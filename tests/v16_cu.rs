@@ -12574,6 +12574,239 @@ fn v16_attack_auto_crank_external_oracle_progress_requires_declared_observation(
     );
 }
 
+// Public-interface LoF/rollback sweep: explicit crank observations are processed sequentially.
+// A duplicated asset observation can arrive after a valid fresh oracle observation has already been
+// consumed and staged into market state. The duplicate must reject atomically, with no partial oracle
+// refresh, no portfolio mutation, and the same single-observation crank remaining live.
+#[test]
+fn v16_attack_duplicate_crank_observation_rolls_back_fresh_oracle_update() {
+    const INITIAL_PRICE: i64 = 1_000_000;
+    const NEXT_PRICE: i64 = 1_250_000;
+
+    let mut env = V16CuEnv::new_with_init_params(production_risk_params());
+    set_test_clock(&mut env, 1, 100);
+    let feed = [0xadu8; 32];
+    let initial_oracle = env.set_pyth_price_with_conf(&feed, INITIAL_PRICE, -6, 0, 100);
+    env.try_configure_hybrid_asset_with_conf_filter_cu(
+        0,
+        1,
+        0,
+        [feed, [0u8; 32], [0u8; 32]],
+        &[initial_oracle],
+        1,
+        100,
+        0,
+        0,
+        10,
+        0,
+    )
+    .expect("configure hybrid oracle");
+
+    let owner = Keypair::new();
+    let portfolio = env.create_portfolio(&owner);
+    env.deposit(&owner, portfolio, 1_000_000);
+
+    set_test_clock(&mut env, 2, 101);
+    let fresh_oracle = env.set_pyth_price_with_conf(&feed, NEXT_PRICE, -6, 0, 101);
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let portfolio_before = env.svm.get_account(&portfolio).unwrap();
+
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 2,
+            close_q: 0,
+            observations: vec![
+                CrankObservationHint {
+                    asset_index: 0,
+                    oracle_accounts: 1,
+                },
+                CrankObservationHint {
+                    asset_index: 0,
+                    oracle_accounts: 0,
+                },
+            ],
+        },
+        vec![
+            AccountMeta::new(env.payer.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio, false),
+            AccountMeta::new_readonly(fresh_oracle, false),
+        ],
+        &[],
+    );
+    assert!(
+        rejected.is_err(),
+        "duplicate observation must reject after staging the first fresh oracle observation"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "duplicate observation rejection rolls back the staged oracle update"
+    );
+    assert_eq!(
+        env.svm.get_account(&portfolio).unwrap(),
+        portfolio_before,
+        "duplicate observation rejection rolls back any auto-crank portfolio effects"
+    );
+
+    env.svm.expire_blockhash();
+    let accepted_cu = env
+        .send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 2,
+                close_q: 0,
+                observations: crank_observations_with_accounts(0, 1),
+            },
+            vec![
+                AccountMeta::new(env.payer.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(portfolio, false),
+                AccountMeta::new_readonly(fresh_oracle, false),
+            ],
+            &[],
+        )
+        .expect("single fresh observation remains live after duplicate rejection");
+    assert_cu_within(
+        "duplicate-observation control crank",
+        accepted_cu,
+        CRANK_CU_LIMIT,
+    );
+    let (cfg, group) = env.market_state();
+    assert_eq!(cfg.last_good_oracle_slot, 2);
+    assert_eq!(group.assets[0].raw_oracle_target_price, NEXT_PRICE as u64);
+}
+
+// Public-interface LoF/rollback sweep: a multi-asset auto-crank can successfully stage a fresh
+// oracle update for the first observed asset and then fail because a later observed asset is missing
+// its required oracle account. The failed later observation must roll back the earlier update; otherwise
+// a hostile keeper could partially move market time/oracles while still returning an error.
+#[test]
+fn v16_attack_multi_observation_missing_tail_rolls_back_prior_oracle_update() {
+    const INITIAL_PRICE: i64 = 1_000_000;
+    const NEXT_ASSET0_PRICE: i64 = 1_100_000;
+    const NEXT_ASSET1_PRICE: i64 = 1_200_000;
+
+    let mut env = V16CuEnv::new_with_init_params(production_risk_params());
+    set_test_clock(&mut env, 1, 100);
+    let feed0 = [0xbdu8; 32];
+    let feed1 = [0xbeu8; 32];
+    let initial0 = env.set_pyth_price_with_conf(&feed0, INITIAL_PRICE, -6, 0, 100);
+    env.try_configure_hybrid_asset_with_conf_filter_cu(
+        0,
+        1,
+        0,
+        [feed0, [0u8; 32], [0u8; 32]],
+        &[initial0],
+        1,
+        100,
+        0,
+        0,
+        10,
+        0,
+    )
+    .expect("configure asset0 hybrid oracle");
+    env.activate_asset(1, 1, INITIAL_PRICE as u64);
+    let initial1 = env.set_pyth_price_with_conf(&feed1, INITIAL_PRICE, -6, 0, 100);
+    env.try_configure_hybrid_asset_with_conf_filter_cu(
+        1,
+        1,
+        0,
+        [feed1, [0u8; 32], [0u8; 32]],
+        &[initial1],
+        1,
+        100,
+        0,
+        0,
+        10,
+        0,
+    )
+    .expect("configure asset1 hybrid oracle");
+
+    let owner = Keypair::new();
+    let portfolio = env.create_portfolio(&owner);
+    env.deposit(&owner, portfolio, 1_000_000);
+
+    set_test_clock(&mut env, 2, 101);
+    let fresh0 = env.set_pyth_price_with_conf(&feed0, NEXT_ASSET0_PRICE, -6, 0, 101);
+    let fresh1 = env.set_pyth_price_with_conf(&feed1, NEXT_ASSET1_PRICE, -6, 0, 101);
+    let observations = vec![
+        CrankObservationHint {
+            asset_index: 0,
+            oracle_accounts: 1,
+        },
+        CrankObservationHint {
+            asset_index: 1,
+            oracle_accounts: 1,
+        },
+    ];
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let portfolio_before = env.svm.get_account(&portfolio).unwrap();
+
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 2,
+            close_q: 0,
+            observations: observations.clone(),
+        },
+        vec![
+            AccountMeta::new(env.payer.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio, false),
+            AccountMeta::new_readonly(fresh0, false),
+        ],
+        &[],
+    );
+    assert!(
+        rejected.is_err(),
+        "missing second oracle account must reject after staging the first observation"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "missing-tail rejection rolls back the first staged oracle update"
+    );
+    assert_eq!(
+        env.svm.get_account(&portfolio).unwrap(),
+        portfolio_before,
+        "missing-tail rejection rolls back any selected auto-crank work"
+    );
+
+    env.svm.expire_blockhash();
+    let accepted_cu = env
+        .send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 2,
+                close_q: 0,
+                observations,
+            },
+            vec![
+                AccountMeta::new(env.payer.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(portfolio, false),
+                AccountMeta::new_readonly(fresh0, false),
+                AccountMeta::new_readonly(fresh1, false),
+            ],
+            &[],
+        )
+        .expect("complete multi-asset observation tail remains live");
+    assert_cu_within(
+        "complete multi-observation crank",
+        accepted_cu,
+        CRANK_CU_LIMIT,
+    );
+    let (_, group) = env.market_state();
+    assert_eq!(
+        group.assets[0].raw_oracle_target_price,
+        NEXT_ASSET0_PRICE as u64
+    );
+    assert_eq!(
+        group.assets[1].raw_oracle_target_price,
+        NEXT_ASSET1_PRICE as u64
+    );
+}
+
 // Public-interface DoS sweep: reward-enabled liquidation has a distinct tail splitter from refresh:
 // when the final account is a program-owned reward portfolio, preceding accounts are treated as the
 // oracle tail. AuthMark liquidations ignore that oracle tail, so a caller can stuff duplicated benign
