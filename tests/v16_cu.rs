@@ -10969,6 +10969,108 @@ fn v16_attack_permissionless_crank_resolved_positive_pnl_account_winds_down() {
 }
 
 #[test]
+fn v16_attack_permissionless_crank_resolved_respects_owner_exit_window() {
+    let mut env = V16CuEnv::new();
+    const EXIT_DELAY: u64 = 5;
+    env.configure_permissionless_resolve_with_cu(100, EXIT_DELAY);
+
+    let owner = Keypair::new();
+    let portfolio = env.create_portfolio(&owner);
+    env.deposit(&owner, portfolio, 1_000);
+    env.resolve();
+
+    let dest = env.token_account(owner.pubkey(), 0);
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let portfolio_before = env.svm.get_account(&portfolio).unwrap();
+    let dest_before = env.svm.get_account(&dest).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+
+    env.svm.expire_blockhash();
+    let unsigned = env.send(
+        ProgInstruction::PermissionlessCrank {
+            action: 2,
+            asset_index: 0,
+            now_slot: u64::MAX,
+            funding_rate_e9: 0,
+            close_q: u128::MAX,
+            fee_bps: u64::MAX,
+            recovery_reason: 0,
+        },
+        vec![
+            AccountMeta::new_readonly(owner.pubkey(), false),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio, false),
+            AccountMeta::new(dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[],
+    );
+    assert!(
+        unsigned.is_err(),
+        "resolved-mode PermissionlessCrank must preserve the owner exit-window signature gate"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "unsigned resolved crank inside the exit window must not mutate market accounting"
+    );
+    assert_eq!(
+        env.svm.get_account(&portfolio).unwrap(),
+        portfolio_before,
+        "unsigned resolved crank inside the exit window must not burn the owner's payout state"
+    );
+    assert_eq!(
+        env.svm.get_account(&dest).unwrap(),
+        dest_before,
+        "unsigned resolved crank inside the exit window pays no tokens"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        vault_before,
+        "unsigned resolved crank inside the exit window moves no vault custody"
+    );
+
+    env.svm.expire_blockhash();
+    let signed = env
+        .send(
+            ProgInstruction::PermissionlessCrank {
+                action: 0,
+                asset_index: 0,
+                now_slot: 0,
+                funding_rate_e9: 0,
+                close_q: 0,
+                fee_bps: u64::MAX,
+                recovery_reason: 0,
+            },
+            vec![
+                AccountMeta::new_readonly(owner.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(portfolio, false),
+                AccountMeta::new(dest, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(env.vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[&owner],
+        )
+        .expect("owner-signed resolved-mode PermissionlessCrank remains live during exit window");
+    assert_cu_within(
+        "resolved-mode PermissionlessCrank owner exit-window close",
+        signed,
+        CUSTODY_CU_LIMIT,
+    );
+    assert_eq!(env.token_amount(dest), 1_000);
+    assert_eq!(env.token_amount(env.vault), 0);
+    let (_, group) = env.market_state();
+    let account = env.portfolio_state(portfolio);
+    assert_eq!(group.vault, 0);
+    assert_eq!(group.c_tot, 0);
+    assert_eq!(account.capital, 0);
+}
+
+#[test]
 fn v16_bpf_failed_close_resolved_transfer_rolls_back_payout_state() {
     let mut env = V16CuEnv::new();
     let owner = Keypair::new();
