@@ -10868,6 +10868,53 @@ fn v16_bpf_close_resolved_moves_payout_tokens_with_ledger() {
 }
 
 #[test]
+fn v16_attack_permissionless_crank_resolved_capital_only_account_winds_down() {
+    let mut env = V16CuEnv::new();
+    let owner = Keypair::new();
+    let portfolio = env.create_portfolio(&owner);
+    env.deposit(&owner, portfolio, 1_000);
+    env.resolve();
+
+    let dest = env.token_account(owner.pubkey(), 0);
+    env.svm.expire_blockhash();
+    let cu = env
+        .send(
+            ProgInstruction::PermissionlessCrank {
+                action: 0,
+                asset_index: 0,
+                now_slot: 0,
+                funding_rate_e9: 0,
+                close_q: 0,
+                fee_bps: u64::MAX,
+                recovery_reason: 0,
+            },
+            vec![
+                AccountMeta::new_readonly(owner.pubkey(), false),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(portfolio, false),
+                AccountMeta::new(dest, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(env.vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[],
+        )
+        .expect("resolved-mode PermissionlessCrank must wind down capital-only accounts");
+    assert_cu_within(
+        "resolved-mode PermissionlessCrank capital wind-down",
+        cu,
+        CUSTODY_CU_LIMIT,
+    );
+    assert_eq!(env.token_amount(dest), 1_000);
+    assert_eq!(env.token_amount(env.vault), 0);
+    let (_, group) = env.market_state();
+    let account = env.portfolio_state(portfolio);
+    assert_eq!(group.vault, 0);
+    assert_eq!(group.c_tot, 0);
+    assert_eq!(account.capital, 0);
+}
+
+#[test]
 fn v16_bpf_failed_close_resolved_transfer_rolls_back_payout_state() {
     let mut env = V16CuEnv::new();
     let owner = Keypair::new();
@@ -12405,6 +12452,116 @@ fn v16_attack_permissionless_crank_auth_mark_duplicate_ignored_tail_is_cu_bounde
         active_leg_for_asset(&hostile_env.portfolio_state(hostile_long), 0).basis_pos_q,
         POS_SCALE as i128,
         "hostile-tail refresh leaves the user position intact"
+    );
+}
+
+#[test]
+fn v16_attack_auto_crank_external_oracle_progress_requires_asset_hint() {
+    const INITIAL_PRICE: u64 = 1_000_000;
+    const NEXT_PRICE: i64 = 1_200_000;
+    let mut env = V16CuEnv::new_with_init_params(production_risk_params());
+    set_test_clock(&mut env, 1, 100);
+    env.configure_auth_mark_for_asset_as_admin(0, 1, INITIAL_PRICE);
+    env.activate_asset(1, 1, INITIAL_PRICE);
+    let feed = [0x41u8; 32];
+    let initial_oracle = env.set_pyth_price_with_conf(&feed, INITIAL_PRICE as i64, -6, 0, 100);
+    env.try_configure_hybrid_asset_with_conf_filter_cu(
+        1,
+        1,
+        0,
+        [feed, [0u8; 32], [0u8; 32]],
+        &[initial_oracle],
+        1,
+        100,
+        1,
+        0,
+        3,
+        0,
+    )
+    .expect("configure asset-1 external oracle");
+
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long = env.create_portfolio(&long_owner);
+    let short = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long, 10_000_000);
+    env.deposit(&short_owner, short, 10_000_000);
+    env.trade_asset_with_cu(
+        1,
+        &long_owner,
+        long,
+        &short_owner,
+        short,
+        POS_SCALE as i128,
+        INITIAL_PRICE,
+        0,
+    );
+
+    set_test_clock(&mut env, 2, 101);
+    let fresh_asset1_oracle = env.set_pyth_price_with_conf(&feed, NEXT_PRICE, -6, 0, 101);
+    env.push_auth_mark_for_asset_as_admin(0, 2, INITIAL_PRICE + 100_000);
+    env.svm.expire_blockhash();
+    let wrong_hint_cu = env
+        .send(
+            ProgInstruction::PermissionlessCrank {
+                action: 0,
+                asset_index: 0,
+                now_slot: 2,
+                funding_rate_e9: 0,
+                close_q: 0,
+                fee_bps: 0,
+                recovery_reason: 0,
+            },
+            vec![
+                AccountMeta::new(env.payer.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(long, false),
+                AccountMeta::new_readonly(fresh_asset1_oracle, false),
+            ],
+            &[],
+        )
+        .expect("wrong external-oracle asset hint currently succeeds as a bounded partial refresh");
+    assert_cu_within(
+        "wrong-hint external-oracle auto-crank partial refresh",
+        wrong_hint_cu,
+        CRANK_CU_LIMIT,
+    );
+    assert_eq!(
+        env.market_state().1.assets[1].effective_price,
+        INITIAL_PRICE,
+        "wrong-hint crank does not self-select and update the asset-1 external oracle"
+    );
+
+    env.svm.expire_blockhash();
+    let ok_cu = env
+        .send(
+            ProgInstruction::PermissionlessCrank {
+                action: 0,
+                asset_index: 1,
+                now_slot: 2,
+                funding_rate_e9: 0,
+                close_q: 0,
+                fee_bps: 0,
+                recovery_reason: 0,
+            },
+            vec![
+                AccountMeta::new(env.payer.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(long, false),
+                AccountMeta::new_readonly(fresh_asset1_oracle, false),
+            ],
+            &[],
+        )
+        .expect("correct asset hint authenticates the selected external oracle");
+    assert_cu_within(
+        "asset-hinted external-oracle auto-crank",
+        ok_cu,
+        CRANK_CU_LIMIT,
+    );
+    assert_ne!(
+        env.market_state().1.assets[1].effective_price,
+        INITIAL_PRICE,
+        "correct-hint crank applies a bounded selected-asset oracle update"
     );
 }
 
@@ -71378,23 +71535,26 @@ fn v16_attack_permissionless_auto_crank_on_healthy_account_is_safe_noop() {
     // A third party permissionlessly cranks the healthy account.
     env.svm.warp_to_slot(5);
     env.svm.expire_blockhash();
-    let _ = env.send(
-        ProgInstruction::PermissionlessCrank {
-            action: 2,
-            asset_index: 0,
-            now_slot: 5,
-            funding_rate_e9: 0,
-            close_q: 0,
-            fee_bps: 0,
-            recovery_reason: 0,
-        },
-        vec![
-            AccountMeta::new(env.payer.pubkey(), true), // arbitrary cranker
-            AccountMeta::new(env.market, false),
-            AccountMeta::new(p, false),
-        ],
-        &[],
-    );
+    let noop_cu = env
+        .send(
+            ProgInstruction::PermissionlessCrank {
+                action: 2,
+                asset_index: 0,
+                now_slot: 5,
+                funding_rate_e9: 0,
+                close_q: 0,
+                fee_bps: 0,
+                recovery_reason: 0,
+            },
+            vec![
+                AccountMeta::new(env.payer.pubkey(), true), // arbitrary cranker
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(p, false),
+            ],
+            &[],
+        )
+        .expect("healthy PermissionlessCrank must succeed as a bounded no-op");
+    assert_cu_within("healthy PermissionlessCrank no-op", noop_cu, CRANK_CU_LIMIT);
 
     // No value moved and no state corruption leaked through the permissionless no-op.
     let (_, g1) = env.market_state();
