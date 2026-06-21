@@ -10364,6 +10364,35 @@ pub mod processor {
             if asset_index_usize >= group.header.config.max_market_slots.get() as usize {
                 return Err(PercolatorError::InvalidInstruction.into());
             }
+            {
+                let mut portfolio_data = portfolio_ai.try_borrow_mut_data()?;
+                let mut portfolio = state::portfolio_view_mut_for_market_slots(
+                    &mut portfolio_data,
+                    max_market_slots,
+                )?;
+                expect_portfolio_view_account_key(&portfolio, portfolio_ai.key)?;
+                let summary = group
+                    .build_actionable_summary(&portfolio.as_view())
+                    .map_err(map_v16_error)?;
+                if summary.expired_close {
+                    let result = group
+                        .permissionless_auto_crank_not_atomic(
+                            &mut portfolio,
+                            AutoCrankWorkV16 {
+                                now_slot: authenticated_now_slot,
+                                observations: &[],
+                                liquidation_max_close_q: close_q,
+                                resolved_close_fee_rate_per_slot: 0,
+                            },
+                        )
+                        .map_err(map_v16_error)?;
+                    if !matches!(result.selected, AutoCrankPlanV16::DeclareRecovery { .. }) {
+                        return Err(PercolatorError::InvalidInstruction.into());
+                    }
+                    group.validate_shape().map_err(map_v16_error)?;
+                    return Ok(());
+                }
+            }
             let mut oracle_profile =
                 read_oracle_profile_from_view(&group, &cfg, asset_index_usize)?;
             let now_unix_ts = Clock::get().map(|c| c.unix_timestamp).unwrap_or_else(|_| {
@@ -10739,6 +10768,9 @@ pub mod processor {
             .header
             .active_bitmap
             .map(percolator::V16PodU64::get);
+        if percolator::active_bitmap_is_empty(active_bitmap) {
+            return Ok(());
+        }
         let mut touches_existing_asset = false;
         for request in requests {
             if portfolio_has_active_asset_view(group, portfolio, request.asset_index)? {
