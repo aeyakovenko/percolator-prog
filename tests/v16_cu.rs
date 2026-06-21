@@ -16634,6 +16634,84 @@ fn v16_attack_permissionless_settle_b_is_bounded_and_live() {
     );
 }
 
+// Auto-crank liveness: an expired close-progress ledger selects DeclareRecovery, which the
+// engine proves needs no oracle observation. The wrapper must not pre-block that path on a
+// stale price-managed oracle; otherwise the public crank loses the engine's no-DoS guarantee.
+#[test]
+fn v16_attack_auto_crank_expired_close_recovery_not_blocked_by_stale_oracle() {
+    let mut env = V16CuEnv::new();
+    env.configure_permissionless_resolve_with_cu(5, 5);
+    env.configure_auth_mark_with_cu(0, 100);
+
+    let owner = Keypair::new();
+    let portfolio = env.create_portfolio(&owner);
+    env.deposit(&owner, portfolio, 100);
+    env.seed_cancellable_close_progress(portfolio);
+
+    env.svm.warp_to_slot(40);
+    env.mutate_market(|_, group| {
+        group.current_slot = 40;
+    });
+    let (cfg, group_before) = env.market_state();
+    assert_eq!(group_before.mode, MarketModeV16::Live);
+    assert!(
+        oracle_v16::permissionless_stale_matured(&cfg, 40),
+        "test setup must make the oracle stale enough to reject observation-bound live routes"
+    );
+    assert!(
+        env.portfolio_state(portfolio).close_progress.max_close_slot < group_before.current_slot,
+        "test setup must make the close-progress ledger expired"
+    );
+    let vault_before = group_before.vault;
+    let c_tot_before = group_before.c_tot;
+    let insurance_before = group_before.insurance;
+
+    env.svm.expire_blockhash();
+    let cu = env
+        .send(
+            ProgInstruction::PermissionlessCrank {
+                action: 0,
+                asset_index: 0,
+                now_slot: 0,
+                funding_rate_e9: 0,
+                close_q: 0,
+                fee_bps: 0,
+                recovery_reason: 0,
+            },
+            vec![
+                AccountMeta::new(env.payer.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(portfolio, false),
+            ],
+            &[],
+        )
+        .expect("expired close recovery auto-crank must not require a fresh oracle");
+    assert_cu_within(
+        "PermissionlessCrank expired-close recovery",
+        cu,
+        CRANK_CU_LIMIT,
+    );
+
+    let (_, group_after) = env.market_state();
+    assert_eq!(group_after.mode, MarketModeV16::Recovery);
+    assert_eq!(
+        group_after.recovery_reason,
+        Some(PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress)
+    );
+    assert_eq!(
+        group_after.vault, vault_before,
+        "recovery declaration moves no custody"
+    );
+    assert_eq!(
+        group_after.c_tot, c_tot_before,
+        "recovery declaration mints no capital"
+    );
+    assert_eq!(
+        group_after.insurance, insurance_before,
+        "recovery declaration spends no insurance"
+    );
+}
+
 // security.md sweep — cross-margin (#22/#32): one portfolio holds positions on TWO assets.
 // Probe aggregate conservation and per-asset OI balance under shared-capital cross-margin.
 #[test]

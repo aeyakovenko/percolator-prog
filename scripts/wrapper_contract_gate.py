@@ -72,20 +72,25 @@ def main() -> int:
         fail(gaps, "manifest must name wrapper routing/auth/oracle/error-propagation obligations")
 
     src = read("src/v16_program.rs")
-    if src.count(".permissionless_auto_crank_not_atomic(") != 1:
-        fail(gaps, "wrapper must call exactly one engine auto-crank entrypoint")
+    auto_call_positions = [
+        m.start() for m in re.finditer(r"\.permissionless_auto_crank_not_atomic\(", src)
+    ]
+    if not auto_call_positions:
+        fail(gaps, "wrapper must call the engine auto-crank entrypoint")
     if ".permissionless_crank_not_atomic(" in src:
         fail(gaps, "wrapper must not call the old direct engine crank")
     if "Instruction::PermissionlessCrank" not in src:
         fail(gaps, "wrapper public PermissionlessCrank instruction dispatch is missing")
     if "handle_close_resolved(program_id, accounts" not in src:
         fail(gaps, "resolved payout route must remain explicit wrapper terminal handling")
-    auto_pos = src.find(".permissionless_auto_crank_not_atomic(")
-    if auto_pos >= 0:
+    for call_index, auto_pos in enumerate(auto_call_positions, start=1):
         auto_stmt_end = src.find(";", auto_pos)
-        auto_stmt = src[auto_pos:auto_stmt_end if auto_stmt_end >= 0 else len(src)]
+        auto_stmt = src[auto_pos : auto_stmt_end if auto_stmt_end >= 0 else len(src)]
         if ".map_err(map_v16_error)?" not in auto_stmt:
-            fail(gaps, "engine auto-crank Err must be mapped and propagated with ?")
+            fail(
+                gaps,
+                f"engine auto-crank Err at call {call_index} must be mapped and propagated with ?",
+            )
     if re.search(r"\.map_err\(map_v16_error\)\s*;", src):
         fail(gaps, "engine Err mapped with map_v16_error must not be dropped")
 
@@ -116,7 +121,7 @@ def main() -> int:
     print("wrapper contract gate OK:")
     print(f"  engine rev: {CERTIFIED_ENGINE_REV}")
     print("  imported manifest: audits/engine_contracts.json")
-    print("  public crank route: wrapper PermissionlessCrank -> engine auto-crank")
+    print(f"  public crank route: wrapper PermissionlessCrank -> engine auto-crank ({len(auto_call_positions)} call sites)")
     print("  engine Err propagation: mapped engine errors are returned to SVM")
     print("  wrapper Kani scope: serialization / matcher ABI only")
     return 0
