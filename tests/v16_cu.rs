@@ -10915,6 +10915,60 @@ fn v16_attack_permissionless_crank_resolved_capital_only_account_winds_down() {
 }
 
 #[test]
+fn v16_attack_permissionless_crank_resolved_positive_pnl_account_winds_down() {
+    let mut env = V16CuEnv::new();
+    let owner = Keypair::new();
+    let portfolio = env.create_portfolio(&owner);
+    env.deposit(&owner, portfolio, 1_000);
+    env.top_up_backing_bucket(1, 250, 10);
+    env.add_source_positive_pnl(portfolio, 1, 250);
+    env.resolve();
+
+    let dest = env.token_account(owner.pubkey(), 0);
+    env.svm.expire_blockhash();
+    let cu = env
+        .send(
+            ProgInstruction::PermissionlessCrank {
+                action: 2,
+                asset_index: 0,
+                now_slot: u64::MAX,
+                funding_rate_e9: 0,
+                close_q: u128::MAX,
+                fee_bps: u64::MAX,
+                recovery_reason: 0,
+            },
+            vec![
+                AccountMeta::new_readonly(owner.pubkey(), false),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(portfolio, false),
+                AccountMeta::new(dest, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(env.vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[],
+        )
+        .expect("resolved-mode PermissionlessCrank must wind down positive-PnL accounts");
+    assert_cu_within(
+        "resolved-mode PermissionlessCrank positive-PnL wind-down",
+        cu,
+        CUSTODY_CU_LIMIT,
+    );
+    assert_eq!(env.token_amount(dest), 1_250);
+    assert_eq!(env.token_amount(env.vault), 0);
+    let (_, group) = env.market_state();
+    let account = env.portfolio_state(portfolio);
+    assert_eq!(group.vault, 0);
+    assert_eq!(group.c_tot, 0);
+    assert_eq!(account.capital, 0);
+    assert_eq!(account.pnl, 0);
+    assert!(
+        !account.resolved_payout_receipt.present,
+        "source-backed positive pnl should be realized and fully paid by public crank wind-down"
+    );
+}
+
+#[test]
 fn v16_bpf_failed_close_resolved_transfer_rolls_back_payout_state() {
     let mut env = V16CuEnv::new();
     let owner = Keypair::new();
