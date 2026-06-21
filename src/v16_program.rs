@@ -2364,6 +2364,7 @@ pub mod ix {
     use solana_program::program_error::ProgramError;
 
     const BATCH_TRADE_DECODE_MAX_LEGS: usize = 16;
+    const CRANK_OBSERVATION_DECODE_MAX: usize = 16;
 
     /// One leg of an atomic multi-leg batch trade. `size_q` is SIGNED (engine semantics): a
     /// positive size makes the taker (account_a) long that asset, a negative size makes it short,
@@ -2385,6 +2386,14 @@ pub mod ix {
         pub size_q: i128,
         pub fee_bps: u64,
         pub limit_price: u64,
+    }
+
+    /// Authenticated market data made available to the engine auto-crank. The caller chooses which
+    /// oracle accounts to provide, not which engine action executes.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct CrankObservationHint {
+        pub asset_index: u16,
+        pub oracle_accounts: u8,
     }
 
     #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2421,13 +2430,9 @@ pub mod ix {
             amount: u128,
         },
         PermissionlessCrank {
-            action: u8,
-            asset_index: u16,
             now_slot: u64,
-            funding_rate_e9: i128,
             close_q: u128,
-            fee_bps: u64,
-            recovery_reason: u8,
+            observations: Vec<CrankObservationHint>,
         },
         TradeNoCpi {
             asset_index: u16,
@@ -2659,15 +2664,26 @@ pub mod ix {
                 4 => Self::Withdraw {
                     amount: read_u128(&mut rest)?,
                 },
-                5 => Self::PermissionlessCrank {
-                    action: read_u8(&mut rest)?,
-                    asset_index: read_u16(&mut rest)?,
-                    now_slot: read_u64(&mut rest)?,
-                    funding_rate_e9: read_i128(&mut rest)?,
-                    close_q: read_u128(&mut rest)?,
-                    fee_bps: read_u64(&mut rest)?,
-                    recovery_reason: read_u8(&mut rest)?,
-                },
+                5 => {
+                    let now_slot = read_u64(&mut rest)?;
+                    let close_q = read_u128(&mut rest)?;
+                    let n = read_u8(&mut rest)? as usize;
+                    if n > CRANK_OBSERVATION_DECODE_MAX {
+                        return Err(ProgramError::InvalidInstructionData);
+                    }
+                    let mut observations = Vec::with_capacity(n);
+                    for _ in 0..n {
+                        observations.push(CrankObservationHint {
+                            asset_index: read_u16(&mut rest)?,
+                            oracle_accounts: read_u8(&mut rest)?,
+                        });
+                    }
+                    Self::PermissionlessCrank {
+                        now_slot,
+                        close_q,
+                        observations,
+                    }
+                }
                 6 => Self::TradeNoCpi {
                     asset_index: read_u16(&mut rest)?,
                     size_q: read_i128(&mut rest)?,
@@ -2949,22 +2965,18 @@ pub mod ix {
                     push_u128(&mut out, amount);
                 }
                 Self::PermissionlessCrank {
-                    action,
-                    asset_index,
                     now_slot,
-                    funding_rate_e9,
                     close_q,
-                    fee_bps,
-                    recovery_reason,
+                    ref observations,
                 } => {
                     out.push(5);
-                    out.push(action);
-                    push_u16(&mut out, asset_index);
                     push_u64(&mut out, now_slot);
-                    push_i128(&mut out, funding_rate_e9);
                     push_u128(&mut out, close_q);
-                    push_u64(&mut out, fee_bps);
-                    out.push(recovery_reason);
+                    out.push(observations.len() as u8);
+                    for observation in observations.iter() {
+                        push_u16(&mut out, observation.asset_index);
+                        out.push(observation.oracle_accounts);
+                    }
                 }
                 Self::TradeNoCpi {
                     asset_index,
@@ -5135,24 +5147,10 @@ pub mod processor {
             Instruction::Deposit { amount } => handle_deposit(program_id, accounts, amount),
             Instruction::Withdraw { amount } => handle_withdraw(program_id, accounts, amount),
             Instruction::PermissionlessCrank {
-                action,
-                asset_index,
                 now_slot,
-                funding_rate_e9,
                 close_q,
-                fee_bps,
-                recovery_reason,
-            } => handle_permissionless_crank(
-                program_id,
-                accounts,
-                action,
-                asset_index,
-                now_slot,
-                funding_rate_e9,
-                close_q,
-                fee_bps,
-                recovery_reason,
-            ),
+                observations,
+            } => handle_permissionless_crank(program_id, accounts, now_slot, close_q, observations),
             Instruction::TradeNoCpi {
                 asset_index,
                 size_q,
@@ -10331,22 +10329,14 @@ pub mod processor {
         market_ai: &AccountInfo<'a>,
         portfolio_ai: &AccountInfo<'a>,
         tail: &[AccountInfo<'a>],
-        action: u8,
-        asset_index: u16,
         now_slot: u64,
-        funding_rate_e9: i128,
         close_q: u128,
-        fee_bps: u64,
-        recovery_reason: u8,
+        observation_hints: &[ix::CrankObservationHint],
         max_market_slots: usize,
     ) -> ProgramResult {
-        if funding_rate_e9 != 0 || recovery_reason != 0 {
+        if observation_hints.len() > percolator::V16_MAX_PORTFOLIO_ASSETS_N {
             return Err(PercolatorError::InvalidInstruction.into());
         }
-        if action > 2 {
-            return Err(PercolatorError::InvalidInstruction.into());
-        }
-        let _ = fee_bps;
         let (target_header, _) =
             state::read_portfolio_owner_preflight(&portfolio_ai.try_borrow_data()?)?;
         if target_header.market_group_id != market_ai.key.to_bytes()
@@ -10356,14 +10346,10 @@ pub mod processor {
         }
         ensure_portfolio_storage_for_market_slots(portfolio_ai, max_market_slots)?;
         let authenticated_now_slot = authenticated_slot_or_fallback(now_slot);
-        let asset_index_usize = asset_index as usize;
         let cfg_after;
         {
             let mut market_data = market_ai.try_borrow_mut_data()?;
             let (mut cfg, mut group) = state::market_view_mut(&mut market_data)?;
-            if asset_index_usize >= group.header.config.max_market_slots.get() as usize {
-                return Err(PercolatorError::InvalidInstruction.into());
-            }
             {
                 let mut portfolio_data = portfolio_ai.try_borrow_mut_data()?;
                 let mut portfolio = state::portfolio_view_mut_for_market_slots(
@@ -10407,15 +10393,6 @@ pub mod processor {
                     return Ok(());
                 }
             }
-            let mut oracle_profile =
-                read_oracle_profile_from_view(&group, &cfg, asset_index_usize)?;
-            let now_unix_ts = Clock::get().map(|c| c.unix_timestamp).unwrap_or_else(|_| {
-                let elapsed_slots =
-                    authenticated_now_slot.saturating_sub(oracle_profile.last_good_oracle_slot);
-                oracle_profile
-                    .oracle_target_publish_time
-                    .saturating_add(i64::try_from(elapsed_slots).unwrap_or(i64::MAX))
-            });
             let reward_enabled = cfg.liquidation_cranker_fee_share_bps != 0;
             let mut oracle_tail = tail;
             let mut cranker_portfolio_ai = None;
@@ -10443,128 +10420,114 @@ pub mod processor {
                     }
                 }
             }
-            reject_non_base_oracle_update_after_global_resolve_matured(
-                &cfg,
-                asset_index_usize,
-                authenticated_now_slot,
-            )?;
-            reject_permissionless_resolve_matured_live_for_profile_view(
-                &cfg,
-                &oracle_profile,
-                &group,
-            )?;
-            let crank_price = hybrid_effective_price_for_crank_view(
-                &cfg,
-                &mut oracle_profile,
-                &group,
-                asset_index_usize,
-                authenticated_now_slot,
-                now_unix_ts,
-                oracle_tail,
-            )?;
-            let computed_funding_rate_e9 = permissionless_funding_rate_e9_view(
-                &oracle_profile,
-                &group,
-                asset_index_usize,
-                crank_price,
-            )?;
-            group
-                .set_asset_raw_oracle_target_not_atomic(
-                    asset_index_usize,
-                    oracle_profile.oracle_target_price_e6,
-                )
-                .map_err(map_v16_error)?;
-            if asset_index_usize == 0 {
-                cfg.last_good_oracle_slot = core::cmp::max(
-                    cfg.last_good_oracle_slot,
-                    oracle_profile.last_good_oracle_slot,
-                );
-            }
-            write_oracle_profile_to_view(&mut group, asset_index_usize, &oracle_profile)?;
-            if asset_index_usize == 0 && oracle_v16::profile_is_price_managed(&oracle_profile) {
-                cfg.oracle_mode = oracle_profile.oracle_mode;
-                cfg.oracle_leg_count = oracle_profile.oracle_leg_count;
-                cfg.oracle_leg_flags = oracle_profile.oracle_leg_flags;
-                cfg.invert = oracle_profile.invert;
-                cfg.unit_scale = oracle_profile.unit_scale;
-                cfg.conf_filter_bps = oracle_profile.conf_filter_bps;
-                cfg.max_staleness_secs = oracle_profile.max_staleness_secs;
-                cfg.hybrid_soft_stale_slots = oracle_profile.hybrid_soft_stale_slots;
-                cfg.mark_ewma_e6 = oracle_profile.mark_ewma_e6;
-                cfg.mark_ewma_last_slot = oracle_profile.mark_ewma_last_slot;
-                cfg.mark_ewma_halflife_slots = oracle_profile.mark_ewma_halflife_slots;
-                cfg.mark_min_fee = oracle_profile.mark_min_fee;
-                cfg.oracle_target_price_e6 = oracle_profile.oracle_target_price_e6;
-                cfg.oracle_target_publish_time = oracle_profile.oracle_target_publish_time;
-                cfg.oracle_leg_feeds = oracle_profile.oracle_leg_feeds;
-                cfg.oracle_leg_prices_e6 = oracle_profile.oracle_leg_prices_e6;
-                cfg.oracle_leg_publish_times = oracle_profile.oracle_leg_publish_times;
-            }
-            group
-                .accrue_asset_to_not_atomic(
-                    asset_index_usize,
+            let insurance_before = group.header.insurance.get();
+            let mut observations: Vec<AutoCrankObservationV16> =
+                Vec::with_capacity(percolator::V16_MAX_PORTFOLIO_ASSETS_N);
+            let clock_unix_ts = Clock::get().ok().map(|c| c.unix_timestamp);
+            for hint in observation_hints.iter() {
+                let asset_index = hint.asset_index as usize;
+                if asset_index >= group.header.config.max_market_slots.get() as usize
+                    || observations.iter().any(|o| o.asset_index == asset_index)
+                {
+                    return Err(PercolatorError::InvalidInstruction.into());
+                }
+                let oracle_account_count = hint.oracle_accounts as usize;
+                let mut oracle_profile = read_oracle_profile_from_view(&group, &cfg, asset_index)?;
+                if oracle_account_count != oracle_profile.oracle_leg_count as usize {
+                    return Err(PercolatorError::InvalidInstruction.into());
+                }
+                if oracle_tail.len() < oracle_account_count {
+                    return Err(ProgramError::NotEnoughAccountKeys);
+                }
+                let (observation_tail, rest) = oracle_tail.split_at(oracle_account_count);
+                oracle_tail = rest;
+                let now_unix_ts = clock_unix_ts.unwrap_or_else(|| {
+                    let elapsed_slots =
+                        authenticated_now_slot.saturating_sub(oracle_profile.last_good_oracle_slot);
+                    oracle_profile
+                        .oracle_target_publish_time
+                        .saturating_add(i64::try_from(elapsed_slots).unwrap_or(i64::MAX))
+                });
+                reject_non_base_oracle_update_after_global_resolve_matured(
+                    &cfg,
+                    asset_index,
                     authenticated_now_slot,
+                )?;
+                reject_permissionless_resolve_matured_live_for_profile_view(
+                    &cfg,
+                    &oracle_profile,
+                    &group,
+                )?;
+                let crank_price = hybrid_effective_price_for_crank_view(
+                    &cfg,
+                    &mut oracle_profile,
+                    &group,
+                    asset_index,
+                    authenticated_now_slot,
+                    now_unix_ts,
+                    observation_tail,
+                )?;
+                let computed_funding_rate_e9 = permissionless_funding_rate_e9_view(
+                    &oracle_profile,
+                    &group,
+                    asset_index,
                     crank_price,
-                    computed_funding_rate_e9,
-                    true,
-                )
-                .map_err(map_v16_error)?;
+                )?;
+                group
+                    .set_asset_raw_oracle_target_not_atomic(
+                        asset_index,
+                        oracle_profile.oracle_target_price_e6,
+                    )
+                    .map_err(map_v16_error)?;
+                if asset_index == 0 {
+                    cfg.last_good_oracle_slot = core::cmp::max(
+                        cfg.last_good_oracle_slot,
+                        oracle_profile.last_good_oracle_slot,
+                    );
+                }
+                write_oracle_profile_to_view(&mut group, asset_index, &oracle_profile)?;
+                if asset_index == 0 && oracle_v16::profile_is_price_managed(&oracle_profile) {
+                    cfg.oracle_mode = oracle_profile.oracle_mode;
+                    cfg.oracle_leg_count = oracle_profile.oracle_leg_count;
+                    cfg.oracle_leg_flags = oracle_profile.oracle_leg_flags;
+                    cfg.invert = oracle_profile.invert;
+                    cfg.unit_scale = oracle_profile.unit_scale;
+                    cfg.conf_filter_bps = oracle_profile.conf_filter_bps;
+                    cfg.max_staleness_secs = oracle_profile.max_staleness_secs;
+                    cfg.hybrid_soft_stale_slots = oracle_profile.hybrid_soft_stale_slots;
+                    cfg.mark_ewma_e6 = oracle_profile.mark_ewma_e6;
+                    cfg.mark_ewma_last_slot = oracle_profile.mark_ewma_last_slot;
+                    cfg.mark_ewma_halflife_slots = oracle_profile.mark_ewma_halflife_slots;
+                    cfg.mark_min_fee = oracle_profile.mark_min_fee;
+                    cfg.oracle_target_price_e6 = oracle_profile.oracle_target_price_e6;
+                    cfg.oracle_target_publish_time = oracle_profile.oracle_target_publish_time;
+                    cfg.oracle_leg_feeds = oracle_profile.oracle_leg_feeds;
+                    cfg.oracle_leg_prices_e6 = oracle_profile.oracle_leg_prices_e6;
+                    cfg.oracle_leg_publish_times = oracle_profile.oracle_leg_publish_times;
+                }
+                group
+                    .accrue_asset_to_not_atomic(
+                        asset_index,
+                        authenticated_now_slot,
+                        crank_price,
+                        computed_funding_rate_e9,
+                        true,
+                    )
+                    .map_err(map_v16_error)?;
+                observations.push(AutoCrankObservationV16 {
+                    asset_index,
+                    effective_price: crank_price,
+                    funding_rate_e9: computed_funding_rate_e9,
+                });
+            }
+            if !oracle_tail.is_empty() {
+                return Err(PercolatorError::InvalidInstruction.into());
+            }
 
             let mut portfolio_data = portfolio_ai.try_borrow_mut_data()?;
             let mut portfolio =
                 state::portfolio_view_mut_for_market_slots(&mut portfolio_data, max_market_slots)?;
             expect_portfolio_view_account_key(&portfolio, portfolio_ai.key)?;
-            let insurance_before = group.header.insurance.get();
-            let mut observations = Vec::with_capacity(percolator::V16_MAX_PORTFOLIO_ASSETS_N);
-            observations.push(AutoCrankObservationV16 {
-                asset_index: asset_index_usize,
-                effective_price: crank_price,
-                funding_rate_e9: computed_funding_rate_e9,
-            });
-            let active_bitmap = portfolio
-                .header
-                .active_bitmap
-                .map(percolator::V16PodU64::get);
-            let mut leg_slot = 0usize;
-            while leg_slot < percolator::V16_MAX_PORTFOLIO_ASSETS_N {
-                if percolator::active_bitmap_get(active_bitmap, leg_slot) {
-                    let leg = portfolio.header.legs[leg_slot]
-                        .try_to_runtime()
-                        .map_err(map_v16_error)?;
-                    let leg_asset = leg.asset_index as usize;
-                    if leg.active
-                        && leg_asset != asset_index_usize
-                        && !observations.iter().any(|o| o.asset_index == leg_asset)
-                        && leg_asset < group.header.config.max_market_slots.get() as usize
-                    {
-                        let mut leg_profile =
-                            read_oracle_profile_from_view(&group, &cfg, leg_asset)?;
-                        if let Ok(leg_price) = hybrid_effective_price_for_crank_view(
-                            &cfg,
-                            &mut leg_profile,
-                            &group,
-                            leg_asset,
-                            authenticated_now_slot,
-                            now_unix_ts,
-                            &[],
-                        ) {
-                            if let Ok(leg_funding_rate_e9) = permissionless_funding_rate_e9_view(
-                                &leg_profile,
-                                &group,
-                                leg_asset,
-                                leg_price,
-                            ) {
-                                observations.push(AutoCrankObservationV16 {
-                                    asset_index: leg_asset,
-                                    effective_price: leg_price,
-                                    funding_rate_e9: leg_funding_rate_e9,
-                                });
-                            }
-                        }
-                    }
-                }
-                leg_slot += 1;
-            }
             let result = group
                 .permissionless_auto_crank_not_atomic(
                     &mut portfolio,
@@ -10583,7 +10546,7 @@ pub mod processor {
                 }
                 | AutoCrankPlanV16::SettleBChunk { asset_index: i }
                 | AutoCrankPlanV16::Liquidate { asset_index: i } => i,
-                _ => asset_index_usize,
+                _ => 0,
             };
             let selected_liquidation =
                 matches!(result.selected, AutoCrankPlanV16::Liquidate { .. });
@@ -10641,18 +10604,13 @@ pub mod processor {
         Ok(())
     }
 
-    #[allow(clippy::too_many_arguments)]
     #[inline(never)]
     fn handle_permissionless_crank<'a>(
         program_id: &Pubkey,
         accounts: &'a [AccountInfo<'a>],
-        action: u8,
-        asset_index: u16,
         now_slot: u64,
-        funding_rate_e9: i128,
         close_q: u128,
-        fee_bps: u64,
-        recovery_reason: u8,
+        observation_hints: Vec<ix::CrankObservationHint>,
     ) -> ProgramResult {
         let owner = account(accounts, 0)?;
         let market_ai = account(accounts, 1)?;
@@ -10664,7 +10622,7 @@ pub mod processor {
         let (_, mode, max_market_slots, _) =
             state::read_market_config_mode_and_capacity(&market_ai.try_borrow_data()?)?;
         if mode == MarketModeV16::Resolved {
-            return handle_close_resolved(program_id, accounts, fee_bps as u128);
+            return handle_close_resolved(program_id, accounts, 0);
         }
         handle_permissionless_crank_zero_copy(
             program_id,
@@ -10672,13 +10630,9 @@ pub mod processor {
             market_ai,
             portfolio_ai,
             accounts.get(3..).unwrap_or(&[]),
-            action,
-            asset_index,
             now_slot,
-            funding_rate_e9,
             close_q,
-            fee_bps,
-            recovery_reason,
+            observation_hints.as_slice(),
             max_market_slots,
         )
     }

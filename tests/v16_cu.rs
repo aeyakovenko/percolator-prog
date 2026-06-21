@@ -9,7 +9,7 @@ use percolator_prog::{
         ASSET_ORACLE_WRAPPER_LEN, MARKET_GROUP_OFF, MATCHER_ABI_VERSION, MATCHER_CONTEXT_MIN_LEN,
         ORACLE_LEG_FLAG_DIVIDE_LEG2, ORACLE_LEG_FLAG_DIVIDE_LEG3, PORTFOLIO_ENGINE_ACCOUNT_LEN,
     },
-    ix::{BatchTradeCpiLeg, BatchTradeLeg, Instruction as ProgInstruction},
+    ix::{BatchTradeCpiLeg, BatchTradeLeg, CrankObservationHint, Instruction as ProgInstruction},
     oracle_v16, processor, state,
     state::{MarketGroupV16, PortfolioAccountV16},
 };
@@ -33,6 +33,23 @@ const CUSTODY_CU_LIMIT: u64 = 300_000;
 const TRADE_CU_LIMIT: u64 = 345_000;
 const MULTI_ASSET_OPEN_TRADE_CU_LIMIT: u64 = 750_000;
 const MATCHER_CONTEXT_LEN: usize = 320;
+
+fn crank_observations(asset_index: u16) -> Vec<CrankObservationHint> {
+    vec![CrankObservationHint {
+        asset_index,
+        oracle_accounts: 0,
+    }]
+}
+
+fn crank_observations_with_accounts(
+    asset_index: u16,
+    oracle_accounts: u8,
+) -> Vec<CrankObservationHint> {
+    vec![CrankObservationHint {
+        asset_index,
+        oracle_accounts,
+    }]
+}
 
 fn active_bitmap_with(indices: &[usize]) -> percolator::V16ActiveBitmap {
     let mut bitmap = percolator::active_bitmap_empty();
@@ -3381,16 +3398,27 @@ impl V16CuEnv {
     }
 
     fn crank(&mut self, portfolio: Pubkey, ix: ProgInstruction) -> u64 {
-        self.send(
-            ix,
-            vec![
-                AccountMeta::new(self.payer.pubkey(), true),
-                AccountMeta::new(self.market, false),
-                AccountMeta::new(portfolio, false),
-            ],
-            &[],
-        )
-        .expect("crank")
+        let attempts = match ix {
+            ProgInstruction::PermissionlessCrank { close_q, .. } if close_q != 0 => 2,
+            _ => 1,
+        };
+        let mut max_cu = 0;
+        for _ in 0..attempts {
+            self.svm.expire_blockhash();
+            let cu = self
+                .send(
+                    ix.clone(),
+                    vec![
+                        AccountMeta::new(self.payer.pubkey(), true),
+                        AccountMeta::new(self.market, false),
+                        AccountMeta::new(portfolio, false),
+                    ],
+                    &[],
+                )
+                .expect("crank");
+            max_cu = max_cu.max(cu);
+        }
+        max_cu
     }
 
     fn crank_with_oracle_tail(
@@ -3399,19 +3427,50 @@ impl V16CuEnv {
         ix: ProgInstruction,
         oracle_accounts: &[Pubkey],
     ) -> u64 {
-        let mut accounts = vec![
-            AccountMeta::new(self.payer.pubkey(), true),
-            AccountMeta::new(self.market, false),
-            AccountMeta::new(portfolio, false),
-        ];
-        accounts.extend(
-            oracle_accounts
-                .iter()
-                .copied()
-                .map(|key| AccountMeta::new_readonly(key, false)),
-        );
-        self.send(ix, accounts, &[])
-            .expect("crank with oracle tail")
+        let ix = match ix {
+            ProgInstruction::PermissionlessCrank {
+                now_slot,
+                close_q,
+                observations,
+            } if observations.len() == 1
+                && observations[0].oracle_accounts == 0
+                && !oracle_accounts.is_empty() =>
+            {
+                ProgInstruction::PermissionlessCrank {
+                    now_slot,
+                    close_q,
+                    observations: crank_observations_with_accounts(
+                        observations[0].asset_index,
+                        oracle_accounts.len() as u8,
+                    ),
+                }
+            }
+            _ => ix,
+        };
+        let attempts = match ix {
+            ProgInstruction::PermissionlessCrank { close_q, .. } if close_q != 0 => 2,
+            _ => 1,
+        };
+        let mut max_cu = 0;
+        for _ in 0..attempts {
+            self.svm.expire_blockhash();
+            let mut accounts = vec![
+                AccountMeta::new(self.payer.pubkey(), true),
+                AccountMeta::new(self.market, false),
+                AccountMeta::new(portfolio, false),
+            ];
+            accounts.extend(
+                oracle_accounts
+                    .iter()
+                    .copied()
+                    .map(|key| AccountMeta::new_readonly(key, false)),
+            );
+            let cu = self
+                .send(ix.clone(), accounts, &[])
+                .expect("crank with oracle tail");
+            max_cu = max_cu.max(cu);
+        }
+        max_cu
     }
 
     fn try_force_close_abandoned_asset_with_cu(
@@ -4569,13 +4628,9 @@ fn v16_bpf_resolved_terminal_insurance_drains_dynamic_domain_after_positions_clo
     env.crank(
         long_account,
         ProgInstruction::PermissionlessCrank {
-            action: 0,
-            asset_index: 1,
             now_slot: 10,
-            funding_rate_e9: 0,
             close_q: 0,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(1),
         },
     );
     let market_data = env.svm.get_account(&env.market).unwrap().data;
@@ -4755,13 +4810,9 @@ fn v16_bpf_permissionless_append_activation_uses_authenticated_slot() {
     env.crank(
         cranker_portfolio,
         ProgInstruction::PermissionlessCrank {
-            action: 0,
-            asset_index: 0,
             now_slot: 100,
-            funding_rate_e9: 0,
             close_q: 0,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(0),
         },
     );
 }
@@ -4823,13 +4874,9 @@ fn v16_bpf_permissionless_reuse_activation_uses_authenticated_slot() {
     env.crank(
         cranker_portfolio,
         ProgInstruction::PermissionlessCrank {
-            action: 0,
-            asset_index: 0,
             now_slot: 4,
-            funding_rate_e9: 0,
             close_q: 0,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(0),
         },
     );
 }
@@ -4859,13 +4906,9 @@ fn v16_bpf_privileged_retire_uses_authenticated_slot() {
     env.crank(
         cranker_portfolio,
         ProgInstruction::PermissionlessCrank {
-            action: 0,
-            asset_index: 0,
             now_slot: 3,
-            funding_rate_e9: 0,
             close_q: 0,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(0),
         },
     );
 }
@@ -4902,13 +4945,9 @@ fn v16_bpf_privileged_reactivate_uses_authenticated_slot() {
     env.crank(
         cranker_portfolio,
         ProgInstruction::PermissionlessCrank {
-            action: 0,
-            asset_index: 0,
             now_slot: 4,
-            funding_rate_e9: 0,
             close_q: 0,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(0),
         },
     );
 }
@@ -5326,13 +5365,9 @@ fn v16_bpf_permissionless_oracle_liquidation_uses_only_its_own_domain_insurance(
         env.crank(
             long_account,
             ProgInstruction::PermissionlessCrank {
-                action: 0,
-                asset_index: 3,
                 now_slot,
-                funding_rate_e9: 0,
                 close_q: 0,
-                fee_bps: 0,
-                recovery_reason: 0,
+                observations: crank_observations(3),
             },
         );
     }
@@ -5349,13 +5384,9 @@ fn v16_bpf_permissionless_oracle_liquidation_uses_only_its_own_domain_insurance(
     let liq_cu = env.crank(
         short_account,
         ProgInstruction::PermissionlessCrank {
-            action: 1,
-            asset_index: 3,
             now_slot: 7,
-            funding_rate_e9: 0,
             close_q: 2 * POS_SCALE,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(3),
         },
     );
     println!("v16 permissionless malicious-oracle liquidation CU: {liq_cu}");
@@ -6721,13 +6752,9 @@ fn v16_bpf_perps_positive_smoke_cross_margin_pnl_convert_close_and_withdraw() {
         let cu = env.crank(
             portfolio,
             ProgInstruction::PermissionlessCrank {
-                action: 0,
-                asset_index,
                 now_slot: 2,
-                funding_rate_e9: 0,
                 close_q: 0,
-                fee_bps: 0,
-                recovery_reason: 0,
+                observations: crank_observations(asset_index),
             },
         );
         assert_cu_within(label, cu, CRANK_CU_LIMIT);
@@ -6895,13 +6922,9 @@ fn v16_bpf_cross_margin_positive_pnl_allows_trading_negative_leg_before_convert(
         let cu = env.crank(
             portfolio,
             ProgInstruction::PermissionlessCrank {
-                action: 0,
-                asset_index,
                 now_slot: 2,
-                funding_rate_e9: 0,
                 close_q: 0,
-                fee_bps: 0,
-                recovery_reason: 0,
+                observations: crank_observations(asset_index),
             },
         );
         assert_cu_within(label, cu, CRANK_CU_LIMIT);
@@ -7083,13 +7106,9 @@ fn run_source_credit_watermark_trade_case(
         env.crank(
             portfolio,
             ProgInstruction::PermissionlessCrank {
-                action: 0,
-                asset_index,
                 now_slot: 2,
-                funding_rate_e9: 0,
                 close_q: 0,
-                fee_bps: 0,
-                recovery_reason: 0,
+                observations: crank_observations(asset_index),
             },
         );
     }
@@ -7285,13 +7304,9 @@ fn v16_bpf_cross_margin_positive_pnl_allows_backed_risk_increase_on_negative_leg
         env.crank(
             portfolio,
             ProgInstruction::PermissionlessCrank {
-                action: 0,
-                asset_index,
                 now_slot: 2,
-                funding_rate_e9: 0,
                 close_q: 0,
-                fee_bps: 0,
-                recovery_reason: 0,
+                observations: crank_observations(asset_index),
             },
         );
     }
@@ -7511,25 +7526,17 @@ fn v16_bpf_permissionless_crank_computes_funding_from_internal_mark_premium() {
     env.crank(
         long_account,
         ProgInstruction::PermissionlessCrank {
-            action: 0,
-            asset_index: 0,
             now_slot: 1,
-            funding_rate_e9: 0,
             close_q: 0,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(0),
         },
     );
     env.crank(
         short_account,
         ProgInstruction::PermissionlessCrank {
-            action: 0,
-            asset_index: 0,
             now_slot: 1,
-            funding_rate_e9: 0,
             close_q: 0,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(0),
         },
     );
     let (cfg_after_first, group_after_first) = env.market_state();
@@ -7546,13 +7553,9 @@ fn v16_bpf_permissionless_crank_computes_funding_from_internal_mark_premium() {
     let funding_cu = env.crank(
         long_account,
         ProgInstruction::PermissionlessCrank {
-            action: 0,
-            asset_index: 0,
             now_slot: 2,
-            funding_rate_e9: 0,
             close_q: 0,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(0),
         },
     );
     assert_cu_within(
@@ -7606,13 +7609,9 @@ fn v16_bpf_existing_funding_ledger_refreshes_and_converts_between_sides() {
     let long_refresh_cu = env.crank(
         long_account,
         ProgInstruction::PermissionlessCrank {
-            action: 0,
-            asset_index: 0,
             now_slot: 1,
-            funding_rate_e9: 0,
             close_q: 0,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(0),
         },
     );
     assert_cu_within(
@@ -7627,13 +7626,9 @@ fn v16_bpf_existing_funding_ledger_refreshes_and_converts_between_sides() {
     let short_refresh_cu = env.crank(
         short_account,
         ProgInstruction::PermissionlessCrank {
-            action: 0,
-            asset_index: 0,
             now_slot: 1,
-            funding_rate_e9: 0,
             close_q: 0,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(0),
         },
     );
     assert_cu_within(
@@ -7714,13 +7709,9 @@ fn v16_bpf_stale_asset_does_not_block_current_unrelated_trade() {
         env.crank(
             cranker_portfolio,
             ProgInstruction::PermissionlessCrank {
-                action: 0,
-                asset_index: 0,
                 now_slot: 3 + nonce,
-                funding_rate_e9: 0,
                 close_q: 0,
-                fee_bps: 0,
-                recovery_reason: 0,
+                observations: crank_observations(0),
             },
         );
     }
@@ -7728,13 +7719,9 @@ fn v16_bpf_stale_asset_does_not_block_current_unrelated_trade() {
     env.crank(
         cranker_portfolio,
         ProgInstruction::PermissionlessCrank {
-            action: 0,
-            asset_index: 1,
             now_slot: 3,
-            funding_rate_e9: 0,
             close_q: 0,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(1),
         },
     );
 
@@ -7844,13 +7831,9 @@ fn v16_bpf_trade_refreshes_stale_related_portfolio_leg_on_demand() {
     env.crank(
         crank_long_account,
         ProgInstruction::PermissionlessCrank {
-            action: 0,
-            asset_index: 1,
             now_slot: 1,
-            funding_rate_e9: 0,
             close_q: 0,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(1),
         },
     );
 
@@ -7983,13 +7966,9 @@ fn v16_bpf_tradecpi_refreshes_stale_traded_portfolio_leg_on_demand() {
     env.crank(
         crank_long_account,
         ProgInstruction::PermissionlessCrank {
-            action: 0,
-            asset_index: 1,
             now_slot: 1,
-            funding_rate_e9: 0,
             close_q: 0,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(1),
         },
     );
 
@@ -8443,13 +8422,9 @@ fn v16_bpf_underfunded_flat_sync_sweeps_remaining_capital_once() {
     env.crank(
         fresh_long_portfolio,
         ProgInstruction::PermissionlessCrank {
-            action: 0,
-            asset_index: 0,
             now_slot: 10,
-            funding_rate_e9: 0,
             close_q: 0,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(0),
         },
     );
     let (_, before_nonflat_sync) = env.market_state();
@@ -9014,13 +8989,9 @@ fn v16_bpf_permissionless_liquidation_is_bounded() {
     let liquidation_cu = env.crank(
         short_account,
         ProgInstruction::PermissionlessCrank {
-            action: 1,
-            asset_index: 0,
             now_slot: 1,
-            funding_rate_e9: 0,
             close_q: POS_SCALE,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(0),
         },
     );
     println!("v16 liquidation crank CU: {liquidation_cu}");
@@ -9068,26 +9039,18 @@ fn v16_bpf_tradenocpi_rejects_off_mark_recycle_when_deficit_cannot_settle() {
     env.crank(
         probe,
         ProgInstruction::PermissionlessCrank {
-            action: 0,
-            asset_index: 0,
             now_slot: 2,
-            funding_rate_e9: 0,
             close_q: 0,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(0),
         },
     );
     env.svm.warp_to_slot(3);
     env.crank(
         probe,
         ProgInstruction::PermissionlessCrank {
-            action: 0,
-            asset_index: 0,
             now_slot: 3,
-            funding_rate_e9: 0,
             close_q: 0,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(0),
         },
     );
     let before_market = env.svm.get_account(&env.market).unwrap();
@@ -9157,26 +9120,18 @@ fn v16_bpf_tradecpi_rejects_off_mark_recycle_when_deficit_cannot_settle() {
     env.crank(
         probe,
         ProgInstruction::PermissionlessCrank {
-            action: 0,
-            asset_index: 0,
             now_slot: 2,
-            funding_rate_e9: 0,
             close_q: 0,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(0),
         },
     );
     env.svm.warp_to_slot(3);
     env.crank(
         probe,
         ProgInstruction::PermissionlessCrank {
-            action: 0,
-            asset_index: 0,
             now_slot: 3,
-            funding_rate_e9: 0,
             close_q: 0,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(0),
         },
     );
     let (matcher_ctx, matcher_delegate, _) = env
@@ -9252,13 +9207,9 @@ fn v16_bpf_tradenocpi_rejects_when_counterparty_starts_bankrupt() {
     env.crank(
         probe,
         ProgInstruction::PermissionlessCrank {
-            action: 0,
-            asset_index: 0,
             now_slot: 1,
-            funding_rate_e9: 0,
             close_q: 0,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(0),
         },
     );
 
@@ -9329,13 +9280,9 @@ fn v16_bpf_tradecpi_rejects_when_counterparty_starts_bankrupt() {
     env.crank(
         probe,
         ProgInstruction::PermissionlessCrank {
-            action: 0,
-            asset_index: 0,
             now_slot: 1,
-            funding_rate_e9: 0,
             close_q: 0,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(0),
         },
     );
     let (matcher_ctx, matcher_delegate, _) = env
@@ -9419,25 +9366,17 @@ fn v16_bpf_tradenocpi_rejects_when_both_counterparties_start_bankrupt() {
     env.crank(
         long_account,
         ProgInstruction::PermissionlessCrank {
-            action: 0,
-            asset_index: 0,
             now_slot: 1,
-            funding_rate_e9: 0,
             close_q: 0,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(0),
         },
     );
     env.crank(
         short_account,
         ProgInstruction::PermissionlessCrank {
-            action: 0,
-            asset_index: 0,
             now_slot: 1,
-            funding_rate_e9: 0,
             close_q: 0,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(0),
         },
     );
 
@@ -9565,26 +9504,18 @@ fn v16_bpf_liquidatable_solvent_account_can_risk_reduce_without_insurance_drain(
     env.crank(
         short_account,
         ProgInstruction::PermissionlessCrank {
-            action: 0,
-            asset_index: 0,
             now_slot: 2,
-            funding_rate_e9: 0,
             close_q: 0,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(0),
         },
     );
     env.svm.warp_to_slot(3);
     env.crank(
         short_account,
         ProgInstruction::PermissionlessCrank {
-            action: 0,
-            asset_index: 0,
             now_slot: 3,
-            funding_rate_e9: 0,
             close_q: 0,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(0),
         },
     );
 
@@ -9660,13 +9591,9 @@ fn v16_bpf_no_cranker_liquidation_rejects_invalid_final_market_shape() {
 
     let result = env.send(
         ProgInstruction::PermissionlessCrank {
-            action: 1,
-            asset_index: 0,
             now_slot: 1,
-            funding_rate_e9: 0,
             close_q: POS_SCALE,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(0),
         },
         vec![
             AccountMeta::new(env.payer.pubkey(), true),
@@ -9732,13 +9659,9 @@ fn v16_bpf_cranker_reward_liquidation_rejects_invalid_shape_without_paying_rewar
         env.program_id,
         &env.payer,
         ProgInstruction::PermissionlessCrank {
-            action: 1,
-            asset_index: 0,
             now_slot: 1,
-            funding_rate_e9: 0,
             close_q: POS_SCALE,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(0),
         },
         vec![
             AccountMeta::new(cranker_owner.pubkey(), true),
@@ -9790,13 +9713,9 @@ fn v16_bpf_full_14_leg_refresh_crank_is_under_tx_limit() {
     let refresh_cu = env.crank(
         long_account,
         ProgInstruction::PermissionlessCrank {
-            action: 0,
-            asset_index: 0,
             now_slot: 16,
-            funding_rate_e9: 0,
             close_q: 0,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(0),
         },
     );
     println!("v16 full-14-leg refresh crank CU: {refresh_cu}");
@@ -9839,13 +9758,9 @@ fn v16_bpf_full_14_leg_liquidation_crank_is_under_tx_limit() {
     let liquidation_cu = env.crank(
         long_account,
         ProgInstruction::PermissionlessCrank {
-            action: 1,
-            asset_index: 0,
             now_slot: 16,
-            funding_rate_e9: 0,
             close_q: 10 * POS_SCALE,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(0),
         },
     );
     println!("v16 full-14-leg liquidation crank CU: {liquidation_cu}");
@@ -11143,13 +11058,9 @@ fn v16_cu_permissionless_crank_refresh_is_bounded() {
     let refresh_cu = env.crank(
         portfolio,
         ProgInstruction::PermissionlessCrank {
-            action: 0,
-            asset_index: 0,
             now_slot: 1,
-            funding_rate_e9: 0,
             close_q: 0,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(0),
         },
     );
     println!("v16 refresh crank CU: {refresh_cu}");
@@ -11169,13 +11080,9 @@ fn v16_bpf_permissionless_crank_uses_authenticated_clock_slot_not_caller_slot() 
     env.crank(
         portfolio,
         ProgInstruction::PermissionlessCrank {
-            action: 0,
-            asset_index: 0,
             now_slot: spoofed_slot,
-            funding_rate_e9: 0,
             close_q: 0,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(0),
         },
     );
 
@@ -11332,13 +11239,9 @@ fn run_hybrid_fresh_oracle_trade_case(dt: u64, oracle_leg_count: u8, invert: u8)
     let fresh_crank_cu = env.crank_with_oracle_tail(
         keeper_portfolio,
         ProgInstruction::PermissionlessCrank {
-            action: 0,
-            asset_index: 0,
             now_slot: 2,
-            funding_rate_e9: 0,
             close_q: 0,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(0),
         },
         &fresh_oracles,
     );
@@ -11648,13 +11551,9 @@ fn run_hybrid_fresh_oracle_production_risk_trade_case(
     let fresh_crank_cu = env.crank_with_oracle_tail(
         keeper_portfolio,
         ProgInstruction::PermissionlessCrank {
-            action: 0,
-            asset_index,
             now_slot: 2,
-            funding_rate_e9: 0,
             close_q: 0,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(asset_index),
         },
         &[fresh_leg0, fresh_leg1, fresh_leg2],
     );
@@ -11834,13 +11733,9 @@ fn v16_bpf_hybrid_mark_uses_ewma_after_hours_then_oracle_when_fresh() {
     let fresh_crank_cu = env.crank_with_oracle_tail(
         keeper_portfolio,
         ProgInstruction::PermissionlessCrank {
-            action: 0,
-            asset_index: 0,
             now_slot: 2,
-            funding_rate_e9: 0,
             close_q: 0,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(0),
         },
         &[fresh_leg0, fresh_leg1, fresh_leg2],
     );
@@ -11909,13 +11804,9 @@ fn v16_bpf_hybrid_mark_uses_ewma_after_hours_then_oracle_when_fresh() {
     let normal_crank_cu = env.crank_with_oracle_tail(
         keeper_portfolio,
         ProgInstruction::PermissionlessCrank {
-            action: 0,
-            asset_index: 0,
             now_slot: 11,
-            funding_rate_e9: 0,
             close_q: 0,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(0),
         },
         &[normal_leg0, normal_leg1, normal_leg2],
     );
@@ -12051,13 +11942,9 @@ fn v16_bpf_auth_mark_target_effective_lag_counts_toward_liquidation_health() {
     env.crank(
         long_portfolio,
         ProgInstruction::PermissionlessCrank {
-            action: 0,
-            asset_index: 0,
             now_slot: 2,
-            funding_rate_e9: 0,
             close_q: 0,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(0),
         },
     );
 
@@ -12088,13 +11975,9 @@ fn v16_bpf_auth_mark_target_effective_lag_counts_toward_liquidation_health() {
     env.crank(
         long_portfolio,
         ProgInstruction::PermissionlessCrank {
-            action: 1,
-            asset_index: 0,
             now_slot: 2,
-            funding_rate_e9: 0,
             close_q: POS_SCALE,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(0),
         },
     );
     let liquidated_long = env.portfolio_state(long_portfolio);
@@ -12114,13 +11997,9 @@ fn v16_cu_crank_cost_is_account_local_after_many_portfolios() {
     let before_extra = env.crank(
         portfolio,
         ProgInstruction::PermissionlessCrank {
-            action: 0,
-            asset_index: 0,
             now_slot: 1,
-            funding_rate_e9: 0,
             close_q: 0,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(0),
         },
     );
     for _ in 0..64 {
@@ -12134,13 +12013,9 @@ fn v16_cu_crank_cost_is_account_local_after_many_portfolios() {
     let after_extra = env.crank(
         portfolio,
         ProgInstruction::PermissionlessCrank {
-            action: 0,
-            asset_index: 0,
             now_slot: 2,
-            funding_rate_e9: 0,
             close_q: 0,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(0),
         },
     );
     println!(
@@ -12310,13 +12185,9 @@ fn v16_bpf_accounting_ledger_tags_are_bounded_and_update_state() {
     pnl_env.crank(
         portfolio,
         ProgInstruction::PermissionlessCrank {
-            action: 0,
-            asset_index: 0,
             now_slot: 0,
-            funding_rate_e9: 0,
             close_q: 0,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(0),
         },
     );
     let convert_cu = pnl_env.convert_released_pnl_with_cu(&owner, portfolio, 40);
@@ -12901,13 +12772,9 @@ fn run_backing_residual_counter_trade_path_case(path: BackingResidualCounterTrad
         env.crank(
             account,
             ProgInstruction::PermissionlessCrank {
-                action: 0,
-                asset_index: 0,
                 now_slot: 2,
-                funding_rate_e9: 0,
                 close_q: 0,
-                fee_bps: 0,
-                recovery_reason: 0,
+                observations: crank_observations(0),
             },
         );
     }
@@ -14229,39 +14096,27 @@ fn v16_regression_mark_to_market_settles_conservation_under_price_move() {
     env.crank(
         pa,
         ProgInstruction::PermissionlessCrank {
-            action: 0,
-            asset_index: 0,
             now_slot: 10,
-            funding_rate_e9: 0,
             close_q: 0,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(0),
         },
     );
     env.svm.expire_blockhash();
     env.crank(
         pb,
         ProgInstruction::PermissionlessCrank {
-            action: 0,
-            asset_index: 0,
             now_slot: 10,
-            funding_rate_e9: 0,
             close_q: 0,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(0),
         },
     );
     env.svm.expire_blockhash();
     env.crank(
         pa,
         ProgInstruction::PermissionlessCrank {
-            action: 0,
-            asset_index: 0,
             now_slot: 11,
-            funding_rate_e9: 0,
             close_q: 0,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(0),
         },
     );
 
@@ -14306,26 +14161,18 @@ fn v16_regression_profit_realization_roundtrip_conserves() {
     env.crank(
         pa,
         ProgInstruction::PermissionlessCrank {
-            action: 0,
-            asset_index: 0,
             now_slot: 10,
-            funding_rate_e9: 0,
             close_q: 0,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(0),
         },
     );
     env.svm.expire_blockhash();
     env.crank(
         pb,
         ProgInstruction::PermissionlessCrank {
-            action: 0,
-            asset_index: 0,
             now_slot: 10,
-            funding_rate_e9: 0,
             close_q: 0,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(0),
         },
     );
     // Close both legs at the new mark.
@@ -14394,26 +14241,18 @@ fn v16_regression_profit_withdraw_no_value_printed() {
     env.crank(
         pa,
         ProgInstruction::PermissionlessCrank {
-            action: 0,
-            asset_index: 0,
             now_slot: 10,
-            funding_rate_e9: 0,
             close_q: 0,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(0),
         },
     );
     env.svm.expire_blockhash();
     env.crank(
         pb,
         ProgInstruction::PermissionlessCrank {
-            action: 0,
-            asset_index: 0,
             now_slot: 10,
-            funding_rate_e9: 0,
             close_q: 0,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(0),
         },
     );
     env.svm.expire_blockhash();
@@ -14477,13 +14316,9 @@ fn v16_attack_crank_caller_funding_rate_injection_rejected() {
         env.svm.expire_blockhash();
         let r = env.send(
             ProgInstruction::PermissionlessCrank {
-                action: 0,
-                asset_index: 0,
                 now_slot: 5,
-                funding_rate_e9: rate,
                 close_q: 0,
-                fee_bps: 0,
-                recovery_reason: rr,
+                observations: crank_observations(0),
             },
             crank_accts(&env),
             &[],
@@ -14499,13 +14334,9 @@ fn v16_attack_crank_caller_funding_rate_injection_rejected() {
     env.svm.expire_blockhash();
     let r = env.send(
         ProgInstruction::PermissionlessCrank {
-            action: 0,
-            asset_index: 0,
             now_slot: 5,
-            funding_rate_e9: 0,
             close_q: 0,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(0),
         },
         crank_accts(&env),
         &[],
@@ -14573,13 +14404,9 @@ fn v16_attack_permissionless_settle_b_is_bounded_and_live() {
         env.svm.expire_blockhash();
         env.send(
             ProgInstruction::PermissionlessCrank {
-                action: 2,
-                asset_index: 0,
                 now_slot: 1,
-                funding_rate_e9: 0,
                 close_q: 0,
-                fee_bps: 0,
-                recovery_reason: 0,
+                observations: crank_observations(0),
             },
             vec![
                 AccountMeta::new_readonly(cranker.pubkey(), false),
@@ -14683,7 +14510,11 @@ fn v16_attack_auto_crank_expired_close_recovery_not_blocked_by_stale_oracle() {
         "test setup must make the oracle stale enough to reject observation-bound live routes"
     );
     assert!(
-        env.portfolio_state(portfolio).close_progress.max_close_slot < group_before.current_slot,
+        env.portfolio_state(portfolio)
+            .close_progress
+            .max_close_slot
+            .get()
+            < group_before.current_slot,
         "test setup must make the close-progress ledger expired"
     );
     let vault_before = group_before.vault;
@@ -14694,13 +14525,9 @@ fn v16_attack_auto_crank_expired_close_recovery_not_blocked_by_stale_oracle() {
     let cu = env
         .send(
             ProgInstruction::PermissionlessCrank {
-                action: 0,
-                asset_index: 0,
                 now_slot: 0,
-                funding_rate_e9: 0,
                 close_q: 0,
-                fee_bps: 0,
-                recovery_reason: 0,
+                observations: crank_observations(0),
             },
             vec![
                 AccountMeta::new(env.payer.pubkey(), true),
@@ -14750,7 +14577,11 @@ fn v16_attack_auto_crank_expired_close_uses_authenticated_slot_not_stale_market_
     let (_, group_before) = env.market_state();
     assert_eq!(group_before.current_slot, 0);
     assert!(
-        env.portfolio_state(portfolio).close_progress.max_close_slot > group_before.current_slot,
+        env.portfolio_state(portfolio)
+            .close_progress
+            .max_close_slot
+            .get()
+            > group_before.current_slot,
         "setup keeps the market slot stale enough that the old summary would not classify expiration"
     );
 
@@ -14759,13 +14590,9 @@ fn v16_attack_auto_crank_expired_close_uses_authenticated_slot_not_stale_market_
     let cu = env
         .send(
             ProgInstruction::PermissionlessCrank {
-                action: 0,
-                asset_index: 0,
                 now_slot: 40,
-                funding_rate_e9: 0,
                 close_q: 0,
-                fee_bps: 0,
-                recovery_reason: 0,
+                observations: crank_observations(0),
             },
             vec![
                 AccountMeta::new(env.payer.pubkey(), true),
@@ -14774,7 +14601,9 @@ fn v16_attack_auto_crank_expired_close_uses_authenticated_slot_not_stale_market_
             ],
             &[],
         )
-        .expect("expired close recovery must use the authenticated slot, not stale market current_slot");
+        .expect(
+            "expired close recovery must use the authenticated slot, not stale market current_slot",
+        );
     assert_cu_within(
         "PermissionlessCrank expired-close authenticated-slot recovery",
         cu,
@@ -14902,13 +14731,9 @@ fn v16_attack_cross_margin_divergent_moves_conserve() {
                 env.svm.expire_blockhash();
                 let _ = env.send(
                     ProgInstruction::PermissionlessCrank {
-                        action: 0,
-                        asset_index: ai,
                         now_slot: slot,
-                        funding_rate_e9: 0,
                         close_q: 0,
-                        fee_bps: 0,
-                        recovery_reason: 0,
+                        observations: crank_observations(ai),
                     },
                     vec![
                         AccountMeta::new(env.payer.pubkey(), true),
@@ -15017,13 +14842,9 @@ fn v16_attack_account_type_confusion_rejected() {
     env.svm.expire_blockhash();
     let r3 = env.send(
         ProgInstruction::PermissionlessCrank {
-            action: 0,
-            asset_index: 0,
             now_slot: 1,
-            funding_rate_e9: 0,
             close_q: 0,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(0),
         },
         vec![
             AccountMeta::new(env.payer.pubkey(), true),
@@ -15071,13 +14892,9 @@ fn v16_attack_crank_raw_program_portfolio_realloc_rolls_back() {
     env.svm.expire_blockhash();
     let rejected = env.send(
         ProgInstruction::PermissionlessCrank {
-            action: 0,
-            asset_index: 0,
             now_slot: 1,
-            funding_rate_e9: 0,
             close_q: 0,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(0),
         },
         vec![
             AccountMeta::new(env.payer.pubkey(), true),
@@ -15106,13 +14923,9 @@ fn v16_attack_crank_raw_program_portfolio_realloc_rolls_back() {
     env.svm.expire_blockhash();
     let ok = env.send(
         ProgInstruction::PermissionlessCrank {
-            action: 0,
-            asset_index: 0,
             now_slot: 1,
-            funding_rate_e9: 0,
             close_q: 0,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(0),
         },
         vec![
             AccountMeta::new(env.payer.pubkey(), true),
@@ -15269,13 +15082,9 @@ fn v16_attack_public_helpers_cannot_use_market_as_portfolio_alias() {
     env.svm.expire_blockhash();
     let crank = env.send(
         ProgInstruction::PermissionlessCrank {
-            action: 0,
-            asset_index: 0,
             now_slot: 10,
-            funding_rate_e9: 0,
             close_q: 0,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(0),
         },
         vec![
             AccountMeta::new(env.payer.pubkey(), true),
@@ -15368,13 +15177,9 @@ fn v16_attack_insolvency_bad_debt_is_socialized_not_printed() {
             env.svm.expire_blockhash();
             let _ = env.send(
                 ProgInstruction::PermissionlessCrank {
-                    action: 0,
-                    asset_index: 0,
                     now_slot: slot,
-                    funding_rate_e9: 0,
                     close_q: 0,
-                    fee_bps: 0,
-                    recovery_reason: 0,
+                    observations: crank_observations(0),
                 },
                 vec![
                     AccountMeta::new(env.payer.pubkey(), true),
@@ -15389,13 +15194,9 @@ fn v16_attack_insolvency_bad_debt_is_socialized_not_printed() {
     env.svm.expire_blockhash();
     let _ = env.send(
         ProgInstruction::PermissionlessCrank {
-            action: 1,
-            asset_index: 0,
             now_slot: 2,
-            funding_rate_e9: 0,
             close_q: POS_SCALE,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(0),
         },
         vec![
             AccountMeta::new(env.payer.pubkey(), true),
@@ -15472,13 +15273,9 @@ fn v16_attack_insurance_backstop_absorbs_bad_debt_no_underflow() {
             env.svm.expire_blockhash();
             let _ = env.send(
                 ProgInstruction::PermissionlessCrank {
-                    action: 0,
-                    asset_index: 0,
                     now_slot: slot,
-                    funding_rate_e9: 0,
                     close_q: 0,
-                    fee_bps: 0,
-                    recovery_reason: 0,
+                    observations: crank_observations(0),
                 },
                 vec![
                     AccountMeta::new(env.payer.pubkey(), true),
@@ -15492,13 +15289,9 @@ fn v16_attack_insurance_backstop_absorbs_bad_debt_no_underflow() {
     env.svm.expire_blockhash();
     let _ = env.send(
         ProgInstruction::PermissionlessCrank {
-            action: 1,
-            asset_index: 0,
             now_slot: 2,
-            funding_rate_e9: 0,
             close_q: POS_SCALE,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(0),
         },
         vec![
             AccountMeta::new(env.payer.pubkey(), true),
@@ -15566,13 +15359,9 @@ fn v16_attack_insolvent_loser_cannot_withdraw_to_escape() {
         env.svm.expire_blockhash();
         let _ = env.send(
             ProgInstruction::PermissionlessCrank {
-                action: 0,
-                asset_index: 0,
                 now_slot: slot,
-                funding_rate_e9: 0,
                 close_q: 0,
-                fee_bps: 0,
-                recovery_reason: 0,
+                observations: crank_observations(0),
             },
             vec![
                 AccountMeta::new(env.payer.pubkey(), true),
@@ -15673,13 +15462,9 @@ fn v16_regression_premium_funding_settlement_conserves_vault() {
             env.svm.expire_blockhash();
             let _ = env.send(
                 ProgInstruction::PermissionlessCrank {
-                    action: 0,
-                    asset_index: 0,
                     now_slot: slot,
-                    funding_rate_e9: 0,
                     close_q: 0,
-                    fee_bps: 0,
-                    recovery_reason: 0,
+                    observations: crank_observations(0),
                 },
                 vec![
                     AccountMeta::new(env.payer.pubkey(), true),
@@ -15754,13 +15539,9 @@ fn v16_attack_convert_released_pnl_respects_caller_cap() {
     env.crank(
         a,
         ProgInstruction::PermissionlessCrank {
-            action: 0,
-            asset_index: 0,
             now_slot: 0,
-            funding_rate_e9: 0,
             close_q: 0,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(0),
         },
     );
     let (_, g0) = env.market_state();
@@ -15791,13 +15572,9 @@ fn v16_attack_convert_released_pnl_respects_caller_cap() {
     env.crank(
         b,
         ProgInstruction::PermissionlessCrank {
-            action: 0,
-            asset_index: 0,
             now_slot: 0,
-            funding_rate_e9: 0,
             close_q: 0,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(0),
         },
     );
     env.svm.expire_blockhash();
@@ -15862,13 +15639,9 @@ fn v16_attack_convert_released_pnl_rejects_cross_market_portfolio_substitution()
     env.crank(
         foreign,
         ProgInstruction::PermissionlessCrank {
-            action: 0,
-            asset_index: 0,
             now_slot: 0,
-            funding_rate_e9: 0,
             close_q: 0,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(0),
         },
     );
     assert_eq!(
@@ -15901,13 +15674,9 @@ fn v16_attack_convert_released_pnl_rejects_cross_market_portfolio_substitution()
         market_b,
         local,
         ProgInstruction::PermissionlessCrank {
-            action: 0,
-            asset_index: 0,
             now_slot: 0,
-            funding_rate_e9: 0,
             close_q: 0,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(0),
         },
     );
     assert_eq!(
@@ -16077,13 +15846,9 @@ fn v16_regression_cross_margin_insolvency_no_value_extraction() {
                 env.svm.expire_blockhash();
                 let _ = env.send(
                     ProgInstruction::PermissionlessCrank {
-                        action: 0,
-                        asset_index: ai,
                         now_slot: slot,
-                        funding_rate_e9: 0,
                         close_q: 0,
-                        fee_bps: 0,
-                        recovery_reason: 0,
+                        observations: crank_observations(ai),
                     },
                     vec![
                         AccountMeta::new(env.payer.pubkey(), true),
@@ -16100,13 +15865,9 @@ fn v16_regression_cross_margin_insolvency_no_value_extraction() {
         env.svm.expire_blockhash();
         let _ = env.send(
             ProgInstruction::PermissionlessCrank {
-                action: 1,
-                asset_index: ai,
                 now_slot: 2,
-                funding_rate_e9: 0,
                 close_q: POS_SCALE,
-                fee_bps: 0,
-                recovery_reason: 0,
+                observations: crank_observations(ai),
             },
             vec![
                 AccountMeta::new(env.payer.pubkey(), true),
@@ -16146,13 +15907,9 @@ fn v16_regression_cross_margin_insolvency_no_value_extraction() {
                 env.svm.expire_blockhash();
                 let _ = env.send(
                     ProgInstruction::PermissionlessCrank {
-                        action: 0,
-                        asset_index: ai,
                         now_slot: slot,
-                        funding_rate_e9: 0,
                         close_q: 0,
-                        fee_bps: 0,
-                        recovery_reason: 0,
+                        observations: crank_observations(ai),
                     },
                     vec![
                         AccountMeta::new(env.payer.pubkey(), true),
@@ -16276,13 +16033,9 @@ fn v16_regression_resolved_open_positions_recover_fairly_order_robust() {
             env.svm.expire_blockhash();
             let _ = env.send(
                 ProgInstruction::PermissionlessCrank {
-                    action: 0,
-                    asset_index: 0,
                     now_slot: slot,
-                    funding_rate_e9: 0,
                     close_q: 0,
-                    fee_bps: 0,
-                    recovery_reason: 0,
+                    observations: crank_observations(0),
                 },
                 vec![
                     AccountMeta::new(env.payer.pubkey(), true),
@@ -16552,13 +16305,9 @@ fn v16_attack_crank_future_now_slot_does_not_overaccrue() {
         env.svm.expire_blockhash();
         let _ = env.send(
             ProgInstruction::PermissionlessCrank {
-                action: 0,
-                asset_index: 0,
                 now_slot: LIE,
-                funding_rate_e9: 0,
                 close_q: 0,
-                fee_bps: 0,
-                recovery_reason: 0,
+                observations: crank_observations(0),
             },
             vec![
                 AccountMeta::new(env.payer.pubkey(), true),
@@ -16630,13 +16379,9 @@ fn v16_attack_resolved_payout_replay_extracts_nothing() {
             env.svm.expire_blockhash();
             let _ = env.send(
                 ProgInstruction::PermissionlessCrank {
-                    action: 0,
-                    asset_index: 0,
                     now_slot: slot,
-                    funding_rate_e9: 0,
                     close_q: 0,
-                    fee_bps: 0,
-                    recovery_reason: 0,
+                    observations: crank_observations(0),
                 },
                 vec![
                     AccountMeta::new(env.payer.pubkey(), true),
@@ -16786,13 +16531,9 @@ fn v16_attack_resolved_payout_dual_mint_replay_extracts_nothing() {
             env.svm.expire_blockhash();
             let _ = env.send(
                 ProgInstruction::PermissionlessCrank {
-                    action: 0,
-                    asset_index: 0,
                     now_slot: slot,
-                    funding_rate_e9: 0,
                     close_q: 0,
-                    fee_bps: 0,
-                    recovery_reason: 0,
+                    observations: crank_observations(0),
                 },
                 vec![
                     AccountMeta::new(env.payer.pubkey(), true),
@@ -17120,13 +16861,9 @@ fn v16_attack_terminal_secondary_payouts_reject_noncanonical_vault() {
             env.svm.expire_blockhash();
             let _ = env.send(
                 ProgInstruction::PermissionlessCrank {
-                    action: 0,
-                    asset_index: 0,
                     now_slot: slot,
-                    funding_rate_e9: 0,
                     close_q: 0,
-                    fee_bps: 0,
-                    recovery_reason: 0,
+                    observations: crank_observations(0),
                 },
                 vec![
                     AccountMeta::new(env.payer.pubkey(), true),
@@ -17657,13 +17394,9 @@ fn v16_attack_extreme_auth_mark_push_rejected_or_safe() {
         env.svm.expire_blockhash();
         let _ = env.send(
             ProgInstruction::PermissionlessCrank {
-                action: 0,
-                asset_index: 0,
                 now_slot: 5,
-                funding_rate_e9: 0,
                 close_q: 0,
-                fee_bps: 0,
-                recovery_reason: 0,
+                observations: crank_observations(0),
             },
             vec![
                 AccountMeta::new(env.payer.pubkey(), true),
@@ -17954,13 +17687,9 @@ fn v16_regression_crank_idempotent_at_settlement_fixed_point() {
         env.svm.expire_blockhash();
         let _ = env.send(
             ProgInstruction::PermissionlessCrank {
-                action: 0,
-                asset_index: 0,
                 now_slot: slot,
-                funding_rate_e9: 0,
                 close_q: 0,
-                fee_bps: 0,
-                recovery_reason: 0,
+                observations: crank_observations(0),
             },
             vec![
                 AccountMeta::new(env.payer.pubkey(), true),
@@ -18180,13 +17909,9 @@ fn v16_attack_over_liquidation_clamps_to_position() {
         env.svm.expire_blockhash();
         let _ = env.send(
             ProgInstruction::PermissionlessCrank {
-                action: 0,
-                asset_index: 0,
                 now_slot: slot,
-                funding_rate_e9: 0,
                 close_q: 0,
-                fee_bps: 0,
-                recovery_reason: 0,
+                observations: crank_observations(0),
             },
             vec![
                 AccountMeta::new(env.payer.pubkey(), true),
@@ -18203,13 +17928,9 @@ fn v16_attack_over_liquidation_clamps_to_position() {
         env.svm.expire_blockhash();
         let _ = env.send(
             ProgInstruction::PermissionlessCrank {
-                action: 1,
-                asset_index: 0,
                 now_slot: 2,
-                funding_rate_e9: 0,
                 close_q: cq,
-                fee_bps: 0,
-                recovery_reason: 0,
+                observations: crank_observations(0),
             },
             vec![
                 AccountMeta::new(env.payer.pubkey(), true),
@@ -18289,13 +18010,9 @@ fn v16_attack_extreme_premium_funding_is_capped() {
                 env.svm.expire_blockhash();
                 let _ = env.send(
                     ProgInstruction::PermissionlessCrank {
-                        action: 0,
-                        asset_index: 0,
                         now_slot: slot,
-                        funding_rate_e9: 0,
                         close_q: 0,
-                        fee_bps: 0,
-                        recovery_reason: 0,
+                        observations: crank_observations(0),
                     },
                     vec![
                         AccountMeta::new(env.payer.pubkey(), true),
@@ -18401,13 +18118,9 @@ fn v16_attack_cross_margin_solvent_account_not_unfairly_liquidated() {
                 env.svm.expire_blockhash();
                 let _ = env.send(
                     ProgInstruction::PermissionlessCrank {
-                        action: 0,
-                        asset_index: ai,
                         now_slot: slot,
-                        funding_rate_e9: 0,
                         close_q: 0,
-                        fee_bps: 0,
-                        recovery_reason: 0,
+                        observations: crank_observations(ai),
                     },
                     vec![
                         AccountMeta::new(env.payer.pubkey(), true),
@@ -18426,13 +18139,9 @@ fn v16_attack_cross_margin_solvent_account_not_unfairly_liquidated() {
     env.svm.expire_blockhash();
     let _ = env.send(
         ProgInstruction::PermissionlessCrank {
-            action: 1,
-            asset_index: 1,
             now_slot: 11,
-            funding_rate_e9: 0,
             close_q: POS_SCALE,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(1),
         },
         vec![
             AccountMeta::new(env.payer.pubkey(), true),
@@ -18476,13 +18185,9 @@ fn v16_attack_convert_then_withdraw_pays_exactly_backed_amount() {
     env.crank(
         p,
         ProgInstruction::PermissionlessCrank {
-            action: 0,
-            asset_index: 0,
             now_slot: 0,
-            funding_rate_e9: 0,
             close_q: 0,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(0),
         },
     );
     let vault0 = env.market_state().1.vault;
@@ -21503,13 +21208,9 @@ fn v16_attack_out_of_range_asset_index_rejected() {
         env.svm.expire_blockhash();
         let rc = env.send(
             ProgInstruction::PermissionlessCrank {
-                action: 0,
-                asset_index: bad,
                 now_slot: 1,
-                funding_rate_e9: 0,
                 close_q: 0,
-                fee_bps: 0,
-                recovery_reason: 0,
+                observations: crank_observations(bad),
             },
             vec![
                 AccountMeta::new(env.payer.pubkey(), true),
@@ -23703,13 +23404,9 @@ fn v16_attack_pnl_pos_tot_consistent_through_sign_flips() {
             env.svm.expire_blockhash();
             let _ = env.send(
                 ProgInstruction::PermissionlessCrank {
-                    action: 0,
-                    asset_index: 0,
                     now_slot: slot,
-                    funding_rate_e9: 0,
                     close_q: 0,
-                    fee_bps: 0,
-                    recovery_reason: 0,
+                    observations: crank_observations(0),
                 },
                 vec![
                     AccountMeta::new(env.payer.pubkey(), true),
@@ -24406,13 +24103,9 @@ fn v16_attack_funding_direction_mark_below_index_conserves() {
             env.svm.expire_blockhash();
             let _ = env.send(
                 ProgInstruction::PermissionlessCrank {
-                    action: 0,
-                    asset_index: 0,
                     now_slot: slot,
-                    funding_rate_e9: 0,
                     close_q: 0,
-                    fee_bps: 0,
-                    recovery_reason: 0,
+                    observations: crank_observations(0),
                 },
                 vec![
                     AccountMeta::new(env.payer.pubkey(), true),
@@ -24803,13 +24496,9 @@ fn v16_regression_roundtrip_recovers_fully_at_resolution() {
             env.svm.expire_blockhash();
             let _ = env.send(
                 ProgInstruction::PermissionlessCrank {
-                    action: 0,
-                    asset_index: 0,
                     now_slot: s,
-                    funding_rate_e9: 0,
                     close_q: 0,
-                    fee_bps: 0,
-                    recovery_reason: 0,
+                    observations: crank_observations(0),
                 },
                 vec![
                     AccountMeta::new(env.payer.pubkey(), true),
@@ -24979,13 +24668,9 @@ fn v16_attack_mark_push_clamped_per_slot() {
         env.svm.expire_blockhash();
         let _ = env.send(
             ProgInstruction::PermissionlessCrank {
-                action: 0,
-                asset_index: 0,
                 now_slot: slot,
-                funding_rate_e9: 0,
                 close_q: 0,
-                fee_bps: 0,
-                recovery_reason: 0,
+                observations: crank_observations(0),
             },
             vec![
                 AccountMeta::new(env.payer.pubkey(), true),
@@ -25456,13 +25141,9 @@ fn v16_attack_healthy_account_not_liquidatable() {
     env.svm.expire_blockhash();
     let _ = env.send(
         ProgInstruction::PermissionlessCrank {
-            action: 1,
-            asset_index: 0,
             now_slot: 1,
-            funding_rate_e9: 0,
             close_q: POS_SCALE,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(0),
         },
         vec![
             AccountMeta::new(env.payer.pubkey(), true),
@@ -25536,13 +25217,9 @@ fn v16_attack_permissionless_resolve_rejects_fresh_market() {
     env2.svm.expire_blockhash();
     let _ = env2.send(
         ProgInstruction::PermissionlessCrank {
-            action: 0,
-            asset_index: 0,
             now_slot: 3,
-            funding_rate_e9: 0,
             close_q: 0,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(0),
         },
         vec![
             AccountMeta::new(env2.payer.pubkey(), true),
@@ -25670,13 +25347,9 @@ fn v16_attack_stale_permissionless_asset_cannot_global_resolve_market() {
     env.crank(
         cranker_portfolio,
         ProgInstruction::PermissionlessCrank {
-            action: 0,
-            asset_index: 0,
             now_slot: 3,
-            funding_rate_e9: 0,
             close_q: 0,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(0),
         },
     );
     env.configure_permissionless_resolve_with_cu(5, 5);
@@ -25955,13 +25628,9 @@ fn v16_attack_permissionless_asset_crank_rejects_after_base_resolve_matured() {
     env.svm.expire_blockhash();
     let fresh_crank = env.send(
         ProgInstruction::PermissionlessCrank {
-            action: 0,
-            asset_index: 1,
             now_slot: 7,
-            funding_rate_e9: 0,
             close_q: 0,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(1),
         },
         vec![
             AccountMeta::new(env.payer.pubkey(), true),
@@ -25981,13 +25650,9 @@ fn v16_attack_permissionless_asset_crank_rejects_after_base_resolve_matured() {
     env.svm.expire_blockhash();
     let stale_crank = env.send(
         ProgInstruction::PermissionlessCrank {
-            action: 0,
-            asset_index: 1,
             now_slot: 8,
-            funding_rate_e9: 0,
             close_q: 0,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(1),
         },
         vec![
             AccountMeta::new(env.payer.pubkey(), true),
@@ -28277,13 +27942,9 @@ fn v16_attack_long_sequence_conservation() {
             env.svm.expire_blockhash();
             let _ = env.send(
                 ProgInstruction::PermissionlessCrank {
-                    action: 0,
-                    asset_index: 0,
                     now_slot: slot,
-                    funding_rate_e9: 0,
                     close_q: 0,
-                    fee_bps: 0,
-                    recovery_reason: 0,
+                    observations: crank_observations(0),
                 },
                 vec![
                     AccountMeta::new(env.payer.pubkey(), true),
@@ -28320,13 +27981,9 @@ fn v16_attack_long_sequence_conservation() {
             env.svm.expire_blockhash();
             let _ = env.send(
                 ProgInstruction::PermissionlessCrank {
-                    action: 0,
-                    asset_index: 0,
                     now_slot: slot,
-                    funding_rate_e9: 0,
                     close_q: 0,
-                    fee_bps: 0,
-                    recovery_reason: 0,
+                    observations: crank_observations(0),
                 },
                 vec![
                     AccountMeta::new(env.payer.pubkey(), true),
@@ -28408,13 +28065,9 @@ fn v16_attack_cross_margin_divergent_close_conserves() {
                 env.svm.expire_blockhash();
                 let _ = env.send(
                     ProgInstruction::PermissionlessCrank {
-                        action: 0,
-                        asset_index: ai,
                         now_slot: slot,
-                        funding_rate_e9: 0,
                         close_q: 0,
-                        fee_bps: 0,
-                        recovery_reason: 0,
+                        observations: crank_observations(ai),
                     },
                     vec![
                         AccountMeta::new(env.payer.pubkey(), true),
@@ -28484,13 +28137,9 @@ fn v16_attack_maintenance_fee_with_open_position_conserves() {
         env.svm.expire_blockhash();
         let _ = env.send(
             ProgInstruction::PermissionlessCrank {
-                action: 0,
-                asset_index: 0,
                 now_slot: slot,
-                funding_rate_e9: 0,
                 close_q: 0,
-                fee_bps: 0,
-                recovery_reason: 0,
+                observations: crank_observations(0),
             },
             vec![
                 AccountMeta::new(env.payer.pubkey(), true),
@@ -28580,13 +28229,9 @@ fn v16_attack_deposit_with_parked_pnl_clean() {
             env.svm.expire_blockhash();
             let _ = env.send(
                 ProgInstruction::PermissionlessCrank {
-                    action: 0,
-                    asset_index: 0,
                     now_slot: slot,
-                    funding_rate_e9: 0,
                     close_q: 0,
-                    fee_bps: 0,
-                    recovery_reason: 0,
+                    observations: crank_observations(0),
                 },
                 vec![
                     AccountMeta::new(env.payer.pubkey(), true),
@@ -30146,13 +29791,9 @@ fn v16_attack_permissionless_crank_rejects_cross_market_target_portfolio() {
     env.svm.expire_blockhash();
     let rejected = env.send(
         ProgInstruction::PermissionlessCrank {
-            action: 0,
-            asset_index: 0,
             now_slot: 5,
-            funding_rate_e9: 0,
             close_q: 0,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(0),
         },
         vec![
             AccountMeta::new(env.payer.pubkey(), true),
@@ -30182,13 +29823,9 @@ fn v16_attack_permissionless_crank_rejects_cross_market_target_portfolio() {
         env.program_id,
         &env.payer,
         ProgInstruction::PermissionlessCrank {
-            action: 0,
-            asset_index: 0,
             now_slot: 5,
-            funding_rate_e9: 0,
             close_q: 0,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(0),
         },
         vec![
             AccountMeta::new(env.payer.pubkey(), true),
@@ -30244,13 +29881,9 @@ fn v16_attack_partial_liquidation_bounded_and_conserves() {
         env.svm.expire_blockhash();
         let _ = env.send(
             ProgInstruction::PermissionlessCrank {
-                action: 0,
-                asset_index: 0,
                 now_slot: slot,
-                funding_rate_e9: 0,
                 close_q: 0,
-                fee_bps: 0,
-                recovery_reason: 0,
+                observations: crank_observations(0),
             },
             vec![
                 AccountMeta::new(env.payer.pubkey(), true),
@@ -30266,13 +29899,9 @@ fn v16_attack_partial_liquidation_bounded_and_conserves() {
     env.svm.expire_blockhash();
     let _ = env.send(
         ProgInstruction::PermissionlessCrank {
-            action: 1,
-            asset_index: 0,
             now_slot: 2,
-            funding_rate_e9: 0,
             close_q: POS_SCALE / 2,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(0),
         },
         vec![
             AccountMeta::new(env.payer.pubkey(), true),
@@ -30334,13 +29963,9 @@ fn v16_attack_insurance_makes_winner_whole_at_resolution() {
             env.svm.expire_blockhash();
             let _ = env.send(
                 ProgInstruction::PermissionlessCrank {
-                    action: 0,
-                    asset_index: 0,
                     now_slot: slot,
-                    funding_rate_e9: 0,
                     close_q: 0,
-                    fee_bps: 0,
-                    recovery_reason: 0,
+                    observations: crank_observations(0),
                 },
                 vec![
                     AccountMeta::new(env.payer.pubkey(), true),
@@ -30355,13 +29980,9 @@ fn v16_attack_insurance_makes_winner_whole_at_resolution() {
     env.svm.expire_blockhash();
     let _ = env.send(
         ProgInstruction::PermissionlessCrank {
-            action: 1,
-            asset_index: 0,
             now_slot: 2,
-            funding_rate_e9: 0,
             close_q: POS_SCALE,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(0),
         },
         vec![
             AccountMeta::new(env.payer.pubkey(), true),
@@ -30440,13 +30061,9 @@ fn v16_attack_funding_and_fee_combined_conserve() {
             env.svm.expire_blockhash();
             let _ = env.send(
                 ProgInstruction::PermissionlessCrank {
-                    action: 0,
-                    asset_index: 0,
                     now_slot: slot,
-                    funding_rate_e9: 0,
                     close_q: 0,
-                    fee_bps: 0,
-                    recovery_reason: 0,
+                    observations: crank_observations(0),
                 },
                 vec![
                     AccountMeta::new(env.payer.pubkey(), true),
@@ -31089,13 +30706,9 @@ fn v16_attack_convert_bounded_by_available_backing() {
     env.crank(
         p,
         ProgInstruction::PermissionlessCrank {
-            action: 0,
-            asset_index: 0,
             now_slot: 0,
-            funding_rate_e9: 0,
             close_q: 0,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(0),
         },
     );
     let cap_before = env.portfolio_state(p).capital.get();
@@ -31322,13 +30935,9 @@ fn v16_attack_max_leg_multi_asset_conserves() {
         env.svm.expire_blockhash();
         let _ = env.send(
             ProgInstruction::PermissionlessCrank {
-                action: 0,
-                asset_index: ai,
                 now_slot: 5,
-                funding_rate_e9: 0,
                 close_q: 0,
-                fee_bps: 0,
-                recovery_reason: 0,
+                observations: crank_observations(ai),
             },
             vec![
                 AccountMeta::new(env.payer.pubkey(), true),
@@ -31456,13 +31065,9 @@ fn v16_attack_sequence_with_liquidation_conserves() {
         env.svm.expire_blockhash();
         let _ = env.send(
             ProgInstruction::PermissionlessCrank {
-                action: 0,
-                asset_index: 0,
                 now_slot: slot,
-                funding_rate_e9: 0,
                 close_q: 0,
-                fee_bps: 0,
-                recovery_reason: 0,
+                observations: crank_observations(0),
             },
             vec![
                 AccountMeta::new(env.payer.pubkey(), true),
@@ -31477,13 +31082,9 @@ fn v16_attack_sequence_with_liquidation_conserves() {
     env.svm.expire_blockhash();
     let _ = env.send(
         ProgInstruction::PermissionlessCrank {
-            action: 1,
-            asset_index: 0,
             now_slot: 2,
-            funding_rate_e9: 0,
             close_q: POS_SCALE,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(0),
         },
         vec![
             AccountMeta::new(env.payer.pubkey(), true),
@@ -31498,13 +31099,9 @@ fn v16_attack_sequence_with_liquidation_conserves() {
     env.svm.expire_blockhash();
     let _ = env.send(
         ProgInstruction::PermissionlessCrank {
-            action: 0,
-            asset_index: 0,
             now_slot: 3,
-            funding_rate_e9: 0,
             close_q: 0,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(0),
         },
         vec![
             AccountMeta::new(env.payer.pubkey(), true),
@@ -31562,13 +31159,9 @@ fn v16_attack_ewma_mark_halflife_zero_safe() {
                 env.svm.expire_blockhash();
                 let _ = env.send(
                     ProgInstruction::PermissionlessCrank {
-                        action: 0,
-                        asset_index: 0,
                         now_slot: slot,
-                        funding_rate_e9: 0,
                         close_q: 0,
-                        fee_bps: 0,
-                        recovery_reason: 0,
+                        observations: crank_observations(0),
                     },
                     vec![
                         AccountMeta::new(env.payer.pubkey(), true),
@@ -32047,13 +31640,9 @@ fn v16_attack_per_asset_crank_isolation() {
             env.svm.expire_blockhash();
             let _ = env.send(
                 ProgInstruction::PermissionlessCrank {
-                    action: 0,
-                    asset_index: 0,
                     now_slot: slot,
-                    funding_rate_e9: 0,
                     close_q: 0,
-                    fee_bps: 0,
-                    recovery_reason: 0,
+                    observations: crank_observations(0),
                 },
                 vec![
                     AccountMeta::new(env.payer.pubkey(), true),
@@ -32108,13 +31697,9 @@ fn v16_attack_close_portfolio_with_pnl_rejected() {
     env.crank(
         p,
         ProgInstruction::PermissionlessCrank {
-            action: 0,
-            asset_index: 0,
             now_slot: 0,
-            funding_rate_e9: 0,
             close_q: 0,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(0),
         },
     );
     assert!(
@@ -32166,13 +31751,9 @@ fn v16_attack_backing_expiry_no_overpay() {
     env.crank(
         p,
         ProgInstruction::PermissionlessCrank {
-            action: 0,
-            asset_index: 0,
             now_slot: 20,
-            funding_rate_e9: 0,
             close_q: 0,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(0),
         },
     );
     let vault_before = env.market_state().1.vault;
@@ -32370,13 +31951,9 @@ fn v16_attack_third_party_withdraw_preserves_pnl_backing() {
             env.svm.expire_blockhash();
             let _ = env.send(
                 ProgInstruction::PermissionlessCrank {
-                    action: 0,
-                    asset_index: 0,
                     now_slot: slot,
-                    funding_rate_e9: 0,
                     close_q: 0,
-                    fee_bps: 0,
-                    recovery_reason: 0,
+                    observations: crank_observations(0),
                 },
                 vec![
                     AccountMeta::new(env.payer.pubkey(), true),
@@ -32828,13 +32405,9 @@ fn v16_attack_no_fee_liquidation_cranker_gets_nothing() {
         env.svm.expire_blockhash();
         let _ = env.send(
             ProgInstruction::PermissionlessCrank {
-                action: 0,
-                asset_index: 0,
                 now_slot: slot,
-                funding_rate_e9: 0,
                 close_q: 0,
-                fee_bps: 0,
-                recovery_reason: 0,
+                observations: crank_observations(0),
             },
             vec![
                 AccountMeta::new(env.payer.pubkey(), true),
@@ -32853,13 +32426,9 @@ fn v16_attack_no_fee_liquidation_cranker_gets_nothing() {
         env.program_id,
         &env.payer,
         ProgInstruction::PermissionlessCrank {
-            action: 1,
-            asset_index: 0,
             now_slot: 2,
-            funding_rate_e9: 0,
             close_q: POS_SCALE,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(0),
         },
         vec![
             AccountMeta::new(cranker_owner.pubkey(), true),
@@ -33124,13 +32693,9 @@ fn v16_attack_per_asset_funding_isolation() {
             env.svm.expire_blockhash();
             let _ = env.send(
                 ProgInstruction::PermissionlessCrank {
-                    action: 0,
-                    asset_index: 0,
                     now_slot: slot,
-                    funding_rate_e9: 0,
                     close_q: 0,
-                    fee_bps: 0,
-                    recovery_reason: 0,
+                    observations: crank_observations(0),
                 },
                 vec![
                     AccountMeta::new(env.payer.pubkey(), true),
@@ -34451,13 +34016,9 @@ fn v16_attack_live_insurance_withdraw_rejects_exposed_target_effective_lag() {
     env.crank(
         long_portfolio,
         ProgInstruction::PermissionlessCrank {
-            action: 0,
-            asset_index: 0,
             now_slot: 2,
-            funding_rate_e9: 0,
             close_q: 0,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(0),
         },
     );
     let g = env.market_state().1;
@@ -34579,13 +34140,9 @@ fn v16_attack_unrelated_refresh_cannot_mask_loss_stale_insurance_gate() {
         env.crank(
             cranker,
             ProgInstruction::PermissionlessCrank {
-                action: 0,
-                asset_index: 0,
                 now_slot: 3,
-                funding_rate_e9: 0,
                 close_q: 0,
-                fee_bps: 0,
-                recovery_reason: 0,
+                observations: crank_observations(0),
             },
         );
     }
@@ -34593,13 +34150,9 @@ fn v16_attack_unrelated_refresh_cannot_mask_loss_stale_insurance_gate() {
     env.crank(
         cranker,
         ProgInstruction::PermissionlessCrank {
-            action: 0,
-            asset_index: 1,
             now_slot: 3,
-            funding_rate_e9: 0,
             close_q: 0,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(1),
         },
     );
 
@@ -34616,13 +34169,9 @@ fn v16_attack_unrelated_refresh_cannot_mask_loss_stale_insurance_gate() {
     env.crank(
         cranker,
         ProgInstruction::PermissionlessCrank {
-            action: 0,
-            asset_index: 0,
             now_slot: 3,
-            funding_rate_e9: 0,
             close_q: 0,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(0),
         },
     );
     let after_unrelated_refresh = env.market_state().1;
@@ -34671,13 +34220,9 @@ fn v16_attack_unexposed_target_move_cannot_grief_live_insurance_withdrawals() {
     env.crank(
         flat_portfolio,
         ProgInstruction::PermissionlessCrank {
-            action: 0,
-            asset_index: 1,
             now_slot: 2,
-            funding_rate_e9: 0,
             close_q: 0,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(1),
         },
     );
     let g = env.market_state().1;
@@ -36243,13 +35788,9 @@ fn v16_attack_off_market_exec_price_wash_trade_prints_nothing() {
         env.svm.expire_blockhash();
         let _ = env.send(
             ProgInstruction::PermissionlessCrank {
-                action: 0,
-                asset_index: 0,
                 now_slot: 1,
-                funding_rate_e9: 0,
                 close_q: 0,
-                fee_bps: 0,
-                recovery_reason: 0,
+                observations: crank_observations(0),
             },
             vec![
                 AccountMeta::new(env.payer.pubkey(), true),
@@ -36916,13 +36457,9 @@ fn v16_attack_unbacked_paper_pnl_not_counted_as_equity() {
         env.svm.expire_blockhash();
         let _ = env.send(
             ProgInstruction::PermissionlessCrank {
-                action: 0,
-                asset_index: 0,
                 now_slot: 2,
-                funding_rate_e9: 0,
                 close_q: 0,
-                fee_bps: 0,
-                recovery_reason: 0,
+                observations: crank_observations(0),
             },
             vec![
                 AccountMeta::new(env.payer.pubkey(), true),
@@ -36936,13 +36473,9 @@ fn v16_attack_unbacked_paper_pnl_not_counted_as_equity() {
     env.svm.expire_blockhash();
     let _ = env.send(
         ProgInstruction::PermissionlessCrank {
-            action: 1,
-            asset_index: 0,
             now_slot: 2,
-            funding_rate_e9: 0,
             close_q: POS_SCALE,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(0),
         },
         vec![
             AccountMeta::new(env.payer.pubkey(), true),
@@ -36955,13 +36488,9 @@ fn v16_attack_unbacked_paper_pnl_not_counted_as_equity() {
     env.svm.expire_blockhash();
     let _ = env.send(
         ProgInstruction::PermissionlessCrank {
-            action: 0,
-            asset_index: 0,
             now_slot: 2,
-            funding_rate_e9: 0,
             close_q: 0,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(0),
         },
         vec![
             AccountMeta::new(env.payer.pubkey(), true),
@@ -37039,13 +36568,9 @@ fn v16_attack_adl_deleverage_conserves_and_shrinks_winner_claim() {
         env.svm.expire_blockhash();
         let _ = env.send(
             ProgInstruction::PermissionlessCrank {
-                action: 0,
-                asset_index: 0,
                 now_slot: 2,
-                funding_rate_e9: 0,
                 close_q: 0,
-                fee_bps: 0,
-                recovery_reason: 0,
+                observations: crank_observations(0),
             },
             vec![
                 AccountMeta::new(env.payer.pubkey(), true),
@@ -37059,13 +36584,9 @@ fn v16_attack_adl_deleverage_conserves_and_shrinks_winner_claim() {
     env.svm.expire_blockhash();
     let r = env.send(
         ProgInstruction::PermissionlessCrank {
-            action: 1,
-            asset_index: 0,
             now_slot: 2,
-            funding_rate_e9: 0,
             close_q: POS_SCALE,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(0),
         },
         vec![
             AccountMeta::new(env.payer.pubkey(), true),
@@ -37136,13 +36657,9 @@ fn v16_attack_unsafe_liquidation_of_deep_insolvency_rejects_and_rolls_back() {
         env.svm.expire_blockhash();
         let _ = env.send(
             ProgInstruction::PermissionlessCrank {
-                action: 0,
-                asset_index: 0,
                 now_slot: 2,
-                funding_rate_e9: 0,
                 close_q: 0,
-                fee_bps: 0,
-                recovery_reason: 0,
+                observations: crank_observations(0),
             },
             vec![
                 AccountMeta::new(env.payer.pubkey(), true),
@@ -37159,13 +36676,9 @@ fn v16_attack_unsafe_liquidation_of_deep_insolvency_rejects_and_rolls_back() {
     env.svm.expire_blockhash();
     let r = env.send(
         ProgInstruction::PermissionlessCrank {
-            action: 1,
-            asset_index: 0,
             now_slot: 2,
-            funding_rate_e9: 0,
             close_q: 2 * POS_SCALE,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(0),
         },
         vec![
             AccountMeta::new(env.payer.pubkey(), true),
@@ -37392,13 +36905,9 @@ fn v16_attack_multi_account_asymmetric_funding_conserves() {
             env.svm.expire_blockhash();
             let _ = env.send(
                 ProgInstruction::PermissionlessCrank {
-                    action: 0,
-                    asset_index: 0,
                     now_slot: slot,
-                    funding_rate_e9: 0,
                     close_q: 0,
-                    fee_bps: 0,
-                    recovery_reason: 0,
+                    observations: crank_observations(0),
                 },
                 vec![
                     AccountMeta::new(env.payer.pubkey(), true),
@@ -37471,13 +36980,9 @@ fn v16_attack_convert_released_pnl_cannot_mint_from_unbacked_pnl() {
     env.crank(
         p,
         ProgInstruction::PermissionlessCrank {
-            action: 0,
-            asset_index: 0,
             now_slot: 0,
-            funding_rate_e9: 0,
             close_q: 0,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(0),
         },
     );
     let pre = env.portfolio_state(p);
@@ -37576,13 +37081,9 @@ fn v16_attack_adl_then_settlement_winner_cannot_escape_deleverage() {
         env.svm.expire_blockhash();
         let _ = env.send(
             ProgInstruction::PermissionlessCrank {
-                action: 0,
-                asset_index: 0,
                 now_slot: 2,
-                funding_rate_e9: 0,
                 close_q: 0,
-                fee_bps: 0,
-                recovery_reason: 0,
+                observations: crank_observations(0),
             },
             vec![
                 AccountMeta::new(env.payer.pubkey(), true),
@@ -37595,13 +37096,9 @@ fn v16_attack_adl_then_settlement_winner_cannot_escape_deleverage() {
     env.svm.expire_blockhash();
     let rl = env.send(
         ProgInstruction::PermissionlessCrank {
-            action: 1,
-            asset_index: 0,
             now_slot: 2,
-            funding_rate_e9: 0,
             close_q: POS_SCALE,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(0),
         },
         vec![
             AccountMeta::new(env.payer.pubkey(), true),
@@ -37624,13 +37121,9 @@ fn v16_attack_adl_then_settlement_winner_cannot_escape_deleverage() {
     env.svm.expire_blockhash();
     let _ = env.send(
         ProgInstruction::PermissionlessCrank {
-            action: 0,
-            asset_index: 0,
             now_slot: 3,
-            funding_rate_e9: 0,
             close_q: 0,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(0),
         },
         vec![
             AccountMeta::new(env.payer.pubkey(), true),
@@ -37692,13 +37185,9 @@ fn v16_attack_deposit_does_not_dilute_junior_backing() {
     env.crank(
         h,
         ProgInstruction::PermissionlessCrank {
-            action: 0,
-            asset_index: 0,
             now_slot: 0,
-            funding_rate_e9: 0,
             close_q: 0,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(0),
         },
     );
     let h_pre = env.portfolio_state(h);
@@ -37725,13 +37214,9 @@ fn v16_attack_deposit_does_not_dilute_junior_backing() {
     env.crank(
         h,
         ProgInstruction::PermissionlessCrank {
-            action: 0,
-            asset_index: 0,
             now_slot: 0,
-            funding_rate_e9: 0,
             close_q: 0,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(0),
         },
     );
     let h_post = env.portfolio_state(h);
@@ -37796,13 +37281,9 @@ fn v16_attack_insurance_ops_preserve_junior_backing() {
     env.crank(
         h,
         ProgInstruction::PermissionlessCrank {
-            action: 0,
-            asset_index: 0,
             now_slot: 0,
-            funding_rate_e9: 0,
             close_q: 0,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(0),
         },
     );
     let eq0 = health_cert(&env.portfolio_state(h)).certified_equity;
@@ -37843,13 +37324,9 @@ fn v16_attack_insurance_ops_preserve_junior_backing() {
     env.crank(
         h,
         ProgInstruction::PermissionlessCrank {
-            action: 0,
-            asset_index: 0,
             now_slot: 0,
-            funding_rate_e9: 0,
             close_q: 0,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(0),
         },
     );
     assert_eq!(
@@ -37873,13 +37350,9 @@ fn v16_attack_insurance_ops_preserve_junior_backing() {
     env.crank(
         h,
         ProgInstruction::PermissionlessCrank {
-            action: 0,
-            asset_index: 0,
             now_slot: 0,
-            funding_rate_e9: 0,
             close_q: 0,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(0),
         },
     );
     let hf = env.portfolio_state(h);
@@ -37921,13 +37394,9 @@ fn v16_attack_recovery_blocks_pnl_conversion() {
     env.crank(
         p,
         ProgInstruction::PermissionlessCrank {
-            action: 0,
-            asset_index: 0,
             now_slot: 0,
-            funding_rate_e9: 0,
             close_q: 0,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(0),
         },
     );
     let pre = env.portfolio_state(p);
@@ -38039,13 +37508,9 @@ fn v16_attack_liquidation_isolated_across_assets() {
         env.svm.expire_blockhash();
         let _ = env.send(
             ProgInstruction::PermissionlessCrank {
-                action: 0,
-                asset_index: 0,
                 now_slot: 2,
-                funding_rate_e9: 0,
                 close_q: 0,
-                fee_bps: 0,
-                recovery_reason: 0,
+                observations: crank_observations(0),
             },
             vec![
                 AccountMeta::new(env.payer.pubkey(), true),
@@ -38058,13 +37523,9 @@ fn v16_attack_liquidation_isolated_across_assets() {
     env.svm.expire_blockhash();
     let rl = env.send(
         ProgInstruction::PermissionlessCrank {
-            action: 1,
-            asset_index: 0,
             now_slot: 2,
-            funding_rate_e9: 0,
             close_q: POS_SCALE,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(0),
         },
         vec![
             AccountMeta::new(env.payer.pubkey(), true),
@@ -38198,13 +37659,9 @@ fn v16_attack_convert_then_withdraw_extracts_exactly_backed() {
     env.crank(
         p,
         ProgInstruction::PermissionlessCrank {
-            action: 0,
-            asset_index: 0,
             now_slot: 0,
-            funding_rate_e9: 0,
             close_q: 0,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(0),
         },
     );
     let vault0 = env.market_state().1.vault;
@@ -38288,13 +37745,9 @@ fn v16_attack_liquidation_cranker_reward_bounded_by_fee() {
         env.svm.expire_blockhash();
         let _ = env.send(
             ProgInstruction::PermissionlessCrank {
-                action: 0,
-                asset_index: 0,
                 now_slot: slot,
-                funding_rate_e9: 0,
                 close_q: 0,
-                fee_bps: 0,
-                recovery_reason: 0,
+                observations: crank_observations(0),
             },
             vec![
                 AccountMeta::new(env.payer.pubkey(), true),
@@ -38314,13 +37767,9 @@ fn v16_attack_liquidation_cranker_reward_bounded_by_fee() {
         env.program_id,
         &env.payer,
         ProgInstruction::PermissionlessCrank {
-            action: 1,
-            asset_index: 0,
             now_slot: 30,
-            funding_rate_e9: 0,
             close_q: POS_SCALE,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(0),
         },
         vec![
             AccountMeta::new(co.pubkey(), true),
@@ -38393,13 +37842,9 @@ fn v16_attack_liquidation_cranker_reward_cannot_alias_liquidated_account() {
         env.svm.expire_blockhash();
         let _ = env.send(
             ProgInstruction::PermissionlessCrank {
-                action: 0,
-                asset_index: 0,
                 now_slot: slot,
-                funding_rate_e9: 0,
                 close_q: 0,
-                fee_bps: 0,
-                recovery_reason: 0,
+                observations: crank_observations(0),
             },
             vec![
                 AccountMeta::new(env.payer.pubkey(), true),
@@ -38416,13 +37861,9 @@ fn v16_attack_liquidation_cranker_reward_cannot_alias_liquidated_account() {
     env.svm.expire_blockhash();
     let rejected = env.send(
         ProgInstruction::PermissionlessCrank {
-            action: 1,
-            asset_index: 0,
             now_slot: 30,
-            funding_rate_e9: 0,
             close_q: POS_SCALE,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(0),
         },
         vec![
             AccountMeta::new(so.pubkey(), true),
@@ -38455,13 +37896,9 @@ fn v16_attack_liquidation_cranker_reward_cannot_alias_liquidated_account() {
     env.svm.expire_blockhash();
     let rejected_market_reward = env.send(
         ProgInstruction::PermissionlessCrank {
-            action: 1,
-            asset_index: 0,
             now_slot: 30,
-            funding_rate_e9: 0,
             close_q: POS_SCALE,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(0),
         },
         vec![
             AccountMeta::new(so.pubkey(), true),
@@ -38490,13 +37927,9 @@ fn v16_attack_liquidation_cranker_reward_cannot_alias_liquidated_account() {
     env.svm.expire_blockhash();
     let accepted = env.send(
         ProgInstruction::PermissionlessCrank {
-            action: 1,
-            asset_index: 0,
             now_slot: 30,
-            funding_rate_e9: 0,
             close_q: POS_SCALE,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(0),
         },
         vec![
             AccountMeta::new(co.pubkey(), true),
@@ -38583,13 +38016,9 @@ fn v16_attack_crank_target_portfolio_rejects_before_oracle_tail_parse() {
         env.svm.expire_blockhash();
         env.send(
             ProgInstruction::PermissionlessCrank {
-                action: 0,
-                asset_index: 0,
                 now_slot: 2,
-                funding_rate_e9: 0,
                 close_q: 0,
-                fee_bps: 0,
-                recovery_reason: 0,
+                observations: crank_observations(0),
             },
             vec![
                 AccountMeta::new(env.payer.pubkey(), true),
@@ -38658,13 +38087,9 @@ fn v16_attack_liquidation_cranker_reward_rejects_wrong_owner() {
         env.svm.expire_blockhash();
         let _ = env.send(
             ProgInstruction::PermissionlessCrank {
-                action: 0,
-                asset_index: 0,
                 now_slot: slot,
-                funding_rate_e9: 0,
                 close_q: 0,
-                fee_bps: 0,
-                recovery_reason: 0,
+                observations: crank_observations(0),
             },
             vec![
                 AccountMeta::new(env.payer.pubkey(), true),
@@ -38689,13 +38114,9 @@ fn v16_attack_liquidation_cranker_reward_rejects_wrong_owner() {
     env.svm.expire_blockhash();
     let rejected = env.send(
         ProgInstruction::PermissionlessCrank {
-            action: 1,
-            asset_index: 0,
             now_slot: 30,
-            funding_rate_e9: 0,
             close_q: POS_SCALE,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(0),
         },
         vec![
             AccountMeta::new(wrong_owner.pubkey(), true),
@@ -38733,13 +38154,9 @@ fn v16_attack_liquidation_cranker_reward_rejects_wrong_owner() {
     env.svm.expire_blockhash();
     let accepted = env.send(
         ProgInstruction::PermissionlessCrank {
-            action: 1,
-            asset_index: 0,
             now_slot: 30,
-            funding_rate_e9: 0,
             close_q: POS_SCALE,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(0),
         },
         vec![
             AccountMeta::new(co.pubkey(), true),
@@ -38797,13 +38214,9 @@ fn v16_attack_liquidation_reward_wrong_owner_rejects_before_oracle_tail_parse() 
         env.svm.expire_blockhash();
         env.send(
             ProgInstruction::PermissionlessCrank {
-                action: 1,
-                asset_index: 0,
                 now_slot: 2,
-                funding_rate_e9: 0,
                 close_q: POS_SCALE,
-                fee_bps: 0,
-                recovery_reason: 0,
+                observations: crank_observations(0),
             },
             vec![
                 AccountMeta::new(signer.pubkey(), true),
@@ -38873,13 +38286,9 @@ fn v16_attack_liquidation_wrong_owner_rolls_back_legacy_reward_realloc() {
         env.svm.expire_blockhash();
         let _ = env.send(
             ProgInstruction::PermissionlessCrank {
-                action: 0,
-                asset_index: 0,
                 now_slot: slot,
-                funding_rate_e9: 0,
                 close_q: 0,
-                fee_bps: 0,
-                recovery_reason: 0,
+                observations: crank_observations(0),
             },
             vec![
                 AccountMeta::new(env.payer.pubkey(), true),
@@ -38913,13 +38322,9 @@ fn v16_attack_liquidation_wrong_owner_rolls_back_legacy_reward_realloc() {
     env.svm.expire_blockhash();
     let rejected = env.send(
         ProgInstruction::PermissionlessCrank {
-            action: 1,
-            asset_index: 0,
             now_slot: 30,
-            funding_rate_e9: 0,
             close_q: POS_SCALE,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(0),
         },
         vec![
             AccountMeta::new(wrong_owner.pubkey(), true),
@@ -38957,13 +38362,9 @@ fn v16_attack_liquidation_wrong_owner_rolls_back_legacy_reward_realloc() {
     env.svm.expire_blockhash();
     let accepted = env.send(
         ProgInstruction::PermissionlessCrank {
-            action: 1,
-            asset_index: 0,
             now_slot: 30,
-            funding_rate_e9: 0,
             close_q: POS_SCALE,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(0),
         },
         vec![
             AccountMeta::new(co.pubkey(), true),
@@ -39010,13 +38411,9 @@ fn v16_attack_liquidation_rejects_cross_market_cranker_reward() {
         env.svm.expire_blockhash();
         let _ = env.send(
             ProgInstruction::PermissionlessCrank {
-                action: 0,
-                asset_index: 0,
                 now_slot: slot,
-                funding_rate_e9: 0,
                 close_q: 0,
-                fee_bps: 0,
-                recovery_reason: 0,
+                observations: crank_observations(0),
             },
             vec![
                 AccountMeta::new(env.payer.pubkey(), true),
@@ -39120,13 +38517,9 @@ fn v16_attack_liquidation_rejects_cross_market_cranker_reward() {
     env.svm.expire_blockhash();
     let rejected = env.send(
         ProgInstruction::PermissionlessCrank {
-            action: 1,
-            asset_index: 0,
             now_slot: 30,
-            funding_rate_e9: 0,
             close_q: POS_SCALE,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(0),
         },
         vec![
             AccountMeta::new(foreign_owner.pubkey(), true),
@@ -39166,13 +38559,9 @@ fn v16_attack_liquidation_rejects_cross_market_cranker_reward() {
     env.svm.expire_blockhash();
     let accepted = env.send(
         ProgInstruction::PermissionlessCrank {
-            action: 1,
-            asset_index: 0,
             now_slot: 30,
-            funding_rate_e9: 0,
             close_q: POS_SCALE,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(0),
         },
         vec![
             AccountMeta::new(foreign_owner.pubkey(), true),
@@ -39232,13 +38621,9 @@ fn v16_attack_liquidation_fee_capped() {
         env.svm.expire_blockhash();
         let _ = env.send(
             ProgInstruction::PermissionlessCrank {
-                action: 0,
-                asset_index: 0,
                 now_slot: slot,
-                funding_rate_e9: 0,
                 close_q: 0,
-                fee_bps: 0,
-                recovery_reason: 0,
+                observations: crank_observations(0),
             },
             vec![
                 AccountMeta::new(env.payer.pubkey(), true),
@@ -39257,13 +38642,9 @@ fn v16_attack_liquidation_fee_capped() {
         env.program_id,
         &env.payer,
         ProgInstruction::PermissionlessCrank {
-            action: 1,
-            asset_index: 0,
             now_slot: 30,
-            funding_rate_e9: 0,
             close_q: POS_SCALE,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(0),
         },
         vec![
             AccountMeta::new(co.pubkey(), true),
@@ -39327,13 +38708,9 @@ fn v16_attack_partial_liquidation_fee_additivity() {
         env.svm.expire_blockhash();
         let _ = env.send(
             ProgInstruction::PermissionlessCrank {
-                action: 0,
-                asset_index: 0,
                 now_slot: slot,
-                funding_rate_e9: 0,
                 close_q: 0,
-                fee_bps: 0,
-                recovery_reason: 0,
+                observations: crank_observations(0),
             },
             vec![
                 AccountMeta::new(env.payer.pubkey(), true),
@@ -39352,13 +38729,9 @@ fn v16_attack_partial_liquidation_fee_additivity() {
             env.program_id,
             &env.payer,
             ProgInstruction::PermissionlessCrank {
-                action: 1,
-                asset_index: 0,
                 now_slot: 30,
-                funding_rate_e9: 0,
                 close_q: POS_SCALE,
-                fee_bps: 0,
-                recovery_reason: 0,
+                observations: crank_observations(0),
             },
             vec![
                 AccountMeta::new(co.pubkey(), true),
@@ -39424,13 +38797,9 @@ fn v16_attack_leveraged_bad_debt_socialized_not_printed() {
         env.svm.expire_blockhash();
         let _ = env.send(
             ProgInstruction::PermissionlessCrank {
-                action: 0,
-                asset_index: 0,
                 now_slot: slot,
-                funding_rate_e9: 0,
                 close_q: 0,
-                fee_bps: 0,
-                recovery_reason: 0,
+                observations: crank_observations(0),
             },
             vec![
                 AccountMeta::new(env.payer.pubkey(), true),
@@ -39455,13 +38824,9 @@ fn v16_attack_leveraged_bad_debt_socialized_not_printed() {
         env.program_id,
         &env.payer,
         ProgInstruction::PermissionlessCrank {
-            action: 1,
-            asset_index: 0,
             now_slot: 40,
-            funding_rate_e9: 0,
             close_q: POS_SCALE,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(0),
         },
         vec![
             AccountMeta::new(co.pubkey(), true),
@@ -39585,13 +38950,9 @@ fn v16_attack_margin_gap_zone_no_liq_no_risk_increase() {
     env.svm.expire_blockhash();
     let _ = env.send(
         ProgInstruction::PermissionlessCrank {
-            action: 0,
-            asset_index: 0,
             now_slot: 2,
-            funding_rate_e9: 0,
             close_q: 0,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(0),
         },
         vec![
             AccountMeta::new(env.payer.pubkey(), true),
@@ -39627,13 +38988,9 @@ fn v16_attack_margin_gap_zone_no_liq_no_risk_increase() {
     env.svm.expire_blockhash();
     let _ = env.send(
         ProgInstruction::PermissionlessCrank {
-            action: 1,
-            asset_index: 0,
             now_slot: 2,
-            funding_rate_e9: 0,
             close_q: POS_SCALE,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(0),
         },
         vec![
             AccountMeta::new(env.payer.pubkey(), true),
@@ -39770,13 +39127,9 @@ fn v16_attack_cross_margin_netting_conserves() {
         env.svm.expire_blockhash();
         let _ = env.send(
             ProgInstruction::PermissionlessCrank {
-                action: 0,
-                asset_index: ai,
                 now_slot: 2,
-                funding_rate_e9: 0,
                 close_q: 0,
-                fee_bps: 0,
-                recovery_reason: 0,
+                observations: crank_observations(ai),
             },
             vec![
                 AccountMeta::new(env.payer.pubkey(), true),
@@ -39845,13 +39198,9 @@ fn v16_attack_over_liquidation_fee_clamped_to_position() {
         env.svm.expire_blockhash();
         let _ = env.send(
             ProgInstruction::PermissionlessCrank {
-                action: 0,
-                asset_index: 0,
                 now_slot: slot,
-                funding_rate_e9: 0,
                 close_q: 0,
-                fee_bps: 0,
-                recovery_reason: 0,
+                observations: crank_observations(0),
             },
             vec![
                 AccountMeta::new(env.payer.pubkey(), true),
@@ -39870,13 +39219,9 @@ fn v16_attack_over_liquidation_fee_clamped_to_position() {
         env.program_id,
         &env.payer,
         ProgInstruction::PermissionlessCrank {
-            action: 1,
-            asset_index: 0,
             now_slot: 30,
-            funding_rate_e9: 0,
             close_q: 1_000 * POS_SCALE,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(0),
         },
         vec![
             AccountMeta::new(co.pubkey(), true),
@@ -41430,13 +40775,9 @@ fn v16_attack_pushed_mark_cannot_override_external_oracle_asset() {
     env.crank_with_oracle_tail(
         cranker_portfolio,
         ProgInstruction::PermissionlessCrank {
-            action: 0,
-            asset_index: 0,
             now_slot: 2,
-            funding_rate_e9: 0,
             close_q: 0,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(0),
         },
         &[updated],
     );
@@ -41479,13 +40820,9 @@ fn v16_attack_crank_oracle_feed_id_mismatch_rejects_without_mutation() {
     env.svm.expire_blockhash();
     let bad = env.send(
         ProgInstruction::PermissionlessCrank {
-            action: 0,
-            asset_index: 0,
             now_slot: 2,
-            funding_rate_e9: 0,
             close_q: 0,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(0),
         },
         vec![
             AccountMeta::new(env.payer.pubkey(), true),
@@ -41520,13 +40857,9 @@ fn v16_attack_crank_oracle_feed_id_mismatch_rejects_without_mutation() {
     env.crank_with_oracle_tail(
         cranker_portfolio,
         ProgInstruction::PermissionlessCrank {
-            action: 0,
-            asset_index: 0,
             now_slot: 2,
-            funding_rate_e9: 0,
             close_q: 0,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(0),
         },
         &[correct_acct],
     );
@@ -41566,13 +40899,9 @@ fn v16_attack_crank_oracle_same_publish_time_price_change_rejects() {
     env.svm.expire_blockhash();
     let replay = env.send(
         ProgInstruction::PermissionlessCrank {
-            action: 0,
-            asset_index: 0,
             now_slot: 2,
-            funding_rate_e9: 0,
             close_q: 0,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(0),
         },
         vec![
             AccountMeta::new(env.payer.pubkey(), true),
@@ -41608,13 +40937,9 @@ fn v16_attack_crank_oracle_same_publish_time_price_change_rejects() {
     env.crank_with_oracle_tail(
         cranker_portfolio,
         ProgInstruction::PermissionlessCrank {
-            action: 0,
-            asset_index: 0,
             now_slot: 3,
-            funding_rate_e9: 0,
             close_q: 0,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(0),
         },
         &[fresh],
     );
@@ -41654,13 +40979,9 @@ fn v16_attack_crank_oracle_regressed_publish_time_rejects_even_when_fresh() {
     env.svm.expire_blockhash();
     let replay = env.send(
         ProgInstruction::PermissionlessCrank {
-            action: 0,
-            asset_index: 0,
             now_slot: 2,
-            funding_rate_e9: 0,
             close_q: 0,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(0),
         },
         vec![
             AccountMeta::new(env.payer.pubkey(), true),
@@ -41696,13 +41017,9 @@ fn v16_attack_crank_oracle_regressed_publish_time_rejects_even_when_fresh() {
     env.crank_with_oracle_tail(
         cranker_portfolio,
         ProgInstruction::PermissionlessCrank {
-            action: 0,
-            asset_index: 0,
             now_slot: 3,
-            funding_rate_e9: 0,
             close_q: 0,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(0),
         },
         &[fresh],
     );
@@ -42477,13 +41794,9 @@ fn v16_attack_convert_released_pnl_owner_gated() {
     env.crank(
         p,
         ProgInstruction::PermissionlessCrank {
-            action: 0,
-            asset_index: 0,
             now_slot: 0,
-            funding_rate_e9: 0,
             close_q: 0,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(0),
         },
     );
     let cap0 = env.portfolio_state(p).capital.get();
@@ -43354,13 +42667,9 @@ fn v16_attack_ewma_mark_respects_per_slot_circuit_breaker() {
         // crank may succeed (clamped move) or be refused (RecoveryRequired) — either way price is bounded.
         let _ = env.send(
             ProgInstruction::PermissionlessCrank {
-                action: 0,
-                asset_index: 0,
                 now_slot: slot,
-                funding_rate_e9: 0,
                 close_q: 0,
-                fee_bps: 0,
-                recovery_reason: 0,
+                observations: crank_observations(0),
             },
             vec![
                 AccountMeta::new(env.payer.pubkey(), true),
@@ -43459,13 +42768,9 @@ fn v16_attack_crank_dt_clamp_blocks_retroactive_settle() {
     env.svm.expire_blockhash();
     let r = env.send(
         ProgInstruction::PermissionlessCrank {
-            action: 0,
-            asset_index: 0,
             now_slot: GAP_SLOT,
-            funding_rate_e9: 0,
             close_q: 0,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(0),
         },
         vec![
             AccountMeta::new(env.payer.pubkey(), true),
@@ -43514,13 +42819,9 @@ fn v16_attack_crank_dt_clamp_blocks_retroactive_settle() {
     env.svm.expire_blockhash();
     let r2 = env.send(
         ProgInstruction::PermissionlessCrank {
-            action: 0,
-            asset_index: 0,
             now_slot: GAP_SLOT,
-            funding_rate_e9: 0,
             close_q: 0,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(0),
         },
         vec![
             AccountMeta::new(env.payer.pubkey(), true),
@@ -43810,13 +43111,9 @@ fn v16_attack_asset1_insolvency_cannot_drain_asset0_domain_insurance() {
             env.svm.expire_blockhash();
             let _ = env.send(
                 ProgInstruction::PermissionlessCrank {
-                    action: 0,
-                    asset_index: 1,
                     now_slot: slot,
-                    funding_rate_e9: 0,
                     close_q: 0,
-                    fee_bps: 0,
-                    recovery_reason: 0,
+                    observations: crank_observations(1),
                 },
                 vec![
                     AccountMeta::new(env.payer.pubkey(), true),
@@ -43831,13 +43128,9 @@ fn v16_attack_asset1_insolvency_cannot_drain_asset0_domain_insurance() {
     env.svm.expire_blockhash();
     let _ = env.send(
         ProgInstruction::PermissionlessCrank {
-            action: 1,
-            asset_index: 1,
             now_slot: 4,
-            funding_rate_e9: 0,
             close_q: POS_SCALE,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(1),
         },
         vec![
             AccountMeta::new(env.payer.pubkey(), true),
@@ -44236,13 +43529,9 @@ fn v16_attack_asset1_insolvency_cannot_drain_asset0_backing() {
             env.svm.expire_blockhash();
             let _ = env.send(
                 ProgInstruction::PermissionlessCrank {
-                    action: 0,
-                    asset_index: 1,
                     now_slot: slot,
-                    funding_rate_e9: 0,
                     close_q: 0,
-                    fee_bps: 0,
-                    recovery_reason: 0,
+                    observations: crank_observations(1),
                 },
                 vec![
                     AccountMeta::new(env.payer.pubkey(), true),
@@ -44256,13 +43545,9 @@ fn v16_attack_asset1_insolvency_cannot_drain_asset0_backing() {
     env.svm.expire_blockhash();
     let _ = env.send(
         ProgInstruction::PermissionlessCrank {
-            action: 1,
-            asset_index: 1,
             now_slot: 4,
-            funding_rate_e9: 0,
             close_q: POS_SCALE,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(1),
         },
         vec![
             AccountMeta::new(env.payer.pubkey(), true),
@@ -44630,13 +43915,9 @@ fn v16_attack_backing_fee_split_conserves() {
         env.crank(
             portfolio,
             ProgInstruction::PermissionlessCrank {
-                action: 0,
-                asset_index,
                 now_slot: 2,
-                funding_rate_e9: 0,
                 close_q: 0,
-                fee_bps: 0,
-                recovery_reason: 0,
+                observations: crank_observations(asset_index),
             },
         );
     }
@@ -46604,13 +45885,9 @@ fn v16_bpf_10m_market_liquidation_high_asset_stays_bounded() {
     let liquidation_cu = env.crank(
         short,
         ProgInstruction::PermissionlessCrank {
-            action: 1,
-            asset_index: HIGH_ASSET as u16,
             now_slot: LIQUIDATION_SLOT,
-            funding_rate_e9: 0,
             close_q: POS_SCALE,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(HIGH_ASSET as u16),
         },
     );
     println!(
@@ -47512,13 +46789,9 @@ fn v16_bpf_force_close_liveness_survives_14_stale_leg_grief_via_precrank() {
     );
     env.svm.warp_to_slot(22);
     let refresh = |slot: u64| ProgInstruction::PermissionlessCrank {
-        action: 0,
-        asset_index: 0,
         now_slot: slot,
-        funding_rate_e9: 0,
         close_q: 0,
-        fee_bps: 0,
-        recovery_reason: 0,
+        observations: crank_observations(0),
     };
     let c_long = env.crank(pa, refresh(22));
     let c_short = env.crank(pb, refresh(22));
@@ -52698,13 +51971,9 @@ fn v16_attack_live_backing_withdraw_rejects_exposed_target_effective_lag() {
     env.crank(
         long_portfolio,
         ProgInstruction::PermissionlessCrank {
-            action: 0,
-            asset_index: 0,
             now_slot: 2,
-            funding_rate_e9: 0,
             close_q: 0,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(0),
         },
     );
     let g = env.market_state().1;
@@ -52962,13 +52231,9 @@ fn v16_attack_convert_released_pnl_rejects_when_resolve_matured() {
         env.crank(
             portfolio,
             ProgInstruction::PermissionlessCrank {
-                action: 0,
-                asset_index: 0,
                 now_slot: 3,
-                funding_rate_e9: 0,
                 close_q: 0,
-                fee_bps: 0,
-                recovery_reason: 0,
+                observations: crank_observations(0),
             },
         );
     }
@@ -53064,13 +52329,9 @@ fn v16_attack_withdraw_rejected_when_resolve_matured() {
     env.svm.expire_blockhash();
     let _ = env.send(
         ProgInstruction::PermissionlessCrank {
-            action: 0,
-            asset_index: 0,
             now_slot: 3,
-            funding_rate_e9: 0,
             close_q: 0,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(0),
         },
         vec![
             AccountMeta::new(env.payer.pubkey(), true),
@@ -53399,13 +52660,9 @@ fn v16_attack_live_value_paths_reject_when_resolve_matured() {
     env.svm.expire_blockhash();
     let stale_crank = env.send(
         ProgInstruction::PermissionlessCrank {
-            action: 0,
-            asset_index: 0,
             now_slot: 0,
-            funding_rate_e9: 0,
             close_q: 0,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(0),
         },
         vec![
             AccountMeta::new(env.payer.pubkey(), true),
@@ -55394,81 +54651,6 @@ fn v16_attack_deposit_withdraw_amount_over_u64_max_rejects_no_truncation() {
 }
 
 // [from pr125]
-// security.md sweep — privilege/injection (#19/#39): the permissionless crank's LIQUIDATION fee is
-// config-pinned, not caller-injectable. For action=1 (Liquidate) the wrapper builds the engine request
-// with `fee_bps: config.liquidation_fee_bps` (ignoring the caller's fee_bps) AND requires the caller's
-// fee_bps == 0 (`action == 1 && fee_bps != 0 -> InvalidInstruction`). Without that gate a liquidator could
-// pass an inflated fee_bps to over-extract from the liquidated account (or 0 it out). The funding-rate
-// injection test covers funding_rate_e9 / recovery_reason (via action=0), but never the action=1 fee_bps
-// gate. This proves a Liquidate crank with a nonzero caller fee_bps rejects at the top of the handler
-// (InvalidInstruction, Custom 9), while the same crank with fee_bps==0 passes the gate (failing later for
-// an unrelated reason on a healthy account — NOT Custom 9).
-#[test]
-fn v16_attack_crank_liquidation_fee_bps_not_caller_injectable() {
-    let mut env = V16CuEnv::new();
-    let owner = Keypair::new();
-    let p = env.create_portfolio(&owner);
-    env.deposit(&owner, p, 1_000); // a flat, healthy (non-liquidatable) account
-
-    // ATTACK: a Liquidate crank (action=1) supplying a nonzero fee_bps must reject on the parameter gate.
-    env.svm.expire_blockhash();
-    let r_fee = env.send(
-        ProgInstruction::PermissionlessCrank {
-            action: 1,
-            asset_index: 0,
-            now_slot: 1,
-            funding_rate_e9: 0,
-            close_q: 1,
-            fee_bps: 5_000, // caller-injected liquidation fee — must be rejected
-            recovery_reason: 0,
-        },
-        vec![
-            AccountMeta::new(env.payer.pubkey(), true),
-            AccountMeta::new(env.market, false),
-            AccountMeta::new(p, false),
-        ],
-        &[],
-    );
-    assert!(
-        r_fee.is_err(),
-        "Liquidate crank with a caller-supplied fee_bps must reject"
-    );
-    assert!(
-        r_fee.unwrap_err().contains("Custom(9)"),
-        "caller fee_bps injection must reject as InvalidInstruction (Custom 9), the parameter gate"
-    );
-
-    // CONTROL: the SAME crank with fee_bps == 0 passes the parameter gate and reaches the engine, which
-    // rejects for an unrelated reason (the account is healthy / not liquidatable) — crucially NOT Custom 9.
-    env.svm.expire_blockhash();
-    let r_zero = env.send(
-        ProgInstruction::PermissionlessCrank {
-            action: 1,
-            asset_index: 0,
-            now_slot: 1,
-            funding_rate_e9: 0,
-            close_q: 1,
-            fee_bps: 0,
-            recovery_reason: 0,
-        },
-        vec![
-            AccountMeta::new(env.payer.pubkey(), true),
-            AccountMeta::new(env.market, false),
-            AccountMeta::new(p, false),
-        ],
-        &[],
-    );
-    assert!(
-        r_zero.is_err(),
-        "liquidating a healthy account still fails (nothing to liquidate)"
-    );
-    assert!(
-        !r_zero.unwrap_err().contains("Custom(9)"),
-        "fee_bps==0 must PASS the parameter gate and fail downstream (not the Custom 9 gate)"
-    );
-}
-
-// [from pr125]
 // LoF/safety sweep — SwapSecondaryForPrimary rejects on a single-mint market (no secondary configured).
 // The swap reads `secondary_collateral_mint(&cfg)?`, which returns InvalidMint when
 // cfg.secondary_collateral_mint == [0;32] (the default until UpdateBaseUnitMints installs a pair). This
@@ -55690,13 +54872,9 @@ fn v16_attack_liquidation_full_cranker_share_takes_whole_fee_no_mint() {
         env.svm.expire_blockhash();
         let _ = env.send(
             ProgInstruction::PermissionlessCrank {
-                action: 0,
-                asset_index: 0,
                 now_slot: slot,
-                funding_rate_e9: 0,
                 close_q: 0,
-                fee_bps: 0,
-                recovery_reason: 0,
+                observations: crank_observations(0),
             },
             vec![
                 AccountMeta::new(env.payer.pubkey(), true),
@@ -55716,13 +54894,9 @@ fn v16_attack_liquidation_full_cranker_share_takes_whole_fee_no_mint() {
         env.program_id,
         &env.payer,
         ProgInstruction::PermissionlessCrank {
-            action: 1,
-            asset_index: 0,
             now_slot: 30,
-            funding_rate_e9: 0,
             close_q: POS_SCALE,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(0),
         },
         vec![
             AccountMeta::new(co.pubkey(), true),
@@ -55913,13 +55087,9 @@ fn v16_attack_permissionless_settle_b_on_healthy_account_is_safe_noop() {
     env.svm.expire_blockhash();
     let _ = env.send(
         ProgInstruction::PermissionlessCrank {
-            action: 2,
-            asset_index: 0,
             now_slot: 5,
-            funding_rate_e9: 0,
             close_q: 0,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(0),
         },
         vec![
             AccountMeta::new(env.payer.pubkey(), true), // arbitrary cranker
@@ -57138,13 +56308,9 @@ fn v16_attack_hybrid_liquidation_bad_reward_tail_rolls_back_oracle_update() {
     env.svm.expire_blockhash();
     let rejected = env.send(
         ProgInstruction::PermissionlessCrank {
-            action: 1,
-            asset_index: 0,
             now_slot: 2,
-            funding_rate_e9: 0,
             close_q: POS_SCALE,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(0),
         },
         vec![
             AccountMeta::new(env.payer.pubkey(), true),
@@ -57181,13 +56347,9 @@ fn v16_attack_hybrid_liquidation_bad_reward_tail_rolls_back_oracle_update() {
     env.svm.expire_blockhash();
     let accepted = env.send(
         ProgInstruction::PermissionlessCrank {
-            action: 1,
-            asset_index: 0,
             now_slot: 2,
-            funding_rate_e9: 0,
             close_q: POS_SCALE,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(0),
         },
         vec![
             AccountMeta::new(payer_owner.pubkey(), true),

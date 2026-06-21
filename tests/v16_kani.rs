@@ -2,7 +2,7 @@
 
 extern crate kani;
 
-use percolator_prog::ix::Instruction;
+use percolator_prog::ix::{CrankObservationHint, Instruction};
 use percolator_prog::matcher_abi::{
     validate_matcher_return, MatcherReturn, FLAG_PARTIAL_OK, FLAG_REJECTED, FLAG_VALID,
 };
@@ -535,41 +535,46 @@ fn kani_v16_matcher_return_accepts_only_bound_echoed_fills() {
 
 #[kani::proof]
 fn kani_v16_permissionless_crank_decode_preserves_wire_fields() {
-    let action: u8 = kani::any();
-    let asset_index: u16 = kani::any();
-    let recovery_reason: u8 = kani::any();
     let now_slot: u64 = kani::any();
-    let funding_rate_e9: i128 = kani::any();
     let close_q: u128 = kani::any();
-    let fee_bps: u64 = kani::any();
+    let asset_index_0: u16 = kani::any();
+    let oracle_accounts_0: u8 = kani::any();
+    let asset_index_1: u16 = kani::any();
+    let oracle_accounts_1: u8 = kani::any();
 
-    let mut data = [0u8; 53];
+    let mut data = [0u8; 32];
     data[0] = 5;
-    data[1] = action;
-    data[2..4].copy_from_slice(&asset_index.to_le_bytes());
-    data[4..12].copy_from_slice(&now_slot.to_le_bytes());
-    data[12..28].copy_from_slice(&funding_rate_e9.to_le_bytes());
-    data[28..44].copy_from_slice(&close_q.to_le_bytes());
-    data[44..52].copy_from_slice(&fee_bps.to_le_bytes());
-    data[52] = recovery_reason;
+    data[1..9].copy_from_slice(&now_slot.to_le_bytes());
+    data[9..25].copy_from_slice(&close_q.to_le_bytes());
+    data[25] = 2;
+    data[26..28].copy_from_slice(&asset_index_0.to_le_bytes());
+    data[28] = oracle_accounts_0;
+    data[29..31].copy_from_slice(&asset_index_1.to_le_bytes());
+    data[31] = oracle_accounts_1;
 
     match Instruction::decode(&data).unwrap() {
         Instruction::PermissionlessCrank {
-            action: got_action,
-            asset_index: got_asset,
             now_slot: got_slot,
-            funding_rate_e9: got_rate,
             close_q: got_close,
-            fee_bps: got_fee,
-            recovery_reason: got_recovery,
+            observations,
         } => {
-            assert_eq!(got_action, action);
-            assert_eq!(got_asset, asset_index);
             assert_eq!(got_slot, now_slot);
-            assert_eq!(got_rate, funding_rate_e9);
             assert_eq!(got_close, close_q);
-            assert_eq!(got_fee, fee_bps);
-            assert_eq!(got_recovery, recovery_reason);
+            assert_eq!(observations.len(), 2);
+            assert_eq!(
+                observations[0],
+                CrankObservationHint {
+                    asset_index: asset_index_0,
+                    oracle_accounts: oracle_accounts_0,
+                }
+            );
+            assert_eq!(
+                observations[1],
+                CrankObservationHint {
+                    asset_index: asset_index_1,
+                    oracle_accounts: oracle_accounts_1,
+                }
+            );
         }
         _ => unreachable!(),
     }
@@ -1103,13 +1108,12 @@ fn kani_v16_trade_and_crank_payloads_reject_trailing_byte() {
 
     assert_rejects_trailing_byte(
         Instruction::PermissionlessCrank {
-            action: 0,
-            asset_index: 0,
             now_slot: 1,
-            funding_rate_e9: 0,
             close_q: 0,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: vec![CrankObservationHint {
+                asset_index: 0,
+                oracle_accounts: 0,
+            }],
         },
         extra,
     );
