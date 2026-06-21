@@ -71108,6 +71108,94 @@ fn v16_attack_crank_liquidation_fee_bps_not_caller_injectable() {
     assert!(zero.4, "control liquidation closed the short position");
 }
 
+// Public auto-crank routing sweep: the legacy `action` byte is only a compatibility hint now. Once the
+// account is current and liquidatable, the wrapper must let the engine selector dispatch liquidation even
+// if the caller supplies the old refresh action value. Otherwise keepers submitting stale/out-of-order
+// hints could turn a valid permissionless liquidation into no progress.
+#[test]
+fn v16_attack_auto_crank_liquidates_current_account_despite_wrong_action_hint() {
+    let mut env = V16CuEnv::new_with_init_params(production_risk_params());
+    env.configure_auth_mark_with_cu(0, 1_000_000);
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long = env.create_portfolio(&long_owner);
+    let short = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long, 100_000_000);
+    env.deposit(&short_owner, short, 100_000);
+    env.trade_asset_with_cu(
+        0,
+        &long_owner,
+        long,
+        &short_owner,
+        short,
+        POS_SCALE as i128,
+        1_000_000,
+        0,
+    );
+    for slot in 1..=30u64 {
+        env.svm.warp_to_slot(slot);
+        let _ = env.push_auth_mark_with_cu(slot, 2_000_000);
+        env.crank(
+            short,
+            ProgInstruction::PermissionlessCrank {
+                action: 0,
+                asset_index: 0,
+                now_slot: slot,
+                funding_rate_e9: 0,
+                close_q: 0,
+                fee_bps: 0,
+                recovery_reason: 0,
+            },
+        );
+    }
+    assert!(
+        env.portfolio_state(short).health_cert.certified_liq_deficit != 0,
+        "setup must leave the current short account liquidatable"
+    );
+    let (_, before) = env.market_state();
+
+    env.svm.expire_blockhash();
+    let cu = env
+        .send(
+            ProgInstruction::PermissionlessCrank {
+                action: 0,
+                asset_index: 0,
+                now_slot: 30,
+                funding_rate_e9: 0,
+                close_q: POS_SCALE,
+                fee_bps: u64::MAX,
+                recovery_reason: 0,
+            },
+            vec![
+                AccountMeta::new(env.payer.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(short, false),
+            ],
+            &[],
+        )
+        .expect("auto-crank must liquidate from state despite a stale refresh action hint");
+    assert_cu_within(
+        "PermissionlessCrank liquidation with wrong action hint",
+        cu,
+        CRANK_CU_LIMIT,
+    );
+    let (_, after) = env.market_state();
+    let short_after = env.portfolio_state(short);
+    assert!(
+        percolator::active_bitmap_is_empty(short_after.active_bitmap),
+        "auto-crank selected liquidation and closed the unsafe short"
+    );
+    assert!(
+        after.insurance > before.insurance,
+        "liquidation charged a real config-derived fee"
+    );
+    assert_eq!(after.vault, before.vault, "liquidation mints no custody");
+    assert!(
+        after.vault >= after.c_tot + after.insurance,
+        "senior conservation holds after wrong-action liquidation"
+    );
+}
+
 // [from pr125]
 // LoF/safety sweep — SwapSecondaryForPrimary rejects on a single-mint market (no secondary configured).
 // The swap reads `secondary_collateral_mint(&cfg)?`, which returns InvalidMint when
