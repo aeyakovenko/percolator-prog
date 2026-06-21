@@ -10844,6 +10844,20 @@ pub mod processor {
                     max_market_slots,
                 )?;
                 expect_portfolio_view_account_key(&portfolio, portfolio_ai.key)?;
+                let close_ledger = portfolio
+                    .header
+                    .close_progress
+                    .try_to_runtime()
+                    .map_err(map_v16_error)?;
+                let authenticated_expired_close = group.header.mode == 0
+                    && close_ledger.active
+                    && close_ledger.residual_remaining > 0
+                    && authenticated_now_slot > close_ledger.max_close_slot;
+                if authenticated_expired_close
+                    && group.header.current_slot.get() < authenticated_now_slot
+                {
+                    group.header.current_slot = percolator::V16PodU64::new(authenticated_now_slot);
+                }
                 let summary = group
                     .build_actionable_summary(&portfolio.as_view())
                     .map_err(map_v16_error)?;

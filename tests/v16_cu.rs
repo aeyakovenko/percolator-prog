@@ -17025,6 +17025,59 @@ fn v16_attack_auto_crank_expired_close_recovery_not_blocked_by_stale_oracle() {
     );
 }
 
+#[test]
+fn v16_attack_auto_crank_expired_close_uses_authenticated_slot_not_stale_market_slot() {
+    let mut env = V16CuEnv::new();
+    env.configure_permissionless_resolve_with_cu(5, 5);
+    env.configure_auth_mark_with_cu(0, 100);
+
+    let owner = Keypair::new();
+    let portfolio = env.create_portfolio(&owner);
+    env.deposit(&owner, portfolio, 100);
+    env.seed_cancellable_close_progress(portfolio);
+
+    let (_, group_before) = env.market_state();
+    assert_eq!(group_before.current_slot, 0);
+    assert!(
+        env.portfolio_state(portfolio).close_progress.max_close_slot > group_before.current_slot,
+        "setup keeps the market slot stale enough that the old summary would not classify expiration"
+    );
+
+    env.svm.warp_to_slot(40);
+    env.svm.expire_blockhash();
+    let cu = env
+        .send(
+            ProgInstruction::PermissionlessCrank {
+                action: 0,
+                asset_index: 0,
+                now_slot: 40,
+                funding_rate_e9: 0,
+                close_q: 0,
+                fee_bps: 0,
+                recovery_reason: 0,
+            },
+            vec![
+                AccountMeta::new(env.payer.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(portfolio, false),
+            ],
+            &[],
+        )
+        .expect("expired close recovery must use the authenticated slot, not stale market current_slot");
+    assert_cu_within(
+        "PermissionlessCrank expired-close authenticated-slot recovery",
+        cu,
+        CRANK_CU_LIMIT,
+    );
+
+    let (_, group_after) = env.market_state();
+    assert_eq!(group_after.mode, MarketModeV16::Recovery);
+    assert_eq!(
+        group_after.recovery_reason,
+        Some(PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress)
+    );
+}
+
 // security.md sweep — cross-margin (#22/#32): one portfolio holds positions on TWO assets.
 // Probe aggregate conservation and per-asset OI balance under shared-capital cross-margin.
 #[test]
