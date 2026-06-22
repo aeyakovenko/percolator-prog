@@ -10826,6 +10826,67 @@ fn v16_attack_permissionless_crank_resolved_capital_only_account_winds_down() {
     assert_eq!(account.capital, 0);
 }
 
+// LoF/DoS sweep: PermissionlessCrank is the public resolved-exit route, but live-mode crank callers
+// still carry observation hints. Once the market is Resolved those hints must not become a liveness
+// gate for the user's payout, even if they would be malformed for the live oracle parser.
+#[test]
+fn v16_attack_resolved_permissionless_crank_ignores_live_observation_garbage() {
+    let mut env = V16CuEnv::new();
+    let owner = Keypair::new();
+    let portfolio = env.create_portfolio(&owner);
+    env.deposit(&owner, portfolio, 1_000);
+    env.resolve();
+
+    let invalid_live_observations: Vec<_> = (0..16)
+        .map(|i| CrankObservationHint {
+            asset_index: if i % 2 == 0 { 0 } else { u16::MAX },
+            oracle_accounts: u8::MAX,
+        })
+        .collect();
+    let dest = env.token_account(owner.pubkey(), 0);
+
+    env.svm.expire_blockhash();
+    let cu = env
+        .send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: u64::MAX,
+                close_q: u128::MAX,
+                observations: invalid_live_observations,
+            },
+            vec![
+                AccountMeta::new_readonly(owner.pubkey(), false),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(portfolio, false),
+                AccountMeta::new(dest, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(env.vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[],
+        )
+        .expect("resolved public crank must not be gated by live-mode observation garbage");
+    assert_cu_within(
+        "resolved PermissionlessCrank with ignored observation garbage",
+        cu,
+        CUSTODY_CU_LIMIT,
+    );
+    assert_eq!(
+        env.token_amount(dest),
+        1_000,
+        "resolved crank still pays the user despite malformed live-mode hints"
+    );
+    assert_eq!(
+        env.token_amount(env.vault),
+        0,
+        "resolved crank drains the accounted payout from custody"
+    );
+    let (_, group) = env.market_state();
+    let account = env.portfolio_state(portfolio);
+    assert_eq!(group.vault, 0);
+    assert_eq!(group.c_tot, 0);
+    assert_eq!(account.capital, 0);
+}
+
 #[test]
 fn v16_attack_permissionless_crank_resolved_positive_pnl_account_winds_down() {
     let mut env = V16CuEnv::new();
