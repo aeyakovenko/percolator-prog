@@ -42625,6 +42625,19 @@ fn v16_attack_tradecpi_matcher_tail_cannot_forward_taker_signer() {
         .unwrap();
     env.set_matcher_config(hostile, &lp, lp_account, ctx, delegate, 1);
 
+    let tail_signer = Keypair::new();
+    env.svm
+        .set_account(
+            tail_signer.pubkey(),
+            Account {
+                lamports: 1_000_000_000,
+                data: vec![],
+                owner: solana_sdk::system_program::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
     let recipient = Pubkey::new_unique();
     env.svm
         .set_account(
@@ -42642,7 +42655,7 @@ fn v16_attack_tradecpi_matcher_tail_cannot_forward_taker_signer() {
     let taker_before = env.svm.get_account(&taker_account).unwrap();
     let lp_before = env.svm.get_account(&lp_account).unwrap();
     let ctx_before = env.svm.get_account(&ctx).unwrap();
-    let taker_wallet_before = env.svm.get_account(&taker.pubkey()).unwrap();
+    let tail_signer_before = env.svm.get_account(&tail_signer.pubkey()).unwrap();
     let recipient_before = env.svm.get_account(&recipient).unwrap();
 
     env.svm.expire_blockhash();
@@ -42661,32 +42674,31 @@ fn v16_attack_tradecpi_matcher_tail_cannot_forward_taker_signer() {
             AccountMeta::new_readonly(hostile, false),
             AccountMeta::new(ctx, false),
             AccountMeta::new_readonly(delegate, false),
-            AccountMeta::new(taker.pubkey(), true),
+            AccountMeta::new(tail_signer.pubkey(), true),
             AccountMeta::new(recipient, false),
             AccountMeta::new_readonly(solana_sdk::system_program::ID, false),
         ],
-        &[&taker],
+        &[&taker, &tail_signer],
     );
-    let rejected_err = rejected.expect_err(
-        "TradeCpi must not forward the taker wallet signer into a hostile matcher tail",
-    );
+    let rejected_err = rejected
+        .expect_err("TradeCpi must not forward any user signer into a hostile matcher tail");
     assert!(
         rejected_err.contains("Custom(9)") || rejected_err.contains("custom program error: 0x9"),
-        "taker-signer matcher tail must reject in wrapper preflight as InvalidInstruction, got {rejected_err}"
+        "signer matcher tail must reject in wrapper preflight as InvalidInstruction, got {rejected_err}"
     );
     assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
     assert_eq!(env.svm.get_account(&taker_account).unwrap(), taker_before);
     assert_eq!(env.svm.get_account(&lp_account).unwrap(), lp_before);
     assert_eq!(env.svm.get_account(&ctx).unwrap(), ctx_before);
     assert_eq!(
-        env.svm.get_account(&taker.pubkey()).unwrap(),
-        taker_wallet_before,
-        "rejected matcher-tail signer forwarding must not debit the taker wallet"
+        env.svm.get_account(&tail_signer.pubkey()).unwrap(),
+        tail_signer_before,
+        "rejected matcher-tail signer forwarding must not debit the tail signer"
     );
     assert_eq!(
         env.svm.get_account(&recipient).unwrap(),
         recipient_before,
-        "hostile matcher must not receive lamports from the taker wallet"
+        "hostile matcher must not receive lamports from the tail signer"
     );
 
     let mut honest_ctx = env.svm.get_account(&ctx).unwrap();
@@ -42874,6 +42886,19 @@ fn v16_attack_batch_tradecpi_matcher_tail_cannot_forward_taker_signer() {
         .unwrap();
     env.set_matcher_config(hostile, &lp, lp_account, ctx, delegate, 1);
 
+    let tail_signer = Keypair::new();
+    env.svm
+        .set_account(
+            tail_signer.pubkey(),
+            Account {
+                lamports: 1_000_000_000,
+                data: vec![],
+                owner: solana_sdk::system_program::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
     let recipient = Pubkey::new_unique();
     env.svm
         .set_account(
@@ -42891,7 +42916,7 @@ fn v16_attack_batch_tradecpi_matcher_tail_cannot_forward_taker_signer() {
     let taker_before = env.svm.get_account(&taker_account).unwrap();
     let lp_before = env.svm.get_account(&lp_account).unwrap();
     let ctx_before = env.svm.get_account(&ctx).unwrap();
-    let taker_wallet_before = env.svm.get_account(&taker.pubkey()).unwrap();
+    let tail_signer_before = env.svm.get_account(&tail_signer.pubkey()).unwrap();
     let recipient_before = env.svm.get_account(&recipient).unwrap();
     let legs = vec![
         BatchTradeCpiLeg {
@@ -42919,32 +42944,31 @@ fn v16_attack_batch_tradecpi_matcher_tail_cannot_forward_taker_signer() {
             AccountMeta::new_readonly(hostile, false),
             AccountMeta::new(ctx, false),
             AccountMeta::new_readonly(delegate, false),
-            AccountMeta::new(taker.pubkey(), true),
+            AccountMeta::new(tail_signer.pubkey(), true),
             AccountMeta::new(recipient, false),
             AccountMeta::new_readonly(solana_sdk::system_program::ID, false),
         ],
-        &[&taker],
+        &[&taker, &tail_signer],
     );
-    let rejected_err = rejected.expect_err(
-        "BatchTradeCpi must not forward the taker wallet signer into a hostile matcher tail",
-    );
+    let rejected_err = rejected
+        .expect_err("BatchTradeCpi must not forward any user signer into a hostile matcher tail");
     assert!(
         rejected_err.contains("Custom(9)") || rejected_err.contains("custom program error: 0x9"),
-        "batch taker-signer matcher tail must reject in wrapper preflight as InvalidInstruction, got {rejected_err}"
+        "batch signer matcher tail must reject in wrapper preflight as InvalidInstruction, got {rejected_err}"
     );
     assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
     assert_eq!(env.svm.get_account(&taker_account).unwrap(), taker_before);
     assert_eq!(env.svm.get_account(&lp_account).unwrap(), lp_before);
     assert_eq!(env.svm.get_account(&ctx).unwrap(), ctx_before);
     assert_eq!(
-        env.svm.get_account(&taker.pubkey()).unwrap(),
-        taker_wallet_before,
-        "rejected batch signer forwarding must not debit the taker wallet"
+        env.svm.get_account(&tail_signer.pubkey()).unwrap(),
+        tail_signer_before,
+        "rejected batch signer forwarding must not debit the tail signer"
     );
     assert_eq!(
         env.svm.get_account(&recipient).unwrap(),
         recipient_before,
-        "hostile batch matcher must not receive lamports from the taker wallet"
+        "hostile batch matcher must not receive lamports from the tail signer"
     );
 
     let mut honest_ctx = env.svm.get_account(&ctx).unwrap();
@@ -69723,22 +69747,20 @@ fn v16_attack_batch_tradecpi_duplicate_matcher_tail_is_cu_bounded() {
 }
 
 // CU/DoS sweep: the generic duplicate-tail tests use a benign account that is not otherwise present
-// in the instruction. A caller can also repeat required matcher accounts in the remaining-account
-// tail. Those aliases are not protocol state, but they exercise the runtime's duplicate writable
-// account path for the matcher context and duplicate signer-PDA path for the matcher delegate. They
-// must not turn an otherwise live fill into a CU amplifier.
+// in the instruction. Required matcher accounts are stronger boundaries: if the context or delegate
+// also appears in the tail, the wrapper must reject before the external matcher can write.
 #[test]
-fn v16_attack_tradecpi_required_matcher_tail_aliases_are_cu_bounded() {
+fn v16_attack_tradecpi_required_matcher_tail_aliases_reject_before_cpi() {
     const MAX_TAIL: usize = percolator_prog::constants::MAX_MATCHER_TAIL_ACCOUNTS;
 
-    #[derive(Clone, Copy)]
+    #[derive(Clone, Copy, PartialEq, Eq)]
     enum TailAlias {
         None,
         MatcherContextWritable,
         MatcherDelegateReadonly,
     }
 
-    fn run_trade_with_tail_alias(alias: TailAlias) -> u64 {
+    fn run_trade_with_tail_alias(alias: TailAlias) -> Result<u64, String> {
         let mut env = V16CuEnv::new();
         let matcher_program = Pubkey::new_unique();
         let matcher_bytes =
@@ -69771,59 +69793,68 @@ fn v16_attack_tradecpi_required_matcher_tail_aliases_are_cu_bounded() {
             }
         }
 
+        let ctx_before = env.svm.get_account(&ctx).unwrap();
         env.svm.expire_blockhash();
-        let cu = env
-            .send(
-                ProgInstruction::TradeCpi {
-                    asset_index: 0,
-                    size_q: (5 * POS_SCALE) as i128,
-                    fee_bps: 100,
-                    limit_price: 0,
-                },
-                accounts,
-                &[&taker],
-            )
-            .expect("TradeCpi with required matcher account aliases in tail");
-        assert!(
-            has_active_leg_for_asset(&env.portfolio_state(taker_account), 0),
-            "required-account tail alias TradeCpi must fill a real leg"
+        let result = env.send(
+            ProgInstruction::TradeCpi {
+                asset_index: 0,
+                size_q: (5 * POS_SCALE) as i128,
+                fee_bps: 100,
+                limit_price: 0,
+            },
+            accounts,
+            &[&taker],
         );
-        assert_cu_within("TradeCpi required matcher tail alias", cu, TRADE_CU_LIMIT);
-        cu
+        if alias == TailAlias::None {
+            let cu = result?;
+            assert!(
+                has_active_leg_for_asset(&env.portfolio_state(taker_account), 0),
+                "clean TradeCpi must still fill a real leg"
+            );
+            assert_cu_within("TradeCpi clean matcher tail baseline", cu, TRADE_CU_LIMIT);
+            Ok(cu)
+        } else {
+            assert_eq!(
+                env.svm.get_account(&ctx).unwrap(),
+                ctx_before,
+                "required-account tail alias must reject before matcher context writes"
+            );
+            result
+        }
     }
 
-    let baseline_cu = run_trade_with_tail_alias(TailAlias::None);
-    let ctx_alias_cu = run_trade_with_tail_alias(TailAlias::MatcherContextWritable);
-    let delegate_alias_cu = run_trade_with_tail_alias(TailAlias::MatcherDelegateReadonly);
-    println!(
-        "v16 TradeCpi required matcher tail aliases: baseline={baseline_cu}, \
-         ctx_alias={ctx_alias_cu}, delegate_alias={delegate_alias_cu}"
-    );
+    let baseline_cu = run_trade_with_tail_alias(TailAlias::None).expect("clean TradeCpi baseline");
+    println!("v16 TradeCpi clean matcher tail baseline: {baseline_cu}");
+    let ctx_alias_err = run_trade_with_tail_alias(TailAlias::MatcherContextWritable)
+        .expect_err("TradeCpi must reject matcher context aliases in the tail");
     assert!(
-        ctx_alias_cu <= baseline_cu + 120_000,
-        "matcher-ctx tail aliases add too much CU: baseline={baseline_cu}, ctx_alias={ctx_alias_cu}"
+        ctx_alias_err.contains("Custom(9)") || ctx_alias_err.contains("custom program error: 0x9"),
+        "matcher-context tail alias must reject as InvalidInstruction, got {ctx_alias_err}"
     );
+    let delegate_alias_err = run_trade_with_tail_alias(TailAlias::MatcherDelegateReadonly)
+        .expect_err("TradeCpi must reject matcher delegate aliases in the tail");
     assert!(
-        delegate_alias_cu <= baseline_cu + 120_000,
-        "matcher-delegate tail aliases add too much CU: baseline={baseline_cu}, delegate_alias={delegate_alias_cu}"
+        delegate_alias_err.contains("Custom(9)")
+            || delegate_alias_err.contains("custom program error: 0x9"),
+        "matcher-delegate tail alias must reject as InvalidInstruction, got {delegate_alias_err}"
     );
 }
 
 // Same alias class as the single TradeCpi probe, but through the batch matcher helper and
-// return-data parser. BatchTradeCpi uses a different CPI wrapper, so keep a direct litesvm guard
-// that required-account tail aliases cannot turn batched fills into a CU cliff.
+// return-data parser. BatchTradeCpi uses a different CPI wrapper, so keep a direct LiteSVM guard
+// that required-account tail aliases reject before the matcher can emit return data.
 #[test]
-fn v16_attack_batch_tradecpi_required_matcher_tail_aliases_are_cu_bounded() {
+fn v16_attack_batch_tradecpi_required_matcher_tail_aliases_reject_before_cpi() {
     const MAX_TAIL: usize = percolator_prog::constants::MAX_MATCHER_TAIL_ACCOUNTS;
 
-    #[derive(Clone, Copy)]
+    #[derive(Clone, Copy, PartialEq, Eq)]
     enum TailAlias {
         None,
         MatcherContextWritable,
         MatcherDelegateReadonly,
     }
 
-    fn run_batch_with_tail_alias(alias: TailAlias) -> u64 {
+    fn run_batch_with_tail_alias(alias: TailAlias) -> Result<u64, String> {
         let mut env = V16CuEnv::new_with_market_params_and_price_move(2, 1_000, 1_000, 500);
         for asset_index in 0..2 {
             env.configure_auth_mark_for_asset_as_admin(asset_index, 1, 100);
@@ -69874,37 +69905,48 @@ fn v16_attack_batch_tradecpi_required_matcher_tail_aliases_are_cu_bounded() {
             }
         }
 
+        let ctx_before = env.svm.get_account(&ctx).unwrap();
         env.svm.expire_blockhash();
-        let cu = env
-            .send(ProgInstruction::BatchTradeCpi { legs }, accounts, &[&taker])
-            .expect("BatchTradeCpi with required matcher account aliases in tail");
-        let taker_after = env.portfolio_state(taker_account);
-        assert!(
-            has_active_leg_for_asset(&taker_after, 0) && has_active_leg_for_asset(&taker_after, 1),
-            "required-account tail alias BatchTradeCpi must fill both real legs"
-        );
-        assert_cu_within(
-            "BatchTradeCpi required matcher tail alias",
-            cu,
-            MULTI_ASSET_OPEN_TRADE_CU_LIMIT,
-        );
-        cu
+        let result = env.send(ProgInstruction::BatchTradeCpi { legs }, accounts, &[&taker]);
+        if alias == TailAlias::None {
+            let cu = result?;
+            let taker_after = env.portfolio_state(taker_account);
+            assert!(
+                has_active_leg_for_asset(&taker_after, 0)
+                    && has_active_leg_for_asset(&taker_after, 1),
+                "clean BatchTradeCpi must still fill both real legs"
+            );
+            assert_cu_within(
+                "BatchTradeCpi clean matcher tail baseline",
+                cu,
+                MULTI_ASSET_OPEN_TRADE_CU_LIMIT,
+            );
+            Ok(cu)
+        } else {
+            assert_eq!(
+                env.svm.get_account(&ctx).unwrap(),
+                ctx_before,
+                "required-account batch tail alias must reject before matcher context writes"
+            );
+            result
+        }
     }
 
-    let baseline_cu = run_batch_with_tail_alias(TailAlias::None);
-    let ctx_alias_cu = run_batch_with_tail_alias(TailAlias::MatcherContextWritable);
-    let delegate_alias_cu = run_batch_with_tail_alias(TailAlias::MatcherDelegateReadonly);
-    println!(
-        "v16 BatchTradeCpi required matcher tail aliases: baseline={baseline_cu}, \
-         ctx_alias={ctx_alias_cu}, delegate_alias={delegate_alias_cu}"
-    );
+    let baseline_cu =
+        run_batch_with_tail_alias(TailAlias::None).expect("clean BatchTradeCpi baseline");
+    println!("v16 BatchTradeCpi clean matcher tail baseline: {baseline_cu}");
+    let ctx_alias_err = run_batch_with_tail_alias(TailAlias::MatcherContextWritable)
+        .expect_err("BatchTradeCpi must reject matcher context aliases in the tail");
     assert!(
-        ctx_alias_cu <= baseline_cu + 120_000,
-        "batch matcher-ctx tail aliases add too much CU: baseline={baseline_cu}, ctx_alias={ctx_alias_cu}"
+        ctx_alias_err.contains("Custom(9)") || ctx_alias_err.contains("custom program error: 0x9"),
+        "batch matcher-context tail alias must reject as InvalidInstruction, got {ctx_alias_err}"
     );
+    let delegate_alias_err = run_batch_with_tail_alias(TailAlias::MatcherDelegateReadonly)
+        .expect_err("BatchTradeCpi must reject matcher delegate aliases in the tail");
     assert!(
-        delegate_alias_cu <= baseline_cu + 120_000,
-        "batch matcher-delegate tail aliases add too much CU: baseline={baseline_cu}, delegate_alias={delegate_alias_cu}"
+        delegate_alias_err.contains("Custom(9)")
+            || delegate_alias_err.contains("custom program error: 0x9"),
+        "batch matcher-delegate tail alias must reject as InvalidInstruction, got {delegate_alias_err}"
     );
 }
 
@@ -73866,8 +73908,10 @@ fn v16_bpf_10m_market_batch_14_high_tail_assets_stays_bounded() {
 
     // The no-CPI path is the bounded max-shape public path here. A matching 14-leg CPI probe
     // currently exceeds the 1.4M CU meter on bbe745a; keep the adjacent 13-leg high-tail CPI
-    // frontier covered with the maximum matcher tail without pretending the full CPI shape is bounded.
+    // frontier covered with the largest matcher tail admitted by the batch fanout budget.
     const CPI_TAIL_LEGS: usize = 13;
+    const CPI_MATCHER_TAIL: usize =
+        (percolator_prog::constants::MAX_MATCHER_TAIL_ACCOUNTS * 2) / CPI_TAIL_LEGS;
     let matcher_program = Pubkey::new_unique();
     let matcher_bytes = std::fs::read(matcher_program_path()).expect("read matcher BPF");
     env.svm.add_program(matcher_program, &matcher_bytes);
@@ -73887,7 +73931,7 @@ fn v16_bpf_10m_market_batch_14_high_tail_assets_stays_bounded() {
             limit_price: 0,
         })
         .collect();
-    let max_matcher_tail: Vec<Pubkey> = (0..percolator_prog::constants::MAX_MATCHER_TAIL_ACCOUNTS)
+    let budgeted_matcher_tail: Vec<Pubkey> = (0..CPI_MATCHER_TAIL)
         .map(|_| {
             let key = Pubkey::new_unique();
             env.svm
@@ -73915,7 +73959,7 @@ fn v16_bpf_10m_market_batch_14_high_tail_assets_stays_bounded() {
         AccountMeta::new_readonly(delegate, false),
     ];
     cpi_metas.extend(
-        max_matcher_tail
+        budgeted_matcher_tail
             .iter()
             .copied()
             .map(|key| AccountMeta::new_readonly(key, false)),
@@ -73928,16 +73972,16 @@ fn v16_bpf_10m_market_batch_14_high_tail_assets_stays_bounded() {
             cpi_metas,
             &[&cpi_taker],
         )
-        .expect("10MiB 13-leg high-tail BatchTradeCpi with max matcher tail must execute");
+        .expect("10MiB 13-leg high-tail BatchTradeCpi with budgeted matcher tail must execute");
     println!(
-        "v16 10MiB BatchTradeCpi 13 high-tail legs plus max matcher tail: \
+        "v16 10MiB BatchTradeCpi 13 high-tail legs plus budgeted matcher tail: \
          assets={N}, account_len={new_len}, first_asset={}, tail_accounts={}, CU={batch_cpi_cu}",
         N - CPI_TAIL_LEGS,
-        max_matcher_tail.len()
+        budgeted_matcher_tail.len()
     );
     assert!(
         batch_cpi_cu < 1_400_000,
-        "10MiB 13-leg high-tail BatchTradeCpi with max matcher tail CU {batch_cpi_cu} must fit the tx limit"
+        "10MiB 13-leg high-tail BatchTradeCpi with budgeted matcher tail CU {batch_cpi_cu} must fit the tx limit"
     );
     let cpi_taker_state = env.portfolio_state(cpi_taker_account);
     assert_eq!(
