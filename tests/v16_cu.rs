@@ -48684,12 +48684,8 @@ fn v16_attack_10m_batch_tradecpi_max_tail_rejects_before_cu_exhaustion() {
         metas
     }
 
-    let mut env = V16CuEnv::new_with_market_params_and_price_move(
-        TAIL_LEGS as u16,
-        1_000,
-        1_000,
-        500,
-    );
+    let mut env =
+        V16CuEnv::new_with_market_params_and_price_move(TAIL_LEGS as u16, 1_000, 1_000, 500);
     for asset_index in 0..TAIL_LEGS as u16 {
         env.configure_auth_mark_for_asset_as_admin(asset_index, 1, PRICE);
     }
@@ -48772,8 +48768,7 @@ fn v16_attack_10m_batch_tradecpi_max_tail_rejects_before_cu_exhaustion() {
     let lp_account = env.create_portfolio(&lp);
     env.deposit(&taker, taker_account, 100_000_000);
     env.deposit(&lp, lp_account, 100_000_000);
-    let (ctx, delegate, _) =
-        env.init_matcher_context_authorized(matcher_program, &lp, lp_account);
+    let (ctx, delegate, _) = env.init_matcher_context_authorized(matcher_program, &lp, lp_account);
     let legs: Vec<BatchTradeCpiLeg> = (FIRST_TAIL_ASSET..N)
         .map(|asset_index| BatchTradeCpiLeg {
             asset_index: asset_index as u16,
@@ -48791,9 +48786,7 @@ fn v16_attack_10m_batch_tradecpi_max_tail_rejects_before_cu_exhaustion() {
     env.svm.expire_blockhash();
     let rejected = env
         .send(
-            ProgInstruction::BatchTradeCpi {
-                legs: legs.clone(),
-            },
+            ProgInstruction::BatchTradeCpi { legs: legs.clone() },
             matcher_accounts(
                 taker.pubkey(),
                 env.market,
@@ -48847,7 +48840,7 @@ fn v16_attack_10m_batch_tradecpi_max_tail_rejects_before_cu_exhaustion() {
     );
     let taker_after = env.portfolio_state(taker_account);
     assert_eq!(
-        percolator::active_bitmap_count_ones(taker_after.active_bitmap),
+        percolator::active_bitmap_count_ones(active_bitmap(&taker_after)),
         TAIL_LEGS as u32,
         "budgeted-tail batch opens the full active-leg cap"
     );
