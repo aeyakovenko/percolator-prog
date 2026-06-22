@@ -10528,29 +10528,36 @@ pub mod processor {
             let mut portfolio =
                 state::portfolio_view_mut_for_market_slots(&mut portfolio_data, max_market_slots)?;
             expect_portfolio_view_account_key(&portfolio, portfolio_ai.key)?;
-            let result = group
-                .permissionless_auto_crank_not_atomic(
-                    &mut portfolio,
-                    AutoCrankWorkV16 {
-                        now_slot: authenticated_now_slot,
-                        observations: observations.as_slice(),
-                        liquidation_max_close_q: close_q,
-                        resolved_close_fee_rate_per_slot: 0,
-                    },
-                )
-                .map_err(map_v16_error)?;
-
-            let selected_fee_asset = match result.selected {
-                AutoCrankPlanV16::RefreshAccount {
-                    asset_index: Some(i),
-                }
-                | AutoCrankPlanV16::SettleBChunk { asset_index: i }
-                | AutoCrankPlanV16::Liquidate { asset_index: i } => i,
-                _ => 0,
+            let result = match group.permissionless_auto_crank_not_atomic(
+                &mut portfolio,
+                AutoCrankWorkV16 {
+                    now_slot: authenticated_now_slot,
+                    observations: observations.as_slice(),
+                    liquidation_max_close_q: close_q,
+                    resolved_close_fee_rate_per_slot: 0,
+                },
+            ) {
+                Ok(result) => Some(result),
+                Err(V16Error::NonProgress) if !observations.is_empty() => None,
+                Err(err) => return Err(map_v16_error(err)),
             };
-            let selected_liquidation =
-                matches!(result.selected, AutoCrankPlanV16::Liquidate { .. });
-            if matches!(result.outcome, AutoCrankOutcomeV16::ResolvedClose(_)) {
+
+            let selected_fee_asset = match result.as_ref().map(|r| &r.selected) {
+                Some(AutoCrankPlanV16::RefreshAccount {
+                    asset_index: Some(i),
+                })
+                | Some(AutoCrankPlanV16::SettleBChunk { asset_index: i })
+                | Some(AutoCrankPlanV16::Liquidate { asset_index: i }) => *i,
+                _ => observations.first().map(|o| o.asset_index).unwrap_or(0),
+            };
+            let selected_liquidation = matches!(
+                result.as_ref().map(|r| &r.selected),
+                Some(AutoCrankPlanV16::Liquidate { .. })
+            );
+            if matches!(
+                result.as_ref().map(|r| &r.outcome),
+                Some(AutoCrankOutcomeV16::ResolvedClose(_))
+            ) {
                 return Err(PercolatorError::EngineLockActive.into());
             }
             let retained_fee = group

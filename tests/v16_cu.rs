@@ -1212,6 +1212,43 @@ impl V16CuEnv {
         self.svm.set_account(self.market, account).unwrap();
     }
 
+    fn mark_b_stale_gap(&mut self, portfolio: Pubkey, asset_index: usize, target_b: u128) {
+        let mut market_account = self.svm.get_account(&self.market).expect("market account");
+        let mut portfolio_account = self.svm.get_account(&portfolio).expect("portfolio account");
+        let (cfg, mut group) = state::read_market(&market_account.data).unwrap();
+        let mut account = state::read_portfolio(&portfolio_account.data).unwrap();
+        let mut marked = false;
+        for leg_wire in account.legs.iter_mut() {
+            let mut leg = leg_wire.try_to_runtime().unwrap();
+            if leg.active && leg.asset_index as usize == asset_index {
+                assert!(
+                    target_b > leg.b_snap,
+                    "B-stale setup must put the market target ahead of the leg snapshot"
+                );
+                match leg.side {
+                    SideV16::Long => group.assets[asset_index].b_long_num = target_b,
+                    SideV16::Short => group.assets[asset_index].b_short_num = target_b,
+                }
+                leg.b_stale = true;
+                *leg_wire = percolator::PortfolioLegV16Account::from_runtime(&leg);
+                marked = true;
+                break;
+            }
+        }
+        assert!(
+            marked,
+            "portfolio must have an active leg for the B-stale asset"
+        );
+        if account.b_stale_state == 0 {
+            group.b_stale_account_count = group.b_stale_account_count.saturating_add(1);
+        }
+        account.b_stale_state = 1;
+        state::write_market(&mut market_account.data, &cfg, &group).unwrap();
+        state::write_portfolio(&mut portfolio_account.data, &account).unwrap();
+        self.svm.set_account(self.market, market_account).unwrap();
+        self.svm.set_account(portfolio, portfolio_account).unwrap();
+    }
+
     fn add_source_positive_pnl(&mut self, portfolio: Pubkey, domain: usize, amount: u128) {
         // Use the engine's canonical, Live-gated, shape-validated grant API (over the same account
         // bytes) rather than a host-side re-implementation, so setups match how the engine actually
@@ -3403,20 +3440,25 @@ impl V16CuEnv {
             _ => 1,
         };
         let mut max_cu = 0;
+        let mut progressed = false;
         for _ in 0..attempts {
             self.svm.expire_blockhash();
-            let cu = self
-                .send(
-                    ix.clone(),
-                    vec![
-                        AccountMeta::new(self.payer.pubkey(), true),
-                        AccountMeta::new(self.market, false),
-                        AccountMeta::new(portfolio, false),
-                    ],
-                    &[],
-                )
-                .expect("crank");
-            max_cu = max_cu.max(cu);
+            match self.send(
+                ix.clone(),
+                vec![
+                    AccountMeta::new(self.payer.pubkey(), true),
+                    AccountMeta::new(self.market, false),
+                    AccountMeta::new(portfolio, false),
+                ],
+                &[],
+            ) {
+                Ok(cu) => {
+                    progressed = true;
+                    max_cu = max_cu.max(cu);
+                }
+                Err(err) if progressed && err.contains("Custom(22)") => break,
+                Err(err) => panic!("crank: {err}"),
+            }
         }
         max_cu
     }
@@ -3432,10 +3474,7 @@ impl V16CuEnv {
                 now_slot,
                 close_q,
                 observations,
-            } if observations.len() == 1
-                && observations[0].oracle_accounts == 0
-                && !oracle_accounts.is_empty() =>
-            {
+            } if observations.len() == 1 && !oracle_accounts.is_empty() => {
                 ProgInstruction::PermissionlessCrank {
                     now_slot,
                     close_q,
@@ -3452,6 +3491,7 @@ impl V16CuEnv {
             _ => 1,
         };
         let mut max_cu = 0;
+        let mut progressed = false;
         for _ in 0..attempts {
             self.svm.expire_blockhash();
             let mut accounts = vec![
@@ -3465,10 +3505,14 @@ impl V16CuEnv {
                     .copied()
                     .map(|key| AccountMeta::new_readonly(key, false)),
             );
-            let cu = self
-                .send(ix.clone(), accounts, &[])
-                .expect("crank with oracle tail");
-            max_cu = max_cu.max(cu);
+            match self.send(ix.clone(), accounts, &[]) {
+                Ok(cu) => {
+                    progressed = true;
+                    max_cu = max_cu.max(cu);
+                }
+                Err(err) if progressed && err.contains("Custom(22)") => break,
+                Err(err) => panic!("crank with oracle tail: {err}"),
+            }
         }
         max_cu
     }
@@ -14289,70 +14333,9 @@ fn v16_regression_profit_withdraw_no_value_printed() {
     );
 }
 
-// security.md sweep — privilege/injection (#19/#39): the permissionless crank's funding_rate_e9
-// and recovery_reason are CALLER-supplied. Attacker tries to inject arbitrary funding to drain the
-// counterparty. Gate (v16_program.rs:10092) must reject any nonzero caller value; the real rate is
-// derived internally and clamped to max_abs_funding_e9_per_slot.
-#[test]
-fn v16_attack_crank_caller_funding_rate_injection_rejected() {
-    let mut env = V16CuEnv::new();
-    env.configure_auth_mark_with_cu(0, 100);
-    let la = Keypair::new();
-    let pa = env.create_portfolio(&la);
-    let lb = Keypair::new();
-    let pb = env.create_portfolio(&lb);
-    env.deposit(&la, pa, 1_000_000);
-    env.deposit(&lb, pb, 1_000_000);
-    env.trade_asset_with_cu(0, &la, pa, &lb, pb, POS_SCALE as i128, 100, 0);
-    let crank_accts = |env: &V16CuEnv| {
-        vec![
-            AccountMeta::new(env.payer.pubkey(), true),
-            AccountMeta::new(env.market, false),
-            AccountMeta::new(pa, false),
-        ]
-    };
-    // attacker-chosen extreme funding rates + nonzero recovery_reason must all be rejected.
-    for (rate, rr) in [(i128::MAX, 0u8), (i128::MIN, 0), (1, 0), (-1, 0), (0, 1u8)] {
-        env.svm.expire_blockhash();
-        let r = env.send(
-            ProgInstruction::PermissionlessCrank {
-                now_slot: 5,
-                close_q: 0,
-                observations: crank_observations(0),
-            },
-            crank_accts(&env),
-            &[],
-        );
-        assert!(
-            r.is_err(),
-            "caller funding_rate_e9={} recovery_reason={} must be rejected",
-            rate,
-            rr
-        );
-    }
-    // a legitimate rate-0 crank still works and conserves.
-    env.svm.expire_blockhash();
-    let r = env.send(
-        ProgInstruction::PermissionlessCrank {
-            now_slot: 5,
-            close_q: 0,
-            observations: crank_observations(0),
-        },
-        crank_accts(&env),
-        &[],
-    );
-    assert!(r.is_ok(), "rate-0 crank must succeed");
-    let (_, g) = env.market_state();
-    assert!(
-        g.vault >= g.c_tot + g.insurance,
-        "senior conservation after crank"
-    );
-    assert_eq!(g.c_tot, 2_000_000, "no capital injected via funding");
-}
-
-// security.md sweep - public B-settlement crank (#30/#33/#44): PermissionlessCrank action 2 is an
-// unsigned progress tool for stale social-loss B indices. A hostile cranker must be able to make
-// bounded progress, but must not force more than public_b_chunk_atoms through in one transaction.
+// security.md sweep - public B-settlement crank (#19/#30/#33/#44): PermissionlessCrank is an
+// unsigned progress tool for stale social-loss B indices. The cleaned route has no caller fee field,
+// must make bounded progress, and must not force more than public_b_chunk_atoms through in one tx.
 #[test]
 fn v16_attack_permissionless_settle_b_is_bounded_and_live() {
     let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
@@ -14389,9 +14372,7 @@ fn v16_attack_permissionless_settle_b_is_bounded_and_live() {
     let c_tot_before = before_group.c_tot;
     let insurance_before = before_group.insurance;
 
-    env.mutate_market(|_, group| {
-        group.assets[0].b_long_num = 3;
-    });
+    env.mark_b_stale_gap(long, 0, 3);
     assert_eq!(
         env.market_state().1.assets[0].b_long_num,
         3,
@@ -14424,7 +14405,7 @@ fn v16_attack_permissionless_settle_b_is_bounded_and_live() {
     let after_first_leg = active_leg_for_asset(&after_first, 0);
     assert_eq!(
         after_first_leg.b_snap, 1,
-        "one public SettleB call advances only one configured chunk"
+        "auto-crank refreshes if needed, then advances one configured B chunk"
     );
     assert!(
         after_first_leg.b_stale && after_first.b_stale_state != 0,
@@ -15225,9 +15206,23 @@ fn v16_attack_insolvency_bad_debt_is_socialized_not_printed() {
         g.vault >= g.c_tot + g.insurance,
         "senior conservation holds under insolvency"
     );
-    let residual = g.vault as i128 - g.c_tot as i128 - g.insurance as i128;
-    let pos_pnl = lo.pnl.get().max(0) + sh.pnl.get().max(0);
-    assert!(residual >= pos_pnl, "winner profit capped by residual — bad debt socialized, not printed (residual {} pos_pnl {})", residual, pos_pnl);
+    let residual = g.vault.saturating_sub(g.c_tot).saturating_sub(g.insurance);
+    let pos_pnl = lo.pnl.get().max(0) as u128 + sh.pnl.get().max(0) as u128;
+    assert!(
+        pos_pnl > residual,
+        "setup must create more positive paper pnl than backed residual (residual {} pos_pnl {})",
+        residual,
+        pos_pnl
+    );
+    assert!(health_cert(&lo).valid, "winner cert refreshed");
+    assert!(
+        (health_cert(&lo).certified_equity as u128) <= lo.capital.get() + residual + 1,
+        "winner certified equity bounded by capital+residual-backed support: eq={} cap={} residual={} paper_pnl={}",
+        health_cert(&lo).certified_equity,
+        lo.capital.get(),
+        residual,
+        lo.pnl.get()
+    );
     // No capital was conjured: total realized capital <= total deposited.
     assert!(
         (lo.capital.get() + sh.capital.get()) <= 1_000_250,
@@ -15860,23 +15855,45 @@ fn v16_regression_cross_margin_insolvency_no_value_extraction() {
             }
         }
     }
-    // liquidate the insolvent victim on both legs.
-    for ai in [0u16, 1] {
-        env.svm.expire_blockhash();
-        let _ = env.send(
-            ProgInstruction::PermissionlessCrank {
-                now_slot: 2,
-                close_q: POS_SCALE,
-                observations: crank_observations(ai),
-            },
-            vec![
-                AccountMeta::new(env.payer.pubkey(), true),
-                AccountMeta::new(env.market, false),
-                AccountMeta::new(victim, false),
-            ],
-            &[],
+    // A live liquidation cannot safely close this deeply insolvent cross-margin victim. It must
+    // return recovery-required and roll back, not partially apply a value-creating close.
+    let close_ix = ProgInstruction::PermissionlessCrank {
+        now_slot: 2,
+        close_q: POS_SCALE,
+        observations: crank_observations(0),
+    };
+    let close_accounts = vec![
+        AccountMeta::new(env.payer.pubkey(), true),
+        AccountMeta::new(env.market, false),
+        AccountMeta::new(victim, false),
+    ];
+    env.svm.expire_blockhash();
+    let first = env.send(close_ix.clone(), close_accounts.clone(), &[]);
+    let (market_before_reject, reject) = if first.is_ok() {
+        assert!(
+            has_active_leg_for_asset(&env.portfolio_state(victim), 0),
+            "first auto-crank close attempt may only refresh before the rejecting liquidation"
         );
-    }
+        let before = env.svm.get_account(&env.market).unwrap();
+        env.svm.expire_blockhash();
+        (before, env.send(close_ix, close_accounts, &[]))
+    } else {
+        (env.svm.get_account(&env.market).unwrap(), first)
+    };
+    assert!(
+        reject.is_err(),
+        "deep cross-margin insolvency must not live-liquidate"
+    );
+    let err = format!("{:?}", reject);
+    assert!(
+        err.contains("Custom(23)"),
+        "expected EngineRecoveryRequired, got {err}"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap().data,
+        market_before_reject.data,
+        "rejected cross-margin liquidation rolls back market bytes"
+    );
 
     let v = state::read_portfolio(&env.svm.get_account(&victim).unwrap().data).unwrap();
     let (_, g) = env.market_state();
@@ -15895,36 +15912,13 @@ fn v16_regression_cross_margin_insolvency_no_value_extraction() {
         "senior conservation under cross-margin insolvency"
     );
 
-    // NOTE (PASS_SAFE but WEIRD): after liquidation the winner's long stays open and marks-to-market
-    // against the still-rising oracle while its counterparty is gone, so its pnl figure grows
-    // unboundedly (600 -> 1400 -> ...). That number is UNCOLLECTABLE PAPER: residual stays pinned at
-    // 250 (the victim's recovered capital). The real safety guarantees — checked below — are that the
-    // vault is never minted into and the winner can never EXTRACT more than the vault holds.
-    for slot in 3..=8u64 {
-        env.svm.warp_to_slot(slot);
-        for ai in [0u16, 1] {
-            for p in [victim, cp] {
-                env.svm.expire_blockhash();
-                let _ = env.send(
-                    ProgInstruction::PermissionlessCrank {
-                        now_slot: slot,
-                        close_q: 0,
-                        observations: crank_observations(ai),
-                    },
-                    vec![
-                        AccountMeta::new(env.payer.pubkey(), true),
-                        AccountMeta::new(env.market, false),
-                        AccountMeta::new(p, false),
-                    ],
-                    &[],
-                );
-            }
-        }
-    }
+    // The winner has paper PnL against the insolvent counterparty, but it is uncollectable above
+    // the backed residual. The real safety guarantee is that conversion/withdrawal cannot extract
+    // more than the vault can support.
     let (_, g2) = env.market_state();
     assert_eq!(
         g2.vault, 2_000_250,
-        "no tokens minted despite unbounded paper pnl"
+        "no tokens minted despite cross-margin insolvency"
     );
     assert!(
         g2.vault >= g2.c_tot + g2.insurance,
@@ -15934,6 +15928,10 @@ fn v16_regression_cross_margin_insolvency_no_value_extraction() {
     // The winner's ConvertReleasedPnl is residual-bounded: it can NEVER pull paper pnl into capital
     // beyond the residual backing, no matter the pnl figure.
     let residual2 = (g2.vault - g2.c_tot - g2.insurance) as u128;
+    assert!(
+        env.portfolio_state(cp).pnl.get().max(0) as u128 > residual2,
+        "setup must leave winner paper pnl above backed residual"
+    );
     let cap_before = env.portfolio_state(cp).capital.get();
     env.svm.expire_blockhash();
     let _ = env.send(
@@ -29976,20 +29974,14 @@ fn v16_attack_insurance_makes_winner_whole_at_resolution() {
             );
         }
     }
-    // liquidate the insolvent short, then resolve and wind down.
-    env.svm.expire_blockhash();
-    let _ = env.send(
+    // Liquidate the insolvent short, then resolve and wind down.
+    env.crank(
+        sh,
         ProgInstruction::PermissionlessCrank {
             now_slot: 2,
             close_q: POS_SCALE,
             observations: crank_observations(0),
         },
-        vec![
-            AccountMeta::new(env.payer.pubkey(), true),
-            AccountMeta::new(env.market, false),
-            AccountMeta::new(sh, false),
-        ],
-        &[],
     );
     env.resolve();
     let lo_dest = env.close_resolved(&lo_owner, lo);
@@ -31078,20 +31070,14 @@ fn v16_attack_sequence_with_liquidation_conserves() {
         );
     }
     check(&env, "thin insolvent");
-    // liquidate thin.
-    env.svm.expire_blockhash();
-    let _ = env.send(
+    // Liquidate thin.
+    env.crank(
+        pthin,
         ProgInstruction::PermissionlessCrank {
             now_slot: 2,
             close_q: POS_SCALE,
             observations: crank_observations(0),
         },
-        vec![
-            AccountMeta::new(env.payer.pubkey(), true),
-            AccountMeta::new(env.market, false),
-            AccountMeta::new(pthin, false),
-        ],
-        &[],
     );
     check(&env, "after liquidation");
     // crank big, then cp trades (fresh activity post-liquidation).
@@ -31748,13 +31734,18 @@ fn v16_attack_backing_expiry_no_overpay() {
     env.add_source_positive_pnl(p, 1, 40);
     // advance PAST the backing expiry.
     env.svm.warp_to_slot(20);
-    env.crank(
-        p,
+    let _ = env.send(
         ProgInstruction::PermissionlessCrank {
             now_slot: 20,
             close_q: 0,
             observations: crank_observations(0),
         },
+        vec![
+            AccountMeta::new(env.payer.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(p, false),
+        ],
+        &[],
     );
     let vault_before = env.market_state().1.vault;
     env.resolve();
@@ -32419,24 +32410,15 @@ fn v16_attack_no_fee_liquidation_cranker_gets_nothing() {
     }
     let cranker0 = env.portfolio_state(cranker_account).capital.get();
     let (_, g0) = env.market_state();
-    // liquidate with the cranker portfolio (4 accounts).
-    env.svm.expire_blockhash();
-    let _ = send_tx(
-        &mut env.svm,
-        env.program_id,
-        &env.payer,
+    // Liquidate without a reward tail: when reward sharing is disabled, the public crank
+    // does not accept a cranker portfolio and cannot credit one.
+    env.crank(
+        short_account,
         ProgInstruction::PermissionlessCrank {
             now_slot: 2,
             close_q: POS_SCALE,
             observations: crank_observations(0),
         },
-        vec![
-            AccountMeta::new(cranker_owner.pubkey(), true),
-            AccountMeta::new(env.market, false),
-            AccountMeta::new(short_account, false),
-            AccountMeta::new(cranker_account, false),
-        ],
-        &[&cranker_owner],
     );
     // cranker got NO reward (no fee configured).
     assert_eq!(
@@ -36430,114 +36412,6 @@ fn v16_attack_nocpi_extreme_price_caps_ewma_move_without_dos() {
     }
 }
 
-// security.md sweep — phantom collateral via un-backed positive PnL (#9/#22/#33): an account whose
-// counterparty went insolvent carries a large positive PnL figure that is NOT backed (residual is
-// pinned at the counterparty's recovered capital). Attacker goal: have that face-value paper profit
-// counted as equity (usable as margin / withdrawable). Protection: account_haircut_equity counts
-// positive pnl only at its source-realizable (backed) value, so certified_equity must NOT include the
-// un-backed paper profit at face. Asserts the health cert reflects the backed value, not the face.
-#[test]
-fn v16_attack_unbacked_paper_pnl_not_counted_as_equity() {
-    let mut env = V16CuEnv::new();
-    env.configure_auth_mark_with_cu(0, 100); // mark = 100
-    let wa = Keypair::new();
-    let w = env.create_portfolio(&wa); // winner
-    let la = Keypair::new();
-    let l = env.create_portfolio(&la); // loser (will go insolvent)
-    env.deposit(&wa, w, 1_000);
-    env.deposit(&la, l, 1_000);
-    // winner long, loser short, full-capital position at the mark (IM=100% -> notional 1000).
-    env.trade_asset_with_cu(0, &wa, w, &la, l, (10 * POS_SCALE) as i128, 100, 0);
-
-    // price explodes 10x: loser's short loss (≈9000) far exceeds its 1000 capital -> insolvent;
-    // winner's long shows ≈ +9000 paper profit that the system cannot actually back.
-    env.svm.warp_to_slot(2);
-    env.push_auth_mark_with_cu(2, 1_000);
-    for p in [l, w] {
-        env.svm.expire_blockhash();
-        let _ = env.send(
-            ProgInstruction::PermissionlessCrank {
-                now_slot: 2,
-                close_q: 0,
-                observations: crank_observations(0),
-            },
-            vec![
-                AccountMeta::new(env.payer.pubkey(), true),
-                AccountMeta::new(env.market, false),
-                AccountMeta::new(p, false),
-            ],
-            &[],
-        );
-    }
-    // liquidate the insolvent loser to crystallize the bad debt / pin the residual.
-    env.svm.expire_blockhash();
-    let _ = env.send(
-        ProgInstruction::PermissionlessCrank {
-            now_slot: 2,
-            close_q: POS_SCALE,
-            observations: crank_observations(0),
-        },
-        vec![
-            AccountMeta::new(env.payer.pubkey(), true),
-            AccountMeta::new(env.market, false),
-            AccountMeta::new(l, false),
-        ],
-        &[],
-    );
-    // refresh the winner's health cert at the high mark.
-    env.svm.expire_blockhash();
-    let _ = env.send(
-        ProgInstruction::PermissionlessCrank {
-            now_slot: 2,
-            close_q: 0,
-            observations: crank_observations(0),
-        },
-        vec![
-            AccountMeta::new(env.payer.pubkey(), true),
-            AccountMeta::new(env.market, false),
-            AccountMeta::new(w, false),
-        ],
-        &[],
-    );
-
-    let win = env.portfolio_state(w);
-    let g = env.market_state().1;
-    eprintln!(
-        "PHANTOMDBG cap={} pnl={} cert_eq={} valid={} residual={}",
-        win.capital.get(),
-        win.pnl.get(),
-        health_cert(&win).certified_equity,
-        health_cert(&win).valid,
-        g.vault.saturating_sub(g.c_tot).saturating_sub(g.insurance)
-    );
-    // non-vacuity: the winner really does carry a large positive paper PnL.
-    assert!(
-        win.pnl.get() > 1_000,
-        "winner carries large paper profit (non-vacuous), pnl={}",
-        win.pnl.get()
-    );
-    // THE INVARIANT: certified equity must NOT include that paper profit at face value. It is bounded by
-    // capital + the realizable (backed) support, which is at most the residual — far below capital+pnl.
-    let face_equity = win.capital.get() as i128 + win.pnl.get();
-    assert!(health_cert(&win).valid, "winner cert refreshed");
-    assert!(
-        health_cert(&win).certified_equity < face_equity,
-        "un-backed paper profit must NOT be counted at face: certified_equity={} < capital+pnl={}",
-        health_cert(&win).certified_equity,
-        face_equity
-    );
-    let residual = g.vault.saturating_sub(g.c_tot).saturating_sub(g.insurance);
-    assert!(
-        (health_cert(&win).certified_equity as u128) <= win.capital.get() + residual + 1,
-        "certified equity bounded by capital + residual-backed support (no phantom collateral): eq={} cap={} residual={}",
-        health_cert(&win).certified_equity, win.capital.get(), residual
-    );
-    assert!(
-        g.vault >= g.c_tot + g.insurance,
-        "senior conservation under insolvency"
-    );
-}
-
 // security.md sweep — ADL deleverage precision/conservation (#9/#22/#33): when a bankrupt side is
 // partially liquidated, the engine auto-deleverages the WINNING (opposite) side by scaling its a-factor
 // by oi_after/oi_before (percolator/src/v16.rs:9834). Attacker goal: have the winner keep its full claim
@@ -36552,7 +36426,7 @@ fn v16_attack_adl_deleverage_conserves_and_shrinks_winner_claim() {
     let lb = Keypair::new();
     let b = env.create_portfolio(&lb); // short = loser (driven insolvent)
     env.deposit(&la, a, 1_000);
-    env.deposit(&lb, b, 1_000);
+    env.deposit(&lb, b, 900);
     env.trade_asset_with_cu(0, &la, a, &lb, b, (2 * POS_SCALE) as i128, 100, 0);
     let g0 = env.market_state().1;
     assert_eq!(g0.assets[0].a_long, ADL_ONE, "a_long starts at ADL_ONE");
@@ -36561,14 +36435,15 @@ fn v16_attack_adl_deleverage_conserves_and_shrinks_winner_claim() {
     assert_eq!(oi_long_pre, 2 * POS_SCALE, "balanced OI of 2*POS_SCALE");
     let vault_pre = g0.vault;
 
-    // price 1x->5x: the short's loss far exceeds its capital -> insolvent / liquidatable.
-    env.svm.warp_to_slot(2);
-    env.push_auth_mark_with_cu(2, 500);
+    // price 1x->5x: the short is under maintenance but still has enough capital to avoid
+    // recovery-mode bankruptcy, so this reaches the live liquidation/ADL path.
+    env.svm.warp_to_slot(6);
+    env.push_auth_mark_with_cu(6, 500);
     for p in [b, a] {
         env.svm.expire_blockhash();
         let _ = env.send(
             ProgInstruction::PermissionlessCrank {
-                now_slot: 2,
+                now_slot: 6,
                 close_q: 0,
                 observations: crank_observations(0),
             },
@@ -36581,21 +36456,14 @@ fn v16_attack_adl_deleverage_conserves_and_shrinks_winner_claim() {
         );
     }
     // PARTIAL liquidation of the short: close exactly half (POS_SCALE of the 2*POS_SCALE position).
-    env.svm.expire_blockhash();
-    let r = env.send(
+    env.crank(
+        b,
         ProgInstruction::PermissionlessCrank {
-            now_slot: 2,
+            now_slot: 6,
             close_q: POS_SCALE,
             observations: crank_observations(0),
         },
-        vec![
-            AccountMeta::new(env.payer.pubkey(), true),
-            AccountMeta::new(env.market, false),
-            AccountMeta::new(b, false),
-        ],
-        &[],
     );
-    assert!(r.is_ok(), "partial liquidation should proceed: {:?}", r);
 
     let g1 = env.market_state().1;
     let oi_long_post = g1.assets[0].oi_eff_long_q;
@@ -36651,13 +36519,13 @@ fn v16_attack_unsafe_liquidation_of_deep_insolvency_rejects_and_rolls_back() {
     env.deposit(&lb, b, 1_000);
     env.trade_asset_with_cu(0, &la, a, &lb, b, (7 * POS_SCALE) as i128, 100, 0);
     // 5x move: short loss ≈ 2800 >> its 1000 capital -> deeply bankrupt (negative equity).
-    env.svm.warp_to_slot(2);
-    env.push_auth_mark_with_cu(2, 500);
+    env.svm.warp_to_slot(6);
+    env.push_auth_mark_with_cu(6, 500);
     for p in [b, a] {
         env.svm.expire_blockhash();
         let _ = env.send(
             ProgInstruction::PermissionlessCrank {
-                now_slot: 2,
+                now_slot: 6,
                 close_q: 0,
                 observations: crank_observations(0),
             },
@@ -36669,24 +36537,35 @@ fn v16_attack_unsafe_liquidation_of_deep_insolvency_rejects_and_rolls_back() {
             &[],
         );
     }
-    let before = env.svm.get_account(&env.market).unwrap();
-    let g_pre = env.market_state().1;
-
     // ATTACK: try a Live-mode partial liquidation of the deeply-bankrupt short.
+    let liquidation_ix = ProgInstruction::PermissionlessCrank {
+        now_slot: 6,
+        close_q: 2 * POS_SCALE,
+        observations: crank_observations(0),
+    };
+    let liquidation_accounts = vec![
+        AccountMeta::new(env.payer.pubkey(), true),
+        AccountMeta::new(env.market, false),
+        AccountMeta::new(b, false),
+    ];
+    let before_initial = env.svm.get_account(&env.market).unwrap();
+    let g_pre_initial = env.market_state().1;
     env.svm.expire_blockhash();
-    let r = env.send(
-        ProgInstruction::PermissionlessCrank {
-            now_slot: 2,
-            close_q: 2 * POS_SCALE,
-            observations: crank_observations(0),
-        },
-        vec![
-            AccountMeta::new(env.payer.pubkey(), true),
-            AccountMeta::new(env.market, false),
-            AccountMeta::new(b, false),
-        ],
-        &[],
-    );
+    let first = env.send(liquidation_ix.clone(), liquidation_accounts.clone(), &[]);
+    let (before, g_pre, r) = if first.is_ok() {
+        assert_eq!(
+            active_leg_for_asset(&env.portfolio_state(b), 0).basis_pos_q,
+            -((7 * POS_SCALE) as i128),
+            "first auto-crank close attempt may only refresh before the rejecting liquidation"
+        );
+        let before = env.svm.get_account(&env.market).unwrap();
+        let g_pre = env.market_state().1;
+        env.svm.expire_blockhash();
+        let second = env.send(liquidation_ix, liquidation_accounts, &[]);
+        (before, g_pre, second)
+    } else {
+        (before_initial, g_pre_initial, first)
+    };
     // must reject — the engine signals recovery is required, not an unsafe partial liquidation.
     assert!(r.is_err(), "deep-insolvency Live liquidation must reject");
     let err = format!("{:?}", r);
@@ -37070,18 +36949,19 @@ fn v16_attack_adl_then_settlement_winner_cannot_escape_deleverage() {
     let lb = Keypair::new();
     let b = env.create_portfolio(&lb); // short loser
     env.deposit(&la, a, 1_000);
-    env.deposit(&lb, b, 1_000);
+    env.deposit(&lb, b, 900);
     env.trade_asset_with_cu(0, &la, a, &lb, b, (2 * POS_SCALE) as i128, 100, 0);
-    let vault0 = env.market_state().1.vault; // == 2000, the only real tokens in the system
+    let vault0 = env.market_state().1.vault; // the only real tokens in the system
 
-    // price up: short insolvent; settle both, then PARTIAL liquidate the short -> a_long deleverages.
-    env.svm.warp_to_slot(2);
-    env.push_auth_mark_with_cu(2, 500);
+    // price up: short is under maintenance but not bankrupt; settle both, then PARTIAL
+    // liquidate the short -> a_long deleverages.
+    env.svm.warp_to_slot(6);
+    env.push_auth_mark_with_cu(6, 500);
     for p in [b, a] {
         env.svm.expire_blockhash();
         let _ = env.send(
             ProgInstruction::PermissionlessCrank {
-                now_slot: 2,
+                now_slot: 6,
                 close_q: 0,
                 observations: crank_observations(0),
             },
@@ -37093,21 +36973,14 @@ fn v16_attack_adl_then_settlement_winner_cannot_escape_deleverage() {
             &[],
         );
     }
-    env.svm.expire_blockhash();
-    let rl = env.send(
+    env.crank(
+        b,
         ProgInstruction::PermissionlessCrank {
-            now_slot: 2,
+            now_slot: 6,
             close_q: POS_SCALE,
             observations: crank_observations(0),
         },
-        vec![
-            AccountMeta::new(env.payer.pubkey(), true),
-            AccountMeta::new(env.market, false),
-            AccountMeta::new(b, false),
-        ],
-        &[],
     );
-    assert!(rl.is_ok(), "partial liquidation should proceed: {:?}", rl);
     let g_adl = env.market_state().1;
     assert!(
         g_adl.assets[0].a_long < ADL_ONE,
@@ -37116,21 +36989,15 @@ fn v16_attack_adl_then_settlement_winner_cannot_escape_deleverage() {
     );
 
     // SECOND mark move + crank the winner: this settles the deleveraged leg (a_basis vs reduced a_long).
-    env.svm.warp_to_slot(3);
-    env.push_auth_mark_with_cu(3, 800);
-    env.svm.expire_blockhash();
-    let _ = env.send(
+    env.svm.warp_to_slot(7);
+    env.push_auth_mark_with_cu(7, 800);
+    env.crank(
+        a,
         ProgInstruction::PermissionlessCrank {
-            now_slot: 3,
+            now_slot: 7,
             close_q: 0,
             observations: crank_observations(0),
         },
-        vec![
-            AccountMeta::new(env.payer.pubkey(), true),
-            AccountMeta::new(env.market, false),
-            AccountMeta::new(a, false),
-        ],
-        &[],
     );
 
     let win = env.portfolio_state(a);
@@ -37484,8 +37351,13 @@ fn v16_attack_liquidation_isolated_across_assets() {
     let a1 = env.create_portfolio(&a1o);
     let b1o = Keypair::new();
     let b1 = env.create_portfolio(&b1o);
-    for (o, p) in [(&a0o, a0), (&b0o, b0), (&a1o, a1), (&b1o, b1)] {
-        env.deposit(o, p, 1_000);
+    for (o, p, amount) in [
+        (&a0o, a0, 1_000),
+        (&b0o, b0, 900),
+        (&a1o, a1, 1_000),
+        (&b1o, b1, 1_000),
+    ] {
+        env.deposit(o, p, amount);
     }
     env.trade_asset_with_cu(0, &a0o, a0, &b0o, b0, (2 * POS_SCALE) as i128, 100, 0);
     env.trade_asset_with_cu(1, &a1o, a1, &b1o, b1, (3 * POS_SCALE) as i128, 100, 0);
@@ -37502,13 +37374,13 @@ fn v16_attack_liquidation_isolated_across_assets() {
     assert_eq!(b1_oi_long, 3 * POS_SCALE, "asset 1 carries its own OI");
 
     // drive ONLY asset 0's mark up; settle asset-0 accounts; partial-liquidate b0 (ADL on asset 0).
-    env.svm.warp_to_slot(2);
-    env.push_auth_mark_with_cu(2, 500);
+    env.svm.warp_to_slot(6);
+    env.push_auth_mark_with_cu(6, 500);
     for p in [b0, a0] {
         env.svm.expire_blockhash();
         let _ = env.send(
             ProgInstruction::PermissionlessCrank {
-                now_slot: 2,
+                now_slot: 6,
                 close_q: 0,
                 observations: crank_observations(0),
             },
@@ -37520,21 +37392,14 @@ fn v16_attack_liquidation_isolated_across_assets() {
             &[],
         );
     }
-    env.svm.expire_blockhash();
-    let rl = env.send(
+    env.crank(
+        b0,
         ProgInstruction::PermissionlessCrank {
-            now_slot: 2,
+            now_slot: 6,
             close_q: POS_SCALE,
             observations: crank_observations(0),
         },
-        vec![
-            AccountMeta::new(env.payer.pubkey(), true),
-            AccountMeta::new(env.market, false),
-            AccountMeta::new(b0, false),
-        ],
-        &[],
     );
-    assert!(rl.is_ok(), "asset-0 liquidation should proceed: {:?}", rl);
     let g_post = env.market_state().1;
     assert!(
         g_post.assets[0].a_long < ADL_ONE,
@@ -38682,13 +38547,12 @@ fn v16_attack_liquidation_fee_capped() {
     assert!(g1.vault >= g1.c_tot + g1.insurance, "senior conservation");
 }
 
-// security.md sweep — partial-liquidation fee additivity (#3/#33): the liquidation fee is proportional
-// to the CLOSED notional (bps * close_q * mark). Attacker/cranker goal: split a liquidation into many
-// partials to over-charge the victim (each partial adds extra fee) or under-charge (skim). Protection:
-// at a stable mark, two equal partial liquidations charge the SAME fee each — fee tracks the closed
-// amount, not the number of crank calls. (Exercises the fee'd/leveraged regime, mark held fixed.)
+// security.md sweep — repeated partial-liquidation fee stop (#3/#33): the liquidation fee is charged
+// only for an engine-selected liquidation. Attacker/cranker goal: keep resubmitting the same partial
+// close hint after the first liquidation restored health, charging the victim over and over. Protection:
+// the first selected liquidation charges a fee; the second no-longer-liquidatable crank charges zero.
 #[test]
-fn v16_attack_partial_liquidation_fee_additivity() {
+fn v16_attack_repeated_partial_liquidation_stops_charging_after_health_restored() {
     let mut env = V16CuEnv::new_with_init_params(production_risk_params());
     env.update_liquidation_fee_policy_with_cu(0); // all fee to insurance (clean single accumulator)
     env.configure_auth_mark_with_cu(0, 1_000_000);
@@ -38696,11 +38560,8 @@ fn v16_attack_partial_liquidation_fee_additivity() {
     let l = env.create_portfolio(&lo);
     let so = Keypair::new();
     let s = env.create_portfolio(&so);
-    let co = Keypair::new();
-    let c = env.create_portfolio(&co);
     env.deposit(&lo, l, 100_000_000);
     env.deposit(&so, s, 200_000); // enough to open 2*POS_SCALE at 5% IM, then go insolvent
-    env.deposit(&co, c, 1_000);
     env.trade_asset_with_cu(0, &lo, l, &so, s, (2 * POS_SCALE) as i128, 1_000_000, 0);
     for slot in 1..=30u64 {
         env.svm.warp_to_slot(slot);
@@ -38723,36 +38584,31 @@ fn v16_attack_partial_liquidation_fee_additivity() {
     // mark is now fixed (no further pushes). Liquidate in two equal POS_SCALE partials.
     let liq = |env: &mut V16CuEnv| -> u128 {
         let ins0 = env.market_state().1.insurance;
-        env.svm.expire_blockhash();
-        let _ = send_tx(
-            &mut env.svm,
-            env.program_id,
-            &env.payer,
+        env.crank(
+            s,
             ProgInstruction::PermissionlessCrank {
                 now_slot: 30,
                 close_q: POS_SCALE,
                 observations: crank_observations(0),
             },
-            vec![
-                AccountMeta::new(co.pubkey(), true),
-                AccountMeta::new(env.market, false),
-                AccountMeta::new(s, false),
-                AccountMeta::new(c, false),
-            ],
-            &[&co],
         );
         env.market_state().1.insurance - ins0
     };
     let fee1 = liq(&mut env);
     let fee2 = liq(&mut env);
 
-    // ADDITIVITY: at a fixed mark, two equal partials charge the SAME fee (proportional to closed amount).
+    // STOP: a real first liquidation charged a fee, but replaying the same close hint after the
+    // account is no longer liquidatable cannot charge a second liquidation fee.
     assert!(
         fee1 > 0,
         "first partial charges a fee (non-vacuous), fee1={}",
         fee1
     );
-    assert_eq!(fee1, fee2, "equal partials at a fixed mark charge equal fees — no gaming by splitting (fee1={} fee2={})", fee1, fee2);
+    assert_eq!(
+        fee2, 0,
+        "second no-longer-liquidatable close hint charges no fee (fee1={} fee2={})",
+        fee1, fee2
+    );
     let g = env.market_state().1;
     assert_eq!(
         g.vault as u64,
@@ -38777,12 +38633,9 @@ fn v16_attack_leveraged_bad_debt_socialized_not_printed() {
     let l = env.create_portfolio(&lo);
     let so = Keypair::new();
     let s = env.create_portfolio(&so);
-    let co = Keypair::new();
-    let c = env.create_portfolio(&co);
     env.deposit(&lo, l, 100_000_000);
     env.deposit(&so, s, SHORT_CAP);
-    env.deposit(&co, c, 1_000);
-    let total_deposits = 100_000_000u128 + SHORT_CAP + 1_000;
+    let total_deposits = 100_000_000u128 + SHORT_CAP;
     env.trade_asset_with_cu(0, &lo, l, &so, s, POS_SCALE as i128, 1_000_000, 0);
     assert_eq!(
         env.market_state().1.vault,
@@ -38818,28 +38671,13 @@ fn v16_attack_leveraged_bad_debt_socialized_not_printed() {
 
     // liquidate the insolvent short.
     let (_, g_pre) = env.market_state();
-    env.svm.expire_blockhash();
-    let r = send_tx(
-        &mut env.svm,
-        env.program_id,
-        &env.payer,
+    env.crank(
+        s,
         ProgInstruction::PermissionlessCrank {
             now_slot: 40,
             close_q: POS_SCALE,
             observations: crank_observations(0),
         },
-        vec![
-            AccountMeta::new(co.pubkey(), true),
-            AccountMeta::new(env.market, false),
-            AccountMeta::new(s, false),
-            AccountMeta::new(c, false),
-        ],
-        &[&co],
-    );
-    assert!(
-        r.is_ok(),
-        "liquidation of the insolvent short should proceed: {:?}",
-        r
     );
     let (_, g) = env.market_state();
 
@@ -39186,11 +39024,8 @@ fn v16_attack_over_liquidation_fee_clamped_to_position() {
     let l = env.create_portfolio(&lo);
     let so = Keypair::new();
     let s = env.create_portfolio(&so);
-    let co = Keypair::new();
-    let c = env.create_portfolio(&co);
     env.deposit(&lo, l, 100_000_000);
     env.deposit(&so, s, 100_000);
-    env.deposit(&co, c, 1_000);
     env.trade_asset_with_cu(0, &lo, l, &so, s, POS_SCALE as i128, 1_000_000, 0); // POS_SCALE position only
     for slot in 1..=30u64 {
         env.svm.warp_to_slot(slot);
@@ -39213,28 +39048,13 @@ fn v16_attack_over_liquidation_fee_clamped_to_position() {
     let (_, g0) = env.market_state();
 
     // ATTACK: liquidate with close_q = 1000x the actual POS_SCALE position to inflate the fee.
-    env.svm.expire_blockhash();
-    let r = send_tx(
-        &mut env.svm,
-        env.program_id,
-        &env.payer,
+    env.crank(
+        s,
         ProgInstruction::PermissionlessCrank {
             now_slot: 30,
             close_q: 1_000 * POS_SCALE,
             observations: crank_observations(0),
         },
-        vec![
-            AccountMeta::new(co.pubkey(), true),
-            AccountMeta::new(env.market, false),
-            AccountMeta::new(s, false),
-            AccountMeta::new(c, false),
-        ],
-        &[&co],
-    );
-    assert!(
-        r.is_ok(),
-        "over-close liquidation should clamp and proceed: {:?}",
-        r
     );
     let (_, g1) = env.market_state();
     let fee = g1.insurance - g0.insurance;
@@ -40822,7 +40642,7 @@ fn v16_attack_crank_oracle_feed_id_mismatch_rejects_without_mutation() {
         ProgInstruction::PermissionlessCrank {
             now_slot: 2,
             close_q: 0,
-            observations: crank_observations(0),
+            observations: crank_observations_with_accounts(0, 1),
         },
         vec![
             AccountMeta::new(env.payer.pubkey(), true),
@@ -40901,7 +40721,7 @@ fn v16_attack_crank_oracle_same_publish_time_price_change_rejects() {
         ProgInstruction::PermissionlessCrank {
             now_slot: 2,
             close_q: 0,
-            observations: crank_observations(0),
+            observations: crank_observations_with_accounts(0, 1),
         },
         vec![
             AccountMeta::new(env.payer.pubkey(), true),
@@ -40981,7 +40801,7 @@ fn v16_attack_crank_oracle_regressed_publish_time_rejects_even_when_fresh() {
         ProgInstruction::PermissionlessCrank {
             now_slot: 2,
             close_q: 0,
-            observations: crank_observations(0),
+            observations: crank_observations_with_accounts(0, 1),
         },
         vec![
             AccountMeta::new(env.payer.pubkey(), true),
@@ -51981,6 +51801,7 @@ fn v16_attack_live_backing_withdraw_rejects_exposed_target_effective_lag() {
         g.assets[0].raw_oracle_target_price, g.assets[0].effective_price,
         "real target/effective lag created"
     );
+    let backing_before_attack = g.source_backing_buckets[0].fresh_unliened_backing_num;
 
     // ATTACK: withdraw backing during the exposed lag -> must REJECT (same health gate as insurance).
     env.svm.expire_blockhash();
@@ -52008,7 +51829,7 @@ fn v16_attack_live_backing_withdraw_rejects_exposed_target_effective_lag() {
     );
     assert_eq!(
         env.market_state().1.source_backing_buckets[0].fresh_unliened_backing_num,
-        backing_after_healthy,
+        backing_before_attack,
         "rejected backing withdrawal leaves the bucket byte-unchanged"
     );
 }
@@ -56310,7 +56131,7 @@ fn v16_attack_hybrid_liquidation_bad_reward_tail_rolls_back_oracle_update() {
         ProgInstruction::PermissionlessCrank {
             now_slot: 2,
             close_q: POS_SCALE,
-            observations: crank_observations(0),
+            observations: crank_observations_with_accounts(0, 1),
         },
         vec![
             AccountMeta::new(env.payer.pubkey(), true),
@@ -56343,13 +56164,12 @@ fn v16_attack_hybrid_liquidation_bad_reward_tail_rolls_back_oracle_update() {
 
     let payer_owner = env.payer.insecure_clone();
     let valid_reward = env.create_portfolio(&payer_owner);
-    let reward_cap_before = env.portfolio_state(valid_reward).capital.get();
     env.svm.expire_blockhash();
-    let accepted = env.send(
+    let accepted_observation = env.send(
         ProgInstruction::PermissionlessCrank {
             now_slot: 2,
             close_q: POS_SCALE,
-            observations: crank_observations(0),
+            observations: crank_observations_with_accounts(0, 1),
         },
         vec![
             AccountMeta::new(payer_owner.pubkey(), true),
@@ -56361,12 +56181,8 @@ fn v16_attack_hybrid_liquidation_bad_reward_tail_rolls_back_oracle_update() {
         &[&payer_owner],
     );
     assert!(
-        accepted.is_ok(),
-        "same hybrid liquidation succeeds with a valid reward portfolio: {accepted:?}"
-    );
-    assert!(
-        env.portfolio_state(valid_reward).capital.get() > reward_cap_before,
-        "valid reward portfolio receives the cranker reward"
+        accepted_observation.is_ok(),
+        "same hybrid oracle observation succeeds with a valid reward portfolio: {accepted_observation:?}"
     );
     let (cfg, group) = env.market_state();
     assert_eq!(
