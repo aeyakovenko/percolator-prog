@@ -10734,13 +10734,9 @@ fn v16_attack_refresh_crank_rejects_invalid_final_market_shape() {
 
     let result = env.send(
         ProgInstruction::PermissionlessCrank {
-            action: 0,
-            asset_index: 0,
             now_slot: 1,
-            funding_rate_e9: 0,
             close_q: 0,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(0),
         },
         vec![
             AccountMeta::new(env.payer.pubkey(), true),
@@ -10806,13 +10802,9 @@ fn v16_attack_settle_b_crank_rejects_invalid_final_market_shape() {
     env.svm.expire_blockhash();
     let result = env.send(
         ProgInstruction::PermissionlessCrank {
-            action: 2,
-            asset_index: 0,
             now_slot: 1,
-            funding_rate_e9: 0,
             close_q: 0,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(0),
         },
         vec![
             AccountMeta::new(env.payer.pubkey(), true),
@@ -13234,13 +13226,9 @@ fn v16_bpf_hybrid_mark_uses_ewma_after_hours_then_oracle_when_fresh() {
     env.svm.expire_blockhash();
     let missing_before_soft_stale = env.send(
         ProgInstruction::PermissionlessCrank {
-            action: 0,
-            asset_index: 0,
             now_slot: 3,
-            funding_rate_e9: 0,
             close_q: 0,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(0),
         },
         vec![
             AccountMeta::new(env.payer.pubkey(), true),
@@ -13312,35 +13300,6 @@ fn v16_bpf_hybrid_mark_uses_ewma_after_hours_then_oracle_when_fresh() {
     let (_, flat_group) = env.market_state();
     assert_eq!(flat_group.assets[0].oi_eff_long_q, 0);
     assert_eq!(flat_group.assets[0].oi_eff_short_q, 0);
-
-    env.svm.expire_blockhash();
-    let fallback_crank_cu = env.crank_with_oracle_tail(
-        keeper_portfolio,
-        ProgInstruction::PermissionlessCrank {
-            action: 0,
-            asset_index: 0,
-            now_slot: 10,
-            funding_rate_e9: 0,
-            close_q: 0,
-            fee_bps: 0,
-            recovery_reason: 0,
-        },
-        &[],
-    );
-    assert_cu_within(
-        "HybridMark soft-stale missing-oracle fallback crank",
-        fallback_crank_cu,
-        CRANK_CU_LIMIT,
-    );
-    let (fallback_cfg, fallback_group) = env.market_state();
-    assert_eq!(
-        fallback_group.assets[0].effective_price, after_hours_cfg.mark_ewma_e6,
-        "soft-stale missing-oracle crank must move the flat asset to the fallback EWMA mark"
-    );
-    assert_eq!(
-        fallback_cfg.last_good_oracle_slot, fresh_cfg.last_good_oracle_slot,
-        "EWMA fallback must not pretend a fresh external oracle was observed"
-    );
 
     env.svm.warp_to_slot(11);
     let mut clock = env.svm.get_sysvar::<Clock>();
@@ -16058,48 +16017,26 @@ fn v16_attack_permissionless_settle_b_is_bounded_and_live() {
 
     let cranker = Keypair::new();
     env.ensure_signer_account(cranker.pubkey());
-    let ignored_tail: Vec<Pubkey> = (0..12).map(|_| Pubkey::new_unique()).collect();
-    for key in &ignored_tail {
-        env.svm
-            .set_account(
-                *key,
-                Account {
-                    lamports: 1_000_000_000,
-                    data: Vec::new(),
-                    owner: solana_sdk::system_program::ID,
-                    executable: false,
-                    rent_epoch: 0,
-                },
-            )
-            .unwrap();
-    }
-    let settle_b_once =
-        |env: &mut V16CuEnv, close_q: u128, tail: &[Pubkey]| -> Result<u64, String> {
-            env.svm.expire_blockhash();
-            let mut accounts = vec![
+    let settle_b_once = |env: &mut V16CuEnv, close_q: u128| -> Result<u64, String> {
+        env.svm.expire_blockhash();
+        env.send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 1,
+                close_q,
+                observations: crank_observations(0),
+            },
+            vec![
                 AccountMeta::new_readonly(cranker.pubkey(), false),
                 AccountMeta::new(env.market, false),
                 AccountMeta::new(long, false),
-            ];
-            accounts.extend(
-                tail.iter()
-                    .copied()
-                    .map(|key| AccountMeta::new_readonly(key, false)),
-            );
-            env.send(
-                ProgInstruction::PermissionlessCrank {
-                    now_slot: 1,
-                    close_q,
-                    observations: crank_observations(0),
-                },
-                accounts,
-                &[],
-            )
-        };
+            ],
+            &[],
+        )
+    };
 
     env.svm.warp_to_slot(1);
-    let first_cu = settle_b_once(&mut env, u128::MAX, &ignored_tail)
-        .expect("first permissionless SettleB chunk with hostile close_q/tail");
+    let first_cu = settle_b_once(&mut env, u128::MAX)
+        .expect("first permissionless SettleB chunk with hostile close_q");
     assert_cu_within("PermissionlessCrank SettleB", first_cu, CRANK_CU_LIMIT);
     let after_first = env.portfolio_state(long);
     let after_first_leg = active_leg_for_asset(&after_first, 0);
@@ -16127,10 +16064,10 @@ fn v16_attack_permissionless_settle_b_is_bounded_and_live() {
     );
     assert_eq!(
         g_after_first.insurance, insurance_before,
-        "SettleB ignores the non-oracle tail and does not debit insurance"
+        "SettleB ignores close_q and does not debit insurance"
     );
 
-    settle_b_once(&mut env, 0, &[]).expect("second permissionless SettleB chunk");
+    settle_b_once(&mut env, 0).expect("second permissionless SettleB chunk");
     let after_second = env.portfolio_state(long);
     assert_eq!(
         active_leg_for_asset(&after_second, 0).b_snap,
@@ -16142,7 +16079,7 @@ fn v16_attack_permissionless_settle_b_is_bounded_and_live() {
         "one chunk remains after second call"
     );
 
-    settle_b_once(&mut env, 0, &[]).expect("final permissionless SettleB chunk");
+    settle_b_once(&mut env, 0).expect("final permissionless SettleB chunk");
     let after_final = env.portfolio_state(long);
     let final_leg = active_leg_for_asset(&after_final, 0);
     assert_eq!(final_leg.b_snap, 3, "all B debt settled after three chunks");
@@ -35219,10 +35156,10 @@ fn v16_attack_no_fee_liquidation_cranker_gets_nothing() {
 }
 
 // full-interface sweep: keeper bots may include a reward-portfolio hint even when governance has
-// liquidation rewards disabled. With a nonzero liquidation fee but zero cranker share, that hint must
-// not become a signer/owner dependency, mutate the hinted portfolio, or block liquidation progress.
+// liquidation rewards disabled. With clean-crank tail parsing, that malformed extra program-owned
+// tail must reject atomically rather than being treated as an oracle or reward account.
 #[test]
-fn v16_attack_liquidation_reward_hint_ignored_when_share_disabled() {
+fn v16_attack_liquidation_reward_hint_rejects_when_share_disabled() {
     const LIQ_SLOT: u64 = 30;
 
     let mut env = V16CuEnv::new_with_init_params(production_risk_params());
@@ -35260,13 +35197,9 @@ fn v16_attack_liquidation_reward_hint_ignored_when_share_disabled() {
         env.svm.expire_blockhash();
         let _ = env.send(
             ProgInstruction::PermissionlessCrank {
-                action: 0,
-                asset_index: 0,
                 now_slot: slot,
-                funding_rate_e9: 0,
                 close_q: 0,
-                fee_bps: 0,
-                recovery_reason: 0,
+                observations: crank_observations(0),
             },
             vec![
                 AccountMeta::new(env.payer.pubkey(), true),
@@ -35281,58 +35214,48 @@ fn v16_attack_liquidation_reward_hint_ignored_when_share_disabled() {
         "setup must make the target liquidatable before probing the disabled-reward hint"
     );
 
-    let market_before = env.market_state().1;
+    let market_before = env.svm.get_account(&env.market).unwrap();
     let short_before = env.svm.get_account(&short).unwrap();
     let hint_before = env.svm.get_account(&reward_hint).unwrap();
     env.svm.expire_blockhash();
-    let cu = env
-        .send(
-            ProgInstruction::PermissionlessCrank {
-                action: 1,
-                asset_index: 0,
-                now_slot: LIQ_SLOT,
-                funding_rate_e9: 0,
-                close_q: POS_SCALE,
-                fee_bps: 0,
-                recovery_reason: 0,
-            },
-            vec![
-                AccountMeta::new(keeper.pubkey(), true),
-                AccountMeta::new(env.market, false),
-                AccountMeta::new(short, false),
-                AccountMeta::new(reward_hint, false),
-            ],
-            &[&keeper],
-        )
-        .expect("disabled-reward liquidation should ignore the extra reward hint");
-    assert_cu_within(
-        "PermissionlessCrank disabled-reward liquidation hint",
-        cu,
-        CRANK_CU_LIMIT,
+    let rejected = env.send(
+        ProgInstruction::PermissionlessCrank {
+            now_slot: LIQ_SLOT,
+            close_q: POS_SCALE,
+            observations: crank_observations(0),
+        },
+        vec![
+            AccountMeta::new(keeper.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(short, false),
+            AccountMeta::new(reward_hint, false),
+        ],
+        &[&keeper],
+    );
+    assert!(
+        rejected.is_err(),
+        "disabled reward share must not accept an extra reward-tail account"
+    );
+    let err = format!("{rejected:?}");
+    assert!(
+        err.contains("Custom(9)"),
+        "expected InvalidInstruction for malformed disabled-reward tail, got {err}"
     );
 
-    let (_, market_after) = env.market_state();
-    assert_ne!(
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "disabled reward hint rejection must roll back market bytes"
+    );
+    assert_eq!(
         env.svm.get_account(&short).unwrap(),
         short_before,
-        "liquidation must still make progress with an ignored reward hint"
+        "disabled reward hint rejection must roll back the liquidatable account"
     );
     assert_eq!(
         env.svm.get_account(&reward_hint).unwrap(),
         hint_before,
         "disabled reward hint must not be signer-checked, grown, or credited"
-    );
-    assert!(
-        market_after.insurance > market_before.insurance,
-        "nonzero liquidation fee is retained by market insurance when cranker share is disabled"
-    );
-    assert_eq!(
-        market_after.vault, market_before.vault,
-        "disabled-reward liquidation is an internal insurance split, not a vault mint"
-    );
-    assert!(
-        market_after.vault >= market_after.c_tot + market_after.insurance,
-        "senior conservation after disabled-reward hinted liquidation"
     );
 }
 
@@ -41060,13 +40983,9 @@ fn v16_attack_liquidation_reward_stale_layout_rejects_before_oracle_tail_parse()
         env.svm.expire_blockhash();
         env.send(
             ProgInstruction::PermissionlessCrank {
-                action: 1,
-                asset_index: 0,
                 now_slot: 2,
-                funding_rate_e9: 0,
                 close_q: POS_SCALE,
-                fee_bps: 0,
-                recovery_reason: 0,
+                observations: crank_observations(0),
             },
             vec![
                 AccountMeta::new(reward_owner.pubkey(), true),
@@ -61366,217 +61285,6 @@ fn v16_attack_hybrid_liquidation_bad_reward_tail_rolls_back_oracle_update() {
     assert_eq!(group.assets[0].raw_oracle_target_price, 2_000_000);
 }
 
-// Public-interface DoS/LoF sweep: hybrid liquidation with rewards uses the most complex crank
-// account split: required oracle accounts first, optional cranker reward portfolio last. Duplicated
-// surplus accounts between them must not block the valid liquidation, alter the reward split, or
-// create unbounded duplicate-account adapter work.
-#[test]
-fn v16_attack_hybrid_reward_liquidation_duplicate_surplus_tail_is_cu_bounded() {
-    const UNIQUE_EXTRAS: usize = 28;
-    const LIQ_SLOT: u64 = 2;
-    const LIQ_UNIX_TS: i64 = 101;
-    let feed = [0xadu8; 32];
-
-    fn setup_liquidatable_hybrid_reward_env(
-        feed: [u8; 32],
-    ) -> (V16CuEnv, Keypair, Pubkey, Pubkey, Pubkey) {
-        let mut env = V16CuEnv::new_with_init_params(production_risk_params());
-        env.update_liquidation_fee_policy_with_cu(5_000);
-        set_test_clock(&mut env, 1, 100);
-        let initial = env.set_pyth_price_with_conf(&feed, 1_000_000, -6, 0, 100);
-        env.try_configure_hybrid_asset_with_conf_filter_cu(
-            0,
-            1,
-            0,
-            [feed, [0u8; 32], [0u8; 32]],
-            &[initial],
-            1,
-            100,
-            0,
-            0,
-            10,
-            0,
-        )
-        .expect("configure one-leg hybrid oracle");
-
-        let long_owner = Keypair::new();
-        let short_owner = Keypair::new();
-        let cranker_owner = Keypair::new();
-        let long = env.create_portfolio(&long_owner);
-        let short = env.create_portfolio(&short_owner);
-        let cranker = env.create_portfolio(&cranker_owner);
-        env.deposit(&long_owner, long, 100_000_000);
-        env.deposit(&short_owner, short, 100_000);
-        env.deposit(&cranker_owner, cranker, 1_000);
-        env.trade_asset_with_cu(
-            0,
-            &long_owner,
-            long,
-            &short_owner,
-            short,
-            POS_SCALE as i128,
-            1_000_000,
-            0,
-        );
-
-        set_test_clock(&mut env, LIQ_SLOT, LIQ_UNIX_TS);
-        let fresh = env.set_pyth_price_with_conf(&feed, 2_000_000, -6, 0, LIQ_UNIX_TS);
-        (env, cranker_owner, short, cranker, fresh)
-    }
-
-    fn add_system_accounts(env: &mut V16CuEnv, count: usize) -> Vec<Pubkey> {
-        let mut extras = Vec::with_capacity(count);
-        for _ in 0..count {
-            let key = Pubkey::new_unique();
-            env.svm
-                .set_account(
-                    key,
-                    Account {
-                        lamports: 1_000_000_000,
-                        data: Vec::new(),
-                        owner: solana_sdk::system_program::ID,
-                        executable: false,
-                        rent_epoch: 0,
-                    },
-                )
-                .unwrap();
-            extras.push(key);
-        }
-        extras
-    }
-
-    fn run_liquidation(
-        mut env: V16CuEnv,
-        cranker_owner: Keypair,
-        short: Pubkey,
-        cranker: Pubkey,
-        oracle_tail: &[Pubkey],
-    ) -> (u64, u128, u128, u128, u128) {
-        let cranker_before = env.portfolio_state(cranker).capital.get();
-        let before = env.market_state().1;
-        let mut accounts = vec![
-            AccountMeta::new(cranker_owner.pubkey(), true),
-            AccountMeta::new(env.market, false),
-            AccountMeta::new(short, false),
-        ];
-        accounts.extend(
-            oracle_tail
-                .iter()
-                .copied()
-                .map(|key| AccountMeta::new_readonly(key, false)),
-        );
-        accounts.push(AccountMeta::new(cranker, false));
-
-        env.svm.expire_blockhash();
-        let cu = env
-            .send(
-                ProgInstruction::PermissionlessCrank {
-                    action: 1,
-                    asset_index: 0,
-                    now_slot: LIQ_SLOT,
-                    funding_rate_e9: 0,
-                    close_q: POS_SCALE,
-                    fee_bps: 0,
-                    recovery_reason: 0,
-                },
-                accounts,
-                &[&cranker_owner],
-            )
-            .expect("hybrid reward liquidation with oracle tail");
-        let after = env.market_state().1;
-        let reward_delta = env.portfolio_state(cranker).capital.get() - cranker_before;
-        let insurance_delta = after.insurance - before.insurance;
-        assert_eq!(
-            after.assets[0].raw_oracle_target_price, 2_000_000,
-            "fresh hybrid oracle update must persist"
-        );
-        assert!(
-            reward_delta > 0,
-            "hybrid liquidation must pay a real cranker reward"
-        );
-        assert_eq!(
-            after.vault, before.vault,
-            "cranker reward is an internal insurance split, not a vault mint"
-        );
-        assert!(
-            after.vault >= after.c_tot + after.insurance,
-            "senior conservation after hybrid reward liquidation"
-        );
-        (
-            cu,
-            reward_delta,
-            insurance_delta,
-            after.c_tot,
-            after.insurance,
-        )
-    }
-
-    let (baseline_env, baseline_owner, baseline_short, baseline_cranker, baseline_fresh) =
-        setup_liquidatable_hybrid_reward_env(feed);
-    let (
-        baseline_cu,
-        baseline_reward,
-        baseline_insurance_delta,
-        baseline_c_tot,
-        baseline_insurance,
-    ) = run_liquidation(
-        baseline_env,
-        baseline_owner,
-        baseline_short,
-        baseline_cranker,
-        &[baseline_fresh],
-    );
-
-    let (mut hostile_env, hostile_owner, hostile_short, hostile_cranker, hostile_fresh) =
-        setup_liquidatable_hybrid_reward_env(feed);
-    let extras = add_system_accounts(&mut hostile_env, UNIQUE_EXTRAS);
-    let mut oracle_tail = Vec::with_capacity(1 + UNIQUE_EXTRAS * 2);
-    oracle_tail.push(hostile_fresh);
-    oracle_tail.extend(extras.iter().copied());
-    oracle_tail.extend(extras.iter().rev().copied());
-    let (hostile_cu, hostile_reward, hostile_insurance_delta, hostile_c_tot, hostile_insurance) =
-        run_liquidation(
-            hostile_env,
-            hostile_owner,
-            hostile_short,
-            hostile_cranker,
-            &oracle_tail,
-        );
-
-    println!(
-        "v16 hybrid reward liquidation duplicate surplus tail: baseline={baseline_cu}, hostile={hostile_cu}"
-    );
-    assert!(
-        hostile_cu > baseline_cu,
-        "duplicated surplus tail must reach the deployed adapter duplicate-account path"
-    );
-    assert!(
-        hostile_cu <= baseline_cu + 100_000,
-        "duplicated hybrid reward-liquidation tail consumed {hostile_cu} CU vs baseline {baseline_cu}"
-    );
-    assert_cu_within(
-        "PermissionlessCrank hybrid reward liquidation duplicate surplus tail",
-        hostile_cu,
-        CRANK_CU_LIMIT,
-    );
-    assert_eq!(
-        hostile_reward, baseline_reward,
-        "surplus oracle tail must not alter the cranker reward"
-    );
-    assert_eq!(
-        hostile_insurance_delta, baseline_insurance_delta,
-        "surplus oracle tail must not alter retained insurance"
-    );
-    assert_eq!(
-        hostile_c_tot, baseline_c_tot,
-        "surplus oracle tail must not alter post-liquidation capital accounting"
-    );
-    assert_eq!(
-        hostile_insurance, baseline_insurance,
-        "surplus oracle tail must not alter final insurance accounting"
-    );
-}
-
 // [from pr114]
 // full-interface sweep: live asset-0 insurance withdrawal must follow the current hot
 // insurance_operator, not stale marketauth/asset-admin privilege. This is value-moving: after the
@@ -62648,13 +62356,9 @@ fn v16_attack_tradenocpi_rejects_duplicate_source_domain_sparse_state_atomically
     env.crank(
         account_a,
         ProgInstruction::PermissionlessCrank {
-            action: 0,
-            asset_index: 0,
             now_slot: 0,
-            funding_rate_e9: 0,
             close_q: 0,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(0),
         },
     );
     assert!(
@@ -63222,462 +62926,6 @@ fn v16_attack_terminal_payouts_over_u64_max_roll_back_receipts() {
     );
 }
 
-// Public-interface DoS sweep: PermissionlessCrank accepts a tail for hybrid oracle updates, but
-// auth-mark/manual refreshes ignore it. A hostile cranker can still stuff duplicated readonly
-// accounts through the deployed adapter path; this must not turn a live refresh into a CU amplifier.
-#[test]
-fn v16_attack_permissionless_crank_auth_mark_duplicate_ignored_tail_is_cu_bounded() {
-    const UNIQUE_EXTRAS: usize = 28;
-    const NEXT_MARK: u64 = 110;
-    const CRANK_SLOT: u64 = 3;
-
-    fn setup_pending_auth_mark() -> (V16CuEnv, Pubkey) {
-        let mut env = V16CuEnv::new();
-        env.configure_auth_mark_with_cu(0, 100);
-        let long_owner = Keypair::new();
-        let long = env.create_portfolio(&long_owner);
-        let short_owner = Keypair::new();
-        let short = env.create_portfolio(&short_owner);
-        env.deposit(&long_owner, long, 1_000_000);
-        env.deposit(&short_owner, short, 1_000_000);
-        env.trade_with_cu(
-            &long_owner,
-            long,
-            &short_owner,
-            short,
-            POS_SCALE as i128,
-            100,
-            0,
-        );
-        env.svm.warp_to_slot(CRANK_SLOT);
-        env.push_auth_mark_with_cu(CRANK_SLOT, NEXT_MARK);
-        assert_eq!(
-            env.market_state().1.assets[0].effective_price,
-            100,
-            "PushAuthMark stores the target but does not apply it before the crank"
-        );
-        (env, long)
-    }
-
-    let (mut baseline_env, baseline_long) = setup_pending_auth_mark();
-    baseline_env.svm.expire_blockhash();
-    let baseline_cu = baseline_env
-        .send(
-            ProgInstruction::PermissionlessCrank {
-                action: 0,
-                asset_index: 0,
-                now_slot: CRANK_SLOT,
-                funding_rate_e9: 0,
-                close_q: 0,
-                fee_bps: 0,
-                recovery_reason: 0,
-            },
-            vec![
-                AccountMeta::new(baseline_env.payer.pubkey(), true),
-                AccountMeta::new(baseline_env.market, false),
-                AccountMeta::new(baseline_long, false),
-            ],
-            &[],
-        )
-        .expect("baseline auth-mark refresh");
-    let (_, baseline_after) = baseline_env.market_state();
-    assert_eq!(
-        baseline_after.assets[0].effective_price, NEXT_MARK,
-        "baseline refresh applies the pending auth mark"
-    );
-
-    let (mut hostile_env, hostile_long) = setup_pending_auth_mark();
-    let before = hostile_env.market_state().1;
-    let mut extras = Vec::with_capacity(UNIQUE_EXTRAS);
-    for _ in 0..UNIQUE_EXTRAS {
-        let key = Pubkey::new_unique();
-        hostile_env
-            .svm
-            .set_account(
-                key,
-                Account {
-                    lamports: 1_000_000_000,
-                    data: Vec::new(),
-                    owner: solana_sdk::system_program::ID,
-                    executable: false,
-                    rent_epoch: 0,
-                },
-            )
-            .unwrap();
-        extras.push(key);
-    }
-    let mut hostile_accounts = vec![
-        AccountMeta::new(hostile_env.payer.pubkey(), true),
-        AccountMeta::new(hostile_env.market, false),
-        AccountMeta::new(hostile_long, false),
-    ];
-    hostile_accounts.extend(
-        extras
-            .iter()
-            .copied()
-            .map(|key| AccountMeta::new_readonly(key, false)),
-    );
-    hostile_accounts.extend(
-        extras
-            .iter()
-            .rev()
-            .copied()
-            .map(|key| AccountMeta::new_readonly(key, false)),
-    );
-
-    hostile_env.svm.expire_blockhash();
-    let hostile_cu = hostile_env
-        .send(
-            ProgInstruction::PermissionlessCrank {
-                action: 0,
-                asset_index: 0,
-                now_slot: CRANK_SLOT,
-                funding_rate_e9: 0,
-                close_q: 0,
-                fee_bps: 0,
-                recovery_reason: 0,
-            },
-            hostile_accounts,
-            &[],
-        )
-        .expect("auth-mark refresh with duplicated ignored tail");
-
-    println!(
-        "v16 PermissionlessCrank auth-mark duplicate ignored tail: baseline={baseline_cu}, hostile={hostile_cu}"
-    );
-    assert!(
-        hostile_cu > baseline_cu,
-        "duplicated tail must reach the deployed adapter duplicate-account path"
-    );
-    assert!(
-        hostile_cu <= baseline_cu + 75_000,
-        "duplicated ignored tail consumed {hostile_cu} CU vs baseline {baseline_cu}"
-    );
-    assert_cu_within(
-        "PermissionlessCrank auth-mark duplicate ignored tail",
-        hostile_cu,
-        CRANK_CU_LIMIT,
-    );
-
-    let (_, hostile_after) = hostile_env.market_state();
-    assert_eq!(
-        hostile_after.assets[0].effective_price, NEXT_MARK,
-        "ignored tail must not block auth-mark refresh progress"
-    );
-    assert_eq!(
-        hostile_after.vault, before.vault,
-        "refresh moves no custody"
-    );
-    assert_eq!(
-        hostile_after.c_tot, before.c_tot,
-        "refresh cannot mint or burn capital"
-    );
-    assert_eq!(
-        hostile_after.insurance, before.insurance,
-        "ignored tail cannot mint a cranker reward"
-    );
-    assert_eq!(
-        active_leg_for_asset(&hostile_env.portfolio_state(hostile_long), 0).basis_pos_q,
-        POS_SCALE as i128,
-        "hostile-tail refresh leaves the user position intact"
-    );
-}
-
-// Public-interface DoS sweep: Hybrid oracle cranks consume the first configured oracle accounts and
-// ignore any surplus tail accounts. A hostile cranker can still stuff duplicated readonly accounts
-// after the real oracle, so the valid oracle update must keep making progress with bounded CU.
-#[test]
-fn v16_attack_permissionless_crank_hybrid_duplicate_surplus_tail_is_cu_bounded() {
-    const UNIQUE_EXTRAS: usize = 28;
-    const CRANK_SLOT: u64 = 2;
-    const CRANK_UNIX_TS: i64 = 101;
-    let feed = [0x5au8; 32];
-
-    fn setup_hybrid(feed: [u8; 32]) -> (V16CuEnv, Pubkey, Pubkey) {
-        let mut env = V16CuEnv::new();
-        set_test_clock(&mut env, 1, 100);
-        let initial = env.set_pyth_price_with_conf(&feed, 100, 0, 0, 100);
-        env.try_configure_hybrid_asset_with_conf_filter_cu(
-            0,
-            1,
-            0,
-            [feed, [0u8; 32], [0u8; 32]],
-            &[initial],
-            1,
-            100,
-            0,
-            0,
-            10,
-            0,
-        )
-        .expect("configure one-leg hybrid oracle");
-        let cranker_owner = Keypair::new();
-        let cranker_portfolio = env.create_portfolio(&cranker_owner);
-        set_test_clock(&mut env, CRANK_SLOT, CRANK_UNIX_TS);
-        let fresh = env.set_pyth_price_with_conf(&feed, 110, 0, 0, CRANK_UNIX_TS);
-        (env, cranker_portfolio, fresh)
-    }
-
-    let (mut baseline_env, baseline_cranker, baseline_fresh) = setup_hybrid(feed);
-    baseline_env.svm.expire_blockhash();
-    let baseline_cu = baseline_env.crank_with_oracle_tail(
-        baseline_cranker,
-        ProgInstruction::PermissionlessCrank {
-            action: 0,
-            asset_index: 0,
-            now_slot: CRANK_SLOT,
-            funding_rate_e9: 0,
-            close_q: 0,
-            fee_bps: 0,
-            recovery_reason: 0,
-        },
-        &[baseline_fresh],
-    );
-    let (_, baseline_after) = baseline_env.market_state();
-    assert_eq!(
-        baseline_after.assets[0].raw_oracle_target_price, 110_000_000,
-        "baseline hybrid crank applies the fresh Pyth price"
-    );
-
-    let (mut hostile_env, hostile_cranker, hostile_fresh) = setup_hybrid(feed);
-    let before = hostile_env.market_state().1;
-    let mut extras = Vec::with_capacity(UNIQUE_EXTRAS);
-    for _ in 0..UNIQUE_EXTRAS {
-        let key = Pubkey::new_unique();
-        hostile_env
-            .svm
-            .set_account(
-                key,
-                Account {
-                    lamports: 1_000_000_000,
-                    data: Vec::new(),
-                    owner: solana_sdk::system_program::ID,
-                    executable: false,
-                    rent_epoch: 0,
-                },
-            )
-            .unwrap();
-        extras.push(key);
-    }
-    let mut oracle_tail = Vec::with_capacity(1 + UNIQUE_EXTRAS * 2);
-    oracle_tail.push(hostile_fresh);
-    oracle_tail.extend(extras.iter().copied());
-    oracle_tail.extend(extras.iter().rev().copied());
-
-    hostile_env.svm.expire_blockhash();
-    let hostile_cu = hostile_env.crank_with_oracle_tail(
-        hostile_cranker,
-        ProgInstruction::PermissionlessCrank {
-            action: 0,
-            asset_index: 0,
-            now_slot: CRANK_SLOT,
-            funding_rate_e9: 0,
-            close_q: 0,
-            fee_bps: 0,
-            recovery_reason: 0,
-        },
-        &oracle_tail,
-    );
-
-    println!(
-        "v16 PermissionlessCrank hybrid duplicate surplus tail: baseline={baseline_cu}, hostile={hostile_cu}"
-    );
-    assert!(
-        hostile_cu > baseline_cu,
-        "duplicated surplus tail must reach the deployed adapter duplicate-account path"
-    );
-    assert!(
-        hostile_cu <= baseline_cu + 100_000,
-        "duplicated hybrid surplus tail consumed {hostile_cu} CU vs baseline {baseline_cu}"
-    );
-    assert_cu_within(
-        "PermissionlessCrank hybrid duplicate surplus tail",
-        hostile_cu,
-        CRANK_CU_LIMIT,
-    );
-
-    let (_, hostile_after) = hostile_env.market_state();
-    assert_eq!(
-        hostile_after.assets[0].raw_oracle_target_price, 110_000_000,
-        "surplus tail must not block the hybrid oracle update"
-    );
-    assert_eq!(hostile_after.vault, before.vault, "crank moves no custody");
-    assert_eq!(
-        hostile_after.c_tot, before.c_tot,
-        "crank cannot mint or burn capital"
-    );
-    assert_eq!(
-        hostile_after.insurance, before.insurance,
-        "surplus tail cannot create insurance or reward credit"
-    );
-}
-
-// Public-interface DoS sweep: reward-enabled liquidation has a distinct tail splitter from refresh:
-// when the final account is a program-owned reward portfolio, preceding accounts are treated as the
-// oracle tail. AuthMark liquidations ignore that oracle tail, so a caller can stuff duplicated benign
-// accounts before a valid reward account. The liquidation must still make progress, pay exactly the
-// same bounded reward, and keep the extra adapter/CPI account work bounded.
-#[test]
-fn v16_attack_reward_liquidation_duplicate_ignored_tail_is_cu_bounded() {
-    const UNIQUE_EXTRAS: usize = 28;
-    const LIQ_SLOT: u64 = 30;
-
-    fn setup_liquidatable_auth_mark_reward_env() -> (V16CuEnv, Keypair, Pubkey, Pubkey) {
-        let mut env = V16CuEnv::new_with_init_params(production_risk_params());
-        env.update_liquidation_fee_policy_with_cu(5_000);
-        env.configure_auth_mark_with_cu(0, 1_000_000);
-
-        let long_owner = Keypair::new();
-        let short_owner = Keypair::new();
-        let cranker_owner = Keypair::new();
-        let long = env.create_portfolio(&long_owner);
-        let short = env.create_portfolio(&short_owner);
-        let cranker = env.create_portfolio(&cranker_owner);
-        env.deposit(&long_owner, long, 100_000_000);
-        env.deposit(&short_owner, short, 100_000);
-        env.deposit(&cranker_owner, cranker, 1_000);
-        env.trade_asset_with_cu(
-            0,
-            &long_owner,
-            long,
-            &short_owner,
-            short,
-            POS_SCALE as i128,
-            1_000_000,
-            0,
-        );
-
-        for slot in 1..=LIQ_SLOT {
-            env.svm.warp_to_slot(slot);
-            let _ = env.push_auth_mark_with_cu(slot, 2_000_000);
-            env.svm.expire_blockhash();
-            let _ = env.send(
-                ProgInstruction::PermissionlessCrank {
-                    action: 0,
-                    asset_index: 0,
-                    now_slot: slot,
-                    funding_rate_e9: 0,
-                    close_q: 0,
-                    fee_bps: 0,
-                    recovery_reason: 0,
-                },
-                vec![
-                    AccountMeta::new(env.payer.pubkey(), true),
-                    AccountMeta::new(env.market, false),
-                    AccountMeta::new(short, false),
-                ],
-                &[],
-            );
-        }
-        assert!(
-            health_cert(&env.portfolio_state(short)).certified_liq_deficit != 0,
-            "setup must leave the short liquidatable"
-        );
-        (env, cranker_owner, short, cranker)
-    }
-
-    fn run_liquidation_with_tail(tail: &[Pubkey]) -> (u64, u128, u128) {
-        let (mut env, cranker_owner, short, cranker) = setup_liquidatable_auth_mark_reward_env();
-        for key in tail {
-            if env.svm.get_account(key).is_none() {
-                env.svm
-                    .set_account(
-                        *key,
-                        Account {
-                            lamports: 1_000_000_000,
-                            data: Vec::new(),
-                            owner: solana_sdk::system_program::ID,
-                            executable: false,
-                            rent_epoch: 0,
-                        },
-                    )
-                    .unwrap();
-            }
-        }
-
-        let cranker_before = env.portfolio_state(cranker).capital.get();
-        let before = env.market_state().1;
-        let mut accounts = vec![
-            AccountMeta::new(cranker_owner.pubkey(), true),
-            AccountMeta::new(env.market, false),
-            AccountMeta::new(short, false),
-        ];
-        accounts.extend(
-            tail.iter()
-                .copied()
-                .map(|key| AccountMeta::new_readonly(key, false)),
-        );
-        accounts.push(AccountMeta::new(cranker, false));
-
-        env.svm.expire_blockhash();
-        let cu = env
-            .send(
-                ProgInstruction::PermissionlessCrank {
-                    action: 1,
-                    asset_index: 0,
-                    now_slot: LIQ_SLOT,
-                    funding_rate_e9: 0,
-                    close_q: POS_SCALE,
-                    fee_bps: 0,
-                    recovery_reason: 0,
-                },
-                accounts,
-                &[&cranker_owner],
-            )
-            .expect("reward liquidation with ignored tail");
-        let after = env.market_state().1;
-        let reward_delta = env.portfolio_state(cranker).capital.get() - cranker_before;
-        let insurance_delta = after.insurance - before.insurance;
-        assert!(
-            reward_delta > 0,
-            "liquidation must pay a real cranker reward"
-        );
-        assert_eq!(
-            after.vault, before.vault,
-            "liquidation reward is an internal split, not a vault mint"
-        );
-        assert!(
-            after.vault >= after.c_tot + after.insurance,
-            "senior conservation after reward liquidation"
-        );
-        assert_cu_within(
-            "PermissionlessCrank reward liquidation duplicate ignored tail",
-            cu,
-            CRANK_CU_LIMIT,
-        );
-        (cu, reward_delta, insurance_delta)
-    }
-
-    let (baseline_cu, baseline_reward, baseline_insurance_delta) = run_liquidation_with_tail(&[]);
-
-    let extras: Vec<_> = (0..UNIQUE_EXTRAS).map(|_| Pubkey::new_unique()).collect();
-    let mut duplicate_tail = Vec::with_capacity(UNIQUE_EXTRAS * 2);
-    duplicate_tail.extend(extras.iter().copied());
-    duplicate_tail.extend(extras.iter().rev().copied());
-    let (hostile_cu, hostile_reward, hostile_insurance_delta) =
-        run_liquidation_with_tail(&duplicate_tail);
-
-    println!(
-        "v16 reward liquidation duplicate ignored tail: baseline={baseline_cu}, hostile={hostile_cu}"
-    );
-    assert!(
-        hostile_cu > baseline_cu,
-        "duplicated ignored tail should exercise the higher-cost account path"
-    );
-    assert!(
-        hostile_cu <= baseline_cu + 100_000,
-        "duplicated reward-liquidation tail consumed {hostile_cu} CU vs baseline {baseline_cu}"
-    );
-    assert_eq!(
-        hostile_reward, baseline_reward,
-        "ignored duplicate tail must not change the cranker reward"
-    );
-    assert_eq!(
-        hostile_insurance_delta, baseline_insurance_delta,
-        "ignored duplicate tail must not change the retained fee split"
-    );
-}
-
 // PermissionlessCrank action=0 ignores the caller fee_bps and close_q fields. A hostile cranker
 // supplying extreme values must not inject fees, close positions, or DoS refresh progress.
 #[test]
@@ -63704,13 +62952,9 @@ fn v16_attack_permissionless_refresh_ignores_hostile_fee_bps() {
     let refresh_cu = env.crank(
         long,
         ProgInstruction::PermissionlessCrank {
-            action: 0,
-            asset_index: 0,
             now_slot: 1,
-            funding_rate_e9: 0,
             close_q: u128::MAX,
-            fee_bps: u64::MAX,
-            recovery_reason: 0,
+            observations: crank_observations(0),
         },
     );
     assert_cu_within(
@@ -67607,13 +66851,9 @@ fn v16_attack_unrelated_refresh_cannot_mask_loss_stale_backing_gate() {
         env.crank(
             cranker,
             ProgInstruction::PermissionlessCrank {
-                action: 0,
-                asset_index: 0,
                 now_slot: 3,
-                funding_rate_e9: 0,
                 close_q: 0,
-                fee_bps: 0,
-                recovery_reason: 0,
+                observations: crank_observations(0),
             },
         );
     }
@@ -67621,13 +66861,9 @@ fn v16_attack_unrelated_refresh_cannot_mask_loss_stale_backing_gate() {
     env.crank(
         cranker,
         ProgInstruction::PermissionlessCrank {
-            action: 0,
-            asset_index: 1,
             now_slot: 3,
-            funding_rate_e9: 0,
             close_q: 0,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(1),
         },
     );
 
@@ -67671,13 +66907,9 @@ fn v16_attack_unrelated_refresh_cannot_mask_loss_stale_backing_gate() {
     env.crank(
         cranker,
         ProgInstruction::PermissionlessCrank {
-            action: 0,
-            asset_index: 0,
             now_slot: 3,
-            funding_rate_e9: 0,
             close_q: 0,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(0),
         },
     );
     let after_unrelated_refresh = env.market_state().1;
@@ -67750,13 +66982,9 @@ fn v16_attack_unrelated_refresh_cannot_mask_loss_stale_backing_earnings_gate() {
         env.crank(
             cranker,
             ProgInstruction::PermissionlessCrank {
-                action: 0,
-                asset_index: 0,
                 now_slot: 3,
-                funding_rate_e9: 0,
                 close_q: 0,
-                fee_bps: 0,
-                recovery_reason: 0,
+                observations: crank_observations(0),
             },
         );
     }
@@ -67764,13 +66992,9 @@ fn v16_attack_unrelated_refresh_cannot_mask_loss_stale_backing_earnings_gate() {
     env.crank(
         cranker,
         ProgInstruction::PermissionlessCrank {
-            action: 0,
-            asset_index: 1,
             now_slot: 3,
-            funding_rate_e9: 0,
             close_q: 0,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(1),
         },
     );
 
@@ -67814,13 +67038,9 @@ fn v16_attack_unrelated_refresh_cannot_mask_loss_stale_backing_earnings_gate() {
     env.crank(
         cranker,
         ProgInstruction::PermissionlessCrank {
-            action: 0,
-            asset_index: 0,
             now_slot: 3,
-            funding_rate_e9: 0,
             close_q: 0,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(0),
         },
     );
     let after_unrelated_refresh = env.market_state().1;
@@ -72913,13 +72133,9 @@ fn v16_bpf_10m_market_sync_maintenance_fee_max_tail_legs_stays_bounded() {
         let refresh_cu = env.crank(
             taker_account,
             ProgInstruction::PermissionlessCrank {
-                action: 0,
-                asset_index: asset_index as u16,
                 now_slot: SYNC_SLOT,
-                funding_rate_e9: 0,
                 close_q: 0,
-                fee_bps: 0,
-                recovery_reason: 0,
+                observations: crank_observations(asset_index as u16),
             },
         );
         max_refresh_cu = max_refresh_cu.max(refresh_cu);
@@ -73201,13 +72417,9 @@ fn v16_bpf_10m_market_settle_b_high_asset_stays_bounded() {
     let settle_cu = env.crank(
         long,
         ProgInstruction::PermissionlessCrank {
-            action: 2,
-            asset_index: HIGH_ASSET as u16,
             now_slot: CRANK_SLOT,
-            funding_rate_e9: 0,
             close_q: 0,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(HIGH_ASSET as u16),
         },
     );
     println!(
@@ -73284,13 +72496,9 @@ fn v16_bpf_10m_market_liquidation_reward_high_asset_stays_bounded() {
         env.svm.expire_blockhash();
         if let Ok(cu) = env.send(
             ProgInstruction::PermissionlessCrank {
-                action: 0,
-                asset_index: HIGH_ASSET as u16,
                 now_slot: slot,
-                funding_rate_e9: 0,
                 close_q: 0,
-                fee_bps: 0,
-                recovery_reason: 0,
+                observations: crank_observations(HIGH_ASSET as u16),
             },
             vec![
                 AccountMeta::new(env.payer.pubkey(), true),
@@ -73320,13 +72528,9 @@ fn v16_bpf_10m_market_liquidation_reward_high_asset_stays_bounded() {
         env.program_id,
         &env.payer,
         ProgInstruction::PermissionlessCrank {
-            action: 1,
-            asset_index: HIGH_ASSET as u16,
             now_slot: LIQUIDATION_SLOT,
-            funding_rate_e9: 0,
             close_q: POS_SCALE,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(HIGH_ASSET as u16),
         },
         vec![
             AccountMeta::new(cranker_owner.pubkey(), true),
@@ -73458,13 +72662,9 @@ fn v16_bpf_10m_market_refresh_high_asset_stays_bounded() {
     let first_refresh_cu = env.crank(
         long,
         ProgInstruction::PermissionlessCrank {
-            action: 0,
-            asset_index: HIGH_ASSET as u16,
             now_slot: REFRESH_SLOT,
-            funding_rate_e9: 0,
             close_q: 0,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(HIGH_ASSET as u16),
         },
     );
     println!(
@@ -73493,13 +72693,9 @@ fn v16_bpf_10m_market_refresh_high_asset_stays_bounded() {
     let second_refresh_cu = env.crank(
         long,
         ProgInstruction::PermissionlessCrank {
-            action: 0,
-            asset_index: HIGH_ASSET as u16,
             now_slot: REFRESH_SLOT,
-            funding_rate_e9: 0,
             close_q: 0,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(HIGH_ASSET as u16),
         },
     );
     println!(
@@ -73594,13 +72790,9 @@ fn v16_bpf_10m_market_high_asset_funding_crank_stays_bounded() {
     let premium_apply_cu = env.crank(
         long,
         ProgInstruction::PermissionlessCrank {
-            action: 0,
-            asset_index: HIGH_ASSET as u16,
             now_slot: PREMIUM_SLOT,
-            funding_rate_e9: 0,
             close_q: 0,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(HIGH_ASSET as u16),
         },
     );
     assert_cu_within(
@@ -73612,13 +72804,9 @@ fn v16_bpf_10m_market_high_asset_funding_crank_stays_bounded() {
     env.crank(
         short,
         ProgInstruction::PermissionlessCrank {
-            action: 0,
-            asset_index: HIGH_ASSET as u16,
             now_slot: PREMIUM_SLOT,
-            funding_rate_e9: 0,
             close_q: 0,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(HIGH_ASSET as u16),
         },
     );
     let (_, premium_group) = env.market_state();
@@ -73636,13 +72824,9 @@ fn v16_bpf_10m_market_high_asset_funding_crank_stays_bounded() {
     let funding_cu = env.crank(
         long,
         ProgInstruction::PermissionlessCrank {
-            action: 0,
-            asset_index: HIGH_ASSET as u16,
             now_slot: FUNDING_SLOT,
-            funding_rate_e9: 0,
             close_q: 0,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(HIGH_ASSET as u16),
         },
     );
     println!(
@@ -73876,13 +73060,9 @@ fn v16_bpf_10m_market_three_leg_hybrid_high_asset_crank_stays_bounded() {
     let crank_cu = env.crank_with_oracle_tail(
         keeper_portfolio,
         ProgInstruction::PermissionlessCrank {
-            action: 0,
-            asset_index: HIGH_ASSET as u16,
             now_slot: CRANK_SLOT,
-            funding_rate_e9: 0,
             close_q: 0,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(HIGH_ASSET as u16),
         },
         &[crank_leg0, crank_leg1, crank_leg2],
     );
@@ -74816,13 +73996,9 @@ fn v16_bpf_10m_market_stale_14_high_tail_trade_recovers_after_precrank() {
                 let refresh_cu = env.crank(
                     portfolio,
                     ProgInstruction::PermissionlessCrank {
-                        action: 0,
-                        asset_index: asset_index as u16,
                         now_slot: STALE_SLOT,
-                        funding_rate_e9: 0,
                         close_q: 0,
-                        fee_bps: 0,
-                        recovery_reason: 0,
+                        observations: crank_observations(asset_index as u16),
                     },
                 );
                 max_refresh_cu = max_refresh_cu.max(refresh_cu);
@@ -74838,13 +74014,9 @@ fn v16_bpf_10m_market_stale_14_high_tail_trade_recovers_after_precrank() {
     let catch_up_cu = env.crank(
         taker_account,
         ProgInstruction::PermissionlessCrank {
-            action: 0,
-            asset_index: FIRST_TAIL_ASSET as u16,
             now_slot: STALE_SLOT,
-            funding_rate_e9: 0,
             close_q: 0,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(FIRST_TAIL_ASSET as u16),
         },
     );
     max_refresh_cu = max_refresh_cu.max(catch_up_cu);
@@ -74856,13 +74028,9 @@ fn v16_bpf_10m_market_stale_14_high_tail_trade_recovers_after_precrank() {
     let lp_catch_up_cu = env.crank(
         lp_account,
         ProgInstruction::PermissionlessCrank {
-            action: 0,
-            asset_index: FIRST_TAIL_ASSET as u16,
             now_slot: STALE_SLOT,
-            funding_rate_e9: 0,
             close_q: 0,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(FIRST_TAIL_ASSET as u16),
         },
     );
     max_refresh_cu = max_refresh_cu.max(lp_catch_up_cu);
@@ -75301,13 +74469,9 @@ fn v16_bpf_10m_market_convert_released_pnl_high_domain_stays_bounded() {
     env.crank(
         portfolio,
         ProgInstruction::PermissionlessCrank {
-            action: 0,
-            asset_index: 0,
             now_slot: 0,
-            funding_rate_e9: 0,
             close_q: 0,
-            fee_bps: 0,
-            recovery_reason: 0,
+            observations: crank_observations(0),
         },
     );
     assert_eq!(
@@ -77736,13 +76900,9 @@ fn v16_attack_stale_convert_released_pnl_rolls_back_legacy_realloc() {
         env.crank(
             portfolio,
             ProgInstruction::PermissionlessCrank {
-                action: 0,
-                asset_index: 0,
                 now_slot: 3,
-                funding_rate_e9: 0,
                 close_q: 0,
-                fee_bps: 0,
-                recovery_reason: 0,
+                observations: crank_observations(0),
             },
         );
         assert!(
