@@ -44138,6 +44138,219 @@ fn v16_attack_crank_oracle_feed_id_mismatch_rejects_without_mutation() {
     assert_eq!(group.assets[0].raw_oracle_target_price, 210_000);
 }
 
+// Public auto-crank observation sweep: multiple oracle observations are parsed and applied before
+// the engine auto-selector runs. A malformed later hint must not leave an earlier accepted oracle
+// update committed. This catches the boundary where wrapper-side oracle mutation, engine error
+// propagation, and SVM rollback must line up.
+#[test]
+fn v16_attack_crank_duplicate_observation_rolls_back_prior_oracle_update() {
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(2, 1_000, 1_000, 500);
+    let keeper = Keypair::new();
+    let keeper_portfolio = env.create_portfolio(&keeper);
+    set_test_clock(&mut env, 1, 100);
+
+    let feed0 = [0x31u8; 32];
+    let feed1 = [0x32u8; 32];
+    let initial0 = env.set_pyth_price_with_conf(&feed0, 200_000, -6, 0, 100);
+    let initial1 = env.set_pyth_price_with_conf(&feed1, 300_000, -6, 0, 100);
+    env.try_configure_hybrid_asset_with_conf_filter_cu(
+        0,
+        1,
+        0,
+        [feed0, [0u8; 32], [0u8; 32]],
+        &[initial0],
+        1,
+        100,
+        0,
+        0,
+        10,
+        0,
+    )
+    .expect("configure asset-0 hybrid oracle");
+    env.try_configure_hybrid_asset_with_conf_filter_cu(
+        1,
+        1,
+        0,
+        [feed1, [0u8; 32], [0u8; 32]],
+        &[initial1],
+        1,
+        100,
+        0,
+        0,
+        10,
+        0,
+    )
+    .expect("configure asset-1 hybrid oracle");
+
+    set_test_clock(&mut env, 2, 101);
+    let fresh0 = env.set_pyth_price_with_conf(&feed0, 210_000, -6, 0, 101);
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let keeper_before = env.svm.get_account(&keeper_portfolio).unwrap();
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 2,
+            close_q: 0,
+            observations: vec![
+                CrankObservationHint {
+                    asset_index: 0,
+                    oracle_accounts: 1,
+                },
+                CrankObservationHint {
+                    asset_index: 0,
+                    oracle_accounts: 1,
+                },
+            ],
+        },
+        vec![
+            AccountMeta::new(env.payer.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(keeper_portfolio, false),
+            AccountMeta::new_readonly(fresh0, false),
+        ],
+        &[],
+    );
+    assert!(
+        rejected.is_err(),
+        "duplicate observation hints must reject after the first observation has run"
+    );
+    let err = rejected.unwrap_err();
+    assert!(
+        err.contains("Custom(9)"),
+        "duplicate observation should reject as InvalidInstruction, got {err}"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "failed multi-observation crank must roll back the earlier oracle/profile update"
+    );
+    assert_eq!(
+        env.svm.get_account(&keeper_portfolio).unwrap(),
+        keeper_before,
+        "failed multi-observation crank must not mutate the target portfolio"
+    );
+
+    env.svm.expire_blockhash();
+    let ok = env.send(
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 2,
+            close_q: 0,
+            observations: crank_observations_with_accounts(0, 1),
+        },
+        vec![
+            AccountMeta::new(env.payer.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(keeper_portfolio, false),
+            AccountMeta::new_readonly(fresh0, false),
+        ],
+        &[],
+    );
+    assert!(
+        ok.is_ok(),
+        "valid single-observation crank remains live after duplicate rejection: {ok:?}"
+    );
+    let (cfg, group) = env.market_state();
+    assert_eq!(cfg.last_good_oracle_slot, 2);
+    assert_eq!(group.assets[0].raw_oracle_target_price, 210_000);
+    assert_eq!(
+        group.assets[1].raw_oracle_target_price, 300_000,
+        "duplicate rejection and valid retry do not touch the unrelated observed asset"
+    );
+}
+
+// A surplus tail account is rejected only after all declared oracle observations have already
+// been applied to local market state. The reject path must still be transaction-atomic.
+#[test]
+fn v16_attack_crank_surplus_oracle_tail_rolls_back_prior_observation() {
+    let mut env = V16CuEnv::new();
+    let keeper = Keypair::new();
+    let keeper_portfolio = env.create_portfolio(&keeper);
+    set_test_clock(&mut env, 1, 100);
+
+    let feed = [0x33u8; 32];
+    let initial = env.set_pyth_price_with_conf(&feed, 200_000, -6, 0, 100);
+    env.try_configure_hybrid_asset_with_conf_filter_cu(
+        0,
+        1,
+        0,
+        [feed, [0u8; 32], [0u8; 32]],
+        &[initial],
+        1,
+        100,
+        0,
+        0,
+        10,
+        0,
+    )
+    .expect("configure hybrid oracle");
+
+    set_test_clock(&mut env, 2, 101);
+    let fresh = env.set_pyth_price_with_conf(&feed, 220_000, -6, 0, 101);
+    let surplus_tail = Pubkey::new_unique();
+    env.ensure_signer_account(surplus_tail);
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let keeper_before = env.svm.get_account(&keeper_portfolio).unwrap();
+
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 2,
+            close_q: 0,
+            observations: crank_observations_with_accounts(0, 1),
+        },
+        vec![
+            AccountMeta::new(env.payer.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(keeper_portfolio, false),
+            AccountMeta::new_readonly(fresh, false),
+            AccountMeta::new_readonly(surplus_tail, false),
+        ],
+        &[],
+    );
+    assert!(
+        rejected.is_err(),
+        "surplus oracle tail must reject after applying the declared observation"
+    );
+    let err = rejected.unwrap_err();
+    assert!(
+        err.contains("Custom(9)"),
+        "surplus oracle tail should reject as InvalidInstruction, got {err}"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "surplus-tail rejection must roll back the prior oracle/profile update"
+    );
+    assert_eq!(
+        env.svm.get_account(&keeper_portfolio).unwrap(),
+        keeper_before,
+        "surplus-tail rejection must not mutate the target portfolio"
+    );
+
+    env.svm.expire_blockhash();
+    let ok = env.send(
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 2,
+            close_q: 0,
+            observations: crank_observations_with_accounts(0, 1),
+        },
+        vec![
+            AccountMeta::new(env.payer.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(keeper_portfolio, false),
+            AccountMeta::new_readonly(fresh, false),
+        ],
+        &[],
+    );
+    assert!(
+        ok.is_ok(),
+        "valid single-observation crank remains live after surplus-tail rejection: {ok:?}"
+    );
+    let (cfg, group) = env.market_state();
+    assert_eq!(cfg.last_good_oracle_slot, 2);
+    assert_eq!(group.assets[0].raw_oracle_target_price, 220_000);
+}
+
 #[test]
 fn v16_attack_crank_oracle_same_publish_time_price_change_rejects() {
     let mut env = V16CuEnv::new();
