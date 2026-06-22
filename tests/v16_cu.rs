@@ -51426,6 +51426,67 @@ fn v16_attack_hostile_matcher_no_write_cannot_replay_stale_single_context() {
     );
 }
 
+#[test]
+fn v16_attack_tradecpi_matcher_req_id_advances_monotonically_on_market() {
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(1, 1_000, 1_000, 500);
+    env.configure_auth_mark_for_asset_as_admin(0, 1, 100);
+    let matcher_program = Pubkey::new_unique();
+    let matcher_bytes = std::fs::read(auth_matcher_program_path()).expect("read auth matcher BPF");
+    env.svm.add_program(matcher_program, &matcher_bytes);
+    let taker_owner = Keypair::new();
+    let lp_owner = Keypair::new();
+    let taker = env.create_portfolio(&taker_owner);
+    let lp = env.create_portfolio(&lp_owner);
+    env.deposit(&taker_owner, taker, 10_000_000);
+    env.deposit(&lp_owner, lp, 10_000_000);
+    let (ctx, delegate, _) = env.init_auth_matcher_context(matcher_program, &lp_owner, lp);
+    let read_ctx_req_id = |env: &V16CuEnv| {
+        let ctx_data = env.svm.get_account(&ctx).unwrap().data;
+        u64::from_le_bytes(ctx_data[32..40].try_into().unwrap())
+    };
+
+    env.try_trade_cpi_with_cu_on_asset(
+        &taker_owner,
+        taker,
+        &lp_owner,
+        lp,
+        matcher_program,
+        ctx,
+        delegate,
+        0,
+        POS_SCALE as i128,
+        100,
+    )
+    .expect("first matcher fill succeeds");
+    assert_eq!(
+        read_ctx_req_id(&env),
+        1,
+        "first matcher fill should use market request sequence 1"
+    );
+    assert_eq!(env.market_state().0.matcher_req_seq, 1);
+
+    env.svm.expire_blockhash();
+    env.try_trade_cpi_with_cu_on_asset(
+        &taker_owner,
+        taker,
+        &lp_owner,
+        lp,
+        matcher_program,
+        ctx,
+        delegate,
+        0,
+        POS_SCALE as i128,
+        100,
+    )
+    .expect("second matcher fill succeeds");
+    assert_eq!(
+        read_ctx_req_id(&env),
+        2,
+        "second matcher fill should use the next market request sequence"
+    );
+    assert_eq!(env.market_state().0.matcher_req_seq, 2);
+}
+
 // DoS/manipulation rate-limit: PushEwmaMark feeds a SMOOTHED mark (EWMA over dt slots). A mark
 // authority must not defeat the per-slot rate limit by pushing repeatedly within ONE slot (each push
 // compounding toward an extreme value -> instant mark manipulation -> mis-liquidation). The EWMA
