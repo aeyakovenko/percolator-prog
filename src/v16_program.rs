@@ -6534,7 +6534,16 @@ pub mod processor {
             max_market_slots,
             &[asset_index],
         )?;
-        let req_id = current_slot_pre.wrapping_add(1);
+        // Single TradeCpi reads the matcher result from matcher_ctx bytes. Bind the
+        // request id to pre-CPI portfolio state so stale bytes from an earlier fill
+        // cannot validate as a fresh response after a nonzero fill mutates state.
+        let req_id = matcher_request_id(
+            current_slot_pre,
+            account_a_ai,
+            account_b_ai,
+            max_market_slots,
+            &[asset_index],
+        )?;
         let lp_account_id = matcher_lp_account_id(&delegate);
 
         invoke_matcher(
@@ -6872,6 +6881,8 @@ pub mod processor {
             &asset_indices,
         )?;
 
+        // Force the batch matcher to emit fresh return data for this CPI.
+        solana_program::program::set_return_data(&[]);
         invoke_matcher_batch(
             matcher_prog,
             matcher_ctx,
@@ -11560,6 +11571,112 @@ pub mod processor {
     fn matcher_lp_account_id(delegate: &Pubkey) -> u64 {
         let bytes = delegate.to_bytes();
         u64::from_le_bytes(bytes[0..8].try_into().unwrap())
+    }
+
+    fn mix_request_u64(mut acc: u64, value: u64) -> u64 {
+        acc ^= value
+            .wrapping_add(0x9e37_79b9_7f4a_7c15)
+            .wrapping_add(acc << 6)
+            .wrapping_add(acc >> 2);
+        acc.rotate_left(27).wrapping_mul(0x94d0_49bb_1331_11eb)
+    }
+
+    fn mix_request_u128(acc: u64, value: u128) -> u64 {
+        let acc = mix_request_u64(acc, value as u64);
+        mix_request_u64(acc, (value >> 64) as u64)
+    }
+
+    fn mix_request_i128(acc: u64, value: i128) -> u64 {
+        mix_request_u128(acc, value as u128)
+    }
+
+    fn mix_matcher_portfolio_request_state(
+        mut acc: u64,
+        portfolio: &percolator::PortfolioV16ViewMut<'_>,
+        asset_indices: &[u16],
+    ) -> Result<u64, ProgramError> {
+        acc = mix_request_u128(acc, portfolio.header.capital.get());
+        acc = mix_request_i128(acc, portfolio.header.pnl.get());
+        acc = mix_request_u128(acc, portfolio.header.reserved_pnl.get());
+        acc = mix_request_i128(acc, portfolio.header.fee_credits.get());
+        acc = mix_request_u64(acc, portfolio.header.last_fee_slot.get());
+        for word in portfolio.header.active_bitmap {
+            acc = mix_request_u64(acc, word.get());
+        }
+        acc = mix_request_u64(acc, portfolio.header.stale_state as u64);
+        acc = mix_request_u64(acc, portfolio.header.b_stale_state as u64);
+        acc = mix_request_u64(acc, portfolio.header.rebalance_lock as u64);
+        acc = mix_request_u64(acc, portfolio.header.liquidation_lock as u64);
+
+        for &asset_index in asset_indices {
+            let mut found = false;
+            let mut slot = 0usize;
+            while slot < portfolio.header.legs.len() {
+                let leg = portfolio.header.legs[slot]
+                    .try_to_runtime()
+                    .map_err(map_v16_error)?;
+                if leg.active && leg.asset_index == asset_index as u32 {
+                    if found {
+                        return Err(PercolatorError::EngineHiddenLeg.into());
+                    }
+                    found = true;
+                    acc = mix_request_u64(acc, slot as u64);
+                    acc = mix_request_u64(acc, leg.asset_index as u64);
+                    acc = mix_request_u64(acc, leg.market_id);
+                    acc = mix_request_u64(
+                        acc,
+                        match leg.side {
+                            SideV16::Long => 1,
+                            SideV16::Short => 2,
+                        },
+                    );
+                    acc = mix_request_i128(acc, leg.basis_pos_q);
+                    acc = mix_request_u128(acc, leg.a_basis);
+                    acc = mix_request_i128(acc, leg.k_snap);
+                    acc = mix_request_i128(acc, leg.f_snap);
+                    acc = mix_request_u64(acc, leg.epoch_snap);
+                    acc = mix_request_u128(acc, leg.loss_weight);
+                    acc = mix_request_u128(acc, leg.b_snap);
+                    acc = mix_request_u128(acc, leg.b_rem);
+                    acc = mix_request_u64(acc, leg.b_epoch_snap);
+                    acc = mix_request_u64(acc, leg.b_stale as u64);
+                    acc = mix_request_u64(acc, leg.stale as u64);
+                }
+                slot += 1;
+            }
+            if !found {
+                acc = mix_request_u64(acc, asset_index as u64);
+                acc = mix_request_u64(acc, 0);
+            }
+        }
+        Ok(acc)
+    }
+
+    fn matcher_request_id(
+        current_slot: u64,
+        account_a_ai: &AccountInfo<'_>,
+        account_b_ai: &AccountInfo<'_>,
+        max_market_slots: usize,
+        asset_indices: &[u16],
+    ) -> Result<u64, ProgramError> {
+        let mut acc = mix_request_u64(0x7065_7263_6d61_7463, current_slot);
+        acc = mix_request_u64(acc, asset_indices.len() as u64);
+        for &asset_index in asset_indices {
+            acc = mix_request_u64(acc, asset_index as u64);
+        }
+        {
+            let mut account_a_data = account_a_ai.try_borrow_mut_data()?;
+            let account_a =
+                state::portfolio_view_mut_for_market_slots(&mut account_a_data, max_market_slots)?;
+            acc = mix_matcher_portfolio_request_state(acc, &account_a, asset_indices)?;
+        }
+        {
+            let mut account_b_data = account_b_ai.try_borrow_mut_data()?;
+            let account_b =
+                state::portfolio_view_mut_for_market_slots(&mut account_b_data, max_market_slots)?;
+            acc = mix_matcher_portfolio_request_state(acc, &account_b, asset_indices)?;
+        }
+        Ok(acc)
     }
 
     fn invoke_matcher<'a>(
