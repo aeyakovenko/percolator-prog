@@ -56167,6 +56167,67 @@ fn v16_attack_hostile_matcher_no_write_cannot_replay_stale_single_context() {
 }
 
 #[test]
+fn v16_attack_tradecpi_two_fresh_fills_same_transaction_stay_live() {
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(1, 1_000, 1_000, 500);
+    env.configure_auth_mark_for_asset_as_admin(0, 1, 100);
+    let matcher_program = Pubkey::new_unique();
+    let matcher_bytes = std::fs::read(auth_matcher_program_path()).expect("read auth matcher BPF");
+    env.svm.add_program(matcher_program, &matcher_bytes);
+    let taker_owner = Keypair::new();
+    let lp_owner = Keypair::new();
+    let taker = env.create_portfolio(&taker_owner);
+    let lp = env.create_portfolio(&lp_owner);
+    env.deposit(&taker_owner, taker, 10_000_000);
+    env.deposit(&lp_owner, lp, 10_000_000);
+    let (ctx, delegate, _) = env.init_auth_matcher_context(matcher_program, &lp_owner, lp);
+    let size_q = POS_SCALE as i128;
+    let program_id = env.program_id;
+    let market = env.market;
+    let taker_key = taker_owner.pubkey();
+    let single_ix = || Instruction {
+        program_id,
+        accounts: vec![
+            AccountMeta::new(taker_key, true),
+            AccountMeta::new(market, false),
+            AccountMeta::new(taker, false),
+            AccountMeta::new(lp, false),
+            AccountMeta::new_readonly(matcher_program, false),
+            AccountMeta::new(ctx, false),
+            AccountMeta::new_readonly(delegate, false),
+        ],
+        data: ProgInstruction::TradeCpi {
+            asset_index: 0,
+            size_q,
+            fee_bps: 100,
+            limit_price: 0,
+        }
+        .encode(),
+    };
+
+    env.svm.expire_blockhash();
+    send_raw_ixs(
+        &mut env.svm,
+        &env.payer,
+        vec![heap_ix(), cu_ix(), single_ix(), single_ix()],
+        &[&taker_owner],
+    )
+    .expect("two fresh matcher fills in one transaction must both execute");
+
+    let ctx_data = env.svm.get_account(&ctx).unwrap().data;
+    assert_eq!(
+        u64::from_le_bytes(ctx_data[32..40].try_into().unwrap()),
+        2,
+        "second same-transaction matcher call must receive a fresh request id"
+    );
+    assert_eq!(env.market_state().0.matcher_req_seq, 2);
+    assert_eq!(
+        leg(&env.portfolio_state(taker), 0).basis_pos_q,
+        2 * size_q,
+        "both same-transaction fills must land on the taker position"
+    );
+}
+
+#[test]
 fn v16_attack_tradecpi_matcher_req_id_advances_monotonically_on_market() {
     let mut env = V16CuEnv::new_with_market_params_and_price_move(1, 1_000, 1_000, 500);
     env.configure_auth_mark_for_asset_as_admin(0, 1, 100);
