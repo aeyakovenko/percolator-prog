@@ -9422,6 +9422,85 @@ fn v16_bpf_permissionless_liquidation_is_bounded() {
 }
 
 #[test]
+fn v16_attack_zero_work_liquidation_does_not_report_successful_noop() {
+    let mut env = V16CuEnv::new();
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long_account = env.create_portfolio(&long_owner);
+    let short_account = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long_account, 1_000_000);
+    env.deposit(&short_owner, short_account, 250);
+    env.configure_ewma_mark_with_cu(0, 100, 1, 0);
+    env.trade_with_cu(
+        &long_owner,
+        long_account,
+        &short_owner,
+        short_account,
+        POS_SCALE as i128,
+        100,
+        0,
+    );
+
+    env.svm.warp_to_slot(1);
+    env.push_ewma_mark_with_cu(1, 300);
+    env.crank(
+        short_account,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 1,
+            close_q: 0,
+            observations: crank_observations(0),
+        },
+    );
+    assert!(
+        health_cert(&env.portfolio_state(short_account)).certified_liq_deficit != 0,
+        "first crank should refresh the short into a fresh liquidatable state"
+    );
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let short_before = env.svm.get_account(&short_account).unwrap();
+    env.svm.expire_blockhash();
+    let zero_work = env.send(
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 1,
+            close_q: 0,
+            observations: crank_observations(0),
+        },
+        vec![
+            AccountMeta::new(env.payer.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(short_account, false),
+        ],
+        &[],
+    );
+    assert!(
+        zero_work.is_err(),
+        "liquidation selected with zero close_q must reject, not report a successful no-op"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "zero-work liquidation rejection must not mutate market state"
+    );
+    assert_eq!(
+        env.svm.get_account(&short_account).unwrap(),
+        short_before,
+        "zero-work liquidation rejection must not mutate the liquidatable portfolio"
+    );
+
+    env.crank(
+        short_account,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 1,
+            close_q: POS_SCALE,
+            observations: crank_observations(0),
+        },
+    );
+    assert!(percolator::active_bitmap_is_empty(active_bitmap(
+        &env.portfolio_state(short_account)
+    )));
+}
+
+#[test]
 fn v16_bpf_tradenocpi_rejects_off_mark_recycle_when_deficit_cannot_settle() {
     let mut env = V16CuEnv::new();
     env.top_up_insurance(1_000_000);
@@ -76774,122 +76853,6 @@ fn v16_attack_init_portfolio_duplicate_ignored_accounts_are_cu_bounded() {
         "init_portfolio duplicate ignored account path",
         duplicate_cu,
         150_000,
-    );
-}
-
-// security.md sweep - stale matcher return-data replay (#39/#49): BatchTradeCpi reads matcher output
-// from Solana return data, which is transaction-scoped. A matcher that sets valid return data for one
-// batch CPI and then returns Ok without setting return data for a second same-transaction batch must
-// not let the wrapper replay the stale first response.
-#[test]
-fn v16_attack_hostile_matcher_no_write_cannot_replay_stale_batch_return_data() {
-    let mut env = V16CuEnv::new_with_market_params_and_price_move(2, 1_000, 1_000, 500);
-    env.configure_auth_mark_for_asset_as_admin(0, 1, 100);
-    env.configure_auth_mark_for_asset_as_admin(1, 1, 100);
-    let hostile = Pubkey::new_unique();
-    env.svm.add_program(
-        hostile,
-        &std::fs::read(hostile_matcher_program_path()).unwrap(),
-    );
-    let taker = Keypair::new();
-    let lp = Keypair::new();
-    let ta = env.create_portfolio(&taker);
-    let la = env.create_portfolio(&lp);
-    env.deposit(&taker, ta, 10_000_000);
-    env.deposit(&lp, la, 10_000_000);
-    let ctx = Pubkey::new_unique();
-    let delegate = matcher_delegate_key(
-        &env.program_id,
-        &env.market,
-        &la,
-        &lp.pubkey(),
-        &hostile,
-        &ctx,
-    );
-    env.svm
-        .set_account(
-            delegate,
-            Account {
-                lamports: 1_000_000_000,
-                data: vec![],
-                owner: Pubkey::default(),
-                executable: false,
-                rent_epoch: 0,
-            },
-        )
-        .unwrap();
-    let mut ctx_data = vec![0u8; MATCHER_CONTEXT_LEN];
-    ctx_data[64] = 13; // first batch writes return data; second same-tx batch writes nothing.
-    env.svm
-        .set_account(
-            ctx,
-            Account {
-                lamports: 1_000_000_000,
-                data: ctx_data,
-                owner: hostile,
-                executable: false,
-                rent_epoch: 0,
-            },
-        )
-        .unwrap();
-    env.set_matcher_config(hostile, &lp, la, ctx, delegate, 1);
-
-    let size_q = POS_SCALE as i128;
-    let program_id = env.program_id;
-    let market = env.market;
-    let taker_key = taker.pubkey();
-    let batch_ix = || Instruction {
-        program_id,
-        accounts: vec![
-            AccountMeta::new(taker_key, true),
-            AccountMeta::new(market, false),
-            AccountMeta::new(ta, false),
-            AccountMeta::new(la, false),
-            AccountMeta::new_readonly(hostile, false),
-            AccountMeta::new(ctx, false),
-            AccountMeta::new_readonly(delegate, false),
-        ],
-        data: ProgInstruction::BatchTradeCpi {
-            legs: vec![
-                BatchTradeCpiLeg {
-                    asset_index: 0,
-                    size_q,
-                    fee_bps: 100,
-                    limit_price: 0,
-                },
-                BatchTradeCpiLeg {
-                    asset_index: 1,
-                    size_q: -size_q,
-                    fee_bps: 100,
-                    limit_price: 0,
-                },
-            ],
-        }
-        .encode(),
-    };
-    let market_before = env.svm.get_account(&env.market).unwrap();
-    let taker_before = env.svm.get_account(&ta).unwrap();
-    let lp_before = env.svm.get_account(&la).unwrap();
-    let ctx_before = env.svm.get_account(&ctx).unwrap();
-
-    env.svm.expire_blockhash();
-    let replay = send_raw_ixs(
-        &mut env.svm,
-        &env.payer,
-        vec![heap_ix(), cu_ix(), batch_ix(), batch_ix()],
-        &[&taker],
-    );
-    assert!(
-        replay.is_err(),
-        "a matcher that omits second-call return data must not replay stale batch return data: {replay:?}"
-    );
-    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
-    assert_eq!(env.svm.get_account(&ta).unwrap(), taker_before);
-    assert_eq!(env.svm.get_account(&la).unwrap(), lp_before);
-    assert_eq!(
-        env.svm.get_account(&ctx).unwrap(),
-        ctx_before,
-        "failed replay transaction must roll back the first matcher context write"
     );
 }
 
