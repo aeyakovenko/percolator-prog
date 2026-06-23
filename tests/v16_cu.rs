@@ -75670,6 +75670,193 @@ fn v16_bpf_10m_market_stale_seven_high_tail_tradecpi_with_max_tail_stays_bounded
     );
 }
 
+// CU/DoS sweep: the single CPI path above covers a stale high-tail account with the full matcher
+// tail. BatchTradeCpi has a separate return-data parser and a leg-count-scaled tail budget; pin the
+// largest stale-valid batch shape so the combined currentness settlement + batch matcher fanout
+// stays below the transaction CU limit.
+#[test]
+fn v16_bpf_10m_market_stale_seven_high_tail_batchcpi_with_budgeted_tail_stays_bounded() {
+    const N: usize = 5_834;
+    const TAIL_LEGS: usize = 7;
+    const FIRST_TAIL_ASSET: usize = N - TAIL_LEGS;
+    const OPEN_PRICE: u64 = 100;
+    const STALE_PRICE: u64 = 95;
+    const OPEN_SLOT: u64 = 1;
+    const STALE_SLOT: u64 = 16;
+    const CPI_MATCHER_TAIL: usize =
+        (percolator_prog::constants::MAX_MATCHER_TAIL_ACCOUNTS * 2) / TAIL_LEGS;
+
+    let mut env =
+        V16CuEnv::new_with_market_params_and_price_move(TAIL_LEGS as u16, 1_000, 1_000, 500);
+    for asset_index in 0..TAIL_LEGS as u16 {
+        env.configure_auth_mark_for_asset_as_admin(asset_index, OPEN_SLOT, OPEN_PRICE);
+    }
+    let (_, template_group) = env.market_state();
+    let template_asset = template_group.assets[0];
+
+    let new_len = state::market_account_len_for_capacity(N).unwrap();
+    {
+        let mut acct = env.svm.get_account(&env.market).unwrap();
+        acct.data.resize(new_len, 0u8);
+        acct.lamports = acct.lamports.max(new_len as u64 * 10);
+        env.svm.set_account(env.market, acct).unwrap();
+    }
+    env.mutate_market(|_cfg, group| {
+        group.config.max_market_slots = N as u32;
+        group.next_market_id = (N as u64) + 1;
+        for asset_index in FIRST_TAIL_ASSET..N {
+            let market_id = (asset_index as u64) + 1;
+            let mut asset = template_asset;
+            asset.market_id = market_id;
+            group.assets[asset_index] = asset;
+            group.source_backing_buckets[2 * asset_index] =
+                percolator::BackingBucketV16::empty_for_market(market_id);
+            group.source_backing_buckets[2 * asset_index + 1] =
+                percolator::BackingBucketV16::empty_for_market(market_id);
+        }
+    });
+    {
+        let mut acct = env.svm.get_account(&env.market).unwrap();
+        let profile0 = state::read_asset_oracle_profile(&acct.data, 0).unwrap();
+        for asset_index in FIRST_TAIL_ASSET..N {
+            state::write_asset_oracle_profile(&mut acct.data, asset_index, &profile0).unwrap();
+        }
+        env.svm.set_account(env.market, acct).unwrap();
+    }
+
+    env.portfolio_account_len = state::portfolio_account_len_for_market_slots(N).unwrap();
+    let taker = Keypair::new();
+    let lp = Keypair::new();
+    let taker_account = env.create_portfolio(&taker);
+    let lp_account = env.create_portfolio(&lp);
+    env.deposit(&taker, taker_account, 100_000_000);
+    env.deposit(&lp, lp_account, 100_000_000);
+
+    let open_legs: Vec<BatchTradeLeg> = (FIRST_TAIL_ASSET..N)
+        .map(|asset_index| BatchTradeLeg {
+            asset_index: asset_index as u16,
+            size_q: (10 * POS_SCALE) as i128,
+            exec_price: OPEN_PRICE,
+            fee_bps: 0,
+        })
+        .collect();
+    env.svm.warp_to_slot(OPEN_SLOT);
+    env.svm.expire_blockhash();
+    env.send(
+        ProgInstruction::BatchTradeNoCpi { legs: open_legs },
+        vec![
+            AccountMeta::new(taker.pubkey(), true),
+            AccountMeta::new(lp.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(taker_account, false),
+            AccountMeta::new(lp_account, false),
+        ],
+        &[&taker, &lp],
+    )
+    .expect("open seven high-tail legs before stale BatchTradeCpi threshold probe");
+
+    env.mutate_market(|_, group| {
+        for asset_index in FIRST_TAIL_ASSET..N {
+            group
+                .accrue_asset_to_not_atomic(asset_index, STALE_SLOT, STALE_PRICE, 0, true)
+                .unwrap();
+            group.assets[asset_index].raw_oracle_target_price = STALE_PRICE;
+        }
+    });
+    let stale_taker = env.portfolio_state(taker_account);
+    assert_eq!(
+        percolator::active_bitmap_count_ones(active_bitmap(&stale_taker)),
+        TAIL_LEGS as u32
+    );
+    assert!(
+        health_cert(&stale_taker).cert_oracle_epoch < env.market_state().1.oracle_epoch,
+        "setup must make the seven-leg certificate stale before BatchTradeCpi"
+    );
+
+    let matcher_program = Pubkey::new_unique();
+    let matcher_bytes = std::fs::read(auth_matcher_program_path()).expect("read auth matcher BPF");
+    env.svm.add_program(matcher_program, &matcher_bytes);
+    let (ctx, delegate, _) = env.init_auth_matcher_context(matcher_program, &lp, lp_account);
+    let cpi_legs: Vec<BatchTradeCpiLeg> = (FIRST_TAIL_ASSET..N)
+        .map(|asset_index| BatchTradeCpiLeg {
+            asset_index: asset_index as u16,
+            size_q: -(POS_SCALE as i128),
+            fee_bps: 0,
+            limit_price: 0,
+        })
+        .collect();
+    let budgeted_tail: Vec<Pubkey> = (0..CPI_MATCHER_TAIL)
+        .map(|_| {
+            let key = Pubkey::new_unique();
+            env.svm
+                .set_account(
+                    key,
+                    Account {
+                        lamports: 1_000_000_000,
+                        data: vec![0u8; 8],
+                        owner: Pubkey::default(),
+                        executable: false,
+                        rent_epoch: 0,
+                    },
+                )
+                .unwrap();
+            key
+        })
+        .collect();
+    let mut accounts = vec![
+        AccountMeta::new(taker.pubkey(), true),
+        AccountMeta::new(env.market, false),
+        AccountMeta::new(taker_account, false),
+        AccountMeta::new(lp_account, false),
+        AccountMeta::new_readonly(matcher_program, false),
+        AccountMeta::new(ctx, false),
+        AccountMeta::new_readonly(delegate, false),
+    ];
+    accounts.extend(
+        budgeted_tail
+            .iter()
+            .copied()
+            .map(|key| AccountMeta::new_readonly(key, false)),
+    );
+
+    env.svm.warp_to_slot(STALE_SLOT);
+    env.svm.expire_blockhash();
+    let batch_cu = env
+        .send(
+            ProgInstruction::BatchTradeCpi { legs: cpi_legs },
+            accounts,
+            &[&taker],
+        )
+        .expect("stale seven-leg high-tail BatchTradeCpi with budgeted tail must remain live");
+    println!(
+        "v16 10MiB stale seven-leg high-tail BatchTradeCpi budgeted tail: \
+         assets={N}, legs={TAIL_LEGS}, account_len={new_len}, \
+         tail_accounts={CPI_MATCHER_TAIL}, CU={batch_cu}"
+    );
+    assert!(
+        batch_cu < 1_400_000,
+        "stale seven-leg high-tail BatchTradeCpi budgeted-tail CU {batch_cu} must fit the tx limit"
+    );
+    let taker_after = env.portfolio_state(taker_account);
+    let lp_after = env.portfolio_state(lp_account);
+    for asset_index in FIRST_TAIL_ASSET..N {
+        assert_eq!(
+            active_leg_for_asset(&taker_after, asset_index).basis_pos_q,
+            (9 * POS_SCALE) as i128,
+            "stale BatchTradeCpi path reduces taker high-tail asset {asset_index}"
+        );
+        assert_eq!(
+            active_leg_for_asset(&lp_after, asset_index).basis_pos_q,
+            -((9 * POS_SCALE) as i128),
+            "stale BatchTradeCpi path reduces LP high-tail asset {asset_index}"
+        );
+    }
+    assert_eq!(
+        env.market_state().1.vault as u64,
+        env.token_amount(env.vault)
+    );
+}
+
 #[test]
 fn v16_bpf_10m_market_stale_14_high_tail_trade_recovers_after_precrank() {
     const N: usize = 5_834;
