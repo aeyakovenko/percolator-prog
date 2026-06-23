@@ -45102,6 +45102,129 @@ fn v16_attack_crank_duplicate_observation_rolls_back_prior_oracle_update() {
     );
 }
 
+// Public auto-crank observation sweep: a later observation can fail with a raw
+// NotEnoughAccountKeys error after an earlier observation has already updated the
+// in-memory oracle profile. That error must still roll back the whole instruction.
+#[test]
+fn v16_attack_crank_short_oracle_tail_rolls_back_prior_observation() {
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(2, 1_000, 1_000, 500);
+    let keeper = Keypair::new();
+    let keeper_portfolio = env.create_portfolio(&keeper);
+    set_test_clock(&mut env, 1, 100);
+
+    let feed0 = [0x41u8; 32];
+    let feed1 = [0x42u8; 32];
+    let initial0 = env.set_pyth_price_with_conf(&feed0, 200_000, -6, 0, 100);
+    let initial1 = env.set_pyth_price_with_conf(&feed1, 300_000, -6, 0, 100);
+    env.try_configure_hybrid_asset_with_conf_filter_cu(
+        0,
+        1,
+        0,
+        [feed0, [0u8; 32], [0u8; 32]],
+        &[initial0],
+        1,
+        100,
+        0,
+        0,
+        10,
+        0,
+    )
+    .expect("configure asset-0 hybrid oracle");
+    env.try_configure_hybrid_asset_with_conf_filter_cu(
+        1,
+        1,
+        0,
+        [feed1, [0u8; 32], [0u8; 32]],
+        &[initial1],
+        1,
+        100,
+        0,
+        0,
+        10,
+        0,
+    )
+    .expect("configure asset-1 hybrid oracle");
+
+    set_test_clock(&mut env, 2, 101);
+    let fresh0 = env.set_pyth_price_with_conf(&feed0, 210_000, -6, 0, 101);
+    let fresh1 = env.set_pyth_price_with_conf(&feed1, 310_000, -6, 0, 101);
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let keeper_before = env.svm.get_account(&keeper_portfolio).unwrap();
+
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 2,
+            close_q: 0,
+            observations: vec![
+                CrankObservationHint {
+                    asset_index: 0,
+                    oracle_accounts: 1,
+                },
+                CrankObservationHint {
+                    asset_index: 1,
+                    oracle_accounts: 1,
+                },
+            ],
+        },
+        vec![
+            AccountMeta::new(env.payer.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(keeper_portfolio, false),
+            AccountMeta::new_readonly(fresh0, false),
+        ],
+        &[],
+    );
+    assert!(
+        rejected.is_err(),
+        "short oracle tail must reject after the first observation has run"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "NotEnoughAccountKeys must roll back the earlier oracle/profile update"
+    );
+    assert_eq!(
+        env.svm.get_account(&keeper_portfolio).unwrap(),
+        keeper_before,
+        "short-tail rejection must not mutate the target portfolio"
+    );
+
+    env.svm.expire_blockhash();
+    let ok = env.send(
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 2,
+            close_q: 0,
+            observations: vec![
+                CrankObservationHint {
+                    asset_index: 0,
+                    oracle_accounts: 1,
+                },
+                CrankObservationHint {
+                    asset_index: 1,
+                    oracle_accounts: 1,
+                },
+            ],
+        },
+        vec![
+            AccountMeta::new(env.payer.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(keeper_portfolio, false),
+            AccountMeta::new_readonly(fresh0, false),
+            AccountMeta::new_readonly(fresh1, false),
+        ],
+        &[],
+    );
+    assert!(
+        ok.is_ok(),
+        "correctly-sized multi-observation crank remains live after short-tail rejection: {ok:?}"
+    );
+    let (cfg, group) = env.market_state();
+    assert_eq!(cfg.last_good_oracle_slot, 2);
+    assert_eq!(group.assets[0].raw_oracle_target_price, 210_000);
+    assert_eq!(group.assets[1].raw_oracle_target_price, 310_000);
+}
+
 // A surplus tail account is rejected only after all declared oracle observations have already
 // been applied to local market state. The reject path must still be transaction-atomic.
 #[test]
