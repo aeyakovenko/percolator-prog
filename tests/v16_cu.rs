@@ -36788,6 +36788,74 @@ fn v16_attack_trade_fee_policy_respects_low_market_fee_cap() {
     );
 }
 
+// Backing-fee policy has its own public write path and policy counter/profile mirror. Low-fee-cap
+// markets must reject authorized backing-fee writes above that market cap without partially touching
+// the shared config, profile, or nonzero-policy count.
+#[test]
+fn v16_attack_backing_fee_policy_respects_low_market_fee_cap() {
+    const MAX_FEE_BPS: u16 = 37;
+
+    let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+        max_trading_fee_bps: u64::from(MAX_FEE_BPS),
+        ..V16CuMarketParams::default()
+    });
+    let market_before = env.svm.get_account(&env.market).unwrap();
+
+    env.svm.expire_blockhash();
+    let rejected = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::UpdateBackingFeePolicy {
+            domain: 0,
+            fee_bps: MAX_FEE_BPS + 1,
+            insurance_share_bps: 5_000,
+        },
+        vec![
+            AccountMeta::new(env.admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&env.admin],
+    );
+    assert!(
+        rejected.is_err(),
+        "authorized backing-fee update above a low market max must reject"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "rejected low-cap backing-fee update must leave the market byte-identical"
+    );
+
+    let (cfg_after_reject, _) = env.market_state();
+    assert_eq!(cfg_after_reject.backing_trade_fee_policy_count, 0);
+    assert_eq!(cfg_after_reject.backing_trade_fee_bps_long, 0);
+    assert_eq!(
+        cfg_after_reject.backing_trade_fee_insurance_share_bps_long,
+        0
+    );
+
+    env.svm.expire_blockhash();
+    env.update_backing_fee_policy_with_cu(0, MAX_FEE_BPS, 5_000);
+    let market_after = env.svm.get_account(&env.market).unwrap();
+    let (cfg_after_accept, _) = env.market_state();
+    let profile_after_accept = state::read_asset_oracle_profile(&market_after.data, 0).unwrap();
+    assert_eq!(
+        cfg_after_accept.backing_trade_fee_policy_count, 1,
+        "exact-cap backing-fee policy installs one nonzero policy"
+    );
+    assert_eq!(cfg_after_accept.backing_trade_fee_bps_long, MAX_FEE_BPS);
+    assert_eq!(
+        cfg_after_accept.backing_trade_fee_insurance_share_bps_long,
+        5_000
+    );
+    assert_eq!(profile_after_accept.backing_trade_fee_bps_long, MAX_FEE_BPS);
+    assert_eq!(
+        profile_after_accept.backing_trade_fee_insurance_share_bps_long,
+        5_000
+    );
+}
+
 // security.md sweep - trade-fee authority isolation (#6/#33): UpdateTradeFeePolicy is a
 // market-wide economic knob, but the code intentionally gates it to asset-0's insurance authority.
 // After asset-0 insurance is rotated away from marketauth, stale marketauth must not be able to raise
