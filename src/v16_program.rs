@@ -10914,17 +10914,25 @@ pub mod processor {
             return Ok(false);
         }
         let market_id = asset.market_id.get();
+        let mut found_active_for_asset = false;
+        let mut found_current_market = false;
         let mut slot = 0usize;
         while slot < percolator::V16_MAX_PORTFOLIO_ASSETS_N {
             let leg = portfolio.header.legs[slot]
                 .try_to_runtime()
                 .map_err(map_v16_error)?;
-            if leg.active && leg.asset_index as usize == asset_index && leg.market_id == market_id {
-                return Ok(true);
+            if leg.active && leg.asset_index as usize == asset_index {
+                if found_active_for_asset {
+                    return Err(PercolatorError::EngineHiddenLeg.into());
+                }
+                found_active_for_asset = true;
+                if leg.market_id == market_id {
+                    found_current_market = true;
+                }
             }
             slot += 1;
         }
-        Ok(false)
+        Ok(found_current_market)
     }
 
     fn signed_position_for_asset_view(
@@ -10936,20 +10944,28 @@ pub mod processor {
             return Err(PercolatorError::EngineInvalidConfig.into());
         }
         let market_id = group.markets[asset_index].engine.asset.market_id.get();
+        let mut found = None;
         let mut slot = 0usize;
         while slot < percolator::V16_MAX_PORTFOLIO_ASSETS_N {
             let leg = portfolio.header.legs[slot]
                 .try_to_runtime()
                 .map_err(map_v16_error)?;
-            if leg.active && leg.asset_index as usize == asset_index && leg.market_id == market_id {
-                return Ok(match leg.side {
-                    SideV16::Long => leg.basis_pos_q.unsigned_abs() as i128,
-                    SideV16::Short => -(leg.basis_pos_q.unsigned_abs() as i128),
-                });
+            if leg.active && leg.asset_index as usize == asset_index {
+                if found.is_some() {
+                    return Err(PercolatorError::EngineHiddenLeg.into());
+                }
+                if leg.market_id == market_id {
+                    found = Some(match leg.side {
+                        SideV16::Long => leg.basis_pos_q.unsigned_abs() as i128,
+                        SideV16::Short => -(leg.basis_pos_q.unsigned_abs() as i128),
+                    });
+                } else {
+                    found = Some(0);
+                }
             }
             slot += 1;
         }
-        Ok(0)
+        Ok(found.unwrap_or(0))
     }
 
     fn ensure_trade_portfolio_current_for_requests_view(
