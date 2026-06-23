@@ -84878,6 +84878,119 @@ fn v16_attack_swap_secondary_amount_over_u64_max_rejects_no_truncation() {
     assert_eq!(env.token_amount(secondary_vault), 15);
 }
 
+// full-interface sweep: the ordinary user value routes must pin the SPL Token program too. Deposit
+// would otherwise credit capital before an outbound token-program failure, and Withdraw would debit
+// capital before the vault transfer. A loaded executable non-SPL program id must reject without
+// changing market, portfolio, vault, source, or destination state, and both routes must remain live.
+#[test]
+fn v16_attack_user_deposit_withdraw_reject_wrong_token_program() {
+    let mut env = V16CuEnv::new();
+    let owner = Keypair::new();
+    let portfolio = env.create_portfolio(&owner);
+    let fake_token_program = Pubkey::new_unique();
+    let matcher_bytes = std::fs::read(matcher_program_path()).expect("read matcher BPF");
+    env.svm.add_program(fake_token_program, &matcher_bytes);
+
+    let deposit_source = env.token_account_for_mint(env.mint, owner.pubkey(), 100);
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let portfolio_before = env.svm.get_account(&portfolio).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    let source_before = env.svm.get_account(&deposit_source).unwrap();
+
+    env.svm.expire_blockhash();
+    let rejected_deposit = env.send(
+        ProgInstruction::Deposit { amount: 100 },
+        vec![
+            AccountMeta::new(owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio, false),
+            AccountMeta::new(deposit_source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(fake_token_program, false),
+        ],
+        &[&owner],
+    );
+    assert!(
+        rejected_deposit.is_err(),
+        "Deposit must reject a loaded non-SPL token program"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "wrong-token Deposit must not credit market accounting"
+    );
+    assert_eq!(
+        env.svm.get_account(&portfolio).unwrap(),
+        portfolio_before,
+        "wrong-token Deposit must not credit portfolio capital"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        vault_before,
+        "wrong-token Deposit must not touch vault custody"
+    );
+    assert_eq!(
+        env.svm.get_account(&deposit_source).unwrap(),
+        source_before,
+        "wrong-token Deposit must not pull user tokens"
+    );
+
+    env.deposit(&owner, portfolio, 100);
+    assert_eq!(env.portfolio_state(portfolio).capital.get(), 100);
+    assert_eq!(env.token_amount(env.vault), 100);
+
+    let withdraw_dest = env.token_account_for_mint(env.mint, owner.pubkey(), 0);
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let portfolio_before = env.svm.get_account(&portfolio).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    let dest_before = env.svm.get_account(&withdraw_dest).unwrap();
+
+    env.svm.expire_blockhash();
+    let rejected_withdraw = env.send(
+        ProgInstruction::Withdraw { amount: 40 },
+        vec![
+            AccountMeta::new(owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio, false),
+            AccountMeta::new(withdraw_dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(fake_token_program, false),
+        ],
+        &[&owner],
+    );
+    assert!(
+        rejected_withdraw.is_err(),
+        "Withdraw must reject a loaded non-SPL token program"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "wrong-token Withdraw must not debit market accounting"
+    );
+    assert_eq!(
+        env.svm.get_account(&portfolio).unwrap(),
+        portfolio_before,
+        "wrong-token Withdraw must not debit portfolio capital"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        vault_before,
+        "wrong-token Withdraw must not debit vault custody"
+    );
+    assert_eq!(
+        env.svm.get_account(&withdraw_dest).unwrap(),
+        dest_before,
+        "wrong-token Withdraw must not pay the destination"
+    );
+
+    let (dest, cu) = env.withdraw_with_cu(&owner, portfolio, 40);
+    assert_cu_within("Withdraw wrong-token-program retry", cu, CUSTODY_CU_LIMIT);
+    assert_eq!(env.token_amount(dest), 40);
+    assert_eq!(env.portfolio_state(portfolio).capital.get(), 60);
+    assert_eq!(env.token_amount(env.vault), 60);
+}
+
 // full-interface sweep: the value top-up handlers must pin the SPL Token program before they credit
 // market accounting. A loaded, executable non-SPL program id must reject on all top-up routes without
 // pulling donor tokens, crediting insurance/backing, or touching the vault.
