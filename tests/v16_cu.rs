@@ -91277,6 +91277,111 @@ fn v16_attack_terminal_insurance_malformed_dest_rolls_back_budget_and_ledger() {
     assert_eq!(group.vault, 60);
 }
 
+// full-interface sweep: terminal WithdrawInsurance debits terminal budgets and the optional ledger
+// before validating the canonical vault layout. A malformed SPL-owned vault must roll back the budget
+// debit and leave the same terminal withdrawal retryable after the vault is restored.
+#[test]
+fn v16_attack_terminal_insurance_malformed_vault_rolls_back_budget_and_ledger() {
+    let mut env = V16CuEnv::new();
+    let admin = env.admin.insecure_clone();
+    env.top_up_insurance(100);
+    env.resolve();
+
+    let ledger = env.insurance_ledger_account();
+    let dest = env.token_account(admin.pubkey(), 0);
+    let good_vault = env.svm.get_account(&env.vault).unwrap();
+    env.svm
+        .set_account(
+            env.vault,
+            Account {
+                data: vec![0u8; TokenAccount::LEN - 1],
+                ..good_vault.clone()
+            },
+        )
+        .unwrap();
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let ledger_before = env.svm.get_account(&ledger).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    let dest_before = env.svm.get_account(&dest).unwrap();
+
+    env.svm.expire_blockhash();
+    let rejected = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::WithdrawInsurance { amount: 40 },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(ledger, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        rejected.is_err(),
+        "terminal WithdrawInsurance must reject a malformed canonical vault"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "malformed-vault terminal insurance withdraw must not debit market budgets"
+    );
+    assert_eq!(
+        env.svm.get_account(&ledger).unwrap(),
+        ledger_before,
+        "malformed-vault terminal insurance withdraw must not rewrite the ledger"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        vault_before,
+        "malformed canonical vault remains byte-identical"
+    );
+    assert_eq!(
+        env.svm.get_account(&dest).unwrap(),
+        dest_before,
+        "malformed-vault terminal insurance withdraw pays no destination tokens"
+    );
+
+    env.svm.set_account(env.vault, good_vault).unwrap();
+    env.svm.expire_blockhash();
+    let ok_cu = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::WithdrawInsurance { amount: 40 },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(ledger, false),
+        ],
+        &[&admin],
+    )
+    .expect("terminal WithdrawInsurance remains live after malformed-vault rejection");
+    assert_cu_within(
+        "terminal WithdrawInsurance malformed-vault retry",
+        ok_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    assert_eq!(env.token_amount(dest), 40);
+    assert_eq!(env.token_amount(env.vault), 60);
+    let ledger_state =
+        state::read_insurance_ledger(&env.svm.get_account(&ledger).unwrap().data).unwrap();
+    assert_eq!(ledger_state.total_withdrawn_atoms, 40);
+    assert_eq!(ledger_state.last_observed_insurance_atoms, 60);
+    let (_, group) = env.market_state();
+    assert_eq!(group.insurance, 60);
+    assert_eq!(group.vault, 60);
+}
+
 // LoF/DoS sweep (cron135): malformed destinations cover token unpack failure, but a frozen
 // initialized SPL account reaches the distinct account-state branch after terminal insurance and
 // the optional ledger have already been debited. The rejected call must roll back those debits and
