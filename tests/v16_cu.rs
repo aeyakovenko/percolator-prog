@@ -11555,6 +11555,100 @@ fn v16_attack_resolved_permissionless_crank_closes_without_live_hint_parsing() {
     assert_eq!(account.capital.get(), 0);
 }
 
+// LoF/DoS sweep (cron135): the resolved PermissionlessCrank opcode is now the public keeper
+// wind-down route. Its resolved-mode forwarder must not bypass the owner exit window before
+// falling into CloseResolved; hostile live-mode hints are still ignored only after that auth gate.
+#[test]
+fn v16_attack_resolved_permissionless_crank_honors_owner_exit_window() {
+    let mut env = V16CuEnv::new();
+    env.configure_permissionless_resolve_with_cu(100, 5);
+    let owner = Keypair::new();
+    let portfolio = env.create_portfolio(&owner);
+    env.deposit(&owner, portfolio, 1_000);
+    env.resolve();
+
+    let dest = env.token_account(owner.pubkey(), 0);
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let portfolio_before = env.svm.get_account(&portfolio).unwrap();
+    let dest_before = env.svm.get_account(&dest).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    let crank_ix = ProgInstruction::PermissionlessCrank {
+        now_slot: u64::MAX,
+        close_q: u128::MAX,
+        observations: vec![CrankObservationHint {
+            asset_index: u16::MAX,
+            oracle_accounts: u8::MAX,
+        }],
+    };
+
+    env.svm.expire_blockhash();
+    let unsigned = env.send(
+        crank_ix.clone(),
+        vec![
+            AccountMeta::new_readonly(owner.pubkey(), false),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio, false),
+            AccountMeta::new(dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[],
+    );
+    assert!(
+        unsigned.is_err(),
+        "resolved PermissionlessCrank must not bypass the owner exit window"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "unsigned resolved crank must not mutate resolved market accounting"
+    );
+    assert_eq!(
+        env.svm.get_account(&portfolio).unwrap(),
+        portfolio_before,
+        "unsigned resolved crank must not burn the owner's payout state"
+    );
+    assert_eq!(
+        env.svm.get_account(&dest).unwrap(),
+        dest_before,
+        "unsigned resolved crank must not pay the destination"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        vault_before,
+        "unsigned resolved crank must not move vault tokens"
+    );
+
+    env.svm.expire_blockhash();
+    let signed = env
+        .send(
+            crank_ix,
+            vec![
+                AccountMeta::new_readonly(owner.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(portfolio, false),
+                AccountMeta::new(dest, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(env.vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[&owner],
+        )
+        .expect("owner-signed resolved PermissionlessCrank works during exit window");
+    assert_cu_within(
+        "Resolved PermissionlessCrank owner exit window",
+        signed,
+        CRANK_CU_LIMIT,
+    );
+    assert_eq!(
+        env.token_amount(dest),
+        1_000,
+        "owner-signed resolved crank recovers the payout during the exit window"
+    );
+    assert_eq!(env.token_amount(env.vault), 0);
+}
+
 #[test]
 fn v16_bpf_failed_close_resolved_transfer_rolls_back_payout_state() {
     let mut env = V16CuEnv::new();
