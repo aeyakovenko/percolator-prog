@@ -36565,6 +36565,108 @@ fn v16_attack_withdraw_to_noninitialized_dest_rejected() {
     );
 }
 
+// full-interface sweep: live Withdraw debits engine capital before the signed SPL payout. A
+// SPL-owned but malformed destination or canonical vault must therefore reject in wrapper preflight,
+// before the engine debit, and the same withdrawal must remain live once the bad account is fixed.
+#[test]
+fn v16_attack_withdraw_rejects_malformed_token_accounts_before_debit() {
+    #[derive(Clone, Copy)]
+    enum MalformedSlot {
+        Dest,
+        Vault,
+    }
+
+    for slot in [MalformedSlot::Dest, MalformedSlot::Vault] {
+        let mut env = V16CuEnv::new();
+        let owner = Keypair::new();
+        let p = env.create_portfolio(&owner);
+        env.deposit(&owner, p, 1_000_000);
+        let dest = env.token_account(owner.pubkey(), 0);
+        let malformed_key = match slot {
+            MalformedSlot::Dest => dest,
+            MalformedSlot::Vault => env.vault,
+        };
+        let good_malformed_slot = env.svm.get_account(&malformed_key).unwrap();
+        env.svm
+            .set_account(
+                malformed_key,
+                Account {
+                    data: vec![0u8; TokenAccount::LEN - 1],
+                    ..good_malformed_slot.clone()
+                },
+            )
+            .unwrap();
+
+        let market_before = env.svm.get_account(&env.market).unwrap();
+        let portfolio_before = env.svm.get_account(&p).unwrap();
+        let dest_before = env.svm.get_account(&dest).unwrap();
+        let vault_before = env.svm.get_account(&env.vault).unwrap();
+
+        env.svm.expire_blockhash();
+        let rejected = env.send(
+            ProgInstruction::Withdraw { amount: 500_000 },
+            vec![
+                AccountMeta::new(owner.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(p, false),
+                AccountMeta::new(dest, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(env.vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[&owner],
+        );
+        assert!(
+            rejected.is_err(),
+            "Withdraw must reject a malformed destination or vault before engine debit"
+        );
+        assert_eq!(
+            env.svm.get_account(&env.market).unwrap(),
+            market_before,
+            "malformed withdraw rejection leaves market accounting unchanged"
+        );
+        assert_eq!(
+            env.svm.get_account(&p).unwrap(),
+            portfolio_before,
+            "malformed withdraw rejection leaves portfolio capital unchanged"
+        );
+        assert_eq!(
+            env.svm.get_account(&dest).unwrap(),
+            dest_before,
+            "malformed withdraw rejection pays no destination tokens"
+        );
+        assert_eq!(
+            env.svm.get_account(&env.vault).unwrap(),
+            vault_before,
+            "malformed withdraw rejection leaves vault custody unchanged"
+        );
+
+        env.svm
+            .set_account(malformed_key, good_malformed_slot)
+            .unwrap();
+        env.svm.expire_blockhash();
+        let ok = env
+            .send(
+                ProgInstruction::Withdraw { amount: 500_000 },
+                vec![
+                    AccountMeta::new(owner.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(p, false),
+                    AccountMeta::new(dest, false),
+                    AccountMeta::new(env.vault, false),
+                    AccountMeta::new_readonly(env.vault_authority, false),
+                    AccountMeta::new_readonly(spl_token::ID, false),
+                ],
+                &[&owner],
+            )
+            .expect("Withdraw remains live after malformed-token rejection");
+        assert_cu_within("Withdraw malformed-token retry", ok, CUSTODY_CU_LIMIT);
+        assert_eq!(env.portfolio_state(p).capital.get(), 500_000);
+        assert_eq!(env.token_amount(dest), 500_000);
+        assert_eq!(env.token_amount(env.vault), 500_000);
+    }
+}
+
 // security.md sweep — vault_authority PDA validation (#44): the withdraw must verify the passed
 // vault_authority account is the canonical derived PDA (expect_key). A wrong/attacker-chosen
 // vault_authority must reject — otherwise a controlled authority could sign the vault transfer.
