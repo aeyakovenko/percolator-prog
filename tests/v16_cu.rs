@@ -67617,6 +67617,126 @@ fn v16_attack_hybrid_liquidation_bad_reward_tail_rolls_back_oracle_update() {
     assert_eq!(group.assets[0].raw_oracle_target_price, 2_000_000);
 }
 
+// LoF/DoS sweep (cron135): an authorized legacy reward tail is grown before
+// the crank parses oracle observations. A malformed oracle must roll that
+// growth back in live mode, and the same call shape must remain retryable with
+// a valid oracle.
+#[test]
+fn v16_attack_live_crank_bad_oracle_rolls_back_legacy_reward_realloc() {
+    let mut env = V16CuEnv::new_with_init_params(production_risk_params());
+    env.update_liquidation_fee_policy_with_cu(5_000);
+    set_test_clock(&mut env, 1, 100);
+    let feed = [0xabu8; 32];
+    let initial_oracle = env.set_pyth_price_with_conf(&feed, 1_000_000, -6, 0, 100);
+    env.try_configure_hybrid_asset_with_conf_filter_cu(
+        0,
+        1,
+        0,
+        [feed, [0u8; 32], [0u8; 32]],
+        &[initial_oracle],
+        1,
+        100,
+        0,
+        0,
+        10,
+        0,
+    )
+    .expect("configure hybrid oracle");
+
+    let target_owner = Keypair::new();
+    let reward_owner = Keypair::new();
+    let target = env.create_portfolio(&target_owner);
+    let reward = env.create_portfolio(&reward_owner);
+    let mut legacy_reward = env.svm.get_account(&reward).unwrap();
+    legacy_reward.data.truncate(PORTFOLIO_ENGINE_ACCOUNT_LEN);
+    env.svm.set_account(reward, legacy_reward).unwrap();
+    assert_eq!(
+        env.svm.get_account(&reward).unwrap().data.len(),
+        PORTFOLIO_ENGINE_ACCOUNT_LEN,
+        "test setup simulates a legacy reward portfolio"
+    );
+
+    set_test_clock(&mut env, 2, 101);
+    let wrong_feed_oracle = env.set_pyth_price_with_conf(&[0xac; 32], 2_000_000, -6, 0, 101);
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let target_before = env.svm.get_account(&target).unwrap();
+    let reward_before = env.svm.get_account(&reward).unwrap();
+
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 2,
+            close_q: POS_SCALE,
+            observations: crank_observations_with_accounts(0, 1),
+        },
+        vec![
+            AccountMeta::new(reward_owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(target, false),
+            AccountMeta::new_readonly(wrong_feed_oracle, false),
+            AccountMeta::new(reward, false),
+        ],
+        &[&reward_owner],
+    );
+    let err = rejected.expect_err("wrong-feed live crank must reject after reward preflight");
+    assert!(
+        err.contains("Custom(26)") || err.contains("Custom(29)"),
+        "wrong-feed live crank should fail in oracle-tail validation, got {err}"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "wrong-feed live crank rolls back staged oracle/profile writes"
+    );
+    assert_eq!(
+        env.svm.get_account(&target).unwrap(),
+        target_before,
+        "wrong-feed live crank does not mutate the target portfolio"
+    );
+    assert_eq!(
+        env.svm.get_account(&reward).unwrap(),
+        reward_before,
+        "wrong-feed live crank rolls back legacy reward-account growth"
+    );
+    assert_eq!(
+        env.svm.get_account(&reward).unwrap().data.len(),
+        PORTFOLIO_ENGINE_ACCOUNT_LEN,
+        "failed live crank leaves the reward account legacy-sized"
+    );
+
+    let valid_oracle = env.set_pyth_price_with_conf(&feed, 1_010_000, -6, 0, 101);
+    env.svm.expire_blockhash();
+    let accepted = env.send(
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 2,
+            close_q: 0,
+            observations: crank_observations_with_accounts(0, 1),
+        },
+        vec![
+            AccountMeta::new(reward_owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(target, false),
+            AccountMeta::new_readonly(valid_oracle, false),
+            AccountMeta::new(reward, false),
+        ],
+        &[&reward_owner],
+    );
+    assert!(
+        accepted.is_ok(),
+        "valid oracle retry remains live after rollback: {accepted:?}"
+    );
+    assert_eq!(
+        env.svm.get_account(&reward).unwrap().data.len(),
+        env.portfolio_account_len,
+        "valid retry grows the authorized legacy reward tail"
+    );
+    assert_eq!(
+        env.market_state().1.assets[0].raw_oracle_target_price,
+        1_010_000,
+        "valid retry commits the oracle update"
+    );
+}
+
 // [from pr114]
 // full-interface sweep: live asset-0 insurance withdrawal must follow the current hot
 // insurance_operator, not stale marketauth/asset-admin privilege. This is value-moving: after the
