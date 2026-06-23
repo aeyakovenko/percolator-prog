@@ -46,7 +46,7 @@ pub mod constants {
     pub const KIND_INSURANCE_LEDGER: u8 = 4;
 
     pub const HEADER_LEN: usize = 16;
-    pub const WRAPPER_CONFIG_LEN: usize = 448;
+    pub const WRAPPER_CONFIG_LEN: usize = 432;
     pub const ASSET_ORACLE_PROFILE_LEN: usize = 400;
     pub const ASSET_ORACLE_WRAPPER_LEN: usize = 512;
     pub const MARKET_GROUP_LEN: usize = size_of::<MarketGroupV16HeaderAccount>();
@@ -547,8 +547,6 @@ pub mod state {
         pub backing_trade_fee_insurance_share_bps_long: u16,
         pub backing_trade_fee_insurance_share_bps_short: u16,
         pub fee_redirect_to_market_0_bps: u16,
-        pub matcher_req_seq: u64,
-        pub _padding1: [u8; 8],
     }
 
     #[repr(C)]
@@ -654,7 +652,8 @@ pub mod state {
         pub matcher_program: [u8; 32],
         pub matcher_context: [u8; 32],
         pub matcher_delegate: [u8; 32],
-        pub enabled: u64,
+        /// Monotonic per-LP matcher request sequence. A zero matcher tuple is disabled.
+        pub matcher_req_seq: u64,
     }
 
     pub type AssetOracleStorageV16 = [u8; ASSET_ORACLE_WRAPPER_LEN];
@@ -759,9 +758,6 @@ pub mod state {
                 .get(..config_len)
                 .ok_or(PercolatorError::InvalidAccountLen)?,
         );
-        if cfg.enabled > 1 {
-            return Err(ProgramError::InvalidAccountData);
-        }
         Ok(cfg)
     }
 
@@ -771,9 +767,6 @@ pub mod state {
         cfg: &PortfolioMatcherConfigV16,
     ) -> Result<(), ProgramError> {
         check_header(data, KIND_PORTFOLIO)?;
-        if cfg.enabled > 1 {
-            return Err(ProgramError::InvalidAccountData);
-        }
         let bytes = matcher_config_bytes_mut(data)?;
         for b in bytes.iter_mut() {
             *b = 0;
@@ -965,7 +958,6 @@ pub mod state {
             || config.conf_filter_bps > 10_000
             || config.invert > 1
             || config._padding0 != 0
-            || config._padding1 != [0u8; 8]
             || config.fee_redirect_to_market_0_bps > 10_000
             || config.oracle_leg_count as usize > ORACLE_LEG_CAP
             || (config.oracle_leg_flags & !ORACLE_LEG_FLAGS_MASK) != 0
@@ -1373,15 +1365,26 @@ pub mod state {
         write_wrapper_config_to_bytes(data, config)
     }
 
-    pub fn bump_matcher_req_seq(data: &mut [u8]) -> Result<u64, ProgramError> {
-        check_header(data, KIND_MARKET)?;
-        let mut config = read_wrapper_config_from_bytes(data)?;
+    pub fn bump_portfolio_matcher_req_seq(
+        data: &mut [u8],
+        matcher_program: &[u8; 32],
+        matcher_context: &[u8; 32],
+        matcher_delegate: &[u8; 32],
+    ) -> Result<u64, ProgramError> {
+        check_header(data, KIND_PORTFOLIO)?;
+        let mut config = read_portfolio_matcher_config(data)?;
+        if config.matcher_program != *matcher_program
+            || config.matcher_context != *matcher_context
+            || config.matcher_delegate != *matcher_delegate
+        {
+            return Err(PercolatorError::Unauthorized.into());
+        }
         config.matcher_req_seq = config
             .matcher_req_seq
             .checked_add(1)
             .ok_or(PercolatorError::InvalidInstruction)?;
         let req_id = config.matcher_req_seq;
-        write_wrapper_config_to_bytes(data, &config)?;
+        write_portfolio_matcher_config(data, &config)?;
         Ok(req_id)
     }
 
@@ -5532,8 +5535,6 @@ pub mod processor {
             backing_trade_fee_insurance_share_bps_long: 0,
             backing_trade_fee_insurance_share_bps_short: 0,
             fee_redirect_to_market_0_bps: 0,
-            matcher_req_seq: 0,
-            _padding1: [0u8; 8],
         };
         state::init_market_account_zero_copy(
             &mut market_ai.try_borrow_mut_data()?,
@@ -6408,14 +6409,27 @@ pub mod processor {
         matcher_delegate_key: &Pubkey,
     ) -> Result<usize, ProgramError> {
         let cfg = state::read_portfolio_matcher_config(&account_b_ai.try_borrow_data()?)?;
-        if cfg.enabled != 1
-            || cfg.matcher_program != matcher_prog_key.to_bytes()
+        if cfg.matcher_program != matcher_prog_key.to_bytes()
             || cfg.matcher_context != matcher_ctx_key.to_bytes()
             || cfg.matcher_delegate != matcher_delegate_key.to_bytes()
         {
             return Err(PercolatorError::Unauthorized.into());
         }
         Ok(7)
+    }
+
+    fn bump_lp_matcher_req_id(
+        account_b_ai: &AccountInfo<'_>,
+        matcher_prog_key: &Pubkey,
+        matcher_ctx_key: &Pubkey,
+        matcher_delegate_key: &Pubkey,
+    ) -> Result<u64, ProgramError> {
+        state::bump_portfolio_matcher_req_seq(
+            &mut account_b_ai.try_borrow_mut_data()?,
+            &matcher_prog_key.to_bytes(),
+            &matcher_ctx_key.to_bytes(),
+            &matcher_delegate_key.to_bytes(),
+        )
     }
 
     fn validate_matcher_tail<'a>(
@@ -6568,10 +6582,12 @@ pub mod processor {
             max_market_slots,
             &cpi_requests,
         )?;
-        let req_id = {
-            let mut market_data = market_ai.try_borrow_mut_data()?;
-            state::bump_matcher_req_seq(&mut market_data)?
-        };
+        let req_id = bump_lp_matcher_req_id(
+            account_b_ai,
+            matcher_prog.key,
+            matcher_ctx.key,
+            matcher_delegate.key,
+        )?;
         let lp_account_id = matcher_lp_account_id(&delegate);
 
         invoke_matcher(
@@ -6665,8 +6681,15 @@ pub mod processor {
         if lp_portfolio_ai.data_len() < required_len {
             lp_portfolio_ai.realloc(required_len, true)?;
         }
+        let matcher_req_seq =
+            state::read_portfolio_matcher_config(&lp_portfolio_ai.try_borrow_data()?)
+                .map(|cfg| cfg.matcher_req_seq)
+                .unwrap_or(0);
         let cfg = if enabled == 0 {
-            state::PortfolioMatcherConfigV16::default()
+            state::PortfolioMatcherConfigV16 {
+                matcher_req_seq,
+                ..state::PortfolioMatcherConfigV16::default()
+            }
         } else {
             let matcher_prog = account(accounts, 3)?;
             let matcher_ctx = account(accounts, 4)?;
@@ -6692,7 +6715,7 @@ pub mod processor {
                 matcher_program: matcher_prog.key.to_bytes(),
                 matcher_context: matcher_ctx.key.to_bytes(),
                 matcher_delegate: matcher_delegate.key.to_bytes(),
-                enabled: 1,
+                matcher_req_seq,
             }
         };
         state::write_portfolio_matcher_config(&mut lp_portfolio_ai.try_borrow_mut_data()?, &cfg)
@@ -6904,10 +6927,6 @@ pub mod processor {
             return Err(PercolatorError::InvalidInstruction.into());
         }
 
-        let req_id = {
-            let mut market_data = market_ai.try_borrow_mut_data()?;
-            state::bump_matcher_req_seq(&mut market_data)?
-        };
         let lp_account_id = matcher_lp_account_id(&delegate);
 
         // Build the matcher batch request: per leg, (asset, that asset's oracle price, signed size).
@@ -6926,6 +6945,12 @@ pub mod processor {
             account_b_ai,
             max_market_slots,
             &cpi_requests,
+        )?;
+        let req_id = bump_lp_matcher_req_id(
+            account_b_ai,
+            matcher_prog.key,
+            matcher_ctx.key,
+            matcher_delegate.key,
         )?;
 
         // Force the batch matcher to emit fresh return data for this CPI.

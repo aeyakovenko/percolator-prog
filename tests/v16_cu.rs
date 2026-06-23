@@ -8,7 +8,7 @@ use percolator_prog::{
     constants::{
         ASSET_ORACLE_WRAPPER_LEN, MARKET_GROUP_OFF, MATCHER_ABI_VERSION, MATCHER_CONTEXT_MIN_LEN,
         ORACLE_LEG_FLAG_DIVIDE_LEG2, ORACLE_LEG_FLAG_DIVIDE_LEG3, ORACLE_MODE_AUTH_MARK,
-        PORTFOLIO_ENGINE_ACCOUNT_LEN,
+        PORTFOLIO_ENGINE_ACCOUNT_LEN, WRAPPER_CONFIG_LEN,
     },
     ix::{BatchTradeCpiLeg, BatchTradeLeg, CrankObservationHint, Instruction as ProgInstruction},
     oracle_v16, processor, state,
@@ -1249,6 +1249,17 @@ impl V16CuEnv {
     fn portfolio_matcher_config(&self, portfolio: Pubkey) -> state::PortfolioMatcherConfigV16 {
         let account = self.svm.get_account(&portfolio).expect("portfolio account");
         state::read_portfolio_matcher_config(&account.data).unwrap()
+    }
+
+    fn mutate_portfolio_matcher_config<F>(&mut self, portfolio: Pubkey, f: F)
+    where
+        F: FnOnce(&mut state::PortfolioMatcherConfigV16),
+    {
+        let mut account = self.svm.get_account(&portfolio).expect("portfolio account");
+        let mut cfg = state::read_portfolio_matcher_config(&account.data).unwrap();
+        f(&mut cfg);
+        state::write_portfolio_matcher_config(&mut account.data, &cfg).unwrap();
+        self.svm.set_account(portfolio, account).unwrap();
     }
 
     fn mutate_market<F>(&mut self, f: F)
@@ -22618,7 +22629,7 @@ fn v16_attack_disabled_lp_matcher_config_blocks_cpi_fills() {
     env.set_matcher_config(matcher_program, &lp_owner, lp, ctx, delegate, 0);
     let auth_state = env.portfolio_matcher_config(lp);
     assert_eq!(
-        auth_state.enabled, 0,
+        auth_state.matcher_req_seq, 0,
         "LP owner revoked unsigned matcher fills"
     );
     let market_before = env.svm.get_account(&env.market).unwrap();
@@ -22746,9 +22757,12 @@ fn v16_attack_non_owner_cannot_change_lp_matcher_config() {
     assert_eq!(env.svm.get_account(&ctx).unwrap(), ctx_before);
     let auth_state = env.portfolio_matcher_config(lp);
     assert_eq!(
-        auth_state.enabled, 1,
+        auth_state.matcher_req_seq, 0,
         "LP matcher config remains enabled after attacker attempt"
     );
+    assert_eq!(auth_state.matcher_program, matcher_program.to_bytes());
+    assert_eq!(auth_state.matcher_context, ctx.to_bytes());
+    assert_eq!(auth_state.matcher_delegate, delegate.to_bytes());
 
     env.svm.expire_blockhash();
     let ok = env.try_trade_cpi_with_cu_on_asset(
@@ -23186,7 +23200,7 @@ fn v16_attack_set_lp_matcher_config_cannot_target_protocol_accounts() {
     env.set_matcher_config(matcher_program, &lp_owner, lp, ctx, delegate, 1);
     let auth_state = env.portfolio_matcher_config(lp);
     assert_eq!(
-        auth_state.enabled, 1,
+        auth_state.matcher_req_seq, 0,
         "a real LP account stores the matcher program/context config"
     );
     assert_eq!(auth_state.matcher_program, matcher_program.to_bytes());
@@ -23266,7 +23280,7 @@ fn v16_attack_matcher_config_and_fills_reject_self_program_context() {
             matcher_program: env.program_id.to_bytes(),
             matcher_context: env.market.to_bytes(),
             matcher_delegate: self_delegate.to_bytes(),
-            enabled: 1,
+            matcher_req_seq: 0,
         },
     )
     .expect("inject stale self-matcher config for fill-time guard");
@@ -23403,7 +23417,7 @@ fn v16_attack_set_matcher_config_reallocs_legacy_lp_portfolio_safely() {
         "SetMatcherConfig must realloc legacy LP storage before writing the matcher tail"
     );
     let auth_state = env.portfolio_matcher_config(lp);
-    assert_eq!(auth_state.enabled, 1);
+    assert_eq!(auth_state.matcher_req_seq, 0);
     assert_eq!(auth_state.matcher_program, matcher_program.to_bytes());
     assert_eq!(auth_state.matcher_context, ctx.to_bytes());
     assert_eq!(auth_state.matcher_delegate, delegate.to_bytes());
@@ -23539,7 +23553,7 @@ fn v16_attack_set_matcher_config_bad_legacy_context_rolls_back_realloc() {
         "valid SetMatcherConfig still grows the legacy LP storage"
     );
     let auth_state = env.portfolio_matcher_config(lp);
-    assert_eq!(auth_state.enabled, 1);
+    assert_eq!(auth_state.matcher_req_seq, 0);
     assert_eq!(auth_state.matcher_program, matcher_program.to_bytes());
     assert_eq!(auth_state.matcher_context, ctx.to_bytes());
     assert_eq!(auth_state.matcher_delegate, delegate.to_bytes());
@@ -61295,6 +61309,27 @@ fn v16_attack_hostile_matcher_no_write_cannot_replay_stale_batch_return_data() {
 }
 
 #[test]
+fn v16_attack_matcher_nonce_does_not_shift_v16_market_engine_layout() {
+    let env = V16CuEnv::new();
+    assert_eq!(
+        WRAPPER_CONFIG_LEN, 432,
+        "matcher freshness state must not grow the v16 market wrapper config"
+    );
+    assert_eq!(
+        MARKET_GROUP_OFF,
+        16 + 432,
+        "v16 engine header offset must stay compatible with existing market accounts"
+    );
+    let market_data = env.svm.get_account(&env.market).unwrap().data;
+    let (_, group) = state::read_market(&market_data).expect("market decodes at stable v16 offset");
+    assert_eq!(group.config.max_market_slots, 1);
+    assert_eq!(
+        group.assets[0].effective_price, 100,
+        "the embedded engine header/assets must still decode at MARKET_GROUP_OFF"
+    );
+}
+
+#[test]
 fn v16_attack_batch_cpi_two_fresh_fills_same_transaction_stay_live() {
     let mut env = V16CuEnv::new_with_market_params_and_price_move(2, 1_000, 1_000, 500);
     env.configure_auth_mark_for_asset_as_admin(0, 1, 100);
@@ -61354,9 +61389,9 @@ fn v16_attack_batch_cpi_two_fresh_fills_same_transaction_stay_live() {
 
     let taker_after = env.portfolio_state(taker);
     assert_eq!(
-        env.market_state().0.matcher_req_seq,
+        env.portfolio_matcher_config(lp).matcher_req_seq,
         2,
-        "each same-transaction batch matcher call must receive a fresh market request id"
+        "each same-transaction batch matcher call must receive a fresh LP request id"
     );
     assert_eq!(
         active_leg_for_asset(&taker_after, 0).basis_pos_q,
@@ -61416,16 +61451,16 @@ fn v16_attack_batch_cpi_matcher_req_id_never_wraps() {
         ]
     };
 
-    env.mutate_market(|cfg, _| {
+    env.mutate_portfolio_matcher_config(lp, |cfg| {
         cfg.matcher_req_seq = u64::MAX - 1;
     });
     env.svm.expire_blockhash();
     env.send(batch_ix.clone(), accounts(), &[&taker_owner])
         .expect("batch matcher fill at the final u64 request id still succeeds");
     assert_eq!(
-        env.market_state().0.matcher_req_seq,
+        env.portfolio_matcher_config(lp).matcher_req_seq,
         u64::MAX,
-        "final successful batch matcher fill should consume the maximum request id"
+        "final successful batch matcher fill should consume the maximum LP request id"
     );
 
     let market_before = env.svm.get_account(&env.market).unwrap();
@@ -61569,6 +61604,125 @@ fn v16_attack_hostile_matcher_no_write_cannot_replay_stale_single_context() {
 }
 
 #[test]
+fn v16_attack_matcher_reenable_preserves_req_id_against_stale_context() {
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(1, 1_000, 1_000, 500);
+    env.configure_auth_mark_for_asset_as_admin(0, 1, 100);
+    let hostile = Pubkey::new_unique();
+    env.svm.add_program(
+        hostile,
+        &std::fs::read(hostile_matcher_program_path()).unwrap(),
+    );
+    let taker = Keypair::new();
+    let lp = Keypair::new();
+    let taker_account = env.create_portfolio(&taker);
+    let lp_account = env.create_portfolio(&lp);
+    env.deposit(&taker, taker_account, 10_000_000);
+    env.deposit(&lp, lp_account, 10_000_000);
+    let ctx = Pubkey::new_unique();
+    let delegate = matcher_delegate_key(
+        &env.program_id,
+        &env.market,
+        &lp_account,
+        &lp.pubkey(),
+        &hostile,
+        &ctx,
+    );
+    env.svm
+        .set_account(
+            delegate,
+            Account {
+                lamports: 1_000_000_000,
+                data: vec![],
+                owner: Pubkey::default(),
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    let mut ctx_data = vec![0u8; MATCHER_CONTEXT_LEN];
+    ctx_data[0] = 10; // accepted flagged partial; writes a valid response into ctx[0..64]
+    env.svm
+        .set_account(
+            ctx,
+            Account {
+                lamports: 1_000_000_000,
+                data: ctx_data,
+                owner: hostile,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    env.set_matcher_config(hostile, &lp, lp_account, ctx, delegate, 1);
+
+    env.try_trade_cpi_with_cu_on_asset(
+        &taker,
+        taker_account,
+        &lp,
+        lp_account,
+        hostile,
+        ctx,
+        delegate,
+        0,
+        POS_SCALE as i128,
+        100,
+    )
+    .expect("first hostile matcher call writes a valid response");
+    assert_eq!(env.portfolio_matcher_config(lp_account).matcher_req_seq, 1);
+    assert_eq!(
+        u64::from_le_bytes(
+            env.svm.get_account(&ctx).unwrap().data[32..40]
+                .try_into()
+                .unwrap()
+        ),
+        1,
+        "test setup leaves a stale valid matcher response in ctx[0..64]"
+    );
+    let mut stale_no_write_ctx = env.svm.get_account(&ctx).unwrap();
+    stale_no_write_ctx.data[64] = 13;
+    stale_no_write_ctx.data[65] = 1;
+    env.svm.set_account(ctx, stale_no_write_ctx).unwrap();
+
+    env.set_matcher_config(hostile, &lp, lp_account, ctx, delegate, 0);
+    let disabled = env.portfolio_matcher_config(lp_account);
+    assert_eq!(disabled.matcher_req_seq, 1);
+    assert_eq!(disabled.matcher_program, [0u8; 32]);
+
+    env.set_matcher_config(hostile, &lp, lp_account, ctx, delegate, 1);
+    assert_eq!(
+        env.portfolio_matcher_config(lp_account).matcher_req_seq,
+        1,
+        "re-enabling a matcher must not reset the consumed request sequence"
+    );
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let taker_before = env.svm.get_account(&taker_account).unwrap();
+    let lp_before = env.svm.get_account(&lp_account).unwrap();
+    let ctx_before = env.svm.get_account(&ctx).unwrap();
+    env.svm.expire_blockhash();
+    let replay = env.try_trade_cpi_with_cu_on_asset(
+        &taker,
+        taker_account,
+        &lp,
+        lp_account,
+        hostile,
+        ctx,
+        delegate,
+        0,
+        POS_SCALE as i128,
+        100,
+    );
+    assert!(
+        replay.is_err(),
+        "re-enabled matcher must not make stale ctx[0..64] valid again: {replay:?}"
+    );
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+    assert_eq!(env.svm.get_account(&taker_account).unwrap(), taker_before);
+    assert_eq!(env.svm.get_account(&lp_account).unwrap(), lp_before);
+    assert_eq!(env.svm.get_account(&ctx).unwrap(), ctx_before);
+}
+
+#[test]
 fn v16_attack_tradecpi_two_fresh_fills_same_transaction_stay_live() {
     let mut env = V16CuEnv::new_with_market_params_and_price_move(1, 1_000, 1_000, 500);
     env.configure_auth_mark_for_asset_as_admin(0, 1, 100);
@@ -61621,7 +61775,7 @@ fn v16_attack_tradecpi_two_fresh_fills_same_transaction_stay_live() {
         2,
         "second same-transaction matcher call must receive a fresh request id"
     );
-    assert_eq!(env.market_state().0.matcher_req_seq, 2);
+    assert_eq!(env.portfolio_matcher_config(lp).matcher_req_seq, 2);
     assert_eq!(
         leg(&env.portfolio_state(taker), 0).basis_pos_q,
         2 * size_q,
@@ -61630,7 +61784,7 @@ fn v16_attack_tradecpi_two_fresh_fills_same_transaction_stay_live() {
 }
 
 #[test]
-fn v16_attack_tradecpi_matcher_req_id_advances_monotonically_on_market() {
+fn v16_attack_tradecpi_matcher_req_id_advances_monotonically_on_lp_config() {
     let mut env = V16CuEnv::new_with_market_params_and_price_move(1, 1_000, 1_000, 500);
     env.configure_auth_mark_for_asset_as_admin(0, 1, 100);
     let matcher_program = Pubkey::new_unique();
@@ -61664,9 +61818,9 @@ fn v16_attack_tradecpi_matcher_req_id_advances_monotonically_on_market() {
     assert_eq!(
         read_ctx_req_id(&env),
         1,
-        "first matcher fill should use market request sequence 1"
+        "first matcher fill should use LP request sequence 1"
     );
-    assert_eq!(env.market_state().0.matcher_req_seq, 1);
+    assert_eq!(env.portfolio_matcher_config(lp).matcher_req_seq, 1);
 
     env.svm.expire_blockhash();
     env.try_trade_cpi_with_cu_on_asset(
@@ -61685,9 +61839,9 @@ fn v16_attack_tradecpi_matcher_req_id_advances_monotonically_on_market() {
     assert_eq!(
         read_ctx_req_id(&env),
         2,
-        "second matcher fill should use the next market request sequence"
+        "second matcher fill should use the next LP request sequence"
     );
-    assert_eq!(env.market_state().0.matcher_req_seq, 2);
+    assert_eq!(env.portfolio_matcher_config(lp).matcher_req_seq, 2);
 }
 
 #[test]
@@ -61709,7 +61863,7 @@ fn v16_attack_tradecpi_matcher_req_id_never_wraps() {
         u64::from_le_bytes(ctx_data[32..40].try_into().unwrap())
     };
 
-    env.mutate_market(|cfg, _| {
+    env.mutate_portfolio_matcher_config(lp, |cfg| {
         cfg.matcher_req_seq = u64::MAX - 1;
     });
     env.try_trade_cpi_with_cu_on_asset(
@@ -61730,7 +61884,7 @@ fn v16_attack_tradecpi_matcher_req_id_never_wraps() {
         u64::MAX,
         "final successful matcher fill should use the maximum request id"
     );
-    assert_eq!(env.market_state().0.matcher_req_seq, u64::MAX);
+    assert_eq!(env.portfolio_matcher_config(lp).matcher_req_seq, u64::MAX);
 
     let market_before = env.svm.get_account(&env.market).unwrap();
     let taker_before = env.svm.get_account(&taker).unwrap();
@@ -61810,13 +61964,13 @@ fn v16_attack_tradecpi_matcher_req_id_survives_market_config_writes() {
     )
     .expect("first matcher fill succeeds");
     assert_eq!(read_ctx_req_id(&env), 1);
-    assert_eq!(env.market_state().0.matcher_req_seq, 1);
+    assert_eq!(env.portfolio_matcher_config(lp).matcher_req_seq, 1);
 
     env.update_liquidation_fee_policy_with_cu(250);
     assert_eq!(
-        env.market_state().0.matcher_req_seq,
+        env.portfolio_matcher_config(lp).matcher_req_seq,
         1,
-        "unrelated market config writes must not reset matcher freshness sequence"
+        "unrelated market config writes must not reset LP matcher freshness sequence"
     );
 
     env.svm.expire_blockhash();
@@ -61838,7 +61992,7 @@ fn v16_attack_tradecpi_matcher_req_id_survives_market_config_writes() {
         2,
         "matcher req id must keep advancing across market config writes"
     );
-    assert_eq!(env.market_state().0.matcher_req_seq, 2);
+    assert_eq!(env.portfolio_matcher_config(lp).matcher_req_seq, 2);
 }
 
 // DoS/manipulation rate-limit: PushEwmaMark feeds a SMOOTHED mark (EWMA over dt slots). A mark
@@ -70522,7 +70676,7 @@ fn v16_attack_lp_can_disable_broken_matcher_config_without_external_accounts() {
     let (ctx, delegate, _) = env.init_auth_matcher_context(matcher_program, &lp_owner, lp);
 
     let enabled_cfg = env.portfolio_matcher_config(lp);
-    assert_eq!(enabled_cfg.enabled, 1);
+    assert_eq!(enabled_cfg.matcher_req_seq, 0);
     assert_eq!(enabled_cfg.matcher_program, matcher_program.to_bytes());
     assert_eq!(enabled_cfg.matcher_context, ctx.to_bytes());
     assert_eq!(enabled_cfg.matcher_delegate, delegate.to_bytes());
