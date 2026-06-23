@@ -68821,6 +68821,105 @@ fn v16_attack_deposit_rejects_delegated_canonical_vault_before_credit() {
     assert_eq!(env.portfolio_state(portfolio).capital.get(), 100);
 }
 
+// LoF/DoS sweep (cron135): Deposit uses the inbound `verify_vault_token_account` rail, distinct from
+// withdraw's `verify_withdrawable_token_accounts`. Pin the close-authority branch here: a canonical
+// vault that can be closed out-of-band must reject before user tokens are pulled or capital is credited.
+#[test]
+fn v16_attack_deposit_rejects_closable_canonical_vault_before_credit() {
+    let mut env = V16CuEnv::new();
+    let owner = Keypair::new();
+    let portfolio = env.create_portfolio(&owner);
+    let source = env.token_account_for_mint(env.mint, owner.pubkey(), 100);
+
+    env.svm
+        .set_account(
+            env.vault,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_closable_token_data(env.mint, env.vault_authority, 0),
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let portfolio_before = env.svm.get_account(&portfolio).unwrap();
+    let source_before = env.svm.get_account(&source).unwrap();
+    let closable_vault_before = env.svm.get_account(&env.vault).unwrap();
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::Deposit { amount: 100 },
+        vec![
+            AccountMeta::new(owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio, false),
+            AccountMeta::new(source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&owner],
+    );
+    assert!(
+        rejected.is_err(),
+        "Deposit must reject a canonical vault with close_authority set"
+    );
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+    assert_eq!(
+        env.svm.get_account(&portfolio).unwrap(),
+        portfolio_before,
+        "closable-vault deposit reject must not credit or grow the portfolio"
+    );
+    assert_eq!(
+        env.svm.get_account(&source).unwrap(),
+        source_before,
+        "closable-vault deposit reject pulls no user tokens"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        closable_vault_before,
+        "closable canonical vault remains byte-identical"
+    );
+    let (_, group_after_reject) = env.market_state();
+    assert_eq!(group_after_reject.c_tot, 0);
+    assert_eq!(group_after_reject.vault, 0);
+    assert_eq!(env.portfolio_state(portfolio).capital.get(), 0);
+
+    env.svm
+        .set_account(
+            env.vault,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_token_data(env.mint, env.vault_authority, 0),
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    env.svm.expire_blockhash();
+    env.send(
+        ProgInstruction::Deposit { amount: 100 },
+        vec![
+            AccountMeta::new(owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio, false),
+            AccountMeta::new(source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&owner],
+    )
+    .expect("Deposit remains live once the canonical vault is no longer closable");
+    assert_eq!(env.token_amount(source), 0);
+    assert_eq!(env.token_amount(env.vault), 100);
+    assert_eq!(env.portfolio_state(portfolio).capital.get(), 100);
+    let (_, group_after) = env.market_state();
+    assert_eq!(group_after.c_tot, 100);
+    assert_eq!(group_after.vault, 100);
+}
+
 // LoF/DoS sweep (cron135): inbound value rails must also reject a frozen canonical vault, not just a
 // delegated one. Otherwise a route could credit market/accounting state before discovering that SPL
 // custody cannot receive the transfer. Cover the distinct token-state branch for Deposit, insurance
