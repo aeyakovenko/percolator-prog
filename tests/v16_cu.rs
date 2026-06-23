@@ -68474,6 +68474,145 @@ fn v16_attack_swap_secondary_rejects_frozen_user_accounts_before_transfer() {
     assert_eq!(env.token_amount(secondary_vault), 40);
 }
 
+// full-interface sweep: SwapSecondaryForPrimary validates all four SPL token accounts before either
+// leg transfers. SPL-owned but malformed account data on any slot must not let the primary deposit
+// run before the secondary payout fails, and the route must remain live after the bad slot is fixed.
+#[test]
+fn v16_attack_swap_secondary_rejects_malformed_token_accounts_before_transfer() {
+    #[derive(Clone, Copy)]
+    enum MalformedSlot {
+        PrimarySource,
+        PrimaryVault,
+        SecondaryDest,
+        SecondaryVault,
+    }
+
+    for slot in [
+        MalformedSlot::PrimarySource,
+        MalformedSlot::PrimaryVault,
+        MalformedSlot::SecondaryDest,
+        MalformedSlot::SecondaryVault,
+    ] {
+        let mut env = V16CuEnv::new();
+        let admin = env.admin.insecure_clone();
+        let secondary_mint = env.create_mint();
+        env.update_base_unit_mints_with_cu(env.mint, secondary_mint);
+
+        let secondary_vault = canonical_vault_ata(env.vault_authority, secondary_mint);
+        env.svm
+            .set_account(
+                secondary_vault,
+                Account {
+                    lamports: 1_000_000_000,
+                    data: make_token_data(secondary_mint, env.vault_authority, 50),
+                    owner: spl_token::ID,
+                    executable: false,
+                    rent_epoch: 0,
+                },
+            )
+            .unwrap();
+        let primary_source = env.token_account_for_mint(env.mint, admin.pubkey(), 10);
+        let secondary_dest = env.token_account_for_mint(secondary_mint, admin.pubkey(), 0);
+        let malformed_key = match slot {
+            MalformedSlot::PrimarySource => primary_source,
+            MalformedSlot::PrimaryVault => env.vault,
+            MalformedSlot::SecondaryDest => secondary_dest,
+            MalformedSlot::SecondaryVault => secondary_vault,
+        };
+        let good_malformed_slot = env.svm.get_account(&malformed_key).unwrap();
+        env.svm
+            .set_account(
+                malformed_key,
+                Account {
+                    data: vec![0u8; TokenAccount::LEN - 1],
+                    ..good_malformed_slot.clone()
+                },
+            )
+            .unwrap();
+
+        let market_before = env.svm.get_account(&env.market).unwrap();
+        let primary_source_before = env.svm.get_account(&primary_source).unwrap();
+        let primary_vault_before = env.svm.get_account(&env.vault).unwrap();
+        let secondary_dest_before = env.svm.get_account(&secondary_dest).unwrap();
+        let secondary_vault_before = env.svm.get_account(&secondary_vault).unwrap();
+
+        env.svm.expire_blockhash();
+        let rejected = env.send(
+            ProgInstruction::SwapSecondaryForPrimary { amount: 10 },
+            vec![
+                AccountMeta::new(admin.pubkey(), true),
+                AccountMeta::new_readonly(env.market, false),
+                AccountMeta::new(primary_source, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new(secondary_dest, false),
+                AccountMeta::new(secondary_vault, false),
+                AccountMeta::new_readonly(env.vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[&admin],
+        );
+        assert!(
+            rejected.is_err(),
+            "SwapSecondaryForPrimary must reject a malformed token account slot"
+        );
+        assert_eq!(
+            env.svm.get_account(&env.market).unwrap(),
+            market_before,
+            "malformed swap rejection leaves market config unchanged"
+        );
+        assert_eq!(
+            env.svm.get_account(&primary_source).unwrap(),
+            primary_source_before,
+            "malformed swap rejection must not pull primary collateral"
+        );
+        assert_eq!(
+            env.svm.get_account(&env.vault).unwrap(),
+            primary_vault_before,
+            "malformed swap rejection must not credit primary custody"
+        );
+        assert_eq!(
+            env.svm.get_account(&secondary_dest).unwrap(),
+            secondary_dest_before,
+            "malformed swap rejection must not pay secondary collateral"
+        );
+        assert_eq!(
+            env.svm.get_account(&secondary_vault).unwrap(),
+            secondary_vault_before,
+            "malformed swap rejection must not debit the secondary reserve"
+        );
+
+        env.svm
+            .set_account(malformed_key, good_malformed_slot)
+            .unwrap();
+        env.svm.expire_blockhash();
+        let ok = env
+            .send(
+                ProgInstruction::SwapSecondaryForPrimary { amount: 10 },
+                vec![
+                    AccountMeta::new(admin.pubkey(), true),
+                    AccountMeta::new_readonly(env.market, false),
+                    AccountMeta::new(primary_source, false),
+                    AccountMeta::new(env.vault, false),
+                    AccountMeta::new(secondary_dest, false),
+                    AccountMeta::new(secondary_vault, false),
+                    AccountMeta::new_readonly(env.vault_authority, false),
+                    AccountMeta::new_readonly(spl_token::ID, false),
+                ],
+                &[&admin],
+            )
+            .expect("SwapSecondaryForPrimary remains live after malformed-account rejection");
+        assert_cu_within(
+            "SwapSecondaryForPrimary malformed-token retry",
+            ok,
+            CUSTODY_CU_LIMIT,
+        );
+        assert_eq!(env.token_amount(primary_source), 0);
+        assert_eq!(env.token_amount(env.vault), 10);
+        assert_eq!(env.token_amount(secondary_dest), 10);
+        assert_eq!(env.token_amount(secondary_vault), 40);
+    }
+}
+
 // [from pr114]
 // full-interface sweep (cron38): the optional secondary reserve is validated before CloseSlab sweeps
 // primary dust. A canonical secondary vault with close_authority set must reject atomically; otherwise
