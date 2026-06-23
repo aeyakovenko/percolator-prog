@@ -58429,13 +58429,54 @@ fn v16_attack_init_market_rejects_grief_config_without_burning_market_account() 
         percolator_prog::constants::WRAPPER_MAX_PORTFOLIO_ASSETS + 1;
     let mut impossible_bound = V16CuMarketParams::default();
     impossible_bound.h_max = (BOUND_SCALE + 1) as u64;
+    let mut zero_bound = V16CuMarketParams::default();
+    zero_bound.h_max = 0;
+    let mut inverted_bound = V16CuMarketParams::default();
+    inverted_bound.h_min = 11;
+    inverted_bound.h_max = 10;
     let mut zero_oracle = V16CuMarketParams::default();
     zero_oracle.initial_price = 0;
     let mut over_oracle = V16CuMarketParams::default();
     over_oracle.initial_price = percolator::MAX_ORACLE_PRICE + 1;
+    let mut zero_margin_floor = V16CuMarketParams::default();
+    zero_margin_floor.min_nonzero_mm_req = 0;
+    let mut im_not_above_mm_floor = V16CuMarketParams::default();
+    im_not_above_mm_floor.min_nonzero_mm_req = 2;
+    im_not_above_mm_floor.min_nonzero_im_req = 2;
+    let mut maintenance_above_initial = V16CuMarketParams::default();
+    maintenance_above_initial.maintenance_margin_bps = percolator::MAX_MARGIN_BPS;
+    maintenance_above_initial.initial_margin_bps = percolator::MAX_MARGIN_BPS - 1;
+    let mut initial_above_max = V16CuMarketParams::default();
+    initial_above_max.initial_margin_bps = percolator::MAX_MARGIN_BPS + 1;
     let mut fee_floor_dos = V16CuMarketParams::default();
     fee_floor_dos.max_trading_fee_bps = 99;
     fee_floor_dos.trade_fee_base_bps = 100;
+    let mut trade_fee_above_margin = V16CuMarketParams::default();
+    trade_fee_above_margin.max_trading_fee_bps = percolator::MAX_MARGIN_BPS + 1;
+    let mut liquidation_fee_above_margin = V16CuMarketParams::default();
+    liquidation_fee_above_margin.liquidation_fee_bps = percolator::MAX_MARGIN_BPS + 1;
+    let mut liquidation_floor_above_cap = V16CuMarketParams::default();
+    liquidation_floor_above_cap.liquidation_fee_cap = 1;
+    liquidation_floor_above_cap.min_liquidation_abs = 2;
+    let mut liquidation_cap_above_protocol = V16CuMarketParams::default();
+    liquidation_cap_above_protocol.liquidation_fee_cap = percolator::MAX_PROTOCOL_FEE_ABS + 1;
+    let mut zero_accrual_dt = V16CuMarketParams::default();
+    zero_accrual_dt.max_accrual_dt_slots = 0;
+    let mut funding_lifetime_below_accrual_dt = V16CuMarketParams::default();
+    funding_lifetime_below_accrual_dt.max_accrual_dt_slots = 2;
+    funding_lifetime_below_accrual_dt.min_funding_lifetime_slots = 1;
+    let mut funding_rate_above_cap = V16CuMarketParams::default();
+    funding_rate_above_cap.max_abs_funding_e9_per_slot = 10_001;
+    let mut zero_price_move_cap = V16CuMarketParams::default();
+    zero_price_move_cap.max_price_move_bps_per_slot = 0;
+    let mut zero_b_settlement_chunks = V16CuMarketParams::default();
+    zero_b_settlement_chunks.max_account_b_settlement_chunks = 0;
+    let mut zero_bankrupt_close_chunks = V16CuMarketParams::default();
+    zero_bankrupt_close_chunks.max_bankrupt_close_chunks = 0;
+    let mut zero_bankrupt_close_lifetime = V16CuMarketParams::default();
+    zero_bankrupt_close_lifetime.max_bankrupt_close_lifetime_slots = 0;
+    let mut zero_public_b_chunk = V16CuMarketParams::default();
+    zero_public_b_chunk.public_b_chunk_atoms = 0;
     let mut maintenance_drain = V16CuMarketParams::default();
     maintenance_drain.maintenance_fee_per_slot = percolator::MAX_PROTOCOL_FEE_ABS + 1;
 
@@ -58443,9 +58484,42 @@ fn v16_attack_init_market_rejects_grief_config_without_burning_market_account() 
         ("zero portfolio cap", zero_portfolios),
         ("portfolio cap above wrapper limit", over_portfolio_cap),
         ("h_max above bound scale", impossible_bound),
+        ("zero h_max bound", zero_bound),
+        ("h_min above h_max", inverted_bound),
         ("zero initial oracle price", zero_oracle),
         ("initial oracle price above max", over_oracle),
+        ("zero maintenance margin floor", zero_margin_floor),
+        (
+            "initial margin floor not above maintenance floor",
+            im_not_above_mm_floor,
+        ),
+        (
+            "maintenance margin above initial margin",
+            maintenance_above_initial,
+        ),
+        ("initial margin above max margin", initial_above_max),
         ("trade fee floor above max fee", fee_floor_dos),
+        ("max trade fee above max margin", trade_fee_above_margin),
+        (
+            "liquidation fee above max margin",
+            liquidation_fee_above_margin,
+        ),
+        ("liquidation floor above cap", liquidation_floor_above_cap),
+        (
+            "liquidation cap above protocol limit",
+            liquidation_cap_above_protocol,
+        ),
+        ("zero accrual dt", zero_accrual_dt),
+        (
+            "funding lifetime below accrual dt",
+            funding_lifetime_below_accrual_dt,
+        ),
+        ("funding rate above cap", funding_rate_above_cap),
+        ("zero price move cap", zero_price_move_cap),
+        ("zero b settlement chunks", zero_b_settlement_chunks),
+        ("zero bankrupt close chunks", zero_bankrupt_close_chunks),
+        ("zero bankrupt close lifetime", zero_bankrupt_close_lifetime),
+        ("zero public b chunk", zero_public_b_chunk),
         ("maintenance fee above protocol cap", maintenance_drain),
     ] {
         let market = Keypair::new();
