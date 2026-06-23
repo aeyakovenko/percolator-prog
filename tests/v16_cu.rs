@@ -49972,6 +49972,134 @@ fn v16_attack_permissionless_create_underfunded_fee_does_not_activate_or_credit(
     assert_domain_budget_remaining_total_consistent(&funded_group, "funded permissionless create");
 }
 
+// LoF sweep: UpdateMarketInitFeePolicy caps the base fee to u64, but the actual
+// permissionless activation fee doubles every 32 asset slots. A high-index public
+// append whose computed fee is u64::MAX+1 must reject before growing the market
+// or crediting accounting; a lower exact fee at the same slot remains live.
+#[test]
+fn v16_attack_permissionless_scaled_init_fee_over_u64_rejects_before_activation() {
+    const TARGET_ASSET: u16 = 32;
+    const HIGH_BASE_FEE: u128 = (u64::MAX as u128 / 2) + 1;
+
+    let mut env = V16CuEnv::new_with_init_params_and_market_capacity(
+        V16CuMarketParams {
+            max_portfolio_assets: percolator_prog::constants::WRAPPER_MAX_PORTFOLIO_ASSETS,
+            ..V16CuMarketParams::default()
+        },
+        TARGET_ASSET as usize + 1,
+    );
+    env.svm.warp_to_slot(1);
+    let start = env.market_state().1.config.max_market_slots as u16;
+    for asset_index in start..TARGET_ASSET {
+        env.activate_asset(asset_index, asset_index as u64, 100);
+    }
+    let (_, ready_group) = env.market_state();
+    assert_eq!(
+        ready_group.config.max_market_slots, TARGET_ASSET as u32,
+        "admin setup reaches the high-index permissionless append frontier"
+    );
+
+    env.update_market_init_fee_policy_with_cu(HIGH_BASE_FEE);
+    let creator = Keypair::new();
+    env.ensure_signer_account(creator.pubkey());
+    let source = env.token_account(creator.pubkey(), HIGH_BASE_FEE as u64);
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    let source_before = env.svm.get_account(&source).unwrap();
+
+    env.svm.warp_to_slot(TARGET_ASSET as u64);
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::UpdateAssetLifecycle {
+            action: percolator_prog::processor::ASSET_ACTION_ACTIVATE,
+            asset_index: TARGET_ASSET,
+            now_slot: TARGET_ASSET as u64,
+            initial_price: 100,
+            insurance_authority: creator.pubkey().to_bytes(),
+            insurance_operator: creator.pubkey().to_bytes(),
+            backing_bucket_authority: creator.pubkey().to_bytes(),
+            oracle_authority: creator.pubkey().to_bytes(),
+        },
+        vec![
+            AccountMeta::new(creator.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&creator],
+    );
+    let err = rejected.expect_err("scaled init fee above u64 must reject");
+    assert!(
+        err.contains("Custom(9)"),
+        "scaled init fee must reject as InvalidInstruction, got {err}"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "over-u64 scaled fee must not grow the market or install authorities"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        vault_before,
+        "over-u64 scaled fee must not credit custody"
+    );
+    assert_eq!(
+        env.svm.get_account(&source).unwrap(),
+        source_before,
+        "over-u64 scaled fee must not pull creator tokens"
+    );
+
+    env.update_market_init_fee_policy_with_cu(1);
+    let control_source = env.token_account(creator.pubkey(), 2);
+    env.svm.expire_blockhash();
+    let accepted = env.send(
+        ProgInstruction::UpdateAssetLifecycle {
+            action: percolator_prog::processor::ASSET_ACTION_ACTIVATE,
+            asset_index: TARGET_ASSET,
+            now_slot: TARGET_ASSET as u64,
+            initial_price: 100,
+            insurance_authority: creator.pubkey().to_bytes(),
+            insurance_operator: creator.pubkey().to_bytes(),
+            backing_bucket_authority: creator.pubkey().to_bytes(),
+            oracle_authority: creator.pubkey().to_bytes(),
+        },
+        vec![
+            AccountMeta::new(creator.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(control_source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&creator],
+    );
+    assert!(
+        accepted.is_ok(),
+        "same high-index append succeeds when the scaled fee fits u64: {accepted:?}"
+    );
+    let (_, accepted_group) = env.market_state();
+    assert_eq!(
+        accepted_group.config.max_market_slots,
+        TARGET_ASSET as u32 + 1
+    );
+    assert_eq!(
+        accepted_group.assets[TARGET_ASSET as usize].lifecycle,
+        AssetLifecycleV16::Active
+    );
+    assert_eq!(env.token_amount(control_source), 0);
+    assert_eq!(
+        env.token_amount(env.vault),
+        2,
+        "asset-32 fee is doubled from base fee 1 to 2"
+    );
+    assert_eq!(accepted_group.vault, 2);
+    assert_eq!(accepted_group.insurance, 2);
+    assert_domain_budget_remaining_total_consistent(
+        &accepted_group,
+        "permissionless scaled init fee control",
+    );
+}
+
 // LoF/DoS sweep (cron135): permissionless activation's init fee must be paid in the
 // configured primary collateral mint before the market account grows. A wrong-mint fee source
 // cannot install a new asset, credit accounting, or consume the creator's unrelated tokens.
