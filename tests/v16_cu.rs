@@ -71375,6 +71375,253 @@ fn v16_attack_cpi_source_domain_lien_mismatch_rejects_before_hostile_matcher_cpi
     }
 }
 
+// LoF/DoS sweep (cron135): keep the raw source-domain CPI preflight honest across the
+// non-duplicate accounting predicates, not just the representative lien mismatch above.
+#[test]
+fn v16_attack_cpi_source_domain_shape_variants_reject_before_hostile_matcher_cpi() {
+    #[derive(Clone, Copy)]
+    enum SourceDomainPoison {
+        WrongMarketId,
+        ClaimExceedsCredit,
+        NonMultipleBacking,
+        FutureFeeSlot,
+        ImpairedReserveWithoutClaim,
+    }
+
+    fn set_hostile_overfill(env: &mut V16CuEnv, hostile: Pubkey, ctx: Pubkey) {
+        let mut ctx_data = vec![0u8; MATCHER_CONTEXT_LEN];
+        ctx_data[0] = 0;
+        env.svm
+            .set_account(
+                ctx,
+                Account {
+                    lamports: 1_000_000_000,
+                    data: ctx_data,
+                    owner: hostile,
+                    executable: false,
+                    rent_epoch: 0,
+                },
+            )
+            .unwrap();
+    }
+
+    fn poison_source_domain(
+        env: &mut V16CuEnv,
+        account: Pubkey,
+        domain: u32,
+        poison: SourceDomainPoison,
+    ) {
+        let current_slot = env.market_state().1.current_slot;
+        let mut poisoned_account = env.svm.get_account(&account).unwrap();
+        let (_, _, max_market_slots, _) = state::read_market_config_mode_and_capacity(
+            &env.svm.get_account(&env.market).unwrap().data,
+        )
+        .unwrap();
+        {
+            let view = state::portfolio_view_mut_for_market_slots(
+                &mut poisoned_account.data,
+                max_market_slots,
+            )
+            .unwrap();
+            let source_slot = view
+                .header
+                .source_domains
+                .iter()
+                .position(|slot| slot.is_occupied() && slot.domain.get() == domain)
+                .expect("canonical source-domain slot");
+            let source = &mut view.header.source_domains[source_slot];
+            assert!(
+                source.source_claim_bound_num.get() >= BOUND_SCALE,
+                "test precondition: source claim can cover one malformed locked atom"
+            );
+            match poison {
+                SourceDomainPoison::WrongMarketId => {
+                    source.source_claim_market_id = percolator::V16PodU64::new(0);
+                }
+                SourceDomainPoison::ClaimExceedsCredit => {
+                    source.source_claim_bound_num = percolator::V16PodU128::new(u128::MAX);
+                }
+                SourceDomainPoison::NonMultipleBacking => {
+                    source.source_claim_liened_num = percolator::V16PodU128::new(BOUND_SCALE);
+                    source.source_claim_counterparty_liened_num =
+                        percolator::V16PodU128::new(BOUND_SCALE);
+                    source.source_claim_insurance_liened_num = percolator::V16PodU128::new(0);
+                    source.source_lien_effective_reserved = percolator::V16PodU128::new(1);
+                    source.source_lien_counterparty_backing_num =
+                        percolator::V16PodU128::new(BOUND_SCALE + 1);
+                    source.source_lien_insurance_backing_num = percolator::V16PodU128::new(0);
+                }
+                SourceDomainPoison::FutureFeeSlot => {
+                    source.source_lien_fee_last_slot =
+                        percolator::V16PodU64::new(current_slot.saturating_add(1));
+                }
+                SourceDomainPoison::ImpairedReserveWithoutClaim => {
+                    source.source_claim_impaired_num = percolator::V16PodU128::new(0);
+                    source.source_lien_impaired_effective_reserved =
+                        percolator::V16PodU128::new(1);
+                }
+            }
+            assert!(
+                source.is_occupied() && source.domain.get() == domain,
+                "test precondition: forged slot remains a single occupied source domain"
+            );
+        }
+        env.svm.set_account(account, poisoned_account).unwrap();
+    }
+
+    let mut env = V16CuEnv::new();
+    env.top_up_backing_bucket(1, 250, 10_000);
+    let hostile = Pubkey::new_unique();
+    env.svm.add_program(
+        hostile,
+        &std::fs::read(hostile_matcher_program_path()).unwrap(),
+    );
+    let taker_owner = Keypair::new();
+    let lp_owner = Keypair::new();
+    let taker = env.create_portfolio(&taker_owner);
+    let lp = env.create_portfolio(&lp_owner);
+    env.deposit(&taker_owner, taker, 1_000_000);
+    env.deposit(&lp_owner, lp, 1_000_000);
+    env.add_source_positive_pnl(taker, 1, 40);
+    env.crank(
+        taker,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 0,
+            close_q: 0,
+            observations: crank_observations(0),
+        },
+    );
+    assert!(
+        state::portfolio_source_domain(&env.portfolio_state(taker), 1)
+            .source_claim_bound_num
+            .get()
+            != 0,
+        "setup must create a canonical source-backed positive-PnL domain"
+    );
+
+    let ctx = Pubkey::new_unique();
+    let delegate = matcher_delegate_key(
+        &env.program_id,
+        &env.market,
+        &lp,
+        &lp_owner.pubkey(),
+        &hostile,
+        &ctx,
+    );
+    env.svm
+        .set_account(
+            delegate,
+            Account {
+                lamports: 1_000_000_000,
+                data: vec![],
+                owner: Pubkey::default(),
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    set_hostile_overfill(&mut env, hostile, ctx);
+    env.set_matcher_config(hostile, &lp_owner, lp, ctx, delegate, 1);
+    let canonical_taker = env.svm.get_account(&taker).unwrap();
+
+    let accounts = |env: &V16CuEnv| {
+        vec![
+            AccountMeta::new(taker_owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(taker, false),
+            AccountMeta::new(lp, false),
+            AccountMeta::new_readonly(hostile, false),
+            AccountMeta::new(ctx, false),
+            AccountMeta::new_readonly(delegate, false),
+        ]
+    };
+
+    set_hostile_overfill(&mut env, hostile, ctx);
+    env.svm.expire_blockhash();
+    let control = env
+        .send(
+            ProgInstruction::TradeCpi {
+                asset_index: 0,
+                size_q: POS_SCALE as i128,
+                fee_bps: 100,
+                limit_price: 0,
+            },
+            accounts(&env),
+            &[&taker_owner],
+        )
+        .expect_err("canonical source-domain CPI should reach hostile matcher validation");
+    assert!(
+        control.contains("InvalidAccountData"),
+        "canonical control should fail from hostile matcher validation, got {control}"
+    );
+
+    for (label, poison, hidden_leg_error) in [
+        ("wrong-market-id", SourceDomainPoison::WrongMarketId, true),
+        (
+            "claim-exceeds-credit",
+            SourceDomainPoison::ClaimExceedsCredit,
+            false,
+        ),
+        (
+            "non-multiple-backing",
+            SourceDomainPoison::NonMultipleBacking,
+            false,
+        ),
+        ("future-fee-slot", SourceDomainPoison::FutureFeeSlot, false),
+        (
+            "impaired-reserve-without-claim",
+            SourceDomainPoison::ImpairedReserveWithoutClaim,
+            false,
+        ),
+    ] {
+        env.svm.set_account(taker, canonical_taker.clone()).unwrap();
+        poison_source_domain(&mut env, taker, 1, poison);
+        set_hostile_overfill(&mut env, hostile, ctx);
+        let market_before = env.svm.get_account(&env.market).unwrap();
+        let taker_before = env.svm.get_account(&taker).unwrap();
+        let lp_before = env.svm.get_account(&lp).unwrap();
+        let ctx_before = env.svm.get_account(&ctx).unwrap();
+        env.svm.expire_blockhash();
+        let rejected = env
+            .send(
+                ProgInstruction::TradeCpi {
+                    asset_index: 0,
+                    size_q: POS_SCALE as i128,
+                    fee_bps: 100,
+                    limit_price: 0,
+                },
+                accounts(&env),
+                &[&taker_owner],
+            )
+            .expect_err("malformed source-domain CPI must reject before matcher CPI");
+        if hidden_leg_error {
+            assert!(
+                rejected.contains("Custom(17)")
+                    || rejected.contains("custom program error: 0x11"),
+                "{label} should fail as EngineHiddenLeg, got {rejected}"
+            );
+        } else {
+            assert!(
+                rejected.contains("Custom(18)")
+                    || rejected.contains("custom program error: 0x12"),
+                "{label} should fail as EngineInvalidLeg, got {rejected}"
+            );
+        }
+        assert!(
+            !rejected.contains("InvalidAccountData"),
+            "{label} must not reach hostile matcher validation: {rejected}"
+        );
+        assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+        assert_eq!(env.svm.get_account(&taker).unwrap(), taker_before);
+        assert_eq!(env.svm.get_account(&lp).unwrap(), lp_before);
+        assert_eq!(
+            env.svm.get_account(&ctx).unwrap(),
+            ctx_before,
+            "{label} must not give the hostile matcher a writable context"
+        );
+    }
+}
+
 #[test]
 fn v16_attack_stale_tradenocpi_currentness_threshold_is_bounded() {
     {
