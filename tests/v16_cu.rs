@@ -52888,6 +52888,38 @@ fn v16_attack_drain_only_existing_risk_increase_rejects_before_hostile_matcher_c
         ]
     };
 
+    let mut ctx_data = vec![0u8; MATCHER_CONTEXT_LEN];
+    ctx_data[0] = 0;
+    env.svm
+        .set_account(
+            ctx,
+            Account {
+                lamports: 1_000_000_000,
+                data: ctx_data,
+                owner: hostile,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    env.svm.expire_blockhash();
+    let reduce_control = env
+        .send(
+            ProgInstruction::TradeCpi {
+                asset_index: 0,
+                size_q: -(POS_SCALE as i128),
+                fee_bps: 0,
+                limit_price: 0,
+            },
+            accounts(&env),
+            &[&taker],
+        )
+        .expect_err("single TradeCpi DrainOnly risk reduction should reach matcher validation");
+    assert!(
+        reduce_control.contains("InvalidAccountData"),
+        "single TradeCpi DrainOnly reduce control should reach matcher validation, got {reduce_control}"
+    );
+
     for (route, instruction) in [
         (
             "TradeCpi",
