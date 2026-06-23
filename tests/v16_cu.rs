@@ -23359,6 +23359,97 @@ fn v16_attack_tradecpi_limit_price_enforced() {
     assert_eq!(g1.vault, g1.c_tot + g1.insurance, "conservation after fill");
 }
 
+// TradeCpi advances through an external matcher before applying the shared engine fill path. If the
+// engine rejects the final market shape, SVM rollback must include the matcher context, the req_id bump,
+// and both portfolio mutations.
+#[test]
+fn v16_attack_tradecpi_rejects_invalid_final_market_shape_after_matcher() {
+    let mut env = V16CuEnv::new();
+    let matcher_program = Pubkey::new_unique();
+    let matcher_bytes = std::fs::read(matcher_program_path()).expect("read matcher BPF");
+    env.svm.add_program(matcher_program, &matcher_bytes);
+    let taker_owner = Keypair::new();
+    let taker = env.create_portfolio(&taker_owner);
+    let maker_owner = Keypair::new();
+    let maker = env.create_portfolio(&maker_owner);
+    env.deposit(&taker_owner, taker, 1_000_000);
+    env.deposit(&maker_owner, maker, 1_000_000);
+    let (ctx, delegate, _) = env.init_matcher_context_with_passive_spread_authorized(
+        matcher_program,
+        &maker_owner,
+        maker,
+        0,
+        1_000,
+    );
+
+    env.mutate_market(|_, group| {
+        group.insurance_domain_budget[0] = group.insurance.saturating_add(1);
+    });
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let taker_before = env.svm.get_account(&taker).unwrap();
+    let maker_before = env.svm.get_account(&maker).unwrap();
+    let ctx_before = env.svm.get_account(&ctx).unwrap();
+
+    let trade = |env: &mut V16CuEnv| {
+        env.svm.expire_blockhash();
+        env.send(
+            ProgInstruction::TradeCpi {
+                asset_index: 0,
+                size_q: (10 * POS_SCALE) as i128,
+                fee_bps: 0,
+                limit_price: 0,
+            },
+            vec![
+                AccountMeta::new(taker_owner.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(taker, false),
+                AccountMeta::new(maker, false),
+                AccountMeta::new_readonly(matcher_program, false),
+                AccountMeta::new(ctx, false),
+                AccountMeta::new_readonly(delegate, false),
+            ],
+            &[&taker_owner],
+        )
+    };
+
+    let rejected = trade(&mut env);
+    assert!(
+        rejected.is_err(),
+        "TradeCpi must propagate an engine final-shape rejection after matcher CPI"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "failed TradeCpi must roll back market writes and the matcher req_id bump"
+    );
+    assert_eq!(
+        env.svm.get_account(&taker).unwrap(),
+        taker_before,
+        "failed TradeCpi must roll back taker writes"
+    );
+    assert_eq!(
+        env.svm.get_account(&maker).unwrap(),
+        maker_before,
+        "failed TradeCpi must roll back maker writes"
+    );
+    assert_eq!(
+        env.svm.get_account(&ctx).unwrap(),
+        ctx_before,
+        "failed TradeCpi must roll back matcher context writes"
+    );
+
+    env.mutate_market(|_, group| {
+        group.insurance_domain_budget[0] = 0;
+    });
+    let accepted = trade(&mut env);
+    assert!(
+        accepted.is_ok(),
+        "valid TradeCpi remains live after invalid-shape rejection: {accepted:?}"
+    );
+    assert!(has_active_leg_for_asset(&env.portfolio_state(taker), 0));
+    assert!(has_active_leg_for_asset(&env.portfolio_state(maker), 0));
+}
+
 // security.md sweep — TradeCpi zero-fill (#39): a zero-capacity matcher (max_fill_abs=0) returns
 // exec_size=0. The wrapper must handle it cleanly — reject or no-op — never create phantom OI/basis,
 // charge a fee on nothing, or corrupt conservation.
