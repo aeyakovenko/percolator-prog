@@ -9397,6 +9397,65 @@ fn v16_attack_sync_maintenance_late_lamport_overflow_rolls_back_fee_close() {
     assert!(closed.data.is_empty() || !state::is_initialized(&closed.data));
 }
 
+// LoF/DoS sweep (cron135): the no-cranker maintenance path can drain a dust portfolio to zero and
+// then dematerialize it. A bad market aggregate must reject before that close side effect, leaving
+// both the fee debit and the public cleanup retry intact.
+#[test]
+fn v16_attack_sync_maintenance_close_rejects_invalid_market_shape() {
+    let mut env = V16CuEnv::new_with_market_params_price_move_and_maintenance_fee(
+        1, 10_000, 10_000, 10_000, 40,
+    );
+    let owner = Keypair::new();
+    let portfolio = env.create_portfolio(&owner);
+    env.deposit(&owner, portfolio, 1);
+    env.svm.warp_to_slot(10);
+
+    env.mutate_market(|_, group| {
+        group.insurance_domain_budget[0] = group.insurance.saturating_add(1);
+    });
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let portfolio_before = env.svm.get_account(&portfolio).unwrap();
+
+    env.svm.expire_blockhash();
+    let rejected = env.try_sync_maintenance_fee_with_cu(portfolio, None, 10);
+    assert!(
+        rejected.is_err(),
+        "SyncMaintenanceFee must reject an invalid market shape before dust dematerialization"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "invalid-shape maintenance close must not debit fees or decrement materialized count"
+    );
+    assert_eq!(
+        env.svm.get_account(&portfolio).unwrap(),
+        portfolio_before,
+        "invalid-shape maintenance close must not close or rewrite the dust portfolio"
+    );
+    assert_eq!(
+        env.market_state().1.materialized_portfolio_count,
+        1,
+        "invalid-shape maintenance close leaves the portfolio materialized"
+    );
+
+    env.mutate_market(|_, group| {
+        group.insurance_domain_budget[0] = 0;
+    });
+    env.svm.expire_blockhash();
+    let ok_cu = env.sync_maintenance_fee_with_cu(portfolio, None, 10);
+    assert_cu_within(
+        "SyncMaintenanceFee invalid-shape close retry",
+        ok_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    let (_, group_after) = env.market_state();
+    assert_eq!(group_after.insurance, 1);
+    assert_eq!(group_after.materialized_portfolio_count, 0);
+    let closed = env.svm.get_account(&portfolio).unwrap();
+    assert_eq!(closed.lamports, 0);
+    assert!(closed.data.is_empty() || !state::is_initialized(&closed.data));
+}
+
 #[test]
 fn v16_attack_underfunded_sync_with_cranker_reward_still_closes_payer() {
     let mut env = V16CuEnv::new_with_market_params_price_move_and_maintenance_fee(
