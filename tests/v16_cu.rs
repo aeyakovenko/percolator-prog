@@ -66009,6 +66009,179 @@ fn v16_attack_rebalance_reduce_overshoot_clamps_to_flat_no_flip() {
     );
 }
 
+// LoF/DoS sweep: the recovery/user liveness tools share with_one_portfolio_view and validate the
+// market/account shape after the engine mutation. Pin that a late shape failure becomes an instruction
+// error with SVM rollback, and that the same user operation remains live once the unrelated shape fault is
+// repaired.
+#[test]
+fn v16_attack_recovery_user_tools_reject_invalid_final_shape_atomically() {
+    let mut reduce_env = V16CuEnv::new_with_market_params_and_price_move(1, 5_000, 10_000, 1_000);
+    let reduce_owner = Keypair::new();
+    let reduce_portfolio = reduce_env.create_portfolio(&reduce_owner);
+    let reduce_cp_owner = Keypair::new();
+    let reduce_cp = reduce_env.create_portfolio(&reduce_cp_owner);
+    reduce_env.deposit(&reduce_owner, reduce_portfolio, 1_000_000);
+    reduce_env.deposit(&reduce_cp_owner, reduce_cp, 1_000_000);
+    reduce_env.trade_asset_with_cu(
+        0,
+        &reduce_owner,
+        reduce_portfolio,
+        &reduce_cp_owner,
+        reduce_cp,
+        POS_SCALE as i128,
+        100,
+        0,
+    );
+    assert!(
+        active_leg_for_asset(&reduce_env.portfolio_state(reduce_portfolio), 0).basis_pos_q > 0,
+        "reduce target starts with a live long leg"
+    );
+    reduce_env.mutate_market(|_, group| {
+        group.insurance_domain_budget[0] = group.insurance.saturating_add(1);
+    });
+    let reduce_market_before = reduce_env.svm.get_account(&reduce_env.market).unwrap();
+    let reduce_portfolio_before = reduce_env.svm.get_account(&reduce_portfolio).unwrap();
+    let reduce_cp_before = reduce_env.svm.get_account(&reduce_cp).unwrap();
+    let reduce_vault_before = reduce_env.svm.get_account(&reduce_env.vault).unwrap();
+    reduce_env.svm.expire_blockhash();
+    let rejected_reduce = reduce_env.send(
+        ProgInstruction::RebalanceReduce {
+            asset_index: 0,
+            reduce_q: POS_SCALE / 2,
+        },
+        vec![
+            AccountMeta::new(reduce_owner.pubkey(), true),
+            AccountMeta::new(reduce_env.market, false),
+            AccountMeta::new(reduce_portfolio, false),
+        ],
+        &[&reduce_owner],
+    );
+    assert!(
+        rejected_reduce.is_err(),
+        "RebalanceReduce must reject when post-engine market shape is invalid"
+    );
+    assert_eq!(
+        reduce_env.svm.get_account(&reduce_env.market).unwrap(),
+        reduce_market_before,
+        "failed RebalanceReduce rolls back market mutation"
+    );
+    assert_eq!(
+        reduce_env.svm.get_account(&reduce_portfolio).unwrap(),
+        reduce_portfolio_before,
+        "failed RebalanceReduce rolls back owner portfolio mutation"
+    );
+    assert_eq!(
+        reduce_env.svm.get_account(&reduce_cp).unwrap(),
+        reduce_cp_before,
+        "failed RebalanceReduce does not touch the counterparty"
+    );
+    assert_eq!(
+        reduce_env.svm.get_account(&reduce_env.vault).unwrap(),
+        reduce_vault_before,
+        "failed RebalanceReduce moves no custody"
+    );
+    reduce_env.mutate_market(|_, group| {
+        group.insurance_domain_budget[0] = group.insurance;
+    });
+    reduce_env.svm.expire_blockhash();
+    let reduce_cu =
+        reduce_env.rebalance_reduce_with_cu(&reduce_owner, reduce_portfolio, 0, POS_SCALE / 2);
+    assert_cu_within(
+        "RebalanceReduce invalid-shape rollback control",
+        reduce_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    assert!(
+        active_leg_for_asset(&reduce_env.portfolio_state(reduce_portfolio), 0)
+            .basis_pos_q
+            .unsigned_abs()
+            < POS_SCALE,
+        "same RebalanceReduce makes progress once shape is repaired"
+    );
+
+    let mut forfeit_env = V16CuEnv::new();
+    let forfeit_owner = Keypair::new();
+    let forfeit_portfolio = forfeit_env.create_portfolio(&forfeit_owner);
+    let forfeit_cp_owner = Keypair::new();
+    let forfeit_cp = forfeit_env.create_portfolio(&forfeit_cp_owner);
+    forfeit_env.deposit(&forfeit_owner, forfeit_portfolio, 10_000);
+    forfeit_env.deposit(&forfeit_cp_owner, forfeit_cp, 10_000);
+    forfeit_env.trade_with_cu(
+        &forfeit_owner,
+        forfeit_portfolio,
+        &forfeit_cp_owner,
+        forfeit_cp,
+        POS_SCALE as i128,
+        100,
+        0,
+    );
+    forfeit_env.mutate_market(|_, group| {
+        group.mode = MarketModeV16::Recovery;
+        group.recovery_reason = Some(PermissionlessRecoveryReasonV16::BelowProgressFloor);
+        group.insurance_domain_budget[0] = group.insurance.saturating_add(1);
+    });
+    assert!(
+        has_active_leg_for_asset(&forfeit_env.portfolio_state(forfeit_portfolio), 0),
+        "forfeit target starts with a recovery leg"
+    );
+    let forfeit_market_before = forfeit_env.svm.get_account(&forfeit_env.market).unwrap();
+    let forfeit_portfolio_before = forfeit_env.svm.get_account(&forfeit_portfolio).unwrap();
+    let forfeit_cp_before = forfeit_env.svm.get_account(&forfeit_cp).unwrap();
+    let forfeit_vault_before = forfeit_env.svm.get_account(&forfeit_env.vault).unwrap();
+    forfeit_env.svm.expire_blockhash();
+    let rejected_forfeit = forfeit_env.send(
+        ProgInstruction::ForfeitRecoveryLeg {
+            asset_index: 0,
+            b_delta_budget: 1,
+        },
+        vec![
+            AccountMeta::new(forfeit_owner.pubkey(), true),
+            AccountMeta::new(forfeit_env.market, false),
+            AccountMeta::new(forfeit_portfolio, false),
+        ],
+        &[&forfeit_owner],
+    );
+    assert!(
+        rejected_forfeit.is_err(),
+        "ForfeitRecoveryLeg must reject when post-engine market shape is invalid"
+    );
+    assert_eq!(
+        forfeit_env.svm.get_account(&forfeit_env.market).unwrap(),
+        forfeit_market_before,
+        "failed ForfeitRecoveryLeg rolls back market mutation"
+    );
+    assert_eq!(
+        forfeit_env.svm.get_account(&forfeit_portfolio).unwrap(),
+        forfeit_portfolio_before,
+        "failed ForfeitRecoveryLeg rolls back owner portfolio mutation"
+    );
+    assert_eq!(
+        forfeit_env.svm.get_account(&forfeit_cp).unwrap(),
+        forfeit_cp_before,
+        "failed ForfeitRecoveryLeg does not touch the counterparty"
+    );
+    assert_eq!(
+        forfeit_env.svm.get_account(&forfeit_env.vault).unwrap(),
+        forfeit_vault_before,
+        "failed ForfeitRecoveryLeg moves no custody"
+    );
+    forfeit_env.mutate_market(|_, group| {
+        group.insurance_domain_budget[0] = group.insurance;
+    });
+    forfeit_env.svm.expire_blockhash();
+    let forfeit_cu =
+        forfeit_env.forfeit_recovery_leg_with_cu(&forfeit_owner, forfeit_portfolio, 0, 1);
+    assert_cu_within(
+        "ForfeitRecoveryLeg invalid-shape rollback control",
+        forfeit_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    assert!(
+        !has_active_leg_for_asset(&forfeit_env.portfolio_state(forfeit_portfolio), 0),
+        "same ForfeitRecoveryLeg makes progress once shape is repaired"
+    );
+}
+
 // [from pr125]
 // DoS/safety sweep — permissionless SettleB (PermissionlessCrank action=2) cannot corrupt or drain a
 // healthy account. SettleB is the bankrupt-account chunk-settlement crank; it is PERMISSIONLESS (anyone
