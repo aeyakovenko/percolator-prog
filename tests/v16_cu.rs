@@ -18448,6 +18448,104 @@ fn v16_regression_resolved_open_positions_recover_fairly_order_robust() {
     assert_eq!(g.vault, 0, "vault fully drained, no funds stranded");
 }
 
+// LoF/DoS sweep (cron135): resolved close can return ProgressOnly before any payout is available.
+// The public PermissionlessCrank wind-down route must be able to take that no-payout progress step
+// with only the core accounts; otherwise keepers could be forced to provide irrelevant SPL accounts.
+#[test]
+fn v16_attack_resolved_crank_progress_only_needs_no_payout_accounts() {
+    let mut env = V16CuEnv::new();
+    env.configure_auth_mark_with_cu(0, 100);
+    let lo_owner = Keypair::new();
+    let lo = env.create_portfolio(&lo_owner);
+    let sh_owner = Keypair::new();
+    let sh = env.create_portfolio(&sh_owner);
+    env.deposit(&lo_owner, lo, 1_000_000);
+    env.deposit(&sh_owner, sh, 1_000_000);
+    env.trade_asset_with_cu(
+        0,
+        &lo_owner,
+        lo,
+        &sh_owner,
+        sh,
+        (10_000 * POS_SCALE) as i128,
+        100,
+        0,
+    );
+    env.svm.warp_to_slot(10);
+    env.push_auth_mark_with_cu(10, 110);
+    for slot in [10u64, 11] {
+        env.svm.warp_to_slot(slot);
+        for p in [sh, lo] {
+            env.svm.expire_blockhash();
+            let _ = env.send(
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: slot,
+                    close_q: 0,
+                    observations: crank_observations(0),
+                },
+                vec![
+                    AccountMeta::new(env.payer.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(p, false),
+                ],
+                &[],
+            );
+        }
+    }
+    env.resolve();
+
+    env.svm.expire_blockhash();
+    let progress_cu = env
+        .send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: u64::MAX,
+                close_q: u128::MAX,
+                observations: vec![CrankObservationHint {
+                    asset_index: u16::MAX,
+                    oracle_accounts: u8::MAX,
+                }],
+            },
+            vec![
+                AccountMeta::new_readonly(lo_owner.pubkey(), false),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(lo, false),
+            ],
+            &[],
+        )
+        .expect("resolved crank ProgressOnly step needs no payout token accounts");
+    assert_cu_within(
+        "Resolved PermissionlessCrank ProgressOnly",
+        progress_cu,
+        CRANK_CU_LIMIT,
+    );
+    let winner_after_progress = env.portfolio_state(lo);
+    assert_eq!(
+        winner_after_progress.capital.get(),
+        1_000_000,
+        "no-payout crank preserves winner capital while waiting for loser funding"
+    );
+    assert_eq!(
+        winner_after_progress.pnl.get(),
+        100_000,
+        "no-payout crank preserves the backed winner pnl"
+    );
+    assert_eq!(
+        env.token_amount(env.vault),
+        2_000_000,
+        "no-payout ProgressOnly step does not move custody"
+    );
+
+    let loser_dest = env.close_resolved(&sh_owner, sh);
+    let winner_dest = env.close_resolved(&lo_owner, lo);
+    assert_eq!(env.token_amount(loser_dest), 900_000);
+    assert_eq!(env.token_amount(winner_dest), 1_100_000);
+    assert_eq!(
+        env.market_state().1.vault,
+        0,
+        "resolved crank progress-only step does not strand terminal payouts"
+    );
+}
+
 // security.md sweep — haircut payout rounding across multiple winners (#33/#37): when several
 // resolved winners share ONE insufficient backing pool, each is paid floor(face * rate). The sum of
 // floored payouts must NEVER exceed the backing (a rounding-up bug would let winners collectively
