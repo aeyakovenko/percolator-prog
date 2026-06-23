@@ -7177,6 +7177,110 @@ fn v16_attack_batch_nocpi_rejects_invalid_final_market_shape() {
     assert!(has_active_leg_for_asset(&lp_after, 1));
 }
 
+// BatchTradeCpi adds an external batched matcher CPI before the same multi-leg engine path. A late
+// engine-shape rejection must roll back matcher return/context effects plus all batch account writes.
+#[test]
+fn v16_attack_batch_cpi_rejects_invalid_final_market_shape_after_matcher() {
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(2, 1_000, 1_000, 500);
+    env.configure_auth_mark_for_asset_as_admin(1, 1, 100);
+    let matcher_program = Pubkey::new_unique();
+    let matcher_bytes = std::fs::read(matcher_program_path()).expect("read matcher BPF");
+    env.svm.add_program(matcher_program, &matcher_bytes);
+    let taker = Keypair::new();
+    let lp = Keypair::new();
+    let taker_account = env.create_portfolio(&taker);
+    let lp_account = env.create_portfolio(&lp);
+    env.deposit(&taker, taker_account, 1_000_000);
+    env.deposit(&lp, lp_account, 1_000_000);
+    let (ctx, delegate, _) = env.init_matcher_context_with_passive_spread_authorized(
+        matcher_program,
+        &lp,
+        lp_account,
+        0,
+        1_000,
+    );
+
+    let legs = vec![
+        BatchTradeCpiLeg {
+            asset_index: 0,
+            size_q: POS_SCALE as i128,
+            fee_bps: 0,
+            limit_price: 0,
+        },
+        BatchTradeCpiLeg {
+            asset_index: 1,
+            size_q: POS_SCALE as i128,
+            fee_bps: 0,
+            limit_price: 0,
+        },
+    ];
+    env.mutate_market(|_, group| {
+        group.insurance_domain_budget[0] = group.insurance.saturating_add(1);
+    });
+    let before_market = env.svm.get_account(&env.market).unwrap();
+    let before_taker = env.svm.get_account(&taker_account).unwrap();
+    let before_lp = env.svm.get_account(&lp_account).unwrap();
+    let before_ctx = env.svm.get_account(&ctx).unwrap();
+
+    let send_batch = |env: &mut V16CuEnv| {
+        env.svm.expire_blockhash();
+        env.send(
+            ProgInstruction::BatchTradeCpi { legs: legs.clone() },
+            vec![
+                AccountMeta::new(taker.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(taker_account, false),
+                AccountMeta::new(lp_account, false),
+                AccountMeta::new_readonly(matcher_program, false),
+                AccountMeta::new(ctx, false),
+                AccountMeta::new_readonly(delegate, false),
+            ],
+            &[&taker],
+        )
+    };
+
+    let rejected = send_batch(&mut env);
+    assert!(
+        rejected.is_err(),
+        "BatchTradeCpi must propagate an engine final-shape rejection after matcher CPI"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        before_market,
+        "failed batch CPI must roll back market writes and the matcher req_id bump"
+    );
+    assert_eq!(
+        env.svm.get_account(&taker_account).unwrap(),
+        before_taker,
+        "failed batch CPI must roll back taker data"
+    );
+    assert_eq!(
+        env.svm.get_account(&lp_account).unwrap(),
+        before_lp,
+        "failed batch CPI must roll back LP data"
+    );
+    assert_eq!(
+        env.svm.get_account(&ctx).unwrap(),
+        before_ctx,
+        "failed batch CPI must roll back matcher context writes"
+    );
+
+    env.mutate_market(|_, group| {
+        group.insurance_domain_budget[0] = 0;
+    });
+    let accepted = send_batch(&mut env);
+    assert!(
+        accepted.is_ok(),
+        "valid multi-leg BatchTradeCpi remains live after invalid-shape rejection: {accepted:?}"
+    );
+    let taker_after = env.portfolio_state(taker_account);
+    let lp_after = env.portfolio_state(lp_account);
+    assert!(has_active_leg_for_asset(&taker_after, 0));
+    assert!(has_active_leg_for_asset(&taker_after, 1));
+    assert!(has_active_leg_for_asset(&lp_after, 0));
+    assert!(has_active_leg_for_asset(&lp_after, 1));
+}
+
 #[test]
 fn v16_bpf_tradenocpi_fresh_open_on_base_and_added_asset_is_bounded() {
     let mut env = V16CuEnv::new_with_market_params_and_price_move(4, 1_000, 1_000, 500);
