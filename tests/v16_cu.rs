@@ -87846,6 +87846,124 @@ fn v16_attack_cure_optional_deposit_rejects_frozen_source_before_cancel() {
     );
 }
 
+// full-interface sweep: CureAndCancelClose has its own optional-deposit rail and also cancels an
+// active close-progress ledger. Malformed SPL-owned source or canonical vault data must reject before
+// the engine credits capital or marks the close ledger canceled, and a clean retry must still work.
+#[test]
+fn v16_attack_cure_optional_deposit_rejects_malformed_token_accounts_before_cancel() {
+    #[derive(Clone, Copy)]
+    enum MalformedSlot {
+        Source,
+        Vault,
+    }
+
+    for slot in [MalformedSlot::Source, MalformedSlot::Vault] {
+        let mut env = V16CuEnv::new();
+        let owner = Keypair::new();
+        let p = env.create_portfolio(&owner);
+        env.deposit(&owner, p, 100);
+        env.seed_cancellable_close_progress(p);
+        let source = env.token_account_for_mint(env.mint, owner.pubkey(), 20);
+        let malformed_key = match slot {
+            MalformedSlot::Source => source,
+            MalformedSlot::Vault => env.vault,
+        };
+        let good_malformed_slot = env.svm.get_account(&malformed_key).unwrap();
+        env.svm
+            .set_account(
+                malformed_key,
+                Account {
+                    data: vec![0u8; TokenAccount::LEN - 1],
+                    ..good_malformed_slot.clone()
+                },
+            )
+            .unwrap();
+
+        let market_before = env.svm.get_account(&env.market).unwrap();
+        let portfolio_before = env.svm.get_account(&p).unwrap();
+        let source_before = env.svm.get_account(&source).unwrap();
+        let vault_before = env.svm.get_account(&env.vault).unwrap();
+
+        env.svm.expire_blockhash();
+        let rejected = env.send(
+            ProgInstruction::CureAndCancelClose {
+                optional_deposit: 20,
+            },
+            vec![
+                AccountMeta::new(owner.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(p, false),
+                AccountMeta::new(source, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[&owner],
+        );
+        assert!(
+            rejected.is_err(),
+            "CureAndCancelClose must reject a malformed source or vault before canceling"
+        );
+        assert_eq!(
+            env.svm.get_account(&env.market).unwrap(),
+            market_before,
+            "malformed cure rejection leaves market accounting unchanged"
+        );
+        assert_eq!(
+            env.svm.get_account(&p).unwrap(),
+            portfolio_before,
+            "malformed cure rejection leaves close-progress and capital unchanged"
+        );
+        assert_eq!(
+            env.svm.get_account(&source).unwrap(),
+            source_before,
+            "malformed cure rejection pulls no optional-deposit tokens"
+        );
+        assert_eq!(
+            env.svm.get_account(&env.vault).unwrap(),
+            vault_before,
+            "malformed cure rejection credits no vault custody"
+        );
+        assert!(
+            close_progress(&env.portfolio_state(p)).active,
+            "close ledger remains active after malformed-token rejection"
+        );
+        assert!(
+            !close_progress(&env.portfolio_state(p)).canceled,
+            "malformed-token rejection must not cancel the close ledger"
+        );
+
+        env.svm
+            .set_account(malformed_key, good_malformed_slot)
+            .unwrap();
+        env.svm.expire_blockhash();
+        let ok = env
+            .send(
+                ProgInstruction::CureAndCancelClose {
+                    optional_deposit: 20,
+                },
+                vec![
+                    AccountMeta::new(owner.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(p, false),
+                    AccountMeta::new(source, false),
+                    AccountMeta::new(env.vault, false),
+                    AccountMeta::new_readonly(spl_token::ID, false),
+                ],
+                &[&owner],
+            )
+            .expect("CureAndCancelClose remains live after malformed-token rejection");
+        assert_cu_within("CureAndCancelClose malformed-token retry", ok, CUSTODY_CU_LIMIT);
+        let cured = env.portfolio_state(p);
+        assert!(close_progress(&cured).canceled);
+        assert_eq!(cured.capital.get(), 120);
+        assert_eq!(env.token_amount(source), 0);
+        assert_eq!(
+            env.market_state().1.vault as u64,
+            env.token_amount(env.vault)
+        );
+    }
+}
+
 // full-interface sweep: value-in routes must reject frozen user source accounts before they credit
 // engine accounting. Otherwise a later SPL transfer failure could leave minted capital, insurance,
 // or backing principal without custody if rollback assumptions are ever broken at the boundary.
