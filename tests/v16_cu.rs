@@ -24030,6 +24030,9 @@ fn v16_attack_tradecpi_self_trade_rejected() {
     env.deposit(&owner, acct, 1_000_000);
     let (ctx, delegate, _) = env.init_matcher_context(matcher_program, acct);
     let (_, g0) = env.market_state();
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let account_before = env.svm.get_account(&acct).unwrap();
+    let ctx_before = env.svm.get_account(&ctx).unwrap();
     // taker == maker == acct.
     env.svm.expire_blockhash();
     let r = env.send(
@@ -24041,7 +24044,6 @@ fn v16_attack_tradecpi_self_trade_rejected() {
         },
         vec![
             AccountMeta::new(owner.pubkey(), true),
-            AccountMeta::new(owner.pubkey(), true),
             AccountMeta::new(env.market, false),
             AccountMeta::new(acct, false),
             AccountMeta::new(acct, false),
@@ -24051,7 +24053,26 @@ fn v16_attack_tradecpi_self_trade_rejected() {
         ],
         &[&owner],
     );
-    assert!(r.is_err(), "TradeCpi self-trade (taker==maker) must reject");
+    let err = r.expect_err("TradeCpi self-trade (taker==maker) must reject");
+    assert!(
+        err.contains("Custom(9)") || err.contains("custom program error: 0x9"),
+        "TradeCpi self-trade should reject as InvalidInstruction after valid account preflight, got {err}"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "self-trade rejection leaves market bytes unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&acct).unwrap(),
+        account_before,
+        "self-trade rejection leaves the portfolio bytes unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&ctx).unwrap(),
+        ctx_before,
+        "self-trade rejection must occur before matcher CPI"
+    );
     let (_, g1) = env.market_state();
     assert_eq!(
         g1.assets[0].oi_eff_long_q, 0,
