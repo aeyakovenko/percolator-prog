@@ -11300,6 +11300,63 @@ fn v16_bpf_close_resolved_moves_payout_tokens_with_ledger() {
     assert_eq!(account.capital.get(), 0);
 }
 
+// LoF/DoS sweep (cron135): PermissionlessCrank is the public keeper route. Once the
+// market is Resolved, it must forward to the resolved-close path before trying to
+// parse live-mode crank observations; otherwise stale keeper hints could block
+// terminal user wind-down.
+#[test]
+fn v16_attack_resolved_permissionless_crank_closes_without_live_hint_parsing() {
+    let mut env = V16CuEnv::new();
+    let owner = Keypair::new();
+    let portfolio = env.create_portfolio(&owner);
+    env.deposit(&owner, portfolio, 1_000);
+    env.resolve();
+
+    let dest = env.token_account(owner.pubkey(), 0);
+    env.svm.expire_blockhash();
+    let cu = env
+        .send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: u64::MAX,
+                close_q: u128::MAX,
+                observations: vec![CrankObservationHint {
+                    asset_index: u16::MAX,
+                    oracle_accounts: u8::MAX,
+                }],
+            },
+            vec![
+                AccountMeta::new_readonly(owner.pubkey(), false),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(portfolio, false),
+                AccountMeta::new(dest, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(env.vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[],
+        )
+        .expect("resolved-mode PermissionlessCrank forwards to CloseResolved");
+    assert_cu_within(
+        "Resolved PermissionlessCrank CloseResolved",
+        cu,
+        CRANK_CU_LIMIT,
+    );
+    assert_eq!(
+        env.token_amount(dest),
+        1_000,
+        "resolved crank pays the user instead of parsing hostile live hints"
+    );
+    assert_eq!(env.token_amount(env.vault), 0);
+
+    let market_data = env.svm.get_account(&env.market).unwrap().data;
+    let portfolio_data = env.svm.get_account(&portfolio).unwrap().data;
+    let (_, group) = state::read_market(&market_data).unwrap();
+    let account = state::read_portfolio(&portfolio_data).unwrap();
+    assert_eq!(group.vault, 0);
+    assert_eq!(group.c_tot, 0);
+    assert_eq!(account.capital.get(), 0);
+}
+
 #[test]
 fn v16_bpf_failed_close_resolved_transfer_rolls_back_payout_state() {
     let mut env = V16CuEnv::new();
