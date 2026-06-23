@@ -60152,6 +60152,170 @@ fn v16_attack_tradecpi_active_stale_rejects_before_hostile_matcher_cpi() {
     }
 }
 
+// CU/DoS hardening: raw malformed leg bytes on an unrequested asset must also be treated as
+// account-global invalid state. These variants cover the inactive-nonempty and invalid-active-byte
+// branches separately from duplicate active-leg detection.
+#[test]
+fn v16_attack_tradecpi_unrequested_raw_hidden_leg_rejects_before_hostile_matcher_cpi() {
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(2, 5_000, 10_000, 1_000);
+    let hostile = Pubkey::new_unique();
+    env.svm.add_program(
+        hostile,
+        &std::fs::read(hostile_matcher_program_path()).unwrap(),
+    );
+    let taker = Keypair::new();
+    let lp = Keypair::new();
+    let taker_account = env.create_portfolio(&taker);
+    let lp_account = env.create_portfolio(&lp);
+    env.deposit(&taker, taker_account, 1_000_000);
+    env.deposit(&lp, lp_account, 1_000_000);
+    env.trade_asset_with_cu(
+        1,
+        &taker,
+        taker_account,
+        &lp,
+        lp_account,
+        POS_SCALE as i128,
+        100,
+        0,
+    );
+
+    let ctx = Pubkey::new_unique();
+    let delegate = matcher_delegate_key(
+        &env.program_id,
+        &env.market,
+        &lp_account,
+        &lp.pubkey(),
+        &hostile,
+        &ctx,
+    );
+    env.svm
+        .set_account(
+            delegate,
+            Account {
+                lamports: 1_000_000_000,
+                data: vec![],
+                owner: Pubkey::default(),
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    let set_hostile_overfill = |env: &mut V16CuEnv| {
+        let mut ctx_data = vec![0u8; MATCHER_CONTEXT_LEN];
+        ctx_data[0] = 0;
+        env.svm
+            .set_account(
+                ctx,
+                Account {
+                    lamports: 1_000_000_000,
+                    data: ctx_data,
+                    owner: hostile,
+                    executable: false,
+                    rent_epoch: 0,
+                },
+            )
+            .unwrap();
+    };
+    set_hostile_overfill(&mut env);
+    env.set_matcher_config(hostile, &lp, lp_account, ctx, delegate, 1);
+
+    let accounts = |env: &V16CuEnv| {
+        vec![
+            AccountMeta::new(taker.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(taker_account, false),
+            AccountMeta::new(lp_account, false),
+            AccountMeta::new_readonly(hostile, false),
+            AccountMeta::new(ctx, false),
+            AccountMeta::new_readonly(delegate, false),
+        ]
+    };
+
+    env.svm.expire_blockhash();
+    let control = env
+        .send(
+            ProgInstruction::TradeCpi {
+                asset_index: 0,
+                size_q: POS_SCALE as i128,
+                fee_bps: 0,
+                limit_price: 0,
+            },
+            accounts(&env),
+            &[&taker],
+        )
+        .expect_err("clean unrequested-active TradeCpi should reach hostile matcher validation");
+    assert!(
+        control.contains("InvalidAccountData"),
+        "clean control should fail from hostile matcher validation, got {control}"
+    );
+
+    let clean_taker = env.svm.get_account(&taker_account).unwrap();
+    for variant in ["inactive-nonempty", "invalid-active-byte"] {
+        let mut taker_data = clean_taker.clone();
+        {
+            let mut account = state::read_portfolio(&taker_data.data).unwrap();
+            account.legs[2] = account.legs[0];
+            if variant == "inactive-nonempty" {
+                account.legs[2].active = 0;
+            } else {
+                account.legs[2].active = 2;
+            }
+            state::write_portfolio(&mut taker_data.data, &account).unwrap();
+        }
+        env.svm.set_account(taker_account, taker_data).unwrap();
+
+        for (route, instruction) in [
+            (
+                "TradeCpi",
+                ProgInstruction::TradeCpi {
+                    asset_index: 0,
+                    size_q: POS_SCALE as i128,
+                    fee_bps: 0,
+                    limit_price: 0,
+                },
+            ),
+            (
+                "BatchTradeCpi",
+                ProgInstruction::BatchTradeCpi {
+                    legs: vec![BatchTradeCpiLeg {
+                        asset_index: 0,
+                        size_q: POS_SCALE as i128,
+                        fee_bps: 0,
+                        limit_price: 0,
+                    }],
+                },
+            ),
+        ] {
+            set_hostile_overfill(&mut env);
+            let market_before = env.svm.get_account(&env.market).unwrap();
+            let taker_before = env.svm.get_account(&taker_account).unwrap();
+            let lp_before = env.svm.get_account(&lp_account).unwrap();
+            let ctx_before = env.svm.get_account(&ctx).unwrap();
+            env.svm.expire_blockhash();
+            let rejected = env
+                .send(instruction, accounts(&env), &[&taker])
+                .expect_err("unrequested malformed raw leg must reject before matcher CPI");
+            assert!(
+                rejected.contains("Custom(17)") || rejected.contains("custom program error: 0x11"),
+                "{route} {variant} raw hidden leg should fail as EngineHiddenLeg, got {rejected}"
+            );
+            assert!(
+                !rejected.contains("InvalidAccountData"),
+                "{route} {variant} raw hidden leg must not reach hostile matcher validation: {rejected}"
+            );
+            assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+            assert_eq!(env.svm.get_account(&taker_account).unwrap(), taker_before);
+            assert_eq!(env.svm.get_account(&lp_account).unwrap(), lp_before);
+            assert_eq!(
+                env.svm.get_account(&ctx).unwrap(),
+                ctx_before,
+                "{route} {variant} must not give the hostile matcher a writable context"
+            );
+        }
+    }
+}
+
 // CU/DoS sweep: full benign matcher tails add the worst valid account fanout to the fresh-asset
 // stale-portfolio BatchTradeCpi boundary. This path must remain live for a one-leg fresh-asset batch
 // and still fit below the transaction CU cap.
