@@ -48413,6 +48413,121 @@ fn v16_attack_drain_only_blocks_new_risk_but_allows_reduce() {
     assert!(closed_group.vault >= closed_group.c_tot + closed_group.insurance);
 }
 
+// Lifecycle sweep: BatchTradeNoCpi routes through a separate wrapper path from single TradeNoCpi.
+// DrainOnly must still block a fresh risk-increasing batch while allowing an existing matched
+// position to reduce, or batch users could either reopen a draining asset or get stuck exiting it.
+#[test]
+fn v16_attack_batch_nocpi_drain_only_blocks_new_risk_but_allows_reduce() {
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(1, 5_000, 10_000, 1_000);
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long_account = env.create_portfolio(&long_owner);
+    let short_account = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long_account, 1_000_000);
+    env.deposit(&short_owner, short_account, 1_000_000);
+    env.trade_asset_with_cu(
+        0,
+        &long_owner,
+        long_account,
+        &short_owner,
+        short_account,
+        (2 * POS_SCALE) as i128,
+        100,
+        0,
+    );
+
+    env.update_asset_lifecycle_as_admin_with_cu(
+        percolator_prog::processor::ASSET_ACTION_DRAIN_ONLY,
+        0,
+        0,
+        0,
+    );
+    assert_eq!(
+        env.market_state().1.assets[0].lifecycle,
+        AssetLifecycleV16::DrainOnly
+    );
+
+    let fresh_long_owner = Keypair::new();
+    let fresh_short_owner = Keypair::new();
+    let fresh_long = env.create_portfolio(&fresh_long_owner);
+    let fresh_short = env.create_portfolio(&fresh_short_owner);
+    env.deposit(&fresh_long_owner, fresh_long, 1_000_000);
+    env.deposit(&fresh_short_owner, fresh_short, 1_000_000);
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let fresh_long_before = env.svm.get_account(&fresh_long).unwrap();
+    let fresh_short_before = env.svm.get_account(&fresh_short).unwrap();
+    env.svm.expire_blockhash();
+    let open = env.send(
+        ProgInstruction::BatchTradeNoCpi {
+            legs: vec![BatchTradeLeg {
+                asset_index: 0,
+                size_q: POS_SCALE as i128,
+                exec_price: 100,
+                fee_bps: 0,
+            }],
+        },
+        vec![
+            AccountMeta::new(fresh_long_owner.pubkey(), true),
+            AccountMeta::new(fresh_short_owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(fresh_long, false),
+            AccountMeta::new(fresh_short, false),
+        ],
+        &[&fresh_long_owner, &fresh_short_owner],
+    );
+    assert!(
+        open.is_err(),
+        "DrainOnly must reject a fresh risk-increasing BatchTradeNoCpi"
+    );
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+    assert_eq!(env.svm.get_account(&fresh_long).unwrap(), fresh_long_before);
+    assert_eq!(
+        env.svm.get_account(&fresh_short).unwrap(),
+        fresh_short_before
+    );
+
+    env.svm.expire_blockhash();
+    let reduce_cu = env
+        .send(
+            ProgInstruction::BatchTradeNoCpi {
+                legs: vec![BatchTradeLeg {
+                    asset_index: 0,
+                    size_q: -(POS_SCALE as i128),
+                    exec_price: 100,
+                    fee_bps: 0,
+                }],
+            },
+            vec![
+                AccountMeta::new(long_owner.pubkey(), true),
+                AccountMeta::new(short_owner.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(long_account, false),
+                AccountMeta::new(short_account, false),
+            ],
+            &[&long_owner, &short_owner],
+        )
+        .expect("DrainOnly must allow existing BatchTradeNoCpi risk reduction");
+    assert_cu_within(
+        "DrainOnly BatchTradeNoCpi reduce",
+        reduce_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    let long_after = env.portfolio_state(long_account);
+    let short_after = env.portfolio_state(short_account);
+    assert_eq!(
+        active_leg_for_asset(&long_after, 0).basis_pos_q,
+        POS_SCALE as i128
+    );
+    assert_eq!(
+        active_leg_for_asset(&short_after, 0).basis_pos_q,
+        -(POS_SCALE as i128)
+    );
+    let (_, group_after) = env.market_state();
+    assert_eq!(group_after.assets[0].oi_eff_long_q, POS_SCALE);
+    assert_eq!(group_after.assets[0].oi_eff_short_q, POS_SCALE);
+    assert!(group_after.vault >= group_after.c_tot + group_after.insurance);
+}
+
 // security.md sweep — §6.2 backing-yield fee split (#5): when a risk-increasing trade GROWS an
 // account's source-credit IM lien that draws a fresh counterparty backing bucket, the wrapper charges
 // a backing-domain trade fee = fee_bps * Δbacking and splits it three ways: insurance_share to the
