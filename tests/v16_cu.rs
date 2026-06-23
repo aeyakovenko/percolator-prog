@@ -57125,6 +57125,100 @@ fn v16_attack_tradecpi_active_stale_rejects_before_hostile_matcher_cpi() {
     }
 }
 
+// CU/DoS sweep: full benign matcher tails add the worst valid account fanout to the fresh-asset
+// stale-portfolio BatchTradeCpi boundary. This path must remain live for a one-leg fresh-asset batch
+// and still fit below the transaction CU cap.
+#[test]
+fn v16_attack_stale_thirteen_leg_fresh_asset_batch_cpi_with_max_tail_stays_bounded() {
+    const MAX_TAIL: usize = percolator_prog::constants::MAX_MATCHER_TAIL_ACCOUNTS;
+
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(14, 1_000, 1_000, 500);
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long_account = env.create_portfolio(&long_owner);
+    let short_account = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long_account, 100_000);
+    env.deposit(&short_owner, short_account, 100_000);
+    env.seed_n_leg_position_for_benchmark(long_account, short_account, 13);
+    env.svm.warp_to_slot(16);
+
+    let matcher_program = Pubkey::new_unique();
+    let matcher_bytes = std::fs::read(auth_matcher_program_path()).expect("read auth matcher BPF");
+    env.svm.add_program(matcher_program, &matcher_bytes);
+    let (ctx, delegate, _) =
+        env.init_auth_matcher_context(matcher_program, &short_owner, short_account);
+    let tail: Vec<Pubkey> = (0..MAX_TAIL)
+        .map(|_| {
+            let key = Pubkey::new_unique();
+            env.svm
+                .set_account(
+                    key,
+                    Account {
+                        lamports: 1_000_000_000,
+                        data: vec![0u8; 8],
+                        owner: Pubkey::default(),
+                        executable: false,
+                        rent_epoch: 0,
+                    },
+                )
+                .unwrap();
+            key
+        })
+        .collect();
+    let mut accounts = vec![
+        AccountMeta::new(long_owner.pubkey(), true),
+        AccountMeta::new(env.market, false),
+        AccountMeta::new(long_account, false),
+        AccountMeta::new(short_account, false),
+        AccountMeta::new_readonly(matcher_program, false),
+        AccountMeta::new(ctx, false),
+        AccountMeta::new_readonly(delegate, false),
+    ];
+    accounts.extend(
+        tail.iter()
+            .copied()
+            .map(|key| AccountMeta::new_readonly(key, false)),
+    );
+
+    env.svm.expire_blockhash();
+    let cu = env
+        .send(
+            ProgInstruction::BatchTradeCpi {
+                legs: vec![BatchTradeCpiLeg {
+                    asset_index: 13,
+                    size_q: POS_SCALE as i128,
+                    fee_bps: 0,
+                    limit_price: 0,
+                }],
+            },
+            accounts,
+            &[&long_owner],
+        )
+        .expect("max-tail fresh-asset BatchTradeCpi from thirteen stale legs must stay live");
+    println!("v16 13-stale-leg fresh-asset BatchTradeCpi max-tail CU: {cu}");
+    assert!(
+        cu < 1_400_000,
+        "fresh-asset max-tail BatchTradeCpi CU {cu}"
+    );
+    let long_after = env.portfolio_state(long_account);
+    let short_after = env.portfolio_state(short_account);
+    assert_eq!(
+        active_leg_for_asset(&long_after, 13).basis_pos_q,
+        POS_SCALE as i128,
+        "fresh asset opened on the taker"
+    );
+    assert_eq!(
+        active_leg_for_asset(&short_after, 13).basis_pos_q,
+        -(POS_SCALE as i128),
+        "fresh asset opened on the LP"
+    );
+    let (_, group) = env.market_state();
+    assert!(
+        group.vault >= group.c_tot + group.insurance,
+        "fresh-asset max-tail BatchTradeCpi preserves senior conservation"
+    );
+}
+
 // CU/DoS hardening: BatchTradeCpi must reject impossible caller fee_bps before invoking a matcher.
 // The single-fill CPI path checks max(caller_fee_bps, trade_fee_base_bps) before CPI; batch CPI must
 // do the same. The hostile over-fill matcher is the sentinel: a valid-fee call reaches matcher-return
