@@ -87582,6 +87582,79 @@ fn v16_attack_terminal_insurance_rejects_wrong_token_program_before_debit() {
 // optional ledger before validating destination/vault token account layouts. A malformed but SPL-owned
 // destination must not burn the withdrawal capacity or strand the ledger.
 #[test]
+fn v16_attack_terminal_insurance_over_u64_rolls_back_budget_and_ledger() {
+    let mut env = V16CuEnv::new();
+    let admin = env.admin.insecure_clone();
+    let over = u64::MAX as u128 + 1;
+
+    env.mutate_market(|_, group| {
+        group.mode = MarketModeV16::Resolved;
+        group.resolved_slot = 1;
+        group.current_slot = 1;
+        group.materialized_portfolio_count = 0;
+        group.c_tot = 0;
+        group.insurance = over;
+        group.vault = over;
+        group.insurance_domain_budget[0] = over;
+        group.insurance_domain_budget[1] = 0;
+        group.insurance_domain_spent[0] = 0;
+        group.insurance_domain_spent[1] = 0;
+    });
+    env.set_token_account_amount(env.vault, env.mint, env.vault_authority, u64::MAX);
+
+    let ledger = env.insurance_ledger_account();
+    let dest = env.token_account(admin.pubkey(), 0);
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let ledger_before = env.svm.get_account(&ledger).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    let dest_before = env.svm.get_account(&dest).unwrap();
+
+    env.svm.expire_blockhash();
+    let rejected = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::WithdrawInsurance { amount: over },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(ledger, false),
+        ],
+        &[&admin],
+    );
+    let err = rejected
+        .expect_err("over-u64 terminal WithdrawInsurance must reject before SPL truncation");
+    assert!(
+        err.contains("Custom(9)"),
+        "over-u64 terminal WithdrawInsurance should reject as InvalidInstruction, got {err}"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "over-u64 terminal insurance withdraw must roll back terminal budget debit"
+    );
+    assert_eq!(
+        env.svm.get_account(&ledger).unwrap(),
+        ledger_before,
+        "over-u64 terminal insurance withdraw must roll back optional ledger writes"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        vault_before,
+        "over-u64 terminal insurance withdraw must not touch vault custody"
+    );
+    assert_eq!(
+        env.svm.get_account(&dest).unwrap(),
+        dest_before,
+        "over-u64 terminal insurance withdraw must not pay a truncated amount"
+    );
+}
+
+#[test]
 fn v16_attack_terminal_insurance_malformed_dest_rolls_back_budget_and_ledger() {
     let mut env = V16CuEnv::new();
     let admin = env.admin.insecure_clone();
