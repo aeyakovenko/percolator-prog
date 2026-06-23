@@ -8619,6 +8619,74 @@ fn v16_attack_sync_maintenance_bad_cranker_rolls_back_fee() {
     );
 }
 
+// SyncMaintenanceFee's cranker-reward branch debits the charged portfolio, credits insurance, and then
+// credits the reward portfolio before validating the market shape. A malformed market aggregate must
+// roll back all three writes and leave the public sync route usable after the shape is repaired.
+#[test]
+fn v16_attack_sync_maintenance_cranker_rejects_invalid_final_market_shape() {
+    let mut env = V16CuEnv::new_with_market_params_price_move_and_maintenance_fee(
+        1, 10_000, 10_000, 10_000, 58,
+    );
+    let payer_owner = Keypair::new();
+    let cranker_owner = Keypair::new();
+    let payer_portfolio = env.create_portfolio(&payer_owner);
+    let cranker_portfolio = env.create_portfolio(&cranker_owner);
+    env.deposit(&payer_owner, payer_portfolio, 100_000_000);
+    env.update_maintenance_fee_policy_with_cu(4_000);
+
+    env.mutate_market(|_, group| {
+        group.insurance_domain_budget[0] = group.insurance.saturating_add(1_000_000);
+    });
+    let before_market = env.svm.get_account(&env.market).unwrap();
+    let before_payer = env.svm.get_account(&payer_portfolio).unwrap();
+    let before_cranker = env.svm.get_account(&cranker_portfolio).unwrap();
+
+    env.svm.warp_to_slot(10);
+    env.svm.expire_blockhash();
+    let rejected =
+        env.try_sync_maintenance_fee_with_cu(payer_portfolio, Some(cranker_portfolio), 10);
+    assert!(
+        rejected.is_err(),
+        "cranker maintenance sync must reject an invalid final market shape"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        before_market,
+        "failed maintenance sync must roll back market insurance and budget writes"
+    );
+    assert_eq!(
+        env.svm.get_account(&payer_portfolio).unwrap(),
+        before_payer,
+        "failed maintenance sync must roll back the charged portfolio debit"
+    );
+    assert_eq!(
+        env.svm.get_account(&cranker_portfolio).unwrap(),
+        before_cranker,
+        "failed maintenance sync must roll back the cranker reward credit"
+    );
+
+    env.mutate_market(|_, group| {
+        group.insurance_domain_budget[0] = 0;
+    });
+    env.svm.expire_blockhash();
+    let sync_cu = env.sync_maintenance_fee_with_cu(payer_portfolio, Some(cranker_portfolio), 10);
+    assert_cu_within(
+        "maintenance sync retry after invalid-shape rejection",
+        sync_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    assert_eq!(
+        env.portfolio_state(payer_portfolio).capital.get(),
+        100_000_000 - 580,
+        "valid retry charges exactly the elapsed maintenance fee"
+    );
+    assert_eq!(
+        env.portfolio_state(cranker_portfolio).capital.get(),
+        232,
+        "valid retry pays the configured cranker reward"
+    );
+}
+
 #[test]
 fn v16_attack_sync_maintenance_rejects_cross_market_cranker_reward() {
     let mut env = V16CuEnv::new_with_market_params_price_move_and_maintenance_fee(
