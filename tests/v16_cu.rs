@@ -45067,6 +45067,151 @@ fn v16_attack_auto_crank_multi_leg_later_distressed_asset_makes_progress() {
     assert!(group.vault >= group.c_tot + group.insurance);
 }
 
+// LoF/DoS sweep: if a work-bearing auto-crank needs asset 1 for its engine-selected
+// liquidation step, a caller should not be able to supply only an unrelated
+// asset-0 observation and commit an oracle-only market mutation while the
+// selected account step returns NonProgress.
+#[test]
+fn v16_attack_auto_crank_missing_selected_observation_rolls_back_unrelated_oracle() {
+    const MARK: u64 = 1_000_000;
+    const BAD_MARK: u64 = 2_000_000;
+    const OPEN_SLOT: u64 = 1;
+    const LIQ_SLOT: u64 = 30;
+    const SIZE_Q: u128 = 10 * POS_SCALE;
+
+    let mut env = V16CuEnv::new_with_init_params(production_risk_params());
+    env.activate_asset(1, OPEN_SLOT, MARK);
+    let feed0 = [0x37u8; 32];
+    set_test_clock(&mut env, OPEN_SLOT, 100);
+    let initial0 = env.set_pyth_price_with_conf(&feed0, MARK as i64, -6, 0, 100);
+    env.try_configure_hybrid_asset_with_conf_filter_cu(
+        0,
+        1,
+        0,
+        [feed0, [0u8; 32], [0u8; 32]],
+        &[initial0],
+        OPEN_SLOT,
+        100,
+        0,
+        0,
+        10,
+        0,
+    )
+    .expect("configure unrelated asset-0 oracle");
+    env.configure_auth_mark_for_asset_as_admin(1, OPEN_SLOT, MARK);
+
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long = env.create_portfolio(&long_owner);
+    let short = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long, 100_000_000);
+    env.deposit(&short_owner, short, 100_000);
+    env.trade_asset_with_cu(
+        1,
+        &long_owner,
+        long,
+        &short_owner,
+        short,
+        POS_SCALE as i128,
+        MARK,
+        0,
+    );
+
+    for slot in 2..=LIQ_SLOT {
+        env.svm.warp_to_slot(slot);
+        env.push_auth_mark_for_asset_as_admin(1, slot, BAD_MARK);
+        env.svm.expire_blockhash();
+        let _ = env.send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: slot,
+                close_q: 0,
+                observations: crank_observations(1),
+            },
+            vec![
+                AccountMeta::new(env.payer.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(short, false),
+            ],
+            &[],
+        );
+        if health_cert(&env.portfolio_state(short)).certified_liq_deficit != 0 {
+            break;
+        }
+    }
+    assert!(
+        health_cert(&env.portfolio_state(short)).certified_liq_deficit != 0,
+        "test setup must make asset 1 the engine-selected liquidatable step"
+    );
+
+    set_test_clock(&mut env, LIQ_SLOT + 1, 101);
+    let fresh0 = env.set_pyth_price_with_conf(&feed0, 1_010_000, -6, 0, 101);
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let short_before = env.svm.get_account(&short).unwrap();
+
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::PermissionlessCrank {
+            now_slot: LIQ_SLOT + 1,
+            close_q: SIZE_Q,
+            observations: crank_observations_with_accounts(0, 1),
+        },
+        vec![
+            AccountMeta::new(env.payer.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(short, false),
+            AccountMeta::new_readonly(fresh0, false),
+        ],
+        &[],
+    );
+    let err =
+        rejected.expect_err("missing selected asset observation must reject and roll back state");
+    assert!(
+        err.contains("Custom(22)"),
+        "missing selected observation should propagate EngineNonProgress, got {err}"
+    );
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+    assert_eq!(env.svm.get_account(&short).unwrap(), short_before);
+
+    env.svm.expire_blockhash();
+    let ok = env.send(
+        ProgInstruction::PermissionlessCrank {
+            now_slot: LIQ_SLOT + 1,
+            close_q: SIZE_Q,
+            observations: vec![
+                CrankObservationHint {
+                    asset_index: 0,
+                    oracle_accounts: 1,
+                },
+                CrankObservationHint {
+                    asset_index: 1,
+                    oracle_accounts: 0,
+                },
+            ],
+        },
+        vec![
+            AccountMeta::new(env.payer.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(short, false),
+            AccountMeta::new_readonly(fresh0, false),
+        ],
+        &[],
+    );
+    assert!(
+        ok.is_ok(),
+        "supplying the selected asset observation must leave the crank live: {ok:?}"
+    );
+    assert_cu_within(
+        "missing-selected-observation valid retry",
+        ok.unwrap(),
+        CRANK_CU_LIMIT,
+    );
+    let (_, group) = env.market_state();
+    assert_eq!(
+        group.assets[0].raw_oracle_target_price, 1_010_000,
+        "valid retry applies the unrelated observation only when selected progress can also run"
+    );
+}
+
 #[test]
 fn v16_attack_crank_oracle_same_publish_time_price_change_rejects() {
     let mut env = V16CuEnv::new();
