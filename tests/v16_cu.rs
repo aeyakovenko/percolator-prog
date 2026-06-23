@@ -6636,6 +6636,66 @@ fn v16_attack_restart_asset_oracle_rejects_backing_fee_earnings_without_mutation
     );
 }
 
+// LoF/DoS sweep (cron135): RestartAssetOracle stages an engine restart and oracle-profile rewrite
+// before final shape validation. A malformed preserved insurance-domain budget must therefore abort
+// the instruction atomically instead of leaving an asset with a fresh market_id but invalid solvency
+// aggregates.
+#[test]
+fn v16_attack_restart_asset_oracle_rejects_invalid_final_shape_atomically() {
+    let mut env = V16CuEnv::new();
+    let admin = env.admin.insecure_clone();
+    env.configure_permissionless_resolve_with_cu(100, 5);
+    env.configure_auth_mark_with_cu(0, 100);
+
+    env.svm.warp_to_slot(2);
+    env.svm.expire_blockhash();
+    env.try_shutdown_asset_with_authority(&admin, 0, 2)
+        .expect("asset admin shuts down empty asset 0");
+    env.mutate_market(|_, group| {
+        group.insurance_domain_budget[0] = group.insurance.saturating_add(1);
+    });
+    let before_restart = env.svm.get_account(&env.market).unwrap();
+    let (_, before_group) = env.market_state();
+    assert_eq!(
+        before_group.assets[0].lifecycle,
+        AssetLifecycleV16::Recovery
+    );
+    assert!(
+        before_group.insurance_domain_budget[0] > before_group.insurance,
+        "test precondition: preserved domain budget makes the final market shape invalid"
+    );
+
+    env.svm.expire_blockhash();
+    let rejected = env.try_restart_asset_oracle_with_authority(&admin, 0, 3, 150);
+    assert!(
+        rejected.is_err(),
+        "restart must reject the invalid final market shape"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        before_restart,
+        "failed restart must roll back the staged engine restart and oracle-profile rewrite"
+    );
+    assert_eq!(
+        env.market_state().1.assets[0].lifecycle,
+        AssetLifecycleV16::Recovery,
+        "failed restart must not leave the asset active under a fresh market id"
+    );
+
+    env.mutate_market(|_, group| {
+        group.insurance_domain_budget[0] = 0;
+    });
+    env.svm.expire_blockhash();
+    env.try_restart_asset_oracle_with_authority(&admin, 0, 3, 150)
+        .expect("repairing the preserved budget restores restart liveness");
+    let (_, repaired_group) = env.market_state();
+    assert_eq!(
+        repaired_group.assets[0].lifecycle,
+        AssetLifecycleV16::Active
+    );
+    assert_eq!(repaired_group.assets[0].effective_price, 150);
+}
+
 // LoF/DoS sweep (cron135): RestartAssetOracle rewrites an empty recovery asset and its per-asset
 // oracle profile. Backing-fee policy is stored in that profile and mirrored by a market-wide batch
 // gate, so restart must neither drop the policy (fee bypass) nor preserve only the counter (sticky
