@@ -44648,6 +44648,152 @@ fn v16_attack_crank_surplus_oracle_tail_rolls_back_prior_observation() {
     assert_eq!(group.assets[0].raw_oracle_target_price, 220_000);
 }
 
+// Multi-observation auto-crank sweep: a keeper may supply fresh oracle observations for more than
+// one asset, while the engine selector liquidates only the currently actionable asset. The retained
+// liquidation fee must be budgeted to the selected/liquidated asset, not to the first observation
+// in the caller-provided tail. Otherwise an attacker could prepend an unrelated oracle update and
+// redirect liquidation insurance away from the distressed asset's domains.
+#[test]
+fn v16_attack_multi_observation_liquidation_fee_uses_selected_asset() {
+    const MARK: u64 = 1_000_000;
+    const LIQ_MARK: u64 = 2_000_000;
+    const OPEN_SLOT: u64 = 1;
+    const LIQ_SLOT: u64 = 30;
+
+    let mut env = V16CuEnv::new_with_init_params(production_risk_params());
+    env.activate_asset(1, OPEN_SLOT, MARK);
+
+    set_test_clock(&mut env, OPEN_SLOT, 100);
+    let feed0 = [0x34u8; 32];
+    let initial0 = env.set_pyth_price_with_conf(&feed0, MARK as i64, -6, 0, 100);
+    env.try_configure_hybrid_asset_with_conf_filter_cu(
+        0,
+        1,
+        0,
+        [feed0, [0u8; 32], [0u8; 32]],
+        &[initial0],
+        OPEN_SLOT,
+        100,
+        0,
+        0,
+        10,
+        0,
+    )
+    .expect("configure unrelated asset-0 hybrid oracle");
+    env.configure_auth_mark_for_asset_as_admin(1, OPEN_SLOT, MARK);
+
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long = env.create_portfolio(&long_owner);
+    let short = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long, 100_000_000);
+    env.deposit(&short_owner, short, 100_000);
+    env.trade_asset_with_cu(
+        1,
+        &long_owner,
+        long,
+        &short_owner,
+        short,
+        POS_SCALE as i128,
+        MARK,
+        0,
+    );
+
+    for slot in 2..=LIQ_SLOT {
+        env.svm.warp_to_slot(slot);
+        env.push_auth_mark_for_asset_as_admin(1, slot, LIQ_MARK);
+        env.svm.expire_blockhash();
+        let _ = env.send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: slot,
+                close_q: 0,
+                observations: vec![CrankObservationHint {
+                    asset_index: 1,
+                    oracle_accounts: 0,
+                }],
+            },
+            vec![
+                AccountMeta::new(env.payer.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(short, false),
+            ],
+            &[],
+        );
+    }
+    assert!(
+        health_cert(&env.portfolio_state(short)).certified_liq_deficit != 0,
+        "short is liquidatable before the fee-attribution probe"
+    );
+
+    set_test_clock(&mut env, LIQ_SLOT, 101);
+    let fresh0 = env.set_pyth_price_with_conf(&feed0, 1_010_000, -6, 0, 101);
+    let (_, before_group) = env.market_state();
+    let asset0_budget_before =
+        before_group.insurance_domain_budget[0] + before_group.insurance_domain_budget[1];
+    let asset1_budget_before =
+        before_group.insurance_domain_budget[2] + before_group.insurance_domain_budget[3];
+
+    env.svm.expire_blockhash();
+    let liquidate = env.send(
+        ProgInstruction::PermissionlessCrank {
+            now_slot: LIQ_SLOT,
+            close_q: POS_SCALE,
+            observations: vec![
+                CrankObservationHint {
+                    asset_index: 0,
+                    oracle_accounts: 1,
+                },
+                CrankObservationHint {
+                    asset_index: 1,
+                    oracle_accounts: 0,
+                },
+            ],
+        },
+        vec![
+            AccountMeta::new(env.payer.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(short, false),
+            AccountMeta::new_readonly(fresh0, false),
+        ],
+        &[],
+    );
+    assert!(
+        liquidate.is_ok(),
+        "multi-observation auto-crank should liquidate the selected asset: {liquidate:?}"
+    );
+
+    let (_, after_group) = env.market_state();
+    let insurance_delta = after_group.insurance - before_group.insurance;
+    let asset0_budget_after =
+        after_group.insurance_domain_budget[0] + after_group.insurance_domain_budget[1];
+    let asset1_budget_after =
+        after_group.insurance_domain_budget[2] + after_group.insurance_domain_budget[3];
+    assert!(
+        insurance_delta > 0,
+        "liquidation charged a retained fee, making the attribution non-vacuous"
+    );
+    assert_eq!(
+        asset0_budget_after, asset0_budget_before,
+        "unrelated first observation must not receive the liquidation fee budget"
+    );
+    assert_eq!(
+        asset1_budget_after - asset1_budget_before,
+        insurance_delta,
+        "retained liquidation fee is budgeted to the selected/liquidated asset"
+    );
+    assert_eq!(
+        after_group.assets[0].raw_oracle_target_price, 1_010_000,
+        "the unrelated first observation was still applied"
+    );
+    assert!(percolator::active_bitmap_is_empty(active_bitmap(
+        &env.portfolio_state(short)
+    )));
+    assert_domain_budget_remaining_total_consistent(
+        &after_group,
+        "multi-observation selected-asset liquidation fee",
+    );
+}
+
 #[test]
 fn v16_attack_crank_oracle_same_publish_time_price_change_rejects() {
     let mut env = V16CuEnv::new();
