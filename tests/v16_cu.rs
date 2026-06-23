@@ -7084,6 +7084,99 @@ fn v16_bpf_tradenocpi_rejects_invalid_final_market_shape() {
     );
 }
 
+// BatchTradeNoCpi routes through a separate multi-leg wrapper path from single TradeNoCpi. A malformed
+// final market shape must abort after the batch engine call and roll back both portfolios across all legs.
+#[test]
+fn v16_attack_batch_nocpi_rejects_invalid_final_market_shape() {
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(2, 1_000, 1_000, 500);
+    env.configure_auth_mark_for_asset_as_admin(1, 1, 100);
+    let taker = Keypair::new();
+    let lp = Keypair::new();
+    let taker_account = env.create_portfolio(&taker);
+    let lp_account = env.create_portfolio(&lp);
+    env.deposit(&taker, taker_account, 1_000_000);
+    env.deposit(&lp, lp_account, 1_000_000);
+
+    let legs = vec![
+        BatchTradeLeg {
+            asset_index: 0,
+            size_q: POS_SCALE as i128,
+            exec_price: 100,
+            fee_bps: 0,
+        },
+        BatchTradeLeg {
+            asset_index: 1,
+            size_q: POS_SCALE as i128,
+            exec_price: 100,
+            fee_bps: 0,
+        },
+    ];
+    env.mutate_market(|_, group| {
+        group.insurance_domain_budget[0] = group.insurance.saturating_add(1);
+    });
+    let before_market = env.svm.get_account(&env.market).unwrap();
+    let before_taker = env.svm.get_account(&taker_account).unwrap();
+    let before_lp = env.svm.get_account(&lp_account).unwrap();
+
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::BatchTradeNoCpi { legs: legs.clone() },
+        vec![
+            AccountMeta::new(taker.pubkey(), true),
+            AccountMeta::new(lp.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(taker_account, false),
+            AccountMeta::new(lp_account, false),
+        ],
+        &[&taker, &lp],
+    );
+    assert!(
+        rejected.is_err(),
+        "BatchTradeNoCpi must reject instead of persisting an invalid final market shape"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        before_market,
+        "failed batch must roll back market data"
+    );
+    assert_eq!(
+        env.svm.get_account(&taker_account).unwrap(),
+        before_taker,
+        "failed batch must roll back taker data"
+    );
+    assert_eq!(
+        env.svm.get_account(&lp_account).unwrap(),
+        before_lp,
+        "failed batch must roll back LP data"
+    );
+
+    env.mutate_market(|_, group| {
+        group.insurance_domain_budget[0] = 0;
+    });
+    env.svm.expire_blockhash();
+    let accepted = env.send(
+        ProgInstruction::BatchTradeNoCpi { legs },
+        vec![
+            AccountMeta::new(taker.pubkey(), true),
+            AccountMeta::new(lp.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(taker_account, false),
+            AccountMeta::new(lp_account, false),
+        ],
+        &[&taker, &lp],
+    );
+    assert!(
+        accepted.is_ok(),
+        "valid multi-leg BatchTradeNoCpi remains live after invalid-shape rejection: {accepted:?}"
+    );
+    let taker_after = env.portfolio_state(taker_account);
+    let lp_after = env.portfolio_state(lp_account);
+    assert!(has_active_leg_for_asset(&taker_after, 0));
+    assert!(has_active_leg_for_asset(&taker_after, 1));
+    assert!(has_active_leg_for_asset(&lp_after, 0));
+    assert!(has_active_leg_for_asset(&lp_after, 1));
+}
+
 #[test]
 fn v16_bpf_tradenocpi_fresh_open_on_base_and_added_asset_is_bounded() {
     let mut env = V16CuEnv::new_with_market_params_and_price_move(4, 1_000, 1_000, 500);
