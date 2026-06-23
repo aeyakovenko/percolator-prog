@@ -11243,6 +11243,76 @@ fn v16_attack_resolve_stale_rejects_invalid_final_market_shape() {
     );
 }
 
+// ResolveMarket is the authenticated terminal transition. It stages resolved-mode header fields inside
+// the engine before the final shape check, so the wrapper must propagate that engine error and SVM
+// rollback must leave ordinary live-user operations available.
+#[test]
+fn v16_attack_admin_resolve_rejects_invalid_final_market_shape() {
+    let mut env = V16CuEnv::new();
+    let admin = env.admin.insecure_clone();
+    let owner = Keypair::new();
+    let portfolio = env.create_portfolio(&owner);
+    env.deposit(&owner, portfolio, 1_000);
+
+    env.mutate_market(|_, group| {
+        group.insurance_domain_budget[0] = group.insurance.saturating_add(1);
+    });
+    let before_market = env.svm.get_account(&env.market).unwrap();
+    let before_portfolio = env.svm.get_account(&portfolio).unwrap();
+    let before_vault = env.svm.get_account(&env.vault).unwrap();
+
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::ResolveMarket,
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        rejected.is_err(),
+        "ResolveMarket must propagate the engine final-shape rejection"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        before_market,
+        "failed admin resolve must roll back the staged resolved header"
+    );
+    assert_eq!(
+        env.svm.get_account(&portfolio).unwrap(),
+        before_portfolio,
+        "failed admin resolve must not mutate user portfolio state"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        before_vault,
+        "failed admin resolve must not move custody"
+    );
+    assert_eq!(
+        env.market_state().1.mode,
+        MarketModeV16::Live,
+        "market remains live after rejected admin resolve"
+    );
+
+    env.mutate_market(|_, group| {
+        group.insurance_domain_budget[0] = 0;
+    });
+    let (dest, _) = env.withdraw_with_cu(&owner, portfolio, 100);
+    assert_eq!(
+        env.token_amount(dest),
+        100,
+        "live user withdrawals remain available after the rejected resolve"
+    );
+    env.svm.expire_blockhash();
+    env.resolve();
+    assert_eq!(
+        env.market_state().1.mode,
+        MarketModeV16::Resolved,
+        "valid admin resolve remains available after the malformed state is cleared"
+    );
+}
+
 #[test]
 fn v16_bpf_cranker_reward_liquidation_rejects_invalid_shape_without_paying_reward() {
     let mut env = V16CuEnv::new();
