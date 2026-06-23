@@ -46356,6 +46356,143 @@ fn v16_attack_deposit_into_uninitialized_portfolio_rejects() {
     );
 }
 
+// LoF/DoS sweep (cron135): Deposit/Withdraw grow legacy portfolio storage before
+// decoding the portfolio header. An undersized raw program-owned account must not
+// stay expanded, and no value may move, if that later identity check fails.
+#[test]
+fn v16_attack_value_routes_raw_undersized_portfolio_realloc_rolls_back() {
+    let mut env = V16CuEnv::new();
+    let owner = Keypair::new();
+    env.ensure_signer_account(owner.pubkey());
+
+    let raw_deposit = env.program_account(8);
+    let deposit_source = env.token_account_for_mint(env.mint, owner.pubkey(), 50);
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    let source_before = env.svm.get_account(&deposit_source).unwrap();
+    let raw_deposit_before = env.svm.get_account(&raw_deposit).unwrap();
+    assert_eq!(
+        raw_deposit_before.data.len(),
+        8,
+        "test setup uses an undersized raw deposit target"
+    );
+
+    env.svm.expire_blockhash();
+    let deposit_rejected = env.send(
+        ProgInstruction::Deposit { amount: 50 },
+        vec![
+            AccountMeta::new(owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(raw_deposit, false),
+            AccountMeta::new(deposit_source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&owner],
+    );
+    assert!(
+        deposit_rejected.is_err(),
+        "deposit into an undersized raw portfolio must reject"
+    );
+    assert_eq!(
+        env.svm.get_account(&raw_deposit).unwrap(),
+        raw_deposit_before,
+        "rejected deposit rolls back the raw account realloc and zero-fill"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "rejected raw deposit leaves market accounting unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        vault_before,
+        "rejected raw deposit moves no vault custody"
+    );
+    assert_eq!(
+        env.svm.get_account(&deposit_source).unwrap(),
+        source_before,
+        "rejected raw deposit pulls no user tokens"
+    );
+
+    let real_portfolio = env.create_portfolio(&owner);
+    let valid_source = env.deposit(&owner, real_portfolio, 50);
+    assert_eq!(
+        env.token_amount(valid_source),
+        0,
+        "valid control deposit still moves custody after the raw reject"
+    );
+
+    let raw_withdraw = env.program_account(8);
+    let withdraw_dest = env.token_account(owner.pubkey(), 0);
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    let real_before = env.svm.get_account(&real_portfolio).unwrap();
+    let dest_before = env.svm.get_account(&withdraw_dest).unwrap();
+    let raw_withdraw_before = env.svm.get_account(&raw_withdraw).unwrap();
+    assert_eq!(
+        raw_withdraw_before.data.len(),
+        8,
+        "test setup uses an undersized raw withdraw target"
+    );
+
+    env.svm.expire_blockhash();
+    let withdraw_rejected = env.send(
+        ProgInstruction::Withdraw { amount: 25 },
+        vec![
+            AccountMeta::new(owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(raw_withdraw, false),
+            AccountMeta::new(withdraw_dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&owner],
+    );
+    assert!(
+        withdraw_rejected.is_err(),
+        "withdraw from an undersized raw portfolio must reject"
+    );
+    assert_eq!(
+        env.svm.get_account(&raw_withdraw).unwrap(),
+        raw_withdraw_before,
+        "rejected withdraw rolls back the raw account realloc and zero-fill"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "rejected raw withdraw leaves market accounting unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&real_portfolio).unwrap(),
+        real_before,
+        "rejected raw withdraw leaves the real portfolio untouched"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        vault_before,
+        "rejected raw withdraw moves no vault custody"
+    );
+    assert_eq!(
+        env.svm.get_account(&withdraw_dest).unwrap(),
+        dest_before,
+        "rejected raw withdraw pays no destination tokens"
+    );
+
+    let (valid_dest, withdraw_cu) = env.withdraw_with_cu(&owner, real_portfolio, 25);
+    assert_cu_within(
+        "valid withdraw after raw undersized rejection",
+        withdraw_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    assert_eq!(
+        env.token_amount(valid_dest),
+        25,
+        "valid control withdraw remains live after the raw reject"
+    );
+}
+
 // security.md sweep - ClosePortfolio on raw account (#44/#48 DoS): a never-initialized program-owned
 // account must not be closeable. Otherwise an attacker could underflow/decrement
 // materialized_portfolio_count or sweep arbitrary account rent into the market slab.
