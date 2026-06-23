@@ -64346,6 +64346,76 @@ fn v16_attack_stale_batch_nocpi_currentness_threshold_is_bounded() {
     }
 }
 
+#[test]
+fn v16_attack_stale_seven_leg_batch_cpi_currentness_threshold_is_bounded() {
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(7, 1_000, 1_000, 500);
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long_account = env.create_portfolio(&long_owner);
+    let short_account = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long_account, 100_000);
+    env.deposit(&short_owner, short_account, 100_000);
+    env.seed_n_leg_position_for_benchmark(long_account, short_account, 7);
+    env.svm.warp_to_slot(16);
+
+    let matcher_program = Pubkey::new_unique();
+    let matcher_bytes = std::fs::read(auth_matcher_program_path()).expect("read auth matcher BPF");
+    env.svm.add_program(matcher_program, &matcher_bytes);
+    let (ctx, delegate, _) =
+        env.init_auth_matcher_context(matcher_program, &short_owner, short_account);
+    let reduce_legs: Vec<BatchTradeCpiLeg> = (0..7u16)
+        .map(|asset_index| BatchTradeCpiLeg {
+            asset_index,
+            size_q: -(POS_SCALE as i128),
+            fee_bps: 0,
+            limit_price: 0,
+        })
+        .collect();
+
+    env.svm.expire_blockhash();
+    let batch_cu = env
+        .send(
+            ProgInstruction::BatchTradeCpi { legs: reduce_legs },
+            vec![
+                AccountMeta::new(long_owner.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(long_account, false),
+                AccountMeta::new(short_account, false),
+                AccountMeta::new_readonly(matcher_program, false),
+                AccountMeta::new(ctx, false),
+                AccountMeta::new_readonly(delegate, false),
+            ],
+            &[&long_owner],
+        )
+        .expect("seven stale active legs remain below the batch-CPI currentness threshold");
+    println!("v16 stale 7-leg BatchTradeCpi threshold CU: {batch_cu}");
+    assert!(
+        batch_cu < 1_400_000,
+        "stale seven-leg BatchTradeCpi must stay under the tx limit: {batch_cu}"
+    );
+
+    let long = env.portfolio_state(long_account);
+    let short = env.portfolio_state(short_account);
+    assert_eq!(
+        percolator::active_bitmap_count_ones(active_bitmap(&long)),
+        7
+    );
+    assert_eq!(
+        percolator::active_bitmap_count_ones(active_bitmap(&short)),
+        7
+    );
+    for asset_index in 0..7usize {
+        assert_eq!(
+            active_leg_for_asset(&long, asset_index).basis_pos_q,
+            (9 * POS_SCALE) as i128
+        );
+        assert_eq!(
+            active_leg_for_asset(&short, asset_index).basis_pos_q,
+            -((9 * POS_SCALE) as i128)
+        );
+    }
+}
+
 // CU/DoS sweep: the large-stale-portfolio currentness preflight intentionally only rejects when the
 // trade touches an already-active stale asset. Opening a fresh asset skips that gate, so cover the
 // worst valid boundary for the highest-overhead public route: 13 stale active legs opening the 14th
