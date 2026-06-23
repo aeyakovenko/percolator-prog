@@ -16275,22 +16275,27 @@ fn v16_attack_auto_crank_expired_close_recovery_not_blocked_by_stale_oracle() {
     let c_tot_before = group_before.c_tot;
     let insurance_before = group_before.insurance;
 
+    let junk_tail = env.program_account(8);
     env.svm.expire_blockhash();
     let cu = env
         .send(
             ProgInstruction::PermissionlessCrank {
                 now_slot: 0,
                 close_q: 0,
-                observations: crank_observations(0),
+                observations: vec![CrankObservationHint {
+                    asset_index: u16::MAX,
+                    oracle_accounts: u8::MAX,
+                }],
             },
             vec![
                 AccountMeta::new(env.payer.pubkey(), true),
                 AccountMeta::new(env.market, false),
                 AccountMeta::new(portfolio, false),
+                AccountMeta::new_readonly(junk_tail, false),
             ],
             &[],
         )
-        .expect("expired close recovery auto-crank must not require a fresh oracle");
+        .expect("expired close recovery auto-crank must ignore hostile live-mode hints");
     assert_cu_within(
         "PermissionlessCrank expired-close recovery",
         cu,
