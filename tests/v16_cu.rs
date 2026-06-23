@@ -87654,6 +87654,106 @@ fn v16_attack_terminal_insurance_over_u64_rolls_back_budget_and_ledger() {
     );
 }
 
+// full-interface sweep (cron135): terminal WithdrawInsurance stages the terminal budget debit
+// before advancing the optional monotonic ledger. A saturated ledger counter must not burn terminal
+// insurance capacity or SPL custody, and a fresh ledger must remain a live withdrawal path.
+#[test]
+fn v16_attack_terminal_insurance_ledger_counter_overflow_rolls_back_budget() {
+    let mut env = V16CuEnv::new();
+    let admin = env.admin.insecure_clone();
+    let poisoned_ledger = env.insurance_ledger_account();
+
+    env.top_up_insurance_domain_with_authority_ledger_and_cu(&admin, poisoned_ledger, 0, 100);
+    let mut poisoned_account = env.svm.get_account(&poisoned_ledger).unwrap();
+    let mut poisoned_state =
+        state::read_insurance_ledger(&poisoned_account.data).expect("initialized insurance ledger");
+    poisoned_state.total_withdrawn_atoms = u128::MAX;
+    state::write_insurance_ledger(&mut poisoned_account.data, &poisoned_state)
+        .expect("poison monotonic withdraw counter");
+    env.svm
+        .set_account(poisoned_ledger, poisoned_account)
+        .unwrap();
+    env.resolve();
+
+    let dest = env.token_account(admin.pubkey(), 0);
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    let ledger_before = env.svm.get_account(&poisoned_ledger).unwrap();
+    let dest_before = env.svm.get_account(&dest).unwrap();
+
+    env.svm.expire_blockhash();
+    let rejected = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::WithdrawInsurance { amount: 1 },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(poisoned_ledger, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        rejected.is_err(),
+        "saturated terminal insurance ledger counter must reject"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "ledger-counter overflow must roll back terminal budget debit"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        vault_before,
+        "ledger-counter overflow must not move vault custody"
+    );
+    assert_eq!(
+        env.svm.get_account(&poisoned_ledger).unwrap(),
+        ledger_before,
+        "ledger-counter overflow must not rewrite the poisoned ledger"
+    );
+    assert_eq!(
+        env.svm.get_account(&dest).unwrap(),
+        dest_before,
+        "ledger-counter overflow must not pay destination tokens"
+    );
+
+    let fresh_ledger = env.insurance_ledger_account();
+    env.svm.expire_blockhash();
+    send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::WithdrawInsurance { amount: 1 },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(fresh_ledger, false),
+        ],
+        &[&admin],
+    )
+    .expect("fresh terminal insurance ledger remains live after rejected poisoned ledger");
+    assert_eq!(env.token_amount(dest), 1);
+    assert_eq!(env.token_amount(env.vault), 99);
+    let (_, group) = env.market_state();
+    assert_eq!(group.insurance, 99);
+    assert_eq!(group.insurance_domain_budget[0], 99);
+    let fresh_state =
+        state::read_insurance_ledger(&env.svm.get_account(&fresh_ledger).unwrap().data)
+            .expect("fresh ledger initialized");
+    assert_eq!(fresh_state.total_withdrawn_atoms, 1);
+    assert_eq!(fresh_state.last_observed_insurance_atoms, 99);
+}
+
 #[test]
 fn v16_attack_terminal_insurance_malformed_dest_rolls_back_budget_and_ledger() {
     let mut env = V16CuEnv::new();
