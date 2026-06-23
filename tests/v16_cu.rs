@@ -16848,6 +16848,91 @@ fn v16_attack_retire_rejects_funded_backing_bucket() {
     );
 }
 
+// LoF/DoS sweep (cron135): RETIRE stages a reusable-slot canonicalization and
+// free-slot counter update before the wrapper's final market-shape validation.
+// A malformed unrelated aggregate must abort atomically instead of leaving the
+// asset retired while the market remains insolvent/malformed.
+#[test]
+fn v16_attack_retire_rejects_invalid_final_shape_atomically() {
+    let mut env = V16CuEnv::new();
+    env.activate_asset(1, 1, 100);
+    env.mutate_market(|_, group| {
+        group.insurance_domain_budget[0] = group.insurance.saturating_add(1);
+    });
+    let admin = env.admin.insecure_clone();
+    let before_retire = env.svm.get_account(&env.market).unwrap();
+    let (_, before_group) = env.market_state();
+    assert_eq!(before_group.assets[1].lifecycle, AssetLifecycleV16::Active);
+    assert!(
+        before_group.insurance_domain_budget[0] > before_group.insurance,
+        "test precondition: unrelated aggregate makes the final market shape invalid"
+    );
+
+    env.svm.warp_to_slot(3);
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::UpdateAssetLifecycle {
+            action: percolator_prog::processor::ASSET_ACTION_RETIRE,
+            asset_index: 1,
+            now_slot: 3,
+            initial_price: 0,
+            insurance_authority: admin.pubkey().to_bytes(),
+            insurance_operator: admin.pubkey().to_bytes(),
+            backing_bucket_authority: admin.pubkey().to_bytes(),
+            oracle_authority: admin.pubkey().to_bytes(),
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        rejected.is_err(),
+        "RETIRE must reject the invalid final market shape"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        before_retire,
+        "failed RETIRE must roll back the staged canonicalization and reusable-slot counter"
+    );
+    assert_eq!(
+        env.market_state().1.assets[1].lifecycle,
+        AssetLifecycleV16::Active,
+        "failed RETIRE must not leave the asset retired"
+    );
+
+    env.mutate_market(|_, group| {
+        group.insurance_domain_budget[0] = 0;
+    });
+    env.svm.warp_to_slot(4);
+    env.svm.expire_blockhash();
+    let accepted = env.send(
+        ProgInstruction::UpdateAssetLifecycle {
+            action: percolator_prog::processor::ASSET_ACTION_RETIRE,
+            asset_index: 1,
+            now_slot: 4,
+            initial_price: 0,
+            insurance_authority: admin.pubkey().to_bytes(),
+            insurance_operator: admin.pubkey().to_bytes(),
+            backing_bucket_authority: admin.pubkey().to_bytes(),
+            oracle_authority: admin.pubkey().to_bytes(),
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        accepted.is_ok(),
+        "repairing the unrelated aggregate restores RETIRE liveness: {accepted:?}"
+    );
+    let (cfg_after, group_after) = env.market_state();
+    assert_eq!(cfg_after.free_market_slot_count, 1);
+    assert_eq!(group_after.assets[1].lifecycle, AssetLifecycleV16::Retired);
+}
+
 // security.md sweep - last-principal backing withdrawal must not strand provider earnings (#22/#48):
 // utilization-fee earnings are owed to the backing authority but stored beside the principal bucket.
 // A provider who withdraws principal before earnings must not turn the bucket into an invalid empty
