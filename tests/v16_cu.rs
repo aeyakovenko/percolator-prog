@@ -79062,6 +79062,43 @@ fn v16_bpf_10m_market_refresh_high_asset_stays_bounded() {
         after_first_leg.k_snap <= after_first_group.assets[HIGH_ASSET].k_long,
         "first bounded crank applies the mark without over-settling the high-index account"
     );
+    assert!(
+        health_cert(&env.portfolio_state(short)).cert_oracle_epoch < after_first_group.oracle_epoch,
+        "first high-asset refresh must leave the counterparty stale for the missing-observation probe"
+    );
+
+    let missing_market_before = env.svm.get_account(&env.market).unwrap();
+    let missing_short_before = env.svm.get_account(&short).unwrap();
+    env.svm.expire_blockhash();
+    let missing_observation = env.send(
+        ProgInstruction::PermissionlessCrank {
+            now_slot: REFRESH_SLOT,
+            close_q: 0,
+            observations: vec![],
+        },
+        vec![
+            AccountMeta::new(env.payer.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(short, false),
+        ],
+        &[],
+    );
+    let missing_err = missing_observation
+        .expect_err("stale 10MiB high-asset refresh without the selected observation must reject");
+    assert!(
+        !missing_err.contains("exceeded CUs"),
+        "stale 10MiB missing-observation refresh must fail by engine NonProgress, not CU exhaustion: {missing_err}"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        missing_market_before,
+        "stale 10MiB missing-observation rejection must not mutate the market"
+    );
+    assert_eq!(
+        env.svm.get_account(&short).unwrap(),
+        missing_short_before,
+        "stale 10MiB missing-observation rejection must not mutate the high-asset portfolio"
+    );
 
     env.svm.expire_blockhash();
     let second_refresh_cu = env.crank(
