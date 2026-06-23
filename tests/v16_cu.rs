@@ -49409,6 +49409,116 @@ fn v16_attack_force_shutdown_timeout_lets_traders_exit_before_close() {
     );
 }
 
+// LoF/DoS sweep (cron135): marketauth can start an empty-asset shutdown, but the exit window must
+// not become a backing-provider rug or a provider DoS. Before force_close_delay_slots matures,
+// marketauth must not be able to drain the provider's bucket through the shutdown cleanup fallback,
+// while the current backing authority must still be able to recover its own principal.
+#[test]
+fn v16_attack_shutdown_exit_window_keeps_provider_backing_withdrawable() {
+    const AMOUNT: u128 = 321;
+    const DELAY: u64 = 5;
+    const SHUT: u64 = 20;
+
+    let mut env = V16CuEnv::new();
+    let admin = env.admin.insecure_clone();
+    let backing_authority = Keypair::new();
+    env.configure_permissionless_resolve_with_cu(100, DELAY);
+    env.activate_asset(1, 1, 100);
+    env.try_update_per_asset_authority_with_cu(
+        &admin,
+        Some(&backing_authority),
+        1,
+        processor::ASSET_AUTH_BACKING_BUCKET,
+        backing_authority.pubkey().to_bytes(),
+    )
+    .expect("asset-1 backing authority rotates to the provider");
+    env.top_up_backing_bucket_with_authority(&backing_authority, 2, AMOUNT, 100_000);
+    let (_, funded_group) = env.market_state();
+    assert_eq!(
+        funded_group.source_backing_buckets[2].fresh_unliened_backing_num,
+        AMOUNT * BOUND_SCALE,
+        "provider backing is funded before shutdown"
+    );
+
+    env.svm.warp_to_slot(SHUT);
+    env.svm.expire_blockhash();
+    env.update_asset_lifecycle_as_admin_with_cu(
+        percolator_prog::processor::ASSET_ACTION_SHUTDOWN,
+        1,
+        SHUT,
+        0,
+    );
+    assert_eq!(
+        env.market_state().1.assets[1].lifecycle,
+        AssetLifecycleV16::Recovery
+    );
+
+    env.svm.warp_to_slot(SHUT + 1);
+    let admin_dest = env.token_account(admin.pubkey(), 0);
+    let market_before_admin = env.svm.get_account(&env.market).unwrap();
+    let vault_before_admin = env.svm.get_account(&env.vault).unwrap();
+    let admin_dest_before = env.svm.get_account(&admin_dest).unwrap();
+    env.svm.expire_blockhash();
+    let early_admin_drain = env.send(
+        ProgInstruction::WithdrawBackingBucket {
+            domain: 2,
+            amount: AMOUNT,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(admin_dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        early_admin_drain.is_err(),
+        "marketauth must not drain provider backing before the shutdown delay matures"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before_admin
+    );
+    assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before_admin);
+    assert_eq!(env.svm.get_account(&admin_dest).unwrap(), admin_dest_before);
+
+    let provider_dest = env.token_account(backing_authority.pubkey(), 0);
+    env.svm.expire_blockhash();
+    let provider_withdraw = env.send(
+        ProgInstruction::WithdrawBackingBucket {
+            domain: 2,
+            amount: AMOUNT,
+        },
+        vec![
+            AccountMeta::new(backing_authority.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(provider_dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&backing_authority],
+    );
+    assert!(
+        provider_withdraw.is_ok(),
+        "current backing provider must be able to recover principal during the shutdown exit window: {provider_withdraw:?}"
+    );
+    assert_eq!(env.token_amount(provider_dest), AMOUNT as u64);
+    let (_, group_after) = env.market_state();
+    assert_eq!(
+        group_after.source_backing_buckets[2].fresh_unliened_backing_num, 0,
+        "provider principal is fully recovered"
+    );
+    assert_eq!(
+        group_after.vault as u64,
+        env.token_amount(env.vault),
+        "provider withdrawal keeps accounting tied to real custody"
+    );
+}
+
 // LoF/DoS sweep (cron135): shutdown puts an asset into Recovery with a frozen mark and a
 // force-close delay so users can exit. The pushed-mark profile can still be AuthMark across
 // that transition, so the public PushAuthMark route must be lifecycle-gated; otherwise the
