@@ -11226,23 +11226,32 @@ fn v16_bpf_full_14_leg_refresh_crank_with_max_observations_is_under_tx_limit() {
 }
 
 // CU/DoS sweep: the max-observation crank above covers zero-account oracle profiles. A hostile
-// keeper can also legally provide one real oracle account for every portfolio asset. Pin the
-// admitted 14-Pyth-tail path so oracle fanout plus a full stale portfolio cannot become a CU cliff.
+// keeper can also legally provide the maximum three oracle accounts for every portfolio asset. Pin
+// the admitted 14x3 Pyth-tail path so oracle fanout plus a full stale portfolio cannot become a CU cliff.
 #[test]
-fn v16_bpf_full_14_leg_refresh_crank_with_max_pyth_observations_is_under_tx_limit() {
+fn v16_bpf_full_14_leg_refresh_crank_with_max_three_leg_pyth_observations_is_under_tx_limit() {
     const N: usize = percolator_prog::constants::WRAPPER_MAX_PORTFOLIO_ASSETS as usize;
 
     let mut env = V16CuEnv::new_with_market_params_and_price_move(N as u16, 1_000, 1_000, 500);
     set_test_clock(&mut env, 1, 100);
     for asset_index in 0..N {
-        let feed = [0x30u8.wrapping_add(asset_index as u8); 32];
-        let initial_oracle = env.set_pyth_price(&feed, 100, -6, 100);
+        let feed_seed = 0x30u8.wrapping_add((asset_index as u8).wrapping_mul(3));
+        let feeds = [
+            [feed_seed; 32],
+            [feed_seed.wrapping_add(1); 32],
+            [feed_seed.wrapping_add(2); 32],
+        ];
+        let initial_oracles = [
+            env.set_pyth_price(&feeds[0], 100, -6, 100),
+            env.set_pyth_price(&feeds[1], 1_000_000, -6, 100),
+            env.set_pyth_price(&feeds[2], 1_000_000, -6, 100),
+        ];
         env.try_configure_hybrid_asset_with_conf_filter_cu(
             asset_index as u16,
-            1,
+            3,
             0,
-            [feed, [0u8; 32], [0u8; 32]],
-            &[initial_oracle],
+            feeds,
+            &initial_oracles,
             1,
             100,
             0,
@@ -11270,14 +11279,21 @@ fn v16_bpf_full_14_leg_refresh_crank_with_max_pyth_observations_is_under_tx_limi
 
     set_test_clock(&mut env, 17, 101);
     let mut observations = Vec::with_capacity(N);
-    let mut oracle_tail = Vec::with_capacity(N);
+    let mut oracle_tail = Vec::with_capacity(N * 3);
     for asset_index in 0..N {
-        let feed = [0x30u8.wrapping_add(asset_index as u8); 32];
+        let feed_seed = 0x30u8.wrapping_add((asset_index as u8).wrapping_mul(3));
+        let feeds = [
+            [feed_seed; 32],
+            [feed_seed.wrapping_add(1); 32],
+            [feed_seed.wrapping_add(2); 32],
+        ];
         observations.push(CrankObservationHint {
             asset_index: asset_index as u16,
-            oracle_accounts: 1,
+            oracle_accounts: 3,
         });
-        oracle_tail.push(env.set_pyth_price(&feed, 99, -6, 101));
+        oracle_tail.push(env.set_pyth_price(&feeds[0], 99, -6, 101));
+        oracle_tail.push(env.set_pyth_price(&feeds[1], 1_000_000, -6, 101));
+        oracle_tail.push(env.set_pyth_price(&feeds[2], 1_000_000, -6, 101));
     }
     let mut accounts = vec![
         AccountMeta::new(env.payer.pubkey(), true),
@@ -11302,14 +11318,14 @@ fn v16_bpf_full_14_leg_refresh_crank_with_max_pyth_observations_is_under_tx_limi
             accounts,
             &[],
         )
-        .expect("max-Pyth-observation full-leg refresh remains live");
-    println!("v16 full-14-leg refresh crank with max Pyth observations CU: {refresh_cu}");
-    const MAX_PYTH_OBSERVATION_REFRESH_CU_LIMIT: u64 = 1_250_000;
+        .expect("max-three-leg-Pyth-observation full-leg refresh remains live");
+    println!("v16 full-14-leg refresh crank with max three-leg Pyth observations CU: {refresh_cu}");
+    const MAX_THREE_LEG_PYTH_OBSERVATION_REFRESH_CU_LIMIT: u64 = 1_250_000;
     assert!(
-        refresh_cu <= MAX_PYTH_OBSERVATION_REFRESH_CU_LIMIT,
-        "full-14-leg max-Pyth-observation refresh CU {} exceeded limit {}",
+        refresh_cu <= MAX_THREE_LEG_PYTH_OBSERVATION_REFRESH_CU_LIMIT,
+        "full-14-leg max-three-leg-Pyth-observation refresh CU {} exceeded limit {}",
         refresh_cu,
-        MAX_PYTH_OBSERVATION_REFRESH_CU_LIMIT
+        MAX_THREE_LEG_PYTH_OBSERVATION_REFRESH_CU_LIMIT
     );
 
     let market_data = env.svm.get_account(&env.market).unwrap().data;
@@ -11323,11 +11339,11 @@ fn v16_bpf_full_14_leg_refresh_crank_with_max_pyth_observations_is_under_tx_limi
     for (asset_index, before) in before_slot_last.iter().copied().enumerate() {
         assert!(
             group.assets[asset_index].slot_last > before,
-            "max-Pyth-observation refresh must commit asset progress for asset {asset_index}"
+            "max-three-leg-Pyth-observation refresh must commit asset progress for asset {asset_index}"
         );
         assert_eq!(
             group.assets[asset_index].effective_price, 99,
-            "max-Pyth-observation refresh applies the fresh oracle mark for asset {asset_index}"
+            "max-three-leg-Pyth-observation refresh applies the fresh oracle mark for asset {asset_index}"
         );
     }
 }
