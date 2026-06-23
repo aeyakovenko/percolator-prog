@@ -44856,6 +44856,142 @@ fn v16_attack_multi_observation_liquidation_fee_uses_selected_asset() {
     );
 }
 
+// LoF/DoS sweep: a cross-margin account can have an earlier active leg than the
+// leg whose mark move makes the account liquidatable. The public auto-crank
+// pre-applies all supplied observations, then the engine self-selects one
+// account step. Repeated bounded calls with observations for both active assets
+// must not starve the later distressed leg behind the earlier active leg.
+#[test]
+fn v16_attack_auto_crank_multi_leg_later_distressed_asset_makes_progress() {
+    const MARK: u64 = 100;
+    const BAD_MARK: u64 = 200;
+    const OPEN_SLOT: u64 = 1;
+    const MOVE_SLOT: u64 = 24;
+    const SIZE_Q: u128 = 10 * POS_SCALE;
+
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(2, 1_000, 1_000, 500);
+    env.configure_auth_mark_for_asset_as_admin(0, OPEN_SLOT, MARK);
+    env.configure_auth_mark_for_asset_as_admin(1, OPEN_SLOT, MARK);
+
+    let target_owner = Keypair::new();
+    let target = env.create_portfolio(&target_owner);
+    let asset0_cp_owner = Keypair::new();
+    let asset0_cp = env.create_portfolio(&asset0_cp_owner);
+    let asset1_cp_owner = Keypair::new();
+    let asset1_cp = env.create_portfolio(&asset1_cp_owner);
+    env.deposit(&target_owner, target, 1_100);
+    env.deposit(&asset0_cp_owner, asset0_cp, 20_000);
+    env.deposit(&asset1_cp_owner, asset1_cp, 20_000);
+
+    env.trade_asset_with_cu(
+        0,
+        &target_owner,
+        target,
+        &asset0_cp_owner,
+        asset0_cp,
+        SIZE_Q as i128,
+        MARK,
+        0,
+    );
+    env.trade_asset_with_cu(
+        1,
+        &target_owner,
+        target,
+        &asset1_cp_owner,
+        asset1_cp,
+        -(SIZE_Q as i128),
+        MARK,
+        0,
+    );
+    assert!(has_active_leg_for_asset(&env.portfolio_state(target), 0));
+    assert!(has_active_leg_for_asset(&env.portfolio_state(target), 1));
+
+    let observations = vec![
+        CrankObservationHint {
+            asset_index: 0,
+            oracle_accounts: 0,
+        },
+        CrankObservationHint {
+            asset_index: 1,
+            oracle_accounts: 0,
+        },
+    ];
+
+    let mut last_cu = 0;
+    for slot in 2..=MOVE_SLOT {
+        if !has_active_leg_for_asset(&env.portfolio_state(target), 1) {
+            break;
+        }
+        let step_mark = (MARK + 5 * (slot - OPEN_SLOT)).min(BAD_MARK);
+        env.svm.warp_to_slot(slot);
+        env.push_auth_mark_for_asset_as_admin(1, slot, step_mark);
+        env.svm.expire_blockhash();
+        let setup = env.send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: slot,
+                close_q: SIZE_Q,
+                observations: observations.clone(),
+            },
+            vec![
+                AccountMeta::new(env.payer.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(target, false),
+            ],
+            &[],
+        );
+        assert!(
+            setup.is_ok(),
+            "setup crank slot {slot} mark {step_mark} must keep the later asset mark moving: {setup:?}"
+        );
+        last_cu = setup.unwrap();
+    }
+
+    for _ in 0..4 {
+        if !has_active_leg_for_asset(&env.portfolio_state(target), 1) {
+            break;
+        }
+        env.svm.expire_blockhash();
+        last_cu = env
+            .send(
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: MOVE_SLOT,
+                    close_q: SIZE_Q,
+                    observations: observations.clone(),
+                },
+                vec![
+                    AccountMeta::new(env.payer.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(target, false),
+                ],
+                &[],
+            )
+            .expect("auto-crank must not spin or reject before the later distressed leg");
+    }
+    assert_cu_within(
+        "multi-leg later-distressed auto-crank",
+        last_cu,
+        CRANK_CU_LIMIT,
+    );
+
+    let after = env.portfolio_state(target);
+    assert!(
+        !has_active_leg_for_asset(&after, 1),
+        "repeated public auto-cranks must eventually close the later distressed leg"
+    );
+    assert!(
+        health_cert(&after).certified_liq_deficit == 0
+            || percolator::active_bitmap_is_empty(active_bitmap(&after)),
+        "liquidation sequence must remove the certified deficit or all open risk"
+    );
+    let (_, group) = env.market_state();
+    assert!(
+        group.assets[1].effective_price > MARK,
+        "later asset mark moved before the selected liquidation path reached it"
+    );
+    assert_eq!(group.vault as u64, env.token_amount(env.vault));
+    assert!(group.vault >= group.c_tot + group.insurance);
+}
+
 #[test]
 fn v16_attack_crank_oracle_same_publish_time_price_change_rejects() {
     let mut env = V16CuEnv::new();
