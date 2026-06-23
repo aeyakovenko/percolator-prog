@@ -25111,12 +25111,71 @@ fn v16_attack_out_of_range_asset_index_rejected() {
             "push auth mark on out-of-range asset_index {} must reject",
             bad
         );
+        // owner-gated self-service recovery/reduction routes also forward the public asset_index
+        // into engine calls; keep them pinned against OOB/no-mutation regressions.
+        env.svm.expire_blockhash();
+        let rr = env.send(
+            ProgInstruction::RebalanceReduce {
+                asset_index: bad,
+                reduce_q: 1,
+            },
+            vec![
+                AccountMeta::new(la.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(pa, false),
+            ],
+            &[&la],
+        );
+        assert!(
+            rr.is_err(),
+            "RebalanceReduce on out-of-range asset_index {} must reject",
+            bad
+        );
+
+        env.svm.expire_blockhash();
+        let ff = env.send(
+            ProgInstruction::ForfeitRecoveryLeg {
+                asset_index: bad,
+                b_delta_budget: 1,
+            },
+            vec![
+                AccountMeta::new(la.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(pa, false),
+            ],
+            &[&la],
+        );
+        assert!(
+            ff.is_err(),
+            "ForfeitRecoveryLeg on out-of-range asset_index {} must reject",
+            bad
+        );
+
+        env.svm.expire_blockhash();
+        let fr = env.send(
+            ProgInstruction::FinalizeResetSide {
+                asset_index: bad,
+                side: 0,
+            },
+            vec![AccountMeta::new(env.market, false)],
+            &[],
+        );
+        assert!(
+            fr.is_err(),
+            "FinalizeResetSide on out-of-range asset_index {} must reject",
+            bad
+        );
     }
     // no corruption from any rejected OOB attempt.
     let (_, g1) = env.market_state();
     assert_eq!(g1.vault, g0.vault, "vault unchanged");
     assert_eq!(g1.c_tot, g0.c_tot, "c_tot unchanged");
     assert_eq!(g1.assets[0].oi_eff_long_q, 0, "no OI created");
+    assert_eq!(
+        env.portfolio_state(pa).capital.get(),
+        1_000_000,
+        "owner-gated bad-index routes did not mutate the portfolio"
+    );
 }
 
 // security.md sweep — ledger account binding (#44, F-VAULT-FRAG sibling): a backing-domain ledger is
