@@ -88772,6 +88772,199 @@ fn v16_attack_value_topup_ledger_counter_overflows_roll_back_engine_credit() {
     assert_eq!(fresh_state.total_principal_atoms, 1);
 }
 
+// full-interface sweep: live domain withdrawals debit market/ledger budgets before signed SPL payout.
+// Malformed SPL-owned destination or canonical vault data must reject before those debits for live
+// insurance, backing principal, and backing earnings, and each route must stay live after restore.
+#[test]
+fn v16_attack_live_domain_withdrawals_reject_malformed_token_accounts_before_debit() {
+    #[derive(Clone, Copy)]
+    enum DomainWithdrawRoute {
+        Insurance,
+        BackingPrincipal,
+        BackingEarnings,
+    }
+
+    impl DomainWithdrawRoute {
+        fn label(self) -> &'static str {
+            match self {
+                DomainWithdrawRoute::Insurance => "WithdrawInsuranceAsset",
+                DomainWithdrawRoute::BackingPrincipal => "WithdrawBackingBucket",
+                DomainWithdrawRoute::BackingEarnings => "WithdrawBackingBucketEarnings",
+            }
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    enum MalformedSlot {
+        Dest,
+        Vault,
+    }
+
+    fn send_domain_withdraw(
+        env: &mut V16CuEnv,
+        route: DomainWithdrawRoute,
+        ledger: Pubkey,
+        dest: Pubkey,
+        amount: u128,
+    ) -> Result<u64, String> {
+        env.svm.expire_blockhash();
+        match route {
+            DomainWithdrawRoute::Insurance => send_tx(
+                &mut env.svm,
+                env.program_id,
+                &env.payer,
+                ProgInstruction::WithdrawInsuranceAsset {
+                    asset_index: 0,
+                    amount,
+                },
+                vec![
+                    AccountMeta::new(env.admin.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(dest, false),
+                    AccountMeta::new(env.vault, false),
+                    AccountMeta::new_readonly(env.vault_authority, false),
+                    AccountMeta::new_readonly(spl_token::ID, false),
+                    AccountMeta::new(ledger, false),
+                ],
+                &[&env.admin],
+            ),
+            DomainWithdrawRoute::BackingPrincipal => send_tx(
+                &mut env.svm,
+                env.program_id,
+                &env.payer,
+                ProgInstruction::WithdrawBackingBucket { domain: 1, amount },
+                vec![
+                    AccountMeta::new(env.admin.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(dest, false),
+                    AccountMeta::new(env.vault, false),
+                    AccountMeta::new_readonly(env.vault_authority, false),
+                    AccountMeta::new_readonly(spl_token::ID, false),
+                    AccountMeta::new(ledger, false),
+                ],
+                &[&env.admin],
+            ),
+            DomainWithdrawRoute::BackingEarnings => send_tx(
+                &mut env.svm,
+                env.program_id,
+                &env.payer,
+                ProgInstruction::WithdrawBackingBucketEarnings { domain: 1, amount },
+                vec![
+                    AccountMeta::new(env.admin.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(ledger, false),
+                    AccountMeta::new(dest, false),
+                    AccountMeta::new(env.vault, false),
+                    AccountMeta::new_readonly(env.vault_authority, false),
+                    AccountMeta::new_readonly(spl_token::ID, false),
+                ],
+                &[&env.admin],
+            ),
+        }
+    }
+
+    for route in [
+        DomainWithdrawRoute::Insurance,
+        DomainWithdrawRoute::BackingPrincipal,
+        DomainWithdrawRoute::BackingEarnings,
+    ] {
+        for slot in [MalformedSlot::Dest, MalformedSlot::Vault] {
+            let mut env = V16CuEnv::new();
+            let admin = env.admin.insecure_clone();
+            let (ledger, amount) = match route {
+                DomainWithdrawRoute::Insurance => {
+                    let ledger = env.insurance_ledger_account();
+                    env.top_up_insurance_domain_with_authority_ledger_and_cu(
+                        &admin, ledger, 0, 100,
+                    );
+                    (ledger, 40)
+                }
+                DomainWithdrawRoute::BackingPrincipal => {
+                    let ledger = env.backing_domain_ledger_account();
+                    env.top_up_backing_bucket_with_ledger_with_cu(ledger, 1, 100, 10_000);
+                    (ledger, 40)
+                }
+                DomainWithdrawRoute::BackingEarnings => {
+                    let ledger = env.backing_domain_ledger_account();
+                    env.top_up_backing_bucket_with_ledger_with_cu(ledger, 1, 100, 10_000);
+                    env.mutate_market(|_, group| {
+                        group.source_backing_buckets[1].utilization_fee_earnings = 30;
+                        group.vault += 30;
+                    });
+                    let (_, funded) = env.market_state();
+                    env.set_token_account_amount(
+                        env.vault,
+                        env.mint,
+                        env.vault_authority,
+                        funded.vault as u64,
+                    );
+                    (ledger, 10)
+                }
+            };
+            let dest = env.token_account_for_mint(env.mint, admin.pubkey(), 0);
+            let malformed_key = match slot {
+                MalformedSlot::Dest => dest,
+                MalformedSlot::Vault => env.vault,
+            };
+            let good_malformed_slot = env.svm.get_account(&malformed_key).unwrap();
+            env.svm
+                .set_account(
+                    malformed_key,
+                    Account {
+                        data: vec![0u8; TokenAccount::LEN - 1],
+                        ..good_malformed_slot.clone()
+                    },
+                )
+                .unwrap();
+
+            let market_before = env.svm.get_account(&env.market).unwrap();
+            let ledger_before = env.svm.get_account(&ledger).unwrap();
+            let vault_before = env.svm.get_account(&env.vault).unwrap();
+            let dest_before = env.svm.get_account(&dest).unwrap();
+            let label = route.label();
+
+            let rejected = send_domain_withdraw(&mut env, route, ledger, dest, amount);
+            assert!(
+                rejected.is_err(),
+                "{label} must reject malformed dest/vault before market debit"
+            );
+            assert_eq!(
+                env.svm.get_account(&env.market).unwrap(),
+                market_before,
+                "{label} malformed-token rejection leaves market budgets unchanged"
+            );
+            assert_eq!(
+                env.svm.get_account(&ledger).unwrap(),
+                ledger_before,
+                "{label} malformed-token rejection leaves ledger unchanged"
+            );
+            assert_eq!(
+                env.svm.get_account(&env.vault).unwrap(),
+                vault_before,
+                "{label} malformed-token rejection leaves vault custody unchanged"
+            );
+            assert_eq!(
+                env.svm.get_account(&dest).unwrap(),
+                dest_before,
+                "{label} malformed-token rejection pays no destination tokens"
+            );
+
+            env.svm
+                .set_account(malformed_key, good_malformed_slot)
+                .unwrap();
+            let ok = send_domain_withdraw(&mut env, route, ledger, dest, amount)
+                .expect("domain withdrawal remains live after malformed-token rejection");
+            assert_cu_within(label, ok, CUSTODY_CU_LIMIT);
+            assert_eq!(env.token_amount(dest), amount as u64, "{label} retry pays");
+            assert_eq!(
+                env.market_state().1.vault as u64,
+                env.token_amount(env.vault),
+                "{label} retry keeps vault accounting tied to custody"
+            );
+        }
+    }
+}
+
 // LoF sweep - outbound domain withdrawals also bridge u128 engine amounts to u64 SPL transfers, but
 // through the shared domain-withdrawal preflight rather than the user Withdraw handler. Amounts above
 // u64::MAX must reject before debiting insurance, backing principal, backing earnings, or ledgers.
