@@ -70962,6 +70962,213 @@ fn v16_attack_cpi_trades_reject_duplicate_source_domain_sparse_state_atomically(
     }
 }
 
+// CU/DoS hardening: source-domain sparse state is account-global, not request-local. A duplicate
+// occupied source-domain tag is invalid engine state; CPI routes must reject it before handing a
+// hostile matcher a writable context.
+#[test]
+fn v16_attack_cpi_duplicate_source_domain_rejects_before_hostile_matcher_cpi() {
+    fn set_hostile_overfill(env: &mut V16CuEnv, hostile: Pubkey, ctx: Pubkey) {
+        let mut ctx_data = vec![0u8; MATCHER_CONTEXT_LEN];
+        ctx_data[0] = 0;
+        env.svm
+            .set_account(
+                ctx,
+                Account {
+                    lamports: 1_000_000_000,
+                    data: ctx_data,
+                    owner: hostile,
+                    executable: false,
+                    rent_epoch: 0,
+                },
+            )
+            .unwrap();
+    }
+
+    fn poison_duplicate_source_domain(env: &mut V16CuEnv, account: Pubkey, domain: u32) -> Account {
+        let canonical_account = env.svm.get_account(&account).unwrap();
+        let mut poisoned_account = canonical_account.clone();
+        let (_, _, max_market_slots, _) = state::read_market_config_mode_and_capacity(
+            &env.svm.get_account(&env.market).unwrap().data,
+        )
+        .unwrap();
+        {
+            let view = state::portfolio_view_mut_for_market_slots(
+                &mut poisoned_account.data,
+                max_market_slots,
+            )
+            .unwrap();
+            let source_slot = view
+                .header
+                .source_domains
+                .iter()
+                .position(|slot| slot.is_occupied() && slot.domain.get() == domain)
+                .expect("canonical source-domain slot");
+            let duplicate_slot = if source_slot == 0 { 1 } else { 0 };
+            view.header.source_domains[duplicate_slot] = view.header.source_domains[source_slot];
+            assert!(
+                view.header
+                    .source_domains
+                    .iter()
+                    .filter(|slot| slot.is_occupied() && slot.domain.get() == domain)
+                    .count()
+                    >= 2,
+                "test precondition: forged account has duplicate occupied source-domain tags"
+            );
+        }
+        env.svm.set_account(account, poisoned_account).unwrap();
+        canonical_account
+    }
+
+    let mut env = V16CuEnv::new();
+    env.top_up_backing_bucket(1, 250, 10_000);
+    let hostile = Pubkey::new_unique();
+    env.svm.add_program(
+        hostile,
+        &std::fs::read(hostile_matcher_program_path()).unwrap(),
+    );
+    let taker_owner = Keypair::new();
+    let lp_owner = Keypair::new();
+    let taker = env.create_portfolio(&taker_owner);
+    let lp = env.create_portfolio(&lp_owner);
+    env.deposit(&taker_owner, taker, 1_000_000);
+    env.deposit(&lp_owner, lp, 1_000_000);
+    env.add_source_positive_pnl(taker, 1, 40);
+    env.crank(
+        taker,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 0,
+            close_q: 0,
+            observations: crank_observations(0),
+        },
+    );
+    assert!(
+        state::portfolio_source_domain(&env.portfolio_state(taker), 1)
+            .source_claim_bound_num
+            .get()
+            != 0,
+        "setup must create a canonical source-backed positive-PnL domain"
+    );
+
+    let ctx = Pubkey::new_unique();
+    let delegate = matcher_delegate_key(
+        &env.program_id,
+        &env.market,
+        &lp,
+        &lp_owner.pubkey(),
+        &hostile,
+        &ctx,
+    );
+    env.svm
+        .set_account(
+            delegate,
+            Account {
+                lamports: 1_000_000_000,
+                data: vec![],
+                owner: Pubkey::default(),
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    set_hostile_overfill(&mut env, hostile, ctx);
+    env.set_matcher_config(hostile, &lp_owner, lp, ctx, delegate, 1);
+
+    let accounts = |env: &V16CuEnv| {
+        vec![
+            AccountMeta::new(taker_owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(taker, false),
+            AccountMeta::new(lp, false),
+            AccountMeta::new_readonly(hostile, false),
+            AccountMeta::new(ctx, false),
+            AccountMeta::new_readonly(delegate, false),
+        ]
+    };
+
+    for (route, instruction) in [
+        (
+            "TradeCpi",
+            ProgInstruction::TradeCpi {
+                asset_index: 0,
+                size_q: POS_SCALE as i128,
+                fee_bps: 100,
+                limit_price: 0,
+            },
+        ),
+        (
+            "BatchTradeCpi",
+            ProgInstruction::BatchTradeCpi {
+                legs: vec![BatchTradeCpiLeg {
+                    asset_index: 0,
+                    size_q: POS_SCALE as i128,
+                    fee_bps: 100,
+                    limit_price: 0,
+                }],
+            },
+        ),
+    ] {
+        set_hostile_overfill(&mut env, hostile, ctx);
+        env.svm.expire_blockhash();
+        let control = env
+            .send(instruction, accounts(&env), &[&taker_owner])
+            .expect_err("canonical source-domain CPI should reach hostile matcher validation");
+        assert!(
+            control.contains("InvalidAccountData"),
+            "{route} canonical control should fail from hostile matcher validation, got {control}"
+        );
+    }
+
+    let _canonical_taker = poison_duplicate_source_domain(&mut env, taker, 1);
+    for (route, instruction) in [
+        (
+            "TradeCpi",
+            ProgInstruction::TradeCpi {
+                asset_index: 0,
+                size_q: POS_SCALE as i128,
+                fee_bps: 100,
+                limit_price: 0,
+            },
+        ),
+        (
+            "BatchTradeCpi",
+            ProgInstruction::BatchTradeCpi {
+                legs: vec![BatchTradeCpiLeg {
+                    asset_index: 0,
+                    size_q: POS_SCALE as i128,
+                    fee_bps: 100,
+                    limit_price: 0,
+                }],
+            },
+        ),
+    ] {
+        set_hostile_overfill(&mut env, hostile, ctx);
+        let market_before = env.svm.get_account(&env.market).unwrap();
+        let taker_before = env.svm.get_account(&taker).unwrap();
+        let lp_before = env.svm.get_account(&lp).unwrap();
+        let ctx_before = env.svm.get_account(&ctx).unwrap();
+        env.svm.expire_blockhash();
+        let rejected = env
+            .send(instruction, accounts(&env), &[&taker_owner])
+            .expect_err("duplicate source-domain CPI must reject before matcher CPI");
+        assert!(
+            rejected.contains("Custom(17)") || rejected.contains("custom program error: 0x11"),
+            "{route} duplicate source-domain should fail as EngineHiddenLeg, got {rejected}"
+        );
+        assert!(
+            !rejected.contains("InvalidAccountData"),
+            "{route} duplicate source-domain must not reach hostile matcher validation: {rejected}"
+        );
+        assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+        assert_eq!(env.svm.get_account(&taker).unwrap(), taker_before);
+        assert_eq!(env.svm.get_account(&lp).unwrap(), lp_before);
+        assert_eq!(
+            env.svm.get_account(&ctx).unwrap(),
+            ctx_before,
+            "{route} must not give the hostile matcher a writable context"
+        );
+    }
+}
+
 #[test]
 fn v16_attack_stale_tradenocpi_currentness_threshold_is_bounded() {
     {
