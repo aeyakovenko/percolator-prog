@@ -52937,6 +52937,168 @@ fn v16_attack_drain_only_existing_risk_increase_rejects_before_hostile_matcher_c
     }
 }
 
+// Mixed-batch CPI preflight must be all-or-nothing. A batch that contains one legitimate
+// DrainOnly risk reduction and one illegal DrainOnly fresh open is still guaranteed not to
+// commit, so it must reject before invoking the external matcher.
+#[test]
+fn v16_attack_mixed_drain_only_batch_cpi_rejects_before_hostile_matcher() {
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(2, 5_000, 10_000, 1_000);
+    env.configure_auth_mark_for_asset_as_admin(0, 1, 100);
+    env.configure_auth_mark_for_asset_as_admin(1, 1, 100);
+
+    let hostile = Pubkey::new_unique();
+    env.svm.add_program(
+        hostile,
+        &std::fs::read(hostile_matcher_program_path()).unwrap(),
+    );
+    let taker = Keypair::new();
+    let lp = Keypair::new();
+    let taker_account = env.create_portfolio(&taker);
+    let lp_account = env.create_portfolio(&lp);
+    env.deposit(&taker, taker_account, 1_000_000);
+    env.deposit(&lp, lp_account, 1_000_000);
+    env.trade_asset_with_cu(
+        0,
+        &taker,
+        taker_account,
+        &lp,
+        lp_account,
+        POS_SCALE as i128,
+        100,
+        0,
+    );
+    for asset_index in 0..=1 {
+        env.update_asset_lifecycle_as_admin_with_cu(
+            percolator_prog::processor::ASSET_ACTION_DRAIN_ONLY,
+            asset_index,
+            0,
+            0,
+        );
+        assert_eq!(
+            env.market_state().1.assets[asset_index as usize].lifecycle,
+            AssetLifecycleV16::DrainOnly
+        );
+    }
+
+    let ctx = Pubkey::new_unique();
+    let delegate = matcher_delegate_key(
+        &env.program_id,
+        &env.market,
+        &lp_account,
+        &lp.pubkey(),
+        &hostile,
+        &ctx,
+    );
+    env.svm
+        .set_account(
+            delegate,
+            Account {
+                lamports: 1_000_000_000,
+                data: vec![],
+                owner: Pubkey::default(),
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    let set_hostile_overfill = |env: &mut V16CuEnv| {
+        let mut ctx_data = vec![0u8; MATCHER_CONTEXT_LEN];
+        ctx_data[0] = 0;
+        env.svm
+            .set_account(
+                ctx,
+                Account {
+                    lamports: 1_000_000_000,
+                    data: ctx_data,
+                    owner: hostile,
+                    executable: false,
+                    rent_epoch: 0,
+                },
+            )
+            .unwrap();
+    };
+    set_hostile_overfill(&mut env);
+    env.set_matcher_config(hostile, &lp, lp_account, ctx, delegate, 1);
+
+    let accounts = |env: &V16CuEnv| {
+        vec![
+            AccountMeta::new(taker.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(taker_account, false),
+            AccountMeta::new(lp_account, false),
+            AccountMeta::new_readonly(hostile, false),
+            AccountMeta::new(ctx, false),
+            AccountMeta::new_readonly(delegate, false),
+        ]
+    };
+
+    set_hostile_overfill(&mut env);
+    env.svm.expire_blockhash();
+    let reduce_control = env
+        .send(
+            ProgInstruction::BatchTradeCpi {
+                legs: vec![BatchTradeCpiLeg {
+                    asset_index: 0,
+                    size_q: -(POS_SCALE as i128),
+                    fee_bps: 0,
+                    limit_price: 0,
+                }],
+            },
+            accounts(&env),
+            &[&taker],
+        )
+        .expect_err("legal DrainOnly reduce control should reach hostile matcher validation");
+    assert!(
+        reduce_control.contains("InvalidAccountData"),
+        "reduce-only DrainOnly CPI control should reach matcher validation, got {reduce_control}"
+    );
+
+    set_hostile_overfill(&mut env);
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let taker_before = env.svm.get_account(&taker_account).unwrap();
+    let lp_before = env.svm.get_account(&lp_account).unwrap();
+    let ctx_before = env.svm.get_account(&ctx).unwrap();
+    env.svm.expire_blockhash();
+    let rejected = env
+        .send(
+            ProgInstruction::BatchTradeCpi {
+                legs: vec![
+                    BatchTradeCpiLeg {
+                        asset_index: 0,
+                        size_q: -(POS_SCALE as i128),
+                        fee_bps: 0,
+                        limit_price: 0,
+                    },
+                    BatchTradeCpiLeg {
+                        asset_index: 1,
+                        size_q: POS_SCALE as i128,
+                        fee_bps: 0,
+                        limit_price: 0,
+                    },
+                ],
+            },
+            accounts(&env),
+            &[&taker],
+        )
+        .expect_err("mixed DrainOnly batch must reject before matcher CPI");
+    assert!(
+        rejected.contains("Custom(21)") || rejected.contains("custom program error: 0x15"),
+        "mixed DrainOnly batch should fail as EngineLockActive, got {rejected}"
+    );
+    assert!(
+        !rejected.contains("InvalidAccountData"),
+        "mixed DrainOnly batch must not reach hostile matcher validation: {rejected}"
+    );
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+    assert_eq!(env.svm.get_account(&taker_account).unwrap(), taker_before);
+    assert_eq!(env.svm.get_account(&lp_account).unwrap(), lp_before);
+    assert_eq!(
+        env.svm.get_account(&ctx).unwrap(),
+        ctx_before,
+        "mixed DrainOnly preflight must not give the hostile matcher a writable context"
+    );
+}
+
 // BatchTradeNoCpi end-state margin: a leg that is individually margin-INFEASIBLE (it would leave the
 // taker holding two full positions at once) is rejected as a standalone trade, but the SAME leg in a
 // batch that also closes the offsetting position SUCCEEDS, because the batch checks initial margin
