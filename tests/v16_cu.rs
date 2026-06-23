@@ -15596,8 +15596,8 @@ fn v16_audit_permissionless_reuse_rejects_zero_insurance_authority() {
     );
 }
 
-// security.md sweep - retired-slot reuse invalid oracle price rollback (#24/#35/#48):
-// permissionless reuse is a separate branch from append. A bad initial price must not consume the
+// security.md sweep - retired-slot reuse rollback (#24/#35/#48): permissionless reuse is a
+// separate branch from append. Bad prices and late final-shape failures must not consume the
 // reusable-slot counter, overwrite the canonical retired slot, or pull the creator's init fee.
 #[test]
 fn v16_attack_permissionless_reuse_invalid_price_keeps_slot_reusable() {
@@ -15687,6 +15687,68 @@ fn v16_attack_permissionless_reuse_invalid_price_keeps_slot_reusable() {
         assert_eq!(group_after.assets[1].lifecycle, AssetLifecycleV16::Retired);
     }
 
+    env.mutate_market(|_, group| {
+        group.insurance_domain_budget[0] = group.insurance.saturating_add(1);
+    });
+    let shape_source = env.token_account(creator.pubkey(), FEE as u64);
+    let shape_market_before = env.svm.get_account(&env.market).unwrap();
+    let shape_source_before = env.svm.get_account(&shape_source).unwrap();
+    let shape_vault_before = env.svm.get_account(&env.vault).unwrap();
+    let (shape_cfg_before, shape_group_before) = env.market_state();
+    assert_eq!(shape_cfg_before.free_market_slot_count, 1);
+    assert_eq!(
+        shape_group_before.assets[1].lifecycle,
+        AssetLifecycleV16::Retired
+    );
+    assert!(
+        shape_group_before.insurance_domain_budget[0] > shape_group_before.insurance,
+        "test precondition: final market shape is invalid before reuse"
+    );
+    env.svm.warp_to_slot(4);
+    env.svm.expire_blockhash();
+    let shape_rejected = env.send(
+        ProgInstruction::UpdateAssetLifecycle {
+            action: percolator_prog::processor::ASSET_ACTION_ACTIVATE,
+            asset_index: 1,
+            now_slot: 4,
+            initial_price: 250,
+            insurance_authority: creator.pubkey().to_bytes(),
+            insurance_operator: creator.pubkey().to_bytes(),
+            backing_bucket_authority: creator.pubkey().to_bytes(),
+            oracle_authority: creator.pubkey().to_bytes(),
+        },
+        vec![
+            AccountMeta::new(creator.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(shape_source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&creator],
+    );
+    assert!(
+        shape_rejected.is_err(),
+        "reuse activation must reject the invalid final market shape"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        shape_market_before,
+        "failed reuse must roll back the fresh slot, profile, and reusable-slot counter"
+    );
+    assert_eq!(
+        env.svm.get_account(&shape_source).unwrap(),
+        shape_source_before,
+        "failed reuse must not pull the creator's init fee"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        shape_vault_before,
+        "failed reuse must not credit the canonical vault"
+    );
+
+    env.mutate_market(|_, group| {
+        group.insurance_domain_budget[0] = 0;
+    });
     let valid_source = env.token_account(creator.pubkey(), FEE as u64);
     env.svm.warp_to_slot(4);
     env.svm.expire_blockhash();
