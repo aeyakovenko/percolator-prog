@@ -46270,6 +46270,140 @@ fn v16_attack_mark_input_bounds_reject_atomically() {
     assert_eq!(cfg_auth.mark_ewma_last_slot, 4);
 }
 
+// LoF/DoS sweep (cron135): direct mark pushes stage oracle/profile writes before the
+// final market-shape validation. If the engine rejects that final shape, the public
+// instruction must surface the error and roll back the staged oracle write as well.
+#[test]
+fn v16_attack_mark_push_invalid_final_shape_rolls_back_oracle_write() {
+    {
+        let mut env = V16CuEnv::new();
+        let admin = env.admin.insecure_clone();
+        env.svm.warp_to_slot(1);
+        env.configure_ewma_mark_with_cu(1, 100, 4, 0);
+        env.mutate_market(|_, group| {
+            group.insurance_domain_budget[0] = group.insurance.saturating_add(1);
+        });
+        let before = env.svm.get_account(&env.market).unwrap();
+
+        env.svm.warp_to_slot(2);
+        env.svm.expire_blockhash();
+        let rejected = send_tx(
+            &mut env.svm,
+            env.program_id,
+            &env.payer,
+            ProgInstruction::PushEwmaMark {
+                asset_index: 0,
+                now_slot: 2,
+                mark_e6: 120,
+            },
+            vec![
+                AccountMeta::new(admin.pubkey(), true),
+                AccountMeta::new(env.market, false),
+            ],
+            &[&admin],
+        );
+        assert!(
+            rejected.is_err(),
+            "PushEwmaMark must propagate the final engine-shape rejection"
+        );
+        assert_eq!(
+            env.svm.get_account(&env.market).unwrap(),
+            before,
+            "PushEwmaMark rejection must roll back the staged oracle/profile write"
+        );
+
+        env.mutate_market(|_, group| {
+            group.insurance_domain_budget[0] = group.insurance;
+        });
+        env.svm.expire_blockhash();
+        let ok = send_tx(
+            &mut env.svm,
+            env.program_id,
+            &env.payer,
+            ProgInstruction::PushEwmaMark {
+                asset_index: 0,
+                now_slot: 2,
+                mark_e6: 120,
+            },
+            vec![
+                AccountMeta::new(admin.pubkey(), true),
+                AccountMeta::new(env.market, false),
+            ],
+            &[&admin],
+        );
+        assert!(
+            ok.is_ok(),
+            "same EWMA mark push remains live after repairing the shape: {ok:?}"
+        );
+        assert_eq!(env.market_state().0.mark_ewma_last_slot, 2);
+    }
+
+    {
+        let mut env = V16CuEnv::new();
+        let admin = env.admin.insecure_clone();
+        env.svm.warp_to_slot(1);
+        env.configure_auth_mark_with_cu(1, 100);
+        env.mutate_market(|_, group| {
+            group.insurance_domain_budget[0] = group.insurance.saturating_add(1);
+        });
+        let before = env.svm.get_account(&env.market).unwrap();
+
+        env.svm.warp_to_slot(2);
+        env.svm.expire_blockhash();
+        let rejected = send_tx(
+            &mut env.svm,
+            env.program_id,
+            &env.payer,
+            ProgInstruction::PushAuthMark {
+                asset_index: 0,
+                now_slot: 2,
+                mark_e6: 130,
+            },
+            vec![
+                AccountMeta::new(admin.pubkey(), true),
+                AccountMeta::new(env.market, false),
+            ],
+            &[&admin],
+        );
+        assert!(
+            rejected.is_err(),
+            "PushAuthMark must propagate the final engine-shape rejection"
+        );
+        assert_eq!(
+            env.svm.get_account(&env.market).unwrap(),
+            before,
+            "PushAuthMark rejection must roll back the staged oracle/profile write"
+        );
+
+        env.mutate_market(|_, group| {
+            group.insurance_domain_budget[0] = group.insurance;
+        });
+        env.svm.expire_blockhash();
+        let ok = send_tx(
+            &mut env.svm,
+            env.program_id,
+            &env.payer,
+            ProgInstruction::PushAuthMark {
+                asset_index: 0,
+                now_slot: 2,
+                mark_e6: 130,
+            },
+            vec![
+                AccountMeta::new(admin.pubkey(), true),
+                AccountMeta::new(env.market, false),
+            ],
+            &[&admin],
+        );
+        assert!(
+            ok.is_ok(),
+            "same auth mark push remains live after repairing the shape: {ok:?}"
+        );
+        let (cfg, _) = env.market_state();
+        assert_eq!(cfg.mark_ewma_last_slot, 2);
+        assert_eq!(cfg.oracle_target_price_e6, 130);
+    }
+}
+
 // hostile public-interface sweep: even the legitimate oracle authority must not be able to
 // reconfigure an oracle anchor/mode after traders have live exposure. Otherwise a compromised or
 // adversarial authority could reset the official price basis under open positions and cause LoF/DoS.
