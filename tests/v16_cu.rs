@@ -89354,6 +89354,137 @@ fn v16_attack_resolved_payout_malformed_dest_rolls_back_terminal_state() {
     assert!(resolved_receipt(&account).finalized);
 }
 
+// LoF/DoS sweep (cron135): delegated and malformed resolved-payout destinations cover ownership and
+// unpack failure, but a frozen initialized destination reaches the distinct SPL account-state branch
+// after ClaimResolvedPayoutTopup has advanced the engine receipt. The failed transfer must roll that
+// receipt mutation back and keep the top-up retryable to a clean user destination.
+#[test]
+fn v16_attack_claim_resolved_topup_frozen_dest_rolls_back_receipt() {
+    let mut env = V16CuEnv::new();
+    let owner = Keypair::new();
+    let portfolio = env.create_portfolio(&owner);
+    {
+        let mut market_account = env.svm.get_account(&env.market).expect("market account");
+        let mut portfolio_account = env.svm.get_account(&portfolio).expect("portfolio account");
+        let (cfg, mut group) = state::read_market(&market_account.data).unwrap();
+        let mut account = state::read_portfolio(&portfolio_account.data).unwrap();
+        group.mode = MarketModeV16::Resolved;
+        group.resolved_slot = 1;
+        group.current_slot = 1;
+        group.vault = 60;
+        group.payout_snapshot_captured = true;
+        group.payout_snapshot = 100;
+        group.resolved_payout_ledger = ResolvedPayoutLedgerV16 {
+            snapshot_residual: 100,
+            terminal_claim_exact_receipts_num: 100 * BOUND_SCALE,
+            terminal_claim_bound_unreceipted_num: 0,
+            current_payout_rate_num: 100 * BOUND_SCALE,
+            current_payout_rate_den: 100 * BOUND_SCALE,
+            snapshot_slot: 1,
+            payout_halted: false,
+            finalized: false,
+        };
+        account.resolved_payout_receipt =
+            percolator::ResolvedPayoutReceiptV16Account::from_runtime(&ResolvedPayoutReceiptV16 {
+                present: true,
+                prior_bound_contribution_num: 100 * BOUND_SCALE,
+                live_released_face_at_receipt: 0,
+                terminal_positive_claim_face: 100,
+                paid_effective: 40,
+                finalized: false,
+            });
+        state::write_market(&mut market_account.data, &cfg, &group).unwrap();
+        state::write_portfolio(&mut portfolio_account.data, &account).unwrap();
+        env.svm.set_account(env.market, market_account).unwrap();
+        env.svm.set_account(portfolio, portfolio_account).unwrap();
+    }
+    env.set_token_account_amount(env.vault, env.mint, env.vault_authority, 60);
+
+    let frozen_dest = Pubkey::new_unique();
+    env.svm
+        .set_account(
+            frozen_dest,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_frozen_token_data(env.mint, owner.pubkey(), 0),
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    let clean_dest = env.token_account_for_mint(env.mint, owner.pubkey(), 0);
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let portfolio_before = env.svm.get_account(&portfolio).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    let frozen_dest_before = env.svm.get_account(&frozen_dest).unwrap();
+    let clean_dest_before = env.svm.get_account(&clean_dest).unwrap();
+
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::ClaimResolvedPayoutTopup,
+        vec![
+            AccountMeta::new_readonly(owner.pubkey(), false),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio, false),
+            AccountMeta::new(frozen_dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[],
+    );
+    assert!(
+        rejected.is_err(),
+        "ClaimResolvedPayoutTopup must reject a frozen initialized destination"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "frozen-dest top-up must not commit market payout changes"
+    );
+    assert_eq!(
+        env.svm.get_account(&portfolio).unwrap(),
+        portfolio_before,
+        "frozen-dest top-up must not burn the pending receipt"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        vault_before,
+        "frozen-dest top-up must not debit the vault"
+    );
+    assert_eq!(
+        env.svm.get_account(&frozen_dest).unwrap(),
+        frozen_dest_before,
+        "frozen destination remains byte-identical"
+    );
+    assert_eq!(
+        env.svm.get_account(&clean_dest).unwrap(),
+        clean_dest_before,
+        "clean destination is not paid by the rejected frozen-dest top-up"
+    );
+    let account = env.portfolio_state(portfolio);
+    assert_eq!(resolved_receipt(&account).paid_effective, 40);
+    assert!(
+        !resolved_receipt(&account).finalized,
+        "receipt remains claimable after frozen-dest rejection"
+    );
+
+    env.svm.expire_blockhash();
+    let cu = env.claim_resolved_payout_topup_with_cu(owner.pubkey(), portfolio, clean_dest);
+    assert_cu_within(
+        "ClaimResolvedPayoutTopup frozen-dest retry",
+        cu,
+        CUSTODY_CU_LIMIT,
+    );
+    assert_eq!(env.token_amount(clean_dest), 60);
+    let account = env.portfolio_state(portfolio);
+    assert_eq!(resolved_receipt(&account).paid_effective, 100);
+    assert!(resolved_receipt(&account).finalized);
+    assert_eq!(env.market_state().1.vault, 0);
+}
+
 // full-interface sweep: terminal WithdrawInsurance is separate from live domain withdrawals and
 // resolved user payouts. A loaded non-SPL executable token-program id must reject before terminal
 // insurance, vault, or optional-ledger accounting can be debited.
