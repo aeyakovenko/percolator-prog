@@ -46270,6 +46270,240 @@ fn v16_attack_mark_input_bounds_reject_atomically() {
     assert_eq!(cfg_auth.mark_ewma_last_slot, 4);
 }
 
+// LoF/DoS sweep (cron135): oracle configure routes stage oracle anchors/profile/config before
+// the final market-shape validation. A bad final shape must propagate the engine error and roll
+// back those staged writes for every public configure mode, not only for pushed mark updates.
+#[test]
+fn v16_attack_oracle_configure_invalid_final_shape_rolls_back_profile_write() {
+    {
+        let mut env = V16CuEnv::new();
+        let admin = env.admin.insecure_clone();
+        env.svm.warp_to_slot(1);
+        env.mutate_market(|_, group| {
+            group.insurance_domain_budget[0] = group.insurance.saturating_add(1);
+        });
+        let before = env.svm.get_account(&env.market).unwrap();
+
+        env.svm.expire_blockhash();
+        let rejected = send_tx(
+            &mut env.svm,
+            env.program_id,
+            &env.payer,
+            ProgInstruction::ConfigureEwmaMark {
+                asset_index: 0,
+                now_slot: 1,
+                initial_mark_e6: 120,
+                mark_ewma_halflife_slots: 4,
+                mark_min_fee: 0,
+            },
+            vec![
+                AccountMeta::new(admin.pubkey(), true),
+                AccountMeta::new(env.market, false),
+            ],
+            &[&admin],
+        );
+        assert!(
+            rejected.is_err(),
+            "ConfigureEwmaMark must propagate the final engine-shape rejection"
+        );
+        assert_eq!(
+            env.svm.get_account(&env.market).unwrap(),
+            before,
+            "ConfigureEwmaMark rejection must roll back staged profile/config writes"
+        );
+
+        env.mutate_market(|_, group| {
+            group.insurance_domain_budget[0] = group.insurance;
+        });
+        env.svm.expire_blockhash();
+        let ok = send_tx(
+            &mut env.svm,
+            env.program_id,
+            &env.payer,
+            ProgInstruction::ConfigureEwmaMark {
+                asset_index: 0,
+                now_slot: 1,
+                initial_mark_e6: 120,
+                mark_ewma_halflife_slots: 4,
+                mark_min_fee: 0,
+            },
+            vec![
+                AccountMeta::new(admin.pubkey(), true),
+                AccountMeta::new(env.market, false),
+            ],
+            &[&admin],
+        );
+        assert!(
+            ok.is_ok(),
+            "same EWMA configure remains live after repairing the shape: {ok:?}"
+        );
+        let (cfg, _) = env.market_state();
+        assert_eq!(
+            cfg.oracle_mode,
+            percolator_prog::constants::ORACLE_MODE_EWMA_MARK
+        );
+        assert_eq!(cfg.mark_ewma_e6, 120);
+    }
+
+    {
+        let mut env = V16CuEnv::new();
+        let admin = env.admin.insecure_clone();
+        env.svm.warp_to_slot(1);
+        env.mutate_market(|_, group| {
+            group.insurance_domain_budget[0] = group.insurance.saturating_add(1);
+        });
+        let before = env.svm.get_account(&env.market).unwrap();
+
+        env.svm.expire_blockhash();
+        let rejected = send_tx(
+            &mut env.svm,
+            env.program_id,
+            &env.payer,
+            ProgInstruction::ConfigureAuthMark {
+                asset_index: 0,
+                now_slot: 1,
+                initial_mark_e6: 130,
+            },
+            vec![
+                AccountMeta::new(admin.pubkey(), true),
+                AccountMeta::new(env.market, false),
+            ],
+            &[&admin],
+        );
+        assert!(
+            rejected.is_err(),
+            "ConfigureAuthMark must propagate the final engine-shape rejection"
+        );
+        assert_eq!(
+            env.svm.get_account(&env.market).unwrap(),
+            before,
+            "ConfigureAuthMark rejection must roll back staged profile/config writes"
+        );
+
+        env.mutate_market(|_, group| {
+            group.insurance_domain_budget[0] = group.insurance;
+        });
+        env.svm.expire_blockhash();
+        let ok = send_tx(
+            &mut env.svm,
+            env.program_id,
+            &env.payer,
+            ProgInstruction::ConfigureAuthMark {
+                asset_index: 0,
+                now_slot: 1,
+                initial_mark_e6: 130,
+            },
+            vec![
+                AccountMeta::new(admin.pubkey(), true),
+                AccountMeta::new(env.market, false),
+            ],
+            &[&admin],
+        );
+        assert!(
+            ok.is_ok(),
+            "same auth configure remains live after repairing the shape: {ok:?}"
+        );
+        let (cfg, _) = env.market_state();
+        assert_eq!(
+            cfg.oracle_mode,
+            percolator_prog::constants::ORACLE_MODE_AUTH_MARK
+        );
+        assert_eq!(cfg.mark_ewma_e6, 130);
+    }
+
+    {
+        let mut env = V16CuEnv::new();
+        let admin = env.admin.insecure_clone();
+        set_test_clock(&mut env, 1, 100);
+        let feed = [0xc7u8; 32];
+        let pyth = env.set_pyth_price_with_conf(&feed, 200_000, -6, 0, 100);
+        let mut feeds = [[0u8; 32]; percolator_prog::constants::ORACLE_LEG_CAP];
+        feeds[0] = feed;
+        env.mutate_market(|_, group| {
+            group.insurance_domain_budget[0] = group.insurance.saturating_add(1);
+        });
+        let before = env.svm.get_account(&env.market).unwrap();
+
+        env.svm.expire_blockhash();
+        let rejected = send_tx(
+            &mut env.svm,
+            env.program_id,
+            &env.payer,
+            ProgInstruction::ConfigureHybridOracle {
+                asset_index: 0,
+                now_slot: 1,
+                now_unix_ts: 100,
+                oracle_leg_count: 1,
+                oracle_leg_flags: 0,
+                max_staleness_secs: 60,
+                hybrid_soft_stale_slots: 3,
+                mark_ewma_halflife_slots: 4,
+                mark_min_fee: 0,
+                invert: 0,
+                unit_scale: 0,
+                conf_filter_bps: 500,
+                oracle_leg_feeds: feeds,
+            },
+            vec![
+                AccountMeta::new(admin.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new_readonly(pyth, false),
+            ],
+            &[&admin],
+        );
+        assert!(
+            rejected.is_err(),
+            "ConfigureHybridOracle must propagate the final engine-shape rejection"
+        );
+        assert_eq!(
+            env.svm.get_account(&env.market).unwrap(),
+            before,
+            "ConfigureHybridOracle rejection must roll back staged oracle/profile/config writes"
+        );
+
+        env.mutate_market(|_, group| {
+            group.insurance_domain_budget[0] = group.insurance;
+        });
+        env.svm.expire_blockhash();
+        let ok = send_tx(
+            &mut env.svm,
+            env.program_id,
+            &env.payer,
+            ProgInstruction::ConfigureHybridOracle {
+                asset_index: 0,
+                now_slot: 1,
+                now_unix_ts: 100,
+                oracle_leg_count: 1,
+                oracle_leg_flags: 0,
+                max_staleness_secs: 60,
+                hybrid_soft_stale_slots: 3,
+                mark_ewma_halflife_slots: 4,
+                mark_min_fee: 0,
+                invert: 0,
+                unit_scale: 0,
+                conf_filter_bps: 500,
+                oracle_leg_feeds: feeds,
+            },
+            vec![
+                AccountMeta::new(admin.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new_readonly(pyth, false),
+            ],
+            &[&admin],
+        );
+        assert!(
+            ok.is_ok(),
+            "same hybrid configure remains live after repairing the shape: {ok:?}"
+        );
+        let (cfg, group) = env.market_state();
+        assert_eq!(
+            cfg.oracle_mode,
+            percolator_prog::constants::ORACLE_MODE_HYBRID_AFTER_HOURS
+        );
+        assert_eq!(group.assets[0].effective_price, 200_000);
+    }
+}
+
 // LoF/DoS sweep (cron135): direct mark pushes stage oracle/profile writes before the
 // final market-shape validation. If the engine rejects that final shape, the public
 // instruction must surface the error and roll back the staged oracle write as well.
