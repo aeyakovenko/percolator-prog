@@ -16797,6 +16797,104 @@ fn v16_attack_public_helpers_cannot_use_market_as_portfolio_alias() {
     assert_unchanged(&env, "PermissionlessCrank alias rejection");
 }
 
+// LoF/DoS sweep (cron135): the ordinary user value routes also take a program-owned
+// writable portfolio account. The market slab is program-owned and large enough to
+// pass shallow storage checks, so a duplicate market-as-portfolio account must fail
+// atomically before any engine debit/credit or SPL transfer.
+#[test]
+fn v16_attack_value_routes_cannot_use_market_as_portfolio_alias() {
+    let mut env = V16CuEnv::new();
+    let owner = Keypair::new();
+    let source = env.token_account(owner.pubkey(), 100);
+    let dest = env.token_account(owner.pubkey(), 0);
+
+    let real_portfolio = env.create_portfolio(&owner);
+    env.deposit(&owner, real_portfolio, 50);
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    let source_before = env.svm.get_account(&source).unwrap();
+    let dest_before = env.svm.get_account(&dest).unwrap();
+    let real_portfolio_before = env.svm.get_account(&real_portfolio).unwrap();
+
+    env.svm.expire_blockhash();
+    let deposit_alias = env.send(
+        ProgInstruction::Deposit { amount: 25 },
+        vec![
+            AccountMeta::new(owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&owner],
+    );
+    assert!(
+        deposit_alias.is_err(),
+        "Deposit must reject market-as-portfolio alias"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "Deposit alias rejection leaves market bytes unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        vault_before,
+        "Deposit alias rejection credits no vault custody"
+    );
+    assert_eq!(
+        env.svm.get_account(&source).unwrap(),
+        source_before,
+        "Deposit alias rejection pulls no source tokens"
+    );
+    assert_eq!(
+        env.svm.get_account(&real_portfolio).unwrap(),
+        real_portfolio_before,
+        "Deposit alias rejection leaves the real portfolio untouched"
+    );
+
+    env.svm.expire_blockhash();
+    let withdraw_alias = env.send(
+        ProgInstruction::Withdraw { amount: 25 },
+        vec![
+            AccountMeta::new(owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&owner],
+    );
+    assert!(
+        withdraw_alias.is_err(),
+        "Withdraw must reject market-as-portfolio alias"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "Withdraw alias rejection leaves market bytes unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        vault_before,
+        "Withdraw alias rejection debits no vault custody"
+    );
+    assert_eq!(
+        env.svm.get_account(&dest).unwrap(),
+        dest_before,
+        "Withdraw alias rejection pays no destination tokens"
+    );
+    assert_eq!(
+        env.svm.get_account(&real_portfolio).unwrap(),
+        real_portfolio_before,
+        "Withdraw alias rejection leaves the real portfolio untouched"
+    );
+}
+
 // security.md sweep — loss-of-funds / DoS (#22/#30): after maintenance fees accrue over a long
 // idle period, the user must still be able to withdraw their remaining (post-fee) capital. A bug
 // here = funds locked (LoF). Probe: deposit, accrue fees, sync, then withdraw everything left.
