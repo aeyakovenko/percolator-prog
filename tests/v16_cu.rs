@@ -90530,6 +90530,240 @@ fn v16_attack_resolved_payout_malformed_dest_rolls_back_terminal_state() {
     assert!(resolved_receipt(&account).finalized);
 }
 
+// full-interface sweep: resolved payout routes validate the canonical vault after computing terminal
+// payout deltas. A SPL-owned but malformed vault must roll back CloseResolved and
+// ClaimResolvedPayoutTopup state, not close the portfolio or burn a pending receipt.
+#[test]
+fn v16_attack_resolved_payout_malformed_vault_rolls_back_terminal_state() {
+    let mut close_env = V16CuEnv::new();
+    let close_owner = Keypair::new();
+    let close_portfolio = close_env.create_portfolio(&close_owner);
+    close_env.deposit(&close_owner, close_portfolio, 1_000_000);
+    close_env.resolve();
+    let close_dest = close_env.token_account_for_mint(close_env.mint, close_owner.pubkey(), 0);
+    let good_close_vault = close_env.svm.get_account(&close_env.vault).unwrap();
+    close_env
+        .svm
+        .set_account(
+            close_env.vault,
+            Account {
+                data: vec![0u8; TokenAccount::LEN - 1],
+                ..good_close_vault.clone()
+            },
+        )
+        .unwrap();
+
+    let close_market_before = close_env.svm.get_account(&close_env.market).unwrap();
+    let close_portfolio_before = close_env.svm.get_account(&close_portfolio).unwrap();
+    let close_vault_before = close_env.svm.get_account(&close_env.vault).unwrap();
+    let close_dest_before = close_env.svm.get_account(&close_dest).unwrap();
+
+    close_env.svm.expire_blockhash();
+    let rejected_close = close_env.send(
+        ProgInstruction::CloseResolved {
+            fee_rate_per_slot: 0,
+        },
+        vec![
+            AccountMeta::new_readonly(close_owner.pubkey(), false),
+            AccountMeta::new(close_env.market, false),
+            AccountMeta::new(close_portfolio, false),
+            AccountMeta::new(close_dest, false),
+            AccountMeta::new(close_env.vault, false),
+            AccountMeta::new_readonly(close_env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[],
+    );
+    assert!(
+        rejected_close.is_err(),
+        "CloseResolved must reject a malformed canonical vault"
+    );
+    assert_eq!(
+        close_env.svm.get_account(&close_env.market).unwrap(),
+        close_market_before,
+        "malformed-vault CloseResolved must not commit payout accounting"
+    );
+    assert_eq!(
+        close_env.svm.get_account(&close_portfolio).unwrap(),
+        close_portfolio_before,
+        "malformed-vault CloseResolved must not close or zero the portfolio"
+    );
+    assert_eq!(
+        close_env.svm.get_account(&close_env.vault).unwrap(),
+        close_vault_before,
+        "malformed canonical vault remains byte-identical"
+    );
+    assert_eq!(
+        close_env.svm.get_account(&close_dest).unwrap(),
+        close_dest_before,
+        "malformed-vault CloseResolved pays no destination tokens"
+    );
+
+    close_env
+        .svm
+        .set_account(close_env.vault, good_close_vault)
+        .unwrap();
+    close_env.svm.expire_blockhash();
+    let accepted_close = close_env.send(
+        ProgInstruction::CloseResolved {
+            fee_rate_per_slot: 0,
+        },
+        vec![
+            AccountMeta::new_readonly(close_owner.pubkey(), false),
+            AccountMeta::new(close_env.market, false),
+            AccountMeta::new(close_portfolio, false),
+            AccountMeta::new(close_dest, false),
+            AccountMeta::new(close_env.vault, false),
+            AccountMeta::new_readonly(close_env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[],
+    );
+    assert!(
+        accepted_close.is_ok(),
+        "CloseResolved remains live after malformed-vault rejection: {accepted_close:?}"
+    );
+    assert_eq!(close_env.token_amount(close_dest), 1_000_000);
+
+    let mut topup_env = V16CuEnv::new();
+    let topup_owner = Keypair::new();
+    let topup_portfolio = topup_env.create_portfolio(&topup_owner);
+    {
+        let mut market_account = topup_env
+            .svm
+            .get_account(&topup_env.market)
+            .expect("market account");
+        let mut portfolio_account = topup_env
+            .svm
+            .get_account(&topup_portfolio)
+            .expect("portfolio account");
+        let (cfg, mut group) = state::read_market(&market_account.data).unwrap();
+        let mut account = state::read_portfolio(&portfolio_account.data).unwrap();
+        group.mode = MarketModeV16::Resolved;
+        group.resolved_slot = 1;
+        group.current_slot = 1;
+        group.vault = 60;
+        group.payout_snapshot_captured = true;
+        group.payout_snapshot = 100;
+        group.resolved_payout_ledger = ResolvedPayoutLedgerV16 {
+            snapshot_residual: 100,
+            terminal_claim_exact_receipts_num: 100 * BOUND_SCALE,
+            terminal_claim_bound_unreceipted_num: 0,
+            current_payout_rate_num: 100 * BOUND_SCALE,
+            current_payout_rate_den: 100 * BOUND_SCALE,
+            snapshot_slot: 1,
+            payout_halted: false,
+            finalized: false,
+        };
+        account.resolved_payout_receipt =
+            percolator::ResolvedPayoutReceiptV16Account::from_runtime(&ResolvedPayoutReceiptV16 {
+                present: true,
+                prior_bound_contribution_num: 100 * BOUND_SCALE,
+                live_released_face_at_receipt: 0,
+                terminal_positive_claim_face: 100,
+                paid_effective: 40,
+                finalized: false,
+            });
+        state::write_market(&mut market_account.data, &cfg, &group).unwrap();
+        state::write_portfolio(&mut portfolio_account.data, &account).unwrap();
+        topup_env
+            .svm
+            .set_account(topup_env.market, market_account)
+            .unwrap();
+        topup_env
+            .svm
+            .set_account(topup_portfolio, portfolio_account)
+            .unwrap();
+    }
+    topup_env.set_token_account_amount(
+        topup_env.vault,
+        topup_env.mint,
+        topup_env.vault_authority,
+        60,
+    );
+    let topup_dest = topup_env.token_account_for_mint(topup_env.mint, topup_owner.pubkey(), 0);
+    let good_topup_vault = topup_env.svm.get_account(&topup_env.vault).unwrap();
+    topup_env
+        .svm
+        .set_account(
+            topup_env.vault,
+            Account {
+                data: vec![0u8; TokenAccount::LEN - 1],
+                ..good_topup_vault.clone()
+            },
+        )
+        .unwrap();
+
+    let topup_market_before = topup_env.svm.get_account(&topup_env.market).unwrap();
+    let topup_portfolio_before = topup_env.svm.get_account(&topup_portfolio).unwrap();
+    let topup_vault_before = topup_env.svm.get_account(&topup_env.vault).unwrap();
+    let topup_dest_before = topup_env.svm.get_account(&topup_dest).unwrap();
+
+    topup_env.svm.expire_blockhash();
+    let rejected_topup = topup_env.send(
+        ProgInstruction::ClaimResolvedPayoutTopup,
+        vec![
+            AccountMeta::new_readonly(topup_owner.pubkey(), false),
+            AccountMeta::new(topup_env.market, false),
+            AccountMeta::new(topup_portfolio, false),
+            AccountMeta::new(topup_dest, false),
+            AccountMeta::new(topup_env.vault, false),
+            AccountMeta::new_readonly(topup_env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[],
+    );
+    assert!(
+        rejected_topup.is_err(),
+        "ClaimResolvedPayoutTopup must reject a malformed canonical vault"
+    );
+    assert_eq!(
+        topup_env.svm.get_account(&topup_env.market).unwrap(),
+        topup_market_before,
+        "malformed-vault top-up must not commit payout ledger changes"
+    );
+    assert_eq!(
+        topup_env.svm.get_account(&topup_portfolio).unwrap(),
+        topup_portfolio_before,
+        "malformed-vault top-up must not burn the pending receipt"
+    );
+    assert_eq!(
+        topup_env.svm.get_account(&topup_env.vault).unwrap(),
+        topup_vault_before,
+        "malformed top-up vault remains byte-identical"
+    );
+    assert_eq!(
+        topup_env.svm.get_account(&topup_dest).unwrap(),
+        topup_dest_before,
+        "malformed-vault top-up pays no destination tokens"
+    );
+    let account = topup_env.portfolio_state(topup_portfolio);
+    assert_eq!(resolved_receipt(&account).paid_effective, 40);
+    assert!(
+        !resolved_receipt(&account).finalized,
+        "receipt remains claimable after malformed-vault rejection"
+    );
+
+    topup_env
+        .svm
+        .set_account(topup_env.vault, good_topup_vault)
+        .unwrap();
+    topup_env.svm.expire_blockhash();
+    let cu = topup_env.claim_resolved_payout_topup_with_cu(
+        topup_owner.pubkey(),
+        topup_portfolio,
+        topup_dest,
+    );
+    assert_cu_within(
+        "ClaimResolvedPayoutTopup malformed-vault rollback",
+        cu,
+        CUSTODY_CU_LIMIT,
+    );
+    assert_eq!(topup_env.token_amount(topup_dest), 60);
+    let account = topup_env.portfolio_state(topup_portfolio);
+    assert!(resolved_receipt(&account).finalized);
+}
+
 // LoF/DoS sweep (cron135): delegated and malformed resolved-payout destinations cover ownership and
 // unpack failure, but a frozen initialized destination reaches the distinct SPL account-state branch
 // after ClaimResolvedPayoutTopup has advanced the engine receipt. The failed transfer must roll that
