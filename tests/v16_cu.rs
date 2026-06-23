@@ -41359,6 +41359,98 @@ fn v16_attack_recovery_mode_crank_observation_rolls_back_oracle_write() {
     );
 }
 
+// LoF/DoS sweep: with liquidation rewards enabled, PermissionlessCrank validates and can grow the
+// optional reward portfolio before parsing oracle observations and hitting the Recovery-mode accrual
+// rejection. That rejected path must roll back both the staged oracle write and any legacy reward-account
+// realloc, or a public cranker could leave rent/state debris while the market is winding down.
+#[test]
+fn v16_attack_recovery_mode_crank_reward_tail_realloc_rolls_back() {
+    let mut env = V16CuEnv::new();
+    env.update_liquidation_fee_policy_with_cu(5_000);
+    let target_owner = Keypair::new();
+    let reward_owner = Keypair::new();
+    let target = env.create_portfolio(&target_owner);
+    let reward = env.create_portfolio(&reward_owner);
+    let feed = [0x3Au8; 32];
+
+    set_test_clock(&mut env, 1, 100);
+    let initial = env.set_pyth_price_with_conf(&feed, 1_000_000, -6, 0, 100);
+    env.try_configure_hybrid_asset_with_conf_filter_cu(
+        0,
+        1,
+        0,
+        [feed, [0u8; 32], [0u8; 32]],
+        &[initial],
+        1,
+        100,
+        0,
+        0,
+        10,
+        0,
+    )
+    .expect("configure hybrid oracle");
+
+    env.mutate_market(|_, group| {
+        group.mode = MarketModeV16::Recovery;
+        group.recovery_reason = Some(PermissionlessRecoveryReasonV16::BelowProgressFloor);
+    });
+    let mut legacy_reward = env.svm.get_account(&reward).unwrap();
+    legacy_reward.data.truncate(PORTFOLIO_ENGINE_ACCOUNT_LEN);
+    env.svm.set_account(reward, legacy_reward).unwrap();
+    assert_eq!(
+        env.svm.get_account(&reward).unwrap().data.len(),
+        PORTFOLIO_ENGINE_ACCOUNT_LEN,
+        "test setup simulates a legacy reward portfolio"
+    );
+
+    set_test_clock(&mut env, 2, 101);
+    let fresh = env.set_pyth_price_with_conf(&feed, 1_020_000, -6, 0, 101);
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let target_before = env.svm.get_account(&target).unwrap();
+    let reward_before = env.svm.get_account(&reward).unwrap();
+
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 2,
+            close_q: 0,
+            observations: crank_observations_with_accounts(0, 1),
+        },
+        vec![
+            AccountMeta::new(reward_owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(target, false),
+            AccountMeta::new_readonly(fresh, false),
+            AccountMeta::new(reward, false),
+        ],
+        &[&reward_owner],
+    );
+    assert!(
+        rejected.is_err(),
+        "recovery-mode crank with reward tail must reject instead of mutating wind-down state"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "rejected recovery reward-tail crank rolls back staged oracle/profile writes"
+    );
+    assert_eq!(
+        env.svm.get_account(&target).unwrap(),
+        target_before,
+        "rejected recovery reward-tail crank leaves the target portfolio unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&reward).unwrap(),
+        reward_before,
+        "rejected recovery reward-tail crank rolls back legacy reward-account growth"
+    );
+    assert_eq!(
+        env.svm.get_account(&reward).unwrap().data.len(),
+        PORTFOLIO_ENGINE_ACCOUNT_LEN,
+        "failed recovery reward-tail crank leaves no public legacy realloc debris"
+    );
+}
+
 // security.md sweep — cross-margin gross margin requirement (#9/#22): a portfolio's initial-margin
 // requirement is the SUM of per-leg risk (gross), never netted across legs. Attacker goal: hold a
 // second (opposite-direction, different-asset) position that a netting model would treat as offsetting,
