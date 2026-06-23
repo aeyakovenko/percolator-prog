@@ -45266,6 +45266,118 @@ fn v16_attack_out_of_order_observation_with_reward_tail_pays_no_reward() {
     );
 }
 
+// LoF/DoS sweep: the out-of-order observation carveout is intentionally limited to
+// close_q==0. With a real liquidation work budget, omitting the engine-selected
+// asset's observation must propagate NonProgress and roll back any unrelated
+// oracle/profile update already staged by the same public crank.
+#[test]
+fn v16_attack_budgeted_out_of_order_crank_rolls_back_unselected_observation() {
+    const MARK: u64 = 1_000_000;
+    const OPEN_SLOT: u64 = 1;
+    const OBS_SLOT: u64 = 2;
+
+    let mut env = V16CuEnv::new_with_init_params(production_risk_params());
+    env.update_liquidation_fee_policy_with_cu(5_000);
+    env.activate_asset(1, OPEN_SLOT, MARK);
+
+    set_test_clock(&mut env, OPEN_SLOT, 100);
+    let feed0 = [0x37u8; 32];
+    let initial0 = env.set_pyth_price_with_conf(&feed0, MARK as i64, -6, 0, 100);
+    env.try_configure_hybrid_asset_with_conf_filter_cu(
+        0,
+        1,
+        0,
+        [feed0, [0u8; 32], [0u8; 32]],
+        &[initial0],
+        OPEN_SLOT,
+        100,
+        0,
+        0,
+        10,
+        0,
+    )
+    .expect("configure unrelated asset-0 hybrid oracle");
+    env.configure_auth_mark_for_asset_as_admin(1, OPEN_SLOT, MARK);
+
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let cranker_owner = Keypair::new();
+    let long = env.create_portfolio(&long_owner);
+    let short = env.create_portfolio(&short_owner);
+    let cranker = env.create_portfolio(&cranker_owner);
+    env.deposit(&long_owner, long, 100_000_000);
+    env.deposit(&short_owner, short, 100_000_000);
+    env.deposit(&cranker_owner, cranker, 1_000);
+    env.trade_asset_with_cu(
+        1,
+        &long_owner,
+        long,
+        &short_owner,
+        short,
+        POS_SCALE as i128,
+        MARK,
+        0,
+    );
+
+    set_test_clock(&mut env, OBS_SLOT, 101);
+    env.push_auth_mark_for_asset_as_admin(1, OBS_SLOT, MARK + 10_000);
+    env.crank(
+        long,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: OBS_SLOT,
+            close_q: 0,
+            observations: crank_observations(1),
+        },
+    );
+    let (_, group_after_asset1) = env.market_state();
+    assert!(
+        health_cert(&env.portfolio_state(short)).cert_oracle_epoch
+            < group_after_asset1.oracle_epoch,
+        "setup must leave the target account stale on its active asset"
+    );
+
+    let fresh0 = env.set_pyth_price_with_conf(&feed0, (MARK + 10_000) as i64, -6, 0, 101);
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let short_before = env.svm.get_account(&short).unwrap();
+    let cranker_before = env.svm.get_account(&cranker).unwrap();
+
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::PermissionlessCrank {
+            now_slot: OBS_SLOT,
+            close_q: POS_SCALE,
+            observations: crank_observations_with_accounts(0, 1),
+        },
+        vec![
+            AccountMeta::new(cranker_owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(short, false),
+            AccountMeta::new_readonly(fresh0, false),
+            AccountMeta::new(cranker, false),
+        ],
+        &[&cranker_owner],
+    );
+    assert!(
+        rejected.is_err(),
+        "budgeted liquidation crank with only an unrelated observation must reject"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "budgeted NonProgress must roll back the unrelated oracle/profile update"
+    );
+    assert_eq!(
+        env.svm.get_account(&short).unwrap(),
+        short_before,
+        "budgeted NonProgress must not mutate the target account"
+    );
+    assert_eq!(
+        env.svm.get_account(&cranker).unwrap(),
+        cranker_before,
+        "budgeted NonProgress must not credit or rewrite the reward account"
+    );
+}
+
 // LoF/DoS sweep: a cross-margin account can have an earlier active leg than the
 // leg whose mark move makes the account liquidatable. The public auto-crank
 // pre-applies all supplied observations, then the engine self-selects one
