@@ -68821,6 +68821,247 @@ fn v16_attack_deposit_rejects_delegated_canonical_vault_before_credit() {
     assert_eq!(env.portfolio_state(portfolio).capital.get(), 100);
 }
 
+// LoF/DoS sweep (cron135): inbound value rails must also reject a frozen canonical vault, not just a
+// delegated one. Otherwise a route could credit market/accounting state before discovering that SPL
+// custody cannot receive the transfer. Cover the distinct token-state branch for Deposit, insurance
+// top-up, domain insurance top-up, and backing top-up, then prove each remains live once the vault is
+// restored.
+#[test]
+fn v16_attack_value_in_routes_reject_frozen_canonical_vault_before_credit() {
+    let mut env = V16CuEnv::new();
+    let admin = env.admin.insecure_clone();
+    let owner = Keypair::new();
+    let portfolio = env.create_portfolio(&owner);
+
+    env.svm
+        .set_account(
+            env.vault,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_frozen_token_data(env.mint, env.vault_authority, 0),
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+
+    let deposit_source = env.token_account_for_mint(env.mint, owner.pubkey(), 21);
+    let insurance_source = env.token_account_for_mint(env.mint, admin.pubkey(), 22);
+    let domain_source = env.token_account_for_mint(env.mint, admin.pubkey(), 23);
+    let backing_source = env.token_account_for_mint(env.mint, admin.pubkey(), 24);
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let portfolio_before = env.svm.get_account(&portfolio).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    let deposit_source_before = env.svm.get_account(&deposit_source).unwrap();
+    let insurance_source_before = env.svm.get_account(&insurance_source).unwrap();
+    let domain_source_before = env.svm.get_account(&domain_source).unwrap();
+    let backing_source_before = env.svm.get_account(&backing_source).unwrap();
+
+    env.svm.expire_blockhash();
+    let rejected_deposit = env.send(
+        ProgInstruction::Deposit { amount: 21 },
+        vec![
+            AccountMeta::new(owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio, false),
+            AccountMeta::new(deposit_source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&owner],
+    );
+    assert!(
+        rejected_deposit.is_err(),
+        "Deposit must reject a frozen canonical vault before credit"
+    );
+
+    env.svm.expire_blockhash();
+    let rejected_insurance = env.send(
+        ProgInstruction::TopUpInsurance { amount: 22 },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(insurance_source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        rejected_insurance.is_err(),
+        "TopUpInsurance must reject a frozen canonical vault before credit"
+    );
+
+    env.svm.expire_blockhash();
+    let rejected_domain = env.send(
+        ProgInstruction::TopUpInsuranceDomain {
+            domain: 0,
+            amount: 23,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(domain_source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        rejected_domain.is_err(),
+        "TopUpInsuranceDomain must reject a frozen canonical vault before credit"
+    );
+
+    env.svm.expire_blockhash();
+    let rejected_backing = env.send(
+        ProgInstruction::TopUpBackingBucket {
+            domain: 1,
+            amount: 24,
+            expiry_slot: 10_000,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(backing_source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        rejected_backing.is_err(),
+        "TopUpBackingBucket must reject a frozen canonical vault before credit"
+    );
+
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "frozen-vault value-in rejects leave market bytes unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&portfolio).unwrap(),
+        portfolio_before,
+        "frozen-vault deposit reject leaves the portfolio unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        vault_before,
+        "frozen canonical vault remains byte-identical"
+    );
+    assert_eq!(
+        env.svm.get_account(&deposit_source).unwrap(),
+        deposit_source_before,
+        "frozen-vault deposit reject pulls no user tokens"
+    );
+    assert_eq!(
+        env.svm.get_account(&insurance_source).unwrap(),
+        insurance_source_before,
+        "frozen-vault insurance reject pulls no donor tokens"
+    );
+    assert_eq!(
+        env.svm.get_account(&domain_source).unwrap(),
+        domain_source_before,
+        "frozen-vault domain-insurance reject pulls no donor tokens"
+    );
+    assert_eq!(
+        env.svm.get_account(&backing_source).unwrap(),
+        backing_source_before,
+        "frozen-vault backing reject pulls no donor tokens"
+    );
+
+    env.svm
+        .set_account(
+            env.vault,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_token_data(env.mint, env.vault_authority, 0),
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    env.svm.expire_blockhash();
+    env.send(
+        ProgInstruction::Deposit { amount: 21 },
+        vec![
+            AccountMeta::new(owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio, false),
+            AccountMeta::new(deposit_source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&owner],
+    )
+    .expect("Deposit remains live after the vault is thawed");
+    env.svm.expire_blockhash();
+    env.send(
+        ProgInstruction::TopUpInsurance { amount: 22 },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(insurance_source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&admin],
+    )
+    .expect("TopUpInsurance remains live after the vault is thawed");
+    env.svm.expire_blockhash();
+    env.send(
+        ProgInstruction::TopUpInsuranceDomain {
+            domain: 0,
+            amount: 23,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(domain_source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&admin],
+    )
+    .expect("TopUpInsuranceDomain remains live after the vault is thawed");
+    env.svm.expire_blockhash();
+    env.send(
+        ProgInstruction::TopUpBackingBucket {
+            domain: 1,
+            amount: 24,
+            expiry_slot: 10_000,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(backing_source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&admin],
+    )
+    .expect("TopUpBackingBucket remains live after the vault is thawed");
+
+    let (_, group_after) = env.market_state();
+    assert_eq!(env.portfolio_state(portfolio).capital.get(), 21);
+    assert_eq!(group_after.insurance, 45);
+    assert_eq!(
+        group_after.insurance_domain_budget[0] + group_after.insurance_domain_budget[1],
+        45,
+        "market and domain insurance top-ups are fully budgeted"
+    );
+    assert_eq!(
+        group_after.source_backing_buckets[1].fresh_unliened_backing_num,
+        24 * BOUND_SCALE
+    );
+    assert_eq!(
+        group_after.vault as u64,
+        env.token_amount(env.vault),
+        "vault accounting matches SPL custody after clean-vault controls"
+    );
+}
+
 #[test]
 fn v16_attack_restart_asset_oracle_checks_nonzero_asset_short_backing_domain() {
     let mut env = V16CuEnv::new();
