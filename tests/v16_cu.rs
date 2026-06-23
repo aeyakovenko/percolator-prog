@@ -11348,6 +11348,128 @@ fn v16_bpf_full_14_leg_refresh_crank_with_max_three_leg_pyth_observations_is_und
     }
 }
 
+// LoF/DoS sweep (cron135): reward-enabled markets peel a cranker portfolio from the
+// tail before parsing oracle observations. A keeper that includes both the maximum
+// legal Pyth observation tail and a reward account must still get one bounded
+// selector step; fresh observations make the cert stale, so the engine must refresh
+// instead of paying a liquidation reward from the same call.
+#[test]
+fn v16_bpf_full_14_leg_max_pyth_observations_with_reward_tail_refreshes_without_reward() {
+    const N: usize = percolator_prog::constants::WRAPPER_MAX_PORTFOLIO_ASSETS as usize;
+
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(N as u16, 1_000, 1_000, 500);
+    env.update_liquidation_fee_policy_with_cu(5_000);
+    set_test_clock(&mut env, 1, 100);
+    for asset_index in 0..N {
+        let feed_seed = 0x70u8.wrapping_add((asset_index as u8).wrapping_mul(3));
+        let feeds = [
+            [feed_seed; 32],
+            [feed_seed.wrapping_add(1); 32],
+            [feed_seed.wrapping_add(2); 32],
+        ];
+        let initial_oracles = [
+            env.set_pyth_price(&feeds[0], 100, -6, 100),
+            env.set_pyth_price(&feeds[1], 1_000_000, -6, 100),
+            env.set_pyth_price(&feeds[2], 1_000_000, -6, 100),
+        ];
+        env.try_configure_hybrid_asset_with_conf_filter_cu(
+            asset_index as u16,
+            3,
+            0,
+            feeds,
+            &initial_oracles,
+            1,
+            100,
+            0,
+            0,
+            3,
+            500,
+        )
+        .expect("configure three-leg hybrid oracle for reward-tail max-observation crank");
+    }
+
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let cranker_owner = Keypair::new();
+    let long_account = env.create_portfolio(&long_owner);
+    let short_account = env.create_portfolio(&short_owner);
+    let cranker_account = env.create_portfolio(&cranker_owner);
+    env.deposit(&long_owner, long_account, 2_000);
+    env.deposit(&short_owner, short_account, 100_000);
+    env.deposit(&cranker_owner, cranker_account, 1_000);
+    env.seed_current_n_leg_position_for_benchmark(long_account, short_account, N);
+    env.force_portfolio_capital_for_benchmark(long_account, 1_000);
+    let cranker_before = env.portfolio_state(cranker_account).capital.get();
+    let before_active =
+        percolator::active_bitmap_count_ones(active_bitmap(&env.portfolio_state(long_account)));
+
+    set_test_clock(&mut env, 17, 101);
+    let mut observations = Vec::with_capacity(N);
+    let mut accounts = vec![
+        AccountMeta::new(cranker_owner.pubkey(), true),
+        AccountMeta::new(env.market, false),
+        AccountMeta::new(long_account, false),
+    ];
+    for asset_index in 0..N {
+        let feed_seed = 0x70u8.wrapping_add((asset_index as u8).wrapping_mul(3));
+        let feeds = [
+            [feed_seed; 32],
+            [feed_seed.wrapping_add(1); 32],
+            [feed_seed.wrapping_add(2); 32],
+        ];
+        observations.push(CrankObservationHint {
+            asset_index: asset_index as u16,
+            oracle_accounts: 3,
+        });
+        accounts.push(AccountMeta::new_readonly(
+            env.set_pyth_price(&feeds[0], 99, -6, 101),
+            false,
+        ));
+        accounts.push(AccountMeta::new_readonly(
+            env.set_pyth_price(&feeds[1], 1_000_000, -6, 101),
+            false,
+        ));
+        accounts.push(AccountMeta::new_readonly(
+            env.set_pyth_price(&feeds[2], 1_000_000, -6, 101),
+            false,
+        ));
+    }
+    accounts.push(AccountMeta::new(cranker_account, false));
+
+    env.svm.expire_blockhash();
+    let refresh_cu = env
+        .send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 17,
+                close_q: POS_SCALE,
+                observations,
+            },
+            accounts,
+            &[&cranker_owner],
+        )
+        .expect("reward-tail max-observation crank remains live");
+    println!("v16 full-14-leg max-Pyth observations plus reward tail refresh CU: {refresh_cu}");
+    const MAX_PYTH_REWARD_TAIL_REFRESH_CU_LIMIT: u64 = 1_300_000;
+    assert!(
+        refresh_cu <= MAX_PYTH_REWARD_TAIL_REFRESH_CU_LIMIT,
+        "max-Pyth reward-tail refresh CU {} exceeded limit {}",
+        refresh_cu,
+        MAX_PYTH_REWARD_TAIL_REFRESH_CU_LIMIT
+    );
+
+    let after_long = env.portfolio_state(long_account);
+    assert_eq!(
+        percolator::active_bitmap_count_ones(active_bitmap(&after_long)),
+        before_active,
+        "fresh observations make the selected step refresh; liquidation waits for a later crank"
+    );
+    assert_eq!(
+        env.portfolio_state(cranker_account).capital.get(),
+        cranker_before,
+        "non-liquidation auto-crank step must not pay the supplied reward portfolio"
+    );
+}
+
 #[test]
 fn v16_bpf_full_14_leg_liquidation_crank_is_under_tx_limit() {
     let mut env = V16CuEnv::new_with_market_params_and_price_move(14, 1_000, 1_000, 500);
