@@ -33185,6 +33185,101 @@ fn v16_attack_partial_liquidation_bounded_and_conserves() {
     );
 }
 
+// Public auto-crank liveness sweep: helper-driven liquidation tests retry when close_q != 0, which can
+// hide whether a *current* liquidatable account makes progress in one public instruction. Start from a
+// solvent but under-margin account with a current health cert, then submit one bounded liquidation step.
+// The instruction must execute and close no more than the keeper's work budget.
+#[test]
+fn v16_attack_auto_crank_current_solvent_partial_liquidation_makes_progress() {
+    let mut env = V16CuEnv::new();
+    env.top_up_insurance(1_000_000);
+    env.svm.warp_to_slot(1);
+    env.configure_auth_mark_with_cu(1, 100);
+
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long_account = env.create_portfolio(&long_owner);
+    let short_account = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long_account, 10_000);
+    env.deposit(&short_owner, short_account, 3_000);
+    env.trade_with_cu(
+        &long_owner,
+        long_account,
+        &short_owner,
+        short_account,
+        (10 * POS_SCALE) as i128,
+        100,
+        0,
+    );
+
+    env.svm.warp_to_slot(2);
+    env.push_auth_mark_with_cu(2, 300);
+    env.crank(
+        short_account,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 2,
+            close_q: 0,
+            observations: crank_observations(0),
+        },
+    );
+    env.svm.warp_to_slot(3);
+    env.crank(
+        short_account,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 3,
+            close_q: 0,
+            observations: crank_observations(0),
+        },
+    );
+
+    let before_group = env.market_state().1;
+    let before_short = env.portfolio_state(short_account);
+    let before_cert = health_cert(&before_short);
+    assert!(
+        before_cert.certified_liq_deficit != 0 && before_cert.certified_equity > 0,
+        "setup must be solvent but liquidatable before partial liquidation: {before_cert:?}"
+    );
+    let oi_pre = before_group.assets[0].oi_eff_short_q;
+
+    env.svm.expire_blockhash();
+    let partial = env.send(
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 3,
+            close_q: POS_SCALE,
+            observations: crank_observations(0),
+        },
+        vec![
+            AccountMeta::new(env.payer.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(short_account, false),
+        ],
+        &[],
+    );
+    assert!(
+        partial.is_ok(),
+        "current solvent liquidation must make progress in one public auto-crank: {partial:?}"
+    );
+
+    let after_group = env.market_state().1;
+    let after_short = env.portfolio_state(short_account);
+    let closed = oi_pre.saturating_sub(after_group.assets[0].oi_eff_short_q);
+    assert!(closed > 0, "partial liquidation must reduce open interest");
+    assert!(
+        closed <= POS_SCALE,
+        "partial liquidation closed at most close_q: closed={closed}"
+    );
+    assert!(
+        has_active_leg_for_asset(&after_short, 0),
+        "partial close should leave the remaining position active"
+    );
+    assert_eq!(
+        after_group.vault, before_group.vault,
+        "liquidation fee is internal accounting, not a vault mint"
+    );
+    assert_eq!(after_group.vault as u64, env.token_amount(env.vault));
+    assert!(after_group.vault >= after_group.c_tot + after_group.insurance);
+}
+
 // security.md sweep — insurance makes winner whole at resolution (#33/#9): with a funded insurance
 // backstop, a winner facing a loser's bad debt should recover their full claim at resolution (insurance
 // absorbs the deficit), bounded by available insurance. Value conserved; insurance only spent.
