@@ -79911,10 +79911,9 @@ fn v16_bpf_10m_market_batch_14_high_tail_assets_stays_bounded() {
         "senior conservation after 10MiB 14-leg batch"
     );
 
-    // The no-CPI path is the bounded max-shape public path here. A matching 14-leg CPI probe
-    // currently exceeds the 1.4M CU meter on bbe745a; keep the adjacent 13-leg high-tail CPI
-    // frontier covered with the largest matcher tail admitted by the batch fanout budget.
-    const CPI_TAIL_LEGS: usize = 13;
+    // Keep the matching CPI route at the full active-leg cap too. This used to be represented by
+    // the adjacent 13-leg frontier; the current engine/wrapper path fits the 1.4M tx meter at 14.
+    const CPI_TAIL_LEGS: usize = TAIL_LEGS;
     const CPI_MATCHER_TAIL: usize =
         (percolator_prog::constants::MAX_MATCHER_TAIL_ACCOUNTS * 2) / CPI_TAIL_LEGS;
     let matcher_program = Pubkey::new_unique();
@@ -79977,16 +79976,16 @@ fn v16_bpf_10m_market_batch_14_high_tail_assets_stays_bounded() {
             cpi_metas,
             &[&cpi_taker],
         )
-        .expect("10MiB 13-leg high-tail BatchTradeCpi with budgeted matcher tail must execute");
+        .expect("10MiB 14-leg high-tail BatchTradeCpi with budgeted matcher tail must execute");
     println!(
-        "v16 10MiB BatchTradeCpi 13 high-tail legs plus budgeted matcher tail: \
+        "v16 10MiB BatchTradeCpi 14 high-tail legs plus budgeted matcher tail: \
          assets={N}, account_len={new_len}, first_asset={}, tail_accounts={}, CU={batch_cpi_cu}",
         N - CPI_TAIL_LEGS,
         budgeted_matcher_tail.len()
     );
     assert!(
         batch_cpi_cu < 1_400_000,
-        "10MiB 13-leg high-tail BatchTradeCpi with budgeted matcher tail CU {batch_cpi_cu} must fit the tx limit"
+        "10MiB 14-leg high-tail BatchTradeCpi with budgeted matcher tail CU {batch_cpi_cu} must fit the tx limit"
     );
     let cpi_taker_state = env.portfolio_state(cpi_taker_account);
     assert_eq!(
