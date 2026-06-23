@@ -45054,6 +45054,123 @@ fn v16_attack_multi_observation_liquidation_fee_uses_selected_asset() {
     );
 }
 
+// LoF/DoS sweep: the wrapper intentionally accepts an observation-only crank when
+// the engine-selected account step returns NonProgress because the selected
+// asset's observation is missing. If liquidation rewards are enabled, the parsed
+// reward tail must not receive any value on that non-liquidation path.
+#[test]
+fn v16_attack_out_of_order_observation_with_reward_tail_pays_no_reward() {
+    const MARK: u64 = 1_000_000;
+    const OPEN_SLOT: u64 = 1;
+    const OBS_SLOT: u64 = 2;
+
+    let mut env = V16CuEnv::new_with_init_params(production_risk_params());
+    env.update_liquidation_fee_policy_with_cu(5_000);
+    env.activate_asset(1, OPEN_SLOT, MARK);
+
+    set_test_clock(&mut env, OPEN_SLOT, 100);
+    let feed0 = [0x36u8; 32];
+    let initial0 = env.set_pyth_price_with_conf(&feed0, MARK as i64, -6, 0, 100);
+    env.try_configure_hybrid_asset_with_conf_filter_cu(
+        0,
+        1,
+        0,
+        [feed0, [0u8; 32], [0u8; 32]],
+        &[initial0],
+        OPEN_SLOT,
+        100,
+        0,
+        0,
+        10,
+        0,
+    )
+    .expect("configure unrelated asset-0 hybrid oracle");
+    env.configure_auth_mark_for_asset_as_admin(1, OPEN_SLOT, MARK);
+
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let cranker_owner = Keypair::new();
+    let long = env.create_portfolio(&long_owner);
+    let short = env.create_portfolio(&short_owner);
+    let cranker = env.create_portfolio(&cranker_owner);
+    env.deposit(&long_owner, long, 100_000_000);
+    env.deposit(&short_owner, short, 100_000_000);
+    env.deposit(&cranker_owner, cranker, 1_000);
+    env.trade_asset_with_cu(
+        1,
+        &long_owner,
+        long,
+        &short_owner,
+        short,
+        POS_SCALE as i128,
+        MARK,
+        0,
+    );
+
+    set_test_clock(&mut env, OBS_SLOT, 101);
+    let fresh0 = env.set_pyth_price_with_conf(&feed0, (MARK + 10_000) as i64, -6, 0, 101);
+    let (_, before_group) = env.market_state();
+    let short_before = env.svm.get_account(&short).unwrap();
+    let cranker_before = env.svm.get_account(&cranker).unwrap();
+    let cranker_cap_before = env.portfolio_state(cranker).capital.get();
+
+    env.svm.expire_blockhash();
+    let accepted = env.send(
+        ProgInstruction::PermissionlessCrank {
+            now_slot: OBS_SLOT,
+            close_q: 0,
+            observations: crank_observations_with_accounts(0, 1),
+        },
+        vec![
+            AccountMeta::new(cranker_owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(short, false),
+            AccountMeta::new_readonly(fresh0, false),
+            AccountMeta::new(cranker, false),
+        ],
+        &[&cranker_owner],
+    );
+    assert!(
+        accepted.is_ok(),
+        "out-of-order observation-only crank should remain live: {accepted:?}"
+    );
+
+    let (after_cfg, after_group) = env.market_state();
+    assert_eq!(
+        after_cfg.last_good_oracle_slot, OBS_SLOT,
+        "accepted observation-only crank commits the supplied asset-0 oracle update"
+    );
+    assert_eq!(
+        after_group.assets[0].raw_oracle_target_price,
+        MARK + 10_000,
+        "asset-0 observation was actually applied"
+    );
+    assert_eq!(
+        after_group.assets[1].effective_price, before_group.assets[1].effective_price,
+        "missing asset-1 observation means the selected account leg is not refreshed"
+    );
+    assert_eq!(
+        env.svm.get_account(&short).unwrap(),
+        short_before,
+        "accepted observation-only crank must not mutate the target portfolio"
+    );
+    assert_eq!(
+        env.svm.get_account(&cranker).unwrap(),
+        cranker_before,
+        "valid reward tail must not be credited on a non-liquidation observation-only crank"
+    );
+    assert_eq!(
+        env.portfolio_state(cranker).capital.get(),
+        cranker_cap_before,
+        "no cranker reward is paid without a selected liquidation"
+    );
+    assert_eq!(
+        after_group.vault as u64,
+        env.token_amount(env.vault),
+        "observation-only crank preserves SPL custody accounting"
+    );
+}
+
 // LoF/DoS sweep: a cross-margin account can have an earlier active leg than the
 // leg whose mark move makes the account liquidatable. The public auto-crank
 // pre-applies all supplied observations, then the engine self-selects one
