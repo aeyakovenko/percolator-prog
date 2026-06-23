@@ -43389,6 +43389,107 @@ fn v16_attack_liquidation_cranker_reward_rejects_wrong_owner() {
     );
 }
 
+// LoF/DoS sweep (cron135): the optional liquidation reward tail is any trailing
+// program-owned account. A keeper must not be able to alias that tail to the
+// market slab itself and have the crank reinterpret shared market state as a
+// reward portfolio; the duplicate-account rejection must be atomic and the same
+// liquidation must remain live with a real reward portfolio.
+#[test]
+fn v16_attack_liquidation_crank_reward_tail_cannot_alias_market() {
+    let mut env = V16CuEnv::new_with_init_params(production_risk_params());
+    env.update_liquidation_fee_policy_with_cu(5_000);
+    env.configure_auth_mark_with_cu(0, 1_000_000);
+    let lo = Keypair::new();
+    let l = env.create_portfolio(&lo);
+    let so = Keypair::new();
+    let s = env.create_portfolio(&so);
+    let keeper = Keypair::new();
+    env.ensure_signer_account(keeper.pubkey());
+    env.deposit(&lo, l, 100_000_000);
+    env.deposit(&so, s, 100_000);
+    env.trade_asset_with_cu(0, &lo, l, &so, s, POS_SCALE as i128, 1_000_000, 0);
+    for slot in 1..=30u64 {
+        env.svm.warp_to_slot(slot);
+        let _ = env.push_auth_mark_with_cu(slot, 2_000_000);
+        env.svm.expire_blockhash();
+        let _ = env.send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: slot,
+                close_q: 0,
+                observations: crank_observations(0),
+            },
+            vec![
+                AccountMeta::new(env.payer.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(s, false),
+            ],
+            &[],
+        );
+    }
+    assert!(
+        health_cert(&env.portfolio_state(s)).certified_liq_deficit != 0,
+        "short is liquidatable before probing the reward-tail market alias"
+    );
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let short_before = env.svm.get_account(&s).unwrap();
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 30,
+            close_q: POS_SCALE,
+            observations: vec![],
+        },
+        vec![
+            AccountMeta::new(keeper.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(s, false),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&keeper],
+    );
+    assert!(
+        rejected.is_err(),
+        "market slab must not be accepted as a liquidation reward portfolio"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "market-alias reward rejection leaves market bytes unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&s).unwrap(),
+        short_before,
+        "market-alias reward rejection leaves the liquidated account unchanged"
+    );
+
+    let reward = env.create_portfolio(&keeper);
+    let reward_cap_before = env.portfolio_state(reward).capital.get();
+    env.svm.expire_blockhash();
+    let accepted = env.send(
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 30,
+            close_q: POS_SCALE,
+            observations: vec![],
+        },
+        vec![
+            AccountMeta::new(keeper.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(s, false),
+            AccountMeta::new(reward, false),
+        ],
+        &[&keeper],
+    );
+    assert!(
+        accepted.is_ok(),
+        "same liquidation remains live with a real reward portfolio: {accepted:?}"
+    );
+    assert!(
+        env.portfolio_state(reward).capital.get() > reward_cap_before,
+        "valid reward control pays a real cranker reward"
+    );
+}
+
 // CU/DoS hardening: when liquidation rewards are enabled, a wrong-owner reward tail must reject
 // before the crank parses a supplied external oracle tail. The authorized control below reaches the
 // bogus oracle and fails there; the wrong-owner attempt must fail as Unauthorized first.
