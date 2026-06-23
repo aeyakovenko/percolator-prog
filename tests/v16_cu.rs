@@ -53370,6 +53370,398 @@ fn v16_attack_batch_decode_oversized_vectors_reject_before_allocation() {
     assert_eq!(env.svm.get_account(&maker_account).unwrap(), maker_before);
 }
 
+// Public-interface DoS sweep: vector-size guards cover attacker-sized decode allocations, but every
+// instruction tag also has a public byte decoder. Any truncated prefix or trailing-junk payload must
+// fail in decode before account parsing or state mutation, rather than panicking or falling through to a
+// handler with shifted fields.
+#[test]
+fn v16_attack_all_instruction_decoders_reject_truncated_or_junk_payloads() {
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(1, 10_000, 10_000, 10_000);
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let signer = env.payer.insecure_clone();
+    let key_a = [0x11u8; 32];
+    let key_b = [0x22u8; 32];
+    let key_c = [0x33u8; 32];
+    let key_d = [0x44u8; 32];
+
+    let cases: Vec<(&'static str, ProgInstruction)> = vec![
+        (
+            "InitMarket",
+            init_market_instruction(&V16CuMarketParams::default()),
+        ),
+        ("InitPortfolio", ProgInstruction::InitPortfolio),
+        ("Deposit", ProgInstruction::Deposit { amount: 1 }),
+        ("Withdraw", ProgInstruction::Withdraw { amount: 1 }),
+        (
+            "PermissionlessCrank",
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 1,
+                close_q: 1,
+                observations: vec![CrankObservationHint {
+                    asset_index: 0,
+                    oracle_accounts: 0,
+                }],
+            },
+        ),
+        (
+            "TradeNoCpi",
+            ProgInstruction::TradeNoCpi {
+                asset_index: 0,
+                size_q: POS_SCALE as i128,
+                exec_price: 100,
+                fee_bps: 0,
+            },
+        ),
+        (
+            "TradeCpi",
+            ProgInstruction::TradeCpi {
+                asset_index: 0,
+                size_q: POS_SCALE as i128,
+                fee_bps: 0,
+                limit_price: 0,
+            },
+        ),
+        (
+            "BatchTradeNoCpi",
+            ProgInstruction::BatchTradeNoCpi {
+                legs: vec![BatchTradeLeg {
+                    asset_index: 0,
+                    size_q: POS_SCALE as i128,
+                    exec_price: 100,
+                    fee_bps: 0,
+                }],
+            },
+        ),
+        (
+            "BatchTradeCpi",
+            ProgInstruction::BatchTradeCpi {
+                legs: vec![BatchTradeCpiLeg {
+                    asset_index: 0,
+                    size_q: POS_SCALE as i128,
+                    fee_bps: 0,
+                    limit_price: 0,
+                }],
+            },
+        ),
+        (
+            "SetMatcherConfig",
+            ProgInstruction::SetMatcherConfig { enabled: 1 },
+        ),
+        ("ClosePortfolio", ProgInstruction::ClosePortfolio),
+        (
+            "TopUpInsurance",
+            ProgInstruction::TopUpInsurance { amount: 1 },
+        ),
+        (
+            "TopUpInsuranceDomain",
+            ProgInstruction::TopUpInsuranceDomain {
+                domain: 0,
+                amount: 1,
+            },
+        ),
+        ("CloseSlab", ProgInstruction::CloseSlab),
+        ("ResolveMarket", ProgInstruction::ResolveMarket),
+        (
+            "TopUpBackingBucket",
+            ProgInstruction::TopUpBackingBucket {
+                domain: 0,
+                amount: 1,
+                expiry_slot: 1,
+            },
+        ),
+        (
+            "WithdrawBackingBucket",
+            ProgInstruction::WithdrawBackingBucket {
+                domain: 0,
+                amount: 1,
+            },
+        ),
+        (
+            "ConvertReleasedPnl",
+            ProgInstruction::ConvertReleasedPnl { amount: 1 },
+        ),
+        (
+            "CloseResolved",
+            ProgInstruction::CloseResolved {
+                fee_rate_per_slot: 1,
+            },
+        ),
+        (
+            "UpdateAuthority",
+            ProgInstruction::UpdateAuthority { new_pubkey: key_a },
+        ),
+        (
+            "UpdateAssetAuthority",
+            ProgInstruction::UpdateAssetAuthority {
+                asset_index: 0,
+                kind: processor::ASSET_AUTH_ORACLE,
+                new_pubkey: key_a,
+            },
+        ),
+        (
+            "UpdateLiquidationFeePolicy",
+            ProgInstruction::UpdateLiquidationFeePolicy {
+                cranker_share_bps: 1,
+            },
+        ),
+        (
+            "UpdateMaintenanceFeePolicy",
+            ProgInstruction::UpdateMaintenanceFeePolicy {
+                cranker_share_bps: 1,
+            },
+        ),
+        (
+            "UpdateBackingFeePolicy",
+            ProgInstruction::UpdateBackingFeePolicy {
+                domain: 0,
+                fee_bps: 1,
+                insurance_share_bps: 1,
+            },
+        ),
+        (
+            "UpdateTradeFeePolicy",
+            ProgInstruction::UpdateTradeFeePolicy {
+                trade_fee_base_bps: 1,
+            },
+        ),
+        (
+            "UpdateFeeRedirectPolicy",
+            ProgInstruction::UpdateFeeRedirectPolicy { redirect_bps: 1 },
+        ),
+        (
+            "UpdateMarketInitFeePolicy",
+            ProgInstruction::UpdateMarketInitFeePolicy { min_init_fee: 1 },
+        ),
+        (
+            "UpdateBaseUnitMints",
+            ProgInstruction::UpdateBaseUnitMints {
+                primary_mint: key_a,
+                secondary_mint: key_b,
+            },
+        ),
+        (
+            "SwapSecondaryForPrimary",
+            ProgInstruction::SwapSecondaryForPrimary { amount: 1 },
+        ),
+        (
+            "WithdrawBackingBucketEarnings",
+            ProgInstruction::WithdrawBackingBucketEarnings {
+                domain: 0,
+                amount: 1,
+            },
+        ),
+        (
+            "SyncBackingDomainLedger",
+            ProgInstruction::SyncBackingDomainLedger { domain: 0 },
+        ),
+        ("SyncInsuranceLedger", ProgInstruction::SyncInsuranceLedger),
+        (
+            "ConfigurePermissionlessResolve",
+            ProgInstruction::ConfigurePermissionlessResolve {
+                stale_slots: 1,
+                force_close_delay_slots: 1,
+            },
+        ),
+        (
+            "ResolveStalePermissionless",
+            ProgInstruction::ResolveStalePermissionless { now_slot: 1 },
+        ),
+        (
+            "ConfigureHybridOracle",
+            ProgInstruction::ConfigureHybridOracle {
+                asset_index: 0,
+                now_slot: 1,
+                now_unix_ts: 1,
+                oracle_leg_count: 1,
+                oracle_leg_flags: 0,
+                max_staleness_secs: 1,
+                hybrid_soft_stale_slots: 1,
+                mark_ewma_halflife_slots: 1,
+                mark_min_fee: 0,
+                invert: 0,
+                unit_scale: 0,
+                conf_filter_bps: 0,
+                oracle_leg_feeds: [key_a, key_b, key_c],
+            },
+        ),
+        (
+            "ConfigureEwmaMark",
+            ProgInstruction::ConfigureEwmaMark {
+                asset_index: 0,
+                now_slot: 1,
+                initial_mark_e6: 100,
+                mark_ewma_halflife_slots: 1,
+                mark_min_fee: 0,
+            },
+        ),
+        (
+            "PushEwmaMark",
+            ProgInstruction::PushEwmaMark {
+                asset_index: 0,
+                now_slot: 1,
+                mark_e6: 100,
+            },
+        ),
+        (
+            "ConfigureAuthMark",
+            ProgInstruction::ConfigureAuthMark {
+                asset_index: 0,
+                now_slot: 1,
+                initial_mark_e6: 100,
+            },
+        ),
+        (
+            "PushAuthMark",
+            ProgInstruction::PushAuthMark {
+                asset_index: 0,
+                now_slot: 1,
+                mark_e6: 100,
+            },
+        ),
+        (
+            "ForceCloseAbandonedAsset",
+            ProgInstruction::ForceCloseAbandonedAsset {
+                asset_index: 0,
+                now_slot: 1,
+                close_q: 1,
+            },
+        ),
+        (
+            "RestartAssetOracle",
+            ProgInstruction::RestartAssetOracle {
+                asset_index: 0,
+                now_slot: 1,
+                initial_price: 100,
+            },
+        ),
+        (
+            "UpdateAssetLifecycle",
+            ProgInstruction::UpdateAssetLifecycle {
+                action: 0,
+                asset_index: 0,
+                now_slot: 1,
+                initial_price: 100,
+                insurance_authority: key_a,
+                insurance_operator: key_b,
+                backing_bucket_authority: key_c,
+                oracle_authority: key_d,
+            },
+        ),
+        (
+            "WithdrawInsurance",
+            ProgInstruction::WithdrawInsurance { amount: 1 },
+        ),
+        (
+            "WithdrawInsuranceAsset",
+            ProgInstruction::WithdrawInsuranceAsset {
+                asset_index: 0,
+                amount: 1,
+            },
+        ),
+        (
+            "CureAndCancelClose",
+            ProgInstruction::CureAndCancelClose {
+                optional_deposit: 1,
+            },
+        ),
+        (
+            "ForfeitRecoveryLeg",
+            ProgInstruction::ForfeitRecoveryLeg {
+                asset_index: 0,
+                b_delta_budget: 1,
+            },
+        ),
+        (
+            "RebalanceReduce",
+            ProgInstruction::RebalanceReduce {
+                asset_index: 0,
+                reduce_q: 1,
+            },
+        ),
+        (
+            "FinalizeResetSide",
+            ProgInstruction::FinalizeResetSide {
+                asset_index: 0,
+                side: 0,
+            },
+        ),
+        (
+            "ClaimResolvedPayoutTopup",
+            ProgInstruction::ClaimResolvedPayoutTopup,
+        ),
+        (
+            "RefineResolvedUnreceiptedBound",
+            ProgInstruction::RefineResolvedUnreceiptedBound { decrease_num: 1 },
+        ),
+        (
+            "SyncMaintenanceFee",
+            ProgInstruction::SyncMaintenanceFee { now_slot: 1 },
+        ),
+    ];
+
+    for (label, ix) in cases {
+        let encoded = ix.encode();
+        for len in 0..encoded.len() {
+            env.svm.expire_blockhash();
+            let err = send_raw_tx(
+                &mut env.svm,
+                &signer,
+                Instruction {
+                    program_id: env.program_id,
+                    accounts: vec![],
+                    data: encoded[..len].to_vec(),
+                },
+                &[],
+            )
+            .expect_err("truncated instruction must reject");
+            assert!(
+                err.contains("InvalidInstructionData"),
+                "{label}: truncated length {len}/{} must reject in decode, got {err}",
+                encoded.len()
+            );
+            assert!(
+                !err.contains("ProgramFailedToComplete")
+                    && !err.contains("memory allocation failed"),
+                "{label}: truncated length {len}/{} must not panic, got {err}",
+                encoded.len()
+            );
+            assert_eq!(
+                env.svm.get_account(&env.market).unwrap(),
+                market_before,
+                "{label}: truncated payload must not mutate market state"
+            );
+        }
+
+        let mut junk = encoded;
+        junk.push(0xa5);
+        env.svm.expire_blockhash();
+        let err = send_raw_tx(
+            &mut env.svm,
+            &signer,
+            Instruction {
+                program_id: env.program_id,
+                accounts: vec![],
+                data: junk,
+            },
+            &[],
+        )
+        .expect_err("trailing-junk instruction must reject");
+        assert!(
+            err.contains("InvalidInstructionData"),
+            "{label}: trailing junk must reject in decode, got {err}"
+        );
+        assert!(
+            !err.contains("ProgramFailedToComplete") && !err.contains("memory allocation failed"),
+            "{label}: trailing junk must not panic, got {err}"
+        );
+        assert_eq!(
+            env.svm.get_account(&env.market).unwrap(),
+            market_before,
+            "{label}: trailing-junk payload must not mutate market state"
+        );
+    }
+}
+
 // DoS sweep: PermissionlessCrank has its own bounded observation vector decoder.
 // A max-u8 observation count must reject before allocating/parsing attacker-sized
 // work and before touching market or portfolio state.
