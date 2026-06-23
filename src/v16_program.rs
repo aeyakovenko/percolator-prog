@@ -10901,39 +10901,86 @@ pub mod processor {
         Ok(())
     }
 
+    fn raw_portfolio_leg_is_empty(leg: &percolator::PortfolioLegV16Account) -> bool {
+        leg.active == 0
+            && leg.asset_index.get() == 0
+            && leg.market_id.get() == 0
+            && leg.side == 0
+            && leg.basis_pos_q.get() == 0
+            && leg.a_basis.get() == percolator::ADL_ONE
+            && leg.k_snap.get() == 0
+            && leg.f_snap.get() == 0
+            && leg.epoch_snap.get() == 0
+            && leg.loss_weight.get() == 0
+            && leg.b_snap.get() == 0
+            && leg.b_rem.get() == 0
+            && leg.b_epoch_snap.get() == 0
+            && leg.b_stale == 0
+            && leg.stale == 0
+    }
+
     fn portfolio_touches_requested_active_asset_view(
         group: &state::MarketViewMutV16<'_>,
         portfolio: &percolator::PortfolioV16ViewMut<'_>,
         requests: &[TradeRequestV16],
     ) -> Result<bool, ProgramError> {
-        let mut seen_asset_indices = [usize::MAX; percolator::V16_MAX_PORTFOLIO_ASSETS_N];
-        let mut seen_len = 0usize;
-        let mut any_request_has_stored_positions = false;
+        let active_bitmap = portfolio
+            .header
+            .active_bitmap
+            .map(percolator::V16PodU64::get);
+        let mut seen_active_assets = [usize::MAX; percolator::V16_MAX_PORTFOLIO_ASSETS_N];
+        let mut seen_active_len = 0usize;
         for request in requests {
             if request.asset_index >= group.markets.len() {
                 return Err(PercolatorError::EngineInvalidConfig.into());
             }
-            let asset = group.markets[request.asset_index].engine.asset;
-            if asset.stored_pos_count_long.get() != 0 || asset.stored_pos_count_short.get() != 0 {
-                any_request_has_stored_positions = true;
-            }
-        }
-        if !any_request_has_stored_positions {
-            return Ok(false);
         }
         let mut touches_current_market = false;
         let mut slot = 0usize;
         while slot < percolator::V16_MAX_PORTFOLIO_ASSETS_N {
-            let leg = portfolio.header.legs[slot]
-                .try_to_runtime()
-                .map_err(map_v16_error)?;
-            if !leg.active {
+            let leg = &portfolio.header.legs[slot];
+            if leg.active > 1 || leg.side > 1 || leg.b_stale > 1 || leg.stale > 1 {
+                return Err(PercolatorError::EngineHiddenLeg.into());
+            }
+            let leg_active = leg.active == 1;
+            let bit = percolator::active_bitmap_get(active_bitmap, slot);
+            if bit != leg_active {
+                return Err(PercolatorError::EngineHiddenLeg.into());
+            }
+            if !leg_active {
+                if !raw_portfolio_leg_is_empty(leg) {
+                    return Err(PercolatorError::EngineHiddenLeg.into());
+                }
                 slot += 1;
                 continue;
             }
+            let leg_asset_index = leg.asset_index.get() as usize;
+            if leg_asset_index >= group.header.config.max_market_slots.get() as usize
+                || leg_asset_index >= group.markets.len()
+            {
+                return Err(PercolatorError::EngineHiddenLeg.into());
+            }
+            let leg_asset = group.markets[leg_asset_index].engine.asset;
+            if leg.market_id.get() != leg_asset.market_id.get()
+                || !matches!(
+                    leg_asset.lifecycle,
+                    ASSET_LIFECYCLE_ACTIVE | ASSET_LIFECYCLE_DRAIN_ONLY | ASSET_LIFECYCLE_RECOVERY
+                )
+            {
+                return Err(PercolatorError::EngineHiddenLeg.into());
+            }
+            let mut seen = 0usize;
+            while seen < seen_active_len {
+                if seen_active_assets[seen] == leg_asset_index {
+                    return Err(PercolatorError::EngineHiddenLeg.into());
+                }
+                seen += 1;
+            }
+            seen_active_assets[seen_active_len] = leg_asset_index;
+            seen_active_len += 1;
             for request in requests {
                 let asset_index = request.asset_index;
-                if leg.asset_index as usize != asset_index {
+                if leg_asset_index != asset_index {
                     continue;
                 }
                 let asset = group.markets[asset_index].engine.asset;
@@ -10941,18 +10988,7 @@ pub mod processor {
                 {
                     break;
                 }
-                let mut seen = 0usize;
-                while seen < seen_len {
-                    if seen_asset_indices[seen] == asset_index {
-                        return Err(PercolatorError::EngineHiddenLeg.into());
-                    }
-                    seen += 1;
-                }
-                seen_asset_indices[seen_len] = asset_index;
-                seen_len += 1;
-                if leg.market_id == asset.market_id.get() {
-                    touches_current_market = true;
-                }
+                touches_current_market = true;
                 break;
             }
             slot += 1;
