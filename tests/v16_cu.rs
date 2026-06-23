@@ -48913,6 +48913,92 @@ fn v16_attack_force_shutdown_timeout_lets_traders_exit_before_close() {
     );
 }
 
+// LoF/DoS sweep (cron135): shutdown puts an asset into Recovery with a frozen mark and a
+// force-close delay so users can exit. The pushed-mark profile can still be AuthMark across
+// that transition, so the public PushAuthMark route must be lifecycle-gated; otherwise the
+// same oracle/admin key could move the recovery mark during the exit window.
+#[test]
+fn v16_attack_recovery_asset_push_auth_mark_is_frozen_until_restart() {
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(2, 10_000, 10_000, 10_000);
+    let admin = env.admin.insecure_clone();
+    env.configure_auth_mark_for_asset_as_admin(1, 1, 100);
+    env.configure_permissionless_resolve_with_cu(100, 50);
+
+    env.svm.warp_to_slot(2);
+    env.push_auth_mark_for_asset_as_admin(1, 2, 120);
+    let active_profile =
+        state::read_asset_oracle_profile(&env.svm.get_account(&env.market).unwrap().data, 1)
+            .unwrap();
+    assert_eq!(
+        active_profile.oracle_mode, ORACLE_MODE_AUTH_MARK,
+        "setup is a non-vacuous pushed-mark asset"
+    );
+    assert_eq!(
+        active_profile.oracle_target_price_e6, 120,
+        "active pushed mark updated the per-asset oracle profile before shutdown"
+    );
+
+    env.svm.warp_to_slot(3);
+    env.svm.expire_blockhash();
+    env.try_shutdown_asset_with_authority(&admin, 1, 3)
+        .expect("marketauth shuts down asset 1");
+    assert_eq!(
+        env.market_state().1.assets[1].lifecycle,
+        AssetLifecycleV16::Recovery
+    );
+    let shutdown_profile =
+        state::read_asset_oracle_profile(&env.svm.get_account(&env.market).unwrap().data, 1)
+            .unwrap();
+    assert_eq!(
+        shutdown_profile.oracle_mode, ORACLE_MODE_AUTH_MARK,
+        "shutdown preserved the pushed-mark profile, so this probes the lifecycle gate"
+    );
+    assert_eq!(
+        shutdown_profile.mark_ewma_e6, 100,
+        "shutdown freezes the profile back to the current effective mark"
+    );
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    env.svm.warp_to_slot(4);
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::PushAuthMark {
+            asset_index: 1,
+            now_slot: 4,
+            mark_e6: 200,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        rejected.is_err(),
+        "Recovery asset marks must be frozen until RestartAssetOracle"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "rejected recovery mark push leaves the frozen mark byte-identical"
+    );
+
+    env.svm.warp_to_slot(5);
+    env.svm.expire_blockhash();
+    env.try_restart_asset_oracle_with_authority(&admin, 1, 5, 125)
+        .expect("asset admin can explicitly restart the recovery asset");
+    env.configure_auth_mark_for_asset_as_admin(1, 5, 125);
+    env.svm.warp_to_slot(6);
+    env.push_auth_mark_for_asset_as_admin(1, 6, 130);
+    assert_eq!(
+        state::read_asset_oracle_profile(&env.svm.get_account(&env.market).unwrap().data, 1)
+            .unwrap()
+            .oracle_target_price_e6,
+        130,
+        "proper restart restores the normal pushed-mark path"
+    );
+}
+
 // lifecycle sweep — explicit DrainOnly is a public UpdateAssetLifecycle action, distinct from
 // shutdown/recovery. It must be marketauth-gated, reject malformed slot/price args, block new risk,
 // and still let existing matched positions reduce to zero.
