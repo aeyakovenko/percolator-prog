@@ -51400,6 +51400,72 @@ fn v16_attack_batch_nocpi_drain_only_blocks_new_risk_but_allows_reduce() {
     assert!(group_after.vault >= group_after.c_tot + group_after.insurance);
 }
 
+// LoF/DoS sweep: DrainOnly must make wind-down monotonic. A cross-zero trade that leaves the same
+// absolute exposure does not increase the engine's absolute-risk metric, but it also does not reduce
+// OI; accepting it would let users keep a draining asset alive by swapping sides forever.
+#[test]
+fn v16_attack_drain_only_rejects_cross_zero_same_abs_flip() {
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(1, 5_000, 10_000, 1_000);
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long_account = env.create_portfolio(&long_owner);
+    let short_account = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long_account, 1_000_000);
+    env.deposit(&short_owner, short_account, 1_000_000);
+    env.trade_asset_with_cu(
+        0,
+        &long_owner,
+        long_account,
+        &short_owner,
+        short_account,
+        POS_SCALE as i128,
+        100,
+        0,
+    );
+    env.update_asset_lifecycle_as_admin_with_cu(
+        percolator_prog::processor::ASSET_ACTION_DRAIN_ONLY,
+        0,
+        0,
+        0,
+    );
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let long_before = env.svm.get_account(&long_account).unwrap();
+    let short_before = env.svm.get_account(&short_account).unwrap();
+    let flip = env.try_trade_asset_with_cu(
+        0,
+        &long_owner,
+        long_account,
+        &short_owner,
+        short_account,
+        -(2 * POS_SCALE as i128),
+        100,
+        0,
+    );
+    assert!(
+        flip.is_err(),
+        "DrainOnly must reject a cross-zero same-abs flip, got {flip:?}"
+    );
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+    assert_eq!(env.svm.get_account(&long_account).unwrap(), long_before);
+    assert_eq!(env.svm.get_account(&short_account).unwrap(), short_before);
+
+    let close = env.try_trade_asset_with_cu(
+        0,
+        &long_owner,
+        long_account,
+        &short_owner,
+        short_account,
+        -(POS_SCALE as i128),
+        100,
+        0,
+    );
+    assert!(
+        close.is_ok(),
+        "DrainOnly must still allow a true close to flat: {close:?}"
+    );
+}
+
 // security.md sweep — §6.2 backing-yield fee split (#5): when a risk-increasing trade GROWS an
 // account's source-credit IM lien that draws a fresh counterparty backing bucket, the wrapper charges
 // a backing-domain trade fee = fee_bps * Δbacking and splits it three ways: insurance_share to the
@@ -55632,6 +55698,144 @@ fn v16_attack_drain_only_existing_risk_increase_rejects_before_hostile_matcher_c
             "{route} must not give the hostile matcher a writable context"
         );
     }
+}
+
+#[test]
+fn v16_attack_drain_only_cpi_oversize_partial_close_cannot_flip() {
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(1, 5_000, 10_000, 1_000);
+    let hostile = Pubkey::new_unique();
+    env.svm.add_program(
+        hostile,
+        &std::fs::read(hostile_matcher_program_path()).unwrap(),
+    );
+    let taker = Keypair::new();
+    let lp = Keypair::new();
+    let taker_account = env.create_portfolio(&taker);
+    let lp_account = env.create_portfolio(&lp);
+    env.deposit(&taker, taker_account, 1_000_000);
+    env.deposit(&lp, lp_account, 1_000_000);
+    env.trade_asset_with_cu(
+        0,
+        &taker,
+        taker_account,
+        &lp,
+        lp_account,
+        POS_SCALE as i128,
+        100,
+        0,
+    );
+    env.update_asset_lifecycle_as_admin_with_cu(
+        percolator_prog::processor::ASSET_ACTION_DRAIN_ONLY,
+        0,
+        0,
+        0,
+    );
+
+    let ctx = Pubkey::new_unique();
+    let delegate = matcher_delegate_key(
+        &env.program_id,
+        &env.market,
+        &lp_account,
+        &lp.pubkey(),
+        &hostile,
+        &ctx,
+    );
+    env.svm
+        .set_account(
+            delegate,
+            Account {
+                lamports: 1_000_000_000,
+                data: vec![],
+                owner: Pubkey::default(),
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    let mut ctx_data = vec![0u8; MATCHER_CONTEXT_LEN];
+    ctx_data[0] = 0;
+    env.svm
+        .set_account(
+            ctx,
+            Account {
+                lamports: 1_000_000_000,
+                data: ctx_data,
+                owner: hostile,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    env.set_matcher_config(hostile, &lp, lp_account, ctx, delegate, 1);
+
+    let accounts = |env: &V16CuEnv| {
+        vec![
+            AccountMeta::new(taker.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(taker_account, false),
+            AccountMeta::new(lp_account, false),
+            AccountMeta::new_readonly(hostile, false),
+            AccountMeta::new(ctx, false),
+            AccountMeta::new_readonly(delegate, false),
+        ]
+    };
+    let oversize_close = ProgInstruction::TradeCpi {
+        asset_index: 0,
+        size_q: -(2 * POS_SCALE as i128),
+        fee_bps: 0,
+        limit_price: 0,
+    };
+
+    let set_mode = |env: &mut V16CuEnv, mode: u8| {
+        let mut data = vec![0u8; MATCHER_CONTEXT_LEN];
+        data[0] = mode;
+        env.svm
+            .set_account(
+                ctx,
+                Account {
+                    lamports: 1_000_000_000,
+                    data,
+                    owner: hostile,
+                    executable: false,
+                    rent_epoch: 0,
+                },
+            )
+            .unwrap();
+    };
+
+    set_mode(&mut env, 9);
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let taker_before = env.svm.get_account(&taker_account).unwrap();
+    let lp_before = env.svm.get_account(&lp_account).unwrap();
+    env.svm.expire_blockhash();
+    let rejected = env
+        .send(oversize_close.clone(), accounts(&env), &[&taker])
+        .expect_err("DrainOnly full cross-zero CPI fill must reject");
+    assert!(
+        rejected.contains("Custom(21)") || rejected.contains("custom program error: 0x15"),
+        "DrainOnly full cross-zero CPI fill should fail through the engine lock, got {rejected}"
+    );
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+    assert_eq!(env.svm.get_account(&taker_account).unwrap(), taker_before);
+    assert_eq!(env.svm.get_account(&lp_account).unwrap(), lp_before);
+
+    set_mode(&mut env, 10);
+    env.svm.expire_blockhash();
+    let close_cu = env
+        .send(oversize_close, accounts(&env), &[&taker])
+        .expect("DrainOnly oversize CPI request may still partially close to flat");
+    assert_cu_within("DrainOnly CPI partial close", close_cu, TRADE_CU_LIMIT);
+    let (_, group_after) = env.market_state();
+    assert_eq!(group_after.assets[0].oi_eff_long_q, 0);
+    assert_eq!(group_after.assets[0].oi_eff_short_q, 0);
+    assert!(
+        !has_active_leg_for_asset(&env.portfolio_state(taker_account), 0),
+        "partial close leaves taker flat"
+    );
+    assert!(
+        !has_active_leg_for_asset(&env.portfolio_state(lp_account), 0),
+        "partial close leaves LP flat"
+    );
 }
 
 // Mixed-batch CPI preflight must be all-or-nothing. A batch that contains one legitimate
