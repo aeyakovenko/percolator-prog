@@ -65624,6 +65624,100 @@ fn v16_attack_asset0_operator_rotation_rekeys_live_insurance_withdraw() {
     );
 }
 
+// LoF/DoS sweep (cron135): the hot insurance_operator can rotate independently from the cold
+// insurance_authority that owns the optional insurance ledger. A stale operator must not be able to
+// withdraw just because it still matches the ledger authority, and the new operator must still be able
+// to use the existing authority ledger so ledger-backed withdrawals are not stranded by hot-key
+// rotation.
+#[test]
+fn v16_attack_operator_rotation_keeps_authority_ledger_usable_by_current_operator() {
+    let mut env = V16CuEnv::new();
+    let admin = env.admin.insecure_clone();
+    let new_operator = Keypair::new();
+    let ledger = env.insurance_ledger_account();
+
+    env.top_up_insurance_domain_with_authority_ledger_and_cu(&admin, ledger, 0, 100);
+    let initial_ledger = state::read_insurance_ledger(&env.svm.get_account(&ledger).unwrap().data)
+        .expect("insurance authority ledger initialized");
+    assert_eq!(initial_ledger.authority, admin.pubkey().to_bytes());
+    assert_eq!(initial_ledger.total_principal_atoms, 100);
+
+    env.try_update_per_asset_authority_with_cu(
+        &admin,
+        Some(&new_operator),
+        0,
+        processor::ASSET_AUTH_INSURANCE_OPERATOR,
+        new_operator.pubkey().to_bytes(),
+    )
+    .expect("asset-0 insurance operator rotates to the hot key");
+
+    let stale_dest = env.token_account(admin.pubkey(), 0);
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let ledger_before = env.svm.get_account(&ledger).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    let stale_dest_before = env.svm.get_account(&stale_dest).unwrap();
+    env.svm.expire_blockhash();
+    let stale_operator = env.send(
+        ProgInstruction::WithdrawInsuranceAsset {
+            asset_index: 0,
+            amount: 40,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(stale_dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(ledger, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        stale_operator.is_err(),
+        "stale operator must not withdraw through the still-admin-owned insurance ledger"
+    );
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+    assert_eq!(env.svm.get_account(&ledger).unwrap(), ledger_before);
+    assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+    assert_eq!(env.svm.get_account(&stale_dest).unwrap(), stale_dest_before);
+
+    let operator_dest = env.token_account(new_operator.pubkey(), 0);
+    env.svm.expire_blockhash();
+    let current_operator = env.send(
+        ProgInstruction::WithdrawInsuranceAsset {
+            asset_index: 0,
+            amount: 40,
+        },
+        vec![
+            AccountMeta::new(new_operator.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(operator_dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(ledger, false),
+        ],
+        &[&new_operator],
+    );
+    assert!(
+        current_operator.is_ok(),
+        "current operator must remain live through the existing insurance-authority ledger: {current_operator:?}"
+    );
+    assert_eq!(env.token_amount(operator_dest), 40);
+    let (_, group_after) = env.market_state();
+    assert_eq!(group_after.insurance_domain_budget[0], 60);
+    assert_eq!(group_after.insurance, 60);
+    assert_eq!(group_after.vault, 60);
+    let ledger_after =
+        state::read_insurance_ledger(&env.svm.get_account(&ledger).unwrap().data).unwrap();
+    assert_eq!(ledger_after.authority, admin.pubkey().to_bytes());
+    assert_eq!(ledger_after.total_principal_atoms, 60);
+    assert_eq!(ledger_after.total_withdrawn_atoms, 40);
+    assert_eq!(ledger_after.last_observed_insurance_atoms, 60);
+    assert_eq!(env.token_amount(env.vault), group_after.vault as u64);
+}
+
 // [from pr114]
 // full-interface sweep: WithdrawBackingBucket has a two-stage authority check where marketauth passes
 // preflight, but live withdrawal must still require the current backing_bucket_authority unless the
