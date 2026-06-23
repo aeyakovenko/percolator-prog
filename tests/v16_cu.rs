@@ -41260,6 +41260,105 @@ fn v16_attack_recovery_mode_blocks_new_risk() {
     let _ = before;
 }
 
+// LoF/DoS sweep: PermissionlessCrank parses oracle observations and stages oracle/profile writes
+// before the engine accrual path rejects Recovery mode. A recovery-mode crank with a fresh oracle tail
+// must therefore roll back those staged writes instead of changing marks during wind-down.
+#[test]
+fn v16_attack_recovery_mode_crank_observation_rolls_back_oracle_write() {
+    let mut env = V16CuEnv::new();
+    let keeper_owner = Keypair::new();
+    let keeper = env.create_portfolio(&keeper_owner);
+    let feed = [0x39u8; 32];
+
+    set_test_clock(&mut env, 1, 100);
+    let initial = env.set_pyth_price_with_conf(&feed, 1_000_000, -6, 0, 100);
+    env.try_configure_hybrid_asset_with_conf_filter_cu(
+        0,
+        1,
+        0,
+        [feed, [0u8; 32], [0u8; 32]],
+        &[initial],
+        1,
+        100,
+        0,
+        0,
+        10,
+        0,
+    )
+    .expect("configure hybrid oracle");
+
+    set_test_clock(&mut env, 2, 101);
+    let live_price = env.set_pyth_price_with_conf(&feed, 1_010_000, -6, 0, 101);
+    env.svm.expire_blockhash();
+    let live = env.send(
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 2,
+            close_q: 0,
+            observations: crank_observations_with_accounts(0, 1),
+        },
+        vec![
+            AccountMeta::new(env.payer.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(keeper, false),
+            AccountMeta::new_readonly(live_price, false),
+        ],
+        &[],
+    );
+    assert!(
+        live.is_ok(),
+        "live observation-only crank should accept the same oracle shape: {live:?}"
+    );
+    assert_eq!(
+        env.market_state().1.assets[0].raw_oracle_target_price,
+        1_010_000,
+        "live control commits the oracle observation"
+    );
+
+    env.mutate_market(|_, group| {
+        group.mode = MarketModeV16::Recovery;
+        group.recovery_reason = Some(PermissionlessRecoveryReasonV16::BelowProgressFloor);
+    });
+    set_test_clock(&mut env, 3, 102);
+    let recovery_price = env.set_pyth_price_with_conf(&feed, 1_020_000, -6, 0, 102);
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let keeper_before = env.svm.get_account(&keeper).unwrap();
+
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 3,
+            close_q: 0,
+            observations: crank_observations_with_accounts(0, 1),
+        },
+        vec![
+            AccountMeta::new(env.payer.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(keeper, false),
+            AccountMeta::new_readonly(recovery_price, false),
+        ],
+        &[],
+    );
+    assert!(
+        rejected.is_err(),
+        "recovery-mode crank with oracle tail must reject instead of mutating marks"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "rejected recovery-mode crank rolls back staged oracle/profile writes"
+    );
+    assert_eq!(
+        env.svm.get_account(&keeper).unwrap(),
+        keeper_before,
+        "rejected recovery-mode crank leaves the target portfolio unchanged"
+    );
+    assert_eq!(
+        env.market_state().1.assets[0].raw_oracle_target_price,
+        1_010_000,
+        "recovery rejection does not commit the later oracle observation"
+    );
+}
+
 // security.md sweep — cross-margin gross margin requirement (#9/#22): a portfolio's initial-margin
 // requirement is the SUM of per-leg risk (gross), never netted across legs. Attacker goal: hold a
 // second (opposite-direction, different-asset) position that a netting model would treat as offsetting,
