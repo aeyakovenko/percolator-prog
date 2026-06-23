@@ -11150,6 +11150,81 @@ fn v16_bpf_full_14_leg_refresh_crank_is_under_tx_limit() {
     assert_eq!(group.assets[0].effective_price, 95);
 }
 
+// CU/DoS sweep: the crank decoder rejects oversized observation vectors, but the exact legal
+// maximum still pre-applies every observation before the engine selector runs. Pin that admitted
+// max shape against a full 14-leg stale refresh so oracle-hint fanout cannot turn a live keeper
+// route into a transaction-CU cliff.
+#[test]
+fn v16_bpf_full_14_leg_refresh_crank_with_max_observations_is_under_tx_limit() {
+    const N: usize = percolator_prog::constants::WRAPPER_MAX_PORTFOLIO_ASSETS as usize;
+
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(N as u16, 1_000, 1_000, 500);
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long_account = env.create_portfolio(&long_owner);
+    let short_account = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long_account, 2_000);
+    env.deposit(&short_owner, short_account, 100_000);
+    env.seed_n_leg_position_for_benchmark(long_account, short_account, N);
+    let before_slot_last: Vec<u64> = {
+        let market_data = env.svm.get_account(&env.market).unwrap().data;
+        let (_, group) = state::read_market(&market_data).unwrap();
+        (0..N)
+            .map(|asset_index| group.assets[asset_index].slot_last)
+            .collect()
+    };
+    let observations: Vec<CrankObservationHint> = (0..N)
+        .map(|asset_index| CrankObservationHint {
+            asset_index: asset_index as u16,
+            oracle_accounts: 0,
+        })
+        .collect();
+
+    env.svm.warp_to_slot(16);
+    env.svm.expire_blockhash();
+    let refresh_cu = env
+        .send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 16,
+                close_q: 0,
+                observations,
+            },
+            vec![
+                AccountMeta::new(env.payer.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(long_account, false),
+            ],
+            &[],
+        )
+        .expect("max-observation full-leg refresh remains live");
+    println!("v16 full-14-leg refresh crank with max observations CU: {refresh_cu}");
+    assert!(
+        refresh_cu <= 900_000,
+        "full-14-leg max-observation refresh CU {} exceeded limit {}",
+        refresh_cu,
+        900_000
+    );
+
+    let market_data = env.svm.get_account(&env.market).unwrap().data;
+    let long_data = env.svm.get_account(&long_account).unwrap().data;
+    let (_, group) = state::read_market(&market_data).unwrap();
+    let long = state::read_portfolio(&long_data).unwrap();
+    assert_eq!(
+        percolator::active_bitmap_count_ones(active_bitmap(&long)),
+        N as u32
+    );
+    for (asset_index, before) in before_slot_last.iter().copied().enumerate() {
+        assert!(
+            group.assets[asset_index].slot_last > before,
+            "max-observation refresh must commit asset progress for asset {asset_index}"
+        );
+        assert_eq!(
+            group.assets[asset_index].effective_price, 95,
+            "max-observation refresh applies the stale benchmark mark for asset {asset_index}"
+        );
+    }
+}
+
 #[test]
 fn v16_bpf_full_14_leg_liquidation_crank_is_under_tx_limit() {
     let mut env = V16CuEnv::new_with_market_params_and_price_move(14, 1_000, 1_000, 500);
