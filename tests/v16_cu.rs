@@ -66789,6 +66789,111 @@ fn v16_attack_stale_batch_nocpi_currentness_threshold_is_bounded() {
     }
 }
 
+// CU/DoS sweep: the fresh-asset currentness skip is intentional for direct owner-signed trades.
+// Pin the largest stale portfolio shape that can still open a fresh asset without the matcher-CPI
+// overhead that made the single external-fill route unsafe.
+#[test]
+fn v16_attack_stale_thirteen_leg_fresh_asset_tradenocpi_stays_bounded() {
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(14, 1_000, 1_000, 500);
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long_account = env.create_portfolio(&long_owner);
+    let short_account = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long_account, 100_000);
+    env.deposit(&short_owner, short_account, 100_000);
+    env.seed_n_leg_position_for_benchmark(long_account, short_account, 13);
+    env.svm.warp_to_slot(16);
+
+    let cu = env
+        .try_trade_asset_with_cu(
+            13,
+            &long_owner,
+            long_account,
+            &short_owner,
+            short_account,
+            POS_SCALE as i128,
+            95,
+            0,
+        )
+        .expect("fresh-asset TradeNoCpi from thirteen stale legs must stay under tx CU");
+    println!("v16 13-stale-leg fresh-asset TradeNoCpi CU: {cu}");
+    assert!(cu < 1_400_000, "fresh-asset TradeNoCpi CU {cu}");
+    let long_after = env.portfolio_state(long_account);
+    let short_after = env.portfolio_state(short_account);
+    assert_eq!(
+        active_leg_for_asset(&long_after, 13).basis_pos_q,
+        POS_SCALE as i128,
+        "fresh asset opened on the taker"
+    );
+    assert_eq!(
+        active_leg_for_asset(&short_after, 13).basis_pos_q,
+        -(POS_SCALE as i128),
+        "fresh asset opened on the counterparty"
+    );
+    let (_, group) = env.market_state();
+    assert!(
+        group.vault >= group.c_tot + group.insurance,
+        "fresh-asset direct trade preserves senior conservation"
+    );
+}
+
+// CU/DoS sweep: the one-leg batch no-CPI path reaches a separate batch execution body from
+// TradeNoCpi. Keep the same fresh-asset stale-boundary pinned there so batching cannot reintroduce
+// the settlement cliff while preserving the intended live path.
+#[test]
+fn v16_attack_stale_thirteen_leg_fresh_asset_batch_nocpi_stays_bounded() {
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(14, 1_000, 1_000, 500);
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long_account = env.create_portfolio(&long_owner);
+    let short_account = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long_account, 100_000);
+    env.deposit(&short_owner, short_account, 100_000);
+    env.seed_n_leg_position_for_benchmark(long_account, short_account, 13);
+    env.svm.warp_to_slot(16);
+
+    env.svm.expire_blockhash();
+    let cu = env
+        .send(
+            ProgInstruction::BatchTradeNoCpi {
+                legs: vec![BatchTradeLeg {
+                    asset_index: 13,
+                    size_q: POS_SCALE as i128,
+                    exec_price: 95,
+                    fee_bps: 0,
+                }],
+            },
+            vec![
+                AccountMeta::new(long_owner.pubkey(), true),
+                AccountMeta::new(short_owner.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(long_account, false),
+                AccountMeta::new(short_account, false),
+            ],
+            &[&long_owner, &short_owner],
+        )
+        .expect("fresh-asset BatchTradeNoCpi from thirteen stale legs must stay under tx CU");
+    println!("v16 13-stale-leg fresh-asset BatchTradeNoCpi CU: {cu}");
+    assert!(cu < 1_400_000, "fresh-asset BatchTradeNoCpi CU {cu}");
+    let long_after = env.portfolio_state(long_account);
+    let short_after = env.portfolio_state(short_account);
+    assert_eq!(
+        active_leg_for_asset(&long_after, 13).basis_pos_q,
+        POS_SCALE as i128,
+        "fresh asset opened on the taker"
+    );
+    assert_eq!(
+        active_leg_for_asset(&short_after, 13).basis_pos_q,
+        -(POS_SCALE as i128),
+        "fresh asset opened on the counterparty"
+    );
+    let (_, group) = env.market_state();
+    assert!(
+        group.vault >= group.c_tot + group.insurance,
+        "fresh-asset batch direct trade preserves senior conservation"
+    );
+}
+
 #[test]
 fn v16_attack_stale_seven_leg_batch_cpi_currentness_threshold_is_bounded() {
     let mut env = V16CuEnv::new_with_market_params_and_price_move(7, 1_000, 1_000, 500);
