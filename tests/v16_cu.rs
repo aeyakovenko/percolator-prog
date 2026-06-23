@@ -65981,6 +65981,139 @@ fn v16_attack_tradenocpi_rejects_duplicate_source_domain_sparse_state_atomically
 }
 
 #[test]
+fn v16_attack_batch_tradenocpi_rejects_duplicate_source_domain_sparse_state_atomically() {
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(2, 1_000, 1_000, 500);
+    env.configure_auth_mark_for_asset_as_admin(0, 1, 100);
+    env.configure_auth_mark_for_asset_as_admin(1, 1, 100);
+    env.top_up_backing_bucket(1, 250, 10_000);
+
+    let owner_a = Keypair::new();
+    let owner_b = Keypair::new();
+    let account_a = env.create_portfolio(&owner_a);
+    let account_b = env.create_portfolio(&owner_b);
+    env.deposit(&owner_a, account_a, 1_000_000);
+    env.deposit(&owner_b, account_b, 1_000_000);
+    env.add_source_positive_pnl(account_a, 1, 40);
+    env.crank(
+        account_a,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 0,
+            close_q: 0,
+            observations: crank_observations(0),
+        },
+    );
+    assert!(
+        state::portfolio_source_domain(&env.portfolio_state(account_a), 1)
+            .source_claim_bound_num
+            .get()
+            != 0,
+        "setup must create a canonical source-backed positive-PnL domain"
+    );
+
+    let canonical_account_a = env.svm.get_account(&account_a).unwrap();
+    let mut poisoned_account_a = canonical_account_a.clone();
+    let (_, _, max_market_slots, _) = state::read_market_config_mode_and_capacity(
+        &env.svm.get_account(&env.market).unwrap().data,
+    )
+    .unwrap();
+    {
+        let view = state::portfolio_view_mut_for_market_slots(
+            &mut poisoned_account_a.data,
+            max_market_slots,
+        )
+        .unwrap();
+        let source_slot = view
+            .header
+            .source_domains
+            .iter()
+            .position(|slot| slot.is_occupied() && slot.domain.get() == 1)
+            .expect("canonical source-domain slot");
+        let duplicate_slot = if source_slot == 0 { 1 } else { 0 };
+        view.header.source_domains[duplicate_slot] = view.header.source_domains[source_slot];
+        assert!(
+            view.header
+                .source_domains
+                .iter()
+                .filter(|slot| slot.is_occupied() && slot.domain.get() == 1)
+                .count()
+                >= 2,
+            "test precondition: forged account has duplicate occupied source-domain tags"
+        );
+    }
+    env.svm.set_account(account_a, poisoned_account_a).unwrap();
+
+    let legs = vec![
+        BatchTradeLeg {
+            asset_index: 0,
+            size_q: POS_SCALE as i128,
+            exec_price: 100,
+            fee_bps: 0,
+        },
+        BatchTradeLeg {
+            asset_index: 1,
+            size_q: -(POS_SCALE as i128),
+            exec_price: 100,
+            fee_bps: 0,
+        },
+    ];
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let account_a_before = env.svm.get_account(&account_a).unwrap();
+    let account_b_before = env.svm.get_account(&account_b).unwrap();
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::BatchTradeNoCpi { legs: legs.clone() },
+        vec![
+            AccountMeta::new(owner_a.pubkey(), true),
+            AccountMeta::new(owner_b.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(account_a, false),
+            AccountMeta::new(account_b, false),
+        ],
+        &[&owner_a, &owner_b],
+    );
+    assert!(
+        rejected.is_err(),
+        "BatchTradeNoCpi must reject duplicate sparse source-domain tags before committing a fill"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "rejected malformed source-domain batch leaves market accounting unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&account_a).unwrap(),
+        account_a_before,
+        "rejected malformed source-domain batch leaves attacker account bytes unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&account_b).unwrap(),
+        account_b_before,
+        "rejected malformed source-domain batch leaves counterparty account bytes unchanged"
+    );
+
+    env.svm.set_account(account_a, canonical_account_a).unwrap();
+    env.svm.expire_blockhash();
+    let batch_cu = env
+        .send(
+            ProgInstruction::BatchTradeNoCpi { legs },
+            vec![
+                AccountMeta::new(owner_a.pubkey(), true),
+                AccountMeta::new(owner_b.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(account_a, false),
+                AccountMeta::new(account_b, false),
+            ],
+            &[&owner_a, &owner_b],
+        )
+        .expect("BatchTradeNoCpi after canonical source-domain restore");
+    assert_cu_within(
+        "BatchTradeNoCpi after canonical source-domain restore",
+        batch_cu,
+        TRADE_CU_LIMIT,
+    );
+}
+
+#[test]
 fn v16_attack_stale_tradenocpi_currentness_threshold_is_bounded() {
     {
         let mut env = V16CuEnv::new_with_market_params_and_price_move(7, 1_000, 1_000, 500);
