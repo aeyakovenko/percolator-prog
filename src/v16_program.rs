@@ -6931,7 +6931,7 @@ pub mod processor {
             account_b_ai,
             max_market_slots,
             &cpi_requests,
-            !tail.is_empty(),
+            false,
         )?;
 
         // Force the batch matcher to emit fresh return data for this CPI.
