@@ -13830,6 +13830,197 @@ fn v16_bpf_failed_backing_earnings_withdraw_rolls_back_bucket_and_ledger() {
     assert_eq!(env.token_amount(dest), 0);
 }
 
+// full-interface sweep (cron135): backing principal and earnings withdrawals stage bucket/vault
+// debits before advancing provider ledger counters. A saturated ledger counter must reject without
+// burning backing capacity, and the domain must remain withdrawable through a non-poisoned path.
+#[test]
+fn v16_attack_backing_ledger_counter_overflows_roll_back_bucket_and_vault() {
+    let mut principal_env = V16CuEnv::new();
+    let admin = principal_env.admin.insecure_clone();
+    let principal_ledger = principal_env.backing_domain_ledger_account();
+    principal_env.top_up_backing_bucket_with_ledger_with_cu(principal_ledger, 1, 100, 10_000);
+
+    let mut principal_ledger_account = principal_env.svm.get_account(&principal_ledger).unwrap();
+    let mut principal_state = state::read_backing_domain_ledger(&principal_ledger_account.data)
+        .expect("initialized backing ledger");
+    principal_state.total_principal_withdrawn_atoms = u128::MAX;
+    state::write_backing_domain_ledger(&mut principal_ledger_account.data, &principal_state)
+        .expect("poison principal withdraw counter");
+    principal_env
+        .svm
+        .set_account(principal_ledger, principal_ledger_account)
+        .unwrap();
+
+    let principal_dest = principal_env.token_account(admin.pubkey(), 0);
+    let market_before = principal_env
+        .svm
+        .get_account(&principal_env.market)
+        .unwrap();
+    let vault_before = principal_env.svm.get_account(&principal_env.vault).unwrap();
+    let ledger_before = principal_env.svm.get_account(&principal_ledger).unwrap();
+    let dest_before = principal_env.svm.get_account(&principal_dest).unwrap();
+
+    principal_env.svm.expire_blockhash();
+    let rejected_principal = send_tx(
+        &mut principal_env.svm,
+        principal_env.program_id,
+        &principal_env.payer,
+        ProgInstruction::WithdrawBackingBucket {
+            domain: 1,
+            amount: 1,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(principal_env.market, false),
+            AccountMeta::new(principal_dest, false),
+            AccountMeta::new(principal_env.vault, false),
+            AccountMeta::new_readonly(principal_env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(principal_ledger, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        rejected_principal.is_err(),
+        "saturated backing-principal ledger counter must reject"
+    );
+    assert_eq!(
+        principal_env
+            .svm
+            .get_account(&principal_env.market)
+            .unwrap(),
+        market_before,
+        "principal counter overflow must roll back backing bucket accounting"
+    );
+    assert_eq!(
+        principal_env.svm.get_account(&principal_env.vault).unwrap(),
+        vault_before,
+        "principal counter overflow must not move vault custody"
+    );
+    assert_eq!(
+        principal_env.svm.get_account(&principal_ledger).unwrap(),
+        ledger_before,
+        "principal counter overflow must not rewrite the poisoned ledger"
+    );
+    assert_eq!(
+        principal_env.svm.get_account(&principal_dest).unwrap(),
+        dest_before,
+        "principal counter overflow must not pay destination tokens"
+    );
+
+    principal_env.svm.expire_blockhash();
+    principal_env.withdraw_backing_bucket_to_admin_token_with_cu(principal_dest, 1, 1);
+    assert_eq!(principal_env.token_amount(principal_dest), 1);
+    assert_eq!(principal_env.token_amount(principal_env.vault), 99);
+    let (_, principal_group) = principal_env.market_state();
+    assert_eq!(principal_group.vault, 99);
+    assert_eq!(
+        principal_group.source_backing_buckets[1].fresh_unliened_backing_num,
+        99 * BOUND_SCALE
+    );
+
+    let mut earnings_env = V16CuEnv::new();
+    let admin = earnings_env.admin.insecure_clone();
+    let earnings_ledger = earnings_env.backing_domain_ledger_account();
+    earnings_env.top_up_backing_bucket_with_ledger_with_cu(earnings_ledger, 1, 100, 10_000);
+    earnings_env.mutate_market(|_, group| {
+        group.source_backing_buckets[1].utilization_fee_earnings = 30;
+        group.vault += 30;
+    });
+    earnings_env.set_token_account_amount(
+        earnings_env.vault,
+        earnings_env.mint,
+        earnings_env.vault_authority,
+        130,
+    );
+    earnings_env.sync_backing_domain_ledger_with_cu(earnings_ledger, 1);
+
+    let mut earnings_ledger_account = earnings_env.svm.get_account(&earnings_ledger).unwrap();
+    let mut earnings_state = state::read_backing_domain_ledger(&earnings_ledger_account.data)
+        .expect("initialized backing earnings ledger");
+    earnings_state.total_earnings_withdrawn_atoms = u128::MAX;
+    state::write_backing_domain_ledger(&mut earnings_ledger_account.data, &earnings_state)
+        .expect("poison earnings withdraw counter");
+    earnings_env
+        .svm
+        .set_account(earnings_ledger, earnings_ledger_account)
+        .unwrap();
+
+    let earnings_dest = earnings_env.token_account(admin.pubkey(), 0);
+    let market_before = earnings_env.svm.get_account(&earnings_env.market).unwrap();
+    let vault_before = earnings_env.svm.get_account(&earnings_env.vault).unwrap();
+    let ledger_before = earnings_env.svm.get_account(&earnings_ledger).unwrap();
+    let dest_before = earnings_env.svm.get_account(&earnings_dest).unwrap();
+
+    earnings_env.svm.expire_blockhash();
+    let rejected_earnings = send_tx(
+        &mut earnings_env.svm,
+        earnings_env.program_id,
+        &earnings_env.payer,
+        ProgInstruction::WithdrawBackingBucketEarnings {
+            domain: 1,
+            amount: 1,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(earnings_env.market, false),
+            AccountMeta::new(earnings_ledger, false),
+            AccountMeta::new(earnings_dest, false),
+            AccountMeta::new(earnings_env.vault, false),
+            AccountMeta::new_readonly(earnings_env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        rejected_earnings.is_err(),
+        "saturated backing-earnings ledger counter must reject"
+    );
+    assert_eq!(
+        earnings_env.svm.get_account(&earnings_env.market).unwrap(),
+        market_before,
+        "earnings counter overflow must roll back bucket and vault accounting"
+    );
+    assert_eq!(
+        earnings_env.svm.get_account(&earnings_env.vault).unwrap(),
+        vault_before,
+        "earnings counter overflow must not move vault custody"
+    );
+    assert_eq!(
+        earnings_env.svm.get_account(&earnings_ledger).unwrap(),
+        ledger_before,
+        "earnings counter overflow must not rewrite the poisoned ledger"
+    );
+    assert_eq!(
+        earnings_env.svm.get_account(&earnings_dest).unwrap(),
+        dest_before,
+        "earnings counter overflow must not pay destination tokens"
+    );
+
+    let fresh_ledger = earnings_env.backing_domain_ledger_account();
+    earnings_env.svm.expire_blockhash();
+    earnings_env.withdraw_backing_bucket_earnings_to_admin_token_with_cu(
+        fresh_ledger,
+        earnings_dest,
+        1,
+        1,
+    );
+    assert_eq!(earnings_env.token_amount(earnings_dest), 1);
+    assert_eq!(earnings_env.token_amount(earnings_env.vault), 129);
+    let (_, earnings_group) = earnings_env.market_state();
+    assert_eq!(earnings_group.vault, 129);
+    assert_eq!(
+        earnings_group.source_backing_buckets[1].utilization_fee_earnings,
+        29
+    );
+    let fresh_state = state::read_backing_domain_ledger(
+        &earnings_env.svm.get_account(&fresh_ledger).unwrap().data,
+    )
+    .expect("fresh backing earnings ledger initialized");
+    assert_eq!(fresh_state.total_earnings_withdrawn_atoms, 1);
+    assert_eq!(fresh_state.last_observed_bucket_earnings_atoms, 29);
+}
+
 #[test]
 fn v16_bpf_close_resolved_pays_positive_pnl_through_engine_ledger() {
     let mut env = V16CuEnv::new();
