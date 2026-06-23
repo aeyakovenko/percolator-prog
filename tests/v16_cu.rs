@@ -36742,6 +36742,52 @@ fn v16_attack_global_policy_bounds_reject_grief_values() {
     assert_domain_budget_remaining_total_consistent(&group, "bounded global policy reward");
 }
 
+// Low-fee-cap markets are a separate public-interface branch from the global 10_000 bps cap:
+// an authorized policy write must not raise the configured base fee above the market's own max.
+#[test]
+fn v16_attack_trade_fee_policy_respects_low_market_fee_cap() {
+    const MAX_FEE_BPS: u64 = 37;
+
+    let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+        max_trading_fee_bps: MAX_FEE_BPS,
+        ..V16CuMarketParams::default()
+    });
+    let market_before = env.svm.get_account(&env.market).unwrap();
+
+    env.svm.expire_blockhash();
+    let rejected = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::UpdateTradeFeePolicy {
+            trade_fee_base_bps: MAX_FEE_BPS + 1,
+        },
+        vec![
+            AccountMeta::new(env.admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&env.admin],
+    );
+    assert!(
+        rejected.is_err(),
+        "authorized trade-fee update above a low market max must reject"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "rejected low-cap fee update must leave the market byte-identical"
+    );
+    assert_eq!(env.market_state().0.trade_fee_base_bps, 0);
+
+    env.svm.expire_blockhash();
+    env.update_trade_fee_policy_with_cu(MAX_FEE_BPS);
+    assert_eq!(
+        env.market_state().0.trade_fee_base_bps,
+        MAX_FEE_BPS,
+        "the exact market fee cap remains a live accepted policy value"
+    );
+}
+
 // security.md sweep - trade-fee authority isolation (#6/#33): UpdateTradeFeePolicy is a
 // market-wide economic knob, but the code intentionally gates it to asset-0's insurance authority.
 // After asset-0 insurance is rotated away from marketauth, stale marketauth must not be able to raise
