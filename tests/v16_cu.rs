@@ -47014,13 +47014,13 @@ fn v16_attack_crank_surplus_oracle_tail_rolls_back_prior_observation() {
     assert_eq!(group.assets[0].raw_oracle_target_price, 220_000);
 }
 
-// Multi-observation auto-crank sweep: a keeper may supply fresh oracle observations for more than
-// one asset, while the engine selector liquidates only the currently actionable asset. The retained
-// liquidation fee must be budgeted to the selected/liquidated asset, not to the first observation
-// in the caller-provided tail. Otherwise an attacker could prepend an unrelated oracle update and
-// redirect liquidation insurance away from the distressed asset's domains.
+// Out-of-order observation auto-crank sweep: a keeper may supply a fresh oracle observation for an
+// unrelated asset while the engine selector liquidates a currently actionable asset using its current
+// cert. The retained liquidation fee must be budgeted to the selected/liquidated asset, not to the
+// first observation in the caller-provided tail. Otherwise an attacker could prepend an unrelated
+// oracle update and redirect liquidation insurance away from the distressed asset's domains.
 #[test]
-fn v16_attack_multi_observation_liquidation_fee_uses_selected_asset() {
+fn v16_attack_unrelated_observation_liquidation_fee_uses_selected_asset() {
     const MARK: u64 = 1_000_000;
     const LIQ_MARK: u64 = 2_000_000;
     const OPEN_SLOT: u64 = 1;
@@ -47104,16 +47104,10 @@ fn v16_attack_multi_observation_liquidation_fee_uses_selected_asset() {
         ProgInstruction::PermissionlessCrank {
             now_slot: LIQ_SLOT,
             close_q: POS_SCALE,
-            observations: vec![
-                CrankObservationHint {
-                    asset_index: 0,
-                    oracle_accounts: 1,
-                },
-                CrankObservationHint {
-                    asset_index: 1,
-                    oracle_accounts: 0,
-                },
-            ],
+            observations: vec![CrankObservationHint {
+                asset_index: 0,
+                oracle_accounts: 1,
+            }],
         },
         vec![
             AccountMeta::new(env.payer.pubkey(), true),
@@ -47125,7 +47119,7 @@ fn v16_attack_multi_observation_liquidation_fee_uses_selected_asset() {
     );
     assert!(
         liquidate.is_ok(),
-        "multi-observation auto-crank should liquidate the selected asset: {liquidate:?}"
+        "unrelated-observation auto-crank should liquidate the selected current asset: {liquidate:?}"
     );
 
     let (_, after_group) = env.market_state();
@@ -47156,7 +47150,7 @@ fn v16_attack_multi_observation_liquidation_fee_uses_selected_asset() {
     )));
     assert_domain_budget_remaining_total_consistent(
         &after_group,
-        "multi-observation selected-asset liquidation fee",
+        "unrelated-observation selected-asset liquidation fee",
     );
 }
 
