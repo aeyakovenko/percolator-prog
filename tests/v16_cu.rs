@@ -4904,6 +4904,110 @@ fn v16_bpf_permissionless_asset_cannot_withdraw_unrelated_domain_insurance() {
     assert_eq!(final_group.insurance_domain_budget[7], 0);
 }
 
+// LoF/DoS sweep (cron135): permissionless append activation reallocs the market account, stages a
+// fresh engine slot/profile, and only then transfers the init fee. A late final-shape rejection must
+// roll back the realloc/staged activation and must not burn the public creator's fee; after repairing
+// the bad aggregate, the same append path must remain live.
+#[test]
+fn v16_attack_permissionless_append_invalid_final_shape_keeps_fee_and_slot_live() {
+    const FEE: u128 = 40;
+    let mut env = V16CuEnv::new();
+    let creator = Keypair::new();
+    env.ensure_signer_account(creator.pubkey());
+    env.update_market_init_fee_policy_with_cu(FEE);
+    env.mutate_market(|_, group| {
+        group.insurance_domain_budget[0] = group.insurance.saturating_add(1);
+    });
+
+    let source = env.token_account(creator.pubkey(), FEE as u64);
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let source_before = env.svm.get_account(&source).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    let (cfg_before, group_before) = env.market_state();
+    assert_eq!(cfg_before.free_market_slot_count, 0);
+    assert_eq!(group_before.assets.len(), 1);
+    assert!(
+        group_before.insurance_domain_budget[0] > group_before.insurance,
+        "test precondition: final market shape is invalid before the append"
+    );
+
+    env.svm.warp_to_slot(1);
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::UpdateAssetLifecycle {
+            action: percolator_prog::processor::ASSET_ACTION_ACTIVATE,
+            asset_index: 1,
+            now_slot: 1,
+            initial_price: 100,
+            insurance_authority: creator.pubkey().to_bytes(),
+            insurance_operator: creator.pubkey().to_bytes(),
+            backing_bucket_authority: creator.pubkey().to_bytes(),
+            oracle_authority: creator.pubkey().to_bytes(),
+        },
+        vec![
+            AccountMeta::new(creator.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&creator],
+    );
+    assert!(
+        rejected.is_err(),
+        "append activation must reject the invalid final market shape"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "failed append must roll back the realloc, fresh slot, profile, and counters"
+    );
+    assert_eq!(
+        env.svm.get_account(&source).unwrap(),
+        source_before,
+        "failed append must not pull the creator's init fee"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        vault_before,
+        "failed append must not credit the canonical vault"
+    );
+
+    env.mutate_market(|_, group| {
+        group.insurance_domain_budget[0] = 0;
+    });
+    env.svm.expire_blockhash();
+    let accepted = env.send(
+        ProgInstruction::UpdateAssetLifecycle {
+            action: percolator_prog::processor::ASSET_ACTION_ACTIVATE,
+            asset_index: 1,
+            now_slot: 1,
+            initial_price: 100,
+            insurance_authority: creator.pubkey().to_bytes(),
+            insurance_operator: creator.pubkey().to_bytes(),
+            backing_bucket_authority: creator.pubkey().to_bytes(),
+            oracle_authority: creator.pubkey().to_bytes(),
+        },
+        vec![
+            AccountMeta::new(creator.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&creator],
+    );
+    assert!(
+        accepted.is_ok(),
+        "valid append remains live after invalid-shape rejection: {accepted:?}"
+    );
+    let (_, group_after) = env.market_state();
+    assert_eq!(group_after.assets[1].lifecycle, AssetLifecycleV16::Active);
+    assert_eq!(group_after.assets[1].effective_price, 100);
+    assert_eq!(env.token_amount(source), 0);
+    assert_eq!(env.token_amount(env.vault), FEE as u64);
+}
+
 #[test]
 fn v16_bpf_permissionless_append_activation_uses_authenticated_slot() {
     let mut env = V16CuEnv::new();
