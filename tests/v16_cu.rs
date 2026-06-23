@@ -88104,6 +88104,177 @@ fn v16_attack_value_in_routes_reject_frozen_sources_before_credit() {
     );
 }
 
+// full-interface sweep: value-in routes credit engine accounting before invoking SPL transfer. A
+// SPL-owned but malformed source or canonical vault must therefore reject in wrapper preflight for
+// every value-in rail, and each rail must remain live after the malformed account is restored.
+#[test]
+fn v16_attack_value_in_routes_reject_malformed_token_accounts_before_credit() {
+    #[derive(Clone, Copy)]
+    enum ValueInRoute {
+        Deposit,
+        TopUpInsurance,
+        TopUpInsuranceDomain,
+        TopUpBackingBucket,
+    }
+
+    impl ValueInRoute {
+        fn label(self) -> &'static str {
+            match self {
+                ValueInRoute::Deposit => "Deposit",
+                ValueInRoute::TopUpInsurance => "TopUpInsurance",
+                ValueInRoute::TopUpInsuranceDomain => "TopUpInsuranceDomain",
+                ValueInRoute::TopUpBackingBucket => "TopUpBackingBucket",
+            }
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    enum MalformedSlot {
+        Source,
+        Vault,
+    }
+
+    fn send_value_in(
+        env: &mut V16CuEnv,
+        route: ValueInRoute,
+        signer: &Keypair,
+        portfolio: Pubkey,
+        source: Pubkey,
+        amount: u128,
+    ) -> Result<u64, String> {
+        let mut send_common = |ix: ProgInstruction| {
+            env.svm.expire_blockhash();
+            env.send(
+                ix,
+                vec![
+                    AccountMeta::new(signer.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(source, false),
+                    AccountMeta::new(env.vault, false),
+                    AccountMeta::new_readonly(spl_token::ID, false),
+                ],
+                &[signer],
+            )
+        };
+        match route {
+            ValueInRoute::Deposit => {
+                env.svm.expire_blockhash();
+                env.send(
+                    ProgInstruction::Deposit { amount },
+                    vec![
+                        AccountMeta::new(signer.pubkey(), true),
+                        AccountMeta::new(env.market, false),
+                        AccountMeta::new(portfolio, false),
+                        AccountMeta::new(source, false),
+                        AccountMeta::new(env.vault, false),
+                        AccountMeta::new_readonly(spl_token::ID, false),
+                    ],
+                    &[signer],
+                )
+            }
+            ValueInRoute::TopUpInsurance => {
+                send_common(ProgInstruction::TopUpInsurance { amount })
+            }
+            ValueInRoute::TopUpInsuranceDomain => {
+                send_common(ProgInstruction::TopUpInsuranceDomain { domain: 0, amount })
+            }
+            ValueInRoute::TopUpBackingBucket => {
+                send_common(ProgInstruction::TopUpBackingBucket {
+                    domain: 1,
+                    amount,
+                    expiry_slot: 10_000,
+                })
+            }
+        }
+    }
+
+    for route in [
+        ValueInRoute::Deposit,
+        ValueInRoute::TopUpInsurance,
+        ValueInRoute::TopUpInsuranceDomain,
+        ValueInRoute::TopUpBackingBucket,
+    ] {
+        for slot in [MalformedSlot::Source, MalformedSlot::Vault] {
+            let mut env = V16CuEnv::new();
+            let admin = env.admin.insecure_clone();
+            let owner = Keypair::new();
+            let portfolio = env.create_portfolio(&owner);
+            let signer = match route {
+                ValueInRoute::Deposit => &owner,
+                _ => &admin,
+            };
+            let amount = match route {
+                ValueInRoute::Deposit => 31,
+                ValueInRoute::TopUpInsurance => 37,
+                ValueInRoute::TopUpInsuranceDomain => 41,
+                ValueInRoute::TopUpBackingBucket => 43,
+            };
+            let source = env.token_account_for_mint(env.mint, signer.pubkey(), amount as u64);
+            let malformed_key = match slot {
+                MalformedSlot::Source => source,
+                MalformedSlot::Vault => env.vault,
+            };
+            let good_malformed_slot = env.svm.get_account(&malformed_key).unwrap();
+            env.svm
+                .set_account(
+                    malformed_key,
+                    Account {
+                        data: vec![0u8; TokenAccount::LEN - 1],
+                        ..good_malformed_slot.clone()
+                    },
+                )
+                .unwrap();
+
+            let market_before = env.svm.get_account(&env.market).unwrap();
+            let portfolio_before = env.svm.get_account(&portfolio).unwrap();
+            let source_before = env.svm.get_account(&source).unwrap();
+            let vault_before = env.svm.get_account(&env.vault).unwrap();
+            let label = route.label();
+
+            let rejected = send_value_in(&mut env, route, signer, portfolio, source, amount);
+            assert!(
+                rejected.is_err(),
+                "{label} must reject malformed source/vault before engine credit"
+            );
+            assert_eq!(
+                env.svm.get_account(&env.market).unwrap(),
+                market_before,
+                "{label} malformed-token rejection leaves market accounting unchanged"
+            );
+            assert_eq!(
+                env.svm.get_account(&source).unwrap(),
+                source_before,
+                "{label} malformed-token rejection pulls no source tokens"
+            );
+            assert_eq!(
+                env.svm.get_account(&env.vault).unwrap(),
+                vault_before,
+                "{label} malformed-token rejection credits no vault custody"
+            );
+            if matches!(route, ValueInRoute::Deposit) {
+                assert_eq!(
+                    env.svm.get_account(&portfolio).unwrap(),
+                    portfolio_before,
+                    "malformed-token Deposit rejection leaves portfolio capital unchanged"
+                );
+            }
+
+            env.svm
+                .set_account(malformed_key, good_malformed_slot)
+                .unwrap();
+            let ok = send_value_in(&mut env, route, signer, portfolio, source, amount)
+                .expect("value-in route remains live after malformed-token rejection");
+            assert_cu_within(label, ok, CUSTODY_CU_LIMIT);
+            assert_eq!(env.token_amount(source), 0, "{label} retry pulls source");
+            assert_eq!(
+                env.market_state().1.vault as u64,
+                env.token_amount(env.vault),
+                "{label} retry keeps vault accounting tied to custody"
+            );
+        }
+    }
+}
+
 // LoF sweep - the market/top-up rails also bridge u128 engine accounting to u64 SPL transfers.
 // These are distinct from Deposit/Withdraw: a truncating bridge here could mint insurance budget,
 // domain budget, or backing principal while transferring zero tokens. Drive u64::MAX+1 through all
