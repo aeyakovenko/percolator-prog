@@ -42970,7 +42970,7 @@ fn v16_attack_liquidation_cranker_reward_bounded_by_fee() {
         ProgInstruction::PermissionlessCrank {
             now_slot: 30,
             close_q: POS_SCALE,
-            observations: crank_observations(0),
+            observations: vec![],
         },
         vec![
             AccountMeta::new(co.pubkey(), true),
@@ -79283,7 +79283,7 @@ fn v16_bpf_10m_market_liquidation_reward_high_asset_stays_bounded() {
         ProgInstruction::PermissionlessCrank {
             now_slot: LIQUIDATION_SLOT,
             close_q: POS_SCALE,
-            observations: crank_observations(HIGH_ASSET as u16),
+            observations: vec![],
         },
         vec![
             AccountMeta::new(cranker_owner.pubkey(), true),
