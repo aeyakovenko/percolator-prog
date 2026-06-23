@@ -48991,6 +48991,219 @@ fn v16_attack_permissionless_create_rejects_wrong_mint_fee_source_before_realloc
     );
 }
 
+// LoF/DoS sweep (cron135): permissionless lifecycle activation is not a plain value-in route.
+// It can realloc a new market slot or reactivate a retired slot and credit insurance before the
+// fee transfer. A frozen primary-mint fee source must be rejected before either lifecycle mutation.
+#[test]
+fn v16_attack_permissionless_lifecycle_rejects_frozen_fee_source_before_slot_mutation() {
+    const FEE: u128 = 40;
+    let mut env = V16CuEnv::new();
+    env.update_market_init_fee_policy_with_cu(FEE);
+    env.svm.warp_to_slot(1);
+
+    let creator = Keypair::new();
+    env.ensure_signer_account(creator.pubkey());
+
+    let frozen_append_source = env.token_account(creator.pubkey(), FEE as u64);
+    let mut source_account = env.svm.get_account(&frozen_append_source).unwrap();
+    source_account.data = make_frozen_token_data(env.mint, creator.pubkey(), FEE as u64);
+    env.svm
+        .set_account(frozen_append_source, source_account)
+        .unwrap();
+
+    let append_market_before = env.svm.get_account(&env.market).unwrap();
+    let append_source_before = env.svm.get_account(&frozen_append_source).unwrap();
+    let append_vault_before = env.svm.get_account(&env.vault).unwrap();
+    let (_, append_group_before) = env.market_state();
+    env.svm.expire_blockhash();
+    let rejected_append = env.send(
+        ProgInstruction::UpdateAssetLifecycle {
+            action: percolator_prog::processor::ASSET_ACTION_ACTIVATE,
+            asset_index: 1,
+            now_slot: 1,
+            initial_price: 100,
+            insurance_authority: creator.pubkey().to_bytes(),
+            insurance_operator: creator.pubkey().to_bytes(),
+            backing_bucket_authority: creator.pubkey().to_bytes(),
+            oracle_authority: creator.pubkey().to_bytes(),
+        },
+        vec![
+            AccountMeta::new(creator.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(frozen_append_source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&creator],
+    );
+    assert!(
+        rejected_append.is_err(),
+        "permissionless append must reject a frozen fee source before realloc"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        append_market_before,
+        "frozen-source append must not realloc or install a new slot"
+    );
+    assert_eq!(
+        env.svm.get_account(&frozen_append_source).unwrap(),
+        append_source_before,
+        "frozen-source append must not spend the creator source"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        append_vault_before,
+        "frozen-source append must not move vault custody"
+    );
+    let (_, append_group_after) = env.market_state();
+    assert_eq!(
+        append_group_after.config.max_market_slots,
+        append_group_before.config.max_market_slots
+    );
+    assert_eq!(append_group_after.vault, append_group_before.vault);
+    assert_eq!(append_group_after.insurance, append_group_before.insurance);
+
+    let clean_append_source = env.token_account(creator.pubkey(), FEE as u64);
+    env.svm.expire_blockhash();
+    let accepted_append = env.send(
+        ProgInstruction::UpdateAssetLifecycle {
+            action: percolator_prog::processor::ASSET_ACTION_ACTIVATE,
+            asset_index: 1,
+            now_slot: 1,
+            initial_price: 100,
+            insurance_authority: creator.pubkey().to_bytes(),
+            insurance_operator: creator.pubkey().to_bytes(),
+            backing_bucket_authority: creator.pubkey().to_bytes(),
+            oracle_authority: creator.pubkey().to_bytes(),
+        },
+        vec![
+            AccountMeta::new(creator.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(clean_append_source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&creator],
+    );
+    assert!(
+        accepted_append.is_ok(),
+        "clean permissionless append remains live after frozen-source rejection: {accepted_append:?}"
+    );
+
+    env.svm.warp_to_slot(3);
+    env.update_asset_lifecycle_as_admin_with_cu(
+        percolator_prog::processor::ASSET_ACTION_RETIRE,
+        1,
+        3,
+        0,
+    );
+    let (retired_cfg, retired_group) = env.market_state();
+    assert_eq!(retired_cfg.free_market_slot_count, 1);
+    assert_eq!(
+        retired_group.assets[1].lifecycle,
+        AssetLifecycleV16::Retired
+    );
+
+    let frozen_reuse_source = env.token_account(creator.pubkey(), FEE as u64);
+    let mut source_account = env.svm.get_account(&frozen_reuse_source).unwrap();
+    source_account.data = make_frozen_token_data(env.mint, creator.pubkey(), FEE as u64);
+    env.svm
+        .set_account(frozen_reuse_source, source_account)
+        .unwrap();
+
+    env.svm.warp_to_slot(4);
+    let reuse_market_before = env.svm.get_account(&env.market).unwrap();
+    let reuse_source_before = env.svm.get_account(&frozen_reuse_source).unwrap();
+    let reuse_vault_before = env.svm.get_account(&env.vault).unwrap();
+    env.svm.expire_blockhash();
+    let rejected_reuse = env.send(
+        ProgInstruction::UpdateAssetLifecycle {
+            action: percolator_prog::processor::ASSET_ACTION_ACTIVATE,
+            asset_index: 1,
+            now_slot: 4,
+            initial_price: 250,
+            insurance_authority: creator.pubkey().to_bytes(),
+            insurance_operator: creator.pubkey().to_bytes(),
+            backing_bucket_authority: creator.pubkey().to_bytes(),
+            oracle_authority: creator.pubkey().to_bytes(),
+        },
+        vec![
+            AccountMeta::new(creator.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(frozen_reuse_source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&creator],
+    );
+    assert!(
+        rejected_reuse.is_err(),
+        "permissionless retired-slot reuse must reject a frozen fee source"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        reuse_market_before,
+        "frozen-source reuse must not reactivate the retired slot or consume the counter"
+    );
+    assert_eq!(
+        env.svm.get_account(&frozen_reuse_source).unwrap(),
+        reuse_source_before,
+        "frozen-source reuse must not spend the creator source"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        reuse_vault_before,
+        "frozen-source reuse must not move vault custody"
+    );
+    let (reuse_cfg_after, reuse_group_after) = env.market_state();
+    assert_eq!(reuse_cfg_after.free_market_slot_count, 1);
+    assert_eq!(
+        reuse_group_after.assets[1].lifecycle,
+        AssetLifecycleV16::Retired
+    );
+    assert_eq!(reuse_group_after.vault, retired_group.vault);
+    assert_eq!(reuse_group_after.insurance, retired_group.insurance);
+
+    let clean_reuse_source = env.token_account(creator.pubkey(), FEE as u64);
+    env.svm.expire_blockhash();
+    let accepted_reuse = env.send(
+        ProgInstruction::UpdateAssetLifecycle {
+            action: percolator_prog::processor::ASSET_ACTION_ACTIVATE,
+            asset_index: 1,
+            now_slot: 4,
+            initial_price: 250,
+            insurance_authority: creator.pubkey().to_bytes(),
+            insurance_operator: creator.pubkey().to_bytes(),
+            backing_bucket_authority: creator.pubkey().to_bytes(),
+            oracle_authority: creator.pubkey().to_bytes(),
+        },
+        vec![
+            AccountMeta::new(creator.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(clean_reuse_source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&creator],
+    );
+    assert!(
+        accepted_reuse.is_ok(),
+        "clean retired-slot reuse remains live after frozen-source rejection: {accepted_reuse:?}"
+    );
+    let (reused_cfg, reused_group) = env.market_state();
+    assert_eq!(reused_cfg.free_market_slot_count, 0);
+    assert_eq!(reused_group.assets[1].lifecycle, AssetLifecycleV16::Active);
+    assert_eq!(reused_group.assets[1].effective_price, 250);
+    assert_eq!(env.token_amount(clean_reuse_source), 0);
+    assert_eq!(env.token_amount(env.vault), (FEE * 2) as u64);
+    assert_eq!(reused_group.vault, FEE * 2);
+    assert_eq!(reused_group.insurance, FEE * 2);
+    assert_domain_budget_remaining_total_consistent(
+        &reused_group,
+        "permissionless lifecycle frozen-fee-source control",
+    );
+}
+
 // security.md sweep - permissionless init-fee vault binding (#44/#48): asset activation charges
 // the public creator before growing a new market slot. A funded creator must not be able to route the
 // fee into a non-canonical vault-authority-owned token account and still install a new asset, which
