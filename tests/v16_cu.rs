@@ -17594,6 +17594,111 @@ fn v16_attack_auto_crank_expired_close_uses_authenticated_slot_not_stale_market_
     );
 }
 
+// LoF/DoS sweep (cron135): expired-close recovery is a special early-return branch in the
+// public auto-crank wrapper. It may bump current_slot from the authenticated clock, call the
+// engine's DeclareRecovery path, validate shape, and return before the normal oracle/reward tail.
+// A final-shape error must still propagate as an instruction error and roll back the slot bump,
+// recovery transition, and target account.
+#[test]
+fn v16_attack_auto_crank_expired_close_rejects_invalid_final_shape_atomically() {
+    let mut env = V16CuEnv::new();
+    env.configure_permissionless_resolve_with_cu(5, 5);
+    env.configure_auth_mark_with_cu(0, 100);
+
+    let owner = Keypair::new();
+    let portfolio = env.create_portfolio(&owner);
+    env.deposit(&owner, portfolio, 100);
+    env.seed_cancellable_close_progress(portfolio);
+
+    let (_, group_before_expiry) = env.market_state();
+    assert_eq!(group_before_expiry.mode, MarketModeV16::Live);
+    assert_eq!(
+        group_before_expiry.current_slot, 0,
+        "setup keeps current_slot stale so the branch must use the authenticated clock"
+    );
+    assert!(
+        env.portfolio_state(portfolio)
+            .close_progress
+            .max_close_slot
+            .get()
+            > group_before_expiry.current_slot,
+        "setup starts with a close ledger that only expires under the authenticated slot"
+    );
+
+    env.svm.warp_to_slot(40);
+    env.mutate_market(|_, group| {
+        group.insurance_domain_budget[0] = group.insurance.saturating_add(1);
+    });
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let portfolio_before = env.svm.get_account(&portfolio).unwrap();
+
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 0,
+            close_q: 0,
+            observations: vec![CrankObservationHint {
+                asset_index: u16::MAX,
+                oracle_accounts: u8::MAX,
+            }],
+        },
+        vec![
+            AccountMeta::new(env.payer.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio, false),
+        ],
+        &[],
+    );
+    assert!(
+        rejected.is_err(),
+        "expired-close recovery must reject an invalid final market shape"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "failed expired-close recovery must roll back the authenticated slot bump and recovery transition"
+    );
+    assert_eq!(
+        env.svm.get_account(&portfolio).unwrap(),
+        portfolio_before,
+        "failed expired-close recovery must not mutate the target close ledger"
+    );
+
+    env.mutate_market(|_, group| {
+        group.insurance_domain_budget[0] = 0;
+    });
+    env.svm.expire_blockhash();
+    let cu = env
+        .send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 0,
+                close_q: 0,
+                observations: vec![CrankObservationHint {
+                    asset_index: u16::MAX,
+                    oracle_accounts: u8::MAX,
+                }],
+            },
+            vec![
+                AccountMeta::new(env.payer.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(portfolio, false),
+            ],
+            &[],
+        )
+        .expect("same expired-close recovery remains live after shape repair");
+    assert_cu_within(
+        "PermissionlessCrank expired-close invalid-shape retry",
+        cu,
+        CRANK_CU_LIMIT,
+    );
+    let (_, group_after) = env.market_state();
+    assert_eq!(group_after.mode, MarketModeV16::Recovery);
+    assert_eq!(
+        group_after.recovery_reason,
+        Some(PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress)
+    );
+}
+
 // security.md sweep — cross-margin (#22/#32): one portfolio holds positions on TWO assets.
 // Probe aggregate conservation and per-asset OI balance under shared-capital cross-margin.
 #[test]
