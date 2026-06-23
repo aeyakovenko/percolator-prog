@@ -23754,6 +23754,94 @@ fn v16_attack_cure_deposit_exact_and_atomic() {
     let _ = g_mid;
 }
 
+// LoF/DoS sweep (cron135): CureAndCancelClose stages close-progress cancellation and optional
+// value-in accounting before the SPL transfer. It must still reject an invalid final market shape
+// instead of committing a cured portfolio and real vault transfer over corrupted market accounting.
+#[test]
+fn v16_attack_cure_rejects_invalid_final_market_shape() {
+    let mut env = V16CuEnv::new();
+    let owner = Keypair::new();
+    let portfolio = env.create_portfolio(&owner);
+    env.deposit(&owner, portfolio, 100);
+    env.seed_cancellable_close_progress(portfolio);
+    let source = env.token_account_for_mint(env.mint, owner.pubkey(), 50);
+
+    env.mutate_market(|_, group| {
+        group.insurance_domain_budget[0] = group.insurance.saturating_add(1);
+    });
+    let before_market = env.svm.get_account(&env.market).unwrap();
+    let before_portfolio = env.svm.get_account(&portfolio).unwrap();
+    let before_source = env.svm.get_account(&source).unwrap();
+    let before_vault = env.svm.get_account(&env.vault).unwrap();
+
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::CureAndCancelClose {
+            optional_deposit: 50,
+        },
+        vec![
+            AccountMeta::new(owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio, false),
+            AccountMeta::new(source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&owner],
+    );
+    assert!(
+        rejected.is_err(),
+        "CureAndCancelClose must reject an invalid final market shape"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        before_market,
+        "failed cure must roll back the invalid market shape and staged vault accounting"
+    );
+    assert_eq!(
+        env.svm.get_account(&portfolio).unwrap(),
+        before_portfolio,
+        "failed cure must not cancel close progress or credit capital"
+    );
+    assert_eq!(
+        env.svm.get_account(&source).unwrap(),
+        before_source,
+        "failed cure must not pull optional-deposit tokens"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        before_vault,
+        "failed cure must leave canonical vault custody untouched"
+    );
+
+    env.mutate_market(|_, group| {
+        group.insurance_domain_budget[0] = 0;
+    });
+    env.svm.expire_blockhash();
+    let accepted = env.send(
+        ProgInstruction::CureAndCancelClose {
+            optional_deposit: 50,
+        },
+        vec![
+            AccountMeta::new(owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio, false),
+            AccountMeta::new(source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&owner],
+    );
+    assert!(
+        accepted.is_ok(),
+        "same cure remains live after repairing shape: {accepted:?}"
+    );
+    let cured = env.portfolio_state(portfolio);
+    assert!(close_progress(&cured).canceled);
+    assert_eq!(cured.capital.get(), 150);
+    assert_eq!(env.token_amount(source), 0);
+}
+
 // security.md sweep - CureAndCancelClose vault pinning (#35/#44/#48): the optional-deposit rail
 // credits portfolio capital and market vault accounting while canceling close-progress. It must only
 // fund the canonical vault, not an arbitrary vault-authority-owned fragment.
