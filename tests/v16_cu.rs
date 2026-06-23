@@ -46521,6 +46521,122 @@ fn v16_attack_out_of_order_observation_with_reward_tail_pays_no_reward() {
     );
 }
 
+// LoF/DoS sweep: the observation-only auto-crank carveout still commits oracle/accrual writes, even
+// when the selected account action returns NonProgress because the selected asset's observation is
+// missing. It must therefore run the same final market-shape guard as mutating crank outcomes, or a
+// malformed market aggregate could accept unrelated oracle writes and remain malformed.
+#[test]
+fn v16_attack_observation_only_crank_rejects_invalid_final_market_shape() {
+    const MARK: u64 = 1_000_000;
+    const OPEN_SLOT: u64 = 1;
+    const OBS_SLOT: u64 = 2;
+
+    let mut env = V16CuEnv::new_with_init_params(production_risk_params());
+    env.activate_asset(1, OPEN_SLOT, MARK);
+
+    set_test_clock(&mut env, OPEN_SLOT, 100);
+    let feed0 = [0x38u8; 32];
+    let initial0 = env.set_pyth_price_with_conf(&feed0, MARK as i64, -6, 0, 100);
+    env.try_configure_hybrid_asset_with_conf_filter_cu(
+        0,
+        1,
+        0,
+        [feed0, [0u8; 32], [0u8; 32]],
+        &[initial0],
+        OPEN_SLOT,
+        100,
+        0,
+        0,
+        10,
+        0,
+    )
+    .expect("configure unrelated asset-0 hybrid oracle");
+    env.configure_auth_mark_for_asset_as_admin(1, OPEN_SLOT, MARK);
+
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long = env.create_portfolio(&long_owner);
+    let short = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long, 100_000_000);
+    env.deposit(&short_owner, short, 100_000_000);
+    env.trade_asset_with_cu(
+        1,
+        &long_owner,
+        long,
+        &short_owner,
+        short,
+        POS_SCALE as i128,
+        MARK,
+        0,
+    );
+
+    set_test_clock(&mut env, OBS_SLOT, 101);
+    let fresh0 = env.set_pyth_price_with_conf(&feed0, (MARK + 10_000) as i64, -6, 0, 101);
+    env.mutate_market(|_, group| {
+        group.insurance_domain_budget[0] = group.insurance.saturating_add(1);
+    });
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let short_before = env.svm.get_account(&short).unwrap();
+
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::PermissionlessCrank {
+            now_slot: OBS_SLOT,
+            close_q: 0,
+            observations: crank_observations_with_accounts(0, 1),
+        },
+        vec![
+            AccountMeta::new(env.payer.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(short, false),
+            AccountMeta::new_readonly(fresh0, false),
+        ],
+        &[],
+    );
+    assert!(
+        rejected.is_err(),
+        "observation-only crank must reject an invalid final market shape"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "failed observation-only crank must roll back the unrelated oracle/profile update"
+    );
+    assert_eq!(
+        env.svm.get_account(&short).unwrap(),
+        short_before,
+        "failed observation-only crank must not mutate the target account"
+    );
+
+    env.mutate_market(|_, group| {
+        group.insurance_domain_budget[0] = 0;
+    });
+    env.svm.expire_blockhash();
+    let accepted = env.send(
+        ProgInstruction::PermissionlessCrank {
+            now_slot: OBS_SLOT,
+            close_q: 0,
+            observations: crank_observations_with_accounts(0, 1),
+        },
+        vec![
+            AccountMeta::new(env.payer.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(short, false),
+            AccountMeta::new_readonly(fresh0, false),
+        ],
+        &[],
+    );
+    assert!(
+        accepted.is_ok(),
+        "observation-only crank remains live after shape repair: {accepted:?}"
+    );
+    assert_eq!(
+        env.market_state().1.assets[0].raw_oracle_target_price,
+        MARK + 10_000,
+        "valid retry commits the unrelated observation"
+    );
+}
+
 // LoF/DoS sweep: the out-of-order observation carveout is intentionally limited to
 // close_q==0. With a real liquidation work budget, omitting the engine-selected
 // asset's observation must propagate NonProgress and roll back any unrelated
