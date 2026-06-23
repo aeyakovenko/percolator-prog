@@ -10171,6 +10171,92 @@ fn v16_attack_zero_work_liquidation_does_not_report_successful_noop() {
     )));
 }
 
+// Public auto-crank error propagation: if the engine-selected refresh needs an observation and
+// the keeper supplies none, the wrapper must surface the engine NonProgress error instead of
+// reporting a successful no-op. A later call with the missing observation proves liveness remains.
+#[test]
+fn v16_attack_missing_observation_crank_propagates_nonprogress_error() {
+    let mut env = V16CuEnv::new();
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long_account = env.create_portfolio(&long_owner);
+    let short_account = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long_account, 1_000_000);
+    env.deposit(&short_owner, short_account, 1_000_000);
+    env.configure_auth_mark_with_cu(0, 100);
+    env.trade_with_cu(
+        &long_owner,
+        long_account,
+        &short_owner,
+        short_account,
+        POS_SCALE as i128,
+        100,
+        0,
+    );
+
+    env.svm.warp_to_slot(1);
+    env.push_auth_mark_with_cu(1, 120);
+    env.crank(
+        long_account,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 1,
+            close_q: 0,
+            observations: crank_observations(0),
+        },
+    );
+    let (_, group_after_mark) = env.market_state();
+    assert!(
+        health_cert(&env.portfolio_state(short_account)).cert_oracle_epoch
+            < group_after_mark.oracle_epoch,
+        "mark push must make the target portfolio stale before probing NonProgress"
+    );
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let short_before = env.svm.get_account(&short_account).unwrap();
+    env.svm.expire_blockhash();
+    let missing_observation = env.send(
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 1,
+            close_q: 0,
+            observations: vec![],
+        },
+        vec![
+            AccountMeta::new(env.payer.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(short_account, false),
+        ],
+        &[],
+    );
+    assert!(
+        missing_observation.is_err(),
+        "missing-observation auto-crank must propagate engine NonProgress as an instruction error"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "missing-observation rejection must not mutate market state"
+    );
+    assert_eq!(
+        env.svm.get_account(&short_account).unwrap(),
+        short_before,
+        "missing-observation rejection must not mutate the target portfolio"
+    );
+
+    env.crank(
+        short_account,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 1,
+            close_q: 0,
+            observations: crank_observations(0),
+        },
+    );
+    assert_eq!(
+        health_cert(&env.portfolio_state(short_account)).cert_oracle_epoch,
+        env.market_state().1.oracle_epoch,
+        "same selected refresh remains live once the keeper supplies the required observation"
+    );
+}
+
 #[test]
 fn v16_bpf_tradenocpi_rejects_off_mark_recycle_when_deficit_cannot_settle() {
     let mut env = V16CuEnv::new();
