@@ -55366,6 +55366,70 @@ fn v16_attack_init_portfolio_rejects_when_resolve_matured() {
     env.close_slab_with_cu();
 }
 
+// LoF/DoS sweep: InitPortfolio increments the materialized portfolio count and initializes a user
+// account. An invalid final market shape must reject before those writes can commit.
+#[test]
+fn v16_attack_init_portfolio_rejects_invalid_final_market_shape() {
+    let mut env = V16CuEnv::new();
+    let owner = Keypair::new();
+    env.ensure_signer_account(owner.pubkey());
+    let portfolio = env.program_account(env.portfolio_account_len);
+
+    env.mutate_market(|_, group| {
+        group.insurance_domain_budget[0] = group.insurance.saturating_add(1);
+    });
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let portfolio_before = env.svm.get_account(&portfolio).unwrap();
+
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::InitPortfolio,
+        vec![
+            AccountMeta::new(owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio, false),
+        ],
+        &[&owner],
+    );
+    assert!(
+        rejected.is_err(),
+        "InitPortfolio must reject an invalid final market shape"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "invalid-shape rejection must not increment materialized count"
+    );
+    assert_eq!(
+        env.svm.get_account(&portfolio).unwrap(),
+        portfolio_before,
+        "invalid-shape rejection must not initialize the target portfolio"
+    );
+
+    env.mutate_market(|_, group| {
+        group.insurance_domain_budget[0] = 0;
+    });
+    env.svm.expire_blockhash();
+    let accepted = env.send(
+        ProgInstruction::InitPortfolio,
+        vec![
+            AccountMeta::new(owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio, false),
+        ],
+        &[&owner],
+    );
+    assert!(
+        accepted.is_ok(),
+        "valid InitPortfolio remains live after repairing market shape: {accepted:?}"
+    );
+    assert_eq!(
+        env.market_state().1.materialized_portfolio_count,
+        1,
+        "repaired InitPortfolio materializes the account"
+    );
+}
+
 // security.md sweep - stale InitPortfolio undersized realloc rollback (#5/#44/#48):
 // InitPortfolio is public and safely grows undersized program-owned accounts
 // before it initializes them. Once the stale-resolve window is reached, that
