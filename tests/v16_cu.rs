@@ -86213,6 +86213,250 @@ fn v16_attack_value_topups_over_u64_max_reject_no_truncation() {
     );
 }
 
+// full-interface sweep (cron135): inbound value routes credit engine insurance/backing before
+// advancing optional provider ledgers. Saturated deposit counters must not mint internal credit
+// without a matching SPL transfer, and the same routes must stay live with fresh ledgers.
+#[test]
+fn v16_attack_value_topup_ledger_counter_overflows_roll_back_engine_credit() {
+    let mut insurance_env = V16CuEnv::new();
+    let admin = insurance_env.admin.insecure_clone();
+    let insurance_ledger = insurance_env.insurance_ledger_account();
+    insurance_env.top_up_insurance_with_ledger_with_cu(insurance_ledger, 100);
+
+    let mut insurance_ledger_account = insurance_env.svm.get_account(&insurance_ledger).unwrap();
+    let mut insurance_state = state::read_insurance_ledger(&insurance_ledger_account.data)
+        .expect("initialized insurance ledger");
+    insurance_state.total_deposited_atoms = u128::MAX;
+    state::write_insurance_ledger(&mut insurance_ledger_account.data, &insurance_state)
+        .expect("poison insurance deposit counter");
+    insurance_env
+        .svm
+        .set_account(insurance_ledger, insurance_ledger_account)
+        .unwrap();
+
+    let insurance_source = insurance_env.token_account(admin.pubkey(), 1);
+    let market_before = insurance_env
+        .svm
+        .get_account(&insurance_env.market)
+        .unwrap();
+    let vault_before = insurance_env.svm.get_account(&insurance_env.vault).unwrap();
+    let ledger_before = insurance_env.svm.get_account(&insurance_ledger).unwrap();
+    let source_before = insurance_env.svm.get_account(&insurance_source).unwrap();
+    insurance_env.svm.expire_blockhash();
+    let rejected_insurance = send_tx(
+        &mut insurance_env.svm,
+        insurance_env.program_id,
+        &insurance_env.payer,
+        ProgInstruction::TopUpInsurance { amount: 1 },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(insurance_env.market, false),
+            AccountMeta::new(insurance_source, false),
+            AccountMeta::new(insurance_env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(insurance_ledger, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        rejected_insurance.is_err(),
+        "saturated insurance top-up ledger counter must reject"
+    );
+    assert_eq!(
+        insurance_env
+            .svm
+            .get_account(&insurance_env.market)
+            .unwrap(),
+        market_before,
+        "insurance top-up counter overflow must roll back engine credit"
+    );
+    assert_eq!(
+        insurance_env.svm.get_account(&insurance_env.vault).unwrap(),
+        vault_before,
+        "insurance top-up counter overflow must not move vault custody"
+    );
+    assert_eq!(
+        insurance_env.svm.get_account(&insurance_ledger).unwrap(),
+        ledger_before,
+        "insurance top-up counter overflow must not rewrite the poisoned ledger"
+    );
+    assert_eq!(
+        insurance_env.svm.get_account(&insurance_source).unwrap(),
+        source_before,
+        "insurance top-up counter overflow must not pull source tokens"
+    );
+
+    let fresh_ledger = insurance_env.insurance_ledger_account();
+    insurance_env.top_up_insurance_with_ledger_with_cu(fresh_ledger, 1);
+    assert_eq!(insurance_env.token_amount(insurance_env.vault), 101);
+    let (_, insurance_group) = insurance_env.market_state();
+    assert_eq!(insurance_group.insurance, 101);
+    let fresh_state =
+        state::read_insurance_ledger(&insurance_env.svm.get_account(&fresh_ledger).unwrap().data)
+            .expect("fresh insurance top-up ledger initialized");
+    assert_eq!(fresh_state.total_deposited_atoms, 1);
+    assert_eq!(fresh_state.last_observed_insurance_atoms, 101);
+
+    let mut domain_env = V16CuEnv::new();
+    let admin = domain_env.admin.insecure_clone();
+    let domain_ledger = domain_env.insurance_ledger_account();
+    domain_env.top_up_insurance_domain_with_authority_ledger_and_cu(&admin, domain_ledger, 0, 100);
+
+    let mut domain_ledger_account = domain_env.svm.get_account(&domain_ledger).unwrap();
+    let mut domain_state = state::read_insurance_ledger(&domain_ledger_account.data)
+        .expect("initialized domain insurance ledger");
+    domain_state.total_deposited_atoms = u128::MAX;
+    state::write_insurance_ledger(&mut domain_ledger_account.data, &domain_state)
+        .expect("poison domain insurance deposit counter");
+    domain_env
+        .svm
+        .set_account(domain_ledger, domain_ledger_account)
+        .unwrap();
+
+    let domain_source = domain_env.token_account(admin.pubkey(), 1);
+    let market_before = domain_env.svm.get_account(&domain_env.market).unwrap();
+    let vault_before = domain_env.svm.get_account(&domain_env.vault).unwrap();
+    let ledger_before = domain_env.svm.get_account(&domain_ledger).unwrap();
+    let source_before = domain_env.svm.get_account(&domain_source).unwrap();
+    domain_env.svm.expire_blockhash();
+    let rejected_domain = send_tx(
+        &mut domain_env.svm,
+        domain_env.program_id,
+        &domain_env.payer,
+        ProgInstruction::TopUpInsuranceDomain {
+            domain: 0,
+            amount: 1,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(domain_env.market, false),
+            AccountMeta::new(domain_source, false),
+            AccountMeta::new(domain_env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(domain_ledger, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        rejected_domain.is_err(),
+        "saturated domain-insurance ledger counter must reject"
+    );
+    assert_eq!(
+        domain_env.svm.get_account(&domain_env.market).unwrap(),
+        market_before,
+        "domain-insurance counter overflow must roll back domain credit"
+    );
+    assert_eq!(
+        domain_env.svm.get_account(&domain_env.vault).unwrap(),
+        vault_before,
+        "domain-insurance counter overflow must not move vault custody"
+    );
+    assert_eq!(
+        domain_env.svm.get_account(&domain_ledger).unwrap(),
+        ledger_before,
+        "domain-insurance counter overflow must not rewrite the poisoned ledger"
+    );
+    assert_eq!(
+        domain_env.svm.get_account(&domain_source).unwrap(),
+        source_before,
+        "domain-insurance counter overflow must not pull source tokens"
+    );
+
+    let fresh_ledger = domain_env.insurance_ledger_account();
+    domain_env.top_up_insurance_domain_with_authority_ledger_and_cu(&admin, fresh_ledger, 0, 1);
+    assert_eq!(domain_env.token_amount(domain_env.vault), 101);
+    let (_, domain_group) = domain_env.market_state();
+    assert_eq!(domain_group.insurance, 101);
+    assert_eq!(domain_group.insurance_domain_budget[0], 101);
+    let fresh_state =
+        state::read_insurance_ledger(&domain_env.svm.get_account(&fresh_ledger).unwrap().data)
+            .expect("fresh domain-insurance top-up ledger initialized");
+    assert_eq!(fresh_state.total_deposited_atoms, 1);
+    assert_eq!(fresh_state.last_observed_insurance_atoms, 101);
+
+    let mut backing_env = V16CuEnv::new();
+    let admin = backing_env.admin.insecure_clone();
+    let backing_ledger = backing_env.backing_domain_ledger_account();
+    backing_env.top_up_backing_bucket_with_ledger_with_cu(backing_ledger, 1, 100, 10_000);
+
+    let mut backing_ledger_account = backing_env.svm.get_account(&backing_ledger).unwrap();
+    let mut backing_state = state::read_backing_domain_ledger(&backing_ledger_account.data)
+        .expect("initialized backing ledger");
+    backing_state.total_deposited_atoms = u128::MAX;
+    state::write_backing_domain_ledger(&mut backing_ledger_account.data, &backing_state)
+        .expect("poison backing deposit counter");
+    backing_env
+        .svm
+        .set_account(backing_ledger, backing_ledger_account)
+        .unwrap();
+
+    let backing_source = backing_env.token_account(admin.pubkey(), 1);
+    let market_before = backing_env.svm.get_account(&backing_env.market).unwrap();
+    let vault_before = backing_env.svm.get_account(&backing_env.vault).unwrap();
+    let ledger_before = backing_env.svm.get_account(&backing_ledger).unwrap();
+    let source_before = backing_env.svm.get_account(&backing_source).unwrap();
+    backing_env.svm.expire_blockhash();
+    let rejected_backing = send_tx(
+        &mut backing_env.svm,
+        backing_env.program_id,
+        &backing_env.payer,
+        ProgInstruction::TopUpBackingBucket {
+            domain: 1,
+            amount: 1,
+            expiry_slot: 10_000,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(backing_env.market, false),
+            AccountMeta::new(backing_source, false),
+            AccountMeta::new(backing_env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(backing_ledger, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        rejected_backing.is_err(),
+        "saturated backing top-up ledger counter must reject"
+    );
+    assert_eq!(
+        backing_env.svm.get_account(&backing_env.market).unwrap(),
+        market_before,
+        "backing counter overflow must roll back bucket credit"
+    );
+    assert_eq!(
+        backing_env.svm.get_account(&backing_env.vault).unwrap(),
+        vault_before,
+        "backing counter overflow must not move vault custody"
+    );
+    assert_eq!(
+        backing_env.svm.get_account(&backing_ledger).unwrap(),
+        ledger_before,
+        "backing counter overflow must not rewrite the poisoned ledger"
+    );
+    assert_eq!(
+        backing_env.svm.get_account(&backing_source).unwrap(),
+        source_before,
+        "backing counter overflow must not pull source tokens"
+    );
+
+    let fresh_ledger = backing_env.backing_domain_ledger_account();
+    backing_env.top_up_backing_bucket_with_ledger_with_cu(fresh_ledger, 1, 1, 10_000);
+    assert_eq!(backing_env.token_amount(backing_env.vault), 101);
+    let (_, backing_group) = backing_env.market_state();
+    assert_eq!(backing_group.vault, 101);
+    assert_eq!(
+        backing_group.source_backing_buckets[1].fresh_unliened_backing_num,
+        101 * BOUND_SCALE
+    );
+    let fresh_state = state::read_backing_domain_ledger(
+        &backing_env.svm.get_account(&fresh_ledger).unwrap().data,
+    )
+    .expect("fresh backing top-up ledger initialized");
+    assert_eq!(fresh_state.total_deposited_atoms, 1);
+    assert_eq!(fresh_state.total_principal_atoms, 1);
+}
+
 // LoF sweep - outbound domain withdrawals also bridge u128 engine amounts to u64 SPL transfers, but
 // through the shared domain-withdrawal preflight rather than the user Withdraw handler. Amounts above
 // u64::MAX must reject before debiting insurance, backing principal, backing earnings, or ledgers.
