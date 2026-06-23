@@ -6618,6 +6618,9 @@ pub mod processor {
             }
         }
         if ret.exec_size == 0 {
+            let mut market_data = market_ai.try_borrow_mut_data()?;
+            let (_, group) = state::market_view_mut(&mut market_data)?;
+            group.validate_shape().map_err(map_v16_error)?;
             return Ok(());
         }
         let (_, _, max_market_slots, _) =
