@@ -6589,6 +6589,58 @@ fn v16_bpf_restart_asset_oracle_is_uniform_for_local_asset_admins() {
     );
 }
 
+// LoF/DoS sweep (cron135): shutdown stages an Active->Recovery transition and profile freeze before
+// final shape validation. A malformed market aggregate must abort atomically, leaving the asset
+// active and still shut-downable once the aggregate is repaired.
+#[test]
+fn v16_attack_shutdown_asset_rejects_invalid_final_shape_atomically() {
+    let mut env = V16CuEnv::new();
+    let admin = env.admin.insecure_clone();
+    env.configure_permissionless_resolve_with_cu(100, 5);
+    env.configure_auth_mark_with_cu(0, 100);
+    env.mutate_market(|_, group| {
+        group.insurance_domain_budget[0] = group.insurance.saturating_add(1);
+    });
+    let before_shutdown = env.svm.get_account(&env.market).unwrap();
+    let (_, before_group) = env.market_state();
+    assert_eq!(before_group.assets[0].lifecycle, AssetLifecycleV16::Active);
+    assert!(
+        before_group.insurance_domain_budget[0] > before_group.insurance,
+        "test precondition: final market shape is invalid before shutdown"
+    );
+
+    env.svm.warp_to_slot(2);
+    env.svm.expire_blockhash();
+    let rejected = env.try_shutdown_asset_with_authority(&admin, 0, 2);
+    assert!(
+        rejected.is_err(),
+        "shutdown must reject the invalid final market shape"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        before_shutdown,
+        "failed shutdown must roll back the staged Recovery transition and profile freeze"
+    );
+    assert_eq!(
+        env.market_state().1.assets[0].lifecycle,
+        AssetLifecycleV16::Active,
+        "failed shutdown must not leave the asset in Recovery"
+    );
+
+    env.mutate_market(|_, group| {
+        group.insurance_domain_budget[0] = 0;
+    });
+    env.svm.expire_blockhash();
+    env.try_shutdown_asset_with_authority(&admin, 0, 2)
+        .expect("repairing the aggregate restores shutdown liveness");
+    let (_, repaired_group) = env.market_state();
+    assert_eq!(
+        repaired_group.assets[0].lifecycle,
+        AssetLifecycleV16::Recovery
+    );
+    assert_eq!(repaired_group.assets[0].effective_price, 100);
+}
+
 // security.md sweep - RestartAssetOracle cross-asset admin isolation (#6/#37/#48): restart rewrites an
 // empty RECOVERY asset back to ACTIVE with a fresh market id and price. A key that is a valid admin for
 // asset 1 must not be able to restart asset 0 at an attacker-selected price.
