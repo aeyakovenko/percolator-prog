@@ -17458,12 +17458,14 @@ fn v16_attack_permissionless_settle_b_is_bounded_and_live() {
 
 // Auto-crank liveness: an expired close-progress ledger selects DeclareRecovery, which the
 // engine proves needs no oracle observation. The wrapper must not pre-block that path on a
-// stale price-managed oracle; otherwise the public crank loses the engine's no-DoS guarantee.
+// stale price-managed oracle or a malformed reward-tail-shaped account; otherwise the public
+// crank loses the engine's no-DoS guarantee.
 #[test]
 fn v16_attack_auto_crank_expired_close_recovery_not_blocked_by_stale_oracle() {
     let mut env = V16CuEnv::new();
     env.configure_permissionless_resolve_with_cu(5, 5);
     env.configure_auth_mark_with_cu(0, 100);
+    env.update_liquidation_fee_policy_with_cu(5_000);
 
     let owner = Keypair::new();
     let portfolio = env.create_portfolio(&owner);
