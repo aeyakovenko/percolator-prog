@@ -44100,6 +44100,102 @@ fn v16_attack_crank_target_portfolio_rejects_before_oracle_tail_parse() {
     );
 }
 
+// CU/DoS hardening: the public crank target itself is validated before any
+// hybrid-oracle tail is parsed. Reward-tail stale-layout coverage exercises a
+// later optional account path; this pins the required target preflight.
+#[test]
+fn v16_attack_crank_target_stale_layout_rejects_before_oracle_tail_parse() {
+    let mut env = V16CuEnv::new_with_init_params(production_risk_params());
+    set_test_clock(&mut env, 1, 100);
+    let feed = [0xc8u8; 32];
+    let initial_oracle = env.set_pyth_price_with_conf(&feed, 1_000_000, -6, 0, 100);
+    env.try_configure_hybrid_asset_with_conf_filter_cu(
+        0,
+        1,
+        0,
+        [feed, [0u8; 32], [0u8; 32]],
+        &[initial_oracle],
+        1,
+        100,
+        0,
+        0,
+        10,
+        0,
+    )
+    .expect("configure hybrid oracle");
+
+    let owner = Keypair::new();
+    let portfolio = env.create_portfolio(&owner);
+    let bogus_oracle = env.program_account(8);
+
+    let send = |env: &mut V16CuEnv| {
+        env.svm.expire_blockhash();
+        env.send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 2,
+                close_q: 0,
+                observations: crank_observations(0),
+            },
+            vec![
+                AccountMeta::new(env.payer.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(portfolio, false),
+                AccountMeta::new_readonly(bogus_oracle, false),
+            ],
+            &[],
+        )
+    };
+
+    set_test_clock(&mut env, 2, 101);
+    let fresh_oracle_err = send(&mut env)
+        .expect_err("fresh target portfolio should reach bogus oracle parsing");
+    assert!(
+        !fresh_oracle_err.contains("InvalidAccountData"),
+        "fresh target must not trip stale-layout preflight: {fresh_oracle_err}"
+    );
+
+    let mut target_account = env.svm.get_account(&portfolio).unwrap();
+    let mut target_state = state::read_portfolio(&target_account.data).unwrap();
+    let current_layout = target_state.provenance_header.layout_discriminator.get();
+    assert!(
+        current_layout > 0,
+        "current engine layout discriminator is nonzero"
+    );
+    target_state.provenance_header =
+        percolator::ProvenanceHeaderV16Account::from_runtime(&percolator::ProvenanceHeaderV16 {
+            market_group_id: target_state.provenance_header.market_group_id,
+            portfolio_account_id: target_state.provenance_header.portfolio_account_id,
+            owner: target_state.provenance_header.owner,
+            version: target_state.provenance_header.version.get(),
+            layout_discriminator: current_layout - 1,
+        });
+    state::write_portfolio(&mut target_account.data, &target_state).unwrap();
+    env.svm.set_account(portfolio, target_account).unwrap();
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let target_before = env.svm.get_account(&portfolio).unwrap();
+    let stale_layout_err =
+        send(&mut env).expect_err("stale-layout target must reject before oracle parsing");
+    assert!(
+        stale_layout_err.contains("InvalidAccountData"),
+        "stale target layout should fail in target preflight, got {stale_layout_err}"
+    );
+    assert!(
+        !stale_layout_err.contains("Custom(29)") && !stale_layout_err.contains("IllegalOwner"),
+        "stale target layout must not reach bogus oracle parsing: {stale_layout_err}"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "stale target preflight leaves market bytes unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&portfolio).unwrap(),
+        target_before,
+        "stale target preflight leaves target bytes unchanged"
+    );
+}
+
 // security.md sweep - liquidation cranker reward owner binding (#6/#35/#44): the optional reward
 // portfolio is validated after the crank path has already refreshed oracle/profile state. A same-market
 // reward portfolio owned by a different user must reject transaction-atomically, or any signer could
