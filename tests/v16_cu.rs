@@ -420,6 +420,25 @@ fn make_closable_token_data(
     data
 }
 
+fn make_native_flagged_token_data(mint: Pubkey, owner: Pubkey, amount: u64) -> Vec<u8> {
+    let mut data = vec![0u8; TokenAccount::LEN];
+    TokenAccount::pack(
+        TokenAccount {
+            mint,
+            owner,
+            amount,
+            delegate: COption::None,
+            state: AccountState::Initialized,
+            is_native: COption::Some(0),
+            delegated_amount: 0,
+            close_authority: COption::None,
+        },
+        &mut data,
+    )
+    .unwrap();
+    data
+}
+
 fn make_pyth_data(
     feed_id: &[u8; 32],
     price: i64,
@@ -42450,6 +42469,183 @@ fn v16_attack_withdraw_vault_with_close_authority_rejected() {
         1_000,
         "clean withdraw delivers the funds"
     );
+}
+
+// LoF/DoS sweep: SPL-native token accounts have different runtime semantics from ordinary SPL
+// collateral accounts. The wrapper must reject native-flagged collateral sources and canonical vaults
+// before any engine credit/debit or token CPI can turn lamports/native accounting into market value.
+#[test]
+fn v16_attack_native_flagged_token_accounts_reject_before_value_moves() {
+    let mut deposit_env = V16CuEnv::new();
+    let deposit_owner = Keypair::new();
+    let deposit_portfolio = deposit_env.create_portfolio(&deposit_owner);
+    let source =
+        deposit_env.token_account_for_mint(deposit_env.mint, deposit_owner.pubkey(), 1_000);
+    let mut source_account = deposit_env.svm.get_account(&source).unwrap();
+    source_account.data =
+        make_native_flagged_token_data(deposit_env.mint, deposit_owner.pubkey(), 1_000);
+    deposit_env.svm.set_account(source, source_account).unwrap();
+
+    let market_before = deposit_env.svm.get_account(&deposit_env.market).unwrap();
+    let portfolio_before = deposit_env.svm.get_account(&deposit_portfolio).unwrap();
+    let source_before = deposit_env.svm.get_account(&source).unwrap();
+    let vault_before = deposit_env.svm.get_account(&deposit_env.vault).unwrap();
+    deposit_env.svm.expire_blockhash();
+    let rejected_deposit = deposit_env.send(
+        ProgInstruction::Deposit { amount: 100 },
+        vec![
+            AccountMeta::new(deposit_owner.pubkey(), true),
+            AccountMeta::new(deposit_env.market, false),
+            AccountMeta::new(deposit_portfolio, false),
+            AccountMeta::new(source, false),
+            AccountMeta::new(deposit_env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&deposit_owner],
+    );
+    assert!(
+        rejected_deposit.is_err(),
+        "Deposit must reject a native-flagged source before engine credit"
+    );
+    assert_eq!(
+        deposit_env.svm.get_account(&deposit_env.market).unwrap(),
+        market_before,
+        "native-source Deposit rejection leaves market accounting unchanged"
+    );
+    assert_eq!(
+        deposit_env.svm.get_account(&deposit_portfolio).unwrap(),
+        portfolio_before,
+        "native-source Deposit rejection credits no capital"
+    );
+    assert_eq!(
+        deposit_env.svm.get_account(&source).unwrap(),
+        source_before,
+        "native-source Deposit rejection pulls no tokens"
+    );
+    assert_eq!(
+        deposit_env.svm.get_account(&deposit_env.vault).unwrap(),
+        vault_before,
+        "native-source Deposit rejection leaves vault custody unchanged"
+    );
+
+    let clean_source =
+        deposit_env.token_account_for_mint(deposit_env.mint, deposit_owner.pubkey(), 100);
+    deposit_env.svm.expire_blockhash();
+    let ok_deposit = deposit_env
+        .send(
+            ProgInstruction::Deposit { amount: 100 },
+            vec![
+                AccountMeta::new(deposit_owner.pubkey(), true),
+                AccountMeta::new(deposit_env.market, false),
+                AccountMeta::new(deposit_portfolio, false),
+                AccountMeta::new(clean_source, false),
+                AccountMeta::new(deposit_env.vault, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[&deposit_owner],
+        )
+        .expect("ordinary source Deposit remains live after native-source rejection");
+    assert_cu_within("Deposit native-source retry", ok_deposit, CUSTODY_CU_LIMIT);
+    assert_eq!(
+        deposit_env.portfolio_state(deposit_portfolio).capital.get(),
+        100
+    );
+    assert_eq!(deposit_env.token_amount(deposit_env.vault), 100);
+
+    let mut withdraw_env = V16CuEnv::new();
+    let withdraw_owner = Keypair::new();
+    let withdraw_portfolio = withdraw_env.create_portfolio(&withdraw_owner);
+    withdraw_env.deposit(&withdraw_owner, withdraw_portfolio, 1_000);
+    let dest = withdraw_env.token_account_for_mint(withdraw_env.mint, withdraw_owner.pubkey(), 0);
+    let clean_vault = withdraw_env.svm.get_account(&withdraw_env.vault).unwrap();
+    withdraw_env
+        .svm
+        .set_account(
+            withdraw_env.vault,
+            Account {
+                data: make_native_flagged_token_data(
+                    withdraw_env.mint,
+                    withdraw_env.vault_authority,
+                    1_000,
+                ),
+                ..clean_vault.clone()
+            },
+        )
+        .unwrap();
+
+    let market_before = withdraw_env.svm.get_account(&withdraw_env.market).unwrap();
+    let portfolio_before = withdraw_env.svm.get_account(&withdraw_portfolio).unwrap();
+    let dest_before = withdraw_env.svm.get_account(&dest).unwrap();
+    let vault_before = withdraw_env.svm.get_account(&withdraw_env.vault).unwrap();
+    withdraw_env.svm.expire_blockhash();
+    let rejected_withdraw = withdraw_env.send(
+        ProgInstruction::Withdraw { amount: 100 },
+        vec![
+            AccountMeta::new(withdraw_owner.pubkey(), true),
+            AccountMeta::new(withdraw_env.market, false),
+            AccountMeta::new(withdraw_portfolio, false),
+            AccountMeta::new(dest, false),
+            AccountMeta::new(withdraw_env.vault, false),
+            AccountMeta::new_readonly(withdraw_env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&withdraw_owner],
+    );
+    assert!(
+        rejected_withdraw.is_err(),
+        "Withdraw must reject a native-flagged canonical vault before engine debit"
+    );
+    assert_eq!(
+        withdraw_env.svm.get_account(&withdraw_env.market).unwrap(),
+        market_before,
+        "native-vault Withdraw rejection leaves market accounting unchanged"
+    );
+    assert_eq!(
+        withdraw_env.svm.get_account(&withdraw_portfolio).unwrap(),
+        portfolio_before,
+        "native-vault Withdraw rejection leaves portfolio capital unchanged"
+    );
+    assert_eq!(
+        withdraw_env.svm.get_account(&dest).unwrap(),
+        dest_before,
+        "native-vault Withdraw rejection pays no destination tokens"
+    );
+    assert_eq!(
+        withdraw_env.svm.get_account(&withdraw_env.vault).unwrap(),
+        vault_before,
+        "native-flagged canonical vault remains byte-identical"
+    );
+
+    withdraw_env
+        .svm
+        .set_account(withdraw_env.vault, clean_vault)
+        .unwrap();
+    withdraw_env.svm.expire_blockhash();
+    let ok_withdraw = withdraw_env
+        .send(
+            ProgInstruction::Withdraw { amount: 100 },
+            vec![
+                AccountMeta::new(withdraw_owner.pubkey(), true),
+                AccountMeta::new(withdraw_env.market, false),
+                AccountMeta::new(withdraw_portfolio, false),
+                AccountMeta::new(dest, false),
+                AccountMeta::new(withdraw_env.vault, false),
+                AccountMeta::new_readonly(withdraw_env.vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[&withdraw_owner],
+        )
+        .expect("ordinary vault Withdraw remains live after native-vault rejection");
+    assert_cu_within("Withdraw native-vault retry", ok_withdraw, CUSTODY_CU_LIMIT);
+    assert_eq!(
+        withdraw_env
+            .portfolio_state(withdraw_portfolio)
+            .capital
+            .get(),
+        900
+    );
+    assert_eq!(withdraw_env.token_amount(dest), 100);
+    assert_eq!(withdraw_env.token_amount(withdraw_env.vault), 900);
 }
 
 // security.md sweep — withdraw to a FROZEN dest rejects gracefully (#44 robustness): the dest token

@@ -11858,6 +11858,7 @@ pub mod processor {
         }
         if token.owner != *expected_owner
             || token.state != spl_token::state::AccountState::Initialized
+            || token.is_native.is_some()
         {
             return Err(PercolatorError::InvalidTokenAccount.into());
         }
@@ -11895,11 +11896,13 @@ pub mod processor {
         }
         if dest.owner != *expected_dest_owner
             || dest.state != spl_token::state::AccountState::Initialized
+            || dest.is_native.is_some()
         {
             return Err(PercolatorError::InvalidTokenAccount.into());
         }
         if vault.owner != *expected_vault_owner
             || vault.state != spl_token::state::AccountState::Initialized
+            || vault.is_native.is_some()
             || vault.delegate.is_some()
             || vault.close_authority.is_some()
             // F-VAULT-FRAG: pin to the single canonical vault address (the ATA of the vault_authority
@@ -11933,6 +11936,7 @@ pub mod processor {
         }
         if token.owner != *expected_owner
             || token.state != spl_token::state::AccountState::Initialized
+            || token.is_native.is_some()
             || token.delegate.is_some()
             || token.close_authority.is_some()
             // F-VAULT-FRAG: pin to the single canonical vault address (ATA of vault_authority+mint).
