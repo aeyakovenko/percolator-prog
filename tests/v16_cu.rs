@@ -76821,6 +76821,7 @@ fn v16_attack_cpi_source_domain_shape_variants_reject_before_hostile_matcher_cpi
     #[derive(Clone, Copy)]
     enum SourceDomainPoison {
         NonOccupiedSparseTag,
+        OutOfRangeDomain,
         WrongMarketId,
         ClaimExceedsCredit,
         NonMultipleBacking,
@@ -76857,6 +76858,8 @@ fn v16_attack_cpi_source_domain_shape_variants_reject_before_hostile_matcher_cpi
             &env.svm.get_account(&env.market).unwrap().data,
         )
         .unwrap();
+        let configured_domains =
+            percolator::v16_domain_count_for_market_slots(max_market_slots as u32).unwrap();
         {
             let view = state::portfolio_view_mut_for_market_slots(
                 &mut poisoned_account.data,
@@ -76894,6 +76897,9 @@ fn v16_attack_cpi_source_domain_shape_variants_reject_before_hostile_matcher_cpi
                     source.source_lien_impaired_capital_at_risk_fee_revenue =
                         percolator::V16PodU128::new(0);
                 }
+                SourceDomainPoison::OutOfRangeDomain => {
+                    source.domain = percolator::V16PodU32::new(configured_domains as u32);
+                }
                 SourceDomainPoison::WrongMarketId => {
                     source.source_claim_market_id = percolator::V16PodU64::new(0);
                 }
@@ -76920,11 +76926,19 @@ fn v16_attack_cpi_source_domain_shape_variants_reject_before_hostile_matcher_cpi
                         percolator::V16PodU128::new(1);
                 }
             }
-            assert_eq!(
-                source.domain.get(),
-                domain,
-                "test precondition: forged slot keeps the sparse domain tag"
-            );
+            if matches!(poison, SourceDomainPoison::OutOfRangeDomain) {
+                assert_eq!(
+                    source.domain.get(),
+                    configured_domains as u32,
+                    "test precondition: forged slot points just beyond configured domains"
+                );
+            } else {
+                assert_eq!(
+                    source.domain.get(),
+                    domain,
+                    "test precondition: forged slot keeps the sparse domain tag"
+                );
+            }
         }
         env.svm.set_account(account, poisoned_account).unwrap();
     }
@@ -77019,6 +77033,11 @@ fn v16_attack_cpi_source_domain_shape_variants_reject_before_hostile_matcher_cpi
         (
             "non-occupied-sparse-tag",
             SourceDomainPoison::NonOccupiedSparseTag,
+            true,
+        ),
+        (
+            "out-of-range-domain",
+            SourceDomainPoison::OutOfRangeDomain,
             true,
         ),
         ("wrong-market-id", SourceDomainPoison::WrongMarketId, true),
