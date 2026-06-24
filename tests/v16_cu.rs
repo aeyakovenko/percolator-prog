@@ -56713,6 +56713,164 @@ fn v16_attack_deposit_primary_only_withdraw_either() {
     );
 }
 
+// LoF/DoS sweep (cron135): ordinary Withdraw can pay either primary or secondary collateral.
+// Primary-rail malformed/frozen/native coverage does not exercise the secondary canonical vault or
+// mint namespace. Bad secondary destination/vault account states must reject before engine capital is
+// debited, and the same secondary withdrawal must remain live after the bad account is restored.
+#[test]
+fn v16_attack_secondary_withdraw_rejects_bad_token_accounts_before_debit() {
+    #[derive(Clone, Copy)]
+    enum BadTokenKind {
+        Malformed,
+        Frozen,
+        Native,
+    }
+
+    impl BadTokenKind {
+        fn label(self) -> &'static str {
+            match self {
+                BadTokenKind::Malformed => "malformed",
+                BadTokenKind::Frozen => "frozen",
+                BadTokenKind::Native => "native",
+            }
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    enum SecondarySlot {
+        Dest,
+        Vault,
+    }
+
+    impl SecondarySlot {
+        fn label(self) -> &'static str {
+            match self {
+                SecondarySlot::Dest => "secondary destination",
+                SecondarySlot::Vault => "secondary vault",
+            }
+        }
+    }
+
+    for kind in [BadTokenKind::Malformed, BadTokenKind::Frozen, BadTokenKind::Native] {
+        for slot in [SecondarySlot::Dest, SecondarySlot::Vault] {
+            let mut env = V16CuEnv::new();
+            let secondary = env.create_mint();
+            env.update_base_unit_mints_with_cu(env.mint, secondary);
+            let owner = Keypair::new();
+            let portfolio = env.create_portfolio(&owner);
+            env.deposit(&owner, portfolio, 1_000);
+            let secondary_vault = canonical_vault_ata(env.vault_authority, secondary);
+            env.svm
+                .set_account(
+                    secondary_vault,
+                    Account {
+                        lamports: 1_000_000_000,
+                        data: make_token_data(secondary, env.vault_authority, 1_000),
+                        owner: spl_token::ID,
+                        executable: false,
+                        rent_epoch: 0,
+                    },
+                )
+                .unwrap();
+            let secondary_dest = env.token_account_for_mint(secondary, owner.pubkey(), 0);
+            let (bad_key, token_owner, token_amount) = match slot {
+                SecondarySlot::Dest => (secondary_dest, owner.pubkey(), 0),
+                SecondarySlot::Vault => (secondary_vault, env.vault_authority, 1_000),
+            };
+            let clean_bad_account = env.svm.get_account(&bad_key).unwrap();
+            let bad_data = match kind {
+                BadTokenKind::Malformed => vec![0u8; TokenAccount::LEN - 1],
+                BadTokenKind::Frozen => {
+                    make_frozen_token_data(secondary, token_owner, token_amount)
+                }
+                BadTokenKind::Native => {
+                    make_native_flagged_token_data(secondary, token_owner, token_amount)
+                }
+            };
+            env.svm
+                .set_account(
+                    bad_key,
+                    Account {
+                        data: bad_data,
+                        ..clean_bad_account.clone()
+                    },
+                )
+                .unwrap();
+
+            let market_before = env.svm.get_account(&env.market).unwrap();
+            let portfolio_before = env.svm.get_account(&portfolio).unwrap();
+            let secondary_vault_before = env.svm.get_account(&secondary_vault).unwrap();
+            let secondary_dest_before = env.svm.get_account(&secondary_dest).unwrap();
+
+            env.svm.expire_blockhash();
+            let rejected = env.send(
+                ProgInstruction::Withdraw { amount: 500 },
+                vec![
+                    AccountMeta::new(owner.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(portfolio, false),
+                    AccountMeta::new(secondary_dest, false),
+                    AccountMeta::new(secondary_vault, false),
+                    AccountMeta::new_readonly(env.vault_authority, false),
+                    AccountMeta::new_readonly(spl_token::ID, false),
+                ],
+                &[&owner],
+            );
+            let kind_label = kind.label();
+            let slot_label = slot.label();
+            assert!(
+                rejected.is_err(),
+                "secondary Withdraw must reject a {kind_label} {slot_label} before debit"
+            );
+            assert_eq!(
+                env.svm.get_account(&env.market).unwrap(),
+                market_before,
+                "{kind_label} {slot_label} rejection leaves market accounting unchanged"
+            );
+            assert_eq!(
+                env.svm.get_account(&portfolio).unwrap(),
+                portfolio_before,
+                "{kind_label} {slot_label} rejection leaves portfolio capital unchanged"
+            );
+            assert_eq!(
+                env.svm.get_account(&secondary_vault).unwrap(),
+                secondary_vault_before,
+                "{kind_label} {slot_label} rejection leaves secondary reserve unchanged"
+            );
+            assert_eq!(
+                env.svm.get_account(&secondary_dest).unwrap(),
+                secondary_dest_before,
+                "{kind_label} {slot_label} rejection pays no secondary collateral"
+            );
+
+            env.svm
+                .set_account(bad_key, clean_bad_account)
+                .unwrap();
+            env.svm.expire_blockhash();
+            let ok = env
+                .send(
+                    ProgInstruction::Withdraw { amount: 500 },
+                    vec![
+                        AccountMeta::new(owner.pubkey(), true),
+                        AccountMeta::new(env.market, false),
+                        AccountMeta::new(portfolio, false),
+                        AccountMeta::new(secondary_dest, false),
+                        AccountMeta::new(secondary_vault, false),
+                        AccountMeta::new_readonly(env.vault_authority, false),
+                        AccountMeta::new_readonly(spl_token::ID, false),
+                    ],
+                    &[&owner],
+                )
+                .expect("secondary Withdraw remains live after bad-token rejection");
+            assert_cu_within("secondary Withdraw bad-token retry", ok, CUSTODY_CU_LIMIT);
+            assert_eq!(env.portfolio_state(portfolio).capital.get(), 500);
+            assert_eq!(env.market_state().1.vault, 500);
+            assert_eq!(env.token_amount(secondary_dest), 500);
+            assert_eq!(env.token_amount(secondary_vault), 500);
+        }
+    }
+}
+
 // security.md sweep — dual-mint shared credit (#33/#44): primary and secondary withdrawals spend the
 // same portfolio capital. A user must not withdraw a primary deposit once from the primary vault and
 // then again from a funded secondary reserve.
