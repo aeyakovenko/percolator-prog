@@ -93440,6 +93440,150 @@ fn v16_attack_value_in_routes_reject_malformed_token_accounts_before_credit() {
     }
 }
 
+// LoF/DoS sweep: TopUpInsurance, TopUpInsuranceDomain, and TopUpBackingBucket all stage
+// engine value credit before the SPL transfer. A late engine final-shape rejection must surface as
+// an instruction error and roll back the staged credit without pulling custody.
+#[test]
+fn v16_attack_value_topups_reject_invalid_final_market_shape_before_custody() {
+    #[derive(Clone, Copy)]
+    enum TopupRoute {
+        Insurance,
+        DomainInsurance,
+        BackingBucket,
+    }
+
+    impl TopupRoute {
+        fn label(self) -> &'static str {
+            match self {
+                TopupRoute::Insurance => "TopUpInsurance",
+                TopupRoute::DomainInsurance => "TopUpInsuranceDomain",
+                TopupRoute::BackingBucket => "TopUpBackingBucket",
+            }
+        }
+
+        fn amount(self) -> u128 {
+            match self {
+                TopupRoute::Insurance => 37,
+                TopupRoute::DomainInsurance => 41,
+                TopupRoute::BackingBucket => 43,
+            }
+        }
+    }
+
+    fn send_topup(
+        env: &mut V16CuEnv,
+        route: TopupRoute,
+        admin: &Keypair,
+        source: Pubkey,
+    ) -> Result<u64, String> {
+        let amount = route.amount();
+        let ix = match route {
+            TopupRoute::Insurance => ProgInstruction::TopUpInsurance { amount },
+            TopupRoute::DomainInsurance => {
+                ProgInstruction::TopUpInsuranceDomain { domain: 0, amount }
+            }
+            TopupRoute::BackingBucket => ProgInstruction::TopUpBackingBucket {
+                domain: 1,
+                amount,
+                expiry_slot: 10_000,
+            },
+        };
+        env.svm.expire_blockhash();
+        env.send(
+            ix,
+            vec![
+                AccountMeta::new(admin.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(source, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[admin],
+        )
+    }
+
+    for route in [
+        TopupRoute::Insurance,
+        TopupRoute::DomainInsurance,
+        TopupRoute::BackingBucket,
+    ] {
+        let mut env = V16CuEnv::new();
+        let admin = env.admin.insecure_clone();
+        let amount = route.amount();
+        let source = env.token_account_for_mint(env.mint, admin.pubkey(), amount as u64);
+        let label = route.label();
+
+        env.mutate_market(|_, group| {
+            group.insurance_domain_budget[0] = group.insurance + amount + 1;
+        });
+        let market_before = env.svm.get_account(&env.market).unwrap();
+        let source_before = env.svm.get_account(&source).unwrap();
+        let vault_before = env.svm.get_account(&env.vault).unwrap();
+
+        let rejected = send_topup(&mut env, route, &admin, source);
+        assert!(
+            rejected.is_err(),
+            "{label} must reject a bad final market shape after staging engine credit"
+        );
+        assert_eq!(
+            env.svm.get_account(&env.market).unwrap(),
+            market_before,
+            "{label} final-shape rejection must roll back staged market credit"
+        );
+        assert_eq!(
+            env.svm.get_account(&source).unwrap(),
+            source_before,
+            "{label} final-shape rejection must not pull source tokens"
+        );
+        assert_eq!(
+            env.svm.get_account(&env.vault).unwrap(),
+            vault_before,
+            "{label} final-shape rejection must not credit vault custody"
+        );
+
+        env.mutate_market(|_, group| {
+            group.insurance_domain_budget[0] = group.insurance;
+        });
+        let (_, repaired_group) = env.market_state();
+        let accepted = send_topup(&mut env, route, &admin, source)
+            .unwrap_or_else(|err| panic!("{label} remains live after shape repair: {err}"));
+        assert_cu_within(label, accepted, CUSTODY_CU_LIMIT);
+        assert_eq!(env.token_amount(source), 0, "{label} retry pulls source");
+
+        let (_, after_group) = env.market_state();
+        assert_eq!(
+            after_group.vault - repaired_group.vault,
+            amount,
+            "{label} retry credits exactly the transferred amount"
+        );
+        match route {
+            TopupRoute::Insurance => {
+                assert_eq!(after_group.insurance - repaired_group.insurance, amount);
+            }
+            TopupRoute::DomainInsurance => {
+                assert_eq!(after_group.insurance - repaired_group.insurance, amount);
+                assert_eq!(
+                    after_group.insurance_domain_budget[0]
+                        - repaired_group.insurance_domain_budget[0],
+                    amount
+                );
+            }
+            TopupRoute::BackingBucket => {
+                assert_eq!(
+                    after_group.source_backing_buckets[1].fresh_unliened_backing_num
+                        - repaired_group.source_backing_buckets[1].fresh_unliened_backing_num,
+                    amount * BOUND_SCALE
+                );
+            }
+        }
+        assert_eq!(
+            after_group.vault as u64,
+            env.token_amount(env.vault),
+            "{label} retry keeps engine vault accounting tied to SPL custody"
+        );
+    }
+}
+
 // LoF sweep - the market/top-up rails also bridge u128 engine accounting to u64 SPL transfers.
 // These are distinct from Deposit/Withdraw: a truncating bridge here could mint insurance budget,
 // domain budget, or backing principal while transferring zero tokens. Drive u64::MAX+1 through all
