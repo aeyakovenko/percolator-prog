@@ -17775,6 +17775,29 @@ fn v16_audit_withdraw_after_cure_and_cancel_close() {
         account.capital.get(), 0,
         "a flat, solvent user must be able to withdraw their capital after curing a cancelled close",
     );
+
+    let market_lamports_before = env.svm.get_account(&env.market).unwrap().lamports;
+    let portfolio_lamports_before = env.svm.get_account(&portfolio).unwrap().lamports;
+    let close_cu = env.close_portfolio_with_cu(&owner, portfolio);
+    assert_cu_within(
+        "ClosePortfolio after cured canceled close ledger",
+        close_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    assert_eq!(
+        env.market_state().1.materialized_portfolio_count,
+        0,
+        "the inert canceled close ledger must not keep an empty portfolio materialized",
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap().lamports,
+        market_lamports_before + portfolio_lamports_before,
+        "dematerializing after a cured close sweeps rent to the market slab",
+    );
+    if let Some(closed_account) = env.svm.get_account(&portfolio) {
+        assert_eq!(closed_account.lamports, 0);
+        assert!(closed_account.data.is_empty() || !state::is_initialized(&closed_account.data));
+    }
 }
 
 // Coverage probe (audit, Finding F): the permissionless retired-slot REUSE branch
