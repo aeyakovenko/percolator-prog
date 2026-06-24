@@ -48903,6 +48903,100 @@ fn v16_attack_observation_only_crank_rejects_invalid_final_market_shape() {
     );
 }
 
+// LoF/DoS sweep (cron135): same final-shape boundary as the prior observation-only
+// crank test, but with a zero retained-fee path. The shape guard must not be an
+// accidental side effect of crediting a nonzero fee budget.
+#[test]
+fn v16_attack_observation_only_zero_fee_crank_rejects_invalid_final_market_shape() {
+    const MARK: u64 = 1_000_000;
+    const OPEN_SLOT: u64 = 1;
+    const OBS_SLOT: u64 = 2;
+
+    let mut env = V16CuEnv::new_with_init_params(production_risk_params());
+    env.activate_asset(1, OPEN_SLOT, MARK);
+    env.configure_auth_mark_for_asset_as_admin(1, OPEN_SLOT, MARK);
+
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long = env.create_portfolio(&long_owner);
+    let short = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long, 100_000_000);
+    env.deposit(&short_owner, short, 100_000_000);
+    env.trade_asset_with_cu(
+        1,
+        &long_owner,
+        long,
+        &short_owner,
+        short,
+        POS_SCALE as i128,
+        MARK,
+        0,
+    );
+
+    set_test_clock(&mut env, OBS_SLOT, 101);
+    let before_slot_last = env.market_state().1.assets[0].slot_last;
+    env.mutate_market(|_, group| {
+        group.insurance_domain_budget[0] = group.insurance.saturating_add(1);
+    });
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let short_before = env.svm.get_account(&short).unwrap();
+
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::PermissionlessCrank {
+            now_slot: OBS_SLOT,
+            close_q: 0,
+            observations: crank_observations(0),
+        },
+        vec![
+            AccountMeta::new(env.payer.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(short, false),
+        ],
+        &[],
+    );
+    assert!(
+        rejected.is_err(),
+        "zero-fee observation-only crank must reject an invalid final market shape"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "failed zero-fee observation-only crank rolls back staged asset accrual"
+    );
+    assert_eq!(
+        env.svm.get_account(&short).unwrap(),
+        short_before,
+        "failed zero-fee observation-only crank must not mutate the target account"
+    );
+
+    env.mutate_market(|_, group| {
+        group.insurance_domain_budget[0] = 0;
+    });
+    env.svm.expire_blockhash();
+    let accepted = env.send(
+        ProgInstruction::PermissionlessCrank {
+            now_slot: OBS_SLOT,
+            close_q: 0,
+            observations: crank_observations(0),
+        },
+        vec![
+            AccountMeta::new(env.payer.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(short, false),
+        ],
+        &[],
+    );
+    assert!(
+        accepted.is_ok(),
+        "zero-fee observation-only crank remains live after shape repair: {accepted:?}"
+    );
+    assert!(
+        env.market_state().1.assets[0].slot_last > before_slot_last,
+        "valid retry commits a real zero-fee asset accrual"
+    );
+}
+
 // LoF/DoS sweep: the out-of-order observation carveout is intentionally limited to
 // close_q==0. With a real liquidation work budget, omitting the engine-selected
 // asset's observation must propagate NonProgress and roll back any unrelated
