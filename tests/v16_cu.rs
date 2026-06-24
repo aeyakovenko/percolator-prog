@@ -46360,6 +46360,91 @@ fn v16_attack_insurance_covered_liquidation_does_not_strand_empty_portfolio() {
     );
 }
 
+// security.md sweep — liquidation fee + insurance backstop recoverability (#9/#33/#48): a bankrupt
+// liquidation with liquidation fees enabled must not strand aggregate insurance outside per-domain
+// withdrawal budgets. The engine settles negative PnL from principal before fee charging, so an account
+// that needs insurance cannot also leave an unbudgeted retained liquidation fee in the same public crank.
+#[test]
+fn v16_attack_bankrupt_liquidation_fee_policy_does_not_strand_insurance_budget() {
+    const SHORT_CAP: u128 = 55_000;
+    let mut env = V16CuEnv::new_with_init_params(production_risk_params());
+    env.update_liquidation_fee_policy_with_cu(0); // any retained fee would remain in insurance
+    env.top_up_insurance(1_000_000);
+    env.configure_auth_mark_with_cu(0, 1_000_000);
+    let lo = Keypair::new();
+    let l = env.create_portfolio(&lo);
+    let so = Keypair::new();
+    let s = env.create_portfolio(&so);
+    env.deposit(&lo, l, 100_000_000);
+    env.deposit(&so, s, SHORT_CAP);
+    env.trade_asset_with_cu(0, &lo, l, &so, s, POS_SCALE as i128, 1_000_000, 0);
+
+    let (_, g_seeded) = env.market_state();
+    let seeded_insurance = g_seeded.insurance;
+    let seeded_budget_sum: u128 = g_seeded.insurance_domain_budget.iter().sum();
+    assert_eq!(
+        seeded_budget_sum, seeded_insurance,
+        "seeded insurance starts fully domain-attributed"
+    );
+
+    // Drive the short through bankruptcy: loss is about 70k on a 55k-capital account, so the
+    // liquidation must use the pre-funded insurance backstop with fees enabled on the market.
+    for slot in 1..=40u64 {
+        env.svm.warp_to_slot(slot);
+        let _ = env.push_auth_mark_with_cu(slot, 1_070_000);
+        env.svm.expire_blockhash();
+        let _ = env.send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: slot,
+                close_q: 0,
+                observations: crank_observations(0),
+            },
+            vec![
+                AccountMeta::new(env.payer.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(s, false),
+            ],
+            &[],
+        );
+    }
+    assert_eq!(
+        env.portfolio_state(s).capital.get(),
+        0,
+        "short capital wiped before liquidation (insurance path is non-vacuous)"
+    );
+
+    env.crank(
+        s,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 40,
+            close_q: POS_SCALE,
+            observations: crank_observations(0),
+        },
+    );
+    let (_, g) = env.market_state();
+    let budget_sum: u128 = g.insurance_domain_budget.iter().sum();
+
+    assert!(
+        g.insurance < seeded_insurance,
+        "liquidation consumed insurance under a nonzero fee policy"
+    );
+    assert!(
+        budget_sum >= g.insurance,
+        "all remaining aggregate insurance must stay attributable to withdrawable domain budgets; \
+         insurance={} budget_sum={} gap={}",
+        g.insurance,
+        budget_sum,
+        g.insurance.saturating_sub(budget_sum)
+    );
+    assert_domain_budget_remaining_total_consistent(&g, "bankrupt liquidation fee policy");
+    assert_eq!(
+        g.vault as u64,
+        env.token_amount(env.vault),
+        "accounting == real vault"
+    );
+    assert!(g.vault >= g.c_tot + g.insurance, "senior conservation");
+}
+
 // security.md sweep — repeated partial-liquidation fee stop (#3/#33): the liquidation fee is charged
 // only for an engine-selected liquidation. Attacker/cranker goal: keep resubmitting the same partial
 // close hint after the first liquidation restored health, charging the victim over and over. Protection:
