@@ -147,6 +147,12 @@ fn market_group_header_bytes(data: &[u8]) -> &percolator::MarketGroupV16HeaderAc
     bytemuck::from_bytes(&data[start..end])
 }
 
+fn market_group_header_bytes_mut(data: &mut [u8]) -> &mut percolator::MarketGroupV16HeaderAccount {
+    let start = MARKET_GROUP_OFF;
+    let end = start + core::mem::size_of::<percolator::MarketGroupV16HeaderAccount>();
+    bytemuck::from_bytes_mut(&mut data[start..end])
+}
+
 fn changed_byte_offsets(before: &[u8], after: &[u8]) -> Vec<usize> {
     assert_eq!(before.len(), after.len());
     before
@@ -44577,6 +44583,76 @@ fn v16_attack_market_exceeds_64_assets_position_holds_any_14_legs() {
         g2.vault >= g2.c_tot + g2.insurance,
         "senior conservation across a >64-asset market"
     );
+}
+
+// LoF/DoS sweep: the market's stored asset_slot_capacity is redundant with the account length
+// derived capacity. A corrupted stored capacity must not let a public lifecycle handler mutate or
+// "repair" a malformed slab while deciding whether to realloc.
+#[test]
+fn v16_attack_corrupt_stored_market_capacity_rejects_lifecycle_append_without_mutation() {
+    let mut env = V16CuEnv::new_with_init_params_and_market_capacity(
+        V16CuMarketParams {
+            max_portfolio_assets: 1,
+            maintenance_margin_bps: 10_000,
+            initial_margin_bps: 10_000,
+            max_price_move_bps_per_slot: 10_000,
+            ..V16CuMarketParams::default()
+        },
+        2,
+    );
+    let clean_market = env.svm.get_account(&env.market).unwrap();
+    let admin = env.admin.insecure_clone();
+    assert_eq!(
+        market_group_header_bytes(&clean_market.data)
+            .asset_slot_capacity
+            .get(),
+        2,
+        "test starts with a two-slot market account capacity"
+    );
+
+    let mut corrupt_market = clean_market.clone();
+    market_group_header_bytes_mut(&mut corrupt_market.data).asset_slot_capacity =
+        percolator::V16PodU32::new(0);
+    env.svm.set_account(env.market, corrupt_market).unwrap();
+    let corrupt_before = env.svm.get_account(&env.market).unwrap();
+
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::UpdateAssetLifecycle {
+            action: percolator_prog::processor::ASSET_ACTION_ACTIVATE,
+            asset_index: 1,
+            now_slot: 2,
+            initial_price: 100,
+            insurance_authority: admin.pubkey().to_bytes(),
+            insurance_operator: admin.pubkey().to_bytes(),
+            backing_bucket_authority: admin.pubkey().to_bytes(),
+            oracle_authority: admin.pubkey().to_bytes(),
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        rejected.is_err(),
+        "lifecycle append must reject a corrupt stored asset_slot_capacity"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        corrupt_before,
+        "rejected capacity-mismatch append must not mutate or repair the malformed market"
+    );
+
+    env.svm.set_account(env.market, clean_market).unwrap();
+    env.svm.expire_blockhash();
+    env.activate_asset(1, 2, 100);
+    let (_, group) = env.market_state();
+    assert_eq!(
+        group.config.max_market_slots, 2,
+        "same append remains live once the stored capacity matches account length"
+    );
+    assert_eq!(group.assets[1].lifecycle, AssetLifecycleV16::Active);
 }
 
 // security.md sweep — cross-asset domain-insurance isolation (#22/#32): a permissionless asset is
