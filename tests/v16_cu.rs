@@ -54910,6 +54910,181 @@ fn v16_attack_backing_fee_split_conserves() {
     assert_domain_budget_remaining_total_consistent(&ga, "backing fee insurance share");
 }
 
+// LoF/DoS sweep: backing-domain trade fees are a wrapper-side post-engine mutation. If that fee layer
+// reaches a late market-shape error, the instruction must roll back the already-executed trade, the
+// collateral fee debits, and both market fee sinks; after shape repair the same risk-increasing trade
+// must remain live and charge a real backing fee.
+#[test]
+fn v16_attack_backing_fee_trade_rejects_invalid_final_shape_atomically() {
+    const INITIAL_PRICE: u64 = 100;
+    const ASSET0_SIZE_Q: i128 = 200 * POS_SCALE as i128;
+    const ASSET1_SIZE_Q: i128 = 100 * POS_SCALE as i128;
+    const SAFE_INCREASE_Q: i128 = 20 * POS_SCALE as i128;
+    const DEPOSIT: u128 = 3_130;
+    const WINNING_DOMAIN: usize = 1;
+    const FEE_BPS: u16 = 5_000;
+    const INSURANCE_SHARE_BPS: u16 = 2_500;
+
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(4, 1_000, 1_000, 500);
+    env.svm.warp_to_slot(1);
+    env.configure_auth_mark_for_asset_as_admin(0, 1, INITIAL_PRICE);
+    env.configure_auth_mark_for_asset_as_admin(1, 1, INITIAL_PRICE);
+    env.update_backing_fee_policy_with_cu(WINNING_DOMAIN as u16, FEE_BPS, INSURANCE_SHARE_BPS);
+    env.svm.expire_blockhash();
+    env.configure_auth_mark_for_asset_as_admin(0, 1, INITIAL_PRICE);
+
+    let cross_owner = Keypair::new();
+    let counterparty_owner = Keypair::new();
+    let cross_account = env.create_portfolio(&cross_owner);
+    let counterparty_account = env.create_portfolio(&counterparty_owner);
+    env.deposit(&cross_owner, cross_account, DEPOSIT);
+    env.deposit(&counterparty_owner, counterparty_account, 10_000);
+    env.top_up_backing_bucket(WINNING_DOMAIN as u16, 1_500, 10);
+
+    env.trade_asset_with_cu(
+        0,
+        &cross_owner,
+        cross_account,
+        &counterparty_owner,
+        counterparty_account,
+        ASSET0_SIZE_Q,
+        INITIAL_PRICE,
+        0,
+    );
+    env.trade_asset_with_cu(
+        1,
+        &cross_owner,
+        cross_account,
+        &counterparty_owner,
+        counterparty_account,
+        ASSET1_SIZE_Q,
+        INITIAL_PRICE,
+        0,
+    );
+    env.svm.warp_to_slot(2);
+    env.push_auth_mark_for_asset_as_admin(0, 2, 105);
+    env.push_auth_mark_for_asset_as_admin(1, 2, 95);
+    for (portfolio, asset_index) in [
+        (counterparty_account, 0),
+        (cross_account, 0),
+        (counterparty_account, 1),
+    ] {
+        env.crank(
+            portfolio,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 2,
+                close_q: 0,
+                observations: crank_observations(asset_index),
+            },
+        );
+    }
+    env.force_portfolio_capital_for_benchmark(cross_account, 2_600);
+    assert!(
+        env.portfolio_state(cross_account).pnl.get() > 0,
+        "setup must create source-backed positive PnL"
+    );
+
+    let (_, g0) = env.market_state();
+    let surplus = (g0.source_credit[WINNING_DOMAIN].fresh_reserved_backing_num
+        - g0.source_credit[WINNING_DOMAIN].positive_claim_bound_num)
+        / BOUND_SCALE;
+    if surplus > 0 {
+        let dest = env.token_account(env.admin.pubkey(), 0);
+        env.withdraw_backing_bucket_to_admin_token_with_cu(dest, WINNING_DOMAIN as u16, surplus);
+    }
+    env.top_up_backing_bucket(WINNING_DOMAIN as u16, 50_000, 10);
+    env.deposit(&cross_owner, cross_account, 500);
+    env.deposit(&counterparty_owner, counterparty_account, 500);
+    env.svm.warp_to_slot(3);
+
+    env.mutate_market(|_, group| {
+        group.insurance_domain_budget[0] = group.insurance + 1_000_000;
+    });
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let cross_before = env.svm.get_account(&cross_account).unwrap();
+    let counterparty_before = env.svm.get_account(&counterparty_account).unwrap();
+
+    let rejected = env.try_trade_asset_with_cu(
+        1,
+        &cross_owner,
+        cross_account,
+        &counterparty_owner,
+        counterparty_account,
+        SAFE_INCREASE_Q,
+        95,
+        0,
+    );
+    assert!(
+        rejected.is_err(),
+        "backing-fee TradeNoCpi must reject the invalid final market shape"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "backing-fee final-shape rejection must roll back market trade and fee sinks"
+    );
+    assert_eq!(
+        env.svm.get_account(&cross_account).unwrap(),
+        cross_before,
+        "backing-fee final-shape rejection must roll back the fee-paying account"
+    );
+    assert_eq!(
+        env.svm.get_account(&counterparty_account).unwrap(),
+        counterparty_before,
+        "backing-fee final-shape rejection must roll back the counterparty"
+    );
+
+    env.mutate_market(|_, group| {
+        group.insurance_domain_budget[0] = group.insurance;
+    });
+    let (_, before_retry) = env.market_state();
+    let provider_before =
+        before_retry.source_backing_buckets[WINNING_DOMAIN].utilization_fee_earnings;
+    let insurance_before = before_retry.insurance;
+    let lien_before: u128 = env
+        .portfolio_state(cross_account)
+        .source_domains
+        .iter()
+        .map(|slot| slot.source_lien_counterparty_backing_num.get())
+        .sum();
+
+    env.svm.expire_blockhash();
+    let accepted = env.try_trade_asset_with_cu(
+        1,
+        &cross_owner,
+        cross_account,
+        &counterparty_owner,
+        counterparty_account,
+        SAFE_INCREASE_Q,
+        95,
+        0,
+    );
+    assert!(
+        accepted.is_ok(),
+        "backing-fee TradeNoCpi remains live after shape repair: {accepted:?}"
+    );
+    let (_, after_retry) = env.market_state();
+    let provider_delta =
+        after_retry.source_backing_buckets[WINNING_DOMAIN].utilization_fee_earnings
+            - provider_before;
+    let insurance_delta = after_retry.insurance - insurance_before;
+    let lien_after: u128 = env
+        .portfolio_state(cross_account)
+        .source_domains
+        .iter()
+        .map(|slot| slot.source_lien_counterparty_backing_num.get())
+        .sum();
+    assert!(
+        lien_after > lien_before,
+        "retry must grow the source-backed lien non-vacuously"
+    );
+    assert!(
+        provider_delta + insurance_delta > 0,
+        "retry must charge a real backing-domain fee"
+    );
+    assert_domain_budget_remaining_total_consistent(&after_retry, "backing fee retry");
+}
+
 // security.md sweep — permissionless asset-create fee gate (#5 / README L52): when the configured
 // permissionless market-init fee is ZERO, asset creation is NOT permissionless — only the market-wide
 // asset authority may append a new asset; a stranger is rejected with Unauthorized.
