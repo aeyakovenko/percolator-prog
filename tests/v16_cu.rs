@@ -53762,6 +53762,168 @@ fn v16_attack_per_asset_admin_rotates_keys_isolated_and_burnable() {
     assert_eq!(prof(&env, 0).asset_admin, [0u8; 32], "asset-0 admin burned");
 }
 
+// LoF/DoS sweep: burning a permissionless asset's local admin must not strand users. Once the
+// local admin is zeroed, the creator can no longer manage the asset, but marketauth still has a
+// terminal wind-down path and the force-close timeout still rolls back atomically before maturity.
+#[test]
+fn v16_attack_burned_permissionless_asset_admin_does_not_block_marketauth_wind_down() {
+    const DELAY: u64 = 5;
+    const SHUT: u64 = 10;
+    let mut env = V16CuEnv::new();
+    let marketauth = env.admin.insecure_clone();
+    let creator = Keypair::new();
+    let cranker = Keypair::new();
+    env.configure_permissionless_resolve_with_cu(100, DELAY);
+    env.update_market_init_fee_policy_with_cu(10);
+
+    env.activate_permissionless_asset_with_fee(
+        &creator,
+        1,
+        1,
+        100,
+        creator.pubkey(),
+        creator.pubkey(),
+        creator.pubkey(),
+        creator.pubkey(),
+        10,
+    );
+    let prof = |env: &V16CuEnv| {
+        state::read_asset_oracle_profile(&env.svm.get_account(&env.market).unwrap().data, 1)
+            .unwrap()
+    };
+    assert_eq!(
+        prof(&env).asset_admin,
+        creator.pubkey().to_bytes(),
+        "permissionless asset admin starts as the creator"
+    );
+
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long_account = env.create_portfolio(&long_owner);
+    let short_account = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long_account, 1_000_000);
+    env.deposit(&short_owner, short_account, 1_000_000);
+    env.trade_asset_with_cu(
+        1,
+        &long_owner,
+        long_account,
+        &short_owner,
+        short_account,
+        POS_SCALE as i128,
+        100,
+        0,
+    );
+    assert_eq!(
+        env.market_state().1.assets[1].oi_eff_long_q,
+        POS_SCALE,
+        "open interest makes the wind-down path non-vacuous"
+    );
+
+    env.try_update_per_asset_authority_with_cu(
+        &creator,
+        None,
+        1,
+        processor::ASSET_AUTH_ADMIN,
+        [0u8; 32],
+    )
+    .expect("creator can burn its local asset admin");
+    assert_eq!(
+        prof(&env).asset_admin,
+        [0u8; 32],
+        "asset admin is irreversibly burned before shutdown"
+    );
+
+    env.svm.warp_to_slot(SHUT);
+    let market_before_creator_shutdown = env.svm.get_account(&env.market).unwrap();
+    let creator_shutdown = env.try_shutdown_asset_with_authority(&creator, 1, SHUT);
+    assert!(
+        creator_shutdown.is_err(),
+        "burned creator key is no longer authorized to shut down the asset"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before_creator_shutdown,
+        "rejected burned-admin shutdown leaves market state unchanged"
+    );
+
+    env.try_shutdown_asset_with_authority(&marketauth, 1, SHUT)
+        .expect("marketauth can still wind down an admin-free permissionless asset");
+    assert_eq!(
+        env.market_state().1.assets[1].lifecycle,
+        AssetLifecycleV16::Recovery,
+        "asset enters Recovery under marketauth despite burned local admin"
+    );
+
+    env.svm.warp_to_slot(SHUT + DELAY - 1);
+    let market_before_early_close = env.svm.get_account(&env.market).unwrap();
+    let long_before_early_close = env.svm.get_account(&long_account).unwrap();
+    let short_before_early_close = env.svm.get_account(&short_account).unwrap();
+    let early = env.try_force_close_abandoned_asset_with_cu(
+        &cranker,
+        long_account,
+        short_account,
+        1,
+        SHUT + DELAY - 1,
+        POS_SCALE,
+    );
+    assert!(
+        early.is_err(),
+        "force-close must not bypass the timeout just because the admin was burned"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before_early_close,
+        "early force-close leaves market byte-identical"
+    );
+    assert_eq!(
+        env.svm.get_account(&long_account).unwrap(),
+        long_before_early_close,
+        "early force-close leaves long account byte-identical"
+    );
+    assert_eq!(
+        env.svm.get_account(&short_account).unwrap(),
+        short_before_early_close,
+        "early force-close leaves short account byte-identical"
+    );
+
+    env.svm.warp_to_slot(SHUT + DELAY + 1);
+    let close_cu = env
+        .try_force_close_abandoned_asset_with_cu(
+            &cranker,
+            long_account,
+            short_account,
+            1,
+            SHUT + DELAY + 1,
+            POS_SCALE,
+        )
+        .expect("permissionless force-close succeeds after the timeout");
+    assert_cu_within(
+        "burned-admin permissionless asset force-close",
+        close_cu,
+        CRANK_CU_LIMIT,
+    );
+    assert!(!has_active_leg_for_asset(
+        &env.portfolio_state(long_account),
+        1
+    ));
+    assert!(!has_active_leg_for_asset(
+        &env.portfolio_state(short_account),
+        1
+    ));
+    let group = env.market_state().1;
+    assert_eq!(group.assets[1].oi_eff_long_q, 0);
+    assert_eq!(group.assets[1].oi_eff_short_q, 0);
+    assert!(
+        group.vault >= group.c_tot + group.insurance,
+        "senior conservation across burned-admin wind-down"
+    );
+    assert_eq!(
+        group.vault as u64,
+        env.token_amount(env.vault),
+        "engine vault accounting matches the token vault"
+    );
+}
+
 // security.md sweep — zero required authority anti-brick (#6/#30/#48): activation rejects zero domain
 // authorities because they can strand domain funds or oracle liveness during terminal wind-down.
 // UpdateAssetAuthority must preserve that invariant too: an admin/operator cannot burn the
