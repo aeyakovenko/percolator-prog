@@ -43313,6 +43313,86 @@ fn v16_attack_nocpi_extreme_price_caps_ewma_move_without_dos() {
     }
 }
 
+fn assert_no_cpi_zero_notional_trade_cannot_move_ewma(path: NoCpiReportedPricePath) {
+    const MARK: u64 = 100;
+    const TRADE_SLOT: u64 = 5;
+    const RAW_UNIT_Q: i128 = 1;
+    let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+        initial_price: MARK,
+        h_max: 20,
+        max_trading_fee_bps: 10_000,
+        max_price_move_bps_per_slot: 500,
+        max_accrual_dt_slots: 20,
+        min_funding_lifetime_slots: 20,
+        ..V16CuMarketParams::default()
+    });
+    env.svm.warp_to_slot(1);
+    env.configure_ewma_mark_with_cu(1, MARK, 1, 0);
+    env.svm.warp_to_slot(TRADE_SLOT);
+    let (owner_a, account_a, owner_b, account_b) =
+        funded_no_cpi_reported_price_pair(&mut env, 3_000_000_000);
+    let before = env.market_state().1;
+    let cfg_before = env.market_state().0;
+
+    env.svm.expire_blockhash();
+    let trade = try_no_cpi_reported_price_trade_with_cu(
+        &mut env,
+        path,
+        &owner_a,
+        account_a,
+        &owner_b,
+        account_b,
+        RAW_UNIT_Q,
+        percolator::MAX_ORACLE_PRICE,
+        0,
+    );
+    assert!(
+        trade.is_ok(),
+        "{path:?}: zero-notional raw-unit trade must remain live: {trade:?}"
+    );
+    let (cfg_after, group_after) = env.market_state();
+    assert_eq!(
+        group_after.assets[0].oi_eff_long_q,
+        before.assets[0].oi_eff_long_q + RAW_UNIT_Q as u128,
+        "{path:?}: raw-unit long OI opened non-vacuously"
+    );
+    assert_eq!(
+        group_after.assets[0].oi_eff_short_q,
+        before.assets[0].oi_eff_short_q + RAW_UNIT_Q as u128,
+        "{path:?}: raw-unit short OI opened non-vacuously"
+    );
+    assert_eq!(
+        group_after.insurance, before.insurance,
+        "{path:?}: zero-notional trade must not invent a fee debit"
+    );
+    assert_eq!(
+        cfg_after.mark_ewma_e6, cfg_before.mark_ewma_e6,
+        "{path:?}: zero-notional trade must not move EWMA for free"
+    );
+    assert_eq!(
+        cfg_after.mark_ewma_last_slot, cfg_before.mark_ewma_last_slot,
+        "{path:?}: free zero-notional trade must not advance the EWMA timestamp"
+    );
+    assert_eq!(
+        group_after.vault,
+        group_after.c_tot + group_after.insurance,
+        "{path:?}: conservation holds after zero-notional raw-unit trade"
+    );
+}
+
+// Low-priced markets make a one-raw-unit position smaller than one quote atom:
+// size_q * accepted_price / POS_SCALE == 0. Those trades may be live, but they
+// must not move trade-driven EWMA state without any fee basis.
+#[test]
+fn v16_attack_nocpi_zero_notional_trade_does_not_move_ewma_for_free() {
+    for path in [
+        NoCpiReportedPricePath::Single,
+        NoCpiReportedPricePath::Batch,
+    ] {
+        assert_no_cpi_zero_notional_trade_cannot_move_ewma(path);
+    }
+}
+
 // security.md sweep — ADL deleverage precision/conservation (#9/#22/#33): when a bankrupt side is
 // partially liquidated, the engine auto-deleverages the WINNING (opposite) side by scaling its a-factor
 // by oi_after/oi_before (percolator/src/v16.rs:9834). Attacker goal: have the winner keep its full claim
@@ -81614,6 +81694,61 @@ fn trade_driven_mark_cpi_env_with_fees(
     env
 }
 
+fn trade_driven_mark_low_price_cpi_env(
+    mode: TradeDrivenMarkMode,
+    asset_index: u16,
+    mark: u64,
+) -> V16CuEnv {
+    let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+        max_portfolio_assets: 2,
+        initial_price: mark,
+        h_max: 20,
+        max_trading_fee_bps: 10_000,
+        max_price_move_bps_per_slot: 500,
+        max_accrual_dt_slots: 20,
+        min_funding_lifetime_slots: 20,
+        ..V16CuMarketParams::default()
+    });
+    match mode {
+        TradeDrivenMarkMode::EwmaMark => {
+            env.svm.warp_to_slot(1);
+            env.configure_ewma_mark_for_asset_as_admin(asset_index, 1, mark, 1, 0);
+            env.svm.warp_to_slot(5);
+        }
+        TradeDrivenMarkMode::HybridAfterHours => {
+            set_test_clock(&mut env, 1, 100);
+            let feed = [0xd5u8; 32];
+            let pyth = env.set_pyth_price(&feed, mark as i64, -6, 100);
+            env.try_configure_hybrid_asset_with_conf_filter_cu(
+                asset_index,
+                1,
+                0,
+                [feed, [0u8; 32], [0u8; 32]],
+                &[pyth],
+                1,
+                100,
+                0,
+                0,
+                1,
+                0,
+            )
+            .expect("configure low-price hybrid oracle for CPI mark test");
+            set_test_clock(&mut env, 5, 104);
+        }
+    }
+    let profile = trade_driven_mark_profile(&env, asset_index);
+    assert_eq!(
+        profile.mark_ewma_e6, mark,
+        "{mode:?}: low-price setup mark should start at mark"
+    );
+    assert_eq!(
+        env.market_state().1.assets[asset_index as usize].effective_price,
+        mark,
+        "{mode:?}: low-price setup effective price should start at mark"
+    );
+    env
+}
+
 #[allow(clippy::too_many_arguments)]
 fn try_cpi_spread_trade_with_cu(
     env: &mut V16CuEnv,
@@ -82346,6 +82481,87 @@ fn v16_attack_cpi_saturated_base_fee_does_not_dos_or_move_marks_for_free() {
     ] {
         for path in [CpiReportedPricePath::Single, CpiReportedPricePath::Batch] {
             assert_cpi_saturated_base_fee_keeps_trade_live_without_free_mark_move(mode, path);
+        }
+    }
+}
+
+fn assert_cpi_zero_notional_fill_cannot_move_trade_driven_mark(
+    mode: TradeDrivenMarkMode,
+    path: CpiReportedPricePath,
+) {
+    const ASSET_INDEX: u16 = 1;
+    const MARK: u64 = 100;
+    const RAW_UNIT_Q: i128 = 1;
+    const SPREAD_BPS: u32 = 9_000;
+
+    let mut env = trade_driven_mark_low_price_cpi_env(mode, ASSET_INDEX, MARK);
+    let taker = Keypair::new();
+    let taker_account = env.create_portfolio(&taker);
+    let lp = Keypair::new();
+    let lp_account = env.create_portfolio(&lp);
+    env.deposit(&taker, taker_account, 3_000_000_000);
+    env.deposit(&lp, lp_account, 3_000_000_000);
+    let before = env.market_state().1;
+    let before_profile = trade_driven_mark_profile(&env, ASSET_INDEX);
+
+    let fill = try_cpi_spread_trade_with_cu(
+        &mut env,
+        path,
+        &taker,
+        taker_account,
+        &lp,
+        lp_account,
+        ASSET_INDEX,
+        RAW_UNIT_Q,
+        0,
+        SPREAD_BPS,
+        SPREAD_BPS,
+    );
+    assert!(
+        fill.is_ok(),
+        "{mode:?} {path:?}: zero-notional CPI raw-unit fill must remain live: {fill:?}"
+    );
+    let after_profile = trade_driven_mark_profile(&env, ASSET_INDEX);
+    let after = env.market_state().1;
+    assert_eq!(
+        after.assets[ASSET_INDEX as usize].oi_eff_long_q,
+        before.assets[ASSET_INDEX as usize].oi_eff_long_q + RAW_UNIT_Q as u128,
+        "{mode:?} {path:?}: raw-unit CPI fill opened long OI"
+    );
+    assert_eq!(
+        after.assets[ASSET_INDEX as usize].oi_eff_short_q,
+        before.assets[ASSET_INDEX as usize].oi_eff_short_q + RAW_UNIT_Q as u128,
+        "{mode:?} {path:?}: raw-unit CPI fill opened short OI"
+    );
+    assert_eq!(
+        after.insurance, before.insurance,
+        "{mode:?} {path:?}: zero-notional CPI fill must not invent a fee debit"
+    );
+    assert_eq!(
+        after_profile.mark_ewma_e6, before_profile.mark_ewma_e6,
+        "{mode:?} {path:?}: zero-notional CPI fill must not move mark state for free"
+    );
+    assert_eq!(
+        after_profile.mark_ewma_last_slot, before_profile.mark_ewma_last_slot,
+        "{mode:?} {path:?}: zero-notional CPI fill must not advance mark timestamp"
+    );
+    assert_eq!(
+        after.vault,
+        after.c_tot + after.insurance,
+        "{mode:?} {path:?}: conservation holds after zero-notional CPI fill"
+    );
+}
+
+// CPI parity for the low-notional boundary: if a matcher returns an off-mark fill whose accepted
+// notional floors to zero, the fill can still land but cannot mutate EWMA/hybrid mark state for free.
+#[test]
+fn v16_attack_cpi_zero_notional_fill_does_not_move_trade_driven_mark_for_free() {
+    for mode in [
+        TradeDrivenMarkMode::EwmaMark,
+        TradeDrivenMarkMode::HybridAfterHours,
+    ] {
+        for path in [CpiReportedPricePath::Single, CpiReportedPricePath::Batch] {
+            assert_cpi_zero_notional_fill_cannot_move_trade_driven_mark(mode, path);
         }
     }
 }
