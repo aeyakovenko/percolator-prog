@@ -85308,6 +85308,195 @@ fn v16_attack_batch_tradecpi_required_matcher_tail_aliases_reject_before_cpi() {
     );
 }
 
+// full-interface/CPI sweep: the matcher context is a required writable account, not a benign tail.
+// If it is passed readonly, TradeCpi/BatchTradeCpi must reject before bumping the LP request sequence
+// or reaching the external matcher; a writable retry must remain live.
+#[test]
+fn v16_attack_tradecpi_readonly_matcher_context_rejects_before_req_id_bump() {
+    #[derive(Clone, Copy)]
+    enum CpiRoute {
+        Single,
+        Batch,
+    }
+
+    for route in [CpiRoute::Single, CpiRoute::Batch] {
+        let mut env = V16CuEnv::new_with_market_params_and_price_move(2, 1_000, 1_000, 500);
+        env.configure_auth_mark_for_asset_as_admin(1, 1, 100);
+        let matcher_program = Pubkey::new_unique();
+        let matcher_bytes =
+            std::fs::read(auth_matcher_program_path()).expect("read auth matcher BPF");
+        env.svm.add_program(matcher_program, &matcher_bytes);
+        let taker = Keypair::new();
+        let lp = Keypair::new();
+        let taker_account = env.create_portfolio(&taker);
+        let lp_account = env.create_portfolio(&lp);
+        env.deposit(&taker, taker_account, 3_000_000);
+        env.deposit(&lp, lp_account, 3_000_000);
+        let (ctx, delegate, _) = env.init_auth_matcher_context(matcher_program, &lp, lp_account);
+        assert_eq!(
+            env.portfolio_matcher_config(lp_account).matcher_req_seq,
+            0,
+            "matcher req_id starts at zero"
+        );
+
+        let market_before = env.svm.get_account(&env.market).unwrap();
+        let taker_before = env.svm.get_account(&taker_account).unwrap();
+        let lp_before = env.svm.get_account(&lp_account).unwrap();
+        let ctx_before = env.svm.get_account(&ctx).unwrap();
+
+        env.svm.expire_blockhash();
+        let rejected = match route {
+            CpiRoute::Single => env.send(
+                ProgInstruction::TradeCpi {
+                    asset_index: 0,
+                    size_q: (5 * POS_SCALE) as i128,
+                    fee_bps: 100,
+                    limit_price: 0,
+                },
+                vec![
+                    AccountMeta::new(taker.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(taker_account, false),
+                    AccountMeta::new(lp_account, false),
+                    AccountMeta::new_readonly(matcher_program, false),
+                    AccountMeta::new_readonly(ctx, false),
+                    AccountMeta::new_readonly(delegate, false),
+                ],
+                &[&taker],
+            ),
+            CpiRoute::Batch => env.send(
+                ProgInstruction::BatchTradeCpi {
+                    legs: vec![
+                        BatchTradeCpiLeg {
+                            asset_index: 0,
+                            size_q: (5 * POS_SCALE) as i128,
+                            fee_bps: 100,
+                            limit_price: 0,
+                        },
+                        BatchTradeCpiLeg {
+                            asset_index: 1,
+                            size_q: -(5 * POS_SCALE as i128),
+                            fee_bps: 100,
+                            limit_price: 0,
+                        },
+                    ],
+                },
+                vec![
+                    AccountMeta::new(taker.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(taker_account, false),
+                    AccountMeta::new(lp_account, false),
+                    AccountMeta::new_readonly(matcher_program, false),
+                    AccountMeta::new_readonly(ctx, false),
+                    AccountMeta::new_readonly(delegate, false),
+                ],
+                &[&taker],
+            ),
+        };
+        assert!(
+            rejected.is_err(),
+            "readonly matcher context must reject before matcher CPI"
+        );
+        assert_eq!(
+            env.svm.get_account(&env.market).unwrap(),
+            market_before,
+            "readonly matcher context must not mutate market state"
+        );
+        assert_eq!(
+            env.svm.get_account(&taker_account).unwrap(),
+            taker_before,
+            "readonly matcher context must not mutate taker state"
+        );
+        assert_eq!(
+            env.svm.get_account(&lp_account).unwrap(),
+            lp_before,
+            "readonly matcher context must not bump LP matcher req_id"
+        );
+        assert_eq!(
+            env.svm.get_account(&ctx).unwrap(),
+            ctx_before,
+            "readonly matcher context must not be written by the external matcher"
+        );
+        assert_eq!(
+            env.portfolio_matcher_config(lp_account).matcher_req_seq,
+            0,
+            "failed readonly-context CPI leaves req_id unchanged"
+        );
+
+        env.svm.expire_blockhash();
+        let accepted = match route {
+            CpiRoute::Single => env.send(
+                ProgInstruction::TradeCpi {
+                    asset_index: 0,
+                    size_q: (5 * POS_SCALE) as i128,
+                    fee_bps: 100,
+                    limit_price: 0,
+                },
+                vec![
+                    AccountMeta::new(taker.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(taker_account, false),
+                    AccountMeta::new(lp_account, false),
+                    AccountMeta::new_readonly(matcher_program, false),
+                    AccountMeta::new(ctx, false),
+                    AccountMeta::new_readonly(delegate, false),
+                ],
+                &[&taker],
+            ),
+            CpiRoute::Batch => env.send(
+                ProgInstruction::BatchTradeCpi {
+                    legs: vec![
+                        BatchTradeCpiLeg {
+                            asset_index: 0,
+                            size_q: (5 * POS_SCALE) as i128,
+                            fee_bps: 100,
+                            limit_price: 0,
+                        },
+                        BatchTradeCpiLeg {
+                            asset_index: 1,
+                            size_q: -(5 * POS_SCALE as i128),
+                            fee_bps: 100,
+                            limit_price: 0,
+                        },
+                    ],
+                },
+                vec![
+                    AccountMeta::new(taker.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(taker_account, false),
+                    AccountMeta::new(lp_account, false),
+                    AccountMeta::new_readonly(matcher_program, false),
+                    AccountMeta::new(ctx, false),
+                    AccountMeta::new_readonly(delegate, false),
+                ],
+                &[&taker],
+            ),
+        }
+        .expect("writable matcher context retry must remain live");
+        let label = match route {
+            CpiRoute::Single => "TradeCpi readonly matcher context retry",
+            CpiRoute::Batch => "BatchTradeCpi readonly matcher context retry",
+        };
+        assert_cu_within(label, accepted, MULTI_ASSET_OPEN_TRADE_CU_LIMIT);
+        assert_eq!(
+            env.portfolio_matcher_config(lp_account).matcher_req_seq,
+            1,
+            "successful retry advances the LP matcher req_id exactly once"
+        );
+        let taker_after = env.portfolio_state(taker_account);
+        assert!(
+            has_active_leg_for_asset(&taker_after, 0),
+            "writable retry fills a real asset-0 leg"
+        );
+        if matches!(route, CpiRoute::Batch) {
+            assert!(
+                has_active_leg_for_asset(&taker_after, 1),
+                "batch writable retry fills the second leg too"
+            );
+        }
+    }
+}
+
 // LoF/terminal authority sweep: UpdateAuthority covers market/asset-0 handoff, but non-base assets
 // use UpdateAssetAuthority. After resolution, rekeying a funded asset's insurance/backing authorities
 // must revoke the stale domain keys and keep terminal withdrawals live for the new keys.
