@@ -90072,6 +90072,216 @@ fn v16_attack_live_domain_withdrawals_reject_frozen_canonical_vault_before_debit
     }
 }
 
+// LoF/DoS sweep (cron135): the secondary reserve is an alternate canonical custody rail, so primary
+// frozen-vault coverage does not exercise the same token account or mint. A frozen secondary reserve
+// must roll back staged engine/ledger debits for all live domain withdrawal routes and remain live
+// after the reserve is restored.
+#[test]
+fn v16_attack_live_domain_withdrawals_reject_frozen_secondary_reserve_before_debit() {
+    #[derive(Clone, Copy)]
+    enum DomainWithdrawRoute {
+        Insurance,
+        BackingPrincipal,
+        BackingEarnings,
+    }
+
+    impl DomainWithdrawRoute {
+        fn label(self) -> &'static str {
+            match self {
+                DomainWithdrawRoute::Insurance => "WithdrawInsuranceAsset",
+                DomainWithdrawRoute::BackingPrincipal => "WithdrawBackingBucket",
+                DomainWithdrawRoute::BackingEarnings => "WithdrawBackingBucketEarnings",
+            }
+        }
+    }
+
+    fn send_secondary_domain_withdraw(
+        env: &mut V16CuEnv,
+        route: DomainWithdrawRoute,
+        ledger: Pubkey,
+        dest: Pubkey,
+        secondary_vault: Pubkey,
+        amount: u128,
+    ) -> Result<u64, String> {
+        env.svm.expire_blockhash();
+        match route {
+            DomainWithdrawRoute::Insurance => send_tx(
+                &mut env.svm,
+                env.program_id,
+                &env.payer,
+                ProgInstruction::WithdrawInsuranceAsset {
+                    asset_index: 0,
+                    amount,
+                },
+                vec![
+                    AccountMeta::new(env.admin.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(dest, false),
+                    AccountMeta::new(secondary_vault, false),
+                    AccountMeta::new_readonly(env.vault_authority, false),
+                    AccountMeta::new_readonly(spl_token::ID, false),
+                    AccountMeta::new(ledger, false),
+                ],
+                &[&env.admin],
+            ),
+            DomainWithdrawRoute::BackingPrincipal => send_tx(
+                &mut env.svm,
+                env.program_id,
+                &env.payer,
+                ProgInstruction::WithdrawBackingBucket { domain: 1, amount },
+                vec![
+                    AccountMeta::new(env.admin.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(dest, false),
+                    AccountMeta::new(secondary_vault, false),
+                    AccountMeta::new_readonly(env.vault_authority, false),
+                    AccountMeta::new_readonly(spl_token::ID, false),
+                    AccountMeta::new(ledger, false),
+                ],
+                &[&env.admin],
+            ),
+            DomainWithdrawRoute::BackingEarnings => send_tx(
+                &mut env.svm,
+                env.program_id,
+                &env.payer,
+                ProgInstruction::WithdrawBackingBucketEarnings { domain: 1, amount },
+                vec![
+                    AccountMeta::new(env.admin.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(ledger, false),
+                    AccountMeta::new(dest, false),
+                    AccountMeta::new(secondary_vault, false),
+                    AccountMeta::new_readonly(env.vault_authority, false),
+                    AccountMeta::new_readonly(spl_token::ID, false),
+                ],
+                &[&env.admin],
+            ),
+        }
+    }
+
+    for route in [
+        DomainWithdrawRoute::Insurance,
+        DomainWithdrawRoute::BackingPrincipal,
+        DomainWithdrawRoute::BackingEarnings,
+    ] {
+        let mut env = V16CuEnv::new();
+        let admin = env.admin.insecure_clone();
+        let secondary = env.create_mint();
+        env.update_base_unit_mints_with_cu(env.mint, secondary);
+        let (ledger, amount) = match route {
+            DomainWithdrawRoute::Insurance => {
+                let ledger = env.insurance_ledger_account();
+                env.top_up_insurance_domain_with_authority_ledger_and_cu(&admin, ledger, 0, 100);
+                (ledger, 40)
+            }
+            DomainWithdrawRoute::BackingPrincipal => {
+                let ledger = env.backing_domain_ledger_account();
+                env.top_up_backing_bucket_with_ledger_with_cu(ledger, 1, 100, 10_000);
+                (ledger, 40)
+            }
+            DomainWithdrawRoute::BackingEarnings => {
+                let ledger = env.backing_domain_ledger_account();
+                env.top_up_backing_bucket_with_ledger_with_cu(ledger, 1, 100, 10_000);
+                env.mutate_market(|_, group| {
+                    group.source_backing_buckets[1].utilization_fee_earnings = 30;
+                    group.vault += 30;
+                });
+                (ledger, 10)
+            }
+        };
+        let funded_vault = env.market_state().1.vault as u64;
+        env.set_token_account_amount(env.vault, env.mint, env.vault_authority, 0);
+        let secondary_vault = canonical_vault_ata(env.vault_authority, secondary);
+        env.svm
+            .set_account(
+                secondary_vault,
+                Account {
+                    lamports: 1_000_000_000,
+                    data: make_frozen_token_data(secondary, env.vault_authority, funded_vault),
+                    owner: spl_token::ID,
+                    executable: false,
+                    rent_epoch: 0,
+                },
+            )
+            .unwrap();
+
+        let dest = env.token_account_for_mint(secondary, admin.pubkey(), 0);
+        let market_before = env.svm.get_account(&env.market).unwrap();
+        let ledger_before = env.svm.get_account(&ledger).unwrap();
+        let primary_vault_before = env.svm.get_account(&env.vault).unwrap();
+        let frozen_secondary_before = env.svm.get_account(&secondary_vault).unwrap();
+        let dest_before = env.svm.get_account(&dest).unwrap();
+        let label = route.label();
+
+        let rejected = send_secondary_domain_withdraw(
+            &mut env,
+            route,
+            ledger,
+            dest,
+            secondary_vault,
+            amount,
+        );
+        assert!(
+            rejected.is_err(),
+            "{label} must reject a frozen secondary reserve before committing the debit"
+        );
+        assert_eq!(
+            env.svm.get_account(&env.market).unwrap(),
+            market_before,
+            "{label} frozen-secondary rejection leaves market budgets unchanged"
+        );
+        assert_eq!(
+            env.svm.get_account(&ledger).unwrap(),
+            ledger_before,
+            "{label} frozen-secondary rejection leaves ledger unchanged"
+        );
+        assert_eq!(
+            env.svm.get_account(&env.vault).unwrap(),
+            primary_vault_before,
+            "{label} frozen-secondary rejection leaves primary vault untouched"
+        );
+        assert_eq!(
+            env.svm.get_account(&secondary_vault).unwrap(),
+            frozen_secondary_before,
+            "{label} frozen secondary reserve remains byte-identical"
+        );
+        assert_eq!(
+            env.svm.get_account(&dest).unwrap(),
+            dest_before,
+            "{label} frozen-secondary rejection pays no destination tokens"
+        );
+
+        env.svm
+            .set_account(
+                secondary_vault,
+                Account {
+                    lamports: 1_000_000_000,
+                    data: make_token_data(secondary, env.vault_authority, funded_vault),
+                    owner: spl_token::ID,
+                    executable: false,
+                    rent_epoch: 0,
+                },
+            )
+            .unwrap();
+        let ok = send_secondary_domain_withdraw(
+            &mut env,
+            route,
+            ledger,
+            dest,
+            secondary_vault,
+            amount,
+        )
+        .expect("secondary-reserve domain withdrawal remains live after frozen rejection");
+        assert_cu_within(label, ok, CUSTODY_CU_LIMIT);
+        assert_eq!(env.token_amount(dest), amount as u64, "{label} retry pays");
+        assert_eq!(
+            env.token_amount(secondary_vault),
+            funded_vault - amount as u64,
+            "{label} retry debits the secondary reserve"
+        );
+    }
+}
+
 // LoF sweep - outbound domain withdrawals also bridge u128 engine amounts to u64 SPL transfers, but
 // through the shared domain-withdrawal preflight rather than the user Withdraw handler. Amounts above
 // u64::MAX must reject before debiting insurance, backing principal, backing earnings, or ledgers.
