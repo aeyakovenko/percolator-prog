@@ -9657,6 +9657,80 @@ fn v16_bpf_close_portfolio_sweeps_rent_to_market_slab() {
     }
 }
 
+// CU/LoF hardening: ClosePortfolio deregisters the portfolio and sweeps its rent into the
+// market slab. A stale embedded engine layout must reject before those exit-side mutations.
+#[test]
+fn v16_attack_close_portfolio_stale_layout_rejects_before_rent_sweep() {
+    let mut env = V16CuEnv::new();
+    let owner = Keypair::new();
+    let portfolio = env.create_portfolio(&owner);
+    assert_eq!(
+        env.market_state().1.materialized_portfolio_count,
+        1,
+        "fresh empty portfolio starts materialized"
+    );
+
+    let fresh_portfolio = env.svm.get_account(&portfolio).unwrap();
+    let mut stale_portfolio = fresh_portfolio.clone();
+    let mut stale_state = state::read_portfolio(&stale_portfolio.data).unwrap();
+    let current_layout = stale_state.provenance_header.layout_discriminator.get();
+    assert!(current_layout > 0, "current engine layout discriminator is nonzero");
+    stale_state.provenance_header =
+        percolator::ProvenanceHeaderV16Account::from_runtime(&percolator::ProvenanceHeaderV16 {
+            market_group_id: stale_state.provenance_header.market_group_id,
+            portfolio_account_id: stale_state.provenance_header.portfolio_account_id,
+            owner: stale_state.provenance_header.owner,
+            version: stale_state.provenance_header.version.get(),
+            layout_discriminator: current_layout - 1,
+        });
+    state::write_portfolio(&mut stale_portfolio.data, &stale_state).unwrap();
+    env.svm
+        .set_account(portfolio, stale_portfolio.clone())
+        .unwrap();
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::ClosePortfolio,
+        vec![
+            AccountMeta::new(owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio, false),
+        ],
+        &[&owner],
+    );
+    let err = rejected.expect_err("stale-layout ClosePortfolio must reject");
+    assert!(
+        err.contains("Custom(16)") || err.contains("custom program error: 0x10"),
+        "stale-layout ClosePortfolio should fail as EngineProvenanceMismatch before deregister/rent sweep, got {err}"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "stale-layout close leaves market slab unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&portfolio).unwrap(),
+        stale_portfolio,
+        "stale-layout close leaves portfolio bytes and rent unchanged"
+    );
+    assert_eq!(
+        env.market_state().1.materialized_portfolio_count,
+        1,
+        "stale-layout close does not deregister the portfolio"
+    );
+
+    env.svm.set_account(portfolio, fresh_portfolio).unwrap();
+    env.svm.expire_blockhash();
+    let close_cu = env.close_portfolio_with_cu(&owner, portfolio);
+    assert_cu_within("restored stale-layout ClosePortfolio", close_cu, CUSTODY_CU_LIMIT);
+    assert_eq!(
+        env.market_state().1.materialized_portfolio_count,
+        0,
+        "restored empty portfolio remains closeable"
+    );
+}
+
 // LoF/DoS sweep: ClosePortfolio deregisters the empty portfolio before sweeping its rent into the
 // market slab. If the final lamport add overflows, SVM rollback must preserve the materialized count
 // and leave the user's portfolio closeable once the slab can receive rent again.
