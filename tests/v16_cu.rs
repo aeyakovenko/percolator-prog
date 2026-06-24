@@ -55947,6 +55947,248 @@ fn v16_attack_permissionless_lifecycle_rejects_frozen_canonical_fee_vault_before
     );
 }
 
+// LoF/DoS sweep (cron135): frozen fee-source/vault coverage does not hit malformed unpack failures or
+// native/wrapped-SOL account states. Permissionless append and retired-slot reuse must reject those
+// states before slot mutation, fee accounting, or SPL custody movement, then remain live after restore.
+#[test]
+fn v16_attack_permissionless_lifecycle_rejects_bad_fee_accounts_before_slot_mutation() {
+    const FEE: u128 = 40;
+
+    #[derive(Clone, Copy)]
+    enum BadTokenKind {
+        Malformed,
+        Native,
+    }
+
+    impl BadTokenKind {
+        fn label(self) -> &'static str {
+            match self {
+                BadTokenKind::Malformed => "malformed",
+                BadTokenKind::Native => "native",
+            }
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    enum FeeSlot {
+        Source,
+        Vault,
+    }
+
+    impl FeeSlot {
+        fn label(self) -> &'static str {
+            match self {
+                FeeSlot::Source => "fee source",
+                FeeSlot::Vault => "fee vault",
+            }
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    enum LifecyclePath {
+        Append,
+        Reuse,
+    }
+
+    impl LifecyclePath {
+        fn label(self) -> &'static str {
+            match self {
+                LifecyclePath::Append => "append",
+                LifecyclePath::Reuse => "retired-slot reuse",
+            }
+        }
+    }
+
+    for path in [LifecyclePath::Append, LifecyclePath::Reuse] {
+        for slot in [FeeSlot::Source, FeeSlot::Vault] {
+            for kind in [BadTokenKind::Malformed, BadTokenKind::Native] {
+                let mut env = V16CuEnv::new();
+                let creator = Keypair::new();
+                env.ensure_signer_account(creator.pubkey());
+                env.update_market_init_fee_policy_with_cu(FEE);
+
+                let (asset_index, now_slot, initial_price, expected_vault_after) = match path {
+                    LifecyclePath::Append => {
+                        env.svm.warp_to_slot(1);
+                        (1, 1, 100, FEE)
+                    }
+                    LifecyclePath::Reuse => {
+                        env.svm.warp_to_slot(1);
+                        env.activate_permissionless_asset_with_fee(
+                            &creator,
+                            1,
+                            1,
+                            100,
+                            creator.pubkey(),
+                            creator.pubkey(),
+                            creator.pubkey(),
+                            creator.pubkey(),
+                            FEE,
+                        );
+                        env.svm.warp_to_slot(3);
+                        env.update_asset_lifecycle_as_admin_with_cu(
+                            percolator_prog::processor::ASSET_ACTION_RETIRE,
+                            1,
+                            3,
+                            0,
+                        );
+                        let (cfg, group) = env.market_state();
+                        assert_eq!(cfg.free_market_slot_count, 1);
+                        assert_eq!(group.assets[1].lifecycle, AssetLifecycleV16::Retired);
+                        env.svm.warp_to_slot(4);
+                        (1, 4, 250, FEE * 2)
+                    }
+                };
+
+                let source = env.token_account(creator.pubkey(), FEE as u64);
+                let bad_key = match slot {
+                    FeeSlot::Source => source,
+                    FeeSlot::Vault => env.vault,
+                };
+                let clean_bad_account = env.svm.get_account(&bad_key).unwrap();
+                let bad_data = match kind {
+                    BadTokenKind::Malformed => vec![0u8; TokenAccount::LEN - 1],
+                    BadTokenKind::Native => {
+                        let (owner, amount) = match slot {
+                            FeeSlot::Source => (creator.pubkey(), FEE as u64),
+                            FeeSlot::Vault => (env.vault_authority, env.token_amount(env.vault)),
+                        };
+                        make_native_flagged_token_data(env.mint, owner, amount)
+                    }
+                };
+                env.svm
+                    .set_account(
+                        bad_key,
+                        Account {
+                            data: bad_data,
+                            ..clean_bad_account.clone()
+                        },
+                    )
+                    .unwrap();
+
+                let market_before = env.svm.get_account(&env.market).unwrap();
+                let source_before = env.svm.get_account(&source).unwrap();
+                let vault_before = env.svm.get_account(&env.vault).unwrap();
+                let (cfg_before, group_before) = env.market_state();
+
+                env.svm.expire_blockhash();
+                let rejected = env.send(
+                    ProgInstruction::UpdateAssetLifecycle {
+                        action: percolator_prog::processor::ASSET_ACTION_ACTIVATE,
+                        asset_index,
+                        now_slot,
+                        initial_price,
+                        insurance_authority: creator.pubkey().to_bytes(),
+                        insurance_operator: creator.pubkey().to_bytes(),
+                        backing_bucket_authority: creator.pubkey().to_bytes(),
+                        oracle_authority: creator.pubkey().to_bytes(),
+                    },
+                    vec![
+                        AccountMeta::new(creator.pubkey(), true),
+                        AccountMeta::new(env.market, false),
+                        AccountMeta::new(source, false),
+                        AccountMeta::new(env.vault, false),
+                        AccountMeta::new_readonly(spl_token::ID, false),
+                    ],
+                    &[&creator],
+                );
+                let kind_label = kind.label();
+                let slot_label = slot.label();
+                let path_label = path.label();
+                assert!(
+                    rejected.is_err(),
+                    "permissionless {path_label} must reject a {kind_label} {slot_label}"
+                );
+                assert_eq!(
+                    env.svm.get_account(&env.market).unwrap(),
+                    market_before,
+                    "{kind_label} {slot_label} {path_label} rejection leaves market bytes unchanged"
+                );
+                assert_eq!(
+                    env.svm.get_account(&source).unwrap(),
+                    source_before,
+                    "{kind_label} {slot_label} {path_label} rejection spends no fee source"
+                );
+                assert_eq!(
+                    env.svm.get_account(&env.vault).unwrap(),
+                    vault_before,
+                    "{kind_label} {slot_label} {path_label} rejection moves no fee custody"
+                );
+                let (cfg_after, group_after) = env.market_state();
+                assert_eq!(
+                    cfg_after.free_market_slot_count,
+                    cfg_before.free_market_slot_count,
+                    "{path_label} rejection must not consume a reusable-slot counter"
+                );
+                assert_eq!(
+                    group_after.config.max_market_slots,
+                    group_before.config.max_market_slots,
+                    "{path_label} rejection must not append a market slot"
+                );
+                assert_eq!(group_after.vault, group_before.vault);
+                assert_eq!(group_after.insurance, group_before.insurance);
+                assert_eq!(
+                    group_after.insurance_domain_budget,
+                    group_before.insurance_domain_budget
+                );
+                if matches!(path, LifecyclePath::Reuse) {
+                    assert_eq!(
+                        group_after.assets[1].lifecycle,
+                        AssetLifecycleV16::Retired,
+                        "bad-account reuse rejection leaves the retired slot retired"
+                    );
+                }
+
+                env.svm.set_account(bad_key, clean_bad_account).unwrap();
+                env.svm.expire_blockhash();
+                let accepted = env.send(
+                    ProgInstruction::UpdateAssetLifecycle {
+                        action: percolator_prog::processor::ASSET_ACTION_ACTIVATE,
+                        asset_index,
+                        now_slot,
+                        initial_price,
+                        insurance_authority: creator.pubkey().to_bytes(),
+                        insurance_operator: creator.pubkey().to_bytes(),
+                        backing_bucket_authority: creator.pubkey().to_bytes(),
+                        oracle_authority: creator.pubkey().to_bytes(),
+                    },
+                    vec![
+                        AccountMeta::new(creator.pubkey(), true),
+                        AccountMeta::new(env.market, false),
+                        AccountMeta::new(source, false),
+                        AccountMeta::new(env.vault, false),
+                        AccountMeta::new_readonly(spl_token::ID, false),
+                    ],
+                    &[&creator],
+                );
+                assert!(
+                    accepted.is_ok(),
+                    "clean permissionless {path_label} remains live after {kind_label} {slot_label} rejection: {accepted:?}"
+                );
+                let (cfg_ok, group_ok) = env.market_state();
+                match path {
+                    LifecyclePath::Append => {
+                        assert_eq!(group_ok.config.max_market_slots, 2);
+                    }
+                    LifecyclePath::Reuse => {
+                        assert_eq!(cfg_ok.free_market_slot_count, 0);
+                    }
+                }
+                assert_eq!(group_ok.assets[1].lifecycle, AssetLifecycleV16::Active);
+                assert_eq!(group_ok.assets[1].effective_price, initial_price);
+                assert_eq!(env.token_amount(source), 0);
+                assert_eq!(env.token_amount(env.vault), expected_vault_after as u64);
+                assert_eq!(group_ok.vault, expected_vault_after);
+                assert_eq!(group_ok.insurance, expected_vault_after);
+                assert_domain_budget_remaining_total_consistent(
+                    &group_ok,
+                    "permissionless lifecycle bad-fee-account retry",
+                );
+            }
+        }
+    }
+}
+
 // security.md sweep - permissionless init-fee vault binding (#44/#48): asset activation charges
 // the public creator before growing a new market slot. A funded creator must not be able to route the
 // fee into a non-canonical vault-authority-owned token account and still install a new asset, which
