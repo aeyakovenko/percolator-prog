@@ -73157,6 +73157,253 @@ fn v16_attack_update_authority_handoff_rekeys_asset0_default_runtime_authorities
     );
 }
 
+// LoF/DoS sweep (cron135): UpdateAuthority has its own default asset-0 authority handoff path,
+// separate from UpdateAssetAuthority. Live provider ledgers initialized under the old marketauth must
+// not remain syncable or reusable after that handoff, and the new marketauth must remain live through
+// fresh ledgers.
+#[test]
+fn v16_attack_update_authority_handoff_rejects_stale_live_ledgers() {
+    let mut env = V16CuEnv::new();
+    let old_marketauth = env.admin.insecure_clone();
+    let new_marketauth = Keypair::new();
+
+    let old_insurance_ledger = env.insurance_ledger_account();
+    env.top_up_insurance_with_ledger_with_cu(old_insurance_ledger, 100);
+    let old_backing_ledger = env.backing_domain_ledger_account();
+    env.top_up_backing_bucket_with_ledger_with_cu(old_backing_ledger, 1, 100, 100_000);
+
+    let old_insurance_state =
+        state::read_insurance_ledger(&env.svm.get_account(&old_insurance_ledger).unwrap().data)
+            .expect("old insurance ledger initialized");
+    assert_eq!(
+        old_insurance_state.authority,
+        old_marketauth.pubkey().to_bytes()
+    );
+    let old_backing_state =
+        state::read_backing_domain_ledger(&env.svm.get_account(&old_backing_ledger).unwrap().data)
+            .expect("old backing ledger initialized");
+    assert_eq!(
+        old_backing_state.authority,
+        old_marketauth.pubkey().to_bytes()
+    );
+    assert_eq!(old_backing_state.domain, 1);
+
+    env.update_asset_authority_with_cu(&new_marketauth);
+    let profile =
+        state::read_asset_oracle_profile(&env.svm.get_account(&env.market).unwrap().data, 0)
+            .unwrap();
+    assert_eq!(
+        profile.insurance_authority,
+        new_marketauth.pubkey().to_bytes(),
+        "UpdateAuthority rekeys asset-0 insurance authority"
+    );
+    assert_eq!(
+        profile.backing_bucket_authority,
+        new_marketauth.pubkey().to_bytes(),
+        "UpdateAuthority rekeys asset-0 backing authority"
+    );
+
+    let market_after_handoff = env.svm.get_account(&env.market).unwrap();
+    let vault_after_handoff = env.svm.get_account(&env.vault).unwrap();
+    let old_insurance_after_handoff = env.svm.get_account(&old_insurance_ledger).unwrap();
+    let old_backing_after_handoff = env.svm.get_account(&old_backing_ledger).unwrap();
+
+    env.svm.expire_blockhash();
+    let stale_insurance_sync = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::SyncInsuranceLedger,
+        vec![
+            AccountMeta::new(old_marketauth.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(old_insurance_ledger, false),
+        ],
+        &[&old_marketauth],
+    );
+    assert!(
+        stale_insurance_sync.is_err(),
+        "stale marketauth must not sync its old insurance ledger after handoff"
+    );
+    assert_eq!(
+        env.svm.get_account(&old_insurance_ledger).unwrap(),
+        old_insurance_after_handoff
+    );
+
+    env.svm.expire_blockhash();
+    let stale_backing_sync = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::SyncBackingDomainLedger { domain: 1 },
+        vec![
+            AccountMeta::new(old_marketauth.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(old_backing_ledger, false),
+        ],
+        &[&old_marketauth],
+    );
+    assert!(
+        stale_backing_sync.is_err(),
+        "stale marketauth must not sync its old backing ledger after handoff"
+    );
+    assert_eq!(
+        env.svm.get_account(&old_backing_ledger).unwrap(),
+        old_backing_after_handoff
+    );
+
+    let stale_insurance_source = env.token_account_for_mint(env.mint, new_marketauth.pubkey(), 25);
+    let stale_insurance_source_before = env.svm.get_account(&stale_insurance_source).unwrap();
+    env.svm.expire_blockhash();
+    let stale_insurance_topup = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::TopUpInsurance { amount: 25 },
+        vec![
+            AccountMeta::new(new_marketauth.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(stale_insurance_source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(old_insurance_ledger, false),
+        ],
+        &[&new_marketauth],
+    );
+    assert!(
+        stale_insurance_topup.is_err(),
+        "new marketauth must not top up through the old insurance ledger"
+    );
+    assert_eq!(
+        env.svm.get_account(&stale_insurance_source).unwrap(),
+        stale_insurance_source_before,
+        "stale-ledger insurance top-up pulls no source tokens"
+    );
+
+    let stale_backing_source = env.token_account_for_mint(env.mint, new_marketauth.pubkey(), 25);
+    let stale_backing_source_before = env.svm.get_account(&stale_backing_source).unwrap();
+    env.svm.expire_blockhash();
+    let stale_backing_topup = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::TopUpBackingBucket {
+            domain: 1,
+            amount: 25,
+            expiry_slot: 100_000,
+        },
+        vec![
+            AccountMeta::new(new_marketauth.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(stale_backing_source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(old_backing_ledger, false),
+        ],
+        &[&new_marketauth],
+    );
+    assert!(
+        stale_backing_topup.is_err(),
+        "new marketauth must not top up through the old backing ledger"
+    );
+    assert_eq!(
+        env.svm.get_account(&stale_backing_source).unwrap(),
+        stale_backing_source_before,
+        "stale-ledger backing top-up pulls no source tokens"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_after_handoff
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        vault_after_handoff
+    );
+    assert_eq!(
+        env.svm.get_account(&old_insurance_ledger).unwrap(),
+        old_insurance_after_handoff,
+        "rejected stale-ledger attempts do not rewrite old insurance ledger"
+    );
+    assert_eq!(
+        env.svm.get_account(&old_backing_ledger).unwrap(),
+        old_backing_after_handoff,
+        "rejected stale-ledger attempts do not rewrite old backing ledger"
+    );
+
+    let fresh_insurance_ledger = env.insurance_ledger_account();
+    let fresh_insurance_source = env.token_account_for_mint(env.mint, new_marketauth.pubkey(), 25);
+    env.svm.expire_blockhash();
+    let fresh_insurance_topup = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::TopUpInsurance { amount: 25 },
+        vec![
+            AccountMeta::new(new_marketauth.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(fresh_insurance_source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(fresh_insurance_ledger, false),
+        ],
+        &[&new_marketauth],
+    );
+    assert!(
+        fresh_insurance_topup.is_ok(),
+        "new marketauth can initialize a fresh insurance ledger: {fresh_insurance_topup:?}"
+    );
+
+    let fresh_backing_ledger = env.backing_domain_ledger_account();
+    let fresh_backing_source = env.token_account_for_mint(env.mint, new_marketauth.pubkey(), 25);
+    env.svm.expire_blockhash();
+    let fresh_backing_topup = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::TopUpBackingBucket {
+            domain: 1,
+            amount: 25,
+            expiry_slot: 100_000,
+        },
+        vec![
+            AccountMeta::new(new_marketauth.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(fresh_backing_source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(fresh_backing_ledger, false),
+        ],
+        &[&new_marketauth],
+    );
+    assert!(
+        fresh_backing_topup.is_ok(),
+        "new marketauth can initialize a fresh backing ledger: {fresh_backing_topup:?}"
+    );
+    assert_eq!(env.token_amount(fresh_insurance_source), 0);
+    assert_eq!(env.token_amount(fresh_backing_source), 0);
+    let fresh_insurance_state =
+        state::read_insurance_ledger(&env.svm.get_account(&fresh_insurance_ledger).unwrap().data)
+            .expect("fresh insurance ledger initialized");
+    assert_eq!(
+        fresh_insurance_state.authority,
+        new_marketauth.pubkey().to_bytes()
+    );
+    let fresh_backing_state = state::read_backing_domain_ledger(
+        &env.svm.get_account(&fresh_backing_ledger).unwrap().data,
+    )
+    .expect("fresh backing ledger initialized");
+    assert_eq!(
+        fresh_backing_state.authority,
+        new_marketauth.pubkey().to_bytes()
+    );
+    assert_eq!(fresh_backing_state.domain, 1);
+    assert_eq!(
+        env.market_state().1.vault as u64,
+        env.token_amount(env.vault),
+        "fresh-ledger handoff controls keep vault accounting tied to custody"
+    );
+}
+
 // security.md sweep — backing-bucket creation must reject an already-lapsed expiry. TopUpBackingBucket
 // forwards expiry_slot to the engine's deposit_fresh, which requires a FUTURE expiry
 // (expiry_slot > current_slot). A topup at expiry_slot 0 would mint immediately-lapsed backing
