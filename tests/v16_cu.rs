@@ -12621,6 +12621,98 @@ fn v16_attack_resolved_permissionless_crank_honors_owner_exit_window() {
     assert_eq!(env.token_amount(env.vault), 0);
 }
 
+// Public-interface DoS sweep: resolved PermissionlessCrank is the sole public crank route once the
+// market winds down. The handler ignores live-mode hints and trailing accounts after forwarding into
+// CloseResolved, but the deployed adapter still scans the complete instruction account list. Keep a
+// near-max ignored tail bounded on the terminal user-payout path, not just on cheap init helpers.
+#[test]
+fn v16_attack_resolved_permissionless_crank_ignored_extra_accounts_are_cu_bounded() {
+    const EXTRA_ACCOUNTS: usize = 56;
+
+    fn send_resolved_crank_with_extra_accounts(extra_count: usize) -> u64 {
+        let mut env = V16CuEnv::new();
+        let owner = Keypair::new();
+        let portfolio = env.create_portfolio(&owner);
+        env.deposit(&owner, portfolio, 1_000);
+        env.resolve();
+        let dest = env.token_account(owner.pubkey(), 0);
+        let mut extras = Vec::with_capacity(extra_count);
+        for _ in 0..extra_count {
+            let key = Pubkey::new_unique();
+            env.svm
+                .set_account(
+                    key,
+                    Account {
+                        lamports: 1_000_000_000,
+                        data: Vec::new(),
+                        owner: solana_sdk::system_program::ID,
+                        executable: false,
+                        rent_epoch: 0,
+                    },
+                )
+                .unwrap();
+            extras.push(key);
+        }
+        let mut accounts = vec![
+            AccountMeta::new_readonly(owner.pubkey(), false),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio, false),
+            AccountMeta::new(dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ];
+        accounts.extend(
+            extras
+                .iter()
+                .copied()
+                .map(|key| AccountMeta::new_readonly(key, false)),
+        );
+
+        env.svm.expire_blockhash();
+        let cu = env
+            .send(
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: u64::MAX,
+                    close_q: u128::MAX,
+                    observations: vec![CrankObservationHint {
+                        asset_index: u16::MAX,
+                        oracle_accounts: u8::MAX,
+                    }],
+                },
+                accounts,
+                &[],
+            )
+            .expect("resolved PermissionlessCrank with ignored trailing accounts");
+        assert_eq!(
+            env.token_amount(dest),
+            1_000,
+            "terminal payout still executes through the bloated public crank"
+        );
+        assert_eq!(env.token_amount(env.vault), 0);
+        cu
+    }
+
+    let baseline_cu = send_resolved_crank_with_extra_accounts(0);
+    let bloated_cu = send_resolved_crank_with_extra_accounts(EXTRA_ACCOUNTS);
+    println!(
+        "v16 resolved PermissionlessCrank ignored extras: baseline={baseline_cu}, bloated={bloated_cu}"
+    );
+    assert!(
+        bloated_cu > baseline_cu,
+        "ignored extra accounts must reach the deployed adapter path"
+    );
+    assert!(
+        bloated_cu <= baseline_cu + 90_000,
+        "ignored extra accounts consumed {bloated_cu} CU vs baseline {baseline_cu}"
+    );
+    assert_cu_within(
+        "resolved PermissionlessCrank ignored extra account path",
+        bloated_cu,
+        CRANK_CU_LIMIT,
+    );
+}
+
 #[test]
 fn v16_bpf_failed_close_resolved_transfer_rolls_back_payout_state() {
     let mut env = V16CuEnv::new();
