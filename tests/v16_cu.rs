@@ -90594,6 +90594,184 @@ fn v16_attack_live_domain_withdrawals_reject_malformed_token_accounts_before_deb
     }
 }
 
+// LoF/DoS sweep (cron135): live domain withdrawals already reject malformed destinations and
+// frozen vaults. A frozen initialized destination reaches a different SPL account-state branch:
+// it must abort before the live insurance/backing route commits market or ledger debits, and the
+// same route must remain executable once the destination is restored.
+#[test]
+fn v16_attack_live_domain_withdrawals_reject_frozen_dest_before_debit() {
+    #[derive(Clone, Copy)]
+    enum DomainWithdrawRoute {
+        Insurance,
+        BackingPrincipal,
+        BackingEarnings,
+    }
+
+    impl DomainWithdrawRoute {
+        fn label(self) -> &'static str {
+            match self {
+                DomainWithdrawRoute::Insurance => "WithdrawInsuranceAsset",
+                DomainWithdrawRoute::BackingPrincipal => "WithdrawBackingBucket",
+                DomainWithdrawRoute::BackingEarnings => "WithdrawBackingBucketEarnings",
+            }
+        }
+    }
+
+    fn send_domain_withdraw(
+        env: &mut V16CuEnv,
+        route: DomainWithdrawRoute,
+        ledger: Pubkey,
+        dest: Pubkey,
+        amount: u128,
+    ) -> Result<u64, String> {
+        env.svm.expire_blockhash();
+        match route {
+            DomainWithdrawRoute::Insurance => send_tx(
+                &mut env.svm,
+                env.program_id,
+                &env.payer,
+                ProgInstruction::WithdrawInsuranceAsset {
+                    asset_index: 0,
+                    amount,
+                },
+                vec![
+                    AccountMeta::new(env.admin.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(dest, false),
+                    AccountMeta::new(env.vault, false),
+                    AccountMeta::new_readonly(env.vault_authority, false),
+                    AccountMeta::new_readonly(spl_token::ID, false),
+                    AccountMeta::new(ledger, false),
+                ],
+                &[&env.admin],
+            ),
+            DomainWithdrawRoute::BackingPrincipal => send_tx(
+                &mut env.svm,
+                env.program_id,
+                &env.payer,
+                ProgInstruction::WithdrawBackingBucket { domain: 1, amount },
+                vec![
+                    AccountMeta::new(env.admin.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(dest, false),
+                    AccountMeta::new(env.vault, false),
+                    AccountMeta::new_readonly(env.vault_authority, false),
+                    AccountMeta::new_readonly(spl_token::ID, false),
+                    AccountMeta::new(ledger, false),
+                ],
+                &[&env.admin],
+            ),
+            DomainWithdrawRoute::BackingEarnings => send_tx(
+                &mut env.svm,
+                env.program_id,
+                &env.payer,
+                ProgInstruction::WithdrawBackingBucketEarnings { domain: 1, amount },
+                vec![
+                    AccountMeta::new(env.admin.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(ledger, false),
+                    AccountMeta::new(dest, false),
+                    AccountMeta::new(env.vault, false),
+                    AccountMeta::new_readonly(env.vault_authority, false),
+                    AccountMeta::new_readonly(spl_token::ID, false),
+                ],
+                &[&env.admin],
+            ),
+        }
+    }
+
+    for route in [
+        DomainWithdrawRoute::Insurance,
+        DomainWithdrawRoute::BackingPrincipal,
+        DomainWithdrawRoute::BackingEarnings,
+    ] {
+        let mut env = V16CuEnv::new();
+        let admin = env.admin.insecure_clone();
+        let (ledger, amount) = match route {
+            DomainWithdrawRoute::Insurance => {
+                let ledger = env.insurance_ledger_account();
+                env.top_up_insurance_domain_with_authority_ledger_and_cu(&admin, ledger, 0, 100);
+                (ledger, 40)
+            }
+            DomainWithdrawRoute::BackingPrincipal => {
+                let ledger = env.backing_domain_ledger_account();
+                env.top_up_backing_bucket_with_ledger_with_cu(ledger, 1, 100, 10_000);
+                (ledger, 40)
+            }
+            DomainWithdrawRoute::BackingEarnings => {
+                let ledger = env.backing_domain_ledger_account();
+                env.top_up_backing_bucket_with_ledger_with_cu(ledger, 1, 100, 10_000);
+                env.mutate_market(|_, group| {
+                    group.source_backing_buckets[1].utilization_fee_earnings = 30;
+                    group.vault += 30;
+                });
+                let (_, funded) = env.market_state();
+                env.set_token_account_amount(
+                    env.vault,
+                    env.mint,
+                    env.vault_authority,
+                    funded.vault as u64,
+                );
+                (ledger, 10)
+            }
+        };
+        let dest = env.token_account_for_mint(env.mint, admin.pubkey(), 0);
+        let clean_dest = env.svm.get_account(&dest).unwrap();
+        env.svm
+            .set_account(
+                dest,
+                Account {
+                    data: make_frozen_token_data(env.mint, admin.pubkey(), 0),
+                    ..clean_dest.clone()
+                },
+            )
+            .unwrap();
+
+        let market_before = env.svm.get_account(&env.market).unwrap();
+        let ledger_before = env.svm.get_account(&ledger).unwrap();
+        let vault_before = env.svm.get_account(&env.vault).unwrap();
+        let frozen_dest_before = env.svm.get_account(&dest).unwrap();
+        let label = route.label();
+
+        let rejected = send_domain_withdraw(&mut env, route, ledger, dest, amount);
+        assert!(
+            rejected.is_err(),
+            "{label} must reject a frozen initialized destination before committing the debit"
+        );
+        assert_eq!(
+            env.svm.get_account(&env.market).unwrap(),
+            market_before,
+            "{label} frozen-dest rejection leaves market budgets unchanged"
+        );
+        assert_eq!(
+            env.svm.get_account(&ledger).unwrap(),
+            ledger_before,
+            "{label} frozen-dest rejection leaves ledger unchanged"
+        );
+        assert_eq!(
+            env.svm.get_account(&env.vault).unwrap(),
+            vault_before,
+            "{label} frozen-dest rejection leaves vault custody unchanged"
+        );
+        assert_eq!(
+            env.svm.get_account(&dest).unwrap(),
+            frozen_dest_before,
+            "{label} frozen destination remains byte-identical"
+        );
+
+        env.svm.set_account(dest, clean_dest).unwrap();
+        let ok = send_domain_withdraw(&mut env, route, ledger, dest, amount)
+            .expect("domain withdrawal remains live after frozen-dest rejection");
+        assert_cu_within(label, ok, CUSTODY_CU_LIMIT);
+        assert_eq!(env.token_amount(dest), amount as u64, "{label} retry pays");
+        assert_eq!(
+            env.market_state().1.vault as u64,
+            env.token_amount(env.vault),
+            "{label} retry keeps vault accounting tied to custody"
+        );
+    }
+}
+
 // LoF/DoS sweep (cron135): a frozen canonical vault is a valid-length SPL account and reaches a
 // different token-program branch than malformed or delegated vaults. Live domain withdrawals must
 // roll back staged market/ledger debits on that SPL error and remain executable after restore.
