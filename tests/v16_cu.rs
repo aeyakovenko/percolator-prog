@@ -27050,6 +27050,135 @@ fn v16_attack_out_of_range_asset_index_rejected() {
     );
 }
 
+// LoF/DoS sweep: batch trades use separate wrapper preflight from single TradeNoCpi/TradeCpi.
+// An out-of-range batch asset must reject before direct batch mutation, and the CPI batch variant
+// must reject before handing a writable matcher context to an external matcher program.
+#[test]
+fn v16_attack_batch_trade_out_of_range_asset_rejects_before_matcher() {
+    let mut env = V16CuEnv::new(); // only asset 0 is configured
+    let taker = Keypair::new();
+    let lp = Keypair::new();
+    let taker_account = env.create_portfolio(&taker);
+    let lp_account = env.create_portfolio(&lp);
+    env.deposit(&taker, taker_account, 1_000_000);
+    env.deposit(&lp, lp_account, 1_000_000);
+    let bad_asset = u16::MAX;
+    let size = POS_SCALE as i128;
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let taker_before = env.svm.get_account(&taker_account).unwrap();
+    let lp_before = env.svm.get_account(&lp_account).unwrap();
+    env.svm.expire_blockhash();
+    let nocpi = env.send(
+        ProgInstruction::BatchTradeNoCpi {
+            legs: vec![BatchTradeLeg {
+                asset_index: bad_asset,
+                size_q: size,
+                exec_price: 100,
+                fee_bps: 0,
+            }],
+        },
+        vec![
+            AccountMeta::new(taker.pubkey(), true),
+            AccountMeta::new(lp.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(taker_account, false),
+            AccountMeta::new(lp_account, false),
+        ],
+        &[&taker, &lp],
+    );
+    assert!(
+        nocpi.is_err(),
+        "out-of-range BatchTradeNoCpi asset must reject"
+    );
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+    assert_eq!(env.svm.get_account(&taker_account).unwrap(), taker_before);
+    assert_eq!(env.svm.get_account(&lp_account).unwrap(), lp_before);
+
+    let hostile = Pubkey::new_unique();
+    env.svm.add_program(
+        hostile,
+        &std::fs::read(hostile_matcher_program_path()).unwrap(),
+    );
+    let ctx = Pubkey::new_unique();
+    let delegate = matcher_delegate_key(
+        &env.program_id,
+        &env.market,
+        &lp_account,
+        &lp.pubkey(),
+        &hostile,
+        &ctx,
+    );
+    env.svm
+        .set_account(
+            delegate,
+            Account {
+                lamports: 1_000_000_000,
+                data: vec![],
+                owner: Pubkey::default(),
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    env.svm
+        .set_account(
+            ctx,
+            Account {
+                lamports: 1_000_000_000,
+                data: vec![0u8; MATCHER_CONTEXT_LEN],
+                owner: hostile,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    env.set_matcher_config(hostile, &lp, lp_account, ctx, delegate, 1);
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let taker_before = env.svm.get_account(&taker_account).unwrap();
+    let lp_before = env.svm.get_account(&lp_account).unwrap();
+    let ctx_before = env.svm.get_account(&ctx).unwrap();
+    env.svm.expire_blockhash();
+    let cpi = env.send(
+        ProgInstruction::BatchTradeCpi {
+            legs: vec![BatchTradeCpiLeg {
+                asset_index: bad_asset,
+                size_q: size,
+                fee_bps: 0,
+                limit_price: 0,
+            }],
+        },
+        vec![
+            AccountMeta::new(taker.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(taker_account, false),
+            AccountMeta::new(lp_account, false),
+            AccountMeta::new_readonly(hostile, false),
+            AccountMeta::new(ctx, false),
+            AccountMeta::new_readonly(delegate, false),
+        ],
+        &[&taker],
+    );
+    let err = cpi.expect_err("out-of-range BatchTradeCpi asset must reject");
+    assert!(
+        err.contains("Custom(9)"),
+        "out-of-range BatchTradeCpi should fail in wrapper preflight, got {err}"
+    );
+    assert!(
+        !err.contains("InvalidAccountData"),
+        "out-of-range BatchTradeCpi must not reach hostile matcher validation: {err}"
+    );
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+    assert_eq!(env.svm.get_account(&taker_account).unwrap(), taker_before);
+    assert_eq!(env.svm.get_account(&lp_account).unwrap(), lp_before);
+    assert_eq!(
+        env.svm.get_account(&ctx).unwrap(),
+        ctx_before,
+        "rejected CPI batch must not give the hostile matcher a writable context"
+    );
+}
+
 // security.md sweep — ledger account binding (#44, F-VAULT-FRAG sibling): a backing-domain ledger is
 // bound to (market_group, authority, domain). Passing a ledger under the WRONG domain must reject —
 // no cross-domain earnings/accounting manipulation. (Contrast the vault, which is owner-only.)
