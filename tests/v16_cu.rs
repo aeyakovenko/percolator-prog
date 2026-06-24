@@ -95291,6 +95291,291 @@ fn v16_attack_value_topup_ledger_counter_overflows_roll_back_engine_credit() {
     assert_eq!(fresh_state.total_principal_atoms, 1);
 }
 
+// full-interface sweep (cron135): direct ledger-sync routes are separate from the value top-up and
+// withdrawal paths. A saturated sync counter must reject without advancing the ledger snapshot; otherwise
+// a provider could lose accounting continuity or permanently DoS future farm/accounting reads.
+#[test]
+fn v16_attack_direct_ledger_sync_counter_overflows_do_not_advance_snapshots() {
+    let mut insurance_env = V16CuEnv::new();
+    let poisoned_insurance_ledger = insurance_env.insurance_ledger_account();
+    let fresh_insurance_ledger = insurance_env.insurance_ledger_account();
+    insurance_env.top_up_insurance_with_ledger_with_cu(poisoned_insurance_ledger, 100);
+    insurance_env.sync_insurance_ledger_with_cu(fresh_insurance_ledger);
+
+    let mut poisoned_insurance_account = insurance_env
+        .svm
+        .get_account(&poisoned_insurance_ledger)
+        .unwrap();
+    let mut poisoned_insurance_state =
+        state::read_insurance_ledger(&poisoned_insurance_account.data)
+            .expect("initialized insurance ledger");
+    poisoned_insurance_state.cumulative_profit_atoms = u128::MAX;
+    state::write_insurance_ledger(
+        &mut poisoned_insurance_account.data,
+        &poisoned_insurance_state,
+    )
+    .expect("poison insurance sync profit counter");
+    insurance_env
+        .svm
+        .set_account(poisoned_insurance_ledger, poisoned_insurance_account)
+        .unwrap();
+    insurance_env.mutate_market(|_, group| {
+        group.insurance += 1;
+        group.vault += 1;
+        group.insurance_domain_budget[0] += 1;
+    });
+    insurance_env.set_token_account_amount(
+        insurance_env.vault,
+        insurance_env.mint,
+        insurance_env.vault_authority,
+        101,
+    );
+
+    let market_before = insurance_env
+        .svm
+        .get_account(&insurance_env.market)
+        .unwrap();
+    let poisoned_before = insurance_env
+        .svm
+        .get_account(&poisoned_insurance_ledger)
+        .unwrap();
+    insurance_env.svm.expire_blockhash();
+    let rejected = send_tx(
+        &mut insurance_env.svm,
+        insurance_env.program_id,
+        &insurance_env.payer,
+        ProgInstruction::SyncInsuranceLedger,
+        vec![
+            AccountMeta::new(insurance_env.admin.pubkey(), true),
+            AccountMeta::new(insurance_env.market, false),
+            AccountMeta::new(poisoned_insurance_ledger, false),
+        ],
+        &[&insurance_env.admin],
+    );
+    assert!(
+        rejected.is_err(),
+        "saturated direct insurance sync counter must reject"
+    );
+    assert_eq!(
+        insurance_env
+            .svm
+            .get_account(&insurance_env.market)
+            .unwrap(),
+        market_before,
+        "failed direct insurance sync must not rewrite market state"
+    );
+    assert_eq!(
+        insurance_env
+            .svm
+            .get_account(&poisoned_insurance_ledger)
+            .unwrap(),
+        poisoned_before,
+        "failed direct insurance sync must not advance the poisoned snapshot"
+    );
+
+    let fresh_cu = insurance_env.sync_insurance_ledger_with_cu(fresh_insurance_ledger);
+    assert_cu_within(
+        "fresh direct SyncInsuranceLedger after poisoned rejection",
+        fresh_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    let fresh_state = state::read_insurance_ledger(
+        &insurance_env
+            .svm
+            .get_account(&fresh_insurance_ledger)
+            .unwrap()
+            .data,
+    )
+    .expect("fresh insurance ledger advanced");
+    assert_eq!(fresh_state.cumulative_profit_atoms, 1);
+    assert_eq!(fresh_state.last_observed_insurance_atoms, 101);
+
+    let mut backing_earnings_env = V16CuEnv::new();
+    let poisoned_earnings_ledger = backing_earnings_env.backing_domain_ledger_account();
+    let fresh_earnings_ledger = backing_earnings_env.backing_domain_ledger_account();
+    backing_earnings_env.top_up_backing_bucket_with_ledger_with_cu(
+        poisoned_earnings_ledger,
+        1,
+        100,
+        10_000,
+    );
+    backing_earnings_env.sync_backing_domain_ledger_with_cu(fresh_earnings_ledger, 1);
+    let mut poisoned_earnings_account = backing_earnings_env
+        .svm
+        .get_account(&poisoned_earnings_ledger)
+        .unwrap();
+    let mut poisoned_earnings_state =
+        state::read_backing_domain_ledger(&poisoned_earnings_account.data)
+            .expect("initialized backing ledger");
+    poisoned_earnings_state.total_earnings_atoms = u128::MAX;
+    state::write_backing_domain_ledger(
+        &mut poisoned_earnings_account.data,
+        &poisoned_earnings_state,
+    )
+    .expect("poison backing sync earnings counter");
+    backing_earnings_env
+        .svm
+        .set_account(poisoned_earnings_ledger, poisoned_earnings_account)
+        .unwrap();
+    backing_earnings_env.mutate_market(|_, group| {
+        group.source_backing_buckets[1].utilization_fee_earnings = 1;
+        group.vault += 1;
+    });
+    backing_earnings_env.set_token_account_amount(
+        backing_earnings_env.vault,
+        backing_earnings_env.mint,
+        backing_earnings_env.vault_authority,
+        101,
+    );
+
+    let market_before = backing_earnings_env
+        .svm
+        .get_account(&backing_earnings_env.market)
+        .unwrap();
+    let poisoned_before = backing_earnings_env
+        .svm
+        .get_account(&poisoned_earnings_ledger)
+        .unwrap();
+    backing_earnings_env.svm.expire_blockhash();
+    let rejected = send_tx(
+        &mut backing_earnings_env.svm,
+        backing_earnings_env.program_id,
+        &backing_earnings_env.payer,
+        ProgInstruction::SyncBackingDomainLedger { domain: 1 },
+        vec![
+            AccountMeta::new(backing_earnings_env.admin.pubkey(), true),
+            AccountMeta::new(backing_earnings_env.market, false),
+            AccountMeta::new(poisoned_earnings_ledger, false),
+        ],
+        &[&backing_earnings_env.admin],
+    );
+    assert!(
+        rejected.is_err(),
+        "saturated direct backing earnings sync counter must reject"
+    );
+    assert_eq!(
+        backing_earnings_env
+            .svm
+            .get_account(&backing_earnings_env.market)
+            .unwrap(),
+        market_before,
+        "failed direct backing earnings sync must not rewrite market state"
+    );
+    assert_eq!(
+        backing_earnings_env
+            .svm
+            .get_account(&poisoned_earnings_ledger)
+            .unwrap(),
+        poisoned_before,
+        "failed direct backing earnings sync must not advance the poisoned snapshot"
+    );
+
+    let fresh_cu =
+        backing_earnings_env.sync_backing_domain_ledger_with_cu(fresh_earnings_ledger, 1);
+    assert_cu_within(
+        "fresh direct SyncBackingDomainLedger earnings after poisoned rejection",
+        fresh_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    let fresh_state = state::read_backing_domain_ledger(
+        &backing_earnings_env
+            .svm
+            .get_account(&fresh_earnings_ledger)
+            .unwrap()
+            .data,
+    )
+    .expect("fresh backing earnings ledger advanced");
+    assert_eq!(fresh_state.total_earnings_atoms, 1);
+    assert_eq!(fresh_state.last_observed_bucket_earnings_atoms, 1);
+
+    let mut backing_loss_env = V16CuEnv::new();
+    let poisoned_loss_ledger = backing_loss_env.backing_domain_ledger_account();
+    let fresh_loss_ledger = backing_loss_env.backing_domain_ledger_account();
+    backing_loss_env.top_up_backing_bucket_with_ledger_with_cu(
+        poisoned_loss_ledger,
+        1,
+        100,
+        10_000,
+    );
+    backing_loss_env.sync_backing_domain_ledger_with_cu(fresh_loss_ledger, 1);
+    let mut poisoned_loss_account = backing_loss_env
+        .svm
+        .get_account(&poisoned_loss_ledger)
+        .unwrap();
+    let mut poisoned_loss_state =
+        state::read_backing_domain_ledger(&poisoned_loss_account.data)
+            .expect("initialized backing ledger");
+    poisoned_loss_state.cumulative_loss_atoms = u128::MAX;
+    state::write_backing_domain_ledger(&mut poisoned_loss_account.data, &poisoned_loss_state)
+        .expect("poison backing sync loss counter");
+    backing_loss_env
+        .svm
+        .set_account(poisoned_loss_ledger, poisoned_loss_account)
+        .unwrap();
+    backing_loss_env.mutate_market(|_, group| {
+        group.source_backing_buckets[1].consumed_liened_backing_num = BOUND_SCALE;
+    });
+
+    let market_before = backing_loss_env
+        .svm
+        .get_account(&backing_loss_env.market)
+        .unwrap();
+    let poisoned_before = backing_loss_env
+        .svm
+        .get_account(&poisoned_loss_ledger)
+        .unwrap();
+    backing_loss_env.svm.expire_blockhash();
+    let rejected = send_tx(
+        &mut backing_loss_env.svm,
+        backing_loss_env.program_id,
+        &backing_loss_env.payer,
+        ProgInstruction::SyncBackingDomainLedger { domain: 1 },
+        vec![
+            AccountMeta::new(backing_loss_env.admin.pubkey(), true),
+            AccountMeta::new(backing_loss_env.market, false),
+            AccountMeta::new(poisoned_loss_ledger, false),
+        ],
+        &[&backing_loss_env.admin],
+    );
+    assert!(
+        rejected.is_err(),
+        "saturated direct backing loss sync counter must reject"
+    );
+    assert_eq!(
+        backing_loss_env
+            .svm
+            .get_account(&backing_loss_env.market)
+            .unwrap(),
+        market_before,
+        "failed direct backing loss sync must not rewrite market state"
+    );
+    assert_eq!(
+        backing_loss_env
+            .svm
+            .get_account(&poisoned_loss_ledger)
+            .unwrap(),
+        poisoned_before,
+        "failed direct backing loss sync must not advance the poisoned snapshot"
+    );
+
+    let fresh_cu = backing_loss_env.sync_backing_domain_ledger_with_cu(fresh_loss_ledger, 1);
+    assert_cu_within(
+        "fresh direct SyncBackingDomainLedger loss after poisoned rejection",
+        fresh_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    let fresh_state = state::read_backing_domain_ledger(
+        &backing_loss_env
+            .svm
+            .get_account(&fresh_loss_ledger)
+            .unwrap()
+            .data,
+    )
+    .expect("fresh backing loss ledger advanced");
+    assert_eq!(fresh_state.cumulative_loss_atoms, 1);
+    assert_eq!(fresh_state.last_observed_unavailable_principal_atoms, 1);
+}
+
 // full-interface sweep: live domain withdrawals debit market/ledger budgets before signed SPL payout.
 // Malformed SPL-owned destination or canonical vault data must reject before those debits for live
 // insurance, backing principal, and backing earnings, and each route must stay live after restore.
