@@ -6703,6 +6703,7 @@ pub mod processor {
     /// Maximum legs in a single matcher batch CPI: the matcher returns N*64 bytes via
     /// `set_return_data`, bounded by Solana's 1024-byte return-data cap.
     const MATCHER_BATCH_MAX_LEGS: usize = 16;
+    const MATCHER_BATCH_TAIL_FANOUT_BUDGET: usize = constants::MAX_MATCHER_TAIL_ACCOUNTS * 2;
 
     #[allow(clippy::too_many_arguments)]
     fn invoke_matcher_batch<'a>(
@@ -6901,6 +6902,9 @@ pub mod processor {
             matcher_delegate,
             program_id,
         )?;
+        if legs.len().saturating_mul(tail.len()) > MATCHER_BATCH_TAIL_FANOUT_BUDGET {
+            return Err(PercolatorError::InvalidInstruction.into());
+        }
 
         let req_id = {
             let mut market_data = market_ai.try_borrow_mut_data()?;
