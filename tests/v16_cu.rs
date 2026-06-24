@@ -18610,6 +18610,95 @@ fn v16_attack_crank_raw_program_portfolio_realloc_rolls_back() {
     );
 }
 
+// LoF/DoS sweep (cron135): PermissionlessCrank is the only public keeper route. A valid
+// initialized portfolio that still has the legacy pre-matcher-tail length must be growable as the
+// crank target itself, not only as a cranker reward tail or through owner-signed routes.
+#[test]
+fn v16_attack_permissionless_crank_grows_legacy_target_portfolio() {
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(1, 10_000, 10_000, 500);
+    set_test_clock(&mut env, 1, 100);
+    env.configure_auth_mark_with_cu(1, 100);
+
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long = env.create_portfolio(&long_owner);
+    let short = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long, 20_000);
+    env.deposit(&short_owner, short, 20_000);
+    env.trade_with_cu(
+        &long_owner,
+        long,
+        &short_owner,
+        short,
+        POS_SCALE as i128,
+        100,
+        0,
+    );
+
+    set_test_clock(&mut env, 2, 101);
+    env.push_auth_mark_with_cu(2, 110);
+    assert_eq!(
+        env.market_state().0.mark_ewma_e6,
+        110,
+        "setup stores a pending auth mark for the public crank to apply"
+    );
+
+    let mut legacy = env.svm.get_account(&long).unwrap();
+    legacy.data.truncate(PORTFOLIO_ENGINE_ACCOUNT_LEN);
+    env.svm.set_account(long, legacy).unwrap();
+    let legacy_before = env.svm.get_account(&long).unwrap();
+    assert_eq!(
+        legacy_before.data.len(),
+        PORTFOLIO_ENGINE_ACCOUNT_LEN,
+        "test setup simulates a legacy initialized crank target"
+    );
+
+    env.svm.expire_blockhash();
+    let cu = env
+        .send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 2,
+                close_q: 0,
+                observations: crank_observations(0),
+            },
+            vec![
+                AccountMeta::new(env.payer.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(long, false),
+            ],
+            &[],
+        )
+        .expect("public crank must grow and refresh a legacy target portfolio");
+    assert_cu_within(
+        "PermissionlessCrank legacy target refresh",
+        cu,
+        CRANK_CU_LIMIT,
+    );
+
+    let grown = env.svm.get_account(&long).unwrap();
+    assert_eq!(
+        grown.data.len(),
+        state::portfolio_account_len_for_market_slots(1).unwrap(),
+        "successful crank grows the target to the current zero-copy portfolio shape"
+    );
+    let (_, group) = env.market_state();
+    let refreshed = env.portfolio_state(long);
+    assert_eq!(
+        health_cert(&refreshed).cert_oracle_epoch,
+        group.oracle_epoch,
+        "legacy target is refreshed to the current oracle epoch"
+    );
+    assert!(
+        group.assets[0].effective_price > 100,
+        "crank applied the pending auth mark while growing the legacy target"
+    );
+    assert_eq!(
+        group.vault as u64,
+        env.token_amount(env.vault),
+        "legacy target refresh preserves SPL custody accounting"
+    );
+}
+
 // security.md sweep - duplicate writable account aliasing (#26/#44/#48): several public helpers take
 // an arbitrary program-owned writable "portfolio" account. The market slab is also program-owned and
 // large enough to pass shallow storage checks; using it as the portfolio slot must reject atomically.
