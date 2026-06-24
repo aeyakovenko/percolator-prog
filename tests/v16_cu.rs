@@ -92193,6 +92193,116 @@ fn v16_attack_stale_recovery_tools_roll_back_legacy_reallocs() {
 // capital before the SPL transfer is committed by the transaction. Amounts above u64::MAX must reject
 // at the wrapper bridge, not truncate to a smaller SPL transfer while canceling an active close ledger.
 #[test]
+fn v16_attack_zero_deposit_cure_ignores_hostile_optional_accounts() {
+    let mut env = V16CuEnv::new();
+    let owner = Keypair::new();
+    let p = env.create_portfolio(&owner);
+    env.deposit(&owner, p, 100);
+    env.seed_cancellable_close_progress(p);
+    assert!(
+        close_progress(&env.portfolio_state(p)).active,
+        "test setup must start from an active close ledger"
+    );
+
+    let fake_source = Pubkey::new_unique();
+    env.svm
+        .set_account(
+            fake_source,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_native_flagged_token_data(env.mint, Pubkey::new_unique(), 999),
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    let fake_vault = Pubkey::new_unique();
+    env.svm
+        .set_account(
+            fake_vault,
+            Account {
+                lamports: 1_000_000_000,
+                data: vec![0u8; TokenAccount::LEN - 1],
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    let fake_token_program = Pubkey::new_unique();
+    env.ensure_signer_account(fake_token_program);
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let portfolio_before = env.svm.get_account(&p).unwrap();
+    let canonical_vault_before = env.svm.get_account(&env.vault).unwrap();
+    let fake_source_before = env.svm.get_account(&fake_source).unwrap();
+    let fake_vault_before = env.svm.get_account(&fake_vault).unwrap();
+    let fake_token_program_before = env.svm.get_account(&fake_token_program).unwrap();
+
+    env.svm.expire_blockhash();
+    let cu = env
+        .send(
+            ProgInstruction::CureAndCancelClose {
+                optional_deposit: 0,
+            },
+            vec![
+                AccountMeta::new(owner.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(p, false),
+                AccountMeta::new(fake_source, false),
+                AccountMeta::new(fake_vault, false),
+                AccountMeta::new_readonly(fake_token_program, false),
+            ],
+            &[&owner],
+        )
+        .expect("zero-deposit CureAndCancelClose must ignore unused optional custody accounts");
+    assert_cu_within(
+        "CureAndCancelClose zero-deposit ignored optional accounts",
+        cu,
+        CUSTODY_CU_LIMIT,
+    );
+
+    let cured = env.portfolio_state(p);
+    assert!(close_progress(&cured).canceled);
+    assert_eq!(
+        cured.capital.get(),
+        100,
+        "zero-deposit cure does not mint capital"
+    );
+    assert_eq!(
+        env.svm.get_account(&fake_source).unwrap(),
+        fake_source_before,
+        "ignored fake source is untouched"
+    );
+    assert_eq!(
+        env.svm.get_account(&fake_vault).unwrap(),
+        fake_vault_before,
+        "ignored fake vault is untouched"
+    );
+    assert_eq!(
+        env.svm.get_account(&fake_token_program).unwrap(),
+        fake_token_program_before,
+        "ignored fake token program is untouched"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        canonical_vault_before,
+        "zero-deposit cure does not touch canonical vault custody"
+    );
+    let (_, group_after) = env.market_state();
+    let (_, group_before) = state::read_market(&market_before.data).unwrap();
+    assert_eq!(group_after.vault, group_before.vault);
+    assert_eq!(group_after.c_tot, group_before.c_tot);
+    assert_eq!(group_after.insurance, group_before.insurance);
+    assert_ne!(
+        env.svm.get_account(&p).unwrap(),
+        portfolio_before,
+        "only the close ledger should change on a successful zero-deposit cure"
+    );
+}
+
+#[test]
 fn v16_attack_cure_optional_deposit_over_u64_max_rejects_no_truncation() {
     let mut env = V16CuEnv::new();
     let owner = Keypair::new();
