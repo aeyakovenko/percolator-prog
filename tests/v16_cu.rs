@@ -9605,6 +9605,213 @@ fn v16_bpf_liquidatable_solvent_account_can_risk_reduce_without_insurance_drain(
     );
 }
 
+// Public auto-crank liveness sweep: helper-driven liquidation tests retry when close_q != 0, which can
+// hide whether a current liquidatable account makes progress in one public instruction. Start from a
+// solvent but under-margin account with a current health cert, then submit one bounded liquidation step
+// without observations. The instruction must execute and close no more than the keeper's work budget.
+#[test]
+fn v16_attack_auto_crank_current_solvent_partial_liquidation_makes_progress() {
+    let mut env = V16CuEnv::new();
+    env.top_up_insurance(1_000_000);
+    env.svm.warp_to_slot(1);
+    env.configure_auth_mark_with_cu(1, 100);
+
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long_account = env.create_portfolio(&long_owner);
+    let short_account = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long_account, 10_000);
+    env.deposit(&short_owner, short_account, 3_000);
+    env.trade_with_cu(
+        &long_owner,
+        long_account,
+        &short_owner,
+        short_account,
+        (10 * POS_SCALE) as i128,
+        100,
+        0,
+    );
+
+    env.svm.warp_to_slot(2);
+    env.push_auth_mark_with_cu(2, 300);
+    env.crank(
+        short_account,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 2,
+            close_q: 0,
+            observations: crank_observations(0),
+        },
+    );
+    env.svm.warp_to_slot(3);
+    env.crank(
+        short_account,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 3,
+            close_q: 0,
+            observations: crank_observations(0),
+        },
+    );
+
+    let before_group = env.market_state().1;
+    let before_short = env.portfolio_state(short_account);
+    let before_cert = health_cert(&before_short);
+    assert!(
+        before_cert.certified_liq_deficit != 0 && before_cert.certified_equity > 0,
+        "setup must be solvent but liquidatable before partial liquidation: {before_cert:?}"
+    );
+    let oi_pre = before_group.assets[0].oi_eff_short_q;
+
+    env.svm.expire_blockhash();
+    let partial = env.send(
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 3,
+            close_q: POS_SCALE,
+            observations: vec![],
+        },
+        vec![
+            AccountMeta::new(env.payer.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(short_account, false),
+        ],
+        &[],
+    );
+    assert!(
+        partial.is_ok(),
+        "current solvent liquidation must not require observations to make progress: {partial:?}"
+    );
+
+    let after_group = env.market_state().1;
+    let after_short = env.portfolio_state(short_account);
+    let closed = oi_pre.saturating_sub(after_group.assets[0].oi_eff_short_q);
+    assert!(closed > 0, "partial liquidation must reduce open interest");
+    assert!(
+        closed <= POS_SCALE,
+        "partial liquidation closed at most close_q: closed={closed}"
+    );
+    assert!(
+        has_active_leg_for_asset(&after_short, 0),
+        "partial close should leave the remaining position active"
+    );
+    assert_eq!(
+        after_group.vault, before_group.vault,
+        "liquidation fee is internal accounting, not a vault mint"
+    );
+    assert_eq!(after_group.vault as u64, env.token_amount(env.vault));
+    assert!(after_group.vault >= after_group.c_tot + after_group.insurance);
+}
+
+// Public auto-crank ordering sweep: observation-only cranks may be benign stale
+// transactions, but a crank carrying a real liquidation work budget must not
+// report success when the engine-selected account step still needs a different
+// observation. The whole instruction must roll back any unrelated oracle update.
+#[test]
+fn v16_attack_budgeted_out_of_order_crank_rolls_back_unselected_observation() {
+    const MARK: u64 = 1_000_000;
+    const OPEN_SLOT: u64 = 1;
+    const OBS_SLOT: u64 = 2;
+
+    let mut env = V16CuEnv::new_with_init_params(production_risk_params());
+    env.update_liquidation_fee_policy_with_cu(5_000);
+    env.activate_asset(1, OPEN_SLOT, MARK);
+
+    set_test_clock(&mut env, OPEN_SLOT, 100);
+    let feed0 = [0x37u8; 32];
+    let initial0 = env.set_pyth_price_with_conf(&feed0, MARK as i64, -6, 0, 100);
+    env.try_configure_hybrid_asset_with_conf_filter_cu(
+        0,
+        1,
+        0,
+        [feed0, [0u8; 32], [0u8; 32]],
+        &[initial0],
+        OPEN_SLOT,
+        100,
+        0,
+        0,
+        10,
+        0,
+    )
+    .expect("configure unrelated asset-0 hybrid oracle");
+    env.configure_auth_mark_for_asset_as_admin(1, OPEN_SLOT, MARK);
+
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let cranker_owner = Keypair::new();
+    let long = env.create_portfolio(&long_owner);
+    let short = env.create_portfolio(&short_owner);
+    let cranker = env.create_portfolio(&cranker_owner);
+    env.deposit(&long_owner, long, 100_000_000);
+    env.deposit(&short_owner, short, 100_000_000);
+    env.deposit(&cranker_owner, cranker, 1_000);
+    env.trade_asset_with_cu(
+        1,
+        &long_owner,
+        long,
+        &short_owner,
+        short,
+        POS_SCALE as i128,
+        MARK,
+        0,
+    );
+
+    set_test_clock(&mut env, OBS_SLOT, 101);
+    env.push_auth_mark_for_asset_as_admin(1, OBS_SLOT, MARK + 10_000);
+    env.crank(
+        long,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: OBS_SLOT,
+            close_q: 0,
+            observations: crank_observations(1),
+        },
+    );
+    let (_, group_after_asset1) = env.market_state();
+    assert!(
+        health_cert(&env.portfolio_state(short)).cert_oracle_epoch
+            < group_after_asset1.oracle_epoch,
+        "setup must leave the target account stale on its active asset"
+    );
+
+    let fresh0 = env.set_pyth_price_with_conf(&feed0, (MARK + 10_000) as i64, -6, 0, 101);
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let short_before = env.svm.get_account(&short).unwrap();
+    let cranker_before = env.svm.get_account(&cranker).unwrap();
+
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::PermissionlessCrank {
+            now_slot: OBS_SLOT,
+            close_q: POS_SCALE,
+            observations: crank_observations_with_accounts(0, 1),
+        },
+        vec![
+            AccountMeta::new(cranker_owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(short, false),
+            AccountMeta::new_readonly(fresh0, false),
+            AccountMeta::new(cranker, false),
+        ],
+        &[&cranker_owner],
+    );
+    assert!(
+        rejected.is_err(),
+        "budgeted liquidation crank with only an unrelated observation must reject"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "budgeted NonProgress must roll back the unrelated oracle/profile update"
+    );
+    assert_eq!(
+        env.svm.get_account(&short).unwrap(),
+        short_before,
+        "budgeted NonProgress must not mutate the target account"
+    );
+    assert_eq!(
+        env.svm.get_account(&cranker).unwrap(),
+        cranker_before,
+        "budgeted NonProgress must not credit or rewrite the reward account"
+    );
+}
+
 #[test]
 fn v16_bpf_no_cranker_liquidation_rejects_invalid_final_market_shape() {
     let mut env = V16CuEnv::new();
