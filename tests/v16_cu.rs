@@ -96507,3 +96507,92 @@ fn v16_attack_backing_topup_lapsed_expiry_rolls_back_existing_ledger() {
         "accepted retry preserves vault accounting"
     );
 }
+
+// LoF/DoS sweep (cron135): PermissionlessCrank may be used as the sole public crank. A keeper
+// should be able to submit an oracle observation even when the selected account carries no value
+// or position. The call may advance market/oracle state and refresh the target's cert metadata, but
+// it must not move user value, create exposure, or pay a liquidation cranker reward without a
+// liquidation.
+#[test]
+fn v16_attack_auto_crank_observation_only_does_not_move_value_or_reward() {
+    let mut env = V16CuEnv::new();
+    env.update_liquidation_fee_policy_with_cu(5_000);
+    env.configure_auth_mark_with_cu(1, 100);
+
+    let target_owner = Keypair::new();
+    let cranker_owner = Keypair::new();
+    let target = env.create_portfolio(&target_owner);
+    let cranker = env.create_portfolio(&cranker_owner);
+
+    env.svm.warp_to_slot(2);
+    env.push_auth_mark_with_cu(2, 125);
+    let (_, before_group) = env.market_state();
+    assert_eq!(
+        before_group.assets[0].effective_price, 100,
+        "PushAuthMark stages the mark; the crank applies it"
+    );
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let target_before = env.svm.get_account(&target).unwrap();
+    let target_state_before = env.portfolio_state(target);
+    let cranker_before = env.svm.get_account(&cranker).unwrap();
+
+    env.svm.expire_blockhash();
+    let cu = env
+        .send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 2,
+                close_q: 0,
+                observations: crank_observations(0),
+            },
+            vec![
+                AccountMeta::new(cranker_owner.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(target, false),
+                AccountMeta::new(cranker, false),
+            ],
+            &[&cranker_owner],
+        )
+        .expect("observation-only auto-crank should accrue market state");
+    assert_cu_within("observation-only auto-crank", cu, CRANK_CU_LIMIT);
+
+    let market_after = env.svm.get_account(&env.market).unwrap();
+    assert_ne!(
+        market_after.data, market_before.data,
+        "observation-only crank must perform a real market/oracle update"
+    );
+    let (_, after_group) = env.market_state();
+    assert_eq!(
+        after_group.assets[0].effective_price, 125,
+        "observation-only crank applies the staged auth mark"
+    );
+    assert_eq!(
+        env.svm.get_account(&target).unwrap().lamports,
+        target_before.lamports,
+        "observation-only crank does not move target rent"
+    );
+    let target_state_after = env.portfolio_state(target);
+    assert_eq!(
+        target_state_after.capital.get(),
+        target_state_before.capital.get(),
+        "observation-only crank does not credit or debit target capital"
+    );
+    assert_eq!(
+        target_state_after.pnl.get(),
+        target_state_before.pnl.get(),
+        "observation-only crank does not move target PnL"
+    );
+    assert!(
+        percolator::active_bitmap_is_empty(active_bitmap(&target_state_after)),
+        "observation-only crank does not create target exposure"
+    );
+    assert_eq!(
+        env.svm.get_account(&cranker).unwrap(),
+        cranker_before,
+        "non-liquidation observation-only crank does not pay or rewrite the cranker"
+    );
+    assert_eq!(
+        after_group.insurance, before_group.insurance,
+        "observation-only crank does not fabricate liquidation fee insurance"
+    );
+}
