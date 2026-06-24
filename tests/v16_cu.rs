@@ -71761,6 +71761,165 @@ fn v16_attack_close_slab_rejects_frozen_secondary_dest_before_primary_reclaim() 
     assert!(closed_market.data.iter().all(|b| *b == 0));
 }
 
+// LoF/DoS sweep (cron135): CloseSlab's secondary cleanup path validates optional secondary custody
+// before sweeping primary dust, closing vaults, or reclaiming market rent. Native-flagged user/vault
+// token accounts must reject atomically so final cleanup cannot normalize wrapped-SOL custody state.
+#[test]
+fn v16_attack_close_slab_rejects_native_secondary_accounts_before_reclaim() {
+    #[derive(Clone, Copy)]
+    enum NativeCloseSlabSlot {
+        PrimaryDest,
+        SecondaryVault,
+        SecondaryDest,
+    }
+
+    impl NativeCloseSlabSlot {
+        fn label(self) -> &'static str {
+            match self {
+                NativeCloseSlabSlot::PrimaryDest => "primary destination",
+                NativeCloseSlabSlot::SecondaryVault => "secondary vault",
+                NativeCloseSlabSlot::SecondaryDest => "secondary destination",
+            }
+        }
+    }
+
+    for slot in [
+        NativeCloseSlabSlot::PrimaryDest,
+        NativeCloseSlabSlot::SecondaryVault,
+        NativeCloseSlabSlot::SecondaryDest,
+    ] {
+        let mut env = V16CuEnv::new();
+        let admin = env.admin.insecure_clone();
+        let secondary_mint = env.create_mint();
+        env.update_base_unit_mints_with_cu(env.mint, secondary_mint);
+        env.set_token_account_amount(env.vault, env.mint, env.vault_authority, 7);
+        let secondary_vault = canonical_vault_ata(env.vault_authority, secondary_mint);
+        env.svm
+            .set_account(
+                secondary_vault,
+                Account {
+                    lamports: 1_000_000_000,
+                    data: make_token_data(secondary_mint, env.vault_authority, 11),
+                    owner: spl_token::ID,
+                    executable: false,
+                    rent_epoch: 0,
+                },
+            )
+            .unwrap();
+        env.resolve();
+
+        let primary_dest = env.token_account(admin.pubkey(), 0);
+        let secondary_dest = env.token_account_for_mint(secondary_mint, admin.pubkey(), 0);
+        let (native_key, native_mint, native_owner, native_amount) = match slot {
+            NativeCloseSlabSlot::PrimaryDest => (primary_dest, env.mint, admin.pubkey(), 0),
+            NativeCloseSlabSlot::SecondaryVault => {
+                (secondary_vault, secondary_mint, env.vault_authority, 11)
+            }
+            NativeCloseSlabSlot::SecondaryDest => {
+                (secondary_dest, secondary_mint, admin.pubkey(), 0)
+            }
+        };
+        let clean_native_slot = env.svm.get_account(&native_key).unwrap();
+        env.svm
+            .set_account(
+                native_key,
+                Account {
+                    data: make_native_flagged_token_data(
+                        native_mint,
+                        native_owner,
+                        native_amount,
+                    ),
+                    ..clean_native_slot.clone()
+                },
+            )
+            .unwrap();
+
+        let market_before = env.svm.get_account(&env.market).unwrap();
+        let primary_vault_before = env.svm.get_account(&env.vault).unwrap();
+        let secondary_vault_before = env.svm.get_account(&secondary_vault).unwrap();
+        let primary_dest_before = env.svm.get_account(&primary_dest).unwrap();
+        let secondary_dest_before = env.svm.get_account(&secondary_dest).unwrap();
+        let admin_before = env.svm.get_account(&admin.pubkey()).unwrap();
+
+        env.svm.expire_blockhash();
+        let rejected = env.send(
+            ProgInstruction::CloseSlab,
+            vec![
+                AccountMeta::new(admin.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(env.vault_authority, false),
+                AccountMeta::new(primary_dest, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+                AccountMeta::new(secondary_vault, false),
+                AccountMeta::new(secondary_dest, false),
+            ],
+            &[&admin],
+        );
+        let label = slot.label();
+        assert!(
+            rejected.is_err(),
+            "CloseSlab must reject a native-flagged {label}"
+        );
+        assert_eq!(
+            env.svm.get_account(&env.market).unwrap(),
+            market_before,
+            "native {label} CloseSlab must not zero the market"
+        );
+        assert_eq!(
+            env.svm.get_account(&env.vault).unwrap(),
+            primary_vault_before,
+            "native {label} CloseSlab must not sweep primary dust"
+        );
+        assert_eq!(
+            env.svm.get_account(&secondary_vault).unwrap(),
+            secondary_vault_before,
+            "native {label} CloseSlab must not debit secondary reserve"
+        );
+        assert_eq!(
+            env.svm.get_account(&primary_dest).unwrap(),
+            primary_dest_before,
+            "native {label} CloseSlab must not credit primary destination"
+        );
+        assert_eq!(
+            env.svm.get_account(&secondary_dest).unwrap(),
+            secondary_dest_before,
+            "native {label} CloseSlab must not credit secondary destination"
+        );
+        assert_eq!(
+            env.svm.get_account(&admin.pubkey()).unwrap(),
+            admin_before,
+            "native {label} CloseSlab must not transfer market rent"
+        );
+
+        env.svm.set_account(native_key, clean_native_slot).unwrap();
+        env.svm.expire_blockhash();
+        let ok = env.send(
+            ProgInstruction::CloseSlab,
+            vec![
+                AccountMeta::new(admin.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(env.vault_authority, false),
+                AccountMeta::new(primary_dest, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+                AccountMeta::new(secondary_vault, false),
+                AccountMeta::new(secondary_dest, false),
+            ],
+            &[&admin],
+        );
+        assert!(
+            ok.is_ok(),
+            "same CloseSlab succeeds once the native {label} is restored: {ok:?}"
+        );
+        assert_eq!(env.token_amount(primary_dest), 7);
+        assert_eq!(env.token_amount(secondary_dest), 11);
+        let closed_market = env.svm.get_account(&env.market).unwrap();
+        assert_eq!(closed_market.lamports, 0);
+        assert!(closed_market.data.iter().all(|b| *b == 0));
+    }
+}
+
 // [from pr114]
 // full-interface sweep: a liquidation crank can carry both a hybrid-oracle tail and an optional
 // program-owned cranker reward tail. A malformed reward tail must not let the valid oracle update
