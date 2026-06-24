@@ -40437,6 +40437,93 @@ fn v16_attack_withdraw_insurance_domain_budget_cannot_be_overdrawn() {
     conserve(&env);
 }
 
+// LoF/DoS sweep: live WithdrawInsuranceAsset validates custody up front, then debits engine
+// insurance/domain budgets before final shape validation. A final engine-shape rejection must still
+// roll back the budget debit and pay no tokens.
+#[test]
+fn v16_attack_live_insurance_withdraw_rejects_invalid_final_market_shape() {
+    let mut env = V16CuEnv::new();
+    let admin = env.admin.insecure_clone();
+    env.top_up_insurance_domain_with_authority(&admin, 0, 100);
+    let dest = env.token_account_for_mint(env.mint, admin.pubkey(), 0);
+
+    env.mutate_market(|_, group| {
+        group.insurance_domain_budget[0] = group.insurance + 2;
+    });
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    let dest_before = env.svm.get_account(&dest).unwrap();
+
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::WithdrawInsuranceAsset {
+            asset_index: 0,
+            amount: 1,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        rejected.is_err(),
+        "live WithdrawInsuranceAsset must reject an invalid final market shape"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "failed live insurance withdrawal must roll back the staged budget debit"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        vault_before,
+        "failed live insurance withdrawal must not move vault custody"
+    );
+    assert_eq!(
+        env.svm.get_account(&dest).unwrap(),
+        dest_before,
+        "failed live insurance withdrawal pays no destination tokens"
+    );
+
+    env.mutate_market(|_, group| {
+        group.insurance_domain_budget[0] = group.insurance;
+    });
+    let (_, repaired_group) = env.market_state();
+    env.svm.expire_blockhash();
+    let accepted = env
+        .send(
+            ProgInstruction::WithdrawInsuranceAsset {
+                asset_index: 0,
+                amount: 1,
+            },
+            vec![
+                AccountMeta::new(admin.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(dest, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(env.vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[&admin],
+        )
+        .expect("live WithdrawInsuranceAsset remains live after shape repair");
+    assert_cu_within("WithdrawInsuranceAsset", accepted, CUSTODY_CU_LIMIT);
+    let (_, after_group) = env.market_state();
+    assert_eq!(env.token_amount(dest), 1);
+    assert_eq!(after_group.insurance, repaired_group.insurance - 1);
+    assert_eq!(
+        after_group.insurance_domain_budget[0],
+        repaired_group.insurance_domain_budget[0] - 1
+    );
+    assert_eq!(after_group.vault, repaired_group.vault - 1);
+    assert_eq!(after_group.vault as u64, env.token_amount(env.vault));
+}
+
 // security.md sweep — uniform live insurance API (#6/#23/#57): asset 0 and permissionless assets 1..N
 // both withdraw through the same asset-indexed tag. The signer must be that asset's insurance_operator,
 // and the withdrawal is bounded to that asset's own long+short insurance budget.
