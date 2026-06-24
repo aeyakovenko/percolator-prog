@@ -54485,6 +54485,151 @@ fn v16_attack_mature_shutdown_drain_cleans_delegated_backing_bucket() {
     assert_eq!(drained_group.vault as u64, env.token_amount(env.vault));
 }
 
+// LoF/DoS sweep (cron135): the same mature shutdown-drain exception exists for
+// asset-scoped live insurance withdrawals. A delegated insurance operator must keep the
+// exit-window authority, but after the force-close delay marketauth must be able to clean an
+// empty non-base asset's abandoned insurance without leaving a second withdrawal path through
+// the old operator/ledger.
+#[test]
+fn v16_attack_mature_shutdown_drain_cleans_delegated_insurance_budget() {
+    const AMOUNT: u128 = 211;
+    const DELAY: u64 = 5;
+    const SHUT: u64 = 20;
+
+    let mut env = V16CuEnv::new();
+    let admin = env.admin.insecure_clone();
+    let insurance_authority = Keypair::new();
+    let insurance_operator = Keypair::new();
+    let provider_ledger = env.insurance_ledger_account();
+    let cleanup_ledger = env.insurance_ledger_account();
+    env.configure_permissionless_resolve_with_cu(100, DELAY);
+    env.activate_asset_with_authorities(
+        1,
+        1,
+        100,
+        insurance_authority.pubkey(),
+        insurance_operator.pubkey(),
+        admin.pubkey(),
+        admin.pubkey(),
+    );
+    let profile =
+        state::read_asset_oracle_profile(&env.svm.get_account(&env.market).unwrap().data, 1)
+            .unwrap();
+    assert_eq!(
+        profile.insurance_authority,
+        insurance_authority.pubkey().to_bytes(),
+        "setup delegates asset-1 insurance authority away from marketauth"
+    );
+    assert_eq!(
+        profile.insurance_operator,
+        insurance_operator.pubkey().to_bytes(),
+        "setup delegates asset-1 insurance operator away from marketauth"
+    );
+
+    env.top_up_insurance_domain_with_authority_ledger_and_cu(
+        &insurance_authority,
+        provider_ledger,
+        2,
+        AMOUNT,
+    );
+    let provider_ledger_before_shutdown = env.svm.get_account(&provider_ledger).unwrap();
+    let (_, funded_group) = env.market_state();
+    assert_eq!(funded_group.insurance_domain_budget[2], AMOUNT);
+    assert_eq!(funded_group.insurance, AMOUNT);
+    assert_eq!(funded_group.vault as u64, env.token_amount(env.vault));
+
+    env.svm.warp_to_slot(SHUT);
+    env.svm.expire_blockhash();
+    env.update_asset_lifecycle_as_admin_with_cu(
+        percolator_prog::processor::ASSET_ACTION_SHUTDOWN,
+        1,
+        SHUT,
+        0,
+    );
+    assert_eq!(
+        env.market_state().1.assets[1].lifecycle,
+        AssetLifecycleV16::Recovery
+    );
+
+    env.svm.warp_to_slot(SHUT + DELAY);
+    let cleanup_dest = env.token_account(admin.pubkey(), 0);
+    env.svm.expire_blockhash();
+    let cleanup_cu = env
+        .send(
+            ProgInstruction::WithdrawInsuranceAsset {
+                asset_index: 1,
+                amount: AMOUNT,
+            },
+            vec![
+                AccountMeta::new(admin.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(cleanup_dest, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(env.vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+                AccountMeta::new(cleanup_ledger, false),
+            ],
+            &[&admin],
+        )
+        .expect("mature shutdown-drain lets marketauth clean abandoned insurance");
+    assert_cu_within(
+        "mature shutdown-drain WithdrawInsuranceAsset",
+        cleanup_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    assert_eq!(env.token_amount(cleanup_dest), AMOUNT as u64);
+    let (_, cleaned_group) = env.market_state();
+    assert_eq!(cleaned_group.insurance_domain_budget[2], 0);
+    assert_eq!(cleaned_group.insurance, 0);
+    assert_eq!(cleaned_group.vault as u64, env.token_amount(env.vault));
+    let cleanup_state =
+        state::read_insurance_ledger(&env.svm.get_account(&cleanup_ledger).unwrap().data)
+            .expect("shutdown insurance cleanup ledger initialized");
+    assert_eq!(cleanup_state.authority, admin.pubkey().to_bytes());
+    assert_eq!(cleanup_state.total_withdrawn_atoms, AMOUNT);
+    assert_eq!(cleanup_state.last_observed_insurance_atoms, 0);
+    assert_eq!(
+        env.svm.get_account(&provider_ledger).unwrap(),
+        provider_ledger_before_shutdown,
+        "marketauth cleanup must not rewrite the delegated provider ledger"
+    );
+
+    let operator_dest = env.token_account(insurance_operator.pubkey(), 0);
+    let market_before_replay = env.svm.get_account(&env.market).unwrap();
+    let provider_ledger_before_replay = env.svm.get_account(&provider_ledger).unwrap();
+    let operator_dest_before = env.svm.get_account(&operator_dest).unwrap();
+    env.svm.expire_blockhash();
+    let replay = env.send(
+        ProgInstruction::WithdrawInsuranceAsset {
+            asset_index: 1,
+            amount: 1,
+        },
+        vec![
+            AccountMeta::new(insurance_operator.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(operator_dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(provider_ledger, false),
+        ],
+        &[&insurance_operator],
+    );
+    assert!(
+        replay.is_err(),
+        "old delegated operator must not double-withdraw after mature shutdown cleanup"
+    );
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before_replay);
+    assert_eq!(
+        env.svm.get_account(&provider_ledger).unwrap(),
+        provider_ledger_before_replay
+    );
+    assert_eq!(
+        env.svm.get_account(&operator_dest).unwrap(),
+        operator_dest_before
+    );
+}
+
 // LoF/DoS sweep (cron135): shutdown puts an asset into Recovery with a frozen mark and a
 // force-close delay so users can exit. The pushed-mark profile can still be AuthMark across
 // that transition, so the public PushAuthMark route must be lifecycle-gated; otherwise the
