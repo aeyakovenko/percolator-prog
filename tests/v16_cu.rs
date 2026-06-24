@@ -85714,6 +85714,172 @@ fn v16_attack_base_unit_mint_reset_rejects_frozen_empty_old_reserves() {
     );
 }
 
+// LoF/DoS sweep (cron135): native/wrapped-SOL canonical old reserves are another valid-length SPL
+// account state that must not prove a retired rail is clean, even when token amount is zero.
+#[test]
+fn v16_attack_base_unit_mint_reset_rejects_native_empty_old_reserves() {
+    let mut env = V16CuEnv::new();
+    let admin = env.admin.insecure_clone();
+    let old_secondary = env.create_mint();
+    env.update_base_unit_mints_with_cu(env.mint, old_secondary);
+
+    let old_secondary_vault = canonical_vault_ata(env.vault_authority, old_secondary);
+    env.svm
+        .set_account(
+            old_secondary_vault,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_native_flagged_token_data(old_secondary, env.vault_authority, 0),
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+
+    let replacement_secondary = env.create_mint();
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let old_secondary_before = env.svm.get_account(&old_secondary_vault).unwrap();
+    env.svm.expire_blockhash();
+    let rejected_secondary = env.send(
+        ProgInstruction::UpdateBaseUnitMints {
+            primary_mint: env.mint.to_bytes(),
+            secondary_mint: replacement_secondary.to_bytes(),
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new_readonly(env.mint, false),
+            AccountMeta::new_readonly(replacement_secondary, false),
+            AccountMeta::new_readonly(old_secondary_vault, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        rejected_secondary.is_err(),
+        "empty but native old secondary reserve must not prove the rail clean"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "rejected native-secondary proof leaves configured mints unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&old_secondary_vault).unwrap(),
+        old_secondary_before,
+        "native old secondary reserve remains recoverable after rejection"
+    );
+
+    env.svm
+        .set_account(
+            old_secondary_vault,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_token_data(old_secondary, env.vault_authority, 0),
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    env.svm.expire_blockhash();
+    let accepted_secondary = env.send(
+        ProgInstruction::UpdateBaseUnitMints {
+            primary_mint: env.mint.to_bytes(),
+            secondary_mint: replacement_secondary.to_bytes(),
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new_readonly(env.mint, false),
+            AccountMeta::new_readonly(replacement_secondary, false),
+            AccountMeta::new_readonly(old_secondary_vault, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        accepted_secondary.is_ok(),
+        "same old secondary reserve can rotate once it is non-native: {accepted_secondary:?}"
+    );
+
+    env.svm
+        .set_account(
+            env.vault,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_native_flagged_token_data(env.mint, env.vault_authority, 0),
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    let replacement_primary = env.create_mint();
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let old_primary_before = env.svm.get_account(&env.vault).unwrap();
+    env.svm.expire_blockhash();
+    let rejected_primary = env.send(
+        ProgInstruction::UpdateBaseUnitMints {
+            primary_mint: replacement_primary.to_bytes(),
+            secondary_mint: replacement_secondary.to_bytes(),
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new_readonly(replacement_primary, false),
+            AccountMeta::new_readonly(replacement_secondary, false),
+            AccountMeta::new_readonly(env.vault, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        rejected_primary.is_err(),
+        "empty but native old primary reserve must not prove the rail clean"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "rejected native-primary proof leaves configured mints unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        old_primary_before,
+        "native old primary reserve remains recoverable after rejection"
+    );
+
+    env.svm
+        .set_account(
+            env.vault,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_token_data(env.mint, env.vault_authority, 0),
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    env.svm.expire_blockhash();
+    let accepted_primary = env.send(
+        ProgInstruction::UpdateBaseUnitMints {
+            primary_mint: replacement_primary.to_bytes(),
+            secondary_mint: replacement_secondary.to_bytes(),
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new_readonly(replacement_primary, false),
+            AccountMeta::new_readonly(replacement_secondary, false),
+            AccountMeta::new_readonly(env.vault, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        accepted_primary.is_ok(),
+        "same old primary reserve can rotate once it is non-native: {accepted_primary:?}"
+    );
+}
+
 // LoF/DoS sweep (cron135): when both base-unit rails rotate in one instruction, the wrapper must
 // require the old primary proof and old secondary proof in order before writing the new config. A
 // missing or swapped proof must not partially update the market, while the correctly ordered proofs
