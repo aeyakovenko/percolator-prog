@@ -13502,6 +13502,222 @@ fn v16_attack_resolved_payout_short_canonical_vault_rolls_back_receipts() {
     assert!(resolved_receipt(&receipt).finalized);
 }
 
+// LoF/DoS sweep (cron135): resolved payout routes mutate terminal engine state before validating
+// and transferring SPL custody. Native/wrapped-SOL token accounts exercise a distinct SPL account
+// branch from malformed, short, frozen, or wrong-owner accounts; the terminal payout state must roll
+// back and remain claimable if either the destination or canonical vault is native-flagged.
+#[test]
+fn v16_attack_resolved_payouts_reject_native_accounts_before_burn() {
+    #[derive(Clone, Copy)]
+    enum ResolvedRoute {
+        CloseResolved,
+        ClaimTopup,
+    }
+
+    impl ResolvedRoute {
+        fn label(self) -> &'static str {
+            match self {
+                ResolvedRoute::CloseResolved => "CloseResolved",
+                ResolvedRoute::ClaimTopup => "ClaimResolvedPayoutTopup",
+            }
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    enum NativeSlot {
+        Dest,
+        Vault,
+    }
+
+    for route in [ResolvedRoute::CloseResolved, ResolvedRoute::ClaimTopup] {
+        for native_slot in [NativeSlot::Dest, NativeSlot::Vault] {
+            let mut env = V16CuEnv::new();
+            let owner = Keypair::new();
+            let portfolio = env.create_portfolio(&owner);
+            let payout = match route {
+                ResolvedRoute::CloseResolved => {
+                    env.deposit(&owner, portfolio, 1_000);
+                    env.resolve();
+                    1_000
+                }
+                ResolvedRoute::ClaimTopup => {
+                    let mut market_account = env.svm.get_account(&env.market).unwrap();
+                    let mut portfolio_account = env.svm.get_account(&portfolio).unwrap();
+                    let (cfg, mut group) = state::read_market(&market_account.data).unwrap();
+                    let mut account = state::read_portfolio(&portfolio_account.data).unwrap();
+                    group.mode = MarketModeV16::Resolved;
+                    group.resolved_slot = 1;
+                    group.current_slot = 1;
+                    group.vault = 60;
+                    group.payout_snapshot_captured = true;
+                    group.payout_snapshot = 100;
+                    group.resolved_payout_ledger = ResolvedPayoutLedgerV16 {
+                        snapshot_residual: 100,
+                        terminal_claim_exact_receipts_num: 100 * BOUND_SCALE,
+                        terminal_claim_bound_unreceipted_num: 0,
+                        current_payout_rate_num: 100 * BOUND_SCALE,
+                        current_payout_rate_den: 100 * BOUND_SCALE,
+                        snapshot_slot: 1,
+                        payout_halted: false,
+                        finalized: false,
+                    };
+                    account.resolved_payout_receipt =
+                        percolator::ResolvedPayoutReceiptV16Account::from_runtime(
+                            &ResolvedPayoutReceiptV16 {
+                                present: true,
+                                prior_bound_contribution_num: 100 * BOUND_SCALE,
+                                live_released_face_at_receipt: 0,
+                                terminal_positive_claim_face: 100,
+                                paid_effective: 40,
+                                finalized: false,
+                            },
+                        );
+                    state::write_market(&mut market_account.data, &cfg, &group).unwrap();
+                    state::write_portfolio(&mut portfolio_account.data, &account).unwrap();
+                    env.svm.set_account(env.market, market_account).unwrap();
+                    env.svm.set_account(portfolio, portfolio_account).unwrap();
+                    env.set_token_account_amount(env.vault, env.mint, env.vault_authority, 60);
+                    60
+                }
+            };
+
+            let dest = env.token_account_for_mint(env.mint, owner.pubkey(), 0);
+            let native_key = match native_slot {
+                NativeSlot::Dest => dest,
+                NativeSlot::Vault => env.vault,
+            };
+            let token_owner = match native_slot {
+                NativeSlot::Dest => owner.pubkey(),
+                NativeSlot::Vault => env.vault_authority,
+            };
+            let clean_native_slot = env.svm.get_account(&native_key).unwrap();
+            env.svm
+                .set_account(
+                    native_key,
+                    Account {
+                        data: make_native_flagged_token_data(
+                            env.mint,
+                            token_owner,
+                            match native_slot {
+                                NativeSlot::Dest => 0,
+                                NativeSlot::Vault => payout,
+                            },
+                        ),
+                        ..clean_native_slot.clone()
+                    },
+                )
+                .unwrap();
+
+            let market_before = env.svm.get_account(&env.market).unwrap();
+            let portfolio_before = env.svm.get_account(&portfolio).unwrap();
+            let dest_before = env.svm.get_account(&dest).unwrap();
+            let vault_before = env.svm.get_account(&env.vault).unwrap();
+
+            env.svm.expire_blockhash();
+            let rejected = match route {
+                ResolvedRoute::CloseResolved => env.send(
+                    ProgInstruction::CloseResolved {
+                        fee_rate_per_slot: 0,
+                    },
+                    vec![
+                        AccountMeta::new_readonly(owner.pubkey(), false),
+                        AccountMeta::new(env.market, false),
+                        AccountMeta::new(portfolio, false),
+                        AccountMeta::new(dest, false),
+                        AccountMeta::new(env.vault, false),
+                        AccountMeta::new_readonly(env.vault_authority, false),
+                        AccountMeta::new_readonly(spl_token::ID, false),
+                    ],
+                    &[],
+                ),
+                ResolvedRoute::ClaimTopup => env.send(
+                    ProgInstruction::ClaimResolvedPayoutTopup,
+                    vec![
+                        AccountMeta::new_readonly(owner.pubkey(), false),
+                        AccountMeta::new(env.market, false),
+                        AccountMeta::new(portfolio, false),
+                        AccountMeta::new(dest, false),
+                        AccountMeta::new(env.vault, false),
+                        AccountMeta::new_readonly(env.vault_authority, false),
+                        AccountMeta::new_readonly(spl_token::ID, false),
+                    ],
+                    &[],
+                ),
+            };
+            let label = route.label();
+            assert!(
+                rejected.is_err(),
+                "{label} must reject native-flagged terminal payout accounts before burn"
+            );
+            assert_eq!(
+                env.svm.get_account(&env.market).unwrap(),
+                market_before,
+                "{label} native-account rejection rolls back market accounting"
+            );
+            assert_eq!(
+                env.svm.get_account(&portfolio).unwrap(),
+                portfolio_before,
+                "{label} native-account rejection leaves terminal receipt/capital claimable"
+            );
+            assert_eq!(
+                env.svm.get_account(&dest).unwrap(),
+                dest_before,
+                "{label} native-account rejection pays no destination tokens"
+            );
+            assert_eq!(
+                env.svm.get_account(&env.vault).unwrap(),
+                vault_before,
+                "{label} native-account rejection leaves vault custody unchanged"
+            );
+
+            env.svm.set_account(native_key, clean_native_slot).unwrap();
+            env.svm.expire_blockhash();
+            let ok_cu = match route {
+                ResolvedRoute::CloseResolved => env
+                    .send(
+                        ProgInstruction::CloseResolved {
+                            fee_rate_per_slot: 0,
+                        },
+                        vec![
+                            AccountMeta::new_readonly(owner.pubkey(), false),
+                            AccountMeta::new(env.market, false),
+                            AccountMeta::new(portfolio, false),
+                            AccountMeta::new(dest, false),
+                            AccountMeta::new(env.vault, false),
+                            AccountMeta::new_readonly(env.vault_authority, false),
+                            AccountMeta::new_readonly(spl_token::ID, false),
+                        ],
+                        &[],
+                    )
+                    .expect("CloseResolved remains live after native-account rejection"),
+                ResolvedRoute::ClaimTopup => env
+                    .send(
+                        ProgInstruction::ClaimResolvedPayoutTopup,
+                        vec![
+                            AccountMeta::new_readonly(owner.pubkey(), false),
+                            AccountMeta::new(env.market, false),
+                            AccountMeta::new(portfolio, false),
+                            AccountMeta::new(dest, false),
+                            AccountMeta::new(env.vault, false),
+                            AccountMeta::new_readonly(env.vault_authority, false),
+                            AccountMeta::new_readonly(spl_token::ID, false),
+                        ],
+                        &[],
+                    )
+                    .expect("ClaimResolvedPayoutTopup remains live after native-account rejection"),
+            };
+            assert_cu_within(label, ok_cu, CUSTODY_CU_LIMIT);
+            assert_eq!(env.token_amount(dest), payout);
+            assert_eq!(env.token_amount(env.vault), 0);
+            if matches!(route, ResolvedRoute::ClaimTopup) {
+                let account = env.portfolio_state(portfolio);
+                assert_eq!(resolved_receipt(&account).paid_effective, 100);
+                assert!(resolved_receipt(&account).finalized);
+            }
+        }
+    }
+}
+
 #[test]
 fn v16_attack_close_resolved_requires_owner_signature_during_exit_window() {
     let mut env = V16CuEnv::new();
