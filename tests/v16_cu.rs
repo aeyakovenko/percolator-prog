@@ -74246,6 +74246,63 @@ fn v16_attack_terminal_secondary_payouts_reject_delegated_canonical_vault() {
             },
         )
         .unwrap();
+    env.svm
+        .set_account(
+            secondary_dest,
+            Account {
+                data: make_frozen_token_data(secondary, owner.pubkey(), 0),
+                ..dest_before.clone()
+            },
+        )
+        .unwrap();
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let portfolio_before = env.svm.get_account(&portfolio).unwrap();
+    let clean_secondary_before = env.svm.get_account(&secondary_vault).unwrap();
+    let frozen_dest_before = env.svm.get_account(&secondary_dest).unwrap();
+    env.svm.expire_blockhash();
+    let rejected_frozen_dest = env.send(
+        ProgInstruction::CloseResolved {
+            fee_rate_per_slot: 0,
+        },
+        vec![
+            AccountMeta::new_readonly(owner.pubkey(), false),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio, false),
+            AccountMeta::new(secondary_dest, false),
+            AccountMeta::new(secondary_vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[],
+    );
+    assert!(
+        rejected_frozen_dest.is_err(),
+        "CloseResolved must reject a frozen secondary destination"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "frozen secondary destination must roll back market accounting"
+    );
+    assert_eq!(
+        env.svm.get_account(&portfolio).unwrap(),
+        portfolio_before,
+        "frozen secondary destination must not burn the payout receipt"
+    );
+    assert_eq!(
+        env.svm.get_account(&secondary_vault).unwrap(),
+        clean_secondary_before,
+        "frozen secondary destination must not debit the secondary reserve"
+    );
+    assert_eq!(
+        env.svm.get_account(&secondary_dest).unwrap(),
+        frozen_dest_before,
+        "frozen secondary destination remains byte-identical"
+    );
+    env.svm
+        .set_account(secondary_dest, dest_before.clone())
+        .unwrap();
+
     env.svm.expire_blockhash();
     let accepted_close = env.send(
         ProgInstruction::CloseResolved {
@@ -74394,6 +74451,69 @@ fn v16_attack_terminal_secondary_payouts_reject_delegated_canonical_vault() {
             },
         )
         .unwrap();
+    topup_env
+        .svm
+        .set_account(
+            topup_dest,
+            Account {
+                data: make_frozen_token_data(topup_secondary, topup_owner.pubkey(), 0),
+                ..dest_before.clone()
+            },
+        )
+        .unwrap();
+    let market_before = topup_env.svm.get_account(&topup_env.market).unwrap();
+    let receipt_before = topup_env.svm.get_account(&topup_portfolio).unwrap();
+    let clean_secondary_before = topup_env.svm.get_account(&topup_secondary_vault).unwrap();
+    let frozen_dest_before = topup_env.svm.get_account(&topup_dest).unwrap();
+    topup_env.svm.expire_blockhash();
+    let rejected_frozen_dest = topup_env.send(
+        ProgInstruction::ClaimResolvedPayoutTopup,
+        vec![
+            AccountMeta::new_readonly(topup_owner.pubkey(), false),
+            AccountMeta::new(topup_env.market, false),
+            AccountMeta::new(topup_portfolio, false),
+            AccountMeta::new(topup_dest, false),
+            AccountMeta::new(topup_secondary_vault, false),
+            AccountMeta::new_readonly(topup_env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[],
+    );
+    assert!(
+        rejected_frozen_dest.is_err(),
+        "ClaimResolvedPayoutTopup must reject a frozen secondary destination"
+    );
+    assert_eq!(
+        topup_env.svm.get_account(&topup_env.market).unwrap(),
+        market_before,
+        "frozen secondary destination top-up must roll back market accounting"
+    );
+    assert_eq!(
+        topup_env.svm.get_account(&topup_portfolio).unwrap(),
+        receipt_before,
+        "frozen secondary destination top-up must not burn the receipt"
+    );
+    assert_eq!(
+        topup_env.svm.get_account(&topup_secondary_vault).unwrap(),
+        clean_secondary_before,
+        "frozen secondary destination top-up must not debit the secondary reserve"
+    );
+    assert_eq!(
+        topup_env.svm.get_account(&topup_dest).unwrap(),
+        frozen_dest_before,
+        "frozen secondary top-up destination remains byte-identical"
+    );
+    let receipt = topup_env.portfolio_state(topup_portfolio);
+    assert_eq!(resolved_receipt(&receipt).paid_effective, 40);
+    assert!(
+        !resolved_receipt(&receipt).finalized,
+        "receipt remains claimable after frozen secondary destination rejection"
+    );
+    topup_env
+        .svm
+        .set_account(topup_dest, dest_before.clone())
+        .unwrap();
+
     topup_env.svm.expire_blockhash();
     let accepted_topup = topup_env.send(
         ProgInstruction::ClaimResolvedPayoutTopup,
