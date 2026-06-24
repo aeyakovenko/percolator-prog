@@ -24138,6 +24138,78 @@ fn v16_attack_set_matcher_config_bad_legacy_context_rolls_back_realloc() {
     assert_eq!(auth_state.matcher_delegate, delegate.to_bytes());
 }
 
+// CU/DoS hardening: SetMatcherConfig authorizes future permissionless CPI fills by writing
+// portfolio-side matcher metadata. A stale-layout LP account must reject in owner/provenance
+// preflight before the matcher tail is written.
+#[test]
+fn v16_attack_set_matcher_config_stale_layout_rejects_without_tail_write() {
+    let mut env = V16CuEnv::new();
+    let matcher_program = Pubkey::new_unique();
+    let matcher_bytes = std::fs::read(auth_matcher_program_path()).expect("read auth matcher BPF");
+    env.svm.add_program(matcher_program, &matcher_bytes);
+    let lp_owner = Keypair::new();
+    let lp = env.create_portfolio(&lp_owner);
+    let ctx = Pubkey::new_unique();
+    let delegate = matcher_delegate_key(
+        &env.program_id,
+        &env.market,
+        &lp,
+        &lp_owner.pubkey(),
+        &matcher_program,
+        &ctx,
+    );
+    env.try_init_auth_matcher_context_with_delegate(matcher_program, &lp_owner, lp, ctx, delegate)
+        .expect("init auth matcher context");
+
+    let fresh_lp = env.svm.get_account(&lp).unwrap();
+    let mut stale_lp = fresh_lp.clone();
+    let mut stale_state = state::read_portfolio(&stale_lp.data).unwrap();
+    let current_layout = stale_state.provenance_header.layout_discriminator.get();
+    assert!(current_layout > 0, "current engine layout discriminator is nonzero");
+    stale_state.provenance_header =
+        percolator::ProvenanceHeaderV16Account::from_runtime(&percolator::ProvenanceHeaderV16 {
+            market_group_id: stale_state.provenance_header.market_group_id,
+            portfolio_account_id: stale_state.provenance_header.portfolio_account_id,
+            owner: stale_state.provenance_header.owner,
+            version: stale_state.provenance_header.version.get(),
+            layout_discriminator: current_layout - 1,
+        });
+    state::write_portfolio(&mut stale_lp.data, &stale_state).unwrap();
+    env.svm.set_account(lp, stale_lp.clone()).unwrap();
+
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::SetMatcherConfig { enabled: 1 },
+        vec![
+            AccountMeta::new(lp_owner.pubkey(), true),
+            AccountMeta::new_readonly(env.market, false),
+            AccountMeta::new(lp, false),
+            AccountMeta::new_readonly(matcher_program, false),
+            AccountMeta::new_readonly(ctx, false),
+            AccountMeta::new_readonly(delegate, false),
+        ],
+        &[&lp_owner],
+    );
+    let err = rejected.expect_err("stale-layout SetMatcherConfig must reject");
+    assert!(
+        err.contains("InvalidAccountData"),
+        "stale-layout SetMatcherConfig should fail in provenance preflight, got {err}"
+    );
+    assert_eq!(
+        env.svm.get_account(&lp).unwrap(),
+        stale_lp,
+        "stale-layout SetMatcherConfig leaves LP bytes, including matcher tail, unchanged"
+    );
+
+    env.svm.set_account(lp, fresh_lp).unwrap();
+    env.set_matcher_config(matcher_program, &lp_owner, lp, ctx, delegate, 1);
+    let auth_state = env.portfolio_matcher_config(lp);
+    assert_eq!(auth_state.matcher_req_seq, 0);
+    assert_eq!(auth_state.matcher_program, matcher_program.to_bytes());
+    assert_eq!(auth_state.matcher_context, ctx.to_bytes());
+    assert_eq!(auth_state.matcher_delegate, delegate.to_bytes());
+}
+
 #[test]
 fn v16_attack_permissionless_lp_cpi_rejects_wrong_delegate_owner_or_account_binding() {
     let mut env = V16CuEnv::new();
