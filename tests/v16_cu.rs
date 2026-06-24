@@ -72782,6 +72782,154 @@ fn v16_attack_close_slab_rejects_native_secondary_accounts_before_reclaim() {
     }
 }
 
+// LoF/DoS sweep (cron135): primary CloseSlab readonly coverage does not exercise the optional
+// secondary-reserve cleanup path. A readonly secondary vault or destination must reject before the
+// handler sweeps primary dust, closes either vault, or reclaims market rent.
+#[test]
+fn v16_attack_close_slab_rejects_readonly_secondary_accounts_before_reclaim() {
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum ReadonlyCloseSlabSlot {
+        SecondaryVault,
+        SecondaryDest,
+    }
+
+    impl ReadonlyCloseSlabSlot {
+        fn label(self) -> &'static str {
+            match self {
+                ReadonlyCloseSlabSlot::SecondaryVault => "secondary vault",
+                ReadonlyCloseSlabSlot::SecondaryDest => "secondary destination",
+            }
+        }
+    }
+
+    fn maybe_readonly(
+        key: Pubkey,
+        readonly_slot: ReadonlyCloseSlabSlot,
+        slot: ReadonlyCloseSlabSlot,
+    ) -> AccountMeta {
+        if readonly_slot == slot {
+            AccountMeta::new_readonly(key, false)
+        } else {
+            AccountMeta::new(key, false)
+        }
+    }
+
+    for readonly_slot in [
+        ReadonlyCloseSlabSlot::SecondaryVault,
+        ReadonlyCloseSlabSlot::SecondaryDest,
+    ] {
+        let mut env = V16CuEnv::new();
+        let admin = env.admin.insecure_clone();
+        let secondary_mint = env.create_mint();
+        env.update_base_unit_mints_with_cu(env.mint, secondary_mint);
+        env.set_token_account_amount(env.vault, env.mint, env.vault_authority, 7);
+        let secondary_vault = canonical_vault_ata(env.vault_authority, secondary_mint);
+        env.svm
+            .set_account(
+                secondary_vault,
+                Account {
+                    lamports: 1_000_000_000,
+                    data: make_token_data(secondary_mint, env.vault_authority, 11),
+                    owner: spl_token::ID,
+                    executable: false,
+                    rent_epoch: 0,
+                },
+            )
+            .unwrap();
+        env.resolve();
+
+        let primary_dest = env.token_account(admin.pubkey(), 0);
+        let secondary_dest = env.token_account_for_mint(secondary_mint, admin.pubkey(), 0);
+        let market_before = env.svm.get_account(&env.market).unwrap();
+        let primary_vault_before = env.svm.get_account(&env.vault).unwrap();
+        let secondary_vault_before = env.svm.get_account(&secondary_vault).unwrap();
+        let primary_dest_before = env.svm.get_account(&primary_dest).unwrap();
+        let secondary_dest_before = env.svm.get_account(&secondary_dest).unwrap();
+        let admin_before = env.svm.get_account(&admin.pubkey()).unwrap();
+
+        env.svm.expire_blockhash();
+        let rejected = env.send(
+            ProgInstruction::CloseSlab,
+            vec![
+                AccountMeta::new(admin.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(env.vault_authority, false),
+                AccountMeta::new(primary_dest, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+                maybe_readonly(
+                    secondary_vault,
+                    readonly_slot,
+                    ReadonlyCloseSlabSlot::SecondaryVault,
+                ),
+                maybe_readonly(
+                    secondary_dest,
+                    readonly_slot,
+                    ReadonlyCloseSlabSlot::SecondaryDest,
+                ),
+            ],
+            &[&admin],
+        );
+        let label = readonly_slot.label();
+        assert!(rejected.is_err(), "CloseSlab must reject readonly {label}");
+        assert_eq!(
+            env.svm.get_account(&env.market).unwrap(),
+            market_before,
+            "readonly {label} CloseSlab must not zero the market"
+        );
+        assert_eq!(
+            env.svm.get_account(&env.vault).unwrap(),
+            primary_vault_before,
+            "readonly {label} CloseSlab must not sweep or close the primary vault"
+        );
+        assert_eq!(
+            env.svm.get_account(&secondary_vault).unwrap(),
+            secondary_vault_before,
+            "readonly {label} CloseSlab must not debit or close the secondary reserve"
+        );
+        assert_eq!(
+            env.svm.get_account(&primary_dest).unwrap(),
+            primary_dest_before,
+            "readonly {label} CloseSlab must not credit the primary destination"
+        );
+        assert_eq!(
+            env.svm.get_account(&secondary_dest).unwrap(),
+            secondary_dest_before,
+            "readonly {label} CloseSlab must not credit the secondary destination"
+        );
+        assert_eq!(
+            env.svm.get_account(&admin.pubkey()).unwrap(),
+            admin_before,
+            "readonly {label} CloseSlab must not transfer market rent"
+        );
+
+        env.svm.expire_blockhash();
+        let ok = env.send(
+            ProgInstruction::CloseSlab,
+            vec![
+                AccountMeta::new(admin.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(env.vault_authority, false),
+                AccountMeta::new(primary_dest, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+                AccountMeta::new(secondary_vault, false),
+                AccountMeta::new(secondary_dest, false),
+            ],
+            &[&admin],
+        );
+        assert!(
+            ok.is_ok(),
+            "same CloseSlab succeeds once the {label} is writable: {ok:?}"
+        );
+        assert_eq!(env.token_amount(primary_dest), 7);
+        assert_eq!(env.token_amount(secondary_dest), 11);
+        let closed_market = env.svm.get_account(&env.market).unwrap();
+        assert_eq!(closed_market.lamports, 0);
+        assert!(closed_market.data.iter().all(|b| *b == 0));
+    }
+}
+
 // [from pr114]
 // full-interface sweep: a liquidation crank can carry both a hybrid-oracle tail and an optional
 // program-owned cranker reward tail. A malformed reward tail must not let the valid oracle update
