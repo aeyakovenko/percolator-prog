@@ -87861,6 +87861,155 @@ fn v16_attack_tradecpi_stale_layout_rejects_before_hostile_matcher_cpi() {
     );
 }
 
+// CU/DoS hardening: BatchTradeCpi has separate matcher return-data plumbing
+// from single TradeCpi. A stale-layout taker must still reject before the
+// hostile matcher receives a writable context.
+#[test]
+fn v16_attack_batch_tradecpi_stale_layout_rejects_before_hostile_matcher_cpi() {
+    let mut env = V16CuEnv::new();
+    let hostile = Pubkey::new_unique();
+    env.svm.add_program(
+        hostile,
+        &std::fs::read(hostile_matcher_program_path()).unwrap(),
+    );
+    let taker = Keypair::new();
+    let lp = Keypair::new();
+    let ta = env.create_portfolio(&taker);
+    let la = env.create_portfolio(&lp);
+    env.deposit(&taker, ta, 1_000_000);
+    env.deposit(&lp, la, 1_000_000);
+
+    let ctx = Pubkey::new_unique();
+    let delegate = matcher_delegate_key(
+        &env.program_id,
+        &env.market,
+        &la,
+        &lp.pubkey(),
+        &hostile,
+        &ctx,
+    );
+    env.svm
+        .set_account(
+            delegate,
+            Account {
+                lamports: 1_000_000_000,
+                data: vec![],
+                owner: Pubkey::default(),
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    let set_hostile_mode = |env: &mut V16CuEnv| {
+        let mut data = vec![0u8; MATCHER_CONTEXT_LEN];
+        data[0] = 0; // hostile over-fill: proves matcher CPI happened if reached.
+        env.svm
+            .set_account(
+                ctx,
+                Account {
+                    lamports: 1_000_000_000,
+                    data,
+                    owner: hostile,
+                    executable: false,
+                    rent_epoch: 0,
+                },
+            )
+            .unwrap();
+    };
+    set_hostile_mode(&mut env);
+    env.set_matcher_config(hostile, &lp, la, ctx, delegate, 1);
+
+    let accounts = |env: &V16CuEnv| {
+        vec![
+            AccountMeta::new(taker.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(ta, false),
+            AccountMeta::new(la, false),
+            AccountMeta::new_readonly(hostile, false),
+            AccountMeta::new(ctx, false),
+            AccountMeta::new_readonly(delegate, false),
+        ]
+    };
+    let legs = || {
+        vec![BatchTradeCpiLeg {
+            asset_index: 0,
+            size_q: POS_SCALE as i128,
+            fee_bps: 100,
+            limit_price: 0,
+        }]
+    };
+
+    env.svm.expire_blockhash();
+    let fresh_err = env
+        .send(
+            ProgInstruction::BatchTradeCpi { legs: legs() },
+            accounts(&env),
+            &[&taker],
+        )
+        .expect_err("fresh BatchTradeCpi control should reach hostile matcher validation");
+    assert!(
+        fresh_err.contains("InvalidAccountData"),
+        "fresh BatchTradeCpi control should fail from matcher-return validation, got {fresh_err}"
+    );
+
+    let mut taker_account = env.svm.get_account(&ta).unwrap();
+    let mut taker_state = state::read_portfolio(&taker_account.data).unwrap();
+    let current_layout = taker_state.provenance_header.layout_discriminator.get();
+    assert!(
+        current_layout > 0,
+        "current engine layout discriminator is nonzero"
+    );
+    taker_state.provenance_header =
+        percolator::ProvenanceHeaderV16Account::from_runtime(&percolator::ProvenanceHeaderV16 {
+            market_group_id: taker_state.provenance_header.market_group_id,
+            portfolio_account_id: taker_state.provenance_header.portfolio_account_id,
+            owner: taker_state.provenance_header.owner,
+            version: taker_state.provenance_header.version.get(),
+            layout_discriminator: current_layout - 1,
+        });
+    state::write_portfolio(&mut taker_account.data, &taker_state).unwrap();
+    env.svm.set_account(ta, taker_account).unwrap();
+    set_hostile_mode(&mut env);
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let taker_before = env.svm.get_account(&ta).unwrap();
+    let lp_before = env.svm.get_account(&la).unwrap();
+    let ctx_before = env.svm.get_account(&ctx).unwrap();
+
+    env.svm.expire_blockhash();
+    let stale_layout_err = env
+        .send(
+            ProgInstruction::BatchTradeCpi { legs: legs() },
+            accounts(&env),
+            &[&taker],
+        )
+        .expect_err("stale-layout BatchTradeCpi must reject before matcher CPI");
+    assert!(
+        stale_layout_err.contains("InvalidAccountData"),
+        "stale-layout BatchTradeCpi should fail in owner preflight, got {stale_layout_err}"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "stale-layout BatchTradeCpi leaves market bytes unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&ta).unwrap(),
+        taker_before,
+        "stale-layout BatchTradeCpi leaves taker bytes unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&la).unwrap(),
+        lp_before,
+        "stale-layout BatchTradeCpi leaves LP bytes unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&ctx).unwrap(),
+        ctx_before,
+        "stale-layout BatchTradeCpi never gives the hostile matcher a writable context"
+    );
+}
+
 // CU/DoS hardening: TradeCpi must reject impossible caller fee_bps before invoking a matcher.
 // The single-fill path has separate ctx-account return plumbing from BatchTradeCpi, so a hostile
 // matcher is used as a sentinel: valid-fee input reaches matcher-return validation, over-fee input
