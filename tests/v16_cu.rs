@@ -78527,6 +78527,185 @@ fn v16_attack_terminal_insurance_rejects_frozen_secondary_vault() {
     assert_eq!(group.vault, 60);
 }
 
+// LoF/DoS sweep (cron135): primary terminal WithdrawInsurance has malformed/native SPL-state
+// coverage, while the secondary route has canonical/delegated/frozen coverage. Exercise malformed
+// and native secondary destination/reserve accounts after terminal budget and ledger state is staged.
+#[test]
+fn v16_attack_terminal_insurance_rejects_bad_secondary_accounts_before_commit() {
+    #[derive(Clone, Copy)]
+    enum BadTokenKind {
+        Malformed,
+        Native,
+    }
+
+    impl BadTokenKind {
+        fn label(self) -> &'static str {
+            match self {
+                BadTokenKind::Malformed => "malformed",
+                BadTokenKind::Native => "native",
+            }
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    enum SecondarySlot {
+        Dest,
+        Vault,
+    }
+
+    impl SecondarySlot {
+        fn label(self) -> &'static str {
+            match self {
+                SecondarySlot::Dest => "secondary destination",
+                SecondarySlot::Vault => "secondary reserve",
+            }
+        }
+    }
+
+    for kind in [BadTokenKind::Malformed, BadTokenKind::Native] {
+        for slot in [SecondarySlot::Dest, SecondarySlot::Vault] {
+            let mut env = V16CuEnv::new();
+            let admin = env.admin.insecure_clone();
+            let secondary = env.create_mint();
+            env.update_base_unit_mints_with_cu(env.mint, secondary);
+            env.top_up_insurance(100);
+            env.resolve();
+            env.set_token_account_amount(env.vault, env.mint, env.vault_authority, 0);
+
+            let secondary_vault = canonical_vault_ata(env.vault_authority, secondary);
+            env.svm
+                .set_account(
+                    secondary_vault,
+                    Account {
+                        lamports: 1_000_000_000,
+                        data: make_token_data(secondary, env.vault_authority, 100),
+                        owner: spl_token::ID,
+                        executable: false,
+                        rent_epoch: 0,
+                    },
+                )
+                .unwrap();
+            let dest = env.token_account_for_mint(secondary, admin.pubkey(), 0);
+            let ledger = env.insurance_ledger_account();
+            let bad_key = match slot {
+                SecondarySlot::Dest => dest,
+                SecondarySlot::Vault => secondary_vault,
+            };
+            let clean_bad_account = env.svm.get_account(&bad_key).unwrap();
+            let bad_data = match kind {
+                BadTokenKind::Malformed => vec![0u8; TokenAccount::LEN - 1],
+                BadTokenKind::Native => {
+                    let (owner, amount) = match slot {
+                        SecondarySlot::Dest => (admin.pubkey(), 0),
+                        SecondarySlot::Vault => (env.vault_authority, 100),
+                    };
+                    make_native_flagged_token_data(secondary, owner, amount)
+                }
+            };
+            env.svm
+                .set_account(
+                    bad_key,
+                    Account {
+                        data: bad_data,
+                        ..clean_bad_account.clone()
+                    },
+                )
+                .unwrap();
+
+            let market_before = env.svm.get_account(&env.market).unwrap();
+            let primary_vault_before = env.svm.get_account(&env.vault).unwrap();
+            let secondary_vault_before = env.svm.get_account(&secondary_vault).unwrap();
+            let dest_before = env.svm.get_account(&dest).unwrap();
+            let ledger_before = env.svm.get_account(&ledger).unwrap();
+
+            env.svm.expire_blockhash();
+            let rejected = send_tx(
+                &mut env.svm,
+                env.program_id,
+                &env.payer,
+                ProgInstruction::WithdrawInsurance { amount: 40 },
+                vec![
+                    AccountMeta::new(admin.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(dest, false),
+                    AccountMeta::new(secondary_vault, false),
+                    AccountMeta::new_readonly(env.vault_authority, false),
+                    AccountMeta::new_readonly(spl_token::ID, false),
+                    AccountMeta::new(ledger, false),
+                ],
+                &[&admin],
+            );
+            let kind_label = kind.label();
+            let slot_label = slot.label();
+            assert!(
+                rejected.is_err(),
+                "terminal WithdrawInsurance must reject a {kind_label} {slot_label}"
+            );
+            assert_eq!(
+                env.svm.get_account(&env.market).unwrap(),
+                market_before,
+                "{kind_label} {slot_label} rejection rolls back terminal budgets"
+            );
+            assert_eq!(
+                env.svm.get_account(&ledger).unwrap(),
+                ledger_before,
+                "{kind_label} {slot_label} rejection rewrites no ledger state"
+            );
+            assert_eq!(
+                env.svm.get_account(&env.vault).unwrap(),
+                primary_vault_before,
+                "{kind_label} {slot_label} rejection leaves primary custody untouched"
+            );
+            assert_eq!(
+                env.svm.get_account(&secondary_vault).unwrap(),
+                secondary_vault_before,
+                "{kind_label} {slot_label} rejection leaves secondary reserve unchanged"
+            );
+            assert_eq!(
+                env.svm.get_account(&dest).unwrap(),
+                dest_before,
+                "{kind_label} {slot_label} rejection pays no secondary collateral"
+            );
+
+            env.svm.set_account(bad_key, clean_bad_account).unwrap();
+            env.svm.expire_blockhash();
+            let ok = send_tx(
+                &mut env.svm,
+                env.program_id,
+                &env.payer,
+                ProgInstruction::WithdrawInsurance { amount: 40 },
+                vec![
+                    AccountMeta::new(admin.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(dest, false),
+                    AccountMeta::new(secondary_vault, false),
+                    AccountMeta::new_readonly(env.vault_authority, false),
+                    AccountMeta::new_readonly(spl_token::ID, false),
+                    AccountMeta::new(ledger, false),
+                ],
+                &[&admin],
+            )
+            .expect("terminal WithdrawInsurance remains live after secondary bad-account rejection");
+            assert_cu_within(
+                "terminal WithdrawInsurance bad-secondary retry",
+                ok,
+                CUSTODY_CU_LIMIT,
+            );
+            assert_eq!(env.token_amount(dest), 40);
+            assert_eq!(env.token_amount(secondary_vault), 60);
+            assert_eq!(env.token_amount(env.vault), 0);
+            let ledger_state =
+                state::read_insurance_ledger(&env.svm.get_account(&ledger).unwrap().data)
+                    .unwrap();
+            assert_eq!(ledger_state.total_withdrawn_atoms, 40);
+            assert_eq!(ledger_state.last_observed_insurance_atoms, 60);
+            let (_, group) = env.market_state();
+            assert_eq!(group.insurance, 60);
+            assert_eq!(group.vault, 60);
+        }
+    }
+}
+
 #[test]
 fn v16_attack_lp_can_disable_broken_matcher_config_without_external_accounts() {
     let mut env = V16CuEnv::new();
