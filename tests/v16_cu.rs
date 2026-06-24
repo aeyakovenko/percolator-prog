@@ -10412,14 +10412,17 @@ fn v16_attack_zero_work_liquidation_does_not_report_successful_noop() {
     )));
 }
 
-// Public auto-crank error propagation: if the engine-selected refresh needs an observation and
-// the keeper supplies none, the wrapper must surface the engine NonProgress error instead of
-// reporting a successful no-op. A later call with the missing observation proves liveness remains.
+// Public auto-crank committed-state liveness: after engine 8338726, active-asset refresh can use
+// the committed market price and must not require a fresh oracle observation. The only remaining
+// missing-observation NonProgress case is the no-active-asset refresh fallback, where the engine has
+// no selected account leg from which to choose a committed asset.
 #[test]
-fn v16_attack_missing_observation_crank_propagates_nonprogress_error() {
+fn v16_attack_active_refresh_without_observation_uses_committed_state() {
     let mut env = V16CuEnv::new();
+    let empty_owner = Keypair::new();
     let long_owner = Keypair::new();
     let short_owner = Keypair::new();
+    let empty_account = env.create_portfolio(&empty_owner);
     let long_account = env.create_portfolio(&long_owner);
     let short_account = env.create_portfolio(&short_owner);
     env.deposit(&long_owner, long_account, 1_000_000);
@@ -10449,13 +10452,38 @@ fn v16_attack_missing_observation_crank_propagates_nonprogress_error() {
     assert!(
         health_cert(&env.portfolio_state(short_account)).cert_oracle_epoch
             < group_after_mark.oracle_epoch,
-        "mark push must make the target portfolio stale before probing NonProgress"
+        "mark push must make the active target stale before probing committed-state refresh"
     );
 
-    let market_before = env.svm.get_account(&env.market).unwrap();
+    let empty_before = env.svm.get_account(&empty_account).unwrap();
+    env.svm.expire_blockhash();
+    let no_active_missing_observation = env.send(
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 1,
+            close_q: 0,
+            observations: vec![],
+        },
+        vec![
+            AccountMeta::new(env.payer.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(empty_account, false),
+        ],
+        &[],
+    );
+    assert!(
+        no_active_missing_observation.is_err(),
+        "no-active fallback refresh still needs at least one observation"
+    );
+    assert_eq!(
+        env.svm.get_account(&empty_account).unwrap(),
+        empty_before,
+        "no-active missing-observation rejection must not mutate the empty target"
+    );
+
+    let (_, group_before_active) = env.market_state();
     let short_before = env.svm.get_account(&short_account).unwrap();
     env.svm.expire_blockhash();
-    let missing_observation = env.send(
+    let active_committed_refresh = env.send(
         ProgInstruction::PermissionlessCrank {
             now_slot: 1,
             close_q: 0,
@@ -10469,32 +10497,33 @@ fn v16_attack_missing_observation_crank_propagates_nonprogress_error() {
         &[],
     );
     assert!(
-        missing_observation.is_err(),
-        "missing-observation auto-crank must propagate engine NonProgress as an instruction error"
+        active_committed_refresh.is_ok(),
+        "active-asset refresh must use committed state without requiring a fresh observation: {active_committed_refresh:?}"
+    );
+    assert_cu_within(
+        "active refresh without observation",
+        active_committed_refresh.unwrap(),
+        CRANK_CU_LIMIT,
+    );
+    let (_, group_after_active) = env.market_state();
+    assert_eq!(
+        group_after_active.assets[0].effective_price, group_before_active.assets[0].effective_price,
+        "committed-state refresh must not require a new oracle price"
     );
     assert_eq!(
-        env.svm.get_account(&env.market).unwrap(),
-        market_before,
-        "missing-observation rejection must not mutate market state"
+        group_after_active.vault, group_before_active.vault,
+        "committed-state refresh must not move custody"
     );
-    assert_eq!(
-        env.svm.get_account(&short_account).unwrap(),
-        short_before,
-        "missing-observation rejection must not mutate the target portfolio"
-    );
-
-    env.crank(
-        short_account,
-        ProgInstruction::PermissionlessCrank {
-            now_slot: 1,
-            close_q: 0,
-            observations: crank_observations(0),
-        },
+    assert_eq!(group_after_active.vault as u64, env.token_amount(env.vault));
+    assert_ne!(
+        env.svm.get_account(&short_account).unwrap().data,
+        short_before.data,
+        "committed-state refresh must update the stale target portfolio"
     );
     assert_eq!(
         health_cert(&env.portfolio_state(short_account)).cert_oracle_epoch,
         env.market_state().1.oracle_epoch,
-        "same selected refresh remains live once the keeper supplies the required observation"
+        "active target cert becomes current from committed engine state"
     );
 }
 
