@@ -12544,6 +12544,109 @@ fn v16_bpf_close_resolved_moves_payout_tokens_with_ledger() {
     assert_eq!(account.capital.get(), 0);
 }
 
+// CU/LoF hardening: CloseResolved burns terminal payout state before transferring vault tokens
+// on the success path. A stale embedded engine layout must reject before payout state or custody
+// can move, and the same account must remain closeable after its layout is restored.
+#[test]
+fn v16_attack_close_resolved_stale_layout_rejects_before_payout() {
+    let mut env = V16CuEnv::new();
+    let owner = Keypair::new();
+    let portfolio = env.create_portfolio(&owner);
+    env.deposit(&owner, portfolio, 1_000);
+    env.resolve();
+
+    let dest = env.token_account(owner.pubkey(), 0);
+    let fresh_portfolio = env.svm.get_account(&portfolio).unwrap();
+    let mut stale_portfolio = fresh_portfolio.clone();
+    let mut stale_state = state::read_portfolio(&stale_portfolio.data).unwrap();
+    let current_layout = stale_state.provenance_header.layout_discriminator.get();
+    assert!(current_layout > 0, "current engine layout discriminator is nonzero");
+    stale_state.provenance_header =
+        percolator::ProvenanceHeaderV16Account::from_runtime(&percolator::ProvenanceHeaderV16 {
+            market_group_id: stale_state.provenance_header.market_group_id,
+            portfolio_account_id: stale_state.provenance_header.portfolio_account_id,
+            owner: stale_state.provenance_header.owner,
+            version: stale_state.provenance_header.version.get(),
+            layout_discriminator: current_layout - 1,
+        });
+    state::write_portfolio(&mut stale_portfolio.data, &stale_state).unwrap();
+    env.svm
+        .set_account(portfolio, stale_portfolio.clone())
+        .unwrap();
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    let dest_before = env.svm.get_account(&dest).unwrap();
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::CloseResolved {
+            fee_rate_per_slot: 0,
+        },
+        vec![
+            AccountMeta::new_readonly(owner.pubkey(), false),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio, false),
+            AccountMeta::new(dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[],
+    );
+    let err = rejected.expect_err("stale-layout CloseResolved must reject");
+    assert!(
+        err.contains("Custom(16)") || err.contains("custom program error: 0x10"),
+        "stale-layout CloseResolved should fail as EngineProvenanceMismatch before payout, got {err}"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "stale-layout CloseResolved leaves market accounting unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&portfolio).unwrap(),
+        stale_portfolio,
+        "stale-layout CloseResolved leaves terminal portfolio bytes unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        vault_before,
+        "stale-layout CloseResolved moves no vault tokens"
+    );
+    assert_eq!(
+        env.svm.get_account(&dest).unwrap(),
+        dest_before,
+        "stale-layout CloseResolved pays no destination tokens"
+    );
+
+    env.svm.set_account(portfolio, fresh_portfolio).unwrap();
+    env.svm.expire_blockhash();
+    let close_cu = env
+        .send(
+            ProgInstruction::CloseResolved {
+                fee_rate_per_slot: 0,
+            },
+            vec![
+                AccountMeta::new_readonly(owner.pubkey(), false),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(portfolio, false),
+                AccountMeta::new(dest, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(env.vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[],
+        )
+        .expect("restored CloseResolved must pay out");
+    assert_cu_within(
+        "restored stale-layout CloseResolved",
+        close_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    assert_eq!(env.token_amount(dest), 1_000);
+    assert_eq!(env.token_amount(env.vault), 0);
+}
+
 // LoF/DoS sweep (cron135): PermissionlessCrank is the public keeper route. Once the
 // market is Resolved, it must forward to the resolved-close path before trying to
 // parse live-mode crank observations; otherwise stale keeper hints could block
