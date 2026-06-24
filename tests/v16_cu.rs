@@ -88699,8 +88699,10 @@ fn v16_bpf_10m_market_refresh_high_asset_stays_bounded() {
     let account_len = grow_market_to_10m_with_high_active_asset(&mut env, N, HIGH_ASSET, PRICE);
     env.portfolio_account_len = state::portfolio_account_len_for_market_slots(N).unwrap();
 
+    let empty_owner = Keypair::new();
     let long_owner = Keypair::new();
     let short_owner = Keypair::new();
+    let empty = env.create_portfolio(&empty_owner);
     let long = env.create_portfolio(&long_owner);
     let short = env.create_portfolio(&short_owner);
     env.deposit(&long_owner, long, 1_000_000);
@@ -88784,13 +88786,58 @@ fn v16_bpf_10m_market_refresh_high_asset_stays_bounded() {
     );
     assert!(
         health_cert(&env.portfolio_state(short)).cert_oracle_epoch < after_first_group.oracle_epoch,
-        "first high-asset refresh must leave the counterparty stale for the missing-observation probe"
+        "first high-asset refresh must leave the counterparty stale for the committed-state probe"
     );
 
-    let missing_market_before = env.svm.get_account(&env.market).unwrap();
+    let (_, missing_group_before) = env.market_state();
     let missing_short_before = env.svm.get_account(&short).unwrap();
     env.svm.expire_blockhash();
-    let missing_observation = env.send(
+    let committed_refresh_cu = env
+        .send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: REFRESH_SLOT,
+                close_q: 0,
+                observations: vec![],
+            },
+            vec![
+                AccountMeta::new(env.payer.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(short, false),
+            ],
+            &[],
+        )
+        .expect("stale 10MiB high-asset refresh must use committed state without an observation");
+    println!(
+        "v16 10MiB PermissionlessCrank Refresh committed-state: assets={N}, \
+         account_len={account_len}, asset={HIGH_ASSET}, CU={committed_refresh_cu}"
+    );
+    assert_cu_within(
+        "10MiB PermissionlessCrank committed-state refresh",
+        committed_refresh_cu,
+        CRANK_CU_LIMIT,
+    );
+    let (_, missing_group_after) = env.market_state();
+    assert_eq!(
+        missing_group_after.vault, missing_group_before.vault,
+        "committed-state high-tail refresh must not move custody"
+    );
+    assert_eq!(
+        missing_group_after.vault as u64,
+        env.token_amount(env.vault)
+    );
+    assert_ne!(
+        env.svm.get_account(&short).unwrap().data,
+        missing_short_before.data,
+        "committed-state high-tail refresh must update the stale portfolio"
+    );
+    assert_eq!(
+        health_cert(&env.portfolio_state(short)).cert_oracle_epoch,
+        missing_group_after.oracle_epoch,
+        "committed-state high-tail refresh must make the counterparty current"
+    );
+
+    env.svm.expire_blockhash();
+    let no_active_missing_observation = env.send(
         ProgInstruction::PermissionlessCrank {
             now_slot: REFRESH_SLOT,
             close_q: 0,
@@ -88799,25 +88846,13 @@ fn v16_bpf_10m_market_refresh_high_asset_stays_bounded() {
         vec![
             AccountMeta::new(env.payer.pubkey(), true),
             AccountMeta::new(env.market, false),
-            AccountMeta::new(short, false),
+            AccountMeta::new(empty, false),
         ],
         &[],
     );
-    let missing_err = missing_observation
-        .expect_err("stale 10MiB high-asset refresh without the selected observation must reject");
     assert!(
-        !missing_err.contains("exceeded CUs"),
-        "stale 10MiB missing-observation refresh must fail by engine NonProgress, not CU exhaustion: {missing_err}"
-    );
-    assert_eq!(
-        env.svm.get_account(&env.market).unwrap(),
-        missing_market_before,
-        "stale 10MiB missing-observation rejection must not mutate the market"
-    );
-    assert_eq!(
-        env.svm.get_account(&short).unwrap(),
-        missing_short_before,
-        "stale 10MiB missing-observation rejection must not mutate the high-asset portfolio"
+        no_active_missing_observation.is_err(),
+        "no-active 10MiB fallback still rejects a missing observation without CU exhaustion"
     );
 
     env.svm.expire_blockhash();
