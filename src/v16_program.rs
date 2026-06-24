@@ -6423,18 +6423,27 @@ pub mod processor {
 
     fn validate_matcher_tail<'a>(
         tail: &'a [AccountInfo<'a>],
+        signer_a_ai: &AccountInfo,
         market_ai: &AccountInfo,
         account_a_ai: &AccountInfo,
         account_b_ai: &AccountInfo,
+        matcher_prog: &AccountInfo,
+        matcher_ctx: &AccountInfo,
+        matcher_delegate: &AccountInfo,
         program_id: &Pubkey,
     ) -> ProgramResult {
         if tail.len() > constants::MAX_MATCHER_TAIL_ACCOUNTS {
             return Err(PercolatorError::InvalidInstruction.into());
         }
         for ai in tail {
-            if ai.key == market_ai.key
+            if ai.is_signer
+                || ai.key == signer_a_ai.key
+                || ai.key == market_ai.key
                 || ai.key == account_a_ai.key
                 || ai.key == account_b_ai.key
+                || ai.key == matcher_prog.key
+                || ai.key == matcher_ctx.key
+                || ai.key == matcher_delegate.key
                 || ai.key == program_id
                 || ai.owner == program_id
             {
@@ -6535,7 +6544,17 @@ pub mod processor {
         let tail = accounts
             .get(tail_start..)
             .ok_or(ProgramError::NotEnoughAccountKeys)?;
-        validate_matcher_tail(tail, market_ai, account_a_ai, account_b_ai, program_id)?;
+        validate_matcher_tail(
+            tail,
+            signer_a,
+            market_ai,
+            account_a_ai,
+            account_b_ai,
+            matcher_prog,
+            matcher_ctx,
+            matcher_delegate,
+            program_id,
+        )?;
         if size_q == 0 || size_q == i128::MIN {
             return Err(PercolatorError::InvalidInstruction.into());
         }
@@ -6871,7 +6890,17 @@ pub mod processor {
         let tail = accounts
             .get(tail_start..)
             .ok_or(ProgramError::NotEnoughAccountKeys)?;
-        validate_matcher_tail(tail, market_ai, account_a_ai, account_b_ai, program_id)?;
+        validate_matcher_tail(
+            tail,
+            signer_a,
+            market_ai,
+            account_a_ai,
+            account_b_ai,
+            matcher_prog,
+            matcher_ctx,
+            matcher_delegate,
+            program_id,
+        )?;
 
         let req_id = {
             let mut market_data = market_ai.try_borrow_mut_data()?;

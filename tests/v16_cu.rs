@@ -39622,6 +39622,147 @@ fn v16_attack_tradecpi_matcher_tail_cannot_carry_protocol_state() {
     );
 }
 
+// security.md sweep - matcher-tail signer isolation (#22/#44/#49): the tail forwarded to an
+// external matcher must not include the taker wallet signer. If it does, a hostile matcher can use
+// that signer privilege in a nested System Program transfer before returning an otherwise valid fill.
+#[test]
+fn v16_attack_tradecpi_matcher_tail_cannot_forward_taker_signer() {
+    let mut env = V16CuEnv::new();
+    let hostile = Pubkey::new_unique();
+    env.svm.add_program(
+        hostile,
+        &std::fs::read(hostile_matcher_program_path()).unwrap(),
+    );
+    let taker = Keypair::new();
+    let lp = Keypair::new();
+    let taker_account = env.create_portfolio(&taker);
+    let lp_account = env.create_portfolio(&lp);
+    env.deposit(&taker, taker_account, 1_000_000);
+    env.deposit(&lp, lp_account, 1_000_000);
+
+    let ctx = Pubkey::new_unique();
+    let delegate = matcher_delegate_key(
+        &env.program_id,
+        &env.market,
+        &lp_account,
+        &lp.pubkey(),
+        &hostile,
+        &ctx,
+    );
+    env.svm
+        .set_account(
+            delegate,
+            Account {
+                lamports: 1_000_000_000,
+                data: vec![],
+                owner: Pubkey::default(),
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    let mut ctx_data = vec![0u8; MATCHER_CONTEXT_LEN];
+    ctx_data[0] = 14; // hostile mode: transfer lamports from tail[0] to tail[1], then return valid fill.
+    env.svm
+        .set_account(
+            ctx,
+            Account {
+                lamports: 1_000_000_000,
+                data: ctx_data,
+                owner: hostile,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    env.set_matcher_config(hostile, &lp, lp_account, ctx, delegate, 1);
+
+    let recipient = Pubkey::new_unique();
+    env.svm
+        .set_account(
+            recipient,
+            Account {
+                lamports: 1,
+                data: vec![],
+                owner: solana_sdk::system_program::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let taker_before = env.svm.get_account(&taker_account).unwrap();
+    let lp_before = env.svm.get_account(&lp_account).unwrap();
+    let ctx_before = env.svm.get_account(&ctx).unwrap();
+    let taker_wallet_before = env.svm.get_account(&taker.pubkey()).unwrap();
+    let recipient_before = env.svm.get_account(&recipient).unwrap();
+
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::TradeCpi {
+            asset_index: 0,
+            size_q: (5 * POS_SCALE) as i128,
+            fee_bps: 100,
+            limit_price: 0,
+        },
+        vec![
+            AccountMeta::new(taker.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(taker_account, false),
+            AccountMeta::new(lp_account, false),
+            AccountMeta::new_readonly(hostile, false),
+            AccountMeta::new(ctx, false),
+            AccountMeta::new_readonly(delegate, false),
+            AccountMeta::new(taker.pubkey(), true),
+            AccountMeta::new(recipient, false),
+            AccountMeta::new_readonly(solana_sdk::system_program::ID, false),
+        ],
+        &[&taker],
+    );
+    let rejected_err = rejected.expect_err(
+        "TradeCpi must not forward the taker wallet signer into a hostile matcher tail",
+    );
+    assert!(
+        rejected_err.contains("Custom(9)") || rejected_err.contains("custom program error: 0x9"),
+        "taker-signer matcher tail must reject in wrapper preflight as InvalidInstruction, got {rejected_err}"
+    );
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+    assert_eq!(env.svm.get_account(&taker_account).unwrap(), taker_before);
+    assert_eq!(env.svm.get_account(&lp_account).unwrap(), lp_before);
+    assert_eq!(env.svm.get_account(&ctx).unwrap(), ctx_before);
+    assert_eq!(
+        env.svm.get_account(&taker.pubkey()).unwrap(),
+        taker_wallet_before,
+        "rejected matcher-tail signer forwarding must not debit the taker wallet"
+    );
+    assert_eq!(
+        env.svm.get_account(&recipient).unwrap(),
+        recipient_before,
+        "hostile matcher must not receive lamports from the taker wallet"
+    );
+
+    let mut honest_ctx = env.svm.get_account(&ctx).unwrap();
+    honest_ctx.data[0] = 9;
+    env.svm.set_account(ctx, honest_ctx).unwrap();
+    env.svm.expire_blockhash();
+    let ok = env.try_trade_cpi_with_cu_on_asset(
+        &taker,
+        taker_account,
+        &lp,
+        lp_account,
+        hostile,
+        ctx,
+        delegate,
+        0,
+        (5 * POS_SCALE) as i128,
+        100,
+    );
+    assert!(
+        ok.is_ok(),
+        "the same authorized hostile fixture fills when no wallet signer is forwarded: {ok:?}"
+    );
+}
+
 // security.md sweep - BatchTradeCpi matcher-tail isolation (#9/#27): the batched CPI fill path also
 // forwards optional remaining accounts to an external matcher. It must reject the market account and
 // any Percolator-owned portfolio in that tail, then still accept a clean permissionless LP fill.
@@ -39725,6 +39866,159 @@ fn v16_attack_batch_tradecpi_matcher_tail_cannot_carry_protocol_state() {
     assert!(
         has_active_leg_for_asset(&taker_state, 1),
         "clean batch fills asset 1"
+    );
+}
+
+// security.md sweep - batch matcher-tail signer isolation (#22/#44/#49): the batched CPI route must
+// apply the same signer-forwarding boundary as single TradeCpi. A hostile matcher must not receive
+// the taker wallet signer through the tail and use it in a nested System Program transfer.
+#[test]
+fn v16_attack_batch_tradecpi_matcher_tail_cannot_forward_taker_signer() {
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(2, 1_000, 1_000, 500);
+    env.configure_auth_mark_for_asset_as_admin(0, 1, 100);
+    env.configure_auth_mark_for_asset_as_admin(1, 1, 100);
+    let hostile = Pubkey::new_unique();
+    env.svm.add_program(
+        hostile,
+        &std::fs::read(hostile_matcher_program_path()).unwrap(),
+    );
+    let taker = Keypair::new();
+    let lp = Keypair::new();
+    let taker_account = env.create_portfolio(&taker);
+    let lp_account = env.create_portfolio(&lp);
+    env.deposit(&taker, taker_account, 1_000_000);
+    env.deposit(&lp, lp_account, 1_000_000);
+
+    let ctx = Pubkey::new_unique();
+    let delegate = matcher_delegate_key(
+        &env.program_id,
+        &env.market,
+        &lp_account,
+        &lp.pubkey(),
+        &hostile,
+        &ctx,
+    );
+    env.svm
+        .set_account(
+            delegate,
+            Account {
+                lamports: 1_000_000_000,
+                data: vec![],
+                owner: Pubkey::default(),
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    let mut ctx_data = vec![0u8; MATCHER_CONTEXT_LEN];
+    ctx_data[0] = 14;
+    env.svm
+        .set_account(
+            ctx,
+            Account {
+                lamports: 1_000_000_000,
+                data: ctx_data,
+                owner: hostile,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    env.set_matcher_config(hostile, &lp, lp_account, ctx, delegate, 1);
+
+    let recipient = Pubkey::new_unique();
+    env.svm
+        .set_account(
+            recipient,
+            Account {
+                lamports: 1,
+                data: vec![],
+                owner: solana_sdk::system_program::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let taker_before = env.svm.get_account(&taker_account).unwrap();
+    let lp_before = env.svm.get_account(&lp_account).unwrap();
+    let ctx_before = env.svm.get_account(&ctx).unwrap();
+    let taker_wallet_before = env.svm.get_account(&taker.pubkey()).unwrap();
+    let recipient_before = env.svm.get_account(&recipient).unwrap();
+    let legs = vec![
+        BatchTradeCpiLeg {
+            asset_index: 0,
+            size_q: (5 * POS_SCALE) as i128,
+            fee_bps: 100,
+            limit_price: 0,
+        },
+        BatchTradeCpiLeg {
+            asset_index: 1,
+            size_q: -(5 * POS_SCALE as i128),
+            fee_bps: 100,
+            limit_price: 0,
+        },
+    ];
+
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::BatchTradeCpi { legs: legs.clone() },
+        vec![
+            AccountMeta::new(taker.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(taker_account, false),
+            AccountMeta::new(lp_account, false),
+            AccountMeta::new_readonly(hostile, false),
+            AccountMeta::new(ctx, false),
+            AccountMeta::new_readonly(delegate, false),
+            AccountMeta::new(taker.pubkey(), true),
+            AccountMeta::new(recipient, false),
+            AccountMeta::new_readonly(solana_sdk::system_program::ID, false),
+        ],
+        &[&taker],
+    );
+    let rejected_err = rejected.expect_err(
+        "BatchTradeCpi must not forward the taker wallet signer into a hostile matcher tail",
+    );
+    assert!(
+        rejected_err.contains("Custom(9)") || rejected_err.contains("custom program error: 0x9"),
+        "batch taker-signer matcher tail must reject in wrapper preflight as InvalidInstruction, got {rejected_err}"
+    );
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+    assert_eq!(env.svm.get_account(&taker_account).unwrap(), taker_before);
+    assert_eq!(env.svm.get_account(&lp_account).unwrap(), lp_before);
+    assert_eq!(env.svm.get_account(&ctx).unwrap(), ctx_before);
+    assert_eq!(
+        env.svm.get_account(&taker.pubkey()).unwrap(),
+        taker_wallet_before,
+        "rejected batch signer forwarding must not debit the taker wallet"
+    );
+    assert_eq!(
+        env.svm.get_account(&recipient).unwrap(),
+        recipient_before,
+        "hostile batch matcher must not receive lamports from the taker wallet"
+    );
+
+    let mut honest_ctx = env.svm.get_account(&ctx).unwrap();
+    honest_ctx.data[0] = 9;
+    env.svm.set_account(ctx, honest_ctx).unwrap();
+    env.svm.expire_blockhash();
+    let ok = env.send(
+        ProgInstruction::BatchTradeCpi { legs },
+        vec![
+            AccountMeta::new(taker.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(taker_account, false),
+            AccountMeta::new(lp_account, false),
+            AccountMeta::new_readonly(hostile, false),
+            AccountMeta::new(ctx, false),
+            AccountMeta::new_readonly(delegate, false),
+        ],
+        &[&taker],
+    );
+    assert!(
+        ok.is_ok(),
+        "the same authorized hostile fixture batch-fills when no wallet signer is forwarded: {ok:?}"
     );
 }
 

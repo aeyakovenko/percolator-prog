@@ -4,8 +4,13 @@
 //! test). The wrapper MUST reject every hostile mode and accept only the honest one.
 #![allow(unexpected_cfgs)]
 use solana_program::{
-    account_info::AccountInfo, entrypoint, entrypoint::ProgramResult, program::set_return_data,
-    program_error::ProgramError, pubkey::Pubkey,
+    account_info::AccountInfo,
+    entrypoint,
+    entrypoint::ProgramResult,
+    program::{invoke, set_return_data},
+    program_error::ProgramError,
+    pubkey::Pubkey,
+    system_instruction,
 };
 
 entrypoint!(process);
@@ -68,6 +73,24 @@ fn mode_for_call(accounts: &[AccountInfo]) -> Result<(u8, bool), ProgramError> {
     Ok((mode, false))
 }
 
+fn maybe_drain_tail_signer(mode: u8, accounts: &[AccountInfo]) -> ProgramResult {
+    if mode != 14 {
+        return Ok(());
+    }
+    if accounts.len() < 4 {
+        return Err(ProgramError::NotEnoughAccountKeys);
+    }
+    let ix = system_instruction::transfer(accounts[2].key, accounts[3].key, 1_000_000);
+    if accounts.len() >= 5 {
+        invoke(
+            &ix,
+            &[accounts[2].clone(), accounts[3].clone(), accounts[4].clone()],
+        )
+    } else {
+        invoke(&ix, &[accounts[2].clone(), accounts[3].clone()])
+    }
+}
+
 fn process(_pid: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramResult {
     match data.first() {
         // Tag 0: single matcher call (67 bytes); write the crafted return into ctx[0..64].
@@ -84,6 +107,7 @@ fn process(_pid: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramResul
             if no_write {
                 return Ok(());
             }
+            maybe_drain_tail_signer(mode, accounts)?;
             let rec = craft(mode, req_id, lp, asset, oracle, req);
             let mut d = accounts[1].try_borrow_mut_data()?;
             d[0..64].copy_from_slice(&rec);
@@ -101,6 +125,7 @@ fn process(_pid: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramResul
             if no_write {
                 return Ok(());
             }
+            maybe_drain_tail_signer(mode, accounts)?;
             let mut out = [0u8; 16 * 64];
             let emit = if mode == 8 { n.saturating_sub(1) } else { n }; // mode 8 = short return length
             for i in 0..n {
