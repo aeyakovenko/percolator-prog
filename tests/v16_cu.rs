@@ -40003,6 +40003,162 @@ fn v16_attack_swap_secondary_unauthorized_and_bounded() {
     );
 }
 
+// LoF/DoS sweep (cron135): SwapSecondaryForPrimary validates both canonical vault rails before
+// performing the user-signed primary transfer and the vault-signed secondary transfer. A delegated
+// secondary reserve or closable primary reserve must reject before either CPI moves custody; otherwise
+// the market authority could strand/unsafe-route one side of the base-unit bridge.
+#[test]
+fn v16_attack_swap_secondary_rejects_delegated_or_closable_vaults_before_transfer() {
+    let mut env = V16CuEnv::new();
+    let admin = env.admin.insecure_clone();
+    let secondary_mint = env.create_mint();
+    env.update_base_unit_mints_with_cu(env.mint, secondary_mint);
+    let secondary_vault = canonical_vault_ata(env.vault_authority, secondary_mint);
+    env.svm
+        .set_account(
+            secondary_vault,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_delegated_token_data(secondary_mint, env.vault_authority, 25),
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+
+    let admin_primary = env.token_account_for_mint(env.mint, admin.pubkey(), 25);
+    let admin_secondary = env.token_account_for_mint(secondary_mint, admin.pubkey(), 0);
+    let send_swap = |env: &mut V16CuEnv| {
+        env.svm.expire_blockhash();
+        send_tx(
+            &mut env.svm,
+            env.program_id,
+            &env.payer,
+            ProgInstruction::SwapSecondaryForPrimary { amount: 10 },
+            vec![
+                AccountMeta::new(admin.pubkey(), true),
+                AccountMeta::new_readonly(env.market, false),
+                AccountMeta::new(admin_primary, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new(admin_secondary, false),
+                AccountMeta::new(secondary_vault, false),
+                AccountMeta::new_readonly(env.vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[&admin],
+        )
+    };
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let primary_source_before = env.svm.get_account(&admin_primary).unwrap();
+    let primary_vault_before = env.svm.get_account(&env.vault).unwrap();
+    let secondary_dest_before = env.svm.get_account(&admin_secondary).unwrap();
+    let delegated_secondary_before = env.svm.get_account(&secondary_vault).unwrap();
+    let delegated_secondary = send_swap(&mut env);
+    assert!(
+        delegated_secondary.is_err(),
+        "SwapSecondaryForPrimary must reject a delegated canonical secondary reserve"
+    );
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+    assert_eq!(
+        env.svm.get_account(&admin_primary).unwrap(),
+        primary_source_before,
+        "delegated-secondary rejection must not pull primary collateral"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        primary_vault_before,
+        "delegated-secondary rejection must not credit the primary vault"
+    );
+    assert_eq!(
+        env.svm.get_account(&admin_secondary).unwrap(),
+        secondary_dest_before,
+        "delegated-secondary rejection must not pay secondary collateral"
+    );
+    assert_eq!(
+        env.svm.get_account(&secondary_vault).unwrap(),
+        delegated_secondary_before,
+        "delegated secondary reserve remains untouched"
+    );
+
+    env.svm
+        .set_account(
+            secondary_vault,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_token_data(secondary_mint, env.vault_authority, 25),
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    env.svm
+        .set_account(
+            env.vault,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_closable_token_data(env.mint, env.vault_authority, 0),
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    let primary_source_before = env.svm.get_account(&admin_primary).unwrap();
+    let closable_primary_before = env.svm.get_account(&env.vault).unwrap();
+    let secondary_dest_before = env.svm.get_account(&admin_secondary).unwrap();
+    let secondary_vault_before = env.svm.get_account(&secondary_vault).unwrap();
+    let closable_primary = send_swap(&mut env);
+    assert!(
+        closable_primary.is_err(),
+        "SwapSecondaryForPrimary must reject a closable canonical primary vault"
+    );
+    assert_eq!(
+        env.svm.get_account(&admin_primary).unwrap(),
+        primary_source_before,
+        "closable-primary rejection must not pull primary collateral"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        closable_primary_before,
+        "closable primary vault remains untouched"
+    );
+    assert_eq!(
+        env.svm.get_account(&admin_secondary).unwrap(),
+        secondary_dest_before,
+        "closable-primary rejection must not pay secondary collateral"
+    );
+    assert_eq!(
+        env.svm.get_account(&secondary_vault).unwrap(),
+        secondary_vault_before,
+        "closable-primary rejection must not debit the secondary reserve"
+    );
+
+    env.svm
+        .set_account(
+            env.vault,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_token_data(env.mint, env.vault_authority, 0),
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    let ok = send_swap(&mut env);
+    assert!(
+        ok.is_ok(),
+        "same secondary swap succeeds after both canonical vaults are clean: {ok:?}"
+    );
+    assert_eq!(env.token_amount(admin_primary), 15);
+    assert_eq!(env.token_amount(env.vault), 10);
+    assert_eq!(env.token_amount(admin_secondary), 10);
+    assert_eq!(env.token_amount(secondary_vault), 15);
+}
+
 // security.md sweep - SwapSecondaryForPrimary account aliasing (#26/#35/#44): the primary source must
 // be an authority-owned token account and the secondary destination must be authority-owned. Otherwise
 // the authority could pass the primary vault as both source and destination for a no-op primary transfer
