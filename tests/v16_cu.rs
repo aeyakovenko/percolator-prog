@@ -71528,67 +71528,6 @@ fn v16_attack_recovery_user_tools_reject_invalid_final_shape_atomically() {
 }
 
 // [from pr125]
-// DoS/safety sweep — permissionless SettleB (PermissionlessCrank action=2) cannot corrupt or drain a
-// healthy account. SettleB is the bankrupt-account chunk-settlement crank; it is PERMISSIONLESS (anyone
-// may target any portfolio) and, unlike Liquidate (action=1), pays NO cranker reward. The existing crank
-// tests only exercise action=0 (Refresh) and action=1 (Liquidate) — the action=2 dispatch is otherwise
-// untested end-to-end. A SettleB on a flat, solvent account has nothing to settle, so it MUST be a safe
-// no-op for value: the account's capital and the market's vault/c_tot are conserved, no reward is minted,
-// and the owner can still withdraw in full afterward (no fund-trap). Guards the untested permissionless
-// dispatch against being abused to corrupt, drain, or freeze an unrelated healthy account.
-#[test]
-fn v16_attack_permissionless_settle_b_on_healthy_account_is_safe_noop() {
-    let mut env = V16CuEnv::new();
-    let owner = Keypair::new();
-    let p = env.create_portfolio(&owner);
-    env.deposit(&owner, p, 1_000); // flat, solvent — nothing to settle
-
-    let (_, g0) = env.market_state();
-    let cap0 = env.portfolio_state(p).capital.get();
-    assert_eq!(cap0, 1_000, "account funded and flat");
-
-    // A third party permissionlessly cranks SettleB (action=2) against the healthy account.
-    env.svm.warp_to_slot(5);
-    env.svm.expire_blockhash();
-    let _ = env.send(
-        ProgInstruction::PermissionlessCrank {
-            now_slot: 5,
-            close_q: 0,
-            observations: crank_observations(0),
-        },
-        vec![
-            AccountMeta::new(env.payer.pubkey(), true), // arbitrary cranker
-            AccountMeta::new(env.market, false),
-            AccountMeta::new(p, false),
-        ],
-        &[],
-    );
-    // Whether the engine treats "nothing to settle" as a no-op (Ok) or NonProgress (Err), the invariant is
-    // the same: NO value moved and NO state corruption.
-    let (_, g1) = env.market_state();
-    assert_eq!(
-        env.portfolio_state(p).capital.get(),
-        cap0,
-        "SettleB must not touch a healthy account's capital"
-    );
-    assert_eq!(g1.vault, g0.vault, "SettleB must not move the market vault");
-    assert_eq!(g1.c_tot, g0.c_tot, "SettleB must not move c_tot");
-    assert_eq!(
-        g1.insurance, g0.insurance,
-        "SettleB must not mint/burn insurance (no cranker reward)"
-    );
-
-    // Liveness: the owner can still withdraw their full capital — the permissionless SettleB did not
-    // freeze or trap the account.
-    let (dest, _) = env.withdraw_with_cu(&owner, p, 1_000);
-    assert_eq!(
-        env.token_amount(dest),
-        1_000,
-        "account fully withdrawable after a permissionless SettleB"
-    );
-}
-
-// [from pr125]
 // LoF/idempotency sweep — CureAndCancelClose cannot be replayed against an already-cured close ledger.
 // A cure leaves the close ledger in the `canceled` (inert) state and escrows the deposit; the preflight
 // rejects any ledger that is not `active` (`!active || canceled || finalized || has_irreversible_progress
@@ -77708,10 +77647,10 @@ fn v16_attack_terminal_payouts_over_u64_max_roll_back_receipts() {
     );
 }
 
-// PermissionlessCrank action=0 ignores the caller fee_bps and close_q fields. A hostile cranker
-// supplying extreme values must not inject fees, close positions, or DoS refresh progress.
+// PermissionlessCrank is selector-driven. A hostile cranker can still supply an extreme close_q, but
+// that work budget must not inject fees, close a refresh-only position, or DoS refresh progress.
 #[test]
-fn v16_attack_permissionless_refresh_ignores_hostile_fee_bps() {
+fn v16_attack_permissionless_refresh_ignores_hostile_close_q() {
     let mut env = V16CuEnv::new();
     let long_owner = Keypair::new();
     let long = env.create_portfolio(&long_owner);
@@ -77740,14 +77679,14 @@ fn v16_attack_permissionless_refresh_ignores_hostile_fee_bps() {
         },
     );
     assert_cu_within(
-        "PermissionlessCrank Refresh hostile fee_bps",
+        "PermissionlessCrank Refresh hostile close_q",
         refresh_cu,
         CRANK_CU_LIMIT,
     );
     let after = env.market_state().1;
     assert_eq!(
         after.current_slot, 1,
-        "hostile fee_bps/close_q must not block refresh progress"
+        "hostile close_q must not block refresh progress"
     );
     assert_eq!(after.vault, before.vault, "refresh moves no custody");
     assert_eq!(
@@ -77756,7 +77695,7 @@ fn v16_attack_permissionless_refresh_ignores_hostile_fee_bps() {
     );
     assert_eq!(
         after.insurance, before.insurance,
-        "refresh ignores caller fee_bps/close_q and charges no insurance"
+        "refresh ignores caller close_q and charges no insurance"
     );
     assert_eq!(
         after.assets[0].oi_eff_long_q,
