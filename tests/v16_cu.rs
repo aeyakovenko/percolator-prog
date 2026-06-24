@@ -49269,6 +49269,100 @@ fn v16_attack_withdraw_vault_with_close_authority_rejected() {
     );
 }
 
+// LoF/DoS sweep (cron135): ordinary user Withdraw shares the outbound
+// verify_withdrawable_token_accounts rail with the terminal/domain payout routes, but its delegated
+// canonical-vault branch is distinct from the close_authority case above. A delegated vault at the
+// canonical address must reject before engine debit or SPL payout, and the same withdrawal must remain
+// live after the vault is restored.
+#[test]
+fn v16_attack_withdraw_rejects_delegated_canonical_vault_before_debit() {
+    let mut env = V16CuEnv::new();
+    let owner = Keypair::new();
+    let p = env.create_portfolio(&owner);
+    env.deposit(&owner, p, 1_000);
+    let dest = env.token_account_for_mint(env.mint, owner.pubkey(), 0);
+
+    let clean_vault = env.svm.get_account(&env.vault).unwrap();
+    env.svm
+        .set_account(
+            env.vault,
+            Account {
+                data: make_delegated_token_data(env.mint, env.vault_authority, 1_000),
+                ..clean_vault.clone()
+            },
+        )
+        .unwrap();
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let portfolio_before = env.svm.get_account(&p).unwrap();
+    let dest_before = env.svm.get_account(&dest).unwrap();
+    let delegated_vault_before = env.svm.get_account(&env.vault).unwrap();
+
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::Withdraw { amount: 1_000 },
+        vec![
+            AccountMeta::new(owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(p, false),
+            AccountMeta::new(dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&owner],
+    );
+    assert!(
+        rejected.is_err(),
+        "Withdraw must reject a delegated canonical vault before engine debit"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "delegated-vault Withdraw rejection leaves market accounting unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&p).unwrap(),
+        portfolio_before,
+        "delegated-vault Withdraw rejection leaves portfolio capital unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&dest).unwrap(),
+        dest_before,
+        "delegated-vault Withdraw rejection pays no destination tokens"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        delegated_vault_before,
+        "delegated canonical vault remains byte-identical"
+    );
+
+    env.svm.set_account(env.vault, clean_vault).unwrap();
+    env.svm.expire_blockhash();
+    let ok = env
+        .send(
+            ProgInstruction::Withdraw { amount: 1_000 },
+            vec![
+                AccountMeta::new(owner.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(p, false),
+                AccountMeta::new(dest, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(env.vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[&owner],
+        )
+        .expect("Withdraw remains live once the canonical vault is undelegated");
+    assert_cu_within(
+        "Withdraw delegated canonical vault retry",
+        ok,
+        CUSTODY_CU_LIMIT,
+    );
+    assert_eq!(env.portfolio_state(p).capital.get(), 0);
+    assert_eq!(env.token_amount(dest), 1_000);
+    assert_eq!(env.token_amount(env.vault), 0);
+}
+
 // security.md sweep — withdraw to a FROZEN dest rejects gracefully (#44 robustness): the dest token
 // account must be in the Initialized state (verify_withdrawable_token_accounts: dest.state ==
 // Initialized). A frozen dest can't receive; the wrapper rejects it cleanly BEFORE the transfer rather
