@@ -47338,6 +47338,128 @@ fn v16_attack_chainlink_oracle_malformed_fields_reject_without_mutation() {
     );
 }
 
+// LoF/DoS sweep: source-specific oracle parsers must enforce the engine price domain before a
+// well-formed fresh feed can install a mark. Composite-over-max and Pyth exponent-over-max have
+// separate coverage; this pins the direct Chainlink decimal-scaling and Switchboard /1e12 branches.
+#[test]
+fn v16_attack_vendor_oracle_direct_over_max_price_rejects_without_mutation() {
+    {
+        let mut env = V16CuEnv::new();
+        set_test_clock(&mut env, 1, 100);
+        let install = |env: &mut V16CuEnv, answer: i128| -> Pubkey {
+            let key = Pubkey::new_unique();
+            env.svm
+                .set_account(
+                    key,
+                    Account {
+                        lamports: 1_000_000_000,
+                        data: make_chainlink_data(1, 6, 1, 1, 1, 100, answer),
+                        owner: oracle_v16::CHAINLINK_STORE_PROGRAM_ID,
+                        executable: false,
+                        rent_epoch: 0,
+                    },
+                )
+                .unwrap();
+            key
+        };
+        let configure = |env: &mut V16CuEnv, feed: Pubkey| {
+            env.try_configure_hybrid_asset_with_conf_filter_cu(
+                0,
+                1,
+                0,
+                [feed.to_bytes(), [0u8; 32], [0u8; 32]],
+                &[feed],
+                1,
+                100,
+                0,
+                0,
+                100,
+                0,
+            )
+        };
+
+        let over = install(&mut env, percolator::MAX_ORACLE_PRICE as i128 + 1);
+        let before = env.svm.get_account(&env.market).unwrap();
+        env.svm.expire_blockhash();
+        let rejected = configure(&mut env, over);
+        assert!(
+            rejected.is_err(),
+            "fresh keyed Chainlink feed over MAX_ORACLE_PRICE must reject"
+        );
+        let err = rejected.unwrap_err();
+        assert!(
+            err.contains("Custom(26)"),
+            "Chainlink direct over-max must reject as OracleInvalid (Custom 26), got: {err}"
+        );
+        assert_eq!(
+            env.svm.get_account(&env.market).unwrap(),
+            before,
+            "rejected Chainlink over-max feed must not mutate the market"
+        );
+
+        let valid = install(&mut env, 100);
+        env.svm.expire_blockhash();
+        configure(&mut env, valid).expect("in-range Chainlink feed remains live");
+        assert_eq!(
+            env.market_state().1.assets[0].effective_price,
+            100,
+            "valid Chainlink decimal-scaled feed seeds the expected mark"
+        );
+    }
+
+    {
+        const SWITCHBOARD_SCALE: i128 = 1_000_000_000_000;
+        let mut env = V16CuEnv::new();
+        set_test_clock(&mut env, 10, 1_000);
+        let configure = |env: &mut V16CuEnv, feed: Pubkey| {
+            env.try_configure_hybrid_asset_with_conf_filter_cu(
+                0,
+                1,
+                0,
+                [feed.to_bytes(), [0u8; 32], [0u8; 32]],
+                &[feed],
+                10,
+                1_000,
+                0,
+                0,
+                3,
+                100,
+            )
+        };
+
+        let over_value = (percolator::MAX_ORACLE_PRICE as i128 + 1)
+            .checked_mul(SWITCHBOARD_SCALE)
+            .unwrap();
+        let over = env.set_switchboard_price(over_value, 1, 1_000);
+        let before = env.svm.get_account(&env.market).unwrap();
+        env.svm.expire_blockhash();
+        let rejected = configure(&mut env, over);
+        assert!(
+            rejected.is_err(),
+            "fresh keyed Switchboard feed over MAX_ORACLE_PRICE must reject"
+        );
+        let err = rejected.unwrap_err();
+        assert!(
+            err.contains("Custom(26)"),
+            "Switchboard direct over-max must reject as OracleInvalid (Custom 26), got: {err}"
+        );
+        assert_eq!(
+            env.svm.get_account(&env.market).unwrap(),
+            before,
+            "rejected Switchboard over-max feed must not mutate the market"
+        );
+
+        let valid = env.set_switchboard_price(100 * SWITCHBOARD_SCALE, 1, 1_000);
+        env.svm.expire_blockhash();
+        configure(&mut env, valid).expect("in-range Switchboard feed remains live");
+        assert_eq!(
+            env.market_state().1.assets[0].effective_price,
+            100,
+            "valid Switchboard /1e12 feed seeds the expected mark"
+        );
+    }
+}
+
 // Chainlink spoofing gate: Chainlink feeds are account-key-bound like Switchboard. A valid-looking
 // transmissions account under the wrong key, or under an attacker owner, must reject atomically.
 #[test]
