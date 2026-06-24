@@ -51718,6 +51718,158 @@ fn v16_attack_force_shutdown_timeout_lets_traders_exit_before_close() {
     );
 }
 
+// LoF/DoS sweep: the shutdown exit window is only useful if normal users can actually reduce
+// exposure before force-close matures. Pin both no-CPI trade paths on a Recovery asset: fresh
+// risk stays blocked, but existing long/short pairs can close themselves at the frozen mark.
+#[test]
+fn v16_attack_shutdown_exit_window_allows_user_trade_reductions() {
+    const DELAY: u64 = 50;
+    const SHUT: u64 = 10;
+
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(2, 10_000, 10_000, 10_000);
+    env.configure_auth_mark_with_cu(0, 100);
+    env.configure_auth_mark_for_asset_as_admin(1, 1, 100);
+    env.configure_permissionless_resolve_with_cu(100, DELAY);
+
+    let single_long_owner = Keypair::new();
+    let single_short_owner = Keypair::new();
+    let batch_long_owner = Keypair::new();
+    let batch_short_owner = Keypair::new();
+    let fresh_long_owner = Keypair::new();
+    let fresh_short_owner = Keypair::new();
+    let single_long = env.create_portfolio(&single_long_owner);
+    let single_short = env.create_portfolio(&single_short_owner);
+    let batch_long = env.create_portfolio(&batch_long_owner);
+    let batch_short = env.create_portfolio(&batch_short_owner);
+    let fresh_long = env.create_portfolio(&fresh_long_owner);
+    let fresh_short = env.create_portfolio(&fresh_short_owner);
+    for (owner, portfolio) in [
+        (&single_long_owner, single_long),
+        (&single_short_owner, single_short),
+        (&batch_long_owner, batch_long),
+        (&batch_short_owner, batch_short),
+        (&fresh_long_owner, fresh_long),
+        (&fresh_short_owner, fresh_short),
+    ] {
+        env.deposit(owner, portfolio, 1_000_000);
+    }
+
+    env.trade_asset_with_cu(
+        1,
+        &single_long_owner,
+        single_long,
+        &single_short_owner,
+        single_short,
+        POS_SCALE as i128,
+        100,
+        0,
+    );
+    env.trade_asset_with_cu(
+        1,
+        &batch_long_owner,
+        batch_long,
+        &batch_short_owner,
+        batch_short,
+        POS_SCALE as i128,
+        100,
+        0,
+    );
+    assert_eq!(env.market_state().1.assets[1].oi_eff_long_q, 2 * POS_SCALE);
+
+    env.svm.warp_to_slot(SHUT);
+    env.update_asset_lifecycle_as_admin_with_cu(
+        percolator_prog::processor::ASSET_ACTION_SHUTDOWN,
+        1,
+        SHUT,
+        0,
+    );
+    assert_eq!(
+        env.market_state().1.assets[1].lifecycle,
+        AssetLifecycleV16::Recovery
+    );
+
+    env.svm.warp_to_slot(SHUT + 1);
+    let market_before_open = env.svm.get_account(&env.market).unwrap();
+    let fresh_long_before = env.svm.get_account(&fresh_long).unwrap();
+    let fresh_short_before = env.svm.get_account(&fresh_short).unwrap();
+    env.svm.expire_blockhash();
+    let blocked_open = env.try_trade_asset_with_cu(
+        1,
+        &fresh_long_owner,
+        fresh_long,
+        &fresh_short_owner,
+        fresh_short,
+        POS_SCALE as i128,
+        100,
+        0,
+    );
+    assert!(
+        blocked_open.is_err(),
+        "Recovery asset must not accept fresh risk during the exit window"
+    );
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before_open);
+    assert_eq!(env.svm.get_account(&fresh_long).unwrap(), fresh_long_before);
+    assert_eq!(env.svm.get_account(&fresh_short).unwrap(), fresh_short_before);
+
+    env.svm.expire_blockhash();
+    let single_reduce = env
+        .try_trade_asset_with_cu(
+            1,
+            &single_long_owner,
+            single_long,
+            &single_short_owner,
+            single_short,
+            -(POS_SCALE as i128),
+            100,
+            0,
+        )
+        .expect("single TradeNoCpi must let Recovery users reduce before force-close");
+    assert_cu_within("Recovery single TradeNoCpi reduce", single_reduce, TRADE_CU_LIMIT);
+    assert!(!has_active_leg_for_asset(
+        &env.portfolio_state(single_long),
+        1
+    ));
+    assert!(!has_active_leg_for_asset(
+        &env.portfolio_state(single_short),
+        1
+    ));
+
+    env.svm.expire_blockhash();
+    let batch_reduce = env
+        .send(
+            ProgInstruction::BatchTradeNoCpi {
+                legs: vec![BatchTradeLeg {
+                    asset_index: 1,
+                    size_q: -(POS_SCALE as i128),
+                    exec_price: 100,
+                    fee_bps: 0,
+                }],
+            },
+            vec![
+                AccountMeta::new(batch_long_owner.pubkey(), true),
+                AccountMeta::new(batch_short_owner.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(batch_long, false),
+                AccountMeta::new(batch_short, false),
+            ],
+            &[&batch_long_owner, &batch_short_owner],
+        )
+        .expect("BatchTradeNoCpi must let Recovery users reduce before force-close");
+    assert_cu_within("Recovery BatchTradeNoCpi reduce", batch_reduce, TRADE_CU_LIMIT);
+
+    let group = env.market_state().1;
+    assert_eq!(
+        group.assets[1].oi_eff_long_q, 0,
+        "both Recovery long positions closed through user reductions"
+    );
+    assert_eq!(
+        group.assets[1].oi_eff_short_q, 0,
+        "both Recovery short positions closed through user reductions"
+    );
+    assert_eq!(group.vault as u64, env.token_amount(env.vault));
+    assert!(group.vault >= group.c_tot + group.insurance);
+}
+
 // LoF/DoS sweep (cron135): marketauth can start an empty-asset shutdown, but the exit window must
 // not become a backing-provider rug or a provider DoS. Before force_close_delay_slots matures,
 // marketauth must not be able to drain the provider's bucket through the shutdown cleanup fallback,
