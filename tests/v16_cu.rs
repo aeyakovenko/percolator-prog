@@ -49363,6 +49363,94 @@ fn v16_attack_withdraw_rejects_delegated_canonical_vault_before_debit() {
     assert_eq!(env.token_amount(env.vault), 0);
 }
 
+// LoF/DoS sweep (cron135): a frozen canonical vault is a distinct outbound verifier branch from a
+// delegated/closable vault and from malformed token data. Ordinary user Withdraw must reject it
+// before debiting the user's engine capital, then stay live after the vault is thawed.
+#[test]
+fn v16_attack_withdraw_rejects_frozen_canonical_vault_before_debit() {
+    let mut env = V16CuEnv::new();
+    let owner = Keypair::new();
+    let p = env.create_portfolio(&owner);
+    env.deposit(&owner, p, 1_000);
+    let dest = env.token_account_for_mint(env.mint, owner.pubkey(), 0);
+
+    let clean_vault = env.svm.get_account(&env.vault).unwrap();
+    env.svm
+        .set_account(
+            env.vault,
+            Account {
+                data: make_frozen_token_data(env.mint, env.vault_authority, 1_000),
+                ..clean_vault.clone()
+            },
+        )
+        .unwrap();
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let portfolio_before = env.svm.get_account(&p).unwrap();
+    let dest_before = env.svm.get_account(&dest).unwrap();
+    let frozen_vault_before = env.svm.get_account(&env.vault).unwrap();
+
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::Withdraw { amount: 1_000 },
+        vec![
+            AccountMeta::new(owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(p, false),
+            AccountMeta::new(dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&owner],
+    );
+    assert!(
+        rejected.is_err(),
+        "Withdraw must reject a frozen canonical vault before engine debit"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "frozen-vault Withdraw rejection leaves market accounting unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&p).unwrap(),
+        portfolio_before,
+        "frozen-vault Withdraw rejection leaves portfolio capital unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&dest).unwrap(),
+        dest_before,
+        "frozen-vault Withdraw rejection pays no destination tokens"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        frozen_vault_before,
+        "frozen canonical vault remains byte-identical"
+    );
+
+    env.svm.set_account(env.vault, clean_vault).unwrap();
+    env.svm.expire_blockhash();
+    let ok = env
+        .send(
+            ProgInstruction::Withdraw { amount: 1_000 },
+            vec![
+                AccountMeta::new(owner.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(p, false),
+                AccountMeta::new(dest, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(env.vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[&owner],
+        )
+        .expect("Withdraw remains live once the canonical vault is thawed");
+    assert_cu_within("Withdraw frozen canonical vault retry", ok, CUSTODY_CU_LIMIT);
+    assert_eq!(env.portfolio_state(p).capital.get(), 0);
+    assert_eq!(env.token_amount(dest), 1_000);
+    assert_eq!(env.token_amount(env.vault), 0);
+}
+
 // security.md sweep — withdraw to a FROZEN dest rejects gracefully (#44 robustness): the dest token
 // account must be in the Initialized state (verify_withdrawable_token_accounts: dest.state ==
 // Initialized). A frozen dest can't receive; the wrapper rejects it cleanly BEFORE the transfer rather
