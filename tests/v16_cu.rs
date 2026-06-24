@@ -10157,6 +10157,174 @@ fn v16_attack_auto_crank_refresh_not_blocked_by_unneeded_first_asset_oracle() {
     );
 }
 
+// LoF/DoS sweep: committed-state refresh is valid only when the selected
+// engine asset has no pending wrapper-side mark. If a public keeper can omit
+// the selected asset observation while another asset made the account stale,
+// the engine fallback would accrue the selected asset at its old committed
+// price and consume the slot, making the pending mark impossible to apply in
+// that slot. That lets out-of-order keepers starve mark/funding progress by
+// repeatedly landing no-observation refreshes first.
+#[test]
+fn v16_attack_pending_selected_mark_requires_observation() {
+    const MARK: u64 = 1_000_000;
+    const NEXT_MARK0: u64 = 1_100_000;
+    const NEXT_MARK1: u64 = 1_010_000;
+    const OPEN_SLOT: u64 = 1;
+    const CRANK_SLOT: u64 = 2;
+
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(2, 10_000, 10_000, 10_000);
+    env.configure_auth_mark_for_asset_as_admin(0, OPEN_SLOT, MARK);
+    env.configure_auth_mark_for_asset_as_admin(1, OPEN_SLOT, MARK);
+
+    let owner_a = Keypair::new();
+    let owner_b = Keypair::new();
+    let asset1_owner = Keypair::new();
+    let asset1_counter_owner = Keypair::new();
+    let account_a = env.create_portfolio(&owner_a);
+    let account_b = env.create_portfolio(&owner_b);
+    let asset1_account = env.create_portfolio(&asset1_owner);
+    let asset1_counter = env.create_portfolio(&asset1_counter_owner);
+    env.deposit(&owner_a, account_a, 100_000_000);
+    env.deposit(&owner_b, account_b, 100_000_000);
+    env.deposit(&asset1_owner, asset1_account, 100_000_000);
+    env.deposit(&asset1_counter_owner, asset1_counter, 100_000_000);
+    env.trade_asset_with_cu(
+        0,
+        &owner_a,
+        account_a,
+        &owner_b,
+        account_b,
+        POS_SCALE as i128,
+        MARK,
+        0,
+    );
+    env.svm.expire_blockhash();
+    env.trade_asset_with_cu(
+        1,
+        &owner_a,
+        account_a,
+        &owner_b,
+        account_b,
+        POS_SCALE as i128,
+        MARK,
+        0,
+    );
+    env.svm.expire_blockhash();
+    env.trade_asset_with_cu(
+        1,
+        &asset1_owner,
+        asset1_account,
+        &asset1_counter_owner,
+        asset1_counter,
+        POS_SCALE as i128,
+        MARK,
+        0,
+    );
+    let account_before_mark = env.portfolio_state(account_a);
+    assert_eq!(
+        leg(&account_before_mark, 0).asset_index,
+        0,
+        "asset 0 must occupy the first active slot for this selected-asset probe"
+    );
+    assert_eq!(
+        active_leg_for_asset(&account_before_mark, 0).asset_index,
+        0,
+        "asset 0 is the engine-selected first active leg"
+    );
+    assert_eq!(active_leg_for_asset(&account_before_mark, 1).asset_index, 1);
+
+    env.svm.warp_to_slot(CRANK_SLOT);
+    env.push_auth_mark_for_asset_as_admin(0, CRANK_SLOT, NEXT_MARK0);
+    let profile0 =
+        state::read_asset_oracle_profile(&env.svm.get_account(&env.market).unwrap().data, 0)
+            .unwrap();
+    let (_, pending_group) = env.market_state();
+    assert_eq!(profile0.mark_ewma_e6, NEXT_MARK0);
+    assert_eq!(profile0.mark_ewma_last_slot, CRANK_SLOT);
+    assert_eq!(
+        pending_group.assets[0].effective_price, MARK,
+        "PushAuthMark only stages the selected asset mark"
+    );
+    assert!(
+        pending_group.assets[0].slot_last < CRANK_SLOT,
+        "selected asset has a pending slot to consume"
+    );
+
+    env.push_auth_mark_for_asset_as_admin(1, CRANK_SLOT, NEXT_MARK1);
+    env.crank(
+        asset1_account,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: CRANK_SLOT,
+            close_q: 0,
+            observations: crank_observations(1),
+        },
+    );
+    let (_, stale_group) = env.market_state();
+    assert_eq!(stale_group.assets[1].effective_price, NEXT_MARK1);
+    assert_eq!(
+        stale_group.assets[0].effective_price, MARK,
+        "selected asset mark is still pending after unrelated asset progress"
+    );
+    assert!(
+        health_cert(&env.portfolio_state(account_a)).cert_oracle_epoch < stale_group.oracle_epoch,
+        "unrelated asset progress makes the target account stale"
+    );
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let account_before = env.svm.get_account(&account_a).unwrap();
+    env.svm.expire_blockhash();
+    let missing_selected_observation = env.send(
+        ProgInstruction::PermissionlessCrank {
+            now_slot: CRANK_SLOT,
+            close_q: 0,
+            observations: vec![],
+        },
+        vec![
+            AccountMeta::new(env.payer.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(account_a, false),
+        ],
+        &[],
+    );
+    assert!(
+        missing_selected_observation.is_err(),
+        "selected asset has a pending mark, so no-observation refresh must not consume its slot"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "rejected missing-observation refresh must not advance the selected asset at the old price"
+    );
+    assert_eq!(
+        env.svm.get_account(&account_a).unwrap(),
+        account_before,
+        "rejected missing-observation refresh must not certify the target against a pending mark"
+    );
+
+    env.svm.expire_blockhash();
+    let observed = env.send(
+        ProgInstruction::PermissionlessCrank {
+            now_slot: CRANK_SLOT,
+            close_q: 0,
+            observations: crank_observations(0),
+        },
+        vec![
+            AccountMeta::new(env.payer.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(account_a, false),
+        ],
+        &[],
+    );
+    assert!(
+        observed.is_ok(),
+        "supplying the selected asset observation must remain live: {observed:?}"
+    );
+    let (_, observed_group) = env.market_state();
+    assert_eq!(
+        observed_group.assets[0].effective_price, NEXT_MARK0,
+        "selected asset observation applies the pending mark"
+    );
+}
+
 #[test]
 fn v16_bpf_no_cranker_liquidation_rejects_invalid_final_market_shape() {
     let mut env = V16CuEnv::new();
