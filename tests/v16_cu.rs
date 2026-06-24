@@ -12527,6 +12527,116 @@ fn v16_attack_resolved_permissionless_crank_closes_without_live_hint_parsing() {
     assert_eq!(account.capital.get(), 0);
 }
 
+// LoF/DoS sweep (cron135): the resolved-mode public crank forwarder must propagate
+// CloseResolved token-account failures, not report success after burning terminal payout state.
+// Hostile live-mode hints are ignored only for route selection; the payout still has to land.
+#[test]
+fn v16_attack_resolved_permissionless_crank_bad_dest_rolls_back_payout() {
+    let mut env = V16CuEnv::new();
+    let owner = Keypair::new();
+    let portfolio = env.create_portfolio(&owner);
+    env.deposit(&owner, portfolio, 1_000);
+    env.resolve();
+
+    let frozen_dest = Pubkey::new_unique();
+    env.svm
+        .set_account(
+            frozen_dest,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_frozen_token_data(env.mint, owner.pubkey(), 0),
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    let clean_dest = env.token_account(owner.pubkey(), 0);
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let portfolio_before = env.svm.get_account(&portfolio).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    let frozen_dest_before = env.svm.get_account(&frozen_dest).unwrap();
+    let clean_dest_before = env.svm.get_account(&clean_dest).unwrap();
+
+    let hostile_crank = ProgInstruction::PermissionlessCrank {
+        now_slot: u64::MAX,
+        close_q: u128::MAX,
+        observations: vec![CrankObservationHint {
+            asset_index: u16::MAX,
+            oracle_accounts: u8::MAX,
+        }],
+    };
+
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        hostile_crank.clone(),
+        vec![
+            AccountMeta::new_readonly(owner.pubkey(), false),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio, false),
+            AccountMeta::new(frozen_dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[],
+    );
+    assert!(
+        rejected.is_err(),
+        "resolved PermissionlessCrank must reject a frozen payout destination"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "failed resolved crank must not commit payout accounting"
+    );
+    assert_eq!(
+        env.svm.get_account(&portfolio).unwrap(),
+        portfolio_before,
+        "failed resolved crank must not close, zero, or finalize the portfolio"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        vault_before,
+        "failed resolved crank must not debit the vault"
+    );
+    assert_eq!(
+        env.svm.get_account(&frozen_dest).unwrap(),
+        frozen_dest_before,
+        "frozen destination remains byte-identical"
+    );
+    assert_eq!(
+        env.svm.get_account(&clean_dest).unwrap(),
+        clean_dest_before,
+        "clean destination is not paid by the rejected crank"
+    );
+
+    env.svm.expire_blockhash();
+    let accepted = env
+        .send(
+            hostile_crank,
+            vec![
+                AccountMeta::new_readonly(owner.pubkey(), false),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(portfolio, false),
+                AccountMeta::new(clean_dest, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(env.vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[],
+        )
+        .expect("resolved PermissionlessCrank remains live with a clean payout destination");
+    assert_cu_within(
+        "Resolved PermissionlessCrank bad-dest retry",
+        accepted,
+        CRANK_CU_LIMIT,
+    );
+    assert_eq!(env.token_amount(clean_dest), 1_000);
+    assert_eq!(env.token_amount(env.vault), 0);
+}
+
 // LoF/DoS sweep (cron135): the resolved PermissionlessCrank opcode is now the public keeper
 // wind-down route. Its resolved-mode forwarder must not bypass the owner exit window before
 // falling into CloseResolved; hostile live-mode hints are still ignored only after that auth gate.
