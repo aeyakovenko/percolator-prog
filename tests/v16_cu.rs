@@ -93966,6 +93966,107 @@ fn v16_attack_close_slab_rejects_delegated_primary_vault_before_reclaim() {
     assert!(closed_market.data.iter().all(|b| *b == 0));
 }
 
+// LoF/DoS sweep (cron135): a frozen canonical primary vault is valid SPL account data at the
+// correct address, mint, and authority, but it cannot be used for the final dust sweep or close.
+// CloseSlab must reject that state before reclaiming the market slab, and cleanup must remain live
+// once the vault is restored.
+#[test]
+fn v16_attack_close_slab_rejects_frozen_primary_vault_before_reclaim() {
+    let mut env = V16CuEnv::new();
+    let admin = env.admin.insecure_clone();
+    env.svm
+        .set_account(
+            env.vault,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_frozen_token_data(env.mint, env.vault_authority, 7),
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    env.resolve();
+
+    let primary_dest = env.token_account(admin.pubkey(), 0);
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let frozen_vault_before = env.svm.get_account(&env.vault).unwrap();
+    let primary_dest_before = env.svm.get_account(&primary_dest).unwrap();
+    let admin_before = env.svm.get_account(&admin.pubkey()).unwrap();
+
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::CloseSlab,
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new(primary_dest, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        rejected.is_err(),
+        "CloseSlab must reject a frozen canonical primary vault"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "frozen-primary-vault CloseSlab must not reclaim the market"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        frozen_vault_before,
+        "frozen canonical primary vault remains byte-identical"
+    );
+    assert_eq!(
+        env.svm.get_account(&primary_dest).unwrap(),
+        primary_dest_before,
+        "frozen-primary-vault CloseSlab must not credit the destination"
+    );
+    assert_eq!(
+        env.svm.get_account(&admin.pubkey()).unwrap(),
+        admin_before,
+        "frozen-primary-vault CloseSlab must not transfer market rent"
+    );
+
+    env.svm
+        .set_account(
+            env.vault,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_token_data(env.mint, env.vault_authority, 7),
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    env.svm.expire_blockhash();
+    let ok = env.send(
+        ProgInstruction::CloseSlab,
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new(primary_dest, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        ok.is_ok(),
+        "same CloseSlab succeeds once the primary vault is initialized: {ok:?}"
+    );
+    assert_eq!(env.token_amount(primary_dest), 7);
+    let closed_market = env.svm.get_account(&env.market).unwrap();
+    assert_eq!(closed_market.lamports, 0);
+    assert!(closed_market.data.iter().all(|b| *b == 0));
+}
+
 // full-interface sweep: CloseSlab uses the supplied SPL Token program for both the final dust sweep and
 // the vault close. A loaded non-SPL executable must reject before any vault transfer, token-account close,
 // or market slab reclaim; the same terminal close must remain live through the real token program.
