@@ -9785,7 +9785,10 @@ fn v16_attack_close_portfolio_stale_layout_rejects_before_rent_sweep() {
     let mut stale_portfolio = fresh_portfolio.clone();
     let mut stale_state = state::read_portfolio(&stale_portfolio.data).unwrap();
     let current_layout = stale_state.provenance_header.layout_discriminator.get();
-    assert!(current_layout > 0, "current engine layout discriminator is nonzero");
+    assert!(
+        current_layout > 0,
+        "current engine layout discriminator is nonzero"
+    );
     stale_state.provenance_header =
         percolator::ProvenanceHeaderV16Account::from_runtime(&percolator::ProvenanceHeaderV16 {
             market_group_id: stale_state.provenance_header.market_group_id,
@@ -9834,7 +9837,11 @@ fn v16_attack_close_portfolio_stale_layout_rejects_before_rent_sweep() {
     env.svm.set_account(portfolio, fresh_portfolio).unwrap();
     env.svm.expire_blockhash();
     let close_cu = env.close_portfolio_with_cu(&owner, portfolio);
-    assert_cu_within("restored stale-layout ClosePortfolio", close_cu, CUSTODY_CU_LIMIT);
+    assert_cu_within(
+        "restored stale-layout ClosePortfolio",
+        close_cu,
+        CUSTODY_CU_LIMIT,
+    );
     assert_eq!(
         env.market_state().1.materialized_portfolio_count,
         0,
@@ -12671,7 +12678,10 @@ fn v16_attack_close_resolved_stale_layout_rejects_before_payout() {
     let mut stale_portfolio = fresh_portfolio.clone();
     let mut stale_state = state::read_portfolio(&stale_portfolio.data).unwrap();
     let current_layout = stale_state.provenance_header.layout_discriminator.get();
-    assert!(current_layout > 0, "current engine layout discriminator is nonzero");
+    assert!(
+        current_layout > 0,
+        "current engine layout discriminator is nonzero"
+    );
     stale_state.provenance_header =
         percolator::ProvenanceHeaderV16Account::from_runtime(&percolator::ProvenanceHeaderV16 {
             market_group_id: stale_state.provenance_header.market_group_id,
@@ -13303,8 +13313,7 @@ fn v16_attack_terminal_routes_reject_wrong_vault_authority_after_engine_mutation
     let close_portfolio_before = close_env.svm.get_account(&close_portfolio).unwrap();
     let close_vault_before = close_env.svm.get_account(&close_env.vault).unwrap();
     let close_dest_before = close_env.svm.get_account(&close_dest).unwrap();
-    let close_wrong_authority_before =
-        close_env.svm.get_account(&close_wrong_authority).unwrap();
+    let close_wrong_authority_before = close_env.svm.get_account(&close_wrong_authority).unwrap();
 
     close_env.svm.expire_blockhash();
     let rejected_close = close_env.send(
@@ -13347,10 +13356,7 @@ fn v16_attack_terminal_routes_reject_wrong_vault_authority_after_engine_mutation
         "wrong vault authority must not pay the resolved destination"
     );
     assert_eq!(
-        close_env
-            .svm
-            .get_account(&close_wrong_authority)
-            .unwrap(),
+        close_env.svm.get_account(&close_wrong_authority).unwrap(),
         close_wrong_authority_before,
         "wrong vault-authority account remains untouched"
     );
@@ -13439,8 +13445,7 @@ fn v16_attack_terminal_routes_reject_wrong_vault_authority_after_engine_mutation
     let topup_portfolio_before = topup_env.svm.get_account(&topup_portfolio).unwrap();
     let topup_vault_before = topup_env.svm.get_account(&topup_env.vault).unwrap();
     let topup_dest_before = topup_env.svm.get_account(&topup_dest).unwrap();
-    let topup_wrong_authority_before =
-        topup_env.svm.get_account(&topup_wrong_authority).unwrap();
+    let topup_wrong_authority_before = topup_env.svm.get_account(&topup_wrong_authority).unwrap();
 
     topup_env.svm.expire_blockhash();
     let rejected_topup = topup_env.send(
@@ -13481,10 +13486,7 @@ fn v16_attack_terminal_routes_reject_wrong_vault_authority_after_engine_mutation
         "wrong vault authority must not pay the top-up destination"
     );
     assert_eq!(
-        topup_env
-            .svm
-            .get_account(&topup_wrong_authority)
-            .unwrap(),
+        topup_env.svm.get_account(&topup_wrong_authority).unwrap(),
         topup_wrong_authority_before,
         "wrong top-up vault-authority account remains untouched"
     );
@@ -13515,7 +13517,10 @@ fn v16_attack_terminal_routes_reject_wrong_vault_authority_after_engine_mutation
     let insurance_dest = insurance_env.token_account(admin.pubkey(), 0);
     let insurance_ledger = insurance_env.insurance_ledger_account();
     let insurance_wrong_authority = wrong_vault_authority_account(&mut insurance_env);
-    let insurance_market_before = insurance_env.svm.get_account(&insurance_env.market).unwrap();
+    let insurance_market_before = insurance_env
+        .svm
+        .get_account(&insurance_env.market)
+        .unwrap();
     let insurance_ledger_before = insurance_env.svm.get_account(&insurance_ledger).unwrap();
     let insurance_vault_before = insurance_env.svm.get_account(&insurance_env.vault).unwrap();
     let insurance_dest_before = insurance_env.svm.get_account(&insurance_dest).unwrap();
@@ -13546,7 +13551,10 @@ fn v16_attack_terminal_routes_reject_wrong_vault_authority_after_engine_mutation
         "terminal WithdrawInsurance must reject a wrong loaded vault-authority account"
     );
     assert_eq!(
-        insurance_env.svm.get_account(&insurance_env.market).unwrap(),
+        insurance_env
+            .svm
+            .get_account(&insurance_env.market)
+            .unwrap(),
         insurance_market_before,
         "wrong vault authority must not debit terminal insurance budgets"
     );
@@ -25012,7 +25020,10 @@ fn v16_attack_set_matcher_config_stale_layout_rejects_without_tail_write() {
     let mut stale_lp = fresh_lp.clone();
     let mut stale_state = state::read_portfolio(&stale_lp.data).unwrap();
     let current_layout = stale_state.provenance_header.layout_discriminator.get();
-    assert!(current_layout > 0, "current engine layout discriminator is nonzero");
+    assert!(
+        current_layout > 0,
+        "current engine layout discriminator is nonzero"
+    );
     stale_state.provenance_header =
         percolator::ProvenanceHeaderV16Account::from_runtime(&percolator::ProvenanceHeaderV16 {
             market_group_id: stale_state.provenance_header.market_group_id,
@@ -45311,8 +45322,8 @@ fn v16_attack_crank_target_stale_layout_rejects_before_oracle_tail_parse() {
     };
 
     set_test_clock(&mut env, 2, 101);
-    let fresh_oracle_err = send(&mut env)
-        .expect_err("fresh target portfolio should reach bogus oracle parsing");
+    let fresh_oracle_err =
+        send(&mut env).expect_err("fresh target portfolio should reach bogus oracle parsing");
     assert!(
         !fresh_oracle_err.contains("InvalidAccountData"),
         "fresh target must not trip stale-layout preflight: {fresh_oracle_err}"
@@ -51122,10 +51133,9 @@ fn v16_attack_value_topups_reject_native_accounts_before_credit() {
         fn instruction(self, amount: u128) -> ProgInstruction {
             match self {
                 TopupRoute::Insurance => ProgInstruction::TopUpInsurance { amount },
-                TopupRoute::DomainInsurance => ProgInstruction::TopUpInsuranceDomain {
-                    domain: 0,
-                    amount,
-                },
+                TopupRoute::DomainInsurance => {
+                    ProgInstruction::TopUpInsuranceDomain { domain: 0, amount }
+                }
                 TopupRoute::BackingBucket => ProgInstruction::TopUpBackingBucket {
                     domain: 1,
                     amount,
@@ -51211,9 +51221,7 @@ fn v16_attack_value_topups_reject_native_accounts_before_credit() {
                 "{label} native-account rejection credits no vault custody"
             );
 
-            env.svm
-                .set_account(native_key, clean_native_slot)
-                .unwrap();
+            env.svm.set_account(native_key, clean_native_slot).unwrap();
             env.svm.expire_blockhash();
             let ok = env
                 .send(
@@ -51427,7 +51435,11 @@ fn v16_attack_withdraw_rejects_frozen_canonical_vault_before_debit() {
             &[&owner],
         )
         .expect("Withdraw remains live once the canonical vault is thawed");
-    assert_cu_within("Withdraw frozen canonical vault retry", ok, CUSTODY_CU_LIMIT);
+    assert_cu_within(
+        "Withdraw frozen canonical vault retry",
+        ok,
+        CUSTODY_CU_LIMIT,
+    );
     assert_eq!(env.portfolio_state(p).capital.get(), 0);
     assert_eq!(env.token_amount(dest), 1_000);
     assert_eq!(env.token_amount(env.vault), 0);
@@ -54203,9 +54215,15 @@ fn v16_attack_shutdown_exit_window_allows_user_trade_reductions() {
         blocked_open.is_err(),
         "Recovery asset must not accept fresh risk during the exit window"
     );
-    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before_open);
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before_open
+    );
     assert_eq!(env.svm.get_account(&fresh_long).unwrap(), fresh_long_before);
-    assert_eq!(env.svm.get_account(&fresh_short).unwrap(), fresh_short_before);
+    assert_eq!(
+        env.svm.get_account(&fresh_short).unwrap(),
+        fresh_short_before
+    );
 
     env.svm.expire_blockhash();
     let single_reduce = env
@@ -54220,7 +54238,11 @@ fn v16_attack_shutdown_exit_window_allows_user_trade_reductions() {
             0,
         )
         .expect("single TradeNoCpi must let Recovery users reduce before force-close");
-    assert_cu_within("Recovery single TradeNoCpi reduce", single_reduce, TRADE_CU_LIMIT);
+    assert_cu_within(
+        "Recovery single TradeNoCpi reduce",
+        single_reduce,
+        TRADE_CU_LIMIT,
+    );
     assert!(!has_active_leg_for_asset(
         &env.portfolio_state(single_long),
         1
@@ -54251,7 +54273,11 @@ fn v16_attack_shutdown_exit_window_allows_user_trade_reductions() {
             &[&batch_long_owner, &batch_short_owner],
         )
         .expect("BatchTradeNoCpi must let Recovery users reduce before force-close");
-    assert_cu_within("Recovery BatchTradeNoCpi reduce", batch_reduce, TRADE_CU_LIMIT);
+    assert_cu_within(
+        "Recovery BatchTradeNoCpi reduce",
+        batch_reduce,
+        TRADE_CU_LIMIT,
+    );
 
     let group = env.market_state().1;
     assert_eq!(
@@ -54521,7 +54547,10 @@ fn v16_attack_mature_shutdown_drain_cleans_delegated_backing_bucket() {
         drained_group.source_backing_buckets[2].fresh_unliened_backing_num, 0,
         "mature shutdown cleanup drains abandoned principal"
     );
-    assert_eq!(drained_group.source_backing_buckets[2].utilization_fee_earnings, 0);
+    assert_eq!(
+        drained_group.source_backing_buckets[2].utilization_fee_earnings,
+        0
+    );
     assert_eq!(drained_group.vault as u64, env.token_amount(env.vault));
 }
 
@@ -54659,7 +54688,10 @@ fn v16_attack_mature_shutdown_drain_cleans_delegated_insurance_budget() {
         replay.is_err(),
         "old delegated operator must not double-withdraw after mature shutdown cleanup"
     );
-    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before_replay);
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before_replay
+    );
     assert_eq!(
         env.svm.get_account(&provider_ledger).unwrap(),
         provider_ledger_before_replay
@@ -55398,9 +55430,9 @@ fn v16_attack_backing_fee_trade_rejects_invalid_final_shape_atomically() {
         "backing-fee TradeNoCpi remains live after shape repair: {accepted:?}"
     );
     let (_, after_retry) = env.market_state();
-    let provider_delta =
-        after_retry.source_backing_buckets[WINNING_DOMAIN].utilization_fee_earnings
-            - provider_before;
+    let provider_delta = after_retry.source_backing_buckets[WINNING_DOMAIN]
+        .utilization_fee_earnings
+        - provider_before;
     let insurance_delta = after_retry.insurance - insurance_before;
     let lien_after: u128 = env
         .portfolio_state(cross_account)
@@ -56450,13 +56482,11 @@ fn v16_attack_permissionless_lifecycle_rejects_bad_fee_accounts_before_slot_muta
                 );
                 let (cfg_after, group_after) = env.market_state();
                 assert_eq!(
-                    cfg_after.free_market_slot_count,
-                    cfg_before.free_market_slot_count,
+                    cfg_after.free_market_slot_count, cfg_before.free_market_slot_count,
                     "{path_label} rejection must not consume a reusable-slot counter"
                 );
                 assert_eq!(
-                    group_after.config.max_market_slots,
-                    group_before.config.max_market_slots,
+                    group_after.config.max_market_slots, group_before.config.max_market_slots,
                     "{path_label} rejection must not append a market slot"
                 );
                 assert_eq!(group_after.vault, group_before.vault);
@@ -57327,7 +57357,11 @@ fn v16_attack_secondary_withdraw_rejects_bad_token_accounts_before_debit() {
         }
     }
 
-    for kind in [BadTokenKind::Malformed, BadTokenKind::Frozen, BadTokenKind::Native] {
+    for kind in [
+        BadTokenKind::Malformed,
+        BadTokenKind::Frozen,
+        BadTokenKind::Native,
+    ] {
         for slot in [SecondarySlot::Dest, SecondarySlot::Vault] {
             let mut env = V16CuEnv::new();
             let secondary = env.create_mint();
@@ -57419,9 +57453,7 @@ fn v16_attack_secondary_withdraw_rejects_bad_token_accounts_before_debit() {
                 "{kind_label} {slot_label} rejection pays no secondary collateral"
             );
 
-            env.svm
-                .set_account(bad_key, clean_bad_account)
-                .unwrap();
+            env.svm.set_account(bad_key, clean_bad_account).unwrap();
             env.svm.expire_blockhash();
             let ok = env
                 .send(
@@ -64559,10 +64591,7 @@ fn v16_attack_stale_thirteen_leg_fresh_asset_batch_cpi_with_max_tail_stays_bound
         )
         .expect("max-tail fresh-asset BatchTradeCpi from thirteen stale legs must stay live");
     println!("v16 13-stale-leg fresh-asset BatchTradeCpi max-tail CU: {cu}");
-    assert!(
-        cu < 1_400_000,
-        "fresh-asset max-tail BatchTradeCpi CU {cu}"
-    );
+    assert!(cu < 1_400_000, "fresh-asset max-tail BatchTradeCpi CU {cu}");
     let long_after = env.portfolio_state(long_account);
     let short_after = env.portfolio_state(short_account);
     assert_eq!(
@@ -72980,9 +73009,7 @@ fn v16_attack_swap_secondary_rejects_native_accounts_before_transfer() {
         let (native_key, native_mint, native_owner, native_amount) = match slot {
             NativeSwapSlot::PrimarySource => (primary_source, env.mint, admin.pubkey(), 10),
             NativeSwapSlot::PrimaryVault => (env.vault, env.mint, env.vault_authority, 0),
-            NativeSwapSlot::SecondaryDest => {
-                (secondary_dest, secondary_mint, admin.pubkey(), 0)
-            }
+            NativeSwapSlot::SecondaryDest => (secondary_dest, secondary_mint, admin.pubkey(), 0),
             NativeSwapSlot::SecondaryVault => {
                 (secondary_vault, secondary_mint, env.vault_authority, 50)
             }
@@ -72992,11 +73019,7 @@ fn v16_attack_swap_secondary_rejects_native_accounts_before_transfer() {
             .set_account(
                 native_key,
                 Account {
-                    data: make_native_flagged_token_data(
-                        native_mint,
-                        native_owner,
-                        native_amount,
-                    ),
+                    data: make_native_flagged_token_data(native_mint, native_owner, native_amount),
                     ..clean_native_slot.clone()
                 },
             )
@@ -73573,11 +73596,7 @@ fn v16_attack_close_slab_rejects_native_secondary_accounts_before_reclaim() {
             .set_account(
                 native_key,
                 Account {
-                    data: make_native_flagged_token_data(
-                        native_mint,
-                        native_owner,
-                        native_amount,
-                    ),
+                    data: make_native_flagged_token_data(native_mint, native_owner, native_amount),
                     ..clean_native_slot.clone()
                 },
             )
@@ -76761,19 +76780,15 @@ fn v16_attack_cpi_source_domain_shape_variants_reject_before_hostile_matcher_cpi
                 SourceDomainPoison::NonOccupiedSparseTag => {
                     source.source_claim_bound_num = percolator::V16PodU128::new(0);
                     source.source_claim_liened_num = percolator::V16PodU128::new(0);
-                    source.source_claim_counterparty_liened_num =
-                        percolator::V16PodU128::new(0);
+                    source.source_claim_counterparty_liened_num = percolator::V16PodU128::new(0);
                     source.source_claim_insurance_liened_num = percolator::V16PodU128::new(0);
                     source.source_lien_effective_reserved = percolator::V16PodU128::new(0);
-                    source.source_lien_counterparty_backing_num =
-                        percolator::V16PodU128::new(0);
+                    source.source_lien_counterparty_backing_num = percolator::V16PodU128::new(0);
                     source.source_lien_insurance_backing_num = percolator::V16PodU128::new(0);
                     source.source_lien_fee_last_slot = percolator::V16PodU64::new(0);
                     source.source_claim_impaired_num = percolator::V16PodU128::new(0);
-                    source.source_lien_impaired_effective_reserved =
-                        percolator::V16PodU128::new(0);
-                    source.source_lien_capital_at_risk_fee_revenue =
-                        percolator::V16PodU128::new(0);
+                    source.source_lien_impaired_effective_reserved = percolator::V16PodU128::new(0);
+                    source.source_lien_capital_at_risk_fee_revenue = percolator::V16PodU128::new(0);
                     source.source_lien_impaired_capital_at_risk_fee_revenue =
                         percolator::V16PodU128::new(0);
                 }
@@ -76822,8 +76837,7 @@ fn v16_attack_cpi_source_domain_shape_variants_reject_before_hostile_matcher_cpi
                 }
                 SourceDomainPoison::ImpairedReserveWithoutClaim => {
                     source.source_claim_impaired_num = percolator::V16PodU128::new(0);
-                    source.source_lien_impaired_effective_reserved =
-                        percolator::V16PodU128::new(1);
+                    source.source_lien_impaired_effective_reserved = percolator::V16PodU128::new(1);
                 }
             }
             if matches!(poison, SourceDomainPoison::OutOfRangeDomain) {
@@ -76991,14 +77005,12 @@ fn v16_attack_cpi_source_domain_shape_variants_reject_before_hostile_matcher_cpi
             .expect_err("malformed source-domain CPI must reject before matcher CPI");
         if hidden_leg_error {
             assert!(
-                rejected.contains("Custom(17)")
-                    || rejected.contains("custom program error: 0x11"),
+                rejected.contains("Custom(17)") || rejected.contains("custom program error: 0x11"),
                 "{label} should fail as EngineHiddenLeg, got {rejected}"
             );
         } else {
             assert!(
-                rejected.contains("Custom(18)")
-                    || rejected.contains("custom program error: 0x12"),
+                rejected.contains("Custom(18)") || rejected.contains("custom program error: 0x12"),
                 "{label} should fail as EngineInvalidLeg, got {rejected}"
             );
         }
@@ -79466,7 +79478,9 @@ fn v16_attack_terminal_insurance_rejects_bad_secondary_accounts_before_commit() 
                 ],
                 &[&admin],
             )
-            .expect("terminal WithdrawInsurance remains live after secondary bad-account rejection");
+            .expect(
+                "terminal WithdrawInsurance remains live after secondary bad-account rejection",
+            );
             assert_cu_within(
                 "terminal WithdrawInsurance bad-secondary retry",
                 ok,
@@ -79476,8 +79490,7 @@ fn v16_attack_terminal_insurance_rejects_bad_secondary_accounts_before_commit() 
             assert_eq!(env.token_amount(secondary_vault), 60);
             assert_eq!(env.token_amount(env.vault), 0);
             let ledger_state =
-                state::read_insurance_ledger(&env.svm.get_account(&ledger).unwrap().data)
-                    .unwrap();
+                state::read_insurance_ledger(&env.svm.get_account(&ledger).unwrap().data).unwrap();
             assert_eq!(ledger_state.total_withdrawn_atoms, 40);
             assert_eq!(ledger_state.last_observed_insurance_atoms, 60);
             let (_, group) = env.market_state();
@@ -92106,16 +92119,15 @@ fn v16_attack_nocpi_trade_stale_layout_rejects_before_state_mutation() {
             current_layout > 0,
             "current engine layout discriminator is nonzero"
         );
-        taker_state.provenance_header =
-            percolator::ProvenanceHeaderV16Account::from_runtime(
-                &percolator::ProvenanceHeaderV16 {
-                    market_group_id: taker_state.provenance_header.market_group_id,
-                    portfolio_account_id: taker_state.provenance_header.portfolio_account_id,
-                    owner: taker_state.provenance_header.owner,
-                    version: taker_state.provenance_header.version.get(),
-                    layout_discriminator: current_layout - 1,
-                },
-            );
+        taker_state.provenance_header = percolator::ProvenanceHeaderV16Account::from_runtime(
+            &percolator::ProvenanceHeaderV16 {
+                market_group_id: taker_state.provenance_header.market_group_id,
+                portfolio_account_id: taker_state.provenance_header.portfolio_account_id,
+                owner: taker_state.provenance_header.owner,
+                version: taker_state.provenance_header.version.get(),
+                layout_discriminator: current_layout - 1,
+            },
+        );
         state::write_portfolio(&mut taker_account.data, &taker_state).unwrap();
         env.svm.set_account(ta, taker_account.clone()).unwrap();
 
@@ -94937,9 +94949,7 @@ fn v16_attack_cure_optional_deposit_rejects_native_accounts_before_cancel() {
             "native-account rejection must not cancel the close ledger"
         );
 
-        env.svm
-            .set_account(native_key, clean_native_slot)
-            .unwrap();
+        env.svm.set_account(native_key, clean_native_slot).unwrap();
         env.svm.expire_blockhash();
         let ok = env
             .send(
@@ -94957,7 +94967,11 @@ fn v16_attack_cure_optional_deposit_rejects_native_accounts_before_cancel() {
                 &[&owner],
             )
             .expect("CureAndCancelClose remains live after native-account rejection");
-        assert_cu_within("CureAndCancelClose native-account retry", ok, CUSTODY_CU_LIMIT);
+        assert_cu_within(
+            "CureAndCancelClose native-account retry",
+            ok,
+            CUSTODY_CU_LIMIT,
+        );
         let cured = env.portfolio_state(p);
         assert!(close_progress(&cured).canceled);
         assert_eq!(cured.capital.get(), 120);
@@ -95075,7 +95089,11 @@ fn v16_attack_cure_optional_deposit_rejects_malformed_token_accounts_before_canc
                 &[&owner],
             )
             .expect("CureAndCancelClose remains live after malformed-token rejection");
-        assert_cu_within("CureAndCancelClose malformed-token retry", ok, CUSTODY_CU_LIMIT);
+        assert_cu_within(
+            "CureAndCancelClose malformed-token retry",
+            ok,
+            CUSTODY_CU_LIMIT,
+        );
         let cured = env.portfolio_state(p);
         assert!(close_progress(&cured).canceled);
         assert_eq!(cured.capital.get(), 120);
@@ -95488,19 +95506,15 @@ fn v16_attack_value_in_routes_reject_malformed_token_accounts_before_credit() {
                     &[signer],
                 )
             }
-            ValueInRoute::TopUpInsurance => {
-                send_common(ProgInstruction::TopUpInsurance { amount })
-            }
+            ValueInRoute::TopUpInsurance => send_common(ProgInstruction::TopUpInsurance { amount }),
             ValueInRoute::TopUpInsuranceDomain => {
                 send_common(ProgInstruction::TopUpInsuranceDomain { domain: 0, amount })
             }
-            ValueInRoute::TopUpBackingBucket => {
-                send_common(ProgInstruction::TopUpBackingBucket {
-                    domain: 1,
-                    amount,
-                    expiry_slot: 10_000,
-                })
-            }
+            ValueInRoute::TopUpBackingBucket => send_common(ProgInstruction::TopUpBackingBucket {
+                domain: 1,
+                amount,
+                expiry_slot: 10_000,
+            }),
         }
     }
 
@@ -96325,9 +96339,8 @@ fn v16_attack_direct_ledger_sync_counter_overflows_do_not_advance_snapshots() {
         .svm
         .get_account(&poisoned_loss_ledger)
         .unwrap();
-    let mut poisoned_loss_state =
-        state::read_backing_domain_ledger(&poisoned_loss_account.data)
-            .expect("initialized backing ledger");
+    let mut poisoned_loss_state = state::read_backing_domain_ledger(&poisoned_loss_account.data)
+        .expect("initialized backing ledger");
     poisoned_loss_state.cumulative_loss_atoms = u128::MAX;
     state::write_backing_domain_ledger(&mut poisoned_loss_account.data, &poisoned_loss_state)
         .expect("poison backing sync loss counter");
@@ -96694,7 +96707,9 @@ fn v16_attack_live_domain_withdrawals_reject_native_accounts_before_debit() {
             let (ledger, amount) = match route {
                 DomainWithdrawRoute::Insurance => {
                     let ledger = env.insurance_ledger_account();
-                    env.top_up_insurance_domain_with_authority_ledger_and_cu(&admin, ledger, 0, 100);
+                    env.top_up_insurance_domain_with_authority_ledger_and_cu(
+                        &admin, ledger, 0, 100,
+                    );
                     (ledger, 40)
                 }
                 DomainWithdrawRoute::BackingPrincipal => {
@@ -96734,11 +96749,7 @@ fn v16_attack_live_domain_withdrawals_reject_native_accounts_before_debit() {
                 .set_account(
                     native_key,
                     Account {
-                        data: make_native_flagged_token_data(
-                            env.mint,
-                            native_owner,
-                            native_amount,
-                        ),
+                        data: make_native_flagged_token_data(env.mint, native_owner, native_amount),
                         ..clean_native_slot.clone()
                     },
                 )
@@ -96911,7 +96922,11 @@ fn v16_attack_live_domain_withdrawals_reject_readonly_accounts_before_debit() {
         DomainWithdrawRoute::BackingPrincipal,
         DomainWithdrawRoute::BackingEarnings,
     ] {
-        for readonly_slot in [ReadonlySlot::Ledger, ReadonlySlot::Dest, ReadonlySlot::Vault] {
+        for readonly_slot in [
+            ReadonlySlot::Ledger,
+            ReadonlySlot::Dest,
+            ReadonlySlot::Vault,
+        ] {
             let mut env = V16CuEnv::new();
             let admin = env.admin.insecure_clone();
             let (ledger, amount) = match route {
@@ -97489,14 +97504,8 @@ fn v16_attack_live_domain_withdrawals_reject_frozen_secondary_reserve_before_deb
         let dest_before = env.svm.get_account(&dest).unwrap();
         let label = route.label();
 
-        let rejected = send_secondary_domain_withdraw(
-            &mut env,
-            route,
-            ledger,
-            dest,
-            secondary_vault,
-            amount,
-        );
+        let rejected =
+            send_secondary_domain_withdraw(&mut env, route, ledger, dest, secondary_vault, amount);
         assert!(
             rejected.is_err(),
             "{label} must reject a frozen secondary reserve before committing the debit"
@@ -97539,15 +97548,9 @@ fn v16_attack_live_domain_withdrawals_reject_frozen_secondary_reserve_before_deb
                 },
             )
             .unwrap();
-        let ok = send_secondary_domain_withdraw(
-            &mut env,
-            route,
-            ledger,
-            dest,
-            secondary_vault,
-            amount,
-        )
-        .expect("secondary-reserve domain withdrawal remains live after frozen rejection");
+        let ok =
+            send_secondary_domain_withdraw(&mut env, route, ledger, dest, secondary_vault, amount)
+                .expect("secondary-reserve domain withdrawal remains live after frozen rejection");
         assert_cu_within(label, ok, CUSTODY_CU_LIMIT);
         assert_eq!(env.token_amount(dest), amount as u64, "{label} retry pays");
         assert_eq!(
@@ -99618,8 +99621,7 @@ fn v16_attack_resolved_payout_readonly_accounts_roll_back_terminal_state() {
         let close_portfolio = close_env.create_portfolio(&close_owner);
         close_env.deposit(&close_owner, close_portfolio, 1_000_000);
         close_env.resolve();
-        let close_dest =
-            close_env.token_account_for_mint(close_env.mint, close_owner.pubkey(), 0);
+        let close_dest = close_env.token_account_for_mint(close_env.mint, close_owner.pubkey(), 0);
 
         let close_market_before = close_env.svm.get_account(&close_env.market).unwrap();
         let close_portfolio_before = close_env.svm.get_account(&close_portfolio).unwrap();
@@ -99755,8 +99757,7 @@ fn v16_attack_resolved_payout_readonly_accounts_roll_back_terminal_state() {
             topup_env.vault_authority,
             60,
         );
-        let topup_dest =
-            topup_env.token_account_for_mint(topup_env.mint, topup_owner.pubkey(), 0);
+        let topup_dest = topup_env.token_account_for_mint(topup_env.mint, topup_owner.pubkey(), 0);
         let topup_market_before = topup_env.svm.get_account(&topup_env.market).unwrap();
         let topup_portfolio_before = topup_env.svm.get_account(&topup_portfolio).unwrap();
         let topup_vault_before = topup_env.svm.get_account(&topup_env.vault).unwrap();
@@ -100867,9 +100868,7 @@ fn v16_attack_terminal_insurance_native_accounts_roll_back_budget_and_ledger() {
             "native terminal insurance withdraw must not pay the destination"
         );
 
-        env.svm
-            .set_account(native_key, clean_native_slot)
-            .unwrap();
+        env.svm.set_account(native_key, clean_native_slot).unwrap();
         env.svm.expire_blockhash();
         let ok_cu = send_tx(
             &mut env.svm,
