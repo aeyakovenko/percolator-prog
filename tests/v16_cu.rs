@@ -69337,6 +69337,148 @@ fn v16_attack_swap_secondary_rejects_frozen_user_accounts_before_transfer() {
     assert_eq!(env.token_amount(secondary_vault), 40);
 }
 
+// LoF/DoS sweep (cron135): SwapSecondaryForPrimary has two vault rails and two SPL transfers. A
+// frozen canonical vault is valid-length SPL data but unusable custody, so either frozen vault must
+// reject before the first primary transfer can strand funds or the second transfer can pay out.
+#[test]
+fn v16_attack_swap_secondary_rejects_frozen_canonical_vaults_before_transfer() {
+    #[derive(Clone, Copy)]
+    enum FrozenVault {
+        Primary,
+        Secondary,
+    }
+
+    for frozen in [FrozenVault::Primary, FrozenVault::Secondary] {
+        let mut env = V16CuEnv::new();
+        let admin = env.admin.insecure_clone();
+        let secondary_mint = env.create_mint();
+        env.update_base_unit_mints_with_cu(env.mint, secondary_mint);
+
+        let secondary_vault = canonical_vault_ata(env.vault_authority, secondary_mint);
+        env.svm
+            .set_account(
+                secondary_vault,
+                Account {
+                    lamports: 1_000_000_000,
+                    data: make_token_data(secondary_mint, env.vault_authority, 50),
+                    owner: spl_token::ID,
+                    executable: false,
+                    rent_epoch: 0,
+                },
+            )
+            .unwrap();
+        let primary_source = env.token_account_for_mint(env.mint, admin.pubkey(), 10);
+        let secondary_dest = env.token_account_for_mint(secondary_mint, admin.pubkey(), 0);
+
+        let market_before = env.svm.get_account(&env.market).unwrap();
+        let primary_source_before = env.svm.get_account(&primary_source).unwrap();
+        let primary_vault_before = env.svm.get_account(&env.vault).unwrap();
+        let secondary_dest_before = env.svm.get_account(&secondary_dest).unwrap();
+        let secondary_vault_before = env.svm.get_account(&secondary_vault).unwrap();
+        let (frozen_key, mint, amount, label) = match frozen {
+            FrozenVault::Primary => (env.vault, env.mint, 0, "primary"),
+            FrozenVault::Secondary => (secondary_vault, secondary_mint, 50, "secondary"),
+        };
+        let clean_frozen_slot = env.svm.get_account(&frozen_key).unwrap();
+        env.svm
+            .set_account(
+                frozen_key,
+                Account {
+                    data: make_frozen_token_data(mint, env.vault_authority, amount),
+                    ..clean_frozen_slot.clone()
+                },
+            )
+            .unwrap();
+        let frozen_slot_before = env.svm.get_account(&frozen_key).unwrap();
+
+        env.svm.expire_blockhash();
+        let rejected = env.send(
+            ProgInstruction::SwapSecondaryForPrimary { amount: 10 },
+            vec![
+                AccountMeta::new(admin.pubkey(), true),
+                AccountMeta::new_readonly(env.market, false),
+                AccountMeta::new(primary_source, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new(secondary_dest, false),
+                AccountMeta::new(secondary_vault, false),
+                AccountMeta::new_readonly(env.vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[&admin],
+        );
+        assert!(
+            rejected.is_err(),
+            "SwapSecondaryForPrimary must reject a frozen {label} canonical vault"
+        );
+        assert_eq!(
+            env.svm.get_account(&env.market).unwrap(),
+            market_before,
+            "frozen-{label}-vault rejection leaves market config unchanged"
+        );
+        assert_eq!(
+            env.svm.get_account(&primary_source).unwrap(),
+            primary_source_before,
+            "frozen-{label}-vault rejection must not pull primary collateral"
+        );
+        if matches!(frozen, FrozenVault::Primary) {
+            assert_eq!(
+                env.svm.get_account(&env.vault).unwrap(),
+                frozen_slot_before,
+                "frozen primary vault remains byte-identical"
+            );
+            assert_eq!(
+                env.svm.get_account(&secondary_vault).unwrap(),
+                secondary_vault_before,
+                "frozen-primary rejection must not debit secondary reserve"
+            );
+        } else {
+            assert_eq!(
+                env.svm.get_account(&env.vault).unwrap(),
+                primary_vault_before,
+                "frozen-secondary rejection must not credit primary custody"
+            );
+            assert_eq!(
+                env.svm.get_account(&secondary_vault).unwrap(),
+                frozen_slot_before,
+                "frozen secondary reserve remains byte-identical"
+            );
+        }
+        assert_eq!(
+            env.svm.get_account(&secondary_dest).unwrap(),
+            secondary_dest_before,
+            "frozen-{label}-vault rejection must not pay secondary collateral"
+        );
+
+        env.svm.set_account(frozen_key, clean_frozen_slot).unwrap();
+        env.svm.expire_blockhash();
+        let ok = env
+            .send(
+                ProgInstruction::SwapSecondaryForPrimary { amount: 10 },
+                vec![
+                    AccountMeta::new(admin.pubkey(), true),
+                    AccountMeta::new_readonly(env.market, false),
+                    AccountMeta::new(primary_source, false),
+                    AccountMeta::new(env.vault, false),
+                    AccountMeta::new(secondary_dest, false),
+                    AccountMeta::new(secondary_vault, false),
+                    AccountMeta::new_readonly(env.vault_authority, false),
+                    AccountMeta::new_readonly(spl_token::ID, false),
+                ],
+                &[&admin],
+            )
+            .expect("SwapSecondaryForPrimary remains live after frozen-vault rejection");
+        assert_cu_within(
+            "SwapSecondaryForPrimary frozen-vault retry",
+            ok,
+            CUSTODY_CU_LIMIT,
+        );
+        assert_eq!(env.token_amount(primary_source), 0);
+        assert_eq!(env.token_amount(env.vault), 10);
+        assert_eq!(env.token_amount(secondary_dest), 10);
+        assert_eq!(env.token_amount(secondary_vault), 40);
+    }
+}
+
 // full-interface sweep: SwapSecondaryForPrimary validates all four SPL token accounts before either
 // leg transfers. SPL-owned but malformed account data on any slot must not let the primary deposit
 // run before the secondary payout fails, and the route must remain live after the bad slot is fixed.
