@@ -94789,6 +94789,208 @@ fn v16_attack_live_domain_withdrawals_reject_native_accounts_before_debit() {
     }
 }
 
+// LoF/DoS sweep (cron135): malformed/native/frozen token data exercises SPL validation, but a
+// keeper or client can also pass valid custody accounts as readonly metas. Live domain withdrawals
+// must reject those account-lock failures before committing market/ledger debits, then remain live
+// when the same accounts are supplied writable.
+#[test]
+fn v16_attack_live_domain_withdrawals_reject_readonly_accounts_before_debit() {
+    #[derive(Clone, Copy)]
+    enum DomainWithdrawRoute {
+        Insurance,
+        BackingPrincipal,
+        BackingEarnings,
+    }
+
+    impl DomainWithdrawRoute {
+        fn label(self) -> &'static str {
+            match self {
+                DomainWithdrawRoute::Insurance => "WithdrawInsuranceAsset",
+                DomainWithdrawRoute::BackingPrincipal => "WithdrawBackingBucket",
+                DomainWithdrawRoute::BackingEarnings => "WithdrawBackingBucketEarnings",
+            }
+        }
+    }
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum ReadonlySlot {
+        Ledger,
+        Dest,
+        Vault,
+    }
+
+    impl ReadonlySlot {
+        fn label(self) -> &'static str {
+            match self {
+                ReadonlySlot::Ledger => "ledger",
+                ReadonlySlot::Dest => "destination",
+                ReadonlySlot::Vault => "vault",
+            }
+        }
+    }
+
+    fn maybe_readonly(
+        key: Pubkey,
+        readonly_slot: Option<ReadonlySlot>,
+        slot: ReadonlySlot,
+    ) -> AccountMeta {
+        if readonly_slot == Some(slot) {
+            AccountMeta::new_readonly(key, false)
+        } else {
+            AccountMeta::new(key, false)
+        }
+    }
+
+    fn send_domain_withdraw(
+        env: &mut V16CuEnv,
+        route: DomainWithdrawRoute,
+        ledger: Pubkey,
+        dest: Pubkey,
+        amount: u128,
+        readonly_slot: Option<ReadonlySlot>,
+    ) -> Result<u64, String> {
+        env.svm.expire_blockhash();
+        match route {
+            DomainWithdrawRoute::Insurance => send_tx(
+                &mut env.svm,
+                env.program_id,
+                &env.payer,
+                ProgInstruction::WithdrawInsuranceAsset {
+                    asset_index: 0,
+                    amount,
+                },
+                vec![
+                    AccountMeta::new(env.admin.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    maybe_readonly(dest, readonly_slot, ReadonlySlot::Dest),
+                    maybe_readonly(env.vault, readonly_slot, ReadonlySlot::Vault),
+                    AccountMeta::new_readonly(env.vault_authority, false),
+                    AccountMeta::new_readonly(spl_token::ID, false),
+                    maybe_readonly(ledger, readonly_slot, ReadonlySlot::Ledger),
+                ],
+                &[&env.admin],
+            ),
+            DomainWithdrawRoute::BackingPrincipal => send_tx(
+                &mut env.svm,
+                env.program_id,
+                &env.payer,
+                ProgInstruction::WithdrawBackingBucket { domain: 1, amount },
+                vec![
+                    AccountMeta::new(env.admin.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    maybe_readonly(dest, readonly_slot, ReadonlySlot::Dest),
+                    maybe_readonly(env.vault, readonly_slot, ReadonlySlot::Vault),
+                    AccountMeta::new_readonly(env.vault_authority, false),
+                    AccountMeta::new_readonly(spl_token::ID, false),
+                    maybe_readonly(ledger, readonly_slot, ReadonlySlot::Ledger),
+                ],
+                &[&env.admin],
+            ),
+            DomainWithdrawRoute::BackingEarnings => send_tx(
+                &mut env.svm,
+                env.program_id,
+                &env.payer,
+                ProgInstruction::WithdrawBackingBucketEarnings { domain: 1, amount },
+                vec![
+                    AccountMeta::new(env.admin.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    maybe_readonly(ledger, readonly_slot, ReadonlySlot::Ledger),
+                    maybe_readonly(dest, readonly_slot, ReadonlySlot::Dest),
+                    maybe_readonly(env.vault, readonly_slot, ReadonlySlot::Vault),
+                    AccountMeta::new_readonly(env.vault_authority, false),
+                    AccountMeta::new_readonly(spl_token::ID, false),
+                ],
+                &[&env.admin],
+            ),
+        }
+    }
+
+    for route in [
+        DomainWithdrawRoute::Insurance,
+        DomainWithdrawRoute::BackingPrincipal,
+        DomainWithdrawRoute::BackingEarnings,
+    ] {
+        for readonly_slot in [ReadonlySlot::Ledger, ReadonlySlot::Dest, ReadonlySlot::Vault] {
+            let mut env = V16CuEnv::new();
+            let admin = env.admin.insecure_clone();
+            let (ledger, amount) = match route {
+                DomainWithdrawRoute::Insurance => {
+                    let ledger = env.insurance_ledger_account();
+                    env.top_up_insurance_domain_with_authority_ledger_and_cu(
+                        &admin, ledger, 0, 100,
+                    );
+                    (ledger, 40)
+                }
+                DomainWithdrawRoute::BackingPrincipal => {
+                    let ledger = env.backing_domain_ledger_account();
+                    env.top_up_backing_bucket_with_ledger_with_cu(ledger, 1, 100, 10_000);
+                    (ledger, 40)
+                }
+                DomainWithdrawRoute::BackingEarnings => {
+                    let ledger = env.backing_domain_ledger_account();
+                    env.top_up_backing_bucket_with_ledger_with_cu(ledger, 1, 100, 10_000);
+                    env.mutate_market(|_, group| {
+                        group.source_backing_buckets[1].utilization_fee_earnings = 30;
+                        group.vault += 30;
+                    });
+                    let (_, funded) = env.market_state();
+                    env.set_token_account_amount(
+                        env.vault,
+                        env.mint,
+                        env.vault_authority,
+                        funded.vault as u64,
+                    );
+                    (ledger, 10)
+                }
+            };
+            let dest = env.token_account_for_mint(env.mint, admin.pubkey(), 0);
+            let market_before = env.svm.get_account(&env.market).unwrap();
+            let ledger_before = env.svm.get_account(&ledger).unwrap();
+            let vault_before = env.svm.get_account(&env.vault).unwrap();
+            let dest_before = env.svm.get_account(&dest).unwrap();
+            let label = route.label();
+            let slot_label = readonly_slot.label();
+
+            let rejected =
+                send_domain_withdraw(&mut env, route, ledger, dest, amount, Some(readonly_slot));
+            assert!(
+                rejected.is_err(),
+                "{label} must reject readonly {slot_label} before committing the debit"
+            );
+            assert_eq!(
+                env.svm.get_account(&env.market).unwrap(),
+                market_before,
+                "{label} readonly-{slot_label} rejection leaves market budgets unchanged"
+            );
+            assert_eq!(
+                env.svm.get_account(&ledger).unwrap(),
+                ledger_before,
+                "{label} readonly-{slot_label} rejection leaves ledger unchanged"
+            );
+            assert_eq!(
+                env.svm.get_account(&env.vault).unwrap(),
+                vault_before,
+                "{label} readonly-{slot_label} rejection leaves vault custody unchanged"
+            );
+            assert_eq!(
+                env.svm.get_account(&dest).unwrap(),
+                dest_before,
+                "{label} readonly-{slot_label} rejection pays no destination tokens"
+            );
+
+            let ok = send_domain_withdraw(&mut env, route, ledger, dest, amount, None)
+                .expect("domain withdrawal remains live after readonly-account rejection");
+            assert_cu_within(label, ok, CUSTODY_CU_LIMIT);
+            assert_eq!(env.token_amount(dest), amount as u64, "{label} retry pays");
+            assert_eq!(
+                env.market_state().1.vault as u64,
+                env.token_amount(env.vault),
+                "{label} retry keeps vault accounting tied to custody"
+            );
+        }
+    }
+}
+
 // LoF/DoS sweep (cron135): live domain withdrawals already reject malformed destinations and
 // frozen vaults. A frozen initialized destination reaches a different SPL account-state branch:
 // it must abort before the live insurance/backing route commits market or ledger debits, and the
