@@ -93677,6 +93677,101 @@ fn v16_attack_stale_empty_portfolio_close_remains_live_before_resolve() {
     env.close_slab_with_cu();
 }
 
+// LoF/DoS sweep: after a resolved payout, the account can be empty while still counted as materialized.
+// If the user disappears, that empty account must not permanently block CloseSlab. Only the current
+// marketauth may use the terminal cleanup branch; arbitrary non-owners still cannot collect the rent.
+#[test]
+fn v16_attack_resolved_empty_portfolio_marketauth_cleanup_unblocks_close_slab() {
+    let mut env = V16CuEnv::new();
+    let admin = env.admin.insecure_clone();
+    let owner = Keypair::new();
+    let portfolio = env.create_portfolio(&owner);
+    env.deposit(&owner, portfolio, 1_000);
+    env.resolve();
+
+    let dest = env.close_resolved(&owner, portfolio);
+    assert_eq!(
+        env.token_amount(dest),
+        1_000,
+        "setup pays the user's resolved claim before marketauth cleanup"
+    );
+    assert_eq!(
+        env.market_state().1.materialized_portfolio_count,
+        1,
+        "resolved payout leaves an empty materialized account to clean"
+    );
+
+    let mallory = Keypair::new();
+    env.ensure_signer_account(mallory.pubkey());
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let portfolio_before = env.svm.get_account(&portfolio).unwrap();
+    let mallory_before = env.svm.get_account(&mallory.pubkey()).unwrap();
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::ClosePortfolio,
+        vec![
+            AccountMeta::new(mallory.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio, false),
+        ],
+        &[&mallory],
+    );
+    assert!(
+        rejected.is_err(),
+        "arbitrary non-owner must not use terminal ClosePortfolio cleanup"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "rejected non-owner cleanup leaves materialized count and rent unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&portfolio).unwrap(),
+        portfolio_before,
+        "rejected non-owner cleanup leaves the empty portfolio account intact"
+    );
+    assert_eq!(
+        env.svm.get_account(&mallory.pubkey()).unwrap(),
+        mallory_before,
+        "rejected non-owner cleanup does not collect portfolio rent"
+    );
+
+    let market_lamports_before = env.svm.get_account(&env.market).unwrap().lamports;
+    let portfolio_lamports_before = env.svm.get_account(&portfolio).unwrap().lamports;
+    env.svm.expire_blockhash();
+    let cleanup_cu = env
+        .send(
+            ProgInstruction::ClosePortfolio,
+            vec![
+                AccountMeta::new(admin.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(portfolio, false),
+            ],
+            &[&admin],
+        )
+        .expect("marketauth can clean an empty resolved portfolio");
+    assert_cu_within(
+        "resolved marketauth ClosePortfolio cleanup",
+        cleanup_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    assert_eq!(
+        env.market_state().1.materialized_portfolio_count,
+        0,
+        "marketauth cleanup removes the abandoned empty portfolio from terminal liveness"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap().lamports,
+        market_lamports_before + portfolio_lamports_before,
+        "terminal cleanup sweeps rent to the market slab, not the cleaner"
+    );
+    if let Some(closed_account) = env.svm.get_account(&portfolio) {
+        assert_eq!(closed_account.lamports, 0);
+        assert!(closed_account.data.is_empty() || !state::is_initialized(&closed_account.data));
+    }
+    env.close_slab_with_cu();
+}
+
 // LoF/DoS sweep: SyncMaintenanceFee is permissionless and can credit an optional cranker reward.
 // The stale-Live boundary is covered above; this pins the already-Resolved boundary. The engine may
 // accept an inert sync, but a cranker must not be able to mutate terminal accounting, debit a user's
