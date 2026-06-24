@@ -92951,6 +92951,109 @@ fn v16_attack_resolved_payout_readonly_accounts_roll_back_terminal_state() {
     }
 }
 
+// LoF/DoS sweep (cron135): CloseResolved computes and can finalize the resolved payout before token
+// validation. Delegated/malformed/readonly destinations cover other branches; this pins the
+// initialized-but-frozen destination branch so a public closer cannot burn the terminal payout state
+// without actually delivering tokens.
+#[test]
+fn v16_attack_close_resolved_frozen_dest_rolls_back_terminal_state() {
+    let mut env = V16CuEnv::new();
+    let owner = Keypair::new();
+    let portfolio = env.create_portfolio(&owner);
+    env.deposit(&owner, portfolio, 1_000_000);
+    env.resolve();
+
+    let frozen_dest = Pubkey::new_unique();
+    env.svm
+        .set_account(
+            frozen_dest,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_frozen_token_data(env.mint, owner.pubkey(), 0),
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    let clean_dest = env.token_account_for_mint(env.mint, owner.pubkey(), 0);
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let portfolio_before = env.svm.get_account(&portfolio).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    let frozen_dest_before = env.svm.get_account(&frozen_dest).unwrap();
+    let clean_dest_before = env.svm.get_account(&clean_dest).unwrap();
+
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::CloseResolved {
+            fee_rate_per_slot: 0,
+        },
+        vec![
+            AccountMeta::new_readonly(owner.pubkey(), false),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio, false),
+            AccountMeta::new(frozen_dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[],
+    );
+    assert!(
+        rejected.is_err(),
+        "CloseResolved must reject a frozen initialized destination"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "frozen-dest CloseResolved must not commit market payout changes"
+    );
+    assert_eq!(
+        env.svm.get_account(&portfolio).unwrap(),
+        portfolio_before,
+        "frozen-dest CloseResolved must not close, zero, or finalize the portfolio"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        vault_before,
+        "frozen-dest CloseResolved must not debit the vault"
+    );
+    assert_eq!(
+        env.svm.get_account(&frozen_dest).unwrap(),
+        frozen_dest_before,
+        "frozen destination remains byte-identical"
+    );
+    assert_eq!(
+        env.svm.get_account(&clean_dest).unwrap(),
+        clean_dest_before,
+        "clean destination is not paid by the rejected frozen-dest close"
+    );
+
+    env.svm.expire_blockhash();
+    let accepted = env.send(
+        ProgInstruction::CloseResolved {
+            fee_rate_per_slot: 0,
+        },
+        vec![
+            AccountMeta::new_readonly(owner.pubkey(), false),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio, false),
+            AccountMeta::new(clean_dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[],
+    );
+    assert!(
+        accepted.is_ok(),
+        "same CloseResolved payout remains live with a clean destination: {accepted:?}"
+    );
+    assert_eq!(env.token_amount(clean_dest), 1_000_000);
+    assert_eq!(env.market_state().1.vault, 0);
+}
+
 // LoF/DoS sweep (cron135): delegated and malformed resolved-payout destinations cover ownership and
 // unpack failure, but a frozen initialized destination reaches the distinct SPL account-state branch
 // after ClaimResolvedPayoutTopup has advanced the engine receipt. The failed transfer must roll that
