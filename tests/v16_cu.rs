@@ -50839,6 +50839,99 @@ fn v16_attack_stale_thirteen_leg_fresh_asset_tradecpi_rejects_before_cu_cliff() 
     );
 }
 
+// CU/DoS hardening: the single TradeCpi route rejects a high-active stale portfolio before
+// invoking a matcher, even when the requested fill opens a fresh asset. BatchTradeCpi must use the
+// same guard; otherwise a public batch fill can route through matcher CPI and then spend almost the
+// full transaction meter settling stale legs before opening the fresh asset.
+#[test]
+fn v16_attack_stale_thirteen_leg_fresh_asset_batch_tradecpi_rejects_before_cu_cliff() {
+    const MAX_TAIL: usize = percolator_prog::constants::MAX_MATCHER_TAIL_ACCOUNTS;
+
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(14, 1_000, 1_000, 500);
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long_account = env.create_portfolio(&long_owner);
+    let short_account = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long_account, 100_000);
+    env.deposit(&short_owner, short_account, 100_000);
+    env.seed_n_leg_position_for_benchmark(long_account, short_account, 13);
+    env.svm.warp_to_slot(16);
+
+    let matcher_program = Pubkey::new_unique();
+    let matcher_bytes = std::fs::read(auth_matcher_program_path()).expect("read auth matcher BPF");
+    env.svm.add_program(matcher_program, &matcher_bytes);
+    let (ctx, delegate, _) =
+        env.init_auth_matcher_context(matcher_program, &short_owner, short_account);
+    let tail: Vec<Pubkey> = (0..MAX_TAIL)
+        .map(|_| {
+            let key = Pubkey::new_unique();
+            env.svm
+                .set_account(
+                    key,
+                    Account {
+                        lamports: 1_000_000_000,
+                        data: vec![0u8; 8],
+                        owner: Pubkey::default(),
+                        executable: false,
+                        rent_epoch: 0,
+                    },
+                )
+                .unwrap();
+            key
+        })
+        .collect();
+    let mut accounts = vec![
+        AccountMeta::new(long_owner.pubkey(), true),
+        AccountMeta::new(env.market, false),
+        AccountMeta::new(long_account, false),
+        AccountMeta::new(short_account, false),
+        AccountMeta::new_readonly(matcher_program, false),
+        AccountMeta::new(ctx, false),
+        AccountMeta::new_readonly(delegate, false),
+    ];
+    accounts.extend(
+        tail.iter()
+            .copied()
+            .map(|key| AccountMeta::new_readonly(key, false)),
+    );
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let long_before = env.svm.get_account(&long_account).unwrap();
+    let short_before = env.svm.get_account(&short_account).unwrap();
+    let ctx_before = env.svm.get_account(&ctx).unwrap();
+    env.svm.expire_blockhash();
+    let rejected = env
+        .send(
+            ProgInstruction::BatchTradeCpi {
+                legs: vec![BatchTradeCpiLeg {
+                    asset_index: 13,
+                    size_q: POS_SCALE as i128,
+                    fee_bps: 0,
+                    limit_price: 0,
+                }],
+            },
+            accounts,
+            &[&long_owner],
+        )
+        .expect_err("max-tail fresh-asset BatchTradeCpi from thirteen stale legs must pre-crank");
+    assert!(
+        rejected.contains("Custom(19)") || rejected.contains("custom program error: 0x13"),
+        "max-tail stale fresh-asset BatchTradeCpi should reject as EngineStale, got: {rejected}"
+    );
+    assert!(
+        !rejected.contains("exceeded CUs"),
+        "max-tail stale fresh-asset BatchTradeCpi must reject before the CU cliff: {rejected}"
+    );
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+    assert_eq!(env.svm.get_account(&long_account).unwrap(), long_before);
+    assert_eq!(env.svm.get_account(&short_account).unwrap(), short_before);
+    assert_eq!(
+        env.svm.get_account(&ctx).unwrap(),
+        ctx_before,
+        "max-tail stale BatchTradeCpi rejection happens before matcher context writes"
+    );
+}
+
 // CU/DoS hardening: BatchTradeCpi must reject impossible caller fee_bps before invoking a matcher.
 // The single-fill CPI path checks max(caller_fee_bps, trade_fee_base_bps) before CPI; batch CPI must
 // do the same. The hostile over-fill matcher is the sentinel: a valid-fee call reaches matcher-return
