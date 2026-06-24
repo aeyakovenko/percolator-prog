@@ -94480,6 +94480,72 @@ fn v16_attack_resolved_empty_portfolio_marketauth_cleanup_unblocks_close_slab() 
     env.close_slab_with_cu();
 }
 
+// LoF/DoS sweep (cron135): SetMatcherConfig writes non-engine portfolio tail bytes and is accepted
+// independent of market mode. A resolved account whose payout is complete must remain terminal-cleanable
+// even if the owner writes a matcher tuple before disappearing; otherwise non-engine tail state could
+// keep materialized_portfolio_count nonzero and permanently block CloseSlab.
+#[test]
+fn v16_attack_resolved_empty_portfolio_with_matcher_tail_remains_marketauth_cleanable() {
+    let mut env = V16CuEnv::new();
+    let admin = env.admin.insecure_clone();
+    let owner = Keypair::new();
+    let portfolio = env.create_portfolio(&owner);
+    env.deposit(&owner, portfolio, 1_000);
+    env.resolve();
+
+    let dest = env.close_resolved(&owner, portfolio);
+    assert_eq!(
+        env.token_amount(dest),
+        1_000,
+        "setup pays the resolved claim before matcher-tail write"
+    );
+    assert_eq!(
+        env.market_state().1.materialized_portfolio_count,
+        1,
+        "resolved payout leaves the empty portfolio materialized"
+    );
+
+    let matcher_program = Pubkey::new_unique();
+    let matcher_bytes = std::fs::read(auth_matcher_program_path()).expect("read auth matcher BPF");
+    env.svm.add_program(matcher_program, &matcher_bytes);
+    let (ctx, delegate, _) = env.init_auth_matcher_context(matcher_program, &owner, portfolio);
+    let matcher_cfg = env.portfolio_matcher_config(portfolio);
+    assert_eq!(matcher_cfg.matcher_program, matcher_program.to_bytes());
+    assert_eq!(matcher_cfg.matcher_context, ctx.to_bytes());
+    assert_eq!(matcher_cfg.matcher_delegate, delegate.to_bytes());
+
+    let market_lamports_before = env.svm.get_account(&env.market).unwrap().lamports;
+    let portfolio_lamports_before = env.svm.get_account(&portfolio).unwrap().lamports;
+    env.svm.expire_blockhash();
+    let cleanup_cu = env
+        .send(
+            ProgInstruction::ClosePortfolio,
+            vec![
+                AccountMeta::new(admin.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(portfolio, false),
+            ],
+            &[&admin],
+        )
+        .expect("marketauth cleanup must ignore non-engine matcher tail");
+    assert_cu_within(
+        "resolved matcher-tail marketauth ClosePortfolio cleanup",
+        cleanup_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    assert_eq!(
+        env.market_state().1.materialized_portfolio_count,
+        0,
+        "matcher tail must not keep an empty resolved portfolio materialized"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap().lamports,
+        market_lamports_before + portfolio_lamports_before,
+        "cleanup still sweeps the abandoned portfolio rent to the market slab"
+    );
+    env.close_slab_with_cu();
+}
+
 // LoF/DoS sweep: SyncMaintenanceFee is permissionless and can credit an optional cranker reward.
 // The stale-Live boundary is covered above; this pins the already-Resolved boundary. The engine may
 // accept an inert sync, but a cranker must not be able to mutate terminal accounting, debit a user's
