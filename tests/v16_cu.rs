@@ -76824,7 +76824,9 @@ fn v16_attack_cpi_source_domain_shape_variants_reject_before_hostile_matcher_cpi
         OutOfRangeDomain,
         WrongMarketId,
         ClaimExceedsCredit,
+        EffectiveReservedExceedsClaim,
         NonMultipleBacking,
+        FeeSlotWithoutBacking,
         FutureFeeSlot,
         ImpairedReserveWithoutClaim,
     }
@@ -76906,6 +76908,13 @@ fn v16_attack_cpi_source_domain_shape_variants_reject_before_hostile_matcher_cpi
                 SourceDomainPoison::ClaimExceedsCredit => {
                     source.source_claim_bound_num = percolator::V16PodU128::new(u128::MAX);
                 }
+                SourceDomainPoison::EffectiveReservedExceedsClaim => {
+                    source.source_claim_liened_num = percolator::V16PodU128::new(BOUND_SCALE);
+                    source.source_claim_counterparty_liened_num =
+                        percolator::V16PodU128::new(BOUND_SCALE);
+                    source.source_claim_insurance_liened_num = percolator::V16PodU128::new(0);
+                    source.source_lien_effective_reserved = percolator::V16PodU128::new(2);
+                }
                 SourceDomainPoison::NonMultipleBacking => {
                     source.source_claim_liened_num = percolator::V16PodU128::new(BOUND_SCALE);
                     source.source_claim_counterparty_liened_num =
@@ -76915,6 +76924,19 @@ fn v16_attack_cpi_source_domain_shape_variants_reject_before_hostile_matcher_cpi
                     source.source_lien_counterparty_backing_num =
                         percolator::V16PodU128::new(BOUND_SCALE + 1);
                     source.source_lien_insurance_backing_num = percolator::V16PodU128::new(0);
+                }
+                SourceDomainPoison::FeeSlotWithoutBacking => {
+                    assert!(
+                        current_slot != 0,
+                        "test precondition: current slot must make a nonzero fee timestamp non-future"
+                    );
+                    source.source_claim_liened_num = percolator::V16PodU128::new(0);
+                    source.source_claim_counterparty_liened_num = percolator::V16PodU128::new(0);
+                    source.source_claim_insurance_liened_num = percolator::V16PodU128::new(0);
+                    source.source_lien_effective_reserved = percolator::V16PodU128::new(0);
+                    source.source_lien_counterparty_backing_num = percolator::V16PodU128::new(0);
+                    source.source_lien_insurance_backing_num = percolator::V16PodU128::new(0);
+                    source.source_lien_fee_last_slot = percolator::V16PodU64::new(current_slot);
                 }
                 SourceDomainPoison::FutureFeeSlot => {
                     source.source_lien_fee_last_slot =
@@ -76957,10 +76979,11 @@ fn v16_attack_cpi_source_domain_shape_variants_reject_before_hostile_matcher_cpi
     env.deposit(&taker_owner, taker, 1_000_000);
     env.deposit(&lp_owner, lp, 1_000_000);
     env.add_source_positive_pnl(taker, 1, 40);
+    env.svm.warp_to_slot(1);
     env.crank(
         taker,
         ProgInstruction::PermissionlessCrank {
-            now_slot: 0,
+            now_slot: 1,
             close_q: 0,
             observations: crank_observations(0),
         },
@@ -77047,8 +77070,18 @@ fn v16_attack_cpi_source_domain_shape_variants_reject_before_hostile_matcher_cpi
             false,
         ),
         (
+            "effective-reserve-exceeds-claim",
+            SourceDomainPoison::EffectiveReservedExceedsClaim,
+            false,
+        ),
+        (
             "non-multiple-backing",
             SourceDomainPoison::NonMultipleBacking,
+            false,
+        ),
+        (
+            "fee-slot-without-backing",
+            SourceDomainPoison::FeeSlotWithoutBacking,
             false,
         ),
         ("future-fee-slot", SourceDomainPoison::FutureFeeSlot, false),
