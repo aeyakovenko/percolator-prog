@@ -54336,6 +54336,155 @@ fn v16_attack_shutdown_exit_window_keeps_provider_backing_withdrawable() {
     );
 }
 
+// LoF/DoS sweep (cron135): once a shutdown asset is empty and the force-close delay has
+// matured, marketauth is intentionally allowed to clean up abandoned non-base backing even if
+// the live backing authority was delegated away. Pin that positive liveness branch for both
+// provider-fee earnings and principal; the pre-delay provider-rug case above covers the
+// opposite side of the policy. Earnings are drained first because the engine correctly forbids
+// converting the last principal into an Empty bucket while provider earnings remain attached.
+#[test]
+fn v16_attack_mature_shutdown_drain_cleans_delegated_backing_bucket() {
+    const PRINCIPAL: u128 = 321;
+    const EARNINGS: u128 = 37;
+    const DELAY: u64 = 5;
+    const SHUT: u64 = 20;
+
+    let mut env = V16CuEnv::new();
+    let admin = env.admin.insecure_clone();
+    let backing_authority = Keypair::new();
+    env.configure_permissionless_resolve_with_cu(100, DELAY);
+    env.activate_asset_with_authorities(
+        1,
+        1,
+        100,
+        admin.pubkey(),
+        admin.pubkey(),
+        backing_authority.pubkey(),
+        admin.pubkey(),
+    );
+    let profile =
+        state::read_asset_oracle_profile(&env.svm.get_account(&env.market).unwrap().data, 1)
+            .unwrap();
+    assert_eq!(
+        profile.backing_bucket_authority,
+        backing_authority.pubkey().to_bytes(),
+        "setup delegates asset-1 backing away from marketauth"
+    );
+
+    env.top_up_backing_bucket_with_authority(&backing_authority, 2, PRINCIPAL, 100_000);
+    env.mutate_market(|_, group| {
+        group.source_backing_buckets[2].utilization_fee_earnings = EARNINGS;
+        group.vault += EARNINGS;
+    });
+    env.set_token_account_amount(
+        env.vault,
+        env.mint,
+        env.vault_authority,
+        (PRINCIPAL + EARNINGS) as u64,
+    );
+    let (_, funded_group) = env.market_state();
+    assert_eq!(
+        funded_group.source_backing_buckets[2].fresh_unliened_backing_num,
+        PRINCIPAL * BOUND_SCALE,
+        "delegated backing principal is funded before shutdown"
+    );
+    assert_eq!(
+        funded_group.source_backing_buckets[2].utilization_fee_earnings, EARNINGS,
+        "delegated backing earnings are funded before shutdown"
+    );
+
+    env.svm.warp_to_slot(SHUT);
+    env.svm.expire_blockhash();
+    env.update_asset_lifecycle_as_admin_with_cu(
+        percolator_prog::processor::ASSET_ACTION_SHUTDOWN,
+        1,
+        SHUT,
+        0,
+    );
+    assert_eq!(
+        env.market_state().1.assets[1].lifecycle,
+        AssetLifecycleV16::Recovery
+    );
+
+    env.svm.warp_to_slot(SHUT + DELAY);
+    let admin_dest = env.token_account(admin.pubkey(), 0);
+    let cleanup_ledger = env.backing_domain_ledger_account();
+    env.svm.expire_blockhash();
+    let earnings_cu = env
+        .send(
+            ProgInstruction::WithdrawBackingBucketEarnings {
+                domain: 2,
+                amount: EARNINGS,
+            },
+            vec![
+                AccountMeta::new(admin.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(cleanup_ledger, false),
+                AccountMeta::new(admin_dest, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(env.vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[&admin],
+        )
+        .expect("mature shutdown-drain lets marketauth clean abandoned earnings");
+    assert_cu_within(
+        "mature shutdown-drain WithdrawBackingBucketEarnings",
+        earnings_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    assert_eq!(env.token_amount(admin_dest), EARNINGS as u64);
+    let (_, after_earnings) = env.market_state();
+    assert_eq!(
+        after_earnings.source_backing_buckets[2].utilization_fee_earnings, 0,
+        "mature shutdown cleanup drains abandoned earnings"
+    );
+    assert_eq!(
+        after_earnings.source_backing_buckets[2].fresh_unliened_backing_num,
+        PRINCIPAL * BOUND_SCALE,
+        "principal remains separately claimable after earnings cleanup"
+    );
+    let cleanup_state =
+        state::read_backing_domain_ledger(&env.svm.get_account(&cleanup_ledger).unwrap().data)
+            .expect("shutdown cleanup ledger initialized");
+    assert_eq!(cleanup_state.authority, admin.pubkey().to_bytes());
+    assert_eq!(cleanup_state.domain, 2);
+    assert_eq!(cleanup_state.total_earnings_withdrawn_atoms, EARNINGS);
+    assert_eq!(cleanup_state.last_observed_bucket_earnings_atoms, 0);
+
+    env.svm.expire_blockhash();
+    let principal_cu = env
+        .send(
+            ProgInstruction::WithdrawBackingBucket {
+                domain: 2,
+                amount: PRINCIPAL,
+            },
+            vec![
+                AccountMeta::new(admin.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(admin_dest, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(env.vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[&admin],
+        )
+        .expect("mature shutdown-drain lets marketauth clean abandoned principal");
+    assert_cu_within(
+        "mature shutdown-drain WithdrawBackingBucket",
+        principal_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    assert_eq!(env.token_amount(admin_dest), (PRINCIPAL + EARNINGS) as u64);
+    let (_, drained_group) = env.market_state();
+    assert_eq!(
+        drained_group.source_backing_buckets[2].fresh_unliened_backing_num, 0,
+        "mature shutdown cleanup drains abandoned principal"
+    );
+    assert_eq!(drained_group.source_backing_buckets[2].utilization_fee_earnings, 0);
+    assert_eq!(drained_group.vault as u64, env.token_amount(env.vault));
+}
+
 // LoF/DoS sweep (cron135): shutdown puts an asset into Recovery with a frozen mark and a
 // force-close delay so users can exit. The pushed-mark profile can still be AuthMark across
 // that transition, so the public PushAuthMark route must be lifecycle-gated; otherwise the
