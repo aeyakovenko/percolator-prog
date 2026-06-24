@@ -40524,6 +40524,179 @@ fn v16_attack_live_insurance_withdraw_rejects_invalid_final_market_shape() {
     assert_eq!(after_group.vault as u64, env.token_amount(env.vault));
 }
 
+// LoF/DoS sweep: backing principal and backing earnings withdrawals debit market/ledger state before
+// final market-shape validation and before the signed SPL payout. A late shape error must propagate as
+// an instruction error, roll back both accounting layers, and leave the withdrawal live after repair.
+#[test]
+fn v16_attack_live_backing_withdrawals_reject_invalid_final_market_shape() {
+    #[derive(Clone, Copy)]
+    enum BackingWithdrawRoute {
+        Principal,
+        Earnings,
+    }
+
+    impl BackingWithdrawRoute {
+        fn label(self) -> &'static str {
+            match self {
+                BackingWithdrawRoute::Principal => "WithdrawBackingBucket",
+                BackingWithdrawRoute::Earnings => "WithdrawBackingBucketEarnings",
+            }
+        }
+
+        fn amount(self) -> u128 {
+            match self {
+                BackingWithdrawRoute::Principal => 10,
+                BackingWithdrawRoute::Earnings => 7,
+            }
+        }
+    }
+
+    fn send_backing_withdraw(
+        env: &mut V16CuEnv,
+        route: BackingWithdrawRoute,
+        admin: &Keypair,
+        ledger: Pubkey,
+        dest: Pubkey,
+        amount: u128,
+    ) -> Result<u64, String> {
+        env.svm.expire_blockhash();
+        match route {
+            BackingWithdrawRoute::Principal => env.send(
+                ProgInstruction::WithdrawBackingBucket { domain: 1, amount },
+                vec![
+                    AccountMeta::new(admin.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(dest, false),
+                    AccountMeta::new(env.vault, false),
+                    AccountMeta::new_readonly(env.vault_authority, false),
+                    AccountMeta::new_readonly(spl_token::ID, false),
+                    AccountMeta::new(ledger, false),
+                ],
+                &[admin],
+            ),
+            BackingWithdrawRoute::Earnings => env.send(
+                ProgInstruction::WithdrawBackingBucketEarnings { domain: 1, amount },
+                vec![
+                    AccountMeta::new(admin.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(ledger, false),
+                    AccountMeta::new(dest, false),
+                    AccountMeta::new(env.vault, false),
+                    AccountMeta::new_readonly(env.vault_authority, false),
+                    AccountMeta::new_readonly(spl_token::ID, false),
+                ],
+                &[admin],
+            ),
+        }
+    }
+
+    for route in [
+        BackingWithdrawRoute::Principal,
+        BackingWithdrawRoute::Earnings,
+    ] {
+        let mut env = V16CuEnv::new();
+        let admin = env.admin.insecure_clone();
+        let ledger = env.backing_domain_ledger_account();
+        env.top_up_backing_bucket_with_ledger_with_cu(ledger, 1, 100, 10_000);
+        if matches!(route, BackingWithdrawRoute::Earnings) {
+            env.mutate_market(|_, group| {
+                group.source_backing_buckets[1].utilization_fee_earnings = 30;
+                group.vault += 30;
+            });
+            let (_, funded) = env.market_state();
+            env.set_token_account_amount(
+                env.vault,
+                env.mint,
+                env.vault_authority,
+                funded.vault as u64,
+            );
+        }
+        let dest = env.token_account_for_mint(env.mint, admin.pubkey(), 0);
+        let amount = route.amount();
+        let label = route.label();
+
+        env.mutate_market(|_, group| {
+            group.insurance_domain_budget[0] = group.insurance + 1;
+        });
+        let market_before = env.svm.get_account(&env.market).unwrap();
+        let ledger_before = env.svm.get_account(&ledger).unwrap();
+        let vault_before = env.svm.get_account(&env.vault).unwrap();
+        let dest_before = env.svm.get_account(&dest).unwrap();
+
+        let rejected = send_backing_withdraw(&mut env, route, &admin, ledger, dest, amount);
+        assert!(
+            rejected.is_err(),
+            "{label} must reject an invalid final market shape"
+        );
+        assert_eq!(
+            env.svm.get_account(&env.market).unwrap(),
+            market_before,
+            "{label} final-shape rejection must roll back staged market accounting"
+        );
+        assert_eq!(
+            env.svm.get_account(&ledger).unwrap(),
+            ledger_before,
+            "{label} final-shape rejection must roll back staged ledger accounting"
+        );
+        assert_eq!(
+            env.svm.get_account(&env.vault).unwrap(),
+            vault_before,
+            "{label} final-shape rejection must not move vault custody"
+        );
+        assert_eq!(
+            env.svm.get_account(&dest).unwrap(),
+            dest_before,
+            "{label} final-shape rejection must not pay destination tokens"
+        );
+
+        env.mutate_market(|_, group| {
+            group.insurance_domain_budget[0] = group.insurance;
+        });
+        let (_, repaired_group) = env.market_state();
+        let accepted = send_backing_withdraw(&mut env, route, &admin, ledger, dest, amount)
+            .unwrap_or_else(|err| panic!("{label} remains live after shape repair: {err}"));
+        assert_cu_within(label, accepted, CUSTODY_CU_LIMIT);
+        let (_, after_group) = env.market_state();
+        assert_eq!(env.token_amount(dest), amount as u64, "{label} retry pays");
+        assert_eq!(
+            after_group.vault,
+            repaired_group.vault - amount,
+            "{label} retry debits vault accounting exactly once"
+        );
+        match route {
+            BackingWithdrawRoute::Principal => {
+                assert_eq!(
+                    after_group.source_backing_buckets[1].fresh_unliened_backing_num,
+                    repaired_group.source_backing_buckets[1].fresh_unliened_backing_num
+                        - amount * BOUND_SCALE,
+                    "{label} retry debits backing principal"
+                );
+                let ledger_state =
+                    state::read_backing_domain_ledger(&env.svm.get_account(&ledger).unwrap().data)
+                        .unwrap();
+                assert_eq!(ledger_state.total_principal_atoms, 100 - amount);
+                assert_eq!(ledger_state.total_principal_withdrawn_atoms, amount);
+            }
+            BackingWithdrawRoute::Earnings => {
+                assert_eq!(
+                    after_group.source_backing_buckets[1].utilization_fee_earnings,
+                    repaired_group.source_backing_buckets[1].utilization_fee_earnings - amount,
+                    "{label} retry debits backing earnings"
+                );
+                let ledger_state =
+                    state::read_backing_domain_ledger(&env.svm.get_account(&ledger).unwrap().data)
+                        .unwrap();
+                assert_eq!(
+                    ledger_state.last_observed_bucket_earnings_atoms,
+                    30 - amount
+                );
+                assert_eq!(ledger_state.total_earnings_withdrawn_atoms, amount);
+            }
+        }
+        assert_eq!(after_group.vault as u64, env.token_amount(env.vault));
+    }
+}
+
 // security.md sweep — uniform live insurance API (#6/#23/#57): asset 0 and permissionless assets 1..N
 // both withdraw through the same asset-indexed tag. The signer must be that asset's insurance_operator,
 // and the withdrawal is bounded to that asset's own long+short insurance budget.
