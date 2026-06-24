@@ -50317,6 +50317,159 @@ fn v16_attack_native_flagged_token_accounts_reject_before_value_moves() {
     assert_eq!(withdraw_env.token_amount(withdraw_env.vault), 900);
 }
 
+// LoF/DoS sweep (cron135): native/wrapped-SOL accounts are a separate SPL state from frozen,
+// delegated, or malformed accounts. The market top-up rails stage insurance/domain/backing accounting
+// before the SPL transfer, so they must reject native sources or the canonical vault before any credit.
+#[test]
+fn v16_attack_value_topups_reject_native_accounts_before_credit() {
+    #[derive(Clone, Copy)]
+    enum TopupRoute {
+        Insurance,
+        DomainInsurance,
+        BackingBucket,
+    }
+
+    impl TopupRoute {
+        fn label(self) -> &'static str {
+            match self {
+                TopupRoute::Insurance => "TopUpInsurance",
+                TopupRoute::DomainInsurance => "TopUpInsuranceDomain",
+                TopupRoute::BackingBucket => "TopUpBackingBucket",
+            }
+        }
+
+        fn instruction(self, amount: u128) -> ProgInstruction {
+            match self {
+                TopupRoute::Insurance => ProgInstruction::TopUpInsurance { amount },
+                TopupRoute::DomainInsurance => ProgInstruction::TopUpInsuranceDomain {
+                    domain: 0,
+                    amount,
+                },
+                TopupRoute::BackingBucket => ProgInstruction::TopUpBackingBucket {
+                    domain: 1,
+                    amount,
+                    expiry_slot: 10_000,
+                },
+            }
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    enum NativeSlot {
+        Source,
+        Vault,
+    }
+
+    for route in [
+        TopupRoute::Insurance,
+        TopupRoute::DomainInsurance,
+        TopupRoute::BackingBucket,
+    ] {
+        for slot in [NativeSlot::Source, NativeSlot::Vault] {
+            let mut env = V16CuEnv::new();
+            let admin = env.admin.insecure_clone();
+            let amount = match route {
+                TopupRoute::Insurance => 31,
+                TopupRoute::DomainInsurance => 37,
+                TopupRoute::BackingBucket => 43,
+            };
+            let source = env.token_account_for_mint(env.mint, admin.pubkey(), amount as u64);
+            let native_key = match slot {
+                NativeSlot::Source => source,
+                NativeSlot::Vault => env.vault,
+            };
+            let clean_native_slot = env.svm.get_account(&native_key).unwrap();
+            let token_owner = match slot {
+                NativeSlot::Source => admin.pubkey(),
+                NativeSlot::Vault => env.vault_authority,
+            };
+            env.svm
+                .set_account(
+                    native_key,
+                    Account {
+                        data: make_native_flagged_token_data(env.mint, token_owner, amount as u64),
+                        ..clean_native_slot.clone()
+                    },
+                )
+                .unwrap();
+
+            let market_before = env.svm.get_account(&env.market).unwrap();
+            let source_before = env.svm.get_account(&source).unwrap();
+            let vault_before = env.svm.get_account(&env.vault).unwrap();
+
+            env.svm.expire_blockhash();
+            let rejected = env.send(
+                route.instruction(amount),
+                vec![
+                    AccountMeta::new(admin.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(source, false),
+                    AccountMeta::new(env.vault, false),
+                    AccountMeta::new_readonly(spl_token::ID, false),
+                ],
+                &[&admin],
+            );
+            let label = route.label();
+            assert!(
+                rejected.is_err(),
+                "{label} must reject native-flagged source/vault accounts before credit"
+            );
+            assert_eq!(
+                env.svm.get_account(&env.market).unwrap(),
+                market_before,
+                "{label} native-account rejection leaves market accounting unchanged"
+            );
+            assert_eq!(
+                env.svm.get_account(&source).unwrap(),
+                source_before,
+                "{label} native-account rejection pulls no source tokens"
+            );
+            assert_eq!(
+                env.svm.get_account(&env.vault).unwrap(),
+                vault_before,
+                "{label} native-account rejection credits no vault custody"
+            );
+
+            env.svm
+                .set_account(native_key, clean_native_slot)
+                .unwrap();
+            env.svm.expire_blockhash();
+            let ok = env
+                .send(
+                    route.instruction(amount),
+                    vec![
+                        AccountMeta::new(admin.pubkey(), true),
+                        AccountMeta::new(env.market, false),
+                        AccountMeta::new(source, false),
+                        AccountMeta::new(env.vault, false),
+                        AccountMeta::new_readonly(spl_token::ID, false),
+                    ],
+                    &[&admin],
+                )
+                .expect("top-up route remains live after native-account rejection");
+            assert_cu_within(label, ok, CUSTODY_CU_LIMIT);
+            assert_eq!(env.token_amount(source), 0, "{label} retry pulls source");
+            let (_, group) = env.market_state();
+            assert_eq!(
+                group.vault as u64,
+                env.token_amount(env.vault),
+                "{label} retry keeps vault accounting tied to custody"
+            );
+            match route {
+                TopupRoute::Insurance => assert_eq!(group.insurance, amount),
+                TopupRoute::DomainInsurance => {
+                    assert_eq!(group.insurance, amount);
+                    assert_eq!(group.insurance_domain_budget[0], amount);
+                }
+                TopupRoute::BackingBucket => assert_eq!(
+                    group.source_backing_buckets[1].fresh_unliened_backing_num,
+                    amount * BOUND_SCALE
+                ),
+            }
+        }
+    }
+}
+
 // LoF/DoS sweep (cron135): ordinary user Withdraw shares the outbound
 // verify_withdrawable_token_accounts rail with the terminal/domain payout routes, but its delegated
 // canonical-vault branch is distinct from the close_authority case above. A delegated vault at the
