@@ -92001,6 +92001,107 @@ fn v16_attack_close_slab_readonly_primary_dest_rolls_back_before_reclaim() {
     assert!(closed_market.data.iter().all(|b| *b == 0));
 }
 
+// LoF/DoS sweep (cron135): CloseSlab is the final authority-owned cleanup path and can sweep
+// unaccounted SPL dust before reclaiming the market slab. A delegated canonical primary vault must
+// reject before any dust transfer or vault close; otherwise final cleanup could normalize unsafe
+// custody state instead of surfacing it.
+#[test]
+fn v16_attack_close_slab_rejects_delegated_primary_vault_before_reclaim() {
+    let mut env = V16CuEnv::new();
+    let admin = env.admin.insecure_clone();
+    env.svm
+        .set_account(
+            env.vault,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_delegated_token_data(env.mint, env.vault_authority, 7),
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    env.resolve();
+
+    let primary_dest = env.token_account(admin.pubkey(), 0);
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let primary_vault_before = env.svm.get_account(&env.vault).unwrap();
+    let primary_dest_before = env.svm.get_account(&primary_dest).unwrap();
+    let admin_before = env.svm.get_account(&admin.pubkey()).unwrap();
+
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::CloseSlab,
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new(primary_dest, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        rejected.is_err(),
+        "CloseSlab must reject a delegated canonical primary vault"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "delegated-primary-vault CloseSlab must not reclaim the market"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        primary_vault_before,
+        "delegated primary vault remains byte-identical"
+    );
+    assert_eq!(
+        env.svm.get_account(&primary_dest).unwrap(),
+        primary_dest_before,
+        "delegated-primary-vault CloseSlab must not credit the destination"
+    );
+    assert_eq!(
+        env.svm.get_account(&admin.pubkey()).unwrap(),
+        admin_before,
+        "delegated-primary-vault CloseSlab must not transfer market rent"
+    );
+
+    env.svm
+        .set_account(
+            env.vault,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_token_data(env.mint, env.vault_authority, 7),
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    env.svm.expire_blockhash();
+    let ok = env.send(
+        ProgInstruction::CloseSlab,
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new(primary_dest, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        ok.is_ok(),
+        "same CloseSlab succeeds once the primary vault is canonical: {ok:?}"
+    );
+    assert_eq!(env.token_amount(primary_dest), 7);
+    let closed_market = env.svm.get_account(&env.market).unwrap();
+    assert_eq!(closed_market.lamports, 0);
+    assert!(closed_market.data.iter().all(|b| *b == 0));
+}
+
 // full-interface sweep: CloseSlab uses the supplied SPL Token program for both the final dust sweep and
 // the vault close. A loaded non-SPL executable must reject before any vault transfer, token-account close,
 // or market slab reclaim; the same terminal close must remain live through the real token program.
