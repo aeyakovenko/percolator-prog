@@ -71331,6 +71331,163 @@ fn v16_attack_swap_secondary_rejects_malformed_token_accounts_before_transfer() 
     }
 }
 
+// LoF/DoS sweep (cron135): wrapped-SOL/native token accounts are valid SPL account data with
+// different runtime semantics. The secondary swap validates four SPL slots before two transfers; any
+// native-flagged slot must reject before primary collateral is pulled or secondary reserve is paid.
+#[test]
+fn v16_attack_swap_secondary_rejects_native_accounts_before_transfer() {
+    #[derive(Clone, Copy)]
+    enum NativeSwapSlot {
+        PrimarySource,
+        PrimaryVault,
+        SecondaryDest,
+        SecondaryVault,
+    }
+
+    impl NativeSwapSlot {
+        fn label(self) -> &'static str {
+            match self {
+                NativeSwapSlot::PrimarySource => "primary source",
+                NativeSwapSlot::PrimaryVault => "primary vault",
+                NativeSwapSlot::SecondaryDest => "secondary destination",
+                NativeSwapSlot::SecondaryVault => "secondary vault",
+            }
+        }
+    }
+
+    for slot in [
+        NativeSwapSlot::PrimarySource,
+        NativeSwapSlot::PrimaryVault,
+        NativeSwapSlot::SecondaryDest,
+        NativeSwapSlot::SecondaryVault,
+    ] {
+        let mut env = V16CuEnv::new();
+        let admin = env.admin.insecure_clone();
+        let secondary_mint = env.create_mint();
+        env.update_base_unit_mints_with_cu(env.mint, secondary_mint);
+
+        let secondary_vault = canonical_vault_ata(env.vault_authority, secondary_mint);
+        env.svm
+            .set_account(
+                secondary_vault,
+                Account {
+                    lamports: 1_000_000_000,
+                    data: make_token_data(secondary_mint, env.vault_authority, 50),
+                    owner: spl_token::ID,
+                    executable: false,
+                    rent_epoch: 0,
+                },
+            )
+            .unwrap();
+        let primary_source = env.token_account_for_mint(env.mint, admin.pubkey(), 10);
+        let secondary_dest = env.token_account_for_mint(secondary_mint, admin.pubkey(), 0);
+        let (native_key, native_mint, native_owner, native_amount) = match slot {
+            NativeSwapSlot::PrimarySource => (primary_source, env.mint, admin.pubkey(), 10),
+            NativeSwapSlot::PrimaryVault => (env.vault, env.mint, env.vault_authority, 0),
+            NativeSwapSlot::SecondaryDest => {
+                (secondary_dest, secondary_mint, admin.pubkey(), 0)
+            }
+            NativeSwapSlot::SecondaryVault => {
+                (secondary_vault, secondary_mint, env.vault_authority, 50)
+            }
+        };
+        let clean_native_slot = env.svm.get_account(&native_key).unwrap();
+        env.svm
+            .set_account(
+                native_key,
+                Account {
+                    data: make_native_flagged_token_data(
+                        native_mint,
+                        native_owner,
+                        native_amount,
+                    ),
+                    ..clean_native_slot.clone()
+                },
+            )
+            .unwrap();
+
+        let market_before = env.svm.get_account(&env.market).unwrap();
+        let primary_source_before = env.svm.get_account(&primary_source).unwrap();
+        let primary_vault_before = env.svm.get_account(&env.vault).unwrap();
+        let secondary_dest_before = env.svm.get_account(&secondary_dest).unwrap();
+        let secondary_vault_before = env.svm.get_account(&secondary_vault).unwrap();
+
+        env.svm.expire_blockhash();
+        let rejected = env.send(
+            ProgInstruction::SwapSecondaryForPrimary { amount: 10 },
+            vec![
+                AccountMeta::new(admin.pubkey(), true),
+                AccountMeta::new_readonly(env.market, false),
+                AccountMeta::new(primary_source, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new(secondary_dest, false),
+                AccountMeta::new(secondary_vault, false),
+                AccountMeta::new_readonly(env.vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[&admin],
+        );
+        let label = slot.label();
+        assert!(
+            rejected.is_err(),
+            "SwapSecondaryForPrimary must reject a native-flagged {label}"
+        );
+        assert_eq!(
+            env.svm.get_account(&env.market).unwrap(),
+            market_before,
+            "native {label} rejection leaves market config unchanged"
+        );
+        assert_eq!(
+            env.svm.get_account(&primary_source).unwrap(),
+            primary_source_before,
+            "native {label} rejection must not pull primary collateral"
+        );
+        assert_eq!(
+            env.svm.get_account(&env.vault).unwrap(),
+            primary_vault_before,
+            "native {label} rejection must not credit primary custody"
+        );
+        assert_eq!(
+            env.svm.get_account(&secondary_dest).unwrap(),
+            secondary_dest_before,
+            "native {label} rejection must not pay secondary collateral"
+        );
+        assert_eq!(
+            env.svm.get_account(&secondary_vault).unwrap(),
+            secondary_vault_before,
+            "native {label} rejection must not debit secondary reserve"
+        );
+
+        env.svm.set_account(native_key, clean_native_slot).unwrap();
+        env.svm.expire_blockhash();
+        let ok = env
+            .send(
+                ProgInstruction::SwapSecondaryForPrimary { amount: 10 },
+                vec![
+                    AccountMeta::new(admin.pubkey(), true),
+                    AccountMeta::new_readonly(env.market, false),
+                    AccountMeta::new(primary_source, false),
+                    AccountMeta::new(env.vault, false),
+                    AccountMeta::new(secondary_dest, false),
+                    AccountMeta::new(secondary_vault, false),
+                    AccountMeta::new_readonly(env.vault_authority, false),
+                    AccountMeta::new_readonly(spl_token::ID, false),
+                ],
+                &[&admin],
+            )
+            .expect("SwapSecondaryForPrimary remains live after native-account rejection");
+        assert_cu_within(
+            "SwapSecondaryForPrimary native-account retry",
+            ok,
+            CUSTODY_CU_LIMIT,
+        );
+        assert_eq!(env.token_amount(primary_source), 0);
+        assert_eq!(env.token_amount(env.vault), 10);
+        assert_eq!(env.token_amount(secondary_dest), 10);
+        assert_eq!(env.token_amount(secondary_vault), 40);
+    }
+}
+
 // [from pr114]
 // full-interface sweep (cron38): the optional secondary reserve is validated before CloseSlab sweeps
 // primary dust. A canonical secondary vault with close_authority set must reject atomically; otherwise
