@@ -8906,6 +8906,92 @@ fn v16_bpf_sync_maintenance_fee_with_cranker_share_is_bounded() {
     assert_domain_budget_remaining_total_consistent(&group, "maintenance fee with cranker share");
 }
 
+// CU/LoF hardening: SyncMaintenanceFee is permissionless and can debit a user's
+// portfolio, credit insurance, and pay a cranker reward. A stale-layout payer
+// must reject before any fee or reward mutation, while the restored account can
+// still pay the bounded fee.
+#[test]
+fn v16_attack_sync_maintenance_stale_layout_rejects_before_fee_charge() {
+    let mut env = V16CuEnv::new_with_market_params_price_move_and_maintenance_fee(
+        1, 10_000, 10_000, 10_000, 58,
+    );
+    let payer_owner = Keypair::new();
+    let cranker_owner = Keypair::new();
+    let payer_portfolio = env.create_portfolio(&payer_owner);
+    let cranker_portfolio = env.create_portfolio(&cranker_owner);
+    env.deposit(&payer_owner, payer_portfolio, 100_000_000);
+    env.update_maintenance_fee_policy_with_cu(4_000);
+
+    let mut payer_account = env.svm.get_account(&payer_portfolio).unwrap();
+    let fresh_payer = payer_account.clone();
+    let mut payer_state = state::read_portfolio(&payer_account.data).unwrap();
+    let current_layout = payer_state.provenance_header.layout_discriminator.get();
+    assert!(
+        current_layout > 0,
+        "current engine layout discriminator is nonzero"
+    );
+    payer_state.provenance_header =
+        percolator::ProvenanceHeaderV16Account::from_runtime(&percolator::ProvenanceHeaderV16 {
+            market_group_id: payer_state.provenance_header.market_group_id,
+            portfolio_account_id: payer_state.provenance_header.portfolio_account_id,
+            owner: payer_state.provenance_header.owner,
+            version: payer_state.provenance_header.version.get(),
+            layout_discriminator: current_layout - 1,
+        });
+    state::write_portfolio(&mut payer_account.data, &payer_state).unwrap();
+    env.svm
+        .set_account(payer_portfolio, payer_account.clone())
+        .unwrap();
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let cranker_before = env.svm.get_account(&cranker_portfolio).unwrap();
+    env.svm.warp_to_slot(10);
+    env.svm.expire_blockhash();
+    let rejected =
+        env.try_sync_maintenance_fee_with_cu(payer_portfolio, Some(cranker_portfolio), 10);
+    let err = rejected.expect_err("stale-layout maintenance sync must reject");
+    assert!(
+        err.contains("Custom(16)") || err.contains("custom program error: 0x10"),
+        "stale-layout maintenance sync should fail as EngineProvenanceMismatch, got {err}"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "stale-layout maintenance sync leaves market accounting unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&payer_portfolio).unwrap(),
+        payer_account,
+        "stale-layout maintenance sync leaves payer bytes unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&cranker_portfolio).unwrap(),
+        cranker_before,
+        "stale-layout maintenance sync pays no cranker reward"
+    );
+
+    env.svm.set_account(payer_portfolio, fresh_payer).unwrap();
+    env.svm.expire_blockhash();
+    let sync_cu = env.sync_maintenance_fee_with_cu(payer_portfolio, Some(cranker_portfolio), 10);
+    assert_cu_within(
+        "restored stale-layout SyncMaintenanceFee",
+        sync_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    assert_eq!(env.portfolio_state(payer_portfolio).last_fee_slot.get(), 10);
+    assert_eq!(
+        env.portfolio_state(payer_portfolio).capital.get(),
+        100_000_000 - 580
+    );
+    assert_eq!(env.portfolio_state(cranker_portfolio).capital.get(), 232);
+    let (_, group) = env.market_state();
+    assert_eq!(group.insurance, 348);
+    assert_domain_budget_remaining_total_consistent(
+        &group,
+        "restored stale-layout maintenance sync",
+    );
+}
+
 #[test]
 fn v16_attack_sync_maintenance_bad_cranker_rolls_back_fee() {
     let mut env = V16CuEnv::new_with_market_params_price_move_and_maintenance_fee(
