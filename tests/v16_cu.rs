@@ -378,7 +378,7 @@ fn make_token_data(mint: Pubkey, owner: Pubkey, amount: u64) -> Vec<u8> {
     data
 }
 
-fn make_delegated_token_data(
+fn make_delegated_token_data_with_delegate(
     mint: Pubkey,
     owner: Pubkey,
     amount: u64,
@@ -403,7 +403,7 @@ fn make_delegated_token_data(
     data
 }
 
-fn make_closable_token_data(
+fn make_closable_token_data_with_authority(
     mint: Pubkey,
     owner: Pubkey,
     amount: u64,
@@ -420,6 +420,44 @@ fn make_closable_token_data(
             is_native: COption::None,
             delegated_amount: 0,
             close_authority: COption::Some(close_authority),
+        },
+        &mut data,
+    )
+    .unwrap();
+    data
+}
+
+fn make_delegated_token_data(mint: Pubkey, owner: Pubkey, amount: u64) -> Vec<u8> {
+    let mut data = vec![0u8; TokenAccount::LEN];
+    TokenAccount::pack(
+        TokenAccount {
+            mint,
+            owner,
+            amount,
+            delegate: COption::Some(Pubkey::new_unique()),
+            state: AccountState::Initialized,
+            is_native: COption::None,
+            delegated_amount: amount,
+            close_authority: COption::None,
+        },
+        &mut data,
+    )
+    .unwrap();
+    data
+}
+
+fn make_closable_token_data(mint: Pubkey, owner: Pubkey, amount: u64) -> Vec<u8> {
+    let mut data = vec![0u8; TokenAccount::LEN];
+    TokenAccount::pack(
+        TokenAccount {
+            mint,
+            owner,
+            amount,
+            delegate: COption::None,
+            state: AccountState::Initialized,
+            is_native: COption::None,
+            delegated_amount: 0,
+            close_authority: COption::Some(Pubkey::new_unique()),
         },
         &mut data,
     )
@@ -14444,7 +14482,7 @@ fn v16_attack_permissionless_close_resolved_rejects_delegated_dest() {
             delegated_dest,
             Account {
                 lamports: 1_000_000_000,
-                data: make_delegated_token_data(
+                data: make_delegated_token_data_with_delegate(
                     env.mint,
                     victim_owner.pubkey(),
                     0,
@@ -14510,7 +14548,7 @@ fn v16_attack_permissionless_close_resolved_rejects_delegated_dest() {
             closable_dest,
             Account {
                 lamports: 1_000_000_000,
-                data: make_closable_token_data(
+                data: make_closable_token_data_with_authority(
                     env.mint,
                     victim_owner.pubkey(),
                     0,
@@ -18424,7 +18462,7 @@ fn v16_attack_resolved_payout_topup_rejects_delegated_dest_without_burning_recei
             delegated_dest,
             Account {
                 lamports: 1_000_000_000,
-                data: make_delegated_token_data(
+                data: make_delegated_token_data_with_delegate(
                     env.mint,
                     owner.pubkey(),
                     0,
@@ -18488,7 +18526,12 @@ fn v16_attack_resolved_payout_topup_rejects_delegated_dest_without_burning_recei
             closable_dest,
             Account {
                 lamports: 1_000_000_000,
-                data: make_closable_token_data(env.mint, owner.pubkey(), 0, attacker.pubkey()),
+                data: make_closable_token_data_with_authority(
+                    env.mint,
+                    owner.pubkey(),
+                    0,
+                    attacker.pubkey(),
+                ),
                 owner: spl_token::ID,
                 executable: false,
                 rent_epoch: 0,
@@ -75050,46 +75093,6 @@ enum TradeDrivenMarkMode {
 enum MixedModeBatchPath {
     NoCpi,
     Cpi,
-}
-
-// Net-new PR 135 loop coverage rebased on the zero-copy account layout.
-
-fn make_delegated_token_data(mint: Pubkey, owner: Pubkey, amount: u64) -> Vec<u8> {
-    let mut data = vec![0u8; TokenAccount::LEN];
-    TokenAccount::pack(
-        TokenAccount {
-            mint,
-            owner,
-            amount,
-            delegate: COption::Some(Pubkey::new_unique()),
-            state: AccountState::Initialized,
-            is_native: COption::None,
-            delegated_amount: amount,
-            close_authority: COption::None,
-        },
-        &mut data,
-    )
-    .unwrap();
-    data
-}
-
-fn make_closable_token_data(mint: Pubkey, owner: Pubkey, amount: u64) -> Vec<u8> {
-    let mut data = vec![0u8; TokenAccount::LEN];
-    TokenAccount::pack(
-        TokenAccount {
-            mint,
-            owner,
-            amount,
-            delegate: COption::None,
-            state: AccountState::Initialized,
-            is_native: COption::None,
-            delegated_amount: 0,
-            close_authority: COption::Some(Pubkey::new_unique()),
-        },
-        &mut data,
-    )
-    .unwrap();
-    data
 }
 
 fn make_frozen_token_data(mint: Pubkey, owner: Pubkey, amount: u64) -> Vec<u8> {
