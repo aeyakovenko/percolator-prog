@@ -94591,6 +94591,204 @@ fn v16_attack_live_domain_withdrawals_reject_malformed_token_accounts_before_deb
     }
 }
 
+// LoF/DoS sweep (cron135): SPL-native/wrapped-SOL accounts are valid-length initialized token
+// accounts but not valid collateral custody. Live domain withdrawals must reject native-flagged
+// destinations or canonical vaults before committing market/ledger debits, and remain live after restore.
+#[test]
+fn v16_attack_live_domain_withdrawals_reject_native_accounts_before_debit() {
+    #[derive(Clone, Copy)]
+    enum DomainWithdrawRoute {
+        Insurance,
+        BackingPrincipal,
+        BackingEarnings,
+    }
+
+    impl DomainWithdrawRoute {
+        fn label(self) -> &'static str {
+            match self {
+                DomainWithdrawRoute::Insurance => "WithdrawInsuranceAsset",
+                DomainWithdrawRoute::BackingPrincipal => "WithdrawBackingBucket",
+                DomainWithdrawRoute::BackingEarnings => "WithdrawBackingBucketEarnings",
+            }
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    enum NativeSlot {
+        Dest,
+        Vault,
+    }
+
+    fn send_domain_withdraw(
+        env: &mut V16CuEnv,
+        route: DomainWithdrawRoute,
+        ledger: Pubkey,
+        dest: Pubkey,
+        amount: u128,
+    ) -> Result<u64, String> {
+        env.svm.expire_blockhash();
+        match route {
+            DomainWithdrawRoute::Insurance => send_tx(
+                &mut env.svm,
+                env.program_id,
+                &env.payer,
+                ProgInstruction::WithdrawInsuranceAsset {
+                    asset_index: 0,
+                    amount,
+                },
+                vec![
+                    AccountMeta::new(env.admin.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(dest, false),
+                    AccountMeta::new(env.vault, false),
+                    AccountMeta::new_readonly(env.vault_authority, false),
+                    AccountMeta::new_readonly(spl_token::ID, false),
+                    AccountMeta::new(ledger, false),
+                ],
+                &[&env.admin],
+            ),
+            DomainWithdrawRoute::BackingPrincipal => send_tx(
+                &mut env.svm,
+                env.program_id,
+                &env.payer,
+                ProgInstruction::WithdrawBackingBucket { domain: 1, amount },
+                vec![
+                    AccountMeta::new(env.admin.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(dest, false),
+                    AccountMeta::new(env.vault, false),
+                    AccountMeta::new_readonly(env.vault_authority, false),
+                    AccountMeta::new_readonly(spl_token::ID, false),
+                    AccountMeta::new(ledger, false),
+                ],
+                &[&env.admin],
+            ),
+            DomainWithdrawRoute::BackingEarnings => send_tx(
+                &mut env.svm,
+                env.program_id,
+                &env.payer,
+                ProgInstruction::WithdrawBackingBucketEarnings { domain: 1, amount },
+                vec![
+                    AccountMeta::new(env.admin.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(ledger, false),
+                    AccountMeta::new(dest, false),
+                    AccountMeta::new(env.vault, false),
+                    AccountMeta::new_readonly(env.vault_authority, false),
+                    AccountMeta::new_readonly(spl_token::ID, false),
+                ],
+                &[&env.admin],
+            ),
+        }
+    }
+
+    for route in [
+        DomainWithdrawRoute::Insurance,
+        DomainWithdrawRoute::BackingPrincipal,
+        DomainWithdrawRoute::BackingEarnings,
+    ] {
+        for native_slot in [NativeSlot::Dest, NativeSlot::Vault] {
+            let mut env = V16CuEnv::new();
+            let admin = env.admin.insecure_clone();
+            let (ledger, amount) = match route {
+                DomainWithdrawRoute::Insurance => {
+                    let ledger = env.insurance_ledger_account();
+                    env.top_up_insurance_domain_with_authority_ledger_and_cu(&admin, ledger, 0, 100);
+                    (ledger, 40)
+                }
+                DomainWithdrawRoute::BackingPrincipal => {
+                    let ledger = env.backing_domain_ledger_account();
+                    env.top_up_backing_bucket_with_ledger_with_cu(ledger, 1, 100, 10_000);
+                    (ledger, 40)
+                }
+                DomainWithdrawRoute::BackingEarnings => {
+                    let ledger = env.backing_domain_ledger_account();
+                    env.top_up_backing_bucket_with_ledger_with_cu(ledger, 1, 100, 10_000);
+                    env.mutate_market(|_, group| {
+                        group.source_backing_buckets[1].utilization_fee_earnings = 30;
+                        group.vault += 30;
+                    });
+                    let (_, funded) = env.market_state();
+                    env.set_token_account_amount(
+                        env.vault,
+                        env.mint,
+                        env.vault_authority,
+                        funded.vault as u64,
+                    );
+                    (ledger, 10)
+                }
+            };
+            let dest = env.token_account_for_mint(env.mint, admin.pubkey(), 0);
+            let (native_key, native_owner, native_amount, slot_label) = match native_slot {
+                NativeSlot::Dest => (dest, admin.pubkey(), 0, "destination"),
+                NativeSlot::Vault => (
+                    env.vault,
+                    env.vault_authority,
+                    env.token_amount(env.vault),
+                    "canonical vault",
+                ),
+            };
+            let clean_native_slot = env.svm.get_account(&native_key).unwrap();
+            env.svm
+                .set_account(
+                    native_key,
+                    Account {
+                        data: make_native_flagged_token_data(
+                            env.mint,
+                            native_owner,
+                            native_amount,
+                        ),
+                        ..clean_native_slot.clone()
+                    },
+                )
+                .unwrap();
+
+            let market_before = env.svm.get_account(&env.market).unwrap();
+            let ledger_before = env.svm.get_account(&ledger).unwrap();
+            let vault_before = env.svm.get_account(&env.vault).unwrap();
+            let dest_before = env.svm.get_account(&dest).unwrap();
+            let label = route.label();
+
+            let rejected = send_domain_withdraw(&mut env, route, ledger, dest, amount);
+            assert!(
+                rejected.is_err(),
+                "{label} must reject a native-flagged {slot_label} before committing the debit"
+            );
+            assert_eq!(
+                env.svm.get_account(&env.market).unwrap(),
+                market_before,
+                "{label} native-account rejection leaves market budgets unchanged"
+            );
+            assert_eq!(
+                env.svm.get_account(&ledger).unwrap(),
+                ledger_before,
+                "{label} native-account rejection leaves ledger unchanged"
+            );
+            assert_eq!(
+                env.svm.get_account(&env.vault).unwrap(),
+                vault_before,
+                "{label} native-account rejection leaves vault custody unchanged"
+            );
+            assert_eq!(
+                env.svm.get_account(&dest).unwrap(),
+                dest_before,
+                "{label} native-account rejection pays no destination tokens"
+            );
+
+            env.svm.set_account(native_key, clean_native_slot).unwrap();
+            let ok = send_domain_withdraw(&mut env, route, ledger, dest, amount)
+                .expect("domain withdrawal remains live after native-account rejection");
+            assert_cu_within(label, ok, CUSTODY_CU_LIMIT);
+            assert_eq!(env.token_amount(dest), amount as u64, "{label} retry pays");
+            assert_eq!(
+                env.market_state().1.vault as u64,
+                env.token_amount(env.vault),
+                "{label} retry keeps vault accounting tied to custody"
+            );
+        }
+    }
+}
+
 // LoF/DoS sweep (cron135): live domain withdrawals already reject malformed destinations and
 // frozen vaults. A frozen initialized destination reaches a different SPL account-state branch:
 // it must abort before the live insurance/backing route commits market or ledger debits, and the
