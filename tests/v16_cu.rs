@@ -56937,6 +56937,185 @@ fn v16_attack_drain_only_existing_risk_increase_rejects_before_hostile_matcher_c
     }
 }
 
+// LoF/DoS sweep: asset Recovery uses the same reduction-only public-trade policy as DrainOnly,
+// but it is reached through shutdown and carries a force-close exit window. Existing exposure must
+// still be reducible through CPI, while a risk-increasing request must reject before a hostile matcher
+// can burn CU on a fill that the engine will never commit.
+#[test]
+fn v16_attack_recovery_existing_risk_increase_rejects_before_hostile_matcher_cpi() {
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(2, 5_000, 10_000, 1_000);
+    env.configure_permissionless_resolve_with_cu(100, 5);
+    env.configure_auth_mark_for_asset_as_admin(1, 1, 100);
+
+    let hostile = Pubkey::new_unique();
+    env.svm.add_program(
+        hostile,
+        &std::fs::read(hostile_matcher_program_path()).unwrap(),
+    );
+    let taker = Keypair::new();
+    let lp = Keypair::new();
+    let taker_account = env.create_portfolio(&taker);
+    let lp_account = env.create_portfolio(&lp);
+    env.deposit(&taker, taker_account, 1_000_000);
+    env.deposit(&lp, lp_account, 1_000_000);
+    env.trade_asset_with_cu(
+        1,
+        &taker,
+        taker_account,
+        &lp,
+        lp_account,
+        POS_SCALE as i128,
+        100,
+        0,
+    );
+
+    env.svm.warp_to_slot(10);
+    env.update_asset_lifecycle_as_admin_with_cu(
+        percolator_prog::processor::ASSET_ACTION_SHUTDOWN,
+        1,
+        10,
+        0,
+    );
+    assert_eq!(
+        env.market_state().1.assets[1].lifecycle,
+        AssetLifecycleV16::Recovery
+    );
+
+    let ctx = Pubkey::new_unique();
+    let delegate = matcher_delegate_key(
+        &env.program_id,
+        &env.market,
+        &lp_account,
+        &lp.pubkey(),
+        &hostile,
+        &ctx,
+    );
+    env.svm
+        .set_account(
+            delegate,
+            Account {
+                lamports: 1_000_000_000,
+                data: vec![],
+                owner: Pubkey::default(),
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    let set_hostile_mode = |env: &mut V16CuEnv| {
+        let mut data = vec![0u8; MATCHER_CONTEXT_LEN];
+        data[0] = 0;
+        env.svm
+            .set_account(
+                ctx,
+                Account {
+                    lamports: 1_000_000_000,
+                    data,
+                    owner: hostile,
+                    executable: false,
+                    rent_epoch: 0,
+                },
+            )
+            .unwrap();
+    };
+    set_hostile_mode(&mut env);
+    env.set_matcher_config(hostile, &lp, lp_account, ctx, delegate, 1);
+
+    let accounts = |env: &V16CuEnv| {
+        vec![
+            AccountMeta::new(taker.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(taker_account, false),
+            AccountMeta::new(lp_account, false),
+            AccountMeta::new_readonly(hostile, false),
+            AccountMeta::new(ctx, false),
+            AccountMeta::new_readonly(delegate, false),
+        ]
+    };
+
+    for (route, instruction) in [
+        (
+            "TradeCpi reduce",
+            ProgInstruction::TradeCpi {
+                asset_index: 1,
+                size_q: -(POS_SCALE as i128),
+                fee_bps: 0,
+                limit_price: 0,
+            },
+        ),
+        (
+            "BatchTradeCpi reduce",
+            ProgInstruction::BatchTradeCpi {
+                legs: vec![BatchTradeCpiLeg {
+                    asset_index: 1,
+                    size_q: -(POS_SCALE as i128),
+                    fee_bps: 0,
+                    limit_price: 0,
+                }],
+            },
+        ),
+    ] {
+        set_hostile_mode(&mut env);
+        env.svm.expire_blockhash();
+        let reduce_control = env
+            .send(instruction, accounts(&env), &[&taker])
+            .expect_err("Recovery CPI risk reduction should reach matcher validation");
+        assert!(
+            reduce_control.contains("InvalidAccountData"),
+            "{route} should reach hostile matcher validation, got {reduce_control}"
+        );
+    }
+
+    for (route, instruction) in [
+        (
+            "TradeCpi increase",
+            ProgInstruction::TradeCpi {
+                asset_index: 1,
+                size_q: POS_SCALE as i128,
+                fee_bps: 0,
+                limit_price: 0,
+            },
+        ),
+        (
+            "BatchTradeCpi increase",
+            ProgInstruction::BatchTradeCpi {
+                legs: vec![BatchTradeCpiLeg {
+                    asset_index: 1,
+                    size_q: POS_SCALE as i128,
+                    fee_bps: 0,
+                    limit_price: 0,
+                }],
+            },
+        ),
+    ] {
+        set_hostile_mode(&mut env);
+        let market_before = env.svm.get_account(&env.market).unwrap();
+        let taker_before = env.svm.get_account(&taker_account).unwrap();
+        let lp_before = env.svm.get_account(&lp_account).unwrap();
+        let ctx_before = env.svm.get_account(&ctx).unwrap();
+        env.svm.expire_blockhash();
+        let rejected = env
+            .send(instruction, accounts(&env), &[&taker])
+            .expect_err("Recovery CPI risk increase must reject before matcher CPI");
+        assert!(
+            rejected.contains("Custom(21)") || rejected.contains("custom program error: 0x15"),
+            "{route} should fail as EngineLockActive, got {rejected}"
+        );
+        assert!(
+            !rejected.contains("InvalidAccountData"),
+            "{route} must not reach hostile matcher validation: {rejected}"
+        );
+        assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+        assert_eq!(env.svm.get_account(&taker_account).unwrap(), taker_before);
+        assert_eq!(env.svm.get_account(&lp_account).unwrap(), lp_before);
+        assert_eq!(
+            env.svm.get_account(&ctx).unwrap(),
+            ctx_before,
+            "{route} must not give the hostile matcher a writable context"
+        );
+    }
+}
+
 // LoF/DoS sweep: the CPI routes run cheap wrapper preflight before invoking an LP matcher. A stored
 // portfolio with duplicate active legs is invalid engine state; if the lightweight preflight only
 // reads the first matching leg, a hostile matcher can be invoked before the engine rejects the
