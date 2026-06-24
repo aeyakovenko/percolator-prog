@@ -89537,6 +89537,55 @@ fn v16_attack_value_in_routes_reject_frozen_sources_before_credit() {
         "frozen-source insurance top-up leaves source bytes unchanged"
     );
 
+    let domain_source = env.token_account(admin.pubkey(), 41);
+    let domain_source_clean = env.svm.get_account(&domain_source).unwrap();
+    env.svm
+        .set_account(
+            domain_source,
+            Account {
+                data: frozen_token_data(admin.pubkey(), 41),
+                ..domain_source_clean.clone()
+            },
+        )
+        .unwrap();
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    let frozen_source_before = env.svm.get_account(&domain_source).unwrap();
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::TopUpInsuranceDomain {
+            domain: 0,
+            amount: 41,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(domain_source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        rejected.is_err(),
+        "TopUpInsuranceDomain must reject a frozen source before domain budget credit"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "frozen-source domain top-up must not credit market accounting"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        vault_before,
+        "frozen-source domain top-up must not move vault custody"
+    );
+    assert_eq!(
+        env.svm.get_account(&domain_source).unwrap(),
+        frozen_source_before,
+        "frozen-source domain top-up leaves source bytes unchanged"
+    );
+
     let backing_source = env.token_account(admin.pubkey(), 44);
     let backing_source_clean = env.svm.get_account(&backing_source).unwrap();
     env.svm
@@ -89629,6 +89678,29 @@ fn v16_attack_value_in_routes_reject_frozen_sources_before_credit() {
     );
 
     env.svm
+        .set_account(domain_source, domain_source_clean)
+        .unwrap();
+    env.svm.expire_blockhash();
+    let ok_domain = env.send(
+        ProgInstruction::TopUpInsuranceDomain {
+            domain: 0,
+            amount: 41,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(domain_source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        ok_domain.is_ok(),
+        "domain insurance top-up remains live once the source is initialized: {ok_domain:?}"
+    );
+
+    env.svm
         .set_account(backing_source, backing_source_clean)
         .unwrap();
     env.svm.expire_blockhash();
@@ -89654,7 +89726,10 @@ fn v16_attack_value_in_routes_reject_frozen_sources_before_credit() {
 
     let (_, group) = env.market_state();
     assert_eq!(env.portfolio_state(portfolio).capital.get(), 25);
-    assert_eq!(group.insurance, 33);
+    assert_eq!(group.insurance, 74);
+    assert_eq!(group.insurance_domain_budget[0], 57);
+    assert_eq!(group.insurance_domain_budget[1], 17);
+    assert_eq!(group.insurance_domain_budget_remaining_total, 74);
     assert_eq!(
         group.source_backing_buckets[1].fresh_unliened_backing_num,
         44 * BOUND_SCALE
