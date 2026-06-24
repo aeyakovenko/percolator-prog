@@ -10538,7 +10538,7 @@ pub mod processor {
                 },
             ) {
                 Ok(result) => Some(result),
-                Err(V16Error::NonProgress) if !observations.is_empty() => None,
+                Err(V16Error::NonProgress) if !observations.is_empty() && close_q == 0 => None,
                 Err(err) => return Err(map_v16_error(err)),
             };
 
