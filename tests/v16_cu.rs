@@ -91086,6 +91086,133 @@ fn v16_attack_cure_optional_deposit_rejects_frozen_source_before_cancel() {
     );
 }
 
+// LoF/liveness sweep (cron135): SPL-native accounts are a separate custody state from frozen or
+// malformed accounts. CureAndCancelClose must reject a wrapped-SOL optional source or canonical vault
+// before canceling close-progress or crediting capital, then remain live once ordinary SPL accounts return.
+#[test]
+fn v16_attack_cure_optional_deposit_rejects_native_accounts_before_cancel() {
+    #[derive(Clone, Copy)]
+    enum NativeSlot {
+        Source,
+        Vault,
+    }
+
+    for slot in [NativeSlot::Source, NativeSlot::Vault] {
+        let mut env = V16CuEnv::new();
+        let owner = Keypair::new();
+        let p = env.create_portfolio(&owner);
+        env.deposit(&owner, p, 100);
+        env.seed_cancellable_close_progress(p);
+        assert!(
+            close_progress(&env.portfolio_state(p)).active,
+            "test setup must start from an active close ledger"
+        );
+
+        let source = env.token_account_for_mint(env.mint, owner.pubkey(), 20);
+        let native_key = match slot {
+            NativeSlot::Source => source,
+            NativeSlot::Vault => env.vault,
+        };
+        let clean_native_slot = env.svm.get_account(&native_key).unwrap();
+        let (mint, token_owner) = match slot {
+            NativeSlot::Source => (env.mint, owner.pubkey()),
+            NativeSlot::Vault => (env.mint, env.vault_authority),
+        };
+        env.svm
+            .set_account(
+                native_key,
+                Account {
+                    data: make_native_flagged_token_data(mint, token_owner, 20),
+                    ..clean_native_slot.clone()
+                },
+            )
+            .unwrap();
+
+        let market_before = env.svm.get_account(&env.market).unwrap();
+        let portfolio_before = env.svm.get_account(&p).unwrap();
+        let source_before = env.svm.get_account(&source).unwrap();
+        let vault_before = env.svm.get_account(&env.vault).unwrap();
+
+        env.svm.expire_blockhash();
+        let rejected = env.send(
+            ProgInstruction::CureAndCancelClose {
+                optional_deposit: 20,
+            },
+            vec![
+                AccountMeta::new(owner.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(p, false),
+                AccountMeta::new(source, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[&owner],
+        );
+        assert!(
+            rejected.is_err(),
+            "CureAndCancelClose must reject native-flagged optional-deposit accounts"
+        );
+        assert_eq!(
+            env.svm.get_account(&env.market).unwrap(),
+            market_before,
+            "native-account cure leaves market accounting unchanged"
+        );
+        assert_eq!(
+            env.svm.get_account(&p).unwrap(),
+            portfolio_before,
+            "native-account cure leaves close-progress and capital unchanged"
+        );
+        assert_eq!(
+            env.svm.get_account(&source).unwrap(),
+            source_before,
+            "native-account cure pulls no source tokens"
+        );
+        assert_eq!(
+            env.svm.get_account(&env.vault).unwrap(),
+            vault_before,
+            "native-account cure credits no vault tokens"
+        );
+        assert!(
+            close_progress(&env.portfolio_state(p)).active,
+            "close ledger remains active after native-account rejection"
+        );
+        assert!(
+            !close_progress(&env.portfolio_state(p)).canceled,
+            "native-account rejection must not cancel the close ledger"
+        );
+
+        env.svm
+            .set_account(native_key, clean_native_slot)
+            .unwrap();
+        env.svm.expire_blockhash();
+        let ok = env
+            .send(
+                ProgInstruction::CureAndCancelClose {
+                    optional_deposit: 20,
+                },
+                vec![
+                    AccountMeta::new(owner.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(p, false),
+                    AccountMeta::new(source, false),
+                    AccountMeta::new(env.vault, false),
+                    AccountMeta::new_readonly(spl_token::ID, false),
+                ],
+                &[&owner],
+            )
+            .expect("CureAndCancelClose remains live after native-account rejection");
+        assert_cu_within("CureAndCancelClose native-account retry", ok, CUSTODY_CU_LIMIT);
+        let cured = env.portfolio_state(p);
+        assert!(close_progress(&cured).canceled);
+        assert_eq!(cured.capital.get(), 120);
+        assert_eq!(env.token_amount(source), 0);
+        assert_eq!(
+            env.market_state().1.vault as u64,
+            env.token_amount(env.vault)
+        );
+    }
+}
+
 // full-interface sweep: CureAndCancelClose has its own optional-deposit rail and also cancels an
 // active close-progress ledger. Malformed SPL-owned source or canonical vault data must reject before
 // the engine credits capital or marks the close ledger canceled, and a clean retry must still work.
