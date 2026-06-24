@@ -94155,6 +94155,114 @@ fn v16_attack_terminal_insurance_malformed_vault_rolls_back_budget_and_ledger() 
     assert_eq!(group.vault, 60);
 }
 
+// LoF/DoS sweep (cron135): terminal WithdrawInsurance debits terminal budgets and the optional
+// ledger before validating the primary canonical vault. A frozen initialized vault is distinct from
+// malformed or delegated vault data and must roll back the staged budget/ledger debit.
+#[test]
+fn v16_attack_terminal_insurance_frozen_vault_rolls_back_budget_and_ledger() {
+    let mut env = V16CuEnv::new();
+    let admin = env.admin.insecure_clone();
+    env.top_up_insurance(100);
+    env.resolve();
+
+    let ledger = env.insurance_ledger_account();
+    let dest = env.token_account(admin.pubkey(), 0);
+    let clean_vault = env.svm.get_account(&env.vault).unwrap();
+    env.svm
+        .set_account(
+            env.vault,
+            Account {
+                data: make_frozen_token_data(env.mint, env.vault_authority, 100),
+                ..clean_vault.clone()
+            },
+        )
+        .unwrap();
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let ledger_before = env.svm.get_account(&ledger).unwrap();
+    let frozen_vault_before = env.svm.get_account(&env.vault).unwrap();
+    let dest_before = env.svm.get_account(&dest).unwrap();
+
+    env.svm.expire_blockhash();
+    let rejected = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::WithdrawInsurance { amount: 40 },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(ledger, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        rejected.is_err(),
+        "terminal WithdrawInsurance must reject a frozen canonical vault"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "frozen-vault terminal insurance withdraw must not debit market budgets"
+    );
+    assert_eq!(
+        env.svm.get_account(&ledger).unwrap(),
+        ledger_before,
+        "frozen-vault terminal insurance withdraw must not rewrite the ledger"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        frozen_vault_before,
+        "frozen canonical vault remains byte-identical"
+    );
+    assert_eq!(
+        env.svm.get_account(&dest).unwrap(),
+        dest_before,
+        "frozen-vault terminal insurance withdraw pays no destination tokens"
+    );
+    let (_, rejected_group) = env.market_state();
+    assert_eq!(rejected_group.insurance, 100);
+    assert_eq!(rejected_group.vault, 100);
+
+    env.svm.set_account(env.vault, clean_vault).unwrap();
+    env.svm.expire_blockhash();
+    let ok_cu = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::WithdrawInsurance { amount: 40 },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(ledger, false),
+        ],
+        &[&admin],
+    )
+    .expect("terminal WithdrawInsurance remains live after frozen-vault rejection");
+    assert_cu_within(
+        "terminal WithdrawInsurance frozen-vault retry",
+        ok_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    assert_eq!(env.token_amount(dest), 40);
+    assert_eq!(env.token_amount(env.vault), 60);
+    let ledger_state =
+        state::read_insurance_ledger(&env.svm.get_account(&ledger).unwrap().data).unwrap();
+    assert_eq!(ledger_state.total_withdrawn_atoms, 40);
+    assert_eq!(ledger_state.last_observed_insurance_atoms, 60);
+    let (_, group) = env.market_state();
+    assert_eq!(group.insurance, 60);
+    assert_eq!(group.vault, 60);
+}
+
 // LoF/DoS sweep (cron135): malformed destinations cover token unpack failure, but a frozen
 // initialized SPL account reaches the distinct account-state branch after terminal insurance and
 // the optional ledger have already been debited. The rejected call must roll back those debits and
