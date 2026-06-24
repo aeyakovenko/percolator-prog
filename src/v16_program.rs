@@ -11017,25 +11017,16 @@ pub mod processor {
         portfolio: &percolator::PortfolioV16ViewMut<'_>,
         asset_index: usize,
     ) -> Result<bool, ProgramError> {
-        if asset_index >= group.markets.len() {
-            return Err(PercolatorError::EngineInvalidConfig.into());
-        }
-        let asset = group.markets[asset_index].engine.asset;
-        if asset.stored_pos_count_long.get() == 0 && asset.stored_pos_count_short.get() == 0 {
-            return Ok(false);
-        }
-        let market_id = asset.market_id.get();
-        let mut slot = 0usize;
-        while slot < percolator::V16_MAX_PORTFOLIO_ASSETS_N {
-            let leg = portfolio.header.legs[slot]
-                .try_to_runtime()
-                .map_err(map_v16_error)?;
-            if leg.active && leg.asset_index as usize == asset_index && leg.market_id == market_id {
-                return Ok(true);
-            }
-            slot += 1;
-        }
-        Ok(false)
+        portfolio_touches_requested_active_asset_view(
+            group,
+            portfolio,
+            &[TradeRequestV16 {
+                asset_index,
+                size_q: 1,
+                exec_price: 1,
+                fee_bps: 0,
+            }],
+        )
     }
 
     fn signed_position_for_asset_view(
