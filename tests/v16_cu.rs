@@ -87959,6 +87959,158 @@ fn v16_attack_tradecpi_stale_rejects_before_hostile_matcher_cpi() {
     );
 }
 
+// CU/LoF hardening: the NoCPI trade routes mutate market open interest and both
+// portfolio states directly. A stale-layout taker must reject before any trade
+// mutation, while the same restored account remains tradeable.
+#[test]
+fn v16_attack_nocpi_trade_stale_layout_rejects_before_state_mutation() {
+    for batch in [false, true] {
+        let mut env = V16CuEnv::new();
+        let taker = Keypair::new();
+        let lp = Keypair::new();
+        let ta = env.create_portfolio(&taker);
+        let la = env.create_portfolio(&lp);
+        env.deposit(&taker, ta, 1_000_000);
+        env.deposit(&lp, la, 1_000_000);
+
+        let mut taker_account = env.svm.get_account(&ta).unwrap();
+        let fresh_taker = taker_account.clone();
+        let mut taker_state = state::read_portfolio(&taker_account.data).unwrap();
+        let current_layout = taker_state.provenance_header.layout_discriminator.get();
+        assert!(
+            current_layout > 0,
+            "current engine layout discriminator is nonzero"
+        );
+        taker_state.provenance_header =
+            percolator::ProvenanceHeaderV16Account::from_runtime(
+                &percolator::ProvenanceHeaderV16 {
+                    market_group_id: taker_state.provenance_header.market_group_id,
+                    portfolio_account_id: taker_state.provenance_header.portfolio_account_id,
+                    owner: taker_state.provenance_header.owner,
+                    version: taker_state.provenance_header.version.get(),
+                    layout_discriminator: current_layout - 1,
+                },
+            );
+        state::write_portfolio(&mut taker_account.data, &taker_state).unwrap();
+        env.svm.set_account(ta, taker_account.clone()).unwrap();
+
+        let market_before = env.svm.get_account(&env.market).unwrap();
+        let lp_before = env.svm.get_account(&la).unwrap();
+        env.svm.expire_blockhash();
+        let rejected = if batch {
+            env.send(
+                ProgInstruction::BatchTradeNoCpi {
+                    legs: vec![BatchTradeLeg {
+                        asset_index: 0,
+                        size_q: POS_SCALE as i128,
+                        exec_price: 100,
+                        fee_bps: 100,
+                    }],
+                },
+                vec![
+                    AccountMeta::new(taker.pubkey(), true),
+                    AccountMeta::new(lp.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(ta, false),
+                    AccountMeta::new(la, false),
+                ],
+                &[&taker, &lp],
+            )
+        } else {
+            env.send(
+                ProgInstruction::TradeNoCpi {
+                    asset_index: 0,
+                    size_q: POS_SCALE as i128,
+                    exec_price: 100,
+                    fee_bps: 100,
+                },
+                vec![
+                    AccountMeta::new(taker.pubkey(), true),
+                    AccountMeta::new(lp.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(ta, false),
+                    AccountMeta::new(la, false),
+                ],
+                &[&taker, &lp],
+            )
+        };
+        let err = rejected.expect_err("stale-layout NoCPI trade must reject");
+        assert!(
+            err.contains("Custom(16)") || err.contains("custom program error: 0x10"),
+            "stale-layout NoCPI trade should fail as EngineProvenanceMismatch, got {err}"
+        );
+        assert_eq!(
+            env.svm.get_account(&env.market).unwrap(),
+            market_before,
+            "stale-layout NoCPI trade leaves market bytes unchanged"
+        );
+        assert_eq!(
+            env.svm.get_account(&ta).unwrap(),
+            taker_account,
+            "stale-layout NoCPI trade leaves taker bytes unchanged"
+        );
+        assert_eq!(
+            env.svm.get_account(&la).unwrap(),
+            lp_before,
+            "stale-layout NoCPI trade leaves LP bytes unchanged"
+        );
+
+        env.svm.set_account(ta, fresh_taker).unwrap();
+        env.svm.expire_blockhash();
+        let ok = if batch {
+            env.send(
+                ProgInstruction::BatchTradeNoCpi {
+                    legs: vec![BatchTradeLeg {
+                        asset_index: 0,
+                        size_q: POS_SCALE as i128,
+                        exec_price: 100,
+                        fee_bps: 100,
+                    }],
+                },
+                vec![
+                    AccountMeta::new(taker.pubkey(), true),
+                    AccountMeta::new(lp.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(ta, false),
+                    AccountMeta::new(la, false),
+                ],
+                &[&taker, &lp],
+            )
+        } else {
+            env.send(
+                ProgInstruction::TradeNoCpi {
+                    asset_index: 0,
+                    size_q: POS_SCALE as i128,
+                    exec_price: 100,
+                    fee_bps: 100,
+                },
+                vec![
+                    AccountMeta::new(taker.pubkey(), true),
+                    AccountMeta::new(lp.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(ta, false),
+                    AccountMeta::new(la, false),
+                ],
+                &[&taker, &lp],
+            )
+        };
+        assert!(
+            ok.is_ok(),
+            "restored NoCPI trade route must remain live: batch={batch}, got {ok:?}"
+        );
+        assert_eq!(
+            active_leg_for_asset(&env.portfolio_state(ta), 0).basis_pos_q,
+            POS_SCALE as i128,
+            "restored NoCPI trade opens a real taker leg"
+        );
+        assert_eq!(
+            active_leg_for_asset(&env.portfolio_state(la), 0).basis_pos_q,
+            -(POS_SCALE as i128),
+            "restored NoCPI trade opens a real LP leg"
+        );
+    }
+}
+
 // CU/DoS hardening: an initialized but stale-layout taker must fail in the
 // TradeCpi portfolio-owner preflight before the wrapper invokes a hostile
 // matcher. Stale-currentness and hidden-leg tests cover different branches.
