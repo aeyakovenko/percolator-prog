@@ -6563,12 +6563,13 @@ pub mod processor {
         }
         let (_, _, max_market_slots, _) =
             state::read_market_config_mode_and_capacity(&market_ai.try_borrow_data()?)?;
+        let cpi_requests = [(asset_index, size_q)];
         ensure_cpi_trade_portfolios_current_before_matcher(
             market_ai,
             account_a_ai,
             account_b_ai,
             max_market_slots,
-            &[asset_index],
+            &cpi_requests,
         )?;
         let req_id = {
             let mut market_data = market_ai.try_borrow_mut_data()?;
@@ -6914,18 +6915,20 @@ pub mod processor {
 
         // Build the matcher batch request: per leg, (asset, that asset's oracle price, signed size).
         let mut matcher_legs: Vec<(u16, u64, i128)> = Vec::with_capacity(legs.len());
+        let mut cpi_requests: Vec<(u16, i128)> = Vec::with_capacity(legs.len());
         for (i, leg) in legs.iter().enumerate() {
             if oracle_prices[i] == 0 {
                 return Err(PercolatorError::InvalidInstruction.into());
             }
             matcher_legs.push((leg.asset_index, oracle_prices[i], leg.size_q));
+            cpi_requests.push((leg.asset_index, leg.size_q));
         }
         ensure_cpi_trade_portfolios_current_before_matcher(
             market_ai,
             account_a_ai,
             account_b_ai,
             max_market_slots,
-            &asset_indices,
+            &cpi_requests,
         )?;
 
         // Force the batch matcher to emit fresh return data for this CPI.
@@ -10792,6 +10795,31 @@ pub mod processor {
         Ok(false)
     }
 
+    fn signed_position_for_asset_view(
+        group: &state::MarketViewMutV16<'_>,
+        portfolio: &percolator::PortfolioV16ViewMut<'_>,
+        asset_index: usize,
+    ) -> Result<i128, ProgramError> {
+        if asset_index >= group.markets.len() {
+            return Err(PercolatorError::EngineInvalidConfig.into());
+        }
+        let market_id = group.markets[asset_index].engine.asset.market_id.get();
+        let mut slot = 0usize;
+        while slot < percolator::V16_MAX_PORTFOLIO_ASSETS_N {
+            let leg = portfolio.header.legs[slot]
+                .try_to_runtime()
+                .map_err(map_v16_error)?;
+            if leg.active && leg.asset_index as usize == asset_index && leg.market_id == market_id {
+                return Ok(match leg.side {
+                    SideV16::Long => leg.basis_pos_q.unsigned_abs() as i128,
+                    SideV16::Short => -(leg.basis_pos_q.unsigned_abs() as i128),
+                });
+            }
+            slot += 1;
+        }
+        Ok(0)
+    }
+
     fn ensure_trade_portfolio_current_for_requests_view(
         group: &state::MarketViewMutV16<'_>,
         portfolio: &percolator::PortfolioV16ViewMut<'_>,
@@ -10860,32 +10888,43 @@ pub mod processor {
         ensure_trade_portfolio_current_for_requests_view(group, account_b, requests)
     }
 
+    fn requested_delta_must_increase_risk(current_q: i128, delta_q: i128) -> bool {
+        current_q == 0 || (current_q > 0 && delta_q > 0) || (current_q < 0 && delta_q < 0)
+    }
+
     fn ensure_cpi_trade_asset_lifecycle_before_matcher(
         group: &state::MarketViewMutV16<'_>,
         account_a: &percolator::PortfolioV16ViewMut<'_>,
         account_b: &percolator::PortfolioV16ViewMut<'_>,
-        asset_indices: &[u16],
+        cpi_requests: &[(u16, i128)],
     ) -> ProgramResult {
-        for &asset_index in asset_indices {
-            let asset_index_usize = asset_index as usize;
-            if asset_index_usize >= group.header.config.max_market_slots.get() as usize
-                || asset_index_usize >= group.markets.len()
+        for &(asset_index_u16, size_q) in cpi_requests {
+            let asset_index = asset_index_u16 as usize;
+            if asset_index >= group.header.config.max_market_slots.get() as usize
+                || asset_index >= group.markets.len()
             {
                 return Err(PercolatorError::InvalidInstruction.into());
             }
-            let lifecycle = group.markets[asset_index_usize].engine.asset.lifecycle;
-            if lifecycle == ASSET_LIFECYCLE_ACTIVE {
-                continue;
-            }
-            let account_a_has_asset =
-                portfolio_has_active_asset_view(group, account_a, asset_index_usize)?;
-            let account_b_has_asset =
-                portfolio_has_active_asset_view(group, account_b, asset_index_usize)?;
-            if !account_a_has_asset && !account_b_has_asset {
-                return Err(PercolatorError::EngineLockActive.into());
-            }
-            match lifecycle {
-                ASSET_LIFECYCLE_DRAIN_ONLY | ASSET_LIFECYCLE_RECOVERY => {}
+            match group.markets[asset_index].engine.asset.lifecycle {
+                ASSET_LIFECYCLE_ACTIVE => {}
+                ASSET_LIFECYCLE_DRAIN_ONLY | ASSET_LIFECYCLE_RECOVERY => {
+                    let account_a_has_asset =
+                        portfolio_has_active_asset_view(group, account_a, asset_index)?;
+                    let account_b_has_asset =
+                        portfolio_has_active_asset_view(group, account_b, asset_index)?;
+                    if !account_a_has_asset && !account_b_has_asset {
+                        return Err(PercolatorError::EngineLockActive.into());
+                    }
+                    let account_a_pos =
+                        signed_position_for_asset_view(group, account_a, asset_index)?;
+                    let account_b_pos =
+                        signed_position_for_asset_view(group, account_b, asset_index)?;
+                    if requested_delta_must_increase_risk(account_a_pos, size_q)
+                        || requested_delta_must_increase_risk(account_b_pos, -size_q)
+                    {
+                        return Err(PercolatorError::EngineLockActive.into());
+                    }
+                }
                 _ => return Err(PercolatorError::EngineLockActive.into()),
             }
         }
@@ -10897,12 +10936,12 @@ pub mod processor {
         account_a_ai: &AccountInfo<'_>,
         account_b_ai: &AccountInfo<'_>,
         max_market_slots: usize,
-        asset_indices: &[u16],
+        cpi_requests: &[(u16, i128)],
     ) -> ProgramResult {
         ensure_portfolio_storage_for_market_slots(account_a_ai, max_market_slots)?;
         ensure_portfolio_storage_for_market_slots(account_b_ai, max_market_slots)?;
-        let mut requests: Vec<TradeRequestV16> = Vec::with_capacity(asset_indices.len());
-        for &asset_index in asset_indices {
+        let mut requests: Vec<TradeRequestV16> = Vec::with_capacity(cpi_requests.len());
+        for &(asset_index, _) in cpi_requests {
             requests.push(TradeRequestV16 {
                 asset_index: asset_index as usize,
                 size_q: 1,
@@ -10922,7 +10961,7 @@ pub mod processor {
             &group,
             &account_a,
             &account_b,
-            asset_indices,
+            cpi_requests,
         )?;
         ensure_trade_portfolios_current_for_requests_view(&group, &account_a, &account_b, &requests)
     }
