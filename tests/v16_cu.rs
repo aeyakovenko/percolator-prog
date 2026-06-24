@@ -51204,6 +51204,289 @@ fn v16_attack_hostile_matcher_single_tradecpi_returns_all_rejected() {
     );
 }
 
+// security.md sweep - stale matcher return-data replay (#39/#49): BatchTradeCpi reads matcher output
+// from Solana return data. A matcher that sets valid return data for one batch CPI and then returns
+// Ok without setting return data for a second same-transaction batch must not let the wrapper replay
+// the stale first response.
+#[test]
+fn v16_attack_hostile_matcher_no_write_cannot_replay_stale_batch_return_data() {
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(2, 1_000, 1_000, 500);
+    env.configure_auth_mark_for_asset_as_admin(0, 1, 100);
+    env.configure_auth_mark_for_asset_as_admin(1, 1, 100);
+    let hostile = Pubkey::new_unique();
+    env.svm.add_program(
+        hostile,
+        &std::fs::read(hostile_matcher_program_path()).unwrap(),
+    );
+    let taker = Keypair::new();
+    let lp = Keypair::new();
+    let ta = env.create_portfolio(&taker);
+    let la = env.create_portfolio(&lp);
+    env.deposit(&taker, ta, 10_000_000);
+    env.deposit(&lp, la, 10_000_000);
+    let ctx = Pubkey::new_unique();
+    let delegate = matcher_delegate_key(
+        &env.program_id,
+        &env.market,
+        &la,
+        &lp.pubkey(),
+        &hostile,
+        &ctx,
+    );
+    env.svm
+        .set_account(
+            delegate,
+            Account {
+                lamports: 1_000_000_000,
+                data: vec![],
+                owner: Pubkey::default(),
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    let mut ctx_data = vec![0u8; MATCHER_CONTEXT_LEN];
+    ctx_data[64] = 13; // first batch writes return data; second same-tx batch writes nothing.
+    env.svm
+        .set_account(
+            ctx,
+            Account {
+                lamports: 1_000_000_000,
+                data: ctx_data,
+                owner: hostile,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    env.set_matcher_config(hostile, &lp, la, ctx, delegate, 1);
+
+    let size_q = POS_SCALE as i128;
+    let program_id = env.program_id;
+    let market = env.market;
+    let taker_key = taker.pubkey();
+    let batch_ix = || Instruction {
+        program_id,
+        accounts: vec![
+            AccountMeta::new(taker_key, true),
+            AccountMeta::new(market, false),
+            AccountMeta::new(ta, false),
+            AccountMeta::new(la, false),
+            AccountMeta::new_readonly(hostile, false),
+            AccountMeta::new(ctx, false),
+            AccountMeta::new_readonly(delegate, false),
+        ],
+        data: ProgInstruction::BatchTradeCpi {
+            legs: vec![
+                BatchTradeCpiLeg {
+                    asset_index: 0,
+                    size_q,
+                    fee_bps: 100,
+                    limit_price: 0,
+                },
+                BatchTradeCpiLeg {
+                    asset_index: 1,
+                    size_q: -size_q,
+                    fee_bps: 100,
+                    limit_price: 0,
+                },
+            ],
+        }
+        .encode(),
+    };
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let taker_before = env.svm.get_account(&ta).unwrap();
+    let lp_before = env.svm.get_account(&la).unwrap();
+    let ctx_before = env.svm.get_account(&ctx).unwrap();
+
+    env.svm.expire_blockhash();
+    let replay = send_raw_ixs(
+        &mut env.svm,
+        &env.payer,
+        vec![heap_ix(), cu_ix(), batch_ix(), batch_ix()],
+        &[&taker],
+    );
+    assert!(
+        replay.is_err(),
+        "a matcher that omits second-call return data must not replay stale batch return data: {replay:?}"
+    );
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+    assert_eq!(env.svm.get_account(&ta).unwrap(), taker_before);
+    assert_eq!(env.svm.get_account(&la).unwrap(), lp_before);
+    assert_eq!(
+        env.svm.get_account(&ctx).unwrap(),
+        ctx_before,
+        "failed replay transaction must roll back the first matcher context write"
+    );
+}
+
+// security.md sweep - stale matcher context replay (#39/#49): single TradeCpi reads the matcher
+// result from the writable matcher context account. A matcher that writes a valid response once and
+// then returns Ok without overwriting the context on a second same-transaction call must not let the
+// wrapper replay the stale first response as a fresh fill.
+#[test]
+fn v16_attack_hostile_matcher_no_write_cannot_replay_stale_single_context() {
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(1, 1_000, 1_000, 500);
+    env.configure_auth_mark_for_asset_as_admin(0, 1, 100);
+    let hostile = Pubkey::new_unique();
+    env.svm.add_program(
+        hostile,
+        &std::fs::read(hostile_matcher_program_path()).unwrap(),
+    );
+    let taker = Keypair::new();
+    let lp = Keypair::new();
+    let ta = env.create_portfolio(&taker);
+    let la = env.create_portfolio(&lp);
+    env.deposit(&taker, ta, 10_000_000);
+    env.deposit(&lp, la, 10_000_000);
+    let ctx = Pubkey::new_unique();
+    let delegate = matcher_delegate_key(
+        &env.program_id,
+        &env.market,
+        &la,
+        &lp.pubkey(),
+        &hostile,
+        &ctx,
+    );
+    env.svm
+        .set_account(
+            delegate,
+            Account {
+                lamports: 1_000_000_000,
+                data: vec![],
+                owner: Pubkey::default(),
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    let mut ctx_data = vec![0u8; MATCHER_CONTEXT_LEN];
+    ctx_data[0] = 9; // faithful first fill
+    ctx_data[64] = 13; // after the first fill, hostile fixture returns Ok without writing output
+    env.svm
+        .set_account(
+            ctx,
+            Account {
+                lamports: 1_000_000_000,
+                data: ctx_data,
+                owner: hostile,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    env.set_matcher_config(hostile, &lp, la, ctx, delegate, 1);
+
+    let size_q = POS_SCALE as i128;
+    let program_id = env.program_id;
+    let market = env.market;
+    let taker_key = taker.pubkey();
+    let single_ix = || Instruction {
+        program_id,
+        accounts: vec![
+            AccountMeta::new(taker_key, true),
+            AccountMeta::new(market, false),
+            AccountMeta::new(ta, false),
+            AccountMeta::new(la, false),
+            AccountMeta::new_readonly(hostile, false),
+            AccountMeta::new(ctx, false),
+            AccountMeta::new_readonly(delegate, false),
+        ],
+        data: ProgInstruction::TradeCpi {
+            asset_index: 0,
+            size_q,
+            fee_bps: 100,
+            limit_price: 0,
+        }
+        .encode(),
+    };
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let taker_before = env.svm.get_account(&ta).unwrap();
+    let lp_before = env.svm.get_account(&la).unwrap();
+    let ctx_before = env.svm.get_account(&ctx).unwrap();
+
+    env.svm.expire_blockhash();
+    let replay = send_raw_ixs(
+        &mut env.svm,
+        &env.payer,
+        vec![heap_ix(), cu_ix(), single_ix(), single_ix()],
+        &[&taker],
+    );
+    assert!(
+        replay.is_err(),
+        "a matcher that omits second-call context output must not replay stale TradeCpi bytes: {replay:?}"
+    );
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+    assert_eq!(env.svm.get_account(&ta).unwrap(), taker_before);
+    assert_eq!(env.svm.get_account(&la).unwrap(), lp_before);
+    assert_eq!(
+        env.svm.get_account(&ctx).unwrap(),
+        ctx_before,
+        "failed replay transaction must roll back the first matcher context write"
+    );
+}
+
+#[test]
+fn v16_attack_tradecpi_matcher_req_id_advances_monotonically_on_market() {
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(1, 1_000, 1_000, 500);
+    env.configure_auth_mark_for_asset_as_admin(0, 1, 100);
+    let matcher_program = Pubkey::new_unique();
+    let matcher_bytes = std::fs::read(auth_matcher_program_path()).expect("read auth matcher BPF");
+    env.svm.add_program(matcher_program, &matcher_bytes);
+    let taker_owner = Keypair::new();
+    let lp_owner = Keypair::new();
+    let taker = env.create_portfolio(&taker_owner);
+    let lp = env.create_portfolio(&lp_owner);
+    env.deposit(&taker_owner, taker, 10_000_000);
+    env.deposit(&lp_owner, lp, 10_000_000);
+    let (ctx, delegate, _) = env.init_auth_matcher_context(matcher_program, &lp_owner, lp);
+    let read_ctx_req_id = |env: &V16CuEnv| {
+        let ctx_data = env.svm.get_account(&ctx).unwrap().data;
+        u64::from_le_bytes(ctx_data[32..40].try_into().unwrap())
+    };
+
+    env.try_trade_cpi_with_cu_on_asset(
+        &taker_owner,
+        taker,
+        &lp_owner,
+        lp,
+        matcher_program,
+        ctx,
+        delegate,
+        0,
+        POS_SCALE as i128,
+        100,
+    )
+    .expect("first matcher fill succeeds");
+    assert_eq!(
+        read_ctx_req_id(&env),
+        1,
+        "first matcher fill should use market request sequence 1"
+    );
+    assert_eq!(env.market_state().0.matcher_req_seq, 1);
+
+    env.svm.expire_blockhash();
+    env.try_trade_cpi_with_cu_on_asset(
+        &taker_owner,
+        taker,
+        &lp_owner,
+        lp,
+        matcher_program,
+        ctx,
+        delegate,
+        0,
+        POS_SCALE as i128,
+        100,
+    )
+    .expect("second matcher fill succeeds");
+    assert_eq!(
+        read_ctx_req_id(&env),
+        2,
+        "second matcher fill should use the next market request sequence"
+    );
+    assert_eq!(env.market_state().0.matcher_req_seq, 2);
+}
+
 // DoS/manipulation rate-limit: PushEwmaMark feeds a SMOOTHED mark (EWMA over dt slots). A mark
 // authority must not defeat the per-slot rate limit by pushing repeatedly within ONE slot (each push
 // compounding toward an extreme value -> instant mark manipulation -> mis-liquidation). The EWMA

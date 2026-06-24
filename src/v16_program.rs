@@ -46,7 +46,7 @@ pub mod constants {
     pub const KIND_INSURANCE_LEDGER: u8 = 4;
 
     pub const HEADER_LEN: usize = 16;
-    pub const WRAPPER_CONFIG_LEN: usize = 432;
+    pub const WRAPPER_CONFIG_LEN: usize = 448;
     pub const ASSET_ORACLE_PROFILE_LEN: usize = 400;
     pub const ASSET_ORACLE_WRAPPER_LEN: usize = 512;
     pub const MARKET_GROUP_LEN: usize = size_of::<MarketGroupV16HeaderAccount>();
@@ -547,6 +547,8 @@ pub mod state {
         pub backing_trade_fee_insurance_share_bps_long: u16,
         pub backing_trade_fee_insurance_share_bps_short: u16,
         pub fee_redirect_to_market_0_bps: u16,
+        pub matcher_req_seq: u64,
+        pub _padding1: [u8; 8],
     }
 
     #[repr(C)]
@@ -963,6 +965,7 @@ pub mod state {
             || config.conf_filter_bps > 10_000
             || config.invert > 1
             || config._padding0 != 0
+            || config._padding1 != [0u8; 8]
             || config.fee_redirect_to_market_0_bps > 10_000
             || config.oracle_leg_count as usize > ORACLE_LEG_CAP
             || (config.oracle_leg_flags & !ORACLE_LEG_FLAGS_MASK) != 0
@@ -1368,6 +1371,18 @@ pub mod state {
     ) -> Result<(), ProgramError> {
         check_header(data, KIND_MARKET)?;
         write_wrapper_config_to_bytes(data, config)
+    }
+
+    pub fn bump_matcher_req_seq(data: &mut [u8]) -> Result<u64, ProgramError> {
+        check_header(data, KIND_MARKET)?;
+        let mut config = read_wrapper_config_from_bytes(data)?;
+        config.matcher_req_seq = config
+            .matcher_req_seq
+            .checked_add(1)
+            .ok_or(PercolatorError::InvalidInstruction)?;
+        let req_id = config.matcher_req_seq;
+        write_wrapper_config_to_bytes(data, &config)?;
+        Ok(req_id)
     }
 
     pub fn market_view_mut(
@@ -5517,6 +5532,8 @@ pub mod processor {
             backing_trade_fee_insurance_share_bps_long: 0,
             backing_trade_fee_insurance_share_bps_short: 0,
             fee_redirect_to_market_0_bps: 0,
+            matcher_req_seq: 0,
+            _padding1: [0u8; 8],
         };
         state::init_market_account_zero_copy(
             &mut market_ai.try_borrow_mut_data()?,
@@ -6534,7 +6551,10 @@ pub mod processor {
             max_market_slots,
             &[asset_index],
         )?;
-        let req_id = current_slot_pre.wrapping_add(1);
+        let req_id = {
+            let mut market_data = market_ai.try_borrow_mut_data()?;
+            state::bump_matcher_req_seq(&mut market_data)?
+        };
         let lp_account_id = matcher_lp_account_id(&delegate);
 
         invoke_matcher(
@@ -6764,7 +6784,7 @@ pub mod processor {
         // re-parsing the market once per leg).
         let (
             mode_pre,
-            current_slot_pre,
+            _current_slot_pre,
             max_market_slots,
             oracle_prices,
             stale_matured,
@@ -6853,7 +6873,10 @@ pub mod processor {
             .ok_or(ProgramError::NotEnoughAccountKeys)?;
         validate_matcher_tail(tail, market_ai, account_a_ai, account_b_ai, program_id)?;
 
-        let req_id = current_slot_pre.wrapping_add(1);
+        let req_id = {
+            let mut market_data = market_ai.try_borrow_mut_data()?;
+            state::bump_matcher_req_seq(&mut market_data)?
+        };
         let lp_account_id = matcher_lp_account_id(&delegate);
 
         // Build the matcher batch request: per leg, (asset, that asset's oracle price, signed size).
@@ -6872,6 +6895,8 @@ pub mod processor {
             &asset_indices,
         )?;
 
+        // Force the batch matcher to emit fresh return data for this CPI.
+        solana_program::program::set_return_data(&[]);
         invoke_matcher_batch(
             matcher_prog,
             matcher_ctx,

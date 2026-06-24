@@ -23,15 +23,18 @@ fn craft(mode: u8, req_id: u64, lp: u64, asset: u64, oracle: u64, req: i128) -> 
     let mut rid = req_id;
     let mut l = lp;
     match mode {
-        0 => size = req.saturating_mul(2),           // over-fill: open 2x the requested position
-        1 => size = req.checked_neg().unwrap_or(0),  // reversed direction
-        2 => a = asset.wrapping_add(1),              // forged asset echo
-        3 => o = oracle.wrapping_add(1),             // forged oracle echo
-        4 => rid = req_id.wrapping_add(1),           // forged req_id
-        5 => l = lp.wrapping_add(1),                 // forged lp_account_id
-        6 => price = 0,                              // zero exec price
-        7 => { flags = FLAG_VALID; size = req / 2 }  // unflagged partial (no PARTIAL_OK)
-        _ => {}                                      // honest full fill -> wrapper accepts
+        0 => size = req.saturating_mul(2), // over-fill: open 2x the requested position
+        1 => size = req.checked_neg().unwrap_or(0), // reversed direction
+        2 => a = asset.wrapping_add(1),    // forged asset echo
+        3 => o = oracle.wrapping_add(1),   // forged oracle echo
+        4 => rid = req_id.wrapping_add(1), // forged req_id
+        5 => l = lp.wrapping_add(1),       // forged lp_account_id
+        6 => price = 0,                    // zero exec price
+        7 => {
+            flags = FLAG_VALID;
+            size = req / 2
+        } // unflagged partial (no PARTIAL_OK)
+        _ => {}                            // honest full fill -> wrapper accepts
     }
     let mut b = [0u8; 64];
     b[0..4].copy_from_slice(&ABI.to_le_bytes());
@@ -43,6 +46,26 @@ fn craft(mode: u8, req_id: u64, lp: u64, asset: u64, oracle: u64, req: i128) -> 
     b[48..56].copy_from_slice(&o.to_le_bytes());
     b[56..64].copy_from_slice(&a.to_le_bytes());
     b
+}
+
+fn mode_for_call(accounts: &[AccountInfo]) -> Result<(u8, bool), ProgramError> {
+    let mut d = accounts[1].try_borrow_mut_data()?;
+    let mode = if d.len() > 64 && d[64] != 0 {
+        d[64]
+    } else {
+        d[0]
+    };
+    if mode == 13 {
+        if d.len() <= 65 {
+            return Err(ProgramError::InvalidAccountData);
+        }
+        if d[65] == 0 {
+            d[65] = 1;
+            return Ok((9, false));
+        }
+        return Ok((13, true));
+    }
+    Ok((mode, false))
 }
 
 fn process(_pid: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramResult {
@@ -57,7 +80,10 @@ fn process(_pid: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramResul
             let lp = u64::from_le_bytes(data[11..19].try_into().unwrap());
             let oracle = u64::from_le_bytes(data[19..27].try_into().unwrap());
             let req = i128::from_le_bytes(data[27..43].try_into().unwrap());
-            let mode = accounts[1].try_borrow_data()?[0];
+            let (mode, no_write) = mode_for_call(accounts)?;
+            if no_write {
+                return Ok(());
+            }
             let rec = craft(mode, req_id, lp, asset, oracle, req);
             let mut d = accounts[1].try_borrow_mut_data()?;
             d[0..64].copy_from_slice(&rec);
@@ -71,7 +97,10 @@ fn process(_pid: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramResul
             }
             let req_id = u64::from_le_bytes(data[2..10].try_into().unwrap());
             let lp = u64::from_le_bytes(data[10..18].try_into().unwrap());
-            let mode = accounts[1].try_borrow_data()?[0];
+            let (mode, no_write) = mode_for_call(accounts)?;
+            if no_write {
+                return Ok(());
+            }
             let mut out = [0u8; 16 * 64];
             let emit = if mode == 8 { n.saturating_sub(1) } else { n }; // mode 8 = short return length
             for i in 0..n {
@@ -79,7 +108,8 @@ fn process(_pid: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramResul
                 let asset = u16::from_le_bytes(data[base..base + 2].try_into().unwrap()) as u64;
                 let oracle = u64::from_le_bytes(data[base + 2..base + 10].try_into().unwrap());
                 let req = i128::from_le_bytes(data[base + 10..base + 26].try_into().unwrap());
-                out[i * 64..i * 64 + 64].copy_from_slice(&craft(mode, req_id, lp, asset, oracle, req));
+                out[i * 64..i * 64 + 64]
+                    .copy_from_slice(&craft(mode, req_id, lp, asset, oracle, req));
             }
             set_return_data(&out[..emit * 64]);
             Ok(())
