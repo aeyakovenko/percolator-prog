@@ -96346,6 +96346,133 @@ fn v16_attack_terminal_insurance_frozen_dest_rolls_back_budget_and_ledger() {
     assert_eq!(group.vault, 60);
 }
 
+// LoF/DoS sweep (cron135): terminal WithdrawInsurance stages terminal budget and optional-ledger
+// debits before validating SPL account state. Native/wrapped-SOL destinations or canonical vaults
+// must reject atomically, distinct from malformed/frozen/delegated token-account branches.
+#[test]
+fn v16_attack_terminal_insurance_native_accounts_roll_back_budget_and_ledger() {
+    #[derive(Clone, Copy)]
+    enum NativeSlot {
+        Dest,
+        Vault,
+    }
+
+    for slot in [NativeSlot::Dest, NativeSlot::Vault] {
+        let mut env = V16CuEnv::new();
+        let admin = env.admin.insecure_clone();
+        env.top_up_insurance(100);
+        env.resolve();
+
+        let ledger = env.insurance_ledger_account();
+        let dest = env.token_account(admin.pubkey(), 0);
+        let native_key = match slot {
+            NativeSlot::Dest => dest,
+            NativeSlot::Vault => env.vault,
+        };
+        let clean_native_slot = env.svm.get_account(&native_key).unwrap();
+        let token_owner = match slot {
+            NativeSlot::Dest => admin.pubkey(),
+            NativeSlot::Vault => env.vault_authority,
+        };
+        let native_amount = match slot {
+            NativeSlot::Dest => 0,
+            NativeSlot::Vault => 100,
+        };
+        env.svm
+            .set_account(
+                native_key,
+                Account {
+                    data: make_native_flagged_token_data(env.mint, token_owner, native_amount),
+                    ..clean_native_slot.clone()
+                },
+            )
+            .unwrap();
+
+        let market_before = env.svm.get_account(&env.market).unwrap();
+        let ledger_before = env.svm.get_account(&ledger).unwrap();
+        let vault_before = env.svm.get_account(&env.vault).unwrap();
+        let dest_before = env.svm.get_account(&dest).unwrap();
+
+        env.svm.expire_blockhash();
+        let rejected = send_tx(
+            &mut env.svm,
+            env.program_id,
+            &env.payer,
+            ProgInstruction::WithdrawInsurance { amount: 40 },
+            vec![
+                AccountMeta::new(admin.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(dest, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(env.vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+                AccountMeta::new(ledger, false),
+            ],
+            &[&admin],
+        );
+        assert!(
+            rejected.is_err(),
+            "terminal WithdrawInsurance must reject native-flagged destination/vault accounts"
+        );
+        assert_eq!(
+            env.svm.get_account(&env.market).unwrap(),
+            market_before,
+            "native terminal insurance withdraw must roll back budget debits"
+        );
+        assert_eq!(
+            env.svm.get_account(&ledger).unwrap(),
+            ledger_before,
+            "native terminal insurance withdraw must not rewrite the ledger"
+        );
+        assert_eq!(
+            env.svm.get_account(&env.vault).unwrap(),
+            vault_before,
+            "native terminal insurance withdraw must not debit vault custody"
+        );
+        assert_eq!(
+            env.svm.get_account(&dest).unwrap(),
+            dest_before,
+            "native terminal insurance withdraw must not pay the destination"
+        );
+
+        env.svm
+            .set_account(native_key, clean_native_slot)
+            .unwrap();
+        env.svm.expire_blockhash();
+        let ok_cu = send_tx(
+            &mut env.svm,
+            env.program_id,
+            &env.payer,
+            ProgInstruction::WithdrawInsurance { amount: 40 },
+            vec![
+                AccountMeta::new(admin.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(dest, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(env.vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+                AccountMeta::new(ledger, false),
+            ],
+            &[&admin],
+        )
+        .expect("terminal WithdrawInsurance remains live after native-account rejection");
+        assert_cu_within(
+            "terminal WithdrawInsurance native-account retry",
+            ok_cu,
+            CUSTODY_CU_LIMIT,
+        );
+        assert_eq!(env.token_amount(dest), 40);
+        assert_eq!(env.token_amount(env.vault), 60);
+        let ledger_state =
+            state::read_insurance_ledger(&env.svm.get_account(&ledger).unwrap().data).unwrap();
+        assert_eq!(ledger_state.total_withdrawn_atoms, 40);
+        assert_eq!(ledger_state.last_observed_insurance_atoms, 60);
+        let (_, group) = env.market_state();
+        assert_eq!(group.insurance, 60);
+        assert_eq!(group.vault, 60);
+    }
+}
+
 // full-interface sweep: SwapSecondaryForPrimary performs a user-signed primary transfer followed by
 // a vault-signed secondary payout. A loaded non-SPL executable token-program id must reject before
 // either leg moves value, and the same accounts must remain usable with the real token program.
