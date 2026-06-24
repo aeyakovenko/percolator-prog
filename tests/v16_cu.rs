@@ -9749,12 +9749,12 @@ fn v16_attack_auto_crank_current_solvent_partial_liquidation_makes_progress() {
     assert!(after_group.vault >= after_group.c_tot + after_group.insurance);
 }
 
-// Public auto-crank ordering sweep: observation-only cranks may be benign stale
-// transactions, but a crank carrying a real liquidation work budget must not
-// report success when the engine-selected account step still needs a different
-// observation. The whole instruction must roll back any unrelated oracle update.
+// Public auto-crank ordering sweep: a stale budgeted liquidation tx may land after
+// the account's selected step has changed to a committed-state refresh. In that
+// case the tx may make refresh progress and apply a valid unrelated oracle update,
+// but it must not liquidate or pay a cranker reward for work it did not perform.
 #[test]
-fn v16_attack_budgeted_out_of_order_crank_rolls_back_unselected_observation() {
+fn v16_attack_budgeted_out_of_order_crank_refreshes_without_unearned_reward() {
     const MARK: u64 = 1_000_000;
     const OPEN_SLOT: u64 = 1;
     const OBS_SLOT: u64 = 2;
@@ -9820,12 +9820,13 @@ fn v16_attack_budgeted_out_of_order_crank_rolls_back_unselected_observation() {
     );
 
     let fresh0 = env.set_pyth_price_with_conf(&feed0, (MARK + 10_000) as i64, -6, 0, 101);
-    let market_before = env.svm.get_account(&env.market).unwrap();
-    let short_before = env.svm.get_account(&short).unwrap();
+    let (_, group_before) = env.market_state();
+    let short_before = env.portfolio_state(short);
+    let short_oi_before = group_before.assets[1].oi_eff_short_q;
     let cranker_before = env.svm.get_account(&cranker).unwrap();
 
     env.svm.expire_blockhash();
-    let rejected = env.send(
+    let refreshed = env.send(
         ProgInstruction::PermissionlessCrank {
             now_slot: OBS_SLOT,
             close_q: POS_SCALE,
@@ -9841,23 +9842,159 @@ fn v16_attack_budgeted_out_of_order_crank_rolls_back_unselected_observation() {
         &[&cranker_owner],
     );
     assert!(
-        rejected.is_err(),
-        "budgeted liquidation crank with only an unrelated observation must reject"
+        refreshed.is_ok(),
+        "budgeted stale tx may still refresh from committed state: {refreshed:?}"
+    );
+    let (_, group_after) = env.market_state();
+    let short_after = env.portfolio_state(short);
+    assert!(
+        health_cert(&short_after).cert_oracle_epoch >= group_after.oracle_epoch,
+        "stale target account becomes current"
     );
     assert_eq!(
-        env.svm.get_account(&env.market).unwrap(),
-        market_before,
-        "budgeted NonProgress must roll back the unrelated oracle/profile update"
+        group_after.assets[1].oi_eff_short_q, short_oi_before,
+        "out-of-order refresh must not liquidate the target position"
     );
     assert_eq!(
-        env.svm.get_account(&short).unwrap(),
-        short_before,
-        "budgeted NonProgress must not mutate the target account"
+        active_leg_for_asset(&short_after, 1).basis_pos_q,
+        active_leg_for_asset(&short_before, 1).basis_pos_q,
+        "target leg size is unchanged by refresh-only progress"
     );
     assert_eq!(
         env.svm.get_account(&cranker).unwrap(),
         cranker_before,
-        "budgeted NonProgress must not credit or rewrite the reward account"
+        "refresh-only progress must not credit or rewrite the reward account"
+    );
+}
+
+#[test]
+fn v16_attack_auto_crank_refresh_not_blocked_by_unneeded_first_asset_oracle() {
+    const MARK: u64 = 1_000_000;
+    const OPEN_SLOT: u64 = 1;
+    const REFRESH_SLOT: u64 = 2;
+
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(2, 10_000, 10_000, 10_000);
+    set_test_clock(&mut env, OPEN_SLOT, 100);
+
+    let stale_feed0 = [0x52u8; 32];
+    let initial0 = env.set_pyth_price_with_conf(&stale_feed0, MARK as i64, -6, 0, 100);
+    env.try_configure_hybrid_asset_with_conf_filter_cu(
+        0,
+        1,
+        0,
+        [stale_feed0, [0u8; 32], [0u8; 32]],
+        &[initial0],
+        OPEN_SLOT,
+        100,
+        0,
+        0,
+        1_000,
+        0,
+    )
+    .expect("configure asset-0 hybrid oracle");
+    env.configure_auth_mark_for_asset_as_admin(1, OPEN_SLOT, MARK);
+
+    let owner_a = Keypair::new();
+    let owner_b = Keypair::new();
+    let account_a = env.create_portfolio(&owner_a);
+    let account_b = env.create_portfolio(&owner_b);
+    env.deposit(&owner_a, account_a, 10_000_000);
+    env.deposit(&owner_b, account_b, 10_000_000);
+    env.trade_asset_with_cu(
+        0,
+        &owner_a,
+        account_a,
+        &owner_b,
+        account_b,
+        POS_SCALE as i128,
+        MARK,
+        0,
+    );
+    env.trade_asset_with_cu(
+        1,
+        &owner_a,
+        account_a,
+        &owner_b,
+        account_b,
+        POS_SCALE as i128,
+        MARK,
+        0,
+    );
+    let a_before_update = env.portfolio_state(account_a);
+    assert!(
+        health_cert(&a_before_update).valid,
+        "setup starts from a current multi-asset account"
+    );
+    assert_eq!(
+        active_leg_for_asset(&a_before_update, 0).asset_index,
+        0,
+        "asset 0 is active"
+    );
+    assert_eq!(
+        active_leg_for_asset(&a_before_update, 1).asset_index,
+        1,
+        "asset 1 is active"
+    );
+
+    set_test_clock(&mut env, REFRESH_SLOT, 200);
+    env.push_auth_mark_for_asset_as_admin(1, REFRESH_SLOT, MARK + 10_000);
+    env.crank(
+        account_b,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: REFRESH_SLOT,
+            close_q: 0,
+            observations: crank_observations(1),
+        },
+    );
+    let (_, group_after_asset1) = env.market_state();
+    assert!(
+        health_cert(&env.portfolio_state(account_a)).cert_oracle_epoch
+            < group_after_asset1.oracle_epoch,
+        "asset-1 progress makes account A stale"
+    );
+
+    env.svm.expire_blockhash();
+    let stale_asset0_attempt = env.send(
+        ProgInstruction::PermissionlessCrank {
+            now_slot: REFRESH_SLOT,
+            close_q: 0,
+            observations: crank_observations_with_accounts(0, 1),
+        },
+        vec![
+            AccountMeta::new(env.payer.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(account_a, false),
+            AccountMeta::new_readonly(initial0, false),
+        ],
+        &[],
+    );
+    assert!(
+        stale_asset0_attempt.is_err(),
+        "asset-0 oracle is stale; the refresh must not depend on it"
+    );
+
+    env.svm.expire_blockhash();
+    let refresh = env.send(
+        ProgInstruction::PermissionlessCrank {
+            now_slot: REFRESH_SLOT,
+            close_q: 0,
+            observations: vec![],
+        },
+        vec![
+            AccountMeta::new(env.payer.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(account_a, false),
+        ],
+        &[],
+    );
+    assert!(
+        refresh.is_ok(),
+        "account refresh should use already-current market state, not require an unneeded first-asset oracle: {refresh:?}"
+    );
+    assert!(
+        health_cert(&env.portfolio_state(account_a)).cert_oracle_epoch
+            >= env.market_state().1.oracle_epoch,
+        "refresh makes the stale account current"
     );
 }
 
