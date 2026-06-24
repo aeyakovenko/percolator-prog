@@ -47954,6 +47954,10 @@ fn v16_attack_chainlink_oracle_malformed_fields_reject_without_mutation() {
         "negative answer",
         make_chainlink_data(1, 8, 1, 1, 1, 100, -10_000),
     ));
+    cases.push((
+        "answer floors to zero after decimal scaling",
+        make_chainlink_data(1, 8, 1, 1, 1, 100, 1),
+    ));
 
     for (label, data) in cases {
         let acct = install(&mut env, data);
