@@ -94146,6 +94146,146 @@ fn v16_attack_init_portfolio_duplicate_ignored_accounts_are_cu_bounded() {
     );
 }
 
+// Public-interface DoS sweep: cheap init coverage proves ignored duplicate tails are bounded in the
+// adapter, but value rails also run token-account validation and SPL CPI after the adapter materializes
+// every meta. A near-max ignored tail that aliases the live custody accounts must not block real
+// deposits/withdrawals or amplify CU enough to make ordinary value movement unavailable.
+#[test]
+fn v16_attack_value_rails_duplicate_ignored_accounts_are_cu_bounded() {
+    const EXTRA_METAS: usize = 52;
+
+    fn duplicate_tail(keys: &[Pubkey], count: usize) -> Vec<AccountMeta> {
+        (0..count)
+            .map(|i| AccountMeta::new_readonly(keys[i % keys.len()], false))
+            .collect()
+    }
+
+    fn send_deposit(
+        env: &mut V16CuEnv,
+        owner: &Keypair,
+        portfolio: Pubkey,
+        amount: u128,
+        tail: Vec<AccountMeta>,
+    ) -> (Pubkey, u64) {
+        let source = env.token_account(owner.pubkey(), amount as u64);
+        let mut accounts = vec![
+            AccountMeta::new(owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio, false),
+            AccountMeta::new(source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ];
+        accounts.extend(tail);
+        env.svm.expire_blockhash();
+        let cu = env
+            .send(ProgInstruction::Deposit { amount }, accounts, &[owner])
+            .expect("Deposit with ignored duplicate value-account tail");
+        (source, cu)
+    }
+
+    fn send_withdraw(
+        env: &mut V16CuEnv,
+        owner: &Keypair,
+        portfolio: Pubkey,
+        amount: u128,
+        tail: Vec<AccountMeta>,
+    ) -> (Pubkey, u64) {
+        let dest = env.token_account(owner.pubkey(), 0);
+        let mut accounts = vec![
+            AccountMeta::new(owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio, false),
+            AccountMeta::new(dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ];
+        accounts.extend(tail);
+        env.svm.expire_blockhash();
+        let cu = env
+            .send(ProgInstruction::Withdraw { amount }, accounts, &[owner])
+            .expect("Withdraw with ignored duplicate value-account tail");
+        (dest, cu)
+    }
+
+    let mut env = V16CuEnv::new();
+    let owner = Keypair::new();
+    let portfolio = env.create_portfolio(&owner);
+
+    let (_baseline_source, baseline_deposit_cu) =
+        send_deposit(&mut env, &owner, portfolio, 25, Vec::new());
+    let duplicate_deposit_tail =
+        duplicate_tail(&[env.vault, owner.pubkey(), spl_token::ID], EXTRA_METAS);
+    let (tail_source, bloated_deposit_cu) =
+        send_deposit(&mut env, &owner, portfolio, 75, duplicate_deposit_tail);
+    assert_eq!(
+        env.token_amount(tail_source),
+        0,
+        "bloated Deposit still pulls the user's source tokens"
+    );
+    assert_eq!(
+        env.token_amount(env.vault),
+        100,
+        "bloated Deposit preserves vault custody accounting"
+    );
+    assert_eq!(
+        env.portfolio_state(portfolio).capital.get(),
+        100,
+        "bloated Deposit credits exactly the requested capital"
+    );
+    println!(
+        "v16 Deposit duplicate ignored value-account tail: baseline={baseline_deposit_cu}, \
+         bloated={bloated_deposit_cu}"
+    );
+    assert!(
+        bloated_deposit_cu <= baseline_deposit_cu + 90_000,
+        "Deposit duplicate ignored tail consumed {bloated_deposit_cu} CU vs baseline {baseline_deposit_cu}"
+    );
+    assert_cu_within(
+        "Deposit duplicate ignored value-account tail",
+        bloated_deposit_cu,
+        CUSTODY_CU_LIMIT,
+    );
+
+    let (_baseline_dest, baseline_withdraw_cu) =
+        send_withdraw(&mut env, &owner, portfolio, 10, Vec::new());
+    let duplicate_withdraw_tail = duplicate_tail(
+        &[env.vault, env.vault_authority, spl_token::ID],
+        EXTRA_METAS,
+    );
+    let (tail_dest, bloated_withdraw_cu) =
+        send_withdraw(&mut env, &owner, portfolio, 30, duplicate_withdraw_tail);
+    assert_eq!(
+        env.token_amount(tail_dest),
+        30,
+        "bloated Withdraw still pays the user's destination token account"
+    );
+    assert_eq!(
+        env.token_amount(env.vault),
+        60,
+        "bloated Withdraw debits only the requested amount from the vault"
+    );
+    assert_eq!(
+        env.portfolio_state(portfolio).capital.get(),
+        60,
+        "bloated Withdraw debits exactly the requested capital"
+    );
+    println!(
+        "v16 Withdraw duplicate ignored value-account tail: baseline={baseline_withdraw_cu}, \
+         bloated={bloated_withdraw_cu}"
+    );
+    assert!(
+        bloated_withdraw_cu <= baseline_withdraw_cu + 90_000,
+        "Withdraw duplicate ignored tail consumed {bloated_withdraw_cu} CU vs baseline {baseline_withdraw_cu}"
+    );
+    assert_cu_within(
+        "Withdraw duplicate ignored value-account tail",
+        bloated_withdraw_cu,
+        CUSTODY_CU_LIMIT,
+    );
+}
+
 // security.md sweep - TradeCpi flagged partial fill (#22/#39): the matcher ABI allows a partial
 // fill only when FLAG_PARTIAL_OK is set. Exercise the accepted oracle-priced path end-to-end so it
 // cannot drift into an overfill, zero-fill, or fee-on-request-size bug.
