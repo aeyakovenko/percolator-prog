@@ -11748,6 +11748,143 @@ fn v16_attack_pending_selected_mark_requires_observation() {
     );
 }
 
+// LoF/DoS sweep: the pending-selected-mark guard must also apply when the
+// engine-selected step is Liquidate, not only when it is Refresh. A current
+// liquidatable account with a staged mark must not be liquidated against the old
+// committed price just because the keeper omitted the selected asset observation.
+#[test]
+fn v16_attack_pending_selected_mark_blocks_no_observation_liquidation() {
+    const OPEN_MARK: u64 = 100;
+    const LIQ_MARK: u64 = 300;
+    const PENDING_MARK: u64 = 350;
+    const OPEN_SLOT: u64 = 1;
+    const LIQ_SLOT: u64 = 2;
+    const PENDING_SLOT: u64 = 4;
+
+    let mut env = V16CuEnv::new();
+    env.top_up_insurance(1_000_000);
+    env.svm.warp_to_slot(OPEN_SLOT);
+    env.configure_auth_mark_with_cu(OPEN_SLOT, OPEN_MARK);
+
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long_account = env.create_portfolio(&long_owner);
+    let short_account = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long_account, 10_000);
+    env.deposit(&short_owner, short_account, 3_000);
+    env.trade_with_cu(
+        &long_owner,
+        long_account,
+        &short_owner,
+        short_account,
+        (10 * POS_SCALE) as i128,
+        OPEN_MARK,
+        0,
+    );
+
+    env.svm.warp_to_slot(LIQ_SLOT);
+    env.push_auth_mark_with_cu(LIQ_SLOT, LIQ_MARK);
+    env.crank(
+        short_account,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: LIQ_SLOT,
+            close_q: 0,
+            observations: crank_observations(0),
+        },
+    );
+    env.svm.warp_to_slot(LIQ_SLOT + 1);
+    env.crank(
+        short_account,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: LIQ_SLOT + 1,
+            close_q: 0,
+            observations: crank_observations(0),
+        },
+    );
+
+    let before_pending = env.portfolio_state(short_account);
+    let before_cert = health_cert(&before_pending);
+    assert!(
+        before_cert.valid
+            && before_cert.certified_liq_deficit != 0
+            && before_cert.certified_equity > 0,
+        "setup must produce a current solvent liquidatable account before staging the mark: {before_cert:?}"
+    );
+    let (_, group_before_pending) = env.market_state();
+    assert_eq!(
+        group_before_pending.assets[0].effective_price, LIQ_MARK,
+        "setup committed the first adverse mark"
+    );
+
+    env.svm.warp_to_slot(PENDING_SLOT);
+    env.push_auth_mark_with_cu(PENDING_SLOT, PENDING_MARK);
+    let (_, staged_group) = env.market_state();
+    assert_eq!(
+        staged_group.assets[0].effective_price, LIQ_MARK,
+        "PushAuthMark stages, but does not apply, the next selected mark"
+    );
+    assert!(
+        staged_group.assets[0].slot_last < PENDING_SLOT,
+        "selected asset has a pending accrual slot before the liquidation probe"
+    );
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let short_before = env.svm.get_account(&short_account).unwrap();
+    env.svm.expire_blockhash();
+    let omitted_observation = env.send(
+        ProgInstruction::PermissionlessCrank {
+            now_slot: PENDING_SLOT,
+            close_q: POS_SCALE,
+            observations: vec![],
+        },
+        vec![
+            AccountMeta::new(env.payer.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(short_account, false),
+        ],
+        &[],
+    );
+    assert!(
+        omitted_observation.is_err(),
+        "liquidation with a pending selected mark must require the selected observation"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "rejected no-observation liquidation must not consume the pending mark slot"
+    );
+    assert_eq!(
+        env.svm.get_account(&short_account).unwrap(),
+        short_before,
+        "rejected no-observation liquidation must not change the target account"
+    );
+
+    env.svm.expire_blockhash();
+    let observed = env.send(
+        ProgInstruction::PermissionlessCrank {
+            now_slot: PENDING_SLOT,
+            close_q: POS_SCALE,
+            observations: crank_observations(0),
+        },
+        vec![
+            AccountMeta::new(env.payer.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(short_account, false),
+        ],
+        &[],
+    );
+    assert!(
+        observed.is_ok(),
+        "supplying the selected mark keeps the public liquidation route live: {observed:?}"
+    );
+    let (_, observed_group) = env.market_state();
+    assert_eq!(
+        observed_group.assets[0].effective_price, PENDING_MARK,
+        "valid retry applies the pending selected mark before account progress"
+    );
+    assert_eq!(observed_group.vault as u64, env.token_amount(env.vault));
+}
+
 #[test]
 fn v16_bpf_no_cranker_liquidation_rejects_invalid_final_market_shape() {
     let mut env = V16CuEnv::new();
