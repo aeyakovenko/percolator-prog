@@ -94286,6 +94286,139 @@ fn v16_attack_value_rails_duplicate_ignored_accounts_are_cu_bounded() {
     );
 }
 
+// Public-interface DoS sweep: the secondary base-unit bridge is a dual-SPL-CPI value route that should
+// stay live even when a hostile caller appends near-max ignored duplicate metas. This covers the adapter's
+// duplicate-account path on the accepted secondary-custody swap, not just the primary deposit/withdraw rails.
+#[test]
+fn v16_attack_secondary_swap_duplicate_ignored_accounts_are_cu_bounded() {
+    const EXTRA_METAS: usize = 52;
+
+    fn duplicate_tail(keys: &[Pubkey], count: usize) -> Vec<AccountMeta> {
+        (0..count)
+            .map(|i| AccountMeta::new_readonly(keys[i % keys.len()], false))
+            .collect()
+    }
+
+    fn send_swap(
+        env: &mut V16CuEnv,
+        admin: &Keypair,
+        primary_source: Pubkey,
+        secondary_dest: Pubkey,
+        secondary_vault: Pubkey,
+        amount: u128,
+        tail: Vec<AccountMeta>,
+    ) -> u64 {
+        let mut accounts = vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new_readonly(env.market, false),
+            AccountMeta::new(primary_source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new(secondary_dest, false),
+            AccountMeta::new(secondary_vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ];
+        accounts.extend(tail);
+        env.svm.expire_blockhash();
+        env.send(
+            ProgInstruction::SwapSecondaryForPrimary { amount },
+            accounts,
+            &[admin],
+        )
+        .expect("SwapSecondaryForPrimary with ignored duplicate account tail")
+    }
+
+    let mut env = V16CuEnv::new();
+    let admin = env.admin.insecure_clone();
+    let secondary_mint = env.create_mint();
+    env.update_base_unit_mints_with_cu(env.mint, secondary_mint);
+    let secondary_vault = canonical_vault_ata(env.vault_authority, secondary_mint);
+    env.svm
+        .set_account(
+            secondary_vault,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_token_data(secondary_mint, env.vault_authority, 100),
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    let primary_source = env.token_account_for_mint(env.mint, admin.pubkey(), 100);
+    let secondary_dest = env.token_account_for_mint(secondary_mint, admin.pubkey(), 0);
+    let market_data_before = env.svm.get_account(&env.market).unwrap().data;
+
+    let baseline_cu = send_swap(
+        &mut env,
+        &admin,
+        primary_source,
+        secondary_dest,
+        secondary_vault,
+        25,
+        Vec::new(),
+    );
+    let duplicate_tail = duplicate_tail(
+        &[
+            primary_source,
+            env.vault,
+            secondary_dest,
+            secondary_vault,
+            env.vault_authority,
+            spl_token::ID,
+        ],
+        EXTRA_METAS,
+    );
+    let bloated_cu = send_swap(
+        &mut env,
+        &admin,
+        primary_source,
+        secondary_dest,
+        secondary_vault,
+        25,
+        duplicate_tail,
+    );
+
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap().data,
+        market_data_before,
+        "secondary swap with duplicate ignored tail must not mutate market state"
+    );
+    assert_eq!(
+        env.token_amount(primary_source),
+        50,
+        "duplicate-tail swap pulls exactly the requested primary collateral"
+    );
+    assert_eq!(
+        env.token_amount(env.vault),
+        50,
+        "duplicate-tail swap credits only the requested primary amount"
+    );
+    assert_eq!(
+        env.token_amount(secondary_dest),
+        50,
+        "duplicate-tail swap pays exactly the requested secondary collateral"
+    );
+    assert_eq!(
+        env.token_amount(secondary_vault),
+        50,
+        "duplicate-tail swap debits only the requested secondary amount"
+    );
+    println!(
+        "v16 SwapSecondaryForPrimary duplicate ignored account tail: baseline={baseline_cu}, \
+         bloated={bloated_cu}"
+    );
+    assert!(
+        bloated_cu <= baseline_cu + 100_000,
+        "SwapSecondaryForPrimary duplicate ignored tail consumed {bloated_cu} CU vs baseline {baseline_cu}"
+    );
+    assert_cu_within(
+        "SwapSecondaryForPrimary duplicate ignored account tail",
+        bloated_cu,
+        CUSTODY_CU_LIMIT,
+    );
+}
+
 // security.md sweep - TradeCpi flagged partial fill (#22/#39): the matcher ABI allows a partial
 // fill only when FLAG_PARTIAL_OK is set. Exercise the accepted oracle-priced path end-to-end so it
 // cannot drift into an overfill, zero-fill, or fee-on-request-size bug.
