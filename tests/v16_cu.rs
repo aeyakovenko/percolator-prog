@@ -94243,6 +94243,99 @@ fn v16_attack_close_portfolio_duplicate_ignored_accounts_are_cu_bounded() {
     );
 }
 
+// Public-interface DoS sweep: CloseSlab is the final market wind-down route. It may transfer raw
+// vault dust, close the SPL vault, zero the market slab, and sweep the slab rent to marketauth.
+// Duplicate ignored tails must not make that terminal reclaim unavailable or redirect value.
+#[test]
+fn v16_attack_close_slab_duplicate_ignored_accounts_are_cu_bounded() {
+    const EXTRA_METAS: usize = 52;
+
+    fn duplicate_tail(keys: &[Pubkey], count: usize) -> Vec<AccountMeta> {
+        (0..count)
+            .map(|i| AccountMeta::new_readonly(keys[i % keys.len()], false))
+            .collect()
+    }
+
+    fn run_close_slab(tail_count: usize) -> u64 {
+        let mut env = V16CuEnv::new();
+        let admin = env.admin.insecure_clone();
+        env.resolve();
+        env.set_token_account_amount(env.vault, env.mint, env.vault_authority, 7);
+        let dest = env.token_account(admin.pubkey(), 0);
+
+        let admin_lamports_before = env.svm.get_account(&admin.pubkey()).unwrap().lamports;
+        let market_lamports_before = env.svm.get_account(&env.market).unwrap().lamports;
+        let vault_lamports_before = env.svm.get_account(&env.vault).unwrap().lamports;
+        let mut accounts = vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new(dest, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ];
+        let tail = duplicate_tail(
+            &[
+                env.market,
+                env.vault,
+                env.vault_authority,
+                dest,
+                admin.pubkey(),
+                spl_token::ID,
+            ],
+            tail_count,
+        );
+        accounts.extend(tail);
+        env.svm.expire_blockhash();
+        let cu = env
+            .send(ProgInstruction::CloseSlab, accounts, &[&admin])
+            .expect("CloseSlab with ignored duplicate account tail");
+
+        assert_eq!(
+            env.token_amount(dest),
+            7,
+            "duplicate-tail CloseSlab transfers only raw primary vault dust"
+        );
+        let market_after = env.svm.get_account(&env.market).unwrap();
+        assert_eq!(
+            market_after.lamports, 0,
+            "duplicate-tail CloseSlab drains market slab lamports"
+        );
+        assert!(
+            market_after.data.iter().all(|b| *b == 0),
+            "duplicate-tail CloseSlab zeroes the market slab data"
+        );
+        assert_eq!(
+            env.svm.get_account(&admin.pubkey()).unwrap().lamports,
+            admin_lamports_before + market_lamports_before + vault_lamports_before,
+            "duplicate-tail CloseSlab pays vault rent and market rent to marketauth"
+        );
+        if let Some(vault_after) = env.svm.get_account(&env.vault) {
+            assert_eq!(
+                vault_after.lamports, 0,
+                "duplicate-tail CloseSlab closes the canonical vault account"
+            );
+        }
+        cu
+    }
+
+    let baseline_cu = run_close_slab(0);
+    let bloated_cu = run_close_slab(EXTRA_METAS);
+    println!(
+        "v16 CloseSlab duplicate ignored account tail: baseline={baseline_cu}, \
+         bloated={bloated_cu}"
+    );
+    assert!(
+        bloated_cu <= baseline_cu + 75_000,
+        "CloseSlab duplicate ignored tail consumed {bloated_cu} CU vs baseline {baseline_cu}"
+    );
+    assert_cu_within(
+        "CloseSlab duplicate ignored account tail",
+        bloated_cu,
+        CUSTODY_CU_LIMIT,
+    );
+}
+
 // Public-interface DoS sweep: cheap init coverage proves ignored duplicate tails are bounded in the
 // adapter, but value rails also run token-account validation and SPL CPI after the adapter materializes
 // every meta. A near-max ignored tail that aliases the live custody accounts must not block real
