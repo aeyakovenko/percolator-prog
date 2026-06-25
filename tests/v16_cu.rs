@@ -19335,6 +19335,91 @@ fn v16_attack_auto_crank_expired_close_recovery_not_blocked_by_stale_oracle() {
 }
 
 #[test]
+fn v16_attack_auto_crank_expired_close_max_tail_is_cu_bounded() {
+    const EXTRA_ACCOUNTS: usize = 56;
+
+    fn run_expired_close(extra_accounts: usize) -> (u64, V16CuEnv, Pubkey) {
+        let mut env = V16CuEnv::new();
+        env.configure_permissionless_resolve_with_cu(5, 5);
+        env.configure_auth_mark_with_cu(0, 100);
+        env.update_liquidation_fee_policy_with_cu(5_000);
+
+        let owner = Keypair::new();
+        let portfolio = env.create_portfolio(&owner);
+        env.deposit(&owner, portfolio, 100);
+        env.seed_cancellable_close_progress(portfolio);
+
+        env.svm.warp_to_slot(40);
+        env.mutate_market(|_, group| {
+            group.current_slot = 40;
+        });
+
+        let mut accounts = vec![
+            AccountMeta::new(env.payer.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio, false),
+        ];
+        for _ in 0..extra_accounts {
+            let tail = env.program_account(8);
+            accounts.push(AccountMeta::new_readonly(tail, false));
+        }
+
+        env.svm.expire_blockhash();
+        let cu = env
+            .send(
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: 0,
+                    close_q: 0,
+                    observations: vec![CrankObservationHint {
+                        asset_index: u16::MAX,
+                        oracle_accounts: u8::MAX,
+                    }],
+                },
+                accounts,
+                &[],
+            )
+            .expect("expired-close auto-crank must ignore hostile max tail");
+        (cu, env, portfolio)
+    }
+
+    let (baseline_cu, baseline_env, _) = run_expired_close(0);
+    let (_, baseline_group) = baseline_env.market_state();
+    assert_eq!(baseline_group.mode, MarketModeV16::Recovery);
+    assert_eq!(
+        baseline_group.recovery_reason,
+        Some(PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress)
+    );
+
+    let (bloated_cu, bloated_env, portfolio) = run_expired_close(EXTRA_ACCOUNTS);
+    println!(
+        "v16 expired-close auto-crank max ignored tail: baseline={baseline_cu}, bloated={bloated_cu}"
+    );
+    assert!(
+        bloated_cu > baseline_cu,
+        "ignored max tail must reach the deployed adapter path"
+    );
+    assert!(
+        bloated_cu <= baseline_cu + 75_000,
+        "expired-close ignored tail consumed {bloated_cu} CU vs baseline {baseline_cu}"
+    );
+    assert_cu_within(
+        "PermissionlessCrank expired-close max ignored tail",
+        bloated_cu,
+        CRANK_CU_LIMIT,
+    );
+    let (_, bloated_group) = bloated_env.market_state();
+    assert_eq!(bloated_group.mode, MarketModeV16::Recovery);
+    assert_eq!(
+        bloated_group.recovery_reason,
+        Some(PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress)
+    );
+    assert!(
+        close_progress(&bloated_env.portfolio_state(portfolio)).active,
+        "expired-close recovery declaration does not mutate the target close ledger"
+    );
+}
+
+#[test]
 fn v16_attack_auto_crank_expired_close_uses_authenticated_slot_not_stale_market_slot() {
     let mut env = V16CuEnv::new();
     env.configure_permissionless_resolve_with_cu(5, 5);
