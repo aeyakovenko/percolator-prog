@@ -8764,6 +8764,11 @@ pub mod processor {
         expect_key(secondary_mint_ai, &secondary_key)?;
         let primary_mint_state = unpack_mint(primary_mint_ai)?;
         let secondary_mint_state = unpack_mint(secondary_mint_ai)?;
+        if primary_mint_state.freeze_authority.is_some()
+            || secondary_mint_state.freeze_authority.is_some()
+        {
+            return Err(PercolatorError::InvalidMint.into());
+        }
         if primary_mint_state.decimals != secondary_mint_state.decimals {
             return Err(PercolatorError::InvalidMint.into());
         }
@@ -11895,7 +11900,11 @@ pub mod processor {
     }
 
     fn verify_mint(mint_ai: &AccountInfo) -> Result<(), ProgramError> {
-        unpack_mint(mint_ai).map(|_| ())
+        let mint = unpack_mint(mint_ai)?;
+        if mint.freeze_authority.is_some() {
+            return Err(PercolatorError::InvalidMint.into());
+        }
+        Ok(())
     }
 
     fn verify_token_program(token_program: &AccountInfo) -> Result<(), ProgramError> {

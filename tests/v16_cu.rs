@@ -330,6 +330,22 @@ fn make_mint_data_with_decimals(decimals: u8) -> Vec<u8> {
     data
 }
 
+fn make_mint_data_with_freeze_authority(freeze_authority: Pubkey) -> Vec<u8> {
+    let mut data = vec![0u8; Mint::LEN];
+    Mint::pack(
+        Mint {
+            mint_authority: COption::None,
+            supply: 0,
+            decimals: 0,
+            is_initialized: true,
+            freeze_authority: COption::Some(freeze_authority),
+        },
+        &mut data,
+    )
+    .unwrap();
+    data
+}
+
 fn make_mint_data() -> Vec<u8> {
     make_mint_data_with_decimals(0)
 }
@@ -59475,5 +59491,216 @@ fn v16_attack_backing_topup_rejects_lapsed_expiry() {
         env.token_amount(env.vault),
         vault0 + 50,
         "valid topup credits exactly the backing"
+    );
+}
+
+#[test]
+fn v16_attack_init_market_rejects_freezable_collateral_mint_without_burning_market_account() {
+    let mut env = V16CuEnv::new();
+    let admin = env.admin.insecure_clone();
+    let freezer = Keypair::new();
+    env.ensure_signer_account(freezer.pubkey());
+    let params = V16CuMarketParams::default();
+    let market = Keypair::new();
+    system_create_account_for_test(
+        &mut env.svm,
+        &env.payer,
+        &market,
+        state::market_account_len_for_capacity(params.max_portfolio_assets as usize)
+            .expect("market len"),
+        env.program_id,
+    );
+
+    let freezable_mint = Pubkey::new_unique();
+    let vault_authority =
+        Pubkey::find_program_address(&[b"vault", market.pubkey().as_ref()], &env.program_id).0;
+    let vault = canonical_vault_ata(vault_authority, freezable_mint);
+    env.svm
+        .set_account(
+            freezable_mint,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_mint_data_with_freeze_authority(freezer.pubkey()),
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    env.svm
+        .set_account(
+            vault,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_token_data(freezable_mint, vault_authority, 0),
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+
+    let market_before = env
+        .svm
+        .get_account(&market.pubkey())
+        .expect("market account");
+    env.svm.expire_blockhash();
+    let rejected = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        init_market_instruction(&params),
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(market.pubkey(), false),
+            AccountMeta::new_readonly(freezable_mint, false),
+        ],
+        &[&admin],
+    );
+    let err = rejected.expect_err("freezable collateral mint must reject");
+    assert!(
+        err.contains("Custom(10)"),
+        "freezable collateral mint must reject as InvalidMint, got {err}"
+    );
+    assert_eq!(
+        env.svm
+            .get_account(&market.pubkey())
+            .expect("market account"),
+        market_before,
+        "rejected freezable mint must leave a fresh market account retryable"
+    );
+
+    let mut mint_account = env.svm.get_account(&freezable_mint).expect("mint account");
+    mint_account.data = make_mint_data();
+    env.svm.set_account(freezable_mint, mint_account).unwrap();
+
+    env.svm.expire_blockhash();
+    send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        init_market_instruction(&params),
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(market.pubkey(), false),
+            AccountMeta::new_readonly(freezable_mint, false),
+        ],
+        &[&admin],
+    )
+    .expect("non-freezable retry initializes the market");
+    let market_after = env
+        .svm
+        .get_account(&market.pubkey())
+        .expect("market account");
+    let (cfg, group) = state::read_market(&market_after.data).expect("valid market after retry");
+    assert_eq!(
+        cfg.collateral_mint,
+        freezable_mint.to_bytes(),
+        "valid retry pins the now-non-freezable collateral mint"
+    );
+    assert_eq!(group.assets[0].effective_price, params.initial_price);
+}
+
+#[test]
+fn v16_attack_base_unit_mints_reject_freezable_mint_accounts() {
+    let mut env = V16CuEnv::new();
+    let admin = env.admin.insecure_clone();
+    let freezer = Keypair::new();
+    let freezable_secondary = Pubkey::new_unique();
+    env.svm
+        .set_account(
+            freezable_secondary,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_mint_data_with_freeze_authority(freezer.pubkey()),
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    let market_before_secondary = env.svm.get_account(&env.market).unwrap();
+
+    env.svm.expire_blockhash();
+    let rejected_secondary = env.send(
+        ProgInstruction::UpdateBaseUnitMints {
+            primary_mint: env.mint.to_bytes(),
+            secondary_mint: freezable_secondary.to_bytes(),
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new_readonly(env.mint, false),
+            AccountMeta::new_readonly(freezable_secondary, false),
+        ],
+        &[&admin],
+    );
+    let err = rejected_secondary.expect_err("freezable secondary mint must reject");
+    assert!(
+        err.contains("Custom(10)"),
+        "freezable secondary mint must reject as InvalidMint, got {err}"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before_secondary,
+        "rejected freezable secondary mint must not update base-unit config"
+    );
+    assert_eq!(env.market_state().0.secondary_collateral_mint, [0u8; 32]);
+
+    let freezable_primary = Pubkey::new_unique();
+    let clean_secondary = env.create_mint();
+    env.svm
+        .set_account(
+            freezable_primary,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_mint_data_with_freeze_authority(freezer.pubkey()),
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    let market_before_primary = env.svm.get_account(&env.market).unwrap();
+
+    env.svm.expire_blockhash();
+    let rejected_primary = env.send(
+        ProgInstruction::UpdateBaseUnitMints {
+            primary_mint: freezable_primary.to_bytes(),
+            secondary_mint: clean_secondary.to_bytes(),
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new_readonly(freezable_primary, false),
+            AccountMeta::new_readonly(clean_secondary, false),
+            AccountMeta::new_readonly(env.vault, false),
+        ],
+        &[&admin],
+    );
+    let err = rejected_primary.expect_err("freezable primary mint must reject");
+    assert!(
+        err.contains("Custom(10)"),
+        "freezable primary mint must reject as InvalidMint, got {err}"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before_primary,
+        "rejected freezable primary mint must not update base-unit config"
+    );
+    assert_eq!(env.market_state().0.collateral_mint, env.mint.to_bytes());
+    assert_eq!(env.market_state().0.secondary_collateral_mint, [0u8; 32]);
+
+    let mut secondary_account = env.svm.get_account(&freezable_secondary).unwrap();
+    secondary_account.data = make_mint_data();
+    env.svm
+        .set_account(freezable_secondary, secondary_account)
+        .unwrap();
+    env.svm.expire_blockhash();
+    env.update_base_unit_mints_with_cu(env.mint, freezable_secondary);
+    assert_eq!(
+        env.market_state().0.secondary_collateral_mint,
+        freezable_secondary.to_bytes(),
+        "same secondary key can configure once it is non-freezable"
     );
 }
