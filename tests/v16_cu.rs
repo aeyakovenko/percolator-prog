@@ -94146,6 +94146,103 @@ fn v16_attack_init_portfolio_duplicate_ignored_accounts_are_cu_bounded() {
     );
 }
 
+// Public-interface DoS sweep: ClosePortfolio is the lifecycle route that deregisters user state,
+// zeroes/truncates the account, and sweeps rent into the market slab. Near-max duplicate ignored
+// tails must not make that public exit path unavailable or change who receives the swept rent.
+#[test]
+fn v16_attack_close_portfolio_duplicate_ignored_accounts_are_cu_bounded() {
+    const EXTRA_METAS: usize = 52;
+
+    fn duplicate_tail(keys: &[Pubkey], count: usize) -> Vec<AccountMeta> {
+        (0..count)
+            .map(|i| AccountMeta::new_readonly(keys[i % keys.len()], false))
+            .collect()
+    }
+
+    fn send_close(
+        env: &mut V16CuEnv,
+        owner: &Keypair,
+        portfolio: Pubkey,
+        tail: Vec<AccountMeta>,
+    ) -> u64 {
+        let mut accounts = vec![
+            AccountMeta::new(owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio, false),
+        ];
+        accounts.extend(tail);
+        env.svm.expire_blockhash();
+        env.send(ProgInstruction::ClosePortfolio, accounts, &[owner])
+            .expect("ClosePortfolio with ignored duplicate account tail")
+    }
+
+    let mut env = V16CuEnv::new();
+    let owner = Keypair::new();
+    let baseline_portfolio = env.create_portfolio(&owner);
+    let baseline_market_lamports = env.svm.get_account(&env.market).unwrap().lamports;
+    let baseline_portfolio_lamports = env.svm.get_account(&baseline_portfolio).unwrap().lamports;
+    let baseline_cu = send_close(&mut env, &owner, baseline_portfolio, Vec::new());
+    assert_eq!(
+        env.market_state().1.materialized_portfolio_count,
+        0,
+        "baseline ClosePortfolio deregisters the materialized portfolio"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap().lamports,
+        baseline_market_lamports + baseline_portfolio_lamports,
+        "baseline ClosePortfolio sweeps rent into the market slab"
+    );
+
+    let bloated_portfolio = env.create_portfolio(&owner);
+    let bloated_market_lamports = env.svm.get_account(&env.market).unwrap().lamports;
+    let bloated_portfolio_lamports = env.svm.get_account(&bloated_portfolio).unwrap().lamports;
+    let tail = duplicate_tail(
+        &[
+            env.market,
+            bloated_portfolio,
+            owner.pubkey(),
+            env.vault,
+            spl_token::ID,
+        ],
+        EXTRA_METAS,
+    );
+    let bloated_cu = send_close(&mut env, &owner, bloated_portfolio, tail);
+    assert_eq!(
+        env.market_state().1.materialized_portfolio_count,
+        0,
+        "duplicate-tail ClosePortfolio deregisters exactly the targeted portfolio"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap().lamports,
+        bloated_market_lamports + bloated_portfolio_lamports,
+        "duplicate-tail ClosePortfolio sweeps rent into the market slab, not a tail account"
+    );
+    if let Some(closed_account) = env.svm.get_account(&bloated_portfolio) {
+        assert_eq!(
+            closed_account.lamports, 0,
+            "duplicate-tail ClosePortfolio drains the closed portfolio account"
+        );
+        assert!(
+            closed_account.data.is_empty() || !state::is_initialized(&closed_account.data),
+            "duplicate-tail ClosePortfolio leaves no initialized portfolio state behind"
+        );
+    }
+
+    println!(
+        "v16 ClosePortfolio duplicate ignored account tail: baseline={baseline_cu}, \
+         bloated={bloated_cu}"
+    );
+    assert!(
+        bloated_cu <= baseline_cu + 75_000,
+        "ClosePortfolio duplicate ignored tail consumed {bloated_cu} CU vs baseline {baseline_cu}"
+    );
+    assert_cu_within(
+        "ClosePortfolio duplicate ignored account tail",
+        bloated_cu,
+        CUSTODY_CU_LIMIT,
+    );
+}
+
 // Public-interface DoS sweep: cheap init coverage proves ignored duplicate tails are bounded in the
 // adapter, but value rails also run token-account validation and SPL CPI after the adapter materializes
 // every meta. A near-max ignored tail that aliases the live custody accounts must not block real
