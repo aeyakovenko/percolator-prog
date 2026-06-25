@@ -19249,6 +19249,99 @@ fn v16_attack_permissionless_settle_b_is_bounded_and_live() {
     );
 }
 
+// LoF/DoS sweep: liquidation reward tails are parsed before the engine-selected action is known.
+// A valid cranker reward portfolio must not turn a non-liquidation SettleBChunk into a payable or
+// account-rewriting path; the B rank should advance and the reward account should remain byte-identical.
+#[test]
+fn v16_attack_settle_b_with_reward_tail_makes_progress_without_paying_cranker() {
+    let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+        public_b_chunk_atoms: 1,
+        ..V16CuMarketParams::default()
+    });
+    env.update_liquidation_fee_policy_with_cu(5_000);
+
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let cranker_owner = Keypair::new();
+    let long = env.create_portfolio(&long_owner);
+    let short = env.create_portfolio(&short_owner);
+    let cranker = env.create_portfolio(&cranker_owner);
+    env.deposit(&long_owner, long, 1_000_000);
+    env.deposit(&short_owner, short, 1_000_000);
+    env.deposit(&cranker_owner, cranker, 1_000);
+    env.trade_asset_with_cu(
+        0,
+        &long_owner,
+        long,
+        &short_owner,
+        short,
+        POS_SCALE as i128,
+        100,
+        0,
+    );
+    env.mark_b_stale_gap(long, 0, 3);
+
+    let (_, group_before) = env.market_state();
+    let long_before = env.portfolio_state(long);
+    let cranker_before = env.svm.get_account(&cranker).unwrap();
+    let cranker_capital_before = env.portfolio_state(cranker).capital.get();
+    assert_eq!(active_leg_for_asset(&long_before, 0).b_snap, 0);
+    assert!(
+        active_leg_for_asset(&long_before, 0).b_stale,
+        "setup creates a selected B-stale leg"
+    );
+
+    env.svm.warp_to_slot(1);
+    env.svm.expire_blockhash();
+    let cu = env
+        .send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 1,
+                close_q: u128::MAX,
+                observations: vec![],
+            },
+            vec![
+                AccountMeta::new(cranker_owner.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(long, false),
+                AccountMeta::new(cranker, false),
+            ],
+            &[&cranker_owner],
+        )
+        .expect("SettleBChunk should ignore liquidation reward tail for payment");
+    assert_cu_within("PermissionlessCrank SettleB reward tail", cu, CRANK_CU_LIMIT);
+
+    let (_, group_after) = env.market_state();
+    let long_after = env.portfolio_state(long);
+    let leg_after = active_leg_for_asset(&long_after, 0);
+    assert_eq!(
+        leg_after.b_snap, 1,
+        "SettleBChunk advances exactly one public B chunk despite a reward tail"
+    );
+    assert!(
+        leg_after.b_stale && long_after.b_stale_state != 0,
+        "remaining B debt stays explicitly stale for later cranks"
+    );
+    assert_eq!(
+        group_after.insurance, group_before.insurance,
+        "SettleBChunk does not charge liquidation fees"
+    );
+    assert_eq!(
+        group_after.vault, group_before.vault,
+        "SettleBChunk moves no custody"
+    );
+    assert_eq!(
+        env.svm.get_account(&cranker).unwrap(),
+        cranker_before,
+        "non-liquidation SettleBChunk must not rewrite the cranker reward account"
+    );
+    assert_eq!(
+        env.portfolio_state(cranker).capital.get(),
+        cranker_capital_before,
+        "non-liquidation SettleBChunk pays no cranker reward"
+    );
+}
+
 // Auto-crank liveness: an expired close-progress ledger selects DeclareRecovery, which the
 // engine proves needs no oracle observation. The wrapper must not pre-block that path on a
 // stale price-managed oracle or a malformed reward-tail-shaped account; otherwise the public
