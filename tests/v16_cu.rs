@@ -18918,6 +18918,102 @@ fn v16_attack_trade_fee_rounds_up_no_free_dust_trades() {
     );
 }
 
+// security.md sweep — fee-splitting dust below one atom: a caller can split a real position into
+// fills whose floor notional is zero. The public TradeNoCpi path must still charge nonzero fees for
+// nonzero risk-changing fills, otherwise repeated slices grow OI without paying the configured fee.
+#[test]
+fn v16_attack_subatom_fee_splits_cannot_accumulate_free_position() {
+    let mut env = V16CuEnv::new(); // max_trading_fee_bps = 10_000
+    let la = Keypair::new();
+    let pa = env.create_portfolio(&la);
+    let lb = Keypair::new();
+    let pb = env.create_portfolio(&lb);
+    env.deposit(&la, pa, 1_000_000);
+    env.deposit(&lb, pb, 1_000_000);
+
+    let sub_atom_size = (POS_SCALE / 100 - 1) as i128;
+    assert!(sub_atom_size > 0, "probe size is nonzero");
+    let mut opened = 0i128;
+    let mut prev_insurance = env.market_state().1.insurance;
+    for i in 0..5 {
+        env.svm.expire_blockhash();
+        env.try_trade_asset_with_cu(0, &la, pa, &lb, pb, sub_atom_size, 100, 1)
+            .unwrap_or_else(|e| panic!("sub-atom public trade #{i} must execute, got {e}"));
+        opened += sub_atom_size;
+        let (_, group) = env.market_state();
+        assert!(
+            group.insurance > prev_insurance,
+            "accepted sub-atom trade #{i} grew OI by {sub_atom_size}q but paid no fee"
+        );
+        assert_eq!(group.vault, 2_000_000, "no value created by sub-atom fill");
+        assert_eq!(group.vault, group.c_tot + group.insurance, "exact conservation");
+        prev_insurance = group.insurance;
+    }
+
+    let taker = env.portfolio_state(pa);
+    let lp = env.portfolio_state(pb);
+    assert!(
+        opened > (POS_SCALE / 100) as i128,
+        "accepted sub-atom fills accumulate into a real position"
+    );
+    assert_eq!(active_leg_for_asset(&taker, 0).basis_pos_q, opened);
+    assert_eq!(active_leg_for_asset(&lp, 0).basis_pos_q, -opened);
+}
+
+// Same fee invariant through BatchTradeNoCpi. This also exercises the wrapper's per-leg fee
+// reconstruction: a stale floor-notional mirror computes zero and fails to match the fixed engine's
+// aggregate fee outcome for a sub-atom leg.
+#[test]
+fn v16_attack_batch_subatom_fee_reconstruction_uses_ceil_notional() {
+    let mut env = V16CuEnv::new(); // max_trading_fee_bps = 10_000
+    let taker = Keypair::new();
+    let lp = Keypair::new();
+    let taker_account = env.create_portfolio(&taker);
+    let lp_account = env.create_portfolio(&lp);
+    env.deposit(&taker, taker_account, 1_000_000);
+    env.deposit(&lp, lp_account, 1_000_000);
+
+    let sub_atom_size = (POS_SCALE / 100 - 1) as i128;
+    let before_insurance = env.market_state().1.insurance;
+    env.send(
+        ProgInstruction::BatchTradeNoCpi {
+            legs: vec![BatchTradeLeg {
+                asset_index: 0,
+                size_q: sub_atom_size,
+                exec_price: 100,
+                fee_bps: 1,
+            }],
+        },
+        vec![
+            AccountMeta::new(taker.pubkey(), true),
+            AccountMeta::new(lp.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(taker_account, false),
+            AccountMeta::new(lp_account, false),
+        ],
+        &[&taker, &lp],
+    )
+    .expect("sub-atom BatchTradeNoCpi must execute with matching fee reconstruction");
+
+    let (_, group) = env.market_state();
+    assert!(
+        group.insurance > before_insurance,
+        "sub-atom batch leg must pay a nonzero fee"
+    );
+    assert_eq!(group.vault, 2_000_000, "no value created by sub-atom batch");
+    assert_eq!(group.vault, group.c_tot + group.insurance, "exact conservation");
+    let taker_after = env.portfolio_state(taker_account);
+    let lp_after = env.portfolio_state(lp_account);
+    assert_eq!(
+        active_leg_for_asset(&taker_after, 0).basis_pos_q,
+        sub_atom_size
+    );
+    assert_eq!(
+        active_leg_for_asset(&lp_after, 0).basis_pos_q,
+        -sub_atom_size
+    );
+}
+
 // security.md sweep — over-liquidation (#2): liquidating a bankrupt account with close_q FAR larger
 // than its position must clamp to the actual size — never over-close into phantom OI, negative OI,
 // or manufactured value. Attacker success = excess close_q creating value / corrupting OI.
