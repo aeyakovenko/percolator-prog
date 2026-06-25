@@ -11812,6 +11812,9 @@ pub mod processor {
     }
 
     fn unpack_mint(mint_ai: &AccountInfo) -> Result<spl_token::state::Mint, ProgramError> {
+        if *mint_ai.key == spl_token::native_mint::id() {
+            return Err(PercolatorError::InvalidMint.into());
+        }
         if mint_ai.owner != &spl_token::ID {
             return Err(PercolatorError::InvalidMint.into());
         }

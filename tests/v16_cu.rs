@@ -46455,6 +46455,152 @@ fn v16_attack_base_unit_mints_reject_mismatched_decimals() {
     );
 }
 
+// LoF/DoS probe: PR 168 rejects native/wrapped-SOL token accounts on custody routes.
+// Therefore the configured collateral/base-unit mint boundary must reject the SPL native mint up
+// front; otherwise a market can be initialized with a mint for which real user custody is rejected.
+#[test]
+fn v16_attack_native_mint_configuration_rejects_before_bricking_custody_routes() {
+    let mut env = V16CuEnv::new();
+    let admin = env.admin.insecure_clone();
+    let params = V16CuMarketParams::default();
+    let native_mint = spl_token::native_mint::id();
+    env.svm
+        .set_account(
+            native_mint,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_mint_data_with_decimals(9),
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+
+    let market = Keypair::new();
+    system_create_account_for_test(
+        &mut env.svm,
+        &env.payer,
+        &market,
+        state::market_account_len_for_capacity(params.max_portfolio_assets as usize)
+            .expect("market len"),
+        env.program_id,
+    );
+    let market_before = env
+        .svm
+        .get_account(&market.pubkey())
+        .expect("market account");
+
+    env.svm.expire_blockhash();
+    let rejected = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        init_market_instruction(&params),
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(market.pubkey(), false),
+            AccountMeta::new_readonly(native_mint, false),
+        ],
+        &[&admin],
+    );
+    let err = rejected.expect_err("native collateral mint must reject");
+    assert!(
+        err.contains("Custom(10)"),
+        "native collateral mint must reject as InvalidMint, got {err}"
+    );
+    assert_eq!(
+        env.svm
+            .get_account(&market.pubkey())
+            .expect("market account"),
+        market_before,
+        "rejected native mint must leave a fresh market account retryable"
+    );
+
+    let cfg_before = env.market_state().0;
+    let secondary = env.create_mint();
+    env.svm.expire_blockhash();
+    let rejected_primary = env.send(
+        ProgInstruction::UpdateBaseUnitMints {
+            primary_mint: native_mint.to_bytes(),
+            secondary_mint: secondary.to_bytes(),
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new_readonly(native_mint, false),
+            AccountMeta::new_readonly(secondary, false),
+        ],
+        &[&admin],
+    );
+    let err = rejected_primary.expect_err("native primary base-unit mint must reject");
+    assert!(
+        err.contains("Custom(10)"),
+        "native primary base-unit mint must reject as InvalidMint, got {err}"
+    );
+    assert_eq!(
+        env.market_state().0.collateral_mint,
+        cfg_before.collateral_mint,
+        "rejected native primary must not rewrite the configured collateral mint"
+    );
+    assert_eq!(
+        env.market_state().0.secondary_collateral_mint,
+        cfg_before.secondary_collateral_mint,
+        "rejected native primary must not install a secondary mint"
+    );
+
+    env.svm.expire_blockhash();
+    let rejected_secondary = env.send(
+        ProgInstruction::UpdateBaseUnitMints {
+            primary_mint: env.mint.to_bytes(),
+            secondary_mint: native_mint.to_bytes(),
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new_readonly(env.mint, false),
+            AccountMeta::new_readonly(native_mint, false),
+        ],
+        &[&admin],
+    );
+    let err = rejected_secondary.expect_err("native secondary base-unit mint must reject");
+    assert!(
+        err.contains("Custom(10)"),
+        "native secondary base-unit mint must reject as InvalidMint, got {err}"
+    );
+    assert_eq!(
+        env.market_state().0.collateral_mint,
+        cfg_before.collateral_mint,
+        "rejected native secondary must not rewrite the configured collateral mint"
+    );
+    assert_eq!(
+        env.market_state().0.secondary_collateral_mint,
+        cfg_before.secondary_collateral_mint,
+        "rejected native secondary must not install a native secondary mint"
+    );
+
+    env.svm.expire_blockhash();
+    env.send(
+        ProgInstruction::UpdateBaseUnitMints {
+            primary_mint: env.mint.to_bytes(),
+            secondary_mint: secondary.to_bytes(),
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new_readonly(env.mint, false),
+            AccountMeta::new_readonly(secondary, false),
+        ],
+        &[&admin],
+    )
+    .expect("non-native base-unit mints remain configurable");
+    assert_eq!(
+        env.market_state().0.secondary_collateral_mint,
+        secondary.to_bytes(),
+        "valid non-native secondary mint still configures after native-mint rejections"
+    );
+}
+
 // security.md sweep — asset-0 / market admin is bounded (#5 / README L85): even the market-wide admin
 // cannot reach into a PERMISSIONLESSLY-created asset's own domain insurance (that is gated by that
 // asset's operator), nor can it withdraw a user's portfolio collateral (gated by the portfolio owner).
