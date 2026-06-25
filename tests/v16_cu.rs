@@ -12594,6 +12594,117 @@ fn v16_bpf_full_14_leg_refresh_crank_with_max_three_leg_pyth_observations_is_und
     }
 }
 
+// CU/DoS sweep: max-observation crank coverage above uses distinct oracle accounts. A public keeper can
+// also repeat the same read-only oracle account for many assets when those assets share a feed. That drives
+// the BPF adapter's duplicate-account path plus max observation fanout on an accepted crank, not a reject.
+#[test]
+fn v16_bpf_full_14_leg_refresh_crank_with_duplicate_pyth_observation_account_is_under_tx_limit() {
+    const N: usize = percolator_prog::constants::WRAPPER_MAX_PORTFOLIO_ASSETS as usize;
+
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(N as u16, 1_000, 1_000, 500);
+    set_test_clock(&mut env, 1, 100);
+    let feed = [0x5du8; 32];
+    let initial_oracle = env.set_pyth_price(&feed, 100, -6, 100);
+    for asset_index in 0..N {
+        env.try_configure_hybrid_asset_with_conf_filter_cu(
+            asset_index as u16,
+            1,
+            0,
+            [feed, [0u8; 32], [0u8; 32]],
+            &[initial_oracle],
+            1,
+            100,
+            0,
+            0,
+            3,
+            500,
+        )
+        .expect("configure shared-feed hybrid oracle for duplicate-observation crank");
+    }
+
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long_account = env.create_portfolio(&long_owner);
+    let short_account = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long_account, 2_000);
+    env.deposit(&short_owner, short_account, 100_000);
+    env.seed_n_leg_position_for_benchmark(long_account, short_account, N);
+    let before_slot_last: Vec<u64> = {
+        let market_data = env.svm.get_account(&env.market).unwrap().data;
+        let (_, group) = state::read_market(&market_data).unwrap();
+        (0..N)
+            .map(|asset_index| group.assets[asset_index].slot_last)
+            .collect()
+    };
+
+    set_test_clock(&mut env, 17, 101);
+    let fresh_oracle = env.set_pyth_price(&feed, 99, -6, 101);
+    let observations: Vec<CrankObservationHint> = (0..N)
+        .map(|asset_index| CrankObservationHint {
+            asset_index: asset_index as u16,
+            oracle_accounts: 1,
+        })
+        .collect();
+    let oracle_tail = vec![fresh_oracle; N];
+    assert!(
+        oracle_tail.windows(2).all(|pair| pair[0] == pair[1]),
+        "test must pass duplicate oracle account metas"
+    );
+    let mut accounts = vec![
+        AccountMeta::new(env.payer.pubkey(), true),
+        AccountMeta::new(env.market, false),
+        AccountMeta::new(long_account, false),
+    ];
+    accounts.extend(
+        oracle_tail
+            .iter()
+            .copied()
+            .map(|key| AccountMeta::new_readonly(key, false)),
+    );
+
+    env.svm.expire_blockhash();
+    let refresh_cu = env
+        .send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 17,
+                close_q: 0,
+                observations,
+            },
+            accounts,
+            &[],
+        )
+        .expect("duplicate-Pyth-observation full-leg refresh remains live");
+    println!(
+        "v16 full-14-leg refresh crank with duplicate Pyth observation account CU: {refresh_cu}"
+    );
+    const DUPLICATE_PYTH_OBSERVATION_REFRESH_CU_LIMIT: u64 = 950_000;
+    assert!(
+        refresh_cu <= DUPLICATE_PYTH_OBSERVATION_REFRESH_CU_LIMIT,
+        "full-14-leg duplicate-Pyth-observation refresh CU {} exceeded limit {}",
+        refresh_cu,
+        DUPLICATE_PYTH_OBSERVATION_REFRESH_CU_LIMIT
+    );
+
+    let market_data = env.svm.get_account(&env.market).unwrap().data;
+    let long_data = env.svm.get_account(&long_account).unwrap().data;
+    let (_, group) = state::read_market(&market_data).unwrap();
+    let long = state::read_portfolio(&long_data).unwrap();
+    assert_eq!(
+        percolator::active_bitmap_count_ones(active_bitmap(&long)),
+        N as u32
+    );
+    for (asset_index, before) in before_slot_last.iter().copied().enumerate() {
+        assert!(
+            group.assets[asset_index].slot_last > before,
+            "duplicate-Pyth-observation refresh must commit asset progress for asset {asset_index}"
+        );
+        assert_eq!(
+            group.assets[asset_index].effective_price, 99,
+            "duplicate-Pyth-observation refresh applies the shared fresh oracle mark for asset {asset_index}"
+        );
+    }
+}
+
 // LoF/DoS sweep (cron135): reward-enabled markets peel a cranker portfolio from the
 // tail before parsing oracle observations. A keeper that includes both the maximum
 // legal Pyth observation tail and a reward account must still get one bounded
@@ -19446,7 +19557,11 @@ fn v16_attack_settle_b_with_reward_tail_makes_progress_without_paying_cranker() 
             &[&cranker_owner],
         )
         .expect("SettleBChunk should ignore liquidation reward tail for payment");
-    assert_cu_within("PermissionlessCrank SettleB reward tail", cu, CRANK_CU_LIMIT);
+    assert_cu_within(
+        "PermissionlessCrank SettleB reward tail",
+        cu,
+        CRANK_CU_LIMIT,
+    );
 
     let (_, group_after) = env.market_state();
     let long_after = env.portfolio_state(long);
