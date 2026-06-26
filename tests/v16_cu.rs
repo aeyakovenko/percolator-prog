@@ -17287,6 +17287,169 @@ fn v16_bpf_accounting_ledger_tags_are_bounded_and_update_state() {
     assert_eq!(ledger_state.last_observed_insurance_atoms, 110);
 }
 
+// Public-interface DoS/LoF sweep: standalone ledger sync routes are authority-signed accounting
+// updates, not SPL custody rails. A hostile caller can append near-max duplicate market/ledger metas;
+// the sync must stay live, update each counter exactly once, and leave vault custody untouched.
+#[test]
+fn v16_attack_standalone_ledger_sync_duplicate_ignored_accounts_are_cu_bounded() {
+    const EXTRA_METAS: usize = 52;
+
+    fn duplicate_tail(keys: &[Pubkey], count: usize) -> Vec<AccountMeta> {
+        (0..count)
+            .map(|i| AccountMeta::new_readonly(keys[i % keys.len()], false))
+            .collect()
+    }
+
+    fn run_backing_sync_with_tail(tail_count: usize) -> u64 {
+        let mut env = V16CuEnv::new();
+        let admin = env.admin.insecure_clone();
+        let ledger = env.backing_domain_ledger_account();
+        env.top_up_backing_bucket_with_ledger_with_cu(ledger, 1, 100, 10_000);
+        env.mutate_market(|_, group| {
+            group.source_backing_buckets[1].utilization_fee_earnings = 30;
+            group.vault += 30;
+        });
+        env.set_token_account_amount(env.vault, env.mint, env.vault_authority, 130);
+        let market_before = env.svm.get_account(&env.market).unwrap();
+        let vault_before = env.svm.get_account(&env.vault).unwrap();
+        let mut accounts = vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(ledger, false),
+        ];
+        accounts.extend(duplicate_tail(
+            &[env.market, ledger, env.vault, spl_token::ID],
+            tail_count,
+        ));
+
+        env.svm.expire_blockhash();
+        let cu = env
+            .send(
+                ProgInstruction::SyncBackingDomainLedger { domain: 1 },
+                accounts,
+                &[&admin],
+            )
+            .expect("SyncBackingDomainLedger with duplicate ignored account tail");
+
+        let ledger_state =
+            state::read_backing_domain_ledger(&env.svm.get_account(&ledger).unwrap().data).unwrap();
+        assert_eq!(ledger_state.total_principal_atoms, 100);
+        assert_eq!(
+            ledger_state.total_earnings_atoms, 30,
+            "duplicate-tail backing sync records earnings exactly once"
+        );
+        assert_eq!(
+            ledger_state.last_observed_bucket_earnings_atoms, 30,
+            "duplicate-tail backing sync advances the earnings snapshot once"
+        );
+        assert_eq!(
+            ledger_state.residual_received_atoms(),
+            0,
+            "utilization earnings remain non-residual farm accounting"
+        );
+        assert_eq!(
+            env.svm.get_account(&env.market).unwrap(),
+            market_before,
+            "SyncBackingDomainLedger does not mutate market state"
+        );
+        assert_eq!(
+            env.svm.get_account(&env.vault).unwrap(),
+            vault_before,
+            "SyncBackingDomainLedger moves no SPL vault custody"
+        );
+        cu
+    }
+
+    fn run_insurance_sync_with_tail(tail_count: usize) -> u64 {
+        let mut env = V16CuEnv::new();
+        let admin = env.admin.insecure_clone();
+        let ledger = env.insurance_ledger_account();
+        env.top_up_insurance_with_ledger_with_cu(ledger, 100);
+        env.mutate_market(|_, group| {
+            group.insurance += 30;
+            group.vault += 30;
+            group.insurance_domain_budget[0] += 15;
+            group.insurance_domain_budget[1] += 15;
+        });
+        env.set_token_account_amount(env.vault, env.mint, env.vault_authority, 130);
+        let market_before = env.svm.get_account(&env.market).unwrap();
+        let vault_before = env.svm.get_account(&env.vault).unwrap();
+        let mut accounts = vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(ledger, false),
+        ];
+        accounts.extend(duplicate_tail(
+            &[env.market, ledger, env.vault, spl_token::ID],
+            tail_count,
+        ));
+
+        env.svm.expire_blockhash();
+        let cu = env
+            .send(ProgInstruction::SyncInsuranceLedger, accounts, &[&admin])
+            .expect("SyncInsuranceLedger with duplicate ignored account tail");
+
+        let ledger_state =
+            state::read_insurance_ledger(&env.svm.get_account(&ledger).unwrap().data).unwrap();
+        assert_eq!(ledger_state.total_principal_atoms, 100);
+        assert_eq!(
+            ledger_state.cumulative_profit_atoms, 30,
+            "duplicate-tail insurance sync records profit exactly once"
+        );
+        assert_eq!(
+            ledger_state.cumulative_loss_atoms, 0,
+            "duplicate-tail insurance sync does not invent a loss"
+        );
+        assert_eq!(
+            ledger_state.last_observed_insurance_atoms, 130,
+            "duplicate-tail insurance sync advances the insurance snapshot once"
+        );
+        assert_eq!(
+            env.svm.get_account(&env.market).unwrap(),
+            market_before,
+            "SyncInsuranceLedger does not mutate market state"
+        );
+        assert_eq!(
+            env.svm.get_account(&env.vault).unwrap(),
+            vault_before,
+            "SyncInsuranceLedger moves no SPL vault custody"
+        );
+        cu
+    }
+
+    let baseline_backing_cu = run_backing_sync_with_tail(0);
+    let bloated_backing_cu = run_backing_sync_with_tail(EXTRA_METAS);
+    println!(
+        "v16 SyncBackingDomainLedger duplicate ignored account tail: \
+         baseline={baseline_backing_cu}, bloated={bloated_backing_cu}"
+    );
+    assert!(
+        bloated_backing_cu <= baseline_backing_cu + 75_000,
+        "SyncBackingDomainLedger duplicate ignored tail consumed {bloated_backing_cu} CU vs baseline {baseline_backing_cu}"
+    );
+    assert_cu_within(
+        "SyncBackingDomainLedger duplicate ignored account tail",
+        bloated_backing_cu,
+        CUSTODY_CU_LIMIT,
+    );
+
+    let baseline_insurance_cu = run_insurance_sync_with_tail(0);
+    let bloated_insurance_cu = run_insurance_sync_with_tail(EXTRA_METAS);
+    println!(
+        "v16 SyncInsuranceLedger duplicate ignored account tail: \
+         baseline={baseline_insurance_cu}, bloated={bloated_insurance_cu}"
+    );
+    assert!(
+        bloated_insurance_cu <= baseline_insurance_cu + 75_000,
+        "SyncInsuranceLedger duplicate ignored tail consumed {bloated_insurance_cu} CU vs baseline {baseline_insurance_cu}"
+    );
+    assert_cu_within(
+        "SyncInsuranceLedger duplicate ignored account tail",
+        bloated_insurance_cu,
+        CUSTODY_CU_LIMIT,
+    );
+}
+
 // Public-interface DoS/LoF sweep: ConvertReleasedPnl is an owner-signed live value-accounting route.
 // A hostile caller can append near-max duplicate metas while converting source-backed PnL into
 // withdrawable capital. The tail must not block the conversion, double-consume backing, move SPL
