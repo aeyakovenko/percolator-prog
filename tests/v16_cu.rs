@@ -17254,6 +17254,228 @@ fn v16_attack_domain_topup_ledgers_duplicate_ignored_accounts_are_cu_bounded() {
     );
 }
 
+// Public-interface DoS sweep: live domain withdrawals are the value-out mirror
+// of the ledger top-up routes, but they stage market/ledger debits before the
+// signed SPL payout. A valid ledger plus ignored duplicate tail must not block
+// the withdrawal, inflate CU, or debit any domain more than once.
+#[test]
+fn v16_attack_live_domain_withdraw_ledgers_duplicate_ignored_accounts_are_cu_bounded() {
+    const EXTRA_METAS: usize = 52;
+
+    #[derive(Clone, Copy)]
+    enum Route {
+        Insurance,
+        BackingPrincipal,
+        BackingEarnings,
+    }
+
+    impl Route {
+        fn label(self) -> &'static str {
+            match self {
+                Route::Insurance => "WithdrawInsuranceAsset",
+                Route::BackingPrincipal => "WithdrawBackingBucket",
+                Route::BackingEarnings => "WithdrawBackingBucketEarnings",
+            }
+        }
+    }
+
+    fn duplicate_tail(keys: &[Pubkey], count: usize) -> Vec<AccountMeta> {
+        (0..count)
+            .map(|i| AccountMeta::new_readonly(keys[i % keys.len()], false))
+            .collect()
+    }
+
+    fn run_withdraw_with_tail(route: Route, tail_count: usize) -> u64 {
+        let mut env = V16CuEnv::new();
+        let admin = env.admin.insecure_clone();
+        let ledger = match route {
+            Route::Insurance => {
+                let ledger = env.insurance_ledger_account();
+                env.top_up_insurance_domain_with_authority_ledger_and_cu(&admin, ledger, 0, 100);
+                ledger
+            }
+            Route::BackingPrincipal | Route::BackingEarnings => {
+                let ledger = env.backing_domain_ledger_account();
+                env.top_up_backing_bucket_with_ledger_with_cu(ledger, 1, 100, 10_000);
+                if matches!(route, Route::BackingEarnings) {
+                    env.mutate_market(|_, group| {
+                        group.source_backing_buckets[1].utilization_fee_earnings = 30;
+                        group.vault += 30;
+                    });
+                    let (_, funded) = env.market_state();
+                    env.set_token_account_amount(
+                        env.vault,
+                        env.mint,
+                        env.vault_authority,
+                        funded.vault as u64,
+                    );
+                }
+                ledger
+            }
+        };
+        let amount = match route {
+            Route::BackingEarnings => 10,
+            Route::Insurance | Route::BackingPrincipal => 40,
+        };
+        let dest = env.token_account_for_mint(env.mint, admin.pubkey(), 0);
+        let tail = duplicate_tail(
+            &[
+                admin.pubkey(),
+                env.market,
+                ledger,
+                dest,
+                env.vault,
+                env.vault_authority,
+                spl_token::ID,
+            ],
+            tail_count,
+        );
+
+        env.svm.expire_blockhash();
+        let cu = match route {
+            Route::Insurance => {
+                let mut accounts = vec![
+                    AccountMeta::new(admin.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(dest, false),
+                    AccountMeta::new(env.vault, false),
+                    AccountMeta::new_readonly(env.vault_authority, false),
+                    AccountMeta::new_readonly(spl_token::ID, false),
+                    AccountMeta::new(ledger, false),
+                ];
+                accounts.extend(tail);
+                env.send(
+                    ProgInstruction::WithdrawInsuranceAsset {
+                        asset_index: 0,
+                        amount,
+                    },
+                    accounts,
+                    &[&admin],
+                )
+            }
+            Route::BackingPrincipal => {
+                let mut accounts = vec![
+                    AccountMeta::new(admin.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(dest, false),
+                    AccountMeta::new(env.vault, false),
+                    AccountMeta::new_readonly(env.vault_authority, false),
+                    AccountMeta::new_readonly(spl_token::ID, false),
+                    AccountMeta::new(ledger, false),
+                ];
+                accounts.extend(tail);
+                env.send(
+                    ProgInstruction::WithdrawBackingBucket { domain: 1, amount },
+                    accounts,
+                    &[&admin],
+                )
+            }
+            Route::BackingEarnings => {
+                let mut accounts = vec![
+                    AccountMeta::new(admin.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(ledger, false),
+                    AccountMeta::new(dest, false),
+                    AccountMeta::new(env.vault, false),
+                    AccountMeta::new_readonly(env.vault_authority, false),
+                    AccountMeta::new_readonly(spl_token::ID, false),
+                ];
+                accounts.extend(tail);
+                env.send(
+                    ProgInstruction::WithdrawBackingBucketEarnings { domain: 1, amount },
+                    accounts,
+                    &[&admin],
+                )
+            }
+        }
+        .unwrap_or_else(|err| {
+            panic!(
+                "{} with ledger and duplicate ignored account tail must stay live: {err}",
+                route.label()
+            )
+        });
+
+        let (_, group) = env.market_state();
+        assert_eq!(
+            env.token_amount(dest),
+            amount as u64,
+            "{} duplicate-tail withdrawal pays exactly the requested amount",
+            route.label()
+        );
+        assert_eq!(
+            group.vault as u64,
+            env.token_amount(env.vault),
+            "{} duplicate-tail withdrawal keeps vault accounting tied to custody",
+            route.label()
+        );
+
+        match route {
+            Route::Insurance => {
+                let ledger_state =
+                    state::read_insurance_ledger(&env.svm.get_account(&ledger).unwrap().data)
+                        .unwrap();
+                assert_eq!(group.insurance, 60);
+                assert_eq!(group.insurance_domain_budget[0], 60);
+                assert_eq!(ledger_state.total_principal_atoms, 60);
+                assert_eq!(ledger_state.total_deposited_atoms, 100);
+                assert_eq!(ledger_state.total_withdrawn_atoms, 40);
+                assert_eq!(ledger_state.last_observed_insurance_atoms, 60);
+            }
+            Route::BackingPrincipal => {
+                let ledger_state =
+                    state::read_backing_domain_ledger(&env.svm.get_account(&ledger).unwrap().data)
+                        .unwrap();
+                assert_eq!(
+                    group.source_backing_buckets[1].fresh_unliened_backing_num,
+                    60 * BOUND_SCALE
+                );
+                assert_eq!(
+                    group.source_credit[1].fresh_reserved_backing_num,
+                    60 * BOUND_SCALE
+                );
+                assert_eq!(ledger_state.total_principal_atoms, 60);
+                assert_eq!(ledger_state.total_deposited_atoms, 100);
+                assert_eq!(ledger_state.total_principal_withdrawn_atoms, 40);
+            }
+            Route::BackingEarnings => {
+                let ledger_state =
+                    state::read_backing_domain_ledger(&env.svm.get_account(&ledger).unwrap().data)
+                        .unwrap();
+                assert_eq!(group.source_backing_buckets[1].utilization_fee_earnings, 20);
+                assert_eq!(ledger_state.total_earnings_atoms, 30);
+                assert_eq!(ledger_state.total_earnings_withdrawn_atoms, 10);
+                assert_eq!(ledger_state.last_observed_bucket_earnings_atoms, 20);
+            }
+        }
+
+        cu
+    }
+
+    for route in [
+        Route::Insurance,
+        Route::BackingPrincipal,
+        Route::BackingEarnings,
+    ] {
+        let baseline_cu = run_withdraw_with_tail(route, 0);
+        let bloated_cu = run_withdraw_with_tail(route, EXTRA_METAS);
+        println!(
+            "v16 {} ledger duplicate ignored account tail: baseline={baseline_cu}, \
+             bloated={bloated_cu}",
+            route.label()
+        );
+        assert!(
+            bloated_cu <= baseline_cu + 100_000,
+            "{} ledger duplicate ignored tail consumed {bloated_cu} CU vs baseline {baseline_cu}",
+            route.label()
+        );
+        assert_cu_within(
+            &format!("{} ledger duplicate ignored account tail", route.label()),
+            bloated_cu,
+            CUSTODY_CU_LIMIT,
+        );
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 enum BackingResidualCounterTradePath {
     TradeNoCpi,
