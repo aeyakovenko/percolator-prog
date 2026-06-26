@@ -17648,6 +17648,102 @@ fn v16_attack_live_domain_withdraw_ledgers_duplicate_ignored_accounts_are_cu_bou
     }
 }
 
+// Public-interface DoS sweep: terminal WithdrawInsurance is the resolved-mode value-out mirror of
+// TopUpInsurance and is distinct from live WithdrawInsuranceAsset. A valid initialized ledger plus a
+// near-max ignored duplicate tail must not block the signed payout or debit insurance more than once.
+#[test]
+fn v16_attack_terminal_withdraw_insurance_ledger_duplicate_ignored_accounts_are_cu_bounded() {
+    const EXTRA_METAS: usize = 52;
+
+    fn duplicate_tail(keys: &[Pubkey], count: usize) -> Vec<AccountMeta> {
+        (0..count)
+            .map(|i| AccountMeta::new_readonly(keys[i % keys.len()], false))
+            .collect()
+    }
+
+    fn run_terminal_withdraw_with_tail(tail_count: usize) -> u64 {
+        let mut env = V16CuEnv::new();
+        let admin = env.admin.insecure_clone();
+        let ledger = env.insurance_ledger_account();
+        env.top_up_insurance_with_ledger_with_cu(ledger, 100);
+        env.resolve();
+        let dest = env.token_account_for_mint(env.mint, admin.pubkey(), 0);
+        let tail = duplicate_tail(
+            &[
+                admin.pubkey(),
+                env.market,
+                dest,
+                env.vault,
+                env.vault_authority,
+                spl_token::ID,
+                ledger,
+            ],
+            tail_count,
+        );
+        let mut accounts = vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(ledger, false),
+        ];
+        accounts.extend(tail);
+
+        env.svm.expire_blockhash();
+        let cu = env
+            .send(
+                ProgInstruction::WithdrawInsurance { amount: 40 },
+                accounts,
+                &[&admin],
+            )
+            .expect("terminal WithdrawInsurance with ledger and duplicate ignored account tail");
+
+        let (_, group) = env.market_state();
+        assert_eq!(
+            env.token_amount(dest),
+            40,
+            "duplicate-tail terminal insurance withdrawal pays exactly the requested amount"
+        );
+        assert_eq!(
+            env.token_amount(env.vault),
+            60,
+            "duplicate-tail terminal insurance withdrawal debits only the requested vault amount"
+        );
+        assert_eq!(group.insurance, 60);
+        assert_eq!(
+            group.vault, 60,
+            "duplicate-tail terminal insurance withdrawal updates vault accounting once"
+        );
+        let ledger_state =
+            state::read_insurance_ledger(&env.svm.get_account(&ledger).unwrap().data).unwrap();
+        assert_eq!(ledger_state.market_group, env.market.to_bytes());
+        assert_eq!(ledger_state.authority, admin.pubkey().to_bytes());
+        assert_eq!(ledger_state.total_principal_atoms, 60);
+        assert_eq!(ledger_state.total_deposited_atoms, 100);
+        assert_eq!(ledger_state.total_withdrawn_atoms, 40);
+        assert_eq!(ledger_state.last_observed_insurance_atoms, 60);
+        cu
+    }
+
+    let baseline_cu = run_terminal_withdraw_with_tail(0);
+    let bloated_cu = run_terminal_withdraw_with_tail(EXTRA_METAS);
+    println!(
+        "v16 terminal WithdrawInsurance ledger duplicate ignored account tail: \
+         baseline={baseline_cu}, bloated={bloated_cu}"
+    );
+    assert!(
+        bloated_cu <= baseline_cu + 100_000,
+        "terminal WithdrawInsurance ledger duplicate ignored tail consumed {bloated_cu} CU vs baseline {baseline_cu}"
+    );
+    assert_cu_within(
+        "terminal WithdrawInsurance ledger duplicate ignored account tail",
+        bloated_cu,
+        CUSTODY_CU_LIMIT,
+    );
+}
+
 #[derive(Clone, Copy, Debug)]
 enum BackingResidualCounterTradePath {
     TradeNoCpi,
