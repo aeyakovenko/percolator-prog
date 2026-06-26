@@ -8969,6 +8969,128 @@ fn v16_bpf_sync_maintenance_fee_with_cranker_share_is_bounded() {
     assert_domain_budget_remaining_total_consistent(&group, "maintenance fee with cranker share");
 }
 
+// Public-interface DoS/LoF sweep: SyncMaintenanceFee is permissionless and can debit one user
+// portfolio while crediting an optional cranker reward portfolio. Extra duplicate metas after the
+// reward account must not make the cranker path unavailable, double-credit the reward, double-charge
+// the payer, or push CU outside the custody envelope.
+#[test]
+fn v16_attack_sync_maintenance_reward_duplicate_ignored_accounts_are_cu_bounded() {
+    const EXTRA_METAS: usize = 52;
+    const FEE: u128 = 580;
+    const REWARD: u128 = 232;
+    const RETAINED: u128 = 348;
+
+    fn duplicate_tail(keys: &[Pubkey], count: usize) -> Vec<AccountMeta> {
+        (0..count)
+            .map(|i| AccountMeta::new_readonly(keys[i % keys.len()], false))
+            .collect()
+    }
+
+    fn run_sync_with_tail(tail_count: usize) -> u64 {
+        let mut env = V16CuEnv::new_with_market_params_price_move_and_maintenance_fee(
+            1, 10_000, 10_000, 10_000, 58,
+        );
+        let payer_owner = Keypair::new();
+        let cranker_owner = Keypair::new();
+        let payer_portfolio = env.create_portfolio(&payer_owner);
+        let cranker_portfolio = env.create_portfolio(&cranker_owner);
+        env.deposit(&payer_owner, payer_portfolio, 100_000_000);
+        env.update_maintenance_fee_policy_with_cu(4_000);
+        let vault_tokens_before = env.token_amount(env.vault);
+        let (_, group_before) = env.market_state();
+
+        env.svm.warp_to_slot(10);
+        let mut accounts = vec![
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(payer_portfolio, false),
+            AccountMeta::new(cranker_portfolio, false),
+        ];
+        accounts.extend(duplicate_tail(
+            &[
+                env.market,
+                payer_portfolio,
+                cranker_portfolio,
+                env.vault,
+                spl_token::ID,
+            ],
+            tail_count,
+        ));
+
+        env.svm.expire_blockhash();
+        let cu = env
+            .send(
+                ProgInstruction::SyncMaintenanceFee { now_slot: 10 },
+                accounts,
+                &[],
+            )
+            .expect("SyncMaintenanceFee with cranker reward and duplicate ignored account tail");
+
+        let payer = env.portfolio_state(payer_portfolio);
+        let cranker = env.portfolio_state(cranker_portfolio);
+        let (_, group_after) = env.market_state();
+        assert_eq!(
+            payer.last_fee_slot.get(),
+            10,
+            "duplicate-tail maintenance sync advances the payer fee slot"
+        );
+        assert_eq!(
+            payer.capital.get(),
+            100_000_000 - FEE,
+            "duplicate-tail maintenance sync charges the payer exactly once"
+        );
+        assert_eq!(
+            cranker.capital.get(),
+            REWARD,
+            "duplicate-tail maintenance sync pays the configured cranker reward exactly once"
+        );
+        assert_eq!(
+            group_after.insurance,
+            group_before.insurance + RETAINED,
+            "duplicate-tail maintenance sync retains the non-reward fee exactly once"
+        );
+        assert_eq!(
+            group_after.insurance_domain_budget[0] + group_after.insurance_domain_budget[1],
+            RETAINED,
+            "duplicate-tail maintenance sync credits active insurance domains exactly once"
+        );
+        assert_eq!(
+            env.token_amount(env.vault),
+            vault_tokens_before,
+            "SyncMaintenanceFee moves no SPL vault custody"
+        );
+        assert_eq!(
+            group_after.vault as u64, vault_tokens_before,
+            "SyncMaintenanceFee leaves market vault accounting tied to custody"
+        );
+        assert_eq!(
+            group_after.vault,
+            payer.capital.get() as u128 + cranker.capital.get() as u128 + group_after.insurance,
+            "senior conservation holds after duplicate-tail maintenance reward split"
+        );
+        assert_domain_budget_remaining_total_consistent(
+            &group_after,
+            "duplicate-tail maintenance reward split",
+        );
+        cu
+    }
+
+    let baseline_cu = run_sync_with_tail(0);
+    let bloated_cu = run_sync_with_tail(EXTRA_METAS);
+    println!(
+        "v16 SyncMaintenanceFee cranker reward duplicate ignored account tail: \
+         baseline={baseline_cu}, bloated={bloated_cu}"
+    );
+    assert!(
+        bloated_cu <= baseline_cu + 100_000,
+        "SyncMaintenanceFee duplicate ignored tail consumed {bloated_cu} CU vs baseline {baseline_cu}"
+    );
+    assert_cu_within(
+        "SyncMaintenanceFee cranker reward duplicate ignored account tail",
+        bloated_cu,
+        CUSTODY_CU_LIMIT,
+    );
+}
+
 // CU/LoF hardening: SyncMaintenanceFee is permissionless and can debit a user's
 // portfolio, credit insurance, and pay a cranker reward. A stale-layout payer
 // must reject before any fee or reward mutation, while the restored account can
