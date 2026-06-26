@@ -9538,8 +9538,12 @@ pub mod processor {
         let mut market_data = market_ai.try_borrow_mut_data()?;
         {
             let (_cfg, group) = state::market_view_mut(&mut market_data)?;
-            if asset_index >= group.markets.len()
-                || group.markets[asset_index].engine.asset.lifecycle == ASSET_LIFECYCLE_RETIRED
+            if asset_index >= group.markets.len() {
+                return Err(PercolatorError::EngineLockActive.into());
+            }
+            let lifecycle = group.markets[asset_index].engine.asset.lifecycle;
+            if lifecycle == ASSET_LIFECYCLE_RETIRED
+                || (fee_bps != 0 && lifecycle != ASSET_LIFECYCLE_ACTIVE)
             {
                 return Err(PercolatorError::EngineLockActive.into());
             }
