@@ -13692,6 +13692,178 @@ fn v16_attack_resolved_permissionless_crank_ignored_extra_accounts_are_cu_bounde
     );
 }
 
+// Public-interface DoS sweep: direct terminal payout routes are separate public entrypoints from
+// resolved PermissionlessCrank. A hostile caller can append near-max ignored duplicate metas while
+// moving real value; those tails must not block payout, redirect value, or push CU outside the
+// custody envelope.
+#[test]
+fn v16_attack_direct_terminal_payout_duplicate_ignored_accounts_are_cu_bounded() {
+    const EXTRA_METAS: usize = 52;
+
+    fn duplicate_tail(keys: &[Pubkey], count: usize) -> Vec<AccountMeta> {
+        (0..count)
+            .map(|i| AccountMeta::new_readonly(keys[i % keys.len()], false))
+            .collect()
+    }
+
+    fn seed_pending_topup_receipt(env: &mut V16CuEnv, portfolio: Pubkey) {
+        let mut market_account = env.svm.get_account(&env.market).expect("market account");
+        let mut portfolio_account = env.svm.get_account(&portfolio).expect("portfolio account");
+        let (cfg, mut group) = state::read_market(&market_account.data).unwrap();
+        let mut account = state::read_portfolio(&portfolio_account.data).unwrap();
+        group.mode = MarketModeV16::Resolved;
+        group.resolved_slot = 1;
+        group.current_slot = 1;
+        group.vault = 60;
+        group.payout_snapshot_captured = true;
+        group.payout_snapshot = 100;
+        group.resolved_payout_ledger = ResolvedPayoutLedgerV16 {
+            snapshot_residual: 100,
+            terminal_claim_exact_receipts_num: 100 * BOUND_SCALE,
+            terminal_claim_bound_unreceipted_num: 0,
+            current_payout_rate_num: 100 * BOUND_SCALE,
+            current_payout_rate_den: 100 * BOUND_SCALE,
+            snapshot_slot: 1,
+            payout_halted: false,
+            finalized: false,
+        };
+        account.resolved_payout_receipt =
+            percolator::ResolvedPayoutReceiptV16Account::from_runtime(&ResolvedPayoutReceiptV16 {
+                present: true,
+                prior_bound_contribution_num: 100 * BOUND_SCALE,
+                live_released_face_at_receipt: 0,
+                terminal_positive_claim_face: 100,
+                paid_effective: 40,
+                finalized: false,
+            });
+        state::write_market(&mut market_account.data, &cfg, &group).unwrap();
+        state::write_portfolio(&mut portfolio_account.data, &account).unwrap();
+        env.svm.set_account(env.market, market_account).unwrap();
+        env.svm.set_account(portfolio, portfolio_account).unwrap();
+        env.set_token_account_amount(env.vault, env.mint, env.vault_authority, 60);
+    }
+
+    fn close_resolved_with_tail(tail_count: usize) -> u64 {
+        let mut env = V16CuEnv::new();
+        let owner = Keypair::new();
+        let portfolio = env.create_portfolio(&owner);
+        env.deposit(&owner, portfolio, 1_000);
+        env.resolve();
+        let dest = env.token_account(owner.pubkey(), 0);
+        let mut accounts = vec![
+            AccountMeta::new_readonly(owner.pubkey(), false),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio, false),
+            AccountMeta::new(dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ];
+        accounts.extend(duplicate_tail(
+            &[env.market, portfolio, dest, env.vault, spl_token::ID],
+            tail_count,
+        ));
+
+        env.svm.expire_blockhash();
+        let cu = env
+            .send(
+                ProgInstruction::CloseResolved {
+                    fee_rate_per_slot: 0,
+                },
+                accounts,
+                &[],
+            )
+            .expect("CloseResolved with ignored duplicate account tail");
+        assert_eq!(
+            env.token_amount(dest),
+            1_000,
+            "duplicate-tail CloseResolved pays exactly the terminal payout"
+        );
+        assert_eq!(
+            env.token_amount(env.vault),
+            0,
+            "duplicate-tail CloseResolved debits only the canonical payout vault"
+        );
+        assert_eq!(
+            env.market_state().1.vault,
+            0,
+            "duplicate-tail CloseResolved clears terminal vault accounting"
+        );
+        cu
+    }
+
+    fn claim_topup_with_tail(tail_count: usize) -> u64 {
+        let mut env = V16CuEnv::new();
+        let owner = Keypair::new();
+        let portfolio = env.create_portfolio(&owner);
+        seed_pending_topup_receipt(&mut env, portfolio);
+        let dest = env.token_account_for_mint(env.mint, owner.pubkey(), 0);
+        let mut accounts = vec![
+            AccountMeta::new_readonly(owner.pubkey(), false),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio, false),
+            AccountMeta::new(dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ];
+        accounts.extend(duplicate_tail(
+            &[env.market, portfolio, dest, env.vault, spl_token::ID],
+            tail_count,
+        ));
+
+        env.svm.expire_blockhash();
+        let cu = env
+            .send(ProgInstruction::ClaimResolvedPayoutTopup, accounts, &[])
+            .expect("ClaimResolvedPayoutTopup with ignored duplicate account tail");
+        assert_eq!(
+            env.token_amount(dest),
+            60,
+            "duplicate-tail top-up claim pays exactly the unpaid receipt amount"
+        );
+        let account = env.portfolio_state(portfolio);
+        assert_eq!(resolved_receipt(&account).paid_effective, 100);
+        assert!(
+            resolved_receipt(&account).finalized,
+            "duplicate-tail top-up claim finalizes the paid receipt"
+        );
+        assert_eq!(env.market_state().1.vault, 0);
+        cu
+    }
+
+    let baseline_close_cu = close_resolved_with_tail(0);
+    let bloated_close_cu = close_resolved_with_tail(EXTRA_METAS);
+    println!(
+        "v16 CloseResolved duplicate ignored account tail: baseline={baseline_close_cu}, \
+         bloated={bloated_close_cu}"
+    );
+    assert!(
+        bloated_close_cu <= baseline_close_cu + 100_000,
+        "CloseResolved duplicate ignored tail consumed {bloated_close_cu} CU vs baseline {baseline_close_cu}"
+    );
+    assert_cu_within(
+        "CloseResolved duplicate ignored account tail",
+        bloated_close_cu,
+        CUSTODY_CU_LIMIT,
+    );
+
+    let baseline_topup_cu = claim_topup_with_tail(0);
+    let bloated_topup_cu = claim_topup_with_tail(EXTRA_METAS);
+    println!(
+        "v16 ClaimResolvedPayoutTopup duplicate ignored account tail: \
+         baseline={baseline_topup_cu}, bloated={bloated_topup_cu}"
+    );
+    assert!(
+        bloated_topup_cu <= baseline_topup_cu + 100_000,
+        "ClaimResolvedPayoutTopup duplicate ignored tail consumed {bloated_topup_cu} CU vs baseline {baseline_topup_cu}"
+    );
+    assert_cu_within(
+        "ClaimResolvedPayoutTopup duplicate ignored account tail",
+        bloated_topup_cu,
+        CUSTODY_CU_LIMIT,
+    );
+}
+
 #[test]
 fn v16_bpf_failed_close_resolved_transfer_rolls_back_payout_state() {
     let mut env = V16CuEnv::new();
