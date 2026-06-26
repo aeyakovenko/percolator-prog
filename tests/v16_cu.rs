@@ -35988,6 +35988,90 @@ fn v16_attack_finalize_reset_side_rejects_after_resolution() {
     assert_eq!(live_group.risk_epoch, risk_epoch_before + 1);
 }
 
+// Public-interface DoS sweep: FinalizeResetSide is the permissionless market-only recovery unlock
+// route, not a one-portfolio user rail. A hostile caller can append near-max duplicate market/custody
+// metas while the side is ready to unlock; the tail must not block the finalizer, replay the unlock,
+// mutate custody, or push the route outside the custody CU envelope.
+#[test]
+fn v16_attack_finalize_reset_side_duplicate_ignored_accounts_are_cu_bounded() {
+    const EXTRA_METAS: usize = 52;
+
+    fn duplicate_tail(keys: &[Pubkey], count: usize) -> Vec<AccountMeta> {
+        (0..count)
+            .map(|i| AccountMeta::new_readonly(keys[i % keys.len()], false))
+            .collect()
+    }
+
+    fn run_finalize_with_tail(tail_count: usize) -> u64 {
+        let mut env = V16CuEnv::new();
+        env.mutate_market(|_, group| {
+            group.assets[0].mode_short = SideModeV16::ResetPending;
+        });
+        let (_, before) = env.market_state();
+        assert_eq!(before.assets[0].mode_short, SideModeV16::ResetPending);
+        let vault_before = env.svm.get_account(&env.vault).unwrap();
+        let mut accounts = vec![AccountMeta::new(env.market, false)];
+        accounts.extend(duplicate_tail(
+            &[env.market, env.vault, env.vault_authority, spl_token::ID],
+            tail_count,
+        ));
+
+        env.svm.expire_blockhash();
+        let cu = env
+            .send(
+                ProgInstruction::FinalizeResetSide {
+                    asset_index: 0,
+                    side: 1,
+                },
+                accounts,
+                &[],
+            )
+            .expect("FinalizeResetSide with duplicate ignored account tail");
+
+        let (_, after) = env.market_state();
+        assert_eq!(
+            after.assets[0].mode_short,
+            SideModeV16::Normal,
+            "duplicate-tail finalizer unlocks the targeted empty side"
+        );
+        assert_eq!(
+            after.assets[0].mode_long, before.assets[0].mode_long,
+            "duplicate-tail finalizer does not rewrite the opposite side"
+        );
+        assert_eq!(
+            after.risk_epoch,
+            before.risk_epoch + 1,
+            "duplicate-tail finalizer bumps the risk epoch exactly once"
+        );
+        assert_eq!(
+            after.vault, before.vault,
+            "FinalizeResetSide moves no market vault accounting"
+        );
+        assert_eq!(
+            env.svm.get_account(&env.vault).unwrap(),
+            vault_before,
+            "FinalizeResetSide moves no SPL vault custody"
+        );
+        cu
+    }
+
+    let baseline_cu = run_finalize_with_tail(0);
+    let bloated_cu = run_finalize_with_tail(EXTRA_METAS);
+    println!(
+        "v16 FinalizeResetSide duplicate ignored account tail: baseline={baseline_cu}, \
+         bloated={bloated_cu}"
+    );
+    assert!(
+        bloated_cu <= baseline_cu + 75_000,
+        "FinalizeResetSide duplicate ignored tail consumed {bloated_cu} CU vs baseline {baseline_cu}"
+    );
+    assert_cu_within(
+        "FinalizeResetSide duplicate ignored account tail",
+        bloated_cu,
+        CUSTODY_CU_LIMIT,
+    );
+}
+
 // security.md sweep — operation-sequence conservation (#32/#33 fuzz-lite): a long varied sequence of
 // deposits/trades/flips/price-moves/cranks/withdrawals must never drift the core invariants. Checks
 // real-vault==accounting, c_tot==Σcapitals, senior conservation, OI balance at every checkpoint.
