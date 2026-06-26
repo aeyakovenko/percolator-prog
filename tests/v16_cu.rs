@@ -17165,6 +17165,127 @@ fn v16_bpf_accounting_ledger_tags_are_bounded_and_update_state() {
     assert_eq!(ledger_state.last_observed_insurance_atoms, 110);
 }
 
+// Public-interface DoS/LoF sweep: ConvertReleasedPnl is an owner-signed live value-accounting route.
+// A hostile caller can append near-max duplicate metas while converting source-backed PnL into
+// withdrawable capital. The tail must not block the conversion, double-consume backing, move SPL
+// custody, or push the route outside the custody CU envelope.
+#[test]
+fn v16_attack_convert_released_pnl_duplicate_ignored_accounts_are_cu_bounded() {
+    const EXTRA_METAS: usize = 52;
+    const RELEASED: u128 = 40;
+
+    fn duplicate_tail(keys: &[Pubkey], count: usize) -> Vec<AccountMeta> {
+        (0..count)
+            .map(|i| AccountMeta::new_readonly(keys[i % keys.len()], false))
+            .collect()
+    }
+
+    fn run_convert_with_tail(tail_count: usize) -> u64 {
+        let mut env = V16CuEnv::new();
+        let ledger = env.backing_domain_ledger_account();
+        env.top_up_backing_bucket_with_ledger_with_cu(ledger, 1, RELEASED, 10_000);
+        let owner = Keypair::new();
+        let portfolio = env.create_portfolio(&owner);
+        env.add_source_positive_pnl(portfolio, 1, RELEASED);
+        env.crank(
+            portfolio,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 0,
+                close_q: 0,
+                observations: crank_observations(0),
+            },
+        );
+        assert_eq!(
+            env.portfolio_state(portfolio).pnl.get(),
+            RELEASED as i128,
+            "setup must expose real released source-backed PnL"
+        );
+
+        let (_, group_before) = env.market_state();
+        let vault_tokens_before = env.token_amount(env.vault);
+        let mut accounts = vec![
+            AccountMeta::new(owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio, false),
+        ];
+        accounts.extend(duplicate_tail(
+            &[env.market, portfolio, env.vault],
+            tail_count,
+        ));
+
+        env.svm.expire_blockhash();
+        let cu = env
+            .send(
+                ProgInstruction::ConvertReleasedPnl { amount: RELEASED },
+                accounts,
+                &[&owner],
+            )
+            .expect("ConvertReleasedPnl with duplicate ignored account tail");
+
+        let account = env.portfolio_state(portfolio);
+        let (_, group_after) = env.market_state();
+        assert_eq!(
+            account.capital.get(),
+            RELEASED,
+            "duplicate-tail convert credits capital exactly once"
+        );
+        assert_eq!(
+            account.pnl.get(),
+            0,
+            "duplicate-tail convert consumes the released PnL exactly once"
+        );
+        assert_eq!(
+            group_after.c_tot,
+            group_before.c_tot + RELEASED,
+            "duplicate-tail convert increases senior capital exactly once"
+        );
+        assert_eq!(
+            group_after.source_backing_buckets[1].consumed_liened_backing_num,
+            RELEASED * BOUND_SCALE,
+            "duplicate-tail convert consumes exactly the backing that funded the released PnL"
+        );
+        assert_eq!(
+            group_after.vault, group_before.vault,
+            "ConvertReleasedPnl moves no market vault accounting"
+        );
+        assert_eq!(
+            env.token_amount(env.vault),
+            vault_tokens_before,
+            "ConvertReleasedPnl moves no SPL vault custody"
+        );
+
+        env.sync_backing_domain_ledger_with_cu(ledger, 1);
+        let ledger_state =
+            state::read_backing_domain_ledger(&env.svm.get_account(&ledger).unwrap().data).unwrap();
+        assert_eq!(
+            ledger_state.cumulative_loss_atoms, RELEASED,
+            "duplicate-tail convert records the source backing loss exactly once"
+        );
+        assert_eq!(
+            ledger_state.residual_received_atoms(),
+            RELEASED,
+            "duplicate-tail convert exposes exactly one residual rewardable loss"
+        );
+        cu
+    }
+
+    let baseline_cu = run_convert_with_tail(0);
+    let bloated_cu = run_convert_with_tail(EXTRA_METAS);
+    println!(
+        "v16 ConvertReleasedPnl duplicate ignored account tail: baseline={baseline_cu}, \
+         bloated={bloated_cu}"
+    );
+    assert!(
+        bloated_cu <= baseline_cu + 100_000,
+        "ConvertReleasedPnl duplicate ignored tail consumed {bloated_cu} CU vs baseline {baseline_cu}"
+    );
+    assert_cu_within(
+        "ConvertReleasedPnl duplicate ignored account tail",
+        bloated_cu,
+        CUSTODY_CU_LIMIT,
+    );
+}
+
 // Public-interface DoS sweep: TopUpInsurance's optional ledger occupies the first
 // remaining-account slot. A valid ledger plus a duplicate ignored tail must not
 // let callers amplify CU or credit the market/ledger more than once.
