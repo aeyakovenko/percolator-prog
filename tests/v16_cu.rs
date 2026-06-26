@@ -49457,7 +49457,10 @@ fn v16_attack_non_active_asset_cannot_enable_backing_fee_batch_gate() {
             env.update_asset_lifecycle_as_admin_with_cu(action, 1, now_slot, 0);
         }
         let (cfg_after_lifecycle, group_after_lifecycle) = env.market_state();
-        assert_eq!(group_after_lifecycle.assets[1].lifecycle, expected_lifecycle);
+        assert_eq!(
+            group_after_lifecycle.assets[1].lifecycle,
+            expected_lifecycle
+        );
         assert_eq!(cfg_after_lifecycle.backing_trade_fee_policy_count, 0);
 
         env.svm.expire_blockhash();
