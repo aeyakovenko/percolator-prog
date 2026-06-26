@@ -10886,24 +10886,30 @@ pub mod processor {
             return Ok(false);
         }
         let market_id = asset.market_id.get();
-        let active_bitmap = portfolio
-            .header
-            .active_bitmap
-            .map(percolator::V16PodU64::get);
         let mut slot = 0usize;
         while slot < percolator::V16_MAX_PORTFOLIO_ASSETS_N {
             let leg = portfolio.header.legs[slot]
                 .try_to_runtime()
                 .map_err(map_v16_error)?;
-            if leg.active != percolator::active_bitmap_get(active_bitmap, slot) {
-                return Err(PercolatorError::EngineHiddenLeg.into());
-            }
             if leg.active && leg.asset_index as usize == asset_index && leg.market_id == market_id {
                 return Ok(true);
             }
             slot += 1;
         }
         Ok(false)
+    }
+
+    fn reject_empty_bitmap_active_leg_view(
+        portfolio: &percolator::PortfolioV16ViewMut<'_>,
+    ) -> ProgramResult {
+        let mut slot = 0usize;
+        while slot < percolator::V16_MAX_PORTFOLIO_ASSETS_N {
+            if portfolio.header.legs[slot].active != 0 {
+                return Err(PercolatorError::EngineHiddenLeg.into());
+            }
+            slot += 1;
+        }
+        Ok(())
     }
 
     fn signed_position_for_asset_view(
@@ -10940,14 +10946,8 @@ pub mod processor {
             .header
             .active_bitmap
             .map(percolator::V16PodU64::get);
-        let mut touches_existing_asset = false;
-        for request in requests {
-            if portfolio_has_active_asset_view(group, portfolio, request.asset_index)? {
-                touches_existing_asset = true;
-                break;
-            }
-        }
         if percolator::active_bitmap_is_empty(active_bitmap) {
+            reject_empty_bitmap_active_leg_view(portfolio)?;
             return Ok(());
         }
         let mut touches_existing_asset = false;
