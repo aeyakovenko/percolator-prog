@@ -16993,6 +16993,101 @@ fn v16_bpf_accounting_ledger_tags_are_bounded_and_update_state() {
     assert_eq!(ledger_state.last_observed_insurance_atoms, 110);
 }
 
+// Public-interface DoS sweep: TopUpInsurance's optional ledger occupies the first
+// remaining-account slot. A valid ledger plus a duplicate ignored tail must not
+// let callers amplify CU or credit the market/ledger more than once.
+#[test]
+fn v16_attack_topup_insurance_ledger_duplicate_ignored_accounts_are_cu_bounded() {
+    const EXTRA_METAS: usize = 52;
+
+    fn duplicate_tail(keys: &[Pubkey], count: usize) -> Vec<AccountMeta> {
+        (0..count)
+            .map(|i| AccountMeta::new_readonly(keys[i % keys.len()], false))
+            .collect()
+    }
+
+    fn run_topup_with_tail(tail_count: usize) -> u64 {
+        let mut env = V16CuEnv::new();
+        let admin = env.admin.insecure_clone();
+        let ledger = env.insurance_ledger_account();
+        let source = env.token_account_for_mint(env.mint, admin.pubkey(), 50);
+        let tail = duplicate_tail(
+            &[
+                admin.pubkey(),
+                env.market,
+                source,
+                env.vault,
+                spl_token::ID,
+                ledger,
+            ],
+            tail_count,
+        );
+        let mut accounts = vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(ledger, false),
+        ];
+        accounts.extend(tail);
+
+        env.svm.expire_blockhash();
+        let cu = env
+            .send(
+                ProgInstruction::TopUpInsurance { amount: 50 },
+                accounts,
+                &[&admin],
+            )
+            .expect("TopUpInsurance with ledger and duplicate ignored account tail");
+
+        let (_, group) = env.market_state();
+        assert_eq!(
+            group.insurance, 50,
+            "duplicate-tail top-up credits insurance exactly once"
+        );
+        assert_eq!(
+            group.vault, 50,
+            "duplicate-tail top-up credits vault accounting exactly once"
+        );
+        let ledger_state =
+            state::read_insurance_ledger(&env.svm.get_account(&ledger).unwrap().data).unwrap();
+        assert_eq!(ledger_state.market_group, env.market.to_bytes());
+        assert_eq!(ledger_state.authority, admin.pubkey().to_bytes());
+        assert_eq!(ledger_state.total_principal_atoms, 50);
+        assert_eq!(ledger_state.total_deposited_atoms, 50);
+        assert_eq!(ledger_state.total_withdrawn_atoms, 0);
+        assert_eq!(ledger_state.last_observed_insurance_atoms, 50);
+        assert_eq!(
+            env.token_amount(source),
+            0,
+            "duplicate-tail top-up pulls only the requested source tokens"
+        );
+        assert_eq!(
+            env.token_amount(env.vault),
+            50,
+            "duplicate-tail top-up credits only the requested vault tokens"
+        );
+        cu
+    }
+
+    let baseline_cu = run_topup_with_tail(0);
+    let bloated_cu = run_topup_with_tail(EXTRA_METAS);
+    println!(
+        "v16 TopUpInsurance ledger duplicate ignored account tail: baseline={baseline_cu}, \
+         bloated={bloated_cu}"
+    );
+    assert!(
+        bloated_cu <= baseline_cu + 100_000,
+        "TopUpInsurance ledger duplicate ignored tail consumed {bloated_cu} CU vs baseline {baseline_cu}"
+    );
+    assert_cu_within(
+        "TopUpInsurance ledger duplicate ignored account tail",
+        bloated_cu,
+        CUSTODY_CU_LIMIT,
+    );
+}
+
 #[derive(Clone, Copy, Debug)]
 enum BackingResidualCounterTradePath {
     TradeNoCpi,
