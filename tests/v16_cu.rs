@@ -35814,6 +35814,126 @@ fn v16_attack_refine_resolved_bound_rejects_invalid_final_market_shape() {
     );
 }
 
+// Public-interface DoS/LoF sweep: RefineResolvedUnreceiptedBound is an authority-signed terminal
+// accounting mutator. A hostile caller can append near-max duplicate metas while reducing the
+// unreceipted bound; the tail must not block refinement, double-decrease the bound, rewrite unrelated
+// receipt accounting, or move custody.
+#[test]
+fn v16_attack_refine_resolved_bound_duplicate_ignored_accounts_are_cu_bounded() {
+    const EXTRA_METAS: usize = 52;
+    const INITIAL_BOUND: u128 = 100 * BOUND_SCALE;
+    const DECREASE: u128 = 10 * BOUND_SCALE;
+
+    fn duplicate_tail(keys: &[Pubkey], count: usize) -> Vec<AccountMeta> {
+        (0..count)
+            .map(|i| AccountMeta::new_readonly(keys[i % keys.len()], false))
+            .collect()
+    }
+
+    fn run_refine_with_tail(tail_count: usize) -> u64 {
+        let mut env = V16CuEnv::new();
+        let admin = env.admin.insecure_clone();
+        env.mutate_market(|_, group| {
+            group.mode = MarketModeV16::Resolved;
+            group.resolved_slot = 1;
+            group.current_slot = 1;
+            group.payout_snapshot_captured = true;
+            group.payout_snapshot = 100;
+            group.resolved_payout_ledger = ResolvedPayoutLedgerV16 {
+                snapshot_residual: 100,
+                terminal_claim_exact_receipts_num: 0,
+                terminal_claim_bound_unreceipted_num: INITIAL_BOUND,
+                current_payout_rate_num: INITIAL_BOUND,
+                current_payout_rate_den: INITIAL_BOUND,
+                snapshot_slot: 1,
+                payout_halted: false,
+                finalized: false,
+            };
+        });
+        let (_, before) = env.market_state();
+        let vault_before = env.svm.get_account(&env.vault).unwrap();
+        let mut accounts = vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ];
+        accounts.extend(duplicate_tail(
+            &[admin.pubkey(), env.market, env.vault, spl_token::ID],
+            tail_count,
+        ));
+
+        env.svm.expire_blockhash();
+        let cu = env
+            .send(
+                ProgInstruction::RefineResolvedUnreceiptedBound {
+                    decrease_num: DECREASE,
+                },
+                accounts,
+                &[&admin],
+            )
+            .expect("RefineResolvedUnreceiptedBound with duplicate ignored account tail");
+
+        let (_, after) = env.market_state();
+        assert_eq!(after.mode, MarketModeV16::Resolved);
+        assert_eq!(
+            after
+                .resolved_payout_ledger
+                .terminal_claim_bound_unreceipted_num,
+            INITIAL_BOUND - DECREASE,
+            "duplicate-tail refine decreases the unreceipted bound exactly once"
+        );
+        assert_eq!(
+            after
+                .resolved_payout_ledger
+                .terminal_claim_exact_receipts_num,
+            before
+                .resolved_payout_ledger
+                .terminal_claim_exact_receipts_num,
+            "duplicate-tail refine leaves exact receipt accounting unchanged"
+        );
+        assert_eq!(
+            after.resolved_payout_ledger.current_payout_rate_num,
+            before.resolved_payout_ledger.current_payout_rate_num - DECREASE,
+            "duplicate-tail refine updates payout numerator exactly once"
+        );
+        assert_eq!(
+            after.resolved_payout_ledger.current_payout_rate_den,
+            before.resolved_payout_ledger.current_payout_rate_den - DECREASE,
+            "duplicate-tail refine updates payout denominator exactly once"
+        );
+        assert_eq!(
+            after.resolved_payout_ledger.snapshot_residual,
+            before.resolved_payout_ledger.snapshot_residual,
+            "duplicate-tail refine leaves the resolved residual snapshot unchanged"
+        );
+        assert_eq!(
+            after.vault, before.vault,
+            "RefineResolvedUnreceiptedBound moves no market vault accounting"
+        );
+        assert_eq!(
+            env.svm.get_account(&env.vault).unwrap(),
+            vault_before,
+            "RefineResolvedUnreceiptedBound moves no SPL vault custody"
+        );
+        cu
+    }
+
+    let baseline_cu = run_refine_with_tail(0);
+    let bloated_cu = run_refine_with_tail(EXTRA_METAS);
+    println!(
+        "v16 RefineResolvedUnreceiptedBound duplicate ignored account tail: \
+         baseline={baseline_cu}, bloated={bloated_cu}"
+    );
+    assert!(
+        bloated_cu <= baseline_cu + 75_000,
+        "RefineResolvedUnreceiptedBound duplicate ignored tail consumed {bloated_cu} CU vs baseline {baseline_cu}"
+    );
+    assert_cu_within(
+        "RefineResolvedUnreceiptedBound duplicate ignored account tail",
+        bloated_cu,
+        CUSTODY_CU_LIMIT,
+    );
+}
+
 // security.md sweep — TopUpInsuranceDomain authorization (#6): a per-domain insurance top-up is gated
 // to the domain's insurance_authority (v16_program.rs:6577 expect_live_authority). A non-authority
 // must reject — no manipulating a domain's insurance/budget accounting by an unauthorized caller.
