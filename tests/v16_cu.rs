@@ -96058,6 +96058,108 @@ fn v16_attack_zero_deposit_cure_ignores_hostile_optional_accounts() {
     );
 }
 
+// Public-interface DoS sweep: CureAndCancelClose has its own optional-deposit rail and close-ledger
+// cancellation, so Deposit/Withdraw ignored-tail coverage does not exercise this state transition. A
+// near-max duplicate ignored tail must not block the successful cure or amplify CU enough to make the
+// owner exit path unavailable.
+#[test]
+fn v16_attack_cure_optional_deposit_duplicate_ignored_accounts_are_cu_bounded() {
+    const EXTRA_METAS: usize = 52;
+
+    fn duplicate_tail(keys: &[Pubkey], count: usize) -> Vec<AccountMeta> {
+        (0..count)
+            .map(|i| AccountMeta::new_readonly(keys[i % keys.len()], false))
+            .collect()
+    }
+
+    fn run_cure_with_tail(tail_count: usize) -> u64 {
+        let mut env = V16CuEnv::new();
+        let owner = Keypair::new();
+        let portfolio = env.create_portfolio(&owner);
+        env.seed_cancellable_close_progress(portfolio);
+        let source = env.token_account_for_mint(env.mint, owner.pubkey(), 50);
+        let tail = duplicate_tail(
+            &[
+                owner.pubkey(),
+                env.market,
+                portfolio,
+                source,
+                env.vault,
+                spl_token::ID,
+            ],
+            tail_count,
+        );
+        let mut accounts = vec![
+            AccountMeta::new(owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio, false),
+            AccountMeta::new(source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ];
+        accounts.extend(tail);
+
+        env.svm.expire_blockhash();
+        let cu = env
+            .send(
+                ProgInstruction::CureAndCancelClose {
+                    optional_deposit: 50,
+                },
+                accounts,
+                &[&owner],
+            )
+            .expect("CureAndCancelClose with ignored duplicate account tail");
+
+        let account = env.portfolio_state(portfolio);
+        assert!(
+            close_progress(&account).canceled,
+            "duplicate-tail cure cancels the active close ledger"
+        );
+        assert_eq!(
+            account.capital.get(),
+            50,
+            "duplicate-tail cure credits exactly the optional deposit"
+        );
+        assert_eq!(
+            env.market_state().1.c_tot,
+            50,
+            "duplicate-tail cure updates market capital exactly once"
+        );
+        assert_eq!(
+            env.market_state().1.vault,
+            50,
+            "duplicate-tail cure updates market vault accounting exactly once"
+        );
+        assert_eq!(
+            env.token_amount(source),
+            0,
+            "duplicate-tail cure pulls only the requested source tokens"
+        );
+        assert_eq!(
+            env.token_amount(env.vault),
+            50,
+            "duplicate-tail cure credits only the requested vault tokens"
+        );
+        cu
+    }
+
+    let baseline_cu = run_cure_with_tail(0);
+    let bloated_cu = run_cure_with_tail(EXTRA_METAS);
+    println!(
+        "v16 CureAndCancelClose duplicate ignored account tail: baseline={baseline_cu}, \
+         bloated={bloated_cu}"
+    );
+    assert!(
+        bloated_cu <= baseline_cu + 100_000,
+        "CureAndCancelClose duplicate ignored tail consumed {bloated_cu} CU vs baseline {baseline_cu}"
+    );
+    assert_cu_within(
+        "CureAndCancelClose duplicate ignored account tail",
+        bloated_cu,
+        CUSTODY_CU_LIMIT,
+    );
+}
+
 #[test]
 fn v16_attack_cure_optional_deposit_over_u64_max_rejects_no_truncation() {
     let mut env = V16CuEnv::new();
