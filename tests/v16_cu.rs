@@ -33505,6 +33505,114 @@ fn v16_attack_permissionless_resolve_uses_authenticated_clock_slot() {
     );
 }
 
+// Public-interface DoS sweep: ResolveStalePermissionless is the permissionless terminal escape hatch.
+// A hostile cranker can append near-max duplicate market/custody metas while resolving a stale market;
+// the tail must not block resolution, spoof the resolved slot, corrupt market accounting, or strand
+// a normal user's terminal CloseResolved payout.
+#[test]
+fn v16_attack_stale_permissionless_resolve_duplicate_ignored_accounts_are_cu_bounded() {
+    const EXTRA_METAS: usize = 52;
+
+    fn duplicate_tail(keys: &[Pubkey], count: usize) -> Vec<AccountMeta> {
+        (0..count)
+            .map(|i| AccountMeta::new_readonly(keys[i % keys.len()], false))
+            .collect()
+    }
+
+    fn run_resolve_with_tail(tail_count: usize) -> u64 {
+        let mut env = V16CuEnv::new();
+        env.configure_permissionless_resolve_with_cu(5, 5);
+        let owner = Keypair::new();
+        let portfolio = env.create_portfolio(&owner);
+        env.deposit(&owner, portfolio, 1_000);
+        let (_, before) = env.market_state();
+        assert_eq!(before.mode, MarketModeV16::Live);
+        assert_eq!(before.vault, 1_000);
+        let vault_before = env.svm.get_account(&env.vault).unwrap();
+
+        env.svm.warp_to_slot(5);
+        let mut accounts = vec![AccountMeta::new(env.market, false)];
+        accounts.extend(duplicate_tail(
+            &[env.market, env.vault, env.vault_authority, spl_token::ID],
+            tail_count,
+        ));
+        env.svm.expire_blockhash();
+        let cu = env
+            .send(
+                ProgInstruction::ResolveStalePermissionless { now_slot: 0 },
+                accounts,
+                &[],
+            )
+            .expect("ResolveStalePermissionless with duplicate ignored account tail");
+
+        let (_, resolved) = env.market_state();
+        assert_eq!(
+            resolved.mode,
+            MarketModeV16::Resolved,
+            "duplicate-tail permissionless resolve reaches terminal mode"
+        );
+        assert_eq!(
+            resolved.resolved_slot, 5,
+            "duplicate-tail permissionless resolve records the authenticated Clock slot"
+        );
+        assert_eq!(
+            resolved.vault, before.vault,
+            "ResolveStalePermissionless moves no market vault accounting"
+        );
+        assert_eq!(
+            env.svm.get_account(&env.vault).unwrap(),
+            vault_before,
+            "ResolveStalePermissionless moves no SPL vault custody"
+        );
+
+        let dest = env.token_account(owner.pubkey(), 0);
+        env.svm.expire_blockhash();
+        env.send(
+            ProgInstruction::CloseResolved {
+                fee_rate_per_slot: 0,
+            },
+            vec![
+                AccountMeta::new_readonly(owner.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(portfolio, false),
+                AccountMeta::new(dest, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(env.vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[&owner],
+        )
+        .expect("owner-signed CloseResolved remains live after duplicate-tail resolve");
+        assert_eq!(
+            env.token_amount(dest),
+            1_000,
+            "terminal payout remains claimable after duplicate-tail permissionless resolve"
+        );
+        assert_eq!(
+            env.token_amount(env.vault),
+            0,
+            "terminal payout drains only the canonical vault after duplicate-tail resolve"
+        );
+        cu
+    }
+
+    let baseline_cu = run_resolve_with_tail(0);
+    let bloated_cu = run_resolve_with_tail(EXTRA_METAS);
+    println!(
+        "v16 ResolveStalePermissionless duplicate ignored account tail: \
+         baseline={baseline_cu}, bloated={bloated_cu}"
+    );
+    assert!(
+        bloated_cu <= baseline_cu + 75_000,
+        "ResolveStalePermissionless duplicate ignored tail consumed {bloated_cu} CU vs baseline {baseline_cu}"
+    );
+    assert_cu_within(
+        "ResolveStalePermissionless duplicate ignored account tail",
+        bloated_cu,
+        CUSTODY_CU_LIMIT,
+    );
+}
+
 // security.md sweep - permissionless asset stale state must not trigger global resolution (#24/#30):
 // a permissionlessly-created asset has a local oracle authority that may stop cranking. That local
 // stale state must not let any cranker call ResolveStalePermissionless and resolve the whole market
