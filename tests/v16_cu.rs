@@ -18946,7 +18946,11 @@ fn v16_attack_subatom_fee_splits_cannot_accumulate_free_position() {
             "accepted sub-atom trade #{i} grew OI by {sub_atom_size}q but paid no fee"
         );
         assert_eq!(group.vault, 2_000_000, "no value created by sub-atom fill");
-        assert_eq!(group.vault, group.c_tot + group.insurance, "exact conservation");
+        assert_eq!(
+            group.vault,
+            group.c_tot + group.insurance,
+            "exact conservation"
+        );
         prev_insurance = group.insurance;
     }
 
@@ -19001,7 +19005,11 @@ fn v16_attack_batch_subatom_fee_reconstruction_uses_ceil_notional() {
         "sub-atom batch leg must pay a nonzero fee"
     );
     assert_eq!(group.vault, 2_000_000, "no value created by sub-atom batch");
-    assert_eq!(group.vault, group.c_tot + group.insurance, "exact conservation");
+    assert_eq!(
+        group.vault,
+        group.c_tot + group.insurance,
+        "exact conservation"
+    );
     let taker_after = env.portfolio_state(taker_account);
     let lp_after = env.portfolio_state(lp_account);
     assert_eq!(
