@@ -44788,6 +44788,140 @@ fn v16_attack_force_close_oversized_close_q_clamps_before_i128_cast() {
     );
 }
 
+// Public-interface DoS sweep: ForceCloseAbandonedAsset is the permissionless abandoned-asset
+// recovery path. A hostile keeper can append ignored duplicate metas while closing a valid
+// long/short pair; the accepted path must still make exactly one bounded close and must not
+// move SPL custody.
+#[test]
+fn v16_attack_force_close_duplicate_ignored_accounts_are_cu_bounded() {
+    const EXTRA_METAS: usize = 52;
+    const DELAY: u64 = 5;
+    const SHUT: u64 = 10;
+
+    fn duplicate_tail(keys: &[Pubkey], count: usize) -> Vec<AccountMeta> {
+        (0..count)
+            .map(|i| AccountMeta::new_readonly(keys[i % keys.len()], false))
+            .collect()
+    }
+
+    fn run_force_close_with_tail(tail_count: usize) -> u64 {
+        let mut env = V16CuEnv::new_with_market_params_and_price_move(2, 10_000, 10_000, 10_000);
+        env.configure_auth_mark_for_asset_as_admin(1, 1, 100);
+        env.configure_permissionless_resolve_with_cu(100, DELAY);
+
+        let long_owner = Keypair::new();
+        let short_owner = Keypair::new();
+        let long = env.create_portfolio(&long_owner);
+        let short = env.create_portfolio(&short_owner);
+        env.deposit(&long_owner, long, 1_000_000);
+        env.deposit(&short_owner, short, 1_000_000);
+        env.trade_asset_with_cu(
+            1,
+            &long_owner,
+            long,
+            &short_owner,
+            short,
+            POS_SCALE as i128,
+            100,
+            0,
+        );
+        let before = env.market_state().1;
+        assert_eq!(before.assets[1].oi_eff_long_q, POS_SCALE);
+        assert_eq!(before.assets[1].oi_eff_short_q, POS_SCALE);
+
+        env.svm.warp_to_slot(SHUT);
+        env.update_asset_lifecycle_as_admin_with_cu(
+            percolator_prog::processor::ASSET_ACTION_SHUTDOWN,
+            1,
+            SHUT,
+            0,
+        );
+        env.svm.warp_to_slot(SHUT + DELAY + 1);
+        let vault_before = env.svm.get_account(&env.vault).unwrap();
+
+        let cranker = Keypair::new();
+        env.ensure_signer_account(cranker.pubkey());
+        let mut accounts = vec![
+            AccountMeta::new(cranker.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(long, false),
+            AccountMeta::new(short, false),
+        ];
+        accounts.extend(duplicate_tail(
+            &[
+                env.market,
+                long,
+                short,
+                env.vault,
+                env.vault_authority,
+                spl_token::ID,
+            ],
+            tail_count,
+        ));
+        env.svm.expire_blockhash();
+        let cu = env
+            .send(
+                ProgInstruction::ForceCloseAbandonedAsset {
+                    asset_index: 1,
+                    now_slot: SHUT + DELAY + 1,
+                    close_q: POS_SCALE,
+                },
+                accounts,
+                &[&cranker],
+            )
+            .expect("ForceCloseAbandonedAsset with duplicate ignored account tail");
+
+        let after = env.market_state().1;
+        assert_eq!(
+            after.assets[1].oi_eff_long_q, 0,
+            "duplicate-tail force-close closes exactly the abandoned long OI"
+        );
+        assert_eq!(
+            after.assets[1].oi_eff_short_q, 0,
+            "duplicate-tail force-close closes exactly the abandoned short OI"
+        );
+        assert!(
+            !has_active_leg_for_asset(&env.portfolio_state(long), 1),
+            "duplicate-tail force-close clears the long leg"
+        );
+        assert!(
+            !has_active_leg_for_asset(&env.portfolio_state(short), 1),
+            "duplicate-tail force-close clears the short leg"
+        );
+        assert_eq!(
+            env.svm.get_account(&env.vault).unwrap(),
+            vault_before,
+            "ForceCloseAbandonedAsset moves no SPL custody"
+        );
+        assert_eq!(
+            after.vault as u64,
+            env.token_amount(env.vault),
+            "force-close keeps market vault accounting tied to custody"
+        );
+        assert!(
+            after.vault >= after.c_tot + after.insurance,
+            "senior conservation after duplicate-tail force-close"
+        );
+        cu
+    }
+
+    let baseline_cu = run_force_close_with_tail(0);
+    let bloated_cu = run_force_close_with_tail(EXTRA_METAS);
+    println!(
+        "v16 ForceCloseAbandonedAsset duplicate ignored account tail: \
+         baseline={baseline_cu}, bloated={bloated_cu}"
+    );
+    assert!(
+        bloated_cu <= baseline_cu + 75_000,
+        "ForceCloseAbandonedAsset duplicate ignored tail consumed {bloated_cu} CU vs baseline {baseline_cu}"
+    );
+    assert_cu_within(
+        "ForceCloseAbandonedAsset duplicate ignored account tail",
+        bloated_cu,
+        TRADE_CU_LIMIT,
+    );
+}
+
 // security.md sweep — ForceCloseAbandonedAsset has no portfolio-owner signatures by design after a
 // shutdown timeout, so it must prove portfolio provenance itself. A cranker must not be able to pair a
 // market-A portfolio with a market-B abandoned asset and mutate either market/account. Same-market
