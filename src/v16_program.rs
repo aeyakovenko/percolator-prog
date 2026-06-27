@@ -11031,13 +11031,8 @@ pub mod processor {
         if percolator::active_bitmap_is_empty(active_bitmap) {
             return Ok(());
         }
-        let mut touches_existing_asset = false;
-        for request in requests {
-            if portfolio_has_active_asset_view(group, portfolio, request.asset_index)? {
-                touches_existing_asset = true;
-                break;
-            }
-        }
+        let touches_existing_asset =
+            portfolio_touches_requested_active_asset_view(group, portfolio, requests)?;
         if !touches_existing_asset {
             return Ok(());
         }
