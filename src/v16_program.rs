@@ -5803,7 +5803,6 @@ pub mod processor {
                 &account_a,
                 &account_b,
                 core::slice::from_ref(&req),
-                false,
             )?;
             let backing_before = if cfg.backing_trade_fee_policy_count == 0 {
                 None
@@ -6048,7 +6047,7 @@ pub mod processor {
                 ));
             }
             ensure_trade_portfolios_current_for_requests_view(
-                &group, &account_a, &account_b, &requests, false,
+                &group, &account_a, &account_b, &requests,
             )?;
 
             let source_lien_before_a =
@@ -6568,7 +6567,6 @@ pub mod processor {
             account_b_ai,
             max_market_slots,
             &cpi_requests,
-            true,
         )?;
         let req_id = {
             let mut market_data = market_ai.try_borrow_mut_data()?;
@@ -6928,7 +6926,6 @@ pub mod processor {
             account_b_ai,
             max_market_slots,
             &cpi_requests,
-            false,
         )?;
 
         // Force the batch matcher to emit fresh return data for this CPI.
@@ -10931,7 +10928,6 @@ pub mod processor {
         group: &state::MarketViewMutV16<'_>,
         portfolio: &percolator::PortfolioV16ViewMut<'_>,
         requests: &[TradeRequestV16],
-        force_high_stale_current: bool,
     ) -> ProgramResult {
         let active_bitmap = portfolio
             .header
@@ -10940,40 +10936,32 @@ pub mod processor {
         if percolator::active_bitmap_is_empty(active_bitmap) {
             return Ok(());
         }
-        if !force_high_stale_current {
-            let mut touches_existing_asset = false;
-            for request in requests {
-                if portfolio_has_active_asset_view(group, portfolio, request.asset_index)? {
-                    touches_existing_asset = true;
-                    break;
-                }
+        let mut touches_existing_asset = false;
+        for request in requests {
+            if portfolio_has_active_asset_view(group, portfolio, request.asset_index)? {
+                touches_existing_asset = true;
+                break;
             }
-            if !touches_existing_asset {
-                return Ok(());
-            }
+        }
+        if !touches_existing_asset {
+            return Ok(());
         }
         let cert = portfolio
             .header
             .health_cert
             .try_to_runtime()
             .map_err(map_v16_error)?;
-        if !force_high_stale_current
-            && (percolator::active_bitmap_is_empty(cert.active_bitmap_at_cert)
-                || (cert.certified_initial_req == 0
-                    && cert.certified_maintenance_req == 0
-                    && cert.certified_worst_case_loss == 0))
+        if percolator::active_bitmap_is_empty(cert.active_bitmap_at_cert)
+            || (cert.certified_initial_req == 0
+                && cert.certified_maintenance_req == 0
+                && cert.certified_worst_case_loss == 0)
         {
             return Ok(());
         }
         // Avoid the pathological 2N stale-leg settlement cliff. Smaller stale
         // portfolios remain engine-handled so first-open and normal UX are not
         // blocked by conservative wrapper currentness heuristics.
-        let currentness_active_count = if force_high_stale_current {
-            percolator::active_bitmap_count_ones(active_bitmap)
-        } else {
-            percolator::active_bitmap_count_ones(cert.active_bitmap_at_cert)
-        };
-        if currentness_active_count < 8 {
+        if percolator::active_bitmap_count_ones(cert.active_bitmap_at_cert) < 8 {
             return Ok(());
         }
         if portfolio.header.b_stale_state != 0 {
@@ -10999,20 +10987,9 @@ pub mod processor {
         account_a: &percolator::PortfolioV16ViewMut<'_>,
         account_b: &percolator::PortfolioV16ViewMut<'_>,
         requests: &[TradeRequestV16],
-        force_high_stale_current: bool,
     ) -> ProgramResult {
-        ensure_trade_portfolio_current_for_requests_view(
-            group,
-            account_a,
-            requests,
-            force_high_stale_current,
-        )?;
-        ensure_trade_portfolio_current_for_requests_view(
-            group,
-            account_b,
-            requests,
-            force_high_stale_current,
-        )
+        ensure_trade_portfolio_current_for_requests_view(group, account_a, requests)?;
+        ensure_trade_portfolio_current_for_requests_view(group, account_b, requests)
     }
 
     fn requested_delta_must_increase_risk(current_q: i128, delta_q: i128) -> bool {
@@ -11064,7 +11041,6 @@ pub mod processor {
         account_b_ai: &AccountInfo<'_>,
         max_market_slots: usize,
         cpi_requests: &[(u16, i128)],
-        force_high_stale_current: bool,
     ) -> ProgramResult {
         ensure_portfolio_storage_for_market_slots(account_a_ai, max_market_slots)?;
         ensure_portfolio_storage_for_market_slots(account_b_ai, max_market_slots)?;
@@ -11091,13 +11067,7 @@ pub mod processor {
             &account_b,
             cpi_requests,
         )?;
-        ensure_trade_portfolios_current_for_requests_view(
-            &group,
-            &account_a,
-            &account_b,
-            &requests,
-            force_high_stale_current,
-        )
+        ensure_trade_portfolios_current_for_requests_view(&group, &account_a, &account_b, &requests)
     }
 
     fn close_portfolio_account_to_market_slab(
