@@ -49414,6 +49414,122 @@ fn v16_attack_backing_fee_policy_count_clears_batch_liveness() {
     );
 }
 
+#[test]
+fn v16_attack_non_active_asset_cannot_enable_backing_fee_batch_gate() {
+    for (label, action, now_slot, expected_lifecycle) in [
+        (
+            "DrainOnly",
+            percolator_prog::processor::ASSET_ACTION_DRAIN_ONLY,
+            0,
+            AssetLifecycleV16::DrainOnly,
+        ),
+        (
+            "Recovery",
+            percolator_prog::processor::ASSET_ACTION_SHUTDOWN,
+            2,
+            AssetLifecycleV16::Recovery,
+        ),
+    ] {
+        let mut env = V16CuEnv::new_with_market_params_and_price_move(1, 1_000, 1_000, 500);
+        env.configure_auth_mark_for_asset_as_admin(0, 1, 100);
+        if action == percolator_prog::processor::ASSET_ACTION_SHUTDOWN {
+            env.configure_permissionless_resolve_with_cu(100, 5);
+        }
+        env.update_market_init_fee_policy_with_cu(1);
+
+        let creator = Keypair::new();
+        env.svm.warp_to_slot(1);
+        env.activate_permissionless_asset_with_fee(
+            &creator,
+            1,
+            1,
+            100,
+            creator.pubkey(),
+            creator.pubkey(),
+            creator.pubkey(),
+            creator.pubkey(),
+            1,
+        );
+        if action == percolator_prog::processor::ASSET_ACTION_SHUTDOWN {
+            env.try_shutdown_asset_with_authority(&creator, 1, now_slot)
+                .expect("asset authority can move its asset to Recovery");
+        } else {
+            env.update_asset_lifecycle_as_admin_with_cu(action, 1, now_slot, 0);
+        }
+        let (cfg_after_lifecycle, group_after_lifecycle) = env.market_state();
+        assert_eq!(
+            group_after_lifecycle.assets[1].lifecycle,
+            expected_lifecycle
+        );
+        assert_eq!(cfg_after_lifecycle.backing_trade_fee_policy_count, 0);
+
+        env.svm.expire_blockhash();
+        let policy = send_tx(
+            &mut env.svm,
+            env.program_id,
+            &env.payer,
+            ProgInstruction::UpdateBackingFeePolicy {
+                domain: 2,
+                fee_bps: 77,
+                insurance_share_bps: 5_000,
+            },
+            vec![
+                AccountMeta::new(creator.pubkey(), true),
+                AccountMeta::new(env.market, false),
+            ],
+            &[&creator],
+        );
+        assert!(
+            policy.is_err(),
+            "{label} asset must not install a new backing-fee policy that globally gates batch trades"
+        );
+        assert_eq!(
+            env.market_state().0.backing_trade_fee_policy_count,
+            0,
+            "rejected {label} policy update must not enable the global batch gate"
+        );
+
+        let taker = Keypair::new();
+        let lp = Keypair::new();
+        let ta = env.create_portfolio(&taker);
+        let la = env.create_portfolio(&lp);
+        env.deposit(&taker, ta, 1_000_000);
+        env.deposit(&lp, la, 1_000_000);
+        let sz = (5 * POS_SCALE) as i128;
+        env.svm.expire_blockhash();
+        let batch = env.send(
+            ProgInstruction::BatchTradeNoCpi {
+                legs: vec![BatchTradeLeg {
+                    asset_index: 0,
+                    size_q: sz,
+                    exec_price: 100,
+                    fee_bps: 0,
+                }],
+            },
+            vec![
+                AccountMeta::new(taker.pubkey(), true),
+                AccountMeta::new(lp.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(ta, false),
+                AccountMeta::new(la, false),
+            ],
+            &[&taker, &lp],
+        );
+        assert!(
+            batch.is_ok(),
+            "rejected {label} asset policy must leave unrelated asset-0 batch trading live: {batch:?}"
+        );
+        assert_eq!(
+            active_leg_for_asset(&env.portfolio_state(ta), 0).basis_pos_q,
+            sz
+        );
+        assert_eq!(
+            active_leg_for_asset(&env.portfolio_state(la), 0).basis_pos_q,
+            -sz
+        );
+    }
+}
+
 // security.md sweep: a backing-fee policy on an inactive retired slot must not leave batch trading
 // globally disabled. The policy count is a market-wide batch gate, so retiring an asset must remove
 // that asset's policy from the active count, old retired-slot authorities must not be able to set a new
