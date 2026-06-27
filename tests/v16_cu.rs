@@ -20751,6 +20751,126 @@ fn v16_attack_settle_b_with_reward_tail_makes_progress_without_paying_cranker() 
     );
 }
 
+// LoF/DoS sweep: SettleBChunk is the account-progress class that deliberately
+// does not need an oracle observation. If an auth mark is already staged, a
+// no-observation B-stale crank must still make B-rank progress and must not
+// consume the pending mark at the old committed price.
+#[test]
+fn v16_attack_settle_b_pending_mark_no_observation_preserves_mark_progress() {
+    const OPEN_SLOT: u64 = 1;
+    const SETTLE_SLOT: u64 = 2;
+    const OLD_MARK: u64 = 100;
+    const NEXT_MARK: u64 = 125;
+
+    let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+        public_b_chunk_atoms: 1,
+        ..V16CuMarketParams::default()
+    });
+    env.svm.warp_to_slot(OPEN_SLOT);
+    env.configure_auth_mark_with_cu(OPEN_SLOT, OLD_MARK);
+
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long = env.create_portfolio(&long_owner);
+    let short = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long, 1_000_000);
+    env.deposit(&short_owner, short, 1_000_000);
+    env.trade_with_cu(
+        &long_owner,
+        long,
+        &short_owner,
+        short,
+        POS_SCALE as i128,
+        OLD_MARK,
+        0,
+    );
+    env.mark_b_stale_gap(long, 0, 1);
+
+    env.svm.warp_to_slot(SETTLE_SLOT);
+    env.push_auth_mark_with_cu(SETTLE_SLOT, NEXT_MARK);
+    let market_after_push = env.svm.get_account(&env.market).unwrap().data;
+    let push_profile = state::read_asset_oracle_profile(&market_after_push, 0).unwrap();
+    let (_, pushed_group) = state::read_market(&market_after_push).unwrap();
+    assert_eq!(
+        pushed_group.assets[0].effective_price, OLD_MARK,
+        "PushAuthMark stages the mark without applying it"
+    );
+    assert_eq!(push_profile.mark_ewma_e6, NEXT_MARK);
+    assert!(
+        pushed_group.assets[0].slot_last < SETTLE_SLOT,
+        "setup leaves the selected asset mark pending"
+    );
+
+    env.svm.expire_blockhash();
+    let settle_cu = env
+        .send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: SETTLE_SLOT,
+                close_q: 0,
+                observations: vec![],
+            },
+            vec![
+                AccountMeta::new_readonly(env.payer.pubkey(), false),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(long, false),
+            ],
+            &[],
+        )
+        .expect("B-stale auto-crank must not require an oracle observation");
+    assert_cu_within(
+        "SettleB pending-mark no-observation crank",
+        settle_cu,
+        CRANK_CU_LIMIT,
+    );
+
+    let after_settle = env.portfolio_state(long);
+    let after_settle_leg = active_leg_for_asset(&after_settle, 0);
+    assert_eq!(
+        after_settle_leg.b_snap, 1,
+        "no-observation SettleB advances the B rank"
+    );
+    assert!(
+        !after_settle_leg.b_stale && after_settle.b_stale_state == 0,
+        "one configured chunk clears the B-stale blocker"
+    );
+    let market_after_settle = env.svm.get_account(&env.market).unwrap().data;
+    let settle_profile = state::read_asset_oracle_profile(&market_after_settle, 0).unwrap();
+    let (_, settle_group) = state::read_market(&market_after_settle).unwrap();
+    assert_eq!(
+        settle_group.assets[0].effective_price, OLD_MARK,
+        "SettleB must not consume the pending mark at the old price"
+    );
+    assert_eq!(
+        settle_group.assets[0].slot_last, pushed_group.assets[0].slot_last,
+        "SettleB leaves the selected asset accrual slot pending"
+    );
+    assert_eq!(
+        settle_profile.mark_ewma_e6, NEXT_MARK,
+        "pending auth mark remains available for a later observation"
+    );
+
+    env.svm.expire_blockhash();
+    env.send(
+        ProgInstruction::PermissionlessCrank {
+            now_slot: SETTLE_SLOT,
+            close_q: 0,
+            observations: crank_observations(0),
+        },
+        vec![
+            AccountMeta::new_readonly(env.payer.pubkey(), false),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(long, false),
+        ],
+        &[],
+    )
+    .expect("supplying the pending observation remains live after B settlement");
+    assert_eq!(
+        env.market_state().1.assets[0].effective_price,
+        NEXT_MARK,
+        "later observation applies the mark after B-stale progress"
+    );
+}
+
 // Auto-crank liveness: an expired close-progress ledger selects DeclareRecovery, which the
 // engine proves needs no oracle observation. The wrapper must not pre-block that path on a
 // stale price-managed oracle or a malformed reward-tail-shaped account; otherwise the public
