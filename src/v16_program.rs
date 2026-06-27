@@ -5884,7 +5884,7 @@ pub mod processor {
 
     /// Reconstruct the exact per-leg fee the engine charges for one leg, so wrapper-side
     /// per-asset/per-domain fee accounting can be split out of the engine's AGGREGATE batch
-    /// outcome. Mirrors engine `trade_notional_floor` (floor) + `checked_fee_bps` (ceil) on the
+    /// outcome. Mirrors engine `trade_fee_notional_ceil` + `checked_fee_bps` (ceil) on the
     /// fast u128 path; extreme sizes that would need the engine's U256 widening error out (the
     /// batch then rejects rather than mis-accounting — see the aggregate cross-check below).
     fn batch_leg_fee(
@@ -5895,10 +5895,7 @@ pub mod processor {
         if abs_size_q == 0 || fee_bps == 0 {
             return Ok(0);
         }
-        let notional = abs_size_q
-            .checked_mul(exec_price as u128)
-            .ok_or(PercolatorError::EngineArithmeticOverflow)?
-            / percolator::POS_SCALE;
+        let notional = trade_fee_notional_ceil(abs_size_q, exec_price)?;
         if notional == 0 {
             return Ok(0);
         }
@@ -11398,13 +11395,6 @@ pub mod processor {
                 != 0
     }
 
-    fn trade_notional_floor(size_q: u128, price: u64) -> Result<u128, ProgramError> {
-        Ok(size_q
-            .checked_mul(price as u128)
-            .ok_or(PercolatorError::EngineArithmeticOverflow)?
-            / percolator::POS_SCALE)
-    }
-
     fn risk_notional_ceil(size_q: u128, price: u64) -> Result<u128, ProgramError> {
         let num = size_q
             .checked_mul(price as u128)
@@ -11413,6 +11403,13 @@ pub mod processor {
             .checked_add(percolator::POS_SCALE - 1)
             .ok_or(PercolatorError::EngineArithmeticOverflow)?
             / percolator::POS_SCALE)
+    }
+
+    fn trade_fee_notional_ceil(size_q: u128, price: u64) -> Result<u128, ProgramError> {
+        if size_q == 0 || price == 0 {
+            return Ok(0);
+        }
+        risk_notional_ceil(size_q, price)
     }
 
     // Per-asset accrual dt, mirroring the engine's
@@ -11586,7 +11583,7 @@ pub mod processor {
         }
         let asset = group.markets[asset_index].engine.asset;
         let effective_price = asset.effective_price.get();
-        let trade_notional = trade_notional_floor(size_q_abs, accepted_exec_price)?;
+        let trade_notional = trade_fee_notional_ceil(size_q_abs, accepted_exec_price)?;
         let max_side_oi_q = core::cmp::max(asset.oi_eff_long_q.get(), asset.oi_eff_short_q.get());
         let max_side_notional = risk_notional_ceil(max_side_oi_q, effective_price)?;
         let mark_externality_notional = core::cmp::max(max_side_notional, trade_notional)
