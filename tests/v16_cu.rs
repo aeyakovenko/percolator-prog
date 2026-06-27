@@ -17037,6 +17037,182 @@ fn v16_regression_cross_margin_insolvency_no_value_extraction() {
     );
 }
 
+#[test]
+fn v16_attack_resolved_cross_margin_deep_insolvency_winds_down_publicly() {
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(2, 10_000, 10_000, 10_000);
+    env.configure_auth_mark_with_cu(0, 100);
+    let cfg_asset1 = |env: &mut V16CuEnv, ix: ProgInstruction| {
+        send_tx(
+            &mut env.svm,
+            env.program_id,
+            &env.payer,
+            ix,
+            vec![
+                AccountMeta::new(env.admin.pubkey(), true),
+                AccountMeta::new(env.market, false),
+            ],
+            &[&env.admin],
+        )
+        .expect("asset1 mark cfg");
+    };
+    cfg_asset1(
+        &mut env,
+        ProgInstruction::ConfigureAuthMark {
+            asset_index: 1,
+            now_slot: 0,
+            initial_mark_e6: 100,
+        },
+    );
+    let victim_owner = Keypair::new();
+    let victim = env.create_portfolio(&victim_owner);
+    let cp_owner = Keypair::new();
+    let cp = env.create_portfolio(&cp_owner);
+    env.deposit(&victim_owner, victim, 250);
+    env.deposit(&cp_owner, cp, 2_000_000);
+    env.trade_asset_with_cu(
+        0,
+        &victim_owner,
+        victim,
+        &cp_owner,
+        cp,
+        -(POS_SCALE as i128),
+        100,
+        0,
+    );
+    env.svm.expire_blockhash();
+    env.trade_asset_with_cu(
+        1,
+        &victim_owner,
+        victim,
+        &cp_owner,
+        cp,
+        -(POS_SCALE as i128),
+        100,
+        0,
+    );
+
+    for (slot, mark) in [(1u64, 300u64), (2, 800)] {
+        env.svm.warp_to_slot(slot);
+        env.push_auth_mark_with_cu(slot, mark);
+        cfg_asset1(
+            &mut env,
+            ProgInstruction::PushAuthMark {
+                asset_index: 1,
+                now_slot: slot,
+                mark_e6: mark,
+            },
+        );
+        for ai in [0u16, 1] {
+            for p in [victim, cp] {
+                env.svm.expire_blockhash();
+                let _ = env.send(
+                    ProgInstruction::PermissionlessCrank {
+                        now_slot: slot,
+                        close_q: 0,
+                        observations: crank_observations(ai),
+                    },
+                    vec![
+                        AccountMeta::new(env.payer.pubkey(), true),
+                        AccountMeta::new(env.market, false),
+                        AccountMeta::new(p, false),
+                    ],
+                    &[],
+                );
+            }
+        }
+    }
+
+    for _ in 0..8 {
+        for ai in [0u16, 1] {
+            for p in [victim, cp] {
+                env.svm.expire_blockhash();
+                let _ = env.send(
+                    ProgInstruction::PermissionlessCrank {
+                        now_slot: 2,
+                        close_q: 0,
+                        observations: crank_observations(ai),
+                    },
+                    vec![
+                        AccountMeta::new(env.payer.pubkey(), true),
+                        AccountMeta::new(env.market, false),
+                        AccountMeta::new(p, false),
+                    ],
+                    &[],
+                );
+            }
+        }
+    }
+
+    let before = env.portfolio_state(victim);
+    assert_eq!(before.capital.get(), 0, "setup makes victim insolvent");
+    assert!(
+        before.pnl.get() < 0,
+        "setup leaves real bad debt before terminal wind-down"
+    );
+    assert!(
+        has_active_leg_for_asset(&before, 0) && has_active_leg_for_asset(&before, 1),
+        "setup leaves unattributed multi-asset exposure"
+    );
+    env.resolve();
+
+    env.svm.expire_blockhash();
+    let loser_crank_cu = env
+        .send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: u64::MAX,
+                close_q: u128::MAX,
+                observations: vec![CrankObservationHint {
+                    asset_index: u16::MAX,
+                    oracle_accounts: u8::MAX,
+                }],
+            },
+            vec![
+                AccountMeta::new_readonly(victim_owner.pubkey(), false),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(victim, false),
+            ],
+            &[],
+        )
+        .expect("resolved deep cross-margin bad debt has public progress");
+    assert_cu_within(
+        "Resolved PermissionlessCrank unattributed bad debt",
+        loser_crank_cu,
+        CRANK_CU_LIMIT,
+    );
+    let victim_after = env.portfolio_state(victim);
+    assert_eq!(
+        victim_after.capital.get(),
+        0,
+        "bad-debt loser has no payout"
+    );
+    assert_eq!(victim_after.pnl.get(), 0, "bad debt cleared terminally");
+    assert!(
+        percolator::active_bitmap_is_empty(victim_after.active_bitmap.map(|w| w.get())),
+        "loser's resolved legs detached"
+    );
+    env.close_portfolio_with_cu(&victim_owner, victim);
+
+    let winner_dest = env.close_resolved(&cp_owner, cp);
+    let winner_payout = env.token_amount(winner_dest);
+    assert!(
+        (2_000_249..=2_000_250).contains(&winner_payout),
+        "winner recovers capital plus the conservative vault-bounded residual, not paper pnl: {winner_payout}"
+    );
+    env.close_portfolio_with_cu(&cp_owner, cp);
+    let (_, g) = env.market_state();
+    assert_eq!(
+        g.materialized_portfolio_count, 0,
+        "all users can dematerialize"
+    );
+    assert_eq!(g.c_tot, 0, "all senior capital wound down");
+    assert!(g.vault <= 1, "at most conservative rounding dust remains");
+    assert_eq!(
+        env.token_amount(env.vault) as u128,
+        g.vault,
+        "SPL custody matches accounting"
+    );
+}
+
 // security.md sweep — resolved wind-down LoF / over-claim (#22/#30/#48): a market can be resolved
 // with OPEN positions (handle_resolve_market does not require flat). After resolution a long and a
 // short must each recover their FAIR value via CloseResolved — neither stuck (LoF) nor able to
