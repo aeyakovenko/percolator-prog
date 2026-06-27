@@ -10416,7 +10416,7 @@ pub mod processor {
         {
             let mut market_data = market_ai.try_borrow_mut_data()?;
             let (mut cfg, mut group) = state::market_view_mut(&mut market_data)?;
-            {
+            let summary = {
                 let mut portfolio_data = portfolio_ai.try_borrow_mut_data()?;
                 let mut portfolio = state::portfolio_view_mut_for_market_slots(
                     &mut portfolio_data,
@@ -10458,6 +10458,13 @@ pub mod processor {
                     group.validate_shape().map_err(map_v16_error)?;
                     return Ok(());
                 }
+                summary
+            };
+            if summary.liquidatable
+                && !summary.b_stale
+                && permissionless_resolve_matured_now_view(&cfg, &group)
+            {
+                return Err(PercolatorError::OracleStale.into());
             }
             let reward_enabled = cfg.liquidation_cranker_fee_share_bps != 0;
             let mut oracle_tail = tail;

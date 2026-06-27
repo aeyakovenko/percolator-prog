@@ -9749,6 +9749,165 @@ fn v16_attack_auto_crank_current_solvent_partial_liquidation_makes_progress() {
     assert!(after_group.vault >= after_group.c_tot + after_group.insurance);
 }
 
+#[test]
+fn v16_attack_stale_resolve_matured_no_observation_liquidation_rejects() {
+    let mut env = V16CuEnv::new();
+    env.configure_permissionless_resolve_with_cu(5, 5);
+    env.top_up_insurance(1_000_000);
+    env.svm.warp_to_slot(1);
+    env.configure_auth_mark_with_cu(1, 100);
+
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long_account = env.create_portfolio(&long_owner);
+    let short_account = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long_account, 10_000);
+    env.deposit(&short_owner, short_account, 3_000);
+    env.trade_with_cu(
+        &long_owner,
+        long_account,
+        &short_owner,
+        short_account,
+        (10 * POS_SCALE) as i128,
+        100,
+        0,
+    );
+
+    env.svm.warp_to_slot(2);
+    env.push_auth_mark_with_cu(2, 300);
+    env.crank(
+        short_account,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 2,
+            close_q: 0,
+            observations: crank_observations(0),
+        },
+    );
+    env.svm.warp_to_slot(3);
+    env.crank(
+        short_account,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 3,
+            close_q: 0,
+            observations: crank_observations(0),
+        },
+    );
+    assert!(
+        health_cert(&env.portfolio_state(short_account)).certified_liq_deficit != 0,
+        "setup must be liquidatable before stale-window probe"
+    );
+
+    env.svm.warp_to_slot(40);
+    let before_market = env.svm.get_account(&env.market).unwrap();
+    let before_short = env.svm.get_account(&short_account).unwrap();
+    env.svm.expire_blockhash();
+    let result = env.send(
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 40,
+            close_q: POS_SCALE,
+            observations: vec![],
+        },
+        vec![
+            AccountMeta::new(env.payer.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(short_account, false),
+        ],
+        &[],
+    );
+    let err = result
+        .expect_err("stale-window no-observation liquidation must reject before live mutation");
+    assert!(
+        err.contains("Custom(27)") || err.contains("custom program error: 0x1b"),
+        "stale-window no-observation liquidation should fail as OracleStale, got: {err}"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        before_market,
+        "rejected stale-window liquidation leaves market state unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&short_account).unwrap(),
+        before_short,
+        "rejected stale-window liquidation leaves target portfolio unchanged"
+    );
+
+    env.svm.expire_blockhash();
+    let resolve = env.send(
+        ProgInstruction::ResolveStalePermissionless { now_slot: 0 },
+        vec![AccountMeta::new(env.market, false)],
+        &[],
+    );
+    assert!(
+        resolve.is_ok(),
+        "permissionless stale resolve remains available after rejected liquidation: {resolve:?}"
+    );
+    assert_eq!(env.market_state().1.mode, MarketModeV16::Resolved);
+}
+
+#[test]
+fn v16_attack_stale_resolve_matured_b_stale_cleanup_still_progresses() {
+    let mut env = V16CuEnv::new();
+    env.configure_permissionless_resolve_with_cu(5, 5);
+
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long_account = env.create_portfolio(&long_owner);
+    let short_account = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long_account, 10_000);
+    env.deposit(&short_owner, short_account, 10_000);
+    env.trade_with_cu(
+        &long_owner,
+        long_account,
+        &short_owner,
+        short_account,
+        POS_SCALE as i128,
+        100,
+        0,
+    );
+    env.mark_b_stale_gap(long_account, 0, 1);
+    assert!(
+        env.portfolio_state(long_account).b_stale_state != 0,
+        "setup must leave a B-stale account that blocks final cleanup"
+    );
+
+    env.svm.warp_to_slot(40);
+    env.svm.expire_blockhash();
+    let settle = env.send(
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 40,
+            close_q: 0,
+            observations: vec![],
+        },
+        vec![
+            AccountMeta::new(env.payer.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(long_account, false),
+        ],
+        &[],
+    );
+    assert!(
+        settle.is_ok(),
+        "stale boundary must still allow B-stale cleanup required for resolution: {settle:?}"
+    );
+    assert_eq!(
+        env.portfolio_state(long_account).b_stale_state,
+        0,
+        "B-stale cleanup clears the account blocker"
+    );
+
+    env.svm.expire_blockhash();
+    let resolve = env.send(
+        ProgInstruction::ResolveStalePermissionless { now_slot: 0 },
+        vec![AccountMeta::new(env.market, false)],
+        &[],
+    );
+    assert!(
+        resolve.is_ok(),
+        "permissionless stale resolve remains available after B cleanup: {resolve:?}"
+    );
+    assert_eq!(env.market_state().1.mode, MarketModeV16::Resolved);
+}
+
 // Public auto-crank ordering sweep: a stale budgeted liquidation tx may land after
 // the account's selected step has changed to a committed-state refresh. In that
 // case the tx may make refresh progress and apply a valid unrelated oracle update,
