@@ -39866,6 +39866,84 @@ fn v16_attack_liquidation_fee_capped() {
     assert!(g1.vault >= g1.c_tot + g1.insurance, "senior conservation");
 }
 
+#[test]
+fn v16_attack_insurance_covered_liquidation_does_not_strand_empty_portfolio() {
+    const SHORT_CAP: u128 = 55_000;
+    let mut env = V16CuEnv::new_with_init_params(production_risk_params());
+    env.update_liquidation_fee_policy_with_cu(0);
+    env.top_up_insurance(1_000_000);
+    env.configure_auth_mark_with_cu(0, 1_000_000);
+
+    let long_owner = Keypair::new();
+    let long = env.create_portfolio(&long_owner);
+    let short_owner = Keypair::new();
+    let short = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long, 100_000_000);
+    env.deposit(&short_owner, short, SHORT_CAP);
+    env.trade_asset_with_cu(
+        0,
+        &long_owner,
+        long,
+        &short_owner,
+        short,
+        POS_SCALE as i128,
+        1_000_000,
+        0,
+    );
+
+    for slot in 1..=40u64 {
+        env.svm.warp_to_slot(slot);
+        let _ = env.push_auth_mark_with_cu(slot, 1_070_000);
+        env.svm.expire_blockhash();
+        let _ = env.send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: slot,
+                close_q: 0,
+                observations: crank_observations(0),
+            },
+            vec![
+                AccountMeta::new(env.payer.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(short, false),
+            ],
+            &[],
+        );
+    }
+
+    env.crank(
+        short,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 40,
+            close_q: POS_SCALE,
+            observations: crank_observations(0),
+        },
+    );
+    let short_after = env.portfolio_state(short);
+    let ledger = close_progress(&short_after);
+    assert_eq!(short_after.capital.get(), 0);
+    assert_eq!(short_after.pnl.get(), 0);
+    assert!(
+        percolator::active_bitmap_is_empty(active_bitmap(&short_after)),
+        "full liquidation leaves the loser flat"
+    );
+    assert!(
+        ledger.finalized && ledger.residual_remaining == 0,
+        "probe must exercise the insurance-covered finalized close ledger"
+    );
+
+    let close_cu = env.close_portfolio_with_cu(&short_owner, short);
+    assert_cu_within(
+        "ClosePortfolio after insurance-covered liquidation",
+        close_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    assert_eq!(
+        env.market_state().1.materialized_portfolio_count,
+        1,
+        "only the long counterparty remains materialized"
+    );
+}
+
 // security.md sweep — repeated partial-liquidation fee stop (#3/#33): the liquidation fee is charged
 // only for an engine-selected liquidation. Attacker/cranker goal: keep resubmitting the same partial
 // close hint after the first liquidation restored health, charging the victim over and over. Protection:
