@@ -46004,6 +46004,7 @@ fn v16_attack_nocpi_extreme_price_caps_ewma_move_without_dos() {
 
 fn assert_no_cpi_zero_notional_trade_cannot_move_ewma(path: NoCpiReportedPricePath) {
     const MARK: u64 = 100;
+    const EXPECTED_PAID_MARK: u64 = 116;
     const TRADE_SLOT: u64 = 5;
     const RAW_UNIT_Q: i128 = 1;
     let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
@@ -46021,7 +46022,6 @@ fn assert_no_cpi_zero_notional_trade_cannot_move_ewma(path: NoCpiReportedPricePa
     let (owner_a, account_a, owner_b, account_b) =
         funded_no_cpi_reported_price_pair(&mut env, 3_000_000_000);
     let before = env.market_state().1;
-    let cfg_before = env.market_state().0;
 
     env.svm.expire_blockhash();
     let trade = try_no_cpi_reported_price_trade_with_cu(
@@ -46051,16 +46051,17 @@ fn assert_no_cpi_zero_notional_trade_cannot_move_ewma(path: NoCpiReportedPricePa
         "{path:?}: raw-unit short OI opened non-vacuously"
     );
     assert_eq!(
-        group_after.insurance, before.insurance,
-        "{path:?}: zero-notional trade must not invent a fee debit"
+        group_after.insurance,
+        before.insurance + 2,
+        "{path:?}: zero-notional raw-unit trade must pay the ceil minimum fee"
     );
     assert_eq!(
-        cfg_after.mark_ewma_e6, cfg_before.mark_ewma_e6,
-        "{path:?}: zero-notional trade must not move EWMA for free"
+        cfg_after.mark_ewma_e6, EXPECTED_PAID_MARK,
+        "{path:?}: zero-notional raw-unit trade pays for the bounded EWMA move"
     );
     assert_eq!(
-        cfg_after.mark_ewma_last_slot, cfg_before.mark_ewma_last_slot,
-        "{path:?}: free zero-notional trade must not advance the EWMA timestamp"
+        cfg_after.mark_ewma_last_slot, TRADE_SLOT,
+        "{path:?}: paid zero-notional raw-unit trade advances the EWMA timestamp"
     );
     assert_eq!(
         group_after.vault,
@@ -46069,9 +46070,9 @@ fn assert_no_cpi_zero_notional_trade_cannot_move_ewma(path: NoCpiReportedPricePa
     );
 }
 
-// Low-priced markets make a one-raw-unit position smaller than one quote atom:
-// size_q * accepted_price / POS_SCALE == 0. Those trades may be live, but they
-// must not move trade-driven EWMA state without any fee basis.
+// Low-priced markets make a one-raw-unit position smaller than one quote atom under floor
+// notional. Those trades may be live, but they must pay the ceil minimum fee and only move
+// trade-driven EWMA state by the bounded paid amount.
 #[test]
 fn v16_attack_nocpi_zero_notional_trade_does_not_move_ewma_for_free() {
     for path in [
@@ -86621,6 +86622,7 @@ fn assert_cpi_zero_notional_fill_cannot_move_trade_driven_mark(
 ) {
     const ASSET_INDEX: u16 = 1;
     const MARK: u64 = 100;
+    const EXPECTED_PAID_MARK: u64 = 116;
     const RAW_UNIT_Q: i128 = 1;
     const SPREAD_BPS: u32 = 9_000;
 
@@ -86632,7 +86634,6 @@ fn assert_cpi_zero_notional_fill_cannot_move_trade_driven_mark(
     env.deposit(&taker, taker_account, 3_000_000_000);
     env.deposit(&lp, lp_account, 3_000_000_000);
     let before = env.market_state().1;
-    let before_profile = trade_driven_mark_profile(&env, ASSET_INDEX);
 
     let fill = try_cpi_spread_trade_with_cu(
         &mut env,
@@ -86664,16 +86665,17 @@ fn assert_cpi_zero_notional_fill_cannot_move_trade_driven_mark(
         "{mode:?} {path:?}: raw-unit CPI fill opened short OI"
     );
     assert_eq!(
-        after.insurance, before.insurance,
-        "{mode:?} {path:?}: zero-notional CPI fill must not invent a fee debit"
+        after.insurance,
+        before.insurance + 2,
+        "{mode:?} {path:?}: zero-notional CPI raw-unit fill must pay the ceil minimum fee"
     );
     assert_eq!(
-        after_profile.mark_ewma_e6, before_profile.mark_ewma_e6,
-        "{mode:?} {path:?}: zero-notional CPI fill must not move mark state for free"
+        after_profile.mark_ewma_e6, EXPECTED_PAID_MARK,
+        "{mode:?} {path:?}: zero-notional CPI raw-unit fill pays for the bounded mark move"
     );
     assert_eq!(
-        after_profile.mark_ewma_last_slot, before_profile.mark_ewma_last_slot,
-        "{mode:?} {path:?}: zero-notional CPI fill must not advance mark timestamp"
+        after_profile.mark_ewma_last_slot, 5,
+        "{mode:?} {path:?}: paid zero-notional CPI raw-unit fill advances mark timestamp"
     );
     assert_eq!(
         after.vault,
@@ -86683,7 +86685,8 @@ fn assert_cpi_zero_notional_fill_cannot_move_trade_driven_mark(
 }
 
 // CPI parity for the low-notional boundary: if a matcher returns an off-mark fill whose accepted
-// notional floors to zero, the fill can still land but cannot mutate EWMA/hybrid mark state for free.
+// notional floors to zero, the fill can still land, but it must pay the ceil minimum fee and only
+// move EWMA/hybrid mark state by the bounded paid amount.
 #[test]
 fn v16_attack_cpi_zero_notional_fill_does_not_move_trade_driven_mark_for_free() {
     for mode in [
