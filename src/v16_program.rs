@@ -10601,6 +10601,20 @@ pub mod processor {
             let mut portfolio =
                 state::portfolio_view_mut_for_market_slots(&mut portfolio_data, max_market_slots)?;
             expect_portfolio_view_account_key(&portfolio, portfolio_ai.key)?;
+            let summary = group
+                .build_actionable_summary(&portfolio.as_view())
+                .map_err(map_v16_error)?;
+            if let Some(asset_index) =
+                auto_crank_selected_asset_that_accrues_view(&portfolio, &summary)?
+            {
+                reject_missing_pending_selected_observation_view(
+                    &cfg,
+                    &group,
+                    asset_index,
+                    authenticated_now_slot,
+                    observations.as_slice(),
+                )?;
+            }
             let result = match group.permissionless_auto_crank_not_atomic(
                 &mut portfolio,
                 AutoCrankWorkV16 {
@@ -10777,6 +10791,86 @@ pub mod processor {
             .map_err(map_v16_error)?;
         if header.portfolio_account_id != key.to_bytes() {
             return Err(PercolatorError::EngineProvenanceMismatch.into());
+        }
+        Ok(())
+    }
+
+    fn first_active_asset_from_portfolio_view(
+        portfolio: &percolator::PortfolioV16ViewMut<'_>,
+    ) -> Result<Option<usize>, ProgramError> {
+        let active_bitmap = portfolio
+            .header
+            .active_bitmap
+            .map(percolator::V16PodU64::get);
+        let mut slot = 0usize;
+        while slot < percolator::V16_MAX_PORTFOLIO_ASSETS_N {
+            let leg = portfolio.header.legs[slot]
+                .try_to_runtime()
+                .map_err(map_v16_error)?;
+            let bit = percolator::active_bitmap_get(active_bitmap, slot);
+            if bit != leg.active {
+                return Err(PercolatorError::EngineHiddenLeg.into());
+            }
+            if bit {
+                return Ok(Some(leg.asset_index as usize));
+            }
+            slot += 1;
+        }
+        Ok(None)
+    }
+
+    fn auto_crank_selected_asset_that_accrues_view(
+        portfolio: &percolator::PortfolioV16ViewMut<'_>,
+        summary: &percolator::ActionableSummaryV16,
+    ) -> Result<Option<usize>, ProgramError> {
+        if summary.b_stale {
+            return Ok(None);
+        }
+        if summary.stale || summary.liquidatable {
+            return first_active_asset_from_portfolio_view(portfolio);
+        }
+        Ok(None)
+    }
+
+    fn reject_missing_pending_selected_observation_view(
+        cfg: &WrapperConfigV16,
+        group: &state::MarketViewMutV16<'_>,
+        asset_index: usize,
+        now_slot: u64,
+        observations: &[AutoCrankObservationV16],
+    ) -> ProgramResult {
+        if observations.iter().any(|o| o.asset_index == asset_index) {
+            return Ok(());
+        }
+        if asset_index >= group.header.config.max_market_slots.get() as usize
+            || asset_index >= group.markets.len()
+        {
+            return Err(PercolatorError::InvalidInstruction.into());
+        }
+        let profile = read_oracle_profile_from_view(group, cfg, asset_index)?;
+        if !oracle_v16::profile_is_price_managed(&profile) {
+            return Ok(());
+        }
+        let asset = group.markets[asset_index].engine.asset;
+        let dt = asset_segment_dt_view(group, asset_index, now_slot)?;
+        if dt == 0 {
+            return Ok(());
+        }
+        let target = profile.mark_ewma_e6;
+        if target == 0 {
+            return Err(PercolatorError::OracleInvalid.into());
+        }
+        let current = asset.effective_price.get();
+        let exposed = asset.oi_eff_long_q.get() != 0 || asset.oi_eff_short_q.get() != 0;
+        let next = oracle_v16::effective_price_from_target(
+            current,
+            target,
+            group.header.config.max_price_move_bps_per_slot.get(),
+            dt,
+            exposed,
+        );
+        if next != current {
+            return Err(PercolatorError::EngineNonProgress.into());
         }
         Ok(())
     }
