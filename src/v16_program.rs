@@ -4244,6 +4244,7 @@ pub mod processor {
         ix::Instruction,
         state::{self, WrapperConfigV16},
     };
+    use percolator::MarketSlotV16View;
 
     // The market-level authority is now a single `marketauth` key rotated via UpdateAuthority
     // (tag 32) with no `kind` discriminant, so the former AUTHORITY_* market-kind constants are gone.
@@ -10924,6 +10925,136 @@ pub mod processor {
         Ok(0)
     }
 
+    fn amount_from_bound_num_view(bound_num: u128) -> Result<u128, ProgramError> {
+        let whole = bound_num / BOUND_SCALE;
+        if bound_num % BOUND_SCALE == 0 {
+            Ok(whole)
+        } else {
+            whole
+                .checked_add(1)
+                .ok_or(PercolatorError::EngineArithmeticOverflow.into())
+        }
+    }
+
+    fn raw_portfolio_account_preflight(
+        data: &[u8],
+    ) -> Result<&percolator::PortfolioAccountV16Account, ProgramError> {
+        let bytes = data
+            .get(constants::HEADER_LEN..constants::HEADER_LEN + constants::PORTFOLIO_STATE_LEN)
+            .ok_or(PercolatorError::InvalidAccountLen)?;
+        bytemuck::try_from_bytes(bytes).map_err(|_| ProgramError::InvalidAccountData)
+    }
+
+    fn ensure_source_domain_shape_before_matcher_raw(
+        group: &state::MarketViewMutV16<'_>,
+        portfolio: &percolator::PortfolioAccountV16Account,
+    ) -> ProgramResult {
+        let configured_domains =
+            v16_domain_count_for_market_slots(group.header.config.max_market_slots.get())
+                .map_err(map_v16_error)?;
+        let mut seen = [u32::MAX; percolator::PORTFOLIO_SOURCE_DOMAIN_CAP];
+        let mut seen_len = 0usize;
+        let mut slot = 0usize;
+        while slot < percolator::PORTFOLIO_SOURCE_DOMAIN_CAP {
+            let source = portfolio.source_domains[slot];
+            let occupied = source.is_occupied();
+            if source.domain.get() == 0 && source.source_claim_market_id.get() == 0 && !occupied {
+                slot += 1;
+                continue;
+            }
+            if !occupied {
+                return Err(PercolatorError::EngineHiddenLeg.into());
+            }
+            let domain_u32 = source.domain.get();
+            let domain = domain_u32 as usize;
+            if domain >= configured_domains {
+                return Err(PercolatorError::EngineHiddenLeg.into());
+            }
+            let mut i = 0usize;
+            while i < seen_len {
+                if seen[i] == domain_u32 {
+                    return Err(PercolatorError::EngineHiddenLeg.into());
+                }
+                i += 1;
+            }
+            seen[seen_len] = domain_u32;
+            seen_len += 1;
+
+            let asset_index = domain / 2;
+            let market = group.markets[asset_index].engine.asset;
+            if source.source_claim_market_id.get() != market.market_id.get() {
+                return Err(PercolatorError::EngineHiddenLeg.into());
+            }
+            let engine_slot = group.markets[asset_index].engine_slot();
+            let source_credit = if domain % 2 == 0 {
+                engine_slot
+                    .source_credit_long
+                    .try_to_runtime()
+                    .map_err(map_v16_error)?
+            } else {
+                engine_slot
+                    .source_credit_short
+                    .try_to_runtime()
+                    .map_err(map_v16_error)?
+            };
+            if source.source_claim_bound_num.get() > source_credit.positive_claim_bound_num {
+                return Err(PercolatorError::EngineInvalidLeg.into());
+            }
+
+            let face_claim_locked = source.source_claim_liened_num.get();
+            let impaired_face_claim = source.source_claim_impaired_num.get();
+            let locked_or_impaired = face_claim_locked
+                .checked_add(impaired_face_claim)
+                .ok_or(PercolatorError::EngineArithmeticOverflow)?;
+            if locked_or_impaired > source.source_claim_bound_num.get() {
+                return Err(PercolatorError::EngineInvalidLeg.into());
+            }
+            let backing_face = source
+                .source_claim_counterparty_liened_num
+                .get()
+                .checked_add(source.source_claim_insurance_liened_num.get())
+                .ok_or(PercolatorError::EngineArithmeticOverflow)?;
+            if backing_face != face_claim_locked {
+                return Err(PercolatorError::EngineInvalidLeg.into());
+            }
+            if source.source_lien_effective_reserved.get()
+                > amount_from_bound_num_view(face_claim_locked)?
+            {
+                return Err(PercolatorError::EngineInvalidLeg.into());
+            }
+            if source.source_lien_counterparty_backing_num.get() % BOUND_SCALE != 0
+                || source.source_lien_insurance_backing_num.get() % BOUND_SCALE != 0
+            {
+                return Err(PercolatorError::EngineInvalidLeg.into());
+            }
+            let lien_backing_num = source
+                .source_lien_counterparty_backing_num
+                .get()
+                .checked_add(source.source_lien_insurance_backing_num.get())
+                .ok_or(PercolatorError::EngineArithmeticOverflow)?;
+            let expected_backing_num = source
+                .source_lien_effective_reserved
+                .get()
+                .checked_mul(BOUND_SCALE)
+                .ok_or(PercolatorError::EngineArithmeticOverflow)?;
+            if lien_backing_num != expected_backing_num {
+                return Err(PercolatorError::EngineInvalidLeg.into());
+            }
+            if source.source_lien_impaired_effective_reserved.get() != 0 && impaired_face_claim == 0
+            {
+                return Err(PercolatorError::EngineInvalidLeg.into());
+            }
+            if (source.source_lien_counterparty_backing_num.get() == 0
+                && source.source_lien_fee_last_slot.get() != 0)
+                || source.source_lien_fee_last_slot.get() > group.header.current_slot.get()
+            {
+                return Err(PercolatorError::EngineInvalidLeg.into());
+            }
+            slot += 1;
+        }
+        Ok(())
+    }
+
     fn ensure_trade_portfolio_current_for_requests_view(
         group: &state::MarketViewMutV16<'_>,
         portfolio: &percolator::PortfolioV16ViewMut<'_>,
@@ -11055,6 +11186,16 @@ pub mod processor {
         }
         let mut market_data = market_ai.try_borrow_mut_data()?;
         let (_, group) = state::market_view_mut(&mut market_data)?;
+        {
+            let account_a_data = account_a_ai.try_borrow_data()?;
+            let account_a_raw = raw_portfolio_account_preflight(&account_a_data)?;
+            ensure_source_domain_shape_before_matcher_raw(&group, account_a_raw)?;
+        }
+        {
+            let account_b_data = account_b_ai.try_borrow_data()?;
+            let account_b_raw = raw_portfolio_account_preflight(&account_b_data)?;
+            ensure_source_domain_shape_before_matcher_raw(&group, account_b_raw)?;
+        }
         let mut account_a_data = account_a_ai.try_borrow_mut_data()?;
         let account_a =
             state::portfolio_view_mut_for_market_slots(&mut account_a_data, max_market_slots)?;
