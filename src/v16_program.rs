@@ -5599,6 +5599,7 @@ pub mod processor {
             group
                 .register_empty_materialized_portfolio_not_atomic(&portfolio.as_view())
                 .map_err(map_v16_error)?;
+            group.validate_shape().map_err(map_v16_error)?;
         }
         let _ = (cfg, source_domain_count);
         Ok(())
@@ -7040,6 +7041,7 @@ pub mod processor {
             group
                 .deregister_empty_materialized_portfolio_not_atomic(&portfolio.as_view())
                 .map_err(map_v16_error)?;
+            group.validate_shape().map_err(map_v16_error)?;
         }
         close_portfolio_account_to_market_slab(portfolio_ai, market_ai)?;
         Ok(())

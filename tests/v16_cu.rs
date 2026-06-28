@@ -8734,6 +8734,68 @@ fn v16_bpf_close_portfolio_sweeps_rent_to_market_slab() {
     }
 }
 
+// LoF/DoS sweep: ClosePortfolio deregisters the portfolio and then sweeps rent into the market slab.
+// The handler must still reject an invalid final market shape before committing either the
+// materialized-count decrement or the account close.
+#[test]
+fn v16_attack_close_portfolio_rejects_invalid_final_market_shape() {
+    let mut env = V16CuEnv::new();
+    let owner = Keypair::new();
+    let portfolio = env.create_portfolio(&owner);
+    assert_eq!(
+        env.market_state().1.materialized_portfolio_count,
+        1,
+        "fresh empty portfolio is materialized before close"
+    );
+
+    env.mutate_market(|_, group| {
+        group.insurance_domain_budget[0] = group.insurance.saturating_add(1);
+    });
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let portfolio_before = env.svm.get_account(&portfolio).unwrap();
+
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::ClosePortfolio,
+        vec![
+            AccountMeta::new(owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio, false),
+        ],
+        &[&owner],
+    );
+    assert!(
+        rejected.is_err(),
+        "ClosePortfolio must reject an invalid final market shape"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "invalid-shape rejection must not decrement materialized count or receive rent"
+    );
+    assert_eq!(
+        env.svm.get_account(&portfolio).unwrap(),
+        portfolio_before,
+        "invalid-shape rejection must not zero or drain the portfolio account"
+    );
+
+    env.mutate_market(|_, group| {
+        group.insurance_domain_budget[0] = 0;
+    });
+    env.svm.expire_blockhash();
+    let close_cu = env.close_portfolio_with_cu(&owner, portfolio);
+    assert_cu_within(
+        "ClosePortfolio retry after invalid-shape rejection",
+        close_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    assert_eq!(
+        env.market_state().1.materialized_portfolio_count,
+        0,
+        "same portfolio remains closeable after repairing the market shape"
+    );
+}
+
 #[test]
 fn v16_attack_non_owner_cannot_close_flat_portfolio() {
     let mut env = V16CuEnv::new();
@@ -55302,6 +55364,70 @@ fn v16_attack_init_portfolio_rejects_when_resolve_matured() {
         "resolved market has no attacker-created materialized account"
     );
     env.close_slab_with_cu();
+}
+
+// LoF/DoS sweep: InitPortfolio increments the materialized portfolio count and initializes a user
+// account. An invalid final market shape must reject before those writes can commit.
+#[test]
+fn v16_attack_init_portfolio_rejects_invalid_final_market_shape() {
+    let mut env = V16CuEnv::new();
+    let owner = Keypair::new();
+    env.ensure_signer_account(owner.pubkey());
+    let portfolio = env.program_account(env.portfolio_account_len);
+
+    env.mutate_market(|_, group| {
+        group.insurance_domain_budget[0] = group.insurance.saturating_add(1);
+    });
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let portfolio_before = env.svm.get_account(&portfolio).unwrap();
+
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::InitPortfolio,
+        vec![
+            AccountMeta::new(owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio, false),
+        ],
+        &[&owner],
+    );
+    assert!(
+        rejected.is_err(),
+        "InitPortfolio must reject an invalid final market shape"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "invalid-shape rejection must not increment materialized count"
+    );
+    assert_eq!(
+        env.svm.get_account(&portfolio).unwrap(),
+        portfolio_before,
+        "invalid-shape rejection must not initialize the target portfolio"
+    );
+
+    env.mutate_market(|_, group| {
+        group.insurance_domain_budget[0] = 0;
+    });
+    env.svm.expire_blockhash();
+    let accepted = env.send(
+        ProgInstruction::InitPortfolio,
+        vec![
+            AccountMeta::new(owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio, false),
+        ],
+        &[&owner],
+    );
+    assert!(
+        accepted.is_ok(),
+        "valid InitPortfolio remains live after repairing market shape: {accepted:?}"
+    );
+    assert_eq!(
+        env.market_state().1.materialized_portfolio_count,
+        1,
+        "repaired InitPortfolio materializes the account"
+    );
 }
 
 // security.md sweep - stale InitPortfolio undersized realloc rollback (#5/#44/#48):
