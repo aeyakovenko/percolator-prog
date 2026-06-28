@@ -21543,6 +21543,113 @@ fn v16_attack_tradecpi_zero_fill_is_clean() {
     let _ = r;
 }
 
+// Full-interface rollback sweep: the single TradeCpi zero-fill path returns before the shared
+// no-CPI engine fill path. It still bumps matcher_req_seq and lets the matcher write its context, so
+// it must run the same final market-shape guard and propagate that error instead of committing a
+// successful no-op against malformed accounting.
+#[test]
+fn v16_attack_tradecpi_zero_fill_rejects_invalid_final_market_shape() {
+    let mut env = V16CuEnv::new();
+    let matcher_program = Pubkey::new_unique();
+    let matcher_bytes = std::fs::read(matcher_program_path()).expect("read matcher BPF");
+    env.svm.add_program(matcher_program, &matcher_bytes);
+    let taker_owner = Keypair::new();
+    let taker = env.create_portfolio(&taker_owner);
+    let maker_owner = Keypair::new();
+    let maker = env.create_portfolio(&maker_owner);
+    env.deposit(&taker_owner, taker, 1_000_000);
+    env.deposit(&maker_owner, maker, 1_000_000);
+    let (ctx, delegate, _) = env.init_matcher_context_with_data_authorized(
+        matcher_program,
+        &maker_owner,
+        maker,
+        encode_matcher_init_passive(0),
+    );
+
+    env.mutate_market(|_, group| {
+        group.insurance_domain_budget[0] = group.insurance.saturating_add(1);
+    });
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let taker_before = env.svm.get_account(&taker).unwrap();
+    let maker_before = env.svm.get_account(&maker).unwrap();
+    let ctx_before = env.svm.get_account(&ctx).unwrap();
+
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::TradeCpi {
+            asset_index: 0,
+            size_q: (10 * POS_SCALE) as i128,
+            fee_bps: 100,
+            limit_price: 0,
+        },
+        vec![
+            AccountMeta::new(taker_owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(taker, false),
+            AccountMeta::new(maker, false),
+            AccountMeta::new_readonly(matcher_program, false),
+            AccountMeta::new(ctx, false),
+            AccountMeta::new_readonly(delegate, false),
+        ],
+        &[&taker_owner],
+    );
+    assert!(
+        rejected.is_err(),
+        "TradeCpi zero-fill must reject an invalid final market shape"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "failed zero-fill must roll back the matcher req_id bump and market bytes"
+    );
+    assert_eq!(
+        env.svm.get_account(&taker).unwrap(),
+        taker_before,
+        "failed zero-fill must not mutate the taker portfolio"
+    );
+    assert_eq!(
+        env.svm.get_account(&maker).unwrap(),
+        maker_before,
+        "failed zero-fill must not mutate the LP portfolio"
+    );
+    assert_eq!(
+        env.svm.get_account(&ctx).unwrap(),
+        ctx_before,
+        "failed zero-fill must roll back matcher context writes"
+    );
+
+    env.mutate_market(|_, group| {
+        group.insurance_domain_budget[0] = 0;
+    });
+    env.svm.expire_blockhash();
+    let accepted = env.send(
+        ProgInstruction::TradeCpi {
+            asset_index: 0,
+            size_q: (10 * POS_SCALE) as i128,
+            fee_bps: 100,
+            limit_price: 0,
+        },
+        vec![
+            AccountMeta::new(taker_owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(taker, false),
+            AccountMeta::new(maker, false),
+            AccountMeta::new_readonly(matcher_program, false),
+            AccountMeta::new(ctx, false),
+            AccountMeta::new_readonly(delegate, false),
+        ],
+        &[&taker_owner],
+    );
+    assert!(
+        accepted.is_ok(),
+        "valid zero-fill remains a clean no-op after shape repair: {accepted:?}"
+    );
+    let (_, group) = env.market_state();
+    assert_eq!(group.assets[0].oi_eff_long_q, 0);
+    assert_eq!(group.assets[0].oi_eff_short_q, 0);
+    assert_eq!(group.vault as u64, env.token_amount(env.vault));
+}
+
 // security.md sweep — TradeCpi self-trade (#49 wash): taker == maker (same portfolio) on the matcher
 // CPI path must reject like TradeNoCpi self-trade — no wash position / OI fabrication.
 #[test]
