@@ -10886,17 +10886,25 @@ pub mod processor {
             return Ok(false);
         }
         let market_id = asset.market_id.get();
+        let mut found_active_for_asset = false;
+        let mut found_current_market = false;
         let mut slot = 0usize;
         while slot < percolator::V16_MAX_PORTFOLIO_ASSETS_N {
             let leg = portfolio.header.legs[slot]
                 .try_to_runtime()
                 .map_err(map_v16_error)?;
-            if leg.active && leg.asset_index as usize == asset_index && leg.market_id == market_id {
-                return Ok(true);
+            if leg.active && leg.asset_index as usize == asset_index {
+                if found_active_for_asset {
+                    return Err(PercolatorError::EngineHiddenLeg.into());
+                }
+                found_active_for_asset = true;
+                if leg.market_id == market_id {
+                    found_current_market = true;
+                }
             }
             slot += 1;
         }
-        Ok(false)
+        Ok(found_current_market)
     }
 
     fn signed_position_for_asset_view(
