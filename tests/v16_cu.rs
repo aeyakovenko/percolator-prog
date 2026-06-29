@@ -89910,6 +89910,86 @@ fn v16_bpf_10m_market_preexisting_portfolios_trade_after_growth() {
     assert!(group.vault >= group.c_tot + group.insurance);
 }
 
+// LoF/DoS sweep - RebalanceReduce is an owner exit route, not just a recovery helper. A user with
+// a high-index position in the largest market account that fits LiteSVM must be able to reduce risk
+// under bounded CU, without scanning the whole 10MiB slab or requiring a counterparty signature.
+#[test]
+fn v16_bpf_10m_market_rebalance_reduce_high_asset_stays_bounded() {
+    const N: usize = 5_834;
+    const HIGH_ASSET: usize = N - 1;
+    const PRICE: u64 = 100;
+    const AMOUNT: u128 = 1_000_000;
+
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(1, 10_000, 10_000, 10_000);
+    let account_len = grow_market_to_10m_with_high_active_asset(&mut env, N, HIGH_ASSET, PRICE);
+
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long_account = env.create_portfolio(&long_owner);
+    let short_account = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long_account, AMOUNT);
+    env.deposit(&short_owner, short_account, AMOUNT);
+    env.trade_asset_with_cu(
+        HIGH_ASSET as u16,
+        &long_owner,
+        long_account,
+        &short_owner,
+        short_account,
+        (2 * POS_SCALE) as i128,
+        PRICE,
+        0,
+    );
+    let short_account_before = env.svm.get_account(&short_account).unwrap();
+    assert_eq!(
+        active_leg_for_asset(&env.portfolio_state(long_account), HIGH_ASSET).basis_pos_q,
+        (2 * POS_SCALE) as i128,
+        "setup opens a non-vacuous high-index long position"
+    );
+
+    env.svm.expire_blockhash();
+    let reduce_cu =
+        env.rebalance_reduce_with_cu(&long_owner, long_account, HIGH_ASSET as u16, POS_SCALE);
+    println!(
+        "v16 10MiB RebalanceReduce high asset: assets={N}, account_len={account_len}, \
+         asset={HIGH_ASSET}, CU={reduce_cu}"
+    );
+    assert_cu_within(
+        "10MiB high-asset RebalanceReduce",
+        reduce_cu,
+        CUSTODY_CU_LIMIT,
+    );
+
+    let long_after = env.portfolio_state(long_account);
+    let (_, group_after) = env.market_state();
+    assert_eq!(
+        active_leg_for_asset(&long_after, HIGH_ASSET).basis_pos_q,
+        POS_SCALE as i128,
+        "owner reduce makes one position-sized unit of high-index exit progress"
+    );
+    assert_eq!(
+        group_after.assets[HIGH_ASSET].oi_eff_long_q, POS_SCALE,
+        "high-index market OI is reduced with the account leg"
+    );
+    assert_eq!(
+        group_after.assets[HIGH_ASSET].oi_eff_short_q, POS_SCALE,
+        "paired market OI remains balanced after owner reduce"
+    );
+    assert_eq!(
+        env.svm.get_account(&short_account).unwrap(),
+        short_account_before,
+        "RebalanceReduce does not require or mutate a writable counterparty account"
+    );
+    assert_eq!(
+        group_after.vault as u64,
+        env.token_amount(env.vault),
+        "RebalanceReduce moves no SPL custody"
+    );
+    assert!(
+        group_after.vault >= group_after.c_tot + group_after.insurance,
+        "senior conservation after high-index RebalanceReduce"
+    );
+}
+
 // LoF/DoS sweep — a user stuck in the close-progress state must still be able
 // to cancel that recovery ledger on a max-size market. This is a distinct
 // recovery route from the flat Deposit/Withdraw/ClosePortfolio lifecycle.
