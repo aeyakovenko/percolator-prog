@@ -65180,6 +65180,97 @@ fn v16_attack_batch_trades_reject_with_backing_fee_policy() {
     assert_eq!(active_leg_for_asset(&lp_after, 0).basis_pos_q, -sz);
 }
 
+// LoF/DoS sweep: backing-fee policy intentionally gates batch trade accounting, but it must not
+// strand users who rely on the public single-fill CPI route where the LP does not co-sign. Proves
+// a TradeCpi open and exit both remain live while the same active policy blocks BatchTradeCpi.
+#[test]
+fn v16_attack_tradecpi_open_and_exit_remain_live_with_backing_fee_policy() {
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(1, 1_000, 1_000, 500);
+    env.configure_auth_mark_for_asset_as_admin(0, 1, 100);
+    env.update_backing_fee_policy_with_cu(0, 77, 5_000);
+    assert_eq!(
+        env.market_state().0.backing_trade_fee_policy_count,
+        1,
+        "test setup must activate the backing-fee batch gate"
+    );
+
+    let taker = Keypair::new();
+    let lp = Keypair::new();
+    let ta = env.create_portfolio(&taker);
+    let la = env.create_portfolio(&lp);
+    env.deposit(&taker, ta, 1_000_000);
+    env.deposit(&lp, la, 1_000_000);
+
+    let matcher_program = Pubkey::new_unique();
+    let matcher_bytes = std::fs::read(auth_matcher_program_path()).expect("read auth matcher BPF");
+    env.svm.add_program(matcher_program, &matcher_bytes);
+    let (ctx, delegate, _) = env.init_auth_matcher_context(matcher_program, &lp, la);
+
+    let sz = (5 * POS_SCALE) as i128;
+    env.svm.expire_blockhash();
+    let open_cu = env
+        .try_trade_cpi_with_cu_on_asset(
+            &taker,
+            ta,
+            &lp,
+            la,
+            matcher_program,
+            ctx,
+            delegate,
+            0,
+            sz,
+            0,
+        )
+        .expect("single TradeCpi open must remain live with active backing-fee policy");
+    assert_cu_within(
+        "TradeCpi backing-fee-policy open",
+        open_cu,
+        MULTI_ASSET_OPEN_TRADE_CU_LIMIT,
+    );
+    assert_eq!(
+        active_leg_for_asset(&env.portfolio_state(ta), 0).basis_pos_q,
+        sz
+    );
+    assert_eq!(
+        active_leg_for_asset(&env.portfolio_state(la), 0).basis_pos_q,
+        -sz
+    );
+
+    env.svm.expire_blockhash();
+    let close_cu = env
+        .try_trade_cpi_with_cu_on_asset(
+            &taker,
+            ta,
+            &lp,
+            la,
+            matcher_program,
+            ctx,
+            delegate,
+            0,
+            -sz,
+            0,
+        )
+        .expect("single TradeCpi exit must remain live with active backing-fee policy");
+    assert_cu_within(
+        "TradeCpi backing-fee-policy exit",
+        close_cu,
+        MULTI_ASSET_OPEN_TRADE_CU_LIMIT,
+    );
+    assert!(
+        !has_active_leg_for_asset(&env.portfolio_state(ta), 0),
+        "taker can fully exit through single TradeCpi while the backing-fee policy is active"
+    );
+    assert!(
+        !has_active_leg_for_asset(&env.portfolio_state(la), 0),
+        "LP leg closes through the same public CPI route"
+    );
+    assert_eq!(
+        env.market_state().0.backing_trade_fee_policy_count,
+        1,
+        "the single TradeCpi escape route must not silently clear the batch gate"
+    );
+}
+
 // security.md sweep — the batch-trade backing-fee gate must not become a sticky DoS. The wrapper
 // keeps a global count of nonzero per-domain backing-fee policies because batch fee splitting is
 // intentionally disabled while any policy is active. Updating one policy nonzero->nonzero must not
