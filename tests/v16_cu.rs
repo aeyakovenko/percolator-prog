@@ -10650,6 +10650,203 @@ fn v16_attack_active_refresh_without_observation_uses_committed_state() {
 }
 
 #[test]
+fn v16_attack_no_observation_refresh_cannot_skip_premium_funding() {
+    const PRICE: u64 = 1_000_000;
+    const DEPOSIT: u128 = 100_000_000;
+    const OPEN_SLOT: u64 = 1;
+    const PREMIUM_SLOT: u64 = 2;
+    const STALE_SLOT: u64 = 3;
+
+    let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+        max_portfolio_assets: 2,
+        initial_price: PRICE,
+        max_price_move_bps_per_slot: 1_000,
+        max_accrual_dt_slots: 1,
+        max_abs_funding_e9_per_slot: 1_000,
+        min_funding_lifetime_slots: 1,
+        ..V16CuMarketParams::default()
+    });
+    env.svm.warp_to_slot(OPEN_SLOT);
+    env.configure_ewma_mark_for_asset_as_admin(0, OPEN_SLOT, PRICE, 1, 0);
+    env.configure_auth_mark_for_asset_as_admin(1, OPEN_SLOT, PRICE);
+
+    let owner_a = Keypair::new();
+    let owner_b = Keypair::new();
+    let asset1_owner = Keypair::new();
+    let asset1_counter_owner = Keypair::new();
+    let account_a = env.create_portfolio(&owner_a);
+    let account_b = env.create_portfolio(&owner_b);
+    let asset1_account = env.create_portfolio(&asset1_owner);
+    let asset1_counter = env.create_portfolio(&asset1_counter_owner);
+    env.deposit(&owner_a, account_a, DEPOSIT);
+    env.deposit(&owner_b, account_b, DEPOSIT);
+    env.deposit(&asset1_owner, asset1_account, DEPOSIT);
+    env.deposit(&asset1_counter_owner, asset1_counter, DEPOSIT);
+    env.trade_asset_with_cu(
+        0,
+        &owner_a,
+        account_a,
+        &owner_b,
+        account_b,
+        POS_SCALE as i128,
+        PRICE,
+        0,
+    );
+    env.svm.expire_blockhash();
+    env.trade_asset_with_cu(
+        1,
+        &owner_a,
+        account_a,
+        &owner_b,
+        account_b,
+        POS_SCALE as i128,
+        PRICE,
+        0,
+    );
+    env.svm.expire_blockhash();
+    env.trade_asset_with_cu(
+        1,
+        &asset1_owner,
+        asset1_account,
+        &asset1_counter_owner,
+        asset1_counter,
+        POS_SCALE as i128,
+        PRICE,
+        0,
+    );
+
+    env.svm.warp_to_slot(PREMIUM_SLOT);
+    env.push_ewma_mark_with_cu(PREMIUM_SLOT, PRICE * 2);
+    env.crank(
+        account_a,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: PREMIUM_SLOT,
+            close_q: 0,
+            observations: crank_observations(0),
+        },
+    );
+    let (_, premium_group) = env.market_state();
+    assert_eq!(
+        premium_group.assets[0].effective_price,
+        PRICE + PRICE / 10,
+        "first observed crank applies only the capped price move"
+    );
+    let premium_profile =
+        state::read_asset_oracle_profile(&env.svm.get_account(&env.market).unwrap().data, 0)
+            .unwrap();
+    assert!(
+        premium_profile.mark_ewma_e6 > premium_group.assets[0].effective_price,
+        "EWMA premium remains after the first capped move"
+    );
+    assert_eq!(
+        premium_group.funding_epoch, 0,
+        "newly staged premium must not retroactively charge funding"
+    );
+    assert!(
+        premium_group.assets[0].f_long_num == 0 && premium_group.assets[0].f_short_num == 0,
+        "setup has not charged funding yet"
+    );
+
+    env.svm.warp_to_slot(STALE_SLOT);
+    env.push_auth_mark_for_asset_as_admin(1, STALE_SLOT, PRICE + PRICE / 100);
+    env.crank(
+        asset1_account,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: STALE_SLOT,
+            close_q: 0,
+            observations: crank_observations(1),
+        },
+    );
+    let (_, before_no_observation) = env.market_state();
+    assert!(
+        health_cert(&env.portfolio_state(account_a)).cert_oracle_epoch
+            < before_no_observation.oracle_epoch,
+        "asset-1 progress makes account A stale while asset-0 premium funding is pending"
+    );
+    assert_eq!(
+        before_no_observation.assets[0].slot_last, PREMIUM_SLOT,
+        "asset-0 still has an unaccrued premium window"
+    );
+    let profile0_before_no_observation =
+        state::read_asset_oracle_profile(&env.svm.get_account(&env.market).unwrap().data, 0)
+            .unwrap();
+    let next_asset0_price = oracle_v16::effective_price_from_target(
+        before_no_observation.assets[0].effective_price,
+        profile0_before_no_observation.mark_ewma_e6,
+        before_no_observation.config.max_price_move_bps_per_slot,
+        STALE_SLOT - before_no_observation.assets[0].slot_last,
+        true,
+    );
+    assert_ne!(
+        next_asset0_price, before_no_observation.assets[0].effective_price,
+        "setup must leave a real selected-asset mark move for the missing-observation guard"
+    );
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let account_before = env.svm.get_account(&account_a).unwrap();
+    env.svm.expire_blockhash();
+    let omitted_observation = env.send(
+        ProgInstruction::PermissionlessCrank {
+            now_slot: STALE_SLOT,
+            close_q: 0,
+            observations: vec![],
+        },
+        vec![
+            AccountMeta::new(env.payer.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(account_a, false),
+        ],
+        &[],
+    );
+    assert!(
+        omitted_observation.is_err(),
+        "no-observation refresh must not advance asset-0 with zero funding while premium funding is pending"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "rejected no-observation refresh must not consume the premium funding window"
+    );
+    assert_eq!(
+        env.svm.get_account(&account_a).unwrap(),
+        account_before,
+        "rejected no-observation refresh must not certify the target account"
+    );
+
+    env.svm.expire_blockhash();
+    let observed = env.send(
+        ProgInstruction::PermissionlessCrank {
+            now_slot: STALE_SLOT,
+            close_q: 0,
+            observations: crank_observations(0),
+        },
+        vec![
+            AccountMeta::new(env.payer.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(account_a, false),
+        ],
+        &[],
+    );
+    assert!(
+        observed.is_ok(),
+        "supplying the selected premium observation keeps the public refresh route live: {observed:?}"
+    );
+    let (_, funded_group) = env.market_state();
+    assert!(
+        funded_group.funding_epoch > before_no_observation.funding_epoch,
+        "observed retry accrues the premium funding that no-observation refresh would have skipped"
+    );
+    assert_ne!(
+        funded_group.assets[0].f_long_num, before_no_observation.assets[0].f_long_num,
+        "asset-0 funding ledger advances on the observed retry"
+    );
+    assert_eq!(
+        funded_group.assets[0].slot_last, STALE_SLOT,
+        "observed retry consumes the premium window at the authenticated slot"
+    );
+}
+
+#[test]
 fn v16_bpf_tradenocpi_rejects_off_mark_recycle_when_deficit_cannot_settle() {
     let mut env = V16CuEnv::new();
     env.top_up_insurance(1_000_000);
