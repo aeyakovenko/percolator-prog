@@ -10847,6 +10847,172 @@ fn v16_attack_no_observation_refresh_cannot_skip_premium_funding() {
 }
 
 #[test]
+fn v16_attack_no_observation_refresh_cannot_certify_over_later_active_mark_move() {
+    const PRICE: u64 = 1_000_000;
+    const NEXT_PRICE: u64 = 1_100_000;
+    const DEPOSIT: u128 = 100_000_000;
+    const OPEN_SLOT: u64 = 1;
+    const STALE_SLOT: u64 = 2;
+
+    let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+        max_portfolio_assets: 3,
+        initial_price: PRICE,
+        max_price_move_bps_per_slot: 500,
+        max_accrual_dt_slots: 1,
+        ..V16CuMarketParams::default()
+    });
+    env.svm.warp_to_slot(OPEN_SLOT);
+    env.configure_auth_mark_for_asset_as_admin(0, OPEN_SLOT, PRICE);
+    env.configure_auth_mark_for_asset_as_admin(1, OPEN_SLOT, PRICE);
+    env.configure_auth_mark_for_asset_as_admin(2, OPEN_SLOT, PRICE);
+
+    let owner_a = Keypair::new();
+    let owner_b = Keypair::new();
+    let asset2_owner = Keypair::new();
+    let asset2_counter_owner = Keypair::new();
+    let account_a = env.create_portfolio(&owner_a);
+    let account_b = env.create_portfolio(&owner_b);
+    let asset2_account = env.create_portfolio(&asset2_owner);
+    let asset2_counter = env.create_portfolio(&asset2_counter_owner);
+    env.deposit(&owner_a, account_a, DEPOSIT);
+    env.deposit(&owner_b, account_b, DEPOSIT);
+    env.deposit(&asset2_owner, asset2_account, DEPOSIT);
+    env.deposit(&asset2_counter_owner, asset2_counter, DEPOSIT);
+
+    env.trade_asset_with_cu(
+        1,
+        &owner_a,
+        account_a,
+        &owner_b,
+        account_b,
+        POS_SCALE as i128,
+        PRICE,
+        0,
+    );
+    env.svm.expire_blockhash();
+    env.trade_asset_with_cu(
+        0,
+        &owner_a,
+        account_a,
+        &owner_b,
+        account_b,
+        POS_SCALE as i128,
+        PRICE,
+        0,
+    );
+    env.svm.expire_blockhash();
+    env.trade_asset_with_cu(
+        2,
+        &asset2_owner,
+        asset2_account,
+        &asset2_counter_owner,
+        asset2_counter,
+        POS_SCALE as i128,
+        PRICE,
+        0,
+    );
+    assert_eq!(
+        leg(&env.portfolio_state(account_a), 0).asset_index,
+        1,
+        "setup requires asset 1 to be the engine-selected first active leg"
+    );
+    assert_eq!(
+        leg(&env.portfolio_state(account_a), 1).asset_index,
+        0,
+        "asset 0 is the later active leg with pending mark work"
+    );
+
+    env.svm.warp_to_slot(STALE_SLOT);
+    env.push_auth_mark_for_asset_as_admin(0, STALE_SLOT, NEXT_PRICE);
+    env.push_auth_mark_for_asset_as_admin(2, STALE_SLOT, PRICE + PRICE / 10);
+    env.crank(
+        asset2_account,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: STALE_SLOT,
+            close_q: 0,
+            observations: crank_observations(2),
+        },
+    );
+    let (_, before_missing) = env.market_state();
+    assert!(
+        health_cert(&env.portfolio_state(account_a)).cert_oracle_epoch
+            < before_missing.oracle_epoch,
+        "unrelated asset-2 progress makes the account stale while asset 0 is still pending"
+    );
+    let next_asset0_price = oracle_v16::effective_price_from_target(
+        before_missing.assets[0].effective_price,
+        NEXT_PRICE,
+        before_missing.config.max_price_move_bps_per_slot,
+        STALE_SLOT - before_missing.assets[0].slot_last,
+        true,
+    );
+    assert_ne!(
+        next_asset0_price, before_missing.assets[0].effective_price,
+        "setup must leave a real pending asset-0 price move"
+    );
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let account_before = env.svm.get_account(&account_a).unwrap();
+    env.svm.expire_blockhash();
+    let omitted_observation = env.send(
+        ProgInstruction::PermissionlessCrank {
+            now_slot: STALE_SLOT,
+            close_q: 0,
+            observations: vec![],
+        },
+        vec![
+            AccountMeta::new(env.payer.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(account_a, false),
+        ],
+        &[],
+    );
+    assert!(
+        omitted_observation.is_err(),
+        "no-observation refresh must not certify over a later active leg's pending mark move"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "rejected no-observation refresh must not consume the pending asset-0 move"
+    );
+    assert_eq!(
+        env.svm.get_account(&account_a).unwrap(),
+        account_before,
+        "rejected no-observation refresh must not certify the target"
+    );
+
+    env.svm.expire_blockhash();
+    let observed = env.send(
+        ProgInstruction::PermissionlessCrank {
+            now_slot: STALE_SLOT,
+            close_q: 0,
+            observations: crank_observations(0),
+        },
+        vec![
+            AccountMeta::new(env.payer.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(account_a, false),
+        ],
+        &[],
+    );
+    assert!(
+        observed.is_ok(),
+        "supplying the later active asset observation keeps the refresh route live: {observed:?}"
+    );
+    let (_, after_observed) = env.market_state();
+    assert_eq!(
+        after_observed.assets[0].effective_price, next_asset0_price,
+        "observed retry consumes the later active asset's pending mark move"
+    );
+    assert_eq!(
+        health_cert(&env.portfolio_state(account_a)).cert_oracle_epoch,
+        after_observed.oracle_epoch,
+        "observed retry certifies only after the pending active-leg move is applied"
+    );
+}
+
+#[test]
 fn v16_bpf_tradenocpi_rejects_off_mark_recycle_when_deficit_cannot_settle() {
     let mut env = V16CuEnv::new();
     env.top_up_insurance(1_000_000);

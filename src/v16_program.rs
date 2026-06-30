@@ -10954,17 +10954,14 @@ pub mod processor {
             let summary = group
                 .build_actionable_summary(&portfolio.as_view())
                 .map_err(map_v16_error)?;
-            if let Some(asset_index) =
-                auto_crank_selected_asset_that_accrues_view(&portfolio, &summary)?
-            {
-                reject_missing_pending_selected_observation_view(
-                    &cfg,
-                    &group,
-                    asset_index,
-                    authenticated_now_slot,
-                    observations.as_slice(),
-                )?;
-            }
+            reject_missing_pending_account_observations_view(
+                &cfg,
+                &group,
+                &portfolio,
+                &summary,
+                authenticated_now_slot,
+                observations.as_slice(),
+            )?;
             let result = match group.permissionless_auto_crank_not_atomic(
                 &mut portfolio,
                 AutoCrankWorkV16 {
@@ -11145,13 +11142,23 @@ pub mod processor {
         Ok(())
     }
 
-    fn first_active_asset_from_portfolio_view(
+    fn reject_missing_pending_account_observations_view(
+        cfg: &WrapperConfigV16,
+        group: &state::MarketViewMutV16<'_>,
         portfolio: &percolator::PortfolioV16ViewMut<'_>,
-    ) -> Result<Option<usize>, ProgramError> {
+        summary: &percolator::ActionableSummaryV16,
+        now_slot: u64,
+        observations: &[AutoCrankObservationV16],
+    ) -> ProgramResult {
+        if summary.b_stale || !(summary.stale || summary.liquidatable) {
+            return Ok(());
+        }
         let active_bitmap = portfolio
             .header
             .active_bitmap
             .map(percolator::V16PodU64::get);
+        let mut seen_assets = [u32::MAX; percolator::V16_MAX_PORTFOLIO_ASSETS_N];
+        let mut seen_asset_count = 0usize;
         let mut slot = 0usize;
         while slot < percolator::V16_MAX_PORTFOLIO_ASSETS_N {
             let leg = portfolio.header.legs[slot]
@@ -11162,24 +11169,26 @@ pub mod processor {
                 return Err(PercolatorError::EngineHiddenLeg.into());
             }
             if bit {
-                return Ok(Some(leg.asset_index as usize));
+                let mut seen = 0usize;
+                while seen < seen_asset_count {
+                    if seen_assets[seen] == leg.asset_index {
+                        return Err(PercolatorError::EngineHiddenLeg.into());
+                    }
+                    seen += 1;
+                }
+                seen_assets[seen_asset_count] = leg.asset_index;
+                seen_asset_count += 1;
+                reject_missing_pending_selected_observation_view(
+                    cfg,
+                    group,
+                    leg.asset_index as usize,
+                    now_slot,
+                    observations,
+                )?;
             }
             slot += 1;
         }
-        Ok(None)
-    }
-
-    fn auto_crank_selected_asset_that_accrues_view(
-        portfolio: &percolator::PortfolioV16ViewMut<'_>,
-        summary: &percolator::ActionableSummaryV16,
-    ) -> Result<Option<usize>, ProgramError> {
-        if summary.b_stale {
-            return Ok(None);
-        }
-        if summary.stale || summary.liquidatable {
-            return first_active_asset_from_portfolio_view(portfolio);
-        }
-        Ok(None)
+        Ok(())
     }
 
     fn reject_missing_pending_selected_observation_view(
