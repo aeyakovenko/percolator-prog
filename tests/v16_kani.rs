@@ -36,31 +36,270 @@ fn kani_v16_premium_funding_rate_is_clamped_and_signed() {
 
 #[kani::proof]
 fn kani_v16_init_market_decode_preserves_wire_fields() {
-    // Full-width symbolic inputs (audit: avoid the u16->u64/u128 widening collapse so
-    // narrow-read / high-byte decode bugs are observable).
     let max_portfolio_assets: u16 = kani::any();
     let h_min: u64 = kani::any();
     let h_max: u64 = kani::any();
     let initial_price: u64 = kani::any();
+
+    match decode_init_market_payload_for_kani(
+        max_portfolio_assets,
+        h_min,
+        h_max,
+        initial_price,
+        5,
+        7,
+        9,
+        11,
+        13,
+        17,
+        19,
+        23,
+        29,
+        31,
+        37,
+        41,
+        43,
+        47,
+        53,
+        59,
+        61,
+        67,
+    ) {
+        Instruction::InitMarket {
+            max_portfolio_assets: got_max_assets,
+            h_min: got_h_min,
+            h_max: got_h_max,
+            initial_price: got_initial_price,
+            ..
+        } => {
+            assert_eq!(got_max_assets, max_portfolio_assets);
+            assert_eq!(got_h_min, h_min);
+            assert_eq!(got_h_max, h_max);
+            assert_eq!(got_initial_price, initial_price);
+        }
+        _ => unreachable!(),
+    }
+}
+
+#[kani::proof]
+fn kani_v16_init_market_decode_preserves_margin_and_fee_fields() {
     let min_nonzero_mm_req: u128 = kani::any();
     let min_nonzero_im_req: u128 = kani::any();
     let maintenance_margin_bps: u64 = kani::any();
     let initial_margin_bps: u64 = kani::any();
     let max_trading_fee_bps: u64 = kani::any();
     let trade_fee_base_bps: u64 = kani::any();
+
+    match decode_init_market_payload_for_kani(
+        3,
+        5,
+        7,
+        11,
+        min_nonzero_mm_req,
+        min_nonzero_im_req,
+        maintenance_margin_bps,
+        initial_margin_bps,
+        max_trading_fee_bps,
+        trade_fee_base_bps,
+        13,
+        17,
+        19,
+        23,
+        29,
+        31,
+        37,
+        41,
+        43,
+        47,
+        53,
+        59,
+    ) {
+        Instruction::InitMarket {
+            min_nonzero_mm_req: got_min_mm,
+            min_nonzero_im_req: got_min_im,
+            maintenance_margin_bps: got_mm,
+            initial_margin_bps: got_im,
+            max_trading_fee_bps: got_fee,
+            trade_fee_base_bps: got_base_fee,
+            ..
+        } => {
+            assert_eq!(got_min_mm, min_nonzero_mm_req);
+            assert_eq!(got_min_im, min_nonzero_im_req);
+            assert_eq!(got_mm, maintenance_margin_bps);
+            assert_eq!(got_im, initial_margin_bps);
+            assert_eq!(got_fee, max_trading_fee_bps);
+            assert_eq!(got_base_fee, trade_fee_base_bps);
+        }
+        _ => unreachable!(),
+    }
+}
+
+#[kani::proof]
+fn kani_v16_init_market_decode_preserves_liquidation_fields() {
     let liquidation_fee_bps: u64 = kani::any();
     let liquidation_fee_cap: u128 = kani::any();
     let min_liquidation_abs: u128 = kani::any();
     let max_price_move_bps_per_slot: u64 = kani::any();
     let max_accrual_dt_slots: u64 = kani::any();
+
+    match decode_init_market_payload_for_kani(
+        3,
+        5,
+        7,
+        11,
+        13,
+        17,
+        19,
+        23,
+        29,
+        31,
+        liquidation_fee_bps,
+        liquidation_fee_cap,
+        min_liquidation_abs,
+        max_price_move_bps_per_slot,
+        max_accrual_dt_slots,
+        37,
+        41,
+        43,
+        47,
+        53,
+        59,
+        61,
+    ) {
+        Instruction::InitMarket {
+            liquidation_fee_bps: got_liq_fee,
+            liquidation_fee_cap: got_liq_cap,
+            min_liquidation_abs: got_min_liq,
+            max_price_move_bps_per_slot: got_move,
+            max_accrual_dt_slots: got_dt,
+            ..
+        } => {
+            assert_eq!(got_liq_fee, liquidation_fee_bps);
+            assert_eq!(got_liq_cap, liquidation_fee_cap);
+            assert_eq!(got_min_liq, min_liquidation_abs);
+            assert_eq!(got_move, max_price_move_bps_per_slot);
+            assert_eq!(got_dt, max_accrual_dt_slots);
+        }
+        _ => unreachable!(),
+    }
+}
+
+#[kani::proof]
+fn kani_v16_init_market_decode_preserves_liveness_budget_fields() {
     let max_abs_funding_e9_per_slot: u64 = kani::any();
     let min_funding_lifetime_slots: u64 = kani::any();
     let max_account_b_settlement_chunks: u64 = kani::any();
     let max_bankrupt_close_chunks: u64 = kani::any();
     let max_bankrupt_close_lifetime_slots: u64 = kani::any();
+
+    match decode_init_market_payload_for_kani(
+        3,
+        5,
+        7,
+        11,
+        13,
+        17,
+        19,
+        23,
+        29,
+        31,
+        37,
+        41,
+        43,
+        47,
+        53,
+        max_abs_funding_e9_per_slot,
+        min_funding_lifetime_slots,
+        max_account_b_settlement_chunks,
+        max_bankrupt_close_chunks,
+        max_bankrupt_close_lifetime_slots,
+        59,
+        61,
+    ) {
+        Instruction::InitMarket {
+            max_abs_funding_e9_per_slot: got_max_funding,
+            min_funding_lifetime_slots: got_funding_life,
+            max_account_b_settlement_chunks: got_b_chunks,
+            max_bankrupt_close_chunks: got_bankrupt_chunks,
+            max_bankrupt_close_lifetime_slots: got_bankrupt_lifetime,
+            ..
+        } => {
+            assert_eq!(got_max_funding, max_abs_funding_e9_per_slot);
+            assert_eq!(got_funding_life, min_funding_lifetime_slots);
+            assert_eq!(got_b_chunks, max_account_b_settlement_chunks);
+            assert_eq!(got_bankrupt_chunks, max_bankrupt_close_chunks);
+            assert_eq!(got_bankrupt_lifetime, max_bankrupt_close_lifetime_slots);
+        }
+        _ => unreachable!(),
+    }
+}
+
+#[kani::proof]
+fn kani_v16_init_market_decode_preserves_public_budget_fields() {
     let public_b_chunk_atoms: u128 = kani::any();
     let maintenance_fee_per_slot: u128 = kani::any();
 
+    match decode_init_market_payload_for_kani(
+        3,
+        5,
+        7,
+        11,
+        13,
+        17,
+        19,
+        23,
+        29,
+        31,
+        37,
+        41,
+        43,
+        47,
+        53,
+        59,
+        61,
+        67,
+        71,
+        73,
+        public_b_chunk_atoms,
+        maintenance_fee_per_slot,
+    ) {
+        Instruction::InitMarket {
+            public_b_chunk_atoms: got_public_b,
+            maintenance_fee_per_slot: got_maintenance_fee,
+            ..
+        } => {
+            assert_eq!(got_public_b, public_b_chunk_atoms);
+            assert_eq!(got_maintenance_fee, maintenance_fee_per_slot);
+        }
+        _ => unreachable!(),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn decode_init_market_payload_for_kani(
+    max_portfolio_assets: u16,
+    h_min: u64,
+    h_max: u64,
+    initial_price: u64,
+    min_nonzero_mm_req: u128,
+    min_nonzero_im_req: u128,
+    maintenance_margin_bps: u64,
+    initial_margin_bps: u64,
+    max_trading_fee_bps: u64,
+    trade_fee_base_bps: u64,
+    liquidation_fee_bps: u64,
+    liquidation_fee_cap: u128,
+    min_liquidation_abs: u128,
+    max_price_move_bps_per_slot: u64,
+    max_accrual_dt_slots: u64,
+    max_abs_funding_e9_per_slot: u64,
+    min_funding_lifetime_slots: u64,
+    max_account_b_settlement_chunks: u64,
+    max_bankrupt_close_chunks: u64,
+    max_bankrupt_close_lifetime_slots: u64,
+    public_b_chunk_atoms: u128,
+    maintenance_fee_per_slot: u128,
+) -> Instruction {
     let mut data = [0u8; 219];
     data[0] = 0;
     data[1..3].copy_from_slice(&max_portfolio_assets.to_le_bytes());
@@ -86,56 +325,7 @@ fn kani_v16_init_market_decode_preserves_wire_fields() {
     data[187..203].copy_from_slice(&public_b_chunk_atoms.to_le_bytes());
     data[203..219].copy_from_slice(&maintenance_fee_per_slot.to_le_bytes());
 
-    match Instruction::decode(&data).unwrap() {
-        Instruction::InitMarket {
-            max_portfolio_assets: got_max_assets,
-            h_min: got_h_min,
-            h_max: got_h_max,
-            initial_price: got_initial_price,
-            min_nonzero_mm_req: got_min_mm,
-            min_nonzero_im_req: got_min_im,
-            maintenance_margin_bps: got_mm,
-            initial_margin_bps: got_im,
-            max_trading_fee_bps: got_fee,
-            trade_fee_base_bps: got_base_fee,
-            liquidation_fee_bps: got_liq_fee,
-            liquidation_fee_cap: got_liq_cap,
-            min_liquidation_abs: got_min_liq,
-            max_price_move_bps_per_slot: got_move,
-            max_accrual_dt_slots: got_dt,
-            max_abs_funding_e9_per_slot: got_max_funding,
-            min_funding_lifetime_slots: got_funding_life,
-            max_account_b_settlement_chunks: got_b_chunks,
-            max_bankrupt_close_chunks: got_bankrupt_chunks,
-            max_bankrupt_close_lifetime_slots: got_bankrupt_lifetime,
-            public_b_chunk_atoms: got_public_b,
-            maintenance_fee_per_slot: got_maintenance_fee,
-        } => {
-            assert_eq!(got_max_assets, max_portfolio_assets);
-            assert_eq!(got_h_min, h_min);
-            assert_eq!(got_h_max, h_max);
-            assert_eq!(got_initial_price, initial_price);
-            assert_eq!(got_min_mm, min_nonzero_mm_req);
-            assert_eq!(got_min_im, min_nonzero_im_req);
-            assert_eq!(got_mm, maintenance_margin_bps);
-            assert_eq!(got_im, initial_margin_bps);
-            assert_eq!(got_fee, max_trading_fee_bps);
-            assert_eq!(got_base_fee, trade_fee_base_bps);
-            assert_eq!(got_liq_fee, liquidation_fee_bps);
-            assert_eq!(got_liq_cap, liquidation_fee_cap);
-            assert_eq!(got_min_liq, min_liquidation_abs);
-            assert_eq!(got_move, max_price_move_bps_per_slot);
-            assert_eq!(got_dt, max_accrual_dt_slots);
-            assert_eq!(got_max_funding, max_abs_funding_e9_per_slot);
-            assert_eq!(got_funding_life, min_funding_lifetime_slots);
-            assert_eq!(got_b_chunks, max_account_b_settlement_chunks);
-            assert_eq!(got_bankrupt_chunks, max_bankrupt_close_chunks);
-            assert_eq!(got_bankrupt_lifetime, max_bankrupt_close_lifetime_slots);
-            assert_eq!(got_public_b, public_b_chunk_atoms);
-            assert_eq!(got_maintenance_fee, maintenance_fee_per_slot);
-        }
-        _ => unreachable!(),
-    }
+    Instruction::decode_init_market_for_kani(&data).unwrap()
 }
 
 #[kani::proof]
@@ -351,45 +541,146 @@ fn kani_v16_asset_lifecycle_decode_preserves_wire_fields() {
     let asset_index: u16 = kani::any();
     let now_slot: u64 = kani::any();
     let initial_price: u64 = kani::any();
-    let insurance_authority: [u8; 32] = kani::any();
-    let insurance_operator: [u8; 32] = kani::any();
-    let backing_bucket_authority: [u8; 32] = kani::any();
-    let oracle_authority: [u8; 32] = kani::any();
 
-    let data = Instruction::UpdateAssetLifecycle {
+    match decode_asset_lifecycle_payload_for_kani(
         action,
         asset_index,
         now_slot,
         initial_price,
-        insurance_authority,
-        insurance_operator,
-        backing_bucket_authority,
-        oracle_authority,
-    }
-    .encode();
-
-    match Instruction::decode(&data).unwrap() {
+        pattern32(1),
+        pattern32(33),
+        pattern32(65),
+        pattern32(97),
+    ) {
         Instruction::UpdateAssetLifecycle {
             action: got_action,
             asset_index: got_asset_index,
             now_slot: got_now_slot,
             initial_price: got_initial_price,
-            insurance_authority: got_insurance_authority,
-            insurance_operator: got_insurance_operator,
-            backing_bucket_authority: got_backing_bucket_authority,
-            oracle_authority: got_oracle_authority,
+            ..
         } => {
             assert_eq!(got_action, action);
             assert_eq!(got_asset_index, asset_index);
             assert_eq!(got_now_slot, now_slot);
             assert_eq!(got_initial_price, initial_price);
+        }
+        _ => unreachable!(),
+    }
+}
+
+#[kani::proof]
+fn kani_v16_asset_lifecycle_decode_preserves_insurance_authorities() {
+    let insurance_authority: [u8; 32] = kani::any();
+    let insurance_operator: [u8; 32] = kani::any();
+
+    match decode_asset_lifecycle_payload_for_kani(
+        3,
+        5,
+        7,
+        11,
+        insurance_authority,
+        insurance_operator,
+        pattern32(65),
+        pattern32(97),
+    ) {
+        Instruction::UpdateAssetLifecycle {
+            insurance_authority: got_insurance_authority,
+            insurance_operator: got_insurance_operator,
+            ..
+        } => {
             assert_eq!(got_insurance_authority, insurance_authority);
             assert_eq!(got_insurance_operator, insurance_operator);
+        }
+        _ => unreachable!(),
+    }
+}
+
+#[kani::proof]
+fn kani_v16_asset_lifecycle_decode_preserves_backing_and_oracle_authorities() {
+    let backing_bucket_authority: [u8; 32] = kani::any();
+    let oracle_authority: [u8; 32] = kani::any();
+
+    match decode_asset_lifecycle_payload_for_kani(
+        3,
+        5,
+        7,
+        11,
+        pattern32(1),
+        pattern32(33),
+        backing_bucket_authority,
+        oracle_authority,
+    ) {
+        Instruction::UpdateAssetLifecycle {
+            backing_bucket_authority: got_backing_bucket_authority,
+            oracle_authority: got_oracle_authority,
+            ..
+        } => {
             assert_eq!(got_backing_bucket_authority, backing_bucket_authority);
             assert_eq!(got_oracle_authority, oracle_authority);
         }
         _ => unreachable!(),
     }
+}
+
+fn decode_asset_lifecycle_payload_for_kani(
+    action: u8,
+    asset_index: u16,
+    now_slot: u64,
+    initial_price: u64,
+    insurance_authority: [u8; 32],
+    insurance_operator: [u8; 32],
+    backing_bucket_authority: [u8; 32],
+    oracle_authority: [u8; 32],
+) -> Instruction {
+    let mut data = [0u8; 148];
+    data[0] = 40;
+    data[1] = action;
+    data[2..4].copy_from_slice(&asset_index.to_le_bytes());
+    data[4..12].copy_from_slice(&now_slot.to_le_bytes());
+    data[12..20].copy_from_slice(&initial_price.to_le_bytes());
+    data[20..52].copy_from_slice(&insurance_authority);
+    data[52..84].copy_from_slice(&insurance_operator);
+    data[84..116].copy_from_slice(&backing_bucket_authority);
+    data[116..148].copy_from_slice(&oracle_authority);
+
+    Instruction::decode_update_asset_lifecycle_for_kani(&data).unwrap()
+}
+
+fn pattern32(start: u8) -> [u8; 32] {
+    [
+        start,
+        start.wrapping_add(1),
+        start.wrapping_add(2),
+        start.wrapping_add(3),
+        start.wrapping_add(4),
+        start.wrapping_add(5),
+        start.wrapping_add(6),
+        start.wrapping_add(7),
+        start.wrapping_add(8),
+        start.wrapping_add(9),
+        start.wrapping_add(10),
+        start.wrapping_add(11),
+        start.wrapping_add(12),
+        start.wrapping_add(13),
+        start.wrapping_add(14),
+        start.wrapping_add(15),
+        start.wrapping_add(16),
+        start.wrapping_add(17),
+        start.wrapping_add(18),
+        start.wrapping_add(19),
+        start.wrapping_add(20),
+        start.wrapping_add(21),
+        start.wrapping_add(22),
+        start.wrapping_add(23),
+        start.wrapping_add(24),
+        start.wrapping_add(25),
+        start.wrapping_add(26),
+        start.wrapping_add(27),
+        start.wrapping_add(28),
+        start.wrapping_add(29),
+        start.wrapping_add(30),
+        start.wrapping_add(31),
+    ]
 }
 
 #[kani::proof]
@@ -798,23 +1089,43 @@ fn kani_v16_update_market_init_fee_policy_decode_preserves_wire_fields() {
 #[kani::proof]
 fn kani_v16_base_unit_payloads_decode_preserves_wire_fields() {
     let primary_mint: [u8; 32] = kani::any();
-    let secondary_mint: [u8; 32] = kani::any();
-    let amount: u128 = kani::any();
 
+    match decode_update_base_unit_mints_payload_for_kani(primary_mint, pattern32(101)) {
+        Instruction::UpdateBaseUnitMints {
+            primary_mint: got_primary,
+            ..
+        } => assert_eq!(got_primary, primary_mint),
+        _ => unreachable!(),
+    }
+}
+
+#[kani::proof]
+fn kani_v16_base_unit_secondary_mint_decode_preserves_wire_fields() {
+    let secondary_mint: [u8; 32] = kani::any();
+
+    match decode_update_base_unit_mints_payload_for_kani(pattern32(17), secondary_mint) {
+        Instruction::UpdateBaseUnitMints {
+            secondary_mint: got_secondary,
+            ..
+        } => assert_eq!(got_secondary, secondary_mint),
+        _ => unreachable!(),
+    }
+}
+
+fn decode_update_base_unit_mints_payload_for_kani(
+    primary_mint: [u8; 32],
+    secondary_mint: [u8; 32],
+) -> Instruction {
     let mut update = [0u8; 65];
     update[0] = 60;
     update[1..33].copy_from_slice(&primary_mint);
     update[33..65].copy_from_slice(&secondary_mint);
-    match Instruction::decode(&update).unwrap() {
-        Instruction::UpdateBaseUnitMints {
-            primary_mint: got_primary,
-            secondary_mint: got_secondary,
-        } => {
-            assert_eq!(got_primary, primary_mint);
-            assert_eq!(got_secondary, secondary_mint);
-        }
-        _ => unreachable!(),
-    }
+    Instruction::decode_update_base_unit_mints_for_kani(&update).unwrap()
+}
+
+#[kani::proof]
+fn kani_v16_swap_secondary_for_primary_decode_preserves_wire_fields() {
+    let amount: u128 = kani::any();
 
     let mut swap = [0u8; 17];
     swap[0] = 61;
@@ -862,26 +1173,136 @@ fn kani_v16_configure_hybrid_oracle_decode_preserves_wire_fields() {
     let asset_index: u16 = kani::any();
     let oracle_leg_count: u8 = kani::any();
     let oracle_leg_flags: u8 = kani::any();
-    let invert: u8 = kani::any();
-    let conf_filter_bps: u16 = kani::any();
     let now_slot: u64 = kani::any();
     let now_unix_ts: i64 = kani::any();
+
+    match decode_hybrid_oracle_payload_for_kani(
+        asset_index,
+        now_slot,
+        now_unix_ts,
+        oracle_leg_count,
+        oracle_leg_flags,
+        17,
+        19,
+        23,
+        29,
+        1,
+        31,
+        37,
+        hybrid_oracle_pattern_feeds(),
+    ) {
+        Instruction::ConfigureHybridOracle {
+            asset_index: got_asset_index,
+            now_slot: got_now_slot,
+            now_unix_ts: got_now_unix,
+            oracle_leg_count: got_count,
+            oracle_leg_flags: got_flags,
+            ..
+        } => {
+            assert_eq!(got_asset_index, asset_index);
+            assert_eq!(got_now_slot, now_slot);
+            assert_eq!(got_now_unix, now_unix_ts);
+            assert_eq!(got_count, oracle_leg_count);
+            assert_eq!(got_flags, oracle_leg_flags);
+        }
+        _ => unreachable!(),
+    }
+}
+
+#[kani::proof]
+fn kani_v16_configure_hybrid_oracle_decode_preserves_policy_fields() {
+    let invert: u8 = kani::any();
+    let conf_filter_bps: u16 = kani::any();
     let max_staleness_secs: u64 = kani::any();
     let hybrid_soft_stale_slots: u64 = kani::any();
     let mark_ewma_halflife_slots: u64 = kani::any();
     let mark_min_fee: u64 = kani::any();
     let unit_scale: u32 = kani::any();
-    let mut feeds = [[0u8; 32]; 3];
-    let mut i = 0;
-    while i < 3 {
-        let mut j = 0;
-        while j < 32 {
-            feeds[i][j] = kani::any();
-            j += 1;
-        }
-        i += 1;
-    }
 
+    match decode_hybrid_oracle_payload_for_kani(
+        7,
+        11,
+        -13,
+        3,
+        5,
+        max_staleness_secs,
+        hybrid_soft_stale_slots,
+        mark_ewma_halflife_slots,
+        mark_min_fee,
+        invert,
+        unit_scale,
+        conf_filter_bps,
+        hybrid_oracle_pattern_feeds(),
+    ) {
+        Instruction::ConfigureHybridOracle {
+            max_staleness_secs: got_max_staleness,
+            hybrid_soft_stale_slots: got_soft,
+            mark_ewma_halflife_slots: got_halflife,
+            mark_min_fee: got_min_fee,
+            invert: got_invert,
+            unit_scale: got_unit_scale,
+            conf_filter_bps: got_conf,
+            ..
+        } => {
+            assert_eq!(got_max_staleness, max_staleness_secs);
+            assert_eq!(got_soft, hybrid_soft_stale_slots);
+            assert_eq!(got_halflife, mark_ewma_halflife_slots);
+            assert_eq!(got_min_fee, mark_min_fee);
+            assert_eq!(got_invert, invert);
+            assert_eq!(got_unit_scale, unit_scale);
+            assert_eq!(got_conf, conf_filter_bps);
+        }
+        _ => unreachable!(),
+    }
+}
+
+#[kani::proof]
+fn kani_v16_configure_hybrid_oracle_decode_preserves_feed_layout() {
+    let feeds = hybrid_oracle_pattern_feeds();
+
+    match decode_hybrid_oracle_payload_for_kani(7, 11, -13, 3, 5, 17, 19, 23, 29, 1, 31, 37, feeds)
+    {
+        Instruction::ConfigureHybridOracle {
+            oracle_leg_feeds: got_feeds,
+            ..
+        } => assert_eq!(got_feeds, feeds),
+        _ => unreachable!(),
+    }
+}
+
+fn hybrid_oracle_pattern_feeds() -> [[u8; 32]; 3] {
+    [
+        [
+            0u8, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
+            24, 25, 26, 27, 28, 29, 30, 31,
+        ],
+        [
+            32u8, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52,
+            53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63,
+        ],
+        [
+            64u8, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84,
+            85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95,
+        ],
+    ]
+}
+
+#[allow(clippy::too_many_arguments)]
+fn decode_hybrid_oracle_payload_for_kani(
+    asset_index: u16,
+    now_slot: u64,
+    now_unix_ts: i64,
+    oracle_leg_count: u8,
+    oracle_leg_flags: u8,
+    max_staleness_secs: u64,
+    hybrid_soft_stale_slots: u64,
+    mark_ewma_halflife_slots: u64,
+    mark_min_fee: u64,
+    invert: u8,
+    unit_scale: u32,
+    conf_filter_bps: u16,
+    feeds: [[u8; 32]; 3],
+) -> Instruction {
     let mut data = [0u8; 156];
     data[0] = 34;
     data[1..3].copy_from_slice(&asset_index.to_le_bytes());
@@ -900,38 +1321,7 @@ fn kani_v16_configure_hybrid_oracle_decode_preserves_wire_fields() {
     data[92..124].copy_from_slice(&feeds[1]);
     data[124..156].copy_from_slice(&feeds[2]);
 
-    match Instruction::decode(&data).unwrap() {
-        Instruction::ConfigureHybridOracle {
-            asset_index: got_asset_index,
-            now_slot: got_now_slot,
-            now_unix_ts: got_now_unix,
-            oracle_leg_count: got_count,
-            oracle_leg_flags: got_flags,
-            max_staleness_secs: got_max_staleness,
-            hybrid_soft_stale_slots: got_soft,
-            mark_ewma_halflife_slots: got_halflife,
-            mark_min_fee: got_min_fee,
-            invert: got_invert,
-            unit_scale: got_unit_scale,
-            conf_filter_bps: got_conf,
-            oracle_leg_feeds: got_feeds,
-        } => {
-            assert_eq!(got_asset_index, asset_index);
-            assert_eq!(got_now_slot, now_slot);
-            assert_eq!(got_now_unix, now_unix_ts);
-            assert_eq!(got_count, oracle_leg_count);
-            assert_eq!(got_flags, oracle_leg_flags);
-            assert_eq!(got_max_staleness, max_staleness_secs);
-            assert_eq!(got_soft, hybrid_soft_stale_slots);
-            assert_eq!(got_halflife, mark_ewma_halflife_slots);
-            assert_eq!(got_min_fee, mark_min_fee);
-            assert_eq!(got_invert, invert);
-            assert_eq!(got_unit_scale, unit_scale);
-            assert_eq!(got_conf, conf_filter_bps);
-            assert_eq!(got_feeds, feeds);
-        }
-        _ => unreachable!(),
-    }
+    Instruction::decode_configure_hybrid_oracle_for_kani(&data).unwrap()
 }
 
 #[kani::proof]
@@ -1027,314 +1417,136 @@ fn kani_v16_ewma_mark_decode_preserves_wire_fields() {
 fn kani_v16_decode_rejects_trailing_bytes() {
     let extra: u8 = kani::any();
     let data = [1u8, extra];
-    assert!(Instruction::decode(&data).is_err());
+    assert!(Instruction::decode_rejects_invalid_wire_len_for_kani(&data));
 }
 
-fn assert_rejects_trailing_byte(ix: Instruction, extra: u8) {
-    let mut data = ix.encode();
-    data.push(extra);
-    assert!(Instruction::decode(&data).is_err());
+macro_rules! assert_trailing_payload_rejects {
+    ($tag:expr, $len:expr, $extra:expr) => {{
+        let mut data = [0u8; $len];
+        data[0] = $tag;
+        data[$len - 1] = $extra;
+        kani::assume(data[0] == $tag);
+        assert!(Instruction::decode_rejects_invalid_wire_len_for_kani(&data));
+    }};
+}
+
+macro_rules! assert_crank_one_observation_trailing_payload_rejects {
+    ($extra:expr) => {{
+        let mut data = [0u8; 30];
+        data[0] = 5;
+        data[25] = 1;
+        data[29] = $extra;
+        kani::assume(data[0] == 5);
+        assert!(Instruction::decode_rejects_invalid_wire_len_for_kani(&data));
+    }};
 }
 
 #[kani::proof]
 fn kani_v16_init_market_payload_rejects_trailing_byte() {
     let extra: u8 = kani::any();
-    assert_rejects_trailing_byte(
-        Instruction::InitMarket {
-            max_portfolio_assets: 1,
-            h_min: 1,
-            h_max: 2,
-            initial_price: 100,
-            min_nonzero_mm_req: 1,
-            min_nonzero_im_req: 2,
-            maintenance_margin_bps: 500,
-            initial_margin_bps: 1_000,
-            max_trading_fee_bps: 10_000,
-            trade_fee_base_bps: 0,
-            liquidation_fee_bps: 0,
-            liquidation_fee_cap: 0,
-            min_liquidation_abs: 0,
-            max_price_move_bps_per_slot: 100,
-            max_accrual_dt_slots: 10,
-            max_abs_funding_e9_per_slot: 0,
-            min_funding_lifetime_slots: 10,
-            max_account_b_settlement_chunks: 1,
-            max_bankrupt_close_chunks: 1,
-            max_bankrupt_close_lifetime_slots: 100,
-            public_b_chunk_atoms: percolator::MAX_VAULT_TVL,
-            maintenance_fee_per_slot: 0,
-        },
-        extra,
-    );
+    assert_trailing_payload_rejects!(0, 220, extra);
 }
 
 #[kani::proof]
 fn kani_v16_custody_payloads_reject_trailing_byte() {
     let extra: u8 = kani::any();
 
-    assert_rejects_trailing_byte(Instruction::InitPortfolio, extra);
-    assert_rejects_trailing_byte(Instruction::Deposit { amount: 1 }, extra);
-    assert_rejects_trailing_byte(Instruction::Withdraw { amount: 1 }, extra);
-    assert_rejects_trailing_byte(Instruction::TopUpInsurance { amount: 1 }, extra);
-    assert_rejects_trailing_byte(
-        Instruction::TopUpBackingBucket {
-            domain: 1,
-            amount: 1,
-            expiry_slot: 10,
-        },
-        extra,
-    );
-    assert_rejects_trailing_byte(
-        Instruction::WithdrawBackingBucket {
-            domain: 1,
-            amount: 1,
-        },
-        extra,
-    );
-    assert_rejects_trailing_byte(Instruction::WithdrawInsurance { amount: 1 }, extra);
-    assert_rejects_trailing_byte(
-        Instruction::WithdrawInsuranceAsset {
-            asset_index: 0,
-            amount: 1,
-        },
-        extra,
-    );
-    assert_rejects_trailing_byte(Instruction::SwapSecondaryForPrimary { amount: 1 }, extra);
+    assert_trailing_payload_rejects!(1, 2, extra);
+    assert_trailing_payload_rejects!(3, 18, extra);
+    assert_trailing_payload_rejects!(4, 18, extra);
+    assert_trailing_payload_rejects!(9, 18, extra);
+    assert_trailing_payload_rejects!(24, 28, extra);
+    assert_trailing_payload_rejects!(50, 20, extra);
+    assert_trailing_payload_rejects!(41, 18, extra);
+    assert_trailing_payload_rejects!(57, 20, extra);
+    assert_trailing_payload_rejects!(61, 18, extra);
 }
 
 #[kani::proof]
 fn kani_v16_trade_and_crank_payloads_reject_trailing_byte() {
     let extra: u8 = kani::any();
 
-    assert_rejects_trailing_byte(
-        Instruction::PermissionlessCrank {
-            now_slot: 1,
-            close_q: 0,
-            observations: vec![CrankObservationHint {
-                asset_index: 0,
-                oracle_accounts: 0,
-            }],
-        },
-        extra,
-    );
-    assert_rejects_trailing_byte(
-        Instruction::TradeNoCpi {
-            asset_index: 0,
-            size_q: 1,
-            exec_price: 100,
-            fee_bps: 0,
-        },
-        extra,
-    );
-    assert_rejects_trailing_byte(
-        Instruction::TradeCpi {
-            asset_index: 0,
-            size_q: 1,
-            fee_bps: 0,
-            limit_price: 0,
-        },
-        extra,
-    );
-    assert_rejects_trailing_byte(Instruction::SyncMaintenanceFee { now_slot: 1 }, extra);
+    assert_crank_one_observation_trailing_payload_rejects!(extra);
+    assert_trailing_payload_rejects!(6, 36, extra);
+    assert_trailing_payload_rejects!(10, 36, extra);
+    assert_trailing_payload_rejects!(48, 10, extra);
 }
 
 #[kani::proof]
 fn kani_v16_admin_policy_payloads_reject_trailing_byte() {
     let extra: u8 = kani::any();
 
-    assert_rejects_trailing_byte(Instruction::CloseSlab, extra);
-    assert_rejects_trailing_byte(Instruction::ResolveMarket, extra);
-    assert_rejects_trailing_byte(
-        Instruction::UpdateAuthority {
-            new_pubkey: [1u8; 32],
-        },
-        extra,
-    );
-    assert_rejects_trailing_byte(
-        Instruction::UpdateAssetAuthority {
-            asset_index: 1,
-            kind: 0,
-            new_pubkey: [1u8; 32],
-        },
-        extra,
-    );
-    assert_rejects_trailing_byte(
-        Instruction::UpdateLiquidationFeePolicy {
-            cranker_share_bps: 4_000,
-        },
-        extra,
-    );
-    assert_rejects_trailing_byte(
-        Instruction::UpdateMaintenanceFeePolicy {
-            cranker_share_bps: 4_000,
-        },
-        extra,
-    );
-    assert_rejects_trailing_byte(
-        Instruction::UpdateBackingFeePolicy {
-            domain: 0,
-            fee_bps: 25,
-            insurance_share_bps: 0,
-        },
-        extra,
-    );
-    assert_rejects_trailing_byte(
-        Instruction::UpdateTradeFeePolicy {
-            trade_fee_base_bps: 25,
-        },
-        extra,
-    );
-    assert_rejects_trailing_byte(
-        Instruction::UpdateFeeRedirectPolicy { redirect_bps: 250 },
-        extra,
-    );
-    assert_rejects_trailing_byte(
-        Instruction::UpdateMarketInitFeePolicy { min_init_fee: 50 },
-        extra,
-    );
-    assert_rejects_trailing_byte(
-        Instruction::UpdateBaseUnitMints {
-            primary_mint: [1u8; 32],
-            secondary_mint: [2u8; 32],
-        },
-        extra,
-    );
-    assert_rejects_trailing_byte(
-        Instruction::ConfigurePermissionlessResolve {
-            stale_slots: 5,
-            force_close_delay_slots: 1,
-        },
-        extra,
-    );
-    assert_rejects_trailing_byte(
-        Instruction::ResolveStalePermissionless { now_slot: 5 },
-        extra,
-    );
+    assert_trailing_payload_rejects!(13, 2, extra);
+    assert_trailing_payload_rejects!(19, 2, extra);
+    assert_trailing_payload_rejects!(32, 34, extra);
+    assert_trailing_payload_rejects!(65, 37, extra);
+    assert_trailing_payload_rejects!(37, 4, extra);
+    assert_trailing_payload_rejects!(49, 4, extra);
+    assert_trailing_payload_rejects!(51, 8, extra);
+    assert_trailing_payload_rejects!(55, 10, extra);
+    assert_trailing_payload_rejects!(58, 4, extra);
+    assert_trailing_payload_rejects!(59, 18, extra);
+    assert_trailing_payload_rejects!(60, 66, extra);
+    assert_trailing_payload_rejects!(38, 18, extra);
+    assert_trailing_payload_rejects!(39, 10, extra);
 }
 
 #[kani::proof]
 fn kani_v16_oracle_asset_payloads_reject_trailing_byte() {
     let extra: u8 = kani::any();
 
-    assert_rejects_trailing_byte(
-        Instruction::ConfigureHybridOracle {
-            asset_index: 0,
-            now_slot: 1,
-            now_unix_ts: 1,
-            oracle_leg_count: 1,
-            oracle_leg_flags: 0,
-            max_staleness_secs: 60,
-            hybrid_soft_stale_slots: 10,
-            mark_ewma_halflife_slots: 1,
-            mark_min_fee: 0,
-            invert: 0,
-            unit_scale: 0,
-            conf_filter_bps: 500,
-            oracle_leg_feeds: [[1u8; 32], [0u8; 32], [0u8; 32]],
-        },
-        extra,
-    );
-    assert_rejects_trailing_byte(
-        Instruction::ConfigureEwmaMark {
-            asset_index: 0,
-            now_slot: 1,
-            initial_mark_e6: 100,
-            mark_ewma_halflife_slots: 1,
-            mark_min_fee: 0,
-        },
-        extra,
-    );
-    assert_rejects_trailing_byte(
-        Instruction::PushEwmaMark {
-            asset_index: 0,
-            now_slot: 2,
-            mark_e6: 101,
-        },
-        extra,
-    );
-    assert_rejects_trailing_byte(
-        Instruction::ConfigureAuthMark {
-            asset_index: 0,
-            now_slot: 1,
-            initial_mark_e6: 100,
-        },
-        extra,
-    );
-    assert_rejects_trailing_byte(
-        Instruction::PushAuthMark {
-            asset_index: 0,
-            now_slot: 2,
-            mark_e6: 101,
-        },
-        extra,
-    );
-    assert_rejects_trailing_byte(
-        Instruction::UpdateAssetLifecycle {
-            action: 0,
-            asset_index: 1,
-            now_slot: 2,
-            initial_price: 100,
-            insurance_authority: [1u8; 32],
-            insurance_operator: [1u8; 32],
-            backing_bucket_authority: [1u8; 32],
-            oracle_authority: [1u8; 32],
-        },
-        extra,
-    );
+    assert_trailing_payload_rejects!(34, 157, extra);
+}
+
+#[kani::proof]
+fn kani_v16_configure_ewma_mark_payload_rejects_trailing_byte() {
+    let extra: u8 = kani::any();
+
+    assert_trailing_payload_rejects!(35, 36, extra);
+}
+
+#[kani::proof]
+fn kani_v16_push_ewma_mark_payload_rejects_trailing_byte() {
+    let extra: u8 = kani::any();
+
+    assert_trailing_payload_rejects!(36, 20, extra);
+}
+
+#[kani::proof]
+fn kani_v16_configure_auth_mark_payload_rejects_trailing_byte() {
+    let extra: u8 = kani::any();
+
+    assert_trailing_payload_rejects!(62, 20, extra);
+}
+
+#[kani::proof]
+fn kani_v16_push_auth_mark_payload_rejects_trailing_byte() {
+    let extra: u8 = kani::any();
+
+    assert_trailing_payload_rejects!(63, 20, extra);
+}
+
+#[kani::proof]
+fn kani_v16_update_asset_lifecycle_payload_rejects_trailing_byte() {
+    let extra: u8 = kani::any();
+
+    assert_trailing_payload_rejects!(40, 149, extra);
 }
 
 #[kani::proof]
 fn kani_v16_resolved_recovery_payloads_reject_trailing_byte() {
     let extra: u8 = kani::any();
 
-    assert_rejects_trailing_byte(Instruction::ConvertReleasedPnl { amount: 1 }, extra);
-    assert_rejects_trailing_byte(
-        Instruction::CloseResolved {
-            fee_rate_per_slot: 0,
-        },
-        extra,
-    );
-    assert_rejects_trailing_byte(
-        Instruction::CureAndCancelClose {
-            optional_deposit: 1,
-        },
-        extra,
-    );
-    assert_rejects_trailing_byte(
-        Instruction::ForfeitRecoveryLeg {
-            asset_index: 0,
-            b_delta_budget: 1,
-        },
-        extra,
-    );
-    assert_rejects_trailing_byte(
-        Instruction::RebalanceReduce {
-            asset_index: 0,
-            reduce_q: 1,
-        },
-        extra,
-    );
-    assert_rejects_trailing_byte(
-        Instruction::FinalizeResetSide {
-            asset_index: 0,
-            side: 0,
-        },
-        extra,
-    );
-    assert_rejects_trailing_byte(
-        Instruction::ForceCloseAbandonedAsset {
-            asset_index: 0,
-            now_slot: 1,
-            close_q: 1,
-        },
-        extra,
-    );
-    assert_rejects_trailing_byte(Instruction::ClaimResolvedPayoutTopup, extra);
-    assert_rejects_trailing_byte(
-        Instruction::RefineResolvedUnreceiptedBound { decrease_num: 1 },
-        extra,
-    );
-    assert_rejects_trailing_byte(Instruction::ClosePortfolio, extra);
+    assert_trailing_payload_rejects!(28, 18, extra);
+    assert_trailing_payload_rejects!(30, 18, extra);
+    assert_trailing_payload_rejects!(42, 18, extra);
+    assert_trailing_payload_rejects!(43, 20, extra);
+    assert_trailing_payload_rejects!(44, 20, extra);
+    assert_trailing_payload_rejects!(45, 5, extra);
+    assert_trailing_payload_rejects!(64, 28, extra);
+    assert_trailing_payload_rejects!(46, 2, extra);
+    assert_trailing_payload_rejects!(47, 18, extra);
+    assert_trailing_payload_rejects!(8, 2, extra);
 }
 
 #[kani::proof]
@@ -1388,7 +1600,7 @@ fn kani_v16_unknown_or_truncated_tags_reject() {
 #[kani::proof]
 fn kani_v16_zero_length_decode_rejects() {
     let data: [u8; 0] = [];
-    assert!(Instruction::decode(&data).is_err());
+    assert!(Instruction::decode_rejects_invalid_wire_len_for_kani(&data));
 }
 
 #[kani::proof]

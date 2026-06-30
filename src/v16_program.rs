@@ -2661,7 +2661,32 @@ pub mod ix {
     }
 
     impl Instruction {
+        #[cfg(kani)]
+        pub fn decode_rejects_invalid_wire_len_for_kani(input: &[u8]) -> bool {
+            !decode_wire_length_maybe_valid(input)
+        }
+
         pub fn decode(input: &[u8]) -> Result<Self, ProgramError> {
+            #[cfg(kani)]
+            if input.len() == 219 && input[0] == 0 {
+                return Self::decode_init_market_for_kani(input);
+            }
+            #[cfg(kani)]
+            if input.len() == 156 && input[0] == 34 {
+                return Self::decode_configure_hybrid_oracle_for_kani(input);
+            }
+            #[cfg(kani)]
+            if input.len() == 148 && input[0] == 40 {
+                return Self::decode_update_asset_lifecycle_for_kani(input);
+            }
+            #[cfg(kani)]
+            if input.len() == 65 && input[0] == 60 {
+                return Self::decode_update_base_unit_mints_for_kani(input);
+            }
+            #[cfg(kani)]
+            if !decode_wire_length_maybe_valid(input) {
+                return Err(ProgramError::InvalidInstructionData);
+            }
             let (&tag, mut rest) = input
                 .split_first()
                 .ok_or(ProgramError::InvalidInstructionData)?;
@@ -2704,13 +2729,30 @@ pub mod ix {
                     if n > CRANK_OBSERVATION_DECODE_MAX {
                         return Err(ProgramError::InvalidInstructionData);
                     }
-                    let mut observations = Vec::with_capacity(n);
-                    for _ in 0..n {
-                        observations.push(CrankObservationHint {
-                            asset_index: read_u16(&mut rest)?,
-                            oracle_accounts: read_u8(&mut rest)?,
-                        });
-                    }
+                    #[cfg(kani)]
+                    let observations = {
+                        let mut observations = Vec::with_capacity(CRANK_OBSERVATION_DECODE_MAX);
+                        for i in 0..CRANK_OBSERVATION_DECODE_MAX {
+                            if i < n {
+                                observations.push(CrankObservationHint {
+                                    asset_index: read_u16(&mut rest)?,
+                                    oracle_accounts: read_u8(&mut rest)?,
+                                });
+                            }
+                        }
+                        observations
+                    };
+                    #[cfg(not(kani))]
+                    let observations = {
+                        let mut observations = Vec::with_capacity(n);
+                        for _ in 0..n {
+                            observations.push(CrankObservationHint {
+                                asset_index: read_u16(&mut rest)?,
+                                oracle_accounts: read_u8(&mut rest)?,
+                            });
+                        }
+                        observations
+                    };
                     Self::PermissionlessCrank {
                         now_slot,
                         close_q,
@@ -2734,15 +2776,34 @@ pub mod ix {
                     if n > BATCH_TRADE_DECODE_MAX_LEGS {
                         return Err(ProgramError::InvalidInstructionData);
                     }
-                    let mut legs = Vec::with_capacity(n);
-                    for _ in 0..n {
-                        legs.push(BatchTradeLeg {
-                            asset_index: read_u16(&mut rest)?,
-                            size_q: read_i128(&mut rest)?,
-                            exec_price: read_u64(&mut rest)?,
-                            fee_bps: read_u64(&mut rest)?,
-                        });
-                    }
+                    #[cfg(kani)]
+                    let legs = {
+                        let mut legs = Vec::with_capacity(BATCH_TRADE_DECODE_MAX_LEGS);
+                        for i in 0..BATCH_TRADE_DECODE_MAX_LEGS {
+                            if i < n {
+                                legs.push(BatchTradeLeg {
+                                    asset_index: read_u16(&mut rest)?,
+                                    size_q: read_i128(&mut rest)?,
+                                    exec_price: read_u64(&mut rest)?,
+                                    fee_bps: read_u64(&mut rest)?,
+                                });
+                            }
+                        }
+                        legs
+                    };
+                    #[cfg(not(kani))]
+                    let legs = {
+                        let mut legs = Vec::with_capacity(n);
+                        for _ in 0..n {
+                            legs.push(BatchTradeLeg {
+                                asset_index: read_u16(&mut rest)?,
+                                size_q: read_i128(&mut rest)?,
+                                exec_price: read_u64(&mut rest)?,
+                                fee_bps: read_u64(&mut rest)?,
+                            });
+                        }
+                        legs
+                    };
                     Self::BatchTradeNoCpi { legs }
                 }
                 67 => {
@@ -2750,15 +2811,34 @@ pub mod ix {
                     if n > BATCH_TRADE_DECODE_MAX_LEGS {
                         return Err(ProgramError::InvalidInstructionData);
                     }
-                    let mut legs = Vec::with_capacity(n);
-                    for _ in 0..n {
-                        legs.push(BatchTradeCpiLeg {
-                            asset_index: read_u16(&mut rest)?,
-                            size_q: read_i128(&mut rest)?,
-                            fee_bps: read_u64(&mut rest)?,
-                            limit_price: read_u64(&mut rest)?,
-                        });
-                    }
+                    #[cfg(kani)]
+                    let legs = {
+                        let mut legs = Vec::with_capacity(BATCH_TRADE_DECODE_MAX_LEGS);
+                        for i in 0..BATCH_TRADE_DECODE_MAX_LEGS {
+                            if i < n {
+                                legs.push(BatchTradeCpiLeg {
+                                    asset_index: read_u16(&mut rest)?,
+                                    size_q: read_i128(&mut rest)?,
+                                    fee_bps: read_u64(&mut rest)?,
+                                    limit_price: read_u64(&mut rest)?,
+                                });
+                            }
+                        }
+                        legs
+                    };
+                    #[cfg(not(kani))]
+                    let legs = {
+                        let mut legs = Vec::with_capacity(n);
+                        for _ in 0..n {
+                            legs.push(BatchTradeCpiLeg {
+                                asset_index: read_u16(&mut rest)?,
+                                size_q: read_i128(&mut rest)?,
+                                fee_bps: read_u64(&mut rest)?,
+                                limit_price: read_u64(&mut rest)?,
+                            });
+                        }
+                        legs
+                    };
                     Self::BatchTradeCpi { legs }
                 }
                 68 => Self::SetMatcherConfig {
@@ -2935,6 +3015,26 @@ pub mod ix {
                 return Err(ProgramError::InvalidInstructionData);
             }
             Ok(ix)
+        }
+
+        #[cfg(kani)]
+        pub fn decode_init_market_for_kani(input: &[u8]) -> Result<Self, ProgramError> {
+            decode_init_market_for_kani(input)
+        }
+
+        #[cfg(kani)]
+        pub fn decode_configure_hybrid_oracle_for_kani(input: &[u8]) -> Result<Self, ProgramError> {
+            decode_configure_hybrid_oracle_for_kani(input)
+        }
+
+        #[cfg(kani)]
+        pub fn decode_update_asset_lifecycle_for_kani(input: &[u8]) -> Result<Self, ProgramError> {
+            decode_update_asset_lifecycle_for_kani(input)
+        }
+
+        #[cfg(kani)]
+        pub fn decode_update_base_unit_mints_for_kani(input: &[u8]) -> Result<Self, ProgramError> {
+            decode_update_base_unit_mints_for_kani(input)
         }
 
         pub fn encode(&self) -> Vec<u8> {
@@ -3337,6 +3437,214 @@ pub mod ix {
             }
             out
         }
+    }
+
+    #[cfg(kani)]
+    fn decode_wire_length_maybe_valid(input: &[u8]) -> bool {
+        let Some((&tag, rest)) = input.split_first() else {
+            return false;
+        };
+        let len = input.len();
+        match tag {
+            0 => len == 219,
+            1 | 8 | 13 | 19 | 46 | 54 => len == 1,
+            3 | 4 | 9 | 28 | 30 | 41 | 42 | 47 | 59 | 61 => len == 17,
+            5 => {
+                if len < 26 {
+                    return false;
+                }
+                let n = rest[24] as usize;
+                n <= CRANK_OBSERVATION_DECODE_MAX && len == 26 + (3 * n)
+            }
+            6 | 10 => len == 35,
+            24 | 64 => len == 27,
+            32 => len == 33,
+            34 => len == 156,
+            35 => len == 35,
+            36 | 62 | 63 | 69 => len == 19,
+            37 | 49 | 58 => len == 3,
+            38 => len == 17,
+            39 | 48 | 55 => len == 9,
+            40 => len == 148,
+            43 | 44 | 50 | 52 | 56 | 57 => len == 19,
+            45 => len == 4,
+            51 => len == 7,
+            53 => len == 3,
+            60 => len == 65,
+            65 => len == 36,
+            66 | 67 => {
+                if len < 2 {
+                    return false;
+                }
+                let n = rest[0] as usize;
+                n <= BATCH_TRADE_DECODE_MAX_LEGS && len == 2 + (34 * n)
+            }
+            68 => len == 2,
+            _ => false,
+        }
+    }
+
+    #[cfg(kani)]
+    fn decode_init_market_for_kani(input: &[u8]) -> Result<Instruction, ProgramError> {
+        if input.len() != 219 || input[0] != 0 {
+            return Err(ProgramError::InvalidInstructionData);
+        }
+
+        Ok(Instruction::InitMarket {
+            max_portfolio_assets: read_u16_at_for_kani(input, 1),
+            h_min: read_u64_at_for_kani(input, 3),
+            h_max: read_u64_at_for_kani(input, 11),
+            initial_price: read_u64_at_for_kani(input, 19),
+            min_nonzero_mm_req: read_u128_at_for_kani(input, 27),
+            min_nonzero_im_req: read_u128_at_for_kani(input, 43),
+            maintenance_margin_bps: read_u64_at_for_kani(input, 59),
+            initial_margin_bps: read_u64_at_for_kani(input, 67),
+            max_trading_fee_bps: read_u64_at_for_kani(input, 75),
+            trade_fee_base_bps: read_u64_at_for_kani(input, 83),
+            liquidation_fee_bps: read_u64_at_for_kani(input, 91),
+            liquidation_fee_cap: read_u128_at_for_kani(input, 99),
+            min_liquidation_abs: read_u128_at_for_kani(input, 115),
+            max_price_move_bps_per_slot: read_u64_at_for_kani(input, 131),
+            max_accrual_dt_slots: read_u64_at_for_kani(input, 139),
+            max_abs_funding_e9_per_slot: read_u64_at_for_kani(input, 147),
+            min_funding_lifetime_slots: read_u64_at_for_kani(input, 155),
+            max_account_b_settlement_chunks: read_u64_at_for_kani(input, 163),
+            max_bankrupt_close_chunks: read_u64_at_for_kani(input, 171),
+            max_bankrupt_close_lifetime_slots: read_u64_at_for_kani(input, 179),
+            public_b_chunk_atoms: read_u128_at_for_kani(input, 187),
+            maintenance_fee_per_slot: read_u128_at_for_kani(input, 203),
+        })
+    }
+
+    #[cfg(kani)]
+    fn decode_configure_hybrid_oracle_for_kani(input: &[u8]) -> Result<Instruction, ProgramError> {
+        if input.len() != 156 || input[0] != 34 {
+            return Err(ProgramError::InvalidInstructionData);
+        }
+
+        Ok(Instruction::ConfigureHybridOracle {
+            asset_index: read_u16_at_for_kani(input, 1),
+            now_slot: read_u64_at_for_kani(input, 3),
+            now_unix_ts: read_i64_at_for_kani(input, 11),
+            oracle_leg_count: input[19],
+            oracle_leg_flags: input[20],
+            max_staleness_secs: read_u64_at_for_kani(input, 21),
+            hybrid_soft_stale_slots: read_u64_at_for_kani(input, 29),
+            mark_ewma_halflife_slots: read_u64_at_for_kani(input, 37),
+            mark_min_fee: read_u64_at_for_kani(input, 45),
+            invert: input[53],
+            unit_scale: read_u32_at_for_kani(input, 54),
+            conf_filter_bps: read_u16_at_for_kani(input, 58),
+            oracle_leg_feeds: [
+                read_bytes32_at_for_kani(input, 60),
+                read_bytes32_at_for_kani(input, 92),
+                read_bytes32_at_for_kani(input, 124),
+            ],
+        })
+    }
+
+    #[cfg(kani)]
+    fn decode_update_asset_lifecycle_for_kani(input: &[u8]) -> Result<Instruction, ProgramError> {
+        if input.len() != 148 || input[0] != 40 {
+            return Err(ProgramError::InvalidInstructionData);
+        }
+
+        Ok(Instruction::UpdateAssetLifecycle {
+            action: input[1],
+            asset_index: read_u16_at_for_kani(input, 2),
+            now_slot: read_u64_at_for_kani(input, 4),
+            initial_price: read_u64_at_for_kani(input, 12),
+            insurance_authority: read_bytes32_at_for_kani(input, 20),
+            insurance_operator: read_bytes32_at_for_kani(input, 52),
+            backing_bucket_authority: read_bytes32_at_for_kani(input, 84),
+            oracle_authority: read_bytes32_at_for_kani(input, 116),
+        })
+    }
+
+    #[cfg(kani)]
+    fn decode_update_base_unit_mints_for_kani(input: &[u8]) -> Result<Instruction, ProgramError> {
+        if input.len() != 65 || input[0] != 60 {
+            return Err(ProgramError::InvalidInstructionData);
+        }
+
+        Ok(Instruction::UpdateBaseUnitMints {
+            primary_mint: read_bytes32_at_for_kani(input, 1),
+            secondary_mint: read_bytes32_at_for_kani(input, 33),
+        })
+    }
+
+    #[cfg(kani)]
+    fn read_u16_at_for_kani(input: &[u8], offset: usize) -> u16 {
+        u16::from_le_bytes([input[offset], input[offset + 1]])
+    }
+
+    #[cfg(kani)]
+    fn read_u32_at_for_kani(input: &[u8], offset: usize) -> u32 {
+        u32::from_le_bytes([
+            input[offset],
+            input[offset + 1],
+            input[offset + 2],
+            input[offset + 3],
+        ])
+    }
+
+    #[cfg(kani)]
+    fn read_u64_at_for_kani(input: &[u8], offset: usize) -> u64 {
+        u64::from_le_bytes([
+            input[offset],
+            input[offset + 1],
+            input[offset + 2],
+            input[offset + 3],
+            input[offset + 4],
+            input[offset + 5],
+            input[offset + 6],
+            input[offset + 7],
+        ])
+    }
+
+    #[cfg(kani)]
+    fn read_i64_at_for_kani(input: &[u8], offset: usize) -> i64 {
+        i64::from_le_bytes([
+            input[offset],
+            input[offset + 1],
+            input[offset + 2],
+            input[offset + 3],
+            input[offset + 4],
+            input[offset + 5],
+            input[offset + 6],
+            input[offset + 7],
+        ])
+    }
+
+    #[cfg(kani)]
+    fn read_u128_at_for_kani(input: &[u8], offset: usize) -> u128 {
+        u128::from_le_bytes([
+            input[offset],
+            input[offset + 1],
+            input[offset + 2],
+            input[offset + 3],
+            input[offset + 4],
+            input[offset + 5],
+            input[offset + 6],
+            input[offset + 7],
+            input[offset + 8],
+            input[offset + 9],
+            input[offset + 10],
+            input[offset + 11],
+            input[offset + 12],
+            input[offset + 13],
+            input[offset + 14],
+            input[offset + 15],
+        ])
+    }
+
+    #[cfg(kani)]
+    fn read_bytes32_at_for_kani(input: &[u8], offset: usize) -> [u8; 32] {
+        let mut out = [0u8; 32];
+        for i in 0..32 {
+            out[i] = input[offset + i];
+        }
+        out
     }
 
     fn read_u8(input: &mut &[u8]) -> Result<u8, ProgramError> {
