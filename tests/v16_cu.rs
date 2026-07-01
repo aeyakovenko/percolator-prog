@@ -53284,6 +53284,101 @@ fn v16_attack_out_of_order_observation_with_reward_tail_pays_no_reward() {
     );
 }
 
+// LoF/DoS sweep: public cranks may carry stale liquidation work budgets. If the
+// target account no longer has liquidation work by the time the transaction
+// lands, the supplied observations are still valid progress; close_q must not
+// force a revert or pay a liquidation reward.
+#[test]
+fn v16_attack_stale_liquidation_budget_observation_crank_progresses_without_reward_or_value() {
+    const MARK: u64 = 1_000_000;
+    const OPEN_SLOT: u64 = 1;
+    const OBS_SLOT: u64 = 2;
+
+    let mut env = V16CuEnv::new_with_init_params(production_risk_params());
+    env.update_liquidation_fee_policy_with_cu(5_000);
+
+    set_test_clock(&mut env, OPEN_SLOT, 100);
+    let feed0 = [0x46u8; 32];
+    let initial0 = env.set_pyth_price_with_conf(&feed0, MARK as i64, -6, 0, 100);
+    env.try_configure_hybrid_asset_with_conf_filter_cu(
+        0,
+        1,
+        0,
+        [feed0, [0u8; 32], [0u8; 32]],
+        &[initial0],
+        OPEN_SLOT,
+        100,
+        0,
+        0,
+        10,
+        0,
+    )
+    .expect("configure asset-0 hybrid oracle");
+
+    let target_owner = Keypair::new();
+    let cranker_owner = Keypair::new();
+    let target = env.create_portfolio(&target_owner);
+    let cranker = env.create_portfolio(&cranker_owner);
+    env.deposit(&cranker_owner, cranker, 1_000);
+
+    set_test_clock(&mut env, OBS_SLOT, 101);
+    let fresh0 = env.set_pyth_price_with_conf(&feed0, (MARK + 10_000) as i64, -6, 0, 101);
+    let target_before = env.portfolio_state(target);
+    let cranker_before = env.svm.get_account(&cranker).unwrap();
+
+    env.svm.expire_blockhash();
+    let accepted = env.send(
+        ProgInstruction::PermissionlessCrank {
+            now_slot: OBS_SLOT,
+            close_q: POS_SCALE,
+            observations: crank_observations_with_accounts(0, 1),
+        },
+        vec![
+            AccountMeta::new(cranker_owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(target, false),
+            AccountMeta::new_readonly(fresh0, false),
+            AccountMeta::new(cranker, false),
+        ],
+        &[&cranker_owner],
+    );
+    assert!(
+        accepted.is_ok(),
+        "stale liquidation budget must not roll back otherwise valid observation-only progress: {accepted:?}"
+    );
+    assert_cu_within(
+        "stale close_q observation-only crank",
+        accepted.unwrap(),
+        CRANK_CU_LIMIT,
+    );
+
+    let (_, after_group) = env.market_state();
+    assert_eq!(
+        after_group.assets[0].raw_oracle_target_price,
+        MARK + 10_000,
+        "observation-only crank commits the supplied oracle update"
+    );
+    assert_eq!(
+        env.portfolio_state(target).capital.get(),
+        target_before.capital.get(),
+        "stale-budget observation crank must not credit or debit target capital"
+    );
+    assert_eq!(
+        env.portfolio_state(target).pnl.get(),
+        target_before.pnl.get(),
+        "stale-budget observation crank must not move target PnL"
+    );
+    assert!(
+        percolator::active_bitmap_is_empty(active_bitmap(&env.portfolio_state(target))),
+        "stale-budget observation crank must not create target exposure"
+    );
+    assert_eq!(
+        env.svm.get_account(&cranker).unwrap(),
+        cranker_before,
+        "observation-only stale-budget crank pays no liquidation reward"
+    );
+}
+
 // LoF/DoS sweep: the observation-only auto-crank carveout still commits oracle/accrual writes, even
 // when the selected account action returns NonProgress because the selected asset's observation is
 // missing. It must therefore run the same final market-shape guard as mutating crank outcomes, or a
