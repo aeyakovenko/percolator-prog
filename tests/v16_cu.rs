@@ -12956,6 +12956,96 @@ fn v16_bpf_full_14_leg_refresh_crank_with_max_observations_is_under_tx_limit() {
     }
 }
 
+// CU/DoS sweep: the crank wire decoder admits 16 observation hints, while the normal
+// portfolio leg cap is 14. A market can still have more configured assets than any one
+// portfolio can hold, so pin the true decode-cap observation-only crank path. This keeps
+// the public keeper route bounded when it refreshes market slots beyond the active-leg cap.
+#[test]
+fn v16_bpf_permissionless_crank_16_observation_decode_cap_is_under_tx_limit() {
+    const PORTFOLIO_CAP: usize = percolator_prog::constants::WRAPPER_MAX_PORTFOLIO_ASSETS as usize;
+    const OBSERVATION_CAP: usize = 16;
+
+    let mut env = V16CuEnv::new_with_init_params_and_market_capacity(
+        V16CuMarketParams {
+            max_portfolio_assets: PORTFOLIO_CAP as u16,
+            max_price_move_bps_per_slot: 10_000,
+            ..V16CuMarketParams::default()
+        },
+        OBSERVATION_CAP,
+    );
+    for asset_index in PORTFOLIO_CAP..OBSERVATION_CAP {
+        env.activate_asset(asset_index as u16, asset_index as u64 + 1, 100);
+    }
+    let (_, configured) = env.market_state();
+    assert_eq!(
+        configured.config.max_market_slots, OBSERVATION_CAP as u32,
+        "test setup must configure every decodable observation asset"
+    );
+    assert_eq!(
+        configured.config.max_portfolio_assets, PORTFOLIO_CAP as u16,
+        "test setup keeps the portfolio leg cap below the observation decode cap"
+    );
+
+    let owner = Keypair::new();
+    let portfolio = env.create_portfolio(&owner);
+    let before_slot_last: Vec<u64> = {
+        let (_, group) = env.market_state();
+        (0..OBSERVATION_CAP)
+            .map(|asset_index| group.assets[asset_index].slot_last)
+            .collect()
+    };
+    let observations: Vec<CrankObservationHint> = (0..OBSERVATION_CAP)
+        .map(|asset_index| CrankObservationHint {
+            asset_index: asset_index as u16,
+            oracle_accounts: 0,
+        })
+        .collect();
+
+    env.svm.warp_to_slot(40);
+    env.svm.expire_blockhash();
+    let refresh_cu = env
+        .send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 40,
+                close_q: 0,
+                observations,
+            },
+            vec![
+                AccountMeta::new(env.payer.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(portfolio, false),
+            ],
+            &[],
+        )
+        .expect("16-observation crank remains a bounded observation-only progress step");
+    println!("v16 16-observation decode-cap PermissionlessCrank CU: {refresh_cu}");
+    assert_cu_within(
+        "16-observation decode-cap PermissionlessCrank",
+        refresh_cu,
+        CRANK_CU_LIMIT,
+    );
+
+    let (_, group) = env.market_state();
+    let account = env.portfolio_state(portfolio);
+    assert_eq!(
+        percolator::active_bitmap_count_ones(active_bitmap(&account)),
+        0,
+        "observation-only crank must not create user exposure"
+    );
+    assert_eq!(account.capital.get(), 0);
+    for (asset_index, before) in before_slot_last.iter().copied().enumerate() {
+        assert!(
+            group.assets[asset_index].slot_last > before,
+            "decode-cap observation crank must refresh asset {asset_index}"
+        );
+    }
+    assert_eq!(
+        env.token_amount(env.vault),
+        0,
+        "observation-only crank moves no collateral custody"
+    );
+}
+
 // CU/DoS sweep: the max-observation crank above covers zero-account oracle profiles. A hostile
 // keeper can also legally provide the maximum three oracle accounts for every portfolio asset. Pin
 // the admitted 14x3 Pyth-tail path so oracle fanout plus a full stale portfolio cannot become a CU cliff.
