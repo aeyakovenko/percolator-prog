@@ -64495,6 +64495,114 @@ fn v16_attack_drain_only_existing_risk_increase_rejects_before_hostile_matcher_c
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+enum DrainOnlyCpiExitRoute {
+    Single,
+    Batch,
+}
+
+fn assert_drain_only_existing_risk_can_exit_through_cpi(route: DrainOnlyCpiExitRoute) {
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(1, 5_000, 10_000, 1_000);
+    let matcher_program = Pubkey::new_unique();
+    env.svm.add_program(
+        matcher_program,
+        &std::fs::read(auth_matcher_program_path()).unwrap(),
+    );
+    let taker = Keypair::new();
+    let lp = Keypair::new();
+    let taker_account = env.create_portfolio(&taker);
+    let lp_account = env.create_portfolio(&lp);
+    env.deposit(&taker, taker_account, 1_000_000);
+    env.deposit(&lp, lp_account, 1_000_000);
+    env.trade_asset_with_cu(
+        0,
+        &taker,
+        taker_account,
+        &lp,
+        lp_account,
+        POS_SCALE as i128,
+        100,
+        0,
+    );
+    let (ctx, delegate, _) = env.init_auth_matcher_context(matcher_program, &lp, lp_account);
+
+    env.update_asset_lifecycle_as_admin_with_cu(
+        percolator_prog::processor::ASSET_ACTION_DRAIN_ONLY,
+        0,
+        0,
+        0,
+    );
+    let (_, before) = env.market_state();
+    assert_eq!(before.assets[0].lifecycle, AssetLifecycleV16::DrainOnly);
+    assert_eq!(before.assets[0].oi_eff_long_q, POS_SCALE);
+    assert_eq!(before.assets[0].oi_eff_short_q, POS_SCALE);
+
+    env.svm.expire_blockhash();
+    let exit = match route {
+        DrainOnlyCpiExitRoute::Single => env.try_trade_cpi_with_cu_on_asset(
+            &taker,
+            taker_account,
+            &lp,
+            lp_account,
+            matcher_program,
+            ctx,
+            delegate,
+            0,
+            -(POS_SCALE as i128),
+            0,
+        ),
+        DrainOnlyCpiExitRoute::Batch => env.send(
+            ProgInstruction::BatchTradeCpi {
+                legs: vec![BatchTradeCpiLeg {
+                    asset_index: 0,
+                    size_q: -(POS_SCALE as i128),
+                    fee_bps: 0,
+                    limit_price: 0,
+                }],
+            },
+            vec![
+                AccountMeta::new(taker.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(taker_account, false),
+                AccountMeta::new(lp_account, false),
+                AccountMeta::new_readonly(matcher_program, false),
+                AccountMeta::new(ctx, false),
+                AccountMeta::new_readonly(delegate, false),
+            ],
+            &[&taker],
+        ),
+    };
+    assert!(
+        exit.is_ok(),
+        "{route:?}: existing DrainOnly risk must be exit-able through CPI: {exit:?}"
+    );
+
+    let (_, after) = env.market_state();
+    assert_eq!(
+        after.assets[0].oi_eff_long_q, 0,
+        "{route:?}: CPI exit reduced long OI"
+    );
+    assert_eq!(
+        after.assets[0].oi_eff_short_q, 0,
+        "{route:?}: CPI exit reduced short OI"
+    );
+    assert!(
+        after.vault >= after.c_tot + after.insurance,
+        "{route:?}: senior conservation after DrainOnly CPI exit"
+    );
+    assert_eq!(
+        after.vault as u64,
+        env.token_amount(env.vault),
+        "{route:?}: accounting stays tied to SPL custody"
+    );
+}
+
+#[test]
+fn v16_attack_drain_only_existing_risk_can_exit_through_cpi() {
+    assert_drain_only_existing_risk_can_exit_through_cpi(DrainOnlyCpiExitRoute::Single);
+    assert_drain_only_existing_risk_can_exit_through_cpi(DrainOnlyCpiExitRoute::Batch);
+}
+
 // LoF/DoS sweep: asset Recovery uses the same reduction-only public-trade policy as DrainOnly,
 // but it is reached through shutdown and carries a force-close exit window. Existing exposure must
 // still be reducible through CPI, while a risk-increasing request must reject before a hostile matcher
