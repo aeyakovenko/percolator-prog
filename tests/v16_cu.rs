@@ -29184,6 +29184,78 @@ fn v16_attack_finalize_reset_side_cannot_unlock_drain_only_modes() {
     );
 }
 
+// LoF/terminal-state sweep: FinalizeResetSide is permissionless and mutates side mode/risk_epoch for
+// ResetPending sides. After resolution, terminal state must be frozen except for the explicit resolved
+// payout/insurance wind-down routes; a public finalizer must not be able to rewrite side mode or risk
+// epoch after ResolveMarket has captured the terminal market mode.
+#[test]
+fn v16_attack_finalize_reset_side_rejects_after_resolution() {
+    let mut env = V16CuEnv::new();
+    let admin = env.admin.insecure_clone();
+    env.mutate_market(|_, group| {
+        group.assets[0].mode_long = SideModeV16::ResetPending;
+    });
+
+    env.svm.expire_blockhash();
+    let resolved = env.send(
+        ProgInstruction::ResolveMarket,
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        resolved.is_ok(),
+        "test setup must reach a resolved market with a pending side: {resolved:?}"
+    );
+    let before = env.svm.get_account(&env.market).unwrap();
+    let before_group = env.market_state().1;
+    assert_eq!(before_group.mode, MarketModeV16::Resolved);
+    assert_eq!(before_group.assets[0].mode_long, SideModeV16::ResetPending);
+
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::FinalizeResetSide {
+            asset_index: 0,
+            side: 0,
+        },
+        vec![AccountMeta::new(env.market, false)],
+        &[],
+    );
+    assert!(
+        rejected.is_err(),
+        "permissionless reset finalization must not mutate a resolved market"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        before,
+        "rejected post-resolve finalization leaves terminal market bytes unchanged"
+    );
+
+    let mut live = V16CuEnv::new();
+    live.mutate_market(|_, group| {
+        group.assets[0].mode_long = SideModeV16::ResetPending;
+    });
+    let risk_epoch_before = live.market_state().1.risk_epoch;
+    live.svm.expire_blockhash();
+    let accepted = live.send(
+        ProgInstruction::FinalizeResetSide {
+            asset_index: 0,
+            side: 0,
+        },
+        vec![AccountMeta::new(live.market, false)],
+        &[],
+    );
+    assert!(
+        accepted.is_ok(),
+        "live empty ResetPending side must remain finalizable: {accepted:?}"
+    );
+    let live_group = live.market_state().1;
+    assert_eq!(live_group.assets[0].mode_long, SideModeV16::Normal);
+    assert_eq!(live_group.risk_epoch, risk_epoch_before + 1);
+}
+
 // security.md sweep — operation-sequence conservation (#32/#33 fuzz-lite): a long varied sequence of
 // deposits/trades/flips/price-moves/cranks/withdrawals must never drift the core invariants. Checks
 // real-vault==accounting, c_tot==Σcapitals, senior conservation, OI balance at every checkpoint.
