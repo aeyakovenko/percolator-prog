@@ -14085,6 +14085,86 @@ fn v16_attack_resolved_permissionless_crank_honors_owner_exit_window() {
     assert_eq!(env.token_amount(env.vault), 0);
 }
 
+// Public-interface DoS sweep: after the protected owner exit window, the public crank must be able
+// to wind down a resolved account even if the owner no longer has a funded system account. The owner
+// key is still the payout identity, but keeper liveness must not depend on that key being a signer or
+// rent-funded once the owner-created SPL destination already exists.
+#[test]
+fn v16_attack_resolved_permissionless_crank_survives_drained_owner_system_account() {
+    let mut env = V16CuEnv::new();
+    const EXIT_DELAY: u64 = 5;
+    env.configure_permissionless_resolve_with_cu(100, EXIT_DELAY);
+
+    let owner = Keypair::new();
+    let portfolio = env.create_portfolio(&owner);
+    env.deposit(&owner, portfolio, 1_000);
+    let dest = env.token_account(owner.pubkey(), 0);
+    env.resolve();
+    env.svm.warp_to_slot(EXIT_DELAY + 1);
+
+    let owner_lamports = env.svm.get_account(&owner.pubkey()).unwrap().lamports;
+    env.svm.expire_blockhash();
+    send_raw_ixs(
+        &mut env.svm,
+        &env.payer,
+        vec![system_instruction::transfer(
+            &owner.pubkey(),
+            &env.payer.pubkey(),
+            owner_lamports,
+        )],
+        &[&owner],
+    )
+    .expect("owner can publicly drain its system-account lamports");
+    assert_eq!(
+        env.svm
+            .get_account(&owner.pubkey())
+            .map(|account| account.lamports)
+            .unwrap_or(0),
+        0,
+        "probe starts after the owner system account is no longer funded"
+    );
+
+    env.svm.expire_blockhash();
+    let cu = env
+        .send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: u64::MAX,
+                close_q: u128::MAX,
+                observations: vec![CrankObservationHint {
+                    asset_index: u16::MAX,
+                    oracle_accounts: u8::MAX,
+                }],
+            },
+            vec![
+                AccountMeta::new_readonly(owner.pubkey(), false),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(portfolio, false),
+                AccountMeta::new(dest, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(env.vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[],
+        )
+        .expect("post-timeout resolved PermissionlessCrank should not depend on owner lamports");
+    assert_cu_within(
+        "post-timeout resolved PermissionlessCrank drained owner account",
+        cu,
+        CRANK_CU_LIMIT,
+    );
+    assert_eq!(
+        env.token_amount(dest),
+        1_000,
+        "resolved public crank still pays the portfolio owner's token account"
+    );
+    assert_eq!(env.token_amount(env.vault), 0);
+    let (_, group) = env.market_state();
+    let account = env.portfolio_state(portfolio);
+    assert_eq!(group.vault, 0);
+    assert_eq!(group.c_tot, 0);
+    assert_eq!(account.capital.get(), 0);
+}
+
 // Public-interface DoS sweep: resolved PermissionlessCrank is the sole public crank route once the
 // market winds down. The handler ignores live-mode hints and trailing accounts after forwarding into
 // CloseResolved, but the deployed adapter still scans the complete instruction account list. Keep a
