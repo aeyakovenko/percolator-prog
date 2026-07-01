@@ -64204,6 +64204,136 @@ fn v16_attack_recovery_existing_risk_increase_rejects_before_hostile_matcher_cpi
     }
 }
 
+// LoF/DoS sweep: after marketauth shuts an asset into Recovery, users still have the
+// force-close delay window to exit voluntarily. The no-CPI routes are pinned above; this drives
+// the real matcher CPI plumbing too, proving both single and batch CPI fills can close Recovery
+// exposure before permissionless force-close matures.
+#[test]
+fn v16_attack_recovery_cpi_routes_allow_user_exit_before_force_close() {
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(2, 5_000, 10_000, 1_000);
+    env.configure_permissionless_resolve_with_cu(100, 50);
+    env.configure_auth_mark_for_asset_as_admin(1, 1, 100);
+
+    let matcher_program = Pubkey::new_unique();
+    let matcher_bytes = std::fs::read(auth_matcher_program_path()).expect("read auth matcher BPF");
+    env.svm.add_program(matcher_program, &matcher_bytes);
+
+    let single_taker = Keypair::new();
+    let single_lp = Keypair::new();
+    let single_taker_account = env.create_portfolio(&single_taker);
+    let single_lp_account = env.create_portfolio(&single_lp);
+    env.deposit(&single_taker, single_taker_account, 1_000_000);
+    env.deposit(&single_lp, single_lp_account, 1_000_000);
+    env.trade_asset_with_cu(
+        1,
+        &single_taker,
+        single_taker_account,
+        &single_lp,
+        single_lp_account,
+        POS_SCALE as i128,
+        100,
+        0,
+    );
+    let (single_ctx, single_delegate, _) =
+        env.init_auth_matcher_context(matcher_program, &single_lp, single_lp_account);
+
+    let batch_taker = Keypair::new();
+    let batch_lp = Keypair::new();
+    let batch_taker_account = env.create_portfolio(&batch_taker);
+    let batch_lp_account = env.create_portfolio(&batch_lp);
+    env.deposit(&batch_taker, batch_taker_account, 1_000_000);
+    env.deposit(&batch_lp, batch_lp_account, 1_000_000);
+    env.trade_asset_with_cu(
+        1,
+        &batch_taker,
+        batch_taker_account,
+        &batch_lp,
+        batch_lp_account,
+        POS_SCALE as i128,
+        100,
+        0,
+    );
+    let (batch_ctx, batch_delegate, _) =
+        env.init_auth_matcher_context(matcher_program, &batch_lp, batch_lp_account);
+
+    env.svm.warp_to_slot(10);
+    env.update_asset_lifecycle_as_admin_with_cu(
+        percolator_prog::processor::ASSET_ACTION_SHUTDOWN,
+        1,
+        10,
+        0,
+    );
+    let (_, recovery_group) = env.market_state();
+    assert_eq!(
+        recovery_group.assets[1].lifecycle,
+        AssetLifecycleV16::Recovery
+    );
+    assert_eq!(recovery_group.assets[1].oi_eff_long_q, 2 * POS_SCALE);
+    assert_eq!(recovery_group.assets[1].oi_eff_short_q, 2 * POS_SCALE);
+
+    env.svm.expire_blockhash();
+    let single_cu = env.trade_cpi_with_cu_on_asset(
+        &single_taker,
+        single_taker_account,
+        &single_lp,
+        single_lp_account,
+        matcher_program,
+        single_ctx,
+        single_delegate,
+        1,
+        -(POS_SCALE as i128),
+        0,
+    );
+    assert_cu_within("Recovery single TradeCpi exit", single_cu, TRADE_CU_LIMIT);
+    assert!(
+        !has_active_leg_for_asset(&env.portfolio_state(single_taker_account), 1),
+        "single TradeCpi exit leaves the taker flat"
+    );
+    assert!(
+        !has_active_leg_for_asset(&env.portfolio_state(single_lp_account), 1),
+        "single TradeCpi exit leaves the LP flat"
+    );
+
+    env.svm.expire_blockhash();
+    let batch_cu = env
+        .send(
+            ProgInstruction::BatchTradeCpi {
+                legs: vec![BatchTradeCpiLeg {
+                    asset_index: 1,
+                    size_q: -(POS_SCALE as i128),
+                    fee_bps: 0,
+                    limit_price: 0,
+                }],
+            },
+            vec![
+                AccountMeta::new(batch_taker.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(batch_taker_account, false),
+                AccountMeta::new(batch_lp_account, false),
+                AccountMeta::new_readonly(matcher_program, false),
+                AccountMeta::new(batch_ctx, false),
+                AccountMeta::new_readonly(batch_delegate, false),
+            ],
+            &[&batch_taker],
+        )
+        .expect("BatchTradeCpi must let Recovery users exit before force-close");
+    assert_cu_within("Recovery BatchTradeCpi exit", batch_cu, TRADE_CU_LIMIT);
+    assert!(
+        !has_active_leg_for_asset(&env.portfolio_state(batch_taker_account), 1),
+        "BatchTradeCpi exit leaves the taker flat"
+    );
+    assert!(
+        !has_active_leg_for_asset(&env.portfolio_state(batch_lp_account), 1),
+        "BatchTradeCpi exit leaves the LP flat"
+    );
+
+    let (_, group_after) = env.market_state();
+    assert_eq!(group_after.assets[1].oi_eff_long_q, 0);
+    assert_eq!(group_after.assets[1].oi_eff_short_q, 0);
+    assert_eq!(group_after.assets[1].lifecycle, AssetLifecycleV16::Recovery);
+    assert!(group_after.vault >= group_after.c_tot + group_after.insurance);
+}
+
 // LoF/DoS sweep: the CPI routes run cheap wrapper preflight before invoking an LP matcher. A stored
 // portfolio with duplicate active legs is invalid engine state; if the lightweight preflight only
 // reads the first matching leg, a hostile matcher can be invoked before the engine rejects the
