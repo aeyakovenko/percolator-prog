@@ -15477,6 +15477,72 @@ fn v16_attack_close_resolved_after_exit_window_is_permissionless_but_not_stealab
     assert_eq!(account.capital.get(), 0);
 }
 
+#[test]
+fn v16_attack_permissionless_close_resolved_survives_drained_owner_system_account() {
+    let mut env = V16CuEnv::new();
+    const EXIT_DELAY: u64 = 5;
+    env.configure_permissionless_resolve_with_cu(100, EXIT_DELAY);
+
+    let owner = Keypair::new();
+    let portfolio = env.create_portfolio(&owner);
+    env.deposit(&owner, portfolio, 1_000);
+    let owner_dest = env.token_account(owner.pubkey(), 0);
+    env.resolve();
+    env.svm.warp_to_slot(EXIT_DELAY + 1);
+
+    let owner_lamports = env.svm.get_account(&owner.pubkey()).unwrap().lamports;
+    env.svm.expire_blockhash();
+    send_raw_ixs(
+        &mut env.svm,
+        &env.payer,
+        vec![system_instruction::transfer(
+            &owner.pubkey(),
+            &env.payer.pubkey(),
+            owner_lamports,
+        )],
+        &[&owner],
+    )
+    .expect("owner can publicly drain its system-account lamports");
+    assert_eq!(
+        env.svm
+            .get_account(&owner.pubkey())
+            .map(|account| account.lamports)
+            .unwrap_or(0),
+        0,
+        "probe starts after the owner system account is no longer funded"
+    );
+
+    env.svm.expire_blockhash();
+    let permissionless = env
+        .send(
+            ProgInstruction::CloseResolved {
+                fee_rate_per_slot: 0,
+            },
+            vec![
+                AccountMeta::new_readonly(owner.pubkey(), false),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(portfolio, false),
+                AccountMeta::new(owner_dest, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(env.vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[],
+        )
+        .expect("post-timeout CloseResolved should not depend on owner lamports");
+    assert_cu_within(
+        "post-timeout CloseResolved drained owner account",
+        permissionless,
+        CUSTODY_CU_LIMIT,
+    );
+    assert_eq!(
+        env.token_amount(owner_dest),
+        1_000,
+        "permissionless close still pays the portfolio owner's token account"
+    );
+    assert_eq!(env.token_amount(env.vault), 0);
+}
+
 // security.md sweep - permissionless CloseResolved legacy rollback (#5/#26/#44/#48):
 // After the owner exit window, CloseResolved is intentionally permissionless
 // when the caller names the portfolio owner, but it mutates payout state before
