@@ -23240,6 +23240,106 @@ fn v16_attack_convert_released_pnl_requires_current_cert_and_public_refresh() {
     );
 }
 
+// LoF/DoS sweep (PR135): ConvertReleasedPnl stages source-backed PnL consumption, senior-capital
+// credit, and source backing counters before the final market/account shape checks. If the market
+// shape is bad, the public route must reject atomically, and after the shape is repaired the same
+// user operation must still make bounded progress.
+#[test]
+fn v16_attack_convert_released_pnl_rejects_invalid_final_market_shape() {
+    const RELEASED: u128 = 40;
+    let mut env = V16CuEnv::new();
+    env.top_up_backing_bucket(1, RELEASED, 10_000);
+
+    let owner = Keypair::new();
+    let portfolio = env.create_portfolio(&owner);
+    env.add_source_positive_pnl(portfolio, 1, RELEASED);
+    env.crank(
+        portfolio,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 0,
+            close_q: 0,
+            observations: crank_observations(0),
+        },
+    );
+    assert_eq!(
+        env.portfolio_state(portfolio).pnl.get(),
+        RELEASED as i128,
+        "setup must stage real source-backed released PnL"
+    );
+
+    env.mutate_market(|_, group| {
+        group.insurance_domain_budget[0] = group.insurance.saturating_add(1);
+    });
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let portfolio_before = env.svm.get_account(&portfolio).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::ConvertReleasedPnl { amount: RELEASED },
+        vec![
+            AccountMeta::new(owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio, false),
+        ],
+        &[&owner],
+    );
+    assert!(
+        rejected.is_err(),
+        "ConvertReleasedPnl must reject an invalid final market shape"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "failed conversion rolls back staged market value accounting"
+    );
+    assert_eq!(
+        env.svm.get_account(&portfolio).unwrap(),
+        portfolio_before,
+        "failed conversion leaves released PnL claimable"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        vault_before,
+        "ConvertReleasedPnl never moves SPL custody"
+    );
+
+    env.mutate_market(|_, group| {
+        group.insurance_domain_budget[0] = 0;
+    });
+    env.svm.expire_blockhash();
+    let accepted = env.send(
+        ProgInstruction::ConvertReleasedPnl { amount: RELEASED },
+        vec![
+            AccountMeta::new(owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio, false),
+        ],
+        &[&owner],
+    );
+    assert!(
+        accepted.is_ok(),
+        "same conversion must progress after repairing the market shape: {accepted:?}"
+    );
+    let after = env.portfolio_state(portfolio);
+    assert_eq!(
+        after.capital.get(),
+        RELEASED,
+        "repaired conversion moves the backed released PnL into senior capital"
+    );
+    assert_eq!(after.pnl.get(), 0, "repaired conversion consumes the claim");
+    let (_, group) = env.market_state();
+    assert_eq!(
+        group.c_tot, RELEASED,
+        "market senior-capital accounting reflects exactly one successful conversion"
+    );
+    assert_eq!(
+        group.vault as u64,
+        env.token_amount(env.vault),
+        "conversion preserves SPL custody parity"
+    );
+}
+
 // security.md sweep - ConvertReleasedPnl market isolation (#2/#33/#44): owner authorization alone is not
 // enough. A market-A portfolio with released source-backed PnL must not be convertible through market B's
 // accounting slab, where it could consume B backing or corrupt B's senior capital counters.
