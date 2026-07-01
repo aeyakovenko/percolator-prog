@@ -37731,6 +37731,221 @@ fn v16_attack_nocpi_extreme_price_caps_ewma_move_without_dos() {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+enum PermissionlessMarkFeeRoute {
+    NoCpiSingle,
+    NoCpiBatch,
+    CpiSingle,
+    CpiBatch,
+}
+
+fn permissionless_ewma_profile(
+    env: &V16CuEnv,
+    asset_index: u16,
+) -> state::AssetOracleProfileV16 {
+    state::read_asset_oracle_profile(
+        &env.svm.get_account(&env.market).unwrap().data,
+        asset_index as usize,
+    )
+    .unwrap()
+}
+
+fn assert_permissionless_ewma_mark_fee_not_reclaimable(route: PermissionlessMarkFeeRoute) {
+    const ASSET_INDEX: u16 = 1;
+    const MARK: u64 = 1_000_000;
+    const CAP_BPS: u64 = 50;
+    const MAX_FEE_BPS: u64 = 37;
+    const SIZE_Q: i128 = (1000u128 * POS_SCALE) as i128;
+    const HIGH_PRINT: u64 = MARK * 19 / 10;
+    const SPREAD_BPS: u32 = 9_000;
+
+    let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+        max_portfolio_assets: 1,
+        initial_price: MARK,
+        h_max: 20,
+        max_trading_fee_bps: MAX_FEE_BPS,
+        max_price_move_bps_per_slot: CAP_BPS,
+        max_accrual_dt_slots: 20,
+        min_funding_lifetime_slots: 20,
+        ..V16CuMarketParams::default()
+    });
+    env.update_market_init_fee_policy_with_cu(1);
+
+    let creator = Keypair::new();
+    env.ensure_signer_account(creator.pubkey());
+    env.svm.warp_to_slot(1);
+    env.activate_permissionless_asset_with_fee(
+        &creator,
+        ASSET_INDEX,
+        1,
+        MARK,
+        creator.pubkey(),
+        creator.pubkey(),
+        creator.pubkey(),
+        creator.pubkey(),
+        1,
+    );
+    env.svm.expire_blockhash();
+    env.send(
+        ProgInstruction::ConfigureEwmaMark {
+            asset_index: ASSET_INDEX,
+            now_slot: 1,
+            initial_mark_e6: MARK,
+            mark_ewma_halflife_slots: 1,
+            mark_min_fee: 0,
+        },
+        vec![
+            AccountMeta::new(creator.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&creator],
+    )
+    .expect("permissionless creator configures its EWMA oracle");
+
+    env.svm.warp_to_slot(5);
+    let (owner_a, account_a, owner_b, account_b) =
+        funded_no_cpi_reported_price_pair(&mut env, 4_000_000_000);
+    let before = env.market_state().1;
+    let asset_budget_before = before.insurance_domain_budget[2] + before.insurance_domain_budget[3];
+    let base_budget_before = before.insurance_domain_budget[0] + before.insurance_domain_budget[1];
+
+    env.svm.expire_blockhash();
+    let trade = match route {
+        PermissionlessMarkFeeRoute::NoCpiSingle => env.try_trade_asset_with_cu(
+            ASSET_INDEX,
+            &owner_a,
+            account_a,
+            &owner_b,
+            account_b,
+            SIZE_Q,
+            HIGH_PRINT,
+            0,
+        ),
+        PermissionlessMarkFeeRoute::NoCpiBatch => env.send(
+            ProgInstruction::BatchTradeNoCpi {
+                legs: vec![BatchTradeLeg {
+                    asset_index: ASSET_INDEX,
+                    size_q: SIZE_Q,
+                    exec_price: HIGH_PRINT,
+                    fee_bps: 0,
+                }],
+            },
+            vec![
+                AccountMeta::new(owner_a.pubkey(), true),
+                AccountMeta::new(owner_b.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(account_a, false),
+                AccountMeta::new(account_b, false),
+            ],
+            &[&owner_a, &owner_b],
+        ),
+        PermissionlessMarkFeeRoute::CpiSingle | PermissionlessMarkFeeRoute::CpiBatch => {
+            let matcher_program = Pubkey::new_unique();
+            let matcher_bytes = std::fs::read(matcher_program_path()).expect("read matcher BPF");
+            env.svm.add_program(matcher_program, &matcher_bytes);
+            let (ctx, delegate, _) = env.init_matcher_context_with_passive_spread_authorized(
+                matcher_program,
+                &owner_b,
+                account_b,
+                SPREAD_BPS,
+                SPREAD_BPS,
+            );
+            match route {
+                PermissionlessMarkFeeRoute::CpiSingle => env.try_trade_cpi_with_cu_on_asset(
+                    &owner_a,
+                    account_a,
+                    &owner_b,
+                    account_b,
+                    matcher_program,
+                    ctx,
+                    delegate,
+                    ASSET_INDEX,
+                    SIZE_Q,
+                    0,
+                ),
+                PermissionlessMarkFeeRoute::CpiBatch => env.send(
+                    ProgInstruction::BatchTradeCpi {
+                        legs: vec![BatchTradeCpiLeg {
+                            asset_index: ASSET_INDEX,
+                            size_q: SIZE_Q,
+                            fee_bps: 0,
+                            limit_price: 0,
+                        }],
+                    },
+                    vec![
+                        AccountMeta::new(owner_a.pubkey(), true),
+                        AccountMeta::new(env.market, false),
+                        AccountMeta::new(account_a, false),
+                        AccountMeta::new(account_b, false),
+                        AccountMeta::new_readonly(matcher_program, false),
+                        AccountMeta::new(ctx, false),
+                        AccountMeta::new_readonly(delegate, false),
+                    ],
+                    &[&owner_a],
+                ),
+                _ => unreachable!(),
+            }
+        }
+    };
+    assert!(
+        trade.is_ok(),
+        "{route:?}: permissionless asset off-mark EWMA trade should remain live: {trade:?}"
+    );
+
+    let profile = permissionless_ewma_profile(&env, ASSET_INDEX);
+    let after_trade = env.market_state().1;
+    let fee_paid = after_trade.insurance - before.insurance;
+    let asset_budget_delta = after_trade.insurance_domain_budget[2]
+        + after_trade.insurance_domain_budget[3]
+        - asset_budget_before;
+    let base_budget_delta = after_trade.insurance_domain_budget[0]
+        + after_trade.insurance_domain_budget[1]
+        - base_budget_before;
+    assert!(
+        fee_paid > 0,
+        "{route:?}: probe must pay a mark-movement fee"
+    );
+    assert_eq!(
+        asset_budget_delta, 0,
+        "{route:?}: mark-movement fee must not land in creator-operated asset domains"
+    );
+    assert_eq!(
+        base_budget_delta, fee_paid,
+        "{route:?}: mark-movement fee must land in non-permissionless base insurance"
+    );
+    assert!(
+        profile.mark_ewma_e6 > MARK,
+        "{route:?}: probe must actually move the trade-driven EWMA mark"
+    );
+    assert_eq!(
+        after_trade.assets[ASSET_INDEX as usize].oi_eff_long_q,
+        SIZE_Q as u128
+    );
+    assert_eq!(
+        after_trade.assets[ASSET_INDEX as usize].oi_eff_short_q,
+        SIZE_Q as u128
+    );
+
+    env.svm.expire_blockhash();
+    let reclaim = env.try_withdraw_insurance_asset_with_authority(&creator, ASSET_INDEX, 1);
+    assert!(
+        reclaim.is_err(),
+        "{route:?}: permissionless creator/operator must not be able to reclaim the EWMA mark-movement fee"
+    );
+}
+
+#[test]
+fn v16_attack_permissionless_trade_driven_mark_fee_is_not_reclaimable() {
+    for route in [
+        PermissionlessMarkFeeRoute::NoCpiSingle,
+        PermissionlessMarkFeeRoute::NoCpiBatch,
+        PermissionlessMarkFeeRoute::CpiSingle,
+        PermissionlessMarkFeeRoute::CpiBatch,
+    ] {
+        assert_permissionless_ewma_mark_fee_not_reclaimable(route);
+    }
+}
+
 // security.md sweep — ADL deleverage precision/conservation (#9/#22/#33): when a bankrupt side is
 // partially liquidated, the engine auto-deleverages the WINNING (opposite) side by scaling its a-factor
 // by oi_after/oi_before (percolator/src/v16.rs:9834). Attacker goal: have the winner keep its full claim

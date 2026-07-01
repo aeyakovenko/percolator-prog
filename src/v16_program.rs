@@ -4992,6 +4992,64 @@ pub mod processor {
         credit_fee_to_domain_budget_view(cfg, group, asset_index * 2 + 1, fee_short)
     }
 
+    fn credit_trade_fees_with_mark_externality_view(
+        cfg: &WrapperConfigV16,
+        group: &mut state::MarketViewMutV16<'_>,
+        asset_index: usize,
+        fee_long: u128,
+        fee_short: u128,
+        mark_externality_fee: u128,
+    ) -> ProgramResult {
+        let total_fee = fee_long
+            .checked_add(fee_short)
+            .ok_or(PercolatorError::EngineArithmeticOverflow)?;
+        let mark_externality_fee = core::cmp::min(mark_externality_fee, total_fee);
+        if mark_externality_fee == 0 {
+            return credit_trade_fees_to_market_budgets_view(
+                cfg,
+                group,
+                asset_index,
+                fee_long,
+                fee_short,
+            );
+        }
+
+        let mut mark_long = mark_externality_fee / 2;
+        let mut mark_short = mark_externality_fee
+            .checked_sub(mark_long)
+            .ok_or(PercolatorError::EngineCounterUnderflow)?;
+        if mark_long > fee_long {
+            let overflow = mark_long
+                .checked_sub(fee_long)
+                .ok_or(PercolatorError::EngineCounterUnderflow)?;
+            mark_long = fee_long;
+            mark_short = mark_short
+                .checked_add(overflow)
+                .ok_or(PercolatorError::EngineArithmeticOverflow)?;
+        }
+        if mark_short > fee_short {
+            let overflow = mark_short
+                .checked_sub(fee_short)
+                .ok_or(PercolatorError::EngineCounterUnderflow)?;
+            mark_short = fee_short;
+            mark_long = mark_long
+                .checked_add(overflow)
+                .ok_or(PercolatorError::EngineArithmeticOverflow)?;
+        }
+        if mark_long > fee_long || mark_short > fee_short {
+            return Err(PercolatorError::EngineArithmeticOverflow.into());
+        }
+
+        let local_long = fee_long
+            .checked_sub(mark_long)
+            .ok_or(PercolatorError::EngineCounterUnderflow)?;
+        let local_short = fee_short
+            .checked_sub(mark_short)
+            .ok_or(PercolatorError::EngineCounterUnderflow)?;
+        credit_trade_fees_to_market_budgets_view(cfg, group, asset_index, local_long, local_short)?;
+        credit_market_insurance_budget_view(group, 0, mark_externality_fee)
+    }
+
     fn credit_market_fee_split_across_domains_view(
         cfg: &WrapperConfigV16,
         group: &mut state::MarketViewMutV16<'_>,
@@ -5843,12 +5901,13 @@ pub mod processor {
                     backing_before_b.as_ref(),
                 )?;
             }
-            credit_trade_fees_to_market_budgets_view(
+            credit_trade_fees_with_mark_externality_view(
                 &cfg,
                 &mut group,
                 asset_index as usize,
                 outcome.fee_a,
                 outcome.fee_b,
+                fee_quote.mark_externality_fee,
             )?;
             update_hybrid_mark_after_trade_view(
                 &mut oracle_profile,
@@ -6072,12 +6131,13 @@ pub mod processor {
                 leg_ctx.iter_mut()
             {
                 let fee_leg = batch_leg_fee(*abs_size, *fee_basis_price, fee_quote.fee_bps)?;
-                credit_trade_fees_to_market_budgets_view(
+                credit_trade_fees_with_mark_externality_view(
                     &cfg,
                     &mut group,
                     *asset_index,
                     fee_leg,
                     fee_leg,
+                    fee_quote.mark_externality_fee,
                 )?;
                 let total_fee_leg = fee_leg
                     .checked_add(fee_leg)
@@ -11415,6 +11475,7 @@ pub mod processor {
     struct HybridTradeFeeQuote {
         fee_bps: u64,
         post_trade_mark_e6: u64,
+        mark_externality_fee: u128,
     }
 
     fn two_sided_trade_fee_paid_view(notional: u128, fee_bps: u64) -> Result<u128, ProgramError> {
@@ -11530,12 +11591,14 @@ pub mod processor {
             return Ok(HybridTradeFeeQuote {
                 fee_bps: base,
                 post_trade_mark_e6: 0,
+                mark_externality_fee: 0,
             });
         }
         if oracle_v16::profile_is_auth_mark(profile) {
             return Ok(HybridTradeFeeQuote {
                 fee_bps: base,
                 post_trade_mark_e6: 0,
+                mark_externality_fee: 0,
             });
         }
         let now_slot = authenticated_market_slot_or_fallback_view(group);
@@ -11545,6 +11608,7 @@ pub mod processor {
             return Ok(HybridTradeFeeQuote {
                 fee_bps: base,
                 post_trade_mark_e6: 0,
+                mark_externality_fee: 0,
             });
         }
         if asset_index >= group.header.config.max_market_slots.get() as usize
@@ -11553,6 +11617,7 @@ pub mod processor {
             return Ok(HybridTradeFeeQuote {
                 fee_bps: base,
                 post_trade_mark_e6: 0,
+                mark_externality_fee: 0,
             });
         }
         let asset = group.markets[asset_index].engine.asset;
@@ -11626,6 +11691,7 @@ pub mod processor {
         Ok(HybridTradeFeeQuote {
             fee_bps,
             post_trade_mark_e6,
+            mark_externality_fee: mark_fee_paid,
         })
     }
 
