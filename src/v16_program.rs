@@ -6975,6 +6975,9 @@ pub mod processor {
             if ret.exec_size == 0 {
                 return Err(PercolatorError::InvalidInstruction.into());
             }
+            if ret.exec_size != leg.size_q {
+                return Err(PercolatorError::InvalidInstruction.into());
+            }
             if leg.limit_price != 0 {
                 let limit_ok = if leg.size_q > 0 {
                     ret.exec_price_e6 <= leg.limit_price
