@@ -52132,6 +52132,105 @@ fn v16_attack_hostile_matcher_batch_returns_all_rejected() {
     );
 }
 
+#[test]
+fn v16_attack_batch_tradecpi_rejects_flagged_partial_spread_fill() {
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(2, 1_000, 1_000, 500);
+    env.configure_auth_mark_for_asset_as_admin(0, 1, 100);
+    env.configure_auth_mark_for_asset_as_admin(1, 1, 100);
+    let hostile = Pubkey::new_unique();
+    env.svm.add_program(
+        hostile,
+        &std::fs::read(hostile_matcher_program_path()).unwrap(),
+    );
+    let taker = Keypair::new();
+    let lp = Keypair::new();
+    let taker_account = env.create_portfolio(&taker);
+    let lp_account = env.create_portfolio(&lp);
+    env.deposit(&taker, taker_account, 1_000_000);
+    env.deposit(&lp, lp_account, 1_000_000);
+
+    let ctx = Pubkey::new_unique();
+    let delegate = matcher_delegate_key(
+        &env.program_id,
+        &env.market,
+        &lp_account,
+        &lp.pubkey(),
+        &hostile,
+        &ctx,
+    );
+    env.svm
+        .set_account(
+            delegate,
+            Account {
+                lamports: 1_000_000_000,
+                data: vec![],
+                owner: Pubkey::default(),
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    let mut ctx_data = vec![0u8; MATCHER_CONTEXT_LEN];
+    ctx_data[0] = 15; // flagged partial: asset 0 half-fills, asset 1 full-fills.
+    env.svm
+        .set_account(
+            ctx,
+            Account {
+                lamports: 1_000_000_000,
+                data: ctx_data,
+                owner: hostile,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    env.set_matcher_config(hostile, &lp, lp_account, ctx, delegate, 1);
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let taker_before = env.svm.get_account(&taker_account).unwrap();
+    let lp_before = env.svm.get_account(&lp_account).unwrap();
+    env.svm.expire_blockhash();
+    let result = env.send(
+        ProgInstruction::BatchTradeCpi {
+            legs: vec![
+                BatchTradeCpiLeg {
+                    asset_index: 0,
+                    size_q: (5 * POS_SCALE) as i128,
+                    fee_bps: 100,
+                    limit_price: 0,
+                },
+                BatchTradeCpiLeg {
+                    asset_index: 1,
+                    size_q: -((5 * POS_SCALE) as i128),
+                    fee_bps: 100,
+                    limit_price: 0,
+                },
+            ],
+        },
+        vec![
+            AccountMeta::new(taker.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(taker_account, false),
+            AccountMeta::new(lp_account, false),
+            AccountMeta::new_readonly(hostile, false),
+            AccountMeta::new(ctx, false),
+            AccountMeta::new_readonly(delegate, false),
+        ],
+        &[&taker],
+    );
+    if result.is_ok() {
+        let taker_state = env.portfolio_state(taker_account);
+        panic!(
+            "BatchTradeCpi accepted a matcher-controlled flagged partial spread: asset0={}, asset1={}",
+            active_leg_for_asset(&taker_state, 0).basis_pos_q,
+            active_leg_for_asset(&taker_state, 1).basis_pos_q
+        );
+    }
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+    assert_eq!(env.svm.get_account(&taker_account).unwrap(), taker_before);
+    assert_eq!(env.svm.get_account(&lp_account).unwrap(), lp_before);
+}
+
 // full-interface sweep / issue: removing the LP signer from TradeCpi is only safe if Percolator
 // verifies that the LP owner explicitly authorized this matcher program/context. A hostile matcher can
 // otherwise return a perfectly well-formed oracle-priced fill and force a victim LP portfolio into a
