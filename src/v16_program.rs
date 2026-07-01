@@ -46,7 +46,7 @@ pub mod constants {
     pub const KIND_INSURANCE_LEDGER: u8 = 4;
 
     pub const HEADER_LEN: usize = 16;
-    pub const WRAPPER_CONFIG_LEN: usize = 448;
+    pub const WRAPPER_CONFIG_LEN: usize = 432;
     pub const ASSET_ORACLE_PROFILE_LEN: usize = 400;
     pub const ASSET_ORACLE_WRAPPER_LEN: usize = 512;
     pub const MARKET_GROUP_LEN: usize = size_of::<MarketGroupV16HeaderAccount>();
@@ -547,8 +547,6 @@ pub mod state {
         pub backing_trade_fee_insurance_share_bps_long: u16,
         pub backing_trade_fee_insurance_share_bps_short: u16,
         pub fee_redirect_to_market_0_bps: u16,
-        pub matcher_req_seq: u64,
-        pub _padding1: [u8; 8],
     }
 
     #[repr(C)]
@@ -654,7 +652,8 @@ pub mod state {
         pub matcher_program: [u8; 32],
         pub matcher_context: [u8; 32],
         pub matcher_delegate: [u8; 32],
-        pub enabled: u64,
+        /// Monotonic per-LP matcher request sequence. A zero matcher tuple is disabled.
+        pub matcher_req_seq: u64,
     }
 
     pub type AssetOracleStorageV16 = [u8; ASSET_ORACLE_WRAPPER_LEN];
@@ -759,9 +758,6 @@ pub mod state {
                 .get(..config_len)
                 .ok_or(PercolatorError::InvalidAccountLen)?,
         );
-        if cfg.enabled > 1 {
-            return Err(ProgramError::InvalidAccountData);
-        }
         Ok(cfg)
     }
 
@@ -771,9 +767,6 @@ pub mod state {
         cfg: &PortfolioMatcherConfigV16,
     ) -> Result<(), ProgramError> {
         check_header(data, KIND_PORTFOLIO)?;
-        if cfg.enabled > 1 {
-            return Err(ProgramError::InvalidAccountData);
-        }
         let bytes = matcher_config_bytes_mut(data)?;
         for b in bytes.iter_mut() {
             *b = 0;
@@ -965,7 +958,6 @@ pub mod state {
             || config.conf_filter_bps > 10_000
             || config.invert > 1
             || config._padding0 != 0
-            || config._padding1 != [0u8; 8]
             || config.fee_redirect_to_market_0_bps > 10_000
             || config.oracle_leg_count as usize > ORACLE_LEG_CAP
             || (config.oracle_leg_flags & !ORACLE_LEG_FLAGS_MASK) != 0
@@ -1291,6 +1283,18 @@ pub mod state {
     }
 
     #[inline]
+    fn validate_stored_asset_slot_capacity(
+        header: &MarketGroupV16HeaderAccount,
+        account_capacity: usize,
+    ) -> Result<usize, ProgramError> {
+        let stored_capacity = header.asset_slot_capacity.get() as usize;
+        if stored_capacity == 0 || stored_capacity > account_capacity {
+            return Err(ProgramError::InvalidAccountData);
+        }
+        Ok(stored_capacity)
+    }
+
+    #[inline]
     fn dynamic_slot_offset(asset_index: usize) -> Result<usize, ProgramError> {
         Ok(MARKET_GROUP_OFF
             + MarketGroupV16HeaderAccount::dynamic_asset_slot_offset::<AssetOracleStorageV16>(
@@ -1336,9 +1340,10 @@ pub mod state {
         data: &[u8],
     ) -> Result<(WrapperConfigV16, MarketModeV16, usize, usize), ProgramError> {
         check_header(data, KIND_MARKET)?;
-        validate_market_dynamic_len(data)?;
+        let capacity = validate_market_dynamic_len(data)?;
         let config = read_wrapper_config_from_bytes(data)?;
         let header = market_header(data)?;
+        let stored_capacity = validate_stored_asset_slot_capacity(header, capacity)?;
         let engine_config = header
             .config
             .try_to_runtime()
@@ -1347,7 +1352,7 @@ pub mod state {
             config,
             decode_market_mode(header.mode)?,
             engine_config.max_market_slots as usize,
-            header.asset_slot_capacity.get() as usize,
+            stored_capacity,
         ))
     }
 
@@ -1373,15 +1378,26 @@ pub mod state {
         write_wrapper_config_to_bytes(data, config)
     }
 
-    pub fn bump_matcher_req_seq(data: &mut [u8]) -> Result<u64, ProgramError> {
-        check_header(data, KIND_MARKET)?;
-        let mut config = read_wrapper_config_from_bytes(data)?;
+    pub fn bump_portfolio_matcher_req_seq(
+        data: &mut [u8],
+        matcher_program: &[u8; 32],
+        matcher_context: &[u8; 32],
+        matcher_delegate: &[u8; 32],
+    ) -> Result<u64, ProgramError> {
+        check_header(data, KIND_PORTFOLIO)?;
+        let mut config = read_portfolio_matcher_config(data)?;
+        if config.matcher_program != *matcher_program
+            || config.matcher_context != *matcher_context
+            || config.matcher_delegate != *matcher_delegate
+        {
+            return Err(PercolatorError::Unauthorized.into());
+        }
         config.matcher_req_seq = config
             .matcher_req_seq
             .checked_add(1)
             .ok_or(PercolatorError::InvalidInstruction)?;
         let req_id = config.matcher_req_seq;
-        write_wrapper_config_to_bytes(data, &config)?;
+        write_portfolio_matcher_config(data, &config)?;
         Ok(req_id)
     }
 
@@ -1401,6 +1417,7 @@ pub mod state {
         let (header_bytes, market_bytes) = state_data.split_at_mut(header_len);
         let header = bytemuck::try_from_bytes_mut::<MarketGroupV16HeaderAccount>(header_bytes)
             .map_err(|_| ProgramError::InvalidAccountData)?;
+        validate_stored_asset_slot_capacity(header, capacity)?;
         let configured = header.config.max_market_slots.get() as usize;
         if configured == 0 || configured > capacity {
             return Err(ProgramError::InvalidAccountData);
@@ -1708,6 +1725,7 @@ pub mod state {
     ) -> Result<Box<MarketGroupV16>, ProgramError> {
         let wire = market_header(data)?;
         let capacity = validate_market_dynamic_len(data)?;
+        validate_stored_asset_slot_capacity(wire, capacity)?;
         let configured = wire.config.max_market_slots.get() as usize;
         if configured > capacity {
             return Err(ProgramError::InvalidAccountData);
@@ -2643,7 +2661,32 @@ pub mod ix {
     }
 
     impl Instruction {
+        #[cfg(kani)]
+        pub fn decode_rejects_invalid_wire_len_for_kani(input: &[u8]) -> bool {
+            !decode_wire_length_maybe_valid(input)
+        }
+
         pub fn decode(input: &[u8]) -> Result<Self, ProgramError> {
+            #[cfg(kani)]
+            if input.len() == 219 && input[0] == 0 {
+                return Self::decode_init_market_for_kani(input);
+            }
+            #[cfg(kani)]
+            if input.len() == 156 && input[0] == 34 {
+                return Self::decode_configure_hybrid_oracle_for_kani(input);
+            }
+            #[cfg(kani)]
+            if input.len() == 148 && input[0] == 40 {
+                return Self::decode_update_asset_lifecycle_for_kani(input);
+            }
+            #[cfg(kani)]
+            if input.len() == 65 && input[0] == 60 {
+                return Self::decode_update_base_unit_mints_for_kani(input);
+            }
+            #[cfg(kani)]
+            if !decode_wire_length_maybe_valid(input) {
+                return Err(ProgramError::InvalidInstructionData);
+            }
             let (&tag, mut rest) = input
                 .split_first()
                 .ok_or(ProgramError::InvalidInstructionData)?;
@@ -2686,13 +2729,30 @@ pub mod ix {
                     if n > CRANK_OBSERVATION_DECODE_MAX {
                         return Err(ProgramError::InvalidInstructionData);
                     }
-                    let mut observations = Vec::with_capacity(n);
-                    for _ in 0..n {
-                        observations.push(CrankObservationHint {
-                            asset_index: read_u16(&mut rest)?,
-                            oracle_accounts: read_u8(&mut rest)?,
-                        });
-                    }
+                    #[cfg(kani)]
+                    let observations = {
+                        let mut observations = Vec::with_capacity(CRANK_OBSERVATION_DECODE_MAX);
+                        for i in 0..CRANK_OBSERVATION_DECODE_MAX {
+                            if i < n {
+                                observations.push(CrankObservationHint {
+                                    asset_index: read_u16(&mut rest)?,
+                                    oracle_accounts: read_u8(&mut rest)?,
+                                });
+                            }
+                        }
+                        observations
+                    };
+                    #[cfg(not(kani))]
+                    let observations = {
+                        let mut observations = Vec::with_capacity(n);
+                        for _ in 0..n {
+                            observations.push(CrankObservationHint {
+                                asset_index: read_u16(&mut rest)?,
+                                oracle_accounts: read_u8(&mut rest)?,
+                            });
+                        }
+                        observations
+                    };
                     Self::PermissionlessCrank {
                         now_slot,
                         close_q,
@@ -2716,15 +2776,34 @@ pub mod ix {
                     if n > BATCH_TRADE_DECODE_MAX_LEGS {
                         return Err(ProgramError::InvalidInstructionData);
                     }
-                    let mut legs = Vec::with_capacity(n);
-                    for _ in 0..n {
-                        legs.push(BatchTradeLeg {
-                            asset_index: read_u16(&mut rest)?,
-                            size_q: read_i128(&mut rest)?,
-                            exec_price: read_u64(&mut rest)?,
-                            fee_bps: read_u64(&mut rest)?,
-                        });
-                    }
+                    #[cfg(kani)]
+                    let legs = {
+                        let mut legs = Vec::with_capacity(BATCH_TRADE_DECODE_MAX_LEGS);
+                        for i in 0..BATCH_TRADE_DECODE_MAX_LEGS {
+                            if i < n {
+                                legs.push(BatchTradeLeg {
+                                    asset_index: read_u16(&mut rest)?,
+                                    size_q: read_i128(&mut rest)?,
+                                    exec_price: read_u64(&mut rest)?,
+                                    fee_bps: read_u64(&mut rest)?,
+                                });
+                            }
+                        }
+                        legs
+                    };
+                    #[cfg(not(kani))]
+                    let legs = {
+                        let mut legs = Vec::with_capacity(n);
+                        for _ in 0..n {
+                            legs.push(BatchTradeLeg {
+                                asset_index: read_u16(&mut rest)?,
+                                size_q: read_i128(&mut rest)?,
+                                exec_price: read_u64(&mut rest)?,
+                                fee_bps: read_u64(&mut rest)?,
+                            });
+                        }
+                        legs
+                    };
                     Self::BatchTradeNoCpi { legs }
                 }
                 67 => {
@@ -2732,15 +2811,34 @@ pub mod ix {
                     if n > BATCH_TRADE_DECODE_MAX_LEGS {
                         return Err(ProgramError::InvalidInstructionData);
                     }
-                    let mut legs = Vec::with_capacity(n);
-                    for _ in 0..n {
-                        legs.push(BatchTradeCpiLeg {
-                            asset_index: read_u16(&mut rest)?,
-                            size_q: read_i128(&mut rest)?,
-                            fee_bps: read_u64(&mut rest)?,
-                            limit_price: read_u64(&mut rest)?,
-                        });
-                    }
+                    #[cfg(kani)]
+                    let legs = {
+                        let mut legs = Vec::with_capacity(BATCH_TRADE_DECODE_MAX_LEGS);
+                        for i in 0..BATCH_TRADE_DECODE_MAX_LEGS {
+                            if i < n {
+                                legs.push(BatchTradeCpiLeg {
+                                    asset_index: read_u16(&mut rest)?,
+                                    size_q: read_i128(&mut rest)?,
+                                    fee_bps: read_u64(&mut rest)?,
+                                    limit_price: read_u64(&mut rest)?,
+                                });
+                            }
+                        }
+                        legs
+                    };
+                    #[cfg(not(kani))]
+                    let legs = {
+                        let mut legs = Vec::with_capacity(n);
+                        for _ in 0..n {
+                            legs.push(BatchTradeCpiLeg {
+                                asset_index: read_u16(&mut rest)?,
+                                size_q: read_i128(&mut rest)?,
+                                fee_bps: read_u64(&mut rest)?,
+                                limit_price: read_u64(&mut rest)?,
+                            });
+                        }
+                        legs
+                    };
                     Self::BatchTradeCpi { legs }
                 }
                 68 => Self::SetMatcherConfig {
@@ -2917,6 +3015,26 @@ pub mod ix {
                 return Err(ProgramError::InvalidInstructionData);
             }
             Ok(ix)
+        }
+
+        #[cfg(kani)]
+        pub fn decode_init_market_for_kani(input: &[u8]) -> Result<Self, ProgramError> {
+            decode_init_market_for_kani(input)
+        }
+
+        #[cfg(kani)]
+        pub fn decode_configure_hybrid_oracle_for_kani(input: &[u8]) -> Result<Self, ProgramError> {
+            decode_configure_hybrid_oracle_for_kani(input)
+        }
+
+        #[cfg(kani)]
+        pub fn decode_update_asset_lifecycle_for_kani(input: &[u8]) -> Result<Self, ProgramError> {
+            decode_update_asset_lifecycle_for_kani(input)
+        }
+
+        #[cfg(kani)]
+        pub fn decode_update_base_unit_mints_for_kani(input: &[u8]) -> Result<Self, ProgramError> {
+            decode_update_base_unit_mints_for_kani(input)
         }
 
         pub fn encode(&self) -> Vec<u8> {
@@ -3319,6 +3437,214 @@ pub mod ix {
             }
             out
         }
+    }
+
+    #[cfg(kani)]
+    fn decode_wire_length_maybe_valid(input: &[u8]) -> bool {
+        let Some((&tag, rest)) = input.split_first() else {
+            return false;
+        };
+        let len = input.len();
+        match tag {
+            0 => len == 219,
+            1 | 8 | 13 | 19 | 46 | 54 => len == 1,
+            3 | 4 | 9 | 28 | 30 | 41 | 42 | 47 | 59 | 61 => len == 17,
+            5 => {
+                if len < 26 {
+                    return false;
+                }
+                let n = rest[24] as usize;
+                n <= CRANK_OBSERVATION_DECODE_MAX && len == 26 + (3 * n)
+            }
+            6 | 10 => len == 35,
+            24 | 64 => len == 27,
+            32 => len == 33,
+            34 => len == 156,
+            35 => len == 35,
+            36 | 62 | 63 | 69 => len == 19,
+            37 | 49 | 58 => len == 3,
+            38 => len == 17,
+            39 | 48 | 55 => len == 9,
+            40 => len == 148,
+            43 | 44 | 50 | 52 | 56 | 57 => len == 19,
+            45 => len == 4,
+            51 => len == 7,
+            53 => len == 3,
+            60 => len == 65,
+            65 => len == 36,
+            66 | 67 => {
+                if len < 2 {
+                    return false;
+                }
+                let n = rest[0] as usize;
+                n <= BATCH_TRADE_DECODE_MAX_LEGS && len == 2 + (34 * n)
+            }
+            68 => len == 2,
+            _ => false,
+        }
+    }
+
+    #[cfg(kani)]
+    fn decode_init_market_for_kani(input: &[u8]) -> Result<Instruction, ProgramError> {
+        if input.len() != 219 || input[0] != 0 {
+            return Err(ProgramError::InvalidInstructionData);
+        }
+
+        Ok(Instruction::InitMarket {
+            max_portfolio_assets: read_u16_at_for_kani(input, 1),
+            h_min: read_u64_at_for_kani(input, 3),
+            h_max: read_u64_at_for_kani(input, 11),
+            initial_price: read_u64_at_for_kani(input, 19),
+            min_nonzero_mm_req: read_u128_at_for_kani(input, 27),
+            min_nonzero_im_req: read_u128_at_for_kani(input, 43),
+            maintenance_margin_bps: read_u64_at_for_kani(input, 59),
+            initial_margin_bps: read_u64_at_for_kani(input, 67),
+            max_trading_fee_bps: read_u64_at_for_kani(input, 75),
+            trade_fee_base_bps: read_u64_at_for_kani(input, 83),
+            liquidation_fee_bps: read_u64_at_for_kani(input, 91),
+            liquidation_fee_cap: read_u128_at_for_kani(input, 99),
+            min_liquidation_abs: read_u128_at_for_kani(input, 115),
+            max_price_move_bps_per_slot: read_u64_at_for_kani(input, 131),
+            max_accrual_dt_slots: read_u64_at_for_kani(input, 139),
+            max_abs_funding_e9_per_slot: read_u64_at_for_kani(input, 147),
+            min_funding_lifetime_slots: read_u64_at_for_kani(input, 155),
+            max_account_b_settlement_chunks: read_u64_at_for_kani(input, 163),
+            max_bankrupt_close_chunks: read_u64_at_for_kani(input, 171),
+            max_bankrupt_close_lifetime_slots: read_u64_at_for_kani(input, 179),
+            public_b_chunk_atoms: read_u128_at_for_kani(input, 187),
+            maintenance_fee_per_slot: read_u128_at_for_kani(input, 203),
+        })
+    }
+
+    #[cfg(kani)]
+    fn decode_configure_hybrid_oracle_for_kani(input: &[u8]) -> Result<Instruction, ProgramError> {
+        if input.len() != 156 || input[0] != 34 {
+            return Err(ProgramError::InvalidInstructionData);
+        }
+
+        Ok(Instruction::ConfigureHybridOracle {
+            asset_index: read_u16_at_for_kani(input, 1),
+            now_slot: read_u64_at_for_kani(input, 3),
+            now_unix_ts: read_i64_at_for_kani(input, 11),
+            oracle_leg_count: input[19],
+            oracle_leg_flags: input[20],
+            max_staleness_secs: read_u64_at_for_kani(input, 21),
+            hybrid_soft_stale_slots: read_u64_at_for_kani(input, 29),
+            mark_ewma_halflife_slots: read_u64_at_for_kani(input, 37),
+            mark_min_fee: read_u64_at_for_kani(input, 45),
+            invert: input[53],
+            unit_scale: read_u32_at_for_kani(input, 54),
+            conf_filter_bps: read_u16_at_for_kani(input, 58),
+            oracle_leg_feeds: [
+                read_bytes32_at_for_kani(input, 60),
+                read_bytes32_at_for_kani(input, 92),
+                read_bytes32_at_for_kani(input, 124),
+            ],
+        })
+    }
+
+    #[cfg(kani)]
+    fn decode_update_asset_lifecycle_for_kani(input: &[u8]) -> Result<Instruction, ProgramError> {
+        if input.len() != 148 || input[0] != 40 {
+            return Err(ProgramError::InvalidInstructionData);
+        }
+
+        Ok(Instruction::UpdateAssetLifecycle {
+            action: input[1],
+            asset_index: read_u16_at_for_kani(input, 2),
+            now_slot: read_u64_at_for_kani(input, 4),
+            initial_price: read_u64_at_for_kani(input, 12),
+            insurance_authority: read_bytes32_at_for_kani(input, 20),
+            insurance_operator: read_bytes32_at_for_kani(input, 52),
+            backing_bucket_authority: read_bytes32_at_for_kani(input, 84),
+            oracle_authority: read_bytes32_at_for_kani(input, 116),
+        })
+    }
+
+    #[cfg(kani)]
+    fn decode_update_base_unit_mints_for_kani(input: &[u8]) -> Result<Instruction, ProgramError> {
+        if input.len() != 65 || input[0] != 60 {
+            return Err(ProgramError::InvalidInstructionData);
+        }
+
+        Ok(Instruction::UpdateBaseUnitMints {
+            primary_mint: read_bytes32_at_for_kani(input, 1),
+            secondary_mint: read_bytes32_at_for_kani(input, 33),
+        })
+    }
+
+    #[cfg(kani)]
+    fn read_u16_at_for_kani(input: &[u8], offset: usize) -> u16 {
+        u16::from_le_bytes([input[offset], input[offset + 1]])
+    }
+
+    #[cfg(kani)]
+    fn read_u32_at_for_kani(input: &[u8], offset: usize) -> u32 {
+        u32::from_le_bytes([
+            input[offset],
+            input[offset + 1],
+            input[offset + 2],
+            input[offset + 3],
+        ])
+    }
+
+    #[cfg(kani)]
+    fn read_u64_at_for_kani(input: &[u8], offset: usize) -> u64 {
+        u64::from_le_bytes([
+            input[offset],
+            input[offset + 1],
+            input[offset + 2],
+            input[offset + 3],
+            input[offset + 4],
+            input[offset + 5],
+            input[offset + 6],
+            input[offset + 7],
+        ])
+    }
+
+    #[cfg(kani)]
+    fn read_i64_at_for_kani(input: &[u8], offset: usize) -> i64 {
+        i64::from_le_bytes([
+            input[offset],
+            input[offset + 1],
+            input[offset + 2],
+            input[offset + 3],
+            input[offset + 4],
+            input[offset + 5],
+            input[offset + 6],
+            input[offset + 7],
+        ])
+    }
+
+    #[cfg(kani)]
+    fn read_u128_at_for_kani(input: &[u8], offset: usize) -> u128 {
+        u128::from_le_bytes([
+            input[offset],
+            input[offset + 1],
+            input[offset + 2],
+            input[offset + 3],
+            input[offset + 4],
+            input[offset + 5],
+            input[offset + 6],
+            input[offset + 7],
+            input[offset + 8],
+            input[offset + 9],
+            input[offset + 10],
+            input[offset + 11],
+            input[offset + 12],
+            input[offset + 13],
+            input[offset + 14],
+            input[offset + 15],
+        ])
+    }
+
+    #[cfg(kani)]
+    fn read_bytes32_at_for_kani(input: &[u8], offset: usize) -> [u8; 32] {
+        let mut out = [0u8; 32];
+        for i in 0..32 {
+            out[i] = input[offset + i];
+        }
+        out
     }
 
     fn read_u8(input: &mut &[u8]) -> Result<u8, ProgramError> {
@@ -4244,6 +4570,7 @@ pub mod processor {
         ix::Instruction,
         state::{self, WrapperConfigV16},
     };
+    use percolator::MarketSlotV16View;
 
     // The market-level authority is now a single `marketauth` key rotated via UpdateAuthority
     // (tag 32) with no `kind` discriminant, so the former AUTHORITY_* market-kind constants are gone.
@@ -5532,8 +5859,6 @@ pub mod processor {
             backing_trade_fee_insurance_share_bps_long: 0,
             backing_trade_fee_insurance_share_bps_short: 0,
             fee_redirect_to_market_0_bps: 0,
-            matcher_req_seq: 0,
-            _padding1: [0u8; 8],
         };
         state::init_market_account_zero_copy(
             &mut market_ai.try_borrow_mut_data()?,
@@ -6408,14 +6733,27 @@ pub mod processor {
         matcher_delegate_key: &Pubkey,
     ) -> Result<usize, ProgramError> {
         let cfg = state::read_portfolio_matcher_config(&account_b_ai.try_borrow_data()?)?;
-        if cfg.enabled != 1
-            || cfg.matcher_program != matcher_prog_key.to_bytes()
+        if cfg.matcher_program != matcher_prog_key.to_bytes()
             || cfg.matcher_context != matcher_ctx_key.to_bytes()
             || cfg.matcher_delegate != matcher_delegate_key.to_bytes()
         {
             return Err(PercolatorError::Unauthorized.into());
         }
         Ok(7)
+    }
+
+    fn bump_lp_matcher_req_id(
+        account_b_ai: &AccountInfo<'_>,
+        matcher_prog_key: &Pubkey,
+        matcher_ctx_key: &Pubkey,
+        matcher_delegate_key: &Pubkey,
+    ) -> Result<u64, ProgramError> {
+        state::bump_portfolio_matcher_req_seq(
+            &mut account_b_ai.try_borrow_mut_data()?,
+            &matcher_prog_key.to_bytes(),
+            &matcher_ctx_key.to_bytes(),
+            &matcher_delegate_key.to_bytes(),
+        )
     }
 
     fn validate_matcher_tail<'a>(
@@ -6568,10 +6906,12 @@ pub mod processor {
             max_market_slots,
             &cpi_requests,
         )?;
-        let req_id = {
-            let mut market_data = market_ai.try_borrow_mut_data()?;
-            state::bump_matcher_req_seq(&mut market_data)?
-        };
+        let req_id = bump_lp_matcher_req_id(
+            account_b_ai,
+            matcher_prog.key,
+            matcher_ctx.key,
+            matcher_delegate.key,
+        )?;
         let lp_account_id = matcher_lp_account_id(&delegate);
 
         invoke_matcher(
@@ -6665,8 +7005,15 @@ pub mod processor {
         if lp_portfolio_ai.data_len() < required_len {
             lp_portfolio_ai.realloc(required_len, true)?;
         }
+        let matcher_req_seq =
+            state::read_portfolio_matcher_config(&lp_portfolio_ai.try_borrow_data()?)
+                .map(|cfg| cfg.matcher_req_seq)
+                .unwrap_or(0);
         let cfg = if enabled == 0 {
-            state::PortfolioMatcherConfigV16::default()
+            state::PortfolioMatcherConfigV16 {
+                matcher_req_seq,
+                ..state::PortfolioMatcherConfigV16::default()
+            }
         } else {
             let matcher_prog = account(accounts, 3)?;
             let matcher_ctx = account(accounts, 4)?;
@@ -6692,7 +7039,7 @@ pub mod processor {
                 matcher_program: matcher_prog.key.to_bytes(),
                 matcher_context: matcher_ctx.key.to_bytes(),
                 matcher_delegate: matcher_delegate.key.to_bytes(),
-                enabled: 1,
+                matcher_req_seq,
             }
         };
         state::write_portfolio_matcher_config(&mut lp_portfolio_ai.try_borrow_mut_data()?, &cfg)
@@ -6904,10 +7251,6 @@ pub mod processor {
             return Err(PercolatorError::InvalidInstruction.into());
         }
 
-        let req_id = {
-            let mut market_data = market_ai.try_borrow_mut_data()?;
-            state::bump_matcher_req_seq(&mut market_data)?
-        };
         let lp_account_id = matcher_lp_account_id(&delegate);
 
         // Build the matcher batch request: per leg, (asset, that asset's oracle price, signed size).
@@ -6926,6 +7269,12 @@ pub mod processor {
             account_b_ai,
             max_market_slots,
             &cpi_requests,
+        )?;
+        let req_id = bump_lp_matcher_req_id(
+            account_b_ai,
+            matcher_prog.key,
+            matcher_ctx.key,
+            matcher_delegate.key,
         )?;
 
         // Force the batch matcher to emit fresh return data for this CPI.
@@ -9413,6 +9762,9 @@ pub mod processor {
         let side = decode_side(side)?;
         let mut data = market_ai.try_borrow_mut_data()?;
         let (_cfg, mut group) = state::market_view_mut(&mut data)?;
+        if group.header.mode == 1 {
+            return Err(PercolatorError::EngineLockActive.into());
+        }
         group
             .finalize_side_reset_not_atomic(asset_index as usize, side)
             .map_err(map_v16_error)
@@ -10602,17 +10954,14 @@ pub mod processor {
             let summary = group
                 .build_actionable_summary(&portfolio.as_view())
                 .map_err(map_v16_error)?;
-            if let Some(asset_index) =
-                auto_crank_selected_asset_that_accrues_view(&portfolio, &summary)?
-            {
-                reject_missing_pending_selected_observation_view(
-                    &cfg,
-                    &group,
-                    asset_index,
-                    authenticated_now_slot,
-                    observations.as_slice(),
-                )?;
-            }
+            reject_missing_pending_account_observations_view(
+                &cfg,
+                &group,
+                &portfolio,
+                &summary,
+                authenticated_now_slot,
+                observations.as_slice(),
+            )?;
             let result = match group.permissionless_auto_crank_not_atomic(
                 &mut portfolio,
                 AutoCrankWorkV16 {
@@ -10793,13 +11142,23 @@ pub mod processor {
         Ok(())
     }
 
-    fn first_active_asset_from_portfolio_view(
+    fn reject_missing_pending_account_observations_view(
+        cfg: &WrapperConfigV16,
+        group: &state::MarketViewMutV16<'_>,
         portfolio: &percolator::PortfolioV16ViewMut<'_>,
-    ) -> Result<Option<usize>, ProgramError> {
+        summary: &percolator::ActionableSummaryV16,
+        now_slot: u64,
+        observations: &[AutoCrankObservationV16],
+    ) -> ProgramResult {
+        if summary.b_stale || !(summary.stale || summary.liquidatable) {
+            return Ok(());
+        }
         let active_bitmap = portfolio
             .header
             .active_bitmap
             .map(percolator::V16PodU64::get);
+        let mut seen_assets = [u32::MAX; percolator::V16_MAX_PORTFOLIO_ASSETS_N];
+        let mut seen_asset_count = 0usize;
         let mut slot = 0usize;
         while slot < percolator::V16_MAX_PORTFOLIO_ASSETS_N {
             let leg = portfolio.header.legs[slot]
@@ -10810,24 +11169,26 @@ pub mod processor {
                 return Err(PercolatorError::EngineHiddenLeg.into());
             }
             if bit {
-                return Ok(Some(leg.asset_index as usize));
+                let mut seen = 0usize;
+                while seen < seen_asset_count {
+                    if seen_assets[seen] == leg.asset_index {
+                        return Err(PercolatorError::EngineHiddenLeg.into());
+                    }
+                    seen += 1;
+                }
+                seen_assets[seen_asset_count] = leg.asset_index;
+                seen_asset_count += 1;
+                reject_missing_pending_selected_observation_view(
+                    cfg,
+                    group,
+                    leg.asset_index as usize,
+                    now_slot,
+                    observations,
+                )?;
             }
             slot += 1;
         }
-        Ok(None)
-    }
-
-    fn auto_crank_selected_asset_that_accrues_view(
-        portfolio: &percolator::PortfolioV16ViewMut<'_>,
-        summary: &percolator::ActionableSummaryV16,
-    ) -> Result<Option<usize>, ProgramError> {
-        if summary.b_stale {
-            return Ok(None);
-        }
-        if summary.stale || summary.liquidatable {
-            return first_active_asset_from_portfolio_view(portfolio);
-        }
-        Ok(None)
+        Ok(())
     }
 
     fn reject_missing_pending_selected_observation_view(
@@ -10873,30 +11234,116 @@ pub mod processor {
         Ok(())
     }
 
+    fn raw_portfolio_leg_is_empty(leg: &percolator::PortfolioLegV16Account) -> bool {
+        leg.active == 0
+            && leg.asset_index.get() == 0
+            && leg.market_id.get() == 0
+            && leg.side == 0
+            && leg.basis_pos_q.get() == 0
+            && leg.a_basis.get() == percolator::ADL_ONE
+            && leg.k_snap.get() == 0
+            && leg.f_snap.get() == 0
+            && leg.epoch_snap.get() == 0
+            && leg.loss_weight.get() == 0
+            && leg.b_snap.get() == 0
+            && leg.b_rem.get() == 0
+            && leg.b_epoch_snap.get() == 0
+            && leg.b_stale == 0
+            && leg.stale == 0
+    }
+
+    fn portfolio_touches_requested_active_asset_view(
+        group: &state::MarketViewMutV16<'_>,
+        portfolio: &percolator::PortfolioV16ViewMut<'_>,
+        requests: &[TradeRequestV16],
+    ) -> Result<bool, ProgramError> {
+        let active_bitmap = portfolio
+            .header
+            .active_bitmap
+            .map(percolator::V16PodU64::get);
+        let mut seen_active_assets = [usize::MAX; percolator::V16_MAX_PORTFOLIO_ASSETS_N];
+        let mut seen_active_len = 0usize;
+        for request in requests {
+            if request.asset_index >= group.markets.len() {
+                return Err(PercolatorError::EngineInvalidConfig.into());
+            }
+        }
+        let mut touches_current_market = false;
+        let mut slot = 0usize;
+        while slot < percolator::V16_MAX_PORTFOLIO_ASSETS_N {
+            let leg = &portfolio.header.legs[slot];
+            if leg.active > 1 || leg.side > 1 || leg.b_stale > 1 || leg.stale > 1 {
+                return Err(PercolatorError::EngineHiddenLeg.into());
+            }
+            let leg_active = leg.active == 1;
+            let bit = percolator::active_bitmap_get(active_bitmap, slot);
+            if bit != leg_active {
+                return Err(PercolatorError::EngineHiddenLeg.into());
+            }
+            if !leg_active {
+                if !raw_portfolio_leg_is_empty(leg) {
+                    return Err(PercolatorError::EngineHiddenLeg.into());
+                }
+                slot += 1;
+                continue;
+            }
+            let leg_asset_index = leg.asset_index.get() as usize;
+            if leg_asset_index >= group.header.config.max_market_slots.get() as usize
+                || leg_asset_index >= group.markets.len()
+            {
+                return Err(PercolatorError::EngineHiddenLeg.into());
+            }
+            let leg_asset = group.markets[leg_asset_index].engine.asset;
+            if leg.market_id.get() != leg_asset.market_id.get()
+                || !matches!(
+                    leg_asset.lifecycle,
+                    ASSET_LIFECYCLE_ACTIVE | ASSET_LIFECYCLE_DRAIN_ONLY | ASSET_LIFECYCLE_RECOVERY
+                )
+            {
+                return Err(PercolatorError::EngineHiddenLeg.into());
+            }
+            let mut seen = 0usize;
+            while seen < seen_active_len {
+                if seen_active_assets[seen] == leg_asset_index {
+                    return Err(PercolatorError::EngineHiddenLeg.into());
+                }
+                seen += 1;
+            }
+            seen_active_assets[seen_active_len] = leg_asset_index;
+            seen_active_len += 1;
+            for request in requests {
+                let asset_index = request.asset_index;
+                if leg_asset_index != asset_index {
+                    continue;
+                }
+                let asset = group.markets[asset_index].engine.asset;
+                if asset.stored_pos_count_long.get() == 0 && asset.stored_pos_count_short.get() == 0
+                {
+                    break;
+                }
+                touches_current_market = true;
+                break;
+            }
+            slot += 1;
+        }
+        Ok(touches_current_market)
+    }
+
     fn portfolio_has_active_asset_view(
         group: &state::MarketViewMutV16<'_>,
         portfolio: &percolator::PortfolioV16ViewMut<'_>,
         asset_index: usize,
     ) -> Result<bool, ProgramError> {
-        if asset_index >= group.markets.len() {
-            return Err(PercolatorError::EngineInvalidConfig.into());
-        }
-        let asset = group.markets[asset_index].engine.asset;
-        if asset.stored_pos_count_long.get() == 0 && asset.stored_pos_count_short.get() == 0 {
-            return Ok(false);
-        }
-        let market_id = asset.market_id.get();
-        let mut slot = 0usize;
-        while slot < percolator::V16_MAX_PORTFOLIO_ASSETS_N {
-            let leg = portfolio.header.legs[slot]
-                .try_to_runtime()
-                .map_err(map_v16_error)?;
-            if leg.active && leg.asset_index as usize == asset_index && leg.market_id == market_id {
-                return Ok(true);
-            }
-            slot += 1;
-        }
-        Ok(false)
+        portfolio_touches_requested_active_asset_view(
+            group,
+            portfolio,
+            &[TradeRequestV16 {
+                asset_index,
+                size_q: 1,
+                exec_price: 1,
+                fee_bps: 0,
+            }],
+        )
     }
 
     fn signed_position_for_asset_view(
@@ -10908,20 +11355,158 @@ pub mod processor {
             return Err(PercolatorError::EngineInvalidConfig.into());
         }
         let market_id = group.markets[asset_index].engine.asset.market_id.get();
+        let mut found = None;
         let mut slot = 0usize;
         while slot < percolator::V16_MAX_PORTFOLIO_ASSETS_N {
             let leg = portfolio.header.legs[slot]
                 .try_to_runtime()
                 .map_err(map_v16_error)?;
-            if leg.active && leg.asset_index as usize == asset_index && leg.market_id == market_id {
-                return Ok(match leg.side {
-                    SideV16::Long => leg.basis_pos_q.unsigned_abs() as i128,
-                    SideV16::Short => -(leg.basis_pos_q.unsigned_abs() as i128),
-                });
+            if leg.active && leg.asset_index as usize == asset_index {
+                if found.is_some() {
+                    return Err(PercolatorError::EngineHiddenLeg.into());
+                }
+                if leg.market_id == market_id {
+                    found = Some(match leg.side {
+                        SideV16::Long => leg.basis_pos_q.unsigned_abs() as i128,
+                        SideV16::Short => -(leg.basis_pos_q.unsigned_abs() as i128),
+                    });
+                } else {
+                    found = Some(0);
+                }
             }
             slot += 1;
         }
-        Ok(0)
+        Ok(found.unwrap_or(0))
+    }
+
+    fn amount_from_bound_num_view(bound_num: u128) -> Result<u128, ProgramError> {
+        let whole = bound_num / BOUND_SCALE;
+        if bound_num % BOUND_SCALE == 0 {
+            Ok(whole)
+        } else {
+            whole
+                .checked_add(1)
+                .ok_or(PercolatorError::EngineArithmeticOverflow.into())
+        }
+    }
+
+    fn raw_portfolio_account_preflight(
+        data: &[u8],
+    ) -> Result<&percolator::PortfolioAccountV16Account, ProgramError> {
+        let bytes = data
+            .get(constants::HEADER_LEN..constants::HEADER_LEN + constants::PORTFOLIO_STATE_LEN)
+            .ok_or(PercolatorError::InvalidAccountLen)?;
+        bytemuck::try_from_bytes(bytes).map_err(|_| ProgramError::InvalidAccountData)
+    }
+
+    fn ensure_source_domain_shape_before_matcher_raw(
+        group: &state::MarketViewMutV16<'_>,
+        portfolio: &percolator::PortfolioAccountV16Account,
+    ) -> ProgramResult {
+        let configured_domains =
+            v16_domain_count_for_market_slots(group.header.config.max_market_slots.get())
+                .map_err(map_v16_error)?;
+        let mut seen = [u32::MAX; percolator::PORTFOLIO_SOURCE_DOMAIN_CAP];
+        let mut seen_len = 0usize;
+        let mut slot = 0usize;
+        while slot < percolator::PORTFOLIO_SOURCE_DOMAIN_CAP {
+            let source = portfolio.source_domains[slot];
+            let occupied = source.is_occupied();
+            if source.domain.get() == 0 && source.source_claim_market_id.get() == 0 && !occupied {
+                slot += 1;
+                continue;
+            }
+            if !occupied {
+                return Err(PercolatorError::EngineHiddenLeg.into());
+            }
+            let domain_u32 = source.domain.get();
+            let domain = domain_u32 as usize;
+            if domain >= configured_domains {
+                return Err(PercolatorError::EngineHiddenLeg.into());
+            }
+            let mut i = 0usize;
+            while i < seen_len {
+                if seen[i] == domain_u32 {
+                    return Err(PercolatorError::EngineHiddenLeg.into());
+                }
+                i += 1;
+            }
+            seen[seen_len] = domain_u32;
+            seen_len += 1;
+
+            let asset_index = domain / 2;
+            let market = group.markets[asset_index].engine.asset;
+            if source.source_claim_market_id.get() != market.market_id.get() {
+                return Err(PercolatorError::EngineHiddenLeg.into());
+            }
+            let engine_slot = group.markets[asset_index].engine_slot();
+            let source_credit = if domain % 2 == 0 {
+                engine_slot
+                    .source_credit_long
+                    .try_to_runtime()
+                    .map_err(map_v16_error)?
+            } else {
+                engine_slot
+                    .source_credit_short
+                    .try_to_runtime()
+                    .map_err(map_v16_error)?
+            };
+            if source.source_claim_bound_num.get() > source_credit.positive_claim_bound_num {
+                return Err(PercolatorError::EngineInvalidLeg.into());
+            }
+
+            let face_claim_locked = source.source_claim_liened_num.get();
+            let impaired_face_claim = source.source_claim_impaired_num.get();
+            let locked_or_impaired = face_claim_locked
+                .checked_add(impaired_face_claim)
+                .ok_or(PercolatorError::EngineArithmeticOverflow)?;
+            if locked_or_impaired > source.source_claim_bound_num.get() {
+                return Err(PercolatorError::EngineInvalidLeg.into());
+            }
+            let backing_face = source
+                .source_claim_counterparty_liened_num
+                .get()
+                .checked_add(source.source_claim_insurance_liened_num.get())
+                .ok_or(PercolatorError::EngineArithmeticOverflow)?;
+            if backing_face != face_claim_locked {
+                return Err(PercolatorError::EngineInvalidLeg.into());
+            }
+            if source.source_lien_effective_reserved.get()
+                > amount_from_bound_num_view(face_claim_locked)?
+            {
+                return Err(PercolatorError::EngineInvalidLeg.into());
+            }
+            if source.source_lien_counterparty_backing_num.get() % BOUND_SCALE != 0
+                || source.source_lien_insurance_backing_num.get() % BOUND_SCALE != 0
+            {
+                return Err(PercolatorError::EngineInvalidLeg.into());
+            }
+            let lien_backing_num = source
+                .source_lien_counterparty_backing_num
+                .get()
+                .checked_add(source.source_lien_insurance_backing_num.get())
+                .ok_or(PercolatorError::EngineArithmeticOverflow)?;
+            let expected_backing_num = source
+                .source_lien_effective_reserved
+                .get()
+                .checked_mul(BOUND_SCALE)
+                .ok_or(PercolatorError::EngineArithmeticOverflow)?;
+            if lien_backing_num != expected_backing_num {
+                return Err(PercolatorError::EngineInvalidLeg.into());
+            }
+            if source.source_lien_impaired_effective_reserved.get() != 0 && impaired_face_claim == 0
+            {
+                return Err(PercolatorError::EngineInvalidLeg.into());
+            }
+            if (source.source_lien_counterparty_backing_num.get() == 0
+                && source.source_lien_fee_last_slot.get() != 0)
+                || source.source_lien_fee_last_slot.get() > group.header.current_slot.get()
+            {
+                return Err(PercolatorError::EngineInvalidLeg.into());
+            }
+            slot += 1;
+        }
+        Ok(())
     }
 
     fn ensure_trade_portfolio_current_for_requests_view(
@@ -10933,15 +11518,13 @@ pub mod processor {
             .header
             .active_bitmap
             .map(percolator::V16PodU64::get);
+        let touches_existing_asset =
+            portfolio_touches_requested_active_asset_view(group, portfolio, requests)?;
         if percolator::active_bitmap_is_empty(active_bitmap) {
-            return Ok(());
-        }
-        let mut touches_existing_asset = false;
-        for request in requests {
-            if portfolio_has_active_asset_view(group, portfolio, request.asset_index)? {
-                touches_existing_asset = true;
-                break;
+            if touches_existing_asset {
+                return Err(PercolatorError::EngineHiddenLeg.into());
             }
+            return Ok(());
         }
         if !touches_existing_asset {
             return Ok(());
@@ -11055,6 +11638,16 @@ pub mod processor {
         }
         let mut market_data = market_ai.try_borrow_mut_data()?;
         let (_, group) = state::market_view_mut(&mut market_data)?;
+        {
+            let account_a_data = account_a_ai.try_borrow_data()?;
+            let account_a_raw = raw_portfolio_account_preflight(&account_a_data)?;
+            ensure_source_domain_shape_before_matcher_raw(&group, account_a_raw)?;
+        }
+        {
+            let account_b_data = account_b_ai.try_borrow_data()?;
+            let account_b_raw = raw_portfolio_account_preflight(&account_b_data)?;
+            ensure_source_domain_shape_before_matcher_raw(&group, account_b_raw)?;
+        }
         let mut account_a_data = account_a_ai.try_borrow_mut_data()?;
         let account_a =
             state::portfolio_view_mut_for_market_slots(&mut account_a_data, max_market_slots)?;
@@ -11930,6 +12523,7 @@ pub mod processor {
         }
         if token.owner != *expected_owner
             || token.state != spl_token::state::AccountState::Initialized
+            || token.is_native.is_some()
         {
             return Err(PercolatorError::InvalidTokenAccount.into());
         }
@@ -11967,11 +12561,13 @@ pub mod processor {
         }
         if dest.owner != *expected_dest_owner
             || dest.state != spl_token::state::AccountState::Initialized
+            || dest.is_native.is_some()
         {
             return Err(PercolatorError::InvalidTokenAccount.into());
         }
         if vault.owner != *expected_vault_owner
             || vault.state != spl_token::state::AccountState::Initialized
+            || vault.is_native.is_some()
             || vault.delegate.is_some()
             || vault.close_authority.is_some()
             // F-VAULT-FRAG: pin to the single canonical vault address (the ATA of the vault_authority
@@ -12005,6 +12601,7 @@ pub mod processor {
         }
         if token.owner != *expected_owner
             || token.state != spl_token::state::AccountState::Initialized
+            || token.is_native.is_some()
             || token.delegate.is_some()
             || token.close_authority.is_some()
             // F-VAULT-FRAG: pin to the single canonical vault address (ATA of vault_authority+mint).
