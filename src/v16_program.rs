@@ -1291,6 +1291,18 @@ pub mod state {
     }
 
     #[inline]
+    fn validate_stored_asset_slot_capacity(
+        header: &MarketGroupV16HeaderAccount,
+        account_capacity: usize,
+    ) -> Result<usize, ProgramError> {
+        let stored_capacity = header.asset_slot_capacity.get() as usize;
+        if stored_capacity == 0 || stored_capacity > account_capacity {
+            return Err(ProgramError::InvalidAccountData);
+        }
+        Ok(stored_capacity)
+    }
+
+    #[inline]
     fn dynamic_slot_offset(asset_index: usize) -> Result<usize, ProgramError> {
         Ok(MARKET_GROUP_OFF
             + MarketGroupV16HeaderAccount::dynamic_asset_slot_offset::<AssetOracleStorageV16>(
@@ -1336,9 +1348,10 @@ pub mod state {
         data: &[u8],
     ) -> Result<(WrapperConfigV16, MarketModeV16, usize, usize), ProgramError> {
         check_header(data, KIND_MARKET)?;
-        validate_market_dynamic_len(data)?;
+        let capacity = validate_market_dynamic_len(data)?;
         let config = read_wrapper_config_from_bytes(data)?;
         let header = market_header(data)?;
+        let stored_capacity = validate_stored_asset_slot_capacity(header, capacity)?;
         let engine_config = header
             .config
             .try_to_runtime()
@@ -1347,7 +1360,7 @@ pub mod state {
             config,
             decode_market_mode(header.mode)?,
             engine_config.max_market_slots as usize,
-            header.asset_slot_capacity.get() as usize,
+            stored_capacity,
         ))
     }
 
@@ -1401,6 +1414,7 @@ pub mod state {
         let (header_bytes, market_bytes) = state_data.split_at_mut(header_len);
         let header = bytemuck::try_from_bytes_mut::<MarketGroupV16HeaderAccount>(header_bytes)
             .map_err(|_| ProgramError::InvalidAccountData)?;
+        validate_stored_asset_slot_capacity(header, capacity)?;
         let configured = header.config.max_market_slots.get() as usize;
         if configured == 0 || configured > capacity {
             return Err(ProgramError::InvalidAccountData);
@@ -1708,6 +1722,7 @@ pub mod state {
     ) -> Result<Box<MarketGroupV16>, ProgramError> {
         let wire = market_header(data)?;
         let capacity = validate_market_dynamic_len(data)?;
+        validate_stored_asset_slot_capacity(wire, capacity)?;
         let configured = wire.config.max_market_slots.get() as usize;
         if configured > capacity {
             return Err(ProgramError::InvalidAccountData);
