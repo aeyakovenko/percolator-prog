@@ -3468,21 +3468,6 @@ impl V16CuEnv {
         .expect("claim resolved payout topup")
     }
 
-    fn refine_resolved_unreceipted_bound_with_cu(&mut self, decrease_num: u128) -> u64 {
-        send_tx(
-            &mut self.svm,
-            self.program_id,
-            &self.payer,
-            ProgInstruction::RefineResolvedUnreceiptedBound { decrease_num },
-            vec![
-                AccountMeta::new(self.admin.pubkey(), true),
-                AccountMeta::new(self.market, false),
-            ],
-            &[&self.admin],
-        )
-        .expect("refine resolved unreceipted bound")
-    }
-
     fn crank(&mut self, portfolio: Pubkey, ix: ProgInstruction) -> u64 {
         let attempts = match ix {
             ProgInstruction::PermissionlessCrank { close_q, .. } if close_q != 0 => 2,
@@ -14261,46 +14246,6 @@ fn v16_bpf_resolved_payout_tags_are_bounded_and_update_state() {
     assert_eq!(group.vault, 0);
     assert_eq!(resolved_receipt(&account).paid_effective, 100);
     assert!(resolved_receipt(&account).finalized);
-
-    let mut refine_env = V16CuEnv::new();
-    refine_env.mutate_market(|_, group| {
-        group.mode = MarketModeV16::Resolved;
-        group.resolved_slot = 1;
-        group.current_slot = 1;
-        group.payout_snapshot_captured = true;
-        group.payout_snapshot = 100;
-        group.resolved_payout_ledger = ResolvedPayoutLedgerV16 {
-            snapshot_residual: 100,
-            terminal_claim_exact_receipts_num: 0,
-            terminal_claim_bound_unreceipted_num: 100 * BOUND_SCALE,
-            current_payout_rate_num: 100 * BOUND_SCALE,
-            current_payout_rate_den: 100 * BOUND_SCALE,
-            snapshot_slot: 1,
-            payout_halted: false,
-            finalized: false,
-        };
-    });
-    let refine_cu = refine_env.refine_resolved_unreceipted_bound_with_cu(10 * BOUND_SCALE);
-    assert_cu_within(
-        "RefineResolvedUnreceiptedBound",
-        refine_cu,
-        CUSTODY_CU_LIMIT,
-    );
-    let (_, group) = refine_env.market_state();
-    assert_eq!(
-        group
-            .resolved_payout_ledger
-            .terminal_claim_bound_unreceipted_num,
-        90 * BOUND_SCALE
-    );
-    assert_eq!(
-        group.resolved_payout_ledger.current_payout_rate_num,
-        90 * BOUND_SCALE
-    );
-    assert_eq!(
-        group.resolved_payout_ledger.current_payout_rate_den,
-        90 * BOUND_SCALE
-    );
 }
 
 // Coverage probe (audit): an INSOLVENT resolved market (residual < positive-PnL
@@ -28850,176 +28795,60 @@ fn v16_attack_forfeit_recovery_leg_rejects_cross_market_portfolio_substitution()
     );
 }
 
-// security.md sweep — RefineResolvedUnreceiptedBound gating (#6/#30): this wind-down tool (decreases
-// the unreceipted resolved claim bound) is admin-only and resolved-mode-only. A non-admin must
-// reject, and it must reject in Live mode — no tampering with the resolved payout accounting.
+// issue88: resolved unreceipted-bound refinement is an internal engine step only.
+// No public wrapper tag, including an admin-signed raw tag 47, may mutate payout accounting.
 #[test]
-fn v16_attack_refine_resolved_bound_admin_and_mode_gated() {
+fn v16_attack_refine_resolved_bound_tag_is_not_public() {
     let mut env = V16CuEnv::new();
-    let owner = Keypair::new();
-    let p = env.create_portfolio(&owner);
-    env.deposit(&owner, p, 1_000_000);
-    let mallory = Keypair::new();
-    env.ensure_signer_account(mallory.pubkey());
-    // 1) Live mode: even the admin can't refine (mode != Resolved).
-    env.svm.expire_blockhash();
-    let r_live = send_tx(
-        &mut env.svm,
-        env.program_id,
-        &env.payer,
-        ProgInstruction::RefineResolvedUnreceiptedBound { decrease_num: 1 },
-        vec![
-            AccountMeta::new(env.admin.pubkey(), true),
-            AccountMeta::new(env.market, false),
-        ],
-        &[&env.admin],
-    );
-    assert!(r_live.is_err(), "refine must reject in Live mode");
-    // 2) Resolved mode: a NON-admin can't refine.
-    env.resolve();
-    env.svm.expire_blockhash();
-    let r_nonadmin = send_tx(
-        &mut env.svm,
-        env.program_id,
-        &env.payer,
-        ProgInstruction::RefineResolvedUnreceiptedBound { decrease_num: 1 },
-        vec![
-            AccountMeta::new(mallory.pubkey(), true),
-            AccountMeta::new(env.market, false),
-        ],
-        &[&mallory],
-    );
-    assert!(
-        r_nonadmin.is_err(),
-        "non-admin refine must reject in resolved mode"
-    );
-    // user funds still fully recoverable (the rejected refines didn't corrupt the resolved accounting).
-    let cr = env.close_resolved(&owner, p);
-    assert_eq!(
-        env.token_amount(cr),
-        1_000_000,
-        "user recovers full resolved payout after rejected refines"
-    );
-}
-
-// security.md sweep - terminal payout bound refinement (#14/#21): even an authorized market admin
-// must not be able to over-decrease the unreceipted claim bound. A bad refine would either underflow
-// terminal accounting or lower the payout denominator incorrectly, locking or haircutting users.
-#[test]
-fn v16_attack_refine_resolved_bound_over_decrease_is_atomic() {
-    let mut env = V16CuEnv::new();
-    let owner_a = Keypair::new();
-    let portfolio_a = env.create_portfolio(&owner_a);
-    let owner_b = Keypair::new();
-    let portfolio_b = env.create_portfolio(&owner_b);
-    let owner_c = Keypair::new();
-    let portfolio_c = env.create_portfolio(&owner_c);
-    env.deposit(&owner_a, portfolio_a, 1_000_000);
-    env.deposit(&owner_b, portfolio_b, 1_000_000);
-    env.deposit(&owner_c, portfolio_c, 500_000);
-    // Two PLAIN-JUNIOR positive-pnl winners (no source backing -> they flow through the junior
-    // receipt pool / unreceipted bound, which is what the refine targets), funded by a third
-    // account that donated its 500k capital into the junior residual. (Source-backed claims now
-    // realize straight to capital and never populate the unreceipted bound.) Conservation holds:
-    // vault 2.5M >= c_tot 2.0M + net positive pnl 0.5M.
-    {
-        let mut m = env.svm.get_account(&env.market).unwrap();
-        let mut pa = env.svm.get_account(&portfolio_a).unwrap();
-        let mut pb = env.svm.get_account(&portfolio_b).unwrap();
-        let mut pc = env.svm.get_account(&portfolio_c).unwrap();
-        let (cfg, mut g) = state::read_market(&m.data).unwrap();
-        let mut a = state::read_portfolio(&pa.data).unwrap();
-        let mut b = state::read_portfolio(&pb.data).unwrap();
-        let mut c = state::read_portfolio(&pc.data).unwrap();
-        // C donates its capital to the junior residual.
-        g.c_tot -= 500_000;
-        c.capital = percolator::V16PodU128::new(0);
-        c.last_fee_slot = percolator::V16PodU64::new(1);
-        // A and B hold matured junior positive pnl.
-        a.pnl = percolator::V16PodI128::new(250_000);
-        a.last_fee_slot = percolator::V16PodU64::new(1);
-        b.pnl = percolator::V16PodI128::new(250_000);
-        b.last_fee_slot = percolator::V16PodU64::new(1);
-        g.pnl_pos_tot = 500_000;
-        g.pnl_matured_pos_tot = 500_000;
-        g.pnl_pos_bound_tot = 500_000;
-        g.pnl_pos_bound_tot_num = 500_000 * BOUND_SCALE;
-        g.mode = MarketModeV16::Resolved;
-        g.resolved_slot = 1;
-        g.current_slot = 1;
-        state::write_market(&mut m.data, &cfg, &g).unwrap();
-        state::write_portfolio(&mut pa.data, &a).unwrap();
-        state::write_portfolio(&mut pb.data, &b).unwrap();
-        state::write_portfolio(&mut pc.data, &c).unwrap();
-        env.svm.set_account(env.market, m).unwrap();
-        env.svm.set_account(portfolio_a, pa).unwrap();
-        env.svm.set_account(portfolio_b, pb).unwrap();
-        env.svm.set_account(portfolio_c, pc).unwrap();
-    }
-
-    let dest_a = env.close_resolved(&owner_a, portfolio_a);
-    assert_eq!(
-        env.token_amount(dest_a),
-        1_250_000,
-        "first winner receives capital + full junior claim and becomes an exact receipt"
-    );
-
-    let (_, group_before) = env.market_state();
-    let bound = group_before
-        .resolved_payout_ledger
-        .terminal_claim_bound_unreceipted_num;
-    assert!(
-        bound > 0,
-        "remaining junior user claim contributes to the unreceipted bound"
-    );
-    assert!(
-        group_before
-            .resolved_payout_ledger
-            .terminal_claim_exact_receipts_num
-            > 0,
-        "first close converted one winner into an exact receipt"
-    );
+    env.mutate_market(|_, group| {
+        group.mode = MarketModeV16::Resolved;
+        group.resolved_slot = 1;
+        group.current_slot = 1;
+        group.payout_snapshot_captured = true;
+        group.payout_snapshot = 100;
+        group.resolved_payout_ledger = ResolvedPayoutLedgerV16 {
+            snapshot_residual: 100,
+            terminal_claim_exact_receipts_num: 0,
+            terminal_claim_bound_unreceipted_num: 100 * BOUND_SCALE,
+            current_payout_rate_num: 100 * BOUND_SCALE,
+            current_payout_rate_den: 100 * BOUND_SCALE,
+            snapshot_slot: 1,
+            payout_halted: false,
+            finalized: false,
+        };
+    });
 
     let market_before = env.svm.get_account(&env.market).unwrap();
-    let portfolio_before = env.svm.get_account(&portfolio_b).unwrap();
     let vault_before = env.svm.get_account(&env.vault).unwrap();
+    let mut data = Vec::with_capacity(17);
+    data.push(47);
+    data.extend_from_slice(&(10 * BOUND_SCALE).to_le_bytes());
     let admin = env.admin.insecure_clone();
     env.svm.expire_blockhash();
-    let rejected = env.send(
-        ProgInstruction::RefineResolvedUnreceiptedBound {
-            decrease_num: bound + 1,
+    let rejected = send_raw_tx(
+        &mut env.svm,
+        &env.payer,
+        Instruction {
+            program_id: env.program_id,
+            accounts: vec![
+                AccountMeta::new(env.admin.pubkey(), true),
+                AccountMeta::new(env.market, false),
+            ],
+            data,
         },
-        vec![
-            AccountMeta::new(env.admin.pubkey(), true),
-            AccountMeta::new(env.market, false),
-        ],
         &[&admin],
     );
-    assert!(
-        rejected.is_err(),
-        "authorized over-decrease of resolved payout bound must reject"
-    );
+
+    assert!(rejected.is_err(), "raw refine tag must be unavailable");
     assert_eq!(
         env.svm.get_account(&env.market).unwrap(),
         market_before,
-        "rejected over-refine leaves resolved market accounting byte-identical"
-    );
-    assert_eq!(
-        env.svm.get_account(&portfolio_b).unwrap(),
-        portfolio_before,
-        "rejected over-refine leaves user payout state byte-identical"
+        "rejected raw refine leaves resolved market accounting byte-identical"
     );
     assert_eq!(
         env.svm.get_account(&env.vault).unwrap(),
         vault_before,
-        "rejected over-refine moves no custody"
-    );
-
-    let dest = env.close_resolved(&owner_b, portfolio_b);
-    assert_eq!(
-        env.token_amount(dest),
-        1_250_000,
-        "remaining user still recovers the full terminal payout after rejected over-refine"
+        "rejected raw refine moves no custody"
     );
 }
 

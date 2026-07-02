@@ -475,8 +475,6 @@ This section describes intent and operational ordering, not argument-by-argument
   - owner-signed risk-reducing rebalance against the wrapper-authenticated effective price vector
 - **ClaimResolvedPayoutTopup** (tag 46)
   - permissionless resolved-payout top-up claim; pays only the stored owner receipt token account
-- **RefineResolvedUnreceiptedBound** (tag 47)
-  - admin-gated monotonic decrease of the resolved unreceipted bound; cannot increase obligations
 
 ### Post-resolution / terminal close
 - **CloseResolved** (tag 30)
