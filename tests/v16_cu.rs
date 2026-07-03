@@ -49907,6 +49907,124 @@ fn v16_attack_drain_only_cpi_reduce_remains_live() {
     }
 }
 
+// LoF/DoS sweep: BatchTradeNoCpi is the remaining public trade route for the DrainOnly wind-down
+// invariant. A batch fill must not open or grow risk after DrainOnly, but it must still let matched
+// users close existing risk. This complements the direct no-CPI and CPI-route coverage.
+#[test]
+fn v16_attack_drain_only_batch_nocpi_blocks_new_risk_but_allows_reduce() {
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(1, 5_000, 10_000, 1_000);
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long_account = env.create_portfolio(&long_owner);
+    let short_account = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long_account, 1_000_000);
+    env.deposit(&short_owner, short_account, 1_000_000);
+    env.trade_asset_with_cu(
+        0,
+        &long_owner,
+        long_account,
+        &short_owner,
+        short_account,
+        POS_SCALE as i128,
+        100,
+        0,
+    );
+    env.update_asset_lifecycle_as_admin_with_cu(
+        percolator_prog::processor::ASSET_ACTION_DRAIN_ONLY,
+        0,
+        0,
+        0,
+    );
+    assert_eq!(
+        env.market_state().1.assets[0].lifecycle,
+        AssetLifecycleV16::DrainOnly
+    );
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let long_before = env.svm.get_account(&long_account).unwrap();
+    let short_before = env.svm.get_account(&short_account).unwrap();
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::BatchTradeNoCpi {
+            legs: vec![BatchTradeLeg {
+                asset_index: 0,
+                size_q: POS_SCALE as i128,
+                exec_price: 100,
+                fee_bps: 0,
+            }],
+        },
+        vec![
+            AccountMeta::new(long_owner.pubkey(), true),
+            AccountMeta::new(short_owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(long_account, false),
+            AccountMeta::new(short_account, false),
+        ],
+        &[&long_owner, &short_owner],
+    );
+    assert!(
+        rejected.is_err(),
+        "BatchTradeNoCpi must reject risk-increasing fills after DrainOnly"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "rejected DrainOnly batch leaves market state unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&long_account).unwrap(),
+        long_before,
+        "rejected DrainOnly batch leaves long state unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&short_account).unwrap(),
+        short_before,
+        "rejected DrainOnly batch leaves short state unchanged"
+    );
+
+    env.svm.expire_blockhash();
+    let close_cu = env
+        .send(
+            ProgInstruction::BatchTradeNoCpi {
+                legs: vec![BatchTradeLeg {
+                    asset_index: 0,
+                    size_q: -(POS_SCALE as i128),
+                    exec_price: 100,
+                    fee_bps: 0,
+                }],
+            },
+            vec![
+                AccountMeta::new(long_owner.pubkey(), true),
+                AccountMeta::new(short_owner.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(long_account, false),
+                AccountMeta::new(short_account, false),
+            ],
+            &[&long_owner, &short_owner],
+        )
+        .expect("BatchTradeNoCpi must still close matched risk after DrainOnly");
+    assert_cu_within(
+        "BatchTradeNoCpi DrainOnly risk reduce",
+        close_cu,
+        MULTI_ASSET_OPEN_TRADE_CU_LIMIT,
+    );
+    let group = env.market_state().1;
+    assert_eq!(group.assets[0].oi_eff_long_q, 0, "long OI closed");
+    assert_eq!(group.assets[0].oi_eff_short_q, 0, "short OI closed");
+    assert!(
+        !has_active_leg_for_asset(&env.portfolio_state(long_account), 0),
+        "long leg closed"
+    );
+    assert!(
+        !has_active_leg_for_asset(&env.portfolio_state(short_account), 0),
+        "short leg closed"
+    );
+    assert!(
+        group.vault >= group.c_tot + group.insurance,
+        "senior conservation after DrainOnly batch reduce"
+    );
+}
+
 // BatchTradeNoCpi end-state margin: a leg that is individually margin-INFEASIBLE (it would leave the
 // taker holding two full positions at once) is rejected as a standalone trade, but the SAME leg in a
 // batch that also closes the offsetting position SUCCEEDS, because the batch checks initial margin
