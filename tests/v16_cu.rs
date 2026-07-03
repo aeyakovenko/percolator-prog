@@ -42520,6 +42520,123 @@ fn v16_attack_chainlink_stale_feed_rejected_without_mutation() {
     );
 }
 
+// Chainlink public refresh route: configuration coverage alone does not prove that PermissionlessCrank
+// uses the same Chainlink transmission offsets and replay guards. A newer transmission must advance the
+// mark, while a changed answer at the same publish_time must reject atomically.
+#[test]
+fn v16_attack_chainlink_crank_refresh_replay_guards_public_route() {
+    let mut env = V16CuEnv::new();
+    let feed = Pubkey::new_unique();
+    let install = |env: &mut V16CuEnv,
+                   key: Pubkey,
+                   latest_round_id: u32,
+                   result_slot: u64,
+                   publish_time: u32,
+                   answer: i128| {
+        env.svm
+            .set_account(
+                key,
+                Account {
+                    lamports: 1_000_000_000,
+                    data: make_chainlink_data(
+                        1,
+                        8,
+                        latest_round_id,
+                        1,
+                        result_slot,
+                        publish_time,
+                        answer,
+                    ),
+                    owner: oracle_v16::CHAINLINK_STORE_PROGRAM_ID,
+                    executable: false,
+                    rent_epoch: 0,
+                },
+            )
+            .unwrap();
+    };
+
+    set_test_clock(&mut env, 1, 100);
+    install(&mut env, feed, 1, 1, 100, 10_000);
+    env.try_configure_hybrid_asset_with_conf_filter_cu(
+        0,
+        1,
+        0,
+        [feed.to_bytes(), [0u8; 32], [0u8; 32]],
+        &[feed],
+        1,
+        100,
+        0,
+        0,
+        10,
+        0,
+    )
+    .expect("configure Chainlink-backed hybrid oracle");
+    assert_eq!(env.market_state().1.assets[0].effective_price, 100);
+
+    let cranker_owner = Keypair::new();
+    let cranker_portfolio = env.create_portfolio(&cranker_owner);
+    set_test_clock(&mut env, 2, 101);
+    install(&mut env, feed, 2, 2, 101, 20_000);
+    env.svm.expire_blockhash();
+    env.crank_with_oracle_tail(
+        cranker_portfolio,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 2,
+            close_q: 0,
+            observations: crank_observations(0),
+        },
+        &[feed],
+    );
+    let (cfg, group) = env.market_state();
+    assert_eq!(cfg.last_good_oracle_slot, 2);
+    assert_eq!(
+        group.assets[0].raw_oracle_target_price, 200,
+        "new Chainlink transmission advances the raw target through public crank"
+    );
+    assert_eq!(
+        group.assets[0].effective_price, 200,
+        "unexposed Chainlink asset applies the fresh mark immediately"
+    );
+
+    install(&mut env, feed, 3, 3, 101, 30_000);
+    let market_before = env.svm.get_account(&env.market).unwrap().data;
+    let portfolio_before = env.svm.get_account(&cranker_portfolio).unwrap().data;
+    env.svm.expire_blockhash();
+    let replay = env.send(
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 2,
+            close_q: 0,
+            observations: crank_observations_with_accounts(0, 1),
+        },
+        vec![
+            AccountMeta::new(env.payer.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(cranker_portfolio, false),
+            AccountMeta::new_readonly(feed, false),
+        ],
+        &[],
+    );
+    assert!(
+        replay.is_err(),
+        "a changed Chainlink answer at the same publish_time must reject"
+    );
+    let err = replay.unwrap_err();
+    assert!(
+        err.contains("Custom(26)"),
+        "same-publish Chainlink replay must reject as OracleInvalid (Custom 26), got: {err}"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap().data,
+        market_before,
+        "rejected Chainlink replay must not mutate market state"
+    );
+    assert_eq!(
+        env.svm.get_account(&cranker_portfolio).unwrap().data,
+        portfolio_before,
+        "rejected Chainlink replay must not mutate the cranker portfolio"
+    );
+}
+
 // Hybrid oracle leg-shape gate: duplicate feed identities, stray feeds, and impossible divide flags
 // must reject before installing an oracle profile. Otherwise a config could double-count one feed or
 // advertise a divide leg that has no corresponding account.
