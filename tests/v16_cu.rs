@@ -33622,12 +33622,22 @@ fn v16_attack_self_crank_maintenance_fee_conserves() {
     let (_, g0) = env.market_state();
     // la syncs its OWN fee, naming ITSELF as the cranker.
     env.svm.warp_to_slot(10);
-    let _ = env.try_sync_maintenance_fee_with_cu(pa, Some(pa), 10);
+    let sync_cu = env.sync_maintenance_fee_with_cu(pa, Some(pa), 10);
+    assert_cu_within("self-crank maintenance fee", sync_cu, CUSTODY_CU_LIMIT);
     let cap1 = env.portfolio_state(pa).capital.get();
     let (_, g1) = env.market_state();
     // net effect on la's capital = -(fee) + (cranker share). insurance += (fee - cranker share).
     let net_loss = cap0.saturating_sub(cap1);
     let insurance_gain = g1.insurance - g0.insurance;
+    assert!(
+        net_loss > 0,
+        "self-crank probe must take the real success path and charge a positive retained fee"
+    );
+    assert_eq!(
+        env.portfolio_state(pa).last_fee_slot.get(),
+        10,
+        "self-crank success advances the charged account fee slot"
+    );
     // total value conserved: la's net loss == insurance gain (the cranker share returned to la nets out).
     assert_eq!(
         net_loss, insurance_gain,
