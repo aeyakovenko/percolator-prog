@@ -50218,6 +50218,58 @@ fn v16_attack_batch_decode_oversized_vectors_reject_before_allocation() {
     assert_eq!(env.svm.get_account(&maker_account).unwrap(), maker_before);
 }
 
+// CU/DoS hardening: PermissionlessCrank carries a caller-supplied observation vector. Like batch
+// trades, oversized vectors must reject during instruction decode, before touching public accounts
+// or allocating/parsing an attacker-sized oracle tail.
+#[test]
+fn v16_attack_crank_decode_oversized_observations_reject_before_account_work() {
+    let mut env = V16CuEnv::new();
+    let owner = Keypair::new();
+    let portfolio = env.create_portfolio(&owner);
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let portfolio_before = env.svm.get_account(&portfolio).unwrap();
+
+    let observations: Vec<CrankObservationHint> = (0..17u16)
+        .map(|asset_index| CrankObservationHint {
+            asset_index,
+            oracle_accounts: 0,
+        })
+        .collect();
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 1,
+            close_q: 0,
+            observations,
+        },
+        vec![
+            AccountMeta::new(env.payer.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio, false),
+        ],
+        &[],
+    );
+    let err = rejected.expect_err("oversized PermissionlessCrank observations must reject");
+    assert!(
+        err.contains("InvalidInstructionData"),
+        "oversized PermissionlessCrank observations must reject in decode, got {err}"
+    );
+    assert!(
+        !err.contains("ProgramFailedToComplete") && !err.contains("memory allocation failed"),
+        "oversized PermissionlessCrank observations must not panic the program: {err}"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "oversized observation decode rejection leaves market unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&portfolio).unwrap(),
+        portfolio_before,
+        "oversized observation decode rejection leaves portfolio unchanged"
+    );
+}
+
 // BatchTradeCpi: a single batched matcher CPI fills a MIXED-direction spread (taker long asset 0,
 // short asset 1) against one LP, then both fills apply with one end-state margin check.
 #[test]
