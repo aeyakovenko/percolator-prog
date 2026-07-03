@@ -17594,6 +17594,68 @@ fn v16_attack_resolved_cross_margin_deep_insolvency_winds_down_publicly() {
     );
 }
 
+// No-DoS/API sweep: PermissionlessCrank is the public crank route. In Resolved mode the wrapper
+// dispatches it to the terminal CloseResolved path, so a positive-payout account must be payable
+// through PermissionlessCrank as well as through the direct legacy CloseResolved instruction.
+#[test]
+fn v16_attack_resolved_permissionless_crank_pays_positive_account() {
+    let mut env = V16CuEnv::new();
+    let owner = Keypair::new();
+    let portfolio = env.create_portfolio(&owner);
+    env.deposit(&owner, portfolio, 1_000_000);
+    env.resolve();
+
+    let dest = env.token_account_for_mint(env.mint, owner.pubkey(), 0);
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let portfolio_before = env.svm.get_account(&portfolio).unwrap();
+    env.svm.expire_blockhash();
+    let cu = env
+        .send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: u64::MAX,
+                close_q: u128::MAX,
+                observations: vec![CrankObservationHint {
+                    asset_index: u16::MAX,
+                    oracle_accounts: u8::MAX,
+                }],
+            },
+            vec![
+                AccountMeta::new_readonly(owner.pubkey(), false),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(portfolio, false),
+                AccountMeta::new(dest, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(env.vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[],
+        )
+        .expect("resolved positive account pays through PermissionlessCrank");
+    assert_cu_within(
+        "Resolved PermissionlessCrank positive payout",
+        cu,
+        CRANK_CU_LIMIT,
+    );
+    assert_eq!(
+        env.token_amount(dest),
+        1_000_000,
+        "resolved crank pays the user's full terminal capital"
+    );
+    assert_ne!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "resolved crank must make terminal market progress"
+    );
+    assert_ne!(
+        env.svm.get_account(&portfolio).unwrap(),
+        portfolio_before,
+        "resolved crank must update the paid portfolio"
+    );
+    let account = env.portfolio_state(portfolio);
+    assert_eq!(account.capital.get(), 0, "capital fully paid");
+    assert_eq!(env.market_state().1.vault, 0, "vault accounting drained");
+}
+
 // security.md sweep — resolved wind-down LoF / over-claim (#22/#30/#48): a market can be resolved
 // with OPEN positions (handle_resolve_market does not require flat). After resolution a long and a
 // short must each recover their FAIR value via CloseResolved — neither stuck (LoF) nor able to
