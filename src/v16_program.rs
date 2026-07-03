@@ -5955,11 +5955,6 @@ pub mod processor {
         {
             let mut market_data = market_ai.try_borrow_mut_data()?;
             let (mut cfg, mut group) = state::market_view_mut(&mut market_data)?;
-            // v1 scope: per-leg backing-domain trade fees are not split in a batch yet. If a backing
-            // fee policy is configured, reject so we never silently skip those fees.
-            if cfg.backing_trade_fee_policy_count != 0 {
-                return Err(PercolatorError::InvalidInstruction.into());
-            }
             let mut account_a_data = account_a_ai.try_borrow_mut_data()?;
             let mut account_b_data = account_b_ai.try_borrow_mut_data()?;
             let mut account_a =
@@ -6031,6 +6026,14 @@ pub mod processor {
                 &group, &account_a, &account_b, &requests,
             )?;
 
+            let backing_before = if cfg.backing_trade_fee_policy_count == 0 {
+                None
+            } else {
+                Some((
+                    source_counterparty_backing_snapshot_view(&account_a)?,
+                    source_counterparty_backing_snapshot_view(&account_b)?,
+                ))
+            };
             let source_lien_before_a =
                 source_lien_effective_reserved_snapshot_for_trade_view(&account_a)?;
             let source_lien_before_b =
@@ -6043,6 +6046,16 @@ pub mod processor {
                     &requests,
                 )
                 .map_err(map_v16_error)?;
+            if let Some((backing_before_a, backing_before_b)) = backing_before {
+                apply_backing_domain_fees_after_trade_view(
+                    &cfg,
+                    &mut group,
+                    &mut account_a,
+                    backing_before_a.as_ref(),
+                    &mut account_b,
+                    backing_before_b.as_ref(),
+                )?;
+            }
 
             // Post-pass: split fees back to each asset's domains and drive its hybrid mark. Fees are
             // reconstructed deterministically per leg; the running total must equal the engine's
@@ -6787,7 +6800,6 @@ pub mod processor {
             max_market_slots,
             oracle_prices,
             stale_matured,
-            backing_fee_policy_active,
             fee_bounds_ok,
         ) = {
             let market_data = market_ai.try_borrow_data()?;
@@ -6823,7 +6835,6 @@ pub mod processor {
                 max_market_slots,
                 oracle_prices,
                 stale_matured,
-                cfg_pre.backing_trade_fee_policy_count != 0,
                 fee_bounds_ok,
             )
         };
@@ -6832,9 +6843,6 @@ pub mod processor {
         }
         if stale_matured {
             return Err(PercolatorError::OracleStale.into());
-        }
-        if backing_fee_policy_active {
-            return Err(PercolatorError::InvalidInstruction.into());
         }
         if !fee_bounds_ok {
             return Err(PercolatorError::InvalidInstruction.into());
