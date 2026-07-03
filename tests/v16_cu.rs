@@ -10151,6 +10151,103 @@ fn v16_attack_auto_crank_refresh_not_blocked_by_unneeded_first_asset_oracle() {
     );
 }
 
+#[test]
+fn v16_attack_duplicate_crank_observation_rolls_back_first_oracle_update() {
+    const MARK: u64 = 1_000_000;
+    const NEXT_MARK: u64 = 1_100_000;
+
+    let mut env = V16CuEnv::new_with_init_params(production_risk_params());
+    set_test_clock(&mut env, 1, 100);
+    let feed = [0xd8u8; 32];
+    let initial = env.set_pyth_price_with_conf(&feed, MARK as i64, -6, 0, 100);
+    env.try_configure_hybrid_asset_with_conf_filter_cu(
+        0,
+        1,
+        0,
+        [feed, [0u8; 32], [0u8; 32]],
+        &[initial],
+        1,
+        100,
+        0,
+        0,
+        10,
+        0,
+    )
+    .expect("configure one-leg hybrid oracle");
+
+    let keeper = Keypair::new();
+    let keeper_portfolio = env.create_portfolio(&keeper);
+    set_test_clock(&mut env, 2, 101);
+    let fresh = env.set_pyth_price_with_conf(&feed, NEXT_MARK as i64, -6, 0, 101);
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let portfolio_before = env.svm.get_account(&keeper_portfolio).unwrap();
+
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 2,
+            close_q: 0,
+            observations: vec![
+                CrankObservationHint {
+                    asset_index: 0,
+                    oracle_accounts: 1,
+                },
+                CrankObservationHint {
+                    asset_index: 0,
+                    oracle_accounts: 1,
+                },
+            ],
+        },
+        vec![
+            AccountMeta::new(env.payer.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(keeper_portfolio, false),
+            AccountMeta::new_readonly(fresh, false),
+        ],
+        &[],
+    );
+    assert!(
+        rejected.is_err(),
+        "duplicate observation hints for the same asset must reject"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "duplicate-hint rejection must roll back the first parsed oracle update"
+    );
+    assert_eq!(
+        env.svm.get_account(&keeper_portfolio).unwrap(),
+        portfolio_before,
+        "duplicate-hint rejection must not mutate the target portfolio"
+    );
+
+    env.svm.expire_blockhash();
+    let accepted = env.send(
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 2,
+            close_q: 0,
+            observations: crank_observations_with_accounts(0, 1),
+        },
+        vec![
+            AccountMeta::new(env.payer.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(keeper_portfolio, false),
+            AccountMeta::new_readonly(fresh, false),
+        ],
+        &[],
+    );
+    assert!(
+        accepted.is_ok(),
+        "same fresh oracle update must progress when supplied once: {accepted:?}"
+    );
+    let (cfg, group) = env.market_state();
+    assert_eq!(cfg.last_good_oracle_slot, 2);
+    assert_eq!(
+        group.assets[0].raw_oracle_target_price, NEXT_MARK,
+        "single observation applies the fresh oracle target"
+    );
+}
+
 // LoF/DoS sweep: committed-state refresh is valid only when the selected
 // engine asset has no pending wrapper-side mark. If a public keeper can omit
 // the selected asset observation while another asset made the account stale,
