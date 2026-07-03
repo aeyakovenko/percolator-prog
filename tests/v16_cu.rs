@@ -49288,6 +49288,111 @@ fn v16_attack_drain_only_existing_risk_increase_rejects_before_hostile_matcher_c
     }
 }
 
+// LoF/DoS sweep: DrainOnly is a wind-down mode, not a matcher-route shutdown. Existing no-CPI coverage
+// proves matched risk can reduce after DrainOnly, and the hostile CPI tests prove risk-increasing CPI
+// requests reject before invoking the matcher. This covers the positive liveness side for permissionless
+// LP fills: both TradeCpi and one-leg BatchTradeCpi must still close existing risk through the public
+// matcher route.
+#[test]
+fn v16_attack_drain_only_cpi_reduce_remains_live() {
+    for (route, batch) in [("TradeCpi", false), ("BatchTradeCpi", true)] {
+        let mut env = V16CuEnv::new_with_market_params_and_price_move(1, 5_000, 10_000, 1_000);
+        let taker = Keypair::new();
+        let lp = Keypair::new();
+        let taker_account = env.create_portfolio(&taker);
+        let lp_account = env.create_portfolio(&lp);
+        env.deposit(&taker, taker_account, 1_000_000);
+        env.deposit(&lp, lp_account, 1_000_000);
+        env.trade_asset_with_cu(
+            0,
+            &taker,
+            taker_account,
+            &lp,
+            lp_account,
+            POS_SCALE as i128,
+            100,
+            0,
+        );
+        let (matcher_program, ctx, delegate) = auth_matcher_for_lp(&mut env, &lp, lp_account);
+
+        env.update_asset_lifecycle_as_admin_with_cu(
+            percolator_prog::processor::ASSET_ACTION_DRAIN_ONLY,
+            0,
+            0,
+            0,
+        );
+        assert_eq!(
+            env.market_state().1.assets[0].lifecycle,
+            AssetLifecycleV16::DrainOnly
+        );
+
+        let accounts = vec![
+            AccountMeta::new(taker.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(taker_account, false),
+            AccountMeta::new(lp_account, false),
+            AccountMeta::new_readonly(matcher_program, false),
+            AccountMeta::new(ctx, false),
+            AccountMeta::new_readonly(delegate, false),
+        ];
+        env.svm.expire_blockhash();
+        let close = if batch {
+            env.send(
+                ProgInstruction::BatchTradeCpi {
+                    legs: vec![BatchTradeCpiLeg {
+                        asset_index: 0,
+                        size_q: -(POS_SCALE as i128),
+                        fee_bps: 0,
+                        limit_price: 0,
+                    }],
+                },
+                accounts,
+                &[&taker],
+            )
+        } else {
+            env.send(
+                ProgInstruction::TradeCpi {
+                    asset_index: 0,
+                    size_q: -(POS_SCALE as i128),
+                    fee_bps: 0,
+                    limit_price: 0,
+                },
+                accounts,
+                &[&taker],
+            )
+        };
+        let close_cu = close
+            .unwrap_or_else(|err| panic!("{route} DrainOnly CPI reduce must stay live: {err}"));
+        assert_cu_within(
+            &format!("{route} DrainOnly risk reduce"),
+            close_cu,
+            MULTI_ASSET_OPEN_TRADE_CU_LIMIT,
+        );
+
+        let group = env.market_state().1;
+        assert_eq!(
+            group.assets[0].oi_eff_long_q, 0,
+            "{route} close clears long OI"
+        );
+        assert_eq!(
+            group.assets[0].oi_eff_short_q, 0,
+            "{route} close clears short OI"
+        );
+        assert!(
+            !has_active_leg_for_asset(&env.portfolio_state(taker_account), 0),
+            "{route} taker leg closed"
+        );
+        assert!(
+            !has_active_leg_for_asset(&env.portfolio_state(lp_account), 0),
+            "{route} LP leg closed"
+        );
+        assert!(
+            group.vault >= group.c_tot + group.insurance,
+            "{route} senior conservation after DrainOnly CPI reduce"
+        );
+    }
+}
+
 // BatchTradeNoCpi end-state margin: a leg that is individually margin-INFEASIBLE (it would leave the
 // taker holding two full positions at once) is rejected as a standalone trade, but the SAME leg in a
 // batch that also closes the offsetting position SUCCEEDS, because the batch checks initial margin
