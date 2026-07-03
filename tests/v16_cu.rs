@@ -45663,6 +45663,86 @@ fn v16_attack_force_shutdown_timeout_lets_traders_exit_before_close() {
     );
 }
 
+#[test]
+fn v16_attack_force_shutdown_window_allows_matched_user_exit() {
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(2, 10_000, 10_000, 10_000);
+    env.configure_auth_mark_with_cu(0, 100);
+    env.configure_auth_mark_for_asset_as_admin(1, 1, 100);
+    const SHUT: u64 = 10;
+    const DELAY: u64 = 50;
+    env.configure_permissionless_resolve_with_cu(100, DELAY);
+
+    let long_owner = Keypair::new();
+    let long_account = env.create_portfolio(&long_owner);
+    let short_owner = Keypair::new();
+    let short_account = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long_account, 1_000_000);
+    env.deposit(&short_owner, short_account, 1_000_000);
+    env.trade_asset_with_cu(
+        1,
+        &long_owner,
+        long_account,
+        &short_owner,
+        short_account,
+        POS_SCALE as i128,
+        100,
+        0,
+    );
+
+    env.svm.warp_to_slot(SHUT);
+    env.svm.expire_blockhash();
+    env.update_asset_lifecycle_as_admin_with_cu(
+        percolator_prog::processor::ASSET_ACTION_SHUTDOWN,
+        1,
+        SHUT,
+        0,
+    );
+    assert_eq!(
+        env.market_state().1.assets[1].lifecycle,
+        AssetLifecycleV16::Recovery
+    );
+
+    env.svm.warp_to_slot(SHUT + DELAY - 1);
+    env.svm.expire_blockhash();
+    let close = env.try_trade_asset_with_cu(
+        1,
+        &long_owner,
+        long_account,
+        &short_owner,
+        short_account,
+        -(POS_SCALE as i128),
+        100,
+        0,
+    );
+    assert!(
+        close.is_ok(),
+        "matched users must be able to close during the shutdown exit window: {close:?}"
+    );
+    let (_, group_after_close) = env.market_state();
+    assert_eq!(group_after_close.assets[1].oi_eff_long_q, 0);
+    assert_eq!(group_after_close.assets[1].oi_eff_short_q, 0);
+    assert!(percolator::active_bitmap_is_empty(active_bitmap(
+        &env.portfolio_state(long_account)
+    )));
+    assert!(percolator::active_bitmap_is_empty(active_bitmap(
+        &env.portfolio_state(short_account)
+    )));
+
+    let long_dest = env.withdraw(&long_owner, long_account, 1_000_000);
+    let short_dest = env.withdraw(&short_owner, short_account, 1_000_000);
+    assert_eq!(env.token_amount(long_dest), 1_000_000);
+    assert_eq!(env.token_amount(short_dest), 1_000_000);
+    let (_, group_after_withdraw) = env.market_state();
+    assert!(
+        group_after_withdraw.vault >= group_after_withdraw.c_tot + group_after_withdraw.insurance
+    );
+    assert_eq!(
+        group_after_withdraw.vault as u64,
+        env.token_amount(env.vault),
+        "accounting == real vault after shutdown-window exits"
+    );
+}
+
 // lifecycle sweep — explicit DrainOnly is a public UpdateAssetLifecycle action, distinct from
 // shutdown/recovery. It must be marketauth-gated, reject malformed slot/price args, block new risk,
 // and still let existing matched positions reduce to zero.
