@@ -8372,6 +8372,116 @@ fn v16_attack_sync_maintenance_rejects_cross_market_cranker_reward() {
     );
 }
 
+#[test]
+fn v16_attack_sync_maintenance_rejects_cross_market_target_portfolio() {
+    let mut env = V16CuEnv::new_with_market_params_price_move_and_maintenance_fee(
+        1, 10_000, 10_000, 10_000, 58,
+    );
+    let foreign_owner = Keypair::new();
+    let foreign_portfolio = env.create_portfolio(&foreign_owner);
+    env.deposit(&foreign_owner, foreign_portfolio, 100_000_000);
+    assert_eq!(
+        env.portfolio_state(foreign_portfolio)
+            .provenance_header
+            .market_group_id,
+        env.market.to_bytes(),
+        "foreign target is genuinely bound to market A"
+    );
+
+    let params = V16CuMarketParams {
+        maintenance_fee_per_slot: 58,
+        ..V16CuMarketParams::default()
+    };
+    let max_assets = params.max_portfolio_assets as usize;
+    let (market_b, _vault_authority_b, vault_b) =
+        init_independent_market_same_mint(&mut env, params);
+    let local_owner = Keypair::new();
+    let local_portfolio = init_portfolio_on_market(&mut env, market_b, &local_owner, max_assets);
+    deposit_to_market(
+        &mut env,
+        market_b,
+        vault_b,
+        &local_owner,
+        local_portfolio,
+        1_000_000,
+    );
+    assert_eq!(
+        state::read_portfolio(&env.svm.get_account(&local_portfolio).unwrap().data)
+            .unwrap()
+            .provenance_header
+            .market_group_id,
+        market_b.to_bytes(),
+        "control target is genuinely bound to market B"
+    );
+
+    let market_a_before = env.svm.get_account(&env.market).unwrap();
+    let market_b_before = env.svm.get_account(&market_b).unwrap();
+    let foreign_before = env.svm.get_account(&foreign_portfolio).unwrap();
+    let local_before = env.svm.get_account(&local_portfolio).unwrap();
+    let vault_a_before = env.svm.get_account(&env.vault).unwrap();
+    let vault_b_before = env.svm.get_account(&vault_b).unwrap();
+
+    env.svm.warp_to_slot(10);
+    env.svm.expire_blockhash();
+    let rejected = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::SyncMaintenanceFee { now_slot: 10 },
+        vec![
+            AccountMeta::new(market_b, false),
+            AccountMeta::new(foreign_portfolio, false),
+        ],
+        &[],
+    );
+    assert!(
+        rejected.is_err(),
+        "SyncMaintenanceFee must reject a market-A target portfolio under market B"
+    );
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_a_before);
+    assert_eq!(
+        env.svm.get_account(&market_b).unwrap(),
+        market_b_before,
+        "rejected foreign-target sync must not credit or debit market B"
+    );
+    assert_eq!(
+        env.svm.get_account(&foreign_portfolio).unwrap(),
+        foreign_before,
+        "foreign target must not be charged or re-certified"
+    );
+    assert_eq!(
+        env.svm.get_account(&local_portfolio).unwrap(),
+        local_before,
+        "local market-B portfolio is untouched by the rejected substitution"
+    );
+    assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_a_before);
+    assert_eq!(env.svm.get_account(&vault_b).unwrap(), vault_b_before);
+
+    env.svm.expire_blockhash();
+    let ok = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::SyncMaintenanceFee { now_slot: 10 },
+        vec![
+            AccountMeta::new(market_b, false),
+            AccountMeta::new(local_portfolio, false),
+        ],
+        &[],
+    );
+    assert!(
+        ok.is_ok(),
+        "same-market SyncMaintenanceFee control must still execute: {ok:?}"
+    );
+    let local_after =
+        state::read_portfolio(&env.svm.get_account(&local_portfolio).unwrap().data).unwrap();
+    assert_eq!(local_after.last_fee_slot.get(), 10);
+    assert!(
+        local_after.capital.get() < 1_000_000,
+        "control sync charges the local market-B portfolio"
+    );
+}
+
 // Regression for #113 — permissionless cross-asset maintenance-fee siphon (FIXED).
 // credit_maintenance_fee_to_active_market_budgets_view (v16_program 5298) previously split every
 // maintenance fee equally across all ACTIVE assets' insurance domains with no positions/activity
