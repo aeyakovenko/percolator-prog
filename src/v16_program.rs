@@ -6971,8 +6971,8 @@ pub mod processor {
                 leg.size_q,
                 req_id,
             )?;
-            // Atomic strategy semantics: every leg must fill (no zero/skip fills in a batch).
-            if ret.exec_size == 0 {
+            // Atomic strategy semantics: every leg must fill exactly as requested.
+            if ret.exec_size != leg.size_q {
                 return Err(PercolatorError::InvalidInstruction.into());
             }
             if leg.limit_price != 0 {

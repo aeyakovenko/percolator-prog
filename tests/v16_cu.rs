@@ -52132,6 +52132,107 @@ fn v16_attack_hostile_matcher_batch_returns_all_rejected() {
     );
 }
 
+// LoF/DoS sweep: BatchTradeCpi has no caller opt-in for partial fills. A matcher that returns
+// FLAG_PARTIAL_OK for a batch leg must not be allowed to turn an atomic strategy into a partial
+// spread; otherwise a malicious LP matcher can leave the taker with unexpected exposure.
+#[test]
+fn v16_attack_batch_tradecpi_flagged_partial_rejects_atomically() {
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(2, 1_000, 1_000, 500);
+    env.configure_auth_mark_for_asset_as_admin(0, 1, 100);
+    env.configure_auth_mark_for_asset_as_admin(1, 1, 100);
+    let hostile = Pubkey::new_unique();
+    env.svm.add_program(
+        hostile,
+        &std::fs::read(hostile_matcher_program_path()).unwrap(),
+    );
+    let taker = Keypair::new();
+    let lp = Keypair::new();
+    let ta = env.create_portfolio(&taker);
+    let la = env.create_portfolio(&lp);
+    env.deposit(&taker, ta, 1_000_000);
+    env.deposit(&lp, la, 1_000_000);
+
+    let ctx = Pubkey::new_unique();
+    let delegate = matcher_delegate_key(
+        &env.program_id,
+        &env.market,
+        &la,
+        &lp.pubkey(),
+        &hostile,
+        &ctx,
+    );
+    env.svm
+        .set_account(
+            delegate,
+            Account {
+                lamports: 1_000_000_000,
+                data: vec![],
+                owner: Pubkey::default(),
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    let mut ctx_data = vec![0u8; MATCHER_CONTEXT_LEN];
+    ctx_data[0] = 10; // valid FLAG_PARTIAL_OK partial fill from the hostile fixture.
+    env.svm
+        .set_account(
+            ctx,
+            Account {
+                lamports: 1_000_000_000,
+                data: ctx_data,
+                owner: hostile,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    env.set_matcher_config(hostile, &lp, la, ctx, delegate, 1);
+
+    let sz = (6 * POS_SCALE) as i128;
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let taker_before = env.svm.get_account(&ta).unwrap();
+    let lp_before = env.svm.get_account(&la).unwrap();
+    let ctx_before = env.svm.get_account(&ctx).unwrap();
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::BatchTradeCpi {
+            legs: vec![
+                BatchTradeCpiLeg {
+                    asset_index: 0,
+                    size_q: sz,
+                    fee_bps: 100,
+                    limit_price: 0,
+                },
+                BatchTradeCpiLeg {
+                    asset_index: 1,
+                    size_q: -sz,
+                    fee_bps: 100,
+                    limit_price: 0,
+                },
+            ],
+        },
+        vec![
+            AccountMeta::new(taker.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(ta, false),
+            AccountMeta::new(la, false),
+            AccountMeta::new_readonly(hostile, false),
+            AccountMeta::new(ctx, false),
+            AccountMeta::new_readonly(delegate, false),
+        ],
+        &[&taker],
+    );
+    assert!(
+        rejected.is_err(),
+        "BatchTradeCpi must reject flagged partial matcher returns; got {rejected:?}"
+    );
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+    assert_eq!(env.svm.get_account(&ta).unwrap(), taker_before);
+    assert_eq!(env.svm.get_account(&la).unwrap(), lp_before);
+    assert_eq!(env.svm.get_account(&ctx).unwrap(), ctx_before);
+}
+
 // full-interface sweep / issue: removing the LP signer from TradeCpi is only safe if Percolator
 // verifies that the LP owner explicitly authorized this matcher program/context. A hostile matcher can
 // otherwise return a perfectly well-formed oracle-priced fill and force a victim LP portfolio into a
