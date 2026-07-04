@@ -45696,6 +45696,186 @@ fn v16_attack_batch_backing_fee_split_conserves() {
     assert_domain_budget_remaining_total_consistent(&ga, "batch backing fee insurance share");
 }
 
+// The matcher-backed batch route shares the same executor as BatchTradeNoCpi, but it reaches that
+// executor only after a public matcher CPI. Pin the value invariant on this route too: a backed risk
+// increase must charge the backing fee and split it between provider earnings and insurance.
+#[test]
+fn v16_attack_batch_tradecpi_backing_fee_split_conserves() {
+    const INITIAL_PRICE: u64 = 100;
+    const ASSET0_SIZE_Q: i128 = 200 * POS_SCALE as i128;
+    const ASSET1_SIZE_Q: i128 = 100 * POS_SCALE as i128;
+    const SAFE_INCREASE_Q: i128 = 20 * POS_SCALE as i128;
+    const DEPOSIT: u128 = 3_130;
+    const WINNING_DOMAIN: usize = 1;
+    const FEE_BPS: u16 = 5_000;
+    const INSURANCE_SHARE_BPS: u16 = 2_500;
+
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(4, 1_000, 1_000, 500);
+    env.svm.warp_to_slot(1);
+    env.configure_auth_mark_for_asset_as_admin(0, 1, INITIAL_PRICE);
+    env.configure_auth_mark_for_asset_as_admin(1, 1, INITIAL_PRICE);
+    env.update_backing_fee_policy_with_cu(WINNING_DOMAIN as u16, FEE_BPS, INSURANCE_SHARE_BPS);
+    env.svm.expire_blockhash();
+    env.configure_auth_mark_for_asset_as_admin(0, 1, INITIAL_PRICE);
+
+    let cross_owner = Keypair::new();
+    let counterparty_owner = Keypair::new();
+    let cross_account = env.create_portfolio(&cross_owner);
+    let counterparty_account = env.create_portfolio(&counterparty_owner);
+    env.deposit(&cross_owner, cross_account, DEPOSIT);
+    env.deposit(&counterparty_owner, counterparty_account, 10_000);
+    env.top_up_backing_bucket(WINNING_DOMAIN as u16, 1_500, 10);
+
+    env.trade_asset_with_cu(
+        0,
+        &cross_owner,
+        cross_account,
+        &counterparty_owner,
+        counterparty_account,
+        ASSET0_SIZE_Q,
+        INITIAL_PRICE,
+        0,
+    );
+    env.trade_asset_with_cu(
+        1,
+        &cross_owner,
+        cross_account,
+        &counterparty_owner,
+        counterparty_account,
+        ASSET1_SIZE_Q,
+        INITIAL_PRICE,
+        0,
+    );
+    env.svm.warp_to_slot(2);
+    env.push_auth_mark_for_asset_as_admin(0, 2, 105);
+    env.push_auth_mark_for_asset_as_admin(1, 2, 95);
+    for (portfolio, asset_index) in [
+        (counterparty_account, 0),
+        (cross_account, 0),
+        (counterparty_account, 1),
+    ] {
+        env.crank(
+            portfolio,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 2,
+                close_q: 0,
+                observations: crank_observations(asset_index),
+            },
+        );
+    }
+    env.force_portfolio_capital_for_benchmark(cross_account, 2_600);
+    assert_eq!(
+        env.portfolio_state(cross_account).pnl.get(),
+        1_000,
+        "setup must create source-backed positive PnL"
+    );
+
+    let (_, g0) = env.market_state();
+    let surplus = (g0.source_credit[WINNING_DOMAIN].fresh_reserved_backing_num
+        - g0.source_credit[WINNING_DOMAIN].positive_claim_bound_num)
+        / BOUND_SCALE;
+    if surplus > 0 {
+        let dest = env.token_account(env.admin.pubkey(), 0);
+        env.withdraw_backing_bucket_to_admin_token_with_cu(dest, WINNING_DOMAIN as u16, surplus);
+    }
+    env.top_up_backing_bucket(WINNING_DOMAIN as u16, 50_000, 10);
+    env.deposit(&cross_owner, cross_account, 500);
+    env.deposit(&counterparty_owner, counterparty_account, 500);
+    env.svm.warp_to_slot(3);
+
+    let (_, gb) = env.market_state();
+    let insurance_before = gb.insurance;
+    let budget_before = gb.insurance_domain_budget[WINNING_DOMAIN];
+    let provider_before = gb.source_backing_buckets[WINNING_DOMAIN].utilization_fee_earnings;
+    let ctot_before = gb.c_tot;
+    let cap_cross_before = env.portfolio_state(cross_account).capital.get();
+    let cap_cp_before = env.portfolio_state(counterparty_account).capital.get();
+    let lien_before: u128 = env
+        .portfolio_state(cross_account)
+        .source_domains
+        .iter()
+        .map(|slot| slot.source_lien_counterparty_backing_num.get())
+        .sum();
+
+    let (matcher_program, ctx, delegate) =
+        auth_matcher_for_lp(&mut env, &counterparty_owner, counterparty_account);
+    env.svm.expire_blockhash();
+    let cu = env
+        .send(
+            ProgInstruction::BatchTradeCpi {
+                legs: vec![BatchTradeCpiLeg {
+                    asset_index: 1,
+                    size_q: SAFE_INCREASE_Q,
+                    fee_bps: 0,
+                    limit_price: 0,
+                }],
+            },
+            vec![
+                AccountMeta::new(cross_owner.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(cross_account, false),
+                AccountMeta::new(counterparty_account, false),
+                AccountMeta::new_readonly(matcher_program, false),
+                AccountMeta::new(ctx, false),
+                AccountMeta::new_readonly(delegate, false),
+            ],
+            &[&cross_owner],
+        )
+        .expect("BatchTradeCpi backed risk increase must stay live and charge backing fees");
+    assert_cu_within(
+        "BatchTradeCpi backing-fee split",
+        cu,
+        MULTI_ASSET_OPEN_TRADE_CU_LIMIT,
+    );
+
+    let (_, ga) = env.market_state();
+    let insurance_delta = ga.insurance - insurance_before;
+    let budget_delta = ga.insurance_domain_budget[WINNING_DOMAIN] - budget_before;
+    let provider_delta =
+        ga.source_backing_buckets[WINNING_DOMAIN].utilization_fee_earnings - provider_before;
+    let cap_cross_after = env.portfolio_state(cross_account).capital.get();
+    let cap_cp_after = env.portfolio_state(counterparty_account).capital.get();
+    let lien_after: u128 = env
+        .portfolio_state(cross_account)
+        .source_domains
+        .iter()
+        .map(|slot| slot.source_lien_counterparty_backing_num.get())
+        .sum();
+    let charged = (cap_cross_before - cap_cross_after) + (cap_cp_before - cap_cp_after);
+
+    assert!(
+        lien_after > lien_before,
+        "BatchTradeCpi must grow the counterparty-backing lien (before={lien_before} after={lien_after})"
+    );
+    assert!(
+        charged > 0,
+        "BatchTradeCpi backing-fee path must charge a positive fee"
+    );
+    assert_eq!(
+        insurance_delta + provider_delta,
+        charged,
+        "BatchTradeCpi backing fee must split with no leakage"
+    );
+    let expected_insurance = charged * INSURANCE_SHARE_BPS as u128 / 10_000;
+    assert_eq!(
+        insurance_delta, expected_insurance,
+        "insurance pool gets floor(fee*share)"
+    );
+    assert_eq!(
+        budget_delta, insurance_delta,
+        "per-domain insurance budget mirrors the insurance share"
+    );
+    assert_eq!(
+        ctot_before - ga.c_tot,
+        charged,
+        "c_tot decreases by exactly the charged fee"
+    );
+    assert_domain_budget_remaining_total_consistent(
+        &ga,
+        "BatchTradeCpi backing fee insurance share",
+    );
+}
+
 // security.md sweep — permissionless asset-create fee gate (#5 / README L52): when the configured
 // permissionless market-init fee is ZERO, asset creation is NOT permissionless — only the market-wide
 // asset authority may append a new asset; a stranger is rejected with Unauthorized.
