@@ -2470,6 +2470,9 @@ pub mod ix {
         /// every leg against a single LP, then all fills apply with one end-state margin check.
         BatchTradeCpi {
             legs: Vec<BatchTradeCpiLeg>,
+            /// Aggregate adverse slippage cap in base units across all legs.
+            /// `u64::MAX` disables the aggregate cap; per-leg `limit_price` still applies.
+            max_slippage_base: u64,
         },
         SetMatcherConfig {
             enabled: u8,
@@ -2741,7 +2744,15 @@ pub mod ix {
                             limit_price: read_u64(&mut rest)?,
                         });
                     }
-                    Self::BatchTradeCpi { legs }
+                    let max_slippage_base = if rest.is_empty() {
+                        u64::MAX
+                    } else {
+                        read_u64(&mut rest)?
+                    };
+                    Self::BatchTradeCpi {
+                        legs,
+                        max_slippage_base,
+                    }
                 }
                 68 => Self::SetMatcherConfig {
                     enabled: read_u8(&mut rest)?,
@@ -3027,7 +3038,10 @@ pub mod ix {
                         push_u64(&mut out, leg.fee_bps);
                     }
                 }
-                Self::BatchTradeCpi { ref legs } => {
+                Self::BatchTradeCpi {
+                    ref legs,
+                    max_slippage_base,
+                } => {
                     out.push(67);
                     out.push(legs.len() as u8);
                     for leg in legs.iter() {
@@ -3036,6 +3050,7 @@ pub mod ix {
                         push_u64(&mut out, leg.fee_bps);
                         push_u64(&mut out, leg.limit_price);
                     }
+                    push_u64(&mut out, max_slippage_base);
                 }
                 Self::SetMatcherConfig { enabled } => {
                     out.push(68);
@@ -5195,9 +5210,10 @@ pub mod processor {
             Instruction::BatchTradeNoCpi { legs } => {
                 handle_batch_trade_nocpi(program_id, accounts, &legs)
             }
-            Instruction::BatchTradeCpi { legs } => {
-                handle_batch_trade_cpi(program_id, accounts, &legs)
-            }
+            Instruction::BatchTradeCpi {
+                legs,
+                max_slippage_base,
+            } => handle_batch_trade_cpi(program_id, accounts, &legs, max_slippage_base),
             Instruction::SetMatcherConfig { enabled } => {
                 handle_set_matcher_config(program_id, accounts, enabled)
             }
@@ -5903,6 +5919,20 @@ pub mod processor {
             .ok_or(PercolatorError::EngineArithmeticOverflow)?;
         let den = percolator::MAX_MARGIN_BPS as u128;
         Ok((product / den) + u128::from(product % den != 0))
+    }
+
+    fn batch_adverse_slippage_base(
+        abs_size_q: u128,
+        is_buy: bool,
+        reference_price: u64,
+        exec_price: u64,
+    ) -> Result<u128, ProgramError> {
+        let adverse_delta = if is_buy {
+            exec_price.saturating_sub(reference_price)
+        } else {
+            reference_price.saturating_sub(exec_price)
+        };
+        trade_fee_notional_ceil(abs_size_q, adverse_delta)
     }
 
     /// Atomic multi-leg batch trade. `account_a` (taker) is the long side, `account_b` (LP) the
@@ -6759,6 +6789,7 @@ pub mod processor {
         program_id: &Pubkey,
         accounts: &'a [AccountInfo<'a>],
         legs: &[ix::BatchTradeCpiLeg],
+        max_slippage_base: u64,
     ) -> ProgramResult {
         if legs.is_empty() || legs.len() > MATCHER_BATCH_MAX_LEGS {
             return Err(PercolatorError::InvalidInstruction.into());
@@ -6959,6 +6990,7 @@ pub mod processor {
         }
 
         let mut exec_legs: Vec<ix::BatchTradeLeg> = Vec::with_capacity(legs.len());
+        let mut aggregate_adverse_slippage_base = 0u128;
         for (i, leg) in legs.iter().enumerate() {
             let chunk = &ret_data[i * matcher_abi::MATCHER_RETURN_BYTES
                 ..(i + 1) * matcher_abi::MATCHER_RETURN_BYTES];
@@ -6974,6 +7006,20 @@ pub mod processor {
             // Atomic strategy semantics: every leg must fill exactly as requested.
             if ret.exec_size != leg.size_q {
                 return Err(PercolatorError::InvalidInstruction.into());
+            }
+            if max_slippage_base != u64::MAX {
+                let adverse_slippage = batch_adverse_slippage_base(
+                    leg.size_q.unsigned_abs(),
+                    leg.size_q > 0,
+                    oracle_prices[i],
+                    ret.exec_price_e6,
+                )?;
+                aggregate_adverse_slippage_base = aggregate_adverse_slippage_base
+                    .checked_add(adverse_slippage)
+                    .ok_or(PercolatorError::EngineArithmeticOverflow)?;
+                if aggregate_adverse_slippage_base > max_slippage_base as u128 {
+                    return Err(PercolatorError::InvalidInstruction.into());
+                }
             }
             if leg.limit_price != 0 {
                 let limit_ok = if leg.size_q > 0 {

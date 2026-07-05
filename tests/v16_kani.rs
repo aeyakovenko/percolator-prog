@@ -692,6 +692,70 @@ fn kani_v16_batch_trade_nocpi_decode_does_not_collide_with_restart_asset_oracle(
 }
 
 #[kani::proof]
+fn kani_v16_batch_trade_cpi_decode_preserves_aggregate_slippage_cap() {
+    let asset_index: u16 = kani::any();
+    let size_q: i128 = kani::any();
+    let fee_bps: u64 = kani::any();
+    let limit_price: u64 = kani::any();
+    let max_slippage_base: u64 = kani::any();
+
+    let mut data = [0u8; 44];
+    data[0] = 67;
+    data[1] = 1;
+    data[2..4].copy_from_slice(&asset_index.to_le_bytes());
+    data[4..20].copy_from_slice(&size_q.to_le_bytes());
+    data[20..28].copy_from_slice(&fee_bps.to_le_bytes());
+    data[28..36].copy_from_slice(&limit_price.to_le_bytes());
+    data[36..44].copy_from_slice(&max_slippage_base.to_le_bytes());
+
+    match Instruction::decode(&data).unwrap() {
+        Instruction::BatchTradeCpi {
+            legs,
+            max_slippage_base: got_cap,
+        } => {
+            assert_eq!(legs.len(), 1);
+            assert_eq!(legs[0].asset_index, asset_index);
+            assert_eq!(legs[0].size_q, size_q);
+            assert_eq!(legs[0].fee_bps, fee_bps);
+            assert_eq!(legs[0].limit_price, limit_price);
+            assert_eq!(got_cap, max_slippage_base);
+        }
+        _ => unreachable!(),
+    }
+}
+
+#[kani::proof]
+fn kani_v16_batch_trade_cpi_legacy_decode_defaults_slippage_cap_disabled() {
+    let asset_index: u16 = kani::any();
+    let size_q: i128 = kani::any();
+    let fee_bps: u64 = kani::any();
+    let limit_price: u64 = kani::any();
+
+    let mut data = [0u8; 36];
+    data[0] = 67;
+    data[1] = 1;
+    data[2..4].copy_from_slice(&asset_index.to_le_bytes());
+    data[4..20].copy_from_slice(&size_q.to_le_bytes());
+    data[20..28].copy_from_slice(&fee_bps.to_le_bytes());
+    data[28..36].copy_from_slice(&limit_price.to_le_bytes());
+
+    match Instruction::decode(&data).unwrap() {
+        Instruction::BatchTradeCpi {
+            legs,
+            max_slippage_base,
+        } => {
+            assert_eq!(legs.len(), 1);
+            assert_eq!(legs[0].asset_index, asset_index);
+            assert_eq!(legs[0].size_q, size_q);
+            assert_eq!(legs[0].fee_bps, fee_bps);
+            assert_eq!(legs[0].limit_price, limit_price);
+            assert_eq!(max_slippage_base, u64::MAX);
+        }
+        _ => unreachable!(),
+    }
+}
+
+#[kani::proof]
 fn kani_v16_update_liquidation_fee_policy_decode_preserves_wire_fields() {
     let cranker_share_bps: u16 = kani::any();
 

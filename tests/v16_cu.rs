@@ -13276,6 +13276,7 @@ fn execute_account_residual_counter_trade_path(
                         fee_bps: 0,
                         limit_price: 0,
                     }],
+                    max_slippage_base: u64::MAX,
                 },
                 vec![
                     AccountMeta::new(taker_owner.pubkey(), true),
@@ -13429,6 +13430,7 @@ fn v16_bpf_account_residual_reward_counter_accumulates_across_batch_legs() {
                             limit_price: 0,
                         },
                     ],
+                    max_slippage_base: u64::MAX,
                 },
                 vec![
                     AccountMeta::new(taker_owner.pubkey(), true),
@@ -13617,6 +13619,7 @@ fn execute_backing_residual_counter_trade_path(
                         fee_bps: 0,
                         limit_price: 0,
                     }],
+                    max_slippage_base: u64::MAX,
                 },
                 vec![
                     AccountMeta::new(taker_owner.pubkey(), true),
@@ -20318,6 +20321,7 @@ fn v16_attack_disabled_lp_matcher_config_blocks_cpi_fills() {
                 fee_bps: 100,
                 limit_price: 0,
             }],
+            max_slippage_base: u64::MAX,
         },
         vec![
             AccountMeta::new(taker_owner.pubkey(), true),
@@ -20682,6 +20686,7 @@ fn v16_attack_batch_tradecpi_matcher_config_arguments_must_match_account_bytes()
                     limit_price: 0,
                 },
             ],
+            max_slippage_base: u64::MAX,
         },
         vec![
             AccountMeta::new(taker_owner.pubkey(), true),
@@ -20714,6 +20719,7 @@ fn v16_attack_batch_tradecpi_matcher_config_arguments_must_match_account_bytes()
                 fee_bps: 100,
                 limit_price: 0,
             }],
+            max_slippage_base: u64::MAX,
         },
         vec![
             AccountMeta::new(taker_owner.pubkey(), true),
@@ -20972,6 +20978,7 @@ fn v16_attack_matcher_config_and_fills_reject_self_program_context() {
                 fee_bps: 100,
                 limit_price: 0,
             }],
+            max_slippage_base: u64::MAX,
         },
         vec![
             AccountMeta::new(taker_owner.pubkey(), true),
@@ -21284,6 +21291,7 @@ fn v16_attack_permissionless_lp_cpi_rejects_wrong_delegate_owner_or_account_bind
             fee_bps: 100,
             limit_price: 0,
         }],
+        max_slippage_base: u64::MAX,
     };
     let taker_owner_key = taker_owner.pubkey();
     let market = env.market;
@@ -30255,6 +30263,7 @@ fn v16_attack_trade_paths_reject_cross_market_portfolio_substitution() {
                     fee_bps: 100,
                     limit_price: 0,
                 }],
+                max_slippage_base: u64::MAX,
             },
             vec![
                 AccountMeta::new(attacker.pubkey(), true),
@@ -30396,6 +30405,7 @@ fn v16_attack_trade_paths_reject_cross_market_portfolio_substitution() {
                 fee_bps: 100,
                 limit_price: 0,
             }],
+            max_slippage_base: u64::MAX,
         },
         vec![
             AccountMeta::new(cpi_taker.pubkey(), true),
@@ -40992,6 +41002,7 @@ fn v16_attack_batch_tradecpi_matcher_tail_cannot_carry_protocol_state() {
                 limit_price: 0,
             },
         ],
+        max_slippage_base: u64::MAX,
     };
     let market = env.market;
     let taker_key = taker.pubkey();
@@ -41152,7 +41163,10 @@ fn v16_attack_batch_tradecpi_matcher_tail_cannot_forward_taker_signer() {
 
     env.svm.expire_blockhash();
     let rejected = env.send(
-        ProgInstruction::BatchTradeCpi { legs: legs.clone() },
+        ProgInstruction::BatchTradeCpi {
+            legs: legs.clone(),
+            max_slippage_base: u64::MAX,
+        },
         vec![
             AccountMeta::new(taker.pubkey(), true),
             AccountMeta::new(env.market, false),
@@ -41194,7 +41208,10 @@ fn v16_attack_batch_tradecpi_matcher_tail_cannot_forward_taker_signer() {
     env.svm.set_account(ctx, honest_ctx).unwrap();
     env.svm.expire_blockhash();
     let ok = env.send(
-        ProgInstruction::BatchTradeCpi { legs },
+        ProgInstruction::BatchTradeCpi {
+            legs,
+            max_slippage_base: u64::MAX,
+        },
         vec![
             AccountMeta::new(taker.pubkey(), true),
             AccountMeta::new(env.market, false),
@@ -42799,6 +42816,7 @@ fn v16_attack_batch_trade_self_trade_rejected() {
                 fee_bps: 100,
                 limit_price: 0,
             }],
+            max_slippage_base: u64::MAX,
         },
         vec![
             AccountMeta::new(owner.pubkey(), true),
@@ -48476,6 +48494,7 @@ fn v16_attack_batch_duplicate_asset_legs_reject_atomically() {
                     limit_price: 0,
                 },
             ],
+            max_slippage_base: u64::MAX,
         },
         vec![
             AccountMeta::new(taker.pubkey(), true),
@@ -48535,6 +48554,7 @@ fn v16_attack_batch_duplicate_asset_legs_reject_atomically() {
                     limit_price: 0,
                 },
             ],
+            max_slippage_base: u64::MAX,
         },
         vec![
             AccountMeta::new(taker.pubkey(), true),
@@ -48634,7 +48654,10 @@ fn v16_attack_batch_tradecpi_duplicate_assets_reject_before_hostile_matcher_cpi(
             .unwrap();
         env.svm.expire_blockhash();
         env.send(
-            ProgInstruction::BatchTradeCpi { legs },
+            ProgInstruction::BatchTradeCpi {
+                legs,
+                max_slippage_base: u64::MAX,
+            },
             vec![
                 AccountMeta::new(taker.pubkey(), true),
                 AccountMeta::new(env.market, false),
@@ -48817,6 +48840,7 @@ fn v16_attack_drain_only_existing_risk_increase_rejects_before_hostile_matcher_c
                     fee_bps: 0,
                     limit_price: 0,
                 }],
+                max_slippage_base: u64::MAX,
             },
         ),
     ] {
@@ -49090,6 +49114,7 @@ fn v16_attack_batch_over_portfolio_leg_cap_rejects_atomically() {
         let rejected = env.send(
             ProgInstruction::BatchTradeCpi {
                 legs: cpi_legs(OVER),
+                max_slippage_base: u64::MAX,
             },
             vec![
                 AccountMeta::new(taker.pubkey(), true),
@@ -49115,6 +49140,7 @@ fn v16_attack_batch_over_portfolio_leg_cap_rejects_atomically() {
         let ok = env.send(
             ProgInstruction::BatchTradeCpi {
                 legs: cpi_legs(CAP),
+                max_slippage_base: u64::MAX,
             },
             vec![
                 AccountMeta::new(taker.pubkey(), true),
@@ -49237,7 +49263,10 @@ fn v16_attack_batch_tradecpi_configured_leg_cap_rejects_before_hostile_matcher_c
             .collect();
         env.svm.expire_blockhash();
         env.send(
-            ProgInstruction::BatchTradeCpi { legs },
+            ProgInstruction::BatchTradeCpi {
+                legs,
+                max_slippage_base: u64::MAX,
+            },
             vec![
                 AccountMeta::new(taker.pubkey(), true),
                 AccountMeta::new(env.market, false),
@@ -49356,7 +49385,10 @@ fn v16_attack_batch_decode_oversized_vectors_reject_before_allocation() {
         .collect();
     env.svm.expire_blockhash();
     let cpi = env.send(
-        ProgInstruction::BatchTradeCpi { legs: cpi_legs },
+        ProgInstruction::BatchTradeCpi {
+            legs: cpi_legs,
+            max_slippage_base: u64::MAX,
+        },
         vec![],
         &[],
     );
@@ -49412,6 +49444,7 @@ fn v16_bpf_batch_trade_cpi_executes_mixed_spread_through_matcher() {
                         limit_price: 0,
                     },
                 ],
+                max_slippage_base: u64::MAX,
             },
             vec![
                 AccountMeta::new(taker.pubkey(), true),
@@ -49511,6 +49544,7 @@ fn v16_attack_batch_trades_reject_with_backing_fee_policy() {
                 fee_bps: 0,
                 limit_price: 0,
             }],
+            max_slippage_base: u64::MAX,
         },
         vec![
             AccountMeta::new(taker.pubkey(), true),
@@ -50096,6 +50130,7 @@ fn v16_attack_inactive_asset_tradecpi_rejects_before_hostile_matcher_cpi() {
                             fee_bps: 0,
                             limit_price: 0,
                         }],
+                        max_slippage_base: u64::MAX,
                     },
                     accounts(&env),
                     &[&taker],
@@ -50162,6 +50197,7 @@ fn v16_attack_batch_cpi_fee_bps_bounded_for_permissionless_lp() {
                     fee_bps,
                     limit_price: 0,
                 }],
+                max_slippage_base: u64::MAX,
             },
             vec![
                 AccountMeta::new(taker.pubkey(), true),
@@ -50256,7 +50292,10 @@ fn v16_bpf_batch_trade_cpi_14_legs_under_tx_limit() {
     env.svm.expire_blockhash();
     let cu = env
         .send(
-            ProgInstruction::BatchTradeCpi { legs },
+            ProgInstruction::BatchTradeCpi {
+                legs,
+                max_slippage_base: u64::MAX,
+            },
             vec![
                 AccountMeta::new(taker.pubkey(), true),
                 AccountMeta::new(env.market, false),
@@ -50442,7 +50481,10 @@ fn v16_attack_10m_batch_tradecpi_max_tail_rejects_before_cu_exhaustion() {
     env.svm.expire_blockhash();
     let rejected = env
         .send(
-            ProgInstruction::BatchTradeCpi { legs: legs.clone() },
+            ProgInstruction::BatchTradeCpi {
+                legs: legs.clone(),
+                max_slippage_base: u64::MAX,
+            },
             matcher_accounts(
                 taker.pubkey(),
                 env.market,
@@ -50475,7 +50517,10 @@ fn v16_attack_10m_batch_tradecpi_max_tail_rejects_before_cu_exhaustion() {
     env.svm.expire_blockhash();
     let allowed_cu = env
         .send(
-            ProgInstruction::BatchTradeCpi { legs },
+            ProgInstruction::BatchTradeCpi {
+                legs,
+                max_slippage_base: u64::MAX,
+            },
             matcher_accounts(
                 taker.pubkey(),
                 env.market,
@@ -50737,6 +50782,7 @@ fn v16_attack_batch_cpi_per_leg_limit_aborts_whole_batch() {
                     limit_price: 100,
                 },
             ],
+            max_slippage_base: u64::MAX,
         },
         metas(&env),
         &[&taker],
@@ -50768,6 +50814,7 @@ fn v16_attack_batch_cpi_per_leg_limit_aborts_whole_batch() {
                     limit_price: 1_000_000,
                 },
             ],
+            max_slippage_base: u64::MAX,
         },
         metas(&env),
         &[&taker],
@@ -50780,6 +50827,103 @@ fn v16_attack_batch_cpi_per_leg_limit_aborts_whole_batch() {
     assert!(
         has_active_leg_for_asset(&t2, 0) && has_active_leg_for_asset(&t2, 1),
         "both legs filled"
+    );
+}
+
+// SOL-028 aggregate slippage: per-leg limits can be intentionally loose for spread strategies, but
+// the taker can still cap total adverse execution in base units across the whole atomic batch.
+#[test]
+fn v16_attack_batch_cpi_aggregate_slippage_cap_aborts_whole_batch() {
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(2, 1_000, 1_000, 500);
+    env.configure_auth_mark_for_asset_as_admin(0, 1, 100);
+    env.configure_auth_mark_for_asset_as_admin(1, 1, 100);
+    let matcher_program = Pubkey::new_unique();
+    let matcher_bytes = std::fs::read(matcher_program_path()).expect("read matcher BPF");
+    env.svm.add_program(matcher_program, &matcher_bytes);
+    let taker = Keypair::new();
+    let lp = Keypair::new();
+    let ta = env.create_portfolio(&taker);
+    let la = env.create_portfolio(&lp);
+    env.deposit(&taker, ta, 1_000_000);
+    env.deposit(&lp, la, 1_000_000);
+
+    // spread matcher: oracle 100, base spread 500 bps -> buy ask = 105 on every leg.
+    let (ctx, delegate, _) = env.init_matcher_context_with_passive_spread_authorized(
+        matcher_program,
+        &lp,
+        la,
+        500,
+        1_000,
+    );
+    let sz = (5 * POS_SCALE) as i128;
+    let adverse_per_leg = (sz.unsigned_abs() * 5 + POS_SCALE - 1) / POS_SCALE;
+    let aggregate_cap = u64::try_from(adverse_per_leg * 2).unwrap();
+    assert_eq!(aggregate_cap, 50);
+    let legs = vec![
+        BatchTradeCpiLeg {
+            asset_index: 0,
+            size_q: sz,
+            fee_bps: 100,
+            limit_price: 1_000_000,
+        },
+        BatchTradeCpiLeg {
+            asset_index: 1,
+            size_q: sz,
+            fee_bps: 100,
+            limit_price: 1_000_000,
+        },
+    ];
+    let metas = |env: &V16CuEnv| {
+        vec![
+            AccountMeta::new(taker.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(ta, false),
+            AccountMeta::new(la, false),
+            AccountMeta::new_readonly(matcher_program, false),
+            AccountMeta::new(ctx, false),
+            AccountMeta::new_readonly(delegate, false),
+        ]
+    };
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let taker_before = env.svm.get_account(&ta).unwrap();
+    let lp_before = env.svm.get_account(&la).unwrap();
+    let ctx_before = env.svm.get_account(&ctx).unwrap();
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::BatchTradeCpi {
+            legs: legs.clone(),
+            max_slippage_base: aggregate_cap - 1,
+        },
+        metas(&env),
+        &[&taker],
+    );
+    assert!(
+        rejected.is_err(),
+        "batch must reject when aggregate adverse slippage exceeds the base-unit cap"
+    );
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+    assert_eq!(env.svm.get_account(&ta).unwrap(), taker_before);
+    assert_eq!(env.svm.get_account(&la).unwrap(), lp_before);
+    assert_eq!(env.svm.get_account(&ctx).unwrap(), ctx_before);
+
+    env.svm.expire_blockhash();
+    let ok = env.send(
+        ProgInstruction::BatchTradeCpi {
+            legs,
+            max_slippage_base: aggregate_cap,
+        },
+        metas(&env),
+        &[&taker],
+    );
+    assert!(
+        ok.is_ok(),
+        "batch with aggregate adverse slippage inside the cap must execute: {ok:?}"
+    );
+    let taker_after = state::read_portfolio(&env.svm.get_account(&ta).unwrap().data).unwrap();
+    assert!(
+        has_active_leg_for_asset(&taker_after, 0) && has_active_leg_for_asset(&taker_after, 1),
+        "successful capped batch fills both legs"
     );
 }
 
@@ -50842,7 +50986,10 @@ fn v16_attack_batch_tradecpi_zero_fill_rejects_atomically() {
 
     env.svm.expire_blockhash();
     let rejected = env.send(
-        ProgInstruction::BatchTradeCpi { legs: legs.clone() },
+        ProgInstruction::BatchTradeCpi {
+            legs: legs.clone(),
+            max_slippage_base: u64::MAX,
+        },
         accounts(&env, ctx, delegate),
         &[&taker],
     );
@@ -50882,7 +51029,10 @@ fn v16_attack_batch_tradecpi_zero_fill_rejects_atomically() {
         env.init_matcher_context_authorized(matcher_program, &lp, lp_portfolio);
     env.svm.expire_blockhash();
     let ok = env.send(
-        ProgInstruction::BatchTradeCpi { legs },
+        ProgInstruction::BatchTradeCpi {
+            legs,
+            max_slippage_base: u64::MAX,
+        },
         accounts(&env, ok_ctx, ok_delegate),
         &[&taker],
     );
@@ -50950,7 +51100,10 @@ fn v16_attack_batch_tradecpi_rejects_stale_resolve_matured_atomically() {
     env.svm.warp_to_slot(4);
     env.svm.expire_blockhash();
     let fresh = env.send(
-        ProgInstruction::BatchTradeCpi { legs: legs.clone() },
+        ProgInstruction::BatchTradeCpi {
+            legs: legs.clone(),
+            max_slippage_base: u64::MAX,
+        },
         accounts(&env),
         &[&taker],
     );
@@ -50972,7 +51125,10 @@ fn v16_attack_batch_tradecpi_rejects_stale_resolve_matured_atomically() {
 
     env.svm.expire_blockhash();
     let rejected = env.send(
-        ProgInstruction::BatchTradeCpi { legs },
+        ProgInstruction::BatchTradeCpi {
+            legs,
+            max_slippage_base: u64::MAX,
+        },
         accounts(&env),
         &[&taker],
     );
@@ -51121,7 +51277,10 @@ fn v16_attack_batch_tradecpi_stale_rejects_before_hostile_matcher_cpi() {
     env.svm.expire_blockhash();
     let fresh_err = env
         .send(
-            ProgInstruction::BatchTradeCpi { legs: legs.clone() },
+            ProgInstruction::BatchTradeCpi {
+                legs: legs.clone(),
+                max_slippage_base: u64::MAX,
+            },
             accounts(&env),
             &[&taker],
         )
@@ -51144,7 +51303,10 @@ fn v16_attack_batch_tradecpi_stale_rejects_before_hostile_matcher_cpi() {
     env.svm.expire_blockhash();
     let stale_err = env
         .send(
-            ProgInstruction::BatchTradeCpi { legs },
+            ProgInstruction::BatchTradeCpi {
+                legs,
+                max_slippage_base: u64::MAX,
+            },
             accounts(&env),
             &[&taker],
         )
@@ -51419,7 +51581,10 @@ fn v16_attack_tradecpi_active_stale_rejects_before_hostile_matcher_cpi() {
         env.svm.expire_blockhash();
         let fresh_err = env
             .send(
-                ProgInstruction::BatchTradeCpi { legs: legs.clone() },
+                ProgInstruction::BatchTradeCpi {
+                    legs: legs.clone(),
+                    max_slippage_base: u64::MAX,
+                },
                 accounts(&env),
                 &[&taker],
             )
@@ -51446,7 +51611,10 @@ fn v16_attack_tradecpi_active_stale_rejects_before_hostile_matcher_cpi() {
         env.svm.expire_blockhash();
         let stale_err = env
             .send(
-                ProgInstruction::BatchTradeCpi { legs },
+                ProgInstruction::BatchTradeCpi {
+                    legs,
+                    max_slippage_base: u64::MAX,
+                },
                 accounts(&env),
                 &[&taker],
             )
@@ -51548,6 +51716,7 @@ fn v16_attack_batch_tradecpi_fee_bps_rejects_before_hostile_matcher_cpi() {
                     fee_bps,
                     limit_price: 0,
                 }],
+                max_slippage_base: u64::MAX,
             },
             vec![
                 AccountMeta::new(taker.pubkey(), true),
@@ -51682,6 +51851,7 @@ fn v16_attack_batch_tradecpi_backing_fee_policy_rejects_before_hostile_matcher_c
                     fee_bps: 0,
                     limit_price: 0,
                 }],
+                max_slippage_base: u64::MAX,
             },
             vec![
                 AccountMeta::new(taker.pubkey(), true),
@@ -52060,6 +52230,7 @@ fn v16_attack_hostile_matcher_batch_returns_all_rejected() {
                         limit_price: 0,
                     },
                 ],
+                max_slippage_base: u64::MAX,
             },
             vec![
                 AccountMeta::new(taker.pubkey(), true),
@@ -52211,6 +52382,7 @@ fn v16_attack_batch_tradecpi_flagged_partial_rejects_atomically() {
                     limit_price: 0,
                 },
             ],
+            max_slippage_base: u64::MAX,
         },
         vec![
             AccountMeta::new(taker.pubkey(), true),
@@ -52407,6 +52579,7 @@ fn v16_attack_batch_tradecpi_rejects_unapproved_unsigned_lp_matcher() {
                     limit_price: 0,
                 },
             ],
+            max_slippage_base: u64::MAX,
         },
         vec![
             AccountMeta::new(taker.pubkey(), true),
@@ -53566,6 +53739,7 @@ fn v16_attack_hostile_matcher_no_write_cannot_replay_stale_batch_return_data() {
                     limit_price: 0,
                 },
             ],
+            max_slippage_base: u64::MAX,
         }
         .encode(),
     };
