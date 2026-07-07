@@ -50900,6 +50900,158 @@ fn v16_attack_batch_tradecpi_zero_fill_rejects_atomically() {
     );
 }
 
+// LoF sweep: BatchTradeCpi is an atomic spread route. A hostile configured LP matcher can return
+// FLAG_PARTIAL_OK for every leg but fill the hedge legs at different ratios. Per-leg price limits
+// and the nonzero-fill gate both pass, but the taker receives unintended one-sided residual
+// exposure. The wrapper must reject non-proportional partial batches atomically while still allowing
+// proportional partial batches.
+#[test]
+fn v16_attack_batch_tradecpi_rejects_nonproportional_partial_fills() {
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(2, 1_000, 1_000, 500);
+    env.configure_auth_mark_for_asset_as_admin(0, 1, 100);
+    env.configure_auth_mark_for_asset_as_admin(1, 1, 100);
+
+    let matcher_program = Pubkey::new_unique();
+    env.svm.add_program(
+        matcher_program,
+        &std::fs::read(hostile_matcher_program_path()).expect("read hostile matcher BPF"),
+    );
+    let taker = Keypair::new();
+    let lp = Keypair::new();
+    let taker_portfolio = env.create_portfolio(&taker);
+    let lp_portfolio = env.create_portfolio(&lp);
+    env.deposit(&taker, taker_portfolio, 1_000_000);
+    env.deposit(&lp, lp_portfolio, 1_000_000);
+
+    let ctx = Pubkey::new_unique();
+    let delegate = matcher_delegate_key(
+        &env.program_id,
+        &env.market,
+        &lp_portfolio,
+        &lp.pubkey(),
+        &matcher_program,
+        &ctx,
+    );
+    env.svm
+        .set_account(
+            delegate,
+            Account {
+                lamports: 1_000_000_000,
+                data: vec![],
+                owner: Pubkey::default(),
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    env.svm
+        .set_account(
+            ctx,
+            Account {
+                lamports: 1_000_000_000,
+                data: vec![15u8; MATCHER_CONTEXT_LEN],
+                owner: matcher_program,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    env.set_matcher_config(matcher_program, &lp, lp_portfolio, ctx, delegate, 1);
+
+    let sz = (8 * POS_SCALE) as i128;
+    let legs = vec![
+        BatchTradeCpiLeg {
+            asset_index: 0,
+            size_q: sz,
+            fee_bps: 100,
+            limit_price: 0,
+        },
+        BatchTradeCpiLeg {
+            asset_index: 1,
+            size_q: -sz,
+            fee_bps: 100,
+            limit_price: 0,
+        },
+    ];
+    let accounts = |env: &V16CuEnv| {
+        vec![
+            AccountMeta::new(taker.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(taker_portfolio, false),
+            AccountMeta::new(lp_portfolio, false),
+            AccountMeta::new_readonly(matcher_program, false),
+            AccountMeta::new(ctx, false),
+            AccountMeta::new_readonly(delegate, false),
+        ]
+    };
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let taker_before = env.svm.get_account(&taker_portfolio).unwrap();
+    let lp_before = env.svm.get_account(&lp_portfolio).unwrap();
+    let ctx_before = env.svm.get_account(&ctx).unwrap();
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        ProgInstruction::BatchTradeCpi { legs: legs.clone() },
+        accounts(&env),
+        &[&taker],
+    );
+    assert!(
+        rejected.is_err(),
+        "BatchTradeCpi must reject non-proportional partial leg fills"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "non-proportional partial rejection rolls back market writes"
+    );
+    assert_eq!(
+        env.svm.get_account(&taker_portfolio).unwrap(),
+        taker_before,
+        "non-proportional partial rejection rolls back taker writes"
+    );
+    assert_eq!(
+        env.svm.get_account(&lp_portfolio).unwrap(),
+        lp_before,
+        "non-proportional partial rejection rolls back LP writes"
+    );
+    assert_eq!(
+        env.svm.get_account(&ctx).unwrap(),
+        ctx_before,
+        "non-proportional partial rejection rolls back matcher context writes"
+    );
+
+    let mut ctx_data = vec![0u8; MATCHER_CONTEXT_LEN];
+    ctx_data[0] = 10;
+    env.svm
+        .set_account(
+            ctx,
+            Account {
+                lamports: 1_000_000_000,
+                data: ctx_data,
+                owner: matcher_program,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    env.svm.expire_blockhash();
+    let accepted = env
+        .send(
+            ProgInstruction::BatchTradeCpi { legs },
+            accounts(&env),
+            &[&taker],
+        )
+        .expect("proportional partial BatchTradeCpi control remains live");
+    assert_cu_within(
+        "BatchTradeCpi proportional partial after bad partial reject",
+        accepted,
+        TRADE_CU_LIMIT,
+    );
+    let taker_after = env.portfolio_state(taker_portfolio);
+    assert_eq!(active_leg_for_asset(&taker_after, 0).basis_pos_q, sz / 2);
+    assert_eq!(active_leg_for_asset(&taker_after, 1).basis_pos_q, -sz / 2);
+}
+
 // security.md sweep - stale-resolve BatchTradeCpi rollback (#30/#35/#48): the batch CPI path invokes
 // the matcher before it reaches the shared batch engine pre-pass that freezes stale-matured markets.
 // Once the oracle is past permissionless_resolve_stale_slots, a batched matcher fill must reject and

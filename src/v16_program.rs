@@ -6940,6 +6940,7 @@ pub mod processor {
         }
 
         let mut exec_legs: Vec<ix::BatchTradeLeg> = Vec::with_capacity(legs.len());
+        let mut batch_fill_ratio: Option<(u128, u128)> = None;
         for (i, leg) in legs.iter().enumerate() {
             let chunk = &ret_data[i * matcher_abi::MATCHER_RETURN_BYTES
                 ..(i + 1) * matcher_abi::MATCHER_RETURN_BYTES];
@@ -6955,6 +6956,21 @@ pub mod processor {
             // Atomic strategy semantics: every leg must fill (no zero/skip fills in a batch).
             if ret.exec_size == 0 {
                 return Err(PercolatorError::InvalidInstruction.into());
+            }
+            let exec_abs = ret.exec_size.unsigned_abs();
+            let req_abs = leg.size_q.unsigned_abs();
+            if let Some((first_exec_abs, first_req_abs)) = batch_fill_ratio {
+                let lhs = exec_abs
+                    .checked_mul(first_req_abs)
+                    .ok_or(PercolatorError::EngineArithmeticOverflow)?;
+                let rhs = first_exec_abs
+                    .checked_mul(req_abs)
+                    .ok_or(PercolatorError::EngineArithmeticOverflow)?;
+                if lhs != rhs {
+                    return Err(PercolatorError::InvalidInstruction.into());
+                }
+            } else {
+                batch_fill_ratio = Some((exec_abs, req_abs));
             }
             if leg.limit_price != 0 {
                 let limit_ok = if leg.size_q > 0 {
