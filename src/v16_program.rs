@@ -6588,16 +6588,13 @@ pub mod processor {
             size_q,
             req_id,
         )?;
-        if limit_price != 0 {
-            let limit_ok = if size_q > 0 {
-                ret.exec_price_e6 <= limit_price
-            } else {
-                ret.exec_price_e6 >= limit_price
-            };
-            if !limit_ok {
-                return Err(PercolatorError::InvalidInstruction.into());
-            }
-        }
+        ensure_cpi_limit_price_view(
+            market_ai,
+            asset_index as usize,
+            size_q,
+            ret.exec_price_e6,
+            limit_price,
+        )?;
         if ret.exec_size == 0 {
             return Ok(());
         }
@@ -6956,16 +6953,13 @@ pub mod processor {
             if ret.exec_size == 0 {
                 return Err(PercolatorError::InvalidInstruction.into());
             }
-            if leg.limit_price != 0 {
-                let limit_ok = if leg.size_q > 0 {
-                    ret.exec_price_e6 <= leg.limit_price
-                } else {
-                    ret.exec_price_e6 >= leg.limit_price
-                };
-                if !limit_ok {
-                    return Err(PercolatorError::InvalidInstruction.into());
-                }
-            }
+            ensure_cpi_limit_price_view(
+                market_ai,
+                leg.asset_index as usize,
+                ret.exec_size,
+                ret.exec_price_e6,
+                leg.limit_price,
+            )?;
             exec_legs.push(ix::BatchTradeLeg {
                 asset_index: leg.asset_index,
                 size_q: ret.exec_size,
@@ -11477,6 +11471,52 @@ pub mod processor {
             group.header.config.max_price_move_bps_per_slot.get(),
             dt_slots,
         ))
+    }
+
+    fn limit_price_allows(size_q: i128, exec_price: u64, limit_price: u64) -> bool {
+        limit_price == 0
+            || if size_q > 0 {
+                exec_price <= limit_price
+            } else {
+                exec_price >= limit_price
+            }
+    }
+
+    fn accepted_cpi_execution_price_view(
+        market_ai: &AccountInfo<'_>,
+        asset_index: usize,
+        reported_exec_price: u64,
+    ) -> Result<u64, ProgramError> {
+        let mut market_data = market_ai.try_borrow_mut_data()?;
+        let (cfg, group) = state::market_view_mut(&mut market_data)?;
+        let oracle_profile = read_oracle_profile_from_view(&group, &cfg, asset_index)?;
+        accepted_reported_trade_price_view(
+            &oracle_profile,
+            &group,
+            asset_index,
+            reported_exec_price,
+        )
+    }
+
+    fn ensure_cpi_limit_price_view(
+        market_ai: &AccountInfo<'_>,
+        asset_index: usize,
+        size_q: i128,
+        reported_exec_price: u64,
+        limit_price: u64,
+    ) -> ProgramResult {
+        if limit_price == 0 {
+            return Ok(());
+        }
+        if !limit_price_allows(size_q, reported_exec_price, limit_price) {
+            return Err(PercolatorError::InvalidInstruction.into());
+        }
+        let accepted_exec_price =
+            accepted_cpi_execution_price_view(market_ai, asset_index, reported_exec_price)?;
+        if !limit_price_allows(size_q, accepted_exec_price, limit_price) {
+            return Err(PercolatorError::InvalidInstruction.into());
+        }
+        Ok(())
     }
 
     fn hybrid_trade_fee_quote_view(
