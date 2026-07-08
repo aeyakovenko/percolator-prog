@@ -41,6 +41,17 @@ fn crank_observations(asset_index: u16) -> Vec<CrankObservationHint> {
     }]
 }
 
+fn crank_observations_for_assets(asset_indices: &[u16]) -> Vec<CrankObservationHint> {
+    asset_indices
+        .iter()
+        .copied()
+        .map(|asset_index| CrankObservationHint {
+            asset_index,
+            oracle_accounts: 0,
+        })
+        .collect()
+}
+
 fn crank_observations_with_accounts(
     asset_index: u16,
     oracle_accounts: u8,
@@ -6959,7 +6970,7 @@ fn v16_bpf_cross_margin_positive_pnl_allows_trading_negative_leg_before_convert(
     const ASSET0_SIZE_Q: i128 = 20 * POS_SCALE as i128;
     const ASSET1_SIZE_Q: i128 = 10 * POS_SCALE as i128;
     const DEPOSIT: u128 = 320;
-    const EXPECTED_POSITIVE_PNL: i128 = 100;
+    const EXPECTED_POSITIVE_PNL: i128 = 50;
     const EXPECTED_NET_PNL_AFTER_NEGATIVE_CLOSE: i128 = 50;
 
     let mut env = V16CuEnv::new_with_market_params_and_price_move(4, 1_000, 1_000, 500);
@@ -6999,25 +7010,16 @@ fn v16_bpf_cross_margin_positive_pnl_allows_trading_negative_leg_before_convert(
     env.push_auth_mark_for_asset_as_admin(0, 2, ASSET0_MARK);
     env.push_auth_mark_for_asset_as_admin(1, 2, ASSET1_MARK);
 
-    for (portfolio, asset_index, label) in [
-        (
-            counterparty_account,
-            0,
-            "counterparty asset[0] loss refresh",
-        ),
-        (cross_account, 0, "cross account asset[0] gain refresh"),
-        (
-            counterparty_account,
-            1,
-            "counterparty asset[1] gain refresh",
-        ),
+    for (portfolio, label) in [
+        (counterparty_account, "counterparty two-asset refresh"),
+        (cross_account, "cross account two-asset refresh"),
     ] {
         let cu = env.crank(
             portfolio,
             ProgInstruction::PermissionlessCrank {
                 now_slot: 2,
                 close_q: 0,
-                observations: crank_observations(asset_index),
+                observations: crank_observations_for_assets(&[0, 1]),
             },
         );
         assert_cu_within(label, cu, CRANK_CU_LIMIT);
@@ -7133,7 +7135,7 @@ fn run_source_credit_watermark_trade_case(
     const ASSET1_SIZE_Q: i128 = 10 * POS_SCALE as i128;
     const SAFE_INCREASE_Q: i128 = POS_SCALE as i128;
     const DEPOSIT: u128 = 313;
-    const EXPECTED_POSITIVE_PNL: i128 = 100;
+    const EXPECTED_POSITIVE_PNL: i128 = 50;
 
     let mut env = V16CuEnv::new_with_market_params_and_price_move(4, 1_000, 1_000, 500);
     let matcher_program = match path {
@@ -7191,17 +7193,13 @@ fn run_source_credit_watermark_trade_case(
     env.svm.warp_to_slot(2);
     env.push_auth_mark_for_asset_as_admin(0, 2, asset0_mark);
     env.push_auth_mark_for_asset_as_admin(1, 2, asset1_mark);
-    for (portfolio, asset_index) in [
-        (counterparty_account, 0),
-        (cross_account, 0),
-        (counterparty_account, 1),
-    ] {
+    for portfolio in [counterparty_account, cross_account] {
         env.crank(
             portfolio,
             ProgInstruction::PermissionlessCrank {
                 now_slot: 2,
                 close_q: 0,
-                observations: crank_observations(asset_index),
+                observations: crank_observations_for_assets(&[0, 1]),
             },
         );
     }
@@ -7349,7 +7347,7 @@ fn v16_bpf_cross_margin_positive_pnl_allows_backed_risk_increase_on_negative_leg
     const SAFE_INCREASE_Q: i128 = POS_SCALE as i128;
     const TOO_LARGE_INCREASE_Q: i128 = 30 * POS_SCALE as i128;
     const DEPOSIT: u128 = 313;
-    const EXPECTED_POSITIVE_PNL: i128 = 100;
+    const EXPECTED_POSITIVE_PNL: i128 = 50;
     const EXPECTED_NET_PNL_AFTER_REFRESH: i128 = 50;
 
     let mut env = V16CuEnv::new_with_market_params_and_price_move(4, 1_000, 1_000, 500);
@@ -7389,17 +7387,13 @@ fn v16_bpf_cross_margin_positive_pnl_allows_backed_risk_increase_on_negative_leg
     env.svm.warp_to_slot(2);
     env.push_auth_mark_for_asset_as_admin(0, 2, ASSET0_MARK);
     env.push_auth_mark_for_asset_as_admin(1, 2, ASSET1_MARK);
-    for (portfolio, asset_index) in [
-        (counterparty_account, 0),
-        (cross_account, 0),
-        (counterparty_account, 1),
-    ] {
+    for portfolio in [counterparty_account, cross_account] {
         env.crank(
             portfolio,
             ProgInstruction::PermissionlessCrank {
                 now_slot: 2,
                 close_q: 0,
-                observations: crank_observations(asset_index),
+                observations: crank_observations_for_assets(&[0, 1]),
             },
         );
     }
@@ -10322,6 +10316,399 @@ fn v16_attack_pending_selected_mark_requires_observation() {
     assert_eq!(
         observed_group.assets[0].effective_price, NEXT_MARK0,
         "selected asset observation applies the pending mark"
+    );
+}
+
+#[test]
+fn v16_attack_no_observation_refresh_cannot_certify_over_later_active_mark_move() {
+    const MARK: u64 = 1_000_000;
+    const NEXT_MARK0: u64 = 1_100_000;
+    const NEXT_MARK2: u64 = 1_010_000;
+    const OPEN_SLOT: u64 = 1;
+    const CRANK_SLOT: u64 = 2;
+
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(3, 10_000, 10_000, 10_000);
+    env.configure_auth_mark_for_asset_as_admin(0, OPEN_SLOT, MARK);
+    env.configure_auth_mark_for_asset_as_admin(1, OPEN_SLOT, MARK);
+    env.configure_auth_mark_for_asset_as_admin(2, OPEN_SLOT, MARK);
+
+    let owner_a = Keypair::new();
+    let owner_b = Keypair::new();
+    let asset2_owner = Keypair::new();
+    let asset2_counter_owner = Keypair::new();
+    let account_a = env.create_portfolio(&owner_a);
+    let account_b = env.create_portfolio(&owner_b);
+    let asset2_account = env.create_portfolio(&asset2_owner);
+    let asset2_counter = env.create_portfolio(&asset2_counter_owner);
+    env.deposit(&owner_a, account_a, 100_000_000);
+    env.deposit(&owner_b, account_b, 100_000_000);
+    env.deposit(&asset2_owner, asset2_account, 100_000_000);
+    env.deposit(&asset2_counter_owner, asset2_counter, 100_000_000);
+
+    env.trade_asset_with_cu(
+        1,
+        &owner_a,
+        account_a,
+        &owner_b,
+        account_b,
+        POS_SCALE as i128,
+        MARK,
+        0,
+    );
+    env.svm.expire_blockhash();
+    env.trade_asset_with_cu(
+        0,
+        &owner_a,
+        account_a,
+        &owner_b,
+        account_b,
+        POS_SCALE as i128,
+        MARK,
+        0,
+    );
+    env.svm.expire_blockhash();
+    env.trade_asset_with_cu(
+        2,
+        &asset2_owner,
+        asset2_account,
+        &asset2_counter_owner,
+        asset2_counter,
+        POS_SCALE as i128,
+        MARK,
+        0,
+    );
+    let account_before_mark = env.portfolio_state(account_a);
+    assert_eq!(
+        leg(&account_before_mark, 0).asset_index,
+        1,
+        "asset 1 must occupy the first active slot for this later-active probe"
+    );
+    assert_eq!(
+        leg(&account_before_mark, 1).asset_index,
+        0,
+        "asset 0 is active but not engine-selected first"
+    );
+
+    env.svm.warp_to_slot(CRANK_SLOT);
+    env.push_auth_mark_for_asset_as_admin(0, CRANK_SLOT, NEXT_MARK0);
+    let (_, pending_group) = env.market_state();
+    assert_eq!(
+        pending_group.assets[0].effective_price, MARK,
+        "PushAuthMark only stages the later active asset mark"
+    );
+    assert!(
+        pending_group.assets[0].slot_last < CRANK_SLOT,
+        "later active asset has a pending slot to consume"
+    );
+
+    env.push_auth_mark_for_asset_as_admin(2, CRANK_SLOT, NEXT_MARK2);
+    env.crank(
+        asset2_account,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: CRANK_SLOT,
+            close_q: 0,
+            observations: crank_observations(2),
+        },
+    );
+    let (_, stale_group) = env.market_state();
+    assert_eq!(stale_group.assets[2].effective_price, NEXT_MARK2);
+    assert_eq!(
+        stale_group.assets[0].effective_price, MARK,
+        "later active asset mark is still pending after unrelated asset progress"
+    );
+    assert!(
+        health_cert(&env.portfolio_state(account_a)).cert_oracle_epoch < stale_group.oracle_epoch,
+        "unrelated asset progress makes the target account stale"
+    );
+    let next_asset0_price = oracle_v16::effective_price_from_target(
+        stale_group.assets[0].effective_price,
+        NEXT_MARK0,
+        stale_group.config.max_price_move_bps_per_slot,
+        CRANK_SLOT - stale_group.assets[0].slot_last,
+        true,
+    );
+    assert_ne!(
+        next_asset0_price, stale_group.assets[0].effective_price,
+        "setup leaves a real pending mark move on the later active asset"
+    );
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let account_before = env.svm.get_account(&account_a).unwrap();
+    env.svm.expire_blockhash();
+    let missing_later_observation = env.send(
+        ProgInstruction::PermissionlessCrank {
+            now_slot: CRANK_SLOT,
+            close_q: 0,
+            observations: vec![],
+        },
+        vec![
+            AccountMeta::new(env.payer.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(account_a, false),
+        ],
+        &[],
+    );
+    assert!(
+        missing_later_observation.is_err(),
+        "no-observation refresh must not certify over a later active leg's pending mark move"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "rejected missing-observation refresh must not consume the later active mark at the old price"
+    );
+    assert_eq!(
+        env.svm.get_account(&account_a).unwrap(),
+        account_before,
+        "rejected missing-observation refresh must not certify the target over pending mark work"
+    );
+
+    env.svm.expire_blockhash();
+    let observed = env.send(
+        ProgInstruction::PermissionlessCrank {
+            now_slot: CRANK_SLOT,
+            close_q: 0,
+            observations: crank_observations(0),
+        },
+        vec![
+            AccountMeta::new(env.payer.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(account_a, false),
+        ],
+        &[],
+    );
+    assert!(
+        observed.is_ok(),
+        "supplying the later active asset observation must remain live: {observed:?}"
+    );
+    let (_, observed_group) = env.market_state();
+    assert_eq!(
+        observed_group.assets[0].effective_price, next_asset0_price,
+        "later active asset observation applies the pending mark"
+    );
+    assert_eq!(
+        health_cert(&env.portfolio_state(account_a)).cert_oracle_epoch,
+        observed_group.oracle_epoch,
+        "account certifies only after the later active asset work is applied"
+    );
+}
+
+#[test]
+fn v16_attack_all_active_pending_auth_marks_refresh_with_bounded_public_crank() {
+    const N: usize = percolator_prog::constants::WRAPPER_MAX_PORTFOLIO_ASSETS as usize;
+    const MARK: u64 = 1_000_000;
+    const NEXT_MARK: u64 = 1_010_000;
+    const OPEN_SLOT: u64 = 1;
+    const CRANK_SLOT: u64 = 2;
+
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(N as u16, 10_000, 10_000, 10_000);
+    for asset_index in 0..N {
+        env.configure_auth_mark_for_asset_as_admin(asset_index as u16, OPEN_SLOT, MARK);
+    }
+
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long_account = env.create_portfolio(&long_owner);
+    let short_account = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long_account, 1_000_000_000);
+    env.deposit(&short_owner, short_account, 1_000_000_000);
+    for asset_index in 0..N {
+        env.svm.expire_blockhash();
+        env.trade_asset_with_cu(
+            asset_index as u16,
+            &long_owner,
+            long_account,
+            &short_owner,
+            short_account,
+            POS_SCALE as i128,
+            MARK,
+            0,
+        );
+    }
+    let long_before = env.portfolio_state(long_account);
+    assert_eq!(
+        percolator::active_bitmap_count_ones(active_bitmap(&long_before)),
+        N as u32,
+        "setup must publicly open every portfolio leg"
+    );
+
+    env.svm.warp_to_slot(CRANK_SLOT);
+    for asset_index in 0..N {
+        env.push_auth_mark_for_asset_as_admin(asset_index as u16, CRANK_SLOT, NEXT_MARK);
+    }
+    let (_, pending_group) = env.market_state();
+    for asset_index in 0..N {
+        assert_eq!(
+            pending_group.assets[asset_index].effective_price, MARK,
+            "PushAuthMark stages asset {asset_index} without applying it"
+        );
+        assert!(
+            pending_group.assets[asset_index].slot_last < CRANK_SLOT,
+            "asset {asset_index} has pending price-managed work"
+        );
+    }
+
+    let observations: Vec<CrankObservationHint> = (0..N)
+        .map(|asset_index| CrankObservationHint {
+            asset_index: asset_index as u16,
+            oracle_accounts: 0,
+        })
+        .collect();
+    env.svm.expire_blockhash();
+    let refresh_cu = env
+        .send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: CRANK_SLOT,
+                close_q: 0,
+                observations,
+            },
+            vec![
+                AccountMeta::new(env.payer.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(long_account, false),
+            ],
+            &[],
+        )
+        .expect("all-pending AuthMark observations must refresh at the active-leg cap");
+    const ALL_PENDING_AUTH_MARK_REFRESH_CU_LIMIT: u64 = 900_000;
+    assert!(
+        refresh_cu <= ALL_PENDING_AUTH_MARK_REFRESH_CU_LIMIT,
+        "all-active pending AuthMark refresh CU {refresh_cu} exceeded limit \
+         {ALL_PENDING_AUTH_MARK_REFRESH_CU_LIMIT}"
+    );
+
+    let (_, refreshed_group) = env.market_state();
+    for asset_index in 0..N {
+        assert_eq!(
+            refreshed_group.assets[asset_index].effective_price, NEXT_MARK,
+            "public crank applied pending mark for asset {asset_index}"
+        );
+    }
+    assert_eq!(
+        health_cert(&env.portfolio_state(long_account)).cert_oracle_epoch,
+        refreshed_group.oracle_epoch,
+        "max-shape account certifies after every active pending mark is observed"
+    );
+}
+
+#[test]
+fn v16_attack_all_active_pending_hybrid_max_tail_refresh_with_bounded_public_crank() {
+    const N: usize = percolator_prog::constants::WRAPPER_MAX_PORTFOLIO_ASSETS as usize;
+    const MARK: u64 = 1_000_000;
+    const NEXT_MARK: u64 = 1_010_000;
+    const OPEN_SLOT: u64 = 1;
+    const CRANK_SLOT: u64 = 2;
+
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(N as u16, 10_000, 10_000, 10_000);
+    set_test_clock(&mut env, OPEN_SLOT, 100);
+    let mut feeds_by_asset = Vec::with_capacity(N);
+    for asset_index in 0..N {
+        let mut feeds = [[0u8; 32]; 3];
+        for (leg, feed) in feeds.iter_mut().enumerate() {
+            feed[0] = 0xa7;
+            feed[1] = asset_index as u8;
+            feed[2] = leg as u8;
+        }
+        let oracle0 = env.set_pyth_price_with_conf(&feeds[0], MARK as i64, -6, 0, 100);
+        let oracle1 = env.set_pyth_price_with_conf(&feeds[1], MARK as i64, -6, 0, 100);
+        let oracle2 = env.set_pyth_price_with_conf(&feeds[2], MARK as i64, -6, 0, 100);
+        env.try_configure_hybrid_asset_with_conf_filter_cu(
+            asset_index as u16,
+            3,
+            0,
+            feeds,
+            &[oracle0, oracle1, oracle2],
+            OPEN_SLOT,
+            100,
+            0,
+            0,
+            10,
+            0,
+        )
+        .expect("configure three-leg hybrid oracle");
+        feeds_by_asset.push(feeds);
+    }
+
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long_account = env.create_portfolio(&long_owner);
+    let short_account = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long_account, 1_000_000_000);
+    env.deposit(&short_owner, short_account, 1_000_000_000);
+    for asset_index in 0..N {
+        env.svm.expire_blockhash();
+        env.trade_asset_with_cu(
+            asset_index as u16,
+            &long_owner,
+            long_account,
+            &short_owner,
+            short_account,
+            POS_SCALE as i128,
+            MARK,
+            0,
+        );
+    }
+    let long_before = env.portfolio_state(long_account);
+    assert_eq!(
+        percolator::active_bitmap_count_ones(active_bitmap(&long_before)),
+        N as u32,
+        "setup must publicly open every portfolio leg"
+    );
+
+    set_test_clock(&mut env, CRANK_SLOT, 101);
+    let mut oracle_accounts = Vec::with_capacity(N * 3);
+    for feeds in feeds_by_asset.iter() {
+        oracle_accounts.push(env.set_pyth_price_with_conf(&feeds[0], NEXT_MARK as i64, -6, 0, 101));
+        oracle_accounts.push(env.set_pyth_price_with_conf(&feeds[1], MARK as i64, -6, 0, 101));
+        oracle_accounts.push(env.set_pyth_price_with_conf(&feeds[2], MARK as i64, -6, 0, 101));
+    }
+    let observations: Vec<CrankObservationHint> = (0..N)
+        .map(|asset_index| CrankObservationHint {
+            asset_index: asset_index as u16,
+            oracle_accounts: 3,
+        })
+        .collect();
+    let mut accounts = vec![
+        AccountMeta::new(env.payer.pubkey(), true),
+        AccountMeta::new(env.market, false),
+        AccountMeta::new(long_account, false),
+    ];
+    accounts.extend(
+        oracle_accounts
+            .iter()
+            .copied()
+            .map(|key| AccountMeta::new_readonly(key, false)),
+    );
+    env.svm.expire_blockhash();
+    let refresh_cu = env
+        .send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: CRANK_SLOT,
+                close_q: 0,
+                observations,
+            },
+            accounts,
+            &[],
+        )
+        .expect("all-pending Hybrid/Pyth observations must refresh at the active-leg cap");
+    const ALL_PENDING_HYBRID_REFRESH_CU_LIMIT: u64 = 900_000;
+    assert!(
+        refresh_cu <= ALL_PENDING_HYBRID_REFRESH_CU_LIMIT,
+        "all-active pending Hybrid/Pyth refresh CU {refresh_cu} exceeded limit \
+         {ALL_PENDING_HYBRID_REFRESH_CU_LIMIT}"
+    );
+
+    let (_, refreshed_group) = env.market_state();
+    for asset_index in 0..N {
+        assert_eq!(
+            refreshed_group.assets[asset_index].effective_price, NEXT_MARK,
+            "public crank applied pending Pyth mark for asset {asset_index}"
+        );
+    }
+    assert_eq!(
+        health_cert(&env.portfolio_state(long_account)).cert_oracle_epoch,
+        refreshed_group.oracle_epoch,
+        "max-shape account certifies after every active pending Pyth mark is observed"
     );
 }
 
@@ -16875,23 +17262,21 @@ fn v16_regression_cross_margin_insolvency_no_value_extraction() {
                 mark_e6: mark,
             },
         );
-        for ai in [0u16, 1] {
-            for p in [victim, cp] {
-                env.svm.expire_blockhash();
-                let _ = env.send(
-                    ProgInstruction::PermissionlessCrank {
-                        now_slot: slot,
-                        close_q: 0,
-                        observations: crank_observations(ai),
-                    },
-                    vec![
-                        AccountMeta::new(env.payer.pubkey(), true),
-                        AccountMeta::new(env.market, false),
-                        AccountMeta::new(p, false),
-                    ],
-                    &[],
-                );
-            }
+        for p in [victim, cp] {
+            env.svm.expire_blockhash();
+            let _ = env.send(
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: slot,
+                    close_q: 0,
+                    observations: crank_observations_for_assets(&[0, 1]),
+                },
+                vec![
+                    AccountMeta::new(env.payer.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(p, false),
+                ],
+                &[],
+            );
         }
     }
     // A live liquidation cannot safely close this deeply insolvent cross-margin victim. It must
@@ -16899,7 +17284,7 @@ fn v16_regression_cross_margin_insolvency_no_value_extraction() {
     let close_ix = ProgInstruction::PermissionlessCrank {
         now_slot: 2,
         close_q: POS_SCALE,
-        observations: crank_observations(0),
+        observations: crank_observations_for_assets(&[0, 1]),
     };
     let close_accounts = vec![
         AccountMeta::new(env.payer.pubkey(), true),
@@ -17102,44 +17487,40 @@ fn v16_attack_resolved_cross_margin_deep_insolvency_winds_down_publicly() {
                 mark_e6: mark,
             },
         );
-        for ai in [0u16, 1] {
-            for p in [victim, cp] {
-                env.svm.expire_blockhash();
-                let _ = env.send(
-                    ProgInstruction::PermissionlessCrank {
-                        now_slot: slot,
-                        close_q: 0,
-                        observations: crank_observations(ai),
-                    },
-                    vec![
-                        AccountMeta::new(env.payer.pubkey(), true),
-                        AccountMeta::new(env.market, false),
-                        AccountMeta::new(p, false),
-                    ],
-                    &[],
-                );
-            }
+        for p in [victim, cp] {
+            env.svm.expire_blockhash();
+            let _ = env.send(
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: slot,
+                    close_q: 0,
+                    observations: crank_observations_for_assets(&[0, 1]),
+                },
+                vec![
+                    AccountMeta::new(env.payer.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(p, false),
+                ],
+                &[],
+            );
         }
     }
 
     for _ in 0..8 {
-        for ai in [0u16, 1] {
-            for p in [victim, cp] {
-                env.svm.expire_blockhash();
-                let _ = env.send(
-                    ProgInstruction::PermissionlessCrank {
-                        now_slot: 2,
-                        close_q: 0,
-                        observations: crank_observations(ai),
-                    },
-                    vec![
-                        AccountMeta::new(env.payer.pubkey(), true),
-                        AccountMeta::new(env.market, false),
-                        AccountMeta::new(p, false),
-                    ],
-                    &[],
-                );
-            }
+        for p in [victim, cp] {
+            env.svm.expire_blockhash();
+            let _ = env.send(
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: 2,
+                    close_q: 0,
+                    observations: crank_observations_for_assets(&[0, 1]),
+                },
+                vec![
+                    AccountMeta::new(env.payer.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(p, false),
+                ],
+                &[],
+            );
         }
     }
 
@@ -40358,22 +40739,24 @@ fn v16_attack_cross_margin_netting_conserves() {
         ],
         &[&admin],
     );
-    for ai in [0u16, 1] {
-        env.svm.expire_blockhash();
-        let _ = env.send(
-            ProgInstruction::PermissionlessCrank {
-                now_slot: 2,
-                close_q: 0,
-                observations: crank_observations(ai),
-            },
-            vec![
-                AccountMeta::new(env.payer.pubkey(), true),
-                AccountMeta::new(env.market, false),
-                AccountMeta::new(x, false),
-            ],
-            &[],
-        );
-    }
+    env.svm.expire_blockhash();
+    let refresh = env.send(
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 2,
+            close_q: 0,
+            observations: crank_observations_for_assets(&[0, 1]),
+        },
+        vec![
+            AccountMeta::new(env.payer.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(x, false),
+        ],
+        &[],
+    );
+    assert!(
+        refresh.is_ok(),
+        "two-asset mark refresh must progress both active legs: {refresh:?}"
+    );
 
     let xs = env.portfolio_state(x);
     let g = env.market_state().1;
@@ -45418,17 +45801,13 @@ fn v16_attack_backing_fee_split_conserves() {
     env.svm.warp_to_slot(2);
     env.push_auth_mark_for_asset_as_admin(0, 2, 105);
     env.push_auth_mark_for_asset_as_admin(1, 2, 95);
-    for (portfolio, asset_index) in [
-        (counterparty_account, 0),
-        (cross_account, 0),
-        (counterparty_account, 1),
-    ] {
+    for portfolio in [counterparty_account, cross_account] {
         env.crank(
             portfolio,
             ProgInstruction::PermissionlessCrank {
                 now_slot: 2,
                 close_q: 0,
-                observations: crank_observations(asset_index),
+                observations: crank_observations_for_assets(&[0, 1]),
             },
         );
     }
@@ -45436,7 +45815,7 @@ fn v16_attack_backing_fee_split_conserves() {
     env.force_portfolio_capital_for_benchmark(cross_account, 2_600);
     assert_eq!(
         env.portfolio_state(cross_account).pnl.get(),
-        1_000,
+        500,
         "setup must create source-backed positive PnL"
     );
 
