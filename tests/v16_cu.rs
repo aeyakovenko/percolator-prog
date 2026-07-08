@@ -16990,7 +16990,8 @@ fn v16_regression_cross_margin_insolvency_no_value_extraction() {
         }
     }
     // A live liquidation cannot safely close this deeply insolvent cross-margin victim. It must
-    // return recovery-required and roll back, not partially apply a value-creating close.
+    // commit the recovery declaration as public progress, not partially apply a value-creating close
+    // or return an instruction error that rolls the declaration back.
     let close_ix = ProgInstruction::PermissionlessCrank {
         now_slot: 2,
         observations: crank_observations(0),
@@ -17001,31 +17002,50 @@ fn v16_regression_cross_margin_insolvency_no_value_extraction() {
         AccountMeta::new(victim, false),
     ];
     env.svm.expire_blockhash();
+    let market_before_first_close = env.svm.get_account(&env.market).unwrap();
     let first = env.send(close_ix.clone(), close_accounts.clone(), &[]);
-    let (market_before_reject, reject) = if first.is_ok() {
+    let (_, first_group) = env.market_state();
+    let recovery_cu = if first_group.mode == MarketModeV16::Recovery {
+        first.expect("recovery declaration must commit")
+    } else {
+        first.expect("first auto-crank close attempt may refresh before recovery declaration");
         assert!(
             has_active_leg_for_asset(&env.portfolio_state(victim), 0),
-            "first auto-crank close attempt may only refresh before the rejecting liquidation"
+            "refresh-only attempt must not live-liquidate the insolvent leg"
         );
-        let before = env.svm.get_account(&env.market).unwrap();
+        let market_before_recovery = env.svm.get_account(&env.market).unwrap();
+        let victim_before_recovery = env.svm.get_account(&victim).unwrap();
         env.svm.expire_blockhash();
-        (before, env.send(close_ix, close_accounts, &[]))
-    } else {
-        (env.svm.get_account(&env.market).unwrap(), first)
+        let cu = env
+            .send(close_ix, close_accounts, &[])
+            .expect("deep cross-margin insolvency must commit recovery");
+        assert_ne!(
+            env.svm.get_account(&env.market).unwrap().data,
+            market_before_recovery.data,
+            "recovery declaration must update market bytes"
+        );
+        assert_eq!(
+            env.svm.get_account(&victim).unwrap().data,
+            victim_before_recovery.data,
+            "recovery-required liquidation must not partially mutate the target portfolio"
+        );
+        cu
     };
-    assert!(
-        reject.is_err(),
-        "deep cross-margin insolvency must not live-liquidate"
+    assert_cu_within(
+        "PermissionlessCrank cross-margin recovery declaration",
+        recovery_cu,
+        CRANK_CU_LIMIT,
     );
-    let err = format!("{:?}", reject);
-    assert!(
-        err.contains("Custom(23)"),
-        "expected EngineRecoveryRequired, got {err}"
-    );
+    let (_, recovery_group) = env.market_state();
+    assert_eq!(recovery_group.mode, MarketModeV16::Recovery);
     assert_eq!(
+        recovery_group.recovery_reason,
+        Some(PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress)
+    );
+    assert_ne!(
         env.svm.get_account(&env.market).unwrap().data,
-        market_before_reject.data,
-        "rejected cross-margin liquidation rolls back market bytes"
+        market_before_first_close.data,
+        "at least the recovery declaration must be committed"
     );
 
     let v = state::read_portfolio(&env.svm.get_account(&victim).unwrap().data).unwrap();
@@ -39875,6 +39895,113 @@ fn v16_attack_insurance_covered_liquidation_does_not_strand_empty_portfolio() {
         1,
         "only the long counterparty remains materialized"
     );
+}
+
+// Public liveness sweep: when liquidation discovers that the market must enter Recovery, the wrapper
+// must commit that engine recovery declaration as successful crank progress. Returning an instruction
+// error rolls the declaration back under SVM semantics, leaving keepers with no bounded public progress
+// path for the account.
+#[test]
+fn v16_attack_public_liquidation_recovery_required_commits_recovery() {
+    const SHORT_CAP: u128 = 55_000;
+    let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+        public_b_chunk_atoms: 1,
+        max_bankrupt_close_lifetime_slots: 1,
+        ..production_risk_params()
+    });
+    env.update_liquidation_fee_policy_with_cu(0);
+    env.configure_auth_mark_with_cu(0, 1_000_000);
+
+    let long_owner = Keypair::new();
+    let long = env.create_portfolio(&long_owner);
+    let short_owner = Keypair::new();
+    let short = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long, 100_000_000);
+    env.deposit(&short_owner, short, SHORT_CAP);
+    env.trade_asset_with_cu(
+        0,
+        &long_owner,
+        long,
+        &short_owner,
+        short,
+        POS_SCALE as i128,
+        1_000_000,
+        0,
+    );
+
+    for slot in 1..=40u64 {
+        env.svm.warp_to_slot(slot);
+        let _ = env.push_auth_mark_with_cu(slot, 1_070_000);
+        env.svm.expire_blockhash();
+        let _ = env.send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: slot,
+                close_q: 0,
+                observations: crank_observations(0),
+            },
+            vec![
+                AccountMeta::new(env.payer.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(short, false),
+            ],
+            &[],
+        );
+    }
+    assert!(
+        health_cert(&env.portfolio_state(short)).certified_liq_deficit != 0,
+        "setup must make the short liquidatable before probing recovery-required liquidation"
+    );
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let (_, group_before) = env.market_state();
+    let short_before = env.svm.get_account(&short).unwrap();
+    env.svm.expire_blockhash();
+    let cu = env
+        .send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 40,
+                close_q: POS_SCALE,
+                observations: crank_observations(0),
+            },
+            vec![
+                AccountMeta::new(env.payer.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(short, false),
+            ],
+            &[],
+        )
+        .expect("recovery-required liquidation must commit recovery instead of rolling back");
+    assert_cu_within(
+        "PermissionlessCrank recovery-required liquidation",
+        cu,
+        CRANK_CU_LIMIT,
+    );
+
+    let (_, recovered) = env.market_state();
+    assert_eq!(recovered.mode, MarketModeV16::Recovery);
+    assert_eq!(
+        recovered.recovery_reason,
+        Some(PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress)
+    );
+    assert_ne!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "the recovery declaration must be committed, not rolled back"
+    );
+    assert_eq!(
+        env.svm.get_account(&short).unwrap(),
+        short_before,
+        "the failed liquidation itself must not partially mutate the target account"
+    );
+    assert_eq!(
+        recovered.vault as u64,
+        env.token_amount(env.vault),
+        "recovery declaration moves no custody"
+    );
+    assert_eq!(recovered.vault, group_before.vault);
+    assert_eq!(recovered.c_tot, group_before.c_tot);
+    assert_eq!(recovered.insurance, group_before.insurance);
+    assert!(recovered.vault >= recovered.c_tot + recovered.insurance);
 }
 
 // security.md sweep — repeated partial-liquidation fee stop (#3/#33): the liquidation fee is charged
