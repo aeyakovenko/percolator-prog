@@ -26797,6 +26797,17 @@ fn v16_attack_non_base_local_stale_domain_withdrawals_reject() {
     env.top_up_insurance_domain_with_authority(&creator, 2, 100);
     env.top_up_insurance_domain_with_authority(&creator, 3, 100);
     env.top_up_backing_bucket_with_authority(&creator, 2, 100, 100);
+    let earnings_ledger = env.backing_domain_ledger_account();
+    env.mutate_market(|_, group| {
+        group.source_backing_buckets[2].utilization_fee_earnings = 30;
+        group.vault += 30;
+    });
+    env.set_token_account_amount(
+        env.vault,
+        env.mint,
+        env.vault_authority,
+        env.market_state().1.vault as u64,
+    );
 
     let long_owner = Keypair::new();
     let short_owner = Keypair::new();
@@ -26832,6 +26843,9 @@ fn v16_attack_non_base_local_stale_domain_withdrawals_reject() {
     assert_eq!(
         fresh_group.source_backing_buckets[2].fresh_unliened_backing_num,
         100 * BOUND_SCALE
+    );
+    assert_eq!(
+        fresh_group.source_backing_buckets[2].utilization_fee_earnings, 30
     );
     assert!(
         has_active_leg_for_asset(&env.portfolio_state(long), 1),
@@ -26914,6 +26928,51 @@ fn v16_attack_non_base_local_stale_domain_withdrawals_reject() {
         env.svm.get_account(&env.vault).unwrap(),
         vault_before,
         "rejected local-stale backing withdrawal moves no custody"
+    );
+
+    let earnings_dest = env.token_account_for_mint(env.mint, creator.pubkey(), 0);
+    let earnings_dest_before = env.svm.get_account(&earnings_dest).unwrap();
+    let earnings_ledger_before = env.svm.get_account(&earnings_ledger).unwrap();
+    env.svm.expire_blockhash();
+    let stale_earnings = env.send(
+        ProgInstruction::WithdrawBackingBucketEarnings {
+            domain: 2,
+            amount: 10,
+        },
+        vec![
+            AccountMeta::new(creator.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(earnings_ledger, false),
+            AccountMeta::new(earnings_dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&creator],
+    );
+    assert!(
+        stale_earnings.is_err(),
+        "WithdrawBackingBucketEarnings must not drain provider earnings from a locally stale non-base asset"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "rejected local-stale earnings withdrawal leaves market accounting unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&earnings_ledger).unwrap(),
+        earnings_ledger_before,
+        "rejected local-stale earnings withdrawal leaves the provider ledger unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&earnings_dest).unwrap(),
+        earnings_dest_before,
+        "rejected local-stale earnings withdrawal pays no tokens"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        vault_before,
+        "rejected local-stale earnings withdrawal moves no custody"
     );
 
     env.svm.expire_blockhash();
