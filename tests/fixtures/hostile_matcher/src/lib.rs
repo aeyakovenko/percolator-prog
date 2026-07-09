@@ -1,7 +1,8 @@
-//! Adversarial matcher for end-to-end testing of the wrapper's validate_matcher_return on BOTH the
-//! batch CPI (tag 3, via set_return_data) and the single TradeCpi (tag 0, via the ctx-account return
-//! region). It returns CRAFTED returns; the attack "mode" is read from ctx_account.data[0] (set by the
-//! test). The wrapper MUST reject every hostile mode and accept only the honest one.
+//! Adversarial matcher for end-to-end testing of wrapper matcher-return validation and CPI slippage
+//! handling on BOTH the batch CPI (tag 3, via set_return_data) and the single TradeCpi (tag 0, via
+//! the ctx-account return region). It returns CRAFTED returns; the attack "mode" is read from
+//! ctx_account.data[0] (set by the test). Most hostile modes are malformed and must reject; mode 15
+//! is a valid low-price fill used to test limit-price enforcement after wrapper price normalization.
 #![allow(unexpected_cfgs)]
 use solana_program::{
     account_info::AccountInfo,
@@ -39,6 +40,7 @@ fn craft(mode: u8, req_id: u64, lp: u64, asset: u64, oracle: u64, req: i128) -> 
             flags = FLAG_VALID;
             size = req / 2
         } // unflagged partial (no PARTIAL_OK)
+        15 => price = 1, // valid but adversarial low price
         _ => {}                            // honest full fill -> wrapper accepts
     }
     let mut b = [0u8; 64];

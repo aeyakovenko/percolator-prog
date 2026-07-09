@@ -6608,12 +6608,15 @@ pub mod processor {
             req_id,
         )?;
         if limit_price != 0 {
-            let limit_ok = if size_q > 0 {
-                ret.exec_price_e6 <= limit_price
-            } else {
-                ret.exec_price_e6 >= limit_price
-            };
-            if !limit_ok {
+            if !cpi_limit_allows_price(size_q, limit_price, ret.exec_price_e6) {
+                return Err(PercolatorError::InvalidInstruction.into());
+            }
+            let engine_price = accepted_reported_trade_price_from_market_account(
+                market_ai,
+                asset_index as usize,
+                ret.exec_price_e6,
+            )?;
+            if !cpi_limit_allows_price(size_q, limit_price, engine_price) {
                 return Err(PercolatorError::InvalidInstruction.into());
             }
         }
@@ -6976,12 +6979,15 @@ pub mod processor {
                 return Err(PercolatorError::InvalidInstruction.into());
             }
             if leg.limit_price != 0 {
-                let limit_ok = if leg.size_q > 0 {
-                    ret.exec_price_e6 <= leg.limit_price
-                } else {
-                    ret.exec_price_e6 >= leg.limit_price
-                };
-                if !limit_ok {
+                if !cpi_limit_allows_price(leg.size_q, leg.limit_price, ret.exec_price_e6) {
+                    return Err(PercolatorError::InvalidInstruction.into());
+                }
+                let engine_price = accepted_reported_trade_price_from_market_account(
+                    market_ai,
+                    leg.asset_index as usize,
+                    ret.exec_price_e6,
+                )?;
+                if !cpi_limit_allows_price(leg.size_q, leg.limit_price, engine_price) {
                     return Err(PercolatorError::InvalidInstruction.into());
                 }
             }
@@ -11510,6 +11516,31 @@ pub mod processor {
             group.header.config.max_price_move_bps_per_slot.get(),
             dt_slots,
         ))
+    }
+
+    fn accepted_reported_trade_price_from_market_account(
+        market_ai: &AccountInfo<'_>,
+        asset_index: usize,
+        reported_exec_price: u64,
+    ) -> Result<u64, ProgramError> {
+        let mut market_data = market_ai.try_borrow_mut_data()?;
+        let (cfg, group) = state::market_view_mut(&mut market_data)?;
+        let oracle_profile = read_oracle_profile_from_view(&group, &cfg, asset_index)?;
+        accepted_reported_trade_price_view(
+            &oracle_profile,
+            &group,
+            asset_index,
+            reported_exec_price,
+        )
+    }
+
+    fn cpi_limit_allows_price(size_q: i128, limit_price: u64, price: u64) -> bool {
+        limit_price == 0
+            || if size_q > 0 {
+                price <= limit_price
+            } else {
+                price >= limit_price
+            }
     }
 
     fn hybrid_trade_fee_quote_view(

@@ -21477,6 +21477,49 @@ fn v16_attack_tradecpi_limit_price_enforced() {
     assert_eq!(g1.vault, g1.c_tot + g1.insurance, "conservation after fill");
 }
 
+#[test]
+fn v16_attack_tradecpi_limit_rejects_normalized_engine_price_violation() {
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(1, 10_000, 10_000, 500);
+    env.configure_ewma_mark_with_cu(0, 100, 10, 0);
+    let taker_owner = Keypair::new();
+    let lp_owner = Keypair::new();
+    let taker = env.create_portfolio(&taker_owner);
+    let lp = env.create_portfolio(&lp_owner);
+    env.deposit(&taker_owner, taker, 1_000_000);
+    env.deposit(&lp_owner, lp, 1_000_000);
+    let (hostile, ctx, delegate) = install_hostile_low_price_matcher(&mut env, &lp_owner, lp);
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let taker_before = env.svm.get_account(&taker).unwrap();
+    let lp_before = env.svm.get_account(&lp).unwrap();
+    env.svm.expire_blockhash();
+    let result = env.send(
+        ProgInstruction::TradeCpi {
+            asset_index: 0,
+            size_q: (5 * POS_SCALE) as i128,
+            fee_bps: 100,
+            limit_price: 1,
+        },
+        vec![
+            AccountMeta::new(taker_owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(taker, false),
+            AccountMeta::new(lp, false),
+            AccountMeta::new_readonly(hostile, false),
+            AccountMeta::new(ctx, false),
+            AccountMeta::new_readonly(delegate, false),
+        ],
+        &[&taker_owner],
+    );
+    assert!(
+        result.is_err(),
+        "TradeCpi limit must apply to the normalized engine price, not only the raw matcher price"
+    );
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+    assert_eq!(env.svm.get_account(&taker).unwrap(), taker_before);
+    assert_eq!(env.svm.get_account(&lp).unwrap(), lp_before);
+}
+
 // security.md sweep — TradeCpi zero-fill (#39): a zero-capacity matcher (max_fill_abs=0) returns
 // exec_size=0. The wrapper must handle it cleanly — reject or no-op — never create phantom OI/basis,
 // charge a fee on nothing, or corrupt conservation.
@@ -50783,6 +50826,51 @@ fn v16_attack_batch_cpi_per_leg_limit_aborts_whole_batch() {
     );
 }
 
+#[test]
+fn v16_attack_batch_cpi_limit_rejects_normalized_engine_price_violation() {
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(1, 10_000, 10_000, 500);
+    env.configure_ewma_mark_with_cu(0, 100, 10, 0);
+    let taker_owner = Keypair::new();
+    let lp_owner = Keypair::new();
+    let taker = env.create_portfolio(&taker_owner);
+    let lp = env.create_portfolio(&lp_owner);
+    env.deposit(&taker_owner, taker, 1_000_000);
+    env.deposit(&lp_owner, lp, 1_000_000);
+    let (hostile, ctx, delegate) = install_hostile_low_price_matcher(&mut env, &lp_owner, lp);
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let taker_before = env.svm.get_account(&taker).unwrap();
+    let lp_before = env.svm.get_account(&lp).unwrap();
+    env.svm.expire_blockhash();
+    let result = env.send(
+        ProgInstruction::BatchTradeCpi {
+            legs: vec![BatchTradeCpiLeg {
+                asset_index: 0,
+                size_q: (5 * POS_SCALE) as i128,
+                fee_bps: 100,
+                limit_price: 1,
+            }],
+        },
+        vec![
+            AccountMeta::new(taker_owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(taker, false),
+            AccountMeta::new(lp, false),
+            AccountMeta::new_readonly(hostile, false),
+            AccountMeta::new(ctx, false),
+            AccountMeta::new_readonly(delegate, false),
+        ],
+        &[&taker_owner],
+    );
+    assert!(
+        result.is_err(),
+        "BatchTradeCpi limit must apply to the normalized engine price, not only the raw matcher price"
+    );
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+    assert_eq!(env.svm.get_account(&taker).unwrap(), taker_before);
+    assert_eq!(env.svm.get_account(&lp).unwrap(), lp_before);
+}
+
 // security.md sweep - BatchTradeCpi zero-fill atomicity (#22/#39): batch strategies require every
 // leg to fill. A zero-capacity matcher returning exec_size=0 must reject the whole batch, not create
 // phantom no-op success or partially advance matcher/protocol state.
@@ -51964,6 +52052,55 @@ fn hostile_matcher_program_path() -> PathBuf {
         "build the hostile matcher: cargo build-sbf in {path:?}"
     );
     path
+}
+
+fn install_hostile_low_price_matcher(
+    env: &mut V16CuEnv,
+    lp_owner: &Keypair,
+    lp: Pubkey,
+) -> (Pubkey, Pubkey, Pubkey) {
+    let hostile = Pubkey::new_unique();
+    env.svm.add_program(
+        hostile,
+        &std::fs::read(hostile_matcher_program_path()).unwrap(),
+    );
+    let ctx = Pubkey::new_unique();
+    let delegate = matcher_delegate_key(
+        &env.program_id,
+        &env.market,
+        &lp,
+        &lp_owner.pubkey(),
+        &hostile,
+        &ctx,
+    );
+    env.svm
+        .set_account(
+            delegate,
+            Account {
+                lamports: 1_000_000_000,
+                data: vec![],
+                owner: Pubkey::default(),
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    let mut ctx_data = vec![0u8; MATCHER_CONTEXT_LEN];
+    ctx_data[0] = 15; // valid hostile fill with exec_price_e6 = 1.
+    env.svm
+        .set_account(
+            ctx,
+            Account {
+                lamports: 1_000_000_000,
+                data: ctx_data,
+                owner: hostile,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    env.set_matcher_config(hostile, lp_owner, lp, ctx, delegate, 1);
+    (hostile, ctx, delegate)
 }
 
 // End-to-end adversarial: a HOSTILE matcher .so returns crafted tag-3 replies (over-fill, reversed
