@@ -59602,3 +59602,119 @@ fn v16_attack_backing_topup_rejects_lapsed_expiry() {
         "valid topup credits exactly the backing"
     );
 }
+
+fn assert_underfunded_ewma_exit_uses_collected_fee(path: NoCpiReportedPricePath) {
+    const MARK: u64 = 1_000_000;
+    const SIZE_Q: i128 = POS_SCALE as i128;
+
+    let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+        initial_price: MARK,
+        max_trading_fee_bps: 10_000,
+        max_price_move_bps_per_slot: 10_000,
+        max_accrual_dt_slots: 1,
+        min_funding_lifetime_slots: 1,
+        ..V16CuMarketParams::default()
+    });
+    env.configure_ewma_mark_with_cu(0, MARK, 1, 0);
+    let (long_owner, long, short_owner, short) =
+        funded_no_cpi_reported_price_pair(&mut env, MARK as u128);
+
+    try_no_cpi_reported_price_trade_with_cu(
+        &mut env,
+        path,
+        &long_owner,
+        long,
+        &short_owner,
+        short,
+        SIZE_Q,
+        MARK,
+        0,
+    )
+    .unwrap_or_else(|err| panic!("{path:?}: setup open failed: {err}"));
+
+    // A legitimate oracle-authority update and public cranks leave the long healthy at the exact
+    // maintenance boundary, but with less capital than the maximum fee on a full exit.
+    env.svm.warp_to_slot(10);
+    env.push_ewma_mark_with_cu(10, 1);
+    for account in [long, short] {
+        env.svm.expire_blockhash();
+        env.crank(
+            account,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 10,
+                close_q: 0,
+                observations: crank_observations(0),
+            },
+        );
+    }
+
+    env.svm.warp_to_slot(20);
+    let (cfg_before, group_before) = env.market_state();
+    let reported_exit_price = group_before.assets[0]
+        .effective_price
+        .checked_mul(2)
+        .expect("one-slot upper price envelope");
+    let requested_fee_per_side = reported_exit_price as u128;
+    let long_capital = env.portfolio_state(long).capital.get();
+    assert!(
+        0 < long_capital && long_capital < requested_fee_per_side,
+        "{path:?}: setup must make one side's quoted fee partly uncollectible"
+    );
+
+    env.svm.expire_blockhash();
+    let exit = try_no_cpi_reported_price_trade_with_cu(
+        &mut env,
+        path,
+        &long_owner,
+        long,
+        &short_owner,
+        short,
+        -SIZE_Q,
+        reported_exit_price,
+        0,
+    );
+    assert!(
+        exit.is_ok(),
+        "{path:?}: an underfunded risk-reducing full exit must remain live: {exit:?}"
+    );
+
+    let (cfg_after, group_after) = env.market_state();
+    assert_eq!(group_after.assets[0].oi_eff_long_q, 0);
+    assert_eq!(group_after.assets[0].oi_eff_short_q, 0);
+    let collected_fee = group_after.insurance - group_before.insurance;
+    let quoted_two_sided_fee = requested_fee_per_side * 2;
+    assert!(
+        collected_fee < quoted_two_sided_fee,
+        "{path:?}: setup must exercise a real engine partial fee charge"
+    );
+
+    // The mark externality is priced against max(pre-trade OI notional, trade notional) on both
+    // sides. A successful trade may collect less than quoted, but its EWMA move cannot consume the
+    // uncollectible part as though it were paid.
+    let mark_externality_notional = quoted_two_sided_fee;
+    let paid_move_bps = collected_fee * 10_000 / mark_externality_notional;
+    let mark_move_bps = percolator_prog::policy_v16::price_move_bps_ceil(
+        cfg_before.mark_ewma_e6,
+        cfg_after.mark_ewma_e6,
+    )
+    .expect("mark move bps");
+    assert!(mark_move_bps > 0, "{path:?}: control must move the EWMA");
+    assert!(
+        mark_move_bps <= paid_move_bps as u64,
+        "{path:?}: EWMA move {mark_move_bps} bps exceeds collected-fee support {paid_move_bps} bps"
+    );
+}
+
+// Public-only regression for a fee-backed mark invariant. The engine intentionally allows a full
+// risk-reducing exit to charge only available capital. Single TradeNoCpi used to move EWMA from the
+// nominal quote anyway; BatchTradeNoCpi instead detected the short aggregate and reverted the exit.
+// Both routes must execute, and both may move the mark only as far as their collected fees support.
+#[test]
+fn v16_attack_underfunded_exit_cannot_move_ewma_with_uncollectible_fee() {
+    for path in [
+        NoCpiReportedPricePath::Single,
+        NoCpiReportedPricePath::Batch,
+    ] {
+        assert_underfunded_ewma_exit_uses_collected_fee(path);
+    }
+}

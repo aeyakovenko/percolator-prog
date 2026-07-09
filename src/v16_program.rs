@@ -5874,11 +5874,17 @@ pub mod processor {
                 outcome.fee_a,
                 outcome.fee_b,
             )?;
+            let collected_post_trade_mark = collected_fee_supported_mark_view(
+                &oracle_profile,
+                fee_quote,
+                outcome.fee_a,
+                outcome.fee_b,
+            )?;
             update_hybrid_mark_after_trade_view(
                 &mut oracle_profile,
                 &group,
                 asset_index as usize,
-                fee_quote.post_trade_mark_e6,
+                collected_post_trade_mark,
             )?;
             write_oracle_profile_to_view(&mut group, asset_index as usize, &oracle_profile)?;
             if asset_index == 0 && oracle_v16::profile_is_price_managed(&oracle_profile) {
@@ -6087,33 +6093,40 @@ pub mod processor {
                 )
                 .map_err(map_v16_error)?;
 
-            // Post-pass: split fees back to each asset's domains and drive its hybrid mark. Fees are
-            // reconstructed deterministically per leg; the running total must equal the engine's
-            // aggregate or we refuse the batch (no silent mis-accounting).
-            let mut reconstructed_total: u128 = 0;
+            // The engine reports one collected-fee aggregate per account. Allocate each aggregate
+            // against requested fees in request order. This deterministic wrapper policy conserves
+            // the engine total while keeping risk-reducing exits live; no asset is credited, or has
+            // its mark moved, using a fee that the engine did not collect.
+            let mut remaining_fee_a = outcome.fee_a;
+            let mut remaining_fee_b = outcome.fee_b;
             let mut cfg_dirty = false;
             for (asset_index, oracle_profile, fee_basis_price, fee_quote, abs_size) in
                 leg_ctx.iter_mut()
             {
-                let fee_leg = batch_leg_fee(*abs_size, *fee_basis_price, fee_quote.fee_bps)?;
+                let requested_fee_leg =
+                    batch_leg_fee(*abs_size, *fee_basis_price, fee_quote.fee_bps)?;
+                let fee_a = requested_fee_leg.min(remaining_fee_a);
+                let fee_b = requested_fee_leg.min(remaining_fee_b);
+                remaining_fee_a = remaining_fee_a
+                    .checked_sub(fee_a)
+                    .ok_or(PercolatorError::EngineArithmeticOverflow)?;
+                remaining_fee_b = remaining_fee_b
+                    .checked_sub(fee_b)
+                    .ok_or(PercolatorError::EngineArithmeticOverflow)?;
                 credit_trade_fees_to_market_budgets_view(
                     &cfg,
                     &mut group,
                     *asset_index,
-                    fee_leg,
-                    fee_leg,
+                    fee_a,
+                    fee_b,
                 )?;
-                let total_fee_leg = fee_leg
-                    .checked_add(fee_leg)
-                    .ok_or(PercolatorError::EngineArithmeticOverflow)?;
-                reconstructed_total = reconstructed_total
-                    .checked_add(total_fee_leg)
-                    .ok_or(PercolatorError::EngineArithmeticOverflow)?;
+                let collected_post_trade_mark =
+                    collected_fee_supported_mark_view(oracle_profile, *fee_quote, fee_a, fee_b)?;
                 update_hybrid_mark_after_trade_view(
                     oracle_profile,
                     &group,
                     *asset_index,
-                    fee_quote.post_trade_mark_e6,
+                    collected_post_trade_mark,
                 )?;
                 write_oracle_profile_to_view(&mut group, *asset_index, oracle_profile)?;
                 if *asset_index == 0 && oracle_v16::profile_is_price_managed(oracle_profile) {
@@ -6122,11 +6135,7 @@ pub mod processor {
                     cfg_dirty = true;
                 }
             }
-            let engine_total = outcome
-                .fee_a
-                .checked_add(outcome.fee_b)
-                .ok_or(PercolatorError::EngineArithmeticOverflow)?;
-            if reconstructed_total != engine_total {
+            if remaining_fee_a != 0 || remaining_fee_b != 0 {
                 return Err(PercolatorError::EngineArithmeticOverflow.into());
             }
             if cfg_dirty {
@@ -11425,6 +11434,8 @@ pub mod processor {
     struct HybridTradeFeeQuote {
         fee_bps: u64,
         post_trade_mark_e6: u64,
+        base_fee_paid: u128,
+        mark_externality_notional: u128,
     }
 
     fn two_sided_trade_fee_paid_view(notional: u128, fee_bps: u64) -> Result<u128, ProgramError> {
@@ -11540,12 +11551,16 @@ pub mod processor {
             return Ok(HybridTradeFeeQuote {
                 fee_bps: base,
                 post_trade_mark_e6: 0,
+                base_fee_paid: 0,
+                mark_externality_notional: 0,
             });
         }
         if oracle_v16::profile_is_auth_mark(profile) {
             return Ok(HybridTradeFeeQuote {
                 fee_bps: base,
                 post_trade_mark_e6: 0,
+                base_fee_paid: 0,
+                mark_externality_notional: 0,
             });
         }
         let now_slot = authenticated_market_slot_or_fallback_view(group);
@@ -11555,6 +11570,8 @@ pub mod processor {
             return Ok(HybridTradeFeeQuote {
                 fee_bps: base,
                 post_trade_mark_e6: 0,
+                base_fee_paid: 0,
+                mark_externality_notional: 0,
             });
         }
         if asset_index >= group.header.config.max_market_slots.get() as usize
@@ -11563,6 +11580,8 @@ pub mod processor {
             return Ok(HybridTradeFeeQuote {
                 fee_bps: base,
                 post_trade_mark_e6: 0,
+                base_fee_paid: 0,
+                mark_externality_notional: 0,
             });
         }
         let asset = group.markets[asset_index].engine.asset;
@@ -11636,7 +11655,35 @@ pub mod processor {
         Ok(HybridTradeFeeQuote {
             fee_bps,
             post_trade_mark_e6,
+            base_fee_paid,
+            mark_externality_notional,
         })
+    }
+
+    fn collected_fee_supported_mark_view(
+        profile: &state::AssetOracleProfileV16,
+        quote: HybridTradeFeeQuote,
+        fee_a: u128,
+        fee_b: u128,
+    ) -> Result<u64, ProgramError> {
+        if quote.post_trade_mark_e6 == 0 || quote.mark_externality_notional == 0 {
+            return Ok(quote.post_trade_mark_e6);
+        }
+        let collected = fee_a
+            .checked_add(fee_b)
+            .ok_or(PercolatorError::EngineArithmeticOverflow)?;
+        let externality_fee = collected.saturating_sub(quote.base_fee_paid);
+        let supported_move_bps = externality_fee
+            .checked_mul(10_000)
+            .ok_or(PercolatorError::EngineArithmeticOverflow)?
+            .checked_div(quote.mark_externality_notional)
+            .ok_or(PercolatorError::EngineArithmeticOverflow)?;
+        Ok(oracle_v16::clamp_toward_engine_dt(
+            profile.mark_ewma_e6,
+            quote.post_trade_mark_e6,
+            u64::try_from(supported_move_bps).unwrap_or(u64::MAX),
+            1,
+        ))
     }
 
     fn hybrid_effective_price_for_crank_view(
