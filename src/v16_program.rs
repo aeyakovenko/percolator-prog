@@ -8409,11 +8409,23 @@ pub mod processor {
             if group.header.mode == 0 && permissionless_resolve_matured_now_view(cfg, group) {
                 return Err(V16Error::LockActive);
             }
+            let asset_index_usize = asset_index as usize;
+            let profile = read_oracle_profile_from_view(group, cfg, asset_index_usize)
+                .map_err(|_| V16Error::InvalidConfig)?;
+            if group.header.mode == 0
+                && global_or_profile_resolve_matured_at_slot(
+                    cfg,
+                    &profile,
+                    authenticated_market_slot_or_fallback_view(group),
+                )
+            {
+                return Err(V16Error::Stale);
+            }
             group
                 .rebalance_reduce_position_not_atomic(
                     portfolio,
                     RebalanceRequestV16 {
-                        asset_index: asset_index as usize,
+                        asset_index: asset_index_usize,
                         reduce_q,
                     },
                 )

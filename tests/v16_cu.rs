@@ -26871,6 +26871,89 @@ fn v16_attack_non_base_slot_zero_profile_stale_rejects_trade() {
     );
 }
 
+#[test]
+fn v16_attack_non_base_local_stale_rebalance_reduce_rejects() {
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(1, 1_000, 1_000, 500);
+    env.configure_permissionless_resolve_with_cu(5, 5);
+
+    env.activate_asset(1, 0, 100);
+    env.configure_auth_mark_for_asset_as_admin(1, 0, 100);
+
+    env.svm.warp_to_slot(1);
+    env.configure_auth_mark_with_cu(1, 100);
+
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long = env.create_portfolio(&long_owner);
+    let short = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long, 1_000_000);
+    env.deposit(&short_owner, short, 1_000_000);
+    env.try_trade_asset_with_cu(
+        1,
+        &long_owner,
+        long,
+        &short_owner,
+        short,
+        POS_SCALE as i128,
+        100,
+        0,
+    )
+    .expect("asset-1 trade succeeds before local stale boundary");
+    assert!(
+        has_active_leg_for_asset(&env.portfolio_state(long), 1),
+        "setup must leave the owner exposed to asset 1"
+    );
+
+    env.svm.warp_to_slot(4);
+    env.push_auth_mark_with_cu(4, 100);
+    let base_resolve = env.send(
+        ProgInstruction::ResolveStalePermissionless { now_slot: 0 },
+        vec![AccountMeta::new(env.market, false)],
+        &[],
+    );
+    assert!(
+        base_resolve.is_err(),
+        "base market is fresh; this probe must isolate asset-1 local stale"
+    );
+
+    env.svm.warp_to_slot(6);
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let long_before = env.svm.get_account(&long).unwrap();
+    let short_before = env.svm.get_account(&short).unwrap();
+    env.svm.expire_blockhash();
+    let reduce = env.send(
+        ProgInstruction::RebalanceReduce {
+            asset_index: 1,
+            reduce_q: POS_SCALE,
+        },
+        vec![
+            AccountMeta::new(long_owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(long, false),
+        ],
+        &[&long_owner],
+    );
+    assert!(
+        reduce.is_err(),
+        "RebalanceReduce must not bypass a locally stale non-base oracle"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "rejected local-stale reduce leaves market unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&long).unwrap(),
+        long_before,
+        "rejected local-stale reduce leaves owner unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&short).unwrap(),
+        short_before,
+        "rejected local-stale reduce leaves counterparty unchanged"
+    );
+}
+
 // security.md sweep - permissionless asset oracle liveness DoS (#2/#30/#37): the reverse
 // isolation must also hold. A fresh permissionless asset oracle must not be able to bump the
 // market-wide stale clock and block ResolveStalePermissionless after the base market oracle is stale.
