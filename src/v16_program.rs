@@ -10816,6 +10816,9 @@ pub mod processor {
         if !oracle_v16::profile_is_price_managed(&profile) {
             return Ok(());
         }
+        if permissionless_resolve_matured_for_profile_at_slot(cfg, &profile, now_slot) {
+            return Err(PercolatorError::OracleStale.into());
+        }
         let asset = group.markets[asset_index].engine.asset;
         let dt = asset_segment_dt_view(group, asset_index, now_slot)?;
         if dt == 0 {

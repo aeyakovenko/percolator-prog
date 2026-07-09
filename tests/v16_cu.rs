@@ -10017,6 +10017,145 @@ fn v16_attack_stale_resolve_matured_no_observation_liquidation_rejects() {
 }
 
 #[test]
+fn v16_attack_non_base_local_stale_no_observation_liquidation_rejects() {
+    let mut env = V16CuEnv::new();
+    env.configure_permissionless_resolve_with_cu(5, 5);
+    env.update_market_init_fee_policy_with_cu(1);
+    env.top_up_insurance(1_000_000);
+    env.svm.warp_to_slot(1);
+    env.configure_auth_mark_with_cu(1, 100);
+
+    let creator = Keypair::new();
+    let creator_key = creator.pubkey();
+    env.activate_permissionless_asset_with_fee(
+        &creator,
+        1,
+        1,
+        100,
+        creator_key,
+        creator_key,
+        creator_key,
+        creator_key,
+        1,
+    );
+    env.configure_auth_mark_for_asset_with_authority(1, &creator, 1, 100);
+
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long_account = env.create_portfolio(&long_owner);
+    let short_account = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long_account, 10_000);
+    env.deposit(&short_owner, short_account, 3_000);
+    env.trade_asset_with_cu(
+        1,
+        &long_owner,
+        long_account,
+        &short_owner,
+        short_account,
+        (10 * POS_SCALE) as i128,
+        100,
+        0,
+    );
+
+    env.svm.warp_to_slot(2);
+    env.push_auth_mark_for_asset_with_authority(1, &creator, 2, 300);
+    env.crank(
+        short_account,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 2,
+            close_q: 0,
+            observations: crank_observations(1),
+        },
+    );
+    env.svm.warp_to_slot(3);
+    env.crank(
+        short_account,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 3,
+            close_q: 0,
+            observations: crank_observations(1),
+        },
+    );
+    assert!(
+        health_cert(&env.portfolio_state(short_account)).certified_liq_deficit != 0,
+        "setup must be liquidatable before local-stale probe"
+    );
+
+    env.svm.warp_to_slot(7);
+    env.push_auth_mark_with_cu(7, 100);
+    let base_resolve = env.send(
+        ProgInstruction::ResolveStalePermissionless { now_slot: 0 },
+        vec![AccountMeta::new(env.market, false)],
+        &[],
+    );
+    assert!(
+        base_resolve.is_err(),
+        "base market is fresh; this probe must isolate asset-1 local stale"
+    );
+    let profile =
+        state::read_asset_oracle_profile(&env.svm.get_account(&env.market).unwrap().data, 1)
+            .unwrap();
+    assert_eq!(profile.last_good_oracle_slot, 2);
+
+    let before_group = env.market_state().1;
+    let before_market = env.svm.get_account(&env.market).unwrap();
+    let before_short = env.svm.get_account(&short_account).unwrap();
+    env.svm.expire_blockhash();
+    let result = env.send(
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 7,
+            close_q: POS_SCALE,
+            observations: vec![],
+        },
+        vec![
+            AccountMeta::new(env.payer.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(short_account, false),
+        ],
+        &[],
+    );
+    if result.is_ok() {
+        let after_group = env.market_state().1;
+        assert!(
+            after_group.assets[1].oi_eff_short_q < before_group.assets[1].oi_eff_short_q,
+            "accepted local-stale no-observation liquidation must be a real liquidation, not a no-op"
+        );
+    }
+    let err = result
+        .expect_err("local-stale no-observation liquidation must reject before live mutation");
+    assert!(
+        err.contains("Custom(27)") || err.contains("custom program error: 0x1b"),
+        "local-stale no-observation liquidation should fail as OracleStale, got: {err}"
+    );
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), before_market);
+    assert_eq!(env.svm.get_account(&short_account).unwrap(), before_short);
+
+    env.svm.expire_blockhash();
+    env.push_auth_mark_for_asset_with_authority(1, &creator, 7, 300);
+    let fresh_liquidation = env.send(
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 7,
+            close_q: POS_SCALE,
+            observations: vec![],
+        },
+        vec![
+            AccountMeta::new(env.payer.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(short_account, false),
+        ],
+        &[],
+    );
+    assert!(
+        fresh_liquidation.is_ok(),
+        "after a public asset-1 refresh, the bounded liquidation remains reachable: {fresh_liquidation:?}"
+    );
+    assert!(
+        env.market_state().1.assets[1].oi_eff_short_q < before_group.assets[1].oi_eff_short_q,
+        "fresh liquidation reduces asset-1 OI"
+    );
+}
+
+#[test]
 fn v16_attack_stale_resolve_matured_b_stale_cleanup_still_progresses() {
     let mut env = V16CuEnv::new();
     env.configure_permissionless_resolve_with_cu(5, 5);
