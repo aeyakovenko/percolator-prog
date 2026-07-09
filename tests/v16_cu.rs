@@ -26772,6 +26772,180 @@ fn v16_attack_stale_permissionless_asset_cannot_global_resolve_market() {
     assert!(group_after_trade.assets[1].oi_eff_long_q > 0);
 }
 
+#[test]
+fn v16_attack_non_base_local_stale_domain_withdrawals_reject() {
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(1, 1_000, 1_000, 500);
+    env.update_market_init_fee_policy_with_cu(1);
+    env.configure_permissionless_resolve_with_cu(5, 5);
+    env.configure_auth_mark_with_cu(1, 100);
+
+    let creator = Keypair::new();
+    let creator_key = creator.pubkey();
+    env.svm.warp_to_slot(1);
+    env.activate_permissionless_asset_with_fee(
+        &creator,
+        1,
+        1,
+        100,
+        creator_key,
+        creator_key,
+        creator_key,
+        creator_key,
+        1,
+    );
+    env.configure_auth_mark_for_asset_with_authority(1, &creator, 1, 100);
+    env.top_up_insurance_domain_with_authority(&creator, 2, 100);
+    env.top_up_insurance_domain_with_authority(&creator, 3, 100);
+    env.top_up_backing_bucket_with_authority(&creator, 2, 100, 100);
+
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long = env.create_portfolio(&long_owner);
+    let short = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long, 1_000_000);
+    env.deposit(&short_owner, short, 1_000_000);
+    env.trade_asset_with_cu(
+        1,
+        &long_owner,
+        long,
+        &short_owner,
+        short,
+        POS_SCALE as i128,
+        100,
+        0,
+    );
+
+    env.svm.warp_to_slot(3);
+    env.push_auth_mark_with_cu(3, 100);
+    let base_resolve = env.send(
+        ProgInstruction::ResolveStalePermissionless { now_slot: 0 },
+        vec![AccountMeta::new(env.market, false)],
+        &[],
+    );
+    assert!(
+        base_resolve.is_err(),
+        "base market is fresh; this probe must isolate asset-1 local stale"
+    );
+    let (_, fresh_group) = env.market_state();
+    assert_eq!(fresh_group.insurance_domain_budget[2], 100);
+    assert_eq!(fresh_group.insurance_domain_budget[3], 100);
+    assert_eq!(
+        fresh_group.source_backing_buckets[2].fresh_unliened_backing_num,
+        100 * BOUND_SCALE
+    );
+    assert!(
+        has_active_leg_for_asset(&env.portfolio_state(long), 1),
+        "setup must leave asset-1 OI protected by the funded domains"
+    );
+
+    env.svm.warp_to_slot(7);
+    let profile =
+        state::read_asset_oracle_profile(&env.svm.get_account(&env.market).unwrap().data, 1)
+            .unwrap();
+    assert_eq!(
+        profile.last_good_oracle_slot, 1,
+        "asset-1 profile must be locally stale by slot 7"
+    );
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let long_before = env.svm.get_account(&long).unwrap();
+    let short_before = env.svm.get_account(&short).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+
+    env.svm.expire_blockhash();
+    let stale_insurance = env.try_withdraw_insurance_asset_with_authority(&creator, 1, 50);
+    assert!(
+        stale_insurance.is_err(),
+        "WithdrawInsuranceAsset must not drain protection from a locally stale non-base asset"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "rejected local-stale insurance withdrawal leaves market accounting unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&long).unwrap(),
+        long_before,
+        "rejected local-stale insurance withdrawal leaves the long unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&short).unwrap(),
+        short_before,
+        "rejected local-stale insurance withdrawal leaves the short unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        vault_before,
+        "rejected local-stale insurance withdrawal moves no custody"
+    );
+
+    let backing_dest = env.token_account_for_mint(env.mint, creator.pubkey(), 0);
+    let backing_dest_before = env.svm.get_account(&backing_dest).unwrap();
+    env.svm.expire_blockhash();
+    let stale_backing = env.send(
+        ProgInstruction::WithdrawBackingBucket {
+            domain: 2,
+            amount: 50,
+        },
+        vec![
+            AccountMeta::new(creator.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(backing_dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&creator],
+    );
+    assert!(
+        stale_backing.is_err(),
+        "WithdrawBackingBucket must not drain backing from a locally stale non-base asset"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "rejected local-stale backing withdrawal leaves market accounting unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&backing_dest).unwrap(),
+        backing_dest_before,
+        "rejected local-stale backing withdrawal pays no tokens"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        vault_before,
+        "rejected local-stale backing withdrawal moves no custody"
+    );
+
+    env.svm.expire_blockhash();
+    env.push_auth_mark_for_asset_with_authority(1, &creator, 7, 100);
+    let (fresh_dest, _) = env
+        .try_withdraw_insurance_asset_with_authority(&creator, 1, 50)
+        .expect("after a public asset-1 oracle refresh, live insurance withdrawal remains reachable");
+    assert_eq!(env.token_amount(fresh_dest), 50);
+
+    env.svm.expire_blockhash();
+    let fresh_backing = env.send(
+        ProgInstruction::WithdrawBackingBucket {
+            domain: 2,
+            amount: 50,
+        },
+        vec![
+            AccountMeta::new(creator.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(backing_dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&creator],
+    );
+    assert!(
+        fresh_backing.is_ok(),
+        "after a public asset-1 oracle refresh, backing withdrawal remains reachable: {fresh_backing:?}"
+    );
+    assert_eq!(env.token_amount(backing_dest), 50);
+}
+
 // security.md sweep - slot-zero local stale bypass (#24/#30/#37): a non-base price-managed asset can
 // be configured at the authenticated genesis slot. Its local stale clock must still mature; otherwise
 // stale AuthMark/EWMA assets born at slot 0 can keep trading forever while the base oracle stays fresh.

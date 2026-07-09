@@ -4422,6 +4422,8 @@ pub mod processor {
         if shutdown_asset_empty_and_matured_now_view(cfg, group, asset_index).is_ok() {
             return Ok(true);
         }
+        let profile = read_oracle_profile_from_view(group, cfg, asset_index)?;
+        reject_permissionless_resolve_matured_live_for_profile_view(cfg, &profile, group)?;
         reject_permissionless_resolve_matured_live_view(cfg, group)?;
         if group.header.bankruptcy_hlock_active != 0
             || group.header.threshold_stress_active != 0
