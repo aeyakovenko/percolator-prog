@@ -3589,6 +3589,17 @@ pub mod oracle_v16 {
                 > profile.hybrid_soft_stale_slots
     }
 
+    pub fn profile_stored_oracle_sample_stale(
+        profile: &AssetOracleProfileV16,
+        now_unix_ts: i64,
+    ) -> bool {
+        if profile.max_staleness_secs == 0 || profile.oracle_target_publish_time == 0 {
+            return false;
+        }
+        let age = now_unix_ts.saturating_sub(profile.oracle_target_publish_time);
+        age >= 0 && age as u64 > profile.max_staleness_secs
+    }
+
     pub fn hard_stale_matured(config: &WrapperConfigV16, now_slot: u64) -> bool {
         is_hybrid(config) && permissionless_stale_matured(config, now_slot)
     }
@@ -10474,14 +10485,6 @@ pub mod processor {
                 }
                 let oracle_account_count = hint.oracle_accounts as usize;
                 let mut oracle_profile = read_oracle_profile_from_view(&group, &cfg, asset_index)?;
-                if oracle_account_count != oracle_profile.oracle_leg_count as usize {
-                    return Err(PercolatorError::InvalidInstruction.into());
-                }
-                if oracle_tail.len() < oracle_account_count {
-                    return Err(ProgramError::NotEnoughAccountKeys);
-                }
-                let (observation_tail, rest) = oracle_tail.split_at(oracle_account_count);
-                oracle_tail = rest;
                 let now_unix_ts = clock_unix_ts.unwrap_or_else(|| {
                     let elapsed_slots =
                         authenticated_now_slot.saturating_sub(oracle_profile.last_good_oracle_slot);
@@ -10489,6 +10492,28 @@ pub mod processor {
                         .oracle_target_publish_time
                         .saturating_add(i64::try_from(elapsed_slots).unwrap_or(i64::MAX))
                 });
+                let expected_oracle_account_count = oracle_profile.oracle_leg_count as usize;
+                if oracle_account_count != expected_oracle_account_count {
+                    let soft_stale_missing_tail =
+                        oracle_account_count == 0
+                            && oracle_v16::profile_is_hybrid(&oracle_profile)
+                            && oracle_v16::profile_hybrid_soft_stale_matured(
+                                &oracle_profile,
+                                authenticated_now_slot,
+                            )
+                            && oracle_v16::profile_stored_oracle_sample_stale(
+                                &oracle_profile,
+                                now_unix_ts,
+                            );
+                    if !soft_stale_missing_tail {
+                        return Err(PercolatorError::InvalidInstruction.into());
+                    }
+                }
+                if oracle_tail.len() < oracle_account_count {
+                    return Err(ProgramError::NotEnoughAccountKeys);
+                }
+                let (observation_tail, rest) = oracle_tail.split_at(oracle_account_count);
+                oracle_tail = rest;
                 reject_non_base_oracle_update_after_global_resolve_matured(
                     &cfg,
                     asset_index,
@@ -11663,6 +11688,11 @@ pub mod processor {
                     || e == ProgramError::NotEnoughAccountKeys =>
             {
                 if !oracle_v16::profile_hybrid_soft_stale_matured(profile, now_slot) {
+                    return Err(e);
+                }
+                if e == ProgramError::NotEnoughAccountKeys
+                    && !oracle_v16::profile_stored_oracle_sample_stale(profile, now_unix_ts)
+                {
                     return Err(e);
                 }
                 profile.mark_ewma_e6

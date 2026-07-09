@@ -12888,6 +12888,193 @@ fn v16_bpf_hybrid_mark_uses_ewma_after_hours_then_oracle_when_fresh() {
 }
 
 #[test]
+fn v16_attack_hybrid_soft_stale_crank_progresses_without_oracle_tail() {
+    let mut env = V16CuEnv::new();
+    set_test_clock(&mut env, 1, 100);
+
+    let feed = [0xc7u8; 32];
+    let initial = env.set_pyth_price(&feed, 100, 0, 100);
+    env.try_configure_hybrid_asset_with_conf_filter_cu(
+        0,
+        1,
+        0,
+        [feed, [0u8; 32], [0u8; 32]],
+        &[initial],
+        1,
+        100,
+        0,
+        0,
+        3,
+        500,
+    )
+    .expect("configure one-leg hybrid oracle");
+    assert_eq!(env.market_state().1.assets[0].effective_price, 100_000_000);
+
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long_account = env.create_portfolio(&long_owner);
+    let short_account = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long_account, 1_000_000_000);
+    env.deposit(&short_owner, short_account, 1_000_000_000);
+
+    set_test_clock(&mut env, 2, 101);
+    env.svm.expire_blockhash();
+    let pre_soft_stale_no_tail = env.send(
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 2,
+            close_q: 0,
+            observations: crank_observations(0),
+        },
+        vec![
+            AccountMeta::new(env.payer.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(long_account, false),
+        ],
+        &[],
+    );
+    assert!(
+        pre_soft_stale_no_tail.is_err(),
+        "fresh hybrid crank must still require the configured oracle tail"
+    );
+
+    set_test_clock(&mut env, 5, 104);
+    env.try_trade_asset_with_cu(
+        0,
+        &long_owner,
+        long_account,
+        &short_owner,
+        short_account,
+        POS_SCALE as i128,
+        150_000_000,
+        0,
+    )
+    .expect("after-hours hybrid trade updates fallback EWMA");
+    let (after_trade_cfg, after_trade_group) = env.market_state();
+    assert!(
+        after_trade_cfg.mark_ewma_e6 > after_trade_group.assets[0].effective_price,
+        "setup must leave a pending fallback EWMA move"
+    );
+
+    set_test_clock(&mut env, 65, 165);
+    env.svm.expire_blockhash();
+    let no_tail = env.send(
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 65,
+            close_q: 0,
+            observations: crank_observations(0),
+        },
+        vec![
+            AccountMeta::new(env.payer.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(long_account, false),
+        ],
+        &[],
+    );
+    assert!(
+        no_tail.is_ok(),
+        "soft-stale hybrid crank should use the fallback EWMA when no external oracle tail is available: {no_tail:?}"
+    );
+    let (_, group) = env.market_state();
+    assert!(
+        group.assets[0].effective_price > 100_000_000,
+        "missing-tail soft-stale crank must make price progress from the fallback EWMA"
+    );
+}
+
+#[test]
+fn v16_attack_hybrid_soft_stale_no_tail_cannot_bypass_fresh_stored_oracle() {
+    let mut env = V16CuEnv::new();
+    set_test_clock(&mut env, 1, 100);
+
+    let feed = [0xc8u8; 32];
+    let initial = env.set_pyth_price(&feed, 100, 0, 100);
+    env.try_configure_hybrid_asset_with_conf_filter_cu(
+        0,
+        1,
+        0,
+        [feed, [0u8; 32], [0u8; 32]],
+        &[initial],
+        1,
+        100,
+        0,
+        0,
+        3,
+        500,
+    )
+    .expect("configure one-leg hybrid oracle");
+
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long_account = env.create_portfolio(&long_owner);
+    let short_account = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long_account, 1_000_000_000);
+    env.deposit(&short_owner, short_account, 1_000_000_000);
+
+    set_test_clock(&mut env, 5, 104);
+    env.try_trade_asset_with_cu(
+        0,
+        &long_owner,
+        long_account,
+        &short_owner,
+        short_account,
+        POS_SCALE as i128,
+        150_000_000,
+        0,
+    )
+    .expect("after-hours hybrid trade updates fallback EWMA");
+    let (after_trade_cfg, after_trade_group) = env.market_state();
+    assert!(
+        after_trade_cfg.mark_ewma_e6 > after_trade_group.assets[0].effective_price,
+        "setup must leave a pending fallback mark above the still-fresh oracle"
+    );
+
+    set_test_clock(&mut env, 6, 105);
+    env.svm.expire_blockhash();
+    let no_tail = env.send(
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 6,
+            close_q: 0,
+            observations: crank_observations(0),
+        },
+        vec![
+            AccountMeta::new(env.payer.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(long_account, false),
+        ],
+        &[],
+    );
+    assert!(
+        no_tail.is_err(),
+        "no-tail fallback must not bypass a stored oracle sample that is still fresh by max_staleness_secs: {no_tail:?}"
+    );
+
+    env.svm.expire_blockhash();
+    let with_tail = env.send(
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 6,
+            close_q: 0,
+            observations: crank_observations_with_accounts(0, 1),
+        },
+        vec![
+            AccountMeta::new(env.payer.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(long_account, false),
+            AccountMeta::new_readonly(initial, false),
+        ],
+        &[],
+    );
+    assert!(
+        with_tail.is_ok(),
+        "the valid fresh-oracle-tail crank must remain available: {with_tail:?}"
+    );
+    let (_, group) = env.market_state();
+    assert_eq!(
+        group.assets[0].effective_price, 100_000_000,
+        "fresh oracle tail must keep the market on the external oracle instead of the fallback mark"
+    );
+}
+
+#[test]
 fn v16_bpf_configure_and_push_ewma_mark_are_bounded_and_clock_authenticated() {
     let mut env = V16CuEnv::new();
     let configure_real_slot = 8;
