@@ -12921,6 +12921,173 @@ fn v16_attack_recovery_first_leg_cannot_block_live_asset_liquidation() {
     );
 }
 
+// A public ADL reset must not leave an abandoned winner able to block either a
+// later cross-margin liquidation or permissionless side-reset finalization.
+#[test]
+fn v16_attack_prior_reset_obligation_cannot_block_live_asset_liquidation() {
+    let params = V16CuMarketParams {
+        max_portfolio_assets: 2,
+        max_price_move_bps_per_slot: 10_000,
+        ..V16CuMarketParams::default()
+    };
+    let mut env = V16CuEnv::new_with_init_params(params);
+    env.configure_auth_mark_for_asset_as_admin(0, 0, 100);
+    env.configure_auth_mark_for_asset_as_admin(1, 0, 100);
+
+    let target_owner = Keypair::new();
+    let target = env.create_portfolio(&target_owner);
+    let asset0_loser_owner = Keypair::new();
+    let asset0_loser = env.create_portfolio(&asset0_loser_owner);
+    let asset1_winner_owner = Keypair::new();
+    let asset1_winner = env.create_portfolio(&asset1_winner_owner);
+    env.deposit(&target_owner, target, 300);
+    env.deposit(&asset0_loser_owner, asset0_loser, 290);
+    env.deposit(&asset1_winner_owner, asset1_winner, 1_000_000);
+    env.trade_asset_with_cu(
+        0,
+        &target_owner,
+        target,
+        &asset0_loser_owner,
+        asset0_loser,
+        POS_SCALE as i128,
+        100,
+        0,
+    );
+    env.trade_asset_with_cu(
+        1,
+        &asset1_winner_owner,
+        asset1_winner,
+        &target_owner,
+        target,
+        (2 * POS_SCALE) as i128,
+        100,
+        0,
+    );
+
+    env.svm.warp_to_slot(1);
+    env.push_auth_mark_for_asset_as_admin(0, 1, 200);
+    env.svm.expire_blockhash();
+    env.send(
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 1,
+            observations: crank_observations(0),
+        },
+        vec![
+            AccountMeta::new(env.payer.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(asset0_loser, false),
+        ],
+        &[],
+    )
+    .expect("first asset-0 move refreshes the future loser");
+    env.svm.warp_to_slot(2);
+    env.push_auth_mark_for_asset_as_admin(0, 2, 400);
+    for label in ["asset-0 refresh", "asset-0 liquidation"] {
+        env.svm.expire_blockhash();
+        let cu = env
+            .send(
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: 2,
+                    observations: crank_observations(0),
+                },
+                vec![
+                    AccountMeta::new(env.payer.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(asset0_loser, false),
+                ],
+                &[],
+            )
+            .expect(label);
+        assert_cu_within(label, cu, CRANK_CU_LIMIT);
+    }
+    assert!(!has_active_leg_for_asset(
+        &env.portfolio_state(asset0_loser),
+        0
+    ));
+    let group_after_asset0 = env.market_state().1;
+    assert_eq!(
+        group_after_asset0.assets[0].mode_long,
+        SideModeV16::ResetPending,
+    );
+    assert_eq!(group_after_asset0.assets[0].oi_eff_long_q, 0);
+    assert_eq!(group_after_asset0.assets[0].oi_eff_short_q, 0);
+    assert!(
+        has_active_leg_for_asset(&env.portfolio_state(target), 0),
+        "the public liquidation leaves the winner's prior-reset obligation stored",
+    );
+
+    env.svm.warp_to_slot(3);
+    env.push_auth_mark_for_asset_as_admin(1, 3, 200);
+    let crank_target = |env: &mut V16CuEnv| {
+        env.svm.expire_blockhash();
+        env.send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 3,
+                observations: crank_observations(1),
+            },
+            vec![
+                AccountMeta::new(env.payer.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(target, false),
+            ],
+            &[],
+        )
+    };
+    let live_before = active_leg_for_asset(&env.portfolio_state(target), 1)
+        .basis_pos_q
+        .unsigned_abs();
+    let cleanup_cu = crank_target(&mut env)
+        .expect("a keeper must settle and detach the prior-reset obligation without the owner");
+    assert_cu_within(
+        "prior-reset obligation auto-cleanup",
+        cleanup_cu,
+        CRANK_CU_LIMIT,
+    );
+    let after_cleanup = env.portfolio_state(target);
+    assert!(
+        !has_active_leg_for_asset(&after_cleanup, 0),
+        "the inert asset-0 obligation no longer blocks reset finalization",
+    );
+    assert_eq!(
+        active_leg_for_asset(&after_cleanup, 1)
+            .basis_pos_q
+            .unsigned_abs(),
+        live_before,
+        "cleanup does not mutate the later live position",
+    );
+    assert!(
+        health_cert(&after_cleanup).certified_liq_deficit > 0,
+        "the remaining live asset is independently liquidatable",
+    );
+
+    let liquidation_cu = crank_target(&mut env)
+        .expect("the next keeper call must liquidate the remaining live asset");
+    assert_cu_within(
+        "post-reset-obligation live liquidation",
+        liquidation_cu,
+        CRANK_CU_LIMIT,
+    );
+    let live_after = if has_active_leg_for_asset(&env.portfolio_state(target), 1) {
+        active_leg_for_asset(&env.portfolio_state(target), 1)
+            .basis_pos_q
+            .unsigned_abs()
+    } else {
+        0
+    };
+    assert!(live_after < live_before);
+
+    let finalize_cu = env.finalize_reset_side_with_cu(0, 0);
+    assert_cu_within(
+        "permissionless finalization after obligation cleanup",
+        finalize_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    assert_eq!(
+        env.market_state().1.assets[0].mode_long,
+        SideModeV16::Normal,
+    );
+}
+
 #[test]
 fn v16_bpf_hybrid_mark_uses_ewma_after_hours_then_oracle_when_fresh() {
     let mut env = V16CuEnv::new();
@@ -29318,6 +29485,14 @@ fn v16_attack_reset_pending_rejects_fresh_counterparty_and_completes_recovery() 
             observations: Vec::new(),
         },
     );
+    let (_, group_after_cleanup) = env.market_state();
+    let reset_pending_after_cleanup = group_after_cleanup.assets[0];
+    assert_eq!(
+        reset_pending_after_cleanup.mode_long,
+        SideModeV16::ResetPending
+    );
+    assert_eq!(reset_pending_after_cleanup.stored_pos_count_long, 0);
+    assert!(!has_active_leg_for_asset(&env.portfolio_state(long), 0));
     let fresh_short_owner = Keypair::new();
     let fresh_short = env.create_portfolio(&fresh_short_owner);
     env.deposit(&fresh_short_owner, fresh_short, 20_000);
@@ -29352,13 +29527,11 @@ fn v16_attack_reset_pending_rejects_fresh_counterparty_and_completes_recovery() 
     assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
 
     let (_, group) = env.market_state();
-    assert_eq!(group.assets[0], reset_pending);
+    assert_eq!(group.assets[0], reset_pending_after_cleanup);
     assert!(percolator::active_bitmap_is_empty(active_bitmap(
         &env.portfolio_state(fresh_short)
     )));
 
-    let forfeit_cu = env.forfeit_recovery_leg_with_cu(&long_owner, long, 0, 1);
-    assert_cu_within("ForfeitRecoveryLeg", forfeit_cu, CUSTODY_CU_LIMIT);
     let finalize_cu = env.finalize_reset_side_with_cu(0, 0);
     assert_cu_within("FinalizeResetSide", finalize_cu, CUSTODY_CU_LIMIT);
     let (_, finalized) = env.market_state();
