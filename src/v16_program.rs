@@ -5206,7 +5206,7 @@ pub mod processor {
                 handle_convert_released_pnl(program_id, accounts, amount)
             }
             Instruction::CloseResolved { fee_rate_per_slot } => {
-                handle_close_resolved(program_id, accounts, fee_rate_per_slot)
+                handle_close_resolved(program_id, accounts, fee_rate_per_slot, true)
             }
             Instruction::UpdateAuthority { new_pubkey } => {
                 handle_update_authority(program_id, accounts, new_pubkey)
@@ -10240,6 +10240,7 @@ pub mod processor {
         program_id: &Pubkey,
         accounts: &'a [AccountInfo<'a>],
         _fee_rate_per_slot: u128,
+        require_payout_accounts: bool,
     ) -> ProgramResult {
         let owner = account(accounts, 0)?;
         let market_ai = account(accounts, 1)?;
@@ -10290,7 +10291,7 @@ pub mod processor {
             };
             (cfg, payout)
         };
-        if payout != 0 {
+        if require_payout_accounts || payout != 0 {
             let dest_token = account(accounts, 3)?;
             let vault_token = account(accounts, 4)?;
             let vault_authority_ai = account(accounts, 5)?;
@@ -10308,18 +10309,20 @@ pub mod processor {
                 &cfg_after,
             )?;
             verify_permissionless_payout_dest_token_account(dest_token)?;
-            let payout_u64 = amount_to_u64(payout)?;
-            require_token_balance(vault_token, payout_u64)?;
-            let bump_arr = [bump];
-            let signer_seeds: &[&[&[u8]]] = &[&[b"vault", market_ai.key.as_ref(), &bump_arr]];
-            transfer_tokens_signed(
-                token_program,
-                vault_token,
-                dest_token,
-                vault_authority_ai,
-                payout_u64,
-                signer_seeds,
-            )?;
+            if payout != 0 {
+                let payout_u64 = amount_to_u64(payout)?;
+                require_token_balance(vault_token, payout_u64)?;
+                let bump_arr = [bump];
+                let signer_seeds: &[&[&[u8]]] = &[&[b"vault", market_ai.key.as_ref(), &bump_arr]];
+                transfer_tokens_signed(
+                    token_program,
+                    vault_token,
+                    dest_token,
+                    vault_authority_ai,
+                    payout_u64,
+                    signer_seeds,
+                )?;
+            }
         }
         Ok(())
     }
@@ -10713,7 +10716,7 @@ pub mod processor {
         let (_, mode, max_market_slots, _) =
             state::read_market_config_mode_and_capacity(&market_ai.try_borrow_data()?)?;
         if mode == MarketModeV16::Resolved {
-            return handle_close_resolved(program_id, accounts, 0);
+            return handle_close_resolved(program_id, accounts, 0, false);
         }
         handle_permissionless_crank_zero_copy(
             program_id,

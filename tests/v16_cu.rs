@@ -2729,24 +2729,67 @@ impl V16CuEnv {
                 },
             )
             .unwrap();
-        let cu = self
-            .send(
+        let max_cu = self
+            .drive_close_resolved_with_cu(owner.pubkey(), portfolio, dest, self.vault)
+            .expect("close resolved");
+        (dest, max_cu)
+    }
+
+    fn drive_close_resolved_with_cu(
+        &mut self,
+        owner: Pubkey,
+        portfolio: Pubkey,
+        dest: Pubkey,
+        vault: Pubkey,
+    ) -> Result<u64, String> {
+        let max_steps = 3 * percolator::PORTFOLIO_SOURCE_DOMAIN_CAP
+            + 2 * percolator::V16_MAX_PORTFOLIO_ASSETS_N
+            + 16;
+        let mut max_cu = 0u64;
+        for _ in 0..max_steps {
+            let market_before = self.svm.get_account(&self.market).unwrap();
+            let portfolio_before = self.svm.get_account(&portfolio).unwrap();
+            self.svm.expire_blockhash();
+            let cu = self.send(
                 ProgInstruction::CloseResolved {
                     fee_rate_per_slot: 0,
                 },
                 vec![
-                    AccountMeta::new_readonly(owner.pubkey(), false),
+                    AccountMeta::new_readonly(owner, false),
                     AccountMeta::new(self.market, false),
                     AccountMeta::new(portfolio, false),
                     AccountMeta::new(dest, false),
-                    AccountMeta::new(self.vault, false),
+                    AccountMeta::new(vault, false),
                     AccountMeta::new_readonly(self.vault_authority, false),
                     AccountMeta::new_readonly(spl_token::ID, false),
                 ],
                 &[],
-            )
-            .expect("close resolved");
-        (dest, cu)
+            )?;
+            max_cu = max_cu.max(cu);
+
+            let state = self.portfolio_state(portfolio);
+            let terminal = state.capital.get() == 0
+                && state.pnl.get() == 0
+                && percolator::active_bitmap_is_empty(active_bitmap(&state))
+                && state
+                    .source_domains
+                    .iter()
+                    .all(|source| source.source_claim_bound_num.get() == 0)
+                && state.stale_state == 0
+                && state.b_stale_state == 0;
+            if terminal {
+                return Ok(max_cu);
+            }
+
+            let made_progress = self.svm.get_account(&self.market).unwrap() != market_before
+                || self.svm.get_account(&portfolio).unwrap() != portfolio_before;
+            if !made_progress {
+                // Another account still gates the global resolved payout. Let
+                // the caller advance that account before retrying this one.
+                return Ok(max_cu);
+            }
+        }
+        Err("resolved close exceeded its bounded progress rank".to_string())
     }
 
     fn top_up_insurance(&mut self, amount: u128) -> Pubkey {
@@ -18175,23 +18218,8 @@ fn v16_attack_resolved_payout_dual_mint_replay_extracts_nothing() {
     );
 
     let secondary_dest = env.token_account_for_mint(secondary, lo_owner.pubkey(), 0);
-    env.svm.expire_blockhash();
     let secondary_close_cu = env
-        .send(
-            ProgInstruction::CloseResolved {
-                fee_rate_per_slot: 0,
-            },
-            vec![
-                AccountMeta::new_readonly(lo_owner.pubkey(), false),
-                AccountMeta::new(env.market, false),
-                AccountMeta::new(lo, false),
-                AccountMeta::new(secondary_dest, false),
-                AccountMeta::new(secondary_vault, false),
-                AccountMeta::new_readonly(env.vault_authority, false),
-                AccountMeta::new_readonly(spl_token::ID, false),
-            ],
-            &[],
-        )
+        .drive_close_resolved_with_cu(lo_owner.pubkey(), lo, secondary_dest, secondary_vault)
         .expect("close resolved through secondary reserve");
     assert_cu_within(
         "CloseResolved secondary payout",
@@ -18550,22 +18578,8 @@ fn v16_attack_terminal_secondary_payouts_reject_noncanonical_vault() {
         "owner receives no payout from rejected non-canonical close"
     );
 
-    env.svm.expire_blockhash();
-    let accepted_close = env.send(
-        ProgInstruction::CloseResolved {
-            fee_rate_per_slot: 0,
-        },
-        vec![
-            AccountMeta::new_readonly(lo_owner.pubkey(), false),
-            AccountMeta::new(env.market, false),
-            AccountMeta::new(lo, false),
-            AccountMeta::new(secondary_dest, false),
-            AccountMeta::new(secondary_vault, false),
-            AccountMeta::new_readonly(env.vault_authority, false),
-            AccountMeta::new_readonly(spl_token::ID, false),
-        ],
-        &[],
-    );
+    let accepted_close =
+        env.drive_close_resolved_with_cu(lo_owner.pubkey(), lo, secondary_dest, secondary_vault);
     assert!(
         accepted_close.is_ok(),
         "canonical secondary CloseResolved still pays: {accepted_close:?}"
@@ -38595,6 +38609,265 @@ fn v16_attack_lapsed_live_source_backing_does_not_stale_loop_auto_crank() {
     let done = env.market_state().1;
     assert_eq!(done.vault, vault_before);
     assert_eq!(done.vault as u64, env.token_amount(env.vault));
+}
+
+// Public max-shape regression: ordinary trades can leave one winner with both
+// historical source domains for all 14 portfolio assets. Before the fix, both
+// fresh and lapsed backing variants exhausted the 1.4M-CU SVM ceiling forever.
+fn run_resolved_close_28_public_source_domains(close_slot: u64, expected_lapsed: usize) {
+    const N: u16 = 14;
+    const OPEN_PRICE: u64 = 100;
+    const HIGH_PRICE: u64 = 200;
+    const WINNER_CAPITAL: u128 = 100_000;
+    const LOSER_CAPITAL: u128 = 1_000;
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(N, 1_000, 1_000, 500);
+    for asset_index in 0..N {
+        env.configure_auth_mark_for_asset_as_admin(asset_index, 0, OPEN_PRICE);
+    }
+
+    let winner_owner = Keypair::new();
+    let winner = env.create_portfolio(&winner_owner);
+    env.deposit(&winner_owner, winner, WINNER_CAPITAL);
+    let keeper_owner = Keypair::new();
+    let keeper = env.create_portfolio(&keeper_owner);
+
+    let mut short_losers = Vec::new();
+    for asset_index in 0..N {
+        let owner = Keypair::new();
+        let portfolio = env.create_portfolio(&owner);
+        env.deposit(&owner, portfolio, LOSER_CAPITAL);
+        env.trade_asset_with_cu(
+            asset_index,
+            &winner_owner,
+            winner,
+            &owner,
+            portfolio,
+            POS_SCALE as i128,
+            OPEN_PRICE,
+            0,
+        );
+        short_losers.push((owner, portfolio));
+    }
+
+    env.svm.warp_to_slot(20);
+    for asset_index in 0..N {
+        env.push_auth_mark_for_asset_as_admin(asset_index, 20, HIGH_PRICE);
+        env.crank(
+            keeper,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 20,
+                observations: crank_observations(asset_index),
+            },
+        );
+    }
+    for (asset_index, (_, portfolio)) in short_losers.iter().enumerate() {
+        env.crank(
+            *portfolio,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 20,
+                observations: crank_observations(asset_index as u16),
+            },
+        );
+    }
+    env.crank(
+        winner,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 20,
+            observations: crank_observations(0),
+        },
+    );
+    assert_eq!(
+        env.portfolio_state(winner)
+            .source_domains
+            .iter()
+            .filter(|source| source.source_claim_bound_num.get() != 0)
+            .count(),
+        N as usize,
+        "the public long-winning cycle creates one odd source domain per asset",
+    );
+    for (asset_index, (owner, portfolio)) in short_losers.iter().enumerate() {
+        env.trade_asset_with_cu(
+            asset_index as u16,
+            &winner_owner,
+            winner,
+            owner,
+            *portfolio,
+            -((2 * POS_SCALE) as i128),
+            HIGH_PRICE,
+            0,
+        );
+    }
+    assert_eq!(
+        active_bitmap(&env.portfolio_state(winner))
+            .iter()
+            .map(|word| word.count_ones())
+            .sum::<u32>(),
+        N as u32,
+        "the risk-neutral flips keep one short leg per asset",
+    );
+
+    env.svm.warp_to_slot(40);
+    for asset_index in 0..N {
+        env.push_auth_mark_for_asset_as_admin(asset_index, 40, OPEN_PRICE);
+        env.crank(
+            keeper,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 40,
+                observations: crank_observations(asset_index),
+            },
+        );
+    }
+    for (asset_index, (_, portfolio)) in short_losers.iter().enumerate() {
+        env.crank(
+            *portfolio,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 40,
+                observations: crank_observations(asset_index as u16),
+            },
+        );
+    }
+    env.crank(
+        winner,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 40,
+            observations: crank_observations(0),
+        },
+    );
+    assert_eq!(
+        env.portfolio_state(winner)
+            .source_domains
+            .iter()
+            .filter(|source| source.source_claim_bound_num.get() != 0)
+            .count(),
+        (2 * N) as usize,
+        "the public short-winning cycle adds every even source domain",
+    );
+    for (asset_index, (owner, portfolio)) in short_losers.iter().enumerate() {
+        env.trade_asset_with_cu(
+            asset_index as u16,
+            &winner_owner,
+            winner,
+            owner,
+            *portfolio,
+            POS_SCALE as i128,
+            OPEN_PRICE,
+            0,
+        );
+    }
+    assert!(percolator::active_bitmap_is_empty(active_bitmap(
+        &env.portfolio_state(winner)
+    )));
+
+    let live = env.market_state().1;
+    for domain in 0..(2 * N) as usize {
+        assert_eq!(
+            live.source_backing_buckets[domain].status,
+            BackingBucketStatusV16::Fresh,
+        );
+    }
+    let lapsed_initial = live.source_backing_buckets[..(2 * N) as usize]
+        .iter()
+        .filter(|bucket| bucket.expiry_slot <= close_slot)
+        .count();
+    assert_eq!(lapsed_initial, expected_lapsed);
+    env.svm.warp_to_slot(close_slot);
+    env.resolve();
+    let dest = env.token_account_for_mint(env.mint, winner_owner.pubkey(), 0);
+    let internal_vault_before = env.market_state().1.vault;
+    let token_vault_before = env.token_amount(env.vault);
+    let dest_before = env.token_amount(dest);
+    let mut rank = 2 * N as usize + lapsed_initial;
+    let expected_calls = rank + 1;
+    let mut calls = 0usize;
+    let mut max_cu = 0u64;
+    loop {
+        let market_before = env.svm.get_account(&env.market).unwrap();
+        let winner_before = env.svm.get_account(&winner).unwrap();
+        let vault_before = env.token_amount(env.vault);
+        let destination_before = env.token_amount(dest);
+        env.svm.expire_blockhash();
+        let cu = env
+            .send(
+                ProgInstruction::CloseResolved {
+                    fee_rate_per_slot: 0,
+                },
+                vec![
+                    AccountMeta::new_readonly(winner_owner.pubkey(), false),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(winner, false),
+                    AccountMeta::new(dest, false),
+                    AccountMeta::new(env.vault, false),
+                    AccountMeta::new_readonly(env.vault_authority, false),
+                    AccountMeta::new_readonly(spl_token::ID, false),
+                ],
+                &[],
+            )
+            .expect("every bounded resolved-close continuation must land");
+        calls += 1;
+        max_cu = max_cu.max(cu);
+        assert!(
+            cu <= 1_000_000,
+            "bounded resolved-close continuation consumed {cu} CU",
+        );
+        let portfolio_after = env.portfolio_state(winner);
+        let source_claims_after = portfolio_after
+            .source_domains
+            .iter()
+            .filter(|source| source.source_claim_bound_num.get() != 0)
+            .count();
+        let market_after = env.market_state().1;
+        let lapsed_fresh_after = market_after.source_backing_buckets[..(2 * N) as usize]
+            .iter()
+            .filter(|bucket| {
+                bucket.status == BackingBucketStatusV16::Fresh && bucket.expiry_slot <= close_slot
+            })
+            .count();
+        let next_rank = source_claims_after + lapsed_fresh_after;
+        let closed = portfolio_after.capital.get() == 0
+            && portfolio_after.pnl.get() == 0
+            && source_claims_after == 0;
+        if closed {
+            assert_eq!(next_rank, 0);
+            break;
+        }
+        assert_eq!(
+            next_rank + 1,
+            rank,
+            "every successful continuation must strictly decrease the public terminal rank",
+        );
+        assert!(
+            env.svm.get_account(&env.market).unwrap() != market_before
+                || env.svm.get_account(&winner).unwrap() != winner_before,
+            "a nonterminal successful close must mutate its progress state",
+        );
+        assert_eq!(env.token_amount(env.vault), vault_before);
+        assert_eq!(env.token_amount(dest), destination_before);
+        rank = next_rank;
+        assert!(calls <= expected_calls);
+    }
+    assert_eq!(calls, expected_calls);
+    assert!(max_cu > 0);
+    let payout = env.token_amount(dest) - dest_before;
+    assert!(payout > 0);
+    assert_eq!(token_vault_before - env.token_amount(env.vault), payout);
+    assert_eq!(
+        internal_vault_before - env.market_state().1.vault,
+        payout as u128,
+    );
+    assert_eq!(
+        env.market_state().1.vault as u64,
+        env.token_amount(env.vault)
+    );
+}
+
+#[test]
+fn v16_attack_resolved_close_28_fresh_source_domains_makes_bounded_progress() {
+    run_resolved_close_28_public_source_domains(40, 0);
+}
+
+#[test]
+fn v16_attack_resolved_close_28_lapsed_source_domains_makes_bounded_progress() {
+    run_resolved_close_28_public_source_domains(200, 28);
 }
 
 // A deeply insolvent single-leg account cannot be partially liquidated while leaving uncovered open
