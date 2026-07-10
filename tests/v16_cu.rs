@@ -12777,6 +12777,155 @@ fn v16_bpf_hybrid_fresh_oracle_trade_devnet_difference_axes() {
     }
 }
 
+// A Recovery leg sorted before an unhealthy live leg must not poison auto-crank dispatch.
+#[test]
+fn v16_attack_recovery_first_leg_cannot_block_live_asset_liquidation() {
+    let mut params = production_risk_params();
+    params.max_portfolio_assets = 2;
+    let mut env = V16CuEnv::new_with_init_params(params);
+    env.configure_permissionless_resolve_with_cu(10_000, 1_000);
+    env.configure_auth_mark_for_asset_as_admin(0, 2, 1_000_000);
+    env.configure_auth_mark_for_asset_as_admin(1, 2, 1_000_000);
+
+    let target_owner = Keypair::new();
+    let asset0_counterparty_owner = Keypair::new();
+    let asset1_counterparty_owner = Keypair::new();
+    let target = env.create_portfolio(&target_owner);
+    let asset0_counterparty = env.create_portfolio(&asset0_counterparty_owner);
+    let asset1_counterparty = env.create_portfolio(&asset1_counterparty_owner);
+    env.deposit(&target_owner, target, 160_000);
+    env.deposit(&asset0_counterparty_owner, asset0_counterparty, 100_000_000);
+    env.deposit(&asset1_counterparty_owner, asset1_counterparty, 100_000_000);
+    env.trade_asset_with_cu(
+        0,
+        &target_owner,
+        target,
+        &asset0_counterparty_owner,
+        asset0_counterparty,
+        POS_SCALE as i128,
+        1_000_000,
+        0,
+    );
+    env.trade_asset_with_cu(
+        1,
+        &target_owner,
+        target,
+        &asset1_counterparty_owner,
+        asset1_counterparty,
+        -(2 * POS_SCALE as i128),
+        1_000_000,
+        0,
+    );
+
+    env.svm.warp_to_slot(3);
+    env.push_auth_mark_for_asset_as_admin(0, 3, 1_000_000);
+    let admin = env.admin.insecure_clone();
+    env.svm.expire_blockhash();
+    env.try_shutdown_asset_with_authority(&admin, 0, 3)
+        .expect("asset 0 enters Recovery while the cross-margin account is open");
+    assert_eq!(
+        env.market_state().1.assets[0].lifecycle,
+        AssetLifecycleV16::Recovery,
+    );
+
+    for slot in 3..=31u64 {
+        env.svm.warp_to_slot(slot);
+        env.push_auth_mark_for_asset_as_admin(1, slot, 2_000_000);
+        env.svm.expire_blockhash();
+        env.send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: slot,
+                observations: crank_observations(1),
+            },
+            vec![
+                AccountMeta::new(env.payer.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(asset1_counterparty, false),
+            ],
+            &[],
+        )
+        .expect("an account whose first leg is live can apply the asset-1 mark");
+    }
+    assert!(
+        env.market_state().1.assets[1].effective_price > 1_050_000,
+        "asset 1 moved enough to make the target short unhealthy",
+    );
+
+    let before_refresh = env.portfolio_state(target);
+    let recovery_basis_before = active_leg_for_asset(&before_refresh, 0).basis_pos_q;
+    let live_basis_before = active_leg_for_asset(&before_refresh, 1).basis_pos_q;
+    env.svm.expire_blockhash();
+    let refresh_cu = env
+        .send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 31,
+                observations: crank_observations(1),
+            },
+            vec![
+                AccountMeta::new(env.payer.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(target, false),
+            ],
+            &[],
+        )
+        .expect("the selector must skip the Recovery first leg and refresh on live asset 1");
+    assert_cu_within(
+        "mixed Recovery/live auto-crank refresh",
+        refresh_cu,
+        CRANK_CU_LIMIT,
+    );
+    let after_refresh = env.portfolio_state(target);
+    assert_eq!(
+        active_leg_for_asset(&after_refresh, 0).basis_pos_q,
+        recovery_basis_before,
+        "refresh leaves the Recovery leg present and unchanged",
+    );
+    assert_eq!(
+        active_leg_for_asset(&after_refresh, 1).basis_pos_q,
+        live_basis_before,
+        "the first step only refreshes the live leg",
+    );
+    assert!(
+        health_cert(&after_refresh).certified_liq_deficit > 0,
+        "the refreshed cross-margin account is liquidatable on live asset 1",
+    );
+
+    env.svm.expire_blockhash();
+    let liquidation_cu = env
+        .send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 31,
+                observations: crank_observations(1),
+            },
+            vec![
+                AccountMeta::new(env.payer.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(target, false),
+            ],
+            &[],
+        )
+        .expect("the next auto-crank must liquidate the dispatchable live leg");
+    assert_cu_within(
+        "mixed Recovery/live auto-crank liquidation",
+        liquidation_cu,
+        CRANK_CU_LIMIT,
+    );
+    let after_liquidation = env.portfolio_state(target);
+    let remaining = if has_active_leg_for_asset(&after_liquidation, 1) {
+        active_leg_for_asset(&after_liquidation, 1)
+            .basis_pos_q
+            .unsigned_abs()
+    } else {
+        0
+    };
+    assert!(remaining < live_basis_before.unsigned_abs());
+    assert_eq!(
+        active_leg_for_asset(&after_liquidation, 0).basis_pos_q,
+        recovery_basis_before,
+        "liquidating asset 1 does not mutate the Recovery asset-0 leg",
+    );
+}
+
 #[test]
 fn v16_bpf_hybrid_mark_uses_ewma_after_hours_then_oracle_when_fresh() {
     let mut env = V16CuEnv::new();
