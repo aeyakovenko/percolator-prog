@@ -142,14 +142,7 @@ fn kani_v16_init_market_decode_preserves_wire_fields() {
 fn kani_v16_amount_instructions_decode_preserves_wire_fields() {
     let tag: u8 = kani::any();
     kani::assume(
-        tag == 3
-            || tag == 4
-            || tag == 9
-            || tag == 28
-            || tag == 30
-            || tag == 41
-            || tag == 42
-            || tag == 47,
+        tag == 3 || tag == 4 || tag == 9 || tag == 28 || tag == 30 || tag == 41 || tag == 42,
     );
     let amount: u128 = kani::any();
 
@@ -172,9 +165,6 @@ fn kani_v16_amount_instructions_decode_preserves_wire_fields() {
                 optional_deposit: got,
             },
         ) => assert_eq!(got, amount),
-        (47, Instruction::RefineResolvedUnreceiptedBound { decrease_num }) => {
-            assert_eq!(decrease_num, amount)
-        }
         _ => unreachable!(),
     }
 }
@@ -1330,10 +1320,6 @@ fn kani_v16_resolved_recovery_payloads_reject_trailing_byte() {
         extra,
     );
     assert_rejects_trailing_byte(Instruction::ClaimResolvedPayoutTopup, extra);
-    assert_rejects_trailing_byte(
-        Instruction::RefineResolvedUnreceiptedBound { decrease_num: 1 },
-        extra,
-    );
     assert_rejects_trailing_byte(Instruction::ClosePortfolio, extra);
 }
 
@@ -1370,7 +1356,6 @@ fn kani_v16_unknown_or_truncated_tags_reject() {
     kani::assume(tag != 44);
     kani::assume(tag != 45);
     kani::assume(tag != 46);
-    kani::assume(tag != 47);
     kani::assume(tag != 48);
     kani::assume(tag != 49);
     kani::assume(tag != 50);
@@ -1383,6 +1368,16 @@ fn kani_v16_unknown_or_truncated_tags_reject() {
 
     let deposit_tag_only = [3u8];
     assert!(Instruction::decode(&deposit_tag_only).is_err());
+}
+
+#[kani::proof]
+fn kani_v16_refine_resolved_bound_tag_is_not_public() {
+    let decrease_num: u128 = kani::any();
+    let mut data = [0u8; 17];
+    data[0] = 47;
+    data[1..].copy_from_slice(&decrease_num.to_le_bytes());
+
+    assert!(Instruction::decode(&data).is_err());
 }
 
 #[kani::proof]

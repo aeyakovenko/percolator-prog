@@ -2627,9 +2627,6 @@ pub mod ix {
             side: u8,
         },
         ClaimResolvedPayoutTopup,
-        RefineResolvedUnreceiptedBound {
-            decrease_num: u128,
-        },
         SyncMaintenanceFee {
             now_slot: u64,
         },
@@ -2905,9 +2902,6 @@ pub mod ix {
                     side: read_u8(&mut rest)?,
                 },
                 46 => Self::ClaimResolvedPayoutTopup,
-                47 => Self::RefineResolvedUnreceiptedBound {
-                    decrease_num: read_u128(&mut rest)?,
-                },
                 48 => Self::SyncMaintenanceFee {
                     now_slot: read_u64(&mut rest)?,
                 },
@@ -3308,10 +3302,6 @@ pub mod ix {
                     out.push(side);
                 }
                 Self::ClaimResolvedPayoutTopup => out.push(46),
-                Self::RefineResolvedUnreceiptedBound { decrease_num } => {
-                    out.push(47);
-                    push_u128(&mut out, decrease_num);
-                }
                 Self::SyncMaintenanceFee { now_slot } => {
                     out.push(48);
                     push_u64(&mut out, now_slot);
@@ -5410,9 +5400,6 @@ pub mod processor {
             }
             Instruction::ClaimResolvedPayoutTopup => {
                 handle_claim_resolved_payout_topup(program_id, accounts)
-            }
-            Instruction::RefineResolvedUnreceiptedBound { decrease_num } => {
-                handle_refine_resolved_unreceipted_bound(program_id, accounts, decrease_num)
             }
             Instruction::SyncMaintenanceFee { now_slot } => {
                 handle_sync_maintenance_fee(program_id, accounts, now_slot)
@@ -9415,28 +9402,6 @@ pub mod processor {
         let (_cfg, mut group) = state::market_view_mut(&mut data)?;
         group
             .finalize_side_reset_not_atomic(asset_index as usize, side)
-            .map_err(map_v16_error)
-    }
-
-    #[inline(never)]
-    fn handle_refine_resolved_unreceipted_bound<'a>(
-        program_id: &Pubkey,
-        accounts: &'a [AccountInfo<'a>],
-        decrease_num: u128,
-    ) -> ProgramResult {
-        let admin = account(accounts, 0)?;
-        let market_ai = account(accounts, 1)?;
-        expect_signer(admin)?;
-        expect_writable(market_ai)?;
-        expect_owner(market_ai, program_id)?;
-        if decrease_num == 0 {
-            return Err(PercolatorError::InvalidInstruction.into());
-        }
-        let mut data = market_ai.try_borrow_mut_data()?;
-        let (cfg, mut group) = state::market_view_mut(&mut data)?;
-        expect_live_authority(&cfg.marketauth, admin.key)?;
-        group
-            .refine_resolved_unreceipted_bound_not_atomic(decrease_num)
             .map_err(map_v16_error)
     }
 
