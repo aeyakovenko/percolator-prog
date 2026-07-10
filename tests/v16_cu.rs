@@ -17606,29 +17606,38 @@ fn v16_attack_resolved_cross_margin_deep_insolvency_winds_down_publicly() {
     );
     env.resolve();
 
-    env.svm.expire_blockhash();
-    let loser_crank_cu = env
-        .send(
-            ProgInstruction::PermissionlessCrank {
-                now_slot: u64::MAX,
-                observations: vec![CrankObservationHint {
-                    asset_index: u16::MAX,
-                    oracle_accounts: u8::MAX,
-                }],
-            },
-            vec![
-                AccountMeta::new_readonly(victim_owner.pubkey(), false),
-                AccountMeta::new(env.market, false),
-                AccountMeta::new(victim, false),
-            ],
-            &[],
-        )
-        .expect("resolved deep cross-margin bad debt has public progress");
-    assert_cu_within(
-        "Resolved PermissionlessCrank unattributed bad debt",
-        loser_crank_cu,
-        CRANK_CU_LIMIT,
-    );
+    let mut active_legs = 2u32;
+    for _ in 0..2 {
+        env.svm.expire_blockhash();
+        let loser_crank_cu = env
+            .send(
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: u64::MAX,
+                    observations: vec![CrankObservationHint {
+                        asset_index: u16::MAX,
+                        oracle_accounts: u8::MAX,
+                    }],
+                },
+                vec![
+                    AccountMeta::new_readonly(victim_owner.pubkey(), false),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(victim, false),
+                ],
+                &[],
+            )
+            .expect("resolved deep cross-margin bad debt has public progress");
+        assert_cu_within(
+            "Resolved PermissionlessCrank unattributed bad debt",
+            loser_crank_cu,
+            CRANK_CU_LIMIT,
+        );
+        let next_active_legs = active_bitmap(&env.portfolio_state(victim))
+            .iter()
+            .map(|word| word.count_ones())
+            .sum::<u32>();
+        assert_eq!(next_active_legs + 1, active_legs);
+        active_legs = next_active_legs;
+    }
     let victim_after = env.portfolio_state(victim);
     assert_eq!(
         victim_after.capital.get(),
@@ -38614,7 +38623,12 @@ fn v16_attack_lapsed_live_source_backing_does_not_stale_loop_auto_crank() {
 // Public max-shape regression: ordinary trades can leave one winner with both
 // historical source domains for all 14 portfolio assets. Before the fix, both
 // fresh and lapsed backing variants exhausted the 1.4M-CU SVM ceiling forever.
-fn run_resolved_close_28_public_source_domains(close_slot: u64, expected_lapsed: usize) {
+fn run_resolved_close_28_public_source_domains(
+    close_slot: u64,
+    expected_lapsed: usize,
+    retain_active_legs: bool,
+    use_permissionless_crank: bool,
+) {
     const N: u16 = 14;
     const OPEN_PRICE: u64 = 100;
     const HIGH_PRICE: u64 = 200;
@@ -38742,21 +38756,31 @@ fn run_resolved_close_28_public_source_domains(close_slot: u64, expected_lapsed:
         (2 * N) as usize,
         "the public short-winning cycle adds every even source domain",
     );
-    for (asset_index, (owner, portfolio)) in short_losers.iter().enumerate() {
-        env.trade_asset_with_cu(
-            asset_index as u16,
-            &winner_owner,
-            winner,
-            owner,
-            *portfolio,
-            POS_SCALE as i128,
-            OPEN_PRICE,
-            0,
+    if !retain_active_legs {
+        for (asset_index, (owner, portfolio)) in short_losers.iter().enumerate() {
+            env.trade_asset_with_cu(
+                asset_index as u16,
+                &winner_owner,
+                winner,
+                owner,
+                *portfolio,
+                POS_SCALE as i128,
+                OPEN_PRICE,
+                0,
+            );
+        }
+        assert!(percolator::active_bitmap_is_empty(active_bitmap(
+            &env.portfolio_state(winner)
+        )));
+    } else {
+        assert_eq!(
+            active_bitmap(&env.portfolio_state(winner))
+                .iter()
+                .map(|word| word.count_ones())
+                .sum::<u32>(),
+            N as u32,
         );
     }
-    assert!(percolator::active_bitmap_is_empty(active_bitmap(
-        &env.portfolio_state(winner)
-    )));
 
     let live = env.market_state().1;
     for domain in 0..(2 * N) as usize {
@@ -38772,12 +38796,36 @@ fn run_resolved_close_28_public_source_domains(close_slot: u64, expected_lapsed:
     assert_eq!(lapsed_initial, expected_lapsed);
     env.svm.warp_to_slot(close_slot);
     env.resolve();
+    if retain_active_legs {
+        for (owner, portfolio) in &short_losers {
+            let dest = env.token_account_for_mint(env.mint, owner.pubkey(), 0);
+            env.drive_close_resolved_with_cu(owner.pubkey(), *portfolio, dest, env.vault)
+                .expect("publicly wind down losing counterparty before last winner");
+        }
+        assert_eq!(
+            active_bitmap(&env.portfolio_state(winner))
+                .iter()
+                .map(|word| word.count_ones())
+                .sum::<u32>(),
+            N as u32,
+            "winner remains the last max-shape active account",
+        );
+    }
     let dest = env.token_account_for_mint(env.mint, winner_owner.pubkey(), 0);
     let internal_vault_before = env.market_state().1.vault;
     let token_vault_before = env.token_amount(env.vault);
     let dest_before = env.token_amount(dest);
-    let mut rank = 2 * N as usize + lapsed_initial;
+    let active_legs_initial = active_bitmap(&env.portfolio_state(winner))
+        .iter()
+        .map(|word| word.count_ones() as usize)
+        .sum::<usize>();
+    let mut rank = 2 * N as usize + lapsed_initial + active_legs_initial;
     let expected_calls = rank + 1;
+    let continuation_cu_limit = if retain_active_legs {
+        1_300_000
+    } else {
+        1_000_000
+    };
     let mut calls = 0usize;
     let mut max_cu = 0u64;
     loop {
@@ -38786,11 +38834,19 @@ fn run_resolved_close_28_public_source_domains(close_slot: u64, expected_lapsed:
         let vault_before = env.token_amount(env.vault);
         let destination_before = env.token_amount(dest);
         env.svm.expire_blockhash();
+        let instruction = if use_permissionless_crank {
+            ProgInstruction::PermissionlessCrank {
+                now_slot: close_slot,
+                observations: crank_observations(0),
+            }
+        } else {
+            ProgInstruction::CloseResolved {
+                fee_rate_per_slot: 0,
+            }
+        };
         let cu = env
             .send(
-                ProgInstruction::CloseResolved {
-                    fee_rate_per_slot: 0,
-                },
+                instruction,
                 vec![
                     AccountMeta::new_readonly(winner_owner.pubkey(), false),
                     AccountMeta::new(env.market, false),
@@ -38806,7 +38862,7 @@ fn run_resolved_close_28_public_source_domains(close_slot: u64, expected_lapsed:
         calls += 1;
         max_cu = max_cu.max(cu);
         assert!(
-            cu <= 1_000_000,
+            cu <= continuation_cu_limit,
             "bounded resolved-close continuation consumed {cu} CU",
         );
         let portfolio_after = env.portfolio_state(winner);
@@ -38816,15 +38872,20 @@ fn run_resolved_close_28_public_source_domains(close_slot: u64, expected_lapsed:
             .filter(|source| source.source_claim_bound_num.get() != 0)
             .count();
         let market_after = env.market_state().1;
+        let active_legs_after = active_bitmap(&portfolio_after)
+            .iter()
+            .map(|word| word.count_ones() as usize)
+            .sum::<usize>();
         let lapsed_fresh_after = market_after.source_backing_buckets[..(2 * N) as usize]
             .iter()
             .filter(|bucket| {
                 bucket.status == BackingBucketStatusV16::Fresh && bucket.expiry_slot <= close_slot
             })
             .count();
-        let next_rank = source_claims_after + lapsed_fresh_after;
+        let next_rank = active_legs_after + source_claims_after + lapsed_fresh_after;
         let closed = portfolio_after.capital.get() == 0
             && portfolio_after.pnl.get() == 0
+            && active_legs_after == 0
             && source_claims_after == 0;
         if closed {
             assert_eq!(next_rank, 0);
@@ -38862,12 +38923,22 @@ fn run_resolved_close_28_public_source_domains(close_slot: u64, expected_lapsed:
 
 #[test]
 fn v16_attack_resolved_close_28_fresh_source_domains_makes_bounded_progress() {
-    run_resolved_close_28_public_source_domains(40, 0);
+    run_resolved_close_28_public_source_domains(40, 0, false, false);
 }
 
 #[test]
 fn v16_attack_resolved_close_28_lapsed_source_domains_makes_bounded_progress() {
-    run_resolved_close_28_public_source_domains(200, 28);
+    run_resolved_close_28_public_source_domains(200, 28, false, false);
+}
+
+#[test]
+fn v16_attack_resolved_close_14_active_legs_and_28_source_domains_is_bounded() {
+    run_resolved_close_28_public_source_domains(40, 0, true, false);
+}
+
+#[test]
+fn v16_attack_resolved_autocrank_14_active_legs_and_28_source_domains_is_bounded() {
+    run_resolved_close_28_public_source_domains(40, 0, true, true);
 }
 
 // A deeply insolvent single-leg account cannot be partially liquidated while leaving uncovered open
