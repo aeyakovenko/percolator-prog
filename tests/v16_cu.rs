@@ -28991,6 +28991,124 @@ fn v16_attack_finalize_reset_side_cannot_unlock_drain_only_modes() {
     );
 }
 
+#[test]
+fn v16_attack_reset_pending_rejects_fresh_counterparty_and_completes_recovery() {
+    let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+        initial_price: 1,
+        max_trading_fee_bps: 10,
+        max_bankrupt_close_lifetime_slots: 1,
+        public_b_chunk_atoms: 1,
+        maintenance_fee_per_slot: 20_000,
+        ..V16CuMarketParams::default()
+    });
+    let short_owner = Keypair::new();
+    let long_owner = Keypair::new();
+    let short = env.create_portfolio(&short_owner);
+    let long = env.create_portfolio(&long_owner);
+    env.deposit(&short_owner, short, 20_000);
+    env.deposit(&long_owner, long, 20_000);
+
+    let open_cu = env.trade_asset_with_cu(
+        0,
+        &long_owner,
+        long,
+        &short_owner,
+        short,
+        (10_000 * POS_SCALE) as i128,
+        1,
+        0,
+    );
+    assert_cu_within("normal risk-increasing trade", open_cu, TRADE_CU_LIMIT);
+    env.svm.warp_to_slot(1);
+    env.crank(
+        short,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 1,
+            observations: crank_observations(0),
+        },
+    );
+    env.sync_maintenance_fee_with_cu(short, None, 1);
+    env.crank_steps(
+        short,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 1,
+            observations: Vec::new(),
+        },
+        2,
+    );
+
+    let (_, group) = env.market_state();
+    let reset_pending = group.assets[0];
+    assert_eq!(reset_pending.lifecycle, AssetLifecycleV16::Active);
+    assert_eq!(reset_pending.mode_long, SideModeV16::ResetPending);
+    assert_eq!(reset_pending.oi_eff_long_q, 0);
+    assert_eq!(reset_pending.stored_pos_count_long, 1);
+
+    env.crank(
+        long,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 1,
+            observations: Vec::new(),
+        },
+    );
+    let fresh_short_owner = Keypair::new();
+    let fresh_short = env.create_portfolio(&fresh_short_owner);
+    env.deposit(&fresh_short_owner, fresh_short, 20_000);
+
+    env.svm.expire_blockhash();
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let long_before = env.svm.get_account(&long).unwrap();
+    let fresh_short_before = env.svm.get_account(&fresh_short).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    let rejected = env
+        .try_trade_asset_with_cu(
+            0,
+            &long_owner,
+            long,
+            &fresh_short_owner,
+            fresh_short,
+            (551 * POS_SCALE) as i128,
+            1,
+            0,
+        )
+        .expect_err("ResetPending side must reject a fresh counterparty risk increase");
+    assert!(
+        rejected.contains("Custom(21)") || rejected.contains("custom program error: 0x15"),
+        "fresh risk must fail specifically at the engine recovery gate, got {rejected}"
+    );
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+    assert_eq!(env.svm.get_account(&long).unwrap(), long_before);
+    assert_eq!(
+        env.svm.get_account(&fresh_short).unwrap(),
+        fresh_short_before
+    );
+    assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+
+    let (_, group) = env.market_state();
+    assert_eq!(group.assets[0], reset_pending);
+    assert!(percolator::active_bitmap_is_empty(active_bitmap(
+        &env.portfolio_state(fresh_short)
+    )));
+
+    let forfeit_cu = env.forfeit_recovery_leg_with_cu(&long_owner, long, 0, 1);
+    assert_cu_within("ForfeitRecoveryLeg", forfeit_cu, CUSTODY_CU_LIMIT);
+    let finalize_cu = env.finalize_reset_side_with_cu(0, 0);
+    assert_cu_within("FinalizeResetSide", finalize_cu, CUSTODY_CU_LIMIT);
+    let (_, finalized) = env.market_state();
+    assert_eq!(finalized.assets[0].mode_long, SideModeV16::Normal);
+    assert_eq!(finalized.assets[0].stored_pos_count_long, 0);
+    assert_eq!(finalized.assets[0].stored_pos_count_short, 0);
+    assert_eq!(finalized.assets[0].oi_eff_long_q, 0);
+    assert_eq!(finalized.assets[0].oi_eff_short_q, 0);
+
+    let fresh_dest = env.withdraw(&fresh_short_owner, fresh_short, 20_000);
+    assert_eq!(
+        env.token_amount(fresh_dest),
+        20_000,
+        "rejected counterparty retains fully withdrawable principal"
+    );
+}
+
 // security.md sweep — operation-sequence conservation (#32/#33 fuzz-lite): a long varied sequence of
 // deposits/trades/flips/price-moves/cranks/withdrawals must never drift the core invariants. Checks
 // real-vault==accounting, c_tot==Σcapitals, senior conservation, OI balance at every checkpoint.
