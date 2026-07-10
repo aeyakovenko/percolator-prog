@@ -2446,7 +2446,6 @@ pub mod ix {
         },
         PermissionlessCrank {
             now_slot: u64,
-            close_q: u128,
             observations: Vec<CrankObservationHint>,
         },
         TradeNoCpi {
@@ -2678,7 +2677,6 @@ pub mod ix {
                 },
                 5 => {
                     let now_slot = read_u64(&mut rest)?;
-                    let close_q = read_u128(&mut rest)?;
                     let n = read_u8(&mut rest)? as usize;
                     if n > CRANK_OBSERVATION_DECODE_MAX {
                         return Err(ProgramError::InvalidInstructionData);
@@ -2692,7 +2690,6 @@ pub mod ix {
                     }
                     Self::PermissionlessCrank {
                         now_slot,
-                        close_q,
                         observations,
                     }
                 }
@@ -2975,12 +2972,10 @@ pub mod ix {
                 }
                 Self::PermissionlessCrank {
                     now_slot,
-                    close_q,
                     ref observations,
                 } => {
                     out.push(5);
                     push_u64(&mut out, now_slot);
-                    push_u128(&mut out, close_q);
                     out.push(observations.len() as u8);
                     for observation in observations.iter() {
                         push_u16(&mut out, observation.asset_index);
@@ -5153,9 +5148,8 @@ pub mod processor {
             Instruction::Withdraw { amount } => handle_withdraw(program_id, accounts, amount),
             Instruction::PermissionlessCrank {
                 now_slot,
-                close_q,
                 observations,
-            } => handle_permissionless_crank(program_id, accounts, now_slot, close_q, observations),
+            } => handle_permissionless_crank(program_id, accounts, now_slot, observations),
             Instruction::TradeNoCpi {
                 asset_index,
                 size_q,
@@ -10359,7 +10353,6 @@ pub mod processor {
         portfolio_ai: &AccountInfo<'a>,
         tail: &[AccountInfo<'a>],
         now_slot: u64,
-        close_q: u128,
         observation_hints: &[ix::CrankObservationHint],
         max_market_slots: usize,
     ) -> ProgramResult {
@@ -10410,7 +10403,6 @@ pub mod processor {
                             AutoCrankWorkV16 {
                                 now_slot: authenticated_now_slot,
                                 observations: &[],
-                                liquidation_max_close_q: close_q,
                                 resolved_close_fee_rate_per_slot: 0,
                             },
                         )
@@ -10583,12 +10575,11 @@ pub mod processor {
                 AutoCrankWorkV16 {
                     now_slot: authenticated_now_slot,
                     observations: observations.as_slice(),
-                    liquidation_max_close_q: close_q,
                     resolved_close_fee_rate_per_slot: 0,
                 },
             ) {
                 Ok(result) => Some(result),
-                Err(V16Error::NonProgress) if !observations.is_empty() && close_q == 0 => None,
+                Err(V16Error::NonProgress) if !observations.is_empty() => None,
                 Err(err) => return Err(map_v16_error(err)),
             };
 
@@ -10666,7 +10657,6 @@ pub mod processor {
         program_id: &Pubkey,
         accounts: &'a [AccountInfo<'a>],
         now_slot: u64,
-        close_q: u128,
         observation_hints: Vec<ix::CrankObservationHint>,
     ) -> ProgramResult {
         let owner = account(accounts, 0)?;
@@ -10688,7 +10678,6 @@ pub mod processor {
             portfolio_ai,
             accounts.get(3..).unwrap_or(&[]),
             now_slot,
-            close_q,
             observation_hints.as_slice(),
             max_market_slots,
         )

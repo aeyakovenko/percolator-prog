@@ -3469,10 +3469,10 @@ impl V16CuEnv {
     }
 
     fn crank(&mut self, portfolio: Pubkey, ix: ProgInstruction) -> u64 {
-        let attempts = match ix {
-            ProgInstruction::PermissionlessCrank { close_q, .. } if close_q != 0 => 2,
-            _ => 1,
-        };
+        self.crank_steps(portfolio, ix, 1)
+    }
+
+    fn crank_steps(&mut self, portfolio: Pubkey, ix: ProgInstruction, attempts: usize) -> u64 {
         let mut max_cu = 0;
         let mut progressed = false;
         for _ in 0..attempts {
@@ -3506,12 +3506,10 @@ impl V16CuEnv {
         let ix = match ix {
             ProgInstruction::PermissionlessCrank {
                 now_slot,
-                close_q,
                 observations,
             } if observations.len() == 1 && !oracle_accounts.is_empty() => {
                 ProgInstruction::PermissionlessCrank {
                     now_slot,
-                    close_q,
                     observations: crank_observations_with_accounts(
                         observations[0].asset_index,
                         oracle_accounts.len() as u8,
@@ -3520,10 +3518,7 @@ impl V16CuEnv {
             }
             _ => ix,
         };
-        let attempts = match ix {
-            ProgInstruction::PermissionlessCrank { close_q, .. } if close_q != 0 => 2,
-            _ => 1,
-        };
+        let attempts = 1;
         let mut max_cu = 0;
         let mut progressed = false;
         for _ in 0..attempts {
@@ -4707,7 +4702,6 @@ fn v16_bpf_resolved_terminal_insurance_drains_dynamic_domain_after_positions_clo
         long_account,
         ProgInstruction::PermissionlessCrank {
             now_slot: 10,
-            close_q: 0,
             observations: crank_observations(1),
         },
     );
@@ -4889,7 +4883,6 @@ fn v16_bpf_permissionless_append_activation_uses_authenticated_slot() {
         cranker_portfolio,
         ProgInstruction::PermissionlessCrank {
             now_slot: 100,
-            close_q: 0,
             observations: crank_observations(0),
         },
     );
@@ -4953,7 +4946,6 @@ fn v16_bpf_permissionless_reuse_activation_uses_authenticated_slot() {
         cranker_portfolio,
         ProgInstruction::PermissionlessCrank {
             now_slot: 4,
-            close_q: 0,
             observations: crank_observations(0),
         },
     );
@@ -4985,7 +4977,6 @@ fn v16_bpf_privileged_retire_uses_authenticated_slot() {
         cranker_portfolio,
         ProgInstruction::PermissionlessCrank {
             now_slot: 3,
-            close_q: 0,
             observations: crank_observations(0),
         },
     );
@@ -5024,7 +5015,6 @@ fn v16_bpf_privileged_reactivate_uses_authenticated_slot() {
         cranker_portfolio,
         ProgInstruction::PermissionlessCrank {
             now_slot: 4,
-            close_q: 0,
             observations: crank_observations(0),
         },
     );
@@ -5444,7 +5434,6 @@ fn v16_bpf_permissionless_oracle_liquidation_uses_only_its_own_domain_insurance(
             long_account,
             ProgInstruction::PermissionlessCrank {
                 now_slot,
-                close_q: 0,
                 observations: crank_observations(3),
             },
         );
@@ -5459,13 +5448,13 @@ fn v16_bpf_permissionless_oracle_liquidation_uses_only_its_own_domain_insurance(
     assert_eq!(before_liq.insurance, 1_801);
 
     env.svm.warp_to_slot(7);
-    let liq_cu = env.crank(
+    let liq_cu = env.crank_steps(
         short_account,
         ProgInstruction::PermissionlessCrank {
             now_slot: 7,
-            close_q: 2 * POS_SCALE,
             observations: crank_observations(3),
         },
+        2,
     );
     println!("v16 permissionless malicious-oracle liquidation CU: {liq_cu}");
 
@@ -6831,7 +6820,6 @@ fn v16_bpf_perps_positive_smoke_cross_margin_pnl_convert_close_and_withdraw() {
             portfolio,
             ProgInstruction::PermissionlessCrank {
                 now_slot: 2,
-                close_q: 0,
                 observations: crank_observations(asset_index),
             },
         );
@@ -7001,7 +6989,6 @@ fn v16_bpf_cross_margin_positive_pnl_allows_trading_negative_leg_before_convert(
             portfolio,
             ProgInstruction::PermissionlessCrank {
                 now_slot: 2,
-                close_q: 0,
                 observations: crank_observations(asset_index),
             },
         );
@@ -7185,7 +7172,6 @@ fn run_source_credit_watermark_trade_case(
             portfolio,
             ProgInstruction::PermissionlessCrank {
                 now_slot: 2,
-                close_q: 0,
                 observations: crank_observations(asset_index),
             },
         );
@@ -7383,7 +7369,6 @@ fn v16_bpf_cross_margin_positive_pnl_allows_backed_risk_increase_on_negative_leg
             portfolio,
             ProgInstruction::PermissionlessCrank {
                 now_slot: 2,
-                close_q: 0,
                 observations: crank_observations(asset_index),
             },
         );
@@ -7605,7 +7590,6 @@ fn v16_bpf_permissionless_crank_computes_funding_from_internal_mark_premium() {
         long_account,
         ProgInstruction::PermissionlessCrank {
             now_slot: 1,
-            close_q: 0,
             observations: crank_observations(0),
         },
     );
@@ -7613,7 +7597,6 @@ fn v16_bpf_permissionless_crank_computes_funding_from_internal_mark_premium() {
         short_account,
         ProgInstruction::PermissionlessCrank {
             now_slot: 1,
-            close_q: 0,
             observations: crank_observations(0),
         },
     );
@@ -7632,7 +7615,6 @@ fn v16_bpf_permissionless_crank_computes_funding_from_internal_mark_premium() {
         long_account,
         ProgInstruction::PermissionlessCrank {
             now_slot: 2,
-            close_q: 0,
             observations: crank_observations(0),
         },
     );
@@ -7688,7 +7670,6 @@ fn v16_bpf_existing_funding_ledger_refreshes_and_converts_between_sides() {
         long_account,
         ProgInstruction::PermissionlessCrank {
             now_slot: 1,
-            close_q: 0,
             observations: crank_observations(0),
         },
     );
@@ -7705,7 +7686,6 @@ fn v16_bpf_existing_funding_ledger_refreshes_and_converts_between_sides() {
         short_account,
         ProgInstruction::PermissionlessCrank {
             now_slot: 1,
-            close_q: 0,
             observations: crank_observations(0),
         },
     );
@@ -7788,7 +7768,6 @@ fn v16_bpf_stale_asset_does_not_block_current_unrelated_trade() {
             cranker_portfolio,
             ProgInstruction::PermissionlessCrank {
                 now_slot: 3 + nonce,
-                close_q: 0,
                 observations: crank_observations(0),
             },
         );
@@ -7798,7 +7777,6 @@ fn v16_bpf_stale_asset_does_not_block_current_unrelated_trade() {
         cranker_portfolio,
         ProgInstruction::PermissionlessCrank {
             now_slot: 3,
-            close_q: 0,
             observations: crank_observations(1),
         },
     );
@@ -7910,7 +7888,6 @@ fn v16_bpf_trade_refreshes_stale_related_portfolio_leg_on_demand() {
         crank_long_account,
         ProgInstruction::PermissionlessCrank {
             now_slot: 1,
-            close_q: 0,
             observations: crank_observations(1),
         },
     );
@@ -8045,7 +8022,6 @@ fn v16_bpf_tradecpi_refreshes_stale_traded_portfolio_leg_on_demand() {
         crank_long_account,
         ProgInstruction::PermissionlessCrank {
             now_slot: 1,
-            close_q: 0,
             observations: crank_observations(1),
         },
     );
@@ -8501,7 +8477,6 @@ fn v16_bpf_underfunded_flat_sync_sweeps_remaining_capital_once() {
         fresh_long_portfolio,
         ProgInstruction::PermissionlessCrank {
             now_slot: 10,
-            close_q: 0,
             observations: crank_observations(0),
         },
     );
@@ -9064,13 +9039,13 @@ fn v16_bpf_permissionless_liquidation_is_bounded() {
 
     env.svm.warp_to_slot(1);
     env.push_ewma_mark_with_cu(1, 300);
-    let liquidation_cu = env.crank(
+    let liquidation_cu = env.crank_steps(
         short_account,
         ProgInstruction::PermissionlessCrank {
             now_slot: 1,
-            close_q: POS_SCALE,
             observations: crank_observations(0),
         },
+        2,
     );
     println!("v16 liquidation crank CU: {liquidation_cu}");
     assert!(
@@ -9086,7 +9061,17 @@ fn v16_bpf_permissionless_liquidation_is_bounded() {
     let short = state::read_portfolio(&short_data).unwrap();
     assert_eq!(group.slot_last, 1);
     assert_eq!(group.assets[0].effective_price, 200);
-    assert!(percolator::active_bitmap_is_empty(active_bitmap(&short)));
+    let remaining_q = if has_active_leg_for_asset(&short, 0) {
+        active_leg_for_asset(&short, 0).basis_pos_q.unsigned_abs()
+    } else {
+        0
+    };
+    assert!(remaining_q < POS_SCALE, "liquidation strictly reduces risk");
+    assert_eq!(
+        health_cert(&short).certified_liq_deficit,
+        0,
+        "engine-selected partial restores maintenance health"
+    );
 }
 
 #[test]
@@ -9118,7 +9103,6 @@ fn v16_bpf_tradenocpi_rejects_off_mark_recycle_when_deficit_cannot_settle() {
         probe,
         ProgInstruction::PermissionlessCrank {
             now_slot: 2,
-            close_q: 0,
             observations: crank_observations(0),
         },
     );
@@ -9127,7 +9111,6 @@ fn v16_bpf_tradenocpi_rejects_off_mark_recycle_when_deficit_cannot_settle() {
         probe,
         ProgInstruction::PermissionlessCrank {
             now_slot: 3,
-            close_q: 0,
             observations: crank_observations(0),
         },
     );
@@ -9199,7 +9182,6 @@ fn v16_bpf_tradecpi_rejects_off_mark_recycle_when_deficit_cannot_settle() {
         probe,
         ProgInstruction::PermissionlessCrank {
             now_slot: 2,
-            close_q: 0,
             observations: crank_observations(0),
         },
     );
@@ -9208,7 +9190,6 @@ fn v16_bpf_tradecpi_rejects_off_mark_recycle_when_deficit_cannot_settle() {
         probe,
         ProgInstruction::PermissionlessCrank {
             now_slot: 3,
-            close_q: 0,
             observations: crank_observations(0),
         },
     );
@@ -9286,7 +9267,6 @@ fn v16_bpf_tradenocpi_rejects_when_counterparty_starts_bankrupt() {
         probe,
         ProgInstruction::PermissionlessCrank {
             now_slot: 1,
-            close_q: 0,
             observations: crank_observations(0),
         },
     );
@@ -9359,7 +9339,6 @@ fn v16_bpf_tradecpi_rejects_when_counterparty_starts_bankrupt() {
         probe,
         ProgInstruction::PermissionlessCrank {
             now_slot: 1,
-            close_q: 0,
             observations: crank_observations(0),
         },
     );
@@ -9445,7 +9424,6 @@ fn v16_bpf_tradenocpi_rejects_when_both_counterparties_start_bankrupt() {
         long_account,
         ProgInstruction::PermissionlessCrank {
             now_slot: 1,
-            close_q: 0,
             observations: crank_observations(0),
         },
     );
@@ -9453,7 +9431,6 @@ fn v16_bpf_tradenocpi_rejects_when_both_counterparties_start_bankrupt() {
         short_account,
         ProgInstruction::PermissionlessCrank {
             now_slot: 1,
-            close_q: 0,
             observations: crank_observations(0),
         },
     );
@@ -9583,7 +9560,6 @@ fn v16_bpf_liquidatable_solvent_account_can_risk_reduce_without_insurance_drain(
         short_account,
         ProgInstruction::PermissionlessCrank {
             now_slot: 2,
-            close_q: 0,
             observations: crank_observations(0),
         },
     );
@@ -9592,7 +9568,6 @@ fn v16_bpf_liquidatable_solvent_account_can_risk_reduce_without_insurance_drain(
         short_account,
         ProgInstruction::PermissionlessCrank {
             now_slot: 3,
-            close_q: 0,
             observations: crank_observations(0),
         },
     );
@@ -9639,10 +9614,9 @@ fn v16_bpf_liquidatable_solvent_account_can_risk_reduce_without_insurance_drain(
     );
 }
 
-// Public auto-crank liveness sweep: helper-driven liquidation tests retry when close_q != 0, which can
-// hide whether a current liquidatable account makes progress in one public instruction. Start from a
-// solvent but under-margin account with a current health cert, then submit one bounded liquidation step
-// without observations. The instruction must execute and close no more than the keeper's work budget.
+// Public auto-crank liveness sweep: a current, solvent, under-margin account must make progress in one
+// public instruction without observations. The engine chooses a proper partial close and restores health;
+// the keeper has no liquidation-size input.
 #[test]
 fn v16_attack_auto_crank_current_solvent_partial_liquidation_makes_progress() {
     let mut env = V16CuEnv::new();
@@ -9672,7 +9646,6 @@ fn v16_attack_auto_crank_current_solvent_partial_liquidation_makes_progress() {
         short_account,
         ProgInstruction::PermissionlessCrank {
             now_slot: 2,
-            close_q: 0,
             observations: crank_observations(0),
         },
     );
@@ -9681,7 +9654,6 @@ fn v16_attack_auto_crank_current_solvent_partial_liquidation_makes_progress() {
         short_account,
         ProgInstruction::PermissionlessCrank {
             now_slot: 3,
-            close_q: 0,
             observations: crank_observations(0),
         },
     );
@@ -9699,7 +9671,6 @@ fn v16_attack_auto_crank_current_solvent_partial_liquidation_makes_progress() {
     let partial = env.send(
         ProgInstruction::PermissionlessCrank {
             now_slot: 3,
-            close_q: POS_SCALE,
             observations: vec![],
         },
         vec![
@@ -9719,12 +9690,17 @@ fn v16_attack_auto_crank_current_solvent_partial_liquidation_makes_progress() {
     let closed = oi_pre.saturating_sub(after_group.assets[0].oi_eff_short_q);
     assert!(closed > 0, "partial liquidation must reduce open interest");
     assert!(
-        closed <= POS_SCALE,
-        "partial liquidation closed at most close_q: closed={closed}"
+        closed < oi_pre,
+        "solvent liquidation should preserve the engine-selected remaining position: closed={closed}"
     );
     assert!(
         has_active_leg_for_asset(&after_short, 0),
         "partial close should leave the remaining position active"
+    );
+    assert_eq!(
+        health_cert(&after_short).certified_liq_deficit,
+        0,
+        "engine-selected partial close restores maintenance health"
     );
     assert_eq!(
         after_group.vault, before_group.vault,
@@ -9764,7 +9740,6 @@ fn v16_attack_stale_resolve_matured_no_observation_liquidation_rejects() {
         short_account,
         ProgInstruction::PermissionlessCrank {
             now_slot: 2,
-            close_q: 0,
             observations: crank_observations(0),
         },
     );
@@ -9773,7 +9748,6 @@ fn v16_attack_stale_resolve_matured_no_observation_liquidation_rejects() {
         short_account,
         ProgInstruction::PermissionlessCrank {
             now_slot: 3,
-            close_q: 0,
             observations: crank_observations(0),
         },
     );
@@ -9789,7 +9763,6 @@ fn v16_attack_stale_resolve_matured_no_observation_liquidation_rejects() {
     let result = env.send(
         ProgInstruction::PermissionlessCrank {
             now_slot: 40,
-            close_q: POS_SCALE,
             observations: vec![],
         },
         vec![
@@ -9860,7 +9833,6 @@ fn v16_attack_stale_resolve_matured_b_stale_cleanup_still_progresses() {
     let settle = env.send(
         ProgInstruction::PermissionlessCrank {
             now_slot: 40,
-            close_q: 0,
             observations: vec![],
         },
         vec![
@@ -9952,7 +9924,6 @@ fn v16_attack_budgeted_out_of_order_crank_refreshes_without_unearned_reward() {
         long,
         ProgInstruction::PermissionlessCrank {
             now_slot: OBS_SLOT,
-            close_q: 0,
             observations: crank_observations(1),
         },
     );
@@ -9973,7 +9944,6 @@ fn v16_attack_budgeted_out_of_order_crank_refreshes_without_unearned_reward() {
     let refreshed = env.send(
         ProgInstruction::PermissionlessCrank {
             now_slot: OBS_SLOT,
-            close_q: POS_SCALE,
             observations: crank_observations_with_accounts(0, 1),
         },
         vec![
@@ -10086,7 +10056,6 @@ fn v16_attack_auto_crank_refresh_not_blocked_by_unneeded_first_asset_oracle() {
         account_b,
         ProgInstruction::PermissionlessCrank {
             now_slot: REFRESH_SLOT,
-            close_q: 0,
             observations: crank_observations(1),
         },
     );
@@ -10101,7 +10070,6 @@ fn v16_attack_auto_crank_refresh_not_blocked_by_unneeded_first_asset_oracle() {
     let stale_asset0_attempt = env.send(
         ProgInstruction::PermissionlessCrank {
             now_slot: REFRESH_SLOT,
-            close_q: 0,
             observations: crank_observations_with_accounts(0, 1),
         },
         vec![
@@ -10121,7 +10089,6 @@ fn v16_attack_auto_crank_refresh_not_blocked_by_unneeded_first_asset_oracle() {
     let refresh = env.send(
         ProgInstruction::PermissionlessCrank {
             now_slot: REFRESH_SLOT,
-            close_q: 0,
             observations: vec![],
         },
         vec![
@@ -10240,7 +10207,6 @@ fn v16_attack_pending_selected_mark_requires_observation() {
         asset1_account,
         ProgInstruction::PermissionlessCrank {
             now_slot: CRANK_SLOT,
-            close_q: 0,
             observations: crank_observations(1),
         },
     );
@@ -10260,7 +10226,6 @@ fn v16_attack_pending_selected_mark_requires_observation() {
     let missing_selected_observation = env.send(
         ProgInstruction::PermissionlessCrank {
             now_slot: CRANK_SLOT,
-            close_q: 0,
             observations: vec![],
         },
         vec![
@@ -10289,7 +10254,6 @@ fn v16_attack_pending_selected_mark_requires_observation() {
     let observed = env.send(
         ProgInstruction::PermissionlessCrank {
             now_slot: CRANK_SLOT,
-            close_q: 0,
             observations: crank_observations(0),
         },
         vec![
@@ -10341,7 +10305,6 @@ fn v16_bpf_no_cranker_liquidation_rejects_invalid_final_market_shape() {
     let result = env.send(
         ProgInstruction::PermissionlessCrank {
             now_slot: 1,
-            close_q: POS_SCALE,
             observations: crank_observations(0),
         },
         vec![
@@ -10409,7 +10372,6 @@ fn v16_bpf_cranker_reward_liquidation_rejects_invalid_shape_without_paying_rewar
         &env.payer,
         ProgInstruction::PermissionlessCrank {
             now_slot: 1,
-            close_q: POS_SCALE,
             observations: crank_observations(0),
         },
         vec![
@@ -10463,7 +10425,6 @@ fn v16_bpf_full_14_leg_refresh_crank_is_under_tx_limit() {
         long_account,
         ProgInstruction::PermissionlessCrank {
             now_slot: 16,
-            close_q: 0,
             observations: crank_observations(0),
         },
     );
@@ -10504,13 +10465,13 @@ fn v16_bpf_full_14_leg_liquidation_crank_is_under_tx_limit() {
     env.force_portfolio_capital_for_benchmark(long_account, 1_000);
 
     env.svm.warp_to_slot(16);
-    let liquidation_cu = env.crank(
+    let liquidation_cu = env.crank_steps(
         long_account,
         ProgInstruction::PermissionlessCrank {
             now_slot: 16,
-            close_q: 10 * POS_SCALE,
             observations: crank_observations(0),
         },
+        2,
     );
     println!("v16 full-14-leg liquidation crank CU: {liquidation_cu}");
     const FULL_14_LEG_LIQUIDATION_CU_LIMIT: u64 = 1_375_000;
@@ -11954,7 +11915,6 @@ fn v16_cu_permissionless_crank_refresh_is_bounded() {
         portfolio,
         ProgInstruction::PermissionlessCrank {
             now_slot: 1,
-            close_q: 0,
             observations: crank_observations(0),
         },
     );
@@ -11976,7 +11936,6 @@ fn v16_bpf_permissionless_crank_uses_authenticated_clock_slot_not_caller_slot() 
         portfolio,
         ProgInstruction::PermissionlessCrank {
             now_slot: spoofed_slot,
-            close_q: 0,
             observations: crank_observations(0),
         },
     );
@@ -12135,7 +12094,6 @@ fn run_hybrid_fresh_oracle_trade_case(dt: u64, oracle_leg_count: u8, invert: u8)
         keeper_portfolio,
         ProgInstruction::PermissionlessCrank {
             now_slot: 2,
-            close_q: 0,
             observations: crank_observations(0),
         },
         &fresh_oracles,
@@ -12447,7 +12405,6 @@ fn run_hybrid_fresh_oracle_production_risk_trade_case(
         keeper_portfolio,
         ProgInstruction::PermissionlessCrank {
             now_slot: 2,
-            close_q: 0,
             observations: crank_observations(asset_index),
         },
         &[fresh_leg0, fresh_leg1, fresh_leg2],
@@ -12629,7 +12586,6 @@ fn v16_bpf_hybrid_mark_uses_ewma_after_hours_then_oracle_when_fresh() {
         keeper_portfolio,
         ProgInstruction::PermissionlessCrank {
             now_slot: 2,
-            close_q: 0,
             observations: crank_observations(0),
         },
         &[fresh_leg0, fresh_leg1, fresh_leg2],
@@ -12700,7 +12656,6 @@ fn v16_bpf_hybrid_mark_uses_ewma_after_hours_then_oracle_when_fresh() {
         keeper_portfolio,
         ProgInstruction::PermissionlessCrank {
             now_slot: 11,
-            close_q: 0,
             observations: crank_observations(0),
         },
         &[normal_leg0, normal_leg1, normal_leg2],
@@ -12838,7 +12793,6 @@ fn v16_bpf_auth_mark_target_effective_lag_counts_toward_liquidation_health() {
         long_portfolio,
         ProgInstruction::PermissionlessCrank {
             now_slot: 2,
-            close_q: 0,
             observations: crank_observations(0),
         },
     );
@@ -12867,18 +12821,30 @@ fn v16_bpf_auth_mark_target_effective_lag_counts_toward_liquidation_health() {
         "lagged adverse AuthMark target must make the under-margined long liquidatable"
     );
 
-    env.crank(
+    env.crank_steps(
         long_portfolio,
         ProgInstruction::PermissionlessCrank {
             now_slot: 2,
-            close_q: POS_SCALE,
             observations: crank_observations(0),
         },
+        2,
     );
     let liquidated_long = env.portfolio_state(long_portfolio);
+    let remaining_q = if has_active_leg_for_asset(&liquidated_long, 0) {
+        active_leg_for_asset(&liquidated_long, 0)
+            .basis_pos_q
+            .unsigned_abs()
+    } else {
+        0
+    };
     assert!(
-        !has_active_leg_for_asset(&liquidated_long, 0),
-        "positive lag-deficit certification must allow permissionless liquidation"
+        remaining_q < POS_SCALE,
+        "positive lag-deficit certification must allow risk-reducing liquidation"
+    );
+    assert_eq!(
+        health_cert(&liquidated_long).certified_liq_deficit,
+        0,
+        "engine-selected lag liquidation restores health"
     );
 }
 
@@ -12893,7 +12859,6 @@ fn v16_cu_crank_cost_is_account_local_after_many_portfolios() {
         portfolio,
         ProgInstruction::PermissionlessCrank {
             now_slot: 1,
-            close_q: 0,
             observations: crank_observations(0),
         },
     );
@@ -12909,7 +12874,6 @@ fn v16_cu_crank_cost_is_account_local_after_many_portfolios() {
         portfolio,
         ProgInstruction::PermissionlessCrank {
             now_slot: 2,
-            close_q: 0,
             observations: crank_observations(0),
         },
     );
@@ -13081,7 +13045,6 @@ fn v16_bpf_accounting_ledger_tags_are_bounded_and_update_state() {
         portfolio,
         ProgInstruction::PermissionlessCrank {
             now_slot: 0,
-            close_q: 0,
             observations: crank_observations(0),
         },
     );
@@ -13668,7 +13631,6 @@ fn run_backing_residual_counter_trade_path_case(path: BackingResidualCounterTrad
             account,
             ProgInstruction::PermissionlessCrank {
                 now_slot: 2,
-                close_q: 0,
                 observations: crank_observations(0),
             },
         );
@@ -15125,7 +15087,6 @@ fn v16_regression_mark_to_market_settles_conservation_under_price_move() {
         pa,
         ProgInstruction::PermissionlessCrank {
             now_slot: 10,
-            close_q: 0,
             observations: crank_observations(0),
         },
     );
@@ -15134,7 +15095,6 @@ fn v16_regression_mark_to_market_settles_conservation_under_price_move() {
         pb,
         ProgInstruction::PermissionlessCrank {
             now_slot: 10,
-            close_q: 0,
             observations: crank_observations(0),
         },
     );
@@ -15143,7 +15103,6 @@ fn v16_regression_mark_to_market_settles_conservation_under_price_move() {
         pa,
         ProgInstruction::PermissionlessCrank {
             now_slot: 11,
-            close_q: 0,
             observations: crank_observations(0),
         },
     );
@@ -15190,7 +15149,6 @@ fn v16_regression_profit_realization_roundtrip_conserves() {
         pa,
         ProgInstruction::PermissionlessCrank {
             now_slot: 10,
-            close_q: 0,
             observations: crank_observations(0),
         },
     );
@@ -15199,7 +15157,6 @@ fn v16_regression_profit_realization_roundtrip_conserves() {
         pb,
         ProgInstruction::PermissionlessCrank {
             now_slot: 10,
-            close_q: 0,
             observations: crank_observations(0),
         },
     );
@@ -15270,7 +15227,6 @@ fn v16_regression_profit_withdraw_no_value_printed() {
         pa,
         ProgInstruction::PermissionlessCrank {
             now_slot: 10,
-            close_q: 0,
             observations: crank_observations(0),
         },
     );
@@ -15279,7 +15235,6 @@ fn v16_regression_profit_withdraw_no_value_printed() {
         pb,
         ProgInstruction::PermissionlessCrank {
             now_slot: 10,
-            close_q: 0,
             observations: crank_observations(0),
         },
     );
@@ -15370,7 +15325,6 @@ fn v16_attack_permissionless_settle_b_is_bounded_and_live() {
         env.send(
             ProgInstruction::PermissionlessCrank {
                 now_slot: 1,
-                close_q: 0,
                 observations: crank_observations(0),
             },
             vec![
@@ -15491,7 +15445,6 @@ fn v16_attack_auto_crank_expired_close_recovery_not_blocked_by_stale_oracle() {
         .send(
             ProgInstruction::PermissionlessCrank {
                 now_slot: 0,
-                close_q: 0,
                 observations: crank_observations(0),
             },
             vec![
@@ -15556,7 +15509,6 @@ fn v16_attack_auto_crank_expired_close_uses_authenticated_slot_not_stale_market_
         .send(
             ProgInstruction::PermissionlessCrank {
                 now_slot: 40,
-                close_q: 0,
                 observations: crank_observations(0),
             },
             vec![
@@ -15697,7 +15649,6 @@ fn v16_attack_cross_margin_divergent_moves_conserve() {
                 let _ = env.send(
                     ProgInstruction::PermissionlessCrank {
                         now_slot: slot,
-                        close_q: 0,
                         observations: crank_observations(ai),
                     },
                     vec![
@@ -15808,7 +15759,6 @@ fn v16_attack_account_type_confusion_rejected() {
     let r3 = env.send(
         ProgInstruction::PermissionlessCrank {
             now_slot: 1,
-            close_q: 0,
             observations: crank_observations(0),
         },
         vec![
@@ -15858,7 +15808,6 @@ fn v16_attack_crank_raw_program_portfolio_realloc_rolls_back() {
     let rejected = env.send(
         ProgInstruction::PermissionlessCrank {
             now_slot: 1,
-            close_q: 0,
             observations: crank_observations(0),
         },
         vec![
@@ -15889,7 +15838,6 @@ fn v16_attack_crank_raw_program_portfolio_realloc_rolls_back() {
     let ok = env.send(
         ProgInstruction::PermissionlessCrank {
             now_slot: 1,
-            close_q: 0,
             observations: crank_observations(0),
         },
         vec![
@@ -16048,7 +15996,6 @@ fn v16_attack_public_helpers_cannot_use_market_as_portfolio_alias() {
     let crank = env.send(
         ProgInstruction::PermissionlessCrank {
             now_slot: 10,
-            close_q: 0,
             observations: crank_observations(0),
         },
         vec![
@@ -16143,7 +16090,6 @@ fn v16_attack_insolvency_bad_debt_is_socialized_not_printed() {
             let _ = env.send(
                 ProgInstruction::PermissionlessCrank {
                     now_slot: slot,
-                    close_q: 0,
                     observations: crank_observations(0),
                 },
                 vec![
@@ -16160,7 +16106,6 @@ fn v16_attack_insolvency_bad_debt_is_socialized_not_printed() {
     let _ = env.send(
         ProgInstruction::PermissionlessCrank {
             now_slot: 2,
-            close_q: POS_SCALE,
             observations: crank_observations(0),
         },
         vec![
@@ -16253,7 +16198,6 @@ fn v16_attack_insurance_backstop_absorbs_bad_debt_no_underflow() {
             let _ = env.send(
                 ProgInstruction::PermissionlessCrank {
                     now_slot: slot,
-                    close_q: 0,
                     observations: crank_observations(0),
                 },
                 vec![
@@ -16269,7 +16213,6 @@ fn v16_attack_insurance_backstop_absorbs_bad_debt_no_underflow() {
     let _ = env.send(
         ProgInstruction::PermissionlessCrank {
             now_slot: 2,
-            close_q: POS_SCALE,
             observations: crank_observations(0),
         },
         vec![
@@ -16339,7 +16282,6 @@ fn v16_attack_insolvent_loser_cannot_withdraw_to_escape() {
         let _ = env.send(
             ProgInstruction::PermissionlessCrank {
                 now_slot: slot,
-                close_q: 0,
                 observations: crank_observations(0),
             },
             vec![
@@ -16442,7 +16384,6 @@ fn v16_regression_premium_funding_settlement_conserves_vault() {
             let _ = env.send(
                 ProgInstruction::PermissionlessCrank {
                     now_slot: slot,
-                    close_q: 0,
                     observations: crank_observations(0),
                 },
                 vec![
@@ -16519,7 +16460,6 @@ fn v16_attack_convert_released_pnl_respects_caller_cap() {
         a,
         ProgInstruction::PermissionlessCrank {
             now_slot: 0,
-            close_q: 0,
             observations: crank_observations(0),
         },
     );
@@ -16552,7 +16492,6 @@ fn v16_attack_convert_released_pnl_respects_caller_cap() {
         b,
         ProgInstruction::PermissionlessCrank {
             now_slot: 0,
-            close_q: 0,
             observations: crank_observations(0),
         },
     );
@@ -16619,7 +16558,6 @@ fn v16_attack_convert_released_pnl_rejects_cross_market_portfolio_substitution()
         foreign,
         ProgInstruction::PermissionlessCrank {
             now_slot: 0,
-            close_q: 0,
             observations: crank_observations(0),
         },
     );
@@ -16654,7 +16592,6 @@ fn v16_attack_convert_released_pnl_rejects_cross_market_portfolio_substitution()
         local,
         ProgInstruction::PermissionlessCrank {
             now_slot: 0,
-            close_q: 0,
             observations: crank_observations(0),
         },
     );
@@ -16826,7 +16763,6 @@ fn v16_regression_cross_margin_insolvency_no_value_extraction() {
                 let _ = env.send(
                     ProgInstruction::PermissionlessCrank {
                         now_slot: slot,
-                        close_q: 0,
                         observations: crank_observations(ai),
                     },
                     vec![
@@ -16843,7 +16779,6 @@ fn v16_regression_cross_margin_insolvency_no_value_extraction() {
     // return recovery-required and roll back, not partially apply a value-creating close.
     let close_ix = ProgInstruction::PermissionlessCrank {
         now_slot: 2,
-        close_q: POS_SCALE,
         observations: crank_observations(0),
     };
     let close_accounts = vec![
@@ -17053,7 +16988,6 @@ fn v16_attack_resolved_cross_margin_deep_insolvency_winds_down_publicly() {
                 let _ = env.send(
                     ProgInstruction::PermissionlessCrank {
                         now_slot: slot,
-                        close_q: 0,
                         observations: crank_observations(ai),
                     },
                     vec![
@@ -17074,7 +17008,6 @@ fn v16_attack_resolved_cross_margin_deep_insolvency_winds_down_publicly() {
                 let _ = env.send(
                     ProgInstruction::PermissionlessCrank {
                         now_slot: 2,
-                        close_q: 0,
                         observations: crank_observations(ai),
                     },
                     vec![
@@ -17105,7 +17038,6 @@ fn v16_attack_resolved_cross_margin_deep_insolvency_winds_down_publicly() {
         .send(
             ProgInstruction::PermissionlessCrank {
                 now_slot: u64::MAX,
-                close_q: u128::MAX,
                 observations: vec![CrankObservationHint {
                     asset_index: u16::MAX,
                     oracle_accounts: u8::MAX,
@@ -17192,7 +17124,6 @@ fn v16_regression_resolved_open_positions_recover_fairly_order_robust() {
             let _ = env.send(
                 ProgInstruction::PermissionlessCrank {
                     now_slot: slot,
-                    close_q: 0,
                     observations: crank_observations(0),
                 },
                 vec![
@@ -17464,7 +17395,6 @@ fn v16_attack_crank_future_now_slot_does_not_overaccrue() {
         let _ = env.send(
             ProgInstruction::PermissionlessCrank {
                 now_slot: LIE,
-                close_q: 0,
                 observations: crank_observations(0),
             },
             vec![
@@ -17538,7 +17468,6 @@ fn v16_attack_resolved_payout_replay_extracts_nothing() {
             let _ = env.send(
                 ProgInstruction::PermissionlessCrank {
                     now_slot: slot,
-                    close_q: 0,
                     observations: crank_observations(0),
                 },
                 vec![
@@ -17690,7 +17619,6 @@ fn v16_attack_resolved_payout_dual_mint_replay_extracts_nothing() {
             let _ = env.send(
                 ProgInstruction::PermissionlessCrank {
                     now_slot: slot,
-                    close_q: 0,
                     observations: crank_observations(0),
                 },
                 vec![
@@ -18020,7 +17948,6 @@ fn v16_attack_terminal_secondary_payouts_reject_noncanonical_vault() {
             let _ = env.send(
                 ProgInstruction::PermissionlessCrank {
                     now_slot: slot,
-                    close_q: 0,
                     observations: crank_observations(0),
                 },
                 vec![
@@ -18553,7 +18480,6 @@ fn v16_attack_extreme_auth_mark_push_rejected_or_safe() {
         let _ = env.send(
             ProgInstruction::PermissionlessCrank {
                 now_slot: 5,
-                close_q: 0,
                 observations: crank_observations(0),
             },
             vec![
@@ -18846,7 +18772,6 @@ fn v16_regression_crank_idempotent_at_settlement_fixed_point() {
         let _ = env.send(
             ProgInstruction::PermissionlessCrank {
                 now_slot: slot,
-                close_q: 0,
                 observations: crank_observations(0),
             },
             vec![
@@ -19143,11 +19068,10 @@ fn v16_attack_batch_subatom_fee_reconstruction_uses_ceil_notional() {
     );
 }
 
-// security.md sweep — over-liquidation (#2): liquidating a bankrupt account with close_q FAR larger
-// than its position must clamp to the actual size — never over-close into phantom OI, negative OI,
-// or manufactured value. Attacker success = excess close_q creating value / corrupting OI.
+// Engine-selected liquidation of a bankrupt account can never over-close into phantom OI or create
+// value. The public instruction carries no liquidation quantity.
 #[test]
-fn v16_attack_over_liquidation_clamps_to_position() {
+fn v16_engine_selected_liquidation_cannot_overclose_or_create_value() {
     let mut env = V16CuEnv::new();
     let long_owner = Keypair::new();
     let short_owner = Keypair::new();
@@ -19172,7 +19096,6 @@ fn v16_attack_over_liquidation_clamps_to_position() {
         let _ = env.send(
             ProgInstruction::PermissionlessCrank {
                 now_slot: slot,
-                close_q: 0,
                 observations: crank_observations(0),
             },
             vec![
@@ -19185,43 +19108,24 @@ fn v16_attack_over_liquidation_clamps_to_position() {
     }
     let (_, g_pre) = env.market_state();
     let oi_pre = g_pre.assets[0].oi_eff_long_q;
-    // liquidate with a grossly excessive close_q (1000x the position, and again u128::MAX-ish).
-    for cq in [POS_SCALE * 1_000, u128::MAX / 2] {
-        env.svm.expire_blockhash();
-        let _ = env.send(
-            ProgInstruction::PermissionlessCrank {
-                now_slot: 2,
-                close_q: cq,
-                observations: crank_observations(0),
-            },
-            vec![
-                AccountMeta::new(env.payer.pubkey(), true),
-                AccountMeta::new(env.market, false),
-                AccountMeta::new(short_account, false),
-            ],
-            &[],
-        );
-        let (_, g) = env.market_state();
-        // OI never goes negative / never exceeds the original (no phantom from excess close_q).
-        assert!(
-            g.assets[0].oi_eff_short_q <= oi_pre,
-            "short OI clamped (no phantom), got {} pre {}",
-            g.assets[0].oi_eff_short_q,
-            oi_pre
-        );
-        assert!(
-            g.assets[0].oi_eff_long_q <= oi_pre,
-            "long OI not inflated by over-liquidation"
-        );
-        assert_eq!(
-            g.vault, 1_000_250,
-            "vault unchanged by liquidation (internal), no value created"
-        );
-        assert!(
-            g.vault >= g.c_tot + g.insurance,
-            "senior conservation under over-liquidation"
-        );
-    }
+    env.svm.expire_blockhash();
+    let _ = env.send(
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 2,
+            observations: crank_observations(0),
+        },
+        vec![
+            AccountMeta::new(env.payer.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(short_account, false),
+        ],
+        &[],
+    );
+    let (_, g) = env.market_state();
+    assert!(g.assets[0].oi_eff_short_q <= oi_pre, "short OI never grows");
+    assert!(g.assets[0].oi_eff_long_q <= oi_pre, "long OI never grows");
+    assert_eq!(g.vault, 1_000_250, "liquidation creates no vault value");
+    assert!(g.vault >= g.c_tot + g.insurance, "senior conservation");
     // the short is fully closed (position gone), not over-closed into a phantom opposite position.
     let sh = state::read_portfolio(&env.svm.get_account(&short_account).unwrap().data).unwrap();
     assert!(
@@ -19273,7 +19177,6 @@ fn v16_attack_extreme_premium_funding_is_capped() {
                 let _ = env.send(
                     ProgInstruction::PermissionlessCrank {
                         now_slot: slot,
-                        close_q: 0,
                         observations: crank_observations(0),
                     },
                     vec![
@@ -19381,7 +19284,6 @@ fn v16_attack_cross_margin_solvent_account_not_unfairly_liquidated() {
                 let _ = env.send(
                     ProgInstruction::PermissionlessCrank {
                         now_slot: slot,
-                        close_q: 0,
                         observations: crank_observations(ai),
                     },
                     vec![
@@ -19402,7 +19304,6 @@ fn v16_attack_cross_margin_solvent_account_not_unfairly_liquidated() {
     let _ = env.send(
         ProgInstruction::PermissionlessCrank {
             now_slot: 11,
-            close_q: POS_SCALE,
             observations: crank_observations(1),
         },
         vec![
@@ -19448,7 +19349,6 @@ fn v16_attack_convert_then_withdraw_pays_exactly_backed_amount() {
         p,
         ProgInstruction::PermissionlessCrank {
             now_slot: 0,
-            close_q: 0,
             observations: crank_observations(0),
         },
     );
@@ -22471,7 +22371,6 @@ fn v16_attack_out_of_range_asset_index_rejected() {
         let rc = env.send(
             ProgInstruction::PermissionlessCrank {
                 now_slot: 1,
-                close_q: 0,
                 observations: crank_observations(bad),
             },
             vec![
@@ -24667,7 +24566,6 @@ fn v16_attack_pnl_pos_tot_consistent_through_sign_flips() {
             let _ = env.send(
                 ProgInstruction::PermissionlessCrank {
                     now_slot: slot,
-                    close_q: 0,
                     observations: crank_observations(0),
                 },
                 vec![
@@ -25366,7 +25264,6 @@ fn v16_attack_funding_direction_mark_below_index_conserves() {
             let _ = env.send(
                 ProgInstruction::PermissionlessCrank {
                     now_slot: slot,
-                    close_q: 0,
                     observations: crank_observations(0),
                 },
                 vec![
@@ -25749,7 +25646,7 @@ fn v16_regression_roundtrip_recovers_fully_at_resolution() {
         lo,
         &sh_owner,
         sh,
-        (10_000 * POS_SCALE) as i128,
+        (1_000 * POS_SCALE) as i128,
         100,
         0,
     );
@@ -25759,7 +25656,6 @@ fn v16_regression_roundtrip_recovers_fully_at_resolution() {
             let _ = env.send(
                 ProgInstruction::PermissionlessCrank {
                     now_slot: s,
-                    close_q: 0,
                     observations: crank_observations(0),
                 },
                 vec![
@@ -25792,7 +25688,7 @@ fn v16_regression_roundtrip_recovers_fully_at_resolution() {
         lo,
         &sh_owner,
         sh,
-        -(10_000 * POS_SCALE as i128),
+        -(1_000 * POS_SCALE as i128),
         100,
         0,
     );
@@ -25931,7 +25827,6 @@ fn v16_attack_mark_push_clamped_per_slot() {
         let _ = env.send(
             ProgInstruction::PermissionlessCrank {
                 now_slot: slot,
-                close_q: 0,
                 observations: crank_observations(0),
             },
             vec![
@@ -26404,7 +26299,6 @@ fn v16_attack_healthy_account_not_liquidatable() {
     let _ = env.send(
         ProgInstruction::PermissionlessCrank {
             now_slot: 1,
-            close_q: POS_SCALE,
             observations: crank_observations(0),
         },
         vec![
@@ -26480,7 +26374,6 @@ fn v16_attack_permissionless_resolve_rejects_fresh_market() {
     let _ = env2.send(
         ProgInstruction::PermissionlessCrank {
             now_slot: 3,
-            close_q: 0,
             observations: crank_observations(0),
         },
         vec![
@@ -26610,7 +26503,6 @@ fn v16_attack_stale_permissionless_asset_cannot_global_resolve_market() {
         cranker_portfolio,
         ProgInstruction::PermissionlessCrank {
             now_slot: 3,
-            close_q: 0,
             observations: crank_observations(0),
         },
     );
@@ -26891,7 +26783,6 @@ fn v16_attack_permissionless_asset_crank_rejects_after_base_resolve_matured() {
     let fresh_crank = env.send(
         ProgInstruction::PermissionlessCrank {
             now_slot: 7,
-            close_q: 0,
             observations: crank_observations(1),
         },
         vec![
@@ -26913,7 +26804,6 @@ fn v16_attack_permissionless_asset_crank_rejects_after_base_resolve_matured() {
     let stale_crank = env.send(
         ProgInstruction::PermissionlessCrank {
             now_slot: 8,
-            close_q: 0,
             observations: crank_observations(1),
         },
         vec![
@@ -29081,7 +28971,6 @@ fn v16_attack_long_sequence_conservation() {
             let _ = env.send(
                 ProgInstruction::PermissionlessCrank {
                     now_slot: slot,
-                    close_q: 0,
                     observations: crank_observations(0),
                 },
                 vec![
@@ -29120,7 +29009,6 @@ fn v16_attack_long_sequence_conservation() {
             let _ = env.send(
                 ProgInstruction::PermissionlessCrank {
                     now_slot: slot,
-                    close_q: 0,
                     observations: crank_observations(0),
                 },
                 vec![
@@ -29204,7 +29092,6 @@ fn v16_attack_cross_margin_divergent_close_conserves() {
                 let _ = env.send(
                     ProgInstruction::PermissionlessCrank {
                         now_slot: slot,
-                        close_q: 0,
                         observations: crank_observations(ai),
                     },
                     vec![
@@ -29276,7 +29163,6 @@ fn v16_attack_maintenance_fee_with_open_position_conserves() {
         let _ = env.send(
             ProgInstruction::PermissionlessCrank {
                 now_slot: slot,
-                close_q: 0,
                 observations: crank_observations(0),
             },
             vec![
@@ -29368,7 +29254,6 @@ fn v16_attack_deposit_with_parked_pnl_clean() {
             let _ = env.send(
                 ProgInstruction::PermissionlessCrank {
                     now_slot: slot,
-                    close_q: 0,
                     observations: crank_observations(0),
                 },
                 vec![
@@ -30930,7 +30815,6 @@ fn v16_attack_permissionless_crank_rejects_cross_market_target_portfolio() {
     let rejected = env.send(
         ProgInstruction::PermissionlessCrank {
             now_slot: 5,
-            close_q: 0,
             observations: crank_observations(0),
         },
         vec![
@@ -30962,7 +30846,6 @@ fn v16_attack_permissionless_crank_rejects_cross_market_target_portfolio() {
         &env.payer,
         ProgInstruction::PermissionlessCrank {
             now_slot: 5,
-            close_q: 0,
             observations: crank_observations(0),
         },
         vec![
@@ -30991,9 +30874,8 @@ fn v16_attack_permissionless_crank_rejects_cross_market_target_portfolio() {
     );
 }
 
-// security.md sweep — partial liquidation exactness (#2/#33): liquidating with close_q < the position
-// must reduce the position by at most close_q (no over-close), conserve value (vault unchanged,
-// accounting==real), and never create value. Complements over-liquidation (batch 35).
+// Engine-selected liquidation must reduce no more than the live position and conserve value. The
+// keeper supplies no quantity, so repeated minimum-fee chunk selection is not representable.
 #[test]
 fn v16_attack_partial_liquidation_bounded_and_conserves() {
     let mut env = V16CuEnv::new();
@@ -31020,7 +30902,6 @@ fn v16_attack_partial_liquidation_bounded_and_conserves() {
         let _ = env.send(
             ProgInstruction::PermissionlessCrank {
                 now_slot: slot,
-                close_q: 0,
                 observations: crank_observations(0),
             },
             vec![
@@ -31033,12 +30914,10 @@ fn v16_attack_partial_liquidation_bounded_and_conserves() {
     }
     let (_, g_pre) = env.market_state();
     let oi_pre = g_pre.assets[0].oi_eff_short_q;
-    // partial liquidation: close only HALF (POS_SCALE/2) of the POS_SCALE position.
     env.svm.expire_blockhash();
     let _ = env.send(
         ProgInstruction::PermissionlessCrank {
             now_slot: 2,
-            close_q: POS_SCALE / 2,
             observations: crank_observations(0),
         },
         vec![
@@ -31049,13 +30928,8 @@ fn v16_attack_partial_liquidation_bounded_and_conserves() {
         &[],
     );
     let (_, g_post) = env.market_state();
-    // OI reduced by AT MOST close_q (bounded; the engine may close less if that resolves things).
     let closed = oi_pre.saturating_sub(g_post.assets[0].oi_eff_short_q);
-    assert!(
-        closed <= POS_SCALE / 2,
-        "partial liquidation closed at most close_q (no over-close): closed={}",
-        closed
-    );
+    assert!(closed <= oi_pre, "engine cannot close more than live OI");
     assert!(
         g_post.assets[0].oi_eff_short_q <= oi_pre,
         "OI never increased"
@@ -31102,7 +30976,6 @@ fn v16_attack_insurance_makes_winner_whole_at_resolution() {
             let _ = env.send(
                 ProgInstruction::PermissionlessCrank {
                     now_slot: slot,
-                    close_q: 0,
                     observations: crank_observations(0),
                 },
                 vec![
@@ -31119,7 +30992,6 @@ fn v16_attack_insurance_makes_winner_whole_at_resolution() {
         sh,
         ProgInstruction::PermissionlessCrank {
             now_slot: 2,
-            close_q: POS_SCALE,
             observations: crank_observations(0),
         },
     );
@@ -31194,7 +31066,6 @@ fn v16_attack_funding_and_fee_combined_conserve() {
             let _ = env.send(
                 ProgInstruction::PermissionlessCrank {
                     now_slot: slot,
-                    close_q: 0,
                     observations: crank_observations(0),
                 },
                 vec![
@@ -31839,7 +31710,6 @@ fn v16_attack_convert_bounded_by_available_backing() {
         p,
         ProgInstruction::PermissionlessCrank {
             now_slot: 0,
-            close_q: 0,
             observations: crank_observations(0),
         },
     );
@@ -32068,7 +31938,6 @@ fn v16_attack_max_leg_multi_asset_conserves() {
         let _ = env.send(
             ProgInstruction::PermissionlessCrank {
                 now_slot: 5,
-                close_q: 0,
                 observations: crank_observations(ai),
             },
             vec![
@@ -32198,7 +32067,6 @@ fn v16_attack_sequence_with_liquidation_conserves() {
         let _ = env.send(
             ProgInstruction::PermissionlessCrank {
                 now_slot: slot,
-                close_q: 0,
                 observations: crank_observations(0),
             },
             vec![
@@ -32215,7 +32083,6 @@ fn v16_attack_sequence_with_liquidation_conserves() {
         pthin,
         ProgInstruction::PermissionlessCrank {
             now_slot: 2,
-            close_q: POS_SCALE,
             observations: crank_observations(0),
         },
     );
@@ -32226,7 +32093,6 @@ fn v16_attack_sequence_with_liquidation_conserves() {
     let _ = env.send(
         ProgInstruction::PermissionlessCrank {
             now_slot: 3,
-            close_q: 0,
             observations: crank_observations(0),
         },
         vec![
@@ -32286,7 +32152,6 @@ fn v16_attack_ewma_mark_halflife_zero_safe() {
                 let _ = env.send(
                     ProgInstruction::PermissionlessCrank {
                         now_slot: slot,
-                        close_q: 0,
                         observations: crank_observations(0),
                     },
                     vec![
@@ -32767,7 +32632,6 @@ fn v16_attack_per_asset_crank_isolation() {
             let _ = env.send(
                 ProgInstruction::PermissionlessCrank {
                     now_slot: slot,
-                    close_q: 0,
                     observations: crank_observations(0),
                 },
                 vec![
@@ -32824,7 +32688,6 @@ fn v16_attack_close_portfolio_with_pnl_rejected() {
         p,
         ProgInstruction::PermissionlessCrank {
             now_slot: 0,
-            close_q: 0,
             observations: crank_observations(0),
         },
     );
@@ -32877,7 +32740,6 @@ fn v16_attack_backing_expiry_no_overpay() {
     let _ = env.send(
         ProgInstruction::PermissionlessCrank {
             now_slot: 20,
-            close_q: 0,
             observations: crank_observations(0),
         },
         vec![
@@ -33083,7 +32945,6 @@ fn v16_attack_third_party_withdraw_preserves_pnl_backing() {
             let _ = env.send(
                 ProgInstruction::PermissionlessCrank {
                     now_slot: slot,
-                    close_q: 0,
                     observations: crank_observations(0),
                 },
                 vec![
@@ -33537,7 +33398,6 @@ fn v16_attack_no_fee_liquidation_cranker_gets_nothing() {
         let _ = env.send(
             ProgInstruction::PermissionlessCrank {
                 now_slot: slot,
-                close_q: 0,
                 observations: crank_observations(0),
             },
             vec![
@@ -33556,7 +33416,6 @@ fn v16_attack_no_fee_liquidation_cranker_gets_nothing() {
         short_account,
         ProgInstruction::PermissionlessCrank {
             now_slot: 2,
-            close_q: POS_SCALE,
             observations: crank_observations(0),
         },
     );
@@ -33816,7 +33675,6 @@ fn v16_attack_per_asset_funding_isolation() {
             let _ = env.send(
                 ProgInstruction::PermissionlessCrank {
                     now_slot: slot,
-                    close_q: 0,
                     observations: crank_observations(0),
                 },
                 vec![
@@ -35139,7 +34997,6 @@ fn v16_attack_live_insurance_withdraw_rejects_exposed_target_effective_lag() {
         long_portfolio,
         ProgInstruction::PermissionlessCrank {
             now_slot: 2,
-            close_q: 0,
             observations: crank_observations(0),
         },
     );
@@ -35263,7 +35120,6 @@ fn v16_attack_unrelated_refresh_cannot_mask_loss_stale_insurance_gate() {
             cranker,
             ProgInstruction::PermissionlessCrank {
                 now_slot: 3,
-                close_q: 0,
                 observations: crank_observations(0),
             },
         );
@@ -35273,7 +35129,6 @@ fn v16_attack_unrelated_refresh_cannot_mask_loss_stale_insurance_gate() {
         cranker,
         ProgInstruction::PermissionlessCrank {
             now_slot: 3,
-            close_q: 0,
             observations: crank_observations(1),
         },
     );
@@ -35292,7 +35147,6 @@ fn v16_attack_unrelated_refresh_cannot_mask_loss_stale_insurance_gate() {
         cranker,
         ProgInstruction::PermissionlessCrank {
             now_slot: 3,
-            close_q: 0,
             observations: crank_observations(0),
         },
     );
@@ -35343,7 +35197,6 @@ fn v16_attack_unexposed_target_move_cannot_grief_live_insurance_withdrawals() {
         flat_portfolio,
         ProgInstruction::PermissionlessCrank {
             now_slot: 2,
-            close_q: 0,
             observations: crank_observations(1),
         },
     );
@@ -36911,7 +36764,6 @@ fn v16_attack_off_market_exec_price_wash_trade_prints_nothing() {
         let _ = env.send(
             ProgInstruction::PermissionlessCrank {
                 now_slot: 1,
-                close_q: 0,
                 observations: crank_observations(0),
             },
             vec![
@@ -37584,7 +37436,6 @@ fn v16_attack_adl_deleverage_conserves_and_shrinks_winner_claim() {
         let _ = env.send(
             ProgInstruction::PermissionlessCrank {
                 now_slot: 6,
-                close_q: 0,
                 observations: crank_observations(0),
             },
             vec![
@@ -37595,14 +37446,14 @@ fn v16_attack_adl_deleverage_conserves_and_shrinks_winner_claim() {
             &[],
         );
     }
-    // PARTIAL liquidation of the short: close exactly half (POS_SCALE of the 2*POS_SCALE position).
-    env.crank(
+    // Engine-selected partial liquidation restores health and proportionally deleverages the winner.
+    env.crank_steps(
         b,
         ProgInstruction::PermissionlessCrank {
             now_slot: 6,
-            close_q: POS_SCALE,
             observations: crank_observations(0),
         },
+        2,
     );
 
     let g1 = env.market_state().1;
@@ -37642,13 +37493,11 @@ fn v16_attack_adl_deleverage_conserves_and_shrinks_winner_claim() {
     );
 }
 
-// security.md sweep — unsafe liquidation escalates to recovery (#9/#19/#30): when a position is so
-// deeply insolvent that a normal Live-mode liquidation cannot safely socialize the shortfall, the
-// engine returns EngineRecoveryRequired rather than processing a partial/unsafe liquidation. Attacker
-// goal: force such a liquidation to partially apply (mint value / strand / corrupt OI). Protection:
-// the crank is rejected and ALL market state rolls back unchanged — no value minted, no partial ADL.
+// A deeply insolvent single-leg account cannot be partially liquidated while leaving uncovered open
+// risk. With no keeper size input, the engine selects a full close, books the residual, and preserves
+// custody and balanced OI.
 #[test]
-fn v16_attack_unsafe_liquidation_of_deep_insolvency_rejects_and_rolls_back() {
+fn v16_engine_selected_deep_insolvency_close_is_full_and_conserving() {
     let mut env = V16CuEnv::new_with_market_params_and_price_move(1, 10_000, 10_000, 10_000);
     env.configure_auth_mark_with_cu(0, 100);
     let la = Keypair::new();
@@ -37666,7 +37515,6 @@ fn v16_attack_unsafe_liquidation_of_deep_insolvency_rejects_and_rolls_back() {
         let _ = env.send(
             ProgInstruction::PermissionlessCrank {
                 now_slot: 6,
-                close_q: 0,
                 observations: crank_observations(0),
             },
             vec![
@@ -37677,60 +37525,25 @@ fn v16_attack_unsafe_liquidation_of_deep_insolvency_rejects_and_rolls_back() {
             &[],
         );
     }
-    // ATTACK: try a Live-mode partial liquidation of the deeply-bankrupt short.
-    let liquidation_ix = ProgInstruction::PermissionlessCrank {
-        now_slot: 6,
-        close_q: 2 * POS_SCALE,
-        observations: crank_observations(0),
-    };
-    let liquidation_accounts = vec![
-        AccountMeta::new(env.payer.pubkey(), true),
-        AccountMeta::new(env.market, false),
-        AccountMeta::new(b, false),
-    ];
-    let before_initial = env.svm.get_account(&env.market).unwrap();
-    let g_pre_initial = env.market_state().1;
-    env.svm.expire_blockhash();
-    let first = env.send(liquidation_ix.clone(), liquidation_accounts.clone(), &[]);
-    let (before, g_pre, r) = if first.is_ok() {
-        assert_eq!(
-            active_leg_for_asset(&env.portfolio_state(b), 0).basis_pos_q,
-            -((7 * POS_SCALE) as i128),
-            "first auto-crank close attempt may only refresh before the rejecting liquidation"
-        );
-        let before = env.svm.get_account(&env.market).unwrap();
-        let g_pre = env.market_state().1;
-        env.svm.expire_blockhash();
-        let second = env.send(liquidation_ix, liquidation_accounts, &[]);
-        (before, g_pre, second)
-    } else {
-        (before_initial, g_pre_initial, first)
-    };
-    // must reject — the engine signals recovery is required, not an unsafe partial liquidation.
-    assert!(r.is_err(), "deep-insolvency Live liquidation must reject");
-    let err = format!("{:?}", r);
-    assert!(
-        err.contains("Custom(23)"),
-        "must be EngineRecoveryRequired (Custom 23), got: {}",
-        err
+    let g_pre = env.market_state().1;
+    env.crank_steps(
+        b,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 6,
+            observations: crank_observations(0),
+        },
+        2,
     );
 
-    // ROLLBACK: the rejected crank leaves the entire market account byte-identical (no partial ADL / mint).
-    let after = env.svm.get_account(&env.market).unwrap();
-    assert_eq!(
-        after.data, before.data,
-        "rejected liquidation rolled back market state byte-for-byte"
-    );
+    let loser = env.portfolio_state(b);
     let g_post = env.market_state().1;
-    assert_eq!(
-        g_post.assets[0].a_long, g_pre.assets[0].a_long,
-        "no ADL applied on rejected liquidation"
+    assert!(
+        percolator::active_bitmap_is_empty(active_bitmap(&loser)),
+        "deeply insolvent single-leg account is fully closed"
     );
-    assert_eq!(
-        g_post.assets[0].a_long, ADL_ONE,
-        "winner not deleveraged by a rejected unsafe liquidation"
-    );
-    assert_eq!(g_post.vault, g_pre.vault, "no vault value minted");
+    assert_eq!(g_post.assets[0].oi_eff_long_q, 0);
+    assert_eq!(g_post.assets[0].oi_eff_short_q, 0);
+    assert_eq!(g_post.vault, g_pre.vault, "full close mints no vault value");
     assert_eq!(
         g_post.vault as u64,
         env.token_amount(env.vault),
@@ -37738,7 +37551,7 @@ fn v16_attack_unsafe_liquidation_of_deep_insolvency_rejects_and_rolls_back() {
     );
     assert!(
         g_post.vault >= g_post.c_tot + g_post.insurance,
-        "senior conservation preserved"
+        "senior conservation preserved through residual booking"
     );
 }
 
@@ -37925,7 +37738,6 @@ fn v16_attack_multi_account_asymmetric_funding_conserves() {
             let _ = env.send(
                 ProgInstruction::PermissionlessCrank {
                     now_slot: slot,
-                    close_q: 0,
                     observations: crank_observations(0),
                 },
                 vec![
@@ -38000,7 +37812,6 @@ fn v16_attack_convert_released_pnl_cannot_mint_from_unbacked_pnl() {
         p,
         ProgInstruction::PermissionlessCrank {
             now_slot: 0,
-            close_q: 0,
             observations: crank_observations(0),
         },
     );
@@ -38093,8 +37904,8 @@ fn v16_attack_adl_then_settlement_winner_cannot_escape_deleverage() {
     env.trade_asset_with_cu(0, &la, a, &lb, b, (2 * POS_SCALE) as i128, 100, 0);
     let vault0 = env.market_state().1.vault; // the only real tokens in the system
 
-    // price up: short is under maintenance but not bankrupt; settle both, then PARTIAL
-    // liquidate the short -> a_long deleverages.
+    // Price up: short is under maintenance but not bankrupt; settle both, then let the engine select
+    // the health-restoring partial liquidation so a_long deleverages.
     env.svm.warp_to_slot(6);
     env.push_auth_mark_with_cu(6, 500);
     for p in [b, a] {
@@ -38102,7 +37913,6 @@ fn v16_attack_adl_then_settlement_winner_cannot_escape_deleverage() {
         let _ = env.send(
             ProgInstruction::PermissionlessCrank {
                 now_slot: 6,
-                close_q: 0,
                 observations: crank_observations(0),
             },
             vec![
@@ -38113,13 +37923,13 @@ fn v16_attack_adl_then_settlement_winner_cannot_escape_deleverage() {
             &[],
         );
     }
-    env.crank(
+    env.crank_steps(
         b,
         ProgInstruction::PermissionlessCrank {
             now_slot: 6,
-            close_q: POS_SCALE,
             observations: crank_observations(0),
         },
+        2,
     );
     let g_adl = env.market_state().1;
     assert!(
@@ -38135,7 +37945,6 @@ fn v16_attack_adl_then_settlement_winner_cannot_escape_deleverage() {
         a,
         ProgInstruction::PermissionlessCrank {
             now_slot: 7,
-            close_q: 0,
             observations: crank_observations(0),
         },
     );
@@ -38193,7 +38002,6 @@ fn v16_attack_deposit_does_not_dilute_junior_backing() {
         h,
         ProgInstruction::PermissionlessCrank {
             now_slot: 0,
-            close_q: 0,
             observations: crank_observations(0),
         },
     );
@@ -38222,7 +38030,6 @@ fn v16_attack_deposit_does_not_dilute_junior_backing() {
         h,
         ProgInstruction::PermissionlessCrank {
             now_slot: 0,
-            close_q: 0,
             observations: crank_observations(0),
         },
     );
@@ -38289,7 +38096,6 @@ fn v16_attack_insurance_ops_preserve_junior_backing() {
         h,
         ProgInstruction::PermissionlessCrank {
             now_slot: 0,
-            close_q: 0,
             observations: crank_observations(0),
         },
     );
@@ -38332,7 +38138,6 @@ fn v16_attack_insurance_ops_preserve_junior_backing() {
         h,
         ProgInstruction::PermissionlessCrank {
             now_slot: 0,
-            close_q: 0,
             observations: crank_observations(0),
         },
     );
@@ -38358,7 +38163,6 @@ fn v16_attack_insurance_ops_preserve_junior_backing() {
         h,
         ProgInstruction::PermissionlessCrank {
             now_slot: 0,
-            close_q: 0,
             observations: crank_observations(0),
         },
     );
@@ -38402,7 +38206,6 @@ fn v16_attack_recovery_blocks_pnl_conversion() {
         p,
         ProgInstruction::PermissionlessCrank {
             now_slot: 0,
-            close_q: 0,
             observations: crank_observations(0),
         },
     );
@@ -38521,7 +38324,6 @@ fn v16_attack_liquidation_isolated_across_assets() {
         let _ = env.send(
             ProgInstruction::PermissionlessCrank {
                 now_slot: 6,
-                close_q: 0,
                 observations: crank_observations(0),
             },
             vec![
@@ -38532,13 +38334,13 @@ fn v16_attack_liquidation_isolated_across_assets() {
             &[],
         );
     }
-    env.crank(
+    env.crank_steps(
         b0,
         ProgInstruction::PermissionlessCrank {
             now_slot: 6,
-            close_q: POS_SCALE,
             observations: crank_observations(0),
         },
+        2,
     );
     let g_post = env.market_state().1;
     assert!(
@@ -38665,7 +38467,6 @@ fn v16_attack_convert_then_withdraw_extracts_exactly_backed() {
         p,
         ProgInstruction::PermissionlessCrank {
             now_slot: 0,
-            close_q: 0,
             observations: crank_observations(0),
         },
     );
@@ -38751,7 +38552,6 @@ fn v16_attack_liquidation_cranker_reward_bounded_by_fee() {
         let _ = env.send(
             ProgInstruction::PermissionlessCrank {
                 now_slot: slot,
-                close_q: 0,
                 observations: crank_observations(0),
             },
             vec![
@@ -38773,7 +38573,6 @@ fn v16_attack_liquidation_cranker_reward_bounded_by_fee() {
         &env.payer,
         ProgInstruction::PermissionlessCrank {
             now_slot: 30,
-            close_q: POS_SCALE,
             observations: crank_observations(0),
         },
         vec![
@@ -38848,7 +38647,6 @@ fn v16_attack_liquidation_cranker_reward_cannot_alias_liquidated_account() {
         let _ = env.send(
             ProgInstruction::PermissionlessCrank {
                 now_slot: slot,
-                close_q: 0,
                 observations: crank_observations(0),
             },
             vec![
@@ -38867,7 +38665,6 @@ fn v16_attack_liquidation_cranker_reward_cannot_alias_liquidated_account() {
     let rejected = env.send(
         ProgInstruction::PermissionlessCrank {
             now_slot: 30,
-            close_q: POS_SCALE,
             observations: crank_observations(0),
         },
         vec![
@@ -38902,7 +38699,6 @@ fn v16_attack_liquidation_cranker_reward_cannot_alias_liquidated_account() {
     let rejected_market_reward = env.send(
         ProgInstruction::PermissionlessCrank {
             now_slot: 30,
-            close_q: POS_SCALE,
             observations: crank_observations(0),
         },
         vec![
@@ -38933,7 +38729,6 @@ fn v16_attack_liquidation_cranker_reward_cannot_alias_liquidated_account() {
     let accepted = env.send(
         ProgInstruction::PermissionlessCrank {
             now_slot: 30,
-            close_q: POS_SCALE,
             observations: crank_observations(0),
         },
         vec![
@@ -39022,7 +38817,6 @@ fn v16_attack_crank_target_portfolio_rejects_before_oracle_tail_parse() {
         env.send(
             ProgInstruction::PermissionlessCrank {
                 now_slot: 2,
-                close_q: 0,
                 observations: crank_observations(0),
             },
             vec![
@@ -39093,7 +38887,6 @@ fn v16_attack_liquidation_cranker_reward_rejects_wrong_owner() {
         let _ = env.send(
             ProgInstruction::PermissionlessCrank {
                 now_slot: slot,
-                close_q: 0,
                 observations: crank_observations(0),
             },
             vec![
@@ -39120,7 +38913,6 @@ fn v16_attack_liquidation_cranker_reward_rejects_wrong_owner() {
     let rejected = env.send(
         ProgInstruction::PermissionlessCrank {
             now_slot: 30,
-            close_q: POS_SCALE,
             observations: crank_observations(0),
         },
         vec![
@@ -39160,7 +38952,6 @@ fn v16_attack_liquidation_cranker_reward_rejects_wrong_owner() {
     let accepted = env.send(
         ProgInstruction::PermissionlessCrank {
             now_slot: 30,
-            close_q: POS_SCALE,
             observations: crank_observations(0),
         },
         vec![
@@ -39220,7 +39011,6 @@ fn v16_attack_liquidation_reward_wrong_owner_rejects_before_oracle_tail_parse() 
         env.send(
             ProgInstruction::PermissionlessCrank {
                 now_slot: 2,
-                close_q: POS_SCALE,
                 observations: crank_observations(0),
             },
             vec![
@@ -39292,7 +39082,6 @@ fn v16_attack_liquidation_wrong_owner_rolls_back_legacy_reward_realloc() {
         let _ = env.send(
             ProgInstruction::PermissionlessCrank {
                 now_slot: slot,
-                close_q: 0,
                 observations: crank_observations(0),
             },
             vec![
@@ -39328,7 +39117,6 @@ fn v16_attack_liquidation_wrong_owner_rolls_back_legacy_reward_realloc() {
     let rejected = env.send(
         ProgInstruction::PermissionlessCrank {
             now_slot: 30,
-            close_q: POS_SCALE,
             observations: crank_observations(0),
         },
         vec![
@@ -39368,7 +39156,6 @@ fn v16_attack_liquidation_wrong_owner_rolls_back_legacy_reward_realloc() {
     let accepted = env.send(
         ProgInstruction::PermissionlessCrank {
             now_slot: 30,
-            close_q: POS_SCALE,
             observations: crank_observations(0),
         },
         vec![
@@ -39417,7 +39204,6 @@ fn v16_attack_liquidation_rejects_cross_market_cranker_reward() {
         let _ = env.send(
             ProgInstruction::PermissionlessCrank {
                 now_slot: slot,
-                close_q: 0,
                 observations: crank_observations(0),
             },
             vec![
@@ -39523,7 +39309,6 @@ fn v16_attack_liquidation_rejects_cross_market_cranker_reward() {
     let rejected = env.send(
         ProgInstruction::PermissionlessCrank {
             now_slot: 30,
-            close_q: POS_SCALE,
             observations: crank_observations(0),
         },
         vec![
@@ -39565,7 +39350,6 @@ fn v16_attack_liquidation_rejects_cross_market_cranker_reward() {
     let accepted = env.send(
         ProgInstruction::PermissionlessCrank {
             now_slot: 30,
-            close_q: POS_SCALE,
             observations: crank_observations(0),
         },
         vec![
@@ -39627,7 +39411,6 @@ fn v16_attack_liquidation_fee_capped() {
         let _ = env.send(
             ProgInstruction::PermissionlessCrank {
                 now_slot: slot,
-                close_q: 0,
                 observations: crank_observations(0),
             },
             vec![
@@ -39648,7 +39431,6 @@ fn v16_attack_liquidation_fee_capped() {
         &env.payer,
         ProgInstruction::PermissionlessCrank {
             now_slot: 30,
-            close_q: POS_SCALE,
             observations: crank_observations(0),
         },
         vec![
@@ -39719,7 +39501,6 @@ fn v16_attack_insurance_covered_liquidation_does_not_strand_empty_portfolio() {
         let _ = env.send(
             ProgInstruction::PermissionlessCrank {
                 now_slot: slot,
-                close_q: 0,
                 observations: crank_observations(0),
             },
             vec![
@@ -39735,7 +39516,6 @@ fn v16_attack_insurance_covered_liquidation_does_not_strand_empty_portfolio() {
         short,
         ProgInstruction::PermissionlessCrank {
             now_slot: 40,
-            close_q: POS_SCALE,
             observations: crank_observations(0),
         },
     );
@@ -39788,7 +39568,6 @@ fn v16_attack_repeated_partial_liquidation_stops_charging_after_health_restored(
         let _ = env.send(
             ProgInstruction::PermissionlessCrank {
                 now_slot: slot,
-                close_q: 0,
                 observations: crank_observations(0),
             },
             vec![
@@ -39806,7 +39585,6 @@ fn v16_attack_repeated_partial_liquidation_stops_charging_after_health_restored(
             s,
             ProgInstruction::PermissionlessCrank {
                 now_slot: 30,
-                close_q: POS_SCALE,
                 observations: crank_observations(0),
             },
         );
@@ -39869,7 +39647,6 @@ fn v16_attack_leveraged_bad_debt_socialized_not_printed() {
         let _ = env.send(
             ProgInstruction::PermissionlessCrank {
                 now_slot: slot,
-                close_q: 0,
                 observations: crank_observations(0),
             },
             vec![
@@ -39893,7 +39670,6 @@ fn v16_attack_leveraged_bad_debt_socialized_not_printed() {
         s,
         ProgInstruction::PermissionlessCrank {
             now_slot: 40,
-            close_q: POS_SCALE,
             observations: crank_observations(0),
         },
     );
@@ -40007,7 +39783,6 @@ fn v16_attack_margin_gap_zone_no_liq_no_risk_increase() {
     let _ = env.send(
         ProgInstruction::PermissionlessCrank {
             now_slot: 2,
-            close_q: 0,
             observations: crank_observations(0),
         },
         vec![
@@ -40045,7 +39820,6 @@ fn v16_attack_margin_gap_zone_no_liq_no_risk_increase() {
     let _ = env.send(
         ProgInstruction::PermissionlessCrank {
             now_slot: 2,
-            close_q: POS_SCALE,
             observations: crank_observations(0),
         },
         vec![
@@ -40184,7 +39958,6 @@ fn v16_attack_cross_margin_netting_conserves() {
         let _ = env.send(
             ProgInstruction::PermissionlessCrank {
                 now_slot: 2,
-                close_q: 0,
                 observations: crank_observations(ai),
             },
             vec![
@@ -40229,12 +40002,10 @@ fn v16_attack_cross_margin_netting_conserves() {
     );
 }
 
-// security.md sweep — over-liquidation close_q clamps the FEE too (#3/#19): the liquidation fee is
-// bps * CLOSED notional. A cranker passing close_q >> the position is clamped to the position size
-// (#9376), but the FEE must be charged on the actually-closed amount, not the inflated close_q.
-// Attacker goal: pass a giant close_q to extract a fee far larger than the position warrants.
+// The engine-selected liquidation fee is derived from actual closed risk, not keeper input, and remains
+// bounded while value conservation holds.
 #[test]
-fn v16_attack_over_liquidation_fee_clamped_to_position() {
+fn v16_engine_selected_liquidation_fee_is_bounded_by_closed_position() {
     let mut env = V16CuEnv::new_with_init_params(production_risk_params());
     env.update_liquidation_fee_policy_with_cu(0); // all to insurance
     env.configure_auth_mark_with_cu(0, 1_000_000);
@@ -40252,7 +40023,6 @@ fn v16_attack_over_liquidation_fee_clamped_to_position() {
         let _ = env.send(
             ProgInstruction::PermissionlessCrank {
                 now_slot: slot,
-                close_q: 0,
                 observations: crank_observations(0),
             },
             vec![
@@ -40265,22 +40035,21 @@ fn v16_attack_over_liquidation_fee_clamped_to_position() {
     }
     let (_, g0) = env.market_state();
 
-    // ATTACK: liquidate with close_q = 1000x the actual POS_SCALE position to inflate the fee.
     env.crank(
         s,
         ProgInstruction::PermissionlessCrank {
             now_slot: 30,
-            close_q: 1_000 * POS_SCALE,
             observations: crank_observations(0),
         },
     );
     let (_, g1) = env.market_state();
     let fee = g1.insurance - g0.insurance;
 
-    // CLAMP: the fee is on the actual POS_SCALE closed (~535 = 5bps * ~1.07e6), NOT 1000x that (~535_000).
     assert!(fee > 0, "a fee was charged (non-vacuous)");
-    assert!(fee < 10_000, "fee {} reflects the ACTUAL closed POS_SCALE (~535), not the inflated 1000x close_q (~535_000)", fee);
-    // the position is fully closed (clamped to the actual size), not over-closed into a phantom.
+    assert!(
+        fee < 10_000,
+        "fee is bounded by the actual closed position: {fee}"
+    );
     let sl = env.portfolio_state(s);
     assert!(
         sl.legs[0].basis_pos_q.get().unsigned_abs() <= POS_SCALE,
@@ -42108,7 +41877,6 @@ fn v16_attack_pushed_mark_cannot_override_external_oracle_asset() {
         cranker_portfolio,
         ProgInstruction::PermissionlessCrank {
             now_slot: 2,
-            close_q: 0,
             observations: crank_observations(0),
         },
         &[updated],
@@ -42153,7 +41921,6 @@ fn v16_attack_crank_oracle_feed_id_mismatch_rejects_without_mutation() {
     let bad = env.send(
         ProgInstruction::PermissionlessCrank {
             now_slot: 2,
-            close_q: 0,
             observations: crank_observations_with_accounts(0, 1),
         },
         vec![
@@ -42190,7 +41957,6 @@ fn v16_attack_crank_oracle_feed_id_mismatch_rejects_without_mutation() {
         cranker_portfolio,
         ProgInstruction::PermissionlessCrank {
             now_slot: 2,
-            close_q: 0,
             observations: crank_observations(0),
         },
         &[correct_acct],
@@ -42232,7 +41998,6 @@ fn v16_attack_crank_oracle_same_publish_time_price_change_rejects() {
     let replay = env.send(
         ProgInstruction::PermissionlessCrank {
             now_slot: 2,
-            close_q: 0,
             observations: crank_observations_with_accounts(0, 1),
         },
         vec![
@@ -42270,7 +42035,6 @@ fn v16_attack_crank_oracle_same_publish_time_price_change_rejects() {
         cranker_portfolio,
         ProgInstruction::PermissionlessCrank {
             now_slot: 3,
-            close_q: 0,
             observations: crank_observations(0),
         },
         &[fresh],
@@ -42312,7 +42076,6 @@ fn v16_attack_crank_oracle_regressed_publish_time_rejects_even_when_fresh() {
     let replay = env.send(
         ProgInstruction::PermissionlessCrank {
             now_slot: 2,
-            close_q: 0,
             observations: crank_observations_with_accounts(0, 1),
         },
         vec![
@@ -42350,7 +42113,6 @@ fn v16_attack_crank_oracle_regressed_publish_time_rejects_even_when_fresh() {
         cranker_portfolio,
         ProgInstruction::PermissionlessCrank {
             now_slot: 3,
-            close_q: 0,
             observations: crank_observations(0),
         },
         &[fresh],
@@ -43127,7 +42889,6 @@ fn v16_attack_convert_released_pnl_owner_gated() {
         p,
         ProgInstruction::PermissionlessCrank {
             now_slot: 0,
-            close_q: 0,
             observations: crank_observations(0),
         },
     );
@@ -44000,7 +43761,6 @@ fn v16_attack_ewma_mark_respects_per_slot_circuit_breaker() {
         let _ = env.send(
             ProgInstruction::PermissionlessCrank {
                 now_slot: slot,
-                close_q: 0,
                 observations: crank_observations(0),
             },
             vec![
@@ -44101,7 +43861,6 @@ fn v16_attack_crank_dt_clamp_blocks_retroactive_settle() {
     let r = env.send(
         ProgInstruction::PermissionlessCrank {
             now_slot: GAP_SLOT,
-            close_q: 0,
             observations: crank_observations(0),
         },
         vec![
@@ -44152,7 +43911,6 @@ fn v16_attack_crank_dt_clamp_blocks_retroactive_settle() {
     let r2 = env.send(
         ProgInstruction::PermissionlessCrank {
             now_slot: GAP_SLOT,
-            close_q: 0,
             observations: crank_observations(0),
         },
         vec![
@@ -44444,7 +44202,6 @@ fn v16_attack_asset1_insolvency_cannot_drain_asset0_domain_insurance() {
             let _ = env.send(
                 ProgInstruction::PermissionlessCrank {
                     now_slot: slot,
-                    close_q: 0,
                     observations: crank_observations(1),
                 },
                 vec![
@@ -44461,7 +44218,6 @@ fn v16_attack_asset1_insolvency_cannot_drain_asset0_domain_insurance() {
     let _ = env.send(
         ProgInstruction::PermissionlessCrank {
             now_slot: 4,
-            close_q: POS_SCALE,
             observations: crank_observations(1),
         },
         vec![
@@ -44862,7 +44618,6 @@ fn v16_attack_asset1_insolvency_cannot_drain_asset0_backing() {
             let _ = env.send(
                 ProgInstruction::PermissionlessCrank {
                     now_slot: slot,
-                    close_q: 0,
                     observations: crank_observations(1),
                 },
                 vec![
@@ -44878,7 +44633,6 @@ fn v16_attack_asset1_insolvency_cannot_drain_asset0_backing() {
     let _ = env.send(
         ProgInstruction::PermissionlessCrank {
             now_slot: 4,
-            close_q: POS_SCALE,
             observations: crank_observations(1),
         },
         vec![
@@ -45248,7 +45002,6 @@ fn v16_attack_backing_fee_split_conserves() {
             portfolio,
             ProgInstruction::PermissionlessCrank {
                 now_slot: 2,
-                close_q: 0,
                 observations: crank_observations(asset_index),
             },
         );
@@ -47214,13 +46967,13 @@ fn v16_bpf_10m_market_liquidation_high_asset_stays_bounded() {
     );
     assert_cu_within("10MiB PushEwmaMark", push_cu, CUSTODY_CU_LIMIT);
 
-    let liquidation_cu = env.crank(
+    let liquidation_cu = env.crank_steps(
         short,
         ProgInstruction::PermissionlessCrank {
             now_slot: LIQUIDATION_SLOT,
-            close_q: POS_SCALE,
             observations: crank_observations(HIGH_ASSET as u16),
         },
+        2,
     );
     println!(
         "v16 10MiB PermissionlessCrank Liquidate: assets={N}, account_len={account_len}, \
@@ -47237,9 +46990,15 @@ fn v16_bpf_10m_market_liquidation_high_asset_stays_bounded() {
         group.assets[HIGH_ASSET].effective_price >= 200,
         "adverse high-asset mark actually moved"
     );
-    assert!(percolator::active_bitmap_is_empty(active_bitmap(
-        &short_after
-    )));
+    let remaining_q = if has_active_leg_for_asset(&short_after, HIGH_ASSET) {
+        active_leg_for_asset(&short_after, HIGH_ASSET)
+            .basis_pos_q
+            .unsigned_abs()
+    } else {
+        0
+    };
+    assert!(remaining_q < POS_SCALE, "high-asset risk strictly reduced");
+    assert_eq!(health_cert(&short_after).certified_liq_deficit, 0);
 }
 
 // Scale proof — the largest current market that fits Solana's 10 MiB account cap is valid AND a
@@ -48122,7 +47881,6 @@ fn v16_bpf_force_close_liveness_survives_14_stale_leg_grief_via_precrank() {
     env.svm.warp_to_slot(22);
     let refresh = |slot: u64| ProgInstruction::PermissionlessCrank {
         now_slot: slot,
-        close_q: 0,
         observations: crank_observations(0),
     };
     let c_long = env.crank(pa, refresh(22));
@@ -54277,7 +54035,6 @@ fn v16_attack_live_backing_withdraw_rejects_exposed_target_effective_lag() {
         long_portfolio,
         ProgInstruction::PermissionlessCrank {
             now_slot: 2,
-            close_q: 0,
             observations: crank_observations(0),
         },
     );
@@ -54538,7 +54295,6 @@ fn v16_attack_convert_released_pnl_rejects_when_resolve_matured() {
             portfolio,
             ProgInstruction::PermissionlessCrank {
                 now_slot: 3,
-                close_q: 0,
                 observations: crank_observations(0),
             },
         );
@@ -54636,7 +54392,6 @@ fn v16_attack_withdraw_rejected_when_resolve_matured() {
     let _ = env.send(
         ProgInstruction::PermissionlessCrank {
             now_slot: 3,
-            close_q: 0,
             observations: crank_observations(0),
         },
         vec![
@@ -54967,7 +54722,6 @@ fn v16_attack_live_value_paths_reject_when_resolve_matured() {
     let stale_crank = env.send(
         ProgInstruction::PermissionlessCrank {
             now_slot: 0,
-            close_q: 0,
             observations: crank_observations(0),
         },
         vec![
@@ -57179,7 +56933,6 @@ fn v16_attack_liquidation_full_cranker_share_takes_whole_fee_no_mint() {
         let _ = env.send(
             ProgInstruction::PermissionlessCrank {
                 now_slot: slot,
-                close_q: 0,
                 observations: crank_observations(0),
             },
             vec![
@@ -57201,7 +56954,6 @@ fn v16_attack_liquidation_full_cranker_share_takes_whole_fee_no_mint() {
         &env.payer,
         ProgInstruction::PermissionlessCrank {
             now_slot: 30,
-            close_q: POS_SCALE,
             observations: crank_observations(0),
         },
         vec![
@@ -57394,7 +57146,6 @@ fn v16_attack_permissionless_settle_b_on_healthy_account_is_safe_noop() {
     let _ = env.send(
         ProgInstruction::PermissionlessCrank {
             now_slot: 5,
-            close_q: 0,
             observations: crank_observations(0),
         },
         vec![
@@ -58615,7 +58366,6 @@ fn v16_attack_hybrid_liquidation_bad_reward_tail_rolls_back_oracle_update() {
     let rejected = env.send(
         ProgInstruction::PermissionlessCrank {
             now_slot: 2,
-            close_q: POS_SCALE,
             observations: crank_observations_with_accounts(0, 1),
         },
         vec![
@@ -58653,7 +58403,6 @@ fn v16_attack_hybrid_liquidation_bad_reward_tail_rolls_back_oracle_update() {
     let accepted_observation = env.send(
         ProgInstruction::PermissionlessCrank {
             now_slot: 2,
-            close_q: POS_SCALE,
             observations: crank_observations_with_accounts(0, 1),
         },
         vec![

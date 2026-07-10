@@ -404,6 +404,7 @@ This section describes intent and operational ordering, not argument-by-argument
 - **PermissionlessCrank** (tag 5)
   - permissionless maintenance entrypoint for a supplied asset/account path
   - authenticates clock/oracle state in the wrapper, then delegates bounded public progress to the engine
+  - carries no liquidation size or fee input; the engine derives both from certified account state and market config
   - candidate accounts are untrusted hints, not a liveness precondition; honest keepers should include the worst known stale/bankrupt/liquidatable accounts, but the engine also makes cursored progress
   - may perform bounded catchup/recovery, liquidation, touch-only settlement, round-robin lifecycle progress, and empty-account reclaim
   - liquidation rewards are optional: when `liquidation_cranker_fee_share_bps > 0`, a keeper may append its writable Percolator portfolio account as the final account in the instruction. Oracle accounts remain immediately after the target portfolio account; the reward portfolio, if present, is last. If no reward portfolio is supplied, the full retained liquidation penalty stays in insurance.

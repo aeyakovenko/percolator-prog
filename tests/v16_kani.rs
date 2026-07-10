@@ -526,30 +526,30 @@ fn kani_v16_matcher_return_accepts_only_bound_echoed_fills() {
 #[kani::proof]
 fn kani_v16_permissionless_crank_decode_preserves_wire_fields() {
     let now_slot: u64 = kani::any();
-    let close_q: u128 = kani::any();
     let asset_index_0: u16 = kani::any();
     let oracle_accounts_0: u8 = kani::any();
     let asset_index_1: u16 = kani::any();
     let oracle_accounts_1: u8 = kani::any();
 
-    let mut data = [0u8; 32];
+    let mut data = [0u8; 16];
     data[0] = 5;
     data[1..9].copy_from_slice(&now_slot.to_le_bytes());
-    data[9..25].copy_from_slice(&close_q.to_le_bytes());
-    data[25] = 2;
-    data[26..28].copy_from_slice(&asset_index_0.to_le_bytes());
-    data[28] = oracle_accounts_0;
-    data[29..31].copy_from_slice(&asset_index_1.to_le_bytes());
-    data[31] = oracle_accounts_1;
+    data[9] = 2;
+    data[10..12].copy_from_slice(&asset_index_0.to_le_bytes());
+    data[12] = oracle_accounts_0;
+    data[13..15].copy_from_slice(&asset_index_1.to_le_bytes());
+    data[15] = oracle_accounts_1;
 
+    kani::cover!(
+        now_slot != 0 && asset_index_0 != asset_index_1 && oracle_accounts_0 != oracle_accounts_1,
+        "crank wire proof covers distinct nontrivial observations"
+    );
     match Instruction::decode(&data).unwrap() {
         Instruction::PermissionlessCrank {
             now_slot: got_slot,
-            close_q: got_close,
             observations,
         } => {
             assert_eq!(got_slot, now_slot);
-            assert_eq!(got_close, close_q);
             assert_eq!(observations.len(), 2);
             assert_eq!(
                 observations[0],
@@ -568,6 +568,28 @@ fn kani_v16_permissionless_crank_decode_preserves_wire_fields() {
         }
         _ => unreachable!(),
     }
+}
+
+#[kani::proof]
+#[kani::unwind(18)]
+fn kani_v16_legacy_permissionless_crank_size_payload_is_rejected() {
+    let now_slot: u64 = kani::any();
+    let close_q: u128 = kani::any();
+    let mut legacy = [0u8; 26];
+    legacy[0] = 5;
+    legacy[1..9].copy_from_slice(&now_slot.to_le_bytes());
+    legacy[9..25].copy_from_slice(&close_q.to_le_bytes());
+    legacy[25] = 0;
+
+    kani::cover!(
+        close_q as u8 <= 16,
+        "legacy payload reaches the new observation parser and rejects trailing bytes"
+    );
+    kani::cover!(
+        close_q as u8 > 16,
+        "legacy payload rejects an oversized interpreted observation count"
+    );
+    assert!(Instruction::decode(&legacy).is_err());
 }
 
 #[kani::proof]
@@ -1099,7 +1121,6 @@ fn kani_v16_trade_and_crank_payloads_reject_trailing_byte() {
     assert_rejects_trailing_byte(
         Instruction::PermissionlessCrank {
             now_slot: 1,
-            close_q: 0,
             observations: vec![CrankObservationHint {
                 asset_index: 0,
                 oracle_accounts: 0,
