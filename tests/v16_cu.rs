@@ -38542,7 +38542,7 @@ fn v16_attack_lapsed_live_source_backing_does_not_stale_loop_auto_crank() {
         )
         .expect("permissionless refresh must expire lapsed Live backing and commit");
     assert_cu_within(
-        "lapsed source-backing auto-crank refresh",
+        "lapsed source-backing expiry step",
         refresh_cu,
         CRANK_CU_LIMIT,
     );
@@ -38551,9 +38551,35 @@ fn v16_attack_lapsed_live_source_backing_does_not_stale_loop_auto_crank() {
     let expired = after_refresh.source_backing_buckets[1];
     assert_eq!(expired.status, BackingBucketStatusV16::Expired);
     assert_eq!(expired.fresh_unliened_backing_num, 0);
-    assert!(health_cert(&env.portfolio_state(long)).valid);
+    assert_ne!(
+        health_cert(&env.portfolio_state(long)).cert_risk_epoch,
+        after_refresh.risk_epoch,
+        "expiry advances risk state, so another bounded crank remains actionable"
+    );
     assert_eq!(after_refresh.vault, vault_before, "expiry moves no custody");
     assert_eq!(env.token_amount(env.vault), vault_tokens_before);
+
+    env.svm.expire_blockhash();
+    let certify_cu = env
+        .send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 160,
+                observations: vec![],
+            },
+            vec![
+                AccountMeta::new(env.payer.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(long, false),
+            ],
+            &[],
+        )
+        .expect("the next bounded auto-crank must certify after expiry");
+    assert_cu_within(
+        "post-expiry account certification",
+        certify_cu,
+        CRANK_CU_LIMIT,
+    );
+    assert!(health_cert(&env.portfolio_state(long)).valid);
 
     let long_before_exit = active_leg_for_asset(&env.portfolio_state(long), 0)
         .basis_pos_q
