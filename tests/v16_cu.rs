@@ -38283,6 +38283,160 @@ fn v16_attack_partial_adl_max_exit_and_both_residues_finish_permissionlessly() {
     assert!(done.vault >= done.c_tot + done.insurance);
 }
 
+// A partial ADL can leave stored basis larger than matched effective OI. If the oracle then dies,
+// the delayed permissionless force-close must not require the abandoned owner to clean the final
+// zero-OI residue: one call nets the matched lot and a second singleton call settles/detaches the
+// residue, after which the side can be finalized without consuming the user's separate PnL claim.
+#[test]
+fn v16_attack_partial_adl_recovery_residue_can_be_force_closed_without_owner() {
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(1, 10_000, 10_000, 10_000);
+    env.configure_permissionless_resolve_with_cu(10_000, 1);
+    env.configure_auth_mark_with_cu(0, 100);
+    let long_owner = Keypair::new();
+    let long = env.create_portfolio(&long_owner);
+    let short_owner = Keypair::new();
+    let short = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long, 1_000);
+    env.deposit(&short_owner, short, 900);
+    env.trade_asset_with_cu(
+        0,
+        &long_owner,
+        long,
+        &short_owner,
+        short,
+        (2 * POS_SCALE) as i128,
+        100,
+        0,
+    );
+
+    env.svm.warp_to_slot(6);
+    env.push_auth_mark_with_cu(6, 500);
+    for portfolio in [short, long] {
+        env.svm.expire_blockhash();
+        let _ = env.send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 6,
+                observations: crank_observations(0),
+            },
+            vec![
+                AccountMeta::new(env.payer.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(portfolio, false),
+            ],
+            &[],
+        );
+    }
+    let liquidation_cu = env.crank_steps(
+        short,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 6,
+            observations: crank_observations(0),
+        },
+        2,
+    );
+    assert_cu_within(
+        "partial-ADL refresh and liquidation before recovery",
+        liquidation_cu,
+        CRANK_CU_LIMIT,
+    );
+    let matched_oi_after_adl = env.market_state().1.assets[0].oi_eff_long_q;
+    assert_eq!(
+        env.market_state().1.assets[0].oi_eff_short_q,
+        matched_oi_after_adl
+    );
+    assert!(matched_oi_after_adl > 0);
+    assert!(matched_oi_after_adl < 2 * POS_SCALE);
+    assert_eq!(
+        active_leg_for_asset(&env.portfolio_state(long), 0).basis_pos_q,
+        (2 * POS_SCALE) as i128,
+    );
+    env.svm.warp_to_slot(7);
+    let admin = env.admin.insecure_clone();
+    env.svm.expire_blockhash();
+    env.try_shutdown_asset_with_authority(&admin, 0, 7)
+        .expect("public shutdown enters asset recovery");
+    env.svm.warp_to_slot(8);
+    let cranker = Keypair::new();
+    env.svm.expire_blockhash();
+    let vault_before = env.market_state().1.vault;
+    let first_cu = env
+        .try_force_close_abandoned_asset_with_cu(&cranker, long, short, 0, 8, 2 * POS_SCALE)
+        .expect("the first force close nets the remaining matched exposure");
+    assert_cu_within(
+        "partial-ADL Recovery matched force close",
+        first_cu,
+        TRADE_CU_LIMIT,
+    );
+    let group = env.market_state().1;
+    let long_state = env.portfolio_state(long);
+    let short_state = env.portfolio_state(short);
+    let long_capital_before_cleanup = long_state.capital.get();
+    let long_pnl_before_cleanup = long_state.pnl.get();
+    assert_eq!(group.assets[0].oi_eff_long_q, 0);
+    assert_eq!(group.assets[0].oi_eff_short_q, 0);
+    assert_eq!(
+        active_leg_for_asset(&long_state, 0).basis_pos_q,
+        (2 * POS_SCALE - matched_oi_after_adl) as i128,
+        "the matched close leaves only the ADL terminal residue",
+    );
+    assert!(
+        !has_active_leg_for_asset(&short_state, 0),
+        "the matched short is fully closed",
+    );
+
+    env.svm.expire_blockhash();
+    let cleanup_cu = env
+        .try_force_close_abandoned_asset_with_cu(
+            &cranker,
+            long,
+            short,
+            0,
+            8,
+            percolator::MAX_VAULT_TVL,
+        )
+        .expect("a singleton zero-OI Recovery residue must be permissionlessly detachable");
+    assert_cu_within(
+        "partial-ADL Recovery singleton cleanup",
+        cleanup_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    assert!(
+        !has_active_leg_for_asset(&env.portfolio_state(long), 0),
+        "the abandoned owner is no longer required to detach the terminal residue",
+    );
+    assert!(
+        !has_active_leg_for_asset(&env.portfolio_state(short), 0),
+        "both public portfolios are detached",
+    );
+
+    let finalize_cu = env.finalize_reset_side_with_cu(0, 0);
+    assert_cu_within(
+        "partial-ADL Recovery side finalization",
+        finalize_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    let done = env.market_state().1;
+    assert_eq!(done.assets[0].lifecycle, AssetLifecycleV16::Recovery);
+    assert_eq!(done.assets[0].mode_long, SideModeV16::Normal);
+    assert_eq!(done.assets[0].mode_short, SideModeV16::Normal);
+    assert_eq!(done.assets[0].stored_pos_count_long, 0);
+    assert_eq!(done.assets[0].stored_pos_count_short, 0);
+    assert_eq!(
+        done.vault, vault_before,
+        "Recovery cleanup moves no custody"
+    );
+    assert_eq!(done.vault as u64, env.token_amount(env.vault));
+    assert_eq!(
+        env.portfolio_state(long).capital.get(),
+        long_capital_before_cleanup,
+    );
+    assert_eq!(
+        env.portfolio_state(long).pnl.get(),
+        long_pnl_before_cleanup,
+        "terminal position cleanup preserves the independent user claim",
+    );
+}
+
 // A deeply insolvent single-leg account cannot be partially liquidated while leaving uncovered open
 // risk. With no keeper size input, the engine selects a full close, books the residual, and preserves
 // custody and balanced OI.
