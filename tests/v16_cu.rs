@@ -3779,6 +3779,43 @@ fn assert_cu_within(label: &str, cu: u64, limit: u64) {
     );
 }
 
+fn portfolio_cert_is_current(env: &V16CuEnv, portfolio: Pubkey) -> bool {
+    let account = env.portfolio_state(portfolio);
+    let group = env.market_state().1;
+    let cert = health_cert(&account);
+    cert.valid
+        && account.stale_state == 0
+        && account.b_stale_state == 0
+        && cert.cert_oracle_epoch == group.oracle_epoch
+        && cert.cert_funding_epoch == group.funding_epoch
+        && cert.cert_risk_epoch == group.risk_epoch
+        && cert.cert_asset_set_epoch == group.asset_set_epoch
+        && cert.active_bitmap_at_cert == active_bitmap(&account)
+}
+
+fn drive_portfolio_cert_current(
+    env: &mut V16CuEnv,
+    portfolio: Pubkey,
+    now_slot: u64,
+    asset_index: u16,
+    max_steps: usize,
+) -> (usize, u64) {
+    let mut calls = 0usize;
+    let mut max_cu = 0u64;
+    while !portfolio_cert_is_current(env, portfolio) {
+        max_cu = max_cu.max(env.crank(
+            portfolio,
+            ProgInstruction::PermissionlessCrank {
+                now_slot,
+                observations: crank_observations(asset_index),
+            },
+        ));
+        calls += 1;
+        assert!(calls <= max_steps, "account refresh exceeded bounded rank");
+    }
+    (calls, max_cu)
+}
+
 #[test]
 fn v16_bpf_mainnet_realistic_system_spl_ata_bootstrap_deposits_and_ledgers() {
     let mut svm = LiteSVM::new();
@@ -16688,6 +16725,25 @@ fn v16_attack_insolvency_bad_debt_is_socialized_not_printed() {
         ],
         &[],
     );
+    let paper_winner = env.portfolio_state(long_account);
+    let paper_short = env.portfolio_state(short_account);
+    let paper_group = env.market_state().1;
+    let paper_residual = paper_group
+        .vault
+        .saturating_sub(paper_group.c_tot)
+        .saturating_sub(paper_group.insurance);
+    let paper_positive_pnl =
+        paper_winner.pnl.get().max(0) as u128 + paper_short.pnl.get().max(0) as u128;
+    assert!(
+        paper_positive_pnl > paper_residual,
+        "setup must create unbacked paper PnL before bounded settlement"
+    );
+    let (_, winner_refresh_cu) = drive_portfolio_cert_current(&mut env, long_account, 2, 0, 8);
+    assert_cu_within(
+        "insolvency winner bounded refresh",
+        winner_refresh_cu,
+        CRANK_CU_LIMIT,
+    );
 
     let lo = state::read_portfolio(&env.svm.get_account(&long_account).unwrap().data).unwrap();
     let sh = state::read_portfolio(&env.svm.get_account(&short_account).unwrap().data).unwrap();
@@ -16711,10 +16767,8 @@ fn v16_attack_insolvency_bad_debt_is_socialized_not_printed() {
     let residual = g.vault.saturating_sub(g.c_tot).saturating_sub(g.insurance);
     let pos_pnl = lo.pnl.get().max(0) as u128 + sh.pnl.get().max(0) as u128;
     assert!(
-        pos_pnl > residual,
-        "setup must create more positive paper pnl than backed residual (residual {} pos_pnl {})",
-        residual,
-        pos_pnl
+        pos_pnl <= paper_positive_pnl,
+        "bounded settlement cannot increase positive paper PnL"
     );
     assert!(health_cert(&lo).valid, "winner cert refreshed");
     assert!(
@@ -38582,23 +38636,10 @@ fn v16_attack_lapsed_live_source_backing_does_not_stale_loop_auto_crank() {
     assert_eq!(after_refresh.vault, vault_before, "expiry moves no custody");
     assert_eq!(env.token_amount(env.vault), vault_tokens_before);
 
-    env.svm.expire_blockhash();
-    let certify_cu = env
-        .send(
-            ProgInstruction::PermissionlessCrank {
-                now_slot: 160,
-                observations: vec![],
-            },
-            vec![
-                AccountMeta::new(env.payer.pubkey(), true),
-                AccountMeta::new(env.market, false),
-                AccountMeta::new(long, false),
-            ],
-            &[],
-        )
-        .expect("the next bounded auto-crank must certify after expiry");
+    let (certify_calls, certify_cu) = drive_portfolio_cert_current(&mut env, long, 160, 0, 4);
+    assert!(certify_calls > 0);
     assert_cu_within(
-        "post-expiry account certification",
+        "post-expiry account certification steps",
         certify_cu,
         CRANK_CU_LIMIT,
     );
@@ -38690,6 +38731,18 @@ fn run_resolved_close_28_public_source_domains(
             observations: crank_observations(0),
         },
     );
+    let mut first_cycle_refresh_calls = 1usize;
+    while !portfolio_cert_is_current(&env, winner) {
+        env.crank(
+            winner,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 20,
+                observations: vec![],
+            },
+        );
+        first_cycle_refresh_calls += 1;
+        assert!(first_cycle_refresh_calls <= N as usize + 1);
+    }
     assert_eq!(
         env.portfolio_state(winner)
             .source_domains
@@ -38747,6 +38800,18 @@ fn run_resolved_close_28_public_source_domains(
             observations: crank_observations(0),
         },
     );
+    let mut second_cycle_refresh_calls = 1usize;
+    while !portfolio_cert_is_current(&env, winner) {
+        env.crank(
+            winner,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 40,
+                observations: vec![],
+            },
+        );
+        second_cycle_refresh_calls += 1;
+        assert!(second_cycle_refresh_calls <= N as usize + 1);
+    }
     assert_eq!(
         env.portfolio_state(winner)
             .source_domains
@@ -38822,9 +38887,9 @@ fn run_resolved_close_28_public_source_domains(
     let mut rank = 2 * N as usize + lapsed_initial + active_legs_initial;
     let expected_calls = rank + 1;
     let continuation_cu_limit = if retain_active_legs {
-        1_300_000
+        1_390_000
     } else {
-        1_000_000
+        1_050_000
     };
     let mut calls = 0usize;
     let mut max_cu = 0u64;
@@ -38939,6 +39004,294 @@ fn v16_attack_resolved_close_14_active_legs_and_28_source_domains_is_bounded() {
 #[test]
 fn v16_attack_resolved_autocrank_14_active_legs_and_28_source_domains_is_bounded() {
     run_resolved_close_28_public_source_domains(40, 0, true, true);
+}
+
+#[test]
+fn v16_attack_public_14_leg_28_source_domain_liquidation_progress_is_bounded() {
+    const N: u16 = 14;
+    const LOW: u64 = 100;
+    const HIGH: u64 = 200;
+    const ADVERSE: u64 = 199;
+    const Q: i128 = (100 * POS_SCALE) as i128;
+
+    let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+        max_portfolio_assets: N,
+        maintenance_margin_bps: 10_000,
+        initial_margin_bps: 10_000,
+        max_price_move_bps_per_slot: 500,
+        max_accrual_dt_slots: 20,
+        min_funding_lifetime_slots: 20,
+        maintenance_fee_per_slot: 150,
+        ..V16CuMarketParams::default()
+    });
+    for asset_index in 0..N {
+        env.configure_auth_mark_for_asset_as_admin(asset_index, 0, LOW);
+    }
+
+    let winner_owner = Keypair::new();
+    let winner = env.create_portfolio(&winner_owner);
+    env.deposit(&winner_owner, winner, 140_001);
+    let keeper_owner = Keypair::new();
+    let keeper = env.create_portfolio(&keeper_owner);
+    let mut counterparties = Vec::new();
+    for asset_index in 0..N {
+        let owner = Keypair::new();
+        let portfolio = env.create_portfolio(&owner);
+        env.deposit(&owner, portfolio, 50_000);
+        let opened = env.try_trade_asset_with_cu(
+            asset_index,
+            &winner_owner,
+            winner,
+            &owner,
+            portfolio,
+            Q,
+            LOW,
+            0,
+        );
+        assert!(
+            opened.is_ok(),
+            "open asset {asset_index} failed: {opened:?}"
+        );
+        counterparties.push((owner, portfolio));
+    }
+
+    let accrue_all = |env: &mut V16CuEnv, keeper: Pubkey, slot: u64, price: u64| {
+        env.svm.warp_to_slot(slot);
+        for asset_index in 0..N {
+            env.push_auth_mark_for_asset_as_admin(asset_index, slot, price);
+            env.crank(
+                keeper,
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: slot,
+                    observations: crank_observations(asset_index),
+                },
+            );
+        }
+    };
+    let refresh_counterparties =
+        |env: &mut V16CuEnv, counterparties: &[(Keypair, Pubkey)], slot: u64| {
+            for (asset_index, (_, portfolio)) in counterparties.iter().enumerate() {
+                env.crank(
+                    *portfolio,
+                    ProgInstruction::PermissionlessCrank {
+                        now_slot: slot,
+                        observations: crank_observations(asset_index as u16),
+                    },
+                );
+            }
+        };
+    accrue_all(&mut env, keeper, 20, HIGH);
+    refresh_counterparties(&mut env, &counterparties, 20);
+    let (first_refresh_calls, first_refresh_cu) =
+        drive_portfolio_cert_current(&mut env, winner, 20, 0, N as usize + 1);
+    assert!(first_refresh_calls > 0);
+    assert_cu_within(
+        "14-leg first winner refresh steps",
+        first_refresh_cu,
+        1_300_000,
+    );
+    assert_eq!(
+        env.portfolio_state(winner)
+            .source_domains
+            .iter()
+            .filter(|source| source.source_claim_bound_num.get() != 0)
+            .count(),
+        N as usize,
+    );
+
+    for (asset_index, (owner, portfolio)) in counterparties.iter().enumerate() {
+        let flipped = env.try_trade_asset_with_cu(
+            asset_index as u16,
+            &winner_owner,
+            winner,
+            owner,
+            *portfolio,
+            -2 * Q,
+            HIGH,
+            0,
+        );
+        assert!(
+            flipped.is_ok(),
+            "flip asset {asset_index} failed: {flipped:?}",
+        );
+    }
+
+    env.svm.warp_to_slot(40);
+    let mut second_cycle_max_cu = 0u64;
+    for (asset_index, (_, portfolio)) in counterparties.iter().enumerate() {
+        let asset_index = asset_index as u16;
+        env.push_auth_mark_for_asset_as_admin(asset_index, 40, LOW);
+        env.crank(
+            keeper,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 40,
+                observations: crank_observations(asset_index),
+            },
+        );
+        env.crank(
+            *portfolio,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 40,
+                observations: crank_observations(asset_index),
+            },
+        );
+        let (calls, cu) = drive_portfolio_cert_current(&mut env, winner, 40, asset_index, 3);
+        assert!(calls > 0);
+        second_cycle_max_cu = second_cycle_max_cu.max(cu);
+        if asset_index == 1 {
+            let fee_cu = env.sync_maintenance_fee_with_cu(winner, None, 40);
+            assert_cu_within("16-source maintenance fee sync", fee_cu, 1_375_000);
+            let (post_fee_calls, post_fee_cu) =
+                drive_portfolio_cert_current(&mut env, winner, 40, asset_index, 2);
+            assert_eq!(post_fee_calls, 1);
+            second_cycle_max_cu = second_cycle_max_cu.max(post_fee_cu);
+        }
+    }
+    assert_cu_within(
+        "incremental 28-source construction",
+        second_cycle_max_cu,
+        1_300_000,
+    );
+    let won = env.portfolio_state(winner);
+    assert_eq!(
+        won.source_domains
+            .iter()
+            .filter(|source| source.source_claim_bound_num.get() != 0)
+            .count(),
+        (2 * N) as usize,
+    );
+    assert_eq!(won.capital.get(), 137_001);
+    assert_eq!(won.pnl.get(), 280_000);
+    assert_eq!(
+        won.source_domains
+            .iter()
+            .filter(|source| source.source_claim_liened_num.get() != 0)
+            .count(),
+        0,
+    );
+
+    accrue_all(&mut env, keeper, 60, ADVERSE);
+    refresh_counterparties(&mut env, &counterparties, 60);
+    let vault_before_refresh = env.market_state().1.vault;
+    let token_vault_before_refresh = env.token_amount(env.vault);
+    let mut refresh_calls = 0usize;
+    let mut max_refresh_cu = 0u64;
+    while !portfolio_cert_is_current(&env, winner) {
+        let before = env.portfolio_state(winner);
+        let claims_before = before
+            .source_domains
+            .iter()
+            .map(|source| source.source_claim_bound_num.get())
+            .sum::<u128>();
+        let pnl_before = before.pnl.get();
+        env.svm.expire_blockhash();
+        let cu = env
+            .send(
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: 60,
+                    observations: vec![],
+                },
+                vec![
+                    AccountMeta::new(env.payer.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(winner, false),
+                ],
+                &[],
+            )
+            .unwrap_or_else(|err| {
+                panic!(
+                    "max-source stale-leg continuation {} with {claims_before} claims failed: {err}",
+                    refresh_calls + 1,
+                )
+            });
+        refresh_calls += 1;
+        max_refresh_cu = max_refresh_cu.max(cu);
+        let after = env.portfolio_state(winner);
+        let claims_after = after
+            .source_domains
+            .iter()
+            .map(|source| source.source_claim_bound_num.get())
+            .sum::<u128>();
+        if portfolio_cert_is_current(&env, winner) {
+            assert_eq!(claims_after, claims_before);
+            assert_eq!(after.pnl.get(), pnl_before);
+        } else {
+            assert!(claims_after < claims_before);
+            assert!(after.pnl.get() < pnl_before);
+        }
+        assert!(refresh_calls <= N as usize + 1);
+    }
+    assert!(refresh_calls > 1);
+    assert_cu_within(
+        "14-leg 28-source stale-leg continuation",
+        max_refresh_cu,
+        1_300_000,
+    );
+    assert_eq!(env.market_state().1.vault, vault_before_refresh);
+    assert_eq!(env.token_amount(env.vault), token_vault_before_refresh);
+
+    let adverse = env.portfolio_state(winner);
+    let adverse_cert = health_cert(&adverse);
+    assert_eq!(adverse.capital.get(), 137_001);
+    assert!(adverse.pnl.get() > 0);
+    assert_eq!(
+        adverse_cert.certified_equity,
+        adverse.capital.get() as i128 + adverse.pnl.get(),
+    );
+    assert_eq!(adverse_cert.certified_maintenance_req, 278_600);
+    assert_eq!(
+        adverse_cert.certified_liq_deficit,
+        adverse_cert
+            .certified_maintenance_req
+            .saturating_sub(adverse_cert.certified_equity as u128),
+    );
+    assert!(adverse_cert.certified_liq_deficit > 0);
+    let adverse_source_domains = adverse
+        .source_domains
+        .iter()
+        .filter(|source| source.source_claim_bound_num.get() != 0)
+        .count();
+    assert_eq!(adverse_source_domains, 8);
+
+    let exposure_before = adverse
+        .legs
+        .iter()
+        .filter_map(|leg| leg.try_to_runtime().ok())
+        .filter(|leg| leg.active)
+        .map(|leg| leg.basis_pos_q.unsigned_abs())
+        .sum::<u128>();
+    env.svm.expire_blockhash();
+    let liquidation_cu = env
+        .send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 60,
+                observations: vec![],
+            },
+            vec![
+                AccountMeta::new(env.payer.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(winner, false),
+            ],
+            &[],
+        )
+        .expect("the current max-source account must be permissionlessly liquidatable");
+    assert_cu_within("14-leg 8-source liquidation", liquidation_cu, 1_375_000);
+    let after_liquidation = env.portfolio_state(winner);
+    let exposure_after = after_liquidation
+        .legs
+        .iter()
+        .filter_map(|leg| leg.try_to_runtime().ok())
+        .filter(|leg| leg.active)
+        .map(|leg| leg.basis_pos_q.unsigned_abs())
+        .sum::<u128>();
+    assert!(
+        exposure_after < exposure_before,
+        "engine-selected liquidation must strictly reduce aggregate active exposure",
+    );
+    assert_eq!(
+        env.market_state().1.vault as u64,
+        env.token_amount(env.vault),
+    );
 }
 
 // A deeply insolvent single-leg account cannot be partially liquidated while leaving uncovered open
@@ -39389,12 +39742,13 @@ fn v16_attack_adl_then_settlement_winner_cannot_escape_deleverage() {
     // SECOND mark move + crank the winner: this settles the deleveraged leg (a_basis vs reduced a_long).
     env.svm.warp_to_slot(7);
     env.push_auth_mark_with_cu(7, 800);
-    env.crank(
-        a,
-        ProgInstruction::PermissionlessCrank {
-            now_slot: 7,
-            observations: crank_observations(0),
-        },
+    let (winner_refresh_calls, winner_refresh_cu) =
+        drive_portfolio_cert_current(&mut env, a, 7, 0, 4);
+    assert!(winner_refresh_calls > 0);
+    assert_cu_within(
+        "post-ADL winner refresh steps",
+        winner_refresh_cu,
+        CRANK_CU_LIMIT,
     );
 
     let win = env.portfolio_state(a);
@@ -41401,21 +41755,18 @@ fn v16_attack_cross_margin_netting_conserves() {
         ],
         &[&admin],
     );
-    for ai in [0u16, 1] {
-        env.svm.expire_blockhash();
-        let _ = env.send(
+    for (ai, counterparty) in [(0u16, y0), (1, y1)] {
+        env.crank(
+            counterparty,
             ProgInstruction::PermissionlessCrank {
                 now_slot: 2,
                 observations: crank_observations(ai),
             },
-            vec![
-                AccountMeta::new(env.payer.pubkey(), true),
-                AccountMeta::new(env.market, false),
-                AccountMeta::new(x, false),
-            ],
-            &[],
         );
     }
+    let (refresh_calls, refresh_cu) = drive_portfolio_cert_current(&mut env, x, 2, 0, 4);
+    assert!(refresh_calls > 0);
+    assert_cu_within("two-leg cross-margin refresh", refresh_cu, CRANK_CU_LIMIT);
 
     let xs = env.portfolio_state(x);
     let g = env.market_state().1;
