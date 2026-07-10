@@ -9806,6 +9806,124 @@ fn v16_attack_auto_crank_current_solvent_partial_liquidation_makes_progress() {
     assert!(after_group.vault >= after_group.c_tot + after_group.insurance);
 }
 
+// Issue #103: after a partial liquidation, a crossed trade must not use one account's same-call
+// side addition to fund the other account's reduction of pre-existing open interest.
+#[test]
+fn v16_attack_crossed_trade_cannot_turn_partial_liquidation_survivors_same_side() {
+    const PRICE: u64 = 1;
+    const OPEN_Q: i128 = 13_000 * POS_SCALE as i128;
+
+    let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+        h_max: 6_480_000,
+        initial_price: PRICE,
+        maintenance_margin_bps: 500,
+        initial_margin_bps: 500,
+        min_nonzero_mm_req: 599,
+        min_nonzero_im_req: 600,
+        max_price_move_bps_per_slot: 24,
+        max_accrual_dt_slots: 20,
+        max_abs_funding_e9_per_slot: 0,
+        min_funding_lifetime_slots: 10_000_000,
+        liquidation_fee_bps: 0,
+        maintenance_fee_per_slot: 27,
+        ..V16CuMarketParams::default()
+    });
+    let owner_a = Keypair::new();
+    let owner_b = Keypair::new();
+    let account_a = env.create_portfolio(&owner_a);
+    let account_b = env.create_portfolio(&owner_b);
+    env.deposit(&owner_a, account_a, 1_000);
+    env.deposit(&owner_b, account_b, 1_189);
+
+    env.svm.warp_to_slot(8);
+    let open_cu = env
+        .try_trade_asset_with_cu(
+            0, &owner_a, account_a, &owner_b, account_b, OPEN_Q, PRICE, 0,
+        )
+        .expect("open trade");
+    assert_cu_within("issue 103 open", open_cu, TRADE_CU_LIMIT);
+
+    env.svm.warp_to_slot(27);
+    env.crank(
+        account_a,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 27,
+            observations: crank_observations(0),
+        },
+    );
+    env.svm.warp_to_slot(35);
+    env.sync_maintenance_fee_with_cu(account_b, None, 35);
+    let liquidation_cu = env.crank_steps(
+        account_b,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 35,
+            observations: crank_observations(0),
+        },
+        2,
+    );
+    assert_cu_within(
+        "issue 103 partial liquidation",
+        liquidation_cu,
+        CRANK_CU_LIMIT,
+    );
+
+    let (_, group) = env.market_state();
+    let asset = group.assets[0];
+    let account_a_state = env.portfolio_state(account_a);
+    let account_b_state = env.portfolio_state(account_b);
+    let leg_a = active_leg_for_asset(&account_a_state, 0);
+    let leg_b = active_leg_for_asset(&account_b_state, 0);
+    assert_eq!(asset.lifecycle, AssetLifecycleV16::Active);
+    assert_eq!(asset.mode_long, SideModeV16::Normal);
+    assert_eq!(asset.mode_short, SideModeV16::Normal);
+    assert_eq!(leg_a.side, SideV16::Long);
+    assert_eq!(leg_b.side, SideV16::Short);
+    let survivor_q = leg_a.basis_pos_q.unsigned_abs();
+    let liquidated_survivor_q = leg_b.basis_pos_q.unsigned_abs();
+    assert_eq!(survivor_q, OPEN_Q.unsigned_abs());
+    assert!(
+        liquidated_survivor_q > 0 && liquidated_survivor_q < survivor_q,
+        "setup must leave a genuine partial-liquidation imbalance"
+    );
+    assert_eq!(asset.oi_eff_long_q, liquidated_survivor_q);
+    assert_eq!(asset.oi_eff_short_q, liquidated_survivor_q);
+
+    let cross_q = liquidated_survivor_q + (survivor_q - liquidated_survivor_q) / 2;
+    assert!(liquidated_survivor_q < cross_q && cross_q < survivor_q);
+    let same_call_long_addition = cross_q - liquidated_survivor_q;
+    assert_eq!(
+        asset.oi_eff_long_q + same_call_long_addition,
+        cross_q,
+        "the rejected transaction must exercise same-call OI self-financing"
+    );
+
+    env.svm.expire_blockhash();
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let account_a_before = env.svm.get_account(&account_a).unwrap();
+    let account_b_before = env.svm.get_account(&account_b).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    let rejected = env
+        .try_trade_asset_with_cu(
+            0,
+            &owner_b,
+            account_b,
+            &owner_a,
+            account_a,
+            cross_q as i128,
+            PRICE,
+            0,
+        )
+        .expect_err("crossed trade must not create two same-side survivor legs");
+    assert!(
+        rejected.contains("Custom(21)") || rejected.contains("custom program error: 0x15"),
+        "crossed trade must fail at the engine OI gate, got {rejected}"
+    );
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+    assert_eq!(env.svm.get_account(&account_a).unwrap(), account_a_before);
+    assert_eq!(env.svm.get_account(&account_b).unwrap(), account_b_before);
+    assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+}
+
 #[test]
 fn v16_attack_stale_resolve_matured_no_observation_liquidation_rejects() {
     let mut env = V16CuEnv::new();
