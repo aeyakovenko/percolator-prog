@@ -9337,24 +9337,20 @@ pub mod processor {
                     let lifecycle = group.markets[asset_index].engine.asset.lifecycle;
                     let retired_policy_count =
                         backing_fee_policy_count_from_profile(&existing_profile);
+                    if matches!(
+                        lifecycle,
+                        ASSET_LIFECYCLE_RECOVERY | ASSET_LIFECYCLE_RETIRED
+                    ) {
+                        group
+                            .clear_terminal_spent_domain_budgets_for_empty_asset_not_atomic(
+                                asset_index,
+                            )
+                            .map_err(map_v16_error)?;
+                    }
                     match lifecycle {
-                        ASSET_LIFECYCLE_ACTIVE | ASSET_LIFECYCLE_DRAIN_ONLY => {
-                            group
-                                .retire_empty_asset_not_atomic(asset_index, authenticated_slot)
-                                .map_err(map_v16_error)?;
-                            canonicalize_retired_asset_slot_view(&mut group, asset_index)?;
-                            cfg.free_market_slot_count = cfg
-                                .free_market_slot_count
-                                .checked_add(1)
-                                .ok_or(PercolatorError::EngineCounterOverflow)?;
-                            subtract_backing_fee_policy_count(&mut cfg, retired_policy_count)?;
-                        }
-                        ASSET_LIFECYCLE_RECOVERY => {
-                            group
-                                .clear_terminal_spent_domain_budgets_for_empty_asset_not_atomic(
-                                    asset_index,
-                                )
-                                .map_err(map_v16_error)?;
+                        ASSET_LIFECYCLE_ACTIVE
+                        | ASSET_LIFECYCLE_DRAIN_ONLY
+                        | ASSET_LIFECYCLE_RECOVERY => {
                             group
                                 .retire_empty_asset_not_atomic(asset_index, authenticated_slot)
                                 .map_err(map_v16_error)?;
@@ -9366,11 +9362,6 @@ pub mod processor {
                             subtract_backing_fee_policy_count(&mut cfg, retired_policy_count)?;
                         }
                         ASSET_LIFECYCLE_RETIRED => {
-                            group
-                                .clear_terminal_spent_domain_budgets_for_empty_asset_not_atomic(
-                                    asset_index,
-                                )
-                                .map_err(map_v16_error)?;
                             group
                                 .retire_empty_asset_not_atomic(asset_index, authenticated_slot)
                                 .map_err(map_v16_error)?;

@@ -44262,146 +44262,56 @@ fn v16_attack_asset1_insolvency_cannot_drain_asset0_domain_insurance() {
     );
 }
 
-// LoF/DoS sweep: delegated domain insurance can be fully consumed by a public liquidation.
-// Once the winning recovery leg is forfeited and source-backed PnL is converted,
-// the asset is empty, but terminal spent-domain and consumed-only backing ledgers
-// used to block restart/retire forever. Restart must clear only those terminal
-// ledgers and preserve the normal empty-asset gates.
-#[test]
-fn v16_attack_spent_domain_empty_recovery_asset_can_restart() {
+fn terminal_spent_asset_env(with_provider_receivable: bool) -> (V16CuEnv, Keypair) {
     let mut env = V16CuEnv::new_with_market_params_and_price_move(2, 10_000, 10_000, 10_000);
     let admin = env.admin.insecure_clone();
     env.configure_auth_mark_with_cu(0, 100);
     env.configure_auth_mark_for_asset_as_admin(1, 1, 100);
-    env.configure_permissionless_resolve_with_cu(100, 1);
     env.top_up_insurance_domain_with_authority(&admin, 2, 450);
-
-    let long_owner = Keypair::new();
-    let long = env.create_portfolio(&long_owner);
-    let short_owner = Keypair::new();
-    let short = env.create_portfolio(&short_owner);
-    env.deposit(&long_owner, long, 1_000_000);
-    env.deposit(&short_owner, short, 250);
-    env.trade_asset_with_cu(
-        1,
-        &long_owner,
-        long,
-        &short_owner,
-        short,
-        POS_SCALE as i128,
-        100,
-        0,
-    );
-
-    for (slot, mark) in [(2u64, 200u64), (3, 400), (4, 800)] {
-        env.svm.warp_to_slot(slot);
-        env.push_auth_mark_for_asset_as_admin(1, slot, mark);
-        for portfolio in [long, short] {
-            env.svm.expire_blockhash();
-            let _ = env.send(
-                ProgInstruction::PermissionlessCrank {
-                    now_slot: slot,
-                    close_q: 0,
-                    observations: crank_observations(1),
-                },
-                vec![
-                    AccountMeta::new(env.payer.pubkey(), true),
-                    AccountMeta::new(env.market, false),
-                    AccountMeta::new(portfolio, false),
-                ],
-                &[],
-            );
+    env.mutate_market(|_, group| {
+        group.assets[1].lifecycle = AssetLifecycleV16::Recovery;
+        group.insurance_domain_spent[2] = 450;
+        group.insurance_domain_budget_remaining_total -= 450;
+        group.insurance -= 450;
+        group.c_tot += 450;
+        if with_provider_receivable {
+            let receivable = 250 * BOUND_SCALE;
+            group.source_credit[3] = percolator::SourceCreditStateV16 {
+                spent_backing_num: receivable,
+                provider_receivable_num: receivable,
+                ..percolator::SourceCreditStateV16::EMPTY
+            };
+            group.source_backing_buckets[3] = percolator::BackingBucketV16 {
+                market_id: group.assets[1].market_id,
+                consumed_liened_backing_num: receivable,
+                expiry_slot: 1,
+                status: BackingBucketStatusV16::Expired,
+                ..percolator::BackingBucketV16::EMPTY
+            };
         }
-    }
+    });
+    (env, admin)
+}
 
-    env.svm.expire_blockhash();
-    env.send(
-        ProgInstruction::PermissionlessCrank {
-            now_slot: 4,
-            close_q: POS_SCALE,
-            observations: crank_observations(1),
-        },
-        vec![
-            AccountMeta::new(env.payer.pubkey(), true),
-            AccountMeta::new(env.market, false),
-            AccountMeta::new(short, false),
-        ],
-        &[],
-    )
-    .expect("public liquidation consumes the delegated asset-1 long-domain insurance");
-    let after_liquidation = env.market_state().1;
-    assert_eq!(after_liquidation.insurance_domain_budget[2], 450);
-    assert_eq!(after_liquidation.insurance_domain_spent[2], 450);
-    assert!(percolator::active_bitmap_is_empty(active_bitmap(
-        &env.portfolio_state(short)
-    )));
-    assert_eq!(
-        percolator::active_bitmap_count_ones(active_bitmap(&env.portfolio_state(long))),
-        1,
-        "winner recovery leg remains before owner forfeit"
-    );
+// Issue #91: fully consumed insurance is history, not a permanent lifecycle lock.
+// Drive the public wrapper instruction and retain unrelated asset/value state.
+#[test]
+fn v16_attack_spent_only_recovery_asset_can_restart() {
+    let (mut env, admin) = terminal_spent_asset_env(false);
+    let before = env.market_state().1;
+    let asset0_before = before.assets[0];
+    let vault_before = before.vault;
+    let c_tot_before = before.c_tot;
+    let insurance_before = before.insurance;
+    assert_eq!(before.assets[1].lifecycle, AssetLifecycleV16::Recovery);
+    assert_eq!(before.insurance_domain_budget[2], 450);
+    assert_eq!(before.insurance_domain_spent[2], 450);
+    assert_eq!(before.insurance_domain_budget_remaining_total, 0);
 
-    env.svm.warp_to_slot(5);
-    env.update_asset_lifecycle_as_admin_with_cu(processor::ASSET_ACTION_SHUTDOWN, 1, 5, 0);
-    let forfeit_cu = env.forfeit_recovery_leg_with_cu(&long_owner, long, 1, 1);
-    assert_cu_within(
-        "spent-domain empty-asset ForfeitRecoveryLeg",
-        forfeit_cu,
-        CUSTODY_CU_LIMIT,
-    );
-    let after_forfeit = env.market_state().1;
-    assert_eq!(
-        after_forfeit.assets[1].lifecycle,
-        AssetLifecycleV16::Recovery
-    );
-    assert_eq!(after_forfeit.insurance_domain_budget[2], 450);
-    assert_eq!(after_forfeit.insurance_domain_spent[2], 450);
-    assert_eq!(after_forfeit.assets[1].oi_eff_long_q, 0);
-    assert_eq!(after_forfeit.assets[1].oi_eff_short_q, 0);
-    assert!(percolator::active_bitmap_is_empty(active_bitmap(
-        &env.portfolio_state(long)
-    )));
-    let convert_cu = env.convert_released_pnl_with_cu(&long_owner, long, 700);
-    assert_cu_within(
-        "spent-domain empty-asset ConvertReleasedPnl",
-        convert_cu,
-        CUSTODY_CU_LIMIT,
-    );
-    env.svm.expire_blockhash();
-    let convert2_cu = env.convert_released_pnl_with_cu(&long_owner, long, 700);
-    assert_cu_within(
-        "spent-domain empty-asset ConvertReleasedPnl final",
-        convert2_cu,
-        CUSTODY_CU_LIMIT,
-    );
-    let after_convert = env.market_state().1;
-    assert_eq!(after_convert.source_credit[3].positive_claim_bound_num, 0);
-    assert_eq!(after_convert.source_credit[3].exact_positive_claim_num, 0);
-    assert_eq!(after_convert.source_credit[3].fresh_reserved_backing_num, 0);
-    assert_eq!(
-        after_convert.source_credit[3].spent_backing_num,
-        250 * BOUND_SCALE
-    );
-    assert_eq!(
-        after_convert.source_credit[3].provider_receivable_num,
-        250 * BOUND_SCALE
-    );
-    assert_eq!(
-        after_convert.source_backing_buckets[3].fresh_unliened_backing_num,
-        0
-    );
-    assert_eq!(
-        after_convert.source_backing_buckets[3].consumed_liened_backing_num,
-        250 * BOUND_SCALE
-    );
-    assert_eq!(
-        after_convert.source_backing_buckets[3].status,
-        BackingBucketStatusV16::Expired
-    );
-    env.svm.warp_to_slot(6);
+    env.svm.warp_to_slot(3);
     let restart_cu = env
-        .try_restart_asset_oracle_with_authority(&admin, 1, 6, 100)
-        .expect("empty Recovery asset with fully spent domain budget remains restartable");
+        .try_restart_asset_oracle_with_authority(&admin, 1, 3, 100)
+        .expect("spent-only Recovery asset remains restartable");
     assert_cu_within(
         "spent-domain empty-asset RestartAssetOracle",
         restart_cu,
@@ -44410,26 +44320,38 @@ fn v16_attack_spent_domain_empty_recovery_asset_can_restart() {
     let after_restart = env.market_state().1;
     assert_eq!(after_restart.assets[1].lifecycle, AssetLifecycleV16::Active);
     assert_eq!(after_restart.assets[1].effective_price, 100);
-    assert_eq!(
-        after_restart.insurance_domain_budget[2], 0,
-        "spent-only budget is exhausted, not preserved as withdrawable funds"
-    );
+    assert_eq!(after_restart.insurance_domain_budget[2], 0);
     assert_eq!(after_restart.insurance_domain_spent[2], 0);
-    assert_eq!(after_restart.source_credit[3].spent_backing_num, 0);
-    assert_eq!(after_restart.source_credit[3].provider_receivable_num, 0);
-    assert_eq!(
-        after_restart.source_backing_buckets[3].consumed_liened_backing_num,
-        0
-    );
-    assert_eq!(
-        after_restart.source_backing_buckets[3].status,
-        BackingBucketStatusV16::Empty
-    );
-    assert!(
-        after_restart.vault >= after_restart.c_tot + after_restart.insurance,
-        "senior conservation still holds after terminal spent-domain cleanup"
-    );
+    assert_eq!(after_restart.vault, vault_before);
+    assert_eq!(after_restart.c_tot, c_tot_before);
+    assert_eq!(after_restart.insurance, insurance_before);
+    assert_eq!(after_restart.assets[0], asset0_before);
     assert_eq!(after_restart.vault as u64, env.token_amount(env.vault));
+}
+
+// Frozen-spec guard: consumed backing is a provider receivable. Even when the
+// insurance budget is fully spent, restart must reject atomically rather than
+// erase that recoverable principal.
+#[test]
+fn v16_attack_spent_cleanup_cannot_erase_provider_receivable() {
+    let (mut env, admin) = terminal_spent_asset_env(true);
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    let before = env.market_state().1;
+    assert_eq!(
+        before.source_credit[3].provider_receivable_num,
+        250 * BOUND_SCALE
+    );
+    assert_eq!(
+        before.source_backing_buckets[3].consumed_liened_backing_num,
+        250 * BOUND_SCALE
+    );
+
+    env.svm.warp_to_slot(3);
+    let rejected = env.try_restart_asset_oracle_with_authority(&admin, 1, 3, 100);
+    assert!(rejected.is_err(), "provider receivable must block restart");
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+    assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
 }
 
 // Product spec — per-asset cold-storage admin keys (governance): EVERY asset (including asset 0) has
