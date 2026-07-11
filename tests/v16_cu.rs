@@ -26868,6 +26868,13 @@ fn v16_attack_non_base_local_stale_domain_withdrawals_reject() {
 
     env.svm.expire_blockhash();
     let stale_insurance = env.try_withdraw_insurance_asset_with_authority(&creator, 1, 50);
+    if let Ok((dest, _)) = &stale_insurance {
+        assert_eq!(
+            env.token_amount(*dest),
+            50,
+            "an accepted stale insurance withdrawal moves real custody"
+        );
+    }
     assert!(
         stale_insurance.is_err(),
         "WithdrawInsuranceAsset must not drain protection from a locally stale non-base asset"
@@ -26911,6 +26918,13 @@ fn v16_attack_non_base_local_stale_domain_withdrawals_reject() {
         ],
         &[&creator],
     );
+    if stale_backing.is_ok() {
+        assert_eq!(
+            env.token_amount(backing_dest),
+            50,
+            "an accepted stale backing withdrawal moves real custody"
+        );
+    }
     assert!(
         stale_backing.is_err(),
         "WithdrawBackingBucket must not drain backing from a locally stale non-base asset"
@@ -26951,6 +26965,13 @@ fn v16_attack_non_base_local_stale_domain_withdrawals_reject() {
         ],
         &[&creator],
     );
+    if stale_earnings.is_ok() {
+        assert_eq!(
+            env.token_amount(earnings_dest),
+            10,
+            "an accepted stale earnings withdrawal moves real custody"
+        );
+    }
     assert!(
         stale_earnings.is_err(),
         "WithdrawBackingBucketEarnings must not drain provider earnings from a locally stale non-base asset"
