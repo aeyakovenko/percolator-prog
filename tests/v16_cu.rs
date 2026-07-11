@@ -10063,7 +10063,6 @@ fn v16_attack_non_base_local_stale_no_observation_liquidation_rejects() {
         short_account,
         ProgInstruction::PermissionlessCrank {
             now_slot: 2,
-            close_q: 0,
             observations: crank_observations(1),
         },
     );
@@ -10072,7 +10071,6 @@ fn v16_attack_non_base_local_stale_no_observation_liquidation_rejects() {
         short_account,
         ProgInstruction::PermissionlessCrank {
             now_slot: 3,
-            close_q: 0,
             observations: crank_observations(1),
         },
     );
@@ -10104,7 +10102,6 @@ fn v16_attack_non_base_local_stale_no_observation_liquidation_rejects() {
     let result = env.send(
         ProgInstruction::PermissionlessCrank {
             now_slot: 7,
-            close_q: POS_SCALE,
             observations: vec![],
         },
         vec![
@@ -10135,7 +10132,6 @@ fn v16_attack_non_base_local_stale_no_observation_liquidation_rejects() {
     let fresh_liquidation = env.send(
         ProgInstruction::PermissionlessCrank {
             now_slot: 7,
-            close_q: POS_SCALE,
             observations: vec![],
         },
         vec![

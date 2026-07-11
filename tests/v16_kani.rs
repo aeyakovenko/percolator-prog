@@ -35,6 +35,62 @@ fn kani_v16_premium_funding_rate_is_clamped_and_signed() {
 }
 
 #[kani::proof]
+fn kani_v16_missing_selected_observation_resolve_boundary_is_exact_and_live() {
+    let price_managed = kani::any::<bool>();
+    let resolve_stale_slots = kani::any::<u64>();
+    let last_good_oracle_slot = kani::any::<u64>();
+    let now_slot = kani::any::<u64>();
+    let rejected = policy_v16::missing_selected_observation_is_resolve_matured(
+        price_managed,
+        resolve_stale_slots,
+        last_good_oracle_slot,
+        now_slot,
+    );
+
+    kani::cover!(
+        rejected && now_slot - last_good_oracle_slot == resolve_stale_slots,
+        "exact local-stale boundary rejects"
+    );
+    kani::cover!(
+        rejected && now_slot - last_good_oracle_slot > resolve_stale_slots,
+        "matured selected profile rejects after the boundary"
+    );
+    kani::cover!(
+        price_managed
+            && resolve_stale_slots != 0
+            && now_slot >= last_good_oracle_slot
+            && now_slot - last_good_oracle_slot < resolve_stale_slots
+            && !rejected,
+        "fresh selected profile remains live"
+    );
+    kani::cover!(
+        now_slot < last_good_oracle_slot && !rejected,
+        "regressed slot cannot manufacture staleness"
+    );
+    kani::cover!(
+        (!price_managed || resolve_stale_slots == 0) && !rejected,
+        "unmanaged or disabled profiles remain live"
+    );
+
+    if rejected {
+        assert!(price_managed);
+        assert!(resolve_stale_slots != 0);
+        assert!(now_slot >= last_good_oracle_slot);
+        assert!(now_slot - last_good_oracle_slot >= resolve_stale_slots);
+    }
+    if price_managed
+        && resolve_stale_slots != 0
+        && now_slot >= last_good_oracle_slot
+        && now_slot - last_good_oracle_slot >= resolve_stale_slots
+    {
+        assert!(rejected);
+    }
+    if !price_managed || resolve_stale_slots == 0 || now_slot < last_good_oracle_slot {
+        assert!(!rejected);
+    }
+}
+
+#[kani::proof]
 fn kani_v16_init_market_decode_preserves_wire_fields() {
     // Full-width symbolic inputs (audit: avoid the u16->u64/u128 widening collapse so
     // narrow-read / high-byte decode bugs are observable).
