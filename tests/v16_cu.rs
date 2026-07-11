@@ -63281,28 +63281,35 @@ fn v16_bpf_public_stale_7_leg_tradenocpi_boundary_is_bounded() {
         "counterparty progress makes the seven-leg target stale"
     );
 
-    let trade = env.try_trade_asset_with_cu(
-        0,
-        &long_owner,
-        long_account,
-        &short_owner,
-        short_account,
-        -(POS_SCALE as i128),
-        95,
-        0,
+    let cu = env
+        .try_trade_asset_with_cu(
+            0,
+            &long_owner,
+            long_account,
+            &short_owner,
+            short_account,
+            -(POS_SCALE as i128),
+            95,
+            0,
+        )
+        .expect("stale seven-leg risk reduction must refresh and execute");
+    println!("v16 stale 7-leg TradeNoCpi boundary CU: {cu}");
+    assert!(cu < 1_400_000, "stale 7-leg trade exceeded tx CU: {cu}");
+
+    let long_after = env.portfolio_state(long_account);
+    let short_after = env.portfolio_state(short_account);
+    assert!(!has_active_leg_for_asset(&long_after, 0));
+    assert!(!has_active_leg_for_asset(&short_after, 0));
+    assert_eq!(
+        percolator::active_bitmap_count_ones(active_bitmap(&long_after)),
+        6,
+        "the bounded trade closes exactly one stale leg"
     );
-    match trade {
-        Ok(cu) => {
-            println!("v16 stale 7-leg TradeNoCpi boundary CU: {cu}");
-            assert!(cu < 1_400_000, "stale 7-leg trade exceeded tx CU: {cu}");
-        }
-        Err(err) => {
-            assert!(
-                !err.contains("exceeded CUs"),
-                "stale 7-leg trade should not hit the CU cliff below the pre-reject threshold: {err}"
-            );
-        }
-    }
+    assert_eq!(
+        percolator::active_bitmap_count_ones(active_bitmap(&short_after)),
+        6,
+        "the counterparty retains the same six unrelated legs"
+    );
 }
 
 #[test]
