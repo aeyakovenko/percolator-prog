@@ -61086,3 +61086,143 @@ fn v16_attack_public_20_source_second_lien_trade_has_bounded_cu() {
         2,
     );
 }
+
+// A backing bucket can expire after a normal risk increase has liened its source-backed PnL.
+// Expiry must itself make auto-crank actionable; otherwise crank reports NoAction while owner
+// reductions read the lapsed source domain and return EngineStale indefinitely.
+#[test]
+fn v16_attack_public_expired_source_lien_auto_crank_restores_progress() {
+    const Q: i128 = (1_000 * POS_SCALE) as i128;
+    const INCREASE_Q: i128 = (50 * POS_SCALE) as i128;
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(1, 1_000, 5_000, 500);
+    env.configure_auth_mark_for_asset_as_admin(0, 0, 100);
+    env.top_up_backing_bucket(1, 100_000, 2);
+
+    let owner = Keypair::new();
+    let account = env.create_portfolio(&owner);
+    let counterparty_owner = Keypair::new();
+    let counterparty = env.create_portfolio(&counterparty_owner);
+    env.deposit(&owner, account, 52_501);
+    env.deposit(&counterparty_owner, counterparty, 1_000_000);
+    env.trade_asset_with_cu(
+        0,
+        &owner,
+        account,
+        &counterparty_owner,
+        counterparty,
+        Q,
+        100,
+        0,
+    );
+
+    env.svm.warp_to_slot(1);
+    env.push_auth_mark_for_asset_as_admin(0, 1, 105);
+    for portfolio in [counterparty, account] {
+        env.crank(
+            portfolio,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 1,
+                observations: crank_observations(0),
+            },
+        );
+    }
+    assert_eq!(env.portfolio_state(account).pnl.get(), 5_000);
+    env.trade_asset_with_cu(
+        0,
+        &owner,
+        account,
+        &counterparty_owner,
+        counterparty,
+        INCREASE_Q,
+        105,
+        0,
+    );
+
+    let lien_before = env.portfolio_state(account).source_domains[0];
+    assert!(lien_before.source_claim_counterparty_liened_num.get() > 0);
+    assert!(lien_before.source_lien_counterparty_backing_num.get() > 0);
+    assert_eq!(lien_before.source_claim_impaired_num.get(), 0);
+    let market_before_expiry = env.market_state().1;
+    let token_vault_before_expiry = env.token_amount(env.vault);
+
+    env.svm.warp_to_slot(2);
+    env.push_auth_mark_for_asset_as_admin(0, 2, 105);
+    env.svm.expire_blockhash();
+    let expiry_crank_cu = env
+        .send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 2,
+                observations: crank_observations(0),
+            },
+            vec![
+                AccountMeta::new(env.payer.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(account, false),
+            ],
+            &[],
+        )
+        .expect("bucket expiry must be a permissionless auto-crank progress step");
+    assert_cu_within(
+        "expired source-lien reconciliation",
+        expiry_crank_cu,
+        400_000,
+    );
+
+    let reconciled = env.portfolio_state(account);
+    let source = reconciled.source_domains[0];
+    let market_after_expiry = env.market_state().1;
+    let bucket = market_after_expiry.source_backing_buckets[1];
+    let domain = market_after_expiry.source_credit[1];
+    assert_eq!(reconciled.pnl.get(), 5_000);
+    assert_eq!(
+        active_leg_for_asset(&reconciled, 0).basis_pos_q,
+        Q + INCREASE_Q
+    );
+    assert_eq!(source.source_claim_liened_num.get(), 0);
+    assert_eq!(source.source_claim_counterparty_liened_num.get(), 0);
+    assert_eq!(source.source_lien_effective_reserved.get(), 0);
+    assert_eq!(source.source_lien_counterparty_backing_num.get(), 0);
+    assert_eq!(
+        source.source_claim_impaired_num.get(),
+        lien_before.source_claim_counterparty_liened_num.get()
+    );
+    assert_eq!(
+        source.source_lien_impaired_effective_reserved.get(),
+        lien_before.source_lien_effective_reserved.get()
+    );
+    assert!(health_cert(&reconciled).valid);
+    assert_eq!(bucket.status, percolator::BackingBucketStatusV16::Impaired);
+    assert_eq!(bucket.valid_liened_backing_num, 0);
+    assert_eq!(domain.valid_liened_backing_num, 0);
+    assert_eq!(domain.fresh_reserved_backing_num, 0);
+    assert_eq!(domain.credit_rate_num, 0);
+    assert_eq!(market_after_expiry.vault, market_before_expiry.vault);
+    assert_eq!(env.token_amount(env.vault), token_vault_before_expiry);
+
+    env.svm.expire_blockhash();
+    let reduce_cu = env
+        .send(
+            ProgInstruction::RebalanceReduce {
+                asset_index: 0,
+                reduce_q: POS_SCALE,
+            },
+            vec![
+                AccountMeta::new(owner.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(account, false),
+            ],
+            &[&owner],
+        )
+        .expect("the owner must be able to reduce after permissionless expiry reconciliation");
+    assert_cu_within(
+        "post-expiry unilateral position reduction",
+        reduce_cu,
+        MULTI_ASSET_OPEN_TRADE_CU_LIMIT,
+    );
+    assert_eq!(
+        active_leg_for_asset(&env.portfolio_state(account), 0).basis_pos_q,
+        Q + INCREASE_Q - POS_SCALE as i128
+    );
+    assert_eq!(env.market_state().1.vault, market_before_expiry.vault);
+    assert_eq!(env.token_amount(env.vault), token_vault_before_expiry);
+}
