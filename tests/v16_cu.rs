@@ -53728,7 +53728,7 @@ fn v16_attack_matcher_context_replay_after_lp_close_reinit_rejects() {
         (2 * POS_SCALE) as i128,
         100,
     )
-    .expect("first hostile matcher call writes a valid partial response");
+    .expect("first hostile matcher call writes a valid response");
     assert_eq!(env.market_state().0.matcher_req_seq, 1);
     assert_eq!(
         u64::from_le_bytes(
@@ -53816,6 +53816,34 @@ fn v16_attack_matcher_context_replay_after_lp_close_reinit_rejects() {
     assert_eq!(env.svm.get_account(&taker_account).unwrap(), taker_before);
     assert_eq!(env.svm.get_account(&lp_account).unwrap(), lp_before);
     assert_eq!(env.svm.get_account(&ctx).unwrap(), ctx_before);
+
+    let mut fresh_ctx = env.svm.get_account(&ctx).unwrap();
+    fresh_ctx.data[64] = 10;
+    env.svm.set_account(ctx, fresh_ctx).unwrap();
+    env.svm.expire_blockhash();
+    env.try_trade_cpi_with_cu_on_asset(
+        &taker,
+        taker_account,
+        &lp,
+        lp_account,
+        hostile,
+        ctx,
+        delegate,
+        0,
+        (2 * POS_SCALE) as i128,
+        100,
+    )
+    .expect("a freshly written matcher response remains live after LP close/reinit");
+    assert_eq!(env.market_state().0.matcher_req_seq, 2);
+    assert_eq!(
+        u64::from_le_bytes(
+            env.svm.get_account(&ctx).unwrap().data[32..40]
+                .try_into()
+                .unwrap()
+        ),
+        2,
+        "post-reinit fill is bound to the next market-level request id"
+    );
 }
 
 // DoS/manipulation rate-limit: PushEwmaMark feeds a SMOOTHED mark (EWMA over dt slots). A mark

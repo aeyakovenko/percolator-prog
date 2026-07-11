@@ -9,6 +9,41 @@ use percolator_prog::matcher_abi::{
 use percolator_prog::policy_v16;
 
 #[kani::proof]
+fn kani_v16_matcher_request_ids_are_strict_unique_and_fail_closed() {
+    let current: u64 = kani::any();
+    let first = policy_v16::next_matcher_request_id(current);
+
+    if current == u64::MAX {
+        assert!(first.is_none());
+    } else {
+        let first = first.unwrap();
+        assert_eq!(first, current + 1);
+        assert!(first > current);
+        assert_ne!(first, 0);
+
+        let second = policy_v16::next_matcher_request_id(first);
+        if first == u64::MAX {
+            assert!(second.is_none());
+        } else {
+            let second = second.unwrap();
+            assert_eq!(second, first + 1);
+            assert!(second > first);
+            assert_ne!(second, current);
+        }
+    }
+
+    kani::cover!(current < u64::MAX - 1, "two successive unique ids are live");
+    kani::cover!(
+        current == u64::MAX - 1 && first == Some(u64::MAX),
+        "last id is issued without wrapping"
+    );
+    kani::cover!(
+        current == u64::MAX && first.is_none(),
+        "exhaustion rejects instead of replaying id zero"
+    );
+}
+
+#[kani::proof]
 fn kani_v16_premium_funding_rate_is_clamped_and_signed() {
     let mark_raw: u16 = kani::any();
     let index_raw: u16 = kani::any();

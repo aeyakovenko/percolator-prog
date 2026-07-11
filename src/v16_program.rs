@@ -1376,9 +1376,7 @@ pub mod state {
     pub fn bump_matcher_req_seq(data: &mut [u8]) -> Result<u64, ProgramError> {
         check_header(data, KIND_MARKET)?;
         let mut config = read_wrapper_config_from_bytes(data)?;
-        config.matcher_req_seq = config
-            .matcher_req_seq
-            .checked_add(1)
+        config.matcher_req_seq = super::policy_v16::next_matcher_request_id(config.matcher_req_seq)
             .ok_or(PercolatorError::InvalidInstruction)?;
         let req_id = config.matcher_req_seq;
         write_wrapper_config_to_bytes(data, &config)?;
@@ -4079,6 +4077,11 @@ pub mod oracle_v16 {
 
 pub mod policy_v16 {
     use crate::constants::MAX_DYNAMIC_TRADE_FEE_BPS;
+
+    #[inline(always)]
+    pub fn next_matcher_request_id(current: u64) -> Option<u64> {
+        current.checked_add(1)
+    }
 
     pub fn price_move_bps_ceil(old: u64, new: u64) -> Option<u64> {
         if old == 0 || old == new {
