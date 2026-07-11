@@ -3593,11 +3593,11 @@ pub mod oracle_v16 {
         profile: &AssetOracleProfileV16,
         now_unix_ts: i64,
     ) -> bool {
-        if profile.max_staleness_secs == 0 || profile.oracle_target_publish_time == 0 {
-            return false;
-        }
-        let age = now_unix_ts.saturating_sub(profile.oracle_target_publish_time);
-        age >= 0 && age as u64 > profile.max_staleness_secs
+        super::policy_v16::stored_oracle_sample_stale(
+            profile.max_staleness_secs,
+            profile.oracle_target_publish_time,
+            now_unix_ts,
+        )
     }
 
     pub fn hard_stale_matured(config: &WrapperConfigV16, now_slot: u64) -> bool {
@@ -4089,7 +4089,44 @@ pub mod oracle_v16 {
 }
 
 pub mod policy_v16 {
-    use crate::constants::MAX_DYNAMIC_TRADE_FEE_BPS;
+    use crate::constants::{MAX_DYNAMIC_TRADE_FEE_BPS, ORACLE_MODE_HYBRID_AFTER_HOURS};
+
+    #[inline(always)]
+    pub fn stored_oracle_sample_stale(
+        max_staleness_secs: u64,
+        publish_time: i64,
+        now_unix_ts: i64,
+    ) -> bool {
+        if max_staleness_secs == 0 || publish_time == 0 {
+            return false;
+        }
+        let age = now_unix_ts.saturating_sub(publish_time);
+        age >= 0 && age as u64 > max_staleness_secs
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    #[inline(always)]
+    pub fn hybrid_crank_oracle_count_allowed(
+        supplied_accounts: usize,
+        expected_accounts: usize,
+        oracle_mode: u8,
+        hybrid_soft_stale_slots: u64,
+        last_good_oracle_slot: u64,
+        now_slot: u64,
+        max_staleness_secs: u64,
+        publish_time: i64,
+        now_unix_ts: i64,
+    ) -> bool {
+        if supplied_accounts == expected_accounts {
+            return true;
+        }
+        supplied_accounts == 0
+            && expected_accounts != 0
+            && oracle_mode == ORACLE_MODE_HYBRID_AFTER_HOURS
+            && hybrid_soft_stale_slots != 0
+            && now_slot.saturating_sub(last_good_oracle_slot) > hybrid_soft_stale_slots
+            && stored_oracle_sample_stale(max_staleness_secs, publish_time, now_unix_ts)
+    }
 
     pub fn price_move_bps_ceil(old: u64, new: u64) -> Option<u64> {
         if old == 0 || old == new {
@@ -10492,22 +10529,18 @@ pub mod processor {
                         .oracle_target_publish_time
                         .saturating_add(i64::try_from(elapsed_slots).unwrap_or(i64::MAX))
                 });
-                let expected_oracle_account_count = oracle_profile.oracle_leg_count as usize;
-                if oracle_account_count != expected_oracle_account_count {
-                    let soft_stale_missing_tail =
-                        oracle_account_count == 0
-                            && oracle_v16::profile_is_hybrid(&oracle_profile)
-                            && oracle_v16::profile_hybrid_soft_stale_matured(
-                                &oracle_profile,
-                                authenticated_now_slot,
-                            )
-                            && oracle_v16::profile_stored_oracle_sample_stale(
-                                &oracle_profile,
-                                now_unix_ts,
-                            );
-                    if !soft_stale_missing_tail {
-                        return Err(PercolatorError::InvalidInstruction.into());
-                    }
+                if !policy_v16::hybrid_crank_oracle_count_allowed(
+                    oracle_account_count,
+                    oracle_profile.oracle_leg_count as usize,
+                    oracle_profile.oracle_mode,
+                    oracle_profile.hybrid_soft_stale_slots,
+                    oracle_profile.last_good_oracle_slot,
+                    authenticated_now_slot,
+                    oracle_profile.max_staleness_secs,
+                    oracle_profile.oracle_target_publish_time,
+                    now_unix_ts,
+                ) {
+                    return Err(PercolatorError::InvalidInstruction.into());
                 }
                 if oracle_tail.len() < oracle_account_count {
                     return Err(ProgramError::NotEnoughAccountKeys);
@@ -11691,7 +11724,17 @@ pub mod processor {
                     return Err(e);
                 }
                 if e == ProgramError::NotEnoughAccountKeys
-                    && !oracle_v16::profile_stored_oracle_sample_stale(profile, now_unix_ts)
+                    && !policy_v16::hybrid_crank_oracle_count_allowed(
+                        oracle_accounts.len(),
+                        profile.oracle_leg_count as usize,
+                        profile.oracle_mode,
+                        profile.hybrid_soft_stale_slots,
+                        profile.last_good_oracle_slot,
+                        now_slot,
+                        profile.max_staleness_secs,
+                        profile.oracle_target_publish_time,
+                        now_unix_ts,
+                    )
                 {
                     return Err(e);
                 }

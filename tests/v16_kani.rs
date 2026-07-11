@@ -9,6 +9,126 @@ use percolator_prog::matcher_abi::{
 use percolator_prog::policy_v16;
 
 #[kani::proof]
+fn kani_v16_hybrid_missing_tail_admission_is_exact_and_non_bypassable() {
+    let supplied: u8 = kani::any();
+    let expected: u8 = kani::any();
+    let oracle_mode: u8 = kani::any();
+    let soft_stale_slots: u64 = kani::any();
+    let last_good_slot: u64 = kani::any();
+    let now_slot: u64 = kani::any();
+    let max_staleness_secs: u64 = kani::any();
+    let publish_time: i64 = kani::any();
+    let now_unix_ts: i64 = kani::any();
+
+    let stored_age = now_unix_ts as i128 - publish_time as i128;
+    let stored_sample_stale =
+        policy_v16::stored_oracle_sample_stale(max_staleness_secs, publish_time, now_unix_ts);
+    if publish_time > 0 {
+        assert_eq!(
+            stored_sample_stale,
+            max_staleness_secs != 0 && stored_age > max_staleness_secs as i128
+        );
+    }
+    if stored_sample_stale {
+        assert_ne!(max_staleness_secs, 0);
+        assert_ne!(publish_time, 0);
+        assert!(stored_age > max_staleness_secs as i128);
+    }
+    let missing_tail_fallback = supplied == 0
+        && expected != 0
+        && oracle_mode == percolator_prog::constants::ORACLE_MODE_HYBRID_AFTER_HOURS
+        && soft_stale_slots != 0
+        && now_slot.saturating_sub(last_good_slot) > soft_stale_slots
+        && stored_sample_stale;
+    let allowed = policy_v16::hybrid_crank_oracle_count_allowed(
+        supplied as usize,
+        expected as usize,
+        oracle_mode,
+        soft_stale_slots,
+        last_good_slot,
+        now_slot,
+        max_staleness_secs,
+        publish_time,
+        now_unix_ts,
+    );
+
+    assert_eq!(allowed, supplied == expected || missing_tail_fallback);
+    if allowed && supplied != expected {
+        assert_eq!(supplied, 0);
+        assert_ne!(expected, 0);
+        assert!(stored_sample_stale);
+    }
+
+    kani::cover!(
+        supplied == expected && allowed,
+        "exact account count accepted"
+    );
+    kani::cover!(
+        supplied != 0 && supplied != expected && !allowed,
+        "partial or oversized tail rejected"
+    );
+    kani::cover!(
+        missing_tail_fallback && allowed,
+        "mature missing-tail fallback accepted"
+    );
+    kani::cover!(
+        supplied == 0
+            && expected != 0
+            && now_slot.saturating_sub(last_good_slot) == soft_stale_slots
+            && !allowed,
+        "soft-stale slot boundary rejected"
+    );
+    kani::cover!(
+        supplied == 0 && expected != 0 && stored_age == max_staleness_secs as i128 && !allowed,
+        "stored-sample age boundary rejected"
+    );
+}
+
+#[kani::proof]
+fn kani_v16_hybrid_missing_tail_liveness_is_monotone_after_maturity() {
+    let expected: u8 = kani::any();
+    let soft_stale_slots: u64 = kani::any();
+    let last_good_slot: u64 = kani::any();
+    let now_slot: u64 = kani::any();
+    let future_slot: u64 = kani::any();
+    let max_staleness_secs: u64 = kani::any();
+    let publish_time: i64 = kani::any();
+    let now_unix_ts: i64 = kani::any();
+    let future_unix_ts: i64 = kani::any();
+
+    kani::assume(expected != 0);
+    kani::assume(future_slot >= now_slot);
+    kani::assume(future_unix_ts >= now_unix_ts);
+    kani::assume(policy_v16::hybrid_crank_oracle_count_allowed(
+        0,
+        expected as usize,
+        percolator_prog::constants::ORACLE_MODE_HYBRID_AFTER_HOURS,
+        soft_stale_slots,
+        last_good_slot,
+        now_slot,
+        max_staleness_secs,
+        publish_time,
+        now_unix_ts,
+    ));
+
+    assert!(policy_v16::hybrid_crank_oracle_count_allowed(
+        0,
+        expected as usize,
+        percolator_prog::constants::ORACLE_MODE_HYBRID_AFTER_HOURS,
+        soft_stale_slots,
+        last_good_slot,
+        future_slot,
+        max_staleness_secs,
+        publish_time,
+        future_unix_ts,
+    ));
+    kani::cover!(
+        future_slot > now_slot && future_unix_ts > now_unix_ts,
+        "fallback remains live after both clocks advance"
+    );
+}
+
+#[kani::proof]
 fn kani_v16_premium_funding_rate_is_clamped_and_signed() {
     let mark_raw: u16 = kani::any();
     let index_raw: u16 = kani::any();
