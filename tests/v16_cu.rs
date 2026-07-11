@@ -17205,7 +17205,8 @@ fn v16_attack_resolved_cross_margin_deep_insolvency_winds_down_publicly() {
         0,
     );
 
-    for (slot, mark) in [(1u64, 300u64), (2, 800)] {
+    let mut reached_recovery = false;
+    'mark_updates: for (slot, mark) in [(1u64, 300u64), (2, 800)] {
         env.svm.warp_to_slot(slot);
         env.push_auth_mark_with_cu(slot, mark);
         cfg_asset1(
@@ -17231,11 +17232,18 @@ fn v16_attack_resolved_cross_margin_deep_insolvency_winds_down_publicly() {
                     ],
                     &[],
                 );
+                if env.market_state().1.mode == MarketModeV16::Recovery {
+                    reached_recovery = true;
+                    break 'mark_updates;
+                }
             }
         }
     }
 
-    for _ in 0..8 {
+    'catchup: for _ in 0..8 {
+        if reached_recovery {
+            break;
+        }
         for ai in [0u16, 1] {
             for p in [victim, cp] {
                 env.svm.expire_blockhash();
@@ -17251,9 +17259,17 @@ fn v16_attack_resolved_cross_margin_deep_insolvency_winds_down_publicly() {
                     ],
                     &[],
                 );
+                if env.market_state().1.mode == MarketModeV16::Recovery {
+                    reached_recovery = true;
+                    break 'catchup;
+                }
             }
         }
     }
+    assert!(
+        reached_recovery,
+        "deep cross-margin insolvency must reach Recovery in bounded public cranks"
+    );
 
     let before = env.portfolio_state(victim);
     assert_eq!(before.capital.get(), 0, "setup makes victim insolvent");
@@ -17265,17 +17281,49 @@ fn v16_attack_resolved_cross_margin_deep_insolvency_winds_down_publicly() {
         has_active_leg_for_asset(&before, 0) && has_active_leg_for_asset(&before, 1),
         "setup leaves unattributed multi-asset exposure"
     );
-    env.resolve();
+    let (_, recovery) = env.market_state();
+    assert_eq!(
+        recovery.mode,
+        MarketModeV16::Recovery,
+        "live liquidation must first commit its terminal recovery rank"
+    );
+    let recovery_market = env.svm.get_account(&env.market).unwrap();
+    let recovery_victim = env.svm.get_account(&victim).unwrap();
+    env.svm.expire_blockhash();
+    let finalize_cu = env
+        .send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: u64::MAX,
+                observations: vec![],
+            },
+            vec![
+                AccountMeta::new(env.payer.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(victim, false),
+            ],
+            &[],
+        )
+        .expect("Recovery must have a bounded permissionless transition to Resolved");
+    assert_cu_within(
+        "PermissionlessCrank cross-margin Recovery-to-Resolved",
+        finalize_cu,
+        CRANK_CU_LIMIT,
+    );
+    let (_, resolved) = env.market_state();
+    assert_eq!(resolved.mode, MarketModeV16::Resolved);
+    assert_ne!(env.svm.get_account(&env.market).unwrap(), recovery_market);
+    assert_eq!(env.svm.get_account(&victim).unwrap(), recovery_victim);
+    assert_eq!(resolved.vault, recovery.vault);
+    assert_eq!(resolved.c_tot, recovery.c_tot);
+    assert_eq!(resolved.insurance, recovery.insurance);
+    assert_eq!(resolved.vault as u64, env.token_amount(env.vault));
 
     env.svm.expire_blockhash();
     let loser_crank_cu = env
         .send(
             ProgInstruction::PermissionlessCrank {
                 now_slot: u64::MAX,
-                observations: vec![CrankObservationHint {
-                    asset_index: u16::MAX,
-                    oracle_accounts: u8::MAX,
-                }],
+                observations: vec![],
             },
             vec![
                 AccountMeta::new_readonly(victim_owner.pubkey(), false),
@@ -39929,48 +39977,46 @@ fn v16_attack_public_liquidation_recovery_required_commits_recovery() {
         0,
     );
 
+    let mut recovery_transition = None;
     for slot in 1..=40u64 {
         env.svm.warp_to_slot(slot);
         let _ = env.push_auth_mark_with_cu(slot, 1_070_000);
+        let market_before = env.svm.get_account(&env.market).unwrap();
+        let (_, group_before) = env.market_state();
+        let short_before = env.svm.get_account(&short).unwrap();
+        let cert_before = health_cert(&env.portfolio_state(short));
         env.svm.expire_blockhash();
-        let _ = env.send(
-            ProgInstruction::PermissionlessCrank {
-                now_slot: slot,
-                close_q: 0,
-                observations: crank_observations(0),
-            },
-            vec![
-                AccountMeta::new(env.payer.pubkey(), true),
-                AccountMeta::new(env.market, false),
-                AccountMeta::new(short, false),
-            ],
-            &[],
-        );
+        let cu = env
+            .send(
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: slot,
+                    observations: crank_observations(0),
+                },
+                vec![
+                    AccountMeta::new(env.payer.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(short, false),
+                ],
+                &[],
+            )
+            .unwrap_or_else(|err| {
+                panic!(
+                    "setup crank slot={slot} mode={:?} cert={cert_before:?} failed: {err}",
+                    group_before.mode
+                )
+            });
+        if env.market_state().1.mode == MarketModeV16::Recovery {
+            recovery_transition =
+                Some((cu, market_before, group_before, short_before, cert_before));
+            break;
+        }
     }
+    let (cu, market_before, group_before, short_before, cert_before) = recovery_transition
+        .expect("a recovery-required liquidation must have a finite public continuation");
     assert!(
-        health_cert(&env.portfolio_state(short)).certified_liq_deficit != 0,
-        "setup must make the short liquidatable before probing recovery-required liquidation"
+        cert_before.valid && cert_before.certified_liq_deficit != 0,
+        "the successful recovery transition must start from a current liquidatable account"
     );
-
-    let market_before = env.svm.get_account(&env.market).unwrap();
-    let (_, group_before) = env.market_state();
-    let short_before = env.svm.get_account(&short).unwrap();
-    env.svm.expire_blockhash();
-    let cu = env
-        .send(
-            ProgInstruction::PermissionlessCrank {
-                now_slot: 40,
-                close_q: POS_SCALE,
-                observations: crank_observations(0),
-            },
-            vec![
-                AccountMeta::new(env.payer.pubkey(), true),
-                AccountMeta::new(env.market, false),
-                AccountMeta::new(short, false),
-            ],
-            &[],
-        )
-        .expect("recovery-required liquidation must commit recovery instead of rolling back");
     assert_cu_within(
         "PermissionlessCrank recovery-required liquidation",
         cu,
@@ -40002,6 +40048,45 @@ fn v16_attack_public_liquidation_recovery_required_commits_recovery() {
     assert_eq!(recovered.c_tot, group_before.c_tot);
     assert_eq!(recovered.insurance, group_before.insurance);
     assert!(recovered.vault >= recovered.c_tot + recovered.insurance);
+
+    let recovery_market = env.svm.get_account(&env.market).unwrap();
+    let recovery_short = env.svm.get_account(&short).unwrap();
+    env.svm.expire_blockhash();
+    let finalize_cu = env
+        .send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: u64::MAX,
+                observations: vec![CrankObservationHint {
+                    asset_index: u16::MAX,
+                    oracle_accounts: u8::MAX,
+                }],
+            },
+            vec![
+                AccountMeta::new(env.payer.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(short, false),
+            ],
+            &[],
+        )
+        .expect("Recovery must finalize through the public crank without oracle input");
+    assert_cu_within(
+        "PermissionlessCrank Recovery-to-Resolved",
+        finalize_cu,
+        CRANK_CU_LIMIT,
+    );
+    let (_, resolved) = env.market_state();
+    assert_eq!(resolved.mode, MarketModeV16::Resolved);
+    assert_eq!(resolved.recovery_reason, recovered.recovery_reason);
+    assert_ne!(
+        env.svm.get_account(&env.market).unwrap(),
+        recovery_market,
+        "the terminal mode transition must commit"
+    );
+    assert_eq!(env.svm.get_account(&short).unwrap(), recovery_short);
+    assert_eq!(resolved.vault, recovered.vault);
+    assert_eq!(resolved.c_tot, recovered.c_tot);
+    assert_eq!(resolved.insurance, recovered.insurance);
+    assert_eq!(resolved.vault as u64, env.token_amount(env.vault));
 }
 
 // security.md sweep — repeated partial-liquidation fee stop (#3/#33): the liquidation fee is charged

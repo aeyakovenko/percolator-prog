@@ -10368,6 +10368,7 @@ pub mod processor {
         now_slot: u64,
         observation_hints: &[ix::CrankObservationHint],
         max_market_slots: usize,
+        market_mode: MarketModeV16,
     ) -> ProgramResult {
         if observation_hints.len() > percolator::V16_MAX_PORTFOLIO_ASSETS_N {
             return Err(PercolatorError::InvalidInstruction.into());
@@ -10385,6 +10386,34 @@ pub mod processor {
         {
             let mut market_data = market_ai.try_borrow_mut_data()?;
             let (mut cfg, mut group) = state::market_view_mut(&mut market_data)?;
+            if market_mode == MarketModeV16::Recovery {
+                let mut portfolio_data = portfolio_ai.try_borrow_mut_data()?;
+                let mut portfolio = state::portfolio_view_mut_for_market_slots(
+                    &mut portfolio_data,
+                    max_market_slots,
+                )?;
+                expect_portfolio_view_account_key(&portfolio, portfolio_ai.key)?;
+                let result = group
+                    .permissionless_auto_crank_not_atomic(
+                        &mut portfolio,
+                        AutoCrankWorkV16 {
+                            now_slot: authenticated_now_slot,
+                            observations: &[],
+                            resolved_close_fee_rate_per_slot: 0,
+                        },
+                    )
+                    .map_err(map_v16_error)?;
+                if result.selected != AutoCrankPlanV16::FinalizeRecovery
+                    || result.outcome != AutoCrankOutcomeV16::RecoveryResolved
+                {
+                    return Err(PercolatorError::InvalidInstruction.into());
+                }
+                group.validate_shape().map_err(map_v16_error)?;
+                portfolio
+                    .validate_with_market(&group.as_view())
+                    .map_err(map_v16_error)?;
+                return Ok(());
+            }
             let summary = {
                 let mut portfolio_data = portfolio_ai.try_borrow_mut_data()?;
                 let mut portfolio = state::portfolio_view_mut_for_market_slots(
@@ -10693,6 +10722,7 @@ pub mod processor {
             now_slot,
             observation_hints.as_slice(),
             max_market_slots,
+            mode,
         )
     }
 
