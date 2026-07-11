@@ -50958,17 +50958,18 @@ fn v16_attack_batch_tradecpi_rejects_nonproportional_partial_fills() {
         .unwrap();
     env.set_matcher_config(matcher_program, &lp, lp_portfolio, ctx, delegate, 1);
 
-    let sz = (8 * POS_SCALE) as i128;
+    let long_sz = (8 * POS_SCALE) as i128;
+    let short_sz = (4 * POS_SCALE) as i128;
     let legs = vec![
         BatchTradeCpiLeg {
             asset_index: 0,
-            size_q: sz,
+            size_q: long_sz,
             fee_bps: 100,
             limit_price: 0,
         },
         BatchTradeCpiLeg {
             asset_index: 1,
-            size_q: -sz,
+            size_q: -short_sz,
             fee_bps: 100,
             limit_price: 0,
         },
@@ -51048,8 +51049,14 @@ fn v16_attack_batch_tradecpi_rejects_nonproportional_partial_fills() {
         TRADE_CU_LIMIT,
     );
     let taker_after = env.portfolio_state(taker_portfolio);
-    assert_eq!(active_leg_for_asset(&taker_after, 0).basis_pos_q, sz / 2);
-    assert_eq!(active_leg_for_asset(&taker_after, 1).basis_pos_q, -sz / 2);
+    assert_eq!(
+        active_leg_for_asset(&taker_after, 0).basis_pos_q,
+        long_sz / 2
+    );
+    assert_eq!(
+        active_leg_for_asset(&taker_after, 1).basis_pos_q,
+        -short_sz / 2
+    );
 }
 
 // security.md sweep - stale-resolve BatchTradeCpi rollback (#30/#35/#48): the batch CPI path invokes

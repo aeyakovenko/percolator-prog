@@ -9,6 +9,92 @@ use percolator_prog::matcher_abi::{
 use percolator_prog::policy_v16;
 
 #[kani::proof]
+fn kani_v16_batch_fill_ratio_cannot_overflow_for_any_engine_valid_size() {
+    let first_req_signed: i128 = kani::any();
+    let req_signed: i128 = kani::any();
+    kani::assume(policy_v16::batch_trade_size_allowed(first_req_signed));
+    kani::assume(policy_v16::batch_trade_size_allowed(req_signed));
+    let first_req = first_req_signed.unsigned_abs();
+    let req = req_signed.unsigned_abs();
+    let first_exec = kani::any::<u64>() as u128;
+    let exec = kani::any::<u64>() as u128;
+    kani::assume(first_exec > 0 && first_exec <= first_req);
+    kani::assume(exec > 0 && exec <= req);
+
+    let actual = policy_v16::batch_fill_ratios_equal(exec, req, first_exec, first_req);
+
+    assert!(exec.checked_mul(first_req).is_some());
+    assert!(first_exec.checked_mul(req).is_some());
+    kani::cover!(actual, "a production-bounded common fill ratio is accepted");
+    kani::cover!(
+        !actual,
+        "a production-bounded mismatched fill ratio is rejected"
+    );
+    kani::cover!(
+        first_req_signed < 0
+            && req_signed > 0
+            && first_req > u32::MAX as u128
+            && req > u32::MAX as u128,
+        "the production cap admits mixed-sign valid sizes wider than 32 bits"
+    );
+}
+
+#[kani::proof]
+fn kani_v16_batch_fill_ratio_rejects_full_vs_partial_and_keeps_common_ratio_live() {
+    let req = kani::any::<u16>() as u128;
+    let exec = kani::any::<u16>() as u128;
+    kani::assume(req > 1);
+    kani::assume(exec > 0 && exec < req);
+
+    assert!(!policy_v16::batch_fill_ratios_equal(exec, req, 1, 1));
+    assert!(policy_v16::batch_fill_ratios_equal(exec, req, exec, req));
+    kani::cover!(
+        exec + 1 < req,
+        "a deeply partial leg is rejected against a fully filled leg"
+    );
+}
+
+#[kani::proof]
+fn kani_v16_batch_fill_ratio_preserves_signed_spread_shape() {
+    let req_abs = kani::any::<u16>() as u128 + 1;
+    let exec_abs = kani::any::<u16>() as u128 + 1;
+    kani::assume(exec_abs <= req_abs);
+    assert!(policy_v16::batch_fill_ratios_equal(
+        exec_abs, req_abs, exec_abs, req_abs
+    ));
+
+    let first_positive: bool = kani::any();
+    let positive: bool = kani::any();
+    let signed = |magnitude: u128, is_positive: bool| {
+        if is_positive {
+            magnitude as i128
+        } else {
+            -(magnitude as i128)
+        }
+    };
+    let first_req = signed(req_abs, first_positive);
+    let req = signed(req_abs, positive);
+    let first_exec = signed(exec_abs, first_positive);
+    let exec = signed(exec_abs, positive);
+
+    if first_positive == positive {
+        assert_eq!(first_req, req);
+        assert_eq!(first_exec, exec);
+    } else {
+        assert_eq!(first_req, -req);
+        assert_eq!(first_exec, -exec);
+    }
+    kani::cover!(
+        first_positive == positive && exec_abs < req_abs,
+        "same-direction partial legs preserve their requested ratio"
+    );
+    kani::cover!(
+        first_positive != positive && exec_abs < req_abs,
+        "mixed-direction partial legs preserve their requested spread shape"
+    );
+}
+
+#[kani::proof]
 fn kani_v16_premium_funding_rate_is_clamped_and_signed() {
     let mark_raw: u16 = kani::any();
     let index_raw: u16 = kani::any();
