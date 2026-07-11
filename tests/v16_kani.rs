@@ -35,6 +35,62 @@ fn kani_v16_premium_funding_rate_is_clamped_and_signed() {
 }
 
 #[kani::proof]
+fn kani_v16_price_managed_profile_resolve_boundary_is_exact_and_live() {
+    let price_managed = kani::any::<bool>();
+    let resolve_stale_slots = kani::any::<u64>();
+    let last_good_oracle_slot = kani::any::<u64>();
+    let now_slot = kani::any::<u64>();
+    let matured = policy_v16::price_managed_profile_resolve_matured(
+        price_managed,
+        resolve_stale_slots,
+        last_good_oracle_slot,
+        now_slot,
+    );
+
+    kani::cover!(
+        matured && now_slot - last_good_oracle_slot == resolve_stale_slots,
+        "exact local-stale boundary matures"
+    );
+    kani::cover!(
+        matured && now_slot - last_good_oracle_slot > resolve_stale_slots,
+        "profile stays matured after the boundary"
+    );
+    kani::cover!(
+        price_managed
+            && resolve_stale_slots != 0
+            && now_slot >= last_good_oracle_slot
+            && now_slot - last_good_oracle_slot < resolve_stale_slots
+            && !matured,
+        "fresh price-managed profile remains live"
+    );
+    kani::cover!(
+        now_slot < last_good_oracle_slot && !matured,
+        "regressed slot cannot manufacture maturity"
+    );
+    kani::cover!(
+        (!price_managed || resolve_stale_slots == 0) && !matured,
+        "unmanaged or disabled profiles never mature locally"
+    );
+
+    if matured {
+        assert!(price_managed);
+        assert!(resolve_stale_slots != 0);
+        assert!(now_slot >= last_good_oracle_slot);
+        assert!(now_slot - last_good_oracle_slot >= resolve_stale_slots);
+    }
+    if price_managed
+        && resolve_stale_slots != 0
+        && now_slot >= last_good_oracle_slot
+        && now_slot - last_good_oracle_slot >= resolve_stale_slots
+    {
+        assert!(matured);
+    }
+    if !price_managed || resolve_stale_slots == 0 || now_slot < last_good_oracle_slot {
+        assert!(!matured);
+    }
+}
+
+#[kani::proof]
 fn kani_v16_init_market_decode_preserves_wire_fields() {
     // Full-width symbolic inputs (audit: avoid the u16->u64/u128 widening collapse so
     // narrow-read / high-byte decode bugs are observable).

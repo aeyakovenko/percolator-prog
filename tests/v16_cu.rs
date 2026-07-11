@@ -26845,7 +26845,8 @@ fn v16_attack_non_base_local_stale_domain_withdrawals_reject() {
         100 * BOUND_SCALE
     );
     assert_eq!(
-        fresh_group.source_backing_buckets[2].utilization_fee_earnings, 30
+        fresh_group.source_backing_buckets[2].utilization_fee_earnings,
+        30
     );
     assert!(
         has_active_leg_for_asset(&env.portfolio_state(long), 1),
@@ -26979,7 +26980,9 @@ fn v16_attack_non_base_local_stale_domain_withdrawals_reject() {
     env.push_auth_mark_for_asset_with_authority(1, &creator, 7, 100);
     let (fresh_dest, _) = env
         .try_withdraw_insurance_asset_with_authority(&creator, 1, 50)
-        .expect("after a public asset-1 oracle refresh, live insurance withdrawal remains reachable");
+        .expect(
+            "after a public asset-1 oracle refresh, live insurance withdrawal remains reachable",
+        );
     assert_eq!(env.token_amount(fresh_dest), 50);
 
     env.svm.expire_blockhash();
@@ -27003,6 +27006,33 @@ fn v16_attack_non_base_local_stale_domain_withdrawals_reject() {
         "after a public asset-1 oracle refresh, backing withdrawal remains reachable: {fresh_backing:?}"
     );
     assert_eq!(env.token_amount(backing_dest), 50);
+
+    env.svm.expire_blockhash();
+    let fresh_earnings = env.send(
+        ProgInstruction::WithdrawBackingBucketEarnings {
+            domain: 2,
+            amount: 10,
+        },
+        vec![
+            AccountMeta::new(creator.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(earnings_ledger, false),
+            AccountMeta::new(earnings_dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&creator],
+    );
+    assert!(
+        fresh_earnings.is_ok(),
+        "after a public asset-1 oracle refresh, earnings withdrawal remains reachable: {fresh_earnings:?}"
+    );
+    assert_eq!(env.token_amount(earnings_dest), 10);
+    assert_eq!(
+        env.market_state().1.source_backing_buckets[2].utilization_fee_earnings,
+        20
+    );
 }
 
 // security.md sweep - slot-zero local stale bypass (#24/#30/#37): a non-base price-managed asset can

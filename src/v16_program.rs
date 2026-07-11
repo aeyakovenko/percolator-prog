@@ -4080,6 +4080,17 @@ pub mod oracle_v16 {
 pub mod policy_v16 {
     use crate::constants::MAX_DYNAMIC_TRADE_FEE_BPS;
 
+    pub fn price_managed_profile_resolve_matured(
+        price_managed: bool,
+        resolve_stale_slots: u64,
+        last_good_oracle_slot: u64,
+        now_slot: u64,
+    ) -> bool {
+        price_managed
+            && resolve_stale_slots != 0
+            && now_slot.saturating_sub(last_good_oracle_slot) >= resolve_stale_slots
+    }
+
     pub fn price_move_bps_ceil(old: u64, new: u64) -> Option<u64> {
         if old == 0 || old == new {
             return Some(0);
@@ -4307,24 +4318,18 @@ pub mod processor {
         )
     }
 
-    fn permissionless_resolve_matured_for_profile_at_slot(
-        cfg: &WrapperConfigV16,
-        profile: &state::AssetOracleProfileV16,
-        now_slot: u64,
-    ) -> bool {
-        cfg.permissionless_resolve_stale_slots != 0
-            && now_slot.saturating_sub(profile.last_good_oracle_slot)
-                >= cfg.permissionless_resolve_stale_slots
-    }
-
     fn global_or_profile_resolve_matured_at_slot(
         cfg: &WrapperConfigV16,
         profile: &state::AssetOracleProfileV16,
         now_slot: u64,
     ) -> bool {
         oracle_v16::permissionless_stale_matured(cfg, now_slot)
-            || (oracle_v16::profile_is_price_managed(profile)
-                && permissionless_resolve_matured_for_profile_at_slot(cfg, profile, now_slot))
+            || policy_v16::price_managed_profile_resolve_matured(
+                oracle_v16::profile_is_price_managed(profile),
+                cfg.permissionless_resolve_stale_slots,
+                profile.last_good_oracle_slot,
+                now_slot,
+            )
     }
 
     fn reject_permissionless_resolve_matured_live_view(
