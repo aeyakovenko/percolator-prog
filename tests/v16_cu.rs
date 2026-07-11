@@ -59865,4 +59865,49 @@ fn v16_attack_reset_remainder_carry_cannot_block_bankruptcy_progress() {
     assert_eq!(end.c_tot + 5, after_exit.c_tot);
     assert_eq!(end.vault as u64, env.token_amount(env.vault));
     assert!(end.vault >= end.c_tot + end.insurance);
+    assert_eq!(
+        end.assets[0].mode_short,
+        SideModeV16::ResetPending,
+        "the liquidated side must expose its surviving zero-OI leg as dead"
+    );
+    assert_eq!(end.assets[0].stored_pos_count_short, 1);
+
+    env.svm.expire_blockhash();
+    let s3_forfeit_cu = env
+        .send(
+            ProgInstruction::ForfeitRecoveryLeg {
+                asset_index: 0,
+                b_delta_budget: percolator::MAX_VAULT_TVL,
+            },
+            vec![
+                AccountMeta::new(s3o.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(s3, false),
+            ],
+            &[&s3o],
+        )
+        .expect("the surviving zero-OI short must have a public dead-leg exit");
+    assert_cu_within(
+        "bilateral zero-OI dead-leg exit",
+        s3_forfeit_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    assert!(!has_active_leg_for_asset(&env.portfolio_state(s3), 0));
+    assert_eq!(env.market_state().1.assets[0].stored_pos_count_short, 0);
+
+    let finalize_cu = env.finalize_reset_side_with_cu(0, 1);
+    assert_cu_within(
+        "bilateral zero-OI reset finalization",
+        finalize_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    assert_eq!(
+        env.market_state().1.assets[0].mode_short,
+        SideModeV16::Normal
+    );
+    let recoverable_capital = env.portfolio_state(s3).capital.get();
+    assert_ne!(recoverable_capital, 0);
+    let dest = env.withdraw(&s3o, s3, recoverable_capital);
+    assert_eq!(env.token_amount(dest), recoverable_capital as u64);
+    assert_eq!(env.portfolio_state(s3).capital.get(), 0);
 }
