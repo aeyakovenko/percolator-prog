@@ -39957,7 +39957,7 @@ fn v16_attack_delayed_permissionless_forfeit_clears_zero_oi_orphan() {
     let long = env.create_portfolio(&long_owner);
     let short = env.create_portfolio(&short_owner);
     env.deposit(&long_owner, long, 100_000_000);
-    env.deposit(&short_owner, short, 250_000);
+    env.deposit(&short_owner, short, 110_000);
     env.trade_asset_with_cu(
         0,
         &long_owner,
@@ -39971,22 +39971,29 @@ fn v16_attack_delayed_permissionless_forfeit_clears_zero_oi_orphan() {
 
     for slot in 1..=30u64 {
         env.svm.warp_to_slot(slot);
-        env.push_auth_mark_with_cu(slot, 2_000_000);
+        env.push_auth_mark_with_cu(slot, 1_070_000);
         env.svm.expire_blockhash();
         let _ = env.send(
             ProgInstruction::PermissionlessCrank {
                 now_slot: slot,
-                close_q: 0,
                 observations: crank_observations(0),
             },
             vec![
                 AccountMeta::new(env.payer.pubkey(), true),
                 AccountMeta::new(env.market, false),
-                AccountMeta::new(short, false),
+                AccountMeta::new(long, false),
             ],
             &[],
         );
     }
+
+    env.crank(
+        short,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 30,
+            observations: crank_observations(0),
+        },
+    );
 
     let (_, before_liquidation) = env.market_state();
     assert_eq!(before_liquidation.assets[0].oi_eff_long_q, 2 * POS_SCALE);
@@ -40000,7 +40007,6 @@ fn v16_attack_delayed_permissionless_forfeit_clears_zero_oi_orphan() {
         short,
         ProgInstruction::PermissionlessCrank {
             now_slot: 30,
-            close_q: POS_SCALE,
             observations: crank_observations(0),
         },
     );
@@ -40023,7 +40029,7 @@ fn v16_attack_delayed_permissionless_forfeit_clears_zero_oi_orphan() {
     );
 
     env.svm.warp_to_slot(31);
-    env.push_auth_mark_with_cu(31, 2_000_000);
+    env.push_auth_mark_with_cu(31, 1_070_000);
     let admin = env.admin.insecure_clone();
     env.svm.expire_blockhash();
     env.try_shutdown_asset_with_authority(&admin, 0, 31)
@@ -40070,12 +40076,11 @@ fn v16_attack_delayed_permissionless_forfeit_clears_zero_oi_orphan() {
             .is_err(),
         "paired force-close has no opposite stored leg",
     );
-    let orphan_before = env.svm.get_account(&long).unwrap();
+    let orphan_before = env.portfolio_state(long);
     env.svm.expire_blockhash();
     let recovery_crank = env.send(
         ProgInstruction::PermissionlessCrank {
             now_slot: 37,
-            close_q: 0,
             observations: vec![],
         },
         vec![
@@ -40085,8 +40090,54 @@ fn v16_attack_delayed_permissionless_forfeit_clears_zero_oi_orphan() {
         ],
         &[],
     );
-    assert!(recovery_crank.is_err());
-    assert_eq!(env.svm.get_account(&long).unwrap(), orphan_before);
+    assert!(
+        recovery_crank.is_ok(),
+        "the current auto-crank can refresh an asset-Recovery account",
+    );
+    let orphan_after_refresh = env.portfolio_state(long);
+    assert!(
+        has_active_leg_for_asset(&orphan_after_refresh, 0),
+        "refresh alone cannot detach the stored zero-OI leg",
+    );
+    assert_eq!(
+        orphan_after_refresh.capital.get(),
+        orphan_before.capital.get(),
+        "refresh cannot take orphan principal",
+    );
+
+    let mut b_progress_steps = 0usize;
+    for _ in 0..2_048 {
+        let leg = active_leg_for_asset(&env.portfolio_state(long), 0);
+        if !leg.b_stale {
+            break;
+        }
+        env.svm.expire_blockhash();
+        env.send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 37,
+                observations: vec![],
+            },
+            vec![
+                AccountMeta::new(env.payer.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(long, false),
+            ],
+            &[],
+        )
+        .expect("bounded public cranks must settle the orphan B backlog");
+        b_progress_steps += 1;
+    }
+    let final_leg = active_leg_for_asset(&env.portfolio_state(long), 0);
+    let final_asset = env.market_state().1.assets[0];
+    assert!(
+        !final_leg.b_stale,
+        "the public crank sequence must reach a B-clean orphan: snap={} target={}",
+        final_leg.b_snap, final_asset.b_epoch_start_long_num,
+    );
+    assert!(
+        b_progress_steps > 1,
+        "the regression must exercise multi-transaction B progress",
+    );
 
     let long_before_forfeit = env.portfolio_state(long);
     let capital_before_forfeit = long_before_forfeit.capital.get();
@@ -40106,9 +40157,10 @@ fn v16_attack_delayed_permissionless_forfeit_clears_zero_oi_orphan() {
         capital_before_forfeit,
         "dead-leg cleanup cannot take account principal",
     );
-    assert!(
-        env.portfolio_state(long).pnl.get() > pnl_before_forfeit,
-        "the profitable orphan's latent mark PnL must be booked, not forfeited",
+    assert_eq!(
+        env.portfolio_state(long).pnl.get(),
+        pnl_before_forfeit,
+        "permissionless detach cannot forfeit or create PnL",
     );
 
     for side in [0, 1] {
