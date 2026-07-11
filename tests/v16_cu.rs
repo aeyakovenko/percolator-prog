@@ -59679,3 +59679,190 @@ fn v16_attack_social_loss_dust_carry_cannot_block_owner_exit() {
         "the rebooked whole atom is charged exactly once"
     );
 }
+
+// Public reset-liveness regression: a B-division remainder and one exited
+// winner's fractional remainder can jointly carry a whole atom exactly when a
+// second bankruptcy drains effective OI to zero. That carry is audit loss; it
+// must not make every retry return RecoveryRequired while the market stays Live.
+#[test]
+fn v16_attack_reset_remainder_carry_cannot_block_bankruptcy_progress() {
+    let mut params = V16CuMarketParams::default();
+    params.initial_price = 1;
+    params.max_price_move_bps_per_slot = 10_000;
+    let mut env = V16CuEnv::new_with_init_params(params);
+    env.configure_auth_mark_with_cu(0, 1);
+
+    let l1o = Keypair::new();
+    let l1 = env.create_portfolio(&l1o);
+    let l2o = Keypair::new();
+    let l2 = env.create_portfolio(&l2o);
+    let l3o = Keypair::new();
+    let l3 = env.create_portfolio(&l3o);
+    let l4o = Keypair::new();
+    let l4 = env.create_portfolio(&l4o);
+    let l5o = Keypair::new();
+    let l5 = env.create_portfolio(&l5o);
+    let s1o = Keypair::new();
+    let s1 = env.create_portfolio(&s1o);
+    let s2o = Keypair::new();
+    let s2 = env.create_portfolio(&s2o);
+    let s3o = Keypair::new();
+    let s3 = env.create_portfolio(&s3o);
+
+    for (owner, portfolio, deposit) in [
+        (&l1o, l1, 1_000),
+        (&l2o, l2, 1_000),
+        (&l3o, l3, 1_000),
+        (&l4o, l4, 1_000),
+        (&l5o, l5, 1_000),
+        (&s1o, s1, 2),
+        (&s2o, s2, 5),
+        (&s3o, s3, 1_000),
+    ] {
+        env.deposit(owner, portfolio, deposit);
+    }
+
+    for (long_owner, long, short_owner, short, q) in [
+        (&l1o, l1, &s1o, s1, 1_897_305),
+        (&l2o, l2, &s1o, s1, 102_695),
+        (&l2o, l2, &s2o, s2, 666_301),
+        (&l3o, l3, &s2o, s2, 65_831),
+        (&l4o, l4, &s2o, s2, 430_043),
+        (&l4o, l4, &s3o, s3, 1_130_061),
+        (&l5o, l5, &s3o, s3, 767_244),
+    ] {
+        env.trade_asset_with_cu(0, long_owner, long, short_owner, short, q, 1, 0);
+    }
+
+    for (slot, mark) in [(1, 2), (2, 3), (3, 4), (4, 5), (5, 6)] {
+        env.svm.warp_to_slot(slot);
+        env.push_auth_mark_with_cu(slot, mark);
+        env.crank(
+            s3,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: slot,
+                observations: crank_observations(0),
+            },
+        );
+    }
+    for _ in 0..4 {
+        if !has_active_leg_for_asset(&env.portfolio_state(s1), 0) {
+            break;
+        }
+        env.crank(
+            s1,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 5,
+                observations: crank_observations(0),
+            },
+        );
+    }
+    let first = env.market_state().1;
+    assert!(
+        !has_active_leg_for_asset(&env.portfolio_state(s1), 0),
+        "the first eight-atom bankruptcy must close through public auto-crank"
+    );
+    assert_eq!(first.mode, MarketModeV16::Live);
+    assert_eq!(first.assets[0].oi_eff_long_q, 3_059_480);
+    assert_eq!(first.assets[0].oi_eff_short_q, 3_059_480);
+    assert_eq!(first.assets[0].social_loss_remainder_long_num, 322_760);
+    assert_eq!(first.assets[0].social_loss_dust_long_num, 0);
+    assert_ne!(first.assets[0].b_long_num, 0);
+
+    for _ in 0..8 {
+        let leg = active_leg_for_asset(&env.portfolio_state(l1), 0);
+        if !leg.b_stale && leg.b_snap == env.market_state().1.assets[0].b_long_num {
+            break;
+        }
+        env.crank(
+            l1,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 5,
+                observations: crank_observations(0),
+            },
+        );
+    }
+    let leg = active_leg_for_asset(&env.portfolio_state(l1), 0);
+    assert_eq!(
+        leg.b_rem,
+        percolator::SOCIAL_LOSS_DEN - 121_035,
+        "the public setup must reach the reset carry boundary"
+    );
+    env.svm.expire_blockhash();
+    let l1_exit_cu = env
+        .send(
+            ProgInstruction::RebalanceReduce {
+                asset_index: 0,
+                reduce_q: 1_897_305,
+            },
+            vec![
+                AccountMeta::new(l1o.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(l1, false),
+            ],
+            &[&l1o],
+        )
+        .expect("the first winner must reduce to flat");
+    assert_cu_within("reset-carry winner exit", l1_exit_cu, CUSTODY_CU_LIMIT);
+    let after_exit = env.market_state().1;
+    assert!(!has_active_leg_for_asset(&env.portfolio_state(l1), 0));
+    assert_eq!(after_exit.assets[0].oi_eff_long_q, 1_162_175);
+    assert_eq!(after_exit.assets[0].oi_eff_short_q, 1_162_175);
+    assert_eq!(after_exit.assets[0].social_loss_remainder_long_num, 322_760);
+    assert_eq!(
+        after_exit.assets[0].social_loss_dust_long_num,
+        percolator::SOCIAL_LOSS_DEN - 121_035
+    );
+
+    env.svm.warp_to_slot(6);
+    env.push_auth_mark_with_cu(6, 7);
+    env.crank(
+        s2,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 6,
+            observations: crank_observations(0),
+        },
+    );
+    env.svm.expire_blockhash();
+    let liquidation_cu = env
+        .send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 6,
+                observations: crank_observations(0),
+            },
+            vec![
+                AccountMeta::new(env.payer.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(s2, false),
+            ],
+            &[],
+        )
+        .expect("reset rounding carry must not roll back the second bankruptcy");
+    assert_cu_within(
+        "reset-carry bankruptcy progress",
+        liquidation_cu,
+        CUSTODY_CU_LIMIT,
+    );
+
+    let end = env.market_state().1;
+    assert_eq!(end.mode, MarketModeV16::Live);
+    assert!(
+        !has_active_leg_for_asset(&env.portfolio_state(s2), 0),
+        "the second bankrupt account reaches flat in bounded public calls"
+    );
+    assert_eq!(env.portfolio_state(s2).capital.get(), 0);
+    assert_eq!(env.portfolio_state(s2).pnl.get(), 0);
+    assert_eq!(end.assets[0].oi_eff_long_q, 0);
+    assert_eq!(end.assets[0].oi_eff_short_q, 0);
+    assert_eq!(end.assets[0].social_loss_remainder_long_num, 0);
+    assert_eq!(end.assets[0].social_loss_dust_long_num, 914_850);
+    assert_eq!(end.assets[0].explicit_unallocated_loss_long, 1);
+    assert_eq!(end.assets[0].b_long_num, 0);
+    assert_eq!(end.assets[0].loss_weight_sum_long, 0);
+    assert_eq!(end.assets[0].a_long, percolator::ADL_ONE);
+    assert_eq!(end.vault, after_exit.vault);
+    assert_eq!(end.insurance, after_exit.insurance);
+    assert_eq!(end.c_tot + 5, after_exit.c_tot);
+    assert_eq!(end.vault as u64, env.token_amount(env.vault));
+    assert!(end.vault >= end.c_tot + end.insurance);
+}
