@@ -4080,6 +4080,31 @@ pub mod oracle_v16 {
 pub mod policy_v16 {
     use crate::constants::MAX_DYNAMIC_TRADE_FEE_BPS;
 
+    #[inline(always)]
+    pub fn positive_lien_growth_num(before_num: u128, after_num: u128) -> Option<u128> {
+        if after_num <= before_num {
+            return None;
+        }
+        Some(after_num - before_num)
+    }
+
+    #[inline(always)]
+    pub fn accumulate_backing_fee_split(
+        accumulated: u128,
+        split: percolator::BackingDomainFeeSplitV16,
+    ) -> percolator::V16Result<u128> {
+        let routed = split
+            .provider_fee
+            .checked_add(split.insurance_fee)
+            .ok_or(percolator::V16Error::ArithmeticOverflow)?;
+        if routed != split.total_fee {
+            return Err(percolator::V16Error::InvalidConfig);
+        }
+        accumulated
+            .checked_add(split.total_fee)
+            .ok_or(percolator::V16Error::ArithmeticOverflow)
+    }
+
     pub fn price_move_bps_ceil(old: u64, new: u64) -> Option<u64> {
         if old == 0 || old == new {
             return Some(0);
@@ -11205,8 +11230,7 @@ pub mod processor {
             let domain = slot.domain.get();
             let after = slot.source_lien_counterparty_backing_num.get();
             let before_val = sparse_domain_value_lookup(before, domain);
-            if after > before_val {
-                let delta_num = after - before_val;
+            if let Some(delta_num) = policy_v16::positive_lien_growth_num(before_val, after) {
                 let (bps, insurance_share_bps) =
                     backing_fee_policy_for_domain_view(group, cfg, domain as usize)?;
                 let split = percolator::backing_domain_fee_split_for_lien_delta_num(
@@ -11222,9 +11246,8 @@ pub mod processor {
                         split.provider_fee,
                         split.insurance_fee,
                     )?;
-                    total = total
-                        .checked_add(split.total_fee)
-                        .ok_or(PercolatorError::EngineArithmeticOverflow)?;
+                    total = policy_v16::accumulate_backing_fee_split(total, split)
+                        .map_err(map_v16_error)?;
                 }
             }
         }

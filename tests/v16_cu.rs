@@ -45585,7 +45585,6 @@ fn v16_attack_batch_backing_fee_split_conserves() {
             portfolio,
             ProgInstruction::PermissionlessCrank {
                 now_slot: 2,
-                close_q: 0,
                 observations: crank_observations(asset_index),
             },
         );
@@ -45758,7 +45757,6 @@ fn v16_attack_batch_tradecpi_backing_fee_split_conserves() {
             portfolio,
             ProgInstruction::PermissionlessCrank {
                 now_slot: 2,
-                close_q: 0,
                 observations: crank_observations(asset_index),
             },
         );
@@ -49337,6 +49335,16 @@ fn v16_attack_unrelated_backing_fee_policy_does_not_block_atomic_batch_exit() {
         "single-leg route must not be a substitute for the atomic exit: {standalone:?}"
     );
 
+    let (_, group_before) = env.market_state();
+    let insurance_before = group_before.insurance;
+    let c_tot_before = group_before.c_tot;
+    let budgets_before = group_before.insurance_domain_budget.clone();
+    let provider_earnings_before: Vec<u128> = group_before
+        .source_backing_buckets
+        .iter()
+        .map(|bucket| bucket.utilization_fee_earnings)
+        .collect();
+
     env.svm.expire_blockhash();
     let cu = env
         .send(
@@ -49380,6 +49388,19 @@ fn v16_attack_unrelated_backing_fee_policy_does_not_block_atomic_batch_exit() {
         active_leg_for_asset(&taker_after, 1).side,
         SideV16::Long,
         "taker keeps only the final healthy asset-1 long"
+    );
+    let (_, group_after) = env.market_state();
+    assert_eq!(group_after.insurance, insurance_before);
+    assert_eq!(group_after.c_tot, c_tot_before);
+    assert_eq!(group_after.insurance_domain_budget, budgets_before);
+    assert_eq!(
+        group_after
+            .source_backing_buckets
+            .iter()
+            .map(|bucket| bucket.utilization_fee_earnings)
+            .collect::<Vec<_>>(),
+        provider_earnings_before,
+        "an unrelated policy cannot route value from this zero-fee batch"
     );
 }
 
