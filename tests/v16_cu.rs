@@ -21665,6 +21665,77 @@ fn v16_attack_cpi_limit_price_binds_internal_execution_price() {
         POS_SCALE as i128,
         "hostile matcher still only fills the flagged partial size"
     );
+
+    let mut batch_mode = env.svm.get_account(&ctx).unwrap();
+    batch_mode.data[64] = 11;
+    env.svm.set_account(ctx, batch_mode).unwrap();
+    let market_before_batch = env.svm.get_account(&env.market).unwrap();
+    let taker_before_batch = env.svm.get_account(&taker_account).unwrap();
+    let lp_before_batch = env.svm.get_account(&lp_account).unwrap();
+    let ctx_before_batch = env.svm.get_account(&ctx).unwrap();
+    env.svm.expire_blockhash();
+    let tight_batch = env.send(
+        ProgInstruction::BatchTradeCpi {
+            legs: vec![BatchTradeCpiLeg {
+                asset_index: 0,
+                size_q: (2 * POS_SCALE) as i128,
+                fee_bps: 0,
+                limit_price: 1,
+            }],
+        },
+        vec![
+            AccountMeta::new(taker.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(taker_account, false),
+            AccountMeta::new(lp_account, false),
+            AccountMeta::new_readonly(hostile, false),
+            AccountMeta::new(ctx, false),
+            AccountMeta::new_readonly(delegate, false),
+        ],
+        &[&taker],
+    );
+    assert!(
+        tight_batch.is_err(),
+        "batch buy limit=1 must bind the internal execution price: {tight_batch:?}"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before_batch
+    );
+    assert_eq!(
+        env.svm.get_account(&taker_account).unwrap(),
+        taker_before_batch
+    );
+    assert_eq!(env.svm.get_account(&lp_account).unwrap(), lp_before_batch);
+    assert_eq!(env.svm.get_account(&ctx).unwrap(), ctx_before_batch);
+
+    env.svm.expire_blockhash();
+    env.send(
+        ProgInstruction::BatchTradeCpi {
+            legs: vec![BatchTradeCpiLeg {
+                asset_index: 0,
+                size_q: (2 * POS_SCALE) as i128,
+                fee_bps: 0,
+                limit_price: 100,
+            }],
+        },
+        vec![
+            AccountMeta::new(taker.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(taker_account, false),
+            AccountMeta::new(lp_account, false),
+            AccountMeta::new_readonly(hostile, false),
+            AccountMeta::new(ctx, false),
+            AccountMeta::new_readonly(delegate, false),
+        ],
+        &[&taker],
+    )
+    .expect("batch CPI remains live when the limit permits the internal price");
+    assert_eq!(
+        active_leg_for_asset(&env.portfolio_state(taker_account), 0).basis_pos_q,
+        (2 * POS_SCALE) as i128,
+        "single and batch hostile partial fills each add exactly one position unit"
+    );
 }
 
 // security.md sweep — TradeCpi zero-fill (#39): a zero-capacity matcher (max_fill_abs=0) returns

@@ -9,6 +9,77 @@ use percolator_prog::matcher_abi::{
 use percolator_prog::policy_v16;
 
 #[kani::proof]
+fn kani_v16_cpi_limit_binds_reported_and_engine_accepted_prices() {
+    let size_q: i128 = kani::any();
+    let reported: u64 = kani::any();
+    let accepted: u64 = kani::any();
+    let limit: u64 = kani::any();
+
+    let allowed = policy_v16::cpi_limit_prices_allow(size_q, reported, accepted, limit);
+    let expected = limit == 0
+        || if size_q > 0 {
+            reported <= limit && accepted <= limit
+        } else {
+            reported >= limit && accepted >= limit
+        };
+    assert_eq!(allowed, expected);
+
+    if allowed && limit != 0 && size_q > 0 {
+        assert!(reported <= limit);
+        assert!(accepted <= limit);
+    }
+    if allowed && limit != 0 && size_q < 0 {
+        assert!(reported >= limit);
+        assert!(accepted >= limit);
+    }
+
+    kani::cover!(limit == 0 && allowed, "disabled limit accepts both prices");
+    kani::cover!(
+        size_q > 0 && limit != 0 && reported <= limit && accepted <= limit && allowed,
+        "buy with both prices in range is live"
+    );
+    kani::cover!(
+        size_q > 0 && reported <= limit && accepted > limit && !allowed,
+        "buy cannot hide an out-of-limit internal price"
+    );
+    kani::cover!(
+        size_q < 0 && limit != 0 && reported >= limit && accepted >= limit && allowed,
+        "sell with both prices in range is live"
+    );
+    kani::cover!(
+        size_q < 0 && reported >= limit && accepted < limit && !allowed,
+        "sell cannot hide an out-of-limit internal price"
+    );
+}
+
+#[kani::proof]
+fn kani_v16_cpi_partial_fill_preserves_limit_direction() {
+    let requested: i128 = kani::any();
+    let filled: i128 = kani::any();
+    let reported: u64 = kani::any();
+    let accepted: u64 = kani::any();
+    let limit: u64 = kani::any();
+
+    kani::assume(requested != 0 && requested != i128::MIN);
+    kani::assume(filled != 0 && filled != i128::MIN);
+    kani::assume(requested.signum() == filled.signum());
+    kani::assume(filled.unsigned_abs() <= requested.unsigned_abs());
+
+    assert_eq!(
+        policy_v16::cpi_limit_prices_allow(requested, reported, accepted, limit),
+        policy_v16::cpi_limit_prices_allow(filled, reported, accepted, limit)
+    );
+    kani::cover!(
+        requested > 0 && filled.unsigned_abs() < requested.unsigned_abs(),
+        "positive partial fill is reachable"
+    );
+    kani::cover!(
+        requested < 0 && filled.unsigned_abs() < requested.unsigned_abs(),
+        "negative partial fill is reachable"
+    );
+}
+
+#[kani::proof]
 fn kani_v16_premium_funding_rate_is_clamped_and_signed() {
     let mark_raw: u16 = kani::any();
     let index_raw: u16 = kani::any();

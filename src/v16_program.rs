@@ -4080,6 +4080,27 @@ pub mod oracle_v16 {
 pub mod policy_v16 {
     use crate::constants::MAX_DYNAMIC_TRADE_FEE_BPS;
 
+    #[inline(always)]
+    pub fn limit_price_allows(size_q: i128, exec_price: u64, limit_price: u64) -> bool {
+        limit_price == 0
+            || if size_q > 0 {
+                exec_price <= limit_price
+            } else {
+                exec_price >= limit_price
+            }
+    }
+
+    #[inline(always)]
+    pub fn cpi_limit_prices_allow(
+        size_q: i128,
+        reported_exec_price: u64,
+        accepted_exec_price: u64,
+        limit_price: u64,
+    ) -> bool {
+        limit_price_allows(size_q, reported_exec_price, limit_price)
+            && limit_price_allows(size_q, accepted_exec_price, limit_price)
+    }
+
     pub fn price_move_bps_ceil(old: u64, new: u64) -> Option<u64> {
         if old == 0 || old == new {
             return Some(0);
@@ -11473,15 +11494,6 @@ pub mod processor {
         ))
     }
 
-    fn limit_price_allows(size_q: i128, exec_price: u64, limit_price: u64) -> bool {
-        limit_price == 0
-            || if size_q > 0 {
-                exec_price <= limit_price
-            } else {
-                exec_price >= limit_price
-            }
-    }
-
     fn accepted_cpi_execution_price_view(
         market_ai: &AccountInfo<'_>,
         asset_index: usize,
@@ -11508,12 +11520,17 @@ pub mod processor {
         if limit_price == 0 {
             return Ok(());
         }
-        if !limit_price_allows(size_q, reported_exec_price, limit_price) {
+        if !policy_v16::limit_price_allows(size_q, reported_exec_price, limit_price) {
             return Err(PercolatorError::InvalidInstruction.into());
         }
         let accepted_exec_price =
             accepted_cpi_execution_price_view(market_ai, asset_index, reported_exec_price)?;
-        if !limit_price_allows(size_q, accepted_exec_price, limit_price) {
+        if !policy_v16::cpi_limit_prices_allow(
+            size_q,
+            reported_exec_price,
+            accepted_exec_price,
+            limit_price,
+        ) {
             return Err(PercolatorError::InvalidInstruction.into());
         }
         Ok(())
