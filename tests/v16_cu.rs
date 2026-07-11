@@ -59717,3 +59717,113 @@ fn v16_attack_underfunded_exit_cannot_move_ewma_with_uncollectible_fee() {
         assert_underfunded_ewma_exit_uses_collected_fee(path);
     }
 }
+
+// Public liveness regression: partial liquidation ADL can leave a winner's stored basis above the
+// side's effective OI. Resolved close must terminally detach that settlement record instead of
+// underflowing OI forever, then preserve close ordering and exact custody through full wind-down.
+#[test]
+fn v16_attack_resolved_adl_winner_can_wind_down_publicly() {
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(1, 10_000, 10_000, 10_000);
+    env.configure_auth_mark_with_cu(0, 100);
+    let long_owner = Keypair::new();
+    let long = env.create_portfolio(&long_owner);
+    let short_owner = Keypair::new();
+    let short = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long, 1_000);
+    env.deposit(&short_owner, short, 900);
+    env.trade_asset_with_cu(
+        0,
+        &long_owner,
+        long,
+        &short_owner,
+        short,
+        (2 * POS_SCALE) as i128,
+        100,
+        0,
+    );
+
+    env.svm.warp_to_slot(6);
+    env.push_auth_mark_with_cu(6, 500);
+    for portfolio in [short, long] {
+        env.svm.expire_blockhash();
+        let _ = env.send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 6,
+                observations: crank_observations(0),
+            },
+            vec![
+                AccountMeta::new(env.payer.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(portfolio, false),
+            ],
+            &[],
+        );
+    }
+    env.crank_steps(
+        short,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 6,
+            observations: crank_observations(0),
+        },
+        2,
+    );
+
+    let (_, after_adl) = env.market_state();
+    let long_before_resolve = env.portfolio_state(long);
+    assert!(after_adl.assets[0].a_long < ADL_ONE, "ADL must engage");
+    assert!(
+        active_leg_for_asset(&long_before_resolve, 0)
+            .basis_pos_q
+            .unsigned_abs()
+            > after_adl.assets[0].oi_eff_long_q,
+        "probe must leave a winner basis larger than effective side OI"
+    );
+
+    let vault_before_resolution = env.token_amount(env.vault);
+    env.resolve();
+    let (long_dest_first, long_close_cu) = env.close_resolved_with_cu(&long_owner, long);
+    assert_cu_within(
+        "CloseResolved ADL winner terminal detach",
+        long_close_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    assert_eq!(
+        env.token_amount(long_dest_first),
+        0,
+        "winner waits for the loser without destructive partial payout"
+    );
+    let long_after = env.portfolio_state(long);
+    assert!(
+        !has_active_leg_for_asset(&long_after, 0),
+        "resolved close must detach the ADL winner's residual leg"
+    );
+    assert_eq!(long_after.capital.get(), 1_000);
+    assert_eq!(long_after.pnl.get(), 800);
+
+    let (short_dest, short_close_cu) = env.close_resolved_with_cu(&short_owner, short);
+    assert_cu_within("CloseResolved ADL loser", short_close_cu, CUSTODY_CU_LIMIT);
+    let (long_dest_retry, long_retry_cu) = env.close_resolved_with_cu(&long_owner, long);
+    assert_cu_within(
+        "CloseResolved ADL winner payout retry",
+        long_retry_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    assert_eq!(env.token_amount(short_dest), 100);
+    assert_eq!(env.token_amount(long_dest_retry), 1_800);
+    assert_eq!(
+        env.token_amount(long_dest_first)
+            + env.token_amount(short_dest)
+            + env.token_amount(long_dest_retry)
+            + env.token_amount(env.vault),
+        vault_before_resolution,
+        "resolved ADL wind-down conserves exact SPL custody"
+    );
+
+    env.close_portfolio_with_cu(&short_owner, short);
+    env.close_portfolio_with_cu(&long_owner, long);
+    let (_, terminal) = env.market_state();
+    assert_eq!(terminal.materialized_portfolio_count, 0);
+    assert_eq!(terminal.c_tot, 0);
+    assert_eq!(terminal.vault, 0);
+    assert_eq!(env.token_amount(env.vault), 0);
+}
