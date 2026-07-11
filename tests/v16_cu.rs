@@ -26722,7 +26722,7 @@ fn v16_attack_stale_permissionless_asset_cannot_global_resolve_market() {
 }
 
 #[test]
-fn v16_attack_non_base_local_stale_shutdown_rejects_before_freeze() {
+fn v16_attack_non_base_local_stale_admin_cannot_block_delayed_shutdown() {
     let mut env = V16CuEnv::new_with_market_params_and_price_move(1, 1_000, 1_000, 500);
     env.update_market_init_fee_policy_with_cu(1);
     env.configure_permissionless_resolve_with_cu(5, 5);
@@ -26811,18 +26811,50 @@ fn v16_attack_non_base_local_stale_shutdown_rejects_before_freeze() {
         "rejected local-stale shutdown leaves the short unchanged"
     );
 
+    let marketauth = env.admin.insecure_clone();
     env.svm.expire_blockhash();
-    env.push_auth_mark_for_asset_with_authority(1, &creator, 7, 101);
-    env.svm.expire_blockhash();
-    let fresh_shutdown = env.try_shutdown_asset_with_authority(&creator, 1, 7);
+    let forced_shutdown = env.try_shutdown_asset_with_authority(&marketauth, 1, 7);
     assert!(
-        fresh_shutdown.is_ok(),
-        "after a public asset-1 oracle refresh, shutdown remains reachable: {fresh_shutdown:?}"
+        forced_shutdown.is_ok(),
+        "asset-0 market authority must be able to shut down an abandoned stale asset: \
+         {forced_shutdown:?}"
     );
+    let shutdown_data = env.svm.get_account(&env.market).unwrap().data;
+    let (_, shutdown_group) = state::read_market(&shutdown_data).unwrap();
+    let shutdown_profile = state::read_asset_oracle_profile(&shutdown_data, 1).unwrap();
     assert_eq!(
-        env.market_state().1.assets[1].lifecycle,
+        shutdown_group.assets[1].lifecycle,
         AssetLifecycleV16::Recovery
     );
+    assert_eq!(shutdown_group.assets[1].effective_price, 100);
+    assert_eq!(shutdown_profile.last_good_oracle_slot, 7);
+    assert!(has_active_leg_for_asset(&env.portfolio_state(long), 1));
+    assert!(has_active_leg_for_asset(&env.portfolio_state(short), 1));
+
+    let cranker = Keypair::new();
+    env.svm.warp_to_slot(11);
+    env.push_auth_mark_with_cu(11, 100);
+    let early =
+        env.try_force_close_abandoned_asset_with_cu(&cranker, long, short, 1, 11, POS_SCALE);
+    assert!(
+        early.is_err(),
+        "the market-authority escape hatch must preserve the configured trader exit window"
+    );
+    assert!(has_active_leg_for_asset(&env.portfolio_state(long), 1));
+    assert!(has_active_leg_for_asset(&env.portfolio_state(short), 1));
+
+    env.svm.warp_to_slot(12);
+    env.svm.expire_blockhash();
+    let late = env.try_force_close_abandoned_asset_with_cu(&cranker, long, short, 1, 12, POS_SCALE);
+    assert!(
+        late.is_ok(),
+        "permissionless wind-down must progress after the exact timeout: {late:?}"
+    );
+    assert!(!has_active_leg_for_asset(&env.portfolio_state(long), 1));
+    assert!(!has_active_leg_for_asset(&env.portfolio_state(short), 1));
+    let final_group = env.market_state().1;
+    assert!(final_group.vault >= final_group.c_tot + final_group.insurance);
+    assert_eq!(final_group.vault as u64, env.token_amount(env.vault));
 }
 
 // security.md sweep - slot-zero local stale bypass (#24/#30/#37): a non-base price-managed asset can

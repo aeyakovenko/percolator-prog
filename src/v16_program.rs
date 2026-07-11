@@ -9214,11 +9214,11 @@ pub mod processor {
                 if !marketauth_authorized && !asset_admin_authorized {
                     return Err(PercolatorError::Unauthorized.into());
                 }
-                reject_permissionless_resolve_matured_live_for_profile_view(
-                    &cfg,
-                    &profile,
-                    &group,
-                )?;
+                if !marketauth_authorized {
+                    reject_permissionless_resolve_matured_live_for_profile_view(
+                        &cfg, &profile, &group,
+                    )?;
+                }
                 if authenticated_slot < group.header.current_slot.get() {
                     return Err(PercolatorError::EngineStale.into());
                 }
