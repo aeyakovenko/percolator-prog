@@ -26872,7 +26872,7 @@ fn v16_attack_non_base_slot_zero_profile_stale_rejects_trade() {
 }
 
 #[test]
-fn v16_attack_non_base_local_stale_rebalance_reduce_rejects() {
+fn v16_attack_stale_asset_operator_cannot_block_defensive_rebalance_exit() {
     let mut env = V16CuEnv::new_with_market_params_and_price_move(1, 1_000, 1_000, 500);
     env.configure_permissionless_resolve_with_cu(5, 5);
 
@@ -26917,41 +26917,68 @@ fn v16_attack_non_base_local_stale_rebalance_reduce_rejects() {
     );
 
     env.svm.warp_to_slot(6);
-    let market_before = env.svm.get_account(&env.market).unwrap();
-    let long_before = env.svm.get_account(&long).unwrap();
+    let profile =
+        state::read_asset_oracle_profile(&env.svm.get_account(&env.market).unwrap().data, 1)
+            .unwrap();
+    assert_eq!(profile.last_good_oracle_slot, 0);
+    assert!(6 - profile.last_good_oracle_slot >= 5);
+
+    let (_, group_before) = env.market_state();
+    let long_before = env.portfolio_state(long);
+    let short_state_before = env.portfolio_state(short);
     let short_before = env.svm.get_account(&short).unwrap();
     env.svm.expire_blockhash();
-    let reduce = env.send(
-        ProgInstruction::RebalanceReduce {
-            asset_index: 1,
-            reduce_q: POS_SCALE,
-        },
-        vec![
-            AccountMeta::new(long_owner.pubkey(), true),
-            AccountMeta::new(env.market, false),
-            AccountMeta::new(long, false),
-        ],
-        &[&long_owner],
+    let reduce_cu = env
+        .send(
+            ProgInstruction::RebalanceReduce {
+                asset_index: 1,
+                reduce_q: POS_SCALE,
+            },
+            vec![
+                AccountMeta::new(long_owner.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(long, false),
+            ],
+            &[&long_owner],
+        )
+        .expect("owner defensive rebalance remains live after its asset oracle stalls");
+    assert_cu_within(
+        "stale defensive RebalanceReduce",
+        reduce_cu,
+        CUSTODY_CU_LIMIT,
     );
-    assert!(
-        reduce.is_err(),
-        "RebalanceReduce must not bypass a locally stale non-base oracle"
-    );
-    assert_eq!(
-        env.svm.get_account(&env.market).unwrap(),
-        market_before,
-        "rejected local-stale reduce leaves market unchanged"
-    );
-    assert_eq!(
-        env.svm.get_account(&long).unwrap(),
-        long_before,
-        "rejected local-stale reduce leaves owner unchanged"
-    );
+
+    let (_, group_after) = env.market_state();
+    let long_after = env.portfolio_state(long);
+    let short_state_after = env.portfolio_state(short);
+    assert_eq!(group_after.vault, group_before.vault);
+    assert_eq!(group_after.c_tot, group_before.c_tot);
+    assert_eq!(group_after.insurance, group_before.insurance);
+    assert_eq!(long_after.capital, long_before.capital);
+    assert_eq!(long_after.pnl, long_before.pnl);
+    assert_eq!(short_state_after.capital, short_state_before.capital);
+    assert_eq!(short_state_after.pnl, short_state_before.pnl);
+    assert!(!has_active_leg_for_asset(&long_after, 1));
+    assert!(has_active_leg_for_asset(&short_state_after, 1));
+    assert_eq!(group_after.assets[1].oi_eff_long_q, 0);
+    assert_eq!(group_after.assets[1].oi_eff_short_q, 0);
     assert_eq!(
         env.svm.get_account(&short).unwrap(),
         short_before,
-        "rejected local-stale reduce leaves counterparty unchanged"
+        "defensive rebalance does not mutate the counterparty account"
     );
+
+    let long_dest = env.withdraw(&long_owner, long, 1_000_000);
+    assert_eq!(env.token_amount(long_dest), 1_000_000);
+    let forfeit_cu = env.forfeit_recovery_leg_with_cu(&short_owner, short, 1, 1);
+    assert_cu_within("orphaned-side forfeit", forfeit_cu, CUSTODY_CU_LIMIT);
+    assert!(!has_active_leg_for_asset(&env.portfolio_state(short), 1));
+    let short_dest = env.withdraw(&short_owner, short, 1_000_000);
+    assert_eq!(env.token_amount(short_dest), 1_000_000);
+    let (_, final_group) = env.market_state();
+    assert_eq!(final_group.vault, 0);
+    assert_eq!(final_group.c_tot, 0);
+    assert_eq!(final_group.insurance, 0);
 }
 
 // security.md sweep - permissionless asset oracle liveness DoS (#2/#30/#37): the reverse
