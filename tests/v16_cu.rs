@@ -40138,6 +40138,15 @@ fn v16_attack_delayed_permissionless_forfeit_clears_zero_oi_orphan() {
         b_progress_steps > 1,
         "the regression must exercise multi-transaction B progress",
     );
+    assert_eq!(final_asset.lifecycle, AssetLifecycleV16::Recovery);
+    assert_eq!(final_asset.oi_eff_long_q, 0);
+    assert_eq!(final_asset.mode_long, SideModeV16::ResetPending);
+    let final_profile =
+        state::read_asset_oracle_profile(&env.svm.get_account(&env.market).unwrap().data, 0)
+            .unwrap();
+    assert_eq!(final_profile.last_good_oracle_slot, 31);
+    assert_eq!(env.market_state().0.force_close_delay_slots, 5);
+    assert_eq!(env.svm.get_sysvar::<Clock>().slot, 37);
 
     let long_before_forfeit = env.portfolio_state(long);
     let capital_before_forfeit = long_before_forfeit.capital.get();
