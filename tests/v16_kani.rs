@@ -35,6 +35,66 @@ fn kani_v16_premium_funding_rate_is_clamped_and_signed() {
 }
 
 #[kani::proof]
+fn kani_v16_fee_supported_mark_clamp_is_directional_and_zero_support_is_noop() {
+    let old_mark = kani::any::<u64>();
+    let quoted_mark = kani::any::<u64>();
+    let supported_move_bps = kani::any::<u64>();
+    kani::assume(old_mark > 0 && quoted_mark > 0);
+    let mark =
+        policy_v16::clamp_mark_to_supported_move_bps(old_mark, quoted_mark, supported_move_bps);
+
+    kani::cover!(
+        supported_move_bps == 0,
+        "zero paid support cannot move mark"
+    );
+    kani::cover!(
+        quoted_mark > old_mark && mark > old_mark,
+        "upward paid movement"
+    );
+    kani::cover!(
+        quoted_mark < old_mark && mark < old_mark,
+        "downward paid movement"
+    );
+
+    assert!(mark >= old_mark.min(quoted_mark));
+    assert!(mark <= old_mark.max(quoted_mark));
+    if supported_move_bps == 0 {
+        assert_eq!(mark, old_mark);
+    }
+}
+
+#[kani::proof]
+fn kani_v16_collected_base_fee_cannot_fund_mark_movement() {
+    let old_mark = kani::any::<u64>();
+    let quoted_mark = kani::any::<u64>();
+    let fee_a = kani::any::<u32>() as u128;
+    let fee_b = kani::any::<u32>() as u128;
+    let base_fee_paid = fee_a + fee_b + kani::any::<u32>() as u128;
+    let mark_externality_notional = kani::any::<u32>() as u128 + 1;
+    kani::assume(old_mark > 0 && quoted_mark > 0);
+
+    let mark = policy_v16::collected_fee_supported_mark(
+        old_mark,
+        quoted_mark,
+        base_fee_paid,
+        mark_externality_notional,
+        fee_a,
+        fee_b,
+    )
+    .unwrap();
+
+    kani::cover!(
+        quoted_mark != old_mark && fee_a > 0 && fee_b > 0,
+        "both counterparties pay only base fee against a moving quote"
+    );
+    kani::cover!(
+        base_fee_paid > fee_a + fee_b,
+        "collected fee does not fully cover base fee"
+    );
+    assert_eq!(mark, old_mark);
+}
+
+#[kani::proof]
 fn kani_v16_init_market_decode_preserves_wire_fields() {
     // Full-width symbolic inputs (audit: avoid the u16->u64/u128 widening collapse so
     // narrow-read / high-byte decode bugs are observable).

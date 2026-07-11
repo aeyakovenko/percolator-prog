@@ -59642,7 +59642,6 @@ fn assert_underfunded_ewma_exit_uses_collected_fee(path: NoCpiReportedPricePath)
             account,
             ProgInstruction::PermissionlessCrank {
                 now_slot: 10,
-                close_q: 0,
                 observations: crank_observations(0),
             },
         );

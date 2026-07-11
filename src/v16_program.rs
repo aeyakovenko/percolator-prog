@@ -4127,6 +4127,42 @@ pub mod policy_v16 {
         u64::try_from(bps).ok()
     }
 
+    pub fn collected_fee_supported_mark(
+        old_mark_e6: u64,
+        quoted_mark_e6: u64,
+        base_fee_paid: u128,
+        mark_externality_notional: u128,
+        fee_a: u128,
+        fee_b: u128,
+    ) -> Option<u64> {
+        if quoted_mark_e6 == 0 || mark_externality_notional == 0 {
+            return Some(quoted_mark_e6);
+        }
+        let collected = fee_a.checked_add(fee_b)?;
+        let externality_fee = collected.saturating_sub(base_fee_paid);
+        let supported_move_bps = externality_fee
+            .checked_mul(10_000)?
+            .checked_div(mark_externality_notional)?;
+        Some(clamp_mark_to_supported_move_bps(
+            old_mark_e6,
+            quoted_mark_e6,
+            u64::try_from(supported_move_bps).unwrap_or(u64::MAX),
+        ))
+    }
+
+    pub fn clamp_mark_to_supported_move_bps(
+        old_mark_e6: u64,
+        quoted_mark_e6: u64,
+        supported_move_bps: u64,
+    ) -> u64 {
+        super::oracle_v16::clamp_toward_engine_dt(
+            old_mark_e6,
+            quoted_mark_e6,
+            supported_move_bps,
+            1,
+        )
+    }
+
     pub fn premium_funding_rate_e9(
         mark_e6: u64,
         index_e6: u64,
@@ -11666,24 +11702,15 @@ pub mod processor {
         fee_a: u128,
         fee_b: u128,
     ) -> Result<u64, ProgramError> {
-        if quote.post_trade_mark_e6 == 0 || quote.mark_externality_notional == 0 {
-            return Ok(quote.post_trade_mark_e6);
-        }
-        let collected = fee_a
-            .checked_add(fee_b)
-            .ok_or(PercolatorError::EngineArithmeticOverflow)?;
-        let externality_fee = collected.saturating_sub(quote.base_fee_paid);
-        let supported_move_bps = externality_fee
-            .checked_mul(10_000)
-            .ok_or(PercolatorError::EngineArithmeticOverflow)?
-            .checked_div(quote.mark_externality_notional)
-            .ok_or(PercolatorError::EngineArithmeticOverflow)?;
-        Ok(oracle_v16::clamp_toward_engine_dt(
+        policy_v16::collected_fee_supported_mark(
             profile.mark_ewma_e6,
             quote.post_trade_mark_e6,
-            u64::try_from(supported_move_bps).unwrap_or(u64::MAX),
-            1,
-        ))
+            quote.base_fee_paid,
+            quote.mark_externality_notional,
+            fee_a,
+            fee_b,
+        )
+        .ok_or(PercolatorError::EngineArithmeticOverflow.into())
     }
 
     fn hybrid_effective_price_for_crank_view(
