@@ -4419,10 +4419,10 @@ pub mod processor {
         domain: usize,
     ) -> Result<bool, ProgramError> {
         let asset_index = domain / 2;
+        reject_permissionless_resolve_matured_live_view(cfg, group)?;
         if shutdown_asset_empty_and_matured_now_view(cfg, group, asset_index).is_ok() {
             return Ok(true);
         }
-        reject_permissionless_resolve_matured_live_view(cfg, group)?;
         if group.header.bankruptcy_hlock_active != 0
             || group.header.threshold_stress_active != 0
             || group.header.loss_stale_active != 0
