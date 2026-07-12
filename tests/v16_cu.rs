@@ -54693,6 +54693,92 @@ fn v16_attack_permissionless_reuse_respects_activation_cooldown_and_fee_atomicit
     );
 }
 
+// A shutdown-matured non-base asset must not bypass the global stale-resolution freeze. Once the
+// base oracle is stale enough to make resolution permissionless, its remaining insurance belongs
+// to the terminal snapshot and cannot still leave through the Live shutdown-drain exception.
+#[test]
+fn v16_attack_shutdown_drain_cannot_reduce_resolve_matured_insurance() {
+    const FUNDED: u128 = 200;
+    const FRESH_DRAIN: u128 = 50;
+    const STALE_DRAIN: u128 = FUNDED - FRESH_DRAIN;
+
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(2, 10_000, 10_000, 10_000);
+    let admin = env.admin.insecure_clone();
+    env.configure_permissionless_resolve_with_cu(20, 5);
+    env.configure_auth_mark_with_cu(1, 100);
+    env.configure_auth_mark_for_asset_as_admin(1, 1, 100);
+    env.top_up_insurance_domain_with_authority(&admin, 2, FUNDED);
+
+    env.svm.warp_to_slot(2);
+    env.svm.expire_blockhash();
+    env.try_shutdown_asset_with_authority(&admin, 1, 2)
+        .expect("empty non-base asset can enter shutdown recovery");
+
+    // Non-vacuous control: after the asset-local delay, but before global stale maturity, the
+    // configured operator can still make bounded shutdown progress.
+    env.svm.warp_to_slot(8);
+    env.svm.expire_blockhash();
+    let (fresh_dest, fresh_cu) = env
+        .try_withdraw_insurance_asset_with_authority(&admin, 1, FRESH_DRAIN)
+        .expect("shutdown insurance drain remains live before global stale maturity");
+    assert_cu_within(
+        "pre-stale shutdown insurance drain",
+        fresh_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    assert_eq!(env.token_amount(fresh_dest), FRESH_DRAIN as u64);
+
+    env.svm.warp_to_slot(30);
+    let stale_dest = env.token_account_for_mint(env.mint, admin.pubkey(), 0);
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    let dest_before = env.svm.get_account(&stale_dest).unwrap();
+    let (_, group_before) = env.market_state();
+    assert_eq!(group_before.mode, MarketModeV16::Live);
+    assert_eq!(group_before.assets[1].lifecycle, AssetLifecycleV16::Recovery);
+    assert_eq!(group_before.insurance_domain_budget[2], STALE_DRAIN);
+    assert_eq!(group_before.insurance_domain_spent[2], 0);
+
+    env.svm.expire_blockhash();
+    let stale_withdraw = env.send(
+        ProgInstruction::WithdrawInsuranceAsset {
+            asset_index: 1,
+            amount: STALE_DRAIN,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(stale_dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        stale_withdraw.is_err(),
+        "shutdown drain must freeze once global stale resolution is available"
+    );
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+    assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+    assert_eq!(env.svm.get_account(&stale_dest).unwrap(), dest_before);
+
+    env.svm.expire_blockhash();
+    let resolve = env.send(
+        ProgInstruction::ResolveStalePermissionless { now_slot: 0 },
+        vec![AccountMeta::new(env.market, false)],
+        &[],
+    );
+    assert!(
+        resolve.is_ok(),
+        "rejected shutdown drain must leave permissionless resolution live: {resolve:?}"
+    );
+    let (_, resolved) = env.market_state();
+    assert_eq!(resolved.mode, MarketModeV16::Resolved);
+    assert_eq!(resolved.insurance_domain_budget[2], STALE_DRAIN);
+    assert_eq!(resolved.insurance_domain_spent[2], 0);
+}
+
 // security.md sweep - stale-resolve junior/senior drift (#30/#33/#35/#48):
 // ConvertReleasedPnl is owner-gated, but it still moves source-backed junior PnL into senior
 // withdrawable capital. Once the market is resolve-matured, that conversion must freeze before the
