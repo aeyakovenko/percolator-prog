@@ -63670,3 +63670,152 @@ fn v16_bpf_10m_flat_user_withdraw_and_close_stay_bounded() {
         assert!(closed.data.is_empty() || !state::is_initialized(&closed.data));
     }
 }
+
+#[test]
+fn v16_attack_no_observation_liquidation_cannot_skip_premium_funding() {
+    const INITIAL_PRICE: u64 = 1_000_000;
+    const TARGET_PRICE: u64 = 3_000_000;
+    const OPEN_SLOT: u64 = 1;
+    const PREMIUM_SLOT: u64 = 2;
+    const LIQUIDATION_SLOT: u64 = 3;
+
+    let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+        initial_price: INITIAL_PRICE,
+        max_price_move_bps_per_slot: 1_000,
+        max_accrual_dt_slots: 1,
+        max_abs_funding_e9_per_slot: 1_000,
+        min_funding_lifetime_slots: 1,
+        ..V16CuMarketParams::default()
+    });
+    env.svm.warp_to_slot(OPEN_SLOT);
+    env.configure_auth_mark_with_cu(OPEN_SLOT, INITIAL_PRICE);
+
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long_account = env.create_portfolio(&long_owner);
+    let short_account = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long_account, 100_000_000);
+    env.deposit(&short_owner, short_account, 30_000_000);
+    env.trade_with_cu(
+        &long_owner,
+        long_account,
+        &short_owner,
+        short_account,
+        (10 * POS_SCALE) as i128,
+        INITIAL_PRICE,
+        0,
+    );
+
+    env.svm.warp_to_slot(PREMIUM_SLOT);
+    env.push_auth_mark_with_cu(PREMIUM_SLOT, TARGET_PRICE);
+    env.crank(
+        short_account,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: PREMIUM_SLOT,
+            observations: crank_observations(0),
+        },
+    );
+    let before = env.market_state().1;
+    let before_short = env.portfolio_state(short_account);
+    let before_cert = health_cert(&before_short);
+    assert_eq!(before.assets[0].effective_price, 1_100_000);
+    assert_eq!(before.assets[0].slot_last, PREMIUM_SLOT);
+    assert_eq!(before.funding_epoch, 0);
+    assert_eq!(before.assets[0].f_long_num, 0);
+    assert_eq!(before.assets[0].f_short_num, 0);
+    assert!(
+        before_cert.certified_equity > 0 && before_cert.certified_liq_deficit > 0,
+        "setup must be solvent but liquidatable with a current cert: {before_cert:?}"
+    );
+
+    env.svm.warp_to_slot(LIQUIDATION_SLOT);
+    let market_before_omission = env.svm.get_account(&env.market).unwrap();
+    let short_before_omission = env.svm.get_account(&short_account).unwrap();
+    env.svm.expire_blockhash();
+    let omitted = env.send(
+        ProgInstruction::PermissionlessCrank {
+            now_slot: LIQUIDATION_SLOT,
+            observations: vec![],
+        },
+        vec![
+            AccountMeta::new(env.payer.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(short_account, false),
+        ],
+        &[],
+    );
+    assert!(
+        omitted.is_err(),
+        "a no-observation liquidation must not consume a pending premium-funding interval"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before_omission
+    );
+    assert_eq!(
+        env.svm.get_account(&short_account).unwrap(),
+        short_before_omission
+    );
+
+    env.svm.expire_blockhash();
+    let observed_refresh = env.send(
+        ProgInstruction::PermissionlessCrank {
+            now_slot: LIQUIDATION_SLOT,
+            observations: crank_observations(0),
+        },
+        vec![
+            AccountMeta::new(env.payer.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(short_account, false),
+        ],
+        &[],
+    );
+    assert!(
+        observed_refresh.is_ok(),
+        "the authenticated retry must accrue and refresh: {observed_refresh:?}"
+    );
+    let after_funding = env.market_state().1;
+    let refreshed_short = env.portfolio_state(short_account);
+    assert!(after_funding.funding_epoch > before.funding_epoch);
+    assert_ne!(after_funding.assets[0].f_long_num, 0);
+    assert_ne!(after_funding.assets[0].f_short_num, 0);
+    assert_eq!(after_funding.assets[0].slot_last, LIQUIDATION_SLOT);
+    assert!(
+        health_cert(&refreshed_short).certified_liq_deficit > 0,
+        "the observed first step must leave a real liquidation continuation"
+    );
+
+    let oi_before_liquidation = after_funding.assets[0].oi_eff_short_q;
+    env.svm.expire_blockhash();
+    let liquidation = env.send(
+        ProgInstruction::PermissionlessCrank {
+            now_slot: LIQUIDATION_SLOT,
+            observations: vec![],
+        },
+        vec![
+            AccountMeta::new(env.payer.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(short_account, false),
+        ],
+        &[],
+    );
+    assert!(
+        liquidation.is_ok(),
+        "after funding is booked, the same-slot no-observation liquidation must make progress: {liquidation:?}"
+    );
+    let after_liquidation = env.market_state().1;
+    assert!(
+        after_liquidation.assets[0].oi_eff_short_q < oi_before_liquidation,
+        "liquidation must reduce the short's open interest"
+    );
+    assert_eq!(
+        after_liquidation.assets[0].f_long_num,
+        after_funding.assets[0].f_long_num
+    );
+    assert_eq!(
+        after_liquidation.assets[0].f_short_num,
+        after_funding.assets[0].f_short_num
+    );
+    assert_eq!(after_liquidation.vault as u64, env.token_amount(env.vault));
+    assert!(after_liquidation.vault >= after_liquidation.c_tot + after_liquidation.insurance);
+}
