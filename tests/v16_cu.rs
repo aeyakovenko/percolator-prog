@@ -38230,6 +38230,110 @@ fn v16_attack_accumulated_ewma_lag_remains_fee_covered_after_crank() {
     );
 }
 
+// A permissionless asset creator controls that asset's oracle and can intentionally bankrupt its
+// own book. Even when this activates the engine's bankruptcy hlock, unrelated base-asset trading
+// must remain live; local loss isolation is insufficient if the global flag freezes normal users.
+#[test]
+fn v16_attack_permissionless_asset_bankruptcy_does_not_freeze_base_trading() {
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(1, 10_000, 10_000, 10_000);
+    env.configure_auth_mark_with_cu(0, 100);
+    env.update_market_init_fee_policy_with_cu(1);
+
+    let creator = Keypair::new();
+    let creator_key = creator.pubkey();
+    env.activate_permissionless_asset_with_fee(
+        &creator,
+        1,
+        1,
+        100,
+        creator_key,
+        creator_key,
+        creator_key,
+        creator_key,
+        1,
+    );
+    env.configure_auth_mark_for_asset_with_authority(1, &creator, 1, 100);
+
+    let attacker_long = Keypair::new();
+    let attacker_short = Keypair::new();
+    let long_account = env.create_portfolio(&attacker_long);
+    let short_account = env.create_portfolio(&attacker_short);
+    env.deposit(&attacker_long, long_account, 1_000_000);
+    env.deposit(&attacker_short, short_account, 250);
+    env.trade_asset_with_cu(
+        1,
+        &attacker_long,
+        long_account,
+        &attacker_short,
+        short_account,
+        POS_SCALE as i128,
+        100,
+        0,
+    );
+
+    for (slot, mark) in [(2u64, 200u64), (3, 400), (4, 800)] {
+        env.svm.warp_to_slot(slot);
+        env.push_auth_mark_for_asset_with_authority(1, &creator, slot, mark);
+        for portfolio in [long_account, short_account] {
+            env.svm.expire_blockhash();
+            let _ = env.send(
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: slot,
+                    observations: crank_observations(1),
+                },
+                vec![
+                    AccountMeta::new(env.payer.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(portfolio, false),
+                ],
+                &[],
+            );
+        }
+    }
+    env.crank_steps(
+        short_account,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 4,
+            observations: crank_observations(1),
+        },
+        4,
+    );
+
+    let (_, failed_asset_group) = env.market_state();
+    assert_eq!(failed_asset_group.mode, MarketModeV16::Live);
+    assert!(
+        failed_asset_group.bankruptcy_hlock_active,
+        "probe must activate the cross-market bankruptcy flag"
+    );
+    assert_eq!(env.portfolio_state(short_account).capital.get(), 0);
+    assert_eq!(env.portfolio_state(short_account).pnl.get(), 0);
+
+    let base_long = Keypair::new();
+    let base_short = Keypair::new();
+    let base_long_account = env.create_portfolio(&base_long);
+    let base_short_account = env.create_portfolio(&base_short);
+    env.deposit(&base_long, base_long_account, 1_000_000);
+    env.deposit(&base_short, base_short_account, 1_000_000);
+    env.svm.expire_blockhash();
+    let base_trade = env.try_trade_asset_with_cu(
+        0,
+        &base_long,
+        base_long_account,
+        &base_short,
+        base_short_account,
+        POS_SCALE as i128,
+        100,
+        0,
+    );
+    assert!(
+        base_trade.is_ok(),
+        "a permissionless asset's self-bankruptcy must not freeze unrelated base trading: {base_trade:?}"
+    );
+    let (_, final_group) = env.market_state();
+    assert_eq!(final_group.assets[0].oi_eff_long_q, POS_SCALE);
+    assert_eq!(final_group.assets[0].oi_eff_short_q, POS_SCALE);
+}
+
 // security.md sweep — ADL deleverage precision/conservation (#9/#22/#33): when a bankrupt side is
 // partially liquidated, the engine auto-deleverages the WINNING (opposite) side by scaling its a-factor
 // by oi_after/oi_before (percolator/src/v16.rs:9834). Attacker goal: have the winner keep its full claim
