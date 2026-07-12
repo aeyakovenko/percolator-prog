@@ -59471,3 +59471,124 @@ fn v16_attack_backing_topup_rejects_lapsed_expiry() {
         "valid topup credits exactly the backing"
     );
 }
+
+// Recovery liveness: aggregate opposite OI may be split across several portfolios. Once the
+// force-close delay expires, a permissionless cranker must be able to consume each matched pair
+// even when the larger account is maintenance-healthy but remains below initial margin after the
+// first partial close. Reusing the ordinary trade IM gate makes every available pair revert and
+// leaves an abandoned position with no permissionless rank-decreasing continuation.
+#[test]
+fn v16_attack_fragmented_recovery_force_close_makes_permissionless_progress() {
+    const ASSET: u16 = 1;
+    const MARK: u64 = 100;
+    const SHUTDOWN_MARK: u64 = 110;
+    const SHUTDOWN_SLOT: u64 = 10;
+    const FORCE_CLOSE_DELAY: u64 = 5;
+    const LARGE_Q: u128 = 10 * POS_SCALE;
+    const SMALL_Q: u128 = POS_SCALE;
+
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(2, 5_000, 10_000, 1_000);
+    env.configure_permissionless_resolve_with_cu(1_000, FORCE_CLOSE_DELAY);
+    env.configure_auth_mark_for_asset_as_admin(ASSET, 1, MARK);
+
+    let large_owner = Keypair::new();
+    let large = env.create_portfolio(&large_owner);
+    env.deposit(&large_owner, large, 1_000);
+    let mut small_owners = Vec::new();
+    let mut smalls = Vec::new();
+    for _ in 0..10 {
+        let owner = Keypair::new();
+        let portfolio = env.create_portfolio(&owner);
+        env.deposit(&owner, portfolio, 100);
+        env.trade_asset_with_cu(
+            ASSET,
+            &large_owner,
+            large,
+            &owner,
+            portfolio,
+            -(SMALL_Q as i128),
+            MARK,
+            0,
+        );
+        small_owners.push(owner);
+        smalls.push(portfolio);
+    }
+
+    env.svm.warp_to_slot(SHUTDOWN_SLOT);
+    env.push_auth_mark_for_asset_as_admin(ASSET, SHUTDOWN_SLOT, SHUTDOWN_MARK);
+    for portfolio in core::iter::once(large).chain(smalls.iter().copied()) {
+        env.svm.expire_blockhash();
+        env.crank(
+            portfolio,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: SHUTDOWN_SLOT,
+                observations: crank_observations(ASSET),
+            },
+        );
+    }
+
+    let large_before_shutdown = env.portfolio_state(large);
+    let cert = health_cert(&large_before_shutdown);
+    assert_eq!(
+        active_leg_for_asset(&large_before_shutdown, ASSET as usize).basis_pos_q,
+        -(LARGE_Q as i128)
+    );
+    assert_eq!(cert.certified_liq_deficit, 0, "the large leg is not liquidatable");
+    assert!(
+        cert.certified_equity >= cert.certified_maintenance_req as i128
+            && cert.certified_equity < cert.certified_initial_req as i128,
+        "the large leg must sit strictly between maintenance and initial margin"
+    );
+
+    env.update_asset_lifecycle_as_admin_with_cu(
+        percolator_prog::processor::ASSET_ACTION_SHUTDOWN,
+        ASSET,
+        SHUTDOWN_SLOT,
+        0,
+    );
+    env.svm
+        .warp_to_slot(SHUTDOWN_SLOT + FORCE_CLOSE_DELAY + 1);
+    let cranker = Keypair::new();
+
+    for (index, small) in smalls.iter().copied().enumerate() {
+        env.svm.expire_blockhash();
+        let cu = env
+            .try_force_close_abandoned_asset_with_cu(
+                &cranker,
+                large,
+                small,
+                ASSET,
+                SHUTDOWN_SLOT + FORCE_CLOSE_DELAY + 1,
+                SMALL_Q,
+            )
+            .unwrap_or_else(|err| {
+                panic!(
+                    "fragment {index} must make permissionless recovery progress: {err}"
+                )
+            });
+        assert_cu_within(
+            "fragmented recovery ForceCloseAbandonedAsset",
+            cu,
+            TRADE_CU_LIMIT,
+        );
+        let expected_q = LARGE_Q - SMALL_Q * (index as u128 + 1);
+        let large_after = env.portfolio_state(large);
+        if expected_q == 0 {
+            assert!(!has_active_leg_for_asset(&large_after, ASSET as usize));
+        } else {
+            assert_eq!(
+                active_leg_for_asset(&large_after, ASSET as usize).basis_pos_q,
+                -(expected_q as i128)
+            );
+        }
+    }
+    assert!(!has_active_leg_for_asset(
+        &env.portfolio_state(large),
+        ASSET as usize
+    ));
+    let (_, group) = env.market_state();
+    assert_eq!(group.assets[ASSET as usize].oi_eff_long_q, 0);
+    assert_eq!(group.assets[ASSET as usize].oi_eff_short_q, 0);
+    assert!(group.vault >= group.c_tot + group.insurance);
+    assert_eq!(group.vault as u64, env.token_amount(env.vault));
+}
