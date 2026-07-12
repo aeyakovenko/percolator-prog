@@ -50231,6 +50231,159 @@ fn v16_attack_batch_cpi_fee_bps_bounded_for_permissionless_lp() {
     );
 }
 
+// LoF: the taker is the only owner signing a CPI fill. A caller-selected fee therefore cannot
+// increase the unsigned LP's charge. Otherwise a permissionless asset creator can trade a full
+// round trip against an LP's pre-existing matcher authorization, withdraw both sides' fees through
+// the creator-controlled asset insurance budget, and keep the LP's half as profit.
+#[test]
+fn v16_attack_cpi_taker_cannot_siphon_unsigned_lp_with_caller_fee() {
+    const DEPOSIT: u128 = 1_000_000;
+    const SIZE_Q: i128 = (100 * POS_SCALE) as i128;
+    const CALLER_FEE_BPS: u64 = 10_000;
+
+    for batch in [false, true] {
+        let mut env = V16CuEnv::new();
+        env.update_market_init_fee_policy_with_cu(1);
+
+        let matcher_program = Pubkey::new_unique();
+        let matcher_bytes =
+            std::fs::read(auth_matcher_program_path()).expect("read auth matcher BPF");
+        env.svm.add_program(matcher_program, &matcher_bytes);
+        let attacker = Keypair::new();
+        let lp = Keypair::new();
+        let attacker_account = env.create_portfolio(&attacker);
+        let lp_account = env.create_portfolio(&lp);
+        env.deposit(&attacker, attacker_account, DEPOSIT);
+        env.deposit(&lp, lp_account, DEPOSIT);
+
+        // The LP authorizes its matcher before the attacker creates asset 1. The matcher request
+        // binds asset/size/price, but carries no fee field for the LP to inspect or reject.
+        let (ctx, delegate, _) =
+            env.init_auth_matcher_context(matcher_program, &lp, lp_account);
+        let attacker_key = attacker.pubkey();
+        env.svm.warp_to_slot(1);
+        env.activate_permissionless_asset_with_fee(
+            &attacker,
+            1,
+            1,
+            100,
+            attacker_key,
+            attacker_key,
+            attacker_key,
+            attacker_key,
+            1,
+        );
+
+        for size_q in [SIZE_Q, -SIZE_Q] {
+            env.svm.expire_blockhash();
+            let fill = if batch {
+                env.send(
+                    ProgInstruction::BatchTradeCpi {
+                        legs: vec![BatchTradeCpiLeg {
+                            asset_index: 1,
+                            size_q,
+                            fee_bps: CALLER_FEE_BPS,
+                            limit_price: 0,
+                        }],
+                    },
+                    vec![
+                        AccountMeta::new(attacker.pubkey(), true),
+                        AccountMeta::new(env.market, false),
+                        AccountMeta::new(attacker_account, false),
+                        AccountMeta::new(lp_account, false),
+                        AccountMeta::new_readonly(matcher_program, false),
+                        AccountMeta::new(ctx, false),
+                        AccountMeta::new_readonly(delegate, false),
+                    ],
+                    &[&attacker],
+                )
+            } else {
+                env.send(
+                    ProgInstruction::TradeCpi {
+                        asset_index: 1,
+                        size_q,
+                        fee_bps: CALLER_FEE_BPS,
+                        limit_price: 0,
+                    },
+                    vec![
+                        AccountMeta::new(attacker.pubkey(), true),
+                        AccountMeta::new(env.market, false),
+                        AccountMeta::new(attacker_account, false),
+                        AccountMeta::new(lp_account, false),
+                        AccountMeta::new_readonly(matcher_program, false),
+                        AccountMeta::new(ctx, false),
+                        AccountMeta::new_readonly(delegate, false),
+                    ],
+                    &[&attacker],
+                )
+            };
+            assert!(
+                fill.is_ok(),
+                "{} CPI round-trip leg remains a valid fill: {fill:?}",
+                if batch { "batch" } else { "single" }
+            );
+        }
+
+        let attacker_after = env.portfolio_state(attacker_account);
+        let lp_after = env.portfolio_state(lp_account);
+        let (_, group_after) = env.market_state();
+        let asset1_budget = group_after.insurance_domain_budget[2]
+            + group_after.insurance_domain_budget[3];
+        println!(
+            "{} caller-fee round trip: attacker_capital={}, lp_capital={}, asset1_budget={asset1_budget}",
+            if batch { "batch" } else { "single" },
+            attacker_after.capital.get(),
+            lp_after.capital.get(),
+        );
+        assert_eq!(group_after.assets[1].oi_eff_long_q, 0);
+        assert_eq!(group_after.assets[1].oi_eff_short_q, 0);
+        let attacker_dest = env.token_account(attacker.pubkey(), 0);
+        env.svm.expire_blockhash();
+        let siphon = env.send(
+            ProgInstruction::WithdrawInsuranceAsset {
+                asset_index: 1,
+                amount: asset1_budget.max(1),
+            },
+            vec![
+                AccountMeta::new(attacker.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(attacker_dest, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(env.vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[&attacker],
+        );
+        if siphon.is_ok() {
+            assert_eq!(env.token_amount(attacker_dest), asset1_budget as u64);
+            assert_eq!(
+                attacker_after.capital.get() + asset1_budget,
+                DEPOSIT + (DEPOSIT - lp_after.capital.get()),
+                "the creator realizes profit equal to the unsigned LP's fee loss"
+            );
+        }
+        assert!(
+            siphon.is_err(),
+            "{} caller fee must not become withdrawable by the permissionless asset creator",
+            if batch { "batch" } else { "single" }
+        );
+        assert_eq!(
+            attacker_after.capital.get(),
+            DEPOSIT,
+            "CPI caller fee must not charge the taker above the market-derived fee"
+        );
+        assert_eq!(
+            lp_after.capital.get(),
+            DEPOSIT,
+            "CPI caller fee must not charge an unsigned LP"
+        );
+        assert_eq!(
+            asset1_budget, 0,
+            "caller-selected fee must not create a creator-withdrawable insurance budget"
+        );
+    }
+}
+
 // BatchTradeCpi 14-leg fan-out through one batched matcher CPI, under the tx CU budget.
 #[test]
 fn v16_bpf_batch_trade_cpi_14_legs_under_tx_limit() {
