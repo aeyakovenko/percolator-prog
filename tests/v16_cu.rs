@@ -5655,11 +5655,14 @@ fn v16_bpf_permissionless_market_shutdown_force_closes_recovers_and_reuses_slot(
     assert!(!has_active_leg_for_asset(&long_closed, 1));
     assert!(!has_active_leg_for_asset(&short_closed, 1));
 
-    let admin_key = env.admin.pubkey();
-    let admin_recovery = env.token_account(admin_key, 0);
+    let insurance_recovery = env.token_account(insurance_authority.pubkey(), 0);
     let provider_recovery = env.token_account(backing_authority.pubkey(), 0);
     for (domain, amount) in [(2u8, 6u128), (3u8, 4u128)] {
-        env.withdraw_insurance_domain_to_admin_token_with_cu(admin_recovery, domain.into(), amount);
+        env.withdraw_insurance_domain_to_admin_token_with_cu(
+            insurance_recovery,
+            domain.into(),
+            amount,
+        );
     }
     for (domain, amount) in [(2u8, 20u128), (3u8, 25u128)] {
         env.withdraw_backing_bucket_to_admin_token_with_cu(
@@ -5669,9 +5672,9 @@ fn v16_bpf_permissionless_market_shutdown_force_closes_recovers_and_reuses_slot(
         );
     }
     assert_eq!(
-        env.token_amount(admin_recovery),
+        env.token_amount(insurance_recovery),
         10,
-        "marketauth recovers only protocol insurance during shutdown cleanup"
+        "market-driven cleanup returns domain insurance to its authority"
     );
     assert_eq!(
         env.token_amount(provider_recovery),
@@ -5679,14 +5682,6 @@ fn v16_bpf_permissionless_market_shutdown_force_closes_recovers_and_reuses_slot(
         "market-driven cleanup returns backing principal to its provider"
     );
     assert_eq!(env.token_amount(env.vault), 20_025);
-
-    env.top_up_insurance_from_admin_token_with_cu(admin_recovery, 10);
-    assert_eq!(
-        env.token_amount(admin_recovery),
-        0,
-        "recovered protocol insurance is re-deposited into market 0"
-    );
-    assert_eq!(env.token_amount(env.vault), 20_035);
     let market_data = env.svm.get_account(&env.market).unwrap().data;
     let (_, recovered_group) = state::read_market(&market_data).unwrap();
     assert_eq!(recovered_group.insurance_domain_budget[2], 0);
@@ -5699,8 +5694,8 @@ fn v16_bpf_permissionless_market_shutdown_force_closes_recovers_and_reuses_slot(
         recovered_group.source_backing_buckets[3].fresh_unliened_backing_num,
         0
     );
-    assert_eq!(recovered_group.insurance_domain_budget[0], 17);
-    assert_eq!(recovered_group.insurance_domain_budget[1], 18);
+    assert_eq!(recovered_group.insurance_domain_budget[0], 12);
+    assert_eq!(recovered_group.insurance_domain_budget[1], 13);
     assert_eq!(
         recovered_group.source_backing_buckets[0].fresh_unliened_backing_num,
         0
@@ -5760,7 +5755,7 @@ fn v16_bpf_permissionless_market_shutdown_force_closes_recovers_and_reuses_slot(
     );
     println!("v16 permissionless asset reuse BPF CU: {reuse_cu}");
     assert_eq!(env.token_amount(reuse_source), 0);
-    assert_eq!(env.token_amount(env.vault), 20_060);
+    assert_eq!(env.token_amount(env.vault), 20_050);
     let market_data = env.svm.get_account(&env.market).unwrap().data;
     let (reused_cfg, reused_group) = state::read_market(&market_data).unwrap();
     assert_eq!(reused_cfg.free_market_slot_count, 0);
@@ -59597,4 +59592,106 @@ fn v16_attack_shutdown_cleanup_cannot_redirect_foreign_backing_principal() {
         env.market_state().1.source_backing_buckets[2].fresh_unliened_backing_num,
         0
     );
+}
+
+#[test]
+fn v16_attack_shutdown_cleanup_cannot_redirect_foreign_insurance_principal() {
+    const INSURANCE: u128 = 300;
+
+    let mut env = V16CuEnv::new();
+    env.configure_permissionless_resolve_with_cu(100, 5);
+    env.update_market_init_fee_policy_with_cu(1);
+
+    let creator = Keypair::new();
+    let insurance_authority = Keypair::new();
+    let insurance_operator = Keypair::new();
+    let creator_key = creator.pubkey();
+    env.svm.warp_to_slot(1);
+    env.activate_permissionless_asset_with_fee(
+        &creator,
+        1,
+        1,
+        100,
+        insurance_authority.pubkey(),
+        insurance_operator.pubkey(),
+        creator_key,
+        creator_key,
+        1,
+    );
+    let ledger = env.insurance_ledger_account();
+    env.top_up_insurance_domain_with_authority_ledger_and_cu(
+        &insurance_authority,
+        ledger,
+        2,
+        INSURANCE,
+    );
+
+    let marketauth = env.admin.insecure_clone();
+    env.svm.warp_to_slot(2);
+    env.svm.expire_blockhash();
+    env.try_shutdown_asset_with_authority(&marketauth, 1, 2)
+        .expect("marketauth can shut down the permissionless asset");
+    env.svm.warp_to_slot(7);
+
+    let before_market = env.svm.get_account(&env.market).unwrap();
+    let before_vault = env.svm.get_account(&env.vault).unwrap();
+    let admin_dest = env.token_account(marketauth.pubkey(), 0);
+    env.svm.expire_blockhash();
+    let redirected = env.send(
+        ProgInstruction::WithdrawInsuranceAsset {
+            asset_index: 1,
+            amount: INSURANCE,
+        },
+        vec![
+            AccountMeta::new(marketauth.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(admin_dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&marketauth],
+    );
+    assert!(
+        redirected.is_err(),
+        "shutdown cleanup must not redirect insurance principal to marketauth"
+    );
+    assert_eq!(env.token_amount(admin_dest), 0);
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), before_market);
+    assert_eq!(env.svm.get_account(&env.vault).unwrap(), before_vault);
+
+    let authority_dest = env.token_account(insurance_authority.pubkey(), 0);
+    env.svm.expire_blockhash();
+    let cleanup_cu = env
+        .send(
+            ProgInstruction::WithdrawInsuranceAsset {
+                asset_index: 1,
+                amount: INSURANCE,
+            },
+            vec![
+                AccountMeta::new(marketauth.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(authority_dest, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(env.vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+                AccountMeta::new(ledger, false),
+            ],
+            &[&marketauth],
+        )
+        .expect("marketauth cleanup pays the insurance authority");
+    assert_cu_within(
+        "provider-pinned shutdown insurance cleanup",
+        cleanup_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    assert_eq!(env.token_amount(authority_dest), INSURANCE as u64);
+    let ledger_after = state::read_insurance_ledger(&env.svm.get_account(&ledger).unwrap().data)
+        .expect("insurance authority ledger remains valid after marketauth cleanup");
+    assert_eq!(
+        ledger_after.authority,
+        insurance_authority.pubkey().to_bytes()
+    );
+    assert_eq!(ledger_after.total_principal_atoms, 0);
+    assert_eq!(env.market_state().1.insurance_domain_budget[2], 0);
 }

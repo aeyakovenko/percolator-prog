@@ -8026,11 +8026,21 @@ pub mod processor {
             {
                 return Err(PercolatorError::InvalidInstruction.into());
             }
+            let profile = read_oracle_profile_for_asset(&market_data, &cfg, asset_index)?;
+            let authorities = domain_authorities_from_profile(&cfg, &profile, asset_index);
+            let local_operator =
+                live_authority_matches(&authorities.insurance_operator, operator.key);
+            // A marketauth fallback can submit shutdown cleanup, but cannot become its payee.
+            let destination_owner = if local_operator {
+                *operator.key
+            } else {
+                Pubkey::new_from_array(authorities.insurance_authority)
+            };
             let (vault_authority, _) = derive_vault_authority(program_id, market_ai.key);
             expect_key(vault_authority_ai, &vault_authority)?;
             verify_withdrawable_token_accounts(
                 dest_token,
-                operator.key,
+                &destination_owner,
                 vault_token,
                 &vault_authority,
                 &cfg,
@@ -8062,11 +8072,7 @@ pub mod processor {
                 if !local_authorized && !admin_shutdown_authorized {
                     return Err(PercolatorError::Unauthorized.into());
                 }
-                if admin_shutdown_authorized && !local_authorized {
-                    cfg.marketauth
-                } else {
-                    authorities.insurance_authority
-                }
+                authorities.insurance_authority
             } else {
                 if group.header.materialized_portfolio_count.get() != 0
                     || group.header.c_tot.get() != 0
