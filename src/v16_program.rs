@@ -1374,13 +1374,25 @@ pub mod state {
     }
 
     pub fn bump_matcher_req_seq(data: &mut [u8]) -> Result<u64, ProgramError> {
+        bump_matcher_req_seq_avoiding(data, None)
+    }
+
+    pub fn bump_matcher_req_seq_avoiding(
+        data: &mut [u8],
+        avoid_req_id: Option<u64>,
+    ) -> Result<u64, ProgramError> {
         check_header(data, KIND_MARKET)?;
         let mut config = read_wrapper_config_from_bytes(data)?;
-        config.matcher_req_seq = config
+        let mut req_id = config
             .matcher_req_seq
             .checked_add(1)
             .ok_or(PercolatorError::InvalidInstruction)?;
-        let req_id = config.matcher_req_seq;
+        if Some(req_id) == avoid_req_id {
+            req_id = req_id
+                .checked_add(1)
+                .ok_or(PercolatorError::InvalidInstruction)?;
+        }
+        config.matcher_req_seq = req_id;
         write_wrapper_config_to_bytes(data, &config)?;
         Ok(req_id)
     }
@@ -6549,12 +6561,20 @@ pub mod processor {
             max_market_slots,
             &cpi_requests,
         )?;
+        // The matcher context can outlive a closed/reinitialized market, whose
+        // request sequence starts over. Never issue the request id already in
+        // the context, so unchanged bytes cannot validate as a fresh response.
+        let context_req_id = {
+            let data = matcher_ctx.try_borrow_data()?;
+            let mut bytes = [0u8; 8];
+            bytes.copy_from_slice(&data[32..40]);
+            u64::from_le_bytes(bytes)
+        };
         let req_id = {
             let mut market_data = market_ai.try_borrow_mut_data()?;
-            state::bump_matcher_req_seq(&mut market_data)?
+            state::bump_matcher_req_seq_avoiding(&mut market_data, Some(context_req_id))?
         };
         let lp_account_id = matcher_lp_account_id(&delegate);
-
         invoke_matcher(
             matcher_prog,
             matcher_ctx,

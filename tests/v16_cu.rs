@@ -59681,4 +59681,27 @@ fn v16_attack_single_matcher_response_cannot_replay_after_market_reinit() {
     assert_eq!(env.svm.get_account(&taker_account).unwrap(), taker_before);
     assert_eq!(env.svm.get_account(&lp_account).unwrap(), lp_before);
     assert_eq!(env.svm.get_account(&ctx).unwrap(), ctx_before);
+
+    let mut live_ctx = env.svm.get_account(&ctx).unwrap();
+    live_ctx.data[64] = 10;
+    env.svm.set_account(ctx, live_ctx).unwrap();
+    env.svm.expire_blockhash();
+    env.try_trade_cpi_with_cu_on_asset(
+        &taker,
+        taker_account,
+        &lp,
+        lp_account,
+        hostile,
+        ctx,
+        delegate,
+        0,
+        (2 * POS_SCALE) as i128,
+        0,
+    )
+    .expect("a matcher that writes a fresh response must remain live");
+    assert_eq!(env.market_state().0.matcher_req_seq, 2);
+    assert_eq!(
+        active_leg_for_asset(&env.portfolio_state(taker_account), 0).basis_pos_q,
+        (2 * POS_SCALE) as i128
+    );
 }
