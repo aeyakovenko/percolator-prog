@@ -63580,3 +63580,41 @@ fn v16_attack_underfunded_exit_cannot_move_ewma_with_uncollectible_fee() {
         assert_underfunded_ewma_exit_uses_collected_fee(path);
     }
 }
+// Max-shape market liveness: the admin must be able to enter terminal resolution without a
+// whole-slab CU cliff, and the mode transition must not move or reclassify user value.
+#[test]
+fn v16_bpf_10m_market_resolution_stays_bounded() {
+    const N: usize = 5_834;
+    const HIGH_ASSET: usize = N - 1;
+    const PRICE: u64 = 100;
+
+    let mut env = V16CuEnv::new();
+    let account_len = grow_market_to_10m_with_high_active_asset(&mut env, N, HIGH_ASSET, PRICE);
+    let before = env.market_state().1;
+    let vault_tokens_before = env.token_amount(env.vault);
+    assert_eq!(before.mode, MarketModeV16::Live);
+
+    let admin = env.admin.insecure_clone();
+    env.svm.warp_to_slot(2);
+    env.svm.expire_blockhash();
+    let resolve_cu = env
+        .send(
+            ProgInstruction::ResolveMarket,
+            vec![
+                AccountMeta::new(admin.pubkey(), true),
+                AccountMeta::new(env.market, false),
+            ],
+            &[&admin],
+        )
+        .expect("max-shape market resolution must make progress");
+    println!("v16 10MiB ResolveMarket: assets={N}, account_len={account_len}, CU={resolve_cu}");
+    assert_cu_within("10MiB ResolveMarket", resolve_cu, CUSTODY_CU_LIMIT);
+
+    let after = env.market_state().1;
+    assert_eq!(after.mode, MarketModeV16::Resolved);
+    assert_eq!(after.vault, before.vault);
+    assert_eq!(after.c_tot, before.c_tot);
+    assert_eq!(after.insurance, before.insurance);
+    assert_eq!(env.token_amount(env.vault), vault_tokens_before);
+    assert_eq!(after.assets[HIGH_ASSET], before.assets[HIGH_ASSET]);
+}
