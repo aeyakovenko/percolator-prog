@@ -64042,3 +64042,110 @@ fn v16_attack_permissionless_oracle_reconfiguration_preserves_unrelated_fee_and_
     assert_eq!(after_close.assets[0].oi_eff_long_q, 0);
     assert_eq!(after_close.assets[0].oi_eff_short_q, 0);
 }
+
+// Public CU/DoS probe: permissionless creators can grow the market one asset at a time. Once the
+// market is otherwise fully wound down, CloseSlab must still fit in one transaction; it is the only
+// route that closes the custody vault and releases the market account lamports.
+#[test]
+fn v16_attack_permissionless_market_growth_keeps_close_slab_bounded() {
+    // With the minimum base fee of one atom and the protocol's 2x-per-32-assets schedule, asset
+    // 1,538 is the last permissionless append whose cumulative fees fit under MAX_VAULT_TVL.
+    const LAST_ASSET: u16 = 1_538;
+    const CREATE_FEE: u128 = 1;
+
+    let mut env = V16CuEnv::new();
+    env.update_market_init_fee_policy_with_cu(CREATE_FEE);
+
+    // Fund rent headroom through an ordinary system transfer. No market or portfolio bytes are
+    // injected; every asset below is appended through UpdateAssetLifecycle.
+    let payer = env.payer.insecure_clone();
+    send_raw_tx(
+        &mut env.svm,
+        &payer,
+        system_instruction::transfer(&payer.pubkey(), &env.market, 30_000_000_000),
+        &[],
+    )
+    .expect("fund public market-growth rent headroom");
+
+    let creator = Keypair::new();
+    let creator_key = creator.pubkey();
+    let mut total_create_fees = 0u128;
+    for asset_index in 1..=LAST_ASSET {
+        let slot = asset_index as u64;
+        let fee = CREATE_FEE << (asset_index as usize / 32);
+        total_create_fees += fee;
+        env.svm.warp_to_slot(slot);
+        env.svm.expire_blockhash();
+        env.activate_permissionless_asset_with_fee(
+            &creator,
+            asset_index,
+            slot,
+            100,
+            creator_key,
+            creator_key,
+            creator_key,
+            creator_key,
+            fee,
+        );
+    }
+    let next_fee = CREATE_FEE << ((LAST_ASSET as usize + 1) / 32);
+    assert!(total_create_fees <= percolator::MAX_VAULT_TVL);
+    assert!(
+        total_create_fees + next_fee > percolator::MAX_VAULT_TVL,
+        "probe reaches the last permissionless append allowed by the vault cap"
+    );
+
+    let market_before_wind_down = env.svm.get_account(&env.market).unwrap();
+    let (_, grown) = env.market_state();
+    assert_eq!(
+        grown.config.max_market_slots,
+        LAST_ASSET as u32 + 1,
+        "all growth came through public contiguous appends"
+    );
+    assert_eq!(
+        grown.insurance, total_create_fees,
+        "permissionless creation fees remain fully accounted"
+    );
+    assert_eq!(
+        market_before_wind_down.data.len(),
+        state::market_account_len_for_capacity(LAST_ASSET as usize + 1).unwrap(),
+        "public appends produced the expected dynamic market size"
+    );
+
+    env.resolve();
+    let admin = env.admin.insecure_clone();
+    env.withdraw_terminal_insurance_with_authority(&admin, total_create_fees);
+    let (_, wound_down) = env.market_state();
+    assert_eq!(wound_down.vault, 0);
+    assert_eq!(wound_down.insurance, 0);
+    assert_eq!(wound_down.c_tot, 0);
+    assert_eq!(wound_down.materialized_portfolio_count, 0);
+
+    let dest = env.token_account(admin.pubkey(), 0);
+    env.svm.expire_blockhash();
+    let close_cu = env
+        .send(
+            ProgInstruction::CloseSlab,
+            vec![
+                AccountMeta::new(admin.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(env.vault_authority, false),
+                AccountMeta::new(dest, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[&admin],
+        )
+        .expect("publicly grown, fully wound-down market must remain closable");
+    println!(
+        "public CloseSlab assets={} bytes={} CU={close_cu}",
+        LAST_ASSET + 1,
+        market_before_wind_down.data.len()
+    );
+    assert_cu_within("publicly grown CloseSlab", close_cu, CUSTODY_CU_LIMIT);
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap().lamports,
+        0,
+        "CloseSlab releases the publicly grown market account"
+    );
+}
