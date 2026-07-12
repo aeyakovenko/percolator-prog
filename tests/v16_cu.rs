@@ -63945,3 +63945,100 @@ fn v16_attack_no_observation_liquidation_cannot_skip_premium_funding() {
     assert_eq!(after_liquidation.vault as u64, env.token_amount(env.vault));
     assert!(after_liquidation.vault >= after_liquidation.c_tot + after_liquidation.insurance);
 }
+
+// Public-interface isolation sweep: a permissionless asset creator can move its own oracle at a
+// later slot, which updates the engine's touched-asset slot summary. That must not make an unrelated
+// open portfolio fee-current: SyncMaintenanceFee derives its safe anchor from the portfolio's live
+// legs, so it leaves capital, insurance, and last_fee_slot unchanged until asset 0 is accrued. The
+// affected users must also retain their signed risk-reducing exit path.
+#[test]
+fn v16_attack_permissionless_oracle_reconfiguration_preserves_unrelated_fee_and_exit_liveness() {
+    let mut env =
+        V16CuEnv::new_with_market_params_price_move_and_maintenance_fee(1, 1_000, 1_000, 500, 100);
+    env.update_market_init_fee_policy_with_cu(1);
+    env.svm.warp_to_slot(1);
+    env.configure_auth_mark_with_cu(1, 100);
+
+    let creator = Keypair::new();
+    env.activate_permissionless_asset_with_fee(
+        &creator,
+        1,
+        1,
+        100,
+        creator.pubkey(),
+        creator.pubkey(),
+        creator.pubkey(),
+        creator.pubkey(),
+        1,
+    );
+    env.configure_auth_mark_for_asset_with_authority(1, &creator, 1, 100);
+
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long = env.create_portfolio(&long_owner);
+    let short = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long, 1_000_000);
+    env.deposit(&short_owner, short, 1_000_000);
+    env.trade_asset_with_cu(
+        0,
+        &long_owner,
+        long,
+        &short_owner,
+        short,
+        (100 * POS_SCALE) as i128,
+        100,
+        0,
+    );
+    let before = env.market_state().1;
+    assert_eq!(before.assets[0].slot_last, 1);
+    assert_eq!(before.slot_last, 1);
+    assert_eq!(before.assets[1].oi_eff_long_q, 0);
+    assert_eq!(before.pnl_pos_tot, 0);
+
+    env.svm.warp_to_slot(100);
+    let configure_cu = env.configure_auth_mark_for_asset_with_authority(1, &creator, 100, 200);
+    let after_configure = env.market_state().1;
+    assert_eq!(after_configure.current_slot, 100);
+    assert_eq!(after_configure.slot_last, 100);
+    assert_eq!(after_configure.assets[0].slot_last, 1);
+    assert_cu_within(
+        "permissionless cross-asset oracle reconfiguration",
+        configure_cu,
+        CUSTODY_CU_LIMIT,
+    );
+
+    let cap_before = env.portfolio_state(long).capital.get();
+    let fee_slot_before = env.portfolio_state(long).last_fee_slot.get();
+    let insurance_before = env.market_state().1.insurance;
+    let sync_cu = env
+        .try_sync_maintenance_fee_with_cu(long, None, 100)
+        .expect("cross-asset fee sync remains live");
+    let long_after = env.portfolio_state(long);
+    let cap_after = long_after.capital.get();
+    let insurance_after = env.market_state().1.insurance;
+    assert_cu_within(
+        "cross-asset loss-safe maintenance sync",
+        sync_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    assert_eq!(cap_after, cap_before);
+    assert_eq!(long_after.last_fee_slot.get(), fee_slot_before);
+    assert_eq!(insurance_after, insurance_before);
+
+    let close_cu = env
+        .try_trade_asset_with_cu(
+            0,
+            &long_owner,
+            long,
+            &short_owner,
+            short,
+            -(100 * POS_SCALE as i128),
+            100,
+            0,
+        )
+        .expect("unrelated oracle reconfiguration must not block a signed risk-reducing exit");
+    assert_cu_within("cross-asset stale-position exit", close_cu, TRADE_CU_LIMIT);
+    let after_close = env.market_state().1;
+    assert_eq!(after_close.assets[0].oi_eff_long_q, 0);
+    assert_eq!(after_close.assets[0].oi_eff_short_q, 0);
+}
