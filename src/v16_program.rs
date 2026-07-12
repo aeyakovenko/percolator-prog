@@ -6613,7 +6613,10 @@ pub mod processor {
             asset_index,
             ret.exec_size,
             ret.exec_price_e6,
-            fee_bps,
+            // Only the taker signs this fill, and the matcher ABI does not carry a fee for the LP
+            // to approve. Start CPI fee derivation at the market-configured base; hybrid/EWMA
+            // movement may still raise it deterministically inside the shared trade path.
+            cfg_pre.trade_fee_base_bps,
             max_market_slots,
         )
     }
@@ -6789,6 +6792,7 @@ pub mod processor {
             stale_matured,
             backing_fee_policy_active,
             fee_bounds_ok,
+            cpi_fee_bps,
         ) = {
             let market_data = market_ai.try_borrow_data()?;
             let (
@@ -6825,6 +6829,7 @@ pub mod processor {
                 stale_matured,
                 cfg_pre.backing_trade_fee_policy_count != 0,
                 fee_bounds_ok,
+                cfg_pre.trade_fee_base_bps,
             )
         };
         if mode_pre != MarketModeV16::Live {
@@ -6970,7 +6975,9 @@ pub mod processor {
                 asset_index: leg.asset_index,
                 size_q: ret.exec_size,
                 exec_price: ret.exec_price_e6,
-                fee_bps: leg.fee_bps,
+                // Batch LPs are unsigned too. Caller fee fields are validated above but cannot
+                // increase their charge without matcher-side fee consent in the ABI.
+                fee_bps: cpi_fee_bps,
             });
         }
 
