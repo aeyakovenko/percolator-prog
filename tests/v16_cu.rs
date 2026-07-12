@@ -59471,3 +59471,214 @@ fn v16_attack_backing_topup_rejects_lapsed_expiry() {
         "valid topup credits exactly the backing"
     );
 }
+
+#[test]
+fn v16_attack_single_matcher_response_cannot_replay_after_market_reinit() {
+    let params = V16CuMarketParams {
+        maintenance_margin_bps: 1_000,
+        initial_margin_bps: 1_000,
+        max_price_move_bps_per_slot: 500,
+        ..V16CuMarketParams::default()
+    };
+    let mut env = V16CuEnv::new_with_init_params(params);
+    env.configure_auth_mark_for_asset_as_admin(0, 1, 100);
+    let hostile = Pubkey::new_unique();
+    env.svm.add_program(
+        hostile,
+        &std::fs::read(hostile_matcher_program_path()).unwrap(),
+    );
+    let taker = Keypair::new();
+    let lp = Keypair::new();
+    let taker_account = env.create_portfolio(&taker);
+    let lp_account = env.create_portfolio(&lp);
+    env.deposit(&taker, taker_account, 10_000_000);
+    env.deposit(&lp, lp_account, 10_000_000);
+
+    let ctx = Pubkey::new_unique();
+    let delegate = matcher_delegate_key(
+        &env.program_id,
+        &env.market,
+        &lp_account,
+        &lp.pubkey(),
+        &hostile,
+        &ctx,
+    );
+    env.svm
+        .set_account(
+            delegate,
+            Account {
+                lamports: 1_000_000_000,
+                data: vec![],
+                owner: Pubkey::default(),
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    let mut ctx_data = vec![0u8; MATCHER_CONTEXT_LEN];
+    ctx_data[0] = 10;
+    env.svm
+        .set_account(
+            ctx,
+            Account {
+                lamports: 1_000_000_000,
+                data: ctx_data,
+                owner: hostile,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    env.set_matcher_config(hostile, &lp, lp_account, ctx, delegate, 1);
+    env.try_trade_cpi_with_cu_on_asset(
+        &taker,
+        taker_account,
+        &lp,
+        lp_account,
+        hostile,
+        ctx,
+        delegate,
+        0,
+        (2 * POS_SCALE) as i128,
+        0,
+    )
+    .expect("first market writes a valid req_id=1 response");
+    assert_eq!(env.market_state().0.matcher_req_seq, 1);
+    assert_eq!(
+        u64::from_le_bytes(
+            env.svm.get_account(&ctx).unwrap().data[32..40]
+                .try_into()
+                .unwrap()
+        ),
+        1
+    );
+
+    env.trade_asset_with_cu(
+        0,
+        &taker,
+        taker_account,
+        &lp,
+        lp_account,
+        -((2 * POS_SCALE) as i128),
+        100,
+        0,
+    );
+    let old_slot = env.svm.get_sysvar::<Clock>().slot;
+    env.push_auth_mark_for_asset_as_admin(0, old_slot, 100);
+    let taker_capital = env.portfolio_state(taker_account).capital.get();
+    let lp_capital = env.portfolio_state(lp_account).capital.get();
+    env.withdraw(&taker, taker_account, taker_capital);
+    env.withdraw(&lp, lp_account, lp_capital);
+    env.close_portfolio_with_cu(&taker, taker_account);
+    env.close_portfolio_with_cu(&lp, lp_account);
+    env.resolve();
+    env.close_slab_with_cu();
+
+    let closed_market = env.svm.get_account(&env.market).unwrap();
+    assert_eq!(closed_market.lamports, 0);
+    assert!(closed_market.data.iter().all(|byte| *byte == 0));
+    env.svm.warp_to_slot(old_slot + 10);
+    env.svm
+        .set_account(
+            env.market,
+            Account {
+                lamports: 1_000_000_000,
+                data: vec![
+                    0u8;
+                    state::market_account_len_for_capacity(
+                        params.max_portfolio_assets as usize,
+                    )
+                    .unwrap()
+                ],
+                owner: env.program_id,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    env.svm
+        .set_account(
+            env.vault,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_token_data(env.mint, env.vault_authority, 0),
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    let admin = env.admin.insecure_clone();
+    env.svm.expire_blockhash();
+    env.send(
+        init_market_instruction(&params),
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new_readonly(env.mint, false),
+        ],
+        &[&admin],
+    )
+    .expect("same market address is publicly reinitialized after account recreation");
+    assert_eq!(env.market_state().0.matcher_req_seq, 0);
+    env.configure_auth_mark_for_asset_as_admin(0, old_slot + 10, 100);
+
+    for (owner, portfolio) in [(&taker, taker_account), (&lp, lp_account)] {
+        env.svm
+            .set_account(
+                portfolio,
+                Account {
+                    lamports: 1_000_000_000,
+                    data: vec![0u8; env.portfolio_account_len],
+                    owner: env.program_id,
+                    executable: false,
+                    rent_epoch: 0,
+                },
+            )
+            .unwrap();
+        env.svm.expire_blockhash();
+        env.send(
+            ProgInstruction::InitPortfolio,
+            vec![
+                AccountMeta::new(owner.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(portfolio, false),
+            ],
+            &[owner],
+        )
+        .expect("same portfolio address is publicly reinitialized");
+    }
+    env.deposit(&taker, taker_account, 10_000_000);
+    env.deposit(&lp, lp_account, 10_000_000);
+    env.set_matcher_config(hostile, &lp, lp_account, ctx, delegate, 1);
+
+    let mut stale_no_write_ctx = env.svm.get_account(&ctx).unwrap();
+    stale_no_write_ctx.data[64] = 13;
+    stale_no_write_ctx.data[65] = 1;
+    env.svm.set_account(ctx, stale_no_write_ctx).unwrap();
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let taker_before = env.svm.get_account(&taker_account).unwrap();
+    let lp_before = env.svm.get_account(&lp_account).unwrap();
+    let ctx_before = env.svm.get_account(&ctx).unwrap();
+    env.svm.expire_blockhash();
+    let replay = env.try_trade_cpi_with_cu_on_asset(
+        &taker,
+        taker_account,
+        &lp,
+        lp_account,
+        hostile,
+        ctx,
+        delegate,
+        0,
+        (2 * POS_SCALE) as i128,
+        0,
+    );
+    assert!(
+        replay.is_err(),
+        "a prior market incarnation's matcher response must not authorize a new LP fill: {replay:?}"
+    );
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+    assert_eq!(env.svm.get_account(&taker_account).unwrap(), taker_before);
+    assert_eq!(env.svm.get_account(&lp_account).unwrap(), lp_before);
+    assert_eq!(env.svm.get_account(&ctx).unwrap(), ctx_before);
+}
