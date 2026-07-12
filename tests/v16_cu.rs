@@ -59621,3 +59621,93 @@ fn v16_attack_pending_later_rescue_mark_cannot_be_omitted_to_liquidate() {
     );
     assert_eq!(env.market_state().1.insurance, insurance_before);
 }
+
+#[test]
+fn v16_bpf_all_14_pending_auth_marks_refresh_stays_bounded() {
+    const N: u16 = 14;
+    const MARK: u64 = 100;
+    const NEXT_MARK: u64 = 101;
+    const OPEN_SLOT: u64 = 1;
+    const CRANK_SLOT: u64 = 2;
+
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(N, 1_000, 1_000, 500);
+    for asset_index in 0..N {
+        env.configure_auth_mark_for_asset_as_admin(asset_index, OPEN_SLOT, MARK);
+    }
+    let taker = Keypair::new();
+    let lp = Keypair::new();
+    let taker_account = env.create_portfolio(&taker);
+    let lp_account = env.create_portfolio(&lp);
+    env.deposit(&taker, taker_account, 10_000_000);
+    env.deposit(&lp, lp_account, 10_000_000);
+    let legs = (0..N)
+        .map(|asset_index| BatchTradeLeg {
+            asset_index,
+            size_q: POS_SCALE as i128,
+            exec_price: MARK,
+            fee_bps: 0,
+        })
+        .collect();
+    env.send(
+        ProgInstruction::BatchTradeNoCpi { legs },
+        vec![
+            AccountMeta::new(taker.pubkey(), true),
+            AccountMeta::new(lp.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(taker_account, false),
+            AccountMeta::new(lp_account, false),
+        ],
+        &[&taker, &lp],
+    )
+    .expect("open public 14-leg portfolio");
+    let position_before = env.portfolio_state(taker_account);
+    let market_before = env.market_state().1;
+
+    env.svm.warp_to_slot(CRANK_SLOT);
+    for asset_index in 0..N {
+        env.push_auth_mark_for_asset_as_admin(asset_index, CRANK_SLOT, NEXT_MARK);
+    }
+    let observations = (0..N)
+        .map(|asset_index| CrankObservationHint {
+            asset_index,
+            oracle_accounts: 0,
+        })
+        .collect();
+    env.svm.expire_blockhash();
+    let refresh_cu = env
+        .send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: CRANK_SLOT,
+                observations,
+            },
+            vec![
+                AccountMeta::new(env.payer.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(taker_account, false),
+            ],
+            &[],
+        )
+        .expect("all active pending marks must fit one crank");
+    println!("v16 all-14 pending AuthMark refresh CU: {refresh_cu}");
+    assert!(
+        refresh_cu <= 900_000,
+        "all-14 pending AuthMark refresh exceeded CU bound: {refresh_cu}"
+    );
+
+    let position_after = env.portfolio_state(taker_account);
+    let market_after = env.market_state().1;
+    for asset_index in 0..N as usize {
+        assert_eq!(market_after.assets[asset_index].effective_price, NEXT_MARK);
+        assert_eq!(
+            active_leg_for_asset(&position_after, asset_index).basis_pos_q,
+            active_leg_for_asset(&position_before, asset_index).basis_pos_q
+        );
+    }
+    assert_eq!(
+        health_cert(&position_after).cert_oracle_epoch,
+        market_after.oracle_epoch
+    );
+    assert_eq!(market_after.vault, market_before.vault);
+    assert_eq!(market_after.c_tot, market_before.c_tot);
+    assert_eq!(market_after.insurance, market_before.insurance);
+}
