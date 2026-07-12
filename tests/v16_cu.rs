@@ -59471,3 +59471,266 @@ fn v16_attack_backing_topup_rejects_lapsed_expiry() {
         "valid topup credits exactly the backing"
     );
 }
+
+#[test]
+fn v16_attack_cpi_lp_backing_fee_requires_matcher_consent() {
+    const INITIAL_PRICE: u64 = 100;
+    const LP_DEPOSIT: u128 = 3_130;
+    const ATTACKER_DEPOSIT: u128 = 10_000;
+    const WINNING_SIZE_Q: i128 = 200 * POS_SCALE as i128;
+    const LOSING_SIZE_Q: i128 = 100 * POS_SCALE as i128;
+    const INCREASE_Q: i128 = 20 * POS_SCALE as i128;
+    const WINNING_DOMAIN: u16 = 3;
+
+    let mut env =
+        V16CuEnv::new_with_market_params_price_move_and_maintenance_fee(2, 1_000, 1_000, 500, 30);
+    assert_eq!(env.market_state().0.maintenance_fee_per_slot, 30);
+    env.update_market_init_fee_policy_with_cu(1);
+    let attacker = Keypair::new();
+    let market_trader = Keypair::new();
+    let lp = Keypair::new();
+
+    env.svm.warp_to_slot(1);
+    env.configure_auth_mark_for_asset_as_admin(0, 1, INITIAL_PRICE);
+    env.configure_auth_mark_for_asset_as_admin(1, 1, INITIAL_PRICE);
+    env.svm.warp_to_slot(2);
+    env.update_asset_lifecycle_as_admin_with_cu(
+        percolator_prog::processor::ASSET_ACTION_RETIRE,
+        1,
+        2,
+        0,
+    );
+    env.svm.warp_to_slot(3);
+    env.activate_permissionless_asset_with_fee(
+        &attacker,
+        1,
+        3,
+        INITIAL_PRICE,
+        attacker.pubkey(),
+        attacker.pubkey(),
+        attacker.pubkey(),
+        attacker.pubkey(),
+        1,
+    );
+    env.configure_auth_mark_for_asset_with_authority(1, &attacker, 3, INITIAL_PRICE);
+
+    let attacker_account = env.create_portfolio(&attacker);
+    let market_trader_account = env.create_portfolio(&market_trader);
+    let lp_account = env.create_portfolio(&lp);
+    env.deposit(&attacker, attacker_account, ATTACKER_DEPOSIT);
+    env.deposit(&market_trader, market_trader_account, ATTACKER_DEPOSIT);
+    env.deposit(&lp, lp_account, LP_DEPOSIT);
+
+    let matcher_program = Pubkey::new_unique();
+    let matcher_bytes = std::fs::read(auth_matcher_program_path()).expect("read auth matcher BPF");
+    env.svm.add_program(matcher_program, &matcher_bytes);
+    let (matcher_ctx, matcher_delegate, _) =
+        env.init_auth_matcher_context(matcher_program, &lp, lp_account);
+
+    let ledger = Keypair::new();
+    let payer = env.payer.insecure_clone();
+    system_create_account_for_test(
+        &mut env.svm,
+        &payer,
+        &ledger,
+        state::backing_domain_ledger_account_len(),
+        env.program_id,
+    );
+    let backing_source = env.token_account(attacker.pubkey(), 5_000);
+    env.svm.expire_blockhash();
+    env.send(
+        ProgInstruction::TopUpBackingBucket {
+            domain: WINNING_DOMAIN,
+            amount: 5_000,
+            expiry_slot: 100,
+        },
+        vec![
+            AccountMeta::new(attacker.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(backing_source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(ledger.pubkey(), false),
+        ],
+        &[&attacker],
+    )
+    .expect("attacker funds its backing domain");
+
+    // Asset 1 makes the LP's short profitable; asset 0 makes its long lose.
+    env.try_trade_cpi_with_cu_on_asset(
+        &market_trader,
+        market_trader_account,
+        &lp,
+        lp_account,
+        matcher_program,
+        matcher_ctx,
+        matcher_delegate,
+        1,
+        -WINNING_SIZE_Q,
+        0,
+    )
+    .expect("initial profitable LP leg");
+    env.try_trade_cpi_with_cu_on_asset(
+        &market_trader,
+        market_trader_account,
+        &lp,
+        lp_account,
+        matcher_program,
+        matcher_ctx,
+        matcher_delegate,
+        0,
+        -LOSING_SIZE_Q,
+        0,
+    )
+    .expect("initial losing LP leg");
+
+    env.svm.warp_to_slot(4);
+    env.push_auth_mark_for_asset_with_authority(1, &attacker, 4, INITIAL_PRICE);
+    env.push_auth_mark_for_asset_as_admin(0, 4, INITIAL_PRICE);
+    for (portfolio, asset_index) in [
+        (market_trader_account, 1),
+        (lp_account, 1),
+        (market_trader_account, 0),
+        (lp_account, 0),
+    ] {
+        env.crank_steps(
+            portfolio,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 4,
+                observations: crank_observations(asset_index),
+            },
+            4,
+        );
+    }
+    env.sync_maintenance_fee_with_cu(lp_account, None, 4);
+    assert_eq!(
+        env.portfolio_state(lp_account).capital.get(),
+        3_100,
+        "the configured one-slot maintenance fee reaches the organic low-capital state"
+    );
+
+    env.svm.warp_to_slot(5);
+    env.push_auth_mark_for_asset_with_authority(1, &attacker, 5, 105);
+    env.push_auth_mark_for_asset_as_admin(0, 5, 95);
+    for (portfolio, asset_index) in [
+        (market_trader_account, 1),
+        (lp_account, 1),
+        (market_trader_account, 0),
+    ] {
+        env.crank_steps(
+            portfolio,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 5,
+                observations: crank_observations(asset_index),
+            },
+            4,
+        );
+    }
+    assert_eq!(
+        env.portfolio_state(lp_account).pnl.get(),
+        1_000,
+        "normal price movement creates the LP's source-backed positive PnL"
+    );
+
+    // The LP authorized the matcher before the permissionless authority installed this fee.
+    env.svm.expire_blockhash();
+    env.send(
+        ProgInstruction::UpdateBackingFeePolicy {
+            domain: WINNING_DOMAIN,
+            fee_bps: 5_000,
+            insurance_share_bps: 0,
+        },
+        vec![
+            AccountMeta::new(attacker.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&attacker],
+    )
+    .expect("permissionless asset authority installs backing fee");
+
+    let lp_before = env.portfolio_state(lp_account).capital.get();
+    let attacker_before = env.portfolio_state(attacker_account).capital.get();
+    let provider_before = env.market_state().1.source_backing_buckets[WINNING_DOMAIN as usize]
+        .utilization_fee_earnings;
+    env.svm.warp_to_slot(6);
+    env.try_trade_cpi_with_cu_on_asset(
+        &attacker,
+        attacker_account,
+        &lp,
+        lp_account,
+        matcher_program,
+        matcher_ctx,
+        matcher_delegate,
+        0,
+        -INCREASE_Q,
+        0,
+    )
+    .expect("fee-bearing CPI risk increase");
+    let lp_after = env.portfolio_state(lp_account).capital.get();
+    let attacker_after = env.portfolio_state(attacker_account).capital.get();
+    let provider_after = env.market_state().1.source_backing_buckets[WINNING_DOMAIN as usize]
+        .utilization_fee_earnings;
+    println!(
+        "backing fee probe: lp {}->{}, attacker {}->{}, provider {}->{}",
+        lp_before, lp_after, attacker_before, attacker_after, provider_before, provider_after
+    );
+    assert!(
+        provider_after > provider_before,
+        "probe must charge provider fee"
+    );
+    let extracted = provider_after - provider_before;
+    env.svm.expire_blockhash();
+    env.try_trade_cpi_with_cu_on_asset(
+        &attacker,
+        attacker_account,
+        &lp,
+        lp_account,
+        matcher_program,
+        matcher_ctx,
+        matcher_delegate,
+        0,
+        INCREASE_Q,
+        0,
+    )
+    .expect("attacker reverses the incremental leg at the same mark");
+    let attacker_flat = env.portfolio_state(attacker_account);
+    let lp_reversed = env.portfolio_state(lp_account);
+    assert!(percolator::active_bitmap_is_empty(active_bitmap(
+        &attacker_flat
+    )));
+    assert_eq!(attacker_flat.capital.get(), attacker_before);
+    assert_eq!(attacker_flat.pnl.get(), 0);
+    assert_eq!(lp_reversed.capital.get(), lp_after);
+    assert_eq!(
+        active_leg_for_asset(&lp_reversed, 0).basis_pos_q,
+        LOSING_SIZE_Q,
+        "the LP returns to its pre-attack asset-0 exposure"
+    );
+    assert_eq!(
+        env.market_state().1.source_backing_buckets[WINNING_DOMAIN as usize]
+            .utilization_fee_earnings,
+        provider_after,
+        "reversing the attack leg does not refund the extracted fee"
+    );
+
+    let earnings_dest = env.token_account(attacker.pubkey(), 0);
+    env.svm.expire_blockhash();
+    env.send(
+        ProgInstruction::WithdrawBackingBucketEarnings {
+            domain: WINNING_DOMAIN,
+            amount: extracted,
+        },
+        vec![
+            AccountMeta::new(attacker.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(ledger.pubkey(), false),
+            AccountMeta::new(earnings_dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&attacker],
+    )
+    .expect("attacker withdraws the LP-funded provider earnings");
+    assert_eq!(env.token_amount(earnings_dest) as u128, extracted);
+}
