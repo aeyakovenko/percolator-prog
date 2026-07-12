@@ -63618,3 +63618,55 @@ fn v16_bpf_10m_market_resolution_stays_bounded() {
     assert_eq!(env.token_amount(env.vault), vault_tokens_before);
     assert_eq!(after.assets[HIGH_ASSET], before.assets[HIGH_ASSET]);
 }
+
+#[test]
+fn v16_bpf_10m_flat_user_withdraw_and_close_stay_bounded() {
+    const N: usize = 5_834;
+    const HIGH_ASSET: usize = N - 1;
+    const PRICE: u64 = 100;
+    const DEPOSIT: u128 = 1_000_000;
+
+    let mut env = V16CuEnv::new();
+    let account_len = grow_market_to_10m_with_high_active_asset(&mut env, N, HIGH_ASSET, PRICE);
+    let rent = env.svm.get_sysvar::<solana_sdk::rent::Rent>();
+    let mut market_account = env.svm.get_account(&env.market).unwrap();
+    market_account.lamports = rent.minimum_balance(market_account.data.len());
+    env.svm.set_account(env.market, market_account).unwrap();
+    env.portfolio_account_len = state::portfolio_account_len_for_market_slots(N).unwrap();
+
+    let owner = Keypair::new();
+    let portfolio = env.create_portfolio(&owner);
+    let mut portfolio_account = env.svm.get_account(&portfolio).unwrap();
+    portfolio_account.lamports = rent.minimum_balance(portfolio_account.data.len());
+    env.svm.set_account(portfolio, portfolio_account).unwrap();
+    env.deposit(&owner, portfolio, DEPOSIT);
+    let vault_before_withdraw = env.token_amount(env.vault);
+    let (dest, withdraw_cu) = env.withdraw_with_cu(&owner, portfolio, DEPOSIT);
+    println!("v16 10MiB flat Withdraw: assets={N}, account_len={account_len}, CU={withdraw_cu}");
+    assert_cu_within("10MiB flat Withdraw", withdraw_cu, CUSTODY_CU_LIMIT);
+    assert_eq!(env.token_amount(dest), DEPOSIT as u64);
+    assert_eq!(vault_before_withdraw, DEPOSIT as u64);
+    assert_eq!(env.token_amount(env.vault), 0);
+    assert_eq!(env.portfolio_state(portfolio).capital.get(), 0);
+    let after_withdraw = env.market_state().1;
+    assert_eq!(after_withdraw.vault, 0);
+    assert_eq!(after_withdraw.c_tot, 0);
+    assert_eq!(after_withdraw.insurance, 0);
+
+    let market_lamports_before = env.svm.get_account(&env.market).unwrap().lamports;
+    let portfolio_before_close = env.svm.get_account(&portfolio).unwrap();
+    let portfolio_lamports = portfolio_before_close.lamports;
+    assert!(rent.is_exempt(portfolio_lamports, portfolio_before_close.data.len()));
+    let close_cu = env.close_portfolio_with_cu(&owner, portfolio);
+    println!("v16 10MiB flat ClosePortfolio: assets={N}, account_len={account_len}, CU={close_cu}");
+    assert_cu_within("10MiB flat ClosePortfolio", close_cu, CUSTODY_CU_LIMIT);
+    assert_eq!(env.market_state().1.materialized_portfolio_count, 0);
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap().lamports,
+        market_lamports_before + portfolio_lamports
+    );
+    if let Some(closed) = env.svm.get_account(&portfolio) {
+        assert_eq!(closed.lamports, 0);
+        assert!(closed.data.is_empty() || !state::is_initialized(&closed.data));
+    }
+}
