@@ -64043,14 +64043,17 @@ fn v16_attack_permissionless_oracle_reconfiguration_preserves_unrelated_fee_and_
     assert_eq!(after_close.assets[0].oi_eff_short_q, 0);
 }
 
-// Public CU/DoS probe: permissionless creators can grow the market one asset at a time. Once the
-// market is otherwise fully wound down, CloseSlab must still fit in one transaction; it is the only
-// route that closes the custody vault and releases the market account lamports.
+// Public CU/DoS probe: permissionless creators can grow the market one asset at a time. At the
+// maximum publicly reachable shape, a provider with insurance in the middle of the dynamic market
+// must still be able to recover it through the global terminal interface, and CloseSlab must still
+// fit in one transaction after wind-down.
 #[test]
 fn v16_attack_permissionless_market_growth_keeps_close_slab_bounded() {
     // With the minimum base fee of one atom and the protocol's 2x-per-32-assets schedule, asset
     // 1,538 is the last permissionless append whose cumulative fees fit under MAX_VAULT_TVL.
     const LAST_ASSET: u16 = 1_538;
+    const MIDDLE_ASSET: u16 = LAST_ASSET / 2;
+    const MIDDLE_INSURANCE: u128 = 123;
     const CREATE_FEE: u128 = 1;
 
     let mut env = V16CuEnv::new();
@@ -64095,6 +64098,20 @@ fn v16_attack_permissionless_market_growth_keeps_close_slab_bounded() {
         "probe reaches the last permissionless append allowed by the vault cap"
     );
 
+    let middle_domain = MIDDLE_ASSET * 2;
+    let middle_topup_cu = env
+        .top_up_insurance_domain_with_authority_and_cu(
+            &creator,
+            middle_domain,
+            MIDDLE_INSURANCE,
+        )
+        .1;
+    assert_cu_within(
+        "max-public-shape middle-domain insurance top-up",
+        middle_topup_cu,
+        CUSTODY_CU_LIMIT,
+    );
+
     let market_before_wind_down = env.svm.get_account(&env.market).unwrap();
     let (_, grown) = env.market_state();
     assert_eq!(
@@ -64103,8 +64120,14 @@ fn v16_attack_permissionless_market_growth_keeps_close_slab_bounded() {
         "all growth came through public contiguous appends"
     );
     assert_eq!(
-        grown.insurance, total_create_fees,
-        "permissionless creation fees remain fully accounted"
+        grown.insurance,
+        total_create_fees + MIDDLE_INSURANCE,
+        "creation fees and the middle provider's insurance remain fully accounted"
+    );
+    assert_eq!(
+        grown.insurance_domain_budget[middle_domain as usize],
+        MIDDLE_INSURANCE,
+        "the public middle asset carries a real provider-owned terminal claim"
     );
     assert_eq!(
         market_before_wind_down.data.len(),
@@ -64113,6 +64136,20 @@ fn v16_attack_permissionless_market_growth_keeps_close_slab_bounded() {
     );
 
     env.resolve();
+    let (creator_dest, middle_withdraw_cu) =
+        env.withdraw_terminal_insurance_with_authority(&creator, MIDDLE_INSURANCE);
+    println!(
+        "public middle-domain WithdrawInsurance assets={} domain={} CU={middle_withdraw_cu}",
+        LAST_ASSET + 1,
+        middle_domain
+    );
+    assert_cu_within(
+        "max-public-shape middle-domain WithdrawInsurance",
+        middle_withdraw_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    assert_eq!(env.token_amount(creator_dest), MIDDLE_INSURANCE as u64);
+
     let admin = env.admin.insecure_clone();
     env.withdraw_terminal_insurance_with_authority(&admin, total_create_fees);
     let (_, wound_down) = env.market_state();
