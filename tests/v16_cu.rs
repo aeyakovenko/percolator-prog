@@ -59471,3 +59471,121 @@ fn v16_attack_backing_topup_rejects_lapsed_expiry() {
         "valid topup credits exactly the backing"
     );
 }
+
+// Public isolation probe: marketauth may drive an abandoned shutdown asset toward cleanup, but it
+// must not redirect that permissionless asset's provider-owned backing principal to itself.
+#[test]
+fn v16_attack_shutdown_cleanup_cannot_redirect_foreign_backing_principal() {
+    const BACKING: u128 = 500;
+
+    let mut env = V16CuEnv::new();
+    env.configure_permissionless_resolve_with_cu(100, 5);
+    env.update_market_init_fee_policy_with_cu(1);
+
+    let provider = Keypair::new();
+    let provider_key = provider.pubkey();
+    env.svm.warp_to_slot(1);
+    env.activate_permissionless_asset_with_fee(
+        &provider,
+        1,
+        1,
+        100,
+        provider_key,
+        provider_key,
+        provider_key,
+        provider_key,
+        1,
+    );
+    let ledger = env.backing_domain_ledger_account();
+    let backing_source = env.token_account(provider_key, BACKING as u64);
+    env.svm.expire_blockhash();
+    env.send(
+        ProgInstruction::TopUpBackingBucket {
+            domain: 2,
+            amount: BACKING,
+            expiry_slot: 1_000,
+        },
+        vec![
+            AccountMeta::new(provider_key, true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(backing_source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(ledger, false),
+        ],
+        &[&provider],
+    )
+    .expect("provider funds its backing bucket and ledger");
+
+    let marketauth = env.admin.insecure_clone();
+    env.svm.warp_to_slot(2);
+    env.svm.expire_blockhash();
+    env.try_shutdown_asset_with_authority(&marketauth, 1, 2)
+        .expect("marketauth can shut down the permissionless asset");
+    env.svm.warp_to_slot(7);
+
+    let before_market = env.svm.get_account(&env.market).unwrap();
+    let before_vault = env.svm.get_account(&env.vault).unwrap();
+    let admin_dest = env.token_account(marketauth.pubkey(), 0);
+    env.svm.expire_blockhash();
+    let redirected = env.send(
+        ProgInstruction::WithdrawBackingBucket {
+            domain: 2,
+            amount: BACKING,
+        },
+        vec![
+            AccountMeta::new(marketauth.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(admin_dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&marketauth],
+    );
+    assert!(
+        redirected.is_err(),
+        "shutdown cleanup must not redirect provider backing to marketauth"
+    );
+    assert_eq!(env.token_amount(admin_dest), 0);
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), before_market);
+    assert_eq!(env.svm.get_account(&env.vault).unwrap(), before_vault);
+
+    // Cleanup remains permissionless: marketauth can submit it when the payout token account is
+    // owned by the backing provider, even if the provider itself is offline.
+    let provider_dest = env.token_account(provider_key, 0);
+    env.svm.expire_blockhash();
+    let cleanup_cu = env
+        .send(
+            ProgInstruction::WithdrawBackingBucket {
+                domain: 2,
+                amount: BACKING,
+            },
+            vec![
+                AccountMeta::new(marketauth.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(provider_dest, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(env.vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+                AccountMeta::new(ledger, false),
+            ],
+            &[&marketauth],
+        )
+        .expect("marketauth cleanup pays the backing provider");
+    assert_cu_within(
+        "provider-pinned shutdown backing cleanup",
+        cleanup_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    assert_eq!(env.token_amount(provider_dest), BACKING as u64);
+    let ledger_after =
+        state::read_backing_domain_ledger(&env.svm.get_account(&ledger).unwrap().data)
+            .expect("provider ledger remains valid after marketauth cleanup");
+    assert_eq!(ledger_after.authority, provider_key.to_bytes());
+    assert_eq!(ledger_after.total_principal_atoms, 0);
+    assert_eq!(
+        env.market_state().1.source_backing_buckets[2].fresh_unliened_backing_num,
+        0
+    );
+}
