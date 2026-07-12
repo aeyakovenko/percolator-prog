@@ -3412,6 +3412,8 @@ pub mod matcher_abi {
     pub const FLAG_VALID: u32 = 1;
     pub const FLAG_PARTIAL_OK: u32 = 2;
     pub const FLAG_REJECTED: u32 = 4;
+    pub const FLAG_BACKING_FEE_CAP_SHIFT: u32 = 8;
+    pub const FLAG_BACKING_FEE_CAP_MASK: u32 = 0x3fff << FLAG_BACKING_FEE_CAP_SHIFT;
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub struct MatcherReturn {
@@ -3423,6 +3425,12 @@ pub mod matcher_abi {
         pub lp_account_id: u64,
         pub oracle_price_e6: u64,
         pub asset_index: u64,
+    }
+
+    impl MatcherReturn {
+        pub fn backing_fee_cap_bps(&self) -> u16 {
+            ((self.flags & FLAG_BACKING_FEE_CAP_MASK) >> FLAG_BACKING_FEE_CAP_SHIFT) as u16
+        }
     }
 
     pub fn read_matcher_return(ctx: &[u8]) -> Result<MatcherReturn, ProgramError> {
@@ -3452,10 +3460,12 @@ pub mod matcher_abi {
         if ret.abi_version != MATCHER_ABI_VERSION {
             return Err(ProgramError::InvalidAccountData);
         }
-        const KNOWN_FLAGS: u32 = FLAG_VALID | FLAG_PARTIAL_OK | FLAG_REJECTED;
+        const KNOWN_FLAGS: u32 =
+            FLAG_VALID | FLAG_PARTIAL_OK | FLAG_REJECTED | FLAG_BACKING_FEE_CAP_MASK;
         if (ret.flags & !KNOWN_FLAGS) != 0
             || (ret.flags & FLAG_VALID) == 0
             || (ret.flags & FLAG_REJECTED) != 0
+            || ret.backing_fee_cap_bps() > 10_000
         {
             return Err(ProgramError::InvalidAccountData);
         }
@@ -5719,6 +5729,7 @@ pub mod processor {
         size_q: i128,
         exec_price: u64,
         fee_bps: u64,
+        account_b_backing_fee_cap_bps: Option<u16>,
         max_market_slots: usize,
     ) -> ProgramResult {
         ensure_portfolio_storage_for_market_slots(account_a_ai, max_market_slots)?;
@@ -5822,6 +5833,7 @@ pub mod processor {
                     backing_before_a.as_ref(),
                     &mut account_b,
                     backing_before_b.as_ref(),
+                    account_b_backing_fee_cap_bps,
                 )?;
             }
             credit_trade_fees_to_market_budgets_view(
@@ -6152,6 +6164,7 @@ pub mod processor {
             size_q,
             exec_price,
             fee_bps,
+            None,
             max_market_slots,
         )
     }
@@ -6614,6 +6627,7 @@ pub mod processor {
             ret.exec_size,
             ret.exec_price_e6,
             fee_bps,
+            Some(ret.backing_fee_cap_bps()),
             max_market_slots,
         )
     }
@@ -11184,6 +11198,7 @@ pub mod processor {
         cfg: &WrapperConfigV16,
         account: &percolator::PortfolioV16ViewMut<'_>,
         before: &[(u32, u128)],
+        backing_fee_cap_bps: Option<u16>,
         fees_by_domain: &mut DomainFeeTotals,
     ) -> Result<u128, ProgramError> {
         // Iterate only the OCCUPIED source-domain slots (after-state, <= CAP). For each, compute the
@@ -11208,6 +11223,11 @@ pub mod processor {
                 )
                 .map_err(map_v16_error)?;
                 if split.total_fee != 0 {
+                    // CPI passes the unsigned LP's matcher cap here. Check only an actual positive
+                    // backing delta, so fee-free and risk-reducing fills remain executable.
+                    if backing_fee_cap_bps.is_some_and(|cap| bps > cap) {
+                        return Err(PercolatorError::Unauthorized.into());
+                    }
                     domain_fee_add(
                         fees_by_domain,
                         domain,
@@ -11260,6 +11280,7 @@ pub mod processor {
         before_a: &[(u32, u128)],
         account_b: &mut percolator::PortfolioV16ViewMut<'_>,
         before_b: &[(u32, u128)],
+        account_b_backing_fee_cap_bps: Option<u16>,
     ) -> Result<u128, ProgramError> {
         let mut fees_a_by_domain: DomainFeeTotals = Vec::new();
         let fee_a = collect_backing_domain_fees_for_account_view(
@@ -11267,6 +11288,7 @@ pub mod processor {
             cfg,
             account_a,
             before_a,
+            None,
             &mut fees_a_by_domain,
         )?;
         let mut fees_b_by_domain: DomainFeeTotals = Vec::new();
@@ -11275,6 +11297,7 @@ pub mod processor {
             cfg,
             account_b,
             before_b,
+            account_b_backing_fee_cap_bps,
             &mut fees_b_by_domain,
         )?;
         if fee_a == 0 && fee_b == 0 {
@@ -12296,6 +12319,7 @@ pub mod processor {
                     before_a,
                     &mut account_b,
                     before_b,
+                    None,
                 )
                 .unwrap();
                 assert_eq!(charged, 10);

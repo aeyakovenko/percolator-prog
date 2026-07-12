@@ -1888,6 +1888,21 @@ impl V16CuEnv {
         maker_owner: &Keypair,
         maker_account: Pubkey,
     ) -> (Pubkey, Pubkey, u64) {
+        self.init_auth_matcher_context_with_backing_fee_cap(
+            matcher_program,
+            maker_owner,
+            maker_account,
+            0,
+        )
+    }
+
+    fn init_auth_matcher_context_with_backing_fee_cap(
+        &mut self,
+        matcher_program: Pubkey,
+        maker_owner: &Keypair,
+        maker_account: Pubkey,
+        backing_fee_cap_bps: u16,
+    ) -> (Pubkey, Pubkey, u64) {
         let ctx = Pubkey::new_unique();
         let delegate = matcher_delegate_key(
             &self.program_id,
@@ -1898,12 +1913,13 @@ impl V16CuEnv {
             &ctx,
         );
         let cu = self
-            .try_init_auth_matcher_context_with_delegate(
+            .try_init_auth_matcher_context_with_delegate_and_backing_fee_cap(
                 matcher_program,
                 maker_owner,
                 maker_account,
                 ctx,
                 delegate,
+                backing_fee_cap_bps,
             )
             .expect("init auth matcher context");
         self.set_matcher_config(
@@ -2033,6 +2049,25 @@ impl V16CuEnv {
         ctx: Pubkey,
         delegate: Pubkey,
     ) -> Result<u64, String> {
+        self.try_init_auth_matcher_context_with_delegate_and_backing_fee_cap(
+            matcher_program,
+            maker_owner,
+            maker_account,
+            ctx,
+            delegate,
+            0,
+        )
+    }
+
+    fn try_init_auth_matcher_context_with_delegate_and_backing_fee_cap(
+        &mut self,
+        matcher_program: Pubkey,
+        maker_owner: &Keypair,
+        maker_account: Pubkey,
+        ctx: Pubkey,
+        delegate: Pubkey,
+        backing_fee_cap_bps: u16,
+    ) -> Result<u64, String> {
         self.ensure_signer_account(maker_owner.pubkey());
         self.svm
             .set_account(
@@ -2058,6 +2093,8 @@ impl V16CuEnv {
                 },
             )
             .unwrap();
+        let mut init_data = vec![2];
+        init_data.extend_from_slice(&backing_fee_cap_bps.to_le_bytes());
         send_raw_tx(
             &mut self.svm,
             &self.payer,
@@ -2071,7 +2108,7 @@ impl V16CuEnv {
                     AccountMeta::new_readonly(self.market, false),
                     AccountMeta::new_readonly(maker_account, false),
                 ],
-                data: vec![2],
+                data: init_data,
             },
             &[maker_owner],
         )
@@ -51873,7 +51910,8 @@ fn v16_attack_batch_nocpi_stale_reject_rolls_back_legacy_realloc() {
 #[test]
 fn v16_attack_matcher_return_antispoof_rejections() {
     use percolator_prog::matcher_abi::{
-        validate_matcher_return, MatcherReturn, FLAG_PARTIAL_OK, FLAG_REJECTED, FLAG_VALID,
+        validate_matcher_return, MatcherReturn, FLAG_BACKING_FEE_CAP_SHIFT, FLAG_PARTIAL_OK,
+        FLAG_REJECTED, FLAG_VALID,
     };
     const LP: u64 = 7;
     const ASSET: u16 = 1;
@@ -51898,6 +51936,10 @@ fn v16_attack_matcher_return_antispoof_rejections() {
     partial.exec_size = (5 * POS_SCALE) as i128;
     partial.flags = FLAG_VALID | FLAG_PARTIAL_OK;
     assert!(chk(&partial).is_ok(), "flagged partial fill validates");
+    let mut capped = valid;
+    capped.flags = FLAG_VALID | (5_000u32 << FLAG_BACKING_FEE_CAP_SHIFT);
+    assert!(chk(&capped).is_ok(), "an in-range LP fee cap validates");
+    assert_eq!(capped.backing_fee_cap_bps(), 5_000);
 
     // --- hostile replies, each must REJECT ---
     let cases: &[(&str, fn(MatcherReturn) -> MatcherReturn)] = &[
@@ -51938,7 +51980,11 @@ fn v16_attack_matcher_return_antispoof_rejections() {
             r
         }),
         ("unknown flag bit", |mut r| {
-            r.flags = FLAG_VALID | 0x100;
+            r.flags = FLAG_VALID | (1 << 31);
+            r
+        }),
+        ("backing fee cap above 10000 bps", |mut r| {
+            r.flags = FLAG_VALID | (10_001 << FLAG_BACKING_FEE_CAP_SHIFT);
             r
         }),
         ("zero exec_price", |mut r| {
@@ -59472,6 +59518,10 @@ fn v16_attack_backing_topup_rejects_lapsed_expiry() {
     );
 }
 
+// LoF: only the taker signs TradeCpi. A permissionless backing authority must not be able to make
+// an unsigned LP pay a newly-installed source-backing fee unless the LP's matcher explicitly
+// returns a sufficient cap. The rejected path is byte-atomic; an opted-in fill and a zero-cap risk
+// reduction remain live.
 #[test]
 fn v16_attack_cpi_lp_backing_fee_requires_matcher_consent() {
     const INITIAL_PRICE: u64 = 100;
@@ -59524,7 +59574,7 @@ fn v16_attack_cpi_lp_backing_fee_requires_matcher_consent() {
     let matcher_program = Pubkey::new_unique();
     let matcher_bytes = std::fs::read(auth_matcher_program_path()).expect("read auth matcher BPF");
     env.svm.add_program(matcher_program, &matcher_bytes);
-    let (matcher_ctx, matcher_delegate, _) =
+    let (zero_cap_matcher_ctx, zero_cap_matcher_delegate, _) =
         env.init_auth_matcher_context(matcher_program, &lp, lp_account);
 
     let ledger = Keypair::new();
@@ -59556,15 +59606,15 @@ fn v16_attack_cpi_lp_backing_fee_requires_matcher_consent() {
     )
     .expect("attacker funds its backing domain");
 
-    // Asset 1 makes the LP's short profitable; asset 0 makes its long lose.
+    // Asset 1 makes the LP's long profitable; asset 0 makes its other long lose.
     env.try_trade_cpi_with_cu_on_asset(
         &market_trader,
         market_trader_account,
         &lp,
         lp_account,
         matcher_program,
-        matcher_ctx,
-        matcher_delegate,
+        zero_cap_matcher_ctx,
+        zero_cap_matcher_delegate,
         1,
         -WINNING_SIZE_Q,
         0,
@@ -59576,8 +59626,8 @@ fn v16_attack_cpi_lp_backing_fee_requires_matcher_consent() {
         &lp,
         lp_account,
         matcher_program,
-        matcher_ctx,
-        matcher_delegate,
+        zero_cap_matcher_ctx,
+        zero_cap_matcher_delegate,
         0,
         -LOSING_SIZE_Q,
         0,
@@ -59648,37 +59698,50 @@ fn v16_attack_cpi_lp_backing_fee_requires_matcher_consent() {
     )
     .expect("permissionless asset authority installs backing fee");
 
-    let lp_before = env.portfolio_state(lp_account).capital.get();
-    let attacker_before = env.portfolio_state(attacker_account).capital.get();
     let provider_before = env.market_state().1.source_backing_buckets[WINNING_DOMAIN as usize]
         .utilization_fee_earnings;
+    let market_before_reject = env.svm.get_account(&env.market).unwrap();
+    let attacker_before_reject = env.svm.get_account(&attacker_account).unwrap();
+    let lp_before_reject = env.svm.get_account(&lp_account).unwrap();
+    let matcher_before_reject = env.svm.get_account(&zero_cap_matcher_ctx).unwrap();
     env.svm.warp_to_slot(6);
-    env.try_trade_cpi_with_cu_on_asset(
+    let rejected = env.try_trade_cpi_with_cu_on_asset(
         &attacker,
         attacker_account,
         &lp,
         lp_account,
         matcher_program,
-        matcher_ctx,
-        matcher_delegate,
+        zero_cap_matcher_ctx,
+        zero_cap_matcher_delegate,
         0,
         -INCREASE_Q,
         0,
-    )
-    .expect("fee-bearing CPI risk increase");
-    let lp_after = env.portfolio_state(lp_account).capital.get();
-    let attacker_after = env.portfolio_state(attacker_account).capital.get();
-    let provider_after = env.market_state().1.source_backing_buckets[WINNING_DOMAIN as usize]
-        .utilization_fee_earnings;
-    println!(
-        "backing fee probe: lp {}->{}, attacker {}->{}, provider {}->{}",
-        lp_before, lp_after, attacker_before, attacker_after, provider_before, provider_after
     );
     assert!(
-        provider_after > provider_before,
-        "probe must charge provider fee"
+        rejected.is_err(),
+        "a zero-cap matcher must reject an LP backing fee"
     );
-    let extracted = provider_after - provider_before;
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before_reject
+    );
+    assert_eq!(
+        env.svm.get_account(&attacker_account).unwrap(),
+        attacker_before_reject
+    );
+    assert_eq!(env.svm.get_account(&lp_account).unwrap(), lp_before_reject);
+    assert_eq!(
+        env.svm.get_account(&zero_cap_matcher_ctx).unwrap(),
+        matcher_before_reject,
+        "the rejected post-engine consent check rolls the matcher CPI back too"
+    );
+
+    // The LP can opt in explicitly. The cap is signed into its matcher context and echoed on
+    // every fill; it is not supplied by the taker.
+    let (consent_matcher_ctx, consent_matcher_delegate, _) =
+        env.init_auth_matcher_context_with_backing_fee_cap(matcher_program, &lp, lp_account, 5_000);
+    let lp_before = env.portfolio_state(lp_account).capital.get();
+    let attacker_before = env.portfolio_state(attacker_account).capital.get();
     env.svm.expire_blockhash();
     env.try_trade_cpi_with_cu_on_asset(
         &attacker,
@@ -59686,13 +59749,48 @@ fn v16_attack_cpi_lp_backing_fee_requires_matcher_consent() {
         &lp,
         lp_account,
         matcher_program,
-        matcher_ctx,
-        matcher_delegate,
+        consent_matcher_ctx,
+        consent_matcher_delegate,
+        0,
+        -INCREASE_Q,
+        0,
+    )
+    .expect("LP-consented backing fee CPI risk increase");
+    let lp_after = env.portfolio_state(lp_account).capital.get();
+    let attacker_after = env.portfolio_state(attacker_account).capital.get();
+    let provider_after = env.market_state().1.source_backing_buckets[WINNING_DOMAIN as usize]
+        .utilization_fee_earnings;
+    println!(
+        "consented backing fee: lp {}->{}, attacker {}->{}, provider {}->{}",
+        lp_before, lp_after, attacker_before, attacker_after, provider_before, provider_after
+    );
+    assert!(
+        provider_after > provider_before,
+        "the explicitly consented fill must charge the provider fee"
+    );
+    let extracted = provider_after - provider_before;
+    env.set_matcher_config(
+        matcher_program,
+        &lp,
+        lp_account,
+        zero_cap_matcher_ctx,
+        zero_cap_matcher_delegate,
+        1,
+    );
+    env.svm.expire_blockhash();
+    env.try_trade_cpi_with_cu_on_asset(
+        &attacker,
+        attacker_account,
+        &lp,
+        lp_account,
+        matcher_program,
+        zero_cap_matcher_ctx,
+        zero_cap_matcher_delegate,
         0,
         INCREASE_Q,
         0,
     )
-    .expect("attacker reverses the incremental leg at the same mark");
+    .expect("a zero-cap matcher still permits a fee-free risk reduction");
     let attacker_flat = env.portfolio_state(attacker_account);
     let lp_reversed = env.portfolio_state(lp_account);
     assert!(percolator::active_bitmap_is_empty(active_bitmap(
