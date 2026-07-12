@@ -5657,27 +5657,36 @@ fn v16_bpf_permissionless_market_shutdown_force_closes_recovers_and_reuses_slot(
 
     let admin_key = env.admin.pubkey();
     let admin_recovery = env.token_account(admin_key, 0);
+    let provider_recovery = env.token_account(backing_authority.pubkey(), 0);
     for (domain, amount) in [(2u8, 6u128), (3u8, 4u128)] {
         env.withdraw_insurance_domain_to_admin_token_with_cu(admin_recovery, domain.into(), amount);
     }
     for (domain, amount) in [(2u8, 20u128), (3u8, 25u128)] {
-        env.withdraw_backing_bucket_to_admin_token_with_cu(admin_recovery, domain.into(), amount);
+        env.withdraw_backing_bucket_to_admin_token_with_cu(
+            provider_recovery,
+            domain.into(),
+            amount,
+        );
     }
     assert_eq!(
         env.token_amount(admin_recovery),
-        55,
-        "admin must recover asset-domain insurance and backing funds"
+        10,
+        "marketauth recovers only protocol insurance during shutdown cleanup"
+    );
+    assert_eq!(
+        env.token_amount(provider_recovery),
+        45,
+        "market-driven cleanup returns backing principal to its provider"
     );
     assert_eq!(env.token_amount(env.vault), 20_025);
 
     env.top_up_insurance_from_admin_token_with_cu(admin_recovery, 10);
-    env.top_up_backing_bucket_from_admin_token_with_cu(admin_recovery, 0, 45, 20);
     assert_eq!(
         env.token_amount(admin_recovery),
         0,
-        "recovered funds should be re-deposited into market-0 buckets"
+        "recovered protocol insurance is re-deposited into market 0"
     );
-    assert_eq!(env.token_amount(env.vault), 20_080);
+    assert_eq!(env.token_amount(env.vault), 20_035);
     let market_data = env.svm.get_account(&env.market).unwrap().data;
     let (_, recovered_group) = state::read_market(&market_data).unwrap();
     assert_eq!(recovered_group.insurance_domain_budget[2], 0);
@@ -5694,7 +5703,7 @@ fn v16_bpf_permissionless_market_shutdown_force_closes_recovers_and_reuses_slot(
     assert_eq!(recovered_group.insurance_domain_budget[1], 18);
     assert_eq!(
         recovered_group.source_backing_buckets[0].fresh_unliened_backing_num,
-        45 * BOUND_SCALE
+        0
     );
 
     env.update_asset_lifecycle_as_admin_with_cu(
@@ -5751,7 +5760,7 @@ fn v16_bpf_permissionless_market_shutdown_force_closes_recovers_and_reuses_slot(
     );
     println!("v16 permissionless asset reuse BPF CU: {reuse_cu}");
     assert_eq!(env.token_amount(reuse_source), 0);
-    assert_eq!(env.token_amount(env.vault), 20_105);
+    assert_eq!(env.token_amount(env.vault), 20_060);
     let market_data = env.svm.get_account(&env.market).unwrap().data;
     let (reused_cfg, reused_group) = state::read_market(&market_data).unwrap();
     assert_eq!(reused_cfg.free_market_slot_count, 0);
