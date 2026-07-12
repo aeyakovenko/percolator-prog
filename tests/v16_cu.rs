@@ -44569,6 +44569,10 @@ fn trigger_permissionless_asset_one_bankruptcy(
     let (_, group) = env.market_state();
     assert_eq!(group.mode, MarketModeV16::Live);
     assert!(group.bankruptcy_hlock_active);
+    assert!(
+        group.bankruptcy_hlock_fully_attributed,
+        "the public single-asset insolvency must persist asset-local attribution"
+    );
     assert_eq!(env.portfolio_state(short_account).capital.get(), 0);
     assert_eq!(group.assets[1].mode_long, SideModeV16::ResetPending);
     (long_owner, long_account)
@@ -44589,6 +44593,7 @@ fn v16_attack_permissionless_asset_bankruptcy_cannot_freeze_unrelated_insurance(
         .expect("healthy base insurance is live before the unrelated attack");
 
     let _ = trigger_permissionless_asset_one_bankruptcy(&mut env, &creator, 2);
+    env.top_up_insurance_domain_with_authority(&creator, 2, 100);
     let before = env.market_state().1;
     assert_eq!(before.insurance_domain_budget[0], 900);
     assert_eq!(before.insurance_domain_spent[0], 0);
@@ -44601,6 +44606,45 @@ fn v16_attack_permissionless_asset_bankruptcy_cannot_freeze_unrelated_insurance(
     let after = env.market_state().1;
     assert_eq!(after.insurance_domain_budget[0], 800);
     assert_eq!(after.insurance_domain_spent[0], 0);
+
+    env.svm.expire_blockhash();
+    let related_withdrawal = env.try_withdraw_insurance_asset_with_authority(&creator, 1, 1);
+    assert!(
+        related_withdrawal.is_err(),
+        "the bankrupt asset's own insurance must remain locked"
+    );
+}
+
+#[test]
+fn v16_bpf_unrelated_bankruptcy_hlock_withdraw_stays_bounded_on_10m_market() {
+    const N: usize = 5_834;
+    const HIGH_ASSET: usize = N - 1;
+    const FUNDED: u128 = 100;
+
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(1, 10_000, 10_000, 10_000);
+    let account_len = grow_market_to_10m_with_high_active_asset(&mut env, N, HIGH_ASSET, 100);
+    env.enable_live_insurance_withdrawal();
+    let admin = env.admin.insecure_clone();
+    env.top_up_insurance_domain_with_authority(&admin, 0, FUNDED);
+    env.mutate_market(|_, group| {
+        group.bankruptcy_hlock_active = true;
+        group.bankruptcy_hlock_fully_attributed = true;
+        group.assets[HIGH_ASSET].mode_long = SideModeV16::ResetPending;
+    });
+
+    env.svm.expire_blockhash();
+    let (_, withdraw_cu) = env
+        .try_withdraw_insurance_asset_with_authority(&admin, 0, 1)
+        .expect("unrelated tail bankruptcy must not brick base insurance withdrawal");
+    println!(
+        "v16 10MiB unrelated bankruptcy hlock withdrawal: assets={N}, account_len={account_len}, CU={withdraw_cu}"
+    );
+    assert_cu_within(
+        "10MiB unrelated bankruptcy hlock withdrawal",
+        withdraw_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    assert_eq!(env.market_state().1.insurance_domain_budget[0], FUNDED - 1);
 }
 
 #[test]
@@ -44666,6 +44710,13 @@ fn v16_attack_permissionless_asset_bankruptcy_cannot_freeze_unrelated_backed_pnl
 
     let (failed_asset_winner, failed_asset_winner_account) =
         trigger_permissionless_asset_one_bankruptcy(&mut env, &creator, 3);
+    env.crank(
+        pairs[1].1,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 6,
+            observations: crank_observations(0),
+        },
+    );
     let target_before = env.portfolio_state(pairs[1].1);
     assert_eq!(target_before.pnl.get(), PNL as i128);
     env.svm.expire_blockhash();
