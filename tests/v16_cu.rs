@@ -38126,6 +38126,110 @@ fn v16_attack_nocpi_extreme_price_caps_ewma_move_without_dos() {
     }
 }
 
+// Trade-driven EWMA discovery may advance while the engine's effective price remains at its old
+// anchor. Exercise the maximum valid uncranked price envelope over many alternating wash trades:
+// movement fees must still cover the attacker's eventual base-unit repricing gain.
+#[test]
+fn v16_attack_accumulated_ewma_lag_remains_fee_covered_after_crank() {
+    const MARK: u64 = 100;
+    const BASE_Q: i128 = POS_SCALE as i128;
+
+    let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+        initial_price: MARK,
+        h_max: 20,
+        max_trading_fee_bps: 10_000,
+        max_price_move_bps_per_slot: 500,
+        max_accrual_dt_slots: 20,
+        min_funding_lifetime_slots: 20,
+        ..V16CuMarketParams::default()
+    });
+    env.svm.warp_to_slot(1);
+    env.configure_ewma_mark_with_cu(1, MARK, 1, 0);
+
+    let attacker = Keypair::new();
+    let victim = Keypair::new();
+    let wash_long = Keypair::new();
+    let wash_short = Keypair::new();
+    let attacker_account = env.create_portfolio(&attacker);
+    let victim_account = env.create_portfolio(&victim);
+    let wash_long_account = env.create_portfolio(&wash_long);
+    let wash_short_account = env.create_portfolio(&wash_short);
+    for (owner, portfolio) in [
+        (&attacker, attacker_account),
+        (&victim, victim_account),
+        (&wash_long, wash_long_account),
+        (&wash_short, wash_short_account),
+    ] {
+        env.deposit(owner, portfolio, 10_000_000_000);
+    }
+
+    env.trade_asset_with_cu(
+        0,
+        &attacker,
+        attacker_account,
+        &victim,
+        victim_account,
+        BASE_Q,
+        MARK,
+        0,
+    );
+    let insurance_before = env.market_state().1.insurance;
+
+    for slot in 2..=20u64 {
+        env.svm.warp_to_slot(slot);
+        let size_q = if slot % 2 == 0 { BASE_Q } else { -BASE_Q };
+        env.svm.expire_blockhash();
+        env.try_trade_asset_with_cu(
+            0,
+            &wash_long,
+            wash_long_account,
+            &wash_short,
+            wash_short_account,
+            size_q,
+            MARK.checked_mul(slot).unwrap(),
+            0,
+        )
+        .unwrap_or_else(|err| panic!("wash trade at slot {slot} failed: {err}"));
+    }
+
+    let (cfg_before_crank, group_before_crank) = env.market_state();
+    let fees_paid = group_before_crank.insurance - insurance_before;
+    let victim_capital_before = env.portfolio_state(victim_account).capital.get();
+    assert_eq!(group_before_crank.assets[0].effective_price, MARK);
+    assert!(cfg_before_crank.mark_ewma_e6 > MARK);
+
+    for portfolio in [attacker_account, victim_account] {
+        env.svm.expire_blockhash();
+        env.crank(
+            portfolio,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 20,
+                observations: crank_observations(0),
+            },
+        );
+    }
+
+    let attacker_after = env.portfolio_state(attacker_account);
+    let victim_after = env.portfolio_state(victim_account);
+    let attacker_pnl = attacker_after.pnl.get();
+    assert!(attacker_pnl > 0);
+    assert_eq!(
+        victim_after.pnl.get(),
+        0,
+        "the losing short settles its negative PnL"
+    );
+    assert_eq!(
+        victim_capital_before - victim_after.capital.get(),
+        attacker_pnl as u128,
+        "the attacker's mark-created claim is the victim's realized capital loss"
+    );
+    assert!(
+        attacker_pnl as u128 <= fees_paid,
+        "accumulated mark-created claim must remain covered by wash fees: pnl={}, fees={fees_paid}",
+        attacker_pnl
+    );
+}
+
 // security.md sweep — ADL deleverage precision/conservation (#9/#22/#33): when a bankrupt side is
 // partially liquidated, the engine auto-deleverages the WINNING (opposite) side by scaling its a-factor
 // by oi_after/oi_before (percolator/src/v16.rs:9834). Attacker goal: have the winner keep its full claim
@@ -64100,11 +64204,7 @@ fn v16_attack_permissionless_market_growth_keeps_close_slab_bounded() {
 
     let middle_domain = MIDDLE_ASSET * 2;
     let middle_topup_cu = env
-        .top_up_insurance_domain_with_authority_and_cu(
-            &creator,
-            middle_domain,
-            MIDDLE_INSURANCE,
-        )
+        .top_up_insurance_domain_with_authority_and_cu(&creator, middle_domain, MIDDLE_INSURANCE)
         .1;
     assert_cu_within(
         "max-public-shape middle-domain insurance top-up",
@@ -64125,8 +64225,7 @@ fn v16_attack_permissionless_market_growth_keeps_close_slab_bounded() {
         "creation fees and the middle provider's insurance remain fully accounted"
     );
     assert_eq!(
-        grown.insurance_domain_budget[middle_domain as usize],
-        MIDDLE_INSURANCE,
+        grown.insurance_domain_budget[middle_domain as usize], MIDDLE_INSURANCE,
         "the public middle asset carries a real provider-owned terminal claim"
     );
     assert_eq!(
