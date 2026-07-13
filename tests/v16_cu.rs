@@ -38437,6 +38437,166 @@ fn v16_attack_partial_adl_recovery_residue_can_be_force_closed_without_owner() {
     );
 }
 
+// Live source-backing expiry liveness: this is a fully public path to a source-backed claim.
+// A partial ADL realizes the loser's capital as Fresh backing for the winner. Once that bucket
+// expires, a later adverse move must not make RefreshAccount return EngineStale forever: SVM
+// rollback would restore the same lapsed-Fresh predicate after every keeper attempt and block the
+// owner's risk-reducing trade. Auto-crank must apply the canonical expiry transition, preserve
+// custody, certify both accounts, and leave the owner able to reduce the position.
+#[test]
+fn v16_attack_lapsed_live_source_backing_does_not_stale_loop_auto_crank() {
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(1, 1_000, 1_000, 500);
+    env.configure_permissionless_resolve_with_cu(10_000, 1);
+    env.configure_auth_mark_with_cu(0, 100);
+    let long_owner = Keypair::new();
+    let long = env.create_portfolio(&long_owner);
+    let short_owner = Keypair::new();
+    let short = env.create_portfolio(&short_owner);
+    let keeper_owner = Keypair::new();
+    let keeper = env.create_portfolio(&keeper_owner);
+    env.deposit(&long_owner, long, 40);
+    env.deposit(&short_owner, short, 410);
+    env.trade_asset_with_cu(
+        0,
+        &long_owner,
+        long,
+        &short_owner,
+        short,
+        (2 * POS_SCALE) as i128,
+        100,
+        0,
+    );
+
+    for slot in 2..=30 {
+        env.svm.warp_to_slot(slot);
+        env.push_auth_mark_with_cu(slot, 300);
+        env.crank(
+            keeper,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: slot,
+                observations: crank_observations(0),
+            },
+        );
+    }
+    for portfolio in [short, long] {
+        env.crank(
+            portfolio,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 30,
+                observations: crank_observations(0),
+            },
+        );
+    }
+    env.crank(
+        short,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 30,
+            observations: crank_observations(0),
+        },
+    );
+    let after_short_group = env.market_state().1;
+    let after_short_long = active_leg_for_asset(&env.portfolio_state(long), 0);
+    let after_short_short = active_leg_for_asset(&env.portfolio_state(short), 0);
+    assert_eq!(after_short_group.assets[0].b_long_num, 0);
+    assert_eq!(after_short_group.assets[0].b_short_num, 0);
+    assert!(!after_short_long.b_stale && !after_short_short.b_stale);
+    let generated_backing = after_short_group.source_backing_buckets[1];
+    assert_eq!(generated_backing.status, BackingBucketStatusV16::Fresh);
+    assert!(
+        generated_backing.fresh_unliened_backing_num > 0,
+        "public partial ADL must create real source backing for the winner"
+    );
+
+    for slot in 31..=160 {
+        env.svm.warp_to_slot(slot);
+        env.push_auth_mark_with_cu(slot, 1);
+        env.crank(
+            keeper,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: slot,
+                observations: crank_observations(0),
+            },
+        );
+    }
+    let before_refresh = env.market_state().1;
+    let lapsed = before_refresh.source_backing_buckets[1];
+    assert_eq!(lapsed.status, BackingBucketStatusV16::Fresh);
+    assert!(lapsed.expiry_slot < 160, "backing is observably lapsed");
+    assert!(env.portfolio_state(long).pnl.get() > 0);
+    let vault_before = before_refresh.vault;
+    let vault_tokens_before = env.token_amount(env.vault);
+
+    env.svm.expire_blockhash();
+    let refresh_cu = env
+        .send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 160,
+                observations: vec![],
+            },
+            vec![
+                AccountMeta::new(env.payer.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(long, false),
+            ],
+            &[],
+        )
+        .expect("permissionless refresh must expire lapsed Live backing and commit");
+    assert_cu_within(
+        "lapsed source-backing expiry step",
+        refresh_cu,
+        CRANK_CU_LIMIT,
+    );
+
+    let after_refresh = env.market_state().1;
+    let expired = after_refresh.source_backing_buckets[1];
+    assert_eq!(expired.status, BackingBucketStatusV16::Expired);
+    assert_eq!(expired.fresh_unliened_backing_num, 0);
+    assert_ne!(
+        health_cert(&env.portfolio_state(long)).cert_risk_epoch,
+        after_refresh.risk_epoch,
+        "expiry advances risk state, so another bounded crank remains actionable"
+    );
+    assert_eq!(after_refresh.vault, vault_before, "expiry moves no custody");
+    assert_eq!(env.token_amount(env.vault), vault_tokens_before);
+
+    env.svm.expire_blockhash();
+    let certify_cu = env
+        .send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 160,
+                observations: vec![],
+            },
+            vec![
+                AccountMeta::new(env.payer.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(long, false),
+            ],
+            &[],
+        )
+        .expect("the next bounded auto-crank must certify after expiry");
+    assert_cu_within(
+        "post-expiry account certification",
+        certify_cu,
+        CRANK_CU_LIMIT,
+    );
+    assert!(health_cert(&env.portfolio_state(long)).valid);
+
+    let long_before_exit = active_leg_for_asset(&env.portfolio_state(long), 0)
+        .basis_pos_q
+        .unsigned_abs();
+    let exit_cu = env.rebalance_reduce_with_cu(&long_owner, long, 0, POS_SCALE / 4);
+    assert_cu_within("post-expiry user risk reduction", exit_cu, CUSTODY_CU_LIMIT);
+    assert_eq!(
+        active_leg_for_asset(&env.portfolio_state(long), 0)
+            .basis_pos_q
+            .unsigned_abs(),
+        long_before_exit - POS_SCALE / 4,
+    );
+    let done = env.market_state().1;
+    assert_eq!(done.vault, vault_before);
+    assert_eq!(done.vault as u64, env.token_amount(env.vault));
+}
+
 // A deeply insolvent single-leg account cannot be partially liquidated while leaving uncovered open
 // risk. With no keeper size input, the engine selects a full close, books the residual, and preserves
 // custody and balanced OI.
