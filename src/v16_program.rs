@@ -124,6 +124,7 @@ pub mod error {
         OracleStale,
         OracleConfTooWide,
         InvalidOracleKey,
+        AssetGenerationMismatch,
     }
 
     impl From<PercolatorError> for ProgramError {
@@ -2158,7 +2159,7 @@ pub mod state {
     pub fn read_market_trade_preflight(
         data: &[u8],
         asset_index: usize,
-    ) -> Result<(WrapperConfigV16, MarketModeV16, u64, u64, u64), ProgramError> {
+    ) -> Result<(WrapperConfigV16, MarketModeV16, u64, u64, u64, u64), ProgramError> {
         if data.len() < MIN_MARKET_ACCOUNT_LEN {
             return Err(PercolatorError::InvalidAccountLen.into());
         }
@@ -2177,6 +2178,7 @@ pub mod state {
             config,
             decode_market_mode(wire.mode)?,
             wire.current_slot.get(),
+            slot.asset.market_id.get(),
             slot.asset.effective_price.get(),
             engine_config.max_trading_fee_bps,
         ))
@@ -2195,6 +2197,7 @@ pub mod state {
             u64,
             u64,
             usize,
+            alloc::vec::Vec<u64>,
             alloc::vec::Vec<u64>,
         ),
         ProgramError,
@@ -2215,6 +2218,7 @@ pub mod state {
             return Err(PercolatorError::InvalidInstruction.into());
         }
         let mut prices = alloc::vec::Vec::with_capacity(asset_indices.len());
+        let mut market_ids = alloc::vec::Vec::with_capacity(asset_indices.len());
         let mut seen_low_assets = 0u128;
         let mut seen_high_assets = [0u16; 16];
         let mut seen_high_len = 0usize;
@@ -2243,6 +2247,7 @@ pub mod state {
                 return Err(PercolatorError::InvalidInstruction.into());
             }
             let slot = asset_slot_wire(data, asset_index as usize)?;
+            market_ids.push(slot.asset.market_id.get());
             prices.push(slot.asset.effective_price.get());
         }
         Ok((
@@ -2252,6 +2257,7 @@ pub mod state {
             engine_config.max_trading_fee_bps,
             engine_config.max_market_slots as usize,
             prices,
+            market_ids,
         ))
     }
 
@@ -2387,6 +2393,8 @@ pub mod ix {
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub struct BatchTradeLeg {
         pub asset_index: u16,
+        /// Asset generation expected by the signers. Asset indices are reusable after retirement.
+        pub market_id: u64,
         pub size_q: i128,
         pub exec_price: u64,
         pub fee_bps: u64,
@@ -2398,6 +2406,8 @@ pub mod ix {
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub struct BatchTradeCpiLeg {
         pub asset_index: u16,
+        /// Asset generation expected by the taker. Asset indices are reusable after retirement.
+        pub market_id: u64,
         pub size_q: i128,
         pub fee_bps: u64,
         pub limit_price: u64,
@@ -2450,12 +2460,14 @@ pub mod ix {
         },
         TradeNoCpi {
             asset_index: u16,
+            market_id: u64,
             size_q: i128,
             exec_price: u64,
             fee_bps: u64,
         },
         TradeCpi {
             asset_index: u16,
+            market_id: u64,
             size_q: i128,
             fee_bps: u64,
             limit_price: u64,
@@ -2695,12 +2707,14 @@ pub mod ix {
                 }
                 6 => Self::TradeNoCpi {
                     asset_index: read_u16(&mut rest)?,
+                    market_id: read_u64(&mut rest)?,
                     size_q: read_i128(&mut rest)?,
                     exec_price: read_u64(&mut rest)?,
                     fee_bps: read_u64(&mut rest)?,
                 },
                 10 => Self::TradeCpi {
                     asset_index: read_u16(&mut rest)?,
+                    market_id: read_u64(&mut rest)?,
                     size_q: read_i128(&mut rest)?,
                     fee_bps: read_u64(&mut rest)?,
                     limit_price: read_u64(&mut rest)?,
@@ -2714,6 +2728,7 @@ pub mod ix {
                     for _ in 0..n {
                         legs.push(BatchTradeLeg {
                             asset_index: read_u16(&mut rest)?,
+                            market_id: read_u64(&mut rest)?,
                             size_q: read_i128(&mut rest)?,
                             exec_price: read_u64(&mut rest)?,
                             fee_bps: read_u64(&mut rest)?,
@@ -2730,6 +2745,7 @@ pub mod ix {
                     for _ in 0..n {
                         legs.push(BatchTradeCpiLeg {
                             asset_index: read_u16(&mut rest)?,
+                            market_id: read_u64(&mut rest)?,
                             size_q: read_i128(&mut rest)?,
                             fee_bps: read_u64(&mut rest)?,
                             limit_price: read_u64(&mut rest)?,
@@ -2984,24 +3000,28 @@ pub mod ix {
                 }
                 Self::TradeNoCpi {
                     asset_index,
+                    market_id,
                     size_q,
                     exec_price,
                     fee_bps,
                 } => {
                     out.push(6);
                     push_u16(&mut out, asset_index);
+                    push_u64(&mut out, market_id);
                     push_i128(&mut out, size_q);
                     push_u64(&mut out, exec_price);
                     push_u64(&mut out, fee_bps);
                 }
                 Self::TradeCpi {
                     asset_index,
+                    market_id,
                     size_q,
                     fee_bps,
                     limit_price,
                 } => {
                     out.push(10);
                     push_u16(&mut out, asset_index);
+                    push_u64(&mut out, market_id);
                     push_i128(&mut out, size_q);
                     push_u64(&mut out, fee_bps);
                     push_u64(&mut out, limit_price);
@@ -3011,6 +3031,7 @@ pub mod ix {
                     out.push(legs.len() as u8);
                     for leg in legs.iter() {
                         push_u16(&mut out, leg.asset_index);
+                        push_u64(&mut out, leg.market_id);
                         push_i128(&mut out, leg.size_q);
                         push_u64(&mut out, leg.exec_price);
                         push_u64(&mut out, leg.fee_bps);
@@ -3021,6 +3042,7 @@ pub mod ix {
                     out.push(legs.len() as u8);
                     for leg in legs.iter() {
                         push_u16(&mut out, leg.asset_index);
+                        push_u64(&mut out, leg.market_id);
                         push_i128(&mut out, leg.size_q);
                         push_u64(&mut out, leg.fee_bps);
                         push_u64(&mut out, leg.limit_price);
@@ -5152,6 +5174,7 @@ pub mod processor {
             } => handle_permissionless_crank(program_id, accounts, now_slot, observations),
             Instruction::TradeNoCpi {
                 asset_index,
+                market_id,
                 size_q,
                 exec_price,
                 fee_bps,
@@ -5159,12 +5182,14 @@ pub mod processor {
                 program_id,
                 accounts,
                 asset_index,
+                market_id,
                 size_q,
                 exec_price,
                 fee_bps,
             ),
             Instruction::TradeCpi {
                 asset_index,
+                market_id,
                 size_q,
                 fee_bps,
                 limit_price,
@@ -5172,6 +5197,7 @@ pub mod processor {
                 program_id,
                 accounts,
                 asset_index,
+                market_id,
                 size_q,
                 fee_bps,
                 limit_price,
@@ -5716,6 +5742,7 @@ pub mod processor {
         account_a_ai: &AccountInfo<'a>,
         account_b_ai: &AccountInfo<'a>,
         asset_index: u16,
+        expected_market_id: u64,
         size_q: i128,
         exec_price: u64,
         fee_bps: u64,
@@ -5727,8 +5754,19 @@ pub mod processor {
         {
             let mut market_data = market_ai.try_borrow_mut_data()?;
             let (mut cfg, mut group) = state::market_view_mut(&mut market_data)?;
+            let asset_index_usize = asset_index as usize;
+            if asset_index_usize >= group.markets.len()
+                || group.markets[asset_index_usize]
+                    .engine
+                    .asset
+                    .market_id
+                    .get()
+                    != expected_market_id
+            {
+                return Err(PercolatorError::AssetGenerationMismatch.into());
+            }
             let mut oracle_profile =
-                read_oracle_profile_from_view(&group, &cfg, asset_index as usize)?;
+                read_oracle_profile_from_view(&group, &cfg, asset_index_usize)?;
             reject_permissionless_resolve_matured_live_for_profile_view(
                 &cfg,
                 &oracle_profile,
@@ -5988,6 +6026,11 @@ pub mod processor {
                 if requests.iter().any(|r| r.asset_index == asset_index) {
                     return Err(PercolatorError::InvalidInstruction.into());
                 }
+                if asset_index >= group.markets.len()
+                    || group.markets[asset_index].engine.asset.market_id.get() != leg.market_id
+                {
+                    return Err(PercolatorError::AssetGenerationMismatch.into());
+                }
                 let oracle_profile = read_oracle_profile_from_view(&group, &cfg, asset_index)?;
                 reject_permissionless_resolve_matured_live_for_profile_view(
                     &cfg,
@@ -6115,6 +6158,7 @@ pub mod processor {
         program_id: &Pubkey,
         accounts: &'a [AccountInfo<'a>],
         asset_index: u16,
+        market_id: u64,
         size_q: i128,
         exec_price: u64,
         fee_bps: u64,
@@ -6149,6 +6193,7 @@ pub mod processor {
             account_a_ai,
             account_b_ai,
             asset_index,
+            market_id,
             size_q,
             exec_price,
             fee_bps,
@@ -6436,6 +6481,7 @@ pub mod processor {
         program_id: &Pubkey,
         accounts: &'a [AccountInfo<'a>],
         asset_index: u16,
+        expected_market_id: u64,
         size_q: i128,
         fee_bps: u64,
         limit_price: u64,
@@ -6466,11 +6512,14 @@ pub mod processor {
             return Err(PercolatorError::InvalidInstruction.into());
         }
 
-        let (cfg_pre, mode_pre, current_slot_pre, oracle_price, max_trading_fee_bps) =
+        let (cfg_pre, mode_pre, current_slot_pre, market_id, oracle_price, max_trading_fee_bps) =
             state::read_market_trade_preflight(
                 &market_ai.try_borrow_data()?,
                 asset_index as usize,
             )?;
+        if market_id != expected_market_id {
+            return Err(PercolatorError::AssetGenerationMismatch.into());
+        }
         let (account_a_header, account_a_owner) =
             state::read_portfolio_owner_preflight(&account_a_ai.try_borrow_data()?)?;
         let (account_b_header, account_b_owner) =
@@ -6611,6 +6660,7 @@ pub mod processor {
             account_a_ai,
             account_b_ai,
             asset_index,
+            expected_market_id,
             ret.exec_size,
             ret.exec_price_e6,
             fee_bps,
@@ -6798,7 +6848,15 @@ pub mod processor {
                 max_trading_fee_bps,
                 max_market_slots,
                 oracle_prices,
+                market_ids,
             ) = state::read_asset_effective_prices(&market_data, &asset_indices)?;
+            if legs
+                .iter()
+                .zip(market_ids.iter())
+                .any(|(leg, market_id)| leg.market_id != *market_id)
+            {
+                return Err(PercolatorError::AssetGenerationMismatch.into());
+            }
             let authenticated_slot = authenticated_slot_or_fallback(current_slot_pre);
             let mut stale_matured = false;
             for &asset_index in &asset_indices {
@@ -6968,6 +7026,7 @@ pub mod processor {
             }
             exec_legs.push(ix::BatchTradeLeg {
                 asset_index: leg.asset_index,
+                market_id: leg.market_id,
                 size_q: ret.exec_size,
                 exec_price: ret.exec_price_e6,
                 fee_bps: leg.fee_bps,
@@ -9469,7 +9528,7 @@ pub mod processor {
         expect_owner(market_ai, program_id)?;
         let domain = domain as usize;
         let asset_index = domain / 2;
-        let (mut cfg, mode, _, _, max_trading_fee_bps) =
+        let (mut cfg, mode, _, _, _, max_trading_fee_bps) =
             state::read_market_trade_preflight(&market_ai.try_borrow_data()?, asset_index)?;
         if mode != MarketModeV16::Live {
             return Err(PercolatorError::EngineLockActive.into());
@@ -9571,7 +9630,7 @@ pub mod processor {
         expect_owner(market_ai, program_id)?;
         let (mut cfg, asset0_insurance_authority, max_trading_fee_bps) = {
             let market_data = market_ai.try_borrow_data()?;
-            let (cfg, _, _, _, max_trading_fee_bps) =
+            let (cfg, _, _, _, _, max_trading_fee_bps) =
                 state::read_market_trade_preflight(&market_data, 0)?;
             let profile0 = read_oracle_profile_for_asset(&market_data, &cfg, 0)?;
             (cfg, profile0.insurance_authority, max_trading_fee_bps)

@@ -301,7 +301,7 @@ Percolator enforces three layers with distinct responsibilities:
 - **Layout**: header + wrapper config + `MarketGroupV16Account`
 - Holds market-level totals, insurance, oracle/asset state, source-domain credit state, and asset lifecycle state.
 
-The v16 asset index ABI is `u16`. The current persisted layout is still a fixed-capacity Pod market-group layout, but asset indices are treated as reusable logical slots. A retired asset slot can only be reactivated after the configured shutdown/activation timeout, and reactivation assigns a new monotonic `u64` `market_id` from the market group. `market_id` values are never reused. Portfolio legs and close-progress ledgers carry that id, so stale state from an old shutdown market cannot bind to a reused slot.
+The v16 asset index ABI is `u16`. The current persisted layout is still a fixed-capacity Pod market-group layout, but asset indices are treated as reusable logical slots. A retired asset slot can only be reactivated after the configured shutdown/activation timeout, and reactivation assigns a new monotonic `u64` `market_id` from the market group. `market_id` values are never reused. Trade instructions, portfolio legs, and close-progress ledgers carry that id, so neither stale signed intent nor stale state from an old shutdown market can bind to a reused slot.
 
 ### Portfolio account
 - **Owner**: Percolator program id
@@ -422,13 +422,16 @@ This section describes intent and operational ordering, not argument-by-argument
 
 ### Trading
 - **TradeNoCpi**
-  - trade without external matcher (used for testing / deterministic scenarios)
+  - trade without external matcher (used for testing / deterministic scenarios). The signed
+    `market_id` must match the current generation of `asset_index`.
 - **TradeCpi**
   - trade via LP-chosen matcher CPI with strict binding + validation. The LP portfolio must already
-    store an enabled matcher config for the passed matcher program/context/delegate tuple.
+    store an enabled matcher config for the passed matcher program/context/delegate tuple. The
+    signed `market_id` is checked before matcher CPI.
 - **BatchTradeNoCpi** (tag 66)
   - atomic multi-leg batch (up to the portfolio asset cap) against one taker/LP pair; each leg's
-    **signed** `size_q` sets its direction, so a single batch can carry a mixed long/short spread.
+    `market_id` binds the reusable asset generation and **signed** `size_q` sets its direction, so a
+    single batch can carry a mixed long/short spread.
     The engine settles both accounts once, applies every leg, then runs a **single end-state
     initial-margin check** — interim legs need not be individually margin-feasible. Current v1 batch
     execution rejects if any backing-domain trade-fee policy is configured, so those fees are not
@@ -436,8 +439,8 @@ This section describes intent and operational ordering, not argument-by-argument
 - **BatchTradeCpi** (tag 67)
   - same atomic multi-leg batch routed through an external matcher: **one** batched matcher CPI
     (matcher tag 3) fills every leg against a single LP, each return is validated under the same
-    anti-spoof binding as `TradeCpi`, then all fills apply through the batch path. Bounded to 16
-    legs (the matcher's return-data cap).
+    anti-spoof binding as `TradeCpi`, and every signed `market_id` is checked before CPI, then all
+    fills apply through the batch path. Bounded to 16 legs (the matcher's return-data cap).
 - **SetMatcherConfig** (tag 68)
   - LP-owner-signed opt-in/out for unsigned LP matcher fills. This writes the matcher config tail
     on the LP portfolio: matcher program, matcher context, matcher delegate, and enabled flag.
