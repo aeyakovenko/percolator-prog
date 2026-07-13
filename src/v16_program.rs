@@ -6337,6 +6337,37 @@ pub mod processor {
         account_b
             .validate_with_market(&group.as_view())
             .map_err(map_v16_error)?;
+        let position_a = signed_position_for_asset_view(&group, &account_a, asset_index_usize)?;
+        let position_b = signed_position_for_asset_view(&group, &account_b, asset_index_usize)?;
+        if position_a == 0 || position_b == 0 {
+            let (residue, residue_position) = match (position_a != 0, position_b != 0) {
+                (true, false) => (&mut account_a, position_a),
+                (false, true) => (&mut account_b, position_b),
+                _ => return Err(PercolatorError::EngineNonProgress.into()),
+            };
+            let side_oi = if residue_position > 0 {
+                asset.oi_eff_long_q.get()
+            } else {
+                asset.oi_eff_short_q.get()
+            };
+            if side_oi != 0 {
+                return Err(PercolatorError::EngineInvalidLeg.into());
+            }
+            // A prior matched force-close can consume the final effective OI
+            // while leaving one ADL terminal residue and no opposite leg to
+            // pair. After the same abandonment delay, settle that dead leg via
+            // the engine's recovery-forfeit path without requiring its owner.
+            group
+                .forfeit_recovery_leg_not_atomic(residue, asset_index_usize, close_q)
+                .map_err(map_v16_error)?;
+            group.validate_shape().map_err(map_v16_error)?;
+            account_a
+                .validate_with_market(&group.as_view())
+                .map_err(map_v16_error)?;
+            return account_b
+                .validate_with_market(&group.as_view())
+                .map_err(map_v16_error);
+        }
         let leg_a = active_leg_for_asset_view(&account_a, asset_index_usize)?;
         let leg_b = active_leg_for_asset_view(&account_b, asset_index_usize)?;
         if leg_a.side == leg_b.side {
