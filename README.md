@@ -935,6 +935,6 @@ cargo build-sbf --no-default-features
 # All tests (integration, unit, alignment; LiteSVM loads target/deploy/percolator_prog.so)
 cargo test --all-targets
 
-# Kani harnesses (requires kani toolchain)
-cargo kani --tests
+# Kani harnesses (requires kani toolchain; proof-specific 32-byte loops override this bound)
+cargo kani --tests --default-unwind 18
 ```

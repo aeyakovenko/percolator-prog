@@ -396,6 +396,7 @@ fn kani_v16_withdraw_backing_bucket_decode_preserves_wire_fields() {
 }
 
 #[kani::proof]
+#[kani::unwind(34)]
 fn kani_v16_asset_lifecycle_decode_preserves_wire_fields() {
     let action: u8 = kani::any();
     let asset_index: u16 = kani::any();
@@ -653,6 +654,7 @@ fn kani_v16_legacy_permissionless_crank_size_payload_is_rejected() {
 }
 
 #[kani::proof]
+#[kani::unwind(34)]
 fn kani_v16_update_authority_decode_preserves_wire_fields() {
     let mut new_pubkey = [0u8; 32];
     let mut i = 0;
@@ -676,6 +678,7 @@ fn kani_v16_update_authority_decode_preserves_wire_fields() {
 }
 
 #[kani::proof]
+#[kani::unwind(34)]
 fn kani_v16_update_asset_authority_decode_preserves_wire_fields() {
     let asset_index: u16 = kani::any();
     let kind: u8 = kani::any();
@@ -868,6 +871,7 @@ fn kani_v16_update_market_init_fee_policy_decode_preserves_wire_fields() {
 }
 
 #[kani::proof]
+#[kani::unwind(34)]
 fn kani_v16_base_unit_payloads_decode_preserves_wire_fields() {
     let primary_mint: [u8; 32] = kani::any();
     let secondary_mint: [u8; 32] = kani::any();
@@ -930,6 +934,7 @@ fn kani_v16_permissionless_resolve_decode_preserves_wire_fields() {
 }
 
 #[kani::proof]
+#[kani::unwind(34)]
 fn kani_v16_configure_hybrid_oracle_decode_preserves_wire_fields() {
     let asset_index: u16 = kani::any();
     let oracle_leg_count: u8 = kani::any();
@@ -1000,7 +1005,9 @@ fn kani_v16_configure_hybrid_oracle_decode_preserves_wire_fields() {
             assert_eq!(got_invert, invert);
             assert_eq!(got_unit_scale, unit_scale);
             assert_eq!(got_conf, conf_filter_bps);
-            assert_eq!(got_feeds, feeds);
+            assert_eq!(got_feeds[0], feeds[0]);
+            assert_eq!(got_feeds[1], feeds[1]);
+            assert_eq!(got_feeds[2], feeds[2]);
         }
         _ => unreachable!(),
     }
@@ -1405,6 +1412,7 @@ fn kani_v16_resolved_recovery_payloads_reject_trailing_byte() {
 }
 
 #[kani::proof]
+#[kani::unwind(18)]
 fn kani_v16_unknown_or_truncated_tags_reject() {
     let tag: u8 = kani::any();
     kani::assume(tag != 0);
