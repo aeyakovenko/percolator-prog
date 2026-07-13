@@ -38147,6 +38147,142 @@ fn v16_attack_adl_deleverage_conserves_and_shrinks_winner_claim() {
     );
 }
 
+// Public LoF/DoS regression: partial ADL leaves the winner's stored basis larger than matched
+// effective OI. Before the fix, a normal max-work RebalanceReduce aborts with
+// EngineCounterUnderflow; reducing exactly the remaining effective OI once instead leaves a
+// Normal-mode, zero-OI residue that every later reduction also rejects. The exit must clamp to
+// matched OI, establish the reset epoch, and leave both residual accounts finitely crankable.
+#[test]
+fn v16_attack_partial_adl_max_exit_and_both_residues_finish_permissionlessly() {
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(1, 10_000, 10_000, 10_000);
+    env.configure_auth_mark_with_cu(0, 100);
+    let long_owner = Keypair::new();
+    let long = env.create_portfolio(&long_owner);
+    let short_owner = Keypair::new();
+    let short = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long, 1_000);
+    env.deposit(&short_owner, short, 900);
+    env.trade_asset_with_cu(
+        0,
+        &long_owner,
+        long,
+        &short_owner,
+        short,
+        (2 * POS_SCALE) as i128,
+        100,
+        0,
+    );
+
+    env.svm.warp_to_slot(6);
+    env.push_auth_mark_with_cu(6, 500);
+    for portfolio in [short, long] {
+        env.svm.expire_blockhash();
+        let _ = env.send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 6,
+                observations: crank_observations(0),
+            },
+            vec![
+                AccountMeta::new(env.payer.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(portfolio, false),
+            ],
+            &[],
+        );
+    }
+    let liquidation_cu = env.crank_steps(
+        short,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 6,
+            observations: crank_observations(0),
+        },
+        2,
+    );
+    assert_cu_within(
+        "partial-ADL refresh and liquidation",
+        liquidation_cu,
+        CRANK_CU_LIMIT,
+    );
+
+    let (_, adl) = env.market_state();
+    let winner = env.portfolio_state(long);
+    assert_eq!(winner.legs[0].basis_pos_q.get(), (2 * POS_SCALE) as i128);
+    let matched_oi_after_adl = adl.assets[0].oi_eff_long_q;
+    assert_eq!(adl.assets[0].oi_eff_short_q, matched_oi_after_adl);
+    assert!(matched_oi_after_adl > 0);
+    assert!(matched_oi_after_adl < 2 * POS_SCALE);
+    assert_eq!(adl.assets[0].mode_long, SideModeV16::Normal);
+    let vault_after_adl = adl.vault;
+
+    // This max-work request is the old red path. It must consume only the remaining matched
+    // exposure rather than subtracting the full stored basis from smaller effective OI.
+    let reduce_cu = env.rebalance_reduce_with_cu(&long_owner, long, 0, 2 * POS_SCALE);
+    assert_cu_within(
+        "partial-ADL max RebalanceReduce",
+        reduce_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    let (_, reset) = env.market_state();
+    assert_eq!(reset.assets[0].oi_eff_long_q, 0);
+    assert_eq!(reset.assets[0].oi_eff_short_q, 0);
+    assert_eq!(reset.assets[0].mode_long, SideModeV16::ResetPending);
+    assert_eq!(reset.assets[0].mode_short, SideModeV16::ResetPending);
+    assert_eq!(
+        env.portfolio_state(long).legs[0].basis_pos_q.get(),
+        (2 * POS_SCALE - matched_oi_after_adl) as i128,
+        "only effective exposure is reduced; terminal stored residue remains for settlement"
+    );
+
+    let mut max_cleanup_cu = 0;
+    for portfolio in [long, short] {
+        for _ in 0..3 {
+            if percolator::active_bitmap_is_empty(active_bitmap(&env.portfolio_state(portfolio))) {
+                break;
+            }
+            max_cleanup_cu = max_cleanup_cu.max(env.crank(
+                portfolio,
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: 6,
+                    observations: crank_observations(0),
+                },
+            ));
+        }
+        assert!(
+            percolator::active_bitmap_is_empty(active_bitmap(&env.portfolio_state(portfolio))),
+            "each prior-reset residue must detach in finitely many unsigned cranks"
+        );
+    }
+    assert_cu_within(
+        "partial-ADL residue cleanup",
+        max_cleanup_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    let long_finalize_cu = env.finalize_reset_side_with_cu(0, 0);
+    let short_finalize_cu = env.finalize_reset_side_with_cu(0, 1);
+    assert_cu_within(
+        "partial-ADL long finalize",
+        long_finalize_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    assert_cu_within(
+        "partial-ADL short finalize",
+        short_finalize_cu,
+        CUSTODY_CU_LIMIT,
+    );
+
+    let (_, done) = env.market_state();
+    assert_eq!(done.assets[0].mode_long, SideModeV16::Normal);
+    assert_eq!(done.assets[0].mode_short, SideModeV16::Normal);
+    assert_eq!(done.assets[0].stored_pos_count_long, 0);
+    assert_eq!(done.assets[0].stored_pos_count_short, 0);
+    assert_eq!(
+        done.vault, vault_after_adl,
+        "exit and cleanup move no custody"
+    );
+    assert_eq!(done.vault as u64, env.token_amount(env.vault));
+    assert!(done.vault >= done.c_tot + done.insurance);
+}
+
 // A deeply insolvent single-leg account cannot be partially liquidated while leaving uncovered open
 // risk. With no keeper size input, the engine selects a full close, books the residual, and preserves
 // custody and balanced OI.
