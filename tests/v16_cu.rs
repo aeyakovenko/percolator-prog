@@ -5784,6 +5784,94 @@ fn v16_bpf_permissionless_market_shutdown_force_closes_recovers_and_reuses_slot(
     );
 }
 
+// A signed trade identifies only the reusable asset index. If the slot is retired and reused while
+// the transaction remains valid, it must not execute against the replacement market generation.
+#[test]
+fn v16_attack_signed_trade_cannot_replay_across_asset_slot_reuse() {
+    const ASSET: u16 = 1;
+    const OLD_PRICE: u64 = 100;
+    const NEW_PRICE: u64 = 250;
+
+    let mut env = V16CuEnv::new();
+    env.update_market_init_fee_policy_with_cu(1);
+    env.svm.warp_to_slot(1);
+    env.activate_asset(ASSET, 1, OLD_PRICE);
+
+    let trader_a = Keypair::new();
+    let trader_b = Keypair::new();
+    let account_a = env.create_portfolio(&trader_a);
+    let account_b = env.create_portfolio(&trader_b);
+    env.deposit(&trader_a, account_a, 1_000_000);
+    env.deposit(&trader_b, account_b, 1_000_000);
+
+    let old_market_id = env.market_state().1.assets[ASSET as usize].market_id;
+    let stale_trade_ix = Instruction {
+        program_id: env.program_id,
+        accounts: vec![
+            AccountMeta::new(trader_a.pubkey(), true),
+            AccountMeta::new(trader_b.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(account_a, false),
+            AccountMeta::new(account_b, false),
+        ],
+        data: ProgInstruction::TradeNoCpi {
+            asset_index: ASSET,
+            size_q: POS_SCALE as i128,
+            exec_price: OLD_PRICE,
+            fee_bps: 0,
+        }
+        .encode(),
+    };
+    let stale_trade = Transaction::new_signed_with_payer(
+        &[heap_ix(), cu_ix(), stale_trade_ix],
+        Some(&env.payer.pubkey()),
+        &[&env.payer, &trader_a, &trader_b],
+        env.svm.latest_blockhash(),
+    );
+
+    env.svm.warp_to_slot(3);
+    env.update_asset_lifecycle_as_admin_with_cu(
+        percolator_prog::processor::ASSET_ACTION_RETIRE,
+        ASSET,
+        3,
+        0,
+    );
+    let replacement_authority = Keypair::new();
+    env.svm.warp_to_slot(4);
+    env.activate_permissionless_asset_with_fee(
+        &replacement_authority,
+        ASSET,
+        4,
+        NEW_PRICE,
+        replacement_authority.pubkey(),
+        replacement_authority.pubkey(),
+        replacement_authority.pubkey(),
+        replacement_authority.pubkey(),
+        1,
+    );
+    let new_market_id = env.market_state().1.assets[ASSET as usize].market_id;
+    assert_ne!(
+        new_market_id, old_market_id,
+        "slot reuse creates a new market generation"
+    );
+
+    let replay = env.svm.send_transaction(stale_trade);
+    if replay.is_ok() {
+        let account_a_after = env.portfolio_state(account_a);
+        let account_b_after = env.portfolio_state(account_b);
+        let leg_a = active_leg_for_asset(&account_a_after, ASSET as usize);
+        let leg_b = active_leg_for_asset(&account_b_after, ASSET as usize);
+        assert_eq!(leg_a.market_id, new_market_id);
+        assert_eq!(leg_b.market_id, new_market_id);
+        assert_eq!(leg_a.basis_pos_q, POS_SCALE as i128);
+        assert_eq!(leg_b.basis_pos_q, -(POS_SCALE as i128));
+    }
+    assert!(
+        replay.is_err(),
+        "a transaction signed for market generation {old_market_id} must not open positions in replacement generation {new_market_id}"
+    );
+}
+
 #[test]
 fn v16_attack_retired_asset_domain_authority_cannot_refund_slot_and_block_reuse() {
     let mut env = V16CuEnv::new();
