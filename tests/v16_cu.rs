@@ -60938,3 +60938,151 @@ fn v16_attack_backing_topup_rejects_lapsed_expiry() {
         "valid topup credits exactly the backing"
     );
 }
+
+#[test]
+fn v16_attack_public_20_source_second_lien_trade_has_bounded_cu() {
+    const N: u16 = 10;
+    const LOW: u64 = 100;
+    const HIGH: u64 = 200;
+    const Q: i128 = (100 * POS_SCALE) as i128;
+    const FIRST_INCREASE_Q: i128 = (100 * POS_SCALE) as i128;
+    const BACKING_EXPIRY_SLOT: u64 = 60;
+
+    let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+        max_portfolio_assets: N,
+        maintenance_margin_bps: 10_000,
+        initial_margin_bps: 10_000,
+        max_price_move_bps_per_slot: 500,
+        max_accrual_dt_slots: 20,
+        min_funding_lifetime_slots: 20,
+        ..V16CuMarketParams::default()
+    });
+    for asset_index in 0..N {
+        env.configure_auth_mark_for_asset_as_admin(asset_index, 0, LOW);
+        env.top_up_backing_bucket(2 * asset_index, 100_000, BACKING_EXPIRY_SLOT);
+        env.top_up_backing_bucket(2 * asset_index + 1, 100_000, BACKING_EXPIRY_SLOT);
+    }
+
+    let winner_owner = Keypair::new();
+    let winner = env.create_portfolio(&winner_owner);
+    env.deposit(&winner_owner, winner, N as u128 * 10_000 + 1);
+    let keeper_owner = Keypair::new();
+    let keeper = env.create_portfolio(&keeper_owner);
+    let mut counterparties = Vec::new();
+    for asset_index in 0..N {
+        let owner = Keypair::new();
+        let portfolio = env.create_portfolio(&owner);
+        env.deposit(&owner, portfolio, 100_000);
+        env.trade_asset_with_cu(
+            asset_index,
+            &winner_owner,
+            winner,
+            &owner,
+            portfolio,
+            Q,
+            LOW,
+            0,
+        );
+        counterparties.push((owner, portfolio));
+    }
+
+    let accrue_all = |env: &mut V16CuEnv, slot: u64, price: u64| {
+        env.svm.warp_to_slot(slot);
+        for asset_index in 0..N {
+            env.push_auth_mark_for_asset_as_admin(asset_index, slot, price);
+            env.crank(
+                keeper,
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: slot,
+                    observations: crank_observations(asset_index),
+                },
+            );
+        }
+    };
+    let refresh_counterparties =
+        |env: &mut V16CuEnv, counterparties: &[(Keypair, Pubkey)], slot: u64| {
+            for (_, portfolio) in counterparties {
+                env.crank(
+                    *portfolio,
+                    ProgInstruction::PermissionlessCrank {
+                        now_slot: slot,
+                        observations: vec![],
+                    },
+                );
+            }
+        };
+
+    accrue_all(&mut env, 20, HIGH);
+    refresh_counterparties(&mut env, &counterparties, 20);
+    drive_portfolio_cert_current(&mut env, winner, 20, 0, N as usize + 1);
+    for (asset_index, (owner, portfolio)) in counterparties.iter().enumerate() {
+        env.trade_asset_with_cu(
+            asset_index as u16,
+            &winner_owner,
+            winner,
+            owner,
+            *portfolio,
+            -2 * Q,
+            HIGH,
+            0,
+        );
+    }
+
+    accrue_all(&mut env, 40, LOW);
+    refresh_counterparties(&mut env, &counterparties, 40);
+    drive_portfolio_cert_current(&mut env, winner, 40, 0, N as usize + 1);
+    let won = env.portfolio_state(winner);
+    assert_eq!(
+        won.source_domains
+            .iter()
+            .filter(|source| source.source_claim_bound_num.get() != 0)
+            .count(),
+        2 * N as usize,
+    );
+    assert_eq!(won.pnl.get(), 2 * N as i128 * 10_000);
+
+    let first_cu = env
+        .try_trade_asset_with_cu(
+            0,
+            &winner_owner,
+            winner,
+            &counterparties[0].0,
+            counterparties[0].1,
+            -FIRST_INCREASE_Q,
+            LOW,
+            0,
+        )
+        .expect("the first public source-lien allocation must fit");
+    assert_cu_within("20-source first lien trade", first_cu, 1_375_000);
+    let first_lien = env.portfolio_state(winner);
+    assert_eq!(
+        first_lien
+            .source_domains
+            .iter()
+            .filter(|source| source.source_lien_counterparty_backing_num.get() != 0)
+            .count(),
+        1,
+    );
+
+    let second_cu = env
+        .try_trade_asset_with_cu(
+            1,
+            &winner_owner,
+            winner,
+            &counterparties[1].0,
+            counterparties[1].1,
+            -(POS_SCALE as i128),
+            LOW,
+            0,
+        )
+        .expect("a second source lien must not make a valid public trade exceed SVM CU");
+    assert_cu_within("20-source second lien trade", second_cu, 1_375_000);
+    assert_eq!(
+        env.portfolio_state(winner)
+            .source_domains
+            .iter()
+            .filter(|source| source.source_lien_counterparty_backing_num.get() != 0)
+            .count(),
+        2,
+    );
+}
