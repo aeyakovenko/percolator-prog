@@ -9927,6 +9927,81 @@ fn v16_attack_crossed_trade_cannot_turn_partial_liquidation_survivors_same_side(
     assert_eq!(env.svm.get_account(&account_a).unwrap(), account_a_before);
     assert_eq!(env.svm.get_account(&account_b).unwrap(), account_b_before);
     assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+
+    env.svm.expire_blockhash();
+    let reduce_cu = env.rebalance_reduce_with_cu(&owner_b, account_b, 0, liquidated_survivor_q);
+    assert_cu_within("issue 103 short owner exit", reduce_cu, CUSTODY_CU_LIMIT);
+    assert!(
+        !has_active_leg_for_asset(&env.portfolio_state(account_b), 0),
+        "the smaller post-liquidation side must retain a public owner exit",
+    );
+
+    env.svm.expire_blockhash();
+    let forfeit_cu =
+        env.forfeit_recovery_leg_with_cu(&owner_a, account_a, 0, percolator::MAX_VAULT_TVL);
+    assert_cu_within("issue 103 ADL survivor exit", forfeit_cu, CUSTODY_CU_LIMIT);
+    assert!(
+        !has_active_leg_for_asset(&env.portfolio_state(account_a), 0),
+        "the zero-effective-OI ADL survivor must retain a public owner cleanup route",
+    );
+    let exited_a = env.portfolio_state(account_a);
+    let exited_b = env.portfolio_state(account_b);
+    assert_eq!(
+        exited_a.capital.get(),
+        1_000,
+        "ADL survivor cleanup must preserve the owner's principal",
+    );
+    assert!(
+        exited_b.capital.get() > 0,
+        "the partially liquidated owner must retain withdrawable principal",
+    );
+    assert_eq!(exited_a.pnl.get(), 0);
+    assert_eq!(exited_b.pnl.get(), 0);
+    assert_eq!(exited_a.fee_credits.get(), 0);
+    assert_eq!(exited_b.fee_credits.get(), 0);
+    let (_, exited_group) = env.market_state();
+    assert_eq!(exited_group.assets[0].oi_eff_long_q, 0);
+    assert_eq!(exited_group.assets[0].oi_eff_short_q, 0);
+    assert_eq!(exited_group.assets[0].stored_pos_count_long, 0);
+    assert_eq!(exited_group.assets[0].stored_pos_count_short, 0);
+    assert_eq!(exited_group.vault as u64, env.token_amount(env.vault));
+    assert!(exited_group.vault >= exited_group.c_tot + exited_group.insurance);
+
+    env.svm.expire_blockhash();
+    let (dest_a, withdraw_a_cu) = env.withdraw_with_cu(&owner_a, account_a, exited_a.capital.get());
+    assert_cu_within(
+        "issue 103 ADL survivor withdrawal",
+        withdraw_a_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    assert_eq!(env.token_amount(dest_a), exited_a.capital.get() as u64);
+    env.svm.expire_blockhash();
+    let (dest_b, withdraw_b_cu) = env.withdraw_with_cu(&owner_b, account_b, exited_b.capital.get());
+    assert_cu_within(
+        "issue 103 partial liquidation withdrawal",
+        withdraw_b_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    assert_eq!(env.token_amount(dest_b), exited_b.capital.get() as u64);
+
+    env.svm.expire_blockhash();
+    let close_a_cu = env.close_portfolio_with_cu(&owner_a, account_a);
+    assert_cu_within(
+        "issue 103 ADL survivor account close",
+        close_a_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    env.svm.expire_blockhash();
+    let close_b_cu = env.close_portfolio_with_cu(&owner_b, account_b);
+    assert_cu_within(
+        "issue 103 partial liquidation account close",
+        close_b_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    let (_, final_group) = env.market_state();
+    assert_eq!(final_group.materialized_portfolio_count, 0);
+    assert_eq!(final_group.vault as u64, env.token_amount(env.vault));
+    assert!(final_group.vault >= final_group.c_tot + final_group.insurance);
 }
 
 #[test]
