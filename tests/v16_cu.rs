@@ -61086,3 +61086,391 @@ fn v16_attack_public_20_source_second_lien_trade_has_bounded_cu() {
         2,
     );
 }
+
+// A backing bucket can expire after a normal risk increase has liened its source-backed PnL.
+// Expiry must itself make auto-crank actionable; otherwise crank reports NoAction while owner
+// reductions read the lapsed source domain and return EngineStale indefinitely.
+#[test]
+fn v16_attack_public_expired_source_lien_auto_crank_restores_progress() {
+    const Q: i128 = (1_000 * POS_SCALE) as i128;
+    const INCREASE_Q: i128 = (50 * POS_SCALE) as i128;
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(1, 1_000, 5_000, 500);
+    env.configure_auth_mark_for_asset_as_admin(0, 0, 100);
+    env.top_up_backing_bucket(1, 100_000, 2);
+
+    let owner = Keypair::new();
+    let account = env.create_portfolio(&owner);
+    let counterparty_owner = Keypair::new();
+    let counterparty = env.create_portfolio(&counterparty_owner);
+    env.deposit(&owner, account, 52_501);
+    env.deposit(&counterparty_owner, counterparty, 1_000_000);
+    env.trade_asset_with_cu(
+        0,
+        &owner,
+        account,
+        &counterparty_owner,
+        counterparty,
+        Q,
+        100,
+        0,
+    );
+
+    env.svm.warp_to_slot(1);
+    env.push_auth_mark_for_asset_as_admin(0, 1, 105);
+    for portfolio in [counterparty, account] {
+        env.crank(
+            portfolio,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 1,
+                observations: crank_observations(0),
+            },
+        );
+    }
+    assert_eq!(env.portfolio_state(account).pnl.get(), 5_000);
+    env.trade_asset_with_cu(
+        0,
+        &owner,
+        account,
+        &counterparty_owner,
+        counterparty,
+        INCREASE_Q,
+        105,
+        0,
+    );
+
+    let lien_before = env.portfolio_state(account).source_domains[0];
+    assert!(lien_before.source_claim_counterparty_liened_num.get() > 0);
+    assert!(lien_before.source_lien_counterparty_backing_num.get() > 0);
+    assert_eq!(lien_before.source_claim_impaired_num.get(), 0);
+    let market_before_expiry = env.market_state().1;
+    let token_vault_before_expiry = env.token_amount(env.vault);
+
+    env.svm.warp_to_slot(2);
+    env.push_auth_mark_for_asset_as_admin(0, 2, 105);
+    env.svm.expire_blockhash();
+    let expiry_crank_cu = env
+        .send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 2,
+                observations: crank_observations(0),
+            },
+            vec![
+                AccountMeta::new(env.payer.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(account, false),
+            ],
+            &[],
+        )
+        .expect("bucket expiry must be a permissionless auto-crank progress step");
+    assert_cu_within(
+        "expired source-lien reconciliation",
+        expiry_crank_cu,
+        400_000,
+    );
+
+    let reconciled = env.portfolio_state(account);
+    let source = reconciled.source_domains[0];
+    let market_after_expiry = env.market_state().1;
+    let bucket = market_after_expiry.source_backing_buckets[1];
+    let domain = market_after_expiry.source_credit[1];
+    assert_eq!(reconciled.pnl.get(), 5_000);
+    assert_eq!(
+        active_leg_for_asset(&reconciled, 0).basis_pos_q,
+        Q + INCREASE_Q
+    );
+    assert_eq!(source.source_claim_liened_num.get(), 0);
+    assert_eq!(source.source_claim_counterparty_liened_num.get(), 0);
+    assert_eq!(source.source_lien_effective_reserved.get(), 0);
+    assert_eq!(source.source_lien_counterparty_backing_num.get(), 0);
+    assert_eq!(
+        source.source_claim_impaired_num.get(),
+        lien_before.source_claim_counterparty_liened_num.get()
+    );
+    assert_eq!(
+        source.source_lien_impaired_effective_reserved.get(),
+        lien_before.source_lien_effective_reserved.get()
+    );
+    assert!(
+        !health_cert(&reconciled).valid,
+        "the bounded expiry step must not certify from partially reconciled state"
+    );
+    assert_eq!(bucket.status, percolator::BackingBucketStatusV16::Impaired);
+    assert_eq!(bucket.valid_liened_backing_num, 0);
+    assert_eq!(domain.valid_liened_backing_num, 0);
+    assert_eq!(domain.fresh_reserved_backing_num, 0);
+    assert_eq!(domain.credit_rate_num, 0);
+    assert_eq!(market_after_expiry.vault, market_before_expiry.vault);
+    assert_eq!(env.token_amount(env.vault), token_vault_before_expiry);
+
+    env.svm.expire_blockhash();
+    let certify_cu = env
+        .send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 2,
+                observations: crank_observations(0),
+            },
+            vec![
+                AccountMeta::new(env.payer.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(account, false),
+            ],
+            &[],
+        )
+        .expect("the next bounded auto-crank must certify the impaired account");
+    assert_cu_within("post-expiry source-lien certification", certify_cu, 400_000);
+    let certified = env.portfolio_state(account);
+    assert!(health_cert(&certified).valid);
+    assert_eq!(certified.pnl.get(), reconciled.pnl.get());
+    assert_eq!(
+        certified.source_domains[0], reconciled.source_domains[0],
+        "certification must not restore expired source credit"
+    );
+    assert_eq!(env.market_state().1.vault, market_before_expiry.vault);
+    assert_eq!(env.token_amount(env.vault), token_vault_before_expiry);
+
+    env.svm.expire_blockhash();
+    let reduce_cu = env
+        .send(
+            ProgInstruction::RebalanceReduce {
+                asset_index: 0,
+                reduce_q: POS_SCALE,
+            },
+            vec![
+                AccountMeta::new(owner.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(account, false),
+            ],
+            &[&owner],
+        )
+        .expect("the owner must be able to reduce after permissionless expiry reconciliation");
+    assert_cu_within(
+        "post-expiry unilateral position reduction",
+        reduce_cu,
+        MULTI_ASSET_OPEN_TRADE_CU_LIMIT,
+    );
+    assert_eq!(
+        active_leg_for_asset(&env.portfolio_state(account), 0).basis_pos_q,
+        Q + INCREASE_Q - POS_SCALE as i128
+    );
+    assert_eq!(env.market_state().1.vault, market_before_expiry.vault);
+    assert_eq!(env.token_amount(env.vault), token_vault_before_expiry);
+}
+
+#[test]
+fn v16_attack_public_28_lien_expiry_has_bounded_progress() {
+    const N: u16 = percolator_prog::constants::WRAPPER_MAX_PORTFOLIO_ASSETS;
+    const LOW: u64 = 100;
+    const HIGH: u64 = 200;
+    const Q: i128 = (100 * POS_SCALE) as i128;
+    const RISK_CHUNK_Q: i128 = (100 * POS_SCALE) as i128;
+    const EXPIRY_SLOT: u64 = 60;
+
+    let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+        max_portfolio_assets: N,
+        maintenance_margin_bps: 10_000,
+        initial_margin_bps: 10_000,
+        max_price_move_bps_per_slot: 500,
+        max_accrual_dt_slots: 20,
+        min_funding_lifetime_slots: 20,
+        ..V16CuMarketParams::default()
+    });
+    for asset_index in 0..N {
+        env.configure_auth_mark_for_asset_as_admin(asset_index, 0, LOW);
+        env.top_up_backing_bucket(2 * asset_index, 100_000, EXPIRY_SLOT);
+        env.top_up_backing_bucket(2 * asset_index + 1, 100_000, EXPIRY_SLOT);
+    }
+
+    let winner_owner = Keypair::new();
+    let winner = env.create_portfolio(&winner_owner);
+    env.deposit(&winner_owner, winner, N as u128 * 10_000 + 1);
+    let keeper_owner = Keypair::new();
+    let keeper = env.create_portfolio(&keeper_owner);
+    let mut counterparties = Vec::new();
+    for asset_index in 0..N {
+        let owner = Keypair::new();
+        let portfolio = env.create_portfolio(&owner);
+        env.deposit(&owner, portfolio, 100_000);
+        env.trade_asset_with_cu(
+            asset_index,
+            &winner_owner,
+            winner,
+            &owner,
+            portfolio,
+            Q,
+            LOW,
+            0,
+        );
+        counterparties.push((owner, portfolio));
+    }
+
+    let accrue_all = |env: &mut V16CuEnv, slot: u64, price: u64| {
+        env.svm.warp_to_slot(slot);
+        for asset_index in 0..N {
+            env.push_auth_mark_for_asset_as_admin(asset_index, slot, price);
+            env.crank(
+                keeper,
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: slot,
+                    observations: crank_observations(asset_index),
+                },
+            );
+        }
+    };
+    let refresh_counterparties =
+        |env: &mut V16CuEnv, counterparties: &[(Keypair, Pubkey)], slot: u64| {
+            for (_, portfolio) in counterparties {
+                env.crank(
+                    *portfolio,
+                    ProgInstruction::PermissionlessCrank {
+                        now_slot: slot,
+                        observations: vec![],
+                    },
+                );
+            }
+        };
+
+    accrue_all(&mut env, 20, HIGH);
+    refresh_counterparties(&mut env, &counterparties, 20);
+    drive_portfolio_cert_current(&mut env, winner, 20, 0, N as usize + 1);
+    for (asset_index, (owner, portfolio)) in counterparties.iter().enumerate() {
+        env.trade_asset_with_cu(
+            asset_index as u16,
+            &winner_owner,
+            winner,
+            owner,
+            *portfolio,
+            -2 * Q,
+            HIGH,
+            0,
+        );
+    }
+
+    accrue_all(&mut env, 40, LOW);
+    refresh_counterparties(&mut env, &counterparties, 40);
+    drive_portfolio_cert_current(&mut env, winner, 40, 0, N as usize + 1);
+    assert_eq!(
+        env.portfolio_state(winner)
+            .source_domains
+            .iter()
+            .filter(|source| source.source_claim_bound_num.get() != 0)
+            .count(),
+        2 * N as usize,
+    );
+
+    let mut max_increase_cu = 0u64;
+    for _ in 0..2 {
+        for (asset_index, (owner, portfolio)) in counterparties.iter().enumerate() {
+            env.svm.expire_blockhash();
+            let cu = env
+                .try_trade_asset_with_cu(
+                    asset_index as u16,
+                    &winner_owner,
+                    winner,
+                    owner,
+                    *portfolio,
+                    -RISK_CHUNK_Q,
+                    LOW,
+                    0,
+                )
+                .unwrap_or_else(|err| panic!("source-lien allocation failed: {err}"));
+            max_increase_cu = max_increase_cu.max(cu);
+        }
+    }
+    assert_cu_within(
+        "28-source incremental lien allocation",
+        max_increase_cu,
+        1_375_000,
+    );
+    assert_eq!(
+        env.portfolio_state(winner)
+            .source_domains
+            .iter()
+            .filter(|source| source.source_lien_counterparty_backing_num.get() != 0)
+            .count(),
+        2 * N as usize,
+    );
+
+    accrue_all(&mut env, EXPIRY_SLOT, LOW);
+    let mut expiry_calls = 0usize;
+    let mut max_expiry_cu = 0u64;
+    loop {
+        let before_market = env.svm.get_account(&env.market).unwrap();
+        let before_portfolio = env.svm.get_account(&winner).unwrap();
+        env.svm.expire_blockhash();
+        let cu = env
+            .send(
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: EXPIRY_SLOT,
+                    observations: vec![],
+                },
+                vec![
+                    AccountMeta::new(env.payer.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(winner, false),
+                ],
+                &[],
+            )
+            .expect("a max-source account needs a bounded public expiry continuation");
+        expiry_calls += 1;
+        max_expiry_cu = max_expiry_cu.max(cu);
+        assert_cu_within("28-lien source expiry step", cu, 1_375_000);
+        let expired = env.portfolio_state(winner);
+        if expired
+            .source_domains
+            .iter()
+            .all(|source| source.source_lien_counterparty_backing_num.get() == 0)
+        {
+            break;
+        }
+        assert!(
+            env.svm.get_account(&env.market).unwrap() != before_market
+                || env.svm.get_account(&winner).unwrap() != before_portfolio,
+            "every successful max-source crank must change the liveness rank",
+        );
+        assert!(
+            expiry_calls <= 2 * N as usize + 2,
+            "max-source expiry exceeded the source-domain rank",
+        );
+    }
+    assert_eq!(expiry_calls, 2 * N as usize);
+    assert_cu_within("28-lien source expiry max", max_expiry_cu, 1_375_000);
+    let expired = env.portfolio_state(winner);
+    assert_eq!(
+        expired
+            .source_domains
+            .iter()
+            .filter(|source| source.source_lien_counterparty_backing_num.get() != 0)
+            .count(),
+        0,
+    );
+    assert_eq!(
+        expired
+            .source_domains
+            .iter()
+            .filter(|source| source.source_claim_impaired_num.get() != 0)
+            .count(),
+        2 * N as usize,
+    );
+
+    let (refresh_calls, refresh_cu) =
+        drive_portfolio_cert_current(&mut env, winner, EXPIRY_SLOT, 0, N as usize + 1);
+    assert!(refresh_calls > 0);
+    assert_cu_within("post-28-lien recertification", refresh_cu, 1_375_000);
+
+    env.svm.expire_blockhash();
+    let reduce_cu = env
+        .send(
+            ProgInstruction::RebalanceReduce {
+                asset_index: 0,
+                reduce_q: POS_SCALE,
+            },
+            vec![
+                AccountMeta::new(winner_owner.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(winner, false),
+            ],
+            &[&winner_owner],
+        )
+        .expect("the max-source owner must be able to reduce after bounded expiry");
+    assert_cu_within("post-28-lien owner reduction", reduce_cu, 1_375_000);
+}
