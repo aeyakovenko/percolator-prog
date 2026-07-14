@@ -301,7 +301,20 @@ Percolator enforces three layers with distinct responsibilities:
 - **Layout**: header + wrapper config + `MarketGroupV16Account`
 - Holds market-level totals, insurance, oracle/asset state, source-domain credit state, and asset lifecycle state.
 
-The v16 asset index ABI is `u16`. The current persisted layout is still a fixed-capacity Pod market-group layout, but asset indices are treated as reusable logical slots. A retired asset slot can only be reactivated after the configured shutdown/activation timeout, and reactivation assigns a new monotonic `u64` `market_id` from the market group. `market_id` values are never reused. Trade instructions, portfolio legs, and close-progress ledgers carry that id, so neither stale signed intent nor stale state from an old shutdown market can bind to a reused slot.
+The v16 asset index ABI is `u16`. The current persisted layout is still a fixed-capacity Pod market-group layout, but asset indices are treated as reusable logical slots. A retired asset slot can only be reactivated after the configured shutdown/activation timeout, and reactivation assigns a new monotonic `u64` `market_id` from the market group. `market_id` values are never reused, including when a closed market account is recreated at the same address. Trade instructions, portfolio legs, and close-progress ledgers carry that id, so neither stale signed intent nor stale state from an old shutdown market can bind to a reused slot.
+
+### Market generation account
+- **Owner**: Percolator program id
+- **PDA seeds**: `["market-generation", market_group_pubkey]`
+- **Layout**: header + market key + next `market_id` (56 bytes total)
+- Persists after `CloseSlab`. `InitMarket` reserves the next initial asset-ID range, while
+  `CloseSlab` checkpoints the live engine counter before deleting the market slab. This is the only
+  state duplicated across closure, and it exists solely because the engine account no longer exists
+  after close. A pre-funded system-owned PDA is allocated and assigned rather than treated as a
+  permanent initialization failure. A market address whose slab was already deleted before this
+  mechanism was deployed has no recoverable generation history and must not be reused; use a fresh
+  market address. Live pre-deployment markets are migrated when `CloseSlab` checkpoints their engine
+  counter.
 
 ### Portfolio account
 - **Owner**: Percolator program id
@@ -369,7 +382,8 @@ This section describes intent and operational ordering, not argument-by-argument
 ### Market lifecycle
 - **InitMarket**
   - initializes slab header/config + calls `RiskEngine::init_in_place(risk_params, clock.slot, init_price)`
-  - binds the collateral mint, initializes asset 0, and sets `marketauth` to the init signer
+  - binds the collateral mint, initializes asset 0 from the persistent generation counter, and sets
+    `marketauth` to the init signer
 - **UpdateAuthority** (tag 32) — single-purpose: rotate the one market-level `marketauth` key
   - `UpdateAuthority { new_pubkey }`: current `marketauth` signs; a non-zero replacement co-signs
   - setting `new_pubkey` to all zeros is rejected; `marketauth` must remain live for final slab reclaim
@@ -743,12 +757,18 @@ Create:
 2) **Vault SPL token account**
    - mint: collateral mint
    - owner: vault authority PDA derived from `["vault", slab_pubkey]`
+3) **Market generation PDA**
+   - owner: Percolator program id
+   - seeds: `["market-generation", slab_pubkey]`
+   - retained across slab close/recreation so signed asset generations cannot repeat
 
 ### Step 1: InitMarket
 Call `InitMarket` with:
 - `marketauth` signer
 - slab (writable)
 - collateral mint
+- market generation PDA (writable)
+- System Program
 - risk params (margins, fees, liquidation knobs, price/funding caps, maintenance fee, etc.)
 
 ### Step 2: Onboard LPs and users
@@ -841,7 +861,8 @@ These are governance powers, not bugs:
    - choose who can call bounded live insurance withdrawal.
    - impact: bounded live insurance extraction capability is delegated.
 8. `CloseSlab` (when market is fully empty)
-    - decommission market account and recover slab lamports.
+    - checkpoint the engine's next asset generation, decommission the market account, and recover
+      slab lamports. The small generation PDA remains.
     - impact: market is permanently closed.
 
 > **Authority model (items 3, 5, 7).** Asset-0's insurance/operator/oracle(mark)/backing authorities now

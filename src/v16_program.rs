@@ -26,6 +26,8 @@ use solana_program::{
     program_error::ProgramError,
     program_pack::Pack,
     pubkey::Pubkey,
+    rent::Rent,
+    system_instruction, system_program,
     sysvar::Sysvar,
 };
 
@@ -44,6 +46,7 @@ pub mod constants {
     pub const KIND_PORTFOLIO: u8 = 2;
     pub const KIND_BACKING_DOMAIN_LEDGER: u8 = 3;
     pub const KIND_INSURANCE_LEDGER: u8 = 4;
+    pub const KIND_MARKET_GENERATION: u8 = 5;
 
     pub const HEADER_LEN: usize = 16;
     pub const WRAPPER_CONFIG_LEN: usize = 448;
@@ -156,9 +159,9 @@ pub mod state {
     use crate::{
         constants::{
             ASSET_ORACLE_PROFILE_LEN, ASSET_ORACLE_WRAPPER_LEN, HEADER_LEN,
-            KIND_BACKING_DOMAIN_LEDGER, KIND_INSURANCE_LEDGER, KIND_MARKET, KIND_PORTFOLIO, MAGIC,
-            MARKET_GROUP_LEN, MARKET_GROUP_OFF, MIN_MARKET_ACCOUNT_LEN, ORACLE_LEG_CAP,
-            ORACLE_LEG_FLAGS_MASK, ORACLE_MODE_AUTH_MARK, ORACLE_MODE_EWMA_MARK,
+            KIND_BACKING_DOMAIN_LEDGER, KIND_INSURANCE_LEDGER, KIND_MARKET, KIND_MARKET_GENERATION,
+            KIND_PORTFOLIO, MAGIC, MARKET_GROUP_LEN, MARKET_GROUP_OFF, MIN_MARKET_ACCOUNT_LEN,
+            ORACLE_LEG_CAP, ORACLE_LEG_FLAGS_MASK, ORACLE_MODE_AUTH_MARK, ORACLE_MODE_EWMA_MARK,
             ORACLE_MODE_HYBRID_AFTER_HOURS, ORACLE_MODE_MANUAL, PORTFOLIO_ACCOUNT_LEN,
             PORTFOLIO_ENGINE_ACCOUNT_LEN, PORTFOLIO_MATCHER_CONFIG_LEN,
             PORTFOLIO_MATCHER_CONFIG_OFF, PORTFOLIO_STATE_LEN, VERSION, WRAPPER_CONFIG_LEN,
@@ -651,6 +654,13 @@ pub mod state {
 
     #[repr(C)]
     #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, bytemuck::Pod, bytemuck::Zeroable)]
+    pub struct MarketGenerationAccountV16 {
+        pub market_group: [u8; 32],
+        pub next_market_id: V16PodU64,
+    }
+
+    #[repr(C)]
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, bytemuck::Pod, bytemuck::Zeroable)]
     pub struct PortfolioMatcherConfigV16 {
         pub matcher_program: [u8; 32],
         pub matcher_context: [u8; 32],
@@ -728,6 +738,66 @@ pub mod state {
 
     pub const fn insurance_ledger_account_len() -> usize {
         HEADER_LEN + core::mem::size_of::<InsuranceLedgerAccountV16>()
+    }
+
+    pub const fn market_generation_account_len() -> usize {
+        HEADER_LEN + core::mem::size_of::<MarketGenerationAccountV16>()
+    }
+
+    #[inline]
+    fn validate_market_generation(
+        generation: &MarketGenerationAccountV16,
+    ) -> Result<(), ProgramError> {
+        if generation.market_group == [0u8; 32] || generation.next_market_id.get() == 0 {
+            return Err(ProgramError::InvalidAccountData);
+        }
+        Ok(())
+    }
+
+    #[inline]
+    pub fn read_market_generation(data: &[u8]) -> Result<MarketGenerationAccountV16, ProgramError> {
+        if data.len() != market_generation_account_len() {
+            return Err(PercolatorError::InvalidAccountLen.into());
+        }
+        check_header(data, KIND_MARKET_GENERATION)?;
+        let bytes = data
+            .get(HEADER_LEN..market_generation_account_len())
+            .ok_or(PercolatorError::InvalidAccountLen)?;
+        let generation = bytemuck::pod_read_unaligned(bytes);
+        validate_market_generation(&generation)?;
+        Ok(generation)
+    }
+
+    #[inline]
+    pub fn write_market_generation(
+        data: &mut [u8],
+        generation: &MarketGenerationAccountV16,
+    ) -> Result<(), ProgramError> {
+        if data.len() != market_generation_account_len() {
+            return Err(PercolatorError::InvalidAccountLen.into());
+        }
+        check_header(data, KIND_MARKET_GENERATION)?;
+        validate_market_generation(generation)?;
+        data.get_mut(HEADER_LEN..market_generation_account_len())
+            .ok_or(PercolatorError::InvalidAccountLen)?
+            .copy_from_slice(bytemuck::bytes_of(generation));
+        Ok(())
+    }
+
+    #[inline]
+    pub fn init_market_generation(
+        data: &mut [u8],
+        generation: &MarketGenerationAccountV16,
+    ) -> Result<(), ProgramError> {
+        if data.len() != market_generation_account_len() {
+            return Err(PercolatorError::InvalidAccountLen.into());
+        }
+        if is_initialized(data) {
+            return Err(PercolatorError::AlreadyInitialized.into());
+        }
+        data.fill(0);
+        write_header(data, KIND_MARKET_GENERATION)?;
+        write_market_generation(data, generation)
     }
 
     #[inline]
@@ -2048,6 +2118,7 @@ pub mod state {
         config: &WrapperConfigV16,
         engine_config: V16Config,
         market_group_id: [u8; 32],
+        first_market_id: u64,
         initial_price: u64,
         init_slot: u64,
     ) -> Result<(), ProgramError> {
@@ -2079,16 +2150,19 @@ pub mod state {
         if configured == 0 || configured > capacity {
             return Err(ProgramError::InvalidAccountData);
         }
-        let next_market_id = (configured as u64)
-            .checked_add(1)
+        if first_market_id == 0 {
+            return Err(PercolatorError::EngineInvalidConfig.into());
+        }
+        let next_market_id = first_market_id
+            .checked_add(configured as u64)
             .ok_or(PercolatorError::EngineArithmeticOverflow)?;
         header.next_market_id = V16PodU64::new(next_market_id);
         *market_header_mut(data)? = header;
 
         let mut i = 0usize;
         while i < configured {
-            let market_id = (i as u64)
-                .checked_add(1)
+            let market_id = first_market_id
+                .checked_add(i as u64)
                 .ok_or(PercolatorError::EngineArithmeticOverflow)?;
             let mut asset = AssetStateV16::default();
             asset.market_id = market_id;
@@ -5464,7 +5538,10 @@ pub mod processor {
         let admin = account(accounts, 0)?;
         let market_ai = account(accounts, 1)?;
         let mint_ai = account(accounts, 2)?;
+        let generation_ai = account(accounts, 3)?;
+        let system_program_ai = account(accounts, 4)?;
         expect_signer(admin)?;
+        expect_writable(admin)?;
         expect_writable(market_ai)?;
         expect_owner(market_ai, program_id)?;
         verify_mint(mint_ai)?;
@@ -5496,6 +5573,14 @@ pub mod processor {
         if initial_price == 0 || initial_price > percolator::MAX_ORACLE_PRICE {
             return Err(PercolatorError::EngineInvalidConfig.into());
         }
+        let first_market_id = reserve_market_id_range(
+            program_id,
+            admin,
+            market_ai,
+            generation_ai,
+            system_program_ai,
+            max_portfolio_assets,
+        )?;
         let init_slot = Clock::get().map(|c| c.slot).unwrap_or(0);
         let wrapper = WrapperConfigV16 {
             marketauth: admin.key.to_bytes(),
@@ -5547,6 +5632,7 @@ pub mod processor {
             &wrapper,
             cfg,
             market_ai.key.to_bytes(),
+            first_market_id,
             initial_price,
             init_slot,
         )
@@ -8225,7 +8311,7 @@ pub mod processor {
         expect_owner(market_ai, program_id)?;
         verify_token_program(token_program)?;
 
-        let cfg_pre = {
+        let (cfg_pre, next_market_id) = {
             let mut market_data = market_ai.try_borrow_mut_data()?;
             let (cfg, group) = state::market_view_mut(&mut market_data)?;
             expect_live_authority(&cfg.marketauth, admin_dest.key)?;
@@ -8239,7 +8325,7 @@ pub mod processor {
             {
                 return Err(PercolatorError::EngineLockActive.into());
             }
-            cfg
+            (cfg, group.header.next_market_id.get())
         };
 
         let (vault_authority, bump) = derive_vault_authority(program_id, market_ai.key);
@@ -8272,6 +8358,18 @@ pub mod processor {
         } else {
             None
         };
+
+        let generation_index = if secondary_close.is_some() { 8 } else { 6 };
+        let generation_ai = account(accounts, generation_index)?;
+        let system_program_ai = account(accounts, generation_index + 1)?;
+        checkpoint_market_generation(
+            program_id,
+            admin_dest,
+            market_ai,
+            generation_ai,
+            system_program_ai,
+            next_market_id,
+        )?;
 
         if vault_account.amount > 0 {
             transfer_tokens_signed(
@@ -11877,6 +11975,138 @@ pub mod processor {
         u64::try_from(amount).map_err(|_| PercolatorError::InvalidInstruction.into())
     }
 
+    fn derive_market_generation(program_id: &Pubkey, market_key: &Pubkey) -> (Pubkey, u8) {
+        Pubkey::find_program_address(&[b"market-generation", market_key.as_ref()], program_id)
+    }
+
+    fn load_or_create_market_generation<'a>(
+        program_id: &Pubkey,
+        payer: &AccountInfo<'a>,
+        market_ai: &AccountInfo<'a>,
+        generation_ai: &AccountInfo<'a>,
+        system_program_ai: &AccountInfo<'a>,
+    ) -> Result<state::MarketGenerationAccountV16, ProgramError> {
+        expect_signer(payer)?;
+        expect_writable(payer)?;
+        expect_writable(generation_ai)?;
+        expect_key(system_program_ai, &system_program::ID)?;
+        let (generation_key, bump) = derive_market_generation(program_id, market_ai.key);
+        expect_key(generation_ai, &generation_key)?;
+
+        if generation_ai.owner == &system_program::ID {
+            if generation_ai.data_len() != 0 {
+                return Err(PercolatorError::InvalidAccountLen.into());
+            }
+            let data_len = state::market_generation_account_len();
+            let minimum_balance = Rent::get()?.minimum_balance(data_len);
+            let bump_seed = [bump];
+            let signer_seeds: &[&[u8]] =
+                &[b"market-generation", market_ai.key.as_ref(), &bump_seed];
+            if generation_ai.lamports() == 0 {
+                let ix = system_instruction::create_account(
+                    payer.key,
+                    generation_ai.key,
+                    minimum_balance,
+                    data_len as u64,
+                    program_id,
+                );
+                invoke_signed(
+                    &ix,
+                    &[
+                        payer.clone(),
+                        generation_ai.clone(),
+                        system_program_ai.clone(),
+                    ],
+                    &[signer_seeds],
+                )?;
+            } else {
+                let shortfall = minimum_balance.saturating_sub(generation_ai.lamports());
+                if shortfall != 0 {
+                    let ix = system_instruction::transfer(payer.key, generation_ai.key, shortfall);
+                    invoke(
+                        &ix,
+                        &[
+                            payer.clone(),
+                            generation_ai.clone(),
+                            system_program_ai.clone(),
+                        ],
+                    )?;
+                }
+                let allocate_ix = system_instruction::allocate(generation_ai.key, data_len as u64);
+                invoke_signed(
+                    &allocate_ix,
+                    &[generation_ai.clone(), system_program_ai.clone()],
+                    &[signer_seeds],
+                )?;
+                let assign_ix = system_instruction::assign(generation_ai.key, program_id);
+                invoke_signed(
+                    &assign_ix,
+                    &[generation_ai.clone(), system_program_ai.clone()],
+                    &[signer_seeds],
+                )?;
+            }
+            let initial = state::MarketGenerationAccountV16 {
+                market_group: market_ai.key.to_bytes(),
+                next_market_id: percolator::V16PodU64::new(1),
+            };
+            state::init_market_generation(&mut generation_ai.try_borrow_mut_data()?, &initial)?;
+        } else {
+            expect_owner(generation_ai, program_id)?;
+        }
+
+        let generation = state::read_market_generation(&generation_ai.try_borrow_data()?)?;
+        if generation.market_group != market_ai.key.to_bytes() {
+            return Err(PercolatorError::EngineProvenanceMismatch.into());
+        }
+        Ok(generation)
+    }
+
+    fn reserve_market_id_range<'a>(
+        program_id: &Pubkey,
+        payer: &AccountInfo<'a>,
+        market_ai: &AccountInfo<'a>,
+        generation_ai: &AccountInfo<'a>,
+        system_program_ai: &AccountInfo<'a>,
+        count: u16,
+    ) -> Result<u64, ProgramError> {
+        let mut generation = load_or_create_market_generation(
+            program_id,
+            payer,
+            market_ai,
+            generation_ai,
+            system_program_ai,
+        )?;
+        let first_market_id = generation.next_market_id.get();
+        let next_market_id = first_market_id
+            .checked_add(count as u64)
+            .ok_or(PercolatorError::EngineCounterOverflow)?;
+        generation.next_market_id = percolator::V16PodU64::new(next_market_id);
+        state::write_market_generation(&mut generation_ai.try_borrow_mut_data()?, &generation)?;
+        Ok(first_market_id)
+    }
+
+    fn checkpoint_market_generation<'a>(
+        program_id: &Pubkey,
+        payer: &AccountInfo<'a>,
+        market_ai: &AccountInfo<'a>,
+        generation_ai: &AccountInfo<'a>,
+        system_program_ai: &AccountInfo<'a>,
+        next_market_id: u64,
+    ) -> ProgramResult {
+        let mut generation = load_or_create_market_generation(
+            program_id,
+            payer,
+            market_ai,
+            generation_ai,
+            system_program_ai,
+        )?;
+        if next_market_id > generation.next_market_id.get() {
+            generation.next_market_id = percolator::V16PodU64::new(next_market_id);
+            state::write_market_generation(&mut generation_ai.try_borrow_mut_data()?, &generation)?;
+        }
+        Ok(())
+    }
+
     fn derive_vault_authority(program_id: &Pubkey, market_key: &Pubkey) -> (Pubkey, u8) {
         Pubkey::find_program_address(&[b"vault", market_key.as_ref()], program_id)
     }
@@ -12196,6 +12426,7 @@ pub mod processor {
                 &cfg,
                 test_engine_config(),
                 [9u8; 32],
+                1,
                 100,
                 0,
             )

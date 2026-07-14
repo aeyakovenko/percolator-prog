@@ -23,7 +23,7 @@ use solana_sdk::{
     program_pack::Pack,
     pubkey::Pubkey,
     signature::{Keypair, Signer},
-    system_instruction,
+    system_instruction, system_program,
     transaction::Transaction,
 };
 use spl_token::state::{Account as TokenAccount, AccountState, Mint};
@@ -357,6 +357,10 @@ fn canonical_vault_ata(vault_authority: Pubkey, mint: Pubkey) -> Pubkey {
     .0
 }
 
+fn market_generation_pda(program_id: Pubkey, market: Pubkey) -> Pubkey {
+    Pubkey::find_program_address(&[b"market-generation", market.as_ref()], &program_id).0
+}
+
 fn make_token_data(mint: Pubkey, owner: Pubkey, amount: u64) -> Vec<u8> {
     let mut data = vec![0u8; TokenAccount::LEN];
     TokenAccount::pack(
@@ -505,6 +509,7 @@ struct V16CuEnv {
     payer: Keypair,
     admin: Keypair,
     market: Pubkey,
+    market_generation: Pubkey,
     mint: Pubkey,
     vault: Pubkey,
     vault_authority: Pubkey,
@@ -608,6 +613,7 @@ fn init_host_market_data_for_serializer_probe() -> Vec<u8> {
         &wrapper,
         engine_config,
         [9u8; 32],
+        1,
         params.initial_price,
         0,
     )
@@ -697,6 +703,7 @@ impl V16CuEnv {
         let payer = Keypair::new();
         let admin = Keypair::new();
         let market = Pubkey::new_unique();
+        let market_generation = market_generation_pda(program_id, market);
         let mint = Pubkey::new_unique();
         let vault_authority =
             Pubkey::find_program_address(&[b"vault", market.as_ref()], &program_id).0;
@@ -770,6 +777,8 @@ impl V16CuEnv {
                 AccountMeta::new(admin.pubkey(), true),
                 AccountMeta::new(market, false),
                 AccountMeta::new_readonly(mint, false),
+                AccountMeta::new(market_generation, false),
+                AccountMeta::new_readonly(system_program::ID, false),
             ],
             &[&admin],
         )
@@ -780,6 +789,7 @@ impl V16CuEnv {
             payer,
             admin,
             market,
+            market_generation,
             mint,
             vault,
             vault_authority,
@@ -2280,6 +2290,8 @@ impl V16CuEnv {
                 AccountMeta::new_readonly(self.vault_authority, false),
                 AccountMeta::new(dest, false),
                 AccountMeta::new_readonly(spl_token::ID, false),
+                AccountMeta::new(self.market_generation, false),
+                AccountMeta::new_readonly(system_program::ID, false),
             ],
             &[&self.admin],
         )
@@ -3853,6 +3865,8 @@ fn v16_bpf_mainnet_realistic_system_spl_ata_bootstrap_deposits_and_ledgers() {
             AccountMeta::new(admin.pubkey(), true),
             AccountMeta::new(market.pubkey(), false),
             AccountMeta::new_readonly(mint.pubkey(), false),
+            AccountMeta::new(market_generation_pda(program_id, market.pubkey()), false),
+            AccountMeta::new_readonly(system_program::ID, false),
         ],
         &[&admin],
     )
@@ -4162,6 +4176,8 @@ fn init_independent_market_same_mint(
             AccountMeta::new(env.admin.pubkey(), true),
             AccountMeta::new(market, false),
             AccountMeta::new_readonly(env.mint, false),
+            AccountMeta::new(market_generation_pda(env.program_id, market), false),
+            AccountMeta::new_readonly(system_program::ID, false),
         ],
         &[&env.admin],
     )
@@ -6020,6 +6036,301 @@ fn v16_attack_signed_trade_cannot_replay_across_asset_slot_reuse() {
         assert_eq!(leg_a.basis_pos_q, POS_SCALE as i128);
         assert_eq!(leg_b.basis_pos_q, -(POS_SCALE as i128));
     }
+}
+
+// Before the persistent generation account, a full CloseSlab + InitMarket cycle at the same market
+// address reset every asset market_id to its first-generation value. Keep the original, fully
+// signed transaction object across that public lifecycle: rebuilding the instruction after reinit
+// would not prove an authorization replay. If accepted, the stale trade can reopen risk in newly
+// funded portfolios and an adverse mark transfers value from a signer who believed the old market
+// was gone.
+#[test]
+fn v16_attack_signed_trade_cannot_replay_across_market_reinit() {
+    const PRICE: u64 = 100;
+    const ADVERSE_PRICE: u64 = 50;
+    const SIZE_Q: i128 = (5_000 * POS_SCALE) as i128;
+    const DEPOSIT: u128 = 1_000_000;
+
+    let params = V16CuMarketParams::default();
+    let mut env = V16CuEnv::new_with_init_params(params);
+    let initial_market_id = env.asset_market_id(0);
+    let admin = env.admin.insecure_clone();
+    env.configure_permissionless_resolve_with_cu(100, 1);
+    env.svm.warp_to_slot(2);
+    env.try_shutdown_asset_with_authority(&admin, 0, 2)
+        .expect("empty asset shuts down before generation rotation");
+    env.svm.warp_to_slot(3);
+    env.try_restart_asset_oracle_with_authority(&admin, 0, 3, PRICE)
+        .expect("empty asset restarts with a fresh engine generation");
+    env.configure_auth_mark_with_cu(3, PRICE);
+
+    let victim = Keypair::new();
+    let attacker = Keypair::new();
+    let victim_account = env.create_portfolio(&victim);
+    let attacker_account = env.create_portfolio(&attacker);
+    env.deposit(&victim, victim_account, DEPOSIT);
+    env.deposit(&attacker, attacker_account, DEPOSIT);
+
+    let old_market_id = env.asset_market_id(0);
+    assert_ne!(old_market_id, initial_market_id);
+    assert_eq!(
+        state::read_market_generation(
+            &env.svm
+                .get_account(&env.market_generation)
+                .unwrap()
+                .data,
+        )
+        .unwrap()
+        .next_market_id
+        .get(),
+        old_market_id,
+        "the persistent counter is intentionally one generation behind until CloseSlab checkpoints the live engine"
+    );
+    let stale_ix = Instruction {
+        program_id: env.program_id,
+        accounts: vec![
+            AccountMeta::new(victim.pubkey(), true),
+            AccountMeta::new(attacker.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(victim_account, false),
+            AccountMeta::new(attacker_account, false),
+        ],
+        data: ProgInstruction::TradeNoCpi {
+            asset_index: 0,
+            market_id: old_market_id,
+            size_q: SIZE_Q,
+            exec_price: PRICE,
+            fee_bps: 0,
+        }
+        .encode(),
+    };
+    let stale_trade = Transaction::new_signed_with_payer(
+        &[heap_ix(), cu_ix(), stale_ix],
+        Some(&env.payer.pubkey()),
+        &[&env.payer, &victim, &attacker],
+        env.svm.latest_blockhash(),
+    );
+
+    env.withdraw(&victim, victim_account, DEPOSIT);
+    env.withdraw(&attacker, attacker_account, DEPOSIT);
+    env.close_portfolio_with_cu(&victim, victim_account);
+    env.close_portfolio_with_cu(&attacker, attacker_account);
+    env.resolve();
+    env.close_slab_with_cu();
+    assert_eq!(env.svm.get_account(&env.market).unwrap().lamports, 0);
+    assert_eq!(
+        state::read_market_generation(&env.svm.get_account(&env.market_generation).unwrap().data,)
+            .unwrap()
+            .next_market_id
+            .get(),
+        old_market_id + 1,
+        "CloseSlab checkpoints all engine-side generation advances before deleting the slab"
+    );
+
+    let reinit_slot = 11;
+    env.svm.warp_to_slot(reinit_slot);
+    env.svm
+        .set_account(
+            env.market,
+            Account {
+                lamports: 1_000_000_000,
+                data: vec![
+                    0u8;
+                    state::market_account_len_for_capacity(
+                        params.max_portfolio_assets as usize,
+                    )
+                    .unwrap()
+                ],
+                owner: env.program_id,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    env.svm
+        .set_account(
+            env.vault,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_token_data(env.mint, env.vault_authority, 0),
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    let reinit_params = V16CuMarketParams {
+        max_bankrupt_close_lifetime_slots: params.max_bankrupt_close_lifetime_slots + 1,
+        ..params
+    };
+    env.send(
+        init_market_instruction(&reinit_params),
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new_readonly(env.mint, false),
+            AccountMeta::new(env.market_generation, false),
+            AccountMeta::new_readonly(system_program::ID, false),
+        ],
+        &[&admin],
+    )
+    .expect("same market address is publicly reinitialized");
+    env.configure_auth_mark_with_cu(reinit_slot, PRICE);
+    assert_ne!(
+        env.asset_market_id(0),
+        old_market_id,
+        "a full-market reinit must consume the persisted next generation"
+    );
+
+    for (owner, portfolio) in [(&victim, victim_account), (&attacker, attacker_account)] {
+        env.svm
+            .set_account(
+                portfolio,
+                Account {
+                    lamports: 1_000_000_000,
+                    data: vec![0u8; env.portfolio_account_len],
+                    owner: env.program_id,
+                    executable: false,
+                    rent_epoch: 0,
+                },
+            )
+            .unwrap();
+        let init_portfolio = Instruction {
+            program_id: env.program_id,
+            accounts: vec![
+                AccountMeta::new(owner.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(portfolio, false),
+            ],
+            data: ProgInstruction::InitPortfolio.encode(),
+        };
+        send_raw_ixs(
+            &mut env.svm,
+            &env.payer,
+            vec![
+                heap_ix(),
+                cu_ix(),
+                ComputeBudgetInstruction::set_compute_unit_price(1),
+                init_portfolio,
+            ],
+            &[owner],
+        )
+        .expect("same portfolio address is publicly reinitialized");
+    }
+    env.deposit(&victim, victim_account, DEPOSIT);
+    env.deposit(&attacker, attacker_account, DEPOSIT);
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let victim_before = env.svm.get_account(&victim_account).unwrap();
+    let attacker_before = env.svm.get_account(&attacker_account).unwrap();
+    let replay = env.svm.send_transaction(stale_trade);
+    if replay.is_ok() {
+        assert_eq!(
+            active_leg_for_asset(&env.portfolio_state(victim_account), 0).basis_pos_q,
+            SIZE_Q,
+            "the old signed intent reopened victim risk in the new market"
+        );
+        env.svm.warp_to_slot(reinit_slot + 1);
+        env.push_auth_mark_with_cu(reinit_slot + 1, ADVERSE_PRICE);
+        env.crank(
+            victim_account,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: reinit_slot + 1,
+                observations: crank_observations(0),
+            },
+        );
+        let victim_after = env.portfolio_state(victim_account);
+        let victim_equity = victim_after.capital.get() as i128 + victim_after.pnl.get();
+        assert!(
+            victim_equity < DEPOSIT as i128,
+            "the replayed position must expose newly deposited value to an adverse mark"
+        );
+        panic!(
+            "an old signed trade executed in a new market incarnation and reduced victim equity from {DEPOSIT} to {victim_equity}"
+        );
+    }
+
+    let replay_error = format!("{:?}", replay.unwrap_err());
+    let expected_error = format!(
+        "Custom({})",
+        PercolatorError::AssetGenerationMismatch as u32
+    );
+    assert!(
+        replay_error.contains(&expected_error),
+        "stale market-incarnation intent must fail with {expected_error}, got {replay_error}"
+    );
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+    assert_eq!(env.svm.get_account(&victim_account).unwrap(), victim_before);
+    assert_eq!(
+        env.svm.get_account(&attacker_account).unwrap(),
+        attacker_before
+    );
+}
+
+#[test]
+fn v16_attack_prefunded_market_generation_pda_cannot_block_init() {
+    let mut env = V16CuEnv::new();
+    let params = V16CuMarketParams::default();
+    let market = Keypair::new();
+    system_create_account_for_test(
+        &mut env.svm,
+        &env.payer,
+        &market,
+        state::market_account_len_for_capacity(params.max_portfolio_assets as usize).unwrap(),
+        env.program_id,
+    );
+    let generation = market_generation_pda(env.program_id, market.pubkey());
+    env.svm.expire_blockhash();
+    send_raw_tx(
+        &mut env.svm,
+        &env.payer,
+        system_instruction::transfer(&env.payer.pubkey(), &generation, 1),
+        &[],
+    )
+    .expect("attacker can pre-fund the uninitialized generation PDA");
+    let prefunded = env.svm.get_account(&generation).unwrap();
+    assert_eq!(prefunded.owner, system_program::ID);
+    assert!(prefunded.data.is_empty());
+
+    let admin = env.admin.insecure_clone();
+    env.svm.expire_blockhash();
+    send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        init_market_instruction(&params),
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(market.pubkey(), false),
+            AccountMeta::new_readonly(env.mint, false),
+            AccountMeta::new(generation, false),
+            AccountMeta::new_readonly(system_program::ID, false),
+        ],
+        &[&admin],
+    )
+    .expect("prefunded generation PDA is allocated and assigned during InitMarket");
+
+    let generation_account = env.svm.get_account(&generation).unwrap();
+    assert_eq!(generation_account.owner, env.program_id);
+    assert_eq!(
+        generation_account.data.len(),
+        state::market_generation_account_len()
+    );
+    assert_eq!(
+        state::read_market_generation(&generation_account.data)
+            .unwrap()
+            .next_market_id
+            .get(),
+        2
+    );
+    assert_eq!(
+        state::read_market(&env.svm.get_account(&market.pubkey()).unwrap().data)
+            .unwrap()
+            .1
+            .assets[0]
+            .market_id,
+        1
+    );
 }
 
 #[test]
@@ -8585,6 +8896,8 @@ fn v16_attack_sync_maintenance_rejects_cross_market_cranker_reward() {
             AccountMeta::new(env.admin.pubkey(), true),
             AccountMeta::new(market_b, false),
             AccountMeta::new_readonly(env.mint, false),
+            AccountMeta::new(market_generation_pda(env.program_id, market_b), false),
+            AccountMeta::new_readonly(system_program::ID, false),
         ],
         &[&env.admin],
     )
@@ -22237,6 +22550,8 @@ fn v16_attack_cure_rejects_cross_market_portfolio_before_transfer() {
             AccountMeta::new(admin.pubkey(), true),
             AccountMeta::new(market_b, false),
             AccountMeta::new_readonly(env.mint, false),
+            AccountMeta::new(market_generation_pda(env.program_id, market_b), false),
+            AccountMeta::new_readonly(system_program::ID, false),
         ],
         &[&admin],
     )
@@ -23076,6 +23391,8 @@ fn v16_attack_backing_ledger_market_binding_enforced() {
             AccountMeta::new(admin.pubkey(), true),
             AccountMeta::new(market_b, false),
             AccountMeta::new_readonly(env.mint, false),
+            AccountMeta::new(market_generation_pda(env.program_id, market_b), false),
+            AccountMeta::new_readonly(system_program::ID, false),
         ],
         &[&admin],
     )
@@ -23437,6 +23754,8 @@ fn v16_attack_insurance_ledger_market_binding_enforced() {
             AccountMeta::new(admin.pubkey(), true),
             AccountMeta::new(market_b, false),
             AccountMeta::new_readonly(env.mint, false),
+            AccountMeta::new(market_generation_pda(env.program_id, market_b), false),
+            AccountMeta::new_readonly(system_program::ID, false),
         ],
         &[&admin],
     )
@@ -23681,6 +24000,8 @@ fn v16_attack_topup_optional_ledgers_reject_cross_market_reuse() {
             AccountMeta::new(admin.pubkey(), true),
             AccountMeta::new(market_b, false),
             AccountMeta::new_readonly(env.mint, false),
+            AccountMeta::new(market_generation_pda(env.program_id, market_b), false),
+            AccountMeta::new_readonly(system_program::ID, false),
         ],
         &[&admin],
     )
@@ -23990,6 +24311,8 @@ fn v16_attack_terminal_insurance_ledger_rejects_cross_market_reuse() {
             AccountMeta::new(admin.pubkey(), true),
             AccountMeta::new(market_b, false),
             AccountMeta::new_readonly(env.mint, false),
+            AccountMeta::new(market_generation_pda(env.program_id, market_b), false),
+            AccountMeta::new_readonly(system_program::ID, false),
         ],
         &[&admin],
     )
@@ -27644,6 +27967,8 @@ fn v16_attack_close_slab_requires_full_winddown() {
                 AccountMeta::new_readonly(env.vault_authority, false),
                 AccountMeta::new(dest, false),
                 AccountMeta::new_readonly(spl_token::ID, false),
+                AccountMeta::new(env.market_generation, false),
+                AccountMeta::new_readonly(system_program::ID, false),
             ],
             &[&env.admin],
         )
@@ -27704,6 +28029,8 @@ fn v16_attack_close_slab_bad_primary_dest_is_atomic() {
                 AccountMeta::new_readonly(env.vault_authority, false),
                 AccountMeta::new(dest, false),
                 AccountMeta::new_readonly(spl_token::ID, false),
+                AccountMeta::new(env.market_generation, false),
+                AccountMeta::new_readonly(system_program::ID, false),
             ],
             &[&admin],
         )
@@ -27821,6 +28148,8 @@ fn v16_attack_close_slab_rejects_stale_marketauth_after_rotation() {
             AccountMeta::new_readonly(env.vault_authority, false),
             AccountMeta::new(stale_dest, false),
             AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(env.market_generation, false),
+            AccountMeta::new_readonly(system_program::ID, false),
         ],
         &[&old_admin],
     );
@@ -27858,6 +28187,8 @@ fn v16_attack_close_slab_rejects_stale_marketauth_after_rotation() {
             AccountMeta::new_readonly(env.vault_authority, false),
             AccountMeta::new(new_dest, false),
             AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(env.market_generation, false),
+            AccountMeta::new_readonly(system_program::ID, false),
         ],
         &[&new_admin],
     );
@@ -27973,6 +28304,8 @@ fn v16_attack_close_slab_rejects_market_as_lamport_destination() {
             AccountMeta::new(admin.pubkey(), true),
             AccountMeta::new(market.pubkey(), false),
             AccountMeta::new_readonly(mint, false),
+            AccountMeta::new(market_generation_pda(program_id, market.pubkey()), false),
+            AccountMeta::new_readonly(system_program::ID, false),
         ],
         &[&admin],
     )
@@ -28038,6 +28371,8 @@ fn v16_attack_close_slab_rejects_market_as_lamport_destination() {
             AccountMeta::new_readonly(vault_authority, false),
             AccountMeta::new(dest, false),
             AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(market_generation_pda(program_id, market.pubkey()), false),
+            AccountMeta::new_readonly(system_program::ID, false),
         ],
         &[&market],
     );
@@ -28131,6 +28466,8 @@ fn v16_attack_close_slab_rejects_delegated_or_closable_primary_vault() {
                 AccountMeta::new_readonly(env.vault_authority, false),
                 AccountMeta::new(dest, false),
                 AccountMeta::new_readonly(spl_token::ID, false),
+                AccountMeta::new(env.market_generation, false),
+                AccountMeta::new_readonly(system_program::ID, false),
             ],
             &[&admin],
         );
@@ -28166,6 +28503,8 @@ fn v16_attack_close_slab_rejects_delegated_or_closable_primary_vault() {
             AccountMeta::new_readonly(env.vault_authority, false),
             AccountMeta::new(dest, false),
             AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(env.market_generation, false),
+            AccountMeta::new_readonly(system_program::ID, false),
         ],
         &[&admin],
     );
@@ -28252,6 +28591,8 @@ fn v16_attack_close_slab_rejects_foreign_primary_vault() {
             AccountMeta::new(admin.pubkey(), true),
             AccountMeta::new(market_b, false),
             AccountMeta::new_readonly(env.mint, false),
+            AccountMeta::new(market_generation_pda(env.program_id, market_b), false),
+            AccountMeta::new_readonly(system_program::ID, false),
         ],
         &[&admin],
     )
@@ -28275,6 +28616,8 @@ fn v16_attack_close_slab_rejects_foreign_primary_vault() {
                 AccountMeta::new_readonly(env.vault_authority, false),
                 AccountMeta::new(dest, false),
                 AccountMeta::new_readonly(spl_token::ID, false),
+                AccountMeta::new(env.market_generation, false),
+                AccountMeta::new_readonly(system_program::ID, false),
             ],
             &[&admin],
         )
@@ -30198,6 +30541,8 @@ fn v16_attack_cross_market_portfolio_cannot_drain_foreign_vault() {
             AccountMeta::new(env.admin.pubkey(), true),
             AccountMeta::new(market_b, false),
             AccountMeta::new_readonly(env.mint, false),
+            AccountMeta::new(market_generation_pda(env.program_id, market_b), false),
+            AccountMeta::new_readonly(system_program::ID, false),
         ],
         &[&env.admin],
     )
@@ -30801,6 +31146,8 @@ fn v16_attack_close_resolved_rejects_cross_market_portfolio_payout() {
             AccountMeta::new(env.admin.pubkey(), true),
             AccountMeta::new(market_b, false),
             AccountMeta::new_readonly(env.mint, false),
+            AccountMeta::new(market_generation_pda(env.program_id, market_b), false),
+            AccountMeta::new_readonly(system_program::ID, false),
         ],
         &[&env.admin],
     )
@@ -31056,6 +31403,8 @@ fn v16_attack_claim_resolved_topup_rejects_cross_market_portfolio_payout() {
             AccountMeta::new(env.admin.pubkey(), true),
             AccountMeta::new(market_b, false),
             AccountMeta::new_readonly(env.mint, false),
+            AccountMeta::new(market_generation_pda(env.program_id, market_b), false),
+            AccountMeta::new_readonly(system_program::ID, false),
         ],
         &[&env.admin],
     )
@@ -31309,6 +31658,8 @@ fn v16_attack_permissionless_crank_rejects_cross_market_target_portfolio() {
             AccountMeta::new(env.admin.pubkey(), true),
             AccountMeta::new(market_b, false),
             AccountMeta::new_readonly(env.mint, false),
+            AccountMeta::new(market_generation_pda(env.program_id, market_b), false),
+            AccountMeta::new_readonly(system_program::ID, false),
         ],
         &[&env.admin],
     )
@@ -36192,6 +36543,8 @@ fn v16_attack_swap_secondary_rejects_foreign_market_vault() {
             AccountMeta::new(admin.pubkey(), true),
             AccountMeta::new(market_b, false),
             AccountMeta::new_readonly(env.mint, false),
+            AccountMeta::new(market_generation_pda(env.program_id, market_b), false),
+            AccountMeta::new_readonly(system_program::ID, false),
         ],
         &[&admin],
     )
@@ -36380,6 +36733,8 @@ fn v16_attack_close_slab_requires_secondary_vault_recovery() {
             AccountMeta::new_readonly(spl_token::ID, false),
             AccountMeta::new(secondary_vault, false),
             AccountMeta::new(wrong_secondary_dest, false),
+            AccountMeta::new(env.market_generation, false),
+            AccountMeta::new_readonly(system_program::ID, false),
         ],
         &[&admin],
     );
@@ -36427,6 +36782,8 @@ fn v16_attack_close_slab_requires_secondary_vault_recovery() {
             AccountMeta::new_readonly(spl_token::ID, false),
             AccountMeta::new(secondary_vault, false),
             AccountMeta::new(secondary_dest, false),
+            AccountMeta::new(env.market_generation, false),
+            AccountMeta::new_readonly(system_program::ID, false),
         ],
         &[&admin],
     );
@@ -36530,6 +36887,8 @@ fn v16_attack_close_slab_rejects_foreign_secondary_vault() {
             AccountMeta::new(admin.pubkey(), true),
             AccountMeta::new(market_b, false),
             AccountMeta::new_readonly(env.mint, false),
+            AccountMeta::new(market_generation_pda(env.program_id, market_b), false),
+            AccountMeta::new_readonly(system_program::ID, false),
         ],
         &[&admin],
     )
@@ -36591,6 +36950,8 @@ fn v16_attack_close_slab_rejects_foreign_secondary_vault() {
                     AccountMeta::new_readonly(spl_token::ID, false),
                     AccountMeta::new(secondary_vault, false),
                     AccountMeta::new(secondary_dest, false),
+                    AccountMeta::new(env.market_generation, false),
+                    AccountMeta::new_readonly(system_program::ID, false),
                 ],
                 &[&admin],
             )
@@ -39876,6 +40237,8 @@ fn v16_attack_liquidation_rejects_cross_market_cranker_reward() {
             AccountMeta::new(env.admin.pubkey(), true),
             AccountMeta::new(market_b, false),
             AccountMeta::new_readonly(env.mint, false),
+            AccountMeta::new(market_generation_pda(env.program_id, market_b), false),
+            AccountMeta::new_readonly(system_program::ID, false),
         ],
         &[&env.admin],
     )
@@ -47375,6 +47738,8 @@ fn v16_attack_scheduled_close_cannot_strand_funds_then_reclaims() {
                 AccountMeta::new_readonly(vault_authority, false),
                 AccountMeta::new(dest, false),
                 AccountMeta::new_readonly(spl_token::ID, false),
+                AccountMeta::new(env.market_generation, false),
+                AccountMeta::new_readonly(system_program::ID, false),
             ],
             &[&admin],
         )
@@ -52843,6 +53208,11 @@ fn v16_attack_init_market_rejects_grief_config_without_burning_market_account() 
                 AccountMeta::new(admin.pubkey(), true),
                 AccountMeta::new(market.pubkey(), false),
                 AccountMeta::new_readonly(env.mint, false),
+                AccountMeta::new(
+                    market_generation_pda(env.program_id, market.pubkey()),
+                    false,
+                ),
+                AccountMeta::new_readonly(system_program::ID, false),
             ],
             &[&admin],
         );
@@ -52868,6 +53238,11 @@ fn v16_attack_init_market_rejects_grief_config_without_burning_market_account() 
                 AccountMeta::new(admin.pubkey(), true),
                 AccountMeta::new(market.pubkey(), false),
                 AccountMeta::new_readonly(env.mint, false),
+                AccountMeta::new(
+                    market_generation_pda(env.program_id, market.pubkey()),
+                    false,
+                ),
+                AccountMeta::new_readonly(system_program::ID, false),
             ],
             &[&admin],
         )
@@ -52971,6 +53346,8 @@ fn v16_attack_init_market_cannot_reinitialize_funded_market() {
             AccountMeta::new(admin.pubkey(), true),
             AccountMeta::new(env.market, false),
             AccountMeta::new_readonly(env.mint, false),
+            AccountMeta::new(env.market_generation, false),
+            AccountMeta::new_readonly(system_program::ID, false),
         ],
         &[&admin],
     );
@@ -53039,6 +53416,8 @@ fn v16_attack_init_market_cannot_reinitialize_empty_market_or_seize_authority() 
             AccountMeta::new(attacker.pubkey(), true),
             AccountMeta::new(env.market, false),
             AccountMeta::new_readonly(attacker_mint, false),
+            AccountMeta::new(env.market_generation, false),
+            AccountMeta::new_readonly(system_program::ID, false),
         ],
         &[&attacker],
     );
@@ -53345,6 +53724,8 @@ fn v16_attack_abandoned_empty_portfolio_cannot_block_slab_close() {
                 AccountMeta::new_readonly(env.vault_authority, false),
                 AccountMeta::new(dest, false),
                 AccountMeta::new_readonly(spl_token::ID, false),
+                AccountMeta::new(env.market_generation, false),
+                AccountMeta::new_readonly(system_program::ID, false),
             ],
             &[&admin],
         )
@@ -59023,6 +59404,8 @@ fn v16_attack_close_slab_rejects_closable_secondary_vault_before_reclaim() {
             AccountMeta::new_readonly(spl_token::ID, false),
             AccountMeta::new(secondary_vault, false),
             AccountMeta::new(secondary_dest, false),
+            AccountMeta::new(env.market_generation, false),
+            AccountMeta::new_readonly(system_program::ID, false),
         ],
         &[&admin],
     );
@@ -59078,6 +59461,8 @@ fn v16_attack_close_slab_rejects_closable_secondary_vault_before_reclaim() {
             AccountMeta::new_readonly(spl_token::ID, false),
             AccountMeta::new(secondary_vault, false),
             AccountMeta::new(secondary_dest, false),
+            AccountMeta::new(env.market_generation, false),
+            AccountMeta::new_readonly(system_program::ID, false),
         ],
         &[&admin],
     );
