@@ -10504,6 +10504,7 @@ pub mod processor {
                             AutoCrankWorkV16 {
                                 now_slot: authenticated_now_slot,
                                 observations: &[],
+                                observations_preaccrued: false,
                                 resolved_close_fee_rate_per_slot: 0,
                             },
                         )
@@ -10660,29 +10661,36 @@ pub mod processor {
             let summary = group
                 .build_actionable_summary(&portfolio.as_view())
                 .map_err(map_v16_error)?;
-            if let Some(asset_index) =
-                auto_crank_selected_asset_that_accrues_view(&portfolio, &summary)?
-            {
-                reject_missing_pending_selected_observation_view(
-                    &cfg,
-                    &group,
-                    asset_index,
-                    authenticated_now_slot,
-                    observations.as_slice(),
-                )?;
+            if observations.is_empty() {
+                if let Some(asset_index) =
+                    auto_crank_selected_asset_that_accrues_view(&portfolio, &summary)?
+                {
+                    reject_missing_pending_selected_observation_view(
+                        &cfg,
+                        &group,
+                        asset_index,
+                        authenticated_now_slot,
+                        observations.as_slice(),
+                    )?;
+                }
             }
-            let result = match group.permissionless_auto_crank_not_atomic(
-                &mut portfolio,
-                AutoCrankWorkV16 {
-                    now_slot: authenticated_now_slot,
-                    observations: observations.as_slice(),
-                    resolved_close_fee_rate_per_slot: 0,
-                },
-            ) {
-                Ok(result) => Some(result),
-                Err(V16Error::NonProgress) if !observations.is_empty() => None,
-                Err(err) => return Err(map_v16_error(err)),
-            };
+            // Supplied observations were authenticated and accrued above. Tell the engine to
+            // dispatch the selected current-state account action without replaying a second market
+            // segment. Every engine error propagates so SVM rollback covers all not-atomic
+            // mutations; no error may be converted into a successful partial commit.
+            let result = Some(
+                group
+                    .permissionless_auto_crank_not_atomic(
+                        &mut portfolio,
+                        AutoCrankWorkV16 {
+                            now_slot: authenticated_now_slot,
+                            observations: observations.as_slice(),
+                            observations_preaccrued: !observations.is_empty(),
+                            resolved_close_fee_rate_per_slot: 0,
+                        },
+                    )
+                    .map_err(map_v16_error)?,
+            );
 
             let selected_fee_asset = match result.as_ref().map(|r| &r.selected) {
                 Some(AutoCrankPlanV16::RefreshAccount {
