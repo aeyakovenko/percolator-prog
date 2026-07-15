@@ -59602,3 +59602,180 @@ fn v16_attack_backing_topup_rejects_lapsed_expiry() {
         "valid topup credits exactly the backing"
     );
 }
+
+#[test]
+fn v16_attack_public_live_source_lien_mark_reversal_can_progress() {
+    const Q: i128 = (1_000 * POS_SCALE) as i128;
+    const INCREASE_Q: i128 = (50 * POS_SCALE) as i128;
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(1, 1_000, 5_000, 500);
+    env.configure_auth_mark_for_asset_as_admin(0, 0, 100);
+    env.top_up_backing_bucket(1, 100_000, 100);
+
+    let owner = Keypair::new();
+    let account = env.create_portfolio(&owner);
+    let counterparty_owner = Keypair::new();
+    let counterparty = env.create_portfolio(&counterparty_owner);
+    let keeper_owner = Keypair::new();
+    let keeper = env.create_portfolio(&keeper_owner);
+    env.deposit(&owner, account, 52_501);
+    env.deposit(&counterparty_owner, counterparty, 1_000_000);
+    env.trade_asset_with_cu(
+        0,
+        &owner,
+        account,
+        &counterparty_owner,
+        counterparty,
+        Q,
+        100,
+        0,
+    );
+
+    env.svm.warp_to_slot(1);
+    env.push_auth_mark_for_asset_as_admin(0, 1, 105);
+    env.crank(
+        keeper,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 1,
+            observations: crank_observations(0),
+        },
+    );
+    env.crank(
+        counterparty,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 1,
+            observations: crank_observations(0),
+        },
+    );
+    env.crank(
+        account,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 1,
+            observations: crank_observations(0),
+        },
+    );
+    assert_eq!(env.portfolio_state(account).pnl.get(), 5_000);
+
+    env.trade_asset_with_cu(
+        0,
+        &owner,
+        account,
+        &counterparty_owner,
+        counterparty,
+        INCREASE_Q,
+        105,
+        0,
+    );
+    let liened = env.portfolio_state(account);
+    assert_eq!(active_leg_for_asset(&liened, 0).basis_pos_q, Q + INCREASE_Q);
+    assert!(
+        liened.source_domains[0].source_claim_liened_num.get() > 0,
+        "public risk increase must create a real source-credit lien"
+    );
+    let lien_before = liened.source_domains[0];
+    let capital_before_reversal = liened.capital.get();
+    let lien_effective = lien_before.source_lien_effective_reserved.get();
+
+    env.svm.warp_to_slot(2);
+    env.push_auth_mark_for_asset_as_admin(0, 2, 100);
+    env.crank(
+        keeper,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 2,
+            observations: crank_observations(0),
+        },
+    );
+    env.crank(
+        counterparty,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 2,
+            observations: crank_observations(0),
+        },
+    );
+
+    let backing_before_reversal = env.market_state().1.source_backing_buckets[1];
+    let vault_before_reversal = env.market_state().1.vault;
+    let token_vault_before_reversal = env.token_amount(env.vault);
+    env.svm.expire_blockhash();
+    let reversal_cu = env
+        .send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 2,
+                observations: vec![],
+            },
+            vec![
+                AccountMeta::new(env.payer.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(account, false),
+            ],
+            &[],
+        )
+        .expect("permissionless crank must settle a loss through a live source lien");
+    assert_cu_within("live source-lien reversal crank", reversal_cu, 400_000);
+
+    let settled = env.portfolio_state(account);
+    let backing_after_reversal = env.market_state().1.source_backing_buckets[1];
+    let unliened_support_consumed = 5_000 - lien_effective;
+    let principal_loss = 5_250 - unliened_support_consumed;
+    assert_eq!(settled.pnl.get(), 0);
+    assert_eq!(
+        settled.capital.get(),
+        capital_before_reversal - principal_loss
+    );
+    assert_eq!(
+        active_leg_for_asset(&settled, 0).basis_pos_q,
+        Q + INCREASE_Q,
+        "settlement recognizes the loss without silently changing the position"
+    );
+    assert_eq!(
+        settled.source_domains[0],
+        percolator::PortfolioSourceDomainV16Account::default(),
+        "the vanished positive claim and its lien are fully cleared"
+    );
+    assert!(health_cert(&settled).valid);
+    assert_eq!(backing_after_reversal.valid_liened_backing_num, 0);
+    assert_eq!(
+        backing_after_reversal.fresh_unliened_backing_num,
+        backing_before_reversal
+            .fresh_unliened_backing_num
+            .checked_sub(unliened_support_consumed * BOUND_SCALE)
+            .unwrap()
+            .checked_add(lien_before.source_lien_counterparty_backing_num.get())
+            .unwrap(),
+        "still-liened provider principal is unpledged rather than consumed"
+    );
+    assert_eq!(
+        backing_after_reversal.consumed_liened_backing_num,
+        backing_before_reversal.consumed_liened_backing_num
+            + unliened_support_consumed * BOUND_SCALE,
+        "only unliened realizable support offsets the reversal loss"
+    );
+    assert_eq!(env.market_state().1.vault, vault_before_reversal);
+    assert_eq!(env.token_amount(env.vault), token_vault_before_reversal);
+
+    env.svm.expire_blockhash();
+    let unilateral_reduce_cu = env
+        .send(
+            ProgInstruction::RebalanceReduce {
+                asset_index: 0,
+                reduce_q: POS_SCALE,
+            },
+            vec![
+                AccountMeta::new(owner.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(account, false),
+            ],
+            &[&owner],
+        )
+        .expect("the refreshed owner must be able to reduce through the public unilateral route");
+    assert_cu_within(
+        "post-reversal unilateral position reduction",
+        unilateral_reduce_cu,
+        MULTI_ASSET_OPEN_TRADE_CU_LIMIT,
+    );
+    assert_eq!(
+        active_leg_for_asset(&env.portfolio_state(account), 0).basis_pos_q,
+        Q + INCREASE_Q - POS_SCALE as i128
+    );
+    assert_eq!(env.market_state().1.vault, vault_before_reversal);
+    assert_eq!(env.token_amount(env.vault), token_vault_before_reversal);
+}
