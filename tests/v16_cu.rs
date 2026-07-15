@@ -59471,3 +59471,115 @@ fn v16_attack_backing_topup_rejects_lapsed_expiry() {
         "valid topup credits exactly the backing"
     );
 }
+
+// A committed AuthMark or EWMA mark creates an economically exposed target/effective-price lag
+// before the first crank publishes that target into the engine. Backing principal is the
+// loss-absorption layer for counterparty claims, so its authority must not be able to escape during
+// that interval. The old withdrawal gate inspected only the engine's still-old raw target and
+// allowed the full bucket out; subsequent public cranks then left part of the winner's claim
+// unbacked.
+#[test]
+fn v16_attack_price_managed_mark_cannot_be_front_run_by_backing_withdraw_before_crank() {
+    const INITIAL_MARK: u64 = 1_000_000;
+    const ADVERSE_MARK: u64 = 1;
+    const BACKING: u128 = 1_000_000;
+
+    for use_ewma in [false, true] {
+        let mode = if use_ewma { "EWMA" } else { "AuthMark" };
+        let mut env = V16CuEnv::new_with_init_params(production_risk_params());
+        env.svm.warp_to_slot(1);
+        if use_ewma {
+            env.configure_ewma_mark_with_cu(1, INITIAL_MARK, 1, 0);
+        } else {
+            env.configure_auth_mark_with_cu(1, INITIAL_MARK);
+        }
+        env.top_up_backing_bucket(0, BACKING, 1_000);
+
+        let long_owner = Keypair::new();
+        let short_owner = Keypair::new();
+        let long = env.create_portfolio(&long_owner);
+        let short = env.create_portfolio(&short_owner);
+        env.deposit(&long_owner, long, 100_000);
+        env.deposit(&short_owner, short, 2_000_000);
+        env.trade_with_cu(
+            &long_owner,
+            long,
+            &short_owner,
+            short,
+            POS_SCALE as i128,
+            INITIAL_MARK,
+            0,
+        );
+
+        env.svm.warp_to_slot(2);
+        if use_ewma {
+            env.push_ewma_mark_with_cu(2, ADVERSE_MARK);
+        } else {
+            env.push_auth_mark_with_cu(2, ADVERSE_MARK);
+        }
+        let (cfg_after_push, group_after_push) = env.market_state();
+        assert!(
+            cfg_after_push.oracle_target_price_e6 < INITIAL_MARK,
+            "{mode} committed an adverse target"
+        );
+        assert_eq!(
+            group_after_push.assets[0].effective_price, INITIAL_MARK,
+            "the committed {mode} target has not yet reached the bounded effective price"
+        );
+
+        let backing_authority = env.admin.insecure_clone();
+        let destination = env.token_account(backing_authority.pubkey(), 0);
+        env.svm.expire_blockhash();
+        let withdrawal = env.send(
+            ProgInstruction::WithdrawBackingBucket {
+                domain: 0,
+                amount: BACKING,
+            },
+            vec![
+                AccountMeta::new(backing_authority.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(destination, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(env.vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[&backing_authority],
+        );
+
+        // Drive only public bounded progress. The losing trader contributes 100,000 of principal, but
+        // the adverse move creates a larger winning claim, so the pre-funded backing is material.
+        for slot in [21, 41, 61] {
+            env.svm.warp_to_slot(slot);
+            for portfolio in [long, short] {
+                env.crank(
+                    portfolio,
+                    ProgInstruction::PermissionlessCrank {
+                        now_slot: slot,
+                        observations: crank_observations(0),
+                    },
+                );
+            }
+        }
+        let group_after = env.market_state().1;
+        let claim_num = group_after.source_credit[0].positive_claim_bound_num;
+        let reserved_num = group_after.source_credit[0].fresh_reserved_backing_num;
+        assert!(
+            claim_num > 100_000 * BOUND_SCALE,
+            "the {mode} winner's claim must exceed the loser's contributed principal"
+        );
+        assert!(
+        withdrawal.is_err(),
+        "backing escaped after the adverse {mode} mark was committed; the public lifecycle left {} claim atoms unbacked",
+        claim_num.saturating_sub(reserved_num) / BOUND_SCALE
+    );
+        assert_eq!(
+            env.token_amount(destination),
+            0,
+            "the rejected race must pay no backing principal"
+        );
+        assert!(
+            reserved_num >= claim_num,
+            "retained backing must fully cover the {mode} winner's accrued claim"
+        );
+    }
+}
