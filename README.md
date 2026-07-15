@@ -146,9 +146,11 @@ Assets 1..N are **truly permissionless ⇒ untrusted**. The protocol must guaran
 - **Per-asset admin keys, isolated — uniform across all assets including asset 0** — one asset's admin
   can never be used against another asset. **✅** Every asset (0..N) carries its own `asset_admin`
   (`AssetOracleProfileV16`): assets 1..N bootstrap it to the activator, **asset 0 bootstraps it to the
-  market admin at `InitMarket`**. `UpdateAssetAuthority { asset_index, kind, new_pubkey }` is scoped to
-  that asset's profile only and now operates on **asset 0 too** (the old `asset_index == 0` rejection is
-  gone). Asset 0 is **not** special for authorities — its only special properties are **fee capture**
+  market admin at `InitMarket`**.
+  `UpdateAssetAuthority { asset_index, market_id, kind, new_pubkey }` is scoped to that asset's
+  current generation and profile only and now operates on **asset 0 too** (the old
+  `asset_index == 0` rejection is gone). Asset 0 is **not** special for authorities — its only
+  special properties are **fee capture**
   (it's the insurance-redirect target) and that it **cannot be permissionlessly created** (it's created
   at `InitMarket`, not via `UpdateAssetLifecycle`).
 - **Each asset (0..N) has a cold-storage admin** that can **rotate that asset's other keys**
@@ -164,9 +166,10 @@ Assets 1..N are **truly permissionless ⇒ untrusted**. The protocol must guaran
   any asset including asset 0** (`ASSET_ACTION_SHUTDOWN` → RECOVERY with the `force_close_delay_slots`
   exit window so traders can exit), **resolve/close the market** (`ResolveMarket`/`CloseSlab`),
   **market policies**, and **rotate/swap the base-unit mint**. It is rotated via
-  `UpdateAuthority { new_pubkey }` (current `marketauth` signs and the non-zero replacement co-signs;
-  burn-to-zero is rejected). Everything else — restart, insurance/operator/backing/oracle on
-  **every** asset including 0 — is per-asset (`asset_admin` + `UpdateAssetAuthority`), never a separate
+  `UpdateAuthority { market_id, new_pubkey }` (current `marketauth` signs, the non-zero replacement
+  co-signs, and `market_id` must match the current base-asset generation; burn-to-zero is rejected).
+  Everything else — restart, insurance/operator/backing/oracle on **every** asset including 0 — is
+  per-asset (`asset_admin` + generation-bound `UpdateAssetAuthority`), never a separate
   marketauth-only path. `marketauth` can restart an asset only while it is also that asset's
   `asset_admin` (the asset-0 bootstrap state).
 - **Each other asset key can rotate itself; only `asset_admin` can be set to 0.** **✅** (a domain
@@ -301,7 +304,7 @@ Percolator enforces three layers with distinct responsibilities:
 - **Layout**: header + wrapper config + `MarketGroupV16Account`
 - Holds market-level totals, insurance, oracle/asset state, source-domain credit state, and asset lifecycle state.
 
-The v16 asset index ABI is `u16`. The current persisted layout is still a fixed-capacity Pod market-group layout, but asset indices are treated as reusable logical slots. A retired asset slot can only be reactivated after the configured shutdown/activation timeout, and reactivation assigns a new monotonic `u64` `market_id` from the market group. `market_id` values are never reused, including when a closed market account is recreated at the same address. Trade instructions, portfolio legs, and close-progress ledgers carry that id, so neither stale signed intent nor stale state from an old shutdown market can bind to a reused slot.
+The v16 asset index ABI is `u16`. The current persisted layout is still a fixed-capacity Pod market-group layout, but asset indices are treated as reusable logical slots. A retired asset slot can only be reactivated after the configured shutdown/activation timeout, and reactivation assigns a new monotonic `u64` `market_id` from the market group. `market_id` values are never reused, including when a closed market account is recreated at the same address. Trade instructions, co-signed authority rotations, portfolio legs, and close-progress ledgers carry that id, so neither stale signed intent nor stale state from an old shutdown market can bind to a reused slot.
 
 ### Market generation account
 - **Owner**: Percolator program id
@@ -385,10 +388,12 @@ This section describes intent and operational ordering, not argument-by-argument
   - binds the collateral mint, initializes asset 0 from the persistent generation counter, and sets
     `marketauth` to the init signer
 - **UpdateAuthority** (tag 32) — single-purpose: rotate the one market-level `marketauth` key
-  - `UpdateAuthority { new_pubkey }`: current `marketauth` signs; a non-zero replacement co-signs
+  - `UpdateAuthority { market_id, new_pubkey }`: current `marketauth` signs; a non-zero replacement
+    co-signs; `market_id` must match the current base-asset generation
   - setting `new_pubkey` to all zeros is rejected; `marketauth` must remain live for final slab reclaim
   - per-asset authorities (insurance/operator/backing/oracle, incl. asset 0) are rotated via
-    `UpdateAssetAuthority`, not this instruction
+    `UpdateAssetAuthority { asset_index, market_id, kind, new_pubkey }`, which requires the target
+    asset's current generation, not this instruction
 - **UpdateAssetLifecycle** (tag 40)
   - appends/reactivates/retires assets 1..N, including permissionless create/reuse when the configured
     create fee is nonzero
@@ -741,8 +746,10 @@ At minimum, monitor:
 - liquidation frequency spikes
 
 ### Governance / authority handling
-- `UpdateAuthority` rotates `marketauth`; the current authority and the new key must both sign.
-- `UpdateAssetAuthority` rotates per-asset authorities; non-admin self-rotation also requires the new key.
+- `UpdateAuthority` rotates `marketauth`; the current authority and the new key must both sign, and
+  the payload must carry asset 0's current `market_id`.
+- `UpdateAssetAuthority` rotates per-asset authorities; the payload must carry the target asset's
+  current `market_id`, and non-admin self-rotation also requires the new key.
 - Burning is limited to `asset_admin`. Required market/domain authorities cannot be set to zero.
 
 ---
@@ -838,26 +845,26 @@ mark/insurance/operator) are reachable until asset-0's `asset_admin` is rotated 
 
 These are governance powers, not bugs:
 
-1. `UpdateAuthority { new_pubkey }`
+1. `UpdateAuthority { market_id, new_pubkey }`
    - rotate `marketauth` to an attacker key.
    - impact: governance capture.
 2. Policy updates / `UpdateMarketInitFeePolicy` / `UpdateBaseUnitMints` / asset create+retire+force-shutdown
    - change funding/cap policy knobs (within validation bounds), the create fee, the base-unit mint, and the asset set — all now under the one `marketauth` key.
    - force-shutdown any asset including asset 0. Restart is not a separate marketauth power: it requires the target asset's `asset_admin`; marketauth can restart asset 0 only while it still holds the asset-0 admin role.
    - impact: economics/market shape can become unfavorable to users (force-shutdown still honors the trader exit window).
-3. `UpdateAssetAuthority { asset_index = 0, kind = ASSET_AUTH_ORACLE }` (while marketauth holds asset-0's `asset_admin`)
+3. `UpdateAssetAuthority { asset_index = 0, market_id, kind = ASSET_AUTH_ORACLE }` (while marketauth holds asset-0's `asset_admin`)
    - choose who can push asset-0 AuthMark/EwmaMark updates.
    - impact: authority mark input control/censorship surface.
 4. `ResolveMarket`
    - transition market to resolved mode using stored authority price.
    - impact: trading/deposits/new accounts are halted; market enters wind-down.
-5. `UpdateAssetAuthority { asset_index = 0, kind = ASSET_AUTH_INSURANCE }` (while marketauth holds asset-0's `asset_admin`)
+5. `UpdateAssetAuthority { asset_index = 0, market_id, kind = ASSET_AUTH_INSURANCE }` (while marketauth holds asset-0's `asset_admin`)
    - choose who can withdraw resolved-market insurance.
    - impact: resolved insurance extraction capability is delegated.
 6. `WithdrawInsurance` (post-resolution, after positions are closed)
    - withdraw insurance buffer to admin ATA.
    - impact: no insurance backstop remains.
-7. `UpdateAssetAuthority { asset_index = 0, kind = ASSET_AUTH_INSURANCE_OPERATOR }` (while marketauth holds asset-0's `asset_admin`)
+7. `UpdateAssetAuthority { asset_index = 0, market_id, kind = ASSET_AUTH_INSURANCE_OPERATOR }` (while marketauth holds asset-0's `asset_admin`)
    - choose who can call bounded live insurance withdrawal.
    - impact: bounded live insurance extraction capability is delegated.
 8. `CloseSlab` (when market is fully empty)
@@ -866,7 +873,8 @@ These are governance powers, not bugs:
     - impact: market is permanently closed.
 
 > **Authority model (items 3, 5, 7).** Asset-0's insurance/operator/oracle(mark)/backing authorities now
-> use the **same per-asset `asset_admin` model as assets 1..N** (`UpdateAssetAuthority { asset_index = 0 }`).
+> use the **same per-asset `asset_admin` model as assets 1..N**
+> (`UpdateAssetAuthority { asset_index = 0, market_id, .. }`).
 > Asset 0's `asset_admin` is bootstrapped to the **market admin** at `InitMarket`, so a malicious admin
 > **can** rotate the shared insurance operator/authority and the mark pusher (items 3/5/7) —
 > exactly the powers the asset_admin has over any asset. To make those delegations sticky, burn

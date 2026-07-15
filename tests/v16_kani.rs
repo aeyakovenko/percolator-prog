@@ -602,6 +602,7 @@ fn kani_v16_legacy_permissionless_crank_size_payload_is_rejected() {
 
 #[kani::proof]
 fn kani_v16_update_authority_decode_preserves_wire_fields() {
+    let market_id: u64 = kani::any();
     let mut new_pubkey = [0u8; 32];
     let mut i = 0;
     while i < 32 {
@@ -609,14 +610,17 @@ fn kani_v16_update_authority_decode_preserves_wire_fields() {
         i += 1;
     }
 
-    let mut data = [0u8; 33];
+    let mut data = [0u8; 41];
     data[0] = 32;
-    data[1..33].copy_from_slice(&new_pubkey);
+    data[1..9].copy_from_slice(&market_id.to_le_bytes());
+    data[9..41].copy_from_slice(&new_pubkey);
 
     match Instruction::decode(&data).unwrap() {
         Instruction::UpdateAuthority {
+            market_id: got_market_id,
             new_pubkey: got_pubkey,
         } => {
+            assert_eq!(got_market_id, market_id);
             assert_eq!(got_pubkey, new_pubkey);
         }
         _ => unreachable!(),
@@ -626,6 +630,7 @@ fn kani_v16_update_authority_decode_preserves_wire_fields() {
 #[kani::proof]
 fn kani_v16_update_asset_authority_decode_preserves_wire_fields() {
     let asset_index: u16 = kani::any();
+    let market_id: u64 = kani::any();
     let kind: u8 = kani::any();
     let mut new_pubkey = [0u8; 32];
     let mut i = 0;
@@ -634,24 +639,38 @@ fn kani_v16_update_asset_authority_decode_preserves_wire_fields() {
         i += 1;
     }
 
-    let mut data = [0u8; 36];
+    let mut data = [0u8; 44];
     data[0] = 65;
     data[1..3].copy_from_slice(&asset_index.to_le_bytes());
-    data[3] = kind;
-    data[4..36].copy_from_slice(&new_pubkey);
+    data[3..11].copy_from_slice(&market_id.to_le_bytes());
+    data[11] = kind;
+    data[12..44].copy_from_slice(&new_pubkey);
 
     match Instruction::decode(&data).unwrap() {
         Instruction::UpdateAssetAuthority {
             asset_index: got_asset_index,
+            market_id: got_market_id,
             kind: got_kind,
             new_pubkey: got_pubkey,
         } => {
             assert_eq!(got_asset_index, asset_index);
+            assert_eq!(got_market_id, market_id);
             assert_eq!(got_kind, kind);
             assert_eq!(got_pubkey, new_pubkey);
         }
         _ => unreachable!(),
     }
+}
+
+#[kani::proof]
+fn kani_v16_legacy_unbound_authority_payloads_are_rejected() {
+    let mut legacy_market: [u8; 33] = kani::any();
+    legacy_market[0] = 32;
+    let mut legacy_asset: [u8; 36] = kani::any();
+    legacy_asset[0] = 65;
+
+    assert!(Instruction::decode(&legacy_market).is_err());
+    assert!(Instruction::decode(&legacy_asset).is_err());
 }
 
 #[kani::proof]
@@ -1216,6 +1235,7 @@ fn kani_v16_admin_policy_payloads_reject_trailing_byte() {
     assert_rejects_trailing_byte(Instruction::ResolveMarket, extra);
     assert_rejects_trailing_byte(
         Instruction::UpdateAuthority {
+            market_id: 1,
             new_pubkey: [1u8; 32],
         },
         extra,
@@ -1223,6 +1243,7 @@ fn kani_v16_admin_policy_payloads_reject_trailing_byte() {
     assert_rejects_trailing_byte(
         Instruction::UpdateAssetAuthority {
             asset_index: 1,
+            market_id: 2,
             kind: 0,
             new_pubkey: [1u8; 32],
         },

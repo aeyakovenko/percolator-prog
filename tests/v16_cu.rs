@@ -1054,11 +1054,13 @@ impl V16CuEnv {
 
     fn update_asset_authority_with_cu(&mut self, new_authority: &Keypair) -> u64 {
         self.ensure_signer_account(new_authority.pubkey());
+        let market_id = self.asset_market_id(0);
         send_tx(
             &mut self.svm,
             self.program_id,
             &self.payer,
             ProgInstruction::UpdateAuthority {
+                market_id,
                 new_pubkey: new_authority.pubkey().to_bytes(),
             },
             vec![
@@ -1088,9 +1090,11 @@ impl V16CuEnv {
         } else {
             self.payer.pubkey()
         };
+        let market_id = self.asset_market_id(asset_index);
         self.send(
             ProgInstruction::UpdateAssetAuthority {
                 asset_index,
+                market_id,
                 kind,
                 new_pubkey,
             },
@@ -6038,6 +6042,140 @@ fn v16_attack_signed_trade_cannot_replay_across_asset_slot_reuse() {
     }
 }
 
+// UpdateAssetAuthority has the same attacker-held signature shape as UpdateAuthority: the incoming
+// non-zero authority co-signs. Retiring and restarting an asset must invalidate an old rotation, or
+// the incoming oracle authority can take control of a replacement generation and move value against
+// positions that did not exist when the transaction was signed.
+#[test]
+fn v16_attack_signed_asset_authority_rotation_cannot_replay_after_restart() {
+    const PRICE: u64 = 100;
+    const ADVERSE_PRICE: u64 = 50;
+    const SIZE_Q: i128 = (5_000 * POS_SCALE) as i128;
+    const DEPOSIT: u128 = 1_000_000;
+
+    let mut env = V16CuEnv::new();
+    let admin = env.admin.insecure_clone();
+    let attacker = Keypair::new();
+    env.ensure_signer_account(attacker.pubkey());
+    let old_market_id = env.asset_market_id(0);
+    let stale_ix = Instruction {
+        program_id: env.program_id,
+        accounts: vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(attacker.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        data: ProgInstruction::UpdateAssetAuthority {
+            asset_index: 0,
+            market_id: old_market_id,
+            kind: processor::ASSET_AUTH_ORACLE,
+            new_pubkey: attacker.pubkey().to_bytes(),
+        }
+        .encode(),
+    };
+    let stale_rotation = Transaction::new_signed_with_payer(
+        &[heap_ix(), cu_ix(), stale_ix],
+        Some(&env.payer.pubkey()),
+        &[&env.payer, &admin, &attacker],
+        env.svm.latest_blockhash(),
+    );
+
+    env.configure_permissionless_resolve_with_cu(100, 1);
+    env.svm.warp_to_slot(1);
+    env.try_shutdown_asset_with_authority(&admin, 0, 1)
+        .expect("empty asset shuts down");
+    env.svm.warp_to_slot(2);
+    env.try_restart_asset_oracle_with_authority(&admin, 0, 2, PRICE)
+        .expect("asset restarts");
+    let new_market_id = env.asset_market_id(0);
+    assert_ne!(new_market_id, old_market_id);
+    env.configure_auth_mark_with_cu(2, PRICE);
+
+    let victim = Keypair::new();
+    let victim_portfolio = env.create_portfolio(&victim);
+    let attacker_portfolio = env.create_portfolio(&attacker);
+    env.deposit(&victim, victim_portfolio, DEPOSIT);
+    env.deposit(&attacker, attacker_portfolio, DEPOSIT);
+    env.trade_with_cu(
+        &victim,
+        victim_portfolio,
+        &attacker,
+        attacker_portfolio,
+        SIZE_Q,
+        PRICE,
+        0,
+    );
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let victim_before = env.svm.get_account(&victim_portfolio).unwrap();
+    let attacker_before = env.svm.get_account(&attacker_portfolio).unwrap();
+
+    let replay = env.svm.send_transaction(stale_rotation);
+    if replay.is_ok() {
+        assert_eq!(
+            state::read_asset_oracle_profile(&env.svm.get_account(&env.market).unwrap().data, 0)
+                .unwrap()
+                .oracle_authority,
+            attacker.pubkey().to_bytes(),
+            "the retained rotation seized the replacement generation's oracle"
+        );
+        env.svm.warp_to_slot(3);
+        env.push_auth_mark_for_asset_with_authority(0, &attacker, 3, ADVERSE_PRICE);
+        env.crank(
+            victim_portfolio,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 3,
+                observations: crank_observations(0),
+            },
+        );
+        let victim_after = env.portfolio_state(victim_portfolio);
+        let victim_equity = victim_after.capital.get() as i128 + victim_after.pnl.get();
+        assert!(
+            victim_equity < DEPOSIT as i128,
+            "the seized oracle must move value against fresh exposure"
+        );
+        panic!(
+            "an attacker replayed an old asset-authority rotation and reduced victim equity from {DEPOSIT} to {victim_equity}"
+        );
+    }
+
+    let replay_error = format!("{:?}", replay.unwrap_err());
+    let expected_error = format!(
+        "Custom({})",
+        PercolatorError::AssetGenerationMismatch as u32
+    );
+    assert!(
+        replay_error.contains(&expected_error),
+        "stale asset-authority intent must fail with {expected_error}, got {replay_error}"
+    );
+
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+    assert_eq!(
+        env.svm.get_account(&victim_portfolio).unwrap(),
+        victim_before
+    );
+    assert_eq!(
+        env.svm.get_account(&attacker_portfolio).unwrap(),
+        attacker_before
+    );
+
+    env.svm.expire_blockhash();
+    env.send(
+        ProgInstruction::UpdateAssetAuthority {
+            asset_index: 0,
+            market_id: new_market_id,
+            kind: processor::ASSET_AUTH_ORACLE,
+            new_pubkey: attacker.pubkey().to_bytes(),
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(attacker.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&admin, &attacker],
+    )
+    .expect("the same rotation remains live when signed for the current asset generation");
+}
+
 // Before the persistent generation account, a full CloseSlab + InitMarket cycle at the same market
 // address reset every asset market_id to its first-generation value. Keep the original, fully
 // signed transaction object across that public lifecycle: rebuilding the instruction after reinit
@@ -6265,6 +6403,156 @@ fn v16_attack_signed_trade_cannot_replay_across_market_reinit() {
         env.svm.get_account(&attacker_account).unwrap(),
         attacker_before
     );
+}
+
+// The incoming market authority co-signs UpdateAuthority and therefore necessarily possesses the
+// complete transaction. A full market close/reinit must invalidate that old capability just as it
+// invalidates an old signed trade. Otherwise the incoming authority can seize and resolve a newly
+// funded incarnation at the same address.
+#[test]
+fn v16_attack_signed_authority_rotation_cannot_replay_across_market_reinit() {
+    let params = V16CuMarketParams::default();
+    let mut env = V16CuEnv::new_with_init_params(params);
+    let admin = env.admin.insecure_clone();
+    let attacker = Keypair::new();
+    env.ensure_signer_account(attacker.pubkey());
+
+    let stale_ix = Instruction {
+        program_id: env.program_id,
+        accounts: vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(attacker.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        data: ProgInstruction::UpdateAuthority {
+            market_id: env.asset_market_id(0),
+            new_pubkey: attacker.pubkey().to_bytes(),
+        }
+        .encode(),
+    };
+    let stale_rotation = Transaction::new_signed_with_payer(
+        &[heap_ix(), cu_ix(), stale_ix],
+        Some(&env.payer.pubkey()),
+        &[&env.payer, &admin, &attacker],
+        env.svm.latest_blockhash(),
+    );
+
+    env.resolve();
+    env.close_slab_with_cu();
+    assert_eq!(env.svm.get_account(&env.market).unwrap().lamports, 0);
+
+    env.svm
+        .set_account(
+            env.market,
+            Account {
+                lamports: 1_000_000_000,
+                data: vec![
+                    0u8;
+                    state::market_account_len_for_capacity(
+                        params.max_portfolio_assets as usize,
+                    )
+                    .unwrap()
+                ],
+                owner: env.program_id,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    env.svm
+        .set_account(
+            env.vault,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_token_data(env.mint, env.vault_authority, 0),
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    let reinit_params = V16CuMarketParams {
+        max_bankrupt_close_lifetime_slots: params.max_bankrupt_close_lifetime_slots + 1,
+        ..params
+    };
+    env.send(
+        init_market_instruction(&reinit_params),
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new_readonly(env.mint, false),
+            AccountMeta::new(env.market_generation, false),
+            AccountMeta::new_readonly(system_program::ID, false),
+        ],
+        &[&admin],
+    )
+    .expect("same market address is publicly reinitialized");
+
+    let victim = Keypair::new();
+    let victim_portfolio = env.create_portfolio(&victim);
+    env.deposit(&victim, victim_portfolio, 1_000_000);
+    assert_eq!(env.market_state().1.mode, MarketModeV16::Live);
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let victim_before = env.svm.get_account(&victim_portfolio).unwrap();
+
+    let replay = env.svm.send_transaction(stale_rotation);
+    if replay.is_ok() {
+        assert_eq!(
+            env.market_state().0.marketauth,
+            attacker.pubkey().to_bytes(),
+            "the retained old rotation seized the fresh market"
+        );
+        let forced_resolve = send_tx(
+            &mut env.svm,
+            env.program_id,
+            &env.payer,
+            ProgInstruction::ResolveMarket,
+            vec![
+                AccountMeta::new(attacker.pubkey(), true),
+                AccountMeta::new(env.market, false),
+            ],
+            &[&attacker],
+        );
+        assert!(
+            forced_resolve.is_ok(),
+            "the replayed authority must be operational: {forced_resolve:?}"
+        );
+        assert_eq!(env.market_state().1.mode, MarketModeV16::Resolved);
+        panic!("an attacker replayed an old co-signed rotation and resolved a newly funded market");
+    }
+
+    let replay_error = format!("{:?}", replay.unwrap_err());
+    let expected_error = format!(
+        "Custom({})",
+        PercolatorError::AssetGenerationMismatch as u32
+    );
+    assert!(
+        replay_error.contains(&expected_error),
+        "stale market-authority intent must fail with {expected_error}, got {replay_error}"
+    );
+
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+    assert_eq!(
+        env.svm.get_account(&victim_portfolio).unwrap(),
+        victim_before
+    );
+    assert_eq!(env.market_state().1.mode, MarketModeV16::Live);
+
+    let current_market_id = env.asset_market_id(0);
+    env.svm.expire_blockhash();
+    env.send(
+        ProgInstruction::UpdateAuthority {
+            market_id: current_market_id,
+            new_pubkey: attacker.pubkey().to_bytes(),
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(attacker.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&admin, &attacker],
+    )
+    .expect("the same rotation remains live when signed for the current market generation");
 }
 
 #[test]
@@ -26119,6 +26407,7 @@ fn v16_attack_update_authority_requires_new_authority_signature() {
         env.program_id,
         &env.payer,
         ProgInstruction::UpdateAuthority {
+            market_id: first_generation_market_id(0),
             new_pubkey: victim.pubkey().to_bytes(),
         },
         vec![
@@ -26147,6 +26436,7 @@ fn v16_attack_update_authority_requires_new_authority_signature() {
         env.program_id,
         &env.payer,
         ProgInstruction::UpdateAuthority {
+            market_id: first_generation_market_id(0),
             new_pubkey: new_asset.pubkey().to_bytes(),
         },
         vec![
@@ -26179,6 +26469,7 @@ fn v16_attack_update_authority_requires_new_authority_signature() {
         env.program_id,
         &env.payer,
         ProgInstruction::UpdateAuthority {
+            market_id: first_generation_market_id(0),
             new_pubkey: env.admin.pubkey().to_bytes(),
         },
         vec![
@@ -26212,6 +26503,7 @@ fn v16_attack_update_authority_requires_new_authority_signature() {
         &env.payer,
         ProgInstruction::UpdateAssetAuthority {
             asset_index: 0,
+            market_id: first_generation_market_id(0),
             kind: processor::ASSET_AUTH_INSURANCE,
             new_pubkey: victim.pubkey().to_bytes(),
         },
@@ -26241,6 +26533,7 @@ fn v16_attack_update_authority_requires_new_authority_signature() {
         &env.payer,
         ProgInstruction::UpdateAssetAuthority {
             asset_index: 0,
+            market_id: first_generation_market_id(0),
             kind: processor::ASSET_AUTH_INSURANCE,
             new_pubkey: new_ins.pubkey().to_bytes(),
         },
@@ -28317,6 +28610,7 @@ fn v16_attack_close_slab_rejects_market_as_lamport_destination() {
         program_id,
         &payer,
         ProgInstruction::UpdateAuthority {
+            market_id: first_generation_market_id(0),
             new_pubkey: market.pubkey().to_bytes(),
         },
         vec![
@@ -43989,6 +44283,7 @@ fn v16_attack_update_authority_non_holder_cannot_rotate() {
         env.program_id,
         &env.payer,
         ProgInstruction::UpdateAuthority {
+            market_id: first_generation_market_id(0),
             new_pubkey: mallory.pubkey().to_bytes(),
         },
         vec![
@@ -44017,6 +44312,7 @@ fn v16_attack_update_authority_non_holder_cannot_rotate() {
         &env.payer,
         ProgInstruction::UpdateAssetAuthority {
             asset_index: 0,
+            market_id: first_generation_market_id(0),
             kind: processor::ASSET_AUTH_INSURANCE,
             new_pubkey: mallory.pubkey().to_bytes(),
         },
@@ -44053,6 +44349,7 @@ fn v16_attack_update_authority_non_holder_cannot_rotate() {
         env.program_id,
         &env.payer,
         ProgInstruction::UpdateAuthority {
+            market_id: first_generation_market_id(0),
             new_pubkey: new_admin.pubkey().to_bytes(),
         },
         vec![
@@ -44091,6 +44388,7 @@ fn v16_attack_marketauth_renounce_rejected_even_with_fallback() {
         env.program_id,
         &env.payer,
         ProgInstruction::UpdateAuthority {
+            market_id: first_generation_market_id(0),
             new_pubkey: [0u8; 32],
         },
         vec![
@@ -44120,6 +44418,7 @@ fn v16_attack_marketauth_renounce_rejected_even_with_fallback() {
         env.program_id,
         &env.payer,
         ProgInstruction::UpdateAuthority {
+            market_id: first_generation_market_id(0),
             new_pubkey: [0u8; 32],
         },
         vec![
@@ -45380,6 +45679,7 @@ fn v16_attack_per_asset_admin_rotates_keys_isolated_and_burnable() {
         if let Some(k) = co {
             signers.push(k);
         }
+        let market_id = env.asset_market_id(ai);
         env.svm.expire_blockhash();
         send_tx(
             &mut env.svm,
@@ -45387,6 +45687,7 @@ fn v16_attack_per_asset_admin_rotates_keys_isolated_and_burnable() {
             &env.payer,
             ProgInstruction::UpdateAssetAuthority {
                 asset_index: ai,
+                market_id,
                 kind,
                 new_pubkey: new,
             },
@@ -45597,6 +45898,7 @@ fn v16_attack_update_asset_authority_rejects_zero_domain_authority() {
             &env.payer,
             ProgInstruction::UpdateAssetAuthority {
                 asset_index: 0,
+                market_id: first_generation_market_id(0),
                 kind,
                 new_pubkey: [0u8; 32],
             },
@@ -58437,6 +58739,7 @@ fn v16_attack_oracle_authority_rotation_revokes_old_grants_new() {
     let rot = env.send(
         ProgInstruction::UpdateAssetAuthority {
             asset_index: 0,
+            market_id: first_generation_market_id(0),
             kind: percolator_prog::processor::ASSET_AUTH_ORACLE,
             new_pubkey: newauth.pubkey().to_bytes(),
         },

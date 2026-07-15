@@ -2585,15 +2585,18 @@ pub mod ix {
             fee_rate_per_slot: u128,
         },
         /// Rotate the single market-level authority (`marketauth`). The current `marketauth` must sign;
-        /// the non-zero replacement must co-sign. Burning `marketauth` to zero is rejected.
+        /// the non-zero replacement must co-sign. `market_id` binds the signed capability to the
+        /// current base-asset generation. Burning `marketauth` to zero is rejected.
         UpdateAuthority {
+            market_id: u64,
             new_pubkey: [u8; 32],
         },
         /// Rotate one of an asset's per-asset authorities. Gated by the asset's own `asset_admin`
         /// (rotates any; only the admin authority itself is burnable) or the current holder of that
-        /// authority (self-rotation). Isolated to the given asset_index.
+        /// authority (self-rotation). Isolated to the given asset_index and `market_id` generation.
         UpdateAssetAuthority {
             asset_index: u16,
+            market_id: u64,
             kind: u8,
             new_pubkey: [u8; 32],
         },
@@ -2856,10 +2859,12 @@ pub mod ix {
                     fee_rate_per_slot: read_u128(&mut rest)?,
                 },
                 32 => Self::UpdateAuthority {
+                    market_id: read_u64(&mut rest)?,
                     new_pubkey: read_bytes32(&mut rest)?,
                 },
                 65 => Self::UpdateAssetAuthority {
                     asset_index: read_u16(&mut rest)?,
+                    market_id: read_u64(&mut rest)?,
                     kind: read_u8(&mut rest)?,
                     new_pubkey: read_bytes32(&mut rest)?,
                 },
@@ -3161,17 +3166,23 @@ pub mod ix {
                     out.push(30);
                     push_u128(&mut out, fee_rate_per_slot);
                 }
-                Self::UpdateAuthority { new_pubkey } => {
+                Self::UpdateAuthority {
+                    market_id,
+                    new_pubkey,
+                } => {
                     out.push(32);
+                    push_u64(&mut out, market_id);
                     out.extend_from_slice(&new_pubkey);
                 }
                 Self::UpdateAssetAuthority {
                     asset_index,
+                    market_id,
                     kind,
                     new_pubkey,
                 } => {
                     out.push(65);
                     push_u16(&mut out, asset_index);
+                    push_u64(&mut out, market_id);
                     out.push(kind);
                     out.extend_from_slice(&new_pubkey);
                 }
@@ -5308,14 +5319,23 @@ pub mod processor {
             Instruction::CloseResolved { fee_rate_per_slot } => {
                 handle_close_resolved(program_id, accounts, fee_rate_per_slot)
             }
-            Instruction::UpdateAuthority { new_pubkey } => {
-                handle_update_authority(program_id, accounts, new_pubkey)
-            }
+            Instruction::UpdateAuthority {
+                market_id,
+                new_pubkey,
+            } => handle_update_authority(program_id, accounts, market_id, new_pubkey),
             Instruction::UpdateAssetAuthority {
                 asset_index,
+                market_id,
                 kind,
                 new_pubkey,
-            } => handle_update_asset_authority(program_id, accounts, asset_index, kind, new_pubkey),
+            } => handle_update_asset_authority(
+                program_id,
+                accounts,
+                asset_index,
+                market_id,
+                kind,
+                new_pubkey,
+            ),
             Instruction::UpdateLiquidationFeePolicy { cranker_share_bps } => {
                 handle_update_liquidation_fee_policy(program_id, accounts, cranker_share_bps)
             }
@@ -8762,6 +8782,7 @@ pub mod processor {
     fn handle_update_authority<'a>(
         program_id: &Pubkey,
         accounts: &'a [AccountInfo<'a>],
+        expected_market_id: u64,
         new_pubkey: [u8; 32],
     ) -> ProgramResult {
         let current = account(accounts, 0)?;
@@ -8783,6 +8804,11 @@ pub mod processor {
         let mut data = market_ai.try_borrow_mut_data()?;
         let cfg_after = {
             let (mut cfg, mut group) = state::market_view_mut(&mut data)?;
+            if group.markets.is_empty()
+                || group.markets[0].engine.asset.market_id.get() != expected_market_id
+            {
+                return Err(PercolatorError::AssetGenerationMismatch.into());
+            }
             expect_live_authority(&cfg.marketauth, current.key)?;
             let old_marketauth = cfg.marketauth;
             let mut profile = read_oracle_profile_from_view(&group, &cfg, 0)?;
@@ -8813,6 +8839,7 @@ pub mod processor {
         program_id: &Pubkey,
         accounts: &'a [AccountInfo<'a>],
         asset_index: u16,
+        expected_market_id: u64,
         kind: u8,
         new_pubkey: [u8; 32],
     ) -> ProgramResult {
@@ -8839,6 +8866,9 @@ pub mod processor {
         let (cfg, mut group) = state::market_view_mut(&mut data)?;
         if asset_index >= group.header.config.max_market_slots.get() as usize {
             return Err(PercolatorError::InvalidInstruction.into());
+        }
+        if group.markets[asset_index].engine.asset.market_id.get() != expected_market_id {
+            return Err(PercolatorError::AssetGenerationMismatch.into());
         }
         let mut profile = read_oracle_profile_from_view(&group, &cfg, asset_index)?;
 
