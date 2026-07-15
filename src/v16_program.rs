@@ -4438,7 +4438,7 @@ pub mod processor {
         if asset_local_loss_stale_view(group, asset_index) {
             return Err(PercolatorError::EngineLockActive.into());
         }
-        reject_exposed_target_effective_lag_view(group, asset_index)?;
+        reject_exposed_target_effective_lag_view(cfg, group, asset_index)?;
         Ok(false)
     }
 
@@ -4460,6 +4460,7 @@ pub mod processor {
     }
 
     fn asset_has_exposed_target_effective_lag_view(
+        cfg: &WrapperConfigV16,
         group: &state::MarketViewMutV16<'_>,
         asset_index: usize,
     ) -> Result<bool, ProgramError> {
@@ -4469,14 +4470,30 @@ pub mod processor {
             .ok_or(PercolatorError::InvalidInstruction)?;
         let asset = &slot.engine.asset;
         let exposed = asset.oi_eff_long_q.get() != 0 || asset.oi_eff_short_q.get() != 0;
-        Ok(exposed && asset.raw_oracle_target_price.get() != asset.effective_price.get())
+        if !exposed {
+            return Ok(false);
+        }
+        let effective_price = asset.effective_price.get();
+        if asset.raw_oracle_target_price.get() != effective_price {
+            return Ok(true);
+        }
+        let profile = read_oracle_profile_from_view(group, cfg, asset_index)?;
+        if !oracle_v16::profile_is_price_managed(&profile) {
+            return Ok(false);
+        }
+        Ok(
+            (profile.mark_ewma_e6 != 0 && profile.mark_ewma_e6 != effective_price)
+                || (profile.oracle_target_price_e6 != 0
+                    && profile.oracle_target_price_e6 != effective_price),
+        )
     }
 
     fn reject_exposed_target_effective_lag_view(
+        cfg: &WrapperConfigV16,
         group: &state::MarketViewMutV16<'_>,
         asset_index: usize,
     ) -> ProgramResult {
-        if asset_has_exposed_target_effective_lag_view(group, asset_index)? {
+        if asset_has_exposed_target_effective_lag_view(cfg, group, asset_index)? {
             return Err(PercolatorError::EngineLockActive.into());
         }
         Ok(())
