@@ -10891,6 +10891,76 @@ pub mod processor {
         Ok(0)
     }
 
+    fn portfolio_active_legs_are_settlement_current_view(
+        group: &state::MarketViewMutV16<'_>,
+        portfolio: &percolator::PortfolioV16ViewMut<'_>,
+    ) -> Result<bool, ProgramError> {
+        let active_bitmap = portfolio
+            .header
+            .active_bitmap
+            .map(percolator::V16PodU64::get);
+        let configured_assets = group.header.config.max_market_slots.get() as usize;
+        let mut slot = 0usize;
+        while slot < percolator::V16_MAX_PORTFOLIO_ASSETS_N {
+            let leg = portfolio.header.legs[slot]
+                .try_to_runtime()
+                .map_err(map_v16_error)?;
+            let bit = percolator::active_bitmap_get(active_bitmap, slot);
+            if bit != leg.active {
+                return Err(PercolatorError::EngineHiddenLeg.into());
+            }
+            if !leg.active {
+                slot += 1;
+                continue;
+            }
+            let asset_index = leg.asset_index as usize;
+            if asset_index >= configured_assets || asset_index >= group.markets.len() {
+                return Err(PercolatorError::EngineHiddenLeg.into());
+            }
+            let asset = group.markets[asset_index]
+                .engine
+                .asset
+                .try_to_runtime()
+                .map_err(map_v16_error)?;
+            if leg.market_id != asset.market_id
+                || !matches!(
+                    asset.lifecycle,
+                    percolator::AssetLifecycleV16::Active
+                        | percolator::AssetLifecycleV16::DrainOnly
+                        | percolator::AssetLifecycleV16::Recovery
+                )
+            {
+                return Err(PercolatorError::EngineHiddenLeg.into());
+            }
+            let (side_epoch, k_target, f_target, b_target) = match leg.side {
+                SideV16::Long => (
+                    asset.epoch_long,
+                    asset.k_long,
+                    asset.f_long_num,
+                    asset.b_long_num,
+                ),
+                SideV16::Short => (
+                    asset.epoch_short,
+                    asset.k_short,
+                    asset.f_short_num,
+                    asset.b_short_num,
+                ),
+            };
+            if leg.stale
+                || leg.b_stale
+                || leg.epoch_snap != side_epoch
+                || leg.b_epoch_snap != side_epoch
+                || leg.k_snap != k_target
+                || leg.f_snap != f_target
+                || leg.b_snap != b_target
+            {
+                return Ok(false);
+            }
+            slot += 1;
+        }
+        Ok(true)
+    }
+
     fn ensure_trade_portfolio_current_for_requests_view(
         group: &state::MarketViewMutV16<'_>,
         portfolio: &percolator::PortfolioV16ViewMut<'_>,
@@ -10937,12 +11007,15 @@ pub mod processor {
         if portfolio.header.stale_state != 0 {
             return Err(PercolatorError::EngineStale.into());
         }
-        if !cert.valid
-            || cert.cert_oracle_epoch != group.header.oracle_epoch.get()
-            || cert.cert_funding_epoch != group.header.funding_epoch.get()
-            || cert.cert_risk_epoch != group.header.risk_epoch.get()
-            || cert.cert_asset_set_epoch != group.header.asset_set_epoch.get()
-            || cert.active_bitmap_at_cert != active_bitmap
+        if !cert.valid || cert.active_bitmap_at_cert != active_bitmap {
+            return Err(PercolatorError::EngineStale.into());
+        }
+        let cert_epochs_current = cert.cert_oracle_epoch == group.header.oracle_epoch.get()
+            && cert.cert_funding_epoch == group.header.funding_epoch.get()
+            && cert.cert_risk_epoch == group.header.risk_epoch.get()
+            && cert.cert_asset_set_epoch == group.header.asset_set_epoch.get();
+        if !cert_epochs_current
+            && !portfolio_active_legs_are_settlement_current_view(group, portfolio)?
         {
             return Err(PercolatorError::EngineStale.into());
         }

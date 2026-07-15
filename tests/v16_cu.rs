@@ -7926,6 +7926,165 @@ fn v16_attack_target_only_lag_invalidates_unrelated_single_trade_cert() {
     assert_eq!(short_cert.certified_maintenance_req, 1_100);
 }
 
+// A permissionless asset authority can advance the market-wide oracle epoch without changing any
+// asset held by another portfolio. That global invalidation must not force an otherwise current
+// large user through a pre-crank race when the engine can recertify and reduce one leg in-budget.
+#[test]
+fn v16_attack_unrelated_permissionless_epoch_cannot_block_eight_leg_exit() {
+    const VICTIM_LEGS: usize = 8;
+    const PRICE: u64 = 100;
+    const ATTACK_PRICE: u64 = 105;
+
+    let mut env =
+        V16CuEnv::new_with_market_params_and_price_move(VICTIM_LEGS as u16, 1_000, 1_000, 500);
+    env.update_market_init_fee_policy_with_cu(1);
+    env.svm.warp_to_slot(1);
+
+    let attacker = Keypair::new();
+    env.activate_permissionless_asset_with_fee(
+        &attacker,
+        VICTIM_LEGS as u16,
+        1,
+        PRICE,
+        attacker.pubkey(),
+        attacker.pubkey(),
+        attacker.pubkey(),
+        attacker.pubkey(),
+        1,
+    );
+    env.configure_auth_mark_for_asset_with_authority(VICTIM_LEGS as u16, &attacker, 1, PRICE);
+
+    let attacker_counterparty = Keypair::new();
+    let attacker_account = env.create_portfolio(&attacker);
+    let attacker_counterparty_account = env.create_portfolio(&attacker_counterparty);
+    env.deposit(&attacker, attacker_account, 1_000_000);
+    env.deposit(
+        &attacker_counterparty,
+        attacker_counterparty_account,
+        1_000_000,
+    );
+    env.trade_asset_with_cu(
+        VICTIM_LEGS as u16,
+        &attacker,
+        attacker_account,
+        &attacker_counterparty,
+        attacker_counterparty_account,
+        POS_SCALE as i128,
+        PRICE,
+        0,
+    );
+
+    let victim_long_owner = Keypair::new();
+    let victim_short_owner = Keypair::new();
+    let victim_long = env.create_portfolio(&victim_long_owner);
+    let victim_short = env.create_portfolio(&victim_short_owner);
+    env.deposit(&victim_long_owner, victim_long, 100_000_000);
+    env.deposit(&victim_short_owner, victim_short, 100_000_000);
+    let open_legs: Vec<BatchTradeLeg> = (0..VICTIM_LEGS as u16)
+        .map(|asset_index| BatchTradeLeg {
+            asset_index,
+            size_q: POS_SCALE as i128,
+            exec_price: PRICE,
+            fee_bps: 0,
+        })
+        .collect();
+    env.send(
+        ProgInstruction::BatchTradeNoCpi { legs: open_legs },
+        vec![
+            AccountMeta::new(victim_long_owner.pubkey(), true),
+            AccountMeta::new(victim_short_owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(victim_long, false),
+            AccountMeta::new(victim_short, false),
+        ],
+        &[&victim_long_owner, &victim_short_owner],
+    )
+    .expect("public setup opens the victim's eight current legs");
+
+    let (_, group_before_attack) = env.market_state();
+    for victim in [victim_long, victim_short] {
+        let account = env.portfolio_state(victim);
+        assert_eq!(
+            percolator::active_bitmap_count_ones(active_bitmap(&account)),
+            VICTIM_LEGS as u32,
+        );
+        let cert = health_cert(&account);
+        assert!(cert.valid);
+        assert_eq!(cert.cert_oracle_epoch, group_before_attack.oracle_epoch);
+        assert_eq!(account.stale_state, 0);
+        assert_eq!(account.b_stale_state, 0);
+    }
+
+    env.svm.warp_to_slot(2);
+    env.push_auth_mark_for_asset_with_authority(VICTIM_LEGS as u16, &attacker, 2, ATTACK_PRICE);
+    env.crank(
+        attacker_account,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 2,
+            observations: crank_observations(VICTIM_LEGS as u16),
+        },
+    );
+
+    let (_, group_after_attack) = env.market_state();
+    assert!(
+        group_after_attack.oracle_epoch > group_before_attack.oracle_epoch,
+        "the attacker-controlled asset advances the global oracle epoch",
+    );
+    for asset_index in 0..VICTIM_LEGS {
+        assert_eq!(
+            group_after_attack.assets[asset_index].effective_price,
+            group_before_attack.assets[asset_index].effective_price,
+            "the attacker did not move victim-held asset {asset_index}",
+        );
+        assert_eq!(
+            group_after_attack.assets[asset_index].slot_last,
+            group_before_attack.assets[asset_index].slot_last,
+            "the attacker did not accrue victim-held asset {asset_index}",
+        );
+    }
+    for victim in [victim_long, victim_short] {
+        let account = env.portfolio_state(victim);
+        let cert = health_cert(&account);
+        assert!(cert.valid);
+        assert!(cert.cert_oracle_epoch < group_after_attack.oracle_epoch);
+        assert_eq!(cert.cert_funding_epoch, group_after_attack.funding_epoch);
+        assert!(cert.cert_risk_epoch < group_after_attack.risk_epoch);
+        assert_eq!(
+            cert.cert_asset_set_epoch,
+            group_after_attack.asset_set_epoch
+        );
+        assert_eq!(account.stale_state, 0);
+        assert_eq!(account.b_stale_state, 0);
+    }
+
+    env.svm.expire_blockhash();
+    let exit_cu = env
+        .try_trade_asset_with_cu(
+            0,
+            &victim_long_owner,
+            victim_long,
+            &victim_short_owner,
+            victim_short,
+            -(POS_SCALE as i128),
+            PRICE,
+            0,
+        )
+        .expect("an unrelated epoch bump must not block the current eight-leg exit");
+    println!("v16 unrelated epoch eight-leg exit CU: {exit_cu}");
+    assert!(
+        exit_cu < 1_400_000,
+        "eight-leg exit exceeded tx CU: {exit_cu}"
+    );
+    assert!(!has_active_leg_for_asset(
+        &env.portfolio_state(victim_long),
+        0,
+    ));
+    assert!(!has_active_leg_for_asset(
+        &env.portfolio_state(victim_short),
+        0,
+    ));
+}
+
 #[test]
 fn v16_bpf_trade_refreshes_stale_related_portfolio_leg_on_demand() {
     let mut env = V16CuEnv::new_with_market_params_and_price_move(4, 1_000, 1_000, 500);
