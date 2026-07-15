@@ -59471,3 +59471,220 @@ fn v16_attack_backing_topup_rejects_lapsed_expiry() {
         "valid topup credits exactly the backing"
     );
 }
+
+#[test]
+fn v16_attack_discharged_social_loss_history_does_not_strand_asset_slot() {
+    let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+        max_portfolio_assets: 2,
+        initial_price: 1,
+        max_trading_fee_bps: 10,
+        max_price_move_bps_per_slot: 10_000,
+        ..V16CuMarketParams::default()
+    });
+    env.configure_permissionless_resolve_with_cu(100, 1);
+    env.configure_auth_mark_with_cu(0, 1);
+    env.configure_auth_mark_for_asset_as_admin(1, 0, 1);
+
+    let debtor_owner = Keypair::new();
+    let debtor = env.create_portfolio(&debtor_owner);
+    let target_long_a_owner = Keypair::new();
+    let target_long_a = env.create_portfolio(&target_long_a_owner);
+    let target_long_b_owner = Keypair::new();
+    let target_long_b = env.create_portfolio(&target_long_b_owner);
+    let target_short_b_owner = Keypair::new();
+    let target_short_b = env.create_portfolio(&target_short_b_owner);
+    let moving_long_owner = Keypair::new();
+    let moving_long = env.create_portfolio(&moving_long_owner);
+
+    for (owner, portfolio, amount) in [
+        (&debtor_owner, debtor, 4),
+        (&target_long_a_owner, target_long_a, 1_000),
+        (&target_long_b_owner, target_long_b, 1_000),
+        (&target_short_b_owner, target_short_b, 1_000),
+        (&moving_long_owner, moving_long, 1_000),
+    ] {
+        env.deposit(owner, portfolio, amount);
+    }
+
+    // The target asset is attached first so the self-selecting crank liquidates it first. Its mark
+    // never moves; the debtor's loss comes entirely from the later asset-0 leg.
+    env.try_trade_asset_with_cu(
+        1,
+        &target_long_a_owner,
+        target_long_a,
+        &debtor_owner,
+        debtor,
+        POS_SCALE as i128,
+        1,
+        0,
+    )
+    .expect("open debtor's first, target-asset leg");
+    env.try_trade_asset_with_cu(
+        1,
+        &target_long_b_owner,
+        target_long_b,
+        &target_short_b_owner,
+        target_short_b,
+        POS_SCALE as i128,
+        1,
+        0,
+    )
+    .expect("open the target asset's surviving matched pair");
+    env.try_trade_asset_with_cu(
+        0,
+        &moving_long_owner,
+        moving_long,
+        &debtor_owner,
+        debtor,
+        POS_SCALE as i128,
+        1,
+        0,
+    )
+    .expect("open debtor's later, price-moving leg");
+
+    for (slot, mark) in [(1, 2), (2, 4), (3, 8), (4, 9)] {
+        env.svm.warp_to_slot(slot);
+        env.push_auth_mark_with_cu(slot, mark);
+        env.crank(
+            moving_long,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: slot,
+                observations: crank_observations(0),
+            },
+        );
+    }
+
+    env.crank(
+        debtor,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 4,
+            observations: crank_observations(1),
+        },
+    );
+    let refreshed = env.portfolio_state(debtor);
+    assert_eq!(
+        refreshed.capital.get(),
+        0,
+        "asset-0 loss consumed principal"
+    );
+    assert!(
+        health_cert(&refreshed).certified_liq_deficit > 0,
+        "cross-asset debtor is liquidatable"
+    );
+
+    env.svm.warp_to_slot(5);
+    env.update_asset_lifecycle_as_admin_with_cu(
+        percolator_prog::processor::ASSET_ACTION_SHUTDOWN,
+        1,
+        5,
+        0,
+    );
+    env.forfeit_recovery_leg_with_cu(&debtor_owner, debtor, 1, percolator::MAX_VAULT_TVL);
+
+    let after_bankruptcy = env.market_state().1;
+    assert!(
+        !has_active_leg_for_asset(&env.portfolio_state(debtor), 1),
+        "engine-selected target leg closed first"
+    );
+    assert_ne!(
+        after_bankruptcy.assets[1].b_long_num, 0,
+        "asset-0 deficit was socialized into the flat-price target asset"
+    );
+    assert_eq!(after_bankruptcy.assets[1].k_long, 0);
+    assert_eq!(after_bankruptcy.assets[1].k_short, 0);
+    assert_eq!(after_bankruptcy.assets[1].f_long_num, 0);
+    assert_eq!(after_bankruptcy.assets[1].f_short_num, 0);
+
+    for (owner, portfolio) in [
+        (&target_long_a_owner, target_long_a),
+        (&target_long_b_owner, target_long_b),
+        (&target_short_b_owner, target_short_b),
+    ] {
+        if has_active_leg_for_asset(&env.portfolio_state(portfolio), 1) {
+            env.forfeit_recovery_leg_with_cu(owner, portfolio, 1, percolator::MAX_VAULT_TVL);
+        }
+        assert!(
+            !has_active_leg_for_asset(&env.portfolio_state(portfolio), 1),
+            "every target-asset claimant completed the public recovery exit"
+        );
+    }
+
+    let (_, group) = env.market_state();
+    let flat = group.assets[1];
+    let old_market_id = flat.market_id;
+    let vault_before = group.vault;
+    assert_eq!(flat.lifecycle, AssetLifecycleV16::Recovery);
+    assert_eq!(flat.mode_long, SideModeV16::Normal);
+    assert_eq!(flat.mode_short, SideModeV16::Normal);
+    assert_eq!(flat.a_long, ADL_ONE);
+    assert_eq!(flat.a_short, ADL_ONE);
+    assert_eq!(flat.k_long, 0);
+    assert_eq!(flat.k_short, 0);
+    assert_eq!(flat.k_epoch_start_long, 0);
+    assert_eq!(flat.k_epoch_start_short, 0);
+    assert_eq!(flat.f_long_num, 0);
+    assert_eq!(flat.f_short_num, 0);
+    assert_eq!(flat.f_epoch_start_long_num, 0);
+    assert_eq!(flat.f_epoch_start_short_num, 0);
+    assert_ne!(flat.b_long_num, 0, "only discharged B history remains");
+    assert_eq!(flat.b_short_num, 0);
+    assert_eq!(flat.b_epoch_start_long_num, 0);
+    assert_eq!(flat.b_epoch_start_short_num, 0);
+    assert_eq!(flat.oi_eff_long_q, 0);
+    assert_eq!(flat.oi_eff_short_q, 0);
+    assert_eq!(flat.stored_pos_count_long, 0);
+    assert_eq!(flat.stored_pos_count_short, 0);
+    assert_eq!(flat.stale_account_count_long, 0);
+    assert_eq!(flat.stale_account_count_short, 0);
+    assert_eq!(flat.pending_obligation_count_long, 0);
+    assert_eq!(flat.pending_obligation_count_short, 0);
+    assert_eq!(flat.loss_weight_sum_long, 0);
+    assert_eq!(flat.loss_weight_sum_short, 0);
+    assert_eq!(flat.social_loss_remainder_long_num, 0);
+    assert_eq!(flat.social_loss_remainder_short_num, 0);
+    assert_eq!(flat.social_loss_dust_long_num, 0);
+    assert_eq!(flat.social_loss_dust_short_num, 0);
+    assert_eq!(flat.explicit_unallocated_loss_long, 0);
+    assert_eq!(flat.explicit_unallocated_loss_short, 0);
+    for domain in [2usize, 3] {
+        let bucket = group.source_backing_buckets[domain];
+        assert!(
+            bucket.fresh_unliened_backing_num == 0
+                && bucket.valid_liened_backing_num == 0
+                && bucket.consumed_liened_backing_num == 0
+                && bucket.impaired_liened_backing_num == 0
+                && bucket.utilization_fee_earnings == 0,
+            "target source-backing domain is empty"
+        );
+    }
+
+    env.svm.expire_blockhash();
+    let retire_cu = env.update_asset_lifecycle_as_admin_with_cu(
+        percolator_prog::processor::ASSET_ACTION_RETIRE,
+        1,
+        5,
+        0,
+    );
+    assert_cu_within(
+        "retire discharged social-loss asset",
+        retire_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    let retired = env.market_state().1;
+    assert_eq!(retired.assets[1].lifecycle, AssetLifecycleV16::Retired);
+    assert_eq!(retired.vault, vault_before);
+    assert_eq!(retired.vault as u64, env.token_amount(env.vault));
+
+    env.svm.warp_to_slot(6);
+    env.svm.expire_blockhash();
+    env.activate_asset(1, 6, 1);
+    let reused = env.market_state().1;
+    assert_eq!(reused.assets[1].lifecycle, AssetLifecycleV16::Active);
+    assert_ne!(reused.assets[1].market_id, old_market_id);
+    assert_eq!(reused.assets[1].b_long_num, 0);
+    assert_eq!(reused.assets[1].b_short_num, 0);
+    assert_eq!(reused.assets[1].b_epoch_start_long_num, 0);
+    assert_eq!(reused.assets[1].b_epoch_start_short_num, 0);
+    assert_eq!(reused.vault, vault_before);
+    assert_eq!(reused.vault as u64, env.token_amount(env.vault));
+}
