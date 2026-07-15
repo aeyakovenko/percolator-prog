@@ -41,6 +41,209 @@ fn crank_observations(asset_index: u16) -> Vec<CrankObservationHint> {
     }]
 }
 
+// Public partial-DoS regression: historical funding indices have no claimant after every position,
+// stale counter, obligation, and source domain is empty. They must not permanently consume an asset
+// slot after an otherwise complete public trading lifecycle.
+#[test]
+fn v16_attack_funded_then_fully_closed_asset_can_retire_and_reuse() {
+    const INITIAL_PRICE: u64 = 1_000_000;
+    const HIGH_MARK: u64 = INITIAL_PRICE * 2;
+
+    let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+        max_portfolio_assets: 2,
+        initial_price: INITIAL_PRICE,
+        max_price_move_bps_per_slot: 1_000,
+        max_accrual_dt_slots: 1,
+        max_abs_funding_e9_per_slot: 1_000,
+        min_funding_lifetime_slots: 1,
+        ..V16CuMarketParams::default()
+    });
+    env.svm.warp_to_slot(0);
+    env.configure_auth_mark_for_asset_as_admin(1, 0, INITIAL_PRICE);
+
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long = env.create_portfolio(&long_owner);
+    let short = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long, 1_000);
+    env.deposit(&short_owner, short, 1_000);
+    env.trade_asset_with_cu(
+        1,
+        &long_owner,
+        long,
+        &short_owner,
+        short,
+        1,
+        INITIAL_PRICE,
+        0,
+    );
+
+    env.svm.warp_to_slot(1);
+    env.push_auth_mark_for_asset_as_admin(1, 1, HIGH_MARK);
+    for account in [long, short] {
+        env.svm.expire_blockhash();
+        env.crank(
+            account,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 1,
+                observations: crank_observations(1),
+            },
+        );
+    }
+
+    env.svm.warp_to_slot(2);
+    for account in [long, short] {
+        env.svm.expire_blockhash();
+        env.crank(
+            account,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 2,
+                observations: crank_observations(1),
+            },
+        );
+    }
+    let (_, funded) = env.market_state();
+    assert_ne!(
+        funded.assets[1].f_long_num, 0,
+        "control: funding index advanced"
+    );
+    assert_ne!(
+        funded.assets[1].f_short_num, 0,
+        "control: funding index advanced"
+    );
+
+    // Return the accepted price to its initial value before closing. K telescopes with price, while
+    // funding is path-dependent, so this isolates historical F as the retirement blocker and does
+    // not depend on the separate inert-K fix.
+    env.svm.warp_to_slot(3);
+    env.push_auth_mark_for_asset_as_admin(1, 3, INITIAL_PRICE);
+    for now_slot in [3, 4] {
+        env.svm.warp_to_slot(now_slot);
+        for account in [long, short] {
+            env.svm.expire_blockhash();
+            env.crank(
+                account,
+                ProgInstruction::PermissionlessCrank {
+                    now_slot,
+                    observations: crank_observations(1),
+                },
+            );
+        }
+    }
+    let (_, round_trip) = env.market_state();
+    assert_eq!(round_trip.assets[1].effective_price, INITIAL_PRICE);
+    assert_eq!(
+        round_trip.assets[1].k_long, 0,
+        "round-trip price clears long K"
+    );
+    assert_eq!(
+        round_trip.assets[1].k_short, 0,
+        "round-trip price clears short K"
+    );
+    assert_ne!(
+        round_trip.assets[1].f_long_num, 0,
+        "control: round-trip leaves path-dependent funding history"
+    );
+    assert_ne!(
+        round_trip.assets[1].f_short_num, 0,
+        "control: round-trip leaves path-dependent funding history"
+    );
+
+    env.svm.expire_blockhash();
+    env.trade_asset_with_cu(
+        1,
+        &long_owner,
+        long,
+        &short_owner,
+        short,
+        -1,
+        INITIAL_PRICE,
+        0,
+    );
+    assert!(percolator::active_bitmap_is_empty(active_bitmap(
+        &env.portfolio_state(long)
+    )));
+    assert!(percolator::active_bitmap_is_empty(active_bitmap(
+        &env.portfolio_state(short)
+    )));
+
+    let backing = env.market_state().1;
+    let backing_dest = env.token_account(env.admin.pubkey(), 0);
+    for domain in [2usize, 3] {
+        let backing_num = backing.source_backing_buckets[domain].fresh_unliened_backing_num;
+        assert_eq!(backing_num % BOUND_SCALE, 0);
+        let amount = backing_num / BOUND_SCALE;
+        if amount != 0 {
+            env.withdraw_backing_bucket_to_admin_token_with_cu(backing_dest, domain as u16, amount);
+        }
+    }
+
+    let (_, flat) = env.market_state();
+    let asset = flat.assets[1];
+    assert_eq!(asset.oi_eff_long_q, 0);
+    assert_eq!(asset.oi_eff_short_q, 0);
+    assert_eq!(asset.stored_pos_count_long, 0);
+    assert_eq!(asset.stored_pos_count_short, 0);
+    assert_eq!(asset.stale_account_count_long, 0);
+    assert_eq!(asset.stale_account_count_short, 0);
+    assert_eq!(asset.pending_obligation_count_long, 0);
+    assert_eq!(asset.pending_obligation_count_short, 0);
+    assert_ne!(
+        asset.f_long_num, 0,
+        "historical funding index remains nonzero"
+    );
+    assert_ne!(
+        asset.f_short_num, 0,
+        "historical funding index remains nonzero"
+    );
+    let old_market_id = asset.market_id;
+    let vault_before = flat.vault;
+
+    let admin = env.admin.insecure_clone();
+    env.svm.expire_blockhash();
+    let retire = env.send(
+        ProgInstruction::UpdateAssetLifecycle {
+            action: processor::ASSET_ACTION_RETIRE,
+            asset_index: 1,
+            now_slot: 4,
+            initial_price: 0,
+            insurance_authority: admin.pubkey().to_bytes(),
+            insurance_operator: admin.pubkey().to_bytes(),
+            backing_bucket_authority: admin.pubkey().to_bytes(),
+            oracle_authority: admin.pubkey().to_bytes(),
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&admin],
+    );
+    let retire_cu = retire
+        .unwrap_or_else(|err| panic!("a fully closed funded asset must remain retireable: {err}"));
+    assert_cu_within(
+        "retire fully closed funded asset",
+        retire_cu,
+        CUSTODY_CU_LIMIT,
+    );
+
+    let (_, retired) = env.market_state();
+    assert_eq!(retired.assets[1].lifecycle, AssetLifecycleV16::Retired);
+    assert_eq!(retired.assets[1].f_long_num, 0);
+    assert_eq!(retired.assets[1].f_short_num, 0);
+    assert_eq!(retired.vault, vault_before);
+
+    env.svm.warp_to_slot(5);
+    env.svm.expire_blockhash();
+    env.activate_asset(1, 5, INITIAL_PRICE);
+    let (_, reactivated) = env.market_state();
+    assert_eq!(reactivated.assets[1].lifecycle, AssetLifecycleV16::Active);
+    assert_ne!(reactivated.assets[1].market_id, old_market_id);
+    assert_eq!(reactivated.assets[1].f_long_num, 0);
+    assert_eq!(reactivated.assets[1].f_short_num, 0);
+    assert_eq!(reactivated.vault, vault_before);
+    assert_eq!(reactivated.vault as u64, env.token_amount(env.vault));
+}
+
 fn crank_observations_with_accounts(
     asset_index: u16,
     oracle_accounts: u8,
