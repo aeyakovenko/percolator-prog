@@ -677,7 +677,7 @@ There are two different insurance withdrawal surfaces:
 - live `WithdrawInsuranceAsset`, which is a per-asset operator path bounded by that asset's funded
   long+short insurance budget
 
-Live insurance withdrawal is intentionally stricter. It is expected to be allowed only when the live market is flat or loss-current, target/effective-lag-free, stress-free, h-lock-free, and has non-negative senior residual. In other words, live insurance can be withdrawn from an empty or fully healthy market, but not while the insurance fund is still protecting unresolved loss or bankruptcy work.
+Live insurance withdrawal is intentionally stricter. It is allowed only when the target asset is empty of positions and unresolved loss state, target/effective-lag-free, stress-free, h-lock-free, and has non-negative senior residual. The market account cannot prove that every exposed portfolio has absorbed the latest oracle epoch, so insurance remains locked while users have exposure and can only be released once it is no longer protecting loss or bankruptcy work.
 
 ### Product intuition
 

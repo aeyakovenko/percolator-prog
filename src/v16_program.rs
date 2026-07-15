@@ -8106,6 +8106,13 @@ pub mod processor {
             let ledger_authority = if live_mode {
                 let shutdown_drain =
                     live_domain_withdraw_health_or_shutdown_view(&cfg, &group, long_domain)?;
+                // The market account cannot enumerate portfolios to prove that every account has
+                // absorbed the latest oracle epoch. Keep live insurance locked while this asset has
+                // any position or unresolved loss state; otherwise an operator can withdraw the
+                // reserve after a mark is accrued by another account but before the loser refreshes.
+                if asset_local_has_position_or_loss_state_view(&group, asset_index) {
+                    return Err(PercolatorError::EngineLockActive.into());
+                }
                 let local_authorized =
                     live_authority_matches(&authorities.insurance_operator, operator.key);
                 let admin_shutdown_authorized = asset_index != 0
