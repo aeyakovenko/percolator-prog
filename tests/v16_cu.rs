@@ -59602,3 +59602,139 @@ fn v16_attack_backing_topup_rejects_lapsed_expiry() {
         "valid topup credits exactly the backing"
     );
 }
+
+// Public DoS regression: permissionless creators grow the market one asset at a time. The Anchor v2
+// entrypoint must preserve each transaction's original account length so repeated reallocations keep
+// working after the market crosses the 10 KiB per-instruction growth threshold. At the maximum shape
+// reachable under the creation-fee TVL cap, provider recovery and CloseSlab must remain bounded.
+#[test]
+fn v16_attack_permissionless_market_growth_keeps_close_slab_bounded() {
+    const LAST_ASSET: u16 = 1_538;
+    const MIDDLE_ASSET: u16 = LAST_ASSET / 2;
+    const MIDDLE_INSURANCE: u128 = 123;
+    const CREATE_FEE: u128 = 1;
+
+    let mut env = V16CuEnv::new();
+    env.update_market_init_fee_policy_with_cu(CREATE_FEE);
+
+    let payer = env.payer.insecure_clone();
+    send_raw_tx(
+        &mut env.svm,
+        &payer,
+        system_instruction::transfer(&payer.pubkey(), &env.market, 30_000_000_000),
+        &[],
+    )
+    .expect("fund public market-growth rent headroom");
+
+    let creator = Keypair::new();
+    let creator_key = creator.pubkey();
+    let mut total_create_fees = 0u128;
+    let mut max_append_cu = 0u64;
+    for asset_index in 1..=LAST_ASSET {
+        let slot = asset_index as u64;
+        let fee = CREATE_FEE << (asset_index as usize / 32);
+        total_create_fees += fee;
+        env.svm.warp_to_slot(slot);
+        env.svm.expire_blockhash();
+        let (_, cu) = env.activate_permissionless_asset_with_fee(
+            &creator,
+            asset_index,
+            slot,
+            100,
+            creator_key,
+            creator_key,
+            creator_key,
+            creator_key,
+            fee,
+        );
+        max_append_cu = max_append_cu.max(cu);
+    }
+    assert_cu_within(
+        "max-public-shape permissionless append",
+        max_append_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    let next_fee = CREATE_FEE << ((LAST_ASSET as usize + 1) / 32);
+    assert!(total_create_fees <= percolator::MAX_VAULT_TVL);
+    assert!(
+        total_create_fees + next_fee > percolator::MAX_VAULT_TVL,
+        "probe reaches the last permissionless append allowed by the vault cap"
+    );
+
+    let middle_domain = MIDDLE_ASSET * 2;
+    let middle_topup_cu = env
+        .top_up_insurance_domain_with_authority_and_cu(&creator, middle_domain, MIDDLE_INSURANCE)
+        .1;
+    assert_cu_within(
+        "max-public-shape middle-domain insurance top-up",
+        middle_topup_cu,
+        CUSTODY_CU_LIMIT,
+    );
+
+    let market_before_wind_down = env.svm.get_account(&env.market).unwrap();
+    let (_, grown) = env.market_state();
+    assert_eq!(
+        grown.config.max_market_slots,
+        LAST_ASSET as u32 + 1,
+        "all growth came through public contiguous appends"
+    );
+    assert!(
+        market_before_wind_down.data.len() > 10_240,
+        "the probe must cross the entrypoint resize boundary"
+    );
+    assert_eq!(
+        grown.insurance,
+        total_create_fees + MIDDLE_INSURANCE,
+        "creation fees and the middle provider's insurance remain fully accounted"
+    );
+    assert_eq!(
+        grown.insurance_domain_budget[middle_domain as usize], MIDDLE_INSURANCE,
+        "the public middle asset carries a real provider-owned terminal claim"
+    );
+    assert_eq!(
+        market_before_wind_down.data.len(),
+        state::market_account_len_for_capacity(LAST_ASSET as usize + 1).unwrap(),
+        "public appends produced the expected dynamic market size"
+    );
+
+    env.resolve();
+    let (creator_dest, middle_withdraw_cu) =
+        env.withdraw_terminal_insurance_with_authority(&creator, MIDDLE_INSURANCE);
+    assert_cu_within(
+        "max-public-shape middle-domain WithdrawInsurance",
+        middle_withdraw_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    assert_eq!(env.token_amount(creator_dest), MIDDLE_INSURANCE as u64);
+
+    let admin = env.admin.insecure_clone();
+    env.withdraw_terminal_insurance_with_authority(&admin, total_create_fees);
+    let (_, wound_down) = env.market_state();
+    assert_eq!(wound_down.vault, 0);
+    assert_eq!(wound_down.insurance, 0);
+    assert_eq!(wound_down.c_tot, 0);
+    assert_eq!(wound_down.materialized_portfolio_count, 0);
+
+    let dest = env.token_account(admin.pubkey(), 0);
+    env.svm.expire_blockhash();
+    let close_cu = env
+        .send(
+            ProgInstruction::CloseSlab,
+            vec![
+                AccountMeta::new(admin.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(env.vault_authority, false),
+                AccountMeta::new(dest, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[&admin],
+        )
+        .expect("publicly grown, fully wound-down market must remain closable");
+    assert_cu_within("publicly grown CloseSlab", close_cu, CUSTODY_CU_LIMIT);
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap().lamports,
+        0,
+        "CloseSlab releases the publicly grown market account"
+    );
+}
