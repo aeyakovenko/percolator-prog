@@ -59471,3 +59471,104 @@ fn v16_attack_backing_topup_rejects_lapsed_expiry() {
         "valid topup credits exactly the backing"
     );
 }
+
+#[test]
+fn v16_attack_live_insurance_withdraw_rejects_unsettled_stale_certificate_loss() {
+    const OPEN_PRICE: u64 = 100;
+    const INSURANCE: u128 = 500;
+
+    let mut env = V16CuEnv::new();
+    env.svm.warp_to_slot(1);
+    env.configure_auth_mark_with_cu(1, OPEN_PRICE);
+    let admin = env.admin.insecure_clone();
+    env.top_up_insurance_domain_with_authority(&admin, 0, INSURANCE);
+
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let cranker_owner = Keypair::new();
+    let long = env.create_portfolio(&long_owner);
+    let short = env.create_portfolio(&short_owner);
+    let cranker = env.create_portfolio(&cranker_owner);
+    env.deposit(&long_owner, long, 1_000_000);
+    env.deposit(&short_owner, short, 250);
+    env.trade_with_cu(
+        &long_owner,
+        long,
+        &short_owner,
+        short,
+        POS_SCALE as i128,
+        OPEN_PRICE,
+        0,
+    );
+
+    // A different account fully accrues the authenticated move. The asset-level
+    // stale and target-lag gates are now clear even though the losing account has
+    // not settled the new oracle epoch.
+    for (slot, mark) in [(2u64, 200u64), (3, 400), (4, 800)] {
+        env.svm.warp_to_slot(slot);
+        env.push_auth_mark_with_cu(slot, mark);
+        env.crank(
+            cranker,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: slot,
+                observations: crank_observations(0),
+            },
+        );
+    }
+
+    let before_withdraw = env.market_state().1;
+    let stale_short = env.portfolio_state(short);
+    assert_eq!(before_withdraw.assets[0].effective_price, 800);
+    assert_eq!(before_withdraw.assets[0].raw_oracle_target_price, 800);
+    assert!(
+        health_cert(&stale_short).cert_oracle_epoch < before_withdraw.oracle_epoch,
+        "the losing account remains stale after another account accrues the mark"
+    );
+    assert_eq!(before_withdraw.assets[0].oi_eff_short_q, POS_SCALE);
+    assert!(!before_withdraw.bankruptcy_hlock_active);
+    assert!(!before_withdraw.threshold_stress_active);
+    assert!(!before_withdraw.loss_stale_active);
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    env.svm.expire_blockhash();
+    let withdraw = env.try_withdraw_insurance_asset_with_authority(&admin, 0, INSURANCE);
+    assert!(
+        withdraw.is_err(),
+        "live insurance must remain locked while stale accounts can realize losses"
+    );
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+    assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+
+    // The retained reserve is economically necessary: once the stale short is
+    // refreshed and liquidated, it absorbs the 450-atom capital deficit. No B
+    // social loss may be pushed onto the winning side.
+    env.svm.expire_blockhash();
+    env.crank(
+        short,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 4,
+            observations: vec![],
+        },
+    );
+    assert!(health_cert(&env.portfolio_state(short)).certified_liq_deficit > 0);
+
+    env.svm.expire_blockhash();
+    env.crank(
+        short,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 4,
+            observations: vec![],
+        },
+    );
+    let after_liquidation = env.market_state().1;
+    assert_eq!(after_liquidation.insurance, 50);
+    assert_eq!(after_liquidation.assets[0].b_long_num, 0);
+    assert_eq!(after_liquidation.assets[0].b_epoch_start_long_num, 0);
+    assert_eq!(
+        after_liquidation.assets[0].explicit_unallocated_loss_long,
+        0
+    );
+    assert_eq!(after_liquidation.vault as u64, env.token_amount(env.vault));
+    assert!(after_liquidation.vault >= after_liquidation.c_tot + after_liquidation.insurance);
+}
