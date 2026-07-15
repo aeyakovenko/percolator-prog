@@ -7479,15 +7479,12 @@ pub mod processor {
         }
         let profile = read_oracle_profile_for_asset(&market_data, &cfg, asset_index)?;
         let authorities = domain_authorities_from_profile(&cfg, &profile, asset_index);
-        let local_authorized = match authority_kind {
-            DOMAIN_WITHDRAW_AUTH_INSURANCE => {
-                live_authority_matches(&authorities.insurance_operator, authority.key)
-            }
-            DOMAIN_WITHDRAW_AUTH_BACKING => {
-                live_authority_matches(&authorities.backing_bucket_authority, authority.key)
-            }
+        let withdrawal_authority = match authority_kind {
+            DOMAIN_WITHDRAW_AUTH_INSURANCE => authorities.insurance_operator,
+            DOMAIN_WITHDRAW_AUTH_BACKING => authorities.backing_bucket_authority,
             _ => return Err(PercolatorError::InvalidInstruction.into()),
         };
+        let local_authorized = live_authority_matches(&withdrawal_authority, authority.key);
         if !local_authorized && !live_authority_matches(&cfg.marketauth, authority.key) {
             return Err(PercolatorError::Unauthorized.into());
         }
@@ -7495,7 +7492,7 @@ pub mod processor {
         expect_key(vault_authority_ai, &vault_authority)?;
         verify_withdrawable_token_accounts(
             dest_token,
-            authority.key,
+            &Pubkey::new_from_array(withdrawal_authority),
             vault_token,
             &vault_authority,
             &cfg,
@@ -7671,11 +7668,9 @@ pub mod processor {
             if !local_authorized && !admin_shutdown_authorized {
                 return Err(PercolatorError::Unauthorized.into());
             }
-            let ledger_authority = if admin_shutdown_authorized && !local_authorized {
-                cfg.marketauth
-            } else {
-                authorities.backing_bucket_authority
-            };
+            // Marketauth may drive mature shutdown cleanup, but the backing principal and its
+            // accounting remain owned by the provider authority.
+            let ledger_authority = authorities.backing_bucket_authority;
 
             let (_, bucket) = backing_domain_parts_view(&group, domain_usize)?;
             let mut ledger_data = if let Some(ledger_ai) = ledger_ai {
@@ -7796,11 +7791,7 @@ pub mod processor {
             if !local_authorized && !admin_shutdown_authorized {
                 return Err(PercolatorError::Unauthorized.into());
             }
-            let ledger_authority = if admin_shutdown_authorized && !local_authorized {
-                cfg.marketauth
-            } else {
-                authorities.backing_bucket_authority
-            };
+            let ledger_authority = authorities.backing_bucket_authority;
 
             let (_, bucket) = backing_domain_parts_view(&group, domain_usize)?;
             if amount > bucket.utilization_fee_earnings || amount > group.header.vault.get() {
@@ -8078,11 +8069,21 @@ pub mod processor {
             {
                 return Err(PercolatorError::InvalidInstruction.into());
             }
+            let profile = read_oracle_profile_for_asset(&market_data, &cfg, asset_index)?;
+            let authorities = domain_authorities_from_profile(&cfg, &profile, asset_index);
+            let local_operator =
+                live_authority_matches(&authorities.insurance_operator, operator.key);
+            // A marketauth fallback can submit shutdown cleanup, but cannot become its payee.
+            let destination_owner = if local_operator {
+                *operator.key
+            } else {
+                Pubkey::new_from_array(authorities.insurance_authority)
+            };
             let (vault_authority, _) = derive_vault_authority(program_id, market_ai.key);
             expect_key(vault_authority_ai, &vault_authority)?;
             verify_withdrawable_token_accounts(
                 dest_token,
-                operator.key,
+                &destination_owner,
                 vault_token,
                 &vault_authority,
                 &cfg,
@@ -8114,11 +8115,7 @@ pub mod processor {
                 if !local_authorized && !admin_shutdown_authorized {
                     return Err(PercolatorError::Unauthorized.into());
                 }
-                if admin_shutdown_authorized && !local_authorized {
-                    cfg.marketauth
-                } else {
-                    authorities.insurance_authority
-                }
+                authorities.insurance_authority
             } else {
                 if group.header.materialized_portfolio_count.get() != 0
                     || group.header.c_tot.get() != 0
