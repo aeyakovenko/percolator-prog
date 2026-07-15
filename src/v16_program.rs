@@ -4639,6 +4639,19 @@ pub mod processor {
         }
     }
 
+    fn require_authority_mark_quorum(
+        authorities: DomainAuthoritiesV16,
+        oracle_signer: &AccountInfo,
+        backing_guardian: &AccountInfo,
+    ) -> ProgramResult {
+        if authorities.oracle_authority == authorities.backing_bucket_authority {
+            return Err(PercolatorError::InvalidInstruction.into());
+        }
+        expect_signer(backing_guardian)?;
+        expect_live_authority(&authorities.oracle_authority, oracle_signer.key)?;
+        expect_live_authority(&authorities.backing_bucket_authority, backing_guardian.key)
+    }
+
     fn domain_authorities_from_view(
         group: &state::MarketViewMutV16<'_>,
         cfg: &WrapperConfigV16,
@@ -9750,9 +9763,7 @@ pub mod processor {
             )?;
             require_asset_active_for_oracle_reconfiguration_view(&group, asset_index_usize)?;
             let existing_profile = read_oracle_profile_from_view(&group, &cfg, asset_index_usize)?;
-            // Asset 0 has a real stored profile; gate oracle reconfiguration on its
-            // oracle_authority exactly like permissionless assets 1..N.
-            expect_live_authority(&existing_profile.oracle_authority, admin.key)?;
+            expect_live_authority(&existing_profile.asset_admin, admin.key)?;
 
             let mut profile = state::AssetOracleProfileV16 {
                 oracle_mode: constants::ORACLE_MODE_HYBRID_AFTER_HOURS,
@@ -9876,9 +9887,7 @@ pub mod processor {
             )?;
             require_asset_active_for_oracle_reconfiguration_view(&group, asset_index_usize)?;
             let existing_profile = read_oracle_profile_from_view(&group, &cfg, asset_index_usize)?;
-            // Asset 0 has a real stored profile; gate oracle reconfiguration on its
-            // oracle_authority exactly like permissionless assets 1..N.
-            expect_live_authority(&existing_profile.oracle_authority, admin.key)?;
+            expect_live_authority(&existing_profile.asset_admin, admin.key)?;
 
             let profile = state::AssetOracleProfileV16 {
                 oracle_mode: constants::ORACLE_MODE_EWMA_MARK,
@@ -9984,9 +9993,7 @@ pub mod processor {
             )?;
             require_asset_active_for_oracle_reconfiguration_view(&group, asset_index_usize)?;
             let existing_profile = read_oracle_profile_from_view(&group, &cfg, asset_index_usize)?;
-            // Asset 0 has a real stored profile; gate oracle reconfiguration on its
-            // oracle_authority exactly like permissionless assets 1..N.
-            expect_live_authority(&existing_profile.oracle_authority, authority.key)?;
+            expect_live_authority(&existing_profile.asset_admin, authority.key)?;
 
             let profile = state::AssetOracleProfileV16 {
                 oracle_mode: constants::ORACLE_MODE_AUTH_MARK,
@@ -10067,6 +10074,7 @@ pub mod processor {
     ) -> ProgramResult {
         let authority = account(accounts, 0)?;
         let market_ai = account(accounts, 1)?;
+        let backing_guardian = account(accounts, 2)?;
         expect_signer(authority)?;
         expect_writable(market_ai)?;
         expect_owner(market_ai, program_id)?;
@@ -10095,7 +10103,7 @@ pub mod processor {
                 return Err(PercolatorError::Unauthorized.into());
             }
             let authorities = domain_authorities_from_profile(&cfg, &profile, asset_index_usize);
-            expect_live_authority(&authorities.oracle_authority, authority.key)?;
+            require_authority_mark_quorum(authorities, authority, backing_guardian)?;
             if authenticated_slot < profile.mark_ewma_last_slot
                 || authenticated_slot < group.header.current_slot.get()
             {
@@ -10148,6 +10156,7 @@ pub mod processor {
     ) -> ProgramResult {
         let authority = account(accounts, 0)?;
         let market_ai = account(accounts, 1)?;
+        let backing_guardian = account(accounts, 2)?;
         expect_signer(authority)?;
         expect_writable(market_ai)?;
         expect_owner(market_ai, program_id)?;
@@ -10176,7 +10185,7 @@ pub mod processor {
                 return Err(PercolatorError::Unauthorized.into());
             }
             let authorities = domain_authorities_from_profile(&cfg, &profile, asset_index_usize);
-            expect_live_authority(&authorities.oracle_authority, authority.key)?;
+            require_authority_mark_quorum(authorities, authority, backing_guardian)?;
             if authenticated_slot < profile.mark_ewma_last_slot
                 || authenticated_slot < group.header.current_slot.get()
             {

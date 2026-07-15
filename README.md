@@ -446,8 +446,8 @@ This section describes intent and operational ordering, not argument-by-argument
 - External-oracle markets authenticate configured oracle account(s) in the oracle configuration/crank
   paths; `TradeCpi` / `TradeNoCpi` use the already-stored effective mark for fee and settlement
   accounting.
-- AuthMark markets use **ConfigureAuthMark** (tag 62) and **PushAuthMark** (tag 63), signed by the configured mark authority, to store a direct authority mark without EWMA smoothing.
-- EwmaMark markets use **ConfigureEwmaMark** (tag 35) and **PushEwmaMark** (tag 36), signed by the configured mark authority, to update a smoothed EWMA mark input.
+- AuthMark markets use **ConfigureAuthMark** (tag 62) and **PushAuthMark** (tag 63) to store a direct authority mark without EWMA smoothing. Configuration requires the asset's `asset_admin`; a push requires the distinct configured `oracle_authority` and `backing_bucket_authority` to co-sign.
+- EwmaMark markets use **ConfigureEwmaMark** (tag 35) and **PushEwmaMark** (tag 36) to update a smoothed EWMA mark input. Configuration is asset-admin governed, and mark pushes use the same two-authority quorum.
 - The per-slot effective-price movement cap is a risk parameter set at init; there is no standalone `SetOraclePriceCap` instruction in the current ABI.
 
 ### Insurance management
@@ -554,8 +554,9 @@ AuthMark is the direct authority-mark path:
 
 - **Direct mark API**: `ConfigureAuthMark { asset_index, now_slot, initial_mark_e6 }` and `PushAuthMark { asset_index, now_slot, mark_e6 }`.
 - **No EWMA configuration**: there is no halflife, mark-min-fee, feed id, confidence filter, invert flag, or unit-scale configuration in the AuthMark API.
-- **Authority boundary**: only the configured mark authority can push a new mark; public cranks can only consume the stored mark.
-- **Adapter-friendly**: a separate oracle adapter PDA can verify Pyth, Chainlink, Switchboard, or custom feed policy, then sign `PushAuthMark` with the resulting mark.
+- **Authority boundary**: configuration requires the asset's `asset_admin`; every push requires both the configured `oracle_authority` and the configured `backing_bucket_authority`, and those authorities must be distinct. Public cranks can only consume the stored mark.
+- **Push accounts**: `[oracle_authority (signer), market (writable), backing_bucket_authority (signer)]` for both `PushAuthMark` and `PushEwmaMark`.
+- **Adapter-friendly**: an oracle adapter PDA can verify Pyth, Chainlink, Switchboard, or custom feed policy and occupy the oracle role; an independently controlled backing guardian must co-sign the resulting mark.
 - **Trade isolation**: `TradeCpi` and `TradeNoCpi` do not rewrite the AuthMark target or charge EWMA mark-movement fees.
 
 ### EwmaMark mode
@@ -568,6 +569,13 @@ EwmaMark is the smoothed authority-mark path for markets that use an internal ma
 - **Execution-price consent**: `TradeCpi` and `TradeNoCpi` both allow counterparties to agree on an execution price. The wrapper clamps mark/index impact and charges dynamic mark-movement fees; it does not reject solely because the agreed execution is away from the current effective price.
 - **Bilateral no-CPI trading**: `TradeNoCpi` is available in EwmaMark and external-oracle markets when both account owners sign. `TradeCpi` adds LP matcher-config binding, but the price-flexibility policy is the same.
 
+The effective-price movement cap limits one-slot movement but is not an oracle-compromise defense: a
+valid signer could otherwise ratchet a fabricated target until the effective mark converged. The
+independent backing quorum prevents one compromised oracle key from doing that. Existing deployments
+whose oracle and backing authorities are the same key must rotate either authority with
+`UpdateAssetAuthority` before the next authority-mark push. Compromise or collusion of both quorum
+authorities remains a trust assumption.
+
 ### Hybrid after-hours mode
 
 Hybrid after-hours mode is a single external-oracle configuration with dynamic mark-movement fees:
@@ -579,7 +587,7 @@ Hybrid after-hours mode is a single external-oracle configuration with dynamic m
 
 In the v16 multi-asset wrapper, Hybrid/AuthMark/EwmaMark configuration is per asset. Every active
 asset `0..N` has its own stored oracle profile and is reconfigured only by that asset's
-`oracle_authority`; asset `0` is mirrored into the legacy wrapper-config oracle fields for
+`asset_admin`; asset `0` is mirrored into the legacy wrapper-config oracle fields for
 compatibility, but other assets do not inherit asset `0`'s mark or composite oracle state. Additional
 asset slots can be activated, drained, retired, and reused independently. Reused slots get a new
 monotonic `market_id`, and stale portfolio legs/source claims/close ledgers from the retired id fail
@@ -823,8 +831,8 @@ These are governance powers, not bugs:
    - force-shutdown any asset including asset 0. Restart is not a separate marketauth power: it requires the target asset's `asset_admin`; marketauth can restart asset 0 only while it still holds the asset-0 admin role.
    - impact: economics/market shape can become unfavorable to users (force-shutdown still honors the trader exit window).
 3. `UpdateAssetAuthority { asset_index = 0, kind = ASSET_AUTH_ORACLE }` (while marketauth holds asset-0's `asset_admin`)
-   - choose who can push asset-0 AuthMark/EwmaMark updates.
-   - impact: authority mark input control/censorship surface.
+   - choose the oracle half of asset-0's AuthMark/EwmaMark push quorum. The distinct backing authority must still co-sign.
+   - impact: mark censorship, but not unilateral mark fabrication unless the backing authority also colludes or is rotated.
 4. `ResolveMarket`
    - transition market to resolved mode using stored authority price.
    - impact: trading/deposits/new accounts are halted; market enters wind-down.
@@ -841,10 +849,10 @@ These are governance powers, not bugs:
     - decommission market account and recover slab lamports.
     - impact: market is permanently closed.
 
-> **Authority model (items 3, 5, 7).** Asset-0's insurance/operator/oracle(mark)/backing authorities now
+> **Authority model.** Asset-0's insurance/operator/oracle(mark)/backing authorities now
 > use the **same per-asset `asset_admin` model as assets 1..N** (`UpdateAssetAuthority { asset_index = 0 }`).
 > Asset 0's `asset_admin` is bootstrapped to the **market admin** at `InitMarket`, so a malicious admin
-> **can** rotate the shared insurance operator/authority and the mark pusher (items 3/5/7) —
+> **can** rotate the shared insurance operator/authority and both mark-quorum roles —
 > exactly the powers the asset_admin has over any asset. To make those delegations sticky, burn
 > asset-0's **`asset_admin`** (set to 0); no key can rotate asset-0's sub-authorities again, and the
 > current holders are frozen. The market-wide `UpdateAuthority` (tag 32) rotates only `marketauth`; the per-asset
@@ -866,8 +874,11 @@ These are intended hard boundaries enforced in code and test suites:
    - covered by `v16_attack_update_authority_non_holder_cannot_rotate`.
 3. Cannot burn `marketauth` to zero, even when permissionless wind-down liveness is configured.
    - covered by `v16_attack_marketauth_renounce_rejected_even_with_fallback`.
-4. Cannot push authority oracle prices unless signer == `oracle_authority`.
-   - covered by `v16_attack_non_authority_cannot_push_auth_mark`.
+4. Cannot push authority oracle prices unless the distinct configured `oracle_authority` and
+   `backing_bucket_authority` both sign.
+   - covered by `v16_attack_non_authority_cannot_push_auth_mark`,
+     `v16_attack_one_key_cannot_fill_both_authority_mark_quorum_roles`, and
+     `v16_attack_compromised_auth_mark_signer_cannot_extract_permissionless_lp_capital`.
 5. Cannot resolve without an authority price, or resolve twice.
    - covered by resolved-mode and oracle-management tests.
 6. Cannot withdraw insurance before resolution or while any account still has open position.

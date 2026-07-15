@@ -499,6 +499,7 @@ struct V16CuEnv {
     program_id: Pubkey,
     payer: Keypair,
     admin: Keypair,
+    authority_mark_oracle: Keypair,
     market: Pubkey,
     mint: Pubkey,
     vault: Pubkey,
@@ -691,6 +692,7 @@ impl V16CuEnv {
 
         let payer = Keypair::new();
         let admin = Keypair::new();
+        let authority_mark_oracle = Keypair::new();
         let market = Pubkey::new_unique();
         let mint = Pubkey::new_unique();
         let vault_authority =
@@ -774,6 +776,7 @@ impl V16CuEnv {
             program_id,
             payer,
             admin,
+            authority_mark_oracle,
             market,
             mint,
             vault,
@@ -2542,6 +2545,8 @@ impl V16CuEnv {
     }
 
     fn push_ewma_mark_with_cu(&mut self, now_slot: u64, mark_e6: u64) -> u64 {
+        let admin = self.admin.insecure_clone();
+        let (oracle, backing_guardian) = self.authority_mark_quorum_signers(0, &admin);
         send_tx(
             &mut self.svm,
             self.program_id,
@@ -2552,12 +2557,65 @@ impl V16CuEnv {
                 mark_e6,
             },
             vec![
-                AccountMeta::new(self.admin.pubkey(), true),
+                AccountMeta::new(oracle.pubkey(), true),
                 AccountMeta::new(self.market, false),
+                AccountMeta::new_readonly(backing_guardian.pubkey(), true),
             ],
-            &[&self.admin],
+            &[&oracle, &backing_guardian],
         )
         .expect("push ewma_mark mark")
+    }
+
+    fn authority_mark_quorum_signers(
+        &mut self,
+        asset_index: u16,
+        expected_authority: &Keypair,
+    ) -> (Keypair, Keypair) {
+        let profile = state::read_asset_oracle_profile(
+            &self.svm.get_account(&self.market).unwrap().data,
+            asset_index as usize,
+        )
+        .unwrap();
+        let expected_key = expected_authority.pubkey().to_bytes();
+        let helper_oracle_key = self.authority_mark_oracle.pubkey().to_bytes();
+
+        if profile.oracle_authority == profile.backing_bucket_authority {
+            assert_eq!(
+                profile.asset_admin, expected_key,
+                "test helper needs the asset admin to split equal oracle/backing authorities"
+            );
+            let helper_oracle = self.authority_mark_oracle.insecure_clone();
+            self.try_update_per_asset_authority_with_cu(
+                expected_authority,
+                Some(&helper_oracle),
+                asset_index,
+                percolator_prog::processor::ASSET_AUTH_ORACLE,
+                helper_oracle.pubkey().to_bytes(),
+            )
+            .expect("split authority-mark oracle and backing guardian");
+        }
+
+        let profile = state::read_asset_oracle_profile(
+            &self.svm.get_account(&self.market).unwrap().data,
+            asset_index as usize,
+        )
+        .unwrap();
+        let oracle = if profile.oracle_authority == expected_key {
+            expected_authority.insecure_clone()
+        } else if profile.oracle_authority == helper_oracle_key {
+            self.authority_mark_oracle.insecure_clone()
+        } else {
+            panic!("test helper does not hold the configured oracle authority")
+        };
+        let backing_guardian = if profile.backing_bucket_authority == expected_key {
+            expected_authority.insecure_clone()
+        } else if profile.backing_bucket_authority == self.admin.pubkey().to_bytes() {
+            self.admin.insecure_clone()
+        } else {
+            panic!("test helper needs the configured backing authority signer")
+        };
+        assert_ne!(oracle.pubkey(), backing_guardian.pubkey());
+        (oracle, backing_guardian)
     }
 
     fn configure_auth_mark_with_cu(&mut self, now_slot: u64, initial_mark_e6: u64) -> u64 {
@@ -2580,6 +2638,8 @@ impl V16CuEnv {
     }
 
     fn push_auth_mark_with_cu(&mut self, now_slot: u64, mark_e6: u64) -> u64 {
+        let admin = self.admin.insecure_clone();
+        let (oracle, backing_guardian) = self.authority_mark_quorum_signers(0, &admin);
         send_tx(
             &mut self.svm,
             self.program_id,
@@ -2590,10 +2650,11 @@ impl V16CuEnv {
                 mark_e6,
             },
             vec![
-                AccountMeta::new(self.admin.pubkey(), true),
+                AccountMeta::new(oracle.pubkey(), true),
                 AccountMeta::new(self.market, false),
+                AccountMeta::new_readonly(backing_guardian.pubkey(), true),
             ],
-            &[&self.admin],
+            &[&oracle, &backing_guardian],
         )
         .expect("push auth mark")
     }
@@ -2628,6 +2689,8 @@ impl V16CuEnv {
         now_slot: u64,
         mark_e6: u64,
     ) -> u64 {
+        let admin = self.admin.insecure_clone();
+        let (oracle, backing_guardian) = self.authority_mark_quorum_signers(asset_index, &admin);
         send_tx(
             &mut self.svm,
             self.program_id,
@@ -2638,15 +2701,16 @@ impl V16CuEnv {
                 mark_e6,
             },
             vec![
-                AccountMeta::new(self.admin.pubkey(), true),
+                AccountMeta::new(oracle.pubkey(), true),
                 AccountMeta::new(self.market, false),
+                AccountMeta::new_readonly(backing_guardian.pubkey(), true),
             ],
-            &[&self.admin],
+            &[&oracle, &backing_guardian],
         )
         .expect("push auth mark for asset as admin")
     }
 
-    fn configure_auth_mark_for_asset_with_authority(
+    fn configure_auth_mark_for_asset_with_admin(
         &mut self,
         asset_index: u16,
         authority: &Keypair,
@@ -2680,6 +2744,7 @@ impl V16CuEnv {
         mark_e6: u64,
     ) -> u64 {
         self.ensure_signer_account(authority.pubkey());
+        let (oracle, backing_guardian) = self.authority_mark_quorum_signers(asset_index, authority);
         send_tx(
             &mut self.svm,
             self.program_id,
@@ -2690,12 +2755,42 @@ impl V16CuEnv {
                 mark_e6,
             },
             vec![
-                AccountMeta::new(authority.pubkey(), true),
+                AccountMeta::new(oracle.pubkey(), true),
                 AccountMeta::new(self.market, false),
+                AccountMeta::new_readonly(backing_guardian.pubkey(), true),
             ],
-            &[authority],
+            &[&oracle, &backing_guardian],
         )
         .expect("push auth mark for asset")
+    }
+
+    fn push_auth_mark_for_asset_with_quorum(
+        &mut self,
+        asset_index: u16,
+        oracle: &Keypair,
+        backing_guardian: &Keypair,
+        now_slot: u64,
+        mark_e6: u64,
+    ) -> u64 {
+        self.ensure_signer_account(oracle.pubkey());
+        self.ensure_signer_account(backing_guardian.pubkey());
+        send_tx(
+            &mut self.svm,
+            self.program_id,
+            &self.payer,
+            ProgInstruction::PushAuthMark {
+                asset_index,
+                now_slot,
+                mark_e6,
+            },
+            vec![
+                AccountMeta::new(oracle.pubkey(), true),
+                AccountMeta::new(self.market, false),
+                AccountMeta::new_readonly(backing_guardian.pubkey(), true),
+            ],
+            &[oracle, backing_guardian],
+        )
+        .expect("push auth mark with oracle/backing quorum")
     }
 
     fn resolve_stale_permissionless_with_cu(&mut self, now_slot: u64) -> u64 {
@@ -5205,31 +5300,54 @@ fn v16_attack_privileged_reactivate_rekeys_retired_slot_authorities() {
     );
     assert!(
         old_oracle_reconfig.is_err(),
-        "old permissionless creator must not retain oracle control over the reused market slot"
+        "old permissionless creator must not retain admin control over the reused market slot"
     );
     assert_eq!(
         env.svm.get_account(&env.market).unwrap(),
         market_before,
-        "rejected stale-authority oracle reconfig must not mutate the reused market"
+        "rejected stale-admin oracle reconfig must not mutate the reused market"
     );
 
-    env.ensure_signer_account(new_oracle.pubkey());
+    // Reconfiguration belongs to the reused asset's admin, while the newly installed operational
+    // oracle and backing guardian control only live mark pushes.
     env.svm.expire_blockhash();
-    let new_oracle_reconfig = env.send(
+    let admin_reconfig = env.send(
         ProgInstruction::ConfigureAuthMark {
             asset_index: 1,
             now_slot: 5,
             initial_mark_e6: 300,
         },
         vec![
-            AccountMeta::new(new_oracle.pubkey(), true),
+            AccountMeta::new(admin.pubkey(), true),
             AccountMeta::new(env.market, false),
         ],
-        &[&new_oracle],
+        &[&admin],
     );
     assert!(
-        new_oracle_reconfig.is_ok(),
-        "new oracle authority must control the reused market slot: {new_oracle_reconfig:?}"
+        admin_reconfig.is_ok(),
+        "asset admin must configure the reused market slot: {admin_reconfig:?}"
+    );
+
+    env.ensure_signer_account(new_oracle.pubkey());
+    env.ensure_signer_account(new_backing.pubkey());
+    env.svm.warp_to_slot(6);
+    env.svm.expire_blockhash();
+    let new_quorum_push = env.send(
+        ProgInstruction::PushAuthMark {
+            asset_index: 1,
+            now_slot: 6,
+            mark_e6: 350,
+        },
+        vec![
+            AccountMeta::new(new_oracle.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new_readonly(new_backing.pubkey(), true),
+        ],
+        &[&new_oracle, &new_backing],
+    );
+    assert!(
+        new_quorum_push.is_ok(),
+        "fresh oracle/backing quorum must control live pushes on the reused slot: {new_quorum_push:?}"
     );
 }
 
@@ -5406,7 +5524,7 @@ fn v16_bpf_permissionless_oracle_liquidation_uses_only_its_own_domain_insurance(
         1,
     );
     env.svm.warp_to_slot(4);
-    env.configure_auth_mark_for_asset_with_authority(3, &attacker, 4, 100);
+    env.configure_auth_mark_for_asset_with_admin(3, &attacker, 4, 100);
     env.top_up_insurance_domain_with_authority(&attacker, 6, 300);
 
     let long_owner = Keypair::new();
@@ -6304,9 +6422,9 @@ fn v16_bpf_asset0_shutdown_force_closes_preserves_insurance_and_restarts() {
         old_oracle_reconfigure.is_err(),
         "old marketauth key is no longer asset-0 oracle authority"
     );
-    env.configure_auth_mark_for_asset_with_authority(0, &new_oracle, 8, 250);
+    env.configure_auth_mark_for_asset_with_admin(0, &asset_admin, 8, 250);
     env.svm.warp_to_slot(9);
-    env.push_auth_mark_for_asset_with_authority(0, &new_oracle, 9, 260);
+    env.push_auth_mark_for_asset_with_quorum(0, &new_oracle, &backing_bucket_authority, 9, 260);
 
     env.trade_asset_with_cu(
         0,
@@ -15844,18 +15962,8 @@ fn v16_attack_cross_margin_divergent_moves_conserve() {
 
     env.svm.warp_to_slot(10);
     env.push_auth_mark_with_cu(10, 110); // asset0 up -> la gains
-    cfg_mark(
-        &mut env,
-        1,
-        10,
-        90,
-        ProgInstruction::PushAuthMark {
-            asset_index: 1,
-            now_slot: 10,
-            mark_e6: 90,
-        },
-    ); // asset1 down -> la loses
-       // crank both assets for both portfolios, two passes to converge §6.1/§6.2 warmup.
+    env.push_auth_mark_for_asset_as_admin(1, 10, 90); // asset1 down -> la loses
+                                                      // crank both assets for both portfolios, two passes to converge §6.1/§6.2 warmup.
     for slot in [10u64, 11] {
         for ai in [0u16, 1] {
             for p in [pa, pb] {
@@ -16963,14 +17071,7 @@ fn v16_regression_cross_margin_insolvency_no_value_extraction() {
     for (slot, mark) in [(1u64, 300u64), (2, 800)] {
         env.svm.warp_to_slot(slot);
         env.push_auth_mark_with_cu(slot, mark);
-        cfg(
-            &mut env,
-            ProgInstruction::PushAuthMark {
-                asset_index: 1,
-                now_slot: slot,
-                mark_e6: mark,
-            },
-        );
+        env.push_auth_mark_for_asset_as_admin(1, slot, mark);
         for ai in [0u16, 1] {
             for p in [victim, cp] {
                 env.svm.expire_blockhash();
@@ -17188,14 +17289,7 @@ fn v16_attack_resolved_cross_margin_deep_insolvency_winds_down_publicly() {
     for (slot, mark) in [(1u64, 300u64), (2, 800)] {
         env.svm.warp_to_slot(slot);
         env.push_auth_mark_with_cu(slot, mark);
-        cfg_asset1(
-            &mut env,
-            ProgInstruction::PushAuthMark {
-                asset_index: 1,
-                now_slot: slot,
-                mark_e6: mark,
-            },
-        );
+        env.push_auth_mark_for_asset_as_admin(1, slot, mark);
         for ai in [0u16, 1] {
             for p in [victim, cp] {
                 env.svm.expire_blockhash();
@@ -18663,6 +18757,8 @@ fn v16_attack_terminal_insurance_rejects_noncanonical_primary_vault() {
 fn v16_attack_extreme_auth_mark_push_rejected_or_safe() {
     let mut env = V16CuEnv::new();
     env.configure_auth_mark_with_cu(0, 100);
+    let admin = env.admin.insecure_clone();
+    let (oracle, backing_guardian) = env.authority_mark_quorum_signers(0, &admin);
     let lo_owner = Keypair::new();
     let lo = env.create_portfolio(&lo_owner);
     let sh_owner = Keypair::new();
@@ -18684,10 +18780,11 @@ fn v16_attack_extreme_auth_mark_push_rejected_or_safe() {
                 mark_e6: mark,
             },
             vec![
-                AccountMeta::new(env.admin.pubkey(), true),
+                AccountMeta::new(oracle.pubkey(), true),
                 AccountMeta::new(env.market, false),
+                AccountMeta::new_readonly(backing_guardian.pubkey(), true),
             ],
-            &[&env.admin],
+            &[&oracle, &backing_guardian],
         ); // ignore Err; we only require no panic + conservation
            // crank against whatever mark landed; must not corrupt conservation.
         env.svm.expire_blockhash();
@@ -19482,14 +19579,7 @@ fn v16_attack_cross_margin_solvent_account_not_unfairly_liquidated() {
     // both marks up 10%: victim GAINS on asset0 (long), LOSES on asset1 (short) -> net ~flat.
     env.svm.warp_to_slot(10);
     env.push_auth_mark_with_cu(10, 110);
-    cfg(
-        &mut env,
-        ProgInstruction::PushAuthMark {
-            asset_index: 1,
-            now_slot: 10,
-            mark_e6: 110,
-        },
-    );
+    env.push_auth_mark_for_asset_as_admin(1, 10, 110);
     for slot in [10u64, 11] {
         env.svm.warp_to_slot(slot);
         for ai in [0u16, 1] {
@@ -22564,6 +22654,8 @@ fn v16_attack_withdraw_to_third_party_dest_rejected() {
 #[test]
 fn v16_attack_out_of_range_asset_index_rejected() {
     let mut env = V16CuEnv::new(); // 1 asset (index 0 valid)
+    let mark_guardian = Keypair::new();
+    env.ensure_signer_account(mark_guardian.pubkey());
     let la = Keypair::new();
     let pa = env.create_portfolio(&la);
     let lb = Keypair::new();
@@ -22613,8 +22705,9 @@ fn v16_attack_out_of_range_asset_index_rejected() {
             vec![
                 AccountMeta::new(env.admin.pubkey(), true),
                 AccountMeta::new(env.market, false),
+                AccountMeta::new_readonly(mark_guardian.pubkey(), true),
             ],
-            &[&env.admin],
+            &[&env.admin, &mark_guardian],
         );
         assert!(
             rm.is_err(),
@@ -26690,7 +26783,7 @@ fn v16_attack_stale_permissionless_asset_cannot_global_resolve_market() {
         creator.pubkey(),
         1,
     );
-    env.configure_auth_mark_for_asset_with_authority(1, &creator, 1, 100);
+    env.configure_auth_mark_for_asset_with_admin(1, &creator, 1, 100);
 
     let stale_long_owner = Keypair::new();
     let stale_short_owner = Keypair::new();
@@ -26879,6 +26972,7 @@ fn v16_attack_permissionless_asset_oracle_cannot_block_base_resolve_matured() {
     let setup = || {
         let mut env = V16CuEnv::new_with_market_params_and_price_move(1, 1_000, 1_000, 500);
         let creator = Keypair::new();
+        let oracle = Keypair::new();
         let creator_key = creator.pubkey();
         env.update_market_init_fee_policy_with_cu(1);
         env.configure_permissionless_resolve_with_cu(5, 5);
@@ -26893,22 +26987,22 @@ fn v16_attack_permissionless_asset_oracle_cannot_block_base_resolve_matured() {
             creator_key,
             creator_key,
             creator_key,
-            creator_key,
+            oracle.pubkey(),
             1,
         );
-        env.configure_auth_mark_for_asset_with_authority(1, &creator, 1, 100);
+        env.configure_auth_mark_for_asset_with_admin(1, &creator, 1, 100);
 
         // Non-vacuous control: before the base stale boundary, the permissionless asset oracle
         // can push its own mark.
         env.svm.warp_to_slot(2);
-        env.push_auth_mark_for_asset_with_authority(1, &creator, 2, 101);
+        env.push_auth_mark_for_asset_with_quorum(1, &oracle, &creator, 2, 101);
         env.svm.warp_to_slot(3);
         env.push_auth_mark_with_cu(3, 100);
-        (env, creator)
+        (env, creator, oracle)
     };
 
     // Control: with no permissionless-asset interference, the base stale market is resolvable.
-    let (mut control_env, _) = setup();
+    let (mut control_env, _, _) = setup();
     control_env.svm.warp_to_slot(40);
     control_env.svm.expire_blockhash();
     let control_resolve = control_env.send(
@@ -26921,7 +27015,7 @@ fn v16_attack_permissionless_asset_oracle_cannot_block_base_resolve_matured() {
         "base market is resolve-matured without a permissionless asset oracle bump: {control_resolve:?}"
     );
 
-    let (mut env, creator) = setup();
+    let (mut env, creator, oracle) = setup();
     env.svm.warp_to_slot(40);
     let market_before = env.svm.get_account(&env.market).unwrap();
     env.svm.expire_blockhash();
@@ -26932,10 +27026,11 @@ fn v16_attack_permissionless_asset_oracle_cannot_block_base_resolve_matured() {
             mark_e6: 102,
         },
         vec![
-            AccountMeta::new(creator.pubkey(), true),
+            AccountMeta::new(oracle.pubkey(), true),
             AccountMeta::new(env.market, false),
+            AccountMeta::new_readonly(creator.pubkey(), true),
         ],
-        &[&creator],
+        &[&oracle, &creator],
     );
     assert!(
         stale_asset_push.is_err(),
@@ -26984,7 +27079,7 @@ fn v16_attack_permissionless_asset_crank_rejects_after_base_resolve_matured() {
         creator_key,
         1,
     );
-    env.configure_auth_mark_for_asset_with_authority(1, &creator, 1, 100);
+    env.configure_auth_mark_for_asset_with_admin(1, &creator, 1, 100);
 
     env.svm.warp_to_slot(3);
     env.push_auth_mark_with_cu(3, 100);
@@ -27076,7 +27171,7 @@ fn v16_attack_non_base_trade_rejects_after_base_resolve_matured() {
         creator_key,
         1,
     );
-    env.configure_auth_mark_for_asset_with_authority(1, &creator, 1, 100);
+    env.configure_auth_mark_for_asset_with_admin(1, &creator, 1, 100);
 
     env.svm.warp_to_slot(3);
     env.push_auth_mark_with_cu(3, 100);
@@ -27180,7 +27275,7 @@ fn v16_attack_non_base_tradecpi_rejects_before_matcher_after_base_resolve_mature
         creator_key,
         1,
     );
-    env.configure_auth_mark_for_asset_with_authority(1, &creator, 1, 100);
+    env.configure_auth_mark_for_asset_with_admin(1, &creator, 1, 100);
 
     let hostile = Pubkey::new_unique();
     env.svm.add_program(
@@ -29408,14 +29503,7 @@ fn v16_attack_cross_margin_divergent_close_conserves() {
     // asset0 UP (la long wins), asset1 DOWN (la short wins) -> la wins both, lb loses both.
     env.svm.warp_to_slot(10);
     env.push_auth_mark_with_cu(10, 110);
-    cfg(
-        &mut env,
-        ProgInstruction::PushAuthMark {
-            asset_index: 1,
-            now_slot: 10,
-            mark_e6: 90,
-        },
-    );
+    env.push_auth_mark_for_asset_as_admin(1, 10, 90);
     for slot in [10u64, 11] {
         env.svm.warp_to_slot(slot);
         for ai in [0u16, 1] {
@@ -40269,22 +40357,9 @@ fn v16_attack_cross_margin_netting_conserves() {
     );
 
     // asset0 UP -> x's long GAINS; asset1 UP -> x's short LOSES (offsetting legs).
-    let admin = env.admin.insecure_clone();
     env.svm.warp_to_slot(2);
     let _ = env.push_auth_mark_with_cu(2, 110);
-    env.svm.expire_blockhash();
-    let _ = env.send(
-        ProgInstruction::PushAuthMark {
-            asset_index: 1,
-            now_slot: 2,
-            mark_e6: 110,
-        },
-        vec![
-            AccountMeta::new(admin.pubkey(), true),
-            AccountMeta::new(env.market, false),
-        ],
-        &[&admin],
-    );
+    env.push_auth_mark_for_asset_as_admin(1, 2, 110);
     for ai in [0u16, 1] {
         env.svm.expire_blockhash();
         let _ = env.send(
@@ -42153,6 +42228,15 @@ fn v16_attack_pushed_mark_cannot_override_external_oracle_asset() {
     assert_eq!(env.market_state().1.assets[0].effective_price, 100_000_000);
 
     let admin = env.admin.insecure_clone();
+    let backing_guardian = Keypair::new();
+    env.try_update_per_asset_authority_with_cu(
+        &admin,
+        Some(&backing_guardian),
+        0,
+        percolator_prog::processor::ASSET_AUTH_BACKING_BUCKET,
+        backing_guardian.pubkey().to_bytes(),
+    )
+    .expect("install distinct backing guardian for pushed-mark mode-isolation probes");
     let hybrid_before = env.svm.get_account(&env.market).unwrap();
     set_test_clock(&mut env, 2, 101);
     env.svm.expire_blockhash();
@@ -42165,8 +42249,9 @@ fn v16_attack_pushed_mark_cannot_override_external_oracle_asset() {
         vec![
             AccountMeta::new(admin.pubkey(), true),
             AccountMeta::new(env.market, false),
+            AccountMeta::new_readonly(backing_guardian.pubkey(), true),
         ],
-        &[&admin],
+        &[&admin, &backing_guardian],
     );
     assert!(
         auth_push.is_err(),
@@ -42188,8 +42273,9 @@ fn v16_attack_pushed_mark_cannot_override_external_oracle_asset() {
         vec![
             AccountMeta::new(admin.pubkey(), true),
             AccountMeta::new(env.market, false),
+            AccountMeta::new_readonly(backing_guardian.pubkey(), true),
         ],
-        &[&admin],
+        &[&admin, &backing_guardian],
     );
     assert!(
         ewma_push.is_err(),
@@ -43498,6 +43584,8 @@ fn v16_attack_marketauth_renounce_rejected_even_with_fallback() {
 fn v16_attack_non_authority_cannot_push_auth_mark() {
     let mut env = V16CuEnv::new();
     env.configure_auth_mark_with_cu(0, 100); // auth-mark mode, oracle_authority defaults to admin
+    let admin = env.admin.insecure_clone();
+    let (oracle, backing_guardian) = env.authority_mark_quorum_signers(0, &admin);
     let g0 = env.market_state().1;
     assert_eq!(g0.assets[0].effective_price, 100, "mark starts at 100");
 
@@ -43518,8 +43606,9 @@ fn v16_attack_non_authority_cannot_push_auth_mark() {
         vec![
             AccountMeta::new(mallory.pubkey(), true),
             AccountMeta::new(env.market, false),
+            AccountMeta::new_readonly(backing_guardian.pubkey(), true),
         ],
-        &[&mallory],
+        &[&mallory, &backing_guardian],
     );
     assert!(r.is_err(), "a non-authority auth-mark push must reject");
 
@@ -43532,7 +43621,6 @@ fn v16_attack_non_authority_cannot_push_auth_mark() {
 
     // CONTROL: the genuine authority (admin) — the SAME push — is ACCEPTED (proving the rejection
     // above was the authority gate, not an unrelated failure).
-    let admin = env.admin.insecure_clone();
     env.svm.expire_blockhash();
     let ok = send_tx(
         &mut env.svm,
@@ -43544,10 +43632,11 @@ fn v16_attack_non_authority_cannot_push_auth_mark() {
             mark_e6: 150,
         },
         vec![
-            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(oracle.pubkey(), true),
             AccountMeta::new(env.market, false),
+            AccountMeta::new_readonly(backing_guardian.pubkey(), true),
         ],
-        &[&admin],
+        &[&oracle, &backing_guardian],
     );
     assert!(
         ok.is_ok(),
@@ -43556,11 +43645,11 @@ fn v16_attack_non_authority_cannot_push_auth_mark() {
     );
 }
 
-// security.md sweep - oracle reconfiguration authority (#6/#37): changing oracle MODE/anchor is as
-// sensitive as pushing a mark. A non-oracle-authority must not switch an empty market between EWMA,
-// AUTH_MARK, or HYBRID modes and thereby seize future price control before users arrive.
+// security.md sweep - oracle reconfiguration authority (#6/#37): changing oracle MODE/anchor is a
+// governance action. A non-asset-admin must not switch an empty market between EWMA, AUTH_MARK, or
+// HYBRID modes and thereby seize future price control before users arrive.
 #[test]
-fn v16_attack_non_authority_cannot_reconfigure_oracle_modes() {
+fn v16_attack_non_asset_admin_cannot_reconfigure_oracle_modes() {
     let mut env = V16CuEnv::new();
     let mallory = Keypair::new();
     env.ensure_signer_account(mallory.pubkey());
@@ -43587,7 +43676,7 @@ fn v16_attack_non_authority_cannot_reconfigure_oracle_modes() {
     );
     assert!(
         ewma.is_err(),
-        "non-oracle-authority must not switch the asset to EWMA mode"
+        "non-asset-admin must not switch the asset to EWMA mode"
     );
     assert_eq!(
         env.svm.get_account(&env.market).unwrap().data,
@@ -43613,7 +43702,7 @@ fn v16_attack_non_authority_cannot_reconfigure_oracle_modes() {
     );
     assert!(
         auth_mark.is_err(),
-        "non-oracle-authority must not switch the asset to AuthMark mode"
+        "non-asset-admin must not switch the asset to AuthMark mode"
     );
     assert_eq!(
         env.svm.get_account(&env.market).unwrap().data,
@@ -43654,7 +43743,7 @@ fn v16_attack_non_authority_cannot_reconfigure_oracle_modes() {
     );
     assert!(
         hybrid.is_err(),
-        "non-oracle-authority must not switch the asset to Hybrid mode"
+        "non-asset-admin must not switch the asset to Hybrid mode"
     );
     assert_eq!(
         env.svm.get_account(&env.market).unwrap().data,
@@ -43683,7 +43772,7 @@ fn v16_attack_non_authority_cannot_reconfigure_oracle_modes() {
     );
     assert!(
         control.is_ok(),
-        "the configured oracle authority can perform the same well-formed reconfiguration: {control:?}"
+        "the asset admin can perform the same well-formed reconfiguration: {control:?}"
     );
 }
 
@@ -43801,8 +43890,40 @@ fn v16_attack_mark_input_bounds_reject_atomically() {
     assert_eq!(cfg_ewma.mark_ewma_e6, 100);
     assert_eq!(cfg_ewma.mark_ewma_halflife_slots, 4);
 
+    let backing_guardian = Keypair::new();
+    env.try_update_per_asset_authority_with_cu(
+        &admin,
+        Some(&backing_guardian),
+        0,
+        percolator_prog::processor::ASSET_AUTH_BACKING_BUCKET,
+        backing_guardian.pubkey().to_bytes(),
+    )
+    .expect("install independent backing guardian for mark-push bounds probes");
+    let reject_push_unchanged = |env: &mut V16CuEnv, ix: ProgInstruction, label: &str| {
+        let before = env.svm.get_account(&env.market).unwrap();
+        env.svm.expire_blockhash();
+        let rejected = send_tx(
+            &mut env.svm,
+            env.program_id,
+            &env.payer,
+            ix,
+            vec![
+                AccountMeta::new(admin.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new_readonly(backing_guardian.pubkey(), true),
+            ],
+            &[&admin, &backing_guardian],
+        );
+        assert!(rejected.is_err(), "{label} must reject");
+        assert_eq!(
+            env.svm.get_account(&env.market).unwrap(),
+            before,
+            "{label} must leave the market byte-identical"
+        );
+    };
+
     env.svm.warp_to_slot(2);
-    reject_unchanged(
+    reject_push_unchanged(
         &mut env,
         ProgInstruction::PushEwmaMark {
             asset_index: 0,
@@ -43811,7 +43932,7 @@ fn v16_attack_mark_input_bounds_reject_atomically() {
         },
         "PushEwmaMark zero mark",
     );
-    reject_unchanged(
+    reject_push_unchanged(
         &mut env,
         ProgInstruction::PushEwmaMark {
             asset_index: 0,
@@ -43834,8 +43955,9 @@ fn v16_attack_mark_input_bounds_reject_atomically() {
         vec![
             AccountMeta::new(admin.pubkey(), true),
             AccountMeta::new(env.market, false),
+            AccountMeta::new_readonly(backing_guardian.pubkey(), true),
         ],
-        &[&admin],
+        &[&admin, &backing_guardian],
     );
     assert!(
         valid_ewma_push.is_ok(),
@@ -43866,7 +43988,7 @@ fn v16_attack_mark_input_bounds_reject_atomically() {
     );
 
     env.svm.warp_to_slot(4);
-    reject_unchanged(
+    reject_push_unchanged(
         &mut env,
         ProgInstruction::PushAuthMark {
             asset_index: 0,
@@ -43875,7 +43997,7 @@ fn v16_attack_mark_input_bounds_reject_atomically() {
         },
         "PushAuthMark zero mark",
     );
-    reject_unchanged(
+    reject_push_unchanged(
         &mut env,
         ProgInstruction::PushAuthMark {
             asset_index: 0,
@@ -43898,8 +44020,9 @@ fn v16_attack_mark_input_bounds_reject_atomically() {
         vec![
             AccountMeta::new(admin.pubkey(), true),
             AccountMeta::new(env.market, false),
+            AccountMeta::new_readonly(backing_guardian.pubkey(), true),
         ],
-        &[&admin],
+        &[&admin, &backing_guardian],
     );
     assert!(
         valid_auth_push.is_ok(),
@@ -47369,6 +47492,8 @@ fn v16_bpf_10m_market_liquidation_high_asset_stays_bounded() {
 
     env.svm.warp_to_slot(LIQUIDATION_SLOT);
     env.svm.expire_blockhash();
+    let admin = env.admin.insecure_clone();
+    let (oracle, backing_guardian) = env.authority_mark_quorum_signers(HIGH_ASSET as u16, &admin);
     let push_cu = send_tx(
         &mut env.svm,
         env.program_id,
@@ -47379,10 +47504,11 @@ fn v16_bpf_10m_market_liquidation_high_asset_stays_bounded() {
             mark_e6: 300,
         },
         vec![
-            AccountMeta::new(env.admin.pubkey(), true),
+            AccountMeta::new(oracle.pubkey(), true),
             AccountMeta::new(env.market, false),
+            AccountMeta::new_readonly(backing_guardian.pubkey(), true),
         ],
-        &[&env.admin],
+        &[&oracle, &backing_guardian],
     )
     .expect("push high-asset ewma mark");
     println!(
@@ -56623,16 +56749,20 @@ fn v16_attack_live_domain_withdrawals_reject_when_resolve_matured() {
 fn v16_attack_cross_asset_oracle_authority_cannot_push_other_asset_mark() {
     let mut env = V16CuEnv::new();
     env.configure_auth_mark_with_cu(0, 100); // asset 0 auth-mark, oracle_authority = admin
-                                             // Activate asset 1 with a DISTINCT oracle_authority A1 (a real per-asset authority).
+    let admin = env.admin.insecure_clone();
+    let (asset0_oracle, asset0_guardian) = env.authority_mark_quorum_signers(0, &admin);
+    // Activate asset 1 with a distinct oracle and backing guardian.
     let a1 = Keypair::new();
+    let a1_guardian = Keypair::new();
     env.ensure_signer_account(a1.pubkey());
+    env.ensure_signer_account(a1_guardian.pubkey());
     env.activate_asset_with_authorities(
         1,
         1,
         100,
         a1.pubkey(),
         a1.pubkey(),
-        a1.pubkey(),
+        a1_guardian.pubkey(),
         a1.pubkey(),
     );
 
@@ -56651,8 +56781,9 @@ fn v16_attack_cross_asset_oracle_authority_cannot_push_other_asset_mark() {
         vec![
             AccountMeta::new(a1.pubkey(), true),
             AccountMeta::new(env.market, false),
+            AccountMeta::new_readonly(asset0_guardian.pubkey(), true),
         ],
-        &[&a1],
+        &[&a1, &asset0_guardian],
     );
     assert!(
         r.is_err(),
@@ -56666,7 +56797,6 @@ fn v16_attack_cross_asset_oracle_authority_cannot_push_other_asset_mark() {
 
     // CONTROL: asset-0's own authority (admin) pushes asset 0 -> accepted (proves the rejection was the
     // per-asset authority gate, not an unrelated failure).
-    let admin = env.admin.insecure_clone();
     env.svm.expire_blockhash();
     let ok = send_tx(
         &mut env.svm,
@@ -56678,10 +56808,11 @@ fn v16_attack_cross_asset_oracle_authority_cannot_push_other_asset_mark() {
             mark_e6: 150,
         },
         vec![
-            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(asset0_oracle.pubkey(), true),
             AccountMeta::new(env.market, false),
+            AccountMeta::new_readonly(asset0_guardian.pubkey(), true),
         ],
-        &[&admin],
+        &[&asset0_oracle, &asset0_guardian],
     );
     assert!(ok.is_ok(), "asset-0's own authority pushes asset-0 (proves the rejection was the per-asset gate): {ok:?}");
 }
@@ -56693,21 +56824,27 @@ fn v16_attack_cross_asset_oracle_authority_cannot_push_other_asset_mark() {
 fn v16_attack_cross_asset_oracle_authority_cannot_push_other_asset_ewma_mark() {
     let mut env = V16CuEnv::new();
     env.configure_ewma_mark_with_cu(0, 100, 10, 0); // asset 0 EWMA, oracle_authority = admin
+    let admin = env.admin.insecure_clone();
+    let (asset0_oracle, asset0_guardian) = env.authority_mark_quorum_signers(0, &admin);
 
     // Activate asset 1 with a distinct real oracle_authority.
     let a1 = Keypair::new();
+    let a1_guardian = Keypair::new();
     env.ensure_signer_account(a1.pubkey());
+    env.ensure_signer_account(a1_guardian.pubkey());
     env.activate_asset_with_authorities(
         1,
         1,
         100,
         a1.pubkey(),
         a1.pubkey(),
-        a1.pubkey(),
+        a1_guardian.pubkey(),
         a1.pubkey(),
     );
 
-    // Non-vacuous control: a1 is accepted as the real oracle_authority for asset 1.
+    // Configure asset 1 through its asset admin, then prove a1 is accepted as the real operational
+    // oracle for asset 1 before attempting the same push against asset 0.
+    let asset1_admin = env.admin.insecure_clone();
     env.svm.expire_blockhash();
     let own_asset_config = send_tx(
         &mut env.svm,
@@ -56721,14 +56858,14 @@ fn v16_attack_cross_asset_oracle_authority_cannot_push_other_asset_ewma_mark() {
             mark_min_fee: 0,
         },
         vec![
-            AccountMeta::new(a1.pubkey(), true),
+            AccountMeta::new(asset1_admin.pubkey(), true),
             AccountMeta::new(env.market, false),
         ],
-        &[&a1],
+        &[&asset1_admin],
     );
     assert!(
         own_asset_config.is_ok(),
-        "asset-1's own oracle_authority configures asset-1 EWMA: {own_asset_config:?}"
+        "asset-1's asset_admin configures asset-1 EWMA: {own_asset_config:?}"
     );
     env.svm.warp_to_slot(2);
     env.svm.expire_blockhash();
@@ -56744,8 +56881,9 @@ fn v16_attack_cross_asset_oracle_authority_cannot_push_other_asset_ewma_mark() {
         vec![
             AccountMeta::new(a1.pubkey(), true),
             AccountMeta::new(env.market, false),
+            AccountMeta::new_readonly(a1_guardian.pubkey(), true),
         ],
-        &[&a1],
+        &[&a1, &a1_guardian],
     );
     assert!(
         own_asset_push.is_ok(),
@@ -56767,8 +56905,9 @@ fn v16_attack_cross_asset_oracle_authority_cannot_push_other_asset_ewma_mark() {
         vec![
             AccountMeta::new(a1.pubkey(), true),
             AccountMeta::new(env.market, false),
+            AccountMeta::new_readonly(asset0_guardian.pubkey(), true),
         ],
-        &[&a1],
+        &[&a1, &asset0_guardian],
     );
     assert!(
         r.is_err(),
@@ -56781,7 +56920,6 @@ fn v16_attack_cross_asset_oracle_authority_cannot_push_other_asset_ewma_mark() {
     );
 
     // CONTROL: asset 0's own authority can push asset 0.
-    let admin = env.admin.insecure_clone();
     env.svm.expire_blockhash();
     let ok = send_tx(
         &mut env.svm,
@@ -56793,10 +56931,11 @@ fn v16_attack_cross_asset_oracle_authority_cannot_push_other_asset_ewma_mark() {
             mark_e6: 150,
         },
         vec![
-            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(asset0_oracle.pubkey(), true),
             AccountMeta::new(env.market, false),
+            AccountMeta::new_readonly(asset0_guardian.pubkey(), true),
         ],
-        &[&admin],
+        &[&asset0_oracle, &asset0_guardian],
     );
     assert!(
         ok.is_ok(),
@@ -56808,14 +56947,13 @@ fn v16_attack_cross_asset_oracle_authority_cannot_push_other_asset_ewma_mark() {
     );
 }
 
-// Per-asset oracle-authority isolation for reconfiguration, not just mark pushes. A key that is a
-// valid oracle_authority for asset 1 must not be accepted when the target asset_index is 0; otherwise
-// a wrong-profile authority lookup could let a permissionless asset steer the base market's oracle
-// mode before exposure arrives. Each rejected attack snapshots the market account, and the same key
-// then configures asset 1 through the identical public handler to prove the signer is non-vacuously
-// valid for its own asset.
+// Per-asset admin isolation for oracle reconfiguration. A key that is asset_admin for asset 1 must
+// not be accepted when the target asset_index is 0; otherwise a wrong-profile authority lookup could
+// let a permissionless asset steer the base market's oracle mode before exposure arrives. Each
+// rejected attack snapshots the market account, and the same key then configures asset 1 through the
+// identical public handler to prove the signer is non-vacuously valid for its own asset.
 #[test]
-fn v16_attack_cross_asset_oracle_authority_cannot_reconfigure_other_asset_modes() {
+fn v16_attack_cross_asset_admin_cannot_reconfigure_other_asset_modes() {
     let setup = || {
         let mut env = V16CuEnv::new();
         env.configure_auth_mark_with_cu(0, 100);
@@ -56830,6 +56968,15 @@ fn v16_attack_cross_asset_oracle_authority_cannot_reconfigure_other_asset_modes(
             a1.pubkey(),
             a1.pubkey(),
         );
+        let market_admin = env.admin.insecure_clone();
+        env.try_update_per_asset_authority_with_cu(
+            &market_admin,
+            Some(&a1),
+            1,
+            percolator_prog::processor::ASSET_AUTH_ADMIN,
+            a1.pubkey().to_bytes(),
+        )
+        .expect("give asset 1 a distinct asset admin");
         (env, a1)
     };
 
@@ -56854,7 +57001,7 @@ fn v16_attack_cross_asset_oracle_authority_cannot_reconfigure_other_asset_modes(
         );
         assert!(
             attack.is_err(),
-            "asset-1 oracle_authority must not configure asset-0 AuthMark"
+            "asset-1 asset_admin must not configure asset-0 AuthMark"
         );
         assert_eq!(
             env.svm.get_account(&env.market).unwrap(),
@@ -56915,7 +57062,7 @@ fn v16_attack_cross_asset_oracle_authority_cannot_reconfigure_other_asset_modes(
         );
         assert!(
             attack.is_err(),
-            "asset-1 oracle_authority must not configure asset-0 EWMA"
+            "asset-1 asset_admin must not configure asset-0 EWMA"
         );
         assert_eq!(
             env.svm.get_account(&env.market).unwrap(),
@@ -56992,7 +57139,7 @@ fn v16_attack_cross_asset_oracle_authority_cannot_reconfigure_other_asset_modes(
         );
         assert!(
             attack.is_err(),
-            "asset-1 oracle_authority must not configure asset-0 Hybrid"
+            "asset-1 asset_admin must not configure asset-0 Hybrid"
         );
         assert_eq!(
             env.svm.get_account(&env.market).unwrap(),
@@ -57670,10 +57817,11 @@ fn v16_attack_cure_cannot_be_replayed_on_canceled_close_ledger() {
 #[test]
 fn v16_attack_oracle_authority_rotation_revokes_old_grants_new() {
     let mut env = V16CuEnv::new();
-    env.configure_auth_mark_with_cu(0, 100); // admin bootstraps as asset 0's oracle authority; mark = 100
+    env.configure_auth_mark_with_cu(0, 100);
     let admin = env.admin.insecure_clone();
+    let (oldauth, backing_guardian) = env.authority_mark_quorum_signers(0, &admin);
 
-    // Baseline: the current oracle authority (admin) can push a mark.
+    // Baseline: the current oracle authority can push with the independent backing guardian.
     env.svm.warp_to_slot(2);
     env.svm.expire_blockhash();
     let r0 = env.send(
@@ -57683,14 +57831,15 @@ fn v16_attack_oracle_authority_rotation_revokes_old_grants_new() {
             mark_e6: 110,
         },
         vec![
-            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(oldauth.pubkey(), true),
             AccountMeta::new(env.market, false),
+            AccountMeta::new_readonly(backing_guardian.pubkey(), true),
         ],
-        &[&admin],
+        &[&oldauth, &backing_guardian],
     );
     assert!(
         r0.is_ok(),
-        "admin (oracle authority) can push before rotation: {r0:?}"
+        "old oracle authority can push before rotation: {r0:?}"
     );
 
     // Rotate the ORACLE authority admin -> newauth. admin signs as asset_admin; newauth co-signs (proves
@@ -57726,10 +57875,11 @@ fn v16_attack_oracle_authority_rotation_revokes_old_grants_new() {
             mark_e6: 120,
         },
         vec![
-            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(oldauth.pubkey(), true),
             AccountMeta::new(env.market, false),
+            AccountMeta::new_readonly(backing_guardian.pubkey(), true),
         ],
-        &[&admin],
+        &[&oldauth, &backing_guardian],
     );
     assert!(
         r_old.is_err(),
@@ -57751,8 +57901,9 @@ fn v16_attack_oracle_authority_rotation_revokes_old_grants_new() {
         vec![
             AccountMeta::new(newauth.pubkey(), true),
             AccountMeta::new(env.market, false),
+            AccountMeta::new_readonly(backing_guardian.pubkey(), true),
         ],
-        &[&newauth],
+        &[&newauth, &backing_guardian],
     );
     assert!(
         r_new.is_ok(),
@@ -59371,6 +59522,16 @@ fn v16_attack_update_authority_handoff_rekeys_asset0_default_runtime_authorities
     .expect("current marketauth inherits asset-0 insurance fee-floor power");
     assert_eq!(env.market_state().0.trade_fee_base_bps, 500);
 
+    let backing_guardian = Keypair::new();
+    env.try_update_per_asset_authority_with_cu(
+        &new_marketauth,
+        Some(&backing_guardian),
+        0,
+        percolator_prog::processor::ASSET_AUTH_BACKING_BUCKET,
+        backing_guardian.pubkey().to_bytes(),
+    )
+    .expect("current asset admin installs an independent backing guardian");
+
     let target_before_old_push = env.market_state().0.oracle_target_price_e6;
     env.svm.warp_to_slot(2);
     env.svm.expire_blockhash();
@@ -59386,8 +59547,9 @@ fn v16_attack_update_authority_handoff_rekeys_asset0_default_runtime_authorities
         vec![
             AccountMeta::new(old_marketauth.pubkey(), true),
             AccountMeta::new(env.market, false),
+            AccountMeta::new_readonly(backing_guardian.pubkey(), true),
         ],
-        &[&old_marketauth],
+        &[&old_marketauth, &backing_guardian],
     );
     assert!(
         stale_push.is_err(),
@@ -59400,7 +59562,7 @@ fn v16_attack_update_authority_handoff_rekeys_asset0_default_runtime_authorities
     );
 
     env.svm.expire_blockhash();
-    env.push_auth_mark_for_asset_with_authority(0, &new_marketauth, 2, 777);
+    env.push_auth_mark_for_asset_with_quorum(0, &new_marketauth, &backing_guardian, 2, 777);
     assert_eq!(
         env.market_state().0.oracle_target_price_e6,
         777,
@@ -59469,5 +59631,427 @@ fn v16_attack_backing_topup_rejects_lapsed_expiry() {
         env.token_amount(env.vault),
         vault0 + 50,
         "valid topup credits exactly the backing"
+    );
+}
+
+// Oracle mode, feed, and anchor selection are governance operations, not live reporting. A
+// compromised operational oracle must therefore fail all three configuration entrypoints even
+// while the asset is flat. The asset-admin controls prove each request is otherwise valid.
+#[test]
+fn v16_attack_operational_oracle_cannot_reconfigure_any_oracle_mode() {
+    let mut env = V16CuEnv::new();
+    env.svm.warp_to_slot(1);
+    set_test_clock(&mut env, 1, 1);
+
+    let asset_admin = env.admin.insecure_clone();
+    let operational_oracle = Keypair::new();
+    env.try_update_per_asset_authority_with_cu(
+        &asset_admin,
+        Some(&operational_oracle),
+        0,
+        percolator_prog::processor::ASSET_AUTH_ORACLE,
+        operational_oracle.pubkey().to_bytes(),
+    )
+    .expect("rotate operational oracle away from asset admin");
+
+    let auth_mark = ProgInstruction::ConfigureAuthMark {
+        asset_index: 0,
+        now_slot: 1,
+        initial_mark_e6: 200,
+    };
+    let before_auth = env.svm.get_account(&env.market).unwrap();
+    env.svm.expire_blockhash();
+    let auth_attack = env.send(
+        auth_mark.clone(),
+        vec![
+            AccountMeta::new(operational_oracle.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&operational_oracle],
+    );
+    assert!(
+        auth_attack.is_err(),
+        "operational oracle must not configure AuthMark"
+    );
+    assert!(
+        auth_attack.unwrap_err().contains("Custom(8)"),
+        "AuthMark configuration must fail the asset-admin gate"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        before_auth,
+        "rejected operational-oracle AuthMark configuration is atomic"
+    );
+    env.svm.expire_blockhash();
+    let auth_control = env.send(
+        auth_mark,
+        vec![
+            AccountMeta::new(asset_admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&asset_admin],
+    );
+    assert!(
+        auth_control.is_ok(),
+        "asset admin must retain AuthMark configuration: {auth_control:?}"
+    );
+
+    let ewma_mark = ProgInstruction::ConfigureEwmaMark {
+        asset_index: 0,
+        now_slot: 1,
+        initial_mark_e6: 200,
+        mark_ewma_halflife_slots: 10,
+        mark_min_fee: 0,
+    };
+    let before_ewma = env.svm.get_account(&env.market).unwrap();
+    env.svm.expire_blockhash();
+    let ewma_attack = env.send(
+        ewma_mark.clone(),
+        vec![
+            AccountMeta::new(operational_oracle.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&operational_oracle],
+    );
+    assert!(
+        ewma_attack.is_err(),
+        "operational oracle must not configure EWMA"
+    );
+    assert!(
+        ewma_attack.unwrap_err().contains("Custom(8)"),
+        "EWMA configuration must fail the asset-admin gate"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        before_ewma,
+        "rejected operational-oracle EWMA configuration is atomic"
+    );
+    env.svm.expire_blockhash();
+    let ewma_control = env.send(
+        ewma_mark,
+        vec![
+            AccountMeta::new(asset_admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&asset_admin],
+    );
+    assert!(
+        ewma_control.is_ok(),
+        "asset admin must retain EWMA configuration: {ewma_control:?}"
+    );
+
+    let feed = [91u8; 32];
+    let pyth = env.set_pyth_price(&feed, 200_000, -6, 1);
+    let mut feeds = [[0u8; 32]; percolator_prog::constants::ORACLE_LEG_CAP];
+    feeds[0] = feed;
+    let hybrid = ProgInstruction::ConfigureHybridOracle {
+        asset_index: 0,
+        now_slot: 1,
+        now_unix_ts: 1,
+        oracle_leg_count: 1,
+        oracle_leg_flags: 0,
+        max_staleness_secs: 60,
+        hybrid_soft_stale_slots: 3,
+        mark_ewma_halflife_slots: 10,
+        mark_min_fee: 0,
+        invert: 0,
+        unit_scale: 0,
+        conf_filter_bps: 500,
+        oracle_leg_feeds: feeds,
+    };
+    let before_hybrid = env.svm.get_account(&env.market).unwrap();
+    env.svm.expire_blockhash();
+    let hybrid_attack = env.send(
+        hybrid.clone(),
+        vec![
+            AccountMeta::new(operational_oracle.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new_readonly(pyth, false),
+        ],
+        &[&operational_oracle],
+    );
+    assert!(
+        hybrid_attack.is_err(),
+        "operational oracle must not configure Hybrid"
+    );
+    assert!(
+        hybrid_attack.unwrap_err().contains("Custom(8)"),
+        "Hybrid configuration must fail the asset-admin gate"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        before_hybrid,
+        "rejected operational-oracle Hybrid configuration is atomic"
+    );
+    env.svm.expire_blockhash();
+    let hybrid_control = env.send(
+        hybrid,
+        vec![
+            AccountMeta::new(asset_admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new_readonly(pyth, false),
+        ],
+        &[&asset_admin],
+    );
+    assert!(
+        hybrid_control.is_ok(),
+        "asset admin must retain Hybrid configuration: {hybrid_control:?}"
+    );
+}
+
+#[test]
+fn v16_attack_one_key_cannot_fill_both_authority_mark_quorum_roles() {
+    let mut auth_env = V16CuEnv::new();
+    auth_env.configure_auth_mark_with_cu(0, 100);
+    let auth_admin = auth_env.admin.insecure_clone();
+    let auth_before = auth_env.svm.get_account(&auth_env.market).unwrap();
+    auth_env.svm.warp_to_slot(2);
+    auth_env.svm.expire_blockhash();
+    let auth_push = auth_env.send(
+        ProgInstruction::PushAuthMark {
+            asset_index: 0,
+            now_slot: 2,
+            mark_e6: 200,
+        },
+        vec![
+            AccountMeta::new(auth_admin.pubkey(), true),
+            AccountMeta::new(auth_env.market, false),
+            AccountMeta::new_readonly(auth_admin.pubkey(), true),
+        ],
+        &[&auth_admin],
+    );
+    assert!(
+        auth_push.is_err(),
+        "one key duplicated into both AuthMark signer slots must reject"
+    );
+    assert!(
+        auth_push.unwrap_err().contains("Custom(9)"),
+        "equal-key AuthMark quorum must fail the explicit distinct-authority gate"
+    );
+    assert_eq!(
+        auth_env.svm.get_account(&auth_env.market).unwrap(),
+        auth_before,
+        "rejected one-key AuthMark push is atomic"
+    );
+
+    let mut ewma_env = V16CuEnv::new();
+    ewma_env.configure_ewma_mark_with_cu(0, 100, 10, 0);
+    let ewma_admin = ewma_env.admin.insecure_clone();
+    let ewma_before = ewma_env.svm.get_account(&ewma_env.market).unwrap();
+    ewma_env.svm.warp_to_slot(2);
+    ewma_env.svm.expire_blockhash();
+    let ewma_push = ewma_env.send(
+        ProgInstruction::PushEwmaMark {
+            asset_index: 0,
+            now_slot: 2,
+            mark_e6: 200,
+        },
+        vec![
+            AccountMeta::new(ewma_admin.pubkey(), true),
+            AccountMeta::new(ewma_env.market, false),
+            AccountMeta::new_readonly(ewma_admin.pubkey(), true),
+        ],
+        &[&ewma_admin],
+    );
+    assert!(
+        ewma_push.is_err(),
+        "one key duplicated into both EWMA signer slots must reject"
+    );
+    assert!(
+        ewma_push.unwrap_err().contains("Custom(9)"),
+        "equal-key EWMA quorum must fail the explicit distinct-authority gate"
+    );
+    assert_eq!(
+        ewma_env.svm.get_account(&ewma_env.market).unwrap(),
+        ewma_before,
+        "rejected one-key EWMA push is atomic"
+    );
+}
+
+// Ostium-class oracle-key compromise probe: a permissionless LP opts into a matcher once, then the
+// taker and compromised operational keys drive the open/mark/close sequence without the LP signer.
+// A per-slot clamp is only a delay if the signer can ratchet the target until effective == target.
+// The safety criterion is custody-level: the taker must not withdraw more than it deposited solely
+// because the authorized signer reported a fabricated mark.
+#[test]
+fn v16_attack_compromised_auth_mark_signer_cannot_extract_permissionless_lp_capital() {
+    const INITIAL_MARK: u64 = 1_000_000;
+    const FABRICATED_MARK: u64 = 2_000_000;
+    const ATTACKER_DEPOSIT: u128 = 60_000;
+    const LP_DEPOSIT: u128 = 2_000_000;
+    const SIZE_Q: i128 = POS_SCALE as i128;
+
+    let mut env = V16CuEnv::new_with_init_params(production_risk_params());
+    env.svm.warp_to_slot(1);
+
+    let asset_admin = env.admin.insecure_clone();
+    env.configure_auth_mark_with_cu(1, INITIAL_MARK);
+
+    // Give asset 0 a distinct operational oracle key through the public authority-rotation API.
+    // Possession of this key models compromise; no protocol account state is injected.
+    let compromised_oracle = Keypair::new();
+    env.try_update_per_asset_authority_with_cu(
+        &asset_admin,
+        Some(&compromised_oracle),
+        0,
+        percolator_prog::processor::ASSET_AUTH_ORACLE,
+        compromised_oracle.pubkey().to_bytes(),
+    )
+    .expect("rotate asset-0 oracle authority");
+
+    let attacker_owner = Keypair::new();
+    let lp_owner = Keypair::new();
+    let attacker = env.create_portfolio(&attacker_owner);
+    let lp = env.create_portfolio(&lp_owner);
+    env.deposit(&attacker_owner, attacker, ATTACKER_DEPOSIT);
+    env.deposit(&lp_owner, lp, LP_DEPOSIT);
+
+    let matcher_program = Pubkey::new_unique();
+    let matcher_bytes = std::fs::read(auth_matcher_program_path()).expect("read auth matcher BPF");
+    env.svm.add_program(matcher_program, &matcher_bytes);
+    let (matcher_context, matcher_delegate, _) =
+        env.init_auth_matcher_context_via_system_create(matcher_program, &lp_owner, lp);
+
+    // Even while the asset is flat, the operational oracle cannot reset the anchor or mode. That
+    // governance action belongs to the independent asset admin.
+    let market_before_reconfigure = env.svm.get_account(&env.market).unwrap();
+    env.svm.expire_blockhash();
+    let forged_reconfigure = env.send(
+        ProgInstruction::ConfigureAuthMark {
+            asset_index: 0,
+            now_slot: 1,
+            initial_mark_e6: FABRICATED_MARK,
+        },
+        vec![
+            AccountMeta::new(compromised_oracle.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&compromised_oracle],
+    );
+    assert!(
+        forged_reconfigure.is_err(),
+        "a compromised operational oracle must not re-anchor a flat funded asset"
+    );
+    assert!(
+        forged_reconfigure.unwrap_err().contains("Custom(8)"),
+        "oracle-only reconfiguration must fail the asset-admin authority check"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before_reconfigure,
+        "rejected oracle-only reconfiguration is atomic"
+    );
+
+    // The LP does not sign either fill after its one-time matcher opt-in.
+    env.trade_cpi_with_cu_on_asset(
+        &attacker_owner,
+        attacker,
+        &lp_owner,
+        lp,
+        matcher_program,
+        matcher_context,
+        matcher_delegate,
+        0,
+        SIZE_Q,
+        0,
+    );
+
+    // The compromised oracle signer cannot produce the independent backing-authority signature.
+    // Before the fix this exact public push succeeded; repeating it for 290 slots converged the
+    // production 24 bps clamp and let the attacker withdraw 1,060,000 after depositing 60,000.
+    let attacker_guardian = Keypair::new();
+    env.ensure_signer_account(attacker_guardian.pubkey());
+    env.svm.warp_to_slot(2);
+    let market_before_forged_push = env.svm.get_account(&env.market).unwrap();
+    env.svm.expire_blockhash();
+    let forged_push = env.send(
+        ProgInstruction::PushAuthMark {
+            asset_index: 0,
+            now_slot: 2,
+            mark_e6: FABRICATED_MARK,
+        },
+        vec![
+            AccountMeta::new(compromised_oracle.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new_readonly(attacker_guardian.pubkey(), true),
+        ],
+        &[&compromised_oracle, &attacker_guardian],
+    );
+    assert!(
+        forged_push.is_err(),
+        "one compromised oracle signer must not be sufficient to move an authority mark"
+    );
+    assert!(
+        forged_push.unwrap_err().contains("Custom(8)"),
+        "attacker-controlled guardian must fail the configured authority check"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before_forged_push,
+        "rejected one-key mark push must not mutate the target or effective mark"
+    );
+
+    env.svm.expire_blockhash();
+    env.trade_cpi_with_cu_on_asset(
+        &attacker_owner,
+        attacker,
+        &lp_owner,
+        lp,
+        matcher_program,
+        matcher_context,
+        matcher_delegate,
+        0,
+        -SIZE_Q,
+        0,
+    );
+
+    let attacker_after_close = env.portfolio_state(attacker);
+    assert!(
+        !has_active_leg_for_asset(&attacker_after_close, 0),
+        "attacker must have closed through the public matcher path"
+    );
+    assert_eq!(
+        attacker_after_close.pnl.get(),
+        0,
+        "rejected forged mark creates no PnL"
+    );
+
+    // Positive controls: the asset admin can reconfigure a flat asset, and an operational update is
+    // live when the independent backing authority co-signs.
+    env.svm.warp_to_slot(3);
+    env.svm.expire_blockhash();
+    env.configure_auth_mark_for_asset_with_admin(0, &asset_admin, 3, INITIAL_MARK + 10_000);
+    env.svm.warp_to_slot(4);
+    env.svm.expire_blockhash();
+    let quorum_push = env.send(
+        ProgInstruction::PushAuthMark {
+            asset_index: 0,
+            now_slot: 4,
+            mark_e6: FABRICATED_MARK,
+        },
+        vec![
+            AccountMeta::new(compromised_oracle.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new_readonly(asset_admin.pubkey(), true),
+        ],
+        &[&compromised_oracle, &asset_admin],
+    );
+    assert!(
+        quorum_push.is_ok(),
+        "independently co-signed AuthMark updates must remain live: {quorum_push:?}"
+    );
+    assert_eq!(
+        env.market_state().0.oracle_target_price_e6,
+        FABRICATED_MARK,
+        "the positive-control quorum push reaches the mark update"
+    );
+
+    let (destination, _) = env.withdraw_with_cu(&attacker_owner, attacker, ATTACKER_DEPOSIT);
+    let withdrawn = env.token_amount(destination) as u128;
+    let lp_capital = env.portfolio_state(lp).capital.get();
+    assert_eq!(withdrawn, ATTACKER_DEPOSIT);
+    assert_eq!(
+        lp_capital, LP_DEPOSIT,
+        "the unsigned LP loses no capital when the forged mark push lacks quorum"
     );
 }
