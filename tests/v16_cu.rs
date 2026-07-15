@@ -59471,3 +59471,111 @@ fn v16_attack_backing_topup_rejects_lapsed_expiry() {
         "valid topup credits exactly the backing"
     );
 }
+// Public partial-DoS regression: a legitimate price update on an otherwise unused asset must not
+// permanently consume the slot merely because permissionless accrual advanced inert K values.
+#[test]
+fn v16_attack_empty_price_moved_asset_can_still_retire_and_reuse() {
+    let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+        max_portfolio_assets: 2,
+        initial_price: 1,
+        ..V16CuMarketParams::default()
+    });
+    env.configure_permissionless_resolve_with_cu(100, 5);
+    env.svm.warp_to_slot(1);
+    env.configure_auth_mark_for_asset_as_admin(1, 1, 1);
+
+    let owner = Keypair::new();
+    let portfolio = env.create_portfolio(&owner);
+    env.deposit(&owner, portfolio, 1_000);
+
+    env.svm.warp_to_slot(2);
+    env.push_auth_mark_for_asset_as_admin(1, 2, 4);
+    let refresh_cu = env.crank(
+        portfolio,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 2,
+            observations: crank_observations(1),
+        },
+    );
+    assert_cu_within(
+        "empty account refresh before empty asset retire",
+        refresh_cu,
+        CRANK_CU_LIMIT,
+    );
+
+    let (_, refreshed_group) = env.market_state();
+    let asset = refreshed_group.assets[1];
+    assert_eq!(asset.oi_eff_long_q, 0);
+    assert_eq!(asset.oi_eff_short_q, 0);
+    assert_eq!(asset.stored_pos_count_long, 0);
+    assert_eq!(asset.stored_pos_count_short, 0);
+    assert_eq!(asset.loss_weight_sum_long, 0);
+    assert_eq!(asset.loss_weight_sum_short, 0);
+    assert_eq!(asset.a_long, ADL_ONE);
+    assert_eq!(asset.a_short, ADL_ONE);
+    assert_ne!(asset.k_long, 0, "control: accrual advanced inert long K");
+    assert_ne!(asset.k_short, 0, "control: accrual advanced inert short K");
+    assert!(percolator::active_bitmap_is_empty(active_bitmap(
+        &env.portfolio_state(portfolio)
+    )));
+    let old_market_id = asset.market_id;
+    let vault_before = refreshed_group.vault;
+    let token_vault_before = env.token_amount(env.vault);
+    let capital_before = env.portfolio_state(portfolio).capital.get();
+
+    let admin = env.admin.insecure_clone();
+    env.svm.expire_blockhash();
+    let retire = env.send(
+        ProgInstruction::UpdateAssetLifecycle {
+            action: processor::ASSET_ACTION_RETIRE,
+            asset_index: 1,
+            now_slot: 2,
+            initial_price: 0,
+            insurance_authority: admin.pubkey().to_bytes(),
+            insurance_operator: admin.pubkey().to_bytes(),
+            backing_bucket_authority: admin.pubkey().to_bytes(),
+            oracle_authority: admin.pubkey().to_bytes(),
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&admin],
+    );
+    let retire_cu = retire.unwrap_or_else(|err| {
+        panic!("an otherwise empty price-moved asset must remain retireable: {err}")
+    });
+    assert_cu_within(
+        "retire empty price-moved asset",
+        retire_cu,
+        CUSTODY_CU_LIMIT,
+    );
+
+    let (_, retired_group) = env.market_state();
+    let retired = retired_group.assets[1];
+    assert_eq!(retired.lifecycle, AssetLifecycleV16::Retired);
+    assert_eq!(retired.k_long, 0, "retire canonicalizes inert long K");
+    assert_eq!(retired.k_short, 0, "retire canonicalizes inert short K");
+    assert_eq!(retired_group.vault, vault_before);
+    assert_eq!(env.token_amount(env.vault), token_vault_before);
+    assert_eq!(env.portfolio_state(portfolio).capital.get(), capital_before);
+
+    env.svm.warp_to_slot(3);
+    env.svm.expire_blockhash();
+    let reactivate_cu = env.activate_asset(1, 3, 5);
+    assert_cu_within(
+        "reactivate price-moved retired slot",
+        reactivate_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    let (_, reactivated_group) = env.market_state();
+    let reactivated = reactivated_group.assets[1];
+    assert_eq!(reactivated.lifecycle, AssetLifecycleV16::Active);
+    assert_ne!(reactivated.market_id, old_market_id);
+    assert_eq!(reactivated.effective_price, 5);
+    assert_eq!(reactivated.k_long, 0);
+    assert_eq!(reactivated.k_short, 0);
+    assert_eq!(reactivated_group.vault, vault_before);
+    assert_eq!(env.token_amount(env.vault), token_vault_before);
+    assert_eq!(env.portfolio_state(portfolio).capital.get(), capital_before);
+}
