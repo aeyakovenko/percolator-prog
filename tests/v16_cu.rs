@@ -59602,3 +59602,211 @@ fn v16_attack_backing_topup_rejects_lapsed_expiry() {
         "valid topup credits exactly the backing"
     );
 }
+
+// Public user-exit regression: two normal winner exits can each fold a half-atom B remainder into
+// the side dust bucket. The second fold must rebook the carried atom over remaining loss weight,
+// never return RecoveryRequired forever while leaving the market Live.
+#[test]
+fn v16_attack_social_loss_dust_carry_cannot_block_owner_exit() {
+    let mut params = V16CuMarketParams::default();
+    params.initial_price = 1;
+    params.max_price_move_bps_per_slot = 10_000;
+    let mut env = V16CuEnv::new_with_init_params(params);
+    env.configure_auth_mark_with_cu(0, 1);
+
+    let l1o = Keypair::new();
+    let l1 = env.create_portfolio(&l1o);
+    let l2o = Keypair::new();
+    let l2 = env.create_portfolio(&l2o);
+    let l3o = Keypair::new();
+    let l3 = env.create_portfolio(&l3o);
+    let l4o = Keypair::new();
+    let l4 = env.create_portfolio(&l4o);
+    let s1o = Keypair::new();
+    let s1 = env.create_portfolio(&s1o);
+    let s2o = Keypair::new();
+    let s2 = env.create_portfolio(&s2o);
+    let s3o = Keypair::new();
+    let s3 = env.create_portfolio(&s3o);
+    let s4o = Keypair::new();
+    let s4 = env.create_portfolio(&s4o);
+
+    for (owner, portfolio, deposit) in [
+        (&l1o, l1, 1_000),
+        (&l2o, l2, 1_000),
+        (&l3o, l3, 1_000),
+        (&l4o, l4, 1_000),
+        (&s1o, s1, 2),
+        (&s2o, s2, 1_000),
+        (&s3o, s3, 1_000),
+        (&s4o, s4, 1_000),
+    ] {
+        env.deposit(owner, portfolio, deposit);
+    }
+    for (long_owner, long, short_owner, short) in [
+        (&l1o, l1, &s1o, s1),
+        (&l2o, l2, &s2o, s2),
+        (&l3o, l3, &s3o, s3),
+        (&l4o, l4, &s4o, s4),
+    ] {
+        env.trade_asset_with_cu(
+            0,
+            long_owner,
+            long,
+            short_owner,
+            short,
+            POS_SCALE as i128,
+            1,
+            0,
+        );
+    }
+
+    for (slot, mark) in [(1, 2), (2, 3), (3, 4), (4, 5)] {
+        env.svm.warp_to_slot(slot);
+        env.push_auth_mark_with_cu(slot, mark);
+        env.crank(
+            s2,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: slot,
+                observations: crank_observations(0),
+            },
+        );
+    }
+    for portfolio in [s1, l1, l2, l3, l4, s2, s3, s4] {
+        env.svm.expire_blockhash();
+        let _ = env.send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 4,
+                observations: crank_observations(0),
+            },
+            vec![
+                AccountMeta::new(env.payer.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(portfolio, false),
+            ],
+            &[],
+        );
+    }
+    for _ in 0..4 {
+        if !has_active_leg_for_asset(&env.portfolio_state(s1), 0) {
+            break;
+        }
+        env.crank(
+            s1,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 4,
+                observations: crank_observations(0),
+            },
+        );
+    }
+
+    let (_, after_bankruptcy) = env.market_state();
+    assert_eq!(after_bankruptcy.mode, MarketModeV16::Live);
+    assert!(
+        !has_active_leg_for_asset(&env.portfolio_state(s1), 0),
+        "the two-atom bankrupt short must close without terminal Recovery"
+    );
+    assert_ne!(after_bankruptcy.assets[0].b_long_num, 0);
+    assert_eq!(after_bankruptcy.assets[0].oi_eff_long_q, 3 * POS_SCALE);
+    assert_eq!(after_bankruptcy.assets[0].oi_eff_short_q, 3 * POS_SCALE);
+    let vault_after_bankruptcy = after_bankruptcy.vault;
+    let b_after_bankruptcy = after_bankruptcy.assets[0].b_long_num;
+    let risk_epoch_after_bankruptcy = after_bankruptcy.risk_epoch;
+
+    for (exit_index, (owner, portfolio)) in [(&l1o, l1), (&l2o, l2)].into_iter().enumerate() {
+        for _ in 0..4 {
+            let leg = active_leg_for_asset(&env.portfolio_state(portfolio), 0);
+            if !leg.b_stale && leg.b_snap == env.market_state().1.assets[0].b_long_num {
+                break;
+            }
+            env.crank(
+                portfolio,
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: 4,
+                    observations: crank_observations(0),
+                },
+            );
+        }
+        let leg = active_leg_for_asset(&env.portfolio_state(portfolio), 0);
+        assert_eq!(
+            leg.b_rem,
+            percolator::SOCIAL_LOSS_DEN / 2,
+            "each selected winner must carry exactly half an atom"
+        );
+        assert!(!leg.b_stale);
+        assert_eq!(
+            env.market_state().1.assets[0].social_loss_dust_long_num,
+            if exit_index == 0 {
+                0
+            } else {
+                percolator::SOCIAL_LOSS_DEN / 2
+            },
+            "the second exit must start at the exact carry boundary"
+        );
+
+        env.svm.expire_blockhash();
+        let clear_cu = env
+            .send(
+                ProgInstruction::RebalanceReduce {
+                    asset_index: 0,
+                    reduce_q: POS_SCALE,
+                },
+                vec![
+                    AccountMeta::new(owner.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(portfolio, false),
+                ],
+                &[owner],
+            )
+            .expect("a dust carry must not reject the owner's full risk reduction");
+        assert_cu_within("social-loss dust owner exit", clear_cu, CUSTODY_CU_LIMIT);
+        assert!(
+            !has_active_leg_for_asset(&env.portfolio_state(portfolio), 0),
+            "each owner reaches flat in one bounded reduction"
+        );
+    }
+
+    let (_, end) = env.market_state();
+    assert_eq!(end.mode, MarketModeV16::Live);
+    assert_eq!(
+        end.assets[0].social_loss_dust_long_num, 0,
+        "the whole-atom carry is removed from the fractional bucket"
+    );
+    assert!(
+        end.assets[0].b_long_num > b_after_bankruptcy,
+        "the carried atom is rebooked into the remaining B index"
+    );
+    assert!(
+        end.risk_epoch > risk_epoch_after_bankruptcy,
+        "the new B obligation invalidates outstanding certificates"
+    );
+    assert_eq!(end.assets[0].oi_eff_long_q, POS_SCALE);
+    assert_eq!(end.assets[0].oi_eff_short_q, POS_SCALE);
+    assert_eq!(end.vault, vault_after_bankruptcy);
+    assert_eq!(end.vault as u64, env.token_amount(env.vault));
+    assert!(end.vault >= end.c_tot + end.insurance);
+
+    let l3_pnl_before = env.portfolio_state(l3).pnl.get();
+    for _ in 0..4 {
+        let leg = active_leg_for_asset(&env.portfolio_state(l3), 0);
+        if !leg.b_stale && leg.b_snap == env.market_state().1.assets[0].b_long_num {
+            break;
+        }
+        env.crank(
+            l3,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 4,
+                observations: crank_observations(0),
+            },
+        );
+    }
+    let l3_after = env.portfolio_state(l3);
+    let l3_leg = active_leg_for_asset(&l3_after, 0);
+    assert_eq!(l3_leg.b_snap, env.market_state().1.assets[0].b_long_num);
+    assert_eq!(l3_leg.b_rem, 0);
+    assert_eq!(
+        l3_after.pnl.get(),
+        l3_pnl_before - 1,
+        "the rebooked whole atom is charged exactly once"
+    );
+}
