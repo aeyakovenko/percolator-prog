@@ -5718,11 +5718,12 @@ pub mod processor {
             &vault_authority,
             &cfg,
         )?;
-        let amount_u64 = amount_to_u64(amount)?;
-        require_token_balance(vault_token, amount_u64)?;
-
+        if amount == 0 {
+            return Ok(());
+        }
+        amount_to_u64(amount)?;
         ensure_portfolio_storage_for_market_slots(portfolio_ai, max_market_slots)?;
-        {
+        let withdrawn_amount = {
             let mut market_data = market_ai.try_borrow_mut_data()?;
             let (cfg, mut group) = state::market_view_mut(&mut market_data)?;
             if group.header.mode != 0 {
@@ -5734,10 +5735,30 @@ pub mod processor {
                 state::portfolio_view_mut_for_market_slots(&mut portfolio_data, max_market_slots)?;
             expect_portfolio_view_account_key(&portfolio, portfolio_ai.key)?;
             expect_portfolio_view_owner(&portfolio, owner.key)?;
-            group
-                .withdraw_not_atomic(&mut portfolio, amount)
+            let capital_before_fee = portfolio.header.capital.get();
+            let fee_slot = authenticated_market_slot_or_fallback_view(&group);
+            let charged = group
+                .sync_account_fee_to_slot_not_atomic(
+                    &mut portfolio,
+                    fee_slot,
+                    cfg.maintenance_fee_per_slot,
+                )
                 .map_err(map_v16_error)?;
-        }
+            credit_maintenance_fee_to_active_market_budgets_view(&cfg, &mut group, charged)?;
+            // Preserve a one-instruction withdraw-all path when a new slot makes the submitted
+            // pre-fee balance stale. Other amounts remain exact requests.
+            let withdrawn_amount = if amount == capital_before_fee {
+                portfolio.header.capital.get()
+            } else {
+                amount
+            };
+            group
+                .withdraw_not_atomic(&mut portfolio, withdrawn_amount)
+                .map_err(map_v16_error)?;
+            withdrawn_amount
+        };
+        let amount_u64 = amount_to_u64(withdrawn_amount)?;
+        require_token_balance(vault_token, amount_u64)?;
         let bump_arr = [bump];
         let signer_seeds: &[&[&[u8]]] = &[&[b"vault", market_ai.key.as_ref(), &bump_arr]];
         transfer_tokens_signed(

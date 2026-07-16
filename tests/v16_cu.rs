@@ -59602,3 +59602,151 @@ fn v16_attack_backing_topup_rejects_lapsed_expiry() {
         "valid topup credits exactly the backing"
     );
 }
+
+// A live user must not be able to erase an elapsed maintenance-fee obligation by atomically
+// flattening, withdrawing the pre-fee balance, and closing the portfolio. Withdraw is the last live
+// custody boundary, so it must settle the engine's account-level fee before releasing capital.
+#[test]
+fn v16_attack_atomic_live_exit_cannot_erase_elapsed_maintenance_fee() {
+    const ASSET: u16 = 1;
+    const OPEN_SLOT: u64 = 1;
+    const EXIT_SLOT: u64 = 10;
+    const CAPITAL: u128 = 10_000;
+    const FEE_PER_SLOT: u128 = 10;
+    const ELAPSED_FEE: u128 = (EXIT_SLOT - OPEN_SLOT) as u128 * FEE_PER_SLOT;
+
+    let mut env = V16CuEnv::new_with_init_params_and_market_capacity(
+        V16CuMarketParams {
+            maintenance_fee_per_slot: FEE_PER_SLOT,
+            ..V16CuMarketParams::default()
+        },
+        2,
+    );
+    env.update_market_init_fee_policy_with_cu(1);
+    env.svm.warp_to_slot(OPEN_SLOT);
+
+    let creator = Keypair::new();
+    env.activate_permissionless_asset_with_fee(
+        &creator,
+        ASSET,
+        OPEN_SLOT,
+        100,
+        creator.pubkey(),
+        creator.pubkey(),
+        creator.pubkey(),
+        creator.pubkey(),
+        1,
+    );
+    env.configure_auth_mark_for_asset_with_authority(ASSET, &creator, OPEN_SLOT, 100);
+
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long = env.create_portfolio(&long_owner);
+    let short = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long, CAPITAL);
+    env.deposit(&short_owner, short, CAPITAL);
+    env.trade_asset_with_cu(
+        ASSET,
+        &long_owner,
+        long,
+        &short_owner,
+        short,
+        POS_SCALE as i128,
+        100,
+        0,
+    );
+
+    env.svm.warp_to_slot(EXIT_SLOT);
+    env.push_auth_mark_for_asset_with_authority(ASSET, &creator, EXIT_SLOT, 100);
+    while env.market_state().1.assets[ASSET as usize].slot_last < EXIT_SLOT {
+        env.crank(
+            long,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: EXIT_SLOT,
+                observations: crank_observations(ASSET),
+            },
+        );
+    }
+    assert_eq!(
+        env.market_state().1.assets[ASSET as usize].slot_last,
+        EXIT_SLOT
+    );
+    assert_eq!(env.portfolio_state(long).last_fee_slot.get(), OPEN_SLOT);
+    assert_eq!(env.portfolio_state(short).last_fee_slot.get(), OPEN_SLOT);
+
+    let long_dest = env.token_account(long_owner.pubkey(), 0);
+    let short_dest = env.token_account(short_owner.pubkey(), 0);
+    let program_id = env.program_id;
+    let market = env.market;
+    let vault = env.vault;
+    let vault_authority = env.vault_authority;
+    let trade_ix = Instruction {
+        program_id,
+        accounts: vec![
+            AccountMeta::new(long_owner.pubkey(), true),
+            AccountMeta::new(short_owner.pubkey(), true),
+            AccountMeta::new(market, false),
+            AccountMeta::new(long, false),
+            AccountMeta::new(short, false),
+        ],
+        data: ProgInstruction::TradeNoCpi {
+            asset_index: ASSET,
+            size_q: -(POS_SCALE as i128),
+            exec_price: 100,
+            fee_bps: 0,
+        }
+        .encode(),
+    };
+    let withdraw_ix = |owner: Pubkey, portfolio: Pubkey, dest: Pubkey, amount: u128| Instruction {
+        program_id,
+        accounts: vec![
+            AccountMeta::new(owner, true),
+            AccountMeta::new(market, false),
+            AccountMeta::new(portfolio, false),
+            AccountMeta::new(dest, false),
+            AccountMeta::new(vault, false),
+            AccountMeta::new_readonly(vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        data: ProgInstruction::Withdraw { amount }.encode(),
+    };
+    let close_ix = |owner: Pubkey, portfolio: Pubkey| Instruction {
+        program_id,
+        accounts: vec![
+            AccountMeta::new(owner, true),
+            AccountMeta::new(market, false),
+            AccountMeta::new(portfolio, false),
+        ],
+        data: ProgInstruction::ClosePortfolio.encode(),
+    };
+
+    let insurance_before_exit = env.market_state().1.insurance;
+    env.svm.expire_blockhash();
+    let exit_cu = send_raw_ixs(
+        &mut env.svm,
+        &env.payer,
+        vec![
+            heap_ix(),
+            cu_ix(),
+            trade_ix,
+            withdraw_ix(long_owner.pubkey(), long, long_dest, CAPITAL),
+            withdraw_ix(short_owner.pubkey(), short, short_dest, CAPITAL),
+            close_ix(long_owner.pubkey(), long),
+            close_ix(short_owner.pubkey(), short),
+        ],
+        &[&long_owner, &short_owner],
+    )
+    .expect("maintenance-current atomic live exit remains available");
+    assert!(exit_cu < 1_400_000);
+    assert_eq!(env.token_amount(long_dest), (CAPITAL - ELAPSED_FEE) as u64);
+    assert_eq!(env.token_amount(short_dest), (CAPITAL - ELAPSED_FEE) as u64);
+    assert_eq!(
+        env.market_state().1.insurance - insurance_before_exit,
+        ELAPSED_FEE * 2,
+        "both account-level fees are collected before capital leaves custody"
+    );
+    let after = env.market_state().1;
+    assert_eq!(after.materialized_portfolio_count, 0);
+    assert_eq!(after.c_tot, 0);
+    assert_eq!(after.vault as u64, env.token_amount(env.vault));
+}
