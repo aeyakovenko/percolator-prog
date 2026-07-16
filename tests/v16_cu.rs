@@ -59838,3 +59838,229 @@ fn v16_attack_permissionless_micro_price_cranks_cannot_pin_oracle_progress() {
     assert_eq!(second.effective_price, PRICE + 2);
     assert_eq!(second.raw_oracle_target_price, TARGET);
 }
+
+// A Hybrid oracle's external target is unknowable without its configured feed accounts. An
+// observation-free auto-crank may refresh an account from committed state, but it must not consume
+// that asset's positive-time accrual segment at the old price. Otherwise an attacker can use a
+// public update from an unrelated oracle to stale the victim, then land an empty victim crank
+// before the honest crank carrying the victim's oracle observation.
+#[test]
+fn v16_attack_omitted_hybrid_observation_cannot_consume_oracle_progress_slot() {
+    const MARK: u64 = 1_000_000;
+    const ORACLE_TARGET: u64 = 2_000_000;
+    const DEPOSIT: u128 = 100_000_000;
+
+    let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+        initial_price: MARK,
+        max_price_move_bps_per_slot: 1_000,
+        max_accrual_dt_slots: 1,
+        min_funding_lifetime_slots: 1,
+        ..V16CuMarketParams::default()
+    });
+    env.activate_asset(1, 1, MARK);
+    set_test_clock(&mut env, 1, 100);
+    let victim_feed = [0x71u8; 32];
+    let epoch_feed = [0x72u8; 32];
+    let initial_victim_feed = env.set_pyth_price_with_conf(&victim_feed, MARK as i64, -6, 0, 100);
+    let initial_epoch_feed = env.set_pyth_price_with_conf(&epoch_feed, MARK as i64, -6, 0, 100);
+    env.try_configure_hybrid_asset_with_conf_filter_cu(
+        0,
+        1,
+        0,
+        [victim_feed, [0u8; 32], [0u8; 32]],
+        &[initial_victim_feed],
+        1,
+        100,
+        0,
+        0,
+        10,
+        0,
+    )
+    .expect("configure fresh hybrid base oracle");
+    env.try_configure_hybrid_asset_with_conf_filter_cu(
+        1,
+        1,
+        0,
+        [epoch_feed, [0u8; 32], [0u8; 32]],
+        &[initial_epoch_feed],
+        1,
+        100,
+        0,
+        0,
+        10,
+        0,
+    )
+    .expect("configure fresh unrelated hybrid oracle");
+
+    let victim_owner = Keypair::new();
+    let victim_counter_owner = Keypair::new();
+    let epoch_owner = Keypair::new();
+    let epoch_counter_owner = Keypair::new();
+    let victim = env.create_portfolio(&victim_owner);
+    let victim_counter = env.create_portfolio(&victim_counter_owner);
+    let epoch_account = env.create_portfolio(&epoch_owner);
+    let epoch_counter = env.create_portfolio(&epoch_counter_owner);
+    for (owner, portfolio) in [
+        (&victim_owner, victim),
+        (&victim_counter_owner, victim_counter),
+        (&epoch_owner, epoch_account),
+        (&epoch_counter_owner, epoch_counter),
+    ] {
+        env.deposit(owner, portfolio, DEPOSIT);
+    }
+    env.trade_asset_with_cu(
+        0,
+        &victim_owner,
+        victim,
+        &victim_counter_owner,
+        victim_counter,
+        POS_SCALE as i128,
+        MARK,
+        0,
+    );
+    env.svm.expire_blockhash();
+    env.trade_asset_with_cu(
+        1,
+        &epoch_owner,
+        epoch_account,
+        &epoch_counter_owner,
+        epoch_counter,
+        POS_SCALE as i128,
+        MARK,
+        0,
+    );
+
+    set_test_clock(&mut env, 2, 101);
+    let fresh_feed = env.set_pyth_price_with_conf(&victim_feed, ORACLE_TARGET as i64, -6, 0, 101);
+    let fresh_epoch_feed =
+        env.set_pyth_price_with_conf(&epoch_feed, (MARK + 100_000) as i64, -6, 0, 101);
+    env.svm.expire_blockhash();
+    let epoch_progress = env.send(
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 2,
+            observations: crank_observations_with_accounts(1, 1),
+        },
+        vec![
+            AccountMeta::new(env.payer.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(epoch_account, false),
+            AccountMeta::new_readonly(fresh_epoch_feed, false),
+        ],
+        &[],
+    );
+    assert!(
+        epoch_progress.is_ok(),
+        "an unrelated public oracle crank must make the victim stale: {epoch_progress:?}"
+    );
+
+    let (_, before_group) = env.market_state();
+    assert!(
+        health_cert(&env.portfolio_state(victim)).cert_oracle_epoch < before_group.oracle_epoch,
+        "the unrelated asset move makes the victim refresh-actionable"
+    );
+    assert_eq!(before_group.assets[0].slot_last, 1);
+    assert_eq!(before_group.assets[0].effective_price, MARK);
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let victim_before = env.svm.get_account(&victim).unwrap();
+
+    env.svm.expire_blockhash();
+    let omitted = env.send(
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 2,
+            observations: vec![],
+        },
+        vec![
+            AccountMeta::new(env.payer.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(victim, false),
+        ],
+        &[],
+    );
+    assert!(
+        omitted.is_ok(),
+        "committed-state account refresh must remain live without a Hybrid observation: {omitted:?}"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "an omitted observation must not mutate or advance the selected market"
+    );
+    assert_ne!(
+        env.svm.get_account(&victim).unwrap(),
+        victim_before,
+        "the observation-free crank must still refresh the stale account"
+    );
+
+    env.svm.expire_blockhash();
+    let observed = env.send(
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 2,
+            observations: crank_observations_with_accounts(0, 1),
+        },
+        vec![
+            AccountMeta::new(env.payer.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(victim, false),
+            AccountMeta::new_readonly(fresh_feed, false),
+        ],
+        &[],
+    );
+    assert!(
+        observed.is_ok(),
+        "the later bounded crank with the configured Hybrid feed must progress: {observed:?}"
+    );
+    let (_, after_observed) = env.market_state();
+    assert_eq!(after_observed.assets[0].slot_last, 2);
+    assert!(
+        after_observed.assets[0].effective_price > MARK,
+        "the authenticated oracle target must move effective price in the preserved slot"
+    );
+    assert_eq!(
+        after_observed.assets[0].raw_oracle_target_price,
+        ORACLE_TARGET
+    );
+
+    // Reverse landing order is safe too: once the observation has advanced the market, an empty
+    // same-slot crank can refresh another stale account without changing the market again.
+    let (_, group_after_observed) = env.market_state();
+    let asset_after_observed = group_after_observed.assets[0];
+    env.svm.expire_blockhash();
+    let late_omitted = env.send(
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 2,
+            observations: vec![],
+        },
+        vec![
+            AccountMeta::new(env.payer.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(victim_counter, false),
+        ],
+        &[],
+    );
+    assert!(
+        late_omitted.is_ok(),
+        "a stale observation-free crank landing after oracle progress must still refresh: {late_omitted:?}"
+    );
+    let (_, group_after_late) = env.market_state();
+    let asset_after_late = group_after_late.assets[0];
+    assert_eq!(asset_after_late.slot_last, asset_after_observed.slot_last);
+    assert_eq!(
+        asset_after_late.effective_price,
+        asset_after_observed.effective_price
+    );
+    assert_eq!(
+        asset_after_late.raw_oracle_target_price,
+        asset_after_observed.raw_oracle_target_price
+    );
+    assert_eq!(asset_after_late.k_long, asset_after_observed.k_long);
+    assert_eq!(asset_after_late.k_short, asset_after_observed.k_short);
+    assert_eq!(asset_after_late.f_long_num, asset_after_observed.f_long_num);
+    assert_eq!(
+        asset_after_late.f_short_num,
+        asset_after_observed.f_short_num
+    );
+    assert_eq!(
+        group_after_late.oracle_epoch, group_after_observed.oracle_epoch,
+        "the late empty crank must not apply a second market segment"
+    );
+}
