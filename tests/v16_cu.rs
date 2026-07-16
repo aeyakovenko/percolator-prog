@@ -7631,8 +7631,9 @@ fn v16_bpf_permissionless_crank_computes_funding_from_internal_mark_premium() {
     let (_, funded_group) = env.market_state();
     assert_eq!(funded_group.funding_epoch, 1);
     assert_eq!(funded_group.assets[0].effective_price, 1_210_000);
-    assert_eq!(funded_group.assets[0].f_long_num, -(ADL_ONE as i128));
-    assert_eq!(funded_group.assets[0].f_short_num, ADL_ONE as i128);
+    let expected_funding = 1_000i128 * 1_210_000i128 * (ADL_ONE / percolator::FUNDING_DEN) as i128;
+    assert_eq!(funded_group.assets[0].f_long_num, -expected_funding);
+    assert_eq!(funded_group.assets[0].f_short_num, expected_funding);
 }
 
 #[test]
@@ -59601,4 +59602,211 @@ fn v16_attack_backing_topup_rejects_lapsed_expiry() {
         vault0 + 50,
         "valid topup credits exactly the backing"
     );
+}
+
+fn public_funding_segment_probe(
+    refresh_victim_each_slot: bool,
+) -> (i128, i128, u64, u64, u128, i128) {
+    const INITIAL_PRICE: u64 = 1_000_000;
+    const TARGET_PRICE: u64 = INITIAL_PRICE * 2;
+    const DEPOSIT: u128 = 10_000_000;
+    // At a 1 bps cap, every price step in this interval is exactly 100 atoms.
+    // A 0.1-lot position therefore settles K integrally while leaving each F
+    // charge fractional, isolating F settlement cadence from price rounding.
+    const POSITION_Q: i128 = POS_SCALE as i128 / 10;
+
+    let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+        initial_price: INITIAL_PRICE,
+        max_price_move_bps_per_slot: 1,
+        max_accrual_dt_slots: 1,
+        max_abs_funding_e9_per_slot: 1_000,
+        min_funding_lifetime_slots: 1,
+        ..V16CuMarketParams::default()
+    });
+    env.svm.warp_to_slot(0);
+    env.configure_auth_mark_with_cu(0, INITIAL_PRICE);
+
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let driver_owner = Keypair::new();
+    let long = env.create_portfolio(&long_owner);
+    let short = env.create_portfolio(&short_owner);
+    let driver = env.create_portfolio(&driver_owner);
+    env.deposit(&long_owner, long, DEPOSIT);
+    env.deposit(&short_owner, short, DEPOSIT);
+    env.trade_with_cu(
+        &long_owner,
+        long,
+        &short_owner,
+        short,
+        POSITION_Q,
+        INITIAL_PRICE,
+        0,
+    );
+
+    // The empty driver advances the market through the exact same public crank
+    // sequence in both runs. Only the victim's permissionless refresh cadence
+    // differs, so any capital difference is account-settlement rounding.
+    env.svm.warp_to_slot(1);
+    env.push_auth_mark_with_cu(1, TARGET_PRICE);
+    env.crank(
+        driver,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 1,
+            observations: crank_observations(0),
+        },
+    );
+    let staged = env.market_state().1;
+    assert_eq!(staged.assets[0].effective_price, 1_000_100);
+    assert_eq!(staged.assets[0].f_long_num, 0);
+    assert_eq!(staged.assets[0].f_short_num, 0);
+
+    for slot in 2..=11 {
+        env.svm.warp_to_slot(slot);
+        env.crank(
+            driver,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: slot,
+                observations: crank_observations(0),
+            },
+        );
+        if refresh_victim_each_slot {
+            env.crank(
+                long,
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: slot,
+                    observations: crank_observations(0),
+                },
+            );
+        }
+    }
+    if !refresh_victim_each_slot {
+        env.crank(
+            long,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 11,
+                observations: crank_observations(0),
+            },
+        );
+    }
+
+    let group = env.market_state().1;
+    let long_state = env.portfolio_state(long);
+    (
+        group.assets[0].f_long_num,
+        group.assets[0].f_short_num,
+        group.funding_epoch,
+        group.assets[0].effective_price,
+        long_state.capital.get(),
+        long_state.pnl.get(),
+    )
+}
+
+#[test]
+fn v16_attack_permissionless_crank_cadence_cannot_erase_funding() {
+    let delayed = public_funding_segment_probe(false);
+    let fragmented = public_funding_segment_probe(true);
+
+    assert_ne!(
+        delayed.0, 0,
+        "the control must accrue a nonzero funding obligation"
+    );
+    assert_eq!(fragmented.0, delayed.0);
+    assert_eq!(fragmented.1, delayed.1);
+    assert_eq!(fragmented.3, delayed.3);
+    assert_eq!(fragmented.4, delayed.4);
+    assert_eq!(fragmented.5, delayed.5);
+}
+
+fn public_fractional_price_settlement_probe(crank_each_slot: bool) -> (u64, u128, i128, i128) {
+    const INITIAL_PRICE: u64 = 1_000_000;
+    const TARGET_PRICE: u64 = 2_000_000;
+    const DEPOSIT: u128 = 10_000_000;
+    const FRACTIONAL_LOT: i128 = POS_SCALE as i128 / 1_000;
+
+    let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+        initial_price: INITIAL_PRICE,
+        max_price_move_bps_per_slot: 1,
+        max_accrual_dt_slots: 10,
+        max_abs_funding_e9_per_slot: 0,
+        min_funding_lifetime_slots: 10,
+        ..V16CuMarketParams::default()
+    });
+    env.svm.warp_to_slot(0);
+    env.configure_auth_mark_with_cu(0, INITIAL_PRICE);
+
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long = env.create_portfolio(&long_owner);
+    let short = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long, DEPOSIT);
+    env.deposit(&short_owner, short, DEPOSIT);
+    env.trade_with_cu(
+        &long_owner,
+        long,
+        &short_owner,
+        short,
+        FRACTIONAL_LOT,
+        INITIAL_PRICE,
+        0,
+    );
+
+    // Both runs first stage the same target and settle the same first price atom.
+    env.svm.warp_to_slot(1);
+    env.push_auth_mark_with_cu(1, TARGET_PRICE);
+    env.crank(
+        short,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 1,
+            observations: crank_observations(0),
+        },
+    );
+
+    if crank_each_slot {
+        for slot in 2..=11 {
+            env.svm.warp_to_slot(slot);
+            env.crank(
+                short,
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: slot,
+                    observations: crank_observations(0),
+                },
+            );
+        }
+    } else {
+        env.svm.warp_to_slot(11);
+        env.crank(
+            short,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 11,
+                observations: crank_observations(0),
+            },
+        );
+    }
+
+    let group = env.market_state().1;
+    let short_state = env.portfolio_state(short);
+    (
+        group.assets[0].effective_price,
+        short_state.capital.get(),
+        short_state.pnl.get(),
+        short_state.legs[0].k_snap.get(),
+    )
+}
+
+#[test]
+fn v16_attack_permissionless_refresh_cadence_cannot_magnify_fractional_price_loss() {
+    let delayed = public_fractional_price_settlement_probe(false);
+    let fragmented = public_fractional_price_settlement_probe(true);
+
+    assert_eq!(
+        fragmented.0, delayed.0,
+        "both public crank schedules must reach the same final effective price"
+    );
+    assert_eq!(
+        fragmented.1, delayed.1,
+        "permissionless refresh cadence must not amplify a fractional position's loss"
+    );
+    assert_eq!(fragmented.2, delayed.2);
+    assert_eq!(fragmented.3, delayed.3);
 }
