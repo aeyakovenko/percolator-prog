@@ -95,6 +95,7 @@ fn kani_v16_collected_base_fee_cannot_fund_mark_movement() {
 }
 
 #[kani::proof]
+#[kani::unwind(18)]
 fn kani_v16_init_market_decode_preserves_wire_fields() {
     // Full-width symbolic inputs (audit: avoid the u16->u64/u128 widening collapse so
     // narrow-read / high-byte decode bugs are observable).
@@ -199,6 +200,7 @@ fn kani_v16_init_market_decode_preserves_wire_fields() {
 }
 
 #[kani::proof]
+#[kani::unwind(18)]
 fn kani_v16_amount_instructions_decode_preserves_wire_fields() {
     let tag: u8 = kani::any();
     kani::assume(
@@ -934,7 +936,7 @@ fn kani_v16_permissionless_resolve_decode_preserves_wire_fields() {
 }
 
 #[kani::proof]
-#[kani::unwind(34)]
+#[kani::unwind(18)]
 fn kani_v16_configure_hybrid_oracle_decode_preserves_wire_fields() {
     let asset_index: u16 = kani::any();
     let oracle_leg_count: u8 = kani::any();
@@ -948,16 +950,11 @@ fn kani_v16_configure_hybrid_oracle_decode_preserves_wire_fields() {
     let mark_ewma_halflife_slots: u64 = kani::any();
     let mark_min_fee: u64 = kani::any();
     let unit_scale: u32 = kani::any();
-    let mut feeds = [[0u8; 32]; 3];
-    let mut i = 0;
-    while i < 3 {
-        let mut j = 0;
-        while j < 32 {
-            feeds[i][j] = kani::any();
-            j += 1;
-        }
-        i += 1;
-    }
+    let feeds: [[u8; 32]; 3] = kani::any();
+    let feed_index: usize = kani::any();
+    let byte_index: usize = kani::any();
+    kani::assume(feed_index < feeds.len());
+    kani::assume(byte_index < feeds[0].len());
 
     let mut data = [0u8; 156];
     data[0] = 34;
@@ -1005,9 +1002,12 @@ fn kani_v16_configure_hybrid_oracle_decode_preserves_wire_fields() {
             assert_eq!(got_invert, invert);
             assert_eq!(got_unit_scale, unit_scale);
             assert_eq!(got_conf, conf_filter_bps);
-            assert_eq!(got_feeds[0], feeds[0]);
-            assert_eq!(got_feeds[1], feeds[1]);
-            assert_eq!(got_feeds[2], feeds[2]);
+            // Arbitrary indices make this equivalent to whole-matrix equality without lowering
+            // the 96-byte symbolic comparison to a SAT-heavy memcmp loop.
+            assert_eq!(
+                got_feeds[feed_index][byte_index],
+                feeds[feed_index][byte_index]
+            );
         }
         _ => unreachable!(),
     }
@@ -1116,6 +1116,7 @@ fn assert_rejects_trailing_byte(ix: Instruction, extra: u8) {
 }
 
 #[kani::proof]
+#[kani::unwind(18)]
 fn kani_v16_init_market_payload_rejects_trailing_byte() {
     let extra: u8 = kani::any();
     assert_rejects_trailing_byte(
@@ -1148,6 +1149,7 @@ fn kani_v16_init_market_payload_rejects_trailing_byte() {
 }
 
 #[kani::proof]
+#[kani::unwind(18)]
 fn kani_v16_custody_payloads_reject_trailing_byte() {
     let extra: u8 = kani::any();
 
@@ -1182,6 +1184,7 @@ fn kani_v16_custody_payloads_reject_trailing_byte() {
 }
 
 #[kani::proof]
+#[kani::unwind(18)]
 fn kani_v16_trade_and_crank_payloads_reject_trailing_byte() {
     let extra: u8 = kani::any();
 
@@ -1217,6 +1220,7 @@ fn kani_v16_trade_and_crank_payloads_reject_trailing_byte() {
 }
 
 #[kani::proof]
+#[kani::unwind(34)]
 fn kani_v16_admin_policy_payloads_reject_trailing_byte() {
     let extra: u8 = kani::any();
 
@@ -1291,6 +1295,7 @@ fn kani_v16_admin_policy_payloads_reject_trailing_byte() {
 }
 
 #[kani::proof]
+#[kani::unwind(34)]
 fn kani_v16_oracle_asset_payloads_reject_trailing_byte() {
     let extra: u8 = kani::any();
 
@@ -1362,6 +1367,7 @@ fn kani_v16_oracle_asset_payloads_reject_trailing_byte() {
 }
 
 #[kani::proof]
+#[kani::unwind(18)]
 fn kani_v16_resolved_recovery_payloads_reject_trailing_byte() {
     let extra: u8 = kani::any();
 
