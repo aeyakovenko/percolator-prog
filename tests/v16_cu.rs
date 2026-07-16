@@ -64428,3 +64428,190 @@ fn v16_attack_recovery_oracle_push_cannot_extend_force_close_deadline() {
     assert!(!has_active_leg_for_asset(&env.portfolio_state(long), 1));
     assert!(!has_active_leg_for_asset(&env.portfolio_state(short), 1));
 }
+
+// A permissionless asset's target update invalidates the market-wide oracle epoch. Even at the
+// portfolio leg cap, an unrelated user can atomically refresh both sides and reduce exposure through
+// an external matcher before the attacker can invalidate the certificates again.
+#[test]
+fn v16_attack_permissionless_asset_epoch_grief_has_atomic_max_leg_exit() {
+    const LEGS: u16 = percolator_prog::constants::WRAPPER_MAX_PORTFOLIO_ASSETS;
+    const ATTACK_ASSET: u16 = LEGS;
+    const PRICE: u64 = 100;
+
+    let mut env = V16CuEnv::new_with_init_params_and_market_capacity(
+        V16CuMarketParams {
+            max_portfolio_assets: LEGS,
+            max_price_move_bps_per_slot: 500,
+            ..V16CuMarketParams::default()
+        },
+        LEGS as usize + 1,
+    );
+    env.update_market_init_fee_policy_with_cu(1);
+    env.svm.warp_to_slot(1);
+    for asset_index in 0..LEGS {
+        env.configure_auth_mark_for_asset_as_admin(asset_index, 1, PRICE);
+    }
+
+    let attacker = Keypair::new();
+    env.svm.warp_to_slot(2);
+    env.activate_permissionless_asset_with_fee(
+        &attacker,
+        ATTACK_ASSET,
+        2,
+        PRICE,
+        attacker.pubkey(),
+        attacker.pubkey(),
+        attacker.pubkey(),
+        attacker.pubkey(),
+        1,
+    );
+    env.configure_auth_mark_for_asset_with_authority(ATTACK_ASSET, &attacker, 2, PRICE);
+
+    let attack_long_owner = Keypair::new();
+    let attack_short_owner = Keypair::new();
+    let attack_long = env.create_portfolio(&attack_long_owner);
+    let attack_short = env.create_portfolio(&attack_short_owner);
+    env.deposit(&attack_long_owner, attack_long, 10_000);
+    env.deposit(&attack_short_owner, attack_short, 10_000);
+    env.trade_asset_with_cu(
+        ATTACK_ASSET,
+        &attack_long_owner,
+        attack_long,
+        &attack_short_owner,
+        attack_short,
+        POS_SCALE as i128,
+        PRICE,
+        0,
+    );
+
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long = env.create_portfolio(&long_owner);
+    let short = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long, 10_000_000);
+    env.deposit(&short_owner, short, 10_000_000);
+    let open_legs: Vec<BatchTradeLeg> = (0..LEGS)
+        .map(|asset_index| BatchTradeLeg {
+            asset_index,
+            size_q: POS_SCALE as i128,
+            exec_price: PRICE,
+            fee_bps: 0,
+        })
+        .collect();
+    env.send(
+        ProgInstruction::BatchTradeNoCpi { legs: open_legs },
+        vec![
+            AccountMeta::new(long_owner.pubkey(), true),
+            AccountMeta::new(short_owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(long, false),
+            AccountMeta::new(short, false),
+        ],
+        &[&long_owner, &short_owner],
+    )
+    .expect("public 14-leg setup trade");
+    let cert_epoch = health_cert(&env.portfolio_state(long)).cert_oracle_epoch;
+    assert_eq!(cert_epoch, env.market_state().1.oracle_epoch);
+
+    env.svm.warp_to_slot(3);
+    env.send(
+        ProgInstruction::PushAuthMark {
+            asset_index: ATTACK_ASSET,
+            now_slot: 3,
+            mark_e6: 200,
+        },
+        vec![
+            AccountMeta::new(attacker.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&attacker],
+    )
+    .expect("attacker updates its permissionless mark");
+    env.crank(
+        attack_long,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 3,
+            observations: crank_observations(ATTACK_ASSET),
+        },
+    );
+    assert!(env.market_state().1.oracle_epoch > cert_epoch);
+    let custody_before_exit = env.token_amount(env.vault);
+
+    env.svm.expire_blockhash();
+    let stale_exit = env.try_trade_asset_with_cu(
+        0,
+        &long_owner,
+        long,
+        &short_owner,
+        short,
+        -(POS_SCALE as i128),
+        PRICE,
+        0,
+    );
+    let stale_err = stale_exit.expect_err("unrelated target update invalidates max-leg exit certs");
+    assert!(
+        stale_err.contains("Custom(19)") || stale_err.contains("custom program error: 0x13"),
+        "expected EngineStale, got {stale_err}"
+    );
+
+    let program_id = env.program_id;
+    let market = env.market;
+    let payer = env.payer.pubkey();
+    let crank_ix = |portfolio| Instruction {
+        program_id,
+        accounts: vec![
+            AccountMeta::new_readonly(payer, true),
+            AccountMeta::new(market, false),
+            AccountMeta::new(portfolio, false),
+        ],
+        data: ProgInstruction::PermissionlessCrank {
+            now_slot: 3,
+            observations: vec![],
+        }
+        .encode(),
+    };
+    let matcher_program = Pubkey::new_unique();
+    let matcher_bytes = std::fs::read(matcher_program_path()).expect("read matcher BPF");
+    env.svm.add_program(matcher_program, &matcher_bytes);
+    let (matcher_context, matcher_delegate, _) =
+        env.init_matcher_context_authorized(matcher_program, &short_owner, short);
+    let exit_ix = Instruction {
+        program_id: env.program_id,
+        accounts: vec![
+            AccountMeta::new(long_owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(long, false),
+            AccountMeta::new(short, false),
+            AccountMeta::new_readonly(matcher_program, false),
+            AccountMeta::new(matcher_context, false),
+            AccountMeta::new_readonly(matcher_delegate, false),
+        ],
+        data: ProgInstruction::TradeCpi {
+            asset_index: 0,
+            size_q: -(POS_SCALE as i128),
+            fee_bps: 0,
+            limit_price: PRICE,
+        }
+        .encode(),
+    };
+    env.svm.expire_blockhash();
+    let atomic_cu = send_raw_ixs(
+        &mut env.svm,
+        &env.payer,
+        vec![heap_ix(), cu_ix(), crank_ix(long), crank_ix(short), exit_ix],
+        &[&long_owner],
+    )
+    .expect("atomic recovery path must fit one transaction");
+    assert!(
+        atomic_cu < 1_400_000,
+        "max-leg atomic refresh+exit consumed {atomic_cu} CU"
+    );
+
+    let after = env.market_state().1;
+    assert_eq!(after.assets[0].oi_eff_long_q, 0);
+    assert_eq!(after.assets[0].oi_eff_short_q, 0);
+    assert!(!has_active_leg_for_asset(&env.portfolio_state(long), 0));
+    assert!(!has_active_leg_for_asset(&env.portfolio_state(short), 0));
+    assert_eq!(env.token_amount(env.vault), custody_before_exit);
+    assert_eq!(after.vault as u64, custody_before_exit);
+}
