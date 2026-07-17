@@ -585,9 +585,9 @@ pub mod state {
         pub oracle_leg_feeds: [[u8; 32]; ORACLE_LEG_CAP],
         pub oracle_leg_prices_e6: [u64; ORACLE_LEG_CAP],
         pub oracle_leg_publish_times: [i64; ORACLE_LEG_CAP],
-        // Per-asset cold-storage admin (assets 1..N). Can rotate THIS asset's domain authorities
-        // (insurance/operator/backing/oracle) and itself, and can be burned (set to 0). Isolated:
-        // it can never act on another asset. Set to the activator at creation.
+        // Per-asset cold-storage admin (assets 1..N). It controls its own handoff and restart, and
+        // can be burned (set to 0). Each operational authority controls its own handoff. Set to the
+        // activator at creation and isolated from every other asset.
         pub asset_admin: [u8; 32],
     }
 
@@ -2540,9 +2540,9 @@ pub mod ix {
         UpdateAuthority {
             new_pubkey: [u8; 32],
         },
-        /// Rotate one of an asset's per-asset authorities. Gated by the asset's own `asset_admin`
-        /// (rotates any; only the admin authority itself is burnable) or the current holder of that
-        /// authority (self-rotation). Isolated to the given asset_index.
+        /// Rotate one of an asset's per-asset authorities. The current holder of the selected
+        /// authority must sign and the replacement must co-sign. Only `asset_admin` is burnable.
+        /// Isolated to the given asset_index.
         UpdateAssetAuthority {
             asset_index: u16,
             kind: u8,
@@ -8773,11 +8773,9 @@ pub mod processor {
         }
         let mut profile = read_oracle_profile_from_view(&group, &cfg, asset_index)?;
 
-        // The asset's own cold-storage admin may rotate ANY of its authorities, and only the admin
-        // authority itself may be burned to 0; otherwise the current holder of THIS authority
-        // self-rotates. Scoped to this asset's profile only — it can never act on another asset.
-        let admin_signed =
-            profile.asset_admin != [0u8; 32] && profile.asset_admin == current.key.to_bytes();
+        // Every authority owns its own handoff. The asset admin may rotate or burn the admin key,
+        // but it cannot seize an independently funded backing/insurance domain or take over an
+        // oracle by replacing that authority without its consent.
         let current_value = match kind {
             ASSET_AUTH_ADMIN => profile.asset_admin,
             ASSET_AUTH_INSURANCE => profile.insurance_authority,
@@ -8792,9 +8790,7 @@ pub mod processor {
         if new_pubkey == [0u8; 32] && kind != ASSET_AUTH_ADMIN {
             return Err(PercolatorError::InvalidInstruction.into());
         }
-        if !admin_signed {
-            expect_live_authority(&current_value, current.key)?;
-        }
+        expect_live_authority(&current_value, current.key)?;
         match kind {
             ASSET_AUTH_ADMIN => profile.asset_admin = new_pubkey,
             ASSET_AUTH_INSURANCE => profile.insurance_authority = new_pubkey,

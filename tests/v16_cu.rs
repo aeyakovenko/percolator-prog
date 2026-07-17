@@ -5958,29 +5958,29 @@ fn v16_bpf_asset0_shutdown_force_closes_preserves_insurance_and_restarts() {
     )
     .expect("asset-0 admin rotates to a cold key");
     env.try_update_per_asset_authority_with_cu(
-        &asset_admin,
+        &marketauth,
         Some(&insurance_authority),
         0,
         processor::ASSET_AUTH_INSURANCE,
         insurance_authority.pubkey().to_bytes(),
     )
-    .expect("asset-0 admin rotates asset-0 insurance authority");
+    .expect("current asset-0 insurance holder rotates its authority");
     env.try_update_per_asset_authority_with_cu(
-        &asset_admin,
+        &marketauth,
         Some(&insurance_operator),
         0,
         processor::ASSET_AUTH_INSURANCE_OPERATOR,
         insurance_operator.pubkey().to_bytes(),
     )
-    .expect("asset-0 admin rotates asset-0 insurance operator");
+    .expect("current asset-0 insurance operator rotates its authority");
     env.try_update_per_asset_authority_with_cu(
-        &asset_admin,
+        &marketauth,
         Some(&backing_bucket_authority),
         0,
         processor::ASSET_AUTH_BACKING_BUCKET,
         backing_bucket_authority.pubkey().to_bytes(),
     )
-    .expect("asset-0 admin rotates asset-0 backing bucket authority");
+    .expect("current asset-0 backing holder rotates its authority");
     env.top_up_insurance_domain_with_authority(&insurance_authority, 0, 500);
     let insurance_before_shutdown = env.market_state().1.insurance;
     let vault_before_shutdown = env.token_amount(env.vault);
@@ -6179,13 +6179,13 @@ fn v16_bpf_asset0_shutdown_force_closes_preserves_insurance_and_restarts() {
     assert_eq!(env.market_state().1.insurance_domain_budget[0], 500);
 
     env.try_update_per_asset_authority_with_cu(
-        &asset_admin,
+        &marketauth,
         Some(&new_oracle),
         0,
         processor::ASSET_AUTH_ORACLE,
         new_oracle.pubkey().to_bytes(),
     )
-    .expect("asset-0 admin rotates oracle before restart");
+    .expect("current asset-0 oracle holder rotates before restart");
     env.svm.warp_to_slot(8);
     env.svm.expire_blockhash();
     let restart_by_marketauth = send_tx(
@@ -43484,8 +43484,7 @@ fn v16_attack_update_authority_non_holder_cannot_rotate() {
         "a non-holder seizing the market authority must reject"
     );
 
-    // and rotating ASSET 0's insurance authority (now a per-asset op) by a non-holder also rejects:
-    // mallory is neither asset-0's asset_admin nor its insurance authority.
+    // Rotating ASSET 0's insurance authority (now a per-asset op) by a non-holder also rejects.
     let prof0 = |env: &V16CuEnv| {
         state::read_asset_oracle_profile(&env.svm.get_account(&env.market).unwrap().data, 0)
             .unwrap()
@@ -44817,14 +44816,12 @@ fn v16_attack_spent_cleanup_cannot_erase_provider_receivable() {
     assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
 }
 
-// Product spec — per-asset cold-storage admin keys (governance): EVERY asset (including asset 0) has
-// its OWN admin that can rotate that asset's domain authorities (insurance/operator/backing/oracle)
-// and itself, and the asset admin can be BURNED to 0; isolated — it can never act on another asset. Asset 0's
-// asset_admin is bootstrapped to the market admin at InitMarket and is rotated/burned through the same
-// UpdateAssetAuthority path as assets 1..N. Each domain authority can also self-rotate through a
-// co-signed handoff, but cannot be burned to zero after activation.
+// Product spec — per-asset authority handoffs are holder-controlled and isolated. Every asset
+// (including asset 0) has an admin key that may rotate or burn itself, while each domain authority
+// self-rotates through a co-signed handoff and cannot be burned after activation. At bootstrap the
+// asset admin is also each initial domain holder, but admin status alone grants no later takeover.
 #[test]
-fn v16_attack_per_asset_admin_rotates_keys_isolated_and_burnable() {
+fn v16_attack_per_asset_authority_handoffs_are_isolated_and_admin_burnable() {
     let mut env = V16CuEnv::new(); // 1 slot (asset 0); asset 1 is APPENDED permissionlessly below
     env.configure_auth_mark_with_cu(0, 100);
     env.activate_asset(1, 2, 100); // APPEND asset 1 -> profile.asset_admin bootstraps to the activator (admin)
@@ -44880,7 +44877,7 @@ fn v16_attack_per_asset_admin_rotates_keys_isolated_and_burnable() {
         )
     };
 
-    // 1) the per-asset admin rotates the asset's ORACLE authority (new key co-signs).
+    // 1) the initial oracle holder rotates the asset's ORACLE authority (new key co-signs).
     let new_oracle = Keypair::new();
     assert!(
         upd(
@@ -44892,7 +44889,7 @@ fn v16_attack_per_asset_admin_rotates_keys_isolated_and_burnable() {
             new_oracle.pubkey().to_bytes()
         )
         .is_ok(),
-        "per-asset admin rotates the asset's oracle authority"
+        "initial oracle holder rotates the asset's oracle authority"
     );
     assert_eq!(
         prof(&env, 1).oracle_authority,
@@ -44916,8 +44913,8 @@ fn v16_attack_per_asset_admin_rotates_keys_isolated_and_burnable() {
         "non-admin cannot rotate the asset's authorities"
     );
 
-    // 3) ASSET 0 uses the SAME per-asset path: its asset_admin (the market admin) rotates asset-0's
-    //    insurance authority — and this is ISOLATED, leaving asset 1's authorities byte-identical.
+    // 3) ASSET 0 uses the SAME path: its initial insurance holder rotates asset-0's insurance
+    //    authority, leaving asset 1's authorities byte-identical.
     let a0_ins = Keypair::new();
     let a1_oracle_before = prof(&env, 1).oracle_authority;
     let a1_ins_before = prof(&env, 1).insurance_authority;
@@ -44931,7 +44928,7 @@ fn v16_attack_per_asset_admin_rotates_keys_isolated_and_burnable() {
             a0_ins.pubkey().to_bytes()
         )
         .is_ok(),
-        "asset-0 admin rotates asset-0 insurance authority via UpdateAssetAuthority"
+        "asset-0 insurance holder rotates via UpdateAssetAuthority"
     );
     assert_eq!(
         prof(&env, 0).insurance_authority,
@@ -44949,7 +44946,7 @@ fn v16_attack_per_asset_admin_rotates_keys_isolated_and_burnable() {
         "asset-1 insurance UNTOUCHED by asset-0 rotation"
     );
 
-    // 3b) ISOLATION the other way: the asset-1 admin cannot reach asset 0.
+    // 3b) Once asset 1's oracle has a distinct holder, its asset admin cannot retake it.
     let a0_prof_before = prof(&env, 0);
     assert!(
         upd(
@@ -44960,8 +44957,8 @@ fn v16_attack_per_asset_admin_rotates_keys_isolated_and_burnable() {
             processor::ASSET_AUTH_ORACLE,
             new_oracle.pubkey().to_bytes()
         )
-        .is_ok(),
-        "asset-1 admin rotates asset-1 oracle (re-establish a known holder)"
+        .is_err(),
+        "asset admin cannot replace a distinct oracle holder"
     );
     assert_eq!(
         prof(&env, 0).insurance_authority,
@@ -45036,6 +45033,88 @@ fn v16_attack_per_asset_admin_rotates_keys_isolated_and_burnable() {
         "asset-0 admin can be burned"
     );
     assert_eq!(prof(&env, 0).asset_admin, [0u8; 32], "asset-0 admin burned");
+}
+
+// PRIVILEGED LoF: the asset admin is governance, not the owner of independently supplied backing.
+// Once a provider accepts a domain and funds it, only that current domain authority may hand the
+// domain to a replacement. Otherwise a compromised asset-admin key can rekey the funded bucket to
+// an attacker and immediately withdraw the provider's principal through public instructions.
+#[test]
+fn v16_attack_asset_admin_cannot_rekey_and_steal_provider_backing() {
+    let mut env = V16CuEnv::new();
+    let asset_admin = env.admin.insecure_clone();
+    let provider = Keypair::new();
+    let attacker = Keypair::new();
+
+    env.try_update_per_asset_authority_with_cu(
+        &asset_admin,
+        Some(&provider),
+        0,
+        processor::ASSET_AUTH_BACKING_BUCKET,
+        provider.pubkey().to_bytes(),
+    )
+    .expect("the current backing authority hands the empty domain to the provider");
+    env.top_up_backing_bucket_with_authority(&provider, 0, 500, 100_000);
+
+    let (_, funded) = env.market_state();
+    assert_eq!(
+        funded.source_backing_buckets[0].fresh_unliened_backing_num,
+        500 * BOUND_SCALE,
+        "independent provider principal is live in the domain"
+    );
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+
+    env.svm.expire_blockhash();
+    let takeover = env.try_update_per_asset_authority_with_cu(
+        &asset_admin,
+        Some(&attacker),
+        0,
+        processor::ASSET_AUTH_BACKING_BUCKET,
+        attacker.pubkey().to_bytes(),
+    );
+
+    let attacker_dest = env.token_account(attacker.pubkey(), 0);
+    env.svm.expire_blockhash();
+    let steal = env.send(
+        ProgInstruction::WithdrawBackingBucket {
+            domain: 0,
+            amount: 500,
+        },
+        vec![
+            AccountMeta::new(attacker.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(attacker_dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&attacker],
+    );
+
+    assert!(
+        steal.is_err(),
+        "attacker must not withdraw the provider's funded domain"
+    );
+    assert!(
+        takeover.is_err(),
+        "asset admin must not replace a distinct live backing authority"
+    );
+    assert_eq!(
+        env.token_amount(attacker_dest),
+        0,
+        "attacker extracts no provider principal"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "rejected takeover and withdrawal preserve market accounting"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        vault_before,
+        "rejected takeover and withdrawal preserve custody"
+    );
 }
 
 // security.md sweep — zero required authority anti-brick (#6/#30/#48): activation rejects zero domain
@@ -57924,7 +58003,7 @@ fn v16_attack_cure_cannot_be_replayed_on_canceled_close_ledger() {
 // GRANT it to the new key. If rotation only updated state cosmetically (old key still able to push), a
 // rotated-out / compromised key could keep injecting marks to manipulate settlement (LoF); if the new key
 // could not push, the asset's oracle would be bricked (DoS). Drives the functional transfer end-to-end:
-// admin (the bootstrapped oracle authority) pushes once, the asset_admin rotates the oracle authority to a
+// admin (the bootstrapped oracle authority) pushes once, then hands the oracle authority to a
 // fresh key, then the OLD key's push rejects (Unauthorized) while the NEW key's push succeeds. The
 // existing rotation test checks state-level isolation/burnability, not the functional push transfer.
 #[test]
@@ -57953,8 +58032,8 @@ fn v16_attack_oracle_authority_rotation_revokes_old_grants_new() {
         "admin (oracle authority) can push before rotation: {r0:?}"
     );
 
-    // Rotate the ORACLE authority admin -> newauth. admin signs as asset_admin; newauth co-signs (proves
-    // control of the incoming key).
+    // Rotate the ORACLE authority admin -> newauth. Admin signs as the current oracle holder;
+    // newauth co-signs to prove control of the incoming key.
     let newauth = Keypair::new();
     env.ensure_signer_account(newauth.pubkey());
     env.svm.expire_blockhash();
@@ -57973,7 +58052,7 @@ fn v16_attack_oracle_authority_rotation_revokes_old_grants_new() {
     );
     assert!(
         rot.is_ok(),
-        "asset_admin rotates the oracle authority: {rot:?}"
+        "current oracle holder rotates the oracle authority: {rot:?}"
     );
 
     env.svm.warp_to_slot(3);
@@ -59127,7 +59206,7 @@ fn v16_attack_asset0_operator_rotation_rekeys_live_insurance_withdraw() {
         processor::ASSET_AUTH_INSURANCE_OPERATOR,
         new_operator.pubkey().to_bytes(),
     )
-    .expect("asset-0 admin rotates the live insurance operator");
+    .expect("current asset-0 insurance operator rotates its authority");
     env.top_up_insurance_domain_with_authority(&admin, 0, 500);
 
     let (_, group_before) = env.market_state();
@@ -59236,7 +59315,7 @@ fn v16_attack_asset0_backing_rotation_rekeys_live_bucket_withdraw() {
         processor::ASSET_AUTH_BACKING_BUCKET,
         new_backing.pubkey().to_bytes(),
     )
-    .expect("asset-0 admin rotates the backing-bucket authority");
+    .expect("current asset-0 backing holder rotates its authority");
     env.top_up_backing_bucket_with_authority(&new_backing, 0, 500, 100_000);
 
     let (_, group_before) = env.market_state();
