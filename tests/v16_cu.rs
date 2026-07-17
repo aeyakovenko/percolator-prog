@@ -5671,17 +5671,20 @@ fn v16_bpf_permissionless_market_shutdown_force_closes_recovers_and_reuses_slot(
             amount,
         );
     }
+    // Abandoned residual: marketauth-driven cleanup escheats the absent provider's insurance and
+    // backing into the base insurance fund (like fees) instead of paying the authority, and does so
+    // vault-neutrally (the tokens stay in the vault).
     assert_eq!(
         env.token_amount(insurance_recovery),
-        10,
-        "market-driven cleanup returns domain insurance to its authority"
+        0,
+        "market-driven cleanup escheats domain insurance rather than paying the authority"
     );
     assert_eq!(
         env.token_amount(provider_recovery),
-        45,
-        "market-driven cleanup returns backing principal to its provider"
+        0,
+        "market-driven cleanup escheats backing principal rather than paying the provider"
     );
-    assert_eq!(env.token_amount(env.vault), 20_025);
+    assert_eq!(env.token_amount(env.vault), 20_080);
     let market_data = env.svm.get_account(&env.market).unwrap().data;
     let (_, recovered_group) = state::read_market(&market_data).unwrap();
     assert_eq!(recovered_group.insurance_domain_budget[2], 0);
@@ -5694,8 +5697,10 @@ fn v16_bpf_permissionless_market_shutdown_force_closes_recovers_and_reuses_slot(
         recovered_group.source_backing_buckets[3].fresh_unliened_backing_num,
         0
     );
-    assert_eq!(recovered_group.insurance_domain_budget[0], 12);
-    assert_eq!(recovered_group.insurance_domain_budget[1], 13);
+    // Base insurance grew by the escheated residual: 55 atoms (10 insurance + 45 backing) split
+    // across the long/short base domains on top of the pre-existing 12/13.
+    assert_eq!(recovered_group.insurance_domain_budget[0], 39);
+    assert_eq!(recovered_group.insurance_domain_budget[1], 41);
     assert_eq!(
         recovered_group.source_backing_buckets[0].fresh_unliened_backing_num,
         0
@@ -5755,7 +5760,7 @@ fn v16_bpf_permissionless_market_shutdown_force_closes_recovers_and_reuses_slot(
     );
     println!("v16 permissionless asset reuse BPF CU: {reuse_cu}");
     assert_eq!(env.token_amount(reuse_source), 0);
-    assert_eq!(env.token_amount(env.vault), 20_050);
+    assert_eq!(env.token_amount(env.vault), 20_105);
     let market_data = env.svm.get_account(&env.market).unwrap().data;
     let (reused_cfg, reused_group) = state::read_market(&market_data).unwrap();
     assert_eq!(reused_cfg.free_market_slot_count, 0);
@@ -59479,7 +59484,7 @@ fn v16_attack_backing_topup_rejects_lapsed_expiry() {
 // Public isolation probe: marketauth may drive an abandoned shutdown asset toward cleanup, but it
 // must not redirect that permissionless asset's provider-owned backing principal to itself.
 #[test]
-fn v16_attack_shutdown_cleanup_cannot_redirect_foreign_backing_principal() {
+fn v16_attack_shutdown_cleanup_escheats_abandoned_backing_to_base_insurance() {
     const BACKING: u128 = 500;
 
     let mut env = V16CuEnv::new();
@@ -59528,47 +59533,55 @@ fn v16_attack_shutdown_cleanup_cannot_redirect_foreign_backing_principal() {
         .expect("marketauth can shut down the permissionless asset");
     env.svm.warp_to_slot(7);
 
-    let before_market = env.svm.get_account(&env.market).unwrap();
-    let before_vault = env.svm.get_account(&env.vault).unwrap();
-    let admin_dest = env.token_account(marketauth.pubkey(), 0);
+    const RECLAIM: u128 = 200;
+    const ABANDONED: u128 = BACKING - RECLAIM;
+
+    // Reclaim-first: the provider (backing authority) can still withdraw its own principal during
+    // shutdown; those funds pay the provider, not the base insurance fund.
+    let provider_dest = env.token_account(provider_key, 0);
     env.svm.expire_blockhash();
-    let redirected = env.send(
+    env.send(
         ProgInstruction::WithdrawBackingBucket {
             domain: 2,
-            amount: BACKING,
+            amount: RECLAIM,
         },
         vec![
-            AccountMeta::new(marketauth.pubkey(), true),
+            AccountMeta::new(provider_key, true),
             AccountMeta::new(env.market, false),
-            AccountMeta::new(admin_dest, false),
+            AccountMeta::new(provider_dest, false),
             AccountMeta::new(env.vault, false),
             AccountMeta::new_readonly(env.vault_authority, false),
             AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(ledger, false),
         ],
-        &[&marketauth],
-    );
-    assert!(
-        redirected.is_err(),
-        "shutdown cleanup must not redirect provider backing to marketauth"
-    );
-    assert_eq!(env.token_amount(admin_dest), 0);
-    assert_eq!(env.svm.get_account(&env.market).unwrap(), before_market);
-    assert_eq!(env.svm.get_account(&env.vault).unwrap(), before_vault);
+        &[&provider],
+    )
+    .expect("provider reclaims its own backing during shutdown");
+    assert_eq!(env.token_amount(provider_dest), RECLAIM as u64);
 
-    // Cleanup remains permissionless: marketauth can submit it when the payout token account is
-    // owned by the backing provider, even if the provider itself is offline.
-    let provider_dest = env.token_account(provider_key, 0);
+    // Snapshot before the abandoned-residual cleanup.
+    let base_insurance_before = {
+        let g = env.market_state().1;
+        g.insurance_domain_budget[0] + g.insurance_domain_budget[1]
+    };
+    let vault_tokens_before = env.token_amount(env.vault);
+    let header_vault_before = env.market_state().1.vault;
+
+    // Abandoned residual: marketauth drives cleanup for the absent provider. It cannot pay itself
+    // (the original rug) and must not need a provider token account (which would strand cleanup);
+    // the residual escheats to the base insurance fund exactly like fees, leaving tokens in vault.
+    let admin_dest = env.token_account(marketauth.pubkey(), 0);
     env.svm.expire_blockhash();
     let cleanup_cu = env
         .send(
             ProgInstruction::WithdrawBackingBucket {
                 domain: 2,
-                amount: BACKING,
+                amount: ABANDONED,
             },
             vec![
                 AccountMeta::new(marketauth.pubkey(), true),
                 AccountMeta::new(env.market, false),
-                AccountMeta::new(provider_dest, false),
+                AccountMeta::new(admin_dest, false),
                 AccountMeta::new(env.vault, false),
                 AccountMeta::new_readonly(env.vault_authority, false),
                 AccountMeta::new_readonly(spl_token::ID, false),
@@ -59576,26 +59589,37 @@ fn v16_attack_shutdown_cleanup_cannot_redirect_foreign_backing_principal() {
             ],
             &[&marketauth],
         )
-        .expect("marketauth cleanup pays the backing provider");
+        .expect("marketauth escheats abandoned backing to base insurance");
     assert_cu_within(
-        "provider-pinned shutdown backing cleanup",
+        "abandoned backing escheat cleanup",
         cleanup_cu,
         CUSTODY_CU_LIMIT,
     );
-    assert_eq!(env.token_amount(provider_dest), BACKING as u64);
+
+    // Marketauth received nothing; the tokens stayed in the vault (vault-neutral, like fees).
+    assert_eq!(env.token_amount(admin_dest), 0);
+    assert_eq!(env.token_amount(env.vault), vault_tokens_before);
+    let g = env.market_state().1;
+    assert_eq!(g.vault, header_vault_before, "escheat is vault-neutral");
+    let base_insurance_after = g.insurance_domain_budget[0] + g.insurance_domain_budget[1];
+    assert_eq!(
+        base_insurance_after - base_insurance_before,
+        ABANDONED,
+        "abandoned backing escheats into the base insurance fund"
+    );
+    assert_eq!(
+        g.source_backing_buckets[2].fresh_unliened_backing_num, 0,
+        "source backing bucket fully drained"
+    );
     let ledger_after =
         state::read_backing_domain_ledger(&env.svm.get_account(&ledger).unwrap().data)
-            .expect("provider ledger remains valid after marketauth cleanup");
+            .expect("provider ledger remains valid after escheat");
     assert_eq!(ledger_after.authority, provider_key.to_bytes());
     assert_eq!(ledger_after.total_principal_atoms, 0);
-    assert_eq!(
-        env.market_state().1.source_backing_buckets[2].fresh_unliened_backing_num,
-        0
-    );
 }
 
 #[test]
-fn v16_attack_shutdown_cleanup_cannot_redirect_foreign_insurance_principal() {
+fn v16_attack_shutdown_cleanup_escheats_abandoned_insurance_to_base_insurance() {
     const INSURANCE: u128 = 300;
 
     let mut env = V16CuEnv::new();
@@ -59633,34 +59657,18 @@ fn v16_attack_shutdown_cleanup_cannot_redirect_foreign_insurance_principal() {
         .expect("marketauth can shut down the permissionless asset");
     env.svm.warp_to_slot(7);
 
-    let before_market = env.svm.get_account(&env.market).unwrap();
-    let before_vault = env.svm.get_account(&env.vault).unwrap();
-    let admin_dest = env.token_account(marketauth.pubkey(), 0);
-    env.svm.expire_blockhash();
-    let redirected = env.send(
-        ProgInstruction::WithdrawInsuranceAsset {
-            asset_index: 1,
-            amount: INSURANCE,
-        },
-        vec![
-            AccountMeta::new(marketauth.pubkey(), true),
-            AccountMeta::new(env.market, false),
-            AccountMeta::new(admin_dest, false),
-            AccountMeta::new(env.vault, false),
-            AccountMeta::new_readonly(env.vault_authority, false),
-            AccountMeta::new_readonly(spl_token::ID, false),
-        ],
-        &[&marketauth],
-    );
-    assert!(
-        redirected.is_err(),
-        "shutdown cleanup must not redirect insurance principal to marketauth"
-    );
-    assert_eq!(env.token_amount(admin_dest), 0);
-    assert_eq!(env.svm.get_account(&env.market).unwrap(), before_market);
-    assert_eq!(env.svm.get_account(&env.vault).unwrap(), before_vault);
+    // Snapshot before the abandoned-residual cleanup.
+    let base_insurance_before = {
+        let g = env.market_state().1;
+        g.insurance_domain_budget[0] + g.insurance_domain_budget[1]
+    };
+    let vault_tokens_before = env.token_amount(env.vault);
+    let header_vault_before = env.market_state().1.vault;
 
-    let authority_dest = env.token_account(insurance_authority.pubkey(), 0);
+    // Abandoned residual: marketauth drives cleanup for the absent insurance operator. It cannot pay
+    // itself (the original rug) and needs no provider token account (which would strand cleanup); the
+    // reserve escheats to the base insurance fund exactly like fees, leaving the tokens in the vault.
+    let admin_dest = env.token_account(marketauth.pubkey(), 0);
     env.svm.expire_blockhash();
     let cleanup_cu = env
         .send(
@@ -59671,7 +59679,7 @@ fn v16_attack_shutdown_cleanup_cannot_redirect_foreign_insurance_principal() {
             vec![
                 AccountMeta::new(marketauth.pubkey(), true),
                 AccountMeta::new(env.market, false),
-                AccountMeta::new(authority_dest, false),
+                AccountMeta::new(admin_dest, false),
                 AccountMeta::new(env.vault, false),
                 AccountMeta::new_readonly(env.vault_authority, false),
                 AccountMeta::new_readonly(spl_token::ID, false),
@@ -59679,19 +59687,33 @@ fn v16_attack_shutdown_cleanup_cannot_redirect_foreign_insurance_principal() {
             ],
             &[&marketauth],
         )
-        .expect("marketauth cleanup pays the insurance authority");
+        .expect("marketauth escheats abandoned insurance to base insurance");
     assert_cu_within(
-        "provider-pinned shutdown insurance cleanup",
+        "abandoned insurance escheat cleanup",
         cleanup_cu,
         CUSTODY_CU_LIMIT,
     );
-    assert_eq!(env.token_amount(authority_dest), INSURANCE as u64);
+
+    // Marketauth received nothing; the tokens stayed in the vault (vault-neutral, like fees).
+    assert_eq!(env.token_amount(admin_dest), 0);
+    assert_eq!(env.token_amount(env.vault), vault_tokens_before);
+    let g = env.market_state().1;
+    assert_eq!(g.vault, header_vault_before, "escheat is vault-neutral");
+    let base_insurance_after = g.insurance_domain_budget[0] + g.insurance_domain_budget[1];
+    assert_eq!(
+        base_insurance_after - base_insurance_before,
+        INSURANCE,
+        "abandoned insurance escheats into the base insurance fund"
+    );
+    assert_eq!(
+        g.insurance_domain_budget[2], 0,
+        "asset insurance domain fully drained"
+    );
     let ledger_after = state::read_insurance_ledger(&env.svm.get_account(&ledger).unwrap().data)
-        .expect("insurance authority ledger remains valid after marketauth cleanup");
+        .expect("insurance authority ledger remains valid after escheat");
     assert_eq!(
         ledger_after.authority,
         insurance_authority.pubkey().to_bytes()
     );
     assert_eq!(ledger_after.total_principal_atoms, 0);
-    assert_eq!(env.market_state().1.insurance_domain_budget[2], 0);
 }
