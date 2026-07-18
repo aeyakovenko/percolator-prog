@@ -64615,3 +64615,156 @@ fn v16_attack_permissionless_asset_epoch_grief_has_atomic_max_leg_exit() {
     assert_eq!(env.token_amount(env.vault), custody_before_exit);
     assert_eq!(after.vault as u64, custody_before_exit);
 }
+
+// LoF/DoS sweep (PR135): shutdown cleanup has to remain permissionlessly live even when an
+// abandoned account retains the maximum 2N public source-claim domains. This cross-product pins
+// the two-account ForceCloseAbandonedAsset path, not just ordinary owner-signed source-lien trades.
+#[test]
+fn v16_attack_public_max_source_force_close_abandoned_asset_stays_bounded() {
+    const N: u16 = 10;
+    const LOW: u64 = 100;
+    const HIGH: u64 = 200;
+    const Q: i128 = (100 * POS_SCALE) as i128;
+    const BACKING_EXPIRY_SLOT: u64 = 100;
+    const SHUTDOWN_SLOT: u64 = 41;
+    const FORCE_SLOT: u64 = 47;
+
+    let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+        max_portfolio_assets: N,
+        maintenance_margin_bps: 10_000,
+        initial_margin_bps: 10_000,
+        max_price_move_bps_per_slot: 500,
+        max_accrual_dt_slots: 20,
+        min_funding_lifetime_slots: 20,
+        ..V16CuMarketParams::default()
+    });
+    env.configure_permissionless_resolve_with_cu(1_000, 5);
+    for asset_index in 0..N {
+        env.configure_auth_mark_for_asset_as_admin(asset_index, 0, LOW);
+        env.top_up_backing_bucket(2 * asset_index, 100_000, BACKING_EXPIRY_SLOT);
+        env.top_up_backing_bucket(2 * asset_index + 1, 100_000, BACKING_EXPIRY_SLOT);
+    }
+
+    let winner_owner = Keypair::new();
+    let winner = env.create_portfolio(&winner_owner);
+    env.deposit(&winner_owner, winner, N as u128 * 10_000 + 1);
+    let keeper_owner = Keypair::new();
+    let keeper = env.create_portfolio(&keeper_owner);
+    let mut counterparties = Vec::new();
+    for asset_index in 0..N {
+        let owner = Keypair::new();
+        let portfolio = env.create_portfolio(&owner);
+        env.deposit(&owner, portfolio, 100_000);
+        env.trade_asset_with_cu(
+            asset_index,
+            &winner_owner,
+            winner,
+            &owner,
+            portfolio,
+            Q,
+            LOW,
+            0,
+        );
+        counterparties.push((owner, portfolio));
+    }
+
+    let accrue_all = |env: &mut V16CuEnv, slot: u64, price: u64| {
+        env.svm.warp_to_slot(slot);
+        for asset_index in 0..N {
+            env.push_auth_mark_for_asset_as_admin(asset_index, slot, price);
+            env.crank(
+                keeper,
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: slot,
+                    observations: crank_observations(asset_index),
+                },
+            );
+        }
+    };
+    let refresh_until_current = |env: &mut V16CuEnv, portfolio: Pubkey, slot: u64| {
+        for _ in 0..=N {
+            let account = env.portfolio_state(portfolio);
+            let group = env.market_state().1;
+            let cert = health_cert(&account);
+            if cert.valid
+                && account.stale_state == 0
+                && account.b_stale_state == 0
+                && cert.cert_oracle_epoch == group.oracle_epoch
+                && cert.cert_funding_epoch == group.funding_epoch
+                && cert.cert_risk_epoch == group.risk_epoch
+                && cert.cert_asset_set_epoch == group.asset_set_epoch
+                && cert.active_bitmap_at_cert == active_bitmap(&account)
+            {
+                return;
+            }
+            env.crank(
+                portfolio,
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: slot,
+                    observations: vec![],
+                },
+            );
+        }
+        panic!("portfolio refresh exceeded bounded rank");
+    };
+
+    accrue_all(&mut env, 20, HIGH);
+    for (_, portfolio) in &counterparties {
+        refresh_until_current(&mut env, *portfolio, 20);
+    }
+    refresh_until_current(&mut env, winner, 20);
+    for (asset_index, (owner, portfolio)) in counterparties.iter().enumerate() {
+        env.trade_asset_with_cu(
+            asset_index as u16,
+            &winner_owner,
+            winner,
+            owner,
+            *portfolio,
+            -2 * Q,
+            HIGH,
+            0,
+        );
+    }
+
+    accrue_all(&mut env, 40, LOW);
+    for (_, portfolio) in &counterparties {
+        refresh_until_current(&mut env, *portfolio, 40);
+    }
+    refresh_until_current(&mut env, winner, 40);
+    assert_eq!(
+        env.portfolio_state(winner)
+            .source_domains
+            .iter()
+            .filter(|source| source.source_claim_bound_num.get() != 0)
+            .count(),
+        2 * N as usize,
+        "setup reaches the public max-source shape",
+    );
+
+    env.svm.warp_to_slot(SHUTDOWN_SLOT);
+    env.update_asset_lifecycle_as_admin_with_cu(
+        percolator_prog::processor::ASSET_ACTION_SHUTDOWN,
+        0,
+        SHUTDOWN_SLOT,
+        0,
+    );
+    env.svm.warp_to_slot(FORCE_SLOT);
+    env.svm.expire_blockhash();
+    let cranker = Keypair::new();
+    let cu = env
+        .try_force_close_abandoned_asset_with_cu(
+            &cranker,
+            winner,
+            counterparties[0].1,
+            0,
+            FORCE_SLOT,
+            Q.unsigned_abs(),
+        )
+        .expect("max-source abandoned pair remains permissionlessly closeable");
+    assert_cu_within("max-source ForceCloseAbandonedAsset", cu, 1_375_000);
+    assert!(!has_active_leg_for_asset(&env.portfolio_state(winner), 0));
+    assert!(!has_active_leg_for_asset(
+        &env.portfolio_state(counterparties[0].1),
+        0,
+    ));
+}
