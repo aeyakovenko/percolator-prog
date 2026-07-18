@@ -59717,3 +59717,178 @@ fn v16_attack_underfunded_exit_cannot_move_ewma_with_uncollectible_fee() {
         assert_underfunded_ewma_exit_uses_collected_fee(path);
     }
 }
+
+// PARTIAL DoS: the live resolve policy is part of the bounded Recovery exit guarantee. After an
+// honest oracle creates a winner and a separate non-oracle admin shuts the asset down, that admin
+// must not move an already-running five-slot force-close deadline out to ten million slots. At the
+// original deadline an honest cranker must still close the pair and the winner must recover its
+// crystallized claim. Forfeiting the leg releases principal but leaves that claim unconvertible, so
+// it is not a complete payout-liveness path.
+#[test]
+fn v16_attack_live_policy_cannot_extend_recovery_force_close_deadline() {
+    const DEPOSIT: u128 = 1_000_000;
+    const SIZE_Q: u128 = 1_000 * POS_SCALE;
+    const PROFIT: u128 = 10_000;
+    const SHUTDOWN_SLOT: u64 = 3;
+    const ORIGINAL_DEADLINE: u64 = 8;
+
+    let mut env = V16CuEnv::new();
+    let admin = env.admin.insecure_clone();
+    let oracle = Keypair::new();
+    let cranker = Keypair::new();
+    env.configure_permissionless_resolve_with_cu(100, 5);
+    env.try_update_per_asset_authority_with_cu(
+        &admin,
+        Some(&oracle),
+        0,
+        processor::ASSET_AUTH_ORACLE,
+        oracle.pubkey().to_bytes(),
+    )
+    .expect("separate the honest oracle key from the non-oracle admin");
+    env.configure_auth_mark_for_asset_with_authority(0, &oracle, 1, 100);
+
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long = env.create_portfolio(&long_owner);
+    let short = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long, DEPOSIT);
+    env.deposit(&short_owner, short, DEPOSIT);
+    env.trade_with_cu(
+        &long_owner,
+        long,
+        &short_owner,
+        short,
+        SIZE_Q as i128,
+        100,
+        0,
+    );
+
+    env.svm.warp_to_slot(2);
+    env.push_auth_mark_for_asset_with_authority(0, &oracle, 2, 110);
+    env.crank(
+        long,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 2,
+            observations: crank_observations(0),
+        },
+    );
+    env.crank(
+        short,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 2,
+            observations: Vec::new(),
+        },
+    );
+    env.crank(
+        long,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 2,
+            observations: Vec::new(),
+        },
+    );
+    assert_eq!(
+        env.portfolio_state(long).pnl.get(),
+        PROFIT as i128,
+        "honest mark creates a real winner before the admin action"
+    );
+
+    env.svm.warp_to_slot(SHUTDOWN_SLOT);
+    env.update_asset_lifecycle_as_admin_with_cu(
+        processor::ASSET_ACTION_SHUTDOWN,
+        0,
+        SHUTDOWN_SLOT,
+        0,
+    );
+    let market_before_extension = env.svm.get_account(&env.market).unwrap();
+
+    env.svm.warp_to_slot(ORIGINAL_DEADLINE - 1);
+    env.svm.expire_blockhash();
+    let extension = env.send(
+        ProgInstruction::ConfigurePermissionlessResolve {
+            stale_slots: 100,
+            force_close_delay_slots: percolator_prog::constants::MAX_FORCE_CLOSE_DELAY_SLOTS,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&admin],
+    );
+    let extension_landed = extension.is_ok();
+    if !extension_landed {
+        assert_eq!(
+            env.svm.get_account(&env.market).unwrap(),
+            market_before_extension,
+            "rejected deadline extension is atomic"
+        );
+    }
+
+    env.svm.warp_to_slot(ORIGINAL_DEADLINE);
+    let force_close = env.try_force_close_abandoned_asset_with_cu(
+        &cranker,
+        long,
+        short,
+        0,
+        ORIGINAL_DEADLINE,
+        SIZE_Q,
+    );
+
+    if extension_landed {
+        assert!(
+            force_close.is_err(),
+            "control: the live policy extension actually blocks the honest cranker"
+        );
+        env.svm.expire_blockhash();
+        let convert = env.send(
+            ProgInstruction::ConvertReleasedPnl { amount: PROFIT },
+            vec![
+                AccountMeta::new(long_owner.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(long, false),
+            ],
+            &[&long_owner],
+        );
+        assert!(
+            convert.is_err(),
+            "winner cannot convert while its Recovery position remains trapped"
+        );
+        env.forfeit_recovery_leg_with_cu(&long_owner, long, 0, 1);
+        let forfeited = env.portfolio_state(long);
+        assert_eq!(forfeited.pnl.get(), PROFIT as i128);
+        env.svm.expire_blockhash();
+        let convert_after_forfeit = env.send(
+            ProgInstruction::ConvertReleasedPnl { amount: PROFIT },
+            vec![
+                AccountMeta::new(long_owner.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(long, false),
+            ],
+            &[&long_owner],
+        );
+        assert!(
+            convert_after_forfeit.is_err(),
+            "forfeiting the leg must not be mistaken for payout progress"
+        );
+        let dest = env.withdraw(&long_owner, long, DEPOSIT);
+        assert_eq!(env.token_amount(dest) as u128, DEPOSIT);
+        assert_eq!(env.portfolio_state(long).pnl.get(), PROFIT as i128);
+        assert!(
+            !extension_landed,
+            "the non-oracle admin extended an in-flight Recovery deadline and stranded the winner's {PROFIT}-atom claim"
+        );
+    }
+
+    let force_close_cu = force_close.expect("original Recovery deadline remains live");
+    assert_cu_within(
+        "immutable Recovery force-close deadline",
+        force_close_cu,
+        TRADE_CU_LIMIT,
+    );
+    assert!(!has_active_leg_for_asset(&env.portfolio_state(long), 0));
+    assert!(!has_active_leg_for_asset(&env.portfolio_state(short), 0));
+    assert_eq!(env.portfolio_state(long).pnl.get(), PROFIT as i128);
+    env.convert_released_pnl_with_cu(&long_owner, long, PROFIT);
+    assert_eq!(env.portfolio_state(long).capital.get(), DEPOSIT + PROFIT);
+    let dest = env.withdraw(&long_owner, long, DEPOSIT + PROFIT);
+    assert_eq!(env.token_amount(dest) as u128, DEPOSIT + PROFIT);
+}
