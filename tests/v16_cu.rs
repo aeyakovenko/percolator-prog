@@ -59895,3 +59895,89 @@ fn v16_attack_market_resolve_cannot_erase_committed_funding() {
     assert_eq!(attack.long_payout, control.long_payout);
     assert_eq!(attack.short_payout, control.short_payout);
 }
+
+// Once stale resolution matures, its accrual preflight and the public crank must not deadlock each
+// other. The crank may commit already-stored price/funding state, but must not accept a fresh oracle
+// report that could reset the stale clock and postpone resolution.
+#[test]
+fn v16_attack_stale_resolve_can_finish_committed_funding_accrual() {
+    const PRICE: u64 = 100;
+    const MARK: u64 = 99;
+    const OPEN_SLOT: u64 = 1;
+    const PRIME_SLOT: u64 = 2;
+    const RESOLVE_SLOT: u64 = 3;
+    const DEPOSIT: u128 = 100_000_000;
+    const SIZE_Q: i128 = 100_000 * POS_SCALE as i128;
+
+    let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+        initial_price: PRICE,
+        max_price_move_bps_per_slot: 1,
+        max_accrual_dt_slots: 1,
+        max_abs_funding_e9_per_slot: 10_000,
+        min_funding_lifetime_slots: 1,
+        ..V16CuMarketParams::default()
+    });
+    env.configure_permissionless_resolve_with_cu(1, 1);
+    env.svm.warp_to_slot(OPEN_SLOT);
+    env.configure_auth_mark_with_cu(OPEN_SLOT, PRICE);
+
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long = env.create_portfolio(&long_owner);
+    let short = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long, DEPOSIT);
+    env.deposit(&short_owner, short, DEPOSIT);
+    env.trade_with_cu(&long_owner, long, &short_owner, short, SIZE_Q, PRICE, 0);
+
+    env.svm.warp_to_slot(PRIME_SLOT);
+    env.push_auth_mark_with_cu(PRIME_SLOT, MARK);
+    env.crank(
+        long,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: PRIME_SLOT,
+            observations: crank_observations(0),
+        },
+    );
+
+    env.svm.warp_to_slot(RESOLVE_SLOT);
+    env.svm.expire_blockhash();
+    let unsafe_resolve = env
+        .send(
+            ProgInstruction::ResolveStalePermissionless { now_slot: 0 },
+            vec![AccountMeta::new(env.market, false)],
+            &[],
+        )
+        .expect_err("stale resolve must wait for the committed funding segment");
+    assert!(
+        unsafe_resolve.contains("Custom(19)")
+            || unsafe_resolve.contains("custom program error: 0x13"),
+        "unsafe stale resolve should reject as EngineStale, got {unsafe_resolve}"
+    );
+
+    env.svm.expire_blockhash();
+    env.crank(
+        long,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: RESOLVE_SLOT,
+            observations: crank_observations(0),
+        },
+    );
+    let (_, accrued) = env.market_state();
+    assert!(accrued.assets[0].f_long_num > 0);
+    assert!(accrued.assets[0].f_short_num < 0);
+
+    env.svm.expire_blockhash();
+    env.send(
+        ProgInstruction::ResolveStalePermissionless { now_slot: 0 },
+        vec![AccountMeta::new(env.market, false)],
+        &[],
+    )
+    .expect("stale resolve succeeds after bounded public catch-up");
+    assert_eq!(env.market_state().1.mode, MarketModeV16::Resolved);
+
+    env.svm.warp_to_slot(RESOLVE_SLOT + 1);
+    let short_dest = env.close_resolved(&short_owner, short);
+    let long_dest = env.close_resolved(&long_owner, long);
+    assert_eq!(env.token_amount(long_dest), 100_100_000);
+    assert_eq!(env.token_amount(short_dest), 99_900_000);
+}
