@@ -59717,3 +59717,202 @@ fn v16_attack_underfunded_exit_cannot_move_ewma_with_uncollectible_fee() {
         assert_underfunded_ewma_exit_uses_collected_fee(path);
     }
 }
+
+// Public-interface TDD probe: a non-oracle market authority must not resolve a live Hybrid market
+// against an expired stored mark after the honest external feed has published a current report. The
+// control differs only by letting a permissionless keeper ingest that report before resolution.
+#[test]
+fn v16_attack_resolve_market_rejects_expired_hybrid_snapshot() {
+    const OPEN_PRICE_E6: u64 = 100_000;
+    const FRESH_PRICE_E6: u64 = 110_000;
+    const CAPITAL: u128 = 100_000_000;
+    const SIZE_Q: i128 = 1_000 * POS_SCALE as i128;
+    const FEED: [u8; 32] = [0xacu8; 32];
+
+    fn setup() -> (V16CuEnv, Keypair, Pubkey, Keypair, Pubkey) {
+        let mut env = V16CuEnv::new_with_market_params_and_price_move(1, 10_000, 10_000, 10_000);
+        set_test_clock(&mut env, 1, 100);
+        let initial_oracle = env.set_pyth_price(&FEED, OPEN_PRICE_E6 as i64, -6, 100);
+
+        // Separate the honest oracle authority from the adversarial market authority. The attack
+        // below uses only ResolveMarket; it never signs an oracle instruction or rewrites the feed.
+        let old_admin = env.admin.insecure_clone();
+        let honest_oracle = Keypair::new();
+        env.try_update_per_asset_authority_with_cu(
+            &old_admin,
+            Some(&honest_oracle),
+            0,
+            processor::ASSET_AUTH_ORACLE,
+            honest_oracle.pubkey().to_bytes(),
+        )
+        .expect("handoff oracle authority to an independent honest key");
+        env.svm.expire_blockhash();
+        send_tx(
+            &mut env.svm,
+            env.program_id,
+            &env.payer,
+            ProgInstruction::ConfigureHybridOracle {
+                asset_index: 0,
+                now_slot: 1,
+                now_unix_ts: 100,
+                oracle_leg_count: 1,
+                oracle_leg_flags: 0,
+                max_staleness_secs: 60,
+                hybrid_soft_stale_slots: 3,
+                mark_ewma_halflife_slots: 1,
+                mark_min_fee: 0,
+                invert: 0,
+                unit_scale: 0,
+                conf_filter_bps: 500,
+                oracle_leg_feeds: [FEED, [0u8; 32], [0u8; 32]],
+            },
+            vec![
+                AccountMeta::new(honest_oracle.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new_readonly(initial_oracle, false),
+            ],
+            &[&honest_oracle],
+        )
+        .expect("honest oracle authority configures the Hybrid market");
+        assert_eq!(
+            env.market_state().1.assets[0].effective_price,
+            OPEN_PRICE_E6
+        );
+
+        let victim = Keypair::new();
+        let victim_portfolio = env.create_portfolio(&victim);
+        let attacker = Keypair::new();
+        let attacker_portfolio = env.create_portfolio(&attacker);
+        env.deposit(&victim, victim_portfolio, CAPITAL);
+        env.deposit(&attacker, attacker_portfolio, CAPITAL);
+        env.trade_asset_with_cu(
+            0,
+            &victim,
+            victim_portfolio,
+            &attacker,
+            attacker_portfolio,
+            SIZE_Q,
+            OPEN_PRICE_E6,
+            0,
+        );
+        (env, victim, victim_portfolio, attacker, attacker_portfolio)
+    }
+
+    fn close_resolved_payouts(
+        env: &mut V16CuEnv,
+        victim: &Keypair,
+        victim_portfolio: Pubkey,
+        attacker: &Keypair,
+        attacker_portfolio: Pubkey,
+    ) -> (u64, u64) {
+        let attacker_dest = env.close_resolved(attacker, attacker_portfolio);
+        let victim_dest = env.close_resolved(victim, victim_portfolio);
+        (
+            env.token_amount(victim_dest),
+            env.token_amount(attacker_dest),
+        )
+    }
+
+    let (mut attacked, victim, victim_portfolio, attacker, attacker_portfolio) = setup();
+    set_test_clock(&mut attacked, 100, 200);
+    let ignored_report = attacked.set_pyth_price(&FEED, FRESH_PRICE_E6 as i64, -6, 200);
+    assert_eq!(
+        attacked.market_state().1.assets[0].effective_price,
+        OPEN_PRICE_E6,
+        "the stored report is expired and the fresh external report is not yet ingested"
+    );
+    assert!(
+        attacked.svm.get_account(&ignored_report).is_some(),
+        "the honest external report existed before adversarial resolution"
+    );
+    let market_before = attacked.svm.get_account(&attacked.market).unwrap();
+    let victim_before = attacked.svm.get_account(&victim_portfolio).unwrap();
+    let attacker_before = attacked.svm.get_account(&attacker_portfolio).unwrap();
+    let compromised_admin = attacked.admin.insecure_clone();
+    attacked.svm.expire_blockhash();
+    let stale_resolve = attacked.send(
+        ProgInstruction::ResolveMarket,
+        vec![
+            AccountMeta::new(compromised_admin.pubkey(), true),
+            AccountMeta::new(attacked.market, false),
+        ],
+        &[&compromised_admin],
+    );
+    let stale_resolve_rejected = stale_resolve.is_err();
+    let attacked_payouts = if stale_resolve_rejected {
+        assert_eq!(
+            attacked.svm.get_account(&attacked.market).unwrap(),
+            market_before
+        );
+        assert_eq!(
+            attacked.svm.get_account(&victim_portfolio).unwrap(),
+            victim_before
+        );
+        assert_eq!(
+            attacked.svm.get_account(&attacker_portfolio).unwrap(),
+            attacker_before
+        );
+        let keeper = Keypair::new();
+        let keeper_portfolio = attacked.create_portfolio(&keeper);
+        attacked.crank_with_oracle_tail(
+            keeper_portfolio,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 100,
+                observations: crank_observations(0),
+            },
+            &[ignored_report],
+        );
+        attacked.resolve();
+        close_resolved_payouts(
+            &mut attacked,
+            &victim,
+            victim_portfolio,
+            &attacker,
+            attacker_portfolio,
+        )
+    } else {
+        close_resolved_payouts(
+            &mut attacked,
+            &victim,
+            victim_portfolio,
+            &attacker,
+            attacker_portfolio,
+        )
+    };
+
+    let (mut control, victim, victim_portfolio, attacker, attacker_portfolio) = setup();
+    set_test_clock(&mut control, 100, 200);
+    let fresh_report = control.set_pyth_price(&FEED, FRESH_PRICE_E6 as i64, -6, 200);
+    let keeper = Keypair::new();
+    let keeper_portfolio = control.create_portfolio(&keeper);
+    control.crank_with_oracle_tail(
+        keeper_portfolio,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 100,
+            observations: crank_observations(0),
+        },
+        &[fresh_report],
+    );
+    assert_eq!(
+        control.market_state().1.assets[0].effective_price,
+        FRESH_PRICE_E6,
+        "permissionless control ingests the honest report"
+    );
+    control.resolve();
+    let control_payouts = close_resolved_payouts(
+        &mut control,
+        &victim,
+        victim_portfolio,
+        &attacker,
+        attacker_portfolio,
+    );
+    assert_eq!(control_payouts.0 + control_payouts.1, 2 * CAPITAL as u64);
+    assert_eq!(
+        attacked_payouts, control_payouts,
+        "stale admin resolution deprived the independent long victim and let the colluding short avoid its honest loss: attack={attacked_payouts:?}, control={control_payouts:?}"
+    );
+    assert!(
+        stale_resolve_rejected,
+        "ResolveMarket must reject an expired stored Hybrid report before terminal settlement"
+    );
+}
