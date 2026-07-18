@@ -59717,3 +59717,76 @@ fn v16_attack_underfunded_exit_cannot_move_ewma_with_uncollectible_fee() {
         assert_underfunded_ewma_exit_uses_collected_fee(path);
     }
 }
+
+// REAL LoF: the asset-0 insurance authority controls the live mandatory base fee and defaults to
+// marketauth. It must not raise that fee after independent users already carry positions, force
+// both sides to surrender principal merely to flatten, then withdraw those forced fees as the live
+// insurance operator. Fee reductions remain safe while users are exposed.
+#[test]
+fn v16_attack_live_trade_fee_hike_cannot_rug_existing_positions() {
+    const PRICE: u64 = 100;
+    const DEPOSIT: u128 = 10_000;
+    const SIZE_Q: i128 = 10 * POS_SCALE as i128;
+
+    let mut env = V16CuEnv::new();
+    let admin = env.admin.insecure_clone();
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long = env.create_portfolio(&long_owner);
+    let short = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long, DEPOSIT);
+    env.deposit(&short_owner, short, DEPOSIT);
+    env.trade_with_cu(&long_owner, long, &short_owner, short, SIZE_Q, PRICE, 0);
+
+    let market_before_hike = env.svm.get_account(&env.market).unwrap();
+    env.svm.expire_blockhash();
+    let hike = env.send(
+        ProgInstruction::UpdateTradeFeePolicy {
+            trade_fee_base_bps: 10_000,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&admin],
+    );
+    let hike_landed = hike.is_ok();
+    if !hike_landed {
+        assert_eq!(
+            env.svm.get_account(&env.market).unwrap(),
+            market_before_hike,
+            "rejected live fee hike is atomic"
+        );
+    }
+
+    env.svm.expire_blockhash();
+    env.trade_with_cu(&long_owner, long, &short_owner, short, -SIZE_Q, PRICE, 0);
+    let (_, after_close) = env.market_state();
+    let extracted = after_close.insurance;
+    let attacker_received = if extracted == 0 {
+        0
+    } else {
+        let (attacker_dest, _) = env
+            .try_withdraw_insurance_asset_with_authority(&admin, 0, extracted)
+            .expect("the default admin/operator extracts the forced exit fees");
+        env.token_amount(attacker_dest) as u128
+    };
+    assert!(
+        !hike_landed,
+        "the fee authority raised mandatory fees under existing positions and extracted \
+         {attacker_received} atoms from two independent users"
+    );
+    assert_eq!(
+        attacker_received, 0,
+        "no pre-existing principal is extractable"
+    );
+    assert_eq!(env.portfolio_state(long).capital.get(), DEPOSIT);
+    assert_eq!(env.portfolio_state(short).capital.get(), DEPOSIT);
+
+    env.update_trade_fee_policy_with_cu(500);
+    assert_eq!(
+        env.market_state().0.trade_fee_base_bps,
+        500,
+        "the same increase remains available once all positions are flat"
+    );
+}
