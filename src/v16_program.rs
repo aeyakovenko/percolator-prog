@@ -8662,6 +8662,50 @@ pub mod processor {
     }
 
     #[inline(never)]
+    fn reject_market_resolve_before_committed_accrual_view(
+        cfg: &WrapperConfigV16,
+        group: &state::MarketViewMutV16<'_>,
+        resolved_slot: u64,
+    ) -> ProgramResult {
+        let configured_slots = group.header.config.max_market_slots.get() as usize;
+        let mut asset_index = 0usize;
+        while asset_index < configured_slots {
+            let asset = group.markets[asset_index].engine.asset;
+            let exposed = asset.oi_eff_long_q.get() != 0 || asset.oi_eff_short_q.get() != 0;
+            if exposed && asset.slot_last.get() < resolved_slot {
+                let profile = read_oracle_profile_from_view(group, cfg, asset_index)?;
+                // A mark newer than the asset cursor is still prospective. Existing resolution
+                // semantics intentionally ignore it until a crank activates that checkpoint.
+                if oracle_v16::profile_is_price_managed(&profile)
+                    && profile.mark_ewma_last_slot <= asset.slot_last.get()
+                {
+                    let next_price = committed_effective_price_for_accrual_view(
+                        &profile,
+                        group,
+                        asset_index,
+                        resolved_slot,
+                    )?;
+                    let funding_rate_e9 = permissionless_funding_rate_e9_view(
+                        &profile,
+                        group,
+                        asset_index,
+                        next_price,
+                    )?;
+                    let balanced =
+                        asset.oi_eff_long_q.get() != 0 && asset.oi_eff_short_q.get() != 0;
+                    if next_price != asset.effective_price.get()
+                        || (balanced && funding_rate_e9 != 0)
+                    {
+                        return Err(PercolatorError::EngineStale.into());
+                    }
+                }
+            }
+            asset_index += 1;
+        }
+        Ok(())
+    }
+
+    #[inline(never)]
     fn handle_resolve_market<'a>(
         program_id: &Pubkey,
         accounts: &'a [AccountInfo<'a>],
@@ -8683,6 +8727,7 @@ pub mod processor {
         if slot < group.header.current_slot.get() {
             return Err(PercolatorError::EngineStale.into());
         }
+        reject_market_resolve_before_committed_accrual_view(&cfg, &group, slot)?;
         group
             .resolve_market_not_atomic(slot)
             .map_err(map_v16_error)?;
@@ -9768,6 +9813,7 @@ pub mod processor {
         if !oracle_v16::permissionless_stale_matured(&cfg, authenticated_slot) {
             return Err(PercolatorError::OracleStale.into());
         }
+        reject_market_resolve_before_committed_accrual_view(&cfg, &group, authenticated_slot)?;
         group
             .resolve_market_not_atomic(authenticated_slot)
             .map_err(map_v16_error)?;
@@ -11463,6 +11509,37 @@ pub mod processor {
         Ok(core::cmp::min(
             now_slot - asset_slot_last,
             group.header.config.max_accrual_dt_slots.get(),
+        ))
+    }
+
+    fn committed_effective_price_for_accrual_view(
+        profile: &state::AssetOracleProfileV16,
+        group: &state::MarketViewMutV16<'_>,
+        asset_index: usize,
+        now_slot: u64,
+    ) -> Result<u64, ProgramError> {
+        if asset_index >= group.header.config.max_market_slots.get() as usize
+            || asset_index >= group.markets.len()
+        {
+            return Err(PercolatorError::InvalidInstruction.into());
+        }
+        let asset = group.markets[asset_index].engine.asset;
+        let current = asset.effective_price.get();
+        let target = if oracle_v16::profile_is_price_managed(profile) {
+            profile.mark_ewma_e6
+        } else {
+            current
+        };
+        if target == 0 {
+            return Err(PercolatorError::OracleInvalid.into());
+        }
+        let exposed = asset.oi_eff_long_q.get() != 0 || asset.oi_eff_short_q.get() != 0;
+        Ok(oracle_v16::effective_price_from_target(
+            current,
+            target,
+            group.header.config.max_price_move_bps_per_slot.get(),
+            asset_segment_dt_view(group, asset_index, now_slot)?,
+            exposed,
         ))
     }
 
