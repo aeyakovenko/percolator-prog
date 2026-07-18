@@ -48099,6 +48099,62 @@ fn v16_bpf_10m_market_liquidation_high_asset_stays_bounded() {
     assert_eq!(health_cert(&short_after).certified_liq_deficit, 0);
 }
 
+#[test]
+fn v16_bpf_10m_market_high_asset_resolved_exit_stays_bounded() {
+    const N: usize = 5_834;
+    const HIGH_ASSET: usize = N - 1;
+    const PRICE: u64 = 100;
+
+    let mut env = V16CuEnv::new();
+    let account_len = grow_market_to_10m_with_high_active_asset(&mut env, N, HIGH_ASSET, PRICE);
+    env.portfolio_account_len = state::portfolio_account_len_for_market_slots(N).unwrap();
+
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long = env.create_portfolio(&long_owner);
+    let short = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long, 1_000_000);
+    env.deposit(&short_owner, short, 1_000_000);
+    env.trade_asset_with_cu(
+        HIGH_ASSET as u16,
+        &long_owner,
+        long,
+        &short_owner,
+        short,
+        POS_SCALE as i128,
+        PRICE,
+        0,
+    );
+
+    let resolve_cu = env.resolve();
+    assert_cu_within("10MiB ResolveMarket", resolve_cu, CUSTODY_CU_LIMIT);
+
+    let (long_dest, long_close_cu) = env.close_resolved_with_cu(&long_owner, long);
+    let (short_dest, short_close_cu) = env.close_resolved_with_cu(&short_owner, short);
+    println!(
+        "v16 10MiB resolved exit: assets={N}, account_len={account_len}, asset={HIGH_ASSET}, \
+         resolve_cu={resolve_cu}, long_close_cu={long_close_cu}, short_close_cu={short_close_cu}"
+    );
+    assert_cu_within("10MiB CloseResolved long", long_close_cu, CUSTODY_CU_LIMIT);
+    assert_cu_within(
+        "10MiB CloseResolved short",
+        short_close_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    assert_eq!(env.token_amount(long_dest), 1_000_000);
+    assert_eq!(env.token_amount(short_dest), 1_000_000);
+
+    for portfolio in [long, short] {
+        let account = env.portfolio_state(portfolio);
+        assert_eq!(account.capital.get(), 0, "resolved capital fully exits");
+        assert_eq!(account.pnl.get(), 0, "resolved pnl fully settles");
+        assert!(
+            !has_active_leg_for_asset(&account, HIGH_ASSET),
+            "high-index resolved leg is cleared"
+        );
+    }
+}
+
 // Scale proof — the largest current market that fits Solana's 10 MiB account cap is valid AND a
 // real BPF trade on a HIGH asset index executes with O(1)-in-N compute.
 //
