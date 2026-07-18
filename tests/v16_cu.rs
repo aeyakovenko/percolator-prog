@@ -9932,7 +9932,7 @@ fn v16_attack_crossed_trade_cannot_turn_partial_liquidation_survivors_same_side(
 #[test]
 fn v16_attack_stale_resolve_matured_no_observation_liquidation_rejects() {
     let mut env = V16CuEnv::new();
-    env.configure_permissionless_resolve_with_cu(5, 5);
+    env.configure_permissionless_resolve_with_cu(6, 5);
     env.top_up_insurance(1_000_000);
     env.svm.warp_to_slot(1);
     env.configure_auth_mark_with_cu(1, 100);
@@ -59751,6 +59751,12 @@ fn v16_attack_live_stale_policy_cannot_expose_passive_lp_after_deadline() {
     env.deposit(&lp_owner, lp, DEPOSIT);
     let (matcher_program, matcher_ctx, matcher_delegate) =
         auth_matcher_for_lp_via_system_create(&mut env, &lp_owner, lp);
+    env.configure_permissionless_resolve_with_cu(5, 5);
+    assert_eq!(
+        env.market_state().0.permissionless_resolve_stale_slots,
+        5,
+        "a shorter hard-stale deadline remains configurable while capital is live"
+    );
 
     env.svm.warp_to_slot(5);
     let market_before_extension = env.svm.get_account(&env.market).unwrap();
@@ -59888,8 +59894,16 @@ fn v16_attack_live_stale_policy_cannot_expose_passive_lp_after_deadline() {
         &[],
     )
     .expect("honest permissionless resolution remains live at the original deadline");
+    env.svm.warp_to_slot(11);
     let attacker_dest = env.close_resolved(&attacker_owner, attacker);
     let lp_dest = env.close_resolved(&lp_owner, lp);
     assert_eq!(env.token_amount(attacker_dest) as u128, DEPOSIT);
     assert_eq!(env.token_amount(lp_dest) as u128, DEPOSIT);
+
+    let mut empty = V16CuEnv::new();
+    empty.configure_permissionless_resolve_with_cu(5, 5);
+    empty.configure_permissionless_resolve_with_cu(6, 6);
+    let cfg = empty.market_state().0;
+    assert_eq!(cfg.permissionless_resolve_stale_slots, 6);
+    assert_eq!(cfg.force_close_delay_slots, 6);
 }
