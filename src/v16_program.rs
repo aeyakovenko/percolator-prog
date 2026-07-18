@@ -5050,6 +5050,74 @@ pub mod processor {
         credit_fee_to_domain_budget_view(cfg, group, asset_index * 2 + 1, fee_short)
     }
 
+    fn credit_trade_fees_with_mark_externality_view(
+        cfg: &WrapperConfigV16,
+        group: &mut state::MarketViewMutV16<'_>,
+        asset_index: usize,
+        fee_long: u128,
+        fee_short: u128,
+        quote: HybridTradeFeeQuote,
+    ) -> ProgramResult {
+        let total_fee = fee_long
+            .checked_add(fee_short)
+            .ok_or(PercolatorError::EngineArithmeticOverflow)?;
+        let mark_externality_fee = if quote.mark_externality_notional == 0 {
+            0
+        } else {
+            total_fee.saturating_sub(quote.base_fee_paid)
+        };
+        if mark_externality_fee == 0 {
+            return credit_trade_fees_to_market_budgets_view(
+                cfg,
+                group,
+                asset_index,
+                fee_long,
+                fee_short,
+            );
+        }
+
+        // A permissionless asset operator must not recover the fee that paid for its mark move.
+        // Keep only that collected externality fee in base insurance; ordinary fees remain local.
+        let mut mark_long = mark_externality_fee / 2;
+        let mut mark_short = mark_externality_fee
+            .checked_sub(mark_long)
+            .ok_or(PercolatorError::EngineCounterUnderflow)?;
+        if mark_long > fee_long {
+            let overflow = mark_long
+                .checked_sub(fee_long)
+                .ok_or(PercolatorError::EngineCounterUnderflow)?;
+            mark_long = fee_long;
+            mark_short = mark_short
+                .checked_add(overflow)
+                .ok_or(PercolatorError::EngineArithmeticOverflow)?;
+        }
+        if mark_short > fee_short {
+            let overflow = mark_short
+                .checked_sub(fee_short)
+                .ok_or(PercolatorError::EngineCounterUnderflow)?;
+            mark_short = fee_short;
+            mark_long = mark_long
+                .checked_add(overflow)
+                .ok_or(PercolatorError::EngineArithmeticOverflow)?;
+        }
+        if mark_long > fee_long || mark_short > fee_short {
+            return Err(PercolatorError::EngineCounterUnderflow.into());
+        }
+
+        credit_trade_fees_to_market_budgets_view(
+            cfg,
+            group,
+            asset_index,
+            fee_long
+                .checked_sub(mark_long)
+                .ok_or(PercolatorError::EngineCounterUnderflow)?,
+            fee_short
+                .checked_sub(mark_short)
+                .ok_or(PercolatorError::EngineCounterUnderflow)?,
+        )?;
+        credit_market_insurance_budget_view(group, 0, mark_externality_fee)
+    }
+
     fn credit_market_fee_split_across_domains_view(
         cfg: &WrapperConfigV16,
         group: &mut state::MarketViewMutV16<'_>,
@@ -5903,12 +5971,13 @@ pub mod processor {
                     backing_before_b.as_ref(),
                 )?;
             }
-            credit_trade_fees_to_market_budgets_view(
+            credit_trade_fees_with_mark_externality_view(
                 &cfg,
                 &mut group,
                 asset_index as usize,
                 outcome.fee_a,
                 outcome.fee_b,
+                fee_quote,
             )?;
             let collected_post_trade_mark = collected_fee_supported_mark_view(
                 &oracle_profile,
@@ -6149,12 +6218,13 @@ pub mod processor {
                 remaining_fee_b = remaining_fee_b
                     .checked_sub(fee_b)
                     .ok_or(PercolatorError::EngineArithmeticOverflow)?;
-                credit_trade_fees_to_market_budgets_view(
+                credit_trade_fees_with_mark_externality_view(
                     &cfg,
                     &mut group,
                     *asset_index,
                     fee_a,
                     fee_b,
+                    *fee_quote,
                 )?;
                 let collected_post_trade_mark =
                     collected_fee_supported_mark_view(oracle_profile, *fee_quote, fee_a, fee_b)?;
