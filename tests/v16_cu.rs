@@ -59887,8 +59887,43 @@ fn v16_attack_live_policy_cannot_extend_recovery_force_close_deadline() {
     assert!(!has_active_leg_for_asset(&env.portfolio_state(long), 0));
     assert!(!has_active_leg_for_asset(&env.portfolio_state(short), 0));
     assert_eq!(env.portfolio_state(long).pnl.get(), PROFIT as i128);
+
+    env.configure_permissionless_resolve_with_cu(100, 4);
+    assert_eq!(
+        env.market_state().0.force_close_delay_slots,
+        4,
+        "a shorter exit delay remains available while capital is deposited"
+    );
+
     env.convert_released_pnl_with_cu(&long_owner, long, PROFIT);
     assert_eq!(env.portfolio_state(long).capital.get(), DEPOSIT + PROFIT);
     let dest = env.withdraw(&long_owner, long, DEPOSIT + PROFIT);
     assert_eq!(env.token_amount(dest) as u128, DEPOSIT + PROFIT);
+
+    let short_capital = env.portfolio_state(short).capital.get();
+    let short_dest = env.withdraw(&short_owner, short, short_capital);
+    assert_eq!(env.token_amount(short_dest) as u128, short_capital);
+    assert_eq!(env.market_state().1.c_tot, 0);
+    env.configure_permissionless_resolve_with_cu(100, 5);
+    assert_eq!(
+        env.market_state().0.force_close_delay_slots,
+        5,
+        "a longer delay remains configurable after all user capital exits"
+    );
+}
+
+#[test]
+fn v16_bpf_flat_10m_market_resolve_policy_update_stays_bounded() {
+    const N: usize = 5_834;
+
+    let mut env = V16CuEnv::new();
+    grow_market_to_10m_with_high_active_asset(&mut env, N, N - 1, 100);
+
+    let cu = env.configure_permissionless_resolve_with_cu(100, 5);
+    println!("v16 flat 10MiB ConfigurePermissionlessResolve CU: {cu}");
+    assert_cu_within(
+        "flat 10MiB ConfigurePermissionlessResolve",
+        cu,
+        CUSTODY_CU_LIMIT,
+    );
 }
