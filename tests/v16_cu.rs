@@ -60226,3 +60226,226 @@ fn v16_attack_underfunded_exit_cannot_move_ewma_with_uncollectible_fee() {
         assert_underfunded_ewma_exit_uses_collected_fee(path);
     }
 }
+
+#[test]
+fn v16_attack_exact_effective_oi_rebalance_must_not_strand_adl_survivor() {
+    const PRICE: u64 = 1;
+    const OPEN_Q: i128 = 13_000 * POS_SCALE as i128;
+
+    let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+        h_max: 6_480_000,
+        initial_price: PRICE,
+        maintenance_margin_bps: 500,
+        initial_margin_bps: 500,
+        min_nonzero_mm_req: 599,
+        min_nonzero_im_req: 600,
+        max_price_move_bps_per_slot: 24,
+        max_accrual_dt_slots: 20,
+        max_abs_funding_e9_per_slot: 0,
+        min_funding_lifetime_slots: 10_000_000,
+        liquidation_fee_bps: 0,
+        maintenance_fee_per_slot: 27,
+        ..V16CuMarketParams::default()
+    });
+    let survivor_owner = Keypair::new();
+    let bankrupt_owner = Keypair::new();
+    let survivor = env.create_portfolio(&survivor_owner);
+    let bankrupt = env.create_portfolio(&bankrupt_owner);
+    env.deposit(&survivor_owner, survivor, 1_000);
+    env.deposit(&bankrupt_owner, bankrupt, 1_189);
+
+    env.svm.warp_to_slot(8);
+    env.try_trade_asset_with_cu(
+        0,
+        &survivor_owner,
+        survivor,
+        &bankrupt_owner,
+        bankrupt,
+        OPEN_Q,
+        PRICE,
+        0,
+    )
+    .expect("open trade");
+    env.svm.warp_to_slot(27);
+    env.crank(
+        survivor,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 27,
+            observations: crank_observations(0),
+        },
+    );
+    env.svm.warp_to_slot(35);
+    env.sync_maintenance_fee_with_cu(bankrupt, None, 35);
+    env.crank_steps(
+        bankrupt,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 35,
+            observations: crank_observations(0),
+        },
+        2,
+    );
+
+    let before = env.market_state().1;
+    let surviving_effective_q = before.assets[0].oi_eff_long_q;
+    let survivor_basis_q = active_leg_for_asset(&env.portfolio_state(survivor), 0)
+        .basis_pos_q
+        .unsigned_abs();
+    assert_eq!(surviving_effective_q, before.assets[0].oi_eff_short_q);
+    assert!(surviving_effective_q > 0 && survivor_basis_q > surviving_effective_q);
+
+    env.svm.expire_blockhash();
+    env.send(
+        ProgInstruction::RebalanceReduce {
+            asset_index: 0,
+            reduce_q: surviving_effective_q,
+        },
+        vec![
+            AccountMeta::new(survivor_owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(survivor, false),
+        ],
+        &[&survivor_owner],
+    )
+    .expect("exact-effective-OI unilateral reduction");
+
+    let after_reduce = env.market_state().1;
+    let survivor_after_reduce = env.portfolio_state(survivor);
+    let residual_q = active_leg_for_asset(&survivor_after_reduce, 0)
+        .basis_pos_q
+        .unsigned_abs();
+    eprintln!(
+        "after exact rebalance: oi=({},{}) mode=({:?},{:?}) residual={residual_q}",
+        after_reduce.assets[0].oi_eff_long_q,
+        after_reduce.assets[0].oi_eff_short_q,
+        after_reduce.assets[0].mode_long,
+        after_reduce.assets[0].mode_short,
+    );
+    assert_eq!(after_reduce.assets[0].oi_eff_long_q, 0);
+    assert_eq!(after_reduce.assets[0].oi_eff_short_q, 0);
+    assert!(residual_q > 0);
+    assert!(survivor_after_reduce.capital.get() > 0);
+
+    env.svm.expire_blockhash();
+    let retry = env.send(
+        ProgInstruction::RebalanceReduce {
+            asset_index: 0,
+            reduce_q: residual_q,
+        },
+        vec![
+            AccountMeta::new(survivor_owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(survivor, false),
+        ],
+        &[&survivor_owner],
+    );
+    assert!(retry.is_err(), "zero-OI residue has no direct reduction path");
+
+    for _ in 0..3 {
+        env.svm.expire_blockhash();
+        env.send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 35,
+                observations: vec![],
+            },
+            vec![
+                AccountMeta::new(env.payer.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(bankrupt, false),
+            ],
+            &[],
+        )
+        .expect("honest counterparty cleanup crank");
+        if !has_active_leg_for_asset(&env.portfolio_state(bankrupt), 0) {
+            break;
+        }
+    }
+    let willing_owner = Keypair::new();
+    let willing = env.create_portfolio(&willing_owner);
+    env.deposit(&willing_owner, willing, 1_000);
+    env.svm.expire_blockhash();
+    let trade_exit = env.try_trade_asset_with_cu(
+        0,
+        &willing_owner,
+        willing,
+        &survivor_owner,
+        survivor,
+        residual_q as i128,
+        PRICE,
+        0,
+    );
+    eprintln!("fresh-counterparty exit={trade_exit:?}");
+    assert!(
+        trade_exit.is_err(),
+        "zero preexisting OI must not make a fresh counterparty an unbounded escape assumption"
+    );
+
+    let withdraw_dest = Pubkey::new_unique();
+    env.svm
+        .set_account(
+            withdraw_dest,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_token_data(env.mint, survivor_owner.pubkey(), 0),
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    env.svm.expire_blockhash();
+    let withdraw_while_stuck = env.send(
+        ProgInstruction::Withdraw {
+            amount: survivor_after_reduce.capital.get(),
+        },
+        vec![
+            AccountMeta::new(survivor_owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(survivor, false),
+            AccountMeta::new(withdraw_dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&survivor_owner],
+    );
+    eprintln!("full withdrawal while residue remains={withdraw_while_stuck:?}");
+    assert!(withdraw_while_stuck.is_err());
+
+    for _ in 0..2 {
+        env.svm.expire_blockhash();
+        env.send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 35,
+                observations: vec![],
+            },
+            vec![
+                AccountMeta::new(env.payer.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(survivor, false),
+            ],
+            &[],
+        )
+        .expect("honest permissionless crank");
+        if !has_active_leg_for_asset(&env.portfolio_state(survivor), 0) {
+            break;
+        }
+    }
+
+    let after_cranks = env.market_state().1;
+    let survivor_after_cranks = env.portfolio_state(survivor);
+    eprintln!(
+        "after honest cranks: mode={:?} active={} capital={}",
+        after_cranks.assets[0].mode_long,
+        has_active_leg_for_asset(&survivor_after_cranks, 0),
+        survivor_after_cranks.capital.get(),
+    );
+
+    assert_eq!(after_reduce.assets[0].mode_long, SideModeV16::ResetPending);
+    assert!(
+        !has_active_leg_for_asset(&survivor_after_cranks, 0),
+        "one honest cranker must clear the owner's zero-OI ADL residue"
+    );
+    let withdrawable = survivor_after_cranks.capital.get();
+    let dest = env.withdraw(&survivor_owner, survivor, withdrawable);
+    assert_eq!(env.token_amount(dest), withdrawable as u64);
+}
