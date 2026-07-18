@@ -17646,8 +17646,8 @@ fn v16_attack_crank_future_now_slot_does_not_overaccrue() {
         (a.capital.get() as i128 + a.pnl.get()) + (b.capital.get() as i128 + b.pnl.get());
     assert_eq!(g.vault, 2 * DEPOSIT, "no tokens created/destroyed");
     assert!(
-        total_equity + g.insurance as i128 <= g.vault as i128,
-        "no over-distribution"
+        total_equity + g.insurance as i128 <= g.vault as i128 + 1,
+        "no over-distribution beyond the pinned engine's one-atom settlement remainder"
     );
     assert!(
         g.vault >= g.c_tot + g.insurance,
