@@ -10663,7 +10663,7 @@ pub mod processor {
             if let Some(asset_index) =
                 auto_crank_selected_asset_that_accrues_view(&portfolio, &summary)?
             {
-                reject_missing_pending_selected_observation_view(
+                reject_missing_selected_observation_that_changes_accrual_view(
                     &cfg,
                     &group,
                     asset_index,
@@ -10885,7 +10885,7 @@ pub mod processor {
         Ok(None)
     }
 
-    fn reject_missing_pending_selected_observation_view(
+    fn reject_missing_selected_observation_that_changes_accrual_view(
         cfg: &WrapperConfigV16,
         group: &state::MarketViewMutV16<'_>,
         asset_index: usize,
@@ -10922,7 +10922,8 @@ pub mod processor {
             dt,
             exposed,
         );
-        if next != current {
+        let funding_rate = permissionless_funding_rate_e9_view(&profile, group, asset_index, next)?;
+        if next != current || funding_rate != 0 {
             return Err(PercolatorError::EngineNonProgress.into());
         }
         Ok(())
