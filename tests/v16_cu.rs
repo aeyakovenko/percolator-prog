@@ -59811,18 +59811,23 @@ fn v16_attack_released_pnl_cannot_charge_one_source_for_another() {
     assert_eq!(flat.pnl.get(), (2 * CLAIM_PER_ASSET) as i128);
 
     env.svm.expire_blockhash();
-    env.convert_released_pnl_with_cu(&winner_owner, winner, CLAIM_PER_ASSET);
+    let first_convert_cu = env.convert_released_pnl_with_cu(&winner_owner, winner, CLAIM_PER_ASSET);
+    assert_cu_within(
+        "cross-domain ConvertReleasedPnl",
+        first_convert_cu,
+        CUSTODY_CU_LIMIT,
+    );
     let after_first = env.portfolio_state(winner);
     let (_, group_after_first) = env.market_state();
     assert_eq!(after_first.pnl.get(), CLAIM_PER_ASSET as i128);
     assert_eq!(
-        group_after_first.source_credit[LOWER_SOURCE_DOMAIN].positive_claim_bound_num, 0,
-        "the first conversion currently burns the unfunded lower-index face",
+        group_after_first.source_credit[LOWER_SOURCE_DOMAIN].positive_claim_bound_num,
+        CLAIM_PER_ASSET * BOUND_SCALE,
+        "conversion must preserve a different domain's unfunded claim",
     );
     assert_eq!(
-        group_after_first.source_credit[FUNDED_SOURCE_DOMAIN].positive_claim_bound_num,
-        CLAIM_PER_ASSET * BOUND_SCALE,
-        "the funded claim incorrectly survives after its backing was consumed",
+        group_after_first.source_credit[FUNDED_SOURCE_DOMAIN].positive_claim_bound_num, 0,
+        "the funded claim must retire with the backing that paid it",
     );
 
     // Consuming backing bumps the risk epoch. A flat account is not auto-crank actionable, but a
@@ -59853,12 +59858,35 @@ fn v16_attack_released_pnl_cannot_charge_one_source_for_another() {
     assert!(percolator::active_bitmap_is_empty(active_bitmap(
         &env.portfolio_state(winner)
     )));
+    let before_second = env.portfolio_state(winner);
     env.svm.expire_blockhash();
-    env.convert_released_pnl_with_cu(&winner_owner, winner, CLAIM_PER_ASSET);
+    let second = env.send(
+        ProgInstruction::ConvertReleasedPnl {
+            amount: CLAIM_PER_ASSET,
+        },
+        vec![
+            AccountMeta::new(winner_owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(winner, false),
+        ],
+        &[&winner_owner],
+    );
+    assert!(
+        second.is_err(),
+        "an unfunded claim must not consume the already-used backing domain again"
+    );
     let after_second = env.portfolio_state(winner);
     let (_, group_after_second) = env.market_state();
-    assert_eq!(after_second.pnl.get(), 0);
-    assert_eq!(after_second.capital.get(), 1_000 + 2 * CLAIM_PER_ASSET);
+    assert_eq!(after_second.pnl.get(), before_second.pnl.get());
+    assert_eq!(after_second.capital.get(), before_second.capital.get());
+    assert_eq!(
+        group_after_second.source_credit[LOWER_SOURCE_DOMAIN].positive_claim_bound_num,
+        CLAIM_PER_ASSET * BOUND_SCALE,
+    );
+    assert_eq!(
+        group_after_second.source_credit[FUNDED_SOURCE_DOMAIN].positive_claim_bound_num,
+        0,
+    );
     assert_eq!(
         group_after_second.source_backing_buckets[FUNDED_SOURCE_DOMAIN].consumed_liened_backing_num,
         CLAIM_PER_ASSET * BOUND_SCALE,
