@@ -59788,17 +59788,42 @@ fn v16_probe_rebalance_reduce_cannot_omit_pending_adverse_mark() {
                     observations: crank_observations(0),
                 },
             );
-        }
-        env.rebalance_reduce_with_cu(
-            &market_admin,
-            attacker_short,
-            0,
-            SIZE_Q.unsigned_abs(),
-        );
-        let attacker_capital = env.portfolio_state(attacker_short).capital.get();
-        let attacker_dest = env.withdraw(&market_admin, attacker_short, attacker_capital);
-
-        if !crank_before_reduce {
+        } else {
+            let market_before = env.svm.get_account(&env.market).unwrap().data;
+            let attacker_before = env.svm.get_account(&attacker_short).unwrap().data;
+            let victim_before = env.svm.get_account(&victim_long).unwrap().data;
+            env.svm.expire_blockhash();
+            let stale_reduce = env.send(
+                ProgInstruction::RebalanceReduce {
+                    asset_index: 0,
+                    reduce_q: SIZE_Q.unsigned_abs(),
+                },
+                vec![
+                    AccountMeta::new(market_admin.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(attacker_short, false),
+                ],
+                &[&market_admin],
+            );
+            assert!(
+                stale_reduce.is_err(),
+                "unilateral reduction must not omit an adverse authenticated mark"
+            );
+            assert_eq!(
+                env.svm.get_account(&env.market).unwrap().data,
+                market_before,
+                "rejected reduction rolls back the market"
+            );
+            assert_eq!(
+                env.svm.get_account(&attacker_short).unwrap().data,
+                attacker_before,
+                "rejected reduction rolls back the attacker portfolio"
+            );
+            assert_eq!(
+                env.svm.get_account(&victim_long).unwrap().data,
+                victim_before,
+                "rejected reduction does not mutate the counterparty"
+            );
             env.crank(
                 victim_long,
                 ProgInstruction::PermissionlessCrank {
@@ -59807,6 +59832,10 @@ fn v16_probe_rebalance_reduce_cannot_omit_pending_adverse_mark() {
                 },
             );
         }
+        env.rebalance_reduce_with_cu(&market_admin, attacker_short, 0, SIZE_Q.unsigned_abs());
+        let attacker_capital = env.portfolio_state(attacker_short).capital.get();
+        let attacker_dest = env.withdraw(&market_admin, attacker_short, attacker_capital);
+
         let effective_price = env.market_state().1.assets[0].effective_price;
         env.resolve();
         let victim_dest = env.close_resolved(&honest_oracle, victim_long);
@@ -59823,4 +59852,56 @@ fn v16_probe_rebalance_reduce_cannot_omit_pending_adverse_mark() {
     assert_eq!(attack.effective_price, control.effective_price);
     assert_eq!(attack.attacker_withdrawal, control.attacker_withdrawal);
     assert_eq!(attack.victim_payout, control.victim_payout);
+}
+
+#[test]
+fn v16_rebalance_reduce_allows_pending_favorable_mark() {
+    const PRICE: u64 = 1_000_000;
+    const MARK: u64 = 2_000_000;
+    const SIZE_Q: i128 = 100 * POS_SCALE as i128;
+
+    let mut env = V16CuEnv::new_with_init_params(production_risk_params());
+    env.svm.warp_to_slot(1);
+    env.configure_auth_mark_with_cu(0, PRICE);
+    let market_admin = env.admin.insecure_clone();
+    let honest_oracle = Keypair::new();
+    env.try_update_per_asset_authority_with_cu(
+        &market_admin,
+        Some(&honest_oracle),
+        0,
+        processor::ASSET_AUTH_ORACLE,
+        honest_oracle.pubkey().to_bytes(),
+    )
+    .expect("separate honest oracle authority");
+
+    let long_owner = Keypair::new();
+    let long = env.create_portfolio(&long_owner);
+    let short_owner = Keypair::new();
+    let short = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long, 100_000_000);
+    env.deposit(&short_owner, short, 100_000_000);
+    env.trade_asset_with_cu(0, &long_owner, long, &short_owner, short, SIZE_Q, PRICE, 0);
+
+    env.svm.warp_to_slot(2);
+    env.svm.expire_blockhash();
+    env.send(
+        ProgInstruction::PushAuthMark {
+            asset_index: 0,
+            now_slot: 2,
+            mark_e6: MARK,
+        },
+        vec![
+            AccountMeta::new(honest_oracle.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&honest_oracle],
+    )
+    .expect("honest favorable mark");
+
+    env.rebalance_reduce_with_cu(&long_owner, long, 0, SIZE_Q.unsigned_abs());
+    assert_eq!(
+        env.portfolio_state(long).legs[0].basis_pos_q.get(),
+        0,
+        "a queued favorable mark must not block voluntary risk reduction"
+    );
 }

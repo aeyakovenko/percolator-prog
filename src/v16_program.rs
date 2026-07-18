@@ -4555,6 +4555,72 @@ pub mod processor {
         Ok(())
     }
 
+    fn reject_rebalance_reduce_with_adverse_pending_mark_view(
+        cfg: &WrapperConfigV16,
+        group: &state::MarketViewMutV16<'_>,
+        portfolio: &percolator::PortfolioV16ViewMut<'_>,
+        asset_index: usize,
+    ) -> Result<(), V16Error> {
+        if asset_index >= group.header.config.max_market_slots.get() as usize
+            || asset_index >= group.markets.len()
+        {
+            return Err(V16Error::InvalidConfig);
+        }
+        let leg =
+            active_leg_for_asset_view(portfolio, asset_index).map_err(|_| V16Error::InvalidLeg)?;
+        let asset = group.markets[asset_index].engine.asset;
+        let profile = read_oracle_profile_from_view(group, cfg, asset_index)
+            .map_err(|_| V16Error::InvalidConfig)?;
+        if !oracle_v16::profile_is_price_managed(&profile) {
+            return Ok(());
+        }
+
+        let now_slot = authenticated_market_slot_or_fallback_view(group);
+        let slot_last = asset.slot_last.get();
+        if now_slot < slot_last {
+            return Err(V16Error::Stale);
+        }
+        let dt = core::cmp::min(
+            now_slot - slot_last,
+            group.header.config.max_accrual_dt_slots.get(),
+        );
+        if dt == 0 {
+            return Ok(());
+        }
+
+        // Auth/EWMA profiles own their queued target. During normal Hybrid operation the
+        // committed engine target is the latest authenticated external observation; after the
+        // soft-stale boundary the profile EWMA becomes the target used by the crank instead.
+        let target = if oracle_v16::profile_is_auth_mark(&profile)
+            || oracle_v16::profile_is_ewma_mark(&profile)
+            || (oracle_v16::profile_is_hybrid(&profile)
+                && oracle_v16::profile_hybrid_soft_stale_matured(&profile, now_slot))
+        {
+            profile.mark_ewma_e6
+        } else {
+            asset.raw_oracle_target_price.get()
+        };
+        if target == 0 {
+            return Err(V16Error::InvalidConfig);
+        }
+        let current = asset.effective_price.get();
+        let next = oracle_v16::effective_price_from_target(
+            current,
+            target,
+            group.header.config.max_price_move_bps_per_slot.get(),
+            dt,
+            true,
+        );
+        let adverse = match leg.side {
+            SideV16::Long => next < current,
+            SideV16::Short => next > current,
+        };
+        if adverse {
+            return Err(V16Error::Stale);
+        }
+        Ok(())
+    }
+
     fn read_oracle_profile_for_asset(
         market_data: &[u8],
         cfg: &WrapperConfigV16,
@@ -8497,6 +8563,12 @@ pub mod processor {
             if group.header.mode == 0 && permissionless_resolve_matured_now_view(cfg, group) {
                 return Err(V16Error::LockActive);
             }
+            reject_rebalance_reduce_with_adverse_pending_mark_view(
+                cfg,
+                group,
+                portfolio,
+                asset_index as usize,
+            )?;
             group
                 .rebalance_reduce_position_not_atomic(
                     portfolio,
