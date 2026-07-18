@@ -59717,3 +59717,282 @@ fn v16_attack_underfunded_exit_cannot_move_ewma_with_uncollectible_fee() {
         assert_underfunded_ewma_exit_uses_collected_fee(path);
     }
 }
+// [BLOCKER DoS] A losing owner can publicly commit one bounded Recovery-forfeit
+// chunk and then disappear. Before #236, that pending close blocks force-close,
+// the opposite owner's forfeit/reduce paths, and auto-crank. Expiry then escalates
+// the whole market to Recovery, where neither admin nor permissionless resolve
+// could reach Resolved. This fixture uses only public instructions and a normal
+// secondary-asset shutdown; no state bytes or oracle fixtures are injected.
+#[test]
+fn v16_attack_partial_recovery_forfeit_has_public_terminal_escape() {
+    const OPEN_PRICE: u64 = 100;
+    const FINAL_PRICE: u64 = 150_000_101;
+    const SIZE_Q: i128 = percolator::MAX_POSITION_ABS_Q as i128;
+    const HONEST_CAPITAL: u64 = 5_000_000_000_000_000;
+    const ATTACKER_CAPITAL: u64 = 5_000_000_000_000_000;
+    const EXPECTED_PENDING: u128 = 100_000_000;
+    const ASSET: u16 = 1;
+
+    let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+        initial_price: OPEN_PRICE,
+        max_bankrupt_close_lifetime_slots: 100,
+        ..V16CuMarketParams::default()
+    });
+    env.configure_permissionless_resolve_with_cu(100, 1);
+    env.configure_auth_mark_with_cu(0, OPEN_PRICE);
+    env.activate_asset(ASSET, 0, OPEN_PRICE);
+    env.configure_auth_mark_for_asset_as_admin(ASSET, 0, OPEN_PRICE);
+
+    let honest_owner = Keypair::new();
+    let attacker_owner = Keypair::new();
+    let honest = env.create_portfolio(&honest_owner);
+    let attacker = env.create_portfolio(&attacker_owner);
+    env.deposit(&honest_owner, honest, HONEST_CAPITAL as u128);
+    env.deposit(&attacker_owner, attacker, ATTACKER_CAPITAL as u128);
+    env.trade_asset_with_cu(
+        ASSET,
+        &honest_owner,
+        honest,
+        &attacker_owner,
+        attacker,
+        SIZE_Q,
+        OPEN_PRICE,
+        0,
+    );
+
+    let mut slot = 0u64;
+    let mut mark = OPEN_PRICE;
+    while mark < FINAL_PRICE {
+        slot += 1;
+        mark = mark.saturating_mul(2).min(FINAL_PRICE);
+        env.svm.warp_to_slot(slot);
+        env.push_auth_mark_for_asset_as_admin(ASSET, slot, mark);
+        env.crank(
+            honest,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: slot,
+                observations: crank_observations(ASSET),
+            },
+        );
+    }
+    assert_eq!(
+        env.market_state().1.assets[ASSET as usize].effective_price,
+        FINAL_PRICE
+    );
+
+    let shutdown_slot = slot + 1;
+    env.svm.warp_to_slot(shutdown_slot);
+    env.update_asset_lifecycle_as_admin_with_cu(
+        processor::ASSET_ACTION_SHUTDOWN,
+        ASSET,
+        shutdown_slot,
+        0,
+    );
+    env.forfeit_recovery_leg_with_cu(&attacker_owner, attacker, ASSET, 1);
+
+    let attacker_after = env.portfolio_state(attacker);
+    let ledger = close_progress(&attacker_after);
+    assert_eq!(
+        ledger.residual_remaining, EXPECTED_PENDING,
+        "one bounded forfeit leaves an organically reachable pending residual"
+    );
+    assert!(has_active_leg_for_asset(&attacker_after, ASSET as usize));
+
+    // Every ordinary bounded continuation is blocked while the attacker is gone.
+    let blocked_slot = shutdown_slot + 1;
+    env.svm.warp_to_slot(blocked_slot);
+    let cranker = Keypair::new();
+    assert!(env
+        .try_force_close_abandoned_asset_with_cu(
+            &cranker,
+            honest,
+            attacker,
+            ASSET,
+            blocked_slot,
+            u128::MAX,
+        )
+        .is_err());
+    env.svm.expire_blockhash();
+    assert!(env
+        .send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: blocked_slot,
+                observations: Vec::new(),
+            },
+            vec![
+                AccountMeta::new_readonly(env.payer.pubkey(), false),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(attacker, false),
+            ],
+            &[],
+        )
+        .is_err());
+    env.svm.expire_blockhash();
+    assert!(env
+        .send(
+            ProgInstruction::ForfeitRecoveryLeg {
+                asset_index: ASSET,
+                b_delta_budget: u128::MAX,
+            },
+            vec![
+                AccountMeta::new(honest_owner.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(honest, false),
+            ],
+            &[&honest_owner],
+        )
+        .is_err());
+    env.svm.expire_blockhash();
+    assert!(env
+        .send(
+            ProgInstruction::RebalanceReduce {
+                asset_index: ASSET,
+                reduce_q: u128::MAX,
+            },
+            vec![
+                AccountMeta::new(honest_owner.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(honest, false),
+            ],
+            &[&honest_owner],
+        )
+        .is_err());
+
+    // Keep asset 0 fresh while the attacker ledger expires. This proves local
+    // asset staleness is not accidentally supplying the global terminal route.
+    env.svm.warp_to_slot(200);
+    env.push_auth_mark_with_cu(200, OPEN_PRICE);
+    env.svm.expire_blockhash();
+    assert!(env
+        .send(
+            ProgInstruction::ResolveStalePermissionless { now_slot: 0 },
+            vec![AccountMeta::new(env.market, false)],
+            &[],
+        )
+        .is_err());
+
+    env.svm.expire_blockhash();
+    env.send(
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 200,
+            observations: Vec::new(),
+        },
+        vec![
+            AccountMeta::new_readonly(env.payer.pubkey(), false),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(attacker, false),
+        ],
+        &[],
+    )
+    .expect("expired attacker ledger commits global Recovery");
+    assert_eq!(env.market_state().1.mode, MarketModeV16::Recovery);
+    let honest_before_resolve = env.portfolio_state(honest);
+    assert!(
+        honest_before_resolve.capital.get() > 0
+            && has_active_leg_for_asset(&honest_before_resolve, ASSET as usize)
+    );
+
+    // RED on the exact parent: Recovery mode was rejected before reaching the
+    // engine. GREEN after #236: once Recovery freezes base updates and its stale
+    // window matures, any keeper can transition the market to Resolved.
+    env.svm.warp_to_slot(300);
+    env.svm.expire_blockhash();
+    let resolve = env.send(
+        ProgInstruction::ResolveStalePermissionless { now_slot: 0 },
+        vec![AccountMeta::new(env.market, false)],
+        &[],
+    );
+    assert!(
+        resolve.is_ok(),
+        "permissionless Recovery wind-down must succeed: {resolve:?}"
+    );
+    assert_eq!(env.market_state().1.mode, MarketModeV16::Resolved);
+
+    // Settle the abandoned loser permissionlessly. Each call is bounded by the
+    // configured chunk and pays no attacker-controlled key.
+    env.svm.warp_to_slot(302);
+    env.svm.expire_blockhash();
+    env.send(
+        ProgInstruction::CloseResolved {
+            fee_rate_per_slot: 0,
+        },
+        vec![
+            AccountMeta::new_readonly(attacker_owner.pubkey(), false),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(attacker, false),
+        ],
+        &[],
+    )
+    .expect("permissionless close settles the abandoned loser");
+    assert_eq!(
+        close_progress(&env.portfolio_state(attacker)).residual_remaining,
+        0
+    );
+    env.svm.expire_blockhash();
+    env.send(
+        ProgInstruction::CloseResolved {
+            fee_rate_per_slot: 0,
+        },
+        vec![
+            AccountMeta::new_readonly(attacker_owner.pubkey(), false),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(attacker, false),
+        ],
+        &[],
+    )
+    .expect("second bounded close books and detaches the abandoned loser");
+    assert!(
+        percolator::active_bitmap_is_empty(
+            env.portfolio_state(attacker)
+                .active_bitmap
+                .map(|word| word.get())
+        ),
+        "abandoned loser reaches a terminal account state"
+    );
+
+    // The honest account was refreshed at every authenticated price step. Once
+    // the abandoned ledger is gone it can consume one configured B-loss chunk
+    // plus the small tail without surrendering already-booked positive PnL.
+    env.svm.expire_blockhash();
+    let first_winner_cu = env.forfeit_recovery_leg_with_cu(&honest_owner, honest, ASSET, u128::MAX);
+    assert_cu_within(
+        "winner terminal B chunk after Recovery",
+        first_winner_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    let honest_after_first = env.portfolio_state(honest);
+    assert!(
+        has_active_leg_for_asset(&honest_after_first, ASSET as usize)
+            && active_leg_for_asset(&honest_after_first, ASSET as usize).b_stale,
+        "first bounded call consumes the full configured loss chunk and exposes the tail"
+    );
+    env.svm.expire_blockhash();
+    let second_winner_cu =
+        env.forfeit_recovery_leg_with_cu(&honest_owner, honest, ASSET, u128::MAX);
+    assert_cu_within(
+        "winner terminal B tail after Recovery",
+        second_winner_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    assert!(
+        !has_active_leg_for_asset(&env.portfolio_state(honest), ASSET as usize),
+        "second bounded continuation detaches the winner"
+    );
+
+    let vault_before = env.market_state().1.vault;
+    env.svm.expire_blockhash();
+    let (honest_dest, close_cu) = env.close_resolved_with_cu(&honest_owner, honest);
+    assert_cu_within(
+        "honest terminal exit after Recovery",
+        close_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    let payout = env.token_amount(honest_dest);
+    assert!(
+        payout >= HONEST_CAPITAL,
+        "independent winner recovers principal through the real vault: payout={payout}"
+    );
+    let (_, after) = env.market_state();
+    assert_eq!(after.vault, vault_before - payout as u128);
+    assert!(after.vault >= after.c_tot + after.insurance);
+}
