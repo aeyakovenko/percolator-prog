@@ -2490,6 +2490,10 @@ pub mod ix {
             size_q: i128,
             exec_price: u64,
             fee_bps: u64,
+            /// Highest source-backing policy rate both owners authorize. Legacy payloads omit
+            /// this field and decode to zero, so a pre-existing signed transaction cannot be
+            /// charged a backing fee that was installed after authorization.
+            max_backing_fee_bps: u16,
         },
         TradeCpi {
             asset_index: u16,
@@ -2730,12 +2734,24 @@ pub mod ix {
                         observations,
                     }
                 }
-                6 => Self::TradeNoCpi {
-                    asset_index: read_u16(&mut rest)?,
-                    size_q: read_i128(&mut rest)?,
-                    exec_price: read_u64(&mut rest)?,
-                    fee_bps: read_u64(&mut rest)?,
-                },
+                6 => {
+                    let asset_index = read_u16(&mut rest)?;
+                    let size_q = read_i128(&mut rest)?;
+                    let exec_price = read_u64(&mut rest)?;
+                    let fee_bps = read_u64(&mut rest)?;
+                    let max_backing_fee_bps = if rest.is_empty() {
+                        0
+                    } else {
+                        read_u16(&mut rest)?
+                    };
+                    Self::TradeNoCpi {
+                        asset_index,
+                        size_q,
+                        exec_price,
+                        fee_bps,
+                        max_backing_fee_bps,
+                    }
+                }
                 10 => Self::TradeCpi {
                     asset_index: read_u16(&mut rest)?,
                     size_q: read_i128(&mut rest)?,
@@ -3024,12 +3040,14 @@ pub mod ix {
                     size_q,
                     exec_price,
                     fee_bps,
+                    max_backing_fee_bps,
                 } => {
                     out.push(6);
                     push_u16(&mut out, asset_index);
                     push_i128(&mut out, size_q);
                     push_u64(&mut out, exec_price);
                     push_u64(&mut out, fee_bps);
+                    push_u16(&mut out, max_backing_fee_bps);
                 }
                 Self::TradeCpi {
                     asset_index,
@@ -5228,6 +5246,7 @@ pub mod processor {
                 size_q,
                 exec_price,
                 fee_bps,
+                max_backing_fee_bps,
             } => handle_trade_nocpi(
                 program_id,
                 accounts,
@@ -5235,6 +5254,7 @@ pub mod processor {
                 size_q,
                 exec_price,
                 fee_bps,
+                max_backing_fee_bps,
             ),
             Instruction::TradeCpi {
                 asset_index,
@@ -5798,6 +5818,7 @@ pub mod processor {
         size_q: i128,
         exec_price: u64,
         fee_bps: u64,
+        max_backing_fee_bps: u16,
         max_market_slots: usize,
     ) -> ProgramResult {
         ensure_portfolio_storage_for_market_slots(account_a_ai, max_market_slots)?;
@@ -5901,6 +5922,7 @@ pub mod processor {
                     backing_before_a.as_ref(),
                     &mut account_b,
                     backing_before_b.as_ref(),
+                    max_backing_fee_bps,
                 )?;
             }
             credit_trade_fees_to_market_budgets_view(
@@ -6206,6 +6228,7 @@ pub mod processor {
         size_q: i128,
         exec_price: u64,
         fee_bps: u64,
+        max_backing_fee_bps: u16,
     ) -> ProgramResult {
         let signer_a = account(accounts, 0)?;
         let signer_b = account(accounts, 1)?;
@@ -6221,6 +6244,9 @@ pub mod processor {
         expect_owner(account_a_ai, program_id)?;
         expect_owner(account_b_ai, program_id)?;
         if account_a_ai.key == account_b_ai.key {
+            return Err(PercolatorError::InvalidInstruction.into());
+        }
+        if max_backing_fee_bps > 10_000 {
             return Err(PercolatorError::InvalidInstruction.into());
         }
         ensure_valid_reported_trade_price(exec_price)?;
@@ -6240,6 +6266,7 @@ pub mod processor {
             size_q,
             exec_price,
             fee_bps,
+            max_backing_fee_bps,
             max_market_slots,
         )
     }
@@ -6702,6 +6729,7 @@ pub mod processor {
             ret.exec_size,
             ret.exec_price_e6,
             fee_bps,
+            10_000,
             max_market_slots,
         )
     }
@@ -11272,6 +11300,7 @@ pub mod processor {
         cfg: &WrapperConfigV16,
         account: &percolator::PortfolioV16ViewMut<'_>,
         before: &[(u32, u128)],
+        max_backing_fee_bps: u16,
         fees_by_domain: &mut DomainFeeTotals,
     ) -> Result<u128, ProgramError> {
         // Iterate only the OCCUPIED source-domain slots (after-state, <= CAP). For each, compute the
@@ -11296,6 +11325,9 @@ pub mod processor {
                 )
                 .map_err(map_v16_error)?;
                 if split.total_fee != 0 {
+                    if bps > max_backing_fee_bps {
+                        return Err(PercolatorError::Unauthorized.into());
+                    }
                     domain_fee_add(
                         fees_by_domain,
                         domain,
@@ -11348,6 +11380,7 @@ pub mod processor {
         before_a: &[(u32, u128)],
         account_b: &mut percolator::PortfolioV16ViewMut<'_>,
         before_b: &[(u32, u128)],
+        max_backing_fee_bps: u16,
     ) -> Result<u128, ProgramError> {
         let mut fees_a_by_domain: DomainFeeTotals = Vec::new();
         let fee_a = collect_backing_domain_fees_for_account_view(
@@ -11355,6 +11388,7 @@ pub mod processor {
             cfg,
             account_a,
             before_a,
+            max_backing_fee_bps,
             &mut fees_a_by_domain,
         )?;
         let mut fees_b_by_domain: DomainFeeTotals = Vec::new();
@@ -11363,6 +11397,7 @@ pub mod processor {
             cfg,
             account_b,
             before_b,
+            max_backing_fee_bps,
             &mut fees_b_by_domain,
         )?;
         if fee_a == 0 && fee_b == 0 {
@@ -12425,6 +12460,7 @@ pub mod processor {
                     before_a,
                     &mut account_b,
                     before_b,
+                    10_000,
                 )
                 .unwrap();
                 assert_eq!(charged, 10);
