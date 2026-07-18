@@ -27283,9 +27283,29 @@ fn v16_attack_non_base_trade_rejects_after_base_resolve_matured() {
         &[],
     );
     assert!(
-        resolve.is_ok(),
-        "base resolve remains available after rejected non-base trade: {resolve:?}"
+        resolve.is_err(),
+        "base resolve must not discard the pending authenticated non-base mark: {resolve:?}"
     );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "rejected resolve leaves the pending mark and market state intact"
+    );
+    env.svm.expire_blockhash();
+    env.crank(
+        taker_portfolio,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 8,
+            observations: crank_observations(1),
+        },
+    );
+    env.svm.expire_blockhash();
+    env.send(
+        ProgInstruction::ResolveStalePermissionless { now_slot: 0 },
+        vec![AccountMeta::new(env.market, false)],
+        &[],
+    )
+    .expect("base resolve remains live after bounded stored-mark catch-up");
     assert_eq!(env.market_state().1.mode, MarketModeV16::Resolved);
 }
 

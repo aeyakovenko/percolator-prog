@@ -8666,6 +8666,7 @@ pub mod processor {
         group: &state::MarketViewMutV16<'_>,
         asset_index: usize,
         resolved_slot: u64,
+        include_pending_mark: bool,
     ) -> Result<Option<(u64, i128)>, ProgramError> {
         if asset_index >= group.header.config.max_market_slots.get() as usize
             || asset_index >= group.markets.len()
@@ -8674,12 +8675,13 @@ pub mod processor {
         }
         let asset = group.markets[asset_index].engine.asset;
         let exposed = asset.oi_eff_long_q.get() != 0 || asset.oi_eff_short_q.get() != 0;
-        // A mark newer than the asset cursor remains prospective. Resolution and its catch-up
-        // crank must agree on this boundary so a stale caller cannot activate a fresh report.
+        // At stale-resolution maturity, the stored price-managed mark is the last authenticated
+        // report. It remains a required bounded transition even when no keeper has yet advanced
+        // the engine cursor to its publication slot.
         if !exposed
             || asset.slot_last.get() >= resolved_slot
             || !oracle_v16::profile_is_price_managed(profile)
-            || profile.mark_ewma_last_slot > asset.slot_last.get()
+            || (!include_pending_mark && profile.mark_ewma_last_slot > asset.slot_last.get())
         {
             return Ok(None);
         }
@@ -8705,6 +8707,7 @@ pub mod processor {
         cfg: &WrapperConfigV16,
         group: &state::MarketViewMutV16<'_>,
         resolved_slot: u64,
+        include_pending_mark: bool,
     ) -> ProgramResult {
         let configured_slots = group.header.config.max_market_slots.get() as usize;
         let mut asset_index = 0usize;
@@ -8718,6 +8721,7 @@ pub mod processor {
                     group,
                     asset_index,
                     resolved_slot,
+                    include_pending_mark,
                 )?
                 .is_some()
                 {
@@ -8751,7 +8755,7 @@ pub mod processor {
         if slot < group.header.current_slot.get() {
             return Err(PercolatorError::EngineStale.into());
         }
-        reject_market_resolve_before_committed_accrual_view(&cfg, &group, slot)?;
+        reject_market_resolve_before_committed_accrual_view(&cfg, &group, slot, false)?;
         group
             .resolve_market_not_atomic(slot)
             .map_err(map_v16_error)?;
@@ -9837,7 +9841,12 @@ pub mod processor {
         if !oracle_v16::permissionless_stale_matured(&cfg, authenticated_slot) {
             return Err(PercolatorError::OracleStale.into());
         }
-        reject_market_resolve_before_committed_accrual_view(&cfg, &group, authenticated_slot)?;
+        reject_market_resolve_before_committed_accrual_view(
+            &cfg,
+            &group,
+            authenticated_slot,
+            true,
+        )?;
         group
             .resolve_market_not_atomic(authenticated_slot)
             .map_err(map_v16_error)?;
@@ -10672,6 +10681,7 @@ pub mod processor {
                         &group,
                         asset_index,
                         authenticated_now_slot,
+                        true,
                     )?
                     .ok_or(PercolatorError::EngineNonProgress)?
                 } else {
