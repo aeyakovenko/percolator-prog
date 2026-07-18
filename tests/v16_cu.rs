@@ -9930,6 +9930,191 @@ fn v16_attack_crossed_trade_cannot_turn_partial_liquidation_survivors_same_side(
 }
 
 #[test]
+fn v16_attack_exact_effective_oi_cross_must_not_strand_adl_survivor() {
+    const PRICE: u64 = 1;
+    const OPEN_Q: i128 = 13_000 * POS_SCALE as i128;
+
+    let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+        h_max: 6_480_000,
+        initial_price: PRICE,
+        maintenance_margin_bps: 500,
+        initial_margin_bps: 500,
+        min_nonzero_mm_req: 599,
+        min_nonzero_im_req: 600,
+        max_price_move_bps_per_slot: 24,
+        max_accrual_dt_slots: 20,
+        max_abs_funding_e9_per_slot: 0,
+        min_funding_lifetime_slots: 10_000_000,
+        liquidation_fee_bps: 0,
+        maintenance_fee_per_slot: 27,
+        ..V16CuMarketParams::default()
+    });
+    let owner_a = Keypair::new();
+    let owner_b = Keypair::new();
+    let account_a = env.create_portfolio(&owner_a);
+    let account_b = env.create_portfolio(&owner_b);
+    env.deposit(&owner_a, account_a, 1_000);
+    env.deposit(&owner_b, account_b, 1_189);
+
+    env.svm.warp_to_slot(8);
+    env.try_trade_asset_with_cu(
+        0, &owner_a, account_a, &owner_b, account_b, OPEN_Q, PRICE, 0,
+    )
+    .expect("open trade");
+    env.svm.warp_to_slot(27);
+    env.crank(
+        account_a,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 27,
+            observations: crank_observations(0),
+        },
+    );
+    env.svm.warp_to_slot(35);
+    env.sync_maintenance_fee_with_cu(account_b, None, 35);
+    env.crank_steps(
+        account_b,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 35,
+            observations: crank_observations(0),
+        },
+        2,
+    );
+
+    let before = env.market_state().1;
+    let surviving_effective_q = before.assets[0].oi_eff_long_q;
+    let survivor_basis_q = active_leg_for_asset(&env.portfolio_state(account_a), 0)
+        .basis_pos_q
+        .unsigned_abs();
+    assert_eq!(surviving_effective_q, before.assets[0].oi_eff_short_q);
+    assert!(surviving_effective_q > 0 && survivor_basis_q > surviving_effective_q);
+
+    env.svm.expire_blockhash();
+    env.try_trade_asset_with_cu(
+        0,
+        &owner_b,
+        account_b,
+        &owner_a,
+        account_a,
+        surviving_effective_q as i128,
+        PRICE,
+        0,
+    )
+    .expect("exact-effective-OI crossed close");
+
+    let after_cross = env.market_state().1;
+    let survivor_after_cross = env.portfolio_state(account_a);
+    let residual_q = active_leg_for_asset(&survivor_after_cross, 0)
+        .basis_pos_q
+        .unsigned_abs();
+    println!(
+        "after exact cross: oi=({},{}) mode=({:?},{:?}) residual={residual_q}",
+        after_cross.assets[0].oi_eff_long_q,
+        after_cross.assets[0].oi_eff_short_q,
+        after_cross.assets[0].mode_long,
+        after_cross.assets[0].mode_short,
+    );
+    assert_eq!(after_cross.assets[0].oi_eff_long_q, 0);
+    assert_eq!(after_cross.assets[0].oi_eff_short_q, 0);
+    assert!(residual_q > 0);
+    assert!(
+        survivor_after_cross.capital.get() > 0,
+        "the stranded owner must retain real deposited capital"
+    );
+
+    env.svm.expire_blockhash();
+    let rebalance = env.send(
+        ProgInstruction::RebalanceReduce {
+            asset_index: 0,
+            reduce_q: residual_q,
+        },
+        vec![
+            AccountMeta::new(owner_a.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(account_a, false),
+        ],
+        &[&owner_a],
+    );
+    println!("owner rebalance after exact cross: {rebalance:?}");
+    assert!(
+        rebalance.is_err(),
+        "the vulnerable engine is expected to reject direct owner reduction"
+    );
+
+    env.svm.expire_blockhash();
+    let market_before_exit = env.svm.get_account(&env.market).unwrap();
+    let survivor_before_exit = env.svm.get_account(&account_a).unwrap();
+    let counterparty_before_exit = env.svm.get_account(&account_b).unwrap();
+    let trade_exit = env.try_trade_asset_with_cu(
+        0,
+        &owner_b,
+        account_b,
+        &owner_a,
+        account_a,
+        residual_q as i128,
+        PRICE,
+        0,
+    );
+    assert!(
+        trade_exit.is_err(),
+        "a fresh willing counterparty cannot fund a reduction from zero preexisting OI"
+    );
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before_exit);
+    assert_eq!(env.svm.get_account(&account_a).unwrap(), survivor_before_exit);
+    assert_eq!(
+        env.svm.get_account(&account_b).unwrap(),
+        counterparty_before_exit
+    );
+
+    let market_before_cranks = env.svm.get_account(&env.market).unwrap();
+    let survivor_before_cranks = env.svm.get_account(&account_a).unwrap();
+    let mut crank_results = Vec::new();
+    for _ in 0..10 {
+        env.svm.expire_blockhash();
+        crank_results.push(env.send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 35,
+                observations: vec![],
+            },
+            vec![
+                AccountMeta::new(env.payer.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(account_a, false),
+            ],
+            &[],
+        ));
+    }
+    let after_cranks = env.market_state().1;
+    let survivor_after_cranks = env.portfolio_state(account_a);
+    println!(
+        "permissionless cranks={crank_results:?} oi=({},{}) mode=({:?},{:?}) active={}",
+        after_cranks.assets[0].oi_eff_long_q,
+        after_cranks.assets[0].oi_eff_short_q,
+        after_cranks.assets[0].mode_long,
+        after_cranks.assets[0].mode_short,
+        has_active_leg_for_asset(&survivor_after_cranks, 0),
+    );
+    assert!(
+        crank_results.iter().all(Result::is_ok),
+        "the selector currently misclassifies the stranded state as successful NoAction"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before_cranks,
+        "successful no-op cranks make no market progress"
+    );
+    assert_eq!(
+        env.svm.get_account(&account_a).unwrap(),
+        survivor_before_cranks,
+        "successful no-op cranks make no survivor progress"
+    );
+
+    assert!(
+        rebalance.is_ok() || !has_active_leg_for_asset(&survivor_after_cranks, 0),
+        "ten successful public cranks must not be no-op witnesses for a permanently stuck ADL residue"
+    );
+}
+
+#[test]
 fn v16_attack_stale_resolve_matured_no_observation_liquidation_rejects() {
     let mut env = V16CuEnv::new();
     env.configure_permissionless_resolve_with_cu(5, 5);
