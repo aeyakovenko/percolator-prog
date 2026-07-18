@@ -47556,6 +47556,47 @@ fn v16_bpf_10m_market_liquidation_high_asset_stays_bounded() {
     assert_eq!(health_cert(&short_after).certified_liq_deficit, 0);
 }
 
+#[test]
+fn v16_bpf_10m_market_resolve_accrual_preflight_stays_bounded() {
+    const N: usize = 5_834;
+    const HIGH_ASSET: usize = N - 1;
+    const PRICE: u64 = 100;
+
+    let mut env = V16CuEnv::new();
+    let account_len = grow_market_to_10m_with_high_active_asset(&mut env, N, HIGH_ASSET, PRICE);
+    env.portfolio_account_len = state::portfolio_account_len_for_market_slots(N).unwrap();
+
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long = env.create_portfolio(&long_owner);
+    let short = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long, 1_000_000);
+    env.deposit(&short_owner, short, 1_000_000);
+    env.svm.warp_to_slot(1);
+    env.trade_asset_with_cu(
+        HIGH_ASSET as u16,
+        &long_owner,
+        long,
+        &short_owner,
+        short,
+        POS_SCALE as i128,
+        PRICE,
+        0,
+    );
+
+    env.svm.warp_to_slot(2);
+    let resolve_cu = env.resolve();
+    println!(
+        "v16 10MiB ResolveMarket accrual preflight: assets={N}, account_len={account_len}, \
+         last_exposed_asset={HIGH_ASSET}, CU={resolve_cu}"
+    );
+    assert!(
+        resolve_cu < 1_400_000,
+        "10MiB ResolveMarket accrual preflight must fit the transaction CU limit: {resolve_cu}"
+    );
+    assert_eq!(env.market_state().1.mode, MarketModeV16::Resolved);
+}
+
 // Scale proof — the largest current market that fits Solana's 10 MiB account cap is valid AND a
 // real BPF trade on a HIGH asset index executes with O(1)-in-N compute.
 //
@@ -59716,4 +59757,141 @@ fn v16_attack_underfunded_exit_cannot_move_ewma_with_uncollectible_fee() {
     ] {
         assert_underfunded_ewma_exit_uses_collected_fee(path);
     }
+}
+
+// Resolve may ignore a mark that has never become an accrual checkpoint, but it must not erase a
+// deterministic funding segment after a public crank has activated that checkpoint.
+#[test]
+fn v16_attack_market_resolve_cannot_erase_committed_funding() {
+    #[derive(Debug)]
+    struct Outcome {
+        f_long_num: i128,
+        f_short_num: i128,
+        long_payout: u64,
+        short_payout: u64,
+    }
+
+    fn run(crank_before_resolve: bool) -> Outcome {
+        const PRICE: u64 = 100;
+        const MARK: u64 = 99;
+        const OPEN_SLOT: u64 = 1;
+        const PRIME_SLOT: u64 = 2;
+        const RESOLVE_SLOT: u64 = 3;
+        const DEPOSIT: u128 = 100_000_000;
+        const SIZE_Q: i128 = 100_000 * POS_SCALE as i128;
+
+        let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+            initial_price: PRICE,
+            max_price_move_bps_per_slot: 1,
+            max_accrual_dt_slots: 1,
+            max_abs_funding_e9_per_slot: 10_000,
+            min_funding_lifetime_slots: 1,
+            ..V16CuMarketParams::default()
+        });
+        env.svm.warp_to_slot(OPEN_SLOT);
+        env.configure_auth_mark_with_cu(OPEN_SLOT, PRICE);
+
+        let resolve_admin = env.admin.insecure_clone();
+        let honest_oracle = Keypair::new();
+        env.try_update_per_asset_authority_with_cu(
+            &resolve_admin,
+            Some(&honest_oracle),
+            0,
+            processor::ASSET_AUTH_ORACLE,
+            honest_oracle.pubkey().to_bytes(),
+        )
+        .expect("separate the honest oracle key from the resolve admin");
+
+        let victim_long = env.create_portfolio(&honest_oracle);
+        let attacker_short = env.create_portfolio(&resolve_admin);
+        env.deposit(&honest_oracle, victim_long, DEPOSIT);
+        env.deposit(&resolve_admin, attacker_short, DEPOSIT);
+        env.trade_with_cu(
+            &honest_oracle,
+            victim_long,
+            &resolve_admin,
+            attacker_short,
+            SIZE_Q,
+            PRICE,
+            0,
+        );
+
+        env.svm.warp_to_slot(PRIME_SLOT);
+        env.svm.expire_blockhash();
+        env.send(
+            ProgInstruction::PushAuthMark {
+                asset_index: 0,
+                now_slot: PRIME_SLOT,
+                mark_e6: MARK,
+            },
+            vec![
+                AccountMeta::new(honest_oracle.pubkey(), true),
+                AccountMeta::new(env.market, false),
+            ],
+            &[&honest_oracle],
+        )
+        .expect("honest oracle mark");
+        env.crank(
+            victim_long,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: PRIME_SLOT,
+                observations: crank_observations(0),
+            },
+        );
+
+        env.svm.warp_to_slot(RESOLVE_SLOT);
+        if crank_before_resolve {
+            env.crank(
+                victim_long,
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: RESOLVE_SLOT,
+                    observations: crank_observations(0),
+                },
+            );
+        }
+        env.svm.expire_blockhash();
+        let first_resolve = send_tx(
+            &mut env.svm,
+            env.program_id,
+            &env.payer,
+            ProgInstruction::ResolveMarket,
+            vec![
+                AccountMeta::new(resolve_admin.pubkey(), true),
+                AccountMeta::new(env.market, false),
+            ],
+            &[&resolve_admin],
+        );
+        if crank_before_resolve {
+            first_resolve.expect("current committed funding permits resolve");
+        } else if first_resolve.is_err() {
+            env.crank(
+                victim_long,
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: RESOLVE_SLOT,
+                    observations: crank_observations(0),
+                },
+            );
+            env.resolve();
+        }
+        let (_, resolved) = env.market_state();
+
+        // The funding loser closes first so its realized loss is available for the winner.
+        let short_dest = env.close_resolved(&resolve_admin, attacker_short);
+        let long_dest = env.close_resolved(&honest_oracle, victim_long);
+        Outcome {
+            f_long_num: resolved.assets[0].f_long_num,
+            f_short_num: resolved.assets[0].f_short_num,
+            long_payout: env.token_amount(long_dest),
+            short_payout: env.token_amount(short_dest),
+        }
+    }
+
+    let control = run(true);
+    let attack = run(false);
+    eprintln!("resolve funding control={control:?} attack={attack:?}");
+    assert!(control.f_long_num > 0 && control.f_short_num < 0);
+    assert_eq!(attack.f_long_num, control.f_long_num);
+    assert_eq!(attack.f_short_num, control.f_short_num);
+    assert_eq!(attack.long_payout, control.long_payout);
+    assert_eq!(attack.short_payout, control.short_payout);
 }
