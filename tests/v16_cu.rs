@@ -59717,3 +59717,86 @@ fn v16_attack_underfunded_exit_cannot_move_ewma_with_uncollectible_fee() {
         assert_underfunded_ewma_exit_uses_collected_fee(path);
     }
 }
+
+// Probe: a separately authenticated AuthMark has already entered program state, but the engine
+// effective-price cursor advances only when a keeper cranks. A non-oracle market authority must not
+// be able to resolve in that interval and choose the older terminal settlement price.
+#[test]
+fn v16_probe_resolve_cannot_omit_pending_authenticated_mark() {
+    #[derive(Debug)]
+    struct Outcome {
+        effective_price: u64,
+        long_payout: u64,
+        short_payout: u64,
+    }
+
+    fn run(crank_before_resolve: bool) -> Outcome {
+        const PRICE: u64 = 1_000_000;
+        const MARK: u64 = 2_000_000;
+        const DEPOSIT: u128 = 100_000_000;
+        const SIZE_Q: i128 = 1_000 * POS_SCALE as i128;
+
+        let mut env = V16CuEnv::new_with_init_params(production_risk_params());
+        env.svm.warp_to_slot(1);
+        env.configure_auth_mark_with_cu(0, PRICE);
+
+        let resolver = env.admin.insecure_clone();
+        let oracle = Keypair::new();
+        env.try_update_per_asset_authority_with_cu(
+            &resolver,
+            Some(&oracle),
+            0,
+            processor::ASSET_AUTH_ORACLE,
+            oracle.pubkey().to_bytes(),
+        )
+        .expect("separate honest oracle from resolver");
+
+        let long = env.create_portfolio(&oracle);
+        let short = env.create_portfolio(&resolver);
+        env.deposit(&oracle, long, DEPOSIT);
+        env.deposit(&resolver, short, DEPOSIT);
+        env.trade_asset_with_cu(0, &oracle, long, &resolver, short, SIZE_Q, PRICE, 0);
+
+        env.svm.warp_to_slot(2);
+        env.svm.expire_blockhash();
+        env.send(
+            ProgInstruction::PushAuthMark {
+                asset_index: 0,
+                now_slot: 2,
+                mark_e6: MARK,
+            },
+            vec![
+                AccountMeta::new(oracle.pubkey(), true),
+                AccountMeta::new(env.market, false),
+            ],
+            &[&oracle],
+        )
+        .expect("honest authenticated mark");
+
+        if crank_before_resolve {
+            env.crank(
+                long,
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: 2,
+                    observations: crank_observations(0),
+                },
+            );
+        }
+        env.resolve();
+        let effective_price = env.market_state().1.assets[0].effective_price;
+        let short_dest = env.close_resolved(&resolver, short);
+        let long_dest = env.close_resolved(&oracle, long);
+        Outcome {
+            effective_price,
+            long_payout: env.token_amount(long_dest),
+            short_payout: env.token_amount(short_dest),
+        }
+    }
+
+    let control = run(true);
+    let attack = run(false);
+    eprintln!("pending AuthMark resolve control={control:?} attack={attack:?}");
+    assert_eq!(attack.effective_price, control.effective_price);
+    assert_eq!(attack.long_payout, control.long_payout);
+    assert_eq!(attack.short_payout, control.short_payout);
+}
