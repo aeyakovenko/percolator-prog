@@ -59717,3 +59717,110 @@ fn v16_attack_underfunded_exit_cannot_move_ewma_with_uncollectible_fee() {
         assert_underfunded_ewma_exit_uses_collected_fee(path);
     }
 }
+
+// Probe: owner-only RebalanceReduce is unilateral. It must not let the losing side flatten and
+// withdraw against the old engine cursor after a separately authenticated mark is queued.
+#[test]
+fn v16_probe_rebalance_reduce_cannot_omit_pending_adverse_mark() {
+    #[derive(Debug)]
+    struct Outcome {
+        effective_price: u64,
+        attacker_withdrawal: u64,
+        victim_payout: u64,
+    }
+
+    fn run(crank_before_reduce: bool) -> Outcome {
+        const PRICE: u64 = 1_000_000;
+        const MARK: u64 = 2_000_000;
+        const DEPOSIT: u128 = 100_000_000;
+        const SIZE_Q: i128 = 1_000 * POS_SCALE as i128;
+
+        let mut env = V16CuEnv::new_with_init_params(production_risk_params());
+        env.svm.warp_to_slot(1);
+        env.configure_auth_mark_with_cu(0, PRICE);
+        let market_admin = env.admin.insecure_clone();
+        let honest_oracle = Keypair::new();
+        env.try_update_per_asset_authority_with_cu(
+            &market_admin,
+            Some(&honest_oracle),
+            0,
+            processor::ASSET_AUTH_ORACLE,
+            honest_oracle.pubkey().to_bytes(),
+        )
+        .expect("separate honest oracle authority");
+
+        let victim_long = env.create_portfolio(&honest_oracle);
+        let attacker_short = env.create_portfolio(&market_admin);
+        env.deposit(&honest_oracle, victim_long, DEPOSIT);
+        env.deposit(&market_admin, attacker_short, DEPOSIT);
+        env.trade_asset_with_cu(
+            0,
+            &honest_oracle,
+            victim_long,
+            &market_admin,
+            attacker_short,
+            SIZE_Q,
+            PRICE,
+            0,
+        );
+
+        env.svm.warp_to_slot(2);
+        env.svm.expire_blockhash();
+        env.send(
+            ProgInstruction::PushAuthMark {
+                asset_index: 0,
+                now_slot: 2,
+                mark_e6: MARK,
+            },
+            vec![
+                AccountMeta::new(honest_oracle.pubkey(), true),
+                AccountMeta::new(env.market, false),
+            ],
+            &[&honest_oracle],
+        )
+        .expect("honest adverse mark");
+
+        if crank_before_reduce {
+            env.crank(
+                victim_long,
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: 2,
+                    observations: crank_observations(0),
+                },
+            );
+        }
+        env.rebalance_reduce_with_cu(
+            &market_admin,
+            attacker_short,
+            0,
+            SIZE_Q.unsigned_abs(),
+        );
+        let attacker_capital = env.portfolio_state(attacker_short).capital.get();
+        let attacker_dest = env.withdraw(&market_admin, attacker_short, attacker_capital);
+
+        if !crank_before_reduce {
+            env.crank(
+                victim_long,
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: 2,
+                    observations: crank_observations(0),
+                },
+            );
+        }
+        let effective_price = env.market_state().1.assets[0].effective_price;
+        env.resolve();
+        let victim_dest = env.close_resolved(&honest_oracle, victim_long);
+        Outcome {
+            effective_price,
+            attacker_withdrawal: env.token_amount(attacker_dest),
+            victim_payout: env.token_amount(victim_dest),
+        }
+    }
+
+    let control = run(true);
+    let attack = run(false);
+    eprintln!("pending-mark rebalance control={control:?} attack={attack:?}");
+    assert_eq!(attack.effective_price, control.effective_price);
+    assert_eq!(attack.attacker_withdrawal, control.attacker_withdrawal);
+    assert_eq!(attack.victim_payout, control.victim_payout);
+}
