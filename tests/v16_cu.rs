@@ -59717,3 +59717,140 @@ fn v16_attack_underfunded_exit_cannot_move_ewma_with_uncollectible_fee() {
         assert_underfunded_ewma_exit_uses_collected_fee(path);
     }
 }
+
+// A non-oracle asset admin may shut an exposed asset down, but shutdown must not erase a funding
+// segment already implied by an honest committed mark. The one-bps price cap rounds the index move
+// to zero here, so the control/attack payout difference is funding only.
+#[test]
+fn v16_attack_asset_shutdown_cannot_erase_committed_funding() {
+    #[derive(Debug)]
+    struct Outcome {
+        f_long_num: i128,
+        f_short_num: i128,
+        long_payout: u64,
+        short_payout: u64,
+    }
+
+    fn run(crank_before_shutdown: bool) -> Outcome {
+        const PRICE: u64 = 100;
+        const MARK: u64 = 99;
+        const OPEN_SLOT: u64 = 1;
+        const PRIME_SLOT: u64 = 2;
+        const SHUTDOWN_SLOT: u64 = 3;
+        const FORCE_CLOSE_SLOT: u64 = 4;
+        const DEPOSIT: u128 = 100_000_000;
+        const SIZE_Q: i128 = 100_000 * POS_SCALE as i128;
+
+        let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+            initial_price: PRICE,
+            max_price_move_bps_per_slot: 1,
+            max_accrual_dt_slots: 1,
+            max_abs_funding_e9_per_slot: 10_000,
+            min_funding_lifetime_slots: 1,
+            ..V16CuMarketParams::default()
+        });
+        env.configure_permissionless_resolve_with_cu(1_000, 1);
+        env.svm.warp_to_slot(OPEN_SLOT);
+        env.configure_auth_mark_with_cu(OPEN_SLOT, PRICE);
+
+        let shutdown_admin = env.admin.insecure_clone();
+        let honest_oracle = Keypair::new();
+        env.try_update_per_asset_authority_with_cu(
+            &shutdown_admin,
+            Some(&honest_oracle),
+            0,
+            processor::ASSET_AUTH_ORACLE,
+            honest_oracle.pubkey().to_bytes(),
+        )
+        .expect("separate the honest oracle key from the shutdown admin");
+
+        let victim_long = env.create_portfolio(&honest_oracle);
+        let attacker_short = env.create_portfolio(&shutdown_admin);
+        env.deposit(&honest_oracle, victim_long, DEPOSIT);
+        env.deposit(&shutdown_admin, attacker_short, DEPOSIT);
+        env.trade_with_cu(
+            &honest_oracle,
+            victim_long,
+            &shutdown_admin,
+            attacker_short,
+            SIZE_Q,
+            PRICE,
+            0,
+        );
+
+        // The honest oracle commits MARK. The first observed crank activates it as the next funding
+        // checkpoint; the cap rounds PRICE * 1bps to zero, so effective price remains PRICE.
+        env.svm.warp_to_slot(PRIME_SLOT);
+        env.svm.expire_blockhash();
+        env.send(
+            ProgInstruction::PushAuthMark {
+                asset_index: 0,
+                now_slot: PRIME_SLOT,
+                mark_e6: MARK,
+            },
+            vec![
+                AccountMeta::new(honest_oracle.pubkey(), true),
+                AccountMeta::new(env.market, false),
+            ],
+            &[&honest_oracle],
+        )
+        .expect("honest oracle mark");
+        env.crank(
+            victim_long,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: PRIME_SLOT,
+                observations: crank_observations(0),
+            },
+        );
+        let (_, primed) = env.market_state();
+        assert_eq!(primed.assets[0].effective_price, PRICE);
+        assert_eq!(primed.assets[0].f_long_num, 0);
+        assert_eq!(primed.assets[0].f_short_num, 0);
+
+        env.svm.warp_to_slot(SHUTDOWN_SLOT);
+        if crank_before_shutdown {
+            env.crank(
+                victim_long,
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: SHUTDOWN_SLOT,
+                    observations: crank_observations(0),
+                },
+            );
+        }
+        env.svm.expire_blockhash();
+        env.try_shutdown_asset_with_authority(&shutdown_admin, 0, SHUTDOWN_SLOT)
+            .expect("asset admin shutdown");
+        let (_, shutdown) = env.market_state();
+        assert_eq!(shutdown.assets[0].effective_price, PRICE);
+
+        let cranker = Keypair::new();
+        env.svm.warp_to_slot(FORCE_CLOSE_SLOT);
+        env.force_close_abandoned_asset_with_cu(
+            &cranker,
+            victim_long,
+            attacker_short,
+            0,
+            FORCE_CLOSE_SLOT,
+            SIZE_Q as u128,
+        );
+        env.resolve();
+        env.svm.warp_to_slot(FORCE_CLOSE_SLOT + 1);
+        let long_dest = env.close_resolved(&honest_oracle, victim_long);
+        let short_dest = env.close_resolved(&shutdown_admin, attacker_short);
+        Outcome {
+            f_long_num: shutdown.assets[0].f_long_num,
+            f_short_num: shutdown.assets[0].f_short_num,
+            long_payout: env.token_amount(long_dest),
+            short_payout: env.token_amount(short_dest),
+        }
+    }
+
+    let control = run(true);
+    let attack = run(false);
+    eprintln!("shutdown funding control={control:?} attack={attack:?}");
+    assert!(control.f_long_num > 0 && control.f_short_num < 0);
+    assert_eq!(attack.f_long_num, control.f_long_num);
+    assert_eq!(attack.f_short_num, control.f_short_num);
+    assert_eq!(attack.long_payout, control.long_payout);
+    assert_eq!(attack.short_payout, control.short_payout);
+}
