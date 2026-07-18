@@ -59787,12 +59787,21 @@ fn v16_probe_pending_authmark_cannot_be_migrated_to_thin_account() {
             &[&honest_oracle],
         )
         .expect("honest adverse mark");
+        assert_eq!(
+            env.market_state().1.assets[0].raw_oracle_target_price,
+            MARK,
+            "authenticated target is immediately visible to engine risk checks"
+        );
 
-        let mut funded_live_withdrawal = 0u128;
+        let funded_live_withdrawal = 0u128;
         if migrate_after_mark {
             // The funded account takes the long side of this transfer to close its short; the thin
             // account inherits the short. Both attacker-controlled owners sign through the public API.
-            env.trade_asset_with_cu(
+            let market_before = env.svm.get_account(&env.market).unwrap().data;
+            let funded_before = env.svm.get_account(&funded_short).unwrap().data;
+            let thin_before = env.svm.get_account(&thin_short).unwrap().data;
+            let victim_before = env.svm.get_account(&victim_long).unwrap().data;
+            let migration = env.try_trade_asset_with_cu(
                 0,
                 &funded_owner,
                 funded_short,
@@ -59803,16 +59812,29 @@ fn v16_probe_pending_authmark_cannot_be_migrated_to_thin_account() {
                 0,
             );
             assert!(
-                !has_active_leg_for_asset(&env.portfolio_state(funded_short), 0),
-                "funded attacker account became flat"
+                migration.is_err(),
+                "thin account must not inherit exposure it cannot margin against the authenticated target"
             );
-            assert!(
-                has_active_leg_for_asset(&env.portfolio_state(thin_short), 0),
-                "thin account inherited the adverse short"
+            assert_eq!(
+                env.svm.get_account(&env.market).unwrap().data,
+                market_before,
+                "rejected migration rolls back the market"
             );
-            let capital = env.portfolio_state(funded_short).capital.get();
-            let dest = env.withdraw(&funded_owner, funded_short, capital);
-            funded_live_withdrawal = env.token_amount(dest) as u128;
+            assert_eq!(
+                env.svm.get_account(&funded_short).unwrap().data,
+                funded_before,
+                "rejected migration rolls back the funded account"
+            );
+            assert_eq!(
+                env.svm.get_account(&thin_short).unwrap().data,
+                thin_before,
+                "rejected migration rolls back the thin account"
+            );
+            assert_eq!(
+                env.svm.get_account(&victim_long).unwrap().data,
+                victim_before,
+                "rejected migration does not mutate the independent victim"
+            );
         }
 
         // Production's 24 bps/slot circuit breaker reaches the 10% target in finite bounded steps.

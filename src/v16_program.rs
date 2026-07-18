@@ -10275,6 +10275,9 @@ pub mod processor {
             profile.oracle_target_price_e6 = mark_e6;
             profile.oracle_target_publish_time = 0;
             profile.last_good_oracle_slot = authenticated_slot;
+            group
+                .set_asset_raw_oracle_target_not_atomic(asset_index_usize, mark_e6)
+                .map_err(map_v16_error)?;
             write_oracle_profile_to_view(&mut group, asset_index_usize, &profile)?;
             if asset_index_usize == 0 {
                 cfg.last_good_oracle_slot =
