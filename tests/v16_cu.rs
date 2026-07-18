@@ -10015,6 +10015,11 @@ fn v16_attack_exact_effective_oi_cross_must_not_strand_adl_survivor() {
     );
     assert_eq!(after_cross.assets[0].oi_eff_long_q, 0);
     assert_eq!(after_cross.assets[0].oi_eff_short_q, 0);
+    assert_eq!(
+        after_cross.assets[0].mode_long,
+        SideModeV16::ResetPending,
+        "zero effective OI with surviving ADL basis must enter a permissionlessly clearable reset"
+    );
     assert!(residual_q > 0);
     assert!(
         survivor_after_cross.capital.get() > 0,
@@ -10034,10 +10039,9 @@ fn v16_attack_exact_effective_oi_cross_must_not_strand_adl_survivor() {
         ],
         &[&owner_a],
     );
-    println!("owner rebalance after exact cross: {rebalance:?}");
     assert!(
         rebalance.is_err(),
-        "the vulnerable engine is expected to reject direct owner reduction"
+        "direct reduction is excluded once the reset route owns residue cleanup"
     );
 
     env.svm.expire_blockhash();
@@ -10058,19 +10062,22 @@ fn v16_attack_exact_effective_oi_cross_must_not_strand_adl_survivor() {
         trade_exit.is_err(),
         "a fresh willing counterparty cannot fund a reduction from zero preexisting OI"
     );
-    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before_exit);
-    assert_eq!(env.svm.get_account(&account_a).unwrap(), survivor_before_exit);
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before_exit
+    );
+    assert_eq!(
+        env.svm.get_account(&account_a).unwrap(),
+        survivor_before_exit
+    );
     assert_eq!(
         env.svm.get_account(&account_b).unwrap(),
         counterparty_before_exit
     );
 
-    let market_before_cranks = env.svm.get_account(&env.market).unwrap();
-    let survivor_before_cranks = env.svm.get_account(&account_a).unwrap();
-    let mut crank_results = Vec::new();
-    for _ in 0..10 {
-        env.svm.expire_blockhash();
-        crank_results.push(env.send(
+    env.svm.expire_blockhash();
+    let crank_cu = env
+        .send(
             ProgInstruction::PermissionlessCrank {
                 now_slot: 35,
                 observations: vec![],
@@ -10081,36 +10088,31 @@ fn v16_attack_exact_effective_oi_cross_must_not_strand_adl_survivor() {
                 AccountMeta::new(account_a, false),
             ],
             &[],
-        ));
-    }
+        )
+        .expect("one permissionless crank clears the prior-reset residue");
+    assert_cu_within("exact-OI ADL residue cleanup", crank_cu, CRANK_CU_LIMIT);
     let after_cranks = env.market_state().1;
     let survivor_after_cranks = env.portfolio_state(account_a);
     println!(
-        "permissionless cranks={crank_results:?} oi=({},{}) mode=({:?},{:?}) active={}",
+        "permissionless cleanup_cu={crank_cu} oi=({},{}) mode=({:?},{:?}) active={}",
         after_cranks.assets[0].oi_eff_long_q,
         after_cranks.assets[0].oi_eff_short_q,
         after_cranks.assets[0].mode_long,
         after_cranks.assets[0].mode_short,
         has_active_leg_for_asset(&survivor_after_cranks, 0),
     );
-    assert!(
-        crank_results.iter().all(Result::is_ok),
-        "the selector currently misclassifies the stranded state as successful NoAction"
-    );
-    assert_eq!(
-        env.svm.get_account(&env.market).unwrap(),
-        market_before_cranks,
-        "successful no-op cranks make no market progress"
-    );
-    assert_eq!(
-        env.svm.get_account(&account_a).unwrap(),
-        survivor_before_cranks,
-        "successful no-op cranks make no survivor progress"
-    );
 
     assert!(
-        rebalance.is_ok() || !has_active_leg_for_asset(&survivor_after_cranks, 0),
-        "ten successful public cranks must not be no-op witnesses for a permanently stuck ADL residue"
+        !has_active_leg_for_asset(&survivor_after_cranks, 0),
+        "the public crank must not return a no-op witness for a permanently stuck ADL residue"
+    );
+    let withdrawable = survivor_after_cranks.capital.get();
+    assert!(withdrawable > 0);
+    let dest = env.withdraw(&owner_a, account_a, withdrawable);
+    assert_eq!(
+        env.token_amount(dest),
+        withdrawable as u64,
+        "the formerly stranded owner can recover all remaining principal"
     );
 }
 
