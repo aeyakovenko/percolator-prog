@@ -59717,3 +59717,151 @@ fn v16_attack_underfunded_exit_cannot_move_ewma_with_uncollectible_fee() {
         assert_underfunded_ewma_exit_uses_collected_fee(path);
     }
 }
+// Public cross-domain isolation probe: aggregate PnL conversion must burn claim face from the
+// same source domains whose backing it consumes. Otherwise an unbacked lower-index claim can make
+// an overfunded higher-index provider pay twice for one domain-local claim.
+#[test]
+fn v16_attack_released_pnl_cannot_charge_one_source_for_another() {
+    const INITIAL_PRICE: u64 = 100;
+    const MOVED_PRICE: u64 = 105;
+    const SIZE_Q: i128 = 20 * POS_SCALE as i128;
+    const CLAIM_PER_ASSET: u128 = 100;
+    const LOWER_SOURCE_DOMAIN: usize = 1;
+    const FUNDED_SOURCE_DOMAIN: usize = 3;
+
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(4, 1_000, 1_000, 500);
+    env.svm.warp_to_slot(1);
+    env.configure_auth_mark_for_asset_as_admin(0, 1, INITIAL_PRICE);
+    env.configure_auth_mark_for_asset_as_admin(1, 1, INITIAL_PRICE);
+    env.top_up_backing_bucket(FUNDED_SOURCE_DOMAIN as u16, 2 * CLAIM_PER_ASSET, 10);
+
+    let winner_owner = Keypair::new();
+    let stale_loser_owner = Keypair::new();
+    let replacement_owner = Keypair::new();
+    let winner = env.create_portfolio(&winner_owner);
+    let stale_loser = env.create_portfolio(&stale_loser_owner);
+    let replacement = env.create_portfolio(&replacement_owner);
+    env.deposit(&winner_owner, winner, 1_000);
+    env.deposit(&stale_loser_owner, stale_loser, 1_000);
+    env.deposit(&replacement_owner, replacement, 1_000);
+
+    for asset_index in [0u16, 1u16] {
+        env.trade_asset_with_cu(
+            asset_index,
+            &winner_owner,
+            winner,
+            &stale_loser_owner,
+            stale_loser,
+            SIZE_Q,
+            INITIAL_PRICE,
+            0,
+        );
+    }
+
+    env.svm.warp_to_slot(2);
+    env.push_auth_mark_for_asset_as_admin(0, 2, MOVED_PRICE);
+    env.push_auth_mark_for_asset_as_admin(1, 2, MOVED_PRICE);
+    // Refresh only the winner. The original loser remains stale, so asset 0's source claim is
+    // publicly present but not yet backed by the loser's crystallized capital.
+    for asset_index in [0u16, 1u16] {
+        env.crank(
+            winner,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 2,
+                observations: crank_observations(asset_index),
+            },
+        );
+    }
+
+    let winner_after_marks = env.portfolio_state(winner);
+    assert_eq!(winner_after_marks.pnl.get(), (2 * CLAIM_PER_ASSET) as i128);
+    let (_, group_after_marks) = env.market_state();
+    assert_eq!(
+        group_after_marks.source_credit[LOWER_SOURCE_DOMAIN].positive_claim_bound_num,
+        CLAIM_PER_ASSET * BOUND_SCALE,
+    );
+    assert_eq!(
+        group_after_marks.source_credit[LOWER_SOURCE_DOMAIN].fresh_reserved_backing_num, 0,
+        "the lower-index claim must be unbacked before the loser is refreshed",
+    );
+    assert_eq!(
+        group_after_marks.source_credit[FUNDED_SOURCE_DOMAIN].positive_claim_bound_num,
+        CLAIM_PER_ASSET * BOUND_SCALE,
+    );
+    assert_eq!(
+        group_after_marks.source_credit[FUNDED_SOURCE_DOMAIN].fresh_reserved_backing_num,
+        2 * CLAIM_PER_ASSET * BOUND_SCALE,
+    );
+
+    // Flatten the winner against a fresh account without touching the stale original loser.
+    for asset_index in [0u16, 1u16] {
+        env.trade_asset_with_cu(
+            asset_index,
+            &winner_owner,
+            winner,
+            &replacement_owner,
+            replacement,
+            -SIZE_Q,
+            MOVED_PRICE,
+            0,
+        );
+    }
+    let flat = env.portfolio_state(winner);
+    assert!(percolator::active_bitmap_is_empty(active_bitmap(&flat)));
+    assert_eq!(flat.pnl.get(), (2 * CLAIM_PER_ASSET) as i128);
+
+    env.svm.expire_blockhash();
+    env.convert_released_pnl_with_cu(&winner_owner, winner, CLAIM_PER_ASSET);
+    let after_first = env.portfolio_state(winner);
+    let (_, group_after_first) = env.market_state();
+    assert_eq!(after_first.pnl.get(), CLAIM_PER_ASSET as i128);
+    assert_eq!(
+        group_after_first.source_credit[LOWER_SOURCE_DOMAIN].positive_claim_bound_num, 0,
+        "the first conversion currently burns the unfunded lower-index face",
+    );
+    assert_eq!(
+        group_after_first.source_credit[FUNDED_SOURCE_DOMAIN].positive_claim_bound_num,
+        CLAIM_PER_ASSET * BOUND_SCALE,
+        "the funded claim incorrectly survives after its backing was consumed",
+    );
+
+    // Consuming backing bumps the risk epoch. A flat account is not auto-crank actionable, but a
+    // bounded open-and-close at the current mark refreshes its certificate without settling either
+    // original loser or changing source backing.
+    env.svm.expire_blockhash();
+    env.trade_asset_with_cu(
+        0,
+        &winner_owner,
+        winner,
+        &replacement_owner,
+        replacement,
+        POS_SCALE as i128,
+        MOVED_PRICE,
+        0,
+    );
+    env.svm.expire_blockhash();
+    env.trade_asset_with_cu(
+        0,
+        &winner_owner,
+        winner,
+        &replacement_owner,
+        replacement,
+        -(POS_SCALE as i128),
+        MOVED_PRICE,
+        0,
+    );
+    assert!(percolator::active_bitmap_is_empty(active_bitmap(
+        &env.portfolio_state(winner)
+    )));
+    env.svm.expire_blockhash();
+    env.convert_released_pnl_with_cu(&winner_owner, winner, CLAIM_PER_ASSET);
+    let after_second = env.portfolio_state(winner);
+    let (_, group_after_second) = env.market_state();
+    assert_eq!(after_second.pnl.get(), 0);
+    assert_eq!(after_second.capital.get(), 1_000 + 2 * CLAIM_PER_ASSET);
+    assert_eq!(
+        group_after_second.source_backing_buckets[FUNDED_SOURCE_DOMAIN].consumed_liened_backing_num,
+        CLAIM_PER_ASSET * BOUND_SCALE,
+        "one domain must not lose more provider backing than its own original claim",
+    );
+}
