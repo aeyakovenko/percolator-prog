@@ -8687,10 +8687,16 @@ pub mod processor {
             return Ok(());
         }
 
-        let external_fresh = profile.oracle_target_publish_time > 0
-            && now_unix_ts >= profile.oracle_target_publish_time
-            && (now_unix_ts - profile.oracle_target_publish_time) as u64
-                <= profile.max_staleness_secs;
+        let oracle_leg_count = profile.oracle_leg_count as usize;
+        let external_fresh = oracle_leg_count != 0
+            && oracle_leg_count <= constants::ORACLE_LEG_CAP
+            && profile.oracle_leg_publish_times[..oracle_leg_count]
+                .iter()
+                .all(|publish_time| {
+                    *publish_time > 0
+                        && now_unix_ts >= *publish_time
+                        && (now_unix_ts - *publish_time) as u64 <= profile.max_staleness_secs
+                });
         let fee_backed_after_hours_mark_current =
             oracle_v16::profile_hybrid_soft_stale_matured(&profile, now_slot)
                 && profile.mark_ewma_last_slot == now_slot;
