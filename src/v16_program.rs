@@ -8661,6 +8661,39 @@ pub mod processor {
         Ok(())
     }
 
+    fn committed_market_resolve_accrual_for_profile_view(
+        profile: &state::AssetOracleProfileV16,
+        group: &state::MarketViewMutV16<'_>,
+        asset_index: usize,
+        resolved_slot: u64,
+    ) -> Result<Option<(u64, i128)>, ProgramError> {
+        if asset_index >= group.header.config.max_market_slots.get() as usize
+            || asset_index >= group.markets.len()
+        {
+            return Err(PercolatorError::InvalidInstruction.into());
+        }
+        let asset = group.markets[asset_index].engine.asset;
+        let exposed = asset.oi_eff_long_q.get() != 0 || asset.oi_eff_short_q.get() != 0;
+        // A mark newer than the asset cursor remains prospective. Resolution and its catch-up
+        // crank must agree on this boundary so a stale caller cannot activate a fresh report.
+        if !exposed
+            || asset.slot_last.get() >= resolved_slot
+            || !oracle_v16::profile_is_price_managed(profile)
+            || profile.mark_ewma_last_slot > asset.slot_last.get()
+        {
+            return Ok(None);
+        }
+        let next_price =
+            committed_effective_price_for_accrual_view(profile, group, asset_index, resolved_slot)?;
+        let funding_rate_e9 =
+            permissionless_funding_rate_e9_view(profile, group, asset_index, next_price)?;
+        let balanced = asset.oi_eff_long_q.get() != 0 && asset.oi_eff_short_q.get() != 0;
+        if next_price == asset.effective_price.get() && (!balanced || funding_rate_e9 == 0) {
+            return Ok(None);
+        }
+        Ok(Some((next_price, funding_rate_e9)))
+    }
+
     #[inline(never)]
     fn reject_market_resolve_before_committed_accrual_view(
         cfg: &WrapperConfigV16,
@@ -8674,30 +8707,15 @@ pub mod processor {
             let exposed = asset.oi_eff_long_q.get() != 0 || asset.oi_eff_short_q.get() != 0;
             if exposed && asset.slot_last.get() < resolved_slot {
                 let profile = read_oracle_profile_from_view(group, cfg, asset_index)?;
-                // A mark newer than the asset cursor is still prospective. Existing resolution
-                // semantics intentionally ignore it until a crank activates that checkpoint.
-                if oracle_v16::profile_is_price_managed(&profile)
-                    && profile.mark_ewma_last_slot <= asset.slot_last.get()
+                if committed_market_resolve_accrual_for_profile_view(
+                    &profile,
+                    group,
+                    asset_index,
+                    resolved_slot,
+                )?
+                .is_some()
                 {
-                    let next_price = committed_effective_price_for_accrual_view(
-                        &profile,
-                        group,
-                        asset_index,
-                        resolved_slot,
-                    )?;
-                    let funding_rate_e9 = permissionless_funding_rate_e9_view(
-                        &profile,
-                        group,
-                        asset_index,
-                        next_price,
-                    )?;
-                    let balanced =
-                        asset.oi_eff_long_q.get() != 0 && asset.oi_eff_short_q.get() != 0;
-                    if next_price != asset.effective_price.get()
-                        || (balanced && funding_rate_e9 != 0)
-                    {
-                        return Err(PercolatorError::EngineStale.into());
-                    }
+                    return Err(PercolatorError::EngineStale.into());
                 }
             }
             asset_index += 1;
@@ -10565,6 +10583,7 @@ pub mod processor {
             if summary.liquidatable
                 && !summary.b_stale
                 && permissionless_resolve_matured_now_view(&cfg, &group)
+                && observation_hints.is_empty()
             {
                 return Err(PercolatorError::OracleStale.into());
             }
@@ -10598,6 +10617,7 @@ pub mod processor {
             let insurance_before = group.header.insurance.get();
             let mut observations: Vec<AutoCrankObservationV16> =
                 Vec::with_capacity(percolator::V16_MAX_PORTFOLIO_ASSETS_N);
+            let mut settlement_only_after_maturity = None;
             let clock_unix_ts = Clock::get().ok().map(|c| c.unix_timestamp);
             for hint in observation_hints.iter() {
                 let asset_index = hint.asset_index as usize;
@@ -10608,7 +10628,24 @@ pub mod processor {
                 }
                 let oracle_account_count = hint.oracle_accounts as usize;
                 let mut oracle_profile = read_oracle_profile_from_view(&group, &cfg, asset_index)?;
-                if oracle_account_count != oracle_profile.oracle_leg_count as usize {
+                let resolve_matured = global_or_profile_resolve_matured_at_slot(
+                    &cfg,
+                    &oracle_profile,
+                    authenticated_now_slot,
+                );
+                if let Some(expected) = settlement_only_after_maturity {
+                    if expected != resolve_matured {
+                        return Err(PercolatorError::InvalidInstruction.into());
+                    }
+                } else {
+                    settlement_only_after_maturity = Some(resolve_matured);
+                }
+                if resolve_matured && oracle_account_count != 0 {
+                    return Err(PercolatorError::OracleStale.into());
+                }
+                if !resolve_matured
+                    && oracle_account_count != oracle_profile.oracle_leg_count as usize
+                {
                     return Err(PercolatorError::InvalidInstruction.into());
                 }
                 if oracle_tail.len() < oracle_account_count {
@@ -10623,31 +10660,42 @@ pub mod processor {
                         .oracle_target_publish_time
                         .saturating_add(i64::try_from(elapsed_slots).unwrap_or(i64::MAX))
                 });
-                reject_non_base_oracle_update_after_global_resolve_matured(
-                    &cfg,
-                    asset_index,
-                    authenticated_now_slot,
-                )?;
-                reject_permissionless_resolve_matured_live_for_profile_view(
-                    &cfg,
-                    &oracle_profile,
-                    &group,
-                )?;
-                let crank_price = hybrid_effective_price_for_crank_view(
-                    &cfg,
-                    &mut oracle_profile,
-                    &group,
-                    asset_index,
-                    authenticated_now_slot,
-                    now_unix_ts,
-                    observation_tail,
-                )?;
-                let computed_funding_rate_e9 = permissionless_funding_rate_e9_view(
-                    &oracle_profile,
-                    &group,
-                    asset_index,
-                    crank_price,
-                )?;
+                let (crank_price, computed_funding_rate_e9) = if resolve_matured {
+                    committed_market_resolve_accrual_for_profile_view(
+                        &oracle_profile,
+                        &group,
+                        asset_index,
+                        authenticated_now_slot,
+                    )?
+                    .ok_or(PercolatorError::EngineNonProgress)?
+                } else {
+                    reject_non_base_oracle_update_after_global_resolve_matured(
+                        &cfg,
+                        asset_index,
+                        authenticated_now_slot,
+                    )?;
+                    reject_permissionless_resolve_matured_live_for_profile_view(
+                        &cfg,
+                        &oracle_profile,
+                        &group,
+                    )?;
+                    let crank_price = hybrid_effective_price_for_crank_view(
+                        &cfg,
+                        &mut oracle_profile,
+                        &group,
+                        asset_index,
+                        authenticated_now_slot,
+                        now_unix_ts,
+                        observation_tail,
+                    )?;
+                    let funding_rate_e9 = permissionless_funding_rate_e9_view(
+                        &oracle_profile,
+                        &group,
+                        asset_index,
+                        crank_price,
+                    )?;
+                    (crank_price, funding_rate_e9)
+                };
                 group
                     .set_asset_raw_oracle_target_not_atomic(
                         asset_index,
@@ -10697,6 +10745,14 @@ pub mod processor {
             }
             if !oracle_tail.is_empty() {
                 return Err(PercolatorError::InvalidInstruction.into());
+            }
+
+            if settlement_only_after_maturity.unwrap_or(false) {
+                group.validate_shape().map_err(map_v16_error)?;
+                drop(group);
+                drop(market_data);
+                state::write_wrapper_config(&mut market_ai.try_borrow_mut_data()?, &cfg)?;
+                return Ok(());
             }
 
             let mut portfolio_data = portfolio_ai.try_borrow_mut_data()?;
