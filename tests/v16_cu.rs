@@ -60145,3 +60145,133 @@ fn v16_dense_price_managed_stale_market_remains_resolvable() {
     assert!(resolve_cu < 1_400_000);
     assert_eq!(env.market_state().1.mode, MarketModeV16::Resolved);
 }
+
+#[test]
+fn v16_probe_stale_resolve_cannot_discard_pending_authenticated_mark() {
+    #[derive(Debug)]
+    struct Outcome {
+        effective_price: u64,
+        long_payout: u64,
+        short_payout: u64,
+        unsafe_resolve_rejected: bool,
+    }
+
+    fn run(crank_before_maturity: bool) -> Outcome {
+        const PRICE: u64 = 1_000_000;
+        const MARK: u64 = 1_010_000;
+        const DEPOSIT: u128 = 2_000_000_000;
+        const SIZE_Q: i128 = 1_000 * POS_SCALE as i128;
+        const PUSH_SLOT: u64 = 2;
+        const RESOLVE_SLOT: u64 = 5;
+
+        let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+            max_portfolio_assets: 1,
+            initial_price: PRICE,
+            h_max: 20,
+            max_trading_fee_bps: 100,
+            max_price_move_bps_per_slot: 100,
+            max_accrual_dt_slots: 20,
+            min_funding_lifetime_slots: 20,
+            ..V16CuMarketParams::default()
+        });
+        env.configure_permissionless_resolve_with_cu(3, 1);
+        env.svm.warp_to_slot(1);
+        env.configure_auth_mark_with_cu(1, PRICE);
+
+        let marketauth = env.admin.insecure_clone();
+        let honest_oracle = Keypair::new();
+        env.try_update_per_asset_authority_with_cu(
+            &marketauth,
+            Some(&honest_oracle),
+            0,
+            processor::ASSET_AUTH_ORACLE,
+            honest_oracle.pubkey().to_bytes(),
+        )
+        .expect("separate honest oracle from market authority");
+
+        let victim = Keypair::new();
+        let victim_long = env.create_portfolio(&victim);
+        let attacker = Keypair::new();
+        let attacker_short = env.create_portfolio(&attacker);
+        env.deposit(&victim, victim_long, DEPOSIT);
+        env.deposit(&attacker, attacker_short, DEPOSIT);
+        env.trade_asset_with_cu(
+            0,
+            &victim,
+            victim_long,
+            &attacker,
+            attacker_short,
+            SIZE_Q,
+            PRICE,
+            0,
+        );
+
+        env.svm.warp_to_slot(PUSH_SLOT);
+        env.push_auth_mark_for_asset_with_authority(0, &honest_oracle, PUSH_SLOT, MARK);
+        assert_eq!(env.market_state().1.assets[0].effective_price, PRICE);
+
+        if crank_before_maturity {
+            env.crank(
+                victim_long,
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: PUSH_SLOT,
+                    observations: crank_observations(0),
+                },
+            );
+        }
+
+        env.svm.warp_to_slot(RESOLVE_SLOT);
+        env.svm.expire_blockhash();
+        let market_before = env.svm.get_account(&env.market).unwrap();
+        let unsafe_resolve = env.send(
+            ProgInstruction::ResolveStalePermissionless {
+                now_slot: RESOLVE_SLOT,
+            },
+            vec![AccountMeta::new(env.market, false)],
+            &[],
+        );
+        let unsafe_resolve_rejected = unsafe_resolve.is_err();
+        if unsafe_resolve_rejected {
+            assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+            env.svm.expire_blockhash();
+            env.crank(
+                victim_long,
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: RESOLVE_SLOT,
+                    observations: crank_observations(0),
+                },
+            );
+            env.svm.expire_blockhash();
+            env.send(
+                ProgInstruction::ResolveStalePermissionless {
+                    now_slot: RESOLVE_SLOT,
+                },
+                vec![AccountMeta::new(env.market, false)],
+                &[],
+            )
+            .expect("resolve after stored-state catch-up");
+        }
+
+        let effective_price = env.market_state().1.assets[0].effective_price;
+        env.svm.warp_to_slot(RESOLVE_SLOT + 1);
+        let short_dest = env.close_resolved(&attacker, attacker_short);
+        let long_dest = env.close_resolved(&victim, victim_long);
+        Outcome {
+            effective_price,
+            long_payout: env.token_amount(long_dest),
+            short_payout: env.token_amount(short_dest),
+            unsafe_resolve_rejected,
+        }
+    }
+
+    let control = run(true);
+    let attack = run(false);
+    eprintln!("pending-mark stale resolve control={control:?} attack={attack:?}");
+    assert_eq!(attack.effective_price, control.effective_price);
+    assert_eq!(attack.long_payout, control.long_payout);
+    assert_eq!(attack.short_payout, control.short_payout);
+    assert!(
+        attack.unsafe_resolve_rejected,
+        "stale resolver discarded an authenticated pending mark"
+    );
+}
