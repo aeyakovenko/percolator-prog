@@ -9291,6 +9291,54 @@ pub mod processor {
                 }
                 match group.markets[asset_index].engine.asset.lifecycle {
                     ASSET_LIFECYCLE_ACTIVE | ASSET_LIFECYCLE_DRAIN_ONLY => {
+                        let asset_slot = group.markets[asset_index].engine.asset.slot_last.get();
+                        let shutdown_dt = authenticated_slot
+                            .checked_sub(asset_slot)
+                            .ok_or(PercolatorError::EngineStale)?;
+                        let shutdown_price = committed_effective_price_for_accrual_view(
+                            &profile,
+                            &group,
+                            asset_index,
+                            authenticated_slot,
+                        )?;
+                        let funding_rate_e9 = permissionless_funding_rate_e9_view(
+                            &profile,
+                            &group,
+                            asset_index,
+                            shutdown_price,
+                        )?;
+                        let asset = group.markets[asset_index].engine.asset;
+                        let current_price = asset.effective_price.get();
+                        let exposed =
+                            asset.oi_eff_long_q.get() != 0 || asset.oi_eff_short_q.get() != 0;
+                        let balanced =
+                            asset.oi_eff_long_q.get() != 0 && asset.oi_eff_short_q.get() != 0;
+                        let committed_target_active = exposed
+                            && oracle_v16::profile_is_price_managed(&profile)
+                            && profile.mark_ewma_e6 != current_price;
+                        let funding_active = shutdown_dt != 0
+                            && balanced
+                            && asset.fund_px_last.get() != 0
+                            && funding_rate_e9 != 0;
+                        let accrual_active = shutdown_price != current_price
+                            || committed_target_active
+                            || funding_active;
+                        if accrual_active {
+                            if shutdown_dt > group.header.config.max_accrual_dt_slots.get() {
+                                // Shutdown is bounded to one engine accrual segment. Permissionless
+                                // cranks can advance an older value-active asset before retrying.
+                                return Err(PercolatorError::EngineStale.into());
+                            }
+                            group
+                                .accrue_asset_to_not_atomic(
+                                    asset_index,
+                                    authenticated_slot,
+                                    shutdown_price,
+                                    funding_rate_e9,
+                                    true,
+                                )
+                                .map_err(map_v16_error)?;
+                        }
                         let frozen_mark = group.markets[asset_index]
                             .engine
                             .asset
@@ -10904,24 +10952,17 @@ pub mod processor {
         if !oracle_v16::profile_is_price_managed(&profile) {
             return Ok(());
         }
-        let asset = group.markets[asset_index].engine.asset;
         let dt = asset_segment_dt_view(group, asset_index, now_slot)?;
         if dt == 0 {
             return Ok(());
         }
-        let target = profile.mark_ewma_e6;
-        if target == 0 {
-            return Err(PercolatorError::OracleInvalid.into());
-        }
-        let current = asset.effective_price.get();
-        let exposed = asset.oi_eff_long_q.get() != 0 || asset.oi_eff_short_q.get() != 0;
-        let next = oracle_v16::effective_price_from_target(
-            current,
-            target,
-            group.header.config.max_price_move_bps_per_slot.get(),
-            dt,
-            exposed,
-        );
+        let current = group.markets[asset_index]
+            .engine
+            .asset
+            .effective_price
+            .get();
+        let next =
+            committed_effective_price_for_accrual_view(&profile, group, asset_index, now_slot)?;
         if next != current {
             return Err(PercolatorError::EngineNonProgress.into());
         }
@@ -11463,6 +11504,37 @@ pub mod processor {
         Ok(core::cmp::min(
             now_slot - asset_slot_last,
             group.header.config.max_accrual_dt_slots.get(),
+        ))
+    }
+
+    fn committed_effective_price_for_accrual_view(
+        profile: &state::AssetOracleProfileV16,
+        group: &state::MarketViewMutV16<'_>,
+        asset_index: usize,
+        now_slot: u64,
+    ) -> Result<u64, ProgramError> {
+        if asset_index >= group.header.config.max_market_slots.get() as usize
+            || asset_index >= group.markets.len()
+        {
+            return Err(PercolatorError::InvalidInstruction.into());
+        }
+        let asset = group.markets[asset_index].engine.asset;
+        let current = asset.effective_price.get();
+        let target = if oracle_v16::profile_is_price_managed(profile) {
+            profile.mark_ewma_e6
+        } else {
+            current
+        };
+        if target == 0 {
+            return Err(PercolatorError::OracleInvalid.into());
+        }
+        let exposed = asset.oi_eff_long_q.get() != 0 || asset.oi_eff_short_q.get() != 0;
+        Ok(oracle_v16::effective_price_from_target(
+            current,
+            target,
+            group.header.config.max_price_move_bps_per_slot.get(),
+            asset_segment_dt_view(group, asset_index, now_slot)?,
+            exposed,
         ))
     }
 
