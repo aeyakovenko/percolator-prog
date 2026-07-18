@@ -8683,6 +8683,7 @@ pub mod processor {
         if slot < group.header.current_slot.get() {
             return Err(PercolatorError::EngineStale.into());
         }
+        reject_privileged_resolve_with_pending_price_move_view(&cfg, &group, slot)?;
         group
             .resolve_market_not_atomic(slot)
             .map_err(map_v16_error)?;
@@ -11464,6 +11465,45 @@ pub mod processor {
             now_slot - asset_slot_last,
             group.header.config.max_accrual_dt_slots.get(),
         ))
+    }
+
+    fn reject_privileged_resolve_with_pending_price_move_view(
+        cfg: &WrapperConfigV16,
+        group: &state::MarketViewMutV16<'_>,
+        resolved_slot: u64,
+    ) -> ProgramResult {
+        let configured_slots = group.header.config.max_market_slots.get() as usize;
+        let mut asset_index = 0usize;
+        while asset_index < configured_slots {
+            let asset = group.markets[asset_index].engine.asset;
+            let exposed = asset.oi_eff_long_q.get() != 0 || asset.oi_eff_short_q.get() != 0;
+            if exposed
+                && matches!(
+                    asset.lifecycle,
+                    ASSET_LIFECYCLE_ACTIVE | ASSET_LIFECYCLE_DRAIN_ONLY
+                )
+                && asset.slot_last.get() < resolved_slot
+            {
+                let profile = read_oracle_profile_from_view(group, cfg, asset_index)?;
+                if oracle_v16::profile_is_price_managed(&profile) {
+                    if profile.mark_ewma_e6 == 0 {
+                        return Err(PercolatorError::OracleInvalid.into());
+                    }
+                    let next = oracle_v16::effective_price_from_target(
+                        asset.effective_price.get(),
+                        profile.mark_ewma_e6,
+                        group.header.config.max_price_move_bps_per_slot.get(),
+                        asset_segment_dt_view(group, asset_index, resolved_slot)?,
+                        true,
+                    );
+                    if next != asset.effective_price.get() {
+                        return Err(PercolatorError::EngineStale.into());
+                    }
+                }
+            }
+            asset_index += 1;
+        }
+        Ok(())
     }
 
     #[derive(Clone, Copy)]

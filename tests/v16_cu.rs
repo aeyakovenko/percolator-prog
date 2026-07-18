@@ -18911,13 +18911,38 @@ fn v16_regression_resolve_before_settlement_uses_official_price() {
         0,
     ); // notional 1M
     env.svm.warp_to_slot(10);
-    env.push_auth_mark_with_cu(10, 110); // pending mark; NOT yet accrued into effective_price (anti-retroactivity)
-                                         // NO crank: resolve immediately. The pushed mark is unaccrued, so the official effective_price is
-                                         // still 100 and the position is officially flat.
+    env.push_auth_mark_with_cu(10, 110); // authenticated target, pending one bounded accrual step
     let (_, g_pre) = env.market_state();
     assert_eq!(
         g_pre.assets[0].effective_price, 100,
         "unaccrued mark push does NOT move the official price"
+    );
+    let resolver = env.admin.insecure_clone();
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    env.svm.expire_blockhash();
+    let unsafe_resolve = env.send(
+        ProgInstruction::ResolveMarket,
+        vec![
+            AccountMeta::new(resolver.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&resolver],
+    );
+    assert!(
+        unsafe_resolve.is_err(),
+        "resolve must not discard a separately authenticated pending mark"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "rejected resolve rolls back"
+    );
+    env.crank(
+        lo,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 10,
+            observations: crank_observations(0),
+        },
     );
     env.resolve();
 
@@ -18938,12 +18963,11 @@ fn v16_regression_resolve_before_settlement_uses_official_price() {
         assert_eq!(b.capital.get(), 0, "loser wound down");
         2_000_000u128.saturating_sub(won)
     };
-    // CORRECT behavior: resolve settles at the OFFICIAL accrued price (100). The unaccrued mark push
-    // is NOT retroactively applied, so no value is created or destroyed — each party recovers exactly
-    // its deposit. (Contrast batch 23: crank-to-accrue BEFORE resolve, and the winner gets 1.1M.)
+    // The resolver cannot choose the old side of a queued authenticated transition. The required
+    // crank advances the official engine price first, then ordinary resolved settlement realizes it.
     assert_eq!(
-        won, 1_000_000,
-        "no value invented from an unaccrued mark — deposit returned"
+        won, 1_100_000,
+        "the long receives the authenticated post-move gain"
     );
     assert_eq!(
         won + lost,
@@ -59723,6 +59747,12 @@ fn v16_attack_underfunded_exit_cannot_move_ewma_with_uncollectible_fee() {
 // be able to resolve in that interval and choose the older terminal settlement price.
 #[test]
 fn v16_probe_resolve_cannot_omit_pending_authenticated_mark() {
+    #[derive(Clone, Copy, Debug)]
+    enum MarkMode {
+        Auth,
+        Ewma,
+    }
+
     #[derive(Debug)]
     struct Outcome {
         effective_price: u64,
@@ -59730,7 +59760,7 @@ fn v16_probe_resolve_cannot_omit_pending_authenticated_mark() {
         short_payout: u64,
     }
 
-    fn run(crank_before_resolve: bool) -> Outcome {
+    fn run(mode: MarkMode, crank_before_resolve: bool) -> Outcome {
         const PRICE: u64 = 1_000_000;
         const MARK: u64 = 2_000_000;
         const DEPOSIT: u128 = 100_000_000;
@@ -59738,7 +59768,14 @@ fn v16_probe_resolve_cannot_omit_pending_authenticated_mark() {
 
         let mut env = V16CuEnv::new_with_init_params(production_risk_params());
         env.svm.warp_to_slot(1);
-        env.configure_auth_mark_with_cu(0, PRICE);
+        match mode {
+            MarkMode::Auth => {
+                env.configure_auth_mark_with_cu(0, PRICE);
+            }
+            MarkMode::Ewma => {
+                env.configure_ewma_mark_with_cu(1, PRICE, 1, 0);
+            }
+        }
 
         let resolver = env.admin.insecure_clone();
         let oracle = Keypair::new();
@@ -59759,12 +59796,20 @@ fn v16_probe_resolve_cannot_omit_pending_authenticated_mark() {
 
         env.svm.warp_to_slot(2);
         env.svm.expire_blockhash();
-        env.send(
-            ProgInstruction::PushAuthMark {
+        let push = match mode {
+            MarkMode::Auth => ProgInstruction::PushAuthMark {
                 asset_index: 0,
                 now_slot: 2,
                 mark_e6: MARK,
             },
+            MarkMode::Ewma => ProgInstruction::PushEwmaMark {
+                asset_index: 0,
+                now_slot: 2,
+                mark_e6: MARK,
+            },
+        };
+        env.send(
+            push,
             vec![
                 AccountMeta::new(oracle.pubkey(), true),
                 AccountMeta::new(env.market, false),
@@ -59781,8 +59826,36 @@ fn v16_probe_resolve_cannot_omit_pending_authenticated_mark() {
                     observations: crank_observations(0),
                 },
             );
+            env.resolve();
+        } else {
+            let market_before = env.svm.get_account(&env.market).unwrap();
+            env.svm.expire_blockhash();
+            let rejected = env.send(
+                ProgInstruction::ResolveMarket,
+                vec![
+                    AccountMeta::new(resolver.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                ],
+                &[&resolver],
+            );
+            assert!(
+                rejected.is_err(),
+                "privileged resolve must wait for the authenticated mark"
+            );
+            assert_eq!(
+                env.svm.get_account(&env.market).unwrap(),
+                market_before,
+                "rejected resolve rolls back"
+            );
+            env.crank(
+                long,
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: 2,
+                    observations: crank_observations(0),
+                },
+            );
+            env.resolve();
         }
-        env.resolve();
         let effective_price = env.market_state().1.assets[0].effective_price;
         let short_dest = env.close_resolved(&resolver, short);
         let long_dest = env.close_resolved(&oracle, long);
@@ -59793,10 +59866,12 @@ fn v16_probe_resolve_cannot_omit_pending_authenticated_mark() {
         }
     }
 
-    let control = run(true);
-    let attack = run(false);
-    eprintln!("pending AuthMark resolve control={control:?} attack={attack:?}");
-    assert_eq!(attack.effective_price, control.effective_price);
-    assert_eq!(attack.long_payout, control.long_payout);
-    assert_eq!(attack.short_payout, control.short_payout);
+    for mode in [MarkMode::Auth, MarkMode::Ewma] {
+        let control = run(mode, true);
+        let attack = run(mode, false);
+        eprintln!("pending {mode:?} resolve control={control:?} attack={attack:?}");
+        assert_eq!(attack.effective_price, control.effective_price);
+        assert_eq!(attack.long_payout, control.long_payout);
+        assert_eq!(attack.short_payout, control.short_payout);
+    }
 }
