@@ -8683,6 +8683,12 @@ pub mod processor {
         {
             return Ok(None);
         }
+        // With an active mark equal to the engine price, the clamped next price is unchanged and
+        // premium funding is exactly zero. Avoid two wide divisions per exposed asset; resolution
+        // must remain bounded for dense, normally constructed markets.
+        if profile.mark_ewma_e6 == asset.effective_price.get() {
+            return Ok(None);
+        }
         let next_price =
             committed_effective_price_for_accrual_view(profile, group, asset_index, resolved_slot)?;
         let funding_rate_e9 =

@@ -59981,3 +59981,167 @@ fn v16_attack_stale_resolve_can_finish_committed_funding_accrual() {
     assert_eq!(env.token_amount(long_dest), 100_100_000);
     assert_eq!(env.token_amount(short_dest), 99_900_000);
 }
+
+#[test]
+fn v16_dense_price_managed_stale_market_remains_resolvable() {
+    const ASSET_COUNT: u16 = 4_000;
+    const PRICE: u64 = 100;
+    // Pre-sizing is part of normal market-account construction. InitMarket still configures only
+    // the first 14 slots; every additional slot is activated below through the public API.
+    let mut env = V16CuEnv::new_with_init_params_and_market_capacity(
+        V16CuMarketParams {
+            max_portfolio_assets: percolator_prog::constants::WRAPPER_MAX_PORTFOLIO_ASSETS,
+            ..V16CuMarketParams::default()
+        },
+        ASSET_COUNT as usize,
+    );
+
+    let admin = env.admin.insecure_clone();
+    let initial_slots = env.market_state().1.config.max_market_slots as u16;
+    for asset_index in 0..initial_slots {
+        env.configure_auth_mark_for_asset_as_admin(asset_index, 0, PRICE);
+    }
+    for asset_index in initial_slots..ASSET_COUNT {
+        env.svm.warp_to_slot(asset_index as u64);
+        env.svm.expire_blockhash();
+        env.send(
+            ProgInstruction::UpdateAssetLifecycle {
+                action: processor::ASSET_ACTION_ACTIVATE,
+                asset_index,
+                now_slot: asset_index as u64,
+                initial_price: PRICE,
+                insurance_authority: admin.pubkey().to_bytes(),
+                insurance_operator: admin.pubkey().to_bytes(),
+                backing_bucket_authority: admin.pubkey().to_bytes(),
+                oracle_authority: admin.pubkey().to_bytes(),
+            },
+            vec![
+                AccountMeta::new(admin.pubkey(), true),
+                AccountMeta::new(env.market, false),
+            ],
+            &[&admin],
+        )
+        .unwrap_or_else(|err| panic!("public activation failed at asset {asset_index}: {err}"));
+        env.configure_auth_mark_for_asset_as_admin(asset_index, asset_index as u64, PRICE);
+    }
+    assert_eq!(
+        env.market_state().1.config.max_market_slots,
+        ASSET_COUNT as u32
+    );
+
+    let open_batch = |env: &mut V16CuEnv,
+                      long_owner: &Keypair,
+                      long: Pubkey,
+                      short_owner: &Keypair,
+                      short: Pubkey,
+                      start: u16,
+                      end: u16|
+     -> Result<u64, String> {
+        let legs = (start..end)
+            .map(|asset_index| BatchTradeLeg {
+                asset_index,
+                size_q: POS_SCALE as i128,
+                exec_price: PRICE,
+                fee_bps: 0,
+            })
+            .collect();
+        env.svm.expire_blockhash();
+        env.send(
+            ProgInstruction::BatchTradeNoCpi { legs },
+            vec![
+                AccountMeta::new(long_owner.pubkey(), true),
+                AccountMeta::new(short_owner.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(long, false),
+                AccountMeta::new(short, false),
+            ],
+            &[long_owner, short_owner],
+        )
+    };
+
+    let victim = Keypair::new();
+    let cooperative_lp = Keypair::new();
+    let victim_portfolio = env.create_portfolio(&victim);
+    let cooperative_lp_portfolio = env.create_portfolio(&cooperative_lp);
+    env.deposit(&victim, victim_portfolio, 1_000_000);
+    env.deposit(&cooperative_lp, cooperative_lp_portfolio, 1_000_000);
+    open_batch(
+        &mut env,
+        &victim,
+        victim_portfolio,
+        &cooperative_lp,
+        cooperative_lp_portfolio,
+        0,
+        14,
+    )
+    .expect("open victim positions through the public batch route");
+
+    for start in (14..ASSET_COUNT).step_by(14) {
+        let end = start.saturating_add(14).min(ASSET_COUNT);
+        let long_owner = Keypair::new();
+        let short_owner = Keypair::new();
+        let long = env.create_portfolio(&long_owner);
+        let short = env.create_portfolio(&short_owner);
+        env.deposit(&long_owner, long, 1_000_000);
+        env.deposit(&short_owner, short, 1_000_000);
+        open_batch(&mut env, &long_owner, long, &short_owner, short, start, end)
+            .unwrap_or_else(|err| panic!("public exposure failed at asset {start}: {err}"));
+    }
+    assert_eq!(
+        env.market_state().1.assets[ASSET_COUNT as usize - 1].oi_eff_long_q,
+        POS_SCALE
+    );
+
+    env.svm.expire_blockhash();
+    env.send(
+        ProgInstruction::ConfigurePermissionlessResolve {
+            stale_slots: 1,
+            force_close_delay_slots: 1,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&admin],
+    )
+    .expect("configure permissionless resolution");
+    let resolved_slot = ASSET_COUNT as u64 + 1;
+    env.svm.warp_to_slot(resolved_slot);
+
+    env.svm.expire_blockhash();
+    let stale_exit = env
+        .send(
+            ProgInstruction::TradeNoCpi {
+                asset_index: 0,
+                size_q: -(POS_SCALE as i128),
+                exec_price: PRICE,
+                fee_bps: 0,
+            },
+            vec![
+                AccountMeta::new(victim.pubkey(), true),
+                AccountMeta::new(cooperative_lp.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(victim_portfolio, false),
+                AccountMeta::new(cooperative_lp_portfolio, false),
+            ],
+            &[&victim, &cooperative_lp],
+        )
+        .expect_err("mature staleness must block the ordinary trade exit");
+    assert!(
+        stale_exit.contains("Custom(27)") || stale_exit.contains("custom program error: 0x1b"),
+        "ordinary exit should fail specifically as OracleStale: {stale_exit}"
+    );
+
+    env.svm.expire_blockhash();
+    let resolve_cu = env
+        .send(
+            ProgInstruction::ResolveStalePermissionless {
+                now_slot: resolved_slot,
+            },
+            vec![AccountMeta::new(env.market, false)],
+            &[],
+        )
+        .expect("a publicly constructed dense market must retain a bounded stale resolver");
+    assert!(resolve_cu < 1_400_000);
+    assert_eq!(env.market_state().1.mode, MarketModeV16::Resolved);
+}
