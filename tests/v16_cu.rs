@@ -59727,12 +59727,14 @@ fn v16_attack_resolve_market_rejects_expired_hybrid_snapshot() {
     const FRESH_PRICE_E6: u64 = 110_000;
     const CAPITAL: u128 = 100_000_000;
     const SIZE_Q: i128 = 1_000 * POS_SCALE as i128;
-    const FEED: [u8; 32] = [0xacu8; 32];
+    const FEED0: [u8; 32] = [0xacu8; 32];
+    const FEED1: [u8; 32] = [0xadu8; 32];
 
     fn setup() -> (V16CuEnv, Keypair, Pubkey, Keypair, Pubkey) {
         let mut env = V16CuEnv::new_with_market_params_and_price_move(1, 10_000, 10_000, 10_000);
-        set_test_clock(&mut env, 1, 100);
-        let initial_oracle = env.set_pyth_price(&FEED, OPEN_PRICE_E6 as i64, -6, 100);
+        set_test_clock(&mut env, 1, 160);
+        let initial_oracle0 = env.set_pyth_price(&FEED0, OPEN_PRICE_E6 as i64, -6, 160);
+        let initial_oracle1 = env.set_pyth_price(&FEED1, 1_000_000, -6, 100);
 
         // Separate the honest oracle authority from the adversarial market authority. The attack
         // below uses only ResolveMarket; it never signs an oracle instruction or rewrites the feed.
@@ -59754,8 +59756,8 @@ fn v16_attack_resolve_market_rejects_expired_hybrid_snapshot() {
             ProgInstruction::ConfigureHybridOracle {
                 asset_index: 0,
                 now_slot: 1,
-                now_unix_ts: 100,
-                oracle_leg_count: 1,
+                now_unix_ts: 160,
+                oracle_leg_count: 2,
                 oracle_leg_flags: 0,
                 max_staleness_secs: 60,
                 hybrid_soft_stale_slots: 3,
@@ -59764,12 +59766,13 @@ fn v16_attack_resolve_market_rejects_expired_hybrid_snapshot() {
                 invert: 0,
                 unit_scale: 0,
                 conf_filter_bps: 500,
-                oracle_leg_feeds: [FEED, [0u8; 32], [0u8; 32]],
+                oracle_leg_feeds: [FEED0, FEED1, [0u8; 32]],
             },
             vec![
                 AccountMeta::new(honest_oracle.pubkey(), true),
                 AccountMeta::new(env.market, false),
-                AccountMeta::new_readonly(initial_oracle, false),
+                AccountMeta::new_readonly(initial_oracle0, false),
+                AccountMeta::new_readonly(initial_oracle1, false),
             ],
             &[&honest_oracle],
         )
@@ -59814,12 +59817,13 @@ fn v16_attack_resolve_market_rejects_expired_hybrid_snapshot() {
     }
 
     let (mut attacked, victim, victim_portfolio, attacker, attacker_portfolio) = setup();
-    set_test_clock(&mut attacked, 100, 200);
-    let ignored_report = attacked.set_pyth_price(&FEED, FRESH_PRICE_E6 as i64, -6, 200);
+    set_test_clock(&mut attacked, 100, 220);
+    let current_leg0 = attacked.set_pyth_price(&FEED0, OPEN_PRICE_E6 as i64, -6, 160);
+    let ignored_report = attacked.set_pyth_price(&FEED1, 1_100_000, -6, 220);
     assert_eq!(
         attacked.market_state().1.assets[0].effective_price,
         OPEN_PRICE_E6,
-        "the stored report is expired and the fresh external report is not yet ingested"
+        "one stored composite leg is expired and the fresh replacement is not yet ingested"
     );
     assert!(
         attacked.svm.get_account(&ignored_report).is_some(),
@@ -59860,7 +59864,7 @@ fn v16_attack_resolve_market_rejects_expired_hybrid_snapshot() {
                 now_slot: 100,
                 observations: crank_observations(0),
             },
-            &[ignored_report],
+            &[current_leg0, ignored_report],
         );
         attacked.resolve();
         close_resolved_payouts(
@@ -59881,8 +59885,9 @@ fn v16_attack_resolve_market_rejects_expired_hybrid_snapshot() {
     };
 
     let (mut control, victim, victim_portfolio, attacker, attacker_portfolio) = setup();
-    set_test_clock(&mut control, 100, 200);
-    let fresh_report = control.set_pyth_price(&FEED, FRESH_PRICE_E6 as i64, -6, 200);
+    set_test_clock(&mut control, 100, 220);
+    let current_leg0 = control.set_pyth_price(&FEED0, OPEN_PRICE_E6 as i64, -6, 160);
+    let fresh_report = control.set_pyth_price(&FEED1, 1_100_000, -6, 220);
     let keeper = Keypair::new();
     let keeper_portfolio = control.create_portfolio(&keeper);
     control.crank_with_oracle_tail(
@@ -59891,7 +59896,7 @@ fn v16_attack_resolve_market_rejects_expired_hybrid_snapshot() {
             now_slot: 100,
             observations: crank_observations(0),
         },
-        &[fresh_report],
+        &[current_leg0, fresh_report],
     );
     assert_eq!(
         control.market_state().1.assets[0].effective_price,
