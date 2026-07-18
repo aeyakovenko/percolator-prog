@@ -59794,6 +59794,11 @@ fn v16_probe_pending_ewma_oracle_target_cannot_be_migrated_to_thin_account() {
             TARGET,
             "one-slot, one-slot-halflife EWMA reaches the expected target"
         );
+        assert_eq!(
+            env.market_state().1.assets[0].raw_oracle_target_price,
+            TARGET,
+            "authenticated EWMA target is immediately visible to engine risk checks"
+        );
 
         let mut funded_live_withdrawal = 0u128;
         let mut migration_landed = false;
