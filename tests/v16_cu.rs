@@ -59717,3 +59717,179 @@ fn v16_attack_underfunded_exit_cannot_move_ewma_with_uncollectible_fee() {
         assert_underfunded_ewma_exit_uses_collected_fee(path);
     }
 }
+
+// Bounded-admin attack: users entered under a five-slot hard oracle-stale deadline and the LP
+// authorized a matcher that fills at the wrapper-supplied oracle mark. A compromised non-oracle
+// market authority must not extend that live deadline immediately before maturity, reopen stale
+// price-taking against the passive LP, and extract the subsequent honest-oracle catch-up PnL.
+#[test]
+fn v16_attack_live_stale_policy_cannot_expose_passive_lp_after_deadline() {
+    const DEPOSIT: u128 = 1_000_000;
+    const SIZE_Q: i128 = 10 * POS_SCALE as i128;
+    const PROFIT: u128 = 1_000;
+
+    let mut env = V16CuEnv::new();
+    let admin = env.admin.insecure_clone();
+    let oracle = Keypair::new();
+    env.configure_permissionless_resolve_with_cu(5, 5);
+    env.try_update_per_asset_authority_with_cu(
+        &admin,
+        Some(&oracle),
+        0,
+        processor::ASSET_AUTH_ORACLE,
+        oracle.pubkey().to_bytes(),
+    )
+    .expect("separate honest oracle authority accepts its role");
+    env.svm.warp_to_slot(1);
+    env.configure_auth_mark_for_asset_with_authority(0, &oracle, 1, 100);
+
+    let attacker_owner = Keypair::new();
+    let lp_owner = Keypair::new();
+    let attacker = env.create_portfolio(&attacker_owner);
+    let lp = env.create_portfolio(&lp_owner);
+    env.deposit(&attacker_owner, attacker, DEPOSIT);
+    env.deposit(&lp_owner, lp, DEPOSIT);
+    let (matcher_program, matcher_ctx, matcher_delegate) =
+        auth_matcher_for_lp_via_system_create(&mut env, &lp_owner, lp);
+
+    env.svm.warp_to_slot(5);
+    let market_before_extension = env.svm.get_account(&env.market).unwrap();
+    env.svm.expire_blockhash();
+    let extension = env.send(
+        ProgInstruction::ConfigurePermissionlessResolve {
+            stale_slots: percolator_prog::constants::MAX_PERMISSIONLESS_RESOLVE_STALE_SLOTS,
+            force_close_delay_slots: 5,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&admin],
+    );
+    let extension_landed = extension.is_ok();
+    if !extension_landed {
+        assert_eq!(
+            env.svm.get_account(&env.market).unwrap(),
+            market_before_extension,
+            "rejected live stale-deadline extension is atomic"
+        );
+    }
+
+    env.svm.warp_to_slot(6);
+    let market_before_fill = env.svm.get_account(&env.market).unwrap();
+    let attacker_before_fill = env.svm.get_account(&attacker).unwrap();
+    let lp_before_fill = env.svm.get_account(&lp).unwrap();
+    let matcher_before_fill = env.svm.get_account(&matcher_ctx).unwrap();
+    env.svm.expire_blockhash();
+    let stale_fill = env.try_trade_cpi_with_cu_on_asset(
+        &attacker_owner,
+        attacker,
+        &lp_owner,
+        lp,
+        matcher_program,
+        matcher_ctx,
+        matcher_delegate,
+        0,
+        SIZE_Q,
+        0,
+    );
+
+    if extension_landed {
+        stale_fill
+            .as_ref()
+            .expect("source: extension reopens price-taking after the original deadline");
+        assert_eq!(
+            active_leg_for_asset(&env.portfolio_state(attacker), 0).basis_pos_q,
+            SIZE_Q
+        );
+        assert_eq!(
+            active_leg_for_asset(&env.portfolio_state(lp), 0).basis_pos_q,
+            -SIZE_Q,
+            "the independent LP owner did not sign the stale fill"
+        );
+
+        env.svm.warp_to_slot(7);
+        env.push_auth_mark_for_asset_with_authority(0, &oracle, 7, 200);
+        env.crank(
+            attacker,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 7,
+                observations: crank_observations(0),
+            },
+        );
+        env.crank(
+            lp,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 7,
+                observations: Vec::new(),
+            },
+        );
+        env.crank(
+            attacker,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 7,
+                observations: Vec::new(),
+            },
+        );
+        assert_eq!(env.portfolio_state(attacker).pnl.get(), PROFIT as i128);
+        assert_eq!(env.portfolio_state(lp).capital.get(), DEPOSIT - PROFIT);
+
+        env.svm.expire_blockhash();
+        env.trade_cpi_with_cu(
+            &attacker_owner,
+            attacker,
+            &lp_owner,
+            lp,
+            matcher_program,
+            matcher_ctx,
+            matcher_delegate,
+            -SIZE_Q,
+            0,
+        );
+        assert!(!has_active_leg_for_asset(&env.portfolio_state(attacker), 0));
+        assert!(!has_active_leg_for_asset(&env.portfolio_state(lp), 0));
+        env.convert_released_pnl_with_cu(&attacker_owner, attacker, PROFIT);
+        let attacker_dest = env.withdraw(&attacker_owner, attacker, DEPOSIT + PROFIT);
+        let lp_dest = env.withdraw(&lp_owner, lp, DEPOSIT - PROFIT);
+        assert_eq!(env.token_amount(attacker_dest) as u128, DEPOSIT + PROFIT);
+        assert_eq!(env.token_amount(lp_dest) as u128, DEPOSIT - PROFIT);
+        assert!(
+            !extension_landed,
+            "non-oracle admin extended the live stale deadline and extracted {PROFIT} atoms from a passive LP"
+        );
+    }
+
+    assert!(
+        extension.is_err(),
+        "live stale-deadline increase must reject"
+    );
+    assert!(
+        stale_fill.is_err(),
+        "the original hard-stale deadline remains binding"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before_fill
+    );
+    assert_eq!(
+        env.svm.get_account(&attacker).unwrap(),
+        attacker_before_fill
+    );
+    assert_eq!(env.svm.get_account(&lp).unwrap(), lp_before_fill);
+    assert_eq!(
+        env.svm.get_account(&matcher_ctx).unwrap(),
+        matcher_before_fill
+    );
+
+    env.svm.expire_blockhash();
+    env.send(
+        ProgInstruction::ResolveStalePermissionless { now_slot: 0 },
+        vec![AccountMeta::new(env.market, false)],
+        &[],
+    )
+    .expect("honest permissionless resolution remains live at the original deadline");
+    let attacker_dest = env.close_resolved(&attacker_owner, attacker);
+    let lp_dest = env.close_resolved(&lp_owner, lp);
+    assert_eq!(env.token_amount(attacker_dest) as u128, DEPOSIT);
+    assert_eq!(env.token_amount(lp_dest) as u128, DEPOSIT);
+}
