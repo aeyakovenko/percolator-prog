@@ -7695,7 +7695,12 @@ fn v16_attack_rebalance_reduce_cannot_erase_elapsed_premium_funding() {
         // In the attack branch only the short signs: it exits through the public
         // unilateral-reduction route before any keeper can settle this interval.
         env.svm.expire_blockhash();
-        env.rebalance_reduce_with_cu(&attacker_owner, attacker, 0, Q as u128);
+        let reduce_cu = env.rebalance_reduce_with_cu(&attacker_owner, attacker, 0, Q as u128);
+        assert_cu_within(
+            "zero-move funding rebalance reduce",
+            reduce_cu,
+            CUSTODY_CU_LIMIT,
+        );
 
         // Settle the independent LP's epoch snapshot permissionlessly. Its raw
         // leg remains in the normal side-reset lifecycle, but its funding claim
