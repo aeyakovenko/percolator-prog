@@ -39098,6 +39098,164 @@ fn v16_attack_liquidation_cranker_reward_bounded_by_fee() {
     );
 }
 
+// Adversarial composition probe: the EWMA fee prices the mark-to-market externality, but a
+// trade-driven mark move can also unlock a third party's minimum liquidation fee. With a 100%
+// public cranker share, that fee is paid to the mark mover. The complete public flow below uses a
+// tiny wash trade to move the mark by one basis point, liquidates an independent victim, then
+// closes and withdraws every attacker-controlled account. The aggregate withdrawal must not exceed
+// the attacker's deposits; otherwise the mark movement is privately profitable at the victim's
+// expense even though the EWMA movement itself was fee-backed.
+#[test]
+fn v16_probe_ewma_move_cannot_profit_from_independent_liquidation_reward() {
+    const MARK: u64 = 1_000_000;
+    const VICTIM_DEPOSIT: u128 = 50_000;
+    const ATTACK_DEPOSIT: u128 = 1_000;
+    const CRANKER_DEPOSIT: u128 = 1;
+    const TINY_Q: i128 = (POS_SCALE / 10_000) as i128;
+
+    let mut params = production_risk_params();
+    params.min_liquidation_abs = 500;
+    params.max_accrual_dt_slots = 1;
+    let mut env = V16CuEnv::new_with_init_params(params);
+    env.update_liquidation_fee_policy_with_cu(10_000);
+    env.svm.warp_to_slot(1);
+    env.configure_ewma_mark_with_cu(1, MARK, 1, 0);
+
+    let victim_owner = Keypair::new();
+    let victim = env.create_portfolio(&victim_owner);
+    let honest_owner = Keypair::new();
+    let honest = env.create_portfolio(&honest_owner);
+    let attack_long_owner = Keypair::new();
+    let attack_long = env.create_portfolio(&attack_long_owner);
+    let attack_short_owner = Keypair::new();
+    let attack_short = env.create_portfolio(&attack_short_owner);
+    let cranker_owner = Keypair::new();
+    let cranker = env.create_portfolio(&cranker_owner);
+
+    env.deposit(&victim_owner, victim, VICTIM_DEPOSIT);
+    env.deposit(&honest_owner, honest, 2_000_000);
+    env.deposit(&attack_long_owner, attack_long, ATTACK_DEPOSIT);
+    env.deposit(&attack_short_owner, attack_short, ATTACK_DEPOSIT);
+    env.deposit(&cranker_owner, cranker, CRANKER_DEPOSIT);
+    env.trade_asset_with_cu(
+        0,
+        &victim_owner,
+        victim,
+        &honest_owner,
+        honest,
+        POS_SCALE as i128,
+        MARK,
+        0,
+    );
+
+    let attack_deposits = ATTACK_DEPOSIT * 2 + CRANKER_DEPOSIT;
+    let insurance_before_move = env.market_state().1.insurance;
+    env.svm.warp_to_slot(2);
+    env.trade_asset_with_cu(
+        0,
+        &attack_long_owner,
+        attack_long,
+        &attack_short_owner,
+        attack_short,
+        TINY_Q,
+        999_800,
+        0,
+    );
+    let (cfg_after_move, group_after_move) = env.market_state();
+    let move_fee = group_after_move.insurance - insurance_before_move;
+    assert_eq!(cfg_after_move.mark_ewma_e6, 999_900);
+    assert_eq!(move_fee, 200, "one-bp EWMA move has a real two-sided cost");
+
+    let cranker_before = env.portfolio_state(cranker).capital.get();
+    let victim_before = env.portfolio_state(victim).capital.get();
+    let mut reward = 0u128;
+    for attempt in 0..8 {
+        env.svm.expire_blockhash();
+        let observations = if attempt == 0 {
+            crank_observations(0)
+        } else {
+            Vec::new()
+        };
+        let crank = env.send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 2,
+                observations,
+            },
+            vec![
+                AccountMeta::new(cranker_owner.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(victim, false),
+                AccountMeta::new(cranker, false),
+            ],
+            &[&cranker_owner],
+        );
+        assert!(
+            crank.is_ok(),
+            "honest public crank attempt {attempt} failed: {crank:?}"
+        );
+        reward = env.portfolio_state(cranker).capital.get() - cranker_before;
+        if reward != 0 {
+            break;
+        }
+    }
+    assert_eq!(
+        reward, 500,
+        "minimum liquidation fee is fully paid to the cranker"
+    );
+    assert!(
+        env.portfolio_state(victim).capital.get() < victim_before,
+        "an independent victim paid a real liquidation loss"
+    );
+    assert!(
+        reward > move_fee,
+        "the public liquidation reward must not exceed the attacker's EWMA-movement cost"
+    );
+
+    for account in [attack_long, attack_short] {
+        env.crank_steps(
+            account,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 2,
+                observations: Vec::new(),
+            },
+            4,
+        );
+    }
+    env.trade_asset_with_cu(
+        0,
+        &attack_long_owner,
+        attack_long,
+        &attack_short_owner,
+        attack_short,
+        -TINY_Q,
+        cfg_after_move.mark_ewma_e6,
+        0,
+    );
+
+    for (owner, account) in [
+        (&attack_long_owner, attack_long),
+        (&attack_short_owner, attack_short),
+    ] {
+        let released = env.portfolio_state(account).pnl.get().max(0) as u128;
+        if released != 0 {
+            env.convert_released_pnl_with_cu(owner, account, released);
+        }
+    }
+    let long_capital = env.portfolio_state(attack_long).capital.get();
+    let short_capital = env.portfolio_state(attack_short).capital.get();
+    let cranker_capital = env.portfolio_state(cranker).capital.get();
+    let long_dest = env.withdraw(&attack_long_owner, attack_long, long_capital);
+    let short_dest = env.withdraw(&attack_short_owner, attack_short, short_capital);
+    let cranker_dest = env.withdraw(&cranker_owner, cranker, cranker_capital);
+    let extracted = env.token_amount(long_dest) as u128
+        + env.token_amount(short_dest) as u128
+        + env.token_amount(cranker_dest) as u128;
+    assert!(
+        extracted <= attack_deposits,
+        "attacker extracted {extracted} after depositing {attack_deposits}"
+    );
+}
+
 // security.md sweep — liquidation cranker reward account aliasing (#3/#44): when cranker rewards are
 // enabled, the optional reward portfolio must be distinct from the portfolio being liquidated. Otherwise
 // a liquidated account could receive part of its own liquidation fee back in the same crank.
