@@ -19250,6 +19250,161 @@ fn v16_portfolio_incarnation_id_separates_close_and_reuse() {
     assert_eq!(replacement.residual_received_atoms_total.get(), 0);
 }
 
+// A matcher grant belongs to one portfolio incarnation. A transaction signed for a closed
+// incarnation must not restore unsigned-LP trading after the same account address is initialized
+// again and receives fresh capital.
+#[test]
+fn v16_attack_signed_matcher_grant_cannot_replay_after_portfolio_reinit() {
+    const PRICE: u64 = 100;
+    const ADVERSE_PRICE: u64 = 50;
+    const DEPOSIT: u128 = 1_000_000;
+    const SIZE_Q: i128 = (5_000 * POS_SCALE) as i128;
+
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(2, 1_000, 1_000, 500);
+    env.svm.warp_to_slot(1);
+    env.configure_auth_mark_with_cu(1, PRICE);
+
+    let matcher_program = Pubkey::new_unique();
+    env.svm.add_program(
+        matcher_program,
+        &std::fs::read(auth_matcher_program_path()).unwrap(),
+    );
+    let victim = Keypair::new();
+    let victim_portfolio = env.create_portfolio(&victim);
+    let old_portfolio_id = env.portfolio_id(victim_portfolio);
+    let (matcher_context, matcher_delegate, _) =
+        env.init_auth_matcher_context_via_system_create(matcher_program, &victim, victim_portfolio);
+    env.set_matcher_config(
+        matcher_program,
+        &victim,
+        victim_portfolio,
+        matcher_context,
+        matcher_delegate,
+        0,
+    );
+
+    let stale_grant_ix = Instruction {
+        program_id: env.program_id,
+        accounts: vec![
+            AccountMeta::new(victim.pubkey(), true),
+            AccountMeta::new_readonly(env.market, false),
+            AccountMeta::new(victim_portfolio, false),
+            AccountMeta::new_readonly(matcher_program, false),
+            AccountMeta::new_readonly(matcher_context, false),
+            AccountMeta::new_readonly(matcher_delegate, false),
+        ],
+        data: ProgInstruction::SetMatcherConfig { enabled: 1 }.encode(),
+    };
+    let stale_grant = Transaction::new_signed_with_payer(
+        &[heap_ix(), cu_ix(), stale_grant_ix],
+        Some(&env.payer.pubkey()),
+        &[&env.payer, &victim],
+        env.svm.latest_blockhash(),
+    );
+
+    env.close_portfolio_with_cu(&victim, victim_portfolio);
+    env.svm.expire_blockhash();
+    send_raw_tx(
+        &mut env.svm,
+        &env.payer,
+        system_instruction::transfer(&env.payer.pubkey(), &victim_portfolio, 1_000_000_000),
+        &[],
+    )
+    .expect("re-fund the closed portfolio through the System Program");
+    env.svm.expire_blockhash();
+    env.send(
+        ProgInstruction::InitPortfolio,
+        vec![
+            AccountMeta::new(victim.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(victim_portfolio, false),
+        ],
+        &[&victim],
+    )
+    .expect("reinitialize the same portfolio address");
+    let replacement_portfolio_id = env.portfolio_id(victim_portfolio);
+    assert_ne!(replacement_portfolio_id, old_portfolio_id);
+    env.deposit(&victim, victim_portfolio, DEPOSIT);
+
+    let victim_before_replay = env.svm.get_account(&victim_portfolio).unwrap();
+    let replay = env.svm.send_transaction(stale_grant);
+    if replay.is_ok() {
+        let attacker = Keypair::new();
+        let attacker_portfolio = env.create_portfolio(&attacker);
+        env.deposit(&attacker, attacker_portfolio, DEPOSIT);
+        env.try_trade_cpi_with_cu_on_asset(
+            &attacker,
+            attacker_portfolio,
+            &victim,
+            victim_portfolio,
+            matcher_program,
+            matcher_context,
+            matcher_delegate,
+            0,
+            -SIZE_Q,
+            0,
+        )
+        .expect("the replayed matcher grant forces fresh victim capital into a long position");
+
+        env.svm.warp_to_slot(11);
+        env.push_auth_mark_with_cu(11, ADVERSE_PRICE);
+        env.crank_steps(
+            victim_portfolio,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 11,
+                observations: crank_observations(0),
+            },
+            4,
+        );
+        env.crank_steps(
+            attacker_portfolio,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 11,
+                observations: crank_observations(0),
+            },
+            4,
+        );
+        let victim_after = env.portfolio_state(victim_portfolio);
+        let attacker_after = env.portfolio_state(attacker_portfolio);
+        let victim_equity = victim_after.capital.get() as i128 + victim_after.pnl.get();
+        let attacker_equity = attacker_after.capital.get() as i128 + attacker_after.pnl.get();
+        assert!(victim_equity < DEPOSIT as i128);
+        assert!(attacker_equity > DEPOSIT as i128);
+
+        env.try_trade_cpi_with_cu_on_asset(
+            &attacker,
+            attacker_portfolio,
+            &victim,
+            victim_portfolio,
+            matcher_program,
+            matcher_context,
+            matcher_delegate,
+            0,
+            SIZE_Q,
+            0,
+        )
+        .expect("the attacker closes against the still-unsigned victim at the adverse mark");
+        let attacker_flat = env.portfolio_state(attacker_portfolio);
+        let released = attacker_flat.pnl.get() as u128;
+        assert!(released > 0);
+        env.convert_released_pnl_with_cu(&attacker, attacker_portfolio, released);
+        let withdrawable = env.portfolio_state(attacker_portfolio).capital.get();
+        let destination = env.withdraw(&attacker, attacker_portfolio, withdrawable);
+        assert_eq!(env.token_amount(destination) as u128, withdrawable);
+        assert!(withdrawable > DEPOSIT);
+        panic!(
+            "a matcher grant for portfolio id {old_portfolio_id} opened risk on replacement id \
+             {replacement_portfolio_id}, reduced victim equity from {DEPOSIT} to {victim_equity}, \
+             and let the attacker withdraw {withdrawable}"
+        );
+    }
+
+    assert_eq!(
+        env.svm.get_account(&victim_portfolio).unwrap(),
+        victim_before_replay
+    );
+}
+
 // security.md sweep — rounding asymmetry (#37 dust): trade fees must round UP (ceil, protocol favor)
 // so dust-notional trades are never free and repeated churn never leaks value to the trader. Attacker
 // success = a fee that floors to 0 (free trade) or insurance that fails to grow on a fee'd dust trade.
