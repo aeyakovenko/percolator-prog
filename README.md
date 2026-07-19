@@ -268,7 +268,8 @@ Positions and PnL use native `i128`/`u128` (`POS_SCALE = 1_000_000`, `ADL_ONE = 
 ### Two trade paths
 - **TradeNoCpi**: no external matcher; used for baseline integration, local testing, and deterministic program-test scenarios.
 - **TradeCpi**: production matcher path; the LP owner configures a matcher program/context once on
-  the LP portfolio with `SetMatcherConfig` (tag 68). Fills then run without the LP owner
+  the LP portfolio with `SetMatcherConfig { portfolio_id, enabled }` (tag 68). The signed grant is
+  bound to that portfolio incarnation. Fills then run without the LP owner
   signing each transaction. Direct LP-signed bilateral trading is `TradeNoCpi`.
 
 ### MatchingEngine trait
@@ -352,7 +353,8 @@ This makes it a "pure identity signer" and prevents it from becoming an attack s
 ### LP matcher config (TradeCpi / BatchTradeCpi)
 Unsigned LP matcher fills require an enabled matcher config stored directly on the LP portfolio.
 
-`SetMatcherConfig` (tag 68) is signed by the LP owner and writes:
+`SetMatcherConfig { portfolio_id, enabled }` (tag 68) is signed by the LP owner, requires the
+portfolio's current program-assigned ID, and writes:
 
 `matcher_program, matcher_context, matcher_delegate, enabled`
 
@@ -447,8 +449,10 @@ This section describes intent and operational ordering, not argument-by-argument
     anti-spoof binding as `TradeCpi`, then all fills apply through the batch path. Bounded to 16
     legs (the matcher's return-data cap).
 - **SetMatcherConfig** (tag 68)
-  - LP-owner-signed opt-in/out for unsigned LP matcher fills. This writes the matcher config tail
-    on the LP portfolio: matcher program, matcher context, matcher delegate, and enabled flag.
+  - LP-owner-signed opt-in/out for unsigned LP matcher fills. The payload carries the current
+    `portfolio_id`, so a retained grant cannot arm a later incarnation at the same address. This
+    writes the matcher config tail on the LP portfolio: matcher program, matcher context, matcher
+    delegate, and enabled flag.
 
 ### Oracle / mark management
 - External-oracle markets authenticate configured oracle account(s) in the oracle configuration/crank

@@ -9,6 +9,7 @@ use percolator_prog::{
         ASSET_ORACLE_WRAPPER_LEN, MARKET_GROUP_OFF, MATCHER_ABI_VERSION, MATCHER_CONTEXT_MIN_LEN,
         ORACLE_LEG_FLAG_DIVIDE_LEG2, ORACLE_LEG_FLAG_DIVIDE_LEG3, PORTFOLIO_ENGINE_ACCOUNT_LEN,
     },
+    error::PercolatorError,
     ix::{BatchTradeCpiLeg, BatchTradeLeg, CrankObservationHint, Instruction as ProgInstruction},
     oracle_v16, processor, state,
     state::{MarketGroupV16, PortfolioAccountV16},
@@ -2022,8 +2023,22 @@ impl V16CuEnv {
                 AccountMeta::new_readonly(matcher_delegate, false),
             ]);
         }
+        let portfolio_account = self
+            .svm
+            .get_account(&maker_account)
+            .expect("maker portfolio");
+        let portfolio_id = if portfolio_account.data.len()
+            < state::portfolio_account_len_for_market_slots(0).unwrap()
+        {
+            u64::MAX
+        } else {
+            state::read_portfolio_id(&portfolio_account.data).unwrap()
+        };
         self.send(
-            ProgInstruction::SetMatcherConfig { enabled },
+            ProgInstruction::SetMatcherConfig {
+                portfolio_id,
+                enabled,
+            },
             accounts,
             &[maker_owner],
         )?;
@@ -19293,7 +19308,11 @@ fn v16_attack_signed_matcher_grant_cannot_replay_after_portfolio_reinit() {
             AccountMeta::new_readonly(matcher_context, false),
             AccountMeta::new_readonly(matcher_delegate, false),
         ],
-        data: ProgInstruction::SetMatcherConfig { enabled: 1 }.encode(),
+        data: ProgInstruction::SetMatcherConfig {
+            portfolio_id: old_portfolio_id,
+            enabled: 1,
+        }
+        .encode(),
     };
     let stale_grant = Transaction::new_signed_with_payer(
         &[heap_ix(), cu_ix(), stale_grant_ix],
@@ -19326,7 +19345,9 @@ fn v16_attack_signed_matcher_grant_cannot_replay_after_portfolio_reinit() {
     assert_ne!(replacement_portfolio_id, old_portfolio_id);
     env.deposit(&victim, victim_portfolio, DEPOSIT);
 
+    let market_before_replay = env.svm.get_account(&env.market).unwrap();
     let victim_before_replay = env.svm.get_account(&victim_portfolio).unwrap();
+    let context_before_replay = env.svm.get_account(&matcher_context).unwrap();
     let replay = env.svm.send_transaction(stale_grant);
     if replay.is_ok() {
         let attacker = Keypair::new();
@@ -19399,9 +19420,40 @@ fn v16_attack_signed_matcher_grant_cannot_replay_after_portfolio_reinit() {
         );
     }
 
+    let replay_error = format!("{replay:?}");
+    let expected_error = format!(
+        "Custom({})",
+        PercolatorError::EngineProvenanceMismatch as u32
+    );
+    assert!(
+        replay_error.contains(&expected_error),
+        "stale matcher grant must fail with {expected_error}, got {replay_error}"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before_replay
+    );
     assert_eq!(
         env.svm.get_account(&victim_portfolio).unwrap(),
         victim_before_replay
+    );
+    assert_eq!(
+        env.svm.get_account(&matcher_context).unwrap(),
+        context_before_replay
+    );
+
+    env.set_matcher_config(
+        matcher_program,
+        &victim,
+        victim_portfolio,
+        matcher_context,
+        matcher_delegate,
+        1,
+    );
+    assert_eq!(
+        env.portfolio_matcher_config(victim_portfolio).enabled,
+        1,
+        "a grant signed for the replacement portfolio id remains live"
     );
 }
 
@@ -20728,7 +20780,10 @@ fn v16_attack_non_owner_cannot_change_lp_matcher_config() {
 
     env.svm.expire_blockhash();
     let revoke = env.send(
-        ProgInstruction::SetMatcherConfig { enabled: 0 },
+        ProgInstruction::SetMatcherConfig {
+            portfolio_id: env.portfolio_id(lp),
+            enabled: 0,
+        },
         vec![
             AccountMeta::new(attacker.pubkey(), true),
             AccountMeta::new_readonly(env.market, false),
@@ -20793,7 +20848,10 @@ fn v16_attack_cross_lp_cannot_overwrite_lp_matcher_config() {
 
     env.svm.expire_blockhash();
     let overwrite = env.send(
-        ProgInstruction::SetMatcherConfig { enabled: 0 },
+        ProgInstruction::SetMatcherConfig {
+            portfolio_id: env.portfolio_id(victim_lp),
+            enabled: 0,
+        },
         vec![
             AccountMeta::new(attacker_owner.pubkey(), true),
             AccountMeta::new_readonly(env.market, false),
@@ -21154,11 +21212,15 @@ fn v16_attack_set_lp_matcher_config_cannot_target_protocol_accounts() {
     );
     env.try_init_auth_matcher_context_with_delegate(matcher_program, &lp_owner, lp, ctx, delegate)
         .expect("init auth matcher context without setting percolator auth");
+    let portfolio_id = env.portfolio_id(lp);
 
     let send_with_lp_account = |env: &mut V16CuEnv, lp_account: Pubkey| {
         env.svm.expire_blockhash();
         env.send(
-            ProgInstruction::SetMatcherConfig { enabled: 1 },
+            ProgInstruction::SetMatcherConfig {
+                portfolio_id,
+                enabled: 1,
+            },
             vec![
                 AccountMeta::new(lp_owner.pubkey(), true),
                 AccountMeta::new_readonly(env.market, false),
@@ -21232,7 +21294,10 @@ fn v16_attack_matcher_config_and_fills_reject_self_program_context() {
     let lp_before_config = env.svm.get_account(&lp).unwrap();
     env.svm.expire_blockhash();
     let self_config = env.send(
-        ProgInstruction::SetMatcherConfig { enabled: 1 },
+        ProgInstruction::SetMatcherConfig {
+            portfolio_id: env.portfolio_id(lp),
+            enabled: 1,
+        },
         vec![
             AccountMeta::new(lp_owner.pubkey(), true),
             AccountMeta::new_readonly(env.market, false),
@@ -21488,7 +21553,10 @@ fn v16_attack_set_matcher_config_bad_legacy_context_rolls_back_realloc() {
     let lp_before = env.svm.get_account(&lp).unwrap();
     env.svm.expire_blockhash();
     let rejected = env.send(
-        ProgInstruction::SetMatcherConfig { enabled: 1 },
+        ProgInstruction::SetMatcherConfig {
+            portfolio_id: u64::MAX,
+            enabled: 1,
+        },
         vec![
             AccountMeta::new(lp_owner.pubkey(), true),
             AccountMeta::new_readonly(env.market, false),
@@ -30691,11 +30759,15 @@ fn v16_attack_trade_paths_reject_cross_market_portfolio_substitution() {
             },
         )
         .unwrap();
+    let cpi_lp_portfolio_id = env.portfolio_id(p_cpi_lp);
     send_tx(
         &mut env.svm,
         env.program_id,
         &env.payer,
-        ProgInstruction::SetMatcherConfig { enabled: 1 },
+        ProgInstruction::SetMatcherConfig {
+            portfolio_id: cpi_lp_portfolio_id,
+            enabled: 1,
+        },
         vec![
             AccountMeta::new(cpi_lp.pubkey(), true),
             AccountMeta::new_readonly(market_b, false),
