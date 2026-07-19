@@ -676,11 +676,13 @@ fn kani_v16_legacy_unbound_authority_payloads_are_rejected() {
 #[kani::proof]
 fn kani_v16_restart_asset_oracle_decode_preserves_wire_fields() {
     let asset_index: u16 = kani::any();
+    let market_id: u64 = kani::any();
     let now_slot: u64 = kani::any();
     let initial_price: u64 = kani::any();
 
     let data = Instruction::RestartAssetOracle {
         asset_index,
+        market_id,
         now_slot,
         initial_price,
     }
@@ -689,10 +691,12 @@ fn kani_v16_restart_asset_oracle_decode_preserves_wire_fields() {
     match Instruction::decode(&data).unwrap() {
         Instruction::RestartAssetOracle {
             asset_index: got_asset_index,
+            market_id: got_market_id,
             now_slot: got_slot,
             initial_price: got_price,
         } => {
             assert_eq!(got_asset_index, asset_index);
+            assert_eq!(got_market_id, market_id);
             assert_eq!(got_slot, now_slot);
             assert_eq!(got_price, initial_price);
         }
@@ -943,6 +947,7 @@ fn kani_v16_permissionless_resolve_decode_preserves_wire_fields() {
 #[kani::unwind(34)]
 fn kani_v16_configure_hybrid_oracle_decode_preserves_wire_fields() {
     let asset_index: u16 = kani::any();
+    let market_id: u64 = kani::any();
     let oracle_leg_count: u8 = kani::any();
     let oracle_leg_flags: u8 = kani::any();
     let invert: u8 = kani::any();
@@ -965,27 +970,29 @@ fn kani_v16_configure_hybrid_oracle_decode_preserves_wire_fields() {
         i += 1;
     }
 
-    let mut data = [0u8; 156];
+    let mut data = [0u8; 164];
     data[0] = 34;
     data[1..3].copy_from_slice(&asset_index.to_le_bytes());
-    data[3..11].copy_from_slice(&now_slot.to_le_bytes());
-    data[11..19].copy_from_slice(&now_unix_ts.to_le_bytes());
-    data[19] = oracle_leg_count;
-    data[20] = oracle_leg_flags;
-    data[21..29].copy_from_slice(&max_staleness_secs.to_le_bytes());
-    data[29..37].copy_from_slice(&hybrid_soft_stale_slots.to_le_bytes());
-    data[37..45].copy_from_slice(&mark_ewma_halflife_slots.to_le_bytes());
-    data[45..53].copy_from_slice(&mark_min_fee.to_le_bytes());
-    data[53] = invert;
-    data[54..58].copy_from_slice(&unit_scale.to_le_bytes());
-    data[58..60].copy_from_slice(&conf_filter_bps.to_le_bytes());
-    data[60..92].copy_from_slice(&feeds[0]);
-    data[92..124].copy_from_slice(&feeds[1]);
-    data[124..156].copy_from_slice(&feeds[2]);
+    data[3..11].copy_from_slice(&market_id.to_le_bytes());
+    data[11..19].copy_from_slice(&now_slot.to_le_bytes());
+    data[19..27].copy_from_slice(&now_unix_ts.to_le_bytes());
+    data[27] = oracle_leg_count;
+    data[28] = oracle_leg_flags;
+    data[29..37].copy_from_slice(&max_staleness_secs.to_le_bytes());
+    data[37..45].copy_from_slice(&hybrid_soft_stale_slots.to_le_bytes());
+    data[45..53].copy_from_slice(&mark_ewma_halflife_slots.to_le_bytes());
+    data[53..61].copy_from_slice(&mark_min_fee.to_le_bytes());
+    data[61] = invert;
+    data[62..66].copy_from_slice(&unit_scale.to_le_bytes());
+    data[66..68].copy_from_slice(&conf_filter_bps.to_le_bytes());
+    data[68..100].copy_from_slice(&feeds[0]);
+    data[100..132].copy_from_slice(&feeds[1]);
+    data[132..164].copy_from_slice(&feeds[2]);
 
     match Instruction::decode(&data).unwrap() {
         Instruction::ConfigureHybridOracle {
             asset_index: got_asset_index,
+            market_id: got_market_id,
             now_slot: got_now_slot,
             now_unix_ts: got_now_unix,
             oracle_leg_count: got_count,
@@ -1000,6 +1007,7 @@ fn kani_v16_configure_hybrid_oracle_decode_preserves_wire_fields() {
             oracle_leg_feeds: got_feeds,
         } => {
             assert_eq!(got_asset_index, asset_index);
+            assert_eq!(got_market_id, market_id);
             assert_eq!(got_now_slot, now_slot);
             assert_eq!(got_now_unix, now_unix_ts);
             assert_eq!(got_count, oracle_leg_count);
@@ -1030,22 +1038,25 @@ fn kani_v16_ewma_mark_decode_preserves_wire_fields() {
     let mark_min_fee: u64 = kani::any();
     let push_mark_e6: u64 = kani::any();
 
-    let mut configure = [0u8; 35];
+    let mut configure = [0u8; 43];
     configure[0] = 35;
     configure[1..3].copy_from_slice(&asset_index.to_le_bytes());
-    configure[3..11].copy_from_slice(&now_slot.to_le_bytes());
-    configure[11..19].copy_from_slice(&initial_mark_e6.to_le_bytes());
-    configure[19..27].copy_from_slice(&mark_ewma_halflife_slots.to_le_bytes());
-    configure[27..35].copy_from_slice(&mark_min_fee.to_le_bytes());
+    configure[3..11].copy_from_slice(&market_id.to_le_bytes());
+    configure[11..19].copy_from_slice(&now_slot.to_le_bytes());
+    configure[19..27].copy_from_slice(&initial_mark_e6.to_le_bytes());
+    configure[27..35].copy_from_slice(&mark_ewma_halflife_slots.to_le_bytes());
+    configure[35..43].copy_from_slice(&mark_min_fee.to_le_bytes());
     match Instruction::decode(&configure).unwrap() {
         Instruction::ConfigureEwmaMark {
             asset_index: got_asset_index,
+            market_id: got_market_id,
             now_slot: got_now,
             initial_mark_e6: got_mark,
             mark_ewma_halflife_slots: got_halflife,
             mark_min_fee: got_min_fee,
         } => {
             assert_eq!(got_asset_index, asset_index);
+            assert_eq!(got_market_id, market_id);
             assert_eq!(got_now, now_slot);
             assert_eq!(got_mark, initial_mark_e6);
             assert_eq!(got_halflife, mark_ewma_halflife_slots);
@@ -1075,18 +1086,21 @@ fn kani_v16_ewma_mark_decode_preserves_wire_fields() {
         _ => unreachable!(),
     }
 
-    let mut configure_auth = [0u8; 19];
+    let mut configure_auth = [0u8; 27];
     configure_auth[0] = 62;
     configure_auth[1..3].copy_from_slice(&asset_index.to_le_bytes());
-    configure_auth[3..11].copy_from_slice(&now_slot.to_le_bytes());
-    configure_auth[11..19].copy_from_slice(&initial_mark_e6.to_le_bytes());
+    configure_auth[3..11].copy_from_slice(&market_id.to_le_bytes());
+    configure_auth[11..19].copy_from_slice(&now_slot.to_le_bytes());
+    configure_auth[19..27].copy_from_slice(&initial_mark_e6.to_le_bytes());
     match Instruction::decode(&configure_auth).unwrap() {
         Instruction::ConfigureAuthMark {
             asset_index: got_asset_index,
+            market_id: got_market_id,
             now_slot: got_now,
             initial_mark_e6: got_mark,
         } => {
             assert_eq!(got_asset_index, asset_index);
+            assert_eq!(got_market_id, market_id);
             assert_eq!(got_now, now_slot);
             assert_eq!(got_mark, initial_mark_e6);
         }
@@ -1317,6 +1331,7 @@ fn kani_v16_oracle_asset_payloads_reject_trailing_byte() {
     assert_rejects_trailing_byte(
         Instruction::ConfigureHybridOracle {
             asset_index: 0,
+            market_id: 1,
             now_slot: 1,
             now_unix_ts: 1,
             oracle_leg_count: 1,
@@ -1335,6 +1350,7 @@ fn kani_v16_oracle_asset_payloads_reject_trailing_byte() {
     assert_rejects_trailing_byte(
         Instruction::ConfigureEwmaMark {
             asset_index: 0,
+            market_id: 1,
             now_slot: 1,
             initial_mark_e6: 100,
             mark_ewma_halflife_slots: 1,
@@ -1354,6 +1370,7 @@ fn kani_v16_oracle_asset_payloads_reject_trailing_byte() {
     assert_rejects_trailing_byte(
         Instruction::ConfigureAuthMark {
             asset_index: 0,
+            market_id: 1,
             now_slot: 1,
             initial_mark_e6: 100,
         },
@@ -1365,6 +1382,15 @@ fn kani_v16_oracle_asset_payloads_reject_trailing_byte() {
             market_id: 1,
             now_slot: 2,
             mark_e6: 101,
+        },
+        extra,
+    );
+    assert_rejects_trailing_byte(
+        Instruction::RestartAssetOracle {
+            asset_index: 0,
+            market_id: 1,
+            now_slot: 2,
+            initial_price: 100,
         },
         extra,
     );

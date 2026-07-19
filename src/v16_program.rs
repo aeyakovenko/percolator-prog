@@ -2637,6 +2637,7 @@ pub mod ix {
         },
         ConfigureHybridOracle {
             asset_index: u16,
+            market_id: u64,
             now_slot: u64,
             now_unix_ts: i64,
             oracle_leg_count: u8,
@@ -2652,6 +2653,7 @@ pub mod ix {
         },
         ConfigureEwmaMark {
             asset_index: u16,
+            market_id: u64,
             now_slot: u64,
             initial_mark_e6: u64,
             mark_ewma_halflife_slots: u64,
@@ -2665,6 +2667,7 @@ pub mod ix {
         },
         ConfigureAuthMark {
             asset_index: u16,
+            market_id: u64,
             now_slot: u64,
             initial_mark_e6: u64,
         },
@@ -2681,6 +2684,7 @@ pub mod ix {
         },
         RestartAssetOracle {
             asset_index: u16,
+            market_id: u64,
             now_slot: u64,
             initial_price: u64,
         },
@@ -2899,6 +2903,7 @@ pub mod ix {
                 },
                 62 => Self::ConfigureAuthMark {
                     asset_index: read_u16(&mut rest)?,
+                    market_id: read_u64(&mut rest)?,
                     now_slot: read_u64(&mut rest)?,
                     initial_mark_e6: read_u64(&mut rest)?,
                 },
@@ -2915,6 +2920,7 @@ pub mod ix {
                 },
                 69 => Self::RestartAssetOracle {
                     asset_index: read_u16(&mut rest)?,
+                    market_id: read_u64(&mut rest)?,
                     now_slot: read_u64(&mut rest)?,
                     initial_price: read_u64(&mut rest)?,
                 },
@@ -2935,6 +2941,7 @@ pub mod ix {
                 },
                 34 => Self::ConfigureHybridOracle {
                     asset_index: read_u16(&mut rest)?,
+                    market_id: read_u64(&mut rest)?,
                     now_slot: read_u64(&mut rest)?,
                     now_unix_ts: read_i64(&mut rest)?,
                     oracle_leg_count: read_u8(&mut rest)?,
@@ -2954,6 +2961,7 @@ pub mod ix {
                 },
                 35 => Self::ConfigureEwmaMark {
                     asset_index: read_u16(&mut rest)?,
+                    market_id: read_u64(&mut rest)?,
                     now_slot: read_u64(&mut rest)?,
                     initial_mark_e6: read_u64(&mut rest)?,
                     mark_ewma_halflife_slots: read_u64(&mut rest)?,
@@ -3256,6 +3264,7 @@ pub mod ix {
                 }
                 Self::ConfigureHybridOracle {
                     asset_index,
+                    market_id,
                     now_slot,
                     now_unix_ts,
                     oracle_leg_count,
@@ -3271,6 +3280,7 @@ pub mod ix {
                 } => {
                     out.push(34);
                     push_u16(&mut out, asset_index);
+                    push_u64(&mut out, market_id);
                     push_u64(&mut out, now_slot);
                     push_i64(&mut out, now_unix_ts);
                     out.push(oracle_leg_count);
@@ -3288,6 +3298,7 @@ pub mod ix {
                 }
                 Self::ConfigureEwmaMark {
                     asset_index,
+                    market_id,
                     now_slot,
                     initial_mark_e6,
                     mark_ewma_halflife_slots,
@@ -3295,6 +3306,7 @@ pub mod ix {
                 } => {
                     out.push(35);
                     push_u16(&mut out, asset_index);
+                    push_u64(&mut out, market_id);
                     push_u64(&mut out, now_slot);
                     push_u64(&mut out, initial_mark_e6);
                     push_u64(&mut out, mark_ewma_halflife_slots);
@@ -3314,11 +3326,13 @@ pub mod ix {
                 }
                 Self::ConfigureAuthMark {
                     asset_index,
+                    market_id,
                     now_slot,
                     initial_mark_e6,
                 } => {
                     out.push(62);
                     push_u16(&mut out, asset_index);
+                    push_u64(&mut out, market_id);
                     push_u64(&mut out, now_slot);
                     push_u64(&mut out, initial_mark_e6);
                 }
@@ -3346,11 +3360,13 @@ pub mod ix {
                 }
                 Self::RestartAssetOracle {
                     asset_index,
+                    market_id,
                     now_slot,
                     initial_price,
                 } => {
                     out.push(69);
                     push_u16(&mut out, asset_index);
+                    push_u64(&mut out, market_id);
                     push_u64(&mut out, now_slot);
                     push_u64(&mut out, initial_price);
                 }
@@ -5161,6 +5177,22 @@ pub mod processor {
         Ok(())
     }
 
+    fn require_asset_generation_view(
+        group: &state::MarketViewMutV16<'_>,
+        asset_index: usize,
+        expected_market_id: u64,
+    ) -> ProgramResult {
+        if asset_index >= group.header.config.max_market_slots.get() as usize
+            || asset_index >= group.markets.len()
+        {
+            return Err(PercolatorError::InvalidInstruction.into());
+        }
+        if group.markets[asset_index].engine.asset.market_id.get() != expected_market_id {
+            return Err(PercolatorError::AssetGenerationMismatch.into());
+        }
+        Ok(())
+    }
+
     fn reset_empty_asset_oracle_anchor_view(
         group: &mut state::MarketViewMutV16<'_>,
         asset_index: usize,
@@ -5391,6 +5423,7 @@ pub mod processor {
             }
             Instruction::ConfigureHybridOracle {
                 asset_index,
+                market_id,
                 now_slot,
                 now_unix_ts,
                 oracle_leg_count,
@@ -5407,6 +5440,7 @@ pub mod processor {
                 program_id,
                 accounts,
                 asset_index,
+                market_id,
                 now_slot,
                 now_unix_ts,
                 oracle_leg_count,
@@ -5422,6 +5456,7 @@ pub mod processor {
             ),
             Instruction::ConfigureEwmaMark {
                 asset_index,
+                market_id,
                 now_slot,
                 initial_mark_e6,
                 mark_ewma_halflife_slots,
@@ -5430,6 +5465,7 @@ pub mod processor {
                 program_id,
                 accounts,
                 asset_index,
+                market_id,
                 now_slot,
                 initial_mark_e6,
                 mark_ewma_halflife_slots,
@@ -5450,12 +5486,14 @@ pub mod processor {
             ),
             Instruction::ConfigureAuthMark {
                 asset_index,
+                market_id,
                 now_slot,
                 initial_mark_e6,
             } => handle_configure_auth_mark(
                 program_id,
                 accounts,
                 asset_index,
+                market_id,
                 now_slot,
                 initial_mark_e6,
             ),
@@ -5485,12 +5523,14 @@ pub mod processor {
             ),
             Instruction::RestartAssetOracle {
                 asset_index,
+                market_id,
                 now_slot,
                 initial_price,
             } => handle_restart_asset_oracle(
                 program_id,
                 accounts,
                 asset_index,
+                market_id,
                 now_slot,
                 initial_price,
             ),
@@ -9120,6 +9160,7 @@ pub mod processor {
         program_id: &Pubkey,
         accounts: &'a [AccountInfo<'a>],
         asset_index: u16,
+        expected_market_id: u64,
         now_slot: u64,
         initial_price: u64,
     ) -> ProgramResult {
@@ -9142,10 +9183,7 @@ pub mod processor {
                 return Err(PercolatorError::OracleStale.into());
             }
             let asset_index = asset_index as usize;
-            let configured_slots = group.header.config.max_market_slots.get() as usize;
-            if asset_index >= configured_slots || asset_index >= group.markets.len() {
-                return Err(PercolatorError::InvalidInstruction.into());
-            }
+            require_asset_generation_view(&group, asset_index, expected_market_id)?;
             if authenticated_slot < group.header.current_slot.get() {
                 return Err(PercolatorError::EngineStale.into());
             }
@@ -9903,6 +9941,7 @@ pub mod processor {
         program_id: &Pubkey,
         accounts: &'a [AccountInfo<'a>],
         asset_index: u16,
+        expected_market_id: u64,
         now_slot: u64,
         now_unix_ts: i64,
         oracle_leg_count: u8,
@@ -9945,9 +9984,7 @@ pub mod processor {
         let cfg_after = {
             let mut data = market_ai.try_borrow_mut_data()?;
             let (mut cfg, mut group) = state::market_view_mut(&mut data)?;
-            if asset_index_usize >= group.header.config.max_market_slots.get() as usize {
-                return Err(PercolatorError::InvalidInstruction.into());
-            }
+            require_asset_generation_view(&group, asset_index_usize, expected_market_id)?;
             if authenticated_slot < group.header.current_slot.get() {
                 return Err(PercolatorError::EngineStale.into());
             }
@@ -10050,6 +10087,7 @@ pub mod processor {
         program_id: &Pubkey,
         accounts: &'a [AccountInfo<'a>],
         asset_index: u16,
+        expected_market_id: u64,
         now_slot: u64,
         initial_mark_e6: u64,
         mark_ewma_halflife_slots: u64,
@@ -10071,9 +10109,7 @@ pub mod processor {
         let cfg_after = {
             let mut data = market_ai.try_borrow_mut_data()?;
             let (mut cfg, mut group) = state::market_view_mut(&mut data)?;
-            if asset_index_usize >= group.header.config.max_market_slots.get() as usize {
-                return Err(PercolatorError::InvalidInstruction.into());
-            }
+            require_asset_generation_view(&group, asset_index_usize, expected_market_id)?;
             if authenticated_slot < group.header.current_slot.get() {
                 return Err(PercolatorError::EngineStale.into());
             }
@@ -10163,6 +10199,7 @@ pub mod processor {
         program_id: &Pubkey,
         accounts: &'a [AccountInfo<'a>],
         asset_index: u16,
+        expected_market_id: u64,
         now_slot: u64,
         initial_mark_e6: u64,
     ) -> ProgramResult {
@@ -10179,9 +10216,7 @@ pub mod processor {
         let cfg_after = {
             let mut data = market_ai.try_borrow_mut_data()?;
             let (mut cfg, mut group) = state::market_view_mut(&mut data)?;
-            if asset_index_usize >= group.header.config.max_market_slots.get() as usize {
-                return Err(PercolatorError::InvalidInstruction.into());
-            }
+            require_asset_generation_view(&group, asset_index_usize, expected_market_id)?;
             if authenticated_slot < group.header.current_slot.get() {
                 return Err(PercolatorError::EngineStale.into());
             }
