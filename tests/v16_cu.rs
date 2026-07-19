@@ -6176,6 +6176,170 @@ fn v16_attack_signed_asset_authority_rotation_cannot_replay_after_restart() {
     .expect("the same rotation remains live when signed for the current asset generation");
 }
 
+// A signed oracle report is an authorization for one asset generation, not for every future asset
+// that happens to occupy the same slot. Keep the original transaction object across an ordinary
+// shutdown/restart lifecycle and place fresh exposure before replaying it. The old report must be
+// rejected before it can move value against positions that did not exist when the oracle signed.
+#[test]
+fn v16_attack_signed_auth_mark_cannot_replay_after_asset_restart() {
+    const PRICE: u64 = 100;
+    const STALE_ADVERSE_PRICE: u64 = 50;
+    const SIZE_Q: i128 = (5_000 * POS_SCALE) as i128;
+    const DEPOSIT: u128 = 1_000_000;
+
+    let mut env = V16CuEnv::new();
+    let oracle = env.admin.insecure_clone();
+    env.configure_auth_mark_with_cu(0, PRICE);
+    let old_market_id = env.asset_market_id(0);
+
+    let stale_ix = Instruction {
+        program_id: env.program_id,
+        accounts: vec![
+            AccountMeta::new(oracle.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        data: ProgInstruction::PushAuthMark {
+            asset_index: 0,
+            now_slot: 0,
+            mark_e6: STALE_ADVERSE_PRICE,
+        }
+        .encode(),
+    };
+    let stale_report = Transaction::new_signed_with_payer(
+        &[heap_ix(), cu_ix(), stale_ix],
+        Some(&env.payer.pubkey()),
+        &[&env.payer, &oracle],
+        env.svm.latest_blockhash(),
+    );
+
+    env.configure_permissionless_resolve_with_cu(100, 1);
+    env.svm.warp_to_slot(1);
+    env.try_shutdown_asset_with_authority(&oracle, 0, 1)
+        .expect("empty asset shuts down");
+    env.svm.warp_to_slot(2);
+    env.try_restart_asset_oracle_with_authority(&oracle, 0, 2, PRICE)
+        .expect("asset restarts");
+    let new_market_id = env.asset_market_id(0);
+    assert_ne!(new_market_id, old_market_id);
+    env.configure_auth_mark_with_cu(2, PRICE);
+
+    let victim = Keypair::new();
+    let counterparty = Keypair::new();
+    let victim_portfolio = env.create_portfolio(&victim);
+    let counterparty_portfolio = env.create_portfolio(&counterparty);
+    env.deposit(&victim, victim_portfolio, DEPOSIT);
+    env.deposit(&counterparty, counterparty_portfolio, DEPOSIT);
+    env.trade_with_cu(
+        &victim,
+        victim_portfolio,
+        &counterparty,
+        counterparty_portfolio,
+        SIZE_Q,
+        PRICE,
+        0,
+    );
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let victim_before = env.svm.get_account(&victim_portfolio).unwrap();
+    let counterparty_before = env.svm.get_account(&counterparty_portfolio).unwrap();
+    let replay = env.svm.send_transaction(stale_report);
+    if replay.is_ok() {
+        assert_eq!(
+            state::read_asset_oracle_profile(&env.svm.get_account(&env.market).unwrap().data, 0)
+                .unwrap()
+                .oracle_target_price_e6,
+            STALE_ADVERSE_PRICE,
+            "the old signed report reached the replacement generation"
+        );
+        env.svm.warp_to_slot(3);
+        env.crank_steps(
+            victim_portfolio,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 3,
+                observations: crank_observations(0),
+            },
+            4,
+        );
+        env.crank_steps(
+            counterparty_portfolio,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 3,
+                observations: crank_observations(0),
+            },
+            4,
+        );
+        let victim_after = env.portfolio_state(victim_portfolio);
+        let counterparty_after = env.portfolio_state(counterparty_portfolio);
+        let victim_equity = victim_after.capital.get() as i128 + victim_after.pnl.get();
+        let counterparty_equity =
+            counterparty_after.capital.get() as i128 + counterparty_after.pnl.get();
+        assert!(
+            victim_equity < DEPOSIT as i128,
+            "the stale report must move value against fresh exposure"
+        );
+        assert!(
+            counterparty_equity > DEPOSIT as i128,
+            "the stale report must transfer the victim's loss to the counterparty"
+        );
+
+        // The counterparty does not need the victim's cooperation to crystallize the transfer: a
+        // new LP can take over the short at the current mark, after which the released PnL converts
+        // to senior capital and leaves through the ordinary withdrawal instruction.
+        let exit_lp = Keypair::new();
+        let exit_portfolio = env.create_portfolio(&exit_lp);
+        env.deposit(&exit_lp, exit_portfolio, DEPOSIT);
+        env.trade_with_cu(
+            &counterparty,
+            counterparty_portfolio,
+            &exit_lp,
+            exit_portfolio,
+            SIZE_Q,
+            STALE_ADVERSE_PRICE,
+            0,
+        );
+        let counterparty_flat = env.portfolio_state(counterparty_portfolio);
+        assert!(
+            percolator::active_bitmap_is_empty(active_bitmap(&counterparty_flat)),
+            "the beneficiary exits without the victim"
+        );
+        let extracted = counterparty_flat.pnl.get() as u128;
+        assert!(
+            extracted > 0,
+            "the stale report creates released positive PnL"
+        );
+        env.convert_released_pnl_with_cu(&counterparty, counterparty_portfolio, extracted);
+        let withdrawable = env.portfolio_state(counterparty_portfolio).capital.get();
+        let destination = env.withdraw(&counterparty, counterparty_portfolio, withdrawable);
+        assert_eq!(env.token_amount(destination) as u128, withdrawable);
+        assert!(
+            withdrawable > DEPOSIT,
+            "the beneficiary extracts victim value through public custody routes"
+        );
+        panic!(
+            "an old-generation oracle report reduced fresh victim equity from {DEPOSIT} to {victim_equity} and let the counterparty withdraw {withdrawable}"
+        );
+    }
+
+    let replay_error = format!("{:?}", replay.unwrap_err());
+    let expected_error = format!(
+        "Custom({})",
+        PercolatorError::AssetGenerationMismatch as u32
+    );
+    assert!(
+        replay_error.contains(&expected_error),
+        "stale oracle report must fail with {expected_error}, got {replay_error}"
+    );
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+    assert_eq!(
+        env.svm.get_account(&victim_portfolio).unwrap(),
+        victim_before
+    );
+    assert_eq!(
+        env.svm.get_account(&counterparty_portfolio).unwrap(),
+        counterparty_before
+    );
+}
+
 // Before the persistent generation account, a full CloseSlab + InitMarket cycle at the same market
 // address reset every asset market_id to its first-generation value. Keep the original, fully
 // signed transaction object across that public lifecycle: rebuilding the instruction after reinit
