@@ -1022,6 +1022,7 @@ fn kani_v16_configure_hybrid_oracle_decode_preserves_wire_fields() {
 #[kani::proof]
 fn kani_v16_ewma_mark_decode_preserves_wire_fields() {
     let asset_index: u16 = kani::any();
+    let market_id: u64 = kani::any();
 
     let now_slot: u64 = kani::any();
     let initial_mark_e6: u64 = kani::any();
@@ -1053,18 +1054,21 @@ fn kani_v16_ewma_mark_decode_preserves_wire_fields() {
         _ => unreachable!(),
     }
 
-    let mut push = [0u8; 19];
+    let mut push = [0u8; 27];
     push[0] = 36;
     push[1..3].copy_from_slice(&asset_index.to_le_bytes());
-    push[3..11].copy_from_slice(&now_slot.to_le_bytes());
-    push[11..19].copy_from_slice(&push_mark_e6.to_le_bytes());
+    push[3..11].copy_from_slice(&market_id.to_le_bytes());
+    push[11..19].copy_from_slice(&now_slot.to_le_bytes());
+    push[19..27].copy_from_slice(&push_mark_e6.to_le_bytes());
     match Instruction::decode(&push).unwrap() {
         Instruction::PushEwmaMark {
             asset_index: got_asset_index,
+            market_id: got_market_id,
             now_slot: got_now,
             mark_e6: got_mark,
         } => {
             assert_eq!(got_asset_index, asset_index);
+            assert_eq!(got_market_id, market_id);
             assert_eq!(got_now, now_slot);
             assert_eq!(got_mark, push_mark_e6);
         }
@@ -1089,18 +1093,21 @@ fn kani_v16_ewma_mark_decode_preserves_wire_fields() {
         _ => unreachable!(),
     }
 
-    let mut push_auth = [0u8; 19];
+    let mut push_auth = [0u8; 27];
     push_auth[0] = 63;
     push_auth[1..3].copy_from_slice(&asset_index.to_le_bytes());
-    push_auth[3..11].copy_from_slice(&now_slot.to_le_bytes());
-    push_auth[11..19].copy_from_slice(&push_mark_e6.to_le_bytes());
+    push_auth[3..11].copy_from_slice(&market_id.to_le_bytes());
+    push_auth[11..19].copy_from_slice(&now_slot.to_le_bytes());
+    push_auth[19..27].copy_from_slice(&push_mark_e6.to_le_bytes());
     match Instruction::decode(&push_auth).unwrap() {
         Instruction::PushAuthMark {
             asset_index: got_asset_index,
+            market_id: got_market_id,
             now_slot: got_now,
             mark_e6: got_mark,
         } => {
             assert_eq!(got_asset_index, asset_index);
+            assert_eq!(got_market_id, market_id);
             assert_eq!(got_now, now_slot);
             assert_eq!(got_mark, push_mark_e6);
         }
@@ -1338,6 +1345,7 @@ fn kani_v16_oracle_asset_payloads_reject_trailing_byte() {
     assert_rejects_trailing_byte(
         Instruction::PushEwmaMark {
             asset_index: 0,
+            market_id: 1,
             now_slot: 2,
             mark_e6: 101,
         },
@@ -1354,6 +1362,7 @@ fn kani_v16_oracle_asset_payloads_reject_trailing_byte() {
     assert_rejects_trailing_byte(
         Instruction::PushAuthMark {
             asset_index: 0,
+            market_id: 1,
             now_slot: 2,
             mark_e6: 101,
         },
