@@ -7636,6 +7636,101 @@ fn v16_bpf_permissionless_crank_computes_funding_from_internal_mark_premium() {
 }
 
 #[test]
+fn v16_attack_rebalance_reduce_cannot_erase_elapsed_premium_funding() {
+    const PRICE: u64 = 2;
+    const TARGET: u64 = 1;
+    const Q: i128 = 100 * POS_SCALE as i128;
+    const DEPOSIT: u128 = 1_000_000;
+
+    let run = |reduce_before_crank: bool| -> (u128, u128, u128, u128) {
+        let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+            initial_price: PRICE,
+            max_price_move_bps_per_slot: 24,
+            max_accrual_dt_slots: 1,
+            max_abs_funding_e9_per_slot: 1_000,
+            min_funding_lifetime_slots: 1,
+            ..V16CuMarketParams::default()
+        });
+        env.configure_auth_mark_with_cu(0, PRICE);
+
+        let attacker_owner = Keypair::new();
+        let lp_owner = Keypair::new();
+        let attacker = env.create_portfolio(&attacker_owner);
+        let lp = env.create_portfolio(&lp_owner);
+        env.deposit(&attacker_owner, attacker, DEPOSIT);
+        env.deposit(&lp_owner, lp, DEPOSIT);
+        env.trade_asset_with_cu(0, &attacker_owner, attacker, &lp_owner, lp, -Q, PRICE, 0);
+
+        env.svm.warp_to_slot(1);
+        env.push_auth_mark_with_cu(1, TARGET);
+        for portfolio in [attacker, lp] {
+            env.svm.expire_blockhash();
+            env.crank(
+                portfolio,
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: 1,
+                    observations: crank_observations(0),
+                },
+            );
+        }
+        let group_at_one = env.market_state().1;
+        assert_eq!(group_at_one.assets[0].effective_price, PRICE);
+        assert_eq!(group_at_one.assets[0].f_long_num, 0);
+        assert_eq!(group_at_one.assets[0].f_short_num, 0);
+
+        env.svm.warp_to_slot(2);
+        if !reduce_before_crank {
+            for portfolio in [attacker, lp] {
+                env.svm.expire_blockhash();
+                env.crank(
+                    portfolio,
+                    ProgInstruction::PermissionlessCrank {
+                        now_slot: 2,
+                        observations: crank_observations(0),
+                    },
+                );
+            }
+        }
+
+        // In the attack branch only the short signs: it exits through the public
+        // unilateral-reduction route before any keeper can settle this interval.
+        env.svm.expire_blockhash();
+        env.rebalance_reduce_with_cu(&attacker_owner, attacker, 0, Q as u128);
+
+        assert!(percolator::active_bitmap_is_empty(active_bitmap(
+            &env.portfolio_state(attacker)
+        )));
+        let attacker_state = env.portfolio_state(attacker);
+        let lp_state = env.portfolio_state(lp);
+        let lp_claim = (lp_state.capital.get() as i128)
+            .checked_add(lp_state.pnl.get())
+            .expect("lp claim");
+        let attacker_paid = attacker_state.funding_short_paid_atoms_total.get();
+        let lp_received = lp_state.funding_long_received_atoms_total.get();
+        let attacker_capital = attacker_state.capital.get();
+        let attacker_dest = env.withdraw(&attacker_owner, attacker, attacker_capital);
+        (
+            env.token_amount(attacker_dest) as u128,
+            u128::try_from(lp_claim).expect("nonnegative lp claim"),
+            attacker_paid,
+            lp_received,
+        )
+    };
+
+    let control = run(false);
+    let attack = run(true);
+    assert_eq!(control, (999_900, 1_000_100, 100, 100));
+    assert_ne!(control.2, 0, "the control interval must charge funding");
+    assert_eq!(control.2, control.3, "funding must balance between sides");
+    assert_eq!(control.0 + control.1, 2 * DEPOSIT);
+    assert_eq!(attack.0 + attack.1, 2 * DEPOSIT);
+    assert_eq!(
+        attack, control,
+        "unilateral reduction must not erase funding"
+    );
+}
+
+#[test]
 fn v16_bpf_existing_funding_ledger_refreshes_and_converts_between_sides() {
     const INITIAL_PRICE: u64 = 1_000_000;
     const FUNDING_RATE_E9: i128 = 1_000;
