@@ -59893,3 +59893,151 @@ fn v16_attack_released_pnl_cannot_charge_one_source_for_another() {
         "one domain must not lose more provider backing than its own original claim",
     );
 }
+
+// A loss must retire source-claim face from the domain whose backing absorbs that loss. If it
+// instead burns the first sparse claim, an adverse move in one asset can consume that asset's
+// provider backing while preserving the same funded claim for a later capital conversion.
+#[test]
+fn v16_attack_adverse_pnl_cannot_charge_one_source_domain_twice() {
+    const INITIAL_PRICE: u64 = 100;
+    const MOVED_PRICE: u64 = 105;
+    const SIZE_Q: i128 = 20 * POS_SCALE as i128;
+    const CLAIM_PER_ASSET: u128 = 100;
+    const UNFUNDED_SOURCE_DOMAIN: usize = 1;
+    const FUNDED_SOURCE_DOMAIN: usize = 3;
+
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(4, 1_000, 1_000, 500);
+    env.svm.warp_to_slot(1);
+    env.configure_auth_mark_for_asset_as_admin(0, 1, INITIAL_PRICE);
+    env.configure_auth_mark_for_asset_as_admin(1, 1, INITIAL_PRICE);
+    env.top_up_backing_bucket(FUNDED_SOURCE_DOMAIN as u16, 2 * CLAIM_PER_ASSET, 10);
+
+    let attacker_owner = Keypair::new();
+    let stale_counterparty_owner = Keypair::new();
+    let exit_counterparty_owner = Keypair::new();
+    let attacker = env.create_portfolio(&attacker_owner);
+    let stale_counterparty = env.create_portfolio(&stale_counterparty_owner);
+    let exit_counterparty = env.create_portfolio(&exit_counterparty_owner);
+    env.deposit(&attacker_owner, attacker, 1_000);
+    env.deposit(&stale_counterparty_owner, stale_counterparty, 1_000);
+    env.deposit(&exit_counterparty_owner, exit_counterparty, 1_000);
+
+    for asset_index in [0u16, 1u16] {
+        env.trade_asset_with_cu(
+            asset_index,
+            &attacker_owner,
+            attacker,
+            &stale_counterparty_owner,
+            stale_counterparty,
+            SIZE_Q,
+            INITIAL_PRICE,
+            0,
+        );
+    }
+
+    env.svm.warp_to_slot(2);
+    env.push_auth_mark_for_asset_as_admin(0, 2, MOVED_PRICE);
+    env.push_auth_mark_for_asset_as_admin(1, 2, MOVED_PRICE);
+    for asset_index in [0u16, 1u16] {
+        env.crank(
+            attacker,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 2,
+                observations: crank_observations(asset_index),
+            },
+        );
+    }
+
+    assert_eq!(
+        env.portfolio_state(attacker).pnl.get(),
+        (2 * CLAIM_PER_ASSET) as i128
+    );
+    let (_, after_gain) = env.market_state();
+    assert_eq!(
+        after_gain.source_credit[UNFUNDED_SOURCE_DOMAIN].positive_claim_bound_num,
+        CLAIM_PER_ASSET * BOUND_SCALE,
+    );
+    assert_eq!(
+        after_gain.source_credit[UNFUNDED_SOURCE_DOMAIN].fresh_reserved_backing_num,
+        0,
+    );
+    assert_eq!(
+        after_gain.source_credit[FUNDED_SOURCE_DOMAIN].positive_claim_bound_num,
+        CLAIM_PER_ASSET * BOUND_SCALE,
+    );
+
+    // Reverse only asset 1. Its funded source claim should net against this loss; asset 0's
+    // unfunded claim must remain attributable to asset 0.
+    env.svm.warp_to_slot(3);
+    env.push_auth_mark_for_asset_as_admin(1, 3, INITIAL_PRICE);
+    env.crank(
+        attacker,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 3,
+            observations: crank_observations(1),
+        },
+    );
+    let after_loss = env.portfolio_state(attacker);
+    let (_, group_after_loss) = env.market_state();
+    assert_eq!(after_loss.pnl.get(), CLAIM_PER_ASSET as i128);
+    assert_eq!(
+        group_after_loss.source_credit[UNFUNDED_SOURCE_DOMAIN].positive_claim_bound_num,
+        CLAIM_PER_ASSET * BOUND_SCALE,
+        "an asset-1 loss must not erase the unrelated asset-0 claim",
+    );
+    assert_eq!(
+        group_after_loss.source_credit[FUNDED_SOURCE_DOMAIN].positive_claim_bound_num,
+        0,
+        "the funded asset-1 claim must retire when asset-1 backing absorbs the loss",
+    );
+    assert_eq!(
+        group_after_loss.source_backing_buckets[FUNDED_SOURCE_DOMAIN]
+            .consumed_liened_backing_num,
+        CLAIM_PER_ASSET * BOUND_SCALE,
+    );
+
+    for (asset_index, price) in [(0u16, MOVED_PRICE), (1u16, INITIAL_PRICE)] {
+        env.svm.expire_blockhash();
+        env.trade_asset_with_cu(
+            asset_index,
+            &attacker_owner,
+            attacker,
+            &exit_counterparty_owner,
+            exit_counterparty,
+            -SIZE_Q,
+            price,
+            0,
+        );
+    }
+    assert!(percolator::active_bitmap_is_empty(active_bitmap(
+        &env.portfolio_state(attacker)
+    )));
+
+    env.svm.expire_blockhash();
+    let before_convert = env.portfolio_state(attacker);
+    let conversion = env.send(
+        ProgInstruction::ConvertReleasedPnl {
+            amount: CLAIM_PER_ASSET,
+        },
+        vec![
+            AccountMeta::new(attacker_owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(attacker, false),
+        ],
+        &[&attacker_owner],
+    );
+    assert!(
+        conversion.is_err(),
+        "the remaining unfunded claim must not consume asset-1 provider backing again",
+    );
+    let after_convert = env.portfolio_state(attacker);
+    let (_, group_after_convert) = env.market_state();
+    assert_eq!(after_convert.pnl.get(), before_convert.pnl.get());
+    assert_eq!(after_convert.capital.get(), before_convert.capital.get());
+    assert_eq!(
+        group_after_convert.source_backing_buckets[FUNDED_SOURCE_DOMAIN]
+            .consumed_liened_backing_num,
+        CLAIM_PER_ASSET * BOUND_SCALE,
+        "one asset domain must not fund both the adverse settlement and an unrelated claim",
+    );
+}
