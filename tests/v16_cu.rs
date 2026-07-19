@@ -59717,3 +59717,259 @@ fn v16_attack_underfunded_exit_cannot_move_ewma_with_uncollectible_fee() {
         assert_underfunded_ewma_exit_uses_collected_fee(path);
     }
 }
+
+// Public regression: a legitimate EWMA round trip can leave the authenticated target far above
+// the bounded engine effective price. A public wash trade must not be able to buy down that pending
+// target for less than the PnL it removes from unrelated open interest.
+#[test]
+fn v16_attack_trade_cannot_underpay_to_override_pending_ewma_target() {
+    #[derive(Debug)]
+    struct Outcome {
+        attacker_withdrawn: u128,
+        victim_withdrawn: u128,
+        movement_fee: u128,
+        low_price: u64,
+        final_price: u64,
+    }
+
+    fn run(path: NoCpiReportedPricePath, with_wash: bool) -> Outcome {
+        const BASIS: u64 = 10_000_000;
+        const DIRECTIONAL_Q: i128 = 1_000 * POS_SCALE as i128;
+        const WASH_Q: i128 = 100 * POS_SCALE as i128;
+        const DIRECTIONAL_DEPOSIT: u128 = 20_000_000_000;
+        const WASH_DEPOSIT: u128 = 2_000_000_000;
+
+        let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+            initial_price: BASIS,
+            max_trading_fee_bps: 10_000,
+            max_price_move_bps_per_slot: 5_000,
+            ..V16CuMarketParams::default()
+        });
+        env.svm.warp_to_slot(1);
+        env.configure_ewma_mark_with_cu(1, BASIS, 1, 0);
+
+        let admin = env.admin.insecure_clone();
+        let honest_oracle = Keypair::new();
+        env.try_update_per_asset_authority_with_cu(
+            &admin,
+            Some(&honest_oracle),
+            0,
+            processor::ASSET_AUTH_ORACLE,
+            honest_oracle.pubkey().to_bytes(),
+        )
+        .expect("separate honest EWMA authority from the attacker");
+
+        let victim = Keypair::new();
+        let victim_portfolio = env.create_portfolio(&victim);
+        let attacker = Keypair::new();
+        let attacker_portfolio = env.create_portfolio(&attacker);
+        env.deposit(&victim, victim_portfolio, DIRECTIONAL_DEPOSIT);
+        env.deposit(&attacker, attacker_portfolio, DIRECTIONAL_DEPOSIT);
+        env.trade_with_cu(
+            &victim,
+            victim_portfolio,
+            &attacker,
+            attacker_portfolio,
+            DIRECTIONAL_Q,
+            BASIS,
+            0,
+        );
+
+        let (wash_long, wash_long_portfolio, wash_short, wash_short_portfolio) =
+            funded_no_cpi_reported_price_pair(&mut env, WASH_DEPOSIT);
+
+        let push = |env: &mut V16CuEnv, slot: u64, mark_e6: u64| {
+            env.svm.expire_blockhash();
+            env.send(
+                ProgInstruction::PushEwmaMark {
+                    asset_index: 0,
+                    now_slot: slot,
+                    mark_e6,
+                },
+                vec![
+                    AccountMeta::new(honest_oracle.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                ],
+                &[&honest_oracle],
+            )
+            .expect("honest EWMA update");
+        };
+        let crank_directional = |env: &mut V16CuEnv, slot: u64| {
+            for portfolio in [victim_portfolio, attacker_portfolio] {
+                env.svm.expire_blockhash();
+                env.crank(
+                    portfolio,
+                    ProgInstruction::PermissionlessCrank {
+                        now_slot: slot,
+                        observations: crank_observations(0),
+                    },
+                );
+            }
+        };
+
+        // A legitimate down move is fully published over ordinary bounded one-slot updates. Both
+        // sides remain solvent throughout the move.
+        for slot in 2..=5 {
+            env.svm.warp_to_slot(slot);
+            push(&mut env, slot, 1);
+            crank_directional(&mut env, slot);
+        }
+        let low_price = env.market_state().1.assets[0].effective_price;
+        assert!(low_price < BASIS / 5, "setup must create a large real move");
+
+        // Advance the engine clock at the low price, then let the honest oracle commit a rebound
+        // exactly to the original basis. The rebound is authenticated but still circuit-breaker
+        // pending in the engine.
+        env.svm.warp_to_slot(6);
+        crank_directional(&mut env, 6);
+        let rebound_input = BASIS
+            .checked_mul(2)
+            .unwrap()
+            .checked_sub(low_price)
+            .unwrap();
+        push(&mut env, 6, rebound_input);
+        assert_eq!(env.market_state().0.mark_ewma_e6, BASIS);
+        assert_eq!(env.market_state().1.assets[0].effective_price, low_price);
+
+        env.svm.warp_to_slot(7);
+        let insurance_before = env.market_state().1.insurance;
+        if with_wash {
+            try_no_cpi_reported_price_trade_with_cu(
+                &mut env,
+                path,
+                &wash_long,
+                wash_long_portfolio,
+                &wash_short,
+                wash_short_portfolio,
+                WASH_Q,
+                1,
+                0,
+            )
+            .unwrap_or_else(|err| panic!("{path:?}: manipulating wash open failed: {err}"));
+            try_no_cpi_reported_price_trade_with_cu(
+                &mut env,
+                path,
+                &wash_long,
+                wash_long_portfolio,
+                &wash_short,
+                wash_short_portfolio,
+                -WASH_Q,
+                low_price,
+                0,
+            )
+            .unwrap_or_else(|err| panic!("{path:?}: wash close failed: {err}"));
+        }
+        let movement_fee = env.market_state().1.insurance - insurance_before;
+        let target = env.market_state().0.mark_ewma_e6;
+        if with_wash {
+            assert!(
+                target < BASIS,
+                "the public wash must buy down the honest target"
+            );
+            assert!(movement_fee > 0, "the target move must charge a real fee");
+        } else {
+            assert_eq!(target, BASIS);
+            assert_eq!(movement_fee, 0);
+        }
+
+        // Let bounded permissionless cranks publish the remaining target, then close at that mark.
+        let mut slot = 7u64;
+        loop {
+            crank_directional(&mut env, slot);
+            if env.market_state().1.assets[0].effective_price == target {
+                break;
+            }
+            slot += 1;
+            assert!(slot < 24, "bounded target convergence must finish");
+            env.svm.warp_to_slot(slot);
+        }
+        env.trade_with_cu(
+            &victim,
+            victim_portfolio,
+            &attacker,
+            attacker_portfolio,
+            -DIRECTIONAL_Q,
+            target,
+            0,
+        );
+
+        env.resolve();
+        let victim_dest = env.close_resolved(&victim, victim_portfolio);
+        let attacker_dest = env.close_resolved(&attacker, attacker_portfolio);
+        let wash_long_dest = env.close_resolved(&wash_long, wash_long_portfolio);
+        let wash_short_dest = env.close_resolved(&wash_short, wash_short_portfolio);
+        for (owner, portfolio, dest) in [
+            (victim.pubkey(), victim_portfolio, victim_dest),
+            (attacker.pubkey(), attacker_portfolio, attacker_dest),
+            (wash_long.pubkey(), wash_long_portfolio, wash_long_dest),
+            (wash_short.pubkey(), wash_short_portfolio, wash_short_dest),
+        ] {
+            env.svm.expire_blockhash();
+            let _ = env.send(
+                ProgInstruction::ClaimResolvedPayoutTopup,
+                vec![
+                    AccountMeta::new_readonly(owner, false),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(portfolio, false),
+                    AccountMeta::new(dest, false),
+                    AccountMeta::new(env.vault, false),
+                    AccountMeta::new_readonly(env.vault_authority, false),
+                    AccountMeta::new_readonly(spl_token::ID, false),
+                ],
+                &[],
+            );
+        }
+        let attacker_withdrawn = env.token_amount(attacker_dest) as u128
+            + env.token_amount(wash_long_dest) as u128
+            + env.token_amount(wash_short_dest) as u128;
+        let victim_withdrawn = env.token_amount(victim_dest) as u128;
+        Outcome {
+            attacker_withdrawn,
+            victim_withdrawn,
+            movement_fee,
+            low_price,
+            final_price: target,
+        }
+    }
+
+    const ATTACKER_DEPOSITS: u128 = 24_000_000_000;
+    const VICTIM_DEPOSIT: u128 = 20_000_000_000;
+    let mut outcomes = Vec::new();
+    for path in [
+        NoCpiReportedPricePath::Single,
+        NoCpiReportedPricePath::Batch,
+    ] {
+        let control = run(path, false);
+        let attack = run(path, true);
+        eprintln!("{path:?} pending-EWMA override control={control:?} attack={attack:?}");
+        outcomes.push((path, control, attack));
+    }
+    for (path, control, attack) in outcomes {
+        assert_eq!(attack.low_price, control.low_price);
+        assert!(attack.final_price < control.final_price);
+        assert!(
+            attack.attacker_withdrawn <= ATTACKER_DEPOSITS,
+            "{path:?}: a public mark override yielded net withdrawable attacker profit: deposits={ATTACKER_DEPOSITS}, withdrawn={}, movement_fee={}",
+            attack.attacker_withdrawn,
+            attack.movement_fee,
+        );
+        assert!(
+            attack.victim_withdrawn < VICTIM_DEPOSIT,
+            "{path:?}: the independent long must fund a non-vacuous mark displacement"
+        );
+        let displaced_victim_pnl = control
+            .victim_withdrawn
+            .checked_sub(attack.victim_withdrawn)
+            .expect("the wash moves value away from the victim");
+        assert!(
+            displaced_victim_pnl > 0,
+            "{path:?}: the mark override must be non-vacuous"
+        );
+        assert!(
+            attack.movement_fee >= displaced_victim_pnl,
+            "{path:?}: movement fee {} failed to cover {} of displaced independent-victim PnL",
+            attack.movement_fee,
+            displaced_victim_pnl,
+        );
+    }
+}
