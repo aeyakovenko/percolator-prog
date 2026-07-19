@@ -59717,3 +59717,304 @@ fn v16_attack_underfunded_exit_cannot_move_ewma_with_uncollectible_fee() {
         assert_underfunded_ewma_exit_uses_collected_fee(path);
     }
 }
+
+// Public-interface DoS regression: retain every sparse source domain, keep an old exposure active,
+// then try to admit a leg whose first favorable settlement needs a 33rd domain. The vulnerable
+// engine admitted the leg, after which an honest mark move made every owner/keeper exit fail.
+#[test]
+fn v16_attack_source_domain_capacity_reserves_settlement_for_admitted_legs() {
+    const ACTIVE_CAP: u16 = percolator_prog::constants::WRAPPER_MAX_PORTFOLIO_ASSETS;
+    const HISTORICAL_ASSETS: u16 = 16;
+    const NEW_ASSET: u16 = HISTORICAL_ASSETS;
+    const PRICE_LOW: u64 = 100;
+    const PRICE_HIGH: u64 = 101;
+
+    let mut env = V16CuEnv::new_with_init_params_and_market_capacity(
+        V16CuMarketParams {
+            max_portfolio_assets: ACTIVE_CAP,
+            maintenance_margin_bps: 10_000,
+            initial_margin_bps: 10_000,
+            max_price_move_bps_per_slot: 10_000,
+            ..V16CuMarketParams::default()
+        },
+        70,
+    );
+    env.svm.warp_to_slot(1);
+    for asset_index in ACTIVE_CAP..=NEW_ASSET {
+        env.activate_asset(
+            asset_index,
+            asset_index as u64 - ACTIVE_CAP as u64 + 1,
+            PRICE_LOW,
+        );
+    }
+    let mut slot = u64::from(NEW_ASSET - ACTIVE_CAP + 1);
+    env.svm.warp_to_slot(slot);
+    for asset_index in 0..=NEW_ASSET {
+        env.configure_auth_mark_for_asset_as_admin(asset_index, slot, PRICE_LOW);
+    }
+    env.configure_permissionless_resolve_with_cu(1_000, 1);
+
+    let owner = Keypair::new();
+    let counterparty_owner = Keypair::new();
+    let portfolio = env.create_portfolio(&owner);
+    let counterparty = env.create_portfolio(&counterparty_owner);
+    env.deposit(&owner, portfolio, 1_000_000);
+    env.deposit(&counterparty_owner, counterparty, 1_000_000);
+
+    let settle_both = |env: &mut V16CuEnv, asset_index: u16, now_slot: u64| {
+        for account in [counterparty, portfolio] {
+            env.crank(
+                account,
+                ProgInstruction::PermissionlessCrank {
+                    now_slot,
+                    observations: crank_observations(asset_index),
+                },
+            );
+        }
+    };
+
+    for asset_index in 0..HISTORICAL_ASSETS {
+        env.svm.expire_blockhash();
+        env.trade_asset_with_cu(
+            asset_index,
+            &owner,
+            portfolio,
+            &counterparty_owner,
+            counterparty,
+            POS_SCALE as i128,
+            PRICE_LOW,
+            0,
+        );
+        slot += 1;
+        env.svm.warp_to_slot(slot);
+        env.push_auth_mark_for_asset_as_admin(asset_index, slot, PRICE_HIGH);
+        settle_both(&mut env, asset_index, slot);
+        env.svm.expire_blockhash();
+        env.trade_asset_with_cu(
+            asset_index,
+            &owner,
+            portfolio,
+            &counterparty_owner,
+            counterparty,
+            -(POS_SCALE as i128),
+            PRICE_HIGH,
+            0,
+        );
+
+        env.svm.expire_blockhash();
+        env.trade_asset_with_cu(
+            asset_index,
+            &owner,
+            portfolio,
+            &counterparty_owner,
+            counterparty,
+            -(POS_SCALE as i128),
+            PRICE_HIGH,
+            0,
+        );
+        slot += 1;
+        env.svm.warp_to_slot(slot);
+        env.push_auth_mark_for_asset_as_admin(asset_index, slot, PRICE_LOW);
+        settle_both(&mut env, asset_index, slot);
+        env.svm.expire_blockhash();
+        env.trade_asset_with_cu(
+            asset_index,
+            &owner,
+            portfolio,
+            &counterparty_owner,
+            counterparty,
+            POS_SCALE as i128,
+            PRICE_LOW,
+            0,
+        );
+    }
+
+    let filled = env.portfolio_state(portfolio);
+    let occupied = filled
+        .source_domains
+        .iter()
+        .filter(|source| source.is_occupied())
+        .count();
+    assert_eq!(occupied, percolator::PORTFOLIO_SOURCE_DOMAIN_CAP);
+    assert_eq!(filled.pnl.get(), i128::from(2 * HISTORICAL_ASSETS));
+    assert!(percolator::active_bitmap_is_empty(active_bitmap(&filled)));
+
+    // Keep a source-claim exposure active so ConvertReleasedPnl cannot be used to free a slot.
+    env.svm.expire_blockhash();
+    env.trade_asset_with_cu(
+        0,
+        &owner,
+        portfolio,
+        &counterparty_owner,
+        counterparty,
+        POS_SCALE as i128,
+        PRICE_LOW,
+        0,
+    );
+    let market_before_admission = env.svm.get_account(&env.market).unwrap();
+    let portfolio_before_admission = env.svm.get_account(&portfolio).unwrap();
+    let counterparty_before_admission = env.svm.get_account(&counterparty).unwrap();
+
+    // A favorable move on this leg needs a source domain outside the full sparse table.
+    env.svm.expire_blockhash();
+    let admission = env.try_trade_asset_with_cu(
+        NEW_ASSET,
+        &owner,
+        portfolio,
+        &counterparty_owner,
+        counterparty,
+        POS_SCALE as i128,
+        PRICE_LOW,
+        0,
+    );
+
+    if admission.is_ok() {
+        slot += 1;
+        env.svm.warp_to_slot(slot);
+        env.push_auth_mark_for_asset_as_admin(NEW_ASSET, slot, PRICE_HIGH);
+        // Let the losing side publish/accrue the honest mark; it needs no new source-domain slot.
+        env.crank(
+            counterparty,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: slot,
+                observations: crank_observations(NEW_ASSET),
+            },
+        );
+
+        env.svm.expire_blockhash();
+        let blocked = env.send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: slot,
+                observations: crank_observations(NEW_ASSET),
+            },
+            vec![
+                AccountMeta::new(env.payer.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(portfolio, false),
+            ],
+            &[],
+        );
+        if blocked.is_ok() {
+            return;
+        }
+        let trapped_market = env.svm.get_account(&env.market).unwrap();
+        let trapped_portfolio = env.svm.get_account(&portfolio).unwrap();
+
+        env.svm.expire_blockhash();
+        let convert = env.send(
+            ProgInstruction::ConvertReleasedPnl { amount: 1 },
+            vec![
+                AccountMeta::new(owner.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(portfolio, false),
+            ],
+            &[&owner],
+        );
+        if convert.is_ok() {
+            return;
+        }
+
+        env.svm.expire_blockhash();
+        let close_new = env.try_trade_asset_with_cu(
+            NEW_ASSET,
+            &owner,
+            portfolio,
+            &counterparty_owner,
+            counterparty,
+            -(POS_SCALE as i128),
+            PRICE_HIGH,
+            0,
+        );
+        if close_new.is_ok() {
+            return;
+        }
+
+        env.svm.expire_blockhash();
+        let close_old = env.try_trade_asset_with_cu(
+            0,
+            &owner,
+            portfolio,
+            &counterparty_owner,
+            counterparty,
+            -(POS_SCALE as i128),
+            PRICE_LOW,
+            0,
+        );
+        if close_old.is_ok() {
+            return;
+        }
+
+        env.svm.expire_blockhash();
+        let reduce = env.send(
+            ProgInstruction::RebalanceReduce {
+                asset_index: NEW_ASSET,
+                reduce_q: POS_SCALE,
+            },
+            vec![
+                AccountMeta::new(owner.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(portfolio, false),
+            ],
+            &[&owner],
+        );
+        if reduce.is_ok() {
+            return;
+        }
+        assert_eq!(env.svm.get_account(&env.market).unwrap(), trapped_market);
+        assert_eq!(env.svm.get_account(&portfolio).unwrap(), trapped_portfolio);
+
+        panic!(
+            "an admitted live leg has no bounded owner/keeper continuation after honest mark movement"
+        );
+    }
+
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before_admission,
+        "rejected admission rolls back market state"
+    );
+    assert_eq!(
+        env.svm.get_account(&portfolio).unwrap(),
+        portfolio_before_admission,
+        "rejected admission rolls back the full source-table portfolio"
+    );
+    assert_eq!(
+        env.svm.get_account(&counterparty).unwrap(),
+        counterparty_before_admission,
+        "rejected admission rolls back the counterparty"
+    );
+
+    // Capacity admission must not block the user's already-admitted exit.
+    env.svm.expire_blockhash();
+    env.trade_asset_with_cu(
+        0,
+        &owner,
+        portfolio,
+        &counterparty_owner,
+        counterparty,
+        -(POS_SCALE as i128),
+        PRICE_LOW,
+        0,
+    );
+    let flat = env.portfolio_state(portfolio);
+    assert!(percolator::active_bitmap_is_empty(active_bitmap(&flat)));
+
+    env.svm.expire_blockhash();
+    let convert = env.send(
+        ProgInstruction::ConvertReleasedPnl { amount: 1_000_000 },
+        vec![
+            AccountMeta::new(owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio, false),
+        ],
+        &[&owner],
+    );
+    assert!(
+        convert.is_ok(),
+        "closing the reserved exposure must release the historical claims: {convert:?}"
+    );
+    let withdrawable = env.portfolio_state(portfolio).capital.get();
+    let destination = env.withdraw(&owner, portfolio, withdrawable);
+    assert_eq!(env.token_amount(destination), withdrawable as u64);
+    assert_eq!(env.portfolio_state(portfolio).capital.get(), 0);
+}
