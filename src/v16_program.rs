@@ -11624,7 +11624,11 @@ pub mod processor {
         let effective_price = asset.effective_price.get();
         let trade_notional = trade_fee_notional_ceil(size_q_abs, accepted_exec_price)?;
         let max_side_oi_q = core::cmp::max(asset.oi_eff_long_q.get(), asset.oi_eff_short_q.get());
-        let max_side_notional = risk_notional_ceil(max_side_oi_q, effective_price)?;
+        // The trade moves the stored target, so value existing OI at the larger of that target
+        // and the lagging engine price. Otherwise a wash trade can cheaply overwrite an honest
+        // rebound while the circuit breaker still holds effective_price near the prior low.
+        let externality_price = core::cmp::max(effective_price, profile.mark_ewma_e6);
+        let max_side_notional = risk_notional_ceil(max_side_oi_q, externality_price)?;
         let mark_externality_notional = core::cmp::max(max_side_notional, trade_notional)
             .checked_mul(2)
             .ok_or(PercolatorError::EngineArithmeticOverflow)?;
