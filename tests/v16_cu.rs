@@ -9,6 +9,7 @@ use percolator_prog::{
         ASSET_ORACLE_WRAPPER_LEN, MARKET_GROUP_OFF, MATCHER_ABI_VERSION, MATCHER_CONTEXT_MIN_LEN,
         ORACLE_LEG_FLAG_DIVIDE_LEG2, ORACLE_LEG_FLAG_DIVIDE_LEG3, PORTFOLIO_ENGINE_ACCOUNT_LEN,
     },
+    error::PercolatorError,
     ix::{BatchTradeCpiLeg, BatchTradeLeg, CrankObservationHint, Instruction as ProgInstruction},
     oracle_v16, processor, state,
     state::{MarketGroupV16, PortfolioAccountV16},
@@ -3405,8 +3406,10 @@ impl V16CuEnv {
         asset_index: u16,
         b_delta_budget: u128,
     ) -> u64 {
+        let portfolio_id = self.portfolio_id(portfolio);
         self.send(
             ProgInstruction::ForfeitRecoveryLeg {
+                portfolio_id,
                 asset_index,
                 b_delta_budget,
             },
@@ -16164,6 +16167,7 @@ fn v16_attack_public_helpers_cannot_use_market_as_portfolio_alias() {
     env.svm.expire_blockhash();
     let forfeit = env.send(
         ProgInstruction::ForfeitRecoveryLeg {
+            portfolio_id: 1,
             asset_index: 0,
             b_delta_budget: 1,
         },
@@ -19312,6 +19316,7 @@ fn v16_probe_signed_forfeit_cannot_replay_after_portfolio_reinit() {
             AccountMeta::new(victim_portfolio, false),
         ],
         data: ProgInstruction::ForfeitRecoveryLeg {
+            portfolio_id: old_portfolio_id,
             asset_index: 0,
             b_delta_budget: 1,
         }
@@ -19319,8 +19324,8 @@ fn v16_probe_signed_forfeit_cannot_replay_after_portfolio_reinit() {
     };
     let stale_forfeit = Transaction::new_signed_with_payer(
         &[heap_ix(), cu_ix(), stale_ix],
-        Some(&admin.pubkey()),
-        &[&admin, &victim],
+        Some(&victim.pubkey()),
+        &[&victim],
         env.svm.latest_blockhash(),
     );
 
@@ -28999,12 +29004,15 @@ fn v16_attack_forfeit_recovery_leg_rejects_cross_market_portfolio_substitution()
     let local_before = env.svm.get_account(&local).unwrap();
     let vault_a_before = env.svm.get_account(&env.vault).unwrap();
     let vault_b_before = env.svm.get_account(&vault_b).unwrap();
+    let foreign_portfolio_id = env.portfolio_id(foreign);
+    let local_portfolio_id = env.portfolio_id(local);
     env.svm.expire_blockhash();
     let rejected = send_tx(
         &mut env.svm,
         env.program_id,
         &env.payer,
         ProgInstruction::ForfeitRecoveryLeg {
+            portfolio_id: foreign_portfolio_id,
             asset_index: 0,
             b_delta_budget: 1,
         },
@@ -29040,6 +29048,7 @@ fn v16_attack_forfeit_recovery_leg_rejects_cross_market_portfolio_substitution()
         env.program_id,
         &env.payer,
         ProgInstruction::ForfeitRecoveryLeg {
+            portfolio_id: local_portfolio_id,
             asset_index: 0,
             b_delta_budget: 1,
         },
@@ -29186,6 +29195,7 @@ fn v16_attack_recovery_tools_owner_gated() {
     env.svm.expire_blockhash();
     let r1 = env.send(
         ProgInstruction::ForfeitRecoveryLeg {
+            portfolio_id: env.portfolio_id(pa),
             asset_index: 0,
             b_delta_budget: 1,
         },
@@ -54502,6 +54512,7 @@ fn v16_attack_forfeit_recovery_leg_owner_gated_and_zero_budget_rejected() {
     env.svm.expire_blockhash();
     let r_grief = env.send(
         ProgInstruction::ForfeitRecoveryLeg {
+            portfolio_id: env.portfolio_id(pa),
             asset_index: 0,
             b_delta_budget: 1_000,
         },
@@ -54531,6 +54542,7 @@ fn v16_attack_forfeit_recovery_leg_owner_gated_and_zero_budget_rejected() {
     env.svm.expire_blockhash();
     let r_zero = env.send(
         ProgInstruction::ForfeitRecoveryLeg {
+            portfolio_id: env.portfolio_id(pa),
             asset_index: 0,
             b_delta_budget: 0,
         },
@@ -56442,6 +56454,7 @@ fn v16_attack_forfeit_recovery_leg_rejects_when_resolve_matured() {
     env.svm.expire_blockhash();
     let rejected = env.send(
         ProgInstruction::ForfeitRecoveryLeg {
+            portfolio_id: env.portfolio_id(stale_long),
             asset_index: 0,
             b_delta_budget: 1,
         },
