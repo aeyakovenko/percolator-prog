@@ -39,6 +39,111 @@ const fn first_generation_market_id(asset_index: u16) -> u64 {
     asset_index as u64 + 1
 }
 
+// A collateral top-up is a signed value-transfer intent. Reusing an asset slot must invalidate an
+// intent signed for the old generation; otherwise the replacement creator can name the old signer
+// as insurance_authority, name itself as insurance_operator, replay the transfer, and withdraw the
+// victim's tokens. Every transition below uses the public wrapper and ordinary SPL accounts.
+#[test]
+fn v16_attack_insurance_topup_cannot_replay_across_asset_generation() {
+    const ASSET: u16 = 1;
+    const DOMAIN: u16 = ASSET * 2;
+    const AMOUNT: u128 = 250_000;
+
+    let mut env = V16CuEnv::new();
+    let victim = Keypair::new();
+    let old_operator = Keypair::new();
+    let attacker = Keypair::new();
+    env.ensure_signer_account(victim.pubkey());
+    env.ensure_signer_account(attacker.pubkey());
+
+    env.svm.warp_to_slot(1);
+    env.activate_asset_with_authorities(
+        ASSET,
+        1,
+        100,
+        victim.pubkey(),
+        old_operator.pubkey(),
+        victim.pubkey(),
+        victim.pubkey(),
+    );
+    let old_market_id = env.asset_market_id(ASSET);
+    let victim_source = env.token_account(victim.pubkey(), AMOUNT as u64);
+    let stale_ix = Instruction {
+        program_id: env.program_id,
+        accounts: vec![
+            AccountMeta::new(victim.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(victim_source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        data: ProgInstruction::TopUpInsuranceDomain {
+            domain: DOMAIN,
+            amount: AMOUNT,
+        }
+        .encode(),
+    };
+    let stale_topup = Transaction::new_signed_with_payer(
+        &[heap_ix(), cu_ix(), stale_ix],
+        Some(&env.payer.pubkey()),
+        &[&env.payer, &victim],
+        env.svm.latest_blockhash(),
+    );
+
+    env.svm.warp_to_slot(2);
+    env.update_asset_lifecycle_as_admin_with_cu(
+        percolator_prog::processor::ASSET_ACTION_RETIRE,
+        ASSET,
+        2,
+        0,
+    );
+    env.svm.warp_to_slot(3);
+    env.activate_asset_with_authorities(
+        ASSET,
+        3,
+        200,
+        victim.pubkey(),
+        attacker.pubkey(),
+        attacker.pubkey(),
+        attacker.pubkey(),
+    );
+    let new_market_id = env.asset_market_id(ASSET);
+    assert_ne!(new_market_id, old_market_id);
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let source_before = env.svm.get_account(&victim_source).unwrap();
+    let vault_before = env.token_amount(env.vault);
+    let replay = env.svm.send_transaction(stale_topup);
+    if replay.is_ok() {
+        assert_eq!(env.token_amount(victim_source), 0);
+        assert_eq!(env.token_amount(env.vault), vault_before + AMOUNT as u64);
+        assert_eq!(
+            env.market_state().1.insurance_domain_budget[DOMAIN as usize],
+            AMOUNT
+        );
+        let (attacker_dest, _) = env
+            .try_withdraw_insurance_asset_with_authority(&attacker, ASSET, AMOUNT)
+            .expect("replacement insurance operator extracts replayed victim collateral");
+        assert_eq!(env.token_amount(attacker_dest), AMOUNT as u64);
+        assert_eq!(env.token_amount(env.vault), vault_before);
+    }
+
+    assert!(
+        replay.is_err(),
+        "stale generation-{old_market_id} top-up debited {AMOUNT} victim atoms and let the generation-{new_market_id} operator withdraw them"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "rejected stale top-up must leave the replacement market unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&victim_source).unwrap(),
+        source_before,
+        "rejected stale top-up must not debit the victim"
+    );
+}
+
 fn crank_observations(asset_index: u16) -> Vec<CrankObservationHint> {
     vec![CrankObservationHint {
         asset_index,
