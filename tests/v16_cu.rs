@@ -7636,6 +7636,204 @@ fn v16_bpf_permissionless_crank_computes_funding_from_internal_mark_premium() {
 }
 
 #[test]
+fn v16_attack_tradecpi_close_cannot_erase_elapsed_premium_funding() {
+    const PRICE: u64 = 2;
+    const TARGET: u64 = 1;
+    const Q: i128 = 100 * POS_SCALE as i128;
+    const DEPOSIT: u128 = 1_000_000;
+
+    let run = |close_before_crank: bool, batch: bool| -> (u128, u128, i128, i128) {
+        let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+            initial_price: PRICE,
+            max_price_move_bps_per_slot: 24,
+            max_accrual_dt_slots: 1,
+            max_abs_funding_e9_per_slot: 1_000,
+            min_funding_lifetime_slots: 1,
+            ..V16CuMarketParams::default()
+        });
+        env.configure_auth_mark_with_cu(0, PRICE);
+
+        let matcher_program = Pubkey::new_unique();
+        let matcher_bytes =
+            std::fs::read(auth_matcher_program_path()).expect("read auth matcher BPF");
+        env.svm.add_program(matcher_program, &matcher_bytes);
+
+        let attacker_owner = Keypair::new();
+        let lp_owner = Keypair::new();
+        let attacker = env.create_portfolio(&attacker_owner);
+        let lp = env.create_portfolio(&lp_owner);
+        env.deposit(&attacker_owner, attacker, DEPOSIT);
+        env.deposit(&lp_owner, lp, DEPOSIT);
+        let (matcher_ctx, matcher_delegate, _) =
+            env.init_auth_matcher_context_via_system_create(matcher_program, &lp_owner, lp);
+
+        // The attacker is short and the independently authorized permissionless LP is long.
+        let open = if batch {
+            env.send(
+                ProgInstruction::BatchTradeCpi {
+                    legs: vec![BatchTradeCpiLeg {
+                        asset_index: 0,
+                        size_q: -Q,
+                        fee_bps: 0,
+                        limit_price: 0,
+                    }],
+                },
+                vec![
+                    AccountMeta::new(attacker_owner.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(attacker, false),
+                    AccountMeta::new(lp, false),
+                    AccountMeta::new_readonly(matcher_program, false),
+                    AccountMeta::new(matcher_ctx, false),
+                    AccountMeta::new_readonly(matcher_delegate, false),
+                ],
+                &[&attacker_owner],
+            )
+        } else {
+            env.try_trade_cpi_with_cu_on_asset(
+                &attacker_owner,
+                attacker,
+                &lp_owner,
+                lp,
+                matcher_program,
+                matcher_ctx,
+                matcher_delegate,
+                0,
+                -Q,
+                0,
+            )
+        };
+        open.expect("permissionless matcher open");
+
+        // Honest mark update. At this tiny price the configured 24-bps movement cap rounds to
+        // zero, so the effective execution price remains exactly PRICE in both branches. The
+        // first crank publishes the target but correctly does not charge it retroactively.
+        env.svm.warp_to_slot(1);
+        env.push_auth_mark_with_cu(1, TARGET);
+        for portfolio in [attacker, lp] {
+            env.svm.expire_blockhash();
+            env.crank(
+                portfolio,
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: 1,
+                    observations: crank_observations(0),
+                },
+            );
+        }
+        let group_at_one = env.market_state().1;
+        assert_eq!(group_at_one.assets[0].effective_price, PRICE);
+        assert_eq!(group_at_one.assets[0].f_long_num, 0);
+        assert_eq!(group_at_one.assets[0].f_short_num, 0);
+
+        env.svm.warp_to_slot(2);
+        if !close_before_crank {
+            for portfolio in [attacker, lp] {
+                env.svm.expire_blockhash();
+                env.crank(
+                    portfolio,
+                    ProgInstruction::PermissionlessCrank {
+                        now_slot: 2,
+                        observations: crank_observations(0),
+                    },
+                );
+            }
+        }
+
+        // Only the attacker signs. A fair, pre-authorized matcher closes both sides at the unchanged
+        // engine price; landing order relative to the crank must not erase the LP's earned funding.
+        env.svm.expire_blockhash();
+        let close = if batch {
+            env.send(
+                ProgInstruction::BatchTradeCpi {
+                    legs: vec![BatchTradeCpiLeg {
+                        asset_index: 0,
+                        size_q: Q,
+                        fee_bps: 0,
+                        limit_price: 0,
+                    }],
+                },
+                vec![
+                    AccountMeta::new(attacker_owner.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(attacker, false),
+                    AccountMeta::new(lp, false),
+                    AccountMeta::new_readonly(matcher_program, false),
+                    AccountMeta::new(matcher_ctx, false),
+                    AccountMeta::new_readonly(matcher_delegate, false),
+                ],
+                &[&attacker_owner],
+            )
+        } else {
+            env.try_trade_cpi_with_cu_on_asset(
+                &attacker_owner,
+                attacker,
+                &lp_owner,
+                lp,
+                matcher_program,
+                matcher_ctx,
+                matcher_delegate,
+                0,
+                Q,
+                0,
+            )
+        };
+        close.expect("permissionless matcher close");
+
+        if close_before_crank {
+            for portfolio in [attacker, lp] {
+                env.svm.expire_blockhash();
+                env.crank(
+                    portfolio,
+                    ProgInstruction::PermissionlessCrank {
+                        now_slot: 2,
+                        observations: crank_observations(0),
+                    },
+                );
+            }
+        }
+
+        let group = env.market_state().1;
+        assert!(percolator::active_bitmap_is_empty(active_bitmap(
+            &env.portfolio_state(attacker)
+        )));
+        assert!(percolator::active_bitmap_is_empty(active_bitmap(
+            &env.portfolio_state(lp)
+        )));
+
+        for (owner, portfolio) in [(&attacker_owner, attacker), (&lp_owner, lp)] {
+            let pnl = env.portfolio_state(portfolio).pnl.get();
+            if pnl > 0 {
+                env.convert_released_pnl_with_cu(owner, portfolio, pnl as u128);
+            }
+        }
+        let attacker_capital = env.portfolio_state(attacker).capital.get();
+        let lp_capital = env.portfolio_state(lp).capital.get();
+        let attacker_dest = env.withdraw(&attacker_owner, attacker, attacker_capital);
+        let lp_dest = env.withdraw(&lp_owner, lp, lp_capital);
+        (
+            env.token_amount(attacker_dest) as u128,
+            env.token_amount(lp_dest) as u128,
+            group.assets[0].f_long_num,
+            group.assets[0].f_short_num,
+        )
+    };
+
+    for batch in [false, true] {
+        let control = run(false, batch);
+        let attack = run(true, batch);
+        assert_eq!(control.0 + control.1, 2 * DEPOSIT);
+        assert_eq!(attack.0 + attack.1, 2 * DEPOSIT);
+        assert_ne!(control.2, 0, "the control interval must accrue funding");
+        assert_eq!(control.2, -control.3);
+        assert_eq!(attack.2, -attack.3);
+        assert_eq!(
+            attack, control,
+            "batch={batch}: ordering must not erase funding owed to the independent LP"
+        );
+    }
+}
+
+#[test]
 fn v16_bpf_existing_funding_ledger_refreshes_and_converts_between_sides() {
     const INITIAL_PRICE: u64 = 1_000_000;
     const FUNDING_RATE_E9: i128 = 1_000;
