@@ -4583,6 +4583,45 @@ pub mod processor {
         Ok(profile)
     }
 
+    fn read_oracle_profile_for_resolve_scan_view(
+        group: &state::MarketViewMutV16<'_>,
+        asset_index: usize,
+    ) -> Result<state::AssetOracleProfileV16, ProgramError> {
+        // Public profile writes perform the full structural validation. Resolution only consumes
+        // this price summary, so re-walking every cold oracle-feed field here would make the sole
+        // terminal path exceed max-shape CU. Revalidate every field that this scan reads.
+        let market = group
+            .markets
+            .get(asset_index)
+            .ok_or(PercolatorError::InvalidInstruction)?;
+        let bytes = market
+            .wrapper
+            .get(..constants::ASSET_ORACLE_PROFILE_LEN)
+            .ok_or(PercolatorError::InvalidAccountLen)?;
+        let profile: state::AssetOracleProfileV16 = bytemuck::pod_read_unaligned(bytes);
+        match profile.oracle_mode {
+            constants::ORACLE_MODE_MANUAL
+            | constants::ORACLE_MODE_HYBRID_AFTER_HOURS
+            | constants::ORACLE_MODE_EWMA_MARK
+            | constants::ORACLE_MODE_AUTH_MARK => {}
+            _ => return Err(ProgramError::InvalidAccountData),
+        }
+        if oracle_v16::profile_is_price_managed(&profile)
+            && (profile.mark_ewma_e6 == 0
+                || profile.mark_ewma_e6 > percolator::MAX_ORACLE_PRICE
+                || profile.oracle_target_price_e6 == 0
+                || profile.oracle_target_price_e6 > percolator::MAX_ORACLE_PRICE)
+        {
+            return Err(ProgramError::InvalidAccountData);
+        }
+        if oracle_v16::profile_is_auth_mark(&profile)
+            && profile.mark_ewma_e6 != profile.oracle_target_price_e6
+        {
+            return Err(ProgramError::InvalidAccountData);
+        }
+        Ok(profile)
+    }
+
     fn write_oracle_profile_to_view_if_separate(
         group: &mut state::MarketViewMutV16<'_>,
         asset_index: usize,
@@ -8661,12 +8700,27 @@ pub mod processor {
         Ok(())
     }
 
+    fn zero_delta_anchor_price_ceiling_view(group: &state::MarketViewMutV16<'_>) -> u64 {
+        let max_delta_factor = group
+            .header
+            .config
+            .max_price_move_bps_per_slot
+            .get()
+            .saturating_mul(group.header.config.max_accrual_dt_slots.get());
+        if max_delta_factor == 0 {
+            u64::MAX
+        } else {
+            9_999 / max_delta_factor
+        }
+    }
+
     fn committed_market_resolve_accrual_for_profile_view(
         profile: &state::AssetOracleProfileV16,
         group: &state::MarketViewMutV16<'_>,
         asset_index: usize,
         resolved_slot: u64,
         include_pending_mark: bool,
+        zero_delta_anchor_price_ceiling: u64,
     ) -> Result<Option<(u64, i128)>, ProgramError> {
         if asset_index >= group.header.config.max_market_slots.get() as usize
             || asset_index >= group.markets.len()
@@ -8691,11 +8745,22 @@ pub mod processor {
         if profile.mark_ewma_e6 == asset.effective_price.get() {
             return Ok(None);
         }
+        // A different mark can still be a provable no-op when even the maximum configured dt makes
+        // the bounded price delta round to zero. The caller computes the ceiling once so this
+        // max-shape scan only needs a comparison per exposed asset.
+        let balanced = asset.oi_eff_long_q.get() != 0 && asset.oi_eff_short_q.get() != 0;
+        let price_must_remain_unchanged = profile.mark_ewma_e6 != 0
+            && asset.effective_price.get() <= zero_delta_anchor_price_ceiling;
+        let funding_must_remain_zero = !balanced
+            || group.header.config.max_abs_funding_e9_per_slot.get() == 0
+            || profile.mark_ewma_last_slot > asset.slot_last.get();
+        if price_must_remain_unchanged && funding_must_remain_zero {
+            return Ok(None);
+        }
         let next_price =
             committed_effective_price_for_accrual_view(profile, group, asset_index, resolved_slot)?;
         let funding_rate_e9 =
             permissionless_funding_rate_e9_view(profile, group, asset_index, next_price)?;
-        let balanced = asset.oi_eff_long_q.get() != 0 && asset.oi_eff_short_q.get() != 0;
         if next_price == asset.effective_price.get() && (!balanced || funding_rate_e9 == 0) {
             return Ok(None);
         }
@@ -8704,24 +8769,25 @@ pub mod processor {
 
     #[inline(never)]
     fn reject_market_resolve_before_committed_accrual_view(
-        cfg: &WrapperConfigV16,
         group: &state::MarketViewMutV16<'_>,
         resolved_slot: u64,
         include_pending_mark: bool,
     ) -> ProgramResult {
         let configured_slots = group.header.config.max_market_slots.get() as usize;
+        let zero_delta_anchor_price_ceiling = zero_delta_anchor_price_ceiling_view(group);
         let mut asset_index = 0usize;
         while asset_index < configured_slots {
             let asset = group.markets[asset_index].engine.asset;
             let exposed = asset.oi_eff_long_q.get() != 0 || asset.oi_eff_short_q.get() != 0;
             if exposed && asset.slot_last.get() < resolved_slot {
-                let profile = read_oracle_profile_from_view(group, cfg, asset_index)?;
+                let profile = read_oracle_profile_for_resolve_scan_view(group, asset_index)?;
                 if committed_market_resolve_accrual_for_profile_view(
                     &profile,
                     group,
                     asset_index,
                     resolved_slot,
                     include_pending_mark,
+                    zero_delta_anchor_price_ceiling,
                 )?
                 .is_some()
                 {
@@ -8755,7 +8821,7 @@ pub mod processor {
         if slot < group.header.current_slot.get() {
             return Err(PercolatorError::EngineStale.into());
         }
-        reject_market_resolve_before_committed_accrual_view(&cfg, &group, slot, false)?;
+        reject_market_resolve_before_committed_accrual_view(&group, slot, false)?;
         group
             .resolve_market_not_atomic(slot)
             .map_err(map_v16_error)?;
@@ -9841,12 +9907,7 @@ pub mod processor {
         if !oracle_v16::permissionless_stale_matured(&cfg, authenticated_slot) {
             return Err(PercolatorError::OracleStale.into());
         }
-        reject_market_resolve_before_committed_accrual_view(
-            &cfg,
-            &group,
-            authenticated_slot,
-            true,
-        )?;
+        reject_market_resolve_before_committed_accrual_view(&group, authenticated_slot, true)?;
         group
             .resolve_market_not_atomic(authenticated_slot)
             .map_err(map_v16_error)?;
@@ -10682,6 +10743,7 @@ pub mod processor {
                         asset_index,
                         authenticated_now_slot,
                         true,
+                        zero_delta_anchor_price_ceiling_view(&group),
                     )?
                     .ok_or(PercolatorError::EngineNonProgress)?
                 } else {

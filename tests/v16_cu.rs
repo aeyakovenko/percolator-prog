@@ -60004,7 +60004,7 @@ fn v16_attack_stale_resolve_can_finish_committed_funding_accrual() {
 
 #[test]
 fn v16_dense_zero_delta_price_managed_stale_market_remains_resolvable() {
-    const ASSET_COUNT: u16 = 2_000;
+    const ASSET_COUNT: u16 = 5_834;
     const PRICE: u64 = 100;
     // Pre-sizing is part of normal market-account construction. InitMarket still configures only
     // the first 14 slots; every additional slot is activated below through the public API.
@@ -60165,7 +60165,6 @@ fn v16_dense_zero_delta_price_managed_stale_market_remains_resolvable() {
     );
 
     env.svm.expire_blockhash();
-    env.svm.expire_blockhash();
     let no_progress = env
         .send(
             ProgInstruction::PermissionlessCrank {
@@ -60181,8 +60180,7 @@ fn v16_dense_zero_delta_price_managed_stale_market_remains_resolvable() {
         )
         .expect_err("the zero-delta committed mark leaves the account crank with no action");
     assert!(
-        no_progress.contains("Custom(22)")
-            || no_progress.contains("custom program error: 0x16"),
+        no_progress.contains("Custom(22)") || no_progress.contains("custom program error: 0x16"),
         "the honest crank should fail specifically as EngineNonProgress: {no_progress}"
     );
 
@@ -60196,6 +60194,7 @@ fn v16_dense_zero_delta_price_managed_stale_market_remains_resolvable() {
             &[],
         )
         .expect("a publicly constructed dense market must retain a bounded stale resolver");
+    eprintln!("dense zero-delta stale resolve CU={resolve_cu}");
     assert!(resolve_cu < 1_400_000);
     assert_eq!(env.market_state().1.mode, MarketModeV16::Resolved);
 }
