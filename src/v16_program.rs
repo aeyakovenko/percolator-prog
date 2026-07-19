@@ -2561,16 +2561,19 @@ pub mod ix {
         },
         ClosePortfolio,
         TopUpInsurance {
+            market_id: u64,
             amount: u128,
         },
         TopUpInsuranceDomain {
             domain: u16,
+            market_id: u64,
             amount: u128,
         },
         CloseSlab,
         ResolveMarket,
         TopUpBackingBucket {
             domain: u16,
+            market_id: u64,
             amount: u128,
             expiry_slot: u64,
         },
@@ -2835,16 +2838,19 @@ pub mod ix {
                 },
                 8 => Self::ClosePortfolio,
                 9 => Self::TopUpInsurance {
+                    market_id: read_u64(&mut rest)?,
                     amount: read_u128(&mut rest)?,
                 },
                 56 => Self::TopUpInsuranceDomain {
                     domain: read_u16(&mut rest)?,
+                    market_id: read_u64(&mut rest)?,
                     amount: read_u128(&mut rest)?,
                 },
                 13 => Self::CloseSlab,
                 19 => Self::ResolveMarket,
                 24 => Self::TopUpBackingBucket {
                     domain: read_u16(&mut rest)?,
+                    market_id: read_u64(&mut rest)?,
                     amount: read_u128(&mut rest)?,
                     expiry_slot: read_u64(&mut rest)?,
                 },
@@ -3132,24 +3138,32 @@ pub mod ix {
                     out.push(enabled);
                 }
                 Self::ClosePortfolio => out.push(8),
-                Self::TopUpInsurance { amount } => {
+                Self::TopUpInsurance { market_id, amount } => {
                     out.push(9);
+                    push_u64(&mut out, market_id);
                     push_u128(&mut out, amount);
                 }
-                Self::TopUpInsuranceDomain { domain, amount } => {
+                Self::TopUpInsuranceDomain {
+                    domain,
+                    market_id,
+                    amount,
+                } => {
                     out.push(56);
                     push_u16(&mut out, domain);
+                    push_u64(&mut out, market_id);
                     push_u128(&mut out, amount);
                 }
                 Self::CloseSlab => out.push(13),
                 Self::ResolveMarket => out.push(19),
                 Self::TopUpBackingBucket {
                     domain,
+                    market_id,
                     amount,
                     expiry_slot,
                 } => {
                     out.push(24);
                     push_u16(&mut out, domain);
+                    push_u64(&mut out, market_id);
                     push_u128(&mut out, amount);
                     push_u64(&mut out, expiry_slot);
                 }
@@ -5297,19 +5311,29 @@ pub mod processor {
                 handle_set_matcher_config(program_id, accounts, enabled)
             }
             Instruction::ClosePortfolio => handle_close_portfolio(program_id, accounts),
-            Instruction::TopUpInsurance { amount } => {
-                handle_top_up_insurance(program_id, accounts, amount)
+            Instruction::TopUpInsurance { market_id, amount } => {
+                handle_top_up_insurance(program_id, accounts, market_id, amount)
             }
-            Instruction::TopUpInsuranceDomain { domain, amount } => {
-                handle_top_up_insurance_domain(program_id, accounts, domain, amount)
-            }
+            Instruction::TopUpInsuranceDomain {
+                domain,
+                market_id,
+                amount,
+            } => handle_top_up_insurance_domain(program_id, accounts, domain, market_id, amount),
             Instruction::CloseSlab => handle_close_slab(program_id, accounts),
             Instruction::ResolveMarket => handle_resolve_market(program_id, accounts),
             Instruction::TopUpBackingBucket {
                 domain,
+                market_id,
                 amount,
                 expiry_slot,
-            } => handle_top_up_backing_bucket(program_id, accounts, domain, amount, expiry_slot),
+            } => handle_top_up_backing_bucket(
+                program_id,
+                accounts,
+                domain,
+                market_id,
+                amount,
+                expiry_slot,
+            ),
             Instruction::WithdrawBackingBucket { domain, amount } => {
                 handle_withdraw_backing_bucket(program_id, accounts, domain, amount)
             }
@@ -7191,10 +7215,27 @@ pub mod processor {
         Ok(())
     }
 
+    fn require_asset_generation_view(
+        group: &state::MarketViewMutV16<'_>,
+        asset_index: usize,
+        expected_market_id: u64,
+    ) -> ProgramResult {
+        if asset_index >= group.header.config.max_market_slots.get() as usize
+            || asset_index >= group.markets.len()
+        {
+            return Err(PercolatorError::InvalidInstruction.into());
+        }
+        if group.markets[asset_index].engine.asset.market_id.get() != expected_market_id {
+            return Err(PercolatorError::AssetGenerationMismatch.into());
+        }
+        Ok(())
+    }
+
     #[inline(never)]
     fn handle_top_up_insurance<'a>(
         program_id: &Pubkey,
         accounts: &'a [AccountInfo<'a>],
+        expected_market_id: u64,
         amount: u128,
     ) -> ProgramResult {
         let signer = account(accounts, 0)?;
@@ -7236,6 +7277,7 @@ pub mod processor {
             if group.header.mode != 0 {
                 return Err(PercolatorError::EngineLockActive.into());
             }
+            require_asset_generation_view(&group, 0, expected_market_id)?;
             reject_permissionless_resolve_matured_live_view(&cfg, &group)?;
             let asset0_insurance_authority =
                 domain_authorities_from_view(&group, &cfg, 0)?.insurance_authority;
@@ -7298,6 +7340,7 @@ pub mod processor {
         program_id: &Pubkey,
         accounts: &'a [AccountInfo<'a>],
         domain: u16,
+        expected_market_id: u64,
         amount: u128,
     ) -> ProgramResult {
         let signer = account(accounts, 0)?;
@@ -7348,6 +7391,7 @@ pub mod processor {
             }
             reject_permissionless_resolve_matured_live_view(&cfg, &group)?;
             require_domain_accepts_live_topup_view(&group, domain)?;
+            require_asset_generation_view(&group, domain / 2, expected_market_id)?;
             let authorities = domain_authorities_from_view(&group, &cfg, domain)?;
             expect_live_authority(&authorities.insurance_authority, signer.key)?;
             let mut ledger_data = if let Some(ledger_ai) = ledger_ai {
@@ -7632,6 +7676,7 @@ pub mod processor {
         program_id: &Pubkey,
         accounts: &'a [AccountInfo<'a>],
         domain: u16,
+        expected_market_id: u64,
         amount: u128,
         expiry_slot: u64,
     ) -> ProgramResult {
@@ -7664,6 +7709,7 @@ pub mod processor {
                 return Err(PercolatorError::EngineLockActive.into());
             }
             require_domain_accepts_live_topup_view(&group, domain_usize)?;
+            require_asset_generation_view(&group, asset_index, expected_market_id)?;
             let profile = read_oracle_profile_from_view(&group, &cfg, asset_index)?;
             let authorities = domain_authorities_from_profile(&cfg, &profile, asset_index);
             (cfg, authorities)
@@ -7683,6 +7729,7 @@ pub mod processor {
             }
             reject_permissionless_resolve_matured_live_view(&cfg, &group)?;
             require_domain_accepts_live_topup_view(&group, domain_usize)?;
+            require_asset_generation_view(&group, domain_usize / 2, expected_market_id)?;
             let authorities = domain_authorities_from_view(&group, &cfg, domain_usize)?;
             expect_live_authority(&authorities.backing_bucket_authority, signer.key)?;
             let mut ledger_data = if let Some(ledger_ai) = ledger_ai {

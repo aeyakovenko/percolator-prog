@@ -304,7 +304,7 @@ Percolator enforces three layers with distinct responsibilities:
 - **Layout**: header + wrapper config + `MarketGroupV16Account`
 - Holds market-level totals, insurance, oracle/asset state, source-domain credit state, and asset lifecycle state.
 
-The v16 asset index ABI is `u16`. The current persisted layout is still a fixed-capacity Pod market-group layout, but asset indices are treated as reusable logical slots. A retired asset slot can only be reactivated after the configured shutdown/activation timeout, and reactivation assigns a new monotonic `u64` `market_id` from the market group. `market_id` values are never reused, including when a closed market account is recreated at the same address. Trade instructions, co-signed authority rotations, portfolio legs, and close-progress ledgers carry that id, so neither stale signed intent nor stale state from an old shutdown market can bind to a reused slot.
+The v16 asset index ABI is `u16`. The current persisted layout is still a fixed-capacity Pod market-group layout, but asset indices are treated as reusable logical slots. A retired asset slot can only be reactivated after the configured shutdown/activation timeout, and reactivation assigns a new monotonic `u64` `market_id` from the market group. `market_id` values are never reused, including when a closed market account is recreated at the same address. Trade instructions, signed collateral contributions, co-signed authority rotations, portfolio legs, and close-progress ledgers carry that id, so neither stale signed intent nor stale state from an old shutdown market can bind to a reused slot.
 
 ### Market generation account
 - **Owner**: Percolator program id
@@ -437,7 +437,14 @@ This section describes intent and operational ordering, not argument-by-argument
   - permissionless side-reset finalization for engine-ready asset sides
   - validates side encoding and engine readiness; it is not an admin override
 - **TopUpInsurance** (tag 9)
-  - transfers collateral into vault; credits insurance fund in engine
+  - `TopUpInsurance { market_id, amount }` transfers collateral into the vault and credits asset 0's insurance fund
+  - the signed `market_id` must match the current base-asset generation
+- **TopUpInsuranceDomain** (tag 56)
+  - `TopUpInsuranceDomain { domain, market_id, amount }` credits one asset-side insurance budget
+  - `market_id` must match the generation owning `domain`
+- **TopUpBackingBucket** (tag 24)
+  - `TopUpBackingBucket { domain, market_id, amount, expiry_slot }` contributes source backing
+  - `market_id` must match the generation owning `domain`
 
 ### Trading
 - **TradeNoCpi**
@@ -790,7 +797,7 @@ Call `InitMarket` with:
   - deposit collateral with `Deposit`
 
 ### Step 3: Fund insurance
-Call `TopUpInsurance` as needed.
+Call `TopUpInsurance` with asset 0's current `market_id` as needed.
 
 ### Step 4: Start keepers
 Run `PermissionlessCrank` continuously.
