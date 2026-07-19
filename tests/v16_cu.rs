@@ -60003,14 +60003,16 @@ fn v16_attack_stale_resolve_can_finish_committed_funding_accrual() {
 }
 
 #[test]
-fn v16_dense_price_managed_stale_market_remains_resolvable() {
-    const ASSET_COUNT: u16 = 4_000;
+fn v16_dense_zero_delta_price_managed_stale_market_remains_resolvable() {
+    const ASSET_COUNT: u16 = 5_834;
     const PRICE: u64 = 100;
     // Pre-sizing is part of normal market-account construction. InitMarket still configures only
     // the first 14 slots; every additional slot is activated below through the public API.
     let mut env = V16CuEnv::new_with_init_params_and_market_capacity(
         V16CuMarketParams {
             max_portfolio_assets: percolator_prog::constants::WRAPPER_MAX_PORTFOLIO_ASSETS,
+            max_price_move_bps_per_slot: 1,
+            max_abs_funding_e9_per_slot: 0,
             ..V16CuMarketParams::default()
         },
         ASSET_COUNT as usize,
@@ -60125,7 +60127,17 @@ fn v16_dense_price_managed_stale_market_remains_resolvable() {
         &[&admin],
     )
     .expect("configure permissionless resolution");
-    let resolved_slot = ASSET_COUNT as u64 + 1;
+
+    // Every exposed asset has a different committed mark, but its configured one-slot move
+    // rounds to zero and funding is disabled. There is no accrual work to commit, so resolution
+    // must remain bounded even though each entry reaches the full preflight predicate.
+    let mark_slot = ASSET_COUNT as u64 + 1;
+    env.svm.warp_to_slot(mark_slot);
+    for asset_index in 0..ASSET_COUNT {
+        env.push_auth_mark_for_asset_as_admin(asset_index, mark_slot, PRICE - 1);
+    }
+
+    let resolved_slot = mark_slot + 2;
     env.svm.warp_to_slot(resolved_slot);
 
     env.svm.expire_blockhash();
@@ -60153,6 +60165,26 @@ fn v16_dense_price_managed_stale_market_remains_resolvable() {
     );
 
     env.svm.expire_blockhash();
+    let no_progress = env
+        .send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: resolved_slot,
+                observations: crank_observations(0),
+            },
+            vec![
+                AccountMeta::new(env.payer.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(victim_portfolio, false),
+            ],
+            &[],
+        )
+        .expect_err("the zero-delta committed mark leaves the account crank with no action");
+    assert!(
+        no_progress.contains("Custom(22)") || no_progress.contains("custom program error: 0x16"),
+        "the honest crank should fail specifically as EngineNonProgress: {no_progress}"
+    );
+
+    env.svm.expire_blockhash();
     let resolve_cu = env
         .send(
             ProgInstruction::ResolveStalePermissionless {
@@ -60162,6 +60194,7 @@ fn v16_dense_price_managed_stale_market_remains_resolvable() {
             &[],
         )
         .expect("a publicly constructed dense market must retain a bounded stale resolver");
+    eprintln!("dense zero-delta stale resolve CU={resolve_cu}");
     assert!(resolve_cu < 1_400_000);
     assert_eq!(env.market_state().1.mode, MarketModeV16::Resolved);
 }
