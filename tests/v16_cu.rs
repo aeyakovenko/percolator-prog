@@ -6391,6 +6391,169 @@ fn v16_attack_signed_mark_push_cannot_replay_after_asset_restart() {
     }
 }
 
+// Oracle configuration is also a signed price authorization. A retained configuration for an old
+// empty asset must not reset a replacement generation's entry anchor immediately before a trade
+// that was signed against the visible current anchor.
+#[test]
+fn v16_attack_signed_auth_config_cannot_replay_after_asset_restart() {
+    const PRICE: u64 = 100;
+    const STALE_ENTRY_PRICE: u64 = 50;
+    const SIZE_Q: i128 = (5_000 * POS_SCALE) as i128;
+    const DEPOSIT: u128 = 1_000_000;
+
+    let mut env = V16CuEnv::new();
+    let oracle = env.admin.insecure_clone();
+    env.configure_auth_mark_with_cu(0, PRICE);
+    let old_market_id = env.asset_market_id(0);
+    let stale_config_ix = Instruction {
+        program_id: env.program_id,
+        accounts: vec![
+            AccountMeta::new(oracle.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        data: ProgInstruction::ConfigureAuthMark {
+            asset_index: 0,
+            now_slot: 0,
+            initial_mark_e6: STALE_ENTRY_PRICE,
+        }
+        .encode(),
+    };
+    let stale_config = Transaction::new_signed_with_payer(
+        &[heap_ix(), cu_ix(), stale_config_ix],
+        Some(&env.payer.pubkey()),
+        &[&env.payer, &oracle],
+        env.svm.latest_blockhash(),
+    );
+
+    env.configure_permissionless_resolve_with_cu(100, 1);
+    env.svm.warp_to_slot(1);
+    env.try_shutdown_asset_with_authority(&oracle, 0, 1)
+        .expect("empty asset shuts down");
+    env.svm.warp_to_slot(2);
+    env.try_restart_asset_oracle_with_authority(&oracle, 0, 2, PRICE)
+        .expect("asset restarts");
+    let new_market_id = env.asset_market_id(0);
+    assert_ne!(new_market_id, old_market_id);
+    env.configure_auth_mark_with_cu(2, PRICE);
+
+    let beneficiary = Keypair::new();
+    let victim = Keypair::new();
+    let beneficiary_portfolio = env.create_portfolio(&beneficiary);
+    let victim_portfolio = env.create_portfolio(&victim);
+    env.deposit(&beneficiary, beneficiary_portfolio, DEPOSIT);
+    env.deposit(&victim, victim_portfolio, DEPOSIT);
+
+    // The beneficiary retains a trade signed while the replacement asset visibly anchors at 100.
+    // Positive size makes the beneficiary long and the independent victim short.
+    let trade_ix = Instruction {
+        program_id: env.program_id,
+        accounts: vec![
+            AccountMeta::new(beneficiary.pubkey(), true),
+            AccountMeta::new(victim.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(beneficiary_portfolio, false),
+            AccountMeta::new(victim_portfolio, false),
+        ],
+        data: ProgInstruction::TradeNoCpi {
+            asset_index: 0,
+            market_id: new_market_id,
+            size_q: SIZE_Q,
+            exec_price: PRICE,
+            fee_bps: 0,
+        }
+        .encode(),
+    };
+    let signed_trade = Transaction::new_signed_with_payer(
+        &[heap_ix(), cu_ix(), trade_ix],
+        Some(&env.payer.pubkey()),
+        &[&env.payer, &beneficiary, &victim],
+        env.svm.latest_blockhash(),
+    );
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let beneficiary_before = env.svm.get_account(&beneficiary_portfolio).unwrap();
+    let victim_before = env.svm.get_account(&victim_portfolio).unwrap();
+    let replay = env.svm.send_transaction(stale_config);
+    if replay.is_ok() {
+        let stale_profile =
+            state::read_asset_oracle_profile(&env.svm.get_account(&env.market).unwrap().data, 0)
+                .unwrap();
+        assert_eq!(stale_profile.oracle_target_price_e6, STALE_ENTRY_PRICE);
+        env.svm
+            .send_transaction(signed_trade)
+            .expect("the retained current-generation trade lands after the stale reconfiguration");
+
+        env.svm.warp_to_slot(3);
+        env.push_auth_mark_for_asset_with_authority(0, &oracle, 3, PRICE);
+        for portfolio in [beneficiary_portfolio, victim_portfolio] {
+            env.crank_steps(
+                portfolio,
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: 3,
+                    observations: crank_observations(0),
+                },
+                4,
+            );
+        }
+        let beneficiary_after = env.portfolio_state(beneficiary_portfolio);
+        let victim_after = env.portfolio_state(victim_portfolio);
+        let beneficiary_equity =
+            beneficiary_after.capital.get() as i128 + beneficiary_after.pnl.get();
+        let victim_equity = victim_after.capital.get() as i128 + victim_after.pnl.get();
+        assert!(beneficiary_equity > DEPOSIT as i128);
+        assert!(victim_equity < DEPOSIT as i128);
+
+        let exit_lp = Keypair::new();
+        let exit_portfolio = env.create_portfolio(&exit_lp);
+        env.deposit(&exit_lp, exit_portfolio, DEPOSIT);
+        let exit_price = env.market_state().1.assets[0].effective_price;
+        env.trade_with_cu(
+            &exit_lp,
+            exit_portfolio,
+            &beneficiary,
+            beneficiary_portfolio,
+            SIZE_Q,
+            exit_price,
+            0,
+        );
+        let beneficiary_flat = env.portfolio_state(beneficiary_portfolio);
+        assert!(percolator::active_bitmap_is_empty(active_bitmap(
+            &beneficiary_flat
+        )));
+        let released = beneficiary_flat.pnl.get() as u128;
+        assert!(released > 0);
+        env.convert_released_pnl_with_cu(&beneficiary, beneficiary_portfolio, released);
+        let withdrawable = env.portfolio_state(beneficiary_portfolio).capital.get();
+        let destination = env.withdraw(&beneficiary, beneficiary_portfolio, withdrawable);
+        assert_eq!(env.token_amount(destination) as u128, withdrawable);
+        assert!(withdrawable > DEPOSIT);
+        panic!(
+            "an old-generation oracle configuration reset fresh entry from {PRICE} to \
+             {STALE_ENTRY_PRICE}, reduced victim equity to {victim_equity}, and let the \
+             beneficiary withdraw {withdrawable}"
+        );
+    }
+
+    let replay_error = format!("{:?}", replay.unwrap_err());
+    let expected_error = format!(
+        "Custom({})",
+        PercolatorError::AssetGenerationMismatch as u32
+    );
+    assert!(
+        replay_error.contains(&expected_error),
+        "stale oracle configuration must fail with {expected_error}, got {replay_error}"
+    );
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+    assert_eq!(
+        env.svm.get_account(&beneficiary_portfolio).unwrap(),
+        beneficiary_before
+    );
+    assert_eq!(
+        env.svm.get_account(&victim_portfolio).unwrap(),
+        victim_before
+    );
+}
+
 // Before the persistent generation account, a full CloseSlab + InitMarket cycle at the same market
 // address reset every asset market_id to its first-generation value. Keep the original, fully
 // signed transaction object across that public lifecycle: rebuilding the instruction after reinit
