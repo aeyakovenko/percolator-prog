@@ -971,6 +971,7 @@ impl V16CuEnv {
             self.program_id,
             &self.payer,
             ProgInstruction::RestartAssetOracle {
+                market_id: 0,
                 asset_index,
                 now_slot,
                 initial_price,
@@ -2418,6 +2419,7 @@ impl V16CuEnv {
             self.program_id,
             &self.payer,
             ProgInstruction::ConfigureHybridOracle {
+                market_id: 0,
                 asset_index: 0,
                 now_slot,
                 now_unix_ts,
@@ -2530,6 +2532,7 @@ impl V16CuEnv {
             self.program_id,
             &self.payer,
             ProgInstruction::ConfigureHybridOracle {
+                market_id: 0,
                 asset_index,
                 now_slot,
                 now_unix_ts,
@@ -2561,6 +2564,7 @@ impl V16CuEnv {
             self.program_id,
             &self.payer,
             ProgInstruction::ConfigureEwmaMark {
+                market_id: 0,
                 asset_index: 0,
                 now_slot,
                 initial_mark_e6,
@@ -2603,6 +2607,7 @@ impl V16CuEnv {
             self.program_id,
             &self.payer,
             ProgInstruction::ConfigureAuthMark {
+                market_id: 0,
                 asset_index: 0,
                 now_slot,
                 initial_mark_e6,
@@ -2648,6 +2653,7 @@ impl V16CuEnv {
             self.program_id,
             &self.payer,
             ProgInstruction::ConfigureAuthMark {
+                market_id: 0,
                 asset_index,
                 now_slot,
                 initial_mark_e6,
@@ -2700,6 +2706,7 @@ impl V16CuEnv {
             self.program_id,
             &self.payer,
             ProgInstruction::ConfigureAuthMark {
+                market_id: 0,
                 asset_index,
                 now_slot,
                 initial_mark_e6,
@@ -3659,10 +3666,11 @@ fn send_tx(
     svm: &mut LiteSVM,
     program_id: Pubkey,
     payer: &Keypair,
-    ix: ProgInstruction,
+    mut ix: ProgInstruction,
     accounts: Vec<AccountMeta>,
     extra_signers: &[&Keypair],
 ) -> Result<u64, String> {
+    bind_test_oracle_generation(svm, &mut ix, &accounts);
     let instruction = Instruction {
         program_id,
         accounts,
@@ -3680,6 +3688,47 @@ fn send_tx(
     svm.send_transaction(tx)
         .map(|meta| meta.compute_units_consumed)
         .map_err(|e| format!("{e:?}"))
+}
+
+fn bind_test_oracle_generation(svm: &LiteSVM, ix: &mut ProgInstruction, accounts: &[AccountMeta]) {
+    let (asset_index, market_id) = match ix {
+        ProgInstruction::ConfigureHybridOracle {
+            asset_index,
+            market_id,
+            ..
+        }
+        | ProgInstruction::ConfigureEwmaMark {
+            asset_index,
+            market_id,
+            ..
+        }
+        | ProgInstruction::ConfigureAuthMark {
+            asset_index,
+            market_id,
+            ..
+        }
+        | ProgInstruction::RestartAssetOracle {
+            asset_index,
+            market_id,
+            ..
+        } => (*asset_index as usize, market_id),
+        _ => return,
+    };
+    if *market_id != 0 {
+        return;
+    }
+    let Some(market) = accounts
+        .get(1)
+        .and_then(|meta| svm.get_account(&meta.pubkey))
+    else {
+        return;
+    };
+    let Ok((_, group)) = state::read_market(&market.data) else {
+        return;
+    };
+    if let Some(asset) = group.assets.get(asset_index) {
+        *market_id = asset.market_id;
+    }
 }
 
 fn send_raw_tx(
@@ -5240,6 +5289,7 @@ fn v16_attack_privileged_reactivate_rekeys_retired_slot_authorities() {
     env.svm.expire_blockhash();
     let old_oracle_reconfig = env.send(
         ProgInstruction::ConfigureAuthMark {
+            market_id: 0,
             asset_index: 1,
             now_slot: 5,
             initial_mark_e6: 300,
@@ -5264,6 +5314,7 @@ fn v16_attack_privileged_reactivate_rekeys_retired_slot_authorities() {
     env.svm.expire_blockhash();
     let new_oracle_reconfig = env.send(
         ProgInstruction::ConfigureAuthMark {
+            market_id: 0,
             asset_index: 1,
             now_slot: 5,
             initial_mark_e6: 300,
@@ -6391,6 +6442,271 @@ fn v16_attack_signed_mark_push_cannot_replay_after_asset_restart() {
     }
 }
 
+// Oracle configuration is also a signed price authorization. A retained configuration for an old
+// empty asset must not reset a replacement generation's entry anchor immediately before a trade
+// that was signed against the visible current anchor.
+#[test]
+fn v16_legacy_unbound_oracle_configuration_payloads_fail_closed() {
+    for (tag, old_len) in [(34, 156), (35, 35), (62, 19), (69, 19)] {
+        let mut old_wire = vec![0u8; old_len];
+        old_wire[0] = tag;
+        assert!(
+            ProgInstruction::decode(&old_wire).is_err(),
+            "legacy tag {tag} payload must fail closed without an asset generation"
+        );
+    }
+}
+
+#[test]
+fn v16_attack_signed_auth_config_cannot_replay_after_asset_restart() {
+    const PRICE: u64 = 100;
+    const STALE_ENTRY_PRICE: u64 = 50;
+    const SIZE_Q: i128 = (5_000 * POS_SCALE) as i128;
+    const DEPOSIT: u128 = 1_000_000;
+
+    let mut env = V16CuEnv::new();
+    let oracle = env.admin.insecure_clone();
+    env.configure_auth_mark_with_cu(0, PRICE);
+    let old_market_id = env.asset_market_id(0);
+    let stale_config_ix = Instruction {
+        program_id: env.program_id,
+        accounts: vec![
+            AccountMeta::new(oracle.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        data: ProgInstruction::ConfigureAuthMark {
+            market_id: old_market_id,
+            asset_index: 0,
+            now_slot: 0,
+            initial_mark_e6: STALE_ENTRY_PRICE,
+        }
+        .encode(),
+    };
+    let stale_config = Transaction::new_signed_with_payer(
+        &[heap_ix(), cu_ix(), stale_config_ix],
+        Some(&env.payer.pubkey()),
+        &[&env.payer, &oracle],
+        env.svm.latest_blockhash(),
+    );
+
+    env.configure_permissionless_resolve_with_cu(100, 1);
+    env.svm.warp_to_slot(1);
+    env.try_shutdown_asset_with_authority(&oracle, 0, 1)
+        .expect("empty asset shuts down");
+    env.svm.warp_to_slot(2);
+    env.try_restart_asset_oracle_with_authority(&oracle, 0, 2, PRICE)
+        .expect("asset restarts");
+    let new_market_id = env.asset_market_id(0);
+    assert_ne!(new_market_id, old_market_id);
+    env.configure_auth_mark_with_cu(2, PRICE);
+
+    let beneficiary = Keypair::new();
+    let victim = Keypair::new();
+    let beneficiary_portfolio = env.create_portfolio(&beneficiary);
+    let victim_portfolio = env.create_portfolio(&victim);
+    env.deposit(&beneficiary, beneficiary_portfolio, DEPOSIT);
+    env.deposit(&victim, victim_portfolio, DEPOSIT);
+
+    // The beneficiary retains a trade signed while the replacement asset visibly anchors at 100.
+    // Positive size makes the beneficiary long and the independent victim short.
+    let trade_ix = Instruction {
+        program_id: env.program_id,
+        accounts: vec![
+            AccountMeta::new(beneficiary.pubkey(), true),
+            AccountMeta::new(victim.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(beneficiary_portfolio, false),
+            AccountMeta::new(victim_portfolio, false),
+        ],
+        data: ProgInstruction::TradeNoCpi {
+            asset_index: 0,
+            market_id: new_market_id,
+            size_q: SIZE_Q,
+            exec_price: PRICE,
+            fee_bps: 0,
+        }
+        .encode(),
+    };
+    let signed_trade = Transaction::new_signed_with_payer(
+        &[heap_ix(), cu_ix(), trade_ix],
+        Some(&env.payer.pubkey()),
+        &[&env.payer, &beneficiary, &victim],
+        env.svm.latest_blockhash(),
+    );
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let beneficiary_before = env.svm.get_account(&beneficiary_portfolio).unwrap();
+    let victim_before = env.svm.get_account(&victim_portfolio).unwrap();
+    let replay = env.svm.send_transaction(stale_config);
+    if replay.is_ok() {
+        let stale_profile =
+            state::read_asset_oracle_profile(&env.svm.get_account(&env.market).unwrap().data, 0)
+                .unwrap();
+        assert_eq!(stale_profile.oracle_target_price_e6, STALE_ENTRY_PRICE);
+        env.svm
+            .send_transaction(signed_trade)
+            .expect("the retained current-generation trade lands after the stale reconfiguration");
+
+        env.svm.warp_to_slot(3);
+        env.push_auth_mark_for_asset_with_authority(0, &oracle, 3, PRICE);
+        for portfolio in [beneficiary_portfolio, victim_portfolio] {
+            env.crank_steps(
+                portfolio,
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: 3,
+                    observations: crank_observations(0),
+                },
+                4,
+            );
+        }
+        let beneficiary_after = env.portfolio_state(beneficiary_portfolio);
+        let victim_after = env.portfolio_state(victim_portfolio);
+        let beneficiary_equity =
+            beneficiary_after.capital.get() as i128 + beneficiary_after.pnl.get();
+        let victim_equity = victim_after.capital.get() as i128 + victim_after.pnl.get();
+        assert!(beneficiary_equity > DEPOSIT as i128);
+        assert!(victim_equity < DEPOSIT as i128);
+
+        let exit_lp = Keypair::new();
+        let exit_portfolio = env.create_portfolio(&exit_lp);
+        env.deposit(&exit_lp, exit_portfolio, DEPOSIT);
+        let exit_price = env.market_state().1.assets[0].effective_price;
+        env.trade_with_cu(
+            &exit_lp,
+            exit_portfolio,
+            &beneficiary,
+            beneficiary_portfolio,
+            SIZE_Q,
+            exit_price,
+            0,
+        );
+        let beneficiary_flat = env.portfolio_state(beneficiary_portfolio);
+        assert!(percolator::active_bitmap_is_empty(active_bitmap(
+            &beneficiary_flat
+        )));
+        let released = beneficiary_flat.pnl.get() as u128;
+        assert!(released > 0);
+        env.convert_released_pnl_with_cu(&beneficiary, beneficiary_portfolio, released);
+        let withdrawable = env.portfolio_state(beneficiary_portfolio).capital.get();
+        let destination = env.withdraw(&beneficiary, beneficiary_portfolio, withdrawable);
+        assert_eq!(env.token_amount(destination) as u128, withdrawable);
+        assert!(withdrawable > DEPOSIT);
+        panic!(
+            "an old-generation oracle configuration reset fresh entry from {PRICE} to \
+             {STALE_ENTRY_PRICE}, reduced victim equity to {victim_equity}, and let the \
+             beneficiary withdraw {withdrawable}"
+        );
+    }
+
+    let replay_error = format!("{:?}", replay.unwrap_err());
+    let expected_error = format!(
+        "Custom({})",
+        PercolatorError::AssetGenerationMismatch as u32
+    );
+    assert!(
+        replay_error.contains(&expected_error),
+        "stale oracle configuration must fail with {expected_error}, got {replay_error}"
+    );
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+    assert_eq!(
+        env.svm.get_account(&beneficiary_portfolio).unwrap(),
+        beneficiary_before
+    );
+    assert_eq!(
+        env.svm.get_account(&victim_portfolio).unwrap(),
+        victim_before
+    );
+
+    for (label, instruction) in [
+        (
+            "ConfigureEwmaMark",
+            ProgInstruction::ConfigureEwmaMark {
+                asset_index: 0,
+                market_id: old_market_id,
+                now_slot: 2,
+                initial_mark_e6: STALE_ENTRY_PRICE,
+                mark_ewma_halflife_slots: 1,
+                mark_min_fee: 0,
+            },
+        ),
+        (
+            "RestartAssetOracle",
+            ProgInstruction::RestartAssetOracle {
+                asset_index: 0,
+                market_id: old_market_id,
+                now_slot: 2,
+                initial_price: STALE_ENTRY_PRICE,
+            },
+        ),
+    ] {
+        env.svm.expire_blockhash();
+        let before = env.svm.get_account(&env.market).unwrap();
+        let rejected = env.send(
+            instruction,
+            vec![
+                AccountMeta::new(oracle.pubkey(), true),
+                AccountMeta::new(env.market, false),
+            ],
+            &[&oracle],
+        );
+        assert!(
+            format!("{rejected:?}").contains(&expected_error),
+            "stale {label} must fail with {expected_error}, got {rejected:?}"
+        );
+        assert_eq!(env.svm.get_account(&env.market).unwrap(), before);
+    }
+
+    let feed = [7u8; 32];
+    let feed_account = env.set_pyth_price(&feed, PRICE as i64, 0, 2);
+    env.svm.expire_blockhash();
+    let before_hybrid = env.svm.get_account(&env.market).unwrap();
+    let stale_hybrid = env.send(
+        ProgInstruction::ConfigureHybridOracle {
+            asset_index: 0,
+            market_id: old_market_id,
+            now_slot: 2,
+            now_unix_ts: 2,
+            oracle_leg_count: 1,
+            oracle_leg_flags: 0,
+            max_staleness_secs: 60,
+            hybrid_soft_stale_slots: 10,
+            mark_ewma_halflife_slots: 1,
+            mark_min_fee: 0,
+            invert: 0,
+            unit_scale: 0,
+            conf_filter_bps: 500,
+            oracle_leg_feeds: [feed, [0u8; 32], [0u8; 32]],
+        },
+        vec![
+            AccountMeta::new(oracle.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new_readonly(feed_account, false),
+        ],
+        &[&oracle],
+    );
+    assert!(
+        format!("{stale_hybrid:?}").contains(&expected_error),
+        "stale ConfigureHybridOracle must fail with {expected_error}, got {stale_hybrid:?}"
+    );
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), before_hybrid);
+
+    env.svm.expire_blockhash();
+    env.send(
+        ProgInstruction::ConfigureAuthMark {
+            asset_index: 0,
+            market_id: new_market_id,
+            now_slot: 2,
+            initial_mark_e6: PRICE,
+        },
+        vec![
+            AccountMeta::new(oracle.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&oracle],
+    )
+    .expect("the current generation remains oracle-configurable");
+}
+
 // Before the persistent generation account, a full CloseSlab + InitMarket cycle at the same market
 // address reset every asset market_id to its first-generation value. Keep the original, fully
 // signed transaction object across that public lifecycle: rebuilding the instruction after reinit
@@ -7169,6 +7485,7 @@ fn v16_bpf_asset0_shutdown_force_closes_preserves_insurance_and_restarts() {
         env.program_id,
         &env.payer,
         ProgInstruction::RestartAssetOracle {
+            market_id: 0,
             asset_index: 0,
             now_slot: 3,
             initial_price: 250,
@@ -7240,6 +7557,7 @@ fn v16_bpf_asset0_shutdown_force_closes_preserves_insurance_and_restarts() {
         env.program_id,
         &env.payer,
         ProgInstruction::RestartAssetOracle {
+            market_id: 0,
             asset_index: 0,
             now_slot: 8,
             initial_price: 250,
@@ -7260,6 +7578,7 @@ fn v16_bpf_asset0_shutdown_force_closes_preserves_insurance_and_restarts() {
         env.program_id,
         &env.payer,
         ProgInstruction::RestartAssetOracle {
+            market_id: 0,
             asset_index: 0,
             now_slot: 8,
             initial_price: 250,
@@ -7342,6 +7661,7 @@ fn v16_bpf_asset0_shutdown_force_closes_preserves_insurance_and_restarts() {
         env.program_id,
         &env.payer,
         ProgInstruction::ConfigureAuthMark {
+            market_id: 0,
             asset_index: 0,
             now_slot: 8,
             initial_mark_e6: 250,
@@ -16822,6 +17142,7 @@ fn v16_attack_cross_margin_two_asset_conservation() {
         env.program_id,
         &env.payer,
         ProgInstruction::ConfigureAuthMark {
+            market_id: 0,
             asset_index: 1,
             now_slot: 0,
             initial_mark_e6: 100,
@@ -16889,6 +17210,7 @@ fn v16_attack_cross_margin_divergent_moves_conserve() {
         0,
         100,
         ProgInstruction::ConfigureAuthMark {
+            market_id: 0,
             asset_index: 1,
             now_slot: 0,
             initial_mark_e6: 100,
@@ -17989,6 +18311,7 @@ fn v16_regression_cross_margin_insolvency_no_value_extraction() {
     cfg(
         &mut env,
         ProgInstruction::ConfigureAuthMark {
+            market_id: 0,
             asset_index: 1,
             now_slot: 0,
             initial_mark_e6: 100,
@@ -18217,6 +18540,7 @@ fn v16_attack_resolved_cross_margin_deep_insolvency_winds_down_publicly() {
     cfg_asset1(
         &mut env,
         ProgInstruction::ConfigureAuthMark {
+            market_id: 0,
             asset_index: 1,
             now_slot: 0,
             initial_mark_e6: 100,
@@ -20514,6 +20838,7 @@ fn v16_attack_cross_margin_solvent_account_not_unfairly_liquidated() {
     cfg(
         &mut env,
         ProgInstruction::ConfigureAuthMark {
+            market_id: 0,
             asset_index: 1,
             now_slot: 0,
             initial_mark_e6: 100,
@@ -23410,6 +23735,7 @@ fn v16_attack_non_admin_cannot_resolve_or_configure() {
         env.program_id,
         &env.payer,
         ProgInstruction::ConfigureAuthMark {
+            market_id: 0,
             asset_index: 0,
             now_slot: 0,
             initial_mark_e6: 999_999,
@@ -30518,6 +30844,7 @@ fn v16_attack_cross_margin_divergent_close_conserves() {
     cfg(
         &mut env,
         ProgInstruction::ConfigureAuthMark {
+            market_id: 0,
             asset_index: 1,
             now_slot: 0,
             initial_mark_e6: 100,
@@ -33350,6 +33677,7 @@ fn v16_attack_max_leg_multi_asset_conserves() {
             env.program_id,
             &env.payer,
             ProgInstruction::ConfigureAuthMark {
+                market_id: 0,
                 asset_index: ai,
                 now_slot: 0,
                 initial_mark_e6: 100,
@@ -33598,6 +33926,7 @@ fn v16_attack_ewma_mark_halflife_zero_safe() {
         env.program_id,
         &env.payer,
         ProgInstruction::ConfigureEwmaMark {
+            market_id: 0,
             asset_index: 0,
             now_slot: 0,
             initial_mark_e6: 100,
@@ -33958,6 +34287,7 @@ fn v16_attack_retire_asset_authority_gated() {
         env.program_id,
         &env.payer,
         ProgInstruction::ConfigureAuthMark {
+            market_id: 0,
             asset_index: 1,
             now_slot: 0,
             initial_mark_e6: 100,
@@ -34072,6 +34402,7 @@ fn v16_attack_per_asset_crank_isolation() {
         env.program_id,
         &env.payer,
         ProgInstruction::ConfigureAuthMark {
+            market_id: 0,
             asset_index: 1,
             now_slot: 0,
             initial_mark_e6: 100,
@@ -35116,6 +35447,7 @@ fn v16_attack_per_asset_funding_isolation() {
         env.program_id,
         &env.payer,
         ProgInstruction::ConfigureEwmaMark {
+            market_id: 0,
             asset_index: 1,
             now_slot: 0,
             initial_mark_e6: IP,
@@ -35253,6 +35585,7 @@ fn v16_attack_fee_redirect_split_lands_correctly() {
         env.program_id,
         &env.payer,
         ProgInstruction::ConfigureAuthMark {
+            market_id: 0,
             asset_index: 1,
             now_slot: 0,
             initial_mark_e6: 100,
@@ -35882,6 +36215,7 @@ fn v16_attack_fee_redirect_full_boundary() {
         env.program_id,
         &env.payer,
         ProgInstruction::ConfigureAuthMark {
+            market_id: 0,
             asset_index: 1,
             now_slot: 0,
             initial_mark_e6: 100,
@@ -37541,6 +37875,7 @@ fn v16_attack_force_close_healthy_asset_rejected() {
         env.program_id,
         &env.payer,
         ProgInstruction::ConfigureAuthMark {
+            market_id: 0,
             asset_index: 1,
             now_slot: 0,
             initial_mark_e6: 100,
@@ -37863,6 +38198,7 @@ fn v16_attack_force_close_rejects_cross_market_portfolio_substitution() {
         env.program_id,
         &env.payer,
         ProgInstruction::ConfigureAuthMark {
+            market_id: 0,
             asset_index: 1,
             now_slot: 1,
             initial_mark_e6: 100,
@@ -43165,6 +43501,7 @@ fn v16_attack_hybrid_oracle_scalar_bounds_reject_atomically() {
             env.program_id,
             &env.payer,
             ProgInstruction::ConfigureHybridOracle {
+                market_id: 0,
                 asset_index: 0,
                 now_slot: 1,
                 now_unix_ts: 100,
@@ -43213,6 +43550,7 @@ fn v16_attack_hybrid_oracle_scalar_bounds_reject_atomically() {
         env.program_id,
         &env.payer,
         ProgInstruction::ConfigureHybridOracle {
+            market_id: 0,
             asset_index: 0,
             now_slot: 1,
             now_unix_ts: 100,
@@ -44750,6 +45088,7 @@ fn v16_attack_non_authority_cannot_reconfigure_oracle_modes() {
         env.program_id,
         &env.payer,
         ProgInstruction::ConfigureEwmaMark {
+            market_id: 0,
             asset_index: 0,
             now_slot: 1,
             initial_mark_e6: 200,
@@ -44778,6 +45117,7 @@ fn v16_attack_non_authority_cannot_reconfigure_oracle_modes() {
         env.program_id,
         &env.payer,
         ProgInstruction::ConfigureAuthMark {
+            market_id: 0,
             asset_index: 0,
             now_slot: 1,
             initial_mark_e6: 200,
@@ -44808,6 +45148,7 @@ fn v16_attack_non_authority_cannot_reconfigure_oracle_modes() {
         env.program_id,
         &env.payer,
         ProgInstruction::ConfigureHybridOracle {
+            market_id: 0,
             asset_index: 0,
             now_slot: 1,
             now_unix_ts: 1,
@@ -44846,6 +45187,7 @@ fn v16_attack_non_authority_cannot_reconfigure_oracle_modes() {
         env.program_id,
         &env.payer,
         ProgInstruction::ConfigureEwmaMark {
+            market_id: 0,
             asset_index: 0,
             now_slot: 1,
             initial_mark_e6: 200,
@@ -44899,6 +45241,7 @@ fn v16_attack_mark_input_bounds_reject_atomically() {
     reject_unchanged(
         &mut env,
         ProgInstruction::ConfigureAuthMark {
+            market_id: 0,
             asset_index: 0,
             now_slot: 1,
             initial_mark_e6: 0,
@@ -44908,6 +45251,7 @@ fn v16_attack_mark_input_bounds_reject_atomically() {
     reject_unchanged(
         &mut env,
         ProgInstruction::ConfigureAuthMark {
+            market_id: 0,
             asset_index: 0,
             now_slot: 1,
             initial_mark_e6: over_max,
@@ -44917,6 +45261,7 @@ fn v16_attack_mark_input_bounds_reject_atomically() {
     reject_unchanged(
         &mut env,
         ProgInstruction::ConfigureEwmaMark {
+            market_id: 0,
             asset_index: 0,
             now_slot: 1,
             initial_mark_e6: 0,
@@ -44928,6 +45273,7 @@ fn v16_attack_mark_input_bounds_reject_atomically() {
     reject_unchanged(
         &mut env,
         ProgInstruction::ConfigureEwmaMark {
+            market_id: 0,
             asset_index: 0,
             now_slot: 1,
             initial_mark_e6: over_max,
@@ -44939,6 +45285,7 @@ fn v16_attack_mark_input_bounds_reject_atomically() {
     reject_unchanged(
         &mut env,
         ProgInstruction::ConfigureEwmaMark {
+            market_id: 0,
             asset_index: 0,
             now_slot: 1,
             initial_mark_e6: 100,
@@ -44954,6 +45301,7 @@ fn v16_attack_mark_input_bounds_reject_atomically() {
         env.program_id,
         &env.payer,
         ProgInstruction::ConfigureEwmaMark {
+            market_id: 0,
             asset_index: 0,
             now_slot: 1,
             initial_mark_e6: 100,
@@ -45030,6 +45378,7 @@ fn v16_attack_mark_input_bounds_reject_atomically() {
         env.program_id,
         &env.payer,
         ProgInstruction::ConfigureAuthMark {
+            market_id: 0,
             asset_index: 0,
             now_slot: 3,
             initial_mark_e6: 200,
@@ -45133,6 +45482,7 @@ fn v16_attack_oracle_reconfiguration_rejects_after_positions_enter_market() {
         env.program_id,
         &env.payer,
         ProgInstruction::ConfigureAuthMark {
+            market_id: 0,
             asset_index: 0,
             now_slot: 1,
             initial_mark_e6: 500,
@@ -45159,6 +45509,7 @@ fn v16_attack_oracle_reconfiguration_rejects_after_positions_enter_market() {
         env.program_id,
         &env.payer,
         ProgInstruction::ConfigureEwmaMark {
+            market_id: 0,
             asset_index: 0,
             now_slot: 1,
             initial_mark_e6: 500,
@@ -45191,6 +45542,7 @@ fn v16_attack_oracle_reconfiguration_rejects_after_positions_enter_market() {
         env.program_id,
         &env.payer,
         ProgInstruction::ConfigureHybridOracle {
+            market_id: 0,
             asset_index: 0,
             now_slot: 1,
             now_unix_ts: 1,
@@ -45608,6 +45960,7 @@ fn v16_attack_market_exceeds_64_assets_position_holds_any_14_legs() {
             env.program_id,
             &env.payer,
             ProgInstruction::ConfigureAuthMark {
+                market_id: 0,
                 asset_index: ai,
                 now_slot: TRADE_SLOT,
                 initial_mark_e6: PRICE,
@@ -48378,6 +48731,7 @@ fn v16_attack_non_admin_activate_cannot_install_authorities() {
     env.svm.expire_blockhash();
     let r_mark = env.send(
         ProgInstruction::ConfigureAuthMark {
+            market_id: 0,
             asset_index: 1,
             now_slot: 1,
             initial_mark_e6: 1_000_000,
@@ -48516,6 +48870,7 @@ fn v16_bpf_10m_market_liquidation_high_asset_stays_bounded() {
         env.program_id,
         &env.payer,
         ProgInstruction::ConfigureEwmaMark {
+            market_id: 0,
             asset_index: HIGH_ASSET as u16,
             now_slot: TRADE_SLOT,
             initial_mark_e6: PRICE,
@@ -57989,6 +58344,7 @@ fn v16_attack_cross_asset_oracle_authority_cannot_push_other_asset_ewma_mark() {
         env.program_id,
         &env.payer,
         ProgInstruction::ConfigureEwmaMark {
+            market_id: 0,
             asset_index: 1,
             now_slot: 1,
             initial_mark_e6: 100,
@@ -58120,6 +58476,7 @@ fn v16_attack_cross_asset_oracle_authority_cannot_reconfigure_other_asset_modes(
             env.program_id,
             &env.payer,
             ProgInstruction::ConfigureAuthMark {
+                market_id: 0,
                 asset_index: 0,
                 now_slot: 1,
                 initial_mark_e6: 250,
@@ -58146,6 +58503,7 @@ fn v16_attack_cross_asset_oracle_authority_cannot_reconfigure_other_asset_modes(
             env.program_id,
             &env.payer,
             ProgInstruction::ConfigureAuthMark {
+                market_id: 0,
                 asset_index: 1,
                 now_slot: 1,
                 initial_mark_e6: 250,
@@ -58179,6 +58537,7 @@ fn v16_attack_cross_asset_oracle_authority_cannot_reconfigure_other_asset_modes(
             env.program_id,
             &env.payer,
             ProgInstruction::ConfigureEwmaMark {
+                market_id: 0,
                 asset_index: 0,
                 now_slot: 1,
                 initial_mark_e6: 250,
@@ -58207,6 +58566,7 @@ fn v16_attack_cross_asset_oracle_authority_cannot_reconfigure_other_asset_modes(
             env.program_id,
             &env.payer,
             ProgInstruction::ConfigureEwmaMark {
+                market_id: 0,
                 asset_index: 1,
                 now_slot: 1,
                 initial_mark_e6: 250,
@@ -58247,6 +58607,7 @@ fn v16_attack_cross_asset_oracle_authority_cannot_reconfigure_other_asset_modes(
             env.program_id,
             &env.payer,
             ProgInstruction::ConfigureHybridOracle {
+                market_id: 0,
                 asset_index: 0,
                 now_slot: 1,
                 now_unix_ts: 1,
@@ -58284,6 +58645,7 @@ fn v16_attack_cross_asset_oracle_authority_cannot_reconfigure_other_asset_modes(
             env.program_id,
             &env.payer,
             ProgInstruction::ConfigureHybridOracle {
+                market_id: 0,
                 asset_index: 1,
                 now_slot: 1,
                 now_unix_ts: 1,

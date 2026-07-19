@@ -196,7 +196,7 @@ Assets 1..N are **truly permissionless ⇒ untrusted**. The protocol must guaran
   `UpdateAssetLifecycle { action: RETIRE, asset_index: 0 }` rejects, so asset 0 is never returned to
   the permissionless reusable-slot pool. Once any asset 0..N is in RECOVERY and every position/loss plus
   value-bearing source/backing/reservation state for that asset is gone,
-  `RestartAssetOracle { asset_index, ... }` signed by that asset's `asset_admin` atomically retires the old market id,
+  `RestartAssetOracle { asset_index, market_id, ... }` signed by that asset's `asset_admin` atomically retires the old market id,
   activates a fresh market id at the supplied initial price, preserves that asset's authority keys and
   funded insurance-domain budgets, and returns the asset to ACTIVE. New legs bind to the new monotonic
   `market_id`; stale legs cannot leak through restart. **✅**
@@ -304,7 +304,7 @@ Percolator enforces three layers with distinct responsibilities:
 - **Layout**: header + wrapper config + `MarketGroupV16Account`
 - Holds market-level totals, insurance, oracle/asset state, source-domain credit state, and asset lifecycle state.
 
-The v16 asset index ABI is `u16`. The current persisted layout is still a fixed-capacity Pod market-group layout, but asset indices are treated as reusable logical slots. A retired asset slot can only be reactivated after the configured shutdown/activation timeout, and reactivation assigns a new monotonic `u64` `market_id` from the market group. `market_id` values are never reused, including when a closed market account is recreated at the same address. Trade instructions, co-signed authority rotations, portfolio legs, and close-progress ledgers carry that id, so neither stale signed intent nor stale state from an old shutdown market can bind to a reused slot.
+The v16 asset index ABI is `u16`. The current persisted layout is still a fixed-capacity Pod market-group layout, but asset indices are treated as reusable logical slots. A retired asset slot can only be reactivated after the configured shutdown/activation timeout, and reactivation assigns a new monotonic `u64` `market_id` from the market group. `market_id` values are never reused, including when a closed market account is recreated at the same address. Trade instructions, oracle configuration and restart instructions, mark pushes, co-signed authority rotations, portfolio legs, and close-progress ledgers carry that id, so neither stale signed intent nor stale state from an old shutdown market can bind to a reused slot.
 
 ### Market generation account
 - **Owner**: Percolator program id
@@ -401,7 +401,7 @@ This section describes intent and operational ordering, not argument-by-argument
     until `force_close_delay_slots` elapses; signer is `marketauth` or that asset's `asset_admin`
   - ordinary `RETIRE` rejects `asset_index = 0`; asset 0 is restarted, not reused
 - **RestartAssetOracle** (tag 69)
-  - `RestartAssetOracle { asset_index, now_slot, initial_price }`, signed by that asset's `asset_admin`
+  - `RestartAssetOracle { asset_index, market_id, now_slot, initial_price }`, signed by that asset's `asset_admin`
   - after the target asset is already RECOVERY and empty of positions/loss plus value-bearing
     source/backing/reservation state, atomically retires the old market id, activates a fresh market id
     at the supplied initial price, preserves authority keys and funded insurance-domain budgets, then
@@ -468,8 +468,8 @@ This section describes intent and operational ordering, not argument-by-argument
 - External-oracle markets authenticate configured oracle account(s) in the oracle configuration/crank
   paths; `TradeCpi` / `TradeNoCpi` use the already-stored effective mark for fee and settlement
   accounting.
-- AuthMark markets use **ConfigureAuthMark** (tag 62) and **PushAuthMark** (tag 63), signed by the configured mark authority, to store a direct authority mark without EWMA smoothing. Pushes include the current asset `market_id` so a signed report cannot cross an asset restart.
-- EwmaMark markets use **ConfigureEwmaMark** (tag 35) and **PushEwmaMark** (tag 36), signed by the configured mark authority, to update a smoothed EWMA mark input. Pushes carry the same generation binding.
+- AuthMark markets use **ConfigureAuthMark** (tag 62) and **PushAuthMark** (tag 63), signed by the configured mark authority, to store a direct authority mark without EWMA smoothing. Both include the current asset `market_id` so signed configuration or report intent cannot cross an asset restart.
+- EwmaMark markets use **ConfigureEwmaMark** (tag 35) and **PushEwmaMark** (tag 36), signed by the configured mark authority, to update a smoothed EWMA mark input. Both carry the same generation binding; Hybrid configuration does as well.
 - The per-slot effective-price movement cap is a risk parameter set at init; there is no standalone `SetOraclePriceCap` instruction in the current ABI.
 
 ### Insurance management
@@ -574,7 +574,7 @@ AuthMark and EwmaMark are authority-pushed pricing modes for markets that do not
 
 AuthMark is the direct authority-mark path:
 
-- **Direct mark API**: `ConfigureAuthMark { asset_index, now_slot, initial_mark_e6 }` and `PushAuthMark { asset_index, market_id, now_slot, mark_e6 }`.
+- **Direct mark API**: `ConfigureAuthMark { asset_index, market_id, now_slot, initial_mark_e6 }` and `PushAuthMark { asset_index, market_id, now_slot, mark_e6 }`.
 - **No EWMA configuration**: there is no halflife, mark-min-fee, feed id, confidence filter, invert flag, or unit-scale configuration in the AuthMark API.
 - **Authority boundary**: only the configured mark authority can push a new mark; public cranks can only consume the stored mark.
 - **Adapter-friendly**: a separate oracle adapter PDA can verify Pyth, Chainlink, Switchboard, or custom feed policy, then sign `PushAuthMark` with the resulting mark.
@@ -584,7 +584,7 @@ AuthMark is the direct authority-mark path:
 
 EwmaMark is the smoothed authority-mark path for markets that use an internal mark/index rather than an external oracle.
 
-- **Smoothed mark API**: `ConfigureEwmaMark { asset_index, now_slot, initial_mark_e6, mark_ewma_halflife_slots, mark_min_fee }` and `PushEwmaMark { asset_index, market_id, now_slot, mark_e6 }`.
+- **Smoothed mark API**: `ConfigureEwmaMark { asset_index, market_id, now_slot, initial_mark_e6, mark_ewma_halflife_slots, mark_min_fee }` and `PushEwmaMark { asset_index, market_id, now_slot, mark_e6 }`.
 - **Mark and index prices**: maintained entirely within the engine; no external oracle feed required for mark settlement.
 - **Premium-based funding**: permissionless cranks compute funding from the spread between mark and index (premium), clamp it to `max_abs_funding_e9_per_slot`, and pass that internally to the engine. The crank instruction's funding-rate field is non-authoritative and must remain zero.
 - **Rate-limited index smoothing**: index price updates are clamped per slot via `clamp_toward_with_dt`, preventing instant mark-to-index jumps. When `dt = 0` or cap is zero, the function returns `index` unchanged (no movement).
