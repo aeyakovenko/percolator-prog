@@ -2659,6 +2659,7 @@ pub mod ix {
         },
         PushEwmaMark {
             asset_index: u16,
+            market_id: u64,
             now_slot: u64,
             mark_e6: u64,
         },
@@ -2669,6 +2670,7 @@ pub mod ix {
         },
         PushAuthMark {
             asset_index: u16,
+            market_id: u64,
             now_slot: u64,
             mark_e6: u64,
         },
@@ -2902,6 +2904,7 @@ pub mod ix {
                 },
                 63 => Self::PushAuthMark {
                     asset_index: read_u16(&mut rest)?,
+                    market_id: read_u64(&mut rest)?,
                     now_slot: read_u64(&mut rest)?,
                     mark_e6: read_u64(&mut rest)?,
                 },
@@ -2958,6 +2961,7 @@ pub mod ix {
                 },
                 36 => Self::PushEwmaMark {
                     asset_index: read_u16(&mut rest)?,
+                    market_id: read_u64(&mut rest)?,
                     now_slot: read_u64(&mut rest)?,
                     mark_e6: read_u64(&mut rest)?,
                 },
@@ -3298,11 +3302,13 @@ pub mod ix {
                 }
                 Self::PushEwmaMark {
                     asset_index,
+                    market_id,
                     now_slot,
                     mark_e6,
                 } => {
                     out.push(36);
                     push_u16(&mut out, asset_index);
+                    push_u64(&mut out, market_id);
                     push_u64(&mut out, now_slot);
                     push_u64(&mut out, mark_e6);
                 }
@@ -3318,11 +3324,13 @@ pub mod ix {
                 }
                 Self::PushAuthMark {
                     asset_index,
+                    market_id,
                     now_slot,
                     mark_e6,
                 } => {
                     out.push(63);
                     push_u16(&mut out, asset_index);
+                    push_u64(&mut out, market_id);
                     push_u64(&mut out, now_slot);
                     push_u64(&mut out, mark_e6);
                 }
@@ -5429,9 +5437,17 @@ pub mod processor {
             ),
             Instruction::PushEwmaMark {
                 asset_index,
+                market_id,
                 now_slot,
                 mark_e6,
-            } => handle_push_ewma_mark(program_id, accounts, asset_index, now_slot, mark_e6),
+            } => handle_push_ewma_mark(
+                program_id,
+                accounts,
+                asset_index,
+                market_id,
+                now_slot,
+                mark_e6,
+            ),
             Instruction::ConfigureAuthMark {
                 asset_index,
                 now_slot,
@@ -5445,9 +5461,17 @@ pub mod processor {
             ),
             Instruction::PushAuthMark {
                 asset_index,
+                market_id,
                 now_slot,
                 mark_e6,
-            } => handle_push_auth_mark(program_id, accounts, asset_index, now_slot, mark_e6),
+            } => handle_push_auth_mark(
+                program_id,
+                accounts,
+                asset_index,
+                market_id,
+                now_slot,
+                mark_e6,
+            ),
             Instruction::ForceCloseAbandonedAsset {
                 asset_index,
                 now_slot,
@@ -10249,6 +10273,7 @@ pub mod processor {
         program_id: &Pubkey,
         accounts: &'a [AccountInfo<'a>],
         asset_index: u16,
+        expected_market_id: u64,
         now_slot: u64,
         mark_e6: u64,
     ) -> ProgramResult {
@@ -10267,6 +10292,15 @@ pub mod processor {
             let (mut cfg, mut group) = state::market_view_mut(&mut data)?;
             if asset_index_usize >= group.header.config.max_market_slots.get() as usize {
                 return Err(PercolatorError::InvalidInstruction.into());
+            }
+            if group.markets[asset_index_usize]
+                .engine
+                .asset
+                .market_id
+                .get()
+                != expected_market_id
+            {
+                return Err(PercolatorError::AssetGenerationMismatch.into());
             }
             let mut profile = read_oracle_profile_from_view(&group, &cfg, asset_index_usize)?;
             if group.header.mode != 0 {
@@ -10330,6 +10364,7 @@ pub mod processor {
         program_id: &Pubkey,
         accounts: &'a [AccountInfo<'a>],
         asset_index: u16,
+        expected_market_id: u64,
         now_slot: u64,
         mark_e6: u64,
     ) -> ProgramResult {
@@ -10348,6 +10383,15 @@ pub mod processor {
             let (mut cfg, mut group) = state::market_view_mut(&mut data)?;
             if asset_index_usize >= group.header.config.max_market_slots.get() as usize {
                 return Err(PercolatorError::InvalidInstruction.into());
+            }
+            if group.markets[asset_index_usize]
+                .engine
+                .asset
+                .market_id
+                .get()
+                != expected_market_id
+            {
+                return Err(PercolatorError::AssetGenerationMismatch.into());
             }
             let mut profile = read_oracle_profile_from_view(&group, &cfg, asset_index_usize)?;
             if group.header.mode != 0 {

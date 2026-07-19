@@ -2577,12 +2577,14 @@ impl V16CuEnv {
     }
 
     fn push_ewma_mark_with_cu(&mut self, now_slot: u64, mark_e6: u64) -> u64 {
+        let market_id = self.asset_market_id(0);
         send_tx(
             &mut self.svm,
             self.program_id,
             &self.payer,
             ProgInstruction::PushEwmaMark {
                 asset_index: 0,
+                market_id,
                 now_slot,
                 mark_e6,
             },
@@ -2615,12 +2617,14 @@ impl V16CuEnv {
     }
 
     fn push_auth_mark_with_cu(&mut self, now_slot: u64, mark_e6: u64) -> u64 {
+        let market_id = self.asset_market_id(0);
         send_tx(
             &mut self.svm,
             self.program_id,
             &self.payer,
             ProgInstruction::PushAuthMark {
                 asset_index: 0,
+                market_id,
                 now_slot,
                 mark_e6,
             },
@@ -2663,12 +2667,14 @@ impl V16CuEnv {
         now_slot: u64,
         mark_e6: u64,
     ) -> u64 {
+        let market_id = self.asset_market_id(asset_index);
         send_tx(
             &mut self.svm,
             self.program_id,
             &self.payer,
             ProgInstruction::PushAuthMark {
                 asset_index,
+                market_id,
                 now_slot,
                 mark_e6,
             },
@@ -2715,12 +2721,14 @@ impl V16CuEnv {
         mark_e6: u64,
     ) -> u64 {
         self.ensure_signer_account(authority.pubkey());
+        let market_id = self.asset_market_id(asset_index);
         send_tx(
             &mut self.svm,
             self.program_id,
             &self.payer,
             ProgInstruction::PushAuthMark {
                 asset_index,
+                market_id,
                 now_slot,
                 mark_e6,
             },
@@ -6176,12 +6184,17 @@ fn v16_attack_signed_asset_authority_rotation_cannot_replay_after_restart() {
     .expect("the same rotation remains live when signed for the current asset generation");
 }
 
+#[derive(Clone, Copy, Debug)]
+enum AssetGenerationMarkPath {
+    Auth,
+    Ewma,
+}
+
 // A signed oracle report is an authorization for one asset generation, not for every future asset
 // that happens to occupy the same slot. Keep the original transaction object across an ordinary
 // shutdown/restart lifecycle and place fresh exposure before replaying it. The old report must be
 // rejected before it can move value against positions that did not exist when the oracle signed.
-#[test]
-fn v16_attack_signed_auth_mark_cannot_replay_after_asset_restart() {
+fn run_signed_mark_generation_replay(path: AssetGenerationMarkPath) {
     const PRICE: u64 = 100;
     const STALE_ADVERSE_PRICE: u64 = 50;
     const SIZE_Q: i128 = (5_000 * POS_SCALE) as i128;
@@ -6189,21 +6202,37 @@ fn v16_attack_signed_auth_mark_cannot_replay_after_asset_restart() {
 
     let mut env = V16CuEnv::new();
     let oracle = env.admin.insecure_clone();
-    env.configure_auth_mark_with_cu(0, PRICE);
+    match path {
+        AssetGenerationMarkPath::Auth => {
+            env.configure_auth_mark_with_cu(0, PRICE);
+        }
+        AssetGenerationMarkPath::Ewma => {
+            env.configure_ewma_mark_with_cu(0, PRICE, 1, 0);
+        }
+    }
     let old_market_id = env.asset_market_id(0);
 
+    let stale_instruction = match path {
+        AssetGenerationMarkPath::Auth => ProgInstruction::PushAuthMark {
+            asset_index: 0,
+            market_id: old_market_id,
+            now_slot: 0,
+            mark_e6: STALE_ADVERSE_PRICE,
+        },
+        AssetGenerationMarkPath::Ewma => ProgInstruction::PushEwmaMark {
+            asset_index: 0,
+            market_id: old_market_id,
+            now_slot: 0,
+            mark_e6: STALE_ADVERSE_PRICE,
+        },
+    };
     let stale_ix = Instruction {
         program_id: env.program_id,
         accounts: vec![
             AccountMeta::new(oracle.pubkey(), true),
             AccountMeta::new(env.market, false),
         ],
-        data: ProgInstruction::PushAuthMark {
-            asset_index: 0,
-            now_slot: 0,
-            mark_e6: STALE_ADVERSE_PRICE,
-        }
-        .encode(),
+        data: stale_instruction.encode(),
     };
     let stale_report = Transaction::new_signed_with_payer(
         &[heap_ix(), cu_ix(), stale_ix],
@@ -6221,7 +6250,14 @@ fn v16_attack_signed_auth_mark_cannot_replay_after_asset_restart() {
         .expect("asset restarts");
     let new_market_id = env.asset_market_id(0);
     assert_ne!(new_market_id, old_market_id);
-    env.configure_auth_mark_with_cu(2, PRICE);
+    match path {
+        AssetGenerationMarkPath::Auth => {
+            env.configure_auth_mark_with_cu(2, PRICE);
+        }
+        AssetGenerationMarkPath::Ewma => {
+            env.configure_ewma_mark_with_cu(2, PRICE, 1, 0);
+        }
+    }
 
     let victim = Keypair::new();
     let counterparty = Keypair::new();
@@ -6239,23 +6275,30 @@ fn v16_attack_signed_auth_mark_cannot_replay_after_asset_restart() {
         0,
     );
 
+    let replay_slot = match path {
+        AssetGenerationMarkPath::Auth => 2,
+        AssetGenerationMarkPath::Ewma => 3,
+    };
+    env.svm.warp_to_slot(replay_slot);
     let market_before = env.svm.get_account(&env.market).unwrap();
     let victim_before = env.svm.get_account(&victim_portfolio).unwrap();
     let counterparty_before = env.svm.get_account(&counterparty_portfolio).unwrap();
     let replay = env.svm.send_transaction(stale_report);
     if replay.is_ok() {
-        assert_eq!(
+        let landed_mark =
             state::read_asset_oracle_profile(&env.svm.get_account(&env.market).unwrap().data, 0)
                 .unwrap()
-                .oracle_target_price_e6,
-            STALE_ADVERSE_PRICE,
-            "the old signed report reached the replacement generation"
+                .oracle_target_price_e6;
+        assert!(
+            landed_mark < PRICE,
+            "{path:?}: the old signed report reached and moved the replacement generation"
         );
-        env.svm.warp_to_slot(3);
+        let crank_slot = replay_slot + 1;
+        env.svm.warp_to_slot(crank_slot);
         env.crank_steps(
             victim_portfolio,
             ProgInstruction::PermissionlessCrank {
-                now_slot: 3,
+                now_slot: crank_slot,
                 observations: crank_observations(0),
             },
             4,
@@ -6263,7 +6306,7 @@ fn v16_attack_signed_auth_mark_cannot_replay_after_asset_restart() {
         env.crank_steps(
             counterparty_portfolio,
             ProgInstruction::PermissionlessCrank {
-                now_slot: 3,
+                now_slot: crank_slot,
                 observations: crank_observations(0),
             },
             4,
@@ -6275,11 +6318,11 @@ fn v16_attack_signed_auth_mark_cannot_replay_after_asset_restart() {
             counterparty_after.capital.get() as i128 + counterparty_after.pnl.get();
         assert!(
             victim_equity < DEPOSIT as i128,
-            "the stale report must move value against fresh exposure"
+            "{path:?}: the stale report must move value against fresh exposure"
         );
         assert!(
             counterparty_equity > DEPOSIT as i128,
-            "the stale report must transfer the victim's loss to the counterparty"
+            "{path:?}: the stale report must transfer the victim's loss to the counterparty"
         );
 
         // The counterparty does not need the victim's cooperation to crystallize the transfer: a
@@ -6288,24 +6331,25 @@ fn v16_attack_signed_auth_mark_cannot_replay_after_asset_restart() {
         let exit_lp = Keypair::new();
         let exit_portfolio = env.create_portfolio(&exit_lp);
         env.deposit(&exit_lp, exit_portfolio, DEPOSIT);
+        let exit_price = env.market_state().1.assets[0].effective_price;
         env.trade_with_cu(
             &counterparty,
             counterparty_portfolio,
             &exit_lp,
             exit_portfolio,
             SIZE_Q,
-            STALE_ADVERSE_PRICE,
+            exit_price,
             0,
         );
         let counterparty_flat = env.portfolio_state(counterparty_portfolio);
         assert!(
             percolator::active_bitmap_is_empty(active_bitmap(&counterparty_flat)),
-            "the beneficiary exits without the victim"
+            "{path:?}: the beneficiary exits without the victim"
         );
         let extracted = counterparty_flat.pnl.get() as u128;
         assert!(
             extracted > 0,
-            "the stale report creates released positive PnL"
+            "{path:?}: the stale report creates released positive PnL"
         );
         env.convert_released_pnl_with_cu(&counterparty, counterparty_portfolio, extracted);
         let withdrawable = env.portfolio_state(counterparty_portfolio).capital.get();
@@ -6313,10 +6357,10 @@ fn v16_attack_signed_auth_mark_cannot_replay_after_asset_restart() {
         assert_eq!(env.token_amount(destination) as u128, withdrawable);
         assert!(
             withdrawable > DEPOSIT,
-            "the beneficiary extracts victim value through public custody routes"
+            "{path:?}: the beneficiary extracts victim value through public custody routes"
         );
         panic!(
-            "an old-generation oracle report reduced fresh victim equity from {DEPOSIT} to {victim_equity} and let the counterparty withdraw {withdrawable}"
+            "{path:?}: an old-generation oracle report reduced fresh victim equity from {DEPOSIT} to {victim_equity} and let the counterparty withdraw {withdrawable}"
         );
     }
 
@@ -6327,7 +6371,7 @@ fn v16_attack_signed_auth_mark_cannot_replay_after_asset_restart() {
     );
     assert!(
         replay_error.contains(&expected_error),
-        "stale oracle report must fail with {expected_error}, got {replay_error}"
+        "{path:?}: stale oracle report must fail with {expected_error}, got {replay_error}"
     );
     assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
     assert_eq!(
@@ -6338,6 +6382,13 @@ fn v16_attack_signed_auth_mark_cannot_replay_after_asset_restart() {
         env.svm.get_account(&counterparty_portfolio).unwrap(),
         counterparty_before
     );
+}
+
+#[test]
+fn v16_attack_signed_mark_push_cannot_replay_after_asset_restart() {
+    for path in [AssetGenerationMarkPath::Auth, AssetGenerationMarkPath::Ewma] {
+        run_signed_mark_generation_replay(path);
+    }
 }
 
 // Before the persistent generation account, a full CloseSlab + InitMarket cycle at the same market
@@ -16862,6 +16913,7 @@ fn v16_attack_cross_margin_divergent_moves_conserve() {
         90,
         ProgInstruction::PushAuthMark {
             asset_index: 1,
+            market_id: first_generation_market_id((1) as u16),
             now_slot: 10,
             mark_e6: 90,
         },
@@ -17979,6 +18031,7 @@ fn v16_regression_cross_margin_insolvency_no_value_extraction() {
             &mut env,
             ProgInstruction::PushAuthMark {
                 asset_index: 1,
+                market_id: first_generation_market_id((1) as u16),
                 now_slot: slot,
                 mark_e6: mark,
             },
@@ -18204,6 +18257,7 @@ fn v16_attack_resolved_cross_margin_deep_insolvency_winds_down_publicly() {
             &mut env,
             ProgInstruction::PushAuthMark {
                 asset_index: 1,
+                market_id: first_generation_market_id((1) as u16),
                 now_slot: slot,
                 mark_e6: mark,
             },
@@ -19692,6 +19746,7 @@ fn v16_attack_extreme_auth_mark_push_rejected_or_safe() {
             &env.payer,
             ProgInstruction::PushAuthMark {
                 asset_index: 0,
+                market_id: first_generation_market_id((0) as u16),
                 now_slot: 5,
                 mark_e6: mark,
             },
@@ -20499,6 +20554,7 @@ fn v16_attack_cross_margin_solvent_account_not_unfairly_liquidated() {
         &mut env,
         ProgInstruction::PushAuthMark {
             asset_index: 1,
+            market_id: first_generation_market_id((1) as u16),
             now_slot: 10,
             mark_e6: 110,
         },
@@ -23637,6 +23693,7 @@ fn v16_attack_out_of_range_asset_index_rejected() {
             &env.payer,
             ProgInstruction::PushAuthMark {
                 asset_index: bad,
+                market_id: first_generation_market_id((bad) as u16),
                 now_slot: 1,
                 mark_e6: 100,
             },
@@ -27972,6 +28029,7 @@ fn v16_attack_permissionless_asset_oracle_cannot_block_base_resolve_matured() {
     let stale_asset_push = env.send(
         ProgInstruction::PushAuthMark {
             asset_index: 1,
+            market_id: first_generation_market_id((1) as u16),
             now_slot: 40,
             mark_e6: 102,
         },
@@ -30482,6 +30540,7 @@ fn v16_attack_cross_margin_divergent_close_conserves() {
         &mut env,
         ProgInstruction::PushAuthMark {
             asset_index: 1,
+            market_id: first_generation_market_id((1) as u16),
             now_slot: 10,
             mark_e6: 90,
         },
@@ -41375,6 +41434,7 @@ fn v16_attack_cross_margin_netting_conserves() {
     let _ = env.send(
         ProgInstruction::PushAuthMark {
             asset_index: 1,
+            market_id: first_generation_market_id((1) as u16),
             now_slot: 2,
             mark_e6: 110,
         },
@@ -43264,6 +43324,7 @@ fn v16_attack_pushed_mark_cannot_override_external_oracle_asset() {
     let auth_push = env.send(
         ProgInstruction::PushAuthMark {
             asset_index: 0,
+            market_id: first_generation_market_id((0) as u16),
             now_slot: 2,
             mark_e6: 9_999_999,
         },
@@ -43287,6 +43348,7 @@ fn v16_attack_pushed_mark_cannot_override_external_oracle_asset() {
     let ewma_push = env.send(
         ProgInstruction::PushEwmaMark {
             asset_index: 0,
+            market_id: first_generation_market_id((0) as u16),
             now_slot: 2,
             mark_e6: 9_999_999,
         },
@@ -44625,6 +44687,7 @@ fn v16_attack_non_authority_cannot_push_auth_mark() {
         &env.payer,
         ProgInstruction::PushAuthMark {
             asset_index: 0,
+            market_id: first_generation_market_id((0) as u16),
             now_slot: 2,
             mark_e6: 9_999_999,
         },
@@ -44653,6 +44716,7 @@ fn v16_attack_non_authority_cannot_push_auth_mark() {
         &env.payer,
         ProgInstruction::PushAuthMark {
             asset_index: 0,
+            market_id: first_generation_market_id((0) as u16),
             now_slot: 2,
             mark_e6: 150,
         },
@@ -44919,6 +44983,7 @@ fn v16_attack_mark_input_bounds_reject_atomically() {
         &mut env,
         ProgInstruction::PushEwmaMark {
             asset_index: 0,
+            market_id: first_generation_market_id((0) as u16),
             now_slot: 2,
             mark_e6: 0,
         },
@@ -44928,6 +44993,7 @@ fn v16_attack_mark_input_bounds_reject_atomically() {
         &mut env,
         ProgInstruction::PushEwmaMark {
             asset_index: 0,
+            market_id: first_generation_market_id((0) as u16),
             now_slot: 2,
             mark_e6: over_max,
         },
@@ -44941,6 +45007,7 @@ fn v16_attack_mark_input_bounds_reject_atomically() {
         &env.payer,
         ProgInstruction::PushEwmaMark {
             asset_index: 0,
+            market_id: first_generation_market_id((0) as u16),
             now_slot: 2,
             mark_e6: 120,
         },
@@ -44983,6 +45050,7 @@ fn v16_attack_mark_input_bounds_reject_atomically() {
         &mut env,
         ProgInstruction::PushAuthMark {
             asset_index: 0,
+            market_id: first_generation_market_id((0) as u16),
             now_slot: 4,
             mark_e6: 0,
         },
@@ -44992,6 +45060,7 @@ fn v16_attack_mark_input_bounds_reject_atomically() {
         &mut env,
         ProgInstruction::PushAuthMark {
             asset_index: 0,
+            market_id: first_generation_market_id((0) as u16),
             now_slot: 4,
             mark_e6: over_max,
         },
@@ -45005,6 +45074,7 @@ fn v16_attack_mark_input_bounds_reject_atomically() {
         &env.payer,
         ProgInstruction::PushAuthMark {
             asset_index: 0,
+            market_id: first_generation_market_id((0) as u16),
             now_slot: 4,
             mark_e6: 220,
         },
@@ -48493,6 +48563,7 @@ fn v16_bpf_10m_market_liquidation_high_asset_stays_bounded() {
         &env.payer,
         ProgInstruction::PushEwmaMark {
             asset_index: HIGH_ASSET as u16,
+            market_id: first_generation_market_id((HIGH_ASSET as u16) as u16),
             now_slot: LIQUIDATION_SLOT,
             mark_e6: 300,
         },
@@ -57847,6 +57918,7 @@ fn v16_attack_cross_asset_oracle_authority_cannot_push_other_asset_mark() {
         &env.payer,
         ProgInstruction::PushAuthMark {
             asset_index: 0,
+            market_id: first_generation_market_id((0) as u16),
             now_slot: 2,
             mark_e6: 9_999_999,
         },
@@ -57876,6 +57948,7 @@ fn v16_attack_cross_asset_oracle_authority_cannot_push_other_asset_mark() {
         &env.payer,
         ProgInstruction::PushAuthMark {
             asset_index: 0,
+            market_id: first_generation_market_id((0) as u16),
             now_slot: 2,
             mark_e6: 150,
         },
@@ -57940,6 +58013,7 @@ fn v16_attack_cross_asset_oracle_authority_cannot_push_other_asset_ewma_mark() {
         &env.payer,
         ProgInstruction::PushEwmaMark {
             asset_index: 1,
+            market_id: first_generation_market_id((1) as u16),
             now_slot: 2,
             mark_e6: 150,
         },
@@ -57963,6 +58037,7 @@ fn v16_attack_cross_asset_oracle_authority_cannot_push_other_asset_ewma_mark() {
         &env.payer,
         ProgInstruction::PushEwmaMark {
             asset_index: 0,
+            market_id: first_generation_market_id((0) as u16),
             now_slot: 2,
             mark_e6: 9_999_999,
         },
@@ -57991,6 +58066,7 @@ fn v16_attack_cross_asset_oracle_authority_cannot_push_other_asset_ewma_mark() {
         &env.payer,
         ProgInstruction::PushEwmaMark {
             asset_index: 0,
+            market_id: first_generation_market_id((0) as u16),
             now_slot: 2,
             mark_e6: 150,
         },
@@ -58881,6 +58957,7 @@ fn v16_attack_oracle_authority_rotation_revokes_old_grants_new() {
     let r0 = env.send(
         ProgInstruction::PushAuthMark {
             asset_index: 0,
+            market_id: first_generation_market_id((0) as u16),
             now_slot: 2,
             mark_e6: 110,
         },
@@ -58925,6 +59002,7 @@ fn v16_attack_oracle_authority_rotation_revokes_old_grants_new() {
     let r_old = env.send(
         ProgInstruction::PushAuthMark {
             asset_index: 0,
+            market_id: first_generation_market_id((0) as u16),
             now_slot: 3,
             mark_e6: 120,
         },
@@ -58948,6 +59026,7 @@ fn v16_attack_oracle_authority_rotation_revokes_old_grants_new() {
     let r_new = env.send(
         ProgInstruction::PushAuthMark {
             asset_index: 0,
+            market_id: first_generation_market_id((0) as u16),
             now_slot: 3,
             mark_e6: 120,
         },
@@ -60587,6 +60666,7 @@ fn v16_attack_update_authority_handoff_rekeys_asset0_default_runtime_authorities
         &env.payer,
         ProgInstruction::PushAuthMark {
             asset_index: 0,
+            market_id: first_generation_market_id((0) as u16),
             now_slot: 2,
             mark_e6: 777,
         },
