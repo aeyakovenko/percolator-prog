@@ -7697,6 +7697,18 @@ fn v16_attack_rebalance_reduce_cannot_erase_elapsed_premium_funding() {
         env.svm.expire_blockhash();
         env.rebalance_reduce_with_cu(&attacker_owner, attacker, 0, Q as u128);
 
+        // Settle the independent LP's epoch snapshot permissionlessly. Its raw
+        // leg remains in the normal side-reset lifecycle, but its funding claim
+        // must already be economically visible after this bounded step.
+        env.svm.expire_blockhash();
+        env.crank(
+            lp,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 2,
+                observations: crank_observations(0),
+            },
+        );
+
         assert!(percolator::active_bitmap_is_empty(active_bitmap(
             &env.portfolio_state(attacker)
         )));
