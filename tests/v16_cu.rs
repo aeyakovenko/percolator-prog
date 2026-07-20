@@ -39126,6 +39126,7 @@ fn assert_trade_driven_mark_cannot_profit_from_independent_liquidation_reward(
     params.max_accrual_dt_slots = 1;
     let mut env = V16CuEnv::new_with_init_params(params);
     env.update_liquidation_fee_policy_with_cu(10_000);
+    let compromised_marketauth = env.admin.insecure_clone();
     let hybrid_oracle = match mode {
         TradeDrivenLiquidationMode::Ewma => {
             env.svm.warp_to_slot(1);
@@ -39272,6 +39273,23 @@ fn assert_trade_driven_mark_cannot_profit_from_independent_liquidation_reward(
         "an independent victim paid a real liquidation loss"
     );
     assert!(reward <= move_fee);
+    let after_liquidation = env.market_state().1;
+    let victim_penalty = after_liquidation.insurance - group_after_move.insurance;
+    assert_eq!(victim_penalty, 500, "the victim paid the minimum penalty");
+    assert_eq!(
+        after_liquidation.insurance_domain_budget_remaining_total
+            - group_after_move.insurance_domain_budget_remaining_total,
+        victim_penalty,
+        "the retained victim penalty became authority-withdrawable insurance"
+    );
+    let (penalty_dest, _) = env
+        .try_withdraw_insurance_asset_with_authority(
+            &compromised_marketauth,
+            0,
+            victim_penalty,
+        )
+        .expect("compromised market authority reclaims the victim penalty");
+    let reclaimed_penalty = env.token_amount(penalty_dest) as u128;
 
     for account in [attack_long, attack_short] {
         env.crank_steps(
@@ -39313,7 +39331,8 @@ fn assert_trade_driven_mark_cannot_profit_from_independent_liquidation_reward(
     let cranker_dest = env.withdraw(&cranker_owner, cranker, cranker_capital);
     let extracted = env.token_amount(long_dest) as u128
         + env.token_amount(short_dest) as u128
-        + env.token_amount(cranker_dest) as u128;
+        + env.token_amount(cranker_dest) as u128
+        + reclaimed_penalty;
     assert!(
         extracted <= attack_deposits,
         "attacker extracted {extracted} after depositing {attack_deposits}"
