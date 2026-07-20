@@ -59827,3 +59827,178 @@ fn v16_attack_resolved_adl_winner_can_wind_down_publicly() {
     assert_eq!(terminal.vault, 0);
     assert_eq!(env.token_amount(env.vault), 0);
 }
+
+fn run_negative_fee_domain_terminal_case(path: NoCpiReportedPricePath) -> (u128, u128, u128, u128) {
+    const MARK: u64 = 1_000_000;
+    const FEE: u128 = MARK as u128;
+    let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+        initial_price: MARK,
+        maintenance_fee_per_slot: FEE - 1,
+        ..V16CuMarketParams::default()
+    });
+    env.configure_auth_mark_with_cu(0, MARK);
+    env.update_maintenance_fee_policy_with_cu(10_000);
+
+    let oracle = Keypair::new();
+    env.ensure_signer_account(oracle.pubkey());
+    let admin = env.admin.insecure_clone();
+    env.send(
+        ProgInstruction::UpdateAssetAuthority {
+            asset_index: 0,
+            kind: percolator_prog::processor::ASSET_AUTH_ORACLE,
+            new_pubkey: oracle.pubkey().to_bytes(),
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(oracle.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&admin, &oracle],
+    )
+    .expect("separate honest oracle authority");
+
+    let low_owner = Keypair::new();
+    let low = env.create_portfolio(&low_owner);
+    let victim_owner = Keypair::new();
+    let victim = env.create_portfolio(&victim_owner);
+    let reward_owner = Keypair::new();
+    let reward = env.create_portfolio(&reward_owner);
+    env.deposit(&low_owner, low, FEE);
+    env.deposit(&victim_owner, victim, 2 * FEE);
+    env.trade_asset_with_cu(
+        0,
+        &low_owner,
+        low,
+        &victim_owner,
+        victim,
+        POS_SCALE as i128,
+        MARK,
+        0,
+    );
+
+    env.svm.warp_to_slot(1);
+    env.send(
+        ProgInstruction::PushAuthMark {
+            asset_index: 0,
+            now_slot: 1,
+            mark_e6: MARK,
+        },
+        vec![
+            AccountMeta::new(oracle.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&oracle],
+    )
+    .expect("honest unchanged mark");
+    for p in [low, victim] {
+        for _ in 0..2 {
+            env.svm.expire_blockhash();
+            let _ = env.send(
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: 1,
+                    observations: crank_observations(0),
+                },
+                vec![
+                    AccountMeta::new(env.payer.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(p, false),
+                ],
+                &[],
+            );
+        }
+    }
+    env.sync_maintenance_fee_with_cu(low, Some(reward), 1);
+    assert_eq!(env.portfolio_state(low).capital.get(), 1);
+    assert_eq!(env.portfolio_state(reward).capital.get(), FEE - 1);
+
+    env.svm.expire_blockhash();
+    try_no_cpi_reported_price_trade_with_cu(
+        &mut env,
+        path,
+        &low_owner,
+        low,
+        &victim_owner,
+        victim,
+        -(POS_SCALE as i128),
+        MARK,
+        10_000,
+    )
+    .unwrap_or_else(|err| panic!("{path:?} risk-reducing fee trade: {err}"));
+    let (_, after_fee) = env.market_state();
+    let long_budget = after_fee.insurance_domain_budget[0];
+    let short_budget = after_fee.insurance_domain_budget[1];
+    assert_eq!(env.portfolio_state(low).capital.get(), 0);
+    assert_eq!(env.portfolio_state(victim).capital.get(), FEE);
+
+    let reward_dest = env.withdraw(&reward_owner, reward, FEE - 1);
+    assert_eq!(env.token_amount(reward_dest) as u128, FEE - 1);
+    env.close_portfolio_with_cu(&reward_owner, reward);
+    env.close_portfolio_with_cu(&low_owner, low);
+
+    let bankrupt_owner = Keypair::new();
+    let bankrupt = env.create_portfolio(&bankrupt_owner);
+    env.deposit(&bankrupt_owner, bankrupt, FEE);
+    env.trade_asset_with_cu(
+        0,
+        &victim_owner,
+        victim,
+        &bankrupt_owner,
+        bankrupt,
+        POS_SCALE as i128,
+        MARK,
+        0,
+    );
+
+    env.svm.warp_to_slot(2);
+    env.send(
+        ProgInstruction::PushAuthMark {
+            asset_index: 0,
+            now_slot: 2,
+            mark_e6: 3 * MARK,
+        },
+        vec![
+            AccountMeta::new(oracle.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&oracle],
+    )
+    .expect("honest adverse mark");
+    for slot in [2u64, 3] {
+        env.svm.warp_to_slot(slot);
+        for _ in 0..3 {
+            env.svm.expire_blockhash();
+            let _ = env.send(
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: slot,
+                    observations: crank_observations(0),
+                },
+                vec![
+                    AccountMeta::new(env.payer.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(victim, false),
+                ],
+                &[],
+            );
+        }
+    }
+    assert_eq!(env.market_state().1.assets[0].effective_price, 3 * MARK);
+    env.resolve();
+
+    let mut victim_payout = 0u128;
+    for _ in 0..4 {
+        let loser_dest = env.close_resolved(&bankrupt_owner, bankrupt);
+        assert_eq!(env.token_amount(loser_dest), 0);
+        let winner_dest = env.close_resolved(&victim_owner, victim);
+        victim_payout += env.token_amount(winner_dest) as u128;
+    }
+    let (_, terminal) = env.market_state();
+    (victim_payout, terminal.insurance, long_budget, short_budget)
+}
+
+#[test]
+fn probe_negative_batch_fee_domain_can_harm_long_winner() {
+    let single = run_negative_fee_domain_terminal_case(NoCpiReportedPricePath::Single);
+    let batch = run_negative_fee_domain_terminal_case(NoCpiReportedPricePath::Batch);
+    println!("single={single:?} batch={batch:?}");
+    assert_eq!(batch, single);
+}
