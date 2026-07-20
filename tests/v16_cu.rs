@@ -59719,9 +59719,10 @@ fn v16_attack_underfunded_exit_cannot_move_ewma_with_uncollectible_fee() {
 }
 
 // A permissionless asset operator must remain economically negative for moving its EWMA against
-// pre-existing independent OI. Reclaiming the externality fee turns the mark move into a public
-// extraction: the attacker opens against a passive LP, self-trades to move the mark, reclaims the
-// fee, then closes against the same LP at the moved effective price.
+// pre-existing independent OI, even when the market authority is compromised. Moving the fee from
+// the creator's domains to asset-0 insurance is insufficient if marketauth can reclaim it after all
+// users exit. The coalition opens against a passive LP, self-trades to move the mark, closes every
+// portfolio, then reclaims the fee from the canonical insurance domain.
 #[test]
 fn v16_attack_reclaimable_ewma_fee_cannot_fund_lp_extraction() {
     const ASSET_INDEX: u16 = 1;
@@ -59742,6 +59743,7 @@ fn v16_attack_reclaimable_ewma_fee_cannot_fund_lp_extraction() {
         ..V16CuMarketParams::default()
     });
     env.update_market_init_fee_policy_with_cu(INIT_FEE);
+    let compromised_marketauth = env.admin.insecure_clone();
 
     let attacker = Keypair::new();
     env.ensure_signer_account(attacker.pubkey());
@@ -59790,13 +59792,8 @@ fn v16_attack_reclaimable_ewma_fee_cannot_fund_lp_extraction() {
         env.deposit(owner, portfolio, DEPOSIT);
     }
 
-    let matcher_program = Pubkey::new_unique();
-    env.svm.add_program(
-        matcher_program,
-        &std::fs::read(matcher_program_path()).expect("read matcher BPF"),
-    );
-    let (matcher_ctx, matcher_delegate, _) =
-        env.init_matcher_context_authorized(matcher_program, &victim, victim_lp);
+    let (matcher_program, matcher_ctx, matcher_delegate) =
+        auth_matcher_for_lp_via_system_create(&mut env, &victim, victim_lp);
 
     // The passive LP is independently owned and authorizes normal fills at the current engine mark.
     env.trade_cpi_with_cu_on_asset(
@@ -59853,11 +59850,15 @@ fn v16_attack_reclaimable_ewma_fee_cannot_fund_lp_extraction() {
         "self-trade must queue a downward EWMA move"
     );
 
-    let reclaimed =
+    let locally_reclaimed =
         match env.try_withdraw_insurance_asset_with_authority(&attacker, ASSET_INDEX, fee_paid) {
             Ok((dest, _)) => env.token_amount(dest) as u128,
             Err(_) => 0,
         };
+    assert_eq!(
+        locally_reclaimed, 0,
+        "movement fee must already be unavailable to the permissionless asset operator"
+    );
 
     // Apply the already-paid mark and settle every participant before closing at the new mark.
     for portfolio in [attacker_position, victim_lp] {
@@ -59911,17 +59912,30 @@ fn v16_attack_reclaimable_ewma_fee_cannot_fund_lp_extraction() {
             env.token_amount(dest) as u128
         }
     };
-    let attacker_payout = withdraw_all(&mut env, &attacker, attacker_position)
+    let mut attacker_payout = withdraw_all(&mut env, &attacker, attacker_position)
         + withdraw_all(&mut env, &self_long_owner, self_long)
-        + withdraw_all(&mut env, &self_short_owner, self_short)
-        + reclaimed;
+        + withdraw_all(&mut env, &self_short_owner, self_short);
     let victim_payout = withdraw_all(&mut env, &victim, victim_lp);
+    assert_eq!(
+        env.market_state().1.c_tot,
+        0,
+        "all user capital exits before the delayed canonical-fee reclaim"
+    );
+    let base_reclaimed = match env.try_withdraw_insurance_asset_with_authority(
+        &compromised_marketauth,
+        0,
+        fee_paid,
+    ) {
+        Ok((dest, _)) => env.token_amount(dest) as u128,
+        Err(_) => 0,
+    };
+    attacker_payout += base_reclaimed;
     let attacker_committed = DEPOSIT * 3 + INIT_FEE;
     let victim_loss = DEPOSIT.saturating_sub(victim_payout);
     let attacker_gain = attacker_payout.saturating_sub(attacker_committed);
 
     eprintln!(
-        "EWMA reclaim extraction: fee={fee_paid} reclaimed={reclaimed} effective={effective} \
+        "EWMA reclaim extraction: fee={fee_paid} base_reclaimed={base_reclaimed} effective={effective} \
          attacker_gain={attacker_gain} victim_loss={victim_loss}"
     );
     assert!(
