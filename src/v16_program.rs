@@ -6136,8 +6136,8 @@ pub mod processor {
             let mut remaining_fee_a = outcome.fee_a;
             let mut remaining_fee_b = outcome.fee_b;
             let mut cfg_dirty = false;
-            for (asset_index, oracle_profile, fee_basis_price, fee_quote, abs_size) in
-                leg_ctx.iter_mut()
+            for ((asset_index, oracle_profile, fee_basis_price, fee_quote, abs_size), request) in
+                leg_ctx.iter_mut().zip(requests.iter())
             {
                 let requested_fee_leg =
                     batch_leg_fee(*abs_size, *fee_basis_price, fee_quote.fee_bps)?;
@@ -6149,12 +6149,17 @@ pub mod processor {
                 remaining_fee_b = remaining_fee_b
                     .checked_sub(fee_b)
                     .ok_or(PercolatorError::EngineArithmeticOverflow)?;
+                let (fee_long, fee_short) = if request.size_q > 0 {
+                    (fee_a, fee_b)
+                } else {
+                    (fee_b, fee_a)
+                };
                 credit_trade_fees_to_market_budgets_view(
                     &cfg,
                     &mut group,
                     *asset_index,
-                    fee_a,
-                    fee_b,
+                    fee_long,
+                    fee_short,
                 )?;
                 let collected_post_trade_mark =
                     collected_fee_supported_mark_view(oracle_profile, *fee_quote, fee_a, fee_b)?;

@@ -59995,10 +59995,21 @@ fn run_negative_fee_domain_terminal_case(path: NoCpiReportedPricePath) -> (u128,
     (victim_payout, terminal.insurance, long_budget, short_budget)
 }
 
+// Public LoF regression: batch fee aggregates are keyed by account A/B, while insurance is keyed by
+// long/short side. On a negative leg A is the short, so crediting fee_a to the long domain strands an
+// honest long winner without the fee-funded backstop. The single and batch routes execute identical
+// trades under a separate honest oracle and must produce identical terminal payouts and budgets.
 #[test]
-fn probe_negative_batch_fee_domain_can_harm_long_winner() {
+fn v16_attack_negative_batch_fee_cannot_deprive_long_winner() {
     let single = run_negative_fee_domain_terminal_case(NoCpiReportedPricePath::Single);
     let batch = run_negative_fee_domain_terminal_case(NoCpiReportedPricePath::Batch);
-    println!("single={single:?} batch={batch:?}");
-    assert_eq!(batch, single);
+    assert_eq!(single.0, 1_000_000, "control winner recovers its capital");
+    assert!(
+        single.2 > single.3,
+        "the asymmetric fee must fund the long-winner domain"
+    );
+    assert_eq!(
+        batch, single,
+        "signed batch routing must match single-trade payout and domain accounting"
+    );
 }
