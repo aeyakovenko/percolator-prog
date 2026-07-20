@@ -5077,7 +5077,8 @@ pub mod processor {
         }
 
         // A permissionless asset operator must not recover the fee that paid for its mark move.
-        // Keep only that collected externality fee in base insurance; ordinary fees remain local.
+        // Leave only that collected externality fee outside every withdrawable domain budget;
+        // ordinary fees remain local. CloseSlab burns the unbudgeted surplus after all claims exit.
         let mut mark_long = mark_externality_fee / 2;
         let mut mark_short = mark_externality_fee
             .checked_sub(mark_long)
@@ -5115,7 +5116,7 @@ pub mod processor {
                 .checked_sub(mark_short)
                 .ok_or(PercolatorError::EngineCounterUnderflow)?,
         )?;
-        credit_market_insurance_budget_view(group, 0, mark_externality_fee)
+        Ok(())
     }
 
     fn credit_market_fee_split_across_domains_view(
@@ -8324,21 +8325,28 @@ pub mod processor {
         expect_owner(market_ai, program_id)?;
         verify_token_program(token_program)?;
 
-        let cfg_pre = {
+        let (cfg_pre, retired_unbudgeted_insurance) = {
             let mut market_data = market_ai.try_borrow_mut_data()?;
-            let (cfg, group) = state::market_view_mut(&mut market_data)?;
+            let (cfg, mut group) = state::market_view_mut(&mut market_data)?;
             expect_live_authority(&cfg.marketauth, admin_dest.key)?;
             if group.header.mode != 1 {
                 return Err(PercolatorError::EngineLockActive.into());
             }
-            if group.header.vault.get() != 0
-                || group.header.insurance.get() != 0
-                || group.header.c_tot.get() != 0
-                || group.header.materialized_portfolio_count.get() != 0
+            if group.header.c_tot.get() != 0 || group.header.materialized_portfolio_count.get() != 0
             {
                 return Err(PercolatorError::EngineLockActive.into());
             }
-            cfg
+            let retired = if group.header.insurance.get() == 0 {
+                0
+            } else {
+                group
+                    .retire_terminal_unbudgeted_insurance_not_atomic()
+                    .map_err(map_v16_error)?
+            };
+            if group.header.vault.get() != 0 || group.header.insurance.get() != 0 {
+                return Err(PercolatorError::EngineLockActive.into());
+            }
+            (cfg, retired)
         };
 
         let (vault_authority, bump) = derive_vault_authority(program_id, market_ai.key);
@@ -8347,6 +8355,11 @@ pub mod processor {
         verify_vault_token_account(vault_token, &vault_authority, &primary_mint)?;
         let vault_account = unpack_token_account(vault_token)?;
         verify_user_token_account(dest_token, admin_dest.key, &primary_mint)?;
+        let retired_u64 = amount_to_u64(retired_unbudgeted_insurance)?;
+        let primary_sweep_amount = vault_account
+            .amount
+            .checked_sub(retired_u64)
+            .ok_or(PercolatorError::InvalidTokenAccount)?;
         let bump_arr = [bump];
         let signer_seeds: &[&[&[u8]]] = &[&[b"vault", market_ai.key.as_ref(), &bump_arr]];
         let secondary_close = if cfg_pre.secondary_collateral_mint != [0u8; 32] {
@@ -8372,13 +8385,28 @@ pub mod processor {
             None
         };
 
-        if vault_account.amount > 0 {
+        if retired_u64 != 0 {
+            let primary_mint_index = if secondary_close.is_some() { 8 } else { 6 };
+            let primary_mint_ai = account(accounts, primary_mint_index)?;
+            expect_writable(primary_mint_ai)?;
+            expect_key(primary_mint_ai, &primary_mint)?;
+            verify_mint(primary_mint_ai)?;
+            burn_tokens_signed(
+                token_program,
+                vault_token,
+                primary_mint_ai,
+                vault_authority_ai,
+                retired_u64,
+                signer_seeds,
+            )?;
+        }
+        if primary_sweep_amount > 0 {
             transfer_tokens_signed(
                 token_program,
                 vault_token,
                 dest_token,
                 vault_authority_ai,
-                vault_account.amount,
+                primary_sweep_amount,
                 signer_seeds,
             )?;
         }
@@ -12243,6 +12271,37 @@ pub mod processor {
             &[
                 source.clone(),
                 dest.clone(),
+                authority.clone(),
+                token_program.clone(),
+            ],
+            signer_seeds,
+        )
+    }
+
+    fn burn_tokens_signed<'a>(
+        token_program: &AccountInfo<'a>,
+        source: &AccountInfo<'a>,
+        mint: &AccountInfo<'a>,
+        authority: &AccountInfo<'a>,
+        amount: u64,
+        signer_seeds: &[&[&[u8]]],
+    ) -> Result<(), ProgramError> {
+        if amount == 0 {
+            return Ok(());
+        }
+        let ix = spl_token::instruction::burn(
+            token_program.key,
+            source.key,
+            mint.key,
+            authority.key,
+            &[],
+            amount,
+        )?;
+        invoke_signed(
+            &ix,
+            &[
+                source.clone(),
+                mint.clone(),
                 authority.clone(),
                 token_program.clone(),
             ],

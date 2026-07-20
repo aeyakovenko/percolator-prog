@@ -1235,6 +1235,14 @@ impl V16CuEnv {
         self.svm.set_account(token, account).unwrap();
     }
 
+    fn set_mint_supply(&mut self, mint_key: Pubkey, supply: u64) {
+        let mut account = self.svm.get_account(&mint_key).expect("mint account");
+        let mut mint = Mint::unpack(&account.data).expect("valid mint");
+        mint.supply = supply;
+        Mint::pack(mint, &mut account.data).expect("pack mint");
+        self.svm.set_account(mint_key, account).unwrap();
+    }
+
     fn market_state(&self) -> (state::WrapperConfigV16, MarketGroupV16) {
         let account = self.svm.get_account(&self.market).expect("market account");
         state::read_market(&account.data).unwrap()
@@ -2266,6 +2274,7 @@ impl V16CuEnv {
                 AccountMeta::new_readonly(self.vault_authority, false),
                 AccountMeta::new(dest, false),
                 AccountMeta::new_readonly(spl_token::ID, false),
+                AccountMeta::new(self.mint, false),
             ],
             &[&self.admin],
         )
@@ -3354,6 +3363,11 @@ impl V16CuEnv {
     fn token_amount(&self, key: Pubkey) -> u64 {
         let account = self.svm.get_account(&key).expect("token account");
         TokenAccount::unpack(&account.data).unwrap().amount
+    }
+
+    fn mint_supply(&self, key: Pubkey) -> u64 {
+        let account = self.svm.get_account(&key).expect("mint account");
+        Mint::unpack(&account.data).unwrap().supply
     }
 
     fn convert_released_pnl_with_cu(
@@ -59742,6 +59756,9 @@ fn v16_attack_reclaimable_ewma_fee_cannot_fund_lp_extraction() {
         min_funding_lifetime_slots: 20,
         ..V16CuMarketParams::default()
     });
+    // LiteSVM fixtures construct funded token accounts directly. Give the external SPL mint a
+    // realistic supply before the exploit so the terminal burn exercises the real token program.
+    env.set_mint_supply(env.mint, u64::MAX);
     env.update_market_init_fee_policy_with_cu(INIT_FEE);
     let compromised_marketauth = env.admin.insecure_clone();
 
@@ -59921,15 +59938,23 @@ fn v16_attack_reclaimable_ewma_fee_cannot_fund_lp_extraction() {
         0,
         "all user capital exits before the delayed canonical-fee reclaim"
     );
-    let base_reclaimed = match env.try_withdraw_insurance_asset_with_authority(
-        &compromised_marketauth,
-        0,
-        fee_paid,
-    ) {
-        Ok((dest, _)) => env.token_amount(dest) as u128,
-        Err(_) => 0,
-    };
+    let base_reclaimed =
+        match env.try_withdraw_insurance_asset_with_authority(&compromised_marketauth, 0, fee_paid)
+        {
+            Ok((dest, _)) => env.token_amount(dest) as u128,
+            Err(_) => 0,
+        };
+    assert_eq!(
+        base_reclaimed, 0,
+        "the compromised market authority must not reclaim the mark-movement fee"
+    );
+    let (init_fee_dest, _) = env
+        .try_withdraw_insurance_asset_with_authority(&compromised_marketauth, 0, INIT_FEE)
+        .expect("the unrelated permissionless-init fee remains normally withdrawable");
+    let init_fee_reclaimed = env.token_amount(init_fee_dest) as u128;
+    assert_eq!(init_fee_reclaimed, INIT_FEE);
     attacker_payout += base_reclaimed;
+    attacker_payout += init_fee_reclaimed;
     let attacker_committed = DEPOSIT * 3 + INIT_FEE;
     let victim_loss = DEPOSIT.saturating_sub(victim_payout);
     let attacker_gain = attacker_payout.saturating_sub(attacker_committed);
@@ -59946,6 +59971,57 @@ fn v16_attack_reclaimable_ewma_fee_cannot_fund_lp_extraction() {
         attacker_payout <= attacker_committed,
         "reclaiming the mark fee made the attacker profitable by {attacker_gain} against an \
          independent LP loss of {victim_loss}"
+    );
+
+    for (owner, portfolio) in [
+        (&attacker, attacker_position),
+        (&self_long_owner, self_long),
+        (&self_short_owner, self_short),
+        (&victim, victim_lp),
+    ] {
+        env.close_portfolio_with_cu(owner, portfolio);
+    }
+    env.resolve();
+    let terminal = env.market_state().1;
+    assert_eq!(terminal.insurance, fee_paid);
+    assert_eq!(terminal.insurance_domain_budget_remaining_total, 0);
+    assert_eq!(terminal.vault, fee_paid);
+    assert_eq!(env.token_amount(env.vault) as u128, fee_paid);
+
+    let supply_before = env.mint_supply(env.mint);
+    let terminal_dest = env.token_account(compromised_marketauth.pubkey(), 0);
+    env.svm.expire_blockhash();
+    let close = env.send(
+        ProgInstruction::CloseSlab,
+        vec![
+            AccountMeta::new(compromised_marketauth.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new(terminal_dest, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(env.mint, false),
+        ],
+        &[&compromised_marketauth],
+    );
+    assert!(
+        close.is_ok(),
+        "terminal mark-fee burn must remain closable: {close:?}"
+    );
+    assert_cu_within(
+        "terminal mark-fee burn CloseSlab",
+        close.unwrap(),
+        CUSTODY_CU_LIMIT,
+    );
+    assert_eq!(
+        env.token_amount(terminal_dest),
+        0,
+        "CloseSlab burns the fee instead of sweeping it to compromised marketauth"
+    );
+    assert_eq!(
+        env.mint_supply(env.mint),
+        supply_before - fee_paid as u64,
+        "the canonical mint supply falls by exactly the non-reclaimable movement fee"
     );
 }
 
@@ -60108,6 +60184,14 @@ fn assert_permissionless_ewma_mark_fee_not_reclaimable(route: PermissionlessMark
     .unwrap();
     let after_trade = env.market_state().1;
     let fee_paid = after_trade.insurance - before.insurance;
+    let unbudgeted_before = before
+        .insurance
+        .checked_sub(before.insurance_domain_budget_remaining_total)
+        .unwrap();
+    let unbudgeted_after = after_trade
+        .insurance
+        .checked_sub(after_trade.insurance_domain_budget_remaining_total)
+        .unwrap();
     let asset_budget_delta = after_trade.insurance_domain_budget[2]
         + after_trade.insurance_domain_budget[3]
         - asset_budget_before;
@@ -60139,8 +60223,13 @@ fn assert_permissionless_ewma_mark_fee_not_reclaimable(route: PermissionlessMark
         "{route:?}: mark fee must not land in creator-operated domains"
     );
     assert_eq!(
-        base_budget_delta, fee_paid,
-        "{route:?}: mark fee must remain in base insurance"
+        base_budget_delta, 0,
+        "{route:?}: mark fee must not become withdrawable by marketauth"
+    );
+    assert_eq!(
+        unbudgeted_after - unbudgeted_before,
+        fee_paid,
+        "{route:?}: the full movement fee stays in claim-free engine insurance"
     );
 }
 
