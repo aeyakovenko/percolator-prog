@@ -20736,6 +20736,122 @@ fn v16_attack_matcher_config_replay_cannot_bind_reinitialized_portfolio() {
     }
 }
 
+// A retained co-signed trade is another portfolio-scoped authority. It must not create exposure in
+// a replacement account at the same address after InitPortfolio assigns a new incarnation ID.
+#[test]
+fn v16_attack_trade_replay_cannot_cross_portfolio_incarnation() {
+    const DEPOSIT: u128 = 1_000_000;
+    const SIZE_Q: i128 = 1_000 * POS_SCALE as i128;
+    const INITIAL_MARK: u64 = 100;
+    const FINAL_MARK: u64 = 200;
+    const EXPECTED_PNL: u128 = 100_000;
+
+    let mut env = V16CuEnv::new();
+    env.configure_auth_mark_with_cu(0, INITIAL_MARK);
+    let victim_owner = Keypair::new();
+    let attacker_owner = Keypair::new();
+    let victim = env.create_portfolio(&victim_owner);
+    let attacker = env.create_portfolio(&attacker_owner);
+    let old_portfolio_id = env.portfolio_id(victim);
+
+    let retained_trade = Transaction::new_signed_with_payer(
+        &[
+            heap_ix(),
+            cu_ix(),
+            Instruction {
+                program_id: env.program_id,
+                accounts: vec![
+                    AccountMeta::new(victim_owner.pubkey(), true),
+                    AccountMeta::new(attacker_owner.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(victim, false),
+                    AccountMeta::new(attacker, false),
+                ],
+                data: ProgInstruction::TradeNoCpi {
+                    asset_index: 0,
+                    size_q: -SIZE_Q,
+                    exec_price: INITIAL_MARK,
+                    fee_bps: 0,
+                }
+                .encode(),
+            },
+        ],
+        Some(&env.payer.pubkey()),
+        &[&env.payer, &victim_owner, &attacker_owner],
+        env.svm.latest_blockhash(),
+    );
+
+    env.close_portfolio_with_cu(&victim_owner, victim);
+    send_raw_tx(
+        &mut env.svm,
+        &env.payer,
+        system_instruction::transfer(&env.payer.pubkey(), &victim, 1_000_000_000),
+        &[],
+    )
+    .expect("re-fund closed victim address");
+    send_raw_ixs(
+        &mut env.svm,
+        &env.payer,
+        vec![
+            heap_ix(),
+            ComputeBudgetInstruction::set_compute_unit_limit(1_399_999),
+            Instruction {
+                program_id: env.program_id,
+                accounts: vec![
+                    AccountMeta::new(victim_owner.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(victim, false),
+                ],
+                data: ProgInstruction::InitPortfolio.encode(),
+            },
+        ],
+        &[&victim_owner],
+    )
+    .expect("reinitialize victim at the same address");
+    let replacement_portfolio_id = env.portfolio_id(victim);
+    assert_ne!(replacement_portfolio_id, old_portfolio_id);
+    env.deposit(&victim_owner, victim, DEPOSIT);
+    env.deposit(&attacker_owner, attacker, DEPOSIT);
+
+    let replay = env.svm.send_transaction(retained_trade);
+    if replay.is_ok() {
+        assert_eq!(
+            active_leg_for_asset(&env.portfolio_state(victim), 0).basis_pos_q,
+            -SIZE_Q
+        );
+        env.svm.warp_to_slot(1);
+        env.push_auth_mark_with_cu(1, FINAL_MARK);
+        for portfolio in [victim, attacker] {
+            env.crank(
+                portfolio,
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: 1,
+                    observations: crank_observations(0),
+                },
+            );
+        }
+        env.rebalance_reduce_with_cu(&attacker_owner, attacker, 0, SIZE_Q as u128);
+        env.convert_released_pnl_with_cu(&attacker_owner, attacker, EXPECTED_PNL);
+        env.forfeit_recovery_leg_with_cu(&victim_owner, victim, 0, 1);
+
+        let attacker_dest = env.withdraw(&attacker_owner, attacker, DEPOSIT + EXPECTED_PNL);
+        let victim_dest = env.withdraw(&victim_owner, victim, DEPOSIT - EXPECTED_PNL);
+        let attacker_payout = env.token_amount(attacker_dest) as u128;
+        let victim_payout = env.token_amount(victim_dest) as u128;
+        assert!(
+            attacker_payout <= DEPOSIT && victim_payout >= DEPOSIT,
+            "trade signed for portfolio {old_portfolio_id} replayed against replacement \
+             {replacement_portfolio_id}: attacker extracted {attacker_payout}, victim recovered \
+             only {victim_payout}"
+        );
+    } else {
+        let attacker_dest = env.withdraw(&attacker_owner, attacker, DEPOSIT);
+        let victim_dest = env.withdraw(&victim_owner, victim, DEPOSIT);
+        assert_eq!(env.token_amount(attacker_dest) as u128, DEPOSIT);
+        assert_eq!(env.token_amount(victim_dest) as u128, DEPOSIT);
+    }
+}
+
 #[test]
 fn v16_attack_non_owner_cannot_change_lp_matcher_config() {
     let mut env = V16CuEnv::new();
