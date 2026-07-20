@@ -33442,6 +33442,287 @@ fn v16_attack_backing_expiry_no_overpay() {
     );
 }
 
+// A junior winner captures the resolved payout snapshot before an independent winner's lapsed
+// Fresh source bucket is expired by terminal realization. The newly released junior funds must
+// raise every receipt's common payout rate, independent of terminal close order.
+#[test]
+fn v16_attack_post_snapshot_backing_expiry_preserves_winner_entitlements() {
+    const CAPITAL: u128 = 1_000;
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(2, 10_000, 10_000, 10_000);
+    env.configure_auth_mark_for_asset_as_admin(0, 0, 100);
+    env.configure_auth_mark_for_asset_as_admin(1, 0, 100);
+
+    let victim_owner = Keypair::new();
+    let victim = env.create_portfolio(&victim_owner);
+    let victim_loser_owner = Keypair::new();
+    let victim_loser = env.create_portfolio(&victim_loser_owner);
+    let attacker_owner = Keypair::new();
+    let attacker = env.create_portfolio(&attacker_owner);
+    let attacker_loser_owner = Keypair::new();
+    let attacker_loser = env.create_portfolio(&attacker_loser_owner);
+    let keeper_owner = Keypair::new();
+    let keeper = env.create_portfolio(&keeper_owner);
+    for (owner, portfolio) in [
+        (&victim_owner, victim),
+        (&victim_loser_owner, victim_loser),
+        (&attacker_owner, attacker),
+        (&attacker_loser_owner, attacker_loser),
+    ] {
+        env.deposit(owner, portfolio, CAPITAL);
+    }
+    env.trade_asset_with_cu(
+        0,
+        &victim_owner,
+        victim,
+        &victim_loser_owner,
+        victim_loser,
+        POS_SCALE as i128,
+        100,
+        0,
+    );
+    env.trade_asset_with_cu(
+        1,
+        &attacker_owner,
+        attacker,
+        &attacker_loser_owner,
+        attacker_loser,
+        POS_SCALE as i128,
+        100,
+        0,
+    );
+
+    // Crystallize both winners and flatten every position while the victim bucket is still fresh.
+    env.svm.warp_to_slot(2);
+    env.push_auth_mark_for_asset_as_admin(0, 2, 140);
+    env.push_auth_mark_for_asset_as_admin(1, 2, 140);
+    env.svm.expire_blockhash();
+    env.send(
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 2,
+            observations: vec![
+                CrankObservationHint {
+                    asset_index: 0,
+                    oracle_accounts: 0,
+                },
+                CrankObservationHint {
+                    asset_index: 1,
+                    oracle_accounts: 0,
+                },
+            ],
+        },
+        vec![
+            AccountMeta::new(env.payer.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(keeper, false),
+        ],
+        &[],
+    )
+    .expect("public keeper publishes both authenticated marks");
+    for portfolio in [victim_loser, victim] {
+        env.crank(
+            portfolio,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 2,
+                observations: crank_observations(0),
+            },
+        );
+    }
+    for portfolio in [attacker_loser, attacker] {
+        env.crank(
+            portfolio,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 2,
+                observations: crank_observations(1),
+            },
+        );
+    }
+    env.trade_asset_with_cu(
+        0,
+        &victim_owner,
+        victim,
+        &victim_loser_owner,
+        victim_loser,
+        -(POS_SCALE as i128),
+        140,
+        0,
+    );
+    for portfolio in [victim, victim_loser] {
+        assert!(
+            percolator::active_bitmap_is_empty(active_bitmap(&env.portfolio_state(portfolio))),
+            "the independent victim pair is flat before expiry"
+        );
+    }
+    assert!(has_active_leg_for_asset(&env.portfolio_state(attacker), 1));
+    assert!(has_active_leg_for_asset(
+        &env.portfolio_state(attacker_loser),
+        1
+    ));
+    assert!(env.portfolio_state(victim).pnl.get() > 0);
+    assert!(env.portfolio_state(attacker).pnl.get() > 0);
+
+    let flat = env.market_state().1;
+    assert_eq!(
+        flat.source_backing_buckets[3].status,
+        BackingBucketStatusV16::Fresh,
+        "the attacker's public losing counterparty creates source backing"
+    );
+    let lapse_slot = flat.source_backing_buckets[3]
+        .expiry_slot
+        .max(flat.source_backing_buckets[1].expiry_slot)
+        .checked_add(1)
+        .unwrap();
+    env.svm.warp_to_slot(lapse_slot);
+    // A nonzero reverse move makes the active winner refresh through its now-lapsed source claim.
+    env.push_auth_mark_for_asset_as_admin(1, lapse_slot, 130);
+    env.crank(
+        keeper,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: lapse_slot,
+            observations: crank_observations(1),
+        },
+    );
+    env.crank(
+        attacker,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: lapse_slot,
+            observations: vec![],
+        },
+    );
+    assert_eq!(
+        env.market_state().1.source_backing_buckets[3].status,
+        BackingBucketStatusV16::Expired,
+        "a public live crank expires the attacker's active source bucket"
+    );
+    let close_slot = lapse_slot.checked_add(1).unwrap();
+    env.svm.warp_to_slot(close_slot);
+    env.push_auth_mark_for_asset_as_admin(1, close_slot, 140);
+    env.crank(
+        keeper,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: close_slot,
+            observations: crank_observations(1),
+        },
+    );
+    for portfolio in [attacker_loser, attacker] {
+        env.crank_steps(
+            portfolio,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: close_slot,
+                observations: vec![],
+            },
+            4,
+        );
+    }
+    env.trade_asset_with_cu(
+        1,
+        &attacker_owner,
+        attacker,
+        &attacker_loser_owner,
+        attacker_loser,
+        -(POS_SCALE as i128),
+        140,
+        0,
+    );
+    for portfolio in [victim, victim_loser, attacker, attacker_loser] {
+        assert!(
+            percolator::active_bitmap_is_empty(active_bitmap(&env.portfolio_state(portfolio))),
+            "all positions are publicly flattened before resolution"
+        );
+    }
+    let pre = env.market_state().1;
+    assert_eq!(pre.assets[0].effective_price, 140);
+    assert_eq!(pre.assets[1].effective_price, 140);
+    assert_eq!(
+        pre.source_backing_buckets[1].status,
+        BackingBucketStatusV16::Fresh
+    );
+    assert!(pre.source_backing_buckets[1].expiry_slot < lapse_slot);
+    assert_eq!(
+        pre.source_backing_buckets[3].status,
+        BackingBucketStatusV16::Expired
+    );
+    assert!(
+        env.portfolio_state(attacker).pnl.get() > 0,
+        "the post-expiry favorable move leaves a public junior claim"
+    );
+
+    env.resolve();
+    let close_sum = |env: &mut V16CuEnv, owner: &Keypair, portfolio: Pubkey| -> (u128, u64) {
+        let mut out = 0;
+        let mut max_cu = 0;
+        for _ in 0..8 {
+            let (dest, cu) = env.close_resolved_with_cu(owner, portfolio);
+            out += env.token_amount(dest) as u128;
+            max_cu = max_cu.max(cu);
+        }
+        (out, max_cu)
+    };
+    let (victim_loser_out, victim_loser_cu) =
+        close_sum(&mut env, &victim_loser_owner, victim_loser);
+    let (attacker_loser_out, attacker_loser_cu) =
+        close_sum(&mut env, &attacker_loser_owner, attacker_loser);
+    let (mut attacker_out, attacker_cu) = close_sum(&mut env, &attacker_owner, attacker);
+    let after_snapshot = env.market_state().1;
+    assert!(after_snapshot.payout_snapshot_captured);
+    assert_eq!(
+        after_snapshot.source_backing_buckets[1].status,
+        BackingBucketStatusV16::Fresh,
+        "unrelated winner must not have touched victim's source bucket"
+    );
+    let (victim_out, victim_cu) = close_sum(&mut env, &victim_owner, victim);
+    let (attacker_topup, attacker_topup_cu) = close_sum(&mut env, &attacker_owner, attacker);
+    attacker_out += attacker_topup;
+    let done = env.market_state().1;
+    eprintln!(
+        "terminal expiry probe: loser_v={victim_loser_out} loser_a={attacker_loser_out} attacker={attacker_out} victim={victim_out} vault={} c_tot={} insurance={} snapshot={} rate={}/{} bucket={:?}",
+        done.vault,
+        done.c_tot,
+        done.insurance,
+        done.payout_snapshot,
+        done.resolved_payout_ledger.current_payout_rate_num,
+        done.resolved_payout_ledger.current_payout_rate_den,
+        done.source_backing_buckets[1].status,
+    );
+    assert_eq!(victim_loser_out, CAPITAL - 40);
+    assert_eq!(attacker_loser_out, CAPITAL - 40);
+    assert_eq!(attacker_out, CAPITAL + 40);
+    assert_eq!(victim_out, CAPITAL + 40);
+    assert_eq!(
+        victim_loser_out + attacker_loser_out + attacker_out + victim_out,
+        4 * CAPITAL,
+        "both independent zero-sum trades conserve every deposited atom"
+    );
+    assert_eq!(
+        done.vault, 0,
+        "no post-snapshot junior residual is stranded"
+    );
+    assert_eq!(done.resolved_payout_ledger.snapshot_residual, 80);
+    assert_eq!(
+        done.resolved_payout_ledger.current_payout_rate_num,
+        done.resolved_payout_ledger.current_payout_rate_den,
+        "both 40-atom winner claims reach the full terminal rate"
+    );
+    for (label, cu) in [
+        ("victim loser resolved close", victim_loser_cu),
+        ("attacker loser resolved close", attacker_loser_cu),
+        ("attacker resolved close", attacker_cu),
+        ("victim resolved close", victim_cu),
+        ("attacker resolved topup", attacker_topup_cu),
+    ] {
+        assert_cu_within(label, cu, CUSTODY_CU_LIMIT);
+    }
+    for (owner, portfolio) in [
+        (&victim_owner, victim),
+        (&victim_loser_owner, victim_loser),
+        (&attacker_owner, attacker),
+        (&attacker_loser_owner, attacker_loser),
+        (&keeper_owner, keeper),
+    ] {
+        env.close_portfolio_with_cu(owner, portfolio);
+    }
+    env.close_slab_with_cu();
+}
+
 // security.md sweep — large-amount deposit boundary + TVL cap (#37): the vault is capped at
 // MAX_VAULT_TVL (overflow prevention). A deposit above the cap must reject; a large deposit just below
 // it must credit exactly (no truncation/wraparound in the u128 aggregates) and round-trip exactly.
