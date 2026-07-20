@@ -9683,6 +9683,16 @@ pub mod processor {
         {
             return Err(PercolatorError::EngineLockActive.into());
         }
+        if cfg.force_close_delay_slots != 0
+            && force_close_delay_slots < cfg.force_close_delay_slots
+            && (group.header.source_fresh_backing_total_num.get() != 0
+                || group.header.backing_provider_earnings_total.get() != 0
+                || group.header.insurance_domain_budget_remaining_total.get() != 0)
+        {
+            // Mature-shutdown fallback escheats abandoned provider value. Do not let marketauth
+            // retroactively shorten the reclaim window while any such value remains entrusted.
+            return Err(PercolatorError::EngineLockActive.into());
+        }
         cfg.permissionless_resolve_stale_slots = stale_slots;
         cfg.force_close_delay_slots = force_close_delay_slots;
         drop(group);
