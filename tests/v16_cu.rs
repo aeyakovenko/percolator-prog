@@ -59723,6 +59723,14 @@ fn v16_attack_underfunded_exit_cannot_move_ewma_with_uncollectible_fee() {
 // target for less than the PnL it removes from unrelated open interest.
 #[test]
 fn v16_attack_trade_cannot_underpay_to_override_pending_ewma_target() {
+    #[derive(Clone, Copy, Debug)]
+    enum PendingTargetTradePath {
+        TradeNoCpi,
+        BatchTradeNoCpi,
+        TradeCpi,
+        BatchTradeCpi,
+    }
+
     #[derive(Debug)]
     struct Outcome {
         attacker_withdrawn: u128,
@@ -59732,7 +59740,7 @@ fn v16_attack_trade_cannot_underpay_to_override_pending_ewma_target() {
         final_price: u64,
     }
 
-    fn run(path: NoCpiReportedPricePath, with_wash: bool) -> Outcome {
+    fn run(path: PendingTargetTradePath, with_wash: bool) -> Outcome {
         const BASIS: u64 = 10_000_000;
         const DIRECTIONAL_Q: i128 = 1_000 * POS_SCALE as i128;
         const WASH_Q: i128 = 100 * POS_SCALE as i128;
@@ -59777,6 +59785,84 @@ fn v16_attack_trade_cannot_underpay_to_override_pending_ewma_target() {
 
         let (wash_long, wash_long_portfolio, wash_short, wash_short_portfolio) =
             funded_no_cpi_reported_price_pair(&mut env, WASH_DEPOSIT);
+        let matcher = match path {
+            PendingTargetTradePath::TradeCpi | PendingTargetTradePath::BatchTradeCpi => Some(
+                auth_matcher_for_lp_via_system_create(&mut env, &wash_short, wash_short_portfolio),
+            ),
+            PendingTargetTradePath::TradeNoCpi | PendingTargetTradePath::BatchTradeNoCpi => None,
+        };
+
+        let trade_wash = |env: &mut V16CuEnv, size_q: i128, exec_price: u64| {
+            env.svm.expire_blockhash();
+            match path {
+                PendingTargetTradePath::TradeNoCpi => env.try_trade_asset_with_cu(
+                    0,
+                    &wash_long,
+                    wash_long_portfolio,
+                    &wash_short,
+                    wash_short_portfolio,
+                    size_q,
+                    exec_price,
+                    0,
+                ),
+                PendingTargetTradePath::BatchTradeNoCpi => env.send(
+                    ProgInstruction::BatchTradeNoCpi {
+                        legs: vec![BatchTradeLeg {
+                            asset_index: 0,
+                            size_q,
+                            exec_price,
+                            fee_bps: 0,
+                        }],
+                    },
+                    vec![
+                        AccountMeta::new(wash_long.pubkey(), true),
+                        AccountMeta::new(wash_short.pubkey(), true),
+                        AccountMeta::new(env.market, false),
+                        AccountMeta::new(wash_long_portfolio, false),
+                        AccountMeta::new(wash_short_portfolio, false),
+                    ],
+                    &[&wash_long, &wash_short],
+                ),
+                PendingTargetTradePath::TradeCpi => {
+                    let (matcher_program, ctx, delegate) = matcher.unwrap();
+                    env.try_trade_cpi_with_cu_on_asset(
+                        &wash_long,
+                        wash_long_portfolio,
+                        &wash_short,
+                        wash_short_portfolio,
+                        matcher_program,
+                        ctx,
+                        delegate,
+                        0,
+                        size_q,
+                        0,
+                    )
+                }
+                PendingTargetTradePath::BatchTradeCpi => {
+                    let (matcher_program, ctx, delegate) = matcher.unwrap();
+                    env.send(
+                        ProgInstruction::BatchTradeCpi {
+                            legs: vec![BatchTradeCpiLeg {
+                                asset_index: 0,
+                                size_q,
+                                fee_bps: 0,
+                                limit_price: 0,
+                            }],
+                        },
+                        vec![
+                            AccountMeta::new(wash_long.pubkey(), true),
+                            AccountMeta::new(env.market, false),
+                            AccountMeta::new(wash_long_portfolio, false),
+                            AccountMeta::new(wash_short_portfolio, false),
+                            AccountMeta::new_readonly(matcher_program, false),
+                            AccountMeta::new(ctx, false),
+                            AccountMeta::new_readonly(delegate, false),
+                        ],
+                        &[&wash_long],
+                    )
+                }
+            }
+        };
 
         let push = |env: &mut V16CuEnv, slot: u64, mark_e6: u64| {
             env.svm.expire_blockhash();
@@ -59834,30 +59920,10 @@ fn v16_attack_trade_cannot_underpay_to_override_pending_ewma_target() {
         env.svm.warp_to_slot(7);
         let insurance_before = env.market_state().1.insurance;
         if with_wash {
-            try_no_cpi_reported_price_trade_with_cu(
-                &mut env,
-                path,
-                &wash_long,
-                wash_long_portfolio,
-                &wash_short,
-                wash_short_portfolio,
-                WASH_Q,
-                1,
-                0,
-            )
-            .unwrap_or_else(|err| panic!("{path:?}: manipulating wash open failed: {err}"));
-            try_no_cpi_reported_price_trade_with_cu(
-                &mut env,
-                path,
-                &wash_long,
-                wash_long_portfolio,
-                &wash_short,
-                wash_short_portfolio,
-                -WASH_Q,
-                low_price,
-                0,
-            )
-            .unwrap_or_else(|err| panic!("{path:?}: wash close failed: {err}"));
+            trade_wash(&mut env, WASH_Q, 1)
+                .unwrap_or_else(|err| panic!("{path:?}: manipulating wash open failed: {err}"));
+            trade_wash(&mut env, -WASH_Q, low_price)
+                .unwrap_or_else(|err| panic!("{path:?}: wash close failed: {err}"));
         }
         let movement_fee = env.market_state().1.insurance - insurance_before;
         let target = env.market_state().0.mark_ewma_e6;
@@ -59936,8 +60002,10 @@ fn v16_attack_trade_cannot_underpay_to_override_pending_ewma_target() {
     const VICTIM_DEPOSIT: u128 = 20_000_000_000;
     let mut outcomes = Vec::new();
     for path in [
-        NoCpiReportedPricePath::Single,
-        NoCpiReportedPricePath::Batch,
+        PendingTargetTradePath::TradeNoCpi,
+        PendingTargetTradePath::BatchTradeNoCpi,
+        PendingTargetTradePath::TradeCpi,
+        PendingTargetTradePath::BatchTradeCpi,
     ] {
         let control = run(path, false);
         let attack = run(path, true);
