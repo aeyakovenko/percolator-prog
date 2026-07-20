@@ -39279,17 +39279,33 @@ fn assert_trade_driven_mark_cannot_profit_from_independent_liquidation_reward(
     assert_eq!(
         after_liquidation.insurance_domain_budget_remaining_total
             - group_after_move.insurance_domain_budget_remaining_total,
-        victim_penalty,
-        "the retained victim penalty became authority-withdrawable insurance"
+        0,
+        "the retained victim penalty must not become authority-withdrawable insurance"
     );
-    let (penalty_dest, _) = env
+    let unbudgeted_before = group_after_move
+        .insurance
+        .checked_sub(group_after_move.insurance_domain_budget_remaining_total)
+        .unwrap();
+    let unbudgeted_after = after_liquidation
+        .insurance
+        .checked_sub(after_liquidation.insurance_domain_budget_remaining_total)
+        .unwrap();
+    assert_eq!(
+        unbudgeted_after - unbudgeted_before,
+        victim_penalty,
+        "the trade-driven liquidation penalty stays non-reclaimable"
+    );
+    let penalty_reclaim = env
         .try_withdraw_insurance_asset_with_authority(
             &compromised_marketauth,
             0,
             victim_penalty,
-        )
-        .expect("compromised market authority reclaims the victim penalty");
-    let reclaimed_penalty = env.token_amount(penalty_dest) as u128;
+        );
+    assert!(
+        penalty_reclaim.is_err(),
+        "compromised market authority must not reclaim the victim penalty"
+    );
+    let reclaimed_penalty = 0;
 
     for account in [attack_long, attack_short] {
         env.crank_steps(
