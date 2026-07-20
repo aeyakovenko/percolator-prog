@@ -2010,6 +2010,14 @@ impl V16CuEnv {
         enabled: u8,
     ) -> Result<Pubkey, String> {
         self.svm.expire_blockhash();
+        let portfolio_id = state::read_portfolio_matcher_incarnation_id(
+            &self
+                .svm
+                .get_account(&maker_account)
+                .ok_or_else(|| "missing maker portfolio".to_string())?
+                .data,
+        )
+        .map_err(|err| format!("read matcher portfolio incarnation: {err:?}"))?;
         let mut accounts = vec![
             AccountMeta::new(maker_owner.pubkey(), true),
             AccountMeta::new_readonly(self.market, false),
@@ -2023,7 +2031,10 @@ impl V16CuEnv {
             ]);
         }
         self.send(
-            ProgInstruction::SetMatcherConfig { enabled },
+            ProgInstruction::SetMatcherConfig {
+                portfolio_id,
+                enabled,
+            },
             accounts,
             &[maker_owner],
         )?;
@@ -20607,7 +20618,11 @@ fn v16_attack_matcher_config_replay_cannot_bind_reinitialized_portfolio() {
                     AccountMeta::new_readonly(matcher_context, false),
                     AccountMeta::new_readonly(matcher_delegate, false),
                 ],
-                data: ProgInstruction::SetMatcherConfig { enabled: 1 }.encode(),
+                data: ProgInstruction::SetMatcherConfig {
+                    portfolio_id: old_portfolio_id,
+                    enabled: 1,
+                }
+                .encode(),
             },
         ],
         Some(&env.payer.pubkey()),
@@ -20742,7 +20757,10 @@ fn v16_attack_non_owner_cannot_change_lp_matcher_config() {
 
     env.svm.expire_blockhash();
     let revoke = env.send(
-        ProgInstruction::SetMatcherConfig { enabled: 0 },
+        ProgInstruction::SetMatcherConfig {
+            portfolio_id: env.portfolio_id(lp),
+            enabled: 0,
+        },
         vec![
             AccountMeta::new(attacker.pubkey(), true),
             AccountMeta::new_readonly(env.market, false),
@@ -20807,7 +20825,10 @@ fn v16_attack_cross_lp_cannot_overwrite_lp_matcher_config() {
 
     env.svm.expire_blockhash();
     let overwrite = env.send(
-        ProgInstruction::SetMatcherConfig { enabled: 0 },
+        ProgInstruction::SetMatcherConfig {
+            portfolio_id: env.portfolio_id(victim_lp),
+            enabled: 0,
+        },
         vec![
             AccountMeta::new(attacker_owner.pubkey(), true),
             AccountMeta::new_readonly(env.market, false),
@@ -21172,7 +21193,10 @@ fn v16_attack_set_lp_matcher_config_cannot_target_protocol_accounts() {
     let send_with_lp_account = |env: &mut V16CuEnv, lp_account: Pubkey| {
         env.svm.expire_blockhash();
         env.send(
-            ProgInstruction::SetMatcherConfig { enabled: 1 },
+            ProgInstruction::SetMatcherConfig {
+                portfolio_id: env.portfolio_id(lp),
+                enabled: 1,
+            },
             vec![
                 AccountMeta::new(lp_owner.pubkey(), true),
                 AccountMeta::new_readonly(env.market, false),
@@ -21246,7 +21270,10 @@ fn v16_attack_matcher_config_and_fills_reject_self_program_context() {
     let lp_before_config = env.svm.get_account(&lp).unwrap();
     env.svm.expire_blockhash();
     let self_config = env.send(
-        ProgInstruction::SetMatcherConfig { enabled: 1 },
+        ProgInstruction::SetMatcherConfig {
+            portfolio_id: env.portfolio_id(lp),
+            enabled: 1,
+        },
         vec![
             AccountMeta::new(lp_owner.pubkey(), true),
             AccountMeta::new_readonly(env.market, false),
@@ -21502,7 +21529,10 @@ fn v16_attack_set_matcher_config_bad_legacy_context_rolls_back_realloc() {
     let lp_before = env.svm.get_account(&lp).unwrap();
     env.svm.expire_blockhash();
     let rejected = env.send(
-        ProgInstruction::SetMatcherConfig { enabled: 1 },
+        ProgInstruction::SetMatcherConfig {
+            portfolio_id: 0,
+            enabled: 1,
+        },
         vec![
             AccountMeta::new(lp_owner.pubkey(), true),
             AccountMeta::new_readonly(env.market, false),
@@ -30705,11 +30735,15 @@ fn v16_attack_trade_paths_reject_cross_market_portfolio_substitution() {
             },
         )
         .unwrap();
+    let cpi_lp_portfolio_id = env.portfolio_id(p_cpi_lp);
     send_tx(
         &mut env.svm,
         env.program_id,
         &env.payer,
-        ProgInstruction::SetMatcherConfig { enabled: 1 },
+        ProgInstruction::SetMatcherConfig {
+            portfolio_id: cpi_lp_portfolio_id,
+            enabled: 1,
+        },
         vec![
             AccountMeta::new(cpi_lp.pubkey(), true),
             AccountMeta::new_readonly(market_b, false),

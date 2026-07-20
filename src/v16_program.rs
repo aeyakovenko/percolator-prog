@@ -800,6 +800,17 @@ pub mod state {
         Ok(id)
     }
 
+    /// Matcher authorization predates the portfolio-incarnation tail. Bind legacy portfolios to
+    /// generation zero; any later `InitPortfolio` writes a nonzero ID, so a retained legacy
+    /// authorization cannot cross the close/reinitialize boundary either.
+    pub fn read_portfolio_matcher_incarnation_id(data: &[u8]) -> Result<u64, ProgramError> {
+        check_header(data, KIND_PORTFOLIO)?;
+        if data.len() < PORTFOLIO_ID_OFF + PORTFOLIO_ID_LEN {
+            return Ok(0);
+        }
+        read_u64(data, PORTFOLIO_ID_OFF)
+    }
+
     #[inline]
     fn write_portfolio_id(data: &mut [u8], id: u64) -> Result<(), ProgramError> {
         check_header(data, KIND_PORTFOLIO)?;
@@ -2508,6 +2519,7 @@ pub mod ix {
             legs: Vec<BatchTradeCpiLeg>,
         },
         SetMatcherConfig {
+            portfolio_id: u64,
             enabled: u8,
         },
         ClosePortfolio,
@@ -2775,6 +2787,7 @@ pub mod ix {
                     Self::BatchTradeCpi { legs }
                 }
                 68 => Self::SetMatcherConfig {
+                    portfolio_id: read_u64(&mut rest)?,
                     enabled: read_u8(&mut rest)?,
                 },
                 8 => Self::ClosePortfolio,
@@ -3063,8 +3076,12 @@ pub mod ix {
                         push_u64(&mut out, leg.limit_price);
                     }
                 }
-                Self::SetMatcherConfig { enabled } => {
+                Self::SetMatcherConfig {
+                    portfolio_id,
+                    enabled,
+                } => {
                     out.push(68);
+                    push_u64(&mut out, portfolio_id);
                     out.push(enabled);
                 }
                 Self::ClosePortfolio => out.push(8),
@@ -5255,9 +5272,10 @@ pub mod processor {
             Instruction::BatchTradeCpi { legs } => {
                 handle_batch_trade_cpi(program_id, accounts, &legs)
             }
-            Instruction::SetMatcherConfig { enabled } => {
-                handle_set_matcher_config(program_id, accounts, enabled)
-            }
+            Instruction::SetMatcherConfig {
+                portfolio_id,
+                enabled,
+            } => handle_set_matcher_config(program_id, accounts, portfolio_id, enabled),
             Instruction::ClosePortfolio => handle_close_portfolio(program_id, accounts),
             Instruction::TopUpInsurance { amount } => {
                 handle_top_up_insurance(program_id, accounts, amount)
@@ -6710,6 +6728,7 @@ pub mod processor {
     fn handle_set_matcher_config<'a>(
         program_id: &Pubkey,
         accounts: &'a [AccountInfo<'a>],
+        expected_portfolio_id: u64,
         enabled: u8,
     ) -> ProgramResult {
         if enabled > 1 {
@@ -6729,6 +6748,11 @@ pub mod processor {
             || owner != lp_owner.key.to_bytes()
         {
             return Err(PercolatorError::Unauthorized.into());
+        }
+        if state::read_portfolio_matcher_incarnation_id(&lp_portfolio_ai.try_borrow_data()?)?
+            != expected_portfolio_id
+        {
+            return Err(PercolatorError::EngineProvenanceMismatch.into());
         }
         let required_len = state::portfolio_account_len_for_market_slots(0)?;
         if lp_portfolio_ai.data_len() < required_len {

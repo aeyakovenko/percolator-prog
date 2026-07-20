@@ -653,6 +653,34 @@ fn kani_v16_legacy_permissionless_crank_size_payload_is_rejected() {
 }
 
 #[kani::proof]
+fn kani_v16_matcher_config_decode_preserves_portfolio_incarnation() {
+    let portfolio_id: u64 = kani::any();
+    let enabled: u8 = kani::any();
+    let mut data = [0u8; 10];
+    data[0] = 68;
+    data[1..9].copy_from_slice(&portfolio_id.to_le_bytes());
+    data[9] = enabled;
+
+    match Instruction::decode(&data).unwrap() {
+        Instruction::SetMatcherConfig {
+            portfolio_id: got_id,
+            enabled: got_enabled,
+        } => {
+            assert_eq!(got_id, portfolio_id);
+            assert_eq!(got_enabled, enabled);
+        }
+        _ => unreachable!(),
+    }
+}
+
+#[kani::proof]
+fn kani_v16_legacy_unbound_matcher_config_payload_is_rejected() {
+    let enabled: u8 = kani::any();
+    let legacy = [68, enabled];
+    assert!(Instruction::decode(&legacy).is_err());
+}
+
+#[kani::proof]
 fn kani_v16_update_authority_decode_preserves_wire_fields() {
     let mut new_pubkey = [0u8; 32];
     let mut i = 0;
