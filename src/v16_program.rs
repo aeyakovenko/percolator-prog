@@ -10794,6 +10794,18 @@ pub mod processor {
                 result.as_ref().map(|r| &r.selected),
                 Some(AutoCrankPlanV16::Liquidate { .. })
             );
+            // A trade-driven mark mover and a later permissionless cranker cannot be
+            // identity-separated: either role can use fresh keys, and one mark move can unlock
+            // liquidation penalties on many portfolios. Paying those penalties back through the
+            // public cranker account would let the mark mover recover more than its EWMA movement
+            // fee. Keep the penalty in insurance while EWMA/stale-hybrid trades control the mark;
+            // authenticated price modes retain the configured cranker reward.
+            let liquidation_penalty_reclaimable = if selected_liquidation {
+                let profile = read_oracle_profile_from_view(&group, &cfg, selected_fee_asset)?;
+                !profile_updates_mark_from_trade_view(&profile, authenticated_now_slot)
+            } else {
+                false
+            };
             if matches!(
                 result.as_ref().map(|r| &r.outcome),
                 Some(AutoCrankOutcomeV16::ResolvedClose(_))
@@ -10806,7 +10818,7 @@ pub mod processor {
                 .get()
                 .saturating_sub(insurance_before);
             let mut retained_for_domains = retained_fee;
-            if selected_liquidation {
+            if selected_liquidation && liquidation_penalty_reclaimable {
                 if let Some(cranker_ai) = cranker_portfolio_ai {
                     let mut cranker_data = cranker_ai.try_borrow_mut_data()?;
                     let mut cranker = state::portfolio_view_mut_for_market_slots(
@@ -10835,6 +10847,9 @@ pub mod processor {
                         .validate_with_market(&group.as_view())
                         .map_err(map_v16_error)?;
                 }
+            }
+            if selected_liquidation && !liquidation_penalty_reclaimable {
+                retained_for_domains = 0;
             }
             credit_market_fee_split_across_domains_view(
                 &cfg,

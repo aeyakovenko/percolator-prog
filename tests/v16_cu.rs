@@ -39098,6 +39098,278 @@ fn v16_attack_liquidation_cranker_reward_bounded_by_fee() {
     );
 }
 
+// Adversarial composition probe: the EWMA fee prices the mark-to-market externality, but a
+// trade-driven mark move can also unlock a third party's minimum liquidation fee. With a 100%
+// public cranker share, that fee is paid to the mark mover. The complete public flow below uses a
+// tiny wash trade to move the mark by one basis point, liquidates an independent victim, then
+// closes and withdraws every attacker-controlled account. The aggregate withdrawal must not exceed
+// the attacker's deposits; otherwise the mark movement is privately profitable at the victim's
+// expense even though the EWMA movement itself was fee-backed.
+#[derive(Clone, Copy, Debug)]
+enum TradeDrivenLiquidationMode {
+    Ewma,
+    HybridAfterHours,
+}
+
+fn assert_trade_driven_mark_cannot_profit_from_independent_liquidation_reward(
+    mode: TradeDrivenLiquidationMode,
+    path: NoCpiReportedPricePath,
+) {
+    const MARK: u64 = 1_000_000;
+    const VICTIM_DEPOSIT: u128 = 50_000;
+    const ATTACK_DEPOSIT: u128 = 1_000;
+    const CRANKER_DEPOSIT: u128 = 1;
+    const TINY_Q: i128 = (POS_SCALE / 10_000) as i128;
+
+    let mut params = production_risk_params();
+    params.min_liquidation_abs = 500;
+    params.max_accrual_dt_slots = 1;
+    let mut env = V16CuEnv::new_with_init_params(params);
+    env.update_liquidation_fee_policy_with_cu(10_000);
+    let compromised_marketauth = env.admin.insecure_clone();
+    let hybrid_oracle = match mode {
+        TradeDrivenLiquidationMode::Ewma => {
+            env.svm.warp_to_slot(1);
+            env.configure_ewma_mark_with_cu(1, MARK, 1, 0);
+            None
+        }
+        TradeDrivenLiquidationMode::HybridAfterHours => {
+            set_test_clock(&mut env, 1, 100);
+            let feed = [0xedu8; 32];
+            let pyth = env.set_pyth_price(&feed, MARK as i64, -6, 100);
+            env.try_configure_hybrid_asset_with_conf_filter_cu(
+                0,
+                1,
+                0,
+                [feed, [0u8; 32], [0u8; 32]],
+                &[pyth],
+                1,
+                100,
+                0,
+                0,
+                1,
+                0,
+            )
+            .expect("configure hybrid fallback");
+            Some(pyth)
+        }
+    };
+
+    let victim_owner = Keypair::new();
+    let victim = env.create_portfolio(&victim_owner);
+    let honest_owner = Keypair::new();
+    let honest = env.create_portfolio(&honest_owner);
+    let attack_long_owner = Keypair::new();
+    let attack_long = env.create_portfolio(&attack_long_owner);
+    let attack_short_owner = Keypair::new();
+    let attack_short = env.create_portfolio(&attack_short_owner);
+    let cranker_owner = Keypair::new();
+    let cranker = env.create_portfolio(&cranker_owner);
+
+    env.deposit(&victim_owner, victim, VICTIM_DEPOSIT);
+    env.deposit(&honest_owner, honest, 2_000_000);
+    env.deposit(&attack_long_owner, attack_long, ATTACK_DEPOSIT);
+    env.deposit(&attack_short_owner, attack_short, ATTACK_DEPOSIT);
+    env.deposit(&cranker_owner, cranker, CRANKER_DEPOSIT);
+    env.trade_asset_with_cu(
+        0,
+        &victim_owner,
+        victim,
+        &honest_owner,
+        honest,
+        POS_SCALE as i128,
+        MARK,
+        0,
+    );
+
+    let attack_deposits = ATTACK_DEPOSIT * 2 + CRANKER_DEPOSIT;
+    let insurance_before_move = env.market_state().1.insurance;
+    let (trade_slot, reported_price) = match mode {
+        TradeDrivenLiquidationMode::Ewma => {
+            env.svm.warp_to_slot(2);
+            (2, 999_800)
+        }
+        TradeDrivenLiquidationMode::HybridAfterHours => {
+            // Hybrid fallback matures only after the configured soft-stale interval. Its
+            // two-slot EWMA alpha needs a 150-atom print delta for a one-bp mark move.
+            set_test_clock(&mut env, 3, 1_000);
+            (3, 999_850)
+        }
+    };
+    try_no_cpi_reported_price_trade_with_cu(
+        &mut env,
+        path,
+        &attack_long_owner,
+        attack_long,
+        &attack_short_owner,
+        attack_short,
+        TINY_Q,
+        reported_price,
+        0,
+    )
+    .unwrap_or_else(|err| panic!("{mode:?} {path:?}: mark-moving wash trade failed: {err}"));
+    let (cfg_after_move, group_after_move) = env.market_state();
+    let move_fee = group_after_move.insurance - insurance_before_move;
+    assert!(cfg_after_move.mark_ewma_e6 < MARK);
+    assert_eq!(
+        percolator_prog::policy_v16::price_move_bps_ceil(MARK, cfg_after_move.mark_ewma_e6),
+        Some(1)
+    );
+    assert_eq!(move_fee, 200, "one-bp EWMA move has a real two-sided cost");
+
+    let cranker_before = env.portfolio_state(cranker).capital.get();
+    let victim_before = env.portfolio_state(victim).capital.get();
+    let mut liquidated = false;
+    for attempt in 0..8 {
+        env.svm.expire_blockhash();
+        let observations = if attempt == 0 {
+            if hybrid_oracle.is_some() {
+                crank_observations_with_accounts(0, 1)
+            } else {
+                crank_observations(0)
+            }
+        } else {
+            Vec::new()
+        };
+        let mut accounts = vec![
+            AccountMeta::new(cranker_owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(victim, false),
+        ];
+        if attempt == 0 {
+            if let Some(pyth) = hybrid_oracle {
+                accounts.push(AccountMeta::new_readonly(pyth, false));
+            }
+        }
+        accounts.push(AccountMeta::new(cranker, false));
+        let crank = env.send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: trade_slot,
+                observations,
+            },
+            accounts,
+            &[&cranker_owner],
+        );
+        assert!(
+            crank.is_ok(),
+            "honest public crank attempt {attempt} failed: {crank:?}"
+        );
+        if env.portfolio_state(victim).legs[0].basis_pos_q.get() != POS_SCALE as i128 {
+            liquidated = true;
+            break;
+        }
+    }
+    assert!(
+        liquidated,
+        "the fee-backed mark move made the victim liquidatable"
+    );
+    let reward = env.portfolio_state(cranker).capital.get() - cranker_before;
+    assert_eq!(
+        reward, 0,
+        "trade-driven mark liquidation penalty must remain in insurance"
+    );
+    assert!(
+        env.portfolio_state(victim).capital.get() < victim_before,
+        "an independent victim paid a real liquidation loss"
+    );
+    assert!(reward <= move_fee);
+    let after_liquidation = env.market_state().1;
+    let victim_penalty = after_liquidation.insurance - group_after_move.insurance;
+    assert_eq!(victim_penalty, 500, "the victim paid the minimum penalty");
+    assert_eq!(
+        after_liquidation.insurance_domain_budget_remaining_total
+            - group_after_move.insurance_domain_budget_remaining_total,
+        0,
+        "the retained victim penalty must not become authority-withdrawable insurance"
+    );
+    let unbudgeted_before = group_after_move
+        .insurance
+        .checked_sub(group_after_move.insurance_domain_budget_remaining_total)
+        .unwrap();
+    let unbudgeted_after = after_liquidation
+        .insurance
+        .checked_sub(after_liquidation.insurance_domain_budget_remaining_total)
+        .unwrap();
+    assert_eq!(
+        unbudgeted_after - unbudgeted_before,
+        victim_penalty,
+        "the trade-driven liquidation penalty stays non-reclaimable"
+    );
+    let penalty_reclaim = env
+        .try_withdraw_insurance_asset_with_authority(
+            &compromised_marketauth,
+            0,
+            victim_penalty,
+        );
+    assert!(
+        penalty_reclaim.is_err(),
+        "compromised market authority must not reclaim the victim penalty"
+    );
+    let reclaimed_penalty = 0;
+
+    for account in [attack_long, attack_short] {
+        env.crank_steps(
+            account,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: trade_slot,
+                observations: Vec::new(),
+            },
+            4,
+        );
+    }
+    try_no_cpi_reported_price_trade_with_cu(
+        &mut env,
+        path,
+        &attack_long_owner,
+        attack_long,
+        &attack_short_owner,
+        attack_short,
+        -TINY_Q,
+        cfg_after_move.mark_ewma_e6,
+        0,
+    )
+    .unwrap_or_else(|err| panic!("{mode:?} {path:?}: wash-trade exit failed: {err}"));
+
+    for (owner, account) in [
+        (&attack_long_owner, attack_long),
+        (&attack_short_owner, attack_short),
+    ] {
+        let released = env.portfolio_state(account).pnl.get().max(0) as u128;
+        if released != 0 {
+            env.convert_released_pnl_with_cu(owner, account, released);
+        }
+    }
+    let long_capital = env.portfolio_state(attack_long).capital.get();
+    let short_capital = env.portfolio_state(attack_short).capital.get();
+    let cranker_capital = env.portfolio_state(cranker).capital.get();
+    let long_dest = env.withdraw(&attack_long_owner, attack_long, long_capital);
+    let short_dest = env.withdraw(&attack_short_owner, attack_short, short_capital);
+    let cranker_dest = env.withdraw(&cranker_owner, cranker, cranker_capital);
+    let extracted = env.token_amount(long_dest) as u128
+        + env.token_amount(short_dest) as u128
+        + env.token_amount(cranker_dest) as u128
+        + reclaimed_penalty;
+    assert!(
+        extracted <= attack_deposits,
+        "attacker extracted {extracted} after depositing {attack_deposits}"
+    );
+}
+
+#[test]
+fn v16_attack_trade_driven_mark_cannot_profit_from_independent_liquidation_reward() {
+    for mode in [
+        TradeDrivenLiquidationMode::Ewma,
+        TradeDrivenLiquidationMode::HybridAfterHours,
+    ] {
+        for path in [
+            NoCpiReportedPricePath::Single,
+            NoCpiReportedPricePath::Batch,
+        ] {
+            assert_trade_driven_mark_cannot_profit_from_independent_liquidation_reward(mode, path);
+        }
+    }
+}
+
 // security.md sweep — liquidation cranker reward account aliasing (#3/#44): when cranker rewards are
 // enabled, the optional reward portfolio must be distinct from the portfolio being liquidated. Otherwise
 // a liquidated account could receive part of its own liquidation fee back in the same crank.
