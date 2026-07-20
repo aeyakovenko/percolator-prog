@@ -59717,3 +59717,166 @@ fn v16_attack_shutdown_cleanup_escheats_abandoned_insurance_to_base_insurance() 
     );
     assert_eq!(ledger_after.total_principal_atoms, 0);
 }
+
+// A configured shutdown delay is the provider's reclaim window. Marketauth must not shorten that
+// live window after provider value is funded; otherwise it can make its own fallback mature,
+// escheat the provider principal into base insurance, then withdraw that insurance to itself.
+#[test]
+fn v16_attack_funded_shutdown_delay_cannot_shrink() {
+    const BACKING: u128 = 500;
+
+    let mut env = V16CuEnv::new();
+    env.configure_permissionless_resolve_with_cu(100, 100);
+    env.update_market_init_fee_policy_with_cu(1);
+
+    let provider = Keypair::new();
+    let provider_key = provider.pubkey();
+    env.svm.warp_to_slot(1);
+    env.activate_permissionless_asset_with_fee(
+        &provider,
+        1,
+        1,
+        100,
+        provider_key,
+        provider_key,
+        provider_key,
+        provider_key,
+        1,
+    );
+    let marketauth = env.admin.insecure_clone();
+    let (init_fee_dest, _) = env
+        .try_withdraw_insurance_asset_with_authority(&marketauth, 0, 1)
+        .expect("remove the base init fee so only provider backing gates the reduction");
+    assert_eq!(env.token_amount(init_fee_dest), 1);
+    let ledger = env.backing_domain_ledger_account();
+    let source = env.token_account(provider_key, BACKING as u64);
+    env.send(
+        ProgInstruction::TopUpBackingBucket {
+            domain: 2,
+            amount: BACKING,
+            expiry_slot: 1_000,
+        },
+        vec![
+            AccountMeta::new(provider_key, true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(ledger, false),
+        ],
+        &[&provider],
+    )
+    .expect("provider funds active backing");
+
+    env.svm.warp_to_slot(2);
+    env.try_shutdown_asset_with_authority(&marketauth, 1, 2)
+        .expect("marketauth shuts down the asset");
+    env.svm.warp_to_slot(3);
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    env.svm.expire_blockhash();
+    let shorten = env.send(
+        ProgInstruction::ConfigurePermissionlessResolve {
+            stale_slots: 100,
+            force_close_delay_slots: 1,
+        },
+        vec![
+            AccountMeta::new(marketauth.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&marketauth],
+    );
+
+    if shorten.is_ok() {
+        // Exact-parent exploit: the shortened window is now mature. Public fallback cleanup
+        // escheats the independent provider's principal, then marketauth (the base-insurance
+        // operator) extracts the same atoms from the vault.
+        env.svm.warp_to_slot(4);
+        env.svm.expire_blockhash();
+        let admin_dest = env.token_account(marketauth.pubkey(), 0);
+        env.send(
+            ProgInstruction::WithdrawBackingBucket {
+                domain: 2,
+                amount: BACKING,
+            },
+            vec![
+                AccountMeta::new(marketauth.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(admin_dest, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(env.vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+                AccountMeta::new(ledger, false),
+            ],
+            &[&marketauth],
+        )
+        .expect("shortened timeout escheats the provider principal");
+        let (stolen_dest, _) = env
+            .try_withdraw_insurance_asset_with_authority(&marketauth, 0, BACKING)
+            .expect("marketauth withdraws the escheated base insurance");
+        assert_eq!(
+            env.token_amount(stolen_dest),
+            0,
+            "accepted delay reduction let marketauth steal all provider backing"
+        );
+    }
+
+    assert!(
+        shorten.is_err(),
+        "a live provider reclaim window must reject retroactive shortening"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "rejected policy change must roll back byte-for-byte"
+    );
+    assert_eq!(env.market_state().0.force_close_delay_slots, 100);
+
+    // The independent provider retains the bounded public reclaim path under the original policy.
+    let provider_dest = env.token_account(provider_key, 0);
+    env.svm.expire_blockhash();
+    env.send(
+        ProgInstruction::WithdrawBackingBucket {
+            domain: 2,
+            amount: BACKING,
+        },
+        vec![
+            AccountMeta::new(provider_key, true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(provider_dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(ledger, false),
+        ],
+        &[&provider],
+    )
+    .expect("provider reclaims principal during the original window");
+    assert_eq!(env.token_amount(provider_dest), BACKING as u64);
+
+    {
+        let mut raw = env.svm.get_account(&env.market).unwrap();
+        let (_, group) = state::market_view_mut(&mut raw.data).unwrap();
+        assert_eq!(group.header.source_fresh_backing_total_num.get(), 0);
+        assert_eq!(group.header.backing_provider_earnings_total.get(), 0);
+        assert_eq!(
+            group.header.insurance_domain_budget_remaining_total.get(),
+            0
+        );
+    }
+
+    env.svm.expire_blockhash();
+    env.send(
+        ProgInstruction::ConfigurePermissionlessResolve {
+            stale_slots: 100,
+            force_close_delay_slots: 1,
+        },
+        vec![
+            AccountMeta::new(marketauth.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&marketauth],
+    )
+    .expect("delay reduction remains live after protected residuals are reclaimed");
+    assert_eq!(env.market_state().0.force_close_delay_slots, 1);
+}
