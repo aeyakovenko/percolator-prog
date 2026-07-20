@@ -59912,6 +59912,193 @@ fn v16_attack_live_policy_cannot_extend_recovery_force_close_deadline() {
     );
 }
 
+// PARTIAL DoS: maintenance can legitimately consume every principal atom while a non-flat
+// portfolio still owns positive PnL. The Recovery deadline therefore has to remain immutable while
+// either capital or an unresolved payout blocker exists; c_tot alone is not a complete proxy for
+// an in-flight user claim.
+#[test]
+fn v16_attack_zero_capital_winner_cannot_have_recovery_deadline_extended() {
+    const DEPOSIT: u128 = 1_000;
+    const SIZE_Q: u128 = 10 * POS_SCALE;
+    const PROFIT: u128 = 100;
+    const MARK_SLOT: u64 = 200;
+    const SHUTDOWN_SLOT: u64 = 201;
+    const ORIGINAL_DEADLINE: u64 = 206;
+
+    let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+        max_accrual_dt_slots: 20,
+        max_price_move_bps_per_slot: 500,
+        min_funding_lifetime_slots: 20,
+        maintenance_fee_per_slot: 10,
+        ..V16CuMarketParams::default()
+    });
+    let admin = env.admin.insecure_clone();
+    let oracle = Keypair::new();
+    let cranker = Keypair::new();
+    env.configure_permissionless_resolve_with_cu(100, 5);
+    env.try_update_per_asset_authority_with_cu(
+        &admin,
+        Some(&oracle),
+        0,
+        processor::ASSET_AUTH_ORACLE,
+        oracle.pubkey().to_bytes(),
+    )
+    .expect("separate the honest oracle key from the non-oracle admin");
+    env.configure_auth_mark_for_asset_with_authority(0, &oracle, 1, 100);
+
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long = env.create_portfolio(&long_owner);
+    let short = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long, DEPOSIT);
+    env.deposit(&short_owner, short, DEPOSIT);
+    env.trade_with_cu(
+        &long_owner,
+        long,
+        &short_owner,
+        short,
+        SIZE_Q as i128,
+        100,
+        0,
+    );
+
+    env.svm.warp_to_slot(MARK_SLOT);
+    env.push_auth_mark_for_asset_with_authority(0, &oracle, MARK_SLOT, 110);
+    env.crank(
+        long,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: MARK_SLOT,
+            observations: crank_observations(0),
+        },
+    );
+    env.crank(
+        short,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: MARK_SLOT,
+            observations: Vec::new(),
+        },
+    );
+    env.crank(
+        long,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: MARK_SLOT,
+            observations: Vec::new(),
+        },
+    );
+    for _ in 0..9 {
+        env.crank(
+            long,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: MARK_SLOT,
+                observations: crank_observations(0),
+            },
+        );
+    }
+    assert_eq!(env.portfolio_state(long).pnl.get(), PROFIT as i128);
+
+    env.sync_maintenance_fee_with_cu(long, None, MARK_SLOT);
+    env.sync_maintenance_fee_with_cu(short, None, MARK_SLOT);
+    let (_, drained_group) = env.market_state();
+    assert_eq!(env.portfolio_state(long).capital.get(), 0);
+    assert_eq!(env.portfolio_state(long).pnl.get(), PROFIT as i128);
+    assert_eq!(env.portfolio_state(short).capital.get(), 0);
+    assert_eq!(drained_group.c_tot, 0);
+    assert!(
+        drained_group.resolved_payout_blocker_count > 0,
+        "active winner and loser legs remain payout blockers after maintenance drains principal"
+    );
+
+    env.svm.warp_to_slot(SHUTDOWN_SLOT);
+    env.update_asset_lifecycle_as_admin_with_cu(
+        processor::ASSET_ACTION_SHUTDOWN,
+        0,
+        SHUTDOWN_SLOT,
+        0,
+    );
+
+    env.svm.warp_to_slot(ORIGINAL_DEADLINE - 1);
+    env.svm.expire_blockhash();
+    let before_extension = env.svm.get_account(&env.market).unwrap();
+    let extension = env.send(
+        ProgInstruction::ConfigurePermissionlessResolve {
+            stale_slots: 100,
+            force_close_delay_slots: percolator_prog::constants::MAX_FORCE_CLOSE_DELAY_SLOTS,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&admin],
+    );
+    let extension_landed = extension.is_ok();
+    if !extension_landed {
+        assert_eq!(
+            env.svm.get_account(&env.market).unwrap(),
+            before_extension,
+            "rejected deadline extension must roll back"
+        );
+    }
+
+    env.svm.warp_to_slot(ORIGINAL_DEADLINE);
+    let force_close = env.try_force_close_abandoned_asset_with_cu(
+        &cranker,
+        long,
+        short,
+        0,
+        ORIGINAL_DEADLINE,
+        SIZE_Q,
+    );
+    if extension_landed {
+        assert!(
+            force_close.is_err(),
+            "control: the live extension must block the original Recovery deadline"
+        );
+        env.svm.expire_blockhash();
+        let convert = env.send(
+            ProgInstruction::ConvertReleasedPnl { amount: PROFIT },
+            vec![
+                AccountMeta::new(long_owner.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(long, false),
+            ],
+            &[&long_owner],
+        );
+        assert!(
+            convert.is_err(),
+            "winner cannot convert while the Recovery position remains trapped"
+        );
+        env.forfeit_recovery_leg_with_cu(&long_owner, long, 0, 1);
+        env.svm.expire_blockhash();
+        let convert_after_forfeit = env.send(
+            ProgInstruction::ConvertReleasedPnl { amount: PROFIT },
+            vec![
+                AccountMeta::new(long_owner.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(long, false),
+            ],
+            &[&long_owner],
+        );
+        assert!(
+            convert_after_forfeit.is_err(),
+            "owner forfeit must not be mistaken for payout progress"
+        );
+        assert_eq!(env.portfolio_state(long).pnl.get(), PROFIT as i128);
+        assert!(
+            !extension_landed,
+            "non-oracle admin extended an in-flight Recovery deadline after maintenance hid the winner behind c_tot == 0"
+        );
+    }
+
+    let force_close_cu = force_close.expect("original deadline remains available to a cranker");
+    assert_cu_within(
+        "zero-capital Recovery force close",
+        force_close_cu,
+        TRADE_CU_LIMIT,
+    );
+    env.convert_released_pnl_with_cu(&long_owner, long, PROFIT);
+    assert_eq!(env.portfolio_state(long).capital.get(), PROFIT);
+}
+
 #[test]
 fn v16_bpf_flat_10m_market_resolve_policy_update_stays_bounded() {
     const N: usize = 5_834;

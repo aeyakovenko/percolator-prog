@@ -9744,7 +9744,8 @@ pub mod processor {
         }
         if cfg.force_close_delay_slots != 0
             && force_close_delay_slots > cfg.force_close_delay_slots
-            && group.header.c_tot.get() != 0
+            && (group.header.c_tot.get() != 0
+                || group.header.resolved_payout_blocker_count.get() != 0)
         {
             return Err(PercolatorError::EngineLockActive.into());
         }
