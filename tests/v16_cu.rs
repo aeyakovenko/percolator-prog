@@ -1677,6 +1677,14 @@ impl V16CuEnv {
         );
         let loss_i128 = i128::try_from(loss).unwrap();
         portfolio.pnl = percolator::V16PodI128::new(-loss_i128);
+        let source = portfolio
+            .source_domains
+            .iter_mut()
+            .find(|source| !source.is_occupied())
+            .expect("security seed has a free source-domain slot");
+        source.domain = percolator::V16PodU32::new(0);
+        source.source_claim_market_id = percolator::V16PodU64::new(group.assets[0].market_id);
+        source.negative_pnl_atoms = percolator::V16PodU128::new(loss);
         group.negative_pnl_account_count += 1;
         portfolio.health_cert.valid = 0;
         state::write_market(&mut market_account.data, &cfg, &group).unwrap();
@@ -1704,6 +1712,14 @@ impl V16CuEnv {
         );
         let loss_i128 = i128::try_from(loss).unwrap();
         portfolio.pnl = percolator::V16PodI128::new(-loss_i128);
+        let source = portfolio
+            .source_domains
+            .iter_mut()
+            .find(|source| !source.is_occupied())
+            .expect("security seed has a free source-domain slot");
+        source.domain = percolator::V16PodU32::new(0);
+        source.source_claim_market_id = percolator::V16PodU64::new(group.assets[0].market_id);
+        source.negative_pnl_atoms = percolator::V16PodU128::new(loss);
         group.negative_pnl_account_count += 1;
         portfolio.health_cert.valid = 0;
         state::write_market(&mut market_account.data, &cfg, &group).unwrap();
@@ -17248,33 +17264,38 @@ fn v16_attack_resolved_cross_margin_deep_insolvency_winds_down_publicly() {
     );
     assert!(
         has_active_leg_for_asset(&before, 0) && has_active_leg_for_asset(&before, 1),
-        "setup leaves unattributed multi-asset exposure"
+        "setup leaves multi-asset exposure"
     );
     env.resolve();
 
-    env.svm.expire_blockhash();
-    let loser_crank_cu = env
-        .send(
-            ProgInstruction::PermissionlessCrank {
-                now_slot: u64::MAX,
-                observations: vec![CrankObservationHint {
-                    asset_index: u16::MAX,
-                    oracle_accounts: u8::MAX,
-                }],
-            },
-            vec![
-                AccountMeta::new_readonly(victim_owner.pubkey(), false),
-                AccountMeta::new(env.market, false),
-                AccountMeta::new(victim, false),
-            ],
-            &[],
-        )
-        .expect("resolved deep cross-margin bad debt has public progress");
-    assert_cu_within(
-        "Resolved PermissionlessCrank unattributed bad debt",
-        loser_crank_cu,
-        CRANK_CU_LIMIT,
-    );
+    for _ in 0..percolator::PORTFOLIO_SOURCE_DOMAIN_CAP {
+        if env.portfolio_state(victim).pnl.get() == 0 {
+            break;
+        }
+        env.svm.expire_blockhash();
+        let loser_crank_cu = env
+            .send(
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: u64::MAX,
+                    observations: vec![CrankObservationHint {
+                        asset_index: u16::MAX,
+                        oracle_accounts: u8::MAX,
+                    }],
+                },
+                vec![
+                    AccountMeta::new_readonly(victim_owner.pubkey(), false),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(victim, false),
+                ],
+                &[],
+            )
+            .expect("resolved deep cross-margin bad debt has public progress");
+        assert_cu_within(
+            "Resolved PermissionlessCrank attributed bad debt",
+            loser_crank_cu,
+            CRANK_CU_LIMIT,
+        );
+    }
     let victim_after = env.portfolio_state(victim);
     assert_eq!(
         victim_after.capital.get(),
@@ -59716,4 +59737,231 @@ fn v16_attack_underfunded_exit_cannot_move_ewma_with_uncollectible_fee() {
     ] {
         assert_underfunded_ewma_exit_uses_collected_fee(path);
     }
+}
+
+// Public cross-margin bankruptcy isolation: after a loss-bearing leg is flattened, aggregate PnL
+// must not be charged to an unrelated surviving leg's insurance domain.
+#[test]
+fn v16_attack_flattened_cross_margin_loss_cannot_drain_unrelated_insurance() {
+    const UNRELATED_Q: u128 = POS_SCALE;
+    let mut env = V16CuEnv::new_with_market_params_price_move_and_maintenance_fee(
+        2, 10_000, 10_000, 10_000, 200,
+    );
+    env.configure_auth_mark_with_cu(0, 100);
+    env.configure_auth_mark_for_asset_as_admin(1, 0, 100);
+
+    let provider = Keypair::new();
+    let oracle = Keypair::new();
+    let admin = env.admin.insecure_clone();
+    env.try_update_per_asset_authority_with_cu(
+        &admin,
+        Some(&provider),
+        0,
+        processor::ASSET_AUTH_INSURANCE,
+        provider.pubkey().to_bytes(),
+    )
+    .expect("independent asset-0 insurance provider");
+    env.try_update_per_asset_authority_with_cu(
+        &admin,
+        Some(&oracle),
+        1,
+        processor::ASSET_AUTH_ORACLE,
+        oracle.pubkey().to_bytes(),
+    )
+    .expect("independent honest asset-1 oracle");
+    env.top_up_insurance_domain_with_authority(&provider, 1, 100_000);
+
+    let loser_owner = Keypair::new();
+    let loser = env.create_portfolio(&loser_owner);
+    let winner_owner = Keypair::new();
+    let winner = env.create_portfolio(&winner_owner);
+    let asset0_cp_owner = Keypair::new();
+    let asset0_cp = env.create_portfolio(&asset0_cp_owner);
+    let observer_owner = Keypair::new();
+    let observer = env.create_portfolio(&observer_owner);
+    env.deposit(&loser_owner, loser, 200);
+    env.deposit(&winner_owner, winner, 10_000);
+    env.deposit(&asset0_cp_owner, asset0_cp, 10_000);
+
+    // Open one position on each asset. Asset 1 will carry the real loss; asset 0 exists only to
+    // leave a selector-visible unrelated leg after the owner exits asset 1.
+    env.trade_asset_with_cu(
+        0,
+        &loser_owner,
+        loser,
+        &asset0_cp_owner,
+        asset0_cp,
+        UNRELATED_Q as i128,
+        100,
+        0,
+    );
+    // The actual loss is entirely on asset 1: loser is short, winner is long.
+    env.trade_asset_with_cu(
+        1,
+        &loser_owner,
+        loser,
+        &winner_owner,
+        winner,
+        -(POS_SCALE as i128),
+        100,
+        0,
+    );
+
+    // Public maintenance sync can legitimately exhaust capital without settling K/F. The asset-0
+    // position remains unrelated while the owner later exits asset 1. No state is injected.
+    env.svm.warp_to_slot(2);
+    env.crank(
+        observer,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 2,
+            observations: crank_observations(0),
+        },
+    );
+    env.crank(
+        observer,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 2,
+            observations: crank_observations(1),
+        },
+    );
+    env.sync_maintenance_fee_with_cu(loser, None, 2);
+    let fee_drained = env.portfolio_state(loser);
+    assert_eq!(
+        fee_drained.capital.get(),
+        0,
+        "risk-reducing fee exhausts capital"
+    );
+    assert!(
+        has_active_leg_for_asset(&fee_drained, 0),
+        "asset-0 leg remains"
+    );
+
+    // Advance only through honest authenticated marks. Crank the healthy winner so the loser is not
+    // liquidated before its owner exercises the public risk-reducing exit.
+    let mut mark = 100u64;
+    for slot in 3u64..=12 {
+        mark = mark.checked_mul(2).expect("bounded mark progression");
+        env.svm.warp_to_slot(slot);
+        env.push_auth_mark_for_asset_with_authority(1, &oracle, slot, mark);
+        env.svm.expire_blockhash();
+        env.send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: slot,
+                observations: crank_observations(1),
+            },
+            vec![
+                AccountMeta::new(env.payer.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(observer, false),
+            ],
+            &[],
+        )
+        .expect("advance the honest mark through a healthy account");
+    }
+
+    env.rebalance_reduce_with_cu(&loser_owner, loser, 1, POS_SCALE);
+    let flattened = env.portfolio_state(loser);
+    assert!(
+        !has_active_leg_for_asset(&flattened, 1) && has_active_leg_for_asset(&flattened, 0),
+        "owner flattens the loss leg while retaining only unrelated risk"
+    );
+    assert!(flattened.pnl.get() < 0, "asset-1 debt remains account-wide");
+    assert_eq!(flattened.capital.get(), 0, "loss exhausts loser principal");
+
+    let before = env.market_state().1;
+    let mut liquidation_calls = 0u64;
+    loop {
+        let state = env.portfolio_state(loser);
+        if state.pnl.get() >= 0 && !has_active_leg_for_asset(&state, 0) {
+            break;
+        }
+        assert!(
+            liquidation_calls < 512,
+            "bounded public cranks must settle attributed debt and close unrelated risk"
+        );
+        env.svm.expire_blockhash();
+        let result = env.send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 12,
+                observations: vec![],
+            },
+            vec![
+                AccountMeta::new(env.payer.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(loser, false),
+            ],
+            &[],
+        );
+        match result {
+            Ok(_) => liquidation_calls += 1,
+            Err(err) => {
+                assert!(
+                    format!("{err:?}").contains("Custom(23)"),
+                    "only the engine's rollback-safe RecoveryRequired terminal is accepted: {err:?}"
+                );
+                let rolled_back = env.market_state().1;
+                assert_eq!(rolled_back.mode, MarketModeV16::Live);
+                assert_eq!(
+                    rolled_back.insurance_domain_spent[1], before.insurance_domain_spent[1],
+                    "failed terminal crank must roll back all unrelated-domain mutation"
+                );
+                break;
+            }
+        }
+    }
+    let after = env.market_state().1;
+
+    let unrelated_spend = after.insurance_domain_spent[1]
+        .checked_sub(before.insurance_domain_spent[1])
+        .expect("domain spent is monotonic");
+    env.resolve();
+    let close_to_terminal =
+        |env: &mut V16CuEnv, label: &str, owner: &Keypair, portfolio: Pubkey| {
+            let mut payout = 0u128;
+            for calls in 0..512u64 {
+                let account = env.portfolio_state(portfolio);
+                let receipt = resolved_receipt(&account);
+                if percolator::active_bitmap_is_empty(active_bitmap(&account))
+                    && account.capital.get() == 0
+                    && account.pnl.get() == 0
+                    && (!receipt.present || receipt.finalized)
+                {
+                    return (payout, calls);
+                }
+                let dest = env.close_resolved(owner, portfolio);
+                payout += env.token_amount(dest) as u128;
+            }
+            let account = env.portfolio_state(portfolio);
+            panic!(
+            "{label} resolved close failed: capital={} pnl={} active={} b_stale={} receipt={:?}",
+            account.capital.get(),
+            account.pnl.get(),
+            percolator::active_bitmap_count_ones(active_bitmap(&account)),
+            account.b_stale_state,
+            resolved_receipt(&account),
+        );
+        };
+    let (loser_payout, loser_close_calls) =
+        close_to_terminal(&mut env, "loser", &loser_owner, loser);
+    let (asset0_cp_payout, asset0_cp_close_calls) =
+        close_to_terminal(&mut env, "asset0 counterparty", &asset0_cp_owner, asset0_cp);
+    let (winner_payout, winner_close_calls) =
+        close_to_terminal(&mut env, "winner", &winner_owner, winner);
+    let attacker_payout = loser_payout + asset0_cp_payout + winner_payout;
+    let attacker_deposit = 200u128 + 10_000 + 10_000;
+    let attacker_gain = attacker_payout.saturating_sub(attacker_deposit);
+    if unrelated_spend != 0 {
+        assert!(
+            attacker_gain > 0,
+            "pre-fix cross-domain spend must be publicly extractable: payout={attacker_payout}, deposit={attacker_deposit}, spend={unrelated_spend}"
+        );
+    }
+
+    assert_eq!(
+        unrelated_spend, 0,
+        "asset-1 debt must not spend independent asset-0 insurance: \
+         spend={unrelated_spend}, attacker_payout={attacker_payout}, attacker_gain={attacker_gain}, \
+         liquidation_calls={liquidation_calls}, \
+         close_calls=({loser_close_calls},{asset0_cp_close_calls},{winner_close_calls})"
+    );
 }
