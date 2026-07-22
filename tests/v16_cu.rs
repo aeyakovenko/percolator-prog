@@ -60514,3 +60514,222 @@ fn v16_attack_backing_topup_rejects_lapsed_expiry() {
         "valid topup credits exactly the backing"
     );
 }
+
+#[test]
+fn v16_attack_rebalance_reduce_cannot_replay_across_market_reinit() {
+    const DEPOSIT: u128 = 1_000_000;
+    const OLD_SIZE_Q: i128 = 2_000 * POS_SCALE as i128;
+    const NEW_SIZE_Q: i128 = 1_000 * POS_SCALE as i128;
+    const REINIT_SLOT: u64 = 11;
+
+    let params = V16CuMarketParams::default();
+    let mut env = V16CuEnv::new_with_init_params(params);
+    env.configure_auth_mark_with_cu(0, 100);
+    let admin = env.admin.insecure_clone();
+
+    let victim_owner = Keypair::new();
+    let attacker_owner = Keypair::new();
+    let victim = env.create_portfolio(&victim_owner);
+    let attacker = env.create_portfolio(&attacker_owner);
+    env.deposit(&victim_owner, victim, DEPOSIT);
+    env.deposit(&attacker_owner, attacker, DEPOSIT);
+    env.trade_with_cu(
+        &victim_owner,
+        victim,
+        &attacker_owner,
+        attacker,
+        OLD_SIZE_Q,
+        100,
+        0,
+    );
+    let old_market_id = env.asset_market_id(0);
+
+    env.svm.expire_blockhash();
+    let retained_reduce = Transaction::new_signed_with_payer(
+        &[
+            heap_ix(),
+            cu_ix(),
+            Instruction {
+                program_id: env.program_id,
+                accounts: vec![
+                    AccountMeta::new(victim_owner.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(victim, false),
+                ],
+                data: ProgInstruction::RebalanceReduce {
+                    asset_index: 0,
+                    reduce_q: NEW_SIZE_Q as u128,
+                }
+                .encode(),
+            },
+        ],
+        Some(&env.payer.pubkey()),
+        &[&env.payer, &victim_owner],
+        env.svm.latest_blockhash(),
+    );
+
+    env.trade_with_cu(
+        &victim_owner,
+        victim,
+        &attacker_owner,
+        attacker,
+        -OLD_SIZE_Q,
+        100,
+        0,
+    );
+    env.withdraw(&victim_owner, victim, DEPOSIT);
+    env.withdraw(&attacker_owner, attacker, DEPOSIT);
+    env.close_portfolio_with_cu(&victim_owner, victim);
+    env.close_portfolio_with_cu(&attacker_owner, attacker);
+    env.resolve();
+    env.close_slab_with_cu();
+    assert_eq!(env.svm.get_account(&env.market).unwrap().lamports, 0);
+
+    env.svm.warp_to_slot(REINIT_SLOT);
+    env.svm
+        .set_account(
+            env.market,
+            Account {
+                lamports: 1_000_000_000,
+                data: vec![
+                    0u8;
+                    state::market_account_len_for_capacity(
+                        params.max_portfolio_assets as usize,
+                    )
+                    .unwrap()
+                ],
+                owner: env.program_id,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    env.svm
+        .set_account(
+            env.vault,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_token_data(env.mint, env.vault_authority, 0),
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    let reinit_params = V16CuMarketParams {
+        max_bankrupt_close_lifetime_slots: params.max_bankrupt_close_lifetime_slots + 1,
+        ..params
+    };
+    env.send(
+        init_market_instruction(&reinit_params),
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new_readonly(env.mint, false),
+            AccountMeta::new(env.market_generation, false),
+            AccountMeta::new_readonly(system_program::ID, false),
+        ],
+        &[&admin],
+    )
+    .expect("same market address is publicly reinitialized");
+    env.configure_auth_mark_with_cu(REINIT_SLOT, 100);
+    assert_ne!(env.asset_market_id(0), old_market_id);
+
+    for (owner, portfolio) in [
+        (&victim_owner, victim),
+        (&attacker_owner, attacker),
+    ] {
+        env.svm
+            .set_account(
+                portfolio,
+                Account {
+                    lamports: 1_000_000_000,
+                    data: vec![0u8; env.portfolio_account_len],
+                    owner: env.program_id,
+                    executable: false,
+                    rent_epoch: 0,
+                },
+            )
+            .unwrap();
+        env.send(
+            ProgInstruction::InitPortfolio,
+            vec![
+                AccountMeta::new(owner.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(portfolio, false),
+            ],
+            &[owner],
+        )
+        .expect("same portfolio address is publicly reinitialized");
+    }
+
+    env.deposit(&victim_owner, victim, DEPOSIT);
+    env.deposit(&attacker_owner, attacker, DEPOSIT);
+    env.trade_with_cu(
+        &victim_owner,
+        victim,
+        &attacker_owner,
+        attacker,
+        NEW_SIZE_Q,
+        100,
+        0,
+    );
+
+    env.svm.warp_to_slot(REINIT_SLOT + 1);
+    env.push_auth_mark_with_cu(REINIT_SLOT + 1, 50);
+    for portfolio in [victim, attacker] {
+        env.send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: REINIT_SLOT + 1,
+                observations: crank_observations(0),
+            },
+            vec![
+                AccountMeta::new(env.payer.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(portfolio, false),
+            ],
+            &[],
+        )
+        .expect("refresh replacement at the adverse mark");
+    }
+
+    let replayed = env.svm.send_transaction(retained_reduce).is_ok();
+    if replayed {
+        assert!(!has_active_leg_for_asset(&env.portfolio_state(victim), 0));
+    }
+
+    env.svm.expire_blockhash();
+    env.svm.warp_to_slot(REINIT_SLOT + 2);
+    env.push_auth_mark_with_cu(REINIT_SLOT + 2, 100);
+    for portfolio in [victim, attacker] {
+        env.crank(
+            portfolio,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: REINIT_SLOT + 2,
+                observations: crank_observations(0),
+            },
+        );
+    }
+    if !replayed {
+        env.trade_with_cu(
+            &victim_owner,
+            victim,
+            &attacker_owner,
+            attacker,
+            -NEW_SIZE_Q,
+            100,
+            0,
+        );
+    }
+
+    env.resolve();
+    let victim_dest = env.close_resolved(&victim_owner, victim);
+    let attacker_dest = env.close_resolved(&attacker_owner, attacker);
+    let victim_payout = env.token_amount(victim_dest) as u128;
+    let attacker_payout = env.token_amount(attacker_dest) as u128;
+    assert!(
+        !replayed && victim_payout >= DEPOSIT && attacker_payout <= DEPOSIT,
+        "rebalance consent for market {old_market_id} replayed into market {}: victim={victim_payout}, attacker={attacker_payout}",
+        env.asset_market_id(0),
+    );
+}
