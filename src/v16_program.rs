@@ -2557,6 +2557,7 @@ pub mod ix {
             legs: Vec<BatchTradeCpiLeg>,
         },
         SetMatcherConfig {
+            market_id: u64,
             enabled: u8,
         },
         ClosePortfolio,
@@ -2831,6 +2832,7 @@ pub mod ix {
                     Self::BatchTradeCpi { legs }
                 }
                 68 => Self::SetMatcherConfig {
+                    market_id: read_u64(&mut rest)?,
                     enabled: read_u8(&mut rest)?,
                 },
                 8 => Self::ClosePortfolio,
@@ -3127,8 +3129,9 @@ pub mod ix {
                         push_u64(&mut out, leg.limit_price);
                     }
                 }
-                Self::SetMatcherConfig { enabled } => {
+                Self::SetMatcherConfig { market_id, enabled } => {
                     out.push(68);
+                    push_u64(&mut out, market_id);
                     out.push(enabled);
                 }
                 Self::ClosePortfolio => out.push(8),
@@ -5293,8 +5296,8 @@ pub mod processor {
             Instruction::BatchTradeCpi { legs } => {
                 handle_batch_trade_cpi(program_id, accounts, &legs)
             }
-            Instruction::SetMatcherConfig { enabled } => {
-                handle_set_matcher_config(program_id, accounts, enabled)
+            Instruction::SetMatcherConfig { market_id, enabled } => {
+                handle_set_matcher_config(program_id, accounts, market_id, enabled)
             }
             Instruction::ClosePortfolio => handle_close_portfolio(program_id, accounts),
             Instruction::TopUpInsurance { amount } => {
@@ -6778,6 +6781,7 @@ pub mod processor {
     fn handle_set_matcher_config<'a>(
         program_id: &Pubkey,
         accounts: &'a [AccountInfo<'a>],
+        expected_market_id: u64,
         enabled: u8,
     ) -> ProgramResult {
         if enabled > 1 {
@@ -6790,6 +6794,11 @@ pub mod processor {
         expect_writable(lp_portfolio_ai)?;
         expect_owner(market_ai, program_id)?;
         expect_owner(lp_portfolio_ai, program_id)?;
+        let (_, _, _, current_market_id, _, _) =
+            state::read_market_trade_preflight(&market_ai.try_borrow_data()?, 0)?;
+        if current_market_id != expected_market_id {
+            return Err(PercolatorError::AssetGenerationMismatch.into());
+        }
         let (header, owner) =
             state::read_portfolio_owner_preflight(&lp_portfolio_ai.try_borrow_data()?)?;
         if header.market_group_id != market_ai.key.to_bytes()

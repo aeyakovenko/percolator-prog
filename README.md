@@ -463,6 +463,7 @@ This section describes intent and operational ordering, not argument-by-argument
 - **SetMatcherConfig** (tag 68)
   - LP-owner-signed opt-in/out for unsigned LP matcher fills. This writes the matcher config tail
     on the LP portfolio: matcher program, matcher context, matcher delegate, and enabled flag.
+    The signed `market_id` binds the grant to one persistent market generation.
 
 ### Oracle / mark management
 - External-oracle markets authenticate configured oracle account(s) in the oracle configuration/crank
