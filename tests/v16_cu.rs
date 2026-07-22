@@ -2048,8 +2048,9 @@ impl V16CuEnv {
                 AccountMeta::new_readonly(matcher_delegate, false),
             ]);
         }
+        let market_id = self.asset_market_id(0);
         self.send(
-            ProgInstruction::SetMatcherConfig { enabled },
+            ProgInstruction::SetMatcherConfig { market_id, enabled },
             accounts,
             &[maker_owner],
         )?;
@@ -21294,7 +21295,10 @@ fn v16_attack_non_owner_cannot_change_lp_matcher_config() {
 
     env.svm.expire_blockhash();
     let revoke = env.send(
-        ProgInstruction::SetMatcherConfig { enabled: 0 },
+        ProgInstruction::SetMatcherConfig {
+            market_id: first_generation_market_id(0),
+            enabled: 0,
+        },
         vec![
             AccountMeta::new(attacker.pubkey(), true),
             AccountMeta::new_readonly(env.market, false),
@@ -21359,7 +21363,10 @@ fn v16_attack_cross_lp_cannot_overwrite_lp_matcher_config() {
 
     env.svm.expire_blockhash();
     let overwrite = env.send(
-        ProgInstruction::SetMatcherConfig { enabled: 0 },
+        ProgInstruction::SetMatcherConfig {
+            market_id: first_generation_market_id(0),
+            enabled: 0,
+        },
         vec![
             AccountMeta::new(attacker_owner.pubkey(), true),
             AccountMeta::new_readonly(env.market, false),
@@ -21728,7 +21735,10 @@ fn v16_attack_set_lp_matcher_config_cannot_target_protocol_accounts() {
     let send_with_lp_account = |env: &mut V16CuEnv, lp_account: Pubkey| {
         env.svm.expire_blockhash();
         env.send(
-            ProgInstruction::SetMatcherConfig { enabled: 1 },
+            ProgInstruction::SetMatcherConfig {
+                market_id: first_generation_market_id(0),
+                enabled: 1,
+            },
             vec![
                 AccountMeta::new(lp_owner.pubkey(), true),
                 AccountMeta::new_readonly(env.market, false),
@@ -21802,7 +21812,10 @@ fn v16_attack_matcher_config_and_fills_reject_self_program_context() {
     let lp_before_config = env.svm.get_account(&lp).unwrap();
     env.svm.expire_blockhash();
     let self_config = env.send(
-        ProgInstruction::SetMatcherConfig { enabled: 1 },
+        ProgInstruction::SetMatcherConfig {
+            market_id: first_generation_market_id(0),
+            enabled: 1,
+        },
         vec![
             AccountMeta::new(lp_owner.pubkey(), true),
             AccountMeta::new_readonly(env.market, false),
@@ -22060,7 +22073,10 @@ fn v16_attack_set_matcher_config_bad_legacy_context_rolls_back_realloc() {
     let lp_before = env.svm.get_account(&lp).unwrap();
     env.svm.expire_blockhash();
     let rejected = env.send(
-        ProgInstruction::SetMatcherConfig { enabled: 1 },
+        ProgInstruction::SetMatcherConfig {
+            market_id: first_generation_market_id(0),
+            enabled: 1,
+        },
         vec![
             AccountMeta::new(lp_owner.pubkey(), true),
             AccountMeta::new_readonly(env.market, false),
@@ -31323,7 +31339,10 @@ fn v16_attack_trade_paths_reject_cross_market_portfolio_substitution() {
         &mut env.svm,
         env.program_id,
         &env.payer,
-        ProgInstruction::SetMatcherConfig { enabled: 1 },
+        ProgInstruction::SetMatcherConfig {
+            market_id: first_generation_market_id(0),
+            enabled: 1,
+        },
         vec![
             AccountMeta::new(cpi_lp.pubkey(), true),
             AccountMeta::new_readonly(market_b, false),
@@ -60513,4 +60532,239 @@ fn v16_attack_backing_topup_rejects_lapsed_expiry() {
         vault0 + 50,
         "valid topup credits exactly the backing"
     );
+}
+
+#[test]
+fn v16_attack_signed_matcher_grant_cannot_replay_across_market_reinit() {
+    const PRICE: u64 = 100;
+    const ADVERSE_PRICE: u64 = 50;
+    const DEPOSIT: u128 = 1_000_000;
+    const SIZE_Q: i128 = 5_000 * POS_SCALE as i128;
+    const REINIT_SLOT: u64 = 11;
+    const ADVERSE_SLOT: u64 = 21;
+
+    let params = V16CuMarketParams {
+        max_portfolio_assets: 2,
+        maintenance_margin_bps: 1_000,
+        initial_margin_bps: 1_000,
+        max_price_move_bps_per_slot: 500,
+        ..V16CuMarketParams::default()
+    };
+    let mut env = V16CuEnv::new_with_init_params(params);
+    env.svm.warp_to_slot(1);
+    env.configure_auth_mark_with_cu(1, PRICE);
+    let admin = env.admin.insecure_clone();
+
+    let matcher_program = Pubkey::new_unique();
+    env.svm.add_program(
+        matcher_program,
+        &std::fs::read(auth_matcher_program_path()).unwrap(),
+    );
+    let victim = Keypair::new();
+    let victim_portfolio = env.create_portfolio(&victim);
+    let old_market_id = env.asset_market_id(0);
+    let (matcher_context, matcher_delegate, _) =
+        env.init_auth_matcher_context_via_system_create(matcher_program, &victim, victim_portfolio);
+
+    env.svm.expire_blockhash();
+    let retained_grant = Transaction::new_signed_with_payer(
+        &[
+            heap_ix(),
+            cu_ix(),
+            Instruction {
+                program_id: env.program_id,
+                accounts: vec![
+                    AccountMeta::new(victim.pubkey(), true),
+                    AccountMeta::new_readonly(env.market, false),
+                    AccountMeta::new(victim_portfolio, false),
+                    AccountMeta::new_readonly(matcher_program, false),
+                    AccountMeta::new_readonly(matcher_context, false),
+                    AccountMeta::new_readonly(matcher_delegate, false),
+                ],
+                data: ProgInstruction::SetMatcherConfig {
+                    market_id: old_market_id,
+                    enabled: 1,
+                }
+                .encode(),
+            },
+        ],
+        Some(&env.payer.pubkey()),
+        &[&env.payer, &victim],
+        env.svm.latest_blockhash(),
+    );
+
+    env.close_portfolio_with_cu(&victim, victim_portfolio);
+    env.resolve();
+    env.close_slab_with_cu();
+    assert_eq!(env.svm.get_account(&env.market).unwrap().lamports, 0);
+
+    env.svm.warp_to_slot(REINIT_SLOT);
+    env.svm
+        .set_account(
+            env.market,
+            Account {
+                lamports: 1_000_000_000,
+                data: vec![
+                    0u8;
+                    state::market_account_len_for_capacity(
+                        params.max_portfolio_assets as usize,
+                    )
+                    .unwrap()
+                ],
+                owner: env.program_id,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    env.svm
+        .set_account(
+            env.vault,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_token_data(env.mint, env.vault_authority, 0),
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    env.send(
+        init_market_instruction(&params),
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new_readonly(env.mint, false),
+            AccountMeta::new(env.market_generation, false),
+            AccountMeta::new_readonly(system_program::ID, false),
+        ],
+        &[&admin],
+    )
+    .expect("same market address is publicly reinitialized");
+    env.configure_auth_mark_with_cu(REINIT_SLOT, PRICE);
+    let new_market_id = env.asset_market_id(0);
+    assert_ne!(new_market_id, old_market_id);
+
+    env.svm
+        .set_account(
+            victim_portfolio,
+            Account {
+                lamports: 1_000_000_000,
+                data: vec![0u8; env.portfolio_account_len],
+                owner: env.program_id,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    env.send(
+        ProgInstruction::InitPortfolio,
+        vec![
+            AccountMeta::new(victim.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(victim_portfolio, false),
+        ],
+        &[&victim],
+    )
+    .expect("same portfolio address is publicly reinitialized");
+    env.deposit(&victim, victim_portfolio, DEPOSIT);
+
+    let market_before_replay = env.svm.get_account(&env.market).unwrap();
+    let victim_before_replay = env.svm.get_account(&victim_portfolio).unwrap();
+    let context_before_replay = env.svm.get_account(&matcher_context).unwrap();
+    let replay = env.svm.send_transaction(retained_grant);
+    if replay.is_ok() {
+        let attacker = Keypair::new();
+        let attacker_portfolio = env.create_portfolio(&attacker);
+        env.deposit(&attacker, attacker_portfolio, DEPOSIT);
+        env.try_trade_cpi_with_cu_on_asset(
+            &attacker,
+            attacker_portfolio,
+            &victim,
+            victim_portfolio,
+            matcher_program,
+            matcher_context,
+            matcher_delegate,
+            0,
+            -SIZE_Q,
+            0,
+        )
+        .expect("the stale grant forces replacement victim capital into a long position");
+
+        env.svm.warp_to_slot(ADVERSE_SLOT);
+        env.push_auth_mark_with_cu(ADVERSE_SLOT, ADVERSE_PRICE);
+        for portfolio in [victim_portfolio, attacker_portfolio] {
+            env.crank_steps(
+                portfolio,
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: ADVERSE_SLOT,
+                    observations: crank_observations(0),
+                },
+                4,
+            );
+        }
+        let victim_equity = {
+            let state = env.portfolio_state(victim_portfolio);
+            state.capital.get() as i128 + state.pnl.get()
+        };
+        assert!(victim_equity < DEPOSIT as i128);
+
+        env.try_trade_cpi_with_cu_on_asset(
+            &attacker,
+            attacker_portfolio,
+            &victim,
+            victim_portfolio,
+            matcher_program,
+            matcher_context,
+            matcher_delegate,
+            0,
+            SIZE_Q,
+            0,
+        )
+        .expect("the attacker closes against the still-unsigned victim at the adverse mark");
+        let released = env.portfolio_state(attacker_portfolio).pnl.get() as u128;
+        assert!(released > 0);
+        env.convert_released_pnl_with_cu(&attacker, attacker_portfolio, released);
+        let withdrawable = env.portfolio_state(attacker_portfolio).capital.get();
+        let destination = env.withdraw(&attacker, attacker_portfolio, withdrawable);
+        assert_eq!(env.token_amount(destination) as u128, withdrawable);
+        assert!(withdrawable > DEPOSIT);
+        panic!(
+            "matcher consent for market {old_market_id} replayed into market {new_market_id}; \
+             victim equity fell from {DEPOSIT} to {victim_equity}, and attacker withdrew \
+             {withdrawable}"
+        );
+    }
+
+    let replay_error = format!("{:?}", replay.unwrap_err());
+    let expected_error = format!(
+        "Custom({})",
+        PercolatorError::AssetGenerationMismatch as u32
+    );
+    assert!(
+        replay_error.contains(&expected_error),
+        "stale matcher grant must fail with {expected_error}, got {replay_error}"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before_replay
+    );
+    assert_eq!(
+        env.svm.get_account(&victim_portfolio).unwrap(),
+        victim_before_replay
+    );
+    assert_eq!(
+        env.svm.get_account(&matcher_context).unwrap(),
+        context_before_replay
+    );
+
+    env.set_matcher_config(
+        matcher_program,
+        &victim,
+        victim_portfolio,
+        matcher_context,
+        matcher_delegate,
+        1,
+    );
+    assert_eq!(env.portfolio_matcher_config(victim_portfolio).enabled, 1);
 }
