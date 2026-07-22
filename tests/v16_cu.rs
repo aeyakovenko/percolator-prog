@@ -7636,6 +7636,260 @@ fn v16_bpf_permissionless_crank_computes_funding_from_internal_mark_premium() {
 }
 
 #[test]
+fn v16_attack_source_backed_force_close_preserves_bounded_resolved_exits() {
+    const PRICE: u64 = 100;
+    const ASSET0_SIZE_Q: i128 = 20 * POS_SCALE as i128;
+    const ASSET1_SIZE_Q: i128 = 10 * POS_SCALE as i128;
+    const SAFE_INCREASE_Q: i128 = POS_SCALE as i128;
+    const TOO_LARGE_INCREASE_Q: i128 = 30 * POS_SCALE as i128;
+    const SHUTDOWN_SLOT: u64 = 4;
+    const FORCE_CLOSE_DELAY: u64 = 5;
+
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(4, 1_000, 1_000, 500);
+    env.svm.warp_to_slot(1);
+    env.configure_auth_mark_for_asset_as_admin(0, 1, PRICE);
+    env.configure_auth_mark_for_asset_as_admin(1, 1, PRICE);
+
+    let winner_owner = Keypair::new();
+    let counterparty_owner = Keypair::new();
+    let winner = env.create_portfolio(&winner_owner);
+    let counterparty = env.create_portfolio(&counterparty_owner);
+    env.deposit(&winner_owner, winner, 313);
+    env.deposit(&counterparty_owner, counterparty, 1_000);
+    env.top_up_backing_bucket(1, 150, 10);
+    env.trade_asset_with_cu(
+        0,
+        &winner_owner,
+        winner,
+        &counterparty_owner,
+        counterparty,
+        ASSET0_SIZE_Q,
+        PRICE,
+        0,
+    );
+    env.trade_asset_with_cu(
+        1,
+        &winner_owner,
+        winner,
+        &counterparty_owner,
+        counterparty,
+        ASSET1_SIZE_Q,
+        PRICE,
+        0,
+    );
+
+    // Create source-backed positive PnL on asset 0, then use it as initial
+    // margin for a public risk increase on the losing asset-1 leg.
+    env.svm.warp_to_slot(2);
+    env.push_auth_mark_for_asset_as_admin(0, 2, 105);
+    env.push_auth_mark_for_asset_as_admin(1, 2, 95);
+    for (portfolio, asset_index) in [(counterparty, 0), (winner, 0), (counterparty, 1)] {
+        env.crank(
+            portfolio,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 2,
+                observations: crank_observations(asset_index),
+            },
+        );
+    }
+
+    let watermark_dest = env.token_account(env.admin.pubkey(), 0);
+    env.withdraw_backing_bucket_to_admin_token_with_cu(watermark_dest, 1, 50);
+    assert!(
+        env.try_trade_asset_with_cu(
+            1,
+            &winner_owner,
+            winner,
+            &counterparty_owner,
+            counterparty,
+            TOO_LARGE_INCREASE_Q,
+            95,
+            0,
+        )
+        .is_err(),
+        "source-credit watermark control must reject the oversized increase"
+    );
+    env.svm.warp_to_slot(3);
+    env.trade_asset_with_cu(
+        1,
+        &winner_owner,
+        winner,
+        &counterparty_owner,
+        counterparty,
+        SAFE_INCREASE_Q,
+        95,
+        0,
+    );
+
+    let winner_before_shutdown = env.portfolio_state(winner);
+    let lien_before = winner_before_shutdown
+        .source_domains
+        .iter()
+        .find(|source| source.source_lien_counterparty_backing_num.get() != 0);
+    assert!(
+        lien_before.is_some(),
+        "winner must hold a counterparty-backed source lien; pnl={} capital={}",
+        winner_before_shutdown.pnl.get(),
+        winner_before_shutdown.capital.get(),
+    );
+    let lien_before = lien_before.unwrap();
+    assert!(winner_before_shutdown.pnl.get() > 0);
+    assert!(lien_before.source_claim_liened_num.get() > 0);
+    assert!(lien_before.source_lien_counterparty_backing_num.get() > 0);
+    assert_eq!(
+        env.market_state().1.source_backing_buckets[1].status,
+        BackingBucketStatusV16::Fresh
+    );
+    env.configure_permissionless_resolve_with_cu(100, FORCE_CLOSE_DELAY);
+
+    // A post-init asset admin may shut down the market, but that action must
+    // preserve bounded owner/keeper exits for users already holding claims.
+    env.svm.warp_to_slot(SHUTDOWN_SLOT);
+    env.update_asset_lifecycle_as_admin_with_cu(
+        percolator_prog::processor::ASSET_ACTION_SHUTDOWN,
+        0,
+        SHUTDOWN_SLOT,
+        0,
+    );
+    env.update_asset_lifecycle_as_admin_with_cu(
+        percolator_prog::processor::ASSET_ACTION_SHUTDOWN,
+        1,
+        SHUTDOWN_SLOT,
+        0,
+    );
+    let (_, recovery) = env.market_state();
+    assert_eq!(recovery.assets[0].lifecycle, AssetLifecycleV16::Recovery);
+    assert_eq!(recovery.assets[1].lifecycle, AssetLifecycleV16::Recovery);
+    assert_eq!(
+        recovery.source_backing_buckets[1].status,
+        BackingBucketStatusV16::Fresh
+    );
+
+    let cranker = Keypair::new();
+    let force_slot = SHUTDOWN_SLOT + FORCE_CLOSE_DELAY + 1;
+    env.svm.warp_to_slot(force_slot);
+    env.force_close_abandoned_asset_with_cu(
+        &cranker,
+        winner,
+        counterparty,
+        0,
+        force_slot,
+        ASSET0_SIZE_Q.unsigned_abs(),
+    );
+    env.force_close_abandoned_asset_with_cu(
+        &cranker,
+        winner,
+        counterparty,
+        1,
+        force_slot,
+        (ASSET1_SIZE_Q + SAFE_INCREASE_Q).unsigned_abs(),
+    );
+    assert!(percolator::active_bitmap_is_empty(active_bitmap(
+        &env.portfolio_state(winner)
+    )));
+    assert!(percolator::active_bitmap_is_empty(active_bitmap(
+        &env.portfolio_state(counterparty)
+    )));
+    let winner_after_force = env.portfolio_state(winner);
+    let forced_lien = winner_after_force
+        .source_domains
+        .iter()
+        .find(|source| source.source_lien_counterparty_backing_num.get() != 0)
+        .expect("force-close must preserve the winner's account-local lien until settlement");
+    let (_, forced_market) = env.market_state();
+    let forced_domain = forced_lien.domain.get() as usize;
+    assert_eq!(
+        forced_market.source_backing_buckets[forced_domain].valid_liened_backing_num,
+        forced_lien.source_lien_counterparty_backing_num.get(),
+        "the public force-close setup must retain a real aggregate-backed source lien",
+    );
+
+    env.resolve();
+    let winner_dest = env.token_account(winner_owner.pubkey(), 0);
+    let counterparty_dest = env.token_account(counterparty_owner.pubkey(), 0);
+    let winner_tokens_before = env.token_amount(winner_dest);
+    let try_close = |env: &mut V16CuEnv, owner: &Keypair, portfolio: Pubkey, dest: Pubkey| {
+        env.svm.expire_blockhash();
+        env.send(
+            ProgInstruction::CloseResolved {
+                fee_rate_per_slot: 0,
+            },
+            vec![
+                AccountMeta::new_readonly(owner.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(portfolio, false),
+                AccountMeta::new(dest, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(env.vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[owner],
+        )
+    };
+
+    let is_terminal = |state: &PortfolioAccountV16| {
+        state.capital.get() == 0
+            && state.pnl.get() == 0
+            && percolator::active_bitmap_is_empty(active_bitmap(state))
+            && state
+                .source_domains
+                .iter()
+                .all(|source| source.source_claim_bound_num.get() == 0)
+            && state.stale_state == 0
+            && state.b_stale_state == 0
+    };
+    let mut max_close_cu = 0;
+    let mut close_rounds = 0;
+    for round in 0..8 {
+        let counterparty_cu = try_close(
+            &mut env,
+            &counterparty_owner,
+            counterparty,
+            counterparty_dest,
+        )
+        .expect("counterparty resolved close must make bounded progress");
+        let winner_cu = try_close(&mut env, &winner_owner, winner, winner_dest)
+            .expect("source-backed winner resolved close must make bounded progress");
+        max_close_cu = max_close_cu.max(counterparty_cu).max(winner_cu);
+        close_rounds = round + 1;
+        if is_terminal(&env.portfolio_state(winner))
+            && is_terminal(&env.portfolio_state(counterparty))
+        {
+            break;
+        }
+    }
+
+    let winner_after = env.portfolio_state(winner);
+    let counterparty_after = env.portfolio_state(counterparty);
+    let winner_tokens_after = env.token_amount(winner_dest);
+    assert!(
+        is_terminal(&winner_after),
+        "source-backed shutdown must not strand the independent winner; \
+         capital={} pnl={} active={:?} rounds={close_rounds}",
+        winner_after.capital.get(),
+        winner_after.pnl.get(),
+        active_bitmap(&winner_after),
+    );
+    assert!(
+        is_terminal(&counterparty_after),
+        "source-backed shutdown must not strand the counterparty; \
+         capital={} pnl={} active={:?} rounds={close_rounds}",
+        counterparty_after.capital.get(),
+        counterparty_after.pnl.get(),
+        active_bitmap(&counterparty_after),
+    );
+    assert!(
+        winner_tokens_after > winner_tokens_before,
+        "resolved close must transfer the winner's withdrawable value"
+    );
+    assert_cu_within(
+        "source-backed force-close resolved wind-down",
+        max_close_cu,
+        CUSTODY_CU_LIMIT,
+    );
+}
+
+#[test]
 fn v16_bpf_existing_funding_ledger_refreshes_and_converts_between_sides() {
     const INITIAL_PRICE: u64 = 1_000_000;
     const FUNDING_RATE_E9: i128 = 1_000;
