@@ -3457,9 +3457,11 @@ impl V16CuEnv {
         asset_index: u16,
         reduce_q: u128,
     ) -> u64 {
+        let market_id = self.asset_market_id(asset_index);
         self.send(
             ProgInstruction::RebalanceReduce {
                 asset_index,
+                market_id,
                 reduce_q,
             },
             vec![
@@ -16986,9 +16988,11 @@ fn v16_attack_public_helpers_cannot_use_market_as_portfolio_alias() {
     assert_unchanged(&env, "ConvertReleasedPnl alias rejection");
 
     env.svm.expire_blockhash();
+    let market_id = env.asset_market_id(0);
     let reduce = env.send(
         ProgInstruction::RebalanceReduce {
             asset_index: 0,
+            market_id,
             reduce_q: POS_SCALE,
         },
         vec![
@@ -29241,9 +29245,11 @@ fn v16_attack_rebalance_reduce_owner_gated() {
     let mallory = Keypair::new();
     env.ensure_signer_account(mallory.pubkey());
     env.svm.expire_blockhash();
+    let market_id = env.asset_market_id(0);
     let r_grief = env.send(
         ProgInstruction::RebalanceReduce {
             asset_index: 0,
+            market_id,
             reduce_q: POS_SCALE,
         },
         vec![
@@ -29273,6 +29279,7 @@ fn v16_attack_rebalance_reduce_owner_gated() {
     let r_owner = env.send(
         ProgInstruction::RebalanceReduce {
             asset_index: 0,
+            market_id,
             reduce_q: POS_SCALE,
         },
         vec![
@@ -29395,6 +29402,7 @@ fn v16_attack_rebalance_reduce_rejects_cross_market_portfolio_substitution() {
         &env.payer,
         ProgInstruction::RebalanceReduce {
             asset_index: 0,
+            market_id: first_generation_market_id(0),
             reduce_q,
         },
         vec![
@@ -29429,6 +29437,7 @@ fn v16_attack_rebalance_reduce_rejects_cross_market_portfolio_substitution() {
         &env.payer,
         ProgInstruction::RebalanceReduce {
             asset_index: 0,
+            market_id: first_generation_market_id(0),
             reduce_q,
         },
         vec![
@@ -57228,9 +57237,11 @@ fn v16_attack_rebalance_reduce_rejects_when_resolve_matured() {
     let vault_before = env.svm.get_account(&env.vault).unwrap();
 
     env.svm.expire_blockhash();
+    let market_id = env.asset_market_id(0);
     let rejected = env.send(
         ProgInstruction::RebalanceReduce {
             asset_index: 0,
+            market_id,
             reduce_q: remaining,
         },
         vec![
@@ -58543,9 +58554,11 @@ fn v16_attack_rebalance_reduce_overshoot_clamps_to_flat_no_flip() {
     // The owner force-reduces with reduce_q FAR larger than the position (3x). The clamp must cap the
     // reduction at the position size, landing exactly flat — never flipping the long into a short.
     env.svm.expire_blockhash();
+    let market_id = env.asset_market_id(0);
     let r = env.send(
         ProgInstruction::RebalanceReduce {
             asset_index: 0,
+            market_id,
             reduce_q: 3 * POS_SCALE,
         },
         vec![
@@ -60558,6 +60571,7 @@ fn v16_attack_rebalance_reduce_cannot_replay_across_market_reinit() {
                 ],
                 data: ProgInstruction::RebalanceReduce {
                     asset_index: 0,
+                    market_id: old_market_id,
                     reduce_q: NEW_SIZE_Q as u128,
                 }
                 .encode(),
@@ -60635,10 +60649,7 @@ fn v16_attack_rebalance_reduce_cannot_replay_across_market_reinit() {
     env.configure_auth_mark_with_cu(REINIT_SLOT, 100);
     assert_ne!(env.asset_market_id(0), old_market_id);
 
-    for (owner, portfolio) in [
-        (&victim_owner, victim),
-        (&attacker_owner, attacker),
-    ] {
+    for (owner, portfolio) in [(&victim_owner, victim), (&attacker_owner, attacker)] {
         env.svm
             .set_account(
                 portfolio,
@@ -60693,10 +60704,25 @@ fn v16_attack_rebalance_reduce_cannot_replay_across_market_reinit() {
         .expect("refresh replacement at the adverse mark");
     }
 
-    let replayed = env.svm.send_transaction(retained_reduce).is_ok();
-    if replayed {
-        assert!(!has_active_leg_for_asset(&env.portfolio_state(victim), 0));
-    }
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let victim_before = env.svm.get_account(&victim).unwrap();
+    let attacker_before = env.svm.get_account(&attacker).unwrap();
+    let replay_error = env
+        .svm
+        .send_transaction(retained_reduce)
+        .expect_err("old market generation must reject");
+    let replay_error = format!("{replay_error:?}");
+    let expected_error = format!(
+        "Custom({})",
+        PercolatorError::AssetGenerationMismatch as u32
+    );
+    assert!(
+        replay_error.contains(&expected_error),
+        "stale RebalanceReduce must fail with {expected_error}, got {replay_error}"
+    );
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+    assert_eq!(env.svm.get_account(&victim).unwrap(), victim_before);
+    assert_eq!(env.svm.get_account(&attacker).unwrap(), attacker_before);
 
     env.svm.expire_blockhash();
     env.svm.warp_to_slot(REINIT_SLOT + 2);
@@ -60710,17 +60736,15 @@ fn v16_attack_rebalance_reduce_cannot_replay_across_market_reinit() {
             },
         );
     }
-    if !replayed {
-        env.trade_with_cu(
-            &victim_owner,
-            victim,
-            &attacker_owner,
-            attacker,
-            -NEW_SIZE_Q,
-            100,
-            0,
-        );
-    }
+    env.trade_with_cu(
+        &victim_owner,
+        victim,
+        &attacker_owner,
+        attacker,
+        -NEW_SIZE_Q,
+        100,
+        0,
+    );
 
     env.resolve();
     let victim_dest = env.close_resolved(&victim_owner, victim);
@@ -60728,7 +60752,7 @@ fn v16_attack_rebalance_reduce_cannot_replay_across_market_reinit() {
     let victim_payout = env.token_amount(victim_dest) as u128;
     let attacker_payout = env.token_amount(attacker_dest) as u128;
     assert!(
-        !replayed && victim_payout >= DEPOSIT && attacker_payout <= DEPOSIT,
+        victim_payout >= DEPOSIT && attacker_payout <= DEPOSIT,
         "rebalance consent for market {old_market_id} replayed into market {}: victim={victim_payout}, attacker={attacker_payout}",
         env.asset_market_id(0),
     );

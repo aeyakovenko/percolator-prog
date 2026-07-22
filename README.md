@@ -496,6 +496,7 @@ This section describes intent and operational ordering, not argument-by-argument
   - owner-signed recovery-leg forfeit for a selected asset and bounded B-delta budget
 - **RebalanceReduce** (tag 44)
   - owner-signed risk-reducing rebalance against the wrapper-authenticated effective price vector
+  - binds the current asset `market_id`; retained consent from a retired market generation rejects
 - **ClaimResolvedPayoutTopup** (tag 46)
   - permissionless resolved-payout top-up claim; pays only the stored owner receipt token account
 
