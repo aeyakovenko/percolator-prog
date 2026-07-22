@@ -3427,8 +3427,10 @@ impl V16CuEnv {
         asset_index: u16,
         reduce_q: u128,
     ) -> u64 {
+        let portfolio_id = self.portfolio_id(portfolio);
         self.send(
             ProgInstruction::RebalanceReduce {
+                portfolio_id,
                 asset_index,
                 reduce_q,
             },
@@ -16145,6 +16147,7 @@ fn v16_attack_public_helpers_cannot_use_market_as_portfolio_alias() {
     env.svm.expire_blockhash();
     let reduce = env.send(
         ProgInstruction::RebalanceReduce {
+            portfolio_id: 1,
             asset_index: 0,
             reduce_q: POS_SCALE,
         },
@@ -28469,6 +28472,7 @@ fn v16_attack_rebalance_reduce_owner_gated() {
     env.svm.expire_blockhash();
     let r_grief = env.send(
         ProgInstruction::RebalanceReduce {
+            portfolio_id: env.portfolio_id(pa),
             asset_index: 0,
             reduce_q: POS_SCALE,
         },
@@ -28498,6 +28502,7 @@ fn v16_attack_rebalance_reduce_owner_gated() {
     env.svm.expire_blockhash();
     let r_owner = env.send(
         ProgInstruction::RebalanceReduce {
+            portfolio_id: env.portfolio_id(pa),
             asset_index: 0,
             reduce_q: POS_SCALE,
         },
@@ -28612,6 +28617,8 @@ fn v16_attack_rebalance_reduce_rejects_cross_market_portfolio_substitution() {
     let foreign_before = env.svm.get_account(&foreign).unwrap();
     let local_before = env.svm.get_account(&local).unwrap();
     let vault_b_before = env.svm.get_account(&vault_b).unwrap();
+    let foreign_portfolio_id = env.portfolio_id(foreign);
+    let local_portfolio_id = env.portfolio_id(local);
     let reduce_q = POS_SCALE / 2;
     env.svm.expire_blockhash();
     let rejected = send_tx(
@@ -28619,6 +28626,7 @@ fn v16_attack_rebalance_reduce_rejects_cross_market_portfolio_substitution() {
         env.program_id,
         &env.payer,
         ProgInstruction::RebalanceReduce {
+            portfolio_id: foreign_portfolio_id,
             asset_index: 0,
             reduce_q,
         },
@@ -28653,6 +28661,7 @@ fn v16_attack_rebalance_reduce_rejects_cross_market_portfolio_substitution() {
         env.program_id,
         &env.payer,
         ProgInstruction::RebalanceReduce {
+            portfolio_id: local_portfolio_id,
             asset_index: 0,
             reduce_q,
         },
@@ -56323,6 +56332,7 @@ fn v16_attack_rebalance_reduce_rejects_when_resolve_matured() {
     env.svm.expire_blockhash();
     let rejected = env.send(
         ProgInstruction::RebalanceReduce {
+            portfolio_id: env.portfolio_id(long),
             asset_index: 0,
             reduce_q: remaining,
         },
@@ -57638,6 +57648,7 @@ fn v16_attack_rebalance_reduce_overshoot_clamps_to_flat_no_flip() {
     env.svm.expire_blockhash();
     let r = env.send(
         ProgInstruction::RebalanceReduce {
+            portfolio_id: env.portfolio_id(pa),
             asset_index: 0,
             reduce_q: 3 * POS_SCALE,
         },
@@ -59762,6 +59773,7 @@ fn v16_attack_rebalance_reduce_replay_cannot_cross_portfolio_incarnation() {
                     AccountMeta::new(victim, false),
                 ],
                 data: ProgInstruction::RebalanceReduce {
+                    portfolio_id: old_portfolio_id,
                     asset_index: 0,
                     reduce_q: NEW_SIZE_Q as u128,
                 }
@@ -59835,6 +59847,19 @@ fn v16_attack_rebalance_reduce_replay_cannot_cross_portfolio_incarnation() {
         &[],
     )
     .expect("refresh replacement at the adverse mark");
+    env.send(
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 1,
+            observations: crank_observations(0),
+        },
+        vec![
+            AccountMeta::new(env.payer.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(attacker, false),
+        ],
+        &[],
+    )
+    .expect("refresh counterparty at the adverse mark");
     assert!(env.portfolio_state(victim).capital.get() < DEPOSIT);
 
     let replay = env.svm.send_transaction(retained_reduce);

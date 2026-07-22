@@ -2655,6 +2655,7 @@ pub mod ix {
             b_delta_budget: u128,
         },
         RebalanceReduce {
+            portfolio_id: u64,
             asset_index: u16,
             reduce_q: u128,
         },
@@ -2928,6 +2929,7 @@ pub mod ix {
                     b_delta_budget: read_u128(&mut rest)?,
                 },
                 44 => Self::RebalanceReduce {
+                    portfolio_id: read_u64(&mut rest)?,
                     asset_index: read_u16(&mut rest)?,
                     reduce_q: read_u128(&mut rest)?,
                 },
@@ -3321,10 +3323,12 @@ pub mod ix {
                     push_u128(&mut out, b_delta_budget);
                 }
                 Self::RebalanceReduce {
+                    portfolio_id,
                     asset_index,
                     reduce_q,
                 } => {
                     out.push(44);
+                    push_u64(&mut out, portfolio_id);
                     push_u16(&mut out, asset_index);
                     push_u128(&mut out, reduce_q);
                 }
@@ -5459,9 +5463,10 @@ pub mod processor {
                 b_delta_budget,
             } => handle_forfeit_recovery_leg(program_id, accounts, asset_index, b_delta_budget),
             Instruction::RebalanceReduce {
+                portfolio_id,
                 asset_index,
                 reduce_q,
-            } => handle_rebalance_reduce(program_id, accounts, asset_index, reduce_q),
+            } => handle_rebalance_reduce(program_id, accounts, portfolio_id, asset_index, reduce_q),
             Instruction::FinalizeResetSide { asset_index, side } => {
                 handle_finalize_reset_side(program_id, accounts, asset_index, side)
             }
@@ -8487,11 +8492,17 @@ pub mod processor {
     fn handle_rebalance_reduce<'a>(
         program_id: &Pubkey,
         accounts: &'a [AccountInfo<'a>],
+        expected_portfolio_id: u64,
         asset_index: u16,
         reduce_q: u128,
     ) -> ProgramResult {
         if reduce_q == 0 {
             return Err(PercolatorError::InvalidInstruction.into());
+        }
+        let portfolio_ai = account(accounts, 2)?;
+        expect_owner(portfolio_ai, program_id)?;
+        if state::read_portfolio_id(&portfolio_ai.try_borrow_data()?)? != expected_portfolio_id {
+            return Err(PercolatorError::EngineProvenanceMismatch.into());
         }
         with_one_portfolio_view(program_id, accounts, true, |group, portfolio, cfg| {
             if group.header.mode == 0 && permissionless_resolve_matured_now_view(cfg, group) {
