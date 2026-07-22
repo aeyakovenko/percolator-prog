@@ -209,6 +209,7 @@ fn kani_v16_domain_topup_and_asset_insurance_decode_preserves_wire_fields() {
 #[kani::proof]
 fn kani_v16_recovery_close_progress_decode_preserves_wire_fields() {
     let asset_index: u16 = kani::any();
+    let market_id: u64 = kani::any();
     let side: u8 = kani::any();
     let b_delta_budget: u128 = kani::any();
     let reduce_q: u128 = kani::any();
@@ -233,15 +234,18 @@ fn kani_v16_recovery_close_progress_decode_preserves_wire_fields() {
 
     let rebalance = Instruction::RebalanceReduce {
         asset_index,
+        market_id,
         reduce_q,
     }
     .encode();
     match Instruction::decode(&rebalance).unwrap() {
         Instruction::RebalanceReduce {
             asset_index: got_asset,
+            market_id: got_market_id,
             reduce_q: got_reduce,
         } => {
             assert_eq!(got_asset, asset_index);
+            assert_eq!(got_market_id, market_id);
             assert_eq!(got_reduce, reduce_q);
         }
         _ => unreachable!(),
@@ -288,6 +292,17 @@ fn kani_v16_recovery_close_progress_decode_preserves_wire_fields() {
         Instruction::SyncMaintenanceFee { now_slot: got } => assert_eq!(got, now_slot),
         _ => unreachable!(),
     }
+}
+
+#[kani::proof]
+fn kani_v16_legacy_unbound_rebalance_market_generation_payload_is_rejected() {
+    let asset_index: u16 = kani::any();
+    let reduce_q: u128 = kani::any();
+    let mut legacy = [0u8; 19];
+    legacy[0] = 44;
+    legacy[1..3].copy_from_slice(&asset_index.to_le_bytes());
+    legacy[3..19].copy_from_slice(&reduce_q.to_le_bytes());
+    assert!(Instruction::decode(&legacy).is_err());
 }
 
 #[kani::proof]
@@ -1401,6 +1416,7 @@ fn kani_v16_resolved_recovery_payloads_reject_trailing_byte() {
     assert_rejects_trailing_byte(
         Instruction::RebalanceReduce {
             asset_index: 0,
+            market_id: 1,
             reduce_q: 1,
         },
         extra,

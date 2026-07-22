@@ -2708,6 +2708,7 @@ pub mod ix {
         },
         RebalanceReduce {
             asset_index: u16,
+            market_id: u64,
             reduce_q: u128,
         },
         FinalizeResetSide {
@@ -2987,6 +2988,7 @@ pub mod ix {
                 },
                 44 => Self::RebalanceReduce {
                     asset_index: read_u16(&mut rest)?,
+                    market_id: read_u64(&mut rest)?,
                     reduce_q: read_u128(&mut rest)?,
                 },
                 45 => Self::FinalizeResetSide {
@@ -3392,10 +3394,12 @@ pub mod ix {
                 }
                 Self::RebalanceReduce {
                     asset_index,
+                    market_id,
                     reduce_q,
                 } => {
                     out.push(44);
                     push_u16(&mut out, asset_index);
+                    push_u64(&mut out, market_id);
                     push_u128(&mut out, reduce_q);
                 }
                 Self::FinalizeResetSide { asset_index, side } => {
@@ -5507,8 +5511,9 @@ pub mod processor {
             } => handle_forfeit_recovery_leg(program_id, accounts, asset_index, b_delta_budget),
             Instruction::RebalanceReduce {
                 asset_index,
+                market_id,
                 reduce_q,
-            } => handle_rebalance_reduce(program_id, accounts, asset_index, reduce_q),
+            } => handle_rebalance_reduce(program_id, accounts, asset_index, market_id, reduce_q),
             Instruction::FinalizeResetSide { asset_index, side } => {
                 handle_finalize_reset_side(program_id, accounts, asset_index, side)
             }
@@ -8577,10 +8582,19 @@ pub mod processor {
         program_id: &Pubkey,
         accounts: &'a [AccountInfo<'a>],
         asset_index: u16,
+        expected_market_id: u64,
         reduce_q: u128,
     ) -> ProgramResult {
         if reduce_q == 0 {
             return Err(PercolatorError::InvalidInstruction.into());
+        }
+        let market_ai = account(accounts, 1)?;
+        let (_, _, _, current_market_id, _, _) = state::read_market_trade_preflight(
+            &market_ai.try_borrow_data()?,
+            asset_index as usize,
+        )?;
+        if current_market_id != expected_market_id {
+            return Err(PercolatorError::AssetGenerationMismatch.into());
         }
         with_one_portfolio_view(program_id, accounts, true, |group, portfolio, cfg| {
             if group.header.mode == 0 && permissionless_resolve_matured_now_view(cfg, group) {
