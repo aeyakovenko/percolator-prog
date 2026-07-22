@@ -59717,3 +59717,168 @@ fn v16_attack_underfunded_exit_cannot_move_ewma_with_uncollectible_fee() {
         assert_underfunded_ewma_exit_uses_collected_fee(path);
     }
 }
+
+// A signed unilateral reduction authorizes irreversible exposure removal. Reusing the same
+// portfolio address must not let an old incarnation's consent close a replacement position at an
+// adverse mark and lock the counterparty's temporary profit before the mark recovers.
+#[test]
+fn v16_attack_rebalance_reduce_replay_cannot_cross_portfolio_incarnation() {
+    const DEPOSIT: u128 = 1_000_000;
+    const OLD_SIZE_Q: i128 = 2_000 * POS_SCALE as i128;
+    const NEW_SIZE_Q: i128 = 1_000 * POS_SCALE as i128;
+
+    let mut env = V16CuEnv::new();
+    env.configure_auth_mark_with_cu(0, 100);
+
+    let victim_owner = Keypair::new();
+    let attacker_owner = Keypair::new();
+    let victim = env.create_portfolio(&victim_owner);
+    let attacker = env.create_portfolio(&attacker_owner);
+    let old_portfolio_id = env.portfolio_id(victim);
+    env.deposit(&victim_owner, victim, DEPOSIT);
+    env.deposit(&attacker_owner, attacker, DEPOSIT);
+    env.trade_with_cu(
+        &victim_owner,
+        victim,
+        &attacker_owner,
+        attacker,
+        OLD_SIZE_Q,
+        100,
+        0,
+    );
+
+    // Keep the exact fee-paid, owner-signed transaction while incarnation 1 really has enough
+    // exposure for it to be a valid reduction.
+    env.svm.expire_blockhash();
+    let retained_reduce = Transaction::new_signed_with_payer(
+        &[
+            heap_ix(),
+            cu_ix(),
+            Instruction {
+                program_id: env.program_id,
+                accounts: vec![
+                    AccountMeta::new(victim_owner.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(victim, false),
+                ],
+                data: ProgInstruction::RebalanceReduce {
+                    asset_index: 0,
+                    reduce_q: NEW_SIZE_Q as u128,
+                }
+                .encode(),
+            },
+        ],
+        Some(&env.payer.pubkey()),
+        &[&env.payer, &victim_owner],
+        env.svm.latest_blockhash(),
+    );
+
+    // Exit and publicly reincarnate the exact same program-owned address without expiring the
+    // retained transaction's blockhash.
+    env.trade_with_cu(
+        &victim_owner,
+        victim,
+        &attacker_owner,
+        attacker,
+        -OLD_SIZE_Q,
+        100,
+        0,
+    );
+    let old_dest = env.withdraw(&victim_owner, victim, DEPOSIT);
+    assert_eq!(env.token_amount(old_dest) as u128, DEPOSIT);
+    env.close_portfolio_with_cu(&victim_owner, victim);
+    send_raw_tx(
+        &mut env.svm,
+        &env.payer,
+        system_instruction::transfer(&env.payer.pubkey(), &victim, 1_000_000_000),
+        &[],
+    )
+    .expect("re-fund the closed portfolio through System Program");
+    env.send(
+        ProgInstruction::InitPortfolio,
+        vec![
+            AccountMeta::new(victim_owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(victim, false),
+        ],
+        &[&victim_owner],
+    )
+    .expect("initialize replacement portfolio");
+    assert_ne!(env.portfolio_id(victim), old_portfolio_id);
+
+    env.deposit(&victim_owner, victim, DEPOSIT);
+    env.trade_with_cu(
+        &victim_owner,
+        victim,
+        &attacker_owner,
+        attacker,
+        NEW_SIZE_Q,
+        100,
+        0,
+    );
+
+    // The authenticated mark falls temporarily. A normal refresh realizes the loss, but the
+    // replacement position would recover when the honest mark returns unless stale consent can
+    // irreversibly reduce it now.
+    env.svm.warp_to_slot(1);
+    env.push_auth_mark_with_cu(1, 50);
+    env.send(
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 1,
+            observations: crank_observations(0),
+        },
+        vec![
+            AccountMeta::new(env.payer.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(victim, false),
+        ],
+        &[],
+    )
+    .expect("refresh replacement at the adverse mark");
+    assert!(env.portfolio_state(victim).capital.get() < DEPOSIT);
+
+    let replay = env.svm.send_transaction(retained_reduce);
+    let replayed = replay.is_ok();
+    if replayed {
+        assert!(
+            !has_active_leg_for_asset(&env.portfolio_state(victim), 0),
+            "control: stale reduction closed the replacement position"
+        );
+    }
+
+    env.svm.expire_blockhash();
+    env.svm.warp_to_slot(2);
+    env.push_auth_mark_with_cu(2, 100);
+    for portfolio in [victim, attacker] {
+        env.crank(
+            portfolio,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 2,
+                observations: crank_observations(0),
+            },
+        );
+    }
+    if !replayed {
+        env.trade_with_cu(
+            &victim_owner,
+            victim,
+            &attacker_owner,
+            attacker,
+            -NEW_SIZE_Q,
+            100,
+            0,
+        );
+    }
+
+    env.resolve();
+    let victim_dest = env.close_resolved(&victim_owner, victim);
+    let attacker_dest = env.close_resolved(&attacker_owner, attacker);
+    let victim_payout = env.token_amount(victim_dest) as u128;
+    let attacker_payout = env.token_amount(attacker_dest) as u128;
+    assert!(
+        !replayed && victim_payout >= DEPOSIT && attacker_payout <= DEPOSIT,
+        "rebalance consent for portfolio {old_portfolio_id} replayed onto replacement {}: \
+         victim recovered {victim_payout}, attacker extracted {attacker_payout}",
+        env.portfolio_id(victim),
+    );
+}
