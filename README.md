@@ -482,7 +482,12 @@ This section describes intent and operational ordering, not argument-by-argument
   - owner-signed recovery-leg forfeit for a selected asset and bounded B-delta budget
 - **RebalanceReduce** (tag 44)
   - owner-signed risk-reducing rebalance against the wrapper-authenticated effective price vector;
-    the payload binds consent to the program-assigned `portfolio_id`
+    the payload binds consent to both the program-assigned `portfolio_id` and the portfolio's
+    `position_epoch`
+  - `position_epoch` advances after every successful exposure-changing trade, rebalance,
+    liquidation, recovery force-close, or recovery-leg forfeit; refresh-only cranks do not advance
+    it, so stale consent cannot target a replacement position and permissionless maintenance cannot
+    invalidate current consent
 - **ClaimResolvedPayoutTopup** (tag 46)
   - permissionless resolved-payout top-up claim; pays only the stored owner receipt token account
 
