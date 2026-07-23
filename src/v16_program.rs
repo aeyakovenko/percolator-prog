@@ -2608,6 +2608,7 @@ pub mod ix {
             cranker_share_bps: u16,
         },
         UpdateMaintenanceFeePolicy {
+            market_id: u64,
             cranker_share_bps: u16,
         },
         UpdateBackingFeePolicy {
@@ -2889,6 +2890,7 @@ pub mod ix {
                     cranker_share_bps: read_u16(&mut rest)?,
                 },
                 49 => Self::UpdateMaintenanceFeePolicy {
+                    market_id: read_u64(&mut rest)?,
                     cranker_share_bps: read_u16(&mut rest)?,
                 },
                 51 => Self::UpdateBackingFeePolicy {
@@ -3226,8 +3228,12 @@ pub mod ix {
                     out.push(37);
                     push_u16(&mut out, cranker_share_bps);
                 }
-                Self::UpdateMaintenanceFeePolicy { cranker_share_bps } => {
+                Self::UpdateMaintenanceFeePolicy {
+                    market_id,
+                    cranker_share_bps,
+                } => {
                     out.push(49);
+                    push_u64(&mut out, market_id);
                     push_u16(&mut out, cranker_share_bps);
                 }
                 Self::UpdateBackingFeePolicy {
@@ -5409,9 +5415,15 @@ pub mod processor {
             Instruction::UpdateLiquidationFeePolicy { cranker_share_bps } => {
                 handle_update_liquidation_fee_policy(program_id, accounts, cranker_share_bps)
             }
-            Instruction::UpdateMaintenanceFeePolicy { cranker_share_bps } => {
-                handle_update_maintenance_fee_policy(program_id, accounts, cranker_share_bps)
-            }
+            Instruction::UpdateMaintenanceFeePolicy {
+                market_id,
+                cranker_share_bps,
+            } => handle_update_maintenance_fee_policy(
+                program_id,
+                accounts,
+                market_id,
+                cranker_share_bps,
+            ),
             Instruction::UpdateBackingFeePolicy {
                 domain,
                 market_id,
@@ -9738,6 +9750,7 @@ pub mod processor {
     fn handle_update_maintenance_fee_policy<'a>(
         program_id: &Pubkey,
         accounts: &'a [AccountInfo<'a>],
+        expected_market_id: u64,
         cranker_share_bps: u16,
     ) -> ProgramResult {
         let admin = account(accounts, 0)?;
@@ -9748,8 +9761,11 @@ pub mod processor {
         if cranker_share_bps > 10_000 {
             return Err(PercolatorError::InvalidInstruction.into());
         }
-        let (mut cfg, _, _, _) =
-            state::read_market_config_mode_and_capacity(&market_ai.try_borrow_data()?)?;
+        let (mut cfg, _, _, market_id, _, _) =
+            state::read_market_trade_preflight(&market_ai.try_borrow_data()?, 0)?;
+        if market_id != expected_market_id {
+            return Err(PercolatorError::AssetGenerationMismatch.into());
+        }
         expect_live_authority(&cfg.marketauth, admin.key)?;
         cfg.maintenance_cranker_fee_share_bps = cranker_share_bps;
         state::write_wrapper_config(&mut market_ai.try_borrow_mut_data()?, &cfg)
