@@ -33161,6 +33161,227 @@ fn v16_attack_sequence_with_liquidation_conserves() {
     );
 }
 
+#[test]
+fn v16_probe_liquidation_then_shutdown_preserves_bounded_owner_exit() {
+    let mut env = V16CuEnv::new();
+    env.configure_ewma_mark_with_cu(0, 100, 1, 0);
+    env.configure_permissionless_resolve_with_cu(100, 2);
+
+    let winner = Keypair::new();
+    let winner_portfolio = env.create_portfolio(&winner);
+    let loser = Keypair::new();
+    let loser_portfolio = env.create_portfolio(&loser);
+    let idle = Keypair::new();
+    let idle_portfolio = env.create_portfolio(&idle);
+    env.deposit(&winner, winner_portfolio, 5_000_000);
+    env.deposit(&loser, loser_portfolio, 250);
+    env.deposit(&idle, idle_portfolio, 5_000_000);
+    env.trade_with_cu(
+        &winner,
+        winner_portfolio,
+        &loser,
+        loser_portfolio,
+        POS_SCALE as i128,
+        100,
+        0,
+    );
+
+    for (slot, mark) in [(1u64, 300u64), (2, 800)] {
+        env.svm.warp_to_slot(slot);
+        env.push_ewma_mark_with_cu(slot, mark);
+        env.svm.expire_blockhash();
+        let _ = env.send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: slot,
+                observations: crank_observations(0),
+            },
+            vec![
+                AccountMeta::new(env.payer.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(loser_portfolio, false),
+            ],
+            &[],
+        );
+    }
+    env.crank(
+        loser_portfolio,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 2,
+            observations: crank_observations(0),
+        },
+    );
+
+    env.svm.warp_to_slot(3);
+    env.update_asset_lifecycle_as_admin_with_cu(
+        percolator_prog::processor::ASSET_ACTION_SHUTDOWN,
+        0,
+        3,
+        0,
+    );
+
+    for (owner, portfolio) in [
+        (&winner, winner_portfolio),
+        (&loser, loser_portfolio),
+        (&idle, idle_portfolio),
+    ] {
+        if has_active_leg_for_asset(&env.portfolio_state(portfolio), 0) {
+            env.svm.expire_blockhash();
+            env.send(
+                ProgInstruction::ForfeitRecoveryLeg {
+                    asset_index: 0,
+                    b_delta_budget: u128::MAX,
+                },
+                vec![
+                    AccountMeta::new(owner.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(portfolio, false),
+                ],
+                &[owner],
+            )
+            .expect("every Recovery survivor has a bounded owner forfeit path");
+        }
+    }
+
+    for portfolio in [winner_portfolio, loser_portfolio, idle_portfolio] {
+        assert!(
+            percolator::active_bitmap_is_empty(active_bitmap(&env.portfolio_state(portfolio))),
+            "shutdown exit must clear every remaining leg"
+        );
+    }
+
+    env.resolve();
+    env.svm.warp_to_slot(6);
+    let mut total_payout = 0u128;
+    for (owner, portfolio) in [
+        (&winner, winner_portfolio),
+        (&loser, loser_portfolio),
+        (&idle, idle_portfolio),
+    ] {
+        for _ in 0..8 {
+            let state = env.portfolio_state(portfolio);
+            let receipt = resolved_receipt(&state);
+            if state.capital.get() == 0
+                && state.pnl.get() == 0
+                && state.reserved_pnl.get() == 0
+                && (!receipt.present || receipt.finalized)
+            {
+                break;
+            }
+            let (dest, _) = env.close_resolved_with_cu(owner, portfolio);
+            total_payout += env.token_amount(dest) as u128;
+        }
+        let state = env.portfolio_state(portfolio);
+        let receipt = resolved_receipt(&state);
+        assert_eq!(state.capital.get(), 0, "resolved capital must be payable");
+        assert_eq!(state.pnl.get(), 0, "resolved PnL must settle");
+        assert_eq!(state.reserved_pnl.get(), 0, "no payout may remain reserved");
+        assert!(
+            !receipt.present || receipt.finalized,
+            "resolved payout receipt must finish in bounded calls"
+        );
+    }
+    let (_, group) = env.market_state();
+    assert_eq!(
+        total_payout + group.vault,
+        10_000_250,
+        "all deposited collateral must remain in payouts or the engine vault"
+    );
+    assert_eq!(
+        group.vault as u64,
+        env.token_amount(env.vault),
+        "engine and SPL custody must remain synchronized"
+    );
+}
+
+#[test]
+fn v16_probe_ewma_fee_covers_large_passive_oi_moved_by_small_wash_trades() {
+    const MARK: u64 = 100;
+    const VICTIM_Q: i128 = 100 * POS_SCALE as i128;
+    const WASH_Q: i128 = POS_SCALE as i128;
+
+    let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+        initial_price: MARK,
+        h_max: 20,
+        max_trading_fee_bps: 10_000,
+        max_price_move_bps_per_slot: 500,
+        max_accrual_dt_slots: 20,
+        min_funding_lifetime_slots: 20,
+        ..V16CuMarketParams::default()
+    });
+    env.svm.warp_to_slot(1);
+    env.configure_ewma_mark_with_cu(1, MARK, 1, 0);
+
+    let attacker = Keypair::new();
+    let victim = Keypair::new();
+    let wash_long = Keypair::new();
+    let wash_short = Keypair::new();
+    let attacker_account = env.create_portfolio(&attacker);
+    let victim_account = env.create_portfolio(&victim);
+    let wash_long_account = env.create_portfolio(&wash_long);
+    let wash_short_account = env.create_portfolio(&wash_short);
+    for (owner, portfolio) in [
+        (&attacker, attacker_account),
+        (&victim, victim_account),
+        (&wash_long, wash_long_account),
+        (&wash_short, wash_short_account),
+    ] {
+        env.deposit(owner, portfolio, 10_000_000_000);
+    }
+    env.trade_asset_with_cu(
+        0,
+        &attacker,
+        attacker_account,
+        &victim,
+        victim_account,
+        VICTIM_Q,
+        MARK,
+        0,
+    );
+    let insurance_before = env.market_state().1.insurance;
+
+    for slot in 2..=20u64 {
+        env.svm.warp_to_slot(slot);
+        let size_q = if slot % 2 == 0 { WASH_Q } else { -WASH_Q };
+        env.svm.expire_blockhash();
+        env.try_trade_asset_with_cu(
+            0,
+            &wash_long,
+            wash_long_account,
+            &wash_short,
+            wash_short_account,
+            size_q,
+            MARK.checked_mul(slot).unwrap(),
+            0,
+        )
+        .unwrap_or_else(|err| panic!("small wash trade at slot {slot} failed: {err}"));
+    }
+
+    let (cfg_before_crank, group_before_crank) = env.market_state();
+    let fees_paid = group_before_crank.insurance - insurance_before;
+    assert_eq!(group_before_crank.assets[0].effective_price, MARK);
+    assert!(cfg_before_crank.mark_ewma_e6 > MARK);
+    for portfolio in [attacker_account, victim_account] {
+        env.svm.expire_blockhash();
+        env.crank(
+            portfolio,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 20,
+                observations: crank_observations(0),
+            },
+        );
+    }
+
+    let attacker_pnl = env.portfolio_state(attacker_account).pnl.get();
+    assert!(
+        attacker_pnl > 0,
+        "wash prints must actually move the large book"
+    );
+    assert!(
+        attacker_pnl as u128 <= fees_paid,
+        "small wash fills must pay for the full passive-book transfer: pnl={attacker_pnl}, fees={fees_paid}"
+    );
+}
+
 // security.md sweep — EWMA mark halflife edge (#37): configuring the EWMA mark with halflife 0
 // (instant) must be handled cleanly — no div-by-zero/panic, no settlement corruption. The mark/price
 // stays in valid bounds and conservation holds.
