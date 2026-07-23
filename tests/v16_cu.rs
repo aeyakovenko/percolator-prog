@@ -984,11 +984,15 @@ impl V16CuEnv {
     }
 
     fn update_liquidation_fee_policy_with_cu(&mut self, cranker_share_bps: u16) -> u64 {
+        let market_id = self.asset_market_id(0);
         send_tx(
             &mut self.svm,
             self.program_id,
             &self.payer,
-            ProgInstruction::UpdateLiquidationFeePolicy { cranker_share_bps },
+            ProgInstruction::UpdateLiquidationFeePolicy {
+                market_id,
+                cranker_share_bps,
+            },
             vec![
                 AccountMeta::new(self.admin.pubkey(), true),
                 AccountMeta::new(self.market, false),
@@ -26738,6 +26742,7 @@ fn v16_attack_rotated_marketauth_cannot_replay_policy_updates() {
 
     old_attempt(
         ProgInstruction::UpdateLiquidationFeePolicy {
+            market_id,
             cranker_share_bps: 5_000,
         },
         "liquidation policy replay",
@@ -26787,6 +26792,7 @@ fn v16_attack_rotated_marketauth_cannot_replay_policy_updates() {
 
     new_update(
         ProgInstruction::UpdateLiquidationFeePolicy {
+            market_id,
             cranker_share_bps: 5_000,
         },
         "liquidation policy update",
@@ -35443,6 +35449,7 @@ fn v16_attack_global_policy_bounds_reject_grief_values() {
     reject_unchanged(
         &mut env,
         ProgInstruction::UpdateLiquidationFeePolicy {
+            market_id,
             cranker_share_bps: 10_001,
         },
         "liquidation cranker share above 100%",
@@ -35690,6 +35697,7 @@ fn v16_attack_permissionless_asset_authority_cannot_update_marketwide_policies()
     );
     assert!(
         attempt(ProgInstruction::UpdateLiquidationFeePolicy {
+            market_id,
             cranker_share_bps: 2_500
         })
         .is_err(),
@@ -62399,6 +62407,241 @@ fn v16_attack_maintenance_fee_policy_cannot_replay_across_market_reinit() {
     );
     let destination = env.withdraw(&current_cranker, current_cranker_account, current_reward);
     assert_eq!(env.token_amount(destination), current_reward as u64);
+}
+
+// A liquidation-fee split signed for a closed market must not redirect a replacement market's
+// liquidation penalty. Otherwise a public cranker can replay a 100% generation-A split, wait for a
+// legitimate generation-B liquidation, and withdraw the victim-paid fee from canonical custody.
+#[test]
+fn v16_attack_liquidation_fee_policy_cannot_replay_across_market_reinit() {
+    const INITIAL_PRICE: u64 = 1_000_000;
+    const LIQUIDATION_PRICE: u64 = 2_000_000;
+    const CRANKER_SHARE_BPS: u16 = 10_000;
+
+    let params = production_risk_params();
+    let reinit_params = V16CuMarketParams {
+        max_bankrupt_close_lifetime_slots: params.max_bankrupt_close_lifetime_slots + 1,
+        ..params
+    };
+    let mut env = V16CuEnv::new_with_init_params(params);
+    let admin = env.admin.insecure_clone();
+    let old_market_id = env.asset_market_id(0);
+
+    let mut legacy_policy_data = vec![37u8];
+    legacy_policy_data.extend_from_slice(&CRANKER_SHARE_BPS.to_le_bytes());
+    let uses_market_id_wire = ProgInstruction::decode(&legacy_policy_data).is_err();
+    let mut bound_policy_data = vec![37u8];
+    bound_policy_data.extend_from_slice(&old_market_id.to_le_bytes());
+    bound_policy_data.extend_from_slice(&CRANKER_SHARE_BPS.to_le_bytes());
+    let stale_policy_ix = Instruction {
+        program_id: env.program_id,
+        accounts: vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        data: if uses_market_id_wire {
+            bound_policy_data
+        } else {
+            legacy_policy_data
+        },
+    };
+    let reinit_ix = Instruction {
+        program_id: env.program_id,
+        accounts: vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new_readonly(env.mint, false),
+            AccountMeta::new(env.market_generation, false),
+            AccountMeta::new_readonly(system_program::ID, false),
+        ],
+        data: init_market_instruction(&reinit_params).encode(),
+    };
+    let retained_blockhash = env.svm.latest_blockhash();
+    let stale_policy = Transaction::new_signed_with_payer(
+        &[heap_ix(), cu_ix(), stale_policy_ix],
+        Some(&env.payer.pubkey()),
+        &[&env.payer, &admin],
+        retained_blockhash,
+    );
+    let presigned_reinit = Transaction::new_signed_with_payer(
+        &[heap_ix(), cu_ix(), reinit_ix],
+        Some(&env.payer.pubkey()),
+        &[&env.payer, &admin],
+        retained_blockhash,
+    );
+
+    env.resolve();
+    env.close_slab_with_cu();
+    assert_eq!(env.svm.get_account(&env.market).unwrap().lamports, 0);
+
+    env.svm.warp_to_slot(10);
+    env.svm
+        .set_account(
+            env.market,
+            Account {
+                lamports: 1_000_000_000,
+                data: vec![
+                    0u8;
+                    state::market_account_len_for_capacity(
+                        params.max_portfolio_assets as usize,
+                    )
+                    .unwrap()
+                ],
+                owner: env.program_id,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    env.svm
+        .set_account(
+            env.vault,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_token_data(env.mint, env.vault_authority, 0),
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    env.svm
+        .send_transaction(presigned_reinit)
+        .expect("the same market address is publicly reinitialized from a retained signed init");
+    let new_market_id = env.asset_market_id(0);
+    assert_ne!(new_market_id, old_market_id);
+    assert_eq!(env.market_state().0.liquidation_cranker_fee_share_bps, 0);
+
+    env.configure_auth_mark_with_cu(10, INITIAL_PRICE);
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let attacker = Keypair::new();
+    let long_account = env.create_portfolio(&long_owner);
+    let short_account = env.create_portfolio(&short_owner);
+    let attacker_account = env.create_portfolio(&attacker);
+    env.deposit(&long_owner, long_account, 100_000_000);
+    env.deposit(&short_owner, short_account, 100_000);
+    env.trade_asset_with_cu(
+        0,
+        &long_owner,
+        long_account,
+        &short_owner,
+        short_account,
+        POS_SCALE as i128,
+        INITIAL_PRICE,
+        0,
+    );
+
+    let market_before_replay = env.svm.get_account(&env.market).unwrap();
+    let replay = env.svm.send_transaction(stale_policy);
+    if uses_market_id_wire {
+        let replay_error = format!(
+            "{:?}",
+            replay.expect_err("stale liquidation-fee policy must reject")
+        );
+        let expected_error = format!(
+            "Custom({})",
+            PercolatorError::AssetGenerationMismatch as u32
+        );
+        assert!(
+            replay_error.contains(&expected_error),
+            "stale liquidation policy must fail with {expected_error}, got {replay_error}"
+        );
+        assert_eq!(
+            env.svm.get_account(&env.market).unwrap(),
+            market_before_replay,
+            "generation mismatch leaves the replacement market byte-identical"
+        );
+        assert_eq!(env.market_state().0.liquidation_cranker_fee_share_bps, 0);
+    } else {
+        replay.expect("retained generation-A liquidation policy lands on generation B");
+        assert_eq!(
+            env.market_state().0.liquidation_cranker_fee_share_bps,
+            CRANKER_SHARE_BPS
+        );
+    }
+
+    for slot in 11..=40u64 {
+        env.svm.warp_to_slot(slot);
+        env.push_auth_mark_with_cu(slot, LIQUIDATION_PRICE);
+        env.svm.expire_blockhash();
+        let _ = env.send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: slot,
+                observations: crank_observations(0),
+            },
+            vec![
+                AccountMeta::new(env.payer.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(short_account, false),
+            ],
+            &[],
+        );
+    }
+
+    let attacker_before = env.portfolio_state(attacker_account).capital.get();
+    let insurance_before = env.market_state().1.insurance;
+    let vault_before = env.token_amount(env.vault);
+    env.svm.expire_blockhash();
+    if !uses_market_id_wire {
+        send_tx(
+            &mut env.svm,
+            env.program_id,
+            &env.payer,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 40,
+                observations: crank_observations(0),
+            },
+            vec![
+                AccountMeta::new(attacker.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(short_account, false),
+                AccountMeta::new(attacker_account, false),
+            ],
+            &[&attacker],
+        )
+        .expect("public cranker liquidates under the replayed 100% split");
+        let reward = env.portfolio_state(attacker_account).capital.get() - attacker_before;
+        let insurance_after = env.market_state().1.insurance;
+        assert!(
+            reward > 0,
+            "a real liquidation penalty funds the public cranker"
+        );
+        assert_eq!(
+            insurance_after, insurance_before,
+            "the stale 100% split diverts the entire liquidation fee from insurance"
+        );
+        let destination = env.withdraw(&attacker, attacker_account, reward);
+        assert_eq!(env.token_amount(destination), reward as u64);
+        assert_eq!(env.token_amount(env.vault), vault_before - reward as u64);
+        panic!("a retained liquidation-fee policy let a public cranker withdraw generation-B user funds");
+    }
+
+    send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 40,
+            observations: crank_observations(0),
+        },
+        vec![
+            AccountMeta::new(env.payer.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(short_account, false),
+        ],
+        &[],
+    )
+    .expect("liquidation remains publicly reachable with the stale split rejected");
+    assert_eq!(
+        env.portfolio_state(attacker_account).capital.get(),
+        attacker_before
+    );
+    assert!(
+        env.market_state().1.insurance > insurance_before,
+        "the current zero-share policy retains the real liquidation fee in insurance"
+    );
+    assert_eq!(env.token_amount(env.vault), vault_before);
 }
 
 // A fee policy signed for a retired market must not acquire authority over a replacement market at
