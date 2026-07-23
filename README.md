@@ -274,8 +274,8 @@ Positions and PnL use native `i128`/`u128` (`POS_SCALE = 1_000_000`, `ADL_ONE = 
 ### Two trade paths
 - **TradeNoCpi**: no external matcher; used for baseline integration, local testing, and deterministic program-test scenarios.
 - **TradeCpi**: production matcher path; the LP owner configures a matcher program/context once on
-  the LP portfolio with `SetMatcherConfig` (tag 68). Fills then run without the LP owner
-  signing each transaction. Direct LP-signed bilateral trading is `TradeNoCpi`.
+  the LP portfolio with an incarnation-bound `SetMatcherConfig` (tag 68). Fills then run without
+  the LP owner signing each transaction. Direct LP-signed bilateral trading is `TradeNoCpi`.
 
 ### MatchingEngine trait
 The `MatchingEngine` trait is defined in the Percolator program (not in the engine crate). The engine is a pure recorder of state transitions and does not define the matching interface. Two implementations exist: `NoOpMatcher` (TradeNoCpi) and `CpiMatcher` (TradeCpi).
@@ -358,7 +358,8 @@ This makes it a "pure identity signer" and prevents it from becoming an attack s
 ### LP matcher config (TradeCpi / BatchTradeCpi)
 Unsigned LP matcher fills require an enabled matcher config stored directly on the LP portfolio.
 
-`SetMatcherConfig` (tag 68) is signed by the LP owner and writes:
+`SetMatcherConfig` (tag 68) is signed by the LP owner, names the portfolio's monotonic ID, and
+writes:
 
 `matcher_program, matcher_context, matcher_delegate, enabled`
 
@@ -461,7 +462,9 @@ This section describes intent and operational ordering, not argument-by-argument
     the leg vector.
 - **SetMatcherConfig** (tag 68)
   - LP-owner-signed opt-in/out for unsigned LP matcher fills. This writes the matcher config tail
-    on the LP portfolio: matcher program, matcher context, matcher delegate, and enabled flag.
+    on the LP portfolio: matcher program, matcher context, matcher delegate, and enabled flag. The
+    payload names the current portfolio ID so a retained grant cannot authorize a replacement
+    incarnation at the same account address.
 
 ### Oracle / mark management
 - External-oracle markets authenticate configured oracle account(s) in the oracle configuration/crank
@@ -776,7 +779,8 @@ Call `InitMarket` with:
   - deploy or choose matcher program
   - create matcher context account owned by matcher program
   - create a portfolio with `InitPortfolio`
-  - call `SetMatcherConfig` with the LP owner signing the exact matcher program/context/delegate tuple
+  - call `SetMatcherConfig` with the LP owner signing the current portfolio ID and exact matcher
+    program/context/delegate tuple
   - deposit collateral with `Deposit`
 - User:
   - create a portfolio with `InitPortfolio`

@@ -2517,6 +2517,7 @@ pub mod ix {
             legs: Vec<BatchTradeCpiLeg>,
         },
         SetMatcherConfig {
+            portfolio_id: u64,
             enabled: u8,
         },
         ClosePortfolio,
@@ -2802,6 +2803,7 @@ pub mod ix {
                     }
                 }
                 68 => Self::SetMatcherConfig {
+                    portfolio_id: read_u64(&mut rest)?,
                     enabled: read_u8(&mut rest)?,
                 },
                 8 => Self::ClosePortfolio,
@@ -3115,8 +3117,12 @@ pub mod ix {
                         push_u64(&mut out, leg.limit_price);
                     }
                 }
-                Self::SetMatcherConfig { enabled } => {
+                Self::SetMatcherConfig {
+                    portfolio_id,
+                    enabled,
+                } => {
                     out.push(68);
+                    push_u64(&mut out, portfolio_id);
                     out.push(enabled);
                 }
                 Self::ClosePortfolio => out.push(8),
@@ -5338,9 +5344,10 @@ pub mod processor {
                 account_b_portfolio_id,
                 &legs,
             ),
-            Instruction::SetMatcherConfig { enabled } => {
-                handle_set_matcher_config(program_id, accounts, enabled)
-            }
+            Instruction::SetMatcherConfig {
+                portfolio_id,
+                enabled,
+            } => handle_set_matcher_config(program_id, accounts, portfolio_id, enabled),
             Instruction::ClosePortfolio => handle_close_portfolio(program_id, accounts),
             Instruction::TopUpInsurance { amount } => {
                 handle_top_up_insurance(program_id, accounts, amount)
@@ -6818,6 +6825,7 @@ pub mod processor {
     fn handle_set_matcher_config<'a>(
         program_id: &Pubkey,
         accounts: &'a [AccountInfo<'a>],
+        portfolio_id: u64,
         enabled: u8,
     ) -> ProgramResult {
         if enabled > 1 {
@@ -6838,6 +6846,7 @@ pub mod processor {
         {
             return Err(PercolatorError::Unauthorized.into());
         }
+        bind_portfolio_id(lp_portfolio_ai, portfolio_id)?;
         let required_len = state::portfolio_account_len_for_market_slots(0)?;
         if lp_portfolio_ai.data_len() < required_len {
             lp_portfolio_ai.realloc(required_len, true)?;
