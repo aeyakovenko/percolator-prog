@@ -6628,6 +6628,148 @@ fn v16_attack_signed_authority_rotation_cannot_replay_across_market_reinit() {
     .expect("the same rotation remains live when signed for the current market generation");
 }
 
+// UpdateAssetLifecycle(SHUTDOWN) is a signed terminal action. It must identify the asset
+// generation the local administrator intended to freeze; otherwise a relayer can retain an empty
+// generation-A shutdown and submit it after an ordinary restart, locking generation B at an
+// attacker-favorable mark and making the replacement victim's temporary loss withdrawable.
+#[test]
+fn v16_attack_presigned_shutdown_rejects_restarted_asset_generation() {
+    const PRICE: u64 = 100;
+    const ADVERSE_PRICE: u64 = 110;
+    const DEPOSIT: u128 = 1_000_000;
+    const SIZE_Q: i128 = (10_000 * POS_SCALE) as i128;
+
+    let mut env = V16CuEnv::new();
+    let admin = env.admin.insecure_clone();
+    env.configure_permissionless_resolve_with_cu(1_000_000, 1);
+    let old_market_id = env.asset_market_id(0);
+
+    env.svm.expire_blockhash();
+    let stale_shutdown = Transaction::new_signed_with_payer(
+        &[
+            heap_ix(),
+            cu_ix(),
+            Instruction {
+                program_id: env.program_id,
+                accounts: vec![
+                    AccountMeta::new(admin.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                ],
+                data: ProgInstruction::UpdateAssetLifecycle {
+                    action: processor::ASSET_ACTION_SHUTDOWN,
+                    asset_index: 0,
+                    now_slot: 12,
+                    initial_price: 0,
+                    insurance_authority: admin.pubkey().to_bytes(),
+                    insurance_operator: admin.pubkey().to_bytes(),
+                    backing_bucket_authority: admin.pubkey().to_bytes(),
+                    oracle_authority: admin.pubkey().to_bytes(),
+                }
+                .encode(),
+            },
+        ],
+        Some(&env.payer.pubkey()),
+        &[&env.payer, &admin],
+        env.svm.latest_blockhash(),
+    );
+
+    env.svm.warp_to_slot(2);
+    env.try_shutdown_asset_with_authority(&admin, 0, 2)
+        .expect("empty generation A shuts down through the public lifecycle");
+    env.svm.warp_to_slot(3);
+    env.try_restart_asset_oracle_with_authority(&admin, 0, 3, PRICE)
+        .expect("asset 0 restarts into generation B");
+    env.configure_auth_mark_with_cu(3, PRICE);
+    let new_market_id = env.asset_market_id(0);
+    assert_ne!(new_market_id, old_market_id);
+
+    let winner_owner = Keypair::new();
+    let victim_owner = Keypair::new();
+    let winner = env.create_portfolio(&winner_owner);
+    let victim = env.create_portfolio(&victim_owner);
+    env.deposit(&winner_owner, winner, DEPOSIT);
+    env.deposit(&victim_owner, victim, DEPOSIT);
+    env.trade_asset_with_cu(
+        0,
+        &winner_owner,
+        winner,
+        &victim_owner,
+        victim,
+        SIZE_Q,
+        PRICE,
+        0,
+    );
+
+    env.svm.warp_to_slot(10);
+    env.push_auth_mark_with_cu(10, ADVERSE_PRICE);
+    for slot in [10u64, 11] {
+        env.svm.warp_to_slot(slot);
+        for portfolio in [victim, winner] {
+            env.svm.expire_blockhash();
+            let _ = env.send(
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: slot,
+                    observations: crank_observations(0),
+                },
+                vec![
+                    AccountMeta::new(env.payer.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(portfolio, false),
+                ],
+                &[],
+            );
+        }
+    }
+    assert_eq!(
+        env.market_state().1.assets[0].effective_price,
+        ADVERSE_PRICE
+    );
+
+    env.svm.warp_to_slot(12);
+    env.svm
+        .send_transaction(stale_shutdown)
+        .expect("RED: generation-A shutdown freezes generation B");
+    assert_eq!(
+        env.market_state().1.assets[0].lifecycle,
+        AssetLifecycleV16::Recovery
+    );
+
+    let relayer = Keypair::new();
+    env.svm.warp_to_slot(13);
+    env.force_close_abandoned_asset_with_cu(&relayer, winner, victim, 0, 13, SIZE_Q.unsigned_abs());
+    let winner_after_force_close = env.portfolio_state(winner);
+    let victim_after_force_close = env.portfolio_state(victim);
+    assert_eq!(
+        victim_after_force_close.capital.get() as i128 + victim_after_force_close.pnl.get(),
+        900_000
+    );
+    assert_eq!(
+        winner_after_force_close.capital.get() as i128 + winner_after_force_close.pnl.get(),
+        1_100_000
+    );
+
+    env.send(
+        ProgInstruction::ResolveMarket {
+            market_id: new_market_id,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&admin],
+    )
+    .expect("the current administrator completes ordinary terminal resolution");
+    env.svm.warp_to_slot(14);
+    let victim_dest = env.close_resolved(&victim_owner, victim);
+    let winner_dest = env.close_resolved(&winner_owner, winner);
+    assert_eq!(env.token_amount(victim_dest), 900_000);
+    assert_eq!(env.token_amount(winner_dest), 1_100_000);
+    panic!(
+        "a retained generation-A shutdown froze generation B and made {} atoms of replacement victim capital withdrawable by the opposing trader",
+        100_000
+    );
+}
+
 #[test]
 fn v16_attack_prefunded_market_generation_pda_cannot_block_init() {
     let mut env = V16CuEnv::new();
