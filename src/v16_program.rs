@@ -801,7 +801,7 @@ pub mod state {
     }
 
     #[inline]
-    fn write_portfolio_id(data: &mut [u8], id: u64) -> Result<(), ProgramError> {
+    pub(crate) fn write_portfolio_id(data: &mut [u8], id: u64) -> Result<(), ProgramError> {
         check_header(data, KIND_PORTFOLIO)?;
         if id == 0 {
             return Err(ProgramError::InvalidAccountData);
@@ -2479,6 +2479,7 @@ pub mod ix {
             amount: u128,
         },
         Withdraw {
+            portfolio_id: u64,
             amount: u128,
         },
         PermissionlessCrank {
@@ -2710,6 +2711,7 @@ pub mod ix {
                     amount: read_u128(&mut rest)?,
                 },
                 4 => Self::Withdraw {
+                    portfolio_id: read_u64(&mut rest)?,
                     amount: read_u128(&mut rest)?,
                 },
                 5 => {
@@ -3003,8 +3005,12 @@ pub mod ix {
                     out.push(3);
                     push_u128(&mut out, amount);
                 }
-                Self::Withdraw { amount } => {
+                Self::Withdraw {
+                    portfolio_id,
+                    amount,
+                } => {
                     out.push(4);
+                    push_u64(&mut out, portfolio_id);
                     push_u128(&mut out, amount);
                 }
                 Self::PermissionlessCrank {
@@ -5218,7 +5224,10 @@ pub mod processor {
             ),
             Instruction::InitPortfolio => handle_init_portfolio(program_id, accounts),
             Instruction::Deposit { amount } => handle_deposit(program_id, accounts, amount),
-            Instruction::Withdraw { amount } => handle_withdraw(program_id, accounts, amount),
+            Instruction::Withdraw {
+                portfolio_id,
+                amount,
+            } => handle_withdraw(program_id, accounts, portfolio_id, amount),
             Instruction::PermissionlessCrank {
                 now_slot,
                 observations,
@@ -5722,6 +5731,7 @@ pub mod processor {
     fn handle_withdraw<'a>(
         program_id: &Pubkey,
         accounts: &'a [AccountInfo<'a>],
+        portfolio_id: u64,
         amount: u128,
     ) -> ProgramResult {
         let owner = account(accounts, 0)?;
@@ -5758,6 +5768,7 @@ pub mod processor {
         require_token_balance(vault_token, amount_u64)?;
 
         ensure_portfolio_storage_for_market_slots(portfolio_ai, max_market_slots)?;
+        bind_withdraw_portfolio_id(portfolio_ai, portfolio_id)?;
         {
             let mut market_data = market_ai.try_borrow_mut_data()?;
             let (cfg, mut group) = state::market_view_mut(&mut market_data)?;
@@ -11155,6 +11166,43 @@ pub mod processor {
         let required = state::portfolio_account_len_for_market_slots(max_market_slots)?;
         if portfolio_ai.data_len() < required {
             portfolio_ai.realloc(required, true)?;
+        }
+        Ok(())
+    }
+
+    const LEGACY_PORTFOLIO_ID: u64 = u64::MAX;
+
+    fn bind_withdraw_portfolio_id(
+        portfolio_ai: &AccountInfo,
+        expected_portfolio_id: u64,
+    ) -> ProgramResult {
+        let required_len = state::portfolio_account_len_for_market_slots(0)?;
+        let (actual_portfolio_id, legacy_portfolio) = {
+            let data = portfolio_ai.try_borrow_data()?;
+            state::read_portfolio_owner_preflight(&data)?;
+            if data.len() < required_len {
+                (LEGACY_PORTFOLIO_ID, true)
+            } else {
+                match state::read_portfolio_id(&data) {
+                    Ok(id) => (id, false),
+                    Err(_) if data[constants::PORTFOLIO_ID_OFF..required_len] == [0u8; 8] => {
+                        (LEGACY_PORTFOLIO_ID, true)
+                    }
+                    Err(err) => return Err(err),
+                }
+            }
+        };
+        if actual_portfolio_id != expected_portfolio_id {
+            return Err(PercolatorError::EngineProvenanceMismatch.into());
+        }
+        if legacy_portfolio {
+            if portfolio_ai.data_len() < required_len {
+                portfolio_ai.realloc(required_len, true)?;
+            }
+            state::write_portfolio_id(
+                &mut portfolio_ai.try_borrow_mut_data()?,
+                LEGACY_PORTFOLIO_ID,
+            )?;
         }
         Ok(())
     }
