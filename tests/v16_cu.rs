@@ -65299,3 +65299,106 @@ fn v16_attack_public_max_source_force_close_abandoned_asset_stays_bounded() {
         0,
     ));
 }
+
+#[test]
+fn v16_attack_auto_crank_reaches_later_material_liquidation_past_tiny_first_leg() {
+    const MARK: u64 = 1_000_000;
+    const ADVERSE_MARK: u64 = 1_040_000;
+    const TINY_Q: i128 = (POS_SCALE / 1_000) as i128;
+
+    let mut params = production_risk_params();
+    params.max_portfolio_assets = 2;
+    let mut env = V16CuEnv::new_with_init_params(params);
+    env.svm.warp_to_slot(1);
+    env.configure_auth_mark_for_asset_as_admin(0, 1, MARK);
+    env.configure_auth_mark_for_asset_as_admin(1, 1, MARK);
+
+    let victim_owner = Keypair::new();
+    let counterparty_owner = Keypair::new();
+    let victim = env.create_portfolio(&victim_owner);
+    let counterparty = env.create_portfolio(&counterparty_owner);
+    env.deposit(&victim_owner, victim, 60_000);
+    env.deposit(&counterparty_owner, counterparty, 2_000_000);
+
+    // Asset 0 deliberately occupies the first active slot but is economically tiny.
+    env.trade_asset_with_cu(
+        0,
+        &victim_owner,
+        victim,
+        &counterparty_owner,
+        counterparty,
+        -TINY_Q,
+        MARK,
+        0,
+    );
+    env.trade_asset_with_cu(
+        1,
+        &victim_owner,
+        victim,
+        &counterparty_owner,
+        counterparty,
+        -(POS_SCALE as i128),
+        MARK,
+        0,
+    );
+    assert_eq!(leg(&env.portfolio_state(victim), 0).asset_index, 0);
+
+    // Reach the adverse price through the production 24-bps/slot circuit breaker while leaving the
+    // victim untouched and stale. The counterparty is only the public accrual vehicle.
+    for slot in 2..=20u64 {
+        env.svm.warp_to_slot(slot);
+        env.push_auth_mark_for_asset_as_admin(1, slot, ADVERSE_MARK);
+        env.crank(
+            counterparty,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: slot,
+                observations: crank_observations(1),
+            },
+        );
+    }
+    env.crank(
+        victim,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 20,
+            observations: vec![],
+        },
+    );
+
+    let before = env.portfolio_state(victim);
+    assert!(health_cert(&before).certified_liq_deficit > 0);
+    assert!(has_active_leg_for_asset(&before, 0));
+    let material_before = active_leg_for_asset(&before, 1).basis_pos_q.unsigned_abs();
+
+    // Every successful call is engine-selected. The tiny first leg may be removed first, but it
+    // must not permanently shadow the later leg that carries the material deficit.
+    let mut material_after = material_before;
+    for _ in 0..6 {
+        env.svm.expire_blockhash();
+        env.send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 20,
+                observations: vec![],
+            },
+            vec![
+                AccountMeta::new(env.payer.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(victim, false),
+            ],
+            &[],
+        )
+        .expect("one honest auto-crank step");
+        let state = env.portfolio_state(victim);
+        material_after = if has_active_leg_for_asset(&state, 1) {
+            active_leg_for_asset(&state, 1).basis_pos_q.unsigned_abs()
+        } else {
+            0
+        };
+        if material_after < material_before {
+            break;
+        }
+    }
+    assert!(
+        material_after < material_before,
+        "tiny first leg must not shadow liquidation of the later losing leg"
+    );
+}
