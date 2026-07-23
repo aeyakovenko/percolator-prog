@@ -164,7 +164,7 @@ Assets 1..N are **truly permissionless ⇒ untrusted**. The protocol must guaran
   `base_unit_authority`). `marketauth` is the only key that can: **create market 0** (`InitMarket`),
   **create/retire assets 1..N and set the permissionless-create-fee policy**, **safely force-shutdown
   any asset including asset 0** (`ASSET_ACTION_SHUTDOWN` → RECOVERY with the `force_close_delay_slots`
-  exit window so traders can exit), **resolve/close the market** (`ResolveMarket`/`CloseSlab`),
+  exit window so traders can exit), **resolve/close the market** (`ResolveMarket { market_id }`/`CloseSlab`),
   **market policies**, and **rotate/swap the base-unit mint**. It is rotated via
   `UpdateAuthority { market_id, new_pubkey }` (current `marketauth` signs, the non-zero replacement
   co-signs, and `market_id` must match the current base-asset generation; burn-to-zero is rejected).
@@ -856,7 +856,7 @@ These are governance powers, not bugs:
 3. `UpdateAssetAuthority { asset_index = 0, market_id, kind = ASSET_AUTH_ORACLE }` (while marketauth holds asset-0's `asset_admin`)
    - choose who can push asset-0 AuthMark/EwmaMark updates.
    - impact: authority mark input control/censorship surface.
-4. `ResolveMarket`
+4. `ResolveMarket { market_id }`
    - transition market to resolved mode using stored authority price.
    - impact: trading/deposits/new accounts are halted; market enters wind-down.
 5. `UpdateAssetAuthority { asset_index = 0, market_id, kind = ASSET_AUTH_INSURANCE }` (while marketauth holds asset-0's `asset_admin`)
