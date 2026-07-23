@@ -2697,6 +2697,11 @@ pub mod ix {
             now_slot: u64,
             initial_price: u64,
         },
+        ShutdownAsset {
+            asset_index: u16,
+            market_id: u64,
+            now_slot: u64,
+        },
         UpdateAssetLifecycle {
             action: u8,
             asset_index: u16,
@@ -2940,6 +2945,11 @@ pub mod ix {
                     asset_index: read_u16(&mut rest)?,
                     now_slot: read_u64(&mut rest)?,
                     initial_price: read_u64(&mut rest)?,
+                },
+                70 => Self::ShutdownAsset {
+                    asset_index: read_u16(&mut rest)?,
+                    market_id: read_u64(&mut rest)?,
+                    now_slot: read_u64(&mut rest)?,
                 },
                 52 => Self::WithdrawBackingBucketEarnings {
                     domain: read_u16(&mut rest)?,
@@ -3415,6 +3425,16 @@ pub mod ix {
                     push_u16(&mut out, asset_index);
                     push_u64(&mut out, now_slot);
                     push_u64(&mut out, initial_price);
+                }
+                Self::ShutdownAsset {
+                    asset_index,
+                    market_id,
+                    now_slot,
+                } => {
+                    out.push(70);
+                    push_u16(&mut out, asset_index);
+                    push_u64(&mut out, market_id);
+                    push_u64(&mut out, now_slot);
                 }
                 Self::UpdateAssetLifecycle {
                     action,
@@ -5594,6 +5614,23 @@ pub mod processor {
                 now_slot,
                 initial_price,
             ),
+            Instruction::ShutdownAsset {
+                asset_index,
+                market_id,
+                now_slot,
+            } => handle_update_asset_lifecycle(
+                program_id,
+                accounts,
+                ASSET_ACTION_SHUTDOWN,
+                asset_index,
+                now_slot,
+                0,
+                [0u8; 32],
+                [0u8; 32],
+                [0u8; 32],
+                [0u8; 32],
+                Some(market_id),
+            ),
             Instruction::UpdateAssetLifecycle {
                 action,
                 asset_index,
@@ -5614,6 +5651,7 @@ pub mod processor {
                 insurance_operator,
                 backing_bucket_authority,
                 oracle_authority,
+                None,
             ),
             Instruction::WithdrawInsurance { amount } => {
                 handle_withdraw_insurance(program_id, accounts, amount)
@@ -9310,6 +9348,7 @@ pub mod processor {
         insurance_operator: [u8; 32],
         backing_bucket_authority: [u8; 32],
         oracle_authority: [u8; 32],
+        expected_market_id: Option<u64>,
     ) -> ProgramResult {
         let authority = account(accounts, 0)?;
         let market_ai = account(accounts, 1)?;
@@ -9499,6 +9538,8 @@ pub mod processor {
             return Ok(());
         }
         if action == ASSET_ACTION_SHUTDOWN {
+            let expected_market_id =
+                expected_market_id.ok_or(PercolatorError::InvalidInstruction)?;
             if now_slot == 0 || initial_price != 0 || cfg_pre.force_close_delay_slots == 0 {
                 return Err(PercolatorError::InvalidInstruction.into());
             }
@@ -9515,6 +9556,9 @@ pub mod processor {
                 let configured_slots = group.header.config.max_market_slots.get() as usize;
                 if asset_index >= configured_slots || asset_index >= group.markets.len() {
                     return Err(PercolatorError::InvalidInstruction.into());
+                }
+                if group.markets[asset_index].engine.asset.market_id.get() != expected_market_id {
+                    return Err(PercolatorError::AssetGenerationMismatch.into());
                 }
                 let mut profile = read_oracle_profile_from_view(&group, &cfg, asset_index)?;
                 let marketauth_authorized = live_authority_matches(&cfg.marketauth, authority.key);

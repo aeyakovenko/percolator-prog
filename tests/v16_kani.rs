@@ -402,6 +402,38 @@ fn kani_v16_asset_lifecycle_decode_preserves_wire_fields() {
 }
 
 #[kani::proof]
+fn kani_v16_shutdown_asset_decode_preserves_generation_witness() {
+    let asset_index: u16 = kani::any();
+    let market_id: u64 = kani::any();
+    let now_slot: u64 = kani::any();
+
+    let data = Instruction::ShutdownAsset {
+        asset_index,
+        market_id,
+        now_slot,
+    }
+    .encode();
+
+    match Instruction::decode(&data).unwrap() {
+        Instruction::ShutdownAsset {
+            asset_index: got_asset_index,
+            market_id: got_market_id,
+            now_slot: got_now_slot,
+        } => {
+            assert_eq!(got_asset_index, asset_index);
+            assert_eq!(got_market_id, market_id);
+            assert_eq!(got_now_slot, now_slot);
+        }
+        _ => unreachable!(),
+    }
+
+    let trailing_byte: u8 = kani::any();
+    let mut with_trailing = data;
+    with_trailing.push(trailing_byte);
+    assert!(Instruction::decode(&with_trailing).is_err());
+}
+
+#[kani::proof]
 fn kani_v16_tradenocpi_decode_preserves_wire_fields() {
     let asset_index: u16 = kani::any();
     let market_id: u64 = kani::any();
@@ -1620,6 +1652,9 @@ fn kani_v16_every_active_payload_rejects_one_byte_truncation() {
 
     let asset_lifecycle = [40u8; 147];
     assert!(Instruction::decode(&asset_lifecycle).is_err());
+
+    let shutdown_asset = [70u8; 18];
+    assert!(Instruction::decode(&shutdown_asset).is_err());
 
     let trade = [6u8; 42];
     assert!(Instruction::decode(&trade).is_err());
