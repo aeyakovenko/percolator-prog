@@ -8572,6 +8572,152 @@ fn v16_attack_resolved_close_expires_prospective_loss_backing_before_negative_k_
 }
 
 #[test]
+fn v16_attack_resolved_close_routes_prospective_loss_after_shared_bucket_impairment() {
+    const Q: i128 = (1_000 * POS_SCALE) as i128;
+    const INCREASE_Q: i128 = POS_SCALE as i128;
+    const PRICE: u64 = 100;
+    const UP_PRICE: u64 = 105;
+
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(1, 1_000, 5_000, 500);
+    env.configure_auth_mark_for_asset_as_admin(0, 0, PRICE);
+    env.top_up_backing_bucket(1, 100_000, 3);
+
+    let lien_owner = Keypair::new();
+    let lien_peer_owner = Keypair::new();
+    let expiry_trigger_owner = Keypair::new();
+    let prospective_loser_owner = Keypair::new();
+    let lien_account = env.create_portfolio(&lien_owner);
+    let lien_peer = env.create_portfolio(&lien_peer_owner);
+    let expiry_trigger = env.create_portfolio(&expiry_trigger_owner);
+    let prospective_loser = env.create_portfolio(&prospective_loser_owner);
+    env.deposit(&lien_owner, lien_account, 52_501);
+    env.deposit(&lien_peer_owner, lien_peer, 1_000_000);
+    env.deposit(&expiry_trigger_owner, expiry_trigger, 1_000_000);
+    env.deposit(&prospective_loser_owner, prospective_loser, 1_000_000);
+    env.trade_with_cu(
+        &lien_owner,
+        lien_account,
+        &lien_peer_owner,
+        lien_peer,
+        Q,
+        PRICE,
+        0,
+    );
+    env.trade_with_cu(
+        &expiry_trigger_owner,
+        expiry_trigger,
+        &prospective_loser_owner,
+        prospective_loser,
+        Q,
+        PRICE,
+        0,
+    );
+    env.svm.warp_to_slot(2);
+    env.push_auth_mark_for_asset_as_admin(0, 2, UP_PRICE);
+    for portfolio in [lien_peer, lien_account, expiry_trigger] {
+        env.crank(
+            portfolio,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 2,
+                observations: crank_observations(0),
+            },
+        );
+    }
+    assert_eq!(env.portfolio_state(lien_account).pnl.get(), 5_000);
+    assert_eq!(env.portfolio_state(expiry_trigger).pnl.get(), 5_000);
+    let prospective_before = env.portfolio_state(prospective_loser);
+    assert_eq!(prospective_before.pnl.get(), 0);
+    assert!(
+        env.market_state().1.assets[0].k_short
+            < active_leg_for_asset(&prospective_before, 0).k_snap,
+        "the short must retain an unsettled negative K delta"
+    );
+
+    env.trade_with_cu(
+        &lien_owner,
+        lien_account,
+        &lien_peer_owner,
+        lien_peer,
+        INCREASE_Q,
+        UP_PRICE,
+        0,
+    );
+    let lien_before = env.portfolio_state(lien_account).source_domains[0];
+    assert!(lien_before.source_claim_counterparty_liened_num.get() > 0);
+    assert!(lien_before.source_lien_counterparty_backing_num.get() > 0);
+
+    env.svm.warp_to_slot(3);
+    env.resolve();
+    let trigger_dest = env.token_account(expiry_trigger_owner.pubkey(), 0);
+    let loser_dest = env.token_account(prospective_loser_owner.pubkey(), 0);
+    let close_once = |env: &mut V16CuEnv, owner: Pubkey, portfolio: Pubkey, dest: Pubkey| {
+        env.svm.expire_blockhash();
+        env.send(
+            ProgInstruction::CloseResolved {
+                fee_rate_per_slot: 0,
+            },
+            vec![
+                AccountMeta::new_readonly(owner, false),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(portfolio, false),
+                AccountMeta::new(dest, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(env.vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[],
+        )
+    };
+    close_once(
+        &mut env,
+        expiry_trigger_owner.pubkey(),
+        expiry_trigger,
+        trigger_dest,
+    )
+    .expect("a lien-free winner must expire the shared bucket");
+    assert_eq!(
+        env.market_state().1.source_backing_buckets[1].status,
+        BackingBucketStatusV16::Impaired
+    );
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let portfolio_before = env.svm.get_account(&prospective_loser).unwrap();
+    let mut progressed = None;
+    let mut last_error = None;
+    for _ in 0..3 {
+        match close_once(
+            &mut env,
+            prospective_loser_owner.pubkey(),
+            prospective_loser,
+            loser_dest,
+        ) {
+            Ok(cu) => {
+                progressed = Some(cu);
+                break;
+            }
+            Err(err) => {
+                last_error = Some(err);
+                assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+                assert_eq!(
+                    env.svm.get_account(&prospective_loser).unwrap(),
+                    portfolio_before
+                );
+            }
+        }
+    }
+    let progress_cu = progressed.unwrap_or_else(|| {
+        panic!(
+            "an impaired source bucket must accept a newly crystallized terminal loss; last={last_error:?}"
+        )
+    });
+    assert_cu_within(
+        "resolved prospective loss after shared-bucket impairment",
+        progress_cu,
+        1_000_000,
+    );
+}
+
+#[test]
 fn v16_cu_resolved_close_scans_max_lapsed_prospective_kf_sources_below_limit() {
     const N: u16 = 14;
     const PRICE: u64 = 100;
