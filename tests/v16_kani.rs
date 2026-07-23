@@ -443,6 +443,40 @@ fn kani_v16_tradecpi_decode_preserves_wire_fields() {
 }
 
 #[kani::proof]
+fn kani_v16_set_matcher_config_decode_preserves_fee_consent() {
+    let enabled: u8 = kani::any();
+    let trade_fee_cap_bps: u16 = kani::any();
+    let data = Instruction::SetMatcherConfig {
+        enabled,
+        trade_fee_cap_bps,
+    }
+    .encode();
+    match Instruction::decode(&data).unwrap() {
+        Instruction::SetMatcherConfig {
+            enabled: decoded_enabled,
+            trade_fee_cap_bps: decoded_cap,
+        } => {
+            assert_eq!(decoded_enabled, enabled);
+            assert_eq!(decoded_cap, trade_fee_cap_bps);
+        }
+        _ => unreachable!(),
+    }
+
+    // Existing two-byte authorizations remain decodable, but cannot silently consent to a fee.
+    let legacy = [68, enabled];
+    match Instruction::decode(&legacy).unwrap() {
+        Instruction::SetMatcherConfig {
+            enabled: decoded_enabled,
+            trade_fee_cap_bps: decoded_cap,
+        } => {
+            assert_eq!(decoded_enabled, enabled);
+            assert_eq!(decoded_cap, 0);
+        }
+        _ => unreachable!(),
+    }
+}
+
+#[kani::proof]
 fn kani_v16_matcher_return_accepts_only_bound_echoed_fills() {
     // Audit fix: the ret's echoed fields and abi_version are drawn INDEPENDENTLY of the
     // expected (bound) params, and sizes are full-width i128, so both the accept path AND
