@@ -59717,3 +59717,121 @@ fn v16_attack_underfunded_exit_cannot_move_ewma_with_uncollectible_fee() {
         assert_underfunded_ewma_exit_uses_collected_fee(path);
     }
 }
+
+#[test]
+fn probe_presigned_trade_nocpi_cannot_be_rugged_by_base_fee_update() {
+    const FEE_BPS: u64 = 500;
+    const DEPOSIT: u128 = 1_000_000;
+    const SIZE_Q: i128 = 1_000 * POS_SCALE as i128;
+
+    let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+        max_trading_fee_bps: FEE_BPS,
+        ..V16CuMarketParams::default()
+    });
+    let attacker = env.admin.insecure_clone();
+    let victim = Keypair::new();
+    let attacker_portfolio = env.create_portfolio(&attacker);
+    let victim_portfolio = env.create_portfolio(&victim);
+    env.deposit(&attacker, attacker_portfolio, DEPOSIT);
+    env.deposit(&victim, victim_portfolio, DEPOSIT);
+
+    let retained_trade = |size_q: i128| {
+        let instruction = Instruction {
+            program_id: env.program_id,
+            accounts: vec![
+                AccountMeta::new(attacker.pubkey(), true),
+                AccountMeta::new(victim.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(attacker_portfolio, false),
+                AccountMeta::new(victim_portfolio, false),
+            ],
+            data: ProgInstruction::TradeNoCpi {
+                asset_index: 0,
+                size_q,
+                exec_price: 100,
+                fee_bps: 0,
+            }
+            .encode(),
+        };
+        Transaction::new_signed_with_payer(
+            &[heap_ix(), cu_ix(), instruction],
+            Some(&env.payer.pubkey()),
+            &[&env.payer, &attacker, &victim],
+            env.svm.latest_blockhash(),
+        )
+    };
+    let retained_open = retained_trade(SIZE_Q);
+    let retained_close = retained_trade(-SIZE_Q);
+
+    env.update_trade_fee_policy_with_cu(FEE_BPS);
+    let market_after_policy = env.svm.get_account(&env.market).unwrap();
+    let attacker_after_policy = env.svm.get_account(&attacker_portfolio).unwrap();
+    let victim_after_policy = env.svm.get_account(&victim_portfolio).unwrap();
+    let vault_after_policy = env.svm.get_account(&env.vault).unwrap();
+
+    if env.svm.send_transaction(retained_open).is_ok() {
+        env.svm
+            .send_transaction(retained_close)
+            .expect("the paired retained close must land on the vulnerable parent");
+        let attacker_state = env.portfolio_state(attacker_portfolio);
+        let victim_state = env.portfolio_state(victim_portfolio);
+        let (_, group) = env.market_state();
+        assert_eq!(attacker_state.capital.get(), 990_000);
+        assert_eq!(victim_state.capital.get(), 990_000);
+        assert_eq!(group.insurance, 20_000);
+
+        let (insurance_dest, _) = env.withdraw_insurance_with_cu(group.insurance);
+        let attacker_dest =
+            env.withdraw(&attacker, attacker_portfolio, attacker_state.capital.get());
+        let victim_dest = env.withdraw(&victim, victim_portfolio, victim_state.capital.get());
+        assert_eq!(
+            env.token_amount(attacker_dest) + env.token_amount(insurance_dest),
+            1_010_000,
+            "the fee authority recovers its own fees and extracts the victim's fee"
+        );
+        assert_eq!(env.token_amount(victim_dest), 990_000);
+        panic!("a retained zero-fee trade accepted a post-sign base-fee increase");
+    }
+
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_after_policy
+    );
+    assert_eq!(
+        env.svm.get_account(&attacker_portfolio).unwrap(),
+        attacker_after_policy
+    );
+    assert_eq!(
+        env.svm.get_account(&victim_portfolio).unwrap(),
+        victim_after_policy
+    );
+    assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_after_policy);
+
+    env.svm.expire_blockhash();
+    env.trade_asset_with_cu(
+        0,
+        &attacker,
+        attacker_portfolio,
+        &victim,
+        victim_portfolio,
+        SIZE_Q,
+        100,
+        FEE_BPS,
+    );
+    env.trade_asset_with_cu(
+        0,
+        &attacker,
+        attacker_portfolio,
+        &victim,
+        victim_portfolio,
+        -SIZE_Q,
+        100,
+        FEE_BPS,
+    );
+    assert_eq!(
+        env.portfolio_state(attacker_portfolio).capital.get(),
+        990_000
+    );
+    assert_eq!(env.portfolio_state(victim_portfolio).capital.get(), 990_000);
+    assert_eq!(env.market_state().1.insurance, 20_000);
+}
