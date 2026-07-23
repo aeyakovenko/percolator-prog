@@ -2523,6 +2523,7 @@ pub mod ix {
         },
         InitPortfolio,
         Deposit {
+            market_id: u64,
             amount: u128,
         },
         Withdraw {
@@ -2759,6 +2760,7 @@ pub mod ix {
                 },
                 1 => Self::InitPortfolio,
                 3 => Self::Deposit {
+                    market_id: read_u64(&mut rest)?,
                     amount: read_u128(&mut rest)?,
                 },
                 4 => Self::Withdraw {
@@ -3057,8 +3059,9 @@ pub mod ix {
                     push_u128(&mut out, maintenance_fee_per_slot);
                 }
                 Self::InitPortfolio => out.push(1),
-                Self::Deposit { amount } => {
+                Self::Deposit { market_id, amount } => {
                     out.push(3);
+                    push_u64(&mut out, market_id);
                     push_u128(&mut out, amount);
                 }
                 Self::Withdraw { amount } => {
@@ -5251,7 +5254,9 @@ pub mod processor {
                 maintenance_fee_per_slot,
             ),
             Instruction::InitPortfolio => handle_init_portfolio(program_id, accounts),
-            Instruction::Deposit { amount } => handle_deposit(program_id, accounts, amount),
+            Instruction::Deposit { market_id, amount } => {
+                handle_deposit(program_id, accounts, market_id, amount)
+            }
             Instruction::Withdraw { amount } => handle_withdraw(program_id, accounts, amount),
             Instruction::PermissionlessCrank {
                 now_slot,
@@ -5721,6 +5726,7 @@ pub mod processor {
     fn handle_deposit<'a>(
         program_id: &Pubkey,
         accounts: &'a [AccountInfo<'a>],
+        expected_market_id: u64,
         amount: u128,
     ) -> ProgramResult {
         let owner = account(accounts, 0)?;
@@ -5738,8 +5744,15 @@ pub mod processor {
         expect_owner(portfolio_ai, program_id)?;
         verify_token_program(token_program)?;
 
+        let market_data = market_ai.try_borrow_data()?;
         let (cfg, mode, max_market_slots, _) =
-            state::read_market_config_mode_and_capacity(&market_ai.try_borrow_data()?)?;
+            state::read_market_config_mode_and_capacity(&market_data)?;
+        let (_, _, _, current_market_id, _, _) =
+            state::read_market_trade_preflight(&market_data, 0)?;
+        if current_market_id != expected_market_id {
+            return Err(PercolatorError::AssetGenerationMismatch.into());
+        }
+        drop(market_data);
         if mode != MarketModeV16::Live {
             return Err(PercolatorError::EngineLockActive.into());
         }
