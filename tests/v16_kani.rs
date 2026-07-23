@@ -833,18 +833,33 @@ fn kani_v16_update_backing_fee_policy_decode_preserves_wire_fields() {
 
 #[kani::proof]
 fn kani_v16_update_trade_fee_policy_decode_preserves_wire_fields() {
+    let market_id: u64 = kani::any();
     let trade_fee_base_bps: u64 = kani::any();
 
-    let mut data = [0u8; 9];
+    let mut data = [0u8; 17];
     data[0] = 55;
-    data[1..9].copy_from_slice(&trade_fee_base_bps.to_le_bytes());
+    data[1..9].copy_from_slice(&market_id.to_le_bytes());
+    data[9..17].copy_from_slice(&trade_fee_base_bps.to_le_bytes());
 
     match Instruction::decode(&data).unwrap() {
         Instruction::UpdateTradeFeePolicy {
+            market_id: got_market_id,
             trade_fee_base_bps: got,
-        } => assert_eq!(got, trade_fee_base_bps),
+        } => {
+            assert_eq!(got_market_id, market_id);
+            assert_eq!(got, trade_fee_base_bps);
+        }
         _ => unreachable!(),
     }
+}
+
+#[kani::proof]
+fn kani_v16_update_trade_fee_policy_rejects_legacy_wire_payload() {
+    let trade_fee_base_bps: u64 = kani::any();
+    let mut data = [0u8; 9];
+    data[0] = 55;
+    data[1..9].copy_from_slice(&trade_fee_base_bps.to_le_bytes());
+    assert!(Instruction::decode(&data).is_err());
 }
 
 #[kani::proof]
@@ -1271,6 +1286,7 @@ fn kani_v16_admin_policy_payloads_reject_trailing_byte() {
     );
     assert_rejects_trailing_byte(
         Instruction::UpdateTradeFeePolicy {
+            market_id: 9,
             trade_fee_base_bps: 25,
         },
         extra,

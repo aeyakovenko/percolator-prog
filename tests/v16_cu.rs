@@ -1023,11 +1023,15 @@ impl V16CuEnv {
     }
 
     fn update_trade_fee_policy_with_cu(&mut self, trade_fee_base_bps: u64) -> u64 {
+        let market_id = self.asset_market_id(0);
         send_tx(
             &mut self.svm,
             self.program_id,
             &self.payer,
-            ProgInstruction::UpdateTradeFeePolicy { trade_fee_base_bps },
+            ProgInstruction::UpdateTradeFeePolicy {
+                market_id,
+                trade_fee_base_bps,
+            },
             vec![
                 AccountMeta::new(self.admin.pubkey(), true),
                 AccountMeta::new(self.market, false),
@@ -35258,6 +35262,7 @@ fn v16_attack_global_policy_bounds_reject_grief_values() {
     env.update_trade_fee_policy_with_cu(88);
     env.update_market_init_fee_policy_with_cu(40);
 
+    let market_id = env.asset_market_id(0);
     let market_before = env.svm.get_account(&env.market).unwrap();
     let reject_unchanged = |env: &mut V16CuEnv, ix: ProgInstruction, label: &str| {
         env.svm.expire_blockhash();
@@ -35297,6 +35302,7 @@ fn v16_attack_global_policy_bounds_reject_grief_values() {
     reject_unchanged(
         &mut env,
         ProgInstruction::UpdateTradeFeePolicy {
+            market_id,
             trade_fee_base_bps: 10_001,
         },
         "trade fee above the market maximum",
@@ -35360,6 +35366,7 @@ fn v16_attack_global_policy_bounds_reject_grief_values() {
 #[test]
 fn v16_attack_trade_fee_policy_follows_asset0_insurance_authority() {
     let mut env = V16CuEnv::new();
+    let market_id = env.asset_market_id(0);
     let admin = env.admin.insecure_clone();
     let new_insurance = Keypair::new();
     env.try_update_per_asset_authority_with_cu(
@@ -35384,6 +35391,7 @@ fn v16_attack_trade_fee_policy_follows_asset0_insurance_authority() {
         env.program_id,
         &env.payer,
         ProgInstruction::UpdateTradeFeePolicy {
+            market_id,
             trade_fee_base_bps: 500,
         },
         vec![
@@ -35409,6 +35417,7 @@ fn v16_attack_trade_fee_policy_follows_asset0_insurance_authority() {
         env.program_id,
         &env.payer,
         ProgInstruction::UpdateTradeFeePolicy {
+            market_id,
             trade_fee_base_bps: 500,
         },
         vec![
@@ -35484,6 +35493,7 @@ fn v16_attack_permissionless_asset_authority_cannot_update_marketwide_policies()
         profile(&env, 1).insurance_authority,
         creator.pubkey().to_bytes()
     );
+    let market_id = env.asset_market_id(0);
 
     let mut attempt = |ix: ProgInstruction| -> Result<u64, String> {
         env.svm.expire_blockhash();
@@ -35502,6 +35512,7 @@ fn v16_attack_permissionless_asset_authority_cannot_update_marketwide_policies()
 
     assert!(
         attempt(ProgInstruction::UpdateTradeFeePolicy {
+            market_id,
             trade_fee_base_bps: 123
         })
         .is_err(),
@@ -60342,6 +60353,7 @@ fn v16_attack_update_authority_handoff_rekeys_asset0_lifecycle_admin() {
 #[test]
 fn v16_attack_update_authority_handoff_rekeys_asset0_default_runtime_authorities() {
     let mut env = V16CuEnv::new();
+    let market_id = env.asset_market_id(0);
     let old_marketauth = env.admin.insecure_clone();
     let new_marketauth = Keypair::new();
     env.ensure_signer_account(new_marketauth.pubkey());
@@ -60379,6 +60391,7 @@ fn v16_attack_update_authority_handoff_rekeys_asset0_default_runtime_authorities
         env.program_id,
         &env.payer,
         ProgInstruction::UpdateTradeFeePolicy {
+            market_id,
             trade_fee_base_bps: 500,
         },
         vec![
@@ -60403,6 +60416,7 @@ fn v16_attack_update_authority_handoff_rekeys_asset0_default_runtime_authorities
         env.program_id,
         &env.payer,
         ProgInstruction::UpdateTradeFeePolicy {
+            market_id,
             trade_fee_base_bps: 500,
         },
         vec![
@@ -60530,6 +60544,7 @@ fn v16_attack_trade_fee_policy_cannot_replay_across_market_reinit() {
     let params = V16CuMarketParams::default();
     let mut env = V16CuEnv::new_with_init_params(params);
     let admin = env.admin.insecure_clone();
+    let old_market_id = env.asset_market_id(0);
 
     let stale_policy_ix = Instruction {
         program_id: env.program_id,
@@ -60538,6 +60553,7 @@ fn v16_attack_trade_fee_policy_cannot_replay_across_market_reinit() {
             AccountMeta::new(env.market, false),
         ],
         data: ProgInstruction::UpdateTradeFeePolicy {
+            market_id: old_market_id,
             trade_fee_base_bps: FORCED_FEE_BPS,
         }
         .encode(),
