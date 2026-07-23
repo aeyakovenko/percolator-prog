@@ -808,27 +808,44 @@ fn kani_v16_update_maintenance_fee_policy_decode_preserves_wire_fields() {
 #[kani::proof]
 fn kani_v16_update_backing_fee_policy_decode_preserves_wire_fields() {
     let domain: u16 = kani::any();
+    let market_id: u64 = kani::any();
     let fee_bps: u16 = kani::any();
     let insurance_share_bps: u16 = kani::any();
 
-    let mut data = [0u8; 7];
+    let mut data = [0u8; 15];
     data[0] = 51;
     data[1..3].copy_from_slice(&domain.to_le_bytes());
-    data[3..5].copy_from_slice(&fee_bps.to_le_bytes());
-    data[5..7].copy_from_slice(&insurance_share_bps.to_le_bytes());
+    data[3..11].copy_from_slice(&market_id.to_le_bytes());
+    data[11..13].copy_from_slice(&fee_bps.to_le_bytes());
+    data[13..15].copy_from_slice(&insurance_share_bps.to_le_bytes());
 
     match Instruction::decode(&data).unwrap() {
         Instruction::UpdateBackingFeePolicy {
             domain: got_domain,
+            market_id: got_market_id,
             fee_bps: got_fee_bps,
             insurance_share_bps: got_insurance_share_bps,
         } => {
             assert_eq!(got_domain, domain);
+            assert_eq!(got_market_id, market_id);
             assert_eq!(got_fee_bps, fee_bps);
             assert_eq!(got_insurance_share_bps, insurance_share_bps);
         }
         _ => unreachable!(),
     }
+}
+
+#[kani::proof]
+fn kani_v16_update_backing_fee_policy_rejects_legacy_wire_payload() {
+    let domain: u16 = kani::any();
+    let fee_bps: u16 = kani::any();
+    let insurance_share_bps: u16 = kani::any();
+    let mut data = [0u8; 7];
+    data[0] = 51;
+    data[1..3].copy_from_slice(&domain.to_le_bytes());
+    data[3..5].copy_from_slice(&fee_bps.to_le_bytes());
+    data[5..7].copy_from_slice(&insurance_share_bps.to_le_bytes());
+    assert!(Instruction::decode(&data).is_err());
 }
 
 #[kani::proof]
@@ -1296,6 +1313,7 @@ fn kani_v16_admin_policy_payloads_reject_trailing_byte() {
     assert_rejects_trailing_byte(
         Instruction::UpdateBackingFeePolicy {
             domain: 0,
+            market_id: 9,
             fee_bps: 25,
             insurance_share_bps: 0,
         },

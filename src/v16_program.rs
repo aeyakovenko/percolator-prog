@@ -2608,6 +2608,7 @@ pub mod ix {
         },
         UpdateBackingFeePolicy {
             domain: u16,
+            market_id: u64,
             fee_bps: u16,
             insurance_share_bps: u16,
         },
@@ -2878,6 +2879,7 @@ pub mod ix {
                 },
                 51 => Self::UpdateBackingFeePolicy {
                     domain: read_u16(&mut rest)?,
+                    market_id: read_u64(&mut rest)?,
                     fee_bps: read_u16(&mut rest)?,
                     insurance_share_bps: read_u16(&mut rest)?,
                 },
@@ -3200,11 +3202,13 @@ pub mod ix {
                 }
                 Self::UpdateBackingFeePolicy {
                     domain,
+                    market_id,
                     fee_bps,
                     insurance_share_bps,
                 } => {
                     out.push(51);
                     push_u16(&mut out, domain);
+                    push_u64(&mut out, market_id);
                     push_u16(&mut out, fee_bps);
                     push_u16(&mut out, insurance_share_bps);
                 }
@@ -5356,12 +5360,14 @@ pub mod processor {
             }
             Instruction::UpdateBackingFeePolicy {
                 domain,
+                market_id,
                 fee_bps,
                 insurance_share_bps,
             } => handle_update_backing_fee_policy(
                 program_id,
                 accounts,
                 domain,
+                market_id,
                 fee_bps,
                 insurance_share_bps,
             ),
@@ -9662,6 +9668,7 @@ pub mod processor {
         program_id: &Pubkey,
         accounts: &'a [AccountInfo<'a>],
         domain: u16,
+        expected_market_id: u64,
         fee_bps: u16,
         insurance_share_bps: u16,
     ) -> ProgramResult {
@@ -9672,8 +9679,11 @@ pub mod processor {
         expect_owner(market_ai, program_id)?;
         let domain = domain as usize;
         let asset_index = domain / 2;
-        let (mut cfg, mode, _, _, _, max_trading_fee_bps) =
+        let (mut cfg, mode, _, market_id, _, max_trading_fee_bps) =
             state::read_market_trade_preflight(&market_ai.try_borrow_data()?, asset_index)?;
+        if market_id != expected_market_id {
+            return Err(PercolatorError::AssetGenerationMismatch.into());
+        }
         if mode != MarketModeV16::Live {
             return Err(PercolatorError::EngineLockActive.into());
         }

@@ -1004,12 +1004,14 @@ impl V16CuEnv {
         fee_bps: u16,
         insurance_share_bps: u16,
     ) -> u64 {
+        let market_id = self.asset_market_id(domain / 2);
         send_tx(
             &mut self.svm,
             self.program_id,
             &self.payer,
             ProgInstruction::UpdateBackingFeePolicy {
                 domain,
+                market_id,
                 fee_bps,
                 insurance_share_bps,
             },
@@ -26289,6 +26291,7 @@ fn v16_attack_domain_indexed_calls_reject_out_of_range_atomically() {
         &env.payer,
         ProgInstruction::UpdateBackingFeePolicy {
             domain: BAD_DOMAIN,
+            market_id: 0,
             fee_bps: 77,
             insurance_share_bps: 5_000,
         },
@@ -35114,6 +35117,7 @@ fn v16_attack_fee_redirect_split_lands_correctly() {
 fn v16_attack_backing_fee_policy_authority_gated() {
     let mut env = V16CuEnv::new();
     let (cfg0, _) = env.market_state();
+    let market_id = env.asset_market_id(0);
     let mallory = Keypair::new();
     env.ensure_signer_account(mallory.pubkey());
     // non-authority sets the backing fee policy -> reject.
@@ -35124,6 +35128,7 @@ fn v16_attack_backing_fee_policy_authority_gated() {
         &env.payer,
         ProgInstruction::UpdateBackingFeePolicy {
             domain: 0,
+            market_id,
             fee_bps: 77,
             insurance_share_bps: 5_000,
         },
@@ -35145,6 +35150,7 @@ fn v16_attack_backing_fee_policy_authority_gated() {
         &env.payer,
         ProgInstruction::UpdateBackingFeePolicy {
             domain: 0,
+            market_id,
             fee_bps: 77,
             insurance_share_bps: 20_000,
         },
@@ -35194,6 +35200,8 @@ fn v16_attack_cross_asset_insurance_authority_cannot_update_other_backing_fee_po
         env.admin.pubkey(),
     );
     env.ensure_signer_account(asset1_insurance.pubkey());
+    let market_id_0 = env.asset_market_id(0);
+    let market_id_1 = env.asset_market_id(1);
 
     let market_before = env.svm.get_account(&env.market).unwrap().data;
     env.svm.expire_blockhash();
@@ -35203,6 +35211,7 @@ fn v16_attack_cross_asset_insurance_authority_cannot_update_other_backing_fee_po
         &env.payer,
         ProgInstruction::UpdateBackingFeePolicy {
             domain: 0,
+            market_id: market_id_0,
             fee_bps: 91,
             insurance_share_bps: 5_000,
         },
@@ -35229,6 +35238,7 @@ fn v16_attack_cross_asset_insurance_authority_cannot_update_other_backing_fee_po
         &env.payer,
         ProgInstruction::UpdateBackingFeePolicy {
             domain: 2,
+            market_id: market_id_1,
             fee_bps: 91,
             insurance_share_bps: 5_000,
         },
@@ -35329,6 +35339,7 @@ fn v16_attack_global_policy_bounds_reject_grief_values() {
         &mut env,
         ProgInstruction::UpdateBackingFeePolicy {
             domain: 0,
+            market_id,
             fee_bps: 0,
             insurance_share_bps: 1,
         },
@@ -35505,6 +35516,7 @@ fn v16_attack_permissionless_asset_authority_cannot_update_marketwide_policies()
         creator.pubkey().to_bytes()
     );
     let market_id = env.asset_market_id(0);
+    let asset1_market_id = env.asset_market_id(1);
 
     let mut attempt = |ix: ProgInstruction| -> Result<u64, String> {
         env.svm.expire_blockhash();
@@ -35558,6 +35570,7 @@ fn v16_attack_permissionless_asset_authority_cannot_update_marketwide_policies()
     assert!(
         attempt(ProgInstruction::UpdateBackingFeePolicy {
             domain: 0,
+            market_id,
             fee_bps: 55,
             insurance_share_bps: 5_000,
         })
@@ -35602,6 +35615,7 @@ fn v16_attack_permissionless_asset_authority_cannot_update_marketwide_policies()
         &env.payer,
         ProgInstruction::UpdateBackingFeePolicy {
             domain: 2,
+            market_id: asset1_market_id,
             fee_bps: 111,
             insurance_share_bps: 5_000,
         },
@@ -50724,6 +50738,7 @@ fn v16_attack_non_active_asset_cannot_enable_backing_fee_batch_gate() {
             expected_lifecycle
         );
         assert_eq!(cfg_after_lifecycle.backing_trade_fee_policy_count, 0);
+        let asset_market_id = env.asset_market_id(1);
 
         env.svm.expire_blockhash();
         let policy = send_tx(
@@ -50732,6 +50747,7 @@ fn v16_attack_non_active_asset_cannot_enable_backing_fee_batch_gate() {
             &env.payer,
             ProgInstruction::UpdateBackingFeePolicy {
                 domain: 2,
+                market_id: asset_market_id,
                 fee_bps: 77,
                 insurance_share_bps: 5_000,
             },
@@ -50819,6 +50835,7 @@ fn v16_attack_retired_reused_asset_backing_fee_policy_cannot_stick_batch_gate() 
 
     let update_policy =
         |env: &mut V16CuEnv, signer: &Keypair, fee_bps: u16| -> Result<u64, String> {
+            let market_id = env.asset_market_id(1);
             env.svm.expire_blockhash();
             send_tx(
                 &mut env.svm,
@@ -50826,6 +50843,7 @@ fn v16_attack_retired_reused_asset_backing_fee_policy_cannot_stick_batch_gate() 
                 &env.payer,
                 ProgInstruction::UpdateBackingFeePolicy {
                     domain: 2,
+                    market_id,
                     fee_bps,
                     insurance_share_bps: if fee_bps == 0 { 0 } else { 5_000 },
                 },
