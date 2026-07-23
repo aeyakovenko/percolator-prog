@@ -15519,6 +15519,7 @@ fn v16_attack_permissionless_settle_b_is_bounded_and_live() {
 
     let before_account = env.portfolio_state(long);
     let before_leg = active_leg_for_asset(&before_account, 0);
+    let capital_before = before_account.capital.get();
     assert_eq!(before_leg.side, SideV16::Long);
     assert_eq!(before_leg.b_snap, 0, "fresh leg starts at B snap 0");
     assert!(
@@ -15561,12 +15562,16 @@ fn v16_attack_permissionless_settle_b_is_bounded_and_live() {
     let after_first = env.portfolio_state(long);
     let after_first_leg = active_leg_for_asset(&after_first, 0);
     assert_eq!(
-        after_first_leg.b_snap, 1,
-        "auto-crank refreshes if needed, then advances one configured B chunk"
+        after_first_leg.b_snap, 3,
+        "the atom budget must not be misapplied directly as a B-index budget"
     );
     assert!(
-        after_first_leg.b_stale && after_first.b_stale_state != 0,
-        "remaining B gap stays explicitly marked stale"
+        !after_first_leg.b_stale && after_first.b_stale_state == 0,
+        "a fully settled B gap clears B-stale state"
+    );
+    assert!(
+        capital_before - after_first.capital.get() <= 1,
+        "one crank cannot charge more than the configured one-atom loss budget"
     );
     assert_eq!(
         env.market_state().1.assets[0].b_long_num,
@@ -15587,26 +15592,6 @@ fn v16_attack_permissionless_settle_b_is_bounded_and_live() {
         "SettleB does not debit insurance"
     );
 
-    settle_b_once(&mut env).expect("second permissionless SettleB chunk");
-    let after_second = env.portfolio_state(long);
-    assert_eq!(
-        active_leg_for_asset(&after_second, 0).b_snap,
-        2,
-        "second SettleB call advances exactly one more chunk"
-    );
-    assert!(
-        after_second.b_stale_state != 0,
-        "one chunk remains after second call"
-    );
-
-    settle_b_once(&mut env).expect("final permissionless SettleB chunk");
-    let after_final = env.portfolio_state(long);
-    let final_leg = active_leg_for_asset(&after_final, 0);
-    assert_eq!(final_leg.b_snap, 3, "all B debt settled after three chunks");
-    assert!(
-        !final_leg.b_stale && after_final.b_stale_state == 0,
-        "final chunk clears B-stale state"
-    );
     let (_, g_end) = env.market_state();
     assert_eq!(
         g_end.vault, vault_before,
@@ -59716,6 +59701,175 @@ fn v16_attack_underfunded_exit_cannot_move_ewma_with_uncollectible_fee() {
     ] {
         assert_underfunded_ewma_exit_uses_collected_fee(path);
     }
+}
+
+#[test]
+fn v16_attack_b_settlement_budget_is_loss_atoms_not_index_delta() {
+    const SCALE: u64 = 100_000_000;
+    const INITIAL_PRICE: u64 = 10_000 * SCALE;
+
+    let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+        initial_price: INITIAL_PRICE,
+        min_nonzero_mm_req: 1,
+        min_nonzero_im_req: 2,
+        maintenance_margin_bps: 250,
+        initial_margin_bps: 500,
+        max_trading_fee_bps: 10,
+        liquidation_fee_bps: 0,
+        liquidation_fee_cap: 0,
+        max_price_move_bps_per_slot: 100,
+        max_accrual_dt_slots: 1,
+        public_b_chunk_atoms: percolator::MAX_VAULT_TVL,
+        ..V16CuMarketParams::default()
+    });
+    env.configure_auth_mark_with_cu(0, INITIAL_PRICE);
+
+    let owners = [Keypair::new(), Keypair::new(), Keypair::new()];
+    let accounts = [
+        env.create_portfolio(&owners[0]),
+        env.create_portfolio(&owners[1]),
+        env.create_portfolio(&owners[2]),
+    ];
+    for index in 0..accounts.len() {
+        env.deposit(&owners[index], accounts[index], 20_000 * u128::from(SCALE));
+    }
+
+    let crank_at = |env: &mut V16CuEnv, portfolio: Pubkey, slot: u64| {
+        env.svm.expire_blockhash();
+        env.send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: slot,
+                observations: crank_observations(0),
+            },
+            vec![
+                AccountMeta::new(env.payer.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(portfolio, false),
+            ],
+            &[],
+        )
+        .expect("valid permissionless crank must land")
+    };
+
+    env.svm.warp_to_slot(1);
+    env.push_auth_mark_with_cu(1, 9_976 * SCALE);
+    crank_at(&mut env, accounts[2], 1);
+    env.trade_asset_with_cu(
+        0,
+        &owners[0],
+        accounts[0],
+        &owners[1],
+        accounts[1],
+        -(29 * POS_SCALE as i128),
+        9_976 * SCALE,
+        3,
+    );
+    env.rebalance_reduce_with_cu(&owners[0], accounts[0], 0, 25 * POS_SCALE);
+    env.trade_asset_with_cu(
+        0,
+        &owners[2],
+        accounts[2],
+        &owners[0],
+        accounts[0],
+        32 * POS_SCALE as i128,
+        9_976 * SCALE,
+        0,
+    );
+    env.trade_asset_with_cu(
+        0,
+        &owners[0],
+        accounts[0],
+        &owners[1],
+        accounts[1],
+        POS_SCALE as i128,
+        9_976 * SCALE,
+        0,
+    );
+    env.trade_asset_with_cu(
+        0,
+        &owners[0],
+        accounts[0],
+        &owners[1],
+        accounts[1],
+        13 * POS_SCALE as i128,
+        9_976 * SCALE,
+        7,
+    );
+    crank_at(&mut env, accounts[0], 1);
+
+    env.svm.warp_to_slot(2);
+    env.push_auth_mark_with_cu(2, 9_931 * SCALE);
+    crank_at(&mut env, accounts[2], 2);
+    env.trade_asset_with_cu(
+        0,
+        &owners[0],
+        accounts[0],
+        &owners[1],
+        accounts[1],
+        POS_SCALE as i128,
+        9_931 * SCALE,
+        0,
+    );
+
+    env.svm.warp_to_slot(3);
+    env.push_auth_mark_with_cu(3, 9_860 * SCALE);
+    crank_at(&mut env, accounts[0], 3);
+    env.trade_asset_with_cu(
+        0,
+        &owners[0],
+        accounts[0],
+        &owners[1],
+        accounts[1],
+        POS_SCALE as i128,
+        9_860 * SCALE,
+        0,
+    );
+
+    env.svm.warp_to_slot(4);
+    env.push_auth_mark_with_cu(4, 9_801 * SCALE);
+    crank_at(&mut env, accounts[2], 4);
+    env.trade_asset_with_cu(
+        0,
+        &owners[0],
+        accounts[0],
+        &owners[1],
+        accounts[1],
+        POS_SCALE as i128,
+        9_801 * SCALE,
+        0,
+    );
+
+    env.resolve();
+    env.close_resolved_with_cu(&owners[2], accounts[2]);
+    env.close_resolved_with_cu(&owners[1], accounts[1]);
+
+    let survivor_before = env.portfolio_state(accounts[0]);
+    let market_before = env.market_state().1;
+    let leg_before = survivor_before.legs[0];
+    let target_b = market_before.assets[0]
+        .b_long_num
+        .max(market_before.assets[0].b_short_num);
+    let remaining_b = target_b - leg_before.b_snap.get();
+    let full_loss = leg_before
+        .loss_weight
+        .get()
+        .checked_mul(remaining_b)
+        .unwrap()
+        .checked_add(leg_before.b_rem.get())
+        .unwrap()
+        / percolator::SOCIAL_LOSS_DEN;
+    assert_eq!(target_b, 107_486_458_947_473_684_210_526_315);
+    assert_eq!(leg_before.loss_weight.get(), 19_000_000);
+    assert!(full_loss > 0 && full_loss < percolator::MAX_VAULT_TVL);
+
+    let (_, close_cu) = env.close_resolved_with_cu(&owners[0], accounts[0]);
+    let survivor_after = env.portfolio_state(accounts[0]);
+    let leg_after = survivor_after.legs[0];
+    assert!(close_cu < 200_000);
+    assert!(
+        leg_after.active == 0 || leg_after.b_snap.get() == target_b,
+        "one atom-bounded close must consume a B gap whose full loss fits the atom budget"
+    );
 }
 
 // Public liveness regression: partial liquidation ADL can leave a winner's stored basis above the
