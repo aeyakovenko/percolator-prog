@@ -61636,6 +61636,216 @@ fn v16_attack_backing_topup_rejects_lapsed_expiry() {
     );
 }
 
+// A resolve signed for a closed market must not acquire authority over a live replacement at the
+// same address. ResolveMarket is terminal, so replaying that retained capability after reinit would
+// permanently halt a generation-B market even when independent users already have open positions.
+#[test]
+fn v16_attack_resolve_market_cannot_replay_across_market_reinit() {
+    const PRICE: u64 = 100;
+    const DEPOSIT: u128 = 1_000;
+    const SIZE_Q: i128 = 5 * POS_SCALE as i128;
+
+    let params = V16CuMarketParams::default();
+    let reinit_params = V16CuMarketParams {
+        max_bankrupt_close_lifetime_slots: params.max_bankrupt_close_lifetime_slots + 1,
+        ..params
+    };
+    let mut env = V16CuEnv::new_with_init_params(params);
+    let admin = env.admin.insecure_clone();
+    let old_market_id = env.asset_market_id(0);
+
+    let legacy_resolve_data = vec![19u8];
+    let uses_market_id_wire = ProgInstruction::decode(&legacy_resolve_data).is_err();
+    let mut bound_resolve_data = vec![19u8];
+    bound_resolve_data.extend_from_slice(&old_market_id.to_le_bytes());
+    let stale_resolve_ix = Instruction {
+        program_id: env.program_id,
+        accounts: vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new_readonly(system_program::ID, false),
+        ],
+        data: if uses_market_id_wire {
+            bound_resolve_data
+        } else {
+            legacy_resolve_data
+        },
+    };
+    let reinit_ix = Instruction {
+        program_id: env.program_id,
+        accounts: vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new_readonly(env.mint, false),
+            AccountMeta::new(env.market_generation, false),
+            AccountMeta::new_readonly(system_program::ID, false),
+        ],
+        data: init_market_instruction(&reinit_params).encode(),
+    };
+    let retained_blockhash = env.svm.latest_blockhash();
+    let stale_resolve = Transaction::new_signed_with_payer(
+        &[heap_ix(), cu_ix(), stale_resolve_ix],
+        Some(&env.payer.pubkey()),
+        &[&env.payer, &admin],
+        retained_blockhash,
+    );
+    let presigned_reinit = Transaction::new_signed_with_payer(
+        &[heap_ix(), cu_ix(), reinit_ix],
+        Some(&env.payer.pubkey()),
+        &[&env.payer, &admin],
+        retained_blockhash,
+    );
+
+    // The legitimate generation-A resolve has a different message from the retained probe, so its
+    // signature does not consume the stale transaction in LiteSVM replay protection.
+    env.resolve();
+    env.close_slab_with_cu();
+    assert_eq!(env.svm.get_account(&env.market).unwrap().lamports, 0);
+
+    env.svm.warp_to_slot(10);
+    env.svm
+        .set_account(
+            env.market,
+            Account {
+                lamports: 1_000_000_000,
+                data: vec![
+                    0u8;
+                    state::market_account_len_for_capacity(
+                        params.max_portfolio_assets as usize,
+                    )
+                    .unwrap()
+                ],
+                owner: env.program_id,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    env.svm
+        .set_account(
+            env.vault,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_token_data(env.mint, env.vault_authority, 0),
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    env.svm
+        .send_transaction(presigned_reinit)
+        .expect("the same market address is publicly reinitialized from a retained signed init");
+    let new_market_id = env.asset_market_id(0);
+    assert_ne!(new_market_id, old_market_id);
+    assert_eq!(env.market_state().1.mode, MarketModeV16::Live);
+
+    let victim = Keypair::new();
+    let counterparty = Keypair::new();
+    let victim_account = env.create_portfolio(&victim);
+    let counterparty_account = env.create_portfolio(&counterparty);
+    env.deposit(&victim, victim_account, DEPOSIT);
+    env.deposit(&counterparty, counterparty_account, DEPOSIT);
+    env.trade_asset_with_cu(
+        0,
+        &victim,
+        victim_account,
+        &counterparty,
+        counterparty_account,
+        SIZE_Q,
+        PRICE,
+        0,
+    );
+    assert_eq!(
+        active_leg_for_asset(&env.portfolio_state(victim_account), 0).basis_pos_q,
+        SIZE_Q
+    );
+
+    let market_before_replay = env.svm.get_account(&env.market).unwrap();
+    let replay = env.svm.send_transaction(stale_resolve);
+    if !uses_market_id_wire {
+        replay.expect("retained generation-A resolve lands on the live replacement market");
+        assert_eq!(env.market_state().1.mode, MarketModeV16::Resolved);
+        let close_after_replay = env.try_trade_asset_with_cu(
+            0,
+            &victim,
+            victim_account,
+            &counterparty,
+            counterparty_account,
+            -SIZE_Q,
+            PRICE,
+            0,
+        );
+        assert!(
+            close_after_replay.is_err(),
+            "terminal replay must demonstrably stop ordinary trade progress"
+        );
+        assert_eq!(
+            active_leg_for_asset(&env.portfolio_state(victim_account), 0).basis_pos_q,
+            SIZE_Q,
+            "the independent users remain in the terminally resolved generation"
+        );
+        panic!("a retained old-market resolve permanently halted a live replacement market");
+    }
+
+    let replay_error = format!(
+        "{:?}",
+        replay.expect_err("stale market resolve must reject")
+    );
+    let expected_error = format!(
+        "Custom({})",
+        PercolatorError::AssetGenerationMismatch as u32
+    );
+    assert!(
+        replay_error.contains(&expected_error),
+        "stale market resolve must fail with {expected_error}, got {replay_error}"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before_replay,
+        "generation mismatch leaves the live replacement byte-identical"
+    );
+    assert_eq!(env.market_state().1.mode, MarketModeV16::Live);
+
+    env.trade_asset_with_cu(
+        0,
+        &victim,
+        victim_account,
+        &counterparty,
+        counterparty_account,
+        -SIZE_Q,
+        PRICE,
+        0,
+    );
+    assert!(percolator::active_bitmap_is_empty(active_bitmap(
+        &env.portfolio_state(victim_account)
+    )));
+
+    let mut current_resolve_data = vec![19u8];
+    current_resolve_data.extend_from_slice(&new_market_id.to_le_bytes());
+    let current_resolve = Transaction::new_signed_with_payer(
+        &[
+            heap_ix(),
+            cu_ix(),
+            Instruction {
+                program_id: env.program_id,
+                accounts: vec![
+                    AccountMeta::new(admin.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                ],
+                data: current_resolve_data,
+            },
+        ],
+        Some(&env.payer.pubkey()),
+        &[&env.payer, &admin],
+        env.svm.latest_blockhash(),
+    );
+    env.svm
+        .send_transaction(current_resolve)
+        .expect("current-generation resolve remains usable");
+    assert_eq!(env.market_state().1.mode, MarketModeV16::Resolved);
+}
+
 // A fee policy signed for a retired market must not acquire authority over a replacement market at
 // the same address. Otherwise it can land while the replacement is empty (bypassing the funded-live
 // fee guard), then tax an already-signed zero-fee trade and route the proceeds to a permissionless
