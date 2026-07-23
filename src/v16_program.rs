@@ -654,8 +654,15 @@ pub mod state {
         pub matcher_program: [u8; 32],
         pub matcher_context: [u8; 32],
         pub matcher_delegate: [u8; 32],
-        pub enabled: u64,
+        pub enabled: u8,
+        pub reserved0: u8,
+        /// LP-signed cap for the authority-mutable base fee component.
+        pub trade_fee_cap_bps: u16,
+        pub reserved1: [u8; 4],
     }
+
+    const _: [(); PORTFOLIO_MATCHER_CONFIG_LEN] =
+        [(); core::mem::size_of::<PortfolioMatcherConfigV16>()];
 
     pub type AssetOracleStorageV16 = [u8; ASSET_ORACLE_WRAPPER_LEN];
     pub type MarketViewMutV16<'a> = MarketGroupV16ViewMut<'a, AssetOracleStorageV16>;
@@ -759,7 +766,11 @@ pub mod state {
                 .get(..config_len)
                 .ok_or(PercolatorError::InvalidAccountLen)?,
         );
-        if cfg.enabled > 1 {
+        if cfg.enabled > 1
+            || cfg.reserved0 != 0
+            || cfg.trade_fee_cap_bps > 10_000
+            || cfg.reserved1 != [0; 4]
+        {
             return Err(ProgramError::InvalidAccountData);
         }
         Ok(cfg)
@@ -771,7 +782,11 @@ pub mod state {
         cfg: &PortfolioMatcherConfigV16,
     ) -> Result<(), ProgramError> {
         check_header(data, KIND_PORTFOLIO)?;
-        if cfg.enabled > 1 {
+        if cfg.enabled > 1
+            || cfg.reserved0 != 0
+            || cfg.trade_fee_cap_bps > 10_000
+            || cfg.reserved1 != [0; 4]
+        {
             return Err(ProgramError::InvalidAccountData);
         }
         let bytes = matcher_config_bytes_mut(data)?;
@@ -2472,6 +2487,7 @@ pub mod ix {
         },
         SetMatcherConfig {
             enabled: u8,
+            trade_fee_cap_bps: u16,
         },
         ClosePortfolio,
         TopUpInsurance {
@@ -2737,9 +2753,20 @@ pub mod ix {
                     }
                     Self::BatchTradeCpi { legs }
                 }
-                68 => Self::SetMatcherConfig {
-                    enabled: read_u8(&mut rest)?,
-                },
+                68 => {
+                    let enabled = read_u8(&mut rest)?;
+                    // Legacy authorizations had no fee-consent field. Decode them as cap zero so
+                    // they remain valid only while the mutable market base fee is also zero.
+                    let trade_fee_cap_bps = if rest.is_empty() {
+                        0
+                    } else {
+                        read_u16(&mut rest)?
+                    };
+                    Self::SetMatcherConfig {
+                        enabled,
+                        trade_fee_cap_bps,
+                    }
+                }
                 8 => Self::ClosePortfolio,
                 9 => Self::TopUpInsurance {
                     amount: read_u128(&mut rest)?,
@@ -3026,9 +3053,13 @@ pub mod ix {
                         push_u64(&mut out, leg.limit_price);
                     }
                 }
-                Self::SetMatcherConfig { enabled } => {
+                Self::SetMatcherConfig {
+                    enabled,
+                    trade_fee_cap_bps,
+                } => {
                     out.push(68);
                     out.push(enabled);
+                    push_u16(&mut out, trade_fee_cap_bps);
                 }
                 Self::ClosePortfolio => out.push(8),
                 Self::TopUpInsurance { amount } => {
@@ -5182,9 +5213,10 @@ pub mod processor {
             Instruction::BatchTradeCpi { legs } => {
                 handle_batch_trade_cpi(program_id, accounts, &legs)
             }
-            Instruction::SetMatcherConfig { enabled } => {
-                handle_set_matcher_config(program_id, accounts, enabled)
-            }
+            Instruction::SetMatcherConfig {
+                enabled,
+                trade_fee_cap_bps,
+            } => handle_set_matcher_config(program_id, accounts, enabled, trade_fee_cap_bps),
             Instruction::ClosePortfolio => handle_close_portfolio(program_id, accounts),
             Instruction::TopUpInsurance { amount } => {
                 handle_top_up_insurance(program_id, accounts, amount)
@@ -6387,7 +6419,7 @@ pub mod processor {
         matcher_prog_key: &Pubkey,
         matcher_ctx_key: &Pubkey,
         matcher_delegate_key: &Pubkey,
-    ) -> Result<usize, ProgramError> {
+    ) -> Result<(usize, u16), ProgramError> {
         let cfg = state::read_portfolio_matcher_config(&account_b_ai.try_borrow_data()?)?;
         if cfg.enabled != 1
             || cfg.matcher_program != matcher_prog_key.to_bytes()
@@ -6396,7 +6428,7 @@ pub mod processor {
         {
             return Err(PercolatorError::Unauthorized.into());
         }
-        Ok(7)
+        Ok((7, cfg.trade_fee_cap_bps))
     }
 
     fn validate_matcher_tail<'a>(
@@ -6513,12 +6545,15 @@ pub mod processor {
             matcher_ctx.key,
         );
         expect_key(matcher_delegate, &delegate)?;
-        let tail_start = matcher_tail_start_or_verify_lp_config(
+        let (tail_start, lp_trade_fee_cap_bps) = matcher_tail_start_or_verify_lp_config(
             account_b_ai,
             matcher_prog.key,
             matcher_ctx.key,
             matcher_delegate.key,
         )?;
+        if cfg_pre.trade_fee_base_bps > u64::from(lp_trade_fee_cap_bps) {
+            return Err(PercolatorError::InvalidInstruction.into());
+        }
         let tail = accounts
             .get(tail_start..)
             .ok_or(ProgramError::NotEnoughAccountKeys)?;
@@ -6613,9 +6648,8 @@ pub mod processor {
             asset_index,
             ret.exec_size,
             ret.exec_price_e6,
-            // Only the taker signs this fill, and the matcher ABI does not carry a fee for the LP
-            // to approve. Start CPI fee derivation at the market-configured base; hybrid/EWMA
-            // movement may still raise it deterministically inside the shared trade path.
+            // The LP's signed matcher config caps the mutable base above. Hybrid/EWMA movement may
+            // still raise the final fee deterministically inside the shared trade path.
             cfg_pre.trade_fee_base_bps,
             max_market_slots,
         )
@@ -6626,8 +6660,9 @@ pub mod processor {
         program_id: &Pubkey,
         accounts: &'a [AccountInfo<'a>],
         enabled: u8,
+        trade_fee_cap_bps: u16,
     ) -> ProgramResult {
-        if enabled > 1 {
+        if enabled > 1 || trade_fee_cap_bps > 10_000 || (enabled == 0 && trade_fee_cap_bps != 0) {
             return Err(PercolatorError::InvalidInstruction.into());
         }
         let lp_owner = account(accounts, 0)?;
@@ -6677,6 +6712,9 @@ pub mod processor {
                 matcher_context: matcher_ctx.key.to_bytes(),
                 matcher_delegate: matcher_delegate.key.to_bytes(),
                 enabled: 1,
+                reserved0: 0,
+                trade_fee_cap_bps,
+                reserved1: [0; 4],
             }
         };
         state::write_portfolio_matcher_config(&mut lp_portfolio_ai.try_borrow_mut_data()?, &cfg)
@@ -6866,12 +6904,15 @@ pub mod processor {
             matcher_ctx.key,
         );
         expect_key(matcher_delegate, &delegate)?;
-        let tail_start = matcher_tail_start_or_verify_lp_config(
+        let (tail_start, lp_trade_fee_cap_bps) = matcher_tail_start_or_verify_lp_config(
             account_b_ai,
             matcher_prog.key,
             matcher_ctx.key,
             matcher_delegate.key,
         )?;
+        if cpi_fee_bps > u64::from(lp_trade_fee_cap_bps) {
+            return Err(PercolatorError::InvalidInstruction.into());
+        }
         let tail = accounts
             .get(tail_start..)
             .ok_or(ProgramError::NotEnoughAccountKeys)?;
@@ -6975,8 +7016,8 @@ pub mod processor {
                 asset_index: leg.asset_index,
                 size_q: ret.exec_size,
                 exec_price: ret.exec_price_e6,
-                // Batch LPs are unsigned too. Caller fee fields are validated above but cannot
-                // increase their charge without matcher-side fee consent in the ABI.
+                // Batch LPs are unsigned too. Their signed matcher config caps this mutable base;
+                // caller fee fields cannot increase the LP charge.
                 fee_bps: cpi_fee_bps,
             });
         }
