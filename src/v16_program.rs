@@ -2565,6 +2565,7 @@ pub mod ix {
         },
         TopUpInsuranceDomain {
             domain: u16,
+            market_id: u64,
             amount: u128,
         },
         CloseSlab,
@@ -2842,6 +2843,7 @@ pub mod ix {
                 },
                 56 => Self::TopUpInsuranceDomain {
                     domain: read_u16(&mut rest)?,
+                    market_id: read_u64(&mut rest)?,
                     amount: read_u128(&mut rest)?,
                 },
                 13 => Self::CloseSlab,
@@ -3142,9 +3144,14 @@ pub mod ix {
                     out.push(9);
                     push_u128(&mut out, amount);
                 }
-                Self::TopUpInsuranceDomain { domain, amount } => {
+                Self::TopUpInsuranceDomain {
+                    domain,
+                    market_id,
+                    amount,
+                } => {
                     out.push(56);
                     push_u16(&mut out, domain);
+                    push_u64(&mut out, market_id);
                     push_u128(&mut out, amount);
                 }
                 Self::CloseSlab => out.push(13),
@@ -5316,9 +5323,11 @@ pub mod processor {
             Instruction::TopUpInsurance { amount } => {
                 handle_top_up_insurance(program_id, accounts, amount)
             }
-            Instruction::TopUpInsuranceDomain { domain, amount } => {
-                handle_top_up_insurance_domain(program_id, accounts, domain, amount)
-            }
+            Instruction::TopUpInsuranceDomain {
+                domain,
+                market_id,
+                amount,
+            } => handle_top_up_insurance_domain(program_id, accounts, domain, market_id, amount),
             Instruction::CloseSlab => handle_close_slab(program_id, accounts),
             Instruction::ResolveMarket => handle_resolve_market(program_id, accounts),
             Instruction::TopUpBackingBucket {
@@ -7320,6 +7329,7 @@ pub mod processor {
         program_id: &Pubkey,
         accounts: &'a [AccountInfo<'a>],
         domain: u16,
+        expected_market_id: u64,
         amount: u128,
     ) -> ProgramResult {
         let signer = account(accounts, 0)?;
@@ -7349,6 +7359,9 @@ pub mod processor {
                 || asset_index >= configured_slots
             {
                 return Err(PercolatorError::InvalidInstruction.into());
+            }
+            if group.markets[asset_index].engine.asset.market_id.get() != expected_market_id {
+                return Err(PercolatorError::AssetGenerationMismatch.into());
             }
             require_domain_accepts_live_topup_view(&group, domain)?;
             let profile = read_oracle_profile_from_view(&group, &cfg, asset_index)?;

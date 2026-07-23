@@ -2935,6 +2935,7 @@ impl V16CuEnv {
         amount: u128,
     ) -> (Pubkey, u64) {
         self.ensure_signer_account(authority.pubkey());
+        let market_id = self.asset_market_id(domain / 2);
         let source = Pubkey::new_unique();
         self.svm
             .set_account(
@@ -2952,7 +2953,11 @@ impl V16CuEnv {
             &mut self.svm,
             self.program_id,
             &self.payer,
-            ProgInstruction::TopUpInsuranceDomain { domain, amount },
+            ProgInstruction::TopUpInsuranceDomain {
+                domain,
+                market_id,
+                amount,
+            },
             vec![
                 AccountMeta::new(authority.pubkey(), true),
                 AccountMeta::new(self.market, false),
@@ -2974,6 +2979,7 @@ impl V16CuEnv {
         amount: u128,
     ) -> (Pubkey, u64) {
         self.ensure_signer_account(authority.pubkey());
+        let market_id = self.asset_market_id(domain / 2);
         let source = Pubkey::new_unique();
         self.svm
             .set_account(
@@ -2991,7 +2997,11 @@ impl V16CuEnv {
             &mut self.svm,
             self.program_id,
             &self.payer,
-            ProgInstruction::TopUpInsuranceDomain { domain, amount },
+            ProgInstruction::TopUpInsuranceDomain {
+                domain,
+                market_id,
+                amount,
+            },
             vec![
                 AccountMeta::new(authority.pubkey(), true),
                 AccountMeta::new(self.market, false),
@@ -4575,6 +4585,7 @@ fn v16_bpf_failed_domain_insurance_topup_transfer_rolls_back_budget_and_ledger()
         &env.payer,
         ProgInstruction::TopUpInsuranceDomain {
             domain: 1,
+            market_id: first_generation_market_id(0),
             amount: 100,
         },
         vec![
@@ -6690,6 +6701,7 @@ fn v16_attack_retired_asset_domain_authority_cannot_refund_slot_and_block_reuse(
     let insurance_topup = env.send(
         ProgInstruction::TopUpInsuranceDomain {
             domain: 2,
+            market_id: first_generation_market_id(1),
             amount: 77,
         },
         vec![
@@ -24067,6 +24079,7 @@ fn v16_attack_insurance_ledger_market_binding_enforced() {
         &env.payer,
         ProgInstruction::TopUpInsuranceDomain {
             domain: 0,
+            market_id: first_generation_market_id(0),
             amount: 100,
         },
         vec![
@@ -24364,6 +24377,7 @@ fn v16_attack_topup_optional_ledgers_reject_cross_market_reuse() {
         &env.payer,
         ProgInstruction::TopUpInsuranceDomain {
             domain: 0,
+            market_id: first_generation_market_id(0),
             amount: 30,
         },
         vec![
@@ -24460,6 +24474,7 @@ fn v16_attack_topup_optional_ledgers_reject_cross_market_reuse() {
         &env.payer,
         ProgInstruction::TopUpInsuranceDomain {
             domain: 0,
+            market_id: first_generation_market_id(0),
             amount: 30,
         },
         vec![
@@ -25154,6 +25169,7 @@ fn v16_attack_value_paths_cannot_use_portfolio_as_optional_ledger() {
     let top_up_domain = env.send(
         ProgInstruction::TopUpInsuranceDomain {
             domain: 0,
+            market_id: first_generation_market_id(0),
             amount: 20,
         },
         vec![
@@ -25367,6 +25383,7 @@ fn v16_attack_value_paths_cannot_use_market_as_optional_ledger() {
     let top_up_domain = env.send(
         ProgInstruction::TopUpInsuranceDomain {
             domain: 0,
+            market_id: first_generation_market_id(0),
             amount: 20,
         },
         vec![
@@ -25619,6 +25636,7 @@ fn v16_attack_topups_cannot_use_vault_as_source() {
         &mut env,
         ProgInstruction::TopUpInsuranceDomain {
             domain: 0,
+            market_id: first_generation_market_id(0),
             amount: 500,
         },
         "TopUpInsuranceDomain",
@@ -26004,6 +26022,7 @@ fn v16_attack_domain_topups_pinned_to_canonical_vault() {
         &env.payer,
         ProgInstruction::TopUpInsuranceDomain {
             domain: 0,
+            market_id: first_generation_market_id(0),
             amount: 500,
         },
         vec![
@@ -26113,6 +26132,7 @@ fn v16_attack_domain_indexed_calls_reject_out_of_range_atomically() {
         &env.payer,
         ProgInstruction::TopUpInsuranceDomain {
             domain: BAD_DOMAIN,
+            market_id: 0,
             amount: 123,
         },
         vec![
@@ -29712,6 +29732,7 @@ fn v16_attack_topup_insurance_domain_authority_gated() {
         &env.payer,
         ProgInstruction::TopUpInsuranceDomain {
             domain: 0,
+            market_id: first_generation_market_id(0),
             amount: 500,
         },
         vec![
@@ -34405,6 +34426,7 @@ fn v16_attack_topups_cannot_bypass_cumulative_tvl_cap() {
         let result = env.send(
             ProgInstruction::TopUpInsuranceDomain {
                 domain: 0,
+                market_id: first_generation_market_id(0),
                 amount: 2,
             },
             vec![
@@ -34431,6 +34453,7 @@ fn v16_attack_topups_cannot_bypass_cumulative_tvl_cap() {
         env.send(
             ProgInstruction::TopUpInsuranceDomain {
                 domain: 0,
+                market_id: first_generation_market_id(0),
                 amount: 1,
             },
             vec![
@@ -56580,6 +56603,7 @@ fn v16_attack_live_value_paths_reject_when_resolve_matured() {
     let stale_insurance = env.send(
         ProgInstruction::TopUpInsuranceDomain {
             domain: 0,
+            market_id: first_generation_market_id(0),
             amount: 25,
         },
         vec![
@@ -59325,6 +59349,7 @@ fn v16_attack_value_topups_reject_delegated_canonical_vault() {
         &env.payer,
         ProgInstruction::TopUpInsuranceDomain {
             domain: 0,
+            market_id: first_generation_market_id(0),
             amount: 12,
         },
         vec![

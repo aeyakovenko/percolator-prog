@@ -172,19 +172,23 @@ fn kani_v16_amount_instructions_decode_preserves_wire_fields() {
 #[kani::proof]
 fn kani_v16_domain_topup_and_asset_insurance_decode_preserves_wire_fields() {
     let domain: u16 = kani::any();
+    let market_id: u64 = kani::any();
     let asset_index: u16 = kani::any();
     let amount: u128 = kani::any();
 
-    let mut top_up = [0u8; 19];
+    let mut top_up = [0u8; 27];
     top_up[0] = 56;
     top_up[1..3].copy_from_slice(&domain.to_le_bytes());
-    top_up[3..19].copy_from_slice(&amount.to_le_bytes());
+    top_up[3..11].copy_from_slice(&market_id.to_le_bytes());
+    top_up[11..27].copy_from_slice(&amount.to_le_bytes());
     match Instruction::decode(&top_up).unwrap() {
         Instruction::TopUpInsuranceDomain {
             domain: got_domain,
+            market_id: got_market_id,
             amount: got_amount,
         } => {
             assert_eq!(got_domain, domain);
+            assert_eq!(got_market_id, market_id);
             assert_eq!(got_amount, amount);
         }
         _ => unreachable!(),
@@ -204,6 +208,17 @@ fn kani_v16_domain_topup_and_asset_insurance_decode_preserves_wire_fields() {
         }
         _ => unreachable!(),
     }
+}
+
+#[kani::proof]
+fn kani_v16_domain_insurance_topup_rejects_legacy_wire_payload() {
+    let domain: u16 = kani::any();
+    let amount: u128 = kani::any();
+    let mut top_up = [0u8; 19];
+    top_up[0] = 56;
+    top_up[1..3].copy_from_slice(&domain.to_le_bytes());
+    top_up[3..19].copy_from_slice(&amount.to_le_bytes());
+    assert!(Instruction::decode(&top_up).is_err());
 }
 
 #[kani::proof]
