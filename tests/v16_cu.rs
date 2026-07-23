@@ -50391,6 +50391,112 @@ fn v16_attack_cpi_taker_cannot_siphon_unsigned_lp_with_caller_fee() {
     }
 }
 
+#[test]
+fn probe_cpi_lp_must_consent_to_mutable_market_base_fee() {
+    const DEPOSIT: u128 = 1_000_000;
+    const SIZE_Q: i128 = (1_000 * POS_SCALE) as i128;
+    const BASE_FEE_BPS: u64 = 500;
+
+    let mut exploited_routes = Vec::new();
+    for batch in [false, true] {
+        let mut env = V16CuEnv::new();
+        let matcher_program = Pubkey::new_unique();
+        let matcher_bytes =
+            std::fs::read(auth_matcher_program_path()).expect("read auth matcher BPF");
+        env.svm.add_program(matcher_program, &matcher_bytes);
+        let attacker = env.admin.insecure_clone();
+        let lp = Keypair::new();
+        let attacker_account = env.create_portfolio(&attacker);
+        let lp_account = env.create_portfolio(&lp);
+        env.deposit(&attacker, attacker_account, DEPOSIT);
+        env.deposit(&lp, lp_account, DEPOSIT);
+        let (ctx, delegate, _) = env.init_auth_matcher_context(matcher_program, &lp, lp_account);
+
+        // The LP authorizes its matcher while the market base is zero. The authority then raises
+        // the execution-time fee, but neither matcher request nor return carries LP consent to it.
+        env.update_trade_fee_policy_with_cu(BASE_FEE_BPS);
+        let market_after_policy = env.svm.get_account(&env.market).unwrap();
+        let attacker_after_policy = env.svm.get_account(&attacker_account).unwrap();
+        let lp_after_policy = env.svm.get_account(&lp_account).unwrap();
+        let ctx_after_policy = env.svm.get_account(&ctx).unwrap();
+
+        let send_fill = |env: &mut V16CuEnv, size_q: i128| {
+            env.svm.expire_blockhash();
+            if batch {
+                env.send(
+                    ProgInstruction::BatchTradeCpi {
+                        legs: vec![BatchTradeCpiLeg {
+                            asset_index: 0,
+                            size_q,
+                            fee_bps: 0,
+                            limit_price: 0,
+                        }],
+                    },
+                    vec![
+                        AccountMeta::new(attacker.pubkey(), true),
+                        AccountMeta::new(env.market, false),
+                        AccountMeta::new(attacker_account, false),
+                        AccountMeta::new(lp_account, false),
+                        AccountMeta::new_readonly(matcher_program, false),
+                        AccountMeta::new(ctx, false),
+                        AccountMeta::new_readonly(delegate, false),
+                    ],
+                    &[&attacker],
+                )
+            } else {
+                env.try_trade_cpi_with_cu_on_asset(
+                    &attacker,
+                    attacker_account,
+                    &lp,
+                    lp_account,
+                    matcher_program,
+                    ctx,
+                    delegate,
+                    0,
+                    size_q,
+                    0,
+                )
+            }
+        };
+
+        if send_fill(&mut env, SIZE_Q).is_ok() {
+            send_fill(&mut env, -SIZE_Q).expect("vulnerable paired CPI close");
+            let attacker_state = env.portfolio_state(attacker_account);
+            let lp_state = env.portfolio_state(lp_account);
+            let (_, group) = env.market_state();
+            assert_eq!(attacker_state.capital.get(), 990_000);
+            assert_eq!(lp_state.capital.get(), 990_000);
+            assert_eq!(group.insurance, 20_000);
+            let (insurance_dest, _) = env.withdraw_insurance_with_cu(group.insurance);
+            let attacker_dest =
+                env.withdraw(&attacker, attacker_account, attacker_state.capital.get());
+            let lp_dest = env.withdraw(&lp, lp_account, lp_state.capital.get());
+            assert_eq!(
+                env.token_amount(attacker_dest) + env.token_amount(insurance_dest),
+                1_010_000
+            );
+            assert_eq!(env.token_amount(lp_dest), 990_000);
+            exploited_routes.push(if batch { "batch" } else { "single" });
+            continue;
+        }
+
+        assert_eq!(
+            env.svm.get_account(&env.market).unwrap(),
+            market_after_policy
+        );
+        assert_eq!(
+            env.svm.get_account(&attacker_account).unwrap(),
+            attacker_after_policy
+        );
+        assert_eq!(env.svm.get_account(&lp_account).unwrap(), lp_after_policy);
+        assert_eq!(env.svm.get_account(&ctx).unwrap(), ctx_after_policy);
+    }
+    assert!(
+        exploited_routes.is_empty(),
+        "CPI matchers accepted authority-controlled base fees without LP consent on {exploited_routes:?}"
+    );
+}
+
 // BatchTradeCpi 14-leg fan-out through one batched matcher CPI, under the tx CU budget.
 #[test]
 fn v16_bpf_batch_trade_cpi_14_legs_under_tx_limit() {
