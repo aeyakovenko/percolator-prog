@@ -65402,3 +65402,158 @@ fn v16_attack_auto_crank_reaches_later_material_liquidation_past_tiny_first_leg(
         "tiny first leg must not shadow liquidation of the later losing leg"
     );
 }
+
+// Terminal liveness/order independence with only public state transitions: two equal winners share
+// one loser, all three flatten after an authenticated mark move, and resolution is driven in opposite
+// close orders. A premature winner close must not change payouts or strand another account.
+#[test]
+fn v16_attack_resolved_two_public_winners_are_close_order_independent() {
+    fn run(winner_attempts_first: bool) -> (u128, u128, u128) {
+        let mut env = V16CuEnv::new_with_init_params(production_risk_params());
+        env.configure_auth_mark_with_cu(0, 1_000_000);
+
+        let winner_a_owner = Keypair::new();
+        let winner_a = env.create_portfolio(&winner_a_owner);
+        let winner_b_owner = Keypair::new();
+        let winner_b = env.create_portfolio(&winner_b_owner);
+        let loser_owner = Keypair::new();
+        let loser = env.create_portfolio(&loser_owner);
+        let accrual_owner = Keypair::new();
+        let accrual = env.create_portfolio(&accrual_owner);
+        for (owner, portfolio) in [
+            (&winner_a_owner, winner_a),
+            (&winner_b_owner, winner_b),
+            (&loser_owner, loser),
+        ] {
+            env.deposit(owner, portfolio, 1_000_000);
+        }
+        env.trade_asset_with_cu(
+            0,
+            &winner_a_owner,
+            winner_a,
+            &loser_owner,
+            loser,
+            (POS_SCALE / 2) as i128,
+            1_000_000,
+            0,
+        );
+        env.trade_asset_with_cu(
+            0,
+            &winner_b_owner,
+            winner_b,
+            &loser_owner,
+            loser,
+            (POS_SCALE / 2) as i128,
+            1_000_000,
+            0,
+        );
+
+        // Reach +10% through the production 24-bps/slot circuit breaker without giving either
+        // winner a different funding-settlement cadence.
+        for slot in 1..=50u64 {
+            env.svm.warp_to_slot(slot);
+            env.push_auth_mark_with_cu(slot, 1_100_000);
+            env.crank(
+                accrual,
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: slot,
+                    observations: crank_observations(0),
+                },
+            );
+        }
+        assert_eq!(env.market_state().1.assets[0].effective_price, 1_100_000);
+        env.close_portfolio_with_cu(&accrual_owner, accrual);
+        for _ in 0..2 {
+            for portfolio in [winner_a, winner_b, loser] {
+                env.svm.expire_blockhash();
+                env.send(
+                    ProgInstruction::PermissionlessCrank {
+                        now_slot: 50,
+                        observations: crank_observations(0),
+                    },
+                    vec![
+                        AccountMeta::new(env.payer.pubkey(), true),
+                        AccountMeta::new(env.market, false),
+                        AccountMeta::new(portfolio, false),
+                    ],
+                    &[],
+                )
+                .expect("public pre-resolution settlement crank");
+            }
+        }
+        for (owner, winner) in [(&winner_a_owner, winner_a), (&winner_b_owner, winner_b)] {
+            env.trade_asset_with_cu(
+                0,
+                owner,
+                winner,
+                &loser_owner,
+                loser,
+                -((POS_SCALE / 2) as i128),
+                1_100_000,
+                0,
+            );
+        }
+        for portfolio in [winner_a, winner_b, loser] {
+            assert!(percolator::active_bitmap_is_empty(active_bitmap(
+                &env.portfolio_state(portfolio)
+            )));
+        }
+        env.resolve();
+
+        let close_once = |env: &mut V16CuEnv, owner: &Keypair, portfolio: Pubkey| -> u128 {
+            let (dest, cu) = env.close_resolved_with_cu(owner, portfolio);
+            assert_cu_within("three-party CloseResolved", cu, CUSTODY_CU_LIMIT);
+            env.token_amount(dest) as u128
+        };
+        let drive = |env: &mut V16CuEnv, owner: &Keypair, portfolio: Pubkey| -> u128 {
+            let mut paid = 0u128;
+            for _ in 0..8 {
+                paid += close_once(env, owner, portfolio);
+                let state = env.portfolio_state(portfolio);
+                if state.capital.get() == 0
+                    && state.pnl.get() == 0
+                    && percolator::active_bitmap_is_empty(active_bitmap(&state))
+                    && (!resolved_receipt(&state).present || resolved_receipt(&state).finalized)
+                {
+                    return paid;
+                }
+            }
+            panic!("resolved close did not terminate within eight bounded calls");
+        };
+
+        let mut winner_a_paid = 0;
+        let mut winner_b_paid = 0;
+        if winner_attempts_first {
+            winner_a_paid += close_once(&mut env, &winner_a_owner, winner_a);
+        }
+        let loser_paid = drive(&mut env, &loser_owner, loser);
+        if winner_attempts_first {
+            winner_b_paid += drive(&mut env, &winner_b_owner, winner_b);
+            winner_a_paid += drive(&mut env, &winner_a_owner, winner_a);
+        } else {
+            winner_b_paid += close_once(&mut env, &winner_b_owner, winner_b);
+            winner_a_paid += drive(&mut env, &winner_a_owner, winner_a);
+            winner_b_paid += drive(&mut env, &winner_b_owner, winner_b);
+        }
+
+        for (owner, portfolio) in [
+            (&winner_a_owner, winner_a),
+            (&winner_b_owner, winner_b),
+            (&loser_owner, loser),
+        ] {
+            env.close_portfolio_with_cu(owner, portfolio);
+        }
+        let (_, group) = env.market_state();
+        assert_eq!(group.materialized_portfolio_count, 0);
+        assert_eq!(group.c_tot, 0);
+        assert_eq!(group.vault, 0);
+        (winner_a_paid, winner_b_paid, loser_paid)
+    }
+
+    let loser_first = run(false);
+    let premature_winner_first = run(true);
+    assert_eq!(premature_winner_first, loser_first);
+    assert_eq!(loser_first.0, loser_first.1);
+    assert_eq!(loser_first.0 + loser_first.1 + loser_first.2, 3_000_000);
+    assert!(loser_first.0 > 1_000_000 && loser_first.2 < 1_000_000);
+}
