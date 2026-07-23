@@ -62130,6 +62130,269 @@ fn v16_attack_permissionless_resolve_policy_cannot_replay_across_market_reinit()
     assert_eq!(env.market_state().1.mode, MarketModeV16::Resolved);
 }
 
+// A maintenance-fee split signed for a closed market must not redirect fees from users of a live
+// replacement at the same address. A retained 100% cranker split otherwise lets any relay turn a
+// generation-B user fee into immediately withdrawable attacker capital without the current admin key.
+#[test]
+fn v16_attack_maintenance_fee_policy_cannot_replay_across_market_reinit() {
+    const DEPOSIT: u128 = 100_000;
+    const MAINTENANCE_FEE_PER_SLOT: u128 = 58;
+    const CRANKER_SHARE_BPS: u16 = 10_000;
+    const PRICE: u64 = 100;
+    const SIZE_Q: i128 = POS_SCALE as i128;
+
+    let params = V16CuMarketParams {
+        maintenance_fee_per_slot: MAINTENANCE_FEE_PER_SLOT,
+        ..V16CuMarketParams::default()
+    };
+    let reinit_params = V16CuMarketParams {
+        max_bankrupt_close_lifetime_slots: params.max_bankrupt_close_lifetime_slots + 1,
+        ..params
+    };
+    let mut env = V16CuEnv::new_with_init_params(params);
+    let admin = env.admin.insecure_clone();
+    let old_market_id = env.asset_market_id(0);
+
+    let mut legacy_policy_data = vec![49u8];
+    legacy_policy_data.extend_from_slice(&CRANKER_SHARE_BPS.to_le_bytes());
+    let uses_market_id_wire = ProgInstruction::decode(&legacy_policy_data).is_err();
+    let mut bound_policy_data = vec![49u8];
+    bound_policy_data.extend_from_slice(&old_market_id.to_le_bytes());
+    bound_policy_data.extend_from_slice(&CRANKER_SHARE_BPS.to_le_bytes());
+    let stale_policy_ix = Instruction {
+        program_id: env.program_id,
+        accounts: vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        data: if uses_market_id_wire {
+            bound_policy_data
+        } else {
+            legacy_policy_data
+        },
+    };
+    let reinit_ix = Instruction {
+        program_id: env.program_id,
+        accounts: vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new_readonly(env.mint, false),
+            AccountMeta::new(env.market_generation, false),
+            AccountMeta::new_readonly(system_program::ID, false),
+        ],
+        data: init_market_instruction(&reinit_params).encode(),
+    };
+    let retained_blockhash = env.svm.latest_blockhash();
+    let stale_policy = Transaction::new_signed_with_payer(
+        &[heap_ix(), cu_ix(), stale_policy_ix],
+        Some(&env.payer.pubkey()),
+        &[&env.payer, &admin],
+        retained_blockhash,
+    );
+    let presigned_reinit = Transaction::new_signed_with_payer(
+        &[heap_ix(), cu_ix(), reinit_ix],
+        Some(&env.payer.pubkey()),
+        &[&env.payer, &admin],
+        retained_blockhash,
+    );
+
+    env.resolve();
+    env.close_slab_with_cu();
+    assert_eq!(env.svm.get_account(&env.market).unwrap().lamports, 0);
+
+    env.svm.warp_to_slot(10);
+    env.svm
+        .set_account(
+            env.market,
+            Account {
+                lamports: 1_000_000_000,
+                data: vec![
+                    0u8;
+                    state::market_account_len_for_capacity(
+                        params.max_portfolio_assets as usize,
+                    )
+                    .unwrap()
+                ],
+                owner: env.program_id,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    env.svm
+        .set_account(
+            env.vault,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_token_data(env.mint, env.vault_authority, 0),
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    env.svm
+        .send_transaction(presigned_reinit)
+        .expect("the same market address is publicly reinitialized from a retained signed init");
+    let new_market_id = env.asset_market_id(0);
+    assert_ne!(new_market_id, old_market_id);
+    assert_eq!(env.market_state().0.maintenance_cranker_fee_share_bps, 0);
+    assert_eq!(
+        env.market_state().0.maintenance_fee_per_slot,
+        MAINTENANCE_FEE_PER_SLOT
+    );
+
+    let victim = Keypair::new();
+    let counterparty = Keypair::new();
+    let fee_payer = Keypair::new();
+    let victim_account = env.create_portfolio(&victim);
+    let counterparty_account = env.create_portfolio(&counterparty);
+    let fee_payer_account = env.create_portfolio(&fee_payer);
+    env.deposit(&victim, victim_account, DEPOSIT);
+    env.deposit(&counterparty, counterparty_account, DEPOSIT);
+    env.deposit(&fee_payer, fee_payer_account, DEPOSIT);
+    env.trade_asset_with_cu(
+        0,
+        &victim,
+        victim_account,
+        &counterparty,
+        counterparty_account,
+        SIZE_Q,
+        PRICE,
+        0,
+    );
+    assert_eq!(
+        active_leg_for_asset(&env.portfolio_state(victim_account), 0).basis_pos_q,
+        SIZE_Q
+    );
+
+    let market_before_replay = env.svm.get_account(&env.market).unwrap();
+    let replay = env.svm.send_transaction(stale_policy);
+    if !uses_market_id_wire {
+        replay.expect("retained generation-A maintenance policy lands on generation B");
+        assert_eq!(
+            env.market_state().0.maintenance_cranker_fee_share_bps,
+            CRANKER_SHARE_BPS
+        );
+
+        env.svm.warp_to_slot(20);
+        let attacker = Keypair::new();
+        let attacker_account = env.create_portfolio(&attacker);
+        let victim_before = env.portfolio_state(fee_payer_account);
+        let victim_equity_before = victim_before.capital.get() as i128 + victim_before.pnl.get();
+        env.sync_maintenance_fee_with_cu(fee_payer_account, Some(attacker_account), 20);
+        let victim_after = env.portfolio_state(fee_payer_account);
+        let charged = (victim_equity_before
+            - (victim_after.capital.get() as i128 + victim_after.pnl.get()))
+            as u128;
+        assert_eq!(charged, MAINTENANCE_FEE_PER_SLOT * 10);
+        assert!(
+            charged > 0,
+            "the independent user paid a real maintenance fee"
+        );
+        assert_eq!(
+            env.portfolio_state(attacker_account).capital.get(),
+            charged,
+            "the stale split turns the entire victim fee into attacker capital"
+        );
+        assert_eq!(
+            env.market_state().1.insurance,
+            0,
+            "the stale 100% split leaves no victim fee in canonical insurance"
+        );
+        let destination = env.withdraw(&attacker, attacker_account, charged);
+        assert_eq!(
+            env.token_amount(destination),
+            charged as u64,
+            "the public cranker extracts the victim-paid fee from canonical custody"
+        );
+        panic!("a retained maintenance-fee policy let a public cranker withdraw generation-B user funds");
+    }
+
+    let replay_error = format!(
+        "{:?}",
+        replay.expect_err("stale maintenance-fee policy must reject")
+    );
+    let expected_error = format!(
+        "Custom({})",
+        PercolatorError::AssetGenerationMismatch as u32
+    );
+    assert!(
+        replay_error.contains(&expected_error),
+        "stale maintenance policy must fail with {expected_error}, got {replay_error}"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before_replay,
+        "generation mismatch leaves the replacement market byte-identical"
+    );
+    assert_eq!(env.market_state().0.maintenance_cranker_fee_share_bps, 0);
+
+    env.svm.warp_to_slot(20);
+    let stale_cranker = Keypair::new();
+    let stale_cranker_account = env.create_portfolio(&stale_cranker);
+    let victim_before = env.portfolio_state(fee_payer_account);
+    let victim_equity_before = victim_before.capital.get() as i128 + victim_before.pnl.get();
+    env.sync_maintenance_fee_with_cu(fee_payer_account, Some(stale_cranker_account), 20);
+    let victim_after = env.portfolio_state(fee_payer_account);
+    let charged = (victim_equity_before
+        - (victim_after.capital.get() as i128 + victim_after.pnl.get())) as u128;
+    assert!(charged > 0);
+    assert_eq!(env.portfolio_state(stale_cranker_account).capital.get(), 0);
+    assert_eq!(
+        env.market_state().1.insurance,
+        charged,
+        "with the stale policy rejected, the current zero-share policy retains the user fee"
+    );
+
+    let mut current_policy_data = vec![49u8];
+    current_policy_data.extend_from_slice(&new_market_id.to_le_bytes());
+    current_policy_data.extend_from_slice(&CRANKER_SHARE_BPS.to_le_bytes());
+    let current_policy = Transaction::new_signed_with_payer(
+        &[
+            heap_ix(),
+            cu_ix(),
+            Instruction {
+                program_id: env.program_id,
+                accounts: vec![
+                    AccountMeta::new(admin.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                ],
+                data: current_policy_data,
+            },
+        ],
+        Some(&env.payer.pubkey()),
+        &[&env.payer, &admin],
+        env.svm.latest_blockhash(),
+    );
+    env.svm
+        .send_transaction(current_policy)
+        .expect("current-generation maintenance policy remains usable");
+    assert_eq!(
+        env.market_state().0.maintenance_cranker_fee_share_bps,
+        CRANKER_SHARE_BPS
+    );
+
+    env.svm.warp_to_slot(30);
+    let current_cranker = Keypair::new();
+    let current_cranker_account = env.create_portfolio(&current_cranker);
+    let victim_before_current = env.portfolio_state(fee_payer_account);
+    let victim_equity_before_current =
+        victim_before_current.capital.get() as i128 + victim_before_current.pnl.get();
+    env.sync_maintenance_fee_with_cu(fee_payer_account, Some(current_cranker_account), 30);
+    let victim_after_current = env.portfolio_state(fee_payer_account);
+    let current_reward = (victim_equity_before_current
+        - (victim_after_current.capital.get() as i128 + victim_after_current.pnl.get()))
+        as u128;
+    assert!(current_reward > 0);
+    assert_eq!(
+        env.portfolio_state(current_cranker_account).capital.get(),
+        current_reward
+    );
+    let destination = env.withdraw(&current_cranker, current_cranker_account, current_reward);
+    assert_eq!(env.token_amount(destination), current_reward as u64);
+}
+
 // A fee policy signed for a retired market must not acquire authority over a replacement market at
 // the same address. Otherwise it can land while the replacement is empty (bypassing the funded-live
 // fee guard), then tax an already-signed zero-fee trade and route the proceeds to a permissionless
