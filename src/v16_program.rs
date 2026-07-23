@@ -2629,6 +2629,7 @@ pub mod ix {
         },
         SyncInsuranceLedger,
         ConfigurePermissionlessResolve {
+            market_id: u64,
             stale_slots: u64,
             force_close_delay_slots: u64,
         },
@@ -2924,6 +2925,7 @@ pub mod ix {
                 },
                 54 => Self::SyncInsuranceLedger,
                 38 => Self::ConfigurePermissionlessResolve {
+                    market_id: read_u64(&mut rest)?,
                     stale_slots: read_u64(&mut rest)?,
                     force_close_delay_slots: read_u64(&mut rest)?,
                 },
@@ -3239,10 +3241,12 @@ pub mod ix {
                 }
                 Self::SyncInsuranceLedger => out.push(54),
                 Self::ConfigurePermissionlessResolve {
+                    market_id,
                     stale_slots,
                     force_close_delay_slots,
                 } => {
                     out.push(38);
+                    push_u64(&mut out, market_id);
                     push_u64(&mut out, stale_slots);
                     push_u64(&mut out, force_close_delay_slots);
                 }
@@ -5370,11 +5374,13 @@ pub mod processor {
             }
             Instruction::SyncInsuranceLedger => handle_sync_insurance_ledger(program_id, accounts),
             Instruction::ConfigurePermissionlessResolve {
+                market_id,
                 stale_slots,
                 force_close_delay_slots,
             } => handle_configure_permissionless_resolve(
                 program_id,
                 accounts,
+                market_id,
                 stale_slots,
                 force_close_delay_slots,
             ),
@@ -9817,6 +9823,7 @@ pub mod processor {
     fn handle_configure_permissionless_resolve<'a>(
         program_id: &Pubkey,
         accounts: &'a [AccountInfo<'a>],
+        expected_market_id: u64,
         stale_slots: u64,
         force_close_delay_slots: u64,
     ) -> ProgramResult {
@@ -9832,18 +9839,26 @@ pub mod processor {
         {
             return Err(PercolatorError::InvalidInstruction.into());
         }
-        let (mut cfg, mode, _, _) =
-            state::read_market_config_mode_and_capacity(&market_ai.try_borrow_data()?)?;
-        expect_live_authority(&cfg.marketauth, admin.key)?;
-        if mode != MarketModeV16::Live {
-            return Err(PercolatorError::EngineLockActive.into());
-        }
-        if oracle_v16::permissionless_stale_matured(&cfg, authenticated_slot_or_fallback(0)) {
-            return Err(PercolatorError::OracleStale.into());
-        }
-        cfg.permissionless_resolve_stale_slots = stale_slots;
-        cfg.force_close_delay_slots = force_close_delay_slots;
-        state::write_wrapper_config(&mut market_ai.try_borrow_mut_data()?, &cfg)
+        let mut market_data = market_ai.try_borrow_mut_data()?;
+        let cfg_after = {
+            let (mut cfg, group) = state::market_view_mut(&mut market_data)?;
+            if group.markets.is_empty()
+                || group.markets[0].engine.asset.market_id.get() != expected_market_id
+            {
+                return Err(PercolatorError::AssetGenerationMismatch.into());
+            }
+            expect_live_authority(&cfg.marketauth, admin.key)?;
+            if group.header.mode != 0 {
+                return Err(PercolatorError::EngineLockActive.into());
+            }
+            if oracle_v16::permissionless_stale_matured(&cfg, authenticated_slot_or_fallback(0)) {
+                return Err(PercolatorError::OracleStale.into());
+            }
+            cfg.permissionless_resolve_stale_slots = stale_slots;
+            cfg.force_close_delay_slots = force_close_delay_slots;
+            cfg
+        };
+        state::write_wrapper_config(&mut market_data, &cfg_after)
     }
 
     #[inline(never)]

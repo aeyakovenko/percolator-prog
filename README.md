@@ -619,7 +619,7 @@ current_fee_bps >= trade_fee_base_bps
 
 The `max_price_move_bps_per_slot` floor applies only during stale hybrid fallback. It lets consenting counterparties keep trading at any execution price while charging for the next honest external-oracle step even when the EWMA mark itself does not move.
 
-The hard `permissionless_resolve_stale_slots` timer remains independent. If that hard timer matures, live price-taking paths stop and the market exits through permissionless resolution.
+The hard `permissionless_resolve_stale_slots` timer remains independent. If that hard timer matures, live price-taking paths stop and the market exits through permissionless resolution. The signed `ConfigurePermissionlessResolve { market_id, .. }` policy update is bound to asset 0's current generation, so a retained update from before an asset-0 shutdown/restart cannot shorten or extend the replacement generation's terminal window.
 
 ---
 
