@@ -1430,9 +1430,10 @@ impl V16CuEnv {
                 },
             )
             .unwrap();
+        let market_id = self.asset_market_id(0);
         let cu = self
             .send(
-                ProgInstruction::Deposit { amount },
+                ProgInstruction::Deposit { market_id, amount },
                 vec![
                     AccountMeta::new(owner.pubkey(), true),
                     AccountMeta::new(self.market, false),
@@ -3936,7 +3937,10 @@ fn v16_bpf_mainnet_realistic_system_spl_ata_bootstrap_deposits_and_ledgers() {
         &mut svm,
         program_id,
         &payer,
-        ProgInstruction::Deposit { amount: 123 },
+        ProgInstruction::Deposit {
+            market_id: first_generation_market_id(0),
+            amount: 123,
+        },
         vec![
             AccountMeta::new(user.pubkey(), true),
             AccountMeta::new(market.pubkey(), false),
@@ -4243,7 +4247,10 @@ fn deposit_to_market(
         &mut env.svm,
         env.program_id,
         &env.payer,
-        ProgInstruction::Deposit { amount },
+        ProgInstruction::Deposit {
+            market_id: first_generation_market_id(0),
+            amount,
+        },
         vec![
             AccountMeta::new(owner.pubkey(), true),
             AccountMeta::new(market, false),
@@ -4459,7 +4466,10 @@ fn v16_bpf_failed_deposit_spl_transfer_rolls_back_engine_credit() {
     let source_before = env.svm.get_account(&source).unwrap();
     let vault_before = env.svm.get_account(&env.vault).unwrap();
     let result = env.send(
-        ProgInstruction::Deposit { amount: 100 },
+        ProgInstruction::Deposit {
+            market_id: first_generation_market_id(0),
+            amount: 100,
+        },
         vec![
             AccountMeta::new(owner.pubkey(), true),
             AccountMeta::new(env.market, false),
@@ -6353,10 +6363,7 @@ fn v16_attack_presigned_deposit_rejects_reinitialized_market() {
             "the stale deposit must reject with {expected_error}: {rejected:?}"
         );
         assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
-        assert_eq!(
-            env.svm.get_account(&victim_account).unwrap(),
-            victim_before
-        );
+        assert_eq!(env.svm.get_account(&victim_account).unwrap(), victim_before);
         assert_eq!(env.svm.get_account(&source).unwrap(), source_before);
         assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
         assert_eq!(env.token_amount(source), FORCED_DEPOSIT as u64);
@@ -20758,7 +20765,10 @@ fn v16_attack_zero_amount_inputs_are_safe() {
     env.svm.expire_blockhash();
     let src = env.token_account(la.pubkey(), 0);
     let r_dep = env.send(
-        ProgInstruction::Deposit { amount: 0 },
+        ProgInstruction::Deposit {
+            market_id: first_generation_market_id(0),
+            amount: 0,
+        },
         vec![
             AccountMeta::new(la.pubkey(), true),
             AccountMeta::new(env.market, false),
@@ -20915,7 +20925,10 @@ fn v16_attack_deposit_underfunded_source_is_atomic() {
         .unwrap();
     env.svm.expire_blockhash();
     let r = env.send(
-        ProgInstruction::Deposit { amount: 1_000_000 },
+        ProgInstruction::Deposit {
+            market_id: first_generation_market_id(0),
+            amount: 1_000_000,
+        },
         vec![
             AccountMeta::new(owner.pubkey(), true),
             AccountMeta::new(env.market, false),
@@ -20947,7 +20960,10 @@ fn v16_attack_deposit_underfunded_source_is_atomic() {
     // a valid deposit within balance still works afterward (state not corrupted).
     env.svm.expire_blockhash();
     let r2 = env.send(
-        ProgInstruction::Deposit { amount: 100 },
+        ProgInstruction::Deposit {
+            market_id: first_generation_market_id(0),
+            amount: 100,
+        },
         vec![
             AccountMeta::new(owner.pubkey(), true),
             AccountMeta::new(env.market, false),
@@ -23207,7 +23223,10 @@ fn v16_attack_cure_rejects_cross_market_portfolio_before_transfer() {
         &mut env.svm,
         env.program_id,
         &env.payer,
-        ProgInstruction::Deposit { amount: 100 },
+        ProgInstruction::Deposit {
+            market_id: first_generation_market_id(0),
+            amount: 100,
+        },
         vec![
             AccountMeta::new(owner.pubkey(), true),
             AccountMeta::new(market_b, false),
@@ -23551,7 +23570,10 @@ fn v16_regression_vault_pinned_to_canonical_ata_no_fragmentation() {
     let atk_src = env.token_account_for_mint(env.mint, attacker.pubkey(), 500_000);
     env.svm.expire_blockhash();
     let dep = env.send(
-        ProgInstruction::Deposit { amount: 500_000 },
+        ProgInstruction::Deposit {
+            market_id: first_generation_market_id(0),
+            amount: 500_000,
+        },
         vec![
             AccountMeta::new(attacker.pubkey(), true),
             AccountMeta::new(env.market, false),
@@ -25779,7 +25801,10 @@ fn v16_attack_deposit_from_vault_as_source_rejected() {
     // attacker tries to "deposit" using the VAULT as the source (vault is owned by vault_authority, not attacker).
     env.svm.expire_blockhash();
     let r = env.send(
-        ProgInstruction::Deposit { amount: 500_000 },
+        ProgInstruction::Deposit {
+            market_id: first_generation_market_id(0),
+            amount: 500_000,
+        },
         vec![
             AccountMeta::new(attacker.pubkey(), true),
             AccountMeta::new(env.market, false),
@@ -25812,7 +25837,10 @@ fn v16_attack_deposit_from_vault_as_source_rejected() {
     let other_src = env.token_account_for_mint(env.mint, other.pubkey(), 500_000);
     env.svm.expire_blockhash();
     let r2 = env.send(
-        ProgInstruction::Deposit { amount: 500_000 },
+        ProgInstruction::Deposit {
+            market_id: first_generation_market_id(0),
+            amount: 500_000,
+        },
         vec![
             AccountMeta::new(attacker.pubkey(), true),
             AccountMeta::new(env.market, false),
@@ -26095,7 +26123,10 @@ fn v16_attack_resolved_mode_gates_all_live_ops() {
     let src = env.token_account_for_mint(env.mint, owner.pubkey(), 100);
     env.svm.expire_blockhash();
     let r_dep = env.send(
-        ProgInstruction::Deposit { amount: 100 },
+        ProgInstruction::Deposit {
+            market_id: first_generation_market_id(0),
+            amount: 100,
+        },
         vec![
             AccountMeta::new(owner.pubkey(), true),
             AccountMeta::new(env.market, false),
@@ -31176,7 +31207,10 @@ fn v16_attack_cross_market_portfolio_cannot_drain_foreign_vault() {
         &mut env.svm,
         env.program_id,
         &env.payer,
-        ProgInstruction::Deposit { amount: 1_000_000 },
+        ProgInstruction::Deposit {
+            market_id: first_generation_market_id(0),
+            amount: 1_000_000,
+        },
         vec![
             AccountMeta::new(victim.pubkey(), true),
             AccountMeta::new(market_b, false),
@@ -31780,7 +31814,10 @@ fn v16_attack_close_resolved_rejects_cross_market_portfolio_payout() {
         &mut env.svm,
         env.program_id,
         &env.payer,
-        ProgInstruction::Deposit { amount: 1_000_000 },
+        ProgInstruction::Deposit {
+            market_id: first_generation_market_id(0),
+            amount: 1_000_000,
+        },
         vec![
             AccountMeta::new(victim.pubkey(), true),
             AccountMeta::new(market_b, false),
@@ -32299,7 +32336,10 @@ fn v16_attack_permissionless_crank_rejects_cross_market_target_portfolio() {
             &mut env.svm,
             env.program_id,
             &env.payer,
-            ProgInstruction::Deposit { amount: 1_000_000 },
+            ProgInstruction::Deposit {
+                market_id: first_generation_market_id(0),
+                amount: 1_000_000,
+            },
             vec![
                 AccountMeta::new(owner.pubkey(), true),
                 AccountMeta::new(market_b, false),
@@ -32774,7 +32814,10 @@ fn v16_attack_wrong_token_program_rejected() {
     let src = env.token_account_for_mint(env.mint, owner.pubkey(), 100);
     env.svm.expire_blockhash();
     let r2 = env.send(
-        ProgInstruction::Deposit { amount: 100 },
+        ProgInstruction::Deposit {
+            market_id: first_generation_market_id(0),
+            amount: 100,
+        },
         vec![
             AccountMeta::new(owner.pubkey(), true),
             AccountMeta::new(env.market, false),
@@ -34327,7 +34370,10 @@ fn v16_attack_large_amount_deposit_withdraw_exact() {
     let src_over = env.token_account_for_mint(env.mint, owner.pubkey(), over as u64);
     env.svm.expire_blockhash();
     let r = env.send(
-        ProgInstruction::Deposit { amount: over },
+        ProgInstruction::Deposit {
+            market_id: first_generation_market_id(0),
+            amount: over,
+        },
         vec![
             AccountMeta::new(owner.pubkey(), true),
             AccountMeta::new(env.market, false),
@@ -34551,7 +34597,10 @@ fn v16_attack_cumulative_tvl_cap_enforced() {
     let src = env.token_account_for_mint(env.mint, b.pubkey(), 100);
     env.svm.expire_blockhash();
     let r = env.send(
-        ProgInstruction::Deposit { amount: 100 },
+        ProgInstruction::Deposit {
+            market_id: first_generation_market_id(0),
+            amount: 100,
+        },
         vec![
             AccountMeta::new(b.pubkey(), true),
             AccountMeta::new(env.market, false),
@@ -35264,7 +35313,10 @@ fn v16_attack_deposit_during_active_close_safe() {
     let src = env.token_account_for_mint(env.mint, owner.pubkey(), 500);
     env.svm.expire_blockhash();
     let r = env.send(
-        ProgInstruction::Deposit { amount: 500 },
+        ProgInstruction::Deposit {
+            market_id: first_generation_market_id(0),
+            amount: 500,
+        },
         vec![
             AccountMeta::new(owner.pubkey(), true),
             AccountMeta::new(env.market, false),
@@ -44021,7 +44073,10 @@ fn v16_attack_deposit_into_uninitialized_portfolio_rejects() {
 
     env.svm.expire_blockhash();
     let r = env.send(
-        ProgInstruction::Deposit { amount: 1_000 },
+        ProgInstruction::Deposit {
+            market_id: first_generation_market_id(0),
+            amount: 1_000,
+        },
         vec![
             AccountMeta::new(owner.pubkey(), true),
             AccountMeta::new(env.market, false),
@@ -44129,7 +44184,10 @@ fn v16_attack_deposit_wrong_mint_source_rejects() {
 
     env.svm.expire_blockhash();
     let r = env.send(
-        ProgInstruction::Deposit { amount: 1_000_000 },
+        ProgInstruction::Deposit {
+            market_id: first_generation_market_id(0),
+            amount: 1_000_000,
+        },
         vec![
             AccountMeta::new(owner.pubkey(), true),
             AccountMeta::new(env.market, false),
@@ -44164,7 +44222,10 @@ fn v16_attack_deposit_wrong_mint_source_rejects() {
     let good_source = env.token_account_for_mint(env.mint, owner.pubkey(), 500);
     env.svm.expire_blockhash();
     let ok = env.send(
-        ProgInstruction::Deposit { amount: 500 },
+        ProgInstruction::Deposit {
+            market_id: first_generation_market_id(0),
+            amount: 500,
+        },
         vec![
             AccountMeta::new(owner.pubkey(), true),
             AccountMeta::new(env.market, false),
@@ -47640,7 +47701,10 @@ fn v16_attack_deposit_primary_only_withdraw_either() {
         .unwrap();
     env.svm.expire_blockhash();
     let r_dep = env.send(
-        ProgInstruction::Deposit { amount: 500 },
+        ProgInstruction::Deposit {
+            market_id: first_generation_market_id(0),
+            amount: 500,
+        },
         vec![
             AccountMeta::new(owner.pubkey(), true),
             AccountMeta::new(market, false),
@@ -56322,7 +56386,10 @@ fn v16_attack_live_value_paths_reject_when_resolve_matured() {
     let fresh_deposit_source = env.token_account_for_mint(env.mint, taker.pubkey(), 50_000);
     env.svm.expire_blockhash();
     let fresh_deposit = env.send(
-        ProgInstruction::Deposit { amount: 50_000 },
+        ProgInstruction::Deposit {
+            market_id: first_generation_market_id(0),
+            amount: 50_000,
+        },
         vec![
             AccountMeta::new(taker.pubkey(), true),
             AccountMeta::new(env.market, false),
@@ -56369,7 +56436,10 @@ fn v16_attack_live_value_paths_reject_when_resolve_matured() {
 
     env.svm.expire_blockhash();
     let stale_deposit = env.send(
-        ProgInstruction::Deposit { amount: 75_000 },
+        ProgInstruction::Deposit {
+            market_id: first_generation_market_id(0),
+            amount: 75_000,
+        },
         vec![
             AccountMeta::new(taker.pubkey(), true),
             AccountMeta::new(env.market, false),
@@ -58391,7 +58461,10 @@ fn v16_attack_deposit_withdraw_amount_over_u64_max_rejects_no_truncation() {
     let src = env.token_account(owner.pubkey(), 1_000);
     env.svm.expire_blockhash();
     let r_dep = env.send(
-        ProgInstruction::Deposit { amount: over },
+        ProgInstruction::Deposit {
+            market_id: first_generation_market_id(0),
+            amount: over,
+        },
         vec![
             AccountMeta::new(owner.pubkey(), true),
             AccountMeta::new(env.market, false),

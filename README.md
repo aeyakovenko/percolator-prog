@@ -411,6 +411,8 @@ This section describes intent and operational ordering, not argument-by-argument
 - **InitPortfolio** (tag 1)
   - initializes a program-owned portfolio account and binds `owner = signer`
 - **Deposit** (tag 3)
+  - carries asset 0's current `market_id`; a stale market generation rejects before portfolio resize,
+    state mutation, or token movement
   - transfers collateral into vault; credits engine balance for that account
 - **Withdraw** (tag 4)
   - performs oracle-read + engine checks; withdraws from vault via PDA signer; debits engine
