@@ -2423,12 +2423,14 @@ impl V16CuEnv {
         now_slot: u64,
         now_unix_ts: i64,
     ) -> Result<u64, String> {
+        let market_id = self.asset_market_id(0);
         send_tx(
             &mut self.svm,
             self.program_id,
             &self.payer,
             ProgInstruction::ConfigureHybridOracle {
                 asset_index: 0,
+                market_id,
                 now_slot,
                 now_unix_ts,
                 oracle_leg_count: 3,
@@ -2524,6 +2526,7 @@ impl V16CuEnv {
         hybrid_soft_stale_slots: u64,
         conf_filter_bps: u16,
     ) -> Result<u64, String> {
+        let market_id = self.asset_market_id(asset_index);
         let mut accounts = vec![
             AccountMeta::new(self.admin.pubkey(), true),
             AccountMeta::new(self.market, false),
@@ -2541,6 +2544,7 @@ impl V16CuEnv {
             &self.payer,
             ProgInstruction::ConfigureHybridOracle {
                 asset_index,
+                market_id,
                 now_slot,
                 now_unix_ts,
                 oracle_leg_count,
@@ -2566,12 +2570,14 @@ impl V16CuEnv {
         halflife_slots: u64,
         mark_min_fee: u64,
     ) -> u64 {
+        let market_id = self.asset_market_id(0);
         send_tx(
             &mut self.svm,
             self.program_id,
             &self.payer,
             ProgInstruction::ConfigureEwmaMark {
                 asset_index: 0,
+                market_id,
                 now_slot,
                 initial_mark_e6,
                 mark_ewma_halflife_slots: halflife_slots,
@@ -2587,12 +2593,14 @@ impl V16CuEnv {
     }
 
     fn push_ewma_mark_with_cu(&mut self, now_slot: u64, mark_e6: u64) -> u64 {
+        let market_id = self.asset_market_id(0);
         send_tx(
             &mut self.svm,
             self.program_id,
             &self.payer,
             ProgInstruction::PushEwmaMark {
                 asset_index: 0,
+                market_id,
                 now_slot,
                 mark_e6,
             },
@@ -2606,12 +2614,14 @@ impl V16CuEnv {
     }
 
     fn configure_auth_mark_with_cu(&mut self, now_slot: u64, initial_mark_e6: u64) -> u64 {
+        let market_id = self.asset_market_id(0);
         send_tx(
             &mut self.svm,
             self.program_id,
             &self.payer,
             ProgInstruction::ConfigureAuthMark {
                 asset_index: 0,
+                market_id,
                 now_slot,
                 initial_mark_e6,
             },
@@ -2625,12 +2635,14 @@ impl V16CuEnv {
     }
 
     fn push_auth_mark_with_cu(&mut self, now_slot: u64, mark_e6: u64) -> u64 {
+        let market_id = self.asset_market_id(0);
         send_tx(
             &mut self.svm,
             self.program_id,
             &self.payer,
             ProgInstruction::PushAuthMark {
                 asset_index: 0,
+                market_id,
                 now_slot,
                 mark_e6,
             },
@@ -2649,12 +2661,14 @@ impl V16CuEnv {
         now_slot: u64,
         initial_mark_e6: u64,
     ) -> u64 {
+        let market_id = self.asset_market_id(asset_index);
         send_tx(
             &mut self.svm,
             self.program_id,
             &self.payer,
             ProgInstruction::ConfigureAuthMark {
                 asset_index,
+                market_id,
                 now_slot,
                 initial_mark_e6,
             },
@@ -2673,12 +2687,14 @@ impl V16CuEnv {
         now_slot: u64,
         mark_e6: u64,
     ) -> u64 {
+        let market_id = self.asset_market_id(asset_index);
         send_tx(
             &mut self.svm,
             self.program_id,
             &self.payer,
             ProgInstruction::PushAuthMark {
                 asset_index,
+                market_id,
                 now_slot,
                 mark_e6,
             },
@@ -2699,12 +2715,14 @@ impl V16CuEnv {
         initial_mark_e6: u64,
     ) -> u64 {
         self.ensure_signer_account(authority.pubkey());
+        let market_id = self.asset_market_id(asset_index);
         send_tx(
             &mut self.svm,
             self.program_id,
             &self.payer,
             ProgInstruction::ConfigureAuthMark {
                 asset_index,
+                market_id,
                 now_slot,
                 initial_mark_e6,
             },
@@ -2725,12 +2743,14 @@ impl V16CuEnv {
         mark_e6: u64,
     ) -> u64 {
         self.ensure_signer_account(authority.pubkey());
+        let market_id = self.asset_market_id(asset_index);
         send_tx(
             &mut self.svm,
             self.program_id,
             &self.payer,
             ProgInstruction::PushAuthMark {
                 asset_index,
+                market_id,
                 now_slot,
                 mark_e6,
             },
@@ -5235,6 +5255,8 @@ fn v16_attack_privileged_reactivate_rekeys_retired_slot_authorities() {
         &[&admin],
     )
     .expect("admin reactivates the retired slot with fresh authorities");
+    let reused_market_id = env.asset_market_id(1);
+    assert_ne!(reused_market_id, first_generation_market_id(1));
 
     let market_data = env.svm.get_account(&env.market).unwrap().data;
     let reused_profile = state::read_asset_oracle_profile(&market_data, 1).unwrap();
@@ -5270,6 +5292,7 @@ fn v16_attack_privileged_reactivate_rekeys_retired_slot_authorities() {
     let old_oracle_reconfig = env.send(
         ProgInstruction::ConfigureAuthMark {
             asset_index: 1,
+            market_id: reused_market_id,
             now_slot: 5,
             initial_mark_e6: 300,
         },
@@ -5294,6 +5317,7 @@ fn v16_attack_privileged_reactivate_rekeys_retired_slot_authorities() {
     let new_oracle_reconfig = env.send(
         ProgInstruction::ConfigureAuthMark {
             asset_index: 1,
+            market_id: reused_market_id,
             now_slot: 5,
             initial_mark_e6: 300,
         },
@@ -7167,6 +7191,7 @@ fn v16_bpf_asset0_shutdown_force_closes_preserves_insurance_and_restarts() {
         &env.payer,
         ProgInstruction::ConfigureAuthMark {
             asset_index: 0,
+            market_id: first_generation_market_id((0) as u16),
             now_slot: 8,
             initial_mark_e6: 250,
         },
@@ -16647,6 +16672,7 @@ fn v16_attack_cross_margin_two_asset_conservation() {
         &env.payer,
         ProgInstruction::ConfigureAuthMark {
             asset_index: 1,
+            market_id: first_generation_market_id((1) as u16),
             now_slot: 0,
             initial_mark_e6: 100,
         },
@@ -16714,6 +16740,7 @@ fn v16_attack_cross_margin_divergent_moves_conserve() {
         100,
         ProgInstruction::ConfigureAuthMark {
             asset_index: 1,
+            market_id: first_generation_market_id((1) as u16),
             now_slot: 0,
             initial_mark_e6: 100,
         },
@@ -16737,6 +16764,7 @@ fn v16_attack_cross_margin_divergent_moves_conserve() {
         90,
         ProgInstruction::PushAuthMark {
             asset_index: 1,
+            market_id: first_generation_market_id((1) as u16),
             now_slot: 10,
             mark_e6: 90,
         },
@@ -17813,6 +17841,7 @@ fn v16_regression_cross_margin_insolvency_no_value_extraction() {
         &mut env,
         ProgInstruction::ConfigureAuthMark {
             asset_index: 1,
+            market_id: first_generation_market_id((1) as u16),
             now_slot: 0,
             initial_mark_e6: 100,
         },
@@ -17854,6 +17883,7 @@ fn v16_regression_cross_margin_insolvency_no_value_extraction() {
             &mut env,
             ProgInstruction::PushAuthMark {
                 asset_index: 1,
+                market_id: first_generation_market_id((1) as u16),
                 now_slot: slot,
                 mark_e6: mark,
             },
@@ -18040,6 +18070,7 @@ fn v16_attack_resolved_cross_margin_deep_insolvency_winds_down_publicly() {
         &mut env,
         ProgInstruction::ConfigureAuthMark {
             asset_index: 1,
+            market_id: first_generation_market_id((1) as u16),
             now_slot: 0,
             initial_mark_e6: 100,
         },
@@ -18079,6 +18110,7 @@ fn v16_attack_resolved_cross_margin_deep_insolvency_winds_down_publicly() {
             &mut env,
             ProgInstruction::PushAuthMark {
                 asset_index: 1,
+                market_id: first_generation_market_id((1) as u16),
                 now_slot: slot,
                 mark_e6: mark,
             },
@@ -19567,6 +19599,7 @@ fn v16_attack_extreme_auth_mark_push_rejected_or_safe() {
             &env.payer,
             ProgInstruction::PushAuthMark {
                 asset_index: 0,
+                market_id: first_generation_market_id((0) as u16),
                 now_slot: 5,
                 mark_e6: mark,
             },
@@ -20335,6 +20368,7 @@ fn v16_attack_cross_margin_solvent_account_not_unfairly_liquidated() {
         &mut env,
         ProgInstruction::ConfigureAuthMark {
             asset_index: 1,
+            market_id: first_generation_market_id((1) as u16),
             now_slot: 0,
             initial_mark_e6: 100,
         },
@@ -20374,6 +20408,7 @@ fn v16_attack_cross_margin_solvent_account_not_unfairly_liquidated() {
         &mut env,
         ProgInstruction::PushAuthMark {
             asset_index: 1,
+            market_id: first_generation_market_id((1) as u16),
             now_slot: 10,
             mark_e6: 110,
         },
@@ -23230,6 +23265,7 @@ fn v16_attack_non_admin_cannot_resolve_or_configure() {
         &env.payer,
         ProgInstruction::ConfigureAuthMark {
             asset_index: 0,
+            market_id: first_generation_market_id((0) as u16),
             now_slot: 0,
             initial_mark_e6: 999_999,
         },
@@ -23512,6 +23548,7 @@ fn v16_attack_out_of_range_asset_index_rejected() {
             &env.payer,
             ProgInstruction::PushAuthMark {
                 asset_index: bad,
+                market_id: first_generation_market_id((bad) as u16),
                 now_slot: 1,
                 mark_e6: 100,
             },
@@ -27867,6 +27904,7 @@ fn v16_attack_permissionless_asset_oracle_cannot_block_base_resolve_matured() {
     let stale_asset_push = env.send(
         ProgInstruction::PushAuthMark {
             asset_index: 1,
+            market_id: first_generation_market_id((1) as u16),
             now_slot: 40,
             mark_e6: 102,
         },
@@ -30357,6 +30395,7 @@ fn v16_attack_cross_margin_divergent_close_conserves() {
         &mut env,
         ProgInstruction::ConfigureAuthMark {
             asset_index: 1,
+            market_id: first_generation_market_id((1) as u16),
             now_slot: 0,
             initial_mark_e6: 100,
         },
@@ -30378,6 +30417,7 @@ fn v16_attack_cross_margin_divergent_close_conserves() {
         &mut env,
         ProgInstruction::PushAuthMark {
             asset_index: 1,
+            market_id: first_generation_market_id((1) as u16),
             now_slot: 10,
             mark_e6: 90,
         },
@@ -33194,6 +33234,7 @@ fn v16_attack_max_leg_multi_asset_conserves() {
             &env.payer,
             ProgInstruction::ConfigureAuthMark {
                 asset_index: ai,
+                market_id: first_generation_market_id((ai) as u16),
                 now_slot: 0,
                 initial_mark_e6: 100,
             },
@@ -33442,6 +33483,7 @@ fn v16_attack_ewma_mark_halflife_zero_safe() {
         &env.payer,
         ProgInstruction::ConfigureEwmaMark {
             asset_index: 0,
+            market_id: first_generation_market_id((0) as u16),
             now_slot: 0,
             initial_mark_e6: 100,
             mark_ewma_halflife_slots: 0,
@@ -33802,6 +33844,7 @@ fn v16_attack_retire_asset_authority_gated() {
         &env.payer,
         ProgInstruction::ConfigureAuthMark {
             asset_index: 1,
+            market_id: first_generation_market_id((1) as u16),
             now_slot: 0,
             initial_mark_e6: 100,
         },
@@ -33916,6 +33959,7 @@ fn v16_attack_per_asset_crank_isolation() {
         &env.payer,
         ProgInstruction::ConfigureAuthMark {
             asset_index: 1,
+            market_id: first_generation_market_id((1) as u16),
             now_slot: 0,
             initial_mark_e6: 100,
         },
@@ -34963,6 +35007,7 @@ fn v16_attack_per_asset_funding_isolation() {
         &env.payer,
         ProgInstruction::ConfigureEwmaMark {
             asset_index: 1,
+            market_id: first_generation_market_id((1) as u16),
             now_slot: 0,
             initial_mark_e6: IP,
             mark_ewma_halflife_slots: 1,
@@ -35100,6 +35145,7 @@ fn v16_attack_fee_redirect_split_lands_correctly() {
         &env.payer,
         ProgInstruction::ConfigureAuthMark {
             asset_index: 1,
+            market_id: first_generation_market_id((1) as u16),
             now_slot: 0,
             initial_mark_e6: 100,
         },
@@ -35748,6 +35794,7 @@ fn v16_attack_fee_redirect_full_boundary() {
         &env.payer,
         ProgInstruction::ConfigureAuthMark {
             asset_index: 1,
+            market_id: first_generation_market_id((1) as u16),
             now_slot: 0,
             initial_mark_e6: 100,
         },
@@ -37408,6 +37455,7 @@ fn v16_attack_force_close_healthy_asset_rejected() {
         &env.payer,
         ProgInstruction::ConfigureAuthMark {
             asset_index: 1,
+            market_id: first_generation_market_id((1) as u16),
             now_slot: 0,
             initial_mark_e6: 100,
         },
@@ -37730,6 +37778,7 @@ fn v16_attack_force_close_rejects_cross_market_portfolio_substitution() {
         &env.payer,
         ProgInstruction::ConfigureAuthMark {
             asset_index: 1,
+            market_id: first_generation_market_id((1) as u16),
             now_slot: 1,
             initial_mark_e6: 100,
         },
@@ -41300,6 +41349,7 @@ fn v16_attack_cross_margin_netting_conserves() {
     let _ = env.send(
         ProgInstruction::PushAuthMark {
             asset_index: 1,
+            market_id: first_generation_market_id((1) as u16),
             now_slot: 2,
             mark_e6: 110,
         },
@@ -43031,6 +43081,7 @@ fn v16_attack_hybrid_oracle_scalar_bounds_reject_atomically() {
             &env.payer,
             ProgInstruction::ConfigureHybridOracle {
                 asset_index: 0,
+                market_id: first_generation_market_id((0) as u16),
                 now_slot: 1,
                 now_unix_ts: 100,
                 oracle_leg_count,
@@ -43079,6 +43130,7 @@ fn v16_attack_hybrid_oracle_scalar_bounds_reject_atomically() {
         &env.payer,
         ProgInstruction::ConfigureHybridOracle {
             asset_index: 0,
+            market_id: first_generation_market_id((0) as u16),
             now_slot: 1,
             now_unix_ts: 100,
             oracle_leg_count: 1,
@@ -43189,6 +43241,7 @@ fn v16_attack_pushed_mark_cannot_override_external_oracle_asset() {
     let auth_push = env.send(
         ProgInstruction::PushAuthMark {
             asset_index: 0,
+            market_id: first_generation_market_id((0) as u16),
             now_slot: 2,
             mark_e6: 9_999_999,
         },
@@ -43212,6 +43265,7 @@ fn v16_attack_pushed_mark_cannot_override_external_oracle_asset() {
     let ewma_push = env.send(
         ProgInstruction::PushEwmaMark {
             asset_index: 0,
+            market_id: first_generation_market_id((0) as u16),
             now_slot: 2,
             mark_e6: 9_999_999,
         },
@@ -44550,6 +44604,7 @@ fn v16_attack_non_authority_cannot_push_auth_mark() {
         &env.payer,
         ProgInstruction::PushAuthMark {
             asset_index: 0,
+            market_id: first_generation_market_id((0) as u16),
             now_slot: 2,
             mark_e6: 9_999_999,
         },
@@ -44578,6 +44633,7 @@ fn v16_attack_non_authority_cannot_push_auth_mark() {
         &env.payer,
         ProgInstruction::PushAuthMark {
             asset_index: 0,
+            market_id: first_generation_market_id((0) as u16),
             now_slot: 2,
             mark_e6: 150,
         },
@@ -44612,6 +44668,7 @@ fn v16_attack_non_authority_cannot_reconfigure_oracle_modes() {
         &env.payer,
         ProgInstruction::ConfigureEwmaMark {
             asset_index: 0,
+            market_id: first_generation_market_id((0) as u16),
             now_slot: 1,
             initial_mark_e6: 200,
             mark_ewma_halflife_slots: 1,
@@ -44640,6 +44697,7 @@ fn v16_attack_non_authority_cannot_reconfigure_oracle_modes() {
         &env.payer,
         ProgInstruction::ConfigureAuthMark {
             asset_index: 0,
+            market_id: first_generation_market_id((0) as u16),
             now_slot: 1,
             initial_mark_e6: 200,
         },
@@ -44670,6 +44728,7 @@ fn v16_attack_non_authority_cannot_reconfigure_oracle_modes() {
         &env.payer,
         ProgInstruction::ConfigureHybridOracle {
             asset_index: 0,
+            market_id: first_generation_market_id((0) as u16),
             now_slot: 1,
             now_unix_ts: 1,
             oracle_leg_count: 1,
@@ -44708,6 +44767,7 @@ fn v16_attack_non_authority_cannot_reconfigure_oracle_modes() {
         &env.payer,
         ProgInstruction::ConfigureEwmaMark {
             asset_index: 0,
+            market_id: first_generation_market_id((0) as u16),
             now_slot: 1,
             initial_mark_e6: 200,
             mark_ewma_halflife_slots: 1,
@@ -44761,6 +44821,7 @@ fn v16_attack_mark_input_bounds_reject_atomically() {
         &mut env,
         ProgInstruction::ConfigureAuthMark {
             asset_index: 0,
+            market_id: first_generation_market_id((0) as u16),
             now_slot: 1,
             initial_mark_e6: 0,
         },
@@ -44770,6 +44831,7 @@ fn v16_attack_mark_input_bounds_reject_atomically() {
         &mut env,
         ProgInstruction::ConfigureAuthMark {
             asset_index: 0,
+            market_id: first_generation_market_id((0) as u16),
             now_slot: 1,
             initial_mark_e6: over_max,
         },
@@ -44779,6 +44841,7 @@ fn v16_attack_mark_input_bounds_reject_atomically() {
         &mut env,
         ProgInstruction::ConfigureEwmaMark {
             asset_index: 0,
+            market_id: first_generation_market_id((0) as u16),
             now_slot: 1,
             initial_mark_e6: 0,
             mark_ewma_halflife_slots: 4,
@@ -44790,6 +44853,7 @@ fn v16_attack_mark_input_bounds_reject_atomically() {
         &mut env,
         ProgInstruction::ConfigureEwmaMark {
             asset_index: 0,
+            market_id: first_generation_market_id((0) as u16),
             now_slot: 1,
             initial_mark_e6: over_max,
             mark_ewma_halflife_slots: 4,
@@ -44801,6 +44865,7 @@ fn v16_attack_mark_input_bounds_reject_atomically() {
         &mut env,
         ProgInstruction::ConfigureEwmaMark {
             asset_index: 0,
+            market_id: first_generation_market_id((0) as u16),
             now_slot: 1,
             initial_mark_e6: 100,
             mark_ewma_halflife_slots: 0,
@@ -44816,6 +44881,7 @@ fn v16_attack_mark_input_bounds_reject_atomically() {
         &env.payer,
         ProgInstruction::ConfigureEwmaMark {
             asset_index: 0,
+            market_id: first_generation_market_id((0) as u16),
             now_slot: 1,
             initial_mark_e6: 100,
             mark_ewma_halflife_slots: 4,
@@ -44844,6 +44910,7 @@ fn v16_attack_mark_input_bounds_reject_atomically() {
         &mut env,
         ProgInstruction::PushEwmaMark {
             asset_index: 0,
+            market_id: first_generation_market_id((0) as u16),
             now_slot: 2,
             mark_e6: 0,
         },
@@ -44853,6 +44920,7 @@ fn v16_attack_mark_input_bounds_reject_atomically() {
         &mut env,
         ProgInstruction::PushEwmaMark {
             asset_index: 0,
+            market_id: first_generation_market_id((0) as u16),
             now_slot: 2,
             mark_e6: over_max,
         },
@@ -44866,6 +44934,7 @@ fn v16_attack_mark_input_bounds_reject_atomically() {
         &env.payer,
         ProgInstruction::PushEwmaMark {
             asset_index: 0,
+            market_id: first_generation_market_id((0) as u16),
             now_slot: 2,
             mark_e6: 120,
         },
@@ -44889,6 +44958,7 @@ fn v16_attack_mark_input_bounds_reject_atomically() {
         &env.payer,
         ProgInstruction::ConfigureAuthMark {
             asset_index: 0,
+            market_id: first_generation_market_id((0) as u16),
             now_slot: 3,
             initial_mark_e6: 200,
         },
@@ -44908,6 +44978,7 @@ fn v16_attack_mark_input_bounds_reject_atomically() {
         &mut env,
         ProgInstruction::PushAuthMark {
             asset_index: 0,
+            market_id: first_generation_market_id((0) as u16),
             now_slot: 4,
             mark_e6: 0,
         },
@@ -44917,6 +44988,7 @@ fn v16_attack_mark_input_bounds_reject_atomically() {
         &mut env,
         ProgInstruction::PushAuthMark {
             asset_index: 0,
+            market_id: first_generation_market_id((0) as u16),
             now_slot: 4,
             mark_e6: over_max,
         },
@@ -44930,6 +45002,7 @@ fn v16_attack_mark_input_bounds_reject_atomically() {
         &env.payer,
         ProgInstruction::PushAuthMark {
             asset_index: 0,
+            market_id: first_generation_market_id((0) as u16),
             now_slot: 4,
             mark_e6: 220,
         },
@@ -44989,6 +45062,7 @@ fn v16_attack_oracle_reconfiguration_rejects_after_positions_enter_market() {
         &env.payer,
         ProgInstruction::ConfigureAuthMark {
             asset_index: 0,
+            market_id: first_generation_market_id((0) as u16),
             now_slot: 1,
             initial_mark_e6: 500,
         },
@@ -45015,6 +45089,7 @@ fn v16_attack_oracle_reconfiguration_rejects_after_positions_enter_market() {
         &env.payer,
         ProgInstruction::ConfigureEwmaMark {
             asset_index: 0,
+            market_id: first_generation_market_id((0) as u16),
             now_slot: 1,
             initial_mark_e6: 500,
             mark_ewma_halflife_slots: 1,
@@ -45047,6 +45122,7 @@ fn v16_attack_oracle_reconfiguration_rejects_after_positions_enter_market() {
         &env.payer,
         ProgInstruction::ConfigureHybridOracle {
             asset_index: 0,
+            market_id: first_generation_market_id((0) as u16),
             now_slot: 1,
             now_unix_ts: 1,
             oracle_leg_count: 1,
@@ -45464,6 +45540,7 @@ fn v16_attack_market_exceeds_64_assets_position_holds_any_14_legs() {
             &env.payer,
             ProgInstruction::ConfigureAuthMark {
                 asset_index: ai,
+                market_id: first_generation_market_id((ai) as u16),
                 now_slot: TRADE_SLOT,
                 initial_mark_e6: PRICE,
             },
@@ -48234,6 +48311,7 @@ fn v16_attack_non_admin_activate_cannot_install_authorities() {
     let r_mark = env.send(
         ProgInstruction::ConfigureAuthMark {
             asset_index: 1,
+            market_id: first_generation_market_id((1) as u16),
             now_slot: 1,
             initial_mark_e6: 1_000_000,
         },
@@ -48372,6 +48450,7 @@ fn v16_bpf_10m_market_liquidation_high_asset_stays_bounded() {
         &env.payer,
         ProgInstruction::ConfigureEwmaMark {
             asset_index: HIGH_ASSET as u16,
+            market_id: first_generation_market_id((HIGH_ASSET as u16) as u16),
             now_slot: TRADE_SLOT,
             initial_mark_e6: PRICE,
             mark_ewma_halflife_slots: 1,
@@ -48418,6 +48497,7 @@ fn v16_bpf_10m_market_liquidation_high_asset_stays_bounded() {
         &env.payer,
         ProgInstruction::PushEwmaMark {
             asset_index: HIGH_ASSET as u16,
+            market_id: first_generation_market_id((HIGH_ASSET as u16) as u16),
             now_slot: LIQUIDATION_SLOT,
             mark_e6: 300,
         },
@@ -58702,6 +58782,7 @@ fn v16_attack_cross_asset_oracle_authority_cannot_push_other_asset_mark() {
         &env.payer,
         ProgInstruction::PushAuthMark {
             asset_index: 0,
+            market_id: first_generation_market_id((0) as u16),
             now_slot: 2,
             mark_e6: 9_999_999,
         },
@@ -58731,6 +58812,7 @@ fn v16_attack_cross_asset_oracle_authority_cannot_push_other_asset_mark() {
         &env.payer,
         ProgInstruction::PushAuthMark {
             asset_index: 0,
+            market_id: first_generation_market_id((0) as u16),
             now_slot: 2,
             mark_e6: 150,
         },
@@ -58772,6 +58854,7 @@ fn v16_attack_cross_asset_oracle_authority_cannot_push_other_asset_ewma_mark() {
         &env.payer,
         ProgInstruction::ConfigureEwmaMark {
             asset_index: 1,
+            market_id: first_generation_market_id((1) as u16),
             now_slot: 1,
             initial_mark_e6: 100,
             mark_ewma_halflife_slots: 10,
@@ -58795,6 +58878,7 @@ fn v16_attack_cross_asset_oracle_authority_cannot_push_other_asset_ewma_mark() {
         &env.payer,
         ProgInstruction::PushEwmaMark {
             asset_index: 1,
+            market_id: first_generation_market_id((1) as u16),
             now_slot: 2,
             mark_e6: 150,
         },
@@ -58818,6 +58902,7 @@ fn v16_attack_cross_asset_oracle_authority_cannot_push_other_asset_ewma_mark() {
         &env.payer,
         ProgInstruction::PushEwmaMark {
             asset_index: 0,
+            market_id: first_generation_market_id((0) as u16),
             now_slot: 2,
             mark_e6: 9_999_999,
         },
@@ -58846,6 +58931,7 @@ fn v16_attack_cross_asset_oracle_authority_cannot_push_other_asset_ewma_mark() {
         &env.payer,
         ProgInstruction::PushEwmaMark {
             asset_index: 0,
+            market_id: first_generation_market_id((0) as u16),
             now_slot: 2,
             mark_e6: 150,
         },
@@ -58900,6 +58986,7 @@ fn v16_attack_cross_asset_oracle_authority_cannot_reconfigure_other_asset_modes(
             &env.payer,
             ProgInstruction::ConfigureAuthMark {
                 asset_index: 0,
+                market_id: first_generation_market_id((0) as u16),
                 now_slot: 1,
                 initial_mark_e6: 250,
             },
@@ -58926,6 +59013,7 @@ fn v16_attack_cross_asset_oracle_authority_cannot_reconfigure_other_asset_modes(
             &env.payer,
             ProgInstruction::ConfigureAuthMark {
                 asset_index: 1,
+                market_id: first_generation_market_id((1) as u16),
                 now_slot: 1,
                 initial_mark_e6: 250,
             },
@@ -58959,6 +59047,7 @@ fn v16_attack_cross_asset_oracle_authority_cannot_reconfigure_other_asset_modes(
             &env.payer,
             ProgInstruction::ConfigureEwmaMark {
                 asset_index: 0,
+                market_id: first_generation_market_id((0) as u16),
                 now_slot: 1,
                 initial_mark_e6: 250,
                 mark_ewma_halflife_slots: 10,
@@ -58987,6 +59076,7 @@ fn v16_attack_cross_asset_oracle_authority_cannot_reconfigure_other_asset_modes(
             &env.payer,
             ProgInstruction::ConfigureEwmaMark {
                 asset_index: 1,
+                market_id: first_generation_market_id((1) as u16),
                 now_slot: 1,
                 initial_mark_e6: 250,
                 mark_ewma_halflife_slots: 10,
@@ -59027,6 +59117,7 @@ fn v16_attack_cross_asset_oracle_authority_cannot_reconfigure_other_asset_modes(
             &env.payer,
             ProgInstruction::ConfigureHybridOracle {
                 asset_index: 0,
+                market_id: first_generation_market_id((0) as u16),
                 now_slot: 1,
                 now_unix_ts: 1,
                 oracle_leg_count: 1,
@@ -59064,6 +59155,7 @@ fn v16_attack_cross_asset_oracle_authority_cannot_reconfigure_other_asset_modes(
             &env.payer,
             ProgInstruction::ConfigureHybridOracle {
                 asset_index: 1,
+                market_id: first_generation_market_id((1) as u16),
                 now_slot: 1,
                 now_unix_ts: 1,
                 oracle_leg_count: 1,
@@ -59736,6 +59828,7 @@ fn v16_attack_oracle_authority_rotation_revokes_old_grants_new() {
     let r0 = env.send(
         ProgInstruction::PushAuthMark {
             asset_index: 0,
+            market_id: first_generation_market_id((0) as u16),
             now_slot: 2,
             mark_e6: 110,
         },
@@ -59780,6 +59873,7 @@ fn v16_attack_oracle_authority_rotation_revokes_old_grants_new() {
     let r_old = env.send(
         ProgInstruction::PushAuthMark {
             asset_index: 0,
+            market_id: first_generation_market_id((0) as u16),
             now_slot: 3,
             mark_e6: 120,
         },
@@ -59803,6 +59897,7 @@ fn v16_attack_oracle_authority_rotation_revokes_old_grants_new() {
     let r_new = env.send(
         ProgInstruction::PushAuthMark {
             asset_index: 0,
+            market_id: first_generation_market_id((0) as u16),
             now_slot: 3,
             mark_e6: 120,
         },
@@ -61447,6 +61542,7 @@ fn v16_attack_update_authority_handoff_rekeys_asset0_default_runtime_authorities
         &env.payer,
         ProgInstruction::PushAuthMark {
             asset_index: 0,
+            market_id: first_generation_market_id((0) as u16),
             now_slot: 2,
             mark_e6: 777,
         },
