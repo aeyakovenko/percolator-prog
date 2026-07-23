@@ -1023,11 +1023,15 @@ impl V16CuEnv {
     }
 
     fn update_trade_fee_policy_with_cu(&mut self, trade_fee_base_bps: u64) -> u64 {
+        let market_id = self.asset_market_id(0);
         send_tx(
             &mut self.svm,
             self.program_id,
             &self.payer,
-            ProgInstruction::UpdateTradeFeePolicy { trade_fee_base_bps },
+            ProgInstruction::UpdateTradeFeePolicy {
+                market_id,
+                trade_fee_base_bps,
+            },
             vec![
                 AccountMeta::new(self.admin.pubkey(), true),
                 AccountMeta::new(self.market, false),
@@ -35258,6 +35262,7 @@ fn v16_attack_global_policy_bounds_reject_grief_values() {
     env.update_trade_fee_policy_with_cu(88);
     env.update_market_init_fee_policy_with_cu(40);
 
+    let market_id = env.asset_market_id(0);
     let market_before = env.svm.get_account(&env.market).unwrap();
     let reject_unchanged = |env: &mut V16CuEnv, ix: ProgInstruction, label: &str| {
         env.svm.expire_blockhash();
@@ -35297,6 +35302,7 @@ fn v16_attack_global_policy_bounds_reject_grief_values() {
     reject_unchanged(
         &mut env,
         ProgInstruction::UpdateTradeFeePolicy {
+            market_id,
             trade_fee_base_bps: 10_001,
         },
         "trade fee above the market maximum",
@@ -35360,6 +35366,7 @@ fn v16_attack_global_policy_bounds_reject_grief_values() {
 #[test]
 fn v16_attack_trade_fee_policy_follows_asset0_insurance_authority() {
     let mut env = V16CuEnv::new();
+    let market_id = env.asset_market_id(0);
     let admin = env.admin.insecure_clone();
     let new_insurance = Keypair::new();
     env.try_update_per_asset_authority_with_cu(
@@ -35384,6 +35391,7 @@ fn v16_attack_trade_fee_policy_follows_asset0_insurance_authority() {
         env.program_id,
         &env.payer,
         ProgInstruction::UpdateTradeFeePolicy {
+            market_id,
             trade_fee_base_bps: 500,
         },
         vec![
@@ -35409,6 +35417,7 @@ fn v16_attack_trade_fee_policy_follows_asset0_insurance_authority() {
         env.program_id,
         &env.payer,
         ProgInstruction::UpdateTradeFeePolicy {
+            market_id,
             trade_fee_base_bps: 500,
         },
         vec![
@@ -35484,6 +35493,7 @@ fn v16_attack_permissionless_asset_authority_cannot_update_marketwide_policies()
         profile(&env, 1).insurance_authority,
         creator.pubkey().to_bytes()
     );
+    let market_id = env.asset_market_id(0);
 
     let mut attempt = |ix: ProgInstruction| -> Result<u64, String> {
         env.svm.expire_blockhash();
@@ -35502,6 +35512,7 @@ fn v16_attack_permissionless_asset_authority_cannot_update_marketwide_policies()
 
     assert!(
         attempt(ProgInstruction::UpdateTradeFeePolicy {
+            market_id,
             trade_fee_base_bps: 123
         })
         .is_err(),
@@ -60342,6 +60353,7 @@ fn v16_attack_update_authority_handoff_rekeys_asset0_lifecycle_admin() {
 #[test]
 fn v16_attack_update_authority_handoff_rekeys_asset0_default_runtime_authorities() {
     let mut env = V16CuEnv::new();
+    let market_id = env.asset_market_id(0);
     let old_marketauth = env.admin.insecure_clone();
     let new_marketauth = Keypair::new();
     env.ensure_signer_account(new_marketauth.pubkey());
@@ -60379,6 +60391,7 @@ fn v16_attack_update_authority_handoff_rekeys_asset0_default_runtime_authorities
         env.program_id,
         &env.payer,
         ProgInstruction::UpdateTradeFeePolicy {
+            market_id,
             trade_fee_base_bps: 500,
         },
         vec![
@@ -60403,6 +60416,7 @@ fn v16_attack_update_authority_handoff_rekeys_asset0_default_runtime_authorities
         env.program_id,
         &env.payer,
         ProgInstruction::UpdateTradeFeePolicy {
+            market_id,
             trade_fee_base_bps: 500,
         },
         vec![
@@ -60513,4 +60527,250 @@ fn v16_attack_backing_topup_rejects_lapsed_expiry() {
         vault0 + 50,
         "valid topup credits exactly the backing"
     );
+}
+
+// A fee policy signed for a retired market must not acquire authority over a replacement market at
+// the same address. Otherwise it can land while the replacement is empty (bypassing the funded-live
+// fee guard), then tax an already-signed zero-fee trade and route the proceeds to a permissionless
+// asset creator's withdrawable insurance domains.
+#[test]
+fn v16_attack_trade_fee_policy_cannot_replay_across_market_reinit() {
+    const PRICE: u64 = 100;
+    const DEPOSIT: u128 = 10_000;
+    const SIZE_Q: i128 = 10 * POS_SCALE as i128;
+    const FORCED_FEE_BPS: u64 = 10_000;
+    const FORCED_FEE_PER_SIDE: u128 = 1_000;
+
+    let params = V16CuMarketParams::default();
+    let mut env = V16CuEnv::new_with_init_params(params);
+    let admin = env.admin.insecure_clone();
+    let old_market_id = env.asset_market_id(0);
+
+    let stale_policy_ix = Instruction {
+        program_id: env.program_id,
+        accounts: vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        data: ProgInstruction::UpdateTradeFeePolicy {
+            market_id: old_market_id,
+            trade_fee_base_bps: FORCED_FEE_BPS,
+        }
+        .encode(),
+    };
+    let stale_policy = Transaction::new_signed_with_payer(
+        &[heap_ix(), cu_ix(), stale_policy_ix],
+        Some(&env.payer.pubkey()),
+        &[&env.payer, &admin],
+        env.svm.latest_blockhash(),
+    );
+
+    env.resolve();
+    env.close_slab_with_cu();
+    assert_eq!(env.svm.get_account(&env.market).unwrap().lamports, 0);
+
+    env.svm.warp_to_slot(10);
+    env.svm
+        .set_account(
+            env.market,
+            Account {
+                lamports: 1_000_000_000,
+                data: vec![
+                    0u8;
+                    state::market_account_len_for_capacity(
+                        params.max_portfolio_assets as usize,
+                    )
+                    .unwrap()
+                ],
+                owner: env.program_id,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    env.svm
+        .set_account(
+            env.vault,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_token_data(env.mint, env.vault_authority, 0),
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    let reinit_params = V16CuMarketParams {
+        max_bankrupt_close_lifetime_slots: params.max_bankrupt_close_lifetime_slots + 1,
+        ..params
+    };
+    env.send(
+        init_market_instruction(&reinit_params),
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new_readonly(env.mint, false),
+            AccountMeta::new(env.market_generation, false),
+            AccountMeta::new_readonly(system_program::ID, false),
+        ],
+        &[&admin],
+    )
+    .expect("same market address is publicly reinitialized");
+    assert_eq!(env.market_state().0.trade_fee_base_bps, 0);
+
+    let attacker = Keypair::new();
+    env.update_market_init_fee_policy_with_cu(1);
+    env.svm.warp_to_slot(11);
+    env.activate_permissionless_asset_with_fee(
+        &attacker,
+        1,
+        11,
+        PRICE,
+        attacker.pubkey(),
+        attacker.pubkey(),
+        attacker.pubkey(),
+        attacker.pubkey(),
+        1,
+    );
+
+    let victim = Keypair::new();
+    let victim_account = env.create_portfolio(&victim);
+    let attacker_account = env.create_portfolio(&attacker);
+    assert_eq!(env.market_state().0.trade_fee_base_bps, 0);
+    assert_eq!(env.market_state().1.c_tot, 0);
+
+    let victim_source = env.token_account(victim.pubkey(), DEPOSIT as u64);
+    let attacker_source = env.token_account(attacker.pubkey(), DEPOSIT as u64);
+    let deposit_tx = |owner: &Keypair, portfolio: Pubkey, source: Pubkey| {
+        let deposit_ix = Instruction {
+            program_id: env.program_id,
+            accounts: vec![
+                AccountMeta::new(owner.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(portfolio, false),
+                AccountMeta::new(source, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            data: ProgInstruction::Deposit { amount: DEPOSIT }.encode(),
+        };
+        Transaction::new_signed_with_payer(
+            &[heap_ix(), cu_ix(), deposit_ix],
+            Some(&env.payer.pubkey()),
+            &[&env.payer, owner],
+            env.svm.latest_blockhash(),
+        )
+    };
+    let presigned_victim_deposit = deposit_tx(&victim, victim_account, victim_source);
+    let presigned_attacker_deposit = deposit_tx(&attacker, attacker_account, attacker_source);
+
+    let presigned_trade_ix = Instruction {
+        program_id: env.program_id,
+        accounts: vec![
+            AccountMeta::new(victim.pubkey(), true),
+            AccountMeta::new(attacker.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(victim_account, false),
+            AccountMeta::new(attacker_account, false),
+        ],
+        data: ProgInstruction::TradeNoCpi {
+            asset_index: 1,
+            market_id: env.asset_market_id(1),
+            size_q: SIZE_Q,
+            exec_price: PRICE,
+            fee_bps: 0,
+        }
+        .encode(),
+    };
+    let presigned_trade = Transaction::new_signed_with_payer(
+        &[heap_ix(), cu_ix(), presigned_trade_ix],
+        Some(&env.payer.pubkey()),
+        &[&env.payer, &victim, &attacker],
+        env.svm.latest_blockhash(),
+    );
+
+    let market_before_replay = env.svm.get_account(&env.market).unwrap();
+    let replay = env.svm.send_transaction(stale_policy);
+    if replay.is_ok() {
+        assert_eq!(
+            env.market_state().0.trade_fee_base_bps,
+            FORCED_FEE_BPS,
+            "the retained old-market policy silently changes the signed trade terms"
+        );
+        env.svm
+            .send_transaction(presigned_victim_deposit)
+            .expect("victim deposit signed before the policy replay lands unchanged");
+        env.svm
+            .send_transaction(presigned_attacker_deposit)
+            .expect("attacker deposit signed before the policy replay lands unchanged");
+        env.svm
+            .send_transaction(presigned_trade)
+            .expect("zero-fee trade signed before the replay is charged the new floor");
+
+        let (_, charged) = env.market_state();
+        assert_eq!(
+            charged.insurance_domain_budget[2], FORCED_FEE_PER_SIDE,
+            "victim's long-side fee is withdrawable by the replacement asset creator"
+        );
+        assert_eq!(
+            charged.insurance_domain_budget[3], FORCED_FEE_PER_SIDE,
+            "attacker's short-side fee is also returned through its domain"
+        );
+        assert_eq!(
+            env.portfolio_state(victim_account).capital.get(),
+            DEPOSIT - FORCED_FEE_PER_SIDE
+        );
+        assert_eq!(
+            env.portfolio_state(attacker_account).capital.get(),
+            DEPOSIT - FORCED_FEE_PER_SIDE
+        );
+
+        let (attacker_dest, _) = env
+            .try_withdraw_insurance_asset_with_authority(&attacker, 1, FORCED_FEE_PER_SIDE * 2)
+            .expect("permissionless asset operator extracts both forced fees");
+        assert_eq!(
+            env.token_amount(attacker_dest) as u128,
+            FORCED_FEE_PER_SIDE * 2
+        );
+        let attacker_total = env.portfolio_state(attacker_account).capital.get()
+            + env.token_amount(attacker_dest) as u128;
+        assert_eq!(
+            attacker_total,
+            DEPOSIT + FORCED_FEE_PER_SIDE,
+            "attacker gains exactly the independent victim's forced fee"
+        );
+        panic!(
+            "a retained old-market fee policy extracted {FORCED_FEE_PER_SIDE} from an independent victim"
+        );
+    }
+
+    let replay_error = format!("{:?}", replay.unwrap_err());
+    let expected_error = format!(
+        "Custom({})",
+        PercolatorError::AssetGenerationMismatch as u32
+    );
+    assert!(
+        replay_error.contains(&expected_error),
+        "stale trade-fee policy must fail with {expected_error}, got {replay_error}"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before_replay,
+        "generation mismatch leaves the replacement market byte-identical"
+    );
+
+    env.svm
+        .send_transaction(presigned_victim_deposit)
+        .expect("victim's pre-signed deposit remains live after replay rejection");
+    env.svm
+        .send_transaction(presigned_attacker_deposit)
+        .expect("attacker's pre-signed deposit remains live after replay rejection");
+    env.svm
+        .send_transaction(presigned_trade)
+        .expect("the pre-signed zero-fee trade remains live after replay rejection");
+    let (_, unchanged) = env.market_state();
+    assert_eq!(unchanged.insurance_domain_budget[2], 0);
+    assert_eq!(unchanged.insurance_domain_budget[3], 0);
+    assert_eq!(env.portfolio_state(victim_account).capital.get(), DEPOSIT);
+    assert_eq!(env.portfolio_state(attacker_account).capital.get(), DEPOSIT);
 }

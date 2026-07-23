@@ -2612,6 +2612,7 @@ pub mod ix {
             insurance_share_bps: u16,
         },
         UpdateTradeFeePolicy {
+            market_id: u64,
             trade_fee_base_bps: u64,
         },
         UpdateFeeRedirectPolicy {
@@ -2880,6 +2881,7 @@ pub mod ix {
                     insurance_share_bps: read_u16(&mut rest)?,
                 },
                 55 => Self::UpdateTradeFeePolicy {
+                    market_id: read_u64(&mut rest)?,
                     trade_fee_base_bps: read_u64(&mut rest)?,
                 },
                 58 => Self::UpdateFeeRedirectPolicy {
@@ -3204,8 +3206,12 @@ pub mod ix {
                     push_u16(&mut out, fee_bps);
                     push_u16(&mut out, insurance_share_bps);
                 }
-                Self::UpdateTradeFeePolicy { trade_fee_base_bps } => {
+                Self::UpdateTradeFeePolicy {
+                    market_id,
+                    trade_fee_base_bps,
+                } => {
                     out.push(55);
+                    push_u64(&mut out, market_id);
                     push_u64(&mut out, trade_fee_base_bps);
                 }
                 Self::UpdateFeeRedirectPolicy { redirect_bps } => {
@@ -5353,8 +5359,11 @@ pub mod processor {
                 fee_bps,
                 insurance_share_bps,
             ),
-            Instruction::UpdateTradeFeePolicy { trade_fee_base_bps } => {
-                handle_update_trade_fee_policy(program_id, accounts, trade_fee_base_bps)
+            Instruction::UpdateTradeFeePolicy {
+                market_id,
+                trade_fee_base_bps,
+            } => {
+                handle_update_trade_fee_policy(program_id, accounts, market_id, trade_fee_base_bps)
             }
             Instruction::UpdateFeeRedirectPolicy { redirect_bps } => {
                 handle_update_fee_redirect_policy(program_id, accounts, redirect_bps)
@@ -9749,6 +9758,7 @@ pub mod processor {
     fn handle_update_trade_fee_policy<'a>(
         program_id: &Pubkey,
         accounts: &'a [AccountInfo<'a>],
+        expected_market_id: u64,
         trade_fee_base_bps: u64,
     ) -> ProgramResult {
         let authority = account(accounts, 0)?;
@@ -9758,8 +9768,11 @@ pub mod processor {
         expect_owner(market_ai, program_id)?;
         let (mut cfg, asset0_insurance_authority, max_trading_fee_bps) = {
             let market_data = market_ai.try_borrow_data()?;
-            let (cfg, _, _, _, _, max_trading_fee_bps) =
+            let (cfg, _, _, market_id, _, max_trading_fee_bps) =
                 state::read_market_trade_preflight(&market_data, 0)?;
+            if market_id != expected_market_id {
+                return Err(PercolatorError::AssetGenerationMismatch.into());
+            }
             let profile0 = read_oracle_profile_for_asset(&market_data, &cfg, 0)?;
             (cfg, profile0.insurance_authority, max_trading_fee_bps)
         };
