@@ -59907,3 +59907,140 @@ fn v16_attack_rebalance_reduce_replay_cannot_cross_portfolio_incarnation() {
         env.portfolio_id(victim),
     );
 }
+
+// Portfolio/market/asset incarnation binding is not enough: a live portfolio can flatten and
+// reopen the same asset without changing any of those IDs. Retained reduction consent must bind
+// the position episode that existed when the owner signed it.
+#[test]
+fn v16_attack_rebalance_reduce_replay_cannot_cross_position_episode() {
+    const DEPOSIT: u128 = 1_000_000;
+    const OLD_SIZE_Q: i128 = 2_000 * POS_SCALE as i128;
+    const NEW_SIZE_Q: i128 = 1_000 * POS_SCALE as i128;
+
+    let mut env = V16CuEnv::new();
+    env.configure_auth_mark_with_cu(0, 100);
+
+    let victim_owner = Keypair::new();
+    let attacker_owner = Keypair::new();
+    let victim = env.create_portfolio(&victim_owner);
+    let attacker = env.create_portfolio(&attacker_owner);
+    let portfolio_id = env.portfolio_id(victim);
+    env.deposit(&victim_owner, victim, DEPOSIT);
+    env.deposit(&attacker_owner, attacker, DEPOSIT);
+    env.trade_with_cu(
+        &victim_owner,
+        victim,
+        &attacker_owner,
+        attacker,
+        OLD_SIZE_Q,
+        100,
+        0,
+    );
+
+    env.svm.expire_blockhash();
+    let retained_reduce = Transaction::new_signed_with_payer(
+        &[
+            heap_ix(),
+            cu_ix(),
+            Instruction {
+                program_id: env.program_id,
+                accounts: vec![
+                    AccountMeta::new(victim_owner.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(victim, false),
+                ],
+                data: ProgInstruction::RebalanceReduce {
+                    portfolio_id,
+                    asset_index: 0,
+                    reduce_q: NEW_SIZE_Q as u128,
+                }
+                .encode(),
+            },
+        ],
+        Some(&env.payer.pubkey()),
+        &[&env.payer, &victim_owner],
+        env.svm.latest_blockhash(),
+    );
+
+    env.trade_with_cu(
+        &victim_owner,
+        victim,
+        &attacker_owner,
+        attacker,
+        -OLD_SIZE_Q,
+        100,
+        0,
+    );
+    assert!(!has_active_leg_for_asset(&env.portfolio_state(victim), 0));
+    env.trade_with_cu(
+        &victim_owner,
+        victim,
+        &attacker_owner,
+        attacker,
+        NEW_SIZE_Q,
+        100,
+        0,
+    );
+    assert_eq!(env.portfolio_id(victim), portfolio_id);
+
+    env.svm.warp_to_slot(1);
+    env.push_auth_mark_with_cu(1, 50);
+    env.send(
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 1,
+            observations: crank_observations(0),
+        },
+        vec![
+            AccountMeta::new(env.payer.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(victim, false),
+        ],
+        &[],
+    )
+    .expect("refresh replacement at the adverse mark");
+    assert!(env.portfolio_state(victim).capital.get() < DEPOSIT);
+
+    let replay = env.svm.send_transaction(retained_reduce);
+    let replayed = replay.is_ok();
+    if replayed {
+        assert!(
+            !has_active_leg_for_asset(&env.portfolio_state(victim), 0),
+            "control: stale reduction closed the replacement position"
+        );
+    }
+
+    env.svm.expire_blockhash();
+    env.svm.warp_to_slot(2);
+    env.push_auth_mark_with_cu(2, 100);
+    for portfolio in [victim, attacker] {
+        env.crank(
+            portfolio,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 2,
+                observations: crank_observations(0),
+            },
+        );
+    }
+    if !replayed {
+        env.trade_with_cu(
+            &victim_owner,
+            victim,
+            &attacker_owner,
+            attacker,
+            -NEW_SIZE_Q,
+            100,
+            0,
+        );
+    }
+
+    env.resolve();
+    let victim_dest = env.close_resolved(&victim_owner, victim);
+    let attacker_dest = env.close_resolved(&attacker_owner, attacker);
+    let victim_payout = env.token_amount(victim_dest) as u128;
+    let attacker_payout = env.token_amount(attacker_dest) as u128;
+    assert!(
+        !replayed && victim_payout >= DEPOSIT && attacker_payout <= DEPOSIT,
+        "rebalance consent for an old position episode replayed onto its replacement: victim \
+         recovered {victim_payout}, attacker extracted {attacker_payout}",
+    );
+}
