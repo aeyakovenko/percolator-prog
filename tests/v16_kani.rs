@@ -201,7 +201,7 @@ fn kani_v16_init_market_decode_preserves_wire_fields() {
 #[kani::proof]
 fn kani_v16_amount_instructions_decode_preserves_wire_fields() {
     let tag: u8 = kani::any();
-    kani::assume(tag == 3 || tag == 9 || tag == 30 || tag == 41 || tag == 42);
+    kani::assume(tag == 9 || tag == 30 || tag == 41 || tag == 42);
     let amount: u128 = kani::any();
 
     let mut data = [0u8; 17];
@@ -209,7 +209,6 @@ fn kani_v16_amount_instructions_decode_preserves_wire_fields() {
     data[1..17].copy_from_slice(&amount.to_le_bytes());
 
     match (tag, Instruction::decode(&data).unwrap()) {
-        (3, Instruction::Deposit { amount: got }) => assert_eq!(got, amount),
         (9, Instruction::TopUpInsurance { amount: got }) => assert_eq!(got, amount),
         (30, Instruction::CloseResolved { fee_rate_per_slot }) => {
             assert_eq!(fee_rate_per_slot, amount)
@@ -221,6 +220,27 @@ fn kani_v16_amount_instructions_decode_preserves_wire_fields() {
                 optional_deposit: got,
             },
         ) => assert_eq!(got, amount),
+        _ => unreachable!(),
+    }
+}
+
+#[kani::proof]
+fn kani_v16_deposit_decode_preserves_portfolio_id_and_amount() {
+    let portfolio_id: u64 = kani::any();
+    let amount: u128 = kani::any();
+    let mut data = [0u8; 25];
+    data[0] = 3;
+    data[1..9].copy_from_slice(&portfolio_id.to_le_bytes());
+    data[9..25].copy_from_slice(&amount.to_le_bytes());
+
+    match Instruction::decode(&data).unwrap() {
+        Instruction::Deposit {
+            portfolio_id: got_id,
+            amount: got_amount,
+        } => {
+            assert_eq!(got_id, portfolio_id);
+            assert_eq!(got_amount, amount);
+        }
         _ => unreachable!(),
     }
 }
@@ -1229,7 +1249,13 @@ fn kani_v16_custody_payloads_reject_trailing_byte() {
     let extra: u8 = kani::any();
 
     assert_rejects_trailing_byte(Instruction::InitPortfolio, extra);
-    assert_rejects_trailing_byte(Instruction::Deposit { amount: 1 }, extra);
+    assert_rejects_trailing_byte(
+        Instruction::Deposit {
+            portfolio_id: 1,
+            amount: 1,
+        },
+        extra,
+    );
     assert_rejects_trailing_byte(
         Instruction::Withdraw {
             portfolio_id: 1,
@@ -1579,7 +1605,7 @@ fn kani_v16_every_active_payload_rejects_one_byte_truncation() {
     let init_market = [0u8; 80];
     assert!(Instruction::decode(&init_market).is_err());
 
-    let deposit = [3u8; 16];
+    let deposit = [3u8; 24];
     assert!(Instruction::decode(&deposit).is_err());
 
     let withdraw = [4u8; 16];
