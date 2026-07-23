@@ -1042,11 +1042,15 @@ impl V16CuEnv {
     }
 
     fn update_fee_redirect_policy_with_cu(&mut self, redirect_bps: u16) -> u64 {
+        let market_id = self.asset_market_id(0);
         send_tx(
             &mut self.svm,
             self.program_id,
             &self.payer,
-            ProgInstruction::UpdateFeeRedirectPolicy { redirect_bps },
+            ProgInstruction::UpdateFeeRedirectPolicy {
+                market_id,
+                redirect_bps,
+            },
             vec![
                 AccountMeta::new(self.admin.pubkey(), true),
                 AccountMeta::new(self.market, false),
@@ -26577,6 +26581,7 @@ fn v16_attack_rotated_marketauth_cannot_replay_policy_updates() {
         "test setup rotates marketauth away from the old key"
     );
     let cfg_after_rotation = env.market_state().0;
+    let market_id = env.asset_market_id(0);
 
     let mut old_attempt = |ix: ProgInstruction, label: &str| {
         env.svm.expire_blockhash();
@@ -26637,6 +26642,7 @@ fn v16_attack_rotated_marketauth_cannot_replay_policy_updates() {
     );
     old_attempt(
         ProgInstruction::UpdateFeeRedirectPolicy {
+            market_id,
             redirect_bps: 2_000,
         },
         "fee redirect replay",
@@ -26683,6 +26689,7 @@ fn v16_attack_rotated_marketauth_cannot_replay_policy_updates() {
     );
     new_update(
         ProgInstruction::UpdateFeeRedirectPolicy {
+            market_id,
             redirect_bps: 2_000,
         },
         "fee redirect update",
@@ -30608,6 +30615,7 @@ fn v16_attack_two_sided_trade_fee_symmetric() {
 #[test]
 fn v16_attack_fee_redirect_gated_bounded_no_leak() {
     let mut env = V16CuEnv::new();
+    let market_id = env.asset_market_id(0);
     let mallory = Keypair::new();
     env.ensure_signer_account(mallory.pubkey());
     // non-admin can't set the redirect.
@@ -30617,6 +30625,7 @@ fn v16_attack_fee_redirect_gated_bounded_no_leak() {
         env.program_id,
         &env.payer,
         ProgInstruction::UpdateFeeRedirectPolicy {
+            market_id,
             redirect_bps: 5_000,
         },
         vec![
@@ -30633,6 +30642,7 @@ fn v16_attack_fee_redirect_gated_bounded_no_leak() {
         env.program_id,
         &env.payer,
         ProgInstruction::UpdateFeeRedirectPolicy {
+            market_id,
             redirect_bps: 20_000,
         },
         vec![
@@ -30649,6 +30659,7 @@ fn v16_attack_fee_redirect_gated_bounded_no_leak() {
         env.program_id,
         &env.payer,
         ProgInstruction::UpdateFeeRedirectPolicy {
+            market_id,
             redirect_bps: 5_000,
         },
         vec![
@@ -35520,6 +35531,7 @@ fn v16_attack_permissionless_asset_authority_cannot_update_marketwide_policies()
     );
     assert!(
         attempt(ProgInstruction::UpdateFeeRedirectPolicy {
+            market_id,
             redirect_bps: 5_000
         })
         .is_err(),
@@ -60773,4 +60785,168 @@ fn v16_attack_trade_fee_policy_cannot_replay_across_market_reinit() {
     assert_eq!(unchanged.insurance_domain_budget[3], 0);
     assert_eq!(env.portfolio_state(victim_account).capital.get(), DEPOSIT);
     assert_eq!(env.portfolio_state(attacker_account).capital.get(), DEPOSIT);
+}
+
+// A redirect policy signed for a retired market must not acquire authority over a public
+// same-address replacement. Otherwise it can route a victim's trade fee into a permissionless
+// asset creator's withdrawable insurance domains instead of the replacement's protected market 0.
+#[test]
+fn v16_attack_fee_redirect_policy_cannot_replay_across_market_reinit() {
+    const PRICE: u64 = 100;
+    const DEPOSIT: u128 = 10_000;
+    const SIZE_Q: i128 = 10 * POS_SCALE as i128;
+    const FEE_BPS: u64 = 10_000;
+    const FEE_PER_SIDE: u128 = 1_000;
+
+    let params = V16CuMarketParams {
+        trade_fee_base_bps: FEE_BPS,
+        ..V16CuMarketParams::default()
+    };
+    let mut env = V16CuEnv::new_with_init_params(params);
+    let admin = env.admin.insecure_clone();
+    let old_market_id = env.asset_market_id(0);
+    let stale_policy_ix = Instruction {
+        program_id: env.program_id,
+        accounts: vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        data: ProgInstruction::UpdateFeeRedirectPolicy {
+            market_id: old_market_id,
+            redirect_bps: 0,
+        }
+        .encode(),
+    };
+    let stale_policy = Transaction::new_signed_with_payer(
+        &[heap_ix(), cu_ix(), stale_policy_ix],
+        Some(&env.payer.pubkey()),
+        &[&env.payer, &admin],
+        env.svm.latest_blockhash(),
+    );
+
+    env.resolve();
+    env.close_slab_with_cu();
+    assert_eq!(env.svm.get_account(&env.market).unwrap().lamports, 0);
+
+    env.svm.warp_to_slot(10);
+    env.svm
+        .set_account(
+            env.market,
+            Account {
+                lamports: 1_000_000_000,
+                data: vec![
+                    0u8;
+                    state::market_account_len_for_capacity(
+                        params.max_portfolio_assets as usize,
+                    )
+                    .unwrap()
+                ],
+                owner: env.program_id,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    env.svm
+        .set_account(
+            env.vault,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_token_data(env.mint, env.vault_authority, 0),
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    let reinit_params = V16CuMarketParams {
+        max_bankrupt_close_lifetime_slots: params.max_bankrupt_close_lifetime_slots + 1,
+        ..params
+    };
+    env.send(
+        init_market_instruction(&reinit_params),
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new_readonly(env.mint, false),
+            AccountMeta::new(env.market_generation, false),
+            AccountMeta::new_readonly(system_program::ID, false),
+        ],
+        &[&admin],
+    )
+    .expect("same market address is publicly reinitialized");
+    let new_market_id = env.asset_market_id(0);
+    assert_ne!(new_market_id, old_market_id);
+
+    env.update_fee_redirect_policy_with_cu(10_000);
+    let attacker = Keypair::new();
+    env.update_market_init_fee_policy_with_cu(1);
+    env.svm.warp_to_slot(11);
+    env.activate_permissionless_asset_with_fee(
+        &attacker,
+        1,
+        11,
+        PRICE,
+        attacker.pubkey(),
+        attacker.pubkey(),
+        attacker.pubkey(),
+        attacker.pubkey(),
+        1,
+    );
+
+    let market_before_replay = env.svm.get_account(&env.market).unwrap();
+    let replay = env.svm.send_transaction(stale_policy);
+    let replay_error = format!(
+        "{:?}",
+        replay.expect_err("stale redirect policy must reject")
+    );
+    let expected_error = format!(
+        "Custom({})",
+        PercolatorError::AssetGenerationMismatch as u32
+    );
+    assert!(
+        replay_error.contains(&expected_error),
+        "stale redirect policy must fail with {expected_error}, got {replay_error}"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before_replay,
+        "generation mismatch leaves the replacement market byte-identical"
+    );
+
+    let victim = Keypair::new();
+    let victim_account = env.create_portfolio(&victim);
+    let attacker_account = env.create_portfolio(&attacker);
+    env.deposit(&victim, victim_account, DEPOSIT);
+    env.deposit(&attacker, attacker_account, DEPOSIT);
+    env.trade_asset_with_cu(
+        1,
+        &victim,
+        victim_account,
+        &attacker,
+        attacker_account,
+        SIZE_Q,
+        PRICE,
+        0,
+    );
+
+    let (_, group) = env.market_state();
+    assert_eq!(
+        env.portfolio_state(victim_account).capital.get(),
+        DEPOSIT - FEE_PER_SIDE
+    );
+    assert_eq!(
+        env.portfolio_state(attacker_account).capital.get(),
+        DEPOSIT - FEE_PER_SIDE
+    );
+    assert_eq!(
+        group.insurance_domain_budget[2] + group.insurance_domain_budget[3],
+        0,
+        "the permissionless asset owner receives none of either user's trade fee"
+    );
+    assert_eq!(
+        group.insurance_domain_budget[0] + group.insurance_domain_budget[1],
+        FEE_PER_SIDE * 2 + 1,
+        "both fees and the one-atom init fee remain in protected market-0 insurance"
+    );
 }
