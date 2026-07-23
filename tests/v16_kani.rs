@@ -308,22 +308,26 @@ fn kani_v16_recovery_close_progress_decode_preserves_wire_fields() {
 #[kani::proof]
 fn kani_v16_top_up_backing_bucket_decode_preserves_wire_fields() {
     let domain: u16 = kani::any();
+    let market_id: u64 = kani::any();
     let amount: u128 = kani::any();
     let expiry_slot: u64 = kani::any();
 
-    let mut data = [0u8; 27];
+    let mut data = [0u8; 35];
     data[0] = 24;
     data[1..3].copy_from_slice(&domain.to_le_bytes());
-    data[3..19].copy_from_slice(&amount.to_le_bytes());
-    data[19..27].copy_from_slice(&expiry_slot.to_le_bytes());
+    data[3..11].copy_from_slice(&market_id.to_le_bytes());
+    data[11..27].copy_from_slice(&amount.to_le_bytes());
+    data[27..35].copy_from_slice(&expiry_slot.to_le_bytes());
 
     match Instruction::decode(&data).unwrap() {
         Instruction::TopUpBackingBucket {
             domain: got_domain,
+            market_id: got_market_id,
             amount: got_amount,
             expiry_slot: got_expiry,
         } => {
             assert_eq!(got_domain, domain);
+            assert_eq!(got_market_id, market_id);
             assert_eq!(got_amount, amount);
             assert_eq!(got_expiry, expiry_slot);
         }
@@ -1229,6 +1233,7 @@ fn kani_v16_custody_payloads_reject_trailing_byte() {
     assert_rejects_trailing_byte(
         Instruction::TopUpBackingBucket {
             domain: 1,
+            market_id: 1,
             amount: 1,
             expiry_slot: 10,
         },
