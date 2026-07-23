@@ -2531,6 +2531,7 @@ pub mod ix {
             amount: u128,
         },
         ConvertReleasedPnl {
+            portfolio_id: u64,
             amount: u128,
         },
         CloseResolved {
@@ -2799,6 +2800,7 @@ pub mod ix {
                     amount: read_u128(&mut rest)?,
                 },
                 28 => Self::ConvertReleasedPnl {
+                    portfolio_id: read_u64(&mut rest)?,
                     amount: read_u128(&mut rest)?,
                 },
                 30 => Self::CloseResolved {
@@ -3100,8 +3102,12 @@ pub mod ix {
                     push_u16(&mut out, domain);
                     push_u128(&mut out, amount);
                 }
-                Self::ConvertReleasedPnl { amount } => {
+                Self::ConvertReleasedPnl {
+                    portfolio_id,
+                    amount,
+                } => {
                     out.push(28);
+                    push_u64(&mut out, portfolio_id);
                     push_u128(&mut out, amount);
                 }
                 Self::CloseResolved { fee_rate_per_slot } => {
@@ -5284,9 +5290,10 @@ pub mod processor {
             Instruction::WithdrawBackingBucket { domain, amount } => {
                 handle_withdraw_backing_bucket(program_id, accounts, domain, amount)
             }
-            Instruction::ConvertReleasedPnl { amount } => {
-                handle_convert_released_pnl(program_id, accounts, amount)
-            }
+            Instruction::ConvertReleasedPnl {
+                portfolio_id,
+                amount,
+            } => handle_convert_released_pnl(program_id, accounts, portfolio_id, amount),
             Instruction::CloseResolved { fee_rate_per_slot } => {
                 handle_close_resolved(program_id, accounts, fee_rate_per_slot)
             }
@@ -5768,7 +5775,7 @@ pub mod processor {
         require_token_balance(vault_token, amount_u64)?;
 
         ensure_portfolio_storage_for_market_slots(portfolio_ai, max_market_slots)?;
-        bind_withdraw_portfolio_id(portfolio_ai, portfolio_id)?;
+        bind_portfolio_id(portfolio_ai, portfolio_id)?;
         {
             let mut market_data = market_ai.try_borrow_mut_data()?;
             let (cfg, mut group) = state::market_view_mut(&mut market_data)?;
@@ -8389,11 +8396,15 @@ pub mod processor {
     fn handle_convert_released_pnl<'a>(
         program_id: &Pubkey,
         accounts: &'a [AccountInfo<'a>],
+        portfolio_id: u64,
         amount: u128,
     ) -> ProgramResult {
         if amount == 0 {
             return Err(PercolatorError::InvalidInstruction.into());
         }
+        let portfolio_ai = account(accounts, 2)?;
+        expect_owner(portfolio_ai, program_id)?;
+        bind_portfolio_id(portfolio_ai, portfolio_id)?;
         with_one_portfolio_view(program_id, accounts, true, |group, portfolio, cfg| {
             if group.header.mode != 0 {
                 return Err(V16Error::LockActive);
@@ -11172,10 +11183,7 @@ pub mod processor {
 
     const LEGACY_PORTFOLIO_ID: u64 = u64::MAX;
 
-    fn bind_withdraw_portfolio_id(
-        portfolio_ai: &AccountInfo,
-        expected_portfolio_id: u64,
-    ) -> ProgramResult {
+    fn bind_portfolio_id(portfolio_ai: &AccountInfo, expected_portfolio_id: u64) -> ProgramResult {
         let required_len = state::portfolio_account_len_for_market_slots(0)?;
         let (actual_portfolio_id, legacy_portfolio) = {
             let data = portfolio_ai.try_borrow_data()?;
