@@ -1415,7 +1415,10 @@ impl V16CuEnv {
             .unwrap();
         let cu = self
             .send(
-                ProgInstruction::Deposit { amount },
+                ProgInstruction::Deposit {
+                    portfolio_id: AUTO_PORTFOLIO_ID,
+                    amount,
+                },
                 vec![
                     AccountMeta::new(owner.pubkey(), true),
                     AccountMeta::new(self.market, false),
@@ -3661,7 +3664,8 @@ fn send_tx(
 
 fn bind_test_portfolio_ids(svm: &LiteSVM, ix: &mut ProgInstruction, accounts: &[AccountMeta]) {
     match ix {
-        ProgInstruction::Withdraw { portfolio_id, .. }
+        ProgInstruction::Deposit { portfolio_id, .. }
+        | ProgInstruction::Withdraw { portfolio_id, .. }
         | ProgInstruction::ConvertReleasedPnl { portfolio_id, .. } => {
             bind_test_portfolio_id_at(svm, portfolio_id, accounts, 2);
         }
@@ -3976,7 +3980,10 @@ fn v16_bpf_mainnet_realistic_system_spl_ata_bootstrap_deposits_and_ledgers() {
         &mut svm,
         program_id,
         &payer,
-        ProgInstruction::Deposit { amount: 123 },
+        ProgInstruction::Deposit {
+            portfolio_id: AUTO_PORTFOLIO_ID,
+            amount: 123,
+        },
         vec![
             AccountMeta::new(user.pubkey(), true),
             AccountMeta::new(market.pubkey(), false),
@@ -4284,7 +4291,10 @@ fn deposit_to_market(
         &mut env.svm,
         env.program_id,
         &env.payer,
-        ProgInstruction::Deposit { amount },
+        ProgInstruction::Deposit {
+            portfolio_id: AUTO_PORTFOLIO_ID,
+            amount,
+        },
         vec![
             AccountMeta::new(owner.pubkey(), true),
             AccountMeta::new(market, false),
@@ -4500,7 +4510,10 @@ fn v16_bpf_failed_deposit_spl_transfer_rolls_back_engine_credit() {
     let source_before = env.svm.get_account(&source).unwrap();
     let vault_before = env.svm.get_account(&env.vault).unwrap();
     let result = env.send(
-        ProgInstruction::Deposit { amount: 100 },
+        ProgInstruction::Deposit {
+            portfolio_id: AUTO_PORTFOLIO_ID,
+            amount: 100,
+        },
         vec![
             AccountMeta::new(owner.pubkey(), true),
             AccountMeta::new(env.market, false),
@@ -20087,6 +20100,256 @@ fn v16_attack_presigned_matcher_config_rejects_reinitialized_portfolio() {
     );
 }
 
+// A deposit signed for one portfolio incarnation must not be replayable after the account is
+// closed and reinitialized. Deposited collateral is exposed to the replacement portfolio's losses,
+// so an old signature is not a harmless donation authorization.
+#[test]
+fn v16_attack_presigned_deposit_rejects_reinitialized_portfolio() {
+    const INITIAL_MARK: u64 = 1_000_000;
+    const INITIAL_CAPITAL: u128 = 150_000;
+    const FORCED_DEPOSIT: u128 = 100_000;
+
+    let mut env = V16CuEnv::new_with_init_params(production_risk_params());
+    env.update_liquidation_fee_policy_with_cu(0);
+    env.configure_auth_mark_with_cu(0, INITIAL_MARK);
+    env.configure_permissionless_resolve_with_cu(5, 5);
+
+    let victim_owner = Keypair::new();
+    let victim_account = Keypair::new();
+    let victim = victim_account.pubkey();
+    env.ensure_signer_account(victim_owner.pubkey());
+    system_create_account_for_test(
+        &mut env.svm,
+        &env.payer,
+        &victim_account,
+        env.portfolio_account_len,
+        env.program_id,
+    );
+    env.send(
+        ProgInstruction::InitPortfolio,
+        vec![
+            AccountMeta::new(victim_owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(victim, false),
+        ],
+        &[&victim_owner],
+    )
+    .expect("initialize incarnation A");
+    let original_id = env.portfolio_id(victim);
+    let forced_source =
+        env.token_account_for_mint(env.mint, victim_owner.pubkey(), FORCED_DEPOSIT as u64);
+    let deposit_ix = |portfolio_id: u64, amount: u128, incarnation_bound: bool| {
+        let mut data = vec![3u8];
+        if incarnation_bound {
+            data.extend_from_slice(&portfolio_id.to_le_bytes());
+        }
+        data.extend_from_slice(&amount.to_le_bytes());
+        Instruction {
+            program_id: env.program_id,
+            accounts: vec![
+                AccountMeta::new(victim_owner.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(victim, false),
+                AccountMeta::new(forced_source, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            data,
+        }
+    };
+
+    env.svm.expire_blockhash();
+    let incarnation_bound = send_raw_tx(
+        &mut env.svm,
+        &env.payer,
+        deposit_ix(original_id, 0, true),
+        &[&victim_owner],
+    )
+    .is_ok();
+    env.svm.expire_blockhash();
+    let retained_deposit = Transaction::new_signed_with_payer(
+        &[
+            heap_ix(),
+            cu_ix(),
+            deposit_ix(original_id, FORCED_DEPOSIT, incarnation_bound),
+        ],
+        Some(&env.payer.pubkey()),
+        &[&env.payer, &victim_owner],
+        env.svm.latest_blockhash(),
+    );
+
+    env.close_portfolio_with_cu(&victim_owner, victim);
+    send_raw_tx(
+        &mut env.svm,
+        &env.payer,
+        system_instruction::transfer(&env.payer.pubkey(), &victim, 1_000_000_000),
+        &[],
+    )
+    .expect("re-fund the closed portfolio account");
+    env.send(
+        ProgInstruction::InitPortfolio,
+        vec![
+            AccountMeta::new(victim_owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(victim, false),
+        ],
+        &[&victim_owner],
+    )
+    .expect("initialize incarnation B");
+    let replacement_id = env.portfolio_id(victim);
+    assert!(replacement_id > original_id);
+    env.deposit(&victim_owner, victim, INITIAL_CAPITAL);
+
+    let winner_owner = Keypair::new();
+    let winner = env.create_portfolio(&winner_owner);
+    env.deposit(&winner_owner, winner, 100_000_000);
+    env.trade_asset_with_cu(
+        0,
+        &winner_owner,
+        winner,
+        &victim_owner,
+        victim,
+        POS_SCALE as i128,
+        INITIAL_MARK,
+        0,
+    );
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let victim_before = env.svm.get_account(&victim).unwrap();
+    let source_before = env.svm.get_account(&forced_source).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    let replay = env.svm.send_transaction(retained_deposit);
+    if let Err(rejected) = replay {
+        assert!(
+            format!("{rejected:?}").contains("Custom(16)"),
+            "the stale deposit must reject with EngineProvenanceMismatch: {rejected:?}"
+        );
+        assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+        assert_eq!(env.svm.get_account(&victim).unwrap(), victim_before);
+        assert_eq!(env.svm.get_account(&forced_source).unwrap(), source_before);
+        assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+        assert_eq!(env.token_amount(forced_source), FORCED_DEPOSIT as u64);
+        return;
+    }
+    assert_eq!(env.token_amount(forced_source), 0);
+    assert_eq!(
+        env.portfolio_state(victim).capital.get(),
+        INITIAL_CAPITAL + FORCED_DEPOSIT
+    );
+
+    for slot in 1..=180u64 {
+        env.svm.warp_to_slot(slot);
+        let _ = env.push_auth_mark_with_cu(slot, 2_000_000);
+    }
+    for _ in 0..20 {
+        env.svm.expire_blockhash();
+        let _ = env.send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 180,
+                observations: crank_observations(0),
+            },
+            vec![
+                AccountMeta::new(env.payer.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(victim, false),
+            ],
+            &[],
+        );
+    }
+    for _ in 0..20 {
+        env.svm.expire_blockhash();
+        let _ = env.send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 180,
+                observations: crank_observations(0),
+            },
+            vec![
+                AccountMeta::new(env.payer.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(winner, false),
+            ],
+            &[],
+        );
+    }
+
+    let victim_after = env.portfolio_state(victim);
+    assert_eq!(victim_after.capital.get(), 0);
+    assert_eq!(victim_after.pnl.get(), 0);
+    assert!(percolator::active_bitmap_is_empty(active_bitmap(
+        &victim_after
+    )));
+
+    let winner_before_recovery = env.portfolio_state(winner);
+    assert!(winner_before_recovery.pnl.get() > INITIAL_CAPITAL as i128);
+    assert!(!percolator::active_bitmap_is_empty(active_bitmap(
+        &winner_before_recovery
+    )));
+    let mut forfeits = Vec::new();
+    for _ in 0..20 {
+        if percolator::active_bitmap_is_empty(active_bitmap(&env.portfolio_state(winner))) {
+            break;
+        }
+        env.svm.expire_blockhash();
+        forfeits.push(env.send(
+            ProgInstruction::ForfeitRecoveryLeg {
+                asset_index: 0,
+                b_delta_budget: u128::MAX,
+            },
+            vec![
+                AccountMeta::new(winner_owner.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(winner, false),
+            ],
+            &[&winner_owner],
+        ));
+    }
+    assert!(forfeits.iter().all(Result::is_ok));
+    env.svm.expire_blockhash();
+    env.send(
+        ProgInstruction::FinalizeResetSide {
+            asset_index: 0,
+            side: 0,
+        },
+        vec![AccountMeta::new(env.market, false)],
+        &[],
+    )
+    .expect("permissionless reset finalization completes the bounded recovery");
+    let winner_flat = env.portfolio_state(winner);
+    assert!(percolator::active_bitmap_is_empty(active_bitmap(
+        &winner_flat
+    )));
+
+    env.svm.expire_blockhash();
+    env.resolve_stale_permissionless_with_cu(200);
+    let destination = env.token_account(winner_owner.pubkey(), 0);
+    env.send(
+        ProgInstruction::CloseResolved {
+            fee_rate_per_slot: 0,
+        },
+        vec![
+            AccountMeta::new_readonly(winner_owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(winner, false),
+            AccountMeta::new(destination, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&winner_owner],
+    )
+    .expect("winning trader withdraws the terminal payout");
+    let payout = env.token_amount(destination) as u128;
+    let extracted_profit = payout
+        .checked_sub(100_000_000)
+        .expect("terminal payout returns the winner's principal");
+    assert!(extracted_profit > INITIAL_CAPITAL);
+    let forced_atoms_extracted = extracted_profit - INITIAL_CAPITAL;
+    assert!(forced_atoms_extracted > 0);
+    panic!(
+        "incarnation-A deposit drained B's wallet source and paid {forced_atoms_extracted} atoms beyond B's own capital to the opposing trader as SPL collateral"
+    );
+}
+
 #[test]
 fn v16_trade_entrypoints_bind_both_portfolio_ids_before_matcher_or_state_mutation() {
     let mut env = V16CuEnv::new_with_market_params_and_price_move(1, 1_000, 1_000, 500);
@@ -20754,7 +21017,10 @@ fn v16_attack_zero_amount_inputs_are_safe() {
     env.svm.expire_blockhash();
     let src = env.token_account(la.pubkey(), 0);
     let r_dep = env.send(
-        ProgInstruction::Deposit { amount: 0 },
+        ProgInstruction::Deposit {
+            portfolio_id: AUTO_PORTFOLIO_ID,
+            amount: 0,
+        },
         vec![
             AccountMeta::new(la.pubkey(), true),
             AccountMeta::new(env.market, false),
@@ -20914,7 +21180,10 @@ fn v16_attack_deposit_underfunded_source_is_atomic() {
         .unwrap();
     env.svm.expire_blockhash();
     let r = env.send(
-        ProgInstruction::Deposit { amount: 1_000_000 },
+        ProgInstruction::Deposit {
+            portfolio_id: AUTO_PORTFOLIO_ID,
+            amount: 1_000_000,
+        },
         vec![
             AccountMeta::new(owner.pubkey(), true),
             AccountMeta::new(env.market, false),
@@ -20946,7 +21215,10 @@ fn v16_attack_deposit_underfunded_source_is_atomic() {
     // a valid deposit within balance still works afterward (state not corrupted).
     env.svm.expire_blockhash();
     let r2 = env.send(
-        ProgInstruction::Deposit { amount: 100 },
+        ProgInstruction::Deposit {
+            portfolio_id: AUTO_PORTFOLIO_ID,
+            amount: 100,
+        },
         vec![
             AccountMeta::new(owner.pubkey(), true),
             AccountMeta::new(env.market, false),
@@ -23232,7 +23504,10 @@ fn v16_attack_cure_rejects_cross_market_portfolio_before_transfer() {
         &mut env.svm,
         env.program_id,
         &env.payer,
-        ProgInstruction::Deposit { amount: 100 },
+        ProgInstruction::Deposit {
+            portfolio_id: AUTO_PORTFOLIO_ID,
+            amount: 100,
+        },
         vec![
             AccountMeta::new(owner.pubkey(), true),
             AccountMeta::new(market_b, false),
@@ -23580,7 +23855,10 @@ fn v16_regression_vault_pinned_to_canonical_ata_no_fragmentation() {
     let atk_src = env.token_account_for_mint(env.mint, attacker.pubkey(), 500_000);
     env.svm.expire_blockhash();
     let dep = env.send(
-        ProgInstruction::Deposit { amount: 500_000 },
+        ProgInstruction::Deposit {
+            portfolio_id: AUTO_PORTFOLIO_ID,
+            amount: 500_000,
+        },
         vec![
             AccountMeta::new(attacker.pubkey(), true),
             AccountMeta::new(env.market, false),
@@ -25809,7 +26087,10 @@ fn v16_attack_deposit_from_vault_as_source_rejected() {
     // attacker tries to "deposit" using the VAULT as the source (vault is owned by vault_authority, not attacker).
     env.svm.expire_blockhash();
     let r = env.send(
-        ProgInstruction::Deposit { amount: 500_000 },
+        ProgInstruction::Deposit {
+            portfolio_id: AUTO_PORTFOLIO_ID,
+            amount: 500_000,
+        },
         vec![
             AccountMeta::new(attacker.pubkey(), true),
             AccountMeta::new(env.market, false),
@@ -25842,7 +26123,10 @@ fn v16_attack_deposit_from_vault_as_source_rejected() {
     let other_src = env.token_account_for_mint(env.mint, other.pubkey(), 500_000);
     env.svm.expire_blockhash();
     let r2 = env.send(
-        ProgInstruction::Deposit { amount: 500_000 },
+        ProgInstruction::Deposit {
+            portfolio_id: AUTO_PORTFOLIO_ID,
+            amount: 500_000,
+        },
         vec![
             AccountMeta::new(attacker.pubkey(), true),
             AccountMeta::new(env.market, false),
@@ -26128,7 +26412,10 @@ fn v16_attack_resolved_mode_gates_all_live_ops() {
     let src = env.token_account_for_mint(env.mint, owner.pubkey(), 100);
     env.svm.expire_blockhash();
     let r_dep = env.send(
-        ProgInstruction::Deposit { amount: 100 },
+        ProgInstruction::Deposit {
+            portfolio_id: AUTO_PORTFOLIO_ID,
+            amount: 100,
+        },
         vec![
             AccountMeta::new(owner.pubkey(), true),
             AccountMeta::new(env.market, false),
@@ -31193,7 +31480,10 @@ fn v16_attack_cross_market_portfolio_cannot_drain_foreign_vault() {
         &mut env.svm,
         env.program_id,
         &env.payer,
-        ProgInstruction::Deposit { amount: 1_000_000 },
+        ProgInstruction::Deposit {
+            portfolio_id: AUTO_PORTFOLIO_ID,
+            amount: 1_000_000,
+        },
         vec![
             AccountMeta::new(victim.pubkey(), true),
             AccountMeta::new(market_b, false),
@@ -31807,7 +32097,10 @@ fn v16_attack_close_resolved_rejects_cross_market_portfolio_payout() {
         &mut env.svm,
         env.program_id,
         &env.payer,
-        ProgInstruction::Deposit { amount: 1_000_000 },
+        ProgInstruction::Deposit {
+            portfolio_id: AUTO_PORTFOLIO_ID,
+            amount: 1_000_000,
+        },
         vec![
             AccountMeta::new(victim.pubkey(), true),
             AccountMeta::new(market_b, false),
@@ -32322,7 +32615,10 @@ fn v16_attack_permissionless_crank_rejects_cross_market_target_portfolio() {
             &mut env.svm,
             env.program_id,
             &env.payer,
-            ProgInstruction::Deposit { amount: 1_000_000 },
+            ProgInstruction::Deposit {
+                portfolio_id: AUTO_PORTFOLIO_ID,
+                amount: 1_000_000,
+            },
             vec![
                 AccountMeta::new(owner.pubkey(), true),
                 AccountMeta::new(market_b, false),
@@ -32801,7 +33097,10 @@ fn v16_attack_wrong_token_program_rejected() {
     let src = env.token_account_for_mint(env.mint, owner.pubkey(), 100);
     env.svm.expire_blockhash();
     let r2 = env.send(
-        ProgInstruction::Deposit { amount: 100 },
+        ProgInstruction::Deposit {
+            portfolio_id: AUTO_PORTFOLIO_ID,
+            amount: 100,
+        },
         vec![
             AccountMeta::new(owner.pubkey(), true),
             AccountMeta::new(env.market, false),
@@ -34364,7 +34663,10 @@ fn v16_attack_large_amount_deposit_withdraw_exact() {
     let src_over = env.token_account_for_mint(env.mint, owner.pubkey(), over as u64);
     env.svm.expire_blockhash();
     let r = env.send(
-        ProgInstruction::Deposit { amount: over },
+        ProgInstruction::Deposit {
+            portfolio_id: AUTO_PORTFOLIO_ID,
+            amount: over,
+        },
         vec![
             AccountMeta::new(owner.pubkey(), true),
             AccountMeta::new(env.market, false),
@@ -34588,7 +34890,10 @@ fn v16_attack_cumulative_tvl_cap_enforced() {
     let src = env.token_account_for_mint(env.mint, b.pubkey(), 100);
     env.svm.expire_blockhash();
     let r = env.send(
-        ProgInstruction::Deposit { amount: 100 },
+        ProgInstruction::Deposit {
+            portfolio_id: AUTO_PORTFOLIO_ID,
+            amount: 100,
+        },
         vec![
             AccountMeta::new(b.pubkey(), true),
             AccountMeta::new(env.market, false),
@@ -35313,7 +35618,10 @@ fn v16_attack_deposit_during_active_close_safe() {
     let src = env.token_account_for_mint(env.mint, owner.pubkey(), 500);
     env.svm.expire_blockhash();
     let r = env.send(
-        ProgInstruction::Deposit { amount: 500 },
+        ProgInstruction::Deposit {
+            portfolio_id: AUTO_PORTFOLIO_ID,
+            amount: 500,
+        },
         vec![
             AccountMeta::new(owner.pubkey(), true),
             AccountMeta::new(env.market, false),
@@ -44078,7 +44386,10 @@ fn v16_attack_deposit_into_uninitialized_portfolio_rejects() {
 
     env.svm.expire_blockhash();
     let r = env.send(
-        ProgInstruction::Deposit { amount: 1_000 },
+        ProgInstruction::Deposit {
+            portfolio_id: AUTO_PORTFOLIO_ID,
+            amount: 1_000,
+        },
         vec![
             AccountMeta::new(owner.pubkey(), true),
             AccountMeta::new(env.market, false),
@@ -44186,7 +44497,10 @@ fn v16_attack_deposit_wrong_mint_source_rejects() {
 
     env.svm.expire_blockhash();
     let r = env.send(
-        ProgInstruction::Deposit { amount: 1_000_000 },
+        ProgInstruction::Deposit {
+            portfolio_id: AUTO_PORTFOLIO_ID,
+            amount: 1_000_000,
+        },
         vec![
             AccountMeta::new(owner.pubkey(), true),
             AccountMeta::new(env.market, false),
@@ -44221,7 +44535,10 @@ fn v16_attack_deposit_wrong_mint_source_rejects() {
     let good_source = env.token_account_for_mint(env.mint, owner.pubkey(), 500);
     env.svm.expire_blockhash();
     let ok = env.send(
-        ProgInstruction::Deposit { amount: 500 },
+        ProgInstruction::Deposit {
+            portfolio_id: AUTO_PORTFOLIO_ID,
+            amount: 500,
+        },
         vec![
             AccountMeta::new(owner.pubkey(), true),
             AccountMeta::new(env.market, false),
@@ -47701,7 +48018,10 @@ fn v16_attack_deposit_primary_only_withdraw_either() {
         .unwrap();
     env.svm.expire_blockhash();
     let r_dep = env.send(
-        ProgInstruction::Deposit { amount: 500 },
+        ProgInstruction::Deposit {
+            portfolio_id: AUTO_PORTFOLIO_ID,
+            amount: 500,
+        },
         vec![
             AccountMeta::new(owner.pubkey(), true),
             AccountMeta::new(market, false),
@@ -56470,7 +56790,10 @@ fn v16_attack_live_value_paths_reject_when_resolve_matured() {
     let fresh_deposit_source = env.token_account_for_mint(env.mint, taker.pubkey(), 50_000);
     env.svm.expire_blockhash();
     let fresh_deposit = env.send(
-        ProgInstruction::Deposit { amount: 50_000 },
+        ProgInstruction::Deposit {
+            portfolio_id: AUTO_PORTFOLIO_ID,
+            amount: 50_000,
+        },
         vec![
             AccountMeta::new(taker.pubkey(), true),
             AccountMeta::new(env.market, false),
@@ -56517,7 +56840,10 @@ fn v16_attack_live_value_paths_reject_when_resolve_matured() {
 
     env.svm.expire_blockhash();
     let stale_deposit = env.send(
-        ProgInstruction::Deposit { amount: 75_000 },
+        ProgInstruction::Deposit {
+            portfolio_id: AUTO_PORTFOLIO_ID,
+            amount: 75_000,
+        },
         vec![
             AccountMeta::new(taker.pubkey(), true),
             AccountMeta::new(env.market, false),
@@ -58540,7 +58866,10 @@ fn v16_attack_deposit_withdraw_amount_over_u64_max_rejects_no_truncation() {
     let src = env.token_account(owner.pubkey(), 1_000);
     env.svm.expire_blockhash();
     let r_dep = env.send(
-        ProgInstruction::Deposit { amount: over },
+        ProgInstruction::Deposit {
+            portfolio_id: AUTO_PORTFOLIO_ID,
+            amount: over,
+        },
         vec![
             AccountMeta::new(owner.pubkey(), true),
             AccountMeta::new(env.market, false),

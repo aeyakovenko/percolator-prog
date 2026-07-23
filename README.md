@@ -407,6 +407,7 @@ This section describes intent and operational ordering, not argument-by-argument
 - **InitPortfolio** (tag 1)
   - initializes a program-owned portfolio account and binds `owner = signer`
 - **Deposit** (tag 3)
+  - binds the signed payload to the current program-assigned portfolio incarnation ID before moving tokens
   - transfers collateral into vault; credits engine balance for that account
 - **Withdraw** (tag 4)
   - binds the signed payload to the current program-assigned portfolio incarnation ID

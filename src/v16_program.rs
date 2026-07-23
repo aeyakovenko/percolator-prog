@@ -2476,6 +2476,7 @@ pub mod ix {
         },
         InitPortfolio,
         Deposit {
+            portfolio_id: u64,
             amount: u128,
         },
         Withdraw {
@@ -2718,6 +2719,7 @@ pub mod ix {
                 },
                 1 => Self::InitPortfolio,
                 3 => Self::Deposit {
+                    portfolio_id: read_u64(&mut rest)?,
                     amount: read_u128(&mut rest)?,
                 },
                 4 => Self::Withdraw {
@@ -3029,8 +3031,12 @@ pub mod ix {
                     push_u128(&mut out, maintenance_fee_per_slot);
                 }
                 Self::InitPortfolio => out.push(1),
-                Self::Deposit { amount } => {
+                Self::Deposit {
+                    portfolio_id,
+                    amount,
+                } => {
                     out.push(3);
+                    push_u64(&mut out, portfolio_id);
                     push_u128(&mut out, amount);
                 }
                 Self::Withdraw {
@@ -5279,7 +5285,10 @@ pub mod processor {
                 maintenance_fee_per_slot,
             ),
             Instruction::InitPortfolio => handle_init_portfolio(program_id, accounts),
-            Instruction::Deposit { amount } => handle_deposit(program_id, accounts, amount),
+            Instruction::Deposit {
+                portfolio_id,
+                amount,
+            } => handle_deposit(program_id, accounts, portfolio_id, amount),
             Instruction::Withdraw {
                 portfolio_id,
                 amount,
@@ -5759,6 +5768,7 @@ pub mod processor {
     fn handle_deposit<'a>(
         program_id: &Pubkey,
         accounts: &'a [AccountInfo<'a>],
+        portfolio_id: u64,
         amount: u128,
     ) -> ProgramResult {
         let owner = account(accounts, 0)?;
@@ -5788,6 +5798,7 @@ pub mod processor {
         let amount_u64 = amount_to_u64(amount)?;
         require_token_balance(source_token, amount_u64)?;
 
+        bind_portfolio_id(portfolio_ai, portfolio_id)?;
         ensure_portfolio_storage_for_market_slots(portfolio_ai, max_market_slots)?;
         {
             let mut market_data = market_ai.try_borrow_mut_data()?;
