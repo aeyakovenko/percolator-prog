@@ -45831,6 +45831,91 @@ fn v16_attack_permissionless_create_underfunded_fee_does_not_activate_or_credit(
     assert_domain_budget_remaining_total_consistent(&funded_group, "funded permissionless create");
 }
 
+// A permissionless creator signs the asset definition and token debit, but the instruction does
+// not bind the mutable fee that will be pulled. A delayed, honestly signed high-fee policy must not
+// be able to land after a visible low-fee correction and debit more than the creator accepted.
+#[test]
+fn v16_attack_presigned_permissionless_activation_cannot_be_charged_a_higher_fee() {
+    const SIGNED_FEE: u128 = 1;
+    const RUGGED_FEE: u128 = 1_000;
+
+    let mut env = V16CuEnv::new();
+    let creator = Keypair::new();
+    env.ensure_signer_account(creator.pubkey());
+    env.svm.warp_to_slot(1);
+
+    let delayed_policy = Instruction {
+        program_id: env.program_id,
+        accounts: vec![
+            AccountMeta::new(env.admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        data: ProgInstruction::UpdateMarketInitFeePolicy {
+            min_init_fee: RUGGED_FEE,
+        }
+        .encode(),
+    };
+    let retained_policy = Transaction::new_signed_with_payer(
+        &[heap_ix(), cu_ix(), delayed_policy],
+        Some(&env.payer.pubkey()),
+        &[&env.payer, &env.admin],
+        env.svm.latest_blockhash(),
+    );
+
+    // The honest authority's newer correction is visible before the creator signs.
+    env.update_market_init_fee_policy_with_cu(SIGNED_FEE);
+    let fee_source = env.token_account(creator.pubkey(), RUGGED_FEE as u64);
+    let activation = Instruction {
+        program_id: env.program_id,
+        accounts: vec![
+            AccountMeta::new(creator.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(fee_source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        data: ProgInstruction::UpdateAssetLifecycle {
+            action: percolator_prog::processor::ASSET_ACTION_ACTIVATE,
+            asset_index: 1,
+            now_slot: 1,
+            initial_price: 100,
+            insurance_authority: creator.pubkey().to_bytes(),
+            insurance_operator: creator.pubkey().to_bytes(),
+            backing_bucket_authority: creator.pubkey().to_bytes(),
+            oracle_authority: creator.pubkey().to_bytes(),
+        }
+        .encode(),
+    };
+    let retained = Transaction::new_signed_with_payer(
+        &[heap_ix(), cu_ix(), activation],
+        Some(&env.payer.pubkey()),
+        &[&env.payer, &creator],
+        env.svm.latest_blockhash(),
+    );
+
+    // An unprivileged relayer restores the older policy and then lands the unchanged activation.
+    env.svm
+        .send_transaction(retained_policy)
+        .expect("delayed high-fee policy remains valid on the vulnerable parent");
+    let result = env
+        .svm
+        .send_transaction(retained)
+        .map(|meta| meta.compute_units_consumed)
+        .map_err(|err| format!("{err:?}"));
+
+    let victim_remaining = env.token_amount(fee_source);
+    let (_, group) = env.market_state();
+    assert!(
+        result.is_err(),
+        "retained activation charged an unsigned fee increase: result={result:?}, \
+         victim_remaining={victim_remaining}, insurance={}, vault={}",
+        group.insurance,
+        group.vault,
+    );
+    assert_eq!(victim_remaining, RUGGED_FEE as u64);
+    assert_eq!(group.insurance, 0);
+}
+
 // security.md sweep - permissionless init-fee vault binding (#44/#48): asset activation charges
 // the public creator before growing a new market slot. A funded creator must not be able to route the
 // fee into a non-canonical vault-authority-owned token account and still install a new asset, which
