@@ -6003,10 +6003,18 @@ pub mod processor {
         for leg in legs {
             ensure_valid_reported_trade_price(leg.exec_price)?;
         }
-        let (_cfg_pre, mode_pre, max_market_slots, _) =
+        let (cfg_pre, mode_pre, max_market_slots, _) =
             state::read_market_config_mode_and_capacity(&market_ai.try_borrow_data()?)?;
         if mode_pre != MarketModeV16::Live {
             return Err(PercolatorError::EngineLockActive.into());
+        }
+        // Both owners sign every leg, so each fee is also their consent ceiling for a mutable
+        // base-fee policy that may have changed since this transaction was built.
+        if legs
+            .iter()
+            .any(|leg| cfg_pre.trade_fee_base_bps > leg.fee_bps)
+        {
+            return Err(PercolatorError::InvalidInstruction.into());
         }
         handle_batch_execute_zero_copy(
             program_id,
@@ -6224,10 +6232,14 @@ pub mod processor {
             return Err(PercolatorError::InvalidInstruction.into());
         }
         ensure_valid_reported_trade_price(exec_price)?;
-        let (_cfg_pre, mode_pre, max_market_slots, _) =
+        let (cfg_pre, mode_pre, max_market_slots, _) =
             state::read_market_config_mode_and_capacity(&market_ai.try_borrow_data()?)?;
         if mode_pre != MarketModeV16::Live {
             return Err(PercolatorError::EngineLockActive.into());
+        }
+        // Both owners sign `fee_bps`; do not let a later policy update increase their charge.
+        if cfg_pre.trade_fee_base_bps > fee_bps {
+            return Err(PercolatorError::InvalidInstruction.into());
         }
         handle_trade_nocpi_zero_copy(
             program_id,
