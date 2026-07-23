@@ -9,6 +9,7 @@ use percolator_prog::{
         ASSET_ORACLE_WRAPPER_LEN, MARKET_GROUP_OFF, MATCHER_ABI_VERSION, MATCHER_CONTEXT_MIN_LEN,
         ORACLE_LEG_FLAG_DIVIDE_LEG2, ORACLE_LEG_FLAG_DIVIDE_LEG3, PORTFOLIO_ENGINE_ACCOUNT_LEN,
     },
+    error::PercolatorError,
     ix::{BatchTradeCpiLeg, BatchTradeLeg, CrankObservationHint, Instruction as ProgInstruction},
     oracle_v16, processor, state,
     state::{MarketGroupV16, PortfolioAccountV16},
@@ -19248,6 +19249,143 @@ fn v16_portfolio_incarnation_id_separates_close_and_reuse() {
     assert_eq!(replacement.residual_crystallized_loss_atoms_total.get(), 0);
     assert_eq!(replacement.residual_spent_principal_atoms_total.get(), 0);
     assert_eq!(replacement.residual_received_atoms_total.get(), 0);
+}
+
+// A close signed for one portfolio incarnation must not be replayable after the account is closed,
+// re-funded, and initialized again. ClosePortfolio transfers the account's lamports into the market
+// slab, so an old signature can otherwise destroy a replacement account funded by the same owner.
+#[test]
+fn v16_attack_presigned_close_rejects_reinitialized_portfolio() {
+    let mut env = V16CuEnv::new();
+    let owner = Keypair::new();
+    let portfolio_account = Keypair::new();
+    let portfolio = portfolio_account.pubkey();
+    env.ensure_signer_account(owner.pubkey());
+    system_create_account_for_test(
+        &mut env.svm,
+        &env.payer,
+        &portfolio_account,
+        env.portfolio_account_len,
+        env.program_id,
+    );
+    env.send(
+        ProgInstruction::InitPortfolio,
+        vec![
+            AccountMeta::new(owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio, false),
+        ],
+        &[&owner],
+    )
+    .expect("initialize incarnation A");
+    let original_id = env.portfolio_id(portfolio);
+    let close_ix = |portfolio_id: u64, incarnation_bound: bool| {
+        let mut data = vec![8u8];
+        if incarnation_bound {
+            data.extend_from_slice(&portfolio_id.to_le_bytes());
+        }
+        Instruction {
+            program_id: env.program_id,
+            accounts: vec![
+                AccountMeta::new(owner.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(portfolio, false),
+            ],
+            data,
+        }
+    };
+
+    let market_before_probe = env.svm.get_account(&env.market).unwrap();
+    let portfolio_before_probe = env.svm.get_account(&portfolio).unwrap();
+    env.svm.expire_blockhash();
+    let probe = send_raw_tx(
+        &mut env.svm,
+        &env.payer,
+        close_ix(original_id + 10_000, true),
+        &[&owner],
+    );
+    let incarnation_bound = match probe {
+        Err(ref rejected)
+            if format!("{rejected:?}").contains(&format!(
+                "Custom({})",
+                PercolatorError::EngineProvenanceMismatch as u32
+            )) =>
+        {
+            true
+        }
+        Err(_) => false,
+        Ok(_) => panic!("a close carrying the wrong portfolio incarnation must reject"),
+    };
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before_probe);
+    assert_eq!(
+        env.svm.get_account(&portfolio).unwrap(),
+        portfolio_before_probe
+    );
+
+    env.svm.expire_blockhash();
+    let retained_close = Transaction::new_signed_with_payer(
+        &[
+            heap_ix(),
+            cu_ix(),
+            ComputeBudgetInstruction::set_compute_unit_price(1),
+            close_ix(original_id, incarnation_bound),
+        ],
+        Some(&env.payer.pubkey()),
+        &[&env.payer, &owner],
+        env.svm.latest_blockhash(),
+    );
+
+    env.close_portfolio_with_cu(&owner, portfolio);
+    env.svm.expire_blockhash();
+    send_raw_tx(
+        &mut env.svm,
+        &env.payer,
+        system_instruction::transfer(&env.payer.pubkey(), &portfolio, 1_000_000_000),
+        &[],
+    )
+    .expect("re-fund the closed portfolio account through the System Program");
+    env.svm.expire_blockhash();
+    env.send(
+        ProgInstruction::InitPortfolio,
+        vec![
+            AccountMeta::new(owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio, false),
+        ],
+        &[&owner],
+    )
+    .expect("initialize incarnation B");
+    let replacement_id = env.portfolio_id(portfolio);
+    assert!(replacement_id > original_id);
+
+    let market_before_replay = env.svm.get_account(&env.market).unwrap();
+    let replacement_before_replay = env.svm.get_account(&portfolio).unwrap();
+    let replay = env.svm.send_transaction(retained_close);
+    if let Err(rejected) = replay {
+        let expected_error = format!(
+            "Custom({})",
+            PercolatorError::EngineProvenanceMismatch as u32
+        );
+        assert!(
+            format!("{rejected:?}").contains(&expected_error),
+            "the stale close must reject with {expected_error}: {rejected:?}"
+        );
+        assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before_replay);
+        assert_eq!(
+            env.svm.get_account(&portfolio).unwrap(),
+            replacement_before_replay
+        );
+        return;
+    }
+
+    assert_eq!(env.svm.get_account(&portfolio).unwrap().lamports, 0);
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap().lamports,
+        market_before_replay.lamports + replacement_before_replay.lamports
+    );
+    panic!(
+        "a close signed for portfolio incarnation {original_id} drained replacement incarnation {replacement_id}"
+    );
 }
 
 // security.md sweep — rounding asymmetry (#37 dust): trade fees must round UP (ceil, protocol favor)
