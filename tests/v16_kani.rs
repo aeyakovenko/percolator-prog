@@ -1318,7 +1318,7 @@ fn kani_v16_admin_policy_payloads_reject_trailing_byte() {
     let extra: u8 = kani::any();
 
     assert_rejects_trailing_byte(Instruction::CloseSlab, extra);
-    assert_rejects_trailing_byte(Instruction::ResolveMarket, extra);
+    assert_rejects_trailing_byte(Instruction::ResolveMarket { market_id: 1 }, extra);
     assert_rejects_trailing_byte(
         Instruction::UpdateAuthority {
             market_id: 1,
