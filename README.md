@@ -149,6 +149,12 @@ Assets 1..N are **truly permissionless ⇒ untrusted**. The protocol must guaran
   a different ID, so a stale snapshot cannot authenticate the replacement account. IDs are local to
   one market, so `portfolio_id` alone is not an identity. **✅**
   (`v16_portfolio_incarnation_id_separates_close_and_reuse`.)
+- **Signed trades bind both portfolio incarnations.** `TradeNoCpi`, `TradeCpi`,
+  `BatchTradeNoCpi`, and `BatchTradeCpi` carry the market-assigned `portfolio_id` for both account A
+  and account B. Both IDs are checked before engine mutation or matcher CPI, so an unlanded trade
+  signed for a closed account cannot execute against a later portfolio at the same address. **✅**
+  (`v16_attack_presigned_trade_rejects_reinitialized_portfolio`,
+  `v16_trade_entrypoints_bind_both_portfolio_ids_before_matcher_or_state_mutation`.)
 
 ### Governance & admin keys
 - **Per-asset admin keys, isolated — uniform across all assets including asset 0** — one asset's admin
@@ -434,22 +440,25 @@ This section describes intent and operational ordering, not argument-by-argument
 
 ### Trading
 - **TradeNoCpi**
-  - trade without external matcher (used for testing / deterministic scenarios)
+  - trade without external matcher (used for testing / deterministic scenarios); the payload names
+    both participating portfolio IDs
 - **TradeCpi**
   - trade via LP-chosen matcher CPI with strict binding + validation. The LP portfolio must already
-    store an enabled matcher config for the passed matcher program/context/delegate tuple.
+    store an enabled matcher config for the passed matcher program/context/delegate tuple. The
+    payload names both the taker and LP portfolio IDs.
 - **BatchTradeNoCpi** (tag 66)
   - atomic multi-leg batch (up to the portfolio asset cap) against one taker/LP pair; each leg's
     **signed** `size_q` sets its direction, so a single batch can carry a mixed long/short spread.
     The engine settles both accounts once, applies every leg, then runs a **single end-state
     initial-margin check** — interim legs need not be individually margin-feasible. Current v1 batch
     execution rejects if any backing-domain trade-fee policy is configured, so those fees are not
-    silently skipped.
+    silently skipped. The payload names both participating portfolio IDs before the leg vector.
 - **BatchTradeCpi** (tag 67)
   - same atomic multi-leg batch routed through an external matcher: **one** batched matcher CPI
     (matcher tag 3) fills every leg against a single LP, each return is validated under the same
     anti-spoof binding as `TradeCpi`, then all fills apply through the batch path. Bounded to 16
-    legs (the matcher's return-data cap).
+    legs (the matcher's return-data cap); the payload names both participating portfolio IDs before
+    the leg vector.
 - **SetMatcherConfig** (tag 68)
   - LP-owner-signed opt-in/out for unsigned LP matcher fills. This writes the matcher config tail
     on the LP portfolio: matcher program, matcher context, matcher delegate, and enabled flag.
@@ -503,6 +512,8 @@ Percolator treats a matcher like a price/size oracle **with rules** chosen by th
 ### What Percolator enforces (non-negotiable)
 - **Signer checks**: the taker/user signs matcher fills; `TradeNoCpi` / `BatchTradeNoCpi`
   require both owners to sign
+- **Portfolio incarnation binding**: all four trade payloads commit to both participants' monotonic
+  portfolio IDs, checked before any matcher invocation or trade state change
 - **LP owner identity**: matcher-routed fills read the LP owner from the LP portfolio; no LP owner
   account is supplied at fill time. Unsigned matcher-routed fills require an enabled matcher config
   set by that LP owner.
