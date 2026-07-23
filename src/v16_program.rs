@@ -2616,6 +2616,7 @@ pub mod ix {
             trade_fee_base_bps: u64,
         },
         UpdateFeeRedirectPolicy {
+            market_id: u64,
             redirect_bps: u16,
         },
         UpdateMarketInitFeePolicy {
@@ -2885,6 +2886,7 @@ pub mod ix {
                     trade_fee_base_bps: read_u64(&mut rest)?,
                 },
                 58 => Self::UpdateFeeRedirectPolicy {
+                    market_id: read_u64(&mut rest)?,
                     redirect_bps: read_u16(&mut rest)?,
                 },
                 59 => Self::UpdateMarketInitFeePolicy {
@@ -3214,8 +3216,12 @@ pub mod ix {
                     push_u64(&mut out, market_id);
                     push_u64(&mut out, trade_fee_base_bps);
                 }
-                Self::UpdateFeeRedirectPolicy { redirect_bps } => {
+                Self::UpdateFeeRedirectPolicy {
+                    market_id,
+                    redirect_bps,
+                } => {
                     out.push(58);
+                    push_u64(&mut out, market_id);
                     push_u16(&mut out, redirect_bps);
                 }
                 Self::UpdateMarketInitFeePolicy { min_init_fee } => {
@@ -5365,9 +5371,10 @@ pub mod processor {
             } => {
                 handle_update_trade_fee_policy(program_id, accounts, market_id, trade_fee_base_bps)
             }
-            Instruction::UpdateFeeRedirectPolicy { redirect_bps } => {
-                handle_update_fee_redirect_policy(program_id, accounts, redirect_bps)
-            }
+            Instruction::UpdateFeeRedirectPolicy {
+                market_id,
+                redirect_bps,
+            } => handle_update_fee_redirect_policy(program_id, accounts, market_id, redirect_bps),
             Instruction::UpdateMarketInitFeePolicy { min_init_fee } => {
                 handle_update_market_init_fee_policy(program_id, accounts, min_init_fee)
             }
@@ -9790,6 +9797,7 @@ pub mod processor {
     fn handle_update_fee_redirect_policy<'a>(
         program_id: &Pubkey,
         accounts: &'a [AccountInfo<'a>],
+        expected_market_id: u64,
         redirect_bps: u16,
     ) -> ProgramResult {
         let admin = account(accounts, 0)?;
@@ -9800,8 +9808,11 @@ pub mod processor {
         if redirect_bps > 10_000 {
             return Err(PercolatorError::InvalidInstruction.into());
         }
-        let (mut cfg, _, _, _) =
-            state::read_market_config_mode_and_capacity(&market_ai.try_borrow_data()?)?;
+        let (mut cfg, _, _, market_id, _, _) =
+            state::read_market_trade_preflight(&market_ai.try_borrow_data()?, 0)?;
+        if market_id != expected_market_id {
+            return Err(PercolatorError::AssetGenerationMismatch.into());
+        }
         expect_live_authority(&cfg.marketauth, admin.key)?;
         cfg.fee_redirect_to_market_0_bps = redirect_bps;
         state::write_wrapper_config(&mut market_ai.try_borrow_mut_data()?, &cfg)

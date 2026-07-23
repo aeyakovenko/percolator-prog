@@ -864,16 +864,33 @@ fn kani_v16_update_trade_fee_policy_rejects_legacy_wire_payload() {
 
 #[kani::proof]
 fn kani_v16_update_fee_redirect_policy_decode_preserves_wire_fields() {
+    let market_id: u64 = kani::any();
     let redirect_bps: u16 = kani::any();
 
+    let mut data = [0u8; 11];
+    data[0] = 58;
+    data[1..9].copy_from_slice(&market_id.to_le_bytes());
+    data[9..11].copy_from_slice(&redirect_bps.to_le_bytes());
+
+    match Instruction::decode(&data).unwrap() {
+        Instruction::UpdateFeeRedirectPolicy {
+            market_id: got_market_id,
+            redirect_bps: got,
+        } => {
+            assert_eq!(got_market_id, market_id);
+            assert_eq!(got, redirect_bps);
+        }
+        _ => unreachable!(),
+    }
+}
+
+#[kani::proof]
+fn kani_v16_update_fee_redirect_policy_rejects_legacy_wire_payload() {
+    let redirect_bps: u16 = kani::any();
     let mut data = [0u8; 3];
     data[0] = 58;
     data[1..3].copy_from_slice(&redirect_bps.to_le_bytes());
-
-    match Instruction::decode(&data).unwrap() {
-        Instruction::UpdateFeeRedirectPolicy { redirect_bps: got } => assert_eq!(got, redirect_bps),
-        _ => unreachable!(),
-    }
+    assert!(Instruction::decode(&data).is_err());
 }
 
 #[kani::proof]
@@ -1292,7 +1309,10 @@ fn kani_v16_admin_policy_payloads_reject_trailing_byte() {
         extra,
     );
     assert_rejects_trailing_byte(
-        Instruction::UpdateFeeRedirectPolicy { redirect_bps: 250 },
+        Instruction::UpdateFeeRedirectPolicy {
+            market_id: 9,
+            redirect_bps: 250,
+        },
         extra,
     );
     assert_rejects_trailing_byte(
