@@ -65,7 +65,10 @@ pub mod constants {
     pub const PORTFOLIO_MATCHER_CONFIG_LEN: usize = 104;
     pub const PORTFOLIO_ID_OFF: usize = PORTFOLIO_MATCHER_CONFIG_OFF + PORTFOLIO_MATCHER_CONFIG_LEN;
     pub const PORTFOLIO_ID_LEN: usize = 8;
-    pub const PORTFOLIO_ACCOUNT_LEN: usize = PORTFOLIO_ID_OFF + PORTFOLIO_ID_LEN;
+    pub const PORTFOLIO_POSITION_EPOCH_OFF: usize = PORTFOLIO_ID_OFF + PORTFOLIO_ID_LEN;
+    pub const PORTFOLIO_POSITION_EPOCH_LEN: usize = 8;
+    pub const PORTFOLIO_ACCOUNT_LEN: usize =
+        PORTFOLIO_POSITION_EPOCH_OFF + PORTFOLIO_POSITION_EPOCH_LEN;
     pub const MAX_MATCHER_TAIL_ACCOUNTS: usize = 32;
     pub const MATCHER_ABI_VERSION: u32 = 3;
     pub const MATCHER_CONTEXT_MIN_LEN: usize = 64;
@@ -161,7 +164,8 @@ pub mod state {
             ORACLE_LEG_FLAGS_MASK, ORACLE_MODE_AUTH_MARK, ORACLE_MODE_EWMA_MARK,
             ORACLE_MODE_HYBRID_AFTER_HOURS, ORACLE_MODE_MANUAL, PORTFOLIO_ACCOUNT_LEN,
             PORTFOLIO_ENGINE_ACCOUNT_LEN, PORTFOLIO_ID_LEN, PORTFOLIO_ID_OFF,
-            PORTFOLIO_MATCHER_CONFIG_LEN, PORTFOLIO_MATCHER_CONFIG_OFF, PORTFOLIO_STATE_LEN,
+            PORTFOLIO_MATCHER_CONFIG_LEN, PORTFOLIO_MATCHER_CONFIG_OFF,
+            PORTFOLIO_POSITION_EPOCH_LEN, PORTFOLIO_POSITION_EPOCH_OFF, PORTFOLIO_STATE_LEN,
             VERSION, WRAPPER_CONFIG_LEN,
         },
         error::PercolatorError,
@@ -821,6 +825,27 @@ pub mod state {
             .checked_add(1)
             .ok_or(PercolatorError::EngineCounterOverflow)?;
         Ok((id, next))
+    }
+
+    #[inline]
+    pub fn read_portfolio_position_epoch(data: &[u8]) -> Result<u64, ProgramError> {
+        check_header(data, KIND_PORTFOLIO)?;
+        read_u64(data, PORTFOLIO_POSITION_EPOCH_OFF)
+    }
+
+    #[inline]
+    pub fn bump_portfolio_position_epoch(data: &mut [u8]) -> Result<u64, ProgramError> {
+        check_header(data, KIND_PORTFOLIO)?;
+        let next = read_portfolio_position_epoch(data)?
+            .checked_add(1)
+            .ok_or(PercolatorError::EngineCounterOverflow)?;
+        data.get_mut(
+            PORTFOLIO_POSITION_EPOCH_OFF
+                ..PORTFOLIO_POSITION_EPOCH_OFF + PORTFOLIO_POSITION_EPOCH_LEN,
+        )
+        .ok_or(PercolatorError::InvalidAccountLen)?
+        .copy_from_slice(&next.to_le_bytes());
+        Ok(next)
     }
 
     #[inline]
@@ -2656,6 +2681,7 @@ pub mod ix {
         },
         RebalanceReduce {
             portfolio_id: u64,
+            position_epoch: u64,
             asset_index: u16,
             reduce_q: u128,
         },
@@ -2930,6 +2956,7 @@ pub mod ix {
                 },
                 44 => Self::RebalanceReduce {
                     portfolio_id: read_u64(&mut rest)?,
+                    position_epoch: read_u64(&mut rest)?,
                     asset_index: read_u16(&mut rest)?,
                     reduce_q: read_u128(&mut rest)?,
                 },
@@ -3324,11 +3351,13 @@ pub mod ix {
                 }
                 Self::RebalanceReduce {
                     portfolio_id,
+                    position_epoch,
                     asset_index,
                     reduce_q,
                 } => {
                     out.push(44);
                     push_u64(&mut out, portfolio_id);
+                    push_u64(&mut out, position_epoch);
                     push_u16(&mut out, asset_index);
                     push_u128(&mut out, reduce_q);
                 }
@@ -5464,9 +5493,17 @@ pub mod processor {
             } => handle_forfeit_recovery_leg(program_id, accounts, asset_index, b_delta_budget),
             Instruction::RebalanceReduce {
                 portfolio_id,
+                position_epoch,
                 asset_index,
                 reduce_q,
-            } => handle_rebalance_reduce(program_id, accounts, portfolio_id, asset_index, reduce_q),
+            } => handle_rebalance_reduce(
+                program_id,
+                accounts,
+                portfolio_id,
+                position_epoch,
+                asset_index,
+                reduce_q,
+            ),
             Instruction::FinalizeResetSide { asset_index, side } => {
                 handle_finalize_reset_side(program_id, accounts, asset_index, side)
             }
@@ -5945,6 +5982,10 @@ pub mod processor {
                 source_lien_before_b.as_ref(),
                 source_lien_after_b.as_ref(),
             )?;
+            drop(account_a);
+            drop(account_b);
+            state::bump_portfolio_position_epoch(&mut account_a_data)?;
+            state::bump_portfolio_position_epoch(&mut account_b_data)?;
         }
         if let Some(cfg) = cfg_after {
             state::write_wrapper_config(&mut market_ai.try_borrow_mut_data()?, &cfg)?;
@@ -6196,6 +6237,10 @@ pub mod processor {
                 source_lien_before_b.as_ref(),
                 source_lien_after_b.as_ref(),
             )?;
+            drop(account_a);
+            drop(account_b);
+            state::bump_portfolio_position_epoch(&mut account_a_data)?;
+            state::bump_portfolio_position_epoch(&mut account_b_data)?;
         }
         if let Some(cfg) = cfg_after {
             state::write_wrapper_config(&mut market_ai.try_borrow_mut_data()?, &cfg)?;
@@ -6472,7 +6517,12 @@ pub mod processor {
             .map_err(map_v16_error)?;
         account_b
             .validate_with_market(&group.as_view())
-            .map_err(map_v16_error)
+            .map_err(map_v16_error)?;
+        drop(account_a);
+        drop(account_b);
+        state::bump_portfolio_position_epoch(&mut account_a_data)?;
+        state::bump_portfolio_position_epoch(&mut account_b_data)?;
+        Ok(())
     }
 
     fn matcher_tail_start_or_verify_lp_config<'a>(
@@ -8478,6 +8528,7 @@ pub mod processor {
         if b_delta_budget == 0 {
             return Err(PercolatorError::InvalidInstruction.into());
         }
+        let portfolio_ai = account(accounts, 2)?;
         with_one_portfolio_view(program_id, accounts, true, |group, portfolio, cfg| {
             if group.header.mode == 0 && permissionless_resolve_matured_now_view(cfg, group) {
                 return Err(V16Error::LockActive);
@@ -8485,7 +8536,9 @@ pub mod processor {
             group
                 .forfeit_recovery_leg_not_atomic(portfolio, asset_index as usize, b_delta_budget)
                 .map(|_| ())
-        })
+        })?;
+        state::bump_portfolio_position_epoch(&mut portfolio_ai.try_borrow_mut_data()?)?;
+        Ok(())
     }
 
     #[inline(never)]
@@ -8493,6 +8546,7 @@ pub mod processor {
         program_id: &Pubkey,
         accounts: &'a [AccountInfo<'a>],
         expected_portfolio_id: u64,
+        expected_position_epoch: u64,
         asset_index: u16,
         reduce_q: u128,
     ) -> ProgramResult {
@@ -8502,6 +8556,11 @@ pub mod processor {
         let portfolio_ai = account(accounts, 2)?;
         expect_owner(portfolio_ai, program_id)?;
         if state::read_portfolio_id(&portfolio_ai.try_borrow_data()?)? != expected_portfolio_id {
+            return Err(PercolatorError::EngineProvenanceMismatch.into());
+        }
+        if state::read_portfolio_position_epoch(&portfolio_ai.try_borrow_data()?)?
+            != expected_position_epoch
+        {
             return Err(PercolatorError::EngineProvenanceMismatch.into());
         }
         with_one_portfolio_view(program_id, accounts, true, |group, portfolio, cfg| {
@@ -8517,7 +8576,9 @@ pub mod processor {
                     },
                 )
                 .map(|_| ())
-        })
+        })?;
+        state::bump_portfolio_position_epoch(&mut portfolio_ai.try_borrow_mut_data()?)?;
+        Ok(())
     }
 
     #[inline(never)]
@@ -10757,6 +10818,8 @@ pub mod processor {
             )?;
             if selected_liquidation {
                 group.validate_shape().map_err(map_v16_error)?;
+                drop(portfolio);
+                state::bump_portfolio_position_epoch(&mut portfolio_data)?;
             }
             cfg_after = cfg;
         }
@@ -12214,6 +12277,33 @@ pub mod processor {
                 state::allocate_portfolio_id(u64::MAX),
                 Err(PercolatorError::EngineCounterOverflow.into())
             );
+        }
+
+        #[test]
+        fn portfolio_position_epoch_is_zero_initialized_checked_and_monotonic() {
+            let mut data = vec![
+                0u8;
+                state::portfolio_account_len_for_market_slots(1)
+                    .expect("portfolio account length")
+            ];
+            state::init_portfolio_account_zero_copy(
+                &mut data, [1u8; 32], [2u8; 32], [3u8; 32], 0, 1, 7,
+            )
+            .expect("initialize portfolio");
+            assert_eq!(state::read_portfolio_position_epoch(&data).unwrap(), 0);
+            assert_eq!(state::bump_portfolio_position_epoch(&mut data).unwrap(), 1);
+            assert_eq!(state::read_portfolio_position_epoch(&data).unwrap(), 1);
+
+            data[constants::PORTFOLIO_POSITION_EPOCH_OFF
+                ..constants::PORTFOLIO_POSITION_EPOCH_OFF
+                    + constants::PORTFOLIO_POSITION_EPOCH_LEN]
+                .copy_from_slice(&u64::MAX.to_le_bytes());
+            let before = data.clone();
+            assert_eq!(
+                state::bump_portfolio_position_epoch(&mut data),
+                Err(PercolatorError::EngineCounterOverflow.into())
+            );
+            assert_eq!(data, before, "overflow must not mutate the epoch tail");
         }
 
         fn test_wrapper_config(price: u64) -> state::WrapperConfigV16 {

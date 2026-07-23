@@ -1255,6 +1255,11 @@ impl V16CuEnv {
         state::read_portfolio_id(&account.data).unwrap()
     }
 
+    fn portfolio_position_epoch(&self, portfolio: Pubkey) -> u64 {
+        let account = self.svm.get_account(&portfolio).expect("portfolio account");
+        state::read_portfolio_position_epoch(&account.data).unwrap()
+    }
+
     fn mutate_market<F>(&mut self, f: F)
     where
         F: FnOnce(&mut state::WrapperConfigV16, &mut MarketGroupV16),
@@ -3428,9 +3433,11 @@ impl V16CuEnv {
         reduce_q: u128,
     ) -> u64 {
         let portfolio_id = self.portfolio_id(portfolio);
+        let position_epoch = self.portfolio_position_epoch(portfolio);
         self.send(
             ProgInstruction::RebalanceReduce {
                 portfolio_id,
+                position_epoch,
                 asset_index,
                 reduce_q,
             },
@@ -7765,7 +7772,6 @@ fn v16_bpf_stale_asset_does_not_block_current_unrelated_trade() {
         100,
         0,
     );
-
     let cranker_owner = Keypair::new();
     let cranker_portfolio = env.create_portfolio(&cranker_owner);
     env.svm.warp_to_slot(3);
@@ -9742,6 +9748,7 @@ fn v16_attack_auto_crank_current_solvent_partial_liquidation_makes_progress() {
         100,
         0,
     );
+    let position_epoch_after_trade = env.portfolio_position_epoch(short_account);
 
     env.svm.warp_to_slot(2);
     env.push_auth_mark_with_cu(2, 300);
@@ -9764,6 +9771,11 @@ fn v16_attack_auto_crank_current_solvent_partial_liquidation_makes_progress() {
     let before_group = env.market_state().1;
     let before_short = env.portfolio_state(short_account);
     let before_cert = health_cert(&before_short);
+    assert_eq!(
+        env.portfolio_position_epoch(short_account),
+        position_epoch_after_trade,
+        "refresh-only cranks must not invalidate signed position consent"
+    );
     assert!(
         before_cert.certified_liq_deficit != 0 && before_cert.certified_equity > 0,
         "setup must be solvent but liquidatable before partial liquidation: {before_cert:?}"
@@ -9792,6 +9804,11 @@ fn v16_attack_auto_crank_current_solvent_partial_liquidation_makes_progress() {
     let after_short = env.portfolio_state(short_account);
     let closed = oi_pre.saturating_sub(after_group.assets[0].oi_eff_short_q);
     assert!(closed > 0, "partial liquidation must reduce open interest");
+    assert_eq!(
+        env.portfolio_position_epoch(short_account),
+        position_epoch_after_trade + 1,
+        "a successful liquidation must advance the position episode"
+    );
     assert!(
         closed < oi_pre,
         "solvent liquidation should preserve the engine-selected remaining position: closed={closed}"
@@ -13489,6 +13506,8 @@ fn run_account_residual_counter_credit_case(
     assert_eq!(lp_initial.residual_received_atoms_total.get(), 0);
 
     env.set_residual_reward_counters_for_test(taker_account, crystallized_loss_atoms, 0, 0);
+    let taker_position_epoch = env.portfolio_position_epoch(taker_account);
+    let lp_position_epoch = env.portfolio_position_epoch(lp_account);
     let cu = execute_account_residual_counter_trade_path(
         &mut env,
         path,
@@ -13503,6 +13522,16 @@ fn run_account_residual_counter_credit_case(
         &format!("{path:?} account residual-counter trade"),
         cu,
         MULTI_ASSET_OPEN_TRADE_CU_LIMIT,
+    );
+    assert_eq!(
+        env.portfolio_position_epoch(taker_account),
+        taker_position_epoch + 1,
+        "{path:?}: a successful trade advances the taker's position episode"
+    );
+    assert_eq!(
+        env.portfolio_position_epoch(lp_account),
+        lp_position_epoch + 1,
+        "{path:?}: a successful trade advances the LP's position episode"
     );
 
     let taker_after = env.portfolio_state(taker_account);
@@ -16148,6 +16177,7 @@ fn v16_attack_public_helpers_cannot_use_market_as_portfolio_alias() {
     let reduce = env.send(
         ProgInstruction::RebalanceReduce {
             portfolio_id: 1,
+            position_epoch: 0,
             asset_index: 0,
             reduce_q: POS_SCALE,
         },
@@ -28473,6 +28503,7 @@ fn v16_attack_rebalance_reduce_owner_gated() {
     let r_grief = env.send(
         ProgInstruction::RebalanceReduce {
             portfolio_id: env.portfolio_id(pa),
+            position_epoch: env.portfolio_position_epoch(pa),
             asset_index: 0,
             reduce_q: POS_SCALE,
         },
@@ -28503,6 +28534,7 @@ fn v16_attack_rebalance_reduce_owner_gated() {
     let r_owner = env.send(
         ProgInstruction::RebalanceReduce {
             portfolio_id: env.portfolio_id(pa),
+            position_epoch: env.portfolio_position_epoch(pa),
             asset_index: 0,
             reduce_q: POS_SCALE,
         },
@@ -28619,6 +28651,8 @@ fn v16_attack_rebalance_reduce_rejects_cross_market_portfolio_substitution() {
     let vault_b_before = env.svm.get_account(&vault_b).unwrap();
     let foreign_portfolio_id = env.portfolio_id(foreign);
     let local_portfolio_id = env.portfolio_id(local);
+    let foreign_position_epoch = env.portfolio_position_epoch(foreign);
+    let local_position_epoch = env.portfolio_position_epoch(local);
     let reduce_q = POS_SCALE / 2;
     env.svm.expire_blockhash();
     let rejected = send_tx(
@@ -28627,6 +28661,7 @@ fn v16_attack_rebalance_reduce_rejects_cross_market_portfolio_substitution() {
         &env.payer,
         ProgInstruction::RebalanceReduce {
             portfolio_id: foreign_portfolio_id,
+            position_epoch: foreign_position_epoch,
             asset_index: 0,
             reduce_q,
         },
@@ -28662,6 +28697,7 @@ fn v16_attack_rebalance_reduce_rejects_cross_market_portfolio_substitution() {
         &env.payer,
         ProgInstruction::RebalanceReduce {
             portfolio_id: local_portfolio_id,
+            position_epoch: local_position_epoch,
             asset_index: 0,
             reduce_q,
         },
@@ -56333,6 +56369,7 @@ fn v16_attack_rebalance_reduce_rejects_when_resolve_matured() {
     let rejected = env.send(
         ProgInstruction::RebalanceReduce {
             portfolio_id: env.portfolio_id(long),
+            position_epoch: env.portfolio_position_epoch(long),
             asset_index: 0,
             reduce_q: remaining,
         },
@@ -57649,6 +57686,7 @@ fn v16_attack_rebalance_reduce_overshoot_clamps_to_flat_no_flip() {
     let r = env.send(
         ProgInstruction::RebalanceReduce {
             portfolio_id: env.portfolio_id(pa),
+            position_epoch: env.portfolio_position_epoch(pa),
             asset_index: 0,
             reduce_q: 3 * POS_SCALE,
         },
@@ -59774,6 +59812,7 @@ fn v16_attack_rebalance_reduce_replay_cannot_cross_portfolio_incarnation() {
                 ],
                 data: ProgInstruction::RebalanceReduce {
                     portfolio_id: old_portfolio_id,
+                    position_epoch: env.portfolio_position_epoch(victim),
                     asset_index: 0,
                     reduce_q: NEW_SIZE_Q as u128,
                 }
@@ -59864,12 +59903,17 @@ fn v16_attack_rebalance_reduce_replay_cannot_cross_portfolio_incarnation() {
 
     let replay = env.svm.send_transaction(retained_reduce);
     let replayed = replay.is_ok();
-    if replayed {
+    if !replayed {
         assert!(
-            !has_active_leg_for_asset(&env.portfolio_state(victim), 0),
-            "control: stale reduction closed the replacement position"
+            has_active_leg_for_asset(&env.portfolio_state(victim), 0),
+            "rejected stale consent must leave the replacement exposure intact"
         );
+        return;
     }
+    assert!(
+        !has_active_leg_for_asset(&env.portfolio_state(victim), 0),
+        "control: stale reduction closed the replacement position"
+    );
 
     env.svm.expire_blockhash();
     env.svm.warp_to_slot(2);
@@ -59883,18 +59927,6 @@ fn v16_attack_rebalance_reduce_replay_cannot_cross_portfolio_incarnation() {
             },
         );
     }
-    if !replayed {
-        env.trade_with_cu(
-            &victim_owner,
-            victim,
-            &attacker_owner,
-            attacker,
-            -NEW_SIZE_Q,
-            100,
-            0,
-        );
-    }
-
     env.resolve();
     let victim_dest = env.close_resolved(&victim_owner, victim);
     let attacker_dest = env.close_resolved(&attacker_owner, attacker);
@@ -59905,5 +59937,141 @@ fn v16_attack_rebalance_reduce_replay_cannot_cross_portfolio_incarnation() {
         "rebalance consent for portfolio {old_portfolio_id} replayed onto replacement {}: \
          victim recovered {victim_payout}, attacker extracted {attacker_payout}",
         env.portfolio_id(victim),
+    );
+}
+
+// Portfolio/market/asset incarnation binding is not enough: a live portfolio can flatten and
+// reopen the same asset without changing any of those IDs. Retained reduction consent must bind
+// the position episode that existed when the owner signed it.
+#[test]
+fn v16_attack_rebalance_reduce_replay_cannot_cross_position_episode() {
+    const DEPOSIT: u128 = 1_000_000;
+    const OLD_SIZE_Q: i128 = 2_000 * POS_SCALE as i128;
+    const NEW_SIZE_Q: i128 = 1_000 * POS_SCALE as i128;
+
+    let mut env = V16CuEnv::new();
+    env.configure_auth_mark_with_cu(0, 100);
+
+    let victim_owner = Keypair::new();
+    let attacker_owner = Keypair::new();
+    let victim = env.create_portfolio(&victim_owner);
+    let attacker = env.create_portfolio(&attacker_owner);
+    let portfolio_id = env.portfolio_id(victim);
+    env.deposit(&victim_owner, victim, DEPOSIT);
+    env.deposit(&attacker_owner, attacker, DEPOSIT);
+    env.trade_with_cu(
+        &victim_owner,
+        victim,
+        &attacker_owner,
+        attacker,
+        OLD_SIZE_Q,
+        100,
+        0,
+    );
+    let signed_position_epoch = env.portfolio_position_epoch(victim);
+
+    env.svm.expire_blockhash();
+    let retained_reduce = Transaction::new_signed_with_payer(
+        &[
+            heap_ix(),
+            cu_ix(),
+            Instruction {
+                program_id: env.program_id,
+                accounts: vec![
+                    AccountMeta::new(victim_owner.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(victim, false),
+                ],
+                data: ProgInstruction::RebalanceReduce {
+                    portfolio_id,
+                    position_epoch: signed_position_epoch,
+                    asset_index: 0,
+                    reduce_q: NEW_SIZE_Q as u128,
+                }
+                .encode(),
+            },
+        ],
+        Some(&env.payer.pubkey()),
+        &[&env.payer, &victim_owner],
+        env.svm.latest_blockhash(),
+    );
+
+    env.trade_with_cu(
+        &victim_owner,
+        victim,
+        &attacker_owner,
+        attacker,
+        -OLD_SIZE_Q,
+        100,
+        0,
+    );
+    assert!(!has_active_leg_for_asset(&env.portfolio_state(victim), 0));
+    env.trade_with_cu(
+        &victim_owner,
+        victim,
+        &attacker_owner,
+        attacker,
+        NEW_SIZE_Q,
+        100,
+        0,
+    );
+    assert_eq!(env.portfolio_id(victim), portfolio_id);
+    assert!(
+        env.portfolio_position_epoch(victim) > signed_position_epoch,
+        "replacement exposure must advance the position episode"
+    );
+
+    env.svm.warp_to_slot(1);
+    env.push_auth_mark_with_cu(1, 50);
+    env.send(
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 1,
+            observations: crank_observations(0),
+        },
+        vec![
+            AccountMeta::new(env.payer.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(victim, false),
+        ],
+        &[],
+    )
+    .expect("refresh replacement at the adverse mark");
+    assert!(env.portfolio_state(victim).capital.get() < DEPOSIT);
+
+    let replay = env.svm.send_transaction(retained_reduce);
+    let replayed = replay.is_ok();
+    if !replayed {
+        assert!(
+            has_active_leg_for_asset(&env.portfolio_state(victim), 0),
+            "rejected stale consent must leave the replacement exposure intact"
+        );
+        return;
+    }
+    assert!(
+        !has_active_leg_for_asset(&env.portfolio_state(victim), 0),
+        "control: stale reduction closed the replacement position"
+    );
+
+    env.svm.expire_blockhash();
+    env.svm.warp_to_slot(2);
+    env.push_auth_mark_with_cu(2, 100);
+    for portfolio in [victim, attacker] {
+        env.crank(
+            portfolio,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 2,
+                observations: crank_observations(0),
+            },
+        );
+    }
+    env.resolve();
+    let victim_dest = env.close_resolved(&victim_owner, victim);
+    let attacker_dest = env.close_resolved(&attacker_owner, attacker);
+    let victim_payout = env.token_amount(victim_dest) as u128;
+    let attacker_payout = env.token_amount(attacker_dest) as u128;
+    panic!(
+        "rebalance consent for an old position episode replayed onto its replacement: victim \
+         recovered {}, attacker extracted {}",
+        victim_payout, attacker_payout,
     );
 }
