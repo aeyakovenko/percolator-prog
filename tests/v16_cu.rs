@@ -2264,11 +2264,12 @@ impl V16CuEnv {
     }
 
     fn resolve(&mut self) -> u64 {
+        let market_id = self.asset_market_id(0);
         send_tx(
             &mut self.svm,
             self.program_id,
             &self.payer,
-            ProgInstruction::ResolveMarket,
+            ProgInstruction::ResolveMarket { market_id },
             vec![
                 AccountMeta::new(self.admin.pubkey(), true),
                 AccountMeta::new(self.market, false),
@@ -6563,11 +6564,12 @@ fn v16_attack_signed_authority_rotation_cannot_replay_across_market_reinit() {
             attacker.pubkey().to_bytes(),
             "the retained old rotation seized the fresh market"
         );
+        let market_id = env.asset_market_id(0);
         let forced_resolve = send_tx(
             &mut env.svm,
             env.program_id,
             &env.payer,
-            ProgInstruction::ResolveMarket,
+            ProgInstruction::ResolveMarket { market_id },
             vec![
                 AccountMeta::new(attacker.pubkey(), true),
                 AccountMeta::new(env.market, false),
@@ -23240,12 +23242,13 @@ fn v16_attack_non_admin_cannot_resolve_or_configure() {
     env.deposit(&la, pa, 1_000_000);
 
     // non-admin ResolveMarket -> reject; market stays Live.
+    let market_id = env.asset_market_id(0);
     env.svm.expire_blockhash();
     let r_res = send_tx(
         &mut env.svm,
         env.program_id,
         &env.payer,
-        ProgInstruction::ResolveMarket,
+        ProgInstruction::ResolveMarket { market_id },
         vec![
             AccountMeta::new(mallory.pubkey(), true),
             AccountMeta::new(env.market, false),
@@ -24705,12 +24708,19 @@ fn v16_attack_terminal_insurance_ledger_rejects_cross_market_reuse() {
         &[&admin],
     )
     .expect("fund market B insurance");
+    let market_b_id = state::read_market(&env.svm.get_account(&market_b).unwrap().data)
+        .unwrap()
+        .1
+        .assets[0]
+        .market_id;
     env.svm.expire_blockhash();
     send_tx(
         &mut env.svm,
         env.program_id,
         &env.payer,
-        ProgInstruction::ResolveMarket,
+        ProgInstruction::ResolveMarket {
+            market_id: market_b_id,
+        },
         vec![
             AccountMeta::new(admin.pubkey(), true),
             AccountMeta::new(market_b, false),
@@ -24841,12 +24851,19 @@ fn v16_attack_terminal_withdraw_insurance_rejects_portfolio_as_ledger() {
         &[&admin],
     )
     .expect("fund market B terminal insurance");
+    let market_b_id = state::read_market(&env.svm.get_account(&market_b).unwrap().data)
+        .unwrap()
+        .1
+        .assets[0]
+        .market_id;
     env.svm.expire_blockhash();
     send_tx(
         &mut env.svm,
         env.program_id,
         &env.payer,
-        ProgInstruction::ResolveMarket,
+        ProgInstruction::ResolveMarket {
+            market_id: market_b_id,
+        },
         vec![
             AccountMeta::new(admin.pubkey(), true),
             AccountMeta::new(market_b, false),
@@ -28502,12 +28519,13 @@ fn v16_attack_close_slab_rejects_stale_marketauth_after_rotation() {
         "test setup rotates marketauth away from the old key"
     );
 
+    let market_id = env.asset_market_id(0);
     env.svm.expire_blockhash();
     let resolve = send_tx(
         &mut env.svm,
         env.program_id,
         &env.payer,
-        ProgInstruction::ResolveMarket,
+        ProgInstruction::ResolveMarket { market_id },
         vec![
             AccountMeta::new(new_admin.pubkey(), true),
             AccountMeta::new(env.market, false),
@@ -28724,7 +28742,9 @@ fn v16_attack_close_slab_rejects_market_as_lamport_destination() {
         &mut svm,
         program_id,
         &payer,
-        ProgInstruction::ResolveMarket,
+        ProgInstruction::ResolveMarket {
+            market_id: first_generation_market_id(0),
+        },
         vec![
             AccountMeta::new(market.pubkey(), true),
             AccountMeta::new(market.pubkey(), false),
@@ -31616,12 +31636,19 @@ fn v16_attack_close_resolved_rejects_cross_market_portfolio_payout() {
         "market B vault funded"
     );
 
+    let market_b_id = state::read_market(&env.svm.get_account(&market_b).unwrap().data)
+        .unwrap()
+        .1
+        .assets[0]
+        .market_id;
     env.svm.expire_blockhash();
     send_tx(
         &mut env.svm,
         env.program_id,
         &env.payer,
-        ProgInstruction::ResolveMarket,
+        ProgInstruction::ResolveMarket {
+            market_id: market_b_id,
+        },
         vec![
             AccountMeta::new(env.admin.pubkey(), true),
             AccountMeta::new(market_b, false),
