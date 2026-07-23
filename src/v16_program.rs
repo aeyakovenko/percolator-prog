@@ -2568,7 +2568,9 @@ pub mod ix {
             amount: u128,
         },
         CloseSlab,
-        ResolveMarket,
+        ResolveMarket {
+            market_id: u64,
+        },
         TopUpBackingBucket {
             domain: u16,
             amount: u128,
@@ -2842,7 +2844,9 @@ pub mod ix {
                     amount: read_u128(&mut rest)?,
                 },
                 13 => Self::CloseSlab,
-                19 => Self::ResolveMarket,
+                19 => Self::ResolveMarket {
+                    market_id: read_u64(&mut rest)?,
+                },
                 24 => Self::TopUpBackingBucket {
                     domain: read_u16(&mut rest)?,
                     amount: read_u128(&mut rest)?,
@@ -3142,7 +3146,10 @@ pub mod ix {
                     push_u128(&mut out, amount);
                 }
                 Self::CloseSlab => out.push(13),
-                Self::ResolveMarket => out.push(19),
+                Self::ResolveMarket { market_id } => {
+                    out.push(19);
+                    push_u64(&mut out, market_id);
+                }
                 Self::TopUpBackingBucket {
                     domain,
                     amount,
@@ -5304,7 +5311,9 @@ pub mod processor {
                 handle_top_up_insurance_domain(program_id, accounts, domain, amount)
             }
             Instruction::CloseSlab => handle_close_slab(program_id, accounts),
-            Instruction::ResolveMarket => handle_resolve_market(program_id, accounts),
+            Instruction::ResolveMarket { market_id } => {
+                handle_resolve_market(program_id, accounts, market_id)
+            }
             Instruction::TopUpBackingBucket {
                 domain,
                 amount,
@@ -8754,6 +8763,7 @@ pub mod processor {
     fn handle_resolve_market<'a>(
         program_id: &Pubkey,
         accounts: &'a [AccountInfo<'a>],
+        expected_market_id: u64,
     ) -> ProgramResult {
         let admin = account(accounts, 0)?;
         let market_ai = account(accounts, 1)?;
@@ -8762,6 +8772,11 @@ pub mod processor {
         expect_owner(market_ai, program_id)?;
         let mut market_data = market_ai.try_borrow_mut_data()?;
         let (cfg, mut group) = state::market_view_mut(&mut market_data)?;
+        if group.markets.is_empty()
+            || group.markets[0].engine.asset.market_id.get() != expected_market_id
+        {
+            return Err(PercolatorError::AssetGenerationMismatch.into());
+        }
         if group.header.mode != 0 {
             return Err(PercolatorError::EngineLockActive.into());
         }

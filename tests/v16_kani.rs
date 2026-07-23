@@ -628,6 +628,30 @@ fn kani_v16_update_authority_decode_preserves_wire_fields() {
 }
 
 #[kani::proof]
+fn kani_v16_resolve_market_decode_preserves_generation() {
+    let market_id: u64 = kani::any();
+    let trailing: u8 = kani::any();
+    let mut data = [0u8; 9];
+    data[0] = 19;
+    data[1..].copy_from_slice(&market_id.to_le_bytes());
+
+    match Instruction::decode(&data).unwrap() {
+        Instruction::ResolveMarket {
+            market_id: got_market_id,
+        } => assert_eq!(got_market_id, market_id),
+        _ => unreachable!(),
+    }
+
+    assert!(Instruction::decode(&[19]).is_err());
+    assert!(Instruction::decode(&data[..8]).is_err());
+
+    let mut oversized = [0u8; 10];
+    oversized[..9].copy_from_slice(&data);
+    oversized[9] = trailing;
+    assert!(Instruction::decode(&oversized).is_err());
+}
+
+#[kani::proof]
 fn kani_v16_update_asset_authority_decode_preserves_wire_fields() {
     let asset_index: u16 = kani::any();
     let market_id: u64 = kani::any();
@@ -1232,7 +1256,7 @@ fn kani_v16_admin_policy_payloads_reject_trailing_byte() {
     let extra: u8 = kani::any();
 
     assert_rejects_trailing_byte(Instruction::CloseSlab, extra);
-    assert_rejects_trailing_byte(Instruction::ResolveMarket, extra);
+    assert_rejects_trailing_byte(Instruction::ResolveMarket { market_id: 1 }, extra);
     assert_rejects_trailing_byte(
         Instruction::UpdateAuthority {
             market_id: 1,
@@ -1502,6 +1526,9 @@ fn kani_v16_every_active_payload_rejects_one_byte_truncation() {
 
     let crank = [5u8; 59];
     assert!(Instruction::decode(&crank).is_err());
+
+    let resolve_market = [19u8; 8];
+    assert!(Instruction::decode(&resolve_market).is_err());
 
     let asset_lifecycle = [40u8; 147];
     assert!(Instruction::decode(&asset_lifecycle).is_err());

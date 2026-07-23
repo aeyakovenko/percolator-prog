@@ -855,8 +855,10 @@ These are governance powers, not bugs:
 3. `UpdateAssetAuthority { asset_index = 0, market_id, kind = ASSET_AUTH_ORACLE }` (while marketauth holds asset-0's `asset_admin`)
    - choose who can push asset-0 AuthMark/EwmaMark updates.
    - impact: authority mark input control/censorship surface.
-4. `ResolveMarket`
+4. `ResolveMarket { market_id }`
    - transition market to resolved mode using stored authority price.
+   - the signed terminal action is bound to asset 0's current generation; retained resolves from a
+     shutdown/restart generation reject before changing market state.
    - impact: trading/deposits/new accounts are halted; market enters wind-down.
 5. `UpdateAssetAuthority { asset_index = 0, market_id, kind = ASSET_AUTH_INSURANCE }` (while marketauth holds asset-0's `asset_admin`)
    - choose who can withdraw resolved-market insurance.
