@@ -3435,9 +3435,11 @@ impl V16CuEnv {
         asset_index: u16,
         b_delta_budget: u128,
     ) -> u64 {
+        let market_id = self.asset_market_id(asset_index);
         self.send(
             ProgInstruction::ForfeitRecoveryLeg {
                 asset_index,
+                market_id,
                 b_delta_budget,
             },
             vec![
@@ -17008,6 +17010,7 @@ fn v16_attack_public_helpers_cannot_use_market_as_portfolio_alias() {
     let forfeit = env.send(
         ProgInstruction::ForfeitRecoveryLeg {
             asset_index: 0,
+            market_id: first_generation_market_id(0),
             b_delta_budget: 1,
         },
         vec![
@@ -29564,6 +29567,7 @@ fn v16_attack_forfeit_recovery_leg_rejects_cross_market_portfolio_substitution()
         &env.payer,
         ProgInstruction::ForfeitRecoveryLeg {
             asset_index: 0,
+            market_id: first_generation_market_id(0),
             b_delta_budget: 1,
         },
         vec![
@@ -29599,6 +29603,7 @@ fn v16_attack_forfeit_recovery_leg_rejects_cross_market_portfolio_substitution()
         &env.payer,
         ProgInstruction::ForfeitRecoveryLeg {
             asset_index: 0,
+            market_id: first_generation_market_id(0),
             b_delta_budget: 1,
         },
         vec![
@@ -29745,6 +29750,7 @@ fn v16_attack_recovery_tools_owner_gated() {
     let r1 = env.send(
         ProgInstruction::ForfeitRecoveryLeg {
             asset_index: 0,
+            market_id: first_generation_market_id(0),
             b_delta_budget: 1,
         },
         vec![
@@ -55191,6 +55197,7 @@ fn v16_attack_forfeit_recovery_leg_owner_gated_and_zero_budget_rejected() {
     let r_grief = env.send(
         ProgInstruction::ForfeitRecoveryLeg {
             asset_index: 0,
+            market_id: first_generation_market_id(0),
             b_delta_budget: 1_000,
         },
         vec![
@@ -55220,6 +55227,7 @@ fn v16_attack_forfeit_recovery_leg_owner_gated_and_zero_budget_rejected() {
     let r_zero = env.send(
         ProgInstruction::ForfeitRecoveryLeg {
             asset_index: 0,
+            market_id: first_generation_market_id(0),
             b_delta_budget: 0,
         },
         vec![
@@ -57132,6 +57140,7 @@ fn v16_attack_forfeit_recovery_leg_rejects_when_resolve_matured() {
     let rejected = env.send(
         ProgInstruction::ForfeitRecoveryLeg {
             asset_index: 0,
+            market_id: first_generation_market_id(0),
             b_delta_budget: 1,
         },
         vec![
@@ -60572,6 +60581,7 @@ fn v16_attack_forfeit_recovery_leg_cannot_replay_across_market_reinit() {
                 ],
                 data: ProgInstruction::ForfeitRecoveryLeg {
                     asset_index: 0,
+                    market_id: old_market_id,
                     b_delta_budget: 1,
                 }
                 .encode(),
