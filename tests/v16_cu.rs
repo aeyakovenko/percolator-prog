@@ -2254,11 +2254,12 @@ impl V16CuEnv {
     }
 
     fn resolve(&mut self) -> u64 {
+        let market_id = self.asset_market_id(0);
         send_tx(
             &mut self.svm,
             self.program_id,
             &self.payer,
-            ProgInstruction::ResolveMarket,
+            ProgInstruction::ResolveMarket { market_id },
             vec![
                 AccountMeta::new(self.admin.pubkey(), true),
                 AccountMeta::new(self.market, false),
@@ -6502,11 +6503,12 @@ fn v16_attack_signed_authority_rotation_cannot_replay_across_market_reinit() {
             attacker.pubkey().to_bytes(),
             "the retained old rotation seized the fresh market"
         );
+        let market_id = env.asset_market_id(0);
         let forced_resolve = send_tx(
             &mut env.svm,
             env.program_id,
             &env.payer,
-            ProgInstruction::ResolveMarket,
+            ProgInstruction::ResolveMarket { market_id },
             vec![
                 AccountMeta::new(attacker.pubkey(), true),
                 AccountMeta::new(env.market, false),
@@ -6553,6 +6555,161 @@ fn v16_attack_signed_authority_rotation_cannot_replay_across_market_reinit() {
         &[&admin, &attacker],
     )
     .expect("the same rotation remains live when signed for the current market generation");
+}
+
+// ResolveMarket is a signed terminal action, so it must identify the asset-0 generation whose
+// positions the administrator intended to settle. Otherwise a transaction retained while an empty
+// generation A was live can be submitted after an ordinary shutdown/restart, crystallizing a
+// replacement user's temporary generation-B loss and making it withdrawable by the opposing trader.
+#[test]
+fn v16_attack_presigned_resolve_rejects_restarted_asset_generation() {
+    const PRICE: u64 = 100;
+    const ADVERSE_PRICE: u64 = 110;
+    const DEPOSIT: u128 = 1_000_000;
+    const SIZE_Q: i128 = (10_000 * POS_SCALE) as i128;
+
+    let mut env = V16CuEnv::new();
+    let admin = env.admin.insecure_clone();
+    env.configure_permissionless_resolve_with_cu(1_000_000, 1);
+    let old_market_id = env.asset_market_id(0);
+    let program_id = env.program_id;
+    let market = env.market;
+    let resolve_ix = |market_id: u64, generation_bound: bool| {
+        let mut data = vec![19u8];
+        if generation_bound {
+            data.extend_from_slice(&market_id.to_le_bytes());
+        }
+        Instruction {
+            program_id,
+            accounts: vec![
+                AccountMeta::new(admin.pubkey(), true),
+                AccountMeta::new(market, false),
+            ],
+            data,
+        }
+    };
+
+    // Keep the RED source compatible with both the legacy tag-only wire and the fixed wire. A
+    // wrong generation distinguishes a decoder that knows the witness without mutating the market.
+    env.svm.expire_blockhash();
+    let generation_probe = send_raw_tx(
+        &mut env.svm,
+        &env.payer,
+        resolve_ix(old_market_id.checked_add(10_000).unwrap(), true),
+        &[&admin],
+    );
+    let generation_bound = format!("{generation_probe:?}").contains(&format!(
+        "Custom({})",
+        PercolatorError::AssetGenerationMismatch as u32
+    ));
+
+    env.svm.expire_blockhash();
+    let stale_resolve = Transaction::new_signed_with_payer(
+        &[
+            heap_ix(),
+            cu_ix(),
+            resolve_ix(old_market_id, generation_bound),
+        ],
+        Some(&env.payer.pubkey()),
+        &[&env.payer, &admin],
+        env.svm.latest_blockhash(),
+    );
+
+    env.svm.warp_to_slot(2);
+    env.try_shutdown_asset_with_authority(&admin, 0, 2)
+        .expect("empty generation A shuts down through the public lifecycle");
+    env.svm.warp_to_slot(3);
+    env.try_restart_asset_oracle_with_authority(&admin, 0, 3, PRICE)
+        .expect("asset 0 restarts into generation B");
+    env.configure_auth_mark_with_cu(3, PRICE);
+    let new_market_id = env.asset_market_id(0);
+    assert_ne!(new_market_id, old_market_id);
+
+    let winner_owner = Keypair::new();
+    let victim_owner = Keypair::new();
+    let winner = env.create_portfolio(&winner_owner);
+    let victim = env.create_portfolio(&victim_owner);
+    env.deposit(&winner_owner, winner, DEPOSIT);
+    env.deposit(&victim_owner, victim, DEPOSIT);
+    env.trade_asset_with_cu(
+        0,
+        &winner_owner,
+        winner,
+        &victim_owner,
+        victim,
+        SIZE_Q,
+        PRICE,
+        0,
+    );
+
+    env.svm.warp_to_slot(10);
+    env.push_auth_mark_with_cu(10, ADVERSE_PRICE);
+    for slot in [10u64, 11] {
+        env.svm.warp_to_slot(slot);
+        for portfolio in [victim, winner] {
+            env.svm.expire_blockhash();
+            let _ = env.send(
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: slot,
+                    observations: crank_observations(0),
+                },
+                vec![
+                    AccountMeta::new(env.payer.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(portfolio, false),
+                ],
+                &[],
+            );
+        }
+    }
+    assert_eq!(
+        env.market_state().1.assets[0].effective_price,
+        ADVERSE_PRICE
+    );
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let winner_before = env.svm.get_account(&winner).unwrap();
+    let victim_before = env.svm.get_account(&victim).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    let replay = env.svm.send_transaction(stale_resolve);
+    if let Err(rejected) = replay {
+        let expected_error = format!(
+            "Custom({})",
+            PercolatorError::AssetGenerationMismatch as u32
+        );
+        assert!(
+            format!("{rejected:?}").contains(&expected_error),
+            "the stale resolve must reject with {expected_error}: {rejected:?}"
+        );
+        assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+        assert_eq!(env.svm.get_account(&winner).unwrap(), winner_before);
+        assert_eq!(env.svm.get_account(&victim).unwrap(), victim_before);
+        assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+        assert_eq!(env.market_state().1.mode, MarketModeV16::Live);
+
+        env.svm.expire_blockhash();
+        send_raw_tx(
+            &mut env.svm,
+            &env.payer,
+            resolve_ix(new_market_id, true),
+            &[&admin],
+        )
+        .expect("a resolve signed for generation B remains available");
+        return;
+    }
+
+    assert_eq!(env.market_state().1.mode, MarketModeV16::Resolved);
+    env.svm.warp_to_slot(12);
+    let victim_dest = env.close_resolved(&victim_owner, victim);
+    let winner_dest = env.close_resolved(&winner_owner, winner);
+    let victim_payout = env.token_amount(victim_dest) as u128;
+    let winner_payout = env.token_amount(winner_dest) as u128;
+    assert_eq!(victim_payout, 900_000);
+    assert_eq!(winner_payout, 1_100_000);
+    panic!(
+        "a generation-A resolve crystallized generation B and paid the opposing trader {} atoms of the replacement victim's capital",
+        winner_payout - DEPOSIT
+    );
 }
 
 #[test]
@@ -23167,11 +23324,12 @@ fn v16_attack_non_admin_cannot_resolve_or_configure() {
 
     // non-admin ResolveMarket -> reject; market stays Live.
     env.svm.expire_blockhash();
+    let market_id = env.asset_market_id(0);
     let r_res = send_tx(
         &mut env.svm,
         env.program_id,
         &env.payer,
-        ProgInstruction::ResolveMarket,
+        ProgInstruction::ResolveMarket { market_id },
         vec![
             AccountMeta::new(mallory.pubkey(), true),
             AccountMeta::new(env.market, false),
@@ -24628,7 +24786,9 @@ fn v16_attack_terminal_insurance_ledger_rejects_cross_market_reuse() {
         &mut env.svm,
         env.program_id,
         &env.payer,
-        ProgInstruction::ResolveMarket,
+        ProgInstruction::ResolveMarket {
+            market_id: first_generation_market_id(0),
+        },
         vec![
             AccountMeta::new(admin.pubkey(), true),
             AccountMeta::new(market_b, false),
@@ -24764,7 +24924,9 @@ fn v16_attack_terminal_withdraw_insurance_rejects_portfolio_as_ledger() {
         &mut env.svm,
         env.program_id,
         &env.payer,
-        ProgInstruction::ResolveMarket,
+        ProgInstruction::ResolveMarket {
+            market_id: first_generation_market_id(0),
+        },
         vec![
             AccountMeta::new(admin.pubkey(), true),
             AccountMeta::new(market_b, false),
@@ -28406,11 +28568,12 @@ fn v16_attack_close_slab_rejects_stale_marketauth_after_rotation() {
     );
 
     env.svm.expire_blockhash();
+    let market_id = env.asset_market_id(0);
     let resolve = send_tx(
         &mut env.svm,
         env.program_id,
         &env.payer,
-        ProgInstruction::ResolveMarket,
+        ProgInstruction::ResolveMarket { market_id },
         vec![
             AccountMeta::new(new_admin.pubkey(), true),
             AccountMeta::new(env.market, false),
@@ -28627,7 +28790,9 @@ fn v16_attack_close_slab_rejects_market_as_lamport_destination() {
         &mut svm,
         program_id,
         &payer,
-        ProgInstruction::ResolveMarket,
+        ProgInstruction::ResolveMarket {
+            market_id: first_generation_market_id(0),
+        },
         vec![
             AccountMeta::new(market.pubkey(), true),
             AccountMeta::new(market.pubkey(), false),
@@ -31517,7 +31682,9 @@ fn v16_attack_close_resolved_rejects_cross_market_portfolio_payout() {
         &mut env.svm,
         env.program_id,
         &env.payer,
-        ProgInstruction::ResolveMarket,
+        ProgInstruction::ResolveMarket {
+            market_id: first_generation_market_id(0),
+        },
         vec![
             AccountMeta::new(env.admin.pubkey(), true),
             AccountMeta::new(market_b, false),
