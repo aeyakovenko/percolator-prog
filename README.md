@@ -163,8 +163,9 @@ Assets 1..N are **truly permissionless ⇒ untrusted**. The protocol must guaran
   `WrapperConfigV16.marketauth` key (it replaced the former separate `admin` / `asset_authority` /
   `base_unit_authority`). `marketauth` is the only key that can: **create market 0** (`InitMarket`),
   **create/retire assets 1..N and set the permissionless-create-fee policy**, **safely force-shutdown
-  any asset including asset 0** (`ASSET_ACTION_SHUTDOWN` → RECOVERY with the `force_close_delay_slots`
-  exit window so traders can exit), **resolve/close the market** (`ResolveMarket { market_id }`/`CloseSlab`),
+  any asset including asset 0** (`ShutdownAsset { asset_index, market_id, now_slot }` → RECOVERY
+  with the `force_close_delay_slots` exit window so traders can exit), **resolve/close the market**
+  (`ResolveMarket { market_id }`/`CloseSlab`),
   **market policies**, and **rotate/swap the base-unit mint**. It is rotated via
   `UpdateAuthority { market_id, new_pubkey }` (current `marketauth` signs, the non-zero replacement
   co-signs, and `market_id` must match the current base-asset generation; burn-to-zero is rejected).
@@ -183,10 +184,11 @@ Assets 1..N are **truly permissionless ⇒ untrusted**. The protocol must guaran
   value, and only **succeeds + zeroes (reclaims) the account** once users are made whole and the slab
   is fully drained; the abandoned-market path is the permissionless-resolve fallback
   (`v16_bpf_permissionless_stale_resolve_is_bounded_and_oracle_free`, bounded + oracle-free).
-- **The `marketauth` key can force-shutdown assets 0..N without rugging traders** — `ASSET_ACTION_SHUTDOWN`
+- **The `marketauth` key can force-shutdown assets 0..N without rugging traders** — `ShutdownAsset`
   accepts either `marketauth` (global liveness) or that asset's `asset_admin` (local shutdown); any
-  other signer is rejected. It moves the asset to RECOVERY with a frozen mark, and the wind-down
-  force-close is gated behind `force_close_delay_slots` so there is an **exit window**. **✅**
+  other signer is rejected, and `market_id` must match the current asset generation. It moves the
+  asset to RECOVERY with a frozen mark, and the wind-down force-close is gated behind
+  `force_close_delay_slots` so there is an **exit window**. **✅**
   `v16_attack_force_shutdown_timeout_lets_traders_exit_before_close` asserts shutdown → RECOVERY,
   force-close **rejects before** the delay and **succeeds after**; plus
   `v16_bpf_permissionless_market_shutdown_force_closes_recovers_and_reuses_slot` and
@@ -401,9 +403,13 @@ This section describes intent and operational ordering, not argument-by-argument
 - **UpdateAssetLifecycle** (tag 40)
   - appends/reactivates/retires assets 1..N, including permissionless create/reuse when the configured
     create fee is nonzero
-  - `ASSET_ACTION_SHUTDOWN` moves any asset 0..N to RECOVERY at a frozen mark, with force-close blocked
-    until `force_close_delay_slots` elapses; signer is `marketauth` or that asset's `asset_admin`
   - ordinary `RETIRE` rejects `asset_index = 0`; asset 0 is restarted, not reused
+- **ShutdownAsset** (tag 70)
+  - `ShutdownAsset { asset_index, market_id, now_slot }` moves any asset 0..N to RECOVERY at a
+    frozen mark
+  - requires the current asset generation plus `marketauth` or that asset's `asset_admin`; the legacy
+    generation-free shutdown action is rejected
+  - force-close remains blocked until `force_close_delay_slots` elapses
 - **RestartAssetOracle** (tag 69)
   - `RestartAssetOracle { asset_index, now_slot, initial_price }`, signed by that asset's `asset_admin`
   - after the target asset is already RECOVERY and empty of positions/loss plus value-bearing

@@ -908,10 +908,13 @@ impl V16CuEnv {
         now_slot: u64,
         initial_price: u64,
     ) -> u64 {
-        send_tx(
-            &mut self.svm,
-            self.program_id,
-            &self.payer,
+        let instruction = if action == percolator_prog::processor::ASSET_ACTION_SHUTDOWN {
+            ProgInstruction::ShutdownAsset {
+                asset_index,
+                market_id: self.asset_market_id(asset_index),
+                now_slot,
+            }
+        } else {
             ProgInstruction::UpdateAssetLifecycle {
                 action,
                 asset_index,
@@ -921,7 +924,13 @@ impl V16CuEnv {
                 insurance_operator: self.admin.pubkey().to_bytes(),
                 backing_bucket_authority: self.admin.pubkey().to_bytes(),
                 oracle_authority: self.admin.pubkey().to_bytes(),
-            },
+            }
+        };
+        send_tx(
+            &mut self.svm,
+            self.program_id,
+            &self.payer,
+            instruction,
             vec![
                 AccountMeta::new(self.admin.pubkey(), true),
                 AccountMeta::new(self.market, false),
@@ -937,19 +946,15 @@ impl V16CuEnv {
         asset_index: u16,
         now_slot: u64,
     ) -> Result<u64, String> {
+        let market_id = self.asset_market_id(asset_index);
         send_tx(
             &mut self.svm,
             self.program_id,
             &self.payer,
-            ProgInstruction::UpdateAssetLifecycle {
-                action: percolator_prog::processor::ASSET_ACTION_SHUTDOWN,
+            ProgInstruction::ShutdownAsset {
                 asset_index,
+                market_id,
                 now_slot,
-                initial_price: 0,
-                insurance_authority: authority.pubkey().to_bytes(),
-                insurance_operator: authority.pubkey().to_bytes(),
-                backing_bucket_authority: authority.pubkey().to_bytes(),
-                oracle_authority: authority.pubkey().to_bytes(),
             },
             vec![
                 AccountMeta::new(authority.pubkey(), true),
@@ -6655,15 +6660,10 @@ fn v16_attack_presigned_shutdown_rejects_restarted_asset_generation() {
                     AccountMeta::new(admin.pubkey(), true),
                     AccountMeta::new(env.market, false),
                 ],
-                data: ProgInstruction::UpdateAssetLifecycle {
-                    action: processor::ASSET_ACTION_SHUTDOWN,
+                data: ProgInstruction::ShutdownAsset {
                     asset_index: 0,
+                    market_id: old_market_id,
                     now_slot: 12,
-                    initial_price: 0,
-                    insurance_authority: admin.pubkey().to_bytes(),
-                    insurance_operator: admin.pubkey().to_bytes(),
-                    backing_bucket_authority: admin.pubkey().to_bytes(),
-                    oracle_authority: admin.pubkey().to_bytes(),
                 }
                 .encode(),
             },
@@ -6726,9 +6726,62 @@ fn v16_attack_presigned_shutdown_rejects_restarted_asset_generation() {
     );
 
     env.svm.warp_to_slot(12);
-    env.svm
-        .send_transaction(stale_shutdown)
-        .expect("RED: generation-A shutdown freezes generation B");
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let winner_before = env.svm.get_account(&winner).unwrap();
+    let victim_before = env.svm.get_account(&victim).unwrap();
+    let replay = env.svm.send_transaction(stale_shutdown);
+    if let Err(rejected) = replay {
+        let expected_error = format!(
+            "Custom({})",
+            PercolatorError::AssetGenerationMismatch as u32
+        );
+        assert!(
+            format!("{rejected:?}").contains(&expected_error),
+            "the stale shutdown must reject with {expected_error}: {rejected:?}"
+        );
+        assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+        assert_eq!(env.svm.get_account(&winner).unwrap(), winner_before);
+        assert_eq!(env.svm.get_account(&victim).unwrap(), victim_before);
+        assert_eq!(
+            env.market_state().1.assets[0].lifecycle,
+            AssetLifecycleV16::Active
+        );
+
+        env.send(
+            ProgInstruction::UpdateAssetLifecycle {
+                action: processor::ASSET_ACTION_SHUTDOWN,
+                asset_index: 0,
+                now_slot: 12,
+                initial_price: 0,
+                insurance_authority: admin.pubkey().to_bytes(),
+                insurance_operator: admin.pubkey().to_bytes(),
+                backing_bucket_authority: admin.pubkey().to_bytes(),
+                oracle_authority: admin.pubkey().to_bytes(),
+            },
+            vec![
+                AccountMeta::new(admin.pubkey(), true),
+                AccountMeta::new(env.market, false),
+            ],
+            &[&admin],
+        )
+        .expect_err("the legacy generation-free shutdown wire must stay disabled");
+        assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+
+        env.send(
+            ProgInstruction::ShutdownAsset {
+                asset_index: 0,
+                market_id: new_market_id,
+                now_slot: 12,
+            },
+            vec![
+                AccountMeta::new(admin.pubkey(), true),
+                AccountMeta::new(env.market, false),
+            ],
+            &[&admin],
+        )
+        .expect("a shutdown signed for generation B remains available");
+        return;
+    }
     assert_eq!(
         env.market_state().1.assets[0].lifecycle,
         AssetLifecycleV16::Recovery
@@ -7111,15 +7164,10 @@ fn v16_bpf_asset0_shutdown_force_closes_preserves_insurance_and_restarts() {
         &mut env.svm,
         env.program_id,
         &env.payer,
-        ProgInstruction::UpdateAssetLifecycle {
-            action: processor::ASSET_ACTION_SHUTDOWN,
+        ProgInstruction::ShutdownAsset {
             asset_index: 0,
+            market_id: old_market_id,
             now_slot: 2,
-            initial_price: 0,
-            insurance_authority: stranger.pubkey().to_bytes(),
-            insurance_operator: stranger.pubkey().to_bytes(),
-            backing_bucket_authority: stranger.pubkey().to_bytes(),
-            oracle_authority: stranger.pubkey().to_bytes(),
         },
         vec![
             AccountMeta::new(stranger.pubkey(), true),
@@ -38064,15 +38112,10 @@ fn v16_attack_force_close_rejects_cross_market_portfolio_substitution() {
         &mut env.svm,
         env.program_id,
         &env.payer,
-        ProgInstruction::UpdateAssetLifecycle {
-            action: percolator_prog::processor::ASSET_ACTION_SHUTDOWN,
+        ProgInstruction::ShutdownAsset {
             asset_index: 1,
+            market_id: market_b_open.assets[1].market_id,
             now_slot: SHUT,
-            initial_price: 0,
-            insurance_authority: env.admin.pubkey().to_bytes(),
-            insurance_operator: env.admin.pubkey().to_bytes(),
-            backing_bucket_authority: env.admin.pubkey().to_bytes(),
-            oracle_authority: env.admin.pubkey().to_bytes(),
         },
         vec![
             AccountMeta::new(env.admin.pubkey(), true),
@@ -46436,19 +46479,15 @@ fn v16_attack_force_shutdown_timeout_lets_traders_exit_before_close() {
     env.svm.expire_blockhash();
     let mallory = Keypair::new();
     env.ensure_signer_account(mallory.pubkey());
+    let asset_market_id = env.asset_market_id(1);
     let stranger = send_tx(
         &mut env.svm,
         env.program_id,
         &env.payer,
-        ProgInstruction::UpdateAssetLifecycle {
-            action: percolator_prog::processor::ASSET_ACTION_SHUTDOWN,
+        ProgInstruction::ShutdownAsset {
             asset_index: 1,
+            market_id: asset_market_id,
             now_slot: SHUT,
-            initial_price: 0,
-            insurance_authority: mallory.pubkey().to_bytes(),
-            insurance_operator: mallory.pubkey().to_bytes(),
-            backing_bucket_authority: mallory.pubkey().to_bytes(),
-            oracle_authority: mallory.pubkey().to_bytes(),
         },
         vec![
             AccountMeta::new(mallory.pubkey(), true),
@@ -61592,21 +61631,17 @@ fn v16_attack_update_authority_handoff_rekeys_asset0_lifecycle_admin() {
     );
 
     let market_before = env.svm.get_account(&env.market).unwrap();
+    let market_id = env.asset_market_id(0);
     env.svm.warp_to_slot(2);
     env.svm.expire_blockhash();
     let stale_shutdown = send_tx(
         &mut env.svm,
         env.program_id,
         &env.payer,
-        ProgInstruction::UpdateAssetLifecycle {
-            action: percolator_prog::processor::ASSET_ACTION_SHUTDOWN,
+        ProgInstruction::ShutdownAsset {
             asset_index: 0,
+            market_id,
             now_slot: 2,
-            initial_price: 0,
-            insurance_authority: old_marketauth.pubkey().to_bytes(),
-            insurance_operator: old_marketauth.pubkey().to_bytes(),
-            backing_bucket_authority: old_marketauth.pubkey().to_bytes(),
-            oracle_authority: old_marketauth.pubkey().to_bytes(),
         },
         vec![
             AccountMeta::new(old_marketauth.pubkey(), true),
@@ -61634,15 +61669,10 @@ fn v16_attack_update_authority_handoff_rekeys_asset0_lifecycle_admin() {
         &mut env.svm,
         env.program_id,
         &env.payer,
-        ProgInstruction::UpdateAssetLifecycle {
-            action: percolator_prog::processor::ASSET_ACTION_SHUTDOWN,
+        ProgInstruction::ShutdownAsset {
             asset_index: 0,
+            market_id,
             now_slot: 2,
-            initial_price: 0,
-            insurance_authority: new_marketauth.pubkey().to_bytes(),
-            insurance_operator: new_marketauth.pubkey().to_bytes(),
-            backing_bucket_authority: new_marketauth.pubkey().to_bytes(),
-            oracle_authority: new_marketauth.pubkey().to_bytes(),
         },
         vec![
             AccountMeta::new(new_marketauth.pubkey(), true),
