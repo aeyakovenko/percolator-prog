@@ -2572,6 +2572,7 @@ pub mod ix {
         ResolveMarket,
         TopUpBackingBucket {
             domain: u16,
+            market_id: u64,
             amount: u128,
             expiry_slot: u64,
         },
@@ -2850,6 +2851,7 @@ pub mod ix {
                 19 => Self::ResolveMarket,
                 24 => Self::TopUpBackingBucket {
                     domain: read_u16(&mut rest)?,
+                    market_id: read_u64(&mut rest)?,
                     amount: read_u128(&mut rest)?,
                     expiry_slot: read_u64(&mut rest)?,
                 },
@@ -3158,11 +3160,13 @@ pub mod ix {
                 Self::ResolveMarket => out.push(19),
                 Self::TopUpBackingBucket {
                     domain,
+                    market_id,
                     amount,
                     expiry_slot,
                 } => {
                     out.push(24);
                     push_u16(&mut out, domain);
+                    push_u64(&mut out, market_id);
                     push_u128(&mut out, amount);
                     push_u64(&mut out, expiry_slot);
                 }
@@ -5332,9 +5336,17 @@ pub mod processor {
             Instruction::ResolveMarket => handle_resolve_market(program_id, accounts),
             Instruction::TopUpBackingBucket {
                 domain,
+                market_id,
                 amount,
                 expiry_slot,
-            } => handle_top_up_backing_bucket(program_id, accounts, domain, amount, expiry_slot),
+            } => handle_top_up_backing_bucket(
+                program_id,
+                accounts,
+                domain,
+                market_id,
+                amount,
+                expiry_slot,
+            ),
             Instruction::WithdrawBackingBucket { domain, amount } => {
                 handle_withdraw_backing_bucket(program_id, accounts, domain, amount)
             }
@@ -7667,6 +7679,7 @@ pub mod processor {
         program_id: &Pubkey,
         accounts: &'a [AccountInfo<'a>],
         domain: u16,
+        expected_market_id: u64,
         amount: u128,
         expiry_slot: u64,
     ) -> ProgramResult {
@@ -7697,6 +7710,9 @@ pub mod processor {
                 || asset_index >= configured_slots
             {
                 return Err(PercolatorError::EngineLockActive.into());
+            }
+            if group.markets[asset_index].engine.asset.market_id.get() != expected_market_id {
+                return Err(PercolatorError::AssetGenerationMismatch.into());
             }
             require_domain_accepts_live_topup_view(&group, domain_usize)?;
             let profile = read_oracle_profile_from_view(&group, &cfg, asset_index)?;

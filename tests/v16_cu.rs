@@ -2838,12 +2838,14 @@ impl V16CuEnv {
         amount: u128,
         expiry_slot: u64,
     ) -> u64 {
+        let market_id = self.asset_market_id(domain / 2);
         send_tx(
             &mut self.svm,
             self.program_id,
             &self.payer,
             ProgInstruction::TopUpBackingBucket {
                 domain,
+                market_id,
                 amount,
                 expiry_slot,
             },
@@ -3022,6 +3024,7 @@ impl V16CuEnv {
         amount: u128,
         expiry_slot: u64,
     ) -> (Pubkey, u64) {
+        let market_id = self.asset_market_id(domain / 2);
         let source = Pubkey::new_unique();
         self.svm
             .set_account(
@@ -3041,6 +3044,7 @@ impl V16CuEnv {
             &self.payer,
             ProgInstruction::TopUpBackingBucket {
                 domain,
+                market_id,
                 amount,
                 expiry_slot,
             },
@@ -3064,6 +3068,7 @@ impl V16CuEnv {
         amount: u128,
         expiry_slot: u64,
     ) -> (Pubkey, u64) {
+        let market_id = self.asset_market_id(domain / 2);
         let source = Pubkey::new_unique();
         self.svm
             .set_account(
@@ -3083,6 +3088,7 @@ impl V16CuEnv {
             &self.payer,
             ProgInstruction::TopUpBackingBucket {
                 domain,
+                market_id,
                 amount,
                 expiry_slot,
             },
@@ -3108,6 +3114,7 @@ impl V16CuEnv {
         expiry_slot: u64,
     ) -> Pubkey {
         self.ensure_signer_account(authority.pubkey());
+        let market_id = self.asset_market_id(domain / 2);
         let source = self.token_account(authority.pubkey(), amount as u64);
         send_tx(
             &mut self.svm,
@@ -3115,6 +3122,7 @@ impl V16CuEnv {
             &self.payer,
             ProgInstruction::TopUpBackingBucket {
                 domain,
+                market_id,
                 amount,
                 expiry_slot,
             },
@@ -3983,6 +3991,7 @@ fn v16_bpf_mainnet_realistic_system_spl_ata_bootstrap_deposits_and_ledgers() {
         &payer,
         ProgInstruction::TopUpBackingBucket {
             domain: 1,
+            market_id: first_generation_market_id(0),
             amount: 77,
             expiry_slot: 10,
         },
@@ -4286,6 +4295,11 @@ fn top_up_backing_bucket_to_market(
     amount: u128,
     expiry_slot: u64,
 ) -> Pubkey {
+    let market_id = state::read_market(&env.svm.get_account(&market).unwrap().data)
+        .unwrap()
+        .1
+        .assets[(domain / 2) as usize]
+        .market_id;
     let source = env.token_account(env.admin.pubkey(), amount as u64);
     env.svm.expire_blockhash();
     send_tx(
@@ -4294,6 +4308,7 @@ fn top_up_backing_bucket_to_market(
         &env.payer,
         ProgInstruction::TopUpBackingBucket {
             domain,
+            market_id,
             amount,
             expiry_slot,
         },
@@ -4642,6 +4657,7 @@ fn v16_bpf_failed_backing_topup_transfer_rolls_back_bucket_and_ledger() {
         &env.payer,
         ProgInstruction::TopUpBackingBucket {
             domain: 1,
+            market_id: first_generation_market_id(0),
             amount: 100,
             expiry_slot: 10,
         },
@@ -6730,6 +6746,7 @@ fn v16_attack_retired_asset_domain_authority_cannot_refund_slot_and_block_reuse(
     let backing_topup = env.send(
         ProgInstruction::TopUpBackingBucket {
             domain: 2,
+            market_id: first_generation_market_id(1),
             amount: 88,
             expiry_slot: 10,
         },
@@ -23716,6 +23733,7 @@ fn v16_attack_backing_ledger_market_binding_enforced() {
         &env.payer,
         ProgInstruction::TopUpBackingBucket {
             domain: 1,
+            market_id: first_generation_market_id(0),
             amount: 100,
             expiry_slot: 10,
         },
@@ -24410,6 +24428,7 @@ fn v16_attack_topup_optional_ledgers_reject_cross_market_reuse() {
         &env.payer,
         ProgInstruction::TopUpBackingBucket {
             domain: 1,
+            market_id: first_generation_market_id(0),
             amount: 40,
             expiry_slot: 10,
         },
@@ -24507,6 +24526,7 @@ fn v16_attack_topup_optional_ledgers_reject_cross_market_reuse() {
         &env.payer,
         ProgInstruction::TopUpBackingBucket {
             domain: 1,
+            market_id: first_generation_market_id(0),
             amount: 40,
             expiry_slot: 10,
         },
@@ -25198,6 +25218,7 @@ fn v16_attack_value_paths_cannot_use_portfolio_as_optional_ledger() {
     let top_up_backing = env.send(
         ProgInstruction::TopUpBackingBucket {
             domain: 1,
+            market_id: first_generation_market_id(0),
             amount: 30,
             expiry_slot: 10,
         },
@@ -25408,6 +25429,7 @@ fn v16_attack_value_paths_cannot_use_market_as_optional_ledger() {
     let top_up_backing = env.send(
         ProgInstruction::TopUpBackingBucket {
             domain: 1,
+            market_id: first_generation_market_id(0),
             amount: 30,
             expiry_slot: 10,
         },
@@ -25646,6 +25668,7 @@ fn v16_attack_topups_cannot_use_vault_as_source() {
         &mut env,
         ProgInstruction::TopUpBackingBucket {
             domain: 1,
+            market_id: first_generation_market_id(0),
             amount: 500,
             expiry_slot,
         },
@@ -26065,6 +26088,7 @@ fn v16_attack_domain_topups_pinned_to_canonical_vault() {
         &env.payer,
         ProgInstruction::TopUpBackingBucket {
             domain: 1,
+            market_id: first_generation_market_id(0),
             amount: 700,
             expiry_slot: 10_000,
         },
@@ -26163,6 +26187,7 @@ fn v16_attack_domain_indexed_calls_reject_out_of_range_atomically() {
         &env.payer,
         ProgInstruction::TopUpBackingBucket {
             domain: BAD_DOMAIN,
+            market_id: 0,
             amount: 456,
             expiry_slot: 10_000,
         },
@@ -32621,6 +32646,7 @@ fn v16_attack_topup_backing_bucket_authority_gated() {
         &env.payer,
         ProgInstruction::TopUpBackingBucket {
             domain: 0,
+            market_id: first_generation_market_id(0),
             amount: 500,
             expiry_slot: 10_000,
         },
@@ -32786,6 +32812,7 @@ fn v16_attack_cross_asset_backing_authority_cannot_withdraw_other_asset_earnings
         &env.payer,
         ProgInstruction::TopUpBackingBucket {
             domain: 2,
+            market_id: first_generation_market_id(1),
             amount: 300,
             expiry_slot: 10_000,
         },
@@ -34493,6 +34520,7 @@ fn v16_attack_topups_cannot_bypass_cumulative_tvl_cap() {
         let result = env.send(
             ProgInstruction::TopUpBackingBucket {
                 domain: 1,
+                market_id: first_generation_market_id(0),
                 amount: 2,
                 expiry_slot: 10_000,
             },
@@ -36166,6 +36194,7 @@ fn v16_attack_backing_bucket_topup_withdraw_input_gates() {
             &env.payer,
             ProgInstruction::TopUpBackingBucket {
                 domain: 0,
+                market_id: first_generation_market_id(0),
                 amount,
                 expiry_slot: expiry,
             },
@@ -51458,6 +51487,7 @@ fn v16_attack_backing_fee_policy_cannot_replay_across_asset_reuse() {
         &env.payer,
         ProgInstruction::TopUpBackingBucket {
             domain: WINNING_DOMAIN,
+            market_id: new_market_id,
             amount: BACKING_PRINCIPAL,
             expiry_slot: 100,
         },
@@ -56898,6 +56928,7 @@ fn v16_attack_live_value_paths_reject_when_resolve_matured() {
     let stale_backing = env.send(
         ProgInstruction::TopUpBackingBucket {
             domain: 1,
+            market_id: first_generation_market_id(0),
             amount: 30,
             expiry_slot: 100,
         },
@@ -59655,6 +59686,7 @@ fn v16_attack_value_topups_reject_delegated_canonical_vault() {
         &env.payer,
         ProgInstruction::TopUpBackingBucket {
             domain: 1,
+            market_id: first_generation_market_id(0),
             amount: 13,
             expiry_slot: 10_000,
         },
@@ -61213,6 +61245,7 @@ fn v16_attack_backing_topup_rejects_lapsed_expiry() {
         env.send(
             ProgInstruction::TopUpBackingBucket {
                 domain: 1,
+                market_id: first_generation_market_id(0),
                 amount: 50,
                 expiry_slot: expiry,
             },
