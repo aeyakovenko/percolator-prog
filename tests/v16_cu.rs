@@ -3435,9 +3435,11 @@ impl V16CuEnv {
         asset_index: u16,
         b_delta_budget: u128,
     ) -> u64 {
+        let market_id = self.asset_market_id(asset_index);
         self.send(
             ProgInstruction::ForfeitRecoveryLeg {
                 asset_index,
+                market_id,
                 b_delta_budget,
             },
             vec![
@@ -17008,6 +17010,7 @@ fn v16_attack_public_helpers_cannot_use_market_as_portfolio_alias() {
     let forfeit = env.send(
         ProgInstruction::ForfeitRecoveryLeg {
             asset_index: 0,
+            market_id: first_generation_market_id(0),
             b_delta_budget: 1,
         },
         vec![
@@ -29564,6 +29567,7 @@ fn v16_attack_forfeit_recovery_leg_rejects_cross_market_portfolio_substitution()
         &env.payer,
         ProgInstruction::ForfeitRecoveryLeg {
             asset_index: 0,
+            market_id: first_generation_market_id(0),
             b_delta_budget: 1,
         },
         vec![
@@ -29599,6 +29603,7 @@ fn v16_attack_forfeit_recovery_leg_rejects_cross_market_portfolio_substitution()
         &env.payer,
         ProgInstruction::ForfeitRecoveryLeg {
             asset_index: 0,
+            market_id: first_generation_market_id(0),
             b_delta_budget: 1,
         },
         vec![
@@ -29745,6 +29750,7 @@ fn v16_attack_recovery_tools_owner_gated() {
     let r1 = env.send(
         ProgInstruction::ForfeitRecoveryLeg {
             asset_index: 0,
+            market_id: first_generation_market_id(0),
             b_delta_budget: 1,
         },
         vec![
@@ -55191,6 +55197,7 @@ fn v16_attack_forfeit_recovery_leg_owner_gated_and_zero_budget_rejected() {
     let r_grief = env.send(
         ProgInstruction::ForfeitRecoveryLeg {
             asset_index: 0,
+            market_id: first_generation_market_id(0),
             b_delta_budget: 1_000,
         },
         vec![
@@ -55220,6 +55227,7 @@ fn v16_attack_forfeit_recovery_leg_owner_gated_and_zero_budget_rejected() {
     let r_zero = env.send(
         ProgInstruction::ForfeitRecoveryLeg {
             asset_index: 0,
+            market_id: first_generation_market_id(0),
             b_delta_budget: 0,
         },
         vec![
@@ -57132,6 +57140,7 @@ fn v16_attack_forfeit_recovery_leg_rejects_when_resolve_matured() {
     let rejected = env.send(
         ProgInstruction::ForfeitRecoveryLeg {
             asset_index: 0,
+            market_id: first_generation_market_id(0),
             b_delta_budget: 1,
         },
         vec![
@@ -60512,5 +60521,268 @@ fn v16_attack_backing_topup_rejects_lapsed_expiry() {
         env.token_amount(env.vault),
         vault0 + 50,
         "valid topup credits exactly the backing"
+    );
+}
+
+// A full market close/reinit restarts the portfolio allocator, so portfolio_id alone cannot bind
+// irreversible forfeit consent to the market incarnation. Retain the exact victim-signed request
+// from the old market, then recreate the market and portfolios at the same public addresses. A
+// stale forfeit must not discard the replacement winner's payout.
+#[test]
+fn v16_attack_forfeit_recovery_leg_cannot_replay_across_market_reinit() {
+    const PRICE: u64 = 100;
+    const WIN_PRICE: u64 = 150;
+    const DEPOSIT: u128 = 1_000_000;
+    const SIZE_Q: i128 = 5_000 * POS_SCALE as i128;
+    const REINIT_SLOT: u64 = 10;
+
+    let params = V16CuMarketParams {
+        max_portfolio_assets: 2,
+        maintenance_margin_bps: 1_000,
+        initial_margin_bps: 1_000,
+        max_price_move_bps_per_slot: 500,
+        ..V16CuMarketParams::default()
+    };
+    let mut env = V16CuEnv::new_with_init_params(params);
+    let admin = env.admin.insecure_clone();
+    env.configure_permissionless_resolve_with_cu(100, 1);
+    env.svm.warp_to_slot(1);
+    env.configure_auth_mark_with_cu(1, PRICE);
+
+    let victim = Keypair::new();
+    let victim_portfolio = env.create_portfolio(&victim);
+    let counterparty_portfolio = env.create_portfolio(&admin);
+    let old_market_id = env.asset_market_id(0);
+    env.deposit(&victim, victim_portfolio, DEPOSIT);
+    env.deposit(&admin, counterparty_portfolio, DEPOSIT);
+    env.trade_with_cu(
+        &victim,
+        victim_portfolio,
+        &admin,
+        counterparty_portfolio,
+        SIZE_Q,
+        PRICE,
+        0,
+    );
+
+    env.svm.warp_to_slot(2);
+    env.try_shutdown_asset_with_authority(&admin, 0, 2)
+        .expect("old market enters Recovery");
+    let stale_forfeit = Transaction::new_signed_with_payer(
+        &[
+            heap_ix(),
+            cu_ix(),
+            Instruction {
+                program_id: env.program_id,
+                accounts: vec![
+                    AccountMeta::new(victim.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(victim_portfolio, false),
+                ],
+                data: ProgInstruction::ForfeitRecoveryLeg {
+                    asset_index: 0,
+                    market_id: old_market_id,
+                    b_delta_budget: 1,
+                }
+                .encode(),
+            },
+        ],
+        Some(&victim.pubkey()),
+        &[&victim],
+        env.svm.latest_blockhash(),
+    );
+
+    env.forfeit_recovery_leg_with_cu(&victim, victim_portfolio, 0, 1);
+    env.forfeit_recovery_leg_with_cu(&admin, counterparty_portfolio, 0, 1);
+    env.withdraw(&victim, victim_portfolio, DEPOSIT);
+    env.withdraw(&admin, counterparty_portfolio, DEPOSIT);
+    env.close_portfolio_with_cu(&victim, victim_portfolio);
+    env.close_portfolio_with_cu(&admin, counterparty_portfolio);
+    env.resolve();
+    env.close_slab_with_cu();
+
+    env.svm.warp_to_slot(REINIT_SLOT);
+    env.svm
+        .set_account(
+            env.market,
+            Account {
+                lamports: 1_000_000_000,
+                data: vec![
+                    0u8;
+                    state::market_account_len_for_capacity(
+                        params.max_portfolio_assets as usize,
+                    )
+                    .unwrap()
+                ],
+                owner: env.program_id,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    env.svm
+        .set_account(
+            env.vault,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_token_data(env.mint, env.vault_authority, 0),
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    let reinit_params = V16CuMarketParams {
+        max_bankrupt_close_lifetime_slots: params.max_bankrupt_close_lifetime_slots + 1,
+        ..params
+    };
+    env.send(
+        init_market_instruction(&reinit_params),
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new_readonly(env.mint, false),
+            AccountMeta::new(env.market_generation, false),
+            AccountMeta::new_readonly(system_program::ID, false),
+        ],
+        &[&admin],
+    )
+    .expect("same market address is publicly reinitialized");
+    env.configure_permissionless_resolve_with_cu(101, 1);
+    env.configure_auth_mark_with_cu(REINIT_SLOT, PRICE);
+
+    for (owner, portfolio) in [
+        (&victim, victim_portfolio),
+        (&admin, counterparty_portfolio),
+    ] {
+        env.svm
+            .set_account(
+                portfolio,
+                Account {
+                    lamports: 1_000_000_000,
+                    data: vec![0u8; env.portfolio_account_len],
+                    owner: env.program_id,
+                    executable: false,
+                    rent_epoch: 0,
+                },
+            )
+            .unwrap();
+        let init_portfolio = Instruction {
+            program_id: env.program_id,
+            accounts: vec![
+                AccountMeta::new(owner.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(portfolio, false),
+            ],
+            data: ProgInstruction::InitPortfolio.encode(),
+        };
+        send_raw_ixs(
+            &mut env.svm,
+            &env.payer,
+            vec![
+                heap_ix(),
+                cu_ix(),
+                ComputeBudgetInstruction::set_compute_unit_price(1),
+                init_portfolio,
+            ],
+            &[owner],
+        )
+        .expect("same portfolio address is publicly reinitialized");
+    }
+    let replacement_market_id = env.asset_market_id(0);
+    assert_ne!(replacement_market_id, old_market_id);
+
+    env.deposit(&victim, victim_portfolio, DEPOSIT);
+    env.deposit(&admin, counterparty_portfolio, DEPOSIT);
+    env.trade_with_cu(
+        &victim,
+        victim_portfolio,
+        &admin,
+        counterparty_portfolio,
+        SIZE_Q,
+        PRICE,
+        0,
+    );
+    env.svm.warp_to_slot(REINIT_SLOT + 10);
+    env.push_auth_mark_with_cu(REINIT_SLOT + 10, WIN_PRICE);
+    env.crank_steps(
+        counterparty_portfolio,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: REINIT_SLOT + 10,
+            observations: crank_observations(0),
+        },
+        4,
+    );
+    let effective_mark = env.market_state().1.assets[0].effective_price;
+    let pending_victim_profit =
+        SIZE_Q.unsigned_abs() * (effective_mark - PRICE) as u128 / POS_SCALE;
+    assert!(pending_victim_profit > 0);
+    assert_eq!(env.portfolio_state(victim_portfolio).pnl.get(), 0);
+
+    env.svm.warp_to_slot(REINIT_SLOT + 11);
+    env.try_shutdown_asset_with_authority(&admin, 0, REINIT_SLOT + 11)
+        .expect("replacement market enters Recovery at the honest mark");
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let victim_before = env.svm.get_account(&victim_portfolio).unwrap();
+    let replay = env.svm.send_transaction(stale_forfeit);
+    if replay.is_ok() {
+        let victim_after = env.portfolio_state(victim_portfolio);
+        let victim_equity = victim_after.capital.get() as i128 + victim_after.pnl.get();
+        assert!(percolator::active_bitmap_is_empty(active_bitmap(
+            &victim_after
+        )));
+
+        env.resolve();
+        env.svm.warp_to_slot(REINIT_SLOT + 12);
+        let counterparty_dest = env.close_resolved(&admin, counterparty_portfolio);
+        let victim_dest = env.close_resolved(&victim, victim_portfolio);
+        let counterparty_out = env.token_amount(counterparty_dest) as u128;
+        let victim_out = env.token_amount(victim_dest) as u128;
+        env.close_portfolio_with_cu(&admin, counterparty_portfolio);
+        env.close_portfolio_with_cu(&victim, victim_portfolio);
+        let (_, stuck) = env.market_state();
+        assert_eq!(stuck.c_tot, 0);
+        assert_eq!(stuck.insurance, 0);
+        assert_eq!(stuck.materialized_portfolio_count, 0);
+        assert_eq!(stuck.vault, pending_victim_profit);
+
+        let close_dest = env.token_account(admin.pubkey(), 0);
+        let close_slab = env.send(
+            ProgInstruction::CloseSlab,
+            vec![
+                AccountMeta::new(admin.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(env.vault_authority, false),
+                AccountMeta::new(close_dest, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+                AccountMeta::new(env.market_generation, false),
+                AccountMeta::new_readonly(system_program::ID, false),
+            ],
+            &[&admin],
+        );
+        assert!(close_slab.is_err());
+        panic!(
+            "a forfeit signed for market {old_market_id} executed in replacement market \
+             {replacement_market_id}, discarded {pending_victim_profit} of victim PnL, paid the \
+             victim only {victim_out} (equity {victim_equity}), paid the counterparty \
+             {counterparty_out}, and stranded {} in a slab that cannot close: {close_slab:?}",
+            stuck.vault,
+        );
+    }
+
+    let replay_error = format!("{replay:?}");
+    let expected_error = format!(
+        "Custom({})",
+        PercolatorError::AssetGenerationMismatch as u32
+    );
+    assert!(
+        replay_error.contains(&expected_error),
+        "stale forfeit must fail with {expected_error}, got {replay_error}"
+    );
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+    assert_eq!(
+        env.svm.get_account(&victim_portfolio).unwrap(),
+        victim_before
     );
 }
