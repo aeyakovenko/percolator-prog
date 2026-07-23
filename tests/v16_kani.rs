@@ -794,16 +794,22 @@ fn kani_v16_legacy_unbound_trade_payloads_are_rejected() {
 
 #[kani::proof]
 fn kani_v16_update_liquidation_fee_policy_decode_preserves_wire_fields() {
+    let market_id: u64 = kani::any();
     let cranker_share_bps: u16 = kani::any();
 
-    let mut data = [0u8; 3];
+    let mut data = [0u8; 11];
     data[0] = 37;
-    data[1..3].copy_from_slice(&cranker_share_bps.to_le_bytes());
+    data[1..9].copy_from_slice(&market_id.to_le_bytes());
+    data[9..11].copy_from_slice(&cranker_share_bps.to_le_bytes());
 
     match Instruction::decode(&data).unwrap() {
         Instruction::UpdateLiquidationFeePolicy {
+            market_id: got_market_id,
             cranker_share_bps: got,
-        } => assert_eq!(got, cranker_share_bps),
+        } => {
+            assert_eq!(got_market_id, market_id);
+            assert_eq!(got, cranker_share_bps);
+        }
         _ => unreachable!(),
     }
 }
@@ -1347,6 +1353,7 @@ fn kani_v16_admin_policy_payloads_reject_trailing_byte() {
     );
     assert_rejects_trailing_byte(
         Instruction::UpdateLiquidationFeePolicy {
+            market_id: 9,
             cranker_share_bps: 4_000,
         },
         extra,

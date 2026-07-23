@@ -424,6 +424,10 @@ This section describes intent and operational ordering, not argument-by-argument
   - resolved-market payout/finalization path for a supplied portfolio; pays only the stored owner token account
 
 ### Risk / maintenance
+- **UpdateLiquidationFeePolicy** (tag 37)
+  - `UpdateLiquidationFeePolicy { market_id, cranker_share_bps }` is signed by `marketauth`;
+    `market_id` must match the current base-asset generation so a retired slab's fee split cannot
+    redirect replacement-market liquidation penalties into a public cranker portfolio
 - **UpdateMaintenanceFeePolicy** (tag 49)
   - `UpdateMaintenanceFeePolicy { market_id, cranker_share_bps }` is signed by `marketauth`;
     `market_id` must match the current base-asset generation so a retired slab's fee split cannot

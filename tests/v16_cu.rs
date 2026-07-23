@@ -984,11 +984,15 @@ impl V16CuEnv {
     }
 
     fn update_liquidation_fee_policy_with_cu(&mut self, cranker_share_bps: u16) -> u64 {
+        let market_id = self.asset_market_id(0);
         send_tx(
             &mut self.svm,
             self.program_id,
             &self.payer,
-            ProgInstruction::UpdateLiquidationFeePolicy { cranker_share_bps },
+            ProgInstruction::UpdateLiquidationFeePolicy {
+                market_id,
+                cranker_share_bps,
+            },
             vec![
                 AccountMeta::new(self.admin.pubkey(), true),
                 AccountMeta::new(self.market, false),
@@ -26738,6 +26742,7 @@ fn v16_attack_rotated_marketauth_cannot_replay_policy_updates() {
 
     old_attempt(
         ProgInstruction::UpdateLiquidationFeePolicy {
+            market_id,
             cranker_share_bps: 5_000,
         },
         "liquidation policy replay",
@@ -26787,6 +26792,7 @@ fn v16_attack_rotated_marketauth_cannot_replay_policy_updates() {
 
     new_update(
         ProgInstruction::UpdateLiquidationFeePolicy {
+            market_id,
             cranker_share_bps: 5_000,
         },
         "liquidation policy update",
@@ -35443,6 +35449,7 @@ fn v16_attack_global_policy_bounds_reject_grief_values() {
     reject_unchanged(
         &mut env,
         ProgInstruction::UpdateLiquidationFeePolicy {
+            market_id,
             cranker_share_bps: 10_001,
         },
         "liquidation cranker share above 100%",
@@ -35690,6 +35697,7 @@ fn v16_attack_permissionless_asset_authority_cannot_update_marketwide_policies()
     );
     assert!(
         attempt(ProgInstruction::UpdateLiquidationFeePolicy {
+            market_id,
             cranker_share_bps: 2_500
         })
         .is_err(),
