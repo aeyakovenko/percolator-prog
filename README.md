@@ -404,6 +404,9 @@ This section describes intent and operational ordering, not argument-by-argument
 - **Withdraw** (tag 4)
   - binds the signed payload to the current program-assigned portfolio incarnation ID
   - performs oracle-read + engine checks; withdraws from vault via PDA signer; debits engine
+- **ConvertReleasedPnl** (tag 28)
+  - binds the signed payload to the current program-assigned portfolio incarnation ID
+  - converts currently released, source-backed junior PnL into senior portfolio capital
 - **ClosePortfolio** (tag 8)
   - closes a flat, empty portfolio account and sweeps its rent to the market slab
 - **CloseResolved** (tag 30)

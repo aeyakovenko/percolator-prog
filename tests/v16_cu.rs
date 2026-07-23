@@ -3367,7 +3367,10 @@ impl V16CuEnv {
         amount: u128,
     ) -> u64 {
         self.send(
-            ProgInstruction::ConvertReleasedPnl { amount },
+            ProgInstruction::ConvertReleasedPnl {
+                portfolio_id: AUTO_PORTFOLIO_ID,
+                amount,
+            },
             vec![
                 AccountMeta::new(owner.pubkey(), true),
                 AccountMeta::new(self.market, false),
@@ -3629,7 +3632,7 @@ fn send_tx(
     accounts: Vec<AccountMeta>,
     extra_signers: &[&Keypair],
 ) -> Result<u64, String> {
-    bind_test_withdraw_portfolio_id(svm, &mut ix, &accounts);
+    bind_test_portfolio_id(svm, &mut ix, &accounts);
     let instruction = Instruction {
         program_id,
         accounts,
@@ -3649,13 +3652,11 @@ fn send_tx(
         .map_err(|e| format!("{e:?}"))
 }
 
-fn bind_test_withdraw_portfolio_id(
-    svm: &LiteSVM,
-    ix: &mut ProgInstruction,
-    accounts: &[AccountMeta],
-) {
-    let ProgInstruction::Withdraw { portfolio_id, .. } = ix else {
-        return;
+fn bind_test_portfolio_id(svm: &LiteSVM, ix: &mut ProgInstruction, accounts: &[AccountMeta]) {
+    let portfolio_id = match ix {
+        ProgInstruction::Withdraw { portfolio_id, .. }
+        | ProgInstruction::ConvertReleasedPnl { portfolio_id, .. } => portfolio_id,
+        _ => return,
     };
     if *portfolio_id != AUTO_PORTFOLIO_ID {
         return;
@@ -16162,7 +16163,10 @@ fn v16_attack_public_helpers_cannot_use_market_as_portfolio_alias() {
 
     env.svm.expire_blockhash();
     let convert = env.send(
-        ProgInstruction::ConvertReleasedPnl { amount: 1 },
+        ProgInstruction::ConvertReleasedPnl {
+            portfolio_id: AUTO_PORTFOLIO_ID,
+            amount: 1,
+        },
         vec![
             AccountMeta::new(long_owner.pubkey(), true),
             AccountMeta::new(env.market, false),
@@ -16723,6 +16727,7 @@ fn v16_attack_convert_released_pnl_respects_caller_cap() {
     env.svm.expire_blockhash();
     let ra = env.send(
         ProgInstruction::ConvertReleasedPnl {
+            portfolio_id: AUTO_PORTFOLIO_ID,
             amount: 1_000_000_000,
         },
         vec![
@@ -16754,6 +16759,7 @@ fn v16_attack_convert_released_pnl_respects_caller_cap() {
     env.svm.expire_blockhash();
     let rb = env.send(
         ProgInstruction::ConvertReleasedPnl {
+            portfolio_id: AUTO_PORTFOLIO_ID,
             amount: RELEASED - 1,
         },
         vec![
@@ -16778,7 +16784,10 @@ fn v16_attack_convert_released_pnl_respects_caller_cap() {
     // zero-amount convert is rejected outright.
     env.svm.expire_blockhash();
     let rz = env.send(
-        ProgInstruction::ConvertReleasedPnl { amount: 0 },
+        ProgInstruction::ConvertReleasedPnl {
+            portfolio_id: AUTO_PORTFOLIO_ID,
+            amount: 0,
+        },
         vec![
             AccountMeta::new(b_owner.pubkey(), true),
             AccountMeta::new(env.market, false),
@@ -16873,7 +16882,10 @@ fn v16_attack_convert_released_pnl_rejects_cross_market_portfolio_substitution()
         &mut env.svm,
         env.program_id,
         &env.payer,
-        ProgInstruction::ConvertReleasedPnl { amount: RELEASED },
+        ProgInstruction::ConvertReleasedPnl {
+            portfolio_id: AUTO_PORTFOLIO_ID,
+            amount: RELEASED,
+        },
         vec![
             AccountMeta::new(foreign_owner.pubkey(), true),
             AccountMeta::new(market_b, false),
@@ -16905,7 +16917,10 @@ fn v16_attack_convert_released_pnl_rejects_cross_market_portfolio_substitution()
         &mut env.svm,
         env.program_id,
         &env.payer,
-        ProgInstruction::ConvertReleasedPnl { amount: RELEASED },
+        ProgInstruction::ConvertReleasedPnl {
+            portfolio_id: AUTO_PORTFOLIO_ID,
+            amount: RELEASED,
+        },
         vec![
             AccountMeta::new(local_owner.pubkey(), true),
             AccountMeta::new(market_b, false),
@@ -17111,6 +17126,7 @@ fn v16_regression_cross_margin_insolvency_no_value_extraction() {
     env.svm.expire_blockhash();
     let _ = env.send(
         ProgInstruction::ConvertReleasedPnl {
+            portfolio_id: AUTO_PORTFOLIO_ID,
             amount: 1_000_000_000,
         },
         vec![
@@ -19403,6 +19419,174 @@ fn v16_attack_presigned_withdraw_rejects_reinitialized_portfolio() {
     );
 }
 
+// Conversion can expose released junior PnL to maintenance fees. A retained owner signature from a
+// closed portfolio must not convert a replacement portfolio at the same address and fund a public
+// cranker reward. Every balance and PnL transition in this setup uses a public program instruction.
+#[test]
+fn v16_attack_presigned_convert_rejects_reinitialized_portfolio() {
+    let mut env =
+        V16CuEnv::new_with_market_params_price_move_and_maintenance_fee(1, 1_000, 1_000, 500, 1);
+    env.update_maintenance_fee_policy_with_cu(10_000);
+    env.svm.warp_to_slot(1);
+    env.configure_auth_mark_with_cu(1, 100);
+    env.top_up_backing_bucket(1, 300, 1_000);
+
+    let owner = Keypair::new();
+    let portfolio_account = Keypair::new();
+    let portfolio = portfolio_account.pubkey();
+    env.ensure_signer_account(owner.pubkey());
+    system_create_account_for_test(
+        &mut env.svm,
+        &env.payer,
+        &portfolio_account,
+        env.portfolio_account_len,
+        env.program_id,
+    );
+    env.send(
+        ProgInstruction::InitPortfolio,
+        vec![
+            AccountMeta::new(owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio, false),
+        ],
+        &[&owner],
+    )
+    .expect("initialize incarnation A");
+
+    let make_released_pnl = |env: &mut V16CuEnv,
+                             winner_owner: &Keypair,
+                             winner: Pubkey,
+                             mark_slot: u64,
+                             start_price: u64| {
+        let loser_owner = Keypair::new();
+        let loser = env.create_portfolio(&loser_owner);
+        env.deposit(winner_owner, winner, 1_000_000);
+        env.deposit(&loser_owner, loser, 1_000_000);
+        env.trade_asset_with_cu(
+            0,
+            winner_owner,
+            winner,
+            &loser_owner,
+            loser,
+            (20 * POS_SCALE) as i128,
+            start_price,
+            0,
+        );
+        env.svm.warp_to_slot(mark_slot);
+        env.push_auth_mark_with_cu(mark_slot, start_price + 5);
+        for account in [loser, winner] {
+            env.crank(
+                account,
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: mark_slot,
+                    observations: crank_observations(0),
+                },
+            );
+        }
+        env.trade_asset_with_cu(
+            0,
+            winner_owner,
+            winner,
+            &loser_owner,
+            loser,
+            -(20 * POS_SCALE as i128),
+            start_price + 5,
+            0,
+        );
+        let released = env.portfolio_state(winner).pnl.get();
+        assert!(released > 0, "public trade path must release winner PnL");
+        released as u128
+    };
+
+    let released_a = make_released_pnl(&mut env, &owner, portfolio, 2, 100);
+    let original_id = env.portfolio_id(portfolio);
+    let retained_convert = Transaction::new_signed_with_payer(
+        &[
+            heap_ix(),
+            cu_ix(),
+            Instruction {
+                program_id: env.program_id,
+                accounts: vec![
+                    AccountMeta::new(owner.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(portfolio, false),
+                ],
+                data: ProgInstruction::ConvertReleasedPnl {
+                    portfolio_id: original_id,
+                    amount: u128::MAX,
+                }
+                .encode(),
+            },
+        ],
+        Some(&env.payer.pubkey()),
+        &[&env.payer, &owner],
+        env.svm.latest_blockhash(),
+    );
+
+    env.convert_released_pnl_with_cu(&owner, portfolio, released_a);
+    let capital_a = env.portfolio_state(portfolio).capital.get();
+    env.withdraw(&owner, portfolio, capital_a);
+    env.close_portfolio_with_cu(&owner, portfolio);
+    send_raw_tx(
+        &mut env.svm,
+        &env.payer,
+        system_instruction::transfer(&env.payer.pubkey(), &portfolio, 1_000_000_000),
+        &[],
+    )
+    .expect("re-fund the closed portfolio account");
+    env.send(
+        ProgInstruction::InitPortfolio,
+        vec![
+            AccountMeta::new(owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio, false),
+        ],
+        &[&owner],
+    )
+    .expect("initialize incarnation B");
+    assert!(env.portfolio_id(portfolio) > original_id);
+
+    let released_b = make_released_pnl(&mut env, &owner, portfolio, 3, 105);
+    let ordinary_capital = env.portfolio_state(portfolio).capital.get();
+    env.withdraw(&owner, portfolio, ordinary_capital);
+    env.crank(
+        portfolio,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 3,
+            observations: crank_observations(0),
+        },
+    );
+    assert_eq!(env.portfolio_state(portfolio).capital.get(), 0);
+    assert_eq!(env.portfolio_state(portfolio).pnl.get(), released_b as i128);
+
+    let attacker_owner = Keypair::new();
+    let attacker = env.create_portfolio(&attacker_owner);
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let portfolio_before = env.svm.get_account(&portfolio).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    let rejected = env
+        .svm
+        .send_transaction(retained_convert)
+        .expect_err("incarnation A's conversion must not mutate incarnation B");
+    assert!(
+        format!("{rejected:?}").contains("Custom(16)"),
+        "stale conversion must reject with EngineProvenanceMismatch: {rejected:?}"
+    );
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+    assert_eq!(env.svm.get_account(&portfolio).unwrap(), portfolio_before);
+    assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+
+    env.svm.warp_to_slot(10);
+    env.sync_maintenance_fee_with_cu(portfolio, Some(attacker), 10);
+    assert_eq!(
+        env.portfolio_state(attacker).capital.get(),
+        0,
+        "a rejected stale conversion cannot fund a public cranker reward"
+    );
+    assert_eq!(env.portfolio_state(portfolio).capital.get(), 0);
+    assert_eq!(env.portfolio_state(portfolio).pnl.get(), released_b as i128);
+}
+
 // security.md sweep — rounding asymmetry (#37 dust): trade fees must round UP (ceil, protocol favor)
 // so dust-notional trades are never free and repeated churn never leaks value to the trader. Attacker
 // success = a fee that floors to 0 (free trade) or insurance that fails to grow on a fee'd dust trade.
@@ -19853,7 +20037,10 @@ fn v16_attack_convert_then_withdraw_pays_exactly_backed_amount() {
     // convert the backed pnl into withdrawable capital.
     env.svm.expire_blockhash();
     let cr = env.send(
-        ProgInstruction::ConvertReleasedPnl { amount: BACKED },
+        ProgInstruction::ConvertReleasedPnl {
+            portfolio_id: AUTO_PORTFOLIO_ID,
+            amount: BACKED,
+        },
         vec![
             AccountMeta::new(owner.pubkey(), true),
             AccountMeta::new(env.market, false),
@@ -25286,7 +25473,10 @@ fn v16_attack_resolved_mode_gates_all_live_ops() {
     // ConvertReleasedPnl -> reject
     env.svm.expire_blockhash();
     let r_cv = env.send(
-        ProgInstruction::ConvertReleasedPnl { amount: 1 },
+        ProgInstruction::ConvertReleasedPnl {
+            portfolio_id: AUTO_PORTFOLIO_ID,
+            amount: 1,
+        },
         vec![
             AccountMeta::new(owner.pubkey(), true),
             AccountMeta::new(env.market, false),
@@ -32364,6 +32554,7 @@ fn v16_attack_convert_bounded_by_available_backing() {
     env.svm.expire_blockhash();
     let _ = env.send(
         ProgInstruction::ConvertReleasedPnl {
+            portfolio_id: AUTO_PORTFOLIO_ID,
             amount: 1_000_000_000,
         },
         vec![
@@ -38498,6 +38689,7 @@ fn v16_attack_convert_released_pnl_cannot_mint_from_unbacked_pnl() {
     env.svm.expire_blockhash();
     let r = env.send(
         ProgInstruction::ConvertReleasedPnl {
+            portfolio_id: AUTO_PORTFOLIO_ID,
             amount: 1_000_000_000,
         },
         vec![
@@ -38894,6 +39086,7 @@ fn v16_attack_recovery_blocks_pnl_conversion() {
     env.svm.expire_blockhash();
     let r = env.send(
         ProgInstruction::ConvertReleasedPnl {
+            portfolio_id: AUTO_PORTFOLIO_ID,
             amount: 1_000_000_000,
         },
         vec![
@@ -39147,6 +39340,7 @@ fn v16_attack_convert_then_withdraw_extracts_exactly_backed() {
     env.svm.expire_blockhash();
     let rc = env.send(
         ProgInstruction::ConvertReleasedPnl {
+            portfolio_id: AUTO_PORTFOLIO_ID,
             amount: 1_000_000_000,
         },
         vec![
@@ -43590,6 +43784,7 @@ fn v16_attack_convert_released_pnl_owner_gated() {
     env.svm.expire_blockhash();
     let r1 = env.send(
         ProgInstruction::ConvertReleasedPnl {
+            portfolio_id: AUTO_PORTFOLIO_ID,
             amount: 1_000_000_000,
         },
         vec![
@@ -43610,6 +43805,7 @@ fn v16_attack_convert_released_pnl_owner_gated() {
     env.svm.expire_blockhash();
     let r2 = env.send(
         ProgInstruction::ConvertReleasedPnl {
+            portfolio_id: AUTO_PORTFOLIO_ID,
             amount: 1_000_000_000,
         },
         vec![
@@ -43645,6 +43841,7 @@ fn v16_attack_convert_released_pnl_owner_gated() {
     env.svm.expire_blockhash();
     let ok = env.send(
         ProgInstruction::ConvertReleasedPnl {
+            portfolio_id: AUTO_PORTFOLIO_ID,
             amount: 1_000_000_000,
         },
         vec![
@@ -55108,7 +55305,10 @@ fn v16_attack_convert_released_pnl_rejects_when_resolve_matured() {
 
     env.svm.expire_blockhash();
     let rejected = env.send(
-        ProgInstruction::ConvertReleasedPnl { amount: RELEASED },
+        ProgInstruction::ConvertReleasedPnl {
+            portfolio_id: AUTO_PORTFOLIO_ID,
+            amount: RELEASED,
+        },
         vec![
             AccountMeta::new(stale_owner.pubkey(), true),
             AccountMeta::new(env.market, false),
