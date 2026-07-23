@@ -7942,6 +7942,183 @@ fn v16_attack_resolved_close_prepares_lapsed_source_before_pending_mark_loss() {
 
     let mut last_long = None;
     let mut last_short = None;
+    let mut max_close_cu = 0u64;
+    for _ in 0..16 {
+        let long_result = try_close(&mut env, long_owner.pubkey(), long_account, long_dest);
+        if let Ok(cu) = &long_result {
+            max_close_cu = max_close_cu.max(*cu);
+        }
+        last_long = Some(long_result);
+        let short_result = try_close(&mut env, short_owner.pubkey(), short_account, short_dest);
+        if let Ok(cu) = &short_result {
+            max_close_cu = max_close_cu.max(*cu);
+        }
+        last_short = Some(short_result);
+    }
+
+    let long_after = env.portfolio_state(long_account);
+    let short_after = env.portfolio_state(short_account);
+    assert!(
+        percolator::active_bitmap_is_empty(active_bitmap(&long_after))
+            && percolator::active_bitmap_is_empty(active_bitmap(&short_after))
+            && long_after.capital.get() == 0
+            && short_after.capital.get() == 0,
+        "bounded closes must prepare lapsed backing before settling the winner's adverse K delta; \
+         long_capital={} long_pnl={} long_active={:?} long_result={:?}; \
+         short_capital={} short_pnl={} short_active={:?} short_result={:?}",
+        long_after.capital.get(),
+        long_after.pnl.get(),
+        active_bitmap(&long_after),
+        last_long,
+        short_after.capital.get(),
+        short_after.pnl.get(),
+        active_bitmap(&short_after),
+        last_short,
+    );
+    assert!(
+        max_close_cu <= 1_000_000,
+        "prospective-source resolved close consumed {max_close_cu} CU",
+    );
+}
+
+#[test]
+fn v16_attack_resolved_close_expires_prospective_source_before_positive_k_settlement() {
+    const PRICE: u64 = 100;
+    const LOW_PRICE: u64 = 98;
+    const REBOUND_PRICE: u64 = 99;
+    const DEPOSIT: u128 = 100_000_000;
+    const SIZE_Q: i128 = 100_000 * POS_SCALE as i128;
+
+    let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+        initial_price: PRICE,
+        max_price_move_bps_per_slot: 200,
+        max_accrual_dt_slots: 1,
+        min_funding_lifetime_slots: 1,
+        ..V16CuMarketParams::default()
+    });
+    env.svm.warp_to_slot(1);
+    env.configure_auth_mark_for_asset_as_admin(0, 1, PRICE);
+
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let neutral_owner = Keypair::new();
+    let long_account = env.create_portfolio(&long_owner);
+    let short_account = env.create_portfolio(&short_owner);
+    let neutral_account = env.create_portfolio(&neutral_owner);
+    env.deposit(&long_owner, long_account, DEPOSIT);
+    env.deposit(&short_owner, short_account, DEPOSIT);
+    env.trade_with_cu(
+        &long_owner,
+        long_account,
+        &short_owner,
+        short_account,
+        SIZE_Q,
+        PRICE,
+        0,
+    );
+    env.top_up_backing_bucket(0, 93, 8);
+    env.top_up_backing_bucket(1, 32, 8);
+
+    // Settle only the long at the low mark. Its loss moves into principal and
+    // its K snapshot advances; the short keeps the full favorable delta.
+    env.svm.warp_to_slot(2);
+    env.push_auth_mark_for_asset_as_admin(0, 2, LOW_PRICE);
+    env.crank(
+        neutral_account,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 2,
+            observations: crank_observations(0),
+        },
+    );
+    assert_eq!(env.market_state().1.assets[0].effective_price, LOW_PRICE);
+
+    env.svm.warp_to_slot(3);
+    env.crank(
+        long_account,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 3,
+            observations: crank_observations(0),
+        },
+    );
+    assert_eq!(env.portfolio_state(long_account).pnl.get(), 0);
+    assert!(env.portfolio_state(long_account).capital.get() < DEPOSIT);
+    assert_eq!(env.portfolio_state(short_account).pnl.get(), 0);
+
+    // Rebound slightly. Relative to their different snapshots, both legs now
+    // carry positive K deltas while neither portfolio has realized positive
+    // PnL or acquired a source-domain record.
+    env.svm.warp_to_slot(4);
+    env.push_auth_mark_for_asset_as_admin(0, 4, REBOUND_PRICE);
+    env.crank(
+        neutral_account,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 4,
+            observations: crank_observations(0),
+        },
+    );
+    assert_eq!(
+        env.market_state().1.assets[0].effective_price,
+        REBOUND_PRICE
+    );
+    let long_before = env.portfolio_state(long_account);
+    let short_before = env.portfolio_state(short_account);
+    assert_eq!(long_before.pnl.get(), 0);
+    assert_eq!(short_before.pnl.get(), 0);
+    assert!(long_before
+        .source_domains
+        .iter()
+        .all(|source| !source.is_occupied()));
+    assert!(short_before
+        .source_domains
+        .iter()
+        .all(|source| !source.is_occupied()));
+
+    env.svm.warp_to_slot(9);
+    for _ in 0..8 {
+        if env.market_state().1.assets[0].slot_last == 9 {
+            break;
+        }
+        env.crank(
+            neutral_account,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 9,
+                observations: crank_observations(0),
+            },
+        );
+    }
+    let (_, before_resolve) = env.market_state();
+    assert_eq!(before_resolve.assets[0].slot_last, 9);
+    assert_eq!(
+        before_resolve.source_backing_buckets[0].status,
+        BackingBucketStatusV16::Fresh
+    );
+    assert_eq!(before_resolve.source_backing_buckets[0].expiry_slot, 8);
+    assert_eq!(before_resolve.pnl_matured_pos_tot, 0);
+    env.resolve();
+
+    let long_dest = env.token_account(long_owner.pubkey(), 0);
+    let short_dest = env.token_account(short_owner.pubkey(), 0);
+    let try_close = |env: &mut V16CuEnv, owner: Pubkey, portfolio: Pubkey, dest: Pubkey| {
+        env.svm.expire_blockhash();
+        env.send(
+            ProgInstruction::CloseResolved {
+                fee_rate_per_slot: 0,
+            },
+            vec![
+                AccountMeta::new_readonly(owner, false),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(portfolio, false),
+                AccountMeta::new(dest, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(env.vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[],
+        )
+    };
+
+    let mut last_long = None;
+    let mut last_short = None;
     for _ in 0..16 {
         last_long = Some(try_close(
             &mut env,
@@ -7964,7 +8141,7 @@ fn v16_attack_resolved_close_prepares_lapsed_source_before_pending_mark_loss() {
             && percolator::active_bitmap_is_empty(active_bitmap(&short_after))
             && long_after.capital.get() == 0
             && short_after.capital.get() == 0,
-        "bounded closes must prepare lapsed backing before settling the winner's adverse K delta; \
+        "bounded public closes must expire the future K/F source before settlement; \
          long_capital={} long_pnl={} long_active={:?} long_result={:?}; \
          short_capital={} short_pnl={} short_active={:?} short_result={:?}",
         long_after.capital.get(),
@@ -7975,6 +8152,117 @@ fn v16_attack_resolved_close_prepares_lapsed_source_before_pending_mark_loss() {
         short_after.pnl.get(),
         active_bitmap(&short_after),
         last_short,
+    );
+}
+
+#[test]
+fn v16_cu_resolved_close_scans_max_lapsed_prospective_kf_sources_below_limit() {
+    const N: u16 = 14;
+    const PRICE: u64 = 100;
+    const OWNER_DEPOSIT: u128 = 100_000_000;
+    const COUNTERPARTY_DEPOSIT: u128 = 1_000_000;
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(N, 1_000, 1_000, 500);
+    for asset_index in 0..N {
+        env.configure_auth_mark_for_asset_as_admin(asset_index, 0, PRICE);
+    }
+
+    let owner = Keypair::new();
+    let owner_account = env.create_portfolio(&owner);
+    env.deposit(&owner, owner_account, OWNER_DEPOSIT);
+    let keeper_owner = Keypair::new();
+    let keeper = env.create_portfolio(&keeper_owner);
+    for asset_index in 0..N {
+        let counterparty_owner = Keypair::new();
+        let counterparty = env.create_portfolio(&counterparty_owner);
+        env.deposit(&counterparty_owner, counterparty, COUNTERPARTY_DEPOSIT);
+        env.trade_asset_with_cu(
+            asset_index,
+            &owner,
+            owner_account,
+            &counterparty_owner,
+            counterparty,
+            POS_SCALE as i128,
+            PRICE,
+            0,
+        );
+        env.top_up_backing_bucket(2 * asset_index + 1, 100, 4);
+    }
+
+    // The first 13 long legs have adverse pending K, while the last has a
+    // positive pending K claim. Every prospective short-side source is lapsed,
+    // forcing the preflight to inspect the full bounded leg roster.
+    env.svm.warp_to_slot(5);
+    for asset_index in 0..N {
+        let mark = if asset_index + 1 == N { 101 } else { 99 };
+        env.push_auth_mark_for_asset_as_admin(asset_index, 5, mark);
+        for _ in 0..8 {
+            if env.market_state().1.assets[asset_index as usize].slot_last == 5 {
+                break;
+            }
+            env.crank(
+                keeper,
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: 5,
+                    observations: crank_observations(asset_index),
+                },
+            );
+        }
+        assert_eq!(
+            env.market_state().1.assets[asset_index as usize].slot_last,
+            5,
+        );
+    }
+    let before = env.portfolio_state(owner_account);
+    assert_eq!(
+        active_bitmap(&before)
+            .iter()
+            .map(|word| word.count_ones())
+            .sum::<u32>(),
+        N as u32,
+    );
+    assert_eq!(before.pnl.get(), 0);
+    assert!(before
+        .source_domains
+        .iter()
+        .all(|source| !source.is_occupied()));
+    let prospective_domain = 2 * (N - 1) + 1;
+    let (_, before_resolve) = env.market_state();
+    assert_eq!(
+        before_resolve.source_backing_buckets[prospective_domain as usize].status,
+        BackingBucketStatusV16::Fresh,
+    );
+    assert_eq!(
+        before_resolve.source_backing_buckets[prospective_domain as usize].expiry_slot,
+        4,
+    );
+    env.resolve();
+
+    let dest = env.token_account(owner.pubkey(), 0);
+    env.svm.expire_blockhash();
+    let cu = env
+        .send(
+            ProgInstruction::CloseResolved {
+                fee_rate_per_slot: 0,
+            },
+            vec![
+                AccountMeta::new_readonly(owner.pubkey(), false),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(owner_account, false),
+                AccountMeta::new(dest, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(env.vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[],
+        )
+        .expect("max-shape prospective-source preflight must land");
+    assert!(
+        cu <= 1_000_000,
+        "max-shape prospective-source preflight consumed {cu} CU",
+    );
+    assert_eq!(
+        env.market_state().1.source_backing_buckets[prospective_domain as usize].status,
+        BackingBucketStatusV16::Expired,
     );
 }
 
