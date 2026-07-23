@@ -2177,8 +2177,11 @@ impl V16CuEnv {
     }
 
     fn close_portfolio_with_cu(&mut self, owner: &Keypair, portfolio: Pubkey) -> u64 {
+        let portfolio_id =
+            state::read_portfolio_id_or_legacy(&self.svm.get_account(&portfolio).unwrap().data)
+                .unwrap();
         self.send(
-            ProgInstruction::ClosePortfolio,
+            ProgInstruction::ClosePortfolio { portfolio_id },
             vec![
                 AccountMeta::new(owner.pubkey(), true),
                 AccountMeta::new(self.market, false),
@@ -8814,7 +8817,9 @@ fn v16_attack_non_owner_cannot_close_flat_portfolio() {
 
     env.svm.expire_blockhash();
     let bad_close = env.send(
-        ProgInstruction::ClosePortfolio,
+        ProgInstruction::ClosePortfolio {
+            portfolio_id: env.portfolio_id(portfolio),
+        },
         vec![
             AccountMeta::new(mallory.pubkey(), true),
             AccountMeta::new(env.market, false),
@@ -8876,7 +8881,7 @@ fn v16_attack_non_owner_close_rolls_back_legacy_realloc() {
 
     env.svm.expire_blockhash();
     let bad_close = env.send(
-        ProgInstruction::ClosePortfolio,
+        ProgInstruction::ClosePortfolio { portfolio_id: 0 },
         vec![
             AccountMeta::new(mallory.pubkey(), true),
             AccountMeta::new(env.market, false),
@@ -8954,7 +8959,9 @@ fn v16_attack_close_portfolio_rejects_occupied_source_domain_without_claim_bound
 
     env.svm.expire_blockhash();
     let close = env.send(
-        ProgInstruction::ClosePortfolio,
+        ProgInstruction::ClosePortfolio {
+            portfolio_id: env.portfolio_id(portfolio),
+        },
         vec![
             AccountMeta::new(owner.pubkey(), true),
             AccountMeta::new(env.market, false),
@@ -16183,7 +16190,7 @@ fn v16_attack_public_helpers_cannot_use_market_as_portfolio_alias() {
 
     env.svm.expire_blockhash();
     let close = env.send(
-        ProgInstruction::ClosePortfolio,
+        ProgInstruction::ClosePortfolio { portfolio_id: 0 },
         vec![
             AccountMeta::new(long_owner.pubkey(), true),
             AccountMeta::new(env.market, false),
@@ -19316,11 +19323,39 @@ fn v16_attack_presigned_close_rejects_reinitialized_portfolio() {
         Err(_) => false,
         Ok(_) => panic!("a close carrying the wrong portfolio incarnation must reject"),
     };
-    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before_probe);
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before_probe
+    );
     assert_eq!(
         env.svm.get_account(&portfolio).unwrap(),
         portfolio_before_probe
     );
+    if incarnation_bound {
+        env.svm.expire_blockhash();
+        let legacy = send_raw_tx(
+            &mut env.svm,
+            &env.payer,
+            close_ix(original_id, false),
+            &[&owner],
+        );
+        let expected_error = format!(
+            "Custom({})",
+            PercolatorError::EngineProvenanceMismatch as u32
+        );
+        assert!(
+            format!("{legacy:?}").contains(&expected_error),
+            "legacy tag-only close must reject a current nonzero incarnation: {legacy:?}"
+        );
+        assert_eq!(
+            env.svm.get_account(&env.market).unwrap(),
+            market_before_probe
+        );
+        assert_eq!(
+            env.svm.get_account(&portfolio).unwrap(),
+            portfolio_before_probe
+        );
+    }
 
     env.svm.expire_blockhash();
     let retained_close = Transaction::new_signed_with_payer(
@@ -19370,7 +19405,10 @@ fn v16_attack_presigned_close_rejects_reinitialized_portfolio() {
             format!("{rejected:?}").contains(&expected_error),
             "the stale close must reject with {expected_error}: {rejected:?}"
         );
-        assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before_replay);
+        assert_eq!(
+            env.svm.get_account(&env.market).unwrap(),
+            market_before_replay
+        );
         assert_eq!(
             env.svm.get_account(&portfolio).unwrap(),
             replacement_before_replay
@@ -19386,6 +19424,52 @@ fn v16_attack_presigned_close_rejects_reinitialized_portfolio() {
     panic!(
         "a close signed for portfolio incarnation {original_id} drained replacement incarnation {replacement_id}"
     );
+}
+
+#[test]
+fn v16_legacy_tag_only_close_remains_available_to_zero_id_portfolios() {
+    let mut env = V16CuEnv::new();
+    for legacy_len in [
+        PORTFOLIO_ENGINE_ACCOUNT_LEN,
+        percolator_prog::constants::PORTFOLIO_ID_OFF,
+        percolator_prog::constants::PORTFOLIO_ACCOUNT_LEN,
+    ] {
+        let owner = Keypair::new();
+        let portfolio = env.create_portfolio(&owner);
+        let mut legacy = env.svm.get_account(&portfolio).unwrap();
+        if legacy_len < legacy.data.len() {
+            legacy.data.truncate(legacy_len);
+        } else {
+            let id_offset = percolator_prog::constants::PORTFOLIO_ID_OFF;
+            legacy.data[id_offset..id_offset + 8].fill(0);
+        }
+        env.svm.set_account(portfolio, legacy).unwrap();
+
+        let market_before = env.svm.get_account(&env.market).unwrap();
+        let portfolio_before = env.svm.get_account(&portfolio).unwrap();
+        env.svm.expire_blockhash();
+        send_raw_tx(
+            &mut env.svm,
+            &env.payer,
+            Instruction {
+                program_id: env.program_id,
+                accounts: vec![
+                    AccountMeta::new(owner.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(portfolio, false),
+                ],
+                data: vec![8],
+            },
+            &[&owner],
+        )
+        .unwrap_or_else(|err| panic!("legacy length {legacy_len} must remain closable: {err}"));
+
+        assert_eq!(env.svm.get_account(&portfolio).unwrap().lamports, 0);
+        assert_eq!(
+            env.svm.get_account(&env.market).unwrap().lamports,
+            market_before.lamports + portfolio_before.lamports
+        );
+    }
 }
 
 // security.md sweep — rounding asymmetry (#37 dust): trade fees must round UP (ceil, protocol favor)
@@ -30326,12 +30410,15 @@ fn v16_attack_cross_market_portfolio_cannot_drain_foreign_vault() {
     );
     let pa_before_close = env.svm.get_account(&pa).unwrap();
     let market_b_before_close = env.svm.get_account(&market_b).unwrap();
+    let pa_id = env.portfolio_id(pa);
     env.svm.expire_blockhash();
     let close_foreign = send_tx(
         &mut env.svm,
         env.program_id,
         &env.payer,
-        ProgInstruction::ClosePortfolio,
+        ProgInstruction::ClosePortfolio {
+            portfolio_id: pa_id,
+        },
         vec![
             AccountMeta::new(attacker.pubkey(), true),
             AccountMeta::new(market_b, false),
@@ -33298,7 +33385,9 @@ fn v16_attack_close_portfolio_with_pnl_rejected() {
     // ClosePortfolio must reject (PnL != 0).
     env.svm.expire_blockhash();
     let r = env.send(
-        ProgInstruction::ClosePortfolio,
+        ProgInstruction::ClosePortfolio {
+            portfolio_id: env.portfolio_id(p),
+        },
         vec![
             AccountMeta::new(owner.pubkey(), true),
             AccountMeta::new(env.market, false),
@@ -43121,7 +43210,7 @@ fn v16_attack_close_uninitialized_portfolio_rejects_without_counter_change() {
 
     env.svm.expire_blockhash();
     let r = env.send(
-        ProgInstruction::ClosePortfolio,
+        ProgInstruction::ClosePortfolio { portfolio_id: 0 },
         vec![
             AccountMeta::new(owner.pubkey(), true),
             AccountMeta::new(env.market, false),
@@ -53169,7 +53258,9 @@ fn v16_attack_empty_portfolio_reinit_cannot_inflate_materialized_count() {
 
     env.svm.expire_blockhash();
     env.send(
-        ProgInstruction::ClosePortfolio,
+        ProgInstruction::ClosePortfolio {
+            portfolio_id: env.portfolio_id(portfolio),
+        },
         vec![
             AccountMeta::new(owner.pubkey(), true),
             AccountMeta::new(env.market, false),
@@ -53203,7 +53294,9 @@ fn v16_attack_close_portfolio_with_capital_rejected_no_strand() {
     assert!(cap > 0 && vault0 >= 400_000);
     env.svm.expire_blockhash();
     let r = env.send(
-        ProgInstruction::ClosePortfolio,
+        ProgInstruction::ClosePortfolio {
+            portfolio_id: env.portfolio_id(p),
+        },
         vec![
             AccountMeta::new(owner.pubkey(), true),
             AccountMeta::new(env.market, false),
@@ -53277,7 +53370,9 @@ fn v16_attack_abandoned_empty_portfolio_cannot_block_slab_close() {
     let abandoned_lamports = env.svm.get_account(&abandoned).unwrap().lamports;
     env.svm.expire_blockhash();
     let cleanup = env.send(
-        ProgInstruction::ClosePortfolio,
+        ProgInstruction::ClosePortfolio {
+            portfolio_id: env.portfolio_id(abandoned),
+        },
         vec![
             AccountMeta::new(admin.pubkey(), true),
             AccountMeta::new(env.market, false),
@@ -53330,7 +53425,9 @@ fn v16_attack_marketauth_terminal_close_cannot_skip_resolved_payout() {
     let vault_before = env.svm.get_account(&env.vault).unwrap();
     env.svm.expire_blockhash();
     let terminal_close = env.send(
-        ProgInstruction::ClosePortfolio,
+        ProgInstruction::ClosePortfolio {
+            portfolio_id: env.portfolio_id(portfolio),
+        },
         vec![
             AccountMeta::new(admin.pubkey(), true),
             AccountMeta::new(env.market, false),
@@ -53376,7 +53473,9 @@ fn v16_attack_marketauth_terminal_close_cannot_skip_resolved_payout() {
 
     env.svm.expire_blockhash();
     env.send(
-        ProgInstruction::ClosePortfolio,
+        ProgInstruction::ClosePortfolio {
+            portfolio_id: env.portfolio_id(portfolio),
+        },
         vec![
             AccountMeta::new(owner.pubkey(), true),
             AccountMeta::new(env.market, false),
@@ -53443,7 +53542,9 @@ fn v16_attack_marketauth_terminal_close_cannot_burn_pending_payout_topup() {
     let vault_before = env.svm.get_account(&env.vault).unwrap();
     env.svm.expire_blockhash();
     let terminal_close = env.send(
-        ProgInstruction::ClosePortfolio,
+        ProgInstruction::ClosePortfolio {
+            portfolio_id: env.portfolio_id(portfolio),
+        },
         vec![
             AccountMeta::new(admin.pubkey(), true),
             AccountMeta::new(env.market, false),
@@ -53476,7 +53577,9 @@ fn v16_attack_marketauth_terminal_close_cannot_burn_pending_payout_topup() {
 
     env.svm.expire_blockhash();
     env.send(
-        ProgInstruction::ClosePortfolio,
+        ProgInstruction::ClosePortfolio {
+            portfolio_id: env.portfolio_id(portfolio),
+        },
         vec![
             AccountMeta::new(owner.pubkey(), true),
             AccountMeta::new(env.market, false),

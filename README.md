@@ -404,7 +404,9 @@ This section describes intent and operational ordering, not argument-by-argument
 - **Withdraw** (tag 4)
   - performs oracle-read + engine checks; withdraws from vault via PDA signer; debits engine
 - **ClosePortfolio** (tag 8)
+  - carries the current portfolio ID; stale incarnations reject before deregistration or lamport movement
   - closes a flat, empty portfolio account and sweeps its rent to the market slab
+  - legacy tag-only closes are accepted only for pre-ID portfolios whose stored ID is zero
 - **CloseResolved** (tag 30)
   - resolved-market payout/finalization path for a supplied portfolio; pays only the stored owner token account
 

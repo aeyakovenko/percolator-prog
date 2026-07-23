@@ -230,6 +230,23 @@ fn kani_v16_amount_instructions_decode_preserves_wire_fields() {
 }
 
 #[kani::proof]
+fn kani_v16_close_portfolio_decode_preserves_incarnation_and_legacy_zero() {
+    let portfolio_id: u64 = kani::any();
+    let mut data = [0u8; 9];
+    data[0] = 8;
+    data[1..9].copy_from_slice(&portfolio_id.to_le_bytes());
+
+    match Instruction::decode(&data).unwrap() {
+        Instruction::ClosePortfolio { portfolio_id: got } => assert_eq!(got, portfolio_id),
+        _ => unreachable!(),
+    }
+    assert_eq!(
+        Instruction::decode(&[8]).unwrap(),
+        Instruction::ClosePortfolio { portfolio_id: 0 }
+    );
+}
+
+#[kani::proof]
 fn kani_v16_domain_topup_and_asset_insurance_decode_preserves_wire_fields() {
     let domain: u16 = kani::any();
     let asset_index: u16 = kani::any();
@@ -1401,7 +1418,7 @@ fn kani_v16_resolved_recovery_payloads_reject_trailing_byte() {
         extra,
     );
     assert_rejects_trailing_byte(Instruction::ClaimResolvedPayoutTopup, extra);
-    assert_rejects_trailing_byte(Instruction::ClosePortfolio, extra);
+    assert_rejects_trailing_byte(Instruction::ClosePortfolio { portfolio_id: 1 }, extra);
 }
 
 #[kani::proof]
@@ -1477,6 +1494,9 @@ fn kani_v16_every_active_payload_rejects_one_byte_truncation() {
 
     let withdraw = [4u8; 16];
     assert!(Instruction::decode(&withdraw).is_err());
+
+    let close_portfolio = [8u8; 8];
+    assert!(Instruction::decode(&close_portfolio).is_err());
 
     let crank = [5u8; 59];
     assert!(Instruction::decode(&crank).is_err());
