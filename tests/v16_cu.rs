@@ -50971,6 +50971,280 @@ fn v16_attack_retired_reused_asset_backing_fee_policy_cannot_stick_batch_gate() 
     );
 }
 
+// A backing top-up signed for a retired asset must not fund a replacement asset at the same index.
+// A replacement creator can reuse the old backing authority, relay the old transfer, and consume
+// the victim's principal through a real self-matched position while its own combined capital stays
+// whole.
+#[test]
+fn v16_attack_backing_topup_cannot_replay_across_asset_reuse() {
+    const DOMAIN: u16 = 3;
+    const TOPUP: u128 = 150;
+    const EXPIRY_SLOT: u64 = 8;
+    const INITIAL_PRICE: u64 = 100;
+    const WIN_MARK: u64 = 120;
+    const SIZE_Q: i128 = 20 * POS_SCALE as i128;
+    const WINNER_DEPOSIT: u128 = 2_000;
+    const LOSER_DEPOSIT: u128 = 250;
+
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(4, 1_000, 1_000, 500);
+    env.configure_permissionless_resolve_with_cu(20, 5);
+    env.update_market_init_fee_policy_with_cu(1);
+    let admin = env.admin.insecure_clone();
+    let old_provider = Keypair::new();
+    env.try_update_per_asset_authority_with_cu(
+        &admin,
+        Some(&old_provider),
+        1,
+        processor::ASSET_AUTH_BACKING_BUCKET,
+        old_provider.pubkey().to_bytes(),
+    )
+    .expect("generation-A backing authority accepts the role");
+    let old_market_id = env.asset_market_id(1);
+    let source = env.token_account(old_provider.pubkey(), TOPUP as u64);
+
+    let mut legacy_topup_data = vec![24u8];
+    legacy_topup_data.extend_from_slice(&DOMAIN.to_le_bytes());
+    legacy_topup_data.extend_from_slice(&TOPUP.to_le_bytes());
+    legacy_topup_data.extend_from_slice(&EXPIRY_SLOT.to_le_bytes());
+    let uses_market_id_wire = ProgInstruction::decode(&legacy_topup_data).is_err();
+    let mut bound_topup_data = vec![24u8];
+    bound_topup_data.extend_from_slice(&DOMAIN.to_le_bytes());
+    bound_topup_data.extend_from_slice(&old_market_id.to_le_bytes());
+    bound_topup_data.extend_from_slice(&TOPUP.to_le_bytes());
+    bound_topup_data.extend_from_slice(&EXPIRY_SLOT.to_le_bytes());
+    let topup_accounts = vec![
+        AccountMeta::new(old_provider.pubkey(), true),
+        AccountMeta::new(env.market, false),
+        AccountMeta::new(source, false),
+        AccountMeta::new(env.vault, false),
+        AccountMeta::new_readonly(spl_token::ID, false),
+    ];
+    let stale_topup_ix = Instruction {
+        program_id: env.program_id,
+        accounts: topup_accounts.clone(),
+        data: if uses_market_id_wire {
+            bound_topup_data
+        } else {
+            legacy_topup_data
+        },
+    };
+    let stale_topup = Transaction::new_signed_with_payer(
+        &[heap_ix(), cu_ix(), stale_topup_ix],
+        Some(&env.payer.pubkey()),
+        &[&env.payer, &old_provider],
+        env.svm.latest_blockhash(),
+    );
+
+    env.svm.warp_to_slot(2);
+    env.update_asset_lifecycle_as_admin_with_cu(
+        percolator_prog::processor::ASSET_ACTION_RETIRE,
+        1,
+        2,
+        0,
+    );
+    let attacker = Keypair::new();
+    env.svm.warp_to_slot(3);
+    env.activate_permissionless_asset_with_fee(
+        &attacker,
+        1,
+        3,
+        INITIAL_PRICE,
+        attacker.pubkey(),
+        attacker.pubkey(),
+        old_provider.pubkey(),
+        attacker.pubkey(),
+        1,
+    );
+    let new_market_id = env.asset_market_id(1);
+    assert_ne!(new_market_id, old_market_id);
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let source_before = env.svm.get_account(&source).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    let replay = env.svm.send_transaction(stale_topup);
+    if uses_market_id_wire {
+        let replay_error = format!(
+            "{:?}",
+            replay.expect_err("stale backing top-up must reject")
+        );
+        let expected_error = format!(
+            "Custom({})",
+            PercolatorError::AssetGenerationMismatch as u32
+        );
+        assert!(
+            replay_error.contains(&expected_error),
+            "stale backing top-up must fail with {expected_error}, got {replay_error}"
+        );
+        assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+        assert_eq!(env.svm.get_account(&source).unwrap(), source_before);
+        assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+
+        let mut current_topup_data = vec![24u8];
+        current_topup_data.extend_from_slice(&DOMAIN.to_le_bytes());
+        current_topup_data.extend_from_slice(&new_market_id.to_le_bytes());
+        current_topup_data.extend_from_slice(&TOPUP.to_le_bytes());
+        current_topup_data.extend_from_slice(&EXPIRY_SLOT.to_le_bytes());
+        send_raw_ixs(
+            &mut env.svm,
+            &env.payer,
+            vec![
+                heap_ix(),
+                cu_ix(),
+                Instruction {
+                    program_id: env.program_id,
+                    accounts: topup_accounts,
+                    data: current_topup_data,
+                },
+            ],
+            &[&old_provider],
+        )
+        .expect("current-generation backing top-up remains usable");
+        assert_eq!(env.token_amount(source), 0);
+        return;
+    }
+
+    replay.expect("retained old-asset backing top-up lands on the replacement asset");
+    assert_eq!(env.token_amount(source), 0);
+    assert_eq!(
+        env.market_state().1.source_backing_buckets[DOMAIN as usize].fresh_unliened_backing_num,
+        TOPUP * BOUND_SCALE
+    );
+
+    env.configure_auth_mark_for_asset_with_authority(1, &attacker, 3, INITIAL_PRICE);
+    let winner = Keypair::new();
+    let loser = Keypair::new();
+    let winner_account = env.create_portfolio(&winner);
+    let loser_account = env.create_portfolio(&loser);
+    env.deposit(&winner, winner_account, WINNER_DEPOSIT);
+    env.deposit(&loser, loser_account, LOSER_DEPOSIT);
+    env.trade_asset_with_cu(
+        1,
+        &winner,
+        winner_account,
+        &loser,
+        loser_account,
+        SIZE_Q,
+        INITIAL_PRICE,
+        0,
+    );
+    for (slot, mark) in [(4, 105), (5, 110), (6, 115), (7, WIN_MARK)] {
+        env.svm.warp_to_slot(slot);
+        env.push_auth_mark_for_asset_with_authority(1, &attacker, slot, mark);
+        env.crank(
+            winner_account,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: slot,
+                observations: crank_observations(1),
+            },
+        );
+        env.svm.expire_blockhash();
+        let _ = env.send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: slot,
+                observations: crank_observations(1),
+            },
+            vec![
+                AccountMeta::new(env.payer.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(loser_account, false),
+            ],
+            &[],
+        );
+    }
+    assert_eq!(
+        env.portfolio_state(winner_account).pnl.get(),
+        400,
+        "the replacement asset creates a real source-backed winner"
+    );
+    assert_eq!(env.portfolio_state(loser_account).capital.get(), 0);
+    assert!(env.portfolio_state(loser_account).pnl.get() < 0);
+    env.resolve_stale_permissionless_with_cu(30);
+    env.svm.warp_to_slot(36);
+    let first_winner_dest = env.close_resolved(&winner, winner_account);
+    let mut attacker_payout = env.token_amount(first_winner_dest) as u128;
+    for _ in 0..16 {
+        let state = env.portfolio_state(loser_account);
+        if state.pnl.get() == 0 && percolator::active_bitmap_is_empty(active_bitmap(&state)) {
+            break;
+        }
+        env.svm.expire_blockhash();
+        env.send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 36,
+                observations: vec![],
+            },
+            vec![
+                AccountMeta::new_readonly(loser.pubkey(), false),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(loser_account, false),
+            ],
+            &[],
+        )
+        .expect("resolved loser makes bounded public progress");
+    }
+    let loser_after = env.portfolio_state(loser_account);
+    assert_eq!(loser_after.capital.get(), 0);
+    assert_eq!(loser_after.pnl.get(), 0);
+    assert!(percolator::active_bitmap_is_empty(active_bitmap(
+        &loser_after
+    )));
+    env.close_portfolio_with_cu(&loser, loser_account);
+
+    for _ in 0..3 {
+        let dest = env.close_resolved(&winner, winner_account);
+        attacker_payout += env.token_amount(dest) as u128;
+    }
+    assert!(
+        attacker_payout > WINNER_DEPOSIT + LOSER_DEPOSIT,
+        "replacement-market winner must extract independent backing, got {attacker_payout}"
+    );
+    env.close_portfolio_with_cu(&winner, winner_account);
+
+    let provider_dest = env.token_account(old_provider.pubkey(), 0);
+    let withdraw_provider = |env: &mut V16CuEnv, amount: u128| {
+        env.svm.expire_blockhash();
+        send_tx(
+            &mut env.svm,
+            env.program_id,
+            &env.payer,
+            ProgInstruction::WithdrawBackingBucket {
+                domain: DOMAIN,
+                amount,
+            },
+            vec![
+                AccountMeta::new(old_provider.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(provider_dest, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(env.vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[&old_provider],
+        )
+    };
+    assert!(
+        withdraw_provider(&mut env, TOPUP).is_err(),
+        "the provider cannot recover consumed replayed principal"
+    );
+    let recoverable = env.market_state().1.source_backing_buckets[DOMAIN as usize]
+        .fresh_unliened_backing_num
+        / BOUND_SCALE;
+    let provider_loss = TOPUP - recoverable;
+    assert_eq!(
+        attacker_payout - WINNER_DEPOSIT - LOSER_DEPOSIT,
+        provider_loss,
+        "the attacker's net terminal gain is the independent provider's unavailable principal"
+    );
+    if recoverable != 0 {
+        withdraw_provider(&mut env, recoverable)
+            .expect("the provider recovers only unconsumed principal");
+    }
+    assert_eq!(env.token_amount(provider_dest) as u128, recoverable);
+    panic!(
+        "retained old-asset top-up transferred {provider_loss} atoms of independent backing to the replacement-market winner"
+    );
+}
+
 // An insurance top-up signed for a retired asset must not fund a replacement asset at the same
 // index. A replacement creator can deliberately reuse the old insurance authority while installing
 // itself as insurance operator, then relay the old transfer and withdraw the victim's deposit.
