@@ -1004,12 +1004,14 @@ impl V16CuEnv {
         fee_bps: u16,
         insurance_share_bps: u16,
     ) -> u64 {
+        let market_id = self.asset_market_id(domain / 2);
         send_tx(
             &mut self.svm,
             self.program_id,
             &self.payer,
             ProgInstruction::UpdateBackingFeePolicy {
                 domain,
+                market_id,
                 fee_bps,
                 insurance_share_bps,
             },
@@ -26289,6 +26291,7 @@ fn v16_attack_domain_indexed_calls_reject_out_of_range_atomically() {
         &env.payer,
         ProgInstruction::UpdateBackingFeePolicy {
             domain: BAD_DOMAIN,
+            market_id: 0,
             fee_bps: 77,
             insurance_share_bps: 5_000,
         },
@@ -35114,6 +35117,7 @@ fn v16_attack_fee_redirect_split_lands_correctly() {
 fn v16_attack_backing_fee_policy_authority_gated() {
     let mut env = V16CuEnv::new();
     let (cfg0, _) = env.market_state();
+    let market_id = env.asset_market_id(0);
     let mallory = Keypair::new();
     env.ensure_signer_account(mallory.pubkey());
     // non-authority sets the backing fee policy -> reject.
@@ -35124,6 +35128,7 @@ fn v16_attack_backing_fee_policy_authority_gated() {
         &env.payer,
         ProgInstruction::UpdateBackingFeePolicy {
             domain: 0,
+            market_id,
             fee_bps: 77,
             insurance_share_bps: 5_000,
         },
@@ -35145,6 +35150,7 @@ fn v16_attack_backing_fee_policy_authority_gated() {
         &env.payer,
         ProgInstruction::UpdateBackingFeePolicy {
             domain: 0,
+            market_id,
             fee_bps: 77,
             insurance_share_bps: 20_000,
         },
@@ -35194,6 +35200,8 @@ fn v16_attack_cross_asset_insurance_authority_cannot_update_other_backing_fee_po
         env.admin.pubkey(),
     );
     env.ensure_signer_account(asset1_insurance.pubkey());
+    let market_id_0 = env.asset_market_id(0);
+    let market_id_1 = env.asset_market_id(1);
 
     let market_before = env.svm.get_account(&env.market).unwrap().data;
     env.svm.expire_blockhash();
@@ -35203,6 +35211,7 @@ fn v16_attack_cross_asset_insurance_authority_cannot_update_other_backing_fee_po
         &env.payer,
         ProgInstruction::UpdateBackingFeePolicy {
             domain: 0,
+            market_id: market_id_0,
             fee_bps: 91,
             insurance_share_bps: 5_000,
         },
@@ -35229,6 +35238,7 @@ fn v16_attack_cross_asset_insurance_authority_cannot_update_other_backing_fee_po
         &env.payer,
         ProgInstruction::UpdateBackingFeePolicy {
             domain: 2,
+            market_id: market_id_1,
             fee_bps: 91,
             insurance_share_bps: 5_000,
         },
@@ -35329,6 +35339,7 @@ fn v16_attack_global_policy_bounds_reject_grief_values() {
         &mut env,
         ProgInstruction::UpdateBackingFeePolicy {
             domain: 0,
+            market_id,
             fee_bps: 0,
             insurance_share_bps: 1,
         },
@@ -35505,6 +35516,7 @@ fn v16_attack_permissionless_asset_authority_cannot_update_marketwide_policies()
         creator.pubkey().to_bytes()
     );
     let market_id = env.asset_market_id(0);
+    let asset1_market_id = env.asset_market_id(1);
 
     let mut attempt = |ix: ProgInstruction| -> Result<u64, String> {
         env.svm.expire_blockhash();
@@ -35558,6 +35570,7 @@ fn v16_attack_permissionless_asset_authority_cannot_update_marketwide_policies()
     assert!(
         attempt(ProgInstruction::UpdateBackingFeePolicy {
             domain: 0,
+            market_id,
             fee_bps: 55,
             insurance_share_bps: 5_000,
         })
@@ -35602,6 +35615,7 @@ fn v16_attack_permissionless_asset_authority_cannot_update_marketwide_policies()
         &env.payer,
         ProgInstruction::UpdateBackingFeePolicy {
             domain: 2,
+            market_id: asset1_market_id,
             fee_bps: 111,
             insurance_share_bps: 5_000,
         },
@@ -50724,6 +50738,7 @@ fn v16_attack_non_active_asset_cannot_enable_backing_fee_batch_gate() {
             expected_lifecycle
         );
         assert_eq!(cfg_after_lifecycle.backing_trade_fee_policy_count, 0);
+        let asset_market_id = env.asset_market_id(1);
 
         env.svm.expire_blockhash();
         let policy = send_tx(
@@ -50732,6 +50747,7 @@ fn v16_attack_non_active_asset_cannot_enable_backing_fee_batch_gate() {
             &env.payer,
             ProgInstruction::UpdateBackingFeePolicy {
                 domain: 2,
+                market_id: asset_market_id,
                 fee_bps: 77,
                 insurance_share_bps: 5_000,
             },
@@ -50819,6 +50835,7 @@ fn v16_attack_retired_reused_asset_backing_fee_policy_cannot_stick_batch_gate() 
 
     let update_policy =
         |env: &mut V16CuEnv, signer: &Keypair, fee_bps: u16| -> Result<u64, String> {
+            let market_id = env.asset_market_id(1);
             env.svm.expire_blockhash();
             send_tx(
                 &mut env.svm,
@@ -50826,6 +50843,7 @@ fn v16_attack_retired_reused_asset_backing_fee_policy_cannot_stick_batch_gate() 
                 &env.payer,
                 ProgInstruction::UpdateBackingFeePolicy {
                     domain: 2,
+                    market_id,
                     fee_bps,
                     insurance_share_bps: if fee_bps == 0 { 0 } else { 5_000 },
                 },
@@ -50927,6 +50945,274 @@ fn v16_attack_retired_reused_asset_backing_fee_policy_cannot_stick_batch_gate() 
     assert!(
         batch.is_ok(),
         "asset-0 batch trade must stay live after retiring/reusing an asset whose old policy was cleared: {batch:?}"
+    );
+}
+
+// A backing-fee policy signed for a retired asset must not acquire authority over a replacement
+// asset at the same index. A replacement creator can deliberately reuse the old insurance key while
+// installing itself as the new backing provider, then relay the old policy into its own earnings.
+#[test]
+fn v16_attack_backing_fee_policy_cannot_replay_across_asset_reuse() {
+    const INITIAL_PRICE: u64 = 100;
+    const ASSET1_WIN_MARK: u64 = 105;
+    const ASSET0_LOSS_MARK: u64 = 95;
+    const ASSET1_SIZE_Q: i128 = 2_000 * POS_SCALE as i128;
+    const ASSET0_SIZE_Q: i128 = 1_000 * POS_SCALE as i128;
+    const SAFE_INCREASE_Q: i128 = 100 * POS_SCALE as i128;
+    const VICTIM_DEPOSIT: u128 = 31_300;
+    const ATTACKER_DEPOSIT: u128 = 100_000;
+    const BACKING_PRINCIPAL: u128 = 15_000;
+    const WINNING_DOMAIN: u16 = 3;
+    const FORCED_FEE_BPS: u16 = 5_000;
+
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(4, 1_000, 1_000, 500);
+    env.update_market_init_fee_policy_with_cu(1);
+    let old_authority = env.admin.insecure_clone();
+    let old_market_id = env.asset_market_id(1);
+
+    let policy_accounts = vec![
+        AccountMeta::new(old_authority.pubkey(), true),
+        AccountMeta::new(env.market, false),
+    ];
+    let mut legacy_policy_data = vec![51u8];
+    legacy_policy_data.extend_from_slice(&WINNING_DOMAIN.to_le_bytes());
+    legacy_policy_data.extend_from_slice(&FORCED_FEE_BPS.to_le_bytes());
+    legacy_policy_data.extend_from_slice(&0u16.to_le_bytes());
+    let uses_market_id_wire = ProgInstruction::decode(&legacy_policy_data).is_err();
+    let mut bound_policy_data = vec![51u8];
+    bound_policy_data.extend_from_slice(&WINNING_DOMAIN.to_le_bytes());
+    bound_policy_data.extend_from_slice(&old_market_id.to_le_bytes());
+    bound_policy_data.extend_from_slice(&FORCED_FEE_BPS.to_le_bytes());
+    bound_policy_data.extend_from_slice(&0u16.to_le_bytes());
+    let stale_policy_ix = Instruction {
+        program_id: env.program_id,
+        accounts: policy_accounts,
+        data: if uses_market_id_wire {
+            bound_policy_data
+        } else {
+            legacy_policy_data
+        },
+    };
+    let stale_policy = Transaction::new_signed_with_payer(
+        &[heap_ix(), cu_ix(), stale_policy_ix],
+        Some(&env.payer.pubkey()),
+        &[&env.payer, &old_authority],
+        env.svm.latest_blockhash(),
+    );
+
+    env.svm.warp_to_slot(2);
+    env.update_asset_lifecycle_as_admin_with_cu(
+        percolator_prog::processor::ASSET_ACTION_RETIRE,
+        1,
+        2,
+        0,
+    );
+    let attacker = Keypair::new();
+    env.svm.warp_to_slot(3);
+    env.activate_permissionless_asset_with_fee(
+        &attacker,
+        1,
+        3,
+        INITIAL_PRICE,
+        old_authority.pubkey(),
+        attacker.pubkey(),
+        attacker.pubkey(),
+        attacker.pubkey(),
+        1,
+    );
+    let new_market_id = env.asset_market_id(1);
+    assert_ne!(new_market_id, old_market_id);
+    env.configure_auth_mark_for_asset_as_admin(0, 3, INITIAL_PRICE);
+    env.configure_auth_mark_for_asset_with_authority(1, &attacker, 3, INITIAL_PRICE);
+
+    let ledger = env.backing_domain_ledger_account();
+    let backing_source = env.token_account(attacker.pubkey(), BACKING_PRINCIPAL as u64);
+    send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::TopUpBackingBucket {
+            domain: WINNING_DOMAIN,
+            amount: BACKING_PRINCIPAL,
+            expiry_slot: 100,
+        },
+        vec![
+            AccountMeta::new(attacker.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(backing_source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(ledger, false),
+        ],
+        &[&attacker],
+    )
+    .expect("replacement backing provider funds the winning source domain");
+
+    let victim = Keypair::new();
+    let victim_account = env.create_portfolio(&victim);
+    let attacker_account = env.create_portfolio(&attacker);
+    env.deposit(&victim, victim_account, VICTIM_DEPOSIT);
+    env.deposit(&attacker, attacker_account, ATTACKER_DEPOSIT);
+    env.trade_asset_with_cu(
+        1,
+        &victim,
+        victim_account,
+        &attacker,
+        attacker_account,
+        ASSET1_SIZE_Q,
+        INITIAL_PRICE,
+        0,
+    );
+    env.trade_asset_with_cu(
+        0,
+        &victim,
+        victim_account,
+        &attacker,
+        attacker_account,
+        ASSET0_SIZE_Q,
+        INITIAL_PRICE,
+        0,
+    );
+
+    env.svm.warp_to_slot(4);
+    env.push_auth_mark_for_asset_with_authority(1, &attacker, 4, ASSET1_WIN_MARK);
+    env.push_auth_mark_for_asset_as_admin(0, 4, ASSET0_LOSS_MARK);
+    for (portfolio, asset_index) in [
+        (attacker_account, 1),
+        (victim_account, 1),
+        (attacker_account, 0),
+    ] {
+        env.crank(
+            portfolio,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 4,
+                observations: crank_observations(asset_index),
+            },
+        );
+    }
+    assert_eq!(
+        env.portfolio_state(victim_account).pnl.get(),
+        10_000,
+        "victim has an organic source-backed winning claim before growing the losing leg"
+    );
+
+    let presigned_trade_ix = Instruction {
+        program_id: env.program_id,
+        accounts: vec![
+            AccountMeta::new(victim.pubkey(), true),
+            AccountMeta::new(attacker.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(victim_account, false),
+            AccountMeta::new(attacker_account, false),
+        ],
+        data: ProgInstruction::TradeNoCpi {
+            asset_index: 0,
+            market_id: env.asset_market_id(0),
+            size_q: SAFE_INCREASE_Q,
+            exec_price: ASSET0_LOSS_MARK,
+            fee_bps: 0,
+        }
+        .encode(),
+    };
+    let presigned_trade = Transaction::new_signed_with_payer(
+        &[heap_ix(), cu_ix(), presigned_trade_ix],
+        Some(&env.payer.pubkey()),
+        &[&env.payer, &victim, &attacker],
+        env.svm.latest_blockhash(),
+    );
+
+    let market_before_replay = env.svm.get_account(&env.market).unwrap();
+    let replay = env.svm.send_transaction(stale_policy);
+    if uses_market_id_wire {
+        let replay_error = format!(
+            "{:?}",
+            replay.expect_err("stale backing policy must reject")
+        );
+        let expected_error = format!(
+            "Custom({})",
+            PercolatorError::AssetGenerationMismatch as u32
+        );
+        assert!(
+            replay_error.contains(&expected_error),
+            "stale backing policy must fail with {expected_error}, got {replay_error}"
+        );
+        assert_eq!(
+            env.svm.get_account(&env.market).unwrap(),
+            market_before_replay,
+            "generation mismatch leaves the replacement market byte-identical"
+        );
+    } else {
+        replay.expect("retained old-asset backing policy lands on the replacement asset");
+        let profile =
+            state::read_asset_oracle_profile(&env.svm.get_account(&env.market).unwrap().data, 1)
+                .unwrap();
+        assert_eq!(profile.backing_trade_fee_bps_short, FORCED_FEE_BPS);
+        assert_eq!(profile.backing_trade_fee_insurance_share_bps_short, 0);
+    }
+
+    let victim_capital_before = env.portfolio_state(victim_account).capital.get();
+    let attacker_capital_before = env.portfolio_state(attacker_account).capital.get();
+    let provider_earnings_before = env.market_state().1.source_backing_buckets
+        [WINNING_DOMAIN as usize]
+        .utilization_fee_earnings;
+    env.svm
+        .send_transaction(presigned_trade)
+        .expect("the pre-signed risk increase executes after stale-policy replay");
+    let victim_capital_after = env.portfolio_state(victim_account).capital.get();
+    let attacker_capital_after = env.portfolio_state(attacker_account).capital.get();
+    let provider_earnings_after = env.market_state().1.source_backing_buckets
+        [WINNING_DOMAIN as usize]
+        .utilization_fee_earnings;
+    let victim_fee = victim_capital_before - victim_capital_after;
+    let provider_fee = provider_earnings_after - provider_earnings_before;
+
+    if uses_market_id_wire {
+        assert_eq!(
+            victim_fee, 0,
+            "rejected stale policy cannot charge the victim"
+        );
+        assert_eq!(
+            provider_fee, 0,
+            "replacement backing earns no stale-policy fee"
+        );
+        assert_eq!(attacker_capital_after, attacker_capital_before);
+        return;
+    }
+
+    assert!(
+        victim_fee > 0,
+        "stale policy charges a non-vacuous victim fee"
+    );
+    assert_eq!(
+        provider_fee, victim_fee,
+        "the replacement backing provider receives every atom taken from the victim"
+    );
+    assert_eq!(attacker_capital_after, attacker_capital_before);
+
+    let attacker_destination = env.token_account(attacker.pubkey(), 0);
+    send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::WithdrawBackingBucketEarnings {
+            domain: WINNING_DOMAIN,
+            amount: provider_fee,
+        },
+        vec![
+            AccountMeta::new(attacker.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(ledger, false),
+            AccountMeta::new(attacker_destination, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&attacker],
+    )
+    .expect("replacement backing provider withdraws the victim-funded earnings");
+    assert_eq!(env.token_amount(attacker_destination) as u128, provider_fee);
+    panic!(
+        "retained old-asset backing policy transferred {provider_fee} atoms from an independent victim"
     );
 }
 
