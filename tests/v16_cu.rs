@@ -2026,7 +2026,10 @@ impl V16CuEnv {
             ]);
         }
         self.send(
-            ProgInstruction::SetMatcherConfig { enabled },
+            ProgInstruction::SetMatcherConfig {
+                portfolio_id: AUTO_PORTFOLIO_ID,
+                enabled,
+            },
             accounts,
             &[maker_owner],
         )?;
@@ -3660,6 +3663,9 @@ fn bind_test_portfolio_ids(svm: &LiteSVM, ix: &mut ProgInstruction, accounts: &[
     match ix {
         ProgInstruction::Withdraw { portfolio_id, .. }
         | ProgInstruction::ConvertReleasedPnl { portfolio_id, .. } => {
+            bind_test_portfolio_id_at(svm, portfolio_id, accounts, 2);
+        }
+        ProgInstruction::SetMatcherConfig { portfolio_id, .. } => {
             bind_test_portfolio_id_at(svm, portfolio_id, accounts, 2);
         }
         ProgInstruction::TradeNoCpi {
@@ -19815,6 +19821,272 @@ fn v16_attack_presigned_trade_rejects_reinitialized_portfolio() {
     );
 }
 
+// A matcher grant signed for one LP portfolio incarnation must not be replayable after the account
+// is closed and reinitialized. Otherwise the retained grant can authorize fresh unsigned LP fills
+// against replacement collateral even though every new trade carries the replacement's public ID.
+#[test]
+fn v16_attack_presigned_matcher_config_rejects_reinitialized_portfolio() {
+    const MARK: u64 = 1_000_000;
+    const VICTIM_CAPITAL: u128 = 100_000;
+
+    let mut env = V16CuEnv::new_with_init_params(production_risk_params());
+    env.update_liquidation_fee_policy_with_cu(10_000);
+    env.configure_auth_mark_with_cu(0, MARK);
+
+    let matcher_program = Pubkey::new_unique();
+    let matcher_bytes = std::fs::read(auth_matcher_program_path()).expect("read auth matcher BPF");
+    env.svm.add_program(matcher_program, &matcher_bytes);
+
+    let victim_owner = Keypair::new();
+    let victim_account = Keypair::new();
+    let victim = victim_account.pubkey();
+    env.ensure_signer_account(victim_owner.pubkey());
+    system_create_account_for_test(
+        &mut env.svm,
+        &env.payer,
+        &victim_account,
+        env.portfolio_account_len,
+        env.program_id,
+    );
+    env.send(
+        ProgInstruction::InitPortfolio,
+        vec![
+            AccountMeta::new(victim_owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(victim, false),
+        ],
+        &[&victim_owner],
+    )
+    .expect("initialize incarnation A");
+    let original_id = env.portfolio_id(victim);
+
+    let matcher_context = Keypair::new();
+    send_raw_tx(
+        &mut env.svm,
+        &env.payer,
+        system_instruction::create_account(
+            &env.payer.pubkey(),
+            &matcher_context.pubkey(),
+            1_000_000_000,
+            MATCHER_CONTEXT_LEN as u64,
+            &matcher_program,
+        ),
+        &[&matcher_context],
+    )
+    .expect("System Program creates matcher context");
+    let delegate = matcher_delegate_key(
+        &env.program_id,
+        &env.market,
+        &victim,
+        &victim_owner.pubkey(),
+        &matcher_program,
+        &matcher_context.pubkey(),
+    );
+    send_raw_tx(
+        &mut env.svm,
+        &env.payer,
+        Instruction {
+            program_id: matcher_program,
+            accounts: vec![
+                AccountMeta::new_readonly(victim_owner.pubkey(), true),
+                AccountMeta::new_readonly(delegate, false),
+                AccountMeta::new(matcher_context.pubkey(), false),
+                AccountMeta::new_readonly(env.program_id, false),
+                AccountMeta::new_readonly(env.market, false),
+                AccountMeta::new_readonly(victim, false),
+            ],
+            data: vec![2],
+        },
+        &[&victim_owner],
+    )
+    .expect("LP owner publicly initializes matcher context for incarnation A");
+
+    let set_config_ix = |portfolio_id: u64, enabled: u8, incarnation_bound: bool| {
+        let mut data = vec![68u8];
+        if incarnation_bound {
+            data.extend_from_slice(&portfolio_id.to_le_bytes());
+        }
+        data.push(enabled);
+        Instruction {
+            program_id: env.program_id,
+            accounts: vec![
+                AccountMeta::new_readonly(victim_owner.pubkey(), true),
+                AccountMeta::new_readonly(env.market, false),
+                AccountMeta::new(victim, false),
+                AccountMeta::new_readonly(matcher_program, false),
+                AccountMeta::new_readonly(matcher_context.pubkey(), false),
+                AccountMeta::new_readonly(delegate, false),
+            ],
+            data,
+        }
+    };
+
+    env.svm.expire_blockhash();
+    let incarnation_bound = send_raw_tx(
+        &mut env.svm,
+        &env.payer,
+        set_config_ix(original_id, 1, true),
+        &[&victim_owner],
+    )
+    .is_ok();
+    if !incarnation_bound {
+        send_raw_tx(
+            &mut env.svm,
+            &env.payer,
+            set_config_ix(original_id, 1, false),
+            &[&victim_owner],
+        )
+        .expect("legacy matcher grant is valid for incarnation A");
+    }
+    env.svm.expire_blockhash();
+    send_raw_tx(
+        &mut env.svm,
+        &env.payer,
+        set_config_ix(original_id, 0, incarnation_bound),
+        &[&victim_owner],
+    )
+    .expect("incarnation A disables its matcher grant before closing");
+
+    env.svm.expire_blockhash();
+    let retained_config = Transaction::new_signed_with_payer(
+        &[
+            heap_ix(),
+            cu_ix(),
+            set_config_ix(original_id, 1, incarnation_bound),
+        ],
+        Some(&env.payer.pubkey()),
+        &[&env.payer, &victim_owner],
+        env.svm.latest_blockhash(),
+    );
+
+    env.close_portfolio_with_cu(&victim_owner, victim);
+    send_raw_tx(
+        &mut env.svm,
+        &env.payer,
+        system_instruction::transfer(&env.payer.pubkey(), &victim, 1_000_000_000),
+        &[],
+    )
+    .expect("re-fund the closed portfolio account");
+    env.send(
+        ProgInstruction::InitPortfolio,
+        vec![
+            AccountMeta::new(victim_owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(victim, false),
+        ],
+        &[&victim_owner],
+    )
+    .expect("initialize incarnation B");
+    let replacement_id = env.portfolio_id(victim);
+    assert!(replacement_id > original_id);
+    env.deposit(&victim_owner, victim, VICTIM_CAPITAL);
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let victim_before = env.svm.get_account(&victim).unwrap();
+    let matcher_before = env.svm.get_account(&matcher_context.pubkey()).unwrap();
+    let replay = env.svm.send_transaction(retained_config);
+    if let Err(rejected) = replay {
+        assert!(
+            format!("{rejected:?}").contains("Custom(16)"),
+            "the stale matcher grant must reject with EngineProvenanceMismatch: {rejected:?}"
+        );
+        assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+        assert_eq!(env.svm.get_account(&victim).unwrap(), victim_before);
+        assert_eq!(
+            env.svm.get_account(&matcher_context.pubkey()).unwrap(),
+            matcher_before
+        );
+        assert_eq!(env.portfolio_matcher_config(victim).enabled, 0);
+        return;
+    }
+    assert_eq!(
+        env.portfolio_matcher_config(victim).enabled,
+        1,
+        "incarnation A's retained signature enabled its matcher on replacement B"
+    );
+
+    let attacker_owner = Keypair::new();
+    let attacker_trade = env.create_portfolio(&attacker_owner);
+    let attacker_reward = env.create_portfolio(&attacker_owner);
+    env.deposit(&attacker_owner, attacker_trade, 100_000_000);
+    env.deposit(&attacker_owner, attacker_reward, 1_000);
+    env.send(
+        ProgInstruction::TradeCpi {
+            account_a_portfolio_id: env.portfolio_id(attacker_trade),
+            account_b_portfolio_id: replacement_id,
+            asset_index: 0,
+            size_q: POS_SCALE as i128,
+            fee_bps: 0,
+            limit_price: 0,
+        },
+        vec![
+            AccountMeta::new(attacker_owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(attacker_trade, false),
+            AccountMeta::new(victim, false),
+            AccountMeta::new_readonly(matcher_program, false),
+            AccountMeta::new(matcher_context.pubkey(), false),
+            AccountMeta::new_readonly(delegate, false),
+        ],
+        &[&attacker_owner],
+    )
+    .expect("fresh attacker trade uses B's current public ID and the replayed matcher grant");
+    assert_eq!(
+        active_leg_for_asset(&env.portfolio_state(victim), 0).side,
+        SideV16::Short
+    );
+
+    for slot in 1..=30u64 {
+        env.svm.warp_to_slot(slot);
+        let _ = env.push_auth_mark_with_cu(slot, 2_000_000);
+        env.svm.expire_blockhash();
+        let _ = env.send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: slot,
+                observations: crank_observations(0),
+            },
+            vec![
+                AccountMeta::new(env.payer.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(victim, false),
+            ],
+            &[],
+        );
+    }
+
+    let reward_before = env.portfolio_state(attacker_reward).capital.get();
+    env.svm.expire_blockhash();
+    send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 30,
+            observations: crank_observations(0),
+        },
+        vec![
+            AccountMeta::new(attacker_owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(victim, false),
+            AccountMeta::new(attacker_reward, false),
+        ],
+        &[&attacker_owner],
+    )
+    .expect("the attacker liquidates replacement B");
+    let reward = env
+        .portfolio_state(attacker_reward)
+        .capital
+        .get()
+        .checked_sub(reward_before)
+        .expect("liquidation cannot debit the attacker reward portfolio");
+    assert!(reward > 0, "the replayed grant must fund a real reward");
+    let destination = env.withdraw(&attacker_owner, attacker_reward, reward);
+    assert_eq!(env.token_amount(destination), reward as u64);
+    panic!(
+        "incarnation-A matcher grant authorized a fresh trade against B and paid the attacker a {reward}-atom withdrawable liquidation reward"
+    );
+}
+
 #[test]
 fn v16_trade_entrypoints_bind_both_portfolio_ids_before_matcher_or_state_mutation() {
     let mut env = V16CuEnv::new_with_market_params_and_price_move(1, 1_000, 1_000, 500);
@@ -21312,7 +21584,10 @@ fn v16_attack_non_owner_cannot_change_lp_matcher_config() {
 
     env.svm.expire_blockhash();
     let revoke = env.send(
-        ProgInstruction::SetMatcherConfig { enabled: 0 },
+        ProgInstruction::SetMatcherConfig {
+            portfolio_id: AUTO_PORTFOLIO_ID,
+            enabled: 0,
+        },
         vec![
             AccountMeta::new(attacker.pubkey(), true),
             AccountMeta::new_readonly(env.market, false),
@@ -21377,7 +21652,10 @@ fn v16_attack_cross_lp_cannot_overwrite_lp_matcher_config() {
 
     env.svm.expire_blockhash();
     let overwrite = env.send(
-        ProgInstruction::SetMatcherConfig { enabled: 0 },
+        ProgInstruction::SetMatcherConfig {
+            portfolio_id: AUTO_PORTFOLIO_ID,
+            enabled: 0,
+        },
         vec![
             AccountMeta::new(attacker_owner.pubkey(), true),
             AccountMeta::new_readonly(env.market, false),
@@ -21748,7 +22026,10 @@ fn v16_attack_set_lp_matcher_config_cannot_target_protocol_accounts() {
     let send_with_lp_account = |env: &mut V16CuEnv, lp_account: Pubkey| {
         env.svm.expire_blockhash();
         env.send(
-            ProgInstruction::SetMatcherConfig { enabled: 1 },
+            ProgInstruction::SetMatcherConfig {
+                portfolio_id: AUTO_PORTFOLIO_ID,
+                enabled: 1,
+            },
             vec![
                 AccountMeta::new(lp_owner.pubkey(), true),
                 AccountMeta::new_readonly(env.market, false),
@@ -21822,7 +22103,10 @@ fn v16_attack_matcher_config_and_fills_reject_self_program_context() {
     let lp_before_config = env.svm.get_account(&lp).unwrap();
     env.svm.expire_blockhash();
     let self_config = env.send(
-        ProgInstruction::SetMatcherConfig { enabled: 1 },
+        ProgInstruction::SetMatcherConfig {
+            portfolio_id: AUTO_PORTFOLIO_ID,
+            enabled: 1,
+        },
         vec![
             AccountMeta::new(lp_owner.pubkey(), true),
             AccountMeta::new_readonly(env.market, false),
@@ -22082,7 +22366,10 @@ fn v16_attack_set_matcher_config_bad_legacy_context_rolls_back_realloc() {
     let lp_before = env.svm.get_account(&lp).unwrap();
     env.svm.expire_blockhash();
     let rejected = env.send(
-        ProgInstruction::SetMatcherConfig { enabled: 1 },
+        ProgInstruction::SetMatcherConfig {
+            portfolio_id: AUTO_PORTFOLIO_ID,
+            enabled: 1,
+        },
         vec![
             AccountMeta::new(lp_owner.pubkey(), true),
             AccountMeta::new_readonly(env.market, false),
@@ -31347,7 +31634,10 @@ fn v16_attack_trade_paths_reject_cross_market_portfolio_substitution() {
         &mut env.svm,
         env.program_id,
         &env.payer,
-        ProgInstruction::SetMatcherConfig { enabled: 1 },
+        ProgInstruction::SetMatcherConfig {
+            portfolio_id: AUTO_PORTFOLIO_ID,
+            enabled: 1,
+        },
         vec![
             AccountMeta::new(cpi_lp.pubkey(), true),
             AccountMeta::new_readonly(market_b, false),

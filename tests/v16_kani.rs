@@ -557,6 +557,28 @@ fn kani_v16_tradecpi_decode_preserves_wire_fields() {
 }
 
 #[kani::proof]
+fn kani_v16_set_matcher_config_decode_preserves_portfolio_id_and_enabled() {
+    let portfolio_id: u64 = kani::any();
+    let enabled: u8 = kani::any();
+
+    let mut data = [0u8; 10];
+    data[0] = 68;
+    data[1..9].copy_from_slice(&portfolio_id.to_le_bytes());
+    data[9] = enabled;
+
+    match Instruction::decode(&data).unwrap() {
+        Instruction::SetMatcherConfig {
+            portfolio_id: got_portfolio_id,
+            enabled: got_enabled,
+        } => {
+            assert_eq!(got_portfolio_id, portfolio_id);
+            assert_eq!(got_enabled, enabled);
+        }
+        _ => unreachable!(),
+    }
+}
+
+#[kani::proof]
 fn kani_v16_matcher_return_accepts_only_bound_echoed_fills() {
     // Audit fix: the ret's echoed fields and abi_version are drawn INDEPENDENTLY of the
     // expected (bound) params, and sizes are full-width i128, so both the accept path AND
@@ -1278,6 +1300,13 @@ fn kani_v16_trade_and_crank_payloads_reject_trailing_byte() {
         },
         extra,
     );
+    assert_rejects_trailing_byte(
+        Instruction::SetMatcherConfig {
+            portfolio_id: 1,
+            enabled: 1,
+        },
+        extra,
+    );
     assert_rejects_trailing_byte(Instruction::SyncMaintenanceFee { now_slot: 1 }, extra);
 }
 
@@ -1567,6 +1596,9 @@ fn kani_v16_every_active_payload_rejects_one_byte_truncation() {
 
     let trade_cpi = [10u8; 33];
     assert!(Instruction::decode(&trade_cpi).is_err());
+
+    let set_matcher_config = [68u8; 9];
+    assert!(Instruction::decode(&set_matcher_config).is_err());
 
     let top_up = [9u8; 16];
     assert!(Instruction::decode(&top_up).is_err());
