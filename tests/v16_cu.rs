@@ -59717,3 +59717,229 @@ fn v16_attack_underfunded_exit_cannot_move_ewma_with_uncollectible_fee() {
         assert_underfunded_ewma_exit_uses_collected_fee(path);
     }
 }
+
+#[test]
+fn v16_attack_cross_domain_source_rounding_cannot_stall_public_exit() {
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(2, 10_000, 10_000, 10_000);
+    env.configure_auth_mark_for_asset_as_admin(0, 0, 100);
+    env.configure_auth_mark_for_asset_as_admin(1, 0, 100);
+
+    let target_owner = Keypair::new();
+    let target = env.create_portfolio(&target_owner);
+    let helper_owner = Keypair::new();
+    let helper = env.create_portfolio(&helper_owner);
+    let target_short_owners = [Keypair::new(), Keypair::new()];
+    let helper_short_owners = [Keypair::new(), Keypair::new()];
+    let target_shorts = [
+        env.create_portfolio(&target_short_owners[0]),
+        env.create_portfolio(&target_short_owners[1]),
+    ];
+    let helper_shorts = [
+        env.create_portfolio(&helper_short_owners[0]),
+        env.create_portfolio(&helper_short_owners[1]),
+    ];
+
+    env.deposit(&target_owner, target, 10_000);
+    env.deposit(&helper_owner, helper, 10_000);
+    for asset_index in 0..2 {
+        env.deposit(
+            &target_short_owners[asset_index],
+            target_shorts[asset_index],
+            102,
+        );
+        env.deposit(
+            &helper_short_owners[asset_index],
+            helper_shorts[asset_index],
+            200,
+        );
+    }
+
+    let mut slot = 0u64;
+    for asset_index in 0..2 {
+        env.trade_asset_with_cu(
+            asset_index as u16,
+            &target_owner,
+            target,
+            &target_short_owners[asset_index],
+            target_shorts[asset_index],
+            POS_SCALE as i128,
+            100,
+            0,
+        );
+
+        slot += 1;
+        env.svm.warp_to_slot(slot);
+        env.push_auth_mark_for_asset_as_admin(asset_index as u16, slot, 100);
+        for portfolio in [target, target_shorts[asset_index]] {
+            env.crank(
+                portfolio,
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: slot,
+                    observations: crank_observations(asset_index as u16),
+                },
+            );
+        }
+
+        env.trade_asset_with_cu(
+            asset_index as u16,
+            &helper_owner,
+            helper,
+            &helper_short_owners[asset_index],
+            helper_shorts[asset_index],
+            (2 * POS_SCALE) as i128,
+            100,
+            0,
+        );
+    }
+
+    for gain_price in [200, 300] {
+        slot += 1;
+        env.svm.warp_to_slot(slot);
+        for asset_index in 0..2 {
+            env.push_auth_mark_for_asset_as_admin(asset_index as u16, slot, gain_price);
+        }
+        for asset_index in 0..2 {
+            env.crank(
+                target_shorts[asset_index],
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: slot,
+                    observations: crank_observations(asset_index as u16),
+                },
+            );
+        }
+    }
+    for asset_index in 0..2 {
+        env.crank(
+            helper_shorts[asset_index],
+            ProgInstruction::PermissionlessCrank {
+                now_slot: slot,
+                observations: crank_observations(asset_index as u16),
+            },
+        );
+    }
+    env.crank(
+        target,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: slot,
+            observations: crank_observations(0),
+        },
+    );
+    env.crank(
+        helper,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: slot,
+            observations: crank_observations(0),
+        },
+    );
+
+    assert_eq!(env.portfolio_state(target).pnl.get(), 400);
+    let expected_rate = percolator::CREDIT_RATE_SCALE * 302 / 600;
+    let (_, gained_market) = env.market_state();
+    assert_eq!(
+        gained_market.source_credit[1].credit_rate_num,
+        expected_rate
+    );
+    assert_eq!(
+        gained_market.source_credit[3].credit_rate_num,
+        expected_rate
+    );
+
+    slot += 1;
+    env.svm.warp_to_slot(slot);
+    env.push_auth_mark_for_asset_as_admin(0, slot, 1);
+    env.crank(
+        target_shorts[0],
+        ProgInstruction::PermissionlessCrank {
+            now_slot: slot,
+            observations: crank_observations(0),
+        },
+    );
+
+    let target_before = env.portfolio_state(target);
+    let (_, market_before) = env.market_state();
+    let token_vault_before = env.token_amount(env.vault);
+    env.svm.expire_blockhash();
+    let first_crank = env.send(
+        ProgInstruction::PermissionlessCrank {
+            now_slot: slot,
+            observations: crank_observations(0),
+        },
+        vec![
+            AccountMeta::new(env.payer.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(target, false),
+        ],
+        &[],
+    );
+    let reversal_cu = match first_crank {
+        Ok(cu) => cu,
+        Err(first_err) => {
+            assert_eq!(
+                env.portfolio_state(target),
+                target_before,
+                "failed crank must roll back the target"
+            );
+            env.svm.expire_blockhash();
+            let owner_reduce = env.send(
+                ProgInstruction::RebalanceReduce {
+                    asset_index: 0,
+                    reduce_q: POS_SCALE,
+                },
+                vec![
+                    AccountMeta::new(target_owner.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(target, false),
+                ],
+                &[&target_owner],
+            );
+
+            slot += 1;
+            env.svm.warp_to_slot(slot);
+            env.push_auth_mark_for_asset_as_admin(0, slot, 1);
+            env.crank(
+                target_shorts[0],
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: slot,
+                    observations: crank_observations(0),
+                },
+            );
+            env.svm.expire_blockhash();
+            let later_crank = env.send(
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: slot,
+                    observations: crank_observations(0),
+                },
+                vec![
+                    AccountMeta::new(env.payer.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(target, false),
+                ],
+                &[],
+            );
+            panic!(
+                "all bounded public continuations are stuck: first crank={first_err}; owner reduce={owner_reduce:?}; later honest crank={later_crank:?}"
+            );
+        }
+    };
+    assert_cu_within(
+        "cross-domain source rounding reversal crank",
+        reversal_cu,
+        400_000,
+    );
+
+    let settled = env.portfolio_state(target);
+    assert!(health_cert(&settled).valid);
+    assert_eq!(settled.pnl.get(), 0);
+    assert_eq!(settled.capital.get(), 9_901);
+    assert_eq!(
+        active_leg_for_asset(&settled, 0).basis_pos_q,
+        POS_SCALE as i128
+    );
+    assert_eq!(
+        active_leg_for_asset(&settled, 1).basis_pos_q,
+        POS_SCALE as i128
+    );
+    let (_, market_after) = env.market_state();
+    assert_eq!(market_after.vault, market_before.vault);
+    assert_eq!(env.token_amount(env.vault), token_vault_before);
+}
