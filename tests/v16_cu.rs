@@ -7825,6 +7825,180 @@ fn v16_attack_resolved_close_progresses_after_source_backing_expires_before_lose
     );
 }
 
+// A different resolved account can expire a shared backing bucket after this account has
+// legitimately liened part of it for initial margin. The account-local lien must follow the
+// aggregate bucket into impairment in one bounded CloseResolved step; attempting to release it
+// from the now-empty live counter otherwise returns CounterUnderflow forever.
+#[test]
+fn v16_attack_resolved_foreign_bucket_expiry_does_not_strand_account_lien() {
+    const Q: i128 = (1_000 * POS_SCALE) as i128;
+    const INCREASE_Q: i128 = POS_SCALE as i128;
+    const PRICE: u64 = 100;
+    const UP_PRICE: u64 = 105;
+
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(1, 1_000, 5_000, 500);
+    env.configure_auth_mark_for_asset_as_admin(0, 0, PRICE);
+    env.top_up_backing_bucket(1, 100_000, 3);
+
+    let target_owner = Keypair::new();
+    let target_peer_owner = Keypair::new();
+    let expiry_trigger_owner = Keypair::new();
+    let trigger_peer_owner = Keypair::new();
+    let target = env.create_portfolio(&target_owner);
+    let target_peer = env.create_portfolio(&target_peer_owner);
+    let expiry_trigger = env.create_portfolio(&expiry_trigger_owner);
+    let trigger_peer = env.create_portfolio(&trigger_peer_owner);
+    env.deposit(&target_owner, target, 52_501);
+    env.deposit(&target_peer_owner, target_peer, 1_000_000);
+    env.deposit(&expiry_trigger_owner, expiry_trigger, 1_000_000);
+    env.deposit(&trigger_peer_owner, trigger_peer, 1_000_000);
+    env.trade_with_cu(
+        &target_owner,
+        target,
+        &target_peer_owner,
+        target_peer,
+        Q,
+        PRICE,
+        0,
+    );
+    env.trade_with_cu(
+        &expiry_trigger_owner,
+        expiry_trigger,
+        &trigger_peer_owner,
+        trigger_peer,
+        Q,
+        PRICE,
+        0,
+    );
+
+    env.svm.warp_to_slot(2);
+    env.push_auth_mark_for_asset_as_admin(0, 2, UP_PRICE);
+    for portfolio in [target_peer, trigger_peer, target, expiry_trigger] {
+        env.crank(
+            portfolio,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 2,
+                observations: crank_observations(0),
+            },
+        );
+    }
+    assert_eq!(env.portfolio_state(target).pnl.get(), 5_000);
+    assert_eq!(env.portfolio_state(expiry_trigger).pnl.get(), 5_000);
+
+    env.trade_with_cu(
+        &target_owner,
+        target,
+        &target_peer_owner,
+        target_peer,
+        INCREASE_Q,
+        UP_PRICE,
+        0,
+    );
+    let lien_before = env.portfolio_state(target).source_domains[0];
+    assert!(lien_before.source_claim_counterparty_liened_num.get() > 0);
+    assert!(lien_before.source_lien_counterparty_backing_num.get() > 0);
+    assert_eq!(lien_before.source_claim_impaired_num.get(), 0);
+    let trigger_before = env.portfolio_state(expiry_trigger).source_domains[0];
+    assert!(trigger_before.source_claim_bound_num.get() > 0);
+    assert_eq!(trigger_before.source_claim_liened_num.get(), 0);
+
+    env.svm.warp_to_slot(3);
+    env.resolve();
+    let target_dest = env.token_account(target_owner.pubkey(), 0);
+    let trigger_dest = env.token_account(expiry_trigger_owner.pubkey(), 0);
+    let close_once = |env: &mut V16CuEnv, owner: Pubkey, portfolio: Pubkey, dest: Pubkey| {
+        env.svm.expire_blockhash();
+        env.send(
+            ProgInstruction::CloseResolved {
+                fee_rate_per_slot: 0,
+            },
+            vec![
+                AccountMeta::new_readonly(owner, false),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(portfolio, false),
+                AccountMeta::new(dest, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(env.vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[],
+        )
+    };
+
+    close_once(
+        &mut env,
+        expiry_trigger_owner.pubkey(),
+        expiry_trigger,
+        trigger_dest,
+    )
+    .expect("a lien-free winner must expire the shared bucket in one bounded close");
+    let (_, after_foreign_expiry) = env.market_state();
+    assert_eq!(
+        after_foreign_expiry.source_backing_buckets[1].status,
+        BackingBucketStatusV16::Impaired
+    );
+    assert_eq!(
+        after_foreign_expiry.source_backing_buckets[1].valid_liened_backing_num,
+        0
+    );
+    assert!(
+        after_foreign_expiry.source_backing_buckets[1].impaired_liened_backing_num
+            >= lien_before.source_lien_counterparty_backing_num.get()
+    );
+
+    let market_before_target = env.svm.get_account(&env.market).unwrap();
+    let target_before_close = env.svm.get_account(&target).unwrap();
+    let token_vault_before_target = env.token_amount(env.vault);
+    let mut progressed = None;
+    let mut last_error = None;
+    for _ in 0..3 {
+        match close_once(&mut env, target_owner.pubkey(), target, target_dest) {
+            Ok(cu) => {
+                progressed = Some(cu);
+                break;
+            }
+            Err(err) => {
+                last_error = Some(err);
+                assert_eq!(
+                    env.svm.get_account(&env.market).unwrap(),
+                    market_before_target,
+                    "a rejected close must roll back the market"
+                );
+                assert_eq!(
+                    env.svm.get_account(&target).unwrap(),
+                    target_before_close,
+                    "a rejected close must roll back the target portfolio"
+                );
+            }
+        }
+    }
+    let progress_cu = progressed.unwrap_or_else(|| {
+        panic!(
+            "a foreign-expired account lien needs a bounded terminal continuation; last={last_error:?}"
+        )
+    });
+    assert_cu_within(
+        "resolved foreign-expiry account-lien impairment",
+        progress_cu,
+        1_000_000,
+    );
+
+    let target_after = env.portfolio_state(target);
+    let impaired = target_after.source_domains[0];
+    assert_eq!(impaired.source_claim_liened_num.get(), 0);
+    assert_eq!(impaired.source_claim_counterparty_liened_num.get(), 0);
+    assert_eq!(impaired.source_lien_counterparty_backing_num.get(), 0);
+    assert_eq!(
+        impaired.source_claim_impaired_num.get(),
+        lien_before.source_claim_counterparty_liened_num.get()
+    );
+    assert_eq!(
+        impaired.source_lien_impaired_effective_reserved.get(),
+        lien_before.source_lien_effective_reserved.get()
+    );
+    assert_eq!(env.token_amount(env.vault), token_vault_before_target);
+}
+
 #[test]
 fn v16_attack_resolved_close_prepares_lapsed_source_before_pending_mark_loss() {
     const PRICE: u64 = 100;
