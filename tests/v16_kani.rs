@@ -401,6 +401,7 @@ fn kani_v16_asset_lifecycle_decode_preserves_wire_fields() {
     let asset_index: u16 = kani::any();
     let now_slot: u64 = kani::any();
     let initial_price: u64 = kani::any();
+    let max_init_fee: u128 = kani::any();
     let insurance_authority: [u8; 32] = kani::any();
     let insurance_operator: [u8; 32] = kani::any();
     let backing_bucket_authority: [u8; 32] = kani::any();
@@ -411,6 +412,7 @@ fn kani_v16_asset_lifecycle_decode_preserves_wire_fields() {
         asset_index,
         now_slot,
         initial_price,
+        max_init_fee,
         insurance_authority,
         insurance_operator,
         backing_bucket_authority,
@@ -424,6 +426,7 @@ fn kani_v16_asset_lifecycle_decode_preserves_wire_fields() {
             asset_index: got_asset_index,
             now_slot: got_now_slot,
             initial_price: got_initial_price,
+            max_init_fee: got_max_init_fee,
             insurance_authority: got_insurance_authority,
             insurance_operator: got_insurance_operator,
             backing_bucket_authority: got_backing_bucket_authority,
@@ -433,6 +436,7 @@ fn kani_v16_asset_lifecycle_decode_preserves_wire_fields() {
             assert_eq!(got_asset_index, asset_index);
             assert_eq!(got_now_slot, now_slot);
             assert_eq!(got_initial_price, initial_price);
+            assert_eq!(got_max_init_fee, max_init_fee);
             assert_eq!(got_insurance_authority, insurance_authority);
             assert_eq!(got_insurance_operator, insurance_operator);
             assert_eq!(got_backing_bucket_authority, backing_bucket_authority);
@@ -1345,6 +1349,7 @@ fn kani_v16_oracle_asset_payloads_reject_trailing_byte() {
             asset_index: 1,
             now_slot: 2,
             initial_price: 100,
+            max_init_fee: 7,
             insurance_authority: [1u8; 32],
             insurance_operator: [1u8; 32],
             backing_bucket_authority: [1u8; 32],
