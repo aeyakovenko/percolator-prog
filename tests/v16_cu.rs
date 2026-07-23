@@ -2318,11 +2318,13 @@ impl V16CuEnv {
         stale_slots: u64,
         force_close_delay_slots: u64,
     ) -> u64 {
+        let market_id = self.asset_market_id(0);
         send_tx(
             &mut self.svm,
             self.program_id,
             &self.payer,
             ProgInstruction::ConfigurePermissionlessResolve {
+                market_id,
                 stale_slots,
                 force_close_delay_slots,
             },
@@ -26755,6 +26757,7 @@ fn v16_attack_rotated_marketauth_cannot_replay_policy_updates() {
     );
     old_attempt(
         ProgInstruction::ConfigurePermissionlessResolve {
+            market_id,
             stale_slots: 100,
             force_close_delay_slots: 5,
         },
@@ -26802,6 +26805,7 @@ fn v16_attack_rotated_marketauth_cannot_replay_policy_updates() {
     );
     new_update(
         ProgInstruction::ConfigurePermissionlessResolve {
+            market_id,
             stale_slots: 100,
             force_close_delay_slots: 5,
         },
@@ -37816,12 +37820,18 @@ fn v16_attack_force_close_rejects_cross_market_portfolio_substitution() {
         &[&env.admin],
     )
     .expect("configure market B asset-1 auth mark");
+    let market_b_id = state::read_market(&env.svm.get_account(&market_b).unwrap().data)
+        .unwrap()
+        .1
+        .assets[0]
+        .market_id;
     env.svm.expire_blockhash();
     send_tx(
         &mut env.svm,
         env.program_id,
         &env.payer,
         ProgInstruction::ConfigurePermissionlessResolve {
+            market_id: market_b_id,
             stale_slots: 100,
             force_close_delay_slots: DELAY,
         },
@@ -56364,6 +56374,7 @@ fn v16_attack_forfeit_recovery_leg_owner_gated_and_zero_budget_rejected() {
 fn v16_attack_configure_permissionless_resolve_gated_and_bounded() {
     let mut env = V16CuEnv::new();
     let admin = env.admin.insecure_clone();
+    let market_id = env.asset_market_id(0);
     let market = env.market;
     let metas = |signer: Pubkey| {
         vec![
@@ -56379,6 +56390,7 @@ fn v16_attack_configure_permissionless_resolve_gated_and_bounded() {
     env.svm.expire_blockhash();
     let r_grief = env.send(
         ProgInstruction::ConfigurePermissionlessResolve {
+            market_id,
             stale_slots: 1_000,
             force_close_delay_slots: 1_000,
         },
@@ -56399,6 +56411,7 @@ fn v16_attack_configure_permissionless_resolve_gated_and_bounded() {
     env.svm.expire_blockhash();
     let r_zero = env.send(
         ProgInstruction::ConfigurePermissionlessResolve {
+            market_id,
             stale_slots: 0,
             force_close_delay_slots: 1_000,
         },
@@ -56414,6 +56427,7 @@ fn v16_attack_configure_permissionless_resolve_gated_and_bounded() {
     env.svm.expire_blockhash();
     let r_huge = env.send(
         ProgInstruction::ConfigurePermissionlessResolve {
+            market_id,
             stale_slots: percolator_prog::constants::MAX_PERMISSIONLESS_RESOLVE_STALE_SLOTS + 1,
             force_close_delay_slots: 1_000,
         },
@@ -56432,6 +56446,7 @@ fn v16_attack_configure_permissionless_resolve_gated_and_bounded() {
     env.svm.expire_blockhash();
     let r_force_zero = env.send(
         ProgInstruction::ConfigurePermissionlessResolve {
+            market_id,
             stale_slots: 1_000,
             force_close_delay_slots: 0,
         },
@@ -56450,6 +56465,7 @@ fn v16_attack_configure_permissionless_resolve_gated_and_bounded() {
     env.svm.expire_blockhash();
     let r_force_huge = env.send(
         ProgInstruction::ConfigurePermissionlessResolve {
+            market_id,
             stale_slots: 1_000,
             force_close_delay_slots: percolator_prog::constants::MAX_FORCE_CLOSE_DELAY_SLOTS + 1,
         },
@@ -56470,6 +56486,7 @@ fn v16_attack_configure_permissionless_resolve_gated_and_bounded() {
     env.svm.expire_blockhash();
     let r_ok = env.send(
         ProgInstruction::ConfigurePermissionlessResolve {
+            market_id,
             stale_slots: 1_000,
             force_close_delay_slots: 1_000,
         },
@@ -56499,6 +56516,7 @@ fn v16_attack_configure_permissionless_resolve_gated_and_bounded() {
 fn v16_attack_configure_permissionless_resolve_rejects_when_resolve_matured() {
     let mut env = V16CuEnv::new();
     let admin = env.admin.insecure_clone();
+    let market_id = env.asset_market_id(0);
     env.configure_permissionless_resolve_with_cu(5, 5);
     env.configure_auth_mark_with_cu(0, 100);
 
@@ -56510,6 +56528,7 @@ fn v16_attack_configure_permissionless_resolve_rejects_when_resolve_matured() {
     env.svm.expire_blockhash();
     let fresh = env.send(
         ProgInstruction::ConfigurePermissionlessResolve {
+            market_id,
             stale_slots: 6,
             force_close_delay_slots: 6,
         },
@@ -56537,6 +56556,7 @@ fn v16_attack_configure_permissionless_resolve_rejects_when_resolve_matured() {
     env.svm.expire_blockhash();
     let stale = env.send(
         ProgInstruction::ConfigurePermissionlessResolve {
+            market_id,
             stale_slots: 1_000,
             force_close_delay_slots: 1_000,
         },
@@ -61870,6 +61890,243 @@ fn v16_attack_resolve_market_cannot_replay_across_market_reinit() {
     env.svm
         .send_transaction(current_resolve)
         .expect("current-generation resolve remains usable");
+    assert_eq!(env.market_state().1.mode, MarketModeV16::Resolved);
+}
+
+// A permissionless-resolve policy signed for a closed market must not control a live replacement at
+// the same address. Otherwise a retained short-staleness policy can make the intentionally public
+// stale-resolve path terminally halt generation B without the current admin key.
+#[test]
+fn v16_attack_permissionless_resolve_policy_cannot_replay_across_market_reinit() {
+    const PRICE: u64 = 100;
+    const DEPOSIT: u128 = 1_000;
+    const SIZE_Q: i128 = 5 * POS_SCALE as i128;
+    const STALE_SLOTS: u64 = 1;
+    const FORCE_CLOSE_DELAY_SLOTS: u64 = 1;
+
+    let params = V16CuMarketParams::default();
+    let reinit_params = V16CuMarketParams {
+        max_bankrupt_close_lifetime_slots: params.max_bankrupt_close_lifetime_slots + 1,
+        ..params
+    };
+    let mut env = V16CuEnv::new_with_init_params(params);
+    let admin = env.admin.insecure_clone();
+    let old_market_id = env.asset_market_id(0);
+
+    let mut legacy_policy_data = vec![38u8];
+    legacy_policy_data.extend_from_slice(&STALE_SLOTS.to_le_bytes());
+    legacy_policy_data.extend_from_slice(&FORCE_CLOSE_DELAY_SLOTS.to_le_bytes());
+    let uses_market_id_wire = ProgInstruction::decode(&legacy_policy_data).is_err();
+    let mut bound_policy_data = vec![38u8];
+    bound_policy_data.extend_from_slice(&old_market_id.to_le_bytes());
+    bound_policy_data.extend_from_slice(&STALE_SLOTS.to_le_bytes());
+    bound_policy_data.extend_from_slice(&FORCE_CLOSE_DELAY_SLOTS.to_le_bytes());
+    let stale_policy_ix = Instruction {
+        program_id: env.program_id,
+        accounts: vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        data: if uses_market_id_wire {
+            bound_policy_data
+        } else {
+            legacy_policy_data
+        },
+    };
+    let reinit_ix = Instruction {
+        program_id: env.program_id,
+        accounts: vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new_readonly(env.mint, false),
+            AccountMeta::new(env.market_generation, false),
+            AccountMeta::new_readonly(system_program::ID, false),
+        ],
+        data: init_market_instruction(&reinit_params).encode(),
+    };
+    let retained_blockhash = env.svm.latest_blockhash();
+    let stale_policy = Transaction::new_signed_with_payer(
+        &[heap_ix(), cu_ix(), stale_policy_ix],
+        Some(&env.payer.pubkey()),
+        &[&env.payer, &admin],
+        retained_blockhash,
+    );
+    let presigned_reinit = Transaction::new_signed_with_payer(
+        &[heap_ix(), cu_ix(), reinit_ix],
+        Some(&env.payer.pubkey()),
+        &[&env.payer, &admin],
+        retained_blockhash,
+    );
+
+    env.resolve();
+    env.close_slab_with_cu();
+    assert_eq!(env.svm.get_account(&env.market).unwrap().lamports, 0);
+
+    env.svm.warp_to_slot(10);
+    env.svm
+        .set_account(
+            env.market,
+            Account {
+                lamports: 1_000_000_000,
+                data: vec![
+                    0u8;
+                    state::market_account_len_for_capacity(
+                        params.max_portfolio_assets as usize,
+                    )
+                    .unwrap()
+                ],
+                owner: env.program_id,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    env.svm
+        .set_account(
+            env.vault,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_token_data(env.mint, env.vault_authority, 0),
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    env.svm
+        .send_transaction(presigned_reinit)
+        .expect("the same market address is publicly reinitialized from a retained signed init");
+    let new_market_id = env.asset_market_id(0);
+    assert_ne!(new_market_id, old_market_id);
+    assert_eq!(
+        env.market_state().0.permissionless_resolve_stale_slots,
+        0,
+        "generation B starts with permissionless resolve disabled"
+    );
+
+    let victim = Keypair::new();
+    let counterparty = Keypair::new();
+    let victim_account = env.create_portfolio(&victim);
+    let counterparty_account = env.create_portfolio(&counterparty);
+    env.deposit(&victim, victim_account, DEPOSIT);
+    env.deposit(&counterparty, counterparty_account, DEPOSIT);
+    env.trade_asset_with_cu(
+        0,
+        &victim,
+        victim_account,
+        &counterparty,
+        counterparty_account,
+        SIZE_Q,
+        PRICE,
+        0,
+    );
+
+    let market_before_replay = env.svm.get_account(&env.market).unwrap();
+    let replay = env.svm.send_transaction(stale_policy);
+    if !uses_market_id_wire {
+        replay.expect("retained generation-A stale policy lands on generation B");
+        assert_eq!(
+            env.market_state().0.permissionless_resolve_stale_slots,
+            STALE_SLOTS
+        );
+        env.svm.warp_to_slot(12);
+        env.send(
+            ProgInstruction::ResolveStalePermissionless { now_slot: 12 },
+            vec![AccountMeta::new(env.market, false)],
+            &[],
+        )
+        .expect("an unprivileged caller completes the replayed terminal policy");
+        assert_eq!(env.market_state().1.mode, MarketModeV16::Resolved);
+        assert!(
+            env.try_trade_asset_with_cu(
+                0,
+                &victim,
+                victim_account,
+                &counterparty,
+                counterparty_account,
+                -SIZE_Q,
+                PRICE,
+                0,
+            )
+            .is_err(),
+            "ordinary trade progress is permanently halted"
+        );
+        panic!(
+            "a retained old-market stale policy let a public caller halt a live replacement market"
+        );
+    }
+
+    let replay_error = format!(
+        "{:?}",
+        replay.expect_err("stale permissionless-resolve policy must reject")
+    );
+    let expected_error = format!(
+        "Custom({})",
+        PercolatorError::AssetGenerationMismatch as u32
+    );
+    assert!(
+        replay_error.contains(&expected_error),
+        "stale permissionless-resolve policy must fail with {expected_error}, got {replay_error}"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before_replay,
+        "generation mismatch leaves the live replacement byte-identical"
+    );
+
+    env.svm.warp_to_slot(12);
+    let public_resolve = env.send(
+        ProgInstruction::ResolveStalePermissionless { now_slot: 12 },
+        vec![AccountMeta::new(env.market, false)],
+        &[],
+    );
+    assert!(
+        public_resolve.is_err(),
+        "rejected stale policy leaves permissionless resolution disabled"
+    );
+    assert_eq!(env.market_state().1.mode, MarketModeV16::Live);
+    env.trade_asset_with_cu(
+        0,
+        &victim,
+        victim_account,
+        &counterparty,
+        counterparty_account,
+        -SIZE_Q,
+        PRICE,
+        0,
+    );
+
+    let mut current_policy_data = vec![38u8];
+    current_policy_data.extend_from_slice(&new_market_id.to_le_bytes());
+    current_policy_data.extend_from_slice(&STALE_SLOTS.to_le_bytes());
+    current_policy_data.extend_from_slice(&FORCE_CLOSE_DELAY_SLOTS.to_le_bytes());
+    let current_policy = Transaction::new_signed_with_payer(
+        &[
+            heap_ix(),
+            cu_ix(),
+            Instruction {
+                program_id: env.program_id,
+                accounts: vec![
+                    AccountMeta::new(admin.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                ],
+                data: current_policy_data,
+            },
+        ],
+        Some(&env.payer.pubkey()),
+        &[&env.payer, &admin],
+        env.svm.latest_blockhash(),
+    );
+    env.svm
+        .send_transaction(current_policy)
+        .expect("current-generation permissionless-resolve policy remains usable");
+    env.svm.expire_blockhash();
+    env.send(
+        ProgInstruction::ResolveStalePermissionless { now_slot: 12 },
+        vec![AccountMeta::new(env.market, false)],
+        &[],
+    )
+    .expect("current-generation policy still permits public stale resolution");
     assert_eq!(env.market_state().1.mode, MarketModeV16::Resolved);
 }
 

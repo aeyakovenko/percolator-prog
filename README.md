@@ -394,6 +394,10 @@ This section describes intent and operational ordering, not argument-by-argument
   - per-asset authorities (insurance/operator/backing/oracle, incl. asset 0) are rotated via
     `UpdateAssetAuthority { asset_index, market_id, kind, new_pubkey }`, which requires the target
     asset's current generation, not this instruction
+- **ConfigurePermissionlessResolve** (tag 38)
+  - `ConfigurePermissionlessResolve { market_id, stale_slots, force_close_delay_slots }` is signed by
+    `marketauth`; `market_id` must match the current base-asset generation so a policy signed for a
+    retired slab cannot arm permissionless shutdown on a replacement at the same address
 - **UpdateAssetLifecycle** (tag 40)
   - appends/reactivates/retires assets 1..N, including permissionless create/reuse when the configured
     create fee is nonzero
