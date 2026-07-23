@@ -7826,6 +7826,159 @@ fn v16_attack_resolved_close_progresses_after_source_backing_expires_before_lose
 }
 
 #[test]
+fn v16_attack_resolved_close_prepares_lapsed_source_before_pending_mark_loss() {
+    const PRICE: u64 = 100;
+    const UP_PRICE: u64 = 101;
+    const DEPOSIT: u128 = 100_000_000;
+    const SIZE_Q: i128 = 100_000 * POS_SCALE as i128;
+
+    let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+        initial_price: PRICE,
+        max_price_move_bps_per_slot: 100,
+        max_accrual_dt_slots: 1,
+        min_funding_lifetime_slots: 1,
+        ..V16CuMarketParams::default()
+    });
+    env.svm.warp_to_slot(1);
+    env.configure_auth_mark_for_asset_as_admin(0, 1, PRICE);
+
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let neutral_owner = Keypair::new();
+    let long_account = env.create_portfolio(&long_owner);
+    let short_account = env.create_portfolio(&short_owner);
+    let neutral_account = env.create_portfolio(&neutral_owner);
+    env.deposit(&long_owner, long_account, DEPOSIT);
+    env.deposit(&short_owner, short_account, DEPOSIT);
+    env.trade_with_cu(
+        &long_owner,
+        long_account,
+        &short_owner,
+        short_account,
+        SIZE_Q,
+        PRICE,
+        0,
+    );
+
+    // Accrue the upward move through a flat third-party account, then settle
+    // it only into the long. The long now owns a source-attributed positive
+    // claim while the short has not yet materialized its matching loss.
+    env.svm.warp_to_slot(2);
+    env.push_auth_mark_for_asset_as_admin(0, 2, UP_PRICE);
+    env.crank(
+        neutral_account,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 2,
+            observations: crank_observations(0),
+        },
+    );
+    assert_eq!(env.market_state().1.assets[0].effective_price, UP_PRICE);
+
+    env.svm.warp_to_slot(3);
+    env.crank(
+        long_account,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 3,
+            observations: crank_observations(0),
+        },
+    );
+    assert!(
+        env.portfolio_state(long_account).pnl.get() > 0,
+        "the long must realize source-attributed mark profit"
+    );
+    env.top_up_backing_bucket(1, 10, 5);
+
+    // Reverse the mark through the flat account. The long keeps its positive
+    // source claim but now carries an unsettled adverse K delta.
+    env.svm.warp_to_slot(4);
+    env.push_auth_mark_for_asset_as_admin(0, 4, PRICE);
+    env.crank(
+        neutral_account,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 4,
+            observations: crank_observations(0),
+        },
+    );
+    env.svm.warp_to_slot(5);
+    env.crank(
+        neutral_account,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 5,
+            observations: crank_observations(0),
+        },
+    );
+    let (_, before_resolve) = env.market_state();
+    assert_eq!(before_resolve.assets[0].effective_price, PRICE);
+    assert_eq!(before_resolve.assets[0].slot_last, 5);
+    assert_eq!(
+        before_resolve.source_backing_buckets[1].status,
+        BackingBucketStatusV16::Fresh
+    );
+    assert_eq!(before_resolve.source_backing_buckets[1].expiry_slot, 5);
+    assert!(env.portfolio_state(long_account).pnl.get() > 0);
+
+    env.resolve();
+
+    let long_dest = env.token_account(long_owner.pubkey(), 0);
+    let short_dest = env.token_account(short_owner.pubkey(), 0);
+    let try_close = |env: &mut V16CuEnv, owner: Pubkey, portfolio: Pubkey, dest: Pubkey| {
+        env.svm.expire_blockhash();
+        env.send(
+            ProgInstruction::CloseResolved {
+                fee_rate_per_slot: 0,
+            },
+            vec![
+                AccountMeta::new_readonly(owner, false),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(portfolio, false),
+                AccountMeta::new(dest, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(env.vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[],
+        )
+    };
+
+    let mut last_long = None;
+    let mut last_short = None;
+    for _ in 0..16 {
+        last_long = Some(try_close(
+            &mut env,
+            long_owner.pubkey(),
+            long_account,
+            long_dest,
+        ));
+        last_short = Some(try_close(
+            &mut env,
+            short_owner.pubkey(),
+            short_account,
+            short_dest,
+        ));
+    }
+
+    let long_after = env.portfolio_state(long_account);
+    let short_after = env.portfolio_state(short_account);
+    assert!(
+        percolator::active_bitmap_is_empty(active_bitmap(&long_after))
+            && percolator::active_bitmap_is_empty(active_bitmap(&short_after))
+            && long_after.capital.get() == 0
+            && short_after.capital.get() == 0,
+        "bounded closes must prepare lapsed backing before settling the winner's adverse K delta; \
+         long_capital={} long_pnl={} long_active={:?} long_result={:?}; \
+         short_capital={} short_pnl={} short_active={:?} short_result={:?}",
+        long_after.capital.get(),
+        long_after.pnl.get(),
+        active_bitmap(&long_after),
+        last_long,
+        short_after.capital.get(),
+        short_after.pnl.get(),
+        active_bitmap(&short_after),
+        last_short,
+    );
+}
+
+#[test]
 fn v16_bpf_existing_funding_ledger_refreshes_and_converts_between_sides() {
     const INITIAL_PRICE: u64 = 1_000_000;
     const FUNDING_RATE_E9: i128 = 1_000;
