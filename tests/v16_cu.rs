@@ -51274,6 +51274,259 @@ fn v16_attack_backing_topup_cannot_replay_across_asset_reuse() {
     );
 }
 
+// Authenticated-mark instructions signed for a retired asset must not control a replacement asset
+// at the same index. Otherwise a replacement creator can advertise the old oracle key, replay its
+// retained configuration and price signatures, and settle an independent trader's collateral at a
+// mark the oracle never authorized for the replacement generation.
+#[test]
+fn v16_attack_auth_mark_cannot_replay_across_asset_reuse() {
+    const ASSET_INDEX: u16 = 1;
+    const INITIAL_PRICE: u64 = 100;
+    const WIN_MARK: u64 = 105;
+    const SIZE_Q: i128 = 20 * POS_SCALE as i128;
+    const DEPOSIT: u128 = 1_000;
+    const EXPECTED_PNL: u128 = 100;
+
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(4, 1_000, 1_000, 500);
+    env.update_market_init_fee_policy_with_cu(1);
+    let admin = env.admin.insecure_clone();
+    let old_oracle = Keypair::new();
+    env.try_update_per_asset_authority_with_cu(
+        &admin,
+        Some(&old_oracle),
+        ASSET_INDEX,
+        processor::ASSET_AUTH_ORACLE,
+        old_oracle.pubkey().to_bytes(),
+    )
+    .expect("generation-A oracle accepts the role");
+    let old_market_id = env.asset_market_id(ASSET_INDEX);
+
+    let oracle_data = |tag: u8, market_id: Option<u64>, slot: u64, mark: u64| {
+        let mut data = vec![tag];
+        data.extend_from_slice(&ASSET_INDEX.to_le_bytes());
+        if let Some(market_id) = market_id {
+            data.extend_from_slice(&market_id.to_le_bytes());
+        }
+        data.extend_from_slice(&slot.to_le_bytes());
+        data.extend_from_slice(&mark.to_le_bytes());
+        data
+    };
+    let legacy_config_data = oracle_data(62, None, 3, INITIAL_PRICE);
+    let uses_market_id_wire = ProgInstruction::decode(&legacy_config_data).is_err();
+    assert_eq!(
+        ProgInstruction::decode(&oracle_data(63, None, 4, WIN_MARK)).is_err(),
+        uses_market_id_wire,
+        "configure and push auth-mark instructions must use the same generation binding"
+    );
+    let oracle_accounts = vec![
+        AccountMeta::new(old_oracle.pubkey(), true),
+        AccountMeta::new(env.market, false),
+    ];
+    let stale_config_ix = Instruction {
+        program_id: env.program_id,
+        accounts: oracle_accounts.clone(),
+        data: if uses_market_id_wire {
+            oracle_data(62, Some(old_market_id), 3, INITIAL_PRICE)
+        } else {
+            legacy_config_data
+        },
+    };
+    let stale_push_ix = Instruction {
+        program_id: env.program_id,
+        accounts: oracle_accounts.clone(),
+        data: oracle_data(
+            63,
+            uses_market_id_wire.then_some(old_market_id),
+            4,
+            WIN_MARK,
+        ),
+    };
+    let retained_blockhash = env.svm.latest_blockhash();
+    let stale_config = Transaction::new_signed_with_payer(
+        &[heap_ix(), cu_ix(), stale_config_ix],
+        Some(&env.payer.pubkey()),
+        &[&env.payer, &old_oracle],
+        retained_blockhash,
+    );
+    let stale_push = Transaction::new_signed_with_payer(
+        &[heap_ix(), cu_ix(), stale_push_ix],
+        Some(&env.payer.pubkey()),
+        &[&env.payer, &old_oracle],
+        retained_blockhash,
+    );
+
+    env.svm.warp_to_slot(2);
+    env.update_asset_lifecycle_as_admin_with_cu(
+        percolator_prog::processor::ASSET_ACTION_RETIRE,
+        ASSET_INDEX,
+        2,
+        0,
+    );
+    let attacker = Keypair::new();
+    env.svm.warp_to_slot(3);
+    env.activate_permissionless_asset_with_fee(
+        &attacker,
+        ASSET_INDEX,
+        3,
+        INITIAL_PRICE,
+        attacker.pubkey(),
+        attacker.pubkey(),
+        attacker.pubkey(),
+        old_oracle.pubkey(),
+        1,
+    );
+    let new_market_id = env.asset_market_id(ASSET_INDEX);
+    assert_ne!(new_market_id, old_market_id);
+
+    let market_before_config_replay = env.svm.get_account(&env.market).unwrap();
+    let config_replay = env.svm.send_transaction(stale_config);
+    if uses_market_id_wire {
+        let replay_error = format!(
+            "{:?}",
+            config_replay.expect_err("stale auth-mark configuration must reject")
+        );
+        let expected_error = format!(
+            "Custom({})",
+            PercolatorError::AssetGenerationMismatch as u32
+        );
+        assert!(
+            replay_error.contains(&expected_error),
+            "stale auth-mark configuration must fail with {expected_error}, got {replay_error}"
+        );
+        assert_eq!(
+            env.svm.get_account(&env.market).unwrap(),
+            market_before_config_replay,
+            "generation mismatch leaves the replacement market byte-identical"
+        );
+
+        let current_config = Transaction::new_signed_with_payer(
+            &[
+                heap_ix(),
+                cu_ix(),
+                Instruction {
+                    program_id: env.program_id,
+                    accounts: oracle_accounts.clone(),
+                    data: oracle_data(62, Some(new_market_id), 3, INITIAL_PRICE),
+                },
+            ],
+            Some(&env.payer.pubkey()),
+            &[&env.payer, &old_oracle],
+            env.svm.latest_blockhash(),
+        );
+        env.svm
+            .send_transaction(current_config)
+            .expect("current-generation auth-mark configuration remains usable");
+    } else {
+        config_replay.expect("retained generation-A auth-mark configuration lands on generation B");
+    }
+
+    let victim = Keypair::new();
+    let attacker_account = env.create_portfolio(&attacker);
+    let victim_account = env.create_portfolio(&victim);
+    env.deposit(&attacker, attacker_account, DEPOSIT);
+    env.deposit(&victim, victim_account, DEPOSIT);
+    env.trade_asset_with_cu(
+        ASSET_INDEX,
+        &attacker,
+        attacker_account,
+        &victim,
+        victim_account,
+        SIZE_Q,
+        INITIAL_PRICE,
+        0,
+    );
+
+    env.svm.warp_to_slot(4);
+    let market_before_push_replay = env.svm.get_account(&env.market).unwrap();
+    let push_replay = env.svm.send_transaction(stale_push);
+    if uses_market_id_wire {
+        let replay_error = format!(
+            "{:?}",
+            push_replay.expect_err("stale auth-mark push must reject")
+        );
+        let expected_error = format!(
+            "Custom({})",
+            PercolatorError::AssetGenerationMismatch as u32
+        );
+        assert!(
+            replay_error.contains(&expected_error),
+            "stale auth-mark push must fail with {expected_error}, got {replay_error}"
+        );
+        assert_eq!(
+            env.svm.get_account(&env.market).unwrap(),
+            market_before_push_replay,
+            "rejected stale push leaves live market and collateral state byte-identical"
+        );
+
+        let current_push = Transaction::new_signed_with_payer(
+            &[
+                heap_ix(),
+                cu_ix(),
+                Instruction {
+                    program_id: env.program_id,
+                    accounts: oracle_accounts,
+                    data: oracle_data(63, Some(new_market_id), 4, WIN_MARK),
+                },
+            ],
+            Some(&env.payer.pubkey()),
+            &[&env.payer, &old_oracle],
+            env.svm.latest_blockhash(),
+        );
+        env.svm
+            .send_transaction(current_push)
+            .expect("current-generation auth-mark push remains usable");
+    } else {
+        push_replay.expect("retained generation-A mark push moves generation B");
+    }
+
+    for portfolio in [victim_account, attacker_account] {
+        env.crank(
+            portfolio,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 4,
+                observations: crank_observations(ASSET_INDEX),
+            },
+        );
+    }
+    assert_eq!(
+        env.portfolio_state(victim_account).capital.get(),
+        DEPOSIT - EXPECTED_PNL
+    );
+    assert_eq!(
+        env.portfolio_state(attacker_account).pnl.get(),
+        EXPECTED_PNL as i128
+    );
+
+    env.trade_asset_with_cu(
+        ASSET_INDEX,
+        &attacker,
+        attacker_account,
+        &victim,
+        victim_account,
+        -SIZE_Q,
+        WIN_MARK,
+        0,
+    );
+    env.convert_released_pnl_with_cu(&attacker, attacker_account, EXPECTED_PNL);
+    let attacker_dest = env.withdraw(&attacker, attacker_account, DEPOSIT + EXPECTED_PNL);
+    let victim_dest = env.withdraw(&victim, victim_account, DEPOSIT - EXPECTED_PNL);
+    assert_eq!(
+        env.token_amount(attacker_dest) as u128,
+        DEPOSIT + EXPECTED_PNL
+    );
+    assert_eq!(
+        env.token_amount(victim_dest) as u128,
+        DEPOSIT - EXPECTED_PNL
+    );
+
+    if uses_market_id_wire {
+        return;
+    }
+    panic!(
+        "retained old-oracle signatures transferred {EXPECTED_PNL} atoms from an independent generation-B trader"
+    );
+}
+
 // An insurance top-up signed for a retired asset must not fund a replacement asset at the same
 // index. A replacement creator can deliberately reuse the old insurance authority while installing
 // itself as insurance operator, then relay the old transfer and withdraw the victim's deposit.
