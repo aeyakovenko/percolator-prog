@@ -59717,3 +59717,325 @@ fn v16_attack_underfunded_exit_cannot_move_ewma_with_uncollectible_fee() {
         assert_underfunded_ewma_exit_uses_collected_fee(path);
     }
 }
+
+// Measurement probe. Does ForfeitRecoveryLeg erase an unbilled zero-move premium-funding
+// segment the way the rebalance-reduce path was proven to?
+//
+// The attacker holds a SMALL short leg. A separate "whale" holds the bulk short so that after
+// the reducer long socializes away >90% of matching short OI (dropping a_short below MIN_A_SIDE
+// => mode_short = DrainOnly, reached with PUBLIC instructions only), the residual short OI still
+// covers the attacker's leg basis (otherwise clearing the attacker leg underflows oi_eff_short_q
+// with CounterUnderflow). The market stays Live and the asset Active. Two orders run to terminal:
+//   (A) ForfeitRecoveryLeg BEFORE any crank books the zero-move segment, then crank the LP.
+//   (B) Crank first (books the segment), THEN ForfeitRecoveryLeg, then crank LP.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ForfeitTerminal {
+    forfeit_ok: bool,
+    attacker_withdrawn: u64,
+    attacker_capital: u128,
+    attacker_pnl: i128,
+    attacker_funding_short_paid: u128,
+    attacker_bitmap_empty: bool,
+    lp_capital: u128,
+    lp_pnl: i128,
+    lp_funding_long_received: u128,
+    whale_funding_short_paid: u128,
+    reducer_funding_long_received: u128,
+    insurance: u128,
+    vault: u128,
+    mode_short_drainonly: bool,
+    f_short_num: i128,
+    f_long_num: i128,
+}
+
+#[test]
+fn v16_attack_forfeit_recovery_leg_cannot_erase_elapsed_premium_funding() {
+    const PRICE: u64 = 2;
+    const TARGET: u64 = 1;
+    // Balanced 100/100 book, split so the attacker's short is small enough to survive the OI
+    // socialization: shorts = attacker(5) + whale(95); longs = reducer(95) + lp(5).
+    const Q_ATTACKER: i128 = 5 * POS_SCALE as i128;
+    const Q_WHALE: i128 = 95 * POS_SCALE as i128;
+    const Q_REDUCER: i128 = 95 * POS_SCALE as i128;
+    const Q_LP: i128 = 5 * POS_SCALE as i128;
+    const DEPOSIT: u128 = 1_000_000;
+
+    let run = |forfeit_before_crank: bool| -> ForfeitTerminal {
+        let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+            initial_price: PRICE,
+            max_price_move_bps_per_slot: 24,
+            max_accrual_dt_slots: 1,
+            max_abs_funding_e9_per_slot: 1_000,
+            min_funding_lifetime_slots: 1,
+            ..V16CuMarketParams::default()
+        });
+        env.configure_auth_mark_with_cu(0, PRICE);
+
+        let attacker_owner = Keypair::new();
+        let whale_owner = Keypair::new();
+        let reducer_owner = Keypair::new();
+        let lp_owner = Keypair::new();
+        let attacker = env.create_portfolio(&attacker_owner);
+        let whale = env.create_portfolio(&whale_owner);
+        let reducer = env.create_portfolio(&reducer_owner);
+        let lp = env.create_portfolio(&lp_owner);
+        for (o, p) in [
+            (&attacker_owner, attacker),
+            (&whale_owner, whale),
+            (&reducer_owner, reducer),
+            (&lp_owner, lp),
+        ] {
+            env.deposit(o, p, DEPOSIT);
+        }
+
+        // slot0: whale short 95 vs reducer long 95; attacker short 5 vs lp long 5.
+        env.trade_asset_with_cu(
+            0, &whale_owner, whale, &reducer_owner, reducer, -Q_WHALE, PRICE, 0,
+        );
+        env.trade_asset_with_cu(0, &attacker_owner, attacker, &lp_owner, lp, -Q_ATTACKER, PRICE, 0);
+        let _ = (Q_REDUCER, Q_LP);
+
+        // slot1: push mark; effective price stays clamped at 2 so f stays 0 (zero-move) while a
+        // nonzero premium builds over the slot1->slot2 interval.
+        env.svm.warp_to_slot(1);
+        env.push_auth_mark_with_cu(1, TARGET);
+        for p in [attacker, whale, reducer, lp] {
+            env.svm.expire_blockhash();
+            env.crank(
+                p,
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: 1,
+                    observations: crank_observations(0),
+                },
+            );
+        }
+        let g1 = env.market_state().1;
+        assert_eq!(g1.assets[0].effective_price, PRICE, "effective price clamped");
+        assert_eq!(g1.assets[0].f_long_num, 0, "f_long stays 0 (zero-move)");
+        assert_eq!(g1.assets[0].f_short_num, 0, "f_short stays 0 (zero-move)");
+
+        env.svm.warp_to_slot(2);
+
+        // Control ordering (B): a keeper books the zero-move segment for everyone first.
+        if !forfeit_before_crank {
+            for p in [attacker, whale, reducer, lp] {
+                env.svm.expire_blockhash();
+                env.crank(
+                    p,
+                    ProgInstruction::PermissionlessCrank {
+                        now_slot: 2,
+                        observations: crank_observations(0),
+                    },
+                );
+            }
+        }
+
+        // Drive attacker's short side to a forfeitable DrainOnly dead state PUBLICLY: the reducer
+        // long unilaterally closes its full 95% leg, scaling a_short below MIN_A_SIDE while the
+        // residual short OI (5) still covers the attacker's 5-unit leg.
+        env.svm.expire_blockhash();
+        let reduce_cu = env.rebalance_reduce_with_cu(&reducer_owner, reducer, 0, Q_REDUCER as u128);
+        assert_cu_within("drainonly setup rebalance reduce", reduce_cu, CUSTODY_CU_LIMIT);
+        let g_after_reduce = env.market_state().1;
+        assert_eq!(
+            g_after_reduce.assets[0].mode_short,
+            SideModeV16::DrainOnly,
+            "reducer long must publicly force mode_short = DrainOnly"
+        );
+        assert_eq!(g_after_reduce.assets[0].lifecycle, AssetLifecycleV16::Active);
+        if forfeit_before_crank {
+            let a = env.market_state().1.assets[0];
+            eprintln!(
+                "[A-trace] after REDUCE: slot_last={} f_short={} f_long={} oi_short={} attacker_paid={}",
+                a.slot_last, a.f_short_num, a.f_long_num, a.oi_eff_short_q,
+                env.portfolio_state(attacker).funding_short_paid_atoms_total.get()
+            );
+        }
+
+        // The attacker abandons its dead short leg via the public recovery tool. In attack order
+        // (A) this happens before any crank books the segment; in control (B) after.
+        env.svm.expire_blockhash();
+        let forfeit_res = env.send(
+            ProgInstruction::ForfeitRecoveryLeg {
+                asset_index: 0,
+                b_delta_budget: u128::from(u64::MAX),
+            },
+            vec![
+                AccountMeta::new(attacker_owner.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(attacker, false),
+            ],
+            &[&attacker_owner],
+        );
+        let forfeit_ok = forfeit_res.is_ok();
+        eprintln!("forfeit_before_crank={forfeit_before_crank} forfeit_result={forfeit_res:?}");
+        if forfeit_before_crank {
+            let a = env.market_state().1.assets[0];
+            eprintln!(
+                "[A-trace] after FORFEIT: slot_last={} f_short={} f_long={} oi_short={} attacker_paid={} attacker_bitmap_empty={}",
+                a.slot_last, a.f_short_num, a.f_long_num, a.oi_eff_short_q,
+                env.portfolio_state(attacker).funding_short_paid_atoms_total.get(),
+                percolator::active_bitmap_is_empty(active_bitmap(&env.portfolio_state(attacker)))
+            );
+        }
+
+        // Settle the independent LP's epoch snapshot permissionlessly.
+        env.svm.expire_blockhash();
+        env.crank(
+            lp,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 2,
+                observations: crank_observations(0),
+            },
+        );
+
+        let attacker_state = env.portfolio_state(attacker);
+        let lp_state = env.portfolio_state(lp);
+        let whale_state = env.portfolio_state(whale);
+        let reducer_state = env.portfolio_state(reducer);
+        let g = env.market_state().1;
+
+        let attacker_capital = attacker_state.capital.get();
+        let attacker_bitmap_empty =
+            percolator::active_bitmap_is_empty(active_bitmap(&attacker_state));
+
+        // Attempt to withdraw the attacker's full capital to terminal tokens (non-panicking).
+        let dest = Pubkey::new_unique();
+        env.svm
+            .set_account(
+                dest,
+                Account {
+                    lamports: 1_000_000_000,
+                    data: make_token_data(env.mint, attacker_owner.pubkey(), 0),
+                    owner: spl_token::ID,
+                    executable: false,
+                    rent_epoch: 0,
+                },
+            )
+            .unwrap();
+        env.svm.expire_blockhash();
+        let w = env.send(
+            ProgInstruction::Withdraw {
+                amount: attacker_capital,
+            },
+            vec![
+                AccountMeta::new(attacker_owner.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(attacker, false),
+                AccountMeta::new(dest, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(env.vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[&attacker_owner],
+        );
+        let attacker_withdrawn = if w.is_ok() { env.token_amount(dest) } else { 0 };
+
+        ForfeitTerminal {
+            forfeit_ok,
+            attacker_withdrawn,
+            attacker_capital,
+            attacker_pnl: attacker_state.pnl.get(),
+            attacker_funding_short_paid: attacker_state.funding_short_paid_atoms_total.get(),
+            attacker_bitmap_empty,
+            lp_capital: lp_state.capital.get(),
+            lp_pnl: lp_state.pnl.get(),
+            lp_funding_long_received: lp_state.funding_long_received_atoms_total.get(),
+            whale_funding_short_paid: whale_state.funding_short_paid_atoms_total.get(),
+            reducer_funding_long_received: reducer_state.funding_long_received_atoms_total.get(),
+            insurance: g.insurance,
+            vault: g.vault,
+            mode_short_drainonly: g.assets[0].mode_short == SideModeV16::DrainOnly,
+            f_short_num: g.assets[0].f_short_num,
+            f_long_num: g.assets[0].f_long_num,
+        }
+    };
+
+    let attack = run(true); // (A) forfeit before crank
+    let control = run(false); // (B) crank first, then forfeit
+
+    eprintln!("=================== FORFEIT ZERO-MOVE PREMIUM MEASUREMENT ===================");
+    eprintln!("(A) forfeit-before-crank (attack): {attack:#?}");
+    eprintln!("(B) crank-first (control):         {control:#?}");
+    eprintln!(
+        "DELTA attacker_funding_short_paid: attack={} control={}",
+        attack.attacker_funding_short_paid, control.attacker_funding_short_paid
+    );
+    eprintln!(
+        "DELTA whale_funding_short_paid: attack={} control={}",
+        attack.whale_funding_short_paid, control.whale_funding_short_paid
+    );
+    eprintln!(
+        "DELTA lp_funding_long_received: attack={} control={}",
+        attack.lp_funding_long_received, control.lp_funding_long_received
+    );
+    eprintln!(
+        "DELTA reducer_funding_long_received: attack={} control={}",
+        attack.reducer_funding_long_received, control.reducer_funding_long_received
+    );
+    eprintln!(
+        "DELTA attacker (withdrawn/capital/pnl): attack=({}/{}/{}) control=({}/{}/{})",
+        attack.attacker_withdrawn, attack.attacker_capital, attack.attacker_pnl,
+        control.attacker_withdrawn, control.attacker_capital, control.attacker_pnl
+    );
+    eprintln!(
+        "DELTA insurance: attack={} control={} | vault: attack={} control={}",
+        attack.insurance, control.insurance, attack.vault, control.vault
+    );
+    eprintln!("============================================================================");
+
+    // Shared public preconditions hold identically in both orderings: the forfeit succeeds, the
+    // short side is genuinely in DrainOnly, insurance is untouched and the vault is conserved.
+    assert!(
+        attack.forfeit_ok && control.forfeit_ok,
+        "ForfeitRecoveryLeg must succeed in both orderings"
+    );
+    assert!(
+        attack.mode_short_drainonly && control.mode_short_drainonly,
+        "short side must be DrainOnly (dead-leg forfeitable) in both orderings"
+    );
+    assert_eq!(attack.insurance, 0, "no insurance movement (attack)");
+    assert_eq!(control.insurance, 0, "no insurance movement (control)");
+    assert_eq!(attack.vault, control.vault, "vault conserved across orderings");
+    assert_eq!(attack.vault, 4 * DEPOSIT as u128, "vault fully conserved");
+
+    // Control (honest keeper books the elapsed zero-move segment first) charges the attacker's
+    // matched pair: the attacker (short 5) pays 5 and the independent, still-open LP (long 5)
+    // receives 5. This is the ground-truth funding outcome for the slot1->slot2 interval.
+    assert_eq!(
+        control.attacker_funding_short_paid, 5,
+        "control must charge the attacker its owed premium"
+    );
+    assert_eq!(
+        control.lp_funding_long_received, 5,
+        "control must credit the independent LP its earned premium"
+    );
+    assert_eq!(control.lp_pnl, 5, "control LP realizes +5 premium");
+    assert_eq!(
+        control.attacker_withdrawn,
+        DEPOSIT as u64 - 5,
+        "control attacker withdraws its deposit minus the 5 premium it owes"
+    );
+
+    // THE PROPERTY UNDER TEST (independent-victim isolation): forfeiting the dead short leg BEFORE
+    // the segment is booked must not let the attacker escape the premium it owes, nor deny the
+    // independent LP the premium it earns. On the unfixed parent the attacker pays 0 / withdraws
+    // its full deposit and the LP receives 0 -> these assertions FAIL (the red state). The
+    // accrue-zero-move-funding-before-forfeit fix makes both orderings agree.
+    assert_eq!(
+        attack.attacker_funding_short_paid, control.attacker_funding_short_paid,
+        "ForfeitRecoveryLeg must not erase the attacker's owed zero-move premium"
+    );
+    assert_eq!(
+        attack.attacker_withdrawn, control.attacker_withdrawn,
+        "attacker must not withdraw more by forfeiting its dead leg before the crank"
+    );
+    assert_eq!(
+        attack.lp_funding_long_received, control.lp_funding_long_received,
+        "independent LP must still receive its earned premium after an early forfeit"
+    );
+    assert_eq!(
+        attack.lp_pnl, control.lp_pnl,
+        "independent LP realizable pnl must not be reduced by the attacker's forfeit"
+    );
+}
