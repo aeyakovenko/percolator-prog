@@ -481,7 +481,8 @@ This section describes intent and operational ordering, not argument-by-argument
 - **ForfeitRecoveryLeg** (tag 43)
   - owner-signed recovery-leg forfeit for a selected asset and bounded B-delta budget
 - **RebalanceReduce** (tag 44)
-  - owner-signed risk-reducing rebalance against the wrapper-authenticated effective price vector
+  - owner-signed risk-reducing rebalance against the wrapper-authenticated effective price vector;
+    the payload binds consent to the program-assigned `portfolio_id`
 - **ClaimResolvedPayoutTopup** (tag 46)
   - permissionless resolved-payout top-up claim; pays only the stored owner receipt token account
 
