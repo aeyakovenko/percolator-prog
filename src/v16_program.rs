@@ -10688,6 +10688,7 @@ pub mod processor {
                 Some(AutoCrankPlanV16::RefreshAccount {
                     asset_index: Some(i),
                 })
+                | Some(AutoCrankPlanV16::AdvanceRecoveryClose { asset_index: i })
                 | Some(AutoCrankPlanV16::SettleBChunk { asset_index: i })
                 | Some(AutoCrankPlanV16::Liquidate { asset_index: i }) => *i,
                 _ => observations.first().map(|o| o.asset_index).unwrap_or(0),
@@ -10876,7 +10877,7 @@ pub mod processor {
         portfolio: &percolator::PortfolioV16ViewMut<'_>,
         summary: &percolator::ActionableSummaryV16,
     ) -> Result<Option<usize>, ProgramError> {
-        if summary.b_stale {
+        if summary.pending_close || summary.b_stale {
             return Ok(None);
         }
         if summary.stale || summary.liquidatable {

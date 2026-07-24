@@ -17136,6 +17136,158 @@ fn v16_regression_cross_margin_insolvency_no_value_extraction() {
     );
 }
 
+// Cross-asset DoS: an untrusted permissionless asset must not be able to promote its own
+// abandoned close ledger into market-wide Recovery. The attacker controls the asset authority and
+// both sides of its book; unrelated base traders must retain their ordinary close path.
+#[test]
+fn v16_attack_permissionless_asset_expired_close_cannot_global_recover() {
+    let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+        max_portfolio_assets: 1,
+        max_bankrupt_close_lifetime_slots: 2,
+        public_b_chunk_atoms: 1,
+        ..V16CuMarketParams::default()
+    });
+    env.configure_auth_mark_with_cu(0, 100);
+    env.configure_permissionless_resolve_with_cu(100, 5);
+    env.update_market_init_fee_policy_with_cu(1);
+
+    // Establish an unrelated, healthy base position before the malicious asset is stressed.
+    let base_long_owner = Keypair::new();
+    let base_short_owner = Keypair::new();
+    let base_long = env.create_portfolio(&base_long_owner);
+    let base_short = env.create_portfolio(&base_short_owner);
+    env.deposit(&base_long_owner, base_long, 1_000);
+    env.deposit(&base_short_owner, base_short, 1_000);
+    env.trade_asset_with_cu(
+        0,
+        &base_long_owner,
+        base_long,
+        &base_short_owner,
+        base_short,
+        POS_SCALE as i128,
+        100,
+        0,
+    );
+
+    let creator = Keypair::new();
+    let creator_key = creator.pubkey();
+    env.activate_permissionless_asset_with_fee(
+        &creator,
+        1,
+        1,
+        100,
+        creator_key,
+        creator_key,
+        creator_key,
+        creator_key,
+        1,
+    );
+    env.configure_auth_mark_for_asset_with_authority(1, &creator, 1, 100);
+
+    let attacker_long_owner = Keypair::new();
+    let attacker_short_owner = Keypair::new();
+    let attacker_long = env.create_portfolio(&attacker_long_owner);
+    let attacker_short = env.create_portfolio(&attacker_short_owner);
+    env.deposit(&attacker_long_owner, attacker_long, 10);
+    env.deposit(&attacker_short_owner, attacker_short, 2);
+    env.trade_asset_with_cu(
+        1,
+        &attacker_long_owner,
+        attacker_long,
+        &attacker_short_owner,
+        attacker_short,
+        (POS_SCALE / 50) as i128,
+        100,
+        0,
+    );
+
+    // Move only the attacker's asset. A healthy counterparty keeps the loss-side B weight nonzero;
+    // refreshing the undercollateralized short realizes a residual much larger than one B chunk.
+    for (slot, mark) in [(2u64, 200u64), (3, 300)] {
+        env.svm.warp_to_slot(slot);
+        env.push_auth_mark_for_asset_with_authority(1, &creator, slot, mark);
+        env.svm.expire_blockhash();
+        env.crank(
+            attacker_long,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: slot,
+                observations: crank_observations(1),
+            },
+        );
+    }
+    env.svm.expire_blockhash();
+    env.crank(
+        attacker_short,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 3,
+            observations: crank_observations(1),
+        },
+    );
+    let short_after_refresh = env.portfolio_state(attacker_short);
+    assert_eq!(short_after_refresh.capital.get(), 0);
+    assert!(
+        short_after_refresh.pnl.get() < -1,
+        "probe needs a residual larger than the configured public B chunk"
+    );
+
+    env.svm.warp_to_slot(4);
+    env.try_shutdown_asset_with_authority(&creator, 1, 4)
+        .expect("permissionless asset authority can shut down its own asset");
+    env.svm.expire_blockhash();
+    env.forfeit_recovery_leg_with_cu(&attacker_short_owner, attacker_short, 1, 1);
+
+    let pending = env.portfolio_state(attacker_short);
+    let ledger = close_progress(&pending);
+    assert!(ledger.active && ledger.residual_remaining > 0);
+    assert_eq!(ledger.residual_remaining, 1);
+    assert_eq!(env.market_state().1.mode, MarketModeV16::Live);
+
+    // Anyone can submit this crank after the attacker deliberately abandons its partial close.
+    let expired_slot = ledger.max_close_slot + 1;
+    env.svm.warp_to_slot(expired_slot);
+    env.svm.expire_blockhash();
+    env.send(
+        ProgInstruction::PermissionlessCrank {
+            now_slot: expired_slot,
+            observations: vec![],
+        },
+        vec![
+            AccountMeta::new(env.payer.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(attacker_short, false),
+        ],
+        &[],
+    )
+    .expect("expired asset-local close should make bounded asset-local progress");
+
+    assert_eq!(
+        env.market_state().1.mode,
+        MarketModeV16::Live,
+        "an untrusted permissionless asset must not force global Recovery"
+    );
+    let completed = env.portfolio_state(attacker_short);
+    assert_eq!(close_progress(&completed).residual_remaining, 0);
+    assert!(
+        !has_active_leg_for_asset(&completed, 1),
+        "the bounded asset-local continuation must detach the completed dead leg"
+    );
+    env.svm.expire_blockhash();
+    let base_exit = env.try_trade_asset_with_cu(
+        0,
+        &base_long_owner,
+        base_long,
+        &base_short_owner,
+        base_short,
+        -(POS_SCALE as i128),
+        100,
+        0,
+    );
+    assert!(
+        base_exit.is_ok(),
+        "unrelated base users must remain able to close: {base_exit:?}"
+    );
+}
+
 #[test]
 fn v16_attack_resolved_cross_margin_deep_insolvency_winds_down_publicly() {
     let mut env = V16CuEnv::new_with_market_params_and_price_move(2, 10_000, 10_000, 10_000);
