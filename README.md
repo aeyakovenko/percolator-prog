@@ -147,8 +147,14 @@ Assets 1..N are **truly permissionless ⇒ untrusted**. The protocol must guaran
   together with its starting counters and require the same tuple before crystallization or claim;
   counter deltas must use checked subtraction. Closing and recreating the same portfolio pubkey gets
   a different ID, so a stale snapshot cannot authenticate the replacement account. IDs are local to
-  one market, so `portfolio_id` alone is not an identity. **✅**
-  (`v16_portfolio_incarnation_id_separates_close_and_reuse`.)
+  one market, so `portfolio_id` alone is not an identity.
+  Signed portfolio-scoped authority is bound the same way: no-CPI trades carry both current
+  portfolio IDs, matcher-CPI trades carry the taker's current ID, and `SetMatcherConfig` carries
+  the LP's current ID. Retained instructions from a closed account therefore cannot create risk or
+  matcher authority in its replacement incarnation. **✅**
+  (`v16_portfolio_incarnation_id_separates_close_and_reuse`,
+  `v16_attack_trade_replay_cannot_cross_portfolio_incarnation`,
+  `v16_trade_routes_reject_stale_portfolio_incarnation_in_every_signed_role`.)
 
 ### Governance & admin keys
 - **Per-asset admin keys, isolated — uniform across all assets including asset 0** — one asset's admin
@@ -352,7 +358,8 @@ This makes it a "pure identity signer" and prevents it from becoming an attack s
 ### LP matcher config (TradeCpi / BatchTradeCpi)
 Unsigned LP matcher fills require an enabled matcher config stored directly on the LP portfolio.
 
-`SetMatcherConfig` (tag 68) is signed by the LP owner and writes:
+`SetMatcherConfig` (tag 68) is signed by the LP owner, carries the portfolio's current
+`portfolio_id`, and writes:
 
 `matcher_program, matcher_context, matcher_delegate, enabled`
 
@@ -360,6 +367,9 @@ During `TradeCpi` / `BatchTradeCpi`, Percolator reads this LP-account config and
 instruction's matcher program, matcher context, and matcher delegate PDA to match it byte-for-byte.
 Extra matcher CPI tail accounts begin immediately after the matcher delegate. Disabled configs,
 wrong matcher program/context/delegate, wrong LP owner, or wrong LP portfolio all reject.
+An incarnation mismatch also rejects, so an authorization retained from a closed portfolio cannot
+bind a later account at the same address. Legacy portfolios without the ID tail use ID 0 until
+they are closed; every new incarnation has a nonzero program-assigned ID.
 
 ### Matcher context (TradeCpi)
 - account owned by matcher program
@@ -430,25 +440,29 @@ This section describes intent and operational ordering, not argument-by-argument
 
 ### Trading
 - **TradeNoCpi**
-  - trade without external matcher (used for testing / deterministic scenarios)
+  - trade without external matcher (used for testing / deterministic scenarios); the signed
+    payload carries the current taker and LP `portfolio_id` values
 - **TradeCpi**
   - trade via LP-chosen matcher CPI with strict binding + validation. The LP portfolio must already
-    store an enabled matcher config for the passed matcher program/context/delegate tuple.
+    store an enabled matcher config for the passed matcher program/context/delegate tuple; the
+    signed payload carries the current taker `portfolio_id`
 - **BatchTradeNoCpi** (tag 66)
   - atomic multi-leg batch (up to the portfolio asset cap) against one taker/LP pair; each leg's
     **signed** `size_q` sets its direction, so a single batch can carry a mixed long/short spread.
     The engine settles both accounts once, applies every leg, then runs a **single end-state
     initial-margin check** — interim legs need not be individually margin-feasible. Current v1 batch
     execution rejects if any backing-domain trade-fee policy is configured, so those fees are not
-    silently skipped.
+    silently skipped. The batch payload carries the current taker and LP `portfolio_id` values.
 - **BatchTradeCpi** (tag 67)
   - same atomic multi-leg batch routed through an external matcher: **one** batched matcher CPI
     (matcher tag 3) fills every leg against a single LP, each return is validated under the same
     anti-spoof binding as `TradeCpi`, then all fills apply through the batch path. Bounded to 16
-    legs (the matcher's return-data cap).
+    legs (the matcher's return-data cap). The signed payload carries the current taker
+    `portfolio_id`.
 - **SetMatcherConfig** (tag 68)
-  - LP-owner-signed opt-in/out for unsigned LP matcher fills. This writes the matcher config tail
-    on the LP portfolio: matcher program, matcher context, matcher delegate, and enabled flag.
+  - LP-owner-signed opt-in/out for unsigned LP matcher fills. The payload includes the current
+    `portfolio_id`; the instruction writes matcher program, matcher context, matcher delegate, and
+    enabled flag only when that incarnation matches.
 
 ### Oracle / mark management
 - External-oracle markets authenticate configured oracle account(s) in the oracle configuration/crank
@@ -498,7 +512,8 @@ Percolator treats a matcher like a price/size oracle **with rules** chosen by th
 
 ### What Percolator enforces (non-negotiable)
 - **Signer checks**: the taker/user signs matcher fills; `TradeNoCpi` / `BatchTradeNoCpi`
-  require both owners to sign
+  require both owners to sign. Every signed trade also commits to the current incarnation IDs of
+  the portfolio roles authorized by those signatures.
 - **LP owner identity**: matcher-routed fills read the LP owner from the LP portfolio; no LP owner
   account is supplied at fill time. Unsigned matcher-routed fills require an enabled matcher config
   set by that LP owner.
@@ -761,7 +776,8 @@ Call `InitMarket` with:
   - deploy or choose matcher program
   - create matcher context account owned by matcher program
   - create a portfolio with `InitPortfolio`
-  - call `SetMatcherConfig` with the LP owner signing the exact matcher program/context/delegate tuple
+  - call `SetMatcherConfig` with the LP owner signing the current `portfolio_id` and exact matcher
+    program/context/delegate tuple
   - deposit collateral with `Deposit`
 - User:
   - create a portfolio with `InitPortfolio`
@@ -774,8 +790,9 @@ Call `TopUpInsurance` as needed.
 Run `PermissionlessCrank` continuously.
 
 ### Step 5: Enable trading
-- Use `TradeNoCpi` for local testing or deterministic environments
-- Use `TradeCpi` for production execution via matcher CPI
+- Read the participating portfolios' current `portfolio_id` values immediately before signing.
+- Use `TradeNoCpi` for local testing or deterministic environments, signing both IDs.
+- Use `TradeCpi` for production execution via matcher CPI, signing the taker's ID.
 
 ---
 
