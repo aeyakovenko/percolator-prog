@@ -9733,18 +9733,25 @@ pub mod processor {
         {
             return Err(PercolatorError::InvalidInstruction.into());
         }
-        let (mut cfg, mode, _, _) =
-            state::read_market_config_mode_and_capacity(&market_ai.try_borrow_data()?)?;
+        let mut market_data = market_ai.try_borrow_mut_data()?;
+        let (mut cfg, group) = state::market_view_mut(&mut market_data)?;
         expect_live_authority(&cfg.marketauth, admin.key)?;
-        if mode != MarketModeV16::Live {
+        if group.header.mode != 0 {
             return Err(PercolatorError::EngineLockActive.into());
         }
         if oracle_v16::permissionless_stale_matured(&cfg, authenticated_slot_or_fallback(0)) {
             return Err(PercolatorError::OracleStale.into());
         }
+        if cfg.force_close_delay_slots != 0
+            && force_close_delay_slots > cfg.force_close_delay_slots
+            && group.header.c_tot.get() != 0
+        {
+            return Err(PercolatorError::EngineLockActive.into());
+        }
         cfg.permissionless_resolve_stale_slots = stale_slots;
         cfg.force_close_delay_slots = force_close_delay_slots;
-        state::write_wrapper_config(&mut market_ai.try_borrow_mut_data()?, &cfg)
+        drop(group);
+        state::write_wrapper_config(&mut market_data, &cfg)
     }
 
     #[inline(never)]
