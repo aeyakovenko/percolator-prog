@@ -8173,6 +8173,9 @@ pub mod processor {
                 if !live_authority_matches(&authorities.insurance_authority, operator.key) {
                     return Err(PercolatorError::Unauthorized.into());
                 }
+                group
+                    .recredit_terminal_claim_free_residual_for_asset_not_atomic(asset_index)
+                    .map_err(map_v16_error)?;
                 authorities.insurance_authority
             };
             let available = market_insurance_withdraw_capacity_view(&group, asset_index)?;
