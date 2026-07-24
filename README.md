@@ -266,10 +266,11 @@ Benefits:
 Positions and PnL use native `i128`/`u128` (`POS_SCALE = 1_000_000`, `ADL_ONE = 1_000_000_000_000_000`). There are no I256/U256 wrapper types for positions or PnL. Positions use the ADL A/K coefficient mechanism defined in the spec.
 
 ### Two trade paths
-- **TradeNoCpi**: no external matcher; used for baseline integration, local testing, and deterministic program-test scenarios.
+- **TradeNoCpi**: no external matcher; used for baseline integration, local testing, and deterministic program-test scenarios. Its signed payload binds both program-assigned portfolio incarnation IDs.
 - **TradeCpi**: production matcher path; the LP owner configures a matcher program/context once on
   the LP portfolio with `SetMatcherConfig` (tag 68). Fills then run without the LP owner
-  signing each transaction. Direct LP-signed bilateral trading is `TradeNoCpi`.
+  signing each transaction. The taker's signed payload binds both portfolio incarnation IDs. Direct
+  LP-signed bilateral trading is `TradeNoCpi`.
 
 ### MatchingEngine trait
 The `MatchingEngine` trait is defined in the Percolator program (not in the engine crate). The engine is a pure recorder of state transitions and does not define the matching interface. Two implementations exist: `NoOpMatcher` (TradeNoCpi) and `CpiMatcher` (TradeCpi).
@@ -429,6 +430,9 @@ This section describes intent and operational ordering, not argument-by-argument
   - transfers collateral into vault; credits insurance fund in engine
 
 ### Trading
+- Every single or batch trade carries `[account_a_portfolio_id, account_b_portfolio_id]`. The IDs
+  must match the current program-assigned incarnations before matcher CPI or engine mutation, so a
+  retained signature cannot bind to an account recreated at the same address.
 - **TradeNoCpi**
   - trade without external matcher (used for testing / deterministic scenarios)
 - **TradeCpi**

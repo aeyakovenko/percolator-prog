@@ -9,6 +9,7 @@ use percolator_prog::{
         ASSET_ORACLE_WRAPPER_LEN, MARKET_GROUP_OFF, MATCHER_ABI_VERSION, MATCHER_CONTEXT_MIN_LEN,
         ORACLE_LEG_FLAG_DIVIDE_LEG2, ORACLE_LEG_FLAG_DIVIDE_LEG3, PORTFOLIO_ENGINE_ACCOUNT_LEN,
     },
+    error::PercolatorError,
     ix::{BatchTradeCpiLeg, BatchTradeLeg, CrankObservationHint, Instruction as ProgInstruction},
     oracle_v16, processor, state,
     state::{MarketGroupV16, PortfolioAccountV16},
@@ -493,6 +494,10 @@ fn cu_ix() -> Instruction {
 fn heap_ix() -> Instruction {
     ComputeBudgetInstruction::request_heap_frame(128 * 1024)
 }
+
+// Test callers use this sentinel and `send_tx` resolves it from the public account bytes before the
+// transaction is signed. Production callers must encode the two current portfolio IDs explicitly.
+const AUTO_PORTFOLIO_IDS: [u64; 2] = [0, 0];
 
 struct V16CuEnv {
     svm: LiteSVM,
@@ -1482,6 +1487,7 @@ impl V16CuEnv {
     ) -> Result<u64, String> {
         self.send(
             ProgInstruction::TradeNoCpi {
+                portfolio_ids: AUTO_PORTFOLIO_IDS,
                 asset_index,
                 size_q,
                 exec_price,
@@ -2161,6 +2167,7 @@ impl V16CuEnv {
         ];
         self.send(
             ProgInstruction::TradeCpi {
+                portfolio_ids: AUTO_PORTFOLIO_IDS,
                 asset_index,
                 size_q,
                 fee_bps,
@@ -3621,10 +3628,11 @@ fn send_tx(
     svm: &mut LiteSVM,
     program_id: Pubkey,
     payer: &Keypair,
-    ix: ProgInstruction,
+    mut ix: ProgInstruction,
     accounts: Vec<AccountMeta>,
     extra_signers: &[&Keypair],
 ) -> Result<u64, String> {
+    bind_test_trade_portfolio_ids(svm, &mut ix, &accounts);
     let instruction = Instruction {
         program_id,
         accounts,
@@ -3642,6 +3650,49 @@ fn send_tx(
     svm.send_transaction(tx)
         .map(|meta| meta.compute_units_consumed)
         .map_err(|e| format!("{e:?}"))
+}
+
+fn bind_test_trade_portfolio_ids(
+    svm: &LiteSVM,
+    ix: &mut ProgInstruction,
+    accounts: &[AccountMeta],
+) {
+    let (portfolio_ids, account_a_index, account_b_index) = match ix {
+        ProgInstruction::TradeNoCpi { portfolio_ids, .. }
+        | ProgInstruction::BatchTradeNoCpi { portfolio_ids, .. } => (portfolio_ids, 3, 4),
+        ProgInstruction::TradeCpi { portfolio_ids, .. }
+        | ProgInstruction::BatchTradeCpi { portfolio_ids, .. } => (portfolio_ids, 2, 3),
+        _ => return,
+    };
+    if *portfolio_ids != AUTO_PORTFOLIO_IDS {
+        return;
+    }
+    let Some(account_a) = accounts.get(account_a_index) else {
+        return;
+    };
+    let Some(account_b) = accounts.get(account_b_index) else {
+        return;
+    };
+    let Some(account_a_id) = test_portfolio_id(svm, account_a.pubkey) else {
+        return;
+    };
+    let Some(account_b_id) = test_portfolio_id(svm, account_b.pubkey) else {
+        return;
+    };
+    *portfolio_ids = [account_a_id, account_b_id];
+}
+
+fn test_portfolio_id(svm: &LiteSVM, portfolio: Pubkey) -> Option<u64> {
+    let account = svm.get_account(&portfolio)?;
+    let required_len = state::portfolio_account_len_for_market_slots(0).ok()?;
+    if account.data.len() < required_len {
+        Some(u64::MAX)
+    } else {
+        state::read_portfolio_id(&account.data).ok().or_else(|| {
+            (account.data[percolator_prog::constants::PORTFOLIO_ID_OFF..required_len] == [0u8; 8])
+                .then_some(u64::MAX)
+        })
+    }
 }
 
 fn send_raw_tx(
@@ -13415,6 +13466,7 @@ fn execute_account_residual_counter_trade_path(
         AccountResidualCounterTradePath::BatchTradeNoCpi => env
             .send(
                 ProgInstruction::BatchTradeNoCpi {
+                    portfolio_ids: AUTO_PORTFOLIO_IDS,
                     legs: vec![BatchTradeLeg {
                         asset_index: 0,
                         size_q,
@@ -13437,6 +13489,7 @@ fn execute_account_residual_counter_trade_path(
                 auth_matcher_for_lp_via_system_create(env, lp_owner, lp_account);
             env.send(
                 ProgInstruction::BatchTradeCpi {
+                    portfolio_ids: AUTO_PORTFOLIO_IDS,
                     legs: vec![BatchTradeCpiLeg {
                         asset_index: 0,
                         size_q,
@@ -13582,6 +13635,7 @@ fn v16_bpf_account_residual_reward_counter_accumulates_across_batch_legs() {
                 auth_matcher_for_lp_via_system_create(&mut env, &lp_owner, lp_account);
             env.send(
                 ProgInstruction::BatchTradeCpi {
+                    portfolio_ids: AUTO_PORTFOLIO_IDS,
                     legs: vec![
                         BatchTradeCpiLeg {
                             asset_index: 0,
@@ -13612,6 +13666,7 @@ fn v16_bpf_account_residual_reward_counter_accumulates_across_batch_legs() {
         } else {
             env.send(
                 ProgInstruction::BatchTradeNoCpi {
+                    portfolio_ids: AUTO_PORTFOLIO_IDS,
                     legs: vec![
                         BatchTradeLeg {
                             asset_index: 0,
@@ -13757,6 +13812,7 @@ fn execute_backing_residual_counter_trade_path(
         BackingResidualCounterTradePath::BatchTradeNoCpi => env
             .send(
                 ProgInstruction::BatchTradeNoCpi {
+                    portfolio_ids: AUTO_PORTFOLIO_IDS,
                     legs: vec![BatchTradeLeg {
                         asset_index: 0,
                         size_q,
@@ -13778,6 +13834,7 @@ fn execute_backing_residual_counter_trade_path(
             let (matcher_program, ctx, delegate) = auth_matcher_for_lp(env, lp_owner, lp_account);
             env.send(
                 ProgInstruction::BatchTradeCpi {
+                    portfolio_ids: AUTO_PORTFOLIO_IDS,
                     legs: vec![BatchTradeCpiLeg {
                         asset_index: 0,
                         size_q,
@@ -15944,6 +16001,7 @@ fn v16_attack_account_type_confusion_rejected() {
     env.svm.expire_blockhash();
     let r2 = env.send(
         ProgInstruction::TradeNoCpi {
+            portfolio_ids: AUTO_PORTFOLIO_IDS,
             asset_index: 0,
             size_q: POS_SCALE as i128,
             exec_price: 100,
@@ -19250,6 +19308,303 @@ fn v16_portfolio_incarnation_id_separates_close_and_reuse() {
     assert_eq!(replacement.residual_received_atoms_total.get(), 0);
 }
 
+// A signed trade is consent for the named portfolio incarnation, not every later account that may
+// occupy the same address. Retain the exact transaction while the victim closes and publicly
+// recreates that address, then prove that replay cannot put fresh victim capital at risk.
+#[test]
+fn v16_attack_signed_trade_cannot_replay_after_portfolio_reinit() {
+    const PRICE: u64 = 100;
+    const ADVERSE_PRICE: u64 = 50;
+    const DEPOSIT: u128 = 1_000_000;
+    const SIZE_Q: i128 = (5_000 * POS_SCALE) as i128;
+
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(2, 1_000, 1_000, 500);
+    env.svm.warp_to_slot(1);
+    env.configure_auth_mark_with_cu(1, PRICE);
+
+    let victim = Keypair::new();
+    let attacker = Keypair::new();
+    let victim_portfolio = env.create_portfolio(&victim);
+    let attacker_portfolio = env.create_portfolio(&attacker);
+    let old_portfolio_id = env.portfolio_id(victim_portfolio);
+    let attacker_portfolio_id = env.portfolio_id(attacker_portfolio);
+
+    let stale_open_ix = Instruction {
+        program_id: env.program_id,
+        accounts: vec![
+            AccountMeta::new_readonly(victim.pubkey(), true),
+            AccountMeta::new_readonly(attacker.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(victim_portfolio, false),
+            AccountMeta::new(attacker_portfolio, false),
+        ],
+        data: ProgInstruction::TradeNoCpi {
+            portfolio_ids: [old_portfolio_id, attacker_portfolio_id],
+            asset_index: 0,
+            size_q: SIZE_Q,
+            exec_price: PRICE,
+            fee_bps: 0,
+        }
+        .encode(),
+    };
+    let stale_close_ix = Instruction {
+        program_id: env.program_id,
+        accounts: vec![
+            AccountMeta::new_readonly(victim.pubkey(), true),
+            AccountMeta::new_readonly(attacker.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(victim_portfolio, false),
+            AccountMeta::new(attacker_portfolio, false),
+        ],
+        data: ProgInstruction::TradeNoCpi {
+            portfolio_ids: [old_portfolio_id, attacker_portfolio_id],
+            asset_index: 0,
+            size_q: -SIZE_Q,
+            exec_price: PRICE,
+            fee_bps: 0,
+        }
+        .encode(),
+    };
+    let signed_blockhash = env.svm.latest_blockhash();
+    let stale_open = Transaction::new_signed_with_payer(
+        &[heap_ix(), cu_ix(), stale_open_ix],
+        Some(&attacker.pubkey()),
+        &[&attacker, &victim],
+        signed_blockhash,
+    );
+    let stale_close = Transaction::new_signed_with_payer(
+        &[heap_ix(), cu_ix(), stale_close_ix],
+        Some(&attacker.pubkey()),
+        &[&attacker, &victim],
+        signed_blockhash,
+    );
+
+    env.close_portfolio_with_cu(&victim, victim_portfolio);
+    env.svm.expire_blockhash();
+    send_raw_tx(
+        &mut env.svm,
+        &env.payer,
+        system_instruction::transfer(&env.payer.pubkey(), &victim_portfolio, 1_000_000_000),
+        &[],
+    )
+    .expect("re-fund the closed portfolio through the System Program");
+    env.svm.expire_blockhash();
+    env.send(
+        ProgInstruction::InitPortfolio,
+        vec![
+            AccountMeta::new(victim.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(victim_portfolio, false),
+        ],
+        &[&victim],
+    )
+    .expect("reinitialize the victim portfolio address");
+    let replacement_portfolio_id = env.portfolio_id(victim_portfolio);
+    assert_ne!(replacement_portfolio_id, old_portfolio_id);
+
+    env.deposit(&victim, victim_portfolio, DEPOSIT);
+    env.deposit(&attacker, attacker_portfolio, DEPOSIT);
+    let market_before_replay = env.svm.get_account(&env.market).unwrap();
+    let victim_before_replay = env.svm.get_account(&victim_portfolio).unwrap();
+    let attacker_before_replay = env.svm.get_account(&attacker_portfolio).unwrap();
+    let replay = env.svm.send_transaction(stale_open);
+    if replay.is_ok() {
+        env.svm.warp_to_slot(11);
+        env.push_auth_mark_with_cu(11, ADVERSE_PRICE);
+        env.crank_steps(
+            victim_portfolio,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 11,
+                observations: crank_observations(0),
+            },
+            4,
+        );
+        env.crank_steps(
+            attacker_portfolio,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 11,
+                observations: crank_observations(0),
+            },
+            4,
+        );
+        let victim_after = env.portfolio_state(victim_portfolio);
+        let attacker_after = env.portfolio_state(attacker_portfolio);
+        let victim_equity = victim_after.capital.get() as i128 + victim_after.pnl.get();
+        let attacker_equity = attacker_after.capital.get() as i128 + attacker_after.pnl.get();
+        assert!(victim_equity < DEPOSIT as i128);
+        assert!(attacker_equity > DEPOSIT as i128);
+
+        env.svm
+            .send_transaction(stale_close)
+            .expect("the second retained transaction closes at the replacement market's mark");
+        let attacker_flat = env.portfolio_state(attacker_portfolio);
+        let released = attacker_flat.pnl.get() as u128;
+        assert!(released > 0);
+        env.convert_released_pnl_with_cu(&attacker, attacker_portfolio, released);
+        let withdrawable = env.portfolio_state(attacker_portfolio).capital.get();
+        let destination = env.withdraw(&attacker, attacker_portfolio, withdrawable);
+        assert_eq!(env.token_amount(destination) as u128, withdrawable);
+        assert!(withdrawable > DEPOSIT);
+        panic!(
+            "a trade signed for portfolio id {old_portfolio_id} opened risk on replacement id \
+             {replacement_portfolio_id}, reduced victim equity from {DEPOSIT} to {victim_equity}, \
+             and let the attacker withdraw {withdrawable}"
+        );
+    }
+
+    let replay_error = format!("{replay:?}");
+    let expected_error = format!(
+        "Custom({})",
+        PercolatorError::EngineProvenanceMismatch as u32
+    );
+    assert!(
+        replay_error.contains(&expected_error),
+        "stale trade must fail with {expected_error}, got {replay_error}"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before_replay
+    );
+    assert_eq!(
+        env.svm.get_account(&victim_portfolio).unwrap(),
+        victim_before_replay
+    );
+    assert_eq!(
+        env.svm.get_account(&attacker_portfolio).unwrap(),
+        attacker_before_replay
+    );
+
+    env.svm.expire_blockhash();
+    let stale_batch = env.send(
+        ProgInstruction::BatchTradeNoCpi {
+            portfolio_ids: [old_portfolio_id, attacker_portfolio_id],
+            legs: vec![BatchTradeLeg {
+                asset_index: 0,
+                size_q: SIZE_Q,
+                exec_price: PRICE,
+                fee_bps: 0,
+            }],
+        },
+        vec![
+            AccountMeta::new(victim.pubkey(), true),
+            AccountMeta::new(attacker.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(victim_portfolio, false),
+            AccountMeta::new(attacker_portfolio, false),
+        ],
+        &[&victim, &attacker],
+    );
+    assert!(
+        format!("{stale_batch:?}").contains(&expected_error),
+        "stale batch trade must fail with {expected_error}, got {stale_batch:?}"
+    );
+
+    let matcher_program = Pubkey::new_unique();
+    env.svm.add_program(
+        matcher_program,
+        &std::fs::read(auth_matcher_program_path()).unwrap(),
+    );
+    let (matcher_context, matcher_delegate, _) = env.init_auth_matcher_context_via_system_create(
+        matcher_program,
+        &attacker,
+        attacker_portfolio,
+    );
+    env.set_matcher_config(
+        matcher_program,
+        &attacker,
+        attacker_portfolio,
+        matcher_context,
+        matcher_delegate,
+        1,
+    );
+    let cpi_market_before = env.svm.get_account(&env.market).unwrap();
+    let cpi_victim_before = env.svm.get_account(&victim_portfolio).unwrap();
+    let cpi_attacker_before = env.svm.get_account(&attacker_portfolio).unwrap();
+    let cpi_context_before = env.svm.get_account(&matcher_context).unwrap();
+    for (label, instruction) in [
+        (
+            "TradeCpi",
+            ProgInstruction::TradeCpi {
+                portfolio_ids: [old_portfolio_id, attacker_portfolio_id],
+                asset_index: 0,
+                size_q: SIZE_Q,
+                fee_bps: 0,
+                limit_price: 0,
+            },
+        ),
+        (
+            "BatchTradeCpi",
+            ProgInstruction::BatchTradeCpi {
+                portfolio_ids: [old_portfolio_id, attacker_portfolio_id],
+                legs: vec![BatchTradeCpiLeg {
+                    asset_index: 0,
+                    size_q: SIZE_Q,
+                    fee_bps: 0,
+                    limit_price: 0,
+                }],
+            },
+        ),
+    ] {
+        env.svm.expire_blockhash();
+        let stale_cpi = env.send(
+            instruction,
+            vec![
+                AccountMeta::new(victim.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(victim_portfolio, false),
+                AccountMeta::new(attacker_portfolio, false),
+                AccountMeta::new_readonly(matcher_program, false),
+                AccountMeta::new(matcher_context, false),
+                AccountMeta::new_readonly(matcher_delegate, false),
+            ],
+            &[&victim],
+        );
+        assert!(
+            format!("{stale_cpi:?}").contains(&expected_error),
+            "stale {label} must fail with {expected_error}, got {stale_cpi:?}"
+        );
+        assert_eq!(env.svm.get_account(&env.market).unwrap(), cpi_market_before);
+        assert_eq!(
+            env.svm.get_account(&victim_portfolio).unwrap(),
+            cpi_victim_before
+        );
+        assert_eq!(
+            env.svm.get_account(&attacker_portfolio).unwrap(),
+            cpi_attacker_before
+        );
+        assert_eq!(
+            env.svm.get_account(&matcher_context).unwrap(),
+            cpi_context_before
+        );
+    }
+
+    env.svm.expire_blockhash();
+    env.trade_with_cu(
+        &victim,
+        victim_portfolio,
+        &attacker,
+        attacker_portfolio,
+        SIZE_Q,
+        PRICE,
+        0,
+    );
+    env.trade_with_cu(
+        &victim,
+        victim_portfolio,
+        &attacker,
+        attacker_portfolio,
+        -SIZE_Q,
+        PRICE,
+        0,
+    );
+    assert!(percolator::active_bitmap_is_empty(active_bitmap(
+        &env.portfolio_state(victim_portfolio)
+    )));
+    assert!(percolator::active_bitmap_is_empty(active_bitmap(
+        &env.portfolio_state(attacker_portfolio)
+    )));
+}
+
 // security.md sweep — rounding asymmetry (#37 dust): trade fees must round UP (ceil, protocol favor)
 // so dust-notional trades are never free and repeated churn never leaks value to the trader. Attacker
 // success = a fee that floors to 0 (free trade) or insurance that fails to grow on a fee'd dust trade.
@@ -19371,6 +19726,7 @@ fn v16_attack_batch_subatom_fee_reconstruction_uses_ceil_notional() {
     let before_insurance = env.market_state().1.insurance;
     env.send(
         ProgInstruction::BatchTradeNoCpi {
+            portfolio_ids: AUTO_PORTFOLIO_IDS,
             legs: vec![BatchTradeLeg {
                 asset_index: 0,
                 size_q: sub_atom_size,
@@ -20473,6 +20829,7 @@ fn v16_attack_disabled_lp_matcher_config_blocks_cpi_fills() {
     env.svm.expire_blockhash();
     let single = env.send(
         ProgInstruction::TradeCpi {
+            portfolio_ids: AUTO_PORTFOLIO_IDS,
             asset_index: 0,
             size_q: (5 * POS_SCALE) as i128,
             fee_bps: 100,
@@ -20501,6 +20858,7 @@ fn v16_attack_disabled_lp_matcher_config_blocks_cpi_fills() {
     env.svm.expire_blockhash();
     let batch = env.send(
         ProgInstruction::BatchTradeCpi {
+            portfolio_ids: AUTO_PORTFOLIO_IDS,
             legs: vec![BatchTradeCpiLeg {
                 asset_index: 0,
                 size_q: (5 * POS_SCALE) as i128,
@@ -20740,6 +21098,7 @@ fn v16_attack_tradecpi_matcher_config_arguments_must_match_account_bytes() {
         env.svm.expire_blockhash();
         env.send(
             ProgInstruction::TradeCpi {
+                portfolio_ids: AUTO_PORTFOLIO_IDS,
                 asset_index: 0,
                 size_q: (5 * POS_SCALE) as i128,
                 fee_bps: 100,
@@ -20857,6 +21216,7 @@ fn v16_attack_batch_tradecpi_matcher_config_arguments_must_match_account_bytes()
     env.svm.expire_blockhash();
     let r = env.send(
         ProgInstruction::BatchTradeCpi {
+            portfolio_ids: AUTO_PORTFOLIO_IDS,
             legs: vec![
                 BatchTradeCpiLeg {
                     asset_index: 0,
@@ -20897,6 +21257,7 @@ fn v16_attack_batch_tradecpi_matcher_config_arguments_must_match_account_bytes()
     env.svm.expire_blockhash();
     let ok = env.send(
         ProgInstruction::BatchTradeCpi {
+            portfolio_ids: AUTO_PORTFOLIO_IDS,
             legs: vec![BatchTradeCpiLeg {
                 asset_index: 0,
                 size_q: sz,
@@ -21123,6 +21484,7 @@ fn v16_attack_matcher_config_and_fills_reject_self_program_context() {
         env.svm.expire_blockhash();
         env.send(
             ProgInstruction::TradeCpi {
+                portfolio_ids: AUTO_PORTFOLIO_IDS,
                 asset_index: 0,
                 size_q: (5 * POS_SCALE) as i128,
                 fee_bps: 100,
@@ -21155,6 +21517,7 @@ fn v16_attack_matcher_config_and_fills_reject_self_program_context() {
     env.svm.expire_blockhash();
     let self_batch = env.send(
         ProgInstruction::BatchTradeCpi {
+            portfolio_ids: AUTO_PORTFOLIO_IDS,
             legs: vec![BatchTradeCpiLeg {
                 asset_index: 0,
                 size_q: (5 * POS_SCALE) as i128,
@@ -21251,6 +21614,17 @@ fn v16_attack_set_matcher_config_reallocs_legacy_lp_portfolio_safely() {
     assert_eq!(auth_state.matcher_program, matcher_program.to_bytes());
     assert_eq!(auth_state.matcher_context, ctx.to_bytes());
     assert_eq!(auth_state.matcher_delegate, delegate.to_bytes());
+    assert_eq!(
+        &lp_after_config.data
+            [percolator_prog::constants::PORTFOLIO_ID_OFF..env.portfolio_account_len],
+        &[0u8; 8],
+        "growing an old matcher config leaves an unassigned incarnation tail"
+    );
+    assert_eq!(
+        test_portfolio_id(&env.svm, lp),
+        Some(u64::MAX),
+        "the trade encoder addresses a grown legacy portfolio by its reserved incarnation"
+    );
 
     env.deposit(&taker_owner, taker, 1_000_000);
     env.deposit(&lp_owner, lp, 1_000_000);
@@ -21467,6 +21841,7 @@ fn v16_attack_permissionless_lp_cpi_rejects_wrong_delegate_owner_or_account_bind
     );
 
     let batch_ix = ProgInstruction::BatchTradeCpi {
+        portfolio_ids: AUTO_PORTFOLIO_IDS,
         legs: vec![BatchTradeCpiLeg {
             asset_index: 0,
             size_q: sz,
@@ -21538,6 +21913,7 @@ fn v16_attack_nocpi_trades_still_require_lp_owner_signature() {
     env.svm.expire_blockhash();
     let single = env.send(
         ProgInstruction::TradeNoCpi {
+            portfolio_ids: AUTO_PORTFOLIO_IDS,
             asset_index: 0,
             size_q: (10 * POS_SCALE) as i128,
             exec_price: 100,
@@ -21559,6 +21935,7 @@ fn v16_attack_nocpi_trades_still_require_lp_owner_signature() {
     env.svm.expire_blockhash();
     let batch = env.send(
         ProgInstruction::BatchTradeNoCpi {
+            portfolio_ids: AUTO_PORTFOLIO_IDS,
             legs: vec![
                 BatchTradeLeg {
                     asset_index: 0,
@@ -21621,6 +21998,7 @@ fn v16_attack_tradecpi_limit_price_enforced() {
         env.svm.expire_blockhash();
         env.send(
             ProgInstruction::TradeCpi {
+                portfolio_ids: AUTO_PORTFOLIO_IDS,
                 asset_index: 0,
                 size_q: (10 * POS_SCALE) as i128,
                 fee_bps: 100,
@@ -21749,6 +22127,7 @@ fn v16_attack_tradecpi_self_trade_rejected() {
     env.svm.expire_blockhash();
     let r = env.send(
         ProgInstruction::TradeCpi {
+            portfolio_ids: AUTO_PORTFOLIO_IDS,
             asset_index: 0,
             size_q: (10 * POS_SCALE) as i128,
             fee_bps: 100,
@@ -22381,6 +22760,7 @@ fn v16_attack_non_owner_cannot_withdraw_or_trade() {
     env.svm.expire_blockhash();
     let r_tr = env.send(
         ProgInstruction::TradeNoCpi {
+            portfolio_ids: AUTO_PORTFOLIO_IDS,
             asset_index: 0,
             size_q: POS_SCALE as i128,
             exec_price: 100,
@@ -26950,6 +27330,7 @@ fn v16_attack_non_base_slot_zero_profile_stale_rejects_trade() {
     env.svm.expire_blockhash();
     let stale_trade = env.send(
         ProgInstruction::TradeNoCpi {
+            portfolio_ids: AUTO_PORTFOLIO_IDS,
             asset_index: 1,
             size_q: POS_SCALE as i128,
             exec_price: 100,
@@ -27242,6 +27623,7 @@ fn v16_attack_non_base_trade_rejects_after_base_resolve_matured() {
     env.svm.expire_blockhash();
     let stale_trade = env.send(
         ProgInstruction::TradeNoCpi {
+            portfolio_ids: AUTO_PORTFOLIO_IDS,
             asset_index: 1,
             size_q: POS_SCALE as i128,
             exec_price: 101,
@@ -27396,6 +27778,7 @@ fn v16_attack_non_base_tradecpi_rejects_before_matcher_after_base_resolve_mature
     let fresh_err = env
         .send(
             ProgInstruction::TradeCpi {
+                portfolio_ids: AUTO_PORTFOLIO_IDS,
                 asset_index: 1,
                 size_q: POS_SCALE as i128,
                 fee_bps: 100,
@@ -27424,6 +27807,7 @@ fn v16_attack_non_base_tradecpi_rejects_before_matcher_after_base_resolve_mature
     let stale_err = env
         .send(
             ProgInstruction::TradeCpi {
+                portfolio_ids: AUTO_PORTFOLIO_IDS,
                 asset_index: 1,
                 size_q: POS_SCALE as i128,
                 fee_bps: 100,
@@ -28591,6 +28975,7 @@ fn v16_attack_rebalance_reduce_rejects_cross_market_portfolio_substitution() {
         env.program_id,
         &env.payer,
         ProgInstruction::TradeNoCpi {
+            portfolio_ids: AUTO_PORTFOLIO_IDS,
             asset_index: 0,
             size_q: POS_SCALE as i128,
             exec_price: 100,
@@ -28748,6 +29133,7 @@ fn v16_attack_forfeit_recovery_leg_rejects_cross_market_portfolio_substitution()
         env.program_id,
         &env.payer,
         ProgInstruction::TradeNoCpi {
+            portfolio_ids: AUTO_PORTFOLIO_IDS,
             asset_index: 0,
             size_q: POS_SCALE as i128,
             exec_price: 100,
@@ -30362,6 +30748,7 @@ fn v16_attack_trade_paths_reject_cross_market_portfolio_substitution() {
         reject_atomically(
             "TradeNoCpi",
             ProgInstruction::TradeNoCpi {
+                portfolio_ids: AUTO_PORTFOLIO_IDS,
                 asset_index: 0,
                 size_q: POS_SCALE as i128,
                 exec_price: 100,
@@ -30379,6 +30766,7 @@ fn v16_attack_trade_paths_reject_cross_market_portfolio_substitution() {
         reject_atomically(
             "BatchTradeNoCpi",
             ProgInstruction::BatchTradeNoCpi {
+                portfolio_ids: AUTO_PORTFOLIO_IDS,
                 legs: vec![BatchTradeLeg {
                     asset_index: 0,
                     size_q: POS_SCALE as i128,
@@ -30398,6 +30786,7 @@ fn v16_attack_trade_paths_reject_cross_market_portfolio_substitution() {
         reject_atomically(
             "TradeCpi",
             ProgInstruction::TradeCpi {
+                portfolio_ids: AUTO_PORTFOLIO_IDS,
                 asset_index: 0,
                 size_q: POS_SCALE as i128,
                 fee_bps: 100,
@@ -30417,6 +30806,7 @@ fn v16_attack_trade_paths_reject_cross_market_portfolio_substitution() {
         reject_atomically(
             "BatchTradeCpi",
             ProgInstruction::BatchTradeCpi {
+                portfolio_ids: AUTO_PORTFOLIO_IDS,
                 legs: vec![BatchTradeCpiLeg {
                     asset_index: 0,
                     size_q: POS_SCALE as i128,
@@ -30459,6 +30849,7 @@ fn v16_attack_trade_paths_reject_cross_market_portfolio_substitution() {
         env.program_id,
         &env.payer,
         ProgInstruction::TradeNoCpi {
+            portfolio_ids: AUTO_PORTFOLIO_IDS,
             asset_index: 0,
             size_q: POS_SCALE as i128,
             exec_price: 100,
@@ -30558,6 +30949,7 @@ fn v16_attack_trade_paths_reject_cross_market_portfolio_substitution() {
         env.program_id,
         &env.payer,
         ProgInstruction::BatchTradeCpi {
+            portfolio_ids: AUTO_PORTFOLIO_IDS,
             legs: vec![BatchTradeCpiLeg {
                 asset_index: 0,
                 size_q: POS_SCALE as i128,
@@ -31242,6 +31634,7 @@ fn v16_attack_permissionless_crank_rejects_cross_market_target_portfolio() {
         env.program_id,
         &env.payer,
         ProgInstruction::TradeNoCpi {
+            portfolio_ids: AUTO_PORTFOLIO_IDS,
             asset_index: 0,
             size_q: POS_SCALE as i128,
             exec_price: 100,
@@ -36903,6 +37296,7 @@ fn v16_attack_force_close_rejects_cross_market_portfolio_substitution() {
         env.program_id,
         &env.payer,
         ProgInstruction::TradeNoCpi {
+            portfolio_ids: AUTO_PORTFOLIO_IDS,
             asset_index: 1,
             size_q: POS_SCALE as i128,
             exec_price: 100,
@@ -37347,6 +37741,7 @@ fn try_no_cpi_reported_price_trade_with_cu(
         ),
         NoCpiReportedPricePath::Batch => env.send(
             ProgInstruction::BatchTradeNoCpi {
+                portfolio_ids: AUTO_PORTFOLIO_IDS,
                 legs: vec![BatchTradeLeg {
                     asset_index: 0,
                     size_q,
@@ -40811,6 +41206,7 @@ fn v16_attack_tradecpi_matcher_tail_cannot_carry_protocol_state() {
         ]
     };
     let ix = |asset_index, size_q| ProgInstruction::TradeCpi {
+        portfolio_ids: AUTO_PORTFOLIO_IDS,
         asset_index,
         size_q,
         fee_bps: 100,
@@ -40943,6 +41339,7 @@ fn v16_attack_tradecpi_matcher_tail_cannot_forward_taker_signer() {
     env.svm.expire_blockhash();
     let rejected = env.send(
         ProgInstruction::TradeCpi {
+            portfolio_ids: AUTO_PORTFOLIO_IDS,
             asset_index: 0,
             size_q: (5 * POS_SCALE) as i128,
             fee_bps: 100,
@@ -41031,6 +41428,7 @@ fn v16_attack_batch_tradecpi_matcher_tail_cannot_carry_protocol_state() {
     let victim_before = env.portfolio_state(victim);
     let sz = (5 * POS_SCALE) as i128;
     let ix = ProgInstruction::BatchTradeCpi {
+        portfolio_ids: AUTO_PORTFOLIO_IDS,
         legs: vec![
             BatchTradeCpiLeg {
                 asset_index: 0,
@@ -41205,7 +41603,10 @@ fn v16_attack_batch_tradecpi_matcher_tail_cannot_forward_taker_signer() {
 
     env.svm.expire_blockhash();
     let rejected = env.send(
-        ProgInstruction::BatchTradeCpi { legs: legs.clone() },
+        ProgInstruction::BatchTradeCpi {
+            portfolio_ids: AUTO_PORTFOLIO_IDS,
+            legs: legs.clone(),
+        },
         vec![
             AccountMeta::new(taker.pubkey(), true),
             AccountMeta::new(env.market, false),
@@ -41247,7 +41648,10 @@ fn v16_attack_batch_tradecpi_matcher_tail_cannot_forward_taker_signer() {
     env.svm.set_account(ctx, honest_ctx).unwrap();
     env.svm.expire_blockhash();
     let ok = env.send(
-        ProgInstruction::BatchTradeCpi { legs },
+        ProgInstruction::BatchTradeCpi {
+            portfolio_ids: AUTO_PORTFOLIO_IDS,
+            legs,
+        },
         vec![
             AccountMeta::new(taker.pubkey(), true),
             AccountMeta::new(env.market, false),
@@ -42746,6 +43150,7 @@ fn v16_attack_tradenocpi_self_trade_rejected() {
     env.svm.expire_blockhash();
     let r = env.send(
         ProgInstruction::TradeNoCpi {
+            portfolio_ids: AUTO_PORTFOLIO_IDS,
             asset_index: 0,
             size_q: POS_SCALE as i128,
             exec_price: 100,
@@ -42806,6 +43211,7 @@ fn v16_attack_batch_trade_self_trade_rejected() {
     env.svm.expire_blockhash();
     let direct = env.send(
         ProgInstruction::BatchTradeNoCpi {
+            portfolio_ids: AUTO_PORTFOLIO_IDS,
             legs: vec![batch_leg],
         },
         vec![
@@ -42839,6 +43245,7 @@ fn v16_attack_batch_trade_self_trade_rejected() {
     env.svm.expire_blockhash();
     let cpi = env.send(
         ProgInstruction::BatchTradeCpi {
+            portfolio_ids: AUTO_PORTFOLIO_IDS,
             legs: vec![BatchTradeCpiLeg {
                 asset_index: 0,
                 size_q: POS_SCALE as i128,
@@ -48477,6 +48884,7 @@ fn v16_bpf_batch_trade_executes_mixed_direction_spread() {
     let cu = env
         .send(
             ProgInstruction::BatchTradeNoCpi {
+                portfolio_ids: AUTO_PORTFOLIO_IDS,
                 legs: vec![
                     BatchTradeLeg {
                         asset_index: 0,
@@ -48535,6 +48943,7 @@ fn v16_attack_batch_duplicate_asset_legs_reject_atomically() {
     env.svm.expire_blockhash();
     let duplicate_nocpi = env.send(
         ProgInstruction::BatchTradeNoCpi {
+            portfolio_ids: AUTO_PORTFOLIO_IDS,
             legs: vec![
                 BatchTradeLeg {
                     asset_index: 0,
@@ -48596,6 +49005,7 @@ fn v16_attack_batch_duplicate_asset_legs_reject_atomically() {
     env.svm.expire_blockhash();
     let duplicate_cpi = env.send(
         ProgInstruction::BatchTradeCpi {
+            portfolio_ids: AUTO_PORTFOLIO_IDS,
             legs: vec![
                 BatchTradeCpiLeg {
                     asset_index: 0,
@@ -48655,6 +49065,7 @@ fn v16_attack_batch_duplicate_asset_legs_reject_atomically() {
     env.svm.expire_blockhash();
     let clean = env.send(
         ProgInstruction::BatchTradeCpi {
+            portfolio_ids: AUTO_PORTFOLIO_IDS,
             legs: vec![
                 BatchTradeCpiLeg {
                     asset_index: 0,
@@ -48768,7 +49179,10 @@ fn v16_attack_batch_tradecpi_duplicate_assets_reject_before_hostile_matcher_cpi(
             .unwrap();
         env.svm.expire_blockhash();
         env.send(
-            ProgInstruction::BatchTradeCpi { legs },
+            ProgInstruction::BatchTradeCpi {
+                portfolio_ids: AUTO_PORTFOLIO_IDS,
+                legs,
+            },
             vec![
                 AccountMeta::new(taker.pubkey(), true),
                 AccountMeta::new(env.market, false),
@@ -48936,6 +49350,7 @@ fn v16_attack_drain_only_existing_risk_increase_rejects_before_hostile_matcher_c
         (
             "TradeCpi",
             ProgInstruction::TradeCpi {
+                portfolio_ids: AUTO_PORTFOLIO_IDS,
                 asset_index: 0,
                 size_q: POS_SCALE as i128,
                 fee_bps: 0,
@@ -48945,6 +49360,7 @@ fn v16_attack_drain_only_existing_risk_increase_rejects_before_hostile_matcher_c
         (
             "BatchTradeCpi",
             ProgInstruction::BatchTradeCpi {
+                portfolio_ids: AUTO_PORTFOLIO_IDS,
                 legs: vec![BatchTradeCpiLeg {
                     asset_index: 0,
                     size_q: POS_SCALE as i128,
@@ -49021,6 +49437,7 @@ fn v16_bpf_batch_trade_checks_margin_on_final_portfolio_only() {
     let cu = env
         .send(
             ProgInstruction::BatchTradeNoCpi {
+                portfolio_ids: AUTO_PORTFOLIO_IDS,
                 legs: vec![
                     BatchTradeLeg {
                         asset_index: 1,
@@ -49082,7 +49499,10 @@ fn v16_bpf_batch_trade_14_legs_under_tx_limit() {
         .collect();
     let cu = env
         .send(
-            ProgInstruction::BatchTradeNoCpi { legs },
+            ProgInstruction::BatchTradeNoCpi {
+                portfolio_ids: AUTO_PORTFOLIO_IDS,
+                legs,
+            },
             vec![
                 AccountMeta::new(taker.pubkey(), true),
                 AccountMeta::new(lp.pubkey(), true),
@@ -49163,6 +49583,7 @@ fn v16_attack_batch_over_portfolio_leg_cap_rejects_atomically() {
         env.svm.expire_blockhash();
         let rejected = env.send(
             ProgInstruction::BatchTradeNoCpi {
+                portfolio_ids: AUTO_PORTFOLIO_IDS,
                 legs: nocpi_legs(OVER),
             },
             vec![
@@ -49185,6 +49606,7 @@ fn v16_attack_batch_over_portfolio_leg_cap_rejects_atomically() {
         env.svm.expire_blockhash();
         let ok = env.send(
             ProgInstruction::BatchTradeNoCpi {
+                portfolio_ids: AUTO_PORTFOLIO_IDS,
                 legs: nocpi_legs(CAP),
             },
             vec![
@@ -49223,6 +49645,7 @@ fn v16_attack_batch_over_portfolio_leg_cap_rejects_atomically() {
         env.svm.expire_blockhash();
         let rejected = env.send(
             ProgInstruction::BatchTradeCpi {
+                portfolio_ids: AUTO_PORTFOLIO_IDS,
                 legs: cpi_legs(OVER),
             },
             vec![
@@ -49248,6 +49671,7 @@ fn v16_attack_batch_over_portfolio_leg_cap_rejects_atomically() {
         env.svm.expire_blockhash();
         let ok = env.send(
             ProgInstruction::BatchTradeCpi {
+                portfolio_ids: AUTO_PORTFOLIO_IDS,
                 legs: cpi_legs(CAP),
             },
             vec![
@@ -49371,7 +49795,10 @@ fn v16_attack_batch_tradecpi_configured_leg_cap_rejects_before_hostile_matcher_c
             .collect();
         env.svm.expire_blockhash();
         env.send(
-            ProgInstruction::BatchTradeCpi { legs },
+            ProgInstruction::BatchTradeCpi {
+                portfolio_ids: AUTO_PORTFOLIO_IDS,
+                legs,
+            },
             vec![
                 AccountMeta::new(taker.pubkey(), true),
                 AccountMeta::new(env.market, false),
@@ -49456,7 +49883,10 @@ fn v16_attack_batch_decode_oversized_vectors_reject_before_allocation() {
         .collect();
     env.svm.expire_blockhash();
     let no_cpi = env.send(
-        ProgInstruction::BatchTradeNoCpi { legs: no_cpi_legs },
+        ProgInstruction::BatchTradeNoCpi {
+            portfolio_ids: AUTO_PORTFOLIO_IDS,
+            legs: no_cpi_legs,
+        },
         vec![
             AccountMeta::new(taker.pubkey(), true),
             AccountMeta::new(maker.pubkey(), true),
@@ -49490,7 +49920,10 @@ fn v16_attack_batch_decode_oversized_vectors_reject_before_allocation() {
         .collect();
     env.svm.expire_blockhash();
     let cpi = env.send(
-        ProgInstruction::BatchTradeCpi { legs: cpi_legs },
+        ProgInstruction::BatchTradeCpi {
+            portfolio_ids: AUTO_PORTFOLIO_IDS,
+            legs: cpi_legs,
+        },
         vec![],
         &[],
     );
@@ -49532,6 +49965,7 @@ fn v16_bpf_batch_trade_cpi_executes_mixed_spread_through_matcher() {
     let cu = env
         .send(
             ProgInstruction::BatchTradeCpi {
+                portfolio_ids: AUTO_PORTFOLIO_IDS,
                 legs: vec![
                     BatchTradeCpiLeg {
                         asset_index: 0,
@@ -49601,6 +50035,7 @@ fn v16_attack_batch_trades_reject_with_backing_fee_policy() {
     env.svm.expire_blockhash();
     let nocpi = env.send(
         ProgInstruction::BatchTradeNoCpi {
+            portfolio_ids: AUTO_PORTFOLIO_IDS,
             legs: vec![BatchTradeLeg {
                 asset_index: 0,
                 size_q: sz,
@@ -49639,6 +50074,7 @@ fn v16_attack_batch_trades_reject_with_backing_fee_policy() {
     env.svm.expire_blockhash();
     let cpi = env.send(
         ProgInstruction::BatchTradeCpi {
+            portfolio_ids: AUTO_PORTFOLIO_IDS,
             legs: vec![BatchTradeCpiLeg {
                 asset_index: 0,
                 size_q: sz,
@@ -49727,6 +50163,7 @@ fn v16_attack_backing_fee_policy_count_clears_batch_liveness() {
         env.svm.expire_blockhash();
         let rejected = env.send(
             ProgInstruction::BatchTradeNoCpi {
+                portfolio_ids: AUTO_PORTFOLIO_IDS,
                 legs: vec![BatchTradeLeg {
                     asset_index: 0,
                     size_q: sz,
@@ -49772,6 +50209,7 @@ fn v16_attack_backing_fee_policy_count_clears_batch_liveness() {
     env.svm.expire_blockhash();
     let reopened = env.send(
         ProgInstruction::BatchTradeNoCpi {
+            portfolio_ids: AUTO_PORTFOLIO_IDS,
             legs: vec![BatchTradeLeg {
                 asset_index: 0,
                 size_q: sz,
@@ -49887,6 +50325,7 @@ fn v16_attack_non_active_asset_cannot_enable_backing_fee_batch_gate() {
         env.svm.expire_blockhash();
         let batch = env.send(
             ProgInstruction::BatchTradeNoCpi {
+                portfolio_ids: AUTO_PORTFOLIO_IDS,
                 legs: vec![BatchTradeLeg {
                     asset_index: 0,
                     size_q: sz,
@@ -50032,6 +50471,7 @@ fn v16_attack_retired_reused_asset_backing_fee_policy_cannot_stick_batch_gate() 
     env.svm.expire_blockhash();
     let batch = env.send(
         ProgInstruction::BatchTradeNoCpi {
+            portfolio_ids: AUTO_PORTFOLIO_IDS,
             legs: vec![BatchTradeLeg {
                 asset_index: 0,
                 size_q: sz,
@@ -50158,6 +50598,7 @@ fn v16_attack_inactive_asset_tradecpi_rejects_before_hostile_matcher_cpi() {
         let fresh_err = env
             .send(
                 ProgInstruction::TradeCpi {
+                    portfolio_ids: AUTO_PORTFOLIO_IDS,
                     asset_index: 1,
                     size_q: POS_SCALE as i128,
                     fee_bps: 0,
@@ -50224,6 +50665,7 @@ fn v16_attack_inactive_asset_tradecpi_rejects_before_hostile_matcher_cpi() {
             let rejected = if batch {
                 env.send(
                     ProgInstruction::BatchTradeCpi {
+                        portfolio_ids: AUTO_PORTFOLIO_IDS,
                         legs: vec![BatchTradeCpiLeg {
                             asset_index: 1,
                             size_q: POS_SCALE as i128,
@@ -50237,6 +50679,7 @@ fn v16_attack_inactive_asset_tradecpi_rejects_before_hostile_matcher_cpi() {
             } else {
                 env.send(
                     ProgInstruction::TradeCpi {
+                        portfolio_ids: AUTO_PORTFOLIO_IDS,
                         asset_index: 1,
                         size_q: POS_SCALE as i128,
                         fee_bps: 0,
@@ -50290,6 +50733,7 @@ fn v16_attack_batch_cpi_fee_bps_bounded_for_permissionless_lp() {
         env.svm.expire_blockhash();
         env.send(
             ProgInstruction::BatchTradeCpi {
+                portfolio_ids: AUTO_PORTFOLIO_IDS,
                 legs: vec![BatchTradeCpiLeg {
                     asset_index: 0,
                     size_q: (5 * POS_SCALE) as i128,
@@ -50390,7 +50834,10 @@ fn v16_bpf_batch_trade_cpi_14_legs_under_tx_limit() {
     env.svm.expire_blockhash();
     let cu = env
         .send(
-            ProgInstruction::BatchTradeCpi { legs },
+            ProgInstruction::BatchTradeCpi {
+                portfolio_ids: AUTO_PORTFOLIO_IDS,
+                legs,
+            },
             vec![
                 AccountMeta::new(taker.pubkey(), true),
                 AccountMeta::new(env.market, false),
@@ -50537,7 +50984,10 @@ fn v16_attack_10m_batch_tradecpi_max_tail_rejects_before_cu_exhaustion() {
         .collect();
     env.svm.expire_blockhash();
     env.send(
-        ProgInstruction::BatchTradeNoCpi { legs: seed_legs },
+        ProgInstruction::BatchTradeNoCpi {
+            portfolio_ids: AUTO_PORTFOLIO_IDS,
+            legs: seed_legs,
+        },
         vec![
             AccountMeta::new(seed_taker.pubkey(), true),
             AccountMeta::new(seed_lp.pubkey(), true),
@@ -50576,7 +51026,10 @@ fn v16_attack_10m_batch_tradecpi_max_tail_rejects_before_cu_exhaustion() {
     env.svm.expire_blockhash();
     let rejected = env
         .send(
-            ProgInstruction::BatchTradeCpi { legs: legs.clone() },
+            ProgInstruction::BatchTradeCpi {
+                portfolio_ids: AUTO_PORTFOLIO_IDS,
+                legs: legs.clone(),
+            },
             matcher_accounts(
                 taker.pubkey(),
                 env.market,
@@ -50609,7 +51062,10 @@ fn v16_attack_10m_batch_tradecpi_max_tail_rejects_before_cu_exhaustion() {
     env.svm.expire_blockhash();
     let allowed_cu = env
         .send(
-            ProgInstruction::BatchTradeCpi { legs },
+            ProgInstruction::BatchTradeCpi {
+                portfolio_ids: AUTO_PORTFOLIO_IDS,
+                legs,
+            },
             matcher_accounts(
                 taker.pubkey(),
                 env.market,
@@ -50658,6 +51114,7 @@ fn v16_attack_batch_fees_isolated_to_each_asset_domain() {
     let sz = (10 * POS_SCALE) as i128;
     env.send(
         ProgInstruction::BatchTradeNoCpi {
+            portfolio_ids: AUTO_PORTFOLIO_IDS,
             legs: vec![
                 BatchTradeLeg {
                     asset_index: 0,
@@ -50714,6 +51171,7 @@ fn v16_attack_batch_cannot_force_counterparty_underwater() {
     let sz = (50 * POS_SCALE) as i128; // notional 5000, IM 500 >> LP capital 50
     let res = env.send(
         ProgInstruction::BatchTradeNoCpi {
+            portfolio_ids: AUTO_PORTFOLIO_IDS,
             legs: vec![
                 BatchTradeLeg {
                     asset_index: 0,
@@ -50857,6 +51315,7 @@ fn v16_attack_batch_cpi_per_leg_limit_aborts_whole_batch() {
     env.svm.expire_blockhash();
     let r = env.send(
         ProgInstruction::BatchTradeCpi {
+            portfolio_ids: AUTO_PORTFOLIO_IDS,
             legs: vec![
                 BatchTradeCpiLeg {
                     asset_index: 0,
@@ -50888,6 +51347,7 @@ fn v16_attack_batch_cpi_per_leg_limit_aborts_whole_batch() {
     env.svm.expire_blockhash();
     let ok = env.send(
         ProgInstruction::BatchTradeCpi {
+            portfolio_ids: AUTO_PORTFOLIO_IDS,
             legs: vec![
                 BatchTradeCpiLeg {
                     asset_index: 0,
@@ -50976,7 +51436,10 @@ fn v16_attack_batch_tradecpi_zero_fill_rejects_atomically() {
 
     env.svm.expire_blockhash();
     let rejected = env.send(
-        ProgInstruction::BatchTradeCpi { legs: legs.clone() },
+        ProgInstruction::BatchTradeCpi {
+            portfolio_ids: AUTO_PORTFOLIO_IDS,
+            legs: legs.clone(),
+        },
         accounts(&env, ctx, delegate),
         &[&taker],
     );
@@ -51016,7 +51479,10 @@ fn v16_attack_batch_tradecpi_zero_fill_rejects_atomically() {
         env.init_matcher_context_authorized(matcher_program, &lp, lp_portfolio);
     env.svm.expire_blockhash();
     let ok = env.send(
-        ProgInstruction::BatchTradeCpi { legs },
+        ProgInstruction::BatchTradeCpi {
+            portfolio_ids: AUTO_PORTFOLIO_IDS,
+            legs,
+        },
         accounts(&env, ok_ctx, ok_delegate),
         &[&taker],
     );
@@ -51084,7 +51550,10 @@ fn v16_attack_batch_tradecpi_rejects_stale_resolve_matured_atomically() {
     env.svm.warp_to_slot(4);
     env.svm.expire_blockhash();
     let fresh = env.send(
-        ProgInstruction::BatchTradeCpi { legs: legs.clone() },
+        ProgInstruction::BatchTradeCpi {
+            portfolio_ids: AUTO_PORTFOLIO_IDS,
+            legs: legs.clone(),
+        },
         accounts(&env),
         &[&taker],
     );
@@ -51106,7 +51575,10 @@ fn v16_attack_batch_tradecpi_rejects_stale_resolve_matured_atomically() {
 
     env.svm.expire_blockhash();
     let rejected = env.send(
-        ProgInstruction::BatchTradeCpi { legs },
+        ProgInstruction::BatchTradeCpi {
+            portfolio_ids: AUTO_PORTFOLIO_IDS,
+            legs,
+        },
         accounts(&env),
         &[&taker],
     );
@@ -51255,7 +51727,10 @@ fn v16_attack_batch_tradecpi_stale_rejects_before_hostile_matcher_cpi() {
     env.svm.expire_blockhash();
     let fresh_err = env
         .send(
-            ProgInstruction::BatchTradeCpi { legs: legs.clone() },
+            ProgInstruction::BatchTradeCpi {
+                portfolio_ids: AUTO_PORTFOLIO_IDS,
+                legs: legs.clone(),
+            },
             accounts(&env),
             &[&taker],
         )
@@ -51278,7 +51753,10 @@ fn v16_attack_batch_tradecpi_stale_rejects_before_hostile_matcher_cpi() {
     env.svm.expire_blockhash();
     let stale_err = env
         .send(
-            ProgInstruction::BatchTradeCpi { legs },
+            ProgInstruction::BatchTradeCpi {
+                portfolio_ids: AUTO_PORTFOLIO_IDS,
+                legs,
+            },
             accounts(&env),
             &[&taker],
         )
@@ -51398,6 +51876,7 @@ fn v16_attack_tradecpi_active_stale_rejects_before_hostile_matcher_cpi() {
         let fresh_err = env
             .send(
                 ProgInstruction::TradeCpi {
+                    portfolio_ids: AUTO_PORTFOLIO_IDS,
                     asset_index: 0,
                     size_q: -(POS_SCALE as i128),
                     fee_bps: 0,
@@ -51430,6 +51909,7 @@ fn v16_attack_tradecpi_active_stale_rejects_before_hostile_matcher_cpi() {
         let stale_err = env
             .send(
                 ProgInstruction::TradeCpi {
+                    portfolio_ids: AUTO_PORTFOLIO_IDS,
                     asset_index: 0,
                     size_q: -(POS_SCALE as i128),
                     fee_bps: 0,
@@ -51553,7 +52033,10 @@ fn v16_attack_tradecpi_active_stale_rejects_before_hostile_matcher_cpi() {
         env.svm.expire_blockhash();
         let fresh_err = env
             .send(
-                ProgInstruction::BatchTradeCpi { legs: legs.clone() },
+                ProgInstruction::BatchTradeCpi {
+                    portfolio_ids: AUTO_PORTFOLIO_IDS,
+                    legs: legs.clone(),
+                },
                 accounts(&env),
                 &[&taker],
             )
@@ -51580,7 +52063,10 @@ fn v16_attack_tradecpi_active_stale_rejects_before_hostile_matcher_cpi() {
         env.svm.expire_blockhash();
         let stale_err = env
             .send(
-                ProgInstruction::BatchTradeCpi { legs },
+                ProgInstruction::BatchTradeCpi {
+                    portfolio_ids: AUTO_PORTFOLIO_IDS,
+                    legs,
+                },
                 accounts(&env),
                 &[&taker],
             )
@@ -51676,6 +52162,7 @@ fn v16_attack_batch_tradecpi_fee_bps_rejects_before_hostile_matcher_cpi() {
         env.svm.expire_blockhash();
         env.send(
             ProgInstruction::BatchTradeCpi {
+                portfolio_ids: AUTO_PORTFOLIO_IDS,
                 legs: vec![BatchTradeCpiLeg {
                     asset_index: 0,
                     size_q: (5 * POS_SCALE) as i128,
@@ -51810,6 +52297,7 @@ fn v16_attack_batch_tradecpi_backing_fee_policy_rejects_before_hostile_matcher_c
         env.svm.expire_blockhash();
         env.send(
             ProgInstruction::BatchTradeCpi {
+                portfolio_ids: AUTO_PORTFOLIO_IDS,
                 legs: vec![BatchTradeCpiLeg {
                     asset_index: 0,
                     size_q: (5 * POS_SCALE) as i128,
@@ -51917,6 +52405,7 @@ fn v16_attack_batch_nocpi_stale_reject_rolls_back_legacy_realloc() {
         env.svm.expire_blockhash();
         env.send(
             ProgInstruction::BatchTradeNoCpi {
+                portfolio_ids: AUTO_PORTFOLIO_IDS,
                 legs: vec![BatchTradeLeg {
                     asset_index: 0,
                     size_q,
@@ -52180,6 +52669,7 @@ fn v16_attack_hostile_matcher_batch_returns_all_rejected() {
         env.svm.expire_blockhash();
         let result = env.send(
             ProgInstruction::BatchTradeCpi {
+                portfolio_ids: AUTO_PORTFOLIO_IDS,
                 legs: vec![
                     BatchTradeCpiLeg {
                         asset_index: 0,
@@ -52331,6 +52821,7 @@ fn v16_attack_tradecpi_rejects_unapproved_unsigned_lp_matcher() {
     env.svm.expire_blockhash();
     let r = env.send(
         ProgInstruction::TradeCpi {
+            portfolio_ids: AUTO_PORTFOLIO_IDS,
             asset_index: 0,
             size_q: (5 * POS_SCALE) as i128,
             fee_bps: 100,
@@ -52426,6 +52917,7 @@ fn v16_attack_batch_tradecpi_rejects_unapproved_unsigned_lp_matcher() {
     env.svm.expire_blockhash();
     let r = env.send(
         ProgInstruction::BatchTradeCpi {
+            portfolio_ids: AUTO_PORTFOLIO_IDS,
             legs: vec![
                 BatchTradeCpiLeg {
                     asset_index: 0,
@@ -53445,6 +53937,7 @@ fn v16_attack_hostile_matcher_single_tradecpi_returns_all_rejected() {
         let m = metas(env);
         let result = env.send(
             ProgInstruction::TradeCpi {
+                portfolio_ids: AUTO_PORTFOLIO_IDS,
                 asset_index: 0,
                 size_q: sz,
                 fee_bps: 100,
@@ -53585,6 +54078,7 @@ fn v16_attack_hostile_matcher_no_write_cannot_replay_stale_batch_return_data() {
             AccountMeta::new_readonly(delegate, false),
         ],
         data: ProgInstruction::BatchTradeCpi {
+            portfolio_ids: AUTO_PORTFOLIO_IDS,
             legs: vec![
                 BatchTradeCpiLeg {
                     asset_index: 0,
@@ -53701,6 +54195,7 @@ fn v16_attack_hostile_matcher_no_write_cannot_replay_stale_single_context() {
             AccountMeta::new_readonly(delegate, false),
         ],
         data: ProgInstruction::TradeCpi {
+            portfolio_ids: AUTO_PORTFOLIO_IDS,
             asset_index: 0,
             size_q,
             fee_bps: 100,
@@ -55196,6 +55691,7 @@ fn v16_attack_live_value_paths_reject_when_resolve_matured() {
     env.svm.expire_blockhash();
     let stale_trade = env.send(
         ProgInstruction::TradeNoCpi {
+            portfolio_ids: AUTO_PORTFOLIO_IDS,
             asset_index: 0,
             size_q: POS_SCALE as i128,
             exec_price: 100,
