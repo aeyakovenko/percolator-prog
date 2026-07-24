@@ -21666,6 +21666,208 @@ fn v16_attack_tradecpi_limit_price_enforced() {
     assert_eq!(g1.vault, g1.c_tot + g1.insurance, "conservation after fill");
 }
 
+// LoF/slippage sweep: validate_matcher_return intentionally accepts any nonzero FLAG_PARTIAL_OK
+// exec_price, including epsilon prices, so the user's CPI limit must bind the wrapper-accepted
+// engine execution price, not only the raw matcher echo. Otherwise a hostile matcher can return
+// exec_price=1 to satisfy a buy limit while the wrapper settles the trade at the mark.
+#[test]
+fn v16_attack_cpi_limit_price_binds_internal_execution_price() {
+    let mut env = V16CuEnv::new();
+    env.configure_auth_mark_with_cu(0, 100);
+    let hostile = Pubkey::new_unique();
+    env.svm.add_program(
+        hostile,
+        &std::fs::read(hostile_matcher_program_path()).unwrap(),
+    );
+    let taker = Keypair::new();
+    let lp = Keypair::new();
+    let taker_account = env.create_portfolio(&taker);
+    let lp_account = env.create_portfolio(&lp);
+    env.deposit(&taker, taker_account, 1_000_000);
+    env.deposit(&lp, lp_account, 1_000_000);
+
+    let ctx = Pubkey::new_unique();
+    let delegate = matcher_delegate_key(
+        &env.program_id,
+        &env.market,
+        &lp_account,
+        &lp.pubkey(),
+        &hostile,
+        &ctx,
+    );
+    env.svm
+        .set_account(
+            delegate,
+            Account {
+                lamports: 1_000_000_000,
+                data: vec![],
+                owner: Pubkey::default(),
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    let mut ctx_data = vec![0u8; MATCHER_CONTEXT_LEN];
+    ctx_data[0] = 11; // valid flagged partial at exec_price=1.
+    env.svm
+        .set_account(
+            ctx,
+            Account {
+                lamports: 1_000_000_000,
+                data: ctx_data,
+                owner: hostile,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    env.set_matcher_config(hostile, &lp, lp_account, ctx, delegate, 1);
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let taker_before = env.svm.get_account(&taker_account).unwrap();
+    let lp_before = env.svm.get_account(&lp_account).unwrap();
+    let ctx_before = env.svm.get_account(&ctx).unwrap();
+    env.svm.expire_blockhash();
+    let tight = env.send(
+        ProgInstruction::TradeCpi {
+            asset_index: 0,
+            size_q: (2 * POS_SCALE) as i128,
+            fee_bps: 0,
+            limit_price: 1,
+        },
+        vec![
+            AccountMeta::new(taker.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(taker_account, false),
+            AccountMeta::new(lp_account, false),
+            AccountMeta::new_readonly(hostile, false),
+            AccountMeta::new(ctx, false),
+            AccountMeta::new_readonly(delegate, false),
+        ],
+        &[&taker],
+    );
+    assert!(
+        tight.is_err(),
+        "buy limit=1 must reject because the internal execution price is the auth mark"
+    );
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+    assert_eq!(
+        env.svm.get_account(&taker_account).unwrap(),
+        taker_before,
+        "tight-limit rejection rolls back the taker"
+    );
+    assert_eq!(
+        env.svm.get_account(&lp_account).unwrap(),
+        lp_before,
+        "tight-limit rejection rolls back the LP"
+    );
+    assert_eq!(
+        env.svm.get_account(&ctx).unwrap(),
+        ctx_before,
+        "tight-limit rejection rolls back matcher context writes"
+    );
+
+    env.svm.expire_blockhash();
+    let ok = env.send(
+        ProgInstruction::TradeCpi {
+            asset_index: 0,
+            size_q: (2 * POS_SCALE) as i128,
+            fee_bps: 0,
+            limit_price: 100,
+        },
+        vec![
+            AccountMeta::new(taker.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(taker_account, false),
+            AccountMeta::new(lp_account, false),
+            AccountMeta::new_readonly(hostile, false),
+            AccountMeta::new(ctx, false),
+            AccountMeta::new_readonly(delegate, false),
+        ],
+        &[&taker],
+    );
+    assert!(
+        ok.is_ok(),
+        "same epsilon matcher partial should execute once the limit permits the internal price: {ok:?}"
+    );
+    assert_eq!(
+        active_leg_for_asset(&env.portfolio_state(taker_account), 0).basis_pos_q,
+        POS_SCALE as i128,
+        "hostile matcher still only fills the flagged partial size"
+    );
+
+    let mut batch_mode = env.svm.get_account(&ctx).unwrap();
+    batch_mode.data[64] = 11;
+    env.svm.set_account(ctx, batch_mode).unwrap();
+    let market_before_batch = env.svm.get_account(&env.market).unwrap();
+    let taker_before_batch = env.svm.get_account(&taker_account).unwrap();
+    let lp_before_batch = env.svm.get_account(&lp_account).unwrap();
+    let ctx_before_batch = env.svm.get_account(&ctx).unwrap();
+    env.svm.expire_blockhash();
+    let tight_batch = env.send(
+        ProgInstruction::BatchTradeCpi {
+            legs: vec![BatchTradeCpiLeg {
+                asset_index: 0,
+                size_q: (2 * POS_SCALE) as i128,
+                fee_bps: 0,
+                limit_price: 1,
+            }],
+        },
+        vec![
+            AccountMeta::new(taker.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(taker_account, false),
+            AccountMeta::new(lp_account, false),
+            AccountMeta::new_readonly(hostile, false),
+            AccountMeta::new(ctx, false),
+            AccountMeta::new_readonly(delegate, false),
+        ],
+        &[&taker],
+    );
+    assert!(
+        tight_batch.is_err(),
+        "batch buy limit=1 must bind the internal execution price: {tight_batch:?}"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before_batch
+    );
+    assert_eq!(
+        env.svm.get_account(&taker_account).unwrap(),
+        taker_before_batch
+    );
+    assert_eq!(env.svm.get_account(&lp_account).unwrap(), lp_before_batch);
+    assert_eq!(env.svm.get_account(&ctx).unwrap(), ctx_before_batch);
+
+    env.svm.expire_blockhash();
+    env.send(
+        ProgInstruction::BatchTradeCpi {
+            legs: vec![BatchTradeCpiLeg {
+                asset_index: 0,
+                size_q: (2 * POS_SCALE) as i128,
+                fee_bps: 0,
+                limit_price: 100,
+            }],
+        },
+        vec![
+            AccountMeta::new(taker.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(taker_account, false),
+            AccountMeta::new(lp_account, false),
+            AccountMeta::new_readonly(hostile, false),
+            AccountMeta::new(ctx, false),
+            AccountMeta::new_readonly(delegate, false),
+        ],
+        &[&taker],
+    )
+    .expect("batch CPI remains live when the limit permits the internal price");
+    assert_eq!(
+        active_leg_for_asset(&env.portfolio_state(taker_account), 0).basis_pos_q,
+        (2 * POS_SCALE) as i128,
+        "single and batch hostile partial fills each add exactly one position unit"
+    );
+}
+
 // security.md sweep — TradeCpi zero-fill (#39): a zero-capacity matcher (max_fill_abs=0) returns
 // exec_size=0. The wrapper must handle it cleanly — reject or no-op — never create phantom OI/basis,
 // charge a fee on nothing, or corrupt conservation.
