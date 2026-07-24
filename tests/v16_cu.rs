@@ -54260,6 +54260,192 @@ fn v16_bpf_oracle_composite_divide_legs_produce_correct_cross_rate() {
     );
 }
 
+// A caller must not be able to combine independently valid reports from different points in time
+// into a false composite cross-rate. Both feeds double between t=100 and t=101, so A/B remains 1.5.
+// The attacker retains the old B report and submits it beside the new A report; accepting that skewed
+// pair would publish 3.0 and eventually liquidate an independent short for a withdrawable reward.
+#[test]
+fn v16_attack_composite_reports_must_not_mix_publish_times() {
+    let mut env = V16CuEnv::new_with_init_params(production_risk_params());
+    env.update_liquidation_fee_policy_with_cu(5_000);
+    set_test_clock(&mut env, 1, 100);
+
+    let feeds = [[0xf1u8; 32], [0xf2u8; 32], [0u8; 32]];
+    let initial_a = env.set_pyth_price_with_conf(&feeds[0], 3_000_000, -6, 0, 100);
+    let initial_b = env.set_pyth_price_with_conf(&feeds[1], 2_000_000, -6, 0, 100);
+    env.try_configure_hybrid_asset_with_conf_filter_cu(
+        0,
+        2,
+        ORACLE_LEG_FLAG_DIVIDE_LEG2,
+        feeds,
+        &[initial_a, initial_b],
+        1,
+        100,
+        0,
+        0,
+        1_000,
+        0,
+    )
+    .expect("configure exact 1.5 two-leg cross-rate");
+    assert_eq!(env.market_state().0.oracle_target_price_e6, 1_500_000);
+
+    let victim_owner = Keypair::new();
+    let counterparty_owner = Keypair::new();
+    let cranker_owner = Keypair::new();
+    let victim = env.create_portfolio(&victim_owner);
+    let counterparty = env.create_portfolio(&counterparty_owner);
+    let cranker = env.create_portfolio(&cranker_owner);
+    env.deposit(&victim_owner, victim, 540_000);
+    env.deposit(&counterparty_owner, counterparty, 540_000);
+    env.deposit(&cranker_owner, cranker, 1_000);
+    // The victim is the short side.
+    let position_q = (POS_SCALE as i128)
+        .checked_mul(35)
+        .and_then(|value| value.checked_div(100))
+        .unwrap();
+    env.trade_asset_with_cu(
+        0,
+        &counterparty_owner,
+        counterparty,
+        &victim_owner,
+        victim,
+        position_q,
+        1_500_000,
+        0,
+    );
+    let victim_capital_initial = env.portfolio_state(victim).capital.get();
+
+    // The honest t=101 tuple is 6/4 = 1.5. The attacker instead supplies 6@101 / 2@100 = 3.0.
+    let new_a = env.set_pyth_price_with_conf(&feeds[0], 6_000_000, -6, 0, 101);
+    let skewed = [new_a, initial_b];
+    let mut slot = 1u64;
+    let mut max_crank_cu = 0u64;
+    for _ in 0..12 {
+        slot += production_risk_params().max_accrual_dt_slots;
+        set_test_clock(&mut env, slot, 101);
+        env.svm.expire_blockhash();
+        let result = env.send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: slot,
+                observations: crank_observations_with_accounts(0, 2),
+            },
+            vec![
+                AccountMeta::new(env.payer.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(cranker, false),
+                AccountMeta::new_readonly(skewed[0], false),
+                AccountMeta::new_readonly(skewed[1], false),
+            ],
+            &[],
+        );
+        match result {
+            Ok(cu) => max_crank_cu = max_crank_cu.max(cu),
+            Err(_) => break,
+        }
+    }
+
+    env.svm.expire_blockhash();
+    let refresh = env.send(
+        ProgInstruction::PermissionlessCrank {
+            now_slot: slot,
+            observations: crank_observations_with_accounts(0, 2),
+        },
+        vec![
+            AccountMeta::new(env.payer.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(victim, false),
+            AccountMeta::new_readonly(skewed[0], false),
+            AccountMeta::new_readonly(skewed[1], false),
+        ],
+        &[],
+    );
+    if let Ok(cu) = refresh {
+        max_crank_cu = max_crank_cu.max(cu);
+    }
+    let cranker_capital_before = env.portfolio_state(cranker).capital.get();
+    let oi_before = env.market_state().1.assets[0].oi_eff_short_q;
+
+    env.svm.expire_blockhash();
+    let liquidation_attempt = env.send(
+        ProgInstruction::PermissionlessCrank {
+            now_slot: slot,
+            observations: crank_observations_with_accounts(0, 2),
+        },
+        vec![
+            AccountMeta::new(cranker_owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(victim, false),
+            AccountMeta::new_readonly(skewed[0], false),
+            AccountMeta::new_readonly(skewed[1], false),
+            AccountMeta::new(cranker, false),
+        ],
+        &[&cranker_owner],
+    );
+    if let Ok(cu) = liquidation_attempt.as_ref() {
+        max_crank_cu = max_crank_cu.max(*cu);
+    }
+    assert_cu_within(
+        "publish-time-consistent composite public crank",
+        max_crank_cu,
+        CRANK_CU_LIMIT,
+    );
+
+    let (cfg_after_attack, group_after_attack) = env.market_state();
+    let victim_after_attack = env.portfolio_state(victim);
+    let cranker_reward = env
+        .portfolio_state(cranker)
+        .capital
+        .get()
+        .saturating_sub(cranker_capital_before);
+    let extracted_reward = if cranker_reward == 0 {
+        0
+    } else {
+        assert!(
+            liquidation_attempt.is_ok(),
+            "a credited reward must come from a committed liquidation"
+        );
+        let dest = env.withdraw(&cranker_owner, cranker, cranker_reward);
+        env.token_amount(dest)
+    };
+
+    println!(
+        "skew probe: victim cap {}->{}, pnl={}; OI long={}, short={}; insurance={}; \
+         vault={}; c_tot={}; cranker reward={} extracted={}",
+        victim_capital_initial,
+        victim_after_attack.capital.get(),
+        victim_after_attack.pnl.get(),
+        group_after_attack.assets[0].oi_eff_long_q,
+        group_after_attack.assets[0].oi_eff_short_q,
+        group_after_attack.insurance,
+        group_after_attack.vault,
+        group_after_attack.c_tot,
+        cranker_reward,
+        extracted_reward,
+    );
+
+    assert!(
+        cfg_after_attack.oracle_target_price_e6 == 1_500_000
+            && group_after_attack.assets[0].effective_price == 1_500_000
+            && group_after_attack.assets[0].oi_eff_short_q == oi_before
+            && victim_after_attack.capital.get() == victim_capital_initial
+            && cfg_after_attack.oracle_leg_publish_times == [100, 100, 0]
+            && cfg_after_attack.oracle_leg_prices_e6 == [3_000_000, 2_000_000, 0]
+            && extracted_reward == 0,
+        "temporally skewed reports changed a constant cross-rate: target={}, mark={}, \
+         short_oi={}->{}, victim_capital={}->{}, cranker_reward={}, extracted_reward={}, \
+         liquidation={:?}",
+        cfg_after_attack.oracle_target_price_e6,
+        group_after_attack.assets[0].effective_price,
+        oi_before,
+        group_after_attack.assets[0].oi_eff_short_q,
+        victim_capital_initial,
+        victim_after_attack.capital.get(),
+        cranker_reward,
+        extracted_reward,
+        liquidation_attempt,
+    );
+}
+
 // ForfeitRecoveryLeg owner-gating + input guard (sibling of v16_attack_rebalance_reduce_owner_gated, which
 // was tested while ForfeitRecoveryLeg was not). handle_forfeit_recovery_leg uses with_one_portfolio_view
 // (owner_must_sign=true), so a non-owner forfeiting a victim's recovery leg -- which would force the victim
