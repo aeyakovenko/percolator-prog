@@ -59717,3 +59717,163 @@ fn v16_attack_underfunded_exit_cannot_move_ewma_with_uncollectible_fee() {
         assert_underfunded_ewma_exit_uses_collected_fee(path);
     }
 }
+
+// Public cross-domain B-settlement probe: a bankruptcy loss must retire claim face from the
+// affected asset's source domain. Sparse portfolio order previously erased an unrelated claim,
+// leaving the affected domain's provider-backed claim available for terminal extraction.
+#[test]
+fn v16_attack_social_loss_retires_claim_from_its_asset_domain() {
+    const INITIAL_PRICE: u64 = 100;
+    const FIRST_MARK: u64 = 105;
+    const BANKRUPTCY_MARK: u64 = 500;
+    const ATTACKER_Q: i128 = 20 * POS_SCALE as i128;
+    const UNFUNDED_DOMAIN: usize = 1;
+    const FUNDED_DOMAIN: usize = 3;
+
+    let source_claim_num = |account: &PortfolioAccountV16, domain: usize| {
+        account
+            .source_domains
+            .iter()
+            .find(|source| {
+                source.source_claim_market_id.get() != 0 && source.domain.get() as usize == domain
+            })
+            .map(|source| source.source_claim_bound_num.get())
+            .unwrap_or(0)
+    };
+
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(4, 10_000, 10_000, 10_000);
+    env.svm.warp_to_slot(1);
+    env.configure_auth_mark_for_asset_as_admin(0, 1, INITIAL_PRICE);
+    env.configure_auth_mark_for_asset_as_admin(1, 1, INITIAL_PRICE);
+    env.top_up_backing_bucket(FUNDED_DOMAIN as u16, 20_000, 1_000);
+
+    let attacker_owner = Keypair::new();
+    let healthy_short_owner = Keypair::new();
+    let bankrupt_short_owner = Keypair::new();
+    let attacker = env.create_portfolio(&attacker_owner);
+    let healthy_short = env.create_portfolio(&healthy_short_owner);
+    let bankrupt_short = env.create_portfolio(&bankrupt_short_owner);
+    env.deposit(&attacker_owner, attacker, 100_000);
+    env.deposit(&healthy_short_owner, healthy_short, 100_000);
+    env.deposit(&bankrupt_short_owner, bankrupt_short, 250);
+
+    for asset_index in [0u16, 1u16] {
+        env.trade_asset_with_cu(
+            asset_index,
+            &attacker_owner,
+            attacker,
+            &healthy_short_owner,
+            healthy_short,
+            ATTACKER_Q,
+            INITIAL_PRICE,
+            0,
+        );
+    }
+
+    env.svm.warp_to_slot(2);
+    env.push_auth_mark_for_asset_as_admin(0, 2, FIRST_MARK);
+    env.push_auth_mark_for_asset_as_admin(1, 2, FIRST_MARK);
+    for asset_index in [0u16, 1u16] {
+        env.crank(
+            attacker,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 2,
+                observations: crank_observations(asset_index),
+            },
+        );
+    }
+    let after_first_mark = env.portfolio_state(attacker);
+    assert_eq!(
+        source_claim_num(&after_first_mark, UNFUNDED_DOMAIN),
+        100 * BOUND_SCALE,
+    );
+    assert_eq!(
+        source_claim_num(&after_first_mark, FUNDED_DOMAIN),
+        100 * BOUND_SCALE,
+    );
+
+    env.svm.expire_blockhash();
+    env.trade_asset_with_cu(
+        1,
+        &attacker_owner,
+        attacker,
+        &bankrupt_short_owner,
+        bankrupt_short,
+        POS_SCALE as i128,
+        FIRST_MARK,
+        0,
+    );
+
+    env.svm.warp_to_slot(7);
+    env.push_auth_mark_for_asset_as_admin(1, 7, BANKRUPTCY_MARK);
+    let mark_crank = ProgInstruction::PermissionlessCrank {
+        now_slot: 7,
+        observations: crank_observations(1),
+    };
+    env.crank_steps(attacker, mark_crank.clone(), 4);
+    env.crank(bankrupt_short, mark_crank);
+
+    for _ in 0..8 {
+        env.svm.expire_blockhash();
+        let _ = env.send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 7,
+                observations: crank_observations(1),
+            },
+            vec![
+                AccountMeta::new(env.payer.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(bankrupt_short, false),
+            ],
+            &[],
+        );
+        if env.market_state().1.assets[1].b_long_num != 0 {
+            break;
+        }
+    }
+    let b_target = env.market_state().1.assets[1].b_long_num;
+    assert!(b_target != 0, "public liquidation must book social loss");
+
+    let before_settle = env.portfolio_state(attacker);
+    let unfunded_before = source_claim_num(&before_settle, UNFUNDED_DOMAIN);
+    let funded_before = source_claim_num(&before_settle, FUNDED_DOMAIN);
+    assert!(unfunded_before != 0 && funded_before > unfunded_before);
+    let settle_cu = env.crank_steps(
+        attacker,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 7,
+            observations: crank_observations(1),
+        },
+        4,
+    );
+    assert_cu_within(
+        "PermissionlessCrank domain-local B settlement",
+        settle_cu,
+        CRANK_CU_LIMIT,
+    );
+
+    let after_settle = env.portfolio_state(attacker);
+    let settled_leg = active_leg_for_asset(&after_settle, 1);
+    assert_eq!(settled_leg.b_snap, b_target);
+    let pnl_loss = u128::try_from(
+        before_settle
+            .pnl
+            .get()
+            .checked_sub(after_settle.pnl.get())
+            .expect("asset-1 settlement delta fits i128"),
+    )
+    .expect("asset-1 settlement reduces PnL");
+    assert!(pnl_loss != 0);
+    let unfunded_after = source_claim_num(&after_settle, UNFUNDED_DOMAIN);
+    let funded_after = source_claim_num(&after_settle, FUNDED_DOMAIN);
+    assert_eq!(
+        unfunded_after, unfunded_before,
+        "asset-1 ADL/B settlement must preserve the unrelated asset-0 claim",
+    );
+    assert_eq!(
+        funded_after,
+        funded_before - pnl_loss * BOUND_SCALE,
+        "all asset-1 loss must retire asset-1 claim face",
+    );
+
+}
