@@ -41,6 +41,265 @@ fn crank_observations(asset_index: u16) -> Vec<CrankObservationHint> {
     }]
 }
 
+// LoF: a backing authority changes the fee after both TradeNoCpi owners signed. The stale
+// transaction must not silently transfer one owner's source-backed PnL to that authority.
+#[test]
+fn v16_attack_presigned_trade_nocpi_cannot_be_rugged_by_backing_fee_update() {
+    const INITIAL_PRICE: u64 = 100;
+    const LP_DEPOSIT: u128 = 3_130;
+    const TRADER_DEPOSIT: u128 = 10_000;
+    const WINNING_SIZE_Q: i128 = 200 * POS_SCALE as i128;
+    const LOSING_SIZE_Q: i128 = 100 * POS_SCALE as i128;
+    const INCREASE_Q: i128 = 20 * POS_SCALE as i128;
+    const WINNING_DOMAIN: u16 = 3;
+
+    let mut env =
+        V16CuEnv::new_with_market_params_price_move_and_maintenance_fee(2, 1_000, 1_000, 500, 30);
+    env.update_market_init_fee_policy_with_cu(1);
+    let attacker = Keypair::new();
+    let market_trader = Keypair::new();
+    let lp = Keypair::new();
+
+    env.svm.warp_to_slot(1);
+    env.configure_auth_mark_for_asset_as_admin(0, 1, INITIAL_PRICE);
+    env.configure_auth_mark_for_asset_as_admin(1, 1, INITIAL_PRICE);
+    env.svm.warp_to_slot(2);
+    env.update_asset_lifecycle_as_admin_with_cu(
+        percolator_prog::processor::ASSET_ACTION_RETIRE,
+        1,
+        2,
+        0,
+    );
+    env.svm.warp_to_slot(3);
+    env.activate_permissionless_asset_with_fee(
+        &attacker,
+        1,
+        3,
+        INITIAL_PRICE,
+        attacker.pubkey(),
+        attacker.pubkey(),
+        attacker.pubkey(),
+        attacker.pubkey(),
+        1,
+    );
+    env.configure_auth_mark_for_asset_with_authority(1, &attacker, 3, INITIAL_PRICE);
+
+    let attacker_account = env.create_portfolio(&attacker);
+    let market_trader_account = env.create_portfolio(&market_trader);
+    let lp_account = env.create_portfolio(&lp);
+    env.deposit(&attacker, attacker_account, TRADER_DEPOSIT);
+    env.deposit(&market_trader, market_trader_account, TRADER_DEPOSIT);
+    env.deposit(&lp, lp_account, LP_DEPOSIT);
+
+    let ledger = Keypair::new();
+    let payer = env.payer.insecure_clone();
+    system_create_account_for_test(
+        &mut env.svm,
+        &payer,
+        &ledger,
+        state::backing_domain_ledger_account_len(),
+        env.program_id,
+    );
+    let backing_source = env.token_account(attacker.pubkey(), 5_000);
+    env.svm.expire_blockhash();
+    env.send(
+        ProgInstruction::TopUpBackingBucket {
+            domain: WINNING_DOMAIN,
+            amount: 5_000,
+            expiry_slot: 100,
+        },
+        vec![
+            AccountMeta::new(attacker.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(backing_source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(ledger.pubkey(), false),
+        ],
+        &[&attacker],
+    )
+    .expect("attacker funds its backing domain");
+
+    env.try_trade_asset_with_cu(
+        1,
+        &market_trader,
+        market_trader_account,
+        &lp,
+        lp_account,
+        -WINNING_SIZE_Q,
+        INITIAL_PRICE,
+        0,
+    )
+    .expect("initial winning TradeNoCpi leg");
+    env.try_trade_asset_with_cu(
+        0,
+        &market_trader,
+        market_trader_account,
+        &lp,
+        lp_account,
+        -LOSING_SIZE_Q,
+        INITIAL_PRICE,
+        0,
+    )
+    .expect("initial losing TradeNoCpi leg");
+
+    env.svm.warp_to_slot(4);
+    env.push_auth_mark_for_asset_with_authority(1, &attacker, 4, INITIAL_PRICE);
+    env.push_auth_mark_for_asset_as_admin(0, 4, INITIAL_PRICE);
+    for (portfolio, asset_index) in [
+        (market_trader_account, 1),
+        (lp_account, 1),
+        (market_trader_account, 0),
+        (lp_account, 0),
+    ] {
+        env.crank_steps(
+            portfolio,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 4,
+                observations: crank_observations(asset_index),
+            },
+            4,
+        );
+    }
+    env.sync_maintenance_fee_with_cu(lp_account, None, 4);
+
+    env.svm.warp_to_slot(5);
+    env.push_auth_mark_for_asset_with_authority(1, &attacker, 5, 105);
+    env.push_auth_mark_for_asset_as_admin(0, 5, 95);
+    for (portfolio, asset_index) in [
+        (market_trader_account, 1),
+        (lp_account, 1),
+        (market_trader_account, 0),
+    ] {
+        env.crank_steps(
+            portfolio,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 5,
+                observations: crank_observations(asset_index),
+            },
+            4,
+        );
+    }
+    assert_eq!(env.portfolio_state(lp_account).pnl.get(), 1_000);
+
+    let trade_data = |max_backing_fee_bps: Option<u16>| {
+        let mut data = vec![6];
+        data.extend_from_slice(&0u16.to_le_bytes());
+        data.extend_from_slice(&(-INCREASE_Q).to_le_bytes());
+        data.extend_from_slice(&95u64.to_le_bytes());
+        data.extend_from_slice(&0u64.to_le_bytes());
+        if let Some(cap) = max_backing_fee_bps {
+            data.extend_from_slice(&cap.to_le_bytes());
+        }
+        data
+    };
+
+    // Both owners authorize the legacy wire payload while the domain fee is zero. On the fixed
+    // program, an omitted cap means zero rather than consenting to an arbitrary future policy.
+    let trade_ix = Instruction {
+        program_id: env.program_id,
+        accounts: vec![
+            AccountMeta::new(attacker.pubkey(), true),
+            AccountMeta::new(lp.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(attacker_account, false),
+            AccountMeta::new(lp_account, false),
+        ],
+        data: trade_data(None),
+    };
+    let presigned_trade = Transaction::new_signed_with_payer(
+        &[heap_ix(), cu_ix(), trade_ix],
+        Some(&env.payer.pubkey()),
+        &[&env.payer, &attacker, &lp],
+        env.svm.latest_blockhash(),
+    );
+
+    env.send(
+        ProgInstruction::UpdateBackingFeePolicy {
+            domain: WINNING_DOMAIN,
+            fee_bps: 5_000,
+            insurance_share_bps: 0,
+        },
+        vec![
+            AccountMeta::new(attacker.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&attacker],
+    )
+    .expect("backing authority changes the live fee after trade authorization");
+
+    let market_before_reject = env.svm.get_account(&env.market).unwrap();
+    let attacker_before_reject = env.svm.get_account(&attacker_account).unwrap();
+    let lp_before_reject = env.svm.get_account(&lp_account).unwrap();
+    let rejected = env.svm.send_transaction(presigned_trade);
+    assert!(
+        rejected.is_err(),
+        "a zero-cap pre-signed trade must reject a later backing-fee hike"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before_reject
+    );
+    assert_eq!(
+        env.svm.get_account(&attacker_account).unwrap(),
+        attacker_before_reject
+    );
+    assert_eq!(env.svm.get_account(&lp_account).unwrap(), lp_before_reject);
+
+    // A freshly signed transaction can opt into the observed policy explicitly.
+    let provider_before = env.market_state().1.source_backing_buckets[WINNING_DOMAIN as usize]
+        .utilization_fee_earnings;
+    let lp_before = env.portfolio_state(lp_account).capital.get();
+    env.svm.expire_blockhash();
+    send_raw_tx(
+        &mut env.svm,
+        &env.payer,
+        Instruction {
+            program_id: env.program_id,
+            accounts: vec![
+                AccountMeta::new(attacker.pubkey(), true),
+                AccountMeta::new(lp.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(attacker_account, false),
+                AccountMeta::new(lp_account, false),
+            ],
+            data: trade_data(Some(5_000)),
+        },
+        &[&attacker, &lp],
+    )
+    .expect("owners can opt into the current backing-fee policy");
+    let provider_after = env.market_state().1.source_backing_buckets[WINNING_DOMAIN as usize]
+        .utilization_fee_earnings;
+    let lp_after = env.portfolio_state(lp_account).capital.get();
+    let extracted = provider_after - provider_before;
+    assert_eq!(
+        extracted, 70,
+        "the opted-in trade pays the exact backing fee"
+    );
+    assert_eq!(lp_before - lp_after, extracted);
+
+    let earnings_dest = env.token_account(attacker.pubkey(), 0);
+    env.svm.expire_blockhash();
+    env.send(
+        ProgInstruction::WithdrawBackingBucketEarnings {
+            domain: WINNING_DOMAIN,
+            amount: extracted,
+        },
+        vec![
+            AccountMeta::new(attacker.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(ledger.pubkey(), false),
+            AccountMeta::new(earnings_dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&attacker],
+    )
+    .expect("attacker withdraws the victim-funded fee");
+    assert_eq!(env.token_amount(earnings_dest) as u128, extracted);
+}
+
 fn crank_observations_with_accounts(
     asset_index: u16,
     oracle_accounts: u8,
@@ -1486,6 +1745,7 @@ impl V16CuEnv {
                 size_q,
                 exec_price,
                 fee_bps,
+                max_backing_fee_bps: 10_000,
             },
             vec![
                 AccountMeta::new(owner_a.pubkey(), true),
@@ -15948,6 +16208,7 @@ fn v16_attack_account_type_confusion_rejected() {
             size_q: POS_SCALE as i128,
             exec_price: 100,
             fee_bps: 0,
+            max_backing_fee_bps: 0,
         },
         vec![
             AccountMeta::new(la.pubkey(), true),
@@ -21542,6 +21803,7 @@ fn v16_attack_nocpi_trades_still_require_lp_owner_signature() {
             size_q: (10 * POS_SCALE) as i128,
             exec_price: 100,
             fee_bps: 0,
+            max_backing_fee_bps: 0,
         },
         vec![
             AccountMeta::new(taker_owner.pubkey(), true),
@@ -22385,6 +22647,7 @@ fn v16_attack_non_owner_cannot_withdraw_or_trade() {
             size_q: POS_SCALE as i128,
             exec_price: 100,
             fee_bps: 0,
+            max_backing_fee_bps: 0,
         },
         vec![
             AccountMeta::new(mallory.pubkey(), true),
@@ -26954,6 +27217,7 @@ fn v16_attack_non_base_slot_zero_profile_stale_rejects_trade() {
             size_q: POS_SCALE as i128,
             exec_price: 100,
             fee_bps: 0,
+            max_backing_fee_bps: 0,
         },
         vec![
             AccountMeta::new(taker.pubkey(), true),
@@ -27246,6 +27510,7 @@ fn v16_attack_non_base_trade_rejects_after_base_resolve_matured() {
             size_q: POS_SCALE as i128,
             exec_price: 101,
             fee_bps: 0,
+            max_backing_fee_bps: 0,
         },
         vec![
             AccountMeta::new(taker.pubkey(), true),
@@ -28595,6 +28860,7 @@ fn v16_attack_rebalance_reduce_rejects_cross_market_portfolio_substitution() {
             size_q: POS_SCALE as i128,
             exec_price: 100,
             fee_bps: 0,
+            max_backing_fee_bps: 0,
         },
         vec![
             AccountMeta::new(local_owner.pubkey(), true),
@@ -28752,6 +29018,7 @@ fn v16_attack_forfeit_recovery_leg_rejects_cross_market_portfolio_substitution()
             size_q: POS_SCALE as i128,
             exec_price: 100,
             fee_bps: 0,
+            max_backing_fee_bps: 0,
         },
         vec![
             AccountMeta::new(local_owner.pubkey(), true),
@@ -30366,6 +30633,7 @@ fn v16_attack_trade_paths_reject_cross_market_portfolio_substitution() {
                 size_q: POS_SCALE as i128,
                 exec_price: 100,
                 fee_bps: 100,
+                max_backing_fee_bps: 0,
             },
             vec![
                 AccountMeta::new(attacker.pubkey(), true),
@@ -30463,6 +30731,7 @@ fn v16_attack_trade_paths_reject_cross_market_portfolio_substitution() {
             size_q: POS_SCALE as i128,
             exec_price: 100,
             fee_bps: 100,
+            max_backing_fee_bps: 0,
         },
         vec![
             AccountMeta::new(good_a.pubkey(), true),
@@ -31246,6 +31515,7 @@ fn v16_attack_permissionless_crank_rejects_cross_market_target_portfolio() {
             size_q: POS_SCALE as i128,
             exec_price: 100,
             fee_bps: 0,
+            max_backing_fee_bps: 0,
         },
         vec![
             AccountMeta::new(long_owner.pubkey(), true),
@@ -36907,6 +37177,7 @@ fn v16_attack_force_close_rejects_cross_market_portfolio_substitution() {
             size_q: POS_SCALE as i128,
             exec_price: 100,
             fee_bps: 0,
+            max_backing_fee_bps: 0,
         },
         vec![
             AccountMeta::new(b_long_owner.pubkey(), true),
@@ -42750,6 +43021,7 @@ fn v16_attack_tradenocpi_self_trade_rejected() {
             size_q: POS_SCALE as i128,
             exec_price: 100,
             fee_bps: 100,
+            max_backing_fee_bps: 0,
         },
         vec![
             AccountMeta::new(owner.pubkey(), true),
@@ -55200,6 +55472,7 @@ fn v16_attack_live_value_paths_reject_when_resolve_matured() {
             size_q: POS_SCALE as i128,
             exec_price: 100,
             fee_bps: 0,
+            max_backing_fee_bps: 0,
         },
         vec![
             AccountMeta::new(taker.pubkey(), true),

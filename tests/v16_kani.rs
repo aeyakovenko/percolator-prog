@@ -462,11 +462,47 @@ fn kani_v16_tradenocpi_decode_preserves_wire_fields() {
             size_q: got_size,
             exec_price: got_price,
             fee_bps: got_fee,
+            max_backing_fee_bps: got_backing_cap,
         } => {
             assert_eq!(got_asset, asset_index);
             assert_eq!(got_size, size_q);
             assert_eq!(got_price, exec_price);
             assert_eq!(got_fee, fee_bps);
+            assert_eq!(got_backing_cap, 0);
+        }
+        _ => unreachable!(),
+    }
+}
+
+#[kani::proof]
+fn kani_v16_tradenocpi_decode_preserves_backing_fee_cap() {
+    let asset_index: u16 = kani::any();
+    let size_q: i128 = kani::any();
+    let exec_price: u64 = kani::any();
+    let fee_bps: u64 = kani::any();
+    let max_backing_fee_bps: u16 = kani::any();
+
+    let mut data = [0u8; 37];
+    data[0] = 6;
+    data[1..3].copy_from_slice(&asset_index.to_le_bytes());
+    data[3..19].copy_from_slice(&size_q.to_le_bytes());
+    data[19..27].copy_from_slice(&exec_price.to_le_bytes());
+    data[27..35].copy_from_slice(&fee_bps.to_le_bytes());
+    data[35..37].copy_from_slice(&max_backing_fee_bps.to_le_bytes());
+
+    match Instruction::decode(&data).unwrap() {
+        Instruction::TradeNoCpi {
+            asset_index: got_asset,
+            size_q: got_size,
+            exec_price: got_price,
+            fee_bps: got_fee,
+            max_backing_fee_bps: got_backing_cap,
+        } => {
+            assert_eq!(got_asset, asset_index);
+            assert_eq!(got_size, size_q);
+            assert_eq!(got_price, exec_price);
+            assert_eq!(got_fee, fee_bps);
+            assert_eq!(got_backing_cap, max_backing_fee_bps);
         }
         _ => unreachable!(),
     }
@@ -1194,6 +1230,7 @@ fn kani_v16_trade_and_crank_payloads_reject_trailing_byte() {
             size_q: 1,
             exec_price: 100,
             fee_bps: 0,
+            max_backing_fee_bps: 0,
         },
         extra,
     );
