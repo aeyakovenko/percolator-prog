@@ -27283,9 +27283,29 @@ fn v16_attack_non_base_trade_rejects_after_base_resolve_matured() {
         &[],
     );
     assert!(
-        resolve.is_ok(),
-        "base resolve remains available after rejected non-base trade: {resolve:?}"
+        resolve.is_err(),
+        "base resolve must not discard the pending authenticated non-base mark: {resolve:?}"
     );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "rejected resolve leaves the pending mark and market state intact"
+    );
+    env.svm.expire_blockhash();
+    env.crank(
+        taker_portfolio,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 8,
+            observations: crank_observations(1),
+        },
+    );
+    env.svm.expire_blockhash();
+    env.send(
+        ProgInstruction::ResolveStalePermissionless { now_slot: 0 },
+        vec![AccountMeta::new(env.market, false)],
+        &[],
+    )
+    .expect("base resolve remains live after bounded stored-mark catch-up");
     assert_eq!(env.market_state().1.mode, MarketModeV16::Resolved);
 }
 
@@ -47556,6 +47576,47 @@ fn v16_bpf_10m_market_liquidation_high_asset_stays_bounded() {
     assert_eq!(health_cert(&short_after).certified_liq_deficit, 0);
 }
 
+#[test]
+fn v16_bpf_10m_market_resolve_accrual_preflight_stays_bounded() {
+    const N: usize = 5_834;
+    const HIGH_ASSET: usize = N - 1;
+    const PRICE: u64 = 100;
+
+    let mut env = V16CuEnv::new();
+    let account_len = grow_market_to_10m_with_high_active_asset(&mut env, N, HIGH_ASSET, PRICE);
+    env.portfolio_account_len = state::portfolio_account_len_for_market_slots(N).unwrap();
+
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long = env.create_portfolio(&long_owner);
+    let short = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long, 1_000_000);
+    env.deposit(&short_owner, short, 1_000_000);
+    env.svm.warp_to_slot(1);
+    env.trade_asset_with_cu(
+        HIGH_ASSET as u16,
+        &long_owner,
+        long,
+        &short_owner,
+        short,
+        POS_SCALE as i128,
+        PRICE,
+        0,
+    );
+
+    env.svm.warp_to_slot(2);
+    let resolve_cu = env.resolve();
+    println!(
+        "v16 10MiB ResolveMarket accrual preflight: assets={N}, account_len={account_len}, \
+         last_exposed_asset={HIGH_ASSET}, CU={resolve_cu}"
+    );
+    assert!(
+        resolve_cu < 1_400_000,
+        "10MiB ResolveMarket accrual preflight must fit the transaction CU limit: {resolve_cu}"
+    );
+    assert_eq!(env.market_state().1.mode, MarketModeV16::Resolved);
+}
+
 // Scale proof — the largest current market that fits Solana's 10 MiB account cap is valid AND a
 // real BPF trade on a HIGH asset index executes with O(1)-in-N compute.
 //
@@ -59716,4 +59777,521 @@ fn v16_attack_underfunded_exit_cannot_move_ewma_with_uncollectible_fee() {
     ] {
         assert_underfunded_ewma_exit_uses_collected_fee(path);
     }
+}
+
+// Resolve may ignore a mark that has never become an accrual checkpoint, but it must not erase a
+// deterministic funding segment after a public crank has activated that checkpoint.
+#[test]
+fn v16_attack_market_resolve_cannot_erase_committed_funding() {
+    #[derive(Debug)]
+    struct Outcome {
+        f_long_num: i128,
+        f_short_num: i128,
+        long_payout: u64,
+        short_payout: u64,
+    }
+
+    fn run(crank_before_resolve: bool) -> Outcome {
+        const PRICE: u64 = 100;
+        const MARK: u64 = 99;
+        const OPEN_SLOT: u64 = 1;
+        const PRIME_SLOT: u64 = 2;
+        const RESOLVE_SLOT: u64 = 3;
+        const DEPOSIT: u128 = 100_000_000;
+        const SIZE_Q: i128 = 100_000 * POS_SCALE as i128;
+
+        let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+            initial_price: PRICE,
+            max_price_move_bps_per_slot: 1,
+            max_accrual_dt_slots: 1,
+            max_abs_funding_e9_per_slot: 10_000,
+            min_funding_lifetime_slots: 1,
+            ..V16CuMarketParams::default()
+        });
+        env.svm.warp_to_slot(OPEN_SLOT);
+        env.configure_auth_mark_with_cu(OPEN_SLOT, PRICE);
+
+        let resolve_admin = env.admin.insecure_clone();
+        let honest_oracle = Keypair::new();
+        env.try_update_per_asset_authority_with_cu(
+            &resolve_admin,
+            Some(&honest_oracle),
+            0,
+            processor::ASSET_AUTH_ORACLE,
+            honest_oracle.pubkey().to_bytes(),
+        )
+        .expect("separate the honest oracle key from the resolve admin");
+
+        let victim_long = env.create_portfolio(&honest_oracle);
+        let attacker_short = env.create_portfolio(&resolve_admin);
+        env.deposit(&honest_oracle, victim_long, DEPOSIT);
+        env.deposit(&resolve_admin, attacker_short, DEPOSIT);
+        env.trade_with_cu(
+            &honest_oracle,
+            victim_long,
+            &resolve_admin,
+            attacker_short,
+            SIZE_Q,
+            PRICE,
+            0,
+        );
+
+        env.svm.warp_to_slot(PRIME_SLOT);
+        env.svm.expire_blockhash();
+        env.send(
+            ProgInstruction::PushAuthMark {
+                asset_index: 0,
+                now_slot: PRIME_SLOT,
+                mark_e6: MARK,
+            },
+            vec![
+                AccountMeta::new(honest_oracle.pubkey(), true),
+                AccountMeta::new(env.market, false),
+            ],
+            &[&honest_oracle],
+        )
+        .expect("honest oracle mark");
+        env.crank(
+            victim_long,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: PRIME_SLOT,
+                observations: crank_observations(0),
+            },
+        );
+
+        env.svm.warp_to_slot(RESOLVE_SLOT);
+        if crank_before_resolve {
+            env.crank(
+                victim_long,
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: RESOLVE_SLOT,
+                    observations: crank_observations(0),
+                },
+            );
+        }
+        env.svm.expire_blockhash();
+        let first_resolve = send_tx(
+            &mut env.svm,
+            env.program_id,
+            &env.payer,
+            ProgInstruction::ResolveMarket,
+            vec![
+                AccountMeta::new(resolve_admin.pubkey(), true),
+                AccountMeta::new(env.market, false),
+            ],
+            &[&resolve_admin],
+        );
+        if crank_before_resolve {
+            first_resolve.expect("current committed funding permits resolve");
+        } else if first_resolve.is_err() {
+            env.crank(
+                victim_long,
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: RESOLVE_SLOT,
+                    observations: crank_observations(0),
+                },
+            );
+            env.resolve();
+        }
+        let (_, resolved) = env.market_state();
+
+        // The funding loser closes first so its realized loss is available for the winner.
+        let short_dest = env.close_resolved(&resolve_admin, attacker_short);
+        let long_dest = env.close_resolved(&honest_oracle, victim_long);
+        Outcome {
+            f_long_num: resolved.assets[0].f_long_num,
+            f_short_num: resolved.assets[0].f_short_num,
+            long_payout: env.token_amount(long_dest),
+            short_payout: env.token_amount(short_dest),
+        }
+    }
+
+    let control = run(true);
+    let attack = run(false);
+    eprintln!("resolve funding control={control:?} attack={attack:?}");
+    assert!(control.f_long_num > 0 && control.f_short_num < 0);
+    assert_eq!(attack.f_long_num, control.f_long_num);
+    assert_eq!(attack.f_short_num, control.f_short_num);
+    assert_eq!(attack.long_payout, control.long_payout);
+    assert_eq!(attack.short_payout, control.short_payout);
+}
+
+// Once stale resolution matures, its accrual preflight and the public crank must not deadlock each
+// other. The crank may commit already-stored price/funding state, but must not accept a fresh oracle
+// report that could reset the stale clock and postpone resolution.
+#[test]
+fn v16_attack_stale_resolve_can_finish_committed_funding_accrual() {
+    const PRICE: u64 = 100;
+    const MARK: u64 = 99;
+    const OPEN_SLOT: u64 = 1;
+    const PRIME_SLOT: u64 = 2;
+    const RESOLVE_SLOT: u64 = 3;
+    const DEPOSIT: u128 = 100_000_000;
+    const SIZE_Q: i128 = 100_000 * POS_SCALE as i128;
+
+    let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+        initial_price: PRICE,
+        max_price_move_bps_per_slot: 1,
+        max_accrual_dt_slots: 1,
+        max_abs_funding_e9_per_slot: 10_000,
+        min_funding_lifetime_slots: 1,
+        ..V16CuMarketParams::default()
+    });
+    env.configure_permissionless_resolve_with_cu(1, 1);
+    env.svm.warp_to_slot(OPEN_SLOT);
+    env.configure_auth_mark_with_cu(OPEN_SLOT, PRICE);
+
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long = env.create_portfolio(&long_owner);
+    let short = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long, DEPOSIT);
+    env.deposit(&short_owner, short, DEPOSIT);
+    env.trade_with_cu(&long_owner, long, &short_owner, short, SIZE_Q, PRICE, 0);
+
+    env.svm.warp_to_slot(PRIME_SLOT);
+    env.push_auth_mark_with_cu(PRIME_SLOT, MARK);
+    env.crank(
+        long,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: PRIME_SLOT,
+            observations: crank_observations(0),
+        },
+    );
+
+    env.svm.warp_to_slot(RESOLVE_SLOT);
+    env.svm.expire_blockhash();
+    let unsafe_resolve = env
+        .send(
+            ProgInstruction::ResolveStalePermissionless { now_slot: 0 },
+            vec![AccountMeta::new(env.market, false)],
+            &[],
+        )
+        .expect_err("stale resolve must wait for the committed funding segment");
+    assert!(
+        unsafe_resolve.contains("Custom(19)")
+            || unsafe_resolve.contains("custom program error: 0x13"),
+        "unsafe stale resolve should reject as EngineStale, got {unsafe_resolve}"
+    );
+
+    env.svm.expire_blockhash();
+    env.crank(
+        long,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: RESOLVE_SLOT,
+            observations: crank_observations(0),
+        },
+    );
+    let (_, accrued) = env.market_state();
+    assert!(accrued.assets[0].f_long_num > 0);
+    assert!(accrued.assets[0].f_short_num < 0);
+
+    env.svm.expire_blockhash();
+    env.send(
+        ProgInstruction::ResolveStalePermissionless { now_slot: 0 },
+        vec![AccountMeta::new(env.market, false)],
+        &[],
+    )
+    .expect("stale resolve succeeds after bounded public catch-up");
+    assert_eq!(env.market_state().1.mode, MarketModeV16::Resolved);
+
+    env.svm.warp_to_slot(RESOLVE_SLOT + 1);
+    let short_dest = env.close_resolved(&short_owner, short);
+    let long_dest = env.close_resolved(&long_owner, long);
+    assert_eq!(env.token_amount(long_dest), 100_100_000);
+    assert_eq!(env.token_amount(short_dest), 99_900_000);
+}
+
+#[test]
+fn v16_dense_price_managed_stale_market_remains_resolvable() {
+    const ASSET_COUNT: u16 = 4_000;
+    const PRICE: u64 = 100;
+    // Pre-sizing is part of normal market-account construction. InitMarket still configures only
+    // the first 14 slots; every additional slot is activated below through the public API.
+    let mut env = V16CuEnv::new_with_init_params_and_market_capacity(
+        V16CuMarketParams {
+            max_portfolio_assets: percolator_prog::constants::WRAPPER_MAX_PORTFOLIO_ASSETS,
+            ..V16CuMarketParams::default()
+        },
+        ASSET_COUNT as usize,
+    );
+
+    let admin = env.admin.insecure_clone();
+    let initial_slots = env.market_state().1.config.max_market_slots as u16;
+    for asset_index in 0..initial_slots {
+        env.configure_auth_mark_for_asset_as_admin(asset_index, 0, PRICE);
+    }
+    for asset_index in initial_slots..ASSET_COUNT {
+        env.svm.warp_to_slot(asset_index as u64);
+        env.svm.expire_blockhash();
+        env.send(
+            ProgInstruction::UpdateAssetLifecycle {
+                action: processor::ASSET_ACTION_ACTIVATE,
+                asset_index,
+                now_slot: asset_index as u64,
+                initial_price: PRICE,
+                insurance_authority: admin.pubkey().to_bytes(),
+                insurance_operator: admin.pubkey().to_bytes(),
+                backing_bucket_authority: admin.pubkey().to_bytes(),
+                oracle_authority: admin.pubkey().to_bytes(),
+            },
+            vec![
+                AccountMeta::new(admin.pubkey(), true),
+                AccountMeta::new(env.market, false),
+            ],
+            &[&admin],
+        )
+        .unwrap_or_else(|err| panic!("public activation failed at asset {asset_index}: {err}"));
+        env.configure_auth_mark_for_asset_as_admin(asset_index, asset_index as u64, PRICE);
+    }
+    assert_eq!(
+        env.market_state().1.config.max_market_slots,
+        ASSET_COUNT as u32
+    );
+
+    let open_batch = |env: &mut V16CuEnv,
+                      long_owner: &Keypair,
+                      long: Pubkey,
+                      short_owner: &Keypair,
+                      short: Pubkey,
+                      start: u16,
+                      end: u16|
+     -> Result<u64, String> {
+        let legs = (start..end)
+            .map(|asset_index| BatchTradeLeg {
+                asset_index,
+                size_q: POS_SCALE as i128,
+                exec_price: PRICE,
+                fee_bps: 0,
+            })
+            .collect();
+        env.svm.expire_blockhash();
+        env.send(
+            ProgInstruction::BatchTradeNoCpi { legs },
+            vec![
+                AccountMeta::new(long_owner.pubkey(), true),
+                AccountMeta::new(short_owner.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(long, false),
+                AccountMeta::new(short, false),
+            ],
+            &[long_owner, short_owner],
+        )
+    };
+
+    let victim = Keypair::new();
+    let cooperative_lp = Keypair::new();
+    let victim_portfolio = env.create_portfolio(&victim);
+    let cooperative_lp_portfolio = env.create_portfolio(&cooperative_lp);
+    env.deposit(&victim, victim_portfolio, 1_000_000);
+    env.deposit(&cooperative_lp, cooperative_lp_portfolio, 1_000_000);
+    open_batch(
+        &mut env,
+        &victim,
+        victim_portfolio,
+        &cooperative_lp,
+        cooperative_lp_portfolio,
+        0,
+        14,
+    )
+    .expect("open victim positions through the public batch route");
+
+    for start in (14..ASSET_COUNT).step_by(14) {
+        let end = start.saturating_add(14).min(ASSET_COUNT);
+        let long_owner = Keypair::new();
+        let short_owner = Keypair::new();
+        let long = env.create_portfolio(&long_owner);
+        let short = env.create_portfolio(&short_owner);
+        env.deposit(&long_owner, long, 1_000_000);
+        env.deposit(&short_owner, short, 1_000_000);
+        open_batch(&mut env, &long_owner, long, &short_owner, short, start, end)
+            .unwrap_or_else(|err| panic!("public exposure failed at asset {start}: {err}"));
+    }
+    assert_eq!(
+        env.market_state().1.assets[ASSET_COUNT as usize - 1].oi_eff_long_q,
+        POS_SCALE
+    );
+
+    env.svm.expire_blockhash();
+    env.send(
+        ProgInstruction::ConfigurePermissionlessResolve {
+            stale_slots: 1,
+            force_close_delay_slots: 1,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&admin],
+    )
+    .expect("configure permissionless resolution");
+    let resolved_slot = ASSET_COUNT as u64 + 1;
+    env.svm.warp_to_slot(resolved_slot);
+
+    env.svm.expire_blockhash();
+    let stale_exit = env
+        .send(
+            ProgInstruction::TradeNoCpi {
+                asset_index: 0,
+                size_q: -(POS_SCALE as i128),
+                exec_price: PRICE,
+                fee_bps: 0,
+            },
+            vec![
+                AccountMeta::new(victim.pubkey(), true),
+                AccountMeta::new(cooperative_lp.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(victim_portfolio, false),
+                AccountMeta::new(cooperative_lp_portfolio, false),
+            ],
+            &[&victim, &cooperative_lp],
+        )
+        .expect_err("mature staleness must block the ordinary trade exit");
+    assert!(
+        stale_exit.contains("Custom(27)") || stale_exit.contains("custom program error: 0x1b"),
+        "ordinary exit should fail specifically as OracleStale: {stale_exit}"
+    );
+
+    env.svm.expire_blockhash();
+    let resolve_cu = env
+        .send(
+            ProgInstruction::ResolveStalePermissionless {
+                now_slot: resolved_slot,
+            },
+            vec![AccountMeta::new(env.market, false)],
+            &[],
+        )
+        .expect("a publicly constructed dense market must retain a bounded stale resolver");
+    assert!(resolve_cu < 1_400_000);
+    assert_eq!(env.market_state().1.mode, MarketModeV16::Resolved);
+}
+
+#[test]
+fn v16_probe_stale_resolve_cannot_discard_pending_authenticated_mark() {
+    #[derive(Debug)]
+    struct Outcome {
+        effective_price: u64,
+        long_payout: u64,
+        short_payout: u64,
+        unsafe_resolve_rejected: bool,
+    }
+
+    fn run(crank_before_maturity: bool) -> Outcome {
+        const PRICE: u64 = 1_000_000;
+        const MARK: u64 = 1_010_000;
+        const DEPOSIT: u128 = 2_000_000_000;
+        const SIZE_Q: i128 = 1_000 * POS_SCALE as i128;
+        const PUSH_SLOT: u64 = 2;
+        const RESOLVE_SLOT: u64 = 5;
+
+        let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+            max_portfolio_assets: 1,
+            initial_price: PRICE,
+            h_max: 20,
+            max_trading_fee_bps: 100,
+            max_price_move_bps_per_slot: 100,
+            max_accrual_dt_slots: 20,
+            min_funding_lifetime_slots: 20,
+            ..V16CuMarketParams::default()
+        });
+        env.configure_permissionless_resolve_with_cu(3, 1);
+        env.svm.warp_to_slot(1);
+        env.configure_auth_mark_with_cu(1, PRICE);
+
+        let marketauth = env.admin.insecure_clone();
+        let honest_oracle = Keypair::new();
+        env.try_update_per_asset_authority_with_cu(
+            &marketauth,
+            Some(&honest_oracle),
+            0,
+            processor::ASSET_AUTH_ORACLE,
+            honest_oracle.pubkey().to_bytes(),
+        )
+        .expect("separate honest oracle from market authority");
+
+        let victim = Keypair::new();
+        let victim_long = env.create_portfolio(&victim);
+        let attacker = Keypair::new();
+        let attacker_short = env.create_portfolio(&attacker);
+        env.deposit(&victim, victim_long, DEPOSIT);
+        env.deposit(&attacker, attacker_short, DEPOSIT);
+        env.trade_asset_with_cu(
+            0,
+            &victim,
+            victim_long,
+            &attacker,
+            attacker_short,
+            SIZE_Q,
+            PRICE,
+            0,
+        );
+
+        env.svm.warp_to_slot(PUSH_SLOT);
+        env.push_auth_mark_for_asset_with_authority(0, &honest_oracle, PUSH_SLOT, MARK);
+        assert_eq!(env.market_state().1.assets[0].effective_price, PRICE);
+
+        if crank_before_maturity {
+            env.crank(
+                victim_long,
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: PUSH_SLOT,
+                    observations: crank_observations(0),
+                },
+            );
+        }
+
+        env.svm.warp_to_slot(RESOLVE_SLOT);
+        env.svm.expire_blockhash();
+        let market_before = env.svm.get_account(&env.market).unwrap();
+        let unsafe_resolve = env.send(
+            ProgInstruction::ResolveStalePermissionless {
+                now_slot: RESOLVE_SLOT,
+            },
+            vec![AccountMeta::new(env.market, false)],
+            &[],
+        );
+        let unsafe_resolve_rejected = unsafe_resolve.is_err();
+        if unsafe_resolve_rejected {
+            assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+            env.svm.expire_blockhash();
+            env.crank(
+                victim_long,
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: RESOLVE_SLOT,
+                    observations: crank_observations(0),
+                },
+            );
+            env.svm.expire_blockhash();
+            env.send(
+                ProgInstruction::ResolveStalePermissionless {
+                    now_slot: RESOLVE_SLOT,
+                },
+                vec![AccountMeta::new(env.market, false)],
+                &[],
+            )
+            .expect("resolve after stored-state catch-up");
+        }
+
+        let effective_price = env.market_state().1.assets[0].effective_price;
+        env.svm.warp_to_slot(RESOLVE_SLOT + 1);
+        let short_dest = env.close_resolved(&attacker, attacker_short);
+        let long_dest = env.close_resolved(&victim, victim_long);
+        Outcome {
+            effective_price,
+            long_payout: env.token_amount(long_dest),
+            short_payout: env.token_amount(short_dest),
+            unsafe_resolve_rejected,
+        }
+    }
+
+    let control = run(true);
+    let attack = run(false);
+    eprintln!("pending-mark stale resolve control={control:?} attack={attack:?}");
+    assert_eq!(attack.effective_price, control.effective_price);
+    assert_eq!(attack.long_payout, control.long_payout);
+    assert_eq!(attack.short_payout, control.short_payout);
+    assert!(
+        attack.unsafe_resolve_rejected,
+        "stale resolver discarded an authenticated pending mark"
+    );
 }
