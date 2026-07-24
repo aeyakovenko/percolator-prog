@@ -8661,6 +8661,73 @@ pub mod processor {
         Ok(())
     }
 
+    fn require_hybrid_terminal_price_current_for_asset_view(
+        cfg: &WrapperConfigV16,
+        group: &state::MarketViewMutV16<'_>,
+        asset_index: usize,
+        now_slot: u64,
+        now_unix_ts: i64,
+    ) -> ProgramResult {
+        let configured_slots = group.header.config.max_market_slots.get() as usize;
+        if asset_index >= configured_slots || asset_index >= group.markets.len() {
+            return Err(PercolatorError::InvalidInstruction.into());
+        }
+        let asset = &group.markets[asset_index].engine.asset;
+        let exposed = asset.oi_eff_long_q.get() != 0 || asset.oi_eff_short_q.get() != 0;
+        if !exposed
+            || !matches!(
+                asset.lifecycle,
+                ASSET_LIFECYCLE_ACTIVE | ASSET_LIFECYCLE_DRAIN_ONLY
+            )
+        {
+            return Ok(());
+        }
+        let profile = read_oracle_profile_from_view(group, cfg, asset_index)?;
+        if !oracle_v16::profile_is_hybrid(&profile) {
+            return Ok(());
+        }
+
+        let oracle_leg_count = profile.oracle_leg_count as usize;
+        let external_fresh = oracle_leg_count != 0
+            && oracle_leg_count <= constants::ORACLE_LEG_CAP
+            && profile.oracle_leg_publish_times[..oracle_leg_count]
+                .iter()
+                .all(|publish_time| {
+                    *publish_time > 0
+                        && now_unix_ts >= *publish_time
+                        && (now_unix_ts - *publish_time) as u64 <= profile.max_staleness_secs
+                });
+        let fee_backed_after_hours_mark_current =
+            oracle_v16::profile_hybrid_soft_stale_matured(&profile, now_slot)
+                && profile.mark_ewma_last_slot == now_slot;
+        if !external_fresh && !fee_backed_after_hours_mark_current {
+            return Err(PercolatorError::OracleStale.into());
+        }
+        Ok(())
+    }
+
+    fn require_hybrid_resolution_prices_current_view(
+        cfg: &WrapperConfigV16,
+        group: &state::MarketViewMutV16<'_>,
+        now_slot: u64,
+        now_unix_ts: i64,
+    ) -> ProgramResult {
+        let configured_slots = group.header.config.max_market_slots.get() as usize;
+        if configured_slots > group.markets.len() {
+            return Err(PercolatorError::InvalidInstruction.into());
+        }
+        for asset_index in 0..configured_slots {
+            require_hybrid_terminal_price_current_for_asset_view(
+                cfg,
+                group,
+                asset_index,
+                now_slot,
+                now_unix_ts,
+            )?;
+        }
+        Ok(())
+    }
+
     #[inline(never)]
     fn handle_resolve_market<'a>(
         program_id: &Pubkey,
@@ -8677,12 +8744,13 @@ pub mod processor {
             return Err(PercolatorError::EngineLockActive.into());
         }
         expect_live_authority(&cfg.marketauth, admin.key)?;
-        let slot = Clock::get()
-            .map(|c| c.slot)
-            .unwrap_or(group.header.current_slot.get());
+        let (slot, unix_timestamp) = Clock::get()
+            .map(|c| (c.slot, c.unix_timestamp))
+            .unwrap_or((group.header.current_slot.get(), 0));
         if slot < group.header.current_slot.get() {
             return Err(PercolatorError::EngineStale.into());
         }
+        require_hybrid_resolution_prices_current_view(&cfg, &group, slot, unix_timestamp)?;
         group
             .resolve_market_not_atomic(slot)
             .map_err(map_v16_error)?;
@@ -9266,6 +9334,7 @@ pub mod processor {
                 return Err(PercolatorError::InvalidInstruction.into());
             }
             let authenticated_slot = authenticated_slot_or_fallback(now_slot);
+            let authenticated_unix_ts = Clock::get().map(|c| c.unix_timestamp).unwrap_or(0);
             if oracle_v16::permissionless_stale_matured(&cfg_pre, authenticated_slot) {
                 return Err(PercolatorError::OracleStale.into());
             }
@@ -9289,6 +9358,13 @@ pub mod processor {
                 if authenticated_slot < group.header.current_slot.get() {
                     return Err(PercolatorError::EngineStale.into());
                 }
+                require_hybrid_terminal_price_current_for_asset_view(
+                    &cfg,
+                    &group,
+                    asset_index,
+                    authenticated_slot,
+                    authenticated_unix_ts,
+                )?;
                 match group.markets[asset_index].engine.asset.lifecycle {
                     ASSET_LIFECYCLE_ACTIVE | ASSET_LIFECYCLE_DRAIN_ONLY => {
                         let frozen_mark = group.markets[asset_index]
