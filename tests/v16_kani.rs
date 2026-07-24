@@ -268,6 +268,7 @@ fn kani_v16_domain_topup_and_asset_insurance_decode_preserves_wire_fields() {
 
 #[kani::proof]
 fn kani_v16_recovery_close_progress_decode_preserves_wire_fields() {
+    let portfolio_id: u64 = kani::any();
     let asset_index: u16 = kani::any();
     let side: u8 = kani::any();
     let b_delta_budget: u128 = kani::any();
@@ -276,15 +277,18 @@ fn kani_v16_recovery_close_progress_decode_preserves_wire_fields() {
     let now_slot: u64 = kani::any();
 
     let forfeit = Instruction::ForfeitRecoveryLeg {
+        portfolio_id,
         asset_index,
         b_delta_budget,
     }
     .encode();
     match Instruction::decode(&forfeit).unwrap() {
         Instruction::ForfeitRecoveryLeg {
+            portfolio_id: got_portfolio_id,
             asset_index: got_asset,
             b_delta_budget: got_budget,
         } => {
+            assert_eq!(got_portfolio_id, portfolio_id);
             assert_eq!(got_asset, asset_index);
             assert_eq!(got_budget, b_delta_budget);
         }
@@ -348,6 +352,14 @@ fn kani_v16_recovery_close_progress_decode_preserves_wire_fields() {
         Instruction::SyncMaintenanceFee { now_slot: got } => assert_eq!(got, now_slot),
         _ => unreachable!(),
     }
+}
+
+#[kani::proof]
+fn kani_v16_legacy_unbound_forfeit_payload_is_rejected() {
+    let mut legacy_payload: [u8; 19] = kani::any();
+    legacy_payload[0] = 43;
+
+    assert!(Instruction::decode(&legacy_payload).is_err());
 }
 
 #[kani::proof]
@@ -1373,6 +1385,7 @@ fn kani_v16_resolved_recovery_payloads_reject_trailing_byte() {
     );
     assert_rejects_trailing_byte(
         Instruction::ForfeitRecoveryLeg {
+            portfolio_id: 1,
             asset_index: 0,
             b_delta_budget: 1,
         },
