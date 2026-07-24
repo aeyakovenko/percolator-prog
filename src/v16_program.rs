@@ -5828,6 +5828,11 @@ pub mod processor {
             } else {
                 size_q.unsigned_abs()
             };
+            accrue_zero_move_funding_before_trade_view(
+                &oracle_profile,
+                &mut group,
+                asset_index as usize,
+            )?;
             // F-TRADENOCPI-FEE / F-NOCPI-MARK-FEE: request.exec_price is used by the engine only as
             // fee notional. In price-managed EWMA/stale-hybrid modes, the caller's reported print is
             // also the mark-discovery input, so first normalize it to the same per-asset dt price
@@ -6083,6 +6088,11 @@ pub mod processor {
                     return Err(PercolatorError::InvalidInstruction.into());
                 }
                 let abs_size = leg.size_q.unsigned_abs();
+                accrue_zero_move_funding_before_trade_view(
+                    &oracle_profile,
+                    &mut group,
+                    asset_index,
+                )?;
                 let fee_basis_price = accepted_reported_trade_price_view(
                     &oracle_profile,
                     &group,
@@ -6554,6 +6564,8 @@ pub mod processor {
             return Err(PercolatorError::InvalidInstruction.into());
         }
 
+        accrue_zero_move_funding_before_matcher_view(market_ai, &[asset_index])?;
+
         let (cfg_pre, mode_pre, current_slot_pre, oracle_price, max_trading_fee_bps) =
             state::read_market_trade_preflight(
                 &market_ai.try_borrow_data()?,
@@ -6867,6 +6879,7 @@ pub mod processor {
             }
             asset_indices.push(leg.asset_index);
         }
+        accrue_zero_move_funding_before_matcher_view(market_ai, &asset_indices)?;
         // One header/config parse for mode + slot + every leg's oracle price (avoids O(N^2)
         // re-parsing the market once per leg).
         let (
@@ -11567,6 +11580,70 @@ pub mod processor {
             group.header.config.max_price_move_bps_per_slot.get(),
             dt_slots,
         ))
+    }
+
+    fn accrue_zero_move_funding_before_trade_view(
+        profile: &state::AssetOracleProfileV16,
+        group: &mut state::MarketViewMutV16<'_>,
+        asset_index: usize,
+    ) -> ProgramResult {
+        if !oracle_v16::profile_is_price_managed(profile)
+            || profile.mark_ewma_e6 == 0
+            || asset_index >= group.header.config.max_market_slots.get() as usize
+            || asset_index >= group.markets.len()
+        {
+            return Ok(());
+        }
+        let now_slot = authenticated_market_slot_or_fallback_view(group);
+        let dt_slots = asset_segment_dt_view(group, asset_index, now_slot)?;
+        if dt_slots == 0 {
+            return Ok(());
+        }
+        let asset = group.markets[asset_index].engine.asset;
+        let effective_price = asset.effective_price.get();
+        let exposed = asset.oi_eff_long_q.get() != 0 || asset.oi_eff_short_q.get() != 0;
+        let bounded_price = oracle_v16::effective_price_from_target(
+            effective_price,
+            profile.mark_ewma_e6,
+            group.header.config.max_price_move_bps_per_slot.get(),
+            dt_slots,
+            exposed,
+        );
+        // Pending nonzero price movement is handled by the full mark-accrual path. This helper
+        // closes the otherwise invisible case where integer price clamping is a no-op but signed
+        // premium funding for the same elapsed segment is not.
+        if bounded_price != effective_price {
+            return Ok(());
+        }
+        let funding_rate_e9 =
+            permissionless_funding_rate_e9_view(profile, group, asset_index, effective_price)?;
+        if funding_rate_e9 == 0 {
+            return Ok(());
+        }
+        group
+            .accrue_asset_to_not_atomic(
+                asset_index,
+                now_slot,
+                effective_price,
+                funding_rate_e9,
+                true,
+            )
+            .map_err(map_v16_error)?;
+        Ok(())
+    }
+
+    fn accrue_zero_move_funding_before_matcher_view(
+        market_ai: &AccountInfo<'_>,
+        asset_indices: &[u16],
+    ) -> ProgramResult {
+        let mut market_data = market_ai.try_borrow_mut_data()?;
+        let (cfg, mut group) = state::market_view_mut(&mut market_data)?;
+        for &asset_index in asset_indices {
+            let asset_index = asset_index as usize;
+            let profile = read_oracle_profile_from_view(&group, &cfg, asset_index)?;
+            accrue_zero_move_funding_before_trade_view(&profile, &mut group, asset_index)?;
+        }
+        group.validate_shape().map_err(map_v16_error)
     }
 
     fn hybrid_trade_fee_quote_view(
