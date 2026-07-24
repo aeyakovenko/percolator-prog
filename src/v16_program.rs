@@ -5050,6 +5050,75 @@ pub mod processor {
         credit_fee_to_domain_budget_view(cfg, group, asset_index * 2 + 1, fee_short)
     }
 
+    fn credit_trade_fees_with_mark_externality_view(
+        cfg: &WrapperConfigV16,
+        group: &mut state::MarketViewMutV16<'_>,
+        asset_index: usize,
+        fee_long: u128,
+        fee_short: u128,
+        quote: HybridTradeFeeQuote,
+    ) -> ProgramResult {
+        let total_fee = fee_long
+            .checked_add(fee_short)
+            .ok_or(PercolatorError::EngineArithmeticOverflow)?;
+        let mark_externality_fee = if quote.mark_externality_notional == 0 {
+            0
+        } else {
+            total_fee.saturating_sub(quote.base_fee_paid)
+        };
+        if mark_externality_fee == 0 {
+            return credit_trade_fees_to_market_budgets_view(
+                cfg,
+                group,
+                asset_index,
+                fee_long,
+                fee_short,
+            );
+        }
+
+        // A permissionless asset operator must not recover the fee that paid for its mark move.
+        // Leave only that collected externality fee outside every withdrawable domain budget;
+        // ordinary fees remain local. CloseSlab burns the unbudgeted surplus after all claims exit.
+        let mut mark_long = mark_externality_fee / 2;
+        let mut mark_short = mark_externality_fee
+            .checked_sub(mark_long)
+            .ok_or(PercolatorError::EngineCounterUnderflow)?;
+        if mark_long > fee_long {
+            let overflow = mark_long
+                .checked_sub(fee_long)
+                .ok_or(PercolatorError::EngineCounterUnderflow)?;
+            mark_long = fee_long;
+            mark_short = mark_short
+                .checked_add(overflow)
+                .ok_or(PercolatorError::EngineArithmeticOverflow)?;
+        }
+        if mark_short > fee_short {
+            let overflow = mark_short
+                .checked_sub(fee_short)
+                .ok_or(PercolatorError::EngineCounterUnderflow)?;
+            mark_short = fee_short;
+            mark_long = mark_long
+                .checked_add(overflow)
+                .ok_or(PercolatorError::EngineArithmeticOverflow)?;
+        }
+        if mark_long > fee_long || mark_short > fee_short {
+            return Err(PercolatorError::EngineCounterUnderflow.into());
+        }
+
+        credit_trade_fees_to_market_budgets_view(
+            cfg,
+            group,
+            asset_index,
+            fee_long
+                .checked_sub(mark_long)
+                .ok_or(PercolatorError::EngineCounterUnderflow)?,
+            fee_short
+                .checked_sub(mark_short)
+                .ok_or(PercolatorError::EngineCounterUnderflow)?,
+        )?;
+        Ok(())
+    }
+
     fn credit_market_fee_split_across_domains_view(
         cfg: &WrapperConfigV16,
         group: &mut state::MarketViewMutV16<'_>,
@@ -5903,12 +5972,13 @@ pub mod processor {
                     backing_before_b.as_ref(),
                 )?;
             }
-            credit_trade_fees_to_market_budgets_view(
+            credit_trade_fees_with_mark_externality_view(
                 &cfg,
                 &mut group,
                 asset_index as usize,
                 outcome.fee_a,
                 outcome.fee_b,
+                fee_quote,
             )?;
             let collected_post_trade_mark = collected_fee_supported_mark_view(
                 &oracle_profile,
@@ -6149,12 +6219,13 @@ pub mod processor {
                 remaining_fee_b = remaining_fee_b
                     .checked_sub(fee_b)
                     .ok_or(PercolatorError::EngineArithmeticOverflow)?;
-                credit_trade_fees_to_market_budgets_view(
+                credit_trade_fees_with_mark_externality_view(
                     &cfg,
                     &mut group,
                     *asset_index,
                     fee_a,
                     fee_b,
+                    *fee_quote,
                 )?;
                 let collected_post_trade_mark =
                     collected_fee_supported_mark_view(oracle_profile, *fee_quote, fee_a, fee_b)?;
@@ -8254,21 +8325,28 @@ pub mod processor {
         expect_owner(market_ai, program_id)?;
         verify_token_program(token_program)?;
 
-        let cfg_pre = {
+        let (cfg_pre, retired_unbudgeted_insurance) = {
             let mut market_data = market_ai.try_borrow_mut_data()?;
-            let (cfg, group) = state::market_view_mut(&mut market_data)?;
+            let (cfg, mut group) = state::market_view_mut(&mut market_data)?;
             expect_live_authority(&cfg.marketauth, admin_dest.key)?;
             if group.header.mode != 1 {
                 return Err(PercolatorError::EngineLockActive.into());
             }
-            if group.header.vault.get() != 0
-                || group.header.insurance.get() != 0
-                || group.header.c_tot.get() != 0
-                || group.header.materialized_portfolio_count.get() != 0
+            if group.header.c_tot.get() != 0 || group.header.materialized_portfolio_count.get() != 0
             {
                 return Err(PercolatorError::EngineLockActive.into());
             }
-            cfg
+            let retired = if group.header.insurance.get() == 0 {
+                0
+            } else {
+                group
+                    .retire_terminal_unbudgeted_insurance_not_atomic()
+                    .map_err(map_v16_error)?
+            };
+            if group.header.vault.get() != 0 || group.header.insurance.get() != 0 {
+                return Err(PercolatorError::EngineLockActive.into());
+            }
+            (cfg, retired)
         };
 
         let (vault_authority, bump) = derive_vault_authority(program_id, market_ai.key);
@@ -8277,6 +8355,11 @@ pub mod processor {
         verify_vault_token_account(vault_token, &vault_authority, &primary_mint)?;
         let vault_account = unpack_token_account(vault_token)?;
         verify_user_token_account(dest_token, admin_dest.key, &primary_mint)?;
+        let retired_u64 = amount_to_u64(retired_unbudgeted_insurance)?;
+        let primary_sweep_amount = vault_account
+            .amount
+            .checked_sub(retired_u64)
+            .ok_or(PercolatorError::InvalidTokenAccount)?;
         let bump_arr = [bump];
         let signer_seeds: &[&[&[u8]]] = &[&[b"vault", market_ai.key.as_ref(), &bump_arr]];
         let secondary_close = if cfg_pre.secondary_collateral_mint != [0u8; 32] {
@@ -8302,13 +8385,28 @@ pub mod processor {
             None
         };
 
-        if vault_account.amount > 0 {
+        if retired_u64 != 0 {
+            let primary_mint_index = if secondary_close.is_some() { 8 } else { 6 };
+            let primary_mint_ai = account(accounts, primary_mint_index)?;
+            expect_writable(primary_mint_ai)?;
+            expect_key(primary_mint_ai, &primary_mint)?;
+            verify_mint(primary_mint_ai)?;
+            burn_tokens_signed(
+                token_program,
+                vault_token,
+                primary_mint_ai,
+                vault_authority_ai,
+                retired_u64,
+                signer_seeds,
+            )?;
+        }
+        if primary_sweep_amount > 0 {
             transfer_tokens_signed(
                 token_program,
                 vault_token,
                 dest_token,
                 vault_authority_ai,
-                vault_account.amount,
+                primary_sweep_amount,
                 signer_seeds,
             )?;
         }
@@ -12173,6 +12271,37 @@ pub mod processor {
             &[
                 source.clone(),
                 dest.clone(),
+                authority.clone(),
+                token_program.clone(),
+            ],
+            signer_seeds,
+        )
+    }
+
+    fn burn_tokens_signed<'a>(
+        token_program: &AccountInfo<'a>,
+        source: &AccountInfo<'a>,
+        mint: &AccountInfo<'a>,
+        authority: &AccountInfo<'a>,
+        amount: u64,
+        signer_seeds: &[&[&[u8]]],
+    ) -> Result<(), ProgramError> {
+        if amount == 0 {
+            return Ok(());
+        }
+        let ix = spl_token::instruction::burn(
+            token_program.key,
+            source.key,
+            mint.key,
+            authority.key,
+            &[],
+            amount,
+        )?;
+        invoke_signed(
+            &ix,
+            &[
+                source.clone(),
+                mint.clone(),
                 authority.clone(),
                 token_program.clone(),
             ],
