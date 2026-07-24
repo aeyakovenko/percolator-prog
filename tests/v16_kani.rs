@@ -503,6 +503,33 @@ fn kani_v16_tradecpi_decode_preserves_wire_fields() {
 }
 
 #[kani::proof]
+fn kani_v16_set_matcher_config_binds_portfolio_id() {
+    let portfolio_id: u64 = kani::any();
+    let enabled: u8 = kani::any();
+    let extra: u8 = kani::any();
+
+    let instruction = Instruction::SetMatcherConfig {
+        portfolio_id,
+        enabled,
+    };
+    let mut encoded = instruction.encode();
+    assert_eq!(encoded.len(), 10);
+    match Instruction::decode(&encoded).unwrap() {
+        Instruction::SetMatcherConfig {
+            portfolio_id: got_portfolio_id,
+            enabled: got_enabled,
+        } => {
+            assert_eq!(got_portfolio_id, portfolio_id);
+            assert_eq!(got_enabled, enabled);
+        }
+        _ => unreachable!(),
+    }
+
+    encoded.push(extra);
+    assert!(Instruction::decode(&encoded).is_err());
+}
+
+#[kani::proof]
 fn kani_v16_matcher_return_accepts_only_bound_echoed_fills() {
     // Audit fix: the ret's echoed fields and abi_version are drawn INDEPENDENTLY of the
     // expected (bound) params, and sizes are full-width i128, so both the accept path AND
