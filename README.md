@@ -480,6 +480,7 @@ This section describes intent and operational ordering, not argument-by-argument
   - owner-signed close recovery path; optional deposit is transferred first, then the engine cancels the pending close if the cure succeeds
 - **ForfeitRecoveryLeg** (tag 43)
   - owner-signed recovery-leg forfeit for a selected asset and bounded B-delta budget
+  - after the force-close delay, any signer may refresh and detach a zero-effective-OI, reset-pending Recovery leg only when the engine reports no forfeited PnL or loss flow
 - **RebalanceReduce** (tag 44)
   - owner-signed risk-reducing rebalance against the wrapper-authenticated effective price vector
 - **ClaimResolvedPayoutTopup** (tag 46)

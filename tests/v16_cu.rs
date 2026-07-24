@@ -28946,9 +28946,9 @@ fn v16_attack_topup_insurance_domain_authority_gated() {
     assert_eq!(g1.vault, g0.vault, "vault unchanged");
     assert!(g1.vault >= g1.c_tot + g1.insurance, "senior conservation");
 }
-// security.md sweep — recovery-tool gating (#6): ForfeitRecoveryLeg is owner-gated
-// (with_one_portfolio_view enforces owner signs + matches the portfolio). FinalizeResetSide is
-// market-only and permissionless, so a bogus victim-portfolio account list must not be accepted.
+// security.md sweep — before the abandoned-asset delay, ForfeitRecoveryLeg is owner-gated.
+// FinalizeResetSide is market-only and permissionless, so a bogus victim-portfolio account list must
+// not be accepted.
 #[test]
 fn v16_attack_recovery_tools_owner_gated() {
     let mut env = V16CuEnv::new();
@@ -40075,6 +40075,304 @@ fn v16_attack_repeated_partial_liquidation_stops_charging_after_health_restored(
         "accounting == real vault"
     );
     assert!(g.vault >= g.c_tot + g.insurance, "senior conservation");
+}
+
+#[test]
+fn v16_attack_delayed_permissionless_forfeit_clears_zero_oi_orphan() {
+    let mut env = V16CuEnv::new_with_init_params(production_risk_params());
+    env.configure_permissionless_resolve_with_cu(1_000, 5);
+    env.configure_auth_mark_with_cu(0, 1_000_000);
+
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long = env.create_portfolio(&long_owner);
+    let short = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long, 100_000_000);
+    env.deposit(&short_owner, short, 110_000);
+    env.trade_asset_with_cu(
+        0,
+        &long_owner,
+        long,
+        &short_owner,
+        short,
+        (2 * POS_SCALE) as i128,
+        1_000_000,
+        0,
+    );
+
+    for slot in 1..=30u64 {
+        env.svm.warp_to_slot(slot);
+        env.push_auth_mark_with_cu(slot, 1_070_000);
+        env.svm.expire_blockhash();
+        let _ = env.send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: slot,
+                observations: crank_observations(0),
+            },
+            vec![
+                AccountMeta::new(env.payer.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(long, false),
+            ],
+            &[],
+        );
+    }
+
+    env.crank(
+        short,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 30,
+            observations: crank_observations(0),
+        },
+    );
+
+    let (_, before_liquidation) = env.market_state();
+    assert_eq!(before_liquidation.assets[0].oi_eff_long_q, 2 * POS_SCALE);
+    assert_eq!(before_liquidation.assets[0].oi_eff_short_q, 2 * POS_SCALE);
+    assert!(
+        health_cert(&env.portfolio_state(short)).certified_liq_deficit > 0,
+        "setup must make the short publicly liquidatable",
+    );
+
+    env.crank(
+        short,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 30,
+            observations: crank_observations(0),
+        },
+    );
+    let (_, after_liquidation) = env.market_state();
+    let long_after_liquidation = env.portfolio_state(long);
+    let short_after_liquidation = env.portfolio_state(short);
+    assert_eq!(after_liquidation.assets[0].oi_eff_long_q, 0);
+    assert_eq!(after_liquidation.assets[0].oi_eff_short_q, 0);
+    assert!(!has_active_leg_for_asset(&short_after_liquidation, 0));
+    assert_eq!(
+        active_leg_for_asset(&long_after_liquidation, 0)
+            .basis_pos_q
+            .unsigned_abs(),
+        2 * POS_SCALE,
+        "the opposite stored leg remains raw-scaled after unilateral liquidation",
+    );
+    assert!(
+        after_liquidation.assets[0].stored_pos_count_long > 0,
+        "the zero-effective-OI long still needs dead-leg cleanup",
+    );
+
+    env.svm.warp_to_slot(31);
+    env.push_auth_mark_with_cu(31, 1_070_000);
+    let admin = env.admin.insecure_clone();
+    env.svm.expire_blockhash();
+    env.try_shutdown_asset_with_authority(&admin, 0, 31)
+        .expect("asset shutdown creates the abandoned-asset recovery window");
+    assert_eq!(
+        env.market_state().1.assets[0].lifecycle,
+        AssetLifecycleV16::Recovery,
+    );
+
+    let cranker = Keypair::new();
+    env.ensure_signer_account(cranker.pubkey());
+    let send_forfeit = |env: &mut V16CuEnv| {
+        env.send(
+            ProgInstruction::ForfeitRecoveryLeg {
+                asset_index: 0,
+                b_delta_budget: percolator::MAX_VAULT_TVL,
+            },
+            vec![
+                AccountMeta::new(cranker.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(long, false),
+            ],
+            &[&cranker],
+        )
+    };
+
+    env.svm.warp_to_slot(35);
+    let market_before_early = env.svm.get_account(&env.market).unwrap();
+    let long_before_early = env.svm.get_account(&long).unwrap();
+    env.svm.expire_blockhash();
+    assert!(
+        send_forfeit(&mut env).is_err(),
+        "a non-owner cannot forfeit the leg before the configured grace period",
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before_early
+    );
+    assert_eq!(env.svm.get_account(&long).unwrap(), long_before_early);
+
+    env.svm.warp_to_slot(37);
+    assert!(
+        env.try_force_close_abandoned_asset_with_cu(&cranker, long, short, 0, 37, 2 * POS_SCALE,)
+            .is_err(),
+        "paired force-close has no opposite stored leg",
+    );
+    let orphan_before = env.portfolio_state(long);
+    env.svm.expire_blockhash();
+    let recovery_crank = env.send(
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 37,
+            observations: vec![],
+        },
+        vec![
+            AccountMeta::new(env.payer.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(long, false),
+        ],
+        &[],
+    );
+    assert!(
+        recovery_crank.is_ok(),
+        "the current auto-crank can refresh an asset-Recovery account",
+    );
+    let orphan_after_refresh = env.portfolio_state(long);
+    assert!(
+        has_active_leg_for_asset(&orphan_after_refresh, 0),
+        "refresh alone cannot detach the stored zero-OI leg",
+    );
+    assert_eq!(
+        orphan_after_refresh.capital.get(),
+        orphan_before.capital.get(),
+        "refresh cannot take orphan principal",
+    );
+
+    let mut b_progress_steps = 0usize;
+    for _ in 0..2_048 {
+        let leg = active_leg_for_asset(&env.portfolio_state(long), 0);
+        if !leg.b_stale {
+            break;
+        }
+        env.svm.expire_blockhash();
+        env.send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 37,
+                observations: vec![],
+            },
+            vec![
+                AccountMeta::new(env.payer.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(long, false),
+            ],
+            &[],
+        )
+        .expect("bounded public cranks must settle the orphan B backlog");
+        b_progress_steps += 1;
+    }
+    let final_leg = active_leg_for_asset(&env.portfolio_state(long), 0);
+    let final_asset = env.market_state().1.assets[0];
+    assert!(
+        !final_leg.b_stale,
+        "the public crank sequence must reach a B-clean orphan: snap={} target={}",
+        final_leg.b_snap, final_asset.b_epoch_start_long_num,
+    );
+    assert!(
+        b_progress_steps > 1,
+        "the regression must exercise multi-transaction B progress",
+    );
+    assert_eq!(final_asset.lifecycle, AssetLifecycleV16::Recovery);
+    assert_eq!(final_asset.oi_eff_long_q, 0);
+    assert_eq!(final_asset.mode_long, SideModeV16::ResetPending);
+    let final_profile =
+        state::read_asset_oracle_profile(&env.svm.get_account(&env.market).unwrap().data, 0)
+            .unwrap();
+    assert_eq!(final_profile.last_good_oracle_slot, 31);
+    assert_eq!(env.market_state().0.force_close_delay_slots, 5);
+    assert_eq!(env.svm.get_sysvar::<Clock>().slot, 37);
+
+    let long_before_forfeit = env.portfolio_state(long);
+    let capital_before_forfeit = long_before_forfeit.capital.get();
+    let pnl_before_forfeit = long_before_forfeit.pnl.get();
+    env.svm.expire_blockhash();
+    let forfeit_cu = send_forfeit(&mut env)
+        .expect("after the grace period, any keeper must be able to clear the dead leg");
+    assert_cu_within(
+        "delayed permissionless dead-leg forfeit",
+        forfeit_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    assert!(!has_active_leg_for_asset(&env.portfolio_state(long), 0));
+    assert_eq!(env.market_state().1.assets[0].stored_pos_count_long, 0);
+    assert_eq!(
+        env.portfolio_state(long).capital.get(),
+        capital_before_forfeit,
+        "dead-leg cleanup cannot take account principal",
+    );
+    assert_eq!(
+        env.portfolio_state(long).pnl.get(),
+        pnl_before_forfeit,
+        "permissionless detach cannot forfeit or create PnL",
+    );
+
+    for side in [0, 1] {
+        env.svm.expire_blockhash();
+        let finalize_cu = env.finalize_reset_side_with_cu(0, side);
+        assert_cu_within(
+            "post-forfeit side reset finalization",
+            finalize_cu,
+            CUSTODY_CU_LIMIT,
+        );
+    }
+
+    let (_, finalized) = env.market_state();
+    assert_eq!(finalized.assets[0].mode_long, SideModeV16::Normal);
+    assert_eq!(finalized.assets[0].mode_short, SideModeV16::Normal);
+
+    let mut exposed_env = V16CuEnv::new_with_init_params(production_risk_params());
+    exposed_env.configure_permissionless_resolve_with_cu(1_000, 5);
+    exposed_env.configure_auth_mark_with_cu(0, 1_000_000);
+    let exposed_long_owner = Keypair::new();
+    let exposed_short_owner = Keypair::new();
+    let exposed_long = exposed_env.create_portfolio(&exposed_long_owner);
+    let exposed_short = exposed_env.create_portfolio(&exposed_short_owner);
+    exposed_env.deposit(&exposed_long_owner, exposed_long, 10_000_000);
+    exposed_env.deposit(&exposed_short_owner, exposed_short, 10_000_000);
+    exposed_env.trade_asset_with_cu(
+        0,
+        &exposed_long_owner,
+        exposed_long,
+        &exposed_short_owner,
+        exposed_short,
+        POS_SCALE as i128,
+        1_000_000,
+        0,
+    );
+    exposed_env.svm.warp_to_slot(1);
+    exposed_env.push_auth_mark_with_cu(1, 1_000_000);
+    let exposed_admin = exposed_env.admin.insecure_clone();
+    exposed_env.svm.expire_blockhash();
+    exposed_env
+        .try_shutdown_asset_with_authority(&exposed_admin, 0, 1)
+        .expect("shutdown permits paired positions to enter bounded recovery");
+    exposed_env.svm.warp_to_slot(7);
+    let exposed_keeper = Keypair::new();
+    exposed_env.ensure_signer_account(exposed_keeper.pubkey());
+    let exposed_market_before = exposed_env.svm.get_account(&exposed_env.market).unwrap();
+    let exposed_long_before = exposed_env.svm.get_account(&exposed_long).unwrap();
+    exposed_env.svm.expire_blockhash();
+    let exposed_forfeit = exposed_env.send(
+        ProgInstruction::ForfeitRecoveryLeg {
+            asset_index: 0,
+            b_delta_budget: percolator::MAX_VAULT_TVL,
+        },
+        vec![
+            AccountMeta::new(exposed_keeper.pubkey(), true),
+            AccountMeta::new(exposed_env.market, false),
+            AccountMeta::new(exposed_long, false),
+        ],
+        &[&exposed_keeper],
+    );
+    assert!(
+        exposed_forfeit.is_err(),
+        "elapsed time cannot make a live-effective Recovery position forfeitable",
+    );
+    assert_eq!(
+        exposed_env.svm.get_account(&exposed_env.market).unwrap(),
+        exposed_market_before,
+    );
+    assert_eq!(
+        exposed_env.svm.get_account(&exposed_long).unwrap(),
+        exposed_long_before,
+    );
 }
 
 // security.md sweep — leveraged bad-debt socialization (#9/#22/#33): at 20x leverage (5% margin) a
@@ -54260,10 +54558,9 @@ fn v16_bpf_oracle_composite_divide_legs_produce_correct_cross_rate() {
     );
 }
 
-// ForfeitRecoveryLeg owner-gating + input guard (sibling of v16_attack_rebalance_reduce_owner_gated, which
-// was tested while ForfeitRecoveryLeg was not). handle_forfeit_recovery_leg uses with_one_portfolio_view
-// (owner_must_sign=true), so a non-owner forfeiting a victim's recovery leg -- which would force the victim
-// to realize a loss -- must reject before any engine mutation. Also guards the b_delta_budget==0 reject.
+// ForfeitRecoveryLeg pre-delay owner gate + input guard. On an active asset, a non-owner forfeiting a
+// victim's leg must reject before any engine mutation. The abandoned-asset exception is covered by the
+// delayed Recovery regression above. Also guards the b_delta_budget==0 reject.
 #[test]
 fn v16_attack_forfeit_recovery_leg_owner_gated_and_zero_budget_rejected() {
     let mut env = V16CuEnv::new_with_market_params_and_price_move(1, 5_000, 10_000, 1_000);
@@ -54309,7 +54606,7 @@ fn v16_attack_forfeit_recovery_leg_owner_gated_and_zero_budget_rejected() {
         "vault unchanged by rejected griefing forfeit"
     );
 
-    // INPUT GUARD: b_delta_budget == 0 rejected (checked before with_one_portfolio_view).
+    // INPUT GUARD: b_delta_budget == 0 rejects before account processing.
     env.svm.expire_blockhash();
     let r_zero = env.send(
         ProgInstruction::ForfeitRecoveryLeg {

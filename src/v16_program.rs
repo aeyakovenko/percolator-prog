@@ -8473,14 +8473,94 @@ pub mod processor {
         if b_delta_budget == 0 {
             return Err(PercolatorError::InvalidInstruction.into());
         }
-        with_one_portfolio_view(program_id, accounts, true, |group, portfolio, cfg| {
-            if group.header.mode == 0 && permissionless_resolve_matured_now_view(cfg, group) {
-                return Err(V16Error::LockActive);
+        let actor = account(accounts, 0)?;
+        let market_ai = account(accounts, 1)?;
+        let portfolio_ai = account(accounts, 2)?;
+        expect_signer(actor)?;
+        expect_writable(market_ai)?;
+        expect_writable(portfolio_ai)?;
+        expect_owner(market_ai, program_id)?;
+        expect_owner(portfolio_ai, program_id)?;
+
+        let (_, _, max_market_slots, _) =
+            state::read_market_config_mode_and_capacity(&market_ai.try_borrow_data()?)?;
+        ensure_portfolio_storage_for_market_slots(portfolio_ai, max_market_slots)?;
+
+        let mut market_data = market_ai.try_borrow_mut_data()?;
+        let (cfg, mut group) = state::market_view_mut(&mut market_data)?;
+        let mut portfolio_data = portfolio_ai.try_borrow_mut_data()?;
+        let mut portfolio =
+            state::portfolio_view_mut_for_market_slots(&mut portfolio_data, max_market_slots)?;
+        expect_portfolio_view_account_key(&portfolio, portfolio_ai.key)?;
+
+        let owner_signed = portfolio.header.owner == actor.key.to_bytes();
+        if !owner_signed {
+            let asset_index = asset_index as usize;
+            if group.header.mode != 0
+                || cfg.force_close_delay_slots == 0
+                || asset_index >= group.header.config.max_market_slots.get() as usize
+                || asset_index >= group.markets.len()
+                || group.markets[asset_index].engine.asset.lifecycle != ASSET_LIFECYCLE_RECOVERY
+            {
+                return Err(PercolatorError::Unauthorized.into());
             }
+            let leg = active_leg_for_asset_view(&portfolio, asset_index)?;
+            let asset = group.markets[asset_index]
+                .engine
+                .asset
+                .try_to_runtime()
+                .map_err(map_v16_error)?;
+            let side_is_zero_oi_reset = match leg.side {
+                SideV16::Long => {
+                    asset.oi_eff_long_q == 0
+                        && asset.mode_long == percolator::SideModeV16::ResetPending
+                }
+                SideV16::Short => {
+                    asset.oi_eff_short_q == 0
+                        && asset.mode_short == percolator::SideModeV16::ResetPending
+                }
+            };
+            if !side_is_zero_oi_reset {
+                return Err(PercolatorError::Unauthorized.into());
+            }
+            let profile = read_oracle_profile_from_view(&group, &cfg, asset_index)?;
+            let shutdown_slot = profile.last_good_oracle_slot;
+            let now_slot = authenticated_market_slot_or_fallback_view(&group);
+            if shutdown_slot == 0
+                || now_slot < shutdown_slot
+                || now_slot.saturating_sub(shutdown_slot) < cfg.force_close_delay_slots
+            {
+                return Err(PercolatorError::Unauthorized.into());
+            }
+        }
+        if group.header.mode == 0 && permissionless_resolve_matured_now_view(&cfg, &group) {
+            return Err(PercolatorError::EngineLockActive.into());
+        }
+        if !owner_signed {
             group
-                .forfeit_recovery_leg_not_atomic(portfolio, asset_index as usize, b_delta_budget)
-                .map(|_| ())
-        })
+                .full_account_refresh_not_atomic(&mut portfolio)
+                .map_err(map_v16_error)?;
+        }
+        let outcome = group
+            .forfeit_recovery_leg_not_atomic(&mut portfolio, asset_index as usize, b_delta_budget)
+            .map_err(map_v16_error)?;
+        if !owner_signed
+            && (!outcome.detached
+                || outcome.positive_pnl_forfeited != 0
+                || outcome.loss_settled != 0
+                || outcome.support_consumed != 0
+                || outcome.junior_face_burned != 0
+                || outcome.principal_used != 0
+                || outcome.insurance_used != 0
+                || outcome.residual_booked != 0
+                || outcome.explicit_loss != 0)
+        {
+            return Err(PercolatorError::EngineLockActive.into());
+        }
+        group.validate_shape().map_err(map_v16_error)?;
+        portfolio
+            .validate_with_market(&group.as_view())
+            .map_err(map_v16_error)
     }
 
     #[inline(never)]
