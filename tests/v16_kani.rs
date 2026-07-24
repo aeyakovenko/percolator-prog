@@ -173,6 +173,7 @@ fn kani_v16_amount_instructions_decode_preserves_wire_fields() {
 fn kani_v16_domain_topup_and_asset_insurance_decode_preserves_wire_fields() {
     let domain: u16 = kani::any();
     let asset_index: u16 = kani::any();
+    let market_id: u64 = kani::any();
     let amount: u128 = kani::any();
 
     let mut top_up = [0u8; 19];
@@ -190,16 +191,19 @@ fn kani_v16_domain_topup_and_asset_insurance_decode_preserves_wire_fields() {
         _ => unreachable!(),
     }
 
-    let mut withdraw = [0u8; 19];
+    let mut withdraw = [0u8; 27];
     withdraw[0] = 57;
     withdraw[1..3].copy_from_slice(&asset_index.to_le_bytes());
-    withdraw[3..19].copy_from_slice(&amount.to_le_bytes());
+    withdraw[3..11].copy_from_slice(&market_id.to_le_bytes());
+    withdraw[11..27].copy_from_slice(&amount.to_le_bytes());
     match Instruction::decode(&withdraw).unwrap() {
         Instruction::WithdrawInsuranceAsset {
             asset_index: got_asset,
+            market_id: got_market_id,
             amount: got_amount,
         } => {
             assert_eq!(got_asset, asset_index);
+            assert_eq!(got_market_id, market_id);
             assert_eq!(got_amount, amount);
         }
         _ => unreachable!(),
@@ -671,6 +675,14 @@ fn kani_v16_legacy_unbound_authority_payloads_are_rejected() {
 
     assert!(Instruction::decode(&legacy_market).is_err());
     assert!(Instruction::decode(&legacy_asset).is_err());
+}
+
+#[kani::proof]
+fn kani_v16_legacy_unbound_insurance_withdraw_payload_is_rejected() {
+    let mut legacy: [u8; 19] = kani::any();
+    legacy[0] = 57;
+
+    assert!(Instruction::decode(&legacy).is_err());
 }
 
 #[kani::proof]
@@ -1181,6 +1193,7 @@ fn kani_v16_custody_payloads_reject_trailing_byte() {
     assert_rejects_trailing_byte(
         Instruction::WithdrawInsuranceAsset {
             asset_index: 0,
+            market_id: 1,
             amount: 1,
         },
         extra,

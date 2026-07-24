@@ -2697,6 +2697,7 @@ pub mod ix {
         },
         WithdrawInsuranceAsset {
             asset_index: u16,
+            market_id: u64,
             amount: u128,
         },
         CureAndCancelClose {
@@ -2976,6 +2977,7 @@ pub mod ix {
                 },
                 57 => Self::WithdrawInsuranceAsset {
                     asset_index: read_u16(&mut rest)?,
+                    market_id: read_u64(&mut rest)?,
                     amount: read_u128(&mut rest)?,
                 },
                 42 => Self::CureAndCancelClose {
@@ -3372,10 +3374,12 @@ pub mod ix {
                 }
                 Self::WithdrawInsuranceAsset {
                     asset_index,
+                    market_id,
                     amount,
                 } => {
                     out.push(57);
                     push_u16(&mut out, asset_index);
+                    push_u64(&mut out, market_id);
                     push_u128(&mut out, amount);
                 }
                 Self::CureAndCancelClose { optional_deposit } => {
@@ -5496,8 +5500,15 @@ pub mod processor {
             }
             Instruction::WithdrawInsuranceAsset {
                 asset_index,
+                market_id,
                 amount,
-            } => handle_withdraw_insurance_asset(program_id, accounts, asset_index, amount),
+            } => handle_withdraw_insurance_asset(
+                program_id,
+                accounts,
+                asset_index,
+                market_id,
+                amount,
+            ),
             Instruction::CureAndCancelClose { optional_deposit } => {
                 handle_cure_and_cancel_close(program_id, accounts, optional_deposit)
             }
@@ -8163,6 +8174,7 @@ pub mod processor {
         program_id: &Pubkey,
         accounts: &'a [AccountInfo<'a>],
         asset_index: u16,
+        expected_market_id: u64,
         amount: u128,
     ) -> ProgramResult {
         let operator = account(accounts, 0)?;
@@ -8192,12 +8204,12 @@ pub mod processor {
         let amount_u64 = amount_to_u64(amount)?;
         {
             let market_data = market_ai.try_borrow_data()?;
-            let (cfg, mode, configured_slots, _) =
-                state::read_market_config_mode_and_capacity(&market_data)?;
-            if (mode != MarketModeV16::Live && mode != MarketModeV16::Resolved)
-                || asset_index >= configured_slots
-                || long_domain >= configured_slots.saturating_mul(2)
-            {
+            let (cfg, mode, _, current_market_id, _, _) =
+                state::read_market_trade_preflight(&market_data, asset_index)?;
+            if current_market_id != expected_market_id {
+                return Err(PercolatorError::AssetGenerationMismatch.into());
+            }
+            if mode != MarketModeV16::Live && mode != MarketModeV16::Resolved {
                 return Err(PercolatorError::InvalidInstruction.into());
             }
             let (vault_authority, _) = derive_vault_authority(program_id, market_ai.key);
@@ -8223,6 +8235,9 @@ pub mod processor {
             let configured_slots = group.header.config.max_market_slots.get() as usize;
             if asset_index >= configured_slots || asset_index >= group.markets.len() {
                 return Err(PercolatorError::InvalidInstruction.into());
+            }
+            if group.markets[asset_index].engine.asset.market_id.get() != expected_market_id {
+                return Err(PercolatorError::AssetGenerationMismatch.into());
             }
             let authorities = domain_authorities_from_view(&group, &cfg, long_domain)?;
             let ledger_authority = if live_mode {
