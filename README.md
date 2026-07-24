@@ -402,6 +402,7 @@ This section describes intent and operational ordering, not argument-by-argument
 - **Deposit** (tag 3)
   - transfers collateral into vault; credits engine balance for that account
 - **Withdraw** (tag 4)
+  - binds the signed payload to the current program-assigned portfolio incarnation ID
   - performs oracle-read + engine checks; withdraws from vault via PDA signer; debits engine
 - **ClosePortfolio** (tag 8)
   - closes a flat, empty portfolio account and sweeps its rent to the market slab
