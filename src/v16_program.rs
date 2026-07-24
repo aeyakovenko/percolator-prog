@@ -4555,6 +4555,75 @@ pub mod processor {
         Ok(())
     }
 
+    fn accrue_zero_move_funding_before_rebalance_reduce_view(
+        cfg: &WrapperConfigV16,
+        group: &mut state::MarketViewMutV16<'_>,
+        asset_index: usize,
+    ) -> Result<(), V16Error> {
+        if asset_index >= group.header.config.max_market_slots.get() as usize
+            || asset_index >= group.markets.len()
+        {
+            return Err(V16Error::InvalidConfig);
+        }
+        let profile = read_oracle_profile_from_view(group, cfg, asset_index)
+            .map_err(|_| V16Error::InvalidConfig)?;
+        if !oracle_v16::profile_is_price_managed(&profile) {
+            return Ok(());
+        }
+
+        let now_slot = authenticated_market_slot_or_fallback_view(group);
+        let asset = group.markets[asset_index].engine.asset;
+        let slot_last = asset.slot_last.get();
+        if now_slot < slot_last {
+            return Err(V16Error::Stale);
+        }
+        let dt = core::cmp::min(
+            now_slot - slot_last,
+            group.header.config.max_accrual_dt_slots.get(),
+        );
+        if dt == 0 || asset.oi_eff_long_q.get() == 0 || asset.oi_eff_short_q.get() == 0 {
+            return Ok(());
+        }
+
+        let target = if oracle_v16::profile_is_auth_mark(&profile)
+            || oracle_v16::profile_is_ewma_mark(&profile)
+            || (oracle_v16::profile_is_hybrid(&profile)
+                && oracle_v16::profile_hybrid_soft_stale_matured(&profile, now_slot))
+        {
+            profile.mark_ewma_e6
+        } else {
+            asset.raw_oracle_target_price.get()
+        };
+        if target == 0 {
+            return Err(V16Error::InvalidConfig);
+        }
+        let current = asset.effective_price.get();
+        let next = oracle_v16::effective_price_from_target(
+            current,
+            target,
+            group.header.config.max_price_move_bps_per_slot.get(),
+            dt,
+            true,
+        );
+        if next != current || profile.mark_ewma_last_slot > slot_last {
+            return Ok(());
+        }
+
+        let max_abs_rate = group.header.config.max_abs_funding_e9_per_slot.get();
+        if max_abs_rate == 0 {
+            return Ok(());
+        }
+        let funding_rate_e9 =
+            policy_v16::premium_funding_rate_e9(profile.mark_ewma_e6, current, max_abs_rate)
+                .ok_or(V16Error::ArithmeticOverflow)?;
+        if funding_rate_e9 == 0 {
+            return Ok(());
+        }
+        group
+            .accrue_asset_to_not_atomic(asset_index, now_slot, current, funding_rate_e9, true)
+            .map(|_| ())
+    }
+
     fn read_oracle_profile_for_asset(
         market_data: &[u8],
         cfg: &WrapperConfigV16,
@@ -8497,6 +8566,11 @@ pub mod processor {
             if group.header.mode == 0 && permissionless_resolve_matured_now_view(cfg, group) {
                 return Err(V16Error::LockActive);
             }
+            accrue_zero_move_funding_before_rebalance_reduce_view(
+                cfg,
+                group,
+                asset_index as usize,
+            )?;
             group
                 .rebalance_reduce_position_not_atomic(
                     portfolio,
