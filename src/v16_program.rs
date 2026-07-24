@@ -5828,6 +5828,11 @@ pub mod processor {
             } else {
                 size_q.unsigned_abs()
             };
+            apply_pending_trade_mark_before_trade_view(
+                &oracle_profile,
+                &mut group,
+                asset_index as usize,
+            )?;
             // F-TRADENOCPI-FEE / F-NOCPI-MARK-FEE: request.exec_price is used by the engine only as
             // fee notional. In price-managed EWMA/stale-hybrid modes, the caller's reported print is
             // also the mark-discovery input, so first normalize it to the same per-asset dt price
@@ -6083,6 +6088,11 @@ pub mod processor {
                     return Err(PercolatorError::InvalidInstruction.into());
                 }
                 let abs_size = leg.size_q.unsigned_abs();
+                apply_pending_trade_mark_before_trade_view(
+                    &oracle_profile,
+                    &mut group,
+                    asset_index,
+                )?;
                 let fee_basis_price = accepted_reported_trade_price_view(
                     &oracle_profile,
                     &group,
@@ -6554,6 +6564,8 @@ pub mod processor {
             return Err(PercolatorError::InvalidInstruction.into());
         }
 
+        apply_pending_trade_marks_before_matcher_view(market_ai, &[asset_index])?;
+
         let (cfg_pre, mode_pre, current_slot_pre, oracle_price, max_trading_fee_bps) =
             state::read_market_trade_preflight(
                 &market_ai.try_borrow_data()?,
@@ -6867,6 +6879,7 @@ pub mod processor {
             }
             asset_indices.push(leg.asset_index);
         }
+        apply_pending_trade_marks_before_matcher_view(market_ai, &asset_indices)?;
         // One header/config parse for mode + slot + every leg's oracle price (avoids O(N^2)
         // re-parsing the market once per leg).
         let (
@@ -11560,13 +11573,75 @@ pub mod processor {
         if !profile_updates_mark_from_trade_view(profile, now_slot) {
             return Ok(effective_price);
         }
-        let dt_slots = core::cmp::max(1, asset_segment_dt_view(group, asset_index, now_slot)?);
+        // Do not grant a synthetic slot after a crank already consumed this asset's dt. A same-slot
+        // trade may still execute, but it cannot queue future mark PnL that later OI would inherit.
+        let dt_slots = asset_segment_dt_view(group, asset_index, now_slot)?;
         Ok(oracle_v16::clamp_toward_engine_dt(
             effective_price,
             reported_exec_price,
             group.header.config.max_price_move_bps_per_slot.get(),
             dt_slots,
         ))
+    }
+
+    fn apply_pending_trade_mark_before_trade_view(
+        profile: &state::AssetOracleProfileV16,
+        group: &mut state::MarketViewMutV16<'_>,
+        asset_index: usize,
+    ) -> ProgramResult {
+        // A paid trade-driven mark belongs to the OI that existed when it was quoted. Apply it
+        // before admitting another trade so later OI enters at the post-mark effective price.
+        let now_slot = authenticated_market_slot_or_fallback_view(group);
+        if !profile_updates_mark_from_trade_view(profile, now_slot)
+            || asset_index >= group.header.config.max_market_slots.get() as usize
+            || asset_index >= group.markets.len()
+        {
+            return Ok(());
+        }
+        let asset = group.markets[asset_index].engine.asset;
+        if profile.mark_ewma_e6 == asset.effective_price.get() {
+            return Ok(());
+        }
+        let exposed = asset.oi_eff_long_q.get() != 0 || asset.oi_eff_short_q.get() != 0;
+        let effective_price = oracle_v16::effective_price_from_target(
+            asset.effective_price.get(),
+            profile.mark_ewma_e6,
+            group.header.config.max_price_move_bps_per_slot.get(),
+            asset_segment_dt_view(group, asset_index, now_slot)?,
+            exposed,
+        );
+        if effective_price == asset.effective_price.get() {
+            return Ok(());
+        }
+        let funding_rate_e9 =
+            permissionless_funding_rate_e9_view(profile, group, asset_index, effective_price)?;
+        group
+            .set_asset_raw_oracle_target_not_atomic(asset_index, profile.mark_ewma_e6)
+            .map_err(map_v16_error)?;
+        group
+            .accrue_asset_to_not_atomic(
+                asset_index,
+                now_slot,
+                effective_price,
+                funding_rate_e9,
+                true,
+            )
+            .map_err(map_v16_error)?;
+        Ok(())
+    }
+
+    fn apply_pending_trade_marks_before_matcher_view(
+        market_ai: &AccountInfo<'_>,
+        asset_indices: &[u16],
+    ) -> ProgramResult {
+        let mut market_data = market_ai.try_borrow_mut_data()?;
+        let (cfg, mut group) = state::market_view_mut(&mut market_data)?;
+        for &asset_index in asset_indices {
+            let asset_index = asset_index as usize;
+            let profile = read_oracle_profile_from_view(&group, &cfg, asset_index)?;
+            apply_pending_trade_mark_before_trade_view(&profile, &mut group, asset_index)?;
+        }
+        group.validate_shape().map_err(map_v16_error)
     }
 
     fn hybrid_trade_fee_quote_view(

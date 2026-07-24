@@ -2526,12 +2526,29 @@ impl V16CuEnv {
         halflife_slots: u64,
         mark_min_fee: u64,
     ) -> u64 {
+        self.configure_ewma_mark_for_asset_with_cu(
+            0,
+            now_slot,
+            initial_mark_e6,
+            halflife_slots,
+            mark_min_fee,
+        )
+    }
+
+    fn configure_ewma_mark_for_asset_with_cu(
+        &mut self,
+        asset_index: u16,
+        now_slot: u64,
+        initial_mark_e6: u64,
+        halflife_slots: u64,
+        mark_min_fee: u64,
+    ) -> u64 {
         send_tx(
             &mut self.svm,
             self.program_id,
             &self.payer,
             ProgInstruction::ConfigureEwmaMark {
-                asset_index: 0,
+                asset_index,
                 now_slot,
                 initial_mark_e6,
                 mark_ewma_halflife_slots: halflife_slots,
@@ -59716,4 +59733,629 @@ fn v16_attack_underfunded_exit_cannot_move_ewma_with_uncollectible_fee() {
     ] {
         assert_underfunded_ewma_exit_uses_collected_fee(path);
     }
+}
+fn assert_presigned_large_trade_cannot_inherit_cheap_pending_ewma_move(
+    path: NoCpiReportedPricePath,
+) {
+    const MARK: u64 = 1_000_000;
+    const LARGE_Q: i128 = 1_000 * POS_SCALE as i128;
+    const LARGE_DEPOSIT: u128 = 2_000_000_000;
+    const SEED_DEPOSIT: u128 = 2_000_000;
+
+    let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+        initial_price: MARK,
+        max_trading_fee_bps: 100,
+        max_price_move_bps_per_slot: 100,
+        max_accrual_dt_slots: 1,
+        ..V16CuMarketParams::default()
+    });
+    env.configure_ewma_mark_with_cu(0, MARK, 1, 0);
+    env.top_up_backing_bucket_with_cu(1, 10_000_000, 100);
+
+    let seed_long_owner = Keypair::new();
+    let seed_long = env.create_portfolio(&seed_long_owner);
+    let seed_short_owner = Keypair::new();
+    let seed_short = env.create_portfolio(&seed_short_owner);
+    env.deposit(&seed_long_owner, seed_long, SEED_DEPOSIT);
+    env.deposit(&seed_short_owner, seed_short, SEED_DEPOSIT);
+
+    let attacker = Keypair::new();
+    let attacker_portfolio = env.create_portfolio(&attacker);
+    let victim_lp = Keypair::new();
+    let victim_portfolio = env.create_portfolio(&victim_lp);
+    env.deposit(&attacker, attacker_portfolio, LARGE_DEPOSIT);
+    env.deposit(&victim_lp, victim_portfolio, LARGE_DEPOSIT);
+
+    env.svm.warp_to_slot(1);
+    let pre_signed_open_ix = Instruction {
+        program_id: env.program_id,
+        accounts: vec![
+            AccountMeta::new(attacker.pubkey(), true),
+            AccountMeta::new(victim_lp.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(attacker_portfolio, false),
+            AccountMeta::new(victim_portfolio, false),
+        ],
+        data: match path {
+            NoCpiReportedPricePath::Single => ProgInstruction::TradeNoCpi {
+                asset_index: 0,
+                size_q: LARGE_Q,
+                exec_price: MARK,
+                fee_bps: 0,
+            },
+            NoCpiReportedPricePath::Batch => ProgInstruction::BatchTradeNoCpi {
+                legs: vec![BatchTradeLeg {
+                    asset_index: 0,
+                    size_q: LARGE_Q,
+                    exec_price: MARK,
+                    fee_bps: 0,
+                }],
+            },
+        }
+        .encode(),
+    };
+    let pre_signed_open = Transaction::new_signed_with_payer(
+        &[heap_ix(), cu_ix(), pre_signed_open_ix],
+        Some(&env.payer.pubkey()),
+        &[&env.payer, &attacker, &victim_lp],
+        env.svm.latest_blockhash(),
+    );
+
+    let seed_capital_before = env.portfolio_state(seed_long).capital.get()
+        + env.portfolio_state(seed_short).capital.get();
+    env.trade_with_cu(
+        &seed_long_owner,
+        seed_long,
+        &seed_short_owner,
+        seed_short,
+        POS_SCALE as i128,
+        MARK * 2,
+        0,
+    );
+    let seed_capital_after = env.portfolio_state(seed_long).capital.get()
+        + env.portfolio_state(seed_short).capital.get();
+    let seed_cost = seed_capital_before - seed_capital_after;
+    let (cfg_after_seed, group_after_seed) = env.market_state();
+    assert!(seed_cost > 0, "the queued EWMA move must be paid for");
+    assert!(
+        cfg_after_seed.mark_ewma_e6 > MARK,
+        "the seed trade must queue an upward mark move"
+    );
+    assert_eq!(
+        group_after_seed.assets[0].effective_price, MARK,
+        "the paid mark move must still be pending before crank"
+    );
+
+    let open_meta = env
+        .svm
+        .send_transaction(pre_signed_open)
+        .unwrap_or_else(|err| {
+            panic!("{path:?}: unchanged pre-signed trade must remain live after a pending mark: {err:?}")
+        });
+    let open_limit = match path {
+        NoCpiReportedPricePath::Single => TRADE_CU_LIMIT,
+        NoCpiReportedPricePath::Batch => MULTI_ASSET_OPEN_TRADE_CU_LIMIT,
+    };
+    assert_cu_within(
+        &format!("{path:?} pending-mark direct open"),
+        open_meta.compute_units_consumed,
+        open_limit,
+    );
+
+    env.svm.warp_to_slot(2);
+    env.crank(
+        attacker_portfolio,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 2,
+            observations: crank_observations(0),
+        },
+    );
+    env.crank(
+        victim_portfolio,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 2,
+            observations: crank_observations(0),
+        },
+    );
+    let applied_mark = env.market_state().1.assets[0].effective_price;
+    assert!(applied_mark > MARK, "the queued mark must apply publicly");
+
+    try_no_cpi_reported_price_trade_with_cu(
+        &mut env,
+        path,
+        &attacker,
+        attacker_portfolio,
+        &victim_lp,
+        victim_portfolio,
+        -LARGE_Q,
+        applied_mark,
+        0,
+    )
+    .unwrap_or_else(|err| panic!("{path:?}: full close must remain live: {err}"));
+    let victim_capital = env.portfolio_state(victim_portfolio).capital.get();
+    let victim_loss = LARGE_DEPOSIT - victim_capital;
+    let attacker_before_convert = env.portfolio_state(attacker_portfolio);
+    assert_eq!(
+        attacker_before_convert.pnl.get(),
+        victim_loss as i128,
+        "{path:?}: any independent LP loss becomes the attackers source-backed claim"
+    );
+    if victim_loss != 0 {
+        env.convert_released_pnl_with_cu(&attacker, attacker_portfolio, victim_loss);
+    }
+    let attacker_capital = env.portfolio_state(attacker_portfolio).capital.get();
+    let attacker_gain = attacker_capital.saturating_sub(LARGE_DEPOSIT);
+    assert_eq!(
+        attacker_gain, victim_loss,
+        "{path:?}: any manipulated PnL transfers from the independent LP"
+    );
+    let extracted = attacker_gain.saturating_sub(seed_cost);
+    if extracted != 0 {
+        let destination = env.withdraw(&attacker, attacker_portfolio, extracted);
+        assert_eq!(
+            env.token_amount(destination) as u128,
+            extracted,
+            "{path:?}: a positive net manipulated gain is publicly withdrawable"
+        );
+    }
+    assert!(
+        attacker_gain <= seed_cost,
+        "{path:?}: inherited pending-mark gain {attacker_gain} exceeds seed cost {seed_cost}"
+    );
+    assert_eq!(
+        victim_loss, 0,
+        "{path:?}: a trade entering after the paid mark must not inherit its PnL"
+    );
+}
+
+#[test]
+fn v16_attack_presigned_large_trade_cannot_inherit_cheap_pending_ewma_move() {
+    for path in [
+        NoCpiReportedPricePath::Single,
+        NoCpiReportedPricePath::Batch,
+    ] {
+        assert_presigned_large_trade_cannot_inherit_cheap_pending_ewma_move(path);
+    }
+}
+
+#[test]
+fn v16_attack_trade_driven_ewma_cannot_consume_zero_engine_dt() {
+    const MARK: u64 = 1_000_000;
+    for path in [
+        NoCpiReportedPricePath::Single,
+        NoCpiReportedPricePath::Batch,
+    ] {
+        let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+            initial_price: MARK,
+            max_trading_fee_bps: 100,
+            max_price_move_bps_per_slot: 100,
+            max_accrual_dt_slots: 1,
+            ..V16CuMarketParams::default()
+        });
+        env.configure_ewma_mark_with_cu(0, MARK, 1, 0);
+        let (owner_a, account_a, owner_b, account_b) =
+            funded_no_cpi_reported_price_pair(&mut env, 2_000_000);
+
+        env.svm.warp_to_slot(1);
+        env.crank(
+            account_a,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 1,
+                observations: crank_observations(0),
+            },
+        );
+        let capital_before = env.portfolio_state(account_a).capital.get()
+            + env.portfolio_state(account_b).capital.get();
+        try_no_cpi_reported_price_trade_with_cu(
+            &mut env,
+            path,
+            &owner_a,
+            account_a,
+            &owner_b,
+            account_b,
+            POS_SCALE as i128,
+            MARK * 2,
+            0,
+        )
+        .unwrap_or_else(|err| panic!("{path:?}: zero-dt trade must remain live: {err}"));
+
+        let (cfg_after, group_after) = env.market_state();
+        assert_eq!(
+            cfg_after.mark_ewma_e6, MARK,
+            "{path:?}: zero engine dt cannot queue future EWMA PnL"
+        );
+        assert_eq!(group_after.assets[0].effective_price, MARK);
+        assert_eq!(
+            env.portfolio_state(account_a).capital.get()
+                + env.portfolio_state(account_b).capital.get(),
+            capital_before,
+            "{path:?}: no mark movement means no externality fee"
+        );
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum PendingMarkCpiPath {
+    Single,
+    Batch,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn try_pending_mark_cpi_trade(
+    env: &mut V16CuEnv,
+    path: PendingMarkCpiPath,
+    taker_owner: &Keypair,
+    taker_account: Pubkey,
+    lp_account: Pubkey,
+    matcher_program: Pubkey,
+    matcher_context: Pubkey,
+    matcher_delegate: Pubkey,
+    size_q: i128,
+    limit_price: u64,
+) -> Result<u64, String> {
+    let accounts = vec![
+        AccountMeta::new(taker_owner.pubkey(), true),
+        AccountMeta::new(env.market, false),
+        AccountMeta::new(taker_account, false),
+        AccountMeta::new(lp_account, false),
+        AccountMeta::new_readonly(matcher_program, false),
+        AccountMeta::new(matcher_context, false),
+        AccountMeta::new_readonly(matcher_delegate, false),
+    ];
+    match path {
+        PendingMarkCpiPath::Single => env.send(
+            ProgInstruction::TradeCpi {
+                asset_index: 0,
+                size_q,
+                fee_bps: 0,
+                limit_price,
+            },
+            accounts,
+            &[taker_owner],
+        ),
+        PendingMarkCpiPath::Batch => env.send(
+            ProgInstruction::BatchTradeCpi {
+                legs: vec![BatchTradeCpiLeg {
+                    asset_index: 0,
+                    size_q,
+                    fee_bps: 0,
+                    limit_price,
+                }],
+            },
+            accounts,
+            &[taker_owner],
+        ),
+    }
+}
+
+fn assert_cpi_lp_cannot_fund_pending_ewma_inheritance(path: PendingMarkCpiPath) {
+    const MARK: u64 = 1_000_000;
+    const LARGE_Q: i128 = 1_000 * POS_SCALE as i128;
+    const LARGE_DEPOSIT: u128 = 2_000_000_000;
+    const SEED_DEPOSIT: u128 = 2_000_000;
+
+    let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+        initial_price: MARK,
+        max_trading_fee_bps: 100,
+        max_price_move_bps_per_slot: 100,
+        max_accrual_dt_slots: 1,
+        ..V16CuMarketParams::default()
+    });
+    env.configure_ewma_mark_with_cu(0, MARK, 1, 0);
+    env.top_up_backing_bucket_with_cu(1, 10_000_000, 100);
+
+    let (seed_long_owner, seed_long, seed_short_owner, seed_short) =
+        funded_no_cpi_reported_price_pair(&mut env, SEED_DEPOSIT);
+    let attacker = Keypair::new();
+    let attacker_portfolio = env.create_portfolio(&attacker);
+    let victim_lp = Keypair::new();
+    let victim_portfolio = env.create_portfolio(&victim_lp);
+    env.deposit(&attacker, attacker_portfolio, LARGE_DEPOSIT);
+    env.deposit(&victim_lp, victim_portfolio, LARGE_DEPOSIT);
+    let (matcher_program, matcher_context, matcher_delegate) =
+        auth_matcher_for_lp(&mut env, &victim_lp, victim_portfolio);
+
+    env.svm.warp_to_slot(1);
+    let seed_capital_before = env.portfolio_state(seed_long).capital.get()
+        + env.portfolio_state(seed_short).capital.get();
+    env.trade_with_cu(
+        &seed_long_owner,
+        seed_long,
+        &seed_short_owner,
+        seed_short,
+        POS_SCALE as i128,
+        MARK * 2,
+        0,
+    );
+    let seed_capital_after = env.portfolio_state(seed_long).capital.get()
+        + env.portfolio_state(seed_short).capital.get();
+    let seed_cost = seed_capital_before - seed_capital_after;
+    assert!(seed_cost > 0, "{path:?}: setup must pay for a pending mark");
+
+    let open_cu = try_pending_mark_cpi_trade(
+        &mut env,
+        path,
+        &attacker,
+        attacker_portfolio,
+        victim_portfolio,
+        matcher_program,
+        matcher_context,
+        matcher_delegate,
+        LARGE_Q,
+        0,
+    )
+    .unwrap_or_else(|err| panic!("{path:?}: pending-mark CPI open must remain live: {err}"));
+    assert_cu_within(
+        &format!("{path:?} pending-mark CPI open"),
+        open_cu,
+        MULTI_ASSET_OPEN_TRADE_CU_LIMIT,
+    );
+
+    env.svm.warp_to_slot(2);
+    for portfolio in [attacker_portfolio, victim_portfolio] {
+        env.crank(
+            portfolio,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 2,
+                observations: crank_observations(0),
+            },
+        );
+    }
+    let applied_mark = env.market_state().1.assets[0].effective_price;
+    assert!(applied_mark > MARK);
+    try_pending_mark_cpi_trade(
+        &mut env,
+        path,
+        &attacker,
+        attacker_portfolio,
+        victim_portfolio,
+        matcher_program,
+        matcher_context,
+        matcher_delegate,
+        -LARGE_Q,
+        0,
+    )
+    .unwrap_or_else(|err| panic!("{path:?}: pending-mark CPI close must remain live: {err}"));
+
+    let victim_capital = env.portfolio_state(victim_portfolio).capital.get();
+    let victim_loss = LARGE_DEPOSIT - victim_capital;
+    assert_eq!(
+        env.portfolio_state(attacker_portfolio).pnl.get(),
+        victim_loss as i128
+    );
+    if victim_loss != 0 {
+        env.convert_released_pnl_with_cu(&attacker, attacker_portfolio, victim_loss);
+    }
+    let attacker_gain = env
+        .portfolio_state(attacker_portfolio)
+        .capital
+        .get()
+        .saturating_sub(LARGE_DEPOSIT);
+    let extracted = attacker_gain.saturating_sub(seed_cost);
+    if extracted != 0 {
+        let destination = env.withdraw(&attacker, attacker_portfolio, extracted);
+        assert_eq!(env.token_amount(destination) as u128, extracted);
+    }
+    assert!(
+        attacker_gain <= seed_cost,
+        "{path:?}: unsigned LP funded {attacker_gain} of inherited mark PnL for seed cost {seed_cost}"
+    );
+    assert_eq!(
+        victim_loss, 0,
+        "{path:?}: unsigned LP must not inherit the pending-mark loss"
+    );
+}
+
+#[test]
+fn v16_attack_cpi_lp_cannot_fund_pending_ewma_inheritance() {
+    for path in [PendingMarkCpiPath::Single, PendingMarkCpiPath::Batch] {
+        assert_cpi_lp_cannot_fund_pending_ewma_inheritance(path);
+    }
+}
+
+#[test]
+fn v16_attack_pending_ewma_applies_before_cpi_limit_binding() {
+    const MARK: u64 = 1_000_000;
+    for path in [PendingMarkCpiPath::Single, PendingMarkCpiPath::Batch] {
+        let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+            initial_price: MARK,
+            max_trading_fee_bps: 100,
+            max_price_move_bps_per_slot: 100,
+            max_accrual_dt_slots: 1,
+            ..V16CuMarketParams::default()
+        });
+        env.configure_ewma_mark_with_cu(0, MARK, 1, 0);
+        let (seed_long_owner, seed_long, seed_short_owner, seed_short) =
+            funded_no_cpi_reported_price_pair(&mut env, 2_000_000);
+        let taker = Keypair::new();
+        let taker_portfolio = env.create_portfolio(&taker);
+        let lp_owner = Keypair::new();
+        let lp_portfolio = env.create_portfolio(&lp_owner);
+        env.deposit(&taker, taker_portfolio, 2_000_000_000);
+        env.deposit(&lp_owner, lp_portfolio, 2_000_000_000);
+        let (matcher_program, matcher_context, matcher_delegate) =
+            auth_matcher_for_lp(&mut env, &lp_owner, lp_portfolio);
+
+        env.svm.warp_to_slot(1);
+        env.trade_with_cu(
+            &seed_long_owner,
+            seed_long,
+            &seed_short_owner,
+            seed_short,
+            POS_SCALE as i128,
+            MARK * 2,
+            0,
+        );
+        let pending_mark = env.market_state().0.mark_ewma_e6;
+        assert!(pending_mark > MARK);
+        let market_before = env.svm.get_account(&env.market).unwrap();
+        let taker_before = env.svm.get_account(&taker_portfolio).unwrap();
+        let lp_before = env.svm.get_account(&lp_portfolio).unwrap();
+
+        let stale_limit = try_pending_mark_cpi_trade(
+            &mut env,
+            path,
+            &taker,
+            taker_portfolio,
+            lp_portfolio,
+            matcher_program,
+            matcher_context,
+            matcher_delegate,
+            1_000 * POS_SCALE as i128,
+            MARK,
+        );
+        assert!(
+            stale_limit.is_err(),
+            "{path:?}: the matcher must bind the limit to the applied pending mark"
+        );
+        assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+        assert_eq!(env.svm.get_account(&taker_portfolio).unwrap(), taker_before);
+        assert_eq!(env.svm.get_account(&lp_portfolio).unwrap(), lp_before);
+
+        try_pending_mark_cpi_trade(
+            &mut env,
+            path,
+            &taker,
+            taker_portfolio,
+            lp_portfolio,
+            matcher_program,
+            matcher_context,
+            matcher_delegate,
+            1_000 * POS_SCALE as i128,
+            pending_mark,
+        )
+        .unwrap_or_else(|err| panic!("{path:?}: updated limit must execute: {err}"));
+        assert_eq!(env.market_state().1.assets[0].effective_price, pending_mark);
+    }
+}
+
+fn max_shape_pending_ewma_env() -> V16CuEnv {
+    const ASSETS: u16 = percolator_prog::constants::WRAPPER_MAX_PORTFOLIO_ASSETS;
+    const MARK: u64 = 1_000_000;
+    let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+        max_portfolio_assets: ASSETS,
+        initial_price: MARK,
+        max_trading_fee_bps: 100,
+        max_price_move_bps_per_slot: 100,
+        max_accrual_dt_slots: 1,
+        ..V16CuMarketParams::default()
+    });
+    for asset_index in 0..ASSETS {
+        env.configure_ewma_mark_for_asset_with_cu(asset_index, 0, MARK, 1, 0);
+    }
+    let seed_long = Keypair::new();
+    let seed_long_account = env.create_portfolio(&seed_long);
+    let seed_short = Keypair::new();
+    let seed_short_account = env.create_portfolio(&seed_short);
+    env.deposit(&seed_long, seed_long_account, 100_000_000);
+    env.deposit(&seed_short, seed_short_account, 100_000_000);
+
+    env.svm.warp_to_slot(1);
+    let seed_legs = (0..ASSETS)
+        .map(|asset_index| BatchTradeLeg {
+            asset_index,
+            size_q: POS_SCALE as i128,
+            exec_price: MARK * 2,
+            fee_bps: 0,
+        })
+        .collect();
+    env.send(
+        ProgInstruction::BatchTradeNoCpi { legs: seed_legs },
+        vec![
+            AccountMeta::new(seed_long.pubkey(), true),
+            AccountMeta::new(seed_short.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(seed_long_account, false),
+            AccountMeta::new(seed_short_account, false),
+        ],
+        &[&seed_long, &seed_short],
+    )
+    .expect("public max-shape seed batch must queue every EWMA mark");
+
+    let market = env.svm.get_account(&env.market).unwrap();
+    let (_, group) = state::read_market(&market.data).unwrap();
+    for asset_index in 0..ASSETS as usize {
+        let profile = state::read_asset_oracle_profile(&market.data, asset_index).unwrap();
+        assert!(profile.mark_ewma_e6 > MARK);
+        assert_eq!(
+            group.assets[asset_index].effective_price, MARK,
+            "asset {asset_index} has a publicly queued mark"
+        );
+    }
+    env
+}
+
+#[test]
+fn v16_bpf_pending_ewma_max_shape_batches_remain_under_tx_limit() {
+    const ASSETS: u16 = percolator_prog::constants::WRAPPER_MAX_PORTFOLIO_ASSETS;
+    const MARK: u64 = 1_000_000;
+    const SIZE_Q: i128 = 10 * POS_SCALE as i128;
+
+    let mut direct = max_shape_pending_ewma_env();
+    let direct_taker = Keypair::new();
+    let direct_taker_account = direct.create_portfolio(&direct_taker);
+    let direct_lp = Keypair::new();
+    let direct_lp_account = direct.create_portfolio(&direct_lp);
+    direct.deposit(&direct_taker, direct_taker_account, 500_000_000);
+    direct.deposit(&direct_lp, direct_lp_account, 500_000_000);
+    let direct_cu = direct
+        .send(
+            ProgInstruction::BatchTradeNoCpi {
+                legs: (0..ASSETS)
+                    .map(|asset_index| BatchTradeLeg {
+                        asset_index,
+                        size_q: SIZE_Q,
+                        exec_price: MARK,
+                        fee_bps: 0,
+                    })
+                    .collect(),
+            },
+            vec![
+                AccountMeta::new(direct_taker.pubkey(), true),
+                AccountMeta::new(direct_lp.pubkey(), true),
+                AccountMeta::new(direct.market, false),
+                AccountMeta::new(direct_taker_account, false),
+                AccountMeta::new(direct_lp_account, false),
+            ],
+            &[&direct_taker, &direct_lp],
+        )
+        .expect("14 pending marks must not DoS the public direct batch");
+    println!("14-leg direct batch with 14 pending EWMA marks CU: {direct_cu}");
+    assert!(direct_cu < 1_400_000, "direct pending batch CU {direct_cu}");
+
+    let mut cpi = max_shape_pending_ewma_env();
+    let cpi_taker = Keypair::new();
+    let cpi_taker_account = cpi.create_portfolio(&cpi_taker);
+    let cpi_lp = Keypair::new();
+    let cpi_lp_account = cpi.create_portfolio(&cpi_lp);
+    cpi.deposit(&cpi_taker, cpi_taker_account, 500_000_000);
+    cpi.deposit(&cpi_lp, cpi_lp_account, 500_000_000);
+    let (matcher_program, matcher_context, matcher_delegate) =
+        auth_matcher_for_lp(&mut cpi, &cpi_lp, cpi_lp_account);
+    let cpi_cu = cpi
+        .send(
+            ProgInstruction::BatchTradeCpi {
+                legs: (0..ASSETS)
+                    .map(|asset_index| BatchTradeCpiLeg {
+                        asset_index,
+                        size_q: SIZE_Q,
+                        fee_bps: 0,
+                        limit_price: 0,
+                    })
+                    .collect(),
+            },
+            vec![
+                AccountMeta::new(cpi_taker.pubkey(), true),
+                AccountMeta::new(cpi.market, false),
+                AccountMeta::new(cpi_taker_account, false),
+                AccountMeta::new(cpi_lp_account, false),
+                AccountMeta::new_readonly(matcher_program, false),
+                AccountMeta::new(matcher_context, false),
+                AccountMeta::new_readonly(matcher_delegate, false),
+            ],
+            &[&cpi_taker],
+        )
+        .expect("14 pending marks must not DoS the public matcher batch");
+    println!("14-leg CPI batch with 14 pending EWMA marks CU: {cpi_cu}");
+    assert!(cpi_cu < 1_400_000, "CPI pending batch CU {cpi_cu}");
 }
