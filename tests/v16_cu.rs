@@ -17322,6 +17322,7 @@ fn v16_public_bankruptcy_recredits_claim_free_residual_to_provider() {
     const POSITION_Q: i128 = 1_000_000_000_000;
     const INITIAL_MARK: u64 = 100;
     const FINAL_MARK: u64 = 130;
+    const MAX_MARKET_SLOTS: usize = 5_834;
 
     let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
         maintenance_margin_bps: 1_000,
@@ -17543,31 +17544,66 @@ fn v16_public_bankruptcy_recredits_claim_free_residual_to_provider() {
     assert_eq!(after_users.materialized_portfolio_count, 0);
     assert_eq!(after_users.c_tot, 0);
     assert_eq!(
-        after_users.insurance, 200_000_000,
-        "the last portfolio close must return the 20M claim-free duplicate charge to insurance"
+        after_users.insurance, 180_000_000,
+        "the duplicate 20M remains residual until its asset provider asks to withdraw"
     );
     assert_eq!(
         after_users.insurance_domain_budget_remaining_total, after_users.insurance,
-        "all terminal insurance is again provider-withdrawable"
+        "all currently classified terminal insurance remains provider-withdrawable"
     );
 
+    // Preserve the publicly reached accounting state while expanding only the
+    // disabled tail to the largest market shape that fits Solana's account cap.
+    // The provider recovery below must remain asset-local rather than scanning
+    // every configured domain.
+    let max_market_len =
+        state::market_account_len_for_capacity(MAX_MARKET_SLOTS).expect("max market length");
+    let asset0_profile = {
+        let account = env.svm.get_account(&env.market).unwrap();
+        state::read_asset_oracle_profile(&account.data, 0).unwrap()
+    };
+    {
+        let mut account = env.svm.get_account(&env.market).unwrap();
+        account.data.resize(max_market_len, 0);
+        account.lamports = account.lamports.max(max_market_len as u64 * 10);
+        env.svm.set_account(env.market, account).unwrap();
+    }
+    env.mutate_market(|_cfg, group| {
+        group.config.max_market_slots = MAX_MARKET_SLOTS as u32;
+        group.next_market_id = (MAX_MARKET_SLOTS as u64) + 1;
+    });
+    {
+        let mut account = env.svm.get_account(&env.market).unwrap();
+        state::write_asset_oracle_profile(&mut account.data, 0, &asset0_profile).unwrap();
+        env.svm.set_account(env.market, account).unwrap();
+    }
+
     let provider_destination = env.token_account(provider.pubkey(), 0);
-    env.send(
-        ProgInstruction::WithdrawInsuranceAsset {
-            asset_index: 0,
-            amount: after_users.insurance,
-        },
-        vec![
-            AccountMeta::new(provider.pubkey(), true),
-            AccountMeta::new(env.market, false),
-            AccountMeta::new(provider_destination, false),
-            AccountMeta::new(env.vault, false),
-            AccountMeta::new_readonly(env.vault_authority, false),
-            AccountMeta::new_readonly(spl_token::ID, false),
-        ],
-        &[&provider],
-    )
-    .expect("provider recovers terminal insurance");
+    let insurance_withdraw_cu = env
+        .send(
+            ProgInstruction::WithdrawInsuranceAsset {
+                asset_index: 0,
+                amount: 2 * DOMAIN_TRANCHE,
+            },
+            vec![
+                AccountMeta::new(provider.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(provider_destination, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(env.vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[&provider],
+        )
+        .expect("provider recovers terminal insurance");
+    println!(
+        "terminal overlap recredit + withdrawal: assets={MAX_MARKET_SLOTS}, CU={insurance_withdraw_cu}"
+    );
+    assert_cu_within(
+        "asset-local terminal overlap recredit and withdrawal",
+        insurance_withdraw_cu,
+        CUSTODY_CU_LIMIT,
+    );
     for domain in [0u16, 1] {
         let backing = env.market_state().1.source_backing_buckets[domain as usize]
             .fresh_unliened_backing_num
