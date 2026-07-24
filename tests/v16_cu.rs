@@ -10493,6 +10493,216 @@ fn v16_attack_pending_selected_mark_requires_observation() {
     );
 }
 
+// REAL LoF: when the price-move cap rounds to zero, a missing selected-asset
+// observation must not erase a nonzero committed negative-premium funding
+// segment. A short can permissionlessly refresh the stale long before an honest
+// observed crank, retain the funding it owes, and reduce the independent long's
+// resolved token payout. Every transition below uses the public wrapper API.
+#[test]
+fn v16_attack_permissionless_crank_cannot_erase_rounded_premium_funding() {
+    #[derive(Debug)]
+    struct Outcome {
+        missing_observation_landed: bool,
+        f_long_num: i128,
+        f_short_num: i128,
+        long_payout: u64,
+        short_payout: u64,
+    }
+
+    fn run(omit_selected_observation: bool) -> Outcome {
+        const PRICE: u64 = 100;
+        const MARK: u64 = 99;
+        const OPEN_SLOT: u64 = 1;
+        const PRIME_SLOT: u64 = 2;
+        const ATTACK_SLOT: u64 = 3;
+        const DEPOSIT: u128 = 100_000_000;
+        const SIZE_Q: i128 = 100_000 * POS_SCALE as i128;
+
+        let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+            max_portfolio_assets: 2,
+            initial_price: PRICE,
+            max_price_move_bps_per_slot: 1,
+            max_accrual_dt_slots: 1,
+            max_abs_funding_e9_per_slot: 10_000,
+            min_funding_lifetime_slots: 1,
+            ..V16CuMarketParams::default()
+        });
+        env.svm.warp_to_slot(OPEN_SLOT);
+        env.configure_auth_mark_for_asset_as_admin(0, OPEN_SLOT, PRICE);
+        env.configure_auth_mark_for_asset_as_admin(1, OPEN_SLOT, PRICE);
+
+        let victim_long_owner = Keypair::new();
+        let attacker_short_owner = Keypair::new();
+        let other_long_owner = Keypair::new();
+        let other_short_owner = Keypair::new();
+        let victim_long = env.create_portfolio(&victim_long_owner);
+        let attacker_short = env.create_portfolio(&attacker_short_owner);
+        let other_long = env.create_portfolio(&other_long_owner);
+        let other_short = env.create_portfolio(&other_short_owner);
+        for (owner, account) in [
+            (&victim_long_owner, victim_long),
+            (&attacker_short_owner, attacker_short),
+            (&other_long_owner, other_long),
+            (&other_short_owner, other_short),
+        ] {
+            env.deposit(owner, account, DEPOSIT);
+        }
+        env.trade_asset_with_cu(
+            0,
+            &victim_long_owner,
+            victim_long,
+            &attacker_short_owner,
+            attacker_short,
+            SIZE_Q,
+            PRICE,
+            0,
+        );
+        env.svm.expire_blockhash();
+        env.trade_asset_with_cu(
+            1,
+            &other_long_owner,
+            other_long,
+            &other_short_owner,
+            other_short,
+            POS_SCALE as i128,
+            PRICE,
+            0,
+        );
+
+        // Commit MARK as the funding checkpoint while the one-bps price cap
+        // rounds PRICE * cap / 10_000 to zero, leaving effective price at PRICE.
+        env.svm.warp_to_slot(PRIME_SLOT);
+        env.push_auth_mark_for_asset_as_admin(0, PRIME_SLOT, MARK);
+        env.crank(
+            victim_long,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: PRIME_SLOT,
+                observations: crank_observations(0),
+            },
+        );
+        let (_, primed) = env.market_state();
+        assert_eq!(primed.assets[0].effective_price, PRICE);
+        assert_eq!(primed.assets[0].slot_last, PRIME_SLOT);
+        assert_eq!(primed.assets[0].f_long_num, 0);
+
+        // Advancing an unrelated live asset bumps the market epoch and makes
+        // the asset-0 account publicly refreshable without touching its bytes.
+        env.svm.warp_to_slot(ATTACK_SLOT);
+        env.push_auth_mark_for_asset_as_admin(1, ATTACK_SLOT, MARK);
+        env.crank(
+            other_long,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: ATTACK_SLOT,
+                observations: crank_observations(1),
+            },
+        );
+        let (_, stale_group) = env.market_state();
+        assert!(
+            health_cert(&env.portfolio_state(victim_long)).cert_oracle_epoch
+                < stale_group.oracle_epoch,
+            "unrelated asset progress must make the target account stale"
+        );
+
+        env.svm.expire_blockhash();
+        let refresh = env.send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: ATTACK_SLOT,
+                observations: if omit_selected_observation {
+                    vec![]
+                } else {
+                    crank_observations(0)
+                },
+            },
+            vec![
+                AccountMeta::new(env.payer.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(victim_long, false),
+            ],
+            &[],
+        );
+        let missing_observation_landed = refresh.is_ok();
+        if !omit_selected_observation {
+            assert!(
+                refresh.is_ok(),
+                "observed refresh must succeed: {refresh:?}"
+            );
+        }
+        if omit_selected_observation && refresh.is_err() {
+            env.crank(
+                victim_long,
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: ATTACK_SLOT,
+                    observations: crank_observations(0),
+                },
+            );
+        }
+        let (_, funded) = env.market_state();
+
+        // Settle the counterparty against the resulting global funding index,
+        // then close both markets through ordinary signed trades.
+        env.svm.expire_blockhash();
+        env.crank(
+            attacker_short,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: ATTACK_SLOT,
+                observations: vec![],
+            },
+        );
+        env.svm.expire_blockhash();
+        env.trade_asset_with_cu(
+            0,
+            &victim_long_owner,
+            victim_long,
+            &attacker_short_owner,
+            attacker_short,
+            -SIZE_Q,
+            PRICE,
+            0,
+        );
+        env.svm.expire_blockhash();
+        env.trade_asset_with_cu(
+            1,
+            &other_long_owner,
+            other_long,
+            &other_short_owner,
+            other_short,
+            -(POS_SCALE as i128),
+            PRICE,
+            0,
+        );
+
+        env.resolve();
+        let long_dest = env.close_resolved(&victim_long_owner, victim_long);
+        let short_dest = env.close_resolved(&attacker_short_owner, attacker_short);
+        let _ = env.close_resolved(&other_long_owner, other_long);
+        let _ = env.close_resolved(&other_short_owner, other_short);
+        Outcome {
+            missing_observation_landed,
+            f_long_num: funded.assets[0].f_long_num,
+            f_short_num: funded.assets[0].f_short_num,
+            long_payout: env.token_amount(long_dest),
+            short_payout: env.token_amount(short_dest),
+        }
+    }
+
+    let control = run(false);
+    let attack = run(true);
+    eprintln!("rounded funding control={control:?} attack={attack:?}");
+    if attack.missing_observation_landed {
+        assert_eq!(control.long_payout - attack.long_payout, 100_000);
+        assert_eq!(attack.short_payout - control.short_payout, 100_000);
+    }
+    assert!(
+        !attack.missing_observation_landed,
+        "a public no-observation crank must not erase committed premium funding"
+    );
+    assert!(control.f_long_num > 0 && control.f_short_num < 0);
+    assert_eq!(attack.f_long_num, control.f_long_num);
+    assert_eq!(attack.f_short_num, control.f_short_num);
+    assert_eq!(attack.long_payout, control.long_payout);
+    assert_eq!(attack.short_payout, control.short_payout);
+}
+
 #[test]
 fn v16_bpf_no_cranker_liquidation_rejects_invalid_final_market_shape() {
     let mut env = V16CuEnv::new();
