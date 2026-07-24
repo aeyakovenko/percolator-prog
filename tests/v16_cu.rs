@@ -44628,6 +44628,260 @@ fn v16_attack_market_exceeds_64_assets_position_holds_any_14_legs() {
 // asset 0's funded domain-insurance budget (draining funds that back asset-0 traders). Protection: domain
 // insurance budgets are per-domain (asset i -> domains 2i, 2i+1); asset-1 bad debt is bounded to asset-1's
 // own domains, so asset 0's domain-insurance bytes are unchanged. Senior conservation holds throughout.
+fn configure_permissionless_asset_one(env: &mut V16CuEnv, creator: &Keypair, start_slot: u64) {
+    let creator_key = creator.pubkey();
+    env.activate_permissionless_asset_with_fee(
+        creator,
+        1,
+        start_slot,
+        100,
+        creator_key,
+        creator_key,
+        creator_key,
+        creator_key,
+        1,
+    );
+    env.configure_auth_mark_for_asset_with_authority(1, creator, start_slot, 100);
+}
+
+fn trigger_permissionless_asset_one_bankruptcy(
+    env: &mut V16CuEnv,
+    creator: &Keypair,
+    start_slot: u64,
+) -> (Keypair, Pubkey) {
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long_account = env.create_portfolio(&long_owner);
+    let short_account = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long_account, 1_000_000);
+    env.deposit(&short_owner, short_account, 250);
+    env.trade_asset_with_cu(
+        1,
+        &long_owner,
+        long_account,
+        &short_owner,
+        short_account,
+        POS_SCALE as i128,
+        100,
+        0,
+    );
+
+    for (slot, mark) in [
+        (start_slot + 1, 200u64),
+        (start_slot + 2, 400),
+        (start_slot + 3, 800),
+    ] {
+        env.svm.warp_to_slot(slot);
+        env.push_auth_mark_for_asset_with_authority(1, creator, slot, mark);
+        for portfolio in [long_account, short_account] {
+            env.svm.expire_blockhash();
+            let _ = env.send(
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: slot,
+                    observations: crank_observations(1),
+                },
+                vec![
+                    AccountMeta::new(env.payer.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(portfolio, false),
+                ],
+                &[],
+            );
+        }
+    }
+    env.crank_steps(
+        short_account,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: start_slot + 3,
+            observations: crank_observations(1),
+        },
+        4,
+    );
+    let (_, group) = env.market_state();
+    assert_eq!(group.mode, MarketModeV16::Live);
+    assert!(group.bankruptcy_hlock_active);
+    assert!(
+        group.bankruptcy_hlock_fully_attributed,
+        "the public single-asset insolvency must persist asset-local attribution"
+    );
+    assert_eq!(env.portfolio_state(short_account).capital.get(), 0);
+    assert_eq!(group.assets[1].mode_long, SideModeV16::ResetPending);
+    (long_owner, long_account)
+}
+
+#[test]
+fn v16_attack_permissionless_asset_bankruptcy_cannot_freeze_unrelated_insurance() {
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(1, 10_000, 10_000, 10_000);
+    env.svm.warp_to_slot(1);
+    env.configure_auth_mark_with_cu(1, 100);
+    env.update_market_init_fee_policy_with_cu(1);
+    let creator = Keypair::new();
+    configure_permissionless_asset_one(&mut env, &creator, 2);
+    env.enable_live_insurance_withdrawal();
+    let base_provider = env.admin.insecure_clone();
+    env.top_up_insurance_domain_with_authority(&base_provider, 0, 1_000);
+    env.try_withdraw_insurance_asset_with_authority(&base_provider, 0, 100)
+        .expect("healthy base insurance is live before the unrelated attack");
+
+    let _ = trigger_permissionless_asset_one_bankruptcy(&mut env, &creator, 2);
+    env.top_up_insurance_domain_with_authority(&creator, 2, 100);
+    let before = env.market_state().1;
+    assert_eq!(before.insurance_domain_budget[0], 900);
+    assert_eq!(before.insurance_domain_spent[0], 0);
+    env.svm.expire_blockhash();
+    let withdrawal = env.try_withdraw_insurance_asset_with_authority(&base_provider, 0, 100);
+    assert!(
+        withdrawal.is_ok(),
+        "asset-1 bankruptcy must not permanently freeze untouched asset-0 insurance: {withdrawal:?}"
+    );
+    let after = env.market_state().1;
+    assert_eq!(after.insurance_domain_budget[0], 800);
+    assert_eq!(after.insurance_domain_spent[0], 0);
+
+    env.svm.expire_blockhash();
+    let related_withdrawal = env.try_withdraw_insurance_asset_with_authority(&creator, 1, 1);
+    assert!(
+        related_withdrawal.is_err(),
+        "the bankrupt asset's own insurance must remain locked"
+    );
+}
+
+#[test]
+fn v16_bpf_unrelated_bankruptcy_hlock_withdraw_stays_bounded_on_10m_market() {
+    const N: usize = 5_834;
+    const HIGH_ASSET: usize = N - 1;
+    const FUNDED: u128 = 100;
+
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(1, 10_000, 10_000, 10_000);
+    let account_len = grow_market_to_10m_with_high_active_asset(&mut env, N, HIGH_ASSET, 100);
+    env.enable_live_insurance_withdrawal();
+    let admin = env.admin.insecure_clone();
+    env.top_up_insurance_domain_with_authority(&admin, 0, FUNDED);
+    env.mutate_market(|_, group| {
+        group.bankruptcy_hlock_active = true;
+        group.bankruptcy_hlock_fully_attributed = true;
+        group.assets[HIGH_ASSET].mode_long = SideModeV16::ResetPending;
+    });
+
+    env.svm.expire_blockhash();
+    let (_, withdraw_cu) = env
+        .try_withdraw_insurance_asset_with_authority(&admin, 0, 1)
+        .expect("unrelated tail bankruptcy must not brick base insurance withdrawal");
+    println!(
+        "v16 10MiB unrelated bankruptcy hlock withdrawal: assets={N}, account_len={account_len}, CU={withdraw_cu}"
+    );
+    assert_cu_within(
+        "10MiB unrelated bankruptcy hlock withdrawal",
+        withdraw_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    assert_eq!(env.market_state().1.insurance_domain_budget[0], FUNDED - 1);
+}
+
+#[test]
+fn v16_attack_permissionless_asset_bankruptcy_cannot_freeze_unrelated_backed_pnl() {
+    const DEPOSIT: u128 = 1_000_000;
+    const PNL: u128 = 100;
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(1, 10_000, 10_000, 10_000);
+    env.svm.warp_to_slot(1);
+    env.configure_auth_mark_with_cu(1, 100);
+    env.update_market_init_fee_policy_with_cu(1);
+    let creator = Keypair::new();
+    configure_permissionless_asset_one(&mut env, &creator, 1);
+
+    let mut pairs = Vec::new();
+    for _ in 0..2 {
+        let winner = Keypair::new();
+        let loser = Keypair::new();
+        let winner_account = env.create_portfolio(&winner);
+        let loser_account = env.create_portfolio(&loser);
+        env.deposit(&winner, winner_account, DEPOSIT);
+        env.deposit(&loser, loser_account, DEPOSIT);
+        env.trade_asset_with_cu(
+            0,
+            &winner,
+            winner_account,
+            &loser,
+            loser_account,
+            POS_SCALE as i128,
+            100,
+            0,
+        );
+        pairs.push((winner, winner_account, loser, loser_account));
+    }
+    env.svm.warp_to_slot(2);
+    env.push_auth_mark_with_cu(2, 200);
+    for (_, winner_account, _, loser_account) in &pairs {
+        for portfolio in [*loser_account, *winner_account] {
+            env.crank(
+                portfolio,
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: 2,
+                    observations: crank_observations(0),
+                },
+            );
+        }
+    }
+    for (winner, winner_account, loser, loser_account) in &pairs {
+        env.trade_asset_with_cu(
+            0,
+            winner,
+            *winner_account,
+            loser,
+            *loser_account,
+            -(POS_SCALE as i128),
+            200,
+            0,
+        );
+        assert_eq!(env.portfolio_state(*winner_account).pnl.get(), PNL as i128);
+    }
+
+    env.convert_released_pnl_with_cu(&pairs[0].0, pairs[0].1, PNL);
+    assert_eq!(env.portfolio_state(pairs[0].1).capital.get(), DEPOSIT + PNL);
+
+    let (failed_asset_winner, failed_asset_winner_account) =
+        trigger_permissionless_asset_one_bankruptcy(&mut env, &creator, 3);
+    env.crank(
+        pairs[1].1,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 6,
+            observations: crank_observations(0),
+        },
+    );
+    let target_before = env.portfolio_state(pairs[1].1);
+    assert_eq!(target_before.pnl.get(), PNL as i128);
+    env.svm.expire_blockhash();
+    let unrelated_convert = env.send(
+        ProgInstruction::ConvertReleasedPnl { amount: PNL },
+        vec![
+            AccountMeta::new(pairs[1].0.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(pairs[1].1, false),
+        ],
+        &[&pairs[1].0],
+    );
+    assert!(
+        unrelated_convert.is_ok(),
+        "asset-1 bankruptcy must not freeze asset-0's fully source-backed payout: {unrelated_convert:?}"
+    );
+    assert_eq!(env.portfolio_state(pairs[1].1).capital.get(), DEPOSIT + PNL);
+
+    env.svm.expire_blockhash();
+    let related_convert = env.send(
+        ProgInstruction::ConvertReleasedPnl { amount: 1_000_000 },
+        vec![
+            AccountMeta::new(failed_asset_winner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(failed_asset_winner_account, false),
+        ],
+        &[&failed_asset_winner],
+    );
+    assert!(
+        related_convert.is_err(),
+        "the failed asset's own unresolved winner must remain locked"
+    );
+}
+
 #[test]
 fn v16_attack_asset1_insolvency_cannot_drain_asset0_domain_insurance() {
     let mut env = V16CuEnv::new_with_market_params_and_price_move(2, 10_000, 10_000, 10_000);

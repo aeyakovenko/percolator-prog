@@ -279,6 +279,7 @@ pub mod state {
         pub current_slot: u64,
         pub assets: Vec<AssetStateV16>,
         pub bankruptcy_hlock_active: bool,
+        pub bankruptcy_hlock_fully_attributed: bool,
         pub threshold_stress_active: bool,
         pub loss_stale_active: bool,
         pub recovery_reason: Option<PermissionlessRecoveryReasonV16>,
@@ -357,6 +358,7 @@ pub mod state {
                 current_slot: 0,
                 assets,
                 bankruptcy_hlock_active: false,
+                bankruptcy_hlock_fully_attributed: false,
                 threshold_stress_active: false,
                 loss_stale_active: false,
                 recovery_reason: None,
@@ -1802,7 +1804,15 @@ pub mod state {
             slot_last: wire.slot_last.get(),
             current_slot: wire.current_slot.get(),
             assets: Vec::with_capacity(slot_count),
-            bankruptcy_hlock_active: decode_bool(wire.bankruptcy_hlock_active)?,
+            bankruptcy_hlock_active: percolator::bankruptcy_hlock_active_from_wire(
+                wire.bankruptcy_hlock_active,
+            )
+            .map_err(map_account_wire_error)?,
+            bankruptcy_hlock_fully_attributed:
+                percolator::bankruptcy_hlock_fully_attributed_from_wire(
+                    wire.bankruptcy_hlock_active,
+                )
+                .map_err(map_account_wire_error)?,
             threshold_stress_active: decode_bool(wire.threshold_stress_active)?,
             loss_stale_active: decode_bool(wire.loss_stale_active)?,
             recovery_reason: wire
@@ -1986,7 +1996,10 @@ pub mod state {
         header.funding_epoch = percolator::V16PodU64::new(group.funding_epoch);
         header.slot_last = percolator::V16PodU64::new(group.slot_last);
         header.current_slot = percolator::V16PodU64::new(group.current_slot);
-        header.bankruptcy_hlock_active = encode_bool_for_account(group.bankruptcy_hlock_active);
+        header.bankruptcy_hlock_active = percolator::bankruptcy_hlock_to_wire(
+            group.bankruptcy_hlock_active,
+            group.bankruptcy_hlock_fully_attributed,
+        );
         header.threshold_stress_active = encode_bool_for_account(group.threshold_stress_active);
         header.loss_stale_active = encode_bool_for_account(group.loss_stale_active);
         header.recovery_reason =
@@ -4496,7 +4509,9 @@ pub mod processor {
             return Ok(true);
         }
         reject_permissionless_resolve_matured_live_view(cfg, group)?;
-        if group.header.bankruptcy_hlock_active != 0
+        let ignore_unrelated_bankruptcy_hlock =
+            bankruptcy_hlock_is_only_unrelated_to_asset_view(group, asset_index)?;
+        if (group.header.bankruptcy_hlock_active != 0 && !ignore_unrelated_bankruptcy_hlock)
             || group.header.threshold_stress_active != 0
             || group.header.loss_stale_active != 0
             || group
@@ -4513,6 +4528,27 @@ pub mod processor {
         }
         reject_exposed_target_effective_lag_view(group, asset_index)?;
         Ok(false)
+    }
+
+    fn bankruptcy_hlock_is_only_unrelated_to_asset_view(
+        group: &state::MarketViewMutV16<'_>,
+        asset_index: usize,
+    ) -> Result<bool, ProgramError> {
+        let configured_assets = group.header.config.max_market_slots.get() as usize;
+        if !percolator::bankruptcy_hlock_active_from_wire(group.header.bankruptcy_hlock_active)
+            .map_err(map_v16_error)?
+            || !percolator::bankruptcy_hlock_fully_attributed_from_wire(
+                group.header.bankruptcy_hlock_active,
+            )
+            .map_err(map_v16_error)?
+            || asset_index >= configured_assets
+            || configured_assets > group.markets.len()
+        {
+            return Ok(false);
+        }
+        percolator::bankruptcy_asset_slot_has_lock_state(&group.markets[asset_index].engine)
+            .map(|locked| !locked)
+            .map_err(map_v16_error)
     }
 
     fn asset_local_loss_stale_view(
