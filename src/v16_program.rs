@@ -9657,21 +9657,22 @@ pub mod processor {
         expect_signer(authority)?;
         expect_writable(market_ai)?;
         expect_owner(market_ai, program_id)?;
-        let (mut cfg, asset0_insurance_authority, max_trading_fee_bps) = {
-            let market_data = market_ai.try_borrow_data()?;
-            let (cfg, _, _, _, max_trading_fee_bps) =
-                state::read_market_trade_preflight(&market_data, 0)?;
-            let profile0 = read_oracle_profile_for_asset(&market_data, &cfg, 0)?;
-            (cfg, profile0.insurance_authority, max_trading_fee_bps)
-        };
-        expect_live_authority(&asset0_insurance_authority, authority.key)?;
+        let mut market_data = market_ai.try_borrow_mut_data()?;
+        let (mut cfg, group) = state::market_view_mut(&mut market_data)?;
+        let profile0 = read_oracle_profile_from_view(&group, &cfg, 0)?;
+        expect_live_authority(&profile0.insurance_authority, authority.key)?;
+        let max_trading_fee_bps = group.header.config.max_trading_fee_bps.get();
         if trade_fee_base_bps > max_trading_fee_bps
             || trade_fee_base_bps > constants::MAX_DYNAMIC_TRADE_FEE_BPS
         {
             return Err(PercolatorError::InvalidInstruction.into());
         }
+        if trade_fee_base_bps > cfg.trade_fee_base_bps && group.header.c_tot.get() != 0 {
+            return Err(PercolatorError::EngineLockActive.into());
+        }
         cfg.trade_fee_base_bps = trade_fee_base_bps;
-        state::write_wrapper_config(&mut market_ai.try_borrow_mut_data()?, &cfg)
+        drop(group);
+        state::write_wrapper_config(&mut market_data, &cfg)
     }
 
     #[inline(never)]
