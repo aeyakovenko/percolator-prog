@@ -54428,6 +54428,8 @@ fn v16_attack_composite_reports_must_not_mix_publish_times() {
             && group_after_attack.assets[0].effective_price == 1_500_000
             && group_after_attack.assets[0].oi_eff_short_q == oi_before
             && victim_after_attack.capital.get() == victim_capital_initial
+            && cfg_after_attack.oracle_leg_publish_times == [100, 100, 0]
+            && cfg_after_attack.oracle_leg_prices_e6 == [3_000_000, 2_000_000, 0]
             && extracted_reward == 0,
         "temporally skewed reports changed a constant cross-rate: target={}, mark={}, \
          short_oi={}->{}, victim_capital={}->{}, cranker_reward={}, extracted_reward={}, \

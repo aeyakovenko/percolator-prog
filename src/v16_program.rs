@@ -3979,7 +3979,7 @@ pub mod oracle_v16 {
         }
         let mut acc = 0u64;
         let mut advanced = false;
-        let mut max_publish_time = i64::MIN;
+        let mut composite_publish_time = 0i64;
         let mut i = 0usize;
         while i < count {
             let (price, publish_time) = read_oracle_price_e6(
@@ -3989,6 +3989,11 @@ pub mod oracle_v16 {
                 config.max_staleness_secs,
                 config.conf_filter_bps,
             )?;
+            if i == 0 {
+                composite_publish_time = publish_time;
+            } else if publish_time != composite_publish_time {
+                return Err(PercolatorError::OracleStale.into());
+            }
             let prev_time = config.oracle_leg_publish_times[i];
             let prev_price = config.oracle_leg_prices_e6[i];
             if prev_time != 0 {
@@ -4004,7 +4009,6 @@ pub mod oracle_v16 {
                 config.oracle_leg_prices_e6[i] = price;
                 advanced = true;
             }
-            max_publish_time = core::cmp::max(max_publish_time, publish_time);
             acc = if i == 0 {
                 price
             } else {
@@ -4014,7 +4018,7 @@ pub mod oracle_v16 {
         }
         Ok((
             apply_transform(acc, config.invert, config.unit_scale)?,
-            max_publish_time,
+            composite_publish_time,
             advanced,
         ))
     }
@@ -4040,7 +4044,7 @@ pub mod oracle_v16 {
         }
         let mut acc = 0u64;
         let mut advanced = false;
-        let mut max_publish_time = i64::MIN;
+        let mut composite_publish_time = 0i64;
         let mut i = 0usize;
         while i < count {
             let (price, publish_time) = read_oracle_price_e6(
@@ -4050,6 +4054,11 @@ pub mod oracle_v16 {
                 profile.max_staleness_secs,
                 profile.conf_filter_bps,
             )?;
+            if i == 0 {
+                composite_publish_time = publish_time;
+            } else if publish_time != composite_publish_time {
+                return Err(PercolatorError::OracleStale.into());
+            }
             let prev_time = profile.oracle_leg_publish_times[i];
             let prev_price = profile.oracle_leg_prices_e6[i];
             if prev_time != 0 {
@@ -4065,7 +4074,6 @@ pub mod oracle_v16 {
                 profile.oracle_leg_prices_e6[i] = price;
                 advanced = true;
             }
-            max_publish_time = core::cmp::max(max_publish_time, publish_time);
             acc = if i == 0 {
                 price
             } else {
@@ -4075,7 +4083,7 @@ pub mod oracle_v16 {
         }
         Ok((
             apply_transform(acc, profile.invert, profile.unit_scale)?,
-            max_publish_time,
+            composite_publish_time,
             advanced,
         ))
     }
