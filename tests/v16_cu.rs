@@ -9930,6 +9930,162 @@ fn v16_attack_crossed_trade_cannot_turn_partial_liquidation_survivors_same_side(
 }
 
 #[test]
+fn v16_adl_split_transfer_rejects_without_value_reissue_and_owner_exit_remains_live() {
+    const PRICE: u64 = 100;
+    const OPEN_Q: i128 = 13_000 * POS_SCALE as i128;
+
+    let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+        h_max: 6_480_000,
+        initial_price: PRICE,
+        maintenance_margin_bps: 500,
+        initial_margin_bps: 500,
+        min_nonzero_mm_req: 59_900,
+        min_nonzero_im_req: 60_000,
+        max_price_move_bps_per_slot: 24,
+        max_accrual_dt_slots: 20,
+        max_abs_funding_e9_per_slot: 0,
+        min_funding_lifetime_slots: 10_000_000,
+        liquidation_fee_bps: 0,
+        maintenance_fee_per_slot: 2_700,
+        ..V16CuMarketParams::default()
+    });
+    env.top_up_backing_bucket(1, 100_000, 10_000);
+    let survivor_owner = Keypair::new();
+    let liquidated_owner = Keypair::new();
+    let successor_owner = Keypair::new();
+    let survivor = env.create_portfolio(&survivor_owner);
+    let liquidated = env.create_portfolio(&liquidated_owner);
+    let successor = env.create_portfolio(&successor_owner);
+    env.deposit(&survivor_owner, survivor, 100_000);
+    env.deposit(&liquidated_owner, liquidated, 118_900);
+    env.deposit(&successor_owner, successor, 100_000);
+    env.svm.warp_to_slot(1);
+    env.configure_auth_mark_with_cu(1, PRICE);
+
+    env.svm.warp_to_slot(8);
+    env.trade_with_cu(
+        &survivor_owner,
+        survivor,
+        &liquidated_owner,
+        liquidated,
+        OPEN_Q,
+        PRICE,
+        0,
+    );
+    env.svm.warp_to_slot(27);
+    env.crank(
+        survivor,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 27,
+            observations: crank_observations(0),
+        },
+    );
+    env.svm.warp_to_slot(35);
+    env.sync_maintenance_fee_with_cu(liquidated, None, 35);
+    env.crank_steps(
+        liquidated,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 35,
+            observations: crank_observations(0),
+        },
+        2,
+    );
+
+    let (_, after_liquidation) = env.market_state();
+    let effective_q = after_liquidation.assets[0].oi_eff_long_q;
+    let raw_q = active_leg_for_asset(&env.portfolio_state(survivor), 0)
+        .basis_pos_q
+        .unsigned_abs();
+    assert_eq!(raw_q, OPEN_Q.unsigned_abs());
+    assert!(effective_q < raw_q);
+    assert!(after_liquidation.assets[0].a_long < percolator::ADL_ONE);
+
+    env.svm.expire_blockhash();
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let survivor_before = env.svm.get_account(&survivor).unwrap();
+    let successor_before = env.svm.get_account(&successor).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    let rejected = env
+        .try_trade_asset_with_cu(
+            0,
+            &survivor_owner,
+            survivor,
+            &successor_owner,
+            successor,
+            -((raw_q / 2) as i128),
+            PRICE,
+            0,
+        )
+        .expect_err("post-ADL raw basis must not be reissued to a fresh portfolio");
+    assert!(
+        rejected.contains("Custom(21)") || rejected.contains("custom program error: 0x15"),
+        "post-ADL risk increase must fail as LockActive, got {rejected}"
+    );
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+    assert_eq!(env.svm.get_account(&survivor).unwrap(), survivor_before);
+    assert_eq!(env.svm.get_account(&successor).unwrap(), successor_before);
+    assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+
+    let account_value = |account: &percolator::PortfolioAccountV16Account| {
+        account.capital.get() as i128 + account.pnl.get()
+    };
+    let survivor_value_before = account_value(&env.portfolio_state(survivor));
+    let liquidated_value_before = account_value(&env.portfolio_state(liquidated));
+    let vault_amount_before_mark = env.token_amount(env.vault);
+
+    env.svm.warp_to_slot(40);
+    env.push_auth_mark_with_cu(40, PRICE + 1);
+    env.crank(
+        survivor,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 40,
+            observations: crank_observations(0),
+        },
+    );
+    env.crank(
+        liquidated,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 40,
+            observations: crank_observations(0),
+        },
+    );
+
+    let survivor_value_after = account_value(&env.portfolio_state(survivor));
+    let liquidated_value_after = account_value(&env.portfolio_state(liquidated));
+    let net_value_delta = (survivor_value_after - survivor_value_before)
+        + (liquidated_value_after - liquidated_value_before);
+    assert!(
+        (-1..=0).contains(&net_value_delta),
+        "post-ADL mark settlement must be neutral or conservatively rounded by at most one atom, \
+         got {net_value_delta}"
+    );
+    assert_eq!(env.token_amount(env.vault), vault_amount_before_mark);
+
+    env.svm.expire_blockhash();
+    let survivor_q_before = active_leg_for_asset(&env.portfolio_state(survivor), 0)
+        .basis_pos_q
+        .unsigned_abs();
+    let (_, market_before_exit) = env.market_state();
+    let exit_cu = env.rebalance_reduce_with_cu(&survivor_owner, survivor, 0, POS_SCALE);
+    assert_cu_within("post-ADL owner exit", exit_cu, CUSTODY_CU_LIMIT);
+    assert_eq!(
+        active_leg_for_asset(&env.portfolio_state(survivor), 0)
+            .basis_pos_q
+            .unsigned_abs(),
+        survivor_q_before - POS_SCALE
+    );
+    let (_, market_after_exit) = env.market_state();
+    assert_eq!(
+        market_after_exit.assets[0].oi_eff_long_q,
+        market_before_exit.assets[0].oi_eff_long_q - POS_SCALE
+    );
+    assert_eq!(
+        market_after_exit.assets[0].oi_eff_short_q,
+        market_before_exit.assets[0].oi_eff_short_q - POS_SCALE
+    );
+}
+
+#[test]
 fn v16_attack_stale_resolve_matured_no_observation_liquidation_rejects() {
     let mut env = V16CuEnv::new();
     env.configure_permissionless_resolve_with_cu(5, 5);
