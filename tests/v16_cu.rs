@@ -59717,3 +59717,162 @@ fn v16_attack_underfunded_exit_cannot_move_ewma_with_uncollectible_fee() {
         assert_underfunded_ewma_exit_uses_collected_fee(path);
     }
 }
+
+// An authenticated EWMA update is committed oracle state, even though the effective price reaches it
+// through the bounded crank. The engine must see that target before any later exposure migration, or
+// a losing trader can move a funded short into a thin account and withdraw the backing that the
+// independent winner should receive as the EWMA converges.
+#[test]
+fn v16_probe_pending_ewma_oracle_target_cannot_be_migrated_to_thin_account() {
+    #[derive(Debug)]
+    struct Outcome {
+        effective_price: u64,
+        attacker_recovery: u128,
+        victim_payout: u128,
+        migration_landed: bool,
+    }
+
+    fn run(migrate_after_mark: bool) -> Outcome {
+        const PRICE: u64 = 1_000_000;
+        const PUSH_PRICE: u64 = 1_200_000;
+        const TARGET: u64 = 1_100_000;
+        const FUNDED_CAPITAL: u128 = 1_100_000_000;
+        const THIN_CAPITAL: u128 = 60_000_000;
+        const SIZE_Q: i128 = 1_000 * POS_SCALE as i128;
+
+        let mut env = V16CuEnv::new_with_init_params(production_risk_params());
+        env.svm.warp_to_slot(1);
+        env.configure_ewma_mark_with_cu(1, PRICE, 1, 0);
+        let market_admin = env.admin.insecure_clone();
+        let honest_oracle = Keypair::new();
+        env.try_update_per_asset_authority_with_cu(
+            &market_admin,
+            Some(&honest_oracle),
+            0,
+            processor::ASSET_AUTH_ORACLE,
+            honest_oracle.pubkey().to_bytes(),
+        )
+        .expect("separate honest oracle authority");
+
+        let victim_owner = Keypair::new();
+        let victim_long = env.create_portfolio(&victim_owner);
+        let funded_owner = Keypair::new();
+        let funded_short = env.create_portfolio(&funded_owner);
+        let thin_owner = Keypair::new();
+        let thin_short = env.create_portfolio(&thin_owner);
+        env.deposit(&victim_owner, victim_long, FUNDED_CAPITAL);
+        env.deposit(&funded_owner, funded_short, FUNDED_CAPITAL);
+        env.deposit(&thin_owner, thin_short, THIN_CAPITAL);
+        env.trade_asset_with_cu(
+            0,
+            &victim_owner,
+            victim_long,
+            &funded_owner,
+            funded_short,
+            SIZE_Q,
+            PRICE,
+            0,
+        );
+
+        env.svm.warp_to_slot(2);
+        env.svm.expire_blockhash();
+        env.send(
+            ProgInstruction::PushEwmaMark {
+                asset_index: 0,
+                now_slot: 2,
+                mark_e6: PUSH_PRICE,
+            },
+            vec![
+                AccountMeta::new(honest_oracle.pubkey(), true),
+                AccountMeta::new(env.market, false),
+            ],
+            &[&honest_oracle],
+        )
+        .expect("honest EWMA oracle update");
+        assert_eq!(
+            env.market_state().0.mark_ewma_e6,
+            TARGET,
+            "one-slot, one-slot-halflife EWMA reaches the expected target"
+        );
+        assert_eq!(
+            env.market_state().1.assets[0].raw_oracle_target_price,
+            TARGET,
+            "authenticated EWMA target is immediately visible to engine risk checks"
+        );
+
+        let mut funded_live_withdrawal = 0u128;
+        let mut migration_landed = false;
+        if migrate_after_mark {
+            let migration = env.try_trade_asset_with_cu(
+                0,
+                &funded_owner,
+                funded_short,
+                &thin_owner,
+                thin_short,
+                SIZE_Q,
+                PRICE,
+                0,
+            );
+            migration_landed = migration.is_ok();
+            if migration_landed {
+                let dest = env.withdraw(&funded_owner, funded_short, FUNDED_CAPITAL);
+                funded_live_withdrawal = env.token_amount(dest) as u128;
+            }
+        }
+
+        for slot in 2..=100u64 {
+            env.svm.warp_to_slot(slot);
+            env.crank(
+                victim_long,
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: slot,
+                    observations: crank_observations(0),
+                },
+            );
+        }
+        let effective_price = env.market_state().1.assets[0].effective_price;
+        assert_eq!(
+            effective_price, TARGET,
+            "honest EWMA target fully converged"
+        );
+
+        env.resolve();
+        let funded_dest = env.close_resolved(&funded_owner, funded_short);
+        let thin_dest = env.close_resolved(&thin_owner, thin_short);
+        let thin_retry_dest = env.close_resolved(&thin_owner, thin_short);
+        let mut victim_payout = 0u128;
+        for _ in 0..5_000 {
+            let dest = env.close_resolved(&victim_owner, victim_long);
+            victim_payout += env.token_amount(dest) as u128;
+            let state = env.portfolio_state(victim_long);
+            let receipt = resolved_receipt(&state);
+            if state.capital.get() == 0
+                && state.pnl.get() == 0
+                && !has_active_leg_for_asset(&state, 0)
+                && (!receipt.present || receipt.finalized)
+            {
+                break;
+            }
+        }
+        Outcome {
+            effective_price,
+            attacker_recovery: funded_live_withdrawal
+                + env.token_amount(funded_dest) as u128
+                + env.token_amount(thin_dest) as u128
+                + env.token_amount(thin_retry_dest) as u128,
+            victim_payout,
+            migration_landed,
+        }
+    }
+
+    let control = run(false);
+    let attack = run(true);
+    eprintln!("pending EWMA migration control={control:?} attack={attack:?}");
+    assert_eq!(attack.effective_price, control.effective_price);
+    assert!(
+        !attack.migration_landed,
+        "exposure migration must price the committed EWMA target"
+    );
+    assert_eq!(attack.attacker_recovery, control.attacker_recovery);
+    assert_eq!(attack.victim_payout, control.victim_payout);
+}
