@@ -3112,6 +3112,7 @@ impl V16CuEnv {
     }
 
     fn withdraw_insurance_with_cu(&mut self, amount: u128) -> (Pubkey, u64) {
+        let market_id = self.asset_market_id(0);
         let dest = Pubkey::new_unique();
         self.svm
             .set_account(
@@ -3131,6 +3132,7 @@ impl V16CuEnv {
             &self.payer,
             ProgInstruction::WithdrawInsuranceAsset {
                 asset_index: 0,
+                market_id,
                 amount,
             },
             vec![
@@ -3153,12 +3155,14 @@ impl V16CuEnv {
         domain: u16,
         amount: u128,
     ) -> u64 {
+        let market_id = self.asset_market_id((domain / 2) as u16);
         send_tx(
             &mut self.svm,
             self.program_id,
             &self.payer,
             ProgInstruction::WithdrawInsuranceAsset {
                 asset_index: (domain / 2) as u16,
+                market_id,
                 amount,
             },
             vec![
@@ -3271,6 +3275,7 @@ impl V16CuEnv {
         asset_index: u16,
         amount: u128,
     ) -> Result<(Pubkey, u64), String> {
+        let market_id = self.asset_market_id(asset_index);
         let dest = Pubkey::new_unique();
         self.svm
             .set_account(
@@ -3290,6 +3295,7 @@ impl V16CuEnv {
             &self.payer,
             ProgInstruction::WithdrawInsuranceAsset {
                 asset_index,
+                market_id,
                 amount,
             },
             vec![
@@ -6174,6 +6180,139 @@ fn v16_attack_signed_asset_authority_rotation_cannot_replay_after_restart() {
         &[&admin, &attacker],
     )
     .expect("the same rotation remains live when signed for the current asset generation");
+}
+
+// A live insurance operator may differ from the authority that supplied the reserve. Holding a
+// signed withdrawal from one asset incarnation must not authorize a withdrawal from a replacement
+// incarnation funded by an independent provider, even when that provider legitimately reuses the
+// same operator service. The exact old transaction is retained and relayed after public
+// retire/reactivate transitions; rebuilding it would not demonstrate replay.
+#[test]
+fn v16_attack_signed_insurance_withdraw_cannot_replay_across_asset_slot_reuse() {
+    const ASSET: u16 = 1;
+    const DOMAIN: u16 = 2;
+    const AMOUNT: u128 = 50_000;
+
+    let mut env = V16CuEnv::new();
+    let old_provider = Keypair::new();
+    let new_provider = Keypair::new();
+    let operator = Keypair::new();
+    env.ensure_signer_account(old_provider.pubkey());
+    env.ensure_signer_account(new_provider.pubkey());
+    env.ensure_signer_account(operator.pubkey());
+
+    env.svm.warp_to_slot(1);
+    env.activate_asset_with_authorities(
+        ASSET,
+        1,
+        100,
+        old_provider.pubkey(),
+        operator.pubkey(),
+        old_provider.pubkey(),
+        old_provider.pubkey(),
+    );
+    env.top_up_insurance_domain_with_authority(&old_provider, DOMAIN, AMOUNT);
+    let old_market_id = env.asset_market_id(ASSET);
+
+    let stale_dest = env.token_account(operator.pubkey(), 0);
+    let stale_ix = Instruction {
+        program_id: env.program_id,
+        accounts: vec![
+            AccountMeta::new(operator.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(stale_dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        data: ProgInstruction::WithdrawInsuranceAsset {
+            asset_index: ASSET,
+            market_id: old_market_id,
+            amount: AMOUNT,
+        }
+        .encode(),
+    };
+    let stale_withdraw = Transaction::new_signed_with_payer(
+        &[heap_ix(), cu_ix(), stale_ix],
+        Some(&env.payer.pubkey()),
+        &[&env.payer, &operator],
+        env.svm.latest_blockhash(),
+    );
+
+    let old_clear_dest = env.token_account(operator.pubkey(), 0);
+    env.send(
+        ProgInstruction::WithdrawInsuranceAsset {
+            asset_index: ASSET,
+            market_id: old_market_id,
+            amount: AMOUNT,
+        },
+        vec![
+            AccountMeta::new(operator.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(old_clear_dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&operator],
+    )
+    .expect("a separate current withdrawal clears the old generation");
+    assert_eq!(env.token_amount(old_clear_dest), AMOUNT as u64);
+
+    env.svm.warp_to_slot(3);
+    env.update_asset_lifecycle_as_admin_with_cu(
+        percolator_prog::processor::ASSET_ACTION_RETIRE,
+        ASSET,
+        3,
+        0,
+    );
+    env.svm.warp_to_slot(4);
+    env.activate_asset_with_authorities(
+        ASSET,
+        4,
+        250,
+        new_provider.pubkey(),
+        operator.pubkey(),
+        new_provider.pubkey(),
+        new_provider.pubkey(),
+    );
+    let new_market_id = env.asset_market_id(ASSET);
+    assert_ne!(new_market_id, old_market_id);
+    env.top_up_insurance_domain_with_authority(&new_provider, DOMAIN, AMOUNT);
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    assert_eq!(env.token_amount(stale_dest), 0);
+
+    let replay = env.svm.send_transaction(stale_withdraw);
+    if replay.is_ok() {
+        assert_eq!(
+            env.token_amount(stale_dest),
+            AMOUNT as u64,
+            "the old operator transaction withdrew the replacement provider's reserve"
+        );
+        assert_eq!(
+            env.market_state().1.insurance_domain_budget[DOMAIN as usize],
+            0,
+            "the replacement asset's insurance budget was debited"
+        );
+        panic!(
+            "a retained generation-{old_market_id} withdrawal drained generation-{new_market_id} insurance"
+        );
+    }
+
+    let replay_error = format!("{:?}", replay.unwrap_err());
+    let expected_error = format!(
+        "Custom({})",
+        PercolatorError::AssetGenerationMismatch as u32
+    );
+    assert!(
+        replay_error.contains(&expected_error),
+        "stale insurance withdrawal must fail with {expected_error}, got {replay_error}"
+    );
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+    assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+    assert_eq!(env.token_amount(stale_dest), 0);
 }
 
 // Before the persistent generation account, a full CloseSlab + InitMarket cycle at the same market
@@ -23878,12 +24017,14 @@ fn v16_attack_insurance_ledger_authority_binding_enforced() {
     let ledger_before = env.svm.get_account(&wrong_ledger).unwrap().data;
     let vault_before = env.svm.get_account(&env.vault).unwrap();
     env.svm.expire_blockhash();
+    let market_id = env.asset_market_id(0);
     let bad = send_tx(
         &mut env.svm,
         env.program_id,
         &env.payer,
         ProgInstruction::WithdrawInsuranceAsset {
             asset_index: 0,
+            market_id,
             amount: 40,
         },
         vec![
@@ -23925,12 +24066,14 @@ fn v16_attack_insurance_ledger_authority_binding_enforced() {
     let correct_ledger = env.insurance_ledger_account();
     let good_dest = env.token_account(admin.pubkey(), 0);
     env.svm.expire_blockhash();
+    let market_id = env.asset_market_id(0);
     let ok = send_tx(
         &mut env.svm,
         env.program_id,
         &env.payer,
         ProgInstruction::WithdrawInsuranceAsset {
             asset_index: 0,
+            market_id,
             amount: 40,
         },
         vec![
@@ -24074,6 +24217,11 @@ fn v16_attack_insurance_ledger_market_binding_enforced() {
         0,
         "market-B insurance was funded"
     );
+    let market_b_id = state::read_market(&env.svm.get_account(&market_b).unwrap().data)
+        .unwrap()
+        .1
+        .assets[0]
+        .market_id;
 
     let market_a_before = env.svm.get_account(&env.market).unwrap();
     let market_b_before = env.svm.get_account(&market_b).unwrap();
@@ -24113,6 +24261,7 @@ fn v16_attack_insurance_ledger_market_binding_enforced() {
         &env.payer,
         ProgInstruction::WithdrawInsuranceAsset {
             asset_index: 0,
+            market_id: market_b_id,
             amount: 40,
         },
         vec![
@@ -24171,6 +24320,7 @@ fn v16_attack_insurance_ledger_market_binding_enforced() {
         &env.payer,
         ProgInstruction::WithdrawInsuranceAsset {
             asset_index: 0,
+            market_id: market_b_id,
             amount: 40,
         },
         vec![
@@ -25198,9 +25348,11 @@ fn v16_attack_value_paths_cannot_use_portfolio_as_optional_ledger() {
 
     let insurance_dest = env.token_account(admin.pubkey(), 0);
     env.svm.expire_blockhash();
+    let insurance_market_id = env.asset_market_id(0);
     let withdraw_insurance = env.send(
         ProgInstruction::WithdrawInsuranceAsset {
             asset_index: 0,
+            market_id: insurance_market_id,
             amount: 10,
         },
         vec![
@@ -25403,9 +25555,11 @@ fn v16_attack_value_paths_cannot_use_market_as_optional_ledger() {
 
     let insurance_dest = env.token_account(admin.pubkey(), 0);
     env.svm.expire_blockhash();
+    let insurance_market_id = env.asset_market_id(0);
     let withdraw_insurance = env.send(
         ProgInstruction::WithdrawInsuranceAsset {
             asset_index: 0,
+            market_id: insurance_market_id,
             amount: 10,
         },
         vec![
@@ -26164,6 +26318,7 @@ fn v16_attack_domain_indexed_calls_reject_out_of_range_atomically() {
         &env.payer,
         ProgInstruction::WithdrawInsuranceAsset {
             asset_index: BAD_DOMAIN as u16,
+            market_id: 0,
             amount: 1,
         },
         vec![
@@ -28974,12 +29129,14 @@ fn v16_attack_withdraw_insurance_asset_operator_gated() {
     let dest = env.token_account_for_mint(env.mint, mallory.pubkey(), 0);
     // non-operator attempts a domain insurance withdrawal -> reject.
     env.svm.expire_blockhash();
+    let market_id = env.asset_market_id(0);
     let r = send_tx(
         &mut env.svm,
         env.program_id,
         &env.payer,
         ProgInstruction::WithdrawInsuranceAsset {
             asset_index: 0,
+            market_id,
             amount: 500_000,
         },
         vec![
@@ -29039,12 +29196,14 @@ fn v16_attack_withdraw_insurance_asset_rejects_noncanonical_vault() {
     let ledger_before = env.svm.get_account(&ledger).unwrap();
 
     env.svm.expire_blockhash();
+    let market_id = env.asset_market_id(0);
     let rejected = send_tx(
         &mut env.svm,
         env.program_id,
         &env.payer,
         ProgInstruction::WithdrawInsuranceAsset {
             asset_index: 0,
+            market_id,
             amount: 40,
         },
         vec![
@@ -29089,12 +29248,14 @@ fn v16_attack_withdraw_insurance_asset_rejects_noncanonical_vault() {
     );
 
     env.svm.expire_blockhash();
+    let market_id = env.asset_market_id(0);
     send_tx(
         &mut env.svm,
         env.program_id,
         &env.payer,
         ProgInstruction::WithdrawInsuranceAsset {
             asset_index: 0,
+            market_id,
             amount: 40,
         },
         vec![
@@ -29171,12 +29332,14 @@ fn v16_attack_live_asset_insurance_withdraw_uses_operator_not_authority() {
     let operator_dest = env.token_account(insurance_operator.pubkey(), 0);
     let ledger = env.insurance_ledger_account();
     env.svm.expire_blockhash();
+    let market_id = env.asset_market_id(1);
     send_tx(
         &mut env.svm,
         env.program_id,
         &env.payer,
         ProgInstruction::WithdrawInsuranceAsset {
             asset_index: 1,
+            market_id,
             amount: 40,
         },
         vec![
@@ -47549,9 +47712,11 @@ fn v16_attack_dual_mint_domain_insurance_no_double_withdraw() {
     let secondary_dest_before = env.svm.get_account(&secondary_dest).unwrap();
 
     env.svm.expire_blockhash();
+    let market_id = env.asset_market_id(0);
     let double_withdraw = env.send(
         ProgInstruction::WithdrawInsuranceAsset {
             asset_index: 0,
+            market_id,
             amount: 1,
         },
         vec![
@@ -47585,6 +47750,7 @@ fn v16_attack_dual_mint_domain_insurance_no_double_withdraw() {
     let legitimate_secondary = env.send(
         ProgInstruction::WithdrawInsuranceAsset {
             asset_index: 0,
+            market_id,
             amount: 1,
         },
         vec![
@@ -47922,10 +48088,12 @@ fn v16_attack_market_admin_cannot_drain_foreign_asset_or_user_collateral() {
     // BOUND 1: the market admin CANNOT withdraw asset-1's domain insurance (it is not the operator and
     // the asset is healthy/live, so the admin-shutdown-drain path does not apply).
     let admin_dest = env.token_account(admin.pubkey(), 0);
+    let asset1_market_id = env.asset_market_id(1);
     env.svm.expire_blockhash();
     let r_foreign = env.send(
         ProgInstruction::WithdrawInsuranceAsset {
             asset_index: 1,
+            market_id: asset1_market_id,
             amount: 500,
         },
         vec![
@@ -47954,6 +48122,7 @@ fn v16_attack_market_admin_cannot_drain_foreign_asset_or_user_collateral() {
     let r_owner = env.send(
         ProgInstruction::WithdrawInsuranceAsset {
             asset_index: 1,
+            market_id: asset1_market_id,
             amount: 200,
         },
         vec![
@@ -49151,10 +49320,12 @@ fn v16_bpf_terminal_asset_insurance_partial_ledger_middle_domain_stays_bounded_o
     env.resolve();
     let dest = env.token_account_for_mint(env.mint, middle_authority.pubkey(), 0);
     env.svm.expire_blockhash();
+    let middle_market_id = env.asset_market_id(MIDDLE_ASSET as u16);
     let withdraw_cu = env
         .send(
             ProgInstruction::WithdrawInsuranceAsset {
                 asset_index: MIDDLE_ASSET as u16,
+                market_id: middle_market_id,
                 amount: PARTIAL,
             },
             vec![
@@ -57545,9 +57716,11 @@ fn v16_attack_live_domain_withdrawals_reject_when_resolve_matured() {
     let earnings_dest_before = env.svm.get_account(&stale_earnings_dest).unwrap();
 
     env.svm.expire_blockhash();
+    let market_id = env.asset_market_id(0);
     let stale_insurance = env.send(
         ProgInstruction::WithdrawInsuranceAsset {
             asset_index: 0,
+            market_id,
             amount: 20,
         },
         vec![
@@ -59922,6 +60095,7 @@ fn v16_attack_asset0_operator_rotation_rekeys_live_insurance_withdraw() {
     let stale_dest_before = env.svm.get_account(&stale_dest).unwrap();
     let vault_before = env.svm.get_account(&env.vault).unwrap();
     let market_before = env.svm.get_account(&env.market).unwrap();
+    let market_id = env.asset_market_id(0);
 
     env.svm.expire_blockhash();
     let stale_admin = send_tx(
@@ -59930,6 +60104,7 @@ fn v16_attack_asset0_operator_rotation_rekeys_live_insurance_withdraw() {
         &env.payer,
         ProgInstruction::WithdrawInsuranceAsset {
             asset_index: 0,
+            market_id,
             amount: 100,
         },
         vec![
@@ -59970,6 +60145,7 @@ fn v16_attack_asset0_operator_rotation_rekeys_live_insurance_withdraw() {
         &env.payer,
         ProgInstruction::WithdrawInsuranceAsset {
             asset_index: 0,
+            market_id,
             amount: 100,
         },
         vec![

@@ -480,6 +480,8 @@ This section describes intent and operational ordering, not argument-by-argument
   - requires market resolved and all accounts closed
 - **WithdrawInsuranceAsset** (tag 57)
   - live/recovery asset-scoped withdrawal from that asset's funded long+short insurance budget
+  - carries the current asset `market_id`; retained withdrawals signed for a retired generation
+    reject before any budget or token mutation
   - gated by that asset's `insurance_operator`; `marketauth` can only use the shutdown-drain path
     for nonzero assets after the shutdown timeout and after the asset is empty
   - the asset `insurance_authority` funds the asset domains and owns terminal recovery accounting,
