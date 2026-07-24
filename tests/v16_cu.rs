@@ -54276,20 +54276,26 @@ fn v16_attack_composite_intermediate_rounding_cannot_false_liquidate() {
         env.set_pyth_price_with_conf(&feeds[1], 1_000_000, -6, 0, 100),
         env.set_pyth_price_with_conf(&feeds[2], 2, -6, 0, 100),
     ];
-    env.try_configure_hybrid_asset_with_conf_filter_cu(
-        0,
-        3,
-        ORACLE_LEG_FLAG_DIVIDE_LEG2 | ORACLE_LEG_FLAG_DIVIDE_LEG3,
-        feeds,
-        &initial,
-        1,
-        100,
-        0,
-        0,
-        1_000,
-        0,
-    )
-    .expect("configure exact 1.5 three-leg cross-rate");
+    let configure_cu = env
+        .try_configure_hybrid_asset_with_conf_filter_cu(
+            0,
+            3,
+            ORACLE_LEG_FLAG_DIVIDE_LEG2 | ORACLE_LEG_FLAG_DIVIDE_LEG3,
+            feeds,
+            &initial,
+            1,
+            100,
+            0,
+            0,
+            1_000,
+            0,
+        )
+        .expect("configure exact 1.5 three-leg cross-rate");
+    assert_cu_within(
+        "single-round composite configure",
+        configure_cu,
+        CUSTODY_CU_LIMIT,
+    );
     assert_eq!(env.market_state().0.oracle_target_price_e6, 1_500_000);
 
     let victim_owner = Keypair::new();
@@ -54324,10 +54330,11 @@ fn v16_attack_composite_intermediate_rounding_cannot_false_liquidate() {
     // On the affected implementation the target is 1.0 and the mark eventually reaches it; with
     // one final rational round, the target remains 1.5 and every call is harmless.
     let mut slot = 1u64;
+    let mut max_crank_cu = 0u64;
     for _ in 0..12 {
         slot += production_risk_params().max_accrual_dt_slots;
         set_test_clock(&mut env, slot, 101);
-        env.crank_with_oracle_tail(
+        let cu = env.crank_with_oracle_tail(
             cranker,
             ProgInstruction::PermissionlessCrank {
                 now_slot: slot,
@@ -54335,11 +54342,12 @@ fn v16_attack_composite_intermediate_rounding_cannot_false_liquidate() {
             },
             &changed,
         );
+        max_crank_cu = max_crank_cu.max(cu);
     }
 
     // Refresh the victim first, then let an unprivileged cranker try the now-current liquidation
     // route with its own reward portfolio.
-    env.crank_with_oracle_tail(
+    let refresh_cu = env.crank_with_oracle_tail(
         victim,
         ProgInstruction::PermissionlessCrank {
             now_slot: slot,
@@ -54347,7 +54355,9 @@ fn v16_attack_composite_intermediate_rounding_cannot_false_liquidate() {
         },
         &changed,
     );
+    max_crank_cu = max_crank_cu.max(refresh_cu);
     let victim_capital_before = env.portfolio_state(victim).capital.get();
+    let victim_cert_before = health_cert(&env.portfolio_state(victim));
     let cranker_capital_before = env.portfolio_state(cranker).capital.get();
     let oi_before = env.market_state().1.assets[0].oi_eff_long_q;
 
@@ -54367,6 +54377,14 @@ fn v16_attack_composite_intermediate_rounding_cannot_false_liquidate() {
             AccountMeta::new(cranker, false),
         ],
         &[&cranker_owner],
+    );
+    if let Ok(cu) = liquidation_attempt.as_ref() {
+        max_crank_cu = max_crank_cu.max(*cu);
+    }
+    assert_cu_within(
+        "single-round composite public crank",
+        max_crank_cu,
+        CRANK_CU_LIMIT,
     );
 
     let (cfg_after, group_after) = env.market_state();
@@ -54392,15 +54410,20 @@ fn v16_attack_composite_intermediate_rounding_cannot_false_liquidate() {
             && group_after.assets[0].effective_price == 1_500_000
             && group_after.assets[0].oi_eff_long_q == oi_before
             && victim_after.capital.get() == victim_capital_before
+            && victim_cert_before.certified_liq_deficit == 0
             && extracted_reward == 0,
         "constant exact cross-rate changed: target={}, mark={}, long_oi={}->{}, \
-         victim_capital={}->{}, cranker_reward={}, extracted_reward={}, liquidation={:?}",
+         victim_capital={}->{}, equity={}, maintenance={}, deficit={}, cranker_reward={}, \
+         extracted_reward={}, liquidation={:?}",
         cfg_after.oracle_target_price_e6,
         group_after.assets[0].effective_price,
         oi_before,
         group_after.assets[0].oi_eff_long_q,
         victim_capital_before,
         victim_after.capital.get(),
+        victim_cert_before.certified_equity,
+        victim_cert_before.certified_maintenance_req,
+        victim_cert_before.certified_liq_deficit,
         cranker_reward,
         extracted_reward,
         liquidation_attempt,
