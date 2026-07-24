@@ -792,12 +792,20 @@ pub mod state {
 
     #[inline]
     pub fn read_portfolio_id(data: &[u8]) -> Result<u64, ProgramError> {
-        check_header(data, KIND_PORTFOLIO)?;
-        let id = read_u64(data, PORTFOLIO_ID_OFF)?;
+        let id = read_portfolio_id_or_legacy(data)?;
         if id == 0 {
             return Err(ProgramError::InvalidAccountData);
         }
         Ok(id)
+    }
+
+    #[inline]
+    pub fn read_portfolio_id_or_legacy(data: &[u8]) -> Result<u64, ProgramError> {
+        check_header(data, KIND_PORTFOLIO)?;
+        if data.len() == PORTFOLIO_ENGINE_ACCOUNT_LEN || data.len() == PORTFOLIO_ID_OFF {
+            return Ok(0);
+        }
+        read_u64(data, PORTFOLIO_ID_OFF)
     }
 
     #[inline]
@@ -2510,7 +2518,9 @@ pub mod ix {
         SetMatcherConfig {
             enabled: u8,
         },
-        ClosePortfolio,
+        ClosePortfolio {
+            portfolio_id: u64,
+        },
         TopUpInsurance {
             amount: u128,
         },
@@ -2777,7 +2787,15 @@ pub mod ix {
                 68 => Self::SetMatcherConfig {
                     enabled: read_u8(&mut rest)?,
                 },
-                8 => Self::ClosePortfolio,
+                8 => Self::ClosePortfolio {
+                    // Legacy tag-only closes are valid only for pre-ID portfolios, whose stored ID
+                    // is zero. Current portfolios must carry and match their nonzero incarnation.
+                    portfolio_id: if rest.is_empty() {
+                        0
+                    } else {
+                        read_u64(&mut rest)?
+                    },
+                },
                 9 => Self::TopUpInsurance {
                     amount: read_u128(&mut rest)?,
                 },
@@ -3067,7 +3085,10 @@ pub mod ix {
                     out.push(68);
                     out.push(enabled);
                 }
-                Self::ClosePortfolio => out.push(8),
+                Self::ClosePortfolio { portfolio_id } => {
+                    out.push(8);
+                    push_u64(&mut out, portfolio_id);
+                }
                 Self::TopUpInsurance { amount } => {
                     out.push(9);
                     push_u128(&mut out, amount);
@@ -5258,7 +5279,9 @@ pub mod processor {
             Instruction::SetMatcherConfig { enabled } => {
                 handle_set_matcher_config(program_id, accounts, enabled)
             }
-            Instruction::ClosePortfolio => handle_close_portfolio(program_id, accounts),
+            Instruction::ClosePortfolio { portfolio_id } => {
+                handle_close_portfolio(program_id, accounts, portfolio_id)
+            }
             Instruction::TopUpInsurance { amount } => {
                 handle_top_up_insurance(program_id, accounts, amount)
             }
@@ -7078,6 +7101,7 @@ pub mod processor {
     fn handle_close_portfolio<'a>(
         program_id: &Pubkey,
         accounts: &'a [AccountInfo<'a>],
+        expected_portfolio_id: u64,
     ) -> ProgramResult {
         let closer = account(accounts, 0)?;
         let market_ai = account(accounts, 1)?;
@@ -7087,6 +7111,11 @@ pub mod processor {
         expect_writable(portfolio_ai)?;
         expect_owner(market_ai, program_id)?;
         expect_owner(portfolio_ai, program_id)?;
+        let current_portfolio_id =
+            state::read_portfolio_id_or_legacy(&portfolio_ai.try_borrow_data()?)?;
+        if current_portfolio_id != expected_portfolio_id {
+            return Err(PercolatorError::EngineProvenanceMismatch.into());
+        }
         let (_, _, max_market_slots, _) =
             state::read_market_config_mode_and_capacity(&market_ai.try_borrow_data()?)?;
         ensure_portfolio_storage_for_market_slots(portfolio_ai, max_market_slots)?;
