@@ -445,25 +445,29 @@ fn kani_v16_asset_lifecycle_decode_preserves_wire_fields() {
 #[kani::proof]
 fn kani_v16_tradenocpi_decode_preserves_wire_fields() {
     let asset_index: u16 = kani::any();
+    let market_id: u64 = kani::any();
     let size_q: i128 = kani::any();
     let exec_price: u64 = kani::any();
     let fee_bps: u64 = kani::any();
 
-    let mut data = [0u8; 35];
+    let mut data = [0u8; 43];
     data[0] = 6;
     data[1..3].copy_from_slice(&asset_index.to_le_bytes());
-    data[3..19].copy_from_slice(&size_q.to_le_bytes());
-    data[19..27].copy_from_slice(&exec_price.to_le_bytes());
-    data[27..35].copy_from_slice(&fee_bps.to_le_bytes());
+    data[3..11].copy_from_slice(&market_id.to_le_bytes());
+    data[11..27].copy_from_slice(&size_q.to_le_bytes());
+    data[27..35].copy_from_slice(&exec_price.to_le_bytes());
+    data[35..43].copy_from_slice(&fee_bps.to_le_bytes());
 
     match Instruction::decode(&data).unwrap() {
         Instruction::TradeNoCpi {
             asset_index: got_asset,
+            market_id: got_market_id,
             size_q: got_size,
             exec_price: got_price,
             fee_bps: got_fee,
         } => {
             assert_eq!(got_asset, asset_index);
+            assert_eq!(got_market_id, market_id);
             assert_eq!(got_size, size_q);
             assert_eq!(got_price, exec_price);
             assert_eq!(got_fee, fee_bps);
@@ -475,25 +479,29 @@ fn kani_v16_tradenocpi_decode_preserves_wire_fields() {
 #[kani::proof]
 fn kani_v16_tradecpi_decode_preserves_wire_fields() {
     let asset_index: u16 = kani::any();
+    let market_id: u64 = kani::any();
     let size_q: i128 = kani::any();
     let fee_bps: u64 = kani::any();
     let limit_price: u64 = kani::any();
 
-    let mut data = [0u8; 35];
+    let mut data = [0u8; 43];
     data[0] = 10;
     data[1..3].copy_from_slice(&asset_index.to_le_bytes());
-    data[3..19].copy_from_slice(&size_q.to_le_bytes());
-    data[19..27].copy_from_slice(&fee_bps.to_le_bytes());
-    data[27..35].copy_from_slice(&limit_price.to_le_bytes());
+    data[3..11].copy_from_slice(&market_id.to_le_bytes());
+    data[11..27].copy_from_slice(&size_q.to_le_bytes());
+    data[27..35].copy_from_slice(&fee_bps.to_le_bytes());
+    data[35..43].copy_from_slice(&limit_price.to_le_bytes());
 
     match Instruction::decode(&data).unwrap() {
         Instruction::TradeCpi {
             asset_index: got_asset,
+            market_id: got_market_id,
             size_q: got_size,
             fee_bps: got_fee,
             limit_price: got_limit,
         } => {
             assert_eq!(got_asset, asset_index);
+            assert_eq!(got_market_id, market_id);
             assert_eq!(got_size, size_q);
             assert_eq!(got_fee, fee_bps);
             assert_eq!(got_limit, limit_price);
@@ -654,6 +662,7 @@ fn kani_v16_legacy_permissionless_crank_size_payload_is_rejected() {
 
 #[kani::proof]
 fn kani_v16_update_authority_decode_preserves_wire_fields() {
+    let market_id: u64 = kani::any();
     let mut new_pubkey = [0u8; 32];
     let mut i = 0;
     while i < 32 {
@@ -661,14 +670,17 @@ fn kani_v16_update_authority_decode_preserves_wire_fields() {
         i += 1;
     }
 
-    let mut data = [0u8; 33];
+    let mut data = [0u8; 41];
     data[0] = 32;
-    data[1..33].copy_from_slice(&new_pubkey);
+    data[1..9].copy_from_slice(&market_id.to_le_bytes());
+    data[9..41].copy_from_slice(&new_pubkey);
 
     match Instruction::decode(&data).unwrap() {
         Instruction::UpdateAuthority {
+            market_id: got_market_id,
             new_pubkey: got_pubkey,
         } => {
+            assert_eq!(got_market_id, market_id);
             assert_eq!(got_pubkey, new_pubkey);
         }
         _ => unreachable!(),
@@ -678,6 +690,7 @@ fn kani_v16_update_authority_decode_preserves_wire_fields() {
 #[kani::proof]
 fn kani_v16_update_asset_authority_decode_preserves_wire_fields() {
     let asset_index: u16 = kani::any();
+    let market_id: u64 = kani::any();
     let kind: u8 = kani::any();
     let mut new_pubkey = [0u8; 32];
     let mut i = 0;
@@ -686,24 +699,38 @@ fn kani_v16_update_asset_authority_decode_preserves_wire_fields() {
         i += 1;
     }
 
-    let mut data = [0u8; 36];
+    let mut data = [0u8; 44];
     data[0] = 65;
     data[1..3].copy_from_slice(&asset_index.to_le_bytes());
-    data[3] = kind;
-    data[4..36].copy_from_slice(&new_pubkey);
+    data[3..11].copy_from_slice(&market_id.to_le_bytes());
+    data[11] = kind;
+    data[12..44].copy_from_slice(&new_pubkey);
 
     match Instruction::decode(&data).unwrap() {
         Instruction::UpdateAssetAuthority {
             asset_index: got_asset_index,
+            market_id: got_market_id,
             kind: got_kind,
             new_pubkey: got_pubkey,
         } => {
             assert_eq!(got_asset_index, asset_index);
+            assert_eq!(got_market_id, market_id);
             assert_eq!(got_kind, kind);
             assert_eq!(got_pubkey, new_pubkey);
         }
         _ => unreachable!(),
     }
+}
+
+#[kani::proof]
+fn kani_v16_legacy_unbound_authority_payloads_are_rejected() {
+    let mut legacy_market: [u8; 33] = kani::any();
+    legacy_market[0] = 32;
+    let mut legacy_asset: [u8; 36] = kani::any();
+    legacy_asset[0] = 65;
+
+    assert!(Instruction::decode(&legacy_market).is_err());
+    assert!(Instruction::decode(&legacy_asset).is_err());
 }
 
 #[kani::proof]
@@ -734,8 +761,9 @@ fn kani_v16_restart_asset_oracle_decode_preserves_wire_fields() {
 }
 
 #[kani::proof]
-fn kani_v16_batch_trade_nocpi_decode_does_not_collide_with_restart_asset_oracle() {
+fn kani_v16_batch_trade_decodes_preserve_generation_ids() {
     let asset_index: u16 = kani::any();
+    let market_id: u64 = kani::any();
     let size_q: i128 = kani::any();
     let exec_price: u64 = kani::any();
     let fee_bps: u64 = kani::any();
@@ -743,6 +771,7 @@ fn kani_v16_batch_trade_nocpi_decode_does_not_collide_with_restart_asset_oracle(
     let data = Instruction::BatchTradeNoCpi {
         legs: vec![percolator_prog::ix::BatchTradeLeg {
             asset_index,
+            market_id,
             size_q,
             exec_price,
             fee_bps,
@@ -755,12 +784,53 @@ fn kani_v16_batch_trade_nocpi_decode_does_not_collide_with_restart_asset_oracle(
         Instruction::BatchTradeNoCpi { legs } => {
             assert_eq!(legs.len(), 1);
             assert_eq!(legs[0].asset_index, asset_index);
+            assert_eq!(legs[0].market_id, market_id);
             assert_eq!(legs[0].size_q, size_q);
             assert_eq!(legs[0].exec_price, exec_price);
             assert_eq!(legs[0].fee_bps, fee_bps);
         }
         _ => unreachable!(),
     }
+
+    let cpi_data = Instruction::BatchTradeCpi {
+        legs: vec![percolator_prog::ix::BatchTradeCpiLeg {
+            asset_index,
+            market_id,
+            size_q,
+            fee_bps,
+            limit_price: exec_price,
+        }],
+    }
+    .encode();
+
+    assert_eq!(cpi_data[0], 67);
+    match Instruction::decode(&cpi_data).unwrap() {
+        Instruction::BatchTradeCpi { legs } => {
+            assert_eq!(legs.len(), 1);
+            assert_eq!(legs[0].asset_index, asset_index);
+            assert_eq!(legs[0].market_id, market_id);
+            assert_eq!(legs[0].size_q, size_q);
+            assert_eq!(legs[0].fee_bps, fee_bps);
+            assert_eq!(legs[0].limit_price, exec_price);
+        }
+        _ => unreachable!(),
+    }
+}
+
+#[kani::proof]
+fn kani_v16_legacy_unbound_trade_payloads_are_rejected() {
+    let mut single: [u8; 35] = kani::any();
+    single[0] = 6;
+    assert!(Instruction::decode(&single).is_err());
+    single[0] = 10;
+    assert!(Instruction::decode(&single).is_err());
+
+    let mut batch: [u8; 36] = kani::any();
+    batch[0] = 66;
+    batch[1] = 1;
+    assert!(Instruction::decode(&batch).is_err());
+    batch[0] = 67;
+    assert!(Instruction::decode(&batch).is_err());
 }
 
 #[kani::proof]
@@ -930,6 +1000,7 @@ fn kani_v16_permissionless_resolve_decode_preserves_wire_fields() {
 }
 
 #[kani::proof]
+#[kani::unwind(34)]
 fn kani_v16_configure_hybrid_oracle_decode_preserves_wire_fields() {
     let asset_index: u16 = kani::any();
     let oracle_leg_count: u8 = kani::any();
@@ -1000,7 +1071,9 @@ fn kani_v16_configure_hybrid_oracle_decode_preserves_wire_fields() {
             assert_eq!(got_invert, invert);
             assert_eq!(got_unit_scale, unit_scale);
             assert_eq!(got_conf, conf_filter_bps);
-            assert_eq!(got_feeds, feeds);
+            assert_eq!(got_feeds[0], feeds[0]);
+            assert_eq!(got_feeds[1], feeds[1]);
+            assert_eq!(got_feeds[2], feeds[2]);
         }
         _ => unreachable!(),
     }
@@ -1141,6 +1214,7 @@ fn kani_v16_init_market_payload_rejects_trailing_byte() {
 }
 
 #[kani::proof]
+#[kani::unwind(18)]
 fn kani_v16_custody_payloads_reject_trailing_byte() {
     let extra: u8 = kani::any();
 
@@ -1175,6 +1249,7 @@ fn kani_v16_custody_payloads_reject_trailing_byte() {
 }
 
 #[kani::proof]
+#[kani::unwind(18)]
 fn kani_v16_trade_and_crank_payloads_reject_trailing_byte() {
     let extra: u8 = kani::any();
 
@@ -1191,6 +1266,7 @@ fn kani_v16_trade_and_crank_payloads_reject_trailing_byte() {
     assert_rejects_trailing_byte(
         Instruction::TradeNoCpi {
             asset_index: 0,
+            market_id: 1,
             size_q: 1,
             exec_price: 100,
             fee_bps: 0,
@@ -1200,6 +1276,7 @@ fn kani_v16_trade_and_crank_payloads_reject_trailing_byte() {
     assert_rejects_trailing_byte(
         Instruction::TradeCpi {
             asset_index: 0,
+            market_id: 1,
             size_q: 1,
             fee_bps: 0,
             limit_price: 0,
@@ -1210,6 +1287,7 @@ fn kani_v16_trade_and_crank_payloads_reject_trailing_byte() {
 }
 
 #[kani::proof]
+#[kani::unwind(18)]
 fn kani_v16_admin_policy_payloads_reject_trailing_byte() {
     let extra: u8 = kani::any();
 
@@ -1217,6 +1295,7 @@ fn kani_v16_admin_policy_payloads_reject_trailing_byte() {
     assert_rejects_trailing_byte(Instruction::ResolveMarket, extra);
     assert_rejects_trailing_byte(
         Instruction::UpdateAuthority {
+            market_id: 1,
             new_pubkey: [1u8; 32],
         },
         extra,
@@ -1224,6 +1303,7 @@ fn kani_v16_admin_policy_payloads_reject_trailing_byte() {
     assert_rejects_trailing_byte(
         Instruction::UpdateAssetAuthority {
             asset_index: 1,
+            market_id: 2,
             kind: 0,
             new_pubkey: [1u8; 32],
         },
@@ -1405,6 +1485,7 @@ fn kani_v16_resolved_recovery_payloads_reject_trailing_byte() {
 }
 
 #[kani::proof]
+#[kani::unwind(18)]
 fn kani_v16_unknown_or_truncated_tags_reject() {
     let tag: u8 = kani::any();
     kani::assume(tag != 0);
@@ -1468,6 +1549,7 @@ fn kani_v16_zero_length_decode_rejects() {
 }
 
 #[kani::proof]
+#[kani::unwind(18)]
 fn kani_v16_every_active_payload_rejects_one_byte_truncation() {
     let init_market = [0u8; 80];
     assert!(Instruction::decode(&init_market).is_err());
@@ -1484,10 +1566,10 @@ fn kani_v16_every_active_payload_rejects_one_byte_truncation() {
     let asset_lifecycle = [40u8; 147];
     assert!(Instruction::decode(&asset_lifecycle).is_err());
 
-    let trade = [6u8; 33];
+    let trade = [6u8; 42];
     assert!(Instruction::decode(&trade).is_err());
 
-    let trade_cpi = [10u8; 33];
+    let trade_cpi = [10u8; 42];
     assert!(Instruction::decode(&trade_cpi).is_err());
 
     let top_up = [9u8; 16];

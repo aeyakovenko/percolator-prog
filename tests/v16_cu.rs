@@ -9,6 +9,7 @@ use percolator_prog::{
         ASSET_ORACLE_WRAPPER_LEN, MARKET_GROUP_OFF, MATCHER_ABI_VERSION, MATCHER_CONTEXT_MIN_LEN,
         ORACLE_LEG_FLAG_DIVIDE_LEG2, ORACLE_LEG_FLAG_DIVIDE_LEG3, PORTFOLIO_ENGINE_ACCOUNT_LEN,
     },
+    error::PercolatorError,
     ix::{BatchTradeCpiLeg, BatchTradeLeg, CrankObservationHint, Instruction as ProgInstruction},
     oracle_v16, processor, state,
     state::{MarketGroupV16, PortfolioAccountV16},
@@ -22,7 +23,7 @@ use solana_sdk::{
     program_pack::Pack,
     pubkey::Pubkey,
     signature::{Keypair, Signer},
-    system_instruction,
+    system_instruction, system_program,
     transaction::Transaction,
 };
 use spl_token::state::{Account as TokenAccount, AccountState, Mint};
@@ -33,6 +34,10 @@ const CUSTODY_CU_LIMIT: u64 = 300_000;
 const TRADE_CU_LIMIT: u64 = 345_000;
 const MULTI_ASSET_OPEN_TRADE_CU_LIMIT: u64 = 750_000;
 const MATCHER_CONTEXT_LEN: usize = 320;
+
+const fn first_generation_market_id(asset_index: u16) -> u64 {
+    asset_index as u64 + 1
+}
 
 fn crank_observations(asset_index: u16) -> Vec<CrankObservationHint> {
     vec![CrankObservationHint {
@@ -352,6 +357,10 @@ fn canonical_vault_ata(vault_authority: Pubkey, mint: Pubkey) -> Pubkey {
     .0
 }
 
+fn market_generation_pda(program_id: Pubkey, market: Pubkey) -> Pubkey {
+    Pubkey::find_program_address(&[b"market-generation", market.as_ref()], &program_id).0
+}
+
 fn make_token_data(mint: Pubkey, owner: Pubkey, amount: u64) -> Vec<u8> {
     let mut data = vec![0u8; TokenAccount::LEN];
     TokenAccount::pack(
@@ -500,6 +509,7 @@ struct V16CuEnv {
     payer: Keypair,
     admin: Keypair,
     market: Pubkey,
+    market_generation: Pubkey,
     mint: Pubkey,
     vault: Pubkey,
     vault_authority: Pubkey,
@@ -603,6 +613,7 @@ fn init_host_market_data_for_serializer_probe() -> Vec<u8> {
         &wrapper,
         engine_config,
         [9u8; 32],
+        1,
         params.initial_price,
         0,
     )
@@ -692,6 +703,7 @@ impl V16CuEnv {
         let payer = Keypair::new();
         let admin = Keypair::new();
         let market = Pubkey::new_unique();
+        let market_generation = market_generation_pda(program_id, market);
         let mint = Pubkey::new_unique();
         let vault_authority =
             Pubkey::find_program_address(&[b"vault", market.as_ref()], &program_id).0;
@@ -765,6 +777,8 @@ impl V16CuEnv {
                 AccountMeta::new(admin.pubkey(), true),
                 AccountMeta::new(market, false),
                 AccountMeta::new_readonly(mint, false),
+                AccountMeta::new(market_generation, false),
+                AccountMeta::new_readonly(system_program::ID, false),
             ],
             &[&admin],
         )
@@ -775,6 +789,7 @@ impl V16CuEnv {
             payer,
             admin,
             market,
+            market_generation,
             mint,
             vault,
             vault_authority,
@@ -1039,11 +1054,13 @@ impl V16CuEnv {
 
     fn update_asset_authority_with_cu(&mut self, new_authority: &Keypair) -> u64 {
         self.ensure_signer_account(new_authority.pubkey());
+        let market_id = self.asset_market_id(0);
         send_tx(
             &mut self.svm,
             self.program_id,
             &self.payer,
             ProgInstruction::UpdateAuthority {
+                market_id,
                 new_pubkey: new_authority.pubkey().to_bytes(),
             },
             vec![
@@ -1073,9 +1090,11 @@ impl V16CuEnv {
         } else {
             self.payer.pubkey()
         };
+        let market_id = self.asset_market_id(asset_index);
         self.send(
             ProgInstruction::UpdateAssetAuthority {
                 asset_index,
+                market_id,
                 kind,
                 new_pubkey,
             },
@@ -1238,6 +1257,10 @@ impl V16CuEnv {
     fn market_state(&self) -> (state::WrapperConfigV16, MarketGroupV16) {
         let account = self.svm.get_account(&self.market).expect("market account");
         state::read_market(&account.data).unwrap()
+    }
+
+    fn asset_market_id(&self, asset_index: u16) -> u64 {
+        self.market_state().1.assets[asset_index as usize].market_id
     }
 
     fn portfolio_state(&self, portfolio: Pubkey) -> PortfolioAccountV16 {
@@ -1480,9 +1503,17 @@ impl V16CuEnv {
         exec_price: u64,
         fee_bps: u64,
     ) -> Result<u64, String> {
+        let market_id = self
+            .market_state()
+            .1
+            .assets
+            .get(asset_index as usize)
+            .map(|asset| asset.market_id)
+            .unwrap_or(0);
         self.send(
             ProgInstruction::TradeNoCpi {
                 asset_index,
+                market_id,
                 size_q,
                 exec_price,
                 fee_bps,
@@ -2150,6 +2181,7 @@ impl V16CuEnv {
         size_q: i128,
         fee_bps: u64,
     ) -> Result<u64, String> {
+        let market_id = self.asset_market_id(asset_index);
         let metas = vec![
             AccountMeta::new(owner_a.pubkey(), true),
             AccountMeta::new(self.market, false),
@@ -2162,6 +2194,7 @@ impl V16CuEnv {
         self.send(
             ProgInstruction::TradeCpi {
                 asset_index,
+                market_id,
                 size_q,
                 fee_bps,
                 limit_price: 0,
@@ -2266,6 +2299,8 @@ impl V16CuEnv {
                 AccountMeta::new_readonly(self.vault_authority, false),
                 AccountMeta::new(dest, false),
                 AccountMeta::new_readonly(spl_token::ID, false),
+                AccountMeta::new(self.market_generation, false),
+                AccountMeta::new_readonly(system_program::ID, false),
             ],
             &[&self.admin],
         )
@@ -3839,6 +3874,8 @@ fn v16_bpf_mainnet_realistic_system_spl_ata_bootstrap_deposits_and_ledgers() {
             AccountMeta::new(admin.pubkey(), true),
             AccountMeta::new(market.pubkey(), false),
             AccountMeta::new_readonly(mint.pubkey(), false),
+            AccountMeta::new(market_generation_pda(program_id, market.pubkey()), false),
+            AccountMeta::new_readonly(system_program::ID, false),
         ],
         &[&admin],
     )
@@ -4148,6 +4185,8 @@ fn init_independent_market_same_mint(
             AccountMeta::new(env.admin.pubkey(), true),
             AccountMeta::new(market, false),
             AccountMeta::new_readonly(env.mint, false),
+            AccountMeta::new(market_generation_pda(env.program_id, market), false),
+            AccountMeta::new_readonly(system_program::ID, false),
         ],
         &[&env.admin],
     )
@@ -5786,6 +5825,804 @@ fn v16_bpf_permissionless_market_shutdown_force_closes_recovers_and_reuses_slot(
             bytemuck::bytes_of(&expected_reused_slot),
         ),
         "reuse must change only the canonical fresh-activation bytes and no stale retired-slot residue may leak"
+    );
+}
+
+#[derive(Clone, Copy, Debug)]
+enum AssetGenerationTradePath {
+    TradeNoCpi,
+    BatchTradeNoCpi,
+    TradeCpi,
+    BatchTradeCpi,
+}
+
+// A transaction signed for one asset generation (for example, with a durable nonce) must not
+// execute after public retirement and permissionless slot reuse. Every route rejects before
+// mutation; the replacement generation then accepts the same trade when its current market_id is
+// signed, so the guard does not block trading.
+#[test]
+fn v16_attack_signed_trade_cannot_replay_across_asset_slot_reuse() {
+    const ASSET: u16 = 1;
+    const OLD_PRICE: u64 = 100;
+    const NEW_PRICE: u64 = 250;
+
+    for path in [
+        AssetGenerationTradePath::TradeNoCpi,
+        AssetGenerationTradePath::BatchTradeNoCpi,
+        AssetGenerationTradePath::TradeCpi,
+        AssetGenerationTradePath::BatchTradeCpi,
+    ] {
+        let mut env = V16CuEnv::new();
+        env.update_market_init_fee_policy_with_cu(1);
+        env.svm.warp_to_slot(1);
+        env.activate_asset(ASSET, 1, OLD_PRICE);
+
+        let trader_a = Keypair::new();
+        let trader_b = Keypair::new();
+        let account_a = env.create_portfolio(&trader_a);
+        let account_b = env.create_portfolio(&trader_b);
+        env.deposit(&trader_a, account_a, 1_000_000);
+        env.deposit(&trader_b, account_b, 1_000_000);
+        let (matcher_program, matcher_ctx, matcher_delegate) =
+            auth_matcher_for_lp_via_system_create(&mut env, &trader_b, account_b);
+
+        let old_market_id = env.asset_market_id(ASSET);
+        let stale_instruction = match path {
+            AssetGenerationTradePath::TradeNoCpi => ProgInstruction::TradeNoCpi {
+                asset_index: ASSET,
+                market_id: old_market_id,
+                size_q: POS_SCALE as i128,
+                exec_price: OLD_PRICE,
+                fee_bps: 0,
+            },
+            AssetGenerationTradePath::BatchTradeNoCpi => ProgInstruction::BatchTradeNoCpi {
+                legs: vec![BatchTradeLeg {
+                    asset_index: ASSET,
+                    market_id: old_market_id,
+                    size_q: POS_SCALE as i128,
+                    exec_price: OLD_PRICE,
+                    fee_bps: 0,
+                }],
+            },
+            AssetGenerationTradePath::TradeCpi => ProgInstruction::TradeCpi {
+                asset_index: ASSET,
+                market_id: old_market_id,
+                size_q: POS_SCALE as i128,
+                fee_bps: 0,
+                limit_price: 0,
+            },
+            AssetGenerationTradePath::BatchTradeCpi => ProgInstruction::BatchTradeCpi {
+                legs: vec![BatchTradeCpiLeg {
+                    asset_index: ASSET,
+                    market_id: old_market_id,
+                    size_q: POS_SCALE as i128,
+                    fee_bps: 0,
+                    limit_price: 0,
+                }],
+            },
+        };
+        let cpi = matches!(
+            path,
+            AssetGenerationTradePath::TradeCpi | AssetGenerationTradePath::BatchTradeCpi
+        );
+        let stale_accounts = if cpi {
+            vec![
+                AccountMeta::new(trader_a.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(account_a, false),
+                AccountMeta::new(account_b, false),
+                AccountMeta::new_readonly(matcher_program, false),
+                AccountMeta::new(matcher_ctx, false),
+                AccountMeta::new_readonly(matcher_delegate, false),
+            ]
+        } else {
+            vec![
+                AccountMeta::new(trader_a.pubkey(), true),
+                AccountMeta::new(trader_b.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(account_a, false),
+                AccountMeta::new(account_b, false),
+            ]
+        };
+        let stale_trade_ix = Instruction {
+            program_id: env.program_id,
+            accounts: stale_accounts.clone(),
+            data: stale_instruction.encode(),
+        };
+        let stale_trade = if cpi {
+            Transaction::new_signed_with_payer(
+                &[heap_ix(), cu_ix(), stale_trade_ix],
+                Some(&env.payer.pubkey()),
+                &[&env.payer, &trader_a],
+                env.svm.latest_blockhash(),
+            )
+        } else {
+            Transaction::new_signed_with_payer(
+                &[heap_ix(), cu_ix(), stale_trade_ix],
+                Some(&env.payer.pubkey()),
+                &[&env.payer, &trader_a, &trader_b],
+                env.svm.latest_blockhash(),
+            )
+        };
+
+        env.svm.warp_to_slot(3);
+        env.update_asset_lifecycle_as_admin_with_cu(
+            percolator_prog::processor::ASSET_ACTION_RETIRE,
+            ASSET,
+            3,
+            0,
+        );
+        let replacement_authority = Keypair::new();
+        env.svm.warp_to_slot(4);
+        env.activate_permissionless_asset_with_fee(
+            &replacement_authority,
+            ASSET,
+            4,
+            NEW_PRICE,
+            replacement_authority.pubkey(),
+            replacement_authority.pubkey(),
+            replacement_authority.pubkey(),
+            replacement_authority.pubkey(),
+            1,
+        );
+        let new_market_id = env.asset_market_id(ASSET);
+        assert_ne!(
+            new_market_id, old_market_id,
+            "{path:?}: slot reuse creates a new market generation"
+        );
+
+        let market_before = env.svm.get_account(&env.market).unwrap();
+        let account_a_before = env.svm.get_account(&account_a).unwrap();
+        let account_b_before = env.svm.get_account(&account_b).unwrap();
+        let matcher_before = env.svm.get_account(&matcher_ctx).unwrap();
+        let replay_error = env
+            .svm
+            .send_transaction(stale_trade)
+            .expect_err("old generation must reject");
+        let replay_error = format!("{replay_error:?}");
+        let expected_error = format!(
+            "Custom({})",
+            PercolatorError::AssetGenerationMismatch as u32
+        );
+        assert!(
+            replay_error.contains(&expected_error),
+            "{path:?}: stale generation must fail with {expected_error}, got {replay_error}"
+        );
+        assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+        assert_eq!(env.svm.get_account(&account_a).unwrap(), account_a_before);
+        assert_eq!(env.svm.get_account(&account_b).unwrap(), account_b_before);
+        assert_eq!(env.svm.get_account(&matcher_ctx).unwrap(), matcher_before);
+
+        let current_instruction = match path {
+            AssetGenerationTradePath::TradeNoCpi => ProgInstruction::TradeNoCpi {
+                asset_index: ASSET,
+                market_id: new_market_id,
+                size_q: POS_SCALE as i128,
+                exec_price: NEW_PRICE,
+                fee_bps: 0,
+            },
+            AssetGenerationTradePath::BatchTradeNoCpi => ProgInstruction::BatchTradeNoCpi {
+                legs: vec![BatchTradeLeg {
+                    asset_index: ASSET,
+                    market_id: new_market_id,
+                    size_q: POS_SCALE as i128,
+                    exec_price: NEW_PRICE,
+                    fee_bps: 0,
+                }],
+            },
+            AssetGenerationTradePath::TradeCpi => ProgInstruction::TradeCpi {
+                asset_index: ASSET,
+                market_id: new_market_id,
+                size_q: POS_SCALE as i128,
+                fee_bps: 0,
+                limit_price: 0,
+            },
+            AssetGenerationTradePath::BatchTradeCpi => ProgInstruction::BatchTradeCpi {
+                legs: vec![BatchTradeCpiLeg {
+                    asset_index: ASSET,
+                    market_id: new_market_id,
+                    size_q: POS_SCALE as i128,
+                    fee_bps: 0,
+                    limit_price: 0,
+                }],
+            },
+        };
+        let current_trade = if cpi {
+            env.send(current_instruction, stale_accounts, &[&trader_a])
+        } else {
+            env.send(current_instruction, stale_accounts, &[&trader_a, &trader_b])
+        };
+        assert!(
+            current_trade.is_ok(),
+            "{path:?}: the replacement generation remains tradeable: {current_trade:?}"
+        );
+        let account_a_after = env.portfolio_state(account_a);
+        let account_b_after = env.portfolio_state(account_b);
+        let leg_a = active_leg_for_asset(&account_a_after, ASSET as usize);
+        let leg_b = active_leg_for_asset(&account_b_after, ASSET as usize);
+        assert_eq!(leg_a.market_id, new_market_id);
+        assert_eq!(leg_b.market_id, new_market_id);
+        assert_eq!(leg_a.basis_pos_q, POS_SCALE as i128);
+        assert_eq!(leg_b.basis_pos_q, -(POS_SCALE as i128));
+    }
+}
+
+// UpdateAssetAuthority has the same attacker-held signature shape as UpdateAuthority: the incoming
+// non-zero authority co-signs. Retiring and restarting an asset must invalidate an old rotation, or
+// the incoming oracle authority can take control of a replacement generation and move value against
+// positions that did not exist when the transaction was signed.
+#[test]
+fn v16_attack_signed_asset_authority_rotation_cannot_replay_after_restart() {
+    const PRICE: u64 = 100;
+    const ADVERSE_PRICE: u64 = 50;
+    const SIZE_Q: i128 = (5_000 * POS_SCALE) as i128;
+    const DEPOSIT: u128 = 1_000_000;
+
+    let mut env = V16CuEnv::new();
+    let admin = env.admin.insecure_clone();
+    let attacker = Keypair::new();
+    env.ensure_signer_account(attacker.pubkey());
+    let old_market_id = env.asset_market_id(0);
+    let stale_ix = Instruction {
+        program_id: env.program_id,
+        accounts: vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(attacker.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        data: ProgInstruction::UpdateAssetAuthority {
+            asset_index: 0,
+            market_id: old_market_id,
+            kind: processor::ASSET_AUTH_ORACLE,
+            new_pubkey: attacker.pubkey().to_bytes(),
+        }
+        .encode(),
+    };
+    let stale_rotation = Transaction::new_signed_with_payer(
+        &[heap_ix(), cu_ix(), stale_ix],
+        Some(&env.payer.pubkey()),
+        &[&env.payer, &admin, &attacker],
+        env.svm.latest_blockhash(),
+    );
+
+    env.configure_permissionless_resolve_with_cu(100, 1);
+    env.svm.warp_to_slot(1);
+    env.try_shutdown_asset_with_authority(&admin, 0, 1)
+        .expect("empty asset shuts down");
+    env.svm.warp_to_slot(2);
+    env.try_restart_asset_oracle_with_authority(&admin, 0, 2, PRICE)
+        .expect("asset restarts");
+    let new_market_id = env.asset_market_id(0);
+    assert_ne!(new_market_id, old_market_id);
+    env.configure_auth_mark_with_cu(2, PRICE);
+
+    let victim = Keypair::new();
+    let victim_portfolio = env.create_portfolio(&victim);
+    let attacker_portfolio = env.create_portfolio(&attacker);
+    env.deposit(&victim, victim_portfolio, DEPOSIT);
+    env.deposit(&attacker, attacker_portfolio, DEPOSIT);
+    env.trade_with_cu(
+        &victim,
+        victim_portfolio,
+        &attacker,
+        attacker_portfolio,
+        SIZE_Q,
+        PRICE,
+        0,
+    );
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let victim_before = env.svm.get_account(&victim_portfolio).unwrap();
+    let attacker_before = env.svm.get_account(&attacker_portfolio).unwrap();
+
+    let replay = env.svm.send_transaction(stale_rotation);
+    if replay.is_ok() {
+        assert_eq!(
+            state::read_asset_oracle_profile(&env.svm.get_account(&env.market).unwrap().data, 0)
+                .unwrap()
+                .oracle_authority,
+            attacker.pubkey().to_bytes(),
+            "the retained rotation seized the replacement generation's oracle"
+        );
+        env.svm.warp_to_slot(3);
+        env.push_auth_mark_for_asset_with_authority(0, &attacker, 3, ADVERSE_PRICE);
+        env.crank(
+            victim_portfolio,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 3,
+                observations: crank_observations(0),
+            },
+        );
+        let victim_after = env.portfolio_state(victim_portfolio);
+        let victim_equity = victim_after.capital.get() as i128 + victim_after.pnl.get();
+        assert!(
+            victim_equity < DEPOSIT as i128,
+            "the seized oracle must move value against fresh exposure"
+        );
+        panic!(
+            "an attacker replayed an old asset-authority rotation and reduced victim equity from {DEPOSIT} to {victim_equity}"
+        );
+    }
+
+    let replay_error = format!("{:?}", replay.unwrap_err());
+    let expected_error = format!(
+        "Custom({})",
+        PercolatorError::AssetGenerationMismatch as u32
+    );
+    assert!(
+        replay_error.contains(&expected_error),
+        "stale asset-authority intent must fail with {expected_error}, got {replay_error}"
+    );
+
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+    assert_eq!(
+        env.svm.get_account(&victim_portfolio).unwrap(),
+        victim_before
+    );
+    assert_eq!(
+        env.svm.get_account(&attacker_portfolio).unwrap(),
+        attacker_before
+    );
+
+    env.svm.expire_blockhash();
+    env.send(
+        ProgInstruction::UpdateAssetAuthority {
+            asset_index: 0,
+            market_id: new_market_id,
+            kind: processor::ASSET_AUTH_ORACLE,
+            new_pubkey: attacker.pubkey().to_bytes(),
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(attacker.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&admin, &attacker],
+    )
+    .expect("the same rotation remains live when signed for the current asset generation");
+}
+
+// Before the persistent generation account, a full CloseSlab + InitMarket cycle at the same market
+// address reset every asset market_id to its first-generation value. Keep the original, fully
+// signed transaction object across that public lifecycle: rebuilding the instruction after reinit
+// would not prove an authorization replay. If accepted, the stale trade can reopen risk in newly
+// funded portfolios and an adverse mark transfers value from a signer who believed the old market
+// was gone.
+#[test]
+fn v16_attack_signed_trade_cannot_replay_across_market_reinit() {
+    const PRICE: u64 = 100;
+    const ADVERSE_PRICE: u64 = 50;
+    const SIZE_Q: i128 = (5_000 * POS_SCALE) as i128;
+    const DEPOSIT: u128 = 1_000_000;
+
+    let params = V16CuMarketParams::default();
+    let mut env = V16CuEnv::new_with_init_params(params);
+    let initial_market_id = env.asset_market_id(0);
+    let admin = env.admin.insecure_clone();
+    env.configure_permissionless_resolve_with_cu(100, 1);
+    env.svm.warp_to_slot(2);
+    env.try_shutdown_asset_with_authority(&admin, 0, 2)
+        .expect("empty asset shuts down before generation rotation");
+    env.svm.warp_to_slot(3);
+    env.try_restart_asset_oracle_with_authority(&admin, 0, 3, PRICE)
+        .expect("empty asset restarts with a fresh engine generation");
+    env.configure_auth_mark_with_cu(3, PRICE);
+
+    let victim = Keypair::new();
+    let attacker = Keypair::new();
+    let victim_account = env.create_portfolio(&victim);
+    let attacker_account = env.create_portfolio(&attacker);
+    env.deposit(&victim, victim_account, DEPOSIT);
+    env.deposit(&attacker, attacker_account, DEPOSIT);
+
+    let old_market_id = env.asset_market_id(0);
+    assert_ne!(old_market_id, initial_market_id);
+    assert_eq!(
+        state::read_market_generation(
+            &env.svm
+                .get_account(&env.market_generation)
+                .unwrap()
+                .data,
+        )
+        .unwrap()
+        .next_market_id
+        .get(),
+        old_market_id,
+        "the persistent counter is intentionally one generation behind until CloseSlab checkpoints the live engine"
+    );
+    let stale_ix = Instruction {
+        program_id: env.program_id,
+        accounts: vec![
+            AccountMeta::new(victim.pubkey(), true),
+            AccountMeta::new(attacker.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(victim_account, false),
+            AccountMeta::new(attacker_account, false),
+        ],
+        data: ProgInstruction::TradeNoCpi {
+            asset_index: 0,
+            market_id: old_market_id,
+            size_q: SIZE_Q,
+            exec_price: PRICE,
+            fee_bps: 0,
+        }
+        .encode(),
+    };
+    let stale_trade = Transaction::new_signed_with_payer(
+        &[heap_ix(), cu_ix(), stale_ix],
+        Some(&env.payer.pubkey()),
+        &[&env.payer, &victim, &attacker],
+        env.svm.latest_blockhash(),
+    );
+
+    env.withdraw(&victim, victim_account, DEPOSIT);
+    env.withdraw(&attacker, attacker_account, DEPOSIT);
+    env.close_portfolio_with_cu(&victim, victim_account);
+    env.close_portfolio_with_cu(&attacker, attacker_account);
+    env.resolve();
+    env.close_slab_with_cu();
+    assert_eq!(env.svm.get_account(&env.market).unwrap().lamports, 0);
+    assert_eq!(
+        state::read_market_generation(&env.svm.get_account(&env.market_generation).unwrap().data,)
+            .unwrap()
+            .next_market_id
+            .get(),
+        old_market_id + 1,
+        "CloseSlab checkpoints all engine-side generation advances before deleting the slab"
+    );
+
+    let reinit_slot = 11;
+    env.svm.warp_to_slot(reinit_slot);
+    env.svm
+        .set_account(
+            env.market,
+            Account {
+                lamports: 1_000_000_000,
+                data: vec![
+                    0u8;
+                    state::market_account_len_for_capacity(
+                        params.max_portfolio_assets as usize,
+                    )
+                    .unwrap()
+                ],
+                owner: env.program_id,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    env.svm
+        .set_account(
+            env.vault,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_token_data(env.mint, env.vault_authority, 0),
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    let reinit_params = V16CuMarketParams {
+        max_bankrupt_close_lifetime_slots: params.max_bankrupt_close_lifetime_slots + 1,
+        ..params
+    };
+    env.send(
+        init_market_instruction(&reinit_params),
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new_readonly(env.mint, false),
+            AccountMeta::new(env.market_generation, false),
+            AccountMeta::new_readonly(system_program::ID, false),
+        ],
+        &[&admin],
+    )
+    .expect("same market address is publicly reinitialized");
+    env.configure_auth_mark_with_cu(reinit_slot, PRICE);
+    assert_ne!(
+        env.asset_market_id(0),
+        old_market_id,
+        "a full-market reinit must consume the persisted next generation"
+    );
+
+    for (owner, portfolio) in [(&victim, victim_account), (&attacker, attacker_account)] {
+        env.svm
+            .set_account(
+                portfolio,
+                Account {
+                    lamports: 1_000_000_000,
+                    data: vec![0u8; env.portfolio_account_len],
+                    owner: env.program_id,
+                    executable: false,
+                    rent_epoch: 0,
+                },
+            )
+            .unwrap();
+        let init_portfolio = Instruction {
+            program_id: env.program_id,
+            accounts: vec![
+                AccountMeta::new(owner.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(portfolio, false),
+            ],
+            data: ProgInstruction::InitPortfolio.encode(),
+        };
+        send_raw_ixs(
+            &mut env.svm,
+            &env.payer,
+            vec![
+                heap_ix(),
+                cu_ix(),
+                ComputeBudgetInstruction::set_compute_unit_price(1),
+                init_portfolio,
+            ],
+            &[owner],
+        )
+        .expect("same portfolio address is publicly reinitialized");
+    }
+    env.deposit(&victim, victim_account, DEPOSIT);
+    env.deposit(&attacker, attacker_account, DEPOSIT);
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let victim_before = env.svm.get_account(&victim_account).unwrap();
+    let attacker_before = env.svm.get_account(&attacker_account).unwrap();
+    let replay = env.svm.send_transaction(stale_trade);
+    if replay.is_ok() {
+        assert_eq!(
+            active_leg_for_asset(&env.portfolio_state(victim_account), 0).basis_pos_q,
+            SIZE_Q,
+            "the old signed intent reopened victim risk in the new market"
+        );
+        env.svm.warp_to_slot(reinit_slot + 1);
+        env.push_auth_mark_with_cu(reinit_slot + 1, ADVERSE_PRICE);
+        env.crank(
+            victim_account,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: reinit_slot + 1,
+                observations: crank_observations(0),
+            },
+        );
+        let victim_after = env.portfolio_state(victim_account);
+        let victim_equity = victim_after.capital.get() as i128 + victim_after.pnl.get();
+        assert!(
+            victim_equity < DEPOSIT as i128,
+            "the replayed position must expose newly deposited value to an adverse mark"
+        );
+        panic!(
+            "an old signed trade executed in a new market incarnation and reduced victim equity from {DEPOSIT} to {victim_equity}"
+        );
+    }
+
+    let replay_error = format!("{:?}", replay.unwrap_err());
+    let expected_error = format!(
+        "Custom({})",
+        PercolatorError::AssetGenerationMismatch as u32
+    );
+    assert!(
+        replay_error.contains(&expected_error),
+        "stale market-incarnation intent must fail with {expected_error}, got {replay_error}"
+    );
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+    assert_eq!(env.svm.get_account(&victim_account).unwrap(), victim_before);
+    assert_eq!(
+        env.svm.get_account(&attacker_account).unwrap(),
+        attacker_before
+    );
+}
+
+// The incoming market authority co-signs UpdateAuthority and therefore necessarily possesses the
+// complete transaction. A full market close/reinit must invalidate that old capability just as it
+// invalidates an old signed trade. Otherwise the incoming authority can seize and resolve a newly
+// funded incarnation at the same address.
+#[test]
+fn v16_attack_signed_authority_rotation_cannot_replay_across_market_reinit() {
+    let params = V16CuMarketParams::default();
+    let mut env = V16CuEnv::new_with_init_params(params);
+    let admin = env.admin.insecure_clone();
+    let attacker = Keypair::new();
+    env.ensure_signer_account(attacker.pubkey());
+
+    let stale_ix = Instruction {
+        program_id: env.program_id,
+        accounts: vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(attacker.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        data: ProgInstruction::UpdateAuthority {
+            market_id: env.asset_market_id(0),
+            new_pubkey: attacker.pubkey().to_bytes(),
+        }
+        .encode(),
+    };
+    let stale_rotation = Transaction::new_signed_with_payer(
+        &[heap_ix(), cu_ix(), stale_ix],
+        Some(&env.payer.pubkey()),
+        &[&env.payer, &admin, &attacker],
+        env.svm.latest_blockhash(),
+    );
+
+    env.resolve();
+    env.close_slab_with_cu();
+    assert_eq!(env.svm.get_account(&env.market).unwrap().lamports, 0);
+
+    env.svm
+        .set_account(
+            env.market,
+            Account {
+                lamports: 1_000_000_000,
+                data: vec![
+                    0u8;
+                    state::market_account_len_for_capacity(
+                        params.max_portfolio_assets as usize,
+                    )
+                    .unwrap()
+                ],
+                owner: env.program_id,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    env.svm
+        .set_account(
+            env.vault,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_token_data(env.mint, env.vault_authority, 0),
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    let reinit_params = V16CuMarketParams {
+        max_bankrupt_close_lifetime_slots: params.max_bankrupt_close_lifetime_slots + 1,
+        ..params
+    };
+    env.send(
+        init_market_instruction(&reinit_params),
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new_readonly(env.mint, false),
+            AccountMeta::new(env.market_generation, false),
+            AccountMeta::new_readonly(system_program::ID, false),
+        ],
+        &[&admin],
+    )
+    .expect("same market address is publicly reinitialized");
+
+    let victim = Keypair::new();
+    let victim_portfolio = env.create_portfolio(&victim);
+    env.deposit(&victim, victim_portfolio, 1_000_000);
+    assert_eq!(env.market_state().1.mode, MarketModeV16::Live);
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let victim_before = env.svm.get_account(&victim_portfolio).unwrap();
+
+    let replay = env.svm.send_transaction(stale_rotation);
+    if replay.is_ok() {
+        assert_eq!(
+            env.market_state().0.marketauth,
+            attacker.pubkey().to_bytes(),
+            "the retained old rotation seized the fresh market"
+        );
+        let forced_resolve = send_tx(
+            &mut env.svm,
+            env.program_id,
+            &env.payer,
+            ProgInstruction::ResolveMarket,
+            vec![
+                AccountMeta::new(attacker.pubkey(), true),
+                AccountMeta::new(env.market, false),
+            ],
+            &[&attacker],
+        );
+        assert!(
+            forced_resolve.is_ok(),
+            "the replayed authority must be operational: {forced_resolve:?}"
+        );
+        assert_eq!(env.market_state().1.mode, MarketModeV16::Resolved);
+        panic!("an attacker replayed an old co-signed rotation and resolved a newly funded market");
+    }
+
+    let replay_error = format!("{:?}", replay.unwrap_err());
+    let expected_error = format!(
+        "Custom({})",
+        PercolatorError::AssetGenerationMismatch as u32
+    );
+    assert!(
+        replay_error.contains(&expected_error),
+        "stale market-authority intent must fail with {expected_error}, got {replay_error}"
+    );
+
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+    assert_eq!(
+        env.svm.get_account(&victim_portfolio).unwrap(),
+        victim_before
+    );
+    assert_eq!(env.market_state().1.mode, MarketModeV16::Live);
+
+    let current_market_id = env.asset_market_id(0);
+    env.svm.expire_blockhash();
+    env.send(
+        ProgInstruction::UpdateAuthority {
+            market_id: current_market_id,
+            new_pubkey: attacker.pubkey().to_bytes(),
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(attacker.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&admin, &attacker],
+    )
+    .expect("the same rotation remains live when signed for the current market generation");
+}
+
+#[test]
+fn v16_attack_prefunded_market_generation_pda_cannot_block_init() {
+    let mut env = V16CuEnv::new();
+    let params = V16CuMarketParams::default();
+    let market = Keypair::new();
+    system_create_account_for_test(
+        &mut env.svm,
+        &env.payer,
+        &market,
+        state::market_account_len_for_capacity(params.max_portfolio_assets as usize).unwrap(),
+        env.program_id,
+    );
+    let generation = market_generation_pda(env.program_id, market.pubkey());
+    env.svm.expire_blockhash();
+    send_raw_tx(
+        &mut env.svm,
+        &env.payer,
+        system_instruction::transfer(&env.payer.pubkey(), &generation, 1),
+        &[],
+    )
+    .expect("attacker can pre-fund the uninitialized generation PDA");
+    let prefunded = env.svm.get_account(&generation).unwrap();
+    assert_eq!(prefunded.owner, system_program::ID);
+    assert!(prefunded.data.is_empty());
+
+    let admin = env.admin.insecure_clone();
+    env.svm.expire_blockhash();
+    send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        init_market_instruction(&params),
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(market.pubkey(), false),
+            AccountMeta::new_readonly(env.mint, false),
+            AccountMeta::new(generation, false),
+            AccountMeta::new_readonly(system_program::ID, false),
+        ],
+        &[&admin],
+    )
+    .expect("prefunded generation PDA is allocated and assigned during InitMarket");
+
+    let generation_account = env.svm.get_account(&generation).unwrap();
+    assert_eq!(generation_account.owner, env.program_id);
+    assert_eq!(
+        generation_account.data.len(),
+        state::market_generation_account_len()
+    );
+    assert_eq!(
+        state::read_market_generation(&generation_account.data)
+            .unwrap()
+            .next_market_id
+            .get(),
+        2
+    );
+    assert_eq!(
+        state::read_market(&env.svm.get_account(&market.pubkey()).unwrap().data)
+            .unwrap()
+            .1
+            .assets[0]
+            .market_id,
+        1
     );
 }
 
@@ -8352,6 +9189,8 @@ fn v16_attack_sync_maintenance_rejects_cross_market_cranker_reward() {
             AccountMeta::new(env.admin.pubkey(), true),
             AccountMeta::new(market_b, false),
             AccountMeta::new_readonly(env.mint, false),
+            AccountMeta::new(market_generation_pda(env.program_id, market_b), false),
+            AccountMeta::new_readonly(system_program::ID, false),
         ],
         &[&env.admin],
     )
@@ -13417,6 +14256,7 @@ fn execute_account_residual_counter_trade_path(
                 ProgInstruction::BatchTradeNoCpi {
                     legs: vec![BatchTradeLeg {
                         asset_index: 0,
+                        market_id: first_generation_market_id((0) as u16),
                         size_q,
                         exec_price,
                         fee_bps: 0,
@@ -13439,6 +14279,7 @@ fn execute_account_residual_counter_trade_path(
                 ProgInstruction::BatchTradeCpi {
                     legs: vec![BatchTradeCpiLeg {
                         asset_index: 0,
+                        market_id: first_generation_market_id((0) as u16),
                         size_q,
                         fee_bps: 0,
                         limit_price: 0,
@@ -13585,12 +14426,14 @@ fn v16_bpf_account_residual_reward_counter_accumulates_across_batch_legs() {
                     legs: vec![
                         BatchTradeCpiLeg {
                             asset_index: 0,
+                            market_id: first_generation_market_id((0) as u16),
                             size_q: POS_SCALE as i128,
                             fee_bps: 0,
                             limit_price: 0,
                         },
                         BatchTradeCpiLeg {
                             asset_index: 1,
+                            market_id: first_generation_market_id((1) as u16),
                             size_q: -(POS_SCALE as i128),
                             fee_bps: 0,
                             limit_price: 0,
@@ -13615,12 +14458,14 @@ fn v16_bpf_account_residual_reward_counter_accumulates_across_batch_legs() {
                     legs: vec![
                         BatchTradeLeg {
                             asset_index: 0,
+                            market_id: first_generation_market_id((0) as u16),
                             size_q: POS_SCALE as i128,
                             exec_price: PRICE,
                             fee_bps: 0,
                         },
                         BatchTradeLeg {
                             asset_index: 1,
+                            market_id: first_generation_market_id((1) as u16),
                             size_q: -(POS_SCALE as i128),
                             exec_price: PRICE,
                             fee_bps: 0,
@@ -13759,6 +14604,7 @@ fn execute_backing_residual_counter_trade_path(
                 ProgInstruction::BatchTradeNoCpi {
                     legs: vec![BatchTradeLeg {
                         asset_index: 0,
+                        market_id: first_generation_market_id((0) as u16),
                         size_q,
                         exec_price,
                         fee_bps: 0,
@@ -13780,6 +14626,7 @@ fn execute_backing_residual_counter_trade_path(
                 ProgInstruction::BatchTradeCpi {
                     legs: vec![BatchTradeCpiLeg {
                         asset_index: 0,
+                        market_id: first_generation_market_id((0) as u16),
                         size_q,
                         fee_bps: 0,
                         limit_price: 0,
@@ -15945,6 +16792,7 @@ fn v16_attack_account_type_confusion_rejected() {
     let r2 = env.send(
         ProgInstruction::TradeNoCpi {
             asset_index: 0,
+            market_id: first_generation_market_id((0) as u16),
             size_q: POS_SCALE as i128,
             exec_price: 100,
             fee_bps: 0,
@@ -19373,6 +20221,7 @@ fn v16_attack_batch_subatom_fee_reconstruction_uses_ceil_notional() {
         ProgInstruction::BatchTradeNoCpi {
             legs: vec![BatchTradeLeg {
                 asset_index: 0,
+                market_id: first_generation_market_id((0) as u16),
                 size_q: sub_atom_size,
                 exec_price: 100,
                 fee_bps: 1,
@@ -20474,6 +21323,7 @@ fn v16_attack_disabled_lp_matcher_config_blocks_cpi_fills() {
     let single = env.send(
         ProgInstruction::TradeCpi {
             asset_index: 0,
+            market_id: first_generation_market_id((0) as u16),
             size_q: (5 * POS_SCALE) as i128,
             fee_bps: 100,
             limit_price: 0,
@@ -20503,6 +21353,7 @@ fn v16_attack_disabled_lp_matcher_config_blocks_cpi_fills() {
         ProgInstruction::BatchTradeCpi {
             legs: vec![BatchTradeCpiLeg {
                 asset_index: 0,
+                market_id: first_generation_market_id((0) as u16),
                 size_q: (5 * POS_SCALE) as i128,
                 fee_bps: 100,
                 limit_price: 0,
@@ -20741,6 +21592,7 @@ fn v16_attack_tradecpi_matcher_config_arguments_must_match_account_bytes() {
         env.send(
             ProgInstruction::TradeCpi {
                 asset_index: 0,
+                market_id: first_generation_market_id((0) as u16),
                 size_q: (5 * POS_SCALE) as i128,
                 fee_bps: 100,
                 limit_price: 0,
@@ -20860,12 +21712,14 @@ fn v16_attack_batch_tradecpi_matcher_config_arguments_must_match_account_bytes()
             legs: vec![
                 BatchTradeCpiLeg {
                     asset_index: 0,
+                    market_id: first_generation_market_id((0) as u16),
                     size_q: sz,
                     fee_bps: 100,
                     limit_price: 0,
                 },
                 BatchTradeCpiLeg {
                     asset_index: 1,
+                    market_id: first_generation_market_id((1) as u16),
                     size_q: -sz,
                     fee_bps: 100,
                     limit_price: 0,
@@ -20899,6 +21753,7 @@ fn v16_attack_batch_tradecpi_matcher_config_arguments_must_match_account_bytes()
         ProgInstruction::BatchTradeCpi {
             legs: vec![BatchTradeCpiLeg {
                 asset_index: 0,
+                market_id: first_generation_market_id((0) as u16),
                 size_q: sz,
                 fee_bps: 100,
                 limit_price: 0,
@@ -21124,6 +21979,7 @@ fn v16_attack_matcher_config_and_fills_reject_self_program_context() {
         env.send(
             ProgInstruction::TradeCpi {
                 asset_index: 0,
+                market_id: first_generation_market_id((0) as u16),
                 size_q: (5 * POS_SCALE) as i128,
                 fee_bps: 100,
                 limit_price: 0,
@@ -21157,6 +22013,7 @@ fn v16_attack_matcher_config_and_fills_reject_self_program_context() {
         ProgInstruction::BatchTradeCpi {
             legs: vec![BatchTradeCpiLeg {
                 asset_index: 0,
+                market_id: first_generation_market_id((0) as u16),
                 size_q: (5 * POS_SCALE) as i128,
                 fee_bps: 100,
                 limit_price: 0,
@@ -21469,6 +22326,7 @@ fn v16_attack_permissionless_lp_cpi_rejects_wrong_delegate_owner_or_account_bind
     let batch_ix = ProgInstruction::BatchTradeCpi {
         legs: vec![BatchTradeCpiLeg {
             asset_index: 0,
+            market_id: first_generation_market_id((0) as u16),
             size_q: sz,
             fee_bps: 100,
             limit_price: 0,
@@ -21539,6 +22397,7 @@ fn v16_attack_nocpi_trades_still_require_lp_owner_signature() {
     let single = env.send(
         ProgInstruction::TradeNoCpi {
             asset_index: 0,
+            market_id: first_generation_market_id((0) as u16),
             size_q: (10 * POS_SCALE) as i128,
             exec_price: 100,
             fee_bps: 0,
@@ -21562,12 +22421,14 @@ fn v16_attack_nocpi_trades_still_require_lp_owner_signature() {
             legs: vec![
                 BatchTradeLeg {
                     asset_index: 0,
+                    market_id: first_generation_market_id((0) as u16),
                     size_q: (5 * POS_SCALE) as i128,
                     exec_price: 100,
                     fee_bps: 0,
                 },
                 BatchTradeLeg {
                     asset_index: 1,
+                    market_id: first_generation_market_id((1) as u16),
                     size_q: -(5 * POS_SCALE as i128),
                     exec_price: 100,
                     fee_bps: 0,
@@ -21622,6 +22483,7 @@ fn v16_attack_tradecpi_limit_price_enforced() {
         env.send(
             ProgInstruction::TradeCpi {
                 asset_index: 0,
+                market_id: first_generation_market_id((0) as u16),
                 size_q: (10 * POS_SCALE) as i128,
                 fee_bps: 100,
                 limit_price: limit,
@@ -21750,6 +22612,7 @@ fn v16_attack_tradecpi_self_trade_rejected() {
     let r = env.send(
         ProgInstruction::TradeCpi {
             asset_index: 0,
+            market_id: first_generation_market_id((0) as u16),
             size_q: (10 * POS_SCALE) as i128,
             fee_bps: 100,
             limit_price: 0,
@@ -22105,6 +22968,8 @@ fn v16_attack_cure_rejects_cross_market_portfolio_before_transfer() {
             AccountMeta::new(admin.pubkey(), true),
             AccountMeta::new(market_b, false),
             AccountMeta::new_readonly(env.mint, false),
+            AccountMeta::new(market_generation_pda(env.program_id, market_b), false),
+            AccountMeta::new_readonly(system_program::ID, false),
         ],
         &[&admin],
     )
@@ -22382,6 +23247,7 @@ fn v16_attack_non_owner_cannot_withdraw_or_trade() {
     let r_tr = env.send(
         ProgInstruction::TradeNoCpi {
             asset_index: 0,
+            market_id: first_generation_market_id((0) as u16),
             size_q: POS_SCALE as i128,
             exec_price: 100,
             fee_bps: 0,
@@ -22943,6 +23809,8 @@ fn v16_attack_backing_ledger_market_binding_enforced() {
             AccountMeta::new(admin.pubkey(), true),
             AccountMeta::new(market_b, false),
             AccountMeta::new_readonly(env.mint, false),
+            AccountMeta::new(market_generation_pda(env.program_id, market_b), false),
+            AccountMeta::new_readonly(system_program::ID, false),
         ],
         &[&admin],
     )
@@ -23304,6 +24172,8 @@ fn v16_attack_insurance_ledger_market_binding_enforced() {
             AccountMeta::new(admin.pubkey(), true),
             AccountMeta::new(market_b, false),
             AccountMeta::new_readonly(env.mint, false),
+            AccountMeta::new(market_generation_pda(env.program_id, market_b), false),
+            AccountMeta::new_readonly(system_program::ID, false),
         ],
         &[&admin],
     )
@@ -23548,6 +24418,8 @@ fn v16_attack_topup_optional_ledgers_reject_cross_market_reuse() {
             AccountMeta::new(admin.pubkey(), true),
             AccountMeta::new(market_b, false),
             AccountMeta::new_readonly(env.mint, false),
+            AccountMeta::new(market_generation_pda(env.program_id, market_b), false),
+            AccountMeta::new_readonly(system_program::ID, false),
         ],
         &[&admin],
     )
@@ -23857,6 +24729,8 @@ fn v16_attack_terminal_insurance_ledger_rejects_cross_market_reuse() {
             AccountMeta::new(admin.pubkey(), true),
             AccountMeta::new(market_b, false),
             AccountMeta::new_readonly(env.mint, false),
+            AccountMeta::new(market_generation_pda(env.program_id, market_b), false),
+            AccountMeta::new_readonly(system_program::ID, false),
         ],
         &[&admin],
     )
@@ -25663,6 +26537,7 @@ fn v16_attack_update_authority_requires_new_authority_signature() {
         env.program_id,
         &env.payer,
         ProgInstruction::UpdateAuthority {
+            market_id: first_generation_market_id(0),
             new_pubkey: victim.pubkey().to_bytes(),
         },
         vec![
@@ -25691,6 +26566,7 @@ fn v16_attack_update_authority_requires_new_authority_signature() {
         env.program_id,
         &env.payer,
         ProgInstruction::UpdateAuthority {
+            market_id: first_generation_market_id(0),
             new_pubkey: new_asset.pubkey().to_bytes(),
         },
         vec![
@@ -25723,6 +26599,7 @@ fn v16_attack_update_authority_requires_new_authority_signature() {
         env.program_id,
         &env.payer,
         ProgInstruction::UpdateAuthority {
+            market_id: first_generation_market_id(0),
             new_pubkey: env.admin.pubkey().to_bytes(),
         },
         vec![
@@ -25756,6 +26633,7 @@ fn v16_attack_update_authority_requires_new_authority_signature() {
         &env.payer,
         ProgInstruction::UpdateAssetAuthority {
             asset_index: 0,
+            market_id: first_generation_market_id(0),
             kind: processor::ASSET_AUTH_INSURANCE,
             new_pubkey: victim.pubkey().to_bytes(),
         },
@@ -25785,6 +26663,7 @@ fn v16_attack_update_authority_requires_new_authority_signature() {
         &env.payer,
         ProgInstruction::UpdateAssetAuthority {
             asset_index: 0,
+            market_id: first_generation_market_id(0),
             kind: processor::ASSET_AUTH_INSURANCE,
             new_pubkey: new_ins.pubkey().to_bytes(),
         },
@@ -26951,6 +27830,7 @@ fn v16_attack_non_base_slot_zero_profile_stale_rejects_trade() {
     let stale_trade = env.send(
         ProgInstruction::TradeNoCpi {
             asset_index: 1,
+            market_id: first_generation_market_id((1) as u16),
             size_q: POS_SCALE as i128,
             exec_price: 100,
             fee_bps: 0,
@@ -27243,6 +28123,7 @@ fn v16_attack_non_base_trade_rejects_after_base_resolve_matured() {
     let stale_trade = env.send(
         ProgInstruction::TradeNoCpi {
             asset_index: 1,
+            market_id: first_generation_market_id((1) as u16),
             size_q: POS_SCALE as i128,
             exec_price: 101,
             fee_bps: 0,
@@ -27397,6 +28278,7 @@ fn v16_attack_non_base_tradecpi_rejects_before_matcher_after_base_resolve_mature
         .send(
             ProgInstruction::TradeCpi {
                 asset_index: 1,
+                market_id: first_generation_market_id((1) as u16),
                 size_q: POS_SCALE as i128,
                 fee_bps: 100,
                 limit_price: 0,
@@ -27425,6 +28307,7 @@ fn v16_attack_non_base_tradecpi_rejects_before_matcher_after_base_resolve_mature
         .send(
             ProgInstruction::TradeCpi {
                 asset_index: 1,
+                market_id: first_generation_market_id((1) as u16),
                 size_q: POS_SCALE as i128,
                 fee_bps: 100,
                 limit_price: 0,
@@ -27507,6 +28390,8 @@ fn v16_attack_close_slab_requires_full_winddown() {
                 AccountMeta::new_readonly(env.vault_authority, false),
                 AccountMeta::new(dest, false),
                 AccountMeta::new_readonly(spl_token::ID, false),
+                AccountMeta::new(env.market_generation, false),
+                AccountMeta::new_readonly(system_program::ID, false),
             ],
             &[&env.admin],
         )
@@ -27567,6 +28452,8 @@ fn v16_attack_close_slab_bad_primary_dest_is_atomic() {
                 AccountMeta::new_readonly(env.vault_authority, false),
                 AccountMeta::new(dest, false),
                 AccountMeta::new_readonly(spl_token::ID, false),
+                AccountMeta::new(env.market_generation, false),
+                AccountMeta::new_readonly(system_program::ID, false),
             ],
             &[&admin],
         )
@@ -27684,6 +28571,8 @@ fn v16_attack_close_slab_rejects_stale_marketauth_after_rotation() {
             AccountMeta::new_readonly(env.vault_authority, false),
             AccountMeta::new(stale_dest, false),
             AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(env.market_generation, false),
+            AccountMeta::new_readonly(system_program::ID, false),
         ],
         &[&old_admin],
     );
@@ -27721,6 +28610,8 @@ fn v16_attack_close_slab_rejects_stale_marketauth_after_rotation() {
             AccountMeta::new_readonly(env.vault_authority, false),
             AccountMeta::new(new_dest, false),
             AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(env.market_generation, false),
+            AccountMeta::new_readonly(system_program::ID, false),
         ],
         &[&new_admin],
     );
@@ -27836,6 +28727,8 @@ fn v16_attack_close_slab_rejects_market_as_lamport_destination() {
             AccountMeta::new(admin.pubkey(), true),
             AccountMeta::new(market.pubkey(), false),
             AccountMeta::new_readonly(mint, false),
+            AccountMeta::new(market_generation_pda(program_id, market.pubkey()), false),
+            AccountMeta::new_readonly(system_program::ID, false),
         ],
         &[&admin],
     )
@@ -27847,6 +28740,7 @@ fn v16_attack_close_slab_rejects_market_as_lamport_destination() {
         program_id,
         &payer,
         ProgInstruction::UpdateAuthority {
+            market_id: first_generation_market_id(0),
             new_pubkey: market.pubkey().to_bytes(),
         },
         vec![
@@ -27901,6 +28795,8 @@ fn v16_attack_close_slab_rejects_market_as_lamport_destination() {
             AccountMeta::new_readonly(vault_authority, false),
             AccountMeta::new(dest, false),
             AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(market_generation_pda(program_id, market.pubkey()), false),
+            AccountMeta::new_readonly(system_program::ID, false),
         ],
         &[&market],
     );
@@ -27994,6 +28890,8 @@ fn v16_attack_close_slab_rejects_delegated_or_closable_primary_vault() {
                 AccountMeta::new_readonly(env.vault_authority, false),
                 AccountMeta::new(dest, false),
                 AccountMeta::new_readonly(spl_token::ID, false),
+                AccountMeta::new(env.market_generation, false),
+                AccountMeta::new_readonly(system_program::ID, false),
             ],
             &[&admin],
         );
@@ -28029,6 +28927,8 @@ fn v16_attack_close_slab_rejects_delegated_or_closable_primary_vault() {
             AccountMeta::new_readonly(env.vault_authority, false),
             AccountMeta::new(dest, false),
             AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(env.market_generation, false),
+            AccountMeta::new_readonly(system_program::ID, false),
         ],
         &[&admin],
     );
@@ -28115,6 +29015,8 @@ fn v16_attack_close_slab_rejects_foreign_primary_vault() {
             AccountMeta::new(admin.pubkey(), true),
             AccountMeta::new(market_b, false),
             AccountMeta::new_readonly(env.mint, false),
+            AccountMeta::new(market_generation_pda(env.program_id, market_b), false),
+            AccountMeta::new_readonly(system_program::ID, false),
         ],
         &[&admin],
     )
@@ -28138,6 +29040,8 @@ fn v16_attack_close_slab_rejects_foreign_primary_vault() {
                 AccountMeta::new_readonly(env.vault_authority, false),
                 AccountMeta::new(dest, false),
                 AccountMeta::new_readonly(spl_token::ID, false),
+                AccountMeta::new(env.market_generation, false),
+                AccountMeta::new_readonly(system_program::ID, false),
             ],
             &[&admin],
         )
@@ -28592,6 +29496,7 @@ fn v16_attack_rebalance_reduce_rejects_cross_market_portfolio_substitution() {
         &env.payer,
         ProgInstruction::TradeNoCpi {
             asset_index: 0,
+            market_id: first_generation_market_id((0) as u16),
             size_q: POS_SCALE as i128,
             exec_price: 100,
             fee_bps: 0,
@@ -28749,6 +29654,7 @@ fn v16_attack_forfeit_recovery_leg_rejects_cross_market_portfolio_substitution()
         &env.payer,
         ProgInstruction::TradeNoCpi {
             asset_index: 0,
+            market_id: first_generation_market_id((0) as u16),
             size_q: POS_SCALE as i128,
             exec_price: 100,
             fee_bps: 0,
@@ -30059,6 +30965,8 @@ fn v16_attack_cross_market_portfolio_cannot_drain_foreign_vault() {
             AccountMeta::new(env.admin.pubkey(), true),
             AccountMeta::new(market_b, false),
             AccountMeta::new_readonly(env.mint, false),
+            AccountMeta::new(market_generation_pda(env.program_id, market_b), false),
+            AccountMeta::new_readonly(system_program::ID, false),
         ],
         &[&env.admin],
     )
@@ -30363,6 +31271,7 @@ fn v16_attack_trade_paths_reject_cross_market_portfolio_substitution() {
             "TradeNoCpi",
             ProgInstruction::TradeNoCpi {
                 asset_index: 0,
+                market_id: first_generation_market_id((0) as u16),
                 size_q: POS_SCALE as i128,
                 exec_price: 100,
                 fee_bps: 100,
@@ -30381,6 +31290,7 @@ fn v16_attack_trade_paths_reject_cross_market_portfolio_substitution() {
             ProgInstruction::BatchTradeNoCpi {
                 legs: vec![BatchTradeLeg {
                     asset_index: 0,
+                    market_id: first_generation_market_id((0) as u16),
                     size_q: POS_SCALE as i128,
                     exec_price: 100,
                     fee_bps: 100,
@@ -30399,6 +31309,7 @@ fn v16_attack_trade_paths_reject_cross_market_portfolio_substitution() {
             "TradeCpi",
             ProgInstruction::TradeCpi {
                 asset_index: 0,
+                market_id: first_generation_market_id((0) as u16),
                 size_q: POS_SCALE as i128,
                 fee_bps: 100,
                 limit_price: 0,
@@ -30419,6 +31330,7 @@ fn v16_attack_trade_paths_reject_cross_market_portfolio_substitution() {
             ProgInstruction::BatchTradeCpi {
                 legs: vec![BatchTradeCpiLeg {
                     asset_index: 0,
+                    market_id: first_generation_market_id((0) as u16),
                     size_q: POS_SCALE as i128,
                     fee_bps: 100,
                     limit_price: 0,
@@ -30460,6 +31372,7 @@ fn v16_attack_trade_paths_reject_cross_market_portfolio_substitution() {
         &env.payer,
         ProgInstruction::TradeNoCpi {
             asset_index: 0,
+            market_id: first_generation_market_id((0) as u16),
             size_q: POS_SCALE as i128,
             exec_price: 100,
             fee_bps: 100,
@@ -30560,6 +31473,7 @@ fn v16_attack_trade_paths_reject_cross_market_portfolio_substitution() {
         ProgInstruction::BatchTradeCpi {
             legs: vec![BatchTradeCpiLeg {
                 asset_index: 0,
+                market_id: first_generation_market_id((0) as u16),
                 size_q: POS_SCALE as i128,
                 fee_bps: 100,
                 limit_price: 0,
@@ -30656,6 +31570,8 @@ fn v16_attack_close_resolved_rejects_cross_market_portfolio_payout() {
             AccountMeta::new(env.admin.pubkey(), true),
             AccountMeta::new(market_b, false),
             AccountMeta::new_readonly(env.mint, false),
+            AccountMeta::new(market_generation_pda(env.program_id, market_b), false),
+            AccountMeta::new_readonly(system_program::ID, false),
         ],
         &[&env.admin],
     )
@@ -30911,6 +31827,8 @@ fn v16_attack_claim_resolved_topup_rejects_cross_market_portfolio_payout() {
             AccountMeta::new(env.admin.pubkey(), true),
             AccountMeta::new(market_b, false),
             AccountMeta::new_readonly(env.mint, false),
+            AccountMeta::new(market_generation_pda(env.program_id, market_b), false),
+            AccountMeta::new_readonly(system_program::ID, false),
         ],
         &[&env.admin],
     )
@@ -31164,6 +32082,8 @@ fn v16_attack_permissionless_crank_rejects_cross_market_target_portfolio() {
             AccountMeta::new(env.admin.pubkey(), true),
             AccountMeta::new(market_b, false),
             AccountMeta::new_readonly(env.mint, false),
+            AccountMeta::new(market_generation_pda(env.program_id, market_b), false),
+            AccountMeta::new_readonly(system_program::ID, false),
         ],
         &[&env.admin],
     )
@@ -31243,6 +32163,7 @@ fn v16_attack_permissionless_crank_rejects_cross_market_target_portfolio() {
         &env.payer,
         ProgInstruction::TradeNoCpi {
             asset_index: 0,
+            market_id: first_generation_market_id((0) as u16),
             size_q: POS_SCALE as i128,
             exec_price: 100,
             fee_bps: 0,
@@ -36046,6 +36967,8 @@ fn v16_attack_swap_secondary_rejects_foreign_market_vault() {
             AccountMeta::new(admin.pubkey(), true),
             AccountMeta::new(market_b, false),
             AccountMeta::new_readonly(env.mint, false),
+            AccountMeta::new(market_generation_pda(env.program_id, market_b), false),
+            AccountMeta::new_readonly(system_program::ID, false),
         ],
         &[&admin],
     )
@@ -36234,6 +37157,8 @@ fn v16_attack_close_slab_requires_secondary_vault_recovery() {
             AccountMeta::new_readonly(spl_token::ID, false),
             AccountMeta::new(secondary_vault, false),
             AccountMeta::new(wrong_secondary_dest, false),
+            AccountMeta::new(env.market_generation, false),
+            AccountMeta::new_readonly(system_program::ID, false),
         ],
         &[&admin],
     );
@@ -36281,6 +37206,8 @@ fn v16_attack_close_slab_requires_secondary_vault_recovery() {
             AccountMeta::new_readonly(spl_token::ID, false),
             AccountMeta::new(secondary_vault, false),
             AccountMeta::new(secondary_dest, false),
+            AccountMeta::new(env.market_generation, false),
+            AccountMeta::new_readonly(system_program::ID, false),
         ],
         &[&admin],
     );
@@ -36384,6 +37311,8 @@ fn v16_attack_close_slab_rejects_foreign_secondary_vault() {
             AccountMeta::new(admin.pubkey(), true),
             AccountMeta::new(market_b, false),
             AccountMeta::new_readonly(env.mint, false),
+            AccountMeta::new(market_generation_pda(env.program_id, market_b), false),
+            AccountMeta::new_readonly(system_program::ID, false),
         ],
         &[&admin],
     )
@@ -36445,6 +37374,8 @@ fn v16_attack_close_slab_rejects_foreign_secondary_vault() {
                     AccountMeta::new_readonly(spl_token::ID, false),
                     AccountMeta::new(secondary_vault, false),
                     AccountMeta::new(secondary_dest, false),
+                    AccountMeta::new(env.market_generation, false),
+                    AccountMeta::new_readonly(system_program::ID, false),
                 ],
                 &[&admin],
             )
@@ -36904,6 +37835,7 @@ fn v16_attack_force_close_rejects_cross_market_portfolio_substitution() {
         &env.payer,
         ProgInstruction::TradeNoCpi {
             asset_index: 1,
+            market_id: first_generation_market_id((1) as u16),
             size_q: POS_SCALE as i128,
             exec_price: 100,
             fee_bps: 0,
@@ -37349,6 +38281,7 @@ fn try_no_cpi_reported_price_trade_with_cu(
             ProgInstruction::BatchTradeNoCpi {
                 legs: vec![BatchTradeLeg {
                     asset_index: 0,
+                    market_id: first_generation_market_id((0) as u16),
                     size_q,
                     exec_price,
                     fee_bps,
@@ -39729,6 +40662,8 @@ fn v16_attack_liquidation_rejects_cross_market_cranker_reward() {
             AccountMeta::new(env.admin.pubkey(), true),
             AccountMeta::new(market_b, false),
             AccountMeta::new_readonly(env.mint, false),
+            AccountMeta::new(market_generation_pda(env.program_id, market_b), false),
+            AccountMeta::new_readonly(system_program::ID, false),
         ],
         &[&env.admin],
     )
@@ -40812,6 +41747,7 @@ fn v16_attack_tradecpi_matcher_tail_cannot_carry_protocol_state() {
     };
     let ix = |asset_index, size_q| ProgInstruction::TradeCpi {
         asset_index,
+        market_id: first_generation_market_id((asset_index) as u16),
         size_q,
         fee_bps: 100,
         limit_price: 0,
@@ -40944,6 +41880,7 @@ fn v16_attack_tradecpi_matcher_tail_cannot_forward_taker_signer() {
     let rejected = env.send(
         ProgInstruction::TradeCpi {
             asset_index: 0,
+            market_id: first_generation_market_id((0) as u16),
             size_q: (5 * POS_SCALE) as i128,
             fee_bps: 100,
             limit_price: 0,
@@ -41034,12 +41971,14 @@ fn v16_attack_batch_tradecpi_matcher_tail_cannot_carry_protocol_state() {
         legs: vec![
             BatchTradeCpiLeg {
                 asset_index: 0,
+                market_id: first_generation_market_id((0) as u16),
                 size_q: sz,
                 fee_bps: 100,
                 limit_price: 0,
             },
             BatchTradeCpiLeg {
                 asset_index: 1,
+                market_id: first_generation_market_id((1) as u16),
                 size_q: -sz,
                 fee_bps: 100,
                 limit_price: 0,
@@ -41191,12 +42130,14 @@ fn v16_attack_batch_tradecpi_matcher_tail_cannot_forward_taker_signer() {
     let legs = vec![
         BatchTradeCpiLeg {
             asset_index: 0,
+            market_id: first_generation_market_id((0) as u16),
             size_q: (5 * POS_SCALE) as i128,
             fee_bps: 100,
             limit_price: 0,
         },
         BatchTradeCpiLeg {
             asset_index: 1,
+            market_id: first_generation_market_id((1) as u16),
             size_q: -(5 * POS_SCALE as i128),
             fee_bps: 100,
             limit_price: 0,
@@ -42747,6 +43688,7 @@ fn v16_attack_tradenocpi_self_trade_rejected() {
     let r = env.send(
         ProgInstruction::TradeNoCpi {
             asset_index: 0,
+            market_id: first_generation_market_id((0) as u16),
             size_q: POS_SCALE as i128,
             exec_price: 100,
             fee_bps: 100,
@@ -42796,6 +43738,7 @@ fn v16_attack_batch_trade_self_trade_rejected() {
     env.deposit(&owner, p, 1_000_000);
     let batch_leg = BatchTradeLeg {
         asset_index: 0,
+        market_id: first_generation_market_id((0) as u16),
         size_q: POS_SCALE as i128,
         exec_price: 100,
         fee_bps: 100,
@@ -42841,6 +43784,7 @@ fn v16_attack_batch_trade_self_trade_rejected() {
         ProgInstruction::BatchTradeCpi {
             legs: vec![BatchTradeCpiLeg {
                 asset_index: 0,
+                market_id: first_generation_market_id((0) as u16),
                 size_q: POS_SCALE as i128,
                 fee_bps: 100,
                 limit_price: 0,
@@ -43470,6 +44414,7 @@ fn v16_attack_update_authority_non_holder_cannot_rotate() {
         env.program_id,
         &env.payer,
         ProgInstruction::UpdateAuthority {
+            market_id: first_generation_market_id(0),
             new_pubkey: mallory.pubkey().to_bytes(),
         },
         vec![
@@ -43498,6 +44443,7 @@ fn v16_attack_update_authority_non_holder_cannot_rotate() {
         &env.payer,
         ProgInstruction::UpdateAssetAuthority {
             asset_index: 0,
+            market_id: first_generation_market_id(0),
             kind: processor::ASSET_AUTH_INSURANCE,
             new_pubkey: mallory.pubkey().to_bytes(),
         },
@@ -43534,6 +44480,7 @@ fn v16_attack_update_authority_non_holder_cannot_rotate() {
         env.program_id,
         &env.payer,
         ProgInstruction::UpdateAuthority {
+            market_id: first_generation_market_id(0),
             new_pubkey: new_admin.pubkey().to_bytes(),
         },
         vec![
@@ -43572,6 +44519,7 @@ fn v16_attack_marketauth_renounce_rejected_even_with_fallback() {
         env.program_id,
         &env.payer,
         ProgInstruction::UpdateAuthority {
+            market_id: first_generation_market_id(0),
             new_pubkey: [0u8; 32],
         },
         vec![
@@ -43601,6 +44549,7 @@ fn v16_attack_marketauth_renounce_rejected_even_with_fallback() {
         env.program_id,
         &env.payer,
         ProgInstruction::UpdateAuthority {
+            market_id: first_generation_market_id(0),
             new_pubkey: [0u8; 32],
         },
         vec![
@@ -44861,6 +45810,7 @@ fn v16_attack_per_asset_admin_rotates_keys_isolated_and_burnable() {
         if let Some(k) = co {
             signers.push(k);
         }
+        let market_id = env.asset_market_id(ai);
         env.svm.expire_blockhash();
         send_tx(
             &mut env.svm,
@@ -44868,6 +45818,7 @@ fn v16_attack_per_asset_admin_rotates_keys_isolated_and_burnable() {
             &env.payer,
             ProgInstruction::UpdateAssetAuthority {
                 asset_index: ai,
+                market_id,
                 kind,
                 new_pubkey: new,
             },
@@ -45078,6 +46029,7 @@ fn v16_attack_update_asset_authority_rejects_zero_domain_authority() {
             &env.payer,
             ProgInstruction::UpdateAssetAuthority {
                 asset_index: 0,
+                market_id: first_generation_market_id(0),
                 kind,
                 new_pubkey: [0u8; 32],
             },
@@ -47219,6 +48171,8 @@ fn v16_attack_scheduled_close_cannot_strand_funds_then_reclaims() {
                 AccountMeta::new_readonly(vault_authority, false),
                 AccountMeta::new(dest, false),
                 AccountMeta::new_readonly(spl_token::ID, false),
+                AccountMeta::new(env.market_generation, false),
+                AccountMeta::new_readonly(system_program::ID, false),
             ],
             &[&admin],
         )
@@ -48480,12 +49434,14 @@ fn v16_bpf_batch_trade_executes_mixed_direction_spread() {
                 legs: vec![
                     BatchTradeLeg {
                         asset_index: 0,
+                        market_id: first_generation_market_id((0) as u16),
                         size_q: sz,
                         exec_price: 100,
                         fee_bps: 0,
                     },
                     BatchTradeLeg {
                         asset_index: 1,
+                        market_id: first_generation_market_id((1) as u16),
                         size_q: -sz,
                         exec_price: 100,
                         fee_bps: 0,
@@ -48538,12 +49494,14 @@ fn v16_attack_batch_duplicate_asset_legs_reject_atomically() {
             legs: vec![
                 BatchTradeLeg {
                     asset_index: 0,
+                    market_id: first_generation_market_id((0) as u16),
                     size_q: sz,
                     exec_price: 100,
                     fee_bps: 100,
                 },
                 BatchTradeLeg {
                     asset_index: 0,
+                    market_id: first_generation_market_id((0) as u16),
                     size_q: -sz,
                     exec_price: 100,
                     fee_bps: 100,
@@ -48599,12 +49557,14 @@ fn v16_attack_batch_duplicate_asset_legs_reject_atomically() {
             legs: vec![
                 BatchTradeCpiLeg {
                     asset_index: 0,
+                    market_id: first_generation_market_id((0) as u16),
                     size_q: sz,
                     fee_bps: 100,
                     limit_price: 0,
                 },
                 BatchTradeCpiLeg {
                     asset_index: 0,
+                    market_id: first_generation_market_id((0) as u16),
                     size_q: -sz,
                     fee_bps: 100,
                     limit_price: 0,
@@ -48658,12 +49618,14 @@ fn v16_attack_batch_duplicate_asset_legs_reject_atomically() {
             legs: vec![
                 BatchTradeCpiLeg {
                     asset_index: 0,
+                    market_id: first_generation_market_id((0) as u16),
                     size_q: sz,
                     fee_bps: 100,
                     limit_price: 0,
                 },
                 BatchTradeCpiLeg {
                     asset_index: 1,
+                    market_id: first_generation_market_id((1) as u16),
                     size_q: -sz,
                     fee_bps: 100,
                     limit_price: 0,
@@ -48788,12 +49750,14 @@ fn v16_attack_batch_tradecpi_duplicate_assets_reject_before_hostile_matcher_cpi(
         vec![
             BatchTradeCpiLeg {
                 asset_index: 0,
+                market_id: first_generation_market_id((0) as u16),
                 size_q: sz,
                 fee_bps: 100,
                 limit_price: 0,
             },
             BatchTradeCpiLeg {
                 asset_index: 1,
+                market_id: first_generation_market_id((1) as u16),
                 size_q: -sz,
                 fee_bps: 100,
                 limit_price: 0,
@@ -48818,12 +49782,14 @@ fn v16_attack_batch_tradecpi_duplicate_assets_reject_before_hostile_matcher_cpi(
         vec![
             BatchTradeCpiLeg {
                 asset_index: 0,
+                market_id: first_generation_market_id((0) as u16),
                 size_q: sz,
                 fee_bps: 100,
                 limit_price: 0,
             },
             BatchTradeCpiLeg {
                 asset_index: 0,
+                market_id: first_generation_market_id((0) as u16),
                 size_q: -sz,
                 fee_bps: 100,
                 limit_price: 0,
@@ -48937,6 +49903,7 @@ fn v16_attack_drain_only_existing_risk_increase_rejects_before_hostile_matcher_c
             "TradeCpi",
             ProgInstruction::TradeCpi {
                 asset_index: 0,
+                market_id: first_generation_market_id((0) as u16),
                 size_q: POS_SCALE as i128,
                 fee_bps: 0,
                 limit_price: 0,
@@ -48947,6 +49914,7 @@ fn v16_attack_drain_only_existing_risk_increase_rejects_before_hostile_matcher_c
             ProgInstruction::BatchTradeCpi {
                 legs: vec![BatchTradeCpiLeg {
                     asset_index: 0,
+                    market_id: first_generation_market_id((0) as u16),
                     size_q: POS_SCALE as i128,
                     fee_bps: 0,
                     limit_price: 0,
@@ -49024,12 +49992,14 @@ fn v16_bpf_batch_trade_checks_margin_on_final_portfolio_only() {
                 legs: vec![
                     BatchTradeLeg {
                         asset_index: 1,
+                        market_id: first_generation_market_id((1) as u16),
                         size_q: sz,
                         exec_price: 100,
                         fee_bps: 0,
                     },
                     BatchTradeLeg {
                         asset_index: 0,
+                        market_id: first_generation_market_id((0) as u16),
                         size_q: sz,
                         exec_price: 100,
                         fee_bps: 0,
@@ -49075,6 +50045,7 @@ fn v16_bpf_batch_trade_14_legs_under_tx_limit() {
     let legs: Vec<BatchTradeLeg> = (0..14u16)
         .map(|a| BatchTradeLeg {
             asset_index: a,
+            market_id: first_generation_market_id((a) as u16),
             size_q: POS_SCALE as i128,
             exec_price: 100,
             fee_bps: 100,
@@ -49137,6 +50108,7 @@ fn v16_attack_batch_over_portfolio_leg_cap_rejects_atomically() {
         (0..count)
             .map(|asset_index| BatchTradeLeg {
                 asset_index,
+                market_id: first_generation_market_id((asset_index) as u16),
                 size_q: POS_SCALE as i128,
                 exec_price: 100,
                 fee_bps: 0,
@@ -49147,6 +50119,7 @@ fn v16_attack_batch_over_portfolio_leg_cap_rejects_atomically() {
         (0..count)
             .map(|asset_index| BatchTradeCpiLeg {
                 asset_index,
+                market_id: first_generation_market_id((asset_index) as u16),
                 size_q: POS_SCALE as i128,
                 fee_bps: 0,
                 limit_price: 0,
@@ -49364,6 +50337,7 @@ fn v16_attack_batch_tradecpi_configured_leg_cap_rejects_before_hostile_matcher_c
         let legs: Vec<BatchTradeCpiLeg> = (0..count)
             .map(|asset_index| BatchTradeCpiLeg {
                 asset_index,
+                market_id: first_generation_market_id((asset_index) as u16),
                 size_q: POS_SCALE as i128,
                 fee_bps: 0,
                 limit_price: 0,
@@ -49449,6 +50423,7 @@ fn v16_attack_batch_decode_oversized_vectors_reject_before_allocation() {
     let no_cpi_legs: Vec<BatchTradeLeg> = (0..u16::from(u8::MAX))
         .map(|asset_index| BatchTradeLeg {
             asset_index,
+            market_id: first_generation_market_id((asset_index) as u16),
             size_q: POS_SCALE as i128,
             exec_price: 100,
             fee_bps: 0,
@@ -49483,6 +50458,7 @@ fn v16_attack_batch_decode_oversized_vectors_reject_before_allocation() {
     let cpi_legs: Vec<BatchTradeCpiLeg> = (0..u16::from(u8::MAX))
         .map(|asset_index| BatchTradeCpiLeg {
             asset_index,
+            market_id: first_generation_market_id((asset_index) as u16),
             size_q: POS_SCALE as i128,
             fee_bps: 0,
             limit_price: 0,
@@ -49535,12 +50511,14 @@ fn v16_bpf_batch_trade_cpi_executes_mixed_spread_through_matcher() {
                 legs: vec![
                     BatchTradeCpiLeg {
                         asset_index: 0,
+                        market_id: first_generation_market_id((0) as u16),
                         size_q: sz,
                         fee_bps: 100,
                         limit_price: 0,
                     },
                     BatchTradeCpiLeg {
                         asset_index: 1,
+                        market_id: first_generation_market_id((1) as u16),
                         size_q: -sz,
                         fee_bps: 100,
                         limit_price: 0,
@@ -49603,6 +50581,7 @@ fn v16_attack_batch_trades_reject_with_backing_fee_policy() {
         ProgInstruction::BatchTradeNoCpi {
             legs: vec![BatchTradeLeg {
                 asset_index: 0,
+                market_id: first_generation_market_id((0) as u16),
                 size_q: sz,
                 exec_price: 100,
                 fee_bps: 0,
@@ -49641,6 +50620,7 @@ fn v16_attack_batch_trades_reject_with_backing_fee_policy() {
         ProgInstruction::BatchTradeCpi {
             legs: vec![BatchTradeCpiLeg {
                 asset_index: 0,
+                market_id: first_generation_market_id((0) as u16),
                 size_q: sz,
                 fee_bps: 0,
                 limit_price: 0,
@@ -49729,6 +50709,7 @@ fn v16_attack_backing_fee_policy_count_clears_batch_liveness() {
             ProgInstruction::BatchTradeNoCpi {
                 legs: vec![BatchTradeLeg {
                     asset_index: 0,
+                    market_id: first_generation_market_id((0) as u16),
                     size_q: sz,
                     exec_price: 100,
                     fee_bps: 0,
@@ -49774,6 +50755,7 @@ fn v16_attack_backing_fee_policy_count_clears_batch_liveness() {
         ProgInstruction::BatchTradeNoCpi {
             legs: vec![BatchTradeLeg {
                 asset_index: 0,
+                market_id: first_generation_market_id((0) as u16),
                 size_q: sz,
                 exec_price: 100,
                 fee_bps: 0,
@@ -49889,6 +50871,7 @@ fn v16_attack_non_active_asset_cannot_enable_backing_fee_batch_gate() {
             ProgInstruction::BatchTradeNoCpi {
                 legs: vec![BatchTradeLeg {
                     asset_index: 0,
+                    market_id: first_generation_market_id((0) as u16),
                     size_q: sz,
                     exec_price: 100,
                     fee_bps: 0,
@@ -50034,6 +51017,7 @@ fn v16_attack_retired_reused_asset_backing_fee_policy_cannot_stick_batch_gate() 
         ProgInstruction::BatchTradeNoCpi {
             legs: vec![BatchTradeLeg {
                 asset_index: 0,
+                market_id: first_generation_market_id((0) as u16),
                 size_q: sz,
                 exec_price: 100,
                 fee_bps: 0,
@@ -50159,6 +51143,7 @@ fn v16_attack_inactive_asset_tradecpi_rejects_before_hostile_matcher_cpi() {
             .send(
                 ProgInstruction::TradeCpi {
                     asset_index: 1,
+                    market_id: first_generation_market_id((1) as u16),
                     size_q: POS_SCALE as i128,
                     fee_bps: 0,
                     limit_price: 0,
@@ -50226,6 +51211,7 @@ fn v16_attack_inactive_asset_tradecpi_rejects_before_hostile_matcher_cpi() {
                     ProgInstruction::BatchTradeCpi {
                         legs: vec![BatchTradeCpiLeg {
                             asset_index: 1,
+                            market_id: first_generation_market_id((1) as u16),
                             size_q: POS_SCALE as i128,
                             fee_bps: 0,
                             limit_price: 0,
@@ -50238,6 +51224,7 @@ fn v16_attack_inactive_asset_tradecpi_rejects_before_hostile_matcher_cpi() {
                 env.send(
                     ProgInstruction::TradeCpi {
                         asset_index: 1,
+                        market_id: first_generation_market_id((1) as u16),
                         size_q: POS_SCALE as i128,
                         fee_bps: 0,
                         limit_price: 0,
@@ -50292,6 +51279,7 @@ fn v16_attack_batch_cpi_fee_bps_bounded_for_permissionless_lp() {
             ProgInstruction::BatchTradeCpi {
                 legs: vec![BatchTradeCpiLeg {
                     asset_index: 0,
+                    market_id: first_generation_market_id((0) as u16),
                     size_q: (5 * POS_SCALE) as i128,
                     fee_bps,
                     limit_price: 0,
@@ -50382,6 +51370,7 @@ fn v16_bpf_batch_trade_cpi_14_legs_under_tx_limit() {
     let legs: Vec<BatchTradeCpiLeg> = (0..14u16)
         .map(|a| BatchTradeCpiLeg {
             asset_index: a,
+            market_id: first_generation_market_id((a) as u16),
             size_q: POS_SCALE as i128,
             fee_bps: 100,
             limit_price: 0,
@@ -50530,6 +51519,7 @@ fn v16_attack_10m_batch_tradecpi_max_tail_rejects_before_cu_exhaustion() {
     let seed_legs: Vec<BatchTradeLeg> = (FIRST_TAIL_ASSET..N)
         .map(|asset_index| BatchTradeLeg {
             asset_index: asset_index as u16,
+            market_id: first_generation_market_id((asset_index as u16) as u16),
             size_q: POS_SCALE as i128,
             exec_price: PRICE,
             fee_bps: 100,
@@ -50562,6 +51552,7 @@ fn v16_attack_10m_batch_tradecpi_max_tail_rejects_before_cu_exhaustion() {
     let legs: Vec<BatchTradeCpiLeg> = (FIRST_TAIL_ASSET..N)
         .map(|asset_index| BatchTradeCpiLeg {
             asset_index: asset_index as u16,
+            market_id: first_generation_market_id((asset_index as u16) as u16),
             size_q: POS_SCALE as i128,
             fee_bps: 100,
             limit_price: 0,
@@ -50661,12 +51652,14 @@ fn v16_attack_batch_fees_isolated_to_each_asset_domain() {
             legs: vec![
                 BatchTradeLeg {
                     asset_index: 0,
+                    market_id: first_generation_market_id((0) as u16),
                     size_q: sz,
                     exec_price: 100,
                     fee_bps: 100,
                 },
                 BatchTradeLeg {
                     asset_index: 1,
+                    market_id: first_generation_market_id((1) as u16),
                     size_q: sz,
                     exec_price: 100,
                     fee_bps: 500,
@@ -50717,12 +51710,14 @@ fn v16_attack_batch_cannot_force_counterparty_underwater() {
             legs: vec![
                 BatchTradeLeg {
                     asset_index: 0,
+                    market_id: first_generation_market_id((0) as u16),
                     size_q: sz,
                     exec_price: 100,
                     fee_bps: 0,
                 },
                 BatchTradeLeg {
                     asset_index: 1,
+                    market_id: first_generation_market_id((1) as u16),
                     size_q: sz,
                     exec_price: 100,
                     fee_bps: 0,
@@ -50860,12 +51855,14 @@ fn v16_attack_batch_cpi_per_leg_limit_aborts_whole_batch() {
             legs: vec![
                 BatchTradeCpiLeg {
                     asset_index: 0,
+                    market_id: first_generation_market_id((0) as u16),
                     size_q: sz,
                     fee_bps: 100,
                     limit_price: 1_000_000,
                 },
                 BatchTradeCpiLeg {
                     asset_index: 1,
+                    market_id: first_generation_market_id((1) as u16),
                     size_q: sz,
                     fee_bps: 100,
                     limit_price: 100,
@@ -50891,12 +51888,14 @@ fn v16_attack_batch_cpi_per_leg_limit_aborts_whole_batch() {
             legs: vec![
                 BatchTradeCpiLeg {
                     asset_index: 0,
+                    market_id: first_generation_market_id((0) as u16),
                     size_q: sz,
                     fee_bps: 100,
                     limit_price: 1_000_000,
                 },
                 BatchTradeCpiLeg {
                     asset_index: 1,
+                    market_id: first_generation_market_id((1) as u16),
                     size_q: sz,
                     fee_bps: 100,
                     limit_price: 1_000_000,
@@ -50946,12 +51945,14 @@ fn v16_attack_batch_tradecpi_zero_fill_rejects_atomically() {
     let legs = vec![
         BatchTradeCpiLeg {
             asset_index: 0,
+            market_id: first_generation_market_id((0) as u16),
             size_q: sz,
             fee_bps: 100,
             limit_price: 0,
         },
         BatchTradeCpiLeg {
             asset_index: 1,
+            market_id: first_generation_market_id((1) as u16),
             size_q: sz,
             fee_bps: 100,
             limit_price: 0,
@@ -51058,12 +52059,14 @@ fn v16_attack_batch_tradecpi_rejects_stale_resolve_matured_atomically() {
     let legs = vec![
         BatchTradeCpiLeg {
             asset_index: 0,
+            market_id: first_generation_market_id((0) as u16),
             size_q: sz,
             fee_bps: 100,
             limit_price: 0,
         },
         BatchTradeCpiLeg {
             asset_index: 1,
+            market_id: first_generation_market_id((1) as u16),
             size_q: -sz,
             fee_bps: 100,
             limit_price: 0,
@@ -51211,12 +52214,14 @@ fn v16_attack_batch_tradecpi_stale_rejects_before_hostile_matcher_cpi() {
     let legs = vec![
         BatchTradeCpiLeg {
             asset_index: 0,
+            market_id: first_generation_market_id((0) as u16),
             size_q: sz,
             fee_bps: 100,
             limit_price: 0,
         },
         BatchTradeCpiLeg {
             asset_index: 1,
+            market_id: first_generation_market_id((1) as u16),
             size_q: sz,
             fee_bps: 100,
             limit_price: 0,
@@ -51399,6 +52404,7 @@ fn v16_attack_tradecpi_active_stale_rejects_before_hostile_matcher_cpi() {
             .send(
                 ProgInstruction::TradeCpi {
                     asset_index: 0,
+                    market_id: first_generation_market_id((0) as u16),
                     size_q: -(POS_SCALE as i128),
                     fee_bps: 0,
                     limit_price: 0,
@@ -51431,6 +52437,7 @@ fn v16_attack_tradecpi_active_stale_rejects_before_hostile_matcher_cpi() {
             .send(
                 ProgInstruction::TradeCpi {
                     asset_index: 0,
+                    market_id: first_generation_market_id((0) as u16),
                     size_q: -(POS_SCALE as i128),
                     fee_bps: 0,
                     limit_price: 0,
@@ -51526,12 +52533,14 @@ fn v16_attack_tradecpi_active_stale_rejects_before_hostile_matcher_cpi() {
         let legs = vec![
             BatchTradeCpiLeg {
                 asset_index: 0,
+                market_id: first_generation_market_id((0) as u16),
                 size_q: -(POS_SCALE as i128),
                 fee_bps: 0,
                 limit_price: 0,
             },
             BatchTradeCpiLeg {
                 asset_index: 1,
+                market_id: first_generation_market_id((1) as u16),
                 size_q: -(POS_SCALE as i128),
                 fee_bps: 0,
                 limit_price: 0,
@@ -51678,6 +52687,7 @@ fn v16_attack_batch_tradecpi_fee_bps_rejects_before_hostile_matcher_cpi() {
             ProgInstruction::BatchTradeCpi {
                 legs: vec![BatchTradeCpiLeg {
                     asset_index: 0,
+                    market_id: first_generation_market_id((0) as u16),
                     size_q: (5 * POS_SCALE) as i128,
                     fee_bps,
                     limit_price: 0,
@@ -51812,6 +52822,7 @@ fn v16_attack_batch_tradecpi_backing_fee_policy_rejects_before_hostile_matcher_c
             ProgInstruction::BatchTradeCpi {
                 legs: vec![BatchTradeCpiLeg {
                     asset_index: 0,
+                    market_id: first_generation_market_id((0) as u16),
                     size_q: (5 * POS_SCALE) as i128,
                     fee_bps: 0,
                     limit_price: 0,
@@ -51919,6 +52930,7 @@ fn v16_attack_batch_nocpi_stale_reject_rolls_back_legacy_realloc() {
             ProgInstruction::BatchTradeNoCpi {
                 legs: vec![BatchTradeLeg {
                     asset_index: 0,
+                    market_id: first_generation_market_id((0) as u16),
                     size_q,
                     exec_price: 100,
                     fee_bps: 100,
@@ -52183,12 +53195,14 @@ fn v16_attack_hostile_matcher_batch_returns_all_rejected() {
                 legs: vec![
                     BatchTradeCpiLeg {
                         asset_index: 0,
+                        market_id: first_generation_market_id((0) as u16),
                         size_q: sz,
                         fee_bps: 100,
                         limit_price: 0,
                     },
                     BatchTradeCpiLeg {
                         asset_index: 1,
+                        market_id: first_generation_market_id((1) as u16),
                         size_q: sz,
                         fee_bps: 100,
                         limit_price: 0,
@@ -52332,6 +53346,7 @@ fn v16_attack_tradecpi_rejects_unapproved_unsigned_lp_matcher() {
     let r = env.send(
         ProgInstruction::TradeCpi {
             asset_index: 0,
+            market_id: first_generation_market_id((0) as u16),
             size_q: (5 * POS_SCALE) as i128,
             fee_bps: 100,
             limit_price: 0,
@@ -52429,12 +53444,14 @@ fn v16_attack_batch_tradecpi_rejects_unapproved_unsigned_lp_matcher() {
             legs: vec![
                 BatchTradeCpiLeg {
                     asset_index: 0,
+                    market_id: first_generation_market_id((0) as u16),
                     size_q: sz,
                     fee_bps: 100,
                     limit_price: 0,
                 },
                 BatchTradeCpiLeg {
                     asset_index: 1,
+                    market_id: first_generation_market_id((1) as u16),
                     size_q: -sz,
                     fee_bps: 100,
                     limit_price: 0,
@@ -52624,6 +53641,11 @@ fn v16_attack_init_market_rejects_grief_config_without_burning_market_account() 
                 AccountMeta::new(admin.pubkey(), true),
                 AccountMeta::new(market.pubkey(), false),
                 AccountMeta::new_readonly(env.mint, false),
+                AccountMeta::new(
+                    market_generation_pda(env.program_id, market.pubkey()),
+                    false,
+                ),
+                AccountMeta::new_readonly(system_program::ID, false),
             ],
             &[&admin],
         );
@@ -52649,6 +53671,11 @@ fn v16_attack_init_market_rejects_grief_config_without_burning_market_account() 
                 AccountMeta::new(admin.pubkey(), true),
                 AccountMeta::new(market.pubkey(), false),
                 AccountMeta::new_readonly(env.mint, false),
+                AccountMeta::new(
+                    market_generation_pda(env.program_id, market.pubkey()),
+                    false,
+                ),
+                AccountMeta::new_readonly(system_program::ID, false),
             ],
             &[&admin],
         )
@@ -52752,6 +53779,8 @@ fn v16_attack_init_market_cannot_reinitialize_funded_market() {
             AccountMeta::new(admin.pubkey(), true),
             AccountMeta::new(env.market, false),
             AccountMeta::new_readonly(env.mint, false),
+            AccountMeta::new(env.market_generation, false),
+            AccountMeta::new_readonly(system_program::ID, false),
         ],
         &[&admin],
     );
@@ -52820,6 +53849,8 @@ fn v16_attack_init_market_cannot_reinitialize_empty_market_or_seize_authority() 
             AccountMeta::new(attacker.pubkey(), true),
             AccountMeta::new(env.market, false),
             AccountMeta::new_readonly(attacker_mint, false),
+            AccountMeta::new(env.market_generation, false),
+            AccountMeta::new_readonly(system_program::ID, false),
         ],
         &[&attacker],
     );
@@ -53126,6 +54157,8 @@ fn v16_attack_abandoned_empty_portfolio_cannot_block_slab_close() {
                 AccountMeta::new_readonly(env.vault_authority, false),
                 AccountMeta::new(dest, false),
                 AccountMeta::new_readonly(spl_token::ID, false),
+                AccountMeta::new(env.market_generation, false),
+                AccountMeta::new_readonly(system_program::ID, false),
             ],
             &[&admin],
         )
@@ -53446,6 +54479,7 @@ fn v16_attack_hostile_matcher_single_tradecpi_returns_all_rejected() {
         let result = env.send(
             ProgInstruction::TradeCpi {
                 asset_index: 0,
+                market_id: first_generation_market_id((0) as u16),
                 size_q: sz,
                 fee_bps: 100,
                 limit_price: 0,
@@ -53588,12 +54622,14 @@ fn v16_attack_hostile_matcher_no_write_cannot_replay_stale_batch_return_data() {
             legs: vec![
                 BatchTradeCpiLeg {
                     asset_index: 0,
+                    market_id: first_generation_market_id((0) as u16),
                     size_q,
                     fee_bps: 100,
                     limit_price: 0,
                 },
                 BatchTradeCpiLeg {
                     asset_index: 1,
+                    market_id: first_generation_market_id((1) as u16),
                     size_q: -size_q,
                     fee_bps: 100,
                     limit_price: 0,
@@ -53702,6 +54738,7 @@ fn v16_attack_hostile_matcher_no_write_cannot_replay_stale_single_context() {
         ],
         data: ProgInstruction::TradeCpi {
             asset_index: 0,
+            market_id: first_generation_market_id((0) as u16),
             size_q,
             fee_bps: 100,
             limit_price: 0,
@@ -55197,6 +56234,7 @@ fn v16_attack_live_value_paths_reject_when_resolve_matured() {
     let stale_trade = env.send(
         ProgInstruction::TradeNoCpi {
             asset_index: 0,
+            market_id: first_generation_market_id((0) as u16),
             size_q: POS_SCALE as i128,
             exec_price: 100,
             fee_bps: 0,
@@ -57832,6 +58870,7 @@ fn v16_attack_oracle_authority_rotation_revokes_old_grants_new() {
     let rot = env.send(
         ProgInstruction::UpdateAssetAuthority {
             asset_index: 0,
+            market_id: first_generation_market_id(0),
             kind: percolator_prog::processor::ASSET_AUTH_ORACLE,
             new_pubkey: newauth.pubkey().to_bytes(),
         },
@@ -58799,6 +59838,8 @@ fn v16_attack_close_slab_rejects_closable_secondary_vault_before_reclaim() {
             AccountMeta::new_readonly(spl_token::ID, false),
             AccountMeta::new(secondary_vault, false),
             AccountMeta::new(secondary_dest, false),
+            AccountMeta::new(env.market_generation, false),
+            AccountMeta::new_readonly(system_program::ID, false),
         ],
         &[&admin],
     );
@@ -58854,6 +59895,8 @@ fn v16_attack_close_slab_rejects_closable_secondary_vault_before_reclaim() {
             AccountMeta::new_readonly(spl_token::ID, false),
             AccountMeta::new(secondary_vault, false),
             AccountMeta::new(secondary_dest, false),
+            AccountMeta::new(env.market_generation, false),
+            AccountMeta::new_readonly(system_program::ID, false),
         ],
         &[&admin],
     );
