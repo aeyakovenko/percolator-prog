@@ -4117,6 +4117,31 @@ pub mod oracle_v16 {
 pub mod policy_v16 {
     use crate::constants::MAX_DYNAMIC_TRADE_FEE_BPS;
 
+    #[inline(always)]
+    pub fn positive_lien_growth_num(before_num: u128, after_num: u128) -> Option<u128> {
+        if after_num <= before_num {
+            return None;
+        }
+        Some(after_num - before_num)
+    }
+
+    #[inline(always)]
+    pub fn accumulate_backing_fee_split(
+        accumulated: u128,
+        split: percolator::BackingDomainFeeSplitV16,
+    ) -> percolator::V16Result<u128> {
+        let routed = split
+            .provider_fee
+            .checked_add(split.insurance_fee)
+            .ok_or(percolator::V16Error::ArithmeticOverflow)?;
+        if routed != split.total_fee {
+            return Err(percolator::V16Error::InvalidConfig);
+        }
+        accumulated
+            .checked_add(split.total_fee)
+            .ok_or(percolator::V16Error::ArithmeticOverflow)
+    }
+
     pub fn price_move_bps_ceil(old: u64, new: u64) -> Option<u64> {
         if old == 0 || old == new {
             return Some(0);
@@ -6040,11 +6065,6 @@ pub mod processor {
         {
             let mut market_data = market_ai.try_borrow_mut_data()?;
             let (mut cfg, mut group) = state::market_view_mut(&mut market_data)?;
-            // v1 scope: per-leg backing-domain trade fees are not split in a batch yet. If a backing
-            // fee policy is configured, reject so we never silently skip those fees.
-            if cfg.backing_trade_fee_policy_count != 0 {
-                return Err(PercolatorError::InvalidInstruction.into());
-            }
             let mut account_a_data = account_a_ai.try_borrow_mut_data()?;
             let mut account_b_data = account_b_ai.try_borrow_mut_data()?;
             let mut account_a =
@@ -6116,6 +6136,14 @@ pub mod processor {
                 &group, &account_a, &account_b, &requests,
             )?;
 
+            let backing_before = if cfg.backing_trade_fee_policy_count == 0 {
+                None
+            } else {
+                Some((
+                    source_counterparty_backing_snapshot_view(&account_a)?,
+                    source_counterparty_backing_snapshot_view(&account_b)?,
+                ))
+            };
             let source_lien_before_a =
                 source_lien_effective_reserved_snapshot_for_trade_view(&account_a)?;
             let source_lien_before_b =
@@ -6128,6 +6156,16 @@ pub mod processor {
                     &requests,
                 )
                 .map_err(map_v16_error)?;
+            if let Some((backing_before_a, backing_before_b)) = backing_before {
+                apply_backing_domain_fees_after_trade_view(
+                    &cfg,
+                    &mut group,
+                    &mut account_a,
+                    backing_before_a.as_ref(),
+                    &mut account_b,
+                    backing_before_b.as_ref(),
+                )?;
+            }
 
             // The engine reports one collected-fee aggregate per account. Allocate each aggregate
             // against requested fees in request order. This deterministic wrapper policy conserves
@@ -6875,7 +6913,6 @@ pub mod processor {
             max_market_slots,
             oracle_prices,
             stale_matured,
-            backing_fee_policy_active,
             fee_bounds_ok,
         ) = {
             let market_data = market_ai.try_borrow_data()?;
@@ -6911,7 +6948,6 @@ pub mod processor {
                 max_market_slots,
                 oracle_prices,
                 stale_matured,
-                cfg_pre.backing_trade_fee_policy_count != 0,
                 fee_bounds_ok,
             )
         };
@@ -6920,9 +6956,6 @@ pub mod processor {
         }
         if stale_matured {
             return Err(PercolatorError::OracleStale.into());
-        }
-        if backing_fee_policy_active {
-            return Err(PercolatorError::InvalidInstruction.into());
         }
         if !fee_bounds_ok {
             return Err(PercolatorError::InvalidInstruction.into());
@@ -11285,8 +11318,7 @@ pub mod processor {
             let domain = slot.domain.get();
             let after = slot.source_lien_counterparty_backing_num.get();
             let before_val = sparse_domain_value_lookup(before, domain);
-            if after > before_val {
-                let delta_num = after - before_val;
+            if let Some(delta_num) = policy_v16::positive_lien_growth_num(before_val, after) {
                 let (bps, insurance_share_bps) =
                     backing_fee_policy_for_domain_view(group, cfg, domain as usize)?;
                 let split = percolator::backing_domain_fee_split_for_lien_delta_num(
@@ -11302,9 +11334,8 @@ pub mod processor {
                         split.provider_fee,
                         split.insurance_fee,
                     )?;
-                    total = total
-                        .checked_add(split.total_fee)
-                        .ok_or(PercolatorError::EngineArithmeticOverflow)?;
+                    total = policy_v16::accumulate_backing_fee_split(total, split)
+                        .map_err(map_v16_error)?;
                 }
             }
         }

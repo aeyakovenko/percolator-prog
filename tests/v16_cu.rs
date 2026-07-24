@@ -45654,6 +45654,357 @@ fn v16_attack_backing_fee_split_conserves() {
     assert_domain_budget_remaining_total_consistent(&ga, "backing fee insurance share");
 }
 
+// Regression for the batch backing-fee liveness fix: after a BatchTradeNoCpi risk increase grows an
+// organic source-credit backing lien, the batch path must charge and split the backing-domain fee
+// exactly like the single-leg path. This proves the fix did not merely remove the old global reject.
+#[test]
+fn v16_attack_batch_backing_fee_split_conserves() {
+    const INITIAL_PRICE: u64 = 100;
+    const ASSET0_SIZE_Q: i128 = 200 * POS_SCALE as i128;
+    const ASSET1_SIZE_Q: i128 = 100 * POS_SCALE as i128;
+    const SAFE_INCREASE_Q: i128 = 20 * POS_SCALE as i128;
+    const DEPOSIT: u128 = 3_130;
+    const WINNING_DOMAIN: usize = 1;
+    const FEE_BPS: u16 = 5_000;
+    const INSURANCE_SHARE_BPS: u16 = 2_500;
+
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(4, 1_000, 1_000, 500);
+    env.svm.warp_to_slot(1);
+    env.configure_auth_mark_for_asset_as_admin(0, 1, INITIAL_PRICE);
+    env.configure_auth_mark_for_asset_as_admin(1, 1, INITIAL_PRICE);
+    env.update_backing_fee_policy_with_cu(WINNING_DOMAIN as u16, FEE_BPS, INSURANCE_SHARE_BPS);
+    env.svm.expire_blockhash();
+    env.configure_auth_mark_for_asset_as_admin(0, 1, INITIAL_PRICE);
+
+    let cross_owner = Keypair::new();
+    let counterparty_owner = Keypair::new();
+    let cross_account = env.create_portfolio(&cross_owner);
+    let counterparty_account = env.create_portfolio(&counterparty_owner);
+    env.deposit(&cross_owner, cross_account, DEPOSIT);
+    env.deposit(&counterparty_owner, counterparty_account, 10_000);
+    env.top_up_backing_bucket(WINNING_DOMAIN as u16, 1_500, 10);
+
+    env.trade_asset_with_cu(
+        0,
+        &cross_owner,
+        cross_account,
+        &counterparty_owner,
+        counterparty_account,
+        ASSET0_SIZE_Q,
+        INITIAL_PRICE,
+        0,
+    );
+    env.trade_asset_with_cu(
+        1,
+        &cross_owner,
+        cross_account,
+        &counterparty_owner,
+        counterparty_account,
+        ASSET1_SIZE_Q,
+        INITIAL_PRICE,
+        0,
+    );
+    env.svm.warp_to_slot(2);
+    env.push_auth_mark_for_asset_as_admin(0, 2, 105);
+    env.push_auth_mark_for_asset_as_admin(1, 2, 95);
+    for (portfolio, asset_index) in [
+        (counterparty_account, 0),
+        (cross_account, 0),
+        (counterparty_account, 1),
+    ] {
+        env.crank(
+            portfolio,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 2,
+                observations: crank_observations(asset_index),
+            },
+        );
+    }
+    env.force_portfolio_capital_for_benchmark(cross_account, 2_600);
+    assert_eq!(
+        env.portfolio_state(cross_account).pnl.get(),
+        1_000,
+        "setup must create source-backed positive PnL"
+    );
+
+    let (_, g0) = env.market_state();
+    let surplus = (g0.source_credit[WINNING_DOMAIN].fresh_reserved_backing_num
+        - g0.source_credit[WINNING_DOMAIN].positive_claim_bound_num)
+        / BOUND_SCALE;
+    if surplus > 0 {
+        let dest = env.token_account(env.admin.pubkey(), 0);
+        env.withdraw_backing_bucket_to_admin_token_with_cu(dest, WINNING_DOMAIN as u16, surplus);
+    }
+    env.top_up_backing_bucket(WINNING_DOMAIN as u16, 50_000, 10);
+    env.deposit(&cross_owner, cross_account, 500);
+    env.deposit(&counterparty_owner, counterparty_account, 500);
+    env.svm.warp_to_slot(3);
+
+    let (_, gb) = env.market_state();
+    let insurance_before = gb.insurance;
+    let budget_before = gb.insurance_domain_budget[WINNING_DOMAIN];
+    let provider_before = gb.source_backing_buckets[WINNING_DOMAIN].utilization_fee_earnings;
+    let ctot_before = gb.c_tot;
+    let cap_cross_before = env.portfolio_state(cross_account).capital.get();
+    let cap_cp_before = env.portfolio_state(counterparty_account).capital.get();
+    let lien_before: u128 = env
+        .portfolio_state(cross_account)
+        .source_domains
+        .iter()
+        .map(|slot| slot.source_lien_counterparty_backing_num.get())
+        .sum();
+
+    env.svm.expire_blockhash();
+    let cu = env
+        .send(
+            ProgInstruction::BatchTradeNoCpi {
+                legs: vec![BatchTradeLeg {
+                    asset_index: 1,
+                    size_q: SAFE_INCREASE_Q,
+                    exec_price: 95,
+                    fee_bps: 0,
+                }],
+            },
+            vec![
+                AccountMeta::new(cross_owner.pubkey(), true),
+                AccountMeta::new(counterparty_owner.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(cross_account, false),
+                AccountMeta::new(counterparty_account, false),
+            ],
+            &[&cross_owner, &counterparty_owner],
+        )
+        .expect("BatchTradeNoCpi backed risk increase must stay live and charge backing fees");
+    assert_cu_within(
+        "BatchTradeNoCpi backing-fee split",
+        cu,
+        MULTI_ASSET_OPEN_TRADE_CU_LIMIT,
+    );
+
+    let (_, ga) = env.market_state();
+    let insurance_delta = ga.insurance - insurance_before;
+    let budget_delta = ga.insurance_domain_budget[WINNING_DOMAIN] - budget_before;
+    let provider_delta =
+        ga.source_backing_buckets[WINNING_DOMAIN].utilization_fee_earnings - provider_before;
+    let cap_cross_after = env.portfolio_state(cross_account).capital.get();
+    let cap_cp_after = env.portfolio_state(counterparty_account).capital.get();
+    let lien_after: u128 = env
+        .portfolio_state(cross_account)
+        .source_domains
+        .iter()
+        .map(|slot| slot.source_lien_counterparty_backing_num.get())
+        .sum();
+    let charged = (cap_cross_before - cap_cross_after) + (cap_cp_before - cap_cp_after);
+
+    assert!(
+        lien_after > lien_before,
+        "batch trade must grow the counterparty-backing lien (before={lien_before} after={lien_after})"
+    );
+    assert!(
+        charged > 0,
+        "batch backing-fee path must charge a positive fee"
+    );
+    assert_eq!(
+        insurance_delta + provider_delta,
+        charged,
+        "batch backing fee must split with no leakage"
+    );
+    let expected_insurance = charged * INSURANCE_SHARE_BPS as u128 / 10_000;
+    assert_eq!(
+        insurance_delta, expected_insurance,
+        "insurance pool gets floor(fee*share)"
+    );
+    assert_eq!(
+        budget_delta, insurance_delta,
+        "per-domain insurance budget mirrors the insurance share"
+    );
+    assert_eq!(
+        ctot_before - ga.c_tot,
+        charged,
+        "c_tot decreases by exactly the charged fee"
+    );
+    assert_domain_budget_remaining_total_consistent(&ga, "batch backing fee insurance share");
+}
+
+// The matcher-backed batch route shares the same executor as BatchTradeNoCpi, but it reaches that
+// executor only after a public matcher CPI. Pin the value invariant on this route too: a backed risk
+// increase must charge the backing fee and split it between provider earnings and insurance.
+#[test]
+fn v16_attack_batch_tradecpi_backing_fee_split_conserves() {
+    const INITIAL_PRICE: u64 = 100;
+    const ASSET0_SIZE_Q: i128 = 200 * POS_SCALE as i128;
+    const ASSET1_SIZE_Q: i128 = 100 * POS_SCALE as i128;
+    const SAFE_INCREASE_Q: i128 = 20 * POS_SCALE as i128;
+    const DEPOSIT: u128 = 3_130;
+    const WINNING_DOMAIN: usize = 1;
+    const FEE_BPS: u16 = 5_000;
+    const INSURANCE_SHARE_BPS: u16 = 2_500;
+
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(4, 1_000, 1_000, 500);
+    env.svm.warp_to_slot(1);
+    env.configure_auth_mark_for_asset_as_admin(0, 1, INITIAL_PRICE);
+    env.configure_auth_mark_for_asset_as_admin(1, 1, INITIAL_PRICE);
+    env.update_backing_fee_policy_with_cu(WINNING_DOMAIN as u16, FEE_BPS, INSURANCE_SHARE_BPS);
+    env.svm.expire_blockhash();
+    env.configure_auth_mark_for_asset_as_admin(0, 1, INITIAL_PRICE);
+
+    let cross_owner = Keypair::new();
+    let counterparty_owner = Keypair::new();
+    let cross_account = env.create_portfolio(&cross_owner);
+    let counterparty_account = env.create_portfolio(&counterparty_owner);
+    env.deposit(&cross_owner, cross_account, DEPOSIT);
+    env.deposit(&counterparty_owner, counterparty_account, 10_000);
+    env.top_up_backing_bucket(WINNING_DOMAIN as u16, 1_500, 10);
+
+    env.trade_asset_with_cu(
+        0,
+        &cross_owner,
+        cross_account,
+        &counterparty_owner,
+        counterparty_account,
+        ASSET0_SIZE_Q,
+        INITIAL_PRICE,
+        0,
+    );
+    env.trade_asset_with_cu(
+        1,
+        &cross_owner,
+        cross_account,
+        &counterparty_owner,
+        counterparty_account,
+        ASSET1_SIZE_Q,
+        INITIAL_PRICE,
+        0,
+    );
+    env.svm.warp_to_slot(2);
+    env.push_auth_mark_for_asset_as_admin(0, 2, 105);
+    env.push_auth_mark_for_asset_as_admin(1, 2, 95);
+    for (portfolio, asset_index) in [
+        (counterparty_account, 0),
+        (cross_account, 0),
+        (counterparty_account, 1),
+    ] {
+        env.crank(
+            portfolio,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 2,
+                observations: crank_observations(asset_index),
+            },
+        );
+    }
+    env.force_portfolio_capital_for_benchmark(cross_account, 2_600);
+    assert_eq!(
+        env.portfolio_state(cross_account).pnl.get(),
+        1_000,
+        "setup must create source-backed positive PnL"
+    );
+
+    let (_, g0) = env.market_state();
+    let surplus = (g0.source_credit[WINNING_DOMAIN].fresh_reserved_backing_num
+        - g0.source_credit[WINNING_DOMAIN].positive_claim_bound_num)
+        / BOUND_SCALE;
+    if surplus > 0 {
+        let dest = env.token_account(env.admin.pubkey(), 0);
+        env.withdraw_backing_bucket_to_admin_token_with_cu(dest, WINNING_DOMAIN as u16, surplus);
+    }
+    env.top_up_backing_bucket(WINNING_DOMAIN as u16, 50_000, 10);
+    env.deposit(&cross_owner, cross_account, 500);
+    env.deposit(&counterparty_owner, counterparty_account, 500);
+    env.svm.warp_to_slot(3);
+
+    let (_, gb) = env.market_state();
+    let insurance_before = gb.insurance;
+    let budget_before = gb.insurance_domain_budget[WINNING_DOMAIN];
+    let provider_before = gb.source_backing_buckets[WINNING_DOMAIN].utilization_fee_earnings;
+    let ctot_before = gb.c_tot;
+    let cap_cross_before = env.portfolio_state(cross_account).capital.get();
+    let cap_cp_before = env.portfolio_state(counterparty_account).capital.get();
+    let lien_before: u128 = env
+        .portfolio_state(cross_account)
+        .source_domains
+        .iter()
+        .map(|slot| slot.source_lien_counterparty_backing_num.get())
+        .sum();
+
+    let (matcher_program, ctx, delegate) =
+        auth_matcher_for_lp(&mut env, &counterparty_owner, counterparty_account);
+    env.svm.expire_blockhash();
+    let cu = env
+        .send(
+            ProgInstruction::BatchTradeCpi {
+                legs: vec![BatchTradeCpiLeg {
+                    asset_index: 1,
+                    size_q: SAFE_INCREASE_Q,
+                    fee_bps: 0,
+                    limit_price: 0,
+                }],
+            },
+            vec![
+                AccountMeta::new(cross_owner.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(cross_account, false),
+                AccountMeta::new(counterparty_account, false),
+                AccountMeta::new_readonly(matcher_program, false),
+                AccountMeta::new(ctx, false),
+                AccountMeta::new_readonly(delegate, false),
+            ],
+            &[&cross_owner],
+        )
+        .expect("BatchTradeCpi backed risk increase must stay live and charge backing fees");
+    assert_cu_within(
+        "BatchTradeCpi backing-fee split",
+        cu,
+        MULTI_ASSET_OPEN_TRADE_CU_LIMIT,
+    );
+
+    let (_, ga) = env.market_state();
+    let insurance_delta = ga.insurance - insurance_before;
+    let budget_delta = ga.insurance_domain_budget[WINNING_DOMAIN] - budget_before;
+    let provider_delta =
+        ga.source_backing_buckets[WINNING_DOMAIN].utilization_fee_earnings - provider_before;
+    let cap_cross_after = env.portfolio_state(cross_account).capital.get();
+    let cap_cp_after = env.portfolio_state(counterparty_account).capital.get();
+    let lien_after: u128 = env
+        .portfolio_state(cross_account)
+        .source_domains
+        .iter()
+        .map(|slot| slot.source_lien_counterparty_backing_num.get())
+        .sum();
+    let charged = (cap_cross_before - cap_cross_after) + (cap_cp_before - cap_cp_after);
+
+    assert!(
+        lien_after > lien_before,
+        "BatchTradeCpi must grow the counterparty-backing lien (before={lien_before} after={lien_after})"
+    );
+    assert!(
+        charged > 0,
+        "BatchTradeCpi backing-fee path must charge a positive fee"
+    );
+    assert_eq!(
+        insurance_delta + provider_delta,
+        charged,
+        "BatchTradeCpi backing fee must split with no leakage"
+    );
+    let expected_insurance = charged * INSURANCE_SHARE_BPS as u128 / 10_000;
+    assert_eq!(
+        insurance_delta, expected_insurance,
+        "insurance pool gets floor(fee*share)"
+    );
+    assert_eq!(
+        budget_delta, insurance_delta,
+        "per-domain insurance budget mirrors the insurance share"
+    );
+    assert_eq!(
+        ctot_before - ga.c_tot,
+        charged,
+        "c_tot decreases by exactly the charged fee"
+    );
+    assert_domain_budget_remaining_total_consistent(
+        &ga,
+        "BatchTradeCpi backing fee insurance share",
+    );
+}
+
 // security.md sweep — permissionless asset-create fee gate (#5 / README L52): when the configured
 // permissionless market-init fee is ZERO, asset creation is NOT permissionless — only the market-wide
 // asset authority may append a new asset; a stranger is rejected with Unauthorized.
@@ -49059,6 +49410,131 @@ fn v16_bpf_batch_trade_checks_margin_on_final_portfolio_only() {
     );
 }
 
+// LoF/DoS sweep: a permissionless creator's backing-fee policy on an unrelated asset must not
+// globally disable an atomic batch exit. The taker below cannot submit the first leg as a standalone
+// trade because the interim portfolio fails IM, but the two-leg batch is final-state healthy.
+#[test]
+fn v16_attack_unrelated_backing_fee_policy_does_not_block_atomic_batch_exit() {
+    let mut env = V16CuEnv::new_with_init_params_and_market_capacity(
+        V16CuMarketParams {
+            max_portfolio_assets: 2,
+            maintenance_margin_bps: 1_000,
+            initial_margin_bps: 1_000,
+            max_price_move_bps_per_slot: 500,
+            ..V16CuMarketParams::default()
+        },
+        3,
+    );
+    env.configure_auth_mark_for_asset_as_admin(0, 1, 100);
+    env.configure_auth_mark_for_asset_as_admin(1, 1, 100);
+
+    let attacker = Keypair::new();
+    let ap = attacker.pubkey();
+    env.update_market_init_fee_policy_with_cu(1);
+    env.activate_permissionless_asset_with_fee(&attacker, 2, 2, 100, ap, ap, ap, ap, 1);
+    env.ensure_signer_account(attacker.pubkey());
+    send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::UpdateBackingFeePolicy {
+            domain: 4,
+            fee_bps: 77,
+            insurance_share_bps: 5_000,
+        },
+        vec![
+            AccountMeta::new(attacker.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&attacker],
+    )
+    .expect("permissionless asset authority installs its own backing-fee policy");
+    assert_eq!(env.market_state().0.backing_trade_fee_policy_count, 1);
+
+    let taker = Keypair::new();
+    let lp = Keypair::new();
+    let ta = env.create_portfolio(&taker);
+    let la = env.create_portfolio(&lp);
+    env.deposit(&taker, ta, 1_000);
+    env.deposit(&lp, la, 1_000_000);
+    let sz = (80 * POS_SCALE) as i128;
+    env.trade_asset_with_cu(0, &lp, la, &taker, ta, sz, 100, 0);
+
+    let standalone = env.try_trade_asset_with_cu(1, &taker, ta, &lp, la, sz, 100, 0);
+    assert!(
+        standalone.is_err(),
+        "single-leg route must not be a substitute for the atomic exit: {standalone:?}"
+    );
+
+    let (_, group_before) = env.market_state();
+    let insurance_before = group_before.insurance;
+    let c_tot_before = group_before.c_tot;
+    let budgets_before = group_before.insurance_domain_budget.clone();
+    let provider_earnings_before: Vec<u128> = group_before
+        .source_backing_buckets
+        .iter()
+        .map(|bucket| bucket.utilization_fee_earnings)
+        .collect();
+
+    env.svm.expire_blockhash();
+    let cu = env
+        .send(
+            ProgInstruction::BatchTradeNoCpi {
+                legs: vec![
+                    BatchTradeLeg {
+                        asset_index: 1,
+                        size_q: sz,
+                        exec_price: 100,
+                        fee_bps: 0,
+                    },
+                    BatchTradeLeg {
+                        asset_index: 0,
+                        size_q: sz,
+                        exec_price: 100,
+                        fee_bps: 0,
+                    },
+                ],
+            },
+            vec![
+                AccountMeta::new(taker.pubkey(), true),
+                AccountMeta::new(lp.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(ta, false),
+                AccountMeta::new(la, false),
+            ],
+            &[&taker, &lp],
+        )
+        .expect("unrelated backing-fee policy must not DoS a final-healthy atomic batch exit");
+    assert_cu_within(
+        "BatchTradeNoCpi exit with unrelated backing-fee policy",
+        cu,
+        MULTI_ASSET_OPEN_TRADE_CU_LIMIT,
+    );
+    let taker_after = env.portfolio_state(ta);
+    assert!(
+        !has_active_leg_for_asset(&taker_after, 0),
+        "asset-0 short closed by the batch"
+    );
+    assert_eq!(
+        active_leg_for_asset(&taker_after, 1).side,
+        SideV16::Long,
+        "taker keeps only the final healthy asset-1 long"
+    );
+    let (_, group_after) = env.market_state();
+    assert_eq!(group_after.insurance, insurance_before);
+    assert_eq!(group_after.c_tot, c_tot_before);
+    assert_eq!(group_after.insurance_domain_budget, budgets_before);
+    assert_eq!(
+        group_after
+            .source_backing_buckets
+            .iter()
+            .map(|bucket| bucket.utilization_fee_earnings)
+            .collect::<Vec<_>>(),
+        provider_earnings_before,
+        "an unrelated policy cannot route value from this zero-fee batch"
+    );
+}
+
 // BatchTradeNoCpi 14-leg fan-out on a fresh account, all under one tx CU budget.
 #[test]
 fn v16_bpf_batch_trade_14_legs_under_tx_limit() {
@@ -49570,13 +50046,11 @@ fn v16_bpf_batch_trade_cpi_executes_mixed_spread_through_matcher() {
     assert_eq!(active_leg_for_asset(&t, 1).basis_pos_q, -sz);
 }
 
-// security.md sweep — batch trades must not silently skip backing-domain fee accounting. Backing
-// fees are collected on single-leg trades when source-credit backing grows; batch fee splitting does
-// not implement that accounting yet, so both batch surfaces must reject atomically while the policy is
-// active. A normal TradeNoCpi control still succeeds under the same policy, proving this is a narrow
-// batch gate rather than a market-wide trade lock.
+// security.md sweep — batch trades must not silently skip backing-domain fee accounting or become a
+// global DoS when a backing-fee policy is active. Both batch surfaces must stay live under the same
+// policy because the executor now applies the same backing-fee post-pass as single-leg trades.
 #[test]
-fn v16_attack_batch_trades_reject_with_backing_fee_policy() {
+fn v16_attack_batch_trades_execute_with_backing_fee_policy() {
     let mut env = V16CuEnv::new_with_market_params_and_price_move(2, 1_000, 1_000, 500);
     env.configure_auth_mark_for_asset_as_admin(0, 1, 100);
     env.configure_auth_mark_for_asset_as_admin(1, 1, 100);
@@ -49595,97 +50069,93 @@ fn v16_attack_batch_trades_reject_with_backing_fee_policy() {
     env.deposit(&lp, la, 1_000_000);
     let sz = (5 * POS_SCALE) as i128;
 
-    let market_before = env.svm.get_account(&env.market).unwrap().data;
-    let taker_before = env.svm.get_account(&ta).unwrap().data;
-    let lp_before = env.svm.get_account(&la).unwrap().data;
     env.svm.expire_blockhash();
-    let nocpi = env.send(
-        ProgInstruction::BatchTradeNoCpi {
-            legs: vec![BatchTradeLeg {
-                asset_index: 0,
-                size_q: sz,
-                exec_price: 100,
-                fee_bps: 0,
-            }],
-        },
-        vec![
-            AccountMeta::new(taker.pubkey(), true),
-            AccountMeta::new(lp.pubkey(), true),
-            AccountMeta::new(env.market, false),
-            AccountMeta::new(ta, false),
-            AccountMeta::new(la, false),
-        ],
-        &[&taker, &lp],
-    );
-    assert!(
-        nocpi.is_err(),
-        "BatchTradeNoCpi must reject while backing-fee policy accounting is active"
+    let nocpi_cu = env
+        .send(
+            ProgInstruction::BatchTradeNoCpi {
+                legs: vec![BatchTradeLeg {
+                    asset_index: 0,
+                    size_q: sz,
+                    exec_price: 100,
+                    fee_bps: 0,
+                }],
+            },
+            vec![
+                AccountMeta::new(taker.pubkey(), true),
+                AccountMeta::new(lp.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(ta, false),
+                AccountMeta::new(la, false),
+            ],
+            &[&taker, &lp],
+        )
+        .expect("BatchTradeNoCpi must remain live while backing-fee policy accounting is active");
+    assert_cu_within(
+        "BatchTradeNoCpi with backing-fee policy",
+        nocpi_cu,
+        MULTI_ASSET_OPEN_TRADE_CU_LIMIT,
     );
     assert_eq!(
-        env.svm.get_account(&env.market).unwrap().data,
-        market_before
+        active_leg_for_asset(&env.portfolio_state(ta), 0).basis_pos_q,
+        sz
     );
-    assert_eq!(env.svm.get_account(&ta).unwrap().data, taker_before);
-    assert_eq!(env.svm.get_account(&la).unwrap().data, lp_before);
+    assert_eq!(
+        active_leg_for_asset(&env.portfolio_state(la), 0).basis_pos_q,
+        -sz
+    );
 
     let matcher_program = Pubkey::new_unique();
     let matcher_bytes = std::fs::read(auth_matcher_program_path()).expect("read auth matcher BPF");
     env.svm.add_program(matcher_program, &matcher_bytes);
-    let (ctx, delegate, _) = env.init_auth_matcher_context(matcher_program, &lp, la);
-    let market_before = env.svm.get_account(&env.market).unwrap().data;
-    let taker_before = env.svm.get_account(&ta).unwrap().data;
-    let lp_before = env.svm.get_account(&la).unwrap().data;
-    let ctx_before = env.svm.get_account(&ctx).unwrap().data;
+    let taker_cpi = Keypair::new();
+    let lp_cpi = Keypair::new();
+    let ta_cpi = env.create_portfolio(&taker_cpi);
+    let la_cpi = env.create_portfolio(&lp_cpi);
+    env.deposit(&taker_cpi, ta_cpi, 1_000_000);
+    env.deposit(&lp_cpi, la_cpi, 1_000_000);
+    let (ctx, delegate, _) = env.init_auth_matcher_context(matcher_program, &lp_cpi, la_cpi);
     env.svm.expire_blockhash();
-    let cpi = env.send(
-        ProgInstruction::BatchTradeCpi {
-            legs: vec![BatchTradeCpiLeg {
-                asset_index: 0,
-                size_q: sz,
-                fee_bps: 0,
-                limit_price: 0,
-            }],
-        },
-        vec![
-            AccountMeta::new(taker.pubkey(), true),
-            AccountMeta::new(env.market, false),
-            AccountMeta::new(ta, false),
-            AccountMeta::new(la, false),
-            AccountMeta::new_readonly(matcher_program, false),
-            AccountMeta::new(ctx, false),
-            AccountMeta::new_readonly(delegate, false),
-        ],
-        &[&taker],
-    );
-    assert!(
-        cpi.is_err(),
-        "BatchTradeCpi must reject while backing-fee policy accounting is active"
+    let cpi_cu = env
+        .send(
+            ProgInstruction::BatchTradeCpi {
+                legs: vec![BatchTradeCpiLeg {
+                    asset_index: 0,
+                    size_q: sz,
+                    fee_bps: 0,
+                    limit_price: 0,
+                }],
+            },
+            vec![
+                AccountMeta::new(taker_cpi.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(ta_cpi, false),
+                AccountMeta::new(la_cpi, false),
+                AccountMeta::new_readonly(matcher_program, false),
+                AccountMeta::new(ctx, false),
+                AccountMeta::new_readonly(delegate, false),
+            ],
+            &[&taker_cpi],
+        )
+        .expect("BatchTradeCpi must remain live while backing-fee policy accounting is active");
+    assert_cu_within(
+        "BatchTradeCpi with backing-fee policy",
+        cpi_cu,
+        MULTI_ASSET_OPEN_TRADE_CU_LIMIT,
     );
     assert_eq!(
-        env.svm.get_account(&env.market).unwrap().data,
-        market_before
+        active_leg_for_asset(&env.portfolio_state(ta_cpi), 0).basis_pos_q,
+        sz
     );
-    assert_eq!(env.svm.get_account(&ta).unwrap().data, taker_before);
-    assert_eq!(env.svm.get_account(&la).unwrap().data, lp_before);
-    assert_eq!(env.svm.get_account(&ctx).unwrap().data, ctx_before);
-
-    env.svm.expire_blockhash();
-    let single = env.try_trade_asset_with_cu(0, &taker, ta, &lp, la, sz, 100, 0);
-    assert!(
-        single.is_ok(),
-        "single-leg TradeNoCpi must still work under an active backing-fee policy: {single:?}"
+    assert_eq!(
+        active_leg_for_asset(&env.portfolio_state(la_cpi), 0).basis_pos_q,
+        -sz
     );
-    let taker_after = env.portfolio_state(ta);
-    let lp_after = env.portfolio_state(la);
-    assert_eq!(active_leg_for_asset(&taker_after, 0).basis_pos_q, sz);
-    assert_eq!(active_leg_for_asset(&lp_after, 0).basis_pos_q, -sz);
 }
 
-// security.md sweep — the batch-trade backing-fee gate must not become a sticky DoS. The wrapper
-// keeps a global count of nonzero per-domain backing-fee policies because batch fee splitting is
-// intentionally disabled while any policy is active. Updating one policy nonzero->nonzero must not
-// double-count, clearing one side must leave the gate active if another side remains, and clearing all
-// policies must drop the count to zero so batch trading works again.
+// security.md sweep — the backing-fee policy count must track policy transitions without becoming a
+// sticky batch DoS. Updating one policy nonzero->nonzero must not double-count, clearing one side must
+// leave the count active if another side remains, clearing all policies must drop it to zero, and
+// BatchTradeNoCpi must remain live throughout.
 #[test]
 fn v16_attack_backing_fee_policy_count_clears_batch_liveness() {
     let mut env = V16CuEnv::new_with_market_params_and_price_move(1, 1_000, 1_000, 500);
@@ -49712,98 +50182,70 @@ fn v16_attack_backing_fee_policy_count_clears_batch_liveness() {
     );
     assert_eq!(cfg.backing_trade_fee_bps_short, 44);
 
-    let taker = Keypair::new();
-    let lp = Keypair::new();
-    let ta = env.create_portfolio(&taker);
-    let la = env.create_portfolio(&lp);
-    env.deposit(&taker, ta, 1_000_000);
-    env.deposit(&lp, la, 1_000_000);
     let sz = (5 * POS_SCALE) as i128;
 
-    let assert_batch_rejects_without_mutation = |env: &mut V16CuEnv, label: &str| {
-        let market_before = env.svm.get_account(&env.market).unwrap().data;
-        let taker_before = env.svm.get_account(&ta).unwrap().data;
-        let lp_before = env.svm.get_account(&la).unwrap().data;
+    let assert_batch_executes = |env: &mut V16CuEnv, label: &str| {
+        let taker = Keypair::new();
+        let lp = Keypair::new();
+        let ta = env.create_portfolio(&taker);
+        let la = env.create_portfolio(&lp);
+        env.deposit(&taker, ta, 1_000_000);
+        env.deposit(&lp, la, 1_000_000);
         env.svm.expire_blockhash();
-        let rejected = env.send(
-            ProgInstruction::BatchTradeNoCpi {
-                legs: vec![BatchTradeLeg {
-                    asset_index: 0,
-                    size_q: sz,
-                    exec_price: 100,
-                    fee_bps: 0,
-                }],
-            },
-            vec![
-                AccountMeta::new(taker.pubkey(), true),
-                AccountMeta::new(lp.pubkey(), true),
-                AccountMeta::new(env.market, false),
-                AccountMeta::new(ta, false),
-                AccountMeta::new(la, false),
-            ],
-            &[&taker, &lp],
-        );
-        assert!(
-            rejected.is_err(),
-            "{label}: batch must reject while any backing-fee policy remains"
+        let cu = env
+            .send(
+                ProgInstruction::BatchTradeNoCpi {
+                    legs: vec![BatchTradeLeg {
+                        asset_index: 0,
+                        size_q: sz,
+                        exec_price: 100,
+                        fee_bps: 0,
+                    }],
+                },
+                vec![
+                    AccountMeta::new(taker.pubkey(), true),
+                    AccountMeta::new(lp.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(ta, false),
+                    AccountMeta::new(la, false),
+                ],
+                &[&taker, &lp],
+            )
+            .unwrap_or_else(|err| {
+                panic!("{label}: batch must execute under backing-fee policy: {err}")
+            });
+        assert_cu_within(label, cu, MULTI_ASSET_OPEN_TRADE_CU_LIMIT);
+        assert_eq!(
+            active_leg_for_asset(&env.portfolio_state(ta), 0).basis_pos_q,
+            sz
         );
         assert_eq!(
-            env.svm.get_account(&env.market).unwrap().data,
-            market_before
+            active_leg_for_asset(&env.portfolio_state(la), 0).basis_pos_q,
+            -sz
         );
-        assert_eq!(env.svm.get_account(&ta).unwrap().data, taker_before);
-        assert_eq!(env.svm.get_account(&la).unwrap().data, lp_before);
     };
-    assert_batch_rejects_without_mutation(&mut env, "two active policies");
+    assert_batch_executes(&mut env, "BatchTradeNoCpi with two active backing policies");
 
     env.update_backing_fee_policy_with_cu(0, 0, 0);
     let (cfg, _) = env.market_state();
     assert_eq!(cfg.backing_trade_fee_policy_count, 1);
     assert_eq!(cfg.backing_trade_fee_bps_long, 0);
     assert_eq!(cfg.backing_trade_fee_bps_short, 44);
-    assert_batch_rejects_without_mutation(&mut env, "short policy still active");
+    assert_batch_executes(
+        &mut env,
+        "BatchTradeNoCpi with short backing policy still active",
+    );
 
     env.update_backing_fee_policy_with_cu(1, 0, 0);
     let (cfg, _) = env.market_state();
     assert_eq!(cfg.backing_trade_fee_policy_count, 0);
     assert_eq!(cfg.backing_trade_fee_bps_long, 0);
     assert_eq!(cfg.backing_trade_fee_bps_short, 0);
-
-    env.svm.expire_blockhash();
-    let reopened = env.send(
-        ProgInstruction::BatchTradeNoCpi {
-            legs: vec![BatchTradeLeg {
-                asset_index: 0,
-                size_q: sz,
-                exec_price: 100,
-                fee_bps: 0,
-            }],
-        },
-        vec![
-            AccountMeta::new(taker.pubkey(), true),
-            AccountMeta::new(lp.pubkey(), true),
-            AccountMeta::new(env.market, false),
-            AccountMeta::new(ta, false),
-            AccountMeta::new(la, false),
-        ],
-        &[&taker, &lp],
-    );
-    assert!(
-        reopened.is_ok(),
-        "clearing every backing-fee policy must restore BatchTradeNoCpi liveness: {reopened:?}"
-    );
-    assert_eq!(
-        active_leg_for_asset(&env.portfolio_state(ta), 0).basis_pos_q,
-        sz
-    );
-    assert_eq!(
-        active_leg_for_asset(&env.portfolio_state(la), 0).basis_pos_q,
-        -sz
-    );
+    assert_batch_executes(&mut env, "BatchTradeNoCpi after clearing backing policies");
 }
 
 #[test]
-fn v16_attack_non_active_asset_cannot_enable_backing_fee_batch_gate() {
+fn v16_attack_non_active_asset_cannot_enable_backing_fee_policy_count() {
     for (label, action, now_slot, expected_lifecycle) in [
         (
             "DrainOnly",
@@ -49869,12 +50311,12 @@ fn v16_attack_non_active_asset_cannot_enable_backing_fee_batch_gate() {
         );
         assert!(
             policy.is_err(),
-            "{label} asset must not install a new backing-fee policy that globally gates batch trades"
+            "{label} asset must not install a new backing-fee policy"
         );
         assert_eq!(
             env.market_state().0.backing_trade_fee_policy_count,
             0,
-            "rejected {label} policy update must not enable the global batch gate"
+            "rejected {label} policy update must not enable backing-fee accounting"
         );
 
         let taker = Keypair::new();
@@ -49918,12 +50360,12 @@ fn v16_attack_non_active_asset_cannot_enable_backing_fee_batch_gate() {
     }
 }
 
-// security.md sweep: a backing-fee policy on an inactive retired slot must not leave batch trading
-// globally disabled. The policy count is a market-wide batch gate, so retiring an asset must remove
-// that asset's policy from the active count, old retired-slot authorities must not be able to set a new
-// policy on the inactive slot, and permissionless reuse with a fresh profile must keep the gate clear.
+// security.md sweep: a backing-fee policy on an inactive retired slot must not leave stale active
+// accounting behind. Retiring an asset must remove that asset's policy from the active count, old
+// retired-slot authorities must not be able to set a new policy on the inactive slot, and
+// permissionless reuse with a fresh profile must keep the count clear.
 #[test]
-fn v16_attack_retired_reused_asset_backing_fee_policy_cannot_stick_batch_gate() {
+fn v16_attack_retired_reused_asset_backing_fee_policy_cannot_stick_count() {
     let mut env = V16CuEnv::new_with_market_params_and_price_move(1, 1_000, 1_000, 500);
     env.configure_auth_mark_for_asset_as_admin(0, 1, 100);
     env.update_market_init_fee_policy_with_cu(1);
@@ -49986,7 +50428,7 @@ fn v16_attack_retired_reused_asset_backing_fee_policy_cannot_stick_batch_gate() 
     );
     assert_eq!(
         retired_cfg.backing_trade_fee_policy_count, 0,
-        "retired-slot backing fee must no longer hold the global batch gate"
+        "retired-slot backing fee must no longer count as active"
     );
     assert!(
         update_policy(&mut env, &old_creator, 88).is_err(),
@@ -49995,7 +50437,7 @@ fn v16_attack_retired_reused_asset_backing_fee_policy_cannot_stick_batch_gate() 
     assert_eq!(
         env.market_state().0.backing_trade_fee_policy_count,
         0,
-        "rejected retired-slot policy update must not re-enable the batch gate"
+        "rejected retired-slot policy update must not re-enable backing-fee accounting"
     );
 
     let new_creator = Keypair::new();
@@ -51739,11 +52181,11 @@ fn v16_attack_batch_tradecpi_fee_bps_rejects_before_hostile_matcher_cpi() {
     }
 }
 
-// CU/DoS hardening: backing-fee policy intentionally disables batch fee splitting, so BatchTradeCpi
-// must reject before the external matcher CPI when any backing-fee policy is active. The no-policy
-// control reaches hostile matcher validation; the policy-on path must fail at the wrapper gate first.
+// CU/DoS hardening: an active backing-fee policy must not globally disable BatchTradeCpi or change
+// matcher validation semantics. The hostile matcher should be reached and rejected by return/account
+// validation both with and without a backing-fee policy.
 #[test]
-fn v16_attack_batch_tradecpi_backing_fee_policy_rejects_before_hostile_matcher_cpi() {
+fn v16_attack_batch_tradecpi_backing_fee_policy_still_validates_matcher_cpi() {
     let mut env = V16CuEnv::new();
     let hostile = Pubkey::new_unique();
     env.svm.add_program(
@@ -51845,20 +52287,20 @@ fn v16_attack_batch_tradecpi_backing_fee_policy_rejects_before_hostile_matcher_c
     assert_eq!(
         env.market_state().0.backing_trade_fee_policy_count,
         1,
-        "test setup must activate the backing-fee batch gate"
+        "test setup must activate backing-fee accounting"
     );
     let market_before = env.svm.get_account(&env.market).unwrap();
     let taker_before = env.svm.get_account(&ta).unwrap();
     let lp_before = env.svm.get_account(&la).unwrap();
     let rejected = send(&mut env)
-        .expect_err("backing-fee policy BatchTradeCpi must reject before matcher CPI");
+        .expect_err("backing-fee policy BatchTradeCpi must still reject hostile matcher output");
     assert!(
-        rejected.contains("Custom(9)"),
-        "backing-fee policy BatchTradeCpi must fail as InvalidInstruction before hostile matcher validation, got {rejected}"
+        rejected.contains("InvalidAccountData"),
+        "backing-fee policy BatchTradeCpi should reach matcher-return validation, got {rejected}"
     );
     assert!(
-        !rejected.contains("InvalidAccountData"),
-        "backing-fee policy BatchTradeCpi must not reach hostile matcher validation: {rejected}"
+        !rejected.contains("Custom(9)"),
+        "backing-fee policy BatchTradeCpi must not trip the old global batch gate: {rejected}"
     );
     assert_eq!(
         env.svm.get_account(&env.market).unwrap(),

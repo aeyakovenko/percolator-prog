@@ -9,6 +9,77 @@ use percolator_prog::matcher_abi::{
 use percolator_prog::policy_v16;
 
 #[kani::proof]
+fn kani_v16_batch_backing_fee_selector_only_admits_positive_lien_growth() {
+    let before_num: u128 = kani::any();
+    let after_num: u128 = kani::any();
+    let growth = policy_v16::positive_lien_growth_num(before_num, after_num);
+
+    match growth {
+        Some(delta) => {
+            assert!(after_num > before_num);
+            assert_eq!(delta, after_num - before_num);
+            assert!(delta > 0);
+        }
+        None => assert!(after_num <= before_num),
+    }
+
+    kani::cover!(
+        after_num > before_num,
+        "positive lien growth is fee-eligible"
+    );
+    kani::cover!(after_num == before_num, "unchanged backing charges no fee");
+    kani::cover!(after_num < before_num, "released backing charges no fee");
+}
+
+#[kani::proof]
+fn kani_v16_batch_backing_fee_aggregation_is_conserving_and_fail_closed() {
+    let total_a = kani::any::<u64>() as u128;
+    let total_b = kani::any::<u64>() as u128;
+    let provider_a = kani::any::<u64>() as u128;
+    let provider_b = kani::any::<u64>() as u128;
+    kani::assume(provider_a <= total_a && provider_b <= total_b);
+    let split_a = percolator::BackingDomainFeeSplitV16 {
+        lien_delta_atoms: kani::any::<u64>() as u128,
+        total_fee: total_a,
+        provider_fee: provider_a,
+        insurance_fee: total_a - provider_a,
+    };
+    let split_b = percolator::BackingDomainFeeSplitV16 {
+        lien_delta_atoms: kani::any::<u64>() as u128,
+        total_fee: total_b,
+        provider_fee: provider_b,
+        insurance_fee: total_b - provider_b,
+    };
+
+    let after_a = policy_v16::accumulate_backing_fee_split(0, split_a).unwrap();
+    let after_b = policy_v16::accumulate_backing_fee_split(after_a, split_b).unwrap();
+    assert_eq!(after_a, total_a);
+    assert_eq!(after_b, total_a + total_b);
+    assert_eq!(
+        after_b,
+        split_a.provider_fee + split_a.insurance_fee + split_b.provider_fee + split_b.insurance_fee
+    );
+
+    let malformed = percolator::BackingDomainFeeSplitV16 {
+        total_fee: total_a + 1,
+        ..split_a
+    };
+    assert!(policy_v16::accumulate_backing_fee_split(0, malformed).is_err());
+
+    kani::cover!(
+        split_a.provider_fee > 0
+            && split_a.insurance_fee > 0
+            && split_b.provider_fee > 0
+            && split_b.insurance_fee > 0,
+        "two domains can independently route fees to both destinations"
+    );
+    kani::cover!(
+        total_a != total_b,
+        "domain fee totals remain independently valued"
+    );
+}
+
+#[kani::proof]
 fn kani_v16_premium_funding_rate_is_clamped_and_signed() {
     let mark_raw: u16 = kani::any();
     let index_raw: u16 = kani::any();
