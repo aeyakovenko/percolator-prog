@@ -2524,6 +2524,8 @@ pub mod ix {
             domain: u16,
             amount: u128,
             expiry_slot: u64,
+            expected_fee_bps: u16,
+            expected_insurance_share_bps: u16,
         },
         WithdrawBackingBucket {
             domain: u16,
@@ -2791,6 +2793,8 @@ pub mod ix {
                     domain: read_u16(&mut rest)?,
                     amount: read_u128(&mut rest)?,
                     expiry_slot: read_u64(&mut rest)?,
+                    expected_fee_bps: read_u16(&mut rest)?,
+                    expected_insurance_share_bps: read_u16(&mut rest)?,
                 },
                 50 => Self::WithdrawBackingBucket {
                     domain: read_u16(&mut rest)?,
@@ -3083,11 +3087,15 @@ pub mod ix {
                     domain,
                     amount,
                     expiry_slot,
+                    expected_fee_bps,
+                    expected_insurance_share_bps,
                 } => {
                     out.push(24);
                     push_u16(&mut out, domain);
                     push_u128(&mut out, amount);
                     push_u64(&mut out, expiry_slot);
+                    push_u16(&mut out, expected_fee_bps);
+                    push_u16(&mut out, expected_insurance_share_bps);
                 }
                 Self::WithdrawBackingBucket { domain, amount } => {
                     out.push(50);
@@ -5271,7 +5279,17 @@ pub mod processor {
                 domain,
                 amount,
                 expiry_slot,
-            } => handle_top_up_backing_bucket(program_id, accounts, domain, amount, expiry_slot),
+                expected_fee_bps,
+                expected_insurance_share_bps,
+            } => handle_top_up_backing_bucket(
+                program_id,
+                accounts,
+                domain,
+                amount,
+                expiry_slot,
+                expected_fee_bps,
+                expected_insurance_share_bps,
+            ),
             Instruction::WithdrawBackingBucket { domain, amount } => {
                 handle_withdraw_backing_bucket(program_id, accounts, domain, amount)
             }
@@ -7565,6 +7583,8 @@ pub mod processor {
         domain: u16,
         amount: u128,
         expiry_slot: u64,
+        expected_fee_bps: u16,
+        expected_insurance_share_bps: u16,
     ) -> ProgramResult {
         let signer = account(accounts, 0)?;
         let market_ai = account(accounts, 1)?;
@@ -7595,6 +7615,11 @@ pub mod processor {
                 return Err(PercolatorError::EngineLockActive.into());
             }
             require_domain_accepts_live_topup_view(&group, domain_usize)?;
+            if backing_fee_policy_for_domain_view(&group, &cfg, domain_usize)?
+                != (expected_fee_bps, expected_insurance_share_bps)
+            {
+                return Err(PercolatorError::InvalidInstruction.into());
+            }
             let profile = read_oracle_profile_from_view(&group, &cfg, asset_index)?;
             let authorities = domain_authorities_from_profile(&cfg, &profile, asset_index);
             (cfg, authorities)
@@ -7614,6 +7639,11 @@ pub mod processor {
             }
             reject_permissionless_resolve_matured_live_view(&cfg, &group)?;
             require_domain_accepts_live_topup_view(&group, domain_usize)?;
+            if backing_fee_policy_for_domain_view(&group, &cfg, domain_usize)?
+                != (expected_fee_bps, expected_insurance_share_bps)
+            {
+                return Err(PercolatorError::InvalidInstruction.into());
+            }
             let authorities = domain_authorities_from_view(&group, &cfg, domain_usize)?;
             expect_live_authority(&authorities.backing_bucket_authority, signer.key)?;
             let mut ledger_data = if let Some(ledger_ai) = ledger_ai {

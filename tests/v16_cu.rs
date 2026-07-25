@@ -1240,6 +1240,11 @@ impl V16CuEnv {
         state::read_market(&account.data).unwrap()
     }
 
+    fn backing_fee_policy(&self, domain: u16) -> (u16, u16) {
+        let account = self.svm.get_account(&self.market).expect("market account");
+        backing_fee_policy_for_market_data(&account.data, domain)
+    }
+
     fn portfolio_state(&self, portfolio: Pubkey) -> PortfolioAccountV16 {
         let account = self.svm.get_account(&portfolio).expect("portfolio account");
         state::read_portfolio(&account.data).unwrap()
@@ -2798,6 +2803,7 @@ impl V16CuEnv {
         amount: u128,
         expiry_slot: u64,
     ) -> u64 {
+        let (expected_fee_bps, expected_insurance_share_bps) = self.backing_fee_policy(domain);
         send_tx(
             &mut self.svm,
             self.program_id,
@@ -2806,6 +2812,8 @@ impl V16CuEnv {
                 domain,
                 amount,
                 expiry_slot,
+                expected_fee_bps,
+                expected_insurance_share_bps,
             },
             vec![
                 AccountMeta::new(self.admin.pubkey(), true),
@@ -2972,6 +2980,7 @@ impl V16CuEnv {
         amount: u128,
         expiry_slot: u64,
     ) -> (Pubkey, u64) {
+        let (expected_fee_bps, expected_insurance_share_bps) = self.backing_fee_policy(domain);
         let source = Pubkey::new_unique();
         self.svm
             .set_account(
@@ -2993,6 +3002,8 @@ impl V16CuEnv {
                 domain,
                 amount,
                 expiry_slot,
+                expected_fee_bps,
+                expected_insurance_share_bps,
             },
             vec![
                 AccountMeta::new(self.admin.pubkey(), true),
@@ -3014,6 +3025,7 @@ impl V16CuEnv {
         amount: u128,
         expiry_slot: u64,
     ) -> (Pubkey, u64) {
+        let (expected_fee_bps, expected_insurance_share_bps) = self.backing_fee_policy(domain);
         let source = Pubkey::new_unique();
         self.svm
             .set_account(
@@ -3035,6 +3047,8 @@ impl V16CuEnv {
                 domain,
                 amount,
                 expiry_slot,
+                expected_fee_bps,
+                expected_insurance_share_bps,
             },
             vec![
                 AccountMeta::new(self.admin.pubkey(), true),
@@ -3057,6 +3071,7 @@ impl V16CuEnv {
         amount: u128,
         expiry_slot: u64,
     ) -> Pubkey {
+        let (expected_fee_bps, expected_insurance_share_bps) = self.backing_fee_policy(domain);
         self.ensure_signer_account(authority.pubkey());
         let source = self.token_account(authority.pubkey(), amount as u64);
         send_tx(
@@ -3067,6 +3082,8 @@ impl V16CuEnv {
                 domain,
                 amount,
                 expiry_slot,
+                expected_fee_bps,
+                expected_insurance_share_bps,
             },
             vec![
                 AccountMeta::new(authority.pubkey(), true),
@@ -3933,6 +3950,8 @@ fn v16_bpf_mainnet_realistic_system_spl_ata_bootstrap_deposits_and_ledgers() {
             domain: 1,
             amount: 77,
             expiry_slot: 10,
+            expected_fee_bps: 0,
+            expected_insurance_share_bps: 0,
         },
         vec![
             AccountMeta::new(admin.pubkey(), true),
@@ -4224,6 +4243,22 @@ fn deposit_to_market(
     source
 }
 
+fn backing_fee_policy_for_market_data(data: &[u8], domain: u16) -> (u16, u16) {
+    let profile =
+        state::read_asset_oracle_profile(data, domain as usize / 2).expect("asset oracle profile");
+    if domain % 2 == 0 {
+        (
+            profile.backing_trade_fee_bps_long,
+            profile.backing_trade_fee_insurance_share_bps_long,
+        )
+    } else {
+        (
+            profile.backing_trade_fee_bps_short,
+            profile.backing_trade_fee_insurance_share_bps_short,
+        )
+    }
+}
+
 fn top_up_backing_bucket_to_market(
     env: &mut V16CuEnv,
     market: Pubkey,
@@ -4232,6 +4267,9 @@ fn top_up_backing_bucket_to_market(
     amount: u128,
     expiry_slot: u64,
 ) -> Pubkey {
+    let market_account = env.svm.get_account(&market).expect("market account");
+    let (expected_fee_bps, expected_insurance_share_bps) =
+        backing_fee_policy_for_market_data(&market_account.data, domain);
     let source = env.token_account(env.admin.pubkey(), amount as u64);
     env.svm.expire_blockhash();
     send_tx(
@@ -4242,6 +4280,8 @@ fn top_up_backing_bucket_to_market(
             domain,
             amount,
             expiry_slot,
+            expected_fee_bps,
+            expected_insurance_share_bps,
         },
         vec![
             AccountMeta::new(env.admin.pubkey(), true),
@@ -4589,6 +4629,8 @@ fn v16_bpf_failed_backing_topup_transfer_rolls_back_bucket_and_ledger() {
             domain: 1,
             amount: 100,
             expiry_slot: 10,
+            expected_fee_bps: 0,
+            expected_insurance_share_bps: 0,
         },
         vec![
             AccountMeta::new(env.admin.pubkey(), true),
@@ -5878,6 +5920,8 @@ fn v16_attack_retired_asset_domain_authority_cannot_refund_slot_and_block_reuse(
             domain: 2,
             amount: 88,
             expiry_slot: 10,
+            expected_fee_bps: 0,
+            expected_insurance_share_bps: 0,
         },
         vec![
             AccountMeta::new(rekeyed_backing_authority.pubkey(), true),
@@ -22958,6 +23002,8 @@ fn v16_attack_backing_ledger_market_binding_enforced() {
             domain: 1,
             amount: 100,
             expiry_slot: 10,
+            expected_fee_bps: 0,
+            expected_insurance_share_bps: 0,
         },
         vec![
             AccountMeta::new(admin.pubkey(), true),
@@ -23646,6 +23692,8 @@ fn v16_attack_topup_optional_ledgers_reject_cross_market_reuse() {
             domain: 1,
             amount: 40,
             expiry_slot: 10,
+            expected_fee_bps: 0,
+            expected_insurance_share_bps: 0,
         },
         vec![
             AccountMeta::new(admin.pubkey(), true),
@@ -23742,6 +23790,8 @@ fn v16_attack_topup_optional_ledgers_reject_cross_market_reuse() {
             domain: 1,
             amount: 40,
             expiry_slot: 10,
+            expected_fee_bps: 0,
+            expected_insurance_share_bps: 0,
         },
         vec![
             AccountMeta::new(admin.pubkey(), true),
@@ -24430,6 +24480,8 @@ fn v16_attack_value_paths_cannot_use_portfolio_as_optional_ledger() {
             domain: 1,
             amount: 30,
             expiry_slot: 10,
+            expected_fee_bps: 0,
+            expected_insurance_share_bps: 0,
         },
         vec![
             AccountMeta::new(admin.pubkey(), true),
@@ -24639,6 +24691,8 @@ fn v16_attack_value_paths_cannot_use_market_as_optional_ledger() {
             domain: 1,
             amount: 30,
             expiry_slot: 10,
+            expected_fee_bps: 0,
+            expected_insurance_share_bps: 0,
         },
         vec![
             AccountMeta::new(admin.pubkey(), true),
@@ -24876,6 +24930,8 @@ fn v16_attack_topups_cannot_use_vault_as_source() {
             domain: 1,
             amount: 500,
             expiry_slot,
+            expected_fee_bps: 0,
+            expected_insurance_share_bps: 0,
         },
         "TopUpBackingBucket",
     );
@@ -25294,6 +25350,8 @@ fn v16_attack_domain_topups_pinned_to_canonical_vault() {
             domain: 1,
             amount: 700,
             expiry_slot: 10_000,
+            expected_fee_bps: 0,
+            expected_insurance_share_bps: 0,
         },
         vec![
             AccountMeta::new(admin.pubkey(), true),
@@ -25391,6 +25449,8 @@ fn v16_attack_domain_indexed_calls_reject_out_of_range_atomically() {
             domain: BAD_DOMAIN,
             amount: 456,
             expiry_slot: 10_000,
+            expected_fee_bps: 0,
+            expected_insurance_share_bps: 0,
         },
         vec![
             AccountMeta::new(admin.pubkey(), true),
@@ -31793,6 +31853,8 @@ fn v16_attack_topup_backing_bucket_authority_gated() {
             domain: 0,
             amount: 500,
             expiry_slot: 10_000,
+            expected_fee_bps: 0,
+            expected_insurance_share_bps: 0,
         },
         vec![
             AccountMeta::new(donor.pubkey(), true),
@@ -31958,6 +32020,8 @@ fn v16_attack_cross_asset_backing_authority_cannot_withdraw_other_asset_earnings
             domain: 2,
             amount: 300,
             expiry_slot: 10_000,
+            expected_fee_bps: 0,
+            expected_insurance_share_bps: 0,
         },
         vec![
             AccountMeta::new(asset1_backing.pubkey(), true),
@@ -33663,6 +33727,8 @@ fn v16_attack_topups_cannot_bypass_cumulative_tvl_cap() {
                 domain: 1,
                 amount: 2,
                 expiry_slot: 10_000,
+                expected_fee_bps: 0,
+                expected_insurance_share_bps: 0,
             },
             vec![
                 AccountMeta::new(admin.pubkey(), true),
@@ -35317,6 +35383,8 @@ fn v16_attack_backing_bucket_topup_withdraw_input_gates() {
                 domain: 0,
                 amount,
                 expiry_slot: expiry,
+                expected_fee_bps: 0,
+                expected_insurance_share_bps: 0,
             },
             vec![
                 AccountMeta::new(admin.pubkey(), true),
@@ -55258,6 +55326,8 @@ fn v16_attack_live_value_paths_reject_when_resolve_matured() {
             domain: 1,
             amount: 30,
             expiry_slot: 100,
+            expected_fee_bps: 0,
+            expected_insurance_share_bps: 0,
         },
         vec![
             AccountMeta::new(admin.pubkey(), true),
@@ -58013,6 +58083,8 @@ fn v16_attack_value_topups_reject_delegated_canonical_vault() {
             domain: 1,
             amount: 13,
             expiry_slot: 10_000,
+            expected_fee_bps: 0,
+            expected_insurance_share_bps: 0,
         },
         vec![
             AccountMeta::new(admin.pubkey(), true),
@@ -59564,6 +59636,8 @@ fn v16_attack_backing_topup_rejects_lapsed_expiry() {
                 domain: 1,
                 amount: 50,
                 expiry_slot: expiry,
+                expected_fee_bps: 0,
+                expected_insurance_share_bps: 0,
             },
             vec![
                 AccountMeta::new(admin.pubkey(), true),
@@ -59874,6 +59948,8 @@ fn v16_attack_delayed_backing_split_cannot_divert_provider_fee_to_operator() {
                     domain: WINNING_DOMAIN,
                     amount: 5_000,
                     expiry_slot: 100,
+                    expected_fee_bps: BACKING_FEE_BPS,
+                    expected_insurance_share_bps: 0,
                 }
                 .encode(),
             },
@@ -59886,8 +59962,28 @@ fn v16_attack_delayed_backing_split_cannot_divert_provider_fee_to_operator() {
     // The stale split wins the ordering race while the bucket is still empty, then the provider's
     // retained top-up lands. Freezing terms only after funding cannot protect this ordering.
     let delayed_accepted = env.svm.send_transaction(delayed_insurance_split).is_ok();
+    let market_before_retained_top_up = env.svm.get_account(&env.market).unwrap();
+    let source_before_retained_top_up = env.svm.get_account(&backing_source).unwrap();
+    let vault_before_retained_top_up = env.svm.get_account(&env.vault).unwrap();
+    let ledger_before_retained_top_up = env.svm.get_account(&ledger.pubkey()).unwrap();
     let retained_top_up_accepted = env.svm.send_transaction(retained_top_up).is_ok();
     if !retained_top_up_accepted {
+        assert_eq!(
+            env.svm.get_account(&env.market).unwrap(),
+            market_before_retained_top_up
+        );
+        assert_eq!(
+            env.svm.get_account(&backing_source).unwrap(),
+            source_before_retained_top_up
+        );
+        assert_eq!(
+            env.svm.get_account(&env.vault).unwrap(),
+            vault_before_retained_top_up
+        );
+        assert_eq!(
+            env.svm.get_account(&ledger.pubkey()).unwrap(),
+            ledger_before_retained_top_up
+        );
         env.svm.expire_blockhash();
         send_tx(
             &mut env.svm,
@@ -59911,6 +60007,8 @@ fn v16_attack_delayed_backing_split_cannot_divert_provider_fee_to_operator() {
                 domain: WINNING_DOMAIN,
                 amount: 5_000,
                 expiry_slot: 100,
+                expected_fee_bps: BACKING_FEE_BPS,
+                expected_insurance_share_bps: 0,
             },
             vec![
                 AccountMeta::new(provider.pubkey(), true),
