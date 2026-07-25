@@ -6312,6 +6312,13 @@ fn v16_bpf_asset0_shutdown_force_closes_preserves_insurance_and_restarts() {
     env.configure_auth_mark_for_asset_with_authority(0, &new_oracle, 8, 250);
     env.svm.warp_to_slot(9);
     env.push_auth_mark_for_asset_with_authority(0, &new_oracle, 9, 260);
+    env.crank(
+        long_account,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 9,
+            observations: crank_observations(0),
+        },
+    );
 
     env.trade_asset_with_cu(
         0,
@@ -27394,6 +27401,13 @@ fn v16_attack_non_base_trade_rejects_after_base_resolve_matured() {
 
     env.svm.warp_to_slot(7);
     env.push_auth_mark_for_asset_with_authority(1, &creator, 7, 101);
+    env.crank(
+        taker_portfolio,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 7,
+            observations: crank_observations(1),
+        },
+    );
     let fresh_trade = env.try_trade_asset_with_cu(
         1,
         &taker,
