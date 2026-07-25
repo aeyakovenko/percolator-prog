@@ -59717,3 +59717,281 @@ fn v16_attack_underfunded_exit_cannot_move_ewma_with_uncollectible_fee() {
         assert_underfunded_ewma_exit_uses_collected_fee(path);
     }
 }
+
+#[test]
+fn v16_attack_delayed_backing_split_cannot_divert_provider_fee_to_operator() {
+    const INITIAL_PRICE: u64 = 100;
+    const LP_DEPOSIT: u128 = 3_130;
+    const TRADER_DEPOSIT: u128 = 10_000;
+    const WINNING_SIZE_Q: i128 = 200 * POS_SCALE as i128;
+    const LOSING_SIZE_Q: i128 = 100 * POS_SCALE as i128;
+    const INCREASE_Q: i128 = 20 * POS_SCALE as i128;
+    const WINNING_DOMAIN: u16 = 3;
+    const BACKING_FEE_BPS: u16 = 5_000;
+    const EXPECTED_FEE: u128 = 70;
+
+    let mut env =
+        V16CuEnv::new_with_market_params_price_move_and_maintenance_fee(2, 1_000, 1_000, 500, 30);
+    env.update_market_init_fee_policy_with_cu(1);
+    let attacker_operator = Keypair::new();
+    let policy_oracle_authority = Keypair::new();
+    let provider = Keypair::new();
+    let market_trader = Keypair::new();
+    let lp = Keypair::new();
+    env.ensure_signer_account(policy_oracle_authority.pubkey());
+    env.ensure_signer_account(provider.pubkey());
+
+    env.svm.warp_to_slot(1);
+    env.configure_auth_mark_for_asset_as_admin(0, 1, INITIAL_PRICE);
+    env.configure_auth_mark_for_asset_as_admin(1, 1, INITIAL_PRICE);
+    env.svm.warp_to_slot(2);
+    env.update_asset_lifecycle_as_admin_with_cu(
+        percolator_prog::processor::ASSET_ACTION_RETIRE,
+        1,
+        2,
+        0,
+    );
+    env.svm.warp_to_slot(3);
+    env.activate_permissionless_asset_with_fee(
+        &attacker_operator,
+        1,
+        3,
+        INITIAL_PRICE,
+        policy_oracle_authority.pubkey(),
+        attacker_operator.pubkey(),
+        provider.pubkey(),
+        policy_oracle_authority.pubkey(),
+        1,
+    );
+    env.configure_auth_mark_for_asset_with_authority(1, &policy_oracle_authority, 3, INITIAL_PRICE);
+
+    // The honest insurance authority signs an older 100%-to-insurance split
+    // and a newer 0% correction under one live blockhash. The correction lands
+    // while the domain is empty; an independent provider then commits backing
+    // under those visible terms.
+    let policy_blockhash = env.svm.latest_blockhash();
+    let make_policy_tx = |insurance_share_bps| {
+        let instruction = Instruction {
+            program_id: env.program_id,
+            accounts: vec![
+                AccountMeta::new(policy_oracle_authority.pubkey(), true),
+                AccountMeta::new(env.market, false),
+            ],
+            data: ProgInstruction::UpdateBackingFeePolicy {
+                domain: WINNING_DOMAIN,
+                fee_bps: BACKING_FEE_BPS,
+                insurance_share_bps,
+            }
+            .encode(),
+        };
+        Transaction::new_signed_with_payer(
+            &[heap_ix(), cu_ix(), instruction],
+            Some(&env.payer.pubkey()),
+            &[&env.payer, &policy_oracle_authority],
+            policy_blockhash,
+        )
+    };
+    let delayed_insurance_split = make_policy_tx(10_000);
+    let correcting_provider_split = make_policy_tx(0);
+    env.svm
+        .send_transaction(correcting_provider_split)
+        .expect("newer provider-fee policy lands before backing is funded");
+
+    let ledger = Keypair::new();
+    let payer = env.payer.insecure_clone();
+    system_create_account_for_test(
+        &mut env.svm,
+        &payer,
+        &ledger,
+        state::backing_domain_ledger_account_len(),
+        env.program_id,
+    );
+    let backing_source = env.token_account(provider.pubkey(), 5_000);
+    env.svm.expire_blockhash();
+    env.send(
+        ProgInstruction::TopUpBackingBucket {
+            domain: WINNING_DOMAIN,
+            amount: 5_000,
+            expiry_slot: 100,
+        },
+        vec![
+            AccountMeta::new(provider.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(backing_source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(ledger.pubkey(), false),
+        ],
+        &[&provider],
+    )
+    .expect("independent provider funds backing under the corrected split");
+
+    let attacker_account = env.create_portfolio(&attacker_operator);
+    let market_trader_account = env.create_portfolio(&market_trader);
+    let lp_account = env.create_portfolio(&lp);
+    env.deposit(&attacker_operator, attacker_account, TRADER_DEPOSIT);
+    env.deposit(&market_trader, market_trader_account, TRADER_DEPOSIT);
+    env.deposit(&lp, lp_account, LP_DEPOSIT);
+
+    env.trade_asset_with_cu(
+        1,
+        &market_trader,
+        market_trader_account,
+        &lp,
+        lp_account,
+        -WINNING_SIZE_Q,
+        INITIAL_PRICE,
+        0,
+    );
+    env.trade_asset_with_cu(
+        0,
+        &market_trader,
+        market_trader_account,
+        &lp,
+        lp_account,
+        -LOSING_SIZE_Q,
+        INITIAL_PRICE,
+        0,
+    );
+
+    env.svm.warp_to_slot(4);
+    env.push_auth_mark_for_asset_with_authority(1, &policy_oracle_authority, 4, INITIAL_PRICE);
+    env.push_auth_mark_for_asset_as_admin(0, 4, INITIAL_PRICE);
+    for (portfolio, asset_index) in [
+        (market_trader_account, 1),
+        (lp_account, 1),
+        (market_trader_account, 0),
+        (lp_account, 0),
+    ] {
+        env.crank_steps(
+            portfolio,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 4,
+                observations: crank_observations(asset_index),
+            },
+            4,
+        );
+    }
+    env.sync_maintenance_fee_with_cu(lp_account, None, 4);
+
+    env.svm.warp_to_slot(5);
+    env.push_auth_mark_for_asset_with_authority(1, &policy_oracle_authority, 5, 105);
+    env.push_auth_mark_for_asset_as_admin(0, 5, 95);
+    for (portfolio, asset_index) in [
+        (market_trader_account, 1),
+        (lp_account, 1),
+        (market_trader_account, 0),
+    ] {
+        env.crank_steps(
+            portfolio,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 5,
+                observations: crank_observations(asset_index),
+            },
+            4,
+        );
+    }
+    assert_eq!(
+        env.portfolio_state(lp_account).pnl.get(),
+        1_000,
+        "the independent LP has real source-backed positive PnL"
+    );
+
+    let trade_instruction = Instruction {
+        program_id: env.program_id,
+        accounts: vec![
+            AccountMeta::new(attacker_operator.pubkey(), true),
+            AccountMeta::new(lp.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(attacker_account, false),
+            AccountMeta::new(lp_account, false),
+        ],
+        data: ProgInstruction::TradeNoCpi {
+            asset_index: 0,
+            size_q: -INCREASE_Q,
+            exec_price: 95,
+            fee_bps: 0,
+        }
+        .encode(),
+    };
+    let presigned_trade = Transaction::new_signed_with_payer(
+        &[heap_ix(), cu_ix(), trade_instruction],
+        Some(&env.payer.pubkey()),
+        &[&env.payer, &attacker_operator, &lp],
+        env.svm.latest_blockhash(),
+    );
+
+    let (_, before) = env.market_state();
+    let provider_before =
+        before.source_backing_buckets[WINNING_DOMAIN as usize].utilization_fee_earnings;
+    let insurance_before = before.insurance_domain_budget[WINNING_DOMAIN as usize];
+    let lp_before = env.portfolio_state(lp_account).capital.get();
+
+    let delayed_accepted = env.svm.send_transaction(delayed_insurance_split).is_ok();
+    env.svm
+        .send_transaction(presigned_trade)
+        .expect("the fee-bearing trade remains executable");
+
+    let (_, after) = env.market_state();
+    let provider_fee = after.source_backing_buckets[WINNING_DOMAIN as usize]
+        .utilization_fee_earnings
+        .saturating_sub(provider_before);
+    let insurance_fee =
+        after.insurance_domain_budget[WINNING_DOMAIN as usize].saturating_sub(insurance_before);
+    let charged = lp_before.saturating_sub(env.portfolio_state(lp_account).capital.get());
+    assert_eq!(provider_fee + insurance_fee, EXPECTED_FEE);
+    assert_eq!(charged, EXPECTED_FEE);
+
+    let attacker_extracted = if insurance_fee == 0 {
+        0
+    } else {
+        let (destination, _) = env
+            .try_withdraw_insurance_asset_with_authority(&attacker_operator, 1, insurance_fee)
+            .expect("asset insurance operator withdraws the diverted fee");
+        env.token_amount(destination) as u128
+    };
+    let provider_withdrawn = if provider_fee == 0 {
+        0
+    } else {
+        let destination = env.token_account(provider.pubkey(), 0);
+        env.svm.expire_blockhash();
+        env.send(
+            ProgInstruction::WithdrawBackingBucketEarnings {
+                domain: WINNING_DOMAIN,
+                amount: provider_fee,
+            },
+            vec![
+                AccountMeta::new(provider.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(ledger.pubkey(), false),
+                AccountMeta::new(destination, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(env.vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[&provider],
+        )
+        .expect("provider withdraws the fee earned under the corrected policy");
+        env.token_amount(destination) as u128
+    };
+
+    if delayed_accepted {
+        assert_eq!((provider_fee, insurance_fee), (0, EXPECTED_FEE));
+        assert_eq!(attacker_extracted, EXPECTED_FEE);
+        assert_eq!(provider_withdrawn, 0);
+        panic!(
+            "delayed insurance split diverted and publicly extracted \
+             {attacker_extracted} atoms owed to the independent backing provider"
+        );
+    }
+    assert_eq!(
+        (
+            provider_fee,
+            insurance_fee,
+            attacker_extracted,
+            provider_withdrawn,
+        ),
+        (EXPECTED_FEE, 0, 0, EXPECTED_FEE),
+        "funded backing must retain the provider split visible at deposit"
+    );
+}
