@@ -49,6 +49,8 @@ pub mod constants {
     pub const WRAPPER_CONFIG_LEN: usize = 448;
     pub const ASSET_ORACLE_PROFILE_LEN: usize = 400;
     pub const ASSET_ORACLE_WRAPPER_LEN: usize = 512;
+    pub const ASSET_MARKETAUTH_SEQUENCE_OFF: usize = ASSET_ORACLE_PROFILE_LEN + 16;
+    pub const ASSET_MARKETAUTH_SEQUENCE_LEN: usize = 8;
     pub const MARKET_GROUP_LEN: usize = size_of::<MarketGroupV16HeaderAccount>();
     pub const MARKET_ASSET_SLOT_LEN: usize = size_of::<Market<[u8; ASSET_ORACLE_WRAPPER_LEN]>>();
     pub const PORTFOLIO_STATE_LEN: usize = size_of::<PortfolioAccountV16Account>();
@@ -155,14 +157,14 @@ pub mod error {
 pub mod state {
     use crate::{
         constants::{
-            ASSET_ORACLE_PROFILE_LEN, ASSET_ORACLE_WRAPPER_LEN, HEADER_LEN,
-            KIND_BACKING_DOMAIN_LEDGER, KIND_INSURANCE_LEDGER, KIND_MARKET, KIND_PORTFOLIO, MAGIC,
-            MARKET_GROUP_LEN, MARKET_GROUP_OFF, MIN_MARKET_ACCOUNT_LEN, ORACLE_LEG_CAP,
-            ORACLE_LEG_FLAGS_MASK, ORACLE_MODE_AUTH_MARK, ORACLE_MODE_EWMA_MARK,
-            ORACLE_MODE_HYBRID_AFTER_HOURS, ORACLE_MODE_MANUAL, PORTFOLIO_ACCOUNT_LEN,
-            PORTFOLIO_ENGINE_ACCOUNT_LEN, PORTFOLIO_ID_LEN, PORTFOLIO_ID_OFF,
-            PORTFOLIO_MATCHER_CONFIG_LEN, PORTFOLIO_MATCHER_CONFIG_OFF, PORTFOLIO_STATE_LEN,
-            VERSION, WRAPPER_CONFIG_LEN,
+            ASSET_MARKETAUTH_SEQUENCE_LEN, ASSET_MARKETAUTH_SEQUENCE_OFF, ASSET_ORACLE_PROFILE_LEN,
+            ASSET_ORACLE_WRAPPER_LEN, HEADER_LEN, KIND_BACKING_DOMAIN_LEDGER,
+            KIND_INSURANCE_LEDGER, KIND_MARKET, KIND_PORTFOLIO, MAGIC, MARKET_GROUP_LEN,
+            MARKET_GROUP_OFF, MIN_MARKET_ACCOUNT_LEN, ORACLE_LEG_CAP, ORACLE_LEG_FLAGS_MASK,
+            ORACLE_MODE_AUTH_MARK, ORACLE_MODE_EWMA_MARK, ORACLE_MODE_HYBRID_AFTER_HOURS,
+            ORACLE_MODE_MANUAL, PORTFOLIO_ACCOUNT_LEN, PORTFOLIO_ENGINE_ACCOUNT_LEN,
+            PORTFOLIO_ID_LEN, PORTFOLIO_ID_OFF, PORTFOLIO_MATCHER_CONFIG_LEN,
+            PORTFOLIO_MATCHER_CONFIG_OFF, PORTFOLIO_STATE_LEN, VERSION, WRAPPER_CONFIG_LEN,
         },
         error::PercolatorError,
     };
@@ -1368,6 +1370,34 @@ pub mod state {
         Ok(profile)
     }
 
+    pub fn read_marketauth_sequence(data: &[u8]) -> Result<u64, ProgramError> {
+        check_header(data, KIND_MARKET)?;
+        if market_slot_capacity(data)? == 0 {
+            return Err(PercolatorError::InvalidAccountLen.into());
+        }
+        let start = dynamic_slot_offset(0)?
+            .checked_add(ASSET_MARKETAUTH_SEQUENCE_OFF)
+            .ok_or(PercolatorError::InvalidAccountLen)?;
+        let bytes = data
+            .get(start..start + ASSET_MARKETAUTH_SEQUENCE_LEN)
+            .ok_or(PercolatorError::InvalidAccountLen)?;
+        let mut raw = [0u8; ASSET_MARKETAUTH_SEQUENCE_LEN];
+        raw.copy_from_slice(bytes);
+        Ok(u64::from_le_bytes(raw))
+    }
+
+    pub fn next_marketauth_sequence(
+        current_sequence: u64,
+        expected_sequence: u64,
+    ) -> Result<u64, ProgramError> {
+        if current_sequence != expected_sequence {
+            return Err(PercolatorError::EngineStale.into());
+        }
+        current_sequence
+            .checked_add(1)
+            .ok_or_else(|| PercolatorError::EngineCounterOverflow.into())
+    }
+
     pub fn read_market_config_mode_and_capacity(
         data: &[u8],
     ) -> Result<(WrapperConfigV16, MarketModeV16, usize, usize), ProgramError> {
@@ -2536,9 +2566,11 @@ pub mod ix {
             fee_rate_per_slot: u128,
         },
         /// Rotate the single market-level authority (`marketauth`). The current `marketauth` must sign;
-        /// the non-zero replacement must co-sign. Burning `marketauth` to zero is rejected.
+        /// the non-zero replacement must co-sign. Burning `marketauth` to zero is rejected. The
+        /// expected sequence makes each co-signed handoff one-shot.
         UpdateAuthority {
             new_pubkey: [u8; 32],
+            expected_sequence: u64,
         },
         /// Rotate one of an asset's per-asset authorities. Gated by the asset's own `asset_admin`
         /// (rotates any; only the admin authority itself is burnable) or the current holder of that
@@ -2804,6 +2836,7 @@ pub mod ix {
                 },
                 32 => Self::UpdateAuthority {
                     new_pubkey: read_bytes32(&mut rest)?,
+                    expected_sequence: read_u64(&mut rest)?,
                 },
                 65 => Self::UpdateAssetAuthority {
                     asset_index: read_u16(&mut rest)?,
@@ -3102,9 +3135,13 @@ pub mod ix {
                     out.push(30);
                     push_u128(&mut out, fee_rate_per_slot);
                 }
-                Self::UpdateAuthority { new_pubkey } => {
+                Self::UpdateAuthority {
+                    new_pubkey,
+                    expected_sequence,
+                } => {
                     out.push(32);
                     out.extend_from_slice(&new_pubkey);
+                    push_u64(&mut out, expected_sequence);
                 }
                 Self::UpdateAssetAuthority {
                     asset_index,
@@ -4555,6 +4592,32 @@ pub mod processor {
         Ok(())
     }
 
+    fn consume_marketauth_sequence_view(
+        group: &mut state::MarketViewMutV16<'_>,
+        expected_sequence: u64,
+    ) -> ProgramResult {
+        let wrapper = &mut group
+            .markets
+            .get_mut(0)
+            .ok_or(PercolatorError::InvalidAccountLen)?
+            .wrapper;
+        let sequence_bytes = wrapper
+            .get(
+                constants::ASSET_MARKETAUTH_SEQUENCE_OFF
+                    ..constants::ASSET_MARKETAUTH_SEQUENCE_OFF
+                        + constants::ASSET_MARKETAUTH_SEQUENCE_LEN,
+            )
+            .ok_or(PercolatorError::InvalidAccountLen)?;
+        let mut raw = [0u8; constants::ASSET_MARKETAUTH_SEQUENCE_LEN];
+        raw.copy_from_slice(sequence_bytes);
+        let current_sequence = u64::from_le_bytes(raw);
+        let next_sequence = state::next_marketauth_sequence(current_sequence, expected_sequence)?;
+        wrapper[constants::ASSET_MARKETAUTH_SEQUENCE_OFF
+            ..constants::ASSET_MARKETAUTH_SEQUENCE_OFF + constants::ASSET_MARKETAUTH_SEQUENCE_LEN]
+            .copy_from_slice(&next_sequence.to_le_bytes());
+        Ok(())
+    }
+
     fn read_oracle_profile_for_asset(
         market_data: &[u8],
         cfg: &WrapperConfigV16,
@@ -5281,9 +5344,10 @@ pub mod processor {
             Instruction::CloseResolved { fee_rate_per_slot } => {
                 handle_close_resolved(program_id, accounts, fee_rate_per_slot)
             }
-            Instruction::UpdateAuthority { new_pubkey } => {
-                handle_update_authority(program_id, accounts, new_pubkey)
-            }
+            Instruction::UpdateAuthority {
+                new_pubkey,
+                expected_sequence,
+            } => handle_update_authority(program_id, accounts, new_pubkey, expected_sequence),
             Instruction::UpdateAssetAuthority {
                 asset_index,
                 kind,
@@ -8694,6 +8758,7 @@ pub mod processor {
         program_id: &Pubkey,
         accounts: &'a [AccountInfo<'a>],
         new_pubkey: [u8; 32],
+        expected_sequence: u64,
     ) -> ProgramResult {
         let current = account(accounts, 0)?;
         let new_authority = account(accounts, 1)?;
@@ -8717,6 +8782,7 @@ pub mod processor {
             expect_live_authority(&cfg.marketauth, current.key)?;
             let old_marketauth = cfg.marketauth;
             let mut profile = read_oracle_profile_from_view(&group, &cfg, 0)?;
+            consume_marketauth_sequence_view(&mut group, expected_sequence)?;
             if profile.asset_admin == old_marketauth {
                 profile.asset_admin = new_pubkey;
             }

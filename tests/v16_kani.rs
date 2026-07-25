@@ -6,7 +6,7 @@ use percolator_prog::ix::{CrankObservationHint, Instruction};
 use percolator_prog::matcher_abi::{
     validate_matcher_return, MatcherReturn, FLAG_PARTIAL_OK, FLAG_REJECTED, FLAG_VALID,
 };
-use percolator_prog::policy_v16;
+use percolator_prog::{policy_v16, state};
 
 #[kani::proof]
 fn kani_v16_premium_funding_rate_is_clamped_and_signed() {
@@ -654,6 +654,7 @@ fn kani_v16_legacy_permissionless_crank_size_payload_is_rejected() {
 
 #[kani::proof]
 fn kani_v16_update_authority_decode_preserves_wire_fields() {
+    let expected_sequence: u64 = kani::any();
     let mut new_pubkey = [0u8; 32];
     let mut i = 0;
     while i < 32 {
@@ -661,17 +662,35 @@ fn kani_v16_update_authority_decode_preserves_wire_fields() {
         i += 1;
     }
 
-    let mut data = [0u8; 33];
+    let mut data = [0u8; 41];
     data[0] = 32;
     data[1..33].copy_from_slice(&new_pubkey);
+    data[33..41].copy_from_slice(&expected_sequence.to_le_bytes());
 
     match Instruction::decode(&data).unwrap() {
         Instruction::UpdateAuthority {
             new_pubkey: got_pubkey,
+            expected_sequence: got_sequence,
         } => {
             assert_eq!(got_pubkey, new_pubkey);
+            assert_eq!(got_sequence, expected_sequence);
         }
         _ => unreachable!(),
+    }
+}
+
+#[kani::proof]
+fn kani_v16_marketauth_sequence_is_exact_and_monotonic() {
+    let current_sequence: u64 = kani::any();
+    let expected_sequence: u64 = kani::any();
+    let next = state::next_marketauth_sequence(current_sequence, expected_sequence);
+
+    if current_sequence != expected_sequence || current_sequence == u64::MAX {
+        assert!(next.is_err());
+    } else {
+        let next_sequence = next.unwrap();
+        assert_eq!(next_sequence, current_sequence + 1);
+        assert!(next_sequence > current_sequence);
     }
 }
 
@@ -1218,6 +1237,7 @@ fn kani_v16_admin_policy_payloads_reject_trailing_byte() {
     assert_rejects_trailing_byte(
         Instruction::UpdateAuthority {
             new_pubkey: [1u8; 32],
+            expected_sequence: 7,
         },
         extra,
     );

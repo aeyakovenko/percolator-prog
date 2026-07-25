@@ -1039,12 +1039,16 @@ impl V16CuEnv {
 
     fn update_asset_authority_with_cu(&mut self, new_authority: &Keypair) -> u64 {
         self.ensure_signer_account(new_authority.pubkey());
+        let expected_sequence =
+            state::read_marketauth_sequence(&self.svm.get_account(&self.market).unwrap().data)
+                .unwrap();
         send_tx(
             &mut self.svm,
             self.program_id,
             &self.payer,
             ProgInstruction::UpdateAuthority {
                 new_pubkey: new_authority.pubkey().to_bytes(),
+                expected_sequence,
             },
             vec![
                 AccountMeta::new(self.admin.pubkey(), true),
@@ -25664,6 +25668,7 @@ fn v16_attack_update_authority_requires_new_authority_signature() {
         &env.payer,
         ProgInstruction::UpdateAuthority {
             new_pubkey: victim.pubkey().to_bytes(),
+            expected_sequence: 0,
         },
         vec![
             AccountMeta::new(env.admin.pubkey(), true),
@@ -25692,6 +25697,7 @@ fn v16_attack_update_authority_requires_new_authority_signature() {
         &env.payer,
         ProgInstruction::UpdateAuthority {
             new_pubkey: new_asset.pubkey().to_bytes(),
+            expected_sequence: 0,
         },
         vec![
             AccountMeta::new(env.admin.pubkey(), true),
@@ -25724,6 +25730,7 @@ fn v16_attack_update_authority_requires_new_authority_signature() {
         &env.payer,
         ProgInstruction::UpdateAuthority {
             new_pubkey: env.admin.pubkey().to_bytes(),
+            expected_sequence: 1,
         },
         vec![
             AccountMeta::new(env.admin.pubkey(), true),
@@ -27848,6 +27855,7 @@ fn v16_attack_close_slab_rejects_market_as_lamport_destination() {
         &payer,
         ProgInstruction::UpdateAuthority {
             new_pubkey: market.pubkey().to_bytes(),
+            expected_sequence: 0,
         },
         vec![
             AccountMeta::new(admin.pubkey(), true),
@@ -43471,6 +43479,7 @@ fn v16_attack_update_authority_non_holder_cannot_rotate() {
         &env.payer,
         ProgInstruction::UpdateAuthority {
             new_pubkey: mallory.pubkey().to_bytes(),
+            expected_sequence: 0,
         },
         vec![
             AccountMeta::new(mallory.pubkey(), true),
@@ -43535,6 +43544,7 @@ fn v16_attack_update_authority_non_holder_cannot_rotate() {
         &env.payer,
         ProgInstruction::UpdateAuthority {
             new_pubkey: new_admin.pubkey().to_bytes(),
+            expected_sequence: 0,
         },
         vec![
             AccountMeta::new(env.admin.pubkey(), true),
@@ -43573,6 +43583,7 @@ fn v16_attack_marketauth_renounce_rejected_even_with_fallback() {
         &env.payer,
         ProgInstruction::UpdateAuthority {
             new_pubkey: [0u8; 32],
+            expected_sequence: 0,
         },
         vec![
             AccountMeta::new(env.admin.pubkey(), true),
@@ -43602,6 +43613,7 @@ fn v16_attack_marketauth_renounce_rejected_even_with_fallback() {
         &env.payer,
         ProgInstruction::UpdateAuthority {
             new_pubkey: [0u8; 32],
+            expected_sequence: 0,
         },
         vec![
             AccountMeta::new(env.admin.pubkey(), true),
@@ -59716,4 +59728,180 @@ fn v16_attack_underfunded_exit_cannot_move_ewma_with_uncollectible_fee() {
     ] {
         assert_underfunded_ewma_exit_uses_collected_fee(path);
     }
+}
+
+// Returning the market authority to a prior holder must not reactivate every old handoff that
+// holder signed during the same market generation. Otherwise a displaced incoming key can retain
+// its co-signed transaction, wait for the old holder to fund insurance, and seize the new reserve.
+#[test]
+fn v16_attack_market_authority_handoff_cannot_replay_after_same_generation_aba() {
+    const AMOUNT: u128 = 50_000;
+
+    let mut env = V16CuEnv::new();
+    let original = env.admin.insecure_clone();
+    let attacker = Keypair::new();
+    let interim = Keypair::new();
+    env.ensure_signer_account(attacker.pubkey());
+    env.ensure_signer_account(interim.pubkey());
+
+    let retained_ix = Instruction {
+        program_id: env.program_id,
+        accounts: vec![
+            AccountMeta::new(original.pubkey(), true),
+            AccountMeta::new(attacker.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        data: ProgInstruction::UpdateAuthority {
+            new_pubkey: attacker.pubkey().to_bytes(),
+            expected_sequence: 0,
+        }
+        .encode(),
+    };
+    let retained = Transaction::new_signed_with_payer(
+        &[
+            heap_ix(),
+            cu_ix(),
+            ComputeBudgetInstruction::set_compute_unit_price(1),
+            retained_ix,
+        ],
+        Some(&attacker.pubkey()),
+        &[&attacker, &original],
+        env.svm.latest_blockhash(),
+    );
+
+    send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::UpdateAuthority {
+            new_pubkey: interim.pubkey().to_bytes(),
+            expected_sequence: 0,
+        },
+        vec![
+            AccountMeta::new(original.pubkey(), true),
+            AccountMeta::new(interim.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&original, &interim],
+    )
+    .expect("the original authority hands off to the interim key");
+    send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::UpdateAuthority {
+            new_pubkey: original.pubkey().to_bytes(),
+            expected_sequence: 1,
+        },
+        vec![
+            AccountMeta::new(interim.pubkey(), true),
+            AccountMeta::new(original.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&interim, &original],
+    )
+    .expect("the interim authority legitimately returns control");
+
+    let source = env.top_up_insurance(AMOUNT);
+    assert_eq!(env.token_amount(source), 0);
+    let profile_before =
+        state::read_asset_oracle_profile(&env.svm.get_account(&env.market).unwrap().data, 0)
+            .unwrap();
+    assert_eq!(
+        env.market_state().0.marketauth,
+        original.pubkey().to_bytes()
+    );
+    assert_eq!(
+        profile_before.insurance_authority,
+        original.pubkey().to_bytes()
+    );
+    assert_eq!(
+        profile_before.insurance_operator,
+        original.pubkey().to_bytes()
+    );
+    let group_before = env.market_state().1;
+    assert_eq!(
+        group_before.insurance_domain_budget[0] + group_before.insurance_domain_budget[1],
+        AMOUNT,
+        "the original authority's contribution makes the replay consequence non-vacuous"
+    );
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    let replay = env.svm.send_transaction(retained);
+    if replay.is_ok() {
+        let profile_after =
+            state::read_asset_oracle_profile(&env.svm.get_account(&env.market).unwrap().data, 0)
+                .unwrap();
+        assert_eq!(
+            env.market_state().0.marketauth,
+            attacker.pubkey().to_bytes()
+        );
+        assert_eq!(
+            profile_after.insurance_operator,
+            attacker.pubkey().to_bytes(),
+            "the retained handoff revived the displaced live-withdrawal key"
+        );
+        let (attacker_dest, _) = env
+            .try_withdraw_insurance_asset_with_authority(&attacker, 0, AMOUNT)
+            .expect("the revived operator drains the new contribution");
+        assert_eq!(env.token_amount(attacker_dest), AMOUNT as u64);
+        let group_after = env.market_state().1;
+        assert_eq!(
+            group_after.insurance_domain_budget[0] + group_after.insurance_domain_budget[1],
+            0
+        );
+        panic!("a retained market-authority handoff replayed after A-to-C-to-A");
+    }
+    let replay_err = format!("{:?}", replay.unwrap_err());
+    assert!(
+        replay_err.contains("Custom(19)") || replay_err.contains("custom program error: 0x13"),
+        "the retained handoff must reject specifically as EngineStale, got {replay_err}"
+    );
+    assert_eq!(
+        state::read_marketauth_sequence(&env.svm.get_account(&env.market).unwrap().data).unwrap(),
+        2,
+        "a stale retained handoff cannot consume the current sequence"
+    );
+
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "rejected stale handoff leaves market state byte-identical"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        vault_before,
+        "rejected stale handoff leaves custody byte-identical"
+    );
+
+    assert!(
+        env.try_withdraw_insurance_asset_with_authority(&attacker, 0, AMOUNT)
+            .is_err(),
+        "the displaced incoming key cannot withdraw the restored authority's reserve"
+    );
+
+    let fresh = Keypair::new();
+    env.ensure_signer_account(fresh.pubkey());
+    send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::UpdateAuthority {
+            new_pubkey: fresh.pubkey().to_bytes(),
+            expected_sequence: 2,
+        },
+        vec![
+            AccountMeta::new(original.pubkey(), true),
+            AccountMeta::new(fresh.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&original, &fresh],
+    )
+    .expect("a freshly sequenced handoff remains live after rejecting stale bytes");
+    assert_eq!(env.market_state().0.marketauth, fresh.pubkey().to_bytes());
+    assert_eq!(
+        state::read_marketauth_sequence(&env.svm.get_account(&env.market).unwrap().data).unwrap(),
+        3
+    );
 }
