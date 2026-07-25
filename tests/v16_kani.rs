@@ -355,22 +355,30 @@ fn kani_v16_top_up_backing_bucket_decode_preserves_wire_fields() {
     let domain: u16 = kani::any();
     let amount: u128 = kani::any();
     let expiry_slot: u64 = kani::any();
+    let expected_fee_bps: u16 = kani::any();
+    let expected_insurance_share_bps: u16 = kani::any();
 
-    let mut data = [0u8; 27];
+    let mut data = [0u8; 31];
     data[0] = 24;
     data[1..3].copy_from_slice(&domain.to_le_bytes());
     data[3..19].copy_from_slice(&amount.to_le_bytes());
     data[19..27].copy_from_slice(&expiry_slot.to_le_bytes());
+    data[27..29].copy_from_slice(&expected_fee_bps.to_le_bytes());
+    data[29..31].copy_from_slice(&expected_insurance_share_bps.to_le_bytes());
 
     match Instruction::decode(&data).unwrap() {
         Instruction::TopUpBackingBucket {
             domain: got_domain,
             amount: got_amount,
             expiry_slot: got_expiry,
+            expected_fee_bps: got_fee_bps,
+            expected_insurance_share_bps: got_insurance_share_bps,
         } => {
             assert_eq!(got_domain, domain);
             assert_eq!(got_amount, amount);
             assert_eq!(got_expiry, expiry_slot);
+            assert_eq!(got_fee_bps, expected_fee_bps);
+            assert_eq!(got_insurance_share_bps, expected_insurance_share_bps);
         }
         _ => unreachable!(),
     }
@@ -1153,6 +1161,8 @@ fn kani_v16_custody_payloads_reject_trailing_byte() {
             domain: 1,
             amount: 1,
             expiry_slot: 10,
+            expected_fee_bps: 20,
+            expected_insurance_share_bps: 30,
         },
         extra,
     );
@@ -1496,7 +1506,7 @@ fn kani_v16_every_active_payload_rejects_one_byte_truncation() {
     let top_up_domain = [56u8; 17];
     assert!(Instruction::decode(&top_up_domain).is_err());
 
-    let top_up_backing = [24u8; 25];
+    let top_up_backing = [24u8; 29];
     assert!(Instruction::decode(&top_up_backing).is_err());
 
     let withdraw_insurance = [23u8; 16];

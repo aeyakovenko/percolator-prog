@@ -78,7 +78,10 @@ The economic and governance model for a permissionless multi-asset market. Statu
     `v16_attack_backing_fee_split_conserves` drives a real BPF risk-increase that grows a
     counterparty-backing lien and asserts the fee splits with no leakage: `charged ==
     insurance_pool_delta + provider_delta`, `insurance_delta == floor(charged * share_bps)`, and the
-    per-domain insurance budget mirrors the insurance share.
+    per-domain insurance budget mirrors the insurance share. The
+    per-domain fee rate and insurance split are immutable while that backing bucket holds provider
+    principal, liens, consumed/impaired backing, or unwithdrawn earnings; idempotent writes remain
+    valid and an empty domain can be reconfigured.
 
 ### Isolation — traders are safe from other assets, even faulty ones
 Assets 1..N are **truly permissionless ⇒ untrusted**. The protocol must guarantee:
