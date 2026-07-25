@@ -59717,3 +59717,127 @@ fn v16_attack_underfunded_exit_cannot_move_ewma_with_uncollectible_fee() {
         assert_underfunded_ewma_exit_uses_collected_fee(path);
     }
 }
+
+#[test]
+fn v16_attack_delayed_trade_fee_policy_cannot_tax_presigned_trade() {
+    const PRICE: u64 = 100;
+    const DEPOSIT: u128 = 10_000;
+    const SIZE_Q: i128 = 10 * POS_SCALE as i128;
+    const FORCED_FEE_BPS: u64 = 10_000;
+    const FORCED_FEE_PER_SIDE: u128 = 1_000;
+
+    let mut env = V16CuEnv::new();
+    let attacker = Keypair::new();
+    env.update_market_init_fee_policy_with_cu(1);
+    env.svm.warp_to_slot(1);
+    env.activate_permissionless_asset_with_fee(
+        &attacker,
+        1,
+        1,
+        PRICE,
+        attacker.pubkey(),
+        attacker.pubkey(),
+        attacker.pubkey(),
+        attacker.pubkey(),
+        1,
+    );
+
+    let victim = Keypair::new();
+    let victim_portfolio = env.create_portfolio(&victim);
+    let attacker_portfolio = env.create_portfolio(&attacker);
+    env.deposit(&victim, victim_portfolio, DEPOSIT);
+    env.deposit(&attacker, attacker_portfolio, DEPOSIT);
+
+    // The honest asset-0 insurance authority signs a high fee and then a
+    // correcting zero fee under one still-live blockhash. Once the correction
+    // lands, the independent victim signs a zero-fee trade on that visible
+    // policy. An untrusted relayer must not be able to restore the older fee
+    // immediately before submitting the already-signed trade.
+    let blockhash = env.svm.latest_blockhash();
+    let make_policy_tx = |trade_fee_base_bps| {
+        let instruction = Instruction {
+            program_id: env.program_id,
+            accounts: vec![
+                AccountMeta::new(env.admin.pubkey(), true),
+                AccountMeta::new(env.market, false),
+            ],
+            data: ProgInstruction::UpdateTradeFeePolicy { trade_fee_base_bps }.encode(),
+        };
+        Transaction::new_signed_with_payer(
+            &[heap_ix(), cu_ix(), instruction],
+            Some(&env.payer.pubkey()),
+            &[&env.payer, &env.admin],
+            blockhash,
+        )
+    };
+    let delayed_high_fee = make_policy_tx(FORCED_FEE_BPS);
+    let correcting_zero_fee = make_policy_tx(0);
+    env.svm
+        .send_transaction(correcting_zero_fee)
+        .expect("newer zero-fee policy lands first");
+    assert_eq!(env.market_state().0.trade_fee_base_bps, 0);
+
+    let trade_instruction = Instruction {
+        program_id: env.program_id,
+        accounts: vec![
+            AccountMeta::new(victim.pubkey(), true),
+            AccountMeta::new(attacker.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(victim_portfolio, false),
+            AccountMeta::new(attacker_portfolio, false),
+        ],
+        data: ProgInstruction::TradeNoCpi {
+            asset_index: 1,
+            size_q: SIZE_Q,
+            exec_price: PRICE,
+            fee_bps: 0,
+        }
+        .encode(),
+    };
+    let presigned_zero_fee_trade = Transaction::new_signed_with_payer(
+        &[heap_ix(), cu_ix(), trade_instruction],
+        Some(&env.payer.pubkey()),
+        &[&env.payer, &victim, &attacker],
+        blockhash,
+    );
+
+    let delayed_accepted = env.svm.send_transaction(delayed_high_fee).is_ok();
+    env.svm
+        .send_transaction(presigned_zero_fee_trade)
+        .expect("the independently signed trade remains executable");
+
+    let (_, group) = env.market_state();
+    let victim_capital = env.portfolio_state(victim_portfolio).capital.get();
+    let attacker_capital = env.portfolio_state(attacker_portfolio).capital.get();
+    let charged_fees = group.insurance_domain_budget[2] + group.insurance_domain_budget[3];
+    let extracted = if charged_fees == 0 {
+        0
+    } else {
+        let (destination, _) = env
+            .try_withdraw_insurance_asset_with_authority(&attacker, 1, charged_fees)
+            .expect("permissionless asset operator withdraws the forced trade fees");
+        env.token_amount(destination) as u128
+    };
+
+    if delayed_accepted {
+        assert_eq!(group.insurance_domain_budget[2], FORCED_FEE_PER_SIDE);
+        assert_eq!(group.insurance_domain_budget[3], FORCED_FEE_PER_SIDE);
+        assert_eq!(victim_capital, DEPOSIT - FORCED_FEE_PER_SIDE);
+        assert_eq!(attacker_capital, DEPOSIT - FORCED_FEE_PER_SIDE);
+        assert_eq!(extracted, FORCED_FEE_PER_SIDE * 2);
+        assert_eq!(
+            attacker_capital + extracted,
+            DEPOSIT + FORCED_FEE_PER_SIDE,
+            "the asset operator's net gain equals the independent victim's forced fee"
+        );
+        panic!(
+            "older high-fee intent landed after the correction, charged \
+             {charged_fees} atoms, and let the asset operator withdraw {extracted}"
+        );
+    }
+    assert_eq!(
+        (victim_capital, attacker_capital, charged_fees, extracted),
+        (DEPOSIT, DEPOSIT, 0, 0),
+        "the superseded policy must not tax the already-signed zero-fee trade"
+    );
+}
