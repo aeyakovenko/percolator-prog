@@ -1039,12 +1039,16 @@ impl V16CuEnv {
 
     fn update_asset_authority_with_cu(&mut self, new_authority: &Keypair) -> u64 {
         self.ensure_signer_account(new_authority.pubkey());
+        let expected_sequence =
+            state::read_marketauth_sequence(&self.svm.get_account(&self.market).unwrap().data)
+                .unwrap();
         send_tx(
             &mut self.svm,
             self.program_id,
             &self.payer,
             ProgInstruction::UpdateAuthority {
                 new_pubkey: new_authority.pubkey().to_bytes(),
+                expected_sequence,
             },
             vec![
                 AccountMeta::new(self.admin.pubkey(), true),
@@ -25664,6 +25668,7 @@ fn v16_attack_update_authority_requires_new_authority_signature() {
         &env.payer,
         ProgInstruction::UpdateAuthority {
             new_pubkey: victim.pubkey().to_bytes(),
+            expected_sequence: 0,
         },
         vec![
             AccountMeta::new(env.admin.pubkey(), true),
@@ -25692,6 +25697,7 @@ fn v16_attack_update_authority_requires_new_authority_signature() {
         &env.payer,
         ProgInstruction::UpdateAuthority {
             new_pubkey: new_asset.pubkey().to_bytes(),
+            expected_sequence: 0,
         },
         vec![
             AccountMeta::new(env.admin.pubkey(), true),
@@ -25724,6 +25730,7 @@ fn v16_attack_update_authority_requires_new_authority_signature() {
         &env.payer,
         ProgInstruction::UpdateAuthority {
             new_pubkey: env.admin.pubkey().to_bytes(),
+            expected_sequence: 1,
         },
         vec![
             AccountMeta::new(env.admin.pubkey(), true),
@@ -27848,6 +27855,7 @@ fn v16_attack_close_slab_rejects_market_as_lamport_destination() {
         &payer,
         ProgInstruction::UpdateAuthority {
             new_pubkey: market.pubkey().to_bytes(),
+            expected_sequence: 0,
         },
         vec![
             AccountMeta::new(admin.pubkey(), true),
@@ -43471,6 +43479,7 @@ fn v16_attack_update_authority_non_holder_cannot_rotate() {
         &env.payer,
         ProgInstruction::UpdateAuthority {
             new_pubkey: mallory.pubkey().to_bytes(),
+            expected_sequence: 0,
         },
         vec![
             AccountMeta::new(mallory.pubkey(), true),
@@ -43535,6 +43544,7 @@ fn v16_attack_update_authority_non_holder_cannot_rotate() {
         &env.payer,
         ProgInstruction::UpdateAuthority {
             new_pubkey: new_admin.pubkey().to_bytes(),
+            expected_sequence: 0,
         },
         vec![
             AccountMeta::new(env.admin.pubkey(), true),
@@ -43573,6 +43583,7 @@ fn v16_attack_marketauth_renounce_rejected_even_with_fallback() {
         &env.payer,
         ProgInstruction::UpdateAuthority {
             new_pubkey: [0u8; 32],
+            expected_sequence: 0,
         },
         vec![
             AccountMeta::new(env.admin.pubkey(), true),
@@ -43602,6 +43613,7 @@ fn v16_attack_marketauth_renounce_rejected_even_with_fallback() {
         &env.payer,
         ProgInstruction::UpdateAuthority {
             new_pubkey: [0u8; 32],
+            expected_sequence: 0,
         },
         vec![
             AccountMeta::new(env.admin.pubkey(), true),
@@ -59741,6 +59753,7 @@ fn v16_attack_market_authority_handoff_cannot_replay_after_same_generation_aba()
         ],
         data: ProgInstruction::UpdateAuthority {
             new_pubkey: attacker.pubkey().to_bytes(),
+            expected_sequence: 0,
         }
         .encode(),
     };
@@ -59762,6 +59775,7 @@ fn v16_attack_market_authority_handoff_cannot_replay_after_same_generation_aba()
         &env.payer,
         ProgInstruction::UpdateAuthority {
             new_pubkey: interim.pubkey().to_bytes(),
+            expected_sequence: 0,
         },
         vec![
             AccountMeta::new(original.pubkey(), true),
@@ -59777,6 +59791,7 @@ fn v16_attack_market_authority_handoff_cannot_replay_after_same_generation_aba()
         &env.payer,
         ProgInstruction::UpdateAuthority {
             new_pubkey: original.pubkey().to_bytes(),
+            expected_sequence: 1,
         },
         vec![
             AccountMeta::new(interim.pubkey(), true),
@@ -59838,6 +59853,16 @@ fn v16_attack_market_authority_handoff_cannot_replay_after_same_generation_aba()
         );
         panic!("a retained market-authority handoff replayed after A-to-C-to-A");
     }
+    let replay_err = format!("{:?}", replay.unwrap_err());
+    assert!(
+        replay_err.contains("Custom(19)") || replay_err.contains("custom program error: 0x13"),
+        "the retained handoff must reject specifically as EngineStale, got {replay_err}"
+    );
+    assert_eq!(
+        state::read_marketauth_sequence(&env.svm.get_account(&env.market).unwrap().data).unwrap(),
+        2,
+        "a stale retained handoff cannot consume the current sequence"
+    );
 
     assert_eq!(
         env.svm.get_account(&env.market).unwrap(),
@@ -59848,5 +59873,35 @@ fn v16_attack_market_authority_handoff_cannot_replay_after_same_generation_aba()
         env.svm.get_account(&env.vault).unwrap(),
         vault_before,
         "rejected stale handoff leaves custody byte-identical"
+    );
+
+    assert!(
+        env.try_withdraw_insurance_asset_with_authority(&attacker, 0, AMOUNT)
+            .is_err(),
+        "the displaced incoming key cannot withdraw the restored authority's reserve"
+    );
+
+    let fresh = Keypair::new();
+    env.ensure_signer_account(fresh.pubkey());
+    send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::UpdateAuthority {
+            new_pubkey: fresh.pubkey().to_bytes(),
+            expected_sequence: 2,
+        },
+        vec![
+            AccountMeta::new(original.pubkey(), true),
+            AccountMeta::new(fresh.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&original, &fresh],
+    )
+    .expect("a freshly sequenced handoff remains live after rejecting stale bytes");
+    assert_eq!(env.market_state().0.marketauth, fresh.pubkey().to_bytes());
+    assert_eq!(
+        state::read_marketauth_sequence(&env.svm.get_account(&env.market).unwrap().data).unwrap(),
+        3
     );
 }

@@ -172,8 +172,9 @@ Assets 1..N are **truly permissionless ⇒ untrusted**. The protocol must guaran
   any asset including asset 0** (`ASSET_ACTION_SHUTDOWN` → RECOVERY with the `force_close_delay_slots`
   exit window so traders can exit), **resolve/close the market** (`ResolveMarket`/`CloseSlab`),
   **market policies**, and **rotate/swap the base-unit mint**. It is rotated via
-  `UpdateAuthority { new_pubkey }` (current `marketauth` signs and the non-zero replacement co-signs;
-  burn-to-zero is rejected). Everything else — restart, insurance/operator/backing/oracle on
+  `UpdateAuthority { new_pubkey, expected_sequence }` (current `marketauth` signs, the non-zero
+  replacement co-signs, and the checked market sequence makes the handoff one-shot; burn-to-zero is
+  rejected). Everything else — restart, insurance/operator/backing/oracle on
   **every** asset including 0 — is per-asset (`asset_admin` + `UpdateAssetAuthority`), never a separate
   marketauth-only path. `marketauth` can restart an asset only while it is also that asset's
   `asset_admin` (the asset-0 bootstrap state).
@@ -379,7 +380,9 @@ This section describes intent and operational ordering, not argument-by-argument
   - initializes slab header/config + calls `RiskEngine::init_in_place(risk_params, clock.slot, init_price)`
   - binds the collateral mint, initializes asset 0, and sets `marketauth` to the init signer
 - **UpdateAuthority** (tag 32) — single-purpose: rotate the one market-level `marketauth` key
-  - `UpdateAuthority { new_pubkey }`: current `marketauth` signs; a non-zero replacement co-signs
+  - `UpdateAuthority { new_pubkey, expected_sequence }`: current `marketauth` signs; a non-zero
+    replacement co-signs; `expected_sequence` must equal the program-owned market handoff sequence
+    and increments on success
   - setting `new_pubkey` to all zeros is rejected; `marketauth` must remain live for final slab reclaim
   - per-asset authorities (insurance/operator/backing/oracle, incl. asset 0) are rotated via
     `UpdateAssetAuthority`, not this instruction
@@ -732,7 +735,8 @@ At minimum, monitor:
 - liquidation frequency spikes
 
 ### Governance / authority handling
-- `UpdateAuthority` rotates `marketauth`; the current authority and the new key must both sign.
+- `UpdateAuthority` rotates `marketauth`; the current authority and new key must both sign, and the
+  handoff must carry the current one-shot sequence.
 - `UpdateAssetAuthority` rotates per-asset authorities; non-admin self-rotation also requires the new key.
 - Burning is limited to `asset_admin`. Required market/domain authorities cannot be set to zero.
 
@@ -823,7 +827,7 @@ mark/insurance/operator) are reachable until asset-0's `asset_admin` is rotated 
 
 These are governance powers, not bugs:
 
-1. `UpdateAuthority { new_pubkey }`
+1. `UpdateAuthority { new_pubkey, expected_sequence }`
    - rotate `marketauth` to an attacker key.
    - impact: governance capture.
 2. Policy updates / `UpdateMarketInitFeePolicy` / `UpdateBaseUnitMints` / asset create+retire+force-shutdown
