@@ -786,6 +786,24 @@ fn kani_v16_update_liquidation_fee_policy_decode_preserves_wire_fields() {
 }
 
 #[kani::proof]
+fn kani_v16_update_liquidation_fee_policy_requires_exact_framing() {
+    let instruction = Instruction::UpdateLiquidationFeePolicy {
+        cranker_share_bps: kani::any(),
+        policy_sequence: kani::any(),
+    };
+    let mut data = instruction.encode();
+    assert_eq!(data.len(), 11);
+    assert!(Instruction::decode(&data).is_ok());
+
+    data.pop();
+    assert!(Instruction::decode(&data).is_err());
+
+    data.push(0);
+    data.push(kani::any());
+    assert!(Instruction::decode(&data).is_err());
+}
+
+#[kani::proof]
 fn kani_v16_update_maintenance_fee_policy_decode_preserves_wire_fields() {
     let cranker_share_bps: u16 = kani::any();
 
