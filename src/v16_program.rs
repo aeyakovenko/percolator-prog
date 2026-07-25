@@ -65,7 +65,11 @@ pub mod constants {
     pub const PORTFOLIO_MATCHER_CONFIG_LEN: usize = 104;
     pub const PORTFOLIO_ID_OFF: usize = PORTFOLIO_MATCHER_CONFIG_OFF + PORTFOLIO_MATCHER_CONFIG_LEN;
     pub const PORTFOLIO_ID_LEN: usize = 8;
-    pub const PORTFOLIO_ACCOUNT_LEN: usize = PORTFOLIO_ID_OFF + PORTFOLIO_ID_LEN;
+    pub const PORTFOLIO_TRADE_REPLAY_OFF: usize = PORTFOLIO_ID_OFF + PORTFOLIO_ID_LEN;
+    pub const PORTFOLIO_TRADE_REPLAY_LEN: usize = 16;
+    pub const LEGACY_PORTFOLIO_ID: u64 = u64::MAX;
+    pub const PORTFOLIO_ACCOUNT_LEN: usize =
+        PORTFOLIO_TRADE_REPLAY_OFF + PORTFOLIO_TRADE_REPLAY_LEN;
     pub const MAX_MATCHER_TAIL_ACCOUNTS: usize = 32;
     pub const MATCHER_ABI_VERSION: u32 = 3;
     pub const MATCHER_CONTEXT_MIN_LEN: usize = 64;
@@ -156,13 +160,13 @@ pub mod state {
     use crate::{
         constants::{
             ASSET_ORACLE_PROFILE_LEN, ASSET_ORACLE_WRAPPER_LEN, HEADER_LEN,
-            KIND_BACKING_DOMAIN_LEDGER, KIND_INSURANCE_LEDGER, KIND_MARKET, KIND_PORTFOLIO, MAGIC,
-            MARKET_GROUP_LEN, MARKET_GROUP_OFF, MIN_MARKET_ACCOUNT_LEN, ORACLE_LEG_CAP,
-            ORACLE_LEG_FLAGS_MASK, ORACLE_MODE_AUTH_MARK, ORACLE_MODE_EWMA_MARK,
+            KIND_BACKING_DOMAIN_LEDGER, KIND_INSURANCE_LEDGER, KIND_MARKET, KIND_PORTFOLIO,
+            LEGACY_PORTFOLIO_ID, MAGIC, MARKET_GROUP_LEN, MARKET_GROUP_OFF, MIN_MARKET_ACCOUNT_LEN,
+            ORACLE_LEG_CAP, ORACLE_LEG_FLAGS_MASK, ORACLE_MODE_AUTH_MARK, ORACLE_MODE_EWMA_MARK,
             ORACLE_MODE_HYBRID_AFTER_HOURS, ORACLE_MODE_MANUAL, PORTFOLIO_ACCOUNT_LEN,
             PORTFOLIO_ENGINE_ACCOUNT_LEN, PORTFOLIO_ID_LEN, PORTFOLIO_ID_OFF,
             PORTFOLIO_MATCHER_CONFIG_LEN, PORTFOLIO_MATCHER_CONFIG_OFF, PORTFOLIO_STATE_LEN,
-            VERSION, WRAPPER_CONFIG_LEN,
+            PORTFOLIO_TRADE_REPLAY_LEN, PORTFOLIO_TRADE_REPLAY_OFF, VERSION, WRAPPER_CONFIG_LEN,
         },
         error::PercolatorError,
     };
@@ -800,6 +804,28 @@ pub mod state {
         Ok(id)
     }
 
+    /// Return the wire ID for a trade, including the deterministic sentinel used by portfolios
+    /// created before incarnation IDs existed.
+    #[inline]
+    pub fn read_trade_portfolio_id(data: &[u8]) -> Result<u64, ProgramError> {
+        check_header(data, KIND_PORTFOLIO)?;
+        let Some(id_bytes) = data.get(PORTFOLIO_ID_OFF..PORTFOLIO_ID_OFF + PORTFOLIO_ID_LEN) else {
+            return Ok(LEGACY_PORTFOLIO_ID);
+        };
+        let id = u64::from_le_bytes(id_bytes.try_into().unwrap());
+        if id != 0 {
+            return Ok(id);
+        }
+        if let Some(replay) = data.get(
+            PORTFOLIO_TRADE_REPLAY_OFF..PORTFOLIO_TRADE_REPLAY_OFF + PORTFOLIO_TRADE_REPLAY_LEN,
+        ) {
+            if replay.iter().any(|byte| *byte != 0) {
+                return Err(ProgramError::InvalidAccountData);
+            }
+        }
+        Ok(LEGACY_PORTFOLIO_ID)
+    }
+
     #[inline]
     fn write_portfolio_id(data: &mut [u8], id: u64) -> Result<(), ProgramError> {
         check_header(data, KIND_PORTFOLIO)?;
@@ -821,6 +847,80 @@ pub mod state {
             .checked_add(1)
             .ok_or(PercolatorError::EngineCounterOverflow)?;
         Ok((id, next))
+    }
+
+    /// Advance a bounded at-most-once window while allowing distinct intents to land out of
+    /// order. Bit zero represents `max_seen`; bit N represents `max_seen - N`.
+    #[inline]
+    pub fn advance_trade_intent_replay_window(
+        max_seen: u64,
+        seen_bitmap: u64,
+        intent_id: u64,
+    ) -> Option<(u64, u64)> {
+        if intent_id == 0
+            || (max_seen == 0 && seen_bitmap != 0)
+            || (max_seen != 0 && seen_bitmap & 1 == 0)
+        {
+            return None;
+        }
+        if max_seen == 0 {
+            return Some((intent_id, 1));
+        }
+        if intent_id > max_seen {
+            let distance = intent_id - max_seen;
+            let shifted = if distance >= u64::BITS as u64 {
+                0
+            } else {
+                seen_bitmap << distance
+            };
+            return Some((intent_id, shifted | 1));
+        }
+        let distance = max_seen - intent_id;
+        if distance >= u64::BITS as u64 {
+            return None;
+        }
+        let bit = 1u64 << distance;
+        if seen_bitmap & bit != 0 {
+            return None;
+        }
+        Some((max_seen, seen_bitmap | bit))
+    }
+
+    #[inline]
+    pub fn consume_trade_intent(
+        data: &mut [u8],
+        expected_portfolio_id: u64,
+        intent_id: u64,
+    ) -> Result<(), ProgramError> {
+        bind_trade_portfolio_id(data, expected_portfolio_id)?;
+        let window = data
+            .get_mut(
+                PORTFOLIO_TRADE_REPLAY_OFF..PORTFOLIO_TRADE_REPLAY_OFF + PORTFOLIO_TRADE_REPLAY_LEN,
+            )
+            .ok_or(PercolatorError::InvalidAccountLen)?;
+        let max_seen = u64::from_le_bytes(window[0..8].try_into().unwrap());
+        let seen_bitmap = u64::from_le_bytes(window[8..16].try_into().unwrap());
+        let (next_max_seen, next_seen_bitmap) =
+            advance_trade_intent_replay_window(max_seen, seen_bitmap, intent_id)
+                .ok_or(PercolatorError::InvalidInstruction)?;
+        window[0..8].copy_from_slice(&next_max_seen.to_le_bytes());
+        window[8..16].copy_from_slice(&next_seen_bitmap.to_le_bytes());
+        Ok(())
+    }
+
+    #[inline]
+    pub fn bind_trade_portfolio_id(
+        data: &mut [u8],
+        expected_portfolio_id: u64,
+    ) -> Result<(), ProgramError> {
+        let actual_portfolio_id = read_trade_portfolio_id(data)?;
+        if actual_portfolio_id != expected_portfolio_id {
+            return Err(PercolatorError::EngineProvenanceMismatch.into());
+        }
+        if read_u64(data, PORTFOLIO_ID_OFF)? == 0 {
+            write_portfolio_id(data, LEGACY_PORTFOLIO_ID)?;
+        }
+        Ok(())
     }
 
     #[inline]
@@ -2490,22 +2590,36 @@ pub mod ix {
             size_q: i128,
             exec_price: u64,
             fee_bps: u64,
+            portfolio_id_a: u64,
+            intent_id_a: u64,
+            portfolio_id_b: u64,
+            intent_id_b: u64,
         },
         TradeCpi {
             asset_index: u16,
             size_q: i128,
             fee_bps: u64,
             limit_price: u64,
+            portfolio_id_a: u64,
+            intent_id_a: u64,
+            portfolio_id_b: u64,
         },
         /// Atomic multi-leg batch: apply every leg against one taker/LP pair with a single
         /// end-state initial-margin check (interim legs need not be individually margin-feasible).
         BatchTradeNoCpi {
             legs: Vec<BatchTradeLeg>,
+            portfolio_id_a: u64,
+            intent_id_a: u64,
+            portfolio_id_b: u64,
+            intent_id_b: u64,
         },
         /// Atomic multi-leg batch routed through an external matcher: one batched matcher CPI fills
         /// every leg against a single LP, then all fills apply with one end-state margin check.
         BatchTradeCpi {
             legs: Vec<BatchTradeCpiLeg>,
+            portfolio_id_a: u64,
+            intent_id_a: u64,
+            portfolio_id_b: u64,
         },
         SetMatcherConfig {
             enabled: u8,
@@ -2735,14 +2849,25 @@ pub mod ix {
                     size_q: read_i128(&mut rest)?,
                     exec_price: read_u64(&mut rest)?,
                     fee_bps: read_u64(&mut rest)?,
+                    portfolio_id_a: read_u64(&mut rest)?,
+                    intent_id_a: read_u64(&mut rest)?,
+                    portfolio_id_b: read_u64(&mut rest)?,
+                    intent_id_b: read_u64(&mut rest)?,
                 },
                 10 => Self::TradeCpi {
                     asset_index: read_u16(&mut rest)?,
                     size_q: read_i128(&mut rest)?,
                     fee_bps: read_u64(&mut rest)?,
                     limit_price: read_u64(&mut rest)?,
+                    portfolio_id_a: read_u64(&mut rest)?,
+                    intent_id_a: read_u64(&mut rest)?,
+                    portfolio_id_b: read_u64(&mut rest)?,
                 },
                 66 => {
+                    let portfolio_id_a = read_u64(&mut rest)?;
+                    let intent_id_a = read_u64(&mut rest)?;
+                    let portfolio_id_b = read_u64(&mut rest)?;
+                    let intent_id_b = read_u64(&mut rest)?;
                     let n = read_u8(&mut rest)? as usize;
                     if n > BATCH_TRADE_DECODE_MAX_LEGS {
                         return Err(ProgramError::InvalidInstructionData);
@@ -2756,9 +2881,18 @@ pub mod ix {
                             fee_bps: read_u64(&mut rest)?,
                         });
                     }
-                    Self::BatchTradeNoCpi { legs }
+                    Self::BatchTradeNoCpi {
+                        legs,
+                        portfolio_id_a,
+                        intent_id_a,
+                        portfolio_id_b,
+                        intent_id_b,
+                    }
                 }
                 67 => {
+                    let portfolio_id_a = read_u64(&mut rest)?;
+                    let intent_id_a = read_u64(&mut rest)?;
+                    let portfolio_id_b = read_u64(&mut rest)?;
                     let n = read_u8(&mut rest)? as usize;
                     if n > BATCH_TRADE_DECODE_MAX_LEGS {
                         return Err(ProgramError::InvalidInstructionData);
@@ -2772,7 +2906,12 @@ pub mod ix {
                             limit_price: read_u64(&mut rest)?,
                         });
                     }
-                    Self::BatchTradeCpi { legs }
+                    Self::BatchTradeCpi {
+                        legs,
+                        portfolio_id_a,
+                        intent_id_a,
+                        portfolio_id_b,
+                    }
                 }
                 68 => Self::SetMatcherConfig {
                     enabled: read_u8(&mut rest)?,
@@ -3024,27 +3163,51 @@ pub mod ix {
                     size_q,
                     exec_price,
                     fee_bps,
+                    portfolio_id_a,
+                    intent_id_a,
+                    portfolio_id_b,
+                    intent_id_b,
                 } => {
                     out.push(6);
                     push_u16(&mut out, asset_index);
                     push_i128(&mut out, size_q);
                     push_u64(&mut out, exec_price);
                     push_u64(&mut out, fee_bps);
+                    push_u64(&mut out, portfolio_id_a);
+                    push_u64(&mut out, intent_id_a);
+                    push_u64(&mut out, portfolio_id_b);
+                    push_u64(&mut out, intent_id_b);
                 }
                 Self::TradeCpi {
                     asset_index,
                     size_q,
                     fee_bps,
                     limit_price,
+                    portfolio_id_a,
+                    intent_id_a,
+                    portfolio_id_b,
                 } => {
                     out.push(10);
                     push_u16(&mut out, asset_index);
                     push_i128(&mut out, size_q);
                     push_u64(&mut out, fee_bps);
                     push_u64(&mut out, limit_price);
+                    push_u64(&mut out, portfolio_id_a);
+                    push_u64(&mut out, intent_id_a);
+                    push_u64(&mut out, portfolio_id_b);
                 }
-                Self::BatchTradeNoCpi { ref legs } => {
+                Self::BatchTradeNoCpi {
+                    ref legs,
+                    portfolio_id_a,
+                    intent_id_a,
+                    portfolio_id_b,
+                    intent_id_b,
+                } => {
                     out.push(66);
+                    push_u64(&mut out, portfolio_id_a);
+                    push_u64(&mut out, intent_id_a);
+                    push_u64(&mut out, portfolio_id_b);
+                    push_u64(&mut out, intent_id_b);
                     out.push(legs.len() as u8);
                     for leg in legs.iter() {
                         push_u16(&mut out, leg.asset_index);
@@ -3053,8 +3216,16 @@ pub mod ix {
                         push_u64(&mut out, leg.fee_bps);
                     }
                 }
-                Self::BatchTradeCpi { ref legs } => {
+                Self::BatchTradeCpi {
+                    ref legs,
+                    portfolio_id_a,
+                    intent_id_a,
+                    portfolio_id_b,
+                } => {
                     out.push(67);
+                    push_u64(&mut out, portfolio_id_a);
+                    push_u64(&mut out, intent_id_a);
+                    push_u64(&mut out, portfolio_id_b);
                     out.push(legs.len() as u8);
                     for leg in legs.iter() {
                         push_u16(&mut out, leg.asset_index);
@@ -5228,6 +5399,10 @@ pub mod processor {
                 size_q,
                 exec_price,
                 fee_bps,
+                portfolio_id_a,
+                intent_id_a,
+                portfolio_id_b,
+                intent_id_b,
             } => handle_trade_nocpi(
                 program_id,
                 accounts,
@@ -5235,12 +5410,19 @@ pub mod processor {
                 size_q,
                 exec_price,
                 fee_bps,
+                portfolio_id_a,
+                intent_id_a,
+                portfolio_id_b,
+                intent_id_b,
             ),
             Instruction::TradeCpi {
                 asset_index,
                 size_q,
                 fee_bps,
                 limit_price,
+                portfolio_id_a,
+                intent_id_a,
+                portfolio_id_b,
             } => handle_trade_cpi(
                 program_id,
                 accounts,
@@ -5248,13 +5430,38 @@ pub mod processor {
                 size_q,
                 fee_bps,
                 limit_price,
+                portfolio_id_a,
+                intent_id_a,
+                portfolio_id_b,
             ),
-            Instruction::BatchTradeNoCpi { legs } => {
-                handle_batch_trade_nocpi(program_id, accounts, &legs)
-            }
-            Instruction::BatchTradeCpi { legs } => {
-                handle_batch_trade_cpi(program_id, accounts, &legs)
-            }
+            Instruction::BatchTradeNoCpi {
+                legs,
+                portfolio_id_a,
+                intent_id_a,
+                portfolio_id_b,
+                intent_id_b,
+            } => handle_batch_trade_nocpi(
+                program_id,
+                accounts,
+                &legs,
+                portfolio_id_a,
+                intent_id_a,
+                portfolio_id_b,
+                intent_id_b,
+            ),
+            Instruction::BatchTradeCpi {
+                legs,
+                portfolio_id_a,
+                intent_id_a,
+                portfolio_id_b,
+            } => handle_batch_trade_cpi(
+                program_id,
+                accounts,
+                &legs,
+                portfolio_id_a,
+                intent_id_a,
+                portfolio_id_b,
+            ),
             Instruction::SetMatcherConfig { enabled } => {
                 handle_set_matcher_config(program_id, accounts, enabled)
             }
@@ -5798,6 +6005,7 @@ pub mod processor {
         size_q: i128,
         exec_price: u64,
         fee_bps: u64,
+        trade_intent_ids: Option<(u64, u64, u64, u64)>,
         max_market_slots: usize,
     ) -> ProgramResult {
         ensure_portfolio_storage_for_market_slots(account_a_ai, max_market_slots)?;
@@ -5815,6 +6023,14 @@ pub mod processor {
             )?;
             let mut account_a_data = account_a_ai.try_borrow_mut_data()?;
             let mut account_b_data = account_b_ai.try_borrow_mut_data()?;
+            expect_portfolio_data_identity(&account_a_data, account_a_ai.key, account_a_owner_key)?;
+            expect_portfolio_data_identity(&account_b_data, account_b_ai.key, account_b_owner_key)?;
+            if let Some((portfolio_id_a, intent_id_a, portfolio_id_b, intent_id_b)) =
+                trade_intent_ids
+            {
+                state::consume_trade_intent(&mut account_a_data, portfolio_id_a, intent_id_a)?;
+                state::consume_trade_intent(&mut account_b_data, portfolio_id_b, intent_id_b)?;
+            }
             let mut account_a =
                 state::portfolio_view_mut_for_market_slots(&mut account_a_data, max_market_slots)?;
             let mut account_b =
@@ -5983,6 +6199,10 @@ pub mod processor {
         program_id: &Pubkey,
         accounts: &'a [AccountInfo<'a>],
         legs: &[ix::BatchTradeLeg],
+        portfolio_id_a: u64,
+        intent_id_a: u64,
+        portfolio_id_b: u64,
+        intent_id_b: u64,
     ) -> ProgramResult {
         let signer_a = account(accounts, 0)?;
         let signer_b = account(accounts, 1)?;
@@ -6016,6 +6236,7 @@ pub mod processor {
             account_a_ai,
             account_b_ai,
             legs,
+            Some((portfolio_id_a, intent_id_a, portfolio_id_b, intent_id_b)),
             max_market_slots,
         )
     }
@@ -6029,6 +6250,7 @@ pub mod processor {
         account_a_ai: &AccountInfo<'a>,
         account_b_ai: &AccountInfo<'a>,
         legs: &[ix::BatchTradeLeg],
+        trade_intent_ids: Option<(u64, u64, u64, u64)>,
         max_market_slots: usize,
     ) -> ProgramResult {
         if legs.is_empty() {
@@ -6047,6 +6269,14 @@ pub mod processor {
             }
             let mut account_a_data = account_a_ai.try_borrow_mut_data()?;
             let mut account_b_data = account_b_ai.try_borrow_mut_data()?;
+            expect_portfolio_data_identity(&account_a_data, account_a_ai.key, account_a_owner_key)?;
+            expect_portfolio_data_identity(&account_b_data, account_b_ai.key, account_b_owner_key)?;
+            if let Some((portfolio_id_a, intent_id_a, portfolio_id_b, intent_id_b)) =
+                trade_intent_ids
+            {
+                state::consume_trade_intent(&mut account_a_data, portfolio_id_a, intent_id_a)?;
+                state::consume_trade_intent(&mut account_b_data, portfolio_id_b, intent_id_b)?;
+            }
             let mut account_a =
                 state::portfolio_view_mut_for_market_slots(&mut account_a_data, max_market_slots)?;
             let mut account_b =
@@ -6206,6 +6436,10 @@ pub mod processor {
         size_q: i128,
         exec_price: u64,
         fee_bps: u64,
+        portfolio_id_a: u64,
+        intent_id_a: u64,
+        portfolio_id_b: u64,
+        intent_id_b: u64,
     ) -> ProgramResult {
         let signer_a = account(accounts, 0)?;
         let signer_b = account(accounts, 1)?;
@@ -6240,6 +6474,7 @@ pub mod processor {
             size_q,
             exec_price,
             fee_bps,
+            Some((portfolio_id_a, intent_id_a, portfolio_id_b, intent_id_b)),
             max_market_slots,
         )
     }
@@ -6519,6 +6754,23 @@ pub mod processor {
         Ok(())
     }
 
+    fn consume_cpi_trade_intent(
+        account_a_ai: &AccountInfo<'_>,
+        account_b_ai: &AccountInfo<'_>,
+        portfolio_id_a: u64,
+        intent_id_a: u64,
+        portfolio_id_b: u64,
+    ) -> ProgramResult {
+        let mut account_b_data = account_b_ai.try_borrow_mut_data()?;
+        state::bind_trade_portfolio_id(&mut account_b_data, portfolio_id_b)?;
+        drop(account_b_data);
+        state::consume_trade_intent(
+            &mut account_a_ai.try_borrow_mut_data()?,
+            portfolio_id_a,
+            intent_id_a,
+        )
+    }
+
     #[inline(never)]
     fn handle_trade_cpi<'a>(
         program_id: &Pubkey,
@@ -6527,6 +6779,9 @@ pub mod processor {
         size_q: i128,
         fee_bps: u64,
         limit_price: u64,
+        portfolio_id_a: u64,
+        intent_id_a: u64,
+        portfolio_id_b: u64,
     ) -> ProgramResult {
         let signer_a = account(accounts, 0)?;
         let market_ai = account(accounts, 1)?;
@@ -6637,6 +6892,13 @@ pub mod processor {
             max_market_slots,
             &cpi_requests,
         )?;
+        consume_cpi_trade_intent(
+            account_a_ai,
+            account_b_ai,
+            portfolio_id_a,
+            intent_id_a,
+            portfolio_id_b,
+        )?;
         let req_id = {
             let mut market_data = market_ai.try_borrow_mut_data()?;
             state::bump_matcher_req_seq(&mut market_data)?
@@ -6702,6 +6964,7 @@ pub mod processor {
             ret.exec_size,
             ret.exec_price_e6,
             fee_bps,
+            None,
             max_market_slots,
         )
     }
@@ -6828,6 +7091,9 @@ pub mod processor {
         program_id: &Pubkey,
         accounts: &'a [AccountInfo<'a>],
         legs: &[ix::BatchTradeCpiLeg],
+        portfolio_id_a: u64,
+        intent_id_a: u64,
+        portfolio_id_b: u64,
     ) -> ProgramResult {
         if legs.is_empty() || legs.len() > MATCHER_BATCH_MAX_LEGS {
             return Err(PercolatorError::InvalidInstruction.into());
@@ -6973,10 +7239,6 @@ pub mod processor {
             return Err(PercolatorError::InvalidInstruction.into());
         }
 
-        let req_id = {
-            let mut market_data = market_ai.try_borrow_mut_data()?;
-            state::bump_matcher_req_seq(&mut market_data)?
-        };
         let lp_account_id = matcher_lp_account_id(&delegate);
 
         // Build the matcher batch request: per leg, (asset, that asset's oracle price, signed size).
@@ -6996,6 +7258,17 @@ pub mod processor {
             max_market_slots,
             &cpi_requests,
         )?;
+        consume_cpi_trade_intent(
+            account_a_ai,
+            account_b_ai,
+            portfolio_id_a,
+            intent_id_a,
+            portfolio_id_b,
+        )?;
+        let req_id = {
+            let mut market_data = market_ai.try_borrow_mut_data()?;
+            state::bump_matcher_req_seq(&mut market_data)?
+        };
 
         // Force the batch matcher to emit fresh return data for this CPI.
         solana_program::program::set_return_data(&[]);
@@ -7070,6 +7343,7 @@ pub mod processor {
             account_a_ai,
             account_b_ai,
             &exec_legs,
+            None,
             max_market_slots,
         )
     }
@@ -10833,6 +11107,21 @@ pub mod processor {
         Ok(())
     }
 
+    fn expect_portfolio_data_identity(
+        data: &[u8],
+        account_key: &Pubkey,
+        owner: &Pubkey,
+    ) -> Result<(), ProgramError> {
+        let (header, stored_owner) = state::read_portfolio_owner_preflight(data)?;
+        if header.portfolio_account_id != account_key.to_bytes() {
+            return Err(PercolatorError::EngineProvenanceMismatch.into());
+        }
+        if stored_owner != owner.to_bytes() {
+            return Err(PercolatorError::Unauthorized.into());
+        }
+        Ok(())
+    }
+
     fn expect_portfolio_view_account_key(
         portfolio: &percolator::PortfolioV16ViewMut<'_>,
         key: &Pubkey,
@@ -12203,6 +12492,33 @@ pub mod processor {
                 state::allocate_portfolio_id(u64::MAX),
                 Err(PercolatorError::EngineCounterOverflow.into())
             );
+        }
+
+        #[test]
+        fn trade_intent_replay_window_accepts_bounded_reordering_once() {
+            let (max_seen, bitmap) = state::advance_trade_intent_replay_window(0, 0, 100).unwrap();
+            let (max_seen, bitmap) =
+                state::advance_trade_intent_replay_window(max_seen, bitmap, 102).unwrap();
+            let (max_seen, bitmap) =
+                state::advance_trade_intent_replay_window(max_seen, bitmap, 101).unwrap();
+            assert_eq!(max_seen, 102);
+            assert_eq!(bitmap & 0b111, 0b111);
+            assert_eq!(
+                state::advance_trade_intent_replay_window(max_seen, bitmap, 101),
+                None
+            );
+            assert_eq!(
+                state::advance_trade_intent_replay_window(max_seen, bitmap, 38),
+                None,
+                "an intent older than the retained 64-id window must expire"
+            );
+        }
+
+        #[test]
+        fn trade_intent_replay_window_rejects_zero_and_malformed_state() {
+            assert_eq!(state::advance_trade_intent_replay_window(0, 0, 0), None);
+            assert_eq!(state::advance_trade_intent_replay_window(0, 1, 1), None);
+            assert_eq!(state::advance_trade_intent_replay_window(1, 0, 2), None);
         }
 
         fn test_wrapper_config(price: u64) -> state::WrapperConfigV16 {

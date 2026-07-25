@@ -7,6 +7,43 @@ use percolator_prog::matcher_abi::{
     validate_matcher_return, MatcherReturn, FLAG_PARTIAL_OK, FLAG_REJECTED, FLAG_VALID,
 };
 use percolator_prog::policy_v16;
+use percolator_prog::state;
+
+#[kani::proof]
+fn kani_v16_accepted_trade_intent_cannot_be_consumed_twice() {
+    let max_seen: u64 = kani::any();
+    let seen_bitmap: u64 = kani::any();
+    let intent_id: u64 = kani::any();
+
+    if let Some((next_max_seen, next_seen_bitmap)) =
+        state::advance_trade_intent_replay_window(max_seen, seen_bitmap, intent_id)
+    {
+        assert!(state::advance_trade_intent_replay_window(
+            next_max_seen,
+            next_seen_bitmap,
+            intent_id
+        )
+        .is_none());
+    }
+}
+
+#[kani::proof]
+fn kani_v16_unseen_trade_intent_inside_window_is_accepted_out_of_order() {
+    let max_seen: u64 = kani::any();
+    let distance: u8 = kani::any();
+    let seen_bitmap: u64 = kani::any();
+    kani::assume(max_seen >= 64);
+    kani::assume(distance > 0 && distance < 64);
+    kani::assume(seen_bitmap & 1 == 1);
+    kani::assume(seen_bitmap & (1u64 << distance) == 0);
+
+    assert!(state::advance_trade_intent_replay_window(
+        max_seen,
+        seen_bitmap,
+        max_seen - distance as u64
+    )
+    .is_some());
+}
 
 #[kani::proof]
 fn kani_v16_premium_funding_rate_is_clamped_and_signed() {
@@ -443,18 +480,27 @@ fn kani_v16_asset_lifecycle_decode_preserves_wire_fields() {
 }
 
 #[kani::proof]
+#[kani::unwind(18)]
 fn kani_v16_tradenocpi_decode_preserves_wire_fields() {
     let asset_index: u16 = kani::any();
     let size_q: i128 = kani::any();
     let exec_price: u64 = kani::any();
     let fee_bps: u64 = kani::any();
+    let portfolio_id_a: u64 = kani::any();
+    let intent_id_a: u64 = kani::any();
+    let portfolio_id_b: u64 = kani::any();
+    let intent_id_b: u64 = kani::any();
 
-    let mut data = [0u8; 35];
+    let mut data = [0u8; 67];
     data[0] = 6;
     data[1..3].copy_from_slice(&asset_index.to_le_bytes());
     data[3..19].copy_from_slice(&size_q.to_le_bytes());
     data[19..27].copy_from_slice(&exec_price.to_le_bytes());
     data[27..35].copy_from_slice(&fee_bps.to_le_bytes());
+    data[35..43].copy_from_slice(&portfolio_id_a.to_le_bytes());
+    data[43..51].copy_from_slice(&intent_id_a.to_le_bytes());
+    data[51..59].copy_from_slice(&portfolio_id_b.to_le_bytes());
+    data[59..67].copy_from_slice(&intent_id_b.to_le_bytes());
 
     match Instruction::decode(&data).unwrap() {
         Instruction::TradeNoCpi {
@@ -462,29 +508,44 @@ fn kani_v16_tradenocpi_decode_preserves_wire_fields() {
             size_q: got_size,
             exec_price: got_price,
             fee_bps: got_fee,
+            portfolio_id_a: got_portfolio_id_a,
+            intent_id_a: got_intent_id_a,
+            portfolio_id_b: got_portfolio_id_b,
+            intent_id_b: got_intent_id_b,
         } => {
             assert_eq!(got_asset, asset_index);
             assert_eq!(got_size, size_q);
             assert_eq!(got_price, exec_price);
             assert_eq!(got_fee, fee_bps);
+            assert_eq!(got_portfolio_id_a, portfolio_id_a);
+            assert_eq!(got_intent_id_a, intent_id_a);
+            assert_eq!(got_portfolio_id_b, portfolio_id_b);
+            assert_eq!(got_intent_id_b, intent_id_b);
         }
         _ => unreachable!(),
     }
 }
 
 #[kani::proof]
+#[kani::unwind(18)]
 fn kani_v16_tradecpi_decode_preserves_wire_fields() {
     let asset_index: u16 = kani::any();
     let size_q: i128 = kani::any();
     let fee_bps: u64 = kani::any();
     let limit_price: u64 = kani::any();
+    let portfolio_id_a: u64 = kani::any();
+    let intent_id_a: u64 = kani::any();
+    let portfolio_id_b: u64 = kani::any();
 
-    let mut data = [0u8; 35];
+    let mut data = [0u8; 59];
     data[0] = 10;
     data[1..3].copy_from_slice(&asset_index.to_le_bytes());
     data[3..19].copy_from_slice(&size_q.to_le_bytes());
     data[19..27].copy_from_slice(&fee_bps.to_le_bytes());
     data[27..35].copy_from_slice(&limit_price.to_le_bytes());
+    data[35..43].copy_from_slice(&portfolio_id_a.to_le_bytes());
+    data[43..51].copy_from_slice(&intent_id_a.to_le_bytes());
+    data[51..59].copy_from_slice(&portfolio_id_b.to_le_bytes());
 
     match Instruction::decode(&data).unwrap() {
         Instruction::TradeCpi {
@@ -492,11 +553,17 @@ fn kani_v16_tradecpi_decode_preserves_wire_fields() {
             size_q: got_size,
             fee_bps: got_fee,
             limit_price: got_limit,
+            portfolio_id_a: got_portfolio_id_a,
+            intent_id_a: got_intent_id_a,
+            portfolio_id_b: got_portfolio_id_b,
         } => {
             assert_eq!(got_asset, asset_index);
             assert_eq!(got_size, size_q);
             assert_eq!(got_fee, fee_bps);
             assert_eq!(got_limit, limit_price);
+            assert_eq!(got_portfolio_id_a, portfolio_id_a);
+            assert_eq!(got_intent_id_a, intent_id_a);
+            assert_eq!(got_portfolio_id_b, portfolio_id_b);
         }
         _ => unreachable!(),
     }
@@ -734,13 +801,22 @@ fn kani_v16_restart_asset_oracle_decode_preserves_wire_fields() {
 }
 
 #[kani::proof]
+#[kani::unwind(18)]
 fn kani_v16_batch_trade_nocpi_decode_does_not_collide_with_restart_asset_oracle() {
     let asset_index: u16 = kani::any();
     let size_q: i128 = kani::any();
     let exec_price: u64 = kani::any();
     let fee_bps: u64 = kani::any();
+    let portfolio_id_a: u64 = kani::any();
+    let intent_id_a: u64 = kani::any();
+    let portfolio_id_b: u64 = kani::any();
+    let intent_id_b: u64 = kani::any();
 
     let data = Instruction::BatchTradeNoCpi {
+        portfolio_id_a,
+        intent_id_a,
+        portfolio_id_b,
+        intent_id_b,
         legs: vec![percolator_prog::ix::BatchTradeLeg {
             asset_index,
             size_q,
@@ -752,12 +828,66 @@ fn kani_v16_batch_trade_nocpi_decode_does_not_collide_with_restart_asset_oracle(
 
     assert_eq!(data[0], 66);
     match Instruction::decode(&data).unwrap() {
-        Instruction::BatchTradeNoCpi { legs } => {
+        Instruction::BatchTradeNoCpi {
+            legs,
+            portfolio_id_a: got_portfolio_id_a,
+            intent_id_a: got_intent_id_a,
+            portfolio_id_b: got_portfolio_id_b,
+            intent_id_b: got_intent_id_b,
+        } => {
+            assert_eq!(got_portfolio_id_a, portfolio_id_a);
+            assert_eq!(got_intent_id_a, intent_id_a);
+            assert_eq!(got_portfolio_id_b, portfolio_id_b);
+            assert_eq!(got_intent_id_b, intent_id_b);
             assert_eq!(legs.len(), 1);
             assert_eq!(legs[0].asset_index, asset_index);
             assert_eq!(legs[0].size_q, size_q);
             assert_eq!(legs[0].exec_price, exec_price);
             assert_eq!(legs[0].fee_bps, fee_bps);
+        }
+        _ => unreachable!(),
+    }
+}
+
+#[kani::proof]
+#[kani::unwind(18)]
+fn kani_v16_batch_tradecpi_decode_preserves_intent_and_leg_fields() {
+    let asset_index: u16 = kani::any();
+    let size_q: i128 = kani::any();
+    let fee_bps: u64 = kani::any();
+    let limit_price: u64 = kani::any();
+    let portfolio_id_a: u64 = kani::any();
+    let intent_id_a: u64 = kani::any();
+    let portfolio_id_b: u64 = kani::any();
+
+    let data = Instruction::BatchTradeCpi {
+        portfolio_id_a,
+        intent_id_a,
+        portfolio_id_b,
+        legs: vec![percolator_prog::ix::BatchTradeCpiLeg {
+            asset_index,
+            size_q,
+            fee_bps,
+            limit_price,
+        }],
+    }
+    .encode();
+
+    match Instruction::decode(&data).unwrap() {
+        Instruction::BatchTradeCpi {
+            legs,
+            portfolio_id_a: got_portfolio_id_a,
+            intent_id_a: got_intent_id_a,
+            portfolio_id_b: got_portfolio_id_b,
+        } => {
+            assert_eq!(got_portfolio_id_a, portfolio_id_a);
+            assert_eq!(got_intent_id_a, intent_id_a);
+            assert_eq!(got_portfolio_id_b, portfolio_id_b);
+            assert_eq!(legs.len(), 1);
+            assert_eq!(legs[0].asset_index, asset_index);
+            assert_eq!(legs[0].size_q, size_q);
+            assert_eq!(legs[0].fee_bps, fee_bps);
+            assert_eq!(legs[0].limit_price, limit_price);
         }
         _ => unreachable!(),
     }
@@ -1175,6 +1305,7 @@ fn kani_v16_custody_payloads_reject_trailing_byte() {
 }
 
 #[kani::proof]
+#[kani::unwind(18)]
 fn kani_v16_trade_and_crank_payloads_reject_trailing_byte() {
     let extra: u8 = kani::any();
 
@@ -1194,6 +1325,10 @@ fn kani_v16_trade_and_crank_payloads_reject_trailing_byte() {
             size_q: 1,
             exec_price: 100,
             fee_bps: 0,
+            portfolio_id_a: 1,
+            intent_id_a: 1,
+            portfolio_id_b: 2,
+            intent_id_b: 1,
         },
         extra,
     );
@@ -1203,10 +1338,49 @@ fn kani_v16_trade_and_crank_payloads_reject_trailing_byte() {
             size_q: 1,
             fee_bps: 0,
             limit_price: 0,
+            portfolio_id_a: 1,
+            intent_id_a: 1,
+            portfolio_id_b: 2,
         },
         extra,
     );
     assert_rejects_trailing_byte(Instruction::SyncMaintenanceFee { now_slot: 1 }, extra);
+}
+
+#[kani::proof]
+#[kani::unwind(18)]
+fn kani_v16_batch_trade_payloads_reject_trailing_byte() {
+    let extra: u8 = kani::any();
+
+    assert_rejects_trailing_byte(
+        Instruction::BatchTradeNoCpi {
+            portfolio_id_a: 1,
+            intent_id_a: 1,
+            portfolio_id_b: 2,
+            intent_id_b: 1,
+            legs: vec![percolator_prog::ix::BatchTradeLeg {
+                asset_index: 0,
+                size_q: 1,
+                exec_price: 100,
+                fee_bps: 0,
+            }],
+        },
+        extra,
+    );
+    assert_rejects_trailing_byte(
+        Instruction::BatchTradeCpi {
+            portfolio_id_a: 1,
+            intent_id_a: 1,
+            portfolio_id_b: 2,
+            legs: vec![percolator_prog::ix::BatchTradeCpiLeg {
+                asset_index: 0,
+                size_q: 1,
+                fee_bps: 0,
+                limit_price: 0,
+            }],
+        },
+        extra,
+    );
 }
 
 #[kani::proof]
