@@ -65702,3 +65702,134 @@ fn v16_attack_resolved_two_public_winners_are_close_order_independent() {
     assert_eq!(loser_first.0 + loser_first.1 + loser_first.2, 3_000_000);
     assert!(loser_first.0 > 1_000_000 && loser_first.2 < 1_000_000);
 }
+
+#[test]
+fn v16_bpf_force_close_pair_order_preserves_unequal_partial_payouts() {
+    fn run(cross_pair: bool) -> ([(u128, i128); 4], [u64; 4], u128, u128, u128, u128, u64) {
+        let mut env = V16CuEnv::new();
+        let cranker = Keypair::new();
+        env.configure_permissionless_resolve_with_cu(100, 1);
+        env.svm.warp_to_slot(1);
+        env.configure_auth_mark_with_cu(1, 100);
+
+        let owners = [
+            Keypair::new(),
+            Keypair::new(),
+            Keypair::new(),
+            Keypair::new(),
+        ];
+        let portfolios = [
+            env.create_portfolio(&owners[0]),
+            env.create_portfolio(&owners[1]),
+            env.create_portfolio(&owners[2]),
+            env.create_portfolio(&owners[3]),
+        ];
+        for (i, amount) in [1_000, 1_000, 2_000, 2_000].into_iter().enumerate() {
+            env.deposit(&owners[i], portfolios[i], amount);
+        }
+
+        env.trade_asset_with_cu(
+            0,
+            &owners[0],
+            portfolios[0],
+            &owners[1],
+            portfolios[1],
+            POS_SCALE as i128,
+            100,
+            0,
+        );
+        env.trade_asset_with_cu(
+            0,
+            &owners[2],
+            portfolios[2],
+            &owners[3],
+            portfolios[3],
+            (2 * POS_SCALE) as i128,
+            100,
+            0,
+        );
+        for (slot, mark) in [(2, 200), (3, 300)] {
+            env.svm.warp_to_slot(slot);
+            env.push_auth_mark_with_cu(slot, mark);
+            for portfolio in portfolios {
+                env.crank(
+                    portfolio,
+                    ProgInstruction::PermissionlessCrank {
+                        now_slot: slot,
+                        observations: crank_observations(0),
+                    },
+                );
+            }
+        }
+
+        env.svm.warp_to_slot(4);
+        env.update_asset_lifecycle_as_admin_with_cu(processor::ASSET_ACTION_SHUTDOWN, 0, 4, 0);
+        env.svm.warp_to_slot(5);
+        if cross_pair {
+            for (long, short) in [
+                (portfolios[0], portfolios[3]),
+                (portfolios[2], portfolios[1]),
+                (portfolios[2], portfolios[3]),
+            ] {
+                env.force_close_abandoned_asset_with_cu(&cranker, long, short, 0, 5, POS_SCALE);
+            }
+        } else {
+            env.force_close_abandoned_asset_with_cu(
+                &cranker,
+                portfolios[0],
+                portfolios[1],
+                0,
+                5,
+                POS_SCALE,
+            );
+            env.force_close_abandoned_asset_with_cu(
+                &cranker,
+                portfolios[2],
+                portfolios[3],
+                0,
+                5,
+                2 * POS_SCALE,
+            );
+        }
+
+        let accounts = portfolios.map(|portfolio| {
+            let state = env.portfolio_state(portfolio);
+            assert!(percolator::active_bitmap_is_empty(
+                state.active_bitmap.map(|word| word.get())
+            ));
+            (state.capital.get(), state.pnl.get())
+        });
+        assert_eq!(
+            accounts,
+            [(1_000, 200), (800, 0), (2_000, 400), (1_600, 0)],
+            "unequal force-closes must carry nonzero realized PnL before the order comparison"
+        );
+
+        env.svm.warp_to_slot(104);
+        env.resolve_stale_permissionless_with_cu(104);
+        env.svm.warp_to_slot(105);
+        let mut payouts = [0u64; 4];
+        for i in 0..4 {
+            let destination = env.close_resolved(&owners[i], portfolios[i]);
+            payouts[i] = env.token_amount(destination);
+        }
+        assert_eq!(payouts, [1_200, 800, 2_400, 1_600]);
+        let (_, group) = env.market_state();
+        (
+            accounts,
+            payouts,
+            group.vault,
+            group.insurance,
+            group.assets[0].oi_eff_long_q,
+            group.assets[0].oi_eff_short_q,
+            env.token_amount(env.vault),
+        )
+    }
+
+    let direct = run(false);
+    let crossed = run(true);
+    assert_eq!(
+        crossed, direct,
+        "a cranker allocated value by choosing an unequal partial force-close schedule"
+    );
+}
