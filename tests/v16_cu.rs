@@ -6312,6 +6312,13 @@ fn v16_bpf_asset0_shutdown_force_closes_preserves_insurance_and_restarts() {
     env.configure_auth_mark_for_asset_with_authority(0, &new_oracle, 8, 250);
     env.svm.warp_to_slot(9);
     env.push_auth_mark_for_asset_with_authority(0, &new_oracle, 9, 260);
+    env.crank(
+        long_account,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 9,
+            observations: crank_observations(0),
+        },
+    );
 
     env.trade_asset_with_cu(
         0,
@@ -7929,6 +7936,180 @@ fn v16_attack_target_only_lag_invalidates_unrelated_single_trade_cert() {
     );
     assert_eq!(long_cert.certified_maintenance_req, 1_200);
     assert_eq!(short_cert.certified_maintenance_req, 1_100);
+}
+
+#[test]
+fn v16_attack_auth_mark_push_stages_engine_target_before_cpi_risk_increase() {
+    const OLD_MARK: u64 = 100;
+    const NEW_MARK: u64 = 200;
+    const EXISTING_SIZE_Q: i128 = POS_SCALE as i128;
+    const ATTACK_SIZE_Q: i128 = (10_000 * POS_SCALE) as i128;
+    const TOTAL_SIZE_Q: i128 = EXISTING_SIZE_Q + ATTACK_SIZE_Q;
+    const TAKER_DEPOSIT: u128 = 1_000_100;
+    const LP_DEPOSIT: u128 = 4_000_000;
+    const STALE_PRICE_PROFIT: u128 = 1_000_100;
+
+    let mut env = V16CuEnv::new();
+    env.configure_auth_mark_with_cu(0, OLD_MARK);
+
+    let taker_owner = Keypair::new();
+    let lp_owner = Keypair::new();
+    let taker = env.create_portfolio(&taker_owner);
+    let lp = env.create_portfolio(&lp_owner);
+    env.deposit(&taker_owner, taker, TAKER_DEPOSIT);
+    env.deposit(&lp_owner, lp, LP_DEPOSIT);
+    let (matcher_program, matcher_context, matcher_delegate) =
+        auth_matcher_for_lp(&mut env, &lp_owner, lp);
+
+    // Non-vacuous liveness control: both sides have a real position that they must remain able
+    // to reduce while the authenticated target is ahead of the engine's effective mark.
+    env.trade_cpi_with_cu_on_asset(
+        &taker_owner,
+        taker,
+        &lp_owner,
+        lp,
+        matcher_program,
+        matcher_context,
+        matcher_delegate,
+        0,
+        EXISTING_SIZE_Q,
+        0,
+    );
+
+    let (_, before_push) = env.market_state();
+    env.svm.warp_to_slot(1);
+    env.push_auth_mark_with_cu(1, NEW_MARK);
+    let profile =
+        state::read_asset_oracle_profile(&env.svm.get_account(&env.market).unwrap().data, 0)
+            .unwrap();
+    let (_, after_push) = env.market_state();
+    assert_eq!(profile.mark_ewma_e6, NEW_MARK);
+    assert_eq!(
+        after_push.assets[0].effective_price, OLD_MARK,
+        "the bounded engine mark should move only when a crank consumes the target"
+    );
+
+    let market_before_attack = env.svm.get_account(&env.market).unwrap();
+    let taker_before_attack = env.svm.get_account(&taker).unwrap();
+    let lp_before_attack = env.svm.get_account(&lp).unwrap();
+    let matcher_before_attack = env.svm.get_account(&matcher_context).unwrap();
+    env.svm.expire_blockhash();
+    let stale_risk_increase = env.try_trade_cpi_with_cu_on_asset(
+        &taker_owner,
+        taker,
+        &lp_owner,
+        lp,
+        matcher_program,
+        matcher_context,
+        matcher_delegate,
+        0,
+        ATTACK_SIZE_Q,
+        0,
+    );
+
+    if stale_risk_increase.is_ok() {
+        // Exact-parent exploit evidence: the public matcher was handed the superseded effective
+        // price, so an unrelated taker enlarged a long after the honest mark update had landed.
+        let (_, vulnerable_group) = env.market_state();
+        assert_eq!(
+            vulnerable_group.assets[0].raw_oracle_target_price, OLD_MARK,
+            "the vulnerable wrapper left the authenticated target outside the engine"
+        );
+        assert_eq!(
+            vulnerable_group.oracle_epoch, before_push.oracle_epoch,
+            "the vulnerable push left pre-update health certificates current"
+        );
+        assert_eq!(
+            active_leg_for_asset(&env.portfolio_state(taker), 0).basis_pos_q,
+            TOTAL_SIZE_Q
+        );
+
+        for portfolio in [taker, lp] {
+            env.crank(
+                portfolio,
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: 1,
+                    observations: crank_observations(0),
+                },
+            );
+        }
+        let (_, moved_group) = env.market_state();
+        assert_eq!(moved_group.assets[0].effective_price, NEW_MARK);
+
+        env.svm.expire_blockhash();
+        env.trade_cpi_with_cu_on_asset(
+            &taker_owner,
+            taker,
+            &lp_owner,
+            lp,
+            matcher_program,
+            matcher_context,
+            matcher_delegate,
+            0,
+            -TOTAL_SIZE_Q,
+            0,
+        );
+        let taker_flat = env.portfolio_state(taker);
+        let lp_flat = env.portfolio_state(lp);
+        assert_eq!(taker_flat.pnl.get(), STALE_PRICE_PROFIT as i128);
+        assert_eq!(lp_flat.capital.get(), LP_DEPOSIT - STALE_PRICE_PROFIT);
+        env.convert_released_pnl_with_cu(&taker_owner, taker, STALE_PRICE_PROFIT);
+        let taker_after_convert = env.portfolio_state(taker);
+        let taker_dest = env.withdraw(&taker_owner, taker, taker_after_convert.capital.get());
+        let lp_dest = env.withdraw(&lp_owner, lp, lp_flat.capital.get());
+        assert_eq!(
+            env.token_amount(taker_dest) as u128,
+            TAKER_DEPOSIT + STALE_PRICE_PROFIT
+        );
+        assert_eq!(
+            env.token_amount(lp_dest) as u128,
+            LP_DEPOSIT - STALE_PRICE_PROFIT
+        );
+        panic!(
+            "honest AuthMark push left a public stale-price CPI window: taker extracted \
+             {STALE_PRICE_PROFIT} collateral atoms from the pre-authorized LP"
+        );
+    }
+
+    assert_eq!(
+        after_push.assets[0].raw_oracle_target_price, NEW_MARK,
+        "the authenticated mark must enter the engine in the push transaction"
+    );
+    assert_eq!(
+        after_push.oracle_epoch,
+        before_push.oracle_epoch + 1,
+        "staging a changed target must invalidate all prior health certificates"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before_attack,
+        "the rejected risk increase must roll back matcher sequence and market state"
+    );
+    assert_eq!(env.svm.get_account(&taker).unwrap(), taker_before_attack);
+    assert_eq!(env.svm.get_account(&lp).unwrap(), lp_before_attack);
+    assert_eq!(
+        env.svm.get_account(&matcher_context).unwrap(),
+        matcher_before_attack,
+        "the rejected wrapper instruction must roll back the matcher CPI"
+    );
+
+    // The target/effective lag blocks only risk increases. Both users can still close at the
+    // effective mark, preserving the public exit path while a keeper advances the mark.
+    env.svm.expire_blockhash();
+    env.trade_cpi_with_cu_on_asset(
+        &taker_owner,
+        taker,
+        &lp_owner,
+        lp,
+        matcher_program,
+        matcher_context,
+        matcher_delegate,
+        0,
+        -EXISTING_SIZE_Q,
+        0,
+    );
+    assert!(!has_active_leg_for_asset(&env.portfolio_state(taker), 0));
+    assert!(!has_active_leg_for_asset(&env.portfolio_state(lp), 0));
 }
 
 #[test]
@@ -27220,6 +27401,13 @@ fn v16_attack_non_base_trade_rejects_after_base_resolve_matured() {
 
     env.svm.warp_to_slot(7);
     env.push_auth_mark_for_asset_with_authority(1, &creator, 7, 101);
+    env.crank(
+        taker_portfolio,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 7,
+            observations: crank_observations(1),
+        },
+    );
     let fresh_trade = env.try_trade_asset_with_cu(
         1,
         &taker,
