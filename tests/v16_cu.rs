@@ -41,6 +41,118 @@ fn crank_observations(asset_index: u16) -> Vec<CrankObservationHint> {
     }]
 }
 
+#[test]
+fn v16_attack_force_close_dust_chunking_is_value_path_independent() {
+    fn run(chunks: &[u128]) -> (u128, i128, i128, u128, i128, i128, u128, u128, u128) {
+        const OPEN_PRICE: u64 = 101;
+        const CLOSE_PRICE: u64 = 137;
+        const SIZE_Q: u128 = POS_SCALE + 17;
+        const SHUT_SLOT: u64 = 3;
+        const CLOSE_SLOT: u64 = 5;
+
+        let mut env = V16CuEnv::new_with_market_params_and_price_move(1, 10_000, 10_000, 10_000);
+        env.configure_permissionless_resolve_with_cu(100, 1);
+        env.configure_auth_mark_for_asset_as_admin(0, 1, OPEN_PRICE);
+
+        let long_owner = Keypair::new();
+        let short_owner = Keypair::new();
+        let long = env.create_portfolio(&long_owner);
+        let short = env.create_portfolio(&short_owner);
+        env.deposit(&long_owner, long, 1_000_000);
+        env.deposit(&short_owner, short, 1_000_000);
+        env.trade_asset_with_cu(
+            0,
+            &long_owner,
+            long,
+            &short_owner,
+            short,
+            SIZE_Q as i128,
+            OPEN_PRICE,
+            0,
+        );
+
+        env.svm.warp_to_slot(2);
+        env.push_auth_mark_for_asset_as_admin(0, 2, CLOSE_PRICE);
+        env.crank(
+            long,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 2,
+                observations: crank_observations(0),
+            },
+        );
+        env.crank(
+            short,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 2,
+                observations: crank_observations(0),
+            },
+        );
+        assert_ne!(
+            env.portfolio_state(long).pnl.get(),
+            0,
+            "setup must realize nonzero mark-to-market value"
+        );
+
+        env.svm.warp_to_slot(SHUT_SLOT);
+        env.update_asset_lifecycle_as_admin_with_cu(
+            processor::ASSET_ACTION_SHUTDOWN,
+            0,
+            SHUT_SLOT,
+            0,
+        );
+        env.svm.warp_to_slot(CLOSE_SLOT);
+        let cranker = Keypair::new();
+        for &chunk in chunks {
+            if !has_active_leg_for_asset(&env.portfolio_state(long), 0) {
+                break;
+            }
+            env.force_close_abandoned_asset_with_cu(&cranker, long, short, 0, CLOSE_SLOT, chunk);
+        }
+        if has_active_leg_for_asset(&env.portfolio_state(long), 0) {
+            env.force_close_abandoned_asset_with_cu(
+                &cranker,
+                long,
+                short,
+                0,
+                CLOSE_SLOT,
+                u128::MAX,
+            );
+        }
+
+        let long_state = env.portfolio_state(long);
+        let short_state = env.portfolio_state(short);
+        let group = env.market_state().1;
+        assert!(!has_active_leg_for_asset(&long_state, 0));
+        assert!(!has_active_leg_for_asset(&short_state, 0));
+        (
+            long_state.capital.get(),
+            long_state.pnl.get(),
+            long_state.fee_credits.get(),
+            short_state.capital.get(),
+            short_state.pnl.get(),
+            short_state.fee_credits.get(),
+            group.insurance,
+            group.assets[0].oi_eff_long_q,
+            group.assets[0].oi_eff_short_q,
+        )
+    }
+
+    let one_shot = run(&[u128::MAX]);
+    let dust_chunked = run(&[
+        1,
+        POS_SCALE / 7,
+        3,
+        POS_SCALE / 5,
+        11,
+        POS_SCALE / 3,
+        u128::MAX,
+    ]);
+    assert_eq!(
+        dust_chunked, one_shot,
+        "permissionless close_q chunking must not change either user's value or market accounting"
+    );
+}
+
 fn crank_observations_with_accounts(
     asset_index: u16,
     oracle_accounts: u8,
