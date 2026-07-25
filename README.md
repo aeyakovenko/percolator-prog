@@ -383,6 +383,9 @@ This section describes intent and operational ordering, not argument-by-argument
   - setting `new_pubkey` to all zeros is rejected; `marketauth` must remain live for final slab reclaim
   - per-asset authorities (insurance/operator/backing/oracle, incl. asset 0) are rotated via
     `UpdateAssetAuthority`, not this instruction
+- **ConfigurePermissionlessResolve** (tag 38)
+  - `sequence` must strictly advance the stored market policy watermark; delayed older policies
+    cannot shorten a corrected stale timer and freeze an unapplied authenticated mark
 - **UpdateAssetLifecycle** (tag 40)
   - appends/reactivates/retires assets 1..N, including permissionless create/reuse when the configured
     create fee is nonzero
