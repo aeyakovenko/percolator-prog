@@ -59719,6 +59719,55 @@ fn v16_attack_underfunded_exit_cannot_move_ewma_with_uncollectible_fee() {
 }
 
 #[test]
+fn v16_bpf_funded_backing_domain_locks_fee_terms_until_empty() {
+    let mut env = V16CuEnv::new();
+    env.update_backing_fee_policy_with_cu(1, 100, 0);
+    env.top_up_backing_bucket_with_cu(1, 100, 10);
+
+    let accepted = env.svm.get_account(&env.market).unwrap();
+    let update = |env: &mut V16CuEnv, fee_bps: u16, insurance_share_bps: u16| {
+        env.svm.expire_blockhash();
+        send_tx(
+            &mut env.svm,
+            env.program_id,
+            &env.payer,
+            ProgInstruction::UpdateBackingFeePolicy {
+                domain: 1,
+                fee_bps,
+                insurance_share_bps,
+            },
+            vec![
+                AccountMeta::new(env.admin.pubkey(), true),
+                AccountMeta::new(env.market, false),
+            ],
+            &[&env.admin],
+        )
+    };
+
+    for (fee_bps, insurance_share_bps) in [(100, 5_000), (200, 0), (0, 0)] {
+        assert!(
+            update(&mut env, fee_bps, insurance_share_bps).is_err(),
+            "funded backing terms must not change"
+        );
+        assert_eq!(
+            env.svm.get_account(&env.market).unwrap(),
+            accepted,
+            "a rejected funded-domain policy change must roll back byte-identically"
+        );
+    }
+    update(&mut env, 100, 0).expect("an idempotent funded-domain policy write remains valid");
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), accepted);
+
+    let destination = env.token_account(env.admin.pubkey(), 0);
+    env.withdraw_backing_bucket_to_admin_token_with_cu(destination, 1, 100);
+    assert_eq!(env.token_amount(destination), 100);
+    update(&mut env, 200, 5_000).expect("an empty domain can be reconfigured");
+    let cfg = env.market_state().0;
+    assert_eq!(cfg.backing_trade_fee_bps_short, 200);
+    assert_eq!(cfg.backing_trade_fee_insurance_share_bps_short, 5_000);
+}
+
+#[test]
 fn v16_attack_delayed_backing_split_cannot_divert_provider_fee_to_operator() {
     const INITIAL_PRICE: u64 = 100;
     const LP_DEPOSIT: u128 = 3_130;
