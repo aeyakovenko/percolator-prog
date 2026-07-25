@@ -45137,6 +45137,135 @@ fn v16_attack_update_asset_authority_rejects_zero_domain_authority() {
     env.close_slab_with_cu();
 }
 
+// A delayed asset-admin handoff must not revive a displaced insurance operator after the current
+// operator has already handed the role to a replacement. Otherwise an unprivileged relayer can
+// reorder a previously valid admin-signed assignment after an independent provider funds the
+// replacement operator's domain, restoring the stale key long enough to drain that fresh reserve.
+#[test]
+fn v16_attack_delayed_asset_admin_handoff_cannot_revive_displaced_insurance_operator() {
+    const ASSET: u16 = 1;
+    const DOMAIN: u16 = 2;
+    const AMOUNT: u128 = 50_000;
+
+    let mut env = V16CuEnv::new();
+    let admin = env.admin.insecure_clone();
+    let original_operator = Keypair::new();
+    let displaced_operator = Keypair::new();
+    let replacement_operator = Keypair::new();
+    let provider = Keypair::new();
+    for key in [
+        &original_operator,
+        &displaced_operator,
+        &replacement_operator,
+        &provider,
+    ] {
+        env.ensure_signer_account(key.pubkey());
+    }
+
+    env.svm.warp_to_slot(1);
+    env.activate_asset_with_authorities(
+        ASSET,
+        1,
+        100,
+        provider.pubkey(),
+        original_operator.pubkey(),
+        provider.pubkey(),
+        provider.pubkey(),
+    );
+
+    let delayed_assignment = Instruction {
+        program_id: env.program_id,
+        accounts: vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(displaced_operator.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        data: ProgInstruction::UpdateAssetAuthority {
+            asset_index: ASSET,
+            kind: processor::ASSET_AUTH_INSURANCE_OPERATOR,
+            new_pubkey: displaced_operator.pubkey().to_bytes(),
+        }
+        .encode(),
+    };
+    let retained_handoff = Transaction::new_signed_with_payer(
+        &[heap_ix(), cu_ix(), delayed_assignment],
+        Some(&env.payer.pubkey()),
+        &[&env.payer, &admin, &displaced_operator],
+        env.svm.latest_blockhash(),
+    );
+
+    // The live holder lands the newer correction first. This is valid both before and after the
+    // holder-consent fix, and leaves the cold admin unchanged.
+    env.send(
+        ProgInstruction::UpdateAssetAuthority {
+            asset_index: ASSET,
+            kind: processor::ASSET_AUTH_INSURANCE_OPERATOR,
+            new_pubkey: replacement_operator.pubkey().to_bytes(),
+        },
+        vec![
+            AccountMeta::new(original_operator.pubkey(), true),
+            AccountMeta::new(replacement_operator.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&original_operator, &replacement_operator],
+    )
+    .expect("current operator hands the role to the replacement");
+    assert_eq!(
+        state::read_asset_oracle_profile(
+            &env.svm.get_account(&env.market).unwrap().data,
+            ASSET as usize
+        )
+        .unwrap()
+        .insurance_operator,
+        replacement_operator.pubkey().to_bytes()
+    );
+
+    let provider_source = env.top_up_insurance_domain_with_authority(&provider, DOMAIN, AMOUNT);
+    assert_eq!(env.token_amount(provider_source), 0);
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+
+    let delayed_result = env.svm.send_transaction(retained_handoff);
+    if delayed_result.is_ok() {
+        assert_eq!(
+            state::read_asset_oracle_profile(
+                &env.svm.get_account(&env.market).unwrap().data,
+                ASSET as usize
+            )
+            .unwrap()
+            .insurance_operator,
+            displaced_operator.pubkey().to_bytes(),
+            "the delayed assignment revived the displaced operator"
+        );
+        let (stolen_dest, _) = env
+            .try_withdraw_insurance_asset_with_authority(&displaced_operator, ASSET, AMOUNT)
+            .expect("revived operator drains the independent provider's fresh reserve");
+        assert_eq!(env.token_amount(stolen_dest), AMOUNT as u64);
+        panic!("a delayed asset-admin handoff revived a displaced withdrawal authority");
+    }
+
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "rejected stale handoff leaves market state byte-identical"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        vault_before,
+        "rejected stale handoff leaves custody byte-identical"
+    );
+    assert_eq!(
+        env.market_state().1.insurance_domain_budget[DOMAIN as usize],
+        AMOUNT,
+        "the independent provider's reserve remains available"
+    );
+    assert!(
+        env.try_withdraw_insurance_asset_with_authority(&displaced_operator, ASSET, AMOUNT)
+            .is_err(),
+        "the displaced operator remains unauthorized"
+    );
+}
+
 // Product spec — cross-asset BACKING isolation (counterpart to the domain-insurance isolation test):
 // a faulty/insolvent permissionless asset must not drain ANOTHER asset's backing bucket. Fund both
 // assets' backing, drive asset 1 insolvent + liquidate, and assert asset 0's backing buckets are
