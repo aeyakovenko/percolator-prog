@@ -679,6 +679,7 @@ fn kani_v16_update_authority_decode_preserves_wire_fields() {
 fn kani_v16_update_asset_authority_decode_preserves_wire_fields() {
     let asset_index: u16 = kani::any();
     let kind: u8 = kani::any();
+    let expected_sequence: u64 = kani::any();
     let mut new_pubkey = [0u8; 32];
     let mut i = 0;
     while i < 32 {
@@ -686,23 +687,42 @@ fn kani_v16_update_asset_authority_decode_preserves_wire_fields() {
         i += 1;
     }
 
-    let mut data = [0u8; 36];
+    let mut data = [0u8; 44];
     data[0] = 65;
     data[1..3].copy_from_slice(&asset_index.to_le_bytes());
     data[3] = kind;
     data[4..36].copy_from_slice(&new_pubkey);
+    data[36..44].copy_from_slice(&expected_sequence.to_le_bytes());
 
     match Instruction::decode(&data).unwrap() {
         Instruction::UpdateAssetAuthority {
             asset_index: got_asset_index,
             kind: got_kind,
             new_pubkey: got_pubkey,
+            expected_sequence: got_sequence,
         } => {
             assert_eq!(got_asset_index, asset_index);
             assert_eq!(got_kind, kind);
             assert_eq!(got_pubkey, new_pubkey);
+            assert_eq!(got_sequence, expected_sequence);
         }
         _ => unreachable!(),
+    }
+}
+
+#[kani::proof]
+fn kani_v16_asset_authority_sequence_is_exact_and_monotonic() {
+    let current_sequence: u64 = kani::any();
+    let expected_sequence: u64 = kani::any();
+    let next =
+        percolator_prog::state::next_asset_authority_sequence(current_sequence, expected_sequence);
+
+    if current_sequence != expected_sequence || current_sequence == u64::MAX {
+        assert!(next.is_err());
+    } else {
+        let next_sequence = next.unwrap();
+        assert_eq!(next_sequence, current_sequence + 1);
+        assert!(next_sequence > current_sequence);
     }
 }
 
@@ -1226,6 +1246,7 @@ fn kani_v16_admin_policy_payloads_reject_trailing_byte() {
             asset_index: 1,
             kind: 0,
             new_pubkey: [1u8; 32],
+            expected_sequence: 7,
         },
         extra,
     );
