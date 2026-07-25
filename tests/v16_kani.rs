@@ -323,16 +323,51 @@ fn kani_v16_top_up_backing_bucket_decode_preserves_wire_fields() {
 #[kani::proof]
 fn kani_v16_withdraw_backing_bucket_decode_preserves_wire_fields() {
     let domain: u16 = kani::any();
+    let market_id: u64 = kani::any();
     let amount: u128 = kani::any();
 
-    let data = Instruction::WithdrawBackingBucket { domain, amount }.encode();
+    let data = Instruction::WithdrawBackingBucket {
+        domain,
+        market_id,
+        amount,
+    }
+    .encode();
 
     match Instruction::decode(&data).unwrap() {
         Instruction::WithdrawBackingBucket {
             domain: got_domain,
+            market_id: got_market_id,
             amount: got_amount,
         } => {
             assert_eq!(got_domain, domain);
+            assert_eq!(got_market_id, market_id);
+            assert_eq!(got_amount, amount);
+        }
+        _ => unreachable!(),
+    }
+}
+
+#[kani::proof]
+fn kani_v16_withdraw_backing_bucket_earnings_decode_preserves_wire_fields() {
+    let domain: u16 = kani::any();
+    let market_id: u64 = kani::any();
+    let amount: u128 = kani::any();
+
+    let data = Instruction::WithdrawBackingBucketEarnings {
+        domain,
+        market_id,
+        amount,
+    }
+    .encode();
+
+    match Instruction::decode(&data).unwrap() {
+        Instruction::WithdrawBackingBucketEarnings {
+            domain: got_domain,
+            market_id: got_market_id,
+            amount: got_amount,
+        } => {
+            assert_eq!(got_domain, domain);
+            assert_eq!(got_market_id, market_id);
             assert_eq!(got_amount, amount);
         }
         _ => unreachable!(),
@@ -681,6 +716,24 @@ fn kani_v16_legacy_unbound_authority_payloads_are_rejected() {
 fn kani_v16_legacy_unbound_insurance_withdraw_payload_is_rejected() {
     let mut legacy: [u8; 19] = kani::any();
     legacy[0] = 57;
+
+    assert!(Instruction::decode(&legacy).is_err());
+}
+
+#[kani::proof]
+fn kani_v16_legacy_unbound_backing_withdraw_payload_is_rejected() {
+    // Pre-generation payload: tag(1) + domain(2) + amount(16) = 19 bytes, missing market_id.
+    let mut legacy: [u8; 19] = kani::any();
+    legacy[0] = 50;
+
+    assert!(Instruction::decode(&legacy).is_err());
+}
+
+#[kani::proof]
+fn kani_v16_legacy_unbound_backing_earnings_withdraw_payload_is_rejected() {
+    // Pre-generation payload: tag(1) + domain(2) + amount(16) = 19 bytes, missing market_id.
+    let mut legacy: [u8; 19] = kani::any();
+    legacy[0] = 52;
 
     assert!(Instruction::decode(&legacy).is_err());
 }
@@ -1185,6 +1238,15 @@ fn kani_v16_custody_payloads_reject_trailing_byte() {
     assert_rejects_trailing_byte(
         Instruction::WithdrawBackingBucket {
             domain: 1,
+            market_id: 1,
+            amount: 1,
+        },
+        extra,
+    );
+    assert_rejects_trailing_byte(
+        Instruction::WithdrawBackingBucketEarnings {
+            domain: 1,
+            market_id: 1,
             amount: 1,
         },
         extra,

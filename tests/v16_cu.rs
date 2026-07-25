@@ -3184,11 +3184,16 @@ impl V16CuEnv {
         domain: u16,
         amount: u128,
     ) -> u64 {
+        let market_id = self.asset_market_id((domain / 2) as u16);
         send_tx(
             &mut self.svm,
             self.program_id,
             &self.payer,
-            ProgInstruction::WithdrawBackingBucket { domain, amount },
+            ProgInstruction::WithdrawBackingBucket {
+                domain,
+                market_id,
+                amount,
+            },
             vec![
                 AccountMeta::new(self.admin.pubkey(), true),
                 AccountMeta::new(self.market, false),
@@ -3225,11 +3230,16 @@ impl V16CuEnv {
         domain: u16,
         amount: u128,
     ) -> u64 {
+        let market_id = self.asset_market_id((domain / 2) as u16);
         send_tx(
             &mut self.svm,
             self.program_id,
             &self.payer,
-            ProgInstruction::WithdrawBackingBucketEarnings { domain, amount },
+            ProgInstruction::WithdrawBackingBucketEarnings {
+                domain,
+                market_id,
+                amount,
+            },
             vec![
                 AccountMeta::new(self.admin.pubkey(), true),
                 AccountMeta::new(self.market, false),
@@ -6315,6 +6325,178 @@ fn v16_attack_signed_insurance_withdraw_cannot_replay_across_asset_slot_reuse() 
     assert_eq!(env.token_amount(stale_dest), 0);
 }
 
+// Sibling of the insurance replay guard, for WithdrawBackingBucket (tag 50). The backing-bucket
+// authority is a reusable custodial service: the SAME key is legitimately re-appointed as the
+// domain's backing_bucket_authority after the asset slot is publicly retired and reactivated. A new,
+// independent provider funds the reused domain in the replacement generation. A fully signed
+// WithdrawBackingBucket retained from the FIRST generation (still inside its recent-blockhash
+// window) is relayed unchanged: rebuilding it would not demonstrate a replay. Without binding the
+// withdrawal to the asset generation, the stale transaction passes the unchanged authority check
+// and debits the replacement provider's freshly funded backing to the old destination -- an
+// independent-victim loss of funds.
+#[test]
+fn v16_attack_signed_backing_withdraw_cannot_replay_across_asset_slot_reuse() {
+    const ASSET: u16 = 1;
+    const DOMAIN: u16 = 2;
+    const AMOUNT: u128 = 50_000;
+
+    let mut env = V16CuEnv::new();
+    // The backing_bucket_authority is a shared service reused across generations; the two providers
+    // are the economically independent funders whose capital it custodies in each generation.
+    let backing_service = Keypair::new();
+    let old_provider = Keypair::new();
+    let new_provider = Keypair::new();
+    env.ensure_signer_account(backing_service.pubkey());
+    env.ensure_signer_account(old_provider.pubkey());
+    env.ensure_signer_account(new_provider.pubkey());
+
+    env.svm.warp_to_slot(1);
+    env.activate_asset_with_authorities(
+        ASSET,
+        1,
+        100,
+        old_provider.pubkey(),
+        old_provider.pubkey(),
+        backing_service.pubkey(),
+        old_provider.pubkey(),
+    );
+    env.top_up_backing_bucket_with_authority(&backing_service, DOMAIN, AMOUNT, 1_000_000);
+    let old_market_id = env.asset_market_id(ASSET);
+
+    let stale_dest = env.token_account(backing_service.pubkey(), 0);
+    let stale_ix = Instruction {
+        program_id: env.program_id,
+        accounts: vec![
+            AccountMeta::new(backing_service.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(stale_dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        data: ProgInstruction::WithdrawBackingBucket {
+            domain: DOMAIN,
+            market_id: old_market_id,
+            amount: AMOUNT,
+        }
+        .encode(),
+    };
+    let stale_withdraw = Transaction::new_signed_with_payer(
+        &[heap_ix(), cu_ix(), stale_ix],
+        Some(&env.payer.pubkey()),
+        &[&env.payer, &backing_service],
+        env.svm.latest_blockhash(),
+    );
+
+    // The original provider legitimately reclaims its own generation's backing, so the vault later
+    // holds only the replacement provider's funds.
+    let old_clear_dest = env.token_account(backing_service.pubkey(), 0);
+    env.send(
+        ProgInstruction::WithdrawBackingBucket {
+            domain: DOMAIN,
+            market_id: old_market_id,
+            amount: AMOUNT,
+        },
+        vec![
+            AccountMeta::new(backing_service.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(old_clear_dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&backing_service],
+    )
+    .expect("a separate current withdrawal clears the old generation");
+    assert_eq!(env.token_amount(old_clear_dest), AMOUNT as u64);
+
+    env.svm.warp_to_slot(3);
+    env.update_asset_lifecycle_as_admin_with_cu(
+        percolator_prog::processor::ASSET_ACTION_RETIRE,
+        ASSET,
+        3,
+        0,
+    );
+    env.svm.warp_to_slot(4);
+    // The reused slot is reactivated with the SAME backing_bucket_authority service, now custodying
+    // the new, independent provider's capital.
+    env.activate_asset_with_authorities(
+        ASSET,
+        4,
+        250,
+        new_provider.pubkey(),
+        new_provider.pubkey(),
+        backing_service.pubkey(),
+        new_provider.pubkey(),
+    );
+    let new_market_id = env.asset_market_id(ASSET);
+    assert_ne!(new_market_id, old_market_id);
+    env.top_up_backing_bucket_with_authority(&backing_service, DOMAIN, AMOUNT, 1_000_000);
+    let replacement_backing =
+        env.market_state().1.source_backing_buckets[DOMAIN as usize].fresh_unliened_backing_num;
+    assert_ne!(replacement_backing, 0, "replacement provider funded fresh backing");
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    assert_eq!(env.token_amount(stale_dest), 0);
+
+    let replay = env.svm.send_transaction(stale_withdraw);
+    if replay.is_ok() {
+        assert_eq!(
+            env.token_amount(stale_dest),
+            AMOUNT as u64,
+            "the old backing-service transaction withdrew the replacement provider's backing"
+        );
+        assert_eq!(
+            env.market_state().1.source_backing_buckets[DOMAIN as usize].fresh_unliened_backing_num,
+            0,
+            "the replacement asset's backing principal was debited"
+        );
+        panic!(
+            "a retained generation-{old_market_id} backing withdrawal drained generation-{new_market_id} backing"
+        );
+    }
+
+    let replay_error = format!("{:?}", replay.unwrap_err());
+    let expected_error = format!(
+        "Custom({})",
+        PercolatorError::AssetGenerationMismatch as u32
+    );
+    assert!(
+        replay_error.contains(&expected_error),
+        "stale backing withdrawal must fail with {expected_error}, got {replay_error}"
+    );
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+    assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+    assert_eq!(env.token_amount(stale_dest), 0);
+    assert_eq!(
+        env.market_state().1.source_backing_buckets[DOMAIN as usize].fresh_unliened_backing_num,
+        replacement_backing,
+        "the replacement provider's backing principal is intact after the rejected replay"
+    );
+
+    // Positive control: a CURRENT-generation backing withdrawal still succeeds and pays out.
+    let current_dest = env.token_account(backing_service.pubkey(), 0);
+    env.send(
+        ProgInstruction::WithdrawBackingBucket {
+            domain: DOMAIN,
+            market_id: new_market_id,
+            amount: AMOUNT,
+        },
+        vec![
+            AccountMeta::new(backing_service.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(current_dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&backing_service],
+    )
+    .expect("a current-generation backing withdrawal succeeds");
+    assert_eq!(env.token_amount(current_dest), AMOUNT as u64);
+}
+
 // Before the persistent generation account, a full CloseSlab + InitMarket cycle at the same market
 // address reset every asset market_id to its first-generation value. Keep the original, fully
 // signed transaction object across that public lifecycle: rebuilding the instruction after reinit
@@ -8500,12 +8682,14 @@ fn v16_bpf_cross_margin_positive_pnl_allows_backed_risk_increase_on_negative_leg
 
     let backing_withdraw_dest = env.token_account(env.admin.pubkey(), 0);
     let market_before_withdraw = env.svm.get_account(&env.market).unwrap();
+    let backing_market_id = env.asset_market_id(0);
     let backing_withdraw = send_tx(
         &mut env.svm,
         env.program_id,
         &env.payer,
         ProgInstruction::WithdrawBackingBucket {
             domain: 1,
+            market_id: backing_market_id,
             amount: over_watermark_amount,
         },
         vec![
@@ -12893,12 +13077,14 @@ fn v16_bpf_failed_backing_withdraw_transfer_rolls_back_bucket_and_ledger() {
     let ledger_before = env.svm.get_account(&ledger).unwrap();
     let dest_before = env.svm.get_account(&dest).unwrap();
     let vault_before = env.svm.get_account(&env.vault).unwrap();
+    let backing_market_id = env.asset_market_id(0);
     let result = send_tx(
         &mut env.svm,
         env.program_id,
         &env.payer,
         ProgInstruction::WithdrawBackingBucket {
             domain: 1,
+            market_id: backing_market_id,
             amount: 40,
         },
         vec![
@@ -12955,12 +13141,14 @@ fn v16_bpf_failed_backing_earnings_withdraw_rolls_back_bucket_and_ledger() {
     let ledger_before = env.svm.get_account(&ledger).unwrap();
     let dest_before = env.svm.get_account(&dest).unwrap();
     let vault_before = env.svm.get_account(&env.vault).unwrap();
+    let backing_market_id = env.asset_market_id(0);
     let result = send_tx(
         &mut env.svm,
         env.program_id,
         &env.payer,
         ProgInstruction::WithdrawBackingBucketEarnings {
             domain: 1,
+            market_id: backing_market_id,
             amount: 10,
         },
         vec![
@@ -15741,9 +15929,11 @@ fn v16_attack_backing_principal_withdraw_preserves_provider_earnings() {
     let vault_before = env.svm.get_account(&env.vault).unwrap();
     let dest_before = env.svm.get_account(&dest).unwrap();
     env.svm.expire_blockhash();
+    let premature_market_id = env.asset_market_id(1);
     let premature_principal = env.send(
         ProgInstruction::WithdrawBackingBucket {
             domain: 2,
+            market_id: premature_market_id,
             amount: PRINCIPAL,
         },
         vec![
@@ -15805,9 +15995,11 @@ fn v16_attack_backing_principal_withdraw_preserves_provider_earnings() {
     );
 
     env.svm.expire_blockhash();
+    let principal_after_market_id = env.asset_market_id(1);
     let principal_after_earnings = env.send(
         ProgInstruction::WithdrawBackingBucket {
             domain: 2,
+            market_id: principal_after_market_id,
             amount: PRINCIPAL,
         },
         vec![
@@ -20700,12 +20892,14 @@ fn v16_attack_backing_withdraw_cannot_strand_liened_winner() {
     // try to withdraw the LIENED backing (full 40, and a partial 1) -> must reject.
     for amt in [40u128, 1] {
         env.svm.expire_blockhash();
+        let market_id = env.asset_market_id(0);
         let r = send_tx(
             &mut env.svm,
             env.program_id,
             &env.payer,
             ProgInstruction::WithdrawBackingBucket {
                 domain: 1,
+                market_id,
                 amount: amt,
             },
             vec![
@@ -20909,12 +21103,14 @@ fn v16_attack_backing_earnings_no_over_or_double_withdraw() {
 
     // attempt to over-withdraw: only 10 remain, request 20 -> must reject (no double-count).
     env.svm.expire_blockhash();
+    let market_id = env.asset_market_id(0);
     let r_over = send_tx(
         &mut env.svm,
         env.program_id,
         &env.payer,
         ProgInstruction::WithdrawBackingBucketEarnings {
             domain: 1,
+            market_id,
             amount: 20,
         },
         vec![
@@ -20949,12 +21145,14 @@ fn v16_attack_backing_earnings_no_over_or_double_withdraw() {
 
     // replay: try to withdraw again -> nothing left, must reject (no double-spend).
     env.svm.expire_blockhash();
+    let market_id = env.asset_market_id(0);
     let r_replay = send_tx(
         &mut env.svm,
         env.program_id,
         &env.payer,
         ProgInstruction::WithdrawBackingBucketEarnings {
             domain: 1,
+            market_id,
             amount: 1,
         },
         vec![
@@ -21023,12 +21221,14 @@ fn v16_attack_backing_earnings_reject_noncanonical_vault() {
     let dest_before = env.svm.get_account(&dest).unwrap();
 
     env.svm.expire_blockhash();
+    let market_id = env.asset_market_id(0);
     let rejected = send_tx(
         &mut env.svm,
         env.program_id,
         &env.payer,
         ProgInstruction::WithdrawBackingBucketEarnings {
             domain: 1,
+            market_id,
             amount: 10,
         },
         vec![
@@ -23672,12 +23872,14 @@ fn v16_attack_backing_ledger_domain_binding_enforced() {
     let (_, g_before_spend) = env.market_state();
     let dest = env.token_account_for_mint(env.mint, env.admin.pubkey(), 0);
     env.svm.expire_blockhash();
+    let market_id = env.asset_market_id(1);
     let r_spend = send_tx(
         &mut env.svm,
         env.program_id,
         &env.payer,
         ProgInstruction::WithdrawBackingBucketEarnings {
             domain: 2,
+            market_id,
             amount: 10,
         },
         vec![
@@ -23889,12 +24091,14 @@ fn v16_attack_backing_ledger_market_binding_enforced() {
     let bad_dest = env.token_account(admin.pubkey(), 0);
     let bad_dest_before = env.svm.get_account(&bad_dest).unwrap();
     env.svm.expire_blockhash();
+    let market_id = env.asset_market_id(0);
     let withdraw_wrong_market = send_tx(
         &mut env.svm,
         env.program_id,
         &env.payer,
         ProgInstruction::WithdrawBackingBucketEarnings {
             domain: 1,
+            market_id,
             amount: 10,
         },
         vec![
@@ -23947,12 +24151,14 @@ fn v16_attack_backing_ledger_market_binding_enforced() {
 
     let good_dest = env.token_account(admin.pubkey(), 0);
     env.svm.expire_blockhash();
+    let market_id = env.asset_market_id(0);
     let withdraw_b = send_tx(
         &mut env.svm,
         env.program_id,
         &env.payer,
         ProgInstruction::WithdrawBackingBucketEarnings {
             domain: 1,
+            market_id,
             amount: 10,
         },
         vec![
@@ -25382,6 +25588,7 @@ fn v16_attack_value_paths_cannot_use_portfolio_as_optional_ledger() {
     let withdraw_backing = env.send(
         ProgInstruction::WithdrawBackingBucket {
             domain: 1,
+            market_id: env.asset_market_id(0),
             amount: 10,
         },
         vec![
@@ -25411,6 +25618,7 @@ fn v16_attack_value_paths_cannot_use_portfolio_as_optional_ledger() {
     let withdraw_earnings = env.send(
         ProgInstruction::WithdrawBackingBucketEarnings {
             domain: 1,
+            market_id: env.asset_market_id(0),
             amount: 10,
         },
         vec![
@@ -25585,6 +25793,7 @@ fn v16_attack_value_paths_cannot_use_market_as_optional_ledger() {
     let withdraw_backing = env.send(
         ProgInstruction::WithdrawBackingBucket {
             domain: 1,
+            market_id: env.asset_market_id(0),
             amount: 10,
         },
         vec![
@@ -25610,6 +25819,7 @@ fn v16_attack_value_paths_cannot_use_market_as_optional_ledger() {
     let withdraw_earnings = env.send(
         ProgInstruction::WithdrawBackingBucketEarnings {
             domain: 1,
+            market_id: env.asset_market_id(0),
             amount: 10,
         },
         vec![
@@ -26350,6 +26560,7 @@ fn v16_attack_domain_indexed_calls_reject_out_of_range_atomically() {
         &env.payer,
         ProgInstruction::WithdrawBackingBucket {
             domain: BAD_DOMAIN,
+            market_id: 0,
             amount: 1,
         },
         vec![
@@ -26383,6 +26594,7 @@ fn v16_attack_domain_indexed_calls_reject_out_of_range_atomically() {
         &env.payer,
         ProgInstruction::WithdrawBackingBucketEarnings {
             domain: BAD_DOMAIN,
+            market_id: 0,
             amount: 1,
         },
         vec![
@@ -32806,12 +33018,14 @@ fn v16_attack_cross_asset_backing_authority_cannot_withdraw_other_asset_bucket()
     let dest_before = env.svm.get_account(&dest).unwrap();
 
     env.svm.expire_blockhash();
+    let market_id = env.asset_market_id(0);
     let rejected = send_tx(
         &mut env.svm,
         env.program_id,
         &env.payer,
         ProgInstruction::WithdrawBackingBucket {
             domain: 0,
+            market_id,
             amount: 100,
         },
         vec![
@@ -32845,12 +33059,14 @@ fn v16_attack_cross_asset_backing_authority_cannot_withdraw_other_asset_bucket()
     );
 
     env.svm.expire_blockhash();
+    let market_id = env.asset_market_id(1);
     send_tx(
         &mut env.svm,
         env.program_id,
         &env.payer,
         ProgInstruction::WithdrawBackingBucket {
             domain: 2,
+            market_id,
             amount: 100,
         },
         vec![
@@ -32954,12 +33170,14 @@ fn v16_attack_cross_asset_backing_authority_cannot_withdraw_other_asset_earnings
     let ledger2_before = env.svm.get_account(&ledger2).unwrap();
 
     env.svm.expire_blockhash();
+    let market_id = env.asset_market_id(0);
     let rejected = send_tx(
         &mut env.svm,
         env.program_id,
         &env.payer,
         ProgInstruction::WithdrawBackingBucketEarnings {
             domain: 0,
+            market_id,
             amount: 10,
         },
         vec![
@@ -33004,12 +33222,14 @@ fn v16_attack_cross_asset_backing_authority_cannot_withdraw_other_asset_earnings
     );
 
     env.svm.expire_blockhash();
+    let market_id = env.asset_market_id(1);
     send_tx(
         &mut env.svm,
         env.program_id,
         &env.payer,
         ProgInstruction::WithdrawBackingBucketEarnings {
             domain: 2,
+            market_id,
             amount: 10,
         },
         vec![
@@ -33067,12 +33287,14 @@ fn v16_attack_backing_withdraw_pinned_to_canonical_vault() {
     let dest = env.token_account_for_mint(env.mint, env.admin.pubkey(), 0);
     // backing withdraw routed to the fake vault -> reject (canonical pin).
     env.svm.expire_blockhash();
+    let market_id = env.asset_market_id(0);
     let r = send_tx(
         &mut env.svm,
         env.program_id,
         &env.payer,
         ProgInstruction::WithdrawBackingBucket {
             domain: 1,
+            market_id,
             amount: 500,
         },
         vec![
@@ -35992,12 +36214,14 @@ fn v16_attack_resolved_backing_withdraw_requires_full_user_wind_down() {
     let vault_before = g.vault;
     let dest_before = env.token_amount(dest);
     env.svm.expire_blockhash();
+    let market_id = env.asset_market_id(0);
     let r = send_tx(
         &mut env.svm,
         env.program_id,
         &env.payer,
         ProgInstruction::WithdrawBackingBucket {
             domain: 1,
+            market_id,
             amount: 100,
         },
         vec![
@@ -36330,12 +36554,14 @@ fn v16_attack_backing_bucket_topup_withdraw_input_gates() {
     // (4) withdraw beyond the fresh-unliened principal must reject.
     let dest = env.token_account_for_mint(env.mint, admin.pubkey(), 0);
     env.svm.expire_blockhash();
+    let market_id = env.asset_market_id(0);
     let r_over = send_tx(
         &mut env.svm,
         env.program_id,
         &env.payer,
         ProgInstruction::WithdrawBackingBucket {
             domain: 0,
+            market_id,
             amount: 1_000_001,
         },
         vec![
@@ -55679,12 +55905,14 @@ fn v16_attack_live_backing_withdraw_rejects_exposed_target_effective_lag() {
 
     // ATTACK: withdraw backing during the exposed lag -> must REJECT (same health gate as insurance).
     env.svm.expire_blockhash();
+    let market_id = env.asset_market_id(0);
     let r = send_tx(
         &mut env.svm,
         env.program_id,
         &env.payer,
         ProgInstruction::WithdrawBackingBucket {
             domain: 0,
+            market_id,
             amount: 100,
         },
         vec![
@@ -57742,6 +57970,7 @@ fn v16_attack_live_domain_withdrawals_reject_when_resolve_matured() {
     let stale_backing = env.send(
         ProgInstruction::WithdrawBackingBucket {
             domain: 1,
+            market_id: env.asset_market_id(0),
             amount: 20,
         },
         vec![
@@ -57763,6 +57992,7 @@ fn v16_attack_live_domain_withdrawals_reject_when_resolve_matured() {
     let stale_earnings = env.send(
         ProgInstruction::WithdrawBackingBucketEarnings {
             domain: 1,
+            market_id: env.asset_market_id(0),
             amount: 10,
         },
         vec![
@@ -60210,12 +60440,14 @@ fn v16_attack_asset0_backing_rotation_rekeys_live_bucket_withdraw() {
     let market_before = env.svm.get_account(&env.market).unwrap();
 
     env.svm.expire_blockhash();
+    let market_id = env.asset_market_id(0);
     let stale_admin = send_tx(
         &mut env.svm,
         env.program_id,
         &env.payer,
         ProgInstruction::WithdrawBackingBucket {
             domain: 0,
+            market_id,
             amount: 100,
         },
         vec![
@@ -60250,12 +60482,14 @@ fn v16_attack_asset0_backing_rotation_rekeys_live_bucket_withdraw() {
 
     let backing_dest = env.token_account(new_backing.pubkey(), 0);
     env.svm.expire_blockhash();
+    let market_id = env.asset_market_id(0);
     let backing_withdraw = send_tx(
         &mut env.svm,
         env.program_id,
         &env.payer,
         ProgInstruction::WithdrawBackingBucket {
             domain: 0,
+            market_id,
             amount: 100,
         },
         vec![

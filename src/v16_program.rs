@@ -2576,6 +2576,7 @@ pub mod ix {
         },
         WithdrawBackingBucket {
             domain: u16,
+            market_id: u64,
             amount: u128,
         },
         ConvertReleasedPnl {
@@ -2622,6 +2623,7 @@ pub mod ix {
         },
         WithdrawBackingBucketEarnings {
             domain: u16,
+            market_id: u64,
             amount: u128,
         },
         SyncBackingDomainLedger {
@@ -2851,6 +2853,7 @@ pub mod ix {
                 },
                 50 => Self::WithdrawBackingBucket {
                     domain: read_u16(&mut rest)?,
+                    market_id: read_u64(&mut rest)?,
                     amount: read_u128(&mut rest)?,
                 },
                 28 => Self::ConvertReleasedPnl {
@@ -2918,6 +2921,7 @@ pub mod ix {
                 },
                 52 => Self::WithdrawBackingBucketEarnings {
                     domain: read_u16(&mut rest)?,
+                    market_id: read_u64(&mut rest)?,
                     amount: read_u128(&mut rest)?,
                 },
                 53 => Self::SyncBackingDomainLedger {
@@ -3155,9 +3159,14 @@ pub mod ix {
                     push_u128(&mut out, amount);
                     push_u64(&mut out, expiry_slot);
                 }
-                Self::WithdrawBackingBucket { domain, amount } => {
+                Self::WithdrawBackingBucket {
+                    domain,
+                    market_id,
+                    amount,
+                } => {
                     out.push(50);
                     push_u16(&mut out, domain);
+                    push_u64(&mut out, market_id);
                     push_u128(&mut out, amount);
                 }
                 Self::ConvertReleasedPnl { amount } => {
@@ -3230,9 +3239,14 @@ pub mod ix {
                     out.push(61);
                     push_u128(&mut out, amount);
                 }
-                Self::WithdrawBackingBucketEarnings { domain, amount } => {
+                Self::WithdrawBackingBucketEarnings {
+                    domain,
+                    market_id,
+                    amount,
+                } => {
                     out.push(52);
                     push_u16(&mut out, domain);
+                    push_u64(&mut out, market_id);
                     push_u128(&mut out, amount);
                 }
                 Self::SyncBackingDomainLedger { domain } => {
@@ -5314,9 +5328,11 @@ pub mod processor {
                 amount,
                 expiry_slot,
             } => handle_top_up_backing_bucket(program_id, accounts, domain, amount, expiry_slot),
-            Instruction::WithdrawBackingBucket { domain, amount } => {
-                handle_withdraw_backing_bucket(program_id, accounts, domain, amount)
-            }
+            Instruction::WithdrawBackingBucket {
+                domain,
+                market_id,
+                amount,
+            } => handle_withdraw_backing_bucket(program_id, accounts, domain, market_id, amount),
             Instruction::ConvertReleasedPnl { amount } => {
                 handle_convert_released_pnl(program_id, accounts, amount)
             }
@@ -5366,9 +5382,17 @@ pub mod processor {
             Instruction::UpdateMarketInitFeePolicy { min_init_fee } => {
                 handle_update_market_init_fee_policy(program_id, accounts, min_init_fee)
             }
-            Instruction::WithdrawBackingBucketEarnings { domain, amount } => {
-                handle_withdraw_backing_bucket_earnings(program_id, accounts, domain, amount)
-            }
+            Instruction::WithdrawBackingBucketEarnings {
+                domain,
+                market_id,
+                amount,
+            } => handle_withdraw_backing_bucket_earnings(
+                program_id,
+                accounts,
+                domain,
+                market_id,
+                amount,
+            ),
             Instruction::SyncBackingDomainLedger { domain } => {
                 handle_sync_backing_domain_ledger(program_id, accounts, domain)
             }
@@ -7597,6 +7621,7 @@ pub mod processor {
         vault_authority_ai: &AccountInfo<'a>,
         domain: usize,
         amount: u128,
+        expected_market_id: u64,
         require_live_mode: bool,
         authority_kind: u8,
     ) -> Result<(u8, u64), ProgramError> {
@@ -7609,6 +7634,14 @@ pub mod processor {
             || asset_index >= configured_slots
         {
             return Err(PercolatorError::InvalidInstruction.into());
+        }
+        // Bind the signed capability to the current asset generation: a retained withdrawal from a
+        // prior generation (before the asset slot was publicly retired + reused) must not debit the
+        // new provider's backing to the old destination.
+        let (_, _, _, current_market_id, _, _) =
+            state::read_market_trade_preflight(&market_data, asset_index)?;
+        if current_market_id != expected_market_id {
+            return Err(PercolatorError::AssetGenerationMismatch.into());
         }
         let profile = read_oracle_profile_for_asset(&market_data, &cfg, asset_index)?;
         let authorities = domain_authorities_from_profile(&cfg, &profile, asset_index);
@@ -7744,6 +7777,7 @@ pub mod processor {
         program_id: &Pubkey,
         accounts: &'a [AccountInfo<'a>],
         domain: u16,
+        expected_market_id: u64,
         amount: u128,
     ) -> ProgramResult {
         let authority = account(accounts, 0)?;
@@ -7777,6 +7811,7 @@ pub mod processor {
             vault_authority_ai,
             domain_usize,
             amount,
+            expected_market_id,
             false,
             DOMAIN_WITHDRAW_AUTH_BACKING,
         )?;
@@ -7784,6 +7819,20 @@ pub mod processor {
         {
             let mut market_data = market_ai.try_borrow_mut_data()?;
             let (cfg, mut group) = state::market_view_mut(&mut market_data)?;
+            // Re-bind to the current asset generation at the mutation boundary: reject a retained
+            // withdrawal whose asset slot was retired + reused since it was signed.
+            let asset_index = domain_usize / 2;
+            let current_market_id = group
+                .markets
+                .get(asset_index)
+                .ok_or(PercolatorError::InvalidInstruction)?
+                .engine
+                .asset
+                .market_id
+                .get();
+            if current_market_id != expected_market_id {
+                return Err(PercolatorError::AssetGenerationMismatch.into());
+            }
             let authorities = domain_authorities_from_view(&group, &cfg, domain_usize)?;
             let shutdown_drain = match group.header.mode {
                 0 => live_domain_withdraw_health_or_shutdown_view(&cfg, &group, domain_usize)?,
@@ -7871,6 +7920,7 @@ pub mod processor {
         program_id: &Pubkey,
         accounts: &'a [AccountInfo<'a>],
         domain: u16,
+        expected_market_id: u64,
         amount: u128,
     ) -> ProgramResult {
         let authority = account(accounts, 0)?;
@@ -7902,6 +7952,7 @@ pub mod processor {
             vault_authority_ai,
             domain_usize,
             amount,
+            expected_market_id,
             false,
             DOMAIN_WITHDRAW_AUTH_BACKING,
         )?;
@@ -7909,6 +7960,20 @@ pub mod processor {
         {
             let mut market_data = market_ai.try_borrow_mut_data()?;
             let (cfg, mut group) = state::market_view_mut(&mut market_data)?;
+            // Re-bind to the current asset generation at the mutation boundary: reject a retained
+            // withdrawal whose asset slot was retired + reused since it was signed.
+            let asset_index = domain_usize / 2;
+            let current_market_id = group
+                .markets
+                .get(asset_index)
+                .ok_or(PercolatorError::InvalidInstruction)?
+                .engine
+                .asset
+                .market_id
+                .get();
+            if current_market_id != expected_market_id {
+                return Err(PercolatorError::AssetGenerationMismatch.into());
+            }
             let authorities = domain_authorities_from_view(&group, &cfg, domain_usize)?;
             let shutdown_drain = match group.header.mode {
                 0 => live_domain_withdraw_health_or_shutdown_view(&cfg, &group, domain_usize)?,
