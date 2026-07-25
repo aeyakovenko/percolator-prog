@@ -59603,6 +59603,123 @@ fn v16_attack_backing_topup_rejects_lapsed_expiry() {
     );
 }
 
+// A signed insurance withdrawal authorizes one transition, not every later reserve that happens to
+// restore the same balance. Two fee-bump variants of the same withdrawal can be valid under one
+// recent blockhash: after one lands and the independent insurance authority replenishes the domain,
+// the retained retry must not consume the new contribution.
+#[test]
+fn v16_attack_signed_insurance_withdraw_cannot_replay_after_same_generation_topup() {
+    const ASSET: u16 = 1;
+    const DOMAIN: u16 = 2;
+    const AMOUNT: u128 = 50_000;
+
+    let mut env = V16CuEnv::new();
+    let provider = Keypair::new();
+    let operator = Keypair::new();
+    env.ensure_signer_account(provider.pubkey());
+    env.ensure_signer_account(operator.pubkey());
+
+    env.svm.warp_to_slot(1);
+    env.activate_asset_with_authorities(
+        ASSET,
+        1,
+        100,
+        provider.pubkey(),
+        operator.pubkey(),
+        provider.pubkey(),
+        provider.pubkey(),
+    );
+    let first_source = env.top_up_insurance_domain_with_authority(&provider, DOMAIN, AMOUNT);
+    assert_eq!(env.token_amount(first_source), 0);
+
+    let retained_dest = env.token_account(operator.pubkey(), 0);
+    let retained_ix = Instruction {
+        program_id: env.program_id,
+        accounts: vec![
+            AccountMeta::new(operator.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(retained_dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        data: ProgInstruction::WithdrawInsuranceAsset {
+            asset_index: ASSET,
+            amount: AMOUNT,
+        }
+        .encode(),
+    };
+    let retained_withdraw = Transaction::new_signed_with_payer(
+        &[
+            heap_ix(),
+            cu_ix(),
+            ComputeBudgetInstruction::set_compute_unit_price(1),
+            retained_ix,
+        ],
+        Some(&env.payer.pubkey()),
+        &[&env.payer, &operator],
+        env.svm.latest_blockhash(),
+    );
+
+    // The same withdrawal without the priority-fee instruction lands first. Both operator-signed
+    // variants remain valid under the same recent blockhash.
+    env.send(
+        ProgInstruction::WithdrawInsuranceAsset {
+            asset_index: ASSET,
+            amount: AMOUNT,
+        },
+        vec![
+            AccountMeta::new(operator.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(retained_dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&operator],
+    )
+    .expect("the separately encoded retry withdraws the first reserve");
+    assert_eq!(env.token_amount(retained_dest), AMOUNT as u64);
+    assert_eq!(
+        env.market_state().1.insurance_domain_budget[DOMAIN as usize],
+        0
+    );
+
+    let second_source = env.top_up_insurance_domain_with_authority(&provider, DOMAIN, AMOUNT);
+    assert_eq!(env.token_amount(second_source), 0);
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    let provider_balance_before = env.token_amount(second_source);
+
+    let replay = env.svm.send_transaction(retained_withdraw);
+    if replay.is_ok() {
+        assert_eq!(
+            env.token_amount(retained_dest),
+            (AMOUNT * 2) as u64,
+            "the retained retry consumed the independent replenishment"
+        );
+        assert_eq!(
+            env.market_state().1.insurance_domain_budget[DOMAIN as usize],
+            0,
+            "the replacement insurance budget was debited"
+        );
+        panic!("a retained withdrawal replayed across a same-generation insurance top-up");
+    }
+
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "rejected stale withdrawal leaves accounting byte-identical"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        vault_before,
+        "rejected stale withdrawal leaves custody byte-identical"
+    );
+    assert_eq!(env.token_amount(retained_dest), AMOUNT as u64);
+    assert_eq!(env.token_amount(second_source), provider_balance_before);
+}
+
 fn assert_underfunded_ewma_exit_uses_collected_fee(path: NoCpiReportedPricePath) {
     const MARK: u64 = 1_000_000;
     const SIZE_Q: i128 = POS_SCALE as i128;
