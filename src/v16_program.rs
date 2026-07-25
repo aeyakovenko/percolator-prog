@@ -5922,10 +5922,16 @@ pub mod processor {
                 asset_index as usize,
                 collected_post_trade_mark,
             )?;
+            stage_trade_driven_mark_target_view(
+                &mut oracle_profile,
+                &mut group,
+                asset_index as usize,
+            )?;
             write_oracle_profile_to_view(&mut group, asset_index as usize, &oracle_profile)?;
             if asset_index == 0 && oracle_v16::profile_is_price_managed(&oracle_profile) {
                 cfg.mark_ewma_e6 = oracle_profile.mark_ewma_e6;
                 cfg.mark_ewma_last_slot = oracle_profile.mark_ewma_last_slot;
+                cfg.oracle_target_price_e6 = oracle_profile.oracle_target_price_e6;
                 cfg_after = Some(cfg);
             }
             group.validate_shape().map_err(map_v16_error)?;
@@ -6164,10 +6170,12 @@ pub mod processor {
                     *asset_index,
                     collected_post_trade_mark,
                 )?;
+                stage_trade_driven_mark_target_view(oracle_profile, &mut group, *asset_index)?;
                 write_oracle_profile_to_view(&mut group, *asset_index, oracle_profile)?;
                 if *asset_index == 0 && oracle_v16::profile_is_price_managed(oracle_profile) {
                     cfg.mark_ewma_e6 = oracle_profile.mark_ewma_e6;
                     cfg.mark_ewma_last_slot = oracle_profile.mark_ewma_last_slot;
+                    cfg.oracle_target_price_e6 = oracle_profile.oracle_target_price_e6;
                     cfg_dirty = true;
                 }
             }
@@ -11857,6 +11865,21 @@ pub mod processor {
             profile.mark_ewma_last_slot = now_slot;
         }
         Ok(())
+    }
+
+    fn stage_trade_driven_mark_target_view(
+        profile: &mut state::AssetOracleProfileV16,
+        group: &mut state::MarketViewMutV16<'_>,
+        asset_index: usize,
+    ) -> Result<(), ProgramError> {
+        let now_slot = authenticated_market_slot_or_fallback_view(group);
+        if !profile_updates_mark_from_trade_view(profile, now_slot) {
+            return Ok(());
+        }
+        profile.oracle_target_price_e6 = profile.mark_ewma_e6;
+        group
+            .set_asset_raw_oracle_target_not_atomic(asset_index, profile.oracle_target_price_e6)
+            .map_err(map_v16_error)
     }
 
     fn derive_matcher_delegate(

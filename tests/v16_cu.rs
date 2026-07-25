@@ -7932,6 +7932,296 @@ fn v16_attack_target_only_lag_invalidates_unrelated_single_trade_cert() {
 }
 
 #[test]
+fn v16_attack_trade_driven_ewma_stages_engine_target_before_same_slot_cpi_risk() {
+    const OLD_MARK: u64 = 100;
+    const REPORTED_MARK: u64 = 200;
+    const EXPECTED_MARK: u64 = 150;
+    const DISCOVERY_SIZE_Q: i128 = POS_SCALE as i128;
+    const ATTACK_SIZE_Q: i128 = (10_000 * POS_SCALE) as i128;
+    const ATTACKER_DEPOSIT: u128 = 1_000_000;
+    const LP_DEPOSIT: u128 = 4_000_000;
+    const STALE_PRICE_PROFIT: u128 = 500_000;
+
+    let mut env = V16CuEnv::new();
+    env.configure_ewma_mark_with_cu(0, OLD_MARK, 1, 0);
+
+    // The discovery trader owns both sides and fully pays the fee supporting the EWMA move.
+    let discovery_long_owner = Keypair::new();
+    let discovery_short_owner = Keypair::new();
+    let discovery_long = env.create_portfolio(&discovery_long_owner);
+    let discovery_short = env.create_portfolio(&discovery_short_owner);
+    env.deposit(&discovery_long_owner, discovery_long, 1_000);
+    env.deposit(&discovery_short_owner, discovery_short, 1_000);
+
+    let attacker_owner = Keypair::new();
+    let lp_owner = Keypair::new();
+    let attacker = env.create_portfolio(&attacker_owner);
+    let lp = env.create_portfolio(&lp_owner);
+    env.deposit(&attacker_owner, attacker, ATTACKER_DEPOSIT);
+    env.deposit(&lp_owner, lp, LP_DEPOSIT);
+    let (matcher_program, matcher_context, matcher_delegate) =
+        auth_matcher_for_lp(&mut env, &lp_owner, lp);
+
+    env.svm.warp_to_slot(1);
+    let (_, before_discovery) = env.market_state();
+    let discovery_cu = env.trade_with_cu(
+        &discovery_long_owner,
+        discovery_long,
+        &discovery_short_owner,
+        discovery_short,
+        DISCOVERY_SIZE_Q,
+        REPORTED_MARK,
+        0,
+    );
+    assert_cu_within(
+        "trade-driven EWMA target staging",
+        discovery_cu,
+        TRADE_CU_LIMIT,
+    );
+    let profile =
+        state::read_asset_oracle_profile(&env.svm.get_account(&env.market).unwrap().data, 0)
+            .unwrap();
+    let (_, after_discovery) = env.market_state();
+    assert_eq!(profile.mark_ewma_e6, EXPECTED_MARK);
+    assert!(
+        after_discovery.insurance > before_discovery.insurance,
+        "the discovery trader must pay the fee supporting the EWMA movement"
+    );
+    assert_eq!(
+        after_discovery.assets[0].effective_price, OLD_MARK,
+        "the bounded effective mark advances only through the public crank"
+    );
+
+    // Leave no discovery position behind. Since no time elapsed, this reduction must not reverse
+    // the paid EWMA observation or create an unrelated exposure.
+    env.trade_with_cu(
+        &discovery_long_owner,
+        discovery_long,
+        &discovery_short_owner,
+        discovery_short,
+        -DISCOVERY_SIZE_Q,
+        OLD_MARK,
+        0,
+    );
+    assert!(!has_active_leg_for_asset(
+        &env.portfolio_state(discovery_long),
+        0
+    ));
+    assert!(!has_active_leg_for_asset(
+        &env.portfolio_state(discovery_short),
+        0
+    ));
+    let profile_after_close =
+        state::read_asset_oracle_profile(&env.svm.get_account(&env.market).unwrap().data, 0)
+            .unwrap();
+    assert_eq!(profile_after_close.mark_ewma_e6, EXPECTED_MARK);
+
+    let market_before_attack = env.svm.get_account(&env.market).unwrap();
+    let attacker_before_attack = env.svm.get_account(&attacker).unwrap();
+    let lp_before_attack = env.svm.get_account(&lp).unwrap();
+    let matcher_before_attack = env.svm.get_account(&matcher_context).unwrap();
+    env.svm.expire_blockhash();
+    let stale_risk_increase = env.try_trade_cpi_with_cu_on_asset(
+        &attacker_owner,
+        attacker,
+        &lp_owner,
+        lp,
+        matcher_program,
+        matcher_context,
+        matcher_delegate,
+        0,
+        ATTACK_SIZE_Q,
+        0,
+    );
+
+    if stale_risk_increase.is_ok() {
+        let (_, vulnerable_group) = env.market_state();
+        assert_eq!(
+            vulnerable_group.assets[0].raw_oracle_target_price, OLD_MARK,
+            "the trade-derived mark remained outside the engine target"
+        );
+        assert_eq!(
+            vulnerable_group.oracle_epoch, before_discovery.oracle_epoch,
+            "the paid mark move did not invalidate pre-move health certificates"
+        );
+        assert_eq!(
+            active_leg_for_asset(&env.portfolio_state(attacker), 0).basis_pos_q,
+            ATTACK_SIZE_Q
+        );
+
+        for portfolio in [attacker, lp] {
+            env.crank(
+                portfolio,
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: 1,
+                    observations: crank_observations(0),
+                },
+            );
+        }
+        let (_, moved_group) = env.market_state();
+        assert_eq!(moved_group.assets[0].effective_price, EXPECTED_MARK);
+
+        env.svm.expire_blockhash();
+        env.trade_cpi_with_cu_on_asset(
+            &attacker_owner,
+            attacker,
+            &lp_owner,
+            lp,
+            matcher_program,
+            matcher_context,
+            matcher_delegate,
+            0,
+            -ATTACK_SIZE_Q,
+            0,
+        );
+        let attacker_flat = env.portfolio_state(attacker);
+        let lp_flat = env.portfolio_state(lp);
+        assert_eq!(attacker_flat.pnl.get(), STALE_PRICE_PROFIT as i128);
+        assert_eq!(lp_flat.capital.get(), LP_DEPOSIT - STALE_PRICE_PROFIT);
+        env.convert_released_pnl_with_cu(&attacker_owner, attacker, STALE_PRICE_PROFIT);
+        let attacker_after_convert = env.portfolio_state(attacker);
+        let attacker_dest = env.withdraw(
+            &attacker_owner,
+            attacker,
+            attacker_after_convert.capital.get(),
+        );
+        let lp_dest = env.withdraw(&lp_owner, lp, lp_flat.capital.get());
+        assert_eq!(
+            env.token_amount(attacker_dest) as u128,
+            ATTACKER_DEPOSIT + STALE_PRICE_PROFIT
+        );
+        assert_eq!(
+            env.token_amount(lp_dest) as u128,
+            LP_DEPOSIT - STALE_PRICE_PROFIT
+        );
+        panic!(
+            "paid EWMA discovery left a same-slot stale CPI window: attacker extracted \
+             {STALE_PRICE_PROFIT} collateral atoms from an unrelated pre-authorized LP"
+        );
+    }
+
+    assert_eq!(
+        after_discovery.assets[0].raw_oracle_target_price, EXPECTED_MARK,
+        "a changed trade-derived mark must enter the engine in the same instruction"
+    );
+    assert_eq!(
+        after_discovery.oracle_epoch,
+        before_discovery.oracle_epoch + 1,
+        "staging a changed trade-derived target must invalidate prior health certificates"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before_attack,
+        "the rejected CPI risk increase must roll back matcher sequence and market state"
+    );
+    assert_eq!(
+        env.svm.get_account(&attacker).unwrap(),
+        attacker_before_attack
+    );
+    assert_eq!(env.svm.get_account(&lp).unwrap(), lp_before_attack);
+    assert_eq!(
+        env.svm.get_account(&matcher_context).unwrap(),
+        matcher_before_attack,
+        "the rejected instruction must roll back matcher CPI state"
+    );
+}
+
+#[test]
+fn v16_bpf_batch_trade_driven_ewma_stages_target_and_preserves_reduction() {
+    const OLD_MARK: u64 = 100;
+    const REPORTED_MARK: u64 = 200;
+    const EXPECTED_MARK: u64 = 150;
+    const SIZE_Q: i128 = POS_SCALE as i128;
+
+    let mut env = V16CuEnv::new();
+    env.configure_ewma_mark_with_cu(0, OLD_MARK, 1, 0);
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long_account = env.create_portfolio(&long_owner);
+    let short_account = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long_account, 1_000);
+    env.deposit(&short_owner, short_account, 1_000);
+
+    env.svm.warp_to_slot(1);
+    let (_, before) = env.market_state();
+    let batch_open_cu = env
+        .send(
+            ProgInstruction::BatchTradeNoCpi {
+                legs: vec![BatchTradeLeg {
+                    asset_index: 0,
+                    size_q: SIZE_Q,
+                    exec_price: REPORTED_MARK,
+                    fee_bps: 0,
+                }],
+            },
+            vec![
+                AccountMeta::new(long_owner.pubkey(), true),
+                AccountMeta::new(short_owner.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(long_account, false),
+                AccountMeta::new(short_account, false),
+            ],
+            &[&long_owner, &short_owner],
+        )
+        .expect("batch EWMA discovery");
+    assert_cu_within(
+        "batch trade-driven EWMA target staging",
+        batch_open_cu,
+        TRADE_CU_LIMIT,
+    );
+
+    let cfg_and_group = env.market_state();
+    let profile =
+        state::read_asset_oracle_profile(&env.svm.get_account(&env.market).unwrap().data, 0)
+            .unwrap();
+    assert_eq!(profile.mark_ewma_e6, EXPECTED_MARK);
+    assert_eq!(profile.oracle_target_price_e6, EXPECTED_MARK);
+    assert_eq!(
+        cfg_and_group.1.assets[0].raw_oracle_target_price,
+        EXPECTED_MARK
+    );
+    assert_eq!(cfg_and_group.1.assets[0].effective_price, OLD_MARK);
+    assert_eq!(cfg_and_group.1.oracle_epoch, before.oracle_epoch + 1);
+
+    // A staged target invalidates old health certificates but must not block either side from
+    // reducing the position at the currently effective price.
+    env.svm.expire_blockhash();
+    let batch_close_cu = env
+        .send(
+            ProgInstruction::BatchTradeNoCpi {
+                legs: vec![BatchTradeLeg {
+                    asset_index: 0,
+                    size_q: -SIZE_Q,
+                    exec_price: OLD_MARK,
+                    fee_bps: 0,
+                }],
+            },
+            vec![
+                AccountMeta::new(long_owner.pubkey(), true),
+                AccountMeta::new(short_owner.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(long_account, false),
+                AccountMeta::new(short_account, false),
+            ],
+            &[&long_owner, &short_owner],
+        )
+        .expect("batch reduction during target/effective lag");
+    assert_cu_within(
+        "batch reduction during target/effective lag",
+        batch_close_cu,
+        TRADE_CU_LIMIT,
+    );
+    assert!(!has_active_leg_for_asset(
+        &env.portfolio_state(long_account),
+        0
+    ));
+    assert!(!has_active_leg_for_asset(
+        &env.portfolio_state(short_account),
+        0
+    ));
+}
+
+#[test]
 fn v16_bpf_trade_refreshes_stale_related_portfolio_leg_on_demand() {
     let mut env = V16CuEnv::new_with_market_params_and_price_move(4, 1_000, 1_000, 500);
     env.configure_auth_mark_for_asset_as_admin(1, 0, 100);
