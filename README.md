@@ -352,14 +352,17 @@ This makes it a "pure identity signer" and prevents it from becoming an attack s
 ### LP matcher config (TradeCpi / BatchTradeCpi)
 Unsigned LP matcher fills require an enabled matcher config stored directly on the LP portfolio.
 
-`SetMatcherConfig` (tag 68) is signed by the LP owner and writes:
+`SetMatcherConfig` (tag 68) is signed by the LP owner, supplies the current portfolio incarnation
+ID and matcher-config sequence, and writes:
 
-`matcher_program, matcher_context, matcher_delegate, enabled`
+`matcher_program, matcher_context, matcher_delegate, enabled, next_sequence`
 
 During `TradeCpi` / `BatchTradeCpi`, Percolator reads this LP-account config and requires the
 instruction's matcher program, matcher context, and matcher delegate PDA to match it byte-for-byte.
 Extra matcher CPI tail accounts begin immediately after the matcher delegate. Disabled configs,
 wrong matcher program/context/delegate, wrong LP owner, or wrong LP portfolio all reject.
+Every successful config update advances the sequence, so delayed signed grants cannot override a
+newer revocation. The portfolio ID also rejects an intent signed for a closed account incarnation.
 
 ### Matcher context (TradeCpi)
 - account owned by matcher program
@@ -447,8 +450,9 @@ This section describes intent and operational ordering, not argument-by-argument
     anti-spoof binding as `TradeCpi`, then all fills apply through the batch path. Bounded to 16
     legs (the matcher's return-data cap).
 - **SetMatcherConfig** (tag 68)
-  - LP-owner-signed opt-in/out for unsigned LP matcher fills. This writes the matcher config tail
-    on the LP portfolio: matcher program, matcher context, matcher delegate, and enabled flag.
+  - LP-owner-signed, incarnation- and sequence-bound opt-in/out for unsigned LP matcher fills. This
+    writes the matcher config tail on the LP portfolio: matcher program, matcher context, matcher
+    delegate, enabled flag, and next sequence.
 
 ### Oracle / mark management
 - External-oracle markets authenticate configured oracle account(s) in the oracle configuration/crank
@@ -761,7 +765,8 @@ Call `InitMarket` with:
   - deploy or choose matcher program
   - create matcher context account owned by matcher program
   - create a portfolio with `InitPortfolio`
-  - call `SetMatcherConfig` with the LP owner signing the exact matcher program/context/delegate tuple
+  - call `SetMatcherConfig` with the LP owner signing the portfolio ID, current config sequence, and
+    exact matcher program/context/delegate tuple
   - deposit collateral with `Deposit`
 - User:
   - create a portfolio with `InitPortfolio`

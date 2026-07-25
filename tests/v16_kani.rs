@@ -230,6 +230,31 @@ fn kani_v16_amount_instructions_decode_preserves_wire_fields() {
 }
 
 #[kani::proof]
+fn kani_v16_set_matcher_config_decode_preserves_intent_binding() {
+    let portfolio_id: u64 = kani::any();
+    let expected_sequence: u64 = kani::any();
+    let enabled: u8 = kani::any();
+    let mut data = [0u8; 18];
+    data[0] = 68;
+    data[1..9].copy_from_slice(&portfolio_id.to_le_bytes());
+    data[9..17].copy_from_slice(&expected_sequence.to_le_bytes());
+    data[17] = enabled;
+
+    match Instruction::decode(&data).unwrap() {
+        Instruction::SetMatcherConfig {
+            portfolio_id: got_portfolio_id,
+            expected_sequence: got_sequence,
+            enabled: got_enabled,
+        } => {
+            assert_eq!(got_portfolio_id, portfolio_id);
+            assert_eq!(got_sequence, expected_sequence);
+            assert_eq!(got_enabled, enabled);
+        }
+        _ => unreachable!(),
+    }
+}
+
+#[kani::proof]
 fn kani_v16_domain_topup_and_asset_insurance_decode_preserves_wire_fields() {
     let domain: u16 = kani::any();
     let asset_index: u16 = kani::any();
@@ -1489,6 +1514,9 @@ fn kani_v16_every_active_payload_rejects_one_byte_truncation() {
 
     let trade_cpi = [10u8; 33];
     assert!(Instruction::decode(&trade_cpi).is_err());
+
+    let set_matcher_config = [68u8; 17];
+    assert!(Instruction::decode(&set_matcher_config).is_err());
 
     let top_up = [9u8; 16];
     assert!(Instruction::decode(&top_up).is_err());
