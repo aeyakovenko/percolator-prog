@@ -2277,11 +2277,18 @@ impl V16CuEnv {
         stale_slots: u64,
         force_close_delay_slots: u64,
     ) -> u64 {
+        let sequence = state::read_permissionless_resolve_policy_sequence(
+            &self.svm.get_account(&self.market).unwrap().data,
+        )
+        .unwrap()
+        .checked_add(1)
+        .unwrap();
         send_tx(
             &mut self.svm,
             self.program_id,
             &self.payer,
             ProgInstruction::ConfigurePermissionlessResolve {
+                sequence,
                 stale_slots,
                 force_close_delay_slots,
             },
@@ -25894,6 +25901,7 @@ fn v16_attack_rotated_marketauth_cannot_replay_policy_updates() {
     );
     old_attempt(
         ProgInstruction::ConfigurePermissionlessResolve {
+            sequence: 1,
             stale_slots: 100,
             force_close_delay_slots: 5,
         },
@@ -25940,6 +25948,7 @@ fn v16_attack_rotated_marketauth_cannot_replay_policy_updates() {
     );
     new_update(
         ProgInstruction::ConfigurePermissionlessResolve {
+            sequence: 1,
             stale_slots: 100,
             force_close_delay_slots: 5,
         },
@@ -36856,6 +36865,7 @@ fn v16_attack_force_close_rejects_cross_market_portfolio_substitution() {
         env.program_id,
         &env.payer,
         ProgInstruction::ConfigurePermissionlessResolve {
+            sequence: 1,
             stale_slots: 100,
             force_close_delay_slots: DELAY,
         },
@@ -54349,6 +54359,7 @@ fn v16_attack_configure_permissionless_resolve_gated_and_bounded() {
     env.svm.expire_blockhash();
     let r_grief = env.send(
         ProgInstruction::ConfigurePermissionlessResolve {
+            sequence: 1,
             stale_slots: 1_000,
             force_close_delay_slots: 1_000,
         },
@@ -54369,6 +54380,7 @@ fn v16_attack_configure_permissionless_resolve_gated_and_bounded() {
     env.svm.expire_blockhash();
     let r_zero = env.send(
         ProgInstruction::ConfigurePermissionlessResolve {
+            sequence: 1,
             stale_slots: 0,
             force_close_delay_slots: 1_000,
         },
@@ -54384,6 +54396,7 @@ fn v16_attack_configure_permissionless_resolve_gated_and_bounded() {
     env.svm.expire_blockhash();
     let r_huge = env.send(
         ProgInstruction::ConfigurePermissionlessResolve {
+            sequence: 1,
             stale_slots: percolator_prog::constants::MAX_PERMISSIONLESS_RESOLVE_STALE_SLOTS + 1,
             force_close_delay_slots: 1_000,
         },
@@ -54402,6 +54415,7 @@ fn v16_attack_configure_permissionless_resolve_gated_and_bounded() {
     env.svm.expire_blockhash();
     let r_force_zero = env.send(
         ProgInstruction::ConfigurePermissionlessResolve {
+            sequence: 1,
             stale_slots: 1_000,
             force_close_delay_slots: 0,
         },
@@ -54420,6 +54434,7 @@ fn v16_attack_configure_permissionless_resolve_gated_and_bounded() {
     env.svm.expire_blockhash();
     let r_force_huge = env.send(
         ProgInstruction::ConfigurePermissionlessResolve {
+            sequence: 1,
             stale_slots: 1_000,
             force_close_delay_slots: percolator_prog::constants::MAX_FORCE_CLOSE_DELAY_SLOTS + 1,
         },
@@ -54440,6 +54455,7 @@ fn v16_attack_configure_permissionless_resolve_gated_and_bounded() {
     env.svm.expire_blockhash();
     let r_ok = env.send(
         ProgInstruction::ConfigurePermissionlessResolve {
+            sequence: 1,
             stale_slots: 1_000,
             force_close_delay_slots: 1_000,
         },
@@ -54480,6 +54496,7 @@ fn v16_attack_configure_permissionless_resolve_rejects_when_resolve_matured() {
     env.svm.expire_blockhash();
     let fresh = env.send(
         ProgInstruction::ConfigurePermissionlessResolve {
+            sequence: 2,
             stale_slots: 6,
             force_close_delay_slots: 6,
         },
@@ -54507,6 +54524,7 @@ fn v16_attack_configure_permissionless_resolve_rejects_when_resolve_matured() {
     env.svm.expire_blockhash();
     let stale = env.send(
         ProgInstruction::ConfigurePermissionlessResolve {
+            sequence: 3,
             stale_slots: 1_000,
             force_close_delay_slots: 1_000,
         },
@@ -59758,6 +59776,7 @@ fn v16_attack_delayed_resolve_policy_cannot_freeze_unapplied_auth_mark() {
             AccountMeta::new(env.market, false),
         ],
         data: ProgInstruction::ConfigurePermissionlessResolve {
+            sequence: 1,
             stale_slots: OLD_STALE_SLOTS,
             force_close_delay_slots: FORCE_CLOSE_DELAY_SLOTS,
         }
@@ -59835,10 +59854,30 @@ fn v16_attack_delayed_resolve_policy_cannot_freeze_unapplied_auth_mark() {
         );
     }
 
+    let replay_error = format!(
+        "{:?}",
+        replay.expect_err("the superseded policy sequence must reject")
+    );
+    let expected_error = format!(
+        "Custom({})",
+        percolator_prog::error::PercolatorError::EngineStale as u32
+    );
+    assert!(
+        replay_error.contains(&expected_error),
+        "stale policy sequence must return {expected_error}, got {replay_error}"
+    );
     assert_eq!(
         env.svm.get_account(&env.market).unwrap(),
         market_before_replay,
         "rejected stale policy leaves the live market byte-identical"
+    );
+    assert_eq!(
+        state::read_permissionless_resolve_policy_sequence(
+            &env.svm.get_account(&env.market).unwrap().data
+        )
+        .unwrap(),
+        2,
+        "oracle profile writes preserve the accepted policy watermark"
     );
     assert_eq!(
         env.market_state().0.permissionless_resolve_stale_slots,

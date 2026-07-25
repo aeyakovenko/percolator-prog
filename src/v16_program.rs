@@ -49,6 +49,7 @@ pub mod constants {
     pub const WRAPPER_CONFIG_LEN: usize = 448;
     pub const ASSET_ORACLE_PROFILE_LEN: usize = 400;
     pub const ASSET_ORACLE_WRAPPER_LEN: usize = 512;
+    pub const PERMISSIONLESS_RESOLVE_POLICY_SEQUENCE_OFF: usize = ASSET_ORACLE_PROFILE_LEN + 64;
     pub const MARKET_GROUP_LEN: usize = size_of::<MarketGroupV16HeaderAccount>();
     pub const MARKET_ASSET_SLOT_LEN: usize = size_of::<Market<[u8; ASSET_ORACLE_WRAPPER_LEN]>>();
     pub const PORTFOLIO_STATE_LEN: usize = size_of::<PortfolioAccountV16Account>();
@@ -159,7 +160,8 @@ pub mod state {
             KIND_BACKING_DOMAIN_LEDGER, KIND_INSURANCE_LEDGER, KIND_MARKET, KIND_PORTFOLIO, MAGIC,
             MARKET_GROUP_LEN, MARKET_GROUP_OFF, MIN_MARKET_ACCOUNT_LEN, ORACLE_LEG_CAP,
             ORACLE_LEG_FLAGS_MASK, ORACLE_MODE_AUTH_MARK, ORACLE_MODE_EWMA_MARK,
-            ORACLE_MODE_HYBRID_AFTER_HOURS, ORACLE_MODE_MANUAL, PORTFOLIO_ACCOUNT_LEN,
+            ORACLE_MODE_HYBRID_AFTER_HOURS, ORACLE_MODE_MANUAL,
+            PERMISSIONLESS_RESOLVE_POLICY_SEQUENCE_OFF, PORTFOLIO_ACCOUNT_LEN,
             PORTFOLIO_ENGINE_ACCOUNT_LEN, PORTFOLIO_ID_LEN, PORTFOLIO_ID_OFF,
             PORTFOLIO_MATCHER_CONFIG_LEN, PORTFOLIO_MATCHER_CONFIG_OFF, PORTFOLIO_STATE_LEN,
             VERSION, WRAPPER_CONFIG_LEN,
@@ -1366,6 +1368,22 @@ pub mod state {
         let profile: AssetOracleProfileV16 = bytemuck::pod_read_unaligned(bytes);
         validate_asset_oracle_profile(&profile)?;
         Ok(profile)
+    }
+
+    pub fn read_permissionless_resolve_policy_sequence(data: &[u8]) -> Result<u64, ProgramError> {
+        check_header(data, KIND_MARKET)?;
+        validate_market_dynamic_len(data)?;
+        let start = dynamic_slot_offset(0)?
+            .checked_add(PERMISSIONLESS_RESOLVE_POLICY_SEQUENCE_OFF)
+            .ok_or(PercolatorError::InvalidAccountLen)?;
+        let bytes = data
+            .get(start..start + 8)
+            .ok_or(PercolatorError::InvalidAccountLen)?;
+        Ok(u64::from_le_bytes(
+            bytes
+                .try_into()
+                .map_err(|_| PercolatorError::InvalidAccountLen)?,
+        ))
     }
 
     pub fn read_market_config_mode_and_capacity(
@@ -2577,6 +2595,7 @@ pub mod ix {
         },
         SyncInsuranceLedger,
         ConfigurePermissionlessResolve {
+            sequence: u64,
             stale_slots: u64,
             force_close_delay_slots: u64,
         },
@@ -2866,6 +2885,7 @@ pub mod ix {
                 },
                 54 => Self::SyncInsuranceLedger,
                 38 => Self::ConfigurePermissionlessResolve {
+                    sequence: read_u64(&mut rest)?,
                     stale_slots: read_u64(&mut rest)?,
                     force_close_delay_slots: read_u64(&mut rest)?,
                 },
@@ -3169,10 +3189,12 @@ pub mod ix {
                 }
                 Self::SyncInsuranceLedger => out.push(54),
                 Self::ConfigurePermissionlessResolve {
+                    sequence,
                     stale_slots,
                     force_close_delay_slots,
                 } => {
                     out.push(38);
+                    push_u64(&mut out, sequence);
                     push_u64(&mut out, stale_slots);
                     push_u64(&mut out, force_close_delay_slots);
                 }
@@ -4583,6 +4605,36 @@ pub mod processor {
         Ok(profile)
     }
 
+    fn permissionless_resolve_policy_sequence_view(
+        group: &state::MarketViewMutV16<'_>,
+    ) -> Result<u64, ProgramError> {
+        let start = constants::PERMISSIONLESS_RESOLVE_POLICY_SEQUENCE_OFF;
+        let bytes = group
+            .markets
+            .first()
+            .and_then(|market| market.wrapper.get(start..start + 8))
+            .ok_or(PercolatorError::InvalidAccountLen)?;
+        Ok(u64::from_le_bytes(
+            bytes
+                .try_into()
+                .map_err(|_| PercolatorError::InvalidAccountLen)?,
+        ))
+    }
+
+    fn write_permissionless_resolve_policy_sequence_view(
+        group: &mut state::MarketViewMutV16<'_>,
+        sequence: u64,
+    ) -> ProgramResult {
+        let start = constants::PERMISSIONLESS_RESOLVE_POLICY_SEQUENCE_OFF;
+        let bytes = group
+            .markets
+            .first_mut()
+            .and_then(|market| market.wrapper.get_mut(start..start + 8))
+            .ok_or(PercolatorError::InvalidAccountLen)?;
+        bytes.copy_from_slice(&sequence.to_le_bytes());
+        Ok(())
+    }
+
     fn write_oracle_profile_to_view_if_separate(
         group: &mut state::MarketViewMutV16<'_>,
         asset_index: usize,
@@ -5323,11 +5375,13 @@ pub mod processor {
             }
             Instruction::SyncInsuranceLedger => handle_sync_insurance_ledger(program_id, accounts),
             Instruction::ConfigurePermissionlessResolve {
+                sequence,
                 stale_slots,
                 force_close_delay_slots,
             } => handle_configure_permissionless_resolve(
                 program_id,
                 accounts,
+                sequence,
                 stale_slots,
                 force_close_delay_slots,
             ),
@@ -9718,6 +9772,7 @@ pub mod processor {
     fn handle_configure_permissionless_resolve<'a>(
         program_id: &Pubkey,
         accounts: &'a [AccountInfo<'a>],
+        sequence: u64,
         stale_slots: u64,
         force_close_delay_slots: u64,
     ) -> ProgramResult {
@@ -9733,18 +9788,26 @@ pub mod processor {
         {
             return Err(PercolatorError::InvalidInstruction.into());
         }
-        let (mut cfg, mode, _, _) =
-            state::read_market_config_mode_and_capacity(&market_ai.try_borrow_data()?)?;
-        expect_live_authority(&cfg.marketauth, admin.key)?;
-        if mode != MarketModeV16::Live {
-            return Err(PercolatorError::EngineLockActive.into());
-        }
-        if oracle_v16::permissionless_stale_matured(&cfg, authenticated_slot_or_fallback(0)) {
-            return Err(PercolatorError::OracleStale.into());
-        }
-        cfg.permissionless_resolve_stale_slots = stale_slots;
-        cfg.force_close_delay_slots = force_close_delay_slots;
-        state::write_wrapper_config(&mut market_ai.try_borrow_mut_data()?, &cfg)
+        let mut data = market_ai.try_borrow_mut_data()?;
+        let cfg_after = {
+            let (mut cfg, mut group) = state::market_view_mut(&mut data)?;
+            expect_live_authority(&cfg.marketauth, admin.key)?;
+            let current_sequence = permissionless_resolve_policy_sequence_view(&group)?;
+            if sequence == 0 || sequence <= current_sequence {
+                return Err(PercolatorError::EngineStale.into());
+            }
+            if group.header.mode != 0 {
+                return Err(PercolatorError::EngineLockActive.into());
+            }
+            if oracle_v16::permissionless_stale_matured(&cfg, authenticated_slot_or_fallback(0)) {
+                return Err(PercolatorError::OracleStale.into());
+            }
+            write_permissionless_resolve_policy_sequence_view(&mut group, sequence)?;
+            cfg.permissionless_resolve_stale_slots = stale_slots;
+            cfg.force_close_delay_slots = force_close_delay_slots;
+            cfg
+        };
+        state::write_wrapper_config(&mut data, &cfg_after)
     }
 
     #[inline(never)]
