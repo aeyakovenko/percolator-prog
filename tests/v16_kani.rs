@@ -201,9 +201,7 @@ fn kani_v16_init_market_decode_preserves_wire_fields() {
 #[kani::proof]
 fn kani_v16_amount_instructions_decode_preserves_wire_fields() {
     let tag: u8 = kani::any();
-    kani::assume(
-        tag == 3 || tag == 4 || tag == 9 || tag == 28 || tag == 30 || tag == 41 || tag == 42,
-    );
+    kani::assume(tag == 3 || tag == 4 || tag == 28 || tag == 30 || tag == 41 || tag == 42);
     let amount: u128 = kani::any();
 
     let mut data = [0u8; 17];
@@ -213,7 +211,6 @@ fn kani_v16_amount_instructions_decode_preserves_wire_fields() {
     match (tag, Instruction::decode(&data).unwrap()) {
         (3, Instruction::Deposit { amount: got }) => assert_eq!(got, amount),
         (4, Instruction::Withdraw { amount: got }) => assert_eq!(got, amount),
-        (9, Instruction::TopUpInsurance { amount: got }) => assert_eq!(got, amount),
         (28, Instruction::ConvertReleasedPnl { amount: got }) => assert_eq!(got, amount),
         (30, Instruction::CloseResolved { fee_rate_per_slot }) => {
             assert_eq!(fee_rate_per_slot, amount)
@@ -233,18 +230,37 @@ fn kani_v16_amount_instructions_decode_preserves_wire_fields() {
 fn kani_v16_domain_topup_and_asset_insurance_decode_preserves_wire_fields() {
     let domain: u16 = kani::any();
     let asset_index: u16 = kani::any();
+    let expected_sequence: u64 = kani::any();
     let amount: u128 = kani::any();
 
-    let mut top_up = [0u8; 19];
+    let mut base_top_up = [0u8; 25];
+    base_top_up[0] = 9;
+    base_top_up[1..9].copy_from_slice(&expected_sequence.to_le_bytes());
+    base_top_up[9..25].copy_from_slice(&amount.to_le_bytes());
+    match Instruction::decode(&base_top_up).unwrap() {
+        Instruction::TopUpInsurance {
+            expected_sequence: got_sequence,
+            amount: got_amount,
+        } => {
+            assert_eq!(got_sequence, expected_sequence);
+            assert_eq!(got_amount, amount);
+        }
+        _ => unreachable!(),
+    }
+
+    let mut top_up = [0u8; 27];
     top_up[0] = 56;
     top_up[1..3].copy_from_slice(&domain.to_le_bytes());
-    top_up[3..19].copy_from_slice(&amount.to_le_bytes());
+    top_up[3..11].copy_from_slice(&expected_sequence.to_le_bytes());
+    top_up[11..27].copy_from_slice(&amount.to_le_bytes());
     match Instruction::decode(&top_up).unwrap() {
         Instruction::TopUpInsuranceDomain {
             domain: got_domain,
+            expected_sequence: got_sequence,
             amount: got_amount,
         } => {
             assert_eq!(got_domain, domain);
+            assert_eq!(got_sequence, expected_sequence);
             assert_eq!(got_amount, amount);
         }
         _ => unreachable!(),
@@ -264,6 +280,37 @@ fn kani_v16_domain_topup_and_asset_insurance_decode_preserves_wire_fields() {
         }
         _ => unreachable!(),
     }
+}
+
+#[kani::proof]
+fn kani_v16_insurance_topups_reject_legacy_and_truncated_payloads() {
+    let domain: u16 = kani::any();
+    let expected_sequence: u64 = kani::any();
+    let amount: u128 = kani::any();
+
+    let mut legacy_base = [0u8; 17];
+    legacy_base[0] = 9;
+    legacy_base[1..17].copy_from_slice(&amount.to_le_bytes());
+    assert!(Instruction::decode(&legacy_base).is_err());
+
+    let mut truncated_base = [0u8; 24];
+    truncated_base[0] = 9;
+    truncated_base[1..9].copy_from_slice(&expected_sequence.to_le_bytes());
+    truncated_base[9..24].copy_from_slice(&amount.to_le_bytes()[..15]);
+    assert!(Instruction::decode(&truncated_base).is_err());
+
+    let mut legacy_domain = [0u8; 19];
+    legacy_domain[0] = 56;
+    legacy_domain[1..3].copy_from_slice(&domain.to_le_bytes());
+    legacy_domain[3..19].copy_from_slice(&amount.to_le_bytes());
+    assert!(Instruction::decode(&legacy_domain).is_err());
+
+    let mut truncated_domain = [0u8; 26];
+    truncated_domain[0] = 56;
+    truncated_domain[1..3].copy_from_slice(&domain.to_le_bytes());
+    truncated_domain[3..11].copy_from_slice(&expected_sequence.to_le_bytes());
+    truncated_domain[11..26].copy_from_slice(&amount.to_le_bytes()[..15]);
+    assert!(Instruction::decode(&truncated_domain).is_err());
 }
 
 #[kani::proof]
@@ -1147,7 +1194,21 @@ fn kani_v16_custody_payloads_reject_trailing_byte() {
     assert_rejects_trailing_byte(Instruction::InitPortfolio, extra);
     assert_rejects_trailing_byte(Instruction::Deposit { amount: 1 }, extra);
     assert_rejects_trailing_byte(Instruction::Withdraw { amount: 1 }, extra);
-    assert_rejects_trailing_byte(Instruction::TopUpInsurance { amount: 1 }, extra);
+    assert_rejects_trailing_byte(
+        Instruction::TopUpInsurance {
+            expected_sequence: 0,
+            amount: 1,
+        },
+        extra,
+    );
+    assert_rejects_trailing_byte(
+        Instruction::TopUpInsuranceDomain {
+            domain: 0,
+            expected_sequence: 0,
+            amount: 1,
+        },
+        extra,
+    );
     assert_rejects_trailing_byte(
         Instruction::TopUpBackingBucket {
             domain: 1,

@@ -49,6 +49,9 @@ pub mod constants {
     pub const WRAPPER_CONFIG_LEN: usize = 448;
     pub const ASSET_ORACLE_PROFILE_LEN: usize = 400;
     pub const ASSET_ORACLE_WRAPPER_LEN: usize = 512;
+    // The first wrapper-reserve word is assigned to live insurance-withdrawal intents.
+    pub const ASSET_INSURANCE_TOPUP_SEQUENCE_OFF: usize = ASSET_ORACLE_PROFILE_LEN + 8;
+    pub const ASSET_INSURANCE_TOPUP_SEQUENCE_LEN: usize = 8;
     pub const MARKET_GROUP_LEN: usize = size_of::<MarketGroupV16HeaderAccount>();
     pub const MARKET_ASSET_SLOT_LEN: usize = size_of::<Market<[u8; ASSET_ORACLE_WRAPPER_LEN]>>();
     pub const PORTFOLIO_STATE_LEN: usize = size_of::<PortfolioAccountV16Account>();
@@ -155,6 +158,7 @@ pub mod error {
 pub mod state {
     use crate::{
         constants::{
+            ASSET_INSURANCE_TOPUP_SEQUENCE_LEN, ASSET_INSURANCE_TOPUP_SEQUENCE_OFF,
             ASSET_ORACLE_PROFILE_LEN, ASSET_ORACLE_WRAPPER_LEN, HEADER_LEN,
             KIND_BACKING_DOMAIN_LEDGER, KIND_INSURANCE_LEDGER, KIND_MARKET, KIND_PORTFOLIO, MAGIC,
             MARKET_GROUP_LEN, MARKET_GROUP_OFF, MIN_MARKET_ACCOUNT_LEN, ORACLE_LEG_CAP,
@@ -1368,6 +1372,27 @@ pub mod state {
         Ok(profile)
     }
 
+    pub fn read_asset_insurance_topup_sequence(
+        data: &[u8],
+        asset_index: usize,
+    ) -> Result<u64, ProgramError> {
+        check_header(data, KIND_MARKET)?;
+        let capacity = market_slot_capacity(data)?;
+        if asset_index >= capacity {
+            return Err(PercolatorError::InvalidInstruction.into());
+        }
+        let start = dynamic_slot_offset(asset_index)?
+            .checked_add(ASSET_INSURANCE_TOPUP_SEQUENCE_OFF)
+            .ok_or(PercolatorError::InvalidAccountLen)?;
+        let end = start
+            .checked_add(ASSET_INSURANCE_TOPUP_SEQUENCE_LEN)
+            .ok_or(PercolatorError::InvalidAccountLen)?;
+        let bytes = data
+            .get(start..end)
+            .ok_or(PercolatorError::InvalidAccountLen)?;
+        Ok(u64::from_le_bytes(bytes.try_into().unwrap()))
+    }
+
     pub fn read_market_config_mode_and_capacity(
         data: &[u8],
     ) -> Result<(WrapperConfigV16, MarketModeV16, usize, usize), ProgramError> {
@@ -2512,10 +2537,12 @@ pub mod ix {
         },
         ClosePortfolio,
         TopUpInsurance {
+            expected_sequence: u64,
             amount: u128,
         },
         TopUpInsuranceDomain {
             domain: u16,
+            expected_sequence: u64,
             amount: u128,
         },
         CloseSlab,
@@ -2779,10 +2806,12 @@ pub mod ix {
                 },
                 8 => Self::ClosePortfolio,
                 9 => Self::TopUpInsurance {
+                    expected_sequence: read_u64(&mut rest)?,
                     amount: read_u128(&mut rest)?,
                 },
                 56 => Self::TopUpInsuranceDomain {
                     domain: read_u16(&mut rest)?,
+                    expected_sequence: read_u64(&mut rest)?,
                     amount: read_u128(&mut rest)?,
                 },
                 13 => Self::CloseSlab,
@@ -3068,13 +3097,22 @@ pub mod ix {
                     out.push(enabled);
                 }
                 Self::ClosePortfolio => out.push(8),
-                Self::TopUpInsurance { amount } => {
+                Self::TopUpInsurance {
+                    expected_sequence,
+                    amount,
+                } => {
                     out.push(9);
+                    push_u64(&mut out, expected_sequence);
                     push_u128(&mut out, amount);
                 }
-                Self::TopUpInsuranceDomain { domain, amount } => {
+                Self::TopUpInsuranceDomain {
+                    domain,
+                    expected_sequence,
+                    amount,
+                } => {
                     out.push(56);
                     push_u16(&mut out, domain);
+                    push_u64(&mut out, expected_sequence);
                     push_u128(&mut out, amount);
                 }
                 Self::CloseSlab => out.push(13),
@@ -4609,6 +4647,36 @@ pub mod processor {
         Ok(())
     }
 
+    fn consume_insurance_topup_sequence_view(
+        group: &mut state::MarketViewMutV16<'_>,
+        asset_index: usize,
+        expected_sequence: u64,
+    ) -> ProgramResult {
+        let market = group
+            .markets
+            .get_mut(asset_index)
+            .ok_or(PercolatorError::InvalidInstruction)?;
+        let bytes = market
+            .wrapper
+            .get_mut(
+                constants::ASSET_INSURANCE_TOPUP_SEQUENCE_OFF
+                    ..constants::ASSET_INSURANCE_TOPUP_SEQUENCE_OFF
+                        + constants::ASSET_INSURANCE_TOPUP_SEQUENCE_LEN,
+            )
+            .ok_or(PercolatorError::InvalidAccountLen)?;
+        let current = u64::from_le_bytes(bytes.try_into().unwrap());
+        if current != expected_sequence {
+            return Err(PercolatorError::EngineStale.into());
+        }
+        bytes.copy_from_slice(
+            &current
+                .checked_add(1)
+                .ok_or(PercolatorError::EngineCounterOverflow)?
+                .to_le_bytes(),
+        );
+        Ok(())
+    }
+
     fn mirror_manual_profile_to_base_config(
         cfg: &mut WrapperConfigV16,
         profile: &state::AssetOracleProfileV16,
@@ -5259,12 +5327,21 @@ pub mod processor {
                 handle_set_matcher_config(program_id, accounts, enabled)
             }
             Instruction::ClosePortfolio => handle_close_portfolio(program_id, accounts),
-            Instruction::TopUpInsurance { amount } => {
-                handle_top_up_insurance(program_id, accounts, amount)
-            }
-            Instruction::TopUpInsuranceDomain { domain, amount } => {
-                handle_top_up_insurance_domain(program_id, accounts, domain, amount)
-            }
+            Instruction::TopUpInsurance {
+                expected_sequence,
+                amount,
+            } => handle_top_up_insurance(program_id, accounts, expected_sequence, amount),
+            Instruction::TopUpInsuranceDomain {
+                domain,
+                expected_sequence,
+                amount,
+            } => handle_top_up_insurance_domain(
+                program_id,
+                accounts,
+                domain,
+                expected_sequence,
+                amount,
+            ),
             Instruction::CloseSlab => handle_close_slab(program_id, accounts),
             Instruction::ResolveMarket => handle_resolve_market(program_id, accounts),
             Instruction::TopUpBackingBucket {
@@ -7118,6 +7195,7 @@ pub mod processor {
     fn handle_top_up_insurance<'a>(
         program_id: &Pubkey,
         accounts: &'a [AccountInfo<'a>],
+        expected_sequence: u64,
         amount: u128,
     ) -> ProgramResult {
         let signer = account(accounts, 0)?;
@@ -7163,6 +7241,7 @@ pub mod processor {
             let asset0_insurance_authority =
                 domain_authorities_from_view(&group, &cfg, 0)?.insurance_authority;
             expect_live_authority(&asset0_insurance_authority, signer.key)?;
+            consume_insurance_topup_sequence_view(&mut group, 0, expected_sequence)?;
             let mut ledger_data = if let Some(ledger_ai) = ledger_ai {
                 Some(ledger_ai.try_borrow_mut_data()?)
             } else {
@@ -7221,6 +7300,7 @@ pub mod processor {
         program_id: &Pubkey,
         accounts: &'a [AccountInfo<'a>],
         domain: u16,
+        expected_sequence: u64,
         amount: u128,
     ) -> ProgramResult {
         let signer = account(accounts, 0)?;
@@ -7240,11 +7320,11 @@ pub mod processor {
         }
         verify_token_program(token_program)?;
         let domain = domain as usize;
+        let asset_index = domain / 2;
         let (cfg_pre, authorities) = {
             let mut market_data = market_ai.try_borrow_mut_data()?;
             let (cfg, group) = state::market_view_mut(&mut market_data)?;
             let configured_slots = group.header.config.max_market_slots.get() as usize;
-            let asset_index = domain / 2;
             if group.header.mode != 0
                 || domain >= configured_slots.saturating_mul(2)
                 || asset_index >= configured_slots
@@ -7273,6 +7353,7 @@ pub mod processor {
             require_domain_accepts_live_topup_view(&group, domain)?;
             let authorities = domain_authorities_from_view(&group, &cfg, domain)?;
             expect_live_authority(&authorities.insurance_authority, signer.key)?;
+            consume_insurance_topup_sequence_view(&mut group, asset_index, expected_sequence)?;
             let mut ledger_data = if let Some(ledger_ai) = ledger_ai {
                 Some(ledger_ai.try_borrow_mut_data()?)
             } else {
