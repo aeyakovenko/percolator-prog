@@ -198,6 +198,170 @@ fn v16_attack_force_close_dust_chunking_is_value_path_independent() {
     );
 }
 
+// Two independent winners register claims against one undercollateralized source domain. Vary both
+// refresh and permissionless resolved-close priority; neither schedule may capture backing first.
+#[test]
+fn v16_attack_resolved_close_order_preserves_scarce_source_backing() {
+    fn run(reverse: bool) -> ([u128; 4], u128, u128, u128, u128, u128) {
+        const OPEN_PRICE: u64 = 100;
+        const FROZEN_PRICE: u64 = 300;
+        const BACKING: u128 = 50;
+
+        let mut env = V16CuEnv::new_with_market_params_and_price_move(1, 10_000, 10_000, 10_000);
+        env.configure_permissionless_resolve_with_cu(100, 1);
+        env.svm.warp_to_slot(1);
+        env.configure_auth_mark_for_asset_as_admin(0, 1, OPEN_PRICE);
+        env.top_up_backing_bucket(1, BACKING, 100);
+
+        let owners = [
+            Keypair::new(),
+            Keypair::new(),
+            Keypair::new(),
+            Keypair::new(),
+        ];
+        let portfolios = owners.each_ref().map(|owner| env.create_portfolio(owner));
+        for i in 0..4 {
+            env.deposit(&owners[i], portfolios[i], 150);
+        }
+        env.trade_asset_with_cu(
+            0,
+            &owners[0],
+            portfolios[0],
+            &owners[2],
+            portfolios[2],
+            POS_SCALE as i128,
+            OPEN_PRICE,
+            0,
+        );
+        env.trade_asset_with_cu(
+            0,
+            &owners[1],
+            portfolios[1],
+            &owners[3],
+            portfolios[3],
+            POS_SCALE as i128,
+            OPEN_PRICE,
+            0,
+        );
+
+        // Accrue the market through a flat account so neither winner is settled
+        // before the permissionless force-close ordering under test.
+        let accrual_owner = Keypair::new();
+        let accrual = env.create_portfolio(&accrual_owner);
+        for slot in 2..=3 {
+            env.svm.warp_to_slot(slot);
+            env.push_auth_mark_for_asset_as_admin(0, slot, FROZEN_PRICE);
+            env.send(
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: slot,
+                    observations: crank_observations(0),
+                },
+                vec![
+                    AccountMeta::new(env.payer.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(accrual, false),
+                ],
+                &[],
+            )
+            .expect("flat-account observation must accrue the market");
+        }
+        assert_eq!(env.market_state().1.assets[0].effective_price, FROZEN_PRICE);
+        env.close_portfolio_with_cu(&accrual_owner, accrual);
+
+        let winner_order = if reverse { [1usize, 0] } else { [0usize, 1] };
+        for i in winner_order {
+            env.send(
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: 3,
+                    observations: vec![],
+                },
+                vec![
+                    AccountMeta::new(env.payer.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(portfolios[i], false),
+                ],
+                &[],
+            )
+            .expect("winner refresh must register its source-backed claim");
+        }
+        let source_before_resolve = env.market_state().1.source_credit[1];
+        assert!(
+            source_before_resolve.positive_claim_bound_num > BACKING * BOUND_SCALE,
+            "the two winners must compete for undercollateralized backing"
+        );
+        assert!(
+            source_before_resolve.credit_rate_num < percolator::CREDIT_RATE_SCALE,
+            "the source-credit rate must reflect scarce backing"
+        );
+
+        env.resolve();
+        env.svm.warp_to_slot(4);
+        let terminal = |env: &V16CuEnv, portfolio: Pubkey| {
+            let state = env.portfolio_state(portfolio);
+            let receipt = resolved_receipt(&state);
+            state.capital.get() == 0
+                && state.pnl.get() == 0
+                && percolator::active_bitmap_is_empty(active_bitmap(&state))
+                && (!receipt.present || receipt.finalized)
+        };
+        let mut payouts = [0u128; 4];
+        let close_order = if reverse {
+            [2usize, 3, 1, 0]
+        } else {
+            [2usize, 3, 0, 1]
+        };
+        for _ in 0..32 {
+            for i in close_order {
+                if terminal(&env, portfolios[i]) {
+                    continue;
+                }
+                let destination = env.close_resolved(&owners[i], portfolios[i]);
+                payouts[i] += env.token_amount(destination) as u128;
+            }
+            if portfolios
+                .iter()
+                .all(|portfolio| terminal(&env, *portfolio))
+            {
+                break;
+            }
+        }
+        assert!(
+            portfolios
+                .iter()
+                .all(|portfolio| terminal(&env, *portfolio)),
+            "honest round-robin resolved settlement must terminate"
+        );
+        let terminal = env.market_state().1;
+        assert!(
+            terminal.source_backing_buckets[1].consumed_liened_backing_num != 0
+                || terminal.source_credit[1].provider_receivable_num != 0,
+            "the differential must consume scarce source backing"
+        );
+        (
+            payouts,
+            terminal.vault,
+            terminal.source_credit[1].positive_claim_bound_num,
+            terminal.source_credit[1].provider_receivable_num,
+            terminal.source_backing_buckets[1].consumed_liened_backing_num,
+            terminal.source_backing_buckets[1].fresh_unliened_backing_num,
+        )
+    }
+
+    let forward = run(false);
+    let reverse = run(true);
+    assert_eq!(
+        reverse, forward,
+        "permissionless resolved-close order allocated scarce source backing between users"
+    );
+    assert_eq!(forward.0, [300, 300, 0, 0]);
+    assert_eq!(forward.1, 50, "provider backing remains canonical custody");
+    assert_eq!(
+        forward.5,
+        50 * BOUND_SCALE,
+        "neither claimant priority may consume the provider's fresh principal"
+    );
+}
+
 fn crank_observations_with_accounts(
     asset_index: u16,
     oracle_accounts: u8,
