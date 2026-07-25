@@ -58775,6 +58775,151 @@ fn v16_attack_sync_maintenance_full_cranker_share_conserves_no_insurance_underfl
     assert_domain_budget_remaining_total_consistent(&group, "100% maintenance cranker share");
 }
 
+#[test]
+fn v16_bpf_force_close_pair_order_preserves_terminal_user_payouts() {
+    fn run(cross_pair: bool) -> ([(u128, i128); 4], [u64; 4], u128, u128, u128, u128, u64) {
+        let mut env = V16CuEnv::new();
+        let cranker = Keypair::new();
+        env.configure_permissionless_resolve_with_cu(100, 1);
+        env.svm.warp_to_slot(1);
+        env.configure_auth_mark_with_cu(1, 100);
+
+        let owners = [
+            Keypair::new(),
+            Keypair::new(),
+            Keypair::new(),
+            Keypair::new(),
+        ];
+        let portfolios = [
+            env.create_portfolio(&owners[0]),
+            env.create_portfolio(&owners[1]),
+            env.create_portfolio(&owners[2]),
+            env.create_portfolio(&owners[3]),
+        ];
+        for i in 0..4 {
+            env.deposit(&owners[i], portfolios[i], 100_000);
+        }
+
+        // The first pair enters at 100. The authenticated mark then advances to
+        // 200 before the second pair enters, leaving one old winner and one old
+        // loser when the asset freezes at 200.
+        env.trade_asset_with_cu(
+            0,
+            &owners[0],
+            portfolios[0],
+            &owners[1],
+            portfolios[1],
+            POS_SCALE as i128,
+            100,
+            0,
+        );
+        env.svm.warp_to_slot(2);
+        env.push_auth_mark_with_cu(2, 200);
+        env.crank(
+            portfolios[0],
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 2,
+                observations: crank_observations(0),
+            },
+        );
+        assert_eq!(env.market_state().1.assets[0].effective_price, 200);
+        env.trade_asset_with_cu(
+            0,
+            &owners[2],
+            portfolios[2],
+            &owners[3],
+            portfolios[3],
+            POS_SCALE as i128,
+            200,
+            0,
+        );
+
+        env.svm.warp_to_slot(3);
+        env.update_asset_lifecycle_as_admin_with_cu(processor::ASSET_ACTION_SHUTDOWN, 0, 3, 0);
+        env.svm.warp_to_slot(4);
+
+        if cross_pair {
+            env.force_close_abandoned_asset_with_cu(
+                &cranker,
+                portfolios[0],
+                portfolios[3],
+                0,
+                4,
+                POS_SCALE,
+            );
+            env.force_close_abandoned_asset_with_cu(
+                &cranker,
+                portfolios[2],
+                portfolios[1],
+                0,
+                4,
+                POS_SCALE,
+            );
+        } else {
+            env.force_close_abandoned_asset_with_cu(
+                &cranker,
+                portfolios[0],
+                portfolios[1],
+                0,
+                4,
+                POS_SCALE,
+            );
+            env.force_close_abandoned_asset_with_cu(
+                &cranker,
+                portfolios[2],
+                portfolios[3],
+                0,
+                4,
+                POS_SCALE,
+            );
+        }
+
+        let accounts = portfolios.map(|portfolio| {
+            let state = env.portfolio_state(portfolio);
+            assert!(percolator::active_bitmap_is_empty(
+                state.active_bitmap.map(|word| word.get())
+            ));
+            (state.capital.get(), state.pnl.get())
+        });
+        assert_eq!(
+            accounts,
+            [(100_000, 100), (99_900, 0), (100_000, 0), (100_000, 0),],
+            "the probe must carry real realized PnL before comparing pair order"
+        );
+        // A flat winner's certificate can be invalidated by a later force-close
+        // and cannot refresh against a Recovery asset. The configured bounded
+        // permissionless market resolution must still provide an owner-independent
+        // terminal exit.
+        env.resolve_stale_permissionless_with_cu(103);
+        env.svm.warp_to_slot(104);
+        let mut payouts = [0u64; 4];
+        for i in 0..4 {
+            let destination = env.close_resolved(&owners[i], portfolios[i]);
+            payouts[i] = env.token_amount(destination);
+        }
+        assert_eq!(payouts, [100_100, 99_900, 100_000, 100_000]);
+        let (_, group) = env.market_state();
+        assert_eq!(group.assets[0].oi_eff_long_q, 0);
+        assert_eq!(group.assets[0].oi_eff_short_q, 0);
+        (
+            accounts,
+            payouts,
+            group.insurance,
+            group.vault,
+            group.insurance_domain_spent[0],
+            group.insurance_domain_spent[1],
+            env.token_amount(env.vault),
+        )
+    }
+
+    let direct = run(false);
+    let crossed = run(true);
+    assert_eq!(
+        crossed, direct,
+        "a permissionless cranker must not allocate value by choosing force-close pairs"
+    );
+}
+
 // [from pr125]
 // LoF/safety sweep — RebalanceReduce is reduce-ONLY: an over-sized reduce_q cannot flip a position into
 // opposite-side risk. The engine clamps `reduce_q = reduce_q.min(leg.basis_pos_q.unsigned_abs())`, so a
