@@ -8673,7 +8673,10 @@ pub mod processor {
         expect_owner(market_ai, program_id)?;
         let mut market_data = market_ai.try_borrow_mut_data()?;
         let (cfg, mut group) = state::market_view_mut(&mut market_data)?;
-        if group.header.mode != 0 {
+        // mode: 0 = Live, 1 = Resolved, 2 = Recovery. Admin may resolve a Live market
+        // OR a market stuck in a permissionless global-Recovery escalation (issue #236)
+        // so it can wind down; only an already-Resolved market is rejected.
+        if group.header.mode == 1 {
             return Err(PercolatorError::EngineLockActive.into());
         }
         expect_live_authority(&cfg.marketauth, admin.key)?;
@@ -9759,7 +9762,12 @@ pub mod processor {
         let authenticated_slot = authenticated_slot_or_fallback(now_slot);
         let mut market_data = market_ai.try_borrow_mut_data()?;
         let (cfg, mut group) = state::market_view_mut(&mut market_data)?;
-        if group.header.mode != 0 {
+        // mode: 0 = Live, 1 = Resolved, 2 = Recovery. A market stuck in a permissionless
+        // global-Recovery escalation (issue #236) must retain a bounded PUBLIC wind-down:
+        // once the oracle is stale-matured, any keeper may resolve it so CloseResolved /
+        // CloseSlab / capital exit become reachable. Only an already-Resolved market is
+        // rejected here.
+        if group.header.mode == 1 {
             return Err(PercolatorError::EngineLockActive.into());
         }
         if authenticated_slot < group.header.current_slot.get() {
