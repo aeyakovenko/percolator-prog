@@ -857,6 +857,7 @@ impl V16CuEnv {
                 asset_index,
                 now_slot,
                 initial_price,
+                max_init_fee: u128::MAX,
                 insurance_authority: insurance_authority.to_bytes(),
                 insurance_operator: insurance_operator.to_bytes(),
                 backing_bucket_authority: backing_bucket_authority.to_bytes(),
@@ -902,6 +903,7 @@ impl V16CuEnv {
                 asset_index,
                 now_slot,
                 initial_price,
+                max_init_fee: u128::MAX,
                 insurance_authority: self.admin.pubkey().to_bytes(),
                 insurance_operator: self.admin.pubkey().to_bytes(),
                 backing_bucket_authority: self.admin.pubkey().to_bytes(),
@@ -931,6 +933,7 @@ impl V16CuEnv {
                 asset_index,
                 now_slot,
                 initial_price: 0,
+                max_init_fee: u128::MAX,
                 insurance_authority: authority.pubkey().to_bytes(),
                 insurance_operator: authority.pubkey().to_bytes(),
                 backing_bucket_authority: authority.pubkey().to_bytes(),
@@ -1375,6 +1378,7 @@ impl V16CuEnv {
                 asset_index,
                 now_slot,
                 initial_price,
+                max_init_fee: fee,
                 insurance_authority: insurance_authority.to_bytes(),
                 insurance_operator: insurance_operator.to_bytes(),
                 backing_bucket_authority: backing_bucket_authority.to_bytes(),
@@ -5069,6 +5073,7 @@ fn v16_attack_marketauth_cannot_reactivate_or_rekey_active_slot_with_open_intere
             asset_index: 1,
             now_slot: 2,
             initial_price: 999,
+            max_init_fee: u128::MAX,
             insurance_authority: new_insurance.pubkey().to_bytes(),
             insurance_operator: new_operator.pubkey().to_bytes(),
             backing_bucket_authority: new_backing.pubkey().to_bytes(),
@@ -5152,6 +5157,7 @@ fn v16_attack_privileged_reactivate_rekeys_retired_slot_authorities() {
             asset_index: 1,
             now_slot: 4,
             initial_price: 250,
+            max_init_fee: u128::MAX,
             insurance_authority: new_insurance.pubkey().to_bytes(),
             insurance_operator: new_operator.pubkey().to_bytes(),
             backing_bucket_authority: new_backing.pubkey().to_bytes(),
@@ -5290,6 +5296,7 @@ fn v16_attack_privileged_reactivate_invalid_price_keeps_retired_slot_reusable() 
                 asset_index: 1,
                 now_slot: 4,
                 initial_price: bad_price,
+                max_init_fee: u128::MAX,
                 insurance_authority: new_insurance.pubkey().to_bytes(),
                 insurance_operator: new_operator.pubkey().to_bytes(),
                 backing_bucket_authority: new_backing.pubkey().to_bytes(),
@@ -5327,6 +5334,7 @@ fn v16_attack_privileged_reactivate_invalid_price_keeps_retired_slot_reusable() 
             asset_index: 1,
             now_slot: 4,
             initial_price: 250,
+            max_init_fee: u128::MAX,
             insurance_authority: new_insurance.pubkey().to_bytes(),
             insurance_operator: new_operator.pubkey().to_bytes(),
             backing_bucket_authority: new_backing.pubkey().to_bytes(),
@@ -5996,6 +6004,7 @@ fn v16_bpf_asset0_shutdown_force_closes_preserves_insurance_and_restarts() {
             asset_index: 0,
             now_slot: 1,
             initial_price: 0,
+            max_init_fee: u128::MAX,
             insurance_authority: marketauth.pubkey().to_bytes(),
             insurance_operator: marketauth.pubkey().to_bytes(),
             backing_bucket_authority: marketauth.pubkey().to_bytes(),
@@ -6067,6 +6076,7 @@ fn v16_bpf_asset0_shutdown_force_closes_preserves_insurance_and_restarts() {
             asset_index: 0,
             now_slot: 2,
             initial_price: 0,
+            max_init_fee: u128::MAX,
             insurance_authority: stranger.pubkey().to_bytes(),
             insurance_operator: stranger.pubkey().to_bytes(),
             backing_bucket_authority: stranger.pubkey().to_bytes(),
@@ -14390,6 +14400,7 @@ fn v16_audit_permissionless_reuse_rejects_zero_insurance_authority() {
             asset_index: 1,
             now_slot: 4,
             initial_price: 250,
+            max_init_fee: u128::MAX,
             insurance_authority: Pubkey::default().to_bytes(), // ZERO -> unrecoverable
             insurance_operator: attacker.pubkey().to_bytes(),
             backing_bucket_authority: attacker.pubkey().to_bytes(),
@@ -14467,6 +14478,7 @@ fn v16_attack_permissionless_reuse_invalid_price_keeps_slot_reusable() {
                 asset_index: 1,
                 now_slot: 4,
                 initial_price: bad_price,
+                max_init_fee: u128::MAX,
                 insurance_authority: creator.pubkey().to_bytes(),
                 insurance_operator: creator.pubkey().to_bytes(),
                 backing_bucket_authority: creator.pubkey().to_bytes(),
@@ -14511,6 +14523,7 @@ fn v16_attack_permissionless_reuse_invalid_price_keeps_slot_reusable() {
             asset_index: 1,
             now_slot: 4,
             initial_price: 250,
+            max_init_fee: u128::MAX,
             insurance_authority: creator.pubkey().to_bytes(),
             insurance_operator: creator.pubkey().to_bytes(),
             backing_bucket_authority: creator.pubkey().to_bytes(),
@@ -14579,6 +14592,7 @@ fn v16_attack_retire_rejects_funded_insurance_domain_budget() {
         asset_index: 1,
         now_slot,
         initial_price: 0,
+        max_init_fee: u128::MAX,
         insurance_authority: admin_key.to_bytes(),
         insurance_operator: admin_key.to_bytes(),
         backing_bucket_authority: admin_key.to_bytes(),
@@ -14655,6 +14669,7 @@ fn v16_attack_retire_rejects_funded_backing_bucket() {
             asset_index: 1,
             now_slot: 3,
             initial_price: 0,
+            max_init_fee: u128::MAX,
             insurance_authority: admin.pubkey().to_bytes(),
             insurance_operator: admin.pubkey().to_bytes(),
             backing_bucket_authority: admin.pubkey().to_bytes(),
@@ -14697,6 +14712,7 @@ fn v16_attack_retire_rejects_funded_backing_bucket() {
             asset_index: 1,
             now_slot: 4,
             initial_price: 0,
+            max_init_fee: u128::MAX,
             insurance_authority: admin.pubkey().to_bytes(),
             insurance_operator: admin.pubkey().to_bytes(),
             backing_bucket_authority: admin.pubkey().to_bytes(),
@@ -14863,6 +14879,7 @@ fn v16_attack_backing_principal_withdraw_preserves_provider_earnings() {
             asset_index: 1,
             now_slot: 4,
             initial_price: 0,
+            max_init_fee: u128::MAX,
             insurance_authority: admin.pubkey().to_bytes(),
             insurance_operator: admin.pubkey().to_bytes(),
             backing_bucket_authority: admin.pubkey().to_bytes(),
@@ -32979,6 +32996,7 @@ fn v16_attack_retire_asset_authority_gated() {
             asset_index: 1,
             now_slot: 5,
             initial_price: 0,
+            max_init_fee: u128::MAX,
             insurance_authority: [0u8; 32],
             insurance_operator: [0u8; 32],
             backing_bucket_authority: [0u8; 32],
@@ -36934,6 +36952,7 @@ fn v16_attack_force_close_rejects_cross_market_portfolio_substitution() {
             asset_index: 1,
             now_slot: SHUT,
             initial_price: 0,
+            max_init_fee: u128::MAX,
             insurance_authority: env.admin.pubkey().to_bytes(),
             insurance_operator: env.admin.pubkey().to_bytes(),
             backing_bucket_authority: env.admin.pubkey().to_bytes(),
@@ -45263,6 +45282,7 @@ fn v16_attack_force_shutdown_timeout_lets_traders_exit_before_close() {
             asset_index: 1,
             now_slot: SHUT,
             initial_price: 0,
+            max_init_fee: u128::MAX,
             insurance_authority: mallory.pubkey().to_bytes(),
             insurance_operator: mallory.pubkey().to_bytes(),
             backing_bucket_authority: mallory.pubkey().to_bytes(),
@@ -45382,6 +45402,7 @@ fn v16_attack_drain_only_blocks_new_risk_but_allows_reduce() {
             asset_index: 0,
             now_slot: 0,
             initial_price: 0,
+            max_init_fee: u128::MAX,
             insurance_authority: stranger.pubkey().to_bytes(),
             insurance_operator: stranger.pubkey().to_bytes(),
             backing_bucket_authority: stranger.pubkey().to_bytes(),
@@ -45410,6 +45431,7 @@ fn v16_attack_drain_only_blocks_new_risk_but_allows_reduce() {
             asset_index: 0,
             now_slot: 1,
             initial_price: 0,
+            max_init_fee: u128::MAX,
             insurance_authority: admin.pubkey().to_bytes(),
             insurance_operator: admin.pubkey().to_bytes(),
             backing_bucket_authority: admin.pubkey().to_bytes(),
@@ -45670,6 +45692,7 @@ fn v16_attack_permissionless_create_requires_nonzero_fee() {
                 asset_index: 1,
                 now_slot: 1,
                 initial_price: 100,
+                max_init_fee: u128::MAX,
                 insurance_authority: signer.pubkey().to_bytes(),
                 insurance_operator: signer.pubkey().to_bytes(),
                 backing_bucket_authority: signer.pubkey().to_bytes(),
@@ -45732,6 +45755,7 @@ fn v16_attack_permissionless_create_underfunded_fee_does_not_activate_or_credit(
             asset_index: 1,
             now_slot: 1,
             initial_price: 100,
+            max_init_fee: u128::MAX,
             insurance_authority: creator.pubkey().to_bytes(),
             insurance_operator: creator.pubkey().to_bytes(),
             backing_bucket_authority: creator.pubkey().to_bytes(),
@@ -45792,6 +45816,7 @@ fn v16_attack_permissionless_create_underfunded_fee_does_not_activate_or_credit(
             asset_index: 1,
             now_slot: 1,
             initial_price: 100,
+            max_init_fee: u128::MAX,
             insurance_authority: creator.pubkey().to_bytes(),
             insurance_operator: creator.pubkey().to_bytes(),
             backing_bucket_authority: creator.pubkey().to_bytes(),
@@ -45829,6 +45854,148 @@ fn v16_attack_permissionless_create_underfunded_fee_does_not_activate_or_credit(
         "fee credited to accounting vault"
     );
     assert_domain_budget_remaining_total_consistent(&funded_group, "funded permissionless create");
+}
+
+// A permissionless creator signs the asset definition and token debit, but the instruction does
+// not bind the mutable fee that will be pulled. A delayed, honestly signed high-fee policy must not
+// be able to land after a visible low-fee correction and debit more than the creator accepted.
+#[test]
+fn v16_attack_presigned_permissionless_activation_cannot_be_charged_a_higher_fee() {
+    const SIGNED_FEE: u128 = 1;
+    const RUGGED_FEE: u128 = 1_000;
+
+    let mut env = V16CuEnv::new();
+    let creator = Keypair::new();
+    env.ensure_signer_account(creator.pubkey());
+    env.svm.warp_to_slot(1);
+
+    let delayed_policy = Instruction {
+        program_id: env.program_id,
+        accounts: vec![
+            AccountMeta::new(env.admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        data: ProgInstruction::UpdateMarketInitFeePolicy {
+            min_init_fee: RUGGED_FEE,
+        }
+        .encode(),
+    };
+    let retained_policy = Transaction::new_signed_with_payer(
+        &[heap_ix(), cu_ix(), delayed_policy],
+        Some(&env.payer.pubkey()),
+        &[&env.payer, &env.admin],
+        env.svm.latest_blockhash(),
+    );
+
+    // The honest authority's newer correction is visible before the creator signs.
+    env.update_market_init_fee_policy_with_cu(SIGNED_FEE);
+    let fee_source = env.token_account(creator.pubkey(), RUGGED_FEE as u64);
+    let activation = Instruction {
+        program_id: env.program_id,
+        accounts: vec![
+            AccountMeta::new(creator.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(fee_source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        data: ProgInstruction::UpdateAssetLifecycle {
+            action: percolator_prog::processor::ASSET_ACTION_ACTIVATE,
+            asset_index: 1,
+            now_slot: 1,
+            initial_price: 100,
+            max_init_fee: SIGNED_FEE,
+            insurance_authority: creator.pubkey().to_bytes(),
+            insurance_operator: creator.pubkey().to_bytes(),
+            backing_bucket_authority: creator.pubkey().to_bytes(),
+            oracle_authority: creator.pubkey().to_bytes(),
+        }
+        .encode(),
+    };
+    let retained = Transaction::new_signed_with_payer(
+        &[heap_ix(), cu_ix(), activation],
+        Some(&env.payer.pubkey()),
+        &[&env.payer, &creator],
+        env.svm.latest_blockhash(),
+    );
+
+    // An unprivileged relayer restores the older policy and then lands the unchanged activation.
+    env.svm
+        .send_transaction(retained_policy)
+        .expect("delayed high-fee policy remains valid on the vulnerable parent");
+    let result = env
+        .svm
+        .send_transaction(retained)
+        .map(|meta| meta.compute_units_consumed)
+        .map_err(|err| format!("{err:?}"));
+
+    let victim_remaining = env.token_amount(fee_source);
+    let (_, group) = env.market_state();
+    assert!(
+        result.is_err(),
+        "retained activation charged an unsigned fee increase: result={result:?}, \
+         victim_remaining={victim_remaining}, insurance={}, vault={}",
+        group.insurance,
+        group.vault,
+    );
+    assert_eq!(victim_remaining, RUGGED_FEE as u64);
+    assert_eq!(group.insurance, 0);
+}
+
+#[test]
+fn v16_permissionless_activation_fee_cap_accepts_and_charges_a_lower_current_fee() {
+    const SIGNED_CAP: u128 = 1_000;
+    const LOWER_FEE: u128 = 7;
+
+    let mut env = V16CuEnv::new();
+    let creator = Keypair::new();
+    env.ensure_signer_account(creator.pubkey());
+    env.update_market_init_fee_policy_with_cu(SIGNED_CAP);
+    env.svm.warp_to_slot(1);
+
+    let fee_source = env.token_account(creator.pubkey(), SIGNED_CAP as u64);
+    let activation = Instruction {
+        program_id: env.program_id,
+        accounts: vec![
+            AccountMeta::new(creator.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(fee_source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        data: ProgInstruction::UpdateAssetLifecycle {
+            action: percolator_prog::processor::ASSET_ACTION_ACTIVATE,
+            asset_index: 1,
+            now_slot: 1,
+            initial_price: 100,
+            max_init_fee: SIGNED_CAP,
+            insurance_authority: creator.pubkey().to_bytes(),
+            insurance_operator: creator.pubkey().to_bytes(),
+            backing_bucket_authority: creator.pubkey().to_bytes(),
+            oracle_authority: creator.pubkey().to_bytes(),
+        }
+        .encode(),
+    };
+    let retained = Transaction::new_signed_with_payer(
+        &[heap_ix(), cu_ix(), activation],
+        Some(&env.payer.pubkey()),
+        &[&env.payer, &creator],
+        env.svm.latest_blockhash(),
+    );
+
+    env.update_market_init_fee_policy_with_cu(LOWER_FEE);
+    env.svm
+        .send_transaction(retained)
+        .expect("a lower current fee remains within the signed cap");
+
+    let (_, group) = env.market_state();
+    assert_eq!(
+        env.token_amount(fee_source),
+        (SIGNED_CAP - LOWER_FEE) as u64
+    );
+    assert_eq!(group.insurance, LOWER_FEE);
+    assert_eq!(group.vault, LOWER_FEE);
+    assert_eq!(group.assets[1].lifecycle, AssetLifecycleV16::Active);
 }
 
 // security.md sweep - permissionless init-fee vault binding (#44/#48): asset activation charges
@@ -45871,6 +46038,7 @@ fn v16_attack_permissionless_create_rejects_noncanonical_fee_vault() {
             asset_index: 1,
             now_slot: 1,
             initial_price: 100,
+            max_init_fee: u128::MAX,
             insurance_authority: creator.pubkey().to_bytes(),
             insurance_operator: creator.pubkey().to_bytes(),
             backing_bucket_authority: creator.pubkey().to_bytes(),
@@ -45923,6 +46091,7 @@ fn v16_attack_permissionless_create_rejects_noncanonical_fee_vault() {
             asset_index: 1,
             now_slot: 1,
             initial_price: 100,
+            max_init_fee: u128::MAX,
             insurance_authority: creator.pubkey().to_bytes(),
             insurance_operator: creator.pubkey().to_bytes(),
             backing_bucket_authority: creator.pubkey().to_bytes(),
@@ -45982,6 +46151,7 @@ fn v16_attack_permissionless_create_rejects_vault_as_fee_source() {
             asset_index: 1,
             now_slot: 1,
             initial_price: 100,
+            max_init_fee: u128::MAX,
             insurance_authority: creator.pubkey().to_bytes(),
             insurance_operator: creator.pubkey().to_bytes(),
             backing_bucket_authority: creator.pubkey().to_bytes(),
@@ -46037,6 +46207,7 @@ fn v16_attack_permissionless_create_rejects_vault_as_fee_source() {
             asset_index: 1,
             now_slot: 1,
             initial_price: 100,
+            max_init_fee: u128::MAX,
             insurance_authority: creator.pubkey().to_bytes(),
             insurance_operator: creator.pubkey().to_bytes(),
             backing_bucket_authority: creator.pubkey().to_bytes(),
@@ -46095,6 +46266,7 @@ fn v16_attack_permissionless_sparse_append_indices_rejected_without_realloc_or_f
                 asset_index: bad_index,
                 now_slot: 1,
                 initial_price: 100,
+                max_init_fee: u128::MAX,
                 insurance_authority: creator.pubkey().to_bytes(),
                 insurance_operator: creator.pubkey().to_bytes(),
                 backing_bucket_authority: creator.pubkey().to_bytes(),
@@ -46147,6 +46319,7 @@ fn v16_attack_permissionless_sparse_append_indices_rejected_without_realloc_or_f
             asset_index: 1,
             now_slot: 1,
             initial_price: 100,
+            max_init_fee: u128::MAX,
             insurance_authority: creator.pubkey().to_bytes(),
             insurance_operator: creator.pubkey().to_bytes(),
             backing_bucket_authority: creator.pubkey().to_bytes(),
@@ -46199,6 +46372,7 @@ fn v16_attack_permissionless_append_zero_authority_rolls_back_realloc_and_fee() 
             asset_index: 1,
             now_slot: 1,
             initial_price: 100,
+            max_init_fee: u128::MAX,
             insurance_authority: [0u8; 32],
             insurance_operator: creator.pubkey().to_bytes(),
             backing_bucket_authority: creator.pubkey().to_bytes(),
@@ -46252,6 +46426,7 @@ fn v16_attack_permissionless_append_zero_authority_rolls_back_realloc_and_fee() 
             asset_index: 1,
             now_slot: 1,
             initial_price: 100,
+            max_init_fee: u128::MAX,
             insurance_authority: creator.pubkey().to_bytes(),
             insurance_operator: creator.pubkey().to_bytes(),
             backing_bucket_authority: creator.pubkey().to_bytes(),
@@ -46309,6 +46484,7 @@ fn v16_attack_permissionless_append_invalid_price_rolls_back_realloc_and_fee() {
                 asset_index: 1,
                 now_slot: 1,
                 initial_price: bad_price,
+                max_init_fee: u128::MAX,
                 insurance_authority: creator.pubkey().to_bytes(),
                 insurance_operator: creator.pubkey().to_bytes(),
                 backing_bucket_authority: creator.pubkey().to_bytes(),
@@ -46362,6 +46538,7 @@ fn v16_attack_permissionless_append_invalid_price_rolls_back_realloc_and_fee() {
             asset_index: 1,
             now_slot: 1,
             initial_price: 100,
+            max_init_fee: u128::MAX,
             insurance_authority: creator.pubkey().to_bytes(),
             insurance_operator: creator.pubkey().to_bytes(),
             backing_bucket_authority: creator.pubkey().to_bytes(),
@@ -47295,6 +47472,7 @@ fn v16_attack_non_admin_activate_cannot_install_authorities() {
             asset_index: 1,
             now_slot: 1,
             initial_price: 100,
+            max_init_fee: u128::MAX,
             insurance_authority: atk,
             insurance_operator: atk,
             backing_bucket_authority: atk,
@@ -47346,6 +47524,7 @@ fn v16_attack_non_admin_activate_cannot_install_authorities() {
             asset_index: 1,
             now_slot: 1,
             initial_price: 100,
+            max_init_fee: u128::MAX,
             insurance_authority: adm,
             insurance_operator: adm,
             backing_bucket_authority: adm,
@@ -54659,6 +54838,7 @@ fn v16_attack_asset_activation_cooldown_enforced() {
         asset_index: idx,
         now_slot: slot,
         initial_price: price,
+        max_init_fee: u128::MAX,
         insurance_authority: admin.pubkey().to_bytes(),
         insurance_operator: admin.pubkey().to_bytes(),
         backing_bucket_authority: admin.pubkey().to_bytes(),
@@ -54746,6 +54926,7 @@ fn v16_attack_permissionless_reuse_respects_activation_cooldown_and_fee_atomicit
             asset_index: 1,
             now_slot: 5,
             initial_price: 250,
+            max_init_fee: u128::MAX,
             insurance_authority: creator.pubkey().to_bytes(),
             insurance_operator: creator.pubkey().to_bytes(),
             backing_bucket_authority: creator.pubkey().to_bytes(),
@@ -54789,6 +54970,7 @@ fn v16_attack_permissionless_reuse_respects_activation_cooldown_and_fee_atomicit
             asset_index: 1,
             now_slot: 6,
             initial_price: 250,
+            max_init_fee: u128::MAX,
             insurance_authority: creator.pubkey().to_bytes(),
             insurance_operator: creator.pubkey().to_bytes(),
             backing_bucket_authority: creator.pubkey().to_bytes(),
@@ -55558,6 +55740,7 @@ fn v16_attack_permissionless_asset_activation_rejects_when_resolve_matured() {
             asset_index: 2,
             now_slot: 0,
             initial_price: 100,
+            max_init_fee: u128::MAX,
             insurance_authority: stale_creator.pubkey().to_bytes(),
             insurance_operator: stale_creator.pubkey().to_bytes(),
             backing_bucket_authority: stale_creator.pubkey().to_bytes(),
@@ -55770,6 +55953,7 @@ fn v16_attack_marketauth_lifecycle_actions_reject_when_resolve_matured() {
             asset_index: 2,
             now_slot: 0,
             initial_price: 0,
+            max_init_fee: u128::MAX,
             insurance_authority: admin.pubkey().to_bytes(),
             insurance_operator: admin.pubkey().to_bytes(),
             backing_bucket_authority: admin.pubkey().to_bytes(),
@@ -55799,6 +55983,7 @@ fn v16_attack_marketauth_lifecycle_actions_reject_when_resolve_matured() {
             asset_index: 2,
             now_slot: 40,
             initial_price: 0,
+            max_init_fee: u128::MAX,
             insurance_authority: admin.pubkey().to_bytes(),
             insurance_operator: admin.pubkey().to_bytes(),
             backing_bucket_authority: admin.pubkey().to_bytes(),
@@ -59370,6 +59555,7 @@ fn v16_attack_update_authority_handoff_rekeys_asset0_lifecycle_admin() {
             asset_index: 0,
             now_slot: 2,
             initial_price: 0,
+            max_init_fee: u128::MAX,
             insurance_authority: old_marketauth.pubkey().to_bytes(),
             insurance_operator: old_marketauth.pubkey().to_bytes(),
             backing_bucket_authority: old_marketauth.pubkey().to_bytes(),
@@ -59406,6 +59592,7 @@ fn v16_attack_update_authority_handoff_rekeys_asset0_lifecycle_admin() {
             asset_index: 0,
             now_slot: 2,
             initial_price: 0,
+            max_init_fee: u128::MAX,
             insurance_authority: new_marketauth.pubkey().to_bytes(),
             insurance_operator: new_marketauth.pubkey().to_bytes(),
             backing_bucket_authority: new_marketauth.pubkey().to_bytes(),
