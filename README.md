@@ -429,14 +429,24 @@ This section describes intent and operational ordering, not argument-by-argument
   - transfers collateral into vault; credits insurance fund in engine
 
 ### Trading
+- Clients derive the wire incarnation with `state::read_trade_portfolio_id`. Portfolios created
+  before incarnation IDs use the reserved legacy sentinel and persist it on their first trade.
 - **TradeNoCpi**
   - trade without external matcher (used for testing / deterministic scenarios)
+  - both owners sign their current `portfolio_id` and a nonzero, portfolio-local `intent_id`.
+    Distinct intents may land out of order within a 64-ID window, but a retry carrying an already
+    consumed ID rejects. Recreating a portfolio address changes `portfolio_id`, invalidating old
+    signed trades.
 - **TradeCpi**
   - trade via LP-chosen matcher CPI with strict binding + validation. The LP portfolio must already
     store an enabled matcher config for the passed matcher program/context/delegate tuple.
+  - the signed taker supplies its current `portfolio_id` and a nonzero, portfolio-local
+    `intent_id`; the LP `portfolio_id` binds the transaction to that LP incarnation. A retry of the
+    same taker intent rejects without consuming replay state for the unsigned LP.
 - **BatchTradeNoCpi** (tag 66)
   - atomic multi-leg batch (up to the portfolio asset cap) against one taker/LP pair; each leg's
     **signed** `size_q` sets its direction, so a single batch can carry a mixed long/short spread.
+    It uses the same per-owner portfolio/incarnation-bound intent IDs as `TradeNoCpi`.
     The engine settles both accounts once, applies every leg, then runs a **single end-state
     initial-margin check** — interim legs need not be individually margin-feasible. Current v1 batch
     execution rejects if any backing-domain trade-fee policy is configured, so those fees are not
@@ -445,7 +455,8 @@ This section describes intent and operational ordering, not argument-by-argument
   - same atomic multi-leg batch routed through an external matcher: **one** batched matcher CPI
     (matcher tag 3) fills every leg against a single LP, each return is validated under the same
     anti-spoof binding as `TradeCpi`, then all fills apply through the batch path. Bounded to 16
-    legs (the matcher's return-data cap).
+    legs (the matcher's return-data cap). It uses the same taker-intent and LP-incarnation binding
+    as `TradeCpi`.
 - **SetMatcherConfig** (tag 68)
   - LP-owner-signed opt-in/out for unsigned LP matcher fills. This writes the matcher config tail
     on the LP portfolio: matcher program, matcher context, matcher delegate, and enabled flag.
