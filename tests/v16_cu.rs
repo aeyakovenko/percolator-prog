@@ -59717,3 +59717,108 @@ fn v16_attack_underfunded_exit_cannot_move_ewma_with_uncollectible_fee() {
         assert_underfunded_ewma_exit_uses_collected_fee(path);
     }
 }
+
+// Two priority-fee variants are a normal retry shape: both carry the same bilateral trade intent
+// and recent blockhash but have distinct transaction signatures. The program must not interpret
+// both variants as two independently authorized position deltas.
+#[test]
+fn v16_attack_bilateral_trade_retry_cannot_execute_twice() {
+    const PRICE: u64 = 100;
+    const HIGH_PRICE: u64 = 110;
+    const DEPOSIT: u128 = 4_000_000;
+    const SIZE_Q: i128 = (10_000 * POS_SCALE) as i128;
+
+    let mut env = V16CuEnv::new();
+    env.configure_auth_mark_with_cu(0, PRICE);
+    let attacker_owner = Keypair::new();
+    let victim_owner = Keypair::new();
+    let attacker = env.create_portfolio(&attacker_owner);
+    let victim = env.create_portfolio(&victim_owner);
+    env.deposit(&attacker_owner, attacker, DEPOSIT);
+    env.deposit(&victim_owner, victim, DEPOSIT);
+
+    env.svm.expire_blockhash();
+    let blockhash = env.svm.latest_blockhash();
+    let trade = Instruction {
+        program_id: env.program_id,
+        accounts: vec![
+            AccountMeta::new(attacker_owner.pubkey(), true),
+            AccountMeta::new(victim_owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(attacker, false),
+            AccountMeta::new(victim, false),
+        ],
+        data: ProgInstruction::TradeNoCpi {
+            asset_index: 0,
+            size_q: SIZE_Q,
+            exec_price: PRICE,
+            fee_bps: 0,
+        }
+        .encode(),
+    };
+    let first = Transaction::new_signed_with_payer(
+        &[heap_ix(), cu_ix(), trade.clone()],
+        Some(&env.payer.pubkey()),
+        &[&env.payer, &attacker_owner, &victim_owner],
+        blockhash,
+    );
+    let retained_retry = Transaction::new_signed_with_payer(
+        &[
+            heap_ix(),
+            cu_ix(),
+            ComputeBudgetInstruction::set_compute_unit_price(1),
+            trade,
+        ],
+        Some(&env.payer.pubkey()),
+        &[&env.payer, &attacker_owner, &victim_owner],
+        blockhash,
+    );
+
+    env.svm
+        .send_transaction(first)
+        .expect("the intended bilateral trade lands");
+    assert_eq!(env.market_state().1.assets[0].oi_eff_long_q, SIZE_Q as u128);
+    env.svm
+        .send_transaction(retained_retry)
+        .expect("RED: retained priority-fee retry executes the same intent again");
+    assert_eq!(
+        env.market_state().1.assets[0].oi_eff_long_q,
+        (SIZE_Q as u128) * 2,
+        "RED: one signed intent created two position deltas"
+    );
+
+    env.svm.warp_to_slot(10);
+    env.push_auth_mark_with_cu(10, HIGH_PRICE);
+    for portfolio in [attacker, victim] {
+        env.svm.expire_blockhash();
+        env.crank(
+            portfolio,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 10,
+                observations: crank_observations(0),
+            },
+        );
+    }
+    env.trade_with_cu(
+        &attacker_owner,
+        attacker,
+        &victim_owner,
+        victim,
+        -2 * SIZE_Q,
+        HIGH_PRICE,
+        0,
+    );
+    env.convert_released_pnl_with_cu(&attacker_owner, attacker, u128::MAX);
+
+    let attacker_capital = env.portfolio_state(attacker).capital.get();
+    let victim_capital = env.portfolio_state(victim).capital.get();
+    assert_eq!(attacker_capital, DEPOSIT + 200_000);
+    assert_eq!(victim_capital, DEPOSIT - 200_000);
+    let attacker_dest = env.withdraw(&attacker_owner, attacker, attacker_capital);
+    let victim_dest = env.withdraw(&victim_owner, victim, victim_capital);
+    assert_eq!(env.token_amount(attacker_dest), (DEPOSIT + 200_000) as u64);
+    assert_eq!(env.token_amount(victim_dest), (DEPOSIT - 200_000) as u64);
+    panic!(
+        "one bilateral intent executed twice and made an extra 100,000 victim atoms withdrawable by the opposing signer"
+    );
+}
