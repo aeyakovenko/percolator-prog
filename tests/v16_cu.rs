@@ -59717,3 +59717,125 @@ fn v16_attack_underfunded_exit_cannot_move_ewma_with_uncollectible_fee() {
         assert_underfunded_ewma_exit_uses_collected_fee(path);
     }
 }
+
+// A signed insurance top-up authorizes one contribution, not every later balance restored to the
+// same source account. A distinct live insurance operator must not be able to retain a fee-bump
+// variant, replay it after an ordinary SPL replenishment, and withdraw the duplicate contribution.
+#[test]
+fn v16_attack_signed_insurance_topup_cannot_replay_after_source_replenishment() {
+    const ASSET: u16 = 1;
+    const DOMAIN: u16 = 2;
+    const AMOUNT: u128 = 50_000;
+
+    let mut env = V16CuEnv::new();
+    let provider = Keypair::new();
+    let operator = Keypair::new();
+    env.ensure_signer_account(provider.pubkey());
+    env.ensure_signer_account(operator.pubkey());
+    env.activate_asset_with_authorities(
+        ASSET,
+        1,
+        100,
+        provider.pubkey(),
+        operator.pubkey(),
+        env.admin.pubkey(),
+        env.admin.pubkey(),
+    );
+
+    let source = env.token_account(provider.pubkey(), AMOUNT as u64);
+    let reserve = env.token_account(provider.pubkey(), AMOUNT as u64);
+    let topup_ix = Instruction {
+        program_id: env.program_id,
+        accounts: vec![
+            AccountMeta::new(provider.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        data: ProgInstruction::TopUpInsuranceDomain {
+            domain: DOMAIN,
+            amount: AMOUNT,
+        }
+        .encode(),
+    };
+    let blockhash = env.svm.latest_blockhash();
+    let first = Transaction::new_signed_with_payer(
+        &[
+            heap_ix(),
+            cu_ix(),
+            ComputeBudgetInstruction::set_compute_unit_price(1),
+            topup_ix.clone(),
+        ],
+        Some(&operator.pubkey()),
+        &[&operator, &provider],
+        blockhash,
+    );
+    let retained = Transaction::new_signed_with_payer(
+        &[
+            heap_ix(),
+            cu_ix(),
+            ComputeBudgetInstruction::set_compute_unit_price(2),
+            topup_ix,
+        ],
+        Some(&operator.pubkey()),
+        &[&operator, &provider],
+        blockhash,
+    );
+
+    env.svm
+        .send_transaction(first)
+        .expect("the provider's intended top-up lands");
+    assert_eq!(env.token_amount(source), 0);
+    assert_eq!(
+        env.market_state().1.insurance_domain_budget[DOMAIN as usize],
+        AMOUNT
+    );
+
+    let replenish = spl_token::instruction::transfer(
+        &spl_token::ID,
+        &reserve,
+        &source,
+        &provider.pubkey(),
+        &[],
+        AMOUNT as u64,
+    )
+    .unwrap();
+    send_raw_tx(&mut env.svm, &env.payer, replenish, &[&provider])
+        .expect("an ordinary public SPL transfer replenishes the source");
+    assert_eq!(env.token_amount(source), AMOUNT as u64);
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    let replay = env.svm.send_transaction(retained);
+    if replay.is_ok() {
+        assert_eq!(env.token_amount(source), 0);
+        assert_eq!(
+            env.market_state().1.insurance_domain_budget[DOMAIN as usize],
+            AMOUNT * 2,
+            "the retained top-up duplicated the provider's contribution"
+        );
+        let (operator_dest, _) = env
+            .try_withdraw_insurance_domain_with_authority(&operator, DOMAIN, AMOUNT)
+            .expect("the distinct live operator extracts the replayed contribution");
+        assert_eq!(env.token_amount(operator_dest), AMOUNT as u64);
+        assert_eq!(
+            env.market_state().1.insurance_domain_budget[DOMAIN as usize],
+            AMOUNT,
+            "the provider's intended first contribution remains after the duplicate is extracted"
+        );
+        panic!("a retained insurance top-up replayed after source replenishment");
+    }
+
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "a rejected retained top-up leaves market state byte-identical"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        vault_before,
+        "a rejected retained top-up leaves vault custody byte-identical"
+    );
+    assert_eq!(env.token_amount(source), AMOUNT as u64);
+}
