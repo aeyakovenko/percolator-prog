@@ -512,7 +512,13 @@ pub mod state {
         pub collateral_mint: [u8; 32],
         pub secondary_collateral_mint: [u8; 32],
         pub maintenance_fee_per_slot: u128,
-        pub permissionless_market_init_fee: u128,
+        /// The public asset-init fee is token-denominated and therefore bounded to `u64`.
+        /// This occupies the low word of the former `u128` field, preserving the zero-copy ABI.
+        pub permissionless_market_init_fee: u64,
+        /// Last accepted market-authority liquidation-policy intent. The high word of the former
+        /// `permissionless_market_init_fee` was always zero because every public setter enforced
+        /// `u64`, so legacy accounts begin at sequence zero without migration.
+        pub liquidation_fee_policy_sequence: u64,
         pub trade_fee_base_bps: u64,
         pub permissionless_resolve_stale_slots: u64,
         pub force_close_delay_slots: u64,
@@ -2550,6 +2556,7 @@ pub mod ix {
         },
         UpdateLiquidationFeePolicy {
             cranker_share_bps: u16,
+            policy_sequence: u64,
         },
         UpdateMaintenanceFeePolicy {
             cranker_share_bps: u16,
@@ -2812,6 +2819,7 @@ pub mod ix {
                 },
                 37 => Self::UpdateLiquidationFeePolicy {
                     cranker_share_bps: read_u16(&mut rest)?,
+                    policy_sequence: read_u64(&mut rest)?,
                 },
                 49 => Self::UpdateMaintenanceFeePolicy {
                     cranker_share_bps: read_u16(&mut rest)?,
@@ -3116,9 +3124,13 @@ pub mod ix {
                     out.push(kind);
                     out.extend_from_slice(&new_pubkey);
                 }
-                Self::UpdateLiquidationFeePolicy { cranker_share_bps } => {
+                Self::UpdateLiquidationFeePolicy {
+                    cranker_share_bps,
+                    policy_sequence,
+                } => {
                     out.push(37);
                     push_u16(&mut out, cranker_share_bps);
+                    push_u64(&mut out, policy_sequence);
                 }
                 Self::UpdateMaintenanceFeePolicy { cranker_share_bps } => {
                     out.push(49);
@@ -5289,9 +5301,15 @@ pub mod processor {
                 kind,
                 new_pubkey,
             } => handle_update_asset_authority(program_id, accounts, asset_index, kind, new_pubkey),
-            Instruction::UpdateLiquidationFeePolicy { cranker_share_bps } => {
-                handle_update_liquidation_fee_policy(program_id, accounts, cranker_share_bps)
-            }
+            Instruction::UpdateLiquidationFeePolicy {
+                cranker_share_bps,
+                policy_sequence,
+            } => handle_update_liquidation_fee_policy(
+                program_id,
+                accounts,
+                cranker_share_bps,
+                policy_sequence,
+            ),
             Instruction::UpdateMaintenanceFeePolicy { cranker_share_bps } => {
                 handle_update_maintenance_fee_policy(program_id, accounts, cranker_share_bps)
             }
@@ -5550,6 +5568,7 @@ pub mod processor {
             secondary_collateral_mint: [0u8; 32],
             maintenance_fee_per_slot,
             permissionless_market_init_fee: 0,
+            liquidation_fee_policy_sequence: 0,
             trade_fee_base_bps,
             permissionless_resolve_stale_slots: 0,
             force_close_delay_slots: 0,
@@ -9107,7 +9126,7 @@ pub mod processor {
                 0
             } else {
                 let fee = permissionless_market_init_fee_for_asset(
-                    cfg_pre.permissionless_market_init_fee,
+                    u128::from(cfg_pre.permissionless_market_init_fee),
                     asset_index,
                 )?;
                 if fee == 0 {
@@ -9146,7 +9165,7 @@ pub mod processor {
                         cfg.marketauth != [0u8; 32] && cfg.marketauth == authority.key.to_bytes();
                     if !still_asset_authority {
                         let expected_fee = permissionless_market_init_fee_for_asset(
-                            cfg.permissionless_market_init_fee,
+                            u128::from(cfg.permissionless_market_init_fee),
                             asset_index,
                         )?;
                         if expected_fee == 0 || expected_fee != init_fee {
@@ -9505,6 +9524,7 @@ pub mod processor {
         program_id: &Pubkey,
         accounts: &'a [AccountInfo<'a>],
         cranker_share_bps: u16,
+        policy_sequence: u64,
     ) -> ProgramResult {
         let admin = account(accounts, 0)?;
         let market_ai = account(accounts, 1)?;
@@ -9517,7 +9537,11 @@ pub mod processor {
         let (mut cfg, _, _, _) =
             state::read_market_config_mode_and_capacity(&market_ai.try_borrow_data()?)?;
         expect_live_authority(&cfg.marketauth, admin.key)?;
+        if policy_sequence <= cfg.liquidation_fee_policy_sequence {
+            return Err(PercolatorError::EngineStale.into());
+        }
         cfg.liquidation_cranker_fee_share_bps = cranker_share_bps;
+        cfg.liquidation_fee_policy_sequence = policy_sequence;
         state::write_wrapper_config(&mut market_ai.try_borrow_mut_data()?, &cfg)
     }
 
@@ -9706,7 +9730,7 @@ pub mod processor {
         expect_signer(admin)?;
         expect_writable(market_ai)?;
         expect_owner(market_ai, program_id)?;
-        let _ = amount_to_u64(min_init_fee)?;
+        let min_init_fee = amount_to_u64(min_init_fee)?;
         let (mut cfg, _, _, _) =
             state::read_market_config_mode_and_capacity(&market_ai.try_borrow_data()?)?;
         expect_live_authority(&cfg.marketauth, admin.key)?;
