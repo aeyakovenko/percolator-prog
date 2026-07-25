@@ -49,6 +49,10 @@ pub mod constants {
     pub const WRAPPER_CONFIG_LEN: usize = 448;
     pub const ASSET_ORACLE_PROFILE_LEN: usize = 400;
     pub const ASSET_ORACLE_WRAPPER_LEN: usize = 512;
+    // Keep the first 24 wrapper-reserve bytes isolated for other one-shot counters.
+    pub const ASSET_AUTHORITY_SEQUENCES_OFF: usize = ASSET_ORACLE_PROFILE_LEN + 24;
+    pub const ASSET_AUTHORITY_SEQUENCE_LEN: usize = 8;
+    pub const ASSET_AUTHORITY_SEQUENCE_COUNT: usize = 5;
     pub const MARKET_GROUP_LEN: usize = size_of::<MarketGroupV16HeaderAccount>();
     pub const MARKET_ASSET_SLOT_LEN: usize = size_of::<Market<[u8; ASSET_ORACLE_WRAPPER_LEN]>>();
     pub const PORTFOLIO_STATE_LEN: usize = size_of::<PortfolioAccountV16Account>();
@@ -155,10 +159,11 @@ pub mod error {
 pub mod state {
     use crate::{
         constants::{
-            ASSET_ORACLE_PROFILE_LEN, ASSET_ORACLE_WRAPPER_LEN, HEADER_LEN,
-            KIND_BACKING_DOMAIN_LEDGER, KIND_INSURANCE_LEDGER, KIND_MARKET, KIND_PORTFOLIO, MAGIC,
-            MARKET_GROUP_LEN, MARKET_GROUP_OFF, MIN_MARKET_ACCOUNT_LEN, ORACLE_LEG_CAP,
-            ORACLE_LEG_FLAGS_MASK, ORACLE_MODE_AUTH_MARK, ORACLE_MODE_EWMA_MARK,
+            ASSET_AUTHORITY_SEQUENCES_OFF, ASSET_AUTHORITY_SEQUENCE_COUNT,
+            ASSET_AUTHORITY_SEQUENCE_LEN, ASSET_ORACLE_PROFILE_LEN, ASSET_ORACLE_WRAPPER_LEN,
+            HEADER_LEN, KIND_BACKING_DOMAIN_LEDGER, KIND_INSURANCE_LEDGER, KIND_MARKET,
+            KIND_PORTFOLIO, MAGIC, MARKET_GROUP_LEN, MARKET_GROUP_OFF, MIN_MARKET_ACCOUNT_LEN,
+            ORACLE_LEG_CAP, ORACLE_LEG_FLAGS_MASK, ORACLE_MODE_AUTH_MARK, ORACLE_MODE_EWMA_MARK,
             ORACLE_MODE_HYBRID_AFTER_HOURS, ORACLE_MODE_MANUAL, PORTFOLIO_ACCOUNT_LEN,
             PORTFOLIO_ENGINE_ACCOUNT_LEN, PORTFOLIO_ID_LEN, PORTFOLIO_ID_OFF,
             PORTFOLIO_MATCHER_CONFIG_LEN, PORTFOLIO_MATCHER_CONFIG_OFF, PORTFOLIO_STATE_LEN,
@@ -1368,6 +1373,44 @@ pub mod state {
         Ok(profile)
     }
 
+    pub fn read_asset_authority_sequence(
+        data: &[u8],
+        asset_index: usize,
+        kind: u8,
+    ) -> Result<u64, ProgramError> {
+        check_header(data, KIND_MARKET)?;
+        if asset_index >= market_slot_capacity(data)?
+            || kind as usize >= ASSET_AUTHORITY_SEQUENCE_COUNT
+        {
+            return Err(PercolatorError::InvalidInstruction.into());
+        }
+        let kind_offset = (kind as usize)
+            .checked_mul(ASSET_AUTHORITY_SEQUENCE_LEN)
+            .ok_or(PercolatorError::InvalidAccountLen)?;
+        let start = dynamic_slot_offset(asset_index)?
+            .checked_add(ASSET_AUTHORITY_SEQUENCES_OFF)
+            .and_then(|offset| offset.checked_add(kind_offset))
+            .ok_or(PercolatorError::InvalidAccountLen)?;
+        let bytes = data
+            .get(start..start + ASSET_AUTHORITY_SEQUENCE_LEN)
+            .ok_or(PercolatorError::InvalidAccountLen)?;
+        let mut raw = [0u8; ASSET_AUTHORITY_SEQUENCE_LEN];
+        raw.copy_from_slice(bytes);
+        Ok(u64::from_le_bytes(raw))
+    }
+
+    pub fn next_asset_authority_sequence(
+        current_sequence: u64,
+        expected_sequence: u64,
+    ) -> Result<u64, ProgramError> {
+        if current_sequence != expected_sequence {
+            return Err(PercolatorError::EngineStale.into());
+        }
+        current_sequence
+            .checked_add(1)
+            .ok_or_else(|| PercolatorError::EngineCounterOverflow.into())
+    }
+
     pub fn read_market_config_mode_and_capacity(
         data: &[u8],
     ) -> Result<(WrapperConfigV16, MarketModeV16, usize, usize), ProgramError> {
@@ -2542,11 +2585,13 @@ pub mod ix {
         },
         /// Rotate one of an asset's per-asset authorities. Gated by the asset's own `asset_admin`
         /// (rotates any; only the admin authority itself is burnable) or the current holder of that
-        /// authority (self-rotation). Isolated to the given asset_index.
+        /// authority (self-rotation). Isolated to the given asset_index; the selected authority
+        /// kind's expected sequence makes the co-signed handoff one-shot.
         UpdateAssetAuthority {
             asset_index: u16,
             kind: u8,
             new_pubkey: [u8; 32],
+            expected_sequence: u64,
         },
         UpdateLiquidationFeePolicy {
             cranker_share_bps: u16,
@@ -2809,6 +2854,7 @@ pub mod ix {
                     asset_index: read_u16(&mut rest)?,
                     kind: read_u8(&mut rest)?,
                     new_pubkey: read_bytes32(&mut rest)?,
+                    expected_sequence: read_u64(&mut rest)?,
                 },
                 37 => Self::UpdateLiquidationFeePolicy {
                     cranker_share_bps: read_u16(&mut rest)?,
@@ -3110,11 +3156,13 @@ pub mod ix {
                     asset_index,
                     kind,
                     new_pubkey,
+                    expected_sequence,
                 } => {
                     out.push(65);
                     push_u16(&mut out, asset_index);
                     out.push(kind);
                     out.extend_from_slice(&new_pubkey);
+                    push_u64(&mut out, expected_sequence);
                 }
                 Self::UpdateLiquidationFeePolicy { cranker_share_bps } => {
                     out.push(37);
@@ -4555,6 +4603,40 @@ pub mod processor {
         Ok(())
     }
 
+    fn consume_asset_authority_sequence_view(
+        group: &mut state::MarketViewMutV16<'_>,
+        asset_index: usize,
+        kind: u8,
+        expected_sequence: u64,
+    ) -> ProgramResult {
+        if kind as usize >= constants::ASSET_AUTHORITY_SEQUENCE_COUNT {
+            return Err(PercolatorError::InvalidInstruction.into());
+        }
+        let kind_offset = (kind as usize)
+            .checked_mul(constants::ASSET_AUTHORITY_SEQUENCE_LEN)
+            .ok_or(PercolatorError::InvalidAccountLen)?;
+        let start = constants::ASSET_AUTHORITY_SEQUENCES_OFF
+            .checked_add(kind_offset)
+            .ok_or(PercolatorError::InvalidAccountLen)?;
+        let end = start
+            .checked_add(constants::ASSET_AUTHORITY_SEQUENCE_LEN)
+            .ok_or(PercolatorError::InvalidAccountLen)?;
+        let wrapper = &mut group
+            .markets
+            .get_mut(asset_index)
+            .ok_or(PercolatorError::InvalidInstruction)?
+            .wrapper;
+        let sequence_bytes = wrapper
+            .get(start..end)
+            .ok_or(PercolatorError::InvalidAccountLen)?;
+        let mut raw = [0u8; constants::ASSET_AUTHORITY_SEQUENCE_LEN];
+        raw.copy_from_slice(sequence_bytes);
+        let next_sequence =
+            state::next_asset_authority_sequence(u64::from_le_bytes(raw), expected_sequence)?;
+        wrapper[start..end].copy_from_slice(&next_sequence.to_le_bytes());
+        Ok(())
+    }
+
     fn read_oracle_profile_for_asset(
         market_data: &[u8],
         cfg: &WrapperConfigV16,
@@ -5288,7 +5370,15 @@ pub mod processor {
                 asset_index,
                 kind,
                 new_pubkey,
-            } => handle_update_asset_authority(program_id, accounts, asset_index, kind, new_pubkey),
+                expected_sequence,
+            } => handle_update_asset_authority(
+                program_id,
+                accounts,
+                asset_index,
+                kind,
+                new_pubkey,
+                expected_sequence,
+            ),
             Instruction::UpdateLiquidationFeePolicy { cranker_share_bps } => {
                 handle_update_liquidation_fee_policy(program_id, accounts, cranker_share_bps)
             }
@@ -8746,6 +8836,7 @@ pub mod processor {
         asset_index: u16,
         kind: u8,
         new_pubkey: [u8; 32],
+        expected_sequence: u64,
     ) -> ProgramResult {
         let current = account(accounts, 0)?;
         let new_authority = account(accounts, 1)?;
@@ -8795,6 +8886,7 @@ pub mod processor {
         if !admin_signed {
             expect_live_authority(&current_value, current.key)?;
         }
+        consume_asset_authority_sequence_view(&mut group, asset_index, kind, expected_sequence)?;
         match kind {
             ASSET_AUTH_ADMIN => profile.asset_admin = new_pubkey,
             ASSET_AUTH_INSURANCE => profile.insurance_authority = new_pubkey,
