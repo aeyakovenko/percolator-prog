@@ -1499,11 +1499,20 @@ impl V16CuEnv {
     }
 
     fn update_maintenance_fee_policy_with_cu(&mut self, cranker_share_bps: u16) -> u64 {
+        let policy_sequence = self
+            .market_state()
+            .0
+            .maintenance_fee_policy_sequence
+            .checked_add(1)
+            .expect("maintenance policy sequence");
         send_tx(
             &mut self.svm,
             self.program_id,
             &self.payer,
-            ProgInstruction::UpdateMaintenanceFeePolicy { cranker_share_bps },
+            ProgInstruction::UpdateMaintenanceFeePolicy {
+                cranker_share_bps,
+                policy_sequence,
+            },
             vec![
                 AccountMeta::new(self.admin.pubkey(), true),
                 AccountMeta::new(self.market, false),
@@ -13128,6 +13137,7 @@ fn v16_bpf_policy_authority_and_base_unit_tags_are_bounded_and_persist() {
     );
     let (cfg, _) = env.market_state();
     assert_eq!(cfg.maintenance_cranker_fee_share_bps, 2_345);
+    assert_eq!(cfg.maintenance_fee_policy_sequence, 1);
 
     let backing_cu = env.update_backing_fee_policy_with_cu(0, 77, 5_000);
     assert_cu_within("UpdateBackingFeePolicy", backing_cu, CUSTODY_CU_LIMIT);
@@ -13193,6 +13203,61 @@ fn v16_bpf_policy_authority_and_base_unit_tags_are_bounded_and_persist() {
     assert_cu_within("UpdateAuthority", authority_cu, CUSTODY_CU_LIMIT);
     let (cfg, _) = env.market_state();
     assert_eq!(cfg.marketauth, new_asset_authority.pubkey().to_bytes());
+}
+
+#[test]
+fn v16_bpf_maintenance_policy_sequence_accepts_gaps_and_rejects_replays() {
+    let mut env = V16CuEnv::new();
+    let update = |env: &mut V16CuEnv, sequence: u64, share_bps: u16| {
+        env.svm.expire_blockhash();
+        send_tx(
+            &mut env.svm,
+            env.program_id,
+            &env.payer,
+            ProgInstruction::UpdateMaintenanceFeePolicy {
+                cranker_share_bps: share_bps,
+                policy_sequence: sequence,
+            },
+            vec![
+                AccountMeta::new(env.admin.pubkey(), true),
+                AccountMeta::new(env.market, false),
+            ],
+            &[&env.admin],
+        )
+    };
+
+    let first_cu = update(&mut env, 17, 1_234).expect("first sequence with a forward gap");
+    assert_cu_within(
+        "UpdateMaintenanceFeePolicy sequenced",
+        first_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    let accepted = env.svm.get_account(&env.market).unwrap();
+    let cfg = env.market_state().0;
+    assert_eq!(cfg.maintenance_cranker_fee_share_bps, 1_234);
+    assert_eq!(cfg.maintenance_fee_policy_sequence, 17);
+    assert_eq!(
+        cfg.insurance_withdraw_deposit_remaining, 0,
+        "the ABI-compatible sequence word must not corrupt adjacent insurance accounting"
+    );
+
+    for stale_sequence in [0, 16, 17] {
+        assert!(
+            update(&mut env, stale_sequence, 9_999).is_err(),
+            "zero, lower, and equal policy sequences must reject"
+        );
+        assert_eq!(
+            env.svm.get_account(&env.market).unwrap(),
+            accepted,
+            "a rejected policy replay must leave the complete market byte-identical"
+        );
+    }
+
+    update(&mut env, 1_000_000, 4_321).expect("large forward sequence gaps remain valid");
+    let cfg = env.market_state().0;
+    assert_eq!(cfg.maintenance_cranker_fee_share_bps, 4_321);
+    assert_eq!(cfg.maintenance_fee_policy_sequence, 1_000_000);
+    assert_eq!(cfg.insurance_withdraw_deposit_remaining, 0);
 }
 
 #[test]
@@ -25879,6 +25944,7 @@ fn v16_attack_rotated_marketauth_cannot_replay_policy_updates() {
     old_attempt(
         ProgInstruction::UpdateMaintenanceFeePolicy {
             cranker_share_bps: 4_000,
+            policy_sequence: 1,
         },
         "maintenance policy replay",
     );
@@ -25925,6 +25991,7 @@ fn v16_attack_rotated_marketauth_cannot_replay_policy_updates() {
     new_update(
         ProgInstruction::UpdateMaintenanceFeePolicy {
             cranker_share_bps: 4_000,
+            policy_sequence: 1,
         },
         "maintenance policy update",
     );
@@ -34500,6 +34567,7 @@ fn v16_attack_global_policy_bounds_reject_grief_values() {
         &mut env,
         ProgInstruction::UpdateMaintenanceFeePolicy {
             cranker_share_bps: 10_001,
+            policy_sequence: 2,
         },
         "maintenance cranker share above 100%",
     );
@@ -34736,7 +34804,8 @@ fn v16_attack_permissionless_asset_authority_cannot_update_marketwide_policies()
     );
     assert!(
         attempt(ProgInstruction::UpdateMaintenanceFeePolicy {
-            cranker_share_bps: 2_500
+            cranker_share_bps: 2_500,
+            policy_sequence: 1,
         })
         .is_err(),
         "asset-1 authority must not control global maintenance-fee policy"
@@ -57608,6 +57677,99 @@ fn v16_attack_sync_maintenance_full_cranker_share_conserves_no_insurance_underfl
         "fee fully conserved: cranker reward + retained insurance == charged"
     );
     assert_domain_budget_remaining_total_consistent(&group, "100% maintenance cranker share");
+}
+
+#[test]
+fn v16_attack_delayed_maintenance_policy_cannot_redirect_fee_to_cranker() {
+    let mut env = V16CuEnv::new_with_market_params_price_move_and_maintenance_fee(
+        1, 10_000, 10_000, 10_000, 58,
+    );
+
+    // The honest market authority signs an older 100% cranker-share policy and
+    // then a correcting 0% policy under one still-live blockhash. A relayer may
+    // submit the signed bytes, but must not be able to restore the superseded
+    // split after an independent user enters under the visible correction.
+    let blockhash = env.svm.latest_blockhash();
+    let make_policy_tx = |cranker_share_bps, policy_sequence| {
+        let instruction = Instruction {
+            program_id: env.program_id,
+            accounts: vec![
+                AccountMeta::new(env.admin.pubkey(), true),
+                AccountMeta::new(env.market, false),
+            ],
+            data: ProgInstruction::UpdateMaintenanceFeePolicy {
+                cranker_share_bps,
+                policy_sequence,
+            }
+            .encode(),
+        };
+        Transaction::new_signed_with_payer(
+            &[heap_ix(), cu_ix(), instruction],
+            Some(&env.payer.pubkey()),
+            &[&env.payer, &env.admin],
+            blockhash,
+        )
+    };
+    let delayed_high_share = make_policy_tx(10_000, 1);
+    let correcting_zero_share = make_policy_tx(0, 2);
+    env.svm
+        .send_transaction(correcting_zero_share)
+        .expect("newer zero-share policy lands first");
+    assert_eq!(env.market_state().0.maintenance_cranker_fee_share_bps, 0);
+
+    let payer_owner = Keypair::new();
+    let payer_portfolio = env.create_portfolio(&payer_owner);
+    let cranker_owner = Keypair::new();
+    let cranker_portfolio = env.create_portfolio(&cranker_owner);
+    env.deposit(&payer_owner, payer_portfolio, 100_000_000);
+
+    let delayed_accepted = env.svm.send_transaction(delayed_high_share).is_ok();
+    let insurance_before = env.market_state().1.insurance;
+    let payer_before = env.portfolio_state(payer_portfolio).capital.get();
+    let cranker_before = env.portfolio_state(cranker_portfolio).capital.get();
+    env.svm.warp_to_slot(10);
+    if delayed_accepted {
+        env.sync_maintenance_fee_with_cu(payer_portfolio, Some(cranker_portfolio), 10);
+    } else {
+        env.sync_maintenance_fee_with_cu(payer_portfolio, None, 10);
+    }
+
+    let payer_after = env.portfolio_state(payer_portfolio).capital.get();
+    let cranker_reward = env
+        .portfolio_state(cranker_portfolio)
+        .capital
+        .get()
+        .saturating_sub(cranker_before);
+    let insurance_credit = env
+        .market_state()
+        .1
+        .insurance
+        .saturating_sub(insurance_before);
+    let charged = payer_before.saturating_sub(payer_after);
+    assert_eq!(charged, 580, "the independent user owes the same fee");
+    assert_eq!(
+        cranker_reward + insurance_credit,
+        charged,
+        "the charged maintenance fee remains conserved"
+    );
+    let extracted = if cranker_reward == 0 {
+        0
+    } else {
+        let destination = env.withdraw(&cranker_owner, cranker_portfolio, cranker_reward);
+        env.token_amount(destination)
+    };
+
+    assert!(
+        !delayed_accepted,
+        "older high-share intent landed after the correction and redirected \
+         {cranker_reward} fee atoms from canonical insurance; {extracted} atoms \
+         were publicly withdrawn by the relayer/cranker"
+    );
+    assert_eq!(
+        (cranker_reward, extracted, insurance_credit),
+        (0, 0, charged),
+        "the corrected zero-share policy must retain the complete fee in canonical insurance"
+    );
 }
 
 // [from pr125]

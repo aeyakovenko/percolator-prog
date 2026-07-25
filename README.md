@@ -422,6 +422,10 @@ This section describes intent and operational ordering, not argument-by-argument
   - optional final account: a writable Percolator cranker portfolio can receive `maintenance_cranker_fee_share_bps` of the fee as internal account capital. If omitted, or if the configured share is zero, the full fee remains in insurance. If the cranker portfolio is the same key as the fee payer, the unsplit insurance share is still collected.
   - live nonflat accounts are anchored to the loss-accrued market slot, so fees cannot run ahead of settled losses
   - the rate is configured at `InitMarket` in collateral atoms per slot; a "$0.50 per 24h" anti-dust policy is an operator/client conversion from collateral atoms per day to atoms per expected slot
+- **UpdateMaintenanceFeePolicy** (tag 49)
+  - sets the optional maintenance cranker share and carries a market-authority-chosen `policy_sequence`
+  - the sequence must strictly exceed the last accepted maintenance-policy sequence; gaps are allowed, while delayed, duplicate, zero, and lower intents reject
+  - tag 49's payload is exactly `u16 cranker_share_bps || u64 policy_sequence`; legacy unsequenced payloads reject
 - **FinalizeResetSide** (tag 45)
   - permissionless side-reset finalization for engine-ready asset sides
   - validates side encoding and engine readiness; it is not an admin override
