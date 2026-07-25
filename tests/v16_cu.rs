@@ -57610,6 +57610,132 @@ fn v16_attack_sync_maintenance_full_cranker_share_conserves_no_insurance_underfl
     assert_domain_budget_remaining_total_consistent(&group, "100% maintenance cranker share");
 }
 
+#[test]
+fn v16_attack_delayed_liquidation_policy_cannot_redirect_fee_to_cranker() {
+    let mut env = V16CuEnv::new_with_init_params(production_risk_params());
+    env.configure_auth_mark_with_cu(0, 1_000_000);
+
+    // The honest admin signs an older 100% cranker-share policy and then a
+    // correcting 0% policy under one still-live blockhash. Relayers may land
+    // those already-authorized bytes, but an older intent must not replace the
+    // correction after users enter under the visible zero-share policy.
+    let blockhash = env.svm.latest_blockhash();
+    let make_policy_tx = |cranker_share_bps| {
+        let instruction = Instruction {
+            program_id: env.program_id,
+            accounts: vec![
+                AccountMeta::new(env.admin.pubkey(), true),
+                AccountMeta::new(env.market, false),
+            ],
+            data: ProgInstruction::UpdateLiquidationFeePolicy { cranker_share_bps }.encode(),
+        };
+        Transaction::new_signed_with_payer(
+            &[heap_ix(), cu_ix(), instruction],
+            Some(&env.payer.pubkey()),
+            &[&env.payer, &env.admin],
+            blockhash,
+        )
+    };
+    let delayed_high_share = make_policy_tx(10_000);
+    let correcting_zero_share = make_policy_tx(0);
+    env.svm
+        .send_transaction(correcting_zero_share)
+        .expect("newer zero-share policy lands first");
+    assert_eq!(env.market_state().0.liquidation_cranker_fee_share_bps, 0);
+
+    let long_owner = Keypair::new();
+    let long = env.create_portfolio(&long_owner);
+    let short_owner = Keypair::new();
+    let short = env.create_portfolio(&short_owner);
+    let cranker_owner = Keypair::new();
+    let cranker = env.create_portfolio(&cranker_owner);
+    env.deposit(&long_owner, long, 100_000_000);
+    env.deposit(&short_owner, short, 100_000);
+    env.deposit(&cranker_owner, cranker, 1_000);
+    env.trade_asset_with_cu(
+        0,
+        &long_owner,
+        long,
+        &short_owner,
+        short,
+        POS_SCALE as i128,
+        1_000_000,
+        0,
+    );
+
+    let delayed_accepted = env.svm.send_transaction(delayed_high_share).is_ok();
+    for slot in 1..=30u64 {
+        env.svm.warp_to_slot(slot);
+        env.push_auth_mark_with_cu(slot, 2_000_000);
+        env.svm.expire_blockhash();
+        let _ = env.send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: slot,
+                observations: crank_observations(0),
+            },
+            vec![
+                AccountMeta::new(env.payer.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(short, false),
+            ],
+            &[],
+        );
+    }
+
+    let cranker_capital_before = env.portfolio_state(cranker).capital.get();
+    let insurance_before = env.market_state().1.insurance;
+    env.svm.expire_blockhash();
+    send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 30,
+            observations: crank_observations(0),
+        },
+        vec![
+            AccountMeta::new(cranker_owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(short, false),
+            AccountMeta::new(cranker, false),
+        ],
+        &[&cranker_owner],
+    )
+    .expect("the liquidation itself remains live");
+    let cranker_reward = env
+        .portfolio_state(cranker)
+        .capital
+        .get()
+        .saturating_sub(cranker_capital_before);
+    let insurance_credit = env
+        .market_state()
+        .1
+        .insurance
+        .saturating_sub(insurance_before);
+    assert!(
+        cranker_reward + insurance_credit > 0,
+        "the liquidation must charge a nonzero fee"
+    );
+    let extracted = if cranker_reward == 0 {
+        0
+    } else {
+        let destination = env.withdraw(&cranker_owner, cranker, cranker_reward);
+        env.token_amount(destination)
+    };
+
+    assert!(
+        !delayed_accepted,
+        "older high-share intent landed after the correction and redirected \
+         {cranker_reward} fee atoms from canonical insurance; {extracted} atoms \
+         were publicly withdrawn by the relayer/cranker"
+    );
+    assert_eq!(
+        (cranker_reward, extracted),
+        (0, 0),
+        "the corrected zero-share policy must leave no extractable cranker reward"
+    );
+}
+
 // [from pr125]
 // LoF/safety sweep — RebalanceReduce is reduce-ONLY: an over-sized reduce_q cannot flip a position into
 // opposite-side risk. The engine clamps `reduce_q = reduce_q.min(leg.basis_pos_q.unsigned_abs())`, so a
