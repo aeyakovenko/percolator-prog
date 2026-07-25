@@ -59717,3 +59717,181 @@ fn v16_attack_underfunded_exit_cannot_move_ewma_with_uncollectible_fee() {
         assert_underfunded_ewma_exit_uses_collected_fee(path);
     }
 }
+
+// An unprivileged relayer must not land an older, honestly signed stale-resolution policy after a
+// newer correction in the same market generation. Otherwise the retained shorter timer lets any
+// caller terminally halt a funded live market while both admin transactions share one valid recent
+// blockhash.
+#[test]
+fn v16_attack_permissionless_resolve_policy_rejects_delayed_same_generation_intent() {
+    const PRICE: u64 = 100;
+    const DEPOSIT: u128 = 1_000;
+    const SIZE_Q: i128 = 5 * POS_SCALE as i128;
+    const OLD_STALE_SLOTS: u64 = 1;
+    const CORRECTED_STALE_SLOTS: u64 = 100;
+    const FORCE_CLOSE_DELAY_SLOTS: u64 = 5;
+
+    let mut env = V16CuEnv::new();
+    let admin = env.admin.insecure_clone();
+    env.configure_auth_mark_with_cu(0, PRICE);
+
+    let victim = Keypair::new();
+    let counterparty = Keypair::new();
+    let victim_account = env.create_portfolio(&victim);
+    let counterparty_account = env.create_portfolio(&counterparty);
+    env.deposit(&victim, victim_account, DEPOSIT);
+    env.deposit(&counterparty, counterparty_account, DEPOSIT);
+    env.trade_asset_with_cu(
+        0,
+        &victim,
+        victim_account,
+        &counterparty,
+        counterparty_account,
+        SIZE_Q,
+        PRICE,
+        0,
+    );
+
+    let policy_data = |sequence: u64, stale_slots: u64| {
+        let mut sequenced = vec![38u8];
+        sequenced.extend_from_slice(&sequence.to_le_bytes());
+        sequenced.extend_from_slice(&stale_slots.to_le_bytes());
+        sequenced.extend_from_slice(&FORCE_CLOSE_DELAY_SLOTS.to_le_bytes());
+        if ProgInstruction::decode(&sequenced).is_ok() {
+            sequenced
+        } else {
+            let mut legacy = vec![38u8];
+            legacy.extend_from_slice(&stale_slots.to_le_bytes());
+            legacy.extend_from_slice(&FORCE_CLOSE_DELAY_SLOTS.to_le_bytes());
+            legacy
+        }
+    };
+    let policy_ix = |data: Vec<u8>| Instruction {
+        program_id: env.program_id,
+        accounts: vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        data,
+    };
+    let retained_blockhash = env.svm.latest_blockhash();
+    let delayed_old_policy = Transaction::new_signed_with_payer(
+        &[
+            heap_ix(),
+            cu_ix(),
+            policy_ix(policy_data(1, OLD_STALE_SLOTS)),
+        ],
+        Some(&env.payer.pubkey()),
+        &[&env.payer, &admin],
+        retained_blockhash,
+    );
+    let corrected_policy = Transaction::new_signed_with_payer(
+        &[
+            heap_ix(),
+            cu_ix(),
+            policy_ix(policy_data(2, CORRECTED_STALE_SLOTS)),
+        ],
+        Some(&env.payer.pubkey()),
+        &[&env.payer, &admin],
+        retained_blockhash,
+    );
+
+    env.svm
+        .send_transaction(corrected_policy)
+        .expect("the honest correction lands first");
+    assert_eq!(
+        env.market_state().0.permissionless_resolve_stale_slots,
+        CORRECTED_STALE_SLOTS
+    );
+    let corrected_market = env.svm.get_account(&env.market).unwrap();
+    let delayed = env.svm.send_transaction(delayed_old_policy);
+    let uses_sequence_wire = policy_data(3, CORRECTED_STALE_SLOTS).len() == 25;
+    if !uses_sequence_wire {
+        delayed.expect("the pre-fix wrapper accepts the superseded short timer");
+        assert_eq!(
+            env.market_state().0.permissionless_resolve_stale_slots,
+            OLD_STALE_SLOTS
+        );
+        let resolve_slot = env
+            .market_state()
+            .0
+            .last_good_oracle_slot
+            .checked_add(OLD_STALE_SLOTS + 1)
+            .unwrap();
+        env.svm.warp_to_slot(resolve_slot);
+        env.send(
+            ProgInstruction::ResolveStalePermissionless {
+                now_slot: resolve_slot,
+            },
+            vec![AccountMeta::new(env.market, false)],
+            &[],
+        )
+        .expect("the delayed policy arms unsigned terminal resolution");
+        assert_eq!(env.market_state().1.mode, MarketModeV16::Resolved);
+        assert!(
+            env.try_trade_asset_with_cu(
+                0,
+                &victim,
+                victim_account,
+                &counterparty,
+                counterparty_account,
+                -SIZE_Q,
+                PRICE,
+                0,
+            )
+            .is_err(),
+            "ordinary user trade progress is permanently disabled"
+        );
+        panic!(
+            "a delayed honest stale-resolution intent let a public relayer halt a live funded market"
+        );
+    }
+
+    let delayed_error = format!(
+        "{:?}",
+        delayed.expect_err("the superseded sequence must reject")
+    );
+    let expected_error = format!(
+        "Custom({})",
+        percolator_prog::error::PercolatorError::EngineStale as u32
+    );
+    assert!(
+        delayed_error.contains(&expected_error),
+        "stale policy sequence must fail with {expected_error}, got {delayed_error}"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        corrected_market,
+        "stale sequence rejection leaves the live market byte-identical"
+    );
+
+    let resolve_slot = env
+        .market_state()
+        .0
+        .last_good_oracle_slot
+        .checked_add(OLD_STALE_SLOTS + 1)
+        .unwrap();
+    env.svm.warp_to_slot(resolve_slot);
+    assert!(
+        env.send(
+            ProgInstruction::ResolveStalePermissionless {
+                now_slot: resolve_slot,
+            },
+            vec![AccountMeta::new(env.market, false)],
+            &[],
+        )
+        .is_err(),
+        "the retained correction keeps the market outside its stale window"
+    );
+    assert_eq!(env.market_state().1.mode, MarketModeV16::Live);
+    env.trade_asset_with_cu(
+        0,
+        &victim,
+        victim_account,
+        &counterparty,
+        counterparty_account,
+        -SIZE_Q,
+        PRICE,
+        0,
+    );
+}
