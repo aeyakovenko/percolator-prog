@@ -2009,6 +2009,14 @@ impl V16CuEnv {
         matcher_delegate: Pubkey,
         enabled: u8,
     ) -> Result<Pubkey, String> {
+        let portfolio = self
+            .svm
+            .get_account(&maker_account)
+            .expect("portfolio account");
+        let portfolio_id = state::read_portfolio_id_allow_legacy_zero(&portfolio.data).unwrap_or(0);
+        let expected_sequence = state::read_portfolio_matcher_config(&portfolio.data)
+            .map(|config| config.sequence())
+            .unwrap_or(0);
         self.svm.expire_blockhash();
         let mut accounts = vec![
             AccountMeta::new(maker_owner.pubkey(), true),
@@ -2023,7 +2031,11 @@ impl V16CuEnv {
             ]);
         }
         self.send(
-            ProgInstruction::SetMatcherConfig { enabled },
+            ProgInstruction::SetMatcherConfig {
+                portfolio_id,
+                expected_sequence,
+                enabled,
+            },
             accounts,
             &[maker_owner],
         )?;
@@ -20553,6 +20565,172 @@ fn v16_attack_disabled_lp_matcher_config_blocks_cpi_fills() {
 }
 
 #[test]
+fn v16_attack_delayed_matcher_enable_cannot_override_newer_revoke() {
+    const OPEN_SIZE_Q: i128 = (10_000 * POS_SCALE) as i128;
+    const ATTACKER_DEPOSIT: u128 = 2_000_000;
+    const LP_DEPOSIT: u128 = 4_000_000;
+    const STALE_GRANT_PROFIT: u128 = 1_000_000;
+
+    let mut env = V16CuEnv::new();
+    env.configure_auth_mark_with_cu(0, 100);
+    let attacker = Keypair::new();
+    let lp_owner = Keypair::new();
+    let attacker_account = env.create_portfolio(&attacker);
+    let lp_account = env.create_portfolio(&lp_owner);
+    env.deposit(&attacker, attacker_account, ATTACKER_DEPOSIT);
+    env.deposit(&lp_owner, lp_account, LP_DEPOSIT);
+    let (matcher_program, matcher_context, matcher_delegate) =
+        auth_matcher_for_lp(&mut env, &lp_owner, lp_account);
+
+    // Model two independently signed intents that can land out of order under one still-valid
+    // recent blockhash. The owner first signs an enable, then decides to revoke it. Landing the
+    // newer revoke must make the older transaction stale rather than let it restore unsigned fills.
+    env.svm.expire_blockhash();
+    let recent_blockhash = env.svm.latest_blockhash();
+    let portfolio_id = env.portfolio_id(lp_account);
+    let expected_sequence = env.portfolio_matcher_config(lp_account).sequence();
+    let enable_ix = Instruction {
+        program_id: env.program_id,
+        accounts: vec![
+            AccountMeta::new(lp_owner.pubkey(), true),
+            AccountMeta::new_readonly(env.market, false),
+            AccountMeta::new(lp_account, false),
+            AccountMeta::new_readonly(matcher_program, false),
+            AccountMeta::new_readonly(matcher_context, false),
+            AccountMeta::new_readonly(matcher_delegate, false),
+        ],
+        data: ProgInstruction::SetMatcherConfig {
+            portfolio_id,
+            expected_sequence,
+            enabled: 1,
+        }
+        .encode(),
+    };
+    let revoke_ix = Instruction {
+        program_id: env.program_id,
+        accounts: vec![
+            AccountMeta::new(lp_owner.pubkey(), true),
+            AccountMeta::new_readonly(env.market, false),
+            AccountMeta::new(lp_account, false),
+        ],
+        data: ProgInstruction::SetMatcherConfig {
+            portfolio_id,
+            expected_sequence,
+            enabled: 0,
+        }
+        .encode(),
+    };
+    let delayed_enable = Transaction::new_signed_with_payer(
+        &[heap_ix(), cu_ix(), enable_ix],
+        Some(&env.payer.pubkey()),
+        &[&env.payer, &lp_owner],
+        recent_blockhash,
+    );
+    let newer_revoke = Transaction::new_signed_with_payer(
+        &[heap_ix(), cu_ix(), revoke_ix],
+        Some(&env.payer.pubkey()),
+        &[&env.payer, &lp_owner],
+        recent_blockhash,
+    );
+    env.svm
+        .send_transaction(newer_revoke)
+        .expect("newer matcher revoke lands first");
+    assert_eq!(env.portfolio_matcher_config(lp_account).enabled, 0);
+
+    let stale_enable = env.svm.send_transaction(delayed_enable);
+    if stale_enable.is_ok() {
+        assert_eq!(
+            env.portfolio_matcher_config(lp_account).enabled,
+            1,
+            "the delayed transaction restored the revoked matcher grant"
+        );
+
+        env.svm.expire_blockhash();
+        env.trade_cpi_with_cu_on_asset(
+            &attacker,
+            attacker_account,
+            &lp_owner,
+            lp_account,
+            matcher_program,
+            matcher_context,
+            matcher_delegate,
+            0,
+            OPEN_SIZE_Q,
+            0,
+        );
+        env.svm.warp_to_slot(1);
+        env.svm.expire_blockhash();
+        env.push_auth_mark_with_cu(1, 200);
+        for account in [attacker_account, lp_account] {
+            env.crank(
+                account,
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: 1,
+                    observations: crank_observations(0),
+                },
+            );
+        }
+        env.svm.expire_blockhash();
+        env.trade_cpi_with_cu_on_asset(
+            &attacker,
+            attacker_account,
+            &lp_owner,
+            lp_account,
+            matcher_program,
+            matcher_context,
+            matcher_delegate,
+            0,
+            -OPEN_SIZE_Q,
+            0,
+        );
+
+        let attacker_state = env.portfolio_state(attacker_account);
+        let lp_state = env.portfolio_state(lp_account);
+        assert_eq!(attacker_state.pnl.get(), STALE_GRANT_PROFIT as i128);
+        assert_eq!(lp_state.capital.get(), LP_DEPOSIT - STALE_GRANT_PROFIT);
+        env.convert_released_pnl_with_cu(&attacker, attacker_account, STALE_GRANT_PROFIT);
+        let attacker_capital = env.portfolio_state(attacker_account).capital.get();
+        let attacker_dest = env.withdraw(&attacker, attacker_account, attacker_capital);
+        let lp_dest = env.withdraw(&lp_owner, lp_account, lp_state.capital.get());
+        assert_eq!(
+            env.token_amount(attacker_dest) as u128,
+            ATTACKER_DEPOSIT + STALE_GRANT_PROFIT
+        );
+        assert_eq!(
+            env.token_amount(lp_dest) as u128,
+            LP_DEPOSIT - STALE_GRANT_PROFIT
+        );
+        panic!(
+            "delayed matcher enable overrode a newer revoke and transferred \
+             {STALE_GRANT_PROFIT} atoms from the independent LP"
+        );
+    }
+
+    assert_eq!(
+        env.portfolio_matcher_config(lp_account).enabled,
+        0,
+        "a rejected stale enable must leave the newer revoke in force"
+    );
+    env.svm.expire_blockhash();
+    let blocked_fill = env.try_trade_cpi_with_cu_on_asset(
+        &attacker,
+        attacker_account,
+        &lp_owner,
+        lp_account,
+        matcher_program,
+        matcher_context,
+        matcher_delegate,
+        0,
+        OPEN_SIZE_Q,
+        0,
+    );
+    assert!(
+        blocked_fill.is_err(),
+        "the revoked matcher must remain unable to fill the LP"
+    );
+}
+
+#[test]
 fn v16_attack_non_owner_cannot_change_lp_matcher_config() {
     let mut env = V16CuEnv::new();
     let matcher_program = Pubkey::new_unique();
@@ -20570,10 +20748,16 @@ fn v16_attack_non_owner_cannot_change_lp_matcher_config() {
     let market_before = env.svm.get_account(&env.market).unwrap();
     let lp_before = env.svm.get_account(&lp).unwrap();
     let ctx_before = env.svm.get_account(&ctx).unwrap();
+    let portfolio_id = env.portfolio_id(lp);
+    let expected_sequence = env.portfolio_matcher_config(lp).sequence();
 
     env.svm.expire_blockhash();
     let revoke = env.send(
-        ProgInstruction::SetMatcherConfig { enabled: 0 },
+        ProgInstruction::SetMatcherConfig {
+            portfolio_id,
+            expected_sequence,
+            enabled: 0,
+        },
         vec![
             AccountMeta::new(attacker.pubkey(), true),
             AccountMeta::new_readonly(env.market, false),
@@ -20635,10 +20819,16 @@ fn v16_attack_cross_lp_cannot_overwrite_lp_matcher_config() {
     let market_before = env.svm.get_account(&env.market).unwrap();
     let victim_before = env.svm.get_account(&victim_lp).unwrap();
     let attacker_before = env.svm.get_account(&attacker_lp).unwrap();
+    let portfolio_id = env.portfolio_id(victim_lp);
+    let expected_sequence = env.portfolio_matcher_config(victim_lp).sequence();
 
     env.svm.expire_blockhash();
     let overwrite = env.send(
-        ProgInstruction::SetMatcherConfig { enabled: 0 },
+        ProgInstruction::SetMatcherConfig {
+            portfolio_id,
+            expected_sequence,
+            enabled: 0,
+        },
         vec![
             AccountMeta::new(attacker_owner.pubkey(), true),
             AccountMeta::new_readonly(env.market, false),
@@ -20999,11 +21189,17 @@ fn v16_attack_set_lp_matcher_config_cannot_target_protocol_accounts() {
     );
     env.try_init_auth_matcher_context_with_delegate(matcher_program, &lp_owner, lp, ctx, delegate)
         .expect("init auth matcher context without setting percolator auth");
+    let portfolio_id = env.portfolio_id(lp);
+    let expected_sequence = env.portfolio_matcher_config(lp).sequence();
 
     let send_with_lp_account = |env: &mut V16CuEnv, lp_account: Pubkey| {
         env.svm.expire_blockhash();
         env.send(
-            ProgInstruction::SetMatcherConfig { enabled: 1 },
+            ProgInstruction::SetMatcherConfig {
+                portfolio_id,
+                expected_sequence,
+                enabled: 1,
+            },
             vec![
                 AccountMeta::new(lp_owner.pubkey(), true),
                 AccountMeta::new_readonly(env.market, false),
@@ -21075,9 +21271,15 @@ fn v16_attack_matcher_config_and_fills_reject_self_program_context() {
 
     let market_before_config = env.svm.get_account(&env.market).unwrap();
     let lp_before_config = env.svm.get_account(&lp).unwrap();
+    let portfolio_id = env.portfolio_id(lp);
+    let expected_sequence = env.portfolio_matcher_config(lp).sequence();
     env.svm.expire_blockhash();
     let self_config = env.send(
-        ProgInstruction::SetMatcherConfig { enabled: 1 },
+        ProgInstruction::SetMatcherConfig {
+            portfolio_id,
+            expected_sequence,
+            enabled: 1,
+        },
         vec![
             AccountMeta::new(lp_owner.pubkey(), true),
             AccountMeta::new_readonly(env.market, false),
@@ -21104,16 +21306,13 @@ fn v16_attack_matcher_config_and_fills_reject_self_program_context() {
     );
 
     let mut corrupt_lp = env.svm.get_account(&lp).unwrap();
-    state::write_portfolio_matcher_config(
-        &mut corrupt_lp.data,
-        &state::PortfolioMatcherConfigV16 {
-            matcher_program: env.program_id.to_bytes(),
-            matcher_context: env.market.to_bytes(),
-            matcher_delegate: self_delegate.to_bytes(),
-            enabled: 1,
-        },
-    )
-    .expect("inject stale self-matcher config for fill-time guard");
+    let mut corrupt_config = state::PortfolioMatcherConfigV16::default();
+    corrupt_config.matcher_program = env.program_id.to_bytes();
+    corrupt_config.matcher_context = env.market.to_bytes();
+    corrupt_config.matcher_delegate = self_delegate.to_bytes();
+    corrupt_config.enabled = 1;
+    state::write_portfolio_matcher_config(&mut corrupt_lp.data, &corrupt_config)
+        .expect("inject stale self-matcher config for fill-time guard");
     env.svm.set_account(lp, corrupt_lp).unwrap();
 
     let market_before_fill = env.svm.get_account(&env.market).unwrap();
@@ -21333,7 +21532,11 @@ fn v16_attack_set_matcher_config_bad_legacy_context_rolls_back_realloc() {
     let lp_before = env.svm.get_account(&lp).unwrap();
     env.svm.expire_blockhash();
     let rejected = env.send(
-        ProgInstruction::SetMatcherConfig { enabled: 1 },
+        ProgInstruction::SetMatcherConfig {
+            portfolio_id: 0,
+            expected_sequence: 0,
+            enabled: 1,
+        },
         vec![
             AccountMeta::new(lp_owner.pubkey(), true),
             AccountMeta::new_readonly(env.market, false),
@@ -30536,11 +30739,17 @@ fn v16_attack_trade_paths_reject_cross_market_portfolio_substitution() {
             },
         )
         .unwrap();
+    let cpi_lp_portfolio_id = env.portfolio_id(p_cpi_lp);
+    let cpi_lp_matcher_sequence = env.portfolio_matcher_config(p_cpi_lp).sequence();
     send_tx(
         &mut env.svm,
         env.program_id,
         &env.payer,
-        ProgInstruction::SetMatcherConfig { enabled: 1 },
+        ProgInstruction::SetMatcherConfig {
+            portfolio_id: cpi_lp_portfolio_id,
+            expected_sequence: cpi_lp_matcher_sequence,
+            enabled: 1,
+        },
         vec![
             AccountMeta::new(cpi_lp.pubkey(), true),
             AccountMeta::new_readonly(market_b, false),

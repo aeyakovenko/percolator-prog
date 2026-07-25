@@ -658,7 +658,29 @@ pub mod state {
         pub matcher_program: [u8; 32],
         pub matcher_context: [u8; 32],
         pub matcher_delegate: [u8; 32],
-        pub enabled: u64,
+        pub enabled: u8,
+        sequence_le: [u8; 7],
+    }
+
+    impl PortfolioMatcherConfigV16 {
+        pub const MAX_SEQUENCE: u64 = (1u64 << 56) - 1;
+
+        #[inline]
+        pub fn sequence(&self) -> u64 {
+            let mut bytes = [0u8; 8];
+            bytes[..7].copy_from_slice(&self.sequence_le);
+            u64::from_le_bytes(bytes)
+        }
+
+        #[inline]
+        pub fn set_sequence(&mut self, sequence: u64) -> Result<(), ProgramError> {
+            if sequence > Self::MAX_SEQUENCE {
+                return Err(PercolatorError::EngineCounterOverflow.into());
+            }
+            self.sequence_le
+                .copy_from_slice(&sequence.to_le_bytes()[..7]);
+            Ok(())
+        }
     }
 
     pub type AssetOracleStorageV16 = [u8; ASSET_ORACLE_WRAPPER_LEN];
@@ -792,12 +814,17 @@ pub mod state {
 
     #[inline]
     pub fn read_portfolio_id(data: &[u8]) -> Result<u64, ProgramError> {
-        check_header(data, KIND_PORTFOLIO)?;
-        let id = read_u64(data, PORTFOLIO_ID_OFF)?;
+        let id = read_portfolio_id_allow_legacy_zero(data)?;
         if id == 0 {
             return Err(ProgramError::InvalidAccountData);
         }
         Ok(id)
+    }
+
+    #[inline]
+    pub fn read_portfolio_id_allow_legacy_zero(data: &[u8]) -> Result<u64, ProgramError> {
+        check_header(data, KIND_PORTFOLIO)?;
+        read_u64(data, PORTFOLIO_ID_OFF)
     }
 
     #[inline]
@@ -2508,6 +2535,8 @@ pub mod ix {
             legs: Vec<BatchTradeCpiLeg>,
         },
         SetMatcherConfig {
+            portfolio_id: u64,
+            expected_sequence: u64,
             enabled: u8,
         },
         ClosePortfolio,
@@ -2775,6 +2804,8 @@ pub mod ix {
                     Self::BatchTradeCpi { legs }
                 }
                 68 => Self::SetMatcherConfig {
+                    portfolio_id: read_u64(&mut rest)?,
+                    expected_sequence: read_u64(&mut rest)?,
                     enabled: read_u8(&mut rest)?,
                 },
                 8 => Self::ClosePortfolio,
@@ -3063,8 +3094,14 @@ pub mod ix {
                         push_u64(&mut out, leg.limit_price);
                     }
                 }
-                Self::SetMatcherConfig { enabled } => {
+                Self::SetMatcherConfig {
+                    portfolio_id,
+                    expected_sequence,
+                    enabled,
+                } => {
                     out.push(68);
+                    push_u64(&mut out, portfolio_id);
+                    push_u64(&mut out, expected_sequence);
                     out.push(enabled);
                 }
                 Self::ClosePortfolio => out.push(8),
@@ -5255,9 +5292,17 @@ pub mod processor {
             Instruction::BatchTradeCpi { legs } => {
                 handle_batch_trade_cpi(program_id, accounts, &legs)
             }
-            Instruction::SetMatcherConfig { enabled } => {
-                handle_set_matcher_config(program_id, accounts, enabled)
-            }
+            Instruction::SetMatcherConfig {
+                portfolio_id,
+                expected_sequence,
+                enabled,
+            } => handle_set_matcher_config(
+                program_id,
+                accounts,
+                portfolio_id,
+                expected_sequence,
+                enabled,
+            ),
             Instruction::ClosePortfolio => handle_close_portfolio(program_id, accounts),
             Instruction::TopUpInsurance { amount } => {
                 handle_top_up_insurance(program_id, accounts, amount)
@@ -6710,6 +6755,8 @@ pub mod processor {
     fn handle_set_matcher_config<'a>(
         program_id: &Pubkey,
         accounts: &'a [AccountInfo<'a>],
+        portfolio_id: u64,
+        expected_sequence: u64,
         enabled: u8,
     ) -> ProgramResult {
         if enabled > 1 {
@@ -6734,7 +6781,17 @@ pub mod processor {
         if lp_portfolio_ai.data_len() < required_len {
             lp_portfolio_ai.realloc(required_len, true)?;
         }
-        let cfg = if enabled == 0 {
+        let current = state::read_portfolio_matcher_config(&lp_portfolio_ai.try_borrow_data()?)?;
+        let current_portfolio_id =
+            state::read_portfolio_id_allow_legacy_zero(&lp_portfolio_ai.try_borrow_data()?)?;
+        if portfolio_id != current_portfolio_id || expected_sequence != current.sequence() {
+            return Err(PercolatorError::InvalidInstruction.into());
+        }
+        let next_sequence = expected_sequence
+            .checked_add(1)
+            .filter(|sequence| *sequence <= state::PortfolioMatcherConfigV16::MAX_SEQUENCE)
+            .ok_or(PercolatorError::EngineCounterOverflow)?;
+        let mut cfg = if enabled == 0 {
             state::PortfolioMatcherConfigV16::default()
         } else {
             let matcher_prog = account(accounts, 3)?;
@@ -6757,13 +6814,14 @@ pub mod processor {
                 matcher_ctx.key,
             );
             expect_key(matcher_delegate, &delegate)?;
-            state::PortfolioMatcherConfigV16 {
-                matcher_program: matcher_prog.key.to_bytes(),
-                matcher_context: matcher_ctx.key.to_bytes(),
-                matcher_delegate: matcher_delegate.key.to_bytes(),
-                enabled: 1,
-            }
+            let mut config = state::PortfolioMatcherConfigV16::default();
+            config.matcher_program = matcher_prog.key.to_bytes();
+            config.matcher_context = matcher_ctx.key.to_bytes();
+            config.matcher_delegate = matcher_delegate.key.to_bytes();
+            config.enabled = 1;
+            config
         };
+        cfg.set_sequence(next_sequence)?;
         state::write_portfolio_matcher_config(&mut lp_portfolio_ai.try_borrow_mut_data()?, &cfg)
     }
 
@@ -12201,6 +12259,28 @@ pub mod processor {
             assert_eq!(state::allocate_portfolio_id(41).unwrap(), (41, 42));
             assert_eq!(
                 state::allocate_portfolio_id(u64::MAX),
+                Err(PercolatorError::EngineCounterOverflow.into())
+            );
+        }
+
+        #[test]
+        fn matcher_config_sequence_preserves_tail_layout_and_bounds() {
+            assert_eq!(
+                core::mem::size_of::<state::PortfolioMatcherConfigV16>(),
+                constants::PORTFOLIO_MATCHER_CONFIG_LEN
+            );
+            let mut config = state::PortfolioMatcherConfigV16::default();
+            assert_eq!(config.enabled, 0);
+            assert_eq!(config.sequence(), 0);
+            config
+                .set_sequence(state::PortfolioMatcherConfigV16::MAX_SEQUENCE)
+                .unwrap();
+            assert_eq!(
+                config.sequence(),
+                state::PortfolioMatcherConfigV16::MAX_SEQUENCE
+            );
+            assert_eq!(
+                config.set_sequence(state::PortfolioMatcherConfigV16::MAX_SEQUENCE + 1),
                 Err(PercolatorError::EngineCounterOverflow.into())
             );
         }
