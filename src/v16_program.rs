@@ -568,7 +568,8 @@ pub mod state {
         pub backing_trade_fee_bps_short: u16,
         pub backing_trade_fee_insurance_share_bps_long: u16,
         pub backing_trade_fee_insurance_share_bps_short: u16,
-        pub _padding0: [u8; 6],
+        /// Monotonic watermark shared by signed control-plane intents for this asset.
+        pub(crate) asset_intent_sequence_le: [u8; 6],
         pub insurance_authority: [u8; 32],
         pub insurance_operator: [u8; 32],
         pub backing_bucket_authority: [u8; 32],
@@ -589,6 +590,27 @@ pub mod state {
         // (insurance/operator/backing/oracle) and itself, and can be burned (set to 0). Isolated:
         // it can never act on another asset. Set to the activator at creation.
         pub asset_admin: [u8; 32],
+    }
+
+    impl AssetOracleProfileV16 {
+        pub const MAX_ASSET_INTENT_SEQUENCE: u64 = (1u64 << 48) - 1;
+
+        #[inline]
+        pub fn asset_intent_sequence(&self) -> u64 {
+            let mut bytes = [0u8; 8];
+            bytes[..6].copy_from_slice(&self.asset_intent_sequence_le);
+            u64::from_le_bytes(bytes)
+        }
+
+        #[inline]
+        pub fn set_asset_intent_sequence(&mut self, sequence: u64) -> Result<(), ProgramError> {
+            if sequence > Self::MAX_ASSET_INTENT_SEQUENCE {
+                return Err(PercolatorError::EngineCounterOverflow.into());
+            }
+            self.asset_intent_sequence_le
+                .copy_from_slice(&sequence.to_le_bytes()[..6]);
+            Ok(())
+        }
     }
 
     /// Aggregate backing-domain accounting for an authority-controlled vault.
@@ -1123,7 +1145,6 @@ pub mod state {
                 profile.backing_trade_fee_insurance_share_bps_short,
             )
             || profile.invert > 1
-            || profile._padding0 != [0u8; 6]
             || profile.oracle_leg_count as usize > ORACLE_LEG_CAP
             || (profile.oracle_leg_flags & !ORACLE_LEG_FLAGS_MASK) != 0
         {
@@ -1214,7 +1235,7 @@ pub mod state {
             backing_trade_fee_bps_short: 0,
             backing_trade_fee_insurance_share_bps_long: 0,
             backing_trade_fee_insurance_share_bps_short: 0,
-            _padding0: [0u8; 6],
+            asset_intent_sequence_le: [0u8; 6],
             insurance_authority: [0u8; 32],
             insurance_operator: [0u8; 32],
             backing_bucket_authority: [0u8; 32],
@@ -1249,7 +1270,7 @@ pub mod state {
                 .backing_trade_fee_insurance_share_bps_long,
             backing_trade_fee_insurance_share_bps_short: config
                 .backing_trade_fee_insurance_share_bps_short,
-            _padding0: [0u8; 6],
+            asset_intent_sequence_le: [0u8; 6],
             // At InitMarket the market key bootstraps asset 0 exactly like an activator bootstraps a
             // permissionless asset 1..N: it is asset 0's cold-storage admin and all its sub-authorities.
             insurance_authority: config.marketauth,
@@ -2558,6 +2579,7 @@ pub mod ix {
             domain: u16,
             fee_bps: u16,
             insurance_share_bps: u16,
+            policy_sequence: u64,
         },
         UpdateTradeFeePolicy {
             trade_fee_base_bps: u64,
@@ -2820,6 +2842,7 @@ pub mod ix {
                     domain: read_u16(&mut rest)?,
                     fee_bps: read_u16(&mut rest)?,
                     insurance_share_bps: read_u16(&mut rest)?,
+                    policy_sequence: read_u64(&mut rest)?,
                 },
                 55 => Self::UpdateTradeFeePolicy {
                     trade_fee_base_bps: read_u64(&mut rest)?,
@@ -3128,11 +3151,13 @@ pub mod ix {
                     domain,
                     fee_bps,
                     insurance_share_bps,
+                    policy_sequence,
                 } => {
                     out.push(51);
                     push_u16(&mut out, domain);
                     push_u16(&mut out, fee_bps);
                     push_u16(&mut out, insurance_share_bps);
+                    push_u64(&mut out, policy_sequence);
                 }
                 Self::UpdateTradeFeePolicy { trade_fee_base_bps } => {
                     out.push(55);
@@ -4646,11 +4671,22 @@ pub mod processor {
             existing.backing_trade_fee_insurance_share_bps_long;
         profile.backing_trade_fee_insurance_share_bps_short =
             existing.backing_trade_fee_insurance_share_bps_short;
+        profile.asset_intent_sequence_le = existing.asset_intent_sequence_le;
         profile.insurance_authority = existing.insurance_authority;
         profile.insurance_operator = existing.insurance_operator;
         profile.backing_bucket_authority = existing.backing_bucket_authority;
         profile.oracle_authority = existing.oracle_authority;
         profile
+    }
+
+    fn advance_asset_intent_sequence(
+        profile: &mut state::AssetOracleProfileV16,
+        intent_sequence: u64,
+    ) -> ProgramResult {
+        if intent_sequence <= profile.asset_intent_sequence() {
+            return Err(PercolatorError::EngineStale.into());
+        }
+        profile.set_asset_intent_sequence(intent_sequence)
     }
 
     fn backing_fee_policy_count_from_profile(profile: &state::AssetOracleProfileV16) -> u16 {
@@ -5299,12 +5335,14 @@ pub mod processor {
                 domain,
                 fee_bps,
                 insurance_share_bps,
+                policy_sequence,
             } => handle_update_backing_fee_policy(
                 program_id,
                 accounts,
                 domain,
                 fee_bps,
                 insurance_share_bps,
+                policy_sequence,
             ),
             Instruction::UpdateTradeFeePolicy { trade_fee_base_bps } => {
                 handle_update_trade_fee_policy(program_id, accounts, trade_fee_base_bps)
@@ -9549,6 +9587,7 @@ pub mod processor {
         domain: u16,
         fee_bps: u16,
         insurance_share_bps: u16,
+        policy_sequence: u64,
     ) -> ProgramResult {
         let authority = account(accounts, 0)?;
         let market_ai = account(accounts, 1)?;
@@ -9624,6 +9663,7 @@ pub mod processor {
                 profile.backing_trade_fee_bps_short = fee_bps;
                 profile.backing_trade_fee_insurance_share_bps_short = insurance_share_bps;
             }
+            advance_asset_intent_sequence(&mut profile, policy_sequence)?;
             state::write_wrapper_config(&mut market_data, &cfg)?;
             state::write_asset_oracle_profile(&mut market_data, asset_index, &profile)
         } else {
@@ -9641,6 +9681,7 @@ pub mod processor {
                 profile.backing_trade_fee_bps_short = fee_bps;
                 profile.backing_trade_fee_insurance_share_bps_short = insurance_share_bps;
             }
+            advance_asset_intent_sequence(&mut profile, policy_sequence)?;
             state::write_wrapper_config(&mut market_data, &cfg)?;
             state::write_asset_oracle_profile(&mut market_data, asset_index, &profile)
         }
@@ -9855,7 +9896,7 @@ pub mod processor {
                     .backing_trade_fee_insurance_share_bps_long,
                 backing_trade_fee_insurance_share_bps_short: existing_profile
                     .backing_trade_fee_insurance_share_bps_short,
-                _padding0: [0u8; 6],
+                asset_intent_sequence_le: existing_profile.asset_intent_sequence_le,
                 insurance_authority: existing_profile.insurance_authority,
                 insurance_operator: existing_profile.insurance_operator,
                 asset_admin: existing_profile.asset_admin,
@@ -9981,7 +10022,7 @@ pub mod processor {
                     .backing_trade_fee_insurance_share_bps_long,
                 backing_trade_fee_insurance_share_bps_short: existing_profile
                     .backing_trade_fee_insurance_share_bps_short,
-                _padding0: [0u8; 6],
+                asset_intent_sequence_le: existing_profile.asset_intent_sequence_le,
                 insurance_authority: existing_profile.insurance_authority,
                 insurance_operator: existing_profile.insurance_operator,
                 asset_admin: existing_profile.asset_admin,
@@ -10089,7 +10130,7 @@ pub mod processor {
                     .backing_trade_fee_insurance_share_bps_long,
                 backing_trade_fee_insurance_share_bps_short: existing_profile
                     .backing_trade_fee_insurance_share_bps_short,
-                _padding0: [0u8; 6],
+                asset_intent_sequence_le: existing_profile.asset_intent_sequence_le,
                 insurance_authority: existing_profile.insurance_authority,
                 insurance_operator: existing_profile.insurance_operator,
                 asset_admin: existing_profile.asset_admin,
