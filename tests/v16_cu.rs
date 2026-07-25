@@ -1240,6 +1240,11 @@ impl V16CuEnv {
         state::read_market(&account.data).unwrap()
     }
 
+    fn insurance_topup_sequence(&self, asset_index: usize) -> u64 {
+        let account = self.svm.get_account(&self.market).expect("market account");
+        state::read_asset_insurance_topup_sequence(&account.data, asset_index).unwrap()
+    }
+
     fn portfolio_state(&self, portfolio: Pubkey) -> PortfolioAccountV16 {
         let account = self.svm.get_account(&portfolio).expect("portfolio account");
         state::read_portfolio(&account.data).unwrap()
@@ -2774,11 +2779,15 @@ impl V16CuEnv {
     }
 
     fn top_up_insurance_from_admin_token_with_cu(&mut self, source: Pubkey, amount: u128) -> u64 {
+        let expected_sequence = self.insurance_topup_sequence(0);
         send_tx(
             &mut self.svm,
             self.program_id,
             &self.payer,
-            ProgInstruction::TopUpInsurance { amount },
+            ProgInstruction::TopUpInsurance {
+                expected_sequence,
+                amount,
+            },
             vec![
                 AccountMeta::new(self.admin.pubkey(), true),
                 AccountMeta::new(self.market, false),
@@ -2833,11 +2842,15 @@ impl V16CuEnv {
                 },
             )
             .unwrap();
+        let expected_sequence = self.insurance_topup_sequence(0);
         let cu = send_tx(
             &mut self.svm,
             self.program_id,
             &self.payer,
-            ProgInstruction::TopUpInsurance { amount },
+            ProgInstruction::TopUpInsurance {
+                expected_sequence,
+                amount,
+            },
             vec![
                 AccountMeta::new(self.admin.pubkey(), true),
                 AccountMeta::new(self.market, false),
@@ -2869,11 +2882,15 @@ impl V16CuEnv {
                 },
             )
             .unwrap();
+        let expected_sequence = self.insurance_topup_sequence(0);
         let cu = send_tx(
             &mut self.svm,
             self.program_id,
             &self.payer,
-            ProgInstruction::TopUpInsurance { amount },
+            ProgInstruction::TopUpInsurance {
+                expected_sequence,
+                amount,
+            },
             vec![
                 AccountMeta::new(self.admin.pubkey(), true),
                 AccountMeta::new(self.market, false),
@@ -2908,11 +2925,16 @@ impl V16CuEnv {
                 },
             )
             .unwrap();
+        let expected_sequence = self.insurance_topup_sequence(domain as usize / 2);
         let cu = send_tx(
             &mut self.svm,
             self.program_id,
             &self.payer,
-            ProgInstruction::TopUpInsuranceDomain { domain, amount },
+            ProgInstruction::TopUpInsuranceDomain {
+                domain,
+                expected_sequence,
+                amount,
+            },
             vec![
                 AccountMeta::new(authority.pubkey(), true),
                 AccountMeta::new(self.market, false),
@@ -2947,11 +2969,16 @@ impl V16CuEnv {
                 },
             )
             .unwrap();
+        let expected_sequence = self.insurance_topup_sequence(domain as usize / 2);
         let cu = send_tx(
             &mut self.svm,
             self.program_id,
             &self.payer,
-            ProgInstruction::TopUpInsuranceDomain { domain, amount },
+            ProgInstruction::TopUpInsuranceDomain {
+                domain,
+                expected_sequence,
+                amount,
+            },
             vec![
                 AccountMeta::new(authority.pubkey(), true),
                 AccountMeta::new(self.market, false),
@@ -3986,7 +4013,10 @@ fn v16_bpf_mainnet_realistic_system_spl_ata_bootstrap_deposits_and_ledgers() {
         &mut svm,
         program_id,
         &payer,
-        ProgInstruction::TopUpInsurance { amount: 33 },
+        ProgInstruction::TopUpInsurance {
+            expected_sequence: 0,
+            amount: 33,
+        },
         vec![
             AccountMeta::new(admin.pubkey(), true),
             AccountMeta::new(market.pubkey(), false),
@@ -4478,7 +4508,10 @@ fn v16_bpf_failed_insurance_topup_transfer_rolls_back_budget_and_ledger() {
         &mut env.svm,
         env.program_id,
         &env.payer,
-        ProgInstruction::TopUpInsurance { amount: 100 },
+        ProgInstruction::TopUpInsurance {
+            expected_sequence: 0,
+            amount: 100,
+        },
         vec![
             AccountMeta::new(env.admin.pubkey(), true),
             AccountMeta::new(env.market, false),
@@ -4531,6 +4564,7 @@ fn v16_bpf_failed_domain_insurance_topup_transfer_rolls_back_budget_and_ledger()
         &env.payer,
         ProgInstruction::TopUpInsuranceDomain {
             domain: 1,
+            expected_sequence: 0,
             amount: 100,
         },
         vec![
@@ -5848,6 +5882,7 @@ fn v16_attack_retired_asset_domain_authority_cannot_refund_slot_and_block_reuse(
     let insurance_topup = env.send(
         ProgInstruction::TopUpInsuranceDomain {
             domain: 2,
+            expected_sequence: 0,
             amount: 77,
         },
         vec![
@@ -23317,6 +23352,7 @@ fn v16_attack_insurance_ledger_market_binding_enforced() {
         &env.payer,
         ProgInstruction::TopUpInsuranceDomain {
             domain: 0,
+            expected_sequence: 0,
             amount: 100,
         },
         vec![
@@ -23581,7 +23617,10 @@ fn v16_attack_topup_optional_ledgers_reject_cross_market_reuse() {
         &mut env.svm,
         env.program_id,
         &env.payer,
-        ProgInstruction::TopUpInsurance { amount: 25 },
+        ProgInstruction::TopUpInsurance {
+            expected_sequence: 0,
+            amount: 25,
+        },
         vec![
             AccountMeta::new(admin.pubkey(), true),
             AccountMeta::new(market_b, false),
@@ -23612,6 +23651,7 @@ fn v16_attack_topup_optional_ledgers_reject_cross_market_reuse() {
         &env.payer,
         ProgInstruction::TopUpInsuranceDomain {
             domain: 0,
+            expected_sequence: 0,
             amount: 30,
         },
         vec![
@@ -23675,7 +23715,10 @@ fn v16_attack_topup_optional_ledgers_reject_cross_market_reuse() {
         &mut env.svm,
         env.program_id,
         &env.payer,
-        ProgInstruction::TopUpInsurance { amount: 25 },
+        ProgInstruction::TopUpInsurance {
+            expected_sequence: 0,
+            amount: 25,
+        },
         vec![
             AccountMeta::new(admin.pubkey(), true),
             AccountMeta::new(market_b, false),
@@ -23708,6 +23751,7 @@ fn v16_attack_topup_optional_ledgers_reject_cross_market_reuse() {
         &env.payer,
         ProgInstruction::TopUpInsuranceDomain {
             domain: 0,
+            expected_sequence: 1,
             amount: 30,
         },
         vec![
@@ -23868,7 +23912,10 @@ fn v16_attack_terminal_insurance_ledger_rejects_cross_market_reuse() {
         &mut env.svm,
         env.program_id,
         &env.payer,
-        ProgInstruction::TopUpInsurance { amount: 100 },
+        ProgInstruction::TopUpInsurance {
+            expected_sequence: 0,
+            amount: 100,
+        },
         vec![
             AccountMeta::new(admin.pubkey(), true),
             AccountMeta::new(market_b, false),
@@ -24004,7 +24051,10 @@ fn v16_attack_terminal_withdraw_insurance_rejects_portfolio_as_ledger() {
         &mut env.svm,
         env.program_id,
         &env.payer,
-        ProgInstruction::TopUpInsurance { amount: 100 },
+        ProgInstruction::TopUpInsurance {
+            expected_sequence: 0,
+            amount: 100,
+        },
         vec![
             AccountMeta::new(admin.pubkey(), true),
             AccountMeta::new(market_b, false),
@@ -24373,7 +24423,10 @@ fn v16_attack_value_paths_cannot_use_portfolio_as_optional_ledger() {
     let top_up_insurance_source = env.token_account(admin.pubkey(), 25);
     env.svm.expire_blockhash();
     let top_up_insurance = env.send(
-        ProgInstruction::TopUpInsurance { amount: 25 },
+        ProgInstruction::TopUpInsurance {
+            expected_sequence: 0,
+            amount: 25,
+        },
         vec![
             AccountMeta::new(admin.pubkey(), true),
             AccountMeta::new(env.market, false),
@@ -24400,6 +24453,7 @@ fn v16_attack_value_paths_cannot_use_portfolio_as_optional_ledger() {
     let top_up_domain = env.send(
         ProgInstruction::TopUpInsuranceDomain {
             domain: 0,
+            expected_sequence: 0,
             amount: 20,
         },
         vec![
@@ -24590,7 +24644,10 @@ fn v16_attack_value_paths_cannot_use_market_as_optional_ledger() {
     let top_up_insurance_source = env.token_account(admin.pubkey(), 25);
     env.svm.expire_blockhash();
     let top_up_insurance = env.send(
-        ProgInstruction::TopUpInsurance { amount: 25 },
+        ProgInstruction::TopUpInsurance {
+            expected_sequence: 0,
+            amount: 25,
+        },
         vec![
             AccountMeta::new(admin.pubkey(), true),
             AccountMeta::new(env.market, false),
@@ -24613,6 +24670,7 @@ fn v16_attack_value_paths_cannot_use_market_as_optional_ledger() {
     let top_up_domain = env.send(
         ProgInstruction::TopUpInsuranceDomain {
             domain: 0,
+            expected_sequence: 0,
             amount: 20,
         },
         vec![
@@ -24858,13 +24916,17 @@ fn v16_attack_topups_cannot_use_vault_as_source() {
 
     reject_alias(
         &mut env,
-        ProgInstruction::TopUpInsurance { amount: 500 },
+        ProgInstruction::TopUpInsurance {
+            expected_sequence: 0,
+            amount: 500,
+        },
         "TopUpInsurance",
     );
     reject_alias(
         &mut env,
         ProgInstruction::TopUpInsuranceDomain {
             domain: 0,
+            expected_sequence: 0,
             amount: 500,
         },
         "TopUpInsuranceDomain",
@@ -25184,7 +25246,10 @@ fn v16_attack_insurance_topup_pinned_to_canonical_vault() {
         &mut env.svm,
         env.program_id,
         &env.payer,
-        ProgInstruction::TopUpInsurance { amount: 500 },
+        ProgInstruction::TopUpInsurance {
+            expected_sequence: 0,
+            amount: 500,
+        },
         vec![
             AccountMeta::new(env.admin.pubkey(), true),
             AccountMeta::new(env.market, false),
@@ -25250,6 +25315,7 @@ fn v16_attack_domain_topups_pinned_to_canonical_vault() {
         &env.payer,
         ProgInstruction::TopUpInsuranceDomain {
             domain: 0,
+            expected_sequence: 0,
             amount: 500,
         },
         vec![
@@ -25359,6 +25425,7 @@ fn v16_attack_domain_indexed_calls_reject_out_of_range_atomically() {
         &env.payer,
         ProgInstruction::TopUpInsuranceDomain {
             domain: BAD_DOMAIN,
+            expected_sequence: 0,
             amount: 123,
         },
         vec![
@@ -28922,6 +28989,7 @@ fn v16_attack_topup_insurance_domain_authority_gated() {
         &env.payer,
         ProgInstruction::TopUpInsuranceDomain {
             domain: 0,
+            expected_sequence: 0,
             amount: 500,
         },
         vec![
@@ -33548,7 +33616,10 @@ fn v16_attack_topups_cannot_bypass_cumulative_tvl_cap() {
 
         env.svm.expire_blockhash();
         let result = env.send(
-            ProgInstruction::TopUpInsurance { amount: 2 },
+            ProgInstruction::TopUpInsurance {
+                expected_sequence: 0,
+                amount: 2,
+            },
             vec![
                 AccountMeta::new(admin.pubkey(), true),
                 AccountMeta::new(env.market, false),
@@ -33596,6 +33667,7 @@ fn v16_attack_topups_cannot_bypass_cumulative_tvl_cap() {
         let result = env.send(
             ProgInstruction::TopUpInsuranceDomain {
                 domain: 0,
+                expected_sequence: 0,
                 amount: 2,
             },
             vec![
@@ -33622,6 +33694,7 @@ fn v16_attack_topups_cannot_bypass_cumulative_tvl_cap() {
         env.send(
             ProgInstruction::TopUpInsuranceDomain {
                 domain: 0,
+                expected_sequence: 0,
                 amount: 1,
             },
             vec![
@@ -55217,7 +55290,10 @@ fn v16_attack_live_value_paths_reject_when_resolve_matured() {
 
     env.svm.expire_blockhash();
     let stale_global_insurance = env.send(
-        ProgInstruction::TopUpInsurance { amount: 20 },
+        ProgInstruction::TopUpInsurance {
+            expected_sequence: 0,
+            amount: 20,
+        },
         vec![
             AccountMeta::new(admin.pubkey(), true),
             AccountMeta::new(env.market, false),
@@ -55236,6 +55312,7 @@ fn v16_attack_live_value_paths_reject_when_resolve_matured() {
     let stale_insurance = env.send(
         ProgInstruction::TopUpInsuranceDomain {
             domain: 0,
+            expected_sequence: 0,
             amount: 25,
         },
         vec![
@@ -57950,7 +58027,10 @@ fn v16_attack_value_topups_reject_delegated_canonical_vault() {
         &mut env.svm,
         env.program_id,
         &env.payer,
-        ProgInstruction::TopUpInsurance { amount: 11 },
+        ProgInstruction::TopUpInsurance {
+            expected_sequence: 0,
+            amount: 11,
+        },
         vec![
             AccountMeta::new(admin.pubkey(), true),
             AccountMeta::new(env.market, false),
@@ -57980,6 +58060,7 @@ fn v16_attack_value_topups_reject_delegated_canonical_vault() {
         &env.payer,
         ProgInstruction::TopUpInsuranceDomain {
             domain: 0,
+            expected_sequence: 0,
             amount: 12,
         },
         vec![
@@ -59755,6 +59836,7 @@ fn v16_attack_signed_insurance_topup_cannot_replay_after_source_replenishment() 
         ],
         data: ProgInstruction::TopUpInsuranceDomain {
             domain: DOMAIN,
+            expected_sequence: 0,
             amount: AMOUNT,
         }
         .encode(),
@@ -59826,6 +59908,15 @@ fn v16_attack_signed_insurance_topup_cannot_replay_after_source_replenishment() 
         );
         panic!("a retained insurance top-up replayed after source replenishment");
     }
+    let replay_error = format!("{:?}", replay.unwrap_err());
+    let expected_error = format!(
+        "Custom({})",
+        percolator_prog::error::PercolatorError::EngineStale as u32
+    );
+    assert!(
+        replay_error.contains(&expected_error),
+        "stale top-up must fail with {expected_error}, got {replay_error}"
+    );
 
     assert_eq!(
         env.svm.get_account(&env.market).unwrap(),
@@ -59838,4 +59929,28 @@ fn v16_attack_signed_insurance_topup_cannot_replay_after_source_replenishment() 
         "a rejected retained top-up leaves vault custody byte-identical"
     );
     assert_eq!(env.token_amount(source), AMOUNT as u64);
+    assert_eq!(env.insurance_topup_sequence(ASSET as usize), 1);
+
+    env.send(
+        ProgInstruction::TopUpInsuranceDomain {
+            domain: DOMAIN,
+            expected_sequence: 1,
+            amount: AMOUNT,
+        },
+        vec![
+            AccountMeta::new(provider.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&provider],
+    )
+    .expect("a freshly sequenced top-up remains live");
+    assert_eq!(env.token_amount(source), 0);
+    assert_eq!(env.insurance_topup_sequence(ASSET as usize), 2);
+    assert_eq!(
+        env.market_state().1.insurance_domain_budget[DOMAIN as usize],
+        AMOUNT * 2
+    );
 }

@@ -427,6 +427,10 @@ This section describes intent and operational ordering, not argument-by-argument
   - validates side encoding and engine readiness; it is not an admin override
 - **TopUpInsurance** (tag 9)
   - transfers collateral into vault; credits insurance fund in engine
+  - carries asset 0's current `expected_sequence`; every successful top-up advances the sequence,
+    so only one concurrently signed retry can debit a replenished source account
+- **TopUpInsuranceDomain** (tag 56)
+  - funds one asset-side insurance domain and shares that asset's top-up sequence across both sides
 
 ### Trading
 - **TradeNoCpi**
