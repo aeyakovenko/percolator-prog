@@ -59856,24 +59856,74 @@ fn v16_attack_delayed_backing_split_cannot_divert_provider_fee_to_operator() {
         env.program_id,
     );
     let backing_source = env.token_account(provider.pubkey(), 5_000);
-    env.svm.expire_blockhash();
-    env.send(
-        ProgInstruction::TopUpBackingBucket {
-            domain: WINNING_DOMAIN,
-            amount: 5_000,
-            expiry_slot: 100,
-        },
-        vec![
-            AccountMeta::new(provider.pubkey(), true),
-            AccountMeta::new(env.market, false),
-            AccountMeta::new(backing_source, false),
-            AccountMeta::new(env.vault, false),
-            AccountMeta::new_readonly(spl_token::ID, false),
-            AccountMeta::new(ledger.pubkey(), false),
+    let retained_top_up = Transaction::new_signed_with_payer(
+        &[
+            heap_ix(),
+            cu_ix(),
+            Instruction {
+                program_id: env.program_id,
+                accounts: vec![
+                    AccountMeta::new(provider.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(backing_source, false),
+                    AccountMeta::new(env.vault, false),
+                    AccountMeta::new_readonly(spl_token::ID, false),
+                    AccountMeta::new(ledger.pubkey(), false),
+                ],
+                data: ProgInstruction::TopUpBackingBucket {
+                    domain: WINNING_DOMAIN,
+                    amount: 5_000,
+                    expiry_slot: 100,
+                }
+                .encode(),
+            },
         ],
-        &[&provider],
-    )
-    .expect("independent provider funds backing under the corrected split");
+        Some(&env.payer.pubkey()),
+        &[&env.payer, &provider],
+        policy_blockhash,
+    );
+
+    // The stale split wins the ordering race while the bucket is still empty, then the provider's
+    // retained top-up lands. Freezing terms only after funding cannot protect this ordering.
+    let delayed_accepted = env.svm.send_transaction(delayed_insurance_split).is_ok();
+    let retained_top_up_accepted = env.svm.send_transaction(retained_top_up).is_ok();
+    if !retained_top_up_accepted {
+        env.svm.expire_blockhash();
+        send_tx(
+            &mut env.svm,
+            env.program_id,
+            &env.payer,
+            ProgInstruction::UpdateBackingFeePolicy {
+                domain: WINNING_DOMAIN,
+                fee_bps: BACKING_FEE_BPS,
+                insurance_share_bps: 0,
+            },
+            vec![
+                AccountMeta::new(policy_oracle_authority.pubkey(), true),
+                AccountMeta::new(env.market, false),
+            ],
+            &[&policy_oracle_authority],
+        )
+        .expect("restore provider-fee policy after rejecting the stale top-up");
+        env.svm.expire_blockhash();
+        env.send(
+            ProgInstruction::TopUpBackingBucket {
+                domain: WINNING_DOMAIN,
+                amount: 5_000,
+                expiry_slot: 100,
+            },
+            vec![
+                AccountMeta::new(provider.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(backing_source, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+                AccountMeta::new(ledger.pubkey(), false),
+            ],
+            &[&provider],
+        )
+        .expect("provider retries after the accepted policy is restored");
+    }
 
     let attacker_account = env.create_portfolio(&attacker_operator);
     let market_trader_account = env.create_portfolio(&market_trader);
@@ -59976,7 +60026,6 @@ fn v16_attack_delayed_backing_split_cannot_divert_provider_fee_to_operator() {
     let insurance_before = before.insurance_domain_budget[WINNING_DOMAIN as usize];
     let lp_before = env.portfolio_state(lp_account).capital.get();
 
-    let delayed_accepted = env.svm.send_transaction(delayed_insurance_split).is_ok();
     env.svm
         .send_transaction(presigned_trade)
         .expect("the fee-bearing trade remains executable");
@@ -60024,12 +60073,12 @@ fn v16_attack_delayed_backing_split_cannot_divert_provider_fee_to_operator() {
         env.token_amount(destination) as u128
     };
 
-    if delayed_accepted {
+    if delayed_accepted && retained_top_up_accepted {
         assert_eq!((provider_fee, insurance_fee), (0, EXPECTED_FEE));
         assert_eq!(attacker_extracted, EXPECTED_FEE);
         assert_eq!(provider_withdrawn, 0);
         panic!(
-            "delayed insurance split diverted and publicly extracted \
+            "stale split front-ran the retained provider top-up and publicly extracted \
              {attacker_extracted} atoms owed to the independent backing provider"
         );
     }
