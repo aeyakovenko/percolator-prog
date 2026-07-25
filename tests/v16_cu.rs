@@ -57610,6 +57610,95 @@ fn v16_attack_sync_maintenance_full_cranker_share_conserves_no_insurance_underfl
     assert_domain_budget_remaining_total_consistent(&group, "100% maintenance cranker share");
 }
 
+#[test]
+fn v16_attack_delayed_maintenance_policy_cannot_redirect_fee_to_cranker() {
+    let mut env = V16CuEnv::new_with_market_params_price_move_and_maintenance_fee(
+        1, 10_000, 10_000, 10_000, 58,
+    );
+
+    // The honest market authority signs an older 100% cranker-share policy and
+    // then a correcting 0% policy under one still-live blockhash. A relayer may
+    // submit the signed bytes, but must not be able to restore the superseded
+    // split after an independent user enters under the visible correction.
+    let blockhash = env.svm.latest_blockhash();
+    let make_policy_tx = |cranker_share_bps| {
+        let instruction = Instruction {
+            program_id: env.program_id,
+            accounts: vec![
+                AccountMeta::new(env.admin.pubkey(), true),
+                AccountMeta::new(env.market, false),
+            ],
+            data: ProgInstruction::UpdateMaintenanceFeePolicy { cranker_share_bps }.encode(),
+        };
+        Transaction::new_signed_with_payer(
+            &[heap_ix(), cu_ix(), instruction],
+            Some(&env.payer.pubkey()),
+            &[&env.payer, &env.admin],
+            blockhash,
+        )
+    };
+    let delayed_high_share = make_policy_tx(10_000);
+    let correcting_zero_share = make_policy_tx(0);
+    env.svm
+        .send_transaction(correcting_zero_share)
+        .expect("newer zero-share policy lands first");
+    assert_eq!(env.market_state().0.maintenance_cranker_fee_share_bps, 0);
+
+    let payer_owner = Keypair::new();
+    let payer_portfolio = env.create_portfolio(&payer_owner);
+    let cranker_owner = Keypair::new();
+    let cranker_portfolio = env.create_portfolio(&cranker_owner);
+    env.deposit(&payer_owner, payer_portfolio, 100_000_000);
+
+    let delayed_accepted = env.svm.send_transaction(delayed_high_share).is_ok();
+    let insurance_before = env.market_state().1.insurance;
+    let payer_before = env.portfolio_state(payer_portfolio).capital.get();
+    let cranker_before = env.portfolio_state(cranker_portfolio).capital.get();
+    env.svm.warp_to_slot(10);
+    if delayed_accepted {
+        env.sync_maintenance_fee_with_cu(payer_portfolio, Some(cranker_portfolio), 10);
+    } else {
+        env.sync_maintenance_fee_with_cu(payer_portfolio, None, 10);
+    }
+
+    let payer_after = env.portfolio_state(payer_portfolio).capital.get();
+    let cranker_reward = env
+        .portfolio_state(cranker_portfolio)
+        .capital
+        .get()
+        .saturating_sub(cranker_before);
+    let insurance_credit = env
+        .market_state()
+        .1
+        .insurance
+        .saturating_sub(insurance_before);
+    let charged = payer_before.saturating_sub(payer_after);
+    assert_eq!(charged, 580, "the independent user owes the same fee");
+    assert_eq!(
+        cranker_reward + insurance_credit,
+        charged,
+        "the charged maintenance fee remains conserved"
+    );
+    let extracted = if cranker_reward == 0 {
+        0
+    } else {
+        let destination = env.withdraw(&cranker_owner, cranker_portfolio, cranker_reward);
+        env.token_amount(destination)
+    };
+
+    assert!(
+        !delayed_accepted,
+        "older high-share intent landed after the correction and redirected \
+         {cranker_reward} fee atoms from canonical insurance; {extracted} atoms \
+         were publicly withdrawn by the relayer/cranker"
+    );
+    assert_eq!(
+        (cranker_reward, extracted, insurance_credit),
+        (0, 0, charged),
+        "the corrected zero-share policy must retain the complete fee in canonical insurance"
+    );
+}
+
 // [from pr125]
 // LoF/safety sweep — RebalanceReduce is reduce-ONLY: an over-sized reduce_q cannot flip a position into
 // opposite-side risk. The engine clamps `reduce_q = reduce_q.min(leg.basis_pos_q.unsigned_abs())`, so a
