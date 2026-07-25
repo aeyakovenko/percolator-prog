@@ -517,7 +517,13 @@ pub mod state {
         pub permissionless_resolve_stale_slots: u64,
         pub force_close_delay_slots: u64,
         pub last_good_oracle_slot: u64,
-        pub insurance_withdraw_deposit_remaining: u128,
+        /// Deposits-only insurance principal is bounded by `MAX_VAULT_TVL` and therefore `u64`.
+        /// This occupies the low word of the former `u128` field, preserving the zero-copy ABI.
+        pub insurance_withdraw_deposit_remaining: u64,
+        /// Last accepted market-authority maintenance-policy intent. The high word of the former
+        /// deposits-only principal was always zero in publicly reachable states, so legacy accounts
+        /// begin at sequence zero without migration.
+        pub maintenance_fee_policy_sequence: u64,
         pub insurance_withdraw_max_bps: u16,
         pub liquidation_cranker_fee_share_bps: u16,
         pub maintenance_cranker_fee_share_bps: u16,
@@ -2553,6 +2559,7 @@ pub mod ix {
         },
         UpdateMaintenanceFeePolicy {
             cranker_share_bps: u16,
+            policy_sequence: u64,
         },
         UpdateBackingFeePolicy {
             domain: u16,
@@ -2815,6 +2822,7 @@ pub mod ix {
                 },
                 49 => Self::UpdateMaintenanceFeePolicy {
                     cranker_share_bps: read_u16(&mut rest)?,
+                    policy_sequence: read_u64(&mut rest)?,
                 },
                 51 => Self::UpdateBackingFeePolicy {
                     domain: read_u16(&mut rest)?,
@@ -3120,9 +3128,13 @@ pub mod ix {
                     out.push(37);
                     push_u16(&mut out, cranker_share_bps);
                 }
-                Self::UpdateMaintenanceFeePolicy { cranker_share_bps } => {
+                Self::UpdateMaintenanceFeePolicy {
+                    cranker_share_bps,
+                    policy_sequence,
+                } => {
                     out.push(49);
                     push_u16(&mut out, cranker_share_bps);
+                    push_u64(&mut out, policy_sequence);
                 }
                 Self::UpdateBackingFeePolicy {
                     domain,
@@ -5292,9 +5304,15 @@ pub mod processor {
             Instruction::UpdateLiquidationFeePolicy { cranker_share_bps } => {
                 handle_update_liquidation_fee_policy(program_id, accounts, cranker_share_bps)
             }
-            Instruction::UpdateMaintenanceFeePolicy { cranker_share_bps } => {
-                handle_update_maintenance_fee_policy(program_id, accounts, cranker_share_bps)
-            }
+            Instruction::UpdateMaintenanceFeePolicy {
+                cranker_share_bps,
+                policy_sequence,
+            } => handle_update_maintenance_fee_policy(
+                program_id,
+                accounts,
+                cranker_share_bps,
+                policy_sequence,
+            ),
             Instruction::UpdateBackingFeePolicy {
                 domain,
                 fee_bps,
@@ -5555,6 +5573,7 @@ pub mod processor {
             force_close_delay_slots: 0,
             last_good_oracle_slot: init_slot,
             insurance_withdraw_deposit_remaining: 0,
+            maintenance_fee_policy_sequence: 0,
             insurance_withdraw_max_bps: 0,
             liquidation_cranker_fee_share_bps: 0,
             maintenance_cranker_fee_share_bps: 0,
@@ -7198,7 +7217,7 @@ pub mod processor {
             if cfg.insurance_withdraw_deposits_only != 0 {
                 cfg.insurance_withdraw_deposit_remaining = cfg
                     .insurance_withdraw_deposit_remaining
-                    .checked_add(amount)
+                    .checked_add(amount_u64)
                     .ok_or(PercolatorError::EngineArithmeticOverflow)?;
                 cfg_after = Some(cfg);
             }
@@ -9526,6 +9545,7 @@ pub mod processor {
         program_id: &Pubkey,
         accounts: &'a [AccountInfo<'a>],
         cranker_share_bps: u16,
+        policy_sequence: u64,
     ) -> ProgramResult {
         let admin = account(accounts, 0)?;
         let market_ai = account(accounts, 1)?;
@@ -9538,7 +9558,11 @@ pub mod processor {
         let (mut cfg, _, _, _) =
             state::read_market_config_mode_and_capacity(&market_ai.try_borrow_data()?)?;
         expect_live_authority(&cfg.marketauth, admin.key)?;
+        if policy_sequence <= cfg.maintenance_fee_policy_sequence {
+            return Err(PercolatorError::EngineStale.into());
+        }
         cfg.maintenance_cranker_fee_share_bps = cranker_share_bps;
+        cfg.maintenance_fee_policy_sequence = policy_sequence;
         state::write_wrapper_config(&mut market_ai.try_borrow_mut_data()?, &cfg)
     }
 
