@@ -512,7 +512,13 @@ pub mod state {
         pub collateral_mint: [u8; 32],
         pub secondary_collateral_mint: [u8; 32],
         pub maintenance_fee_per_slot: u128,
-        pub permissionless_market_init_fee: u128,
+        /// The public setter and SPL transfer path require this fee to fit in `u64`.
+        /// This occupies the low word of the former `u128` field, preserving the zero-copy ABI.
+        pub permissionless_market_init_fee: u64,
+        /// Last accepted market-authority fee-redirect intent. The high word of the former
+        /// init-fee field was always zero in publicly reachable states, so legacy accounts begin at
+        /// sequence zero without migration.
+        pub fee_redirect_policy_sequence: u64,
         pub trade_fee_base_bps: u64,
         pub permissionless_resolve_stale_slots: u64,
         pub force_close_delay_slots: u64,
@@ -2564,6 +2570,7 @@ pub mod ix {
         },
         UpdateFeeRedirectPolicy {
             redirect_bps: u16,
+            policy_sequence: u64,
         },
         UpdateMarketInitFeePolicy {
             min_init_fee: u128,
@@ -2826,6 +2833,7 @@ pub mod ix {
                 },
                 58 => Self::UpdateFeeRedirectPolicy {
                     redirect_bps: read_u16(&mut rest)?,
+                    policy_sequence: read_u64(&mut rest)?,
                 },
                 59 => Self::UpdateMarketInitFeePolicy {
                     min_init_fee: read_u128(&mut rest)?,
@@ -3138,9 +3146,13 @@ pub mod ix {
                     out.push(55);
                     push_u64(&mut out, trade_fee_base_bps);
                 }
-                Self::UpdateFeeRedirectPolicy { redirect_bps } => {
+                Self::UpdateFeeRedirectPolicy {
+                    redirect_bps,
+                    policy_sequence,
+                } => {
                     out.push(58);
                     push_u16(&mut out, redirect_bps);
+                    push_u64(&mut out, policy_sequence);
                 }
                 Self::UpdateMarketInitFeePolicy { min_init_fee } => {
                     out.push(59);
@@ -4353,10 +4365,10 @@ pub mod processor {
 
     #[inline(always)]
     fn permissionless_market_init_fee_for_asset(
-        base_fee: u128,
+        base_fee: u64,
         asset_index: usize,
     ) -> Result<u128, ProgramError> {
-        let mut fee = base_fee;
+        let mut fee = u128::from(base_fee);
         if fee == 0 {
             return Ok(0);
         }
@@ -5309,9 +5321,15 @@ pub mod processor {
             Instruction::UpdateTradeFeePolicy { trade_fee_base_bps } => {
                 handle_update_trade_fee_policy(program_id, accounts, trade_fee_base_bps)
             }
-            Instruction::UpdateFeeRedirectPolicy { redirect_bps } => {
-                handle_update_fee_redirect_policy(program_id, accounts, redirect_bps)
-            }
+            Instruction::UpdateFeeRedirectPolicy {
+                redirect_bps,
+                policy_sequence,
+            } => handle_update_fee_redirect_policy(
+                program_id,
+                accounts,
+                redirect_bps,
+                policy_sequence,
+            ),
             Instruction::UpdateMarketInitFeePolicy { min_init_fee } => {
                 handle_update_market_init_fee_policy(program_id, accounts, min_init_fee)
             }
@@ -5550,6 +5568,7 @@ pub mod processor {
             secondary_collateral_mint: [0u8; 32],
             maintenance_fee_per_slot,
             permissionless_market_init_fee: 0,
+            fee_redirect_policy_sequence: 0,
             trade_fee_base_bps,
             permissionless_resolve_stale_slots: 0,
             force_close_delay_slots: 0,
@@ -9679,6 +9698,7 @@ pub mod processor {
         program_id: &Pubkey,
         accounts: &'a [AccountInfo<'a>],
         redirect_bps: u16,
+        policy_sequence: u64,
     ) -> ProgramResult {
         let admin = account(accounts, 0)?;
         let market_ai = account(accounts, 1)?;
@@ -9691,7 +9711,11 @@ pub mod processor {
         let (mut cfg, _, _, _) =
             state::read_market_config_mode_and_capacity(&market_ai.try_borrow_data()?)?;
         expect_live_authority(&cfg.marketauth, admin.key)?;
+        if policy_sequence <= cfg.fee_redirect_policy_sequence {
+            return Err(PercolatorError::EngineStale.into());
+        }
         cfg.fee_redirect_to_market_0_bps = redirect_bps;
+        cfg.fee_redirect_policy_sequence = policy_sequence;
         state::write_wrapper_config(&mut market_ai.try_borrow_mut_data()?, &cfg)
     }
 
@@ -9706,7 +9730,7 @@ pub mod processor {
         expect_signer(admin)?;
         expect_writable(market_ai)?;
         expect_owner(market_ai, program_id)?;
-        let _ = amount_to_u64(min_init_fee)?;
+        let min_init_fee = amount_to_u64(min_init_fee)?;
         let (mut cfg, _, _, _) =
             state::read_market_config_mode_and_capacity(&market_ai.try_borrow_data()?)?;
         expect_live_authority(&cfg.marketauth, admin.key)?;
