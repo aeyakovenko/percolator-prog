@@ -1015,6 +1015,7 @@ fn kani_v16_ewma_mark_decode_preserves_wire_fields() {
     let mark_ewma_halflife_slots: u64 = kani::any();
     let mark_min_fee: u64 = kani::any();
     let push_mark_e6: u64 = kani::any();
+    let observation_sequence: u64 = kani::any();
 
     let mut configure = [0u8; 35];
     configure[0] = 35;
@@ -1040,20 +1041,23 @@ fn kani_v16_ewma_mark_decode_preserves_wire_fields() {
         _ => unreachable!(),
     }
 
-    let mut push = [0u8; 19];
+    let mut push = [0u8; 27];
     push[0] = 36;
     push[1..3].copy_from_slice(&asset_index.to_le_bytes());
     push[3..11].copy_from_slice(&now_slot.to_le_bytes());
     push[11..19].copy_from_slice(&push_mark_e6.to_le_bytes());
+    push[19..27].copy_from_slice(&observation_sequence.to_le_bytes());
     match Instruction::decode(&push).unwrap() {
         Instruction::PushEwmaMark {
             asset_index: got_asset_index,
             now_slot: got_now,
             mark_e6: got_mark,
+            observation_sequence: got_sequence,
         } => {
             assert_eq!(got_asset_index, asset_index);
             assert_eq!(got_now, now_slot);
             assert_eq!(got_mark, push_mark_e6);
+            assert_eq!(got_sequence, observation_sequence);
         }
         _ => unreachable!(),
     }
@@ -1076,23 +1080,45 @@ fn kani_v16_ewma_mark_decode_preserves_wire_fields() {
         _ => unreachable!(),
     }
 
-    let mut push_auth = [0u8; 19];
+    let mut push_auth = [0u8; 27];
     push_auth[0] = 63;
     push_auth[1..3].copy_from_slice(&asset_index.to_le_bytes());
     push_auth[3..11].copy_from_slice(&now_slot.to_le_bytes());
     push_auth[11..19].copy_from_slice(&push_mark_e6.to_le_bytes());
+    push_auth[19..27].copy_from_slice(&observation_sequence.to_le_bytes());
     match Instruction::decode(&push_auth).unwrap() {
         Instruction::PushAuthMark {
             asset_index: got_asset_index,
             now_slot: got_now,
             mark_e6: got_mark,
+            observation_sequence: got_sequence,
         } => {
             assert_eq!(got_asset_index, asset_index);
             assert_eq!(got_now, now_slot);
             assert_eq!(got_mark, push_mark_e6);
+            assert_eq!(got_sequence, observation_sequence);
         }
         _ => unreachable!(),
     }
+}
+
+#[kani::proof]
+fn kani_v16_authenticated_mark_push_payloads_require_exact_length() {
+    let extra: u8 = kani::any();
+
+    let ewma = [36u8; 27];
+    assert!(Instruction::decode(&ewma).is_ok());
+    assert!(Instruction::decode(&ewma[..26]).is_err());
+    let mut ewma_trailing = [36u8; 28];
+    ewma_trailing[27] = extra;
+    assert!(Instruction::decode(&ewma_trailing).is_err());
+
+    let auth = [63u8; 27];
+    assert!(Instruction::decode(&auth).is_ok());
+    assert!(Instruction::decode(&auth[..26]).is_err());
+    let mut auth_trailing = [63u8; 28];
+    auth_trailing[27] = extra;
+    assert!(Instruction::decode(&auth_trailing).is_err());
 }
 
 #[kani::proof]
@@ -1320,6 +1346,7 @@ fn kani_v16_oracle_asset_payloads_reject_trailing_byte() {
             asset_index: 0,
             now_slot: 2,
             mark_e6: 101,
+            observation_sequence: 1,
         },
         extra,
     );
@@ -1336,6 +1363,7 @@ fn kani_v16_oracle_asset_payloads_reject_trailing_byte() {
             asset_index: 0,
             now_slot: 2,
             mark_e6: 101,
+            observation_sequence: 1,
         },
         extra,
     );
@@ -1526,13 +1554,13 @@ fn kani_v16_every_active_payload_rejects_one_byte_truncation() {
     let configure_ewma_mark = [35u8; 34];
     assert!(Instruction::decode(&configure_ewma_mark).is_err());
 
-    let push_ewma_mark = [36u8; 18];
+    let push_ewma_mark = [36u8; 26];
     assert!(Instruction::decode(&push_ewma_mark).is_err());
 
     let configure_auth_mark = [62u8; 18];
     assert!(Instruction::decode(&configure_auth_mark).is_err());
 
-    let push_auth_mark = [63u8; 18];
+    let push_auth_mark = [63u8; 26];
     assert!(Instruction::decode(&push_auth_mark).is_err());
 
     let update_liquidation = [37u8; 2];

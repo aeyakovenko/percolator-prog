@@ -568,7 +568,7 @@ pub mod state {
         pub backing_trade_fee_bps_short: u16,
         pub backing_trade_fee_insurance_share_bps_long: u16,
         pub backing_trade_fee_insurance_share_bps_short: u16,
-        pub _padding0: [u8; 6],
+        pub(crate) mark_observation_sequence_le: [u8; 6],
         pub insurance_authority: [u8; 32],
         pub insurance_operator: [u8; 32],
         pub backing_bucket_authority: [u8; 32],
@@ -589,6 +589,27 @@ pub mod state {
         // (insurance/operator/backing/oracle) and itself, and can be burned (set to 0). Isolated:
         // it can never act on another asset. Set to the activator at creation.
         pub asset_admin: [u8; 32],
+    }
+
+    impl AssetOracleProfileV16 {
+        pub const MAX_MARK_OBSERVATION_SEQUENCE: u64 = (1u64 << 48) - 1;
+
+        #[inline]
+        pub fn mark_observation_sequence(&self) -> u64 {
+            let mut bytes = [0u8; 8];
+            bytes[..6].copy_from_slice(&self.mark_observation_sequence_le);
+            u64::from_le_bytes(bytes)
+        }
+
+        #[inline]
+        pub fn set_mark_observation_sequence(&mut self, sequence: u64) -> Result<(), ProgramError> {
+            if sequence > Self::MAX_MARK_OBSERVATION_SEQUENCE {
+                return Err(PercolatorError::EngineCounterOverflow.into());
+            }
+            self.mark_observation_sequence_le
+                .copy_from_slice(&sequence.to_le_bytes()[..6]);
+            Ok(())
+        }
     }
 
     /// Aggregate backing-domain accounting for an authority-controlled vault.
@@ -1123,7 +1144,6 @@ pub mod state {
                 profile.backing_trade_fee_insurance_share_bps_short,
             )
             || profile.invert > 1
-            || profile._padding0 != [0u8; 6]
             || profile.oracle_leg_count as usize > ORACLE_LEG_CAP
             || (profile.oracle_leg_flags & !ORACLE_LEG_FLAGS_MASK) != 0
         {
@@ -1214,7 +1234,7 @@ pub mod state {
             backing_trade_fee_bps_short: 0,
             backing_trade_fee_insurance_share_bps_long: 0,
             backing_trade_fee_insurance_share_bps_short: 0,
-            _padding0: [0u8; 6],
+            mark_observation_sequence_le: [0u8; 6],
             insurance_authority: [0u8; 32],
             insurance_operator: [0u8; 32],
             backing_bucket_authority: [0u8; 32],
@@ -1249,7 +1269,7 @@ pub mod state {
                 .backing_trade_fee_insurance_share_bps_long,
             backing_trade_fee_insurance_share_bps_short: config
                 .backing_trade_fee_insurance_share_bps_short,
-            _padding0: [0u8; 6],
+            mark_observation_sequence_le: [0u8; 6],
             // At InitMarket the market key bootstraps asset 0 exactly like an activator bootstraps a
             // permissionless asset 1..N: it is asset 0's cold-storage admin and all its sub-authorities.
             insurance_authority: config.marketauth,
@@ -2609,6 +2629,7 @@ pub mod ix {
             asset_index: u16,
             now_slot: u64,
             mark_e6: u64,
+            observation_sequence: u64,
         },
         ConfigureAuthMark {
             asset_index: u16,
@@ -2619,6 +2640,7 @@ pub mod ix {
             asset_index: u16,
             now_slot: u64,
             mark_e6: u64,
+            observation_sequence: u64,
         },
         ForceCloseAbandonedAsset {
             asset_index: u16,
@@ -2846,6 +2868,7 @@ pub mod ix {
                     asset_index: read_u16(&mut rest)?,
                     now_slot: read_u64(&mut rest)?,
                     mark_e6: read_u64(&mut rest)?,
+                    observation_sequence: read_u64(&mut rest)?,
                 },
                 64 => Self::ForceCloseAbandonedAsset {
                     asset_index: read_u16(&mut rest)?,
@@ -2902,6 +2925,7 @@ pub mod ix {
                     asset_index: read_u16(&mut rest)?,
                     now_slot: read_u64(&mut rest)?,
                     mark_e6: read_u64(&mut rest)?,
+                    observation_sequence: read_u64(&mut rest)?,
                 },
                 40 => Self::UpdateAssetLifecycle {
                     action: read_u8(&mut rest)?,
@@ -3230,11 +3254,13 @@ pub mod ix {
                     asset_index,
                     now_slot,
                     mark_e6,
+                    observation_sequence,
                 } => {
                     out.push(36);
                     push_u16(&mut out, asset_index);
                     push_u64(&mut out, now_slot);
                     push_u64(&mut out, mark_e6);
+                    push_u64(&mut out, observation_sequence);
                 }
                 Self::ConfigureAuthMark {
                     asset_index,
@@ -3250,11 +3276,13 @@ pub mod ix {
                     asset_index,
                     now_slot,
                     mark_e6,
+                    observation_sequence,
                 } => {
                     out.push(63);
                     push_u16(&mut out, asset_index);
                     push_u64(&mut out, now_slot);
                     push_u64(&mut out, mark_e6);
+                    push_u64(&mut out, observation_sequence);
                 }
                 Self::ForceCloseAbandonedAsset {
                     asset_index,
@@ -4646,6 +4674,7 @@ pub mod processor {
             existing.backing_trade_fee_insurance_share_bps_long;
         profile.backing_trade_fee_insurance_share_bps_short =
             existing.backing_trade_fee_insurance_share_bps_short;
+        profile.mark_observation_sequence_le = existing.mark_observation_sequence_le;
         profile.insurance_authority = existing.insurance_authority;
         profile.insurance_operator = existing.insurance_operator;
         profile.backing_bucket_authority = existing.backing_bucket_authority;
@@ -5384,7 +5413,15 @@ pub mod processor {
                 asset_index,
                 now_slot,
                 mark_e6,
-            } => handle_push_ewma_mark(program_id, accounts, asset_index, now_slot, mark_e6),
+                observation_sequence,
+            } => handle_push_ewma_mark(
+                program_id,
+                accounts,
+                asset_index,
+                now_slot,
+                mark_e6,
+                observation_sequence,
+            ),
             Instruction::ConfigureAuthMark {
                 asset_index,
                 now_slot,
@@ -5400,7 +5437,15 @@ pub mod processor {
                 asset_index,
                 now_slot,
                 mark_e6,
-            } => handle_push_auth_mark(program_id, accounts, asset_index, now_slot, mark_e6),
+                observation_sequence,
+            } => handle_push_auth_mark(
+                program_id,
+                accounts,
+                asset_index,
+                now_slot,
+                mark_e6,
+                observation_sequence,
+            ),
             Instruction::ForceCloseAbandonedAsset {
                 asset_index,
                 now_slot,
@@ -9855,7 +9900,7 @@ pub mod processor {
                     .backing_trade_fee_insurance_share_bps_long,
                 backing_trade_fee_insurance_share_bps_short: existing_profile
                     .backing_trade_fee_insurance_share_bps_short,
-                _padding0: [0u8; 6],
+                mark_observation_sequence_le: existing_profile.mark_observation_sequence_le,
                 insurance_authority: existing_profile.insurance_authority,
                 insurance_operator: existing_profile.insurance_operator,
                 asset_admin: existing_profile.asset_admin,
@@ -9981,7 +10026,7 @@ pub mod processor {
                     .backing_trade_fee_insurance_share_bps_long,
                 backing_trade_fee_insurance_share_bps_short: existing_profile
                     .backing_trade_fee_insurance_share_bps_short,
-                _padding0: [0u8; 6],
+                mark_observation_sequence_le: existing_profile.mark_observation_sequence_le,
                 insurance_authority: existing_profile.insurance_authority,
                 insurance_operator: existing_profile.insurance_operator,
                 asset_admin: existing_profile.asset_admin,
@@ -10089,7 +10134,7 @@ pub mod processor {
                     .backing_trade_fee_insurance_share_bps_long,
                 backing_trade_fee_insurance_share_bps_short: existing_profile
                     .backing_trade_fee_insurance_share_bps_short,
-                _padding0: [0u8; 6],
+                mark_observation_sequence_le: existing_profile.mark_observation_sequence_le,
                 insurance_authority: existing_profile.insurance_authority,
                 insurance_operator: existing_profile.insurance_operator,
                 asset_admin: existing_profile.asset_admin,
@@ -10152,6 +10197,7 @@ pub mod processor {
         asset_index: u16,
         now_slot: u64,
         mark_e6: u64,
+        observation_sequence: u64,
     ) -> ProgramResult {
         let authority = account(accounts, 0)?;
         let market_ai = account(accounts, 1)?;
@@ -10184,6 +10230,12 @@ pub mod processor {
             }
             let authorities = domain_authorities_from_profile(&cfg, &profile, asset_index_usize);
             expect_live_authority(&authorities.oracle_authority, authority.key)?;
+            if observation_sequence <= profile.mark_observation_sequence() {
+                return Err(PercolatorError::EngineStale.into());
+            }
+            if observation_sequence > state::AssetOracleProfileV16::MAX_MARK_OBSERVATION_SEQUENCE {
+                return Err(PercolatorError::EngineCounterOverflow.into());
+            }
             if authenticated_slot < profile.mark_ewma_last_slot
                 || authenticated_slot < group.header.current_slot.get()
             {
@@ -10211,6 +10263,7 @@ pub mod processor {
             profile.oracle_target_price_e6 = next_mark;
             profile.oracle_target_publish_time = 0;
             profile.last_good_oracle_slot = authenticated_slot;
+            profile.set_mark_observation_sequence(observation_sequence)?;
             write_oracle_profile_to_view(&mut group, asset_index_usize, &profile)?;
             if asset_index_usize == 0 {
                 cfg.last_good_oracle_slot =
@@ -10233,6 +10286,7 @@ pub mod processor {
         asset_index: u16,
         now_slot: u64,
         mark_e6: u64,
+        observation_sequence: u64,
     ) -> ProgramResult {
         let authority = account(accounts, 0)?;
         let market_ai = account(accounts, 1)?;
@@ -10265,6 +10319,12 @@ pub mod processor {
             }
             let authorities = domain_authorities_from_profile(&cfg, &profile, asset_index_usize);
             expect_live_authority(&authorities.oracle_authority, authority.key)?;
+            if observation_sequence <= profile.mark_observation_sequence() {
+                return Err(PercolatorError::EngineStale.into());
+            }
+            if observation_sequence > state::AssetOracleProfileV16::MAX_MARK_OBSERVATION_SEQUENCE {
+                return Err(PercolatorError::EngineCounterOverflow.into());
+            }
             if authenticated_slot < profile.mark_ewma_last_slot
                 || authenticated_slot < group.header.current_slot.get()
             {
@@ -10275,6 +10335,7 @@ pub mod processor {
             profile.oracle_target_price_e6 = mark_e6;
             profile.oracle_target_publish_time = 0;
             profile.last_good_oracle_slot = authenticated_slot;
+            profile.set_mark_observation_sequence(observation_sequence)?;
             write_oracle_profile_to_view(&mut group, asset_index_usize, &profile)?;
             if asset_index_usize == 0 {
                 cfg.last_good_oracle_slot =
@@ -12192,6 +12253,32 @@ pub mod processor {
                 core::mem::size_of::<state::WrapperConfigV16>(),
                 state::wrapper_config_len_for_test(),
                 "WRAPPER_CONFIG_LEN must equal size_of::<WrapperConfigV16>() for the zero-copy layout",
+            );
+        }
+
+        #[test]
+        fn mark_observation_sequence_uses_profile_padding_without_layout_growth() {
+            assert_eq!(
+                core::mem::size_of::<state::AssetOracleProfileV16>(),
+                constants::ASSET_ORACLE_PROFILE_LEN,
+            );
+
+            let mut profile = state::AssetOracleProfileV16::default();
+            assert_eq!(profile.mark_observation_sequence(), 0);
+            profile
+                .set_mark_observation_sequence(
+                    state::AssetOracleProfileV16::MAX_MARK_OBSERVATION_SEQUENCE,
+                )
+                .unwrap();
+            assert_eq!(
+                profile.mark_observation_sequence(),
+                state::AssetOracleProfileV16::MAX_MARK_OBSERVATION_SEQUENCE,
+            );
+            assert_eq!(
+                profile.set_mark_observation_sequence(
+                    state::AssetOracleProfileV16::MAX_MARK_OBSERVATION_SEQUENCE + 1,
+                ),
+                Err(PercolatorError::EngineCounterOverflow.into()),
             );
         }
 

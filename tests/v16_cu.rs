@@ -1255,6 +1255,15 @@ impl V16CuEnv {
         state::read_portfolio_id(&account.data).unwrap()
     }
 
+    fn next_mark_observation_sequence(&self, asset_index: usize) -> u64 {
+        let account = self.svm.get_account(&self.market).expect("market account");
+        state::read_asset_oracle_profile(&account.data, asset_index)
+            .unwrap()
+            .mark_observation_sequence()
+            .checked_add(1)
+            .expect("mark observation sequence")
+    }
+
     fn mutate_market<F>(&mut self, f: F)
     where
         F: FnOnce(&mut state::WrapperConfigV16, &mut MarketGroupV16),
@@ -2547,6 +2556,7 @@ impl V16CuEnv {
     }
 
     fn push_ewma_mark_with_cu(&mut self, now_slot: u64, mark_e6: u64) -> u64 {
+        let observation_sequence = self.next_mark_observation_sequence(0);
         send_tx(
             &mut self.svm,
             self.program_id,
@@ -2555,6 +2565,7 @@ impl V16CuEnv {
                 asset_index: 0,
                 now_slot,
                 mark_e6,
+                observation_sequence,
             },
             vec![
                 AccountMeta::new(self.admin.pubkey(), true),
@@ -2585,6 +2596,7 @@ impl V16CuEnv {
     }
 
     fn push_auth_mark_with_cu(&mut self, now_slot: u64, mark_e6: u64) -> u64 {
+        let observation_sequence = self.next_mark_observation_sequence(0);
         send_tx(
             &mut self.svm,
             self.program_id,
@@ -2593,6 +2605,7 @@ impl V16CuEnv {
                 asset_index: 0,
                 now_slot,
                 mark_e6,
+                observation_sequence,
             },
             vec![
                 AccountMeta::new(self.admin.pubkey(), true),
@@ -2633,6 +2646,7 @@ impl V16CuEnv {
         now_slot: u64,
         mark_e6: u64,
     ) -> u64 {
+        let observation_sequence = self.next_mark_observation_sequence(asset_index as usize);
         send_tx(
             &mut self.svm,
             self.program_id,
@@ -2641,6 +2655,7 @@ impl V16CuEnv {
                 asset_index,
                 now_slot,
                 mark_e6,
+                observation_sequence,
             },
             vec![
                 AccountMeta::new(self.admin.pubkey(), true),
@@ -2685,6 +2700,7 @@ impl V16CuEnv {
         mark_e6: u64,
     ) -> u64 {
         self.ensure_signer_account(authority.pubkey());
+        let observation_sequence = self.next_mark_observation_sequence(asset_index as usize);
         send_tx(
             &mut self.svm,
             self.program_id,
@@ -2693,6 +2709,7 @@ impl V16CuEnv {
                 asset_index,
                 now_slot,
                 mark_e6,
+                observation_sequence,
             },
             vec![
                 AccountMeta::new(authority.pubkey(), true),
@@ -13145,7 +13162,7 @@ fn v16_attack_delayed_auth_mark_cannot_override_newer_observation() {
     // choose their landing order. The older report must not become current after the newer one.
     env.svm.expire_blockhash();
     let recent_blockhash = env.svm.latest_blockhash();
-    let signed_push = |mark_e6| {
+    let signed_push = |mark_e6, observation_sequence| {
         let push_ix = Instruction {
             program_id: env.program_id,
             accounts: vec![
@@ -13156,6 +13173,7 @@ fn v16_attack_delayed_auth_mark_cannot_override_newer_observation() {
                 asset_index: 0,
                 now_slot: 0,
                 mark_e6,
+                observation_sequence,
             }
             .encode(),
         };
@@ -13166,8 +13184,8 @@ fn v16_attack_delayed_auth_mark_cannot_override_newer_observation() {
             recent_blockhash,
         )
     };
-    let delayed_low_mark = signed_push(50);
-    let newer_correct_mark = signed_push(100);
+    let delayed_low_mark = signed_push(50, 1);
+    let newer_correct_mark = signed_push(100, 2);
     env.svm
         .send_transaction(newer_correct_mark)
         .expect("newer correcting mark lands first");
@@ -13247,6 +13265,54 @@ fn v16_attack_delayed_auth_mark_cannot_override_newer_observation() {
     );
     assert_eq!(env.portfolio_state(attacker_account).pnl.get(), 0);
     assert_eq!(env.portfolio_state(lp_account).capital.get(), LP_DEPOSIT);
+}
+
+#[test]
+fn v16_attack_delayed_ewma_mark_cannot_override_newer_observation() {
+    let mut env = V16CuEnv::new();
+    env.configure_ewma_mark_with_cu(0, 100, 1, 0);
+    env.svm.warp_to_slot(1);
+    env.svm.expire_blockhash();
+    let recent_blockhash = env.svm.latest_blockhash();
+    let signed_push = |mark_e6, observation_sequence| {
+        let push_ix = Instruction {
+            program_id: env.program_id,
+            accounts: vec![
+                AccountMeta::new(env.admin.pubkey(), true),
+                AccountMeta::new(env.market, false),
+            ],
+            data: ProgInstruction::PushEwmaMark {
+                asset_index: 0,
+                now_slot: 0,
+                mark_e6,
+                observation_sequence,
+            }
+            .encode(),
+        };
+        Transaction::new_signed_with_payer(
+            &[heap_ix(), cu_ix(), push_ix],
+            Some(&env.payer.pubkey()),
+            &[&env.payer, &env.admin],
+            recent_blockhash,
+        )
+    };
+    let delayed_old = signed_push(80, 1);
+    let newer = signed_push(120, 2);
+    env.svm
+        .send_transaction(newer)
+        .expect("newer EWMA observation lands first despite a sequence gap");
+    let newer_state = env.svm.get_account(&env.market).unwrap();
+
+    let stale = env.svm.send_transaction(delayed_old);
+    assert!(
+        stale.is_err(),
+        "a delayed older EWMA observation must reject after a newer sequence"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        newer_state,
+        "the rejected stale EWMA observation must leave the newer state byte-identical"
+    );
 }
 
 #[test]
@@ -16127,6 +16193,7 @@ fn v16_attack_cross_margin_divergent_moves_conserve() {
             asset_index: 1,
             now_slot: 10,
             mark_e6: 90,
+            observation_sequence: 1,
         },
     ); // asset1 down -> la loses
        // crank both assets for both portfolios, two passes to converge §6.1/§6.2 warmup.
@@ -17243,6 +17310,7 @@ fn v16_regression_cross_margin_insolvency_no_value_extraction() {
                 asset_index: 1,
                 now_slot: slot,
                 mark_e6: mark,
+                observation_sequence: slot,
             },
         );
         for ai in [0u16, 1] {
@@ -17468,6 +17536,7 @@ fn v16_attack_resolved_cross_margin_deep_insolvency_winds_down_publicly() {
                 asset_index: 1,
                 now_slot: slot,
                 mark_e6: mark,
+                observation_sequence: slot,
             },
         );
         for ai in [0u16, 1] {
@@ -18947,6 +19016,7 @@ fn v16_attack_extreme_auth_mark_push_rejected_or_safe() {
     env.svm.warp_to_slot(5);
     // push extreme marks; each must reject or be clamped — never panic, never corrupt state.
     for mark in [0u64, 1, u64::MAX, u64::MAX / 2] {
+        let observation_sequence = env.next_mark_observation_sequence(0);
         env.svm.expire_blockhash();
         let _ = send_tx(
             &mut env.svm,
@@ -18956,6 +19026,7 @@ fn v16_attack_extreme_auth_mark_push_rejected_or_safe() {
                 asset_index: 0,
                 now_slot: 5,
                 mark_e6: mark,
+                observation_sequence,
             },
             vec![
                 AccountMeta::new(env.admin.pubkey(), true),
@@ -19887,6 +19958,7 @@ fn v16_attack_cross_margin_solvent_account_not_unfairly_liquidated() {
             asset_index: 1,
             now_slot: 10,
             mark_e6: 110,
+            observation_sequence: 1,
         },
     );
     for slot in [10u64, 11] {
@@ -23008,6 +23080,7 @@ fn v16_attack_out_of_range_asset_index_rejected() {
                 asset_index: bad,
                 now_slot: 1,
                 mark_e6: 100,
+                observation_sequence: 1,
             },
             vec![
                 AccountMeta::new(env.admin.pubkey(), true),
@@ -27329,6 +27402,7 @@ fn v16_attack_permissionless_asset_oracle_cannot_block_base_resolve_matured() {
             asset_index: 1,
             now_slot: 40,
             mark_e6: 102,
+            observation_sequence: 1,
         },
         vec![
             AccountMeta::new(creator.pubkey(), true),
@@ -29813,6 +29887,7 @@ fn v16_attack_cross_margin_divergent_close_conserves() {
             asset_index: 1,
             now_slot: 10,
             mark_e6: 90,
+            observation_sequence: 1,
         },
     );
     for slot in [10u64, 11] {
@@ -40678,6 +40753,7 @@ fn v16_attack_cross_margin_netting_conserves() {
             asset_index: 1,
             now_slot: 2,
             mark_e6: 110,
+            observation_sequence: 1,
         },
         vec![
             AccountMeta::new(admin.pubkey(), true),
@@ -42561,6 +42637,7 @@ fn v16_attack_pushed_mark_cannot_override_external_oracle_asset() {
             asset_index: 0,
             now_slot: 2,
             mark_e6: 9_999_999,
+            observation_sequence: 1,
         },
         vec![
             AccountMeta::new(admin.pubkey(), true),
@@ -42584,6 +42661,7 @@ fn v16_attack_pushed_mark_cannot_override_external_oracle_asset() {
             asset_index: 0,
             now_slot: 2,
             mark_e6: 9_999_999,
+            observation_sequence: 1,
         },
         vec![
             AccountMeta::new(admin.pubkey(), true),
@@ -43914,6 +43992,7 @@ fn v16_attack_non_authority_cannot_push_auth_mark() {
             asset_index: 0,
             now_slot: 2,
             mark_e6: 9_999_999,
+            observation_sequence: 1,
         },
         vec![
             AccountMeta::new(mallory.pubkey(), true),
@@ -43942,6 +44021,7 @@ fn v16_attack_non_authority_cannot_push_auth_mark() {
             asset_index: 0,
             now_slot: 2,
             mark_e6: 150,
+            observation_sequence: 1,
         },
         vec![
             AccountMeta::new(admin.pubkey(), true),
@@ -44208,6 +44288,7 @@ fn v16_attack_mark_input_bounds_reject_atomically() {
             asset_index: 0,
             now_slot: 2,
             mark_e6: 0,
+            observation_sequence: 1,
         },
         "PushEwmaMark zero mark",
     );
@@ -44217,6 +44298,7 @@ fn v16_attack_mark_input_bounds_reject_atomically() {
             asset_index: 0,
             now_slot: 2,
             mark_e6: over_max,
+            observation_sequence: 1,
         },
         "PushEwmaMark over-max mark",
     );
@@ -44230,6 +44312,7 @@ fn v16_attack_mark_input_bounds_reject_atomically() {
             asset_index: 0,
             now_slot: 2,
             mark_e6: 120,
+            observation_sequence: 1,
         },
         vec![
             AccountMeta::new(admin.pubkey(), true),
@@ -44272,6 +44355,7 @@ fn v16_attack_mark_input_bounds_reject_atomically() {
             asset_index: 0,
             now_slot: 4,
             mark_e6: 0,
+            observation_sequence: 2,
         },
         "PushAuthMark zero mark",
     );
@@ -44281,6 +44365,7 @@ fn v16_attack_mark_input_bounds_reject_atomically() {
             asset_index: 0,
             now_slot: 4,
             mark_e6: over_max,
+            observation_sequence: 2,
         },
         "PushAuthMark over-max mark",
     );
@@ -44294,6 +44379,7 @@ fn v16_attack_mark_input_bounds_reject_atomically() {
             asset_index: 0,
             now_slot: 4,
             mark_e6: 220,
+            observation_sequence: 2,
         },
         vec![
             AccountMeta::new(admin.pubkey(), true),
@@ -47777,6 +47863,7 @@ fn v16_bpf_10m_market_liquidation_high_asset_stays_bounded() {
             asset_index: HIGH_ASSET as u16,
             now_slot: LIQUIDATION_SLOT,
             mark_e6: 300,
+            observation_sequence: 1,
         },
         vec![
             AccountMeta::new(env.admin.pubkey(), true),
@@ -57047,6 +57134,7 @@ fn v16_attack_cross_asset_oracle_authority_cannot_push_other_asset_mark() {
             asset_index: 0,
             now_slot: 2,
             mark_e6: 9_999_999,
+            observation_sequence: 1,
         },
         vec![
             AccountMeta::new(a1.pubkey(), true),
@@ -57076,6 +57164,7 @@ fn v16_attack_cross_asset_oracle_authority_cannot_push_other_asset_mark() {
             asset_index: 0,
             now_slot: 2,
             mark_e6: 150,
+            observation_sequence: 1,
         },
         vec![
             AccountMeta::new(admin.pubkey(), true),
@@ -57140,6 +57229,7 @@ fn v16_attack_cross_asset_oracle_authority_cannot_push_other_asset_ewma_mark() {
             asset_index: 1,
             now_slot: 2,
             mark_e6: 150,
+            observation_sequence: 1,
         },
         vec![
             AccountMeta::new(a1.pubkey(), true),
@@ -57163,6 +57253,7 @@ fn v16_attack_cross_asset_oracle_authority_cannot_push_other_asset_ewma_mark() {
             asset_index: 0,
             now_slot: 2,
             mark_e6: 9_999_999,
+            observation_sequence: 1,
         },
         vec![
             AccountMeta::new(a1.pubkey(), true),
@@ -57191,6 +57282,7 @@ fn v16_attack_cross_asset_oracle_authority_cannot_push_other_asset_ewma_mark() {
             asset_index: 0,
             now_slot: 2,
             mark_e6: 150,
+            observation_sequence: 1,
         },
         vec![
             AccountMeta::new(admin.pubkey(), true),
@@ -58081,6 +58173,7 @@ fn v16_attack_oracle_authority_rotation_revokes_old_grants_new() {
             asset_index: 0,
             now_slot: 2,
             mark_e6: 110,
+            observation_sequence: 1,
         },
         vec![
             AccountMeta::new(admin.pubkey(), true),
@@ -58124,6 +58217,7 @@ fn v16_attack_oracle_authority_rotation_revokes_old_grants_new() {
             asset_index: 0,
             now_slot: 3,
             mark_e6: 120,
+            observation_sequence: 2,
         },
         vec![
             AccountMeta::new(admin.pubkey(), true),
@@ -58147,6 +58241,7 @@ fn v16_attack_oracle_authority_rotation_revokes_old_grants_new() {
             asset_index: 0,
             now_slot: 3,
             mark_e6: 120,
+            observation_sequence: 2,
         },
         vec![
             AccountMeta::new(newauth.pubkey(), true),
@@ -59782,6 +59877,7 @@ fn v16_attack_update_authority_handoff_rekeys_asset0_default_runtime_authorities
             asset_index: 0,
             now_slot: 2,
             mark_e6: 777,
+            observation_sequence: 1,
         },
         vec![
             AccountMeta::new(old_marketauth.pubkey(), true),

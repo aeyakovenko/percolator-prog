@@ -560,7 +560,7 @@ AuthMark and EwmaMark are authority-pushed pricing modes for markets that do not
 
 AuthMark is the direct authority-mark path:
 
-- **Direct mark API**: `ConfigureAuthMark { asset_index, now_slot, initial_mark_e6 }` and `PushAuthMark { asset_index, now_slot, mark_e6 }`.
+- **Direct mark API**: `ConfigureAuthMark { asset_index, now_slot, initial_mark_e6 }` and `PushAuthMark { asset_index, now_slot, mark_e6, observation_sequence }`. `PushEwmaMark` carries the same signer-chosen, strictly increasing `observation_sequence`. The program persists the last accepted sequence per asset across oracle-profile rewrites, so delayed same-incarnation reports cannot replace newer authenticated observations while gaps and out-of-order transaction landing remain supported.
 - **No EWMA configuration**: there is no halflife, mark-min-fee, feed id, confidence filter, invert flag, or unit-scale configuration in the AuthMark API.
 - **Authority boundary**: only the configured mark authority can push a new mark; public cranks can only consume the stored mark.
 - **Adapter-friendly**: a separate oracle adapter PDA can verify Pyth, Chainlink, Switchboard, or custom feed policy, then sign `PushAuthMark` with the resulting mark.
