@@ -49,6 +49,8 @@ pub mod constants {
     pub const WRAPPER_CONFIG_LEN: usize = 448;
     pub const ASSET_ORACLE_PROFILE_LEN: usize = 400;
     pub const ASSET_ORACLE_WRAPPER_LEN: usize = 512;
+    pub const ASSET_INSURANCE_WITHDRAW_SEQUENCE_OFF: usize = ASSET_ORACLE_PROFILE_LEN;
+    pub const ASSET_INSURANCE_WITHDRAW_SEQUENCE_LEN: usize = 8;
     pub const MARKET_GROUP_LEN: usize = size_of::<MarketGroupV16HeaderAccount>();
     pub const MARKET_ASSET_SLOT_LEN: usize = size_of::<Market<[u8; ASSET_ORACLE_WRAPPER_LEN]>>();
     pub const PORTFOLIO_STATE_LEN: usize = size_of::<PortfolioAccountV16Account>();
@@ -155,6 +157,7 @@ pub mod error {
 pub mod state {
     use crate::{
         constants::{
+            ASSET_INSURANCE_WITHDRAW_SEQUENCE_LEN, ASSET_INSURANCE_WITHDRAW_SEQUENCE_OFF,
             ASSET_ORACLE_PROFILE_LEN, ASSET_ORACLE_WRAPPER_LEN, HEADER_LEN,
             KIND_BACKING_DOMAIN_LEDGER, KIND_INSURANCE_LEDGER, KIND_MARKET, KIND_PORTFOLIO, MAGIC,
             MARKET_GROUP_LEN, MARKET_GROUP_OFF, MIN_MARKET_ACCOUNT_LEN, ORACLE_LEG_CAP,
@@ -1366,6 +1369,27 @@ pub mod state {
         let profile: AssetOracleProfileV16 = bytemuck::pod_read_unaligned(bytes);
         validate_asset_oracle_profile(&profile)?;
         Ok(profile)
+    }
+
+    pub fn read_asset_insurance_withdraw_sequence(
+        data: &[u8],
+        asset_index: usize,
+    ) -> Result<u64, ProgramError> {
+        check_header(data, KIND_MARKET)?;
+        let capacity = market_slot_capacity(data)?;
+        if asset_index >= capacity {
+            return Err(PercolatorError::InvalidInstruction.into());
+        }
+        let start = dynamic_slot_offset(asset_index)?
+            .checked_add(ASSET_INSURANCE_WITHDRAW_SEQUENCE_OFF)
+            .ok_or(PercolatorError::InvalidAccountLen)?;
+        let end = start
+            .checked_add(ASSET_INSURANCE_WITHDRAW_SEQUENCE_LEN)
+            .ok_or(PercolatorError::InvalidAccountLen)?;
+        let bytes = data
+            .get(start..end)
+            .ok_or(PercolatorError::InvalidAccountLen)?;
+        Ok(u64::from_le_bytes(bytes.try_into().unwrap()))
     }
 
     pub fn read_market_config_mode_and_capacity(
@@ -2645,6 +2669,7 @@ pub mod ix {
         },
         WithdrawInsuranceAsset {
             asset_index: u16,
+            expected_sequence: u64,
             amount: u128,
         },
         CureAndCancelClose {
@@ -2918,6 +2943,7 @@ pub mod ix {
                 },
                 57 => Self::WithdrawInsuranceAsset {
                     asset_index: read_u16(&mut rest)?,
+                    expected_sequence: read_u64(&mut rest)?,
                     amount: read_u128(&mut rest)?,
                 },
                 42 => Self::CureAndCancelClose {
@@ -3302,10 +3328,12 @@ pub mod ix {
                 }
                 Self::WithdrawInsuranceAsset {
                     asset_index,
+                    expected_sequence,
                     amount,
                 } => {
                     out.push(57);
                     push_u16(&mut out, asset_index);
+                    push_u64(&mut out, expected_sequence);
                     push_u128(&mut out, amount);
                 }
                 Self::CureAndCancelClose { optional_deposit } => {
@@ -4609,6 +4637,36 @@ pub mod processor {
         Ok(())
     }
 
+    fn consume_insurance_withdraw_sequence_view(
+        group: &mut state::MarketViewMutV16<'_>,
+        asset_index: usize,
+        expected_sequence: u64,
+    ) -> ProgramResult {
+        let market = group
+            .markets
+            .get_mut(asset_index)
+            .ok_or(PercolatorError::InvalidInstruction)?;
+        let bytes = market
+            .wrapper
+            .get_mut(
+                constants::ASSET_INSURANCE_WITHDRAW_SEQUENCE_OFF
+                    ..constants::ASSET_INSURANCE_WITHDRAW_SEQUENCE_OFF
+                        + constants::ASSET_INSURANCE_WITHDRAW_SEQUENCE_LEN,
+            )
+            .ok_or(PercolatorError::InvalidAccountLen)?;
+        let current = u64::from_le_bytes(bytes.try_into().unwrap());
+        if current != expected_sequence {
+            return Err(PercolatorError::EngineStale.into());
+        }
+        bytes.copy_from_slice(
+            &current
+                .checked_add(1)
+                .ok_or(PercolatorError::EngineCounterOverflow)?
+                .to_le_bytes(),
+        );
+        Ok(())
+    }
+
     fn mirror_manual_profile_to_base_config(
         cfg: &mut WrapperConfigV16,
         profile: &state::AssetOracleProfileV16,
@@ -5449,8 +5507,15 @@ pub mod processor {
             }
             Instruction::WithdrawInsuranceAsset {
                 asset_index,
+                expected_sequence,
                 amount,
-            } => handle_withdraw_insurance_asset(program_id, accounts, asset_index, amount),
+            } => handle_withdraw_insurance_asset(
+                program_id,
+                accounts,
+                asset_index,
+                expected_sequence,
+                amount,
+            ),
             Instruction::CureAndCancelClose { optional_deposit } => {
                 handle_cure_and_cancel_close(program_id, accounts, optional_deposit)
             }
@@ -8086,6 +8151,7 @@ pub mod processor {
         program_id: &Pubkey,
         accounts: &'a [AccountInfo<'a>],
         asset_index: u16,
+        expected_sequence: u64,
         amount: u128,
     ) -> ProgramResult {
         let operator = account(accounts, 0)?;
@@ -8122,6 +8188,11 @@ pub mod processor {
                 || long_domain >= configured_slots.saturating_mul(2)
             {
                 return Err(PercolatorError::InvalidInstruction.into());
+            }
+            if state::read_asset_insurance_withdraw_sequence(&market_data, asset_index)?
+                != expected_sequence
+            {
+                return Err(PercolatorError::EngineStale.into());
             }
             let (vault_authority, _) = derive_vault_authority(program_id, market_ai.key);
             expect_key(vault_authority_ai, &vault_authority)?;
@@ -8201,6 +8272,7 @@ pub mod processor {
             };
             // Atomic insurance/vault/budget withdraw through the engine (maintains the
             // insurance_domain_budget_remaining_total aggregate).
+            consume_insurance_withdraw_sequence_view(&mut group, asset_index, expected_sequence)?;
             debit_market_insurance_budget_view(&mut group, asset_index, amount)?;
             if let Some((ledger, _)) = ledger_state.as_mut() {
                 ledger.total_withdrawn_atoms = ledger

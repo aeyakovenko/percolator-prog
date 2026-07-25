@@ -1240,6 +1240,11 @@ impl V16CuEnv {
         state::read_market(&account.data).unwrap()
     }
 
+    fn insurance_withdraw_sequence(&self, asset_index: u16) -> u64 {
+        let account = self.svm.get_account(&self.market).expect("market account");
+        state::read_asset_insurance_withdraw_sequence(&account.data, asset_index as usize).unwrap()
+    }
+
     fn portfolio_state(&self, portfolio: Pubkey) -> PortfolioAccountV16 {
         let account = self.svm.get_account(&portfolio).expect("portfolio account");
         state::read_portfolio(&account.data).unwrap()
@@ -3095,12 +3100,14 @@ impl V16CuEnv {
                 },
             )
             .unwrap();
+        let expected_sequence = self.insurance_withdraw_sequence(0);
         let cu = send_tx(
             &mut self.svm,
             self.program_id,
             &self.payer,
             ProgInstruction::WithdrawInsuranceAsset {
                 asset_index: 0,
+                expected_sequence,
                 amount,
             },
             vec![
@@ -3123,12 +3130,15 @@ impl V16CuEnv {
         domain: u16,
         amount: u128,
     ) -> u64 {
+        let asset_index = (domain / 2) as u16;
+        let expected_sequence = self.insurance_withdraw_sequence(asset_index);
         send_tx(
             &mut self.svm,
             self.program_id,
             &self.payer,
             ProgInstruction::WithdrawInsuranceAsset {
-                asset_index: (domain / 2) as u16,
+                asset_index,
+                expected_sequence,
                 amount,
             },
             vec![
@@ -3254,12 +3264,14 @@ impl V16CuEnv {
                 },
             )
             .unwrap();
+        let expected_sequence = self.insurance_withdraw_sequence(asset_index);
         let cu = send_tx(
             &mut self.svm,
             self.program_id,
             &self.payer,
             ProgInstruction::WithdrawInsuranceAsset {
                 asset_index,
+                expected_sequence,
                 amount,
             },
             vec![
@@ -23146,6 +23158,7 @@ fn v16_attack_insurance_ledger_authority_binding_enforced() {
         &env.payer,
         ProgInstruction::WithdrawInsuranceAsset {
             asset_index: 0,
+            expected_sequence: 0,
             amount: 40,
         },
         vec![
@@ -23193,6 +23206,7 @@ fn v16_attack_insurance_ledger_authority_binding_enforced() {
         &env.payer,
         ProgInstruction::WithdrawInsuranceAsset {
             asset_index: 0,
+            expected_sequence: 0,
             amount: 40,
         },
         vec![
@@ -23373,6 +23387,7 @@ fn v16_attack_insurance_ledger_market_binding_enforced() {
         &env.payer,
         ProgInstruction::WithdrawInsuranceAsset {
             asset_index: 0,
+            expected_sequence: 0,
             amount: 40,
         },
         vec![
@@ -23431,6 +23446,7 @@ fn v16_attack_insurance_ledger_market_binding_enforced() {
         &env.payer,
         ProgInstruction::WithdrawInsuranceAsset {
             asset_index: 0,
+            expected_sequence: 0,
             amount: 40,
         },
         vec![
@@ -24457,6 +24473,7 @@ fn v16_attack_value_paths_cannot_use_portfolio_as_optional_ledger() {
     let withdraw_insurance = env.send(
         ProgInstruction::WithdrawInsuranceAsset {
             asset_index: 0,
+            expected_sequence: 0,
             amount: 10,
         },
         vec![
@@ -24662,6 +24679,7 @@ fn v16_attack_value_paths_cannot_use_market_as_optional_ledger() {
     let withdraw_insurance = env.send(
         ProgInstruction::WithdrawInsuranceAsset {
             asset_index: 0,
+            expected_sequence: 0,
             amount: 10,
         },
         vec![
@@ -25420,6 +25438,7 @@ fn v16_attack_domain_indexed_calls_reject_out_of_range_atomically() {
         &env.payer,
         ProgInstruction::WithdrawInsuranceAsset {
             asset_index: BAD_DOMAIN as u16,
+            expected_sequence: 0,
             amount: 1,
         },
         vec![
@@ -28206,6 +28225,7 @@ fn v16_attack_withdraw_insurance_asset_operator_gated() {
         &env.payer,
         ProgInstruction::WithdrawInsuranceAsset {
             asset_index: 0,
+            expected_sequence: 0,
             amount: 500_000,
         },
         vec![
@@ -28271,6 +28291,7 @@ fn v16_attack_withdraw_insurance_asset_rejects_noncanonical_vault() {
         &env.payer,
         ProgInstruction::WithdrawInsuranceAsset {
             asset_index: 0,
+            expected_sequence: 0,
             amount: 40,
         },
         vec![
@@ -28321,6 +28342,7 @@ fn v16_attack_withdraw_insurance_asset_rejects_noncanonical_vault() {
         &env.payer,
         ProgInstruction::WithdrawInsuranceAsset {
             asset_index: 0,
+            expected_sequence: 0,
             amount: 40,
         },
         vec![
@@ -28403,6 +28425,7 @@ fn v16_attack_live_asset_insurance_withdraw_uses_operator_not_authority() {
         &env.payer,
         ProgInstruction::WithdrawInsuranceAsset {
             asset_index: 1,
+            expected_sequence: 0,
             amount: 40,
         },
         vec![
@@ -46731,6 +46754,7 @@ fn v16_attack_dual_mint_domain_insurance_no_double_withdraw() {
     let double_withdraw = env.send(
         ProgInstruction::WithdrawInsuranceAsset {
             asset_index: 0,
+            expected_sequence: env.insurance_withdraw_sequence(0),
             amount: 1,
         },
         vec![
@@ -46764,6 +46788,7 @@ fn v16_attack_dual_mint_domain_insurance_no_double_withdraw() {
     let legitimate_secondary = env.send(
         ProgInstruction::WithdrawInsuranceAsset {
             asset_index: 0,
+            expected_sequence: env.insurance_withdraw_sequence(0),
             amount: 1,
         },
         vec![
@@ -47105,6 +47130,7 @@ fn v16_attack_market_admin_cannot_drain_foreign_asset_or_user_collateral() {
     let r_foreign = env.send(
         ProgInstruction::WithdrawInsuranceAsset {
             asset_index: 1,
+            expected_sequence: 0,
             amount: 500,
         },
         vec![
@@ -47133,6 +47159,7 @@ fn v16_attack_market_admin_cannot_drain_foreign_asset_or_user_collateral() {
     let r_owner = env.send(
         ProgInstruction::WithdrawInsuranceAsset {
             asset_index: 1,
+            expected_sequence: 0,
             amount: 200,
         },
         vec![
@@ -48332,6 +48359,7 @@ fn v16_bpf_terminal_asset_insurance_partial_ledger_middle_domain_stays_bounded_o
         .send(
             ProgInstruction::WithdrawInsuranceAsset {
                 asset_index: MIDDLE_ASSET as u16,
+                expected_sequence: 0,
                 amount: PARTIAL,
             },
             vec![
@@ -56641,6 +56669,7 @@ fn v16_attack_live_domain_withdrawals_reject_when_resolve_matured() {
     let stale_insurance = env.send(
         ProgInstruction::WithdrawInsuranceAsset {
             asset_index: 0,
+            expected_sequence: 0,
             amount: 20,
         },
         vec![
@@ -59018,6 +59047,7 @@ fn v16_attack_asset0_operator_rotation_rekeys_live_insurance_withdraw() {
         &env.payer,
         ProgInstruction::WithdrawInsuranceAsset {
             asset_index: 0,
+            expected_sequence: 0,
             amount: 100,
         },
         vec![
@@ -59058,6 +59088,7 @@ fn v16_attack_asset0_operator_rotation_rekeys_live_insurance_withdraw() {
         &env.payer,
         ProgInstruction::WithdrawInsuranceAsset {
             asset_index: 0,
+            expected_sequence: 0,
             amount: 100,
         },
         vec![
@@ -59645,6 +59676,7 @@ fn v16_attack_signed_insurance_withdraw_cannot_replay_after_same_generation_topu
         ],
         data: ProgInstruction::WithdrawInsuranceAsset {
             asset_index: ASSET,
+            expected_sequence: 0,
             amount: AMOUNT,
         }
         .encode(),
@@ -59666,6 +59698,7 @@ fn v16_attack_signed_insurance_withdraw_cannot_replay_after_same_generation_topu
     env.send(
         ProgInstruction::WithdrawInsuranceAsset {
             asset_index: ASSET,
+            expected_sequence: 0,
             amount: AMOUNT,
         },
         vec![
@@ -59689,7 +59722,6 @@ fn v16_attack_signed_insurance_withdraw_cannot_replay_after_same_generation_topu
     assert_eq!(env.token_amount(second_source), 0);
     let market_before = env.svm.get_account(&env.market).unwrap();
     let vault_before = env.svm.get_account(&env.vault).unwrap();
-    let provider_balance_before = env.token_amount(second_source);
 
     let replay = env.svm.send_transaction(retained_withdraw);
     if replay.is_ok() {
@@ -59705,6 +59737,15 @@ fn v16_attack_signed_insurance_withdraw_cannot_replay_after_same_generation_topu
         );
         panic!("a retained withdrawal replayed across a same-generation insurance top-up");
     }
+    let replay_error = format!("{:?}", replay.unwrap_err());
+    let expected_error = format!(
+        "Custom({})",
+        percolator_prog::error::PercolatorError::EngineStale as u32
+    );
+    assert!(
+        replay_error.contains(&expected_error),
+        "stale withdrawal must fail with {expected_error}, got {replay_error}"
+    );
 
     assert_eq!(
         env.svm.get_account(&env.market).unwrap(),
@@ -59717,7 +59758,34 @@ fn v16_attack_signed_insurance_withdraw_cannot_replay_after_same_generation_topu
         "rejected stale withdrawal leaves custody byte-identical"
     );
     assert_eq!(env.token_amount(retained_dest), AMOUNT as u64);
-    assert_eq!(env.token_amount(second_source), provider_balance_before);
+    assert_eq!(env.token_amount(second_source), 0);
+    assert_eq!(
+        env.market_state().1.insurance_domain_budget[DOMAIN as usize],
+        AMOUNT,
+        "the rejected replay preserves the independent replenishment"
+    );
+    assert_eq!(env.insurance_withdraw_sequence(ASSET), 1);
+
+    let current_dest = env.token_account(operator.pubkey(), 0);
+    env.send(
+        ProgInstruction::WithdrawInsuranceAsset {
+            asset_index: ASSET,
+            expected_sequence: 1,
+            amount: AMOUNT,
+        },
+        vec![
+            AccountMeta::new(operator.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(current_dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&operator],
+    )
+    .expect("a freshly sequenced withdrawal remains live");
+    assert_eq!(env.token_amount(current_dest), AMOUNT as u64);
+    assert_eq!(env.insurance_withdraw_sequence(ASSET), 2);
 }
 
 fn assert_underfunded_ewma_exit_uses_collected_fee(path: NoCpiReportedPricePath) {
