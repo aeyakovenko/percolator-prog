@@ -512,7 +512,11 @@ pub mod state {
         pub collateral_mint: [u8; 32],
         pub secondary_collateral_mint: [u8; 32],
         pub maintenance_fee_per_slot: u128,
-        pub permissionless_market_init_fee: u128,
+        /// Public activation transfers are SPL-token `u64` amounts. The former high word was
+        /// therefore always zero and now stores the stale-resolution policy intent watermark
+        /// without changing the 448-byte market account ABI.
+        pub permissionless_market_init_fee: u64,
+        pub permissionless_resolve_policy_sequence: u64,
         pub trade_fee_base_bps: u64,
         pub permissionless_resolve_stale_slots: u64,
         pub force_close_delay_slots: u64,
@@ -2577,6 +2581,7 @@ pub mod ix {
         },
         SyncInsuranceLedger,
         ConfigurePermissionlessResolve {
+            sequence: u64,
             stale_slots: u64,
             force_close_delay_slots: u64,
         },
@@ -2866,6 +2871,7 @@ pub mod ix {
                 },
                 54 => Self::SyncInsuranceLedger,
                 38 => Self::ConfigurePermissionlessResolve {
+                    sequence: read_u64(&mut rest)?,
                     stale_slots: read_u64(&mut rest)?,
                     force_close_delay_slots: read_u64(&mut rest)?,
                 },
@@ -3169,10 +3175,12 @@ pub mod ix {
                 }
                 Self::SyncInsuranceLedger => out.push(54),
                 Self::ConfigurePermissionlessResolve {
+                    sequence,
                     stale_slots,
                     force_close_delay_slots,
                 } => {
                     out.push(38);
+                    push_u64(&mut out, sequence);
                     push_u64(&mut out, stale_slots);
                     push_u64(&mut out, force_close_delay_slots);
                 }
@@ -5323,11 +5331,13 @@ pub mod processor {
             }
             Instruction::SyncInsuranceLedger => handle_sync_insurance_ledger(program_id, accounts),
             Instruction::ConfigurePermissionlessResolve {
+                sequence,
                 stale_slots,
                 force_close_delay_slots,
             } => handle_configure_permissionless_resolve(
                 program_id,
                 accounts,
+                sequence,
                 stale_slots,
                 force_close_delay_slots,
             ),
@@ -5550,6 +5560,7 @@ pub mod processor {
             secondary_collateral_mint: [0u8; 32],
             maintenance_fee_per_slot,
             permissionless_market_init_fee: 0,
+            permissionless_resolve_policy_sequence: 0,
             trade_fee_base_bps,
             permissionless_resolve_stale_slots: 0,
             force_close_delay_slots: 0,
@@ -9107,7 +9118,7 @@ pub mod processor {
                 0
             } else {
                 let fee = permissionless_market_init_fee_for_asset(
-                    cfg_pre.permissionless_market_init_fee,
+                    cfg_pre.permissionless_market_init_fee as u128,
                     asset_index,
                 )?;
                 if fee == 0 {
@@ -9146,7 +9157,7 @@ pub mod processor {
                         cfg.marketauth != [0u8; 32] && cfg.marketauth == authority.key.to_bytes();
                     if !still_asset_authority {
                         let expected_fee = permissionless_market_init_fee_for_asset(
-                            cfg.permissionless_market_init_fee,
+                            cfg.permissionless_market_init_fee as u128,
                             asset_index,
                         )?;
                         if expected_fee == 0 || expected_fee != init_fee {
@@ -9710,7 +9721,7 @@ pub mod processor {
         let (mut cfg, _, _, _) =
             state::read_market_config_mode_and_capacity(&market_ai.try_borrow_data()?)?;
         expect_live_authority(&cfg.marketauth, admin.key)?;
-        cfg.permissionless_market_init_fee = min_init_fee;
+        cfg.permissionless_market_init_fee = min_init_fee as u64;
         state::write_wrapper_config(&mut market_ai.try_borrow_mut_data()?, &cfg)
     }
 
@@ -9718,6 +9729,7 @@ pub mod processor {
     fn handle_configure_permissionless_resolve<'a>(
         program_id: &Pubkey,
         accounts: &'a [AccountInfo<'a>],
+        sequence: u64,
         stale_slots: u64,
         force_close_delay_slots: u64,
     ) -> ProgramResult {
@@ -9736,12 +9748,16 @@ pub mod processor {
         let (mut cfg, mode, _, _) =
             state::read_market_config_mode_and_capacity(&market_ai.try_borrow_data()?)?;
         expect_live_authority(&cfg.marketauth, admin.key)?;
+        if sequence == 0 || sequence <= cfg.permissionless_resolve_policy_sequence {
+            return Err(PercolatorError::EngineStale.into());
+        }
         if mode != MarketModeV16::Live {
             return Err(PercolatorError::EngineLockActive.into());
         }
         if oracle_v16::permissionless_stale_matured(&cfg, authenticated_slot_or_fallback(0)) {
             return Err(PercolatorError::OracleStale.into());
         }
+        cfg.permissionless_resolve_policy_sequence = sequence;
         cfg.permissionless_resolve_stale_slots = stale_slots;
         cfg.force_close_delay_slots = force_close_delay_slots;
         state::write_wrapper_config(&mut market_ai.try_borrow_mut_data()?, &cfg)

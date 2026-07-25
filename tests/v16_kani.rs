@@ -899,24 +899,35 @@ fn kani_v16_base_unit_payloads_decode_preserves_wire_fields() {
 
 #[kani::proof]
 fn kani_v16_permissionless_resolve_decode_preserves_wire_fields() {
+    let sequence: u64 = kani::any();
     let stale_slots: u64 = kani::any();
     let force_close_delay_slots: u64 = kani::any();
     let now_slot: u64 = kani::any();
 
-    let mut configure = [0u8; 17];
+    let mut configure = [0u8; 25];
     configure[0] = 38;
-    configure[1..9].copy_from_slice(&stale_slots.to_le_bytes());
-    configure[9..17].copy_from_slice(&force_close_delay_slots.to_le_bytes());
+    configure[1..9].copy_from_slice(&sequence.to_le_bytes());
+    configure[9..17].copy_from_slice(&stale_slots.to_le_bytes());
+    configure[17..25].copy_from_slice(&force_close_delay_slots.to_le_bytes());
     match Instruction::decode(&configure).unwrap() {
         Instruction::ConfigurePermissionlessResolve {
+            sequence: got_sequence,
             stale_slots: got_stale,
             force_close_delay_slots: got_delay,
         } => {
+            assert_eq!(got_sequence, sequence);
             assert_eq!(got_stale, stale_slots);
             assert_eq!(got_delay, force_close_delay_slots);
         }
         _ => unreachable!(),
     }
+    assert!(Instruction::decode(&configure[..24]).is_err());
+
+    let mut legacy = [0u8; 17];
+    legacy[0] = 38;
+    legacy[1..9].copy_from_slice(&stale_slots.to_le_bytes());
+    legacy[9..17].copy_from_slice(&force_close_delay_slots.to_le_bytes());
+    assert!(Instruction::decode(&legacy).is_err());
 
     let mut resolve = [0u8; 9];
     resolve[0] = 39;
@@ -1272,6 +1283,7 @@ fn kani_v16_admin_policy_payloads_reject_trailing_byte() {
     );
     assert_rejects_trailing_byte(
         Instruction::ConfigurePermissionlessResolve {
+            sequence: 1,
             stale_slots: 5,
             force_close_delay_slots: 1,
         },

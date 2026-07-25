@@ -2277,11 +2277,18 @@ impl V16CuEnv {
         stale_slots: u64,
         force_close_delay_slots: u64,
     ) -> u64 {
+        let sequence = self
+            .market_state()
+            .0
+            .permissionless_resolve_policy_sequence
+            .checked_add(1)
+            .unwrap();
         send_tx(
             &mut self.svm,
             self.program_id,
             &self.payer,
             ProgInstruction::ConfigurePermissionlessResolve {
+                sequence,
                 stale_slots,
                 force_close_delay_slots,
             },
@@ -25894,6 +25901,7 @@ fn v16_attack_rotated_marketauth_cannot_replay_policy_updates() {
     );
     old_attempt(
         ProgInstruction::ConfigurePermissionlessResolve {
+            sequence: 1,
             stale_slots: 100,
             force_close_delay_slots: 5,
         },
@@ -25940,6 +25948,7 @@ fn v16_attack_rotated_marketauth_cannot_replay_policy_updates() {
     );
     new_update(
         ProgInstruction::ConfigurePermissionlessResolve {
+            sequence: 1,
             stale_slots: 100,
             force_close_delay_slots: 5,
         },
@@ -36856,6 +36865,7 @@ fn v16_attack_force_close_rejects_cross_market_portfolio_substitution() {
         env.program_id,
         &env.payer,
         ProgInstruction::ConfigurePermissionlessResolve {
+            sequence: 1,
             stale_slots: 100,
             force_close_delay_slots: DELAY,
         },
@@ -54349,6 +54359,7 @@ fn v16_attack_configure_permissionless_resolve_gated_and_bounded() {
     env.svm.expire_blockhash();
     let r_grief = env.send(
         ProgInstruction::ConfigurePermissionlessResolve {
+            sequence: 1,
             stale_slots: 1_000,
             force_close_delay_slots: 1_000,
         },
@@ -54369,6 +54380,7 @@ fn v16_attack_configure_permissionless_resolve_gated_and_bounded() {
     env.svm.expire_blockhash();
     let r_zero = env.send(
         ProgInstruction::ConfigurePermissionlessResolve {
+            sequence: 1,
             stale_slots: 0,
             force_close_delay_slots: 1_000,
         },
@@ -54384,6 +54396,7 @@ fn v16_attack_configure_permissionless_resolve_gated_and_bounded() {
     env.svm.expire_blockhash();
     let r_huge = env.send(
         ProgInstruction::ConfigurePermissionlessResolve {
+            sequence: 1,
             stale_slots: percolator_prog::constants::MAX_PERMISSIONLESS_RESOLVE_STALE_SLOTS + 1,
             force_close_delay_slots: 1_000,
         },
@@ -54402,6 +54415,7 @@ fn v16_attack_configure_permissionless_resolve_gated_and_bounded() {
     env.svm.expire_blockhash();
     let r_force_zero = env.send(
         ProgInstruction::ConfigurePermissionlessResolve {
+            sequence: 1,
             stale_slots: 1_000,
             force_close_delay_slots: 0,
         },
@@ -54420,6 +54434,7 @@ fn v16_attack_configure_permissionless_resolve_gated_and_bounded() {
     env.svm.expire_blockhash();
     let r_force_huge = env.send(
         ProgInstruction::ConfigurePermissionlessResolve {
+            sequence: 1,
             stale_slots: 1_000,
             force_close_delay_slots: percolator_prog::constants::MAX_FORCE_CLOSE_DELAY_SLOTS + 1,
         },
@@ -54440,6 +54455,7 @@ fn v16_attack_configure_permissionless_resolve_gated_and_bounded() {
     env.svm.expire_blockhash();
     let r_ok = env.send(
         ProgInstruction::ConfigurePermissionlessResolve {
+            sequence: 1,
             stale_slots: 1_000,
             force_close_delay_slots: 1_000,
         },
@@ -54480,6 +54496,7 @@ fn v16_attack_configure_permissionless_resolve_rejects_when_resolve_matured() {
     env.svm.expire_blockhash();
     let fresh = env.send(
         ProgInstruction::ConfigurePermissionlessResolve {
+            sequence: 2,
             stale_slots: 6,
             force_close_delay_slots: 6,
         },
@@ -54507,6 +54524,7 @@ fn v16_attack_configure_permissionless_resolve_rejects_when_resolve_matured() {
     env.svm.expire_blockhash();
     let stale = env.send(
         ProgInstruction::ConfigurePermissionlessResolve {
+            sequence: 3,
             stale_slots: 1_000,
             force_close_delay_slots: 1_000,
         },
@@ -59894,4 +59912,44 @@ fn v16_attack_permissionless_resolve_policy_rejects_delayed_same_generation_inte
         PRICE,
         0,
     );
+
+    env.svm.expire_blockhash();
+    env.send(
+        ProgInstruction::ConfigurePermissionlessResolve {
+            sequence: 5,
+            stale_slots: CORRECTED_STALE_SLOTS,
+            force_close_delay_slots: FORCE_CLOSE_DELAY_SLOTS,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&admin],
+    )
+    .expect("a forward sequence gap remains valid");
+    let after_gap = env.svm.get_account(&env.market).unwrap();
+    for stale_sequence in [0, 5, 4] {
+        env.svm.expire_blockhash();
+        let rejected = env.send(
+            ProgInstruction::ConfigurePermissionlessResolve {
+                sequence: stale_sequence,
+                stale_slots: CORRECTED_STALE_SLOTS - 1,
+                force_close_delay_slots: FORCE_CLOSE_DELAY_SLOTS,
+            },
+            vec![
+                AccountMeta::new(admin.pubkey(), true),
+                AccountMeta::new(env.market, false),
+            ],
+            &[&admin],
+        );
+        assert!(
+            rejected.is_err(),
+            "zero, equal, and lower policy sequences must reject"
+        );
+        assert_eq!(
+            env.svm.get_account(&env.market).unwrap(),
+            after_gap,
+            "rejected policy sequence leaves the market byte-identical"
+        );
+    }
 }
