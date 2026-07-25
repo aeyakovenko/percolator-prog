@@ -59717,3 +59717,131 @@ fn v16_attack_underfunded_exit_cannot_move_ewma_with_uncollectible_fee() {
         assert_underfunded_ewma_exit_uses_collected_fee(path);
     }
 }
+
+#[test]
+fn v16_attack_delayed_fee_redirect_cannot_divert_canonical_insurance() {
+    const PRICE: u64 = 100;
+    const DEPOSIT: u128 = 10_000;
+    const SIZE_Q: i128 = 10 * POS_SCALE as i128;
+    const FEE_BPS: u64 = 10_000;
+    const FEE_PER_SIDE: u128 = 1_000;
+
+    let mut env = V16CuEnv::new();
+    let attacker = Keypair::new();
+    env.update_market_init_fee_policy_with_cu(1);
+    env.svm.warp_to_slot(1);
+    env.activate_permissionless_asset_with_fee(
+        &attacker,
+        1,
+        1,
+        PRICE,
+        attacker.pubkey(),
+        attacker.pubkey(),
+        attacker.pubkey(),
+        attacker.pubkey(),
+        1,
+    );
+
+    let victim = Keypair::new();
+    let victim_portfolio = env.create_portfolio(&victim);
+    let attacker_portfolio = env.create_portfolio(&attacker);
+    env.deposit(&victim, victim_portfolio, DEPOSIT);
+    env.deposit(&attacker, attacker_portfolio, DEPOSIT);
+
+    // The honest market authority signs an old local-fee intent and then a
+    // correction routing all non-base fees to canonical asset-0 insurance.
+    // Both remain valid under one recent blockhash. Once the correction is
+    // visible, the independent victim signs the fee-bearing trade.
+    let blockhash = env.svm.latest_blockhash();
+    let make_policy_tx = |redirect_bps| {
+        let instruction = Instruction {
+            program_id: env.program_id,
+            accounts: vec![
+                AccountMeta::new(env.admin.pubkey(), true),
+                AccountMeta::new(env.market, false),
+            ],
+            data: ProgInstruction::UpdateFeeRedirectPolicy { redirect_bps }.encode(),
+        };
+        Transaction::new_signed_with_payer(
+            &[heap_ix(), cu_ix(), instruction],
+            Some(&env.payer.pubkey()),
+            &[&env.payer, &env.admin],
+            blockhash,
+        )
+    };
+    let delayed_local_redirect = make_policy_tx(0);
+    let correcting_canonical_redirect = make_policy_tx(10_000);
+    env.svm
+        .send_transaction(correcting_canonical_redirect)
+        .expect("newer canonical redirect lands first");
+    assert_eq!(env.market_state().0.fee_redirect_to_market_0_bps, 10_000);
+
+    let trade_instruction = Instruction {
+        program_id: env.program_id,
+        accounts: vec![
+            AccountMeta::new(victim.pubkey(), true),
+            AccountMeta::new(attacker.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(victim_portfolio, false),
+            AccountMeta::new(attacker_portfolio, false),
+        ],
+        data: ProgInstruction::TradeNoCpi {
+            asset_index: 1,
+            size_q: SIZE_Q,
+            exec_price: PRICE,
+            fee_bps: FEE_BPS,
+        }
+        .encode(),
+    };
+    let presigned_trade = Transaction::new_signed_with_payer(
+        &[heap_ix(), cu_ix(), trade_instruction],
+        Some(&env.payer.pubkey()),
+        &[&env.payer, &victim, &attacker],
+        blockhash,
+    );
+
+    let before = env.market_state().1.insurance_domain_budget;
+    let delayed_accepted = env.svm.send_transaction(delayed_local_redirect).is_ok();
+    env.svm
+        .send_transaction(presigned_trade)
+        .expect("the independently signed trade remains executable");
+
+    let (_, group) = env.market_state();
+    let canonical_fee = (group.insurance_domain_budget[0] - before[0])
+        + (group.insurance_domain_budget[1] - before[1]);
+    let local_fee = (group.insurance_domain_budget[2] - before[2])
+        + (group.insurance_domain_budget[3] - before[3]);
+    let victim_capital = env.portfolio_state(victim_portfolio).capital.get();
+    let attacker_capital = env.portfolio_state(attacker_portfolio).capital.get();
+    let extracted = if local_fee == 0 {
+        0
+    } else {
+        let (destination, _) = env
+            .try_withdraw_insurance_asset_with_authority(&attacker, 1, local_fee)
+            .expect("permissionless asset operator withdraws the diverted fees");
+        env.token_amount(destination) as u128
+    };
+
+    if delayed_accepted {
+        assert_eq!(canonical_fee, 0);
+        assert_eq!(local_fee, FEE_PER_SIDE * 2);
+        assert_eq!(victim_capital, DEPOSIT - FEE_PER_SIDE);
+        assert_eq!(attacker_capital, DEPOSIT - FEE_PER_SIDE);
+        assert_eq!(extracted, FEE_PER_SIDE * 2);
+        assert_eq!(
+            attacker_capital + extracted,
+            DEPOSIT + FEE_PER_SIDE,
+            "operator gain must equal the independent victim's diverted fee"
+        );
+        panic!(
+            "older local-redirect intent landed after the correction and let \
+             the asset operator extract {extracted} atoms from canonical insurance"
+        );
+    }
+
+    assert_eq!(canonical_fee, FEE_PER_SIDE * 2);
+    assert_eq!(local_fee, 0);
+    assert_eq!(victim_capital, DEPOSIT - FEE_PER_SIDE);
+    assert_eq!(attacker_capital, DEPOSIT - FEE_PER_SIDE);
+    assert_eq!(extracted, 0);
+}
