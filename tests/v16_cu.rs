@@ -1008,11 +1008,20 @@ impl V16CuEnv {
     }
 
     fn update_trade_fee_policy_with_cu(&mut self, trade_fee_base_bps: u64) -> u64 {
+        let policy_sequence = self
+            .market_state()
+            .0
+            .trade_fee_policy_sequence
+            .checked_add(1)
+            .expect("trade fee policy sequence");
         send_tx(
             &mut self.svm,
             self.program_id,
             &self.payer,
-            ProgInstruction::UpdateTradeFeePolicy { trade_fee_base_bps },
+            ProgInstruction::UpdateTradeFeePolicy {
+                trade_fee_base_bps,
+                policy_sequence,
+            },
             vec![
                 AccountMeta::new(self.admin.pubkey(), true),
                 AccountMeta::new(self.market, false),
@@ -13140,6 +13149,7 @@ fn v16_bpf_policy_authority_and_base_unit_tags_are_bounded_and_persist() {
     assert_cu_within("UpdateTradeFeePolicy", trade_fee_cu, CUSTODY_CU_LIMIT);
     let (cfg, _) = env.market_state();
     assert_eq!(cfg.trade_fee_base_bps, 88);
+    assert_eq!(cfg.trade_fee_policy_sequence, 1);
 
     let redirect_cu = env.update_fee_redirect_policy_with_cu(2_500);
     assert_cu_within("UpdateFeeRedirectPolicy", redirect_cu, CUSTODY_CU_LIMIT);
@@ -34507,6 +34517,7 @@ fn v16_attack_global_policy_bounds_reject_grief_values() {
         &mut env,
         ProgInstruction::UpdateTradeFeePolicy {
             trade_fee_base_bps: 10_001,
+            policy_sequence: 2,
         },
         "trade fee above the market maximum",
     );
@@ -34594,6 +34605,7 @@ fn v16_attack_trade_fee_policy_follows_asset0_insurance_authority() {
         &env.payer,
         ProgInstruction::UpdateTradeFeePolicy {
             trade_fee_base_bps: 500,
+            policy_sequence: 1,
         },
         vec![
             AccountMeta::new(admin.pubkey(), true),
@@ -34619,6 +34631,7 @@ fn v16_attack_trade_fee_policy_follows_asset0_insurance_authority() {
         &env.payer,
         ProgInstruction::UpdateTradeFeePolicy {
             trade_fee_base_bps: 500,
+            policy_sequence: 1,
         },
         vec![
             AccountMeta::new(new_insurance.pubkey(), true),
@@ -34711,7 +34724,8 @@ fn v16_attack_permissionless_asset_authority_cannot_update_marketwide_policies()
 
     assert!(
         attempt(ProgInstruction::UpdateTradeFeePolicy {
-            trade_fee_base_bps: 123
+            trade_fee_base_bps: 123,
+            policy_sequence: 1,
         })
         .is_err(),
         "asset-1 authority must not control the market-wide trade fee"
@@ -59468,6 +59482,7 @@ fn v16_attack_update_authority_handoff_rekeys_asset0_default_runtime_authorities
         &env.payer,
         ProgInstruction::UpdateTradeFeePolicy {
             trade_fee_base_bps: 500,
+            policy_sequence: 1,
         },
         vec![
             AccountMeta::new(old_marketauth.pubkey(), true),
@@ -59492,6 +59507,7 @@ fn v16_attack_update_authority_handoff_rekeys_asset0_default_runtime_authorities
         &env.payer,
         ProgInstruction::UpdateTradeFeePolicy {
             trade_fee_base_bps: 500,
+            policy_sequence: 1,
         },
         vec![
             AccountMeta::new(new_marketauth.pubkey(), true),
@@ -59719,6 +59735,58 @@ fn v16_attack_underfunded_exit_cannot_move_ewma_with_uncollectible_fee() {
 }
 
 #[test]
+fn v16_bpf_trade_fee_policy_sequence_accepts_gaps_and_rejects_replays() {
+    let mut env = V16CuEnv::new();
+    env.update_market_init_fee_policy_with_cu(37);
+    let update = |env: &mut V16CuEnv, sequence: u64, fee_bps: u64| {
+        env.svm.expire_blockhash();
+        send_tx(
+            &mut env.svm,
+            env.program_id,
+            &env.payer,
+            ProgInstruction::UpdateTradeFeePolicy {
+                trade_fee_base_bps: fee_bps,
+                policy_sequence: sequence,
+            },
+            vec![
+                AccountMeta::new(env.admin.pubkey(), true),
+                AccountMeta::new(env.market, false),
+            ],
+            &[&env.admin],
+        )
+    };
+
+    let first_cu = update(&mut env, 17, 1_234).expect("first sequence with a forward gap");
+    assert_cu_within("UpdateTradeFeePolicy sequenced", first_cu, CUSTODY_CU_LIMIT);
+    let accepted = env.svm.get_account(&env.market).unwrap();
+    let cfg = env.market_state().0;
+    assert_eq!(cfg.trade_fee_base_bps, 1_234);
+    assert_eq!(cfg.trade_fee_policy_sequence, 17);
+    assert_eq!(
+        cfg.permissionless_market_init_fee, 37,
+        "the ABI-compatible sequence word must not corrupt the adjacent init fee"
+    );
+
+    for stale_sequence in [0, 16, 17] {
+        assert!(
+            update(&mut env, stale_sequence, 9_999).is_err(),
+            "zero, lower, and equal policy sequences must reject"
+        );
+        assert_eq!(
+            env.svm.get_account(&env.market).unwrap(),
+            accepted,
+            "a rejected policy replay must leave the complete market byte-identical"
+        );
+    }
+
+    update(&mut env, 1_000_000, 4_321).expect("large forward sequence gaps remain valid");
+    let cfg = env.market_state().0;
+    assert_eq!(cfg.trade_fee_base_bps, 4_321);
+    assert_eq!(cfg.trade_fee_policy_sequence, 1_000_000);
+    assert_eq!(cfg.permissionless_market_init_fee, 37);
+}
+
+#[test]
 fn v16_attack_delayed_trade_fee_policy_cannot_tax_presigned_trade() {
     const PRICE: u64 = 100;
     const DEPOSIT: u128 = 10_000;
@@ -59754,14 +59822,18 @@ fn v16_attack_delayed_trade_fee_policy_cannot_tax_presigned_trade() {
     // policy. An untrusted relayer must not be able to restore the older fee
     // immediately before submitting the already-signed trade.
     let blockhash = env.svm.latest_blockhash();
-    let make_policy_tx = |trade_fee_base_bps| {
+    let make_policy_tx = |trade_fee_base_bps, policy_sequence| {
         let instruction = Instruction {
             program_id: env.program_id,
             accounts: vec![
                 AccountMeta::new(env.admin.pubkey(), true),
                 AccountMeta::new(env.market, false),
             ],
-            data: ProgInstruction::UpdateTradeFeePolicy { trade_fee_base_bps }.encode(),
+            data: ProgInstruction::UpdateTradeFeePolicy {
+                trade_fee_base_bps,
+                policy_sequence,
+            }
+            .encode(),
         };
         Transaction::new_signed_with_payer(
             &[heap_ix(), cu_ix(), instruction],
@@ -59770,8 +59842,8 @@ fn v16_attack_delayed_trade_fee_policy_cannot_tax_presigned_trade() {
             blockhash,
         )
     };
-    let delayed_high_fee = make_policy_tx(FORCED_FEE_BPS);
-    let correcting_zero_fee = make_policy_tx(0);
+    let delayed_high_fee = make_policy_tx(FORCED_FEE_BPS, 1);
+    let correcting_zero_fee = make_policy_tx(0, 2);
     env.svm
         .send_transaction(correcting_zero_fee)
         .expect("newer zero-fee policy lands first");

@@ -429,6 +429,13 @@ This section describes intent and operational ordering, not argument-by-argument
   - transfers collateral into vault; credits insurance fund in engine
 
 ### Trading
+- **UpdateTradeFeePolicy** (tag 55)
+  - sets the market-wide minimum trade fee and carries an asset-0 insurance-authority-chosen
+    `policy_sequence`
+  - the sequence must strictly exceed the last accepted trade-fee sequence; gaps are allowed, while
+    delayed, duplicate, zero, and lower intents reject
+  - tag 55's payload is exactly `u64 trade_fee_base_bps || u64 policy_sequence`; legacy
+    unsequenced payloads reject
 - **TradeNoCpi**
   - trade without external matcher (used for testing / deterministic scenarios)
 - **TradeCpi**
