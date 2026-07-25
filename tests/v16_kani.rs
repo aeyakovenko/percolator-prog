@@ -943,6 +943,7 @@ fn kani_v16_configure_hybrid_oracle_decode_preserves_wire_fields() {
     let mark_ewma_halflife_slots: u64 = kani::any();
     let mark_min_fee: u64 = kani::any();
     let unit_scale: u32 = kani::any();
+    let observation_sequence: u64 = kani::any();
     let mut feeds = [[0u8; 32]; 3];
     let mut i = 0;
     while i < 3 {
@@ -954,7 +955,7 @@ fn kani_v16_configure_hybrid_oracle_decode_preserves_wire_fields() {
         i += 1;
     }
 
-    let mut data = [0u8; 156];
+    let mut data = [0u8; 164];
     data[0] = 34;
     data[1..3].copy_from_slice(&asset_index.to_le_bytes());
     data[3..11].copy_from_slice(&now_slot.to_le_bytes());
@@ -971,6 +972,7 @@ fn kani_v16_configure_hybrid_oracle_decode_preserves_wire_fields() {
     data[60..92].copy_from_slice(&feeds[0]);
     data[92..124].copy_from_slice(&feeds[1]);
     data[124..156].copy_from_slice(&feeds[2]);
+    data[156..164].copy_from_slice(&observation_sequence.to_le_bytes());
 
     match Instruction::decode(&data).unwrap() {
         Instruction::ConfigureHybridOracle {
@@ -987,6 +989,7 @@ fn kani_v16_configure_hybrid_oracle_decode_preserves_wire_fields() {
             unit_scale: got_unit_scale,
             conf_filter_bps: got_conf,
             oracle_leg_feeds: got_feeds,
+            observation_sequence: got_sequence,
         } => {
             assert_eq!(got_asset_index, asset_index);
             assert_eq!(got_now_slot, now_slot);
@@ -1001,6 +1004,7 @@ fn kani_v16_configure_hybrid_oracle_decode_preserves_wire_fields() {
             assert_eq!(got_unit_scale, unit_scale);
             assert_eq!(got_conf, conf_filter_bps);
             assert_eq!(got_feeds, feeds);
+            assert_eq!(got_sequence, observation_sequence);
         }
         _ => unreachable!(),
     }
@@ -1017,13 +1021,14 @@ fn kani_v16_ewma_mark_decode_preserves_wire_fields() {
     let push_mark_e6: u64 = kani::any();
     let observation_sequence: u64 = kani::any();
 
-    let mut configure = [0u8; 35];
+    let mut configure = [0u8; 43];
     configure[0] = 35;
     configure[1..3].copy_from_slice(&asset_index.to_le_bytes());
     configure[3..11].copy_from_slice(&now_slot.to_le_bytes());
     configure[11..19].copy_from_slice(&initial_mark_e6.to_le_bytes());
     configure[19..27].copy_from_slice(&mark_ewma_halflife_slots.to_le_bytes());
     configure[27..35].copy_from_slice(&mark_min_fee.to_le_bytes());
+    configure[35..43].copy_from_slice(&observation_sequence.to_le_bytes());
     match Instruction::decode(&configure).unwrap() {
         Instruction::ConfigureEwmaMark {
             asset_index: got_asset_index,
@@ -1031,12 +1036,14 @@ fn kani_v16_ewma_mark_decode_preserves_wire_fields() {
             initial_mark_e6: got_mark,
             mark_ewma_halflife_slots: got_halflife,
             mark_min_fee: got_min_fee,
+            observation_sequence: got_sequence,
         } => {
             assert_eq!(got_asset_index, asset_index);
             assert_eq!(got_now, now_slot);
             assert_eq!(got_mark, initial_mark_e6);
             assert_eq!(got_halflife, mark_ewma_halflife_slots);
             assert_eq!(got_min_fee, mark_min_fee);
+            assert_eq!(got_sequence, observation_sequence);
         }
         _ => unreachable!(),
     }
@@ -1062,20 +1069,23 @@ fn kani_v16_ewma_mark_decode_preserves_wire_fields() {
         _ => unreachable!(),
     }
 
-    let mut configure_auth = [0u8; 19];
+    let mut configure_auth = [0u8; 27];
     configure_auth[0] = 62;
     configure_auth[1..3].copy_from_slice(&asset_index.to_le_bytes());
     configure_auth[3..11].copy_from_slice(&now_slot.to_le_bytes());
     configure_auth[11..19].copy_from_slice(&initial_mark_e6.to_le_bytes());
+    configure_auth[19..27].copy_from_slice(&observation_sequence.to_le_bytes());
     match Instruction::decode(&configure_auth).unwrap() {
         Instruction::ConfigureAuthMark {
             asset_index: got_asset_index,
             now_slot: got_now,
             initial_mark_e6: got_mark,
+            observation_sequence: got_sequence,
         } => {
             assert_eq!(got_asset_index, asset_index);
             assert_eq!(got_now, now_slot);
             assert_eq!(got_mark, initial_mark_e6);
+            assert_eq!(got_sequence, observation_sequence);
         }
         _ => unreachable!(),
     }
@@ -1103,8 +1113,22 @@ fn kani_v16_ewma_mark_decode_preserves_wire_fields() {
 }
 
 #[kani::proof]
-fn kani_v16_authenticated_mark_push_payloads_require_exact_length() {
+fn kani_v16_authenticated_mark_payloads_require_exact_length() {
     let extra: u8 = kani::any();
+
+    let hybrid = [34u8; 164];
+    assert!(Instruction::decode(&hybrid).is_ok());
+    assert!(Instruction::decode(&hybrid[..163]).is_err());
+    let mut hybrid_trailing = [34u8; 165];
+    hybrid_trailing[164] = extra;
+    assert!(Instruction::decode(&hybrid_trailing).is_err());
+
+    let configure_ewma = [35u8; 43];
+    assert!(Instruction::decode(&configure_ewma).is_ok());
+    assert!(Instruction::decode(&configure_ewma[..42]).is_err());
+    let mut configure_ewma_trailing = [35u8; 44];
+    configure_ewma_trailing[43] = extra;
+    assert!(Instruction::decode(&configure_ewma_trailing).is_err());
 
     let ewma = [36u8; 27];
     assert!(Instruction::decode(&ewma).is_ok());
@@ -1112,6 +1136,13 @@ fn kani_v16_authenticated_mark_push_payloads_require_exact_length() {
     let mut ewma_trailing = [36u8; 28];
     ewma_trailing[27] = extra;
     assert!(Instruction::decode(&ewma_trailing).is_err());
+
+    let configure_auth = [62u8; 27];
+    assert!(Instruction::decode(&configure_auth).is_ok());
+    assert!(Instruction::decode(&configure_auth[..26]).is_err());
+    let mut configure_auth_trailing = [62u8; 28];
+    configure_auth_trailing[27] = extra;
+    assert!(Instruction::decode(&configure_auth_trailing).is_err());
 
     let auth = [63u8; 27];
     assert!(Instruction::decode(&auth).is_ok());
@@ -1328,6 +1359,7 @@ fn kani_v16_oracle_asset_payloads_reject_trailing_byte() {
             unit_scale: 0,
             conf_filter_bps: 500,
             oracle_leg_feeds: [[1u8; 32], [0u8; 32], [0u8; 32]],
+            observation_sequence: 1,
         },
         extra,
     );
@@ -1338,6 +1370,7 @@ fn kani_v16_oracle_asset_payloads_reject_trailing_byte() {
             initial_mark_e6: 100,
             mark_ewma_halflife_slots: 1,
             mark_min_fee: 0,
+            observation_sequence: 1,
         },
         extra,
     );
@@ -1355,6 +1388,7 @@ fn kani_v16_oracle_asset_payloads_reject_trailing_byte() {
             asset_index: 0,
             now_slot: 1,
             initial_mark_e6: 100,
+            observation_sequence: 1,
         },
         extra,
     );

@@ -2617,6 +2617,7 @@ pub mod ix {
             unit_scale: u32,
             conf_filter_bps: u16,
             oracle_leg_feeds: [[u8; 32]; 3],
+            observation_sequence: u64,
         },
         ConfigureEwmaMark {
             asset_index: u16,
@@ -2624,6 +2625,7 @@ pub mod ix {
             initial_mark_e6: u64,
             mark_ewma_halflife_slots: u64,
             mark_min_fee: u64,
+            observation_sequence: u64,
         },
         PushEwmaMark {
             asset_index: u16,
@@ -2635,6 +2637,7 @@ pub mod ix {
             asset_index: u16,
             now_slot: u64,
             initial_mark_e6: u64,
+            observation_sequence: u64,
         },
         PushAuthMark {
             asset_index: u16,
@@ -2863,6 +2866,7 @@ pub mod ix {
                     asset_index: read_u16(&mut rest)?,
                     now_slot: read_u64(&mut rest)?,
                     initial_mark_e6: read_u64(&mut rest)?,
+                    observation_sequence: read_u64(&mut rest)?,
                 },
                 63 => Self::PushAuthMark {
                     asset_index: read_u16(&mut rest)?,
@@ -2913,6 +2917,7 @@ pub mod ix {
                         read_bytes32(&mut rest)?,
                         read_bytes32(&mut rest)?,
                     ],
+                    observation_sequence: read_u64(&mut rest)?,
                 },
                 35 => Self::ConfigureEwmaMark {
                     asset_index: read_u16(&mut rest)?,
@@ -2920,6 +2925,7 @@ pub mod ix {
                     initial_mark_e6: read_u64(&mut rest)?,
                     mark_ewma_halflife_slots: read_u64(&mut rest)?,
                     mark_min_fee: read_u64(&mut rest)?,
+                    observation_sequence: read_u64(&mut rest)?,
                 },
                 36 => Self::PushEwmaMark {
                     asset_index: read_u16(&mut rest)?,
@@ -3218,6 +3224,7 @@ pub mod ix {
                     unit_scale,
                     conf_filter_bps,
                     oracle_leg_feeds,
+                    observation_sequence,
                 } => {
                     out.push(34);
                     push_u16(&mut out, asset_index);
@@ -3235,6 +3242,7 @@ pub mod ix {
                     for feed in oracle_leg_feeds {
                         out.extend_from_slice(&feed);
                     }
+                    push_u64(&mut out, observation_sequence);
                 }
                 Self::ConfigureEwmaMark {
                     asset_index,
@@ -3242,6 +3250,7 @@ pub mod ix {
                     initial_mark_e6,
                     mark_ewma_halflife_slots,
                     mark_min_fee,
+                    observation_sequence,
                 } => {
                     out.push(35);
                     push_u16(&mut out, asset_index);
@@ -3249,6 +3258,7 @@ pub mod ix {
                     push_u64(&mut out, initial_mark_e6);
                     push_u64(&mut out, mark_ewma_halflife_slots);
                     push_u64(&mut out, mark_min_fee);
+                    push_u64(&mut out, observation_sequence);
                 }
                 Self::PushEwmaMark {
                     asset_index,
@@ -3266,11 +3276,13 @@ pub mod ix {
                     asset_index,
                     now_slot,
                     initial_mark_e6,
+                    observation_sequence,
                 } => {
                     out.push(62);
                     push_u16(&mut out, asset_index);
                     push_u64(&mut out, now_slot);
                     push_u64(&mut out, initial_mark_e6);
+                    push_u64(&mut out, observation_sequence);
                 }
                 Self::PushAuthMark {
                     asset_index,
@@ -4682,6 +4694,16 @@ pub mod processor {
         profile
     }
 
+    fn advance_mark_observation_sequence(
+        profile: &mut state::AssetOracleProfileV16,
+        observation_sequence: u64,
+    ) -> ProgramResult {
+        if observation_sequence <= profile.mark_observation_sequence() {
+            return Err(PercolatorError::EngineStale.into());
+        }
+        profile.set_mark_observation_sequence(observation_sequence)
+    }
+
     fn backing_fee_policy_count_from_profile(profile: &state::AssetOracleProfileV16) -> u16 {
         (profile.backing_trade_fee_bps_long != 0) as u16
             + (profile.backing_trade_fee_bps_short != 0) as u16
@@ -5377,6 +5399,7 @@ pub mod processor {
                 unit_scale,
                 conf_filter_bps,
                 oracle_leg_feeds,
+                observation_sequence,
             } => handle_configure_hybrid_oracle(
                 program_id,
                 accounts,
@@ -5393,6 +5416,7 @@ pub mod processor {
                 unit_scale,
                 conf_filter_bps,
                 oracle_leg_feeds,
+                observation_sequence,
             ),
             Instruction::ConfigureEwmaMark {
                 asset_index,
@@ -5400,6 +5424,7 @@ pub mod processor {
                 initial_mark_e6,
                 mark_ewma_halflife_slots,
                 mark_min_fee,
+                observation_sequence,
             } => handle_configure_ewma_mark(
                 program_id,
                 accounts,
@@ -5408,6 +5433,7 @@ pub mod processor {
                 initial_mark_e6,
                 mark_ewma_halflife_slots,
                 mark_min_fee,
+                observation_sequence,
             ),
             Instruction::PushEwmaMark {
                 asset_index,
@@ -5426,12 +5452,14 @@ pub mod processor {
                 asset_index,
                 now_slot,
                 initial_mark_e6,
+                observation_sequence,
             } => handle_configure_auth_mark(
                 program_id,
                 accounts,
                 asset_index,
                 now_slot,
                 initial_mark_e6,
+                observation_sequence,
             ),
             Instruction::PushAuthMark {
                 asset_index,
@@ -9837,6 +9865,7 @@ pub mod processor {
         unit_scale: u32,
         conf_filter_bps: u16,
         oracle_leg_feeds: [[u8; 32]; constants::ORACLE_LEG_CAP],
+        observation_sequence: u64,
     ) -> ProgramResult {
         let admin = account(accounts, 0)?;
         let market_ai = account(accounts, 1)?;
@@ -9919,6 +9948,7 @@ pub mod processor {
                 oracle_leg_prices_e6: [0u64; constants::ORACLE_LEG_CAP],
                 oracle_leg_publish_times: [0i64; constants::ORACLE_LEG_CAP],
             };
+            advance_mark_observation_sequence(&mut profile, observation_sequence)?;
 
             let (price, publish_time, advanced) = oracle_v16::read_external_price_e6_profile(
                 &mut profile,
@@ -9976,6 +10006,7 @@ pub mod processor {
         initial_mark_e6: u64,
         mark_ewma_halflife_slots: u64,
         mark_min_fee: u64,
+        observation_sequence: u64,
     ) -> ProgramResult {
         let admin = account(accounts, 0)?;
         let market_ai = account(accounts, 1)?;
@@ -10013,7 +10044,7 @@ pub mod processor {
             // oracle_authority exactly like permissionless assets 1..N.
             expect_live_authority(&existing_profile.oracle_authority, admin.key)?;
 
-            let profile = state::AssetOracleProfileV16 {
+            let mut profile = state::AssetOracleProfileV16 {
                 oracle_mode: constants::ORACLE_MODE_EWMA_MARK,
                 oracle_leg_count: 0,
                 oracle_leg_flags: 0,
@@ -10045,6 +10076,7 @@ pub mod processor {
                 oracle_leg_prices_e6: [0u64; constants::ORACLE_LEG_CAP],
                 oracle_leg_publish_times: [0i64; constants::ORACLE_LEG_CAP],
             };
+            advance_mark_observation_sequence(&mut profile, observation_sequence)?;
 
             reset_empty_asset_oracle_anchor_view(
                 &mut group,
@@ -10087,6 +10119,7 @@ pub mod processor {
         asset_index: u16,
         now_slot: u64,
         initial_mark_e6: u64,
+        observation_sequence: u64,
     ) -> ProgramResult {
         let authority = account(accounts, 0)?;
         let market_ai = account(accounts, 1)?;
@@ -10121,7 +10154,7 @@ pub mod processor {
             // oracle_authority exactly like permissionless assets 1..N.
             expect_live_authority(&existing_profile.oracle_authority, authority.key)?;
 
-            let profile = state::AssetOracleProfileV16 {
+            let mut profile = state::AssetOracleProfileV16 {
                 oracle_mode: constants::ORACLE_MODE_AUTH_MARK,
                 oracle_leg_count: 0,
                 oracle_leg_flags: 0,
@@ -10153,6 +10186,7 @@ pub mod processor {
                 oracle_leg_prices_e6: [0u64; constants::ORACLE_LEG_CAP],
                 oracle_leg_publish_times: [0i64; constants::ORACLE_LEG_CAP],
             };
+            advance_mark_observation_sequence(&mut profile, observation_sequence)?;
 
             reset_empty_asset_oracle_anchor_view(
                 &mut group,
@@ -10230,12 +10264,7 @@ pub mod processor {
             }
             let authorities = domain_authorities_from_profile(&cfg, &profile, asset_index_usize);
             expect_live_authority(&authorities.oracle_authority, authority.key)?;
-            if observation_sequence <= profile.mark_observation_sequence() {
-                return Err(PercolatorError::EngineStale.into());
-            }
-            if observation_sequence > state::AssetOracleProfileV16::MAX_MARK_OBSERVATION_SEQUENCE {
-                return Err(PercolatorError::EngineCounterOverflow.into());
-            }
+            advance_mark_observation_sequence(&mut profile, observation_sequence)?;
             if authenticated_slot < profile.mark_ewma_last_slot
                 || authenticated_slot < group.header.current_slot.get()
             {
@@ -10263,7 +10292,6 @@ pub mod processor {
             profile.oracle_target_price_e6 = next_mark;
             profile.oracle_target_publish_time = 0;
             profile.last_good_oracle_slot = authenticated_slot;
-            profile.set_mark_observation_sequence(observation_sequence)?;
             write_oracle_profile_to_view(&mut group, asset_index_usize, &profile)?;
             if asset_index_usize == 0 {
                 cfg.last_good_oracle_slot =
@@ -10319,12 +10347,7 @@ pub mod processor {
             }
             let authorities = domain_authorities_from_profile(&cfg, &profile, asset_index_usize);
             expect_live_authority(&authorities.oracle_authority, authority.key)?;
-            if observation_sequence <= profile.mark_observation_sequence() {
-                return Err(PercolatorError::EngineStale.into());
-            }
-            if observation_sequence > state::AssetOracleProfileV16::MAX_MARK_OBSERVATION_SEQUENCE {
-                return Err(PercolatorError::EngineCounterOverflow.into());
-            }
+            advance_mark_observation_sequence(&mut profile, observation_sequence)?;
             if authenticated_slot < profile.mark_ewma_last_slot
                 || authenticated_slot < group.header.current_slot.get()
             {
@@ -10335,7 +10358,6 @@ pub mod processor {
             profile.oracle_target_price_e6 = mark_e6;
             profile.oracle_target_publish_time = 0;
             profile.last_good_oracle_slot = authenticated_slot;
-            profile.set_mark_observation_sequence(observation_sequence)?;
             write_oracle_profile_to_view(&mut group, asset_index_usize, &profile)?;
             if asset_index_usize == 0 {
                 cfg.last_good_oracle_slot =
