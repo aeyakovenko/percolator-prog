@@ -989,6 +989,12 @@ impl V16CuEnv {
         fee_bps: u16,
         insurance_share_bps: u16,
     ) -> u64 {
+        let profile = state::read_asset_oracle_profile(
+            &self.svm.get_account(&self.market).unwrap().data,
+            domain as usize / 2,
+        )
+        .unwrap();
+        let policy_sequence = profile.asset_intent_sequence().checked_add(1).unwrap();
         send_tx(
             &mut self.svm,
             self.program_id,
@@ -997,6 +1003,7 @@ impl V16CuEnv {
                 domain,
                 fee_bps,
                 insurance_share_bps,
+                policy_sequence,
             },
             vec![
                 AccountMeta::new(self.admin.pubkey(), true),
@@ -25539,6 +25546,7 @@ fn v16_attack_domain_indexed_calls_reject_out_of_range_atomically() {
             domain: BAD_DOMAIN,
             fee_bps: 77,
             insurance_share_bps: 5_000,
+            policy_sequence: 1,
         },
         vec![
             AccountMeta::new(admin.pubkey(), true),
@@ -34320,6 +34328,7 @@ fn v16_attack_backing_fee_policy_authority_gated() {
             domain: 0,
             fee_bps: 77,
             insurance_share_bps: 5_000,
+            policy_sequence: 1,
         },
         vec![
             AccountMeta::new(mallory.pubkey(), true),
@@ -34341,6 +34350,7 @@ fn v16_attack_backing_fee_policy_authority_gated() {
             domain: 0,
             fee_bps: 77,
             insurance_share_bps: 20_000,
+            policy_sequence: 1,
         },
         vec![
             AccountMeta::new(env.admin.pubkey(), true),
@@ -34399,6 +34409,7 @@ fn v16_attack_cross_asset_insurance_authority_cannot_update_other_backing_fee_po
             domain: 0,
             fee_bps: 91,
             insurance_share_bps: 5_000,
+            policy_sequence: 1,
         },
         vec![
             AccountMeta::new(asset1_insurance.pubkey(), true),
@@ -34425,6 +34436,7 @@ fn v16_attack_cross_asset_insurance_authority_cannot_update_other_backing_fee_po
             domain: 2,
             fee_bps: 91,
             insurance_share_bps: 5_000,
+            policy_sequence: 1,
         },
         vec![
             AccountMeta::new(asset1_insurance.pubkey(), true),
@@ -34523,6 +34535,7 @@ fn v16_attack_global_policy_bounds_reject_grief_values() {
             domain: 0,
             fee_bps: 0,
             insurance_share_bps: 1,
+            policy_sequence: 1,
         },
         "nonzero backing insurance split on a zero backing fee",
     );
@@ -34746,6 +34759,7 @@ fn v16_attack_permissionless_asset_authority_cannot_update_marketwide_policies()
             domain: 0,
             fee_bps: 55,
             insurance_share_bps: 5_000,
+            policy_sequence: 1,
         })
         .is_err(),
         "asset-1 authority must not control market-0 backing-fee policy"
@@ -34790,6 +34804,7 @@ fn v16_attack_permissionless_asset_authority_cannot_update_marketwide_policies()
             domain: 2,
             fee_bps: 111,
             insurance_share_bps: 5_000,
+            policy_sequence: 1,
         },
         vec![
             AccountMeta::new(creator.pubkey(), true),
@@ -45654,6 +45669,166 @@ fn v16_attack_backing_fee_split_conserves() {
     assert_domain_budget_remaining_total_consistent(&ga, "backing fee insurance share");
 }
 
+// A relayer must not be able to land an older, authority-signed backing-fee policy after the
+// authority's newer zero-fee correction and charge a source-backed trade under the superseded terms.
+#[test]
+fn v16_attack_delayed_backing_fee_policy_replay_charges_superseded_fee() {
+    fn run(replay_old_policy: bool) -> (u128, u128, u128) {
+        const INITIAL_PRICE: u64 = 100;
+        const ASSET0_MARK: u64 = 105;
+        const ASSET1_MARK: u64 = 95;
+        const ASSET0_SIZE_Q: i128 = 20_000 * POS_SCALE as i128;
+        const ASSET1_SIZE_Q: i128 = 10_000 * POS_SCALE as i128;
+        const SAFE_INCREASE_Q: i128 = 1_000 * POS_SCALE as i128;
+        const DEPOSIT: u128 = 313_000;
+        const WINNING_DOMAIN: u16 = 1;
+
+        let mut env = V16CuEnv::new_with_market_params_and_price_move(4, 1_000, 1_000, 500);
+        env.svm.warp_to_slot(1);
+        env.configure_auth_mark_for_asset_as_admin(0, 1, INITIAL_PRICE);
+        env.configure_auth_mark_for_asset_as_admin(1, 1, INITIAL_PRICE);
+
+        let cross_owner = Keypair::new();
+        let counterparty_owner = Keypair::new();
+        let cross_account = env.create_portfolio(&cross_owner);
+        let counterparty_account = env.create_portfolio(&counterparty_owner);
+        env.deposit(&cross_owner, cross_account, DEPOSIT);
+        env.deposit(&counterparty_owner, counterparty_account, 1_000_000);
+        env.top_up_backing_bucket(WINNING_DOMAIN, 150_000, 10);
+
+        env.trade_asset_with_cu(
+            0,
+            &cross_owner,
+            cross_account,
+            &counterparty_owner,
+            counterparty_account,
+            ASSET0_SIZE_Q,
+            INITIAL_PRICE,
+            0,
+        );
+        env.trade_asset_with_cu(
+            1,
+            &cross_owner,
+            cross_account,
+            &counterparty_owner,
+            counterparty_account,
+            ASSET1_SIZE_Q,
+            INITIAL_PRICE,
+            0,
+        );
+
+        env.svm.warp_to_slot(2);
+        env.push_auth_mark_for_asset_as_admin(0, 2, ASSET0_MARK);
+        env.push_auth_mark_for_asset_as_admin(1, 2, ASSET1_MARK);
+        for (portfolio, asset_index) in [
+            (counterparty_account, 0),
+            (cross_account, 0),
+            (counterparty_account, 1),
+        ] {
+            env.crank(
+                portfolio,
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: 2,
+                    observations: crank_observations(asset_index),
+                },
+            );
+        }
+
+        let make_policy_tx = |fee_bps: u16| {
+            let instruction = Instruction {
+                program_id: env.program_id,
+                accounts: vec![
+                    AccountMeta::new(env.admin.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                ],
+                data: ProgInstruction::UpdateBackingFeePolicy {
+                    domain: WINNING_DOMAIN,
+                    fee_bps,
+                    insurance_share_bps: 0,
+                    policy_sequence: if fee_bps == 0 { 2 } else { 1 },
+                }
+                .encode(),
+            };
+            Transaction::new_signed_with_payer(
+                &[heap_ix(), cu_ix(), instruction],
+                Some(&env.payer.pubkey()),
+                &[&env.payer, &env.admin],
+                env.svm.latest_blockhash(),
+            )
+        };
+        let old_high_fee = make_policy_tx(5_000);
+        let newer_zero_fee = make_policy_tx(0);
+        env.svm
+            .send_transaction(newer_zero_fee)
+            .expect("newer zero-fee policy");
+        if replay_old_policy {
+            env.svm
+                .send_transaction(old_high_fee)
+                .expect_err("delayed old high-fee policy must reject");
+        }
+
+        let (_, before_group) = env.market_state();
+        let capital_before = env.portfolio_state(cross_account).capital.get()
+            + env.portfolio_state(counterparty_account).capital.get();
+        let provider_before =
+            before_group.source_backing_buckets[WINNING_DOMAIN as usize].utilization_fee_earnings;
+        let lien_before: u128 = env
+            .portfolio_state(cross_account)
+            .source_domains
+            .iter()
+            .map(|slot| slot.source_lien_counterparty_backing_num.get())
+            .sum();
+
+        env.svm.warp_to_slot(3);
+        env.trade_asset_with_cu(
+            1,
+            &cross_owner,
+            cross_account,
+            &counterparty_owner,
+            counterparty_account,
+            SAFE_INCREASE_Q,
+            ASSET1_MARK,
+            0,
+        );
+
+        let (_, after_group) = env.market_state();
+        let capital_after = env.portfolio_state(cross_account).capital.get()
+            + env.portfolio_state(counterparty_account).capital.get();
+        let provider_after =
+            after_group.source_backing_buckets[WINNING_DOMAIN as usize].utilization_fee_earnings;
+        let lien_after: u128 = env
+            .portfolio_state(cross_account)
+            .source_domains
+            .iter()
+            .map(|slot| slot.source_lien_counterparty_backing_num.get())
+            .sum();
+        assert!(
+            lien_after > lien_before,
+            "public risk increase must create the source-backed lien that incurs the fee"
+        );
+        (
+            capital_before - capital_after,
+            provider_after - provider_before,
+            lien_after - lien_before,
+        )
+    }
+
+    let current_policy = run(false);
+    let delayed_policy = run(true);
+    assert_eq!(
+        current_policy.0, 0,
+        "the current zero-fee policy charges nothing"
+    );
+    assert_eq!(
+        current_policy.1, 0,
+        "the provider earns nothing under the current policy"
+    );
+    assert_eq!(
+        delayed_policy, current_policy,
+        "a delayed superseded policy must not change trader cost or provider earnings"
+    );
+}
+
 // security.md sweep — permissionless asset-create fee gate (#5 / README L52): when the configured
 // permissionless market-init fee is ZERO, asset creation is NOT permissionless — only the market-wide
 // asset authority may append a new asset; a stranger is rejected with Unauthorized.
@@ -49860,6 +50035,7 @@ fn v16_attack_non_active_asset_cannot_enable_backing_fee_batch_gate() {
                 domain: 2,
                 fee_bps: 77,
                 insurance_share_bps: 5_000,
+                policy_sequence: 1,
             },
             vec![
                 AccountMeta::new(creator.pubkey(), true),
@@ -49942,25 +50118,31 @@ fn v16_attack_retired_reused_asset_backing_fee_policy_cannot_stick_batch_gate() 
         1,
     );
 
-    let update_policy =
-        |env: &mut V16CuEnv, signer: &Keypair, fee_bps: u16| -> Result<u64, String> {
-            env.svm.expire_blockhash();
-            send_tx(
-                &mut env.svm,
-                env.program_id,
-                &env.payer,
-                ProgInstruction::UpdateBackingFeePolicy {
-                    domain: 2,
-                    fee_bps,
-                    insurance_share_bps: if fee_bps == 0 { 0 } else { 5_000 },
-                },
-                vec![
-                    AccountMeta::new(signer.pubkey(), true),
-                    AccountMeta::new(env.market, false),
-                ],
-                &[signer],
-            )
-        };
+    let update_policy = |env: &mut V16CuEnv,
+                         signer: &Keypair,
+                         fee_bps: u16|
+     -> Result<u64, String> {
+        env.svm.expire_blockhash();
+        let profile =
+            state::read_asset_oracle_profile(&env.svm.get_account(&env.market).unwrap().data, 1)
+                .unwrap();
+        send_tx(
+            &mut env.svm,
+            env.program_id,
+            &env.payer,
+            ProgInstruction::UpdateBackingFeePolicy {
+                domain: 2,
+                fee_bps,
+                insurance_share_bps: if fee_bps == 0 { 0 } else { 5_000 },
+                policy_sequence: profile.asset_intent_sequence() + 1,
+            },
+            vec![
+                AccountMeta::new(signer.pubkey(), true),
+                AccountMeta::new(env.market, false),
+            ],
+            &[signer],
+        )
+    };
 
     update_policy(&mut env, &old_creator, 77).expect("old asset authority sets active policy");
     let (cfg_with_policy, _) = env.market_state();

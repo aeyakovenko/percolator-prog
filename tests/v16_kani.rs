@@ -800,25 +800,34 @@ fn kani_v16_update_backing_fee_policy_decode_preserves_wire_fields() {
     let domain: u16 = kani::any();
     let fee_bps: u16 = kani::any();
     let insurance_share_bps: u16 = kani::any();
+    let policy_sequence: u64 = kani::any();
 
-    let mut data = [0u8; 7];
+    let mut data = [0u8; 15];
     data[0] = 51;
     data[1..3].copy_from_slice(&domain.to_le_bytes());
     data[3..5].copy_from_slice(&fee_bps.to_le_bytes());
     data[5..7].copy_from_slice(&insurance_share_bps.to_le_bytes());
+    data[7..15].copy_from_slice(&policy_sequence.to_le_bytes());
 
     match Instruction::decode(&data).unwrap() {
         Instruction::UpdateBackingFeePolicy {
             domain: got_domain,
             fee_bps: got_fee_bps,
             insurance_share_bps: got_insurance_share_bps,
+            policy_sequence: got_policy_sequence,
         } => {
             assert_eq!(got_domain, domain);
             assert_eq!(got_fee_bps, fee_bps);
             assert_eq!(got_insurance_share_bps, insurance_share_bps);
+            assert_eq!(got_policy_sequence, policy_sequence);
         }
         _ => unreachable!(),
     }
+
+    let mut trailing = [0u8; 16];
+    trailing[..15].copy_from_slice(&data);
+    trailing[15] = kani::any();
+    assert!(Instruction::decode(&trailing).is_err());
 }
 
 #[kani::proof]
@@ -1246,6 +1255,7 @@ fn kani_v16_admin_policy_payloads_reject_trailing_byte() {
             domain: 0,
             fee_bps: 25,
             insurance_share_bps: 0,
+            policy_sequence: 1,
         },
         extra,
     );
