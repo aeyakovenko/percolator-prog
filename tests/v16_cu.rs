@@ -59717,3 +59717,144 @@ fn v16_attack_underfunded_exit_cannot_move_ewma_with_uncollectible_fee() {
         assert_underfunded_ewma_exit_uses_collected_fee(path);
     }
 }
+
+// Returning a per-asset authority to a prior holder must not reactivate old handoffs that holder
+// signed during the same asset generation. This remains security-critical after asset_admin is
+// burned: a displaced incoming insurance operator can otherwise retain A->B, wait for A->C->A and
+// an independent provider top-up, then replay the old handoff and drain the new reserve.
+#[test]
+fn v16_attack_asset_authority_handoff_cannot_replay_after_same_generation_aba() {
+    const AMOUNT: u128 = 50_000;
+    const ASSET_INDEX: u16 = 1;
+    const DOMAIN: u16 = 2;
+
+    let mut env = V16CuEnv::new();
+    let provider = Keypair::new();
+    let original = Keypair::new();
+    let attacker = Keypair::new();
+    let interim = Keypair::new();
+    for signer in [&provider, &original, &attacker, &interim] {
+        env.ensure_signer_account(signer.pubkey());
+    }
+
+    env.activate_asset_with_authorities(
+        ASSET_INDEX,
+        2,
+        100,
+        provider.pubkey(),
+        original.pubkey(),
+        original.pubkey(),
+        original.pubkey(),
+    );
+
+    // Remove the cold admin so every following operator handoff is owned solely by the live holder.
+    let asset_admin = env.admin.insecure_clone();
+    env.try_update_per_asset_authority_with_cu(
+        &asset_admin,
+        None,
+        ASSET_INDEX,
+        processor::ASSET_AUTH_ADMIN,
+        [0u8; 32],
+    )
+    .expect("burn asset admin");
+    let profile = state::read_asset_oracle_profile(
+        &env.svm.get_account(&env.market).unwrap().data,
+        ASSET_INDEX as usize,
+    )
+    .unwrap();
+    assert_eq!(profile.asset_admin, [0u8; 32]);
+    assert_eq!(profile.insurance_authority, provider.pubkey().to_bytes());
+    assert_eq!(profile.insurance_operator, original.pubkey().to_bytes());
+
+    let retained_ix = Instruction {
+        program_id: env.program_id,
+        accounts: vec![
+            AccountMeta::new(original.pubkey(), true),
+            AccountMeta::new(attacker.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        data: ProgInstruction::UpdateAssetAuthority {
+            asset_index: ASSET_INDEX,
+            kind: processor::ASSET_AUTH_INSURANCE_OPERATOR,
+            new_pubkey: attacker.pubkey().to_bytes(),
+        }
+        .encode(),
+    };
+    let retained = Transaction::new_signed_with_payer(
+        &[
+            heap_ix(),
+            cu_ix(),
+            ComputeBudgetInstruction::set_compute_unit_price(1),
+            retained_ix,
+        ],
+        Some(&attacker.pubkey()),
+        &[&attacker, &original],
+        env.svm.latest_blockhash(),
+    );
+
+    env.try_update_per_asset_authority_with_cu(
+        &original,
+        Some(&interim),
+        ASSET_INDEX,
+        processor::ASSET_AUTH_INSURANCE_OPERATOR,
+        interim.pubkey().to_bytes(),
+    )
+    .expect("original operator hands off to interim");
+    env.try_update_per_asset_authority_with_cu(
+        &interim,
+        Some(&original),
+        ASSET_INDEX,
+        processor::ASSET_AUTH_INSURANCE_OPERATOR,
+        original.pubkey().to_bytes(),
+    )
+    .expect("interim operator legitimately returns control");
+
+    let source = env.top_up_insurance_domain_with_authority(&provider, DOMAIN, AMOUNT);
+    assert_eq!(env.token_amount(source), 0);
+    assert_eq!(
+        env.market_state().1.insurance_domain_budget[DOMAIN as usize],
+        AMOUNT,
+        "the independent provider contribution makes the replay consequence non-vacuous"
+    );
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    let replay = env.svm.send_transaction(retained);
+    if replay.is_ok() {
+        let replayed_profile = state::read_asset_oracle_profile(
+            &env.svm.get_account(&env.market).unwrap().data,
+            ASSET_INDEX as usize,
+        )
+        .unwrap();
+        assert_eq!(
+            replayed_profile.insurance_operator,
+            attacker.pubkey().to_bytes(),
+            "the retained handoff revived the displaced operator"
+        );
+        let (attacker_dest, _) = env
+            .try_withdraw_insurance_asset_with_authority(&attacker, ASSET_INDEX, AMOUNT)
+            .expect("the revived operator drains the provider contribution");
+        assert_eq!(env.token_amount(attacker_dest), AMOUNT as u64);
+        assert_eq!(
+            env.market_state().1.insurance_domain_budget[DOMAIN as usize],
+            0
+        );
+        panic!("a retained asset-authority handoff replayed after A-to-C-to-A");
+    }
+
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "rejected stale handoff leaves market state byte-identical"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        vault_before,
+        "rejected stale handoff leaves custody byte-identical"
+    );
+    assert!(
+        env.try_withdraw_insurance_asset_with_authority(&attacker, ASSET_INDEX, AMOUNT)
+            .is_err(),
+        "the displaced operator cannot withdraw the provider reserve"
+    );
+}
