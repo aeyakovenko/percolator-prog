@@ -43,7 +43,13 @@ fn crank_observations(asset_index: u16) -> Vec<CrankObservationHint> {
 
 #[test]
 fn v16_attack_force_close_dust_chunking_is_value_path_independent() {
-    fn run(chunks: &[u128]) -> (u128, i128, i128, u128, i128, i128, u128, u128, u128) {
+    fn run(
+        chunks: &[u128],
+        with_backing: bool,
+    ) -> (
+        (u128, i128, i128, u128, i128, i128, u128, u128, u128),
+        (u128, u128, u128, u128),
+    ) {
         const OPEN_PRICE: u64 = 101;
         const CLOSE_PRICE: u64 = 137;
         const SIZE_Q: u128 = POS_SCALE + 17;
@@ -53,6 +59,9 @@ fn v16_attack_force_close_dust_chunking_is_value_path_independent() {
         let mut env = V16CuEnv::new_with_market_params_and_price_move(1, 10_000, 10_000, 10_000);
         env.configure_permissionless_resolve_with_cu(100, 1);
         env.configure_auth_mark_for_asset_as_admin(0, 1, OPEN_PRICE);
+        if with_backing {
+            env.top_up_backing_bucket(1, 1_000, 10);
+        }
 
         let long_owner = Keypair::new();
         let short_owner = Keypair::new();
@@ -124,32 +133,68 @@ fn v16_attack_force_close_dust_chunking_is_value_path_independent() {
         let group = env.market_state().1;
         assert!(!has_active_leg_for_asset(&long_state, 0));
         assert!(!has_active_leg_for_asset(&short_state, 0));
+        let source = group.source_credit[1];
+        if with_backing {
+            assert!(
+                source.positive_claim_bound_num != 0,
+                "backed setup must create a real source-credit claim"
+            );
+        }
         (
-            long_state.capital.get(),
-            long_state.pnl.get(),
-            long_state.fee_credits.get(),
-            short_state.capital.get(),
-            short_state.pnl.get(),
-            short_state.fee_credits.get(),
-            group.insurance,
-            group.assets[0].oi_eff_long_q,
-            group.assets[0].oi_eff_short_q,
+            (
+                long_state.capital.get(),
+                long_state.pnl.get(),
+                long_state.fee_credits.get(),
+                short_state.capital.get(),
+                short_state.pnl.get(),
+                short_state.fee_credits.get(),
+                group.insurance,
+                group.assets[0].oi_eff_long_q,
+                group.assets[0].oi_eff_short_q,
+            ),
+            (
+                source.positive_claim_bound_num,
+                source.fresh_reserved_backing_num,
+                source.provider_receivable_num,
+                group.source_backing_buckets[1].fresh_unliened_backing_num,
+            ),
         )
     }
 
-    let one_shot = run(&[u128::MAX]);
-    let dust_chunked = run(&[
-        1,
-        POS_SCALE / 7,
-        3,
-        POS_SCALE / 5,
-        11,
-        POS_SCALE / 3,
-        u128::MAX,
-    ]);
+    let one_shot = run(&[u128::MAX], false);
+    let dust_chunked = run(
+        &[
+            1,
+            POS_SCALE / 7,
+            3,
+            POS_SCALE / 5,
+            11,
+            POS_SCALE / 3,
+            u128::MAX,
+        ],
+        false,
+    );
     assert_eq!(
         dust_chunked, one_shot,
         "permissionless close_q chunking must not change either user's value or market accounting"
+    );
+
+    let backed_one_shot = run(&[u128::MAX], true);
+    let backed_dust_chunked = run(
+        &[
+            1,
+            POS_SCALE / 7,
+            3,
+            POS_SCALE / 5,
+            11,
+            POS_SCALE / 3,
+            u128::MAX,
+        ],
+        true,
+    );
+    assert_eq!(
+        backed_dust_chunked, backed_one_shot,
+        "chunking must not alter source-credit or provider-backing value allocation"
     );
 }
 
