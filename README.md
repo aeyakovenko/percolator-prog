@@ -71,7 +71,9 @@ The economic and governance model for a permissionless multi-asset market. Statu
 - **Fee routing (configured percentages):**
   - a % of **all trading fees → asset-0 insurance** (`fee_redirect_to_market_0_bps`). **✅**
     (`v16_attack_fee_redirect_split_lands_correctly` asserts the 20% split + conservation;
-    `v16_attack_market0_fees_stay_local`, `..._fee_redirect_full_boundary`.)
+    `v16_attack_market0_fees_stay_local`, `..._fee_redirect_full_boundary`.) Redirect updates carry
+    a strictly increasing signer sequence, so delayed transactions cannot restore a superseded fee
+    destination.
   - a % of **asset-N backing yield → asset-N insurance** and **→ asset-0 insurance**
     (`backing_trade_fee_insurance_share`, redirected via the same market-0 share). **✅** — policy is
     authority-gated + bounded (`v16_attack_backing_fee_policy_authority_gated`), and

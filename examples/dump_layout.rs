@@ -41,7 +41,8 @@ fn main() {
     wcf!(collateral_mint, [u8; 32]);
     wcf!(secondary_collateral_mint, [u8; 32]);
     wcf!(maintenance_fee_per_slot, u128);
-    wcf!(permissionless_market_init_fee, u128);
+    wcf!(permissionless_market_init_fee, u64);
+    wcf!(fee_redirect_policy_sequence, u64);
     wcf!(trade_fee_base_bps, u64);
     wcf!(permissionless_resolve_stale_slots, u64);
     wcf!(force_close_delay_slots, u64);
