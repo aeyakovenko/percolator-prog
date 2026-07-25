@@ -766,15 +766,21 @@ fn kani_v16_batch_trade_nocpi_decode_does_not_collide_with_restart_asset_oracle(
 #[kani::proof]
 fn kani_v16_update_liquidation_fee_policy_decode_preserves_wire_fields() {
     let cranker_share_bps: u16 = kani::any();
+    let policy_sequence: u64 = kani::any();
 
-    let mut data = [0u8; 3];
+    let mut data = [0u8; 11];
     data[0] = 37;
     data[1..3].copy_from_slice(&cranker_share_bps.to_le_bytes());
+    data[3..11].copy_from_slice(&policy_sequence.to_le_bytes());
 
     match Instruction::decode(&data).unwrap() {
         Instruction::UpdateLiquidationFeePolicy {
             cranker_share_bps: got,
-        } => assert_eq!(got, cranker_share_bps),
+            policy_sequence: got_sequence,
+        } => {
+            assert_eq!(got, cranker_share_bps);
+            assert_eq!(got_sequence, policy_sequence);
+        }
         _ => unreachable!(),
     }
 }
@@ -1232,6 +1238,7 @@ fn kani_v16_admin_policy_payloads_reject_trailing_byte() {
     assert_rejects_trailing_byte(
         Instruction::UpdateLiquidationFeePolicy {
             cranker_share_bps: 4_000,
+            policy_sequence: 1,
         },
         extra,
     );

@@ -416,6 +416,10 @@ This section describes intent and operational ordering, not argument-by-argument
   - candidate accounts are untrusted hints, not a liveness precondition; honest keepers should include the worst known stale/bankrupt/liquidatable accounts, but the engine also makes cursored progress
   - may perform bounded catchup/recovery, liquidation, touch-only settlement, round-robin lifecycle progress, and empty-account reclaim
   - liquidation rewards are optional: when `liquidation_cranker_fee_share_bps > 0`, a keeper may append its writable Percolator portfolio account as the final account in the instruction. Oracle accounts remain immediately after the target portfolio account; the reward portfolio, if present, is last. If no reward portfolio is supplied, the full retained liquidation penalty stays in insurance.
+- **UpdateLiquidationFeePolicy** (tag 37)
+  - sets the optional cranker share and carries a market-authority-chosen `policy_sequence`
+  - the sequence must strictly exceed the last accepted liquidation-policy sequence; gaps are allowed, while delayed, duplicate, zero, and lower intents reject
+  - tag 37's payload is exactly `u16 cranker_share_bps || u64 policy_sequence`; legacy unsequenced payloads reject
 - **SyncMaintenanceFee** (tag 48)
   - permissionless per-portfolio maintenance-fee realization for the supplied portfolio account
   - charges `maintenance_fee_per_slot * elapsed_slots`, capped by remaining capital, into insurance after engine-side loss settlement
