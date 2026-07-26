@@ -2721,6 +2721,39 @@ impl V16CuEnv {
     }
 
     fn close_resolved_with_cu(&mut self, owner: &Keypair, portfolio: Pubkey) -> (Pubkey, u64) {
+        let dest = self.create_resolved_destination(owner);
+        let max_steps = percolator::V16_MAX_PORTFOLIO_ASSETS_N
+            + 3 * percolator::PORTFOLIO_SOURCE_DOMAIN_CAP
+            + 8;
+        let mut max_cu = 0u64;
+        for step in 0..max_steps {
+            if step != 0 {
+                self.svm.expire_blockhash();
+            }
+            let market_before = self.svm.get_account(&self.market).unwrap();
+            let portfolio_before = self.svm.get_account(&portfolio).unwrap();
+            let dest_before = self.svm.get_account(&dest).unwrap();
+            max_cu = max_cu.max(self.close_resolved_once_to_dest_with_cu(owner, portfolio, dest));
+            if self.resolved_close_complete(portfolio) {
+                return (dest, max_cu);
+            }
+            if self.svm.get_account(&self.market).unwrap() == market_before
+                && self.svm.get_account(&portfolio).unwrap() == portfolio_before
+                && self.svm.get_account(&dest).unwrap() == dest_before
+            {
+                return (dest, max_cu);
+            }
+        }
+        panic!("close resolved exceeded its finite leg/source-domain rank");
+    }
+
+    fn close_resolved_once_with_cu(&mut self, owner: &Keypair, portfolio: Pubkey) -> (Pubkey, u64) {
+        let dest = self.create_resolved_destination(owner);
+        let cu = self.close_resolved_once_to_dest_with_cu(owner, portfolio, dest);
+        (dest, cu)
+    }
+
+    fn create_resolved_destination(&mut self, owner: &Keypair) -> Pubkey {
         let dest = Pubkey::new_unique();
         self.svm
             .set_account(
@@ -2734,24 +2767,45 @@ impl V16CuEnv {
                 },
             )
             .unwrap();
-        let cu = self
-            .send(
-                ProgInstruction::CloseResolved {
-                    fee_rate_per_slot: 0,
-                },
-                vec![
-                    AccountMeta::new_readonly(owner.pubkey(), false),
-                    AccountMeta::new(self.market, false),
-                    AccountMeta::new(portfolio, false),
-                    AccountMeta::new(dest, false),
-                    AccountMeta::new(self.vault, false),
-                    AccountMeta::new_readonly(self.vault_authority, false),
-                    AccountMeta::new_readonly(spl_token::ID, false),
-                ],
-                &[],
-            )
-            .expect("close resolved");
-        (dest, cu)
+        dest
+    }
+
+    fn close_resolved_once_to_dest_with_cu(
+        &mut self,
+        owner: &Keypair,
+        portfolio: Pubkey,
+        dest: Pubkey,
+    ) -> u64 {
+        self.send(
+            ProgInstruction::CloseResolved {
+                fee_rate_per_slot: 0,
+            },
+            vec![
+                AccountMeta::new_readonly(owner.pubkey(), false),
+                AccountMeta::new(self.market, false),
+                AccountMeta::new(portfolio, false),
+                AccountMeta::new(dest, false),
+                AccountMeta::new(self.vault, false),
+                AccountMeta::new_readonly(self.vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[],
+        )
+        .expect("close resolved")
+    }
+
+    fn resolved_close_complete(&self, portfolio: Pubkey) -> bool {
+        let account = self.portfolio_state(portfolio);
+        let receipt = resolved_receipt(&account);
+        percolator::active_bitmap_is_empty(active_bitmap(&account))
+            && account.capital.get() == 0
+            && account.pnl.get() == 0
+            && account.resolved_source_realization_bitmap.get() == 0
+            && account
+                .source_domains
+                .iter()
+                .all(|source| !source.is_occupied())
+            && (!receipt.present || receipt.finalized)
     }
 
     fn top_up_insurance(&mut self, amount: u128) -> Pubkey {
@@ -11005,6 +11059,116 @@ fn v16_bpf_public_14_leg_28_source_domain_liquidation_is_bounded() {
         ASSETS as usize,
         "the public setup must retain all 14 active positions"
     );
+    let group_before_terminal_fork = env.market_state().1;
+    let pending_kf_legs = long_before_adverse_move
+        .legs
+        .iter()
+        .map(|leg| leg.try_to_runtime().expect("max-source leg must decode"))
+        .filter(|leg| {
+            if !leg.active {
+                return false;
+            }
+            let asset = group_before_terminal_fork.assets[leg.asset_index as usize];
+            let (k_target, f_target) = match leg.side {
+                SideV16::Long => (asset.k_long, asset.f_long_num),
+                SideV16::Short => (asset.k_short, asset.f_short_num),
+            };
+            leg.k_snap != k_target || leg.f_snap != f_target
+        })
+        .count();
+    println!("max-source terminal fork pending K/F legs={pending_kf_legs}");
+
+    // Fork the exact public max-source state before the adverse live-market
+    // branch. Resolved mode dispatches directly to CloseResolved, so every
+    // call must fit and consume a bounded terminal rank as well.
+    let mut terminal_svm = LiteSVM::new();
+    terminal_svm.add_program(
+        env.program_id,
+        &std::fs::read(program_path()).expect("read terminal-fork BPF"),
+    );
+    terminal_svm.add_program(
+        spl_token::ID,
+        &std::fs::read(spl_token_program_path()).expect("read terminal-fork token BPF"),
+    );
+    for key in [
+        env.payer.pubkey(),
+        env.admin.pubkey(),
+        env.market,
+        env.mint,
+        env.vault,
+        long_owner.pubkey(),
+        short_owner.pubkey(),
+        long_account,
+        short_account,
+    ] {
+        let account = env
+            .svm
+            .get_account(&key)
+            .unwrap_or_else(|| panic!("terminal fork account missing: {key}"));
+        terminal_svm.set_account(key, account).unwrap();
+    }
+    terminal_svm.warp_to_slot(3);
+    let mut terminal_env = V16CuEnv {
+        svm: terminal_svm,
+        program_id: env.program_id,
+        payer: Keypair::from_bytes(&env.payer.to_bytes()).unwrap(),
+        admin: Keypair::from_bytes(&env.admin.to_bytes()).unwrap(),
+        market: env.market,
+        mint: env.mint,
+        vault: env.vault,
+        vault_authority: env.vault_authority,
+        portfolio_account_len: env.portfolio_account_len,
+    };
+    terminal_env.resolve();
+
+    let terminal_done = |env: &V16CuEnv, portfolio: Pubkey| env.resolved_close_complete(portfolio);
+    let terminal_rank = |env: &V16CuEnv, portfolio: Pubkey| {
+        let account = env.portfolio_state(portfolio);
+        let active = percolator::active_bitmap_count_ones(active_bitmap(&account)) as usize;
+        let processed = account.resolved_source_realization_bitmap.get();
+        let unprocessed_sources = account
+            .source_domains
+            .iter()
+            .filter(|source| source.is_occupied() && processed & (1u32 << source.domain.get()) == 0)
+            .count();
+        active + unprocessed_sources + usize::from(!terminal_done(env, portfolio))
+    };
+    let mut terminal_calls = 0usize;
+    let mut max_terminal_cu = 0u64;
+    while !terminal_done(&terminal_env, long_account)
+        || !terminal_done(&terminal_env, short_account)
+    {
+        for (owner, portfolio) in [(&long_owner, long_account), (&short_owner, short_account)] {
+            if terminal_done(&terminal_env, portfolio) {
+                continue;
+            }
+            let rank_before = terminal_rank(&terminal_env, portfolio);
+            terminal_env.svm.expire_blockhash();
+            let (_, cu) = terminal_env.close_resolved_once_with_cu(owner, portfolio);
+            terminal_calls += 1;
+            max_terminal_cu = max_terminal_cu.max(cu);
+            let rank_after = terminal_rank(&terminal_env, portfolio);
+            assert!(
+                rank_after < rank_before,
+                "successful max-source resolved continuation did not decrease rank: {rank_before} -> {rank_after}"
+            );
+            assert!(
+                cu <= 1_375_000,
+                "max-source CloseResolved step exceeded its CU envelope: {cu}"
+            );
+            let source_domains = (ASSETS * 2) as usize;
+            let max_terminal_calls = 2 * (ASSETS as usize + 3 * source_domains + 4);
+            assert!(
+                terminal_calls <= max_terminal_calls,
+                "max-source resolved close exceeded its finite leg/source/payout rank"
+            );
+        }
+    }
+    println!("max-source resolved close calls={terminal_calls}, max CU={max_terminal_cu}");
+    assert_eq!(
+        terminal_env.market_state().1.vault as u64,
+        terminal_env.token_amount(terminal_env.vault)
+    );
 
     let source_claim_total = |env: &V16CuEnv, portfolio: Pubkey| {
         env.portfolio_state(portfolio)
@@ -17660,6 +17824,7 @@ fn v16_attack_resolved_cross_margin_deep_insolvency_winds_down_publicly() {
         loser_crank_cu,
         CRANK_CU_LIMIT,
     );
+    let _ = env.close_resolved(&victim_owner, victim);
     let victim_after = env.portfolio_state(victim);
     assert_eq!(
         victim_after.capital.get(),
@@ -18249,24 +18414,36 @@ fn v16_attack_resolved_payout_dual_mint_replay_extracts_nothing() {
     );
 
     let secondary_dest = env.token_account_for_mint(secondary, lo_owner.pubkey(), 0);
-    env.svm.expire_blockhash();
-    let secondary_close_cu = env
-        .send(
-            ProgInstruction::CloseResolved {
-                fee_rate_per_slot: 0,
-            },
-            vec![
-                AccountMeta::new_readonly(lo_owner.pubkey(), false),
-                AccountMeta::new(env.market, false),
-                AccountMeta::new(lo, false),
-                AccountMeta::new(secondary_dest, false),
-                AccountMeta::new(secondary_vault, false),
-                AccountMeta::new_readonly(env.vault_authority, false),
-                AccountMeta::new_readonly(spl_token::ID, false),
-            ],
-            &[],
-        )
-        .expect("close resolved through secondary reserve");
+    let mut secondary_close_cu = 0;
+    for step in 0..(percolator::V16_MAX_PORTFOLIO_ASSETS_N
+        + 3 * percolator::PORTFOLIO_SOURCE_DOMAIN_CAP
+        + 8)
+    {
+        if step != 0 {
+            env.svm.expire_blockhash();
+        }
+        secondary_close_cu = secondary_close_cu.max(
+            env.send(
+                ProgInstruction::CloseResolved {
+                    fee_rate_per_slot: 0,
+                },
+                vec![
+                    AccountMeta::new_readonly(lo_owner.pubkey(), false),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(lo, false),
+                    AccountMeta::new(secondary_dest, false),
+                    AccountMeta::new(secondary_vault, false),
+                    AccountMeta::new_readonly(env.vault_authority, false),
+                    AccountMeta::new_readonly(spl_token::ID, false),
+                ],
+                &[],
+            )
+            .expect("close resolved through secondary reserve"),
+        );
+        if env.token_amount(secondary_dest) != 0 {
+            break;
+        }
+    }
     assert_cu_within(
         "CloseResolved secondary payout",
         secondary_close_cu,
@@ -18573,55 +18750,88 @@ fn v16_attack_terminal_secondary_payouts_reject_noncanonical_vault() {
     );
 
     let secondary_dest = env.token_account_for_mint(secondary, lo_owner.pubkey(), 0);
-    let market_before = env.svm.get_account(&env.market).unwrap();
-    let winner_before = env.svm.get_account(&lo).unwrap();
-    let canonical_before = env.svm.get_account(&secondary_vault).unwrap();
-    let fake_before = env.svm.get_account(&fake_secondary_vault).unwrap();
-    let dest_before = env.svm.get_account(&secondary_dest).unwrap();
-    env.svm.expire_blockhash();
-    let rejected_close = env.send(
-        ProgInstruction::CloseResolved {
-            fee_rate_per_slot: 0,
-        },
-        vec![
-            AccountMeta::new_readonly(lo_owner.pubkey(), false),
-            AccountMeta::new(env.market, false),
-            AccountMeta::new(lo, false),
-            AccountMeta::new(secondary_dest, false),
-            AccountMeta::new(fake_secondary_vault, false),
-            AccountMeta::new_readonly(env.vault_authority, false),
-            AccountMeta::new_readonly(spl_token::ID, false),
-        ],
-        &[],
-    );
+    let mut rejected_at_payout = false;
+    for step in 0..(percolator::V16_MAX_PORTFOLIO_ASSETS_N
+        + 3 * percolator::PORTFOLIO_SOURCE_DOMAIN_CAP
+        + 8)
+    {
+        if step != 0 {
+            env.svm.expire_blockhash();
+        }
+        let market_before = env.svm.get_account(&env.market).unwrap();
+        let winner_before = env.svm.get_account(&lo).unwrap();
+        let canonical_before = env.svm.get_account(&secondary_vault).unwrap();
+        let fake_before = env.svm.get_account(&fake_secondary_vault).unwrap();
+        let dest_before = env.svm.get_account(&secondary_dest).unwrap();
+        let close = env.send(
+            ProgInstruction::CloseResolved {
+                fee_rate_per_slot: 0,
+            },
+            vec![
+                AccountMeta::new_readonly(lo_owner.pubkey(), false),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(lo, false),
+                AccountMeta::new(secondary_dest, false),
+                AccountMeta::new(fake_secondary_vault, false),
+                AccountMeta::new_readonly(env.vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[],
+        );
+        if close.is_ok() {
+            assert!(
+                env.svm.get_account(&env.market).unwrap() != market_before
+                    || env.svm.get_account(&lo).unwrap() != winner_before,
+                "a pre-payout CloseResolved call must make bounded progress"
+            );
+            assert_eq!(
+                env.svm.get_account(&secondary_vault).unwrap(),
+                canonical_before,
+                "progress-only close does not touch the canonical reserve"
+            );
+            assert_eq!(
+                env.svm.get_account(&fake_secondary_vault).unwrap(),
+                fake_before,
+                "progress-only close does not touch the supplied reserve"
+            );
+            assert_eq!(
+                env.svm.get_account(&secondary_dest).unwrap(),
+                dest_before,
+                "progress-only close does not pay the owner"
+            );
+            continue;
+        }
+        assert_eq!(
+            env.svm.get_account(&env.market).unwrap(),
+            market_before,
+            "rejected close leaves terminal market accounting byte-identical"
+        );
+        assert_eq!(
+            env.svm.get_account(&lo).unwrap(),
+            winner_before,
+            "rejected close does not burn the winner receipt"
+        );
+        assert_eq!(
+            env.svm.get_account(&secondary_vault).unwrap(),
+            canonical_before,
+            "canonical secondary vault remains untouched"
+        );
+        assert_eq!(
+            env.svm.get_account(&fake_secondary_vault).unwrap(),
+            fake_before,
+            "fake secondary reserve remains untouched"
+        );
+        assert_eq!(
+            env.svm.get_account(&secondary_dest).unwrap(),
+            dest_before,
+            "owner receives no payout from rejected non-canonical close"
+        );
+        rejected_at_payout = true;
+        break;
+    }
     assert!(
-        rejected_close.is_err(),
-        "CloseResolved must reject a non-canonical secondary reserve"
-    );
-    assert_eq!(
-        env.svm.get_account(&env.market).unwrap(),
-        market_before,
-        "rejected close leaves terminal market accounting byte-identical"
-    );
-    assert_eq!(
-        env.svm.get_account(&lo).unwrap(),
-        winner_before,
-        "rejected close does not burn the winner receipt"
-    );
-    assert_eq!(
-        env.svm.get_account(&secondary_vault).unwrap(),
-        canonical_before,
-        "canonical secondary vault remains untouched"
-    );
-    assert_eq!(
-        env.svm.get_account(&fake_secondary_vault).unwrap(),
-        fake_before,
-        "fake secondary reserve remains untouched"
-    );
-    assert_eq!(
-        env.svm.get_account(&secondary_dest).unwrap(),
-        dest_before,
-        "owner receives no payout from rejected non-canonical close"
+        rejected_at_payout,
+        "CloseResolved must reject the non-canonical reserve at the payout boundary"
     );
 
     env.svm.expire_blockhash();
