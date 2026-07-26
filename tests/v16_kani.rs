@@ -6,7 +6,25 @@ use percolator_prog::ix::{CrankObservationHint, Instruction};
 use percolator_prog::matcher_abi::{
     validate_matcher_return, MatcherReturn, FLAG_PARTIAL_OK, FLAG_REJECTED, FLAG_VALID,
 };
-use percolator_prog::policy_v16;
+use percolator_prog::{policy_v16, state};
+
+#[kani::proof]
+fn kani_v16_intent_replay_window_is_at_most_once() {
+    let max_seen: u64 = kani::any();
+    let seen_bitmap: u64 = kani::any();
+    let intent_id: u64 = kani::any();
+
+    if let Some((next_max_seen, next_seen_bitmap)) =
+        state::advance_intent_replay_window(max_seen, seen_bitmap, intent_id)
+    {
+        assert_eq!(next_seen_bitmap & 1, 1);
+        assert!(next_max_seen >= intent_id);
+        assert_eq!(
+            state::advance_intent_replay_window(next_max_seen, next_seen_bitmap, intent_id),
+            None
+        );
+    }
+}
 
 #[kani::proof]
 fn kani_v16_premium_funding_rate_is_clamped_and_signed() {
@@ -380,16 +398,24 @@ fn kani_v16_top_up_backing_bucket_decode_preserves_wire_fields() {
 fn kani_v16_withdraw_backing_bucket_decode_preserves_wire_fields() {
     let domain: u16 = kani::any();
     let amount: u128 = kani::any();
+    let intent_id: u64 = kani::any();
 
-    let data = Instruction::WithdrawBackingBucket { domain, amount }.encode();
+    let data = Instruction::WithdrawBackingBucket {
+        domain,
+        amount,
+        intent_id,
+    }
+    .encode();
 
     match Instruction::decode(&data).unwrap() {
         Instruction::WithdrawBackingBucket {
             domain: got_domain,
             amount: got_amount,
+            intent_id: got_intent_id,
         } => {
             assert_eq!(got_domain, domain);
             assert_eq!(got_amount, amount);
+            assert_eq!(got_intent_id, intent_id);
         }
         _ => unreachable!(),
     }
@@ -1160,6 +1186,7 @@ fn kani_v16_custody_payloads_reject_trailing_byte() {
         Instruction::WithdrawBackingBucket {
             domain: 1,
             amount: 1,
+            intent_id: 1,
         },
         extra,
     );

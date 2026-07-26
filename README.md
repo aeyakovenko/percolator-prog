@@ -459,6 +459,9 @@ This section describes intent and operational ordering, not argument-by-argument
 - The per-slot effective-price movement cap is a risk parameter set at init; there is no standalone `SetOraclePriceCap` instruction in the current ABI.
 
 ### Insurance management
+- **WithdrawBackingBucket** (tag 50)
+  - provider withdrawal intents carry an asset-level `intent_id`; a 64-intent window accepts
+    bounded out-of-order landing across both domains while rejecting every intent at most once
 - **WithdrawInsurance** (tag 41)
   - unbounded resolved-market insurance withdrawal
   - gated by the asset-0 insurance authority, with shutdown-drain cases for nonzero assets gated by

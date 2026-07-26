@@ -3150,11 +3150,20 @@ impl V16CuEnv {
         domain: u16,
         amount: u128,
     ) -> u64 {
+        let intent_id = state::read_next_backing_withdraw_intent_id(
+            &self.svm.get_account(&self.market).unwrap().data,
+            domain as usize / 2,
+        )
+        .unwrap();
         send_tx(
             &mut self.svm,
             self.program_id,
             &self.payer,
-            ProgInstruction::WithdrawBackingBucket { domain, amount },
+            ProgInstruction::WithdrawBackingBucket {
+                domain,
+                amount,
+                intent_id,
+            },
             vec![
                 AccountMeta::new(self.admin.pubkey(), true),
                 AccountMeta::new(self.market, false),
@@ -7536,6 +7545,7 @@ fn v16_bpf_cross_margin_positive_pnl_allows_backed_risk_increase_on_negative_leg
         ProgInstruction::WithdrawBackingBucket {
             domain: 1,
             amount: over_watermark_amount,
+            intent_id: 1,
         },
         vec![
             AccountMeta::new(env.admin.pubkey(), true),
@@ -11927,6 +11937,7 @@ fn v16_bpf_failed_backing_withdraw_transfer_rolls_back_bucket_and_ledger() {
         ProgInstruction::WithdrawBackingBucket {
             domain: 1,
             amount: 40,
+            intent_id: 1,
         },
         vec![
             AccountMeta::new(env.admin.pubkey(), true),
@@ -14764,6 +14775,7 @@ fn v16_attack_backing_principal_withdraw_preserves_provider_earnings() {
         ProgInstruction::WithdrawBackingBucket {
             domain: 2,
             amount: PRINCIPAL,
+            intent_id: 1,
         },
         vec![
             AccountMeta::new(admin.pubkey(), true),
@@ -14828,6 +14840,7 @@ fn v16_attack_backing_principal_withdraw_preserves_provider_earnings() {
         ProgInstruction::WithdrawBackingBucket {
             domain: 2,
             amount: PRINCIPAL,
+            intent_id: 1,
         },
         vec![
             AccountMeta::new(admin.pubkey(), true),
@@ -19849,6 +19862,7 @@ fn v16_attack_backing_withdraw_cannot_strand_liened_winner() {
             ProgInstruction::WithdrawBackingBucket {
                 domain: 1,
                 amount: amt,
+                intent_id: 1,
             },
             vec![
                 AccountMeta::new(env.admin.pubkey(), true),
@@ -24487,6 +24501,7 @@ fn v16_attack_value_paths_cannot_use_portfolio_as_optional_ledger() {
         ProgInstruction::WithdrawBackingBucket {
             domain: 1,
             amount: 10,
+            intent_id: 1,
         },
         vec![
             AccountMeta::new(admin.pubkey(), true),
@@ -24688,6 +24703,7 @@ fn v16_attack_value_paths_cannot_use_market_as_optional_ledger() {
         ProgInstruction::WithdrawBackingBucket {
             domain: 1,
             amount: 10,
+            intent_id: 1,
         },
         vec![
             AccountMeta::new(admin.pubkey(), true),
@@ -25452,6 +25468,7 @@ fn v16_attack_domain_indexed_calls_reject_out_of_range_atomically() {
         ProgInstruction::WithdrawBackingBucket {
             domain: BAD_DOMAIN,
             amount: 1,
+            intent_id: 1,
         },
         vec![
             AccountMeta::new(admin.pubkey(), true),
@@ -31859,6 +31876,7 @@ fn v16_attack_cross_asset_backing_authority_cannot_withdraw_other_asset_bucket()
         ProgInstruction::WithdrawBackingBucket {
             domain: 0,
             amount: 100,
+            intent_id: 1,
         },
         vec![
             AccountMeta::new(asset1_backing.pubkey(), true),
@@ -31898,6 +31916,7 @@ fn v16_attack_cross_asset_backing_authority_cannot_withdraw_other_asset_bucket()
         ProgInstruction::WithdrawBackingBucket {
             domain: 2,
             amount: 100,
+            intent_id: 1,
         },
         vec![
             AccountMeta::new(asset1_backing.pubkey(), true),
@@ -32120,6 +32139,7 @@ fn v16_attack_backing_withdraw_pinned_to_canonical_vault() {
         ProgInstruction::WithdrawBackingBucket {
             domain: 1,
             amount: 500,
+            intent_id: 1,
         },
         vec![
             AccountMeta::new(env.admin.pubkey(), true),
@@ -35045,6 +35065,7 @@ fn v16_attack_resolved_backing_withdraw_requires_full_user_wind_down() {
         ProgInstruction::WithdrawBackingBucket {
             domain: 1,
             amount: 100,
+            intent_id: 1,
         },
         vec![
             AccountMeta::new(env.admin.pubkey(), true),
@@ -35383,6 +35404,7 @@ fn v16_attack_backing_bucket_topup_withdraw_input_gates() {
         ProgInstruction::WithdrawBackingBucket {
             domain: 0,
             amount: 1_000_001,
+            intent_id: 1,
         },
         vec![
             AccountMeta::new(admin.pubkey(), true),
@@ -54609,6 +54631,7 @@ fn v16_attack_live_backing_withdraw_rejects_exposed_target_effective_lag() {
         ProgInstruction::WithdrawBackingBucket {
             domain: 0,
             amount: 100,
+            intent_id: 1,
         },
         vec![
             AccountMeta::new(admin.pubkey(), true),
@@ -56663,6 +56686,7 @@ fn v16_attack_live_domain_withdrawals_reject_when_resolve_matured() {
         ProgInstruction::WithdrawBackingBucket {
             domain: 1,
             amount: 20,
+            intent_id: 1,
         },
         vec![
             AccountMeta::new(admin.pubkey(), true),
@@ -59129,6 +59153,7 @@ fn v16_attack_asset0_backing_rotation_rekeys_live_bucket_withdraw() {
         ProgInstruction::WithdrawBackingBucket {
             domain: 0,
             amount: 100,
+            intent_id: 1,
         },
         vec![
             AccountMeta::new(admin.pubkey(), true),
@@ -59169,6 +59194,7 @@ fn v16_attack_asset0_backing_rotation_rekeys_live_bucket_withdraw() {
         ProgInstruction::WithdrawBackingBucket {
             domain: 0,
             amount: 100,
+            intent_id: 1,
         },
         vec![
             AccountMeta::new(new_backing.pubkey(), true),
@@ -59759,6 +59785,7 @@ fn run_backing_withdraw_retry_replay_case(replay_retained: bool) -> (u64, u64, u
         data: ProgInstruction::WithdrawBackingBucket {
             domain: WINNING_DOMAIN,
             amount: BACKING,
+            intent_id: 1,
         }
         .encode(),
     };
@@ -59859,4 +59886,59 @@ fn v16_attack_backing_withdraw_retry_replay_removes_independent_winner_backing()
         replay.1, control.1,
         "rejecting the retained retry must preserve the independent winner payout"
     );
+}
+
+#[test]
+fn v16_bpf_backing_withdraw_intents_land_out_of_order_once_across_domains() {
+    let mut env = V16CuEnv::new();
+    let admin = env.admin.insecure_clone();
+    env.top_up_backing_bucket(0, 100, 10_000);
+    env.top_up_backing_bucket(1, 100, 10_000);
+    let dest = env.token_account(admin.pubkey(), 0);
+
+    let withdraw = |domain, intent_id| ProgInstruction::WithdrawBackingBucket {
+        domain,
+        amount: 10,
+        intent_id,
+    };
+    for (domain, intent_id) in [(0, 3), (1, 1), (0, 2)] {
+        env.send(
+            withdraw(domain, intent_id),
+            vec![
+                AccountMeta::new(admin.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(dest, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(env.vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[&admin],
+        )
+        .expect("distinct bounded intent lands out of order");
+    }
+    assert_eq!(env.token_amount(dest), 30);
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    let dest_before = env.svm.get_account(&dest).unwrap();
+    env.svm.expire_blockhash();
+    let duplicate = env.send(
+        withdraw(0, 2),
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        duplicate.is_err(),
+        "duplicate withdrawal intent must reject"
+    );
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+    assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+    assert_eq!(env.svm.get_account(&dest).unwrap(), dest_before);
 }
