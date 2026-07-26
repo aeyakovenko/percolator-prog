@@ -2586,6 +2586,8 @@ pub mod ix {
             amount: u128,
         },
         Withdraw {
+            portfolio_id: u64,
+            intent_id: u64,
             amount: u128,
         },
         PermissionlessCrank {
@@ -2819,6 +2821,8 @@ pub mod ix {
                     amount: read_u128(&mut rest)?,
                 },
                 4 => Self::Withdraw {
+                    portfolio_id: read_u64(&mut rest)?,
+                    intent_id: read_u64(&mut rest)?,
                     amount: read_u128(&mut rest)?,
                 },
                 5 => {
@@ -3118,8 +3122,14 @@ pub mod ix {
                     push_u64(&mut out, intent_id);
                     push_u128(&mut out, amount);
                 }
-                Self::Withdraw { amount } => {
+                Self::Withdraw {
+                    portfolio_id,
+                    intent_id,
+                    amount,
+                } => {
                     out.push(4);
+                    push_u64(&mut out, portfolio_id);
+                    push_u64(&mut out, intent_id);
                     push_u128(&mut out, amount);
                 }
                 Self::PermissionlessCrank {
@@ -5337,7 +5347,11 @@ pub mod processor {
                 intent_id,
                 amount,
             } => handle_deposit(program_id, accounts, portfolio_id, intent_id, amount),
-            Instruction::Withdraw { amount } => handle_withdraw(program_id, accounts, amount),
+            Instruction::Withdraw {
+                portfolio_id,
+                intent_id,
+                amount,
+            } => handle_withdraw(program_id, accounts, portfolio_id, intent_id, amount),
             Instruction::PermissionlessCrank {
                 now_slot,
                 observations,
@@ -5850,6 +5864,8 @@ pub mod processor {
     fn handle_withdraw<'a>(
         program_id: &Pubkey,
         accounts: &'a [AccountInfo<'a>],
+        portfolio_id: u64,
+        intent_id: u64,
         amount: u128,
     ) -> ProgramResult {
         let owner = account(accounts, 0)?;
@@ -5894,10 +5910,17 @@ pub mod processor {
             }
             reject_permissionless_resolve_matured_live_view(&cfg, &group)?;
             let mut portfolio_data = portfolio_ai.try_borrow_mut_data()?;
+            {
+                let portfolio = state::portfolio_view_mut_for_market_slots(
+                    &mut portfolio_data,
+                    max_market_slots,
+                )?;
+                expect_portfolio_view_account_key(&portfolio, portfolio_ai.key)?;
+                expect_portfolio_view_owner(&portfolio, owner.key)?;
+            }
+            state::consume_owner_intent(&mut portfolio_data, portfolio_id, intent_id)?;
             let mut portfolio =
                 state::portfolio_view_mut_for_market_slots(&mut portfolio_data, max_market_slots)?;
-            expect_portfolio_view_account_key(&portfolio, portfolio_ai.key)?;
-            expect_portfolio_view_owner(&portfolio, owner.key)?;
             group
                 .withdraw_not_atomic(&mut portfolio, amount)
                 .map_err(map_v16_error)?;
