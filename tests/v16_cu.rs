@@ -29402,6 +29402,254 @@ fn v16_attack_reset_pending_rejects_fresh_counterparty_and_completes_recovery() 
     );
 }
 
+#[test]
+fn v16_attack_presigned_forfeit_does_not_replay_across_recovery_episodes() {
+    const VICTIM_CAPITAL: u128 = 20_000;
+    const FIRST_LOSER_CAPITAL: u128 = 10_000;
+    const SECOND_LOSER_CAPITAL: u128 = 20_000;
+    const FIRST_GAIN: i128 = 10_000;
+    const SECOND_GAIN: i128 = 20_000;
+    const POSITION_Q: i128 = 10_000 * POS_SCALE as i128;
+
+    let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+        initial_price: 1,
+        max_trading_fee_bps: 10,
+        max_price_move_bps_per_slot: 10_000,
+        max_bankrupt_close_lifetime_slots: 1,
+        public_b_chunk_atoms: 1,
+        maintenance_fee_per_slot: 0,
+        ..V16CuMarketParams::default()
+    });
+    env.configure_auth_mark_with_cu(0, 1);
+
+    let victim_owner = Keypair::new();
+    let victim = env.create_portfolio(&victim_owner);
+    env.deposit(&victim_owner, victim, VICTIM_CAPITAL);
+
+    let first_loser_owner = Keypair::new();
+    let first_loser = env.create_portfolio(&first_loser_owner);
+    env.deposit(&first_loser_owner, first_loser, FIRST_LOSER_CAPITAL);
+    env.trade_asset_with_cu(
+        0,
+        &victim_owner,
+        victim,
+        &first_loser_owner,
+        first_loser,
+        POSITION_Q,
+        1,
+        0,
+    );
+
+    env.svm.warp_to_slot(1);
+    env.push_auth_mark_with_cu(1, 2);
+    env.crank(
+        first_loser,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 1,
+            observations: crank_observations(0),
+        },
+    );
+    env.crank_steps(
+        first_loser,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 1,
+            observations: Vec::new(),
+        },
+        3,
+    );
+    env.crank(
+        victim,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 1,
+            observations: Vec::new(),
+        },
+    );
+    assert_eq!(
+        env.portfolio_state(victim).pnl.get(),
+        FIRST_GAIN,
+        "the first gain is honestly settled before the owner consents to forfeit"
+    );
+    assert_eq!(
+        env.market_state().1.assets[0].mode_long,
+        SideModeV16::ResetPending,
+        "first public bankruptcy must create a forfeitable survivor leg"
+    );
+
+    env.svm.expire_blockhash();
+    let blockhash = env.svm.latest_blockhash();
+    let forfeit_ix = Instruction {
+        program_id: env.program_id,
+        accounts: vec![
+            AccountMeta::new(victim_owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(victim, false),
+        ],
+        data: ProgInstruction::ForfeitRecoveryLeg {
+            asset_index: 0,
+            b_delta_budget: 1,
+        }
+        .encode(),
+    };
+    let intended = Transaction::new_signed_with_payer(
+        &[heap_ix(), cu_ix(), forfeit_ix.clone()],
+        Some(&env.payer.pubkey()),
+        &[&env.payer, &victim_owner],
+        blockhash,
+    );
+    let retained = Transaction::new_signed_with_payer(
+        &[
+            heap_ix(),
+            cu_ix(),
+            ComputeBudgetInstruction::set_compute_unit_price(1),
+            forfeit_ix,
+        ],
+        Some(&env.payer.pubkey()),
+        &[&env.payer, &victim_owner],
+        blockhash,
+    );
+    env.svm
+        .send_transaction(intended)
+        .expect("the intended first-episode forfeit lands");
+    env.finalize_reset_side_with_cu(0, 0);
+    assert!(
+        !has_active_leg_for_asset(&env.portfolio_state(victim), 0),
+        "the first episode is fully cleared before fresh risk opens"
+    );
+
+    let second_loser_owner = Keypair::new();
+    let second_loser = env.create_portfolio(&second_loser_owner);
+    env.deposit(&second_loser_owner, second_loser, SECOND_LOSER_CAPITAL);
+    env.trade_asset_with_cu(
+        0,
+        &victim_owner,
+        victim,
+        &second_loser_owner,
+        second_loser,
+        POSITION_Q,
+        2,
+        0,
+    );
+
+    env.svm.warp_to_slot(2);
+    env.push_auth_mark_with_cu(2, 4);
+    env.crank(
+        second_loser,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 2,
+            observations: crank_observations(0),
+        },
+    );
+    env.crank_steps(
+        second_loser,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 2,
+            observations: Vec::new(),
+        },
+        3,
+    );
+    assert_eq!(
+        env.market_state().1.assets[0].mode_long,
+        SideModeV16::ResetPending,
+        "the second public bankruptcy must recreate a forfeitable survivor leg"
+    );
+    assert_eq!(
+        env.portfolio_state(victim).pnl.get(),
+        FIRST_GAIN,
+        "only the first settled gain is in PnL; the fresh second gain remains attached to the leg"
+    );
+
+    let victim_before_replay = env.svm.get_account(&victim).unwrap();
+    let market_before_replay = env.svm.get_account(&env.market).unwrap();
+    let vault_before_replay = env.svm.get_account(&env.vault).unwrap();
+    let replay = env.svm.send_transaction(retained);
+    if replay.is_err() {
+        assert_eq!(
+            env.svm.get_account(&victim).unwrap(),
+            victim_before_replay,
+            "rejected stale consent must leave the victim unchanged"
+        );
+        assert_eq!(
+            env.svm.get_account(&env.market).unwrap(),
+            market_before_replay,
+            "rejected stale consent must leave the market unchanged"
+        );
+        assert_eq!(
+            env.svm.get_account(&env.vault).unwrap(),
+            vault_before_replay,
+            "rejected stale consent must move no custody"
+        );
+        return;
+    }
+
+    let replay_cu = replay.unwrap().compute_units_consumed;
+    let victim_after = env.portfolio_state(victim);
+    let (_, group_after) = env.market_state();
+    assert_cu_within("retained recovery-episode forfeit", replay_cu, CUSTODY_CU_LIMIT);
+    assert_eq!(victim_after.capital.get(), VICTIM_CAPITAL);
+    assert_eq!(victim_after.pnl.get(), FIRST_GAIN);
+    assert!(!has_active_leg_for_asset(&victim_after, 0));
+    assert_eq!(group_after.vault, 50_000);
+    assert_eq!(group_after.c_tot, VICTIM_CAPITAL);
+    assert_eq!(group_after.insurance, 0);
+
+    env.finalize_reset_side_with_cu(0, 0);
+    env.resolve();
+    let mut victim_out = 0u64;
+    let mut first_loser_out = 0u64;
+    let mut second_loser_out = 0u64;
+    for _ in 0..4 {
+        let first_loser_dest = env.close_resolved(&first_loser_owner, first_loser);
+        let second_loser_dest = env.close_resolved(&second_loser_owner, second_loser);
+        let victim_dest = env.close_resolved(&victim_owner, victim);
+        first_loser_out += env.token_amount(first_loser_dest);
+        second_loser_out += env.token_amount(second_loser_dest);
+        victim_out += env.token_amount(victim_dest);
+    }
+    assert_eq!(first_loser_out, 0);
+    assert_eq!(second_loser_out, 0);
+    assert_eq!(
+        victim_out,
+        u64::try_from(VICTIM_CAPITAL + FIRST_GAIN as u128).unwrap(),
+        "the stale replay discards the fresh second gain instead of paying it"
+    );
+    assert_eq!(
+        u128::from(victim_out) + SECOND_GAIN as u128,
+        group_after.vault,
+        "the missing second gain remains as an unowned vault residual"
+    );
+
+    env.close_portfolio_with_cu(&victim_owner, victim);
+    env.close_portfolio_with_cu(&first_loser_owner, first_loser);
+    env.close_portfolio_with_cu(&second_loser_owner, second_loser);
+    let drained = env.market_state().1;
+    assert_eq!(drained.vault, SECOND_GAIN as u128);
+    assert_eq!(drained.c_tot, 0);
+    assert_eq!(drained.insurance, 0);
+    assert_eq!(drained.materialized_portfolio_count, 0);
+
+    let close_dest = env.token_account(env.admin.pubkey(), 0);
+    let close = env.send(
+        ProgInstruction::CloseSlab,
+        vec![
+            AccountMeta::new(env.admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new(close_dest, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&env.admin.insecure_clone()],
+    );
+    assert!(
+        close.is_err(),
+        "the replay-created unowned residual must keep terminal close stuck"
+    );
+    panic!(
+        "stale first-episode forfeit consent deleted a fresh {SECOND_GAIN}-atom backed gain \
+         and left it permanently unowned in the market vault"
+    );
+}
+
 // security.md sweep — operation-sequence conservation (#32/#33 fuzz-lite): a long varied sequence of
 // deposits/trades/flips/price-moves/cranks/withdrawals must never drift the core invariants. Checks
 // real-vault==accounting, c_tot==Σcapitals, senior conservation, OI balance at every checkpoint.
