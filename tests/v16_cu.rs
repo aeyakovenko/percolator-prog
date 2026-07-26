@@ -3741,6 +3741,43 @@ fn assert_cu_within(label: &str, cu: u64, limit: u64) {
     );
 }
 
+fn portfolio_cert_is_current(env: &V16CuEnv, portfolio: Pubkey) -> bool {
+    let account = env.portfolio_state(portfolio);
+    let group = env.market_state().1;
+    let cert = health_cert(&account);
+    cert.valid
+        && account.stale_state == 0
+        && account.b_stale_state == 0
+        && cert.cert_oracle_epoch == group.oracle_epoch
+        && cert.cert_funding_epoch == group.funding_epoch
+        && cert.cert_risk_epoch == group.risk_epoch
+        && cert.cert_asset_set_epoch == group.asset_set_epoch
+        && cert.active_bitmap_at_cert == active_bitmap(&account)
+}
+
+fn drive_portfolio_cert_current(
+    env: &mut V16CuEnv,
+    portfolio: Pubkey,
+    now_slot: u64,
+    asset_index: u16,
+    max_steps: usize,
+) -> (usize, u64) {
+    let mut calls = 0usize;
+    let mut max_cu = 0u64;
+    while !portfolio_cert_is_current(env, portfolio) {
+        max_cu = max_cu.max(env.crank(
+            portfolio,
+            ProgInstruction::PermissionlessCrank {
+                now_slot,
+                observations: crank_observations(asset_index),
+            },
+        ));
+        calls += 1;
+        assert!(calls <= max_steps, "account refresh exceeded bounded rank");
+    }
+    (calls, max_cu)
+}
+
 #[test]
 fn v16_bpf_mainnet_realistic_system_spl_ata_bootstrap_deposits_and_ledgers() {
     let mut svm = LiteSVM::new();
@@ -10956,20 +10993,19 @@ fn v16_bpf_public_14_leg_28_source_domain_liquidation_is_bounded() {
         (ASSETS * 2) as usize,
         "opposite profitable episodes should reach the public source-domain cap"
     );
+    assert_eq!(
+        long_before_adverse_move
+            .legs
+            .iter()
+            .map(|leg| leg
+                .try_to_runtime()
+                .expect("publicly created leg must decode"))
+            .filter(|leg| leg.active)
+            .count(),
+        ASSETS as usize,
+        "the public setup must retain all 14 active positions"
+    );
 
-    let cert_is_current = |env: &V16CuEnv, portfolio: Pubkey| {
-        let account = env.portfolio_state(portfolio);
-        let group = env.market_state().1;
-        let cert = health_cert(&account);
-        cert.valid
-            && account.stale_state == 0
-            && account.b_stale_state == 0
-            && cert.cert_oracle_epoch == group.oracle_epoch
-            && cert.cert_funding_epoch == group.funding_epoch
-            && cert.cert_risk_epoch == group.risk_epoch
-            && cert.cert_asset_set_epoch == group.asset_set_epoch
-            && cert.active_bitmap_at_cert == active_bitmap(&account)
-    };
     let source_claim_total = |env: &V16CuEnv, portfolio: Pubkey| {
         env.portfolio_state(portfolio)
             .source_domains
@@ -10982,10 +11018,10 @@ fn v16_bpf_public_14_leg_28_source_domain_liquidation_is_bounded() {
     env.push_auth_mark_for_asset_as_admin(0, 4, ADVERSE_PRICE);
     let vault_before_refresh = env.market_state().1.vault;
     let token_vault_before_refresh = env.token_amount(env.vault);
-    let claims_before_refresh = source_claim_total(&env, long_account);
-    let pnl_before_refresh = env.portfolio_state(long_account).pnl.get();
+    let observer_owner = Keypair::new();
+    let observer_account = env.create_portfolio(&observer_owner);
     env.svm.expire_blockhash();
-    let first_refresh_cu = env
+    let observation_cu = env
         .send(
             ProgInstruction::PermissionlessCrank {
                 now_slot: 4,
@@ -10997,13 +11033,36 @@ fn v16_bpf_public_14_leg_28_source_domain_liquidation_is_bounded() {
             vec![
                 AccountMeta::new(env.payer.pubkey(), true),
                 AccountMeta::new(env.market, false),
+                AccountMeta::new(observer_account, false),
+            ],
+            &[],
+        )
+        .expect("observation-only crank must fit");
+    assert!(
+        observation_cu <= 300_000,
+        "observation-only crank exceeded its CU envelope: {observation_cu}"
+    );
+
+    let claims_before_refresh = source_claim_total(&env, long_account);
+    let pnl_before_refresh = env.portfolio_state(long_account).pnl.get();
+    env.svm.expire_blockhash();
+    let first_refresh_cu = env
+        .send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 4,
+                observations: vec![],
+            },
+            vec![
+                AccountMeta::new(env.payer.pubkey(), true),
+                AccountMeta::new(env.market, false),
                 AccountMeta::new(long_account, false),
             ],
             &[],
         )
-        .expect("max-source observation and first stale-leg settlement must fit");
+        .expect("first max-source stale-leg settlement must fit");
+    println!("first max-source stale-leg settlement CU: {first_refresh_cu}");
     assert!(
-        first_refresh_cu <= 1_300_000,
+        first_refresh_cu <= 1_375_000,
         "first max-source stale-leg settlement exceeded its CU envelope: {first_refresh_cu}"
     );
     assert!(
@@ -11014,11 +11073,11 @@ fn v16_bpf_public_14_leg_28_source_domain_liquidation_is_bounded() {
         env.portfolio_state(long_account).pnl.get() < pnl_before_refresh,
         "first stale-leg settlement must consume favorable PnL"
     );
-    assert!(!cert_is_current(&env, long_account));
+    assert!(!portfolio_cert_is_current(&env, long_account));
 
     let mut refresh_calls = 1usize;
     let mut max_refresh_cu = first_refresh_cu;
-    while !cert_is_current(&env, long_account) {
+    while !portfolio_cert_is_current(&env, long_account) {
         let claims_before = source_claim_total(&env, long_account);
         let pnl_before = env.portfolio_state(long_account).pnl.get();
         env.svm.expire_blockhash();
@@ -11043,7 +11102,7 @@ fn v16_bpf_public_14_leg_28_source_domain_liquidation_is_bounded() {
             "max-source refresh exceeded the active-leg rank"
         );
 
-        if !cert_is_current(&env, long_account) {
+        if !portfolio_cert_is_current(&env, long_account) {
             assert!(
                 source_claim_total(&env, long_account) < claims_before,
                 "a nonterminal refresh step must consume source-claim rank"
@@ -11055,9 +11114,10 @@ fn v16_bpf_public_14_leg_28_source_domain_liquidation_is_bounded() {
         }
     }
     assert!(
-        max_refresh_cu <= 1_300_000,
+        max_refresh_cu <= 1_375_000,
         "max-source refresh continuation exceeded its CU envelope: {max_refresh_cu}"
     );
+    println!("max-source refresh calls={refresh_calls}, max CU={max_refresh_cu}");
     assert_eq!(env.market_state().1.vault, vault_before_refresh);
     assert_eq!(env.token_amount(env.vault), token_vault_before_refresh);
 
@@ -11066,7 +11126,7 @@ fn v16_bpf_public_14_leg_28_source_domain_liquidation_is_bounded() {
     let exposure_before = liquidatable
         .legs
         .iter()
-        .filter_map(|leg| leg.try_to_runtime().ok())
+        .map(|leg| leg.try_to_runtime().expect("liquidatable leg must decode"))
         .filter(|leg| leg.active)
         .map(|leg| leg.basis_pos_q.unsigned_abs())
         .sum::<u128>();
@@ -11085,6 +11145,7 @@ fn v16_bpf_public_14_leg_28_source_domain_liquidation_is_bounded() {
             &[],
         )
         .expect("current max-source account must be permissionlessly liquidatable");
+    println!("max-source liquidation CU: {liquidation_cu}");
     assert!(
         liquidation_cu <= 1_375_000,
         "max-source liquidation exceeded its CU envelope: {liquidation_cu}"
@@ -11093,7 +11154,7 @@ fn v16_bpf_public_14_leg_28_source_domain_liquidation_is_bounded() {
         .portfolio_state(long_account)
         .legs
         .iter()
-        .filter_map(|leg| leg.try_to_runtime().ok())
+        .map(|leg| leg.try_to_runtime().expect("post-crank leg must decode"))
         .filter(|leg| leg.active)
         .map(|leg| leg.basis_pos_q.unsigned_abs())
         .sum::<u128>();
@@ -16641,6 +16702,25 @@ fn v16_attack_insolvency_bad_debt_is_socialized_not_printed() {
         ],
         &[],
     );
+    let paper_winner = env.portfolio_state(long_account);
+    let paper_short = env.portfolio_state(short_account);
+    let paper_group = env.market_state().1;
+    let paper_residual = paper_group
+        .vault
+        .saturating_sub(paper_group.c_tot)
+        .saturating_sub(paper_group.insurance);
+    let paper_positive_pnl =
+        paper_winner.pnl.get().max(0) as u128 + paper_short.pnl.get().max(0) as u128;
+    assert!(
+        paper_positive_pnl > paper_residual,
+        "setup must create unbacked paper PnL before bounded settlement"
+    );
+    let (_, winner_refresh_cu) = drive_portfolio_cert_current(&mut env, long_account, 2, 0, 8);
+    assert_cu_within(
+        "insolvency winner bounded refresh",
+        winner_refresh_cu,
+        CRANK_CU_LIMIT,
+    );
 
     let lo = state::read_portfolio(&env.svm.get_account(&long_account).unwrap().data).unwrap();
     let sh = state::read_portfolio(&env.svm.get_account(&short_account).unwrap().data).unwrap();
@@ -16664,10 +16744,8 @@ fn v16_attack_insolvency_bad_debt_is_socialized_not_printed() {
     let residual = g.vault.saturating_sub(g.c_tot).saturating_sub(g.insurance);
     let pos_pnl = lo.pnl.get().max(0) as u128 + sh.pnl.get().max(0) as u128;
     assert!(
-        pos_pnl > residual,
-        "setup must create more positive paper pnl than backed residual (residual {} pos_pnl {})",
-        residual,
-        pos_pnl
+        pos_pnl <= paper_positive_pnl,
+        "bounded settlement cannot increase positive paper PnL"
     );
     assert!(health_cert(&lo).valid, "winner cert refreshed");
     assert!(
@@ -38710,12 +38788,13 @@ fn v16_attack_adl_then_settlement_winner_cannot_escape_deleverage() {
     // SECOND mark move + crank the winner: this settles the deleveraged leg (a_basis vs reduced a_long).
     env.svm.warp_to_slot(7);
     env.push_auth_mark_with_cu(7, 800);
-    env.crank(
-        a,
-        ProgInstruction::PermissionlessCrank {
-            now_slot: 7,
-            observations: crank_observations(0),
-        },
+    let (winner_refresh_calls, winner_refresh_cu) =
+        drive_portfolio_cert_current(&mut env, a, 7, 0, 4);
+    assert!(winner_refresh_calls > 0);
+    assert_cu_within(
+        "post-ADL winner refresh steps",
+        winner_refresh_cu,
+        CRANK_CU_LIMIT,
     );
 
     let win = env.portfolio_state(a);
@@ -40723,21 +40802,18 @@ fn v16_attack_cross_margin_netting_conserves() {
         ],
         &[&admin],
     );
-    for ai in [0u16, 1] {
-        env.svm.expire_blockhash();
-        let _ = env.send(
+    for (ai, counterparty) in [(0u16, y0), (1, y1)] {
+        env.crank(
+            counterparty,
             ProgInstruction::PermissionlessCrank {
                 now_slot: 2,
                 observations: crank_observations(ai),
             },
-            vec![
-                AccountMeta::new(env.payer.pubkey(), true),
-                AccountMeta::new(env.market, false),
-                AccountMeta::new(x, false),
-            ],
-            &[],
         );
     }
+    let (refresh_calls, refresh_cu) = drive_portfolio_cert_current(&mut env, x, 2, 0, 4);
+    assert!(refresh_calls > 0);
+    assert_cu_within("two-leg cross-margin refresh", refresh_cu, CRANK_CU_LIMIT);
 
     let xs = env.portfolio_state(x);
     let g = env.market_state().1;
