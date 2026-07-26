@@ -406,6 +406,9 @@ This section describes intent and operational ordering, not argument-by-argument
     blockhash retry variants for an already consumed economic intent
 - **Withdraw** (tag 4)
   - performs oracle-read + engine checks; withdraws from vault via PDA signer; debits engine
+  - binds the signed request to `portfolio_id` and consumes a nonzero portfolio-local `intent_id`;
+    distinct owner intents may land out of order within the same 64-ID replay window used by
+    deposits, while retry variants for an already consumed economic intent are rejected
 - **ClosePortfolio** (tag 8)
   - closes a flat, empty portfolio account and sweeps its rent to the market slab
 - **CloseResolved** (tag 30)

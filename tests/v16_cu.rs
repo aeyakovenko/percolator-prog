@@ -504,6 +504,16 @@ fn owner_deposit_instruction(svm: &LiteSVM, portfolio: Pubkey, amount: u128) -> 
     }
 }
 
+fn owner_withdraw_instruction(svm: &LiteSVM, portfolio: Pubkey, amount: u128) -> ProgInstruction {
+    let account = svm.get_account(&portfolio).expect("portfolio account");
+    ProgInstruction::Withdraw {
+        portfolio_id: state::read_owner_intent_portfolio_id(&account.data)
+            .expect("owner-intent portfolio id"),
+        intent_id: state::next_owner_intent_id(&account.data).expect("next owner-intent id"),
+        amount,
+    }
+}
+
 struct V16CuEnv {
     svm: LiteSVM,
     program_id: Pubkey,
@@ -2223,7 +2233,7 @@ impl V16CuEnv {
             .unwrap();
         let cu = self
             .send(
-                ProgInstruction::Withdraw { amount },
+                owner_withdraw_instruction(&self.svm, portfolio, amount),
                 vec![
                     AccountMeta::new(owner.pubkey(), true),
                     AccountMeta::new(self.market, false),
@@ -4027,11 +4037,12 @@ fn v16_bpf_mainnet_realistic_system_spl_ata_bootstrap_deposits_and_ledgers() {
     )
     .expect("sync system-created insurance ledger");
 
+    let withdraw_instruction = owner_withdraw_instruction(&svm, portfolio.pubkey(), 23);
     send_tx(
         &mut svm,
         program_id,
         &payer,
-        ProgInstruction::Withdraw { amount: 23 },
+        withdraw_instruction,
         vec![
             AccountMeta::new(user.pubkey(), true),
             AccountMeta::new(market.pubkey(), false),
@@ -4650,7 +4661,7 @@ fn v16_bpf_failed_withdraw_spl_transfer_rolls_back_engine_debit() {
     let dest_before = env.svm.get_account(&dest).unwrap();
     let vault_before = env.svm.get_account(&env.vault).unwrap();
     let result = env.send(
-        ProgInstruction::Withdraw { amount: 40 },
+        owner_withdraw_instruction(&env.svm, portfolio, 40),
         vec![
             AccountMeta::new(owner.pubkey(), true),
             AccountMeta::new(env.market, false),
@@ -15942,7 +15953,7 @@ fn v16_attack_account_type_confusion_rejected() {
         )
         .unwrap();
     let r1 = env.send(
-        ProgInstruction::Withdraw { amount: 1 },
+        owner_withdraw_instruction(&env.svm, pa, 1),
         vec![
             AccountMeta::new(la.pubkey(), true),
             AccountMeta::new(env.market, false),
@@ -16545,7 +16556,7 @@ fn v16_attack_insolvent_loser_cannot_withdraw_to_escape() {
             )
             .unwrap();
         let r = env.send(
-            ProgInstruction::Withdraw { amount: amt },
+            owner_withdraw_instruction(&env.svm, short_account, amt),
             vec![
                 AccountMeta::new(short_owner.pubkey(), true),
                 AccountMeta::new(env.market, false),
@@ -17124,7 +17135,7 @@ fn v16_regression_cross_margin_insolvency_no_value_extraction() {
         .unwrap();
     let cap_now = env.portfolio_state(cp).capital.get();
     let _ = env.send(
-        ProgInstruction::Withdraw { amount: cap_now },
+        owner_withdraw_instruction(&env.svm, cp, cap_now),
         vec![
             AccountMeta::new(cp_owner.pubkey(), true),
             AccountMeta::new(env.market, false),
@@ -19266,6 +19277,282 @@ fn v16_portfolio_incarnation_id_separates_close_and_reuse() {
     assert_eq!(replacement.residual_received_atoms_total.get(), 0);
 }
 
+#[test]
+fn v16_attack_presigned_withdraw_retry_cannot_liquidate_fresh_risk() {
+    const STARTING_CAPITAL: u128 = 200_000_000;
+    const WITHDRAW_AMOUNT: u128 = 50_000_000;
+    const POSITION_Q: i128 = 1_000 * POS_SCALE as i128;
+
+    let mut env = V16CuEnv::new_with_init_params(production_risk_params());
+    env.update_liquidation_fee_policy_with_cu(5_000);
+    env.configure_auth_mark_with_cu(0, 1_000_000);
+
+    let long_owner = Keypair::new();
+    let long = env.create_portfolio(&long_owner);
+    env.deposit(&long_owner, long, 2_000_000_000);
+    let victim_owner = Keypair::new();
+    let victim = env.create_portfolio(&victim_owner);
+    env.deposit(&victim_owner, victim, STARTING_CAPITAL);
+    let cranker_owner = Keypair::new();
+    let cranker = env.create_portfolio(&cranker_owner);
+    env.deposit(&cranker_owner, cranker, 1_000);
+
+    let victim_destination = env.token_account(victim_owner.pubkey(), 0);
+    env.svm.expire_blockhash();
+    let blockhash = env.svm.latest_blockhash();
+    let withdraw_ix = Instruction {
+        program_id: env.program_id,
+        accounts: vec![
+            AccountMeta::new(victim_owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(victim, false),
+            AccountMeta::new(victim_destination, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        data: {
+            let account = env.svm.get_account(&victim).expect("victim portfolio");
+            ProgInstruction::Withdraw {
+                portfolio_id: state::read_owner_intent_portfolio_id(&account.data)
+                    .expect("victim portfolio id"),
+                intent_id: state::next_owner_intent_id(&account.data)
+                    .expect("victim withdrawal intent id"),
+                amount: WITHDRAW_AMOUNT,
+            }
+            .encode()
+        },
+    };
+    let intended = Transaction::new_signed_with_payer(
+        &[heap_ix(), cu_ix(), withdraw_ix.clone()],
+        Some(&env.payer.pubkey()),
+        &[&env.payer, &victim_owner],
+        blockhash,
+    );
+    let retained = Transaction::new_signed_with_payer(
+        &[
+            heap_ix(),
+            cu_ix(),
+            ComputeBudgetInstruction::set_compute_unit_price(1),
+            withdraw_ix,
+        ],
+        Some(&env.payer.pubkey()),
+        &[&env.payer, &victim_owner],
+        blockhash,
+    );
+    env.svm
+        .send_transaction(intended)
+        .expect("the owner's intended withdrawal lands");
+    assert_eq!(
+        env.portfolio_state(victim).capital.get(),
+        STARTING_CAPITAL - WITHDRAW_AMOUNT
+    );
+    assert_eq!(env.token_amount(victim_destination), WITHDRAW_AMOUNT as u64);
+
+    let fresh_trade = Transaction::new_signed_with_payer(
+        &[
+            heap_ix(),
+            cu_ix(),
+            Instruction {
+                program_id: env.program_id,
+                accounts: vec![
+                    AccountMeta::new(long_owner.pubkey(), true),
+                    AccountMeta::new(victim_owner.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(long, false),
+                    AccountMeta::new(victim, false),
+                ],
+                data: ProgInstruction::TradeNoCpi {
+                    asset_index: 0,
+                    size_q: POSITION_Q,
+                    exec_price: 1_000_000,
+                    fee_bps: 0,
+                }
+                .encode(),
+            },
+        ],
+        Some(&env.payer.pubkey()),
+        &[&env.payer, &long_owner, &victim_owner],
+        blockhash,
+    );
+
+    let market_before_replay = env.svm.get_account(&env.market).unwrap();
+    let victim_before_replay = env.svm.get_account(&victim).unwrap();
+    let destination_before_replay = env.svm.get_account(&victim_destination).unwrap();
+    let vault_before_replay = env.svm.get_account(&env.vault).unwrap();
+    let replay = env.svm.send_transaction(retained);
+    let replay_succeeded = match replay {
+        Ok(meta) => {
+            assert_cu_within(
+                "retained withdrawal replay",
+                meta.compute_units_consumed,
+                CUSTODY_CU_LIMIT,
+            );
+            assert_eq!(
+                env.portfolio_state(victim).capital.get(),
+                STARTING_CAPITAL - 2 * WITHDRAW_AMOUNT
+            );
+            assert_eq!(
+                env.token_amount(victim_destination),
+                (2 * WITHDRAW_AMOUNT) as u64
+            );
+            true
+        }
+        Err(_) => {
+            assert_eq!(
+                env.svm.get_account(&env.market).unwrap(),
+                market_before_replay,
+                "duplicate rejection leaves the market unchanged"
+            );
+            assert_eq!(
+                env.svm.get_account(&victim).unwrap(),
+                victim_before_replay,
+                "duplicate rejection preserves the intended post-withdrawal margin"
+            );
+            assert_eq!(
+                env.svm.get_account(&victim_destination).unwrap(),
+                destination_before_replay,
+                "duplicate rejection makes no second SPL transfer"
+            );
+            assert_eq!(
+                env.svm.get_account(&env.vault).unwrap(),
+                vault_before_replay,
+                "duplicate rejection leaves canonical custody unchanged"
+            );
+            false
+        }
+    };
+    env.svm
+        .send_transaction(fresh_trade)
+        .expect("the fresh trade signed against the intended post-withdrawal state still lands");
+    assert_eq!(
+        active_leg_for_asset(&env.portfolio_state(victim), 0).basis_pos_q,
+        -POSITION_Q
+    );
+
+    let mut liquidation_slot = None;
+    for slot in 1..=30u64 {
+        env.svm.warp_to_slot(slot);
+        let current_mark = env.market_state().1.assets[0].effective_price;
+        let next_mark = current_mark + (current_mark / 500).max(1);
+        env.push_auth_mark_with_cu(slot, next_mark);
+        env.send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: slot,
+                observations: crank_observations(0),
+            },
+            vec![
+                AccountMeta::new(env.payer.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(victim, false),
+            ],
+            &[],
+        )
+        .expect("honest cranker refreshes the victim");
+
+        let victim_state = env.portfolio_state(victim);
+        let cert = health_cert(&victim_state);
+        if cert.certified_equity < cert.certified_maintenance_req as i128 {
+            assert!(
+                cert.certified_equity + WITHDRAW_AMOUNT as i128
+                    > cert.certified_maintenance_req as i128,
+                "without the retained withdrawal, the same account remains maintenance-healthy: \
+                 equity={}, maintenance={}, restored={}",
+                cert.certified_equity,
+                cert.certified_maintenance_req,
+                cert.certified_equity + WITHDRAW_AMOUNT as i128
+            );
+            liquidation_slot = Some(slot);
+            break;
+        }
+    }
+    if !replay_succeeded {
+        assert!(
+            liquidation_slot.is_none(),
+            "the intended single-withdrawal state remains maintenance-healthy"
+        );
+        let victim_state = env.portfolio_state(victim);
+        let cert = health_cert(&victim_state);
+        assert!(cert.certified_equity > cert.certified_maintenance_req as i128);
+        assert!(has_active_leg_for_asset(&victim_state, 0));
+        return;
+    }
+    let liquidation_slot = liquidation_slot
+        .expect("the retained withdrawal must make the fresh position liquidatable");
+
+    let cranker_before = env.portfolio_state(cranker).capital.get();
+    env.svm.expire_blockhash();
+    send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: liquidation_slot,
+            observations: Vec::new(),
+        },
+        vec![
+            AccountMeta::new(cranker_owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(victim, false),
+            AccountMeta::new(cranker, false),
+        ],
+        &[&cranker_owner],
+    )
+    .expect("an unprivileged cranker liquidates and receives the configured reward");
+    let cranker_reward = env.portfolio_state(cranker).capital.get() - cranker_before;
+    assert!(
+        cranker_reward > 0,
+        "the replay-induced liquidation pays an independent cranker"
+    );
+    let reward_destination = env.withdraw(&cranker_owner, cranker, cranker_reward);
+    assert_eq!(
+        env.token_amount(reward_destination),
+        cranker_reward as u64,
+        "the victim-funded liquidation reward is independently withdrawable"
+    );
+    panic!(
+        "retained withdrawal retry undercollateralized fresh risk and paid an independent \
+         cranker {cranker_reward} atoms"
+    );
+}
+
+#[test]
+fn v16_withdraw_distinct_intents_can_land_out_of_order() {
+    let mut env = V16CuEnv::new();
+    let owner = Keypair::new();
+    let portfolio = env.create_portfolio(&owner);
+    env.deposit(&owner, portfolio, 100);
+    let destination = env.token_account(owner.pubkey(), 0);
+    let account = env.svm.get_account(&portfolio).expect("portfolio account");
+    let portfolio_id = state::read_owner_intent_portfolio_id(&account.data).expect("portfolio id");
+    let first_intent = state::next_owner_intent_id(&account.data).expect("first withdrawal intent");
+
+    for (intent_id, amount) in [(first_intent + 1, 20), (first_intent, 10)] {
+        env.svm.expire_blockhash();
+        env.send(
+            ProgInstruction::Withdraw {
+                portfolio_id,
+                intent_id,
+                amount,
+            },
+            vec![
+                AccountMeta::new(owner.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(portfolio, false),
+                AccountMeta::new(destination, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(env.vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[&owner],
+        )
+        .expect("distinct withdrawal intent lands out of order");
+    }
+
+    assert_eq!(env.portfolio_state(portfolio).capital.get(), 70);
+    assert_eq!(env.token_amount(destination), 30);
+}
+
 // security.md sweep — rounding asymmetry (#37 dust): trade fees must round UP (ceil, protocol favor)
 // so dust-notional trades are never free and repeated churn never leaks value to the trader. Attacker
 // success = a fee that floors to 0 (free trade) or insurance that fails to grow on a fee'd dust trade.
@@ -19796,7 +20083,7 @@ fn v16_attack_zero_amount_inputs_are_safe() {
         )
         .unwrap();
     let r_wd = env.send(
-        ProgInstruction::Withdraw { amount: 0 },
+        owner_withdraw_instruction(&env.svm, pa, 0),
         vec![
             AccountMeta::new(la.pubkey(), true),
             AccountMeta::new(env.market, false),
@@ -20271,7 +20558,7 @@ fn v16_attack_withdraw_wrong_mint_dest_rejected() {
         .unwrap();
     env.svm.expire_blockhash();
     let r = env.send(
-        ProgInstruction::Withdraw { amount: 500_000 },
+        owner_withdraw_instruction(&env.svm, p, 500_000),
         vec![
             AccountMeta::new(owner.pubkey(), true),
             AccountMeta::new(env.market, false),
@@ -22367,7 +22654,7 @@ fn v16_attack_non_owner_cannot_withdraw_or_trade() {
         )
         .unwrap();
     let r_wd = env.send(
-        ProgInstruction::Withdraw { amount: 500_000 },
+        owner_withdraw_instruction(&env.svm, pa, 500_000),
         vec![
             AccountMeta::new(mallory.pubkey(), true),
             AccountMeta::new(env.market, false),
@@ -22594,7 +22881,7 @@ fn v16_regression_vault_pinned_to_canonical_ata_no_fragmentation() {
         )
         .unwrap();
     let wd = env.send(
-        ProgInstruction::Withdraw { amount: 500_000 },
+        owner_withdraw_instruction(&env.svm, ap, 500_000),
         vec![
             AccountMeta::new(attacker.pubkey(), true),
             AccountMeta::new(env.market, false),
@@ -22627,7 +22914,7 @@ fn v16_regression_vault_pinned_to_canonical_ata_no_fragmentation() {
         )
         .unwrap();
     let hw = env.send(
-        ProgInstruction::Withdraw { amount: 1_000_000 },
+        owner_withdraw_instruction(&env.svm, hp, 1_000_000),
         vec![
             AccountMeta::new(honest.pubkey(), true),
             AccountMeta::new(env.market, false),
@@ -22673,7 +22960,7 @@ fn v16_attack_withdraw_to_third_party_dest_rejected() {
         .unwrap();
     env.svm.expire_blockhash();
     let r = env.send(
-        ProgInstruction::Withdraw { amount: 500_000 },
+        owner_withdraw_instruction(&env.svm, p, 500_000),
         vec![
             AccountMeta::new(owner.pubkey(), true),
             AccountMeta::new(env.market, false),
@@ -25012,7 +25299,7 @@ fn v16_attack_withdraw_respects_margin_and_recoverable() {
             )
             .unwrap();
         env.send(
-            ProgInstruction::Withdraw { amount: amt },
+            owner_withdraw_instruction(&env.svm, pa, amt),
             vec![
                 AccountMeta::new(la.pubkey(), true),
                 AccountMeta::new(env.market, false),
@@ -25110,7 +25397,7 @@ fn v16_attack_resolved_mode_gates_all_live_ops() {
         )
         .unwrap();
     let r_wd = env.send(
-        ProgInstruction::Withdraw { amount: 100 },
+        owner_withdraw_instruction(&env.svm, p, 100),
         vec![
             AccountMeta::new(owner.pubkey(), true),
             AccountMeta::new(env.market, false),
@@ -30163,11 +30450,12 @@ fn v16_attack_cross_market_portfolio_cannot_drain_foreign_vault() {
         )
         .unwrap();
     env.svm.expire_blockhash();
+    let withdraw_instruction = owner_withdraw_instruction(&env.svm, pa, 1_000_000);
     let r = send_tx(
         &mut env.svm,
         env.program_id,
         &env.payer,
-        ProgInstruction::Withdraw { amount: 1_000_000 },
+        withdraw_instruction,
         vec![
             AccountMeta::new(attacker.pubkey(), true),
             AccountMeta::new(market_b, false), // foreign market B
@@ -31686,7 +31974,7 @@ fn v16_attack_wrong_token_program_rejected() {
     // withdraw with a bogus token program -> reject.
     env.svm.expire_blockhash();
     let r = env.send(
-        ProgInstruction::Withdraw { amount: 500_000 },
+        owner_withdraw_instruction(&env.svm, p, 500_000),
         vec![
             AccountMeta::new(owner.pubkey(), true),
             AccountMeta::new(env.market, false),
@@ -32932,7 +33220,7 @@ fn v16_attack_vault_with_delegate_rejected() {
         )
         .unwrap();
     let r = env.send(
-        ProgInstruction::Withdraw { amount: 500_000 },
+        owner_withdraw_instruction(&env.svm, p, 500_000),
         vec![
             AccountMeta::new(owner.pubkey(), true),
             AccountMeta::new(env.market, false),
@@ -32971,7 +33259,7 @@ fn v16_attack_withdraw_to_noninitialized_dest_rejected() {
     let do_wd = |env: &mut V16CuEnv, dest: Pubkey| -> Result<u64, String> {
         env.svm.expire_blockhash();
         env.send(
-            ProgInstruction::Withdraw { amount: 500_000 },
+            owner_withdraw_instruction(&env.svm, p, 500_000),
             vec![
                 AccountMeta::new(owner.pubkey(), true),
                 AccountMeta::new(env.market, false),
@@ -33077,7 +33365,7 @@ fn v16_attack_wrong_vault_authority_rejected() {
     let bad_authority = Pubkey::new_unique(); // not the derived vault PDA
     env.svm.expire_blockhash();
     let r = env.send(
-        ProgInstruction::Withdraw { amount: 500_000 },
+        owner_withdraw_instruction(&env.svm, p, 500_000),
         vec![
             AccountMeta::new(owner.pubkey(), true),
             AccountMeta::new(env.market, false),
@@ -33966,7 +34254,7 @@ fn v16_attack_portfolio_as_market_rejected() {
     // withdraw but pass a PORTFOLIO account (p2) in the MARKET slot.
     env.svm.expire_blockhash();
     let r = env.send(
-        ProgInstruction::Withdraw { amount: 500_000 },
+        owner_withdraw_instruction(&env.svm, p, 500_000),
         vec![
             AccountMeta::new(owner.pubkey(), true),
             AccountMeta::new(p2, false),
@@ -34034,7 +34322,7 @@ fn v16_attack_wrong_mint_vault_rejected() {
         .unwrap();
     env.svm.expire_blockhash();
     let r = env.send(
-        ProgInstruction::Withdraw { amount: 500_000 },
+        owner_withdraw_instruction(&env.svm, p, 500_000),
         vec![
             AccountMeta::new(owner.pubkey(), true),
             AccountMeta::new(env.market, false),
@@ -34166,7 +34454,7 @@ fn v16_attack_withdraw_requires_flat_regardless_of_size() {
             )
             .unwrap();
         env.send(
-            ProgInstruction::Withdraw { amount: amt },
+            owner_withdraw_instruction(&env.svm, pa, amt),
             vec![
                 AccountMeta::new(la.pubkey(), true),
                 AccountMeta::new(env.market, false),
@@ -34242,7 +34530,7 @@ fn v16_attack_withdraw_blocked_during_active_close() {
         )
         .unwrap();
     let r = env.send(
-        ProgInstruction::Withdraw { amount: 500_000 },
+        owner_withdraw_instruction(&env.svm, p, 500_000),
         vec![
             AccountMeta::new(owner.pubkey(), true),
             AccountMeta::new(env.market, false),
@@ -42919,7 +43207,7 @@ fn v16_attack_cloned_portfolio_cannot_withdraw() {
     let dest = env.token_account_for_mint(env.mint, owner.pubkey(), 0);
     env.svm.expire_blockhash();
     let r = env.send(
-        ProgInstruction::Withdraw { amount: 1_000 },
+        owner_withdraw_instruction(&env.svm, clone, 1_000),
         vec![
             AccountMeta::new(owner.pubkey(), true),
             AccountMeta::new(env.market, false),
@@ -43358,7 +43646,7 @@ fn v16_attack_withdraw_vault_with_close_authority_rejected() {
     // ATTACK: withdraw through the close_authority-tainted vault -> reject.
     env.svm.expire_blockhash();
     let r = env.send(
-        ProgInstruction::Withdraw { amount: 1_000 },
+        owner_withdraw_instruction(&env.svm, p, 1_000),
         vec![
             AccountMeta::new(owner.pubkey(), true),
             AccountMeta::new(env.market, false),
@@ -43401,7 +43689,7 @@ fn v16_attack_withdraw_vault_with_close_authority_rejected() {
     env.svm.set_account(env.vault, v2).unwrap();
     env.svm.expire_blockhash();
     let ok = env.send(
-        ProgInstruction::Withdraw { amount: 1_000 },
+        owner_withdraw_instruction(&env.svm, p, 1_000),
         vec![
             AccountMeta::new(owner.pubkey(), true),
             AccountMeta::new(env.market, false),
@@ -43466,7 +43754,7 @@ fn v16_attack_withdraw_to_frozen_dest_rejects_clean() {
 
     env.svm.expire_blockhash();
     let r = env.send(
-        ProgInstruction::Withdraw { amount: 1_000 },
+        owner_withdraw_instruction(&env.svm, p, 1_000),
         vec![
             AccountMeta::new(owner.pubkey(), true),
             AccountMeta::new(env.market, false),
@@ -46812,7 +47100,7 @@ fn v16_attack_deposit_primary_only_withdraw_either() {
     let sec_dest = env.token_account_for_mint(secondary, owner.pubkey(), 0);
     env.svm.expire_blockhash();
     let r_wd = env.send(
-        ProgInstruction::Withdraw { amount: 300 },
+        owner_withdraw_instruction(&env.svm, p, 300),
         vec![
             AccountMeta::new(owner.pubkey(), true),
             AccountMeta::new(market, false),
@@ -46876,7 +47164,7 @@ fn v16_attack_dual_mint_shared_credit_no_double_withdraw() {
 
     env.svm.expire_blockhash();
     let double_withdraw = env.send(
-        ProgInstruction::Withdraw { amount: 1 },
+        owner_withdraw_instruction(&env.svm, portfolio, 1),
         vec![
             AccountMeta::new(owner.pubkey(), true),
             AccountMeta::new(env.market, false),
@@ -46908,7 +47196,7 @@ fn v16_attack_dual_mint_shared_credit_no_double_withdraw() {
     env.deposit(&owner, portfolio, 1);
     env.svm.expire_blockhash();
     let legitimate_secondary = env.send(
-        ProgInstruction::Withdraw { amount: 1 },
+        owner_withdraw_instruction(&env.svm, portfolio, 1),
         vec![
             AccountMeta::new(owner.pubkey(), true),
             AccountMeta::new(env.market, false),
@@ -47400,7 +47688,7 @@ fn v16_attack_market_admin_cannot_drain_foreign_asset_or_user_collateral() {
     let admin_steal = env.token_account(admin.pubkey(), 0);
     env.svm.expire_blockhash();
     let r_user = env.send(
-        ProgInstruction::Withdraw { amount: 10_000 },
+        owner_withdraw_instruction(&env.svm, p, 10_000),
         vec![
             AccountMeta::new(admin.pubkey(), true),
             AccountMeta::new(market, false),
@@ -55209,7 +55497,7 @@ fn v16_attack_withdraw_rejected_when_resolve_matured() {
     env.svm.expire_blockhash();
     let dest = env.token_account(owner.pubkey(), 0);
     let r = env.send(
-        ProgInstruction::Withdraw { amount: 100_000 },
+        owner_withdraw_instruction(&env.svm, p, 100_000),
         vec![
             AccountMeta::new(owner.pubkey(), true),
             AccountMeta::new(env.market, false),
@@ -55287,7 +55575,7 @@ fn v16_attack_stale_withdraw_rolls_back_legacy_realloc_and_signed_transfer() {
 
     env.svm.expire_blockhash();
     let rejected = env.send(
-        ProgInstruction::Withdraw { amount: 50_000 },
+        owner_withdraw_instruction(&env.svm, stale, 50_000),
         vec![
             AccountMeta::new(stale_owner.pubkey(), true),
             AccountMeta::new(env.market, false),
@@ -57471,7 +57759,7 @@ fn v16_attack_deposit_withdraw_amount_over_u64_max_rejects_no_truncation() {
     let dest = env.token_account(owner.pubkey(), 0);
     env.svm.expire_blockhash();
     let r_wd = env.send(
-        ProgInstruction::Withdraw { amount: over },
+        owner_withdraw_instruction(&env.svm, p, over),
         vec![
             AccountMeta::new(owner.pubkey(), true),
             AccountMeta::new(env.market, false),

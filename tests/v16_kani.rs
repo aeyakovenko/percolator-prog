@@ -202,7 +202,7 @@ fn kani_v16_init_market_decode_preserves_wire_fields() {
 #[kani::proof]
 fn kani_v16_amount_instructions_decode_preserves_wire_fields() {
     let tag: u8 = kani::any();
-    kani::assume(tag == 4 || tag == 9 || tag == 28 || tag == 30 || tag == 41 || tag == 42);
+    kani::assume(tag == 9 || tag == 28 || tag == 30 || tag == 41 || tag == 42);
     let amount: u128 = kani::any();
 
     let mut data = [0u8; 17];
@@ -210,7 +210,6 @@ fn kani_v16_amount_instructions_decode_preserves_wire_fields() {
     data[1..17].copy_from_slice(&amount.to_le_bytes());
 
     match (tag, Instruction::decode(&data).unwrap()) {
-        (4, Instruction::Withdraw { amount: got }) => assert_eq!(got, amount),
         (9, Instruction::TopUpInsurance { amount: got }) => assert_eq!(got, amount),
         (28, Instruction::ConvertReleasedPnl { amount: got }) => assert_eq!(got, amount),
         (30, Instruction::CloseResolved { fee_rate_per_slot }) => {
@@ -225,6 +224,38 @@ fn kani_v16_amount_instructions_decode_preserves_wire_fields() {
         ) => assert_eq!(got, amount),
         _ => unreachable!(),
     }
+}
+
+#[kani::proof]
+fn kani_v16_withdraw_intent_decode_preserves_wire_fields() {
+    let portfolio_id: u64 = kani::any();
+    let intent_id: u64 = kani::any();
+    let amount: u128 = kani::any();
+    let encoded = Instruction::Withdraw {
+        portfolio_id,
+        intent_id,
+        amount,
+    }
+    .encode();
+
+    assert_eq!(encoded.len(), 33);
+    match Instruction::decode(&encoded).unwrap() {
+        Instruction::Withdraw {
+            portfolio_id: got_portfolio_id,
+            intent_id: got_intent_id,
+            amount: got_amount,
+        } => {
+            assert_eq!(got_portfolio_id, portfolio_id);
+            assert_eq!(got_intent_id, intent_id);
+            assert_eq!(got_amount, amount);
+        }
+        _ => unreachable!(),
+    }
+
+    let mut legacy = [0u8; 17];
+    legacy[0] = 4;
+    legacy[1..17].copy_from_slice(&amount.to_le_bytes());
+    assert!(Instruction::decode(&legacy).is_err());
 }
 
 #[kani::proof]
@@ -1201,7 +1232,14 @@ fn kani_v16_custody_payloads_reject_trailing_byte() {
         },
         extra,
     );
-    assert_rejects_trailing_byte(Instruction::Withdraw { amount: 1 }, extra);
+    assert_rejects_trailing_byte(
+        Instruction::Withdraw {
+            portfolio_id: 1,
+            intent_id: 1,
+            amount: 1,
+        },
+        extra,
+    );
     assert_rejects_trailing_byte(Instruction::TopUpInsurance { amount: 1 }, extra);
     assert_rejects_trailing_byte(
         Instruction::TopUpBackingBucket {
