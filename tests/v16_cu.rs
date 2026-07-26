@@ -25651,6 +25651,139 @@ fn v16_attack_funding_direction_mark_below_index_conserves() {
     );
 }
 
+// A signed terminal action belongs to one market-authority incarnation, not merely to a pubkey.
+// Returning A to power after A -> C -> A must not revive a retained ResolveMarket signed during the
+// prior A incarnation and let an unprivileged relayer crystallize an independent trader's loss.
+#[test]
+fn v16_attack_presigned_resolve_does_not_revive_after_marketauth_aba() {
+    const PRICE: u64 = 100;
+    const ADVERSE_PRICE: u64 = 110;
+    const DEPOSIT: u128 = 1_000_000;
+    const SIZE_Q: i128 = (10_000 * POS_SCALE) as i128;
+
+    let mut env = V16CuEnv::new();
+    env.configure_auth_mark_with_cu(0, PRICE);
+    let authority_a = env.admin.insecure_clone();
+    let authority_c = Keypair::new();
+    env.ensure_signer_account(authority_c.pubkey());
+
+    env.svm.expire_blockhash();
+    let retained_resolve = Transaction::new_signed_with_payer(
+        &[
+            heap_ix(),
+            cu_ix(),
+            Instruction {
+                program_id: env.program_id,
+                accounts: vec![
+                    AccountMeta::new(authority_a.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                ],
+                data: ProgInstruction::ResolveMarket.encode(),
+            },
+        ],
+        Some(&env.payer.pubkey()),
+        &[&env.payer, &authority_a],
+        env.svm.latest_blockhash(),
+    );
+
+    env.svm.expire_blockhash();
+    env.send(
+        ProgInstruction::UpdateAuthority {
+            new_pubkey: authority_c.pubkey().to_bytes(),
+        },
+        vec![
+            AccountMeta::new(authority_a.pubkey(), true),
+            AccountMeta::new(authority_c.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&authority_a, &authority_c],
+    )
+    .expect("rotate A to C");
+    env.svm.expire_blockhash();
+    env.send(
+        ProgInstruction::UpdateAuthority {
+            new_pubkey: authority_a.pubkey().to_bytes(),
+        },
+        vec![
+            AccountMeta::new(authority_c.pubkey(), true),
+            AccountMeta::new(authority_a.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&authority_c, &authority_a],
+    )
+    .expect("rotate C back to a fresh A incarnation");
+
+    let winner_owner = Keypair::new();
+    let winner = env.create_portfolio(&winner_owner);
+    let victim_owner = Keypair::new();
+    let victim = env.create_portfolio(&victim_owner);
+    env.deposit(&winner_owner, winner, DEPOSIT);
+    env.deposit(&victim_owner, victim, DEPOSIT);
+    env.trade_asset_with_cu(
+        0,
+        &winner_owner,
+        winner,
+        &victim_owner,
+        victim,
+        SIZE_Q,
+        PRICE,
+        0,
+    );
+
+    env.svm.warp_to_slot(10);
+    env.push_auth_mark_with_cu(10, ADVERSE_PRICE);
+    for slot in [10u64, 11] {
+        env.svm.warp_to_slot(slot);
+        for portfolio in [victim, winner] {
+            env.svm.expire_blockhash();
+            let _ = env.send(
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: slot,
+                    observations: crank_observations(0),
+                },
+                vec![
+                    AccountMeta::new(env.payer.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(portfolio, false),
+                ],
+                &[],
+            );
+        }
+    }
+    assert_eq!(
+        env.market_state().1.assets[0].effective_price,
+        ADVERSE_PRICE,
+        "honest authenticated mark creates a non-vacuous temporary PnL transfer"
+    );
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let winner_before = env.svm.get_account(&winner).unwrap();
+    let victim_before = env.svm.get_account(&victim).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    let replay = env.svm.send_transaction(retained_resolve);
+    if replay.is_err() {
+        assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+        assert_eq!(env.svm.get_account(&winner).unwrap(), winner_before);
+        assert_eq!(env.svm.get_account(&victim).unwrap(), victim_before);
+        assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+        assert_eq!(env.market_state().1.mode, MarketModeV16::Live);
+        return;
+    }
+
+    assert_eq!(env.market_state().1.mode, MarketModeV16::Resolved);
+    env.svm.warp_to_slot(12);
+    let victim_dest = env.close_resolved(&victim_owner, victim);
+    let winner_dest = env.close_resolved(&winner_owner, winner);
+    let victim_payout = env.token_amount(victim_dest) as u128;
+    let winner_payout = env.token_amount(winner_dest) as u128;
+    assert_eq!(victim_payout, 900_000);
+    assert_eq!(winner_payout, 1_100_000);
+    panic!(
+        "retained resolve from the prior A incarnation transferred {} atoms of independent victim capital",
+        winner_payout - DEPOSIT
+    );
+}
+
 // security.md sweep — UpdateAuthority new-authority binding (#6): setting an authority to a non-zero
 // key requires THAT key to co-sign (handle_update_authority: expect_signer(new_authority) + key match).
 // Otherwise an admin (or attacker) could assign an authority to a key nobody controls (griefing/brick).
