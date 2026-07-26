@@ -1240,6 +1240,15 @@ impl V16CuEnv {
         state::read_market(&account.data).unwrap()
     }
 
+    fn next_backing_topup_intent_id(&self, domain: u16) -> u64 {
+        self.next_backing_topup_intent_id_for_market(self.market, domain)
+    }
+
+    fn next_backing_topup_intent_id_for_market(&self, market: Pubkey, domain: u16) -> u64 {
+        let account = self.svm.get_account(&market).expect("market account");
+        state::read_next_backing_topup_intent_id(&account.data, domain as usize).unwrap()
+    }
+
     fn portfolio_state(&self, portfolio: Pubkey) -> PortfolioAccountV16 {
         let account = self.svm.get_account(&portfolio).expect("portfolio account");
         state::read_portfolio(&account.data).unwrap()
@@ -2798,6 +2807,7 @@ impl V16CuEnv {
         amount: u128,
         expiry_slot: u64,
     ) -> u64 {
+        let intent_id = self.next_backing_topup_intent_id(domain);
         send_tx(
             &mut self.svm,
             self.program_id,
@@ -2806,6 +2816,7 @@ impl V16CuEnv {
                 domain,
                 amount,
                 expiry_slot,
+                intent_id,
             },
             vec![
                 AccountMeta::new(self.admin.pubkey(), true),
@@ -2972,6 +2983,7 @@ impl V16CuEnv {
         amount: u128,
         expiry_slot: u64,
     ) -> (Pubkey, u64) {
+        let intent_id = self.next_backing_topup_intent_id(domain);
         let source = Pubkey::new_unique();
         self.svm
             .set_account(
@@ -2993,6 +3005,7 @@ impl V16CuEnv {
                 domain,
                 amount,
                 expiry_slot,
+                intent_id,
             },
             vec![
                 AccountMeta::new(self.admin.pubkey(), true),
@@ -3014,6 +3027,7 @@ impl V16CuEnv {
         amount: u128,
         expiry_slot: u64,
     ) -> (Pubkey, u64) {
+        let intent_id = self.next_backing_topup_intent_id(domain);
         let source = Pubkey::new_unique();
         self.svm
             .set_account(
@@ -3035,6 +3049,7 @@ impl V16CuEnv {
                 domain,
                 amount,
                 expiry_slot,
+                intent_id,
             },
             vec![
                 AccountMeta::new(self.admin.pubkey(), true),
@@ -3057,6 +3072,7 @@ impl V16CuEnv {
         amount: u128,
         expiry_slot: u64,
     ) -> Pubkey {
+        let intent_id = self.next_backing_topup_intent_id(domain);
         self.ensure_signer_account(authority.pubkey());
         let source = self.token_account(authority.pubkey(), amount as u64);
         send_tx(
@@ -3067,6 +3083,7 @@ impl V16CuEnv {
                 domain,
                 amount,
                 expiry_slot,
+                intent_id,
             },
             vec![
                 AccountMeta::new(authority.pubkey(), true),
@@ -3933,6 +3950,7 @@ fn v16_bpf_mainnet_realistic_system_spl_ata_bootstrap_deposits_and_ledgers() {
             domain: 1,
             amount: 77,
             expiry_slot: 10,
+            intent_id: 1,
         },
         vec![
             AccountMeta::new(admin.pubkey(), true),
@@ -4232,6 +4250,7 @@ fn top_up_backing_bucket_to_market(
     amount: u128,
     expiry_slot: u64,
 ) -> Pubkey {
+    let intent_id = env.next_backing_topup_intent_id_for_market(market, domain);
     let source = env.token_account(env.admin.pubkey(), amount as u64);
     env.svm.expire_blockhash();
     send_tx(
@@ -4242,6 +4261,7 @@ fn top_up_backing_bucket_to_market(
             domain,
             amount,
             expiry_slot,
+            intent_id,
         },
         vec![
             AccountMeta::new(env.admin.pubkey(), true),
@@ -4562,6 +4582,7 @@ fn v16_bpf_failed_domain_insurance_topup_transfer_rolls_back_budget_and_ledger()
 #[test]
 fn v16_bpf_failed_backing_topup_transfer_rolls_back_bucket_and_ledger() {
     let mut env = V16CuEnv::new();
+    let intent_id = env.next_backing_topup_intent_id(1);
     let ledger = env.backing_domain_ledger_account();
     let source = Pubkey::new_unique();
     env.svm
@@ -4589,6 +4610,7 @@ fn v16_bpf_failed_backing_topup_transfer_rolls_back_bucket_and_ledger() {
             domain: 1,
             amount: 100,
             expiry_slot: 10,
+            intent_id,
         },
         vec![
             AccountMeta::new(env.admin.pubkey(), true),
@@ -5872,12 +5894,14 @@ fn v16_attack_retired_asset_domain_authority_cannot_refund_slot_and_block_reuse(
 
     let backing_source = env.token_account(rekeyed_backing_authority.pubkey(), 88);
     let backing_source_before = env.svm.get_account(&backing_source).unwrap();
+    let backing_intent_id = env.next_backing_topup_intent_id(2);
     env.svm.expire_blockhash();
     let backing_topup = env.send(
         ProgInstruction::TopUpBackingBucket {
             domain: 2,
             amount: 88,
             expiry_slot: 10,
+            intent_id: backing_intent_id,
         },
         vec![
             AccountMeta::new(rekeyed_backing_authority.pubkey(), true),
@@ -22949,6 +22973,7 @@ fn v16_attack_backing_ledger_market_binding_enforced() {
     .expect("init market B");
 
     let source_b = env.token_account(admin.pubkey(), 100);
+    let market_b_intent_id = env.next_backing_topup_intent_id_for_market(market_b, 1);
     env.svm.expire_blockhash();
     send_tx(
         &mut env.svm,
@@ -22958,6 +22983,7 @@ fn v16_attack_backing_ledger_market_binding_enforced() {
             domain: 1,
             amount: 100,
             expiry_slot: 10,
+            intent_id: market_b_intent_id,
         },
         vec![
             AccountMeta::new(admin.pubkey(), true),
@@ -23637,6 +23663,7 @@ fn v16_attack_topup_optional_ledgers_reject_cross_market_reuse() {
 
     let backing_source = env.token_account(admin.pubkey(), 40);
     let backing_source_before = env.svm.get_account(&backing_source).unwrap();
+    let backing_reject_intent_id = env.next_backing_topup_intent_id_for_market(market_b, 1);
     env.svm.expire_blockhash();
     let backing_reject = send_tx(
         &mut env.svm,
@@ -23646,6 +23673,7 @@ fn v16_attack_topup_optional_ledgers_reject_cross_market_reuse() {
             domain: 1,
             amount: 40,
             expiry_slot: 10,
+            intent_id: backing_reject_intent_id,
         },
         vec![
             AccountMeta::new(admin.pubkey(), true),
@@ -23733,6 +23761,7 @@ fn v16_attack_topup_optional_ledgers_reject_cross_market_reuse() {
 
     let backing_ledger_b = env.backing_domain_ledger_account();
     let backing_ok_source = env.token_account(admin.pubkey(), 40);
+    let backing_ok_intent_id = env.next_backing_topup_intent_id_for_market(market_b, 1);
     env.svm.expire_blockhash();
     let backing_ok = send_tx(
         &mut env.svm,
@@ -23742,6 +23771,7 @@ fn v16_attack_topup_optional_ledgers_reject_cross_market_reuse() {
             domain: 1,
             amount: 40,
             expiry_slot: 10,
+            intent_id: backing_ok_intent_id,
         },
         vec![
             AccountMeta::new(admin.pubkey(), true),
@@ -24424,12 +24454,14 @@ fn v16_attack_value_paths_cannot_use_portfolio_as_optional_ledger() {
     );
 
     let top_up_backing_source = env.token_account(admin.pubkey(), 30);
+    let top_up_backing_intent_id = env.next_backing_topup_intent_id(1);
     env.svm.expire_blockhash();
     let top_up_backing = env.send(
         ProgInstruction::TopUpBackingBucket {
             domain: 1,
             amount: 30,
             expiry_slot: 10,
+            intent_id: top_up_backing_intent_id,
         },
         vec![
             AccountMeta::new(admin.pubkey(), true),
@@ -24633,12 +24665,14 @@ fn v16_attack_value_paths_cannot_use_market_as_optional_ledger() {
     assert_eq!(env.token_amount(top_up_domain_source), 20);
 
     let top_up_backing_source = env.token_account(admin.pubkey(), 30);
+    let top_up_backing_intent_id = env.next_backing_topup_intent_id(1);
     env.svm.expire_blockhash();
     let top_up_backing = env.send(
         ProgInstruction::TopUpBackingBucket {
             domain: 1,
             amount: 30,
             expiry_slot: 10,
+            intent_id: top_up_backing_intent_id,
         },
         vec![
             AccountMeta::new(admin.pubkey(), true),
@@ -24870,12 +24904,14 @@ fn v16_attack_topups_cannot_use_vault_as_source() {
         "TopUpInsuranceDomain",
     );
     let expiry_slot = env.svm.get_sysvar::<Clock>().slot + 10_000;
+    let backing_intent_id = env.next_backing_topup_intent_id(1);
     reject_alias(
         &mut env,
         ProgInstruction::TopUpBackingBucket {
             domain: 1,
             amount: 500,
             expiry_slot,
+            intent_id: backing_intent_id,
         },
         "TopUpBackingBucket",
     );
@@ -25282,6 +25318,7 @@ fn v16_attack_domain_topups_pinned_to_canonical_vault() {
     );
 
     let backing_src = env.token_account_for_mint(env.mint, admin.pubkey(), 700);
+    let backing_intent_id = env.next_backing_topup_intent_id(1);
     let market_before = env.svm.get_account(&env.market).unwrap();
     let source_before = env.svm.get_account(&backing_src).unwrap();
     let fake_before = env.svm.get_account(&fake_vault).unwrap();
@@ -25294,6 +25331,7 @@ fn v16_attack_domain_topups_pinned_to_canonical_vault() {
             domain: 1,
             amount: 700,
             expiry_slot: 10_000,
+            intent_id: backing_intent_id,
         },
         vec![
             AccountMeta::new(admin.pubkey(), true),
@@ -25391,6 +25429,7 @@ fn v16_attack_domain_indexed_calls_reject_out_of_range_atomically() {
             domain: BAD_DOMAIN,
             amount: 456,
             expiry_slot: 10_000,
+            intent_id: 1,
         },
         vec![
             AccountMeta::new(admin.pubkey(), true),
@@ -31780,6 +31819,7 @@ fn v16_attack_haircut_proportional_to_claim_size() {
 fn v16_attack_topup_backing_bucket_authority_gated() {
     let mut env = V16CuEnv::new();
     let (_, g0) = env.market_state();
+    let intent_id = env.next_backing_topup_intent_id(0);
     let donor = Keypair::new();
     env.ensure_signer_account(donor.pubkey());
     let src = env.token_account_for_mint(env.mint, donor.pubkey(), 500);
@@ -31793,6 +31833,7 @@ fn v16_attack_topup_backing_bucket_authority_gated() {
             domain: 0,
             amount: 500,
             expiry_slot: 10_000,
+            intent_id,
         },
         vec![
             AccountMeta::new(donor.pubkey(), true),
@@ -31949,6 +31990,7 @@ fn v16_attack_cross_asset_backing_authority_cannot_withdraw_other_asset_earnings
 
     let ledger2 = env.backing_domain_ledger_account();
     let source2 = env.token_account(asset1_backing.pubkey(), 300);
+    let intent_id = env.next_backing_topup_intent_id(2);
     env.svm.expire_blockhash();
     send_tx(
         &mut env.svm,
@@ -31958,6 +32000,7 @@ fn v16_attack_cross_asset_backing_authority_cannot_withdraw_other_asset_earnings
             domain: 2,
             amount: 300,
             expiry_slot: 10_000,
+            intent_id,
         },
         vec![
             AccountMeta::new(asset1_backing.pubkey(), true),
@@ -33656,6 +33699,7 @@ fn v16_attack_topups_cannot_bypass_cumulative_tvl_cap() {
         let ledger_before = env.svm.get_account(&ledger).unwrap();
         let source_before = env.svm.get_account(&source).unwrap();
         let vault_before = env.svm.get_account(&env.vault).unwrap();
+        let intent_id = env.next_backing_topup_intent_id(1);
 
         env.svm.expire_blockhash();
         let result = env.send(
@@ -33663,6 +33707,7 @@ fn v16_attack_topups_cannot_bypass_cumulative_tvl_cap() {
                 domain: 1,
                 amount: 2,
                 expiry_slot: 10_000,
+                intent_id,
             },
             vec![
                 AccountMeta::new(admin.pubkey(), true),
@@ -35295,6 +35340,7 @@ fn v16_attack_backing_bucket_topup_withdraw_input_gates() {
 
     // helper: inline TopUpBackingBucket returning Result (the env helper panics on reject).
     let top_up = |env: &mut V16CuEnv, amount: u128, expiry: u64| -> Result<u64, String> {
+        let intent_id = env.next_backing_topup_intent_id(0);
         let source = Pubkey::new_unique();
         env.svm
             .set_account(
@@ -35317,6 +35363,7 @@ fn v16_attack_backing_bucket_topup_withdraw_input_gates() {
                 domain: 0,
                 amount,
                 expiry_slot: expiry,
+                intent_id,
             },
             vec![
                 AccountMeta::new(admin.pubkey(), true),
@@ -55252,12 +55299,14 @@ fn v16_attack_live_value_paths_reject_when_resolve_matured() {
         "TopUpInsuranceDomain must reject once the market is resolve-matured"
     );
 
+    let stale_backing_intent_id = env.next_backing_topup_intent_id(1);
     env.svm.expire_blockhash();
     let stale_backing = env.send(
         ProgInstruction::TopUpBackingBucket {
             domain: 1,
             amount: 30,
             expiry_slot: 100,
+            intent_id: stale_backing_intent_id,
         },
         vec![
             AccountMeta::new(admin.pubkey(), true),
@@ -58004,6 +58053,7 @@ fn v16_attack_value_topups_reject_delegated_canonical_vault() {
 
     let backing_source = env.token_account_for_mint(env.mint, admin.pubkey(), 13);
     let backing_source_before = env.svm.get_account(&backing_source).unwrap();
+    let backing_intent_id = env.next_backing_topup_intent_id(1);
     env.svm.expire_blockhash();
     let backing_reject = send_tx(
         &mut env.svm,
@@ -58013,6 +58063,7 @@ fn v16_attack_value_topups_reject_delegated_canonical_vault() {
             domain: 1,
             amount: 13,
             expiry_slot: 10_000,
+            intent_id: backing_intent_id,
         },
         vec![
             AccountMeta::new(admin.pubkey(), true),
@@ -59558,12 +59609,14 @@ fn v16_attack_backing_topup_rejects_lapsed_expiry() {
     let admin = env.admin.insecure_clone();
     let source = env.token_account(admin.pubkey(), 50);
     let topup = |env: &mut V16CuEnv, expiry: u64| -> Result<u64, String> {
+        let intent_id = env.next_backing_topup_intent_id(1);
         env.svm.expire_blockhash();
         env.send(
             ProgInstruction::TopUpBackingBucket {
                 domain: 1,
                 amount: 50,
                 expiry_slot: expiry,
+                intent_id,
             },
             vec![
                 AccountMeta::new(admin.pubkey(), true),
@@ -59718,6 +59771,89 @@ fn v16_attack_underfunded_exit_cannot_move_ewma_with_uncollectible_fee() {
     }
 }
 
+#[test]
+fn v16_backing_topup_intents_allow_bounded_out_of_order_landing() {
+    let mut env = V16CuEnv::new();
+    let admin = env.admin.insecure_clone();
+
+    let opposite_domain_source = env.token_account(admin.pubkey(), 1);
+    env.svm.expire_blockhash();
+    env.send(
+        ProgInstruction::TopUpBackingBucket {
+            domain: 0,
+            amount: 1,
+            expiry_slot: 10_000,
+            intent_id: 1,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(opposite_domain_source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&admin],
+    )
+    .expect("one domain's intent must not consume the opposite domain's replay window");
+    assert_eq!(env.next_backing_topup_intent_id(0), 2);
+    assert_eq!(env.next_backing_topup_intent_id(1), 1);
+
+    for intent_id in [3, 1, 2] {
+        let source = env.token_account(admin.pubkey(), 1);
+        env.svm.expire_blockhash();
+        env.send(
+            ProgInstruction::TopUpBackingBucket {
+                domain: 1,
+                amount: 1,
+                expiry_slot: 10_000,
+                intent_id,
+            },
+            vec![
+                AccountMeta::new(admin.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(source, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[&admin],
+        )
+        .expect("distinct backing intents may land out of order");
+        assert_eq!(env.token_amount(source), 0);
+    }
+    assert_eq!(env.next_backing_topup_intent_id(1), 4);
+
+    for (intent_id, label) in [(68, "far-future"), (2, "consumed")] {
+        let rejected_source = env.token_account(admin.pubkey(), 1);
+        let market_before = env.svm.get_account(&env.market).unwrap();
+        let source_before = env.svm.get_account(&rejected_source).unwrap();
+        let vault_before = env.svm.get_account(&env.vault).unwrap();
+        env.svm.expire_blockhash();
+        let rejected = env.send(
+            ProgInstruction::TopUpBackingBucket {
+                domain: 1,
+                amount: 1,
+                expiry_slot: 10_000,
+                intent_id,
+            },
+            vec![
+                AccountMeta::new(admin.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(rejected_source, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[&admin],
+        );
+        assert!(rejected.is_err(), "{} backing intent must reject", label);
+        assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+        assert_eq!(
+            env.svm.get_account(&rejected_source).unwrap(),
+            source_before
+        );
+        assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+    }
+}
+
 fn run_backing_topup_retry_replay_case(replay_retained: bool) -> (u64, u64, u64) {
     const BACKING: u128 = 500;
     const SIZE_Q: i128 = 10 * POS_SCALE as i128;
@@ -59736,6 +59872,7 @@ fn run_backing_topup_retry_replay_case(replay_retained: bool) -> (u64, u64, u64)
     env.deposit(&loser_owner, loser, 1_000);
 
     let source = env.token_account(env.admin.pubkey(), (2 * BACKING) as u64);
+    let intent_id = env.next_backing_topup_intent_id(WINNING_DOMAIN);
     env.svm.expire_blockhash();
     let blockhash = env.svm.latest_blockhash();
     let topup_ix = Instruction {
@@ -59751,6 +59888,7 @@ fn run_backing_topup_retry_replay_case(replay_retained: bool) -> (u64, u64, u64)
             domain: WINNING_DOMAIN,
             amount: BACKING,
             expiry_slot: 10_000,
+            intent_id,
         }
         .encode(),
     };

@@ -6,7 +6,25 @@ use percolator_prog::ix::{CrankObservationHint, Instruction};
 use percolator_prog::matcher_abi::{
     validate_matcher_return, MatcherReturn, FLAG_PARTIAL_OK, FLAG_REJECTED, FLAG_VALID,
 };
-use percolator_prog::policy_v16;
+use percolator_prog::{policy_v16, state};
+
+#[kani::proof]
+fn kani_v16_intent_replay_window_is_at_most_once() {
+    let max_seen: u64 = kani::any();
+    let seen_bitmap: u64 = kani::any();
+    let intent_id: u64 = kani::any();
+
+    if let Some((next_max_seen, next_seen_bitmap)) =
+        state::advance_intent_replay_window(max_seen, seen_bitmap, intent_id)
+    {
+        assert_eq!(next_seen_bitmap & 1, 1);
+        assert!(next_max_seen >= intent_id);
+        assert_eq!(
+            state::advance_intent_replay_window(next_max_seen, next_seen_bitmap, intent_id),
+            None
+        );
+    }
+}
 
 #[kani::proof]
 fn kani_v16_premium_funding_rate_is_clamped_and_signed() {
@@ -355,22 +373,26 @@ fn kani_v16_top_up_backing_bucket_decode_preserves_wire_fields() {
     let domain: u16 = kani::any();
     let amount: u128 = kani::any();
     let expiry_slot: u64 = kani::any();
+    let intent_id: u64 = kani::any();
 
-    let mut data = [0u8; 27];
+    let mut data = [0u8; 35];
     data[0] = 24;
     data[1..3].copy_from_slice(&domain.to_le_bytes());
     data[3..19].copy_from_slice(&amount.to_le_bytes());
     data[19..27].copy_from_slice(&expiry_slot.to_le_bytes());
+    data[27..35].copy_from_slice(&intent_id.to_le_bytes());
 
     match Instruction::decode(&data).unwrap() {
         Instruction::TopUpBackingBucket {
             domain: got_domain,
             amount: got_amount,
             expiry_slot: got_expiry,
+            intent_id: got_intent_id,
         } => {
             assert_eq!(got_domain, domain);
             assert_eq!(got_amount, amount);
             assert_eq!(got_expiry, expiry_slot);
+            assert_eq!(got_intent_id, intent_id);
         }
         _ => unreachable!(),
     }
@@ -1153,6 +1175,7 @@ fn kani_v16_custody_payloads_reject_trailing_byte() {
             domain: 1,
             amount: 1,
             expiry_slot: 10,
+            intent_id: 1,
         },
         extra,
     );
@@ -1496,7 +1519,7 @@ fn kani_v16_every_active_payload_rejects_one_byte_truncation() {
     let top_up_domain = [56u8; 17];
     assert!(Instruction::decode(&top_up_domain).is_err());
 
-    let top_up_backing = [24u8; 25];
+    let top_up_backing = [24u8; 34];
     assert!(Instruction::decode(&top_up_backing).is_err());
 
     let withdraw_insurance = [23u8; 16];

@@ -427,6 +427,10 @@ This section describes intent and operational ordering, not argument-by-argument
   - validates side encoding and engine readiness; it is not an admin override
 - **TopUpInsurance** (tag 9)
   - transfers collateral into vault; credits insurance fund in engine
+- **TopUpBackingBucket** (tag 24)
+  - transfers collateral into an asset's backing bucket under that domain's backing authority
+  - carries a nonzero, per-domain `intent_id`; a 64-entry replay window permits bounded
+    out-of-order landing while rejecting retained transaction variants for an already-consumed intent
 
 ### Trading
 - **TradeNoCpi**
