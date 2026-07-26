@@ -10800,6 +10800,176 @@ fn v16_bpf_stale_full_14_leg_tradenocpi_rejects_before_cu_cliff() {
     // v16_bpf_current_full_14_leg_tradenocpi_is_under_tx_limit tests.
 }
 
+// Public max-shape composition: retain both payout-source domains for every active leg, then prove
+// a normal owner-signed reduction still fits one transaction without state injection.
+#[test]
+fn v16_bpf_public_14_leg_28_source_domain_exit_is_under_tx_limit() {
+    const ASSETS: u16 = 14;
+    const OPEN_PRICE: u64 = 100;
+    const PROFIT_PRICE: u64 = 105;
+    const DEPOSIT: u128 = 1_000_000_000;
+    const BACKING: u128 = 10_000_000;
+
+    let mut env =
+        V16CuEnv::new_with_market_params_and_price_move(ASSETS, 1_000, 1_000, 500);
+    env.svm.warp_to_slot(1);
+    for asset_index in 0..ASSETS {
+        env.configure_auth_mark_for_asset_as_admin(asset_index, 1, OPEN_PRICE);
+    }
+
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long_account = env.create_portfolio(&long_owner);
+    let short_account = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long_account, DEPOSIT);
+    env.deposit(&short_owner, short_account, DEPOSIT);
+    let legs = (0..ASSETS)
+        .map(|asset_index| BatchTradeLeg {
+            asset_index,
+            size_q: (10 * POS_SCALE) as i128,
+            exec_price: OPEN_PRICE,
+            fee_bps: 0,
+        })
+        .collect();
+    env.send(
+        ProgInstruction::BatchTradeNoCpi { legs },
+        vec![
+            AccountMeta::new(long_owner.pubkey(), true),
+            AccountMeta::new(short_owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(long_account, false),
+            AccountMeta::new(short_account, false),
+        ],
+        &[&long_owner, &short_owner],
+    )
+    .expect("public 14-leg open");
+
+    // Enable the wrapper's source-domain snapshot/fee path, then fund both
+    // source domains for every asset before producing positive PnL.
+    env.update_backing_fee_policy_with_cu(0, 1, 0);
+    for domain in 0..(ASSETS * 2) {
+        env.top_up_backing_bucket(domain, BACKING, 100);
+    }
+
+    env.svm.warp_to_slot(2);
+    for asset_index in 0..ASSETS {
+        env.push_auth_mark_for_asset_as_admin(asset_index, 2, PROFIT_PRICE);
+        env.crank(
+            long_account,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 2,
+                observations: vec![CrankObservationHint {
+                    asset_index,
+                    oracle_accounts: 0,
+                }],
+            },
+        );
+        env.crank(
+            short_account,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 2,
+                observations: vec![],
+            },
+        );
+    }
+    for portfolio in [long_account, short_account] {
+        env.crank(
+            portfolio,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 2,
+                observations: vec![],
+            },
+        );
+    }
+
+    let long_before = env.portfolio_state(long_account);
+    let occupied_before = long_before
+        .source_domains
+        .iter()
+        .filter(|source| source.is_occupied())
+        .count();
+    assert_eq!(
+        occupied_before, ASSETS as usize,
+        "public favorable settlement should retain one source domain per asset"
+    );
+    for asset_index in 0..ASSETS {
+        env.trade_asset_with_cu(
+            asset_index,
+            &long_owner,
+            long_account,
+            &short_owner,
+            short_account,
+            -((20 * POS_SCALE) as i128),
+            PROFIT_PRICE,
+            0,
+        );
+    }
+
+    env.svm.warp_to_slot(3);
+    for asset_index in 0..ASSETS {
+        env.push_auth_mark_for_asset_as_admin(asset_index, 3, OPEN_PRICE);
+        env.crank(
+            long_account,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 3,
+                observations: vec![CrankObservationHint {
+                    asset_index,
+                    oracle_accounts: 0,
+                }],
+            },
+        );
+        env.crank(
+            short_account,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 3,
+                observations: vec![],
+            },
+        );
+    }
+    for portfolio in [long_account, short_account] {
+        env.crank(
+            portfolio,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 3,
+                observations: vec![],
+            },
+        );
+    }
+
+    let long_before_reduction = env.portfolio_state(long_account);
+    let occupied_before_reduction = long_before_reduction
+        .source_domains
+        .iter()
+        .filter(|source| source.is_occupied())
+        .count();
+    assert_eq!(
+        occupied_before_reduction,
+        (ASSETS * 2) as usize,
+        "opposite profitable episodes should reach the public source-domain cap"
+    );
+    let reduction_cu = env
+        .try_trade_asset_with_cu(
+            0,
+            &long_owner,
+            long_account,
+            &short_owner,
+            short_account,
+            POS_SCALE as i128,
+            OPEN_PRICE,
+            0,
+        )
+        .expect("risk-reducing trade must remain executable");
+    println!("public 14-leg/28-source-domain risk reduction CU: {reduction_cu}");
+    assert!(
+        reduction_cu <= 1_050_000,
+        "max-source-domain risk reduction exceeded its CU envelope: {reduction_cu}"
+    );
+    assert_eq!(
+        active_leg_for_asset(&env.portfolio_state(long_account), 0).basis_pos_q,
+        -((9 * POS_SCALE) as i128)
+    );
+}
+
 #[test]
 fn v16_bpf_close_resolved_moves_payout_tokens_with_ledger() {
     let mut env = V16CuEnv::new();
