@@ -11366,6 +11366,141 @@ fn v16_bpf_full_14_leg_liquidation_crank_is_under_tx_limit() {
 }
 
 #[test]
+fn v16_bpf_public_full_14_leg_composite_oracle_liquidation_progress_is_bounded() {
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(14, 1_000, 1_000, 500);
+    set_test_clock(&mut env, 1, 100);
+
+    let feeds = [[0xd1u8; 32], [0xd2u8; 32], [0xd3u8; 32]];
+    let initial_oracles = [
+        env.set_pyth_price(&feeds[0], 3_000_000, -6, 100),
+        env.set_pyth_price(&feeds[1], 150_000_000, -6, 100),
+        env.set_pyth_price(&feeds[2], 200_000_000, -6, 100),
+    ];
+    env.configure_three_leg_hybrid_with_cu(
+        feeds,
+        initial_oracles[0],
+        initial_oracles[1],
+        initial_oracles[2],
+        1,
+        100,
+    );
+    for asset_index in 1..14 {
+        env.configure_auth_mark_for_asset_as_admin(asset_index, 1, 100);
+    }
+
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long_account = env.create_portfolio(&long_owner);
+    let short_account = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long_account, 2_000);
+    env.deposit(&short_owner, short_account, 100_000);
+    let legs = (0..14)
+        .map(|asset_index| BatchTradeLeg {
+            asset_index,
+            size_q: (10 * POS_SCALE) as i128,
+            exec_price: 100,
+            fee_bps: 0,
+        })
+        .collect();
+    let open_cu = env
+        .send(
+            ProgInstruction::BatchTradeNoCpi { legs },
+            vec![
+                AccountMeta::new(long_owner.pubkey(), true),
+                AccountMeta::new(short_owner.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(long_account, false),
+                AccountMeta::new(short_account, false),
+            ],
+            &[&long_owner, &short_owner],
+        )
+        .expect("public 14-leg batch open");
+
+    set_test_clock(&mut env, 2, 101);
+    let moved_oracles = [
+        env.set_pyth_price(&feeds[0], 2_850_000, -6, 101),
+        env.set_pyth_price(&feeds[1], 150_000_000, -6, 101),
+        env.set_pyth_price(&feeds[2], 200_000_000, -6, 101),
+    ];
+    for asset_index in 1..14 {
+        env.push_auth_mark_for_asset_as_admin(asset_index, 2, 95);
+    }
+    env.svm.expire_blockhash();
+    let refresh_cu = env
+        .send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 2,
+                observations: std::iter::once(CrankObservationHint {
+                    asset_index: 0,
+                    oracle_accounts: 3,
+                })
+                .chain((1..14).map(|asset_index| CrankObservationHint {
+                    asset_index,
+                    oracle_accounts: 0,
+                }))
+                .collect(),
+            },
+            vec![
+                AccountMeta::new(env.payer.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(long_account, false),
+                AccountMeta::new_readonly(moved_oracles[0], false),
+                AccountMeta::new_readonly(moved_oracles[1], false),
+                AccountMeta::new_readonly(moved_oracles[2], false),
+            ],
+            &[],
+        )
+        .expect("public composite/auth-mark refresh");
+    let after_refresh =
+        state::read_portfolio(&env.svm.get_account(&long_account).unwrap().data).unwrap();
+    let before_liquidation_group = env.market_state().1;
+    let oi_before_liquidation: u128 = before_liquidation_group.assets[..14]
+        .iter()
+        .map(|asset| asset.oi_eff_long_q)
+        .sum();
+    println!(
+        "public 14-leg composite open={open_cu} first_crank={refresh_cu} active={}",
+        percolator::active_bitmap_count_ones(active_bitmap(&after_refresh))
+    );
+    assert!(open_cu < 1_400_000, "public 14-leg open must fit");
+    assert!(refresh_cu < 1_400_000, "max-shape refresh must fit");
+    assert_ne!(
+        health_cert(&after_refresh).certified_liq_deficit,
+        0,
+        "all fourteen public 5% mark moves must make the minimally collateralized account actionable"
+    );
+
+    let liquidation_cu = env.crank(
+        long_account,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 2,
+            observations: vec![],
+        },
+    );
+    let after_liquidation =
+        state::read_portfolio(&env.svm.get_account(&long_account).unwrap().data).unwrap();
+    let after_liquidation_group = env.market_state().1;
+    let oi_after_liquidation: u128 = after_liquidation_group.assets[..14]
+        .iter()
+        .map(|asset| asset.oi_eff_long_q)
+        .sum();
+    println!(
+        "public 14-leg composite second_crank={liquidation_cu} active={}",
+        percolator::active_bitmap_count_ones(active_bitmap(&after_liquidation))
+    );
+    assert!(liquidation_cu < 1_400_000, "max-shape liquidation must fit");
+    assert!(
+        oi_after_liquidation < oi_before_liquidation,
+        "selector continuation must strictly reduce aggregate long open interest"
+    );
+    assert_eq!(
+        health_cert(&after_liquidation).certified_liq_deficit,
+        0,
+        "one bounded selector continuation must restore maintenance health"
+    );
+}
+
+#[test]
 fn v16_bpf_current_full_14_leg_tradenocpi_is_under_tx_limit() {
     let mut env = V16CuEnv::new_with_market_params_and_price_move(14, 1_000, 1_000, 500);
     let long_owner = Keypair::new();
