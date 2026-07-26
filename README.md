@@ -401,6 +401,9 @@ This section describes intent and operational ordering, not argument-by-argument
   - initializes a program-owned portfolio account and binds `owner = signer`
 - **Deposit** (tag 3)
   - transfers collateral into vault; credits engine balance for that account
+  - binds the signed request to `portfolio_id` and consumes a nonzero portfolio-local `intent_id`;
+    a 64-ID replay window allows distinct deposits to land out of order but rejects fee-bump or
+    blockhash retry variants for an already consumed economic intent
 - **Withdraw** (tag 4)
   - performs oracle-read + engine checks; withdraws from vault via PDA signer; debits engine
 - **ClosePortfolio** (tag 8)

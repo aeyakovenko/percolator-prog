@@ -7,6 +7,7 @@ use percolator_prog::matcher_abi::{
     validate_matcher_return, MatcherReturn, FLAG_PARTIAL_OK, FLAG_REJECTED, FLAG_VALID,
 };
 use percolator_prog::policy_v16;
+use percolator_prog::state;
 
 #[kani::proof]
 fn kani_v16_premium_funding_rate_is_clamped_and_signed() {
@@ -201,9 +202,7 @@ fn kani_v16_init_market_decode_preserves_wire_fields() {
 #[kani::proof]
 fn kani_v16_amount_instructions_decode_preserves_wire_fields() {
     let tag: u8 = kani::any();
-    kani::assume(
-        tag == 3 || tag == 4 || tag == 9 || tag == 28 || tag == 30 || tag == 41 || tag == 42,
-    );
+    kani::assume(tag == 4 || tag == 9 || tag == 28 || tag == 30 || tag == 41 || tag == 42);
     let amount: u128 = kani::any();
 
     let mut data = [0u8; 17];
@@ -211,7 +210,6 @@ fn kani_v16_amount_instructions_decode_preserves_wire_fields() {
     data[1..17].copy_from_slice(&amount.to_le_bytes());
 
     match (tag, Instruction::decode(&data).unwrap()) {
-        (3, Instruction::Deposit { amount: got }) => assert_eq!(got, amount),
         (4, Instruction::Withdraw { amount: got }) => assert_eq!(got, amount),
         (9, Instruction::TopUpInsurance { amount: got }) => assert_eq!(got, amount),
         (28, Instruction::ConvertReleasedPnl { amount: got }) => assert_eq!(got, amount),
@@ -226,6 +224,56 @@ fn kani_v16_amount_instructions_decode_preserves_wire_fields() {
             },
         ) => assert_eq!(got, amount),
         _ => unreachable!(),
+    }
+}
+
+#[kani::proof]
+fn kani_v16_deposit_intent_decode_preserves_wire_fields() {
+    let portfolio_id: u64 = kani::any();
+    let intent_id: u64 = kani::any();
+    let amount: u128 = kani::any();
+    let encoded = Instruction::Deposit {
+        portfolio_id,
+        intent_id,
+        amount,
+    }
+    .encode();
+
+    assert_eq!(encoded.len(), 33);
+    match Instruction::decode(&encoded).unwrap() {
+        Instruction::Deposit {
+            portfolio_id: got_portfolio_id,
+            intent_id: got_intent_id,
+            amount: got_amount,
+        } => {
+            assert_eq!(got_portfolio_id, portfolio_id);
+            assert_eq!(got_intent_id, intent_id);
+            assert_eq!(got_amount, amount);
+        }
+        _ => unreachable!(),
+    }
+
+    let mut legacy = [0u8; 17];
+    legacy[0] = 3;
+    legacy[1..17].copy_from_slice(&amount.to_le_bytes());
+    assert!(Instruction::decode(&legacy).is_err());
+}
+
+#[kani::proof]
+fn kani_v16_owner_intent_consumption_is_at_most_once() {
+    let max_seen: u64 = kani::any();
+    let seen_bitmap: u64 = kani::any();
+    let intent_id: u64 = kani::any();
+
+    if let Some((next_max_seen, next_seen_bitmap)) =
+        state::advance_owner_intent_replay_window(max_seen, seen_bitmap, intent_id)
+    {
+        assert!(state::advance_owner_intent_replay_window(
+            next_max_seen,
+            next_seen_bitmap,
+            intent_id,
+        )
+        .is_none());
     }
 }
 
@@ -1145,7 +1193,14 @@ fn kani_v16_custody_payloads_reject_trailing_byte() {
     let extra: u8 = kani::any();
 
     assert_rejects_trailing_byte(Instruction::InitPortfolio, extra);
-    assert_rejects_trailing_byte(Instruction::Deposit { amount: 1 }, extra);
+    assert_rejects_trailing_byte(
+        Instruction::Deposit {
+            portfolio_id: 1,
+            intent_id: 1,
+            amount: 1,
+        },
+        extra,
+    );
     assert_rejects_trailing_byte(Instruction::Withdraw { amount: 1 }, extra);
     assert_rejects_trailing_byte(Instruction::TopUpInsurance { amount: 1 }, extra);
     assert_rejects_trailing_byte(
