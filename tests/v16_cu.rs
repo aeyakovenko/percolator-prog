@@ -2230,11 +2230,14 @@ impl V16CuEnv {
     }
 
     fn resolve(&mut self) -> u64 {
+        let expected_sequence =
+            state::read_marketauth_sequence(&self.svm.get_account(&self.market).unwrap().data)
+                .unwrap();
         send_tx(
             &mut self.svm,
             self.program_id,
             &self.payer,
-            ProgInstruction::ResolveMarket,
+            ProgInstruction::ResolveMarket { expected_sequence },
             vec![
                 AccountMeta::new(self.admin.pubkey(), true),
                 AccountMeta::new(self.market, false),
@@ -22439,7 +22442,9 @@ fn v16_attack_non_admin_cannot_resolve_or_configure() {
         &mut env.svm,
         env.program_id,
         &env.payer,
-        ProgInstruction::ResolveMarket,
+        ProgInstruction::ResolveMarket {
+            expected_sequence: 0,
+        },
         vec![
             AccountMeta::new(mallory.pubkey(), true),
             AccountMeta::new(env.market, false),
@@ -23888,7 +23893,9 @@ fn v16_attack_terminal_insurance_ledger_rejects_cross_market_reuse() {
         &mut env.svm,
         env.program_id,
         &env.payer,
-        ProgInstruction::ResolveMarket,
+        ProgInstruction::ResolveMarket {
+            expected_sequence: 0,
+        },
         vec![
             AccountMeta::new(admin.pubkey(), true),
             AccountMeta::new(market_b, false),
@@ -24024,7 +24031,9 @@ fn v16_attack_terminal_withdraw_insurance_rejects_portfolio_as_ledger() {
         &mut env.svm,
         env.program_id,
         &env.payer,
-        ProgInstruction::ResolveMarket,
+        ProgInstruction::ResolveMarket {
+            expected_sequence: 0,
+        },
         vec![
             AccountMeta::new(admin.pubkey(), true),
             AccountMeta::new(market_b, false),
@@ -25678,7 +25687,10 @@ fn v16_attack_presigned_resolve_does_not_revive_after_marketauth_aba() {
                     AccountMeta::new(authority_a.pubkey(), true),
                     AccountMeta::new(env.market, false),
                 ],
-                data: ProgInstruction::ResolveMarket.encode(),
+                data: ProgInstruction::ResolveMarket {
+                    expected_sequence: 0,
+                }
+                .encode(),
             },
         ],
         Some(&env.payer.pubkey()),
@@ -25690,6 +25702,7 @@ fn v16_attack_presigned_resolve_does_not_revive_after_marketauth_aba() {
     env.send(
         ProgInstruction::UpdateAuthority {
             new_pubkey: authority_c.pubkey().to_bytes(),
+            expected_sequence: 0,
         },
         vec![
             AccountMeta::new(authority_a.pubkey(), true),
@@ -25703,6 +25716,7 @@ fn v16_attack_presigned_resolve_does_not_revive_after_marketauth_aba() {
     env.send(
         ProgInstruction::UpdateAuthority {
             new_pubkey: authority_a.pubkey().to_bytes(),
+            expected_sequence: 1,
         },
         vec![
             AccountMeta::new(authority_c.pubkey(), true),
@@ -27793,7 +27807,9 @@ fn v16_attack_close_slab_rejects_stale_marketauth_after_rotation() {
         &mut env.svm,
         env.program_id,
         &env.payer,
-        ProgInstruction::ResolveMarket,
+        ProgInstruction::ResolveMarket {
+            expected_sequence: 1,
+        },
         vec![
             AccountMeta::new(new_admin.pubkey(), true),
             AccountMeta::new(env.market, false),
@@ -28004,7 +28020,9 @@ fn v16_attack_close_slab_rejects_market_as_lamport_destination() {
         &mut svm,
         program_id,
         &payer,
-        ProgInstruction::ResolveMarket,
+        ProgInstruction::ResolveMarket {
+            expected_sequence: 1,
+        },
         vec![
             AccountMeta::new(market.pubkey(), true),
             AccountMeta::new(market.pubkey(), false),
@@ -30872,7 +30890,9 @@ fn v16_attack_close_resolved_rejects_cross_market_portfolio_payout() {
         &mut env.svm,
         env.program_id,
         &env.payer,
-        ProgInstruction::ResolveMarket,
+        ProgInstruction::ResolveMarket {
+            expected_sequence: 0,
+        },
         vec![
             AccountMeta::new(env.admin.pubkey(), true),
             AccountMeta::new(market_b, false),
