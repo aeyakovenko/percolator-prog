@@ -49,6 +49,9 @@ pub mod constants {
     pub const WRAPPER_CONFIG_LEN: usize = 448;
     pub const ASSET_ORACLE_PROFILE_LEN: usize = 400;
     pub const ASSET_ORACLE_WRAPPER_LEN: usize = 512;
+    pub const BACKING_TOPUP_REPLAY_WINDOW_LEN: usize = 16;
+    pub const ASSET_BACKING_TOPUP_REPLAY_OFF: usize =
+        ASSET_ORACLE_WRAPPER_LEN - 2 * BACKING_TOPUP_REPLAY_WINDOW_LEN;
     pub const MARKET_GROUP_LEN: usize = size_of::<MarketGroupV16HeaderAccount>();
     pub const MARKET_ASSET_SLOT_LEN: usize = size_of::<Market<[u8; ASSET_ORACLE_WRAPPER_LEN]>>();
     pub const PORTFOLIO_STATE_LEN: usize = size_of::<PortfolioAccountV16Account>();
@@ -155,14 +158,14 @@ pub mod error {
 pub mod state {
     use crate::{
         constants::{
-            ASSET_ORACLE_PROFILE_LEN, ASSET_ORACLE_WRAPPER_LEN, HEADER_LEN,
-            KIND_BACKING_DOMAIN_LEDGER, KIND_INSURANCE_LEDGER, KIND_MARKET, KIND_PORTFOLIO, MAGIC,
-            MARKET_GROUP_LEN, MARKET_GROUP_OFF, MIN_MARKET_ACCOUNT_LEN, ORACLE_LEG_CAP,
-            ORACLE_LEG_FLAGS_MASK, ORACLE_MODE_AUTH_MARK, ORACLE_MODE_EWMA_MARK,
-            ORACLE_MODE_HYBRID_AFTER_HOURS, ORACLE_MODE_MANUAL, PORTFOLIO_ACCOUNT_LEN,
-            PORTFOLIO_ENGINE_ACCOUNT_LEN, PORTFOLIO_ID_LEN, PORTFOLIO_ID_OFF,
-            PORTFOLIO_MATCHER_CONFIG_LEN, PORTFOLIO_MATCHER_CONFIG_OFF, PORTFOLIO_STATE_LEN,
-            VERSION, WRAPPER_CONFIG_LEN,
+            ASSET_BACKING_TOPUP_REPLAY_OFF, ASSET_ORACLE_PROFILE_LEN, ASSET_ORACLE_WRAPPER_LEN,
+            BACKING_TOPUP_REPLAY_WINDOW_LEN, HEADER_LEN, KIND_BACKING_DOMAIN_LEDGER,
+            KIND_INSURANCE_LEDGER, KIND_MARKET, KIND_PORTFOLIO, MAGIC, MARKET_GROUP_LEN,
+            MARKET_GROUP_OFF, MIN_MARKET_ACCOUNT_LEN, ORACLE_LEG_CAP, ORACLE_LEG_FLAGS_MASK,
+            ORACLE_MODE_AUTH_MARK, ORACLE_MODE_EWMA_MARK, ORACLE_MODE_HYBRID_AFTER_HOURS,
+            ORACLE_MODE_MANUAL, PORTFOLIO_ACCOUNT_LEN, PORTFOLIO_ENGINE_ACCOUNT_LEN,
+            PORTFOLIO_ID_LEN, PORTFOLIO_ID_OFF, PORTFOLIO_MATCHER_CONFIG_LEN,
+            PORTFOLIO_MATCHER_CONFIG_OFF, PORTFOLIO_STATE_LEN, VERSION, WRAPPER_CONFIG_LEN,
         },
         error::PercolatorError,
     };
@@ -1368,6 +1371,76 @@ pub mod state {
         Ok(profile)
     }
 
+    /// Advance a bounded at-most-once window while allowing distinct signed intents to land out of
+    /// order. Bit zero represents `max_seen`; bit N represents `max_seen - N`.
+    #[inline]
+    pub fn advance_intent_replay_window(
+        max_seen: u64,
+        seen_bitmap: u64,
+        intent_id: u64,
+    ) -> Option<(u64, u64)> {
+        if intent_id == 0
+            || (max_seen == 0 && seen_bitmap != 0)
+            || (max_seen != 0 && seen_bitmap & 1 == 0)
+        {
+            return None;
+        }
+        if max_seen == 0 {
+            if intent_id > u64::BITS as u64 {
+                return None;
+            }
+            return Some((intent_id, 1));
+        }
+        if intent_id > max_seen {
+            let distance = intent_id - max_seen;
+            if distance > u64::BITS as u64 {
+                return None;
+            }
+            let shifted = if distance == u64::BITS as u64 {
+                0
+            } else {
+                seen_bitmap << distance
+            };
+            return Some((intent_id, shifted | 1));
+        }
+        let distance = max_seen - intent_id;
+        if distance >= u64::BITS as u64 {
+            return None;
+        }
+        let bit = 1u64 << distance;
+        if seen_bitmap & bit != 0 {
+            return None;
+        }
+        Some((max_seen, seen_bitmap | bit))
+    }
+
+    #[inline]
+    pub fn read_next_backing_topup_intent_id(
+        data: &[u8],
+        domain: usize,
+    ) -> Result<u64, ProgramError> {
+        check_header(data, KIND_MARKET)?;
+        let capacity = market_slot_capacity(data)?;
+        let domain_capacity = capacity
+            .checked_mul(2)
+            .ok_or(PercolatorError::InvalidAccountLen)?;
+        if domain >= domain_capacity {
+            return Err(PercolatorError::InvalidInstruction.into());
+        }
+        let asset_index = domain / 2;
+        let start = dynamic_slot_offset(asset_index)?
+            .checked_add(ASSET_BACKING_TOPUP_REPLAY_OFF)
+            .and_then(|offset| offset.checked_add((domain % 2) * BACKING_TOPUP_REPLAY_WINDOW_LEN))
+            .ok_or(PercolatorError::InvalidAccountLen)?;
+        let window = data
+            .get(start..start + BACKING_TOPUP_REPLAY_WINDOW_LEN)
+            .ok_or(PercolatorError::InvalidAccountLen)?;
+        let max_seen = u64::from_le_bytes(window[0..8].try_into().unwrap());
+        max_seen
+            .checked_add(1)
+            .ok_or(PercolatorError::EngineCounterOverflow.into())
+    }
+
     pub fn read_market_config_mode_and_capacity(
         data: &[u8],
     ) -> Result<(WrapperConfigV16, MarketModeV16, usize, usize), ProgramError> {
@@ -2524,6 +2597,7 @@ pub mod ix {
             domain: u16,
             amount: u128,
             expiry_slot: u64,
+            intent_id: u64,
         },
         WithdrawBackingBucket {
             domain: u16,
@@ -2791,6 +2865,7 @@ pub mod ix {
                     domain: read_u16(&mut rest)?,
                     amount: read_u128(&mut rest)?,
                     expiry_slot: read_u64(&mut rest)?,
+                    intent_id: read_u64(&mut rest)?,
                 },
                 50 => Self::WithdrawBackingBucket {
                     domain: read_u16(&mut rest)?,
@@ -3083,11 +3158,13 @@ pub mod ix {
                     domain,
                     amount,
                     expiry_slot,
+                    intent_id,
                 } => {
                     out.push(24);
                     push_u16(&mut out, domain);
                     push_u128(&mut out, amount);
                     push_u64(&mut out, expiry_slot);
+                    push_u64(&mut out, intent_id);
                 }
                 Self::WithdrawBackingBucket { domain, amount } => {
                     out.push(50);
@@ -5271,7 +5348,15 @@ pub mod processor {
                 domain,
                 amount,
                 expiry_slot,
-            } => handle_top_up_backing_bucket(program_id, accounts, domain, amount, expiry_slot),
+                intent_id,
+            } => handle_top_up_backing_bucket(
+                program_id,
+                accounts,
+                domain,
+                amount,
+                expiry_slot,
+                intent_id,
+            ),
             Instruction::WithdrawBackingBucket { domain, amount } => {
                 handle_withdraw_backing_bucket(program_id, accounts, domain, amount)
             }
@@ -7557,6 +7642,7 @@ pub mod processor {
         domain: u16,
         amount: u128,
         expiry_slot: u64,
+        intent_id: u64,
     ) -> ProgramResult {
         let signer = account(accounts, 0)?;
         let market_ai = account(accounts, 1)?;
@@ -7608,6 +7694,26 @@ pub mod processor {
             require_domain_accepts_live_topup_view(&group, domain_usize)?;
             let authorities = domain_authorities_from_view(&group, &cfg, domain_usize)?;
             expect_live_authority(&authorities.backing_bucket_authority, signer.key)?;
+            let asset_index = domain_usize / 2;
+            let replay_window = group
+                .markets
+                .get_mut(asset_index)
+                .ok_or(PercolatorError::InvalidInstruction)?
+                .wrapper
+                .get_mut(
+                    constants::ASSET_BACKING_TOPUP_REPLAY_OFF
+                        + (domain_usize % 2) * constants::BACKING_TOPUP_REPLAY_WINDOW_LEN
+                        ..constants::ASSET_BACKING_TOPUP_REPLAY_OFF
+                            + (domain_usize % 2 + 1) * constants::BACKING_TOPUP_REPLAY_WINDOW_LEN,
+                )
+                .ok_or(PercolatorError::InvalidAccountLen)?;
+            let max_seen = u64::from_le_bytes(replay_window[0..8].try_into().unwrap());
+            let seen_bitmap = u64::from_le_bytes(replay_window[8..16].try_into().unwrap());
+            let (next_max_seen, next_seen_bitmap) =
+                state::advance_intent_replay_window(max_seen, seen_bitmap, intent_id)
+                    .ok_or(PercolatorError::EngineStale)?;
+            replay_window[0..8].copy_from_slice(&next_max_seen.to_le_bytes());
+            replay_window[8..16].copy_from_slice(&next_seen_bitmap.to_le_bytes());
             let mut ledger_data = if let Some(ledger_ai) = ledger_ai {
                 Some(ledger_ai.try_borrow_mut_data()?)
             } else {
@@ -12202,6 +12308,35 @@ pub mod processor {
             assert_eq!(
                 state::allocate_portfolio_id(u64::MAX),
                 Err(PercolatorError::EngineCounterOverflow.into())
+            );
+        }
+
+        #[test]
+        fn intent_replay_window_accepts_bounded_reordering_once() {
+            let (max_seen, bitmap) = state::advance_intent_replay_window(0, 0, 1).unwrap();
+            let (max_seen, bitmap) =
+                state::advance_intent_replay_window(max_seen, bitmap, 3).unwrap();
+            let (max_seen, bitmap) =
+                state::advance_intent_replay_window(max_seen, bitmap, 2).unwrap();
+            assert_eq!((max_seen, bitmap), (3, 0b111));
+            assert_eq!(
+                state::advance_intent_replay_window(max_seen, bitmap, 2),
+                None
+            );
+            assert_eq!(state::advance_intent_replay_window(100, 1, 36), None);
+        }
+
+        #[test]
+        fn intent_replay_window_rejects_zero_and_malformed_state() {
+            assert_eq!(state::advance_intent_replay_window(0, 0, 0), None);
+            assert_eq!(state::advance_intent_replay_window(0, 1, 1), None);
+            assert_eq!(state::advance_intent_replay_window(1, 0, 2), None);
+            assert_eq!(state::advance_intent_replay_window(0, 0, 65), None);
+            assert_eq!(state::advance_intent_replay_window(1, 1, 66), None);
+            assert_eq!(
+                constants::ASSET_BACKING_TOPUP_REPLAY_OFF
+                    + 2 * constants::BACKING_TOPUP_REPLAY_WINDOW_LEN,
+                constants::ASSET_ORACLE_WRAPPER_LEN
             );
         }
 
