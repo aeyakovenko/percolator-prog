@@ -65,7 +65,11 @@ pub mod constants {
     pub const PORTFOLIO_MATCHER_CONFIG_LEN: usize = 104;
     pub const PORTFOLIO_ID_OFF: usize = PORTFOLIO_MATCHER_CONFIG_OFF + PORTFOLIO_MATCHER_CONFIG_LEN;
     pub const PORTFOLIO_ID_LEN: usize = 8;
-    pub const PORTFOLIO_ACCOUNT_LEN: usize = PORTFOLIO_ID_OFF + PORTFOLIO_ID_LEN;
+    pub const PORTFOLIO_OWNER_REPLAY_OFF: usize = PORTFOLIO_ID_OFF + PORTFOLIO_ID_LEN;
+    pub const PORTFOLIO_OWNER_REPLAY_LEN: usize = 16;
+    pub const LEGACY_PORTFOLIO_ID: u64 = u64::MAX;
+    pub const PORTFOLIO_ACCOUNT_LEN: usize =
+        PORTFOLIO_OWNER_REPLAY_OFF + PORTFOLIO_OWNER_REPLAY_LEN;
     pub const MAX_MATCHER_TAIL_ACCOUNTS: usize = 32;
     pub const MATCHER_ABI_VERSION: u32 = 3;
     pub const MATCHER_CONTEXT_MIN_LEN: usize = 64;
@@ -156,13 +160,13 @@ pub mod state {
     use crate::{
         constants::{
             ASSET_ORACLE_PROFILE_LEN, ASSET_ORACLE_WRAPPER_LEN, HEADER_LEN,
-            KIND_BACKING_DOMAIN_LEDGER, KIND_INSURANCE_LEDGER, KIND_MARKET, KIND_PORTFOLIO, MAGIC,
-            MARKET_GROUP_LEN, MARKET_GROUP_OFF, MIN_MARKET_ACCOUNT_LEN, ORACLE_LEG_CAP,
-            ORACLE_LEG_FLAGS_MASK, ORACLE_MODE_AUTH_MARK, ORACLE_MODE_EWMA_MARK,
+            KIND_BACKING_DOMAIN_LEDGER, KIND_INSURANCE_LEDGER, KIND_MARKET, KIND_PORTFOLIO,
+            LEGACY_PORTFOLIO_ID, MAGIC, MARKET_GROUP_LEN, MARKET_GROUP_OFF, MIN_MARKET_ACCOUNT_LEN,
+            ORACLE_LEG_CAP, ORACLE_LEG_FLAGS_MASK, ORACLE_MODE_AUTH_MARK, ORACLE_MODE_EWMA_MARK,
             ORACLE_MODE_HYBRID_AFTER_HOURS, ORACLE_MODE_MANUAL, PORTFOLIO_ACCOUNT_LEN,
             PORTFOLIO_ENGINE_ACCOUNT_LEN, PORTFOLIO_ID_LEN, PORTFOLIO_ID_OFF,
-            PORTFOLIO_MATCHER_CONFIG_LEN, PORTFOLIO_MATCHER_CONFIG_OFF, PORTFOLIO_STATE_LEN,
-            VERSION, WRAPPER_CONFIG_LEN,
+            PORTFOLIO_MATCHER_CONFIG_LEN, PORTFOLIO_MATCHER_CONFIG_OFF, PORTFOLIO_OWNER_REPLAY_LEN,
+            PORTFOLIO_OWNER_REPLAY_OFF, PORTFOLIO_STATE_LEN, VERSION, WRAPPER_CONFIG_LEN,
         },
         error::PercolatorError,
     };
@@ -800,6 +804,28 @@ pub mod state {
         Ok(id)
     }
 
+    /// Return the incarnation ID used by owner-signed intents. Portfolios created before the
+    /// incarnation tail existed migrate to a deterministic sentinel on their first such intent.
+    #[inline]
+    pub fn read_owner_intent_portfolio_id(data: &[u8]) -> Result<u64, ProgramError> {
+        check_header(data, KIND_PORTFOLIO)?;
+        let Some(id_bytes) = data.get(PORTFOLIO_ID_OFF..PORTFOLIO_ID_OFF + PORTFOLIO_ID_LEN) else {
+            return Ok(LEGACY_PORTFOLIO_ID);
+        };
+        let id = u64::from_le_bytes(id_bytes.try_into().unwrap());
+        if id != 0 {
+            return Ok(id);
+        }
+        if let Some(replay) = data.get(
+            PORTFOLIO_OWNER_REPLAY_OFF..PORTFOLIO_OWNER_REPLAY_OFF + PORTFOLIO_OWNER_REPLAY_LEN,
+        ) {
+            if replay.iter().any(|byte| *byte != 0) {
+                return Err(ProgramError::InvalidAccountData);
+            }
+        }
+        Ok(LEGACY_PORTFOLIO_ID)
+    }
+
     #[inline]
     fn write_portfolio_id(data: &mut [u8], id: u64) -> Result<(), ProgramError> {
         check_header(data, KIND_PORTFOLIO)?;
@@ -821,6 +847,85 @@ pub mod state {
             .checked_add(1)
             .ok_or(PercolatorError::EngineCounterOverflow)?;
         Ok((id, next))
+    }
+
+    /// Advance a bounded at-most-once window while allowing distinct owner intents to land out of
+    /// order. Bit zero represents `max_seen`; bit N represents `max_seen - N`.
+    #[inline]
+    pub fn advance_owner_intent_replay_window(
+        max_seen: u64,
+        seen_bitmap: u64,
+        intent_id: u64,
+    ) -> Option<(u64, u64)> {
+        if intent_id == 0
+            || (max_seen == 0 && seen_bitmap != 0)
+            || (max_seen != 0 && seen_bitmap & 1 == 0)
+        {
+            return None;
+        }
+        if max_seen == 0 {
+            return Some((intent_id, 1));
+        }
+        if intent_id > max_seen {
+            let distance = intent_id - max_seen;
+            let shifted = if distance >= u64::BITS as u64 {
+                0
+            } else {
+                seen_bitmap << distance
+            };
+            return Some((intent_id, shifted | 1));
+        }
+        let distance = max_seen - intent_id;
+        if distance >= u64::BITS as u64 {
+            return None;
+        }
+        let bit = 1u64 << distance;
+        if seen_bitmap & bit != 0 {
+            return None;
+        }
+        Some((max_seen, seen_bitmap | bit))
+    }
+
+    #[inline]
+    pub fn next_owner_intent_id(data: &[u8]) -> Result<u64, ProgramError> {
+        check_header(data, KIND_PORTFOLIO)?;
+        let max_seen = data
+            .get(
+                PORTFOLIO_OWNER_REPLAY_OFF..PORTFOLIO_OWNER_REPLAY_OFF + PORTFOLIO_OWNER_REPLAY_LEN,
+            )
+            .map(|window| u64::from_le_bytes(window[0..8].try_into().unwrap()))
+            .unwrap_or(0);
+        max_seen
+            .checked_add(1)
+            .ok_or(PercolatorError::EngineCounterOverflow.into())
+    }
+
+    #[inline]
+    pub fn consume_owner_intent(
+        data: &mut [u8],
+        expected_portfolio_id: u64,
+        intent_id: u64,
+    ) -> Result<(), ProgramError> {
+        let actual_portfolio_id = read_owner_intent_portfolio_id(data)?;
+        if actual_portfolio_id != expected_portfolio_id {
+            return Err(PercolatorError::EngineProvenanceMismatch.into());
+        }
+        if read_u64(data, PORTFOLIO_ID_OFF)? == 0 {
+            write_portfolio_id(data, LEGACY_PORTFOLIO_ID)?;
+        }
+        let window = data
+            .get_mut(
+                PORTFOLIO_OWNER_REPLAY_OFF..PORTFOLIO_OWNER_REPLAY_OFF + PORTFOLIO_OWNER_REPLAY_LEN,
+            )
+            .ok_or(PercolatorError::InvalidAccountLen)?;
+        let max_seen = u64::from_le_bytes(window[0..8].try_into().unwrap());
+        let seen_bitmap = u64::from_le_bytes(window[8..16].try_into().unwrap());
+        let (next_max_seen, next_seen_bitmap) =
+            advance_owner_intent_replay_window(max_seen, seen_bitmap, intent_id)
+                .ok_or(PercolatorError::EngineStale)?;
+        window[0..8].copy_from_slice(&next_max_seen.to_le_bytes());
+        window[8..16].copy_from_slice(&next_seen_bitmap.to_le_bytes());
+        Ok(())
     }
 
     #[inline]
@@ -2476,6 +2581,8 @@ pub mod ix {
         },
         InitPortfolio,
         Deposit {
+            portfolio_id: u64,
+            intent_id: u64,
             amount: u128,
         },
         Withdraw {
@@ -2707,6 +2814,8 @@ pub mod ix {
                 },
                 1 => Self::InitPortfolio,
                 3 => Self::Deposit {
+                    portfolio_id: read_u64(&mut rest)?,
+                    intent_id: read_u64(&mut rest)?,
                     amount: read_u128(&mut rest)?,
                 },
                 4 => Self::Withdraw {
@@ -2999,8 +3108,14 @@ pub mod ix {
                     push_u128(&mut out, maintenance_fee_per_slot);
                 }
                 Self::InitPortfolio => out.push(1),
-                Self::Deposit { amount } => {
+                Self::Deposit {
+                    portfolio_id,
+                    intent_id,
+                    amount,
+                } => {
                     out.push(3);
+                    push_u64(&mut out, portfolio_id);
+                    push_u64(&mut out, intent_id);
                     push_u128(&mut out, amount);
                 }
                 Self::Withdraw { amount } => {
@@ -5217,7 +5332,11 @@ pub mod processor {
                 maintenance_fee_per_slot,
             ),
             Instruction::InitPortfolio => handle_init_portfolio(program_id, accounts),
-            Instruction::Deposit { amount } => handle_deposit(program_id, accounts, amount),
+            Instruction::Deposit {
+                portfolio_id,
+                intent_id,
+                amount,
+            } => handle_deposit(program_id, accounts, portfolio_id, intent_id, amount),
             Instruction::Withdraw { amount } => handle_withdraw(program_id, accounts, amount),
             Instruction::PermissionlessCrank {
                 now_slot,
@@ -5668,6 +5787,8 @@ pub mod processor {
     fn handle_deposit<'a>(
         program_id: &Pubkey,
         accounts: &'a [AccountInfo<'a>],
+        portfolio_id: u64,
+        intent_id: u64,
         amount: u128,
     ) -> ProgramResult {
         let owner = account(accounts, 0)?;
@@ -5706,10 +5827,17 @@ pub mod processor {
             }
             reject_permissionless_resolve_matured_live_view(&cfg, &group)?;
             let mut portfolio_data = portfolio_ai.try_borrow_mut_data()?;
+            {
+                let portfolio = state::portfolio_view_mut_for_market_slots(
+                    &mut portfolio_data,
+                    max_market_slots,
+                )?;
+                expect_portfolio_view_account_key(&portfolio, portfolio_ai.key)?;
+                expect_portfolio_view_owner(&portfolio, owner.key)?;
+            }
+            state::consume_owner_intent(&mut portfolio_data, portfolio_id, intent_id)?;
             let mut portfolio =
                 state::portfolio_view_mut_for_market_slots(&mut portfolio_data, max_market_slots)?;
-            expect_portfolio_view_account_key(&portfolio, portfolio_ai.key)?;
-            expect_portfolio_view_owner(&portfolio, owner.key)?;
             group
                 .deposit_not_atomic(&mut portfolio, amount)
                 .map_err(map_v16_error)?;
@@ -12203,6 +12331,31 @@ pub mod processor {
                 state::allocate_portfolio_id(u64::MAX),
                 Err(PercolatorError::EngineCounterOverflow.into())
             );
+        }
+
+        #[test]
+        fn owner_intent_replay_window_accepts_bounded_reordering_once() {
+            let (max_seen, bitmap) = state::advance_owner_intent_replay_window(0, 0, 100).unwrap();
+            let (max_seen, bitmap) =
+                state::advance_owner_intent_replay_window(max_seen, bitmap, 102).unwrap();
+            let (max_seen, bitmap) =
+                state::advance_owner_intent_replay_window(max_seen, bitmap, 101).unwrap();
+            assert_eq!((max_seen, bitmap), (102, 0b111));
+            assert_eq!(
+                state::advance_owner_intent_replay_window(max_seen, bitmap, 101),
+                None
+            );
+            assert_eq!(
+                state::advance_owner_intent_replay_window(max_seen, bitmap, 38),
+                None
+            );
+        }
+
+        #[test]
+        fn owner_intent_replay_window_rejects_zero_and_malformed_state() {
+            assert_eq!(state::advance_owner_intent_replay_window(0, 0, 0), None);
+            assert_eq!(state::advance_owner_intent_replay_window(0, 1, 1), None);
+            assert_eq!(state::advance_owner_intent_replay_window(1, 0, 2), None);
         }
 
         fn test_wrapper_config(price: u64) -> state::WrapperConfigV16 {
