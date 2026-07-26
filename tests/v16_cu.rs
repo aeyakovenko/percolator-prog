@@ -59717,3 +59717,136 @@ fn v16_attack_underfunded_exit_cannot_move_ewma_with_uncollectible_fee() {
         assert_underfunded_ewma_exit_uses_collected_fee(path);
     }
 }
+
+fn run_backing_topup_retry_replay_case(replay_retained: bool) -> (u64, u64, u64) {
+    const BACKING: u128 = 500;
+    const SIZE_Q: i128 = 10 * POS_SCALE as i128;
+    const WINNING_DOMAIN: u16 = 1;
+
+    let mut env = V16CuEnv::new();
+    env.configure_auth_mark_with_cu(0, 100);
+
+    let winner_owner = Keypair::new();
+    let loser_owner = Keypair::new();
+    let publisher_owner = Keypair::new();
+    let winner = env.create_portfolio(&winner_owner);
+    let loser = env.create_portfolio(&loser_owner);
+    let publisher = env.create_portfolio(&publisher_owner);
+    env.deposit(&winner_owner, winner, 1_000);
+    env.deposit(&loser_owner, loser, 1_000);
+
+    let source = env.token_account(env.admin.pubkey(), (2 * BACKING) as u64);
+    env.svm.expire_blockhash();
+    let blockhash = env.svm.latest_blockhash();
+    let topup_ix = Instruction {
+        program_id: env.program_id,
+        accounts: vec![
+            AccountMeta::new(env.admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        data: ProgInstruction::TopUpBackingBucket {
+            domain: WINNING_DOMAIN,
+            amount: BACKING,
+            expiry_slot: 10_000,
+        }
+        .encode(),
+    };
+    let intended = Transaction::new_signed_with_payer(
+        &[heap_ix(), cu_ix(), topup_ix.clone()],
+        Some(&env.payer.pubkey()),
+        &[&env.payer, &env.admin],
+        blockhash,
+    );
+    let retained = Transaction::new_signed_with_payer(
+        &[
+            heap_ix(),
+            cu_ix(),
+            ComputeBudgetInstruction::set_compute_unit_price(1),
+            topup_ix,
+        ],
+        Some(&env.payer.pubkey()),
+        &[&env.payer, &env.admin],
+        blockhash,
+    );
+    env.svm
+        .send_transaction(intended)
+        .expect("the provider's intended top-up lands");
+    assert_eq!(env.token_amount(source), BACKING as u64);
+
+    env.trade_asset_with_cu(
+        0,
+        &winner_owner,
+        winner,
+        &loser_owner,
+        loser,
+        SIZE_Q,
+        100,
+        0,
+    );
+
+    for (slot, mark) in [(1, 200), (2, 350)] {
+        env.svm.warp_to_slot(slot);
+        env.push_auth_mark_with_cu(slot, mark);
+        env.send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: slot,
+                observations: crank_observations(0),
+            },
+            vec![
+                AccountMeta::new(env.payer.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(publisher, false),
+            ],
+            &[],
+        )
+        .expect("publish the honest mark step");
+    }
+    assert_eq!(
+        env.market_state().1.assets[0].effective_price,
+        350,
+        "the retained top-up lands only after the adverse mark is committed"
+    );
+
+    if replay_retained {
+        let source_before = env.svm.get_account(&source).unwrap();
+        let market_before = env.svm.get_account(&env.market).unwrap();
+        let vault_before = env.svm.get_account(&env.vault).unwrap();
+        env.svm
+            .send_transaction(retained)
+            .expect_err("a retained fee-bump variant must not debit the provider twice");
+        assert_eq!(env.svm.get_account(&source).unwrap(), source_before);
+        assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+        assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+    }
+
+    env.resolve();
+    let winner_first = env.close_resolved(&winner_owner, winner);
+    let loser_dest = env.close_resolved(&loser_owner, loser);
+    let winner_retry = env.close_resolved(&winner_owner, winner);
+    (
+        env.token_amount(source),
+        env.token_amount(winner_first) + env.token_amount(winner_retry),
+        env.token_amount(loser_dest),
+    )
+}
+
+#[test]
+fn v16_attack_backing_topup_retry_replay_funds_independent_winner() {
+    let control = run_backing_topup_retry_replay_case(false);
+    let replay = run_backing_topup_retry_replay_case(true);
+
+    assert_eq!(control.0, 500, "control retains the unsigned source half");
+    assert_eq!(
+        replay.0, 500,
+        "rejected retry retains the unsigned source half"
+    );
+    assert_eq!(control.2, 0, "the insolvent loser receives no payout");
+    assert_eq!(replay.2, 0, "the replay does not benefit the loser");
+    assert_eq!(
+        replay.1, control.1,
+        "rejecting the retained retry must prevent an extra independent-winner payout"
+    );
+}
