@@ -19266,6 +19266,241 @@ fn v16_portfolio_incarnation_id_separates_close_and_reuse() {
     assert_eq!(replacement.residual_received_atoms_total.get(), 0);
 }
 
+#[test]
+fn v16_attack_presigned_withdraw_retry_cannot_liquidate_fresh_risk() {
+    const STARTING_CAPITAL: u128 = 200_000_000;
+    const WITHDRAW_AMOUNT: u128 = 50_000_000;
+    const POSITION_Q: i128 = 1_000 * POS_SCALE as i128;
+
+    let mut env = V16CuEnv::new_with_init_params(production_risk_params());
+    env.update_liquidation_fee_policy_with_cu(5_000);
+    env.configure_auth_mark_with_cu(0, 1_000_000);
+
+    let long_owner = Keypair::new();
+    let long = env.create_portfolio(&long_owner);
+    env.deposit(&long_owner, long, 2_000_000_000);
+    let victim_owner = Keypair::new();
+    let victim = env.create_portfolio(&victim_owner);
+    env.deposit(&victim_owner, victim, STARTING_CAPITAL);
+    let cranker_owner = Keypair::new();
+    let cranker = env.create_portfolio(&cranker_owner);
+    env.deposit(&cranker_owner, cranker, 1_000);
+
+    let victim_destination = env.token_account(victim_owner.pubkey(), 0);
+    env.svm.expire_blockhash();
+    let blockhash = env.svm.latest_blockhash();
+    let withdraw_ix = Instruction {
+        program_id: env.program_id,
+        accounts: vec![
+            AccountMeta::new(victim_owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(victim, false),
+            AccountMeta::new(victim_destination, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        data: ProgInstruction::Withdraw {
+            amount: WITHDRAW_AMOUNT,
+        }
+        .encode(),
+    };
+    let intended = Transaction::new_signed_with_payer(
+        &[heap_ix(), cu_ix(), withdraw_ix.clone()],
+        Some(&env.payer.pubkey()),
+        &[&env.payer, &victim_owner],
+        blockhash,
+    );
+    let retained = Transaction::new_signed_with_payer(
+        &[
+            heap_ix(),
+            cu_ix(),
+            ComputeBudgetInstruction::set_compute_unit_price(1),
+            withdraw_ix,
+        ],
+        Some(&env.payer.pubkey()),
+        &[&env.payer, &victim_owner],
+        blockhash,
+    );
+    env.svm
+        .send_transaction(intended)
+        .expect("the owner's intended withdrawal lands");
+    assert_eq!(
+        env.portfolio_state(victim).capital.get(),
+        STARTING_CAPITAL - WITHDRAW_AMOUNT
+    );
+    assert_eq!(
+        env.token_amount(victim_destination),
+        WITHDRAW_AMOUNT as u64
+    );
+
+    let fresh_trade = Transaction::new_signed_with_payer(
+        &[
+            heap_ix(),
+            cu_ix(),
+            Instruction {
+                program_id: env.program_id,
+                accounts: vec![
+                    AccountMeta::new(long_owner.pubkey(), true),
+                    AccountMeta::new(victim_owner.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(long, false),
+                    AccountMeta::new(victim, false),
+                ],
+                data: ProgInstruction::TradeNoCpi {
+                    asset_index: 0,
+                    size_q: POSITION_Q,
+                    exec_price: 1_000_000,
+                    fee_bps: 0,
+                }
+                .encode(),
+            },
+        ],
+        Some(&env.payer.pubkey()),
+        &[&env.payer, &long_owner, &victim_owner],
+        blockhash,
+    );
+
+    let market_before_replay = env.svm.get_account(&env.market).unwrap();
+    let victim_before_replay = env.svm.get_account(&victim).unwrap();
+    let destination_before_replay = env.svm.get_account(&victim_destination).unwrap();
+    let vault_before_replay = env.svm.get_account(&env.vault).unwrap();
+    let replay = env.svm.send_transaction(retained);
+    let replay_succeeded = match replay {
+        Ok(meta) => {
+            assert_cu_within(
+                "retained withdrawal replay",
+                meta.compute_units_consumed,
+                CUSTODY_CU_LIMIT,
+            );
+            assert_eq!(
+                env.portfolio_state(victim).capital.get(),
+                STARTING_CAPITAL - 2 * WITHDRAW_AMOUNT
+            );
+            assert_eq!(
+                env.token_amount(victim_destination),
+                (2 * WITHDRAW_AMOUNT) as u64
+            );
+            true
+        }
+        Err(_) => {
+            assert_eq!(
+                env.svm.get_account(&env.market).unwrap(),
+                market_before_replay,
+                "duplicate rejection leaves the market unchanged"
+            );
+            assert_eq!(
+                env.svm.get_account(&victim).unwrap(),
+                victim_before_replay,
+                "duplicate rejection preserves the intended post-withdrawal margin"
+            );
+            assert_eq!(
+                env.svm.get_account(&victim_destination).unwrap(),
+                destination_before_replay,
+                "duplicate rejection makes no second SPL transfer"
+            );
+            assert_eq!(
+                env.svm.get_account(&env.vault).unwrap(),
+                vault_before_replay,
+                "duplicate rejection leaves canonical custody unchanged"
+            );
+            false
+        }
+    };
+    env.svm
+        .send_transaction(fresh_trade)
+        .expect("the fresh trade signed against the intended post-withdrawal state still lands");
+    assert_eq!(
+        active_leg_for_asset(&env.portfolio_state(victim), 0).basis_pos_q,
+        -POSITION_Q
+    );
+
+    let mut liquidation_slot = None;
+    for slot in 1..=30u64 {
+        env.svm.warp_to_slot(slot);
+        let current_mark = env.market_state().1.assets[0].effective_price;
+        let next_mark = current_mark + (current_mark / 500).max(1);
+        env.push_auth_mark_with_cu(slot, next_mark);
+        env.send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: slot,
+                observations: crank_observations(0),
+            },
+            vec![
+                AccountMeta::new(env.payer.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(victim, false),
+            ],
+            &[],
+        )
+        .expect("honest cranker refreshes the victim");
+
+        let victim_state = env.portfolio_state(victim);
+        let cert = health_cert(&victim_state);
+        if cert.certified_equity < cert.certified_maintenance_req as i128 {
+            assert!(
+                cert.certified_equity + WITHDRAW_AMOUNT as i128
+                    > cert.certified_maintenance_req as i128,
+                "without the retained withdrawal, the same account remains maintenance-healthy: \
+                 equity={}, maintenance={}, restored={}",
+                cert.certified_equity,
+                cert.certified_maintenance_req,
+                cert.certified_equity + WITHDRAW_AMOUNT as i128
+            );
+            liquidation_slot = Some(slot);
+            break;
+        }
+    }
+    if !replay_succeeded {
+        assert!(
+            liquidation_slot.is_none(),
+            "the intended single-withdrawal state remains maintenance-healthy"
+        );
+        let victim_state = env.portfolio_state(victim);
+        let cert = health_cert(&victim_state);
+        assert!(cert.certified_equity > cert.certified_maintenance_req as i128);
+        assert!(has_active_leg_for_asset(&victim_state, 0));
+        return;
+    }
+    let liquidation_slot = liquidation_slot
+        .expect("the retained withdrawal must make the fresh position liquidatable");
+
+    let cranker_before = env.portfolio_state(cranker).capital.get();
+    env.svm.expire_blockhash();
+    send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: liquidation_slot,
+            observations: Vec::new(),
+        },
+        vec![
+            AccountMeta::new(cranker_owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(victim, false),
+            AccountMeta::new(cranker, false),
+        ],
+        &[&cranker_owner],
+    )
+    .expect("an unprivileged cranker liquidates and receives the configured reward");
+    let cranker_reward = env.portfolio_state(cranker).capital.get() - cranker_before;
+    assert!(
+        cranker_reward > 0,
+        "the replay-induced liquidation pays an independent cranker"
+    );
+    let reward_destination = env.withdraw(&cranker_owner, cranker, cranker_reward);
+    assert_eq!(
+        env.token_amount(reward_destination),
+        cranker_reward as u64,
+        "the victim-funded liquidation reward is independently withdrawable"
+    );
+    panic!(
+        "retained withdrawal retry undercollateralized fresh risk and paid an independent \
+         cranker {cranker_reward} atoms"
+    );
+}
+
 // security.md sweep — rounding asymmetry (#37 dust): trade fees must round UP (ceil, protocol favor)
 // so dust-notional trades are never free and repeated churn never leaks value to the trader. Attacker
 // success = a fee that floors to 0 (free trade) or insurance that fails to grow on a fee'd dust trade.
