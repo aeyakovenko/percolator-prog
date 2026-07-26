@@ -680,6 +680,34 @@ fn kani_v16_update_authority_decode_preserves_wire_fields() {
 }
 
 #[kani::proof]
+fn kani_v16_resolve_market_decode_preserves_authority_sequence() {
+    let expected_sequence: u64 = kani::any();
+    let mut data = [0u8; 9];
+    data[0] = 19;
+    data[1..9].copy_from_slice(&expected_sequence.to_le_bytes());
+
+    match Instruction::decode(&data).unwrap() {
+        Instruction::ResolveMarket {
+            expected_sequence: got_sequence,
+        } => assert_eq!(got_sequence, expected_sequence),
+        _ => unreachable!(),
+    }
+
+    let mut with_trailing = [0u8; 10];
+    with_trailing[..9].copy_from_slice(&data);
+    with_trailing[9] = kani::any();
+    assert!(Instruction::decode(&with_trailing).is_err());
+}
+
+#[kani::proof]
+fn kani_v16_marketauth_sequence_gate_is_exact() {
+    let current_sequence: u64 = kani::any();
+    let expected_sequence: u64 = kani::any();
+    let accepted = state::require_marketauth_sequence(current_sequence, expected_sequence).is_ok();
+    assert_eq!(accepted, current_sequence == expected_sequence);
+}
+
+#[kani::proof]
 fn kani_v16_marketauth_sequence_is_exact_and_monotonic() {
     let current_sequence: u64 = kani::any();
     let expected_sequence: u64 = kani::any();
@@ -1233,7 +1261,6 @@ fn kani_v16_admin_policy_payloads_reject_trailing_byte() {
     let extra: u8 = kani::any();
 
     assert_rejects_trailing_byte(Instruction::CloseSlab, extra);
-    assert_rejects_trailing_byte(Instruction::ResolveMarket, extra);
     assert_rejects_trailing_byte(
         Instruction::UpdateAuthority {
             new_pubkey: [1u8; 32],

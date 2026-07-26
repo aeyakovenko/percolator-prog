@@ -1390,12 +1390,20 @@ pub mod state {
         current_sequence: u64,
         expected_sequence: u64,
     ) -> Result<u64, ProgramError> {
-        if current_sequence != expected_sequence {
-            return Err(PercolatorError::EngineStale.into());
-        }
+        require_marketauth_sequence(current_sequence, expected_sequence)?;
         current_sequence
             .checked_add(1)
             .ok_or_else(|| PercolatorError::EngineCounterOverflow.into())
+    }
+
+    pub fn require_marketauth_sequence(
+        current_sequence: u64,
+        expected_sequence: u64,
+    ) -> Result<(), ProgramError> {
+        if current_sequence != expected_sequence {
+            return Err(PercolatorError::EngineStale.into());
+        }
+        Ok(())
     }
 
     pub fn read_market_config_mode_and_capacity(
@@ -2549,7 +2557,10 @@ pub mod ix {
             amount: u128,
         },
         CloseSlab,
-        ResolveMarket,
+        /// Resolve only for the market-authority incarnation that authorized these bytes.
+        ResolveMarket {
+            expected_sequence: u64,
+        },
         TopUpBackingBucket {
             domain: u16,
             amount: u128,
@@ -2818,7 +2829,9 @@ pub mod ix {
                     amount: read_u128(&mut rest)?,
                 },
                 13 => Self::CloseSlab,
-                19 => Self::ResolveMarket,
+                19 => Self::ResolveMarket {
+                    expected_sequence: read_u64(&mut rest)?,
+                },
                 24 => Self::TopUpBackingBucket {
                     domain: read_u16(&mut rest)?,
                     amount: read_u128(&mut rest)?,
@@ -3111,7 +3124,10 @@ pub mod ix {
                     push_u128(&mut out, amount);
                 }
                 Self::CloseSlab => out.push(13),
-                Self::ResolveMarket => out.push(19),
+                Self::ResolveMarket { expected_sequence } => {
+                    out.push(19);
+                    push_u64(&mut out, expected_sequence);
+                }
                 Self::TopUpBackingBucket {
                     domain,
                     amount,
@@ -4592,13 +4608,12 @@ pub mod processor {
         Ok(())
     }
 
-    fn consume_marketauth_sequence_view(
-        group: &mut state::MarketViewMutV16<'_>,
-        expected_sequence: u64,
-    ) -> ProgramResult {
-        let wrapper = &mut group
+    fn read_marketauth_sequence_view(
+        group: &state::MarketViewMutV16<'_>,
+    ) -> Result<u64, ProgramError> {
+        let wrapper = &group
             .markets
-            .get_mut(0)
+            .get(0)
             .ok_or(PercolatorError::InvalidAccountLen)?
             .wrapper;
         let sequence_bytes = wrapper
@@ -4610,8 +4625,27 @@ pub mod processor {
             .ok_or(PercolatorError::InvalidAccountLen)?;
         let mut raw = [0u8; constants::ASSET_MARKETAUTH_SEQUENCE_LEN];
         raw.copy_from_slice(sequence_bytes);
-        let current_sequence = u64::from_le_bytes(raw);
+        Ok(u64::from_le_bytes(raw))
+    }
+
+    fn require_marketauth_sequence_view(
+        group: &state::MarketViewMutV16<'_>,
+        expected_sequence: u64,
+    ) -> ProgramResult {
+        state::require_marketauth_sequence(read_marketauth_sequence_view(group)?, expected_sequence)
+    }
+
+    fn consume_marketauth_sequence_view(
+        group: &mut state::MarketViewMutV16<'_>,
+        expected_sequence: u64,
+    ) -> ProgramResult {
+        let current_sequence = read_marketauth_sequence_view(group)?;
         let next_sequence = state::next_marketauth_sequence(current_sequence, expected_sequence)?;
+        let wrapper = &mut group
+            .markets
+            .get_mut(0)
+            .ok_or(PercolatorError::InvalidAccountLen)?
+            .wrapper;
         wrapper[constants::ASSET_MARKETAUTH_SEQUENCE_OFF
             ..constants::ASSET_MARKETAUTH_SEQUENCE_OFF + constants::ASSET_MARKETAUTH_SEQUENCE_LEN]
             .copy_from_slice(&next_sequence.to_le_bytes());
@@ -5329,7 +5363,9 @@ pub mod processor {
                 handle_top_up_insurance_domain(program_id, accounts, domain, amount)
             }
             Instruction::CloseSlab => handle_close_slab(program_id, accounts),
-            Instruction::ResolveMarket => handle_resolve_market(program_id, accounts),
+            Instruction::ResolveMarket { expected_sequence } => {
+                handle_resolve_market(program_id, accounts, expected_sequence)
+            }
             Instruction::TopUpBackingBucket {
                 domain,
                 amount,
@@ -8729,6 +8765,7 @@ pub mod processor {
     fn handle_resolve_market<'a>(
         program_id: &Pubkey,
         accounts: &'a [AccountInfo<'a>],
+        expected_sequence: u64,
     ) -> ProgramResult {
         let admin = account(accounts, 0)?;
         let market_ai = account(accounts, 1)?;
@@ -8741,6 +8778,7 @@ pub mod processor {
             return Err(PercolatorError::EngineLockActive.into());
         }
         expect_live_authority(&cfg.marketauth, admin.key)?;
+        require_marketauth_sequence_view(&group, expected_sequence)?;
         let slot = Clock::get()
             .map(|c| c.slot)
             .unwrap_or(group.header.current_slot.get());

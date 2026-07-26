@@ -170,7 +170,8 @@ Assets 1..N are **truly permissionless ⇒ untrusted**. The protocol must guaran
   `base_unit_authority`). `marketauth` is the only key that can: **create market 0** (`InitMarket`),
   **create/retire assets 1..N and set the permissionless-create-fee policy**, **safely force-shutdown
   any asset including asset 0** (`ASSET_ACTION_SHUTDOWN` → RECOVERY with the `force_close_delay_slots`
-  exit window so traders can exit), **resolve/close the market** (`ResolveMarket`/`CloseSlab`),
+  exit window so traders can exit), **resolve/close the market**
+  (`ResolveMarket { expected_sequence }`/`CloseSlab`),
   **market policies**, and **rotate/swap the base-unit mint**. It is rotated via
   `UpdateAuthority { new_pubkey, expected_sequence }` (current `marketauth` signs, the non-zero
   replacement co-signs, and the checked market sequence makes the handoff one-shot; burn-to-zero is
@@ -386,6 +387,10 @@ This section describes intent and operational ordering, not argument-by-argument
   - setting `new_pubkey` to all zeros is rejected; `marketauth` must remain live for final slab reclaim
   - per-asset authorities (insurance/operator/backing/oracle, incl. asset 0) are rotated via
     `UpdateAssetAuthority`, not this instruction
+- **ResolveMarket** (tag 19)
+  - `ResolveMarket { expected_sequence }`: current `marketauth` signs and the expected sequence must
+    equal the program-owned market handoff sequence, so returning a pubkey to authority cannot revive
+    terminal actions signed during one of its prior incarnations
 - **UpdateAssetLifecycle** (tag 40)
   - appends/reactivates/retires assets 1..N, including permissionless create/reuse when the configured
     create fee is nonzero
@@ -736,7 +741,8 @@ At minimum, monitor:
 
 ### Governance / authority handling
 - `UpdateAuthority` rotates `marketauth`; the current authority and new key must both sign, and the
-  handoff must carry the current one-shot sequence.
+  handoff must carry the current one-shot sequence. `ResolveMarket` must carry that same current
+  sequence, which binds terminal authorization to the active authority incarnation.
 - `UpdateAssetAuthority` rotates per-asset authorities; non-admin self-rotation also requires the new key.
 - Burning is limited to `asset_admin`. Required market/domain authorities cannot be set to zero.
 
@@ -837,7 +843,7 @@ These are governance powers, not bugs:
 3. `UpdateAssetAuthority { asset_index = 0, kind = ASSET_AUTH_ORACLE }` (while marketauth holds asset-0's `asset_admin`)
    - choose who can push asset-0 AuthMark/EwmaMark updates.
    - impact: authority mark input control/censorship surface.
-4. `ResolveMarket`
+4. `ResolveMarket { expected_sequence }`
    - transition market to resolved mode using stored authority price.
    - impact: trading/deposits/new accounts are halted; market enters wind-down.
 5. `UpdateAssetAuthority { asset_index = 0, kind = ASSET_AUTH_INSURANCE }` (while marketauth holds asset-0's `asset_admin`)
