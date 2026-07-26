@@ -31721,6 +31721,151 @@ fn v16_attack_wrong_token_program_rejected() {
     );
 }
 
+fn run_deposit_retry_replay_case(replay_retained: bool) -> (u64, u64, u64) {
+    const INITIAL_CAPITAL: u128 = 1_000;
+    const TOP_UP: u128 = 500;
+    const POSITION_Q: i128 = 10 * POS_SCALE as i128;
+
+    let mut env = V16CuEnv::new();
+    env.configure_auth_mark_with_cu(0, 100);
+
+    let victim_owner = Keypair::new();
+    let winner_owner = Keypair::new();
+    let publisher_owner = Keypair::new();
+    let victim = env.create_portfolio(&victim_owner);
+    let winner = env.create_portfolio(&winner_owner);
+    let publisher = env.create_portfolio(&publisher_owner);
+    env.deposit(&victim_owner, victim, INITIAL_CAPITAL);
+    env.deposit(&winner_owner, winner, INITIAL_CAPITAL);
+    env.trade_with_cu(
+        &victim_owner,
+        victim,
+        &winner_owner,
+        winner,
+        -POSITION_Q,
+        100,
+        0,
+    );
+
+    let source = env.token_account(victim_owner.pubkey(), (2 * TOP_UP) as u64);
+    env.svm.expire_blockhash();
+    let blockhash = env.svm.latest_blockhash();
+    let deposit_ix = Instruction {
+        program_id: env.program_id,
+        accounts: vec![
+            AccountMeta::new(victim_owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(victim, false),
+            AccountMeta::new(source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        data: ProgInstruction::Deposit { amount: TOP_UP }.encode(),
+    };
+    let intended = Transaction::new_signed_with_payer(
+        &[heap_ix(), cu_ix(), deposit_ix.clone()],
+        Some(&env.payer.pubkey()),
+        &[&env.payer, &victim_owner],
+        blockhash,
+    );
+    let retained = Transaction::new_signed_with_payer(
+        &[
+            heap_ix(),
+            cu_ix(),
+            ComputeBudgetInstruction::set_compute_unit_price(1),
+            deposit_ix,
+        ],
+        Some(&env.payer.pubkey()),
+        &[&env.payer, &victim_owner],
+        blockhash,
+    );
+    env.svm
+        .send_transaction(intended)
+        .expect("the victim's intended top-up lands");
+    assert_eq!(env.token_amount(source), TOP_UP as u64);
+
+    env.svm.warp_to_slot(1);
+    env.push_auth_mark_with_cu(1, 200);
+    env.send(
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 1,
+            observations: crank_observations(0),
+        },
+        vec![
+            AccountMeta::new(env.payer.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(publisher, false),
+        ],
+        &[],
+    )
+    .expect("publish the first honest mark step");
+    env.svm.warp_to_slot(2);
+    env.push_auth_mark_with_cu(2, 300);
+    env.send(
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 2,
+            observations: crank_observations(0),
+        },
+        vec![
+            AccountMeta::new(env.payer.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(publisher, false),
+        ],
+        &[],
+    )
+    .expect("publish the second honest mark step");
+    assert_eq!(
+        env.market_state().1.assets[0].effective_price,
+        300,
+        "the retained top-up must land after the honest adverse price is committed"
+    );
+
+    if replay_retained {
+        let source_before = env.svm.get_account(&source).unwrap();
+        let market_before = env.svm.get_account(&env.market).unwrap();
+        let victim_before = env.svm.get_account(&victim).unwrap();
+        let vault_before = env.svm.get_account(&env.vault).unwrap();
+        env.svm
+            .send_transaction(retained)
+            .expect_err("a retained fee-bump variant must not debit the deposit source twice");
+        assert_eq!(env.svm.get_account(&source).unwrap(), source_before);
+        assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+        assert_eq!(env.svm.get_account(&victim).unwrap(), victim_before);
+        assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+    }
+
+    env.resolve();
+    let winner_dest_first = env.close_resolved(&winner_owner, winner);
+    let victim_dest = env.close_resolved(&victim_owner, victim);
+    let winner_dest_retry = env.close_resolved(&winner_owner, winner);
+    (
+        env.token_amount(source),
+        env.token_amount(winner_dest_first) + env.token_amount(winner_dest_retry),
+        env.token_amount(victim_dest),
+    )
+}
+
+#[test]
+fn v16_attack_deposit_retry_replay_funds_independent_winner() {
+    let control = run_deposit_retry_replay_case(false);
+    let replay = run_deposit_retry_replay_case(true);
+
+    assert_eq!(control.0, 500, "control retains the unsigned source half");
+    assert_eq!(
+        replay.0, 500,
+        "rejected retry retains the unsigned source half"
+    );
+    assert_eq!(control.2, 0, "the insolvent victim has no terminal payout");
+    assert_eq!(
+        replay.2, 0,
+        "the replay does not return value to the victim"
+    );
+    assert_eq!(
+        replay.1, control.1,
+        "rejecting the retained retry must prevent an extra independent-winner payout"
+    );
+}
+
 // security.md sweep — haircut proportionality with disparate claims (#33/#37): two resolved winners
 // with very different positive-pnl faces (100 vs 900) sharing insufficient backing must be paid
 // PROPORTIONALLY to their claim size (~1:9), and the total must not exceed the backing.
