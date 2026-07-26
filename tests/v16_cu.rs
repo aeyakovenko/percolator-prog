@@ -3410,8 +3410,12 @@ impl V16CuEnv {
         asset_index: u16,
         b_delta_budget: u128,
     ) -> u64 {
+        let portfolio_id = self.portfolio_id(portfolio);
+        let position_epoch = self.portfolio_position_epoch(portfolio);
         self.send(
             ProgInstruction::ForfeitRecoveryLeg {
+                portfolio_id,
+                position_epoch,
                 asset_index,
                 b_delta_budget,
             },
@@ -16197,6 +16201,8 @@ fn v16_attack_public_helpers_cannot_use_market_as_portfolio_alias() {
     env.svm.expire_blockhash();
     let forfeit = env.send(
         ProgInstruction::ForfeitRecoveryLeg {
+            portfolio_id: 1,
+            position_epoch: 0,
             asset_index: 0,
             b_delta_budget: 1,
         },
@@ -28819,6 +28825,8 @@ fn v16_attack_forfeit_recovery_leg_rejects_cross_market_portfolio_substitution()
         market_b.to_bytes(),
         "control forfeit target is genuinely bound to market B"
     );
+    let foreign_portfolio_id = env.portfolio_id(foreign);
+    let foreign_position_epoch = env.portfolio_position_epoch(foreign);
 
     let market_a_before = env.svm.get_account(&env.market).unwrap();
     let market_b_before = env.svm.get_account(&market_b).unwrap();
@@ -28832,6 +28840,8 @@ fn v16_attack_forfeit_recovery_leg_rejects_cross_market_portfolio_substitution()
         env.program_id,
         &env.payer,
         ProgInstruction::ForfeitRecoveryLeg {
+            portfolio_id: foreign_portfolio_id,
+            position_epoch: foreign_position_epoch,
             asset_index: 0,
             b_delta_budget: 1,
         },
@@ -28861,12 +28871,16 @@ fn v16_attack_forfeit_recovery_leg_rejects_cross_market_portfolio_substitution()
     assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_a_before);
     assert_eq!(env.svm.get_account(&vault_b).unwrap(), vault_b_before);
 
+    let local_portfolio_id = env.portfolio_id(local);
+    let local_position_epoch = env.portfolio_position_epoch(local);
     env.svm.expire_blockhash();
     let ok = send_tx(
         &mut env.svm,
         env.program_id,
         &env.payer,
         ProgInstruction::ForfeitRecoveryLeg {
+            portfolio_id: local_portfolio_id,
+            position_epoch: local_position_epoch,
             asset_index: 0,
             b_delta_budget: 1,
         },
@@ -29013,6 +29027,8 @@ fn v16_attack_recovery_tools_owner_gated() {
     env.svm.expire_blockhash();
     let r1 = env.send(
         ProgInstruction::ForfeitRecoveryLeg {
+            portfolio_id: env.portfolio_id(pa),
+            position_epoch: env.portfolio_position_epoch(pa),
             asset_index: 0,
             b_delta_budget: 1,
         },
@@ -29477,6 +29493,8 @@ fn v16_attack_presigned_forfeit_does_not_replay_across_recovery_episodes() {
 
     env.svm.expire_blockhash();
     let blockhash = env.svm.latest_blockhash();
+    let signed_portfolio_id = env.portfolio_id(victim);
+    let signed_position_epoch = env.portfolio_position_epoch(victim);
     let forfeit_ix = Instruction {
         program_id: env.program_id,
         accounts: vec![
@@ -29485,6 +29503,8 @@ fn v16_attack_presigned_forfeit_does_not_replay_across_recovery_episodes() {
             AccountMeta::new(victim, false),
         ],
         data: ProgInstruction::ForfeitRecoveryLeg {
+            portfolio_id: signed_portfolio_id,
+            position_epoch: signed_position_epoch,
             asset_index: 0,
             b_delta_budget: 1,
         }
@@ -54577,6 +54597,8 @@ fn v16_attack_forfeit_recovery_leg_owner_gated_and_zero_budget_rejected() {
     env.svm.expire_blockhash();
     let r_grief = env.send(
         ProgInstruction::ForfeitRecoveryLeg {
+            portfolio_id: env.portfolio_id(pa),
+            position_epoch: env.portfolio_position_epoch(pa),
             asset_index: 0,
             b_delta_budget: 1_000,
         },
@@ -54606,6 +54628,8 @@ fn v16_attack_forfeit_recovery_leg_owner_gated_and_zero_budget_rejected() {
     env.svm.expire_blockhash();
     let r_zero = env.send(
         ProgInstruction::ForfeitRecoveryLeg {
+            portfolio_id: env.portfolio_id(pa),
+            position_epoch: env.portfolio_position_epoch(pa),
             asset_index: 0,
             b_delta_budget: 0,
         },
@@ -56517,6 +56541,8 @@ fn v16_attack_forfeit_recovery_leg_rejects_when_resolve_matured() {
     env.svm.expire_blockhash();
     let rejected = env.send(
         ProgInstruction::ForfeitRecoveryLeg {
+            portfolio_id: env.portfolio_id(stale_long),
+            position_epoch: env.portfolio_position_epoch(stale_long),
             asset_index: 0,
             b_delta_budget: 1,
         },

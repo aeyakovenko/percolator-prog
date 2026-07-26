@@ -479,7 +479,8 @@ This section describes intent and operational ordering, not argument-by-argument
 - **CureAndCancelClose** (tag 42)
   - owner-signed close recovery path; optional deposit is transferred first, then the engine cancels the pending close if the cure succeeds
 - **ForfeitRecoveryLeg** (tag 43)
-  - owner-signed recovery-leg forfeit for a selected asset and bounded B-delta budget
+  - owner-signed recovery-leg forfeit for a selected asset and bounded B-delta budget; the payload
+    binds consent to both the program-assigned `portfolio_id` and the portfolio's `position_epoch`
 - **RebalanceReduce** (tag 44)
   - owner-signed risk-reducing rebalance against the wrapper-authenticated effective price vector;
     the payload binds consent to both the program-assigned `portfolio_id` and the portfolio's

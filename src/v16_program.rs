@@ -2676,6 +2676,8 @@ pub mod ix {
             optional_deposit: u128,
         },
         ForfeitRecoveryLeg {
+            portfolio_id: u64,
+            position_epoch: u64,
             asset_index: u16,
             b_delta_budget: u128,
         },
@@ -2951,6 +2953,8 @@ pub mod ix {
                     optional_deposit: read_u128(&mut rest)?,
                 },
                 43 => Self::ForfeitRecoveryLeg {
+                    portfolio_id: read_u64(&mut rest)?,
+                    position_epoch: read_u64(&mut rest)?,
                     asset_index: read_u16(&mut rest)?,
                     b_delta_budget: read_u128(&mut rest)?,
                 },
@@ -3342,10 +3346,14 @@ pub mod ix {
                     push_u128(&mut out, optional_deposit);
                 }
                 Self::ForfeitRecoveryLeg {
+                    portfolio_id,
+                    position_epoch,
                     asset_index,
                     b_delta_budget,
                 } => {
                     out.push(43);
+                    push_u64(&mut out, portfolio_id);
+                    push_u64(&mut out, position_epoch);
                     push_u16(&mut out, asset_index);
                     push_u128(&mut out, b_delta_budget);
                 }
@@ -5488,9 +5496,18 @@ pub mod processor {
                 handle_cure_and_cancel_close(program_id, accounts, optional_deposit)
             }
             Instruction::ForfeitRecoveryLeg {
+                portfolio_id,
+                position_epoch,
                 asset_index,
                 b_delta_budget,
-            } => handle_forfeit_recovery_leg(program_id, accounts, asset_index, b_delta_budget),
+            } => handle_forfeit_recovery_leg(
+                program_id,
+                accounts,
+                portfolio_id,
+                position_epoch,
+                asset_index,
+                b_delta_budget,
+            ),
             Instruction::RebalanceReduce {
                 portfolio_id,
                 position_epoch,
@@ -8522,6 +8539,8 @@ pub mod processor {
     fn handle_forfeit_recovery_leg<'a>(
         program_id: &Pubkey,
         accounts: &'a [AccountInfo<'a>],
+        expected_portfolio_id: u64,
+        expected_position_epoch: u64,
         asset_index: u16,
         b_delta_budget: u128,
     ) -> ProgramResult {
@@ -8529,6 +8548,15 @@ pub mod processor {
             return Err(PercolatorError::InvalidInstruction.into());
         }
         let portfolio_ai = account(accounts, 2)?;
+        expect_owner(portfolio_ai, program_id)?;
+        if state::read_portfolio_id(&portfolio_ai.try_borrow_data()?)? != expected_portfolio_id {
+            return Err(PercolatorError::EngineProvenanceMismatch.into());
+        }
+        if state::read_portfolio_position_epoch(&portfolio_ai.try_borrow_data()?)?
+            != expected_position_epoch
+        {
+            return Err(PercolatorError::EngineProvenanceMismatch.into());
+        }
         with_one_portfolio_view(program_id, accounts, true, |group, portfolio, cfg| {
             if group.header.mode == 0 && permissionless_resolve_matured_now_view(cfg, group) {
                 return Err(V16Error::LockActive);
