@@ -67143,6 +67143,71 @@ fn v16_attack_public_14_leg_32_source_domain_exit_stays_bounded() {
     assert_eq!(group_after.vault as u64, custody_before);
 }
 
+// The unsigned LP can accrue every public source-domain slot and still reclaim principal without
+// first converting its source-backed positive PnL. This owner exit must remain account-local and
+// bounded independently of the separate source-claim conversion path.
+#[test]
+fn v16_attack_public_max_source_flat_principal_withdraw_stays_bounded() {
+    let (mut env, _taker_owner, lp_owner, _taker, lp, _slot) = setup_max_source_live_pair(0, 1);
+    let active_asset = MAX_SOURCE_LIVE_ASSETS - 1;
+
+    env.rebalance_reduce_with_cu(
+        &lp_owner,
+        lp,
+        active_asset,
+        MAX_SOURCE_LIVE_SIZE_Q.unsigned_abs(),
+    );
+
+    let before = env.portfolio_state(lp);
+    let group_before = env.market_state().1;
+    let custody_before = env.token_amount(env.vault);
+    eprintln!(
+        "flat max-source before withdraw: capital={} pnl={} sources={}",
+        before.capital.get(),
+        before.pnl.get(),
+        before
+            .source_domains
+            .iter()
+            .filter(|source| source.is_occupied())
+            .count()
+    );
+    assert!(percolator::active_bitmap_is_empty(active_bitmap(&before)));
+    assert!(before.pnl.get() > 0);
+    assert_eq!(
+        before
+            .source_domains
+            .iter()
+            .filter(|source| source.is_occupied())
+            .count(),
+        percolator::PORTFOLIO_SOURCE_DOMAIN_CAP
+    );
+
+    env.svm.expire_blockhash();
+    let (dest, cu) = env.withdraw_with_cu(&lp_owner, lp, before.capital.get());
+    eprintln!("flat 32-source Withdraw CU={cu}");
+    assert_cu_within("flat 32-source Withdraw", cu, 500_000);
+    assert_eq!(env.token_amount(dest), before.capital.get() as u64);
+    let after = env.portfolio_state(lp);
+    let group_after = env.market_state().1;
+    assert_eq!(after.capital.get(), 0);
+    assert_eq!(after.pnl.get(), before.pnl.get());
+    assert_eq!(
+        after
+            .source_domains
+            .iter()
+            .filter(|source| source.is_occupied())
+            .count(),
+        percolator::PORTFOLIO_SOURCE_DOMAIN_CAP
+    );
+    assert_eq!(group_before.c_tot - group_after.c_tot, before.capital.get());
+    assert_eq!(group_before.vault - group_after.vault, before.capital.get());
+    assert_eq!(
+        custody_before - env.token_amount(env.vault),
+        before.capital.get() as u64
+    );
+    assert_eq!(group_after.vault as u64, env.token_amount(env.vault));
+}
+
 #[test]
 fn v16_bpf_force_close_pair_order_preserves_unequal_partial_payouts() {
     fn run(cross_pair: bool) -> ([(u128, i128); 4], [u64; 4], u128, u128, u128, u128, u64) {
