@@ -368,106 +368,6 @@ pub mod state {
                 resolved_payout_ledger: ResolvedPayoutLedgerV16::EMPTY,
             })
         }
-
-        pub fn accrue_asset_to_not_atomic(
-            &mut self,
-            asset_index: usize,
-            now_slot: u64,
-            effective_price: u64,
-            funding_rate_e9: i128,
-            _protective_progress_committed: bool,
-        ) -> Result<percolator::AccrueAssetOutcomeV16, V16Error> {
-            if self.mode != MarketModeV16::Live
-                || asset_index >= self.config.max_market_slots as usize
-                || asset_index >= self.assets.len()
-                || effective_price == 0
-                || now_slot < self.current_slot
-            {
-                return Err(V16Error::InvalidConfig);
-            }
-            let old = self.assets[asset_index];
-            if now_slot < old.slot_last {
-                return Err(V16Error::InvalidConfig);
-            }
-            let dt_total = now_slot - old.slot_last;
-            let segment_dt = dt_total.min(self.config.max_accrual_dt_slots);
-            let exposed = old.oi_eff_long_q != 0 || old.oi_eff_short_q != 0;
-            let balanced = old.oi_eff_long_q != 0 && old.oi_eff_short_q != 0;
-            let price_move_active = effective_price != old.effective_price && exposed;
-            let funding_active =
-                segment_dt != 0 && funding_rate_e9 != 0 && balanced && old.fund_px_last > 0;
-            let price_delta = effective_price as i128 - old.effective_price as i128;
-            let k_delta = price_delta
-                .checked_mul(percolator::ADL_ONE as i128)
-                .ok_or(V16Error::ArithmeticOverflow)?;
-            let funding_delta = if funding_active {
-                funding_rate_e9
-                    .checked_mul(segment_dt as i128)
-                    .and_then(|v| v.checked_mul(effective_price as i128))
-                    .map(|v| v / percolator::FUNDING_DEN as i128)
-                    .and_then(|v| v.checked_mul(percolator::ADL_ONE as i128))
-                    .ok_or(V16Error::ArithmeticOverflow)?
-            } else {
-                0
-            };
-            let mut asset = old;
-            asset.k_long = asset
-                .k_long
-                .checked_add(k_delta)
-                .ok_or(V16Error::ArithmeticOverflow)?;
-            asset.k_short = asset
-                .k_short
-                .checked_sub(k_delta)
-                .ok_or(V16Error::ArithmeticOverflow)?;
-            asset.f_long_num = asset
-                .f_long_num
-                .checked_sub(funding_delta)
-                .ok_or(V16Error::ArithmeticOverflow)?;
-            asset.f_short_num = asset
-                .f_short_num
-                .checked_add(funding_delta)
-                .ok_or(V16Error::ArithmeticOverflow)?;
-            asset.effective_price = effective_price;
-            asset.fund_px_last = effective_price;
-            asset.slot_last = asset
-                .slot_last
-                .checked_add(segment_dt)
-                .ok_or(V16Error::ArithmeticOverflow)?;
-            self.assets[asset_index] = asset;
-            self.current_slot = now_slot;
-            self.slot_last = self
-                .assets
-                .iter()
-                .filter(|asset| {
-                    matches!(
-                        asset.lifecycle,
-                        percolator::AssetLifecycleV16::Active
-                            | percolator::AssetLifecycleV16::DrainOnly
-                    )
-                })
-                .map(|asset| asset.slot_last)
-                .min()
-                .unwrap_or(now_slot);
-            if price_move_active {
-                self.oracle_epoch = self
-                    .oracle_epoch
-                    .checked_add(1)
-                    .ok_or(V16Error::CounterOverflow)?;
-            }
-            if funding_active {
-                self.funding_epoch = self
-                    .funding_epoch
-                    .checked_add(1)
-                    .ok_or(V16Error::CounterOverflow)?;
-            }
-            Ok(percolator::AccrueAssetOutcomeV16 {
-                dt: segment_dt,
-                price_move_active,
-                funding_active,
-                equity_active: price_move_active || funding_active,
-                loss_stale_after: asset.slot_last < now_slot,
-            })
-        }
     }
 
     #[cfg(not(target_os = "solana"))]
@@ -4116,6 +4016,16 @@ pub mod oracle_v16 {
 
 pub mod policy_v16 {
     use crate::constants::MAX_DYNAMIC_TRADE_FEE_BPS;
+
+    pub fn stale_cohort_has_external_account(
+        stale_account_count: u64,
+        account_a_is_stale: bool,
+        account_b_is_stale: bool,
+    ) -> Option<bool> {
+        let local_stale_count =
+            (account_a_is_stale as u64).checked_add(account_b_is_stale as u64)?;
+        Some(stale_account_count.checked_sub(local_stale_count)? != 0)
+    }
 
     pub fn unsigned_lp_adds_unsettled_cohort_exposure(
         current_q: i128,
@@ -10982,37 +10892,21 @@ pub mod processor {
         Ok(false)
     }
 
-    fn signed_position_for_asset_view(
-        group: &state::MarketViewMutV16<'_>,
-        portfolio: &percolator::PortfolioV16ViewMut<'_>,
-        asset_index: usize,
-    ) -> Result<i128, ProgramError> {
-        if asset_index >= group.markets.len() {
-            return Err(PercolatorError::EngineInvalidConfig.into());
-        }
-        let market_id = group.markets[asset_index].engine.asset.market_id.get();
-        let mut slot = 0usize;
-        while slot < percolator::V16_MAX_PORTFOLIO_ASSETS_N {
-            let leg = portfolio.header.legs[slot]
-                .try_to_runtime()
-                .map_err(map_v16_error)?;
-            if leg.active && leg.asset_index as usize == asset_index && leg.market_id == market_id {
-                return Ok(match leg.side {
-                    SideV16::Long => leg.basis_pos_q.unsigned_abs() as i128,
-                    SideV16::Short => -(leg.basis_pos_q.unsigned_abs() as i128),
-                });
-            }
-            slot += 1;
-        }
-        Ok(0)
+    #[derive(Clone, Copy, Default)]
+    struct CpiPortfolioRequestState {
+        signed_position: i128,
+        stale_long: bool,
+        stale_short: bool,
     }
 
-    fn signed_positions_for_cpi_requests_view(
+    fn portfolio_states_for_cpi_requests_view(
         portfolio: &percolator::PortfolioV16ViewMut<'_>,
         cpi_requests: &[(u16, i128)],
         request_market_ids: &[u64; MATCHER_BATCH_MAX_LEGS],
-    ) -> Result<[i128; MATCHER_BATCH_MAX_LEGS], ProgramError> {
-        let mut positions = [0i128; MATCHER_BATCH_MAX_LEGS];
+        request_kf_epoch_long: &[u64; MATCHER_BATCH_MAX_LEGS],
+        request_kf_epoch_short: &[u64; MATCHER_BATCH_MAX_LEGS],
+    ) -> Result<[CpiPortfolioRequestState; MATCHER_BATCH_MAX_LEGS], ProgramError> {
+        let mut states = [CpiPortfolioRequestState::default(); MATCHER_BATCH_MAX_LEGS];
         let mut slot = 0usize;
         while slot < percolator::V16_MAX_PORTFOLIO_ASSETS_N {
             let leg = portfolio.header.legs[slot]
@@ -11023,16 +10917,26 @@ pub mod processor {
                     if leg.asset_index == asset_index as u32
                         && leg.market_id == request_market_ids[request_index]
                     {
-                        positions[request_index] = match leg.side {
-                            SideV16::Long => leg.basis_pos_q.unsigned_abs() as i128,
-                            SideV16::Short => -(leg.basis_pos_q.unsigned_abs() as i128),
+                        states[request_index] = match leg.side {
+                            SideV16::Long => CpiPortfolioRequestState {
+                                signed_position: leg.basis_pos_q.unsigned_abs() as i128,
+                                stale_long: leg.kf_epoch_snap
+                                    != request_kf_epoch_long[request_index],
+                                stale_short: false,
+                            },
+                            SideV16::Short => CpiPortfolioRequestState {
+                                signed_position: -(leg.basis_pos_q.unsigned_abs() as i128),
+                                stale_long: false,
+                                stale_short: leg.kf_epoch_snap
+                                    != request_kf_epoch_short[request_index],
+                            },
                         };
                     }
                 }
             }
             slot += 1;
         }
-        Ok(positions)
+        Ok(states)
     }
 
     fn ensure_trade_portfolio_current_for_requests_view(
@@ -11117,6 +11021,8 @@ pub mod processor {
             return Err(PercolatorError::InvalidInstruction.into());
         }
         let mut request_market_ids = [0u64; MATCHER_BATCH_MAX_LEGS];
+        let mut request_kf_epoch_long = [0u64; MATCHER_BATCH_MAX_LEGS];
+        let mut request_kf_epoch_short = [0u64; MATCHER_BATCH_MAX_LEGS];
         for (request_index, &(asset_index_u16, _)) in cpi_requests.iter().enumerate() {
             let asset_index = asset_index_u16 as usize;
             if asset_index >= group.header.config.max_market_slots.get() as usize
@@ -11124,14 +11030,29 @@ pub mod processor {
             {
                 return Err(PercolatorError::InvalidInstruction.into());
             }
-            request_market_ids[request_index] =
-                group.markets[asset_index].engine.asset.market_id.get();
+            let asset = &group.markets[asset_index].engine.asset;
+            request_market_ids[request_index] = asset.market_id.get();
+            request_kf_epoch_long[request_index] = asset.kf_epoch_long.get();
+            request_kf_epoch_short[request_index] = asset.kf_epoch_short.get();
         }
-        let account_b_positions =
-            signed_positions_for_cpi_requests_view(account_b, cpi_requests, &request_market_ids)?;
+        let account_a_states = portfolio_states_for_cpi_requests_view(
+            account_a,
+            cpi_requests,
+            &request_market_ids,
+            &request_kf_epoch_long,
+            &request_kf_epoch_short,
+        )?;
+        let account_b_states = portfolio_states_for_cpi_requests_view(
+            account_b,
+            cpi_requests,
+            &request_market_ids,
+            &request_kf_epoch_long,
+            &request_kf_epoch_short,
+        )?;
         for (request_index, &(asset_index_u16, size_q)) in cpi_requests.iter().enumerate() {
             let asset_index = asset_index_u16 as usize;
-            let account_b_pos = account_b_positions[request_index];
+            let account_a_state = account_a_states[request_index];
+            let account_b_state = account_b_states[request_index];
             match group.markets[asset_index].engine.asset.lifecycle {
                 ASSET_LIFECYCLE_ACTIVE => {}
                 ASSET_LIFECYCLE_DRAIN_ONLY | ASSET_LIFECYCLE_RECOVERY => {
@@ -11142,10 +11063,11 @@ pub mod processor {
                     if !account_a_has_asset && !account_b_has_asset {
                         return Err(PercolatorError::EngineLockActive.into());
                     }
-                    let account_a_pos =
-                        signed_position_for_asset_view(group, account_a, asset_index)?;
-                    if requested_delta_must_increase_risk(account_a_pos, size_q)
-                        || requested_delta_must_increase_risk(account_b_pos, -size_q)
+                    if requested_delta_must_increase_risk(account_a_state.signed_position, size_q)
+                        || requested_delta_must_increase_risk(
+                            account_b_state.signed_position,
+                            -size_q,
+                        )
                     {
                         return Err(PercolatorError::EngineLockActive.into());
                     }
@@ -11156,11 +11078,23 @@ pub mod processor {
                 .checked_neg()
                 .ok_or(PercolatorError::EngineArithmeticOverflow)?;
             let asset = &group.markets[asset_index].engine.asset;
+            let external_stale_long = policy_v16::stale_cohort_has_external_account(
+                asset.stale_account_count_long.get(),
+                account_a_state.stale_long,
+                account_b_state.stale_long,
+            )
+            .ok_or(PercolatorError::EngineCounterUnderflow)?;
+            let external_stale_short = policy_v16::stale_cohort_has_external_account(
+                asset.stale_account_count_short.get(),
+                account_a_state.stale_short,
+                account_b_state.stale_short,
+            )
+            .ok_or(PercolatorError::EngineCounterUnderflow)?;
             let unsafe_unsigned_exposure = policy_v16::unsigned_lp_adds_unsettled_cohort_exposure(
-                account_b_pos,
+                account_b_state.signed_position,
                 lp_delta,
-                asset.stale_account_count_long.get() != 0,
-                asset.stale_account_count_short.get() != 0,
+                external_stale_long,
+                external_stale_short,
                 group.header.negative_pnl_account_count.get() != 0,
             )
             .ok_or(PercolatorError::EngineArithmeticOverflow)?;

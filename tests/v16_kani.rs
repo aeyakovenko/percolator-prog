@@ -10,6 +10,36 @@ use percolator_prog::policy_v16;
 
 #[kani::proof]
 fn kani_v16_unsigned_lp_cohort_gate_is_side_exact_and_preserves_reductions() {
+    let stale_account_count: u8 = kani::any();
+    let account_a_is_stale: bool = kani::any();
+    let account_b_is_stale: bool = kani::any();
+    let local_stale_count = account_a_is_stale as u64 + account_b_is_stale as u64;
+    let external = policy_v16::stale_cohort_has_external_account(
+        stale_account_count as u64,
+        account_a_is_stale,
+        account_b_is_stale,
+    );
+    if (stale_account_count as u64) < local_stale_count {
+        assert!(external.is_none());
+    } else {
+        assert_eq!(
+            external.unwrap(),
+            stale_account_count as u64 > local_stale_count
+        );
+    }
+    kani::cover!(
+        stale_account_count as u64 == local_stale_count && local_stale_count != 0,
+        "the two atomic trade accounts consume the complete stale cohort"
+    );
+    kani::cover!(
+        stale_account_count as u64 > local_stale_count,
+        "an external stale account remains after local settlement"
+    );
+    kani::cover!(
+        (stale_account_count as u64) < local_stale_count,
+        "an inconsistent stale counter fails closed"
+    );
+
     let current_q: i64 = kani::any();
     let delta_q: i64 = kani::any();
     let stale_long: bool = kani::any();

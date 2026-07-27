@@ -1266,6 +1266,30 @@ impl V16CuEnv {
         self.svm.set_account(self.market, account).unwrap();
     }
 
+    fn accrue_asset_for_test(
+        &mut self,
+        asset_index: usize,
+        now_slot: u64,
+        effective_price: u64,
+        funding_rate_e9: i128,
+    ) -> percolator::AccrueAssetOutcomeV16 {
+        let mut account = self.svm.get_account(&self.market).expect("market account");
+        let outcome = {
+            let (_, mut group) = state::market_view_mut(&mut account.data).unwrap();
+            group
+                .accrue_asset_to_not_atomic(
+                    asset_index,
+                    now_slot,
+                    effective_price,
+                    funding_rate_e9,
+                    true,
+                )
+                .unwrap()
+        };
+        self.svm.set_account(self.market, account).unwrap();
+        outcome
+    }
+
     fn mark_b_stale_gap(&mut self, portfolio: Pubkey, asset_index: usize, target_b: u128) {
         let mut market_account = self.svm.get_account(&self.market).expect("market account");
         let mut portfolio_account = self.svm.get_account(&portfolio).expect("portfolio account");
@@ -7658,11 +7682,9 @@ fn v16_bpf_existing_funding_ledger_refreshes_and_converts_between_sides() {
         0,
     );
 
+    let out = env.accrue_asset_for_test(0, 1, INITIAL_PRICE, FUNDING_RATE_E9);
+    assert!(out.funding_active);
     env.mutate_market(|_, group| {
-        let out = group
-            .accrue_asset_to_not_atomic(0, 1, INITIAL_PRICE, FUNDING_RATE_E9, true)
-            .unwrap();
-        assert!(out.funding_active);
         group.assets[0].raw_oracle_target_price = INITIAL_PRICE;
     });
     env.svm.warp_to_slot(1);
@@ -8682,8 +8704,8 @@ fn v16_bpf_nonflat_fee_sync_settles_hidden_loss_before_sweeping_fee() {
     assert_eq!(long_before_move.capital.get(), 100);
     assert_eq!(long_before_move.pnl.get(), 0);
 
+    env.accrue_asset_for_test(0, 1, 50, 0);
     env.mutate_market(|_, group| {
-        group.accrue_asset_to_not_atomic(0, 1, 50, 0, true).unwrap();
         group.assets[0].raw_oracle_target_price = 50;
     });
     env.svm.warp_to_slot(1);
@@ -8741,10 +8763,8 @@ fn v16_bpf_fee_sync_rejects_reused_market_slot_stale_leg_without_mutation() {
     );
 
     let old_market_id = env.market_state().1.assets[0].market_id;
+    env.accrue_asset_for_test(0, 1, 100, 0);
     env.mutate_market(|_, group| {
-        group
-            .accrue_asset_to_not_atomic(0, 1, 100, 0, true)
-            .unwrap();
         group.assets[0].market_id = old_market_id + 1;
         group.next_market_id = group.next_market_id.max(old_market_id + 2);
     });
@@ -47446,7 +47466,7 @@ fn grow_market_to_10m_with_high_active_asset(
 
 #[test]
 fn v16_bpf_10m_market_liquidation_high_asset_stays_bounded() {
-    const N: usize = 5_834;
+    const N: usize = 5_782;
     const HIGH_ASSET: usize = N - 1;
     const PRICE: u64 = 100;
     const TRADE_SLOT: u64 = 1;
@@ -47561,10 +47581,10 @@ fn v16_bpf_10m_market_liquidation_high_asset_stays_bounded() {
 //
 // We cannot activate thousands of assets via thousands of UpdateAssetLifecycle txs (far too slow), so
 // we CONSTRUCT the market state directly: start from a known-good 1-asset market, make asset 0
-// active+flat via ConfigureAuthMark, grow the on-chain account to market_account_len_for_capacity(5834),
-// then via the host mirror set max_market_slots=5834 and clone asset 0's active state into a high
-// traded index (index 5833). All intermediate slots stay canonical DISABLED slots (validate_shape accepts them).
-// A real BPF TradeNoCpi on index 5833 then opens a balanced position; its CU is compared to a
+// active+flat via ConfigureAuthMark, grow the on-chain account to market_account_len_for_capacity(5782),
+// then via the host mirror set max_market_slots=5782 and clone asset 0's active state into a high
+// traded index (index 5781). All intermediate slots stay canonical DISABLED slots (validate_shape accepts them).
+// A real BPF TradeNoCpi on index 5781 then opens a balanced position; its CU is compared to a
 // small-N trade to prove per-trade compute does NOT scale with the thousands-of-assets count.
 //
 // Mechanism notes worth recording (verified against the pinned engine + wrapper):
@@ -47578,9 +47598,9 @@ fn v16_bpf_10m_market_liquidation_high_asset_stays_bounded() {
 //     profile bytes into the high slot so the high index has a valid, current (non-stale) mark.
 #[test]
 fn v16_bpf_10m_market_over_5000_assets_trades_with_bounded_cu() {
-    const N: usize = 5_834;
+    const N: usize = 5_782;
     const SOLANA_MAX_ACCOUNT_DATA_LEN: usize = 10 * 1024 * 1024;
-    const TRADED: usize = N - 1; // 5833 — a HIGH index, proving the trade isn't special to asset 0.
+    const TRADED: usize = N - 1; // 5781 — a HIGH index, proving the trade isn't special to asset 0.
     const PRICE: u64 = 100;
     const TRADE_SLOT: u64 = 10;
 
@@ -47793,7 +47813,7 @@ fn v16_bpf_10m_market_over_5000_assets_trades_with_bounded_cu() {
 // then close the slab.
 #[test]
 fn v16_bpf_terminal_insurance_last_domain_withdraw_stays_bounded_on_10m_market() {
-    const N: usize = 5_834;
+    const N: usize = 5_782;
     const SOLANA_MAX_ACCOUNT_DATA_LEN: usize = 10 * 1024 * 1024;
     const HIGH_ASSET: usize = N - 1;
     const PRICE: u64 = 100;
@@ -47913,7 +47933,7 @@ fn v16_bpf_terminal_insurance_last_domain_withdraw_stays_bounded_on_10m_market()
 // withdrawal counters.
 #[test]
 fn v16_bpf_terminal_insurance_ledger_last_domain_withdraw_stays_bounded_on_10m_market() {
-    const N: usize = 5_834;
+    const N: usize = 5_782;
     const SOLANA_MAX_ACCOUNT_DATA_LEN: usize = 10 * 1024 * 1024;
     const HIGH_ASSET: usize = N - 1;
     const PRICE: u64 = 100;
@@ -47995,7 +48015,7 @@ fn v16_bpf_terminal_insurance_ledger_last_domain_withdraw_stays_bounded_on_10m_m
 // every remaining atom, there is no residual insurance balance to reconcile.
 #[test]
 fn v16_bpf_terminal_insurance_initialized_ledger_full_drain_stays_bounded_on_10m_market() {
-    const N: usize = 5_834;
+    const N: usize = 5_782;
     const SOLANA_MAX_ACCOUNT_DATA_LEN: usize = 10 * 1024 * 1024;
     const HIGH_ASSET: usize = N - 1;
     const PRICE: u64 = 100;
@@ -48096,7 +48116,7 @@ fn v16_bpf_terminal_insurance_initialized_ledger_full_drain_stays_bounded_on_10m
 // withdrawal cannot brick ledger-using insurance operators on a near-10 MiB market.
 #[test]
 fn v16_bpf_terminal_insurance_partial_ledger_withdraw_stays_bounded_on_10m_market() {
-    const N: usize = 5_834;
+    const N: usize = 5_782;
     const SOLANA_MAX_ACCOUNT_DATA_LEN: usize = 10 * 1024 * 1024;
     const HIGH_ASSET: usize = N - 1;
     const PRICE: u64 = 100;
@@ -48192,7 +48212,7 @@ fn v16_bpf_terminal_insurance_partial_ledger_withdraw_stays_bounded_on_10m_marke
 // can force a full account walk before the tail authority can recover even one atom.
 #[test]
 fn v16_bpf_terminal_insurance_partial_ledger_ignores_other_authority_budget_on_10m_market() {
-    const N: usize = 5_834;
+    const N: usize = 5_782;
     const HIGH_ASSET: usize = N - 1;
     const PRICE: u64 = 100;
     const OTHER_AUTHORITY_FUNDED: u128 = 77;
@@ -48275,7 +48295,7 @@ fn v16_bpf_terminal_insurance_partial_ledger_ignores_other_authority_budget_on_1
 
 #[test]
 fn v16_bpf_terminal_asset_insurance_partial_ledger_middle_domain_stays_bounded_on_10m_market() {
-    const N: usize = 5_834;
+    const N: usize = 5_782;
     const MIDDLE_ASSET: usize = N / 2;
     const HIGH_ASSET: usize = N - 1;
     const PRICE: u64 = 100;
@@ -50419,7 +50439,7 @@ fn v16_bpf_batch_trade_cpi_14_legs_under_tx_limit() {
 // a smaller tail budget for real integrations.
 #[test]
 fn v16_attack_10m_batch_tradecpi_max_tail_rejects_before_cu_exhaustion() {
-    const N: usize = 5_834;
+    const N: usize = 5_782;
     const TAIL_LEGS: usize = percolator_prog::constants::WRAPPER_MAX_PORTFOLIO_ASSETS as usize;
     const FIRST_TAIL_ASSET: usize = N - TAIL_LEGS;
     const PRICE: u64 = 100;
@@ -51413,11 +51433,11 @@ fn v16_attack_tradecpi_active_stale_rejects_before_hostile_matcher_cpi() {
         );
 
         env.svm.warp_to_slot(16);
+        for asset_index in 0..8usize {
+            env.accrue_asset_for_test(asset_index, 16, 95, 0);
+        }
         env.mutate_market(|_, group| {
             for asset_index in 0..8usize {
-                group
-                    .accrue_asset_to_not_atomic(asset_index, 16, 95, 0, true)
-                    .unwrap();
                 group.assets[asset_index].raw_oracle_target_price = 95;
             }
         });
@@ -51564,11 +51584,11 @@ fn v16_attack_tradecpi_active_stale_rejects_before_hostile_matcher_cpi() {
         );
 
         env.svm.warp_to_slot(16);
+        for asset_index in 0..8usize {
+            env.accrue_asset_for_test(asset_index, 16, 95, 0);
+        }
         env.mutate_market(|_, group| {
             for asset_index in 0..8usize {
-                group
-                    .accrue_asset_to_not_atomic(asset_index, 16, 95, 0, true)
-                    .unwrap();
                 group.assets[asset_index].raw_oracle_target_price = 95;
             }
         });
