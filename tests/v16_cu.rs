@@ -59717,3 +59717,259 @@ fn v16_attack_underfunded_exit_cannot_move_ewma_with_uncollectible_fee() {
         assert_underfunded_ewma_exit_uses_collected_fee(path);
     }
 }
+
+struct DelayedBackingTopupOutcome {
+    topup_accepted: bool,
+    provider_source: u64,
+    winner_payout: u64,
+    loser_payout: u64,
+    winner_terminal: bool,
+    loser_terminal: bool,
+    provider_recovery: u64,
+    provider_withdraw_succeeded: bool,
+}
+
+fn run_delayed_backing_topup_after_expiry(submit_retained: bool) -> DelayedBackingTopupOutcome {
+    const BACKING: u128 = 500;
+    const SIZE_Q: i128 = 10 * POS_SCALE as i128;
+    const ASSET_INDEX: u16 = 1;
+    const WINNING_DOMAIN: u16 = 3;
+    const EXPIRY_SLOT: u64 = 6;
+    const SETTLED_SLOT: u64 = 3;
+    const LANDING_SLOT: u64 = 7;
+    const RESOLVE_SLOT: u64 = 13;
+
+    let mut env = V16CuEnv::new();
+    let provider = Keypair::new();
+    env.activate_asset_with_authorities(
+        ASSET_INDEX,
+        1,
+        100,
+        env.admin.pubkey(),
+        env.admin.pubkey(),
+        provider.pubkey(),
+        env.admin.pubkey(),
+    );
+    env.ensure_signer_account(provider.pubkey());
+    env.configure_auth_mark_for_asset_as_admin(ASSET_INDEX, 1, 100);
+    env.configure_permissionless_resolve_with_cu(RESOLVE_SLOT - SETTLED_SLOT, 1);
+
+    let winner_owner = Keypair::new();
+    let loser_owner = Keypair::new();
+    let publisher_owner = Keypair::new();
+    let winner = env.create_portfolio(&winner_owner);
+    let loser = env.create_portfolio(&loser_owner);
+    let publisher = env.create_portfolio(&publisher_owner);
+    env.deposit(&winner_owner, winner, 1_000);
+    env.deposit(&loser_owner, loser, 1_000);
+    env.trade_asset_with_cu(
+        ASSET_INDEX,
+        &winner_owner,
+        winner,
+        &loser_owner,
+        loser,
+        SIZE_Q,
+        100,
+        0,
+    );
+
+    for (slot, mark) in [(2, 200), (SETTLED_SLOT, 350)] {
+        env.svm.warp_to_slot(slot);
+        env.push_auth_mark_for_asset_as_admin(ASSET_INDEX, slot, mark);
+        env.crank(
+            publisher,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: slot,
+                observations: crank_observations(ASSET_INDEX),
+            },
+        );
+    }
+    assert_eq!(
+        env.market_state().1.assets[ASSET_INDEX as usize].effective_price,
+        350,
+        "the adverse public mark must be committed before the provider signs"
+    );
+
+    let source = env.token_account(provider.pubkey(), BACKING as u64);
+    env.svm.expire_blockhash();
+    let retained = Transaction::new_signed_with_payer(
+        &[
+            heap_ix(),
+            cu_ix(),
+            Instruction {
+                program_id: env.program_id,
+                accounts: vec![
+                    AccountMeta::new(provider.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(source, false),
+                    AccountMeta::new(env.vault, false),
+                    AccountMeta::new_readonly(spl_token::ID, false),
+                ],
+                data: ProgInstruction::TopUpBackingBucket {
+                    domain: WINNING_DOMAIN,
+                    amount: BACKING,
+                    expiry_slot: EXPIRY_SLOT,
+                }
+                .encode(),
+            },
+        ],
+        Some(&env.payer.pubkey()),
+        &[&env.payer, &provider],
+        env.svm.latest_blockhash(),
+    );
+
+    // A relayer retains the honestly signed transaction until after the provider's
+    // explicit risk window. No market instruction advances the engine slot first.
+    env.svm.warp_to_slot(LANDING_SLOT);
+    let topup_accepted = if submit_retained {
+        let result = env.svm.send_transaction(retained);
+        result.is_ok()
+    } else {
+        false
+    };
+    assert_eq!(
+        env.svm.get_sysvar::<Clock>().slot,
+        LANDING_SLOT,
+        "the transaction is submitted after its signed expiry"
+    );
+
+    env.resolve_stale_permissionless_with_cu(RESOLVE_SLOT);
+    env.svm.warp_to_slot(RESOLVE_SLOT + 1);
+    let winner_dest = env.token_account(winner_owner.pubkey(), 0);
+    let loser_dest = env.token_account(loser_owner.pubkey(), 0);
+    let is_terminal = |portfolio: &PortfolioAccountV16| {
+        portfolio.capital.get() == 0
+            && portfolio.pnl.get() == 0
+            && percolator::active_bitmap_is_empty(active_bitmap(portfolio))
+            && portfolio
+                .source_domains
+                .iter()
+                .all(|source| source.source_claim_bound_num.get() == 0)
+    };
+    let mut close_successes = 0usize;
+    let mut close_errors = 0usize;
+    for _ in 0..64 {
+        for (owner, portfolio, dest) in [
+            (&loser_owner, loser, loser_dest),
+            (&winner_owner, winner, winner_dest),
+        ] {
+            if is_terminal(&env.portfolio_state(portfolio)) {
+                continue;
+            }
+            env.svm.expire_blockhash();
+            let result = env.send(
+                ProgInstruction::CloseResolved {
+                    fee_rate_per_slot: 0,
+                },
+                vec![
+                    AccountMeta::new_readonly(owner.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(portfolio, false),
+                    AccountMeta::new(dest, false),
+                    AccountMeta::new(env.vault, false),
+                    AccountMeta::new_readonly(env.vault_authority, false),
+                    AccountMeta::new_readonly(spl_token::ID, false),
+                ],
+                &[owner],
+            );
+            if result.is_ok() {
+                close_successes += 1;
+            } else {
+                close_errors += 1;
+            }
+        }
+        if is_terminal(&env.portfolio_state(winner)) && is_terminal(&env.portfolio_state(loser)) {
+            break;
+        }
+    }
+    let winner_terminal = is_terminal(&env.portfolio_state(winner));
+    let loser_terminal = is_terminal(&env.portfolio_state(loser));
+    let provider_dest = env.token_account(provider.pubkey(), 0);
+    let provider_withdraw_succeeded = if topup_accepted {
+        env.svm.expire_blockhash();
+        env.send(
+            ProgInstruction::WithdrawBackingBucket {
+                domain: WINNING_DOMAIN,
+                amount: BACKING,
+            },
+            vec![
+                AccountMeta::new(provider.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(provider_dest, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(env.vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[&provider],
+        )
+        .is_ok()
+    } else {
+        false
+    };
+    println!(
+        "delayed-topup terminal summary: accepted={topup_accepted} closes_ok={close_successes} \
+         closes_err={close_errors} winner_terminal={winner_terminal} \
+         loser_terminal={loser_terminal} provider_source={} provider_recovery={} \
+         winner_payout={} loser_payout={}",
+        env.token_amount(source),
+        env.token_amount(provider_dest),
+        env.token_amount(winner_dest),
+        env.token_amount(loser_dest),
+    );
+
+    DelayedBackingTopupOutcome {
+        topup_accepted,
+        provider_source: env.token_amount(source),
+        winner_payout: env.token_amount(winner_dest),
+        loser_payout: env.token_amount(loser_dest),
+        winner_terminal,
+        loser_terminal,
+        provider_recovery: env.token_amount(provider_dest),
+        provider_withdraw_succeeded,
+    }
+}
+
+// A backing provider's signed expiry is a custody boundary, not a hint. A relayer
+// must not be able to land the retained top-up after that slot and route the
+// provider's atoms into an already-profitable independent account.
+#[test]
+fn v16_attack_retained_backing_topup_cannot_land_after_signed_expiry() {
+    let control = run_delayed_backing_topup_after_expiry(false);
+    let delayed = run_delayed_backing_topup_after_expiry(true);
+
+    assert!(
+        !delayed.topup_accepted,
+        "expired retained top-up landed: provider source {} -> {}, recovery={}, \
+         winner payout {} -> {}, terminal={}; loser terminal={}",
+        control.provider_source,
+        delayed.provider_source,
+        delayed.provider_recovery,
+        control.winner_payout,
+        delayed.winner_payout,
+        delayed.winner_terminal,
+        delayed.loser_terminal,
+    );
+    assert!(
+        delayed.winner_terminal && delayed.loser_terminal,
+        "the stale transaction must not strand terminal users (winner={}, loser={})",
+        delayed.winner_terminal,
+        delayed.loser_terminal,
+    );
+    assert_eq!(
+        delayed.provider_source + delayed.provider_recovery,
+        control.provider_source + control.provider_recovery,
+        "rejected stale top-up preserves provider custody"
+    );
+    assert!(
+        !delayed.topup_accepted || delayed.provider_withdraw_succeeded,
+        "accepted stale top-up must remain publicly recoverable by its provider"
+    );
+    assert_eq!(
+        delayed.winner_payout, control.winner_payout,
+        "an expired provider signature cannot increase an independent payout"
+    );
+    assert_eq!(
+        delayed.loser_payout, control.loser_payout,
+        "the stale transaction cannot alter terminal loss allocation"
+    );
+}
