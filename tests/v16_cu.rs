@@ -59965,3 +59965,134 @@ fn v16_attack_flattened_cross_margin_loss_cannot_drain_unrelated_insurance() {
          close_calls=({loser_close_calls},{asset0_cp_close_calls},{winner_close_calls})"
     );
 }
+
+#[test]
+fn v16_attack_resolved_bankruptcy_cannot_shift_loss_by_winner_close_order() {
+    fn run(close_small_first: bool) -> (u128, u128) {
+        const MARK: u64 = 1_000_000;
+        const ADVERSE_MARK: u64 = 1_100_000;
+        const WINNER_CAPITAL: u128 = 1_000_000;
+        const LOSER_CAPITAL: u128 = 50_001;
+
+        let mut env = V16CuEnv::new_with_init_params(production_risk_params());
+        env.configure_auth_mark_with_cu(0, MARK);
+
+        let small_owner = Keypair::new();
+        let small = env.create_portfolio(&small_owner);
+        let large_owner = Keypair::new();
+        let large = env.create_portfolio(&large_owner);
+        let loser_owner = Keypair::new();
+        let loser = env.create_portfolio(&loser_owner);
+        let accrual_owner = Keypair::new();
+        let accrual = env.create_portfolio(&accrual_owner);
+        env.deposit(&small_owner, small, WINNER_CAPITAL);
+        env.deposit(&large_owner, large, WINNER_CAPITAL);
+        env.deposit(&loser_owner, loser, LOSER_CAPITAL);
+
+        env.trade_asset_with_cu(
+            0,
+            &small_owner,
+            small,
+            &loser_owner,
+            loser,
+            (POS_SCALE / 4) as i128,
+            MARK,
+            0,
+        );
+        env.trade_asset_with_cu(
+            0,
+            &large_owner,
+            large,
+            &loser_owner,
+            loser,
+            (3 * POS_SCALE / 4) as i128,
+            MARK,
+            0,
+        );
+
+        for slot in 1..=50u64 {
+            env.svm.warp_to_slot(slot);
+            env.push_auth_mark_with_cu(slot, ADVERSE_MARK);
+            env.crank(
+                accrual,
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: slot,
+                    observations: crank_observations(0),
+                },
+            );
+        }
+        assert_eq!(env.market_state().1.assets[0].effective_price, ADVERSE_MARK);
+        env.close_portfolio_with_cu(&accrual_owner, accrual);
+        env.resolve();
+
+        let close_once = |env: &mut V16CuEnv, owner: &Keypair, portfolio: Pubkey| -> u128 {
+            env.svm.expire_blockhash();
+            let (dest, cu) = env.close_resolved_with_cu(owner, portfolio);
+            assert_cu_within("resolved close-order step", cu, CUSTODY_CU_LIMIT);
+            env.token_amount(dest) as u128
+        };
+        let is_terminal = |env: &V16CuEnv, portfolio: Pubkey| {
+            let account = env.portfolio_state(portfolio);
+            account.capital.get() == 0
+                && account.pnl.get() == 0
+                && percolator::active_bitmap_is_empty(active_bitmap(&account))
+                && (!resolved_receipt(&account).present || resolved_receipt(&account).finalized)
+        };
+        let drive = |env: &mut V16CuEnv, owner: &Keypair, portfolio: Pubkey| -> u128 {
+            let mut payout = 0u128;
+            for _ in 0..16 {
+                payout += close_once(env, owner, portfolio);
+                if is_terminal(env, portfolio) {
+                    return payout;
+                }
+            }
+            panic!("resolved loser did not terminate in 16 bounded calls");
+        };
+
+        let (first_owner, first, remaining) = if close_small_first {
+            (&small_owner, small, large)
+        } else {
+            (&large_owner, large, small)
+        };
+        assert_eq!(
+            close_once(&mut env, first_owner, first),
+            0,
+            "a premature winner may progress, but cannot pay before bankruptcy blockers clear"
+        );
+        assert!(
+            !has_active_leg_for_asset(&env.portfolio_state(first), 0),
+            "the first winner has detached before the loser books terminal debt"
+        );
+        assert!(
+            has_active_leg_for_asset(&env.portfolio_state(remaining), 0),
+            "the other winner still carries the only remaining loss weight"
+        );
+
+        let loser_paid = drive(&mut env, &loser_owner, loser);
+        assert_eq!(loser_paid, 0, "the bankrupt loser has no terminal payout");
+        let after_bankruptcy = env.market_state().1;
+        assert_eq!(
+            (
+                after_bankruptcy.assets[0].b_long_num,
+                after_bankruptcy.assets[0].b_short_num,
+            ),
+            (0, 0),
+            "Resolved bankruptcy is already priced by the payout haircut and must not redistribute \
+             loss through close-order-dependent B weights"
+        );
+        assert_eq!(
+            after_bankruptcy.vault as u64,
+            env.token_amount(env.vault),
+            "terminal debt classification moves no SPL custody"
+        );
+        (
+            after_bankruptcy.assets[0].b_long_num,
+            after_bankruptcy.assets[0].b_short_num,
+        )
+    }
+
+    let small_first = run(true);
+    let large_first = run(false);
+    assert_eq!(small_first, (0, 0));
+    assert_eq!(large_first, (0, 0));
+}
