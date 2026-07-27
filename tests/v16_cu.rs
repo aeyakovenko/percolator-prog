@@ -59717,3 +59717,158 @@ fn v16_attack_underfunded_exit_cannot_move_ewma_with_uncollectible_fee() {
         assert_underfunded_ewma_exit_uses_collected_fee(path);
     }
 }
+
+// Public-interface DoS regression: an LP authorizes a matcher once, after which an unrelated taker
+// can fill against it without the LP owner signing each trade. Repeated ordinary fills and honest
+// mark moves can leave the flat LP with all 32 sparse source domains occupied. Conversion must make
+// bounded rank-decreasing progress; processing the whole source table atomically hits the SVM limit
+// and strands the LP's source-backed profit for as long as the healthy market remains Live.
+#[test]
+fn v16_attack_max_source_conversion_is_bounded_for_unsigned_lp() {
+    const ACTIVE_CAP: u16 = percolator_prog::constants::WRAPPER_MAX_PORTFOLIO_ASSETS;
+    const ASSETS: u16 = 16;
+    const PRICE_LOW: u64 = 100;
+    const PRICE_HIGH: u64 = 101;
+    const SIZE_Q: i128 = POS_SCALE as i128 * 1_000;
+    const PROFIT_PER_DOMAIN: u128 = 1_000;
+
+    let mut env = V16CuEnv::new_with_init_params_and_market_capacity(
+        V16CuMarketParams {
+            max_portfolio_assets: ACTIVE_CAP,
+            maintenance_margin_bps: 10_000,
+            initial_margin_bps: 10_000,
+            max_price_move_bps_per_slot: 10_000,
+            ..V16CuMarketParams::default()
+        },
+        70,
+    );
+    for asset_index in ACTIVE_CAP..ASSETS {
+        let activation_slot = u64::from(asset_index - ACTIVE_CAP + 1);
+        env.activate_asset(asset_index, activation_slot, PRICE_LOW);
+    }
+    let mut slot = u64::from(ASSETS - ACTIVE_CAP);
+    env.svm.warp_to_slot(slot);
+    for asset_index in 0..ASSETS {
+        env.configure_auth_mark_for_asset_as_admin(asset_index, slot, PRICE_LOW);
+    }
+
+    let matcher_program = Pubkey::new_unique();
+    let matcher_bytes = std::fs::read(auth_matcher_program_path()).expect("read auth matcher BPF");
+    env.svm.add_program(matcher_program, &matcher_bytes);
+
+    let attacker_owner = Keypair::new();
+    let victim_owner = Keypair::new();
+    let attacker = env.create_portfolio(&attacker_owner);
+    let victim_lp = env.create_portfolio(&victim_owner);
+    env.deposit(&attacker_owner, attacker, 1_000_000);
+    env.deposit(&victim_owner, victim_lp, 1_000_000);
+    let (matcher_ctx, matcher_delegate, _) =
+        env.init_auth_matcher_context(matcher_program, &victim_owner, victim_lp);
+
+    let cpi_fill = |env: &mut V16CuEnv, asset_index: u16, size_q: i128| {
+        env.svm.expire_blockhash();
+        env.try_trade_cpi_with_cu_on_asset(
+            &attacker_owner,
+            attacker,
+            &victim_owner,
+            victim_lp,
+            matcher_program,
+            matcher_ctx,
+            matcher_delegate,
+            asset_index,
+            size_q,
+            0,
+        )
+        .unwrap_or_else(|err| panic!("unsigned-LP asset {asset_index} fill failed: {err}"));
+    };
+    let settle_both = |env: &mut V16CuEnv, asset_index: u16, now_slot: u64| {
+        for account in [attacker, victim_lp] {
+            env.svm.expire_blockhash();
+            env.crank(
+                account,
+                ProgInstruction::PermissionlessCrank {
+                    now_slot,
+                    observations: crank_observations(asset_index),
+                },
+            );
+        }
+    };
+
+    for asset_index in 0..ASSETS {
+        // Only the attacker signs these fills. First make the LP long and profitable.
+        cpi_fill(&mut env, asset_index, -SIZE_Q);
+        slot += 1;
+        env.svm.warp_to_slot(slot);
+        env.push_auth_mark_for_asset_as_admin(asset_index, slot, PRICE_HIGH);
+        settle_both(&mut env, asset_index, slot);
+        cpi_fill(&mut env, asset_index, SIZE_Q);
+
+        // Then make the LP short and profitable, retaining the opposite source domain too.
+        cpi_fill(&mut env, asset_index, SIZE_Q);
+        slot += 1;
+        env.svm.warp_to_slot(slot);
+        env.push_auth_mark_for_asset_as_admin(asset_index, slot, PRICE_LOW);
+        settle_both(&mut env, asset_index, slot);
+        cpi_fill(&mut env, asset_index, -SIZE_Q);
+    }
+
+    let victim = env.portfolio_state(victim_lp);
+    assert!(percolator::active_bitmap_is_empty(active_bitmap(&victim)));
+    assert_eq!(
+        victim
+            .source_domains
+            .iter()
+            .filter(|source| source.is_occupied())
+            .count(),
+        percolator::PORTFOLIO_SOURCE_DOMAIN_CAP
+    );
+    let total_profit = i128::from(2 * ASSETS) * PROFIT_PER_DOMAIN as i128;
+    assert_eq!(victim.pnl.get(), total_profit);
+
+    let mut max_conversion_cu = 0;
+    for remaining_domains in (1..=percolator::PORTFOLIO_SOURCE_DOMAIN_CAP).rev() {
+        let before = env.portfolio_state(victim_lp);
+        env.svm.expire_blockhash();
+        let cu = env
+            .send(
+                ProgInstruction::ConvertReleasedPnl { amount: u128::MAX },
+                vec![
+                    AccountMeta::new(victim_owner.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(victim_lp, false),
+                ],
+                &[&victim_owner],
+            )
+            .unwrap_or_else(|err| {
+                panic!("max-source conversion must have a bounded continuation: {err}")
+            });
+        max_conversion_cu = max_conversion_cu.max(cu);
+        assert!(
+            cu < 1_400_000,
+            "source conversion consumed the transaction limit: {cu}"
+        );
+        let after = env.portfolio_state(victim_lp);
+        assert_eq!(
+            before.pnl.get() - after.pnl.get(),
+            PROFIT_PER_DOMAIN as i128
+        );
+        assert_eq!(
+            after
+                .source_domains
+                .iter()
+                .filter(|source| source.is_occupied())
+                .count(),
+            remaining_domains - 1
+        );
+    }
+    println!("v16 max-source bounded conversion max CU: {max_conversion_cu}");
+
+    let final_state = env.portfolio_state(victim_lp);
+    assert_eq!(final_state.pnl.get(), 0);
+    assert_eq!(final_state.capital.get(), 1_000_000 + total_profit as u128);
+    let destination = env.withdraw(&victim_owner, victim_lp, final_state.capital.get());
+    assert_eq!(
+        env.token_amount(destination),
+        (1_000_000 + total_profit as u128) as u64
+    );
+}

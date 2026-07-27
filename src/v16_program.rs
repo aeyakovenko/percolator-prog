@@ -8390,10 +8390,10 @@ pub mod processor {
             if permissionless_resolve_matured_now_view(cfg, group) {
                 return Err(V16Error::LockActive);
             }
-            // The v16 engine converts the currently released residual-bounded
-            // amount atomically. Preserve the wrapper caller cap by staging the
-            // conversion and only committing it when the converted amount fits.
-            let converted = group.convert_released_pnl_to_capital_not_atomic(portfolio)?;
+            // Convert one source domain per call so max-shape accounts retain a
+            // bounded continuation. Instruction rollback preserves the caller
+            // cap when the selected step would exceed it.
+            let converted = group.convert_released_pnl_to_capital_step_not_atomic(portfolio)?;
             if converted == 0 || converted > amount {
                 return Err(V16Error::LockActive);
             }
