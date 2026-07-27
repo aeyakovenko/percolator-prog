@@ -59825,14 +59825,13 @@ fn v16_attack_max_source_conversion_is_bounded_for_unsigned_lp() {
     let total_profit = i128::from(2 * ASSETS) * PROFIT_PER_DOMAIN as i128;
     assert_eq!(victim.pnl.get(), total_profit);
 
+    let mut max_conversion_cu = 0;
     for remaining_domains in (1..=percolator::PORTFOLIO_SOURCE_DOMAIN_CAP).rev() {
         let before = env.portfolio_state(victim_lp);
         env.svm.expire_blockhash();
         let cu = env
             .send(
-                ProgInstruction::ConvertReleasedPnl {
-                    amount: PROFIT_PER_DOMAIN,
-                },
+                ProgInstruction::ConvertReleasedPnl { amount: u128::MAX },
                 vec![
                     AccountMeta::new(victim_owner.pubkey(), true),
                     AccountMeta::new(env.market, false),
@@ -59843,6 +59842,7 @@ fn v16_attack_max_source_conversion_is_bounded_for_unsigned_lp() {
             .unwrap_or_else(|err| {
                 panic!("max-source conversion must have a bounded continuation: {err}")
             });
+        max_conversion_cu = max_conversion_cu.max(cu);
         assert!(
             cu < 1_400_000,
             "source conversion consumed the transaction limit: {cu}"
@@ -59861,6 +59861,7 @@ fn v16_attack_max_source_conversion_is_bounded_for_unsigned_lp() {
             remaining_domains - 1
         );
     }
+    println!("v16 max-source bounded conversion max CU: {max_conversion_cu}");
 
     let final_state = env.portfolio_state(victim_lp);
     assert_eq!(final_state.pnl.get(), 0);
