@@ -66191,7 +66191,7 @@ fn v16_attack_public_max_source_force_close_abandoned_asset_stays_bounded() {
 fn v16_attack_auto_crank_reaches_later_material_liquidation_past_tiny_first_leg() {
     const MARK: u64 = 1_000_000;
     const ADVERSE_MARK: u64 = 1_040_000;
-    const TINY_Q: i128 = (POS_SCALE / 1_000) as i128;
+    const TINY_Q: i128 = 1;
 
     let mut params = production_risk_params();
     params.max_portfolio_assets = 2;
@@ -66207,7 +66207,8 @@ fn v16_attack_auto_crank_reaches_later_material_liquidation_past_tiny_first_leg(
     env.deposit(&victim_owner, victim, 60_000);
     env.deposit(&counterparty_owner, counterparty, 2_000_000);
 
-    // Asset 0 deliberately occupies the first active slot but is economically tiny.
+    // Asset 0 deliberately occupies the first active slot with the minimum representable public
+    // position quantum. It must still be removable rather than shadowing the material asset-1 loss.
     env.trade_asset_with_cu(
         0,
         &victim_owner,
@@ -66287,6 +66288,10 @@ fn v16_attack_auto_crank_reaches_later_material_liquidation_past_tiny_first_leg(
     assert!(
         material_after < material_before,
         "tiny first leg must not shadow liquidation of the later losing leg"
+    );
+    assert!(
+        !has_active_leg_for_asset(&env.portfolio_state(victim), 0),
+        "the minimum-quantum first leg must clear before the later material liquidation progresses"
     );
 }
 
