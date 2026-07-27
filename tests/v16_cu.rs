@@ -66450,18 +66450,15 @@ fn v16_attack_resolved_two_public_winners_are_close_order_independent() {
     assert!(loser_first.0 > 1_000_000 && loser_first.2 < 1_000_000);
 }
 
-// Max-source liveness through a wrapper-specific owner route: an LP authorizes a matcher once,
-// then an unrelated taker can create both source domains on every asset without the LP signing the
-// fills. Leave the final profitable leg open and prove the owner can still unilaterally reduce it
-// at the exact 32-domain public shape.
-#[test]
-fn v16_attack_max_source_owner_rebalance_reduce_stays_bounded() {
+const MAX_SOURCE_LIVE_ASSETS: u16 = 16;
+const MAX_SOURCE_LIVE_SIZE_Q: i128 = POS_SCALE as i128 * 1_000;
+
+// An LP authorizes a matcher once, then an unrelated taker creates both source domains on every
+// asset without the LP signing the fills. All but the final profitable LP leg are closed.
+fn setup_max_source_live_pair() -> (V16CuEnv, Keypair, Pubkey, Pubkey, u64) {
     const ACTIVE_CAP: u16 = percolator_prog::constants::WRAPPER_MAX_PORTFOLIO_ASSETS;
-    const ASSETS: u16 = 16;
     const PRICE_LOW: u64 = 100;
     const PRICE_HIGH: u64 = 101;
-    const SIZE_Q: i128 = POS_SCALE as i128 * 1_000;
-
     let mut env = V16CuEnv::new_with_init_params_and_market_capacity(
         V16CuMarketParams {
             max_portfolio_assets: ACTIVE_CAP,
@@ -66472,13 +66469,13 @@ fn v16_attack_max_source_owner_rebalance_reduce_stays_bounded() {
         },
         70,
     );
-    for asset_index in ACTIVE_CAP..ASSETS {
+    for asset_index in ACTIVE_CAP..MAX_SOURCE_LIVE_ASSETS {
         let activation_slot = u64::from(asset_index - ACTIVE_CAP + 1);
         env.activate_asset(asset_index, activation_slot, PRICE_LOW);
     }
-    let mut slot = u64::from(ASSETS - ACTIVE_CAP);
+    let mut slot = u64::from(MAX_SOURCE_LIVE_ASSETS - ACTIVE_CAP);
     env.svm.warp_to_slot(slot);
-    for asset_index in 0..ASSETS {
+    for asset_index in 0..MAX_SOURCE_LIVE_ASSETS {
         env.configure_auth_mark_for_asset_as_admin(asset_index, slot, PRICE_LOW);
     }
 
@@ -66524,27 +66521,27 @@ fn v16_attack_max_source_owner_rebalance_reduce_stays_bounded() {
         }
     };
 
-    for asset_index in 0..ASSETS {
-        cpi_fill(&mut env, asset_index, -SIZE_Q);
+    for asset_index in 0..MAX_SOURCE_LIVE_ASSETS {
+        cpi_fill(&mut env, asset_index, -MAX_SOURCE_LIVE_SIZE_Q);
         slot += 1;
         env.svm.warp_to_slot(slot);
         env.push_auth_mark_for_asset_as_admin(asset_index, slot, PRICE_HIGH);
         settle_both(&mut env, asset_index, slot);
-        cpi_fill(&mut env, asset_index, SIZE_Q);
+        cpi_fill(&mut env, asset_index, MAX_SOURCE_LIVE_SIZE_Q);
 
-        cpi_fill(&mut env, asset_index, SIZE_Q);
+        cpi_fill(&mut env, asset_index, MAX_SOURCE_LIVE_SIZE_Q);
         slot += 1;
         env.svm.warp_to_slot(slot);
         env.push_auth_mark_for_asset_as_admin(asset_index, slot, PRICE_LOW);
         settle_both(&mut env, asset_index, slot);
-        if asset_index + 1 != ASSETS {
-            cpi_fill(&mut env, asset_index, -SIZE_Q);
+        if asset_index + 1 != MAX_SOURCE_LIVE_ASSETS {
+            cpi_fill(&mut env, asset_index, -MAX_SOURCE_LIVE_SIZE_Q);
         }
     }
 
-    let before = env.portfolio_state(lp);
+    let lp_state = env.portfolio_state(lp);
     assert_eq!(
-        before
+        lp_state
             .source_domains
             .iter()
             .filter(|source| source.is_occupied())
@@ -66552,24 +66549,49 @@ fn v16_attack_max_source_owner_rebalance_reduce_stays_bounded() {
         percolator::PORTFOLIO_SOURCE_DOMAIN_CAP
     );
     assert_eq!(
-        active_leg_for_asset(&before, usize::from(ASSETS - 1)).basis_pos_q,
-        -SIZE_Q
+        active_leg_for_asset(&lp_state, usize::from(MAX_SOURCE_LIVE_ASSETS - 1)).basis_pos_q,
+        -MAX_SOURCE_LIVE_SIZE_Q
     );
+    assert_eq!(
+        active_leg_for_asset(
+            &env.portfolio_state(taker),
+            usize::from(MAX_SOURCE_LIVE_ASSETS - 1)
+        )
+        .basis_pos_q,
+        MAX_SOURCE_LIVE_SIZE_Q
+    );
+    (env, lp_owner, taker, lp, slot)
+}
+
+// Max-source liveness through a wrapper-specific owner route: the owner can still unilaterally
+// reduce the final leg at the exact 32-domain public shape.
+#[test]
+fn v16_attack_max_source_owner_rebalance_reduce_stays_bounded() {
+    let (mut env, lp_owner, _taker, lp, _slot) = setup_max_source_live_pair();
+    let before = env.portfolio_state(lp);
     let group_before = env.market_state().1;
-    let oi_before = group_before.assets[usize::from(ASSETS - 1)].oi_eff_short_q;
+    let oi_before = group_before.assets[usize::from(MAX_SOURCE_LIVE_ASSETS - 1)].oi_eff_short_q;
     let pnl_before = before.pnl.get();
     let custody_before = env.token_amount(env.vault);
 
     env.svm.expire_blockhash();
-    let cu = env.rebalance_reduce_with_cu(&lp_owner, lp, ASSETS - 1, SIZE_Q.unsigned_abs());
+    let cu = env.rebalance_reduce_with_cu(
+        &lp_owner,
+        lp,
+        MAX_SOURCE_LIVE_ASSETS - 1,
+        MAX_SOURCE_LIVE_SIZE_Q.unsigned_abs(),
+    );
     println!("v16 32-source-domain RebalanceReduce CU: {cu}");
     assert_cu_within("32-source-domain RebalanceReduce", cu, 1_375_000);
     let after = env.portfolio_state(lp);
     let group_after = env.market_state().1;
-    assert!(!has_active_leg_for_asset(&after, usize::from(ASSETS - 1)));
+    assert!(!has_active_leg_for_asset(
+        &after,
+        usize::from(MAX_SOURCE_LIVE_ASSETS - 1)
+    ));
     assert_eq!(
-        group_after.assets[usize::from(ASSETS - 1)].oi_eff_short_q,
-        oi_before - SIZE_Q.unsigned_abs()
+        group_after.assets[usize::from(MAX_SOURCE_LIVE_ASSETS - 1)].oi_eff_short_q,
+        oi_before - MAX_SOURCE_LIVE_SIZE_Q.unsigned_abs()
     );
     assert_eq!(after.pnl.get(), pnl_before);
     assert_eq!(
@@ -66579,6 +66601,59 @@ fn v16_attack_max_source_owner_rebalance_reduce_stays_bounded() {
             .filter(|source| source.is_occupied())
             .count(),
         percolator::PORTFOLIO_SOURCE_DOMAIN_CAP
+    );
+    assert_eq!(env.token_amount(env.vault), custody_before);
+    assert_eq!(group_after.vault as u64, custody_before);
+}
+
+// Max-source liveness through a wrapper-specific two-account route: shutdown must leave an
+// unrelated cranker enough CU to clear the final abandoned pair at the exact 32-domain shape.
+#[test]
+fn v16_attack_max_source_force_close_abandoned_asset_stays_bounded() {
+    let (mut env, _lp_owner, taker, lp, mut slot) = setup_max_source_live_pair();
+    let custody_before = env.token_amount(env.vault);
+
+    env.configure_permissionless_resolve_with_cu(1_000, 5);
+    slot += 1;
+    env.svm.warp_to_slot(slot);
+    env.update_asset_lifecycle_as_admin_with_cu(
+        percolator_prog::processor::ASSET_ACTION_SHUTDOWN,
+        MAX_SOURCE_LIVE_ASSETS - 1,
+        slot,
+        0,
+    );
+    slot += 5;
+    env.svm.warp_to_slot(slot);
+    env.svm.expire_blockhash();
+    let cranker = Keypair::new();
+    let cu = env
+        .try_force_close_abandoned_asset_with_cu(
+            &cranker,
+            taker,
+            lp,
+            MAX_SOURCE_LIVE_ASSETS - 1,
+            slot,
+            MAX_SOURCE_LIVE_SIZE_Q.unsigned_abs(),
+        )
+        .expect("32-source abandoned pair remains permissionlessly closeable");
+    println!("v16 32-source-domain ForceCloseAbandonedAsset CU: {cu}");
+    assert_cu_within("32-source-domain ForceCloseAbandonedAsset", cu, 1_375_000);
+    assert!(!has_active_leg_for_asset(
+        &env.portfolio_state(taker),
+        usize::from(MAX_SOURCE_LIVE_ASSETS - 1)
+    ));
+    assert!(!has_active_leg_for_asset(
+        &env.portfolio_state(lp),
+        usize::from(MAX_SOURCE_LIVE_ASSETS - 1)
+    ));
+    let group_after = env.market_state().1;
+    assert_eq!(
+        group_after.assets[usize::from(MAX_SOURCE_LIVE_ASSETS - 1)].oi_eff_long_q,
+        0
+    );
+    assert_eq!(
+        group_after.assets[usize::from(MAX_SOURCE_LIVE_ASSETS - 1)].oi_eff_short_q,
+        0
     );
     assert_eq!(env.token_amount(env.vault), custody_before);
     assert_eq!(group_after.vault as u64, custody_before);
