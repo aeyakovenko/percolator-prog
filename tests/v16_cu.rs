@@ -59717,3 +59717,416 @@ fn v16_attack_underfunded_exit_cannot_move_ewma_with_uncollectible_fee() {
         assert_underfunded_ewma_exit_uses_collected_fee(path);
     }
 }
+
+#[test]
+fn v16_attack_stale_loser_cannot_shift_preexisting_bankruptcy_to_fresh_lp() {
+    const OPEN_PRICE: u64 = 100;
+    const LOSS_PRICE: u64 = 500;
+    const RECOVERY_PRICE: u64 = 501;
+    const SIZE_Q: u128 = 10 * POS_SCALE;
+    const WINNER_DEPOSIT: u64 = 5_000;
+    const LOSER_DEPOSIT: u64 = 1_000;
+    const ATTACKER_DEPOSIT: u64 = WINNER_DEPOSIT + LOSER_DEPOSIT;
+    const LP_DEPOSIT: u64 = 1_000_000;
+
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(1, 10_000, 10_000, 10_000);
+    env.configure_auth_mark_with_cu(0, OPEN_PRICE);
+    env.top_up_backing_bucket(1, 10_000, 100);
+
+    let winner_owner = Keypair::new();
+    let loser_owner = Keypair::new();
+    let entrant_owner = Keypair::new();
+    let winner = env.create_portfolio(&winner_owner);
+    let loser = env.create_portfolio(&loser_owner);
+    let entrant = env.create_portfolio(&entrant_owner);
+    env.deposit(&winner_owner, winner, WINNER_DEPOSIT.into());
+    env.deposit(&loser_owner, loser, LOSER_DEPOSIT.into());
+    env.deposit(&entrant_owner, entrant, LP_DEPOSIT.into());
+
+    let matcher_program = Pubkey::new_unique();
+    let matcher_bytes = std::fs::read(auth_matcher_program_path()).expect("read auth matcher BPF");
+    env.svm.add_program(matcher_program, &matcher_bytes);
+    let (matcher_context, matcher_delegate, _) =
+        env.init_auth_matcher_context(matcher_program, &entrant_owner, entrant);
+
+    env.trade_asset_with_cu(
+        0,
+        &winner_owner,
+        winner,
+        &loser_owner,
+        loser,
+        SIZE_Q as i128,
+        OPEN_PRICE,
+        0,
+    );
+    for slot in 1..=3 {
+        env.svm.warp_to_slot(slot);
+        env.push_auth_mark_with_cu(slot, LOSS_PRICE);
+        env.crank(
+            winner,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: slot,
+                observations: crank_observations(0),
+            },
+        );
+    }
+
+    let before_group = env.market_state().1;
+    let winner_before = env.portfolio_state(winner);
+    let loser_before = env.portfolio_state(loser);
+    assert_eq!(winner_before.pnl.get(), 4_000);
+    assert_eq!(
+        loser_before.pnl.get(),
+        0,
+        "the losing leg is deliberately stale"
+    );
+    assert!(has_active_leg_for_asset(&winner_before, 0));
+    assert!(has_active_leg_for_asset(&loser_before, 0));
+    assert_eq!(before_group.assets[0].effective_price, LOSS_PRICE);
+    assert_eq!(before_group.negative_pnl_account_count, 0);
+
+    // The winner controls the taker and the losing account, while an independent LP has authorized
+    // the production CPI matcher. Moving the winner's long to that LP before the loser settles used
+    // to leave the later social loss attached to the LP's fresh position.
+    let market_before_transfer = env.svm.get_account(&env.market).unwrap();
+    let winner_before_transfer = env.svm.get_account(&winner).unwrap();
+    let entrant_before_transfer = env.svm.get_account(&entrant).unwrap();
+    let matcher_before_transfer = env.svm.get_account(&matcher_context).unwrap();
+    env.svm.expire_blockhash();
+    let batch_transfer = env.send(
+        ProgInstruction::BatchTradeCpi {
+            legs: vec![BatchTradeCpiLeg {
+                asset_index: 0,
+                size_q: -(SIZE_Q as i128),
+                fee_bps: 0,
+                limit_price: 0,
+            }],
+        },
+        vec![
+            AccountMeta::new(winner_owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(winner, false),
+            AccountMeta::new(entrant, false),
+            AccountMeta::new_readonly(matcher_program, false),
+            AccountMeta::new(matcher_context, false),
+            AccountMeta::new_readonly(matcher_delegate, false),
+        ],
+        &[&winner_owner],
+    );
+    assert!(
+        batch_transfer.is_err(),
+        "the batch matcher route must reject the same historical cohort transfer"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before_transfer
+    );
+    assert_eq!(
+        env.svm.get_account(&winner).unwrap(),
+        winner_before_transfer
+    );
+    assert_eq!(
+        env.svm.get_account(&entrant).unwrap(),
+        entrant_before_transfer
+    );
+    assert_eq!(
+        env.svm.get_account(&matcher_context).unwrap(),
+        matcher_before_transfer
+    );
+
+    env.svm.expire_blockhash();
+    let transfer = env.try_trade_cpi_with_cu_on_asset(
+        &winner_owner,
+        winner,
+        &entrant_owner,
+        entrant,
+        matcher_program,
+        matcher_context,
+        matcher_delegate,
+        0,
+        -(SIZE_Q as i128),
+        0,
+    );
+    assert!(
+        transfer.is_err(),
+        "a stale settlement cohort must not be novated to a fresh LP"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before_transfer
+    );
+    assert_eq!(
+        env.svm.get_account(&winner).unwrap(),
+        winner_before_transfer
+    );
+    assert_eq!(
+        env.svm.get_account(&entrant).unwrap(),
+        entrant_before_transfer
+    );
+    assert_eq!(
+        env.svm.get_account(&matcher_context).unwrap(),
+        matcher_before_transfer,
+        "SVM rollback includes the production matcher CPI"
+    );
+
+    // The accounting lock is not a market-wide trade pause. With both owners signing, the same
+    // position can be transferred and returned while the losing cohort is stale; only an unsigned
+    // matcher may not place that historical obligation on its LP.
+    env.try_trade_asset_with_cu(
+        0,
+        &winner_owner,
+        winner,
+        &entrant_owner,
+        entrant,
+        -(SIZE_Q as i128),
+        LOSS_PRICE,
+        0,
+    )
+    .expect("fully signed stale-cohort transfer must remain live");
+    assert!(!has_active_leg_for_asset(&env.portfolio_state(winner), 0));
+    assert!(has_active_leg_for_asset(&env.portfolio_state(entrant), 0));
+    env.try_trade_asset_with_cu(
+        0,
+        &winner_owner,
+        winner,
+        &entrant_owner,
+        entrant,
+        SIZE_Q as i128,
+        LOSS_PRICE,
+        0,
+    )
+    .expect("fully signed stale-cohort return must remain live");
+    assert!(has_active_leg_for_asset(&env.portfolio_state(winner), 0));
+    assert!(!has_active_leg_for_asset(&env.portfolio_state(entrant), 0));
+
+    let market_before_conversion = env.svm.get_account(&env.market).unwrap();
+    let winner_before_conversion = env.svm.get_account(&winner).unwrap();
+    env.svm.expire_blockhash();
+    let conversion = env.send(
+        ProgInstruction::ConvertReleasedPnl { amount: 4_000 },
+        vec![
+            AccountMeta::new(winner_owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(winner, false),
+        ],
+        &[&winner_owner],
+    );
+    assert!(
+        conversion.is_err(),
+        "the winner must not release source-backed PnL before its counterparty settles"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before_conversion
+    );
+    assert_eq!(
+        env.svm.get_account(&winner).unwrap(),
+        winner_before_conversion
+    );
+
+    // There is also a one-crank interval after the loser settles K/F and principal but before its
+    // bankruptcy residual is booked. The source-side stale count is zero in that interval, so the
+    // global negative-PnL H-lock must independently keep the winner's claim non-favorable.
+    env.crank(
+        loser,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 3,
+            observations: crank_observations(0),
+        },
+    );
+    let mid_group = env.market_state().1;
+    let loser_mid = env.portfolio_state(loser);
+    assert_eq!(mid_group.assets[0].stale_account_count_short, 0);
+    assert_eq!(mid_group.negative_pnl_account_count, 1);
+    assert_eq!(loser_mid.capital.get(), 0);
+    assert_eq!(loser_mid.pnl.get(), -3_000);
+    assert!(!close_progress(&loser_mid).active);
+
+    let market_before_negative_conversion = env.svm.get_account(&env.market).unwrap();
+    let winner_before_negative_conversion = env.svm.get_account(&winner).unwrap();
+    env.svm.expire_blockhash();
+    let negative_conversion = env.send(
+        ProgInstruction::ConvertReleasedPnl { amount: 4_000 },
+        vec![
+            AccountMeta::new(winner_owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(winner, false),
+        ],
+        &[&winner_owner],
+    );
+    assert!(
+        negative_conversion.is_err(),
+        "unresolved negative PnL must keep source-backed winner credit non-favorable"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before_negative_conversion
+    );
+    assert_eq!(
+        env.svm.get_account(&winner).unwrap(),
+        winner_before_negative_conversion
+    );
+
+    let mut successful_cranks = 0usize;
+    for _ in 0..64 {
+        let group = env.market_state().1;
+        let asset = &group.assets[0];
+        if asset.stale_account_count_long == 0
+            && asset.stale_account_count_short == 0
+            && asset.stored_pos_count_short == 0
+            && group.negative_pnl_account_count == 0
+            && group.b_stale_account_count == 0
+            && group
+                .pending_domain_loss_barriers
+                .iter()
+                .all(|&barrier| barrier == 0)
+        {
+            break;
+        }
+
+        let mut round_progressed = false;
+        for portfolio in [loser, winner] {
+            env.svm.expire_blockhash();
+            let result = env.send(
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: 3,
+                    observations: crank_observations(0),
+                },
+                vec![
+                    AccountMeta::new(env.payer.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(portfolio, false),
+                ],
+                &[],
+            );
+            if result.is_ok() {
+                round_progressed = true;
+                successful_cranks += 1;
+            }
+        }
+        assert!(
+            round_progressed,
+            "an honest permissionless cranker must make progress while settlement work remains"
+        );
+    }
+
+    let winner_after = env.portfolio_state(winner);
+    let loser_after = env.portfolio_state(loser);
+    let entrant_after = env.portfolio_state(entrant);
+    let settled_group = env.market_state().1;
+    assert!(successful_cranks > 0);
+    assert_eq!(settled_group.assets[0].stale_account_count_long, 0);
+    assert_eq!(settled_group.assets[0].stale_account_count_short, 0);
+    assert_eq!(settled_group.assets[0].stored_pos_count_long, 1);
+    assert_eq!(settled_group.assets[0].stored_pos_count_short, 0);
+    assert_eq!(settled_group.assets[0].mode_long, SideModeV16::ResetPending);
+    assert_eq!(settled_group.assets[0].mode_short, SideModeV16::Normal);
+    assert_eq!(settled_group.negative_pnl_account_count, 0);
+    assert_eq!(settled_group.b_stale_account_count, 0);
+    assert!(settled_group
+        .pending_domain_loss_barriers
+        .iter()
+        .all(|&barrier| barrier == 0));
+    assert!(close_progress(&loser_after).finalized);
+    assert_eq!(close_progress(&loser_after).b_loss_booked, 3_000);
+    assert_eq!(
+        winner_after.pnl.get(),
+        1_000,
+        "the preexisting winner, not the fresh LP, absorbs the social loss"
+    );
+    assert_eq!(entrant_after.capital.get(), LP_DEPOSIT as u128);
+    assert_eq!(entrant_after.pnl.get(), 0);
+    assert!(!has_active_leg_for_asset(&entrant_after, 0));
+    assert!(has_active_leg_for_asset(&winner_after, 0));
+    assert!(!has_active_leg_for_asset(&loser_after, 0));
+
+    // Market accrual remains public while the winning side is ResetPending. Its surviving stored
+    // leg belongs to the frozen prior epoch, so a later segment must not invent stale K/F work
+    // that the old leg can never consume.
+    env.svm.warp_to_slot(4);
+    env.push_auth_mark_with_cu(4, RECOVERY_PRICE);
+    env.crank(
+        winner,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 4,
+            observations: crank_observations(0),
+        },
+    );
+    let post_reset_accrual = env.market_state().1;
+    assert_eq!(post_reset_accrual.assets[0].effective_price, RECOVERY_PRICE);
+    assert_eq!(
+        post_reset_accrual.assets[0].stale_account_count_long, 0,
+        "post-reset accrual must not strand a prior-generation leg"
+    );
+
+    // The surviving prior-generation leg has no live OI. Its owner can detach it without
+    // forfeiting already-settled PnL, after which anyone can finalize the side reset.
+    env.forfeit_recovery_leg_with_cu(&winner_owner, winner, 0, 1);
+    assert!(!has_active_leg_for_asset(&env.portfolio_state(winner), 0));
+    assert_eq!(env.portfolio_state(winner).pnl.get(), 1_000);
+    env.finalize_reset_side_with_cu(0, 0);
+    let recovered_group = env.market_state().1;
+    assert_eq!(recovered_group.assets[0].stored_pos_count_long, 0);
+    assert_eq!(recovered_group.assets[0].mode_long, SideModeV16::Normal);
+
+    // The gate is temporary: after recovery the production CPI route can open a fresh cohort.
+    env.trade_cpi_with_cu_on_asset(
+        &winner_owner,
+        winner,
+        &entrant_owner,
+        entrant,
+        matcher_program,
+        matcher_context,
+        matcher_delegate,
+        0,
+        POS_SCALE as i128,
+        0,
+    );
+    assert!(has_active_leg_for_asset(&env.portfolio_state(winner), 0));
+    assert!(has_active_leg_for_asset(&env.portfolio_state(entrant), 0));
+
+    // Close the fresh cohort without fees so terminal payouts measure only the exploit accounting.
+    env.trade_asset_with_cu(
+        0,
+        &winner_owner,
+        winner,
+        &entrant_owner,
+        entrant,
+        -(POS_SCALE as i128),
+        RECOVERY_PRICE,
+        0,
+    );
+    assert!(!has_active_leg_for_asset(&env.portfolio_state(winner), 0));
+    assert!(!has_active_leg_for_asset(&env.portfolio_state(entrant), 0));
+    assert_eq!(
+        env.portfolio_state(winner).capital.get(),
+        WINNER_DEPOSIT as u128
+    );
+    assert_eq!(env.portfolio_state(winner).pnl.get(), 1_000);
+    assert_eq!(
+        env.portfolio_state(entrant).capital.get(),
+        LP_DEPOSIT as u128
+    );
+
+    env.resolve();
+    let mut winner_payout = 0u64;
+    let mut loser_payout = 0u64;
+    let mut entrant_payout = 0u64;
+    for _ in 0..24 {
+        let winner_destination = env.close_resolved(&winner_owner, winner);
+        let loser_destination = env.close_resolved(&loser_owner, loser);
+        let entrant_destination = env.close_resolved(&entrant_owner, entrant);
+        winner_payout += env.token_amount(winner_destination);
+        loser_payout += env.token_amount(loser_destination);
+        entrant_payout += env.token_amount(entrant_destination);
+    }
+    assert_eq!(
+        winner_payout + loser_payout,
+        ATTACKER_DEPOSIT,
+        "the attacker cannot extract the backing provider's funds"
+    );
+    assert_eq!(
+        entrant_payout, LP_DEPOSIT,
+        "the fresh LP recovers its full principal"
+    );
+}
