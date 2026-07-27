@@ -177,6 +177,7 @@ fn kani_v16_collected_base_fee_cannot_fund_mark_movement() {
 }
 
 #[kani::proof]
+#[kani::unwind(34)]
 fn kani_v16_init_market_decode_preserves_wire_fields() {
     // Full-width symbolic inputs (audit: avoid the u16->u64/u128 widening collapse so
     // narrow-read / high-byte decode bugs are observable).
@@ -281,6 +282,7 @@ fn kani_v16_init_market_decode_preserves_wire_fields() {
 }
 
 #[kani::proof]
+#[kani::unwind(34)]
 fn kani_v16_amount_instructions_decode_preserves_wire_fields() {
     let tag: u8 = kani::any();
     kani::assume(
@@ -312,6 +314,7 @@ fn kani_v16_amount_instructions_decode_preserves_wire_fields() {
 }
 
 #[kani::proof]
+#[kani::unwind(34)]
 fn kani_v16_domain_topup_and_asset_insurance_decode_preserves_wire_fields() {
     let domain: u16 = kani::any();
     let asset_index: u16 = kani::any();
@@ -349,6 +352,7 @@ fn kani_v16_domain_topup_and_asset_insurance_decode_preserves_wire_fields() {
 }
 
 #[kani::proof]
+#[kani::unwind(34)]
 fn kani_v16_recovery_close_progress_decode_preserves_wire_fields() {
     let asset_index: u16 = kani::any();
     let side: u8 = kani::any();
@@ -433,6 +437,7 @@ fn kani_v16_recovery_close_progress_decode_preserves_wire_fields() {
 }
 
 #[kani::proof]
+#[kani::unwind(34)]
 fn kani_v16_top_up_backing_bucket_decode_preserves_wire_fields() {
     let domain: u16 = kani::any();
     let amount: u128 = kani::any();
@@ -459,6 +464,7 @@ fn kani_v16_top_up_backing_bucket_decode_preserves_wire_fields() {
 }
 
 #[kani::proof]
+#[kani::unwind(34)]
 fn kani_v16_withdraw_backing_bucket_decode_preserves_wire_fields() {
     let domain: u16 = kani::any();
     let amount: u128 = kani::any();
@@ -478,6 +484,7 @@ fn kani_v16_withdraw_backing_bucket_decode_preserves_wire_fields() {
 }
 
 #[kani::proof]
+#[kani::unwind(34)]
 fn kani_v16_asset_lifecycle_decode_preserves_wire_fields() {
     let action: u8 = kani::any();
     let asset_index: u16 = kani::any();
@@ -525,6 +532,7 @@ fn kani_v16_asset_lifecycle_decode_preserves_wire_fields() {
 }
 
 #[kani::proof]
+#[kani::unwind(34)]
 fn kani_v16_tradenocpi_decode_preserves_wire_fields() {
     let asset_index: u16 = kani::any();
     let size_q: i128 = kani::any();
@@ -555,6 +563,7 @@ fn kani_v16_tradenocpi_decode_preserves_wire_fields() {
 }
 
 #[kani::proof]
+#[kani::unwind(34)]
 fn kani_v16_tradecpi_decode_preserves_wire_fields() {
     let asset_index: u16 = kani::any();
     let size_q: i128 = kani::any();
@@ -666,6 +675,7 @@ fn kani_v16_matcher_return_accepts_only_bound_echoed_fills() {
 }
 
 #[kani::proof]
+#[kani::unwind(34)]
 fn kani_v16_permissionless_crank_decode_preserves_wire_fields() {
     let now_slot: u64 = kani::any();
     let asset_index_0: u16 = kani::any();
@@ -735,6 +745,7 @@ fn kani_v16_legacy_permissionless_crank_size_payload_is_rejected() {
 }
 
 #[kani::proof]
+#[kani::unwind(34)]
 fn kani_v16_update_authority_decode_preserves_wire_fields() {
     let mut new_pubkey = [0u8; 32];
     let mut i = 0;
@@ -758,6 +769,7 @@ fn kani_v16_update_authority_decode_preserves_wire_fields() {
 }
 
 #[kani::proof]
+#[kani::unwind(34)]
 fn kani_v16_update_asset_authority_decode_preserves_wire_fields() {
     let asset_index: u16 = kani::any();
     let kind: u8 = kani::any();
@@ -789,6 +801,7 @@ fn kani_v16_update_asset_authority_decode_preserves_wire_fields() {
 }
 
 #[kani::proof]
+#[kani::unwind(34)]
 fn kani_v16_restart_asset_oracle_decode_preserves_wire_fields() {
     let asset_index: u16 = kani::any();
     let now_slot: u64 = kani::any();
@@ -816,6 +829,7 @@ fn kani_v16_restart_asset_oracle_decode_preserves_wire_fields() {
 }
 
 #[kani::proof]
+#[kani::unwind(34)]
 fn kani_v16_batch_trade_nocpi_decode_does_not_collide_with_restart_asset_oracle() {
     let asset_index: u16 = kani::any();
     let size_q: i128 = kani::any();
@@ -846,6 +860,7 @@ fn kani_v16_batch_trade_nocpi_decode_does_not_collide_with_restart_asset_oracle(
 }
 
 #[kani::proof]
+#[kani::unwind(34)]
 fn kani_v16_update_liquidation_fee_policy_decode_preserves_wire_fields() {
     let cranker_share_bps: u16 = kani::any();
 
@@ -862,6 +877,7 @@ fn kani_v16_update_liquidation_fee_policy_decode_preserves_wire_fields() {
 }
 
 #[kani::proof]
+#[kani::unwind(34)]
 fn kani_v16_update_maintenance_fee_policy_decode_preserves_wire_fields() {
     let cranker_share_bps: u16 = kani::any();
 
@@ -878,6 +894,7 @@ fn kani_v16_update_maintenance_fee_policy_decode_preserves_wire_fields() {
 }
 
 #[kani::proof]
+#[kani::unwind(34)]
 fn kani_v16_update_backing_fee_policy_decode_preserves_wire_fields() {
     let domain: u16 = kani::any();
     let fee_bps: u16 = kani::any();
@@ -904,6 +921,7 @@ fn kani_v16_update_backing_fee_policy_decode_preserves_wire_fields() {
 }
 
 #[kani::proof]
+#[kani::unwind(34)]
 fn kani_v16_update_trade_fee_policy_decode_preserves_wire_fields() {
     let trade_fee_base_bps: u64 = kani::any();
 
@@ -920,6 +938,7 @@ fn kani_v16_update_trade_fee_policy_decode_preserves_wire_fields() {
 }
 
 #[kani::proof]
+#[kani::unwind(34)]
 fn kani_v16_update_fee_redirect_policy_decode_preserves_wire_fields() {
     let redirect_bps: u16 = kani::any();
 
@@ -934,6 +953,7 @@ fn kani_v16_update_fee_redirect_policy_decode_preserves_wire_fields() {
 }
 
 #[kani::proof]
+#[kani::unwind(34)]
 fn kani_v16_update_market_init_fee_policy_decode_preserves_wire_fields() {
     let min_init_fee: u128 = kani::any();
 
@@ -950,6 +970,7 @@ fn kani_v16_update_market_init_fee_policy_decode_preserves_wire_fields() {
 }
 
 #[kani::proof]
+#[kani::unwind(34)]
 fn kani_v16_base_unit_payloads_decode_preserves_wire_fields() {
     let primary_mint: [u8; 32] = kani::any();
     let secondary_mint: [u8; 32] = kani::any();
@@ -980,6 +1001,7 @@ fn kani_v16_base_unit_payloads_decode_preserves_wire_fields() {
 }
 
 #[kani::proof]
+#[kani::unwind(34)]
 fn kani_v16_permissionless_resolve_decode_preserves_wire_fields() {
     let stale_slots: u64 = kani::any();
     let force_close_delay_slots: u64 = kani::any();
@@ -1012,6 +1034,7 @@ fn kani_v16_permissionless_resolve_decode_preserves_wire_fields() {
 }
 
 #[kani::proof]
+#[kani::unwind(34)]
 fn kani_v16_configure_hybrid_oracle_decode_preserves_wire_fields() {
     let asset_index: u16 = kani::any();
     let oracle_leg_count: u8 = kani::any();
@@ -1082,13 +1105,24 @@ fn kani_v16_configure_hybrid_oracle_decode_preserves_wire_fields() {
             assert_eq!(got_invert, invert);
             assert_eq!(got_unit_scale, unit_scale);
             assert_eq!(got_conf, conf_filter_bps);
-            assert_eq!(got_feeds, feeds);
+            let mut i = 0;
+            let mut feeds_match = true;
+            while i < 3 {
+                let mut j = 0;
+                while j < 32 {
+                    feeds_match &= got_feeds[i][j] == feeds[i][j];
+                    j += 1;
+                }
+                i += 1;
+            }
+            assert!(feeds_match);
         }
         _ => unreachable!(),
     }
 }
 
 #[kani::proof]
+#[kani::unwind(34)]
 fn kani_v16_ewma_mark_decode_preserves_wire_fields() {
     let asset_index: u16 = kani::any();
 
