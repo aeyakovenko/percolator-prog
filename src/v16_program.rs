@@ -7630,6 +7630,9 @@ pub mod processor {
             {
                 return Err(PercolatorError::EngineLockActive.into());
             }
+            if amount != 0 && expiry_slot <= authenticated_market_slot_or_fallback_view(&group) {
+                return Err(PercolatorError::InvalidInstruction.into());
+            }
             require_domain_accepts_live_topup_view(&group, domain_usize)?;
             let profile = read_oracle_profile_from_view(&group, &cfg, asset_index)?;
             let authorities = domain_authorities_from_profile(&cfg, &profile, asset_index);
@@ -7647,6 +7650,9 @@ pub mod processor {
             let (cfg, mut group) = state::market_view_mut(&mut market_data)?;
             if group.header.mode != 0 {
                 return Err(PercolatorError::EngineLockActive.into());
+            }
+            if expiry_slot <= authenticated_market_slot_or_fallback_view(&group) {
+                return Err(PercolatorError::InvalidInstruction.into());
             }
             reject_permissionless_resolve_matured_live_view(&cfg, &group)?;
             require_domain_accepts_live_topup_view(&group, domain_usize)?;
