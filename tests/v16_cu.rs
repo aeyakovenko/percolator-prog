@@ -10890,6 +10890,233 @@ fn v16_bpf_stale_full_14_leg_tradenocpi_rejects_before_cu_cliff() {
     // v16_bpf_current_full_14_leg_tradenocpi_is_under_tx_limit tests.
 }
 
+const MAX_COMPOSED_SOURCE_ASSETS: u16 = 16;
+const MAX_COMPOSED_SOURCE_SIZE_Q: i128 = POS_SCALE as i128 * 1_000;
+
+fn setup_public_max_composed_source_pair(
+    retained_active_assets: u16,
+) -> (V16CuEnv, Pubkey, Pubkey, u64) {
+    const ACTIVE_CAP: u16 = percolator_prog::constants::WRAPPER_MAX_PORTFOLIO_ASSETS;
+    const PRICE_LOW: u64 = 100;
+    const PRICE_HIGH: u64 = 101;
+    assert!(retained_active_assets > 0 && retained_active_assets <= ACTIVE_CAP);
+
+    let mut env = V16CuEnv::new_with_init_params_and_market_capacity(
+        V16CuMarketParams {
+            max_portfolio_assets: ACTIVE_CAP,
+            maintenance_margin_bps: 10_000,
+            initial_margin_bps: 10_000,
+            max_price_move_bps_per_slot: 10_000,
+            ..V16CuMarketParams::default()
+        },
+        70,
+    );
+    for asset_index in ACTIVE_CAP..MAX_COMPOSED_SOURCE_ASSETS {
+        let activation_slot = u64::from(asset_index - ACTIVE_CAP + 1);
+        env.activate_asset(asset_index, activation_slot, PRICE_LOW);
+    }
+    let mut slot = u64::from(MAX_COMPOSED_SOURCE_ASSETS - ACTIVE_CAP);
+    env.svm.warp_to_slot(slot);
+    for asset_index in 0..MAX_COMPOSED_SOURCE_ASSETS {
+        env.configure_auth_mark_for_asset_as_admin(asset_index, slot, PRICE_LOW);
+    }
+
+    let matcher_program = Pubkey::new_unique();
+    let matcher_bytes = std::fs::read(auth_matcher_program_path()).expect("read auth matcher BPF");
+    env.svm.add_program(matcher_program, &matcher_bytes);
+
+    let taker_owner = Keypair::new();
+    let lp_owner = Keypair::new();
+    let taker = env.create_portfolio(&taker_owner);
+    let lp = env.create_portfolio(&lp_owner);
+    env.deposit(&taker_owner, taker, 2_000_000);
+    env.deposit(&lp_owner, lp, 2_000_000);
+    let (matcher_ctx, matcher_delegate, _) =
+        env.init_auth_matcher_context(matcher_program, &lp_owner, lp);
+
+    let cpi_fill = |env: &mut V16CuEnv, asset_index: u16, size_q: i128| {
+        env.svm.expire_blockhash();
+        env.try_trade_cpi_with_cu_on_asset(
+            &taker_owner,
+            taker,
+            &lp_owner,
+            lp,
+            matcher_program,
+            matcher_ctx,
+            matcher_delegate,
+            asset_index,
+            size_q,
+            0,
+        )
+        .unwrap_or_else(|err| panic!("unsigned-LP asset {asset_index} fill failed: {err}"));
+    };
+    let drive_both_current = |env: &mut V16CuEnv, now_slot: u64| {
+        for _ in 0..(percolator::V16_MAX_PORTFOLIO_ASSETS_N + 2) {
+            for portfolio in [taker, lp] {
+                if !portfolio_cert_is_current(env, portfolio) {
+                    env.crank(
+                        portfolio,
+                        ProgInstruction::PermissionlessCrank {
+                            now_slot,
+                            observations: vec![],
+                        },
+                    );
+                }
+            }
+            if portfolio_cert_is_current(env, taker) && portfolio_cert_is_current(env, lp) {
+                return;
+            }
+        }
+        panic!("public cranks did not reach a two-account certificate fixed point");
+    };
+    let settle_both = |env: &mut V16CuEnv, asset_index: u16, now_slot: u64| {
+        for portfolio in [taker, lp] {
+            env.svm.expire_blockhash();
+            env.crank(
+                portfolio,
+                ProgInstruction::PermissionlessCrank {
+                    now_slot,
+                    observations: crank_observations(asset_index),
+                },
+            );
+        }
+        drive_both_current(env, now_slot);
+    };
+
+    for asset_index in 0..MAX_COMPOSED_SOURCE_ASSETS {
+        cpi_fill(&mut env, asset_index, -MAX_COMPOSED_SOURCE_SIZE_Q);
+        slot += 1;
+        env.svm.warp_to_slot(slot);
+        env.push_auth_mark_for_asset_as_admin(asset_index, slot, PRICE_HIGH);
+        settle_both(&mut env, asset_index, slot);
+        cpi_fill(&mut env, asset_index, MAX_COMPOSED_SOURCE_SIZE_Q);
+
+        cpi_fill(&mut env, asset_index, MAX_COMPOSED_SOURCE_SIZE_Q);
+        slot += 1;
+        env.svm.warp_to_slot(slot);
+        env.push_auth_mark_for_asset_as_admin(asset_index, slot, PRICE_LOW);
+        settle_both(&mut env, asset_index, slot);
+        if asset_index < MAX_COMPOSED_SOURCE_ASSETS - retained_active_assets {
+            cpi_fill(&mut env, asset_index, -MAX_COMPOSED_SOURCE_SIZE_Q);
+        } else {
+            for active_asset in (MAX_COMPOSED_SOURCE_ASSETS - retained_active_assets)..=asset_index
+            {
+                env.crank(
+                    taker,
+                    ProgInstruction::PermissionlessCrank {
+                        now_slot: slot,
+                        observations: crank_observations(active_asset),
+                    },
+                );
+            }
+            drive_both_current(&mut env, slot);
+        }
+    }
+
+    let lp_state = env.portfolio_state(lp);
+    assert_eq!(
+        lp_state
+            .source_domains
+            .iter()
+            .filter(|source| source.is_occupied())
+            .count(),
+        percolator::PORTFOLIO_SOURCE_DOMAIN_CAP
+    );
+    assert_eq!(
+        percolator::active_bitmap_count_ones(active_bitmap(&lp_state)),
+        u32::from(retained_active_assets)
+    );
+    (env, taker, lp, slot)
+}
+
+#[test]
+fn v16_bpf_public_14_leg_32_source_domain_liquidation_is_bounded() {
+    let (mut env, taker, lp, mut slot) = setup_public_max_composed_source_pair(
+        percolator_prog::constants::WRAPPER_MAX_PORTFOLIO_ASSETS,
+    );
+    let first_active =
+        MAX_COMPOSED_SOURCE_ASSETS - percolator_prog::constants::WRAPPER_MAX_PORTFOLIO_ASSETS;
+    let custody_before = env.token_amount(env.vault);
+
+    slot += 1;
+    env.svm.warp_to_slot(slot);
+    for asset_index in first_active..MAX_COMPOSED_SOURCE_ASSETS {
+        env.push_auth_mark_for_asset_as_admin(asset_index, slot, 200);
+        env.crank(
+            taker,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: slot,
+                observations: crank_observations(asset_index),
+            },
+        );
+    }
+
+    let mut calls = 0usize;
+    let mut max_refresh_cu = 0u64;
+    while !portfolio_cert_is_current(&env, lp) {
+        env.svm.expire_blockhash();
+        let cu = env
+            .send(
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: slot,
+                    observations: vec![],
+                },
+                vec![
+                    AccountMeta::new(env.payer.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(lp, false),
+                ],
+                &[],
+            )
+            .expect("each 14-leg/32-source refresh continuation must fit");
+        calls += 1;
+        max_refresh_cu = max_refresh_cu.max(cu);
+        assert!(
+            calls <= percolator::V16_MAX_PORTFOLIO_ASSETS_N + 2,
+            "max-composition refresh exceeded its active-leg rank"
+        );
+    }
+    let refreshed = env.portfolio_state(lp);
+    assert!(
+        health_cert(&refreshed).certified_liq_deficit > 0,
+        "authenticated adverse marks must make the short portfolio liquidatable"
+    );
+    assert!(
+        max_refresh_cu <= 1_375_000,
+        "14-leg/32-source refresh exceeded its CU envelope: {max_refresh_cu}"
+    );
+
+    env.svm.expire_blockhash();
+    let liquidation_cu = env
+        .send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: slot,
+                observations: vec![],
+            },
+            vec![
+                AccountMeta::new(env.payer.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(lp, false),
+            ],
+            &[],
+        )
+        .expect("14-leg/32-source liquidation must fit");
+    let after = env.portfolio_state(lp);
+    assert!(
+        percolator::active_bitmap_count_ones(active_bitmap(&after))
+            < percolator::active_bitmap_count_ones(active_bitmap(&refreshed))
+    );
+    assert!(
+        liquidation_cu <= 1_375_000,
+        "14-leg/32-source liquidation exceeded its CU envelope: {liquidation_cu}"
+    );
+    assert_eq!(env.token_amount(env.vault), custody_before);
+    println!(
+        "14-leg/32-source refresh calls={calls}, max CU={max_refresh_cu}, \
+         liquidation CU={liquidation_cu}"
+    );
+}
+
 // Public max-shape composition: retain both payout-source domains for every active leg, make one
 // leg adverse through the authenticated mark route, and require finite permissionless progress.
 #[test]
