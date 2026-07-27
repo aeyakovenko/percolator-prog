@@ -66533,10 +66533,15 @@ const MAX_SOURCE_LIVE_SIZE_Q: i128 = POS_SCALE as i128 * 1_000;
 // asset without the LP signing the fills. All but the final profitable LP leg are closed.
 fn setup_max_source_live_pair(
     maintenance_fee_per_slot: u128,
-) -> (V16CuEnv, Keypair, Pubkey, Pubkey, u64) {
+    retained_active_assets: u16,
+) -> (V16CuEnv, Keypair, Keypair, Pubkey, Pubkey, u64) {
     const ACTIVE_CAP: u16 = percolator_prog::constants::WRAPPER_MAX_PORTFOLIO_ASSETS;
     const PRICE_LOW: u64 = 100;
     const PRICE_HIGH: u64 = 101;
+    assert!(
+        retained_active_assets > 0 && retained_active_assets <= ACTIVE_CAP,
+        "fixture must retain between one and the public active-leg cap"
+    );
     let mut env = V16CuEnv::new_with_init_params_and_market_capacity(
         V16CuMarketParams {
             max_portfolio_assets: ACTIVE_CAP,
@@ -66566,8 +66571,8 @@ fn setup_max_source_live_pair(
     let lp_owner = Keypair::new();
     let taker = env.create_portfolio(&taker_owner);
     let lp = env.create_portfolio(&lp_owner);
-    env.deposit(&taker_owner, taker, 1_000_000);
-    env.deposit(&lp_owner, lp, 1_000_000);
+    env.deposit(&taker_owner, taker, 2_000_000);
+    env.deposit(&lp_owner, lp, 2_000_000);
     let (matcher_ctx, matcher_delegate, _) =
         env.init_auth_matcher_context(matcher_program, &lp_owner, lp);
 
@@ -66587,6 +66592,36 @@ fn setup_max_source_live_pair(
         )
         .unwrap_or_else(|err| panic!("unsigned-LP asset {asset_index} fill failed: {err}"));
     };
+    let drive_both_current = |env: &mut V16CuEnv, now_slot: u64| {
+        let cert_current = |env: &V16CuEnv, portfolio: Pubkey| {
+            let group = env.market_state().1;
+            let state = env.portfolio_state(portfolio);
+            let cert = health_cert(&state);
+            cert.valid
+                && cert.cert_oracle_epoch == group.oracle_epoch
+                && cert.cert_funding_epoch == group.funding_epoch
+                && cert.cert_risk_epoch == group.risk_epoch
+                && cert.cert_asset_set_epoch == group.asset_set_epoch
+                && cert.active_bitmap_at_cert == active_bitmap(&state)
+        };
+        for _ in 0..8 {
+            for portfolio in [taker, lp] {
+                if !cert_current(env, portfolio) {
+                    env.crank(
+                        portfolio,
+                        ProgInstruction::PermissionlessCrank {
+                            now_slot,
+                            observations: vec![],
+                        },
+                    );
+                }
+            }
+            if cert_current(env, taker) && cert_current(env, lp) {
+                return;
+            }
+        }
+        panic!("public cranks did not reach a two-account certificate fixed point");
+    };
     let settle_both = |env: &mut V16CuEnv, asset_index: u16, now_slot: u64| {
         for account in [taker, lp] {
             env.svm.expire_blockhash();
@@ -66598,6 +66633,7 @@ fn setup_max_source_live_pair(
                 },
             );
         }
+        drive_both_current(env, now_slot);
     };
 
     for asset_index in 0..MAX_SOURCE_LIVE_ASSETS {
@@ -66613,8 +66649,19 @@ fn setup_max_source_live_pair(
         env.svm.warp_to_slot(slot);
         env.push_auth_mark_for_asset_as_admin(asset_index, slot, PRICE_LOW);
         settle_both(&mut env, asset_index, slot);
-        if asset_index + 1 != MAX_SOURCE_LIVE_ASSETS {
+        if asset_index < MAX_SOURCE_LIVE_ASSETS - retained_active_assets {
             cpi_fill(&mut env, asset_index, -MAX_SOURCE_LIVE_SIZE_Q);
+        } else {
+            for active_asset in (MAX_SOURCE_LIVE_ASSETS - retained_active_assets)..=asset_index {
+                env.crank(
+                    taker,
+                    ProgInstruction::PermissionlessCrank {
+                        now_slot: slot,
+                        observations: crank_observations(active_asset),
+                    },
+                );
+            }
+            drive_both_current(&mut env, slot);
         }
     }
 
@@ -66632,6 +66679,10 @@ fn setup_max_source_live_pair(
         -MAX_SOURCE_LIVE_SIZE_Q
     );
     assert_eq!(
+        percolator::active_bitmap_count_ones(active_bitmap(&lp_state)),
+        u32::from(retained_active_assets)
+    );
+    assert_eq!(
         active_leg_for_asset(
             &env.portfolio_state(taker),
             usize::from(MAX_SOURCE_LIVE_ASSETS - 1)
@@ -66639,14 +66690,14 @@ fn setup_max_source_live_pair(
         .basis_pos_q,
         MAX_SOURCE_LIVE_SIZE_Q
     );
-    (env, lp_owner, taker, lp, slot)
+    (env, taker_owner, lp_owner, taker, lp, slot)
 }
 
 // Max-source liveness through a wrapper-specific owner route: the owner can still unilaterally
 // reduce the final leg at the exact 32-domain public shape.
 #[test]
 fn v16_attack_max_source_owner_rebalance_reduce_stays_bounded() {
-    let (mut env, lp_owner, _taker, lp, _slot) = setup_max_source_live_pair(0);
+    let (mut env, _taker_owner, lp_owner, _taker, lp, _slot) = setup_max_source_live_pair(0, 1);
     let before = env.portfolio_state(lp);
     let group_before = env.market_state().1;
     let oi_before = group_before.assets[usize::from(MAX_SOURCE_LIVE_ASSETS - 1)].oi_eff_short_q;
@@ -66689,7 +66740,7 @@ fn v16_attack_max_source_owner_rebalance_reduce_stays_bounded() {
 // unrelated cranker enough CU to clear the final abandoned pair at the exact 32-domain shape.
 #[test]
 fn v16_attack_max_source_force_close_abandoned_asset_stays_bounded() {
-    let (mut env, _lp_owner, taker, lp, mut slot) = setup_max_source_live_pair(0);
+    let (mut env, _taker_owner, _lp_owner, taker, lp, mut slot) = setup_max_source_live_pair(0, 1);
     let custody_before = env.token_amount(env.vault);
 
     env.configure_permissionless_resolve_with_cu(1_000, 5);
@@ -66742,7 +66793,7 @@ fn v16_attack_max_source_force_close_abandoned_asset_stays_bounded() {
 // withdrawal and close. Exercise a real nonzero charge, not only a zero-fee refresh.
 #[test]
 fn v16_attack_max_source_maintenance_sync_stays_bounded() {
-    let (mut env, _lp_owner, _taker, lp, slot) = setup_max_source_live_pair(1);
+    let (mut env, _taker_owner, _lp_owner, _taker, lp, slot) = setup_max_source_live_pair(1, 1);
     let before = env.portfolio_state(lp);
     let group_before = env.market_state().1;
     let custody_before = env.token_amount(env.vault);
@@ -66774,6 +66825,80 @@ fn v16_attack_max_source_maintenance_sync_stays_bounded() {
             .count(),
         percolator::PORTFOLIO_SOURCE_DOMAIN_CAP
     );
+    assert_eq!(env.token_amount(env.vault), custody_before);
+    assert_eq!(group_after.vault as u64, custody_before);
+}
+
+// Compose the full public active-leg cap with the larger 32-entry historical source cap. A normal
+// bilateral reduction remains the bounded escape even though account-wide optional maintenance
+// sync and unilateral convenience routes are more expensive at this shape.
+#[test]
+fn v16_attack_public_14_leg_32_source_domain_exit_stays_bounded() {
+    let (mut env, taker_owner, lp_owner, taker, lp, _slot) =
+        setup_max_source_live_pair(0, percolator_prog::constants::WRAPPER_MAX_PORTFOLIO_ASSETS);
+    let custody_before = env.token_amount(env.vault);
+    let taker_before = env.portfolio_state(taker);
+    let lp_before = env.portfolio_state(lp);
+    assert_eq!(
+        percolator::active_bitmap_count_ones(active_bitmap(&taker_before)),
+        u32::from(percolator_prog::constants::WRAPPER_MAX_PORTFOLIO_ASSETS)
+    );
+    assert_eq!(
+        percolator::active_bitmap_count_ones(active_bitmap(&lp_before)),
+        u32::from(percolator_prog::constants::WRAPPER_MAX_PORTFOLIO_ASSETS)
+    );
+    assert_eq!(
+        lp_before
+            .source_domains
+            .iter()
+            .filter(|source| source.is_occupied())
+            .count(),
+        percolator::PORTFOLIO_SOURCE_DOMAIN_CAP
+    );
+
+    let first_retained_asset =
+        MAX_SOURCE_LIVE_ASSETS - percolator_prog::constants::WRAPPER_MAX_PORTFOLIO_ASSETS;
+    let mut max_cu = 0;
+    for asset_index in (first_retained_asset..MAX_SOURCE_LIVE_ASSETS).rev() {
+        env.svm.expire_blockhash();
+        let cu = env
+            .try_trade_asset_with_cu(
+                asset_index,
+                &taker_owner,
+                taker,
+                &lp_owner,
+                lp,
+                -MAX_SOURCE_LIVE_SIZE_Q,
+                100,
+                0,
+            )
+            .unwrap_or_else(|err| {
+                panic!("full-shape asset {asset_index} risk reduction failed: {err}")
+            });
+        max_cu = max_cu.max(cu);
+        assert_cu_within("14-leg/32-source-domain TradeNoCpi", cu, 1_100_000);
+    }
+    println!("v16 public 14-leg/32-source-domain exit max TradeNoCpi CU: {max_cu}");
+
+    let taker_after = env.portfolio_state(taker);
+    let lp_after = env.portfolio_state(lp);
+    assert!(percolator::active_bitmap_is_empty(active_bitmap(
+        &taker_after
+    )));
+    assert!(percolator::active_bitmap_is_empty(active_bitmap(&lp_after)));
+    assert_eq!(
+        lp_after
+            .source_domains
+            .iter()
+            .filter(|source| source.is_occupied())
+            .count(),
+        percolator::PORTFOLIO_SOURCE_DOMAIN_CAP
+    );
+    let group_after = env.market_state().1;
+    for asset_index in 0..usize::from(MAX_SOURCE_LIVE_ASSETS) {
+        assert_eq!(group_after.assets[asset_index].oi_eff_long_q, 0);
+        assert_eq!(group_after.assets[asset_index].oi_eff_short_q, 0);
+    }
     assert_eq!(env.token_amount(env.vault), custody_before);
     assert_eq!(group_after.vault as u64, custody_before);
 }
