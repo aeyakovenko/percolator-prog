@@ -67208,6 +67208,44 @@ fn v16_attack_public_max_source_flat_principal_withdraw_stays_bounded() {
     assert_eq!(group_after.vault as u64, env.token_amount(env.vault));
 }
 
+// Adding collateral is the owner's unconditional cure primitive. It must remain executable at the
+// full active-leg and historical-source cross-product without requiring account refresh first.
+#[test]
+fn v16_attack_public_14_leg_32_source_collateral_deposit_stays_bounded() {
+    const DEPOSIT: u128 = 1_000;
+    let (mut env, _taker_owner, lp_owner, _taker, lp, _slot) =
+        setup_max_source_live_pair(0, percolator_prog::constants::WRAPPER_MAX_PORTFOLIO_ASSETS);
+    let before = env.portfolio_state(lp);
+    let group_before = env.market_state().1;
+    let custody_before = env.token_amount(env.vault);
+
+    env.svm.expire_blockhash();
+    let (source, cu) = env.deposit_with_cu(&lp_owner, lp, DEPOSIT);
+    eprintln!("14-leg/32-source Deposit CU={cu}");
+    assert_cu_within("14-leg/32-source Deposit", cu, 600_000);
+
+    let after = env.portfolio_state(lp);
+    let group_after = env.market_state().1;
+    assert_eq!(after.capital.get() - before.capital.get(), DEPOSIT);
+    assert_eq!(after.pnl.get(), before.pnl.get());
+    assert_eq!(group_after.c_tot - group_before.c_tot, DEPOSIT);
+    assert_eq!(group_after.vault - group_before.vault, DEPOSIT);
+    assert_eq!(env.token_amount(source), 0);
+    assert_eq!(env.token_amount(env.vault) - custody_before, DEPOSIT as u64);
+    assert_eq!(
+        percolator::active_bitmap_count_ones(active_bitmap(&after)),
+        u32::from(percolator_prog::constants::WRAPPER_MAX_PORTFOLIO_ASSETS)
+    );
+    assert_eq!(
+        after
+            .source_domains
+            .iter()
+            .filter(|source| source.is_occupied())
+            .count(),
+        percolator::PORTFOLIO_SOURCE_DOMAIN_CAP
+    );
+}
+
 #[test]
 fn v16_bpf_force_close_pair_order_preserves_unequal_partial_payouts() {
     fn run(cross_pair: bool) -> ([(u128, i128); 4], [u64; 4], u128, u128, u128, u128, u64) {
