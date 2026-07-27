@@ -59717,3 +59717,137 @@ fn v16_attack_underfunded_exit_cannot_move_ewma_with_uncollectible_fee() {
         assert_underfunded_ewma_exit_uses_collected_fee(path);
     }
 }
+
+// A non-oracle asset admin may shut an asset down, but that power must not erase an already
+// authenticated oracle target. Otherwise a compromised admin can wait for an adverse honest mark,
+// freeze the previous effective price, and force-close its counterparty without paying the mark PnL.
+#[test]
+fn v16_attack_shutdown_cannot_discard_pending_authenticated_mark() {
+    const OPEN_MARK: u64 = 100;
+    const AUTHENTICATED_MARK: u64 = 200;
+    const EXPECTED_FROZEN_MARK: u64 = 105;
+    const DEPOSIT: u128 = 10_000;
+    const SIZE_Q: i128 = 10 * POS_SCALE as i128;
+    const OPEN_SLOT: u64 = 1;
+    const MARK_SLOT: u64 = 2;
+    const FORCE_CLOSE_DELAY: u64 = 2;
+    const FORCE_CLOSE_SLOT: u64 = MARK_SLOT + FORCE_CLOSE_DELAY;
+
+    fn run(accrue_before_shutdown: bool) -> (u64, u64, u64) {
+        let mut env = V16CuEnv::new_with_market_params_and_price_move(1, 10_000, 10_000, 500);
+        env.configure_permissionless_resolve_with_cu(1_000, FORCE_CLOSE_DELAY);
+
+        // Separate the trusted oracle from the non-oracle market/asset admin. The oracle signs the
+        // adverse target; only the later shutdown uses the compromised administrative capability.
+        let oracle = Keypair::new();
+        env.ensure_signer_account(oracle.pubkey());
+        send_tx(
+            &mut env.svm,
+            env.program_id,
+            &env.payer,
+            ProgInstruction::UpdateAssetAuthority {
+                asset_index: 0,
+                kind: percolator_prog::processor::ASSET_AUTH_ORACLE,
+                new_pubkey: oracle.pubkey().to_bytes(),
+            },
+            vec![
+                AccountMeta::new(env.admin.pubkey(), true),
+                AccountMeta::new(oracle.pubkey(), true),
+                AccountMeta::new(env.market, false),
+            ],
+            &[&env.admin, &oracle],
+        )
+        .expect("install a distinct honest oracle authority");
+
+        env.svm.warp_to_slot(OPEN_SLOT);
+        env.configure_auth_mark_for_asset_with_authority(0, &oracle, OPEN_SLOT, OPEN_MARK);
+
+        let victim_owner = Keypair::new();
+        let attacker_owner = Keypair::new();
+        let victim = env.create_portfolio(&victim_owner);
+        let attacker = env.create_portfolio(&attacker_owner);
+        env.deposit(&victim_owner, victim, DEPOSIT);
+        env.deposit(&attacker_owner, attacker, DEPOSIT);
+        env.trade_asset_with_cu(
+            0,
+            &victim_owner,
+            victim,
+            &attacker_owner,
+            attacker,
+            SIZE_Q,
+            OPEN_MARK,
+            0,
+        );
+
+        env.svm.warp_to_slot(MARK_SLOT);
+        env.push_auth_mark_for_asset_with_authority(0, &oracle, MARK_SLOT, AUTHENTICATED_MARK);
+        let (_, pending) = env.market_state();
+        assert_eq!(pending.assets[0].effective_price, OPEN_MARK);
+        assert_eq!(
+            state::read_asset_oracle_profile(&env.svm.get_account(&env.market).unwrap().data, 0,)
+                .unwrap()
+                .oracle_target_price_e6,
+            AUTHENTICATED_MARK,
+            "the honest adverse mark is committed before the admin acts"
+        );
+
+        if accrue_before_shutdown {
+            env.crank(
+                victim,
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: MARK_SLOT,
+                    observations: crank_observations(0),
+                },
+            );
+        }
+        env.update_asset_lifecycle_as_admin_with_cu(
+            percolator_prog::processor::ASSET_ACTION_SHUTDOWN,
+            0,
+            MARK_SLOT,
+            0,
+        );
+        let frozen_price = env.market_state().1.assets[0].effective_price;
+
+        env.svm.warp_to_slot(FORCE_CLOSE_SLOT);
+        let cranker = Keypair::new();
+        env.force_close_abandoned_asset_with_cu(
+            &cranker,
+            victim,
+            attacker,
+            0,
+            FORCE_CLOSE_SLOT,
+            SIZE_Q as u128,
+        );
+        assert!(!has_active_leg_for_asset(&env.portfolio_state(victim), 0));
+        assert!(!has_active_leg_for_asset(&env.portfolio_state(attacker), 0));
+
+        env.resolve();
+        env.svm.warp_to_slot(FORCE_CLOSE_SLOT + FORCE_CLOSE_DELAY);
+        let attacker_dest = env.close_resolved(&attacker_owner, attacker);
+        let victim_dest = env.close_resolved(&victim_owner, victim);
+        (
+            env.token_amount(victim_dest),
+            env.token_amount(attacker_dest),
+            frozen_price,
+        )
+    }
+
+    let (control_victim_payout, control_attacker_payout, control_mark) = run(true);
+    assert_eq!(control_mark, EXPECTED_FROZEN_MARK);
+    assert_eq!(
+        (control_victim_payout, control_attacker_payout),
+        (10_050, 9_950),
+        "control realizes the honest mark into final SPL payouts"
+    );
+
+    let (attacked_victim_payout, attacked_attacker_payout, attacked_mark) = run(false);
+    assert_eq!(
+        (attacked_victim_payout, attacked_attacker_payout),
+        (control_victim_payout, control_attacker_payout),
+        "non-oracle shutdown authority cannot erase an independent user's mark PnL"
+    );
+    assert_eq!(
+        attacked_mark, EXPECTED_FROZEN_MARK,
+        "shutdown must first commit the circuit-breaker-bounded authenticated target"
+    );
+}

@@ -9291,6 +9291,50 @@ pub mod processor {
                 }
                 match group.markets[asset_index].engine.asset.lifecycle {
                     ASSET_LIFECYCLE_ACTIVE | ASSET_LIFECYCLE_DRAIN_ONLY => {
+                        let asset = group.markets[asset_index].engine.asset;
+                        let current_price = asset.effective_price.get();
+                        let committed_target = if oracle_v16::profile_is_price_managed(&profile) {
+                            profile.mark_ewma_e6
+                        } else {
+                            current_price
+                        };
+                        if committed_target == 0 {
+                            return Err(PercolatorError::OracleInvalid.into());
+                        }
+                        let exposed =
+                            asset.oi_eff_long_q.get() != 0 || asset.oi_eff_short_q.get() != 0;
+                        let segment_dt =
+                            asset_segment_dt_view(&group, asset_index, authenticated_slot)?;
+                        let shutdown_price = oracle_v16::effective_price_from_target(
+                            current_price,
+                            committed_target,
+                            group.header.config.max_price_move_bps_per_slot.get(),
+                            segment_dt,
+                            exposed,
+                        );
+                        if shutdown_price != current_price {
+                            let shutdown_dt = authenticated_slot
+                                .checked_sub(asset.slot_last.get())
+                                .ok_or(PercolatorError::EngineStale)?;
+                            if shutdown_dt > group.header.config.max_accrual_dt_slots.get() {
+                                return Err(PercolatorError::EngineStale.into());
+                            }
+                            let funding_rate_e9 = permissionless_funding_rate_e9_view(
+                                &profile,
+                                &group,
+                                asset_index,
+                                shutdown_price,
+                            )?;
+                            group
+                                .accrue_asset_to_not_atomic(
+                                    asset_index,
+                                    authenticated_slot,
+                                    shutdown_price,
+                                    funding_rate_e9,
+                                    true,
+                                )
+                                .map_err(map_v16_error)?;
+                        }
                         let frozen_mark = group.markets[asset_index]
                             .engine
                             .asset
