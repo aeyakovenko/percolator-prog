@@ -66965,6 +66965,70 @@ fn v16_attack_max_source_force_close_abandoned_asset_stays_bounded() {
     assert_eq!(group_after.vault as u64, custody_before);
 }
 
+// Compose the full active-leg and historical-source caps with asset Recovery. Even if the
+// convenience pair force-close is too expensive at this shape, each affected owner must retain a
+// bounded unilateral path that clears the shutdown leg without depending on its counterparty.
+#[test]
+fn v16_attack_public_14_leg_32_source_recovery_forfeit_stays_bounded() {
+    let (mut env, taker_owner, lp_owner, taker, lp, mut slot) =
+        setup_max_source_live_pair(0, percolator_prog::constants::WRAPPER_MAX_PORTFOLIO_ASSETS);
+    let custody_before = env.token_amount(env.vault);
+    let active_before =
+        percolator::active_bitmap_count_ones(active_bitmap(&env.portfolio_state(taker)));
+
+    env.configure_permissionless_resolve_with_cu(1_000, 5);
+    slot += 1;
+    env.svm.warp_to_slot(slot);
+    env.update_asset_lifecycle_as_admin_with_cu(
+        percolator_prog::processor::ASSET_ACTION_SHUTDOWN,
+        MAX_SOURCE_LIVE_ASSETS - 1,
+        slot,
+        0,
+    );
+    slot += 5;
+    env.svm.warp_to_slot(slot);
+
+    for (owner, portfolio) in [(&taker_owner, taker), (&lp_owner, lp)] {
+        env.svm.expire_blockhash();
+        let cu = env
+            .send(
+                ProgInstruction::ForfeitRecoveryLeg {
+                    asset_index: MAX_SOURCE_LIVE_ASSETS - 1,
+                    b_delta_budget: u128::MAX,
+                },
+                vec![
+                    AccountMeta::new(owner.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(portfolio, false),
+                ],
+                &[owner],
+            )
+            .expect("full-leg/full-source owner forfeit must remain bounded");
+        eprintln!("14-leg/32-source owner forfeit CU: {cu}");
+        assert_cu_within("14-leg/32-source ForfeitRecoveryLeg", cu, 1_375_000);
+        let state = env.portfolio_state(portfolio);
+        assert_eq!(
+            percolator::active_bitmap_count_ones(active_bitmap(&state)),
+            active_before - 1
+        );
+        assert!(!has_active_leg_for_asset(
+            &state,
+            usize::from(MAX_SOURCE_LIVE_ASSETS - 1)
+        ));
+    }
+    let group_after = env.market_state().1;
+    assert_eq!(
+        group_after.assets[usize::from(MAX_SOURCE_LIVE_ASSETS - 1)].oi_eff_long_q,
+        0
+    );
+    assert_eq!(
+        group_after.assets[usize::from(MAX_SOURCE_LIVE_ASSETS - 1)].oi_eff_short_q,
+        0
+    );
+    assert_eq!(env.token_amount(env.vault), custody_before);
+    assert_eq!(group_after.vault as u64, custody_before);
+}
+
 // Max-source liveness through the permissionless fee-currentness route used by eventual owner
 // withdrawal and close. Exercise a real nonzero charge, not only a zero-fee refresh.
 #[test]
