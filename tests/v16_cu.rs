@@ -17252,29 +17252,47 @@ fn v16_attack_resolved_cross_margin_deep_insolvency_winds_down_publicly() {
     );
     env.resolve();
 
-    env.svm.expire_blockhash();
-    let loser_crank_cu = env
-        .send(
-            ProgInstruction::PermissionlessCrank {
-                now_slot: u64::MAX,
-                observations: vec![CrankObservationHint {
-                    asset_index: u16::MAX,
-                    oracle_accounts: u8::MAX,
-                }],
-            },
-            vec![
-                AccountMeta::new_readonly(victim_owner.pubkey(), false),
-                AccountMeta::new(env.market, false),
-                AccountMeta::new(victim, false),
-            ],
-            &[],
-        )
-        .expect("resolved deep cross-margin bad debt has public progress");
-    assert_cu_within(
-        "Resolved PermissionlessCrank unattributed bad debt",
-        loser_crank_cu,
-        CRANK_CU_LIMIT,
-    );
+    for _ in 0..8 {
+        let before_step = env.portfolio_state(victim);
+        if before_step.pnl.get() == 0
+            && percolator::active_bitmap_is_empty(before_step.active_bitmap.map(|w| w.get()))
+        {
+            break;
+        }
+        env.svm.expire_blockhash();
+        let loser_crank_cu = env
+            .send(
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: u64::MAX,
+                    observations: vec![CrankObservationHint {
+                        asset_index: u16::MAX,
+                        oracle_accounts: u8::MAX,
+                    }],
+                },
+                vec![
+                    AccountMeta::new_readonly(victim_owner.pubkey(), false),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(victim, false),
+                ],
+                &[],
+            )
+            .expect("resolved deep cross-margin bad debt has public progress");
+        assert_cu_within(
+            "Resolved PermissionlessCrank unattributed bad debt",
+            loser_crank_cu,
+            CRANK_CU_LIMIT,
+        );
+        let after_step = env.portfolio_state(victim);
+        assert!(
+            after_step.pnl.get() > before_step.pnl.get()
+                || percolator::active_bitmap_count_ones(
+                    after_step.active_bitmap.map(|word| word.get())
+                ) < percolator::active_bitmap_count_ones(
+                    before_step.active_bitmap.map(|word| word.get())
+                ),
+            "each successful resolved loser crank clears debt or one leg"
+        );
+    }
     let victim_after = env.portfolio_state(victim);
     assert_eq!(
         victim_after.capital.get(),
@@ -17288,8 +17306,27 @@ fn v16_attack_resolved_cross_margin_deep_insolvency_winds_down_publicly() {
     );
     env.close_portfolio_with_cu(&victim_owner, victim);
 
-    let winner_dest = env.close_resolved(&cp_owner, cp);
-    let winner_payout = env.token_amount(winner_dest);
+    let mut winner_payout = 0u64;
+    for _ in 0..8 {
+        let winner = env.portfolio_state(cp);
+        let receipt = resolved_receipt(&winner);
+        if winner.capital.get() == 0
+            && winner.pnl.get() == 0
+            && percolator::active_bitmap_is_empty(active_bitmap(&winner))
+            && (!receipt.present || receipt.finalized)
+        {
+            break;
+        }
+        let (winner_dest, close_cu) = env.close_resolved_with_cu(&cp_owner, cp);
+        assert_cu_within(
+            "Resolved CloseResolved cross-margin winner",
+            close_cu,
+            CUSTODY_CU_LIMIT,
+        );
+        winner_payout = winner_payout
+            .checked_add(env.token_amount(winner_dest))
+            .expect("winner payout fits u64");
+    }
     assert!(
         (2_000_249..=2_000_250).contains(&winner_payout),
         "winner recovers capital plus the conservative vault-bounded residual, not paper pnl: {winner_payout}"
@@ -59871,4 +59908,238 @@ fn v16_attack_max_source_conversion_is_bounded_for_unsigned_lp() {
         env.token_amount(destination),
         (1_000_000 + total_profit as u128) as u64
     );
+}
+
+const RESOLVED_MAX_SOURCE_ASSETS: u16 = 16;
+const RESOLVED_MAX_SOURCE_SIZE_Q: i128 = POS_SCALE as i128 * 1_000;
+
+// Build the maximum public active-leg/source-domain shape using only authenticated marks,
+// permissionless cranks, and real CPI fills. The LP signs only its matcher authorization; an
+// unrelated taker drives every fill after that.
+fn setup_max_source_resolved_pair() -> (V16CuEnv, Keypair, Keypair, Pubkey, Pubkey, u64) {
+    const ACTIVE_CAP: u16 = percolator_prog::constants::WRAPPER_MAX_PORTFOLIO_ASSETS;
+    const PRICE_LOW: u64 = 100;
+    const PRICE_HIGH: u64 = 101;
+
+    let mut env = V16CuEnv::new_with_init_params_and_market_capacity(
+        V16CuMarketParams {
+            max_portfolio_assets: ACTIVE_CAP,
+            maintenance_margin_bps: 10_000,
+            initial_margin_bps: 10_000,
+            max_price_move_bps_per_slot: 10_000,
+            ..V16CuMarketParams::default()
+        },
+        70,
+    );
+    for asset_index in ACTIVE_CAP..RESOLVED_MAX_SOURCE_ASSETS {
+        let activation_slot = u64::from(asset_index - ACTIVE_CAP + 1);
+        env.activate_asset(asset_index, activation_slot, PRICE_LOW);
+    }
+    let mut slot = u64::from(RESOLVED_MAX_SOURCE_ASSETS - ACTIVE_CAP);
+    env.svm.warp_to_slot(slot);
+    for asset_index in 0..RESOLVED_MAX_SOURCE_ASSETS {
+        env.configure_auth_mark_for_asset_as_admin(asset_index, slot, PRICE_LOW);
+    }
+
+    let matcher_program = Pubkey::new_unique();
+    let matcher_bytes = std::fs::read(auth_matcher_program_path()).expect("read auth matcher BPF");
+    env.svm.add_program(matcher_program, &matcher_bytes);
+
+    let taker_owner = Keypair::new();
+    let lp_owner = Keypair::new();
+    let taker = env.create_portfolio(&taker_owner);
+    let lp = env.create_portfolio(&lp_owner);
+    env.deposit(&taker_owner, taker, 2_000_000);
+    env.deposit(&lp_owner, lp, 2_000_000);
+    let (matcher_ctx, matcher_delegate, _) =
+        env.init_auth_matcher_context(matcher_program, &lp_owner, lp);
+
+    let cpi_fill = |env: &mut V16CuEnv, asset_index: u16, size_q: i128| {
+        env.svm.expire_blockhash();
+        env.try_trade_cpi_with_cu_on_asset(
+            &taker_owner,
+            taker,
+            &lp_owner,
+            lp,
+            matcher_program,
+            matcher_ctx,
+            matcher_delegate,
+            asset_index,
+            size_q,
+            0,
+        )
+        .unwrap_or_else(|err| panic!("unsigned-LP asset {asset_index} fill failed: {err}"));
+    };
+    let drive_both_current = |env: &mut V16CuEnv, now_slot: u64| {
+        let cert_current = |env: &V16CuEnv, portfolio: Pubkey| {
+            let group = env.market_state().1;
+            let state = env.portfolio_state(portfolio);
+            let cert = health_cert(&state);
+            cert.valid
+                && cert.cert_oracle_epoch == group.oracle_epoch
+                && cert.cert_funding_epoch == group.funding_epoch
+                && cert.cert_risk_epoch == group.risk_epoch
+                && cert.cert_asset_set_epoch == group.asset_set_epoch
+                && cert.active_bitmap_at_cert == active_bitmap(&state)
+        };
+        for _ in 0..8 {
+            for portfolio in [taker, lp] {
+                if !cert_current(env, portfolio) {
+                    env.crank(
+                        portfolio,
+                        ProgInstruction::PermissionlessCrank {
+                            now_slot,
+                            observations: vec![],
+                        },
+                    );
+                }
+            }
+            if cert_current(env, taker) && cert_current(env, lp) {
+                return;
+            }
+        }
+        panic!("public cranks did not reach a two-account certificate fixed point");
+    };
+    let settle_both = |env: &mut V16CuEnv, asset_index: u16, now_slot: u64| {
+        for portfolio in [taker, lp] {
+            env.svm.expire_blockhash();
+            env.crank(
+                portfolio,
+                ProgInstruction::PermissionlessCrank {
+                    now_slot,
+                    observations: crank_observations(asset_index),
+                },
+            );
+        }
+        drive_both_current(env, now_slot);
+    };
+
+    for asset_index in 0..RESOLVED_MAX_SOURCE_ASSETS {
+        cpi_fill(&mut env, asset_index, -RESOLVED_MAX_SOURCE_SIZE_Q);
+        slot += 1;
+        env.svm.warp_to_slot(slot);
+        env.push_auth_mark_for_asset_as_admin(asset_index, slot, PRICE_HIGH);
+        settle_both(&mut env, asset_index, slot);
+        cpi_fill(&mut env, asset_index, RESOLVED_MAX_SOURCE_SIZE_Q);
+
+        cpi_fill(&mut env, asset_index, RESOLVED_MAX_SOURCE_SIZE_Q);
+        slot += 1;
+        env.svm.warp_to_slot(slot);
+        env.push_auth_mark_for_asset_as_admin(asset_index, slot, PRICE_LOW);
+        settle_both(&mut env, asset_index, slot);
+        if asset_index < RESOLVED_MAX_SOURCE_ASSETS - ACTIVE_CAP {
+            cpi_fill(&mut env, asset_index, -RESOLVED_MAX_SOURCE_SIZE_Q);
+        } else {
+            for active_asset in (RESOLVED_MAX_SOURCE_ASSETS - ACTIVE_CAP)..=asset_index {
+                env.crank(
+                    taker,
+                    ProgInstruction::PermissionlessCrank {
+                        now_slot: slot,
+                        observations: crank_observations(active_asset),
+                    },
+                );
+            }
+            drive_both_current(&mut env, slot);
+        }
+    }
+
+    for portfolio in [taker, lp] {
+        assert_eq!(
+            percolator::active_bitmap_count_ones(active_bitmap(&env.portfolio_state(portfolio))),
+            u32::from(ACTIVE_CAP)
+        );
+    }
+    assert_eq!(
+        env.portfolio_state(lp)
+            .source_domains
+            .iter()
+            .filter(|source| source.is_occupied())
+            .count(),
+        percolator::PORTFOLIO_SOURCE_DOMAIN_CAP
+    );
+    (env, taker_owner, lp_owner, taker, lp, slot)
+}
+
+// Public-interface TDD for a terminal CU lock. Before the engine fix, the first CloseResolved on
+// this reachable 14-leg account consumes all 1.4M CU, rolls back, and leaves no alternative
+// terminal route. A bounded implementation must remove one leg/source domain per call until both
+// users receive all custody.
+#[test]
+fn v16_attack_max_shape_resolved_close_makes_bounded_progress() {
+    let (mut env, taker_owner, lp_owner, taker, lp, slot) = setup_max_source_resolved_pair();
+    let initial_custody = env.token_amount(env.vault);
+
+    env.configure_permissionless_resolve_with_cu(1, 1);
+    let resolve_slot = slot + 2;
+    let resolve_cu = env.resolve_stale_permissionless_with_cu(resolve_slot);
+    assert_cu_within(
+        "max-shape ResolveStalePermissionless",
+        resolve_cu,
+        1_375_000,
+    );
+    env.svm.warp_to_slot(resolve_slot + 1);
+
+    let terminal = |env: &V16CuEnv, portfolio: Pubkey| {
+        let state = env.portfolio_state(portfolio);
+        let receipt = resolved_receipt(&state);
+        state.capital.get() == 0
+            && state.pnl.get() == 0
+            && percolator::active_bitmap_is_empty(active_bitmap(&state))
+            && state
+                .source_domains
+                .iter()
+                .all(|source| !source.is_occupied())
+            && (!receipt.present || receipt.finalized)
+    };
+    let rank = |env: &V16CuEnv, portfolio: Pubkey| {
+        let state = env.portfolio_state(portfolio);
+        (
+            percolator::active_bitmap_count_ones(active_bitmap(&state)),
+            state
+                .source_domains
+                .iter()
+                .filter(|source| source.is_occupied())
+                .count(),
+        )
+    };
+
+    let mut total_paid = 0u64;
+    let mut max_close_cu = 0u64;
+    let mut calls = 0usize;
+    for _ in 0..128 {
+        for (owner, portfolio) in [(&taker_owner, taker), (&lp_owner, lp)] {
+            if terminal(&env, portfolio) {
+                continue;
+            }
+            let before = rank(&env, portfolio);
+            env.svm.expire_blockhash();
+            let (dest, cu) = env.close_resolved_with_cu(owner, portfolio);
+            calls += 1;
+            max_close_cu = max_close_cu.max(cu);
+            assert_cu_within("max-shape CloseResolved", cu, 1_375_000);
+            total_paid = total_paid
+                .checked_add(env.token_amount(dest))
+                .expect("terminal payouts fit u64");
+            let after = rank(&env, portfolio);
+            assert!(
+                terminal(&env, portfolio) || after.0 < before.0 || after.1 < before.1,
+                "successful close must finish or strictly reduce (active legs, source domains): \
+                 before={before:?} after={after:?}"
+            );
+        }
+        if terminal(&env, taker) && terminal(&env, lp) {
+            break;
+        }
+    }
+
+    println!(
+        "v16 max-shape resolved exit: calls={calls}, resolve CU={resolve_cu}, \
+         max CloseResolved CU={max_close_cu}"
+    );
+    assert!(terminal(&env, taker));
+    assert!(terminal(&env, lp));
+    assert_eq!(total_paid, initial_custody);
+    let (_, group) = env.market_state();
+    assert_eq!(group.vault, 0);
+    assert_eq!(group.c_tot, 0);
 }
