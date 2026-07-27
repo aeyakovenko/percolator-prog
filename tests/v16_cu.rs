@@ -60150,3 +60150,95 @@ fn v16_attack_stale_loser_cannot_shift_preexisting_bankruptcy_to_fresh_lp() {
         "the fresh LP recovers its full principal"
     );
 }
+
+#[test]
+fn v16_cpi_cured_local_negative_exit_is_not_external_bankruptcy() {
+    const OPEN_PRICE: u64 = 100;
+    const LOSS_PRICE: u64 = 500;
+    const SIZE_Q: u128 = 10 * POS_SCALE;
+
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(1, 10_000, 10_000, 10_000);
+    env.configure_auth_mark_with_cu(0, OPEN_PRICE);
+
+    let winner_owner = Keypair::new();
+    let loser_owner = Keypair::new();
+    let lp_owner = Keypair::new();
+    let winner = env.create_portfolio(&winner_owner);
+    let loser = env.create_portfolio(&loser_owner);
+    let lp = env.create_portfolio(&lp_owner);
+    env.deposit(&winner_owner, winner, 5_000);
+    env.deposit(&loser_owner, loser, 1_000);
+    env.deposit(&lp_owner, lp, 1_000_000);
+
+    let matcher_program = Pubkey::new_unique();
+    let matcher_bytes = std::fs::read(auth_matcher_program_path()).expect("read auth matcher BPF");
+    env.svm.add_program(matcher_program, &matcher_bytes);
+    let (matcher_context, matcher_delegate, _) =
+        env.init_auth_matcher_context(matcher_program, &lp_owner, lp);
+
+    env.trade_asset_with_cu(
+        0,
+        &winner_owner,
+        winner,
+        &loser_owner,
+        loser,
+        SIZE_Q as i128,
+        OPEN_PRICE,
+        0,
+    );
+    for slot in 1..=3 {
+        env.svm.warp_to_slot(slot);
+        env.push_auth_mark_with_cu(slot, LOSS_PRICE);
+        env.crank(
+            winner,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: slot,
+                observations: crank_observations(0),
+            },
+        );
+    }
+    env.crank(
+        loser,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 3,
+            observations: crank_observations(0),
+        },
+    );
+    assert_eq!(env.portfolio_state(loser).capital.get(), 0);
+    assert_eq!(env.portfolio_state(loser).pnl.get(), -3_000);
+    assert_eq!(env.market_state().1.negative_pnl_account_count, 1);
+
+    // Deposit cures enough principal for the engine's inline settlement, but intentionally leaves
+    // the aggregate negative-PnL counter pending until the trade executes.
+    env.deposit(&loser_owner, loser, 4_000);
+    assert_eq!(env.portfolio_state(loser).capital.get(), 4_000);
+    assert_eq!(env.portfolio_state(loser).pnl.get(), -3_000);
+    assert_eq!(env.market_state().1.negative_pnl_account_count, 1);
+
+    env.try_trade_cpi_with_cu_on_asset(
+        &loser_owner,
+        loser,
+        &lp_owner,
+        lp,
+        matcher_program,
+        matcher_context,
+        matcher_delegate,
+        0,
+        SIZE_Q as i128,
+        0,
+    )
+    .expect("a locally curable negative account must retain its CPI exit");
+
+    let loser_after = env.portfolio_state(loser);
+    let lp_after = env.portfolio_state(lp);
+    let group_after = env.market_state().1;
+    assert_eq!(loser_after.capital.get(), 1_000);
+    assert_eq!(loser_after.pnl.get(), 0);
+    assert!(!has_active_leg_for_asset(&loser_after, 0));
+    assert!(has_active_leg_for_asset(&lp_after, 0));
+    assert_eq!(group_after.negative_pnl_account_count, 0);
+    assert_eq!(
+        group_after.assets[0].oi_eff_long_q,
+        group_after.assets[0].oi_eff_short_q
+    );
+}
