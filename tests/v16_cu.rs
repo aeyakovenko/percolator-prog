@@ -66531,7 +66531,9 @@ const MAX_SOURCE_LIVE_SIZE_Q: i128 = POS_SCALE as i128 * 1_000;
 
 // An LP authorizes a matcher once, then an unrelated taker creates both source domains on every
 // asset without the LP signing the fills. All but the final profitable LP leg are closed.
-fn setup_max_source_live_pair() -> (V16CuEnv, Keypair, Pubkey, Pubkey, u64) {
+fn setup_max_source_live_pair(
+    maintenance_fee_per_slot: u128,
+) -> (V16CuEnv, Keypair, Pubkey, Pubkey, u64) {
     const ACTIVE_CAP: u16 = percolator_prog::constants::WRAPPER_MAX_PORTFOLIO_ASSETS;
     const PRICE_LOW: u64 = 100;
     const PRICE_HIGH: u64 = 101;
@@ -66541,6 +66543,7 @@ fn setup_max_source_live_pair() -> (V16CuEnv, Keypair, Pubkey, Pubkey, u64) {
             maintenance_margin_bps: 10_000,
             initial_margin_bps: 10_000,
             max_price_move_bps_per_slot: 10_000,
+            maintenance_fee_per_slot,
             ..V16CuMarketParams::default()
         },
         70,
@@ -66643,7 +66646,7 @@ fn setup_max_source_live_pair() -> (V16CuEnv, Keypair, Pubkey, Pubkey, u64) {
 // reduce the final leg at the exact 32-domain public shape.
 #[test]
 fn v16_attack_max_source_owner_rebalance_reduce_stays_bounded() {
-    let (mut env, lp_owner, _taker, lp, _slot) = setup_max_source_live_pair();
+    let (mut env, lp_owner, _taker, lp, _slot) = setup_max_source_live_pair(0);
     let before = env.portfolio_state(lp);
     let group_before = env.market_state().1;
     let oi_before = group_before.assets[usize::from(MAX_SOURCE_LIVE_ASSETS - 1)].oi_eff_short_q;
@@ -66686,7 +66689,7 @@ fn v16_attack_max_source_owner_rebalance_reduce_stays_bounded() {
 // unrelated cranker enough CU to clear the final abandoned pair at the exact 32-domain shape.
 #[test]
 fn v16_attack_max_source_force_close_abandoned_asset_stays_bounded() {
-    let (mut env, _lp_owner, taker, lp, mut slot) = setup_max_source_live_pair();
+    let (mut env, _lp_owner, taker, lp, mut slot) = setup_max_source_live_pair(0);
     let custody_before = env.token_amount(env.vault);
 
     env.configure_permissionless_resolve_with_cu(1_000, 5);
@@ -66730,6 +66733,46 @@ fn v16_attack_max_source_force_close_abandoned_asset_stays_bounded() {
     assert_eq!(
         group_after.assets[usize::from(MAX_SOURCE_LIVE_ASSETS - 1)].oi_eff_short_q,
         0
+    );
+    assert_eq!(env.token_amount(env.vault), custody_before);
+    assert_eq!(group_after.vault as u64, custody_before);
+}
+
+// Max-source liveness through the permissionless fee-currentness route used by eventual owner
+// withdrawal and close. Exercise a real nonzero charge, not only a zero-fee refresh.
+#[test]
+fn v16_attack_max_source_maintenance_sync_stays_bounded() {
+    let (mut env, _lp_owner, _taker, lp, slot) = setup_max_source_live_pair(1);
+    let before = env.portfolio_state(lp);
+    let group_before = env.market_state().1;
+    let custody_before = env.token_amount(env.vault);
+
+    env.svm.warp_to_slot(slot + 1);
+    env.svm.expire_blockhash();
+    let cu = env.sync_maintenance_fee_with_cu(lp, None, slot + 1);
+    println!("v16 32-source-domain SyncMaintenanceFee CU: {cu}");
+    assert_cu_within("32-source-domain SyncMaintenanceFee", cu, 1_375_000);
+
+    let after = env.portfolio_state(lp);
+    let group_after = env.market_state().1;
+    let charged = before
+        .capital
+        .get()
+        .checked_sub(after.capital.get())
+        .expect("maintenance sync cannot increase payer capital");
+    assert!(
+        charged > 0,
+        "nonzero elapsed fee must exercise the charge path"
+    );
+    assert_eq!(group_after.insurance - group_before.insurance, charged);
+    assert_eq!(group_before.c_tot - group_after.c_tot, charged);
+    assert_eq!(
+        after
+            .source_domains
+            .iter()
+            .filter(|source| source.is_occupied())
+            .count(),
+        percolator::PORTFOLIO_SOURCE_DOMAIN_CAP
     );
     assert_eq!(env.token_amount(env.vault), custody_before);
     assert_eq!(group_after.vault as u64, custody_before);
