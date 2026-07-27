@@ -2800,7 +2800,6 @@ impl V16CuEnv {
         percolator::active_bitmap_is_empty(active_bitmap(&account))
             && account.capital.get() == 0
             && account.pnl.get() == 0
-            && account.resolved_source_realization_bitmap.get() == 0
             && account
                 .source_domains
                 .iter()
@@ -11125,11 +11124,10 @@ fn v16_bpf_public_14_leg_28_source_domain_liquidation_is_bounded() {
     let terminal_rank = |env: &V16CuEnv, portfolio: Pubkey| {
         let account = env.portfolio_state(portfolio);
         let active = percolator::active_bitmap_count_ones(active_bitmap(&account)) as usize;
-        let processed = account.resolved_source_realization_bitmap.get();
         let unprocessed_sources = account
             .source_domains
             .iter()
-            .filter(|source| source.is_occupied() && processed & (1u32 << source.domain.get()) == 0)
+            .filter(|source| source.is_occupied() && source.resolved_realization_processed == 0)
             .count();
         active + unprocessed_sources + usize::from(!terminal_done(env, portfolio))
     };
@@ -11326,6 +11324,99 @@ fn v16_bpf_public_14_leg_28_source_domain_liquidation_is_bounded() {
         exposure_after < exposure_before,
         "engine-selected liquidation must strictly reduce aggregate exposure"
     );
+    assert_eq!(
+        env.market_state().1.vault as u64,
+        env.token_amount(env.vault)
+    );
+}
+
+// A portfolio's source table is sparse and bounded by entry count, not by global domain ID.
+// Resolved progress must therefore work for source claims on assets above index 15 as well.
+#[test]
+fn v16_attack_resolved_high_domain_source_claim_has_bounded_exit() {
+    const ASSET: u16 = 16;
+    const PRICE: u64 = 100;
+    const PROFIT_PRICE: u64 = 101;
+
+    let mut env = V16CuEnv::new_with_init_params_and_market_capacity(
+        V16CuMarketParams {
+            max_portfolio_assets: percolator_prog::constants::WRAPPER_MAX_PORTFOLIO_ASSETS,
+            maintenance_margin_bps: 10_000,
+            initial_margin_bps: 10_000,
+            max_price_move_bps_per_slot: 10_000,
+            ..V16CuMarketParams::default()
+        },
+        ASSET as usize + 1,
+    );
+    let start = env.market_state().1.config.max_market_slots as u16;
+    for asset_index in start..=ASSET {
+        env.activate_asset(asset_index, u64::from(asset_index) + 1, PRICE);
+    }
+    env.svm.warp_to_slot(20);
+    env.configure_auth_mark_for_asset_as_admin(ASSET, 20, PRICE);
+
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long_account = env.create_portfolio(&long_owner);
+    let short_account = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long_account, 1_000_000);
+    env.deposit(&short_owner, short_account, 1_000_000);
+    env.trade_asset_with_cu(
+        ASSET,
+        &long_owner,
+        long_account,
+        &short_owner,
+        short_account,
+        (100 * POS_SCALE) as i128,
+        PRICE,
+        0,
+    );
+
+    let long_domain = ASSET * 2;
+    let short_domain = long_domain + 1;
+    env.update_backing_fee_policy_with_cu(long_domain, 1, 0);
+    env.top_up_backing_bucket(long_domain, 1_000_000, 100);
+    env.top_up_backing_bucket(short_domain, 1_000_000, 100);
+
+    env.svm.warp_to_slot(21);
+    env.push_auth_mark_for_asset_as_admin(ASSET, 21, PROFIT_PRICE);
+    env.crank(
+        long_account,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 21,
+            observations: crank_observations(ASSET),
+        },
+    );
+    env.crank(
+        short_account,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 21,
+            observations: vec![],
+        },
+    );
+
+    let winner_before = env.portfolio_state(long_account);
+    assert!(winner_before.pnl.get() > 0);
+    assert!(
+        winner_before
+            .source_domains
+            .iter()
+            .any(|source| source.is_occupied() && source.domain.get() >= u32::BITS),
+        "public setup must create a source-backed claim with a global domain ID above 31"
+    );
+
+    env.resolve();
+    let (_, loser_cu) = env.close_resolved_with_cu(&short_owner, short_account);
+    let (winner_dest, winner_cu) = env.close_resolved_with_cu(&long_owner, long_account);
+    assert!(
+        loser_cu.max(winner_cu) <= 1_375_000,
+        "high-domain resolved close exceeded its CU envelope"
+    );
+    assert!(
+        env.token_amount(winner_dest) > 1_000_000,
+        "the high-domain winner must receive capital plus its backed profit"
+    );
+    assert!(env.resolved_close_complete(long_account));
     assert_eq!(
         env.market_state().1.vault as u64,
         env.token_amount(env.vault)
