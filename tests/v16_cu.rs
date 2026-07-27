@@ -59717,3 +59717,170 @@ fn v16_attack_underfunded_exit_cannot_move_ewma_with_uncollectible_fee() {
         assert_underfunded_ewma_exit_uses_collected_fee(path);
     }
 }
+
+// An authenticated adverse mark is committed wrapper-side before the public crank applies it to
+// engine state. A permissionless fee sync must not collect and reward maintenance debt against the
+// stale engine mark, because that reward can consume backing owed to an independent winning trader.
+#[test]
+fn v16_attack_fee_sync_cannot_front_run_authenticated_mark_loss() {
+    fn run(attempt_fee_first: bool) -> (bool, u64, u64, u64) {
+        const OPEN_PRICE: u64 = 100;
+        const ADVERSE_PRICE: u64 = 50;
+        const DEPOSIT: u128 = 100_000;
+        const SIZE_Q: u128 = 1_000 * POS_SCALE;
+        const FEE_PER_SLOT: u128 = 12_500;
+
+        let mut env = V16CuEnv::new_with_market_params_price_move_and_maintenance_fee(
+            1,
+            10_000,
+            10_000,
+            10_000,
+            FEE_PER_SLOT,
+        );
+        env.svm.warp_to_slot(1);
+        env.configure_auth_mark_with_cu(1, OPEN_PRICE);
+        env.update_maintenance_fee_policy_with_cu(10_000);
+
+        let victim_owner = Keypair::new();
+        let winner_owner = Keypair::new();
+        let cranker_owner = Keypair::new();
+        let victim = env.create_portfolio(&victim_owner);
+        let winner = env.create_portfolio(&winner_owner);
+        let cranker = env.create_portfolio(&cranker_owner);
+        env.deposit(&victim_owner, victim, DEPOSIT);
+        env.deposit(&winner_owner, winner, DEPOSIT);
+        env.trade_asset_with_cu(
+            0,
+            &victim_owner,
+            victim,
+            &winner_owner,
+            winner,
+            SIZE_Q as i128,
+            OPEN_PRICE,
+            0,
+        );
+
+        // Advance the official mark/account-loss clock without collecting the victim's fee debt.
+        env.svm.warp_to_slot(9);
+        env.push_auth_mark_with_cu(9, OPEN_PRICE);
+        for _ in 0..12 {
+            env.crank(
+                cranker,
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: 9,
+                    observations: crank_observations(0),
+                },
+            );
+            if env.market_state().1.assets[0].slot_last == 9 {
+                break;
+            }
+        }
+        let victim_before = env.portfolio_state(victim);
+        let (_, group_before) = env.market_state();
+        assert_eq!(victim_before.last_fee_slot.get(), 1);
+        assert_eq!(group_before.assets[0].slot_last, 9);
+
+        // The honest mark is authenticated, but the public crank has not applied it yet.
+        env.svm.warp_to_slot(10);
+        env.push_auth_mark_with_cu(10, ADVERSE_PRICE);
+        let (pending_cfg, pending_group) = env.market_state();
+        assert_eq!(pending_cfg.oracle_target_price_e6, ADVERSE_PRICE);
+        assert_eq!(pending_group.assets[0].raw_oracle_target_price, OPEN_PRICE);
+        assert_eq!(pending_group.assets[0].effective_price, OPEN_PRICE);
+
+        let mut fee_first_rejected = false;
+        if attempt_fee_first {
+            let market_before = env.svm.get_account(&env.market).unwrap();
+            let victim_before = env.svm.get_account(&victim).unwrap();
+            let cranker_before = env.svm.get_account(&cranker).unwrap();
+            match env.try_sync_maintenance_fee_with_cu(victim, Some(cranker), 10) {
+                Ok(_) => {}
+                Err(err) => {
+                    assert!(
+                        err.contains("Custom(21)") || err.contains("custom program error: 0x15"),
+                        "pending-mark fee sync must reject as EngineLockActive: {err}"
+                    );
+                    fee_first_rejected = true;
+                    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+                    assert_eq!(env.svm.get_account(&victim).unwrap(), victim_before);
+                    assert_eq!(env.svm.get_account(&cranker).unwrap(), cranker_before);
+                }
+            }
+        }
+
+        env.crank(
+            victim,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 10,
+                observations: crank_observations(0),
+            },
+        );
+        if !attempt_fee_first || fee_first_rejected {
+            env.sync_maintenance_fee_with_cu(victim, Some(cranker), 10);
+        }
+
+        let reward = env.portfolio_state(cranker).capital.get();
+        assert!(reward > 0, "maintenance sync must pay a real reward");
+        let cranker_dest = env.withdraw(&cranker_owner, cranker, reward);
+        assert_eq!(env.token_amount(cranker_dest), reward as u64);
+        env.close_portfolio_with_cu(&cranker_owner, cranker);
+
+        // Settle both trading accounts using public cranks, then compare terminal user payouts.
+        for _ in 0..12 {
+            for portfolio in [victim, winner] {
+                env.svm.expire_blockhash();
+                let _ = env.send(
+                    ProgInstruction::PermissionlessCrank {
+                        now_slot: 10,
+                        observations: crank_observations(0),
+                    },
+                    vec![
+                        AccountMeta::new(env.payer.pubkey(), true),
+                        AccountMeta::new(env.market, false),
+                        AccountMeta::new(portfolio, false),
+                    ],
+                    &[],
+                );
+            }
+        }
+
+        env.resolve();
+        let mut victim_paid = 0u64;
+        let mut winner_paid = 0u64;
+        for _ in 0..24 {
+            let victim_dest = env.close_resolved(&victim_owner, victim);
+            victim_paid = victim_paid
+                .checked_add(env.token_amount(victim_dest))
+                .unwrap();
+            let winner_dest = env.close_resolved(&winner_owner, winner);
+            winner_paid = winner_paid
+                .checked_add(env.token_amount(winner_dest))
+                .unwrap();
+            let victim_state = env.portfolio_state(victim);
+            let winner_state = env.portfolio_state(winner);
+            if victim_state.capital.get() == 0
+                && victim_state.pnl.get() == 0
+                && !resolved_receipt(&victim_state).present
+                && winner_state.capital.get() == 0
+                && winner_state.pnl.get() == 0
+                && !resolved_receipt(&winner_state).present
+            {
+                break;
+            }
+        }
+        (fee_first_rejected, reward as u64, victim_paid, winner_paid)
+    }
+
+    let mark_first = run(false);
+    let fee_first = run(true);
+    println!("mark-first={mark_first:?} fee-first={fee_first:?}");
+    assert!(
+        fee_first.0,
+        "a permissionless fee sync must reject until the authenticated mark is applied"
+    );
+    assert_eq!(
+        (fee_first.1, fee_first.2, fee_first.3),
+        (mark_first.1, mark_first.2, mark_first.3),
+        "fee-sync ordering must not change the cranker reward or terminal user payouts"
+    );
+}
