@@ -10,34 +10,34 @@ use percolator_prog::policy_v16;
 
 #[kani::proof]
 fn kani_v16_unsigned_lp_cohort_gate_is_side_exact_and_preserves_reductions() {
-    let stale_account_count: u8 = kani::any();
-    let account_a_is_stale: bool = kani::any();
-    let account_b_is_stale: bool = kani::any();
-    let local_stale_count = account_a_is_stale as u64 + account_b_is_stale as u64;
-    let external = policy_v16::stale_cohort_has_external_account(
-        stale_account_count as u64,
-        account_a_is_stale,
-        account_b_is_stale,
+    let pending_account_count: u8 = kani::any();
+    let account_a_is_pending: bool = kani::any();
+    let account_b_is_pending: bool = kani::any();
+    let local_pending_count = account_a_is_pending as u64 + account_b_is_pending as u64;
+    let external = policy_v16::pending_counter_has_external_account(
+        pending_account_count as u64,
+        account_a_is_pending,
+        account_b_is_pending,
     );
-    if (stale_account_count as u64) < local_stale_count {
+    if (pending_account_count as u64) < local_pending_count {
         assert!(external.is_none());
     } else {
         assert_eq!(
             external.unwrap(),
-            stale_account_count as u64 > local_stale_count
+            pending_account_count as u64 > local_pending_count
         );
     }
     kani::cover!(
-        stale_account_count as u64 == local_stale_count && local_stale_count != 0,
-        "the two atomic trade accounts consume the complete stale cohort"
+        pending_account_count as u64 == local_pending_count && local_pending_count != 0,
+        "the two atomic trade accounts consume the complete pending cohort"
     );
     kani::cover!(
-        stale_account_count as u64 > local_stale_count,
-        "an external stale account remains after local settlement"
+        pending_account_count as u64 > local_pending_count,
+        "an external pending account remains after local settlement"
     );
     kani::cover!(
-        (stale_account_count as u64) < local_stale_count,
-        "an inconsistent stale counter fails closed"
+        (pending_account_count as u64) < local_pending_count,
+        "an inconsistent pending counter fails closed"
     );
 
     let current_q: i64 = kani::any();

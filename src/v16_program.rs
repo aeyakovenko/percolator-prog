@@ -4017,14 +4017,14 @@ pub mod oracle_v16 {
 pub mod policy_v16 {
     use crate::constants::MAX_DYNAMIC_TRADE_FEE_BPS;
 
-    pub fn stale_cohort_has_external_account(
-        stale_account_count: u64,
-        account_a_is_stale: bool,
-        account_b_is_stale: bool,
+    pub fn pending_counter_has_external_account(
+        pending_account_count: u64,
+        account_a_is_pending: bool,
+        account_b_is_pending: bool,
     ) -> Option<bool> {
-        let local_stale_count =
-            (account_a_is_stale as u64).checked_add(account_b_is_stale as u64)?;
-        Some(stale_account_count.checked_sub(local_stale_count)? != 0)
+        let local_pending_count =
+            (account_a_is_pending as u64).checked_add(account_b_is_pending as u64)?;
+        Some(pending_account_count.checked_sub(local_pending_count)? != 0)
     }
 
     pub fn unsigned_lp_adds_unsettled_cohort_exposure(
@@ -11049,6 +11049,12 @@ pub mod processor {
             &request_kf_epoch_long,
             &request_kf_epoch_short,
         )?;
+        let external_negative_pnl = policy_v16::pending_counter_has_external_account(
+            group.header.negative_pnl_account_count.get(),
+            account_a.header.pnl.get() < 0,
+            account_b.header.pnl.get() < 0,
+        )
+        .ok_or(PercolatorError::EngineCounterUnderflow)?;
         for (request_index, &(asset_index_u16, size_q)) in cpi_requests.iter().enumerate() {
             let asset_index = asset_index_u16 as usize;
             let account_a_state = account_a_states[request_index];
@@ -11078,13 +11084,13 @@ pub mod processor {
                 .checked_neg()
                 .ok_or(PercolatorError::EngineArithmeticOverflow)?;
             let asset = &group.markets[asset_index].engine.asset;
-            let external_stale_long = policy_v16::stale_cohort_has_external_account(
+            let external_stale_long = policy_v16::pending_counter_has_external_account(
                 asset.stale_account_count_long.get(),
                 account_a_state.stale_long,
                 account_b_state.stale_long,
             )
             .ok_or(PercolatorError::EngineCounterUnderflow)?;
-            let external_stale_short = policy_v16::stale_cohort_has_external_account(
+            let external_stale_short = policy_v16::pending_counter_has_external_account(
                 asset.stale_account_count_short.get(),
                 account_a_state.stale_short,
                 account_b_state.stale_short,
@@ -11095,7 +11101,7 @@ pub mod processor {
                 lp_delta,
                 external_stale_long,
                 external_stale_short,
-                group.header.negative_pnl_account_count.get() != 0,
+                external_negative_pnl,
             )
             .ok_or(PercolatorError::EngineArithmeticOverflow)?;
             if unsafe_unsigned_exposure {
