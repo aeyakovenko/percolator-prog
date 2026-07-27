@@ -39231,7 +39231,7 @@ fn assert_no_cpi_tiny_exit_accepts_extreme_reported_price(
     const MARK: u64 = 1_000_000;
     const CAP_BPS: u64 = 50;
     const OPEN_Q: i128 = (1000u128 * POS_SCALE) as i128;
-    const CLOSE_Q: i128 = -(POS_SCALE as i128);
+    const CLOSE_Q: i128 = -1;
 
     let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
         initial_price: MARK,
@@ -39279,19 +39279,19 @@ fn assert_no_cpi_tiny_exit_accepts_extreme_reported_price(
     let (closed_cfg, closed_group) = env.market_state();
     assert_eq!(
         closed_group.assets[0].oi_eff_long_q,
-        long_before - POS_SCALE,
+        long_before - 1,
         "{path:?}: long OI reduced by the close"
     );
     assert_eq!(
         closed_group.assets[0].oi_eff_short_q,
-        short_before - POS_SCALE,
+        short_before - 1,
         "{path:?}: short OI reduced by the close"
     );
-    assert!(
-        closed_group.insurance > insurance_before_exit,
-        "{path:?}: extreme reported_price={reported_price} close charged a bounded higher fee"
-    );
     let close_fee_paid = closed_group.insurance - insurance_before_exit;
+    assert_eq!(
+        close_fee_paid, 0,
+        "{path:?}: setup must exercise a minimum-quantum close whose fee rounds below one atom"
+    );
     let externality_notional = 2u128
         .checked_mul(long_before)
         .and_then(|v| v.checked_mul(MARK as u128))
@@ -39314,7 +39314,7 @@ fn assert_no_cpi_tiny_open_accepts_extreme_reported_price(
     const MARK: u64 = 1_000_000;
     const CAP_BPS: u64 = 50;
     const OPEN_Q: i128 = (1000u128 * POS_SCALE) as i128;
-    const TINY_Q: i128 = POS_SCALE as i128;
+    const TINY_Q: i128 = 1;
 
     let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
         initial_price: MARK,
@@ -39362,19 +39362,19 @@ fn assert_no_cpi_tiny_open_accepts_extreme_reported_price(
     let (final_cfg, final_group) = env.market_state();
     assert_eq!(
         final_group.assets[0].oi_eff_long_q,
-        long_before + POS_SCALE,
+        long_before + 1,
         "{path:?}: long OI increased by the tiny open"
     );
     assert_eq!(
         final_group.assets[0].oi_eff_short_q,
-        short_before + POS_SCALE,
+        short_before + 1,
         "{path:?}: short OI increased by the tiny open"
     );
-    assert!(
-        final_group.insurance > insurance_before_tiny,
-        "{path:?}: extreme reported_price={reported_price} open charged a bounded higher fee"
-    );
     let tiny_fee_paid = final_group.insurance - insurance_before_tiny;
+    assert_eq!(
+        tiny_fee_paid, 0,
+        "{path:?}: setup must exercise a minimum-quantum open whose fee rounds below one atom"
+    );
     let externality_notional = 2u128
         .checked_mul(long_before)
         .and_then(|v| v.checked_mul(MARK as u128))
@@ -39391,8 +39391,8 @@ fn assert_no_cpi_tiny_open_accepts_extreme_reported_price(
 }
 
 // Trade liveness: reported no-CPI prices are adversarial mark-discovery inputs, not a reason to
-// reject valid trades. Extreme valid reports may be clamped and charged higher fees, but tiny trades
-// against large existing OI must still execute instead of failing the fee model.
+// reject valid trades. At the minimum representable position quantum, fees round below one base
+// unit against this price. The trade must still execute, but the unpaid print must move no EWMA.
 #[test]
 fn v16_attack_nocpi_trade_not_dosed_by_extreme_reported_price() {
     for path in [
@@ -65091,22 +65091,34 @@ fn assert_cpi_matcher_price_caps_paid_ewma_move(path: CpiEwmaTradePath, size_q: 
     let (cfg, group) = env.market_state();
     let mark_move_bps = percolator_prog::policy_v16::price_move_bps_ceil(MARK, cfg.mark_ewma_e6)
         .expect("actual mark move bps");
-    assert_eq!(
-        mark_move_bps, MAX_FEE_BPS,
-        "{path:?}: CPI EWMA movement should bind at the market fee cap"
-    );
-    assert!(
-        group.insurance > insurance_before,
-        "{path:?}: CPI EWMA movement must charge a fee"
-    );
     let size_abs = size_q.unsigned_abs();
-    let trade_notional = size_abs * accepted_price as u128 / POS_SCALE;
+    let trade_notional = size_abs
+        .checked_mul(accepted_price as u128)
+        .and_then(|num| num.checked_add(POS_SCALE - 1))
+        .expect("trade notional numerator")
+        / POS_SCALE;
     let externality_notional = trade_notional * 2;
     let paid_move_bps = (group.insurance - insurance_before) * 10_000 / externality_notional;
     assert!(
         mark_move_bps <= paid_move_bps as u64,
         "{path:?}: CPI EWMA move ({mark_move_bps} bps) must be covered by paid fee ({paid_move_bps} bps)"
     );
+    assert_eq!(
+        mark_move_bps, MAX_FEE_BPS,
+        "{path:?}: CPI EWMA movement should bind at the market fee cap"
+    );
+    if size_abs == 1 {
+        assert_eq!(
+            group.insurance - insurance_before,
+            2,
+            "{path:?}: a minimum-quantum CPI fill must collect the one-atom fee ceiling from each side"
+        );
+    } else {
+        assert!(
+            group.insurance > insurance_before,
+            "{path:?}: CPI EWMA movement must charge a fee"
+        );
+    }
     assert_eq!(group.assets[0].oi_eff_long_q, size_abs);
     assert_eq!(group.assets[0].oi_eff_short_q, size_abs);
 }
@@ -65119,6 +65131,8 @@ fn v16_attack_cpi_matcher_price_caps_ewma_move_without_dos() {
     for path in [CpiEwmaTradePath::Single, CpiEwmaTradePath::Batch] {
         assert_cpi_matcher_price_caps_paid_ewma_move(path, (1000u128 * POS_SCALE) as i128);
         assert_cpi_matcher_price_caps_paid_ewma_move(path, -((1000u128 * POS_SCALE) as i128));
+        assert_cpi_matcher_price_caps_paid_ewma_move(path, 1);
+        assert_cpi_matcher_price_caps_paid_ewma_move(path, -1);
     }
 }
 
