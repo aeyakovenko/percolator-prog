@@ -27301,29 +27301,6 @@ fn v16_attack_non_base_trade_rejects_after_base_resolve_matured() {
     );
 
     env.svm.expire_blockhash();
-    let premature_resolve = env.send(
-        ProgInstruction::ResolveStalePermissionless { now_slot: 0 },
-        vec![AccountMeta::new(env.market, false)],
-        &[],
-    );
-    assert!(
-        premature_resolve.is_err(),
-        "base resolve must not discard asset 1's authenticated pending mark"
-    );
-    assert_eq!(
-        env.svm.get_account(&env.market).unwrap(),
-        market_before,
-        "rejected resolve leaves the pending non-base mark intact"
-    );
-
-    env.crank(
-        taker_portfolio,
-        ProgInstruction::PermissionlessCrank {
-            now_slot: 8,
-            observations: crank_observations(1),
-        },
-    );
-    env.svm.expire_blockhash();
     let resolve = env.send(
         ProgInstruction::ResolveStalePermissionless { now_slot: 0 },
         vec![AccountMeta::new(env.market, false)],
@@ -27331,7 +27308,7 @@ fn v16_attack_non_base_trade_rejects_after_base_resolve_matured() {
     );
     assert!(
         resolve.is_ok(),
-        "base resolve succeeds after asset 1's pending mark step: {resolve:?}"
+        "base resolve remains available after rejected non-base trade: {resolve:?}"
     );
     assert_eq!(env.market_state().1.mode, MarketModeV16::Resolved);
 }
@@ -60006,4 +59983,117 @@ fn v16_probe_permissionless_resolve_prioritizes_pending_authenticated_mark() {
     let victim_dest = env.close_resolved(&victim, victim_account);
     assert_eq!(env.token_amount(victim_dest), 1_100_000);
     assert_eq!(env.token_amount(attacker_dest), 900_000);
+}
+
+// A crank earlier in the same slot must not let a later authenticated target be installed with
+// zero elapsed dt and then treated as fully observed for terminal settlement.
+#[test]
+fn v16_probe_same_slot_zero_dt_crank_cannot_discard_pending_authenticated_mark() {
+    const DEPOSIT: u128 = 1_000_000;
+    const SIZE_Q: i128 = 10_000 * POS_SCALE as i128;
+
+    let mut env = V16CuEnv::new();
+    env.svm.warp_to_slot(1);
+    env.configure_auth_mark_with_cu(0, 100);
+
+    let resolver = env.admin.insecure_clone();
+    let oracle = Keypair::new();
+    env.try_update_per_asset_authority_with_cu(
+        &resolver,
+        Some(&oracle),
+        0,
+        processor::ASSET_AUTH_ORACLE,
+        oracle.pubkey().to_bytes(),
+    )
+    .expect("separate honest oracle from the resolver");
+
+    let victim = Keypair::new();
+    let counterparty = Keypair::new();
+    let victim_account = env.create_portfolio(&victim);
+    let counterparty_account = env.create_portfolio(&counterparty);
+    env.deposit(&victim, victim_account, DEPOSIT);
+    env.deposit(&counterparty, counterparty_account, DEPOSIT);
+    env.trade_asset_with_cu(
+        0,
+        &victim,
+        victim_account,
+        &counterparty,
+        counterparty_account,
+        SIZE_Q,
+        100,
+        0,
+    );
+
+    env.svm.warp_to_slot(2);
+    env.crank(
+        victim_account,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 2,
+            observations: crank_observations(0),
+        },
+    );
+    env.svm.expire_blockhash();
+    env.send(
+        ProgInstruction::PushAuthMark {
+            asset_index: 0,
+            now_slot: 2,
+            mark_e6: 110,
+        },
+        vec![
+            AccountMeta::new(oracle.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&oracle],
+    )
+    .expect("later same-slot authenticated mark");
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let victim_before = env.svm.get_account(&victim_account).unwrap();
+    env.svm.expire_blockhash();
+    let zero_dt_crank = env.send(
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 2,
+            observations: crank_observations(0),
+        },
+        vec![
+            AccountMeta::new(env.payer.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(victim_account, false),
+        ],
+        &[],
+    );
+    assert!(
+        zero_dt_crank.is_err(),
+        "zero-dt crank must not mark a future price step as observed"
+    );
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+    assert_eq!(env.svm.get_account(&victim_account).unwrap(), victim_before);
+
+    env.svm.expire_blockhash();
+    let premature_resolve = env.send(
+        ProgInstruction::ResolveMarket,
+        vec![
+            AccountMeta::new(resolver.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&resolver],
+    );
+    assert!(
+        premature_resolve.is_err(),
+        "same-slot target remains pending after the rejected zero-dt crank"
+    );
+
+    env.svm.warp_to_slot(3);
+    env.crank(
+        victim_account,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 3,
+            observations: crank_observations(0),
+        },
+    );
+    env.resolve();
+    let counterparty_dest = env.close_resolved(&counterparty, counterparty_account);
+    let victim_dest = env.close_resolved(&victim, victim_account);
+    assert_eq!(env.token_amount(victim_dest), 1_100_000);
+    assert_eq!(env.token_amount(counterparty_dest), 900_000);
 }

@@ -8683,7 +8683,7 @@ pub mod processor {
         if slot < group.header.current_slot.get() {
             return Err(PercolatorError::EngineStale.into());
         }
-        reject_resolve_with_pending_price_move_view(&cfg, &group, slot)?;
+        reject_privileged_resolve_with_pending_price_move_view(&cfg, &group, slot)?;
         group
             .resolve_market_not_atomic(slot)
             .map_err(map_v16_error)?;
@@ -9769,7 +9769,6 @@ pub mod processor {
         if !oracle_v16::permissionless_stale_matured(&cfg, authenticated_slot) {
             return Err(PercolatorError::OracleStale.into());
         }
-        reject_resolve_with_pending_price_move_view(&cfg, &group, authenticated_slot)?;
         group
             .resolve_market_not_atomic(authenticated_slot)
             .map_err(map_v16_error)?;
@@ -10521,7 +10520,6 @@ pub mod processor {
             if summary.liquidatable
                 && !summary.b_stale
                 && permissionless_resolve_matured_now_view(&cfg, &group)
-                && observation_hints.is_empty()
             {
                 return Err(PercolatorError::OracleStale.into());
             }
@@ -10555,7 +10553,6 @@ pub mod processor {
             let insurance_before = group.header.insurance.get();
             let mut observations: Vec<AutoCrankObservationV16> =
                 Vec::with_capacity(percolator::V16_MAX_PORTFOLIO_ASSETS_N);
-            let mut matured_price_rescue = false;
             let clock_unix_ts = Clock::get().ok().map(|c| c.unix_timestamp);
             for hint in observation_hints.iter() {
                 let asset_index = hint.asset_index as usize;
@@ -10581,49 +10578,25 @@ pub mod processor {
                         .oracle_target_publish_time
                         .saturating_add(i64::try_from(elapsed_slots).unwrap_or(i64::MAX))
                 });
-                let resolve_matured = group.header.mode == 0
-                    && global_or_profile_resolve_matured_at_slot(
-                        &cfg,
-                        &oracle_profile,
-                        authenticated_now_slot,
-                    );
-                let pending_price_step = if resolve_matured {
-                    pending_stored_price_step_view(
-                        &oracle_profile,
-                        &group,
-                        asset_index,
-                        authenticated_now_slot,
-                    )?
-                } else {
-                    None
-                };
-                let crank_price = if let Some((target, price)) = pending_price_step {
-                    // Once terminal resolution is mature, only finish a price transition that was
-                    // already authenticated into the profile. Do not parse fresh oracle accounts.
-                    oracle_profile.oracle_target_price_e6 = target;
-                    matured_price_rescue = true;
-                    price
-                } else {
-                    reject_non_base_oracle_update_after_global_resolve_matured(
-                        &cfg,
-                        asset_index,
-                        authenticated_now_slot,
-                    )?;
-                    reject_permissionless_resolve_matured_live_for_profile_view(
-                        &cfg,
-                        &oracle_profile,
-                        &group,
-                    )?;
-                    hybrid_effective_price_for_crank_view(
-                        &cfg,
-                        &mut oracle_profile,
-                        &group,
-                        asset_index,
-                        authenticated_now_slot,
-                        now_unix_ts,
-                        observation_tail,
-                    )?
-                };
+                reject_non_base_oracle_update_after_global_resolve_matured(
+                    &cfg,
+                    asset_index,
+                    authenticated_now_slot,
+                )?;
+                reject_permissionless_resolve_matured_live_for_profile_view(
+                    &cfg,
+                    &oracle_profile,
+                    &group,
+                )?;
+                let crank_price = hybrid_effective_price_for_crank_view(
+                    &cfg,
+                    &mut oracle_profile,
+                    &group,
+                    asset_index,
+                    authenticated_now_slot,
+                    now_unix_ts,
+                    observation_tail,
+                )?;
                 let computed_funding_rate_e9 = permissionless_funding_rate_e9_view(
                     &oracle_profile,
                     &group,
@@ -10679,12 +10652,6 @@ pub mod processor {
             }
             if !oracle_tail.is_empty() {
                 return Err(PercolatorError::InvalidInstruction.into());
-            }
-            if matured_price_rescue {
-                group.validate_shape().map_err(map_v16_error)?;
-                drop(group);
-                state::write_wrapper_config(&mut market_data, &cfg)?;
-                return Ok(());
             }
 
             let mut portfolio_data = portfolio_ai.try_borrow_mut_data()?;
@@ -11500,88 +11467,39 @@ pub mod processor {
         ))
     }
 
-    fn stored_profile_target_at_slot(profile: &state::AssetOracleProfileV16, now_slot: u64) -> u64 {
-        if oracle_v16::profile_is_hybrid(profile)
-            && !oracle_v16::profile_hybrid_soft_stale_matured(profile, now_slot)
-        {
-            profile.oracle_target_price_e6
-        } else {
-            profile.mark_ewma_e6
-        }
-    }
-
-    fn pending_stored_price_move_for_dt_view(
-        profile: &state::AssetOracleProfileV16,
-        group: &state::MarketViewMutV16<'_>,
-        asset_index: usize,
-        target_slot: u64,
-        dt: u64,
-    ) -> Result<Option<(u64, u64)>, ProgramError> {
-        let asset = group.markets[asset_index].engine.asset;
-        let exposed = asset.oi_eff_long_q.get() != 0 || asset.oi_eff_short_q.get() != 0;
-        if !exposed
-            || !matches!(
-                asset.lifecycle,
-                ASSET_LIFECYCLE_ACTIVE | ASSET_LIFECYCLE_DRAIN_ONLY
-            )
-            || !oracle_v16::profile_is_price_managed(profile)
-        {
-            return Ok(None);
-        }
-        let target = stored_profile_target_at_slot(profile, target_slot);
-        if target == 0 {
-            return Err(PercolatorError::OracleInvalid.into());
-        }
-        let current = asset.effective_price.get();
-        let next = oracle_v16::effective_price_from_target(
-            current,
-            target,
-            group.header.config.max_price_move_bps_per_slot.get(),
-            dt,
-            true,
-        );
-        Ok((next != current).then_some((target, next)))
-    }
-
-    fn pending_stored_price_step_view(
-        profile: &state::AssetOracleProfileV16,
-        group: &state::MarketViewMutV16<'_>,
-        asset_index: usize,
-        now_slot: u64,
-    ) -> Result<Option<(u64, u64)>, ProgramError> {
-        let dt = asset_segment_dt_view(group, asset_index, now_slot)?;
-        pending_stored_price_move_for_dt_view(profile, group, asset_index, now_slot, dt)
-    }
-
-    fn reject_resolve_with_pending_price_move_view(
+    fn reject_privileged_resolve_with_pending_price_move_view(
         cfg: &WrapperConfigV16,
         group: &state::MarketViewMutV16<'_>,
         resolved_slot: u64,
     ) -> ProgramResult {
         let configured_slots = group.header.config.max_market_slots.get() as usize;
-        let max_dt = group.header.config.max_accrual_dt_slots.get();
         let mut asset_index = 0usize;
         while asset_index < configured_slots {
-            let profile = read_oracle_profile_from_view(group, cfg, asset_index)?;
             let asset = group.markets[asset_index].engine.asset;
-            let target = stored_profile_target_at_slot(&profile, resolved_slot);
-            let profile_target_pending = asset.raw_oracle_target_price.get() != target;
-            let target_can_move = pending_stored_price_move_for_dt_view(
-                &profile,
-                group,
-                asset_index,
-                resolved_slot,
-                max_dt,
-            )?
-            .is_some();
-            let elapsed_step_pending = if asset.slot_last.get() < resolved_slot {
-                pending_stored_price_step_view(&profile, group, asset_index, resolved_slot)?
-                    .is_some()
-            } else {
-                false
-            };
-            if (profile_target_pending && target_can_move) || elapsed_step_pending {
-                return Err(PercolatorError::EngineStale.into());
+            let exposed = asset.oi_eff_long_q.get() != 0 || asset.oi_eff_short_q.get() != 0;
+            if exposed
+                && matches!(
+                    asset.lifecycle,
+                    ASSET_LIFECYCLE_ACTIVE | ASSET_LIFECYCLE_DRAIN_ONLY
+                )
+                && asset.slot_last.get() < resolved_slot
+            {
+                let profile = read_oracle_profile_from_view(group, cfg, asset_index)?;
+                if oracle_v16::profile_is_price_managed(&profile) {
+                    if profile.mark_ewma_e6 == 0 {
+                        return Err(PercolatorError::OracleInvalid.into());
+                    }
+                    let next = oracle_v16::effective_price_from_target(
+                        asset.effective_price.get(),
+                        profile.mark_ewma_e6,
+                        group.header.config.max_price_move_bps_per_slot.get(),
+                        asset_segment_dt_view(group, asset_index, resolved_slot)?,
+                        true,
+                    );
+                    if next != asset.effective_price.get() {
+                        return Err(PercolatorError::EngineStale.into());
+                    }
+                }
             }
             asset_index += 1;
         }
