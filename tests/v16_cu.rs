@@ -65497,6 +65497,168 @@ fn v16_attack_underfunded_exit_cannot_move_ewma_with_uncollectible_fee() {
         assert_underfunded_ewma_exit_uses_collected_fee(path);
     }
 }
+
+fn assert_underfunded_cpi_ewma_exit_uses_collected_fee(path: CpiEwmaTradePath) {
+    const MARK: u64 = 1_000_000;
+    const ADVERSE_MARK: u64 = 1_999_999;
+    const SIZE_Q: i128 = POS_SCALE as i128;
+
+    let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+        initial_price: MARK,
+        max_trading_fee_bps: 10_000,
+        max_price_move_bps_per_slot: 10_000,
+        max_accrual_dt_slots: 1,
+        min_funding_lifetime_slots: 1,
+        ..V16CuMarketParams::default()
+    });
+    env.configure_ewma_mark_with_cu(0, MARK, 1, 0);
+
+    let matcher_program = Pubkey::new_unique();
+    let matcher_bytes = std::fs::read(matcher_program_path()).expect("read matcher BPF");
+    env.svm.add_program(matcher_program, &matcher_bytes);
+    let taker_owner = Keypair::new();
+    let taker = env.create_portfolio(&taker_owner);
+    let lp_owner = Keypair::new();
+    let lp = env.create_portfolio(&lp_owner);
+    env.deposit(&taker_owner, taker, MARK as u128);
+    env.deposit(&lp_owner, lp, MARK as u128);
+    let (open_ctx, open_delegate, _) = env.init_matcher_context_with_passive_spread_authorized(
+        matcher_program,
+        &lp_owner,
+        lp,
+        0,
+        9_000,
+    );
+
+    env.svm.expire_blockhash();
+    env.try_trade_cpi_with_cu_on_asset(
+        &taker_owner,
+        taker,
+        &lp_owner,
+        lp,
+        matcher_program,
+        open_ctx,
+        open_delegate,
+        0,
+        -SIZE_Q,
+        0,
+    )
+    .unwrap_or_else(|err| panic!("{path:?}: setup short open failed: {err}"));
+
+    env.svm.warp_to_slot(10);
+    env.push_ewma_mark_with_cu(10, ADVERSE_MARK);
+    for account in [taker, lp] {
+        env.svm.expire_blockhash();
+        env.crank(
+            account,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 10,
+                observations: crank_observations(0),
+            },
+        );
+    }
+
+    let (exit_ctx, exit_delegate, _) = env.init_matcher_context_with_passive_spread_authorized(
+        matcher_program,
+        &lp_owner,
+        lp,
+        9_000,
+        9_000,
+    );
+    env.svm.warp_to_slot(20);
+    let (cfg_before, group_before) = env.market_state();
+    let expected_matcher_price = group_before.assets[0]
+        .effective_price
+        .checked_mul(19)
+        .expect("matcher ask numerator")
+        / 10;
+    let accepted_exit_price = oracle_v16::clamp_toward_engine_dt(
+        group_before.assets[0].effective_price,
+        expected_matcher_price,
+        10_000,
+        1,
+    );
+    assert_eq!(
+        accepted_exit_price, expected_matcher_price,
+        "{path:?}: wide matcher ask must remain inside the one-segment engine envelope"
+    );
+    let requested_fee_per_side = accepted_exit_price as u128;
+    let taker_capital = env.portfolio_state(taker).capital.get();
+    assert!(
+        0 < taker_capital && taker_capital < requested_fee_per_side,
+        "{path:?}: setup must leave the adverse short unable to pay its quoted exit fee"
+    );
+
+    env.svm.expire_blockhash();
+    let exit = match path {
+        CpiEwmaTradePath::Single => env.try_trade_cpi_with_cu_on_asset(
+            &taker_owner,
+            taker,
+            &lp_owner,
+            lp,
+            matcher_program,
+            exit_ctx,
+            exit_delegate,
+            0,
+            SIZE_Q,
+            0,
+        ),
+        CpiEwmaTradePath::Batch => env.send(
+            ProgInstruction::BatchTradeCpi {
+                legs: vec![BatchTradeCpiLeg {
+                    asset_index: 0,
+                    size_q: SIZE_Q,
+                    fee_bps: 0,
+                    limit_price: 0,
+                }],
+            },
+            vec![
+                AccountMeta::new(taker_owner.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(taker, false),
+                AccountMeta::new(lp, false),
+                AccountMeta::new_readonly(matcher_program, false),
+                AccountMeta::new(exit_ctx, false),
+                AccountMeta::new_readonly(exit_delegate, false),
+            ],
+            &[&taker_owner],
+        ),
+    };
+    assert!(
+        exit.is_ok(),
+        "{path:?}: an underfunded risk-reducing CPI exit must remain live: {exit:?}"
+    );
+
+    let (cfg_after, group_after) = env.market_state();
+    assert_eq!(group_after.assets[0].oi_eff_long_q, 0);
+    assert_eq!(group_after.assets[0].oi_eff_short_q, 0);
+    let collected_fee = group_after.insurance - group_before.insurance;
+    let quoted_two_sided_fee = requested_fee_per_side * 2;
+    assert!(
+        collected_fee < quoted_two_sided_fee,
+        "{path:?}: setup must exercise a real partial engine fee charge"
+    );
+    let mark_externality_notional = quoted_two_sided_fee;
+    let paid_move_bps = collected_fee * 10_000 / mark_externality_notional;
+    let mark_move_bps = percolator_prog::policy_v16::price_move_bps_ceil(
+        cfg_before.mark_ewma_e6,
+        cfg_after.mark_ewma_e6,
+    )
+    .expect("mark move bps");
+    assert!(mark_move_bps > 0, "{path:?}: control must move the EWMA");
+    assert!(
+        mark_move_bps <= paid_move_bps as u64,
+        "{path:?}: CPI EWMA move {mark_move_bps} bps exceeds collected-fee support {paid_move_bps} bps"
+    );
+}
+
+#[test]
+fn v16_attack_underfunded_cpi_exit_cannot_move_ewma_with_uncollectible_fee() {
+    for path in [CpiEwmaTradePath::Single, CpiEwmaTradePath::Batch] {
+        assert_underfunded_cpi_ewma_exit_uses_collected_fee(path);
+    }
+}
+
 // Max-shape market liveness: the admin must be able to enter terminal resolution without a
 // whole-slab CU cliff, and the mode transition must not move or reclassify user value.
 #[test]
