@@ -66450,6 +66450,140 @@ fn v16_attack_resolved_two_public_winners_are_close_order_independent() {
     assert!(loser_first.0 > 1_000_000 && loser_first.2 < 1_000_000);
 }
 
+// Max-source liveness through a wrapper-specific owner route: an LP authorizes a matcher once,
+// then an unrelated taker can create both source domains on every asset without the LP signing the
+// fills. Leave the final profitable leg open and prove the owner can still unilaterally reduce it
+// at the exact 32-domain public shape.
+#[test]
+fn v16_attack_max_source_owner_rebalance_reduce_stays_bounded() {
+    const ACTIVE_CAP: u16 = percolator_prog::constants::WRAPPER_MAX_PORTFOLIO_ASSETS;
+    const ASSETS: u16 = 16;
+    const PRICE_LOW: u64 = 100;
+    const PRICE_HIGH: u64 = 101;
+    const SIZE_Q: i128 = POS_SCALE as i128 * 1_000;
+
+    let mut env = V16CuEnv::new_with_init_params_and_market_capacity(
+        V16CuMarketParams {
+            max_portfolio_assets: ACTIVE_CAP,
+            maintenance_margin_bps: 10_000,
+            initial_margin_bps: 10_000,
+            max_price_move_bps_per_slot: 10_000,
+            ..V16CuMarketParams::default()
+        },
+        70,
+    );
+    for asset_index in ACTIVE_CAP..ASSETS {
+        let activation_slot = u64::from(asset_index - ACTIVE_CAP + 1);
+        env.activate_asset(asset_index, activation_slot, PRICE_LOW);
+    }
+    let mut slot = u64::from(ASSETS - ACTIVE_CAP);
+    env.svm.warp_to_slot(slot);
+    for asset_index in 0..ASSETS {
+        env.configure_auth_mark_for_asset_as_admin(asset_index, slot, PRICE_LOW);
+    }
+
+    let matcher_program = Pubkey::new_unique();
+    let matcher_bytes = std::fs::read(auth_matcher_program_path()).expect("read auth matcher BPF");
+    env.svm.add_program(matcher_program, &matcher_bytes);
+
+    let taker_owner = Keypair::new();
+    let lp_owner = Keypair::new();
+    let taker = env.create_portfolio(&taker_owner);
+    let lp = env.create_portfolio(&lp_owner);
+    env.deposit(&taker_owner, taker, 1_000_000);
+    env.deposit(&lp_owner, lp, 1_000_000);
+    let (matcher_ctx, matcher_delegate, _) =
+        env.init_auth_matcher_context(matcher_program, &lp_owner, lp);
+
+    let cpi_fill = |env: &mut V16CuEnv, asset_index: u16, size_q: i128| {
+        env.svm.expire_blockhash();
+        env.try_trade_cpi_with_cu_on_asset(
+            &taker_owner,
+            taker,
+            &lp_owner,
+            lp,
+            matcher_program,
+            matcher_ctx,
+            matcher_delegate,
+            asset_index,
+            size_q,
+            0,
+        )
+        .unwrap_or_else(|err| panic!("unsigned-LP asset {asset_index} fill failed: {err}"));
+    };
+    let settle_both = |env: &mut V16CuEnv, asset_index: u16, now_slot: u64| {
+        for account in [taker, lp] {
+            env.svm.expire_blockhash();
+            env.crank(
+                account,
+                ProgInstruction::PermissionlessCrank {
+                    now_slot,
+                    observations: crank_observations(asset_index),
+                },
+            );
+        }
+    };
+
+    for asset_index in 0..ASSETS {
+        cpi_fill(&mut env, asset_index, -SIZE_Q);
+        slot += 1;
+        env.svm.warp_to_slot(slot);
+        env.push_auth_mark_for_asset_as_admin(asset_index, slot, PRICE_HIGH);
+        settle_both(&mut env, asset_index, slot);
+        cpi_fill(&mut env, asset_index, SIZE_Q);
+
+        cpi_fill(&mut env, asset_index, SIZE_Q);
+        slot += 1;
+        env.svm.warp_to_slot(slot);
+        env.push_auth_mark_for_asset_as_admin(asset_index, slot, PRICE_LOW);
+        settle_both(&mut env, asset_index, slot);
+        if asset_index + 1 != ASSETS {
+            cpi_fill(&mut env, asset_index, -SIZE_Q);
+        }
+    }
+
+    let before = env.portfolio_state(lp);
+    assert_eq!(
+        before
+            .source_domains
+            .iter()
+            .filter(|source| source.is_occupied())
+            .count(),
+        percolator::PORTFOLIO_SOURCE_DOMAIN_CAP
+    );
+    assert_eq!(
+        active_leg_for_asset(&before, usize::from(ASSETS - 1)).basis_pos_q,
+        -SIZE_Q
+    );
+    let group_before = env.market_state().1;
+    let oi_before = group_before.assets[usize::from(ASSETS - 1)].oi_eff_short_q;
+    let pnl_before = before.pnl.get();
+    let custody_before = env.token_amount(env.vault);
+
+    env.svm.expire_blockhash();
+    let cu = env.rebalance_reduce_with_cu(&lp_owner, lp, ASSETS - 1, SIZE_Q.unsigned_abs());
+    println!("v16 32-source-domain RebalanceReduce CU: {cu}");
+    assert_cu_within("32-source-domain RebalanceReduce", cu, 1_375_000);
+    let after = env.portfolio_state(lp);
+    let group_after = env.market_state().1;
+    assert!(!has_active_leg_for_asset(&after, usize::from(ASSETS - 1)));
+    assert_eq!(
+        group_after.assets[usize::from(ASSETS - 1)].oi_eff_short_q,
+        oi_before - SIZE_Q.unsigned_abs()
+    );
+    assert_eq!(after.pnl.get(), pnl_before);
+    assert_eq!(
+        after
+            .source_domains
+            .iter()
+            .filter(|source| source.is_occupied())
+            .count(),
+        percolator::PORTFOLIO_SOURCE_DOMAIN_CAP
+    );
+    assert_eq!(env.token_amount(env.vault), custody_before);
+    assert_eq!(group_after.vault as u64, custody_before);
+}
+
 #[test]
 fn v16_bpf_force_close_pair_order_preserves_unequal_partial_payouts() {
     fn run(cross_pair: bool) -> ([(u128, i128); 4], [u64; 4], u128, u128, u128, u128, u64) {
