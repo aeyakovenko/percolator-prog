@@ -10850,6 +10850,82 @@ fn v16_attack_budgeted_out_of_order_crank_refreshes_without_unearned_reward() {
     );
 }
 
+// Public multi-observation differential: keepers may submit authenticated
+// observations in any order. Reordering the same set must not change either
+// user's economics, aggregate engine state, or custody.
+#[test]
+fn v16_attack_multi_observation_crank_order_cannot_change_economics() {
+    const MARK: u64 = 1_000_000;
+    const OPEN_SLOT: u64 = 1;
+    const CRANK_SLOT: u64 = 2;
+
+    let run = |order: [u16; 2]| {
+        let mut env = V16CuEnv::new_with_market_params_and_price_move(2, 10_000, 10_000, 10_000);
+        env.configure_auth_mark_for_asset_as_admin(0, OPEN_SLOT, MARK);
+        env.configure_auth_mark_for_asset_as_admin(1, OPEN_SLOT, MARK);
+
+        let owner_a = Keypair::new();
+        let owner_b = Keypair::new();
+        let account_a = env.create_portfolio(&owner_a);
+        let account_b = env.create_portfolio(&owner_b);
+        env.deposit(&owner_a, account_a, 100_000_000);
+        env.deposit(&owner_b, account_b, 100_000_000);
+        env.trade_asset_with_cu(
+            0,
+            &owner_a,
+            account_a,
+            &owner_b,
+            account_b,
+            POS_SCALE as i128,
+            MARK,
+            0,
+        );
+        env.svm.expire_blockhash();
+        env.trade_asset_with_cu(
+            1,
+            &owner_a,
+            account_a,
+            &owner_b,
+            account_b,
+            POS_SCALE as i128,
+            MARK,
+            0,
+        );
+
+        set_test_clock(&mut env, CRANK_SLOT, 101);
+        env.push_auth_mark_for_asset_as_admin(0, CRANK_SLOT, MARK + 10_000);
+        env.push_auth_mark_for_asset_as_admin(1, CRANK_SLOT, MARK - 20_000);
+        let mut observations = Vec::new();
+        for asset_index in order {
+            observations.extend(crank_observations(asset_index));
+        }
+        env.crank(
+            account_a,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: CRANK_SLOT,
+                observations,
+            },
+        );
+
+        let mut group = env.market_state().1;
+        group.market_group_id = [0; 32];
+        let mut a = env.portfolio_state(account_a);
+        a.provenance_header = Default::default();
+        a.owner = [0; 32];
+        let mut b = env.portfolio_state(account_b);
+        b.provenance_header = Default::default();
+        b.owner = [0; 32];
+        (group, a, b, env.token_amount(env.vault))
+    };
+
+    let forward = run([0, 1]);
+    let reverse = run([1, 0]);
+    assert_eq!(
+        forward, reverse,
+        "caller-chosen observation order must not change market or user economics"
+    );
+}
+
 #[test]
 fn v16_attack_auto_crank_refresh_not_blocked_by_unneeded_first_asset_oracle() {
     const MARK: u64 = 1_000_000;
