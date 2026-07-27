@@ -41,7 +41,7 @@ The economic and governance model for a permissionless multi-asset market. Statu
 - A **10 MiB slab fits 5,834 assets** with the current layout (per-asset slot is 1797 B; 5,835 would exceed Solana's 10 MiB account cap), and
   per-trader CU stays bounded **independent of N** (a trader pays only for the assets they actually
   touch, not all N). **✅** — no 64-asset cap (`v16_attack_market_exceeds_64_assets_position_holds_any_14_legs`),
-  and a real BPF trade on asset **index 5833 of a 5,834-asset / near-10 MiB market is under the tx CU limit** — flat
+  and a real BPF trade on asset **index 5781 of a 5,782-asset / near-10 MiB market is under the tx CU limit** — flat
   vs. small-N, proving O(1)-in-N (`v16_bpf_10m_market_over_5000_assets_trades_with_bounded_cu`). The same
   regression also exercises high public domain indices above 11,000, proving backing/insurance management
   is not capped at one-byte domain ids. The portfolio's

@@ -9,6 +9,88 @@ use percolator_prog::matcher_abi::{
 use percolator_prog::policy_v16;
 
 #[kani::proof]
+fn kani_v16_unsigned_lp_cohort_gate_is_side_exact_and_preserves_reductions() {
+    let pending_account_count: u8 = kani::any();
+    let account_a_is_pending: bool = kani::any();
+    let account_b_is_pending: bool = kani::any();
+    let local_pending_count = account_a_is_pending as u64 + account_b_is_pending as u64;
+    let external = policy_v16::pending_counter_has_external_account(
+        pending_account_count as u64,
+        account_a_is_pending,
+        account_b_is_pending,
+    );
+    if (pending_account_count as u64) < local_pending_count {
+        assert!(external.is_none());
+    } else {
+        assert_eq!(
+            external.unwrap(),
+            pending_account_count as u64 > local_pending_count
+        );
+    }
+    kani::cover!(
+        pending_account_count as u64 == local_pending_count && local_pending_count != 0,
+        "the two atomic trade accounts consume the complete pending cohort"
+    );
+    kani::cover!(
+        pending_account_count as u64 > local_pending_count,
+        "an external pending account remains after local settlement"
+    );
+    kani::cover!(
+        (pending_account_count as u64) < local_pending_count,
+        "an inconsistent pending counter fails closed"
+    );
+
+    let current_q: i64 = kani::any();
+    let delta_q: i64 = kani::any();
+    let stale_long: bool = kani::any();
+    let stale_short: bool = kani::any();
+    let unresolved_negative: bool = kani::any();
+    let current_q = current_q as i128;
+    let delta_q = delta_q as i128;
+    let next_q = current_q + delta_q;
+
+    let current_long = current_q.max(0) as u128;
+    let current_short = current_q.min(0).unsigned_abs();
+    let next_long = next_q.max(0) as u128;
+    let next_short = next_q.min(0).unsigned_abs();
+    let adds_long = next_long > current_long;
+    let adds_short = next_short > current_short;
+    let expected = (adds_long && stale_short)
+        || (adds_short && stale_long)
+        || ((adds_long || adds_short) && unresolved_negative);
+
+    let blocked = policy_v16::unsigned_lp_adds_unsettled_cohort_exposure(
+        current_q,
+        delta_q,
+        stale_long,
+        stale_short,
+        unresolved_negative,
+    )
+    .unwrap();
+
+    kani::cover!(
+        !adds_long && !adds_short && (stale_long || stale_short || unresolved_negative),
+        "pure LP reduction remains live while historical settlement is pending"
+    );
+    kani::cover!(
+        adds_long && stale_short && !stale_long,
+        "fresh long exposure is bound to stale short counterparties"
+    );
+    kani::cover!(
+        adds_short && stale_long && !stale_short,
+        "fresh short exposure is bound to stale long counterparties"
+    );
+    kani::cover!(
+        (adds_long || adds_short) && unresolved_negative,
+        "the post-settlement pre-booking interval blocks fresh unsigned exposure"
+    );
+    assert_eq!(blocked, expected);
+    if !adds_long && !adds_short {
+        assert!(!blocked);
+    }
+}
+
+#[kani::proof]
 fn kani_v16_premium_funding_rate_is_clamped_and_signed() {
     let mark_raw: u16 = kani::any();
     let index_raw: u16 = kani::any();
@@ -95,6 +177,7 @@ fn kani_v16_collected_base_fee_cannot_fund_mark_movement() {
 }
 
 #[kani::proof]
+#[kani::unwind(34)]
 fn kani_v16_init_market_decode_preserves_wire_fields() {
     // Full-width symbolic inputs (audit: avoid the u16->u64/u128 widening collapse so
     // narrow-read / high-byte decode bugs are observable).
@@ -199,6 +282,7 @@ fn kani_v16_init_market_decode_preserves_wire_fields() {
 }
 
 #[kani::proof]
+#[kani::unwind(34)]
 fn kani_v16_amount_instructions_decode_preserves_wire_fields() {
     let tag: u8 = kani::any();
     kani::assume(
@@ -230,6 +314,7 @@ fn kani_v16_amount_instructions_decode_preserves_wire_fields() {
 }
 
 #[kani::proof]
+#[kani::unwind(34)]
 fn kani_v16_domain_topup_and_asset_insurance_decode_preserves_wire_fields() {
     let domain: u16 = kani::any();
     let asset_index: u16 = kani::any();
@@ -267,6 +352,7 @@ fn kani_v16_domain_topup_and_asset_insurance_decode_preserves_wire_fields() {
 }
 
 #[kani::proof]
+#[kani::unwind(34)]
 fn kani_v16_recovery_close_progress_decode_preserves_wire_fields() {
     let asset_index: u16 = kani::any();
     let side: u8 = kani::any();
@@ -351,6 +437,7 @@ fn kani_v16_recovery_close_progress_decode_preserves_wire_fields() {
 }
 
 #[kani::proof]
+#[kani::unwind(34)]
 fn kani_v16_top_up_backing_bucket_decode_preserves_wire_fields() {
     let domain: u16 = kani::any();
     let amount: u128 = kani::any();
@@ -377,6 +464,7 @@ fn kani_v16_top_up_backing_bucket_decode_preserves_wire_fields() {
 }
 
 #[kani::proof]
+#[kani::unwind(34)]
 fn kani_v16_withdraw_backing_bucket_decode_preserves_wire_fields() {
     let domain: u16 = kani::any();
     let amount: u128 = kani::any();
@@ -396,6 +484,7 @@ fn kani_v16_withdraw_backing_bucket_decode_preserves_wire_fields() {
 }
 
 #[kani::proof]
+#[kani::unwind(34)]
 fn kani_v16_asset_lifecycle_decode_preserves_wire_fields() {
     let action: u8 = kani::any();
     let asset_index: u16 = kani::any();
@@ -443,6 +532,7 @@ fn kani_v16_asset_lifecycle_decode_preserves_wire_fields() {
 }
 
 #[kani::proof]
+#[kani::unwind(34)]
 fn kani_v16_tradenocpi_decode_preserves_wire_fields() {
     let asset_index: u16 = kani::any();
     let size_q: i128 = kani::any();
@@ -473,6 +563,7 @@ fn kani_v16_tradenocpi_decode_preserves_wire_fields() {
 }
 
 #[kani::proof]
+#[kani::unwind(34)]
 fn kani_v16_tradecpi_decode_preserves_wire_fields() {
     let asset_index: u16 = kani::any();
     let size_q: i128 = kani::any();
@@ -584,6 +675,7 @@ fn kani_v16_matcher_return_accepts_only_bound_echoed_fills() {
 }
 
 #[kani::proof]
+#[kani::unwind(34)]
 fn kani_v16_permissionless_crank_decode_preserves_wire_fields() {
     let now_slot: u64 = kani::any();
     let asset_index_0: u16 = kani::any();
@@ -653,6 +745,7 @@ fn kani_v16_legacy_permissionless_crank_size_payload_is_rejected() {
 }
 
 #[kani::proof]
+#[kani::unwind(34)]
 fn kani_v16_update_authority_decode_preserves_wire_fields() {
     let mut new_pubkey = [0u8; 32];
     let mut i = 0;
@@ -676,6 +769,7 @@ fn kani_v16_update_authority_decode_preserves_wire_fields() {
 }
 
 #[kani::proof]
+#[kani::unwind(34)]
 fn kani_v16_update_asset_authority_decode_preserves_wire_fields() {
     let asset_index: u16 = kani::any();
     let kind: u8 = kani::any();
@@ -707,6 +801,7 @@ fn kani_v16_update_asset_authority_decode_preserves_wire_fields() {
 }
 
 #[kani::proof]
+#[kani::unwind(34)]
 fn kani_v16_restart_asset_oracle_decode_preserves_wire_fields() {
     let asset_index: u16 = kani::any();
     let now_slot: u64 = kani::any();
@@ -734,6 +829,7 @@ fn kani_v16_restart_asset_oracle_decode_preserves_wire_fields() {
 }
 
 #[kani::proof]
+#[kani::unwind(34)]
 fn kani_v16_batch_trade_nocpi_decode_does_not_collide_with_restart_asset_oracle() {
     let asset_index: u16 = kani::any();
     let size_q: i128 = kani::any();
@@ -764,6 +860,7 @@ fn kani_v16_batch_trade_nocpi_decode_does_not_collide_with_restart_asset_oracle(
 }
 
 #[kani::proof]
+#[kani::unwind(34)]
 fn kani_v16_update_liquidation_fee_policy_decode_preserves_wire_fields() {
     let cranker_share_bps: u16 = kani::any();
 
@@ -780,6 +877,7 @@ fn kani_v16_update_liquidation_fee_policy_decode_preserves_wire_fields() {
 }
 
 #[kani::proof]
+#[kani::unwind(34)]
 fn kani_v16_update_maintenance_fee_policy_decode_preserves_wire_fields() {
     let cranker_share_bps: u16 = kani::any();
 
@@ -796,6 +894,7 @@ fn kani_v16_update_maintenance_fee_policy_decode_preserves_wire_fields() {
 }
 
 #[kani::proof]
+#[kani::unwind(34)]
 fn kani_v16_update_backing_fee_policy_decode_preserves_wire_fields() {
     let domain: u16 = kani::any();
     let fee_bps: u16 = kani::any();
@@ -822,6 +921,7 @@ fn kani_v16_update_backing_fee_policy_decode_preserves_wire_fields() {
 }
 
 #[kani::proof]
+#[kani::unwind(34)]
 fn kani_v16_update_trade_fee_policy_decode_preserves_wire_fields() {
     let trade_fee_base_bps: u64 = kani::any();
 
@@ -838,6 +938,7 @@ fn kani_v16_update_trade_fee_policy_decode_preserves_wire_fields() {
 }
 
 #[kani::proof]
+#[kani::unwind(34)]
 fn kani_v16_update_fee_redirect_policy_decode_preserves_wire_fields() {
     let redirect_bps: u16 = kani::any();
 
@@ -852,6 +953,7 @@ fn kani_v16_update_fee_redirect_policy_decode_preserves_wire_fields() {
 }
 
 #[kani::proof]
+#[kani::unwind(34)]
 fn kani_v16_update_market_init_fee_policy_decode_preserves_wire_fields() {
     let min_init_fee: u128 = kani::any();
 
@@ -868,6 +970,7 @@ fn kani_v16_update_market_init_fee_policy_decode_preserves_wire_fields() {
 }
 
 #[kani::proof]
+#[kani::unwind(34)]
 fn kani_v16_base_unit_payloads_decode_preserves_wire_fields() {
     let primary_mint: [u8; 32] = kani::any();
     let secondary_mint: [u8; 32] = kani::any();
@@ -898,6 +1001,7 @@ fn kani_v16_base_unit_payloads_decode_preserves_wire_fields() {
 }
 
 #[kani::proof]
+#[kani::unwind(34)]
 fn kani_v16_permissionless_resolve_decode_preserves_wire_fields() {
     let stale_slots: u64 = kani::any();
     let force_close_delay_slots: u64 = kani::any();
@@ -930,6 +1034,7 @@ fn kani_v16_permissionless_resolve_decode_preserves_wire_fields() {
 }
 
 #[kani::proof]
+#[kani::unwind(34)]
 fn kani_v16_configure_hybrid_oracle_decode_preserves_wire_fields() {
     let asset_index: u16 = kani::any();
     let oracle_leg_count: u8 = kani::any();
@@ -1000,13 +1105,24 @@ fn kani_v16_configure_hybrid_oracle_decode_preserves_wire_fields() {
             assert_eq!(got_invert, invert);
             assert_eq!(got_unit_scale, unit_scale);
             assert_eq!(got_conf, conf_filter_bps);
-            assert_eq!(got_feeds, feeds);
+            let mut i = 0;
+            let mut feeds_match = true;
+            while i < 3 {
+                let mut j = 0;
+                while j < 32 {
+                    feeds_match &= got_feeds[i][j] == feeds[i][j];
+                    j += 1;
+                }
+                i += 1;
+            }
+            assert!(feeds_match);
         }
         _ => unreachable!(),
     }
 }
 
 #[kani::proof]
+#[kani::unwind(34)]
 fn kani_v16_ewma_mark_decode_preserves_wire_fields() {
     let asset_index: u16 = kani::any();
 
@@ -1096,6 +1212,7 @@ fn kani_v16_ewma_mark_decode_preserves_wire_fields() {
 }
 
 #[kani::proof]
+#[kani::unwind(18)]
 fn kani_v16_decode_rejects_trailing_bytes() {
     let extra: u8 = kani::any();
     let data = [1u8, extra];
@@ -1109,6 +1226,7 @@ fn assert_rejects_trailing_byte(ix: Instruction, extra: u8) {
 }
 
 #[kani::proof]
+#[kani::unwind(18)]
 fn kani_v16_init_market_payload_rejects_trailing_byte() {
     let extra: u8 = kani::any();
     assert_rejects_trailing_byte(
@@ -1141,6 +1259,7 @@ fn kani_v16_init_market_payload_rejects_trailing_byte() {
 }
 
 #[kani::proof]
+#[kani::unwind(18)]
 fn kani_v16_custody_payloads_reject_trailing_byte() {
     let extra: u8 = kani::any();
 
@@ -1175,6 +1294,7 @@ fn kani_v16_custody_payloads_reject_trailing_byte() {
 }
 
 #[kani::proof]
+#[kani::unwind(18)]
 fn kani_v16_trade_and_crank_payloads_reject_trailing_byte() {
     let extra: u8 = kani::any();
 
@@ -1210,6 +1330,7 @@ fn kani_v16_trade_and_crank_payloads_reject_trailing_byte() {
 }
 
 #[kani::proof]
+#[kani::unwind(18)]
 fn kani_v16_admin_policy_payloads_reject_trailing_byte() {
     let extra: u8 = kani::any();
 
@@ -1284,6 +1405,7 @@ fn kani_v16_admin_policy_payloads_reject_trailing_byte() {
 }
 
 #[kani::proof]
+#[kani::unwind(18)]
 fn kani_v16_oracle_asset_payloads_reject_trailing_byte() {
     let extra: u8 = kani::any();
 
@@ -1355,6 +1477,7 @@ fn kani_v16_oracle_asset_payloads_reject_trailing_byte() {
 }
 
 #[kani::proof]
+#[kani::unwind(18)]
 fn kani_v16_resolved_recovery_payloads_reject_trailing_byte() {
     let extra: u8 = kani::any();
 
@@ -1405,6 +1528,7 @@ fn kani_v16_resolved_recovery_payloads_reject_trailing_byte() {
 }
 
 #[kani::proof]
+#[kani::unwind(18)]
 fn kani_v16_unknown_or_truncated_tags_reject() {
     let tag: u8 = kani::any();
     kani::assume(tag != 0);
@@ -1452,6 +1576,7 @@ fn kani_v16_unknown_or_truncated_tags_reject() {
 }
 
 #[kani::proof]
+#[kani::unwind(18)]
 fn kani_v16_refine_resolved_bound_tag_is_not_public() {
     let decrease_num: u128 = kani::any();
     let mut data = [0u8; 17];
@@ -1468,6 +1593,7 @@ fn kani_v16_zero_length_decode_rejects() {
 }
 
 #[kani::proof]
+#[kani::unwind(18)]
 fn kani_v16_every_active_payload_rejects_one_byte_truncation() {
     let init_market = [0u8; 80];
     assert!(Instruction::decode(&init_market).is_err());
