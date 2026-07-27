@@ -1487,6 +1487,7 @@ fn kani_v16_resolved_recovery_payloads_reject_trailing_byte() {
 }
 
 #[kani::proof]
+#[kani::unwind(18)]
 fn kani_v16_unknown_or_truncated_tags_reject() {
     let tag: u8 = kani::any();
     kani::assume(tag != 0);
