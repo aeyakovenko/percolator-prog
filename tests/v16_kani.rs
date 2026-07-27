@@ -1178,6 +1178,7 @@ fn kani_v16_ewma_mark_decode_preserves_wire_fields() {
 }
 
 #[kani::proof]
+#[kani::unwind(18)]
 fn kani_v16_decode_rejects_trailing_bytes() {
     let extra: u8 = kani::any();
     let data = [1u8, extra];
@@ -1191,6 +1192,7 @@ fn assert_rejects_trailing_byte(ix: Instruction, extra: u8) {
 }
 
 #[kani::proof]
+#[kani::unwind(18)]
 fn kani_v16_init_market_payload_rejects_trailing_byte() {
     let extra: u8 = kani::any();
     assert_rejects_trailing_byte(
@@ -1223,6 +1225,7 @@ fn kani_v16_init_market_payload_rejects_trailing_byte() {
 }
 
 #[kani::proof]
+#[kani::unwind(18)]
 fn kani_v16_custody_payloads_reject_trailing_byte() {
     let extra: u8 = kani::any();
 
@@ -1257,6 +1260,7 @@ fn kani_v16_custody_payloads_reject_trailing_byte() {
 }
 
 #[kani::proof]
+#[kani::unwind(18)]
 fn kani_v16_trade_and_crank_payloads_reject_trailing_byte() {
     let extra: u8 = kani::any();
 
@@ -1292,6 +1296,7 @@ fn kani_v16_trade_and_crank_payloads_reject_trailing_byte() {
 }
 
 #[kani::proof]
+#[kani::unwind(18)]
 fn kani_v16_admin_policy_payloads_reject_trailing_byte() {
     let extra: u8 = kani::any();
 
@@ -1366,6 +1371,7 @@ fn kani_v16_admin_policy_payloads_reject_trailing_byte() {
 }
 
 #[kani::proof]
+#[kani::unwind(18)]
 fn kani_v16_oracle_asset_payloads_reject_trailing_byte() {
     let extra: u8 = kani::any();
 
@@ -1437,6 +1443,7 @@ fn kani_v16_oracle_asset_payloads_reject_trailing_byte() {
 }
 
 #[kani::proof]
+#[kani::unwind(18)]
 fn kani_v16_resolved_recovery_payloads_reject_trailing_byte() {
     let extra: u8 = kani::any();
 
@@ -1535,6 +1542,7 @@ fn kani_v16_unknown_or_truncated_tags_reject() {
 }
 
 #[kani::proof]
+#[kani::unwind(18)]
 fn kani_v16_refine_resolved_bound_tag_is_not_public() {
     let decrease_num: u128 = kani::any();
     let mut data = [0u8; 17];
@@ -1551,6 +1559,7 @@ fn kani_v16_zero_length_decode_rejects() {
 }
 
 #[kani::proof]
+#[kani::unwind(18)]
 fn kani_v16_every_active_payload_rejects_one_byte_truncation() {
     let init_market = [0u8; 80];
     assert!(Instruction::decode(&init_market).is_err());
