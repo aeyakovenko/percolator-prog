@@ -2721,6 +2721,39 @@ impl V16CuEnv {
     }
 
     fn close_resolved_with_cu(&mut self, owner: &Keypair, portfolio: Pubkey) -> (Pubkey, u64) {
+        let dest = self.create_resolved_destination(owner);
+        let max_steps = percolator::V16_MAX_PORTFOLIO_ASSETS_N
+            + 3 * percolator::PORTFOLIO_SOURCE_DOMAIN_CAP
+            + 8;
+        let mut max_cu = 0u64;
+        for step in 0..max_steps {
+            if step != 0 {
+                self.svm.expire_blockhash();
+            }
+            let market_before = self.svm.get_account(&self.market).unwrap();
+            let portfolio_before = self.svm.get_account(&portfolio).unwrap();
+            let dest_before = self.svm.get_account(&dest).unwrap();
+            max_cu = max_cu.max(self.close_resolved_once_to_dest_with_cu(owner, portfolio, dest));
+            if self.resolved_close_complete(portfolio) {
+                return (dest, max_cu);
+            }
+            if self.svm.get_account(&self.market).unwrap() == market_before
+                && self.svm.get_account(&portfolio).unwrap() == portfolio_before
+                && self.svm.get_account(&dest).unwrap() == dest_before
+            {
+                return (dest, max_cu);
+            }
+        }
+        panic!("close resolved exceeded its finite leg/source-domain rank");
+    }
+
+    fn close_resolved_once_with_cu(&mut self, owner: &Keypair, portfolio: Pubkey) -> (Pubkey, u64) {
+        let dest = self.create_resolved_destination(owner);
+        let cu = self.close_resolved_once_to_dest_with_cu(owner, portfolio, dest);
+        (dest, cu)
+    }
+
+    fn create_resolved_destination(&mut self, owner: &Keypair) -> Pubkey {
         let dest = Pubkey::new_unique();
         self.svm
             .set_account(
@@ -2734,24 +2767,44 @@ impl V16CuEnv {
                 },
             )
             .unwrap();
-        let cu = self
-            .send(
-                ProgInstruction::CloseResolved {
-                    fee_rate_per_slot: 0,
-                },
-                vec![
-                    AccountMeta::new_readonly(owner.pubkey(), false),
-                    AccountMeta::new(self.market, false),
-                    AccountMeta::new(portfolio, false),
-                    AccountMeta::new(dest, false),
-                    AccountMeta::new(self.vault, false),
-                    AccountMeta::new_readonly(self.vault_authority, false),
-                    AccountMeta::new_readonly(spl_token::ID, false),
-                ],
-                &[],
-            )
-            .expect("close resolved");
-        (dest, cu)
+        dest
+    }
+
+    fn close_resolved_once_to_dest_with_cu(
+        &mut self,
+        owner: &Keypair,
+        portfolio: Pubkey,
+        dest: Pubkey,
+    ) -> u64 {
+        self.send(
+            ProgInstruction::CloseResolved {
+                fee_rate_per_slot: 0,
+            },
+            vec![
+                AccountMeta::new_readonly(owner.pubkey(), false),
+                AccountMeta::new(self.market, false),
+                AccountMeta::new(portfolio, false),
+                AccountMeta::new(dest, false),
+                AccountMeta::new(self.vault, false),
+                AccountMeta::new_readonly(self.vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[],
+        )
+        .expect("close resolved")
+    }
+
+    fn resolved_close_complete(&self, portfolio: Pubkey) -> bool {
+        let account = self.portfolio_state(portfolio);
+        let receipt = resolved_receipt(&account);
+        percolator::active_bitmap_is_empty(active_bitmap(&account))
+            && account.capital.get() == 0
+            && account.pnl.get() == 0
+            && account
+                .source_domains
+                .iter()
+                .all(|source| !source.is_occupied())
+            && (!receipt.present || receipt.finalized)
     }
 
     fn top_up_insurance(&mut self, amount: u128) -> Pubkey {
@@ -3739,6 +3792,43 @@ fn assert_cu_within(label: &str, cu: u64, limit: u64) {
         cu <= limit,
         "{label} consumed {cu} CU, above the {limit} CU guardrail"
     );
+}
+
+fn portfolio_cert_is_current(env: &V16CuEnv, portfolio: Pubkey) -> bool {
+    let account = env.portfolio_state(portfolio);
+    let group = env.market_state().1;
+    let cert = health_cert(&account);
+    cert.valid
+        && account.stale_state == 0
+        && account.b_stale_state == 0
+        && cert.cert_oracle_epoch == group.oracle_epoch
+        && cert.cert_funding_epoch == group.funding_epoch
+        && cert.cert_risk_epoch == group.risk_epoch
+        && cert.cert_asset_set_epoch == group.asset_set_epoch
+        && cert.active_bitmap_at_cert == active_bitmap(&account)
+}
+
+fn drive_portfolio_cert_current(
+    env: &mut V16CuEnv,
+    portfolio: Pubkey,
+    now_slot: u64,
+    asset_index: u16,
+    max_steps: usize,
+) -> (usize, u64) {
+    let mut calls = 0usize;
+    let mut max_cu = 0u64;
+    while !portfolio_cert_is_current(env, portfolio) {
+        max_cu = max_cu.max(env.crank(
+            portfolio,
+            ProgInstruction::PermissionlessCrank {
+                now_slot,
+                observations: crank_observations(asset_index),
+            },
+        ));
+        calls += 1;
+        assert!(calls <= max_steps, "account refresh exceeded bounded rank");
+    }
+    (calls, max_cu)
 }
 
 #[test]
@@ -10800,6 +10890,766 @@ fn v16_bpf_stale_full_14_leg_tradenocpi_rejects_before_cu_cliff() {
     // v16_bpf_current_full_14_leg_tradenocpi_is_under_tx_limit tests.
 }
 
+const MAX_COMPOSED_SOURCE_ASSETS: u16 = 16;
+const MAX_COMPOSED_SOURCE_SIZE_Q: i128 = POS_SCALE as i128 * 1_000;
+
+fn setup_public_max_composed_source_pair(
+    retained_active_assets: u16,
+) -> (V16CuEnv, Pubkey, Pubkey, u64) {
+    const ACTIVE_CAP: u16 = percolator_prog::constants::WRAPPER_MAX_PORTFOLIO_ASSETS;
+    const PRICE_LOW: u64 = 100;
+    const PRICE_HIGH: u64 = 101;
+    assert!(retained_active_assets > 0 && retained_active_assets <= ACTIVE_CAP);
+
+    let mut env = V16CuEnv::new_with_init_params_and_market_capacity(
+        V16CuMarketParams {
+            max_portfolio_assets: ACTIVE_CAP,
+            maintenance_margin_bps: 10_000,
+            initial_margin_bps: 10_000,
+            max_price_move_bps_per_slot: 10_000,
+            ..V16CuMarketParams::default()
+        },
+        70,
+    );
+    for asset_index in ACTIVE_CAP..MAX_COMPOSED_SOURCE_ASSETS {
+        let activation_slot = u64::from(asset_index - ACTIVE_CAP + 1);
+        env.activate_asset(asset_index, activation_slot, PRICE_LOW);
+    }
+    let mut slot = u64::from(MAX_COMPOSED_SOURCE_ASSETS - ACTIVE_CAP);
+    env.svm.warp_to_slot(slot);
+    for asset_index in 0..MAX_COMPOSED_SOURCE_ASSETS {
+        env.configure_auth_mark_for_asset_as_admin(asset_index, slot, PRICE_LOW);
+    }
+
+    let matcher_program = Pubkey::new_unique();
+    let matcher_bytes = std::fs::read(auth_matcher_program_path()).expect("read auth matcher BPF");
+    env.svm.add_program(matcher_program, &matcher_bytes);
+
+    let taker_owner = Keypair::new();
+    let lp_owner = Keypair::new();
+    let taker = env.create_portfolio(&taker_owner);
+    let lp = env.create_portfolio(&lp_owner);
+    env.deposit(&taker_owner, taker, 2_000_000);
+    env.deposit(&lp_owner, lp, 2_000_000);
+    let (matcher_ctx, matcher_delegate, _) =
+        env.init_auth_matcher_context(matcher_program, &lp_owner, lp);
+
+    let cpi_fill = |env: &mut V16CuEnv, asset_index: u16, size_q: i128| {
+        env.svm.expire_blockhash();
+        env.try_trade_cpi_with_cu_on_asset(
+            &taker_owner,
+            taker,
+            &lp_owner,
+            lp,
+            matcher_program,
+            matcher_ctx,
+            matcher_delegate,
+            asset_index,
+            size_q,
+            0,
+        )
+        .unwrap_or_else(|err| panic!("unsigned-LP asset {asset_index} fill failed: {err}"));
+    };
+    let drive_both_current = |env: &mut V16CuEnv, now_slot: u64| {
+        for _ in 0..(percolator::V16_MAX_PORTFOLIO_ASSETS_N + 2) {
+            for portfolio in [taker, lp] {
+                if !portfolio_cert_is_current(env, portfolio) {
+                    env.crank(
+                        portfolio,
+                        ProgInstruction::PermissionlessCrank {
+                            now_slot,
+                            observations: vec![],
+                        },
+                    );
+                }
+            }
+            if portfolio_cert_is_current(env, taker) && portfolio_cert_is_current(env, lp) {
+                return;
+            }
+        }
+        panic!("public cranks did not reach a two-account certificate fixed point");
+    };
+    let settle_both = |env: &mut V16CuEnv, asset_index: u16, now_slot: u64| {
+        for portfolio in [taker, lp] {
+            env.svm.expire_blockhash();
+            env.crank(
+                portfolio,
+                ProgInstruction::PermissionlessCrank {
+                    now_slot,
+                    observations: crank_observations(asset_index),
+                },
+            );
+        }
+        drive_both_current(env, now_slot);
+    };
+
+    for asset_index in 0..MAX_COMPOSED_SOURCE_ASSETS {
+        cpi_fill(&mut env, asset_index, -MAX_COMPOSED_SOURCE_SIZE_Q);
+        slot += 1;
+        env.svm.warp_to_slot(slot);
+        env.push_auth_mark_for_asset_as_admin(asset_index, slot, PRICE_HIGH);
+        settle_both(&mut env, asset_index, slot);
+        cpi_fill(&mut env, asset_index, MAX_COMPOSED_SOURCE_SIZE_Q);
+
+        cpi_fill(&mut env, asset_index, MAX_COMPOSED_SOURCE_SIZE_Q);
+        slot += 1;
+        env.svm.warp_to_slot(slot);
+        env.push_auth_mark_for_asset_as_admin(asset_index, slot, PRICE_LOW);
+        settle_both(&mut env, asset_index, slot);
+        if asset_index < MAX_COMPOSED_SOURCE_ASSETS - retained_active_assets {
+            cpi_fill(&mut env, asset_index, -MAX_COMPOSED_SOURCE_SIZE_Q);
+        } else {
+            for active_asset in (MAX_COMPOSED_SOURCE_ASSETS - retained_active_assets)..=asset_index
+            {
+                env.crank(
+                    taker,
+                    ProgInstruction::PermissionlessCrank {
+                        now_slot: slot,
+                        observations: crank_observations(active_asset),
+                    },
+                );
+            }
+            drive_both_current(&mut env, slot);
+        }
+    }
+
+    let lp_state = env.portfolio_state(lp);
+    assert_eq!(
+        lp_state
+            .source_domains
+            .iter()
+            .filter(|source| source.is_occupied())
+            .count(),
+        percolator::PORTFOLIO_SOURCE_DOMAIN_CAP
+    );
+    assert_eq!(
+        percolator::active_bitmap_count_ones(active_bitmap(&lp_state)),
+        u32::from(retained_active_assets)
+    );
+    (env, taker, lp, slot)
+}
+
+#[test]
+fn v16_bpf_public_14_leg_32_source_domain_liquidation_is_bounded() {
+    let (mut env, taker, lp, mut slot) = setup_public_max_composed_source_pair(
+        percolator_prog::constants::WRAPPER_MAX_PORTFOLIO_ASSETS,
+    );
+    let first_active =
+        MAX_COMPOSED_SOURCE_ASSETS - percolator_prog::constants::WRAPPER_MAX_PORTFOLIO_ASSETS;
+    let custody_before = env.token_amount(env.vault);
+
+    slot += 1;
+    env.svm.warp_to_slot(slot);
+    for asset_index in first_active..MAX_COMPOSED_SOURCE_ASSETS {
+        env.push_auth_mark_for_asset_as_admin(asset_index, slot, 200);
+        env.crank(
+            taker,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: slot,
+                observations: crank_observations(asset_index),
+            },
+        );
+    }
+
+    let mut calls = 0usize;
+    let mut max_refresh_cu = 0u64;
+    while !portfolio_cert_is_current(&env, lp) {
+        env.svm.expire_blockhash();
+        let cu = env
+            .send(
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: slot,
+                    observations: vec![],
+                },
+                vec![
+                    AccountMeta::new(env.payer.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(lp, false),
+                ],
+                &[],
+            )
+            .expect("each 14-leg/32-source refresh continuation must fit");
+        calls += 1;
+        max_refresh_cu = max_refresh_cu.max(cu);
+        assert!(
+            calls <= percolator::V16_MAX_PORTFOLIO_ASSETS_N + 2,
+            "max-composition refresh exceeded its active-leg rank"
+        );
+    }
+    let refreshed = env.portfolio_state(lp);
+    assert!(
+        health_cert(&refreshed).certified_liq_deficit > 0,
+        "authenticated adverse marks must make the short portfolio liquidatable"
+    );
+    assert!(
+        max_refresh_cu <= 1_375_000,
+        "14-leg/32-source refresh exceeded its CU envelope: {max_refresh_cu}"
+    );
+
+    env.svm.expire_blockhash();
+    let liquidation_cu = env
+        .send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: slot,
+                observations: vec![],
+            },
+            vec![
+                AccountMeta::new(env.payer.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(lp, false),
+            ],
+            &[],
+        )
+        .expect("14-leg/32-source liquidation must fit");
+    let after = env.portfolio_state(lp);
+    assert!(
+        percolator::active_bitmap_count_ones(active_bitmap(&after))
+            < percolator::active_bitmap_count_ones(active_bitmap(&refreshed))
+    );
+    assert!(
+        liquidation_cu <= 1_375_000,
+        "14-leg/32-source liquidation exceeded its CU envelope: {liquidation_cu}"
+    );
+    assert_eq!(env.token_amount(env.vault), custody_before);
+    println!(
+        "14-leg/32-source refresh calls={calls}, max CU={max_refresh_cu}, \
+         liquidation CU={liquidation_cu}"
+    );
+}
+
+// Public max-shape composition: retain both payout-source domains for every active leg, make one
+// leg adverse through the authenticated mark route, and require finite permissionless progress.
+#[test]
+fn v16_bpf_public_14_leg_28_source_domain_liquidation_is_bounded() {
+    const ASSETS: u16 = 14;
+    const OPEN_PRICE: u64 = 100;
+    const PROFIT_PRICE: u64 = 101;
+    const ADVERSE_PRICE: u64 = 105;
+    const LONG_DEPOSIT: u128 = 1_550;
+    const SHORT_DEPOSIT: u128 = 1_000_000_000;
+    const BACKING: u128 = 10_000_000;
+
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(ASSETS, 1_000, 1_000, 500);
+    env.svm.warp_to_slot(1);
+    for asset_index in 0..ASSETS {
+        env.configure_auth_mark_for_asset_as_admin(asset_index, 1, OPEN_PRICE);
+    }
+
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long_account = env.create_portfolio(&long_owner);
+    let short_account = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long_account, LONG_DEPOSIT);
+    env.deposit(&short_owner, short_account, SHORT_DEPOSIT);
+    let legs = (0..ASSETS)
+        .map(|asset_index| BatchTradeLeg {
+            asset_index,
+            size_q: ((if asset_index == 0 { 140 } else { 1 }) * POS_SCALE) as i128,
+            exec_price: OPEN_PRICE,
+            fee_bps: 0,
+        })
+        .collect();
+    env.send(
+        ProgInstruction::BatchTradeNoCpi { legs },
+        vec![
+            AccountMeta::new(long_owner.pubkey(), true),
+            AccountMeta::new(short_owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(long_account, false),
+            AccountMeta::new(short_account, false),
+        ],
+        &[&long_owner, &short_owner],
+    )
+    .expect("public 14-leg open");
+
+    // Enable the wrapper's source-domain snapshot/fee path, then fund both
+    // source domains for every asset before producing positive PnL.
+    env.update_backing_fee_policy_with_cu(0, 1, 0);
+    for domain in 0..(ASSETS * 2) {
+        env.top_up_backing_bucket(domain, BACKING, 100);
+    }
+
+    env.svm.warp_to_slot(2);
+    for asset_index in 0..ASSETS {
+        env.push_auth_mark_for_asset_as_admin(asset_index, 2, PROFIT_PRICE);
+        env.crank(
+            long_account,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 2,
+                observations: vec![CrankObservationHint {
+                    asset_index,
+                    oracle_accounts: 0,
+                }],
+            },
+        );
+        env.crank(
+            short_account,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 2,
+                observations: vec![],
+            },
+        );
+    }
+    for portfolio in [long_account, short_account] {
+        env.crank(
+            portfolio,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 2,
+                observations: vec![],
+            },
+        );
+    }
+
+    let long_before = env.portfolio_state(long_account);
+    let occupied_before = long_before
+        .source_domains
+        .iter()
+        .filter(|source| source.is_occupied())
+        .count();
+    assert_eq!(
+        occupied_before, ASSETS as usize,
+        "public favorable settlement should retain one source domain per asset"
+    );
+    for asset_index in 0..ASSETS {
+        let position_units = if asset_index == 0 { 140 } else { 1 };
+        env.trade_asset_with_cu(
+            asset_index,
+            &long_owner,
+            long_account,
+            &short_owner,
+            short_account,
+            -((2 * position_units * POS_SCALE) as i128),
+            PROFIT_PRICE,
+            0,
+        );
+    }
+
+    env.svm.warp_to_slot(3);
+    for asset_index in 0..ASSETS {
+        env.push_auth_mark_for_asset_as_admin(asset_index, 3, OPEN_PRICE);
+        env.crank(
+            long_account,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 3,
+                observations: vec![CrankObservationHint {
+                    asset_index,
+                    oracle_accounts: 0,
+                }],
+            },
+        );
+        env.crank(
+            short_account,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 3,
+                observations: vec![],
+            },
+        );
+    }
+    for portfolio in [long_account, short_account] {
+        env.crank(
+            portfolio,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 3,
+                observations: vec![],
+            },
+        );
+    }
+    env.crank(
+        long_account,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 3,
+            observations: vec![],
+        },
+    );
+
+    let long_before_adverse_move = env.portfolio_state(long_account);
+    let occupied_before_adverse_move = long_before_adverse_move
+        .source_domains
+        .iter()
+        .filter(|source| source.is_occupied())
+        .count();
+    assert_eq!(
+        occupied_before_adverse_move,
+        (ASSETS * 2) as usize,
+        "opposite profitable episodes should reach the public source-domain cap"
+    );
+    assert_eq!(
+        long_before_adverse_move
+            .legs
+            .iter()
+            .map(|leg| leg
+                .try_to_runtime()
+                .expect("publicly created leg must decode"))
+            .filter(|leg| leg.active)
+            .count(),
+        ASSETS as usize,
+        "the public setup must retain all 14 active positions"
+    );
+    let group_before_terminal_fork = env.market_state().1;
+    let pending_kf_legs = long_before_adverse_move
+        .legs
+        .iter()
+        .map(|leg| leg.try_to_runtime().expect("max-source leg must decode"))
+        .filter(|leg| {
+            if !leg.active {
+                return false;
+            }
+            let asset = group_before_terminal_fork.assets[leg.asset_index as usize];
+            let (k_target, f_target) = match leg.side {
+                SideV16::Long => (asset.k_long, asset.f_long_num),
+                SideV16::Short => (asset.k_short, asset.f_short_num),
+            };
+            leg.k_snap != k_target || leg.f_snap != f_target
+        })
+        .count();
+    println!("max-source terminal fork pending K/F legs={pending_kf_legs}");
+
+    // Fork the exact public max-source state before the adverse live-market
+    // branch. Resolved mode dispatches directly to CloseResolved, so every
+    // call must fit and consume a bounded terminal rank as well.
+    let mut terminal_svm = LiteSVM::new();
+    terminal_svm.add_program(
+        env.program_id,
+        &std::fs::read(program_path()).expect("read terminal-fork BPF"),
+    );
+    terminal_svm.add_program(
+        spl_token::ID,
+        &std::fs::read(spl_token_program_path()).expect("read terminal-fork token BPF"),
+    );
+    for key in [
+        env.payer.pubkey(),
+        env.admin.pubkey(),
+        env.market,
+        env.mint,
+        env.vault,
+        long_owner.pubkey(),
+        short_owner.pubkey(),
+        long_account,
+        short_account,
+    ] {
+        let account = env
+            .svm
+            .get_account(&key)
+            .unwrap_or_else(|| panic!("terminal fork account missing: {key}"));
+        terminal_svm.set_account(key, account).unwrap();
+    }
+    terminal_svm.warp_to_slot(3);
+    let mut terminal_env = V16CuEnv {
+        svm: terminal_svm,
+        program_id: env.program_id,
+        payer: Keypair::from_bytes(&env.payer.to_bytes()).unwrap(),
+        admin: Keypair::from_bytes(&env.admin.to_bytes()).unwrap(),
+        market: env.market,
+        mint: env.mint,
+        vault: env.vault,
+        vault_authority: env.vault_authority,
+        portfolio_account_len: env.portfolio_account_len,
+    };
+    terminal_env.resolve();
+
+    let terminal_done = |env: &V16CuEnv, portfolio: Pubkey| env.resolved_close_complete(portfolio);
+    let terminal_rank = |env: &V16CuEnv, portfolio: Pubkey| {
+        let account = env.portfolio_state(portfolio);
+        let active = percolator::active_bitmap_count_ones(active_bitmap(&account)) as usize;
+        let unprocessed_sources = account
+            .source_domains
+            .iter()
+            .filter(|source| source.is_occupied() && source.resolved_realization_processed == 0)
+            .count();
+        active + unprocessed_sources + usize::from(!terminal_done(env, portfolio))
+    };
+    let mut terminal_calls = 0usize;
+    let mut max_terminal_cu = 0u64;
+    while !terminal_done(&terminal_env, long_account)
+        || !terminal_done(&terminal_env, short_account)
+    {
+        for (owner, portfolio) in [(&long_owner, long_account), (&short_owner, short_account)] {
+            if terminal_done(&terminal_env, portfolio) {
+                continue;
+            }
+            let rank_before = terminal_rank(&terminal_env, portfolio);
+            terminal_env.svm.expire_blockhash();
+            let (_, cu) = terminal_env.close_resolved_once_with_cu(owner, portfolio);
+            terminal_calls += 1;
+            max_terminal_cu = max_terminal_cu.max(cu);
+            let rank_after = terminal_rank(&terminal_env, portfolio);
+            assert!(
+                rank_after < rank_before,
+                "successful max-source resolved continuation did not decrease rank: {rank_before} -> {rank_after}"
+            );
+            assert!(
+                cu <= 1_375_000,
+                "max-source CloseResolved step exceeded its CU envelope: {cu}"
+            );
+            let source_domains = (ASSETS * 2) as usize;
+            let max_terminal_calls = 2 * (ASSETS as usize + 3 * source_domains + 4);
+            assert!(
+                terminal_calls <= max_terminal_calls,
+                "max-source resolved close exceeded its finite leg/source/payout rank"
+            );
+        }
+    }
+    println!("max-source resolved close calls={terminal_calls}, max CU={max_terminal_cu}");
+    assert_eq!(
+        terminal_env.market_state().1.vault as u64,
+        terminal_env.token_amount(terminal_env.vault)
+    );
+
+    let source_claim_total = |env: &V16CuEnv, portfolio: Pubkey| {
+        env.portfolio_state(portfolio)
+            .source_domains
+            .iter()
+            .map(|source| source.source_claim_bound_num.get())
+            .sum::<u128>()
+    };
+
+    env.svm.warp_to_slot(4);
+    env.push_auth_mark_for_asset_as_admin(0, 4, ADVERSE_PRICE);
+    let vault_before_refresh = env.market_state().1.vault;
+    let token_vault_before_refresh = env.token_amount(env.vault);
+    let observer_owner = Keypair::new();
+    let observer_account = env.create_portfolio(&observer_owner);
+    env.svm.expire_blockhash();
+    let observation_cu = env
+        .send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 4,
+                observations: vec![CrankObservationHint {
+                    asset_index: 0,
+                    oracle_accounts: 0,
+                }],
+            },
+            vec![
+                AccountMeta::new(env.payer.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(observer_account, false),
+            ],
+            &[],
+        )
+        .expect("observation-only crank must fit");
+    assert!(
+        observation_cu <= 300_000,
+        "observation-only crank exceeded its CU envelope: {observation_cu}"
+    );
+
+    let claims_before_refresh = source_claim_total(&env, long_account);
+    let pnl_before_refresh = env.portfolio_state(long_account).pnl.get();
+    env.svm.expire_blockhash();
+    let first_refresh_cu = env
+        .send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 4,
+                observations: vec![],
+            },
+            vec![
+                AccountMeta::new(env.payer.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(long_account, false),
+            ],
+            &[],
+        )
+        .expect("first max-source stale-leg settlement must fit");
+    println!("first max-source stale-leg settlement CU: {first_refresh_cu}");
+    assert!(
+        first_refresh_cu <= 1_375_000,
+        "first max-source stale-leg settlement exceeded its CU envelope: {first_refresh_cu}"
+    );
+    assert!(
+        source_claim_total(&env, long_account) < claims_before_refresh,
+        "first stale-leg settlement must consume source-claim rank"
+    );
+    assert!(
+        env.portfolio_state(long_account).pnl.get() < pnl_before_refresh,
+        "first stale-leg settlement must consume favorable PnL"
+    );
+    assert!(!portfolio_cert_is_current(&env, long_account));
+
+    let mut refresh_calls = 1usize;
+    let mut max_refresh_cu = first_refresh_cu;
+    while !portfolio_cert_is_current(&env, long_account) {
+        let claims_before = source_claim_total(&env, long_account);
+        let pnl_before = env.portfolio_state(long_account).pnl.get();
+        env.svm.expire_blockhash();
+        let cu = env
+            .send(
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: 4,
+                    observations: vec![],
+                },
+                vec![
+                    AccountMeta::new(env.payer.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(long_account, false),
+                ],
+                &[],
+            )
+            .expect("each max-source refresh continuation must fit");
+        refresh_calls += 1;
+        max_refresh_cu = max_refresh_cu.max(cu);
+        assert!(
+            refresh_calls <= ASSETS as usize + 1,
+            "max-source refresh exceeded the active-leg rank"
+        );
+
+        if !portfolio_cert_is_current(&env, long_account) {
+            assert!(
+                source_claim_total(&env, long_account) < claims_before,
+                "a nonterminal refresh step must consume source-claim rank"
+            );
+            assert!(
+                env.portfolio_state(long_account).pnl.get() < pnl_before,
+                "a nonterminal refresh step must consume favorable PnL"
+            );
+        }
+    }
+    assert!(
+        max_refresh_cu <= 1_375_000,
+        "max-source refresh continuation exceeded its CU envelope: {max_refresh_cu}"
+    );
+    println!("max-source refresh calls={refresh_calls}, max CU={max_refresh_cu}");
+    assert_eq!(env.market_state().1.vault, vault_before_refresh);
+    assert_eq!(env.token_amount(env.vault), token_vault_before_refresh);
+
+    let liquidatable = env.portfolio_state(long_account);
+    assert!(health_cert(&liquidatable).certified_liq_deficit > 0);
+    let exposure_before = liquidatable
+        .legs
+        .iter()
+        .map(|leg| leg.try_to_runtime().expect("liquidatable leg must decode"))
+        .filter(|leg| leg.active)
+        .map(|leg| leg.basis_pos_q.unsigned_abs())
+        .sum::<u128>();
+    env.svm.expire_blockhash();
+    let liquidation_cu = env
+        .send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 4,
+                observations: vec![],
+            },
+            vec![
+                AccountMeta::new(env.payer.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(long_account, false),
+            ],
+            &[],
+        )
+        .expect("current max-source account must be permissionlessly liquidatable");
+    println!("max-source liquidation CU: {liquidation_cu}");
+    assert!(
+        liquidation_cu <= 1_375_000,
+        "max-source liquidation exceeded its CU envelope: {liquidation_cu}"
+    );
+    let exposure_after = env
+        .portfolio_state(long_account)
+        .legs
+        .iter()
+        .map(|leg| leg.try_to_runtime().expect("post-crank leg must decode"))
+        .filter(|leg| leg.active)
+        .map(|leg| leg.basis_pos_q.unsigned_abs())
+        .sum::<u128>();
+    assert!(
+        exposure_after < exposure_before,
+        "engine-selected liquidation must strictly reduce aggregate exposure"
+    );
+    assert_eq!(
+        env.market_state().1.vault as u64,
+        env.token_amount(env.vault)
+    );
+}
+
+// A portfolio's source table is sparse and bounded by entry count, not by global domain ID.
+// Resolved progress must therefore work for source claims on assets above index 15 as well.
+#[test]
+fn v16_attack_resolved_high_domain_source_claim_has_bounded_exit() {
+    const ASSET: u16 = 16;
+    const PRICE: u64 = 100;
+    const PROFIT_PRICE: u64 = 101;
+
+    let mut env = V16CuEnv::new_with_init_params_and_market_capacity(
+        V16CuMarketParams {
+            max_portfolio_assets: percolator_prog::constants::WRAPPER_MAX_PORTFOLIO_ASSETS,
+            maintenance_margin_bps: 10_000,
+            initial_margin_bps: 10_000,
+            max_price_move_bps_per_slot: 10_000,
+            ..V16CuMarketParams::default()
+        },
+        ASSET as usize + 1,
+    );
+    let start = env.market_state().1.config.max_market_slots as u16;
+    for asset_index in start..=ASSET {
+        env.activate_asset(asset_index, u64::from(asset_index) + 1, PRICE);
+    }
+    env.svm.warp_to_slot(20);
+    env.configure_auth_mark_for_asset_as_admin(ASSET, 20, PRICE);
+
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long_account = env.create_portfolio(&long_owner);
+    let short_account = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long_account, 1_000_000);
+    env.deposit(&short_owner, short_account, 1_000_000);
+    env.trade_asset_with_cu(
+        ASSET,
+        &long_owner,
+        long_account,
+        &short_owner,
+        short_account,
+        (100 * POS_SCALE) as i128,
+        PRICE,
+        0,
+    );
+
+    let long_domain = ASSET * 2;
+    let short_domain = long_domain + 1;
+    env.update_backing_fee_policy_with_cu(long_domain, 1, 0);
+    env.top_up_backing_bucket(long_domain, 1_000_000, 100);
+    env.top_up_backing_bucket(short_domain, 1_000_000, 100);
+
+    env.svm.warp_to_slot(21);
+    env.push_auth_mark_for_asset_as_admin(ASSET, 21, PROFIT_PRICE);
+    env.crank(
+        long_account,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 21,
+            observations: crank_observations(ASSET),
+        },
+    );
+    env.crank(
+        short_account,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 21,
+            observations: vec![],
+        },
+    );
+
+    let winner_before = env.portfolio_state(long_account);
+    assert!(winner_before.pnl.get() > 0);
+    assert!(
+        winner_before
+            .source_domains
+            .iter()
+            .any(|source| source.is_occupied() && source.domain.get() >= u32::BITS),
+        "public setup must create a source-backed claim with a global domain ID above 31"
+    );
+
+    env.resolve();
+    let (_, loser_cu) = env.close_resolved_with_cu(&short_owner, short_account);
+    let (winner_dest, winner_cu) = env.close_resolved_with_cu(&long_owner, long_account);
+    assert!(
+        loser_cu.max(winner_cu) <= 1_375_000,
+        "high-domain resolved close exceeded its CU envelope"
+    );
+    assert!(
+        env.token_amount(winner_dest) > 1_000_000,
+        "the high-domain winner must receive capital plus its backed profit"
+    );
+    assert!(env.resolved_close_complete(long_account));
+    assert_eq!(
+        env.market_state().1.vault as u64,
+        env.token_amount(env.vault)
+    );
+}
+
 #[test]
 fn v16_bpf_close_resolved_moves_payout_tokens_with_ledger() {
     let mut env = V16CuEnv::new();
@@ -16334,6 +17184,25 @@ fn v16_attack_insolvency_bad_debt_is_socialized_not_printed() {
         ],
         &[],
     );
+    let paper_winner = env.portfolio_state(long_account);
+    let paper_short = env.portfolio_state(short_account);
+    let paper_group = env.market_state().1;
+    let paper_residual = paper_group
+        .vault
+        .saturating_sub(paper_group.c_tot)
+        .saturating_sub(paper_group.insurance);
+    let paper_positive_pnl =
+        paper_winner.pnl.get().max(0) as u128 + paper_short.pnl.get().max(0) as u128;
+    assert!(
+        paper_positive_pnl > paper_residual,
+        "setup must create unbacked paper PnL before bounded settlement"
+    );
+    let (_, winner_refresh_cu) = drive_portfolio_cert_current(&mut env, long_account, 2, 0, 8);
+    assert_cu_within(
+        "insolvency winner bounded refresh",
+        winner_refresh_cu,
+        CRANK_CU_LIMIT,
+    );
 
     let lo = state::read_portfolio(&env.svm.get_account(&long_account).unwrap().data).unwrap();
     let sh = state::read_portfolio(&env.svm.get_account(&short_account).unwrap().data).unwrap();
@@ -16357,10 +17226,8 @@ fn v16_attack_insolvency_bad_debt_is_socialized_not_printed() {
     let residual = g.vault.saturating_sub(g.c_tot).saturating_sub(g.insurance);
     let pos_pnl = lo.pnl.get().max(0) as u128 + sh.pnl.get().max(0) as u128;
     assert!(
-        pos_pnl > residual,
-        "setup must create more positive paper pnl than backed residual (residual {} pos_pnl {})",
-        residual,
-        pos_pnl
+        pos_pnl <= paper_positive_pnl,
+        "bounded settlement cannot increase positive paper PnL"
     );
     assert!(health_cert(&lo).valid, "winner cert refreshed");
     assert!(
@@ -17275,6 +18142,7 @@ fn v16_attack_resolved_cross_margin_deep_insolvency_winds_down_publicly() {
         loser_crank_cu,
         CRANK_CU_LIMIT,
     );
+    let _ = env.close_resolved(&victim_owner, victim);
     let victim_after = env.portfolio_state(victim);
     assert_eq!(
         victim_after.capital.get(),
@@ -17864,24 +18732,36 @@ fn v16_attack_resolved_payout_dual_mint_replay_extracts_nothing() {
     );
 
     let secondary_dest = env.token_account_for_mint(secondary, lo_owner.pubkey(), 0);
-    env.svm.expire_blockhash();
-    let secondary_close_cu = env
-        .send(
-            ProgInstruction::CloseResolved {
-                fee_rate_per_slot: 0,
-            },
-            vec![
-                AccountMeta::new_readonly(lo_owner.pubkey(), false),
-                AccountMeta::new(env.market, false),
-                AccountMeta::new(lo, false),
-                AccountMeta::new(secondary_dest, false),
-                AccountMeta::new(secondary_vault, false),
-                AccountMeta::new_readonly(env.vault_authority, false),
-                AccountMeta::new_readonly(spl_token::ID, false),
-            ],
-            &[],
-        )
-        .expect("close resolved through secondary reserve");
+    let mut secondary_close_cu = 0;
+    for step in 0..(percolator::V16_MAX_PORTFOLIO_ASSETS_N
+        + 3 * percolator::PORTFOLIO_SOURCE_DOMAIN_CAP
+        + 8)
+    {
+        if step != 0 {
+            env.svm.expire_blockhash();
+        }
+        secondary_close_cu = secondary_close_cu.max(
+            env.send(
+                ProgInstruction::CloseResolved {
+                    fee_rate_per_slot: 0,
+                },
+                vec![
+                    AccountMeta::new_readonly(lo_owner.pubkey(), false),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(lo, false),
+                    AccountMeta::new(secondary_dest, false),
+                    AccountMeta::new(secondary_vault, false),
+                    AccountMeta::new_readonly(env.vault_authority, false),
+                    AccountMeta::new_readonly(spl_token::ID, false),
+                ],
+                &[],
+            )
+            .expect("close resolved through secondary reserve"),
+        );
+        if env.token_amount(secondary_dest) != 0 {
+            break;
+        }
+    }
     assert_cu_within(
         "CloseResolved secondary payout",
         secondary_close_cu,
@@ -18188,55 +19068,88 @@ fn v16_attack_terminal_secondary_payouts_reject_noncanonical_vault() {
     );
 
     let secondary_dest = env.token_account_for_mint(secondary, lo_owner.pubkey(), 0);
-    let market_before = env.svm.get_account(&env.market).unwrap();
-    let winner_before = env.svm.get_account(&lo).unwrap();
-    let canonical_before = env.svm.get_account(&secondary_vault).unwrap();
-    let fake_before = env.svm.get_account(&fake_secondary_vault).unwrap();
-    let dest_before = env.svm.get_account(&secondary_dest).unwrap();
-    env.svm.expire_blockhash();
-    let rejected_close = env.send(
-        ProgInstruction::CloseResolved {
-            fee_rate_per_slot: 0,
-        },
-        vec![
-            AccountMeta::new_readonly(lo_owner.pubkey(), false),
-            AccountMeta::new(env.market, false),
-            AccountMeta::new(lo, false),
-            AccountMeta::new(secondary_dest, false),
-            AccountMeta::new(fake_secondary_vault, false),
-            AccountMeta::new_readonly(env.vault_authority, false),
-            AccountMeta::new_readonly(spl_token::ID, false),
-        ],
-        &[],
-    );
+    let mut rejected_at_payout = false;
+    for step in 0..(percolator::V16_MAX_PORTFOLIO_ASSETS_N
+        + 3 * percolator::PORTFOLIO_SOURCE_DOMAIN_CAP
+        + 8)
+    {
+        if step != 0 {
+            env.svm.expire_blockhash();
+        }
+        let market_before = env.svm.get_account(&env.market).unwrap();
+        let winner_before = env.svm.get_account(&lo).unwrap();
+        let canonical_before = env.svm.get_account(&secondary_vault).unwrap();
+        let fake_before = env.svm.get_account(&fake_secondary_vault).unwrap();
+        let dest_before = env.svm.get_account(&secondary_dest).unwrap();
+        let close = env.send(
+            ProgInstruction::CloseResolved {
+                fee_rate_per_slot: 0,
+            },
+            vec![
+                AccountMeta::new_readonly(lo_owner.pubkey(), false),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(lo, false),
+                AccountMeta::new(secondary_dest, false),
+                AccountMeta::new(fake_secondary_vault, false),
+                AccountMeta::new_readonly(env.vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[],
+        );
+        if close.is_ok() {
+            assert!(
+                env.svm.get_account(&env.market).unwrap() != market_before
+                    || env.svm.get_account(&lo).unwrap() != winner_before,
+                "a pre-payout CloseResolved call must make bounded progress"
+            );
+            assert_eq!(
+                env.svm.get_account(&secondary_vault).unwrap(),
+                canonical_before,
+                "progress-only close does not touch the canonical reserve"
+            );
+            assert_eq!(
+                env.svm.get_account(&fake_secondary_vault).unwrap(),
+                fake_before,
+                "progress-only close does not touch the supplied reserve"
+            );
+            assert_eq!(
+                env.svm.get_account(&secondary_dest).unwrap(),
+                dest_before,
+                "progress-only close does not pay the owner"
+            );
+            continue;
+        }
+        assert_eq!(
+            env.svm.get_account(&env.market).unwrap(),
+            market_before,
+            "rejected close leaves terminal market accounting byte-identical"
+        );
+        assert_eq!(
+            env.svm.get_account(&lo).unwrap(),
+            winner_before,
+            "rejected close does not burn the winner receipt"
+        );
+        assert_eq!(
+            env.svm.get_account(&secondary_vault).unwrap(),
+            canonical_before,
+            "canonical secondary vault remains untouched"
+        );
+        assert_eq!(
+            env.svm.get_account(&fake_secondary_vault).unwrap(),
+            fake_before,
+            "fake secondary reserve remains untouched"
+        );
+        assert_eq!(
+            env.svm.get_account(&secondary_dest).unwrap(),
+            dest_before,
+            "owner receives no payout from rejected non-canonical close"
+        );
+        rejected_at_payout = true;
+        break;
+    }
     assert!(
-        rejected_close.is_err(),
-        "CloseResolved must reject a non-canonical secondary reserve"
-    );
-    assert_eq!(
-        env.svm.get_account(&env.market).unwrap(),
-        market_before,
-        "rejected close leaves terminal market accounting byte-identical"
-    );
-    assert_eq!(
-        env.svm.get_account(&lo).unwrap(),
-        winner_before,
-        "rejected close does not burn the winner receipt"
-    );
-    assert_eq!(
-        env.svm.get_account(&secondary_vault).unwrap(),
-        canonical_before,
-        "canonical secondary vault remains untouched"
-    );
-    assert_eq!(
-        env.svm.get_account(&fake_secondary_vault).unwrap(),
-        fake_before,
-        "fake secondary reserve remains untouched"
-    );
-    assert_eq!(
-        env.svm.get_account(&secondary_dest).unwrap(),
-        dest_before,
-        "owner receives no payout from rejected non-canonical close"
+        rejected_at_payout,
+        "CloseResolved must reject the non-canonical reserve at the payout boundary"
     );
 
     env.svm.expire_blockhash();
@@ -38403,12 +39316,13 @@ fn v16_attack_adl_then_settlement_winner_cannot_escape_deleverage() {
     // SECOND mark move + crank the winner: this settles the deleveraged leg (a_basis vs reduced a_long).
     env.svm.warp_to_slot(7);
     env.push_auth_mark_with_cu(7, 800);
-    env.crank(
-        a,
-        ProgInstruction::PermissionlessCrank {
-            now_slot: 7,
-            observations: crank_observations(0),
-        },
+    let (winner_refresh_calls, winner_refresh_cu) =
+        drive_portfolio_cert_current(&mut env, a, 7, 0, 4);
+    assert!(winner_refresh_calls > 0);
+    assert_cu_within(
+        "post-ADL winner refresh steps",
+        winner_refresh_cu,
+        CRANK_CU_LIMIT,
     );
 
     let win = env.portfolio_state(a);
@@ -40416,21 +41330,18 @@ fn v16_attack_cross_margin_netting_conserves() {
         ],
         &[&admin],
     );
-    for ai in [0u16, 1] {
-        env.svm.expire_blockhash();
-        let _ = env.send(
+    for (ai, counterparty) in [(0u16, y0), (1, y1)] {
+        env.crank(
+            counterparty,
             ProgInstruction::PermissionlessCrank {
                 now_slot: 2,
                 observations: crank_observations(ai),
             },
-            vec![
-                AccountMeta::new(env.payer.pubkey(), true),
-                AccountMeta::new(env.market, false),
-                AccountMeta::new(x, false),
-            ],
-            &[],
         );
     }
+    let (refresh_calls, refresh_cu) = drive_portfolio_cert_current(&mut env, x, 2, 0, 4);
+    assert!(refresh_calls > 0);
+    assert_cu_within("two-leg cross-margin refresh", refresh_cu, CRANK_CU_LIMIT);
 
     let xs = env.portfolio_state(x);
     let g = env.market_state().1;
