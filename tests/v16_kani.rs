@@ -9,6 +9,58 @@ use percolator_prog::matcher_abi::{
 use percolator_prog::policy_v16;
 
 #[kani::proof]
+fn kani_v16_unsigned_lp_cohort_gate_is_side_exact_and_preserves_reductions() {
+    let current_q: i64 = kani::any();
+    let delta_q: i64 = kani::any();
+    let stale_long: bool = kani::any();
+    let stale_short: bool = kani::any();
+    let unresolved_negative: bool = kani::any();
+    let current_q = current_q as i128;
+    let delta_q = delta_q as i128;
+    let next_q = current_q + delta_q;
+
+    let current_long = current_q.max(0) as u128;
+    let current_short = current_q.min(0).unsigned_abs();
+    let next_long = next_q.max(0) as u128;
+    let next_short = next_q.min(0).unsigned_abs();
+    let adds_long = next_long > current_long;
+    let adds_short = next_short > current_short;
+    let expected = (adds_long && stale_short)
+        || (adds_short && stale_long)
+        || ((adds_long || adds_short) && unresolved_negative);
+
+    let blocked = policy_v16::unsigned_lp_adds_unsettled_cohort_exposure(
+        current_q,
+        delta_q,
+        stale_long,
+        stale_short,
+        unresolved_negative,
+    )
+    .unwrap();
+
+    kani::cover!(
+        !adds_long && !adds_short && (stale_long || stale_short || unresolved_negative),
+        "pure LP reduction remains live while historical settlement is pending"
+    );
+    kani::cover!(
+        adds_long && stale_short && !stale_long,
+        "fresh long exposure is bound to stale short counterparties"
+    );
+    kani::cover!(
+        adds_short && stale_long && !stale_short,
+        "fresh short exposure is bound to stale long counterparties"
+    );
+    kani::cover!(
+        (adds_long || adds_short) && unresolved_negative,
+        "the post-settlement pre-booking interval blocks fresh unsigned exposure"
+    );
+    assert_eq!(blocked, expected);
+    if !adds_long && !adds_short {
+        assert!(!blocked);
+    }
+}
+
+#[kani::proof]
 fn kani_v16_premium_funding_rate_is_clamped_and_signed() {
     let mark_raw: u16 = kani::any();
     let index_raw: u16 = kani::any();

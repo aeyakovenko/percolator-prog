@@ -4117,6 +4117,34 @@ pub mod oracle_v16 {
 pub mod policy_v16 {
     use crate::constants::MAX_DYNAMIC_TRADE_FEE_BPS;
 
+    pub fn unsigned_lp_adds_unsettled_cohort_exposure(
+        current_q: i128,
+        delta_q: i128,
+        stale_long_counterparties: bool,
+        stale_short_counterparties: bool,
+        unresolved_negative_pnl: bool,
+    ) -> Option<bool> {
+        let next_q = current_q.checked_add(delta_q)?;
+        if next_q == i128::MIN {
+            return None;
+        }
+        let current_long = if current_q > 0 { current_q as u128 } else { 0 };
+        let current_short = if current_q < 0 {
+            current_q.unsigned_abs()
+        } else {
+            0
+        };
+        let next_long = if next_q > 0 { next_q as u128 } else { 0 };
+        let next_short = if next_q < 0 { next_q.unsigned_abs() } else { 0 };
+        let adds_long = next_long > current_long;
+        let adds_short = next_short > current_short;
+        Some(
+            (adds_long && stale_short_counterparties)
+                || (adds_short && stale_long_counterparties)
+                || ((adds_long || adds_short) && unresolved_negative_pnl),
+        )
+    }
+
     pub fn price_move_bps_ceil(old: u64, new: u64) -> Option<u64> {
         if old == 0 || old == new {
             return Some(0);
@@ -10979,6 +11007,34 @@ pub mod processor {
         Ok(0)
     }
 
+    fn signed_positions_for_cpi_requests_view(
+        portfolio: &percolator::PortfolioV16ViewMut<'_>,
+        cpi_requests: &[(u16, i128)],
+        request_market_ids: &[u64; MATCHER_BATCH_MAX_LEGS],
+    ) -> Result<[i128; MATCHER_BATCH_MAX_LEGS], ProgramError> {
+        let mut positions = [0i128; MATCHER_BATCH_MAX_LEGS];
+        let mut slot = 0usize;
+        while slot < percolator::V16_MAX_PORTFOLIO_ASSETS_N {
+            let leg = portfolio.header.legs[slot]
+                .try_to_runtime()
+                .map_err(map_v16_error)?;
+            if leg.active {
+                for (request_index, &(asset_index, _)) in cpi_requests.iter().enumerate() {
+                    if leg.asset_index == asset_index as u32
+                        && leg.market_id == request_market_ids[request_index]
+                    {
+                        positions[request_index] = match leg.side {
+                            SideV16::Long => leg.basis_pos_q.unsigned_abs() as i128,
+                            SideV16::Short => -(leg.basis_pos_q.unsigned_abs() as i128),
+                        };
+                    }
+                }
+            }
+            slot += 1;
+        }
+        Ok(positions)
+    }
+
     fn ensure_trade_portfolio_current_for_requests_view(
         group: &state::MarketViewMutV16<'_>,
         portfolio: &percolator::PortfolioV16ViewMut<'_>,
@@ -11057,13 +11113,25 @@ pub mod processor {
         account_b: &percolator::PortfolioV16ViewMut<'_>,
         cpi_requests: &[(u16, i128)],
     ) -> ProgramResult {
-        for &(asset_index_u16, size_q) in cpi_requests {
+        if cpi_requests.len() > MATCHER_BATCH_MAX_LEGS {
+            return Err(PercolatorError::InvalidInstruction.into());
+        }
+        let mut request_market_ids = [0u64; MATCHER_BATCH_MAX_LEGS];
+        for (request_index, &(asset_index_u16, _)) in cpi_requests.iter().enumerate() {
             let asset_index = asset_index_u16 as usize;
             if asset_index >= group.header.config.max_market_slots.get() as usize
                 || asset_index >= group.markets.len()
             {
                 return Err(PercolatorError::InvalidInstruction.into());
             }
+            request_market_ids[request_index] =
+                group.markets[asset_index].engine.asset.market_id.get();
+        }
+        let account_b_positions =
+            signed_positions_for_cpi_requests_view(account_b, cpi_requests, &request_market_ids)?;
+        for (request_index, &(asset_index_u16, size_q)) in cpi_requests.iter().enumerate() {
+            let asset_index = asset_index_u16 as usize;
+            let account_b_pos = account_b_positions[request_index];
             match group.markets[asset_index].engine.asset.lifecycle {
                 ASSET_LIFECYCLE_ACTIVE => {}
                 ASSET_LIFECYCLE_DRAIN_ONLY | ASSET_LIFECYCLE_RECOVERY => {
@@ -11076,8 +11144,6 @@ pub mod processor {
                     }
                     let account_a_pos =
                         signed_position_for_asset_view(group, account_a, asset_index)?;
-                    let account_b_pos =
-                        signed_position_for_asset_view(group, account_b, asset_index)?;
                     if requested_delta_must_increase_risk(account_a_pos, size_q)
                         || requested_delta_must_increase_risk(account_b_pos, -size_q)
                     {
@@ -11085,6 +11151,21 @@ pub mod processor {
                     }
                 }
                 _ => return Err(PercolatorError::EngineLockActive.into()),
+            }
+            let lp_delta = size_q
+                .checked_neg()
+                .ok_or(PercolatorError::EngineArithmeticOverflow)?;
+            let asset = &group.markets[asset_index].engine.asset;
+            let unsafe_unsigned_exposure = policy_v16::unsigned_lp_adds_unsettled_cohort_exposure(
+                account_b_pos,
+                lp_delta,
+                asset.stale_account_count_long.get() != 0,
+                asset.stale_account_count_short.get() != 0,
+                group.header.negative_pnl_account_count.get() != 0,
+            )
+            .ok_or(PercolatorError::EngineArithmeticOverflow)?;
+            if unsafe_unsigned_exposure {
+                return Err(PercolatorError::EngineLockActive.into());
             }
         }
         Ok(())
