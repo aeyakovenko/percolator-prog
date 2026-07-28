@@ -59717,3 +59717,102 @@ fn v16_attack_underfunded_exit_cannot_move_ewma_with_uncollectible_fee() {
         assert_underfunded_ewma_exit_uses_collected_fee(path);
     }
 }
+
+// LoF sweep: a permissionless retired-slot activation is an owner-signed value intent. Two
+// fee-bump variants may share the same semantic activation while having distinct transaction
+// signatures. Once one variant activates generation N, a retained variant must not become valid
+// again after that generation is retired; otherwise an unprivileged relayer can charge the creator
+// a second init fee and reinstall stale price/authority material.
+#[test]
+fn v16_attack_retained_reuse_activation_cannot_debit_next_generation() {
+    const FEE: u128 = 500;
+    const ASSET_INDEX: u16 = 1;
+
+    let mut env = V16CuEnv::new();
+    env.update_market_init_fee_policy_with_cu(FEE);
+
+    // Bootstrap and retire slot 1 so the honest creator's signed request exercises the
+    // permissionless reuse path rather than first-time market growth.
+    env.svm.warp_to_slot(1);
+    env.update_asset_lifecycle_as_admin_with_cu(
+        processor::ASSET_ACTION_ACTIVATE,
+        ASSET_INDEX,
+        1,
+        100,
+    );
+    env.svm.warp_to_slot(2);
+    env.update_asset_lifecycle_as_admin_with_cu(processor::ASSET_ACTION_RETIRE, ASSET_INDEX, 2, 0);
+
+    let creator = Keypair::new();
+    env.ensure_signer_account(creator.pubkey());
+    let source = env.token_account(creator.pubkey(), (2 * FEE) as u64);
+    env.svm.warp_to_slot(3);
+    env.svm.expire_blockhash();
+    let blockhash = env.svm.latest_blockhash();
+    let activate_ix = Instruction {
+        program_id: env.program_id,
+        accounts: vec![
+            AccountMeta::new(creator.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        data: ProgInstruction::UpdateAssetLifecycle {
+            action: processor::ASSET_ACTION_ACTIVATE,
+            asset_index: ASSET_INDEX,
+            now_slot: 3,
+            initial_price: 100,
+            insurance_authority: creator.pubkey().to_bytes(),
+            insurance_operator: creator.pubkey().to_bytes(),
+            backing_bucket_authority: creator.pubkey().to_bytes(),
+            oracle_authority: creator.pubkey().to_bytes(),
+        }
+        .encode(),
+    };
+    let intended = Transaction::new_signed_with_payer(
+        &[heap_ix(), cu_ix(), activate_ix.clone()],
+        Some(&env.payer.pubkey()),
+        &[&env.payer, &creator],
+        blockhash,
+    );
+    let retained = Transaction::new_signed_with_payer(
+        &[
+            heap_ix(),
+            cu_ix(),
+            ComputeBudgetInstruction::set_compute_unit_price(1),
+            activate_ix,
+        ],
+        Some(&env.payer.pubkey()),
+        &[&env.payer, &creator],
+        blockhash,
+    );
+    env.svm
+        .send_transaction(intended)
+        .expect("the creator's intended reuse activation lands");
+    assert_eq!(env.token_amount(source), FEE as u64);
+    let first_generation = env.market_state().1.assets[ASSET_INDEX as usize].market_id;
+
+    // Normal lifecycle progress makes the same slot reusable again while the retained blockhash
+    // variant remains valid.
+    env.svm.warp_to_slot(4);
+    env.update_asset_lifecycle_as_admin_with_cu(processor::ASSET_ACTION_RETIRE, ASSET_INDEX, 4, 0);
+    assert_eq!(
+        env.market_state().1.assets[ASSET_INDEX as usize].lifecycle,
+        AssetLifecycleV16::Retired
+    );
+    let source_before = env.svm.get_account(&source).unwrap();
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+
+    env.svm.warp_to_slot(5);
+    let replay = env.svm.send_transaction(retained);
+    assert!(
+        replay.is_err(),
+        "retained generation-{first_generation} reuse activation must reject instead of \
+         charging the creator twice and installing another asset generation"
+    );
+    assert_eq!(env.svm.get_account(&source).unwrap(), source_before);
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+    assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+}
