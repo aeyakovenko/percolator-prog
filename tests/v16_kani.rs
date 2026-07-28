@@ -6,7 +6,29 @@ use percolator_prog::ix::{CrankObservationHint, Instruction};
 use percolator_prog::matcher_abi::{
     validate_matcher_return, MatcherReturn, FLAG_PARTIAL_OK, FLAG_REJECTED, FLAG_VALID,
 };
-use percolator_prog::policy_v16;
+use percolator_prog::{policy_v16, processor};
+
+#[kani::proof]
+fn kani_v16_retired_activation_intent_cannot_cross_next_retirement() {
+    let intent_slot: u64 = kani::any();
+    let first_authenticated_slot: u64 = kani::any();
+    let prior_retired_slot: u64 = kani::any();
+    let next_retired_slot: u64 = kani::any();
+    let replay_authenticated_slot: u64 = kani::any();
+
+    kani::assume(processor::activation_intent_slot_is_fresh(
+        intent_slot,
+        first_authenticated_slot,
+        prior_retired_slot,
+    ));
+    kani::assume(next_retired_slot >= first_authenticated_slot);
+
+    assert!(!processor::activation_intent_slot_is_fresh(
+        intent_slot,
+        replay_authenticated_slot,
+        next_retired_slot,
+    ));
+}
 
 #[kani::proof]
 fn kani_v16_premium_funding_rate_is_clamped_and_signed() {

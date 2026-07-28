@@ -4925,11 +4925,11 @@ fn v16_bpf_permissionless_reuse_activation_uses_authenticated_slot() {
         AssetLifecycleV16::Retired
     );
 
-    env.svm.warp_to_slot(4);
+    env.svm.warp_to_slot(5);
     env.activate_permissionless_asset_with_fee(
         &attacker,
         1,
-        u64::MAX,
+        4,
         250,
         attacker.pubkey(),
         attacker.pubkey(),
@@ -4940,17 +4940,17 @@ fn v16_bpf_permissionless_reuse_activation_uses_authenticated_slot() {
 
     let (_, group) = env.market_state();
     assert_eq!(
-        group.current_slot, 4,
+        group.current_slot, 5,
         "permissionless reuse activation must authenticate now_slot against Clock"
     );
-    assert_eq!(group.assets[1].slot_last, 4);
+    assert_eq!(group.assets[1].slot_last, 5);
 
     let cranker = Keypair::new();
     let cranker_portfolio = env.create_portfolio(&cranker);
     env.crank(
         cranker_portfolio,
         ProgInstruction::PermissionlessCrank {
-            now_slot: 4,
+            now_slot: 5,
             observations: crank_observations(0),
         },
     );
@@ -4999,27 +4999,27 @@ fn v16_bpf_privileged_reactivate_uses_authenticated_slot() {
         0,
     );
 
-    env.svm.warp_to_slot(4);
+    env.svm.warp_to_slot(5);
     env.update_asset_lifecycle_as_admin_with_cu(
         percolator_prog::processor::ASSET_ACTION_ACTIVATE,
         1,
-        u64::MAX,
+        4,
         250,
     );
 
     let (_, group) = env.market_state();
     assert_eq!(
-        group.current_slot, 4,
+        group.current_slot, 5,
         "privileged reactivation must authenticate now_slot against Clock"
     );
-    assert_eq!(group.assets[1].slot_last, 4);
+    assert_eq!(group.assets[1].slot_last, 5);
 
     let cranker = Keypair::new();
     let cranker_portfolio = env.create_portfolio(&cranker);
     env.crank(
         cranker_portfolio,
         ProgInstruction::PermissionlessCrank {
-            now_slot: 4,
+            now_slot: 5,
             observations: crank_observations(0),
         },
     );
@@ -59809,8 +59809,9 @@ fn v16_attack_retained_reuse_activation_cannot_debit_next_generation() {
     let replay = env.svm.send_transaction(retained);
     assert!(
         replay.is_err(),
-        "retained generation-{first_generation} reuse activation must reject instead of \
-         charging the creator twice and installing another asset generation"
+        "retained generation-{} reuse activation must reject instead of charging the creator \
+         twice and installing another asset generation",
+        first_generation
     );
     assert_eq!(env.svm.get_account(&source).unwrap(), source_before);
     assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);

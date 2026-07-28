@@ -4334,6 +4334,16 @@ pub mod processor {
         Clock::get().map(|c| c.slot).unwrap_or(fallback_slot)
     }
 
+    #[doc(hidden)]
+    #[inline]
+    pub fn activation_intent_slot_is_fresh(
+        intent_slot: u64,
+        authenticated_slot: u64,
+        retired_slot: u64,
+    ) -> bool {
+        intent_slot != 0 && intent_slot <= authenticated_slot && intent_slot > retired_slot
+    }
+
     fn authenticated_market_slot_or_fallback_view(group: &state::MarketViewMutV16<'_>) -> u64 {
         core::cmp::max(
             Clock::get()
@@ -9170,6 +9180,15 @@ pub mod processor {
                         {
                             return Err(PercolatorError::EngineLockActive.into());
                         }
+                        let retired_slot =
+                            group.markets[asset_index].engine.asset.retired_slot.get();
+                        if !activation_intent_slot_is_fresh(
+                            now_slot,
+                            authenticated_slot,
+                            retired_slot,
+                        ) {
+                            return Err(PercolatorError::InvalidInstruction.into());
+                        }
                         // Reject zero domain authorities, mirroring the append path
                         // (activate_dynamic_asset_slot, ~line 1475). A zero
                         // insurance_authority makes that domain's insurance budget
@@ -9368,6 +9387,17 @@ pub mod processor {
                     }
                     let was_retired = group.markets[asset_index].engine.asset.lifecycle
                         == ASSET_LIFECYCLE_RETIRED;
+                    if was_retired {
+                        let retired_slot =
+                            group.markets[asset_index].engine.asset.retired_slot.get();
+                        if !activation_intent_slot_is_fresh(
+                            now_slot,
+                            authenticated_slot,
+                            retired_slot,
+                        ) {
+                            return Err(PercolatorError::InvalidInstruction.into());
+                        }
+                    }
                     let preserved_policy_count =
                         backing_fee_policy_count_from_profile(&existing_profile);
                     group
