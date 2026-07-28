@@ -11577,6 +11577,151 @@ fn v16_bpf_public_full_14_leg_composite_oracle_liquidation_progress_is_bounded()
 }
 
 #[test]
+fn v16_bpf_public_full_14_leg_three_feed_oracle_refresh_is_bounded() {
+    const ASSET_COUNT: u16 = 14;
+    const MARK: u64 = 100;
+    const MOVED_MARK: u64 = 95;
+
+    let mut env =
+        V16CuEnv::new_with_market_params_and_price_move(ASSET_COUNT, 1_000, 1_000, 500);
+    set_test_clock(&mut env, 1, 100);
+    let feeds = [[0xe1u8; 32], [0xe2u8; 32], [0xe3u8; 32]];
+    let initial_oracles = [
+        env.set_pyth_price(&feeds[0], 3_000_000, -6, 100),
+        env.set_pyth_price(&feeds[1], 150_000_000, -6, 100),
+        env.set_pyth_price(&feeds[2], 200_000_000, -6, 100),
+    ];
+    for asset_index in 0..ASSET_COUNT {
+        env.try_configure_hybrid_asset_with_conf_filter_cu(
+            asset_index,
+            3,
+            ORACLE_LEG_FLAG_DIVIDE_LEG2 | ORACLE_LEG_FLAG_DIVIDE_LEG3,
+            feeds,
+            &initial_oracles,
+            1,
+            100,
+            0,
+            0,
+            3,
+            500,
+        )
+        .expect("configure max-shape three-feed asset");
+    }
+
+    let taker = Keypair::new();
+    let lp = Keypair::new();
+    let taker_account = env.create_portfolio(&taker);
+    let lp_account = env.create_portfolio(&lp);
+    env.deposit(&taker, taker_account, 10_000_000);
+    env.deposit(&lp, lp_account, 10_000_000);
+    env.send(
+        ProgInstruction::BatchTradeNoCpi {
+            legs: (0..ASSET_COUNT)
+                .map(|asset_index| BatchTradeLeg {
+                    asset_index,
+                    size_q: POS_SCALE as i128,
+                    exec_price: MARK,
+                    fee_bps: 0,
+                })
+                .collect(),
+        },
+        vec![
+            AccountMeta::new(taker.pubkey(), true),
+            AccountMeta::new(lp.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(taker_account, false),
+            AccountMeta::new(lp_account, false),
+        ],
+        &[&taker, &lp],
+    )
+    .expect("open public max-shape portfolio");
+    let before_portfolio = env.portfolio_state(taker_account);
+    let (_, before_group) = env.market_state();
+    let vault_before = env.token_amount(env.vault);
+
+    set_test_clock(&mut env, 2, 101);
+    let moved_oracles = [
+        env.set_pyth_price(&feeds[0], 2_850_000, -6, 101),
+        env.set_pyth_price(&feeds[1], 150_000_000, -6, 101),
+        env.set_pyth_price(&feeds[2], 200_000_000, -6, 101),
+    ];
+    let observations = (0..ASSET_COUNT)
+        .map(|asset_index| CrankObservationHint {
+            asset_index,
+            oracle_accounts: 3,
+        })
+        .collect();
+    let mut accounts = vec![
+        AccountMeta::new(env.payer.pubkey(), true),
+        AccountMeta::new(env.market, false),
+        AccountMeta::new(taker_account, false),
+    ];
+    for _ in 0..ASSET_COUNT {
+        accounts.extend(
+            moved_oracles
+                .iter()
+                .copied()
+                .map(|key| AccountMeta::new_readonly(key, false)),
+        );
+    }
+
+    env.svm.expire_blockhash();
+    let refresh_cu = env
+        .send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 2,
+                observations,
+            },
+            accounts,
+            &[],
+        )
+        .expect("42-reference max-shape oracle crank");
+    println!("v16 all-14 three-feed oracle refresh CU: {refresh_cu}");
+    assert!(
+        refresh_cu <= 900_000,
+        "all-14 three-feed refresh exceeded 900k CU: {refresh_cu}"
+    );
+
+    let after_portfolio = env.portfolio_state(taker_account);
+    let (_, after_group) = env.market_state();
+    for asset_index in 0..ASSET_COUNT as usize {
+        assert_eq!(
+            after_group.assets[asset_index].effective_price, MOVED_MARK,
+            "asset {asset_index} must commit its authenticated composite move"
+        );
+        assert_eq!(
+            active_leg_for_asset(&after_portfolio, asset_index).basis_pos_q,
+            active_leg_for_asset(&before_portfolio, asset_index).basis_pos_q,
+            "oracle refresh must not resize asset {asset_index}"
+        );
+    }
+    assert_eq!(
+        health_cert(&after_portfolio).cert_oracle_epoch,
+        after_group.oracle_epoch
+    );
+    assert_eq!(after_group.vault, before_group.vault);
+    assert_eq!(
+        before_portfolio.capital.get() - after_portfolio.capital.get(),
+        14 * (MARK - MOVED_MARK) as u128,
+        "each losing leg settles its five-atom mark loss exactly once"
+    );
+    assert_eq!(
+        before_group.c_tot - after_group.c_tot,
+        before_portfolio.capital.get() - after_portfolio.capital.get(),
+        "the account debit must match the aggregate principal debit"
+    );
+    assert_eq!(after_group.insurance, before_group.insurance);
+    assert_eq!(
+        after_group.vault - after_group.c_tot - after_group.insurance,
+        before_group.vault - before_group.c_tot - before_group.insurance
+            + before_group.c_tot
+            - after_group.c_tot,
+        "settled loss remains in the vault as backing for the counterparty claim"
+    );
+    assert_eq!(env.token_amount(env.vault), vault_before);
+}
+
+#[test]
 fn v16_bpf_current_full_14_leg_tradenocpi_is_under_tx_limit() {
     let mut env = V16CuEnv::new_with_market_params_and_price_move(14, 1_000, 1_000, 500);
     let long_owner = Keypair::new();
