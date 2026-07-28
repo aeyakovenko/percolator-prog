@@ -59717,3 +59717,137 @@ fn v16_attack_underfunded_exit_cannot_move_ewma_with_uncollectible_fee() {
         assert_underfunded_ewma_exit_uses_collected_fee(path);
     }
 }
+
+// Authenticated wall-clock expiry must be observed before released
+// source-backed PnL can consume and withdraw provider principal.
+#[test]
+fn v16_attack_released_pnl_cannot_consume_backing_after_wall_clock_expiry() {
+    const INITIAL_PRICE: u64 = 100;
+    const WINNING_MARK: u64 = 105;
+    const SIZE_Q: i128 = 20 * POS_SCALE as i128;
+    const EXPECTED_PNL: u128 = 100;
+    const WINNING_DOMAIN: usize = 1;
+    const EXPIRY_SLOT: u64 = 3;
+
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(1, 1_000, 1_000, 500);
+    env.svm.warp_to_slot(1);
+    env.configure_auth_mark_for_asset_as_admin(0, 1, INITIAL_PRICE);
+    let admin = env.admin.insecure_clone();
+    let backing_provider = Keypair::new();
+    env.try_update_per_asset_authority_with_cu(
+        &admin,
+        Some(&backing_provider),
+        0,
+        processor::ASSET_AUTH_BACKING_BUCKET,
+        backing_provider.pubkey().to_bytes(),
+    )
+    .expect("rotate to an independent backing provider");
+    let provider_source = env.top_up_backing_bucket_with_authority(
+        &backing_provider,
+        WINNING_DOMAIN as u16,
+        150,
+        EXPIRY_SLOT,
+    );
+    assert_eq!(
+        env.token_amount(provider_source),
+        0,
+        "the independent provider funds the expiring bucket"
+    );
+
+    let winner_owner = Keypair::new();
+    let loser_owner = Keypair::new();
+    let winner = env.create_portfolio(&winner_owner);
+    let loser = env.create_portfolio(&loser_owner);
+    env.deposit(&winner_owner, winner, 1_000);
+    env.deposit(&loser_owner, loser, 1_000);
+    env.trade_with_cu(
+        &winner_owner,
+        winner,
+        &loser_owner,
+        loser,
+        SIZE_Q,
+        INITIAL_PRICE,
+        0,
+    );
+
+    env.svm.warp_to_slot(2);
+    env.push_auth_mark_for_asset_as_admin(0, 2, WINNING_MARK);
+    for portfolio in [loser, winner] {
+        env.crank(
+            portfolio,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 2,
+                observations: crank_observations(0),
+            },
+        );
+    }
+    env.trade_with_cu(
+        &winner_owner,
+        winner,
+        &loser_owner,
+        loser,
+        -SIZE_Q,
+        WINNING_MARK,
+        0,
+    );
+
+    let winner_before = env.portfolio_state(winner);
+    assert_eq!(winner_before.pnl.get(), EXPECTED_PNL as i128);
+    assert!(
+        !has_active_leg_for_asset(&winner_before, 0),
+        "precondition: the PnL is released before expiry"
+    );
+    let (_, market_before) = env.market_state();
+    assert_eq!(market_before.current_slot, 2);
+    assert_eq!(
+        market_before.source_backing_buckets[WINNING_DOMAIN].consumed_liened_backing_num,
+        0
+    );
+    let winner_capital_before = winner_before.capital.get();
+    let market_account_before = env.svm.get_account(&env.market).unwrap();
+    let portfolio_account_before = env.svm.get_account(&winner).unwrap();
+    let custody_before = env.token_amount(env.vault);
+
+    env.svm.warp_to_slot(EXPIRY_SLOT + 1);
+    let conversion = env.send(
+        ProgInstruction::ConvertReleasedPnl {
+            amount: EXPECTED_PNL,
+        },
+        vec![
+            AccountMeta::new(winner_owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(winner, false),
+        ],
+        &[&winner_owner],
+    );
+
+    let mut extracted = 0u64;
+    if conversion.is_ok() {
+        let (dest, _) = env.withdraw_with_cu(&winner_owner, winner, EXPECTED_PNL);
+        extracted = env.token_amount(dest);
+    }
+    let winner_after = env.portfolio_state(winner);
+    let (_, market_after) = env.market_state();
+    assert!(
+        conversion.is_err(),
+        "released PnL converted at authenticated slot {} after backing expiry {} while engine slot stayed {}; capital {} -> {}, extracted {} SPL atoms",
+        EXPIRY_SLOT + 1,
+        EXPIRY_SLOT,
+        market_after.current_slot,
+        winner_capital_before,
+        winner_after.capital.get(),
+        extracted,
+    );
+    assert_eq!(extracted, 0, "no post-expiry backing may be withdrawn");
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_account_before,
+        "rejected conversion preserves market state"
+    );
+    assert_eq!(
+        env.svm.get_account(&winner).unwrap(),
+        portfolio_account_before,
+        "rejected conversion preserves portfolio state"
+    );
+    assert_eq!(env.token_amount(env.vault), custody_before);
+}
