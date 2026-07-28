@@ -8418,6 +8418,39 @@ pub mod processor {
         Ok(())
     }
 
+    fn reject_lapsed_source_backing_for_conversion_view(
+        group: &state::MarketViewMutV16<'_>,
+        portfolio: &percolator::PortfolioV16ViewMut<'_>,
+        authenticated_slot: u64,
+    ) -> Result<(), V16Error> {
+        let max_market_slots = group.header.config.max_market_slots.get() as usize;
+        if max_market_slots > group.markets.len() {
+            return Err(V16Error::InvalidConfig);
+        }
+        for source in portfolio.header.source_domains.iter() {
+            if !source.is_occupied() || source.source_claim_bound_num.get() == 0 {
+                continue;
+            }
+            let domain = source.domain.get() as usize;
+            let asset_index = domain / 2;
+            if asset_index >= max_market_slots {
+                return Err(V16Error::InvalidConfig);
+            }
+            let engine_slot = &group.markets[asset_index].engine;
+            let bucket = if domain % 2 == 0 {
+                engine_slot.backing_long.try_to_runtime()?
+            } else {
+                engine_slot.backing_short.try_to_runtime()?
+            };
+            if bucket.status == percolator::BackingBucketStatusV16::Fresh
+                && bucket.expiry_slot <= authenticated_slot
+            {
+                return Err(V16Error::Stale);
+            }
+        }
+        Ok(())
+    }
+
     #[inline(never)]
     fn handle_convert_released_pnl<'a>(
         program_id: &Pubkey,
@@ -8434,6 +8467,11 @@ pub mod processor {
             if permissionless_resolve_matured_now_view(cfg, group) {
                 return Err(V16Error::LockActive);
             }
+            reject_lapsed_source_backing_for_conversion_view(
+                group,
+                portfolio,
+                authenticated_market_slot_or_fallback_view(group),
+            )?;
             // The v16 engine converts the currently released residual-bounded
             // amount atomically. Preserve the wrapper caller cap by staging the
             // conversion and only committing it when the converted amount fits.
