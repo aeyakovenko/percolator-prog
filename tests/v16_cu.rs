@@ -7558,6 +7558,162 @@ fn v16_bpf_cross_margin_positive_pnl_allows_backed_risk_increase_on_negative_leg
 }
 
 #[test]
+fn v16_attack_flat_source_lien_releases_for_live_pnl_conversion() {
+    const PRICE: u64 = 100;
+    const ASSET0_SIZE_Q: i128 = 20 * POS_SCALE as i128;
+    const ASSET1_SIZE_Q: i128 = 10 * POS_SCALE as i128;
+    const SAFE_INCREASE_Q: i128 = POS_SCALE as i128;
+
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(4, 1_000, 1_000, 500);
+    env.svm.warp_to_slot(1);
+    env.configure_auth_mark_for_asset_as_admin(0, 1, PRICE);
+    env.configure_auth_mark_for_asset_as_admin(1, 1, PRICE);
+
+    let winner_owner = Keypair::new();
+    let counterparty_owner = Keypair::new();
+    let winner = env.create_portfolio(&winner_owner);
+    let counterparty = env.create_portfolio(&counterparty_owner);
+    env.deposit(&winner_owner, winner, 313);
+    env.deposit(&counterparty_owner, counterparty, 1_000);
+    env.top_up_backing_bucket(1, 150, 10);
+    env.trade_asset_with_cu(
+        0,
+        &winner_owner,
+        winner,
+        &counterparty_owner,
+        counterparty,
+        ASSET0_SIZE_Q,
+        PRICE,
+        0,
+    );
+    env.trade_asset_with_cu(
+        1,
+        &winner_owner,
+        winner,
+        &counterparty_owner,
+        counterparty,
+        ASSET1_SIZE_Q,
+        PRICE,
+        0,
+    );
+
+    env.svm.warp_to_slot(2);
+    env.push_auth_mark_for_asset_as_admin(0, 2, 105);
+    env.push_auth_mark_for_asset_as_admin(1, 2, 95);
+    for (portfolio, asset_index) in [(counterparty, 0), (winner, 0), (counterparty, 1)] {
+        env.crank(
+            portfolio,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 2,
+                observations: crank_observations(asset_index),
+            },
+        );
+    }
+
+    let watermark_dest = env.token_account(env.admin.pubkey(), 0);
+    env.withdraw_backing_bucket_to_admin_token_with_cu(watermark_dest, 1, 50);
+    env.svm.warp_to_slot(3);
+    env.trade_asset_with_cu(
+        1,
+        &winner_owner,
+        winner,
+        &counterparty_owner,
+        counterparty,
+        SAFE_INCREASE_Q,
+        95,
+        0,
+    );
+    assert!(
+        env.portfolio_state(winner)
+            .source_domains
+            .iter()
+            .any(|source| source.source_claim_liened_num.get() != 0),
+        "public risk increase must create the source-credit lien"
+    );
+
+    env.trade_asset_with_cu(
+        1,
+        &winner_owner,
+        winner,
+        &counterparty_owner,
+        counterparty,
+        -(ASSET1_SIZE_Q + SAFE_INCREASE_Q),
+        95,
+        0,
+    );
+    env.trade_asset_with_cu(
+        0,
+        &winner_owner,
+        winner,
+        &counterparty_owner,
+        counterparty,
+        -ASSET0_SIZE_Q,
+        105,
+        0,
+    );
+
+    let flat = env.portfolio_state(winner);
+    assert!(percolator::active_bitmap_is_empty(active_bitmap(&flat)));
+    assert!(flat.pnl.get() > 0, "flat winner must retain positive PnL");
+    assert!(
+        flat.source_domains
+            .iter()
+            .any(|source| source.source_claim_liened_num.get() != 0),
+        "closing all risk leaves the now-unneeded source-credit lien"
+    );
+
+    env.svm.expire_blockhash();
+    let crank = env.send(
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 3,
+            observations: crank_observations(0),
+        },
+        vec![
+            AccountMeta::new(env.payer.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(winner, false),
+        ],
+        &[],
+    );
+    assert!(
+        crank.is_ok(),
+        "an honest best-effort crank must land even when no account action is selected"
+    );
+    let after_crank = env.portfolio_state(winner);
+    assert!(percolator::active_bitmap_is_empty(active_bitmap(
+        &after_crank
+    )));
+    assert!(
+        after_crank.pnl.get() > 0,
+        "honest crank must preserve the flat winner's positive PnL"
+    );
+    assert!(
+        after_crank
+            .source_domains
+            .iter()
+            .any(|source| source.source_claim_liened_num.get() != 0),
+        "honest crank cannot release the flat account's source-credit lien"
+    );
+
+    let positive_pnl = after_crank.pnl.get() as u128;
+    let convert_cu = env.convert_released_pnl_with_cu(&winner_owner, winner, positive_pnl);
+    assert_cu_within("flat source-lien conversion", convert_cu, CUSTODY_CU_LIMIT);
+    let converted = env.portfolio_state(winner);
+    assert_eq!(converted.pnl.get(), 0);
+    assert!(
+        converted
+            .source_domains
+            .iter()
+            .all(|source| source.source_claim_liened_num.get() == 0),
+        "conversion must release every now-unneeded source-credit lien"
+    );
+
+    let capital = converted.capital.get();
+    env.withdraw(&winner_owner, winner, capital);
+    env.close_portfolio_with_cu(&winner_owner, winner);
+}
+
+#[test]
 fn v16_bpf_permissionless_crank_computes_funding_from_internal_mark_premium() {
     const INITIAL_PRICE: u64 = 1_000_000;
     const DEPOSIT: u128 = 10_000_000;
@@ -59719,18 +59875,22 @@ fn v16_attack_underfunded_exit_cannot_move_ewma_with_uncollectible_fee() {
 }
 
 // Public-interface DoS regression: an LP authorizes a matcher once, after which an unrelated taker
-// can fill against it without the LP owner signing each trade. Repeated ordinary fills and honest
-// mark moves can leave the flat LP with all 32 sparse source domains occupied. Conversion must make
-// bounded rank-decreasing progress; processing the whole source table atomically hits the SVM limit
-// and strands the LP's source-backed profit for as long as the healthy market remains Live.
+// can fill against it without the LP owner signing each trade. Repeated ordinary fills, honest mark
+// moves, and a source-backed margin increase can leave the flat LP with all 32 sparse source domains
+// occupied and multiple now-unneeded live liens. Conversion must release and consume bounded work
+// per call; processing either whole table atomically can strand the LP's source-backed profit.
 #[test]
 fn v16_attack_max_source_conversion_is_bounded_for_unsigned_lp() {
     const ACTIVE_CAP: u16 = percolator_prog::constants::WRAPPER_MAX_PORTFOLIO_ASSETS;
     const ASSETS: u16 = 16;
+    const LIEN_ASSET: u16 = ASSETS;
     const PRICE_LOW: u64 = 100;
-    const PRICE_HIGH: u64 = 101;
+    const PRICE_HIGH: u64 = 110;
     const SIZE_Q: i128 = POS_SCALE as i128 * 1_000;
-    const PROFIT_PER_DOMAIN: u128 = 1_000;
+    const LIEN_BASE_SIZE_Q: i128 = POS_SCALE as i128 * 10_010;
+    const LIEN_INCREMENT_Q: i128 = POS_SCALE as i128 * 10;
+    const LIEN_STEPS: usize = 12;
+    const PROFIT_PER_DOMAIN: u128 = 10_000;
 
     let mut env = V16CuEnv::new_with_init_params_and_market_capacity(
         V16CuMarketParams {
@@ -59742,14 +59902,17 @@ fn v16_attack_max_source_conversion_is_bounded_for_unsigned_lp() {
         },
         70,
     );
-    for asset_index in ACTIVE_CAP..ASSETS {
+    for asset_index in ACTIVE_CAP..=LIEN_ASSET {
         let activation_slot = u64::from(asset_index - ACTIVE_CAP + 1);
         env.activate_asset(asset_index, activation_slot, PRICE_LOW);
     }
-    let mut slot = u64::from(ASSETS - ACTIVE_CAP);
+    let mut slot = u64::from(LIEN_ASSET - ACTIVE_CAP + 1);
     env.svm.warp_to_slot(slot);
-    for asset_index in 0..ASSETS {
+    for asset_index in 0..=LIEN_ASSET {
         env.configure_auth_mark_for_asset_as_admin(asset_index, slot, PRICE_LOW);
+    }
+    for domain in 0..2 {
+        env.top_up_backing_bucket(domain, 100_000, slot + 1_000);
     }
 
     let matcher_program = Pubkey::new_unique();
@@ -59760,7 +59923,7 @@ fn v16_attack_max_source_conversion_is_bounded_for_unsigned_lp() {
     let victim_owner = Keypair::new();
     let attacker = env.create_portfolio(&attacker_owner);
     let victim_lp = env.create_portfolio(&victim_owner);
-    env.deposit(&attacker_owner, attacker, 1_000_000);
+    env.deposit(&attacker_owner, attacker, 2_000_000);
     env.deposit(&victim_owner, victim_lp, 1_000_000);
     let (matcher_ctx, matcher_delegate, _) =
         env.init_auth_matcher_context(matcher_program, &victim_owner, victim_lp);
@@ -59810,6 +59973,33 @@ fn v16_attack_max_source_conversion_is_bounded_for_unsigned_lp() {
         env.push_auth_mark_for_asset_as_admin(asset_index, slot, PRICE_LOW);
         settle_both(&mut env, asset_index, slot);
         cpi_fill(&mut env, asset_index, -SIZE_Q);
+
+        if asset_index == 0 {
+            // Spend part of the first source-backed profits as initial margin,
+            // then flatten at the same mark. The lien remains while later fills
+            // grow the source table to its maximum public shape.
+            settle_both(&mut env, LIEN_ASSET, slot);
+            cpi_fill(&mut env, LIEN_ASSET, -LIEN_BASE_SIZE_Q);
+            for _ in 1..LIEN_STEPS {
+                cpi_fill(&mut env, LIEN_ASSET, -LIEN_INCREMENT_Q);
+            }
+            let risk_increased = env.portfolio_state(victim_lp);
+            assert!(
+                risk_increased
+                    .source_domains
+                    .iter()
+                    .filter(|source| source.source_claim_liened_num.get() != 0)
+                    .count()
+                    > 1,
+                "risk increase must spread its IM lien across source domains"
+            );
+            let lien_total_q =
+                LIEN_BASE_SIZE_Q + LIEN_INCREMENT_Q * i128::try_from(LIEN_STEPS - 1).unwrap();
+            cpi_fill(&mut env, LIEN_ASSET, lien_total_q);
+            assert!(percolator::active_bitmap_is_empty(active_bitmap(
+                &env.portfolio_state(victim_lp)
+            )));
+        }
     }
 
     let victim = env.portfolio_state(victim_lp);
@@ -59824,6 +60014,13 @@ fn v16_attack_max_source_conversion_is_bounded_for_unsigned_lp() {
     );
     let total_profit = i128::from(2 * ASSETS) * PROFIT_PER_DOMAIN as i128;
     assert_eq!(victim.pnl.get(), total_profit);
+    assert!(
+        victim
+            .source_domains
+            .iter()
+            .any(|source| source.source_claim_liened_num.get() != 0),
+        "max-shape flat account must retain the now-unneeded source liens"
+    );
 
     let mut max_conversion_cu = 0;
     for remaining_domains in (1..=percolator::PORTFOLIO_SOURCE_DOMAIN_CAP).rev() {
