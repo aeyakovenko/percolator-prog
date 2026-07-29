@@ -60136,3 +60136,165 @@ fn v16_attack_reopened_recovery_forfeit_preserves_prior_same_domain_claim() {
         "the fixed path pays the preserved value through canonical custody"
     );
 }
+
+// Episode attribution must remain live when the later episode uses part of its newly earned claim
+// as source-backed initial margin. The Recovery exit must atomically preserve the older claim's
+// economic value; returning LockActive or releasing its backing for a provider race is not enough.
+#[test]
+fn v16_attack_reopened_recovery_forfeit_capitalizes_prior_claim_past_lien_overlap() {
+    const PRICE: u64 = 1_000_000;
+    const FIRST_PROFIT_MARK: u64 = 952_000;
+    const SECOND_PROFIT_MARK: u64 = 932_000;
+    const ASSET: u16 = 1;
+    const SOURCE_DOMAIN: u16 = ASSET * 2;
+    const INITIAL_CAPITAL: u128 = 1_000_000;
+    const RETAINED_CAPITAL: u128 = 5_000;
+
+    let mut params = production_risk_params();
+    params.max_portfolio_assets = 2;
+    let mut env = V16CuEnv::new_with_init_params(params);
+    env.configure_permissionless_resolve_with_cu(100, 5);
+    env.configure_auth_mark_for_asset_as_admin(0, 0, PRICE);
+    env.configure_auth_mark_for_asset_as_admin(ASSET, 0, PRICE);
+    env.top_up_backing_bucket(SOURCE_DOMAIN, 100_000, 10_000);
+
+    let victim_owner = Keypair::new();
+    let first_counterparty_owner = Keypair::new();
+    let attacker_owner = Keypair::new();
+    let victim = env.create_portfolio(&victim_owner);
+    let first_counterparty = env.create_portfolio(&first_counterparty_owner);
+    let attacker = env.create_portfolio(&attacker_owner);
+    for (owner, portfolio) in [
+        (&victim_owner, victim),
+        (&first_counterparty_owner, first_counterparty),
+        (&attacker_owner, attacker),
+    ] {
+        env.deposit(owner, portfolio, INITIAL_CAPITAL);
+    }
+
+    env.trade_asset_with_cu(
+        ASSET,
+        &first_counterparty_owner,
+        first_counterparty,
+        &victim_owner,
+        victim,
+        POS_SCALE as i128,
+        PRICE,
+        0,
+    );
+    env.svm.warp_to_slot(20);
+    env.push_auth_mark_for_asset_as_admin(ASSET, 20, FIRST_PROFIT_MARK);
+    env.crank(
+        victim,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 20,
+            observations: crank_observations(ASSET),
+        },
+    );
+    env.trade_asset_with_cu(
+        ASSET,
+        &first_counterparty_owner,
+        first_counterparty,
+        &victim_owner,
+        victim,
+        -(POS_SCALE as i128),
+        FIRST_PROFIT_MARK,
+        0,
+    );
+    let historical_claim =
+        state::portfolio_source_domain(&env.portfolio_state(victim), SOURCE_DOMAIN as usize)
+            .source_claim_bound_num
+            .get();
+    assert_eq!(historical_claim, 48_000 * BOUND_SCALE);
+
+    env.withdraw(&victim_owner, victim, INITIAL_CAPITAL - RETAINED_CAPITAL);
+    env.trade_asset_with_cu(
+        ASSET,
+        &attacker_owner,
+        attacker,
+        &victim_owner,
+        victim,
+        POS_SCALE as i128,
+        FIRST_PROFIT_MARK,
+        0,
+    );
+
+    // Episode two earns a new claim, then increases risk enough to lien beyond the attach-time
+    // historical floor. This is the overlap branch that a zero-PnL reopen does not exercise.
+    env.svm.warp_to_slot(40);
+    env.push_auth_mark_for_asset_as_admin(ASSET, 40, SECOND_PROFIT_MARK);
+    for portfolio in [victim, attacker] {
+        env.crank(
+            portfolio,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 40,
+                observations: crank_observations(ASSET),
+            },
+        );
+    }
+    env.trade_asset_with_cu(
+        ASSET,
+        &attacker_owner,
+        attacker,
+        &victim_owner,
+        victim,
+        (POS_SCALE / 2) as i128,
+        SECOND_PROFIT_MARK,
+        0,
+    );
+    let before_shutdown = env.portfolio_state(victim);
+    let source = state::portfolio_source_domain(&before_shutdown, SOURCE_DOMAIN as usize);
+    assert!(
+        source.source_claim_bound_num.get() > historical_claim,
+        "episode two must add a new same-domain claim suffix"
+    );
+    assert!(
+        source.source_claim_liened_num.get() > historical_claim,
+        "risk increase must lien part of episode two above the historical floor"
+    );
+
+    env.update_asset_lifecycle_as_admin_with_cu(processor::ASSET_ACTION_SHUTDOWN, ASSET, 40, 0);
+    env.forfeit_recovery_leg_with_cu(&attacker_owner, attacker, ASSET, u128::MAX);
+    assert!(
+        !has_active_leg_for_asset(&env.portfolio_state(attacker), ASSET as usize),
+        "the attacker must remove the only opposite leg before the victim exits"
+    );
+    env.forfeit_recovery_leg_with_cu(&victim_owner, victim, ASSET, u128::MAX);
+
+    let after_forfeit = env.portfolio_state(victim);
+    assert!(
+        !has_active_leg_for_asset(&after_forfeit, ASSET as usize),
+        "the owner must retain a bounded unilateral Recovery exit"
+    );
+    assert_eq!(
+        after_forfeit.capital.get(),
+        RETAINED_CAPITAL + historical_claim / BOUND_SCALE,
+        "the forfeit must atomically capitalize episode one's backed value"
+    );
+    assert_eq!(
+        after_forfeit.pnl.get(),
+        0,
+        "the historical claim is capitalized while episode-two PnL is waived"
+    );
+
+    // The provider may immediately reclaim every unconsumed backing atom. This transaction must
+    // not race the victim because the preserved claim is already senior capital.
+    let provider_withdrawable = env.market_state().1.source_backing_buckets[SOURCE_DOMAIN as usize]
+        .fresh_unliened_backing_num
+        / BOUND_SCALE;
+    if provider_withdrawable != 0 {
+        let provider_destination = env.token_account(env.admin.pubkey(), 0);
+        env.withdraw_backing_bucket_to_admin_token_with_cu(
+            provider_destination,
+            SOURCE_DOMAIN,
+            provider_withdrawable,
+        );
+    }
+    let withdrawable = env.portfolio_state(victim).capital.get();
+    let (destination, _) = env.withdraw_with_cu(&victim_owner, victim, withdrawable);
+    assert_eq!(
+        env.token_amount(destination) as u128,
+        RETAINED_CAPITAL + historical_claim / BOUND_SCALE,
+        "the older claim remains fully withdrawable despite the later lien overlap"
+    );
+}
