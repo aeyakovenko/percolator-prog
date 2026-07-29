@@ -6337,6 +6337,215 @@ fn v16_bpf_asset0_shutdown_force_closes_preserves_insurance_and_restarts() {
 }
 
 #[test]
+fn v16_bpf_asset0_bankruptcy_recovery_lets_only_backing_provider_drain() {
+    let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+        initial_price: 1_000,
+        min_nonzero_mm_req: 599,
+        min_nonzero_im_req: 600,
+        maintenance_margin_bps: 5_000,
+        initial_margin_bps: 5_000,
+        max_price_move_bps_per_slot: 4_900,
+        max_bankrupt_close_lifetime_slots: 1,
+        ..V16CuMarketParams::default()
+    });
+    let marketauth = env.admin.insecure_clone();
+    let backing_provider = Keypair::new();
+    env.configure_permissionless_resolve_with_cu(1_000, 1);
+    env.configure_auth_mark_with_cu(0, 1_000);
+    env.try_update_per_asset_authority_with_cu(
+        &marketauth,
+        Some(&backing_provider),
+        0,
+        processor::ASSET_AUTH_BACKING_BUCKET,
+        backing_provider.pubkey().to_bytes(),
+    )
+    .expect("record an external asset-0 backing provider");
+    env.top_up_insurance(2);
+
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let crank_owner = Keypair::new();
+    let long = env.create_portfolio(&long_owner);
+    let short = env.create_portfolio(&short_owner);
+    let crank_target = env.create_portfolio(&crank_owner);
+    env.deposit(&long_owner, long, 600);
+    env.deposit(&short_owner, short, 600);
+    env.trade_asset_with_cu(
+        0,
+        &long_owner,
+        long,
+        &short_owner,
+        short,
+        POS_SCALE as i128,
+        1_000,
+        0,
+    );
+
+    env.svm.warp_to_slot(1);
+    env.push_auth_mark_with_cu(1, 399);
+    for slot in [1u64, 2] {
+        env.svm.warp_to_slot(slot);
+        env.crank(
+            crank_target,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: slot,
+                observations: crank_observations(0),
+            },
+        );
+    }
+    for _ in 0..5 {
+        env.crank(
+            long,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 2,
+                observations: Vec::new(),
+            },
+        );
+    }
+    let (_, bankrupt) = env.market_state();
+    assert!(
+        bankrupt.bankruptcy_hlock_active,
+        "a real public liquidation must activate the durable bankruptcy lock"
+    );
+    assert_eq!(
+        bankrupt.insurance_domain_budget_remaining_total, 1,
+        "the loss consumes exactly one insurance atom"
+    );
+    let bankrupt_principal = bankrupt.source_backing_buckets[0]
+        .fresh_unliened_backing_num
+        .checked_div(BOUND_SCALE)
+        .unwrap();
+    assert!(
+        bankrupt_principal > 0,
+        "the public bankruptcy path must recover backing before shutdown"
+    );
+    let provider_dest = env.token_account(backing_provider.pubkey(), 0);
+    env.svm.expire_blockhash();
+    let live_provider_attempt = env.send(
+        ProgInstruction::WithdrawBackingBucket {
+            domain: 0,
+            amount: bankrupt_principal,
+        },
+        vec![
+            AccountMeta::new(backing_provider.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(provider_dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&backing_provider],
+    );
+    assert!(
+        live_provider_attempt.is_err(),
+        "the provider cannot leave while the bankrupt asset is still live"
+    );
+
+    env.update_asset_lifecycle_as_admin_with_cu(processor::ASSET_ACTION_SHUTDOWN, 0, 2, 0);
+    for (owner, portfolio) in [(&long_owner, long), (&short_owner, short)] {
+        for _ in 0..8 {
+            if percolator::active_bitmap_is_empty(active_bitmap(&env.portfolio_state(portfolio))) {
+                break;
+            }
+            env.forfeit_recovery_leg_with_cu(owner, portfolio, 0, percolator::MAX_VAULT_TVL);
+        }
+    }
+    for side in [0u8, 1] {
+        env.finalize_reset_side_with_cu(0, side);
+    }
+
+    let (_, recovered) = env.market_state();
+    assert_eq!(recovered.assets[0].lifecycle, AssetLifecycleV16::Recovery);
+    assert!(recovered.bankruptcy_hlock_active);
+    assert_eq!(recovered.assets[0].oi_eff_long_q, 0);
+    assert_eq!(recovered.assets[0].oi_eff_short_q, 0);
+    assert_eq!(recovered.assets[0].stored_pos_count_long, 0);
+    assert_eq!(recovered.assets[0].stored_pos_count_short, 0);
+    let principal = recovered.source_backing_buckets[0]
+        .fresh_unliened_backing_num
+        .checked_div(BOUND_SCALE)
+        .unwrap();
+    assert!(
+        principal > 0,
+        "the public bankruptcy path must leave withdrawable recovered backing"
+    );
+    assert_eq!(principal, bankrupt_principal);
+    env.svm.expire_blockhash();
+    let immature_provider_attempt = env.send(
+        ProgInstruction::WithdrawBackingBucket {
+            domain: 0,
+            amount: principal,
+        },
+        vec![
+            AccountMeta::new(backing_provider.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(provider_dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&backing_provider],
+    );
+    assert!(
+        immature_provider_attempt.is_err(),
+        "the provider must wait for the configured recovery delay"
+    );
+    env.svm.warp_to_slot(3);
+
+    let admin_dest = env.token_account(marketauth.pubkey(), 0);
+    let before_admin_attempt = env.svm.get_account(&env.market).unwrap();
+    env.svm.expire_blockhash();
+    let admin_attempt = env.send(
+        ProgInstruction::WithdrawBackingBucket {
+            domain: 0,
+            amount: principal,
+        },
+        vec![
+            AccountMeta::new(marketauth.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(admin_dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&marketauth],
+    );
+    assert!(
+        admin_attempt.is_err(),
+        "market governance cannot acquire the provider's asset-0 backing"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        before_admin_attempt,
+        "the rejected governance drain is atomic"
+    );
+
+    assert!(
+        env.try_withdraw_insurance_asset_with_authority(&marketauth, 0, 1)
+            .is_err(),
+        "the provider-only backing exception must not unlock insurance"
+    );
+    env.svm.expire_blockhash();
+    env.send(
+        ProgInstruction::WithdrawBackingBucket {
+            domain: 0,
+            amount: principal,
+        },
+        vec![
+            AccountMeta::new(backing_provider.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(provider_dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&backing_provider],
+    )
+    .expect("the recorded provider can drain mature, empty asset-0 recovery backing");
+    assert_eq!(env.token_amount(provider_dest) as u128, principal);
+}
+
+#[test]
 fn v16_bpf_restart_asset_oracle_is_uniform_for_local_asset_admins() {
     let mut env = V16CuEnv::new();
     let marketauth = env.admin.insecure_clone();
