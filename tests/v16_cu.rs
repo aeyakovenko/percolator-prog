@@ -59874,6 +59874,74 @@ fn v16_attack_micro_price_target_reversal_resets_fractional_cap_budget() {
     );
 }
 
+// A fresh oracle report commonly changes the target every slot. Same-direction target updates must
+// retain fractional cap budget; otherwise an honest moving feed can reset the fraction forever and
+// pin the effective price without any stale or malicious report.
+#[test]
+fn v16_attack_moving_micro_price_target_cannot_reset_fractional_cap_budget() {
+    const PRICE: u64 = 100;
+    const CAP_BPS: u64 = 24;
+
+    let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+        initial_price: PRICE,
+        max_price_move_bps_per_slot: CAP_BPS,
+        max_accrual_dt_slots: 20,
+        min_funding_lifetime_slots: 20,
+        ..V16CuMarketParams::default()
+    });
+    env.svm.warp_to_slot(0);
+    env.configure_auth_mark_with_cu(0, PRICE);
+
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long = env.create_portfolio(&long_owner);
+    let short = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long, 1_000_000);
+    env.deposit(&short_owner, short, 1_000_000);
+    env.trade_asset_with_cu(
+        0,
+        &long_owner,
+        long,
+        &short_owner,
+        short,
+        POS_SCALE as i128,
+        PRICE,
+        0,
+    );
+
+    for slot in 1..=10 {
+        let target = 200 + slot;
+        env.svm.warp_to_slot(slot);
+        env.push_auth_mark_with_cu(slot, target);
+        env.svm.expire_blockhash();
+        let cu = env
+            .send(
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: slot,
+                    observations: crank_observations(0),
+                },
+                vec![
+                    AccountMeta::new(env.payer.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(long, false),
+                ],
+                &[],
+            )
+            .expect("same-direction moving target remains crankable");
+        assert_cu_within("moving-target PermissionlessCrank", cu, CRANK_CU_LIMIT);
+        let asset = env.market_state().1.assets[0];
+        assert_eq!(asset.raw_oracle_target_price, target);
+        assert!(asset.effective_price >= PRICE);
+        assert!(asset.effective_price <= target);
+    }
+
+    assert_eq!(
+        env.market_state().1.assets[0].effective_price,
+        PRICE + 2,
+        "same-direction reports must accumulate enough fractional budget to move"
+    );
+}
+
 // Regression for the max-dt endpoint: price 100 -> 1 used to stall forever at 20 even after the
 // zero-delta caller fix. Fractional cap carry must reach the target before stale resolution, so
 // terminal payouts use the honest authenticated mark.

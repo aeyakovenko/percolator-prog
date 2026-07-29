@@ -11463,13 +11463,18 @@ pub mod processor {
         if asset.oi_eff_long_q.get() == 0 && asset.oi_eff_short_q.get() == 0 {
             return Ok(target);
         }
-        let remainder_num = if target == asset.raw_oracle_target_price.get() {
+        let anchor = asset.effective_price.get();
+        let old_target = asset.raw_oracle_target_price.get();
+        let target_changed = target != old_target;
+        let target_direction_preserved =
+            (old_target > anchor && target > anchor) || (old_target < anchor && target < anchor);
+        let remainder_num = if !target_changed || target_direction_preserved {
             asset.retired_slot.get()
         } else {
             0
         };
         percolator::capped_oracle_price_step_v16(
-            asset.effective_price.get(),
+            anchor,
             target,
             group.header.config.max_price_move_bps_per_slot.get(),
             dt,
