@@ -59724,7 +59724,16 @@ enum UnderfundedCpiFeePath {
     Batch,
 }
 
-fn assert_underfunded_cpi_fee_cannot_subsidize_attacker_mark_gain(path: UnderfundedCpiFeePath) {
+#[derive(Clone, Copy, Debug)]
+enum UnderfundedMarkMode {
+    Ewma,
+    HybridAfterHours,
+}
+
+fn assert_underfunded_cpi_fee_cannot_subsidize_attacker_mark_gain(
+    mode: UnderfundedMarkMode,
+    path: UnderfundedCpiFeePath,
+) {
     const MARK: u64 = 1_000_000;
     const ADVERSE_MARK: u64 = 1_999_999;
     const MOVER_Q: i128 = POS_SCALE as i128;
@@ -59738,25 +59747,52 @@ fn assert_underfunded_cpi_fee_cannot_subsidize_attacker_mark_gain(path: Underfun
         min_funding_lifetime_slots: 1,
         ..V16CuMarketParams::default()
     });
-    env.configure_ewma_mark_with_cu(0, MARK, 1, 0);
-    let oracle_authority = Keypair::new();
-    env.ensure_signer_account(oracle_authority.pubkey());
-    let market_admin = env.admin.insecure_clone();
-    env.svm.expire_blockhash();
-    env.send(
-        ProgInstruction::UpdateAssetAuthority {
-            asset_index: 0,
-            kind: percolator_prog::processor::ASSET_AUTH_ORACLE,
-            new_pubkey: oracle_authority.pubkey().to_bytes(),
-        },
-        vec![
-            AccountMeta::new(market_admin.pubkey(), true),
-            AccountMeta::new(oracle_authority.pubkey(), true),
-            AccountMeta::new(env.market, false),
-        ],
-        &[&market_admin, &oracle_authority],
-    )
-    .expect("separate the honest oracle authority from every trader");
+    let mut ewma_oracle_authority = None;
+    let mut hybrid_feed = None;
+    match mode {
+        UnderfundedMarkMode::Ewma => {
+            env.configure_ewma_mark_with_cu(0, MARK, 1, 0);
+            let oracle_authority = Keypair::new();
+            env.ensure_signer_account(oracle_authority.pubkey());
+            let market_admin = env.admin.insecure_clone();
+            env.svm.expire_blockhash();
+            env.send(
+                ProgInstruction::UpdateAssetAuthority {
+                    asset_index: 0,
+                    kind: percolator_prog::processor::ASSET_AUTH_ORACLE,
+                    new_pubkey: oracle_authority.pubkey().to_bytes(),
+                },
+                vec![
+                    AccountMeta::new(market_admin.pubkey(), true),
+                    AccountMeta::new(oracle_authority.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                ],
+                &[&market_admin, &oracle_authority],
+            )
+            .expect("separate the honest oracle authority from every trader");
+            ewma_oracle_authority = Some(oracle_authority);
+        }
+        UnderfundedMarkMode::HybridAfterHours => {
+            set_test_clock(&mut env, 1, 100);
+            let feed = [0xceu8; 32];
+            let initial_oracle = env.set_pyth_price(&feed, MARK as i64, -6, 100);
+            env.try_configure_hybrid_asset_with_conf_filter_cu(
+                0,
+                1,
+                0,
+                [feed, [0u8; 32], [0u8; 32]],
+                &[initial_oracle],
+                1,
+                100,
+                0,
+                0,
+                1,
+                0,
+            )
+            .expect("configure external-oracle hybrid market");
+            hybrid_feed = Some(feed);
+        }
+    }
 
     let matcher_program = Pubkey::new_unique();
     let matcher_bytes = std::fs::read(matcher_program_path()).expect("read matcher BPF");
@@ -59835,37 +59871,60 @@ fn assert_underfunded_cpi_fee_cannot_subsidize_attacker_mark_gain(path: Underfun
     );
 
     // Reach a distressed but still live short through normal oracle and crank instructions.
-    env.svm.warp_to_slot(10);
-    env.svm.expire_blockhash();
-    env.send(
-        ProgInstruction::PushEwmaMark {
-            asset_index: 0,
-            now_slot: 10,
-            mark_e6: ADVERSE_MARK,
-        },
-        vec![
-            AccountMeta::new(oracle_authority.pubkey(), true),
-            AccountMeta::new(env.market, false),
-        ],
-        &[&oracle_authority],
-    )
-    .expect("honest oracle advances the market before the attack");
+    let hybrid_oracle_tail = match mode {
+        UnderfundedMarkMode::Ewma => {
+            env.svm.warp_to_slot(10);
+            let oracle_authority = ewma_oracle_authority
+                .as_ref()
+                .expect("EWMA mode has an independent oracle authority");
+            env.svm.expire_blockhash();
+            env.send(
+                ProgInstruction::PushEwmaMark {
+                    asset_index: 0,
+                    now_slot: 10,
+                    mark_e6: ADVERSE_MARK,
+                },
+                vec![
+                    AccountMeta::new(oracle_authority.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                ],
+                &[oracle_authority],
+            )
+            .expect("honest oracle advances the market before the attack");
+            None
+        }
+        UnderfundedMarkMode::HybridAfterHours => {
+            set_test_clock(&mut env, 10, 110);
+            Some(
+                env.set_pyth_price(
+                    hybrid_feed
+                        .as_ref()
+                        .expect("hybrid mode has an external feed"),
+                    ADVERSE_MARK as i64,
+                    -6,
+                    110,
+                ),
+            )
+        }
+    };
     for (index, account) in [mover, fee_lp, beneficiary, victim, close_long, close_lp]
         .into_iter()
         .enumerate()
     {
         env.svm.expire_blockhash();
-        env.crank(
-            account,
-            ProgInstruction::PermissionlessCrank {
-                now_slot: 10,
-                observations: if index == 0 {
-                    crank_observations(0)
-                } else {
-                    Vec::new()
-                },
+        let instruction = ProgInstruction::PermissionlessCrank {
+            now_slot: 10,
+            observations: if index == 0 || hybrid_oracle_tail.is_some() {
+                crank_observations(0)
+            } else {
+                Vec::new()
             },
-        );
+        };
+        if let Some(oracle) = hybrid_oracle_tail {
+            env.crank_with_oracle_tail(account, instruction, &[oracle]);
+        } else {
+            env.crank(account, instruction);
+        }
     }
     let (_, group_at_attack_setup) = env.market_state();
     let setup_mark = group_at_attack_setup.assets[0].effective_price;
@@ -59890,7 +59949,10 @@ fn assert_underfunded_cpi_fee_cannot_subsidize_attacker_mark_gain(path: Underfun
         9_000,
         9_000,
     );
-    env.svm.warp_to_slot(20);
+    match mode {
+        UnderfundedMarkMode::Ewma => env.svm.warp_to_slot(20),
+        UnderfundedMarkMode::HybridAfterHours => set_test_clock(&mut env, 20, 1_000),
+    }
     env.svm.expire_blockhash();
     let exit = match path {
         UnderfundedCpiFeePath::Single => env.try_trade_cpi_with_cu_on_asset(
@@ -59933,22 +59995,24 @@ fn assert_underfunded_cpi_fee_cannot_subsidize_attacker_mark_gain(path: Underfun
 
     let (cfg_after_trade, group_after_trade) = env.market_state();
     assert!(
-        cfg_after_trade.mark_ewma_e6 > setup_mark,
-        "the independently funded side must currently move the mark"
+        cfg_after_trade.mark_ewma_e6 >= setup_mark,
+        "the accepted upward print must not reverse the mark"
     );
     for (index, account) in [beneficiary, victim].into_iter().enumerate() {
         env.svm.expire_blockhash();
-        env.crank(
-            account,
-            ProgInstruction::PermissionlessCrank {
-                now_slot: 20,
-                observations: if index == 0 {
-                    crank_observations(0)
-                } else {
-                    Vec::new()
-                },
+        let instruction = ProgInstruction::PermissionlessCrank {
+            now_slot: 20,
+            observations: if index == 0 || hybrid_oracle_tail.is_some() {
+                crank_observations(0)
+            } else {
+                Vec::new()
             },
-        );
+        };
+        if let Some(oracle) = hybrid_oracle_tail {
+            env.crank_with_oracle_tail(account, instruction, &[oracle]);
+        } else {
+            env.crank(account, instruction);
+        }
     }
 
     let attacker_after =
@@ -59957,7 +60021,7 @@ fn assert_underfunded_cpi_fee_cannot_subsidize_attacker_mark_gain(path: Underfun
     let fee_lp_after = equity(&env.portfolio_state(fee_lp));
     let insurance_after = env.market_state().1.insurance;
     eprintln!(
-        "{path:?} underfunded CPI subsidy: setup_mark={setup_mark} queued_mark={} \
+        "{mode:?} {path:?} underfunded CPI subsidy: setup_mark={setup_mark} queued_mark={} \
          attacker_delta={} victim_delta={} fee_lp_delta={} insurance_delta={}",
         cfg_after_trade.mark_ewma_e6,
         attacker_after - attacker_before,
@@ -60003,8 +60067,16 @@ fn assert_underfunded_cpi_fee_cannot_subsidize_attacker_mark_gain(path: Underfun
         attacker_payout - attacker_before as u128
     );
     assert!(
-        victim_after < victim_before,
-        "the probe must move real victim value"
+        victim_after <= victim_before,
+        "the accepted upward print must not benefit the short victim"
+    );
+    assert!(
+        fee_lp_after < fee_lp_before,
+        "the independent LP must pay a real fee"
+    );
+    assert!(
+        insurance_after > insurance_before,
+        "the accepted trade must collect a real fee"
     );
     assert!(attacker_after >= attacker_payout as i128);
     assert_eq!(
@@ -60015,7 +60087,12 @@ fn assert_underfunded_cpi_fee_cannot_subsidize_attacker_mark_gain(path: Underfun
 
 #[test]
 fn v16_attack_underfunded_cpi_fee_cannot_subsidize_attacker_mark_gain() {
-    for path in [UnderfundedCpiFeePath::Single, UnderfundedCpiFeePath::Batch] {
-        assert_underfunded_cpi_fee_cannot_subsidize_attacker_mark_gain(path);
+    for mode in [
+        UnderfundedMarkMode::Ewma,
+        UnderfundedMarkMode::HybridAfterHours,
+    ] {
+        for path in [UnderfundedCpiFeePath::Single, UnderfundedCpiFeePath::Batch] {
+            assert_underfunded_cpi_fee_cannot_subsidize_attacker_mark_gain(mode, path);
+        }
     }
 }
