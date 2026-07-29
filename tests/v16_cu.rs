@@ -59932,3 +59932,207 @@ fn v16_attack_winner_first_recovery_forfeit_cannot_strand_loser() {
         "both Recovery users can dematerialize"
     );
 }
+
+// A Recovery forfeit is scoped to the selected position episode. A counterparty that forfeits a
+// newly reopened leg first must not force the remaining owner to burn already-materialized,
+// provider-backed PnL earned by an earlier, fully closed position on the same asset and side.
+#[test]
+fn v16_attack_reopened_recovery_forfeit_preserves_prior_same_domain_claim() {
+    const PRICE: u64 = 1_000_000;
+    const PROFIT_MARK: u64 = 952_000;
+    const ASSET: u16 = 1;
+    const VICTIM_SOURCE_DOMAIN: u16 = ASSET * 2;
+    const BACKING: u128 = 100_000;
+
+    let mut params = production_risk_params();
+    params.max_portfolio_assets = 2;
+    let mut env = V16CuEnv::new_with_init_params(params);
+    env.configure_permissionless_resolve_with_cu(100, 5);
+    env.configure_auth_mark_for_asset_as_admin(0, 0, PRICE);
+    env.configure_auth_mark_for_asset_as_admin(ASSET, 0, PRICE);
+    env.top_up_backing_bucket(VICTIM_SOURCE_DOMAIN, BACKING, 10_000);
+
+    let victim_owner = Keypair::new();
+    let first_counterparty_owner = Keypair::new();
+    let attacker_owner = Keypair::new();
+    let victim = env.create_portfolio(&victim_owner);
+    let first_counterparty = env.create_portfolio(&first_counterparty_owner);
+    let attacker = env.create_portfolio(&attacker_owner);
+    for (owner, portfolio) in [
+        (&victim_owner, victim),
+        (&first_counterparty_owner, first_counterparty),
+        (&attacker_owner, attacker),
+    ] {
+        env.deposit(owner, portfolio, 1_000_000);
+    }
+
+    // Episode one: the victim is short, earns a bounded authenticated-mark profit, and closes the
+    // position completely while retaining the materialized source-domain claim.
+    env.trade_asset_with_cu(
+        ASSET,
+        &first_counterparty_owner,
+        first_counterparty,
+        &victim_owner,
+        victim,
+        POS_SCALE as i128,
+        PRICE,
+        0,
+    );
+    env.svm.warp_to_slot(20);
+    env.push_auth_mark_for_asset_as_admin(ASSET, 20, PROFIT_MARK);
+    env.crank(
+        victim,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 20,
+            observations: crank_observations(ASSET),
+        },
+    );
+    env.trade_asset_with_cu(
+        ASSET,
+        &first_counterparty_owner,
+        first_counterparty,
+        &victim_owner,
+        victim,
+        -(POS_SCALE as i128),
+        PROFIT_MARK,
+        0,
+    );
+
+    let after_first_episode = env.portfolio_state(victim);
+    assert!(
+        !has_active_leg_for_asset(&after_first_episode, ASSET as usize),
+        "the profitable first position episode must be fully closed"
+    );
+    let historical_pnl = after_first_episode.pnl.get();
+    let historical_claim =
+        state::portfolio_source_domain(&after_first_episode, VICTIM_SOURCE_DOMAIN as usize)
+            .source_claim_bound_num
+            .get();
+    assert_eq!(
+        historical_pnl, 48_000,
+        "the bounded authenticated mark creates the expected independent-victim claim"
+    );
+    assert!(
+        historical_pnl > 0 && historical_claim > 0,
+        "the closed episode must leave real materialized, source-attributed PnL"
+    );
+
+    // Episode two reuses the same asset and side at the current mark, adding no PnL. After normal
+    // shutdown, the new counterparty maliciously forfeits first and removes the pair-close route.
+    env.trade_asset_with_cu(
+        ASSET,
+        &attacker_owner,
+        attacker,
+        &victim_owner,
+        victim,
+        POS_SCALE as i128,
+        PROFIT_MARK,
+        0,
+    );
+    assert_eq!(
+        env.portfolio_state(victim).pnl.get(),
+        historical_pnl,
+        "reopening at the current mark must not create the historical profit"
+    );
+    env.update_asset_lifecycle_as_admin_with_cu(processor::ASSET_ACTION_SHUTDOWN, ASSET, 20, 0);
+    env.forfeit_recovery_leg_with_cu(&attacker_owner, attacker, ASSET, u128::MAX);
+    assert!(
+        !has_active_leg_for_asset(&env.portfolio_state(attacker), ASSET as usize),
+        "the attacker removes the only opposite leg"
+    );
+
+    // The historical claim is real and backed, but every non-destructive public exit is gone.
+    env.svm.expire_blockhash();
+    let convert = env.send(
+        ProgInstruction::ConvertReleasedPnl {
+            amount: historical_pnl as u128,
+        },
+        vec![
+            AccountMeta::new(victim_owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(victim, false),
+        ],
+        &[&victim_owner],
+    );
+    assert!(
+        convert.is_err(),
+        "Recovery must reproduce the blocked direct conversion path"
+    );
+    env.svm.expire_blockhash();
+    let reduce = env.send(
+        ProgInstruction::RebalanceReduce {
+            asset_index: ASSET,
+            reduce_q: POS_SCALE,
+        },
+        vec![
+            AccountMeta::new(victim_owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(victim, false),
+        ],
+        &[&victim_owner],
+    );
+    assert!(
+        reduce.is_err(),
+        "Recovery must reproduce the blocked unilateral reduction path"
+    );
+    // Keep the unrelated base current beyond the global stale-resolution horizon. The victim
+    // cannot escape by waiting for whole-market resolution while honest base cranking continues.
+    env.svm.warp_to_slot(1_000);
+    env.push_auth_mark_for_asset_as_admin(0, 1_000, PRICE);
+    env.crank(
+        first_counterparty,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 1_000,
+            observations: crank_observations(0),
+        },
+    );
+    assert_eq!(
+        env.market_state().1.mode,
+        MarketModeV16::Live,
+        "fresh base observations keep the unaffected market live"
+    );
+    let cranker = Keypair::new();
+    assert!(
+        env.try_force_close_abandoned_asset_with_cu(
+            &cranker, attacker, victim, ASSET, 1_000, POS_SCALE,
+        )
+        .is_err(),
+        "the attacker has no leg left for permissionless pair close"
+    );
+
+    env.forfeit_recovery_leg_with_cu(&victim_owner, victim, ASSET, u128::MAX);
+    let after_forfeit = env.portfolio_state(victim);
+    assert_eq!(
+        after_forfeit.pnl.get(),
+        historical_pnl,
+        "forfeiting episode two must preserve episode one's materialized PnL"
+    );
+    assert_eq!(
+        state::portfolio_source_domain(&after_forfeit, VICTIM_SOURCE_DOMAIN as usize)
+            .source_claim_bound_num
+            .get(),
+        historical_claim,
+        "forfeiting episode two must preserve episode one's source claim"
+    );
+
+    env.crank(
+        victim,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 1_000,
+            observations: crank_observations(0),
+        },
+    );
+    env.convert_released_pnl_with_cu(&victim_owner, victim, historical_pnl as u128);
+    assert_eq!(
+        env.portfolio_state(victim).capital.get(),
+        1_000_000 + historical_pnl as u128,
+        "the preserved claim must remain convertible into senior capital"
+    );
+    let withdrawable = env.portfolio_state(victim).capital.get();
+    let (destination, _) = env.withdraw_with_cu(&victim_owner, victim, withdrawable);
+    assert_eq!(
+        env.token_amount(destination) as u128,
+        withdrawable,
+        "the fixed path pays the preserved value through canonical custody"
+    );
+}
