@@ -4438,14 +4438,13 @@ pub mod processor {
         Ok(())
     }
 
-    fn shutdown_asset_matured_at_slot_view(
+    fn recovery_asset_matured_at_slot_view(
         cfg: &WrapperConfigV16,
         group: &state::MarketViewMutV16<'_>,
         asset_index: usize,
         now_slot: u64,
     ) -> ProgramResult {
         if group.header.mode != 0
-            || asset_index == 0
             || cfg.force_close_delay_slots == 0
             || asset_index >= group.header.config.max_market_slots.get() as usize
             || asset_index >= group.markets.len()
@@ -4462,6 +4461,31 @@ pub mod processor {
             return Err(PercolatorError::EngineLockActive.into());
         }
         Ok(())
+    }
+
+    fn recovery_asset_empty_and_matured_at_slot_view(
+        cfg: &WrapperConfigV16,
+        group: &state::MarketViewMutV16<'_>,
+        asset_index: usize,
+        now_slot: u64,
+    ) -> ProgramResult {
+        recovery_asset_matured_at_slot_view(cfg, group, asset_index, now_slot)?;
+        if asset_local_has_position_or_loss_state_view(group, asset_index) {
+            return Err(PercolatorError::EngineLockActive.into());
+        }
+        Ok(())
+    }
+
+    fn shutdown_asset_matured_at_slot_view(
+        cfg: &WrapperConfigV16,
+        group: &state::MarketViewMutV16<'_>,
+        asset_index: usize,
+        now_slot: u64,
+    ) -> ProgramResult {
+        if asset_index == 0 {
+            return Err(PercolatorError::EngineLockActive.into());
+        }
+        recovery_asset_matured_at_slot_view(cfg, group, asset_index, now_slot)
     }
 
     fn shutdown_asset_empty_and_matured_at_slot_view(
@@ -4490,10 +4514,21 @@ pub mod processor {
         cfg: &WrapperConfigV16,
         group: &state::MarketViewMutV16<'_>,
         domain: usize,
+        allow_asset0_local_backing_recovery: bool,
     ) -> Result<bool, ProgramError> {
         let asset_index = domain / 2;
         if shutdown_asset_empty_and_matured_now_view(cfg, group, asset_index).is_ok() {
             return Ok(true);
+        }
+        if allow_asset0_local_backing_recovery && asset_index == 0 {
+            let now_slot = authenticated_market_slot_or_fallback_view(group);
+            if recovery_asset_empty_and_matured_at_slot_view(cfg, group, asset_index, now_slot)
+                .is_ok()
+            {
+                // This bypasses only the global health lock. Returning false keeps
+                // the market authority from acquiring a shutdown-drain capability.
+                return Ok(false);
+            }
         }
         reject_permissionless_resolve_matured_live_view(cfg, group)?;
         if group.header.bankruptcy_hlock_active != 0
@@ -7698,7 +7733,9 @@ pub mod processor {
             let (cfg, mut group) = state::market_view_mut(&mut market_data)?;
             let authorities = domain_authorities_from_view(&group, &cfg, domain_usize)?;
             let shutdown_drain = match group.header.mode {
-                0 => live_domain_withdraw_health_or_shutdown_view(&cfg, &group, domain_usize)?,
+                0 => {
+                    live_domain_withdraw_health_or_shutdown_view(&cfg, &group, domain_usize, true)?
+                }
                 1 => {
                     if group.header.materialized_portfolio_count.get() != 0
                         || group.header.c_tot.get() != 0
@@ -7823,7 +7860,9 @@ pub mod processor {
             let (cfg, mut group) = state::market_view_mut(&mut market_data)?;
             let authorities = domain_authorities_from_view(&group, &cfg, domain_usize)?;
             let shutdown_drain = match group.header.mode {
-                0 => live_domain_withdraw_health_or_shutdown_view(&cfg, &group, domain_usize)?,
+                0 => {
+                    live_domain_withdraw_health_or_shutdown_view(&cfg, &group, domain_usize, true)?
+                }
                 1 => {
                     if group.header.materialized_portfolio_count.get() != 0
                         || group.header.c_tot.get() != 0
@@ -8150,7 +8189,7 @@ pub mod processor {
             let authorities = domain_authorities_from_view(&group, &cfg, long_domain)?;
             let ledger_authority = if live_mode {
                 let shutdown_drain =
-                    live_domain_withdraw_health_or_shutdown_view(&cfg, &group, long_domain)?;
+                    live_domain_withdraw_health_or_shutdown_view(&cfg, &group, long_domain, false)?;
                 let local_authorized =
                     live_authority_matches(&authorities.insurance_operator, operator.key);
                 let admin_shutdown_authorized = asset_index != 0
