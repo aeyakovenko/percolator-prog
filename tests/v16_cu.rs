@@ -59725,6 +59725,9 @@ fn v16_attack_underfunded_exit_cannot_move_ewma_with_uncollectible_fee() {
 fn v16_attack_winner_first_recovery_forfeit_cannot_strand_loser() {
     const PRICE: u64 = 1_000_000;
     const ASSET: u16 = 1;
+    const WINNER_SOURCE_DOMAIN: u16 = ASSET * 2;
+    const BACKING: u128 = 100_000;
+    const BASE_RISK_Q: i128 = POS_SCALE as i128 * 3 / 2;
 
     let mut params = production_risk_params();
     params.max_portfolio_assets = 2;
@@ -59736,10 +59739,14 @@ fn v16_attack_winner_first_recovery_forfeit_cannot_strand_loser() {
 
     let loser_owner = Keypair::new();
     let winner_owner = Keypair::new();
+    let base_counterparty_owner = Keypair::new();
     let loser = env.create_portfolio(&loser_owner);
     let winner = env.create_portfolio(&winner_owner);
+    let base_counterparty = env.create_portfolio(&base_counterparty_owner);
     env.deposit(&loser_owner, loser, 51_000);
     env.deposit(&winner_owner, winner, 100_000);
+    env.deposit(&base_counterparty_owner, base_counterparty, 100_000);
+    env.top_up_backing_bucket(WINNER_SOURCE_DOMAIN, BACKING, 10_000);
     env.trade_asset_with_cu(
         ASSET,
         &loser_owner,
@@ -59751,7 +59758,33 @@ fn v16_attack_winner_first_recovery_forfeit_cannot_strand_loser() {
         0,
     );
 
-    for (slot, mark) in [(20, 952_000), (25, 940_000), (30, 940_576)] {
+    env.svm.warp_to_slot(20);
+    env.push_auth_mark_for_asset_as_admin(ASSET, 20, 952_000);
+    env.crank(
+        winner,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 20,
+            observations: crank_observations(ASSET),
+        },
+    );
+    env.trade_asset_with_cu(
+        0,
+        &winner_owner,
+        winner,
+        &base_counterparty_owner,
+        base_counterparty,
+        BASE_RISK_Q,
+        PRICE,
+        0,
+    );
+    let winner_with_lien = env.portfolio_state(winner);
+    let lien = state::portfolio_source_domain(&winner_with_lien, WINNER_SOURCE_DOMAIN as usize);
+    assert!(
+        lien.source_lien_counterparty_backing_num.get() > 0,
+        "public cross-margin risk increase must create a real backing lien"
+    );
+
+    for (slot, mark) in [(25, 940_000), (30, 940_576)] {
         env.svm.warp_to_slot(slot);
         env.push_auth_mark_for_asset_as_admin(ASSET, slot, mark);
         env.crank(
@@ -59775,6 +59808,19 @@ fn v16_attack_winner_first_recovery_forfeit_cannot_strand_loser() {
         "winner-first Recovery loser forfeit",
         loser_forfeit_cu,
         CUSTODY_CU_LIMIT,
+    );
+    let (_, after_forfeits) = env.market_state();
+    assert_eq!(
+        after_forfeits.source_backing_buckets[WINNER_SOURCE_DOMAIN as usize]
+            .valid_liened_backing_num,
+        0,
+        "winner forfeit must release its selected-domain backing lien"
+    );
+    assert_eq!(
+        after_forfeits.source_backing_buckets[WINNER_SOURCE_DOMAIN as usize]
+            .fresh_unliened_backing_num,
+        BACKING * BOUND_SCALE,
+        "released lien must return all provider principal"
     );
 
     let loser_after = env.portfolio_state(loser);
@@ -59842,6 +59888,16 @@ fn v16_attack_winner_first_recovery_forfeit_cannot_strand_loser() {
         CUSTODY_CU_LIMIT,
     );
 
+    env.trade_asset_with_cu(
+        0,
+        &winner_owner,
+        winner,
+        &base_counterparty_owner,
+        base_counterparty,
+        -BASE_RISK_Q,
+        PRICE,
+        0,
+    );
     let winner_capital = env.portfolio_state(winner).capital.get();
     assert!(
         winner_capital > 0,
@@ -59854,6 +59910,22 @@ fn v16_attack_winner_first_recovery_forfeit_cannot_strand_loser() {
         "the detached winner can withdraw"
     );
     env.close_portfolio_with_cu(&winner_owner, winner);
+
+    let base_counterparty_capital = env.portfolio_state(base_counterparty).capital.get();
+    env.withdraw(
+        &base_counterparty_owner,
+        base_counterparty,
+        base_counterparty_capital,
+    );
+    env.close_portfolio_with_cu(&base_counterparty_owner, base_counterparty);
+
+    let backing_dest = env.token_account(env.admin.pubkey(), 0);
+    env.withdraw_backing_bucket_to_admin_token_with_cu(backing_dest, WINNER_SOURCE_DOMAIN, BACKING);
+    assert_eq!(
+        env.token_amount(backing_dest),
+        BACKING as u64,
+        "the released backing remains fully withdrawable by its provider"
+    );
     assert_eq!(
         env.market_state().1.materialized_portfolio_count,
         0,
