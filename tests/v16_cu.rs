@@ -59720,9 +59720,9 @@ fn v16_attack_underfunded_exit_cannot_move_ewma_with_uncollectible_fee() {
     }
 }
 
-// A percentage price cap can round a one-slot move below one price atom. Permissionless callers
-// must not consume those zero-delta slots and reset the elapsed interval forever: failed calls
-// preserve state until enough time has accumulated for a representable target-directed move.
+// A percentage price cap can round a one-slot move below one price atom. Each bounded crank must
+// carry that fraction forward, so callers cannot discard it and the effective price still reaches
+// the authenticated target after finitely many successful calls.
 #[test]
 fn v16_attack_permissionless_micro_price_cranks_cannot_pin_oracle_progress() {
     const PRICE: u64 = 100;
@@ -59775,66 +59775,262 @@ fn v16_attack_permissionless_micro_price_cranks_cannot_pin_oracle_progress() {
         )
     };
 
-    for slot in 1..5u64 {
-        let market_before = env.svm.get_account(&env.market).unwrap();
-        let crank = crank_once(&mut env, slot);
-        assert!(
-            matches!(&crank, Err(err) if err.contains("Custom(22)")),
-            "slot {slot} zero-delta crank must return engine NonProgress: {crank:?}"
-        );
-        assert_eq!(
-            env.svm.get_account(&env.market).unwrap(),
-            market_before,
-            "slot {slot} rejected crank is byte-stable under SVM rollback"
-        );
+    let mut saw_fraction_only_progress = false;
+    let mut saw_price_move = false;
+    for slot in 1..=10u64 {
+        let before = env.market_state().1.assets[0];
+        let cu = crank_once(&mut env, slot).expect("fractional-cap crank must commit progress");
+        assert_cu_within("fractional-cap PermissionlessCrank", cu, CRANK_CU_LIMIT);
+        let after = env.market_state().1.assets[0];
+        assert_eq!(after.slot_last, slot);
+        assert_eq!(after.raw_oracle_target_price, TARGET);
+        assert!(after.effective_price >= before.effective_price);
+        assert!(after.effective_price <= TARGET);
+        if after.effective_price == before.effective_price {
+            saw_fraction_only_progress = true;
+            assert!(
+                after.retired_slot > before.retired_slot,
+                "a sub-atom segment carries cap numerator forward"
+            );
+        } else {
+            saw_price_move = true;
+        }
+    }
+    let after = env.market_state().1.assets[0];
+    assert!(saw_fraction_only_progress);
+    assert!(saw_price_move);
+    assert_eq!(after.effective_price, PRICE + 2);
+}
+
+// Fractional budget belongs only to the authenticated target that earned it. If the target reverses
+// before a whole price atom is available, the wrapper and engine must both reset the old-direction
+// carry so the first new-direction crank remains executable.
+#[test]
+fn v16_attack_micro_price_target_reversal_resets_fractional_cap_budget() {
+    const PRICE: u64 = 100;
+    const CAP_BPS: u64 = 24;
+
+    let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+        initial_price: PRICE,
+        max_price_move_bps_per_slot: CAP_BPS,
+        max_accrual_dt_slots: 20,
+        min_funding_lifetime_slots: 20,
+        ..V16CuMarketParams::default()
+    });
+    env.svm.warp_to_slot(0);
+    env.configure_auth_mark_with_cu(0, PRICE);
+
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long = env.create_portfolio(&long_owner);
+    let short = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long, 1_000_000);
+    env.deposit(&short_owner, short, 1_000_000);
+    env.trade_asset_with_cu(
+        0,
+        &long_owner,
+        long,
+        &short_owner,
+        short,
+        POS_SCALE as i128,
+        PRICE,
+        0,
+    );
+
+    let crank_once = |env: &mut V16CuEnv, slot: u64| {
+        env.svm.warp_to_slot(slot);
+        env.svm.expire_blockhash();
+        env.send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: slot,
+                observations: crank_observations(0),
+            },
+            vec![
+                AccountMeta::new(env.payer.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(long, false),
+            ],
+            &[],
+        )
+    };
+
+    env.svm.warp_to_slot(1);
+    env.push_auth_mark_with_cu(1, 200);
+    crank_once(&mut env, 4).expect("old-direction fractional progress");
+    let before_reversal = env.market_state().1.assets[0];
+    assert_eq!(before_reversal.effective_price, PRICE);
+    assert_eq!(before_reversal.retired_slot, 9_600);
+
+    env.svm.warp_to_slot(5);
+    env.push_auth_mark_with_cu(5, 1);
+    let cu = crank_once(&mut env, 5).expect("target reversal remains crankable");
+    assert_cu_within("target-reversal PermissionlessCrank", cu, CRANK_CU_LIMIT);
+    let after_reversal = env.market_state().1.assets[0];
+    assert_eq!(after_reversal.effective_price, PRICE);
+    assert_eq!(after_reversal.raw_oracle_target_price, 1);
+    assert_eq!(
+        after_reversal.retired_slot, 2_400,
+        "old-direction carry must not subsidize the reversed target"
+    );
+}
+
+// A fresh oracle report commonly changes the target every slot. Same-direction target updates must
+// retain fractional cap budget; otherwise an honest moving feed can reset the fraction forever and
+// pin the effective price without any stale or malicious report.
+#[test]
+fn v16_attack_moving_micro_price_target_cannot_reset_fractional_cap_budget() {
+    const PRICE: u64 = 100;
+    const CAP_BPS: u64 = 24;
+
+    let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+        initial_price: PRICE,
+        max_price_move_bps_per_slot: CAP_BPS,
+        max_accrual_dt_slots: 20,
+        min_funding_lifetime_slots: 20,
+        ..V16CuMarketParams::default()
+    });
+    env.svm.warp_to_slot(0);
+    env.configure_auth_mark_with_cu(0, PRICE);
+
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long = env.create_portfolio(&long_owner);
+    let short = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long, 1_000_000);
+    env.deposit(&short_owner, short, 1_000_000);
+    env.trade_asset_with_cu(
+        0,
+        &long_owner,
+        long,
+        &short_owner,
+        short,
+        POS_SCALE as i128,
+        PRICE,
+        0,
+    );
+
+    for slot in 1..=10 {
+        let target = 200 + slot;
+        env.svm.warp_to_slot(slot);
+        env.push_auth_mark_with_cu(slot, target);
+        env.svm.expire_blockhash();
+        let cu = env
+            .send(
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: slot,
+                    observations: crank_observations(0),
+                },
+                vec![
+                    AccountMeta::new(env.payer.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(long, false),
+                ],
+                &[],
+            )
+            .expect("same-direction moving target remains crankable");
+        assert_cu_within("moving-target PermissionlessCrank", cu, CRANK_CU_LIMIT);
         let asset = env.market_state().1.assets[0];
-        assert_eq!(asset.slot_last, 0, "slot {slot} was not consumed");
-        assert_eq!(
-            asset.effective_price, PRICE,
-            "zero-delta rejection preserves the effective price"
-        );
-        assert_eq!(
-            asset.raw_oracle_target_price, PRICE,
-            "the engine target copy rolls back with the rejected crank"
-        );
-        assert_eq!(
-            env.market_state().0.oracle_target_price_e6,
-            TARGET,
-            "the separately committed authenticated wrapper target remains pending"
-        );
+        assert_eq!(asset.raw_oracle_target_price, target);
+        assert!(asset.effective_price >= PRICE);
+        assert!(asset.effective_price <= target);
     }
 
-    let first_cu = crank_once(&mut env, 5).expect("five accumulated slots move one price atom");
-    assert!(
-        first_cu <= CRANK_CU_LIMIT,
-        "representable progress stays within crank CU budget: {first_cu}"
+    assert_eq!(
+        env.market_state().1.assets[0].effective_price,
+        PRICE + 2,
+        "same-direction reports must accumulate enough fractional budget to move"
     );
-    let first = env.market_state().1.assets[0];
-    assert_eq!(first.slot_last, 5);
-    assert_eq!(first.effective_price, PRICE + 1);
-    assert_eq!(first.raw_oracle_target_price, TARGET);
+}
 
-    for slot in 6..10u64 {
-        let market_before = env.svm.get_account(&env.market).unwrap();
-        let crank = crank_once(&mut env, slot);
-        assert!(
-            matches!(&crank, Err(err) if err.contains("Custom(22)")),
-            "slot {slot} zero-delta crank must return engine NonProgress: {crank:?}"
-        );
-        assert_eq!(
-            env.svm.get_account(&env.market).unwrap(),
-            market_before,
-            "slot {slot} rejected crank is byte-stable under SVM rollback"
-        );
+// Regression for the max-dt endpoint: price 100 -> 1 used to stall forever at 20 even after the
+// zero-delta caller fix. Fractional cap carry must reach the target before stale resolution, so
+// terminal payouts use the honest authenticated mark.
+#[test]
+fn v16_attack_max_dt_price_floor_cannot_underpay_honest_settlement() {
+    const OPEN_PRICE: u64 = 100;
+    const TARGET_PRICE: u64 = 1;
+    const CAP_BPS: u64 = 24;
+    const MAX_DT: u64 = 20;
+    const DEPOSIT: u128 = 1_000_000;
+
+    let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+        initial_price: OPEN_PRICE,
+        max_price_move_bps_per_slot: CAP_BPS,
+        max_accrual_dt_slots: MAX_DT,
+        min_funding_lifetime_slots: MAX_DT,
+        ..V16CuMarketParams::default()
+    });
+    env.configure_permissionless_resolve_with_cu(10_000, 1);
+    env.svm.warp_to_slot(0);
+    env.configure_auth_mark_with_cu(0, OPEN_PRICE);
+
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long = env.create_portfolio(&long_owner);
+    let short = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long, DEPOSIT);
+    env.deposit(&short_owner, short, DEPOSIT);
+    env.trade_asset_with_cu(
+        0,
+        &long_owner,
+        long,
+        &short_owner,
+        short,
+        POS_SCALE as i128,
+        OPEN_PRICE,
+        0,
+    );
+
+    env.svm.warp_to_slot(1);
+    env.push_auth_mark_with_cu(1, TARGET_PRICE);
+
+    let crank_once = |env: &mut V16CuEnv, slot: u64| {
+        env.svm.warp_to_slot(slot);
+        env.svm.expire_blockhash();
+        env.send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: slot,
+                observations: crank_observations(0),
+            },
+            vec![
+                AccountMeta::new(env.payer.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(short, false),
+            ],
+            &[],
+        )
+    };
+
+    let mut slot = MAX_DT;
+    let mut saw_fraction_only_progress = false;
+    for _ in 0..200 {
+        let before = env.market_state().1.assets[0];
+        let cu = crank_once(&mut env, slot).expect("each max-dt crank commits bounded progress");
+        assert_cu_within("max-dt fractional-cap crank", cu, CRANK_CU_LIMIT);
+        let after = env.market_state().1.assets[0];
+        if after.effective_price == before.effective_price {
+            saw_fraction_only_progress = true;
+            assert!(after.retired_slot > before.retired_slot);
+        }
+        if after.effective_price == TARGET_PRICE {
+            break;
+        }
+        slot += MAX_DT;
     }
+    let converged = env.market_state().1.assets[0];
+    assert!(saw_fraction_only_progress);
+    assert_eq!(converged.effective_price, TARGET_PRICE);
+    assert_eq!(converged.raw_oracle_target_price, TARGET_PRICE);
+    assert_eq!(converged.retired_slot, 0);
 
-    let second_cu = crank_once(&mut env, 10).expect("next five-slot interval also progresses");
-    assert!(
-        second_cu <= CRANK_CU_LIMIT,
-        "repeated representable progress stays within crank CU budget: {second_cu}"
-    );
-    let second = env.market_state().1.assets[0];
-    assert_eq!(second.slot_last, 10);
-    assert_eq!(second.effective_price, PRICE + 2);
-    assert_eq!(second.raw_oracle_target_price, TARGET);
+    let resolve_slot = slot + 1_000 * MAX_DT + 1;
+    env.resolve_stale_permissionless_with_cu(resolve_slot);
+    env.svm.warp_to_slot(resolve_slot + 1);
+    let long_dest = env.close_resolved(&long_owner, long);
+    let short_dest = env.close_resolved(&short_owner, short);
+    let long_payout = env.token_amount(long_dest);
+    let short_payout = env.token_amount(short_dest);
+    assert_eq!(long_payout, DEPOSIT as u64 - (OPEN_PRICE - TARGET_PRICE));
+    assert_eq!(short_payout, DEPOSIT as u64 + (OPEN_PRICE - TARGET_PRICE));
+    assert_eq!(long_payout + short_payout, 2 * DEPOSIT as u64);
 }
