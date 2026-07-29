@@ -59427,6 +59427,251 @@ fn v16_attack_update_authority_handoff_rekeys_asset0_lifecycle_admin() {
     );
 }
 
+// Bounded-admin LoF: an asset admin may recover empty role assignments, but it must not replace a
+// backing authority after an independent provider has funded that role. Otherwise the replacement
+// can withdraw the provider's principal without the incumbent provider ever signing the handoff.
+#[test]
+fn v16_attack_asset_admin_cannot_seize_funded_backing_role() {
+    let mut env = V16CuEnv::new();
+    let marketauth = env.admin.insecure_clone();
+    let asset_admin = Keypair::new();
+    let provider = Keypair::new();
+    let replacement = Keypair::new();
+
+    env.try_update_per_asset_authority_with_cu(
+        &marketauth,
+        Some(&asset_admin),
+        0,
+        processor::ASSET_AUTH_ADMIN,
+        asset_admin.pubkey().to_bytes(),
+    )
+    .expect("market authority delegates the separate cold asset-admin role");
+    env.try_update_per_asset_authority_with_cu(
+        &asset_admin,
+        Some(&provider),
+        0,
+        processor::ASSET_AUTH_BACKING_BUCKET,
+        provider.pubkey().to_bytes(),
+    )
+    .expect("empty backing role can be handed to the provider");
+    let provider_source = env.top_up_backing_bucket_with_authority(&provider, 0, 500, 100_000);
+    assert_eq!(
+        env.token_amount(provider_source),
+        0,
+        "independent provider actually committed 500 tokens"
+    );
+    assert_eq!(
+        env.market_state().1.source_backing_buckets[0].fresh_unliened_backing_num,
+        500 * BOUND_SCALE,
+        "provider principal is live in the backing bucket"
+    );
+
+    env.svm.expire_blockhash();
+    let takeover = env.try_update_per_asset_authority_with_cu(
+        &asset_admin,
+        Some(&replacement),
+        0,
+        processor::ASSET_AUTH_BACKING_BUCKET,
+        replacement.pubkey().to_bytes(),
+    );
+
+    let replacement_gain = if takeover.is_ok() {
+        let replacement_dest = env.token_account(replacement.pubkey(), 0);
+        env.svm.expire_blockhash();
+        send_tx(
+            &mut env.svm,
+            env.program_id,
+            &env.payer,
+            ProgInstruction::WithdrawBackingBucket {
+                domain: 0,
+                amount: 500,
+            },
+            vec![
+                AccountMeta::new(replacement.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(replacement_dest, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(env.vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[&replacement],
+        )
+        .expect("replacement authority drains the seized provider principal");
+        env.token_amount(replacement_dest)
+    } else {
+        0
+    };
+    assert_eq!(
+        replacement_gain, 0,
+        "asset admin replaced a funded backing role and transferred {replacement_gain} provider tokens to the replacement"
+    );
+
+    let provider_successor = Keypair::new();
+    env.svm.expire_blockhash();
+    env.try_update_per_asset_authority_with_cu(
+        &provider,
+        Some(&provider_successor),
+        0,
+        processor::ASSET_AUTH_BACKING_BUCKET,
+        provider_successor.pubkey().to_bytes(),
+    )
+    .expect("incumbent provider can still rotate its own funded role");
+    let provider_dest = env.token_account(provider_successor.pubkey(), 0);
+    env.svm.expire_blockhash();
+    send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::WithdrawBackingBucket {
+            domain: 0,
+            amount: 500,
+        },
+        vec![
+            AccountMeta::new(provider_successor.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(provider_dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&provider_successor],
+    )
+    .expect("provider-approved successor retains the funded withdrawal path");
+    assert_eq!(env.token_amount(provider_dest), 500);
+}
+
+// The same funded-role invariant applies to the live insurance operator: asset-admin recovery of an
+// empty role is useful, but an admin must not redirect an independent funder's live reserve without
+// the incumbent role holder's consent.
+#[test]
+fn v16_attack_asset_admin_cannot_seize_funded_insurance_operator_role() {
+    let mut env = V16CuEnv::new();
+    let marketauth = env.admin.insecure_clone();
+    let asset_admin = Keypair::new();
+    let funder = Keypair::new();
+    let replacement = Keypair::new();
+
+    env.try_update_per_asset_authority_with_cu(
+        &marketauth,
+        Some(&asset_admin),
+        0,
+        processor::ASSET_AUTH_ADMIN,
+        asset_admin.pubkey().to_bytes(),
+    )
+    .expect("market authority delegates the separate cold asset-admin role");
+    for kind in [
+        processor::ASSET_AUTH_INSURANCE,
+        processor::ASSET_AUTH_INSURANCE_OPERATOR,
+    ] {
+        env.try_update_per_asset_authority_with_cu(
+            &asset_admin,
+            Some(&funder),
+            0,
+            kind,
+            funder.pubkey().to_bytes(),
+        )
+        .expect("empty insurance role can be handed to the independent funder");
+    }
+    let funder_source = env.top_up_insurance_domain_with_authority(&funder, 0, 500);
+    assert_eq!(
+        env.token_amount(funder_source),
+        0,
+        "independent funder actually committed 500 tokens"
+    );
+    assert_eq!(
+        env.market_state().1.insurance_domain_budget[0],
+        500,
+        "the independent reserve is live before the takeover"
+    );
+
+    env.svm.expire_blockhash();
+    let takeover = env.try_update_per_asset_authority_with_cu(
+        &asset_admin,
+        Some(&replacement),
+        0,
+        processor::ASSET_AUTH_INSURANCE_OPERATOR,
+        replacement.pubkey().to_bytes(),
+    );
+    let replacement_gain = if takeover.is_ok() {
+        let (replacement_dest, _) = env
+            .try_withdraw_insurance_asset_with_authority(&replacement, 0, 500)
+            .expect("replacement operator drains the seized insurance reserve");
+        env.token_amount(replacement_dest)
+    } else {
+        0
+    };
+    assert_eq!(
+        replacement_gain, 0,
+        "asset admin replaced a funded insurance role and transferred {replacement_gain} funder tokens to the replacement"
+    );
+
+    let (funder_dest, _) = env
+        .try_withdraw_insurance_asset_with_authority(&funder, 0, 500)
+        .expect("incumbent insurance operator retains the funded withdrawal path");
+    assert_eq!(env.token_amount(funder_dest), 500);
+}
+
+// Terminal insurance belongs to the configured insurance authority. Replacing that funded role is
+// the delayed form of the same attack: an honest market authority can resolve normally, after which
+// the admin-appointed replacement would otherwise withdraw the independent funder's reserve.
+#[test]
+fn v16_attack_asset_admin_cannot_seize_funded_insurance_authority_role() {
+    let mut env = V16CuEnv::new();
+    let marketauth = env.admin.insecure_clone();
+    let asset_admin = Keypair::new();
+    let funder = Keypair::new();
+    let replacement = Keypair::new();
+
+    env.try_update_per_asset_authority_with_cu(
+        &marketauth,
+        Some(&asset_admin),
+        0,
+        processor::ASSET_AUTH_ADMIN,
+        asset_admin.pubkey().to_bytes(),
+    )
+    .expect("market authority delegates the separate cold asset-admin role");
+    env.try_update_per_asset_authority_with_cu(
+        &asset_admin,
+        Some(&funder),
+        0,
+        processor::ASSET_AUTH_INSURANCE,
+        funder.pubkey().to_bytes(),
+    )
+    .expect("empty terminal insurance role can be handed to the independent funder");
+    let funder_source = env.top_up_insurance_domain_with_authority(&funder, 0, 500);
+    assert_eq!(env.token_amount(funder_source), 0);
+    assert_eq!(env.market_state().1.insurance_domain_budget[0], 500);
+
+    env.svm.expire_blockhash();
+    let takeover = env.try_update_per_asset_authority_with_cu(
+        &asset_admin,
+        Some(&replacement),
+        0,
+        processor::ASSET_AUTH_INSURANCE,
+        replacement.pubkey().to_bytes(),
+    );
+
+    env.resolve();
+    let replacement_gain = if takeover.is_ok() {
+        let (replacement_dest, _) =
+            env.withdraw_terminal_insurance_with_authority(&replacement, 500);
+        env.token_amount(replacement_dest)
+    } else {
+        0
+    };
+    assert_eq!(
+        replacement_gain, 0,
+        "asset admin replaced the funded terminal insurance authority and transferred {replacement_gain} funder tokens to the replacement"
+    );
+
+    let (funder_dest, _) = env.withdraw_terminal_insurance_with_authority(&funder, 500);
+    assert_eq!(
+        env.token_amount(funder_dest),
+        500,
+        "incumbent funder retains the terminal withdrawal path"
+    );
+}
+
 #[test]
 fn v16_attack_update_authority_handoff_rekeys_asset0_default_runtime_authorities() {
     let mut env = V16CuEnv::new();
