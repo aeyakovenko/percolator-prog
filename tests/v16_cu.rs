@@ -67865,11 +67865,7 @@ fn v16_probe_post_expiry_trade_cannot_charge_backing_fee() {
     let mut env = V16CuEnv::new_with_market_params_and_price_move(1, 1_000, 5_000, 500);
     env.configure_auth_mark_for_asset_as_admin(0, 0, PRICE);
     env.update_backing_fee_policy_with_cu(WINNING_DOMAIN as u16, 5_000, 0);
-    env.top_up_backing_bucket(
-        WINNING_DOMAIN as u16,
-        100_000,
-        EXPIRY_SLOT,
-    );
+    env.top_up_backing_bucket(WINNING_DOMAIN as u16, 100_000, EXPIRY_SLOT);
 
     let trader_owner = Keypair::new();
     let counterparty_owner = Keypair::new();
@@ -67909,6 +67905,9 @@ fn v16_probe_post_expiry_trade_cannot_charge_backing_fee() {
     let trader_capital_before = env.portfolio_state(trader).capital.get();
     let provider_earnings_before =
         before.source_backing_buckets[WINNING_DOMAIN].utilization_fee_earnings;
+    let market_account_before = env.svm.get_account(&env.market).unwrap();
+    let trader_account_before = env.svm.get_account(&trader).unwrap();
+    let counterparty_account_before = env.svm.get_account(&counterparty).unwrap();
 
     env.svm.expire_blockhash();
     let retained_trade = Transaction::new_signed_with_payer(
@@ -67968,4 +67967,30 @@ fn v16_probe_post_expiry_trade_cannot_charge_backing_fee() {
         after.current_slot,
     );
     assert_eq!(extracted, 0, "expired support may not earn a trade fee");
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_account_before,
+        "the rejected stale trade must roll back the market"
+    );
+    assert_eq!(
+        env.svm.get_account(&trader).unwrap(),
+        trader_account_before,
+        "the rejected stale trade must roll back the trader"
+    );
+    assert_eq!(
+        env.svm.get_account(&counterparty).unwrap(),
+        counterparty_account_before,
+        "the rejected stale trade must roll back the counterparty"
+    );
+
+    env.trade_asset_with_cu(
+        0,
+        &trader_owner,
+        trader,
+        &counterparty_owner,
+        counterparty,
+        -INCREASE_Q,
+        WINNING_MARK,
+        0,
+    );
 }
