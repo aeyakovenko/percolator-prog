@@ -6543,6 +6543,40 @@ fn v16_bpf_asset0_bankruptcy_recovery_lets_only_backing_provider_drain() {
     )
     .expect("the recorded provider can drain mature, empty asset-0 recovery backing");
     assert_eq!(env.token_amount(provider_dest) as u128, principal);
+
+    // A completed asset restart creates a fresh insurance generation. The historical
+    // market-wide bankruptcy lock must remain active for unrelated accounts, but it
+    // cannot permanently strand this empty asset's newly funded domain budget.
+    env.enable_live_insurance_withdrawal();
+    let old_market_id = env.market_state().1.assets[0].market_id;
+    env.svm.warp_to_slot(4);
+    env.try_restart_asset_oracle_with_authority(&marketauth, 0, 4, 399)
+        .expect("the cleaned loss generation restarts");
+    let restarted = env.market_state().1;
+    assert_ne!(restarted.assets[0].market_id, old_market_id);
+    assert_eq!(restarted.assets[0].lifecycle, AssetLifecycleV16::Active);
+    assert!(
+        restarted.bankruptcy_hlock_active,
+        "asset restart must not clear the market-wide historical lock",
+    );
+    assert_eq!(restarted.insurance_domain_spent[0], 0);
+    assert_eq!(restarted.insurance_domain_spent[1], 0);
+
+    env.top_up_insurance_domain_with_authority(&marketauth, 0, 2);
+    let before_withdrawal = env.market_state().1;
+    env.try_withdraw_insurance_asset_with_authority(&marketauth, 0, 1)
+        .expect("fresh empty-generation insurance remains withdrawable");
+    let after_withdrawal = env.market_state().1;
+    assert!(after_withdrawal.bankruptcy_hlock_active);
+    assert_eq!(after_withdrawal.insurance, before_withdrawal.insurance - 1,);
+    assert_eq!(
+        after_withdrawal.insurance_domain_budget[0],
+        before_withdrawal.insurance_domain_budget[0] - 1,
+    );
+    assert_eq!(
+        after_withdrawal.insurance_domain_budget[1],
+        before_withdrawal.insurance_domain_budget[1],
+    );
 }
 
 #[test]
@@ -35699,16 +35733,9 @@ fn v16_attack_live_insurance_withdraw_rejects_exposed_target_effective_lag() {
     );
 }
 
-// security.md sweep — live insurance withdrawal must reject while insurance is still protecting
-// unresolved loss (SOL-021/SOL-022 terminal/encumbered gating). live_domain_withdraw_health_or_shutdown
-// _view (v16_program 4812) blocks WithdrawInsuranceAsset on a live market whenever bankruptcy_hlock_active
-// / threshold_stress_active / loss_stale_active / recovery_reason is set — exactly the states where the
-// fund is the users' backstop for in-flight loss/bankruptcy work. If an operator could drain insurance
-// then, users lose their protection (LOF). The exposed target/effective lag branch is covered by
-// v16_attack_live_insurance_withdraw_rejects_exposed_target_effective_lag; the DISTINCT stress/h-lock/
-// loss-stale OR-branch (4822-4831) was untested. This sets each flag on an otherwise-healthy FLAT market
-// (where the same withdrawal demonstrably succeeds) and asserts the withdrawal rejects with insurance +
-// domain budget byte-unchanged — proving the stress flag is the sole blocker (non-vacuous).
+// Live insurance withdrawal must reject while insurance is still protecting unresolved loss.
+// Threshold/loss-stale flags remain unconditional. A bankruptcy h-lock may be historical for an
+// unrelated empty asset, but it must still block the exact asset as soon as fresh exposure exists.
 #[test]
 fn v16_attack_live_insurance_withdraw_rejects_while_stressed_or_hlocked() {
     let mut env = V16CuEnv::new_with_market_params_and_price_move(1, 10_000, 10_000, 24);
@@ -35725,11 +35752,8 @@ fn v16_attack_live_insurance_withdraw_rejects_while_stressed_or_hlocked() {
     env.try_withdraw_insurance_asset_with_authority(&admin, 0, 100)
         .expect("flat healthy live insurance withdrawal must succeed");
 
-    // Each engine "insurance still protecting loss" flag must independently block the withdrawal.
-    let cases: [(&str, fn(&mut MarketGroupV16, bool)); 3] = [
-        ("bankruptcy_hlock_active", |g, v| {
-            g.bankruptcy_hlock_active = v
-        }),
+    // These global states remain unconditional blockers even while the asset is empty.
+    let cases: [(&str, fn(&mut MarketGroupV16, bool)); 2] = [
         ("threshold_stress_active", |g, v| {
             g.threshold_stress_active = v
         }),
@@ -35756,6 +35780,62 @@ fn v16_attack_live_insurance_withdraw_rejects_while_stressed_or_hlocked() {
         // clear the flag so the next iteration tests its flag in isolation.
         env.mutate_market(|_cfg, group| set(group, false));
     }
+
+    env.mutate_market(|_cfg, group| {
+        group.bankruptcy_hlock_active = true;
+        group.assets[0].pending_obligation_count_long = 1;
+    });
+    let pending_before = env.market_state().1;
+    env.svm.expire_blockhash();
+    assert!(
+        env.try_withdraw_insurance_asset_with_authority(&admin, 0, 100)
+            .is_err(),
+        "the historical-lock exception must not cross a pending local obligation",
+    );
+    let pending_after = env.market_state().1;
+    assert_eq!(pending_after.insurance, pending_before.insurance);
+    assert_eq!(
+        pending_after.insurance_domain_budget[0],
+        pending_before.insurance_domain_budget[0],
+    );
+    env.mutate_market(|_cfg, group| {
+        group.bankruptcy_hlock_active = false;
+        group.assets[0].pending_obligation_count_long = 0;
+    });
+
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long = env.create_portfolio(&long_owner);
+    let short = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long, 1_000_000_000);
+    env.deposit(&short_owner, short, 1_000_000_000);
+    env.trade_with_cu(
+        &long_owner,
+        long,
+        &short_owner,
+        short,
+        POS_SCALE as i128,
+        100_000_000,
+        0,
+    );
+
+    env.svm.expire_blockhash();
+    env.try_withdraw_insurance_asset_with_authority(&admin, 0, 100)
+        .expect("healthy current exposure alone does not block its bounded insurance operator");
+    env.mutate_market(|_cfg, group| group.bankruptcy_hlock_active = true);
+    let before = env.market_state().1;
+    env.svm.expire_blockhash();
+    assert!(
+        env.try_withdraw_insurance_asset_with_authority(&admin, 0, 100)
+            .is_err(),
+        "a bankruptcy h-lock must protect the freshly exposed generation",
+    );
+    let after = env.market_state().1;
+    assert_eq!(after.insurance, before.insurance);
+    assert_eq!(
+        after.insurance_domain_budget[0],
+        before.insurance_domain_budget[0],
+    );
 }
 
 #[test]

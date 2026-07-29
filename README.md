@@ -677,7 +677,15 @@ There are two different insurance withdrawal surfaces:
 - live `WithdrawInsuranceAsset`, which is a per-asset operator path bounded by that asset's funded
   long+short insurance budget
 
-Live insurance withdrawal is intentionally stricter. It is expected to be allowed only when the live market is flat or loss-current, target/effective-lag-free, stress-free, h-lock-free, and has non-negative senior residual. In other words, live insurance can be withdrawn from an empty or fully healthy market, but not while the insurance fund is still protecting unresolved loss or bankruptcy work.
+Live insurance withdrawal is intentionally stricter. It is expected to be allowed only when the
+live market is flat or loss-current, target/effective-lag-free, stress-free, and has non-negative
+senior residual. A bankruptcy h-lock remains an unconditional blocker for backing withdrawals and
+for an insurance asset with any local position, stale account, pending obligation, loss state,
+generation spend, or loss barrier. The per-asset insurance operator may bypass only a historical
+market-wide h-lock after that target asset has restarted Active with an empty local generation.
+Per-domain budgets and global/source reservation capacity still prevent that path from consuming
+insurance assigned to another asset. Threshold stress, loss staleness, and recovery reason remain
+unconditional blockers.
 
 ### Product intuition
 
