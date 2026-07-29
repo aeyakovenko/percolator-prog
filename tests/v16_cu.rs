@@ -60734,138 +60734,30 @@ fn v16_attack_retained_recovery_forfeit_cannot_consume_expired_backing() {
         &[&env.payer, &victim_owner],
         env.svm.latest_blockhash(),
     );
-    let market_before = env.svm.get_account(&env.market).unwrap();
-    let victim_before = env.svm.get_account(&victim).unwrap();
     let vault_before = env.svm.get_account(&env.vault).unwrap();
 
     // Only authenticated wall-clock time changes. The engine's cached slot and every protocol
     // account remain at the state where the transaction was signed.
     env.svm.warp_to_slot(EXPIRY_SLOT + 1);
     let delayed = env.svm.send_transaction(retained_forfeit);
-
-    let mut extracted = 0u64;
-    if delayed.is_ok() {
-        let withdrawable = env.portfolio_state(victim).capital.get();
-        let (destination, _) = env.withdraw_with_cu(&victim_owner, victim, withdrawable);
-        extracted = env.token_amount(destination);
-    }
-    let (_, after) = env.market_state();
-    let consumed_provider_principal = after.source_backing_buckets[SOURCE_DOMAIN as usize]
-        .consumed_liened_backing_num
-        / BOUND_SCALE;
-    let extracted_provider_principal = extracted.saturating_sub(RETAINED_CAPITAL as u64);
     assert!(
-        delayed.is_err(),
-        "retained Recovery forfeit landed at wall-clock slot {}, past provider expiry {}, while engine slot stayed {}; it consumed {} provider atoms and the user withdrew {} atoms of provider principal",
-        EXPIRY_SLOT + 1,
-        EXPIRY_SLOT,
-        after.current_slot,
-        consumed_provider_principal,
-        extracted_provider_principal,
-    );
-    assert_eq!(
-        extracted_provider_principal, 0,
-        "no expired backing principal may reach user custody"
-    );
-    assert_eq!(
-        env.svm.get_account(&env.market).unwrap(),
-        market_before,
-        "the stale retained transaction must preserve market bytes"
-    );
-    assert_eq!(
-        env.svm.get_account(&victim).unwrap(),
-        victim_before,
-        "the stale retained transaction must preserve victim bytes"
+        delayed.is_ok(),
+        "the authenticated forfeit must reconcile expiry instead of consuming backing or stranding the dead leg: {delayed:?}"
     );
     assert_eq!(
         env.svm.get_account(&env.vault).unwrap(),
         vault_before,
-        "the stale retained transaction must preserve canonical custody"
+        "expiry reconciliation and dead-leg detach move no SPL custody"
     );
 
-    // Keep the base market healthy after the asset-local force-close delay. Global resolution is
-    // not a valid escape hatch for one lapsed backing domain in an otherwise live market.
-    let retry_slot = EXPIRY_SLOT + 10;
-    env.svm.warp_to_slot(retry_slot);
-    env.push_auth_mark_for_asset_as_admin(0, retry_slot, PRICE);
-    env.svm.expire_blockhash();
-    let global_resolve = env.send(
-        ProgInstruction::ResolveStalePermissionless {
-            now_slot: retry_slot,
-        },
-        vec![AccountMeta::new(env.market, false)],
-        &[],
-    );
-    assert!(
-        global_resolve.is_err(),
-        "a fresh base market must not be globally resolved to free one expired backing lien"
-    );
-
-    // The opposite leg was validly forfeited before expiry, so pair-close cannot make progress.
-    let cranker = Keypair::new();
-    let pair_close = env.try_force_close_abandoned_asset_with_cu(
-        &cranker, victim, attacker, ASSET, retry_slot, POS_SCALE,
-    );
-    assert!(
-        pair_close.is_err(),
-        "the remaining owner has no opposite Recovery leg to pair-close against"
-    );
-
-    env.svm.expire_blockhash();
-    let crank = env.send(
-        ProgInstruction::PermissionlessCrank {
-            now_slot: retry_slot,
-            observations: crank_observations(ASSET),
-        },
-        vec![
-            AccountMeta::new(env.payer.pubkey(), true),
-            AccountMeta::new(env.market, false),
-            AccountMeta::new(victim, false),
-        ],
-        &[],
-    );
-    assert!(
-        crank.is_err(),
-        "ordinary account refresh cannot reconcile an asset already in Recovery"
-    );
-
-    env.svm.expire_blockhash();
-    let reduce = env.send(
-        ProgInstruction::RebalanceReduce {
-            asset_index: ASSET,
-            reduce_q: POS_SCALE,
-        },
-        vec![
-            AccountMeta::new(victim_owner.pubkey(), true),
-            AccountMeta::new(env.market, false),
-            AccountMeta::new(victim, false),
-        ],
-        &[&victim_owner],
-    );
-    assert!(
-        reduce.is_err(),
-        "owner reduction is not the unilateral dead-leg exit"
-    );
-
-    // A freshly signed forfeit is the remaining bounded exit. It must observe expiry, impair the
-    // source-backed claim instead of capitalizing it, and detach the dead leg so deposited capital
-    // is not held hostage to a global market shutdown.
-    env.svm.expire_blockhash();
-    let fresh_forfeit = env.send(
-        ProgInstruction::ForfeitRecoveryLeg {
-            asset_index: ASSET,
-            b_delta_budget: u128::MAX,
-        },
-        vec![
-            AccountMeta::new(victim_owner.pubkey(), true),
-            AccountMeta::new(env.market, false),
-            AccountMeta::new(victim, false),
-        ],
-        &[&victim_owner],
-    );
-    assert!(
-        fresh_forfeit.is_ok(),
-        "expired backing must not permanently block the only unilateral Recovery exit: {fresh_forfeit:?}"
+    let (_, after) = env.market_state();
+    let bucket_after = after.source_backing_buckets[SOURCE_DOMAIN as usize];
+    assert_eq!(after.current_slot, 40);
+    assert_eq!(bucket_after.status, BackingBucketStatusV16::Impaired);
+    assert_eq!(bucket_after.valid_liened_backing_num, 0);
+    assert_eq!(
+        bucket_after.consumed_liened_backing_num, 0,
+        "expiry must impair provider backing rather than consume it into senior capital"
     );
     let recovered = env.portfolio_state(victim);
     assert!(
@@ -60882,6 +60774,10 @@ fn v16_attack_retained_recovery_forfeit_cannot_consume_expired_backing() {
         (historical_claim / BOUND_SCALE) as i128,
         "the earlier claim remains impaired rather than trapping deposited capital"
     );
+    let source = state::portfolio_source_domain(&recovered, SOURCE_DOMAIN as usize);
+    assert_eq!(source.source_claim_bound_num.get(), historical_claim);
+    assert_eq!(source.source_claim_impaired_num.get(), historical_claim);
+
     let (deposit_destination, _) = env.withdraw_with_cu(&victim_owner, victim, RETAINED_CAPITAL);
     assert_eq!(
         env.token_amount(deposit_destination),
