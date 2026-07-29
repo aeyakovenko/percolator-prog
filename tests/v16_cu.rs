@@ -60513,3 +60513,266 @@ fn v16_probe_stale_resolve_cannot_discard_pending_authenticated_mark() {
         "stale resolver discarded an authenticated pending mark"
     );
 }
+
+// An expired recovery ledger on one asset must not let a permissionless caller resolve an
+// unrelated exposed asset before its authenticated mark is committed. The attack uses only public
+// instructions and demonstrates the short withdrawing the 10,000,000 atoms owed to the long.
+#[test]
+fn v16_attack_expired_recovery_cannot_discard_unrelated_pending_mark() {
+    #[derive(Debug)]
+    struct Outcome {
+        effective_price: u64,
+        victim_long_pnl: i128,
+        attacker_short_payout: u64,
+    }
+
+    fn run(accrue_pending_mark: bool, late_same_slot_mark: bool) -> Outcome {
+        const PRICE: u64 = 1_000_000;
+        const NEXT_MARK: u64 = 1_010_000;
+        const VICTIM_DEPOSIT: u128 = 2_000_000_000;
+        const VICTIM_SIZE_Q: i128 = 1_000 * POS_SCALE as i128;
+
+        let mut params = production_risk_params();
+        params.max_portfolio_assets = 2;
+        params.max_bankrupt_close_lifetime_slots = 1;
+        params.public_b_chunk_atoms = 8_000;
+        let mut env = V16CuEnv::new_with_init_params(params);
+        env.configure_permissionless_resolve_with_cu(100, 5);
+        env.configure_auth_mark_for_asset_as_admin(0, 0, PRICE);
+        env.configure_auth_mark_for_asset_as_admin(1, 0, PRICE);
+
+        let bankrupt_owner = Keypair::new();
+        let recovery_counterparty_owner = Keypair::new();
+        let victim_long_owner = Keypair::new();
+        let attacker_short_owner = Keypair::new();
+        let bankrupt = env.create_portfolio(&bankrupt_owner);
+        let recovery_counterparty = env.create_portfolio(&recovery_counterparty_owner);
+        let victim_long = env.create_portfolio(&victim_long_owner);
+        let attacker_short = env.create_portfolio(&attacker_short_owner);
+        env.deposit(&bankrupt_owner, bankrupt, 51_000);
+        env.deposit(&recovery_counterparty_owner, recovery_counterparty, 100_000);
+        env.deposit(&victim_long_owner, victim_long, VICTIM_DEPOSIT);
+        env.deposit(&attacker_short_owner, attacker_short, VICTIM_DEPOSIT);
+
+        env.trade_asset_with_cu(
+            0,
+            &bankrupt_owner,
+            bankrupt,
+            &recovery_counterparty_owner,
+            recovery_counterparty,
+            POS_SCALE as i128,
+            PRICE,
+            0,
+        );
+        env.trade_asset_with_cu(
+            1,
+            &victim_long_owner,
+            victim_long,
+            &attacker_short_owner,
+            attacker_short,
+            VICTIM_SIZE_Q,
+            PRICE,
+            0,
+        );
+
+        for (slot, mark) in [(20, 952_000), (25, 940_000), (30, 940_576)] {
+            env.svm.warp_to_slot(slot);
+            env.push_auth_mark_for_asset_as_admin(0, slot, mark);
+            env.crank(
+                recovery_counterparty,
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: slot,
+                    observations: crank_observations(0),
+                },
+            );
+        }
+        env.update_asset_lifecycle_as_admin_with_cu(
+            percolator_prog::processor::ASSET_ACTION_SHUTDOWN,
+            0,
+            30,
+            0,
+        );
+
+        env.svm.expire_blockhash();
+        env.send(
+            ProgInstruction::ForfeitRecoveryLeg {
+                asset_index: 0,
+                b_delta_budget: percolator::MAX_VAULT_TVL,
+            },
+            vec![
+                AccountMeta::new(bankrupt_owner.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(bankrupt, false),
+            ],
+            &[&bankrupt_owner],
+        )
+        .expect("public forfeit must commit a partial close ledger");
+        let ledger = close_progress(&env.portfolio_state(bankrupt));
+        assert!(ledger.active && ledger.residual_remaining > 0);
+
+        let terminal_slot = ledger.max_close_slot + 1;
+        let pending_slot = if late_same_slot_mark {
+            terminal_slot
+        } else {
+            ledger.max_close_slot
+        };
+        env.svm.warp_to_slot(pending_slot);
+        if late_same_slot_mark {
+            env.crank(
+                victim_long,
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: pending_slot,
+                    observations: crank_observations(1),
+                },
+            );
+            assert_eq!(
+                env.market_state().1.assets[1].slot_last,
+                pending_slot,
+                "control must advance the old asset cursor before the same-slot mark lands"
+            );
+        }
+        env.push_auth_mark_for_asset_as_admin(1, pending_slot, NEXT_MARK);
+        assert_eq!(
+            env.market_state().1.assets[1].effective_price,
+            PRICE,
+            "authenticated mark must remain pending until public accrual"
+        );
+        if accrue_pending_mark {
+            let accrual_slot = if late_same_slot_mark {
+                pending_slot + 1
+            } else {
+                pending_slot
+            };
+            env.svm.warp_to_slot(accrual_slot);
+            env.crank(
+                victim_long,
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: accrual_slot,
+                    observations: crank_observations(1),
+                },
+            );
+        }
+
+        let initial_recovery_slot = if accrue_pending_mark && late_same_slot_mark {
+            terminal_slot + 1
+        } else {
+            terminal_slot
+        };
+        env.svm.warp_to_slot(initial_recovery_slot);
+        env.svm.expire_blockhash();
+        let unsafe_recovery = env.send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 0,
+                observations: Vec::new(),
+            },
+            vec![
+                AccountMeta::new_readonly(env.payer.pubkey(), false),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(bankrupt, false),
+            ],
+            &[],
+        );
+        if accrue_pending_mark {
+            unsafe_recovery.expect("current committed accrual permits terminal recovery");
+        } else if unsafe_recovery.is_err() {
+            if late_same_slot_mark {
+                env.crank(
+                    victim_long,
+                    ProgInstruction::PermissionlessCrank {
+                        now_slot: terminal_slot,
+                        observations: crank_observations(1),
+                    },
+                );
+                let target_only = env.market_state().1.assets[1];
+                assert_eq!(target_only.raw_oracle_target_price, NEXT_MARK);
+                assert_eq!(
+                    target_only.effective_price, PRICE,
+                    "same-slot target commit must not move the effective price"
+                );
+                env.svm.expire_blockhash();
+                env.send(
+                    ProgInstruction::PermissionlessCrank {
+                        now_slot: 0,
+                        observations: Vec::new(),
+                    },
+                    vec![
+                        AccountMeta::new_readonly(env.payer.pubkey(), false),
+                        AccountMeta::new(env.market, false),
+                        AccountMeta::new(bankrupt, false),
+                    ],
+                    &[],
+                )
+                .expect_err(
+                    "target-only same-slot lag must remain blocked until effective-price progress",
+                );
+            }
+            let catchup_slot = if late_same_slot_mark {
+                terminal_slot + 1
+            } else {
+                terminal_slot
+            };
+            env.svm.warp_to_slot(catchup_slot);
+            env.crank(
+                victim_long,
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: catchup_slot,
+                    observations: crank_observations(1),
+                },
+            );
+            env.svm.expire_blockhash();
+            env.send(
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: 0,
+                    observations: Vec::new(),
+                },
+                vec![
+                    AccountMeta::new_readonly(env.payer.pubkey(), false),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(bankrupt, false),
+                ],
+                &[],
+            )
+            .expect("terminal recovery remains live after bounded accrual catch-up");
+        }
+        let (_, resolved) = env.market_state();
+        assert_eq!(resolved.mode, MarketModeV16::Resolved);
+
+        let victim_long_pnl = env.portfolio_state(victim_long).pnl.get();
+        env.svm.warp_to_slot(resolved.resolved_slot + 5);
+        let _bankrupt_progress = env.close_resolved(&bankrupt_owner, bankrupt);
+        let attacker_short_dest = env.close_resolved(&attacker_short_owner, attacker_short);
+        Outcome {
+            effective_price: resolved.assets[1].effective_price,
+            victim_long_pnl,
+            attacker_short_payout: env.token_amount(attacker_short_dest),
+        }
+    }
+
+    for late_same_slot_mark in [false, true] {
+        let control = run(true, late_same_slot_mark);
+        let attack = run(false, late_same_slot_mark);
+        eprintln!(
+            "terminal recovery pending-mark same_slot={late_same_slot_mark} \
+             control={control:?} attack={attack:?}"
+        );
+        let expected_price = if late_same_slot_mark {
+            1_002_400
+        } else {
+            1_010_000
+        };
+        let expected_pnl: i128 = if late_same_slot_mark {
+            2_399_000
+        } else {
+            10_000_000
+        };
+        assert_eq!(control.effective_price, expected_price);
+        assert_eq!(control.victim_long_pnl, expected_pnl);
+        assert_eq!(
+            control.attacker_short_payout,
+            2_000_000_000 - u64::try_from(expected_pnl).unwrap()
+        );
+        assert_eq!(attack.effective_price, control.effective_price);
+        assert_eq!(attack.victim_long_pnl, control.victim_long_pnl);
+        assert_eq!(attack.attacker_short_payout, control.attacker_short_payout);
+    }
+}

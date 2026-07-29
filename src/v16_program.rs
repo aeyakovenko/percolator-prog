@@ -8714,17 +8714,27 @@ pub mod processor {
         while asset_index < configured_slots {
             let asset = group.markets[asset_index].engine.asset;
             let exposed = asset.oi_eff_long_q.get() != 0 || asset.oi_eff_short_q.get() != 0;
-            if exposed && asset.slot_last.get() < resolved_slot {
+            if exposed {
                 let profile = read_oracle_profile_from_view(group, cfg, asset_index)?;
-                if committed_market_resolve_accrual_for_profile_view(
-                    &profile,
-                    group,
-                    asset_index,
-                    resolved_slot,
-                    include_pending_mark,
-                )?
-                .is_some()
-                {
+                // A mark can land after the engine already advanced this asset in the same slot.
+                // Compare the authenticated wrapper target with the engine's committed raw target;
+                // effective-price equality or slot equality alone cannot distinguish that order.
+                let target_only_lag_at_cursor = profile.mark_ewma_e6 != asset.effective_price.get()
+                    && profile.mark_ewma_last_slot >= asset.slot_last.get();
+                let pending_authenticated_target = include_pending_mark
+                    && oracle_v16::profile_is_price_managed(&profile)
+                    && (profile.mark_ewma_e6 != asset.raw_oracle_target_price.get()
+                        || target_only_lag_at_cursor);
+                let pending_value_accrual = asset.slot_last.get() < resolved_slot
+                    && committed_market_resolve_accrual_for_profile_view(
+                        &profile,
+                        group,
+                        asset_index,
+                        resolved_slot,
+                        include_pending_mark,
+                    )?
+                    .is_some();
+                if pending_authenticated_target || pending_value_accrual {
                     return Err(PercolatorError::EngineStale.into());
                 }
             }
@@ -10577,6 +10587,12 @@ pub mod processor {
                     .build_actionable_summary(&portfolio.as_view())
                     .map_err(map_v16_error)?;
                 if summary.expired_close {
+                    reject_market_resolve_before_committed_accrual_view(
+                        &cfg,
+                        &group,
+                        authenticated_now_slot,
+                        true,
+                    )?;
                     let result = group
                         .permissionless_auto_crank_not_atomic(
                             &mut portfolio,
