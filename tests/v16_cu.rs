@@ -15681,22 +15681,22 @@ fn v16_attack_auto_crank_expired_close_recovery_not_blocked_by_stale_oracle() {
     );
 
     let (_, group_after) = env.market_state();
-    assert_eq!(group_after.mode, MarketModeV16::Recovery);
+    assert_eq!(group_after.mode, MarketModeV16::Resolved);
     assert_eq!(
         group_after.recovery_reason,
         Some(PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress)
     );
     assert_eq!(
         group_after.vault, vault_before,
-        "recovery declaration moves no custody"
+        "terminal recovery resolution moves no custody"
     );
     assert_eq!(
         group_after.c_tot, c_tot_before,
-        "recovery declaration mints no capital"
+        "terminal recovery resolution mints no capital"
     );
     assert_eq!(
         group_after.insurance, insurance_before,
-        "recovery declaration spends no insurance"
+        "terminal recovery resolution spends no insurance"
     );
 }
 
@@ -15747,7 +15747,7 @@ fn v16_attack_auto_crank_expired_close_uses_authenticated_slot_not_stale_market_
     );
 
     let (_, group_after) = env.market_state();
-    assert_eq!(group_after.mode, MarketModeV16::Recovery);
+    assert_eq!(group_after.mode, MarketModeV16::Resolved);
     assert_eq!(
         group_after.recovery_reason,
         Some(PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress)
