@@ -2322,7 +2322,16 @@ pub mod state {
         check_header(data, KIND_MARKET)?;
         write_wrapper_config_to_bytes(data, config)?;
         if config.oracle_mode != ORACLE_MODE_MANUAL {
-            let base_profile = asset_oracle_profile_from_config(config);
+            let existing_profile = read_asset_oracle_profile(data, 0)?;
+            let mut base_profile = asset_oracle_profile_from_config(config);
+            base_profile.insurance_authority = existing_profile.insurance_authority;
+            base_profile.insurance_operator = existing_profile.insurance_operator;
+            base_profile.backing_bucket_authority = existing_profile.backing_bucket_authority;
+            base_profile.oracle_authority = existing_profile.oracle_authority;
+            base_profile.asset_admin = existing_profile.asset_admin;
+            base_profile.funding_mark_e6 = existing_profile.funding_mark_e6;
+            base_profile.funding_mark_pending_e6 = existing_profile.funding_mark_pending_e6;
+            base_profile.funding_mark_pending_slot = existing_profile.funding_mark_pending_slot;
             write_asset_oracle_profile(data, 0, &base_profile)?;
         }
         write_market_wire(data, group)?;
