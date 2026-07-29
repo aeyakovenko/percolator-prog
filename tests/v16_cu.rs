@@ -10493,6 +10493,207 @@ fn v16_attack_pending_selected_mark_requires_observation() {
     );
 }
 
+// A stale-account refresh must not omit funding on a later active leg merely
+// because that leg's capped effective-price movement rounds to zero. Otherwise
+// the refresh can certify and liquidate the account before its authenticated
+// rescue funding is booked.
+#[test]
+fn v16_attack_pending_later_rounded_rescue_funding_requires_observation() {
+    const ADVERSE_PRICE: u64 = 1_000_000;
+    const ADVERSE_TARGET: u64 = 997_600;
+    const RESCUE_PRICE: u64 = 100;
+    const RESCUE_MARK: u64 = 99;
+    const OPEN_SLOT: u64 = 1;
+    const PRIME_SLOT: u64 = 2;
+    const ATTACK_SLOT: u64 = 3;
+    const ADVERSE_SIZE_Q: i128 = (50 * POS_SCALE) as i128;
+    const RESCUE_SIZE_Q: i128 = (100_000 * POS_SCALE) as i128;
+
+    let mut params = production_risk_params();
+    params.max_portfolio_assets = 2;
+    params.max_accrual_dt_slots = 1;
+    params.max_abs_funding_e9_per_slot = 10_000;
+    params.min_funding_lifetime_slots = 1;
+    let mut env = V16CuEnv::new_with_init_params(params);
+    env.svm.warp_to_slot(OPEN_SLOT);
+    env.configure_auth_mark_for_asset_as_admin(0, OPEN_SLOT, RESCUE_PRICE);
+    env.configure_auth_mark_for_asset_as_admin(1, OPEN_SLOT, ADVERSE_PRICE);
+
+    let user = Keypair::new();
+    let counterparty = Keypair::new();
+    let observer_owner = Keypair::new();
+    let user_account = env.create_portfolio(&user);
+    let counterparty_account = env.create_portfolio(&counterparty);
+    let observer = env.create_portfolio(&observer_owner);
+    env.deposit(&user, user_account, 3_115_000);
+    env.deposit(&counterparty, counterparty_account, 50_000_000);
+
+    // The adverse long is first. The funding-receiving long deliberately
+    // occupies a later slot, outside the wrapper's selected-leg check.
+    env.trade_asset_with_cu(
+        1,
+        &user,
+        user_account,
+        &counterparty,
+        counterparty_account,
+        ADVERSE_SIZE_Q,
+        ADVERSE_PRICE,
+        0,
+    );
+    env.svm.expire_blockhash();
+    env.trade_asset_with_cu(
+        0,
+        &user,
+        user_account,
+        &counterparty,
+        counterparty_account,
+        RESCUE_SIZE_Q,
+        RESCUE_PRICE,
+        0,
+    );
+    let opened = env.portfolio_state(user_account);
+    assert_eq!(leg(&opened, 0).asset_index, 1);
+    assert_eq!(leg(&opened, 1).asset_index, 0);
+    let adverse_position_before = active_leg_for_asset(&opened, 1).basis_pos_q.unsigned_abs();
+
+    // Prime the later leg at the low price. Its 24-bps movement cap rounds to
+    // zero, and the first observed segment intentionally has no funding.
+    env.svm.warp_to_slot(PRIME_SLOT);
+    env.push_auth_mark_for_asset_as_admin(0, PRIME_SLOT, RESCUE_MARK);
+    env.crank(
+        observer,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: PRIME_SLOT,
+            observations: crank_observations(0),
+        },
+    );
+    let (_, primed) = env.market_state();
+    assert_eq!(primed.assets[0].effective_price, RESCUE_PRICE);
+    assert_eq!(primed.assets[0].slot_last, PRIME_SLOT);
+    assert_eq!(primed.assets[0].f_long_num, 0);
+
+    // Commit the first leg's adverse move. This makes the user's certificate
+    // stale while the later leg has one segment of negative-premium long funding.
+    env.svm.warp_to_slot(ATTACK_SLOT);
+    env.push_auth_mark_for_asset_as_admin(1, ATTACK_SLOT, ADVERSE_TARGET);
+    env.crank(
+        observer,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: ATTACK_SLOT,
+            observations: crank_observations(1),
+        },
+    );
+    let (_, stale_group) = env.market_state();
+    assert_eq!(stale_group.assets[0].effective_price, RESCUE_PRICE);
+    assert_eq!(stale_group.assets[0].slot_last, PRIME_SLOT);
+    assert!(
+        health_cert(&env.portfolio_state(user_account)).cert_oracle_epoch
+            < stale_group.oracle_epoch
+    );
+    let market_before_omission = env.svm.get_account(&env.market).unwrap();
+    let user_before_omission = env.svm.get_account(&user_account).unwrap();
+    let insurance_before = stale_group.insurance;
+
+    env.svm.expire_blockhash();
+    let omitted = env.send(
+        ProgInstruction::PermissionlessCrank {
+            now_slot: ATTACK_SLOT,
+            observations: vec![],
+        },
+        vec![
+            AccountMeta::new(env.payer.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(user_account, false),
+        ],
+        &[],
+    );
+    if omitted.is_ok() {
+        let stale = env.portfolio_state(user_account);
+        assert!(
+            health_cert(&stale).certified_liq_deficit > 0,
+            "omitting later-leg rescue funding must reproduce a liquidatable certificate: {:?}",
+            health_cert(&stale)
+        );
+        let stale_position = active_leg_for_asset(&stale, 1).basis_pos_q.unsigned_abs();
+        env.svm.expire_blockhash();
+        let liquidation = env.send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: ATTACK_SLOT,
+                observations: vec![],
+            },
+            vec![
+                AccountMeta::new(env.payer.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(user_account, false),
+            ],
+            &[],
+        );
+        assert!(
+            liquidation.is_ok(),
+            "omitted funding must reach public liquidation: {liquidation:?}"
+        );
+        let liquidated = env.portfolio_state(user_account);
+        let liquidated_position = if has_active_leg_for_asset(&liquidated, 1) {
+            active_leg_for_asset(&liquidated, 1)
+                .basis_pos_q
+                .unsigned_abs()
+        } else {
+            0
+        };
+        assert!(liquidated_position < stale_position);
+        assert!(env.market_state().1.insurance > insurance_before);
+        panic!(
+            "omitted later-leg rescue funding reduced user position {stale_position}->{liquidated_position} and charged insurance {}->{}",
+            insurance_before,
+            env.market_state().1.insurance
+        );
+    }
+
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before_omission
+    );
+    assert_eq!(
+        env.svm.get_account(&user_account).unwrap(),
+        user_before_omission
+    );
+
+    // Supplying the later-leg observation books the rescue funding and leaves
+    // the same account healthy without charging a liquidation fee.
+    env.svm.expire_blockhash();
+    env.crank(
+        observer,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: ATTACK_SLOT,
+            observations: crank_observations(0),
+        },
+    );
+    assert!(env.market_state().1.assets[0].f_long_num > 0);
+    env.svm.expire_blockhash();
+    env.crank(
+        counterparty_account,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: ATTACK_SLOT,
+            observations: vec![],
+        },
+    );
+    env.svm.expire_blockhash();
+    env.crank(
+        user_account,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: ATTACK_SLOT,
+            observations: vec![],
+        },
+    );
+    let healthy = env.portfolio_state(user_account);
+    assert_eq!(health_cert(&healthy).certified_liq_deficit, 0);
+    assert_eq!(
+        active_leg_for_asset(&healthy, 1).basis_pos_q.unsigned_abs(),
+        adverse_position_before
+    );
+    assert_eq!(env.market_state().1.insurance, insurance_before);
+}
+
 #[test]
 fn v16_bpf_no_cranker_liquidation_rejects_invalid_final_market_shape() {
     let mut env = V16CuEnv::new();
