@@ -15754,6 +15754,160 @@ fn v16_attack_auto_crank_expired_close_uses_authenticated_slot_not_stale_market_
     );
 }
 
+// Public-interface DoS probe: an asset-recovery owner can leave a chunked forfeit ledger
+// unfinished until it expires. The expiry crank must not turn that account-local condition into
+// an irreversible global market mode that strands an unrelated flat user's principal.
+#[test]
+fn v16_probe_expired_recovery_forfeit_cannot_globally_lock_unrelated_user() {
+    let mut params = production_risk_params();
+    params.max_bankrupt_close_lifetime_slots = 1;
+    params.public_b_chunk_atoms = 8_000;
+    let mut env = V16CuEnv::new_with_init_params(params);
+    env.configure_permissionless_resolve_with_cu(100, 5);
+    env.configure_auth_mark_with_cu(0, 1_000_000);
+
+    let attacker = Keypair::new();
+    let counterparty = Keypair::new();
+    let victim = Keypair::new();
+    let attacker_account = env.create_portfolio(&attacker);
+    let counterparty_account = env.create_portfolio(&counterparty);
+    let victim_account = env.create_portfolio(&victim);
+    env.deposit(&attacker, attacker_account, 51_000);
+    env.deposit(&counterparty, counterparty_account, 100_000);
+    env.deposit(&victim, victim_account, 100);
+
+    env.trade_asset_with_cu(
+        0,
+        &attacker,
+        attacker_account,
+        &counterparty,
+        counterparty_account,
+        POS_SCALE as i128,
+        1_000_000,
+        0,
+    );
+
+    env.svm.warp_to_slot(20);
+    env.push_auth_mark_with_cu(20, 952_000);
+    env.crank(
+        counterparty_account,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 20,
+            observations: crank_observations(0),
+        },
+    );
+    env.svm.warp_to_slot(25);
+    env.push_auth_mark_with_cu(25, 940_000);
+    env.crank(
+        counterparty_account,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 25,
+            observations: crank_observations(0),
+        },
+    );
+    env.svm.warp_to_slot(30);
+    env.push_auth_mark_with_cu(30, 940_576);
+    env.crank(
+        counterparty_account,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 30,
+            observations: crank_observations(0),
+        },
+    );
+    env.update_asset_lifecycle_as_admin_with_cu(
+        percolator_prog::processor::ASSET_ACTION_SHUTDOWN,
+        0,
+        30,
+        0,
+    );
+
+    env.svm.expire_blockhash();
+    let partial_forfeit = env.send(
+        ProgInstruction::ForfeitRecoveryLeg {
+            asset_index: 0,
+            b_delta_budget: percolator::MAX_VAULT_TVL,
+        },
+        vec![
+            AccountMeta::new(attacker.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(attacker_account, false),
+        ],
+        &[&attacker],
+    );
+    assert!(
+        partial_forfeit.is_ok(),
+        "public recovery forfeit must commit one bounded residual chunk: {partial_forfeit:?}"
+    );
+
+    let partial = env.portfolio_state(attacker_account);
+    let ledger = close_progress(&partial);
+    assert!(
+        ledger.active && ledger.residual_remaining > 0,
+        "public recovery forfeit must leave a genuine bounded residual for the expiry probe: \
+         capital={} pnl={} ledger={ledger:?}",
+        partial.capital.get(),
+        partial.pnl.get(),
+    );
+    assert_eq!(env.market_state().1.mode, MarketModeV16::Live);
+
+    env.svm.warp_to_slot(ledger.max_close_slot + 1);
+    env.svm.expire_blockhash();
+    env.send(
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 0,
+            observations: Vec::new(),
+        },
+        vec![
+            AccountMeta::new_readonly(env.payer.pubkey(), false),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(attacker_account, false),
+        ],
+        &[],
+    )
+    .expect("expired public forfeit ledger selects terminal recovery");
+    let (_, terminal) = env.market_state();
+    assert_eq!(
+        terminal.mode,
+        MarketModeV16::Resolved,
+        "an expired account-local close must enter the bounded resolved-exit path, not a global \
+         Recovery sink"
+    );
+    assert_eq!(
+        terminal.recovery_reason,
+        Some(PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress),
+        "terminal resolution retains the recovery reason for audit"
+    );
+
+    let victim_dest = env.token_account(victim.pubkey(), 0);
+    let vault_tokens_before = env.token_amount(env.vault);
+    env.svm.expire_blockhash();
+    let close_cu = env
+        .send(
+            ProgInstruction::CloseResolved {
+                fee_rate_per_slot: 0,
+            },
+            vec![
+                AccountMeta::new_readonly(victim.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(victim_account, false),
+                AccountMeta::new(victim_dest, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(env.vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[&victim],
+        )
+        .expect("unrelated flat owner retains a real custody exit after terminal recovery");
+    assert_cu_within(
+        "CloseResolved after expired account-local recovery",
+        close_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    assert_eq!(env.token_amount(victim_dest), 100);
+    assert_eq!(env.token_amount(env.vault), vault_tokens_before - 100);
+    assert_eq!(env.portfolio_state(victim_account).capital.get(), 0);
+}
+
 // security.md sweep — cross-margin (#22/#32): one portfolio holds positions on TWO assets.
 // Probe aggregate conservation and per-asset OI balance under shared-capital cross-margin.
 #[test]
