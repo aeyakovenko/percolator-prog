@@ -59718,8 +59718,13 @@ fn v16_attack_underfunded_exit_cannot_move_ewma_with_uncollectible_fee() {
     }
 }
 
-#[test]
-fn v16_probe_underfunded_cpi_fee_cannot_subsidize_attacker_mark_gain() {
+#[derive(Clone, Copy, Debug)]
+enum UnderfundedCpiFeePath {
+    Single,
+    Batch,
+}
+
+fn assert_underfunded_cpi_fee_cannot_subsidize_attacker_mark_gain(path: UnderfundedCpiFeePath) {
     const MARK: u64 = 1_000_000;
     const ADVERSE_MARK: u64 = 1_999_999;
     const MOVER_Q: i128 = POS_SCALE as i128;
@@ -59887,19 +59892,44 @@ fn v16_probe_underfunded_cpi_fee_cannot_subsidize_attacker_mark_gain() {
     );
     env.svm.warp_to_slot(20);
     env.svm.expire_blockhash();
-    env.try_trade_cpi_with_cu_on_asset(
-        &mover_owner,
-        mover,
-        &fee_lp_owner,
-        fee_lp,
-        matcher_program,
-        exit_ctx,
-        exit_delegate,
-        0,
-        MOVER_Q,
-        0,
-    )
-    .expect("underfunded risk-reducing exit must remain live");
+    let exit = match path {
+        UnderfundedCpiFeePath::Single => env.try_trade_cpi_with_cu_on_asset(
+            &mover_owner,
+            mover,
+            &fee_lp_owner,
+            fee_lp,
+            matcher_program,
+            exit_ctx,
+            exit_delegate,
+            0,
+            MOVER_Q,
+            0,
+        ),
+        UnderfundedCpiFeePath::Batch => env.send(
+            ProgInstruction::BatchTradeCpi {
+                legs: vec![BatchTradeCpiLeg {
+                    asset_index: 0,
+                    size_q: MOVER_Q,
+                    fee_bps: 0,
+                    limit_price: 0,
+                }],
+            },
+            vec![
+                AccountMeta::new(mover_owner.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(mover, false),
+                AccountMeta::new(fee_lp, false),
+                AccountMeta::new_readonly(matcher_program, false),
+                AccountMeta::new(exit_ctx, false),
+                AccountMeta::new_readonly(exit_delegate, false),
+            ],
+            &[&mover_owner],
+        ),
+    };
+    assert!(
+        exit.is_ok(),
+        "{path:?}: underfunded risk-reducing exit must remain live: {exit:?}"
+    );
 
     let (cfg_after_trade, group_after_trade) = env.market_state();
     assert!(
@@ -59927,7 +59957,7 @@ fn v16_probe_underfunded_cpi_fee_cannot_subsidize_attacker_mark_gain() {
     let fee_lp_after = equity(&env.portfolio_state(fee_lp));
     let insurance_after = env.market_state().1.insurance;
     eprintln!(
-        "underfunded CPI subsidy: setup_mark={setup_mark} queued_mark={} \
+        "{path:?} underfunded CPI subsidy: setup_mark={setup_mark} queued_mark={} \
          attacker_delta={} victim_delta={} fee_lp_delta={} insurance_delta={}",
         cfg_after_trade.mark_ewma_e6,
         attacker_after - attacker_before,
@@ -59981,4 +60011,11 @@ fn v16_probe_underfunded_cpi_fee_cannot_subsidize_attacker_mark_gain() {
         group_after_trade.assets[0].oi_eff_long_q,
         (BENEFICIARY_Q * 2) as u128
     );
+}
+
+#[test]
+fn v16_attack_underfunded_cpi_fee_cannot_subsidize_attacker_mark_gain() {
+    for path in [UnderfundedCpiFeePath::Single, UnderfundedCpiFeePath::Batch] {
+        assert_underfunded_cpi_fee_cannot_subsidize_attacker_mark_gain(path);
+    }
 }
