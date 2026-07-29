@@ -59926,3 +59926,239 @@ fn v16_attack_underfunded_exit_cannot_move_ewma_with_uncollectible_fee() {
         assert_underfunded_ewma_exit_uses_collected_fee(path);
     }
 }
+
+// Public terminal-payout regression: a one-quantum position must not turn a tiny amount of fresh
+// source backing into a haircut of an unrelated user's full round-trip claim. CloseResolved is
+// permissionless, so the victim cannot defend itself by choosing a more favorable close order.
+#[test]
+fn v16_attack_one_atom_source_backing_cannot_erase_terminal_round_trip_payout() {
+    #[derive(Debug)]
+    struct Outcome {
+        attacker_withdrawn: u128,
+        victim_withdrawn: u128,
+        vault_remaining: u128,
+    }
+
+    fn run(path: NoCpiReportedPricePath, with_dust: bool) -> Outcome {
+        const BASIS: u64 = 10_000_000;
+        const DIRECTIONAL_Q: i128 = 1_000 * POS_SCALE as i128;
+        const DUST_Q: i128 = 1;
+        const DIRECTIONAL_DEPOSIT: u128 = 20_000_000_000;
+        const DUST_DEPOSIT: u128 = 1_000;
+
+        let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+            initial_price: BASIS,
+            max_trading_fee_bps: 10_000,
+            max_price_move_bps_per_slot: 5_000,
+            ..V16CuMarketParams::default()
+        });
+        env.svm.warp_to_slot(1);
+        env.configure_ewma_mark_with_cu(1, BASIS, 1, 0);
+
+        let admin = env.admin.insecure_clone();
+        let honest_oracle = Keypair::new();
+        env.try_update_per_asset_authority_with_cu(
+            &admin,
+            Some(&honest_oracle),
+            0,
+            processor::ASSET_AUTH_ORACLE,
+            honest_oracle.pubkey().to_bytes(),
+        )
+        .expect("separate honest EWMA authority from the attacker");
+
+        let victim = Keypair::new();
+        let victim_portfolio = env.create_portfolio(&victim);
+        let attacker = Keypair::new();
+        let attacker_portfolio = env.create_portfolio(&attacker);
+        env.deposit(&victim, victim_portfolio, DIRECTIONAL_DEPOSIT);
+        env.deposit(&attacker, attacker_portfolio, DIRECTIONAL_DEPOSIT);
+        env.trade_with_cu(
+            &victim,
+            victim_portfolio,
+            &attacker,
+            attacker_portfolio,
+            DIRECTIONAL_Q,
+            BASIS,
+            0,
+        );
+
+        let (dust_long, dust_long_portfolio, dust_short, dust_short_portfolio) =
+            funded_no_cpi_reported_price_pair(&mut env, DUST_DEPOSIT);
+
+        let push = |env: &mut V16CuEnv, slot: u64, mark_e6: u64| {
+            env.svm.expire_blockhash();
+            env.send(
+                ProgInstruction::PushEwmaMark {
+                    asset_index: 0,
+                    now_slot: slot,
+                    mark_e6,
+                },
+                vec![
+                    AccountMeta::new(honest_oracle.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                ],
+                &[&honest_oracle],
+            )
+            .expect("honest EWMA update");
+        };
+        let crank_directional = |env: &mut V16CuEnv, slot: u64| {
+            for portfolio in [victim_portfolio, attacker_portfolio] {
+                env.svm.expire_blockhash();
+                env.crank(
+                    portfolio,
+                    ProgInstruction::PermissionlessCrank {
+                        now_slot: slot,
+                        observations: crank_observations(0),
+                    },
+                );
+            }
+        };
+
+        for slot in 2..=5 {
+            env.svm.warp_to_slot(slot);
+            push(&mut env, slot, 1);
+            crank_directional(&mut env, slot);
+        }
+        let low_price = env.market_state().1.assets[0].effective_price;
+        assert!(low_price < BASIS / 5);
+        if with_dust {
+            try_no_cpi_reported_price_trade_with_cu(
+                &mut env,
+                path,
+                &dust_long,
+                dust_long_portfolio,
+                &dust_short,
+                dust_short_portfolio,
+                DUST_Q,
+                low_price,
+                0,
+            )
+            .unwrap_or_else(|err| panic!("{path:?}: dust open failed: {err}"));
+        }
+
+        env.svm.warp_to_slot(6);
+        crank_directional(&mut env, 6);
+        let rebound_input = BASIS
+            .checked_mul(2)
+            .unwrap()
+            .checked_sub(low_price)
+            .unwrap();
+        push(&mut env, 6, rebound_input);
+        assert_eq!(env.market_state().0.mark_ewma_e6, BASIS);
+
+        env.svm.warp_to_slot(7);
+        let mut slot = 7u64;
+        loop {
+            crank_directional(&mut env, slot);
+            if env.market_state().1.assets[0].effective_price == BASIS {
+                break;
+            }
+            slot += 1;
+            assert!(slot < 24, "bounded target convergence must finish");
+            env.svm.warp_to_slot(slot);
+        }
+
+        if with_dust {
+            try_no_cpi_reported_price_trade_with_cu(
+                &mut env,
+                path,
+                &dust_long,
+                dust_long_portfolio,
+                &dust_short,
+                dust_short_portfolio,
+                -DUST_Q,
+                BASIS,
+                0,
+            )
+            .unwrap_or_else(|err| panic!("{path:?}: dust close failed: {err}"));
+        }
+        env.trade_with_cu(
+            &victim,
+            victim_portfolio,
+            &attacker,
+            attacker_portfolio,
+            -DIRECTIONAL_Q,
+            BASIS,
+            0,
+        );
+
+        env.resolve();
+        let victim_dest = env.close_resolved(&victim, victim_portfolio);
+        let attacker_dest = env.close_resolved(&attacker, attacker_portfolio);
+        let dust_long_dest = env.close_resolved(&dust_long, dust_long_portfolio);
+        let dust_short_dest = env.close_resolved(&dust_short, dust_short_portfolio);
+
+        for (owner, portfolio, dest) in [
+            (victim.pubkey(), victim_portfolio, victim_dest),
+            (attacker.pubkey(), attacker_portfolio, attacker_dest),
+            (dust_long.pubkey(), dust_long_portfolio, dust_long_dest),
+            (dust_short.pubkey(), dust_short_portfolio, dust_short_dest),
+        ] {
+            for _ in 0..16 {
+                env.svm.expire_blockhash();
+                let _ = env.send(
+                    ProgInstruction::CloseResolved {
+                        fee_rate_per_slot: 0,
+                    },
+                    vec![
+                        AccountMeta::new_readonly(owner, false),
+                        AccountMeta::new(env.market, false),
+                        AccountMeta::new(portfolio, false),
+                        AccountMeta::new(dest, false),
+                        AccountMeta::new(env.vault, false),
+                        AccountMeta::new_readonly(env.vault_authority, false),
+                        AccountMeta::new_readonly(spl_token::ID, false),
+                    ],
+                    &[],
+                );
+                env.svm.expire_blockhash();
+                let _ = env.send(
+                    ProgInstruction::ClaimResolvedPayoutTopup,
+                    vec![
+                        AccountMeta::new_readonly(owner, false),
+                        AccountMeta::new(env.market, false),
+                        AccountMeta::new(portfolio, false),
+                        AccountMeta::new(dest, false),
+                        AccountMeta::new(env.vault, false),
+                        AccountMeta::new_readonly(env.vault_authority, false),
+                        AccountMeta::new_readonly(spl_token::ID, false),
+                    ],
+                    &[],
+                );
+            }
+        }
+
+        let attacker_withdrawn = env.token_amount(attacker_dest) as u128
+            + env.token_amount(dust_long_dest) as u128
+            + env.token_amount(dust_short_dest) as u128;
+        let group = env.market_state().1;
+        assert_eq!(group.vault as u64, env.token_amount(env.vault));
+        Outcome {
+            attacker_withdrawn,
+            victim_withdrawn: env.token_amount(victim_dest) as u128,
+            vault_remaining: group.vault,
+        }
+    }
+
+    const ATTACKER_DEPOSITS: u128 = 20_000_002_000;
+    const VICTIM_DEPOSIT: u128 = 20_000_000_000;
+    for path in [
+        NoCpiReportedPricePath::Single,
+        NoCpiReportedPricePath::Batch,
+    ] {
+        let control = run(path, false);
+        let attack = run(path, true);
+        eprintln!("{path:?} terminal dust control={control:?} attack={attack:?}");
+        assert_eq!(control.attacker_withdrawn, ATTACKER_DEPOSITS);
+        assert_eq!(control.victim_withdrawn, VICTIM_DEPOSIT);
+        assert_eq!(attack.attacker_withdrawn + 1, ATTACKER_DEPOSITS);
+        assert_eq!(
+            attack.victim_withdrawn, VICTIM_DEPOSIT,
+            "{path:?}: one atom of attacker loss erased an independent user's terminal payout"
+        );
+        assert!(
+            attack.vault_remaining <= 1,
+            "{path:?}: user value remained in the vault without a live claim"
+        );
+    }
+}
