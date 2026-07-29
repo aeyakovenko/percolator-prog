@@ -8477,10 +8477,74 @@ pub mod processor {
             if group.header.mode == 0 && permissionless_resolve_matured_now_view(cfg, group) {
                 return Err(V16Error::LockActive);
             }
+            reject_lapsed_source_backing_for_recovery_forfeit_view(
+                group,
+                portfolio,
+                asset_index as usize,
+                authenticated_market_slot_or_fallback_view(group),
+            )?;
             group
                 .forfeit_recovery_leg_not_atomic(portfolio, asset_index as usize, b_delta_budget)
                 .map(|_| ())
         })
+    }
+
+    fn reject_lapsed_source_backing_for_recovery_forfeit_view(
+        group: &state::MarketViewMutV16<'_>,
+        portfolio: &percolator::PortfolioV16ViewMut<'_>,
+        asset_index: usize,
+        authenticated_slot: u64,
+    ) -> Result<(), V16Error> {
+        if asset_index >= group.header.config.max_market_slots.get() as usize
+            || asset_index >= group.markets.len()
+        {
+            return Err(V16Error::InvalidLeg);
+        }
+        let market_id = group.markets[asset_index].engine.asset.market_id.get();
+        let mut leg_side = None;
+        for leg in portfolio.header.legs.iter() {
+            let leg = leg.try_to_runtime()?;
+            if leg.active && leg.asset_index as usize == asset_index && leg.market_id == market_id {
+                if leg_side.replace(leg.side).is_some() {
+                    return Err(V16Error::HiddenLeg);
+                }
+            }
+        }
+        let Some(leg_side) = leg_side else {
+            return Ok(());
+        };
+        let source_domain = asset_index
+            .checked_mul(2)
+            .and_then(|domain| domain.checked_add(usize::from(leg_side == SideV16::Long)))
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        let source =
+            portfolio.header.source_domains.iter().find(|source| {
+                source.is_occupied() && source.domain.get() as usize == source_domain
+            });
+        let Some(source) = source else {
+            return Ok(());
+        };
+        let claim_floor = source.active_leg_claim_floor_num.get();
+        let locked_claim = source
+            .source_claim_liened_num
+            .get()
+            .checked_add(source.source_claim_impaired_num.get())
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        if claim_floor == 0 || locked_claim <= claim_floor {
+            return Ok(());
+        }
+        let engine_slot = &group.markets[source_domain / 2].engine;
+        let bucket = if source_domain % 2 == 0 {
+            engine_slot.backing_long.try_to_runtime()?
+        } else {
+            engine_slot.backing_short.try_to_runtime()?
+        };
+        if bucket.status == percolator::BackingBucketStatusV16::Fresh
+            && bucket.expiry_slot <= authenticated_slot
+        {
+            return Err(V16Error::Stale);
+        }
+        Ok(())
     }
 
     #[inline(never)]
