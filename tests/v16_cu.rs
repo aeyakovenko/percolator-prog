@@ -59717,3 +59717,146 @@ fn v16_attack_underfunded_exit_cannot_move_ewma_with_uncollectible_fee() {
         assert_underfunded_ewma_exit_uses_collected_fee(path);
     }
 }
+
+// Probe: after a normal asset shutdown, public forfeit order must not strand the last losing leg.
+// The winning side is allowed to forfeit first; the remaining owner still needs a bounded public
+// route that commits progress even when no opposing social-loss weight remains.
+#[test]
+fn v16_attack_winner_first_recovery_forfeit_cannot_strand_loser() {
+    const PRICE: u64 = 1_000_000;
+    const ASSET: u16 = 1;
+
+    let mut params = production_risk_params();
+    params.max_portfolio_assets = 2;
+    params.public_b_chunk_atoms = 8_000;
+    let mut env = V16CuEnv::new_with_init_params(params);
+    env.configure_permissionless_resolve_with_cu(100, 5);
+    env.configure_auth_mark_for_asset_as_admin(0, 0, PRICE);
+    env.configure_auth_mark_for_asset_as_admin(ASSET, 0, PRICE);
+
+    let loser_owner = Keypair::new();
+    let winner_owner = Keypair::new();
+    let loser = env.create_portfolio(&loser_owner);
+    let winner = env.create_portfolio(&winner_owner);
+    env.deposit(&loser_owner, loser, 51_000);
+    env.deposit(&winner_owner, winner, 100_000);
+    env.trade_asset_with_cu(
+        ASSET,
+        &loser_owner,
+        loser,
+        &winner_owner,
+        winner,
+        POS_SCALE as i128,
+        PRICE,
+        0,
+    );
+
+    for (slot, mark) in [(20, 952_000), (25, 940_000), (30, 940_576)] {
+        env.svm.warp_to_slot(slot);
+        env.push_auth_mark_for_asset_as_admin(ASSET, slot, mark);
+        env.crank(
+            winner,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: slot,
+                observations: crank_observations(ASSET),
+            },
+        );
+    }
+    env.update_asset_lifecycle_as_admin_with_cu(processor::ASSET_ACTION_SHUTDOWN, ASSET, 30, 0);
+    env.forfeit_recovery_leg_with_cu(&winner_owner, winner, ASSET, u128::MAX);
+    assert!(
+        !has_active_leg_for_asset(&env.portfolio_state(winner), ASSET as usize),
+        "the winning counterparty must detach first"
+    );
+
+    let custody_before = env.token_amount(env.vault);
+    let loser_forfeit_cu = env.forfeit_recovery_leg_with_cu(&loser_owner, loser, ASSET, u128::MAX);
+    assert_cu_within(
+        "winner-first Recovery loser forfeit",
+        loser_forfeit_cu,
+        CUSTODY_CU_LIMIT,
+    );
+
+    let loser_after = env.portfolio_state(loser);
+    assert!(
+        !has_active_leg_for_asset(&loser_after, ASSET as usize),
+        "the losing owner must detach after the winner forfeits first"
+    );
+    assert_eq!(
+        loser_after.capital.get(),
+        0,
+        "the bankrupt owner has no remaining capital"
+    );
+    assert_eq!(
+        loser_after.pnl.get(),
+        0,
+        "the explicit claim-free residual must be finalized"
+    );
+    let ledger = close_progress(&loser_after);
+    assert!(
+        ledger.finalized && ledger.residual_remaining == 0,
+        "no pending close residual may survive the successful forfeit"
+    );
+
+    let (_, group_after) = env.market_state();
+    assert_eq!(
+        group_after.mode,
+        MarketModeV16::Live,
+        "a secondary-asset shutdown must not resolve the live market"
+    );
+    assert_eq!(
+        group_after.assets[ASSET as usize].lifecycle,
+        AssetLifecycleV16::Recovery
+    );
+    assert_eq!(group_after.assets[ASSET as usize].oi_eff_long_q, 0);
+    assert_eq!(group_after.assets[ASSET as usize].oi_eff_short_q, 0);
+    assert_eq!(group_after.assets[ASSET as usize].loss_weight_sum_long, 0);
+    assert_eq!(group_after.assets[ASSET as usize].loss_weight_sum_short, 0);
+    assert_eq!(
+        env.token_amount(env.vault),
+        custody_before,
+        "forfeiting recovery legs must not move SPL custody"
+    );
+
+    // Keep the unrelated base current beyond the stale-resolution horizon. Progress must complete
+    // without resolving an otherwise-live market.
+    env.svm.warp_to_slot(1_000);
+    env.push_auth_mark_for_asset_as_admin(0, 1_000, PRICE);
+    env.crank(
+        winner,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 1_000,
+            observations: crank_observations(0),
+        },
+    );
+    assert_eq!(
+        env.market_state().1.mode,
+        MarketModeV16::Live,
+        "honest base cranking keeps the market live"
+    );
+
+    let loser_close_cu = env.close_portfolio_with_cu(&loser_owner, loser);
+    assert_cu_within(
+        "ClosePortfolio after winner-first Recovery forfeit",
+        loser_close_cu,
+        CUSTODY_CU_LIMIT,
+    );
+
+    let winner_capital = env.portfolio_state(winner).capital.get();
+    assert!(
+        winner_capital > 0,
+        "the winner retains only its independently withdrawable capital"
+    );
+    let winner_dest = env.withdraw(&winner_owner, winner, winner_capital);
+    assert_eq!(
+        env.token_amount(winner_dest),
+        winner_capital as u64,
+        "the detached winner can withdraw"
+    );
+    env.close_portfolio_with_cu(&winner_owner, winner);
+    assert_eq!(
+        env.market_state().1.materialized_portfolio_count,
+        0,
+        "both Recovery users can dematerialize"
+    );
+}
