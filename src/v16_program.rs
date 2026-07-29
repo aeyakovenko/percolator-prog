@@ -4138,9 +4138,16 @@ pub mod policy_v16 {
         if quoted_mark_e6 == 0 || mark_externality_notional == 0 {
             return Some(quoted_mark_e6);
         }
-        let collected = fee_a.checked_add(fee_b)?;
-        let externality_fee = collected.saturating_sub(base_fee_paid);
-        let supported_move_bps = externality_fee
+        // Each side can hold other positions that benefit from the mark move. Do not let one
+        // underfunded side use its counterparty's payment to make that separate book profitable.
+        // The quote's base fee is exactly two equal per-side charges, so only matched externality
+        // payments can support movement.
+        let base_fee_per_side = base_fee_paid / 2;
+        let externality_fee_a = fee_a.saturating_sub(base_fee_per_side);
+        let externality_fee_b = fee_b.saturating_sub(base_fee_per_side);
+        let matched_externality_fee =
+            core::cmp::min(externality_fee_a, externality_fee_b).checked_mul(2)?;
+        let supported_move_bps = matched_externality_fee
             .checked_mul(10_000)?
             .checked_div(mark_externality_notional)?;
         Some(clamp_mark_to_supported_move_bps(
