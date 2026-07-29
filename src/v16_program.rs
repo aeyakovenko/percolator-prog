@@ -5864,14 +5864,8 @@ pub mod processor {
                 &account_b,
                 core::slice::from_ref(&req),
             )?;
-            let backing_before = if cfg.backing_trade_fee_policy_count == 0 {
-                None
-            } else {
-                Some((
-                    source_counterparty_backing_snapshot_view(&account_a)?,
-                    source_counterparty_backing_snapshot_view(&account_b)?,
-                ))
-            };
+            let backing_before_a = source_counterparty_backing_snapshot_view(&account_a)?;
+            let backing_before_b = source_counterparty_backing_snapshot_view(&account_b)?;
             let source_lien_before_a =
                 source_lien_effective_reserved_snapshot_for_trade_view(&account_a)?;
             let source_lien_before_b =
@@ -5893,7 +5887,15 @@ pub mod processor {
                     )
                     .map_err(map_v16_error)?
             };
-            if let Some((backing_before_a, backing_before_b)) = backing_before {
+            ensure_new_counterparty_backed_liens_fresh_for_trade_view(
+                &group,
+                authenticated_market_slot_or_fallback_view(&group),
+                backing_before_a.as_ref(),
+                &account_a,
+                backing_before_b.as_ref(),
+                &account_b,
+            )?;
+            if cfg.backing_trade_fee_policy_count != 0 {
                 apply_backing_domain_fees_after_trade_view(
                     &cfg,
                     &mut group,
@@ -6116,6 +6118,8 @@ pub mod processor {
                 &group, &account_a, &account_b, &requests,
             )?;
 
+            let backing_before_a = source_counterparty_backing_snapshot_view(&account_a)?;
+            let backing_before_b = source_counterparty_backing_snapshot_view(&account_b)?;
             let source_lien_before_a =
                 source_lien_effective_reserved_snapshot_for_trade_view(&account_a)?;
             let source_lien_before_b =
@@ -6128,6 +6132,14 @@ pub mod processor {
                     &requests,
                 )
                 .map_err(map_v16_error)?;
+            ensure_new_counterparty_backed_liens_fresh_for_trade_view(
+                &group,
+                authenticated_market_slot_or_fallback_view(&group),
+                backing_before_a.as_ref(),
+                &account_a,
+                backing_before_b.as_ref(),
+                &account_b,
+            )?;
 
             // The engine reports one collected-fee aggregate per account. Allocate each aggregate
             // against requested fees in request order. This deterministic wrapper policy conserves
@@ -6322,6 +6334,38 @@ pub mod processor {
                     ensure_source_credit_full_rate_for_domain_view(group, domain as usize)?;
                 }
                 i += 1;
+            }
+        }
+        Ok(())
+    }
+
+    fn ensure_new_counterparty_backed_liens_fresh_for_trade_view(
+        group: &state::MarketViewMutV16<'_>,
+        authenticated_slot: u64,
+        before_a: &[(u32, u128)],
+        account_a: &percolator::PortfolioV16ViewMut<'_>,
+        before_b: &[(u32, u128)],
+        account_b: &percolator::PortfolioV16ViewMut<'_>,
+    ) -> ProgramResult {
+        // A retained transaction can land after the engine's cached slot and a provider's signed
+        // backing expiry. Only newly-created counterparty-backed liens need this landing-time
+        // check; insurance-backed liens and trades that do not increase a lien remain live.
+        for (account, before) in [(account_a, before_a), (account_b, before_b)] {
+            for source in account.header.source_domains.iter() {
+                if !source.is_occupied() {
+                    continue;
+                }
+                let domain = source.domain.get();
+                let after = source.source_lien_counterparty_backing_num.get();
+                if after <= sparse_domain_value_lookup(before, domain) {
+                    continue;
+                }
+                let (_, bucket) = backing_domain_parts_view(group, domain as usize)?;
+                if bucket.status != percolator::BackingBucketStatusV16::Fresh
+                    || bucket.expiry_slot <= authenticated_slot
+                {
+                    return Err(PercolatorError::EngineStale.into());
+                }
             }
         }
         Ok(())
