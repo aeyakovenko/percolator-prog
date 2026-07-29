@@ -10493,10 +10493,10 @@ fn v16_attack_pending_selected_mark_requires_observation() {
     );
 }
 
-// A stale-account refresh must not omit funding on a later active leg merely
-// because that leg's capped effective-price movement rounds to zero. Otherwise
-// the refresh can certify and liquidate the account before its authenticated
-// rescue funding is booked.
+// Liquidation must not omit funding on a later active leg merely because that
+// leg's capped effective-price movement rounds to zero. An order-insensitive
+// stale refresh may land first, but the irreversible liquidation must wait for
+// every active leg whose authenticated accrual would change.
 #[test]
 fn v16_attack_pending_later_rounded_rescue_funding_requires_observation() {
     const ADVERSE_PRICE: u64 = 1_000_000;
@@ -10527,6 +10527,7 @@ fn v16_attack_pending_later_rounded_rescue_funding_requires_observation() {
     let observer = env.create_portfolio(&observer_owner);
     env.deposit(&user, user_account, 3_115_000);
     env.deposit(&counterparty, counterparty_account, 50_000_000);
+    env.top_up_backing_bucket(1, 200_000, 10);
 
     // The adverse long is first. The funding-receiving long deliberately
     // occupies a later slot, outside the wrapper's selected-leg check.
@@ -10590,8 +10591,6 @@ fn v16_attack_pending_later_rounded_rescue_funding_requires_observation() {
         health_cert(&env.portfolio_state(user_account)).cert_oracle_epoch
             < stale_group.oracle_epoch
     );
-    let market_before_omission = env.svm.get_account(&env.market).unwrap();
-    let user_before_omission = env.svm.get_account(&user_account).unwrap();
     let insurance_before = stale_group.insurance;
 
     env.svm.expire_blockhash();
@@ -10607,31 +10606,33 @@ fn v16_attack_pending_later_rounded_rescue_funding_requires_observation() {
         ],
         &[],
     );
-    if omitted.is_ok() {
-        let stale = env.portfolio_state(user_account);
-        assert!(
-            health_cert(&stale).certified_liq_deficit > 0,
-            "omitting later-leg rescue funding must reproduce a liquidatable certificate: {:?}",
-            health_cert(&stale)
-        );
-        let stale_position = active_leg_for_asset(&stale, 1).basis_pos_q.unsigned_abs();
-        env.svm.expire_blockhash();
-        let liquidation = env.send(
-            ProgInstruction::PermissionlessCrank {
-                now_slot: ATTACK_SLOT,
-                observations: vec![],
-            },
-            vec![
-                AccountMeta::new(env.payer.pubkey(), true),
-                AccountMeta::new(env.market, false),
-                AccountMeta::new(user_account, false),
-            ],
-            &[],
-        );
-        assert!(
-            liquidation.is_ok(),
-            "omitted funding must reach public liquidation: {liquidation:?}"
-        );
+    assert!(
+        omitted.is_ok(),
+        "ordinary stale refresh remains order-insensitive: {omitted:?}"
+    );
+    let stale = env.portfolio_state(user_account);
+    assert!(
+        health_cert(&stale).certified_liq_deficit > 0,
+        "omitting later-leg rescue funding must reproduce a liquidatable certificate: {:?}",
+        health_cert(&stale)
+    );
+    let stale_position = active_leg_for_asset(&stale, 1).basis_pos_q.unsigned_abs();
+    let market_before_liquidation = env.svm.get_account(&env.market).unwrap();
+    let user_before_liquidation = env.svm.get_account(&user_account).unwrap();
+    env.svm.expire_blockhash();
+    let liquidation = env.send(
+        ProgInstruction::PermissionlessCrank {
+            now_slot: ATTACK_SLOT,
+            observations: vec![],
+        },
+        vec![
+            AccountMeta::new(env.payer.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(user_account, false),
+        ],
+        &[],
+    );
+    if liquidation.is_ok() {
         let liquidated = env.portfolio_state(user_account);
         let liquidated_position = if has_active_leg_for_asset(&liquidated, 1) {
             active_leg_for_asset(&liquidated, 1)
@@ -10648,14 +10649,15 @@ fn v16_attack_pending_later_rounded_rescue_funding_requires_observation() {
             env.market_state().1.insurance
         );
     }
-
     assert_eq!(
         env.svm.get_account(&env.market).unwrap(),
-        market_before_omission
+        market_before_liquidation,
+        "rejected stale-funding liquidation must roll back market state"
     );
     assert_eq!(
         env.svm.get_account(&user_account).unwrap(),
-        user_before_omission
+        user_before_liquidation,
+        "rejected stale-funding liquidation must roll back the victim"
     );
 
     // Supplying the later-leg observation books the rescue funding and leaves

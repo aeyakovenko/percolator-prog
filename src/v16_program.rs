@@ -10660,10 +10660,18 @@ pub mod processor {
             let summary = group
                 .build_actionable_summary(&portfolio.as_view())
                 .map_err(map_v16_error)?;
-            if let Some(asset_index) =
+            if summary.liquidatable && !summary.b_stale {
+                reject_missing_pending_liquidation_observations_view(
+                    &cfg,
+                    &group,
+                    &portfolio,
+                    authenticated_now_slot,
+                    observations.as_slice(),
+                )?;
+            } else if let Some(asset_index) =
                 auto_crank_selected_asset_that_accrues_view(&portfolio, &summary)?
             {
-                reject_missing_pending_selected_observation_view(
+                reject_missing_observation_that_changes_accrual_view(
                     &cfg,
                     &group,
                     asset_index,
@@ -10848,6 +10856,51 @@ pub mod processor {
         Ok(())
     }
 
+    fn reject_missing_pending_liquidation_observations_view(
+        cfg: &WrapperConfigV16,
+        group: &state::MarketViewMutV16<'_>,
+        portfolio: &percolator::PortfolioV16ViewMut<'_>,
+        now_slot: u64,
+        observations: &[AutoCrankObservationV16],
+    ) -> ProgramResult {
+        let active_bitmap = portfolio
+            .header
+            .active_bitmap
+            .map(percolator::V16PodU64::get);
+        let mut seen_assets = [u32::MAX; percolator::V16_MAX_PORTFOLIO_ASSETS_N];
+        let mut seen_asset_count = 0usize;
+        let mut slot = 0usize;
+        while slot < percolator::V16_MAX_PORTFOLIO_ASSETS_N {
+            let leg = portfolio.header.legs[slot]
+                .try_to_runtime()
+                .map_err(map_v16_error)?;
+            let bit = percolator::active_bitmap_get(active_bitmap, slot);
+            if bit != leg.active {
+                return Err(PercolatorError::EngineHiddenLeg.into());
+            }
+            if bit {
+                let mut seen = 0usize;
+                while seen < seen_asset_count {
+                    if seen_assets[seen] == leg.asset_index {
+                        return Err(PercolatorError::EngineHiddenLeg.into());
+                    }
+                    seen += 1;
+                }
+                seen_assets[seen_asset_count] = leg.asset_index;
+                seen_asset_count += 1;
+                reject_missing_observation_that_changes_accrual_view(
+                    cfg,
+                    group,
+                    leg.asset_index as usize,
+                    now_slot,
+                    observations,
+                )?;
+            }
+            slot += 1;
+        }
+        Ok(())
+    }
+
     fn first_active_asset_from_portfolio_view(
         portfolio: &percolator::PortfolioV16ViewMut<'_>,
     ) -> Result<Option<usize>, ProgramError> {
@@ -10885,7 +10938,7 @@ pub mod processor {
         Ok(None)
     }
 
-    fn reject_missing_pending_selected_observation_view(
+    fn reject_missing_observation_that_changes_accrual_view(
         cfg: &WrapperConfigV16,
         group: &state::MarketViewMutV16<'_>,
         asset_index: usize,
@@ -10922,7 +10975,8 @@ pub mod processor {
             dt,
             exposed,
         );
-        if next != current {
+        let funding_rate = permissionless_funding_rate_e9_view(&profile, group, asset_index, next)?;
+        if next != current || funding_rate != 0 {
             return Err(PercolatorError::EngineNonProgress.into());
         }
         Ok(())
