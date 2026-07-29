@@ -4515,6 +4515,7 @@ pub mod processor {
         group: &state::MarketViewMutV16<'_>,
         domain: usize,
         allow_asset0_local_backing_recovery: bool,
+        allow_empty_asset_historical_bankruptcy: bool,
     ) -> Result<bool, ProgramError> {
         let asset_index = domain / 2;
         if shutdown_asset_empty_and_matured_now_view(cfg, group, asset_index).is_ok() {
@@ -4531,7 +4532,9 @@ pub mod processor {
             }
         }
         reject_permissionless_resolve_matured_live_view(cfg, group)?;
-        if group.header.bankruptcy_hlock_active != 0
+        let historical_bankruptcy_isolated = allow_empty_asset_historical_bankruptcy
+            && asset_is_active_without_local_insurance_risk_view(group, asset_index);
+        if (group.header.bankruptcy_hlock_active != 0 && !historical_bankruptcy_isolated)
             || group.header.threshold_stress_active != 0
             || group.header.loss_stale_active != 0
             || group
@@ -4548,6 +4551,19 @@ pub mod processor {
         }
         reject_exposed_target_effective_lag_view(group, asset_index)?;
         Ok(false)
+    }
+
+    fn asset_is_active_without_local_insurance_risk_view(
+        group: &state::MarketViewMutV16<'_>,
+        asset_index: usize,
+    ) -> bool {
+        let Some(slot) = group.markets.get(asset_index) else {
+            return false;
+        };
+        slot.engine.asset.lifecycle == ASSET_LIFECYCLE_ACTIVE
+            && slot.engine.insurance_domain_spent_long.get() == 0
+            && slot.engine.insurance_domain_spent_short.get() == 0
+            && !asset_local_has_position_or_loss_state_view(group, asset_index)
     }
 
     fn asset_local_loss_stale_view(
@@ -7733,9 +7749,13 @@ pub mod processor {
             let (cfg, mut group) = state::market_view_mut(&mut market_data)?;
             let authorities = domain_authorities_from_view(&group, &cfg, domain_usize)?;
             let shutdown_drain = match group.header.mode {
-                0 => {
-                    live_domain_withdraw_health_or_shutdown_view(&cfg, &group, domain_usize, true)?
-                }
+                0 => live_domain_withdraw_health_or_shutdown_view(
+                    &cfg,
+                    &group,
+                    domain_usize,
+                    true,
+                    false,
+                )?,
                 1 => {
                     if group.header.materialized_portfolio_count.get() != 0
                         || group.header.c_tot.get() != 0
@@ -7860,9 +7880,13 @@ pub mod processor {
             let (cfg, mut group) = state::market_view_mut(&mut market_data)?;
             let authorities = domain_authorities_from_view(&group, &cfg, domain_usize)?;
             let shutdown_drain = match group.header.mode {
-                0 => {
-                    live_domain_withdraw_health_or_shutdown_view(&cfg, &group, domain_usize, true)?
-                }
+                0 => live_domain_withdraw_health_or_shutdown_view(
+                    &cfg,
+                    &group,
+                    domain_usize,
+                    true,
+                    false,
+                )?,
                 1 => {
                     if group.header.materialized_portfolio_count.get() != 0
                         || group.header.c_tot.get() != 0
@@ -8188,8 +8212,13 @@ pub mod processor {
             }
             let authorities = domain_authorities_from_view(&group, &cfg, long_domain)?;
             let ledger_authority = if live_mode {
-                let shutdown_drain =
-                    live_domain_withdraw_health_or_shutdown_view(&cfg, &group, long_domain, false)?;
+                let shutdown_drain = live_domain_withdraw_health_or_shutdown_view(
+                    &cfg,
+                    &group,
+                    long_domain,
+                    false,
+                    true,
+                )?;
                 let local_authorized =
                     live_authority_matches(&authorities.insurance_operator, operator.key);
                 let admin_shutdown_authorized = asset_index != 0
@@ -11437,6 +11466,8 @@ pub mod processor {
             || asset.stored_pos_count_short.get() != 0
             || asset.stale_account_count_long.get() != 0
             || asset.stale_account_count_short.get() != 0
+            || asset.pending_obligation_count_long.get() != 0
+            || asset.pending_obligation_count_short.get() != 0
             || asset.b_long_num.get() != 0
             || asset.b_short_num.get() != 0
             || asset.b_epoch_start_long_num.get() != 0
