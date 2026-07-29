@@ -8739,6 +8739,43 @@ pub mod processor {
         state::write_wrapper_config(&mut data, &cfg_after)
     }
 
+    fn asset_role_holds_funded_value_view(
+        group: &state::MarketViewMutV16<'_>,
+        asset_index: usize,
+        kind: u8,
+    ) -> Result<bool, ProgramError> {
+        let long_domain = asset_index
+            .checked_mul(2)
+            .ok_or(PercolatorError::EngineArithmeticOverflow)?;
+        let short_domain = long_domain
+            .checked_add(1)
+            .ok_or(PercolatorError::EngineArithmeticOverflow)?;
+        if matches!(kind, ASSET_AUTH_INSURANCE | ASSET_AUTH_INSURANCE_OPERATOR) {
+            return Ok(domain_budget_remaining_view(group, long_domain)? != 0
+                || domain_budget_remaining_view(group, short_domain)? != 0);
+        }
+        if kind != ASSET_AUTH_BACKING_BUCKET {
+            return Ok(false);
+        }
+        for domain in [long_domain, short_domain] {
+            let (source, bucket) = backing_domain_parts_view(group, domain)?;
+            if bucket.fresh_unliened_backing_num != 0
+                || bucket.valid_liened_backing_num != 0
+                || bucket.consumed_liened_backing_num != 0
+                || bucket.impaired_liened_backing_num != 0
+                || bucket.utilization_fee_earnings != 0
+                || source.fresh_reserved_backing_num != 0
+                || source.spent_backing_num != 0
+                || source.provider_receivable_num != 0
+                || source.valid_liened_backing_num != 0
+                || source.impaired_liened_backing_num != 0
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     #[inline(never)]
     fn handle_update_asset_authority<'a>(
         program_id: &Pubkey,
@@ -8786,6 +8823,14 @@ pub mod processor {
             ASSET_AUTH_ORACLE => profile.oracle_authority,
             _ => return Err(PercolatorError::InvalidInstruction.into()),
         };
+        // The cold admin can repair an empty role, but cannot redirect value already funded under
+        // an independent holder. A funded holder can still self-rotate through this same endpoint.
+        if admin_signed
+            && current_value != current.key.to_bytes()
+            && asset_role_holds_funded_value_view(&group, asset_index, kind)?
+        {
+            return Err(PercolatorError::EngineLockActive.into());
+        }
         // Required domain authorities must stay live after activation. A zero insurance/backing/oracle
         // authority can strand funds or oracle liveness during wind-down; only the cold-storage
         // asset_admin may be intentionally burned.
