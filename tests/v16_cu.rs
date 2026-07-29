@@ -60298,3 +60298,268 @@ fn v16_attack_reopened_recovery_forfeit_capitalizes_prior_claim_past_lien_overla
         "the older claim remains fully withdrawable despite the later lien overlap"
     );
 }
+// A reopened position's pending B haircut belongs to that position episode. Recovery must net the
+// haircut against the reopened episode's positive accrual before discarding that episode, rather
+// than burn the gross new claim first and then charge the old, fully closed episode.
+#[test]
+fn v16_attack_retained_recovery_forfeit_haircut_preserves_prior_same_domain_claim() {
+    const PRICE: u64 = 1_000_000;
+    const FIRST_PROFIT_MARK: u64 = 952_000;
+    const ASSET: u16 = 1;
+    const VICTIM_SOURCE_DOMAIN: u16 = ASSET * 2;
+    const BACKING: u128 = 200_000;
+
+    let mut params = production_risk_params();
+    params.max_portfolio_assets = 2;
+    params.public_b_chunk_atoms = percolator::MAX_VAULT_TVL;
+    let mut env = V16CuEnv::new_with_init_params(params);
+    env.configure_permissionless_resolve_with_cu(100, 5);
+    env.configure_auth_mark_for_asset_as_admin(0, 0, PRICE);
+    env.configure_auth_mark_for_asset_as_admin(ASSET, 0, PRICE);
+    env.top_up_backing_bucket(VICTIM_SOURCE_DOMAIN, BACKING, 10_000);
+
+    let victim_owner = Keypair::new();
+    let first_counterparty_owner = Keypair::new();
+    let attacker_owner = Keypair::new();
+    let victim = env.create_portfolio(&victim_owner);
+    let first_counterparty = env.create_portfolio(&first_counterparty_owner);
+    let attacker = env.create_portfolio(&attacker_owner);
+    env.deposit(&victim_owner, victim, 1_000_000);
+    env.deposit(&first_counterparty_owner, first_counterparty, 1_000_000);
+    env.deposit(&attacker_owner, attacker, 51_000);
+
+    // Episode one creates a real, provider-backed 48,000-atom claim and closes completely.
+    env.trade_asset_with_cu(
+        ASSET,
+        &first_counterparty_owner,
+        first_counterparty,
+        &victim_owner,
+        victim,
+        POS_SCALE as i128,
+        PRICE,
+        0,
+    );
+    env.svm.warp_to_slot(20);
+    env.push_auth_mark_for_asset_as_admin(ASSET, 20, FIRST_PROFIT_MARK);
+    env.crank(
+        victim,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 20,
+            observations: crank_observations(ASSET),
+        },
+    );
+    env.trade_asset_with_cu(
+        ASSET,
+        &first_counterparty_owner,
+        first_counterparty,
+        &victim_owner,
+        victim,
+        -(POS_SCALE as i128),
+        FIRST_PROFIT_MARK,
+        0,
+    );
+    let after_first_episode = env.portfolio_state(victim);
+    let historical_pnl = after_first_episode.pnl.get();
+    let historical_claim =
+        state::portfolio_source_domain(&after_first_episode, VICTIM_SOURCE_DOMAIN as usize)
+            .source_claim_bound_num
+            .get();
+    assert_eq!(historical_pnl, 48_000);
+    assert!(historical_claim > 0);
+
+    // Episode two makes the attacker the underfunded long and the victim the winning short.
+    env.trade_asset_with_cu(
+        ASSET,
+        &attacker_owner,
+        attacker,
+        &victim_owner,
+        victim,
+        POS_SCALE as i128,
+        FIRST_PROFIT_MARK,
+        0,
+    );
+    for (slot, mark) in [(40, 904_000), (45, 892_000), (50, 892_576)] {
+        env.svm.warp_to_slot(slot);
+        env.push_auth_mark_for_asset_as_admin(ASSET, slot, mark);
+        env.crank(
+            victim,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: slot,
+                observations: crank_observations(ASSET),
+            },
+        );
+    }
+    env.update_asset_lifecycle_as_admin_with_cu(processor::ASSET_ACTION_SHUTDOWN, ASSET, 50, 0);
+
+    // The victim signs while no B loss is pending. At this state the transaction only waives
+    // episode two and is safe under the attach-time claim floor. A relayer can retain these exact
+    // signed bytes while the counterparty changes the public market state.
+    let pre_attack_victim = env.portfolio_state(victim);
+    let pre_attack_leg = active_leg_for_asset(&pre_attack_victim, ASSET as usize);
+    assert_eq!(
+        pre_attack_leg.b_snap,
+        env.market_state().1.assets[ASSET as usize].b_short_num,
+        "the retained transaction must be signed before any B haircut exists"
+    );
+    let retained_forfeit = Transaction::new_signed_with_payer(
+        &[
+            heap_ix(),
+            cu_ix(),
+            Instruction {
+                program_id: env.program_id,
+                accounts: vec![
+                    AccountMeta::new(victim_owner.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(victim, false),
+                ],
+                data: ProgInstruction::ForfeitRecoveryLeg {
+                    asset_index: ASSET,
+                    b_delta_budget: u128::MAX,
+                }
+                .encode(),
+            },
+        ],
+        Some(&env.payer.pubkey()),
+        &[&env.payer, &victim_owner],
+        env.svm.latest_blockhash(),
+    );
+
+    // The attacker completes its bankrupt forfeit first, booking a real B haircut to the victim's
+    // side and removing the only pair-close counterparty.
+    env.forfeit_recovery_leg_with_cu(&attacker_owner, attacker, ASSET, u128::MAX);
+    assert!(
+        !has_active_leg_for_asset(&env.portfolio_state(attacker), ASSET as usize),
+        "bounded public forfeits must remove the bankrupt attacker"
+    );
+
+    env.svm.expire_blockhash();
+    let convert = env.send(
+        ProgInstruction::ConvertReleasedPnl {
+            amount: historical_pnl as u128,
+        },
+        vec![
+            AccountMeta::new(victim_owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(victim, false),
+        ],
+        &[&victim_owner],
+    );
+    assert!(
+        convert.is_err(),
+        "asset Recovery must block conversion while the victim leg remains"
+    );
+    env.svm.expire_blockhash();
+    let reduce = env.send(
+        ProgInstruction::RebalanceReduce {
+            asset_index: ASSET,
+            reduce_q: POS_SCALE,
+        },
+        vec![
+            AccountMeta::new(victim_owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(victim, false),
+        ],
+        &[&victim_owner],
+    );
+    assert!(
+        reduce.is_err(),
+        "asset Recovery must block unilateral reduction"
+    );
+
+    let cranker = Keypair::new();
+    assert!(
+        env.try_force_close_abandoned_asset_with_cu(
+            &cranker, attacker, victim, ASSET, 50, POS_SCALE,
+        )
+        .is_err(),
+        "the attacker has no remaining leg for a permissionless pair close"
+    );
+
+    let before_victim_forfeit = env.portfolio_state(victim);
+    let victim_leg = active_leg_for_asset(&before_victim_forfeit, ASSET as usize);
+    let b_target = env.market_state().1.assets[ASSET as usize].b_short_num;
+    assert!(
+        victim_leg.b_snap < b_target,
+        "attacker bankruptcy must leave a genuine pending B haircut"
+    );
+    assert_eq!(
+        before_victim_forfeit.pnl.get(),
+        historical_pnl + 59_424,
+        "episode two must have the expected gross positive accrual"
+    );
+
+    let retained_meta = env
+        .svm
+        .send_transaction(retained_forfeit)
+        .expect("an unprivileged relayer can land the retained honest transaction");
+    assert_cu_within(
+        "retained Recovery forfeit after B movement",
+        retained_meta.compute_units_consumed,
+        CUSTODY_CU_LIMIT,
+    );
+    let after_forfeit = env.portfolio_state(victim);
+    assert!(
+        !has_active_leg_for_asset(&after_forfeit, ASSET as usize),
+        "victim must retain a bounded unilateral Recovery exit"
+    );
+    assert_eq!(
+        after_forfeit.pnl.get(),
+        historical_pnl,
+        "episode-two B haircut must not consume episode-one PnL"
+    );
+    assert_eq!(
+        state::portfolio_source_domain(&after_forfeit, VICTIM_SOURCE_DOMAIN as usize)
+            .source_claim_bound_num
+            .get(),
+        historical_claim,
+        "episode-two B haircut must not consume episode-one source claim"
+    );
+
+    env.svm.warp_to_slot(1_000);
+    env.push_auth_mark_for_asset_as_admin(0, 1_000, PRICE);
+    env.crank(
+        first_counterparty,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 1_000,
+            observations: crank_observations(0),
+        },
+    );
+    assert_eq!(
+        env.market_state().1.mode,
+        MarketModeV16::Live,
+        "fresh base observations keep global resolution unavailable"
+    );
+
+    // Bankruptcy intentionally leaves the market in the conservative h-lock lane. The bounded
+    // authority resolves it, and the user receives the preserved claim through terminal custody.
+    env.resolve();
+    env.svm.expire_blockhash();
+    let destination = env.token_account(victim_owner.pubkey(), 0);
+    let close_cu = env
+        .send(
+            ProgInstruction::CloseResolved {
+                fee_rate_per_slot: 0,
+            },
+            vec![
+                AccountMeta::new_readonly(victim_owner.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(victim, false),
+                AccountMeta::new(destination, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(env.vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[&victim_owner],
+        )
+        .expect("owner-signed CloseResolved pays during the exit window");
+    assert_cu_within(
+        "CloseResolved after retained Recovery forfeit",
+        close_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    assert_eq!(
+        env.token_amount(destination),
+        1_000_000 + historical_pnl as u64,
+        "the public fixed path pays every preserved atom through canonical custody"
+    );
+}
