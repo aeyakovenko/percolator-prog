@@ -8478,7 +8478,12 @@ pub mod processor {
                 return Err(V16Error::LockActive);
             }
             group
-                .forfeit_recovery_leg_not_atomic(portfolio, asset_index as usize, b_delta_budget)
+                .forfeit_recovery_leg_at_slot_not_atomic(
+                    portfolio,
+                    asset_index as usize,
+                    b_delta_budget,
+                    authenticated_market_slot_or_fallback_view(group),
+                )
                 .map(|_| ())
         })
     }
