@@ -4310,6 +4310,27 @@ fn v16_host_write_market_round_trips_source_fresh_backing_total() {
     );
 }
 
+#[test]
+fn v16_host_write_market_preserves_funding_mark_checkpoint() {
+    let mut data = init_host_market_data_for_serializer_probe();
+    let (mut cfg, group) = state::read_market(&data).unwrap();
+    cfg.oracle_mode = percolator_prog::constants::ORACLE_MODE_EWMA_MARK;
+    cfg.mark_ewma_e6 = 101;
+    cfg.mark_ewma_last_slot = 7;
+
+    let mut profile = state::asset_oracle_profile_from_config(&cfg);
+    profile.funding_mark_e6 = 100;
+    profile.funding_mark_pending_e6 = 101;
+    profile.funding_mark_pending_slot = 7;
+    state::write_asset_oracle_profile(&mut data, 0, &profile).unwrap();
+
+    state::write_market(&mut data, &cfg, &group).unwrap();
+    let after = state::read_asset_oracle_profile(&data, 0).unwrap();
+    assert_eq!(after.funding_mark_e6, 100);
+    assert_eq!(after.funding_mark_pending_e6, 101);
+    assert_eq!(after.funding_mark_pending_slot, 7);
+}
+
 fn crank_portfolio_on_market(
     env: &mut V16CuEnv,
     market: Pubkey,
@@ -17624,6 +17645,13 @@ fn v16_attack_crank_future_now_slot_does_not_overaccrue() {
             &[],
         );
     }
+    env.crank(
+        lo,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: LIE,
+            observations: vec![],
+        },
+    );
     let a = state::read_portfolio(&env.svm.get_account(&lo).unwrap().data).unwrap();
     let b = state::read_portfolio(&env.svm.get_account(&sh).unwrap().data).unwrap();
     let (_, g) = env.market_state();
@@ -17647,7 +17675,7 @@ fn v16_attack_crank_future_now_slot_does_not_overaccrue() {
     assert_eq!(g.vault, 2 * DEPOSIT, "no tokens created/destroyed");
     assert!(
         total_equity + g.insurance as i128 <= g.vault as i128,
-        "no over-distribution"
+        "no over-distribution after bounded account settlement"
     );
     assert!(
         g.vault >= g.c_tot + g.insurance,
@@ -59715,5 +59743,205 @@ fn v16_attack_underfunded_exit_cannot_move_ewma_with_uncollectible_fee() {
         NoCpiReportedPricePath::Batch,
     ] {
         assert_underfunded_ewma_exit_uses_collected_fee(path);
+    }
+}
+
+// A trade-driven EWMA update is prospective: a risk-reducing exit that lands before a bounded
+// catch-up crank must not erase funding already attributable to the prior committed premium.
+#[test]
+fn v16_attack_risk_reducing_trade_cannot_erase_catchup_funding() {
+    const PRICE: u64 = 1_000_000;
+    const DEPOSIT: u128 = 100_000_000;
+    const MARK_HALFLIFE: u64 = 1_000_000;
+    const PREP_SLOT: u64 = 1_000;
+    const CATCHUP_SLOT: u64 = 1_101;
+    const PUSH_TARGET: u64 = 556_555_556;
+
+    fn run(
+        path: NoCpiReportedPricePath,
+        stamp_before_catchup: bool,
+        stamp_slot: u64,
+        mark_halflife: u64,
+        stamp_exec_price: u64,
+    ) -> (u128, u128, u128, u128, u64, u64, i128) {
+        let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+            initial_price: PRICE,
+            max_price_move_bps_per_slot: 1,
+            max_accrual_dt_slots: PREP_SLOT,
+            max_abs_funding_e9_per_slot: 10_000,
+            min_funding_lifetime_slots: PREP_SLOT,
+            ..V16CuMarketParams::default()
+        });
+        env.configure_ewma_mark_with_cu(0, PRICE, mark_halflife, 0);
+
+        let attacker = Keypair::new();
+        let victim = Keypair::new();
+        let stamper_long = Keypair::new();
+        let stamper_short = Keypair::new();
+        let attacker_portfolio = env.create_portfolio(&attacker);
+        let victim_portfolio = env.create_portfolio(&victim);
+        let stamper_long_portfolio = env.create_portfolio(&stamper_long);
+        let stamper_short_portfolio = env.create_portfolio(&stamper_short);
+        env.deposit(&attacker, attacker_portfolio, DEPOSIT);
+        env.deposit(&victim, victim_portfolio, DEPOSIT);
+        env.deposit(&stamper_long, stamper_long_portfolio, DEPOSIT);
+        env.deposit(&stamper_short, stamper_short_portfolio, DEPOSIT);
+        try_no_cpi_reported_price_trade_with_cu(
+            &mut env,
+            path,
+            &attacker,
+            attacker_portfolio,
+            &victim,
+            victim_portfolio,
+            POS_SCALE as i128,
+            PRICE,
+            0,
+        )
+        .unwrap_or_else(|err| panic!("{path:?}: primary setup trade failed: {err}"));
+        try_no_cpi_reported_price_trade_with_cu(
+            &mut env,
+            path,
+            &stamper_long,
+            stamper_long_portfolio,
+            &stamper_short,
+            stamper_short_portfolio,
+            POS_SCALE as i128,
+            PRICE,
+            0,
+        )
+        .unwrap_or_else(|err| panic!("{path:?}: stamper setup trade failed: {err}"));
+
+        // Bring the engine clock current while mark == effective, then publish an honest premium.
+        env.svm.warp_to_slot(PREP_SLOT);
+        env.crank(
+            victim_portfolio,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: PREP_SLOT,
+                observations: crank_observations(0),
+            },
+        );
+        env.push_ewma_mark_with_cu(PREP_SLOT, PUSH_TARGET);
+        let (cfg_after_push, group_after_push) = env.market_state();
+        if mark_halflife == MARK_HALFLIFE {
+            assert_eq!(cfg_after_push.mark_ewma_e6, 1_500_000);
+        }
+        assert_eq!(cfg_after_push.mark_ewma_last_slot, PREP_SLOT);
+        assert_eq!(group_after_push.assets[0].effective_price, PRICE);
+        assert_eq!(group_after_push.assets[0].slot_last, PREP_SLOT);
+
+        env.svm.warp_to_slot(stamp_slot);
+        let insurance_before_stamp = env.market_state().1.insurance;
+        let stamp = |env: &mut V16CuEnv| {
+            try_no_cpi_reported_price_trade_with_cu(
+                env,
+                path,
+                &stamper_long,
+                stamper_long_portfolio,
+                &stamper_short,
+                stamper_short_portfolio,
+                -(POS_SCALE as i128),
+                stamp_exec_price,
+                0,
+            )
+            .unwrap_or_else(|err| panic!("{path:?}: risk-reducing stamp failed: {err}"));
+        };
+        let catchup = |env: &mut V16CuEnv, slot: u64| {
+            env.crank(
+                victim_portfolio,
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: slot,
+                    observations: crank_observations(0),
+                },
+            );
+        };
+        if stamp_before_catchup {
+            stamp(&mut env);
+            catchup(&mut env, stamp_slot);
+        } else {
+            catchup(&mut env, stamp_slot);
+            stamp(&mut env);
+        }
+        if stamp_slot < CATCHUP_SLOT {
+            env.svm.warp_to_slot(CATCHUP_SLOT);
+            catchup(&mut env, CATCHUP_SLOT);
+        }
+
+        let (cfg_after, group_after) = env.market_state();
+        let stamp_fee = group_after.insurance - insurance_before_stamp;
+        if stamp_slot == CATCHUP_SLOT && mark_halflife == MARK_HALFLIFE {
+            assert_eq!(cfg_after.mark_ewma_e6, 1_499_952);
+            assert_eq!(cfg_after.mark_ewma_last_slot, CATCHUP_SLOT);
+            assert_eq!(group_after.assets[0].effective_price, 1_010_100);
+        }
+        assert_eq!(group_after.assets[0].slot_last, CATCHUP_SLOT);
+
+        env.resolve();
+        let close_total = |env: &mut V16CuEnv, owner: &Keypair, portfolio: Pubkey| {
+            let mut paid = 0u128;
+            for _ in 0..3 {
+                let dest = env.close_resolved(owner, portfolio);
+                paid += env.token_amount(dest) as u128;
+                let account = env.portfolio_state(portfolio);
+                if account.capital.get() == 0
+                    && account.pnl.get() == 0
+                    && (resolved_receipt(&account).finalized || !resolved_receipt(&account).present)
+                {
+                    break;
+                }
+            }
+            paid
+        };
+        // Settle the price-losing shorts first so the residual is present before long winners claim.
+        let stamper_short_paid = close_total(&mut env, &stamper_short, stamper_short_portfolio);
+        let victim_paid = close_total(&mut env, &victim, victim_portfolio);
+        let attacker_paid = close_total(&mut env, &attacker, attacker_portfolio);
+        let stamper_long_paid = close_total(&mut env, &stamper_long, stamper_long_portfolio);
+        (
+            attacker_paid + stamper_long_paid,
+            stamper_short_paid,
+            victim_paid,
+            stamp_fee,
+            cfg_after.mark_ewma_e6,
+            group_after.assets[0].effective_price,
+            group_after.assets[0].f_short_num,
+        )
+    }
+
+    fn assert_order_invariant(
+        path: NoCpiReportedPricePath,
+        label: &str,
+        control: (u128, u128, u128, u128, u64, u64, i128),
+        attack: (u128, u128, u128, u128, u64, u64, i128),
+    ) {
+        assert_eq!(attack.3, control.3, "{path:?} {label}: same stamp fee");
+        assert_eq!(attack.4, control.4, "{path:?} {label}: same final mark");
+        assert_eq!(attack.5, control.5, "{path:?} {label}: same final index");
+        assert!(control.6 > 0, "{path:?} {label}: control accrues funding");
+        assert_eq!(
+            attack.6, control.6,
+            "{path:?} {label}: trade ordering must not erase catch-up funding: control={control:?} attack={attack:?}"
+        );
+        assert_eq!(
+            attack.2, control.2,
+            "{path:?} {label}: independent victim SPL payout must be order-independent: control={control:?} attack={attack:?}"
+        );
+        assert_eq!(
+            attack.0 + attack.1,
+            control.0 + control.1,
+            "{path:?} {label}: attacker-controlled SPL payouts must not gain: control={control:?} attack={attack:?}"
+        );
+    }
+
+    for path in [
+        NoCpiReportedPricePath::Single,
+        NoCpiReportedPricePath::Batch,
+    ] {
+        let control = run(path, false, CATCHUP_SLOT, MARK_HALFLIFE, 1_010_100);
+        let attack = run(path, true, CATCHUP_SLOT, MARK_HALFLIFE, 1_010_100);
+        assert_order_invariant(path, "endpoint", control, attack);
+
+        let midpoint_control = run(path, false, 1_050, 100_000, 1_005_000);
+        let midpoint_attack = run(path, true, 1_050, 100_000, 1_005_000);
+        assert_order_invariant(path, "midpoint", midpoint_control, midpoint_attack);
     }
 }
