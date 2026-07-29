@@ -59717,3 +59717,268 @@ fn v16_attack_underfunded_exit_cannot_move_ewma_with_uncollectible_fee() {
         assert_underfunded_ewma_exit_uses_collected_fee(path);
     }
 }
+
+#[test]
+fn v16_probe_underfunded_cpi_fee_cannot_subsidize_attacker_mark_gain() {
+    const MARK: u64 = 1_000_000;
+    const ADVERSE_MARK: u64 = 1_999_999;
+    const MOVER_Q: i128 = POS_SCALE as i128;
+    const BENEFICIARY_Q: i128 = 10 * POS_SCALE as i128;
+
+    let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+        initial_price: MARK,
+        max_trading_fee_bps: 10_000,
+        max_price_move_bps_per_slot: 10_000,
+        max_accrual_dt_slots: 1,
+        min_funding_lifetime_slots: 1,
+        ..V16CuMarketParams::default()
+    });
+    env.configure_ewma_mark_with_cu(0, MARK, 1, 0);
+    let oracle_authority = Keypair::new();
+    env.ensure_signer_account(oracle_authority.pubkey());
+    let market_admin = env.admin.insecure_clone();
+    env.svm.expire_blockhash();
+    env.send(
+        ProgInstruction::UpdateAssetAuthority {
+            asset_index: 0,
+            kind: percolator_prog::processor::ASSET_AUTH_ORACLE,
+            new_pubkey: oracle_authority.pubkey().to_bytes(),
+        },
+        vec![
+            AccountMeta::new(market_admin.pubkey(), true),
+            AccountMeta::new(oracle_authority.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&market_admin, &oracle_authority],
+    )
+    .expect("separate the honest oracle authority from every trader");
+
+    let matcher_program = Pubkey::new_unique();
+    let matcher_bytes = std::fs::read(matcher_program_path()).expect("read matcher BPF");
+    env.svm.add_program(matcher_program, &matcher_bytes);
+
+    let mover_owner = Keypair::new();
+    let mover = env.create_portfolio(&mover_owner);
+    let fee_lp_owner = Keypair::new();
+    let fee_lp = env.create_portfolio(&fee_lp_owner);
+    let beneficiary_owner = Keypair::new();
+    let beneficiary = env.create_portfolio(&beneficiary_owner);
+    let victim_owner = Keypair::new();
+    let victim = env.create_portfolio(&victim_owner);
+    let close_long_owner = Keypair::new();
+    let close_long = env.create_portfolio(&close_long_owner);
+    let close_lp_owner = Keypair::new();
+    let close_lp = env.create_portfolio(&close_lp_owner);
+    env.deposit(&mover_owner, mover, MARK as u128);
+    env.deposit(&fee_lp_owner, fee_lp, 50_000_000);
+    env.deposit(&beneficiary_owner, beneficiary, 50_000_000);
+    env.deposit(&victim_owner, victim, 50_000_000);
+    env.deposit(&close_long_owner, close_long, 50_000_000);
+    env.deposit(&close_lp_owner, close_lp, 50_000_000);
+
+    let (open_ctx, open_delegate, _) = env.init_matcher_context_with_passive_spread_authorized(
+        matcher_program,
+        &fee_lp_owner,
+        fee_lp,
+        0,
+        9_000,
+    );
+    env.svm.expire_blockhash();
+    env.try_trade_cpi_with_cu_on_asset(
+        &mover_owner,
+        mover,
+        &fee_lp_owner,
+        fee_lp,
+        matcher_program,
+        open_ctx,
+        open_delegate,
+        0,
+        -MOVER_Q,
+        0,
+    )
+    .expect("open the future distressed short");
+
+    // Establish the separate attacker/victim book before the distressed account raises H-lock.
+    env.svm.expire_blockhash();
+    env.trade_asset_with_cu(
+        0,
+        &beneficiary_owner,
+        beneficiary,
+        &victim_owner,
+        victim,
+        BENEFICIARY_Q,
+        MARK,
+        0,
+    );
+    env.svm.expire_blockhash();
+    env.trade_asset_with_cu(
+        0,
+        &close_long_owner,
+        close_long,
+        &close_lp_owner,
+        close_lp,
+        BENEFICIARY_Q,
+        MARK,
+        0,
+    );
+    let (close_ctx, close_delegate, _) = env.init_matcher_context_with_passive_spread_authorized(
+        matcher_program,
+        &close_lp_owner,
+        close_lp,
+        0,
+        9_000,
+    );
+
+    // Reach a distressed but still live short through normal oracle and crank instructions.
+    env.svm.warp_to_slot(10);
+    env.svm.expire_blockhash();
+    env.send(
+        ProgInstruction::PushEwmaMark {
+            asset_index: 0,
+            now_slot: 10,
+            mark_e6: ADVERSE_MARK,
+        },
+        vec![
+            AccountMeta::new(oracle_authority.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&oracle_authority],
+    )
+    .expect("honest oracle advances the market before the attack");
+    for (index, account) in [mover, fee_lp, beneficiary, victim, close_long, close_lp]
+        .into_iter()
+        .enumerate()
+    {
+        env.svm.expire_blockhash();
+        env.crank(
+            account,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 10,
+                observations: if index == 0 {
+                    crank_observations(0)
+                } else {
+                    Vec::new()
+                },
+            },
+        );
+    }
+    let (_, group_at_attack_setup) = env.market_state();
+    let setup_mark = group_at_attack_setup.assets[0].effective_price;
+    let mover_at_setup = env.portfolio_state(mover);
+    assert!(
+        0 < mover_at_setup.capital.get() && mover_at_setup.capital.get() < setup_mark as u128,
+        "setup must leave a live short unable to pay a one-sided 100% exit fee"
+    );
+
+    let equity =
+        |state: &PortfolioAccountV16| -> i128 { state.capital.get() as i128 + state.pnl.get() };
+    let attacker_before =
+        equity(&env.portfolio_state(mover)) + equity(&env.portfolio_state(beneficiary));
+    let victim_before = equity(&env.portfolio_state(victim));
+    let fee_lp_before = equity(&env.portfolio_state(fee_lp));
+    let insurance_before = env.market_state().1.insurance;
+
+    let (exit_ctx, exit_delegate, _) = env.init_matcher_context_with_passive_spread_authorized(
+        matcher_program,
+        &fee_lp_owner,
+        fee_lp,
+        9_000,
+        9_000,
+    );
+    env.svm.warp_to_slot(20);
+    env.svm.expire_blockhash();
+    env.try_trade_cpi_with_cu_on_asset(
+        &mover_owner,
+        mover,
+        &fee_lp_owner,
+        fee_lp,
+        matcher_program,
+        exit_ctx,
+        exit_delegate,
+        0,
+        MOVER_Q,
+        0,
+    )
+    .expect("underfunded risk-reducing exit must remain live");
+
+    let (cfg_after_trade, group_after_trade) = env.market_state();
+    assert!(
+        cfg_after_trade.mark_ewma_e6 > setup_mark,
+        "the independently funded side must currently move the mark"
+    );
+    for (index, account) in [beneficiary, victim].into_iter().enumerate() {
+        env.svm.expire_blockhash();
+        env.crank(
+            account,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 20,
+                observations: if index == 0 {
+                    crank_observations(0)
+                } else {
+                    Vec::new()
+                },
+            },
+        );
+    }
+
+    let attacker_after =
+        equity(&env.portfolio_state(mover)) + equity(&env.portfolio_state(beneficiary));
+    let victim_after = equity(&env.portfolio_state(victim));
+    let fee_lp_after = equity(&env.portfolio_state(fee_lp));
+    let insurance_after = env.market_state().1.insurance;
+    eprintln!(
+        "underfunded CPI subsidy: setup_mark={setup_mark} queued_mark={} \
+         attacker_delta={} victim_delta={} fee_lp_delta={} insurance_delta={}",
+        cfg_after_trade.mark_ewma_e6,
+        attacker_after - attacker_before,
+        victim_after - victim_before,
+        fee_lp_after - fee_lp_before,
+        insurance_after - insurance_before,
+    );
+
+    // Close through a separately authorized passive LP and turn the marked gain into ordinary SPL
+    // custody. The victim does not participate in the attack or the extraction.
+    env.svm.expire_blockhash();
+    env.try_trade_cpi_with_cu_on_asset(
+        &beneficiary_owner,
+        beneficiary,
+        &close_lp_owner,
+        close_lp,
+        matcher_program,
+        close_ctx,
+        close_delegate,
+        0,
+        -BENEFICIARY_Q,
+        0,
+    )
+    .expect("attacker closes the beneficiary position through the passive matcher");
+    let released = env.portfolio_state(beneficiary).pnl.get().max(0) as u128;
+    assert!(released > 0, "the mark gain must be real and releasable");
+    env.convert_released_pnl_with_cu(&beneficiary_owner, beneficiary, released);
+    let beneficiary_capital = env.portfolio_state(beneficiary).capital.get();
+    let beneficiary_dest = env.withdraw(&beneficiary_owner, beneficiary, beneficiary_capital);
+    let mover_capital = env.portfolio_state(mover).capital.get();
+    let mover_payout = if mover_capital == 0 {
+        0
+    } else {
+        let mover_dest = env.withdraw(&mover_owner, mover, mover_capital);
+        env.token_amount(mover_dest) as u128
+    };
+    let attacker_payout = env.token_amount(beneficiary_dest) as u128 + mover_payout;
+
+    assert!(
+        attacker_payout <= attacker_before as u128,
+        "an underfunded mover used an independent LP's fee to withdraw {} more atoms than the \
+         attacker's pre-attack equity",
+        attacker_payout - attacker_before as u128
+    );
+    assert!(
+        victim_after < victim_before,
+        "the probe must move real victim value"
+    );
+    assert!(attacker_after >= attacker_payout as i128);
+    assert_eq!(
+        group_after_trade.assets[0].oi_eff_long_q,
+        (BENEFICIARY_Q * 2) as u128
+    );
+}
