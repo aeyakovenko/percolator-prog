@@ -15908,6 +15908,70 @@ fn v16_probe_expired_recovery_forfeit_cannot_globally_lock_unrelated_user() {
     assert_eq!(env.portfolio_state(victim_account).capital.get(), 0);
 }
 
+// Upgrade regression only: model a Recovery state committed by the previous engine revision, then
+// require the wrapper's sole public crank to classify and complete its value-neutral transition.
+// The public exploit reachability proof itself is the preceding test and does not inject state.
+#[test]
+fn v16_upgrade_committed_recovery_resolves_through_permissionless_crank() {
+    let mut env = V16CuEnv::new();
+    let owner = Keypair::new();
+    let portfolio = env.create_portfolio(&owner);
+    env.deposit(&owner, portfolio, 100);
+    env.mutate_market(|_, group| {
+        group.mode = MarketModeV16::Recovery;
+        group.recovery_reason =
+            Some(PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress);
+    });
+
+    env.svm.warp_to_slot(1);
+    env.svm.expire_blockhash();
+    let crank_cu = env
+        .send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 0,
+                observations: Vec::new(),
+            },
+            vec![
+                AccountMeta::new_readonly(env.payer.pubkey(), false),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(portfolio, false),
+            ],
+            &[],
+        )
+        .expect("the sole public crank must resolve a persisted Recovery state");
+    assert_cu_within(
+        "PermissionlessCrank persisted Recovery migration",
+        crank_cu,
+        CRANK_CU_LIMIT,
+    );
+    let (_, resolved) = env.market_state();
+    assert_eq!(resolved.mode, MarketModeV16::Resolved);
+    assert_eq!(
+        resolved.recovery_reason,
+        Some(PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress)
+    );
+
+    let destination = env.token_account(owner.pubkey(), 0);
+    env.svm.expire_blockhash();
+    env.send(
+        ProgInstruction::CloseResolved {
+            fee_rate_per_slot: 0,
+        },
+        vec![
+            AccountMeta::new_readonly(owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio, false),
+            AccountMeta::new(destination, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&owner],
+    )
+    .expect("the owner can exit real custody after the migration crank");
+    assert_eq!(env.token_amount(destination), 100);
+}
+
 // security.md sweep — cross-margin (#22/#32): one portfolio holds positions on TWO assets.
 // Probe aggregate conservation and per-asset OI balance under shared-capital cross-margin.
 #[test]
