@@ -54549,6 +54549,165 @@ fn v16_bpf_oracle_composite_divide_legs_produce_correct_cross_rate() {
     );
 }
 
+// A composite update with an unchanged exact cross-rate must not create liquidation work. The two
+// feed tuples below both equal 1.002000, but sequential E6 flooring turns the second tuple into
+// 1.000000. At production risk settings, that false 20-bps move can liquidate an exactly margined
+// long and pay a permissionless cranker in withdrawable collateral.
+#[test]
+fn v16_attack_composite_rounding_cannot_false_liquidate_and_pay_cranker() {
+    const EXACT_MARK: u64 = 1_002_000;
+    const SIZE_Q: u128 = 1_000 * POS_SCALE;
+    const INITIAL_MARGIN: u128 = 50_100_000;
+
+    let initial_prices = [501u128, 1_000_000, 500];
+    let fresh_prices = [501u128, 500_000_000, 1];
+    let exact_composite = |prices: [u128; 3]| {
+        prices[0].checked_mul(1_000_000_000_000).unwrap()
+            / prices[1].checked_mul(prices[2]).unwrap()
+    };
+    assert_eq!(exact_composite(initial_prices), EXACT_MARK as u128);
+    assert_eq!(exact_composite(fresh_prices), EXACT_MARK as u128);
+
+    let mut params = production_risk_params();
+    params.initial_price = EXACT_MARK;
+    let mut env = V16CuEnv::new_with_init_params(params);
+    env.update_liquidation_fee_policy_with_cu(5_000);
+    set_test_clock(&mut env, 1, 100);
+
+    let feeds = [[0xe1u8; 32], [0xe2u8; 32], [0xe3u8; 32]];
+    let initial_oracles = [
+        env.set_pyth_price_with_conf(&feeds[0], initial_prices[0] as i64, -6, 0, 100),
+        env.set_pyth_price_with_conf(&feeds[1], initial_prices[1] as i64, -6, 0, 100),
+        env.set_pyth_price_with_conf(&feeds[2], initial_prices[2] as i64, -6, 0, 100),
+    ];
+    env.try_configure_hybrid_with_cu(
+        3,
+        ORACLE_LEG_FLAG_DIVIDE_LEG2 | ORACLE_LEG_FLAG_DIVIDE_LEG3,
+        feeds,
+        &initial_oracles,
+        1,
+        100,
+        0,
+        0,
+        3,
+    )
+    .expect("configure exact composite");
+
+    let (configured, configured_group) = env.market_state();
+    assert_eq!(configured.oracle_target_price_e6, EXACT_MARK);
+    assert_eq!(configured_group.assets[0].effective_price, EXACT_MARK);
+
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let cranker_owner = Keypair::new();
+    let long = env.create_portfolio(&long_owner);
+    let short = env.create_portfolio(&short_owner);
+    let cranker = env.create_portfolio(&cranker_owner);
+    env.deposit(&long_owner, long, INITIAL_MARGIN);
+    env.deposit(&short_owner, short, INITIAL_MARGIN);
+    env.deposit(&cranker_owner, cranker, 1);
+    env.trade_asset_with_cu(
+        0,
+        &long_owner,
+        long,
+        &short_owner,
+        short,
+        SIZE_Q as i128,
+        EXACT_MARK,
+        0,
+    );
+
+    let (_, group_before) = env.market_state();
+    let long_before = env.portfolio_state(long);
+    let cranker_before = env.portfolio_state(cranker).capital.get();
+    assert_eq!(cranker_before, 1);
+    assert_eq!(health_cert(&long_before).certified_liq_deficit, 0);
+
+    set_test_clock(&mut env, 2, 101);
+    let fresh_oracles = [
+        env.set_pyth_price_with_conf(&feeds[0], fresh_prices[0] as i64, -6, 0, 101),
+        env.set_pyth_price_with_conf(&feeds[1], fresh_prices[1] as i64, -6, 0, 101),
+        env.set_pyth_price_with_conf(&feeds[2], fresh_prices[2] as i64, -6, 0, 101),
+    ];
+    env.svm.expire_blockhash();
+    send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 2,
+            observations: crank_observations_with_accounts(0, 3),
+        },
+        vec![
+            AccountMeta::new(env.payer.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(long, false),
+            AccountMeta::new_readonly(fresh_oracles[0], false),
+            AccountMeta::new_readonly(fresh_oracles[1], false),
+            AccountMeta::new_readonly(fresh_oracles[2], false),
+        ],
+        &[],
+    )
+    .expect("permissionless composite refresh");
+
+    let post_refresh = env.portfolio_state(long);
+    if health_cert(&post_refresh).certified_liq_deficit != 0 {
+        env.svm.expire_blockhash();
+        send_tx(
+            &mut env.svm,
+            env.program_id,
+            &env.payer,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 2,
+                observations: crank_observations_with_accounts(0, 3),
+            },
+            vec![
+                AccountMeta::new(cranker_owner.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(long, false),
+                AccountMeta::new_readonly(fresh_oracles[0], false),
+                AccountMeta::new_readonly(fresh_oracles[1], false),
+                AccountMeta::new_readonly(fresh_oracles[2], false),
+                AccountMeta::new(cranker, false),
+            ],
+            &[&cranker_owner],
+        )
+        .expect("permissionless false-price liquidation");
+    }
+
+    let (refreshed, group_after) = env.market_state();
+    let long_after = env.portfolio_state(long);
+    let cranker_after = env.portfolio_state(cranker).capital.get();
+    let cranker_destination = env.withdraw(&cranker_owner, cranker, cranker_after);
+    let cranker_withdrawn = env.token_amount(cranker_destination);
+    assert_eq!(
+        cranker_withdrawn, cranker_after as u64,
+        "every credited cranker atom must reach the attacker's SPL account"
+    );
+
+    assert!(
+        refreshed.oracle_target_price_e6 == EXACT_MARK
+            && group_after.assets[0].effective_price == EXACT_MARK
+            && group_after.assets[0].oi_eff_long_q == group_before.assets[0].oi_eff_long_q
+            && long_after.capital.get() == long_before.capital.get()
+            && group_after.insurance == group_before.insurance
+            && cranker_after == cranker_before,
+        "unchanged rational cross-rate caused target={}, mark={}, long_oi {}->{}, \
+         victim_capital {}->{}, insurance {}->{}, cranker_capital {}->{}, withdrawn={}",
+        refreshed.oracle_target_price_e6,
+        group_after.assets[0].effective_price,
+        group_before.assets[0].oi_eff_long_q,
+        group_after.assets[0].oi_eff_long_q,
+        long_before.capital.get(),
+        long_after.capital.get(),
+        group_before.insurance,
+        group_after.insurance,
+        cranker_before,
+        cranker_after,
+        cranker_withdrawn
+    );
+}
+
 // ForfeitRecoveryLeg owner-gating + input guard (sibling of v16_attack_rebalance_reduce_owner_gated, which
 // was tested while ForfeitRecoveryLeg was not). handle_forfeit_recovery_leg uses with_one_portfolio_view
 // (owner_must_sign=true), so a non-owner forfeiting a victim's recovery leg -- which would force the victim
