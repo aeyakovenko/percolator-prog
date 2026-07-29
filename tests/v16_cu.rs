@@ -60782,6 +60782,112 @@ fn v16_attack_retained_recovery_forfeit_cannot_consume_expired_backing() {
         vault_before,
         "the stale retained transaction must preserve canonical custody"
     );
+
+    // Keep the base market healthy after the asset-local force-close delay. Global resolution is
+    // not a valid escape hatch for one lapsed backing domain in an otherwise live market.
+    let retry_slot = EXPIRY_SLOT + 10;
+    env.svm.warp_to_slot(retry_slot);
+    env.push_auth_mark_for_asset_as_admin(0, retry_slot, PRICE);
+    env.svm.expire_blockhash();
+    let global_resolve = env.send(
+        ProgInstruction::ResolveStalePermissionless {
+            now_slot: retry_slot,
+        },
+        vec![AccountMeta::new(env.market, false)],
+        &[],
+    );
+    assert!(
+        global_resolve.is_err(),
+        "a fresh base market must not be globally resolved to free one expired backing lien"
+    );
+
+    // The opposite leg was validly forfeited before expiry, so pair-close cannot make progress.
+    let cranker = Keypair::new();
+    let pair_close = env.try_force_close_abandoned_asset_with_cu(
+        &cranker, victim, attacker, ASSET, retry_slot, POS_SCALE,
+    );
+    assert!(
+        pair_close.is_err(),
+        "the remaining owner has no opposite Recovery leg to pair-close against"
+    );
+
+    env.svm.expire_blockhash();
+    let crank = env.send(
+        ProgInstruction::PermissionlessCrank {
+            now_slot: retry_slot,
+            observations: crank_observations(ASSET),
+        },
+        vec![
+            AccountMeta::new(env.payer.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(victim, false),
+        ],
+        &[],
+    );
+    assert!(
+        crank.is_err(),
+        "ordinary account refresh cannot reconcile an asset already in Recovery"
+    );
+
+    env.svm.expire_blockhash();
+    let reduce = env.send(
+        ProgInstruction::RebalanceReduce {
+            asset_index: ASSET,
+            reduce_q: POS_SCALE,
+        },
+        vec![
+            AccountMeta::new(victim_owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(victim, false),
+        ],
+        &[&victim_owner],
+    );
+    assert!(
+        reduce.is_err(),
+        "owner reduction is not the unilateral dead-leg exit"
+    );
+
+    // A freshly signed forfeit is the remaining bounded exit. It must observe expiry, impair the
+    // source-backed claim instead of capitalizing it, and detach the dead leg so deposited capital
+    // is not held hostage to a global market shutdown.
+    env.svm.expire_blockhash();
+    let fresh_forfeit = env.send(
+        ProgInstruction::ForfeitRecoveryLeg {
+            asset_index: ASSET,
+            b_delta_budget: u128::MAX,
+        },
+        vec![
+            AccountMeta::new(victim_owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(victim, false),
+        ],
+        &[&victim_owner],
+    );
+    assert!(
+        fresh_forfeit.is_ok(),
+        "expired backing must not permanently block the only unilateral Recovery exit: {fresh_forfeit:?}"
+    );
+    let recovered = env.portfolio_state(victim);
+    assert!(
+        !has_active_leg_for_asset(&recovered, ASSET as usize),
+        "the dead leg must detach after bounded expiry reconciliation"
+    );
+    assert_eq!(
+        recovered.capital.get(),
+        RETAINED_CAPITAL,
+        "expired provider principal must not be capitalized"
+    );
+    assert_eq!(
+        recovered.pnl.get(),
+        (historical_claim / BOUND_SCALE) as i128,
+        "the earlier claim remains impaired rather than trapping deposited capital"
+    );
+    let (deposit_destination, _) = env.withdraw_with_cu(&victim_owner, victim, RETAINED_CAPITAL);
+    assert_eq!(
+        env.token_amount(deposit_destination),
+        RETAINED_CAPITAL as u64,
+        "the owner recovers the deposited capital after the dead leg detaches"
+    );
 }
 
 #[test]
