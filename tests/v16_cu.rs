@@ -60563,3 +60563,287 @@ fn v16_attack_retained_recovery_forfeit_haircut_preserves_prior_same_domain_clai
         "the public fixed path pays every preserved atom through canonical custody"
     );
 }
+
+// Recovery can capitalize an older claim while releasing a reopened leg's overlapping source
+// lien. A transaction signed while that backing is live must not consume the provider's principal
+// when an unprivileged relayer lands it after the provider's signed wall-clock expiry.
+#[test]
+fn v16_attack_retained_recovery_forfeit_cannot_consume_expired_backing() {
+    const PRICE: u64 = 1_000_000;
+    const FIRST_PROFIT_MARK: u64 = 952_000;
+    const SECOND_PROFIT_MARK: u64 = 932_000;
+    const ASSET: u16 = 1;
+    const SOURCE_DOMAIN: u16 = ASSET * 2;
+    const INITIAL_CAPITAL: u128 = 1_000_000;
+    const RETAINED_CAPITAL: u128 = 5_000;
+    const BACKING: u128 = 100_000;
+    const EXPIRY_SLOT: u64 = 41;
+
+    let mut params = production_risk_params();
+    params.max_portfolio_assets = 2;
+    let mut env = V16CuEnv::new_with_init_params(params);
+    env.configure_permissionless_resolve_with_cu(100, 5);
+    env.configure_auth_mark_for_asset_as_admin(0, 0, PRICE);
+    env.configure_auth_mark_for_asset_as_admin(ASSET, 0, PRICE);
+
+    let admin = env.admin.insecure_clone();
+    let backing_provider = Keypair::new();
+    env.try_update_per_asset_authority_with_cu(
+        &admin,
+        Some(&backing_provider),
+        ASSET,
+        processor::ASSET_AUTH_BACKING_BUCKET,
+        backing_provider.pubkey().to_bytes(),
+    )
+    .expect("rotate the asset to an independent backing provider");
+    let provider_source = env.top_up_backing_bucket_with_authority(
+        &backing_provider,
+        SOURCE_DOMAIN,
+        BACKING,
+        EXPIRY_SLOT,
+    );
+    assert_eq!(
+        env.token_amount(provider_source),
+        0,
+        "the independent provider funds the expiring bucket"
+    );
+
+    let victim_owner = Keypair::new();
+    let first_counterparty_owner = Keypair::new();
+    let attacker_owner = Keypair::new();
+    let victim = env.create_portfolio(&victim_owner);
+    let first_counterparty = env.create_portfolio(&first_counterparty_owner);
+    let attacker = env.create_portfolio(&attacker_owner);
+    for (owner, portfolio) in [
+        (&victim_owner, victim),
+        (&first_counterparty_owner, first_counterparty),
+        (&attacker_owner, attacker),
+    ] {
+        env.deposit(owner, portfolio, INITIAL_CAPITAL);
+    }
+
+    // Episode one earns and fully closes a real 48,000-atom provider-backed claim.
+    env.trade_asset_with_cu(
+        ASSET,
+        &first_counterparty_owner,
+        first_counterparty,
+        &victim_owner,
+        victim,
+        POS_SCALE as i128,
+        PRICE,
+        0,
+    );
+    env.svm.warp_to_slot(20);
+    env.push_auth_mark_for_asset_as_admin(ASSET, 20, FIRST_PROFIT_MARK);
+    env.crank(
+        victim,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 20,
+            observations: crank_observations(ASSET),
+        },
+    );
+    env.trade_asset_with_cu(
+        ASSET,
+        &first_counterparty_owner,
+        first_counterparty,
+        &victim_owner,
+        victim,
+        -(POS_SCALE as i128),
+        FIRST_PROFIT_MARK,
+        0,
+    );
+    let historical_claim =
+        state::portfolio_source_domain(&env.portfolio_state(victim), SOURCE_DOMAIN as usize)
+            .source_claim_bound_num
+            .get();
+    assert_eq!(historical_claim, 48_000 * BOUND_SCALE);
+
+    // Reopening the same side creates a claim suffix and then liens across the historical floor.
+    env.withdraw(&victim_owner, victim, INITIAL_CAPITAL - RETAINED_CAPITAL);
+    env.trade_asset_with_cu(
+        ASSET,
+        &attacker_owner,
+        attacker,
+        &victim_owner,
+        victim,
+        POS_SCALE as i128,
+        FIRST_PROFIT_MARK,
+        0,
+    );
+    env.svm.warp_to_slot(40);
+    env.push_auth_mark_for_asset_as_admin(ASSET, 40, SECOND_PROFIT_MARK);
+    for portfolio in [victim, attacker] {
+        env.crank(
+            portfolio,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 40,
+                observations: crank_observations(ASSET),
+            },
+        );
+    }
+    env.trade_asset_with_cu(
+        ASSET,
+        &attacker_owner,
+        attacker,
+        &victim_owner,
+        victim,
+        (POS_SCALE / 2) as i128,
+        SECOND_PROFIT_MARK,
+        0,
+    );
+    let source =
+        state::portfolio_source_domain(&env.portfolio_state(victim), SOURCE_DOMAIN as usize);
+    assert!(source.source_claim_bound_num.get() > historical_claim);
+    assert!(source.source_claim_liened_num.get() > historical_claim);
+
+    env.update_asset_lifecycle_as_admin_with_cu(processor::ASSET_ACTION_SHUTDOWN, ASSET, 40, 0);
+    env.forfeit_recovery_leg_with_cu(&attacker_owner, attacker, ASSET, u128::MAX);
+    assert!(
+        !has_active_leg_for_asset(&env.portfolio_state(attacker), ASSET as usize),
+        "the opposite leg is gone before the retained transaction is signed"
+    );
+    let (_, before_signing) = env.market_state();
+    let bucket_before = before_signing.source_backing_buckets[SOURCE_DOMAIN as usize];
+    assert_eq!(before_signing.current_slot, 40);
+    assert_eq!(bucket_before.expiry_slot, EXPIRY_SLOT);
+    assert_eq!(bucket_before.status, BackingBucketStatusV16::Fresh);
+    assert!(
+        bucket_before.valid_liened_backing_num >= historical_claim,
+        "the historical claim remains backed when the victim signs"
+    );
+
+    let retained_forfeit = Transaction::new_signed_with_payer(
+        &[
+            heap_ix(),
+            cu_ix(),
+            Instruction {
+                program_id: env.program_id,
+                accounts: vec![
+                    AccountMeta::new(victim_owner.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(victim, false),
+                ],
+                data: ProgInstruction::ForfeitRecoveryLeg {
+                    asset_index: ASSET,
+                    b_delta_budget: u128::MAX,
+                }
+                .encode(),
+            },
+        ],
+        Some(&env.payer.pubkey()),
+        &[&env.payer, &victim_owner],
+        env.svm.latest_blockhash(),
+    );
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let victim_before = env.svm.get_account(&victim).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+
+    // Only authenticated wall-clock time changes. The engine's cached slot and every protocol
+    // account remain at the state where the transaction was signed.
+    env.svm.warp_to_slot(EXPIRY_SLOT + 1);
+    let delayed = env.svm.send_transaction(retained_forfeit);
+
+    let mut extracted = 0u64;
+    if delayed.is_ok() {
+        let withdrawable = env.portfolio_state(victim).capital.get();
+        let (destination, _) = env.withdraw_with_cu(&victim_owner, victim, withdrawable);
+        extracted = env.token_amount(destination);
+    }
+    let (_, after) = env.market_state();
+    let consumed_provider_principal = after.source_backing_buckets[SOURCE_DOMAIN as usize]
+        .consumed_liened_backing_num
+        / BOUND_SCALE;
+    let extracted_provider_principal = extracted.saturating_sub(RETAINED_CAPITAL as u64);
+    assert!(
+        delayed.is_err(),
+        "retained Recovery forfeit landed at wall-clock slot {}, past provider expiry {}, while engine slot stayed {}; it consumed {} provider atoms and the user withdrew {} atoms of provider principal",
+        EXPIRY_SLOT + 1,
+        EXPIRY_SLOT,
+        after.current_slot,
+        consumed_provider_principal,
+        extracted_provider_principal,
+    );
+    assert_eq!(
+        extracted_provider_principal, 0,
+        "no expired backing principal may reach user custody"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "the stale retained transaction must preserve market bytes"
+    );
+    assert_eq!(
+        env.svm.get_account(&victim).unwrap(),
+        victim_before,
+        "the stale retained transaction must preserve victim bytes"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        vault_before,
+        "the stale retained transaction must preserve canonical custody"
+    );
+}
+
+#[test]
+fn v16_recovery_expired_backing_claim_free_forfeit_remains_live() {
+    const PRICE: u64 = 1_000_000;
+    const ASSET: u16 = 1;
+    const VICTIM_SOURCE_DOMAIN: u16 = ASSET * 2;
+    const EXPIRY_SLOT: u64 = 2;
+
+    let mut params = production_risk_params();
+    params.max_portfolio_assets = 2;
+    let mut env = V16CuEnv::new_with_init_params(params);
+    env.configure_permissionless_resolve_with_cu(100, 5);
+    env.configure_auth_mark_for_asset_as_admin(ASSET, 0, PRICE);
+    env.top_up_backing_bucket(VICTIM_SOURCE_DOMAIN, 100_000, EXPIRY_SLOT);
+
+    let counterparty_owner = Keypair::new();
+    let victim_owner = Keypair::new();
+    let counterparty = env.create_portfolio(&counterparty_owner);
+    let victim = env.create_portfolio(&victim_owner);
+    env.deposit(&counterparty_owner, counterparty, 100_000);
+    env.deposit(&victim_owner, victim, 100_000);
+    env.trade_asset_with_cu(
+        ASSET,
+        &counterparty_owner,
+        counterparty,
+        &victim_owner,
+        victim,
+        POS_SCALE as i128,
+        PRICE,
+        0,
+    );
+    assert!(
+        env.portfolio_state(victim)
+            .source_domains
+            .iter()
+            .all(|source| !source.is_occupied()),
+        "the zero-PnL control has no preserved source claim"
+    );
+    env.svm.warp_to_slot(1);
+    env.update_asset_lifecycle_as_admin_with_cu(processor::ASSET_ACTION_SHUTDOWN, ASSET, 1, 0);
+
+    env.svm.warp_to_slot(EXPIRY_SLOT + 1);
+    let (_, before) = env.market_state();
+    assert!(before.current_slot < EXPIRY_SLOT);
+    assert_eq!(
+        before.source_backing_buckets[VICTIM_SOURCE_DOMAIN as usize].status,
+        BackingBucketStatusV16::Fresh
+    );
+    assert_eq!(
+        before.source_backing_buckets[VICTIM_SOURCE_DOMAIN as usize].expiry_slot,
+        EXPIRY_SLOT
+    );
+
+    let cu = env.forfeit_recovery_leg_with_cu(&victim_owner, victim, ASSET, u128::MAX);
+    assert_cu_within(
+        "claim-free Recovery forfeit after unrelated backing expiry",
+        cu,
+        CUSTODY_CU_LIMIT,
+    );
+    assert!(
+        !has_active_leg_for_asset(&env.portfolio_state(victim), ASSET as usize),
+        "wall-clock expiry must not block a forfeit that cannot consume backing"
+    );
+}
