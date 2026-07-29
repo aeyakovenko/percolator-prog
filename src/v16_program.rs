@@ -4098,20 +4098,6 @@ pub mod oracle_v16 {
             core::cmp::max(target, p_last.saturating_sub(max_delta))
         }
     }
-
-    pub fn effective_price_from_target(
-        anchor: u64,
-        target: u64,
-        max_change_bps: u64,
-        dt_slots: u64,
-        exposed: bool,
-    ) -> u64 {
-        if exposed {
-            clamp_toward_engine_dt(anchor, target, max_change_bps, dt_slots)
-        } else {
-            target
-        }
-    }
 }
 
 pub mod policy_v16 {
@@ -10922,14 +10908,7 @@ pub mod processor {
             return Err(PercolatorError::OracleInvalid.into());
         }
         let current = asset.effective_price.get();
-        let exposed = asset.oi_eff_long_q.get() != 0 || asset.oi_eff_short_q.get() != 0;
-        let next = oracle_v16::effective_price_from_target(
-            current,
-            target,
-            group.header.config.max_price_move_bps_per_slot.get(),
-            dt,
-            exposed,
-        );
+        let next = capped_effective_price_for_asset_view(group, asset_index, target, dt)?;
         if next != current {
             return Err(PercolatorError::EngineNonProgress.into());
         }
@@ -11474,6 +11453,32 @@ pub mod processor {
         ))
     }
 
+    fn capped_effective_price_for_asset_view(
+        group: &state::MarketViewMutV16<'_>,
+        asset_index: usize,
+        target: u64,
+        dt: u64,
+    ) -> Result<u64, ProgramError> {
+        let asset = group.markets[asset_index].engine.asset;
+        if asset.oi_eff_long_q.get() == 0 && asset.oi_eff_short_q.get() == 0 {
+            return Ok(target);
+        }
+        let remainder_num = if target == asset.raw_oracle_target_price.get() {
+            asset.retired_slot.get()
+        } else {
+            0
+        };
+        percolator::capped_oracle_price_step_v16(
+            asset.effective_price.get(),
+            target,
+            group.header.config.max_price_move_bps_per_slot.get(),
+            dt,
+            remainder_num,
+        )
+        .map(|(price, _)| price)
+        .map_err(map_v16_error)
+    }
+
     #[derive(Clone, Copy)]
     struct HybridTradeFeeQuote {
         fee_bps: u64,
@@ -11738,15 +11743,12 @@ pub mod processor {
             if target == 0 {
                 return Err(PercolatorError::OracleInvalid.into());
             }
-            let asset = group.markets[asset_index].engine.asset;
-            let exposed = asset.oi_eff_long_q.get() != 0 || asset.oi_eff_short_q.get() != 0;
-            let price = oracle_v16::effective_price_from_target(
-                asset.effective_price.get(),
+            let price = capped_effective_price_for_asset_view(
+                group,
+                asset_index,
                 target,
-                group.header.config.max_price_move_bps_per_slot.get(),
                 asset_segment_dt_view(group, asset_index, now_slot)?,
-                exposed,
-            );
+            )?;
             profile.oracle_target_price_e6 = target;
             return Ok(price);
         }
@@ -11797,15 +11799,12 @@ pub mod processor {
         if target == 0 {
             return Err(PercolatorError::OracleInvalid.into());
         }
-        let asset = group.markets[asset_index].engine.asset;
-        let exposed = asset.oi_eff_long_q.get() != 0 || asset.oi_eff_short_q.get() != 0;
-        let price = oracle_v16::effective_price_from_target(
-            asset.effective_price.get(),
+        let price = capped_effective_price_for_asset_view(
+            group,
+            asset_index,
             target,
-            group.header.config.max_price_move_bps_per_slot.get(),
             asset_segment_dt_view(group, asset_index, now_slot)?,
-            exposed,
-        );
+        )?;
         profile.oracle_target_price_e6 = target;
         if !oracle_v16::profile_hybrid_soft_stale_matured(profile, now_slot) {
             profile.mark_ewma_e6 = price;
