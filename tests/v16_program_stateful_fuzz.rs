@@ -20,10 +20,10 @@ use support::fuzz_model::{
     reproduce_post_expiry_backing_fee, reproduce_rebalance_funding_erasure,
     reproduce_reclaimable_ewma_fee, reproduce_rounded_funding_omission,
     reproduce_terminal_dust_payout_erasure, reproduce_trade_driven_liquidation_reward,
-    reproduce_trade_funding_erasure, reproduce_trade_retry_replay, rounded_funding_seed_strategy,
-    run_scenario, scenario_strategy, terminal_dust_payout_erasure_strategy,
-    trade_driven_liquidation_reward_strategy, trade_funding_erasure_strategy,
-    trade_retry_replay_strategy,
+    reproduce_trade_funding_erasure, reproduce_trade_retry_replay, reproduce_unstaged_mark_target,
+    rounded_funding_seed_strategy, run_scenario, scenario_strategy, target_staging_strategy,
+    terminal_dust_payout_erasure_strategy, trade_driven_liquidation_reward_strategy,
+    trade_funding_erasure_strategy, trade_retry_replay_strategy,
 };
 
 fn env_usize(name: &str, default: usize) -> usize {
@@ -227,6 +227,20 @@ proptest! {
         prop_assert!(
             result.is_ok(),
             "PR 331 no longer reproduces for seed {:?}: {}",
+            seed,
+            result.unwrap_err()
+        );
+    }
+
+    #[test]
+    fn v16_program_pr332_pr333_unstaged_mark_target_fuzz(
+        (seed, case) in target_staging_strategy()
+    ) {
+        let result = reproduce_unstaged_mark_target(seed, case);
+        prop_assert!(
+            result.is_ok(),
+            "{:?} no longer reproduces for seed {:?}: {}",
+            case,
             seed,
             result.unwrap_err()
         );

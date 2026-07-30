@@ -38,6 +38,7 @@ pub enum BlockerAdapter {
     Pr283TerminalDustPayoutErasure,
     Pr290CrossMarginInsuranceDrain,
     Pr331CompositeOracleTimeSkew,
+    TargetStaging,
     CompositeOracleRounding,
     Pr343TradeRetryReplay,
     Pr367PostExpiryBacking,
@@ -65,6 +66,7 @@ impl BlockerAdapter {
             Self::Pr283TerminalDustPayoutErasure => 283,
             Self::Pr290CrossMarginInsuranceDrain => 290,
             Self::Pr331CompositeOracleTimeSkew => 331,
+            Self::TargetStaging => 332,
             Self::CompositeOracleRounding => 329,
             Self::Pr343TradeRetryReplay => 343,
             Self::Pr367PostExpiryBacking => 367,
@@ -74,6 +76,7 @@ impl BlockerAdapter {
     pub const fn supports(self, pr: u16) -> bool {
         match self {
             Self::CompositeOracleRounding => pr == 329 || pr == 381,
+            Self::TargetStaging => pr == 332 || pr == 333,
             _ => self.canonical_pr() == pr,
         }
     }
@@ -293,8 +296,8 @@ pub const OPEN_LOFS: &[OpenLof] = &[
         OracleAccrual,
         BlockerAdapter::Pr331CompositeOracleTimeSkew,
     ),
-    OpenLof::missing(332, Blocker, OracleAccrual),
-    OpenLof::missing(333, Blocker, OracleAccrual),
+    OpenLof::quarantined(332, Blocker, OracleAccrual, BlockerAdapter::TargetStaging),
+    OpenLof::quarantined(333, Blocker, OracleAccrual, BlockerAdapter::TargetStaging),
     OpenLof::missing(334, Blocker, ReplayIncarnation),
     OpenLof::missing(335, Blocker, ReplayIncarnation),
     OpenLof::missing(336, Blocker, ReplayIncarnation),

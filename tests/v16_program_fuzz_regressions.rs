@@ -13,9 +13,10 @@ use support::{
         reproduce_post_expiry_backing_fee, reproduce_rebalance_funding_erasure,
         reproduce_reclaimable_ewma_fee, reproduce_rounded_funding_omission,
         reproduce_terminal_dust_payout_erasure, reproduce_trade_driven_liquidation_reward,
-        reproduce_trade_funding_erasure, reproduce_trade_retry_replay, run_scenario,
-        AssetGenerationConfigPath, AssetGenerationMarkPath, CompositeRoundingCase, KnownBlocker,
-        PostExpiryBackingCase, Scenario, TradeDrivenLiquidationMode, TradeRoute,
+        reproduce_trade_funding_erasure, reproduce_trade_retry_replay,
+        reproduce_unstaged_mark_target, run_scenario, AssetGenerationConfigPath,
+        AssetGenerationMarkPath, CompositeRoundingCase, KnownBlocker, PostExpiryBackingCase,
+        Scenario, TargetStagingCase, TradeDrivenLiquidationMode, TradeRoute,
     },
     open_lof_manifest::{missing_prs, quarantined_prs, validate_manifest},
 };
@@ -332,6 +333,29 @@ fn v16_program_pr331_temporally_skewed_composite_liquidates_at_false_price() {
 }
 
 #[test]
+fn v16_program_pr332_pr333_unstaged_mark_targets_open_stale_cpi_window() {
+    for case in [
+        TargetStagingCase::AuthMarkPush,
+        TargetStagingCase::EwmaSingleTrade,
+        TargetStagingCase::EwmaBatchTrade,
+    ] {
+        let reproduction = reproduce_unstaged_mark_target([0x32; 32], case)
+            .unwrap_or_else(|error| panic!("{case:?} no longer reproduces: {error}"));
+        assert_eq!(reproduction.blocker, KnownBlocker::UnstagedMarkTarget);
+        assert_eq!(reproduction.case, case);
+        assert_eq!(reproduction.stale_engine_target, 100);
+        assert_eq!(reproduction.moved_engine_mark, reproduction.wrapper_target);
+        assert!(reproduction.attacker_profit > 0);
+        assert_eq!(
+            reproduction.attacker_profit,
+            reproduction.victim_capital_loss
+        );
+        assert!(u128::from(reproduction.attacker_withdrawn) > reproduction.attacker_profit);
+        assert!(reproduction.attack_cu < support::v16_svm::TX_CU_LIMIT);
+    }
+}
+
+#[test]
 fn v16_program_pr225_reclaimed_ewma_fee_extracts_on_every_route() {
     for route in [
         TradeRoute::NoCpi,
@@ -523,13 +547,13 @@ fn v16_program_open_lof_manifest_is_complete_and_honest() {
         quarantined_prs(),
         [
             220, 223, 224, 225, 231, 253, 260, 267, 271, 272, 273, 275, 277, 280, 281, 282, 283,
-            290, 329, 331, 343, 367, 381
+            290, 329, 331, 332, 333, 343, 367, 381
         ]
     );
     let missing = missing_prs();
     assert_eq!(
         missing.len(),
-        76,
+        74,
         "update the explicit evidence state when an executable adapter lands"
     );
     assert!(!missing.contains(&220));
@@ -552,6 +576,8 @@ fn v16_program_open_lof_manifest_is_complete_and_honest() {
     assert!(!missing.contains(&290));
     assert!(!missing.contains(&329));
     assert!(!missing.contains(&331));
+    assert!(!missing.contains(&332));
+    assert!(!missing.contains(&333));
     assert!(!missing.contains(&343));
     assert!(!missing.contains(&367));
     assert!(!missing.contains(&381));
