@@ -54,16 +54,59 @@ pub enum SubstitutionKind {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum KnownBlocker {
     LiveLapsedSourceBacking,
+    OmittedRescueAccrualLiquidation,
+    PostExpiryBackingFee,
+    TradeRetryReplay,
 }
 
 impl KnownBlocker {
-    pub const COUNT: usize = 1;
+    pub const COUNT: usize = 4;
 
     pub const fn index(self) -> usize {
         match self {
             Self::LiveLapsedSourceBacking => 0,
+            Self::OmittedRescueAccrualLiquidation => 1,
+            Self::PostExpiryBackingFee => 2,
+            Self::TradeRetryReplay => 3,
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PostExpiryBackingCase {
+    pub fee_bps: u16,
+    pub expiry_offset: u8,
+    pub mark_move_bps: u16,
+    pub increase_divisor: u8,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PostExpiryBackingReproduction {
+    pub blocker: KnownBlocker,
+    pub victim_capital_loss: u128,
+    pub provider_earnings: u128,
+    pub extracted_tokens: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OmittedRescueReproduction {
+    pub blocker: KnownBlocker,
+    pub omitted_position_before_q: u128,
+    pub omitted_position_after_q: u128,
+    pub omitted_insurance_delta: u128,
+    pub complete_position_after_q: u128,
+    pub complete_liquidation_deficit: u128,
+    pub complete_insurance_delta: u128,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TradeRetryReplayReproduction {
+    pub blocker: KnownBlocker,
+    pub route: TradeRoute,
+    pub victim_extra_loss: u64,
+    pub attacker_extra_payout: u64,
+    pub control_total_payout: u128,
+    pub replay_total_payout: u128,
 }
 
 impl SubstitutionKind {
@@ -163,7 +206,9 @@ impl From<SmallMarketConfig> for MarketConfig {
             max_price_move_bps_per_slot: config.max_price_move_bps_per_slot,
             max_accrual_dt_slots: config.max_accrual_dt_slots,
             max_abs_funding_e9_per_slot: config.max_abs_funding_e9_per_slot,
+            min_funding_lifetime_slots: config.max_accrual_dt_slots,
             maintenance_fee_per_slot: config.maintenance_fee_per_slot,
+            ..Self::default()
         }
     }
 }
@@ -315,6 +360,7 @@ struct Snapshot {
     foreign_market: Vec<u8>,
     primary_portfolios: Vec<Vec<u8>>,
     foreign_portfolio: Vec<u8>,
+    backing_domain_ledger: Vec<u8>,
     token_accounts: Vec<Vec<u8>>,
     matcher_contexts: Vec<Vec<u8>>,
 }
@@ -1481,6 +1527,7 @@ impl ScenarioRunner {
             foreign_market: self.env.market_data(true),
             primary_portfolios: self.env.all_primary_portfolio_data(),
             foreign_portfolio: self.env.foreign_portfolio_data(),
+            backing_domain_ledger: self.env.backing_domain_ledger_data(),
             token_accounts: self.env.all_token_account_data(),
             matcher_contexts: self.env.all_matcher_context_data(),
         }
@@ -1516,6 +1563,7 @@ impl ScenarioRunner {
             || before.foreign_market != self.env.market_data(true)
             || before.primary_portfolios != self.env.all_primary_portfolio_data()
             || before.foreign_portfolio != self.env.foreign_portfolio_data()
+            || before.backing_domain_ledger != self.env.backing_domain_ledger_data()
             || before.token_accounts != self.env.all_token_account_data()
             || before.matcher_contexts != self.env.all_matcher_context_data()
         {
@@ -1694,6 +1742,519 @@ fn run_liquidation_exit_probe(mut seed: [u8; 32]) -> Result<Coverage, String> {
     }
     runner.assert_global_invariants()?;
     Ok(runner.coverage)
+}
+
+pub fn reproduce_post_expiry_backing_fee(
+    mut seed: [u8; 32],
+    case: PostExpiryBackingCase,
+) -> Result<PostExpiryBackingReproduction, String> {
+    seed[0] ^= 0x67;
+    let price = 100u64;
+    let mut env = V16Svm::new(
+        seed,
+        MarketConfig {
+            maintenance_margin_bps: 1_000,
+            initial_margin_bps: 5_000,
+            max_price_move_bps_per_slot: 500,
+            max_accrual_dt_slots: 1,
+            min_funding_lifetime_slots: 1,
+            actor_deposits: [
+                52_501,
+                1_000_000,
+                super::v16_svm::USER_DEPOSIT,
+                super::v16_svm::USER_DEPOSIT,
+                super::v16_svm::EXIT_MAKER_DEPOSIT,
+            ],
+            ..MarketConfig::default()
+        },
+    );
+    let fee_bps = case.fee_bps.clamp(1, 10_000);
+    let expiry_offset = u64::from(case.expiry_offset.clamp(2, 8));
+    let mark_move_bps = u64::from(case.mark_move_bps.clamp(100, 1_000));
+    let increase_divisor = i128::from(case.increase_divisor.clamp(10, 100));
+    let domain = 1u16;
+    let bucket_amount = 100_000u128;
+    let open_q = 1_000 * POS_SCALE as i128;
+    let increase_q = open_q
+        .checked_div(increase_divisor)
+        .ok_or("post-expiry increase divisor is zero")?;
+
+    env.configure_auth_mark(false, 0, env.current_slot(), price)
+        .map_err(|error| format!("configure low-price AuthMark: {error}"))?;
+    env.update_backing_fee_policy(domain, fee_bps, 0)
+        .map_err(|error| format!("configure backing fee policy: {error}"))?;
+    let expiry_slot = env
+        .current_slot()
+        .checked_add(expiry_offset)
+        .ok_or("post-expiry slot overflow")?;
+    env.top_up_backing_bucket(domain, bucket_amount, expiry_slot)
+        .map_err(|error| format!("top up backing bucket: {error}"))?;
+    env.trade_no_cpi(0, 1, 0, open_q, price, 0)
+        .map_err(|error| format!("open source-backed position: {error}"))?;
+
+    let mark_slot = env
+        .current_slot()
+        .checked_add(1)
+        .ok_or("post-expiry mark slot overflow")?;
+    env.warp_to_slot(mark_slot);
+    let winning_mark = price
+        .checked_mul(
+            10_000u64
+                .checked_add(mark_move_bps)
+                .ok_or("post-expiry mark bps overflow")?,
+        )
+        .and_then(|value| value.checked_div(10_000))
+        .ok_or("post-expiry winning mark overflow")?;
+    env.push_auth_mark(0, mark_slot, winning_mark)
+        .map_err(|error| format!("push winning mark: {error}"))?;
+    let oracle_accounts = env.primary_profile(0).oracle_leg_count;
+    let observation = || {
+        vec![CrankObservationHint {
+            asset_index: 0,
+            oracle_accounts,
+        }]
+    };
+    env.crank(1, mark_slot, observation())
+        .map_err(|error| format!("refresh counterparty at winning mark: {error}"))?;
+    env.crank(0, mark_slot, observation())
+        .map_err(|error| format!("refresh trader at winning mark: {error}"))?;
+
+    let (_, before_group) = env.primary_market_state();
+    let before_bucket = before_group.source_backing_buckets[domain as usize];
+    if before_bucket.status != BackingBucketStatusV16::Fresh
+        || before_bucket.expiry_slot != expiry_slot
+    {
+        return Err("backing bucket was not Fresh immediately before retained trade".into());
+    }
+    let capital_before = env.primary_portfolio(0).capital.get();
+    let provider_before = env.token_amount(env.provider_destination_token);
+    let supply_before = env.token_supply_observed();
+    let retained = env.build_retained_no_cpi_trade(0, 1, 0, increase_q, winning_mark);
+
+    env.warp_to_slot(
+        expiry_slot
+            .checked_add(1)
+            .ok_or("post-expiry landing slot overflow")?,
+    );
+    if env.current_slot() <= expiry_slot {
+        return Err("authenticated Clock did not pass backing expiry".into());
+    }
+    env.land_retained(retained)
+        .map_err(|error| format!("retained post-expiry trade no longer lands: {error}"))?;
+
+    let (_, after_group) = env.primary_market_state();
+    if after_group.current_slot >= env.current_slot() {
+        return Err(
+            "post-expiry reproducer did not preserve the authenticated-Clock/engine-slot gap"
+                .into(),
+        );
+    }
+    let after_bucket = after_group.source_backing_buckets[domain as usize];
+    let provider_earnings = after_bucket
+        .utilization_fee_earnings
+        .checked_sub(before_bucket.utilization_fee_earnings)
+        .ok_or("post-expiry provider earnings decreased")?;
+    let capital_after = env.primary_portfolio(0).capital.get();
+    let victim_capital_loss = capital_before
+        .checked_sub(capital_after)
+        .ok_or("post-expiry trade increased victim capital")?;
+    if provider_earnings == 0 || victim_capital_loss == 0 {
+        return Err(format!(
+            "post-expiry trade created no extractable loss: capital {capital_before}->{capital_after}, earnings {}->{}",
+            before_bucket.utilization_fee_earnings, after_bucket.utilization_fee_earnings
+        ));
+    }
+
+    env.withdraw_backing_bucket_earnings(domain, provider_earnings)
+        .map_err(|error| format!("withdraw post-expiry provider earnings: {error}"))?;
+    let provider_after = env.token_amount(env.provider_destination_token);
+    let extracted_tokens = provider_after
+        .checked_sub(provider_before)
+        .ok_or("provider destination token balance decreased")?;
+    if u128::from(extracted_tokens) != provider_earnings {
+        return Err(format!(
+            "provider could not extract exact post-expiry earnings: ledger {provider_earnings}, SPL {extracted_tokens}"
+        ));
+    }
+    if env.token_supply_observed() != supply_before {
+        return Err("post-expiry extraction changed total SPL supply".into());
+    }
+    Ok(PostExpiryBackingReproduction {
+        blocker: KnownBlocker::PostExpiryBackingFee,
+        victim_capital_loss,
+        provider_earnings,
+        extracted_tokens,
+    })
+}
+
+pub fn reproduce_omitted_rescue_liquidation(
+    mut seed: [u8; 32],
+) -> Result<OmittedRescueReproduction, String> {
+    seed[0] ^= 0x22;
+    let (mut omitted, position_before_q, insurance_before) = build_omitted_rescue_world(seed)?;
+    omitted
+        .crank(0, 3, Vec::new())
+        .map_err(|error| format!("omitted-observation stale refresh: {error}"))?;
+    let stale = omitted.primary_portfolio(0);
+    let stale_cert = stale
+        .health_cert
+        .try_to_runtime()
+        .map_err(|error| format!("decode omitted-observation certificate: {error:?}"))?;
+    if stale_cert.certified_liq_deficit == 0 {
+        return Err("omitted later-leg funding did not create a liquidatable certificate".into());
+    }
+    let omitted_position_before_q = position_abs_for_asset(&stale, 1)?;
+    omitted
+        .crank(0, 3, Vec::new())
+        .map_err(|error| format!("PR 220 liquidation no longer lands: {error}"))?;
+    let omitted_position_after_q = position_abs_for_asset(&omitted.primary_portfolio(0), 1)?;
+    let omitted_insurance_after = omitted.primary_market_state().1.insurance;
+    let omitted_insurance_delta = omitted_insurance_after
+        .checked_sub(insurance_before)
+        .ok_or("omitted-observation liquidation decreased insurance")?;
+    if omitted_position_after_q >= omitted_position_before_q || omitted_insurance_delta == 0 {
+        return Err(format!(
+            "omitted observation did not transfer liquidation value: position {omitted_position_before_q}->{omitted_position_after_q}, insurance {insurance_before}->{omitted_insurance_after}"
+        ));
+    }
+
+    let (mut complete, complete_position_before_q, complete_insurance_before) =
+        build_omitted_rescue_world(seed)?;
+    let rescue_oracle_accounts = complete.primary_profile(0).oracle_leg_count;
+    complete
+        .crank(
+            2,
+            3,
+            vec![CrankObservationHint {
+                asset_index: 0,
+                oracle_accounts: rescue_oracle_accounts,
+            }],
+        )
+        .map_err(|error| format!("complete-world rescue observation: {error}"))?;
+    if complete.primary_market_state().1.assets[0].f_long_num == 0 {
+        return Err("complete-world rescue observation booked no long funding".into());
+    }
+    complete
+        .crank(1, 3, Vec::new())
+        .map_err(|error| format!("complete-world counterparty refresh: {error}"))?;
+    complete
+        .crank(0, 3, Vec::new())
+        .map_err(|error| format!("complete-world user refresh: {error}"))?;
+    let complete_account = complete.primary_portfolio(0);
+    let complete_position_after_q = position_abs_for_asset(&complete_account, 1)?;
+    let complete_cert = complete_account
+        .health_cert
+        .try_to_runtime()
+        .map_err(|error| format!("decode complete-world certificate: {error:?}"))?;
+    let complete_insurance_after = complete.primary_market_state().1.insurance;
+    let complete_insurance_delta = complete_insurance_after
+        .checked_sub(complete_insurance_before)
+        .ok_or("complete-world insurance decreased")?;
+    if complete_position_before_q != position_before_q
+        || complete_position_after_q != complete_position_before_q
+        || complete_cert.certified_liq_deficit != 0
+        || complete_insurance_delta != 0
+    {
+        return Err(format!(
+            "complete observation did not preserve the healthy control: position {complete_position_before_q}->{complete_position_after_q}, deficit {}, insurance delta {complete_insurance_delta}",
+            complete_cert.certified_liq_deficit
+        ));
+    }
+
+    Ok(OmittedRescueReproduction {
+        blocker: KnownBlocker::OmittedRescueAccrualLiquidation,
+        omitted_position_before_q,
+        omitted_position_after_q,
+        omitted_insurance_delta,
+        complete_position_after_q,
+        complete_liquidation_deficit: complete_cert.certified_liq_deficit,
+        complete_insurance_delta,
+    })
+}
+
+pub fn reproduce_trade_retry_replay(
+    mut seed: [u8; 32],
+    route: TradeRoute,
+) -> Result<TradeRetryReplayReproduction, String> {
+    seed[0] ^= 0x43;
+    let control = run_trade_retry_world(seed, route, false)?;
+    let replay = run_trade_retry_world(seed, route, true)?;
+    let victim_extra_loss = control
+        .0
+        .checked_sub(replay.0)
+        .ok_or("trade retry replay increased victim payout")?;
+    let attacker_extra_payout = replay
+        .1
+        .checked_sub(control.1)
+        .ok_or("trade retry replay decreased attacker payout")?;
+    if victim_extra_loss == 0 || victim_extra_loss != attacker_extra_payout {
+        return Err(format!(
+            "{route:?} retry variants did not transfer equal extractable value: victim {}/{}; attacker {}/{}",
+            control.0, replay.0, control.1, replay.1
+        ));
+    }
+    if control.2 != replay.2 {
+        return Err(format!(
+            "{route:?} retry replay changed total withdrawn value: control {}, replay {}",
+            control.2, replay.2
+        ));
+    }
+    Ok(TradeRetryReplayReproduction {
+        blocker: KnownBlocker::TradeRetryReplay,
+        route,
+        victim_extra_loss,
+        attacker_extra_payout,
+        control_total_payout: control.2,
+        replay_total_payout: replay.2,
+    })
+}
+
+fn run_trade_retry_world(
+    seed: [u8; 32],
+    route: TradeRoute,
+    land_retry: bool,
+) -> Result<(u64, u64, u128), String> {
+    let mut env = V16Svm::new(
+        seed,
+        MarketConfig {
+            max_price_move_bps_per_slot: 1_000,
+            max_accrual_dt_slots: 1,
+            actor_deposits: [
+                4_000_000,
+                4_000_000,
+                super::v16_svm::USER_DEPOSIT,
+                super::v16_svm::USER_DEPOSIT,
+                super::v16_svm::EXIT_MAKER_DEPOSIT,
+            ],
+            ..MarketConfig::default()
+        },
+    );
+    let size_q = -(POS_SCALE as i128);
+    let build = |env: &mut V16Svm| match route {
+        TradeRoute::NoCpi => {
+            env.build_retained_no_cpi_trade(0, 1, 0, size_q, super::v16_svm::INITIAL_PRICE)
+        }
+        TradeRoute::Cpi => {
+            env.build_retained_cpi_trade(0, 1, 0, size_q, super::v16_svm::INITIAL_PRICE)
+        }
+        TradeRoute::BatchNoCpi => {
+            env.build_retained_batch_no_cpi_trade(0, 1, 0, size_q, super::v16_svm::INITIAL_PRICE)
+        }
+        TradeRoute::BatchCpi => {
+            env.build_retained_batch_cpi_trade(0, 1, 0, size_q, super::v16_svm::INITIAL_PRICE)
+        }
+    };
+    let original = build(&mut env);
+    let retry = build(&mut env);
+    env.land_retained(original)
+        .map_err(|error| format!("{route:?} original intent: {error}"))?;
+    if land_retry {
+        env.land_retained(retry)
+            .map_err(|error| format!("{route:?} retry variant no longer lands: {error}"))?;
+    }
+
+    let expected_abs_q = (if land_retry { 2 } else { 1 }) * POS_SCALE;
+    let victim_position = observed_positions(&env.primary_portfolio(0))?[0];
+    if victim_position >= 0 || victim_position.unsigned_abs() != expected_abs_q {
+        return Err(format!(
+            "{route:?} retry setup produced unexpected victim position {victim_position}, expected -{expected_abs_q}"
+        ));
+    }
+
+    env.warp_to_slot(2);
+    let close_price = super::v16_svm::INITIAL_PRICE
+        .checked_mul(11)
+        .and_then(|value| value.checked_div(10))
+        .ok_or("trade retry close-price overflow")?;
+    env.push_auth_mark(0, 2, close_price)
+        .map_err(|error| format!("{route:?} push adverse mark: {error}"))?;
+    let oracle_accounts = env.primary_profile(0).oracle_leg_count;
+    let observation = || {
+        vec![CrankObservationHint {
+            asset_index: 0,
+            oracle_accounts,
+        }]
+    };
+    env.crank(1, 2, observation())
+        .map_err(|error| format!("{route:?} refresh attacker: {error}"))?;
+    env.crank(0, 2, observation())
+        .map_err(|error| format!("{route:?} refresh victim: {error}"))?;
+    let victim_position = observed_positions(&env.primary_portfolio(0))?[0];
+    env.trade_no_cpi(0, 1, 0, -victim_position, close_price, 0)
+        .map_err(|error| format!("{route:?} close replayed exposure: {error}"))?;
+    if observed_positions(&env.primary_portfolio(0))?[0] != 0
+        || observed_positions(&env.primary_portfolio(1))?[0] != 0
+    {
+        return Err(format!("{route:?} replay world did not close flat"));
+    }
+
+    env.convert_released_pnl(1, u128::MAX)
+        .map_err(|error| format!("{route:?} convert attacker released PnL: {error}"))?;
+    let victim_capital = env.primary_portfolio(0).capital.get();
+    let attacker_capital = env.primary_portfolio(1).capital.get();
+    env.withdraw_primary(0, victim_capital)
+        .map_err(|error| format!("{route:?} victim withdrawal: {error}"))?;
+    env.withdraw_primary(1, attacker_capital)
+        .map_err(|error| format!("{route:?} attacker withdrawal: {error}"))?;
+    let victim_payout = env.token_amount(env.actors[0].destination_token);
+    let attacker_payout = env.token_amount(env.actors[1].destination_token);
+    Ok((
+        victim_payout,
+        attacker_payout,
+        u128::from(victim_payout) + u128::from(attacker_payout),
+    ))
+}
+
+fn build_omitted_rescue_world(seed: [u8; 32]) -> Result<(V16Svm, u128, u128), String> {
+    const ADVERSE_PRICE: u64 = 1_000_000;
+    const ADVERSE_TARGET: u64 = 997_600;
+    const RESCUE_PRICE: u64 = 100;
+    const RESCUE_MARK: u64 = 99;
+    const ADVERSE_SIZE_Q: i128 = 50 * POS_SCALE as i128;
+    const RESCUE_SIZE_Q: i128 = 100_000 * POS_SCALE as i128;
+
+    let mut env = V16Svm::new(
+        seed,
+        MarketConfig {
+            h_max: 6_480_000,
+            min_nonzero_mm_req: 599,
+            min_nonzero_im_req: 600,
+            maintenance_margin_bps: 500,
+            initial_margin_bps: 500,
+            liquidation_fee_bps: 5,
+            liquidation_fee_cap: percolator::MAX_PROTOCOL_FEE_ABS,
+            max_price_move_bps_per_slot: 24,
+            max_accrual_dt_slots: 1,
+            max_abs_funding_e9_per_slot: 10_000,
+            min_funding_lifetime_slots: 1,
+            actor_deposits: [
+                3_115_000,
+                50_000_000,
+                super::v16_svm::USER_DEPOSIT,
+                super::v16_svm::USER_DEPOSIT,
+                super::v16_svm::EXIT_MAKER_DEPOSIT,
+            ],
+            ..MarketConfig::default()
+        },
+    );
+    env.configure_auth_mark(false, 0, 1, RESCUE_PRICE)
+        .map_err(|error| format!("configure rescue AuthMark: {error}"))?;
+    env.configure_auth_mark(false, 1, 1, ADVERSE_PRICE)
+        .map_err(|error| format!("configure adverse AuthMark: {error}"))?;
+    env.top_up_backing_bucket(1, 200_000, 10)
+        .map_err(|error| format!("top up rescue backing: {error}"))?;
+    env.trade_no_cpi(0, 1, 1, ADVERSE_SIZE_Q, ADVERSE_PRICE, 0)
+        .map_err(|error| format!("open adverse first leg: {error}"))?;
+    env.trade_no_cpi(0, 1, 0, RESCUE_SIZE_Q, RESCUE_PRICE, 0)
+        .map_err(|error| format!("open rescue later leg: {error}"))?;
+    let opened = env.primary_portfolio(0);
+    let active_assets: Vec<_> = decoded_legs(&opened)
+        .into_iter()
+        .filter(|leg| leg.active)
+        .map(|leg| leg.asset_index)
+        .collect();
+    if active_assets != [1, 0] {
+        return Err(format!(
+            "rescue setup did not preserve first/later leg ordering: {active_assets:?}"
+        ));
+    }
+    let position_before_q = position_abs_for_asset(&opened, 1)?;
+
+    env.warp_to_slot(2);
+    env.push_auth_mark(0, 2, RESCUE_MARK)
+        .map_err(|error| format!("stage rounded rescue mark: {error}"))?;
+    let rescue_oracle_accounts = env.primary_profile(0).oracle_leg_count;
+    env.crank(
+        2,
+        2,
+        vec![CrankObservationHint {
+            asset_index: 0,
+            oracle_accounts: rescue_oracle_accounts,
+        }],
+    )
+    .map_err(|error| format!("prime rounded rescue mark: {error}"))?;
+    let (_, primed) = env.primary_market_state();
+    if primed.assets[0].effective_price != RESCUE_PRICE
+        || primed.assets[0].slot_last != 2
+        || primed.assets[0].f_long_num != 0
+    {
+        return Err("rescue leg did not reach the rounded, zero-funding prime state".into());
+    }
+
+    env.warp_to_slot(3);
+    env.push_auth_mark(1, 3, ADVERSE_TARGET)
+        .map_err(|error| format!("stage adverse mark: {error}"))?;
+    let adverse_oracle_accounts = env.primary_profile(1).oracle_leg_count;
+    env.crank(
+        2,
+        3,
+        vec![CrankObservationHint {
+            asset_index: 1,
+            oracle_accounts: adverse_oracle_accounts,
+        }],
+    )
+    .map_err(|error| format!("commit adverse mark: {error}"))?;
+    let (_, stale_group) = env.primary_market_state();
+    if stale_group.assets[0].effective_price != RESCUE_PRICE || stale_group.assets[0].slot_last != 2
+    {
+        return Err("adverse prefix accidentally consumed the later rescue leg".into());
+    }
+    let insurance_before = stale_group.insurance;
+    Ok((env, position_before_q, insurance_before))
+}
+
+fn position_abs_for_asset(
+    account: &percolator_prog::state::PortfolioAccountV16,
+    asset_index: usize,
+) -> Result<u128, String> {
+    decoded_legs(account)
+        .into_iter()
+        .find(|leg| leg.active && leg.asset_index as usize == asset_index)
+        .map(|leg| leg.basis_pos_q.unsigned_abs())
+        .ok_or_else(|| format!("portfolio has no active asset {asset_index}"))
+}
+
+#[allow(dead_code)]
+pub fn post_expiry_backing_case_strategy(
+) -> impl Strategy<Value = ([u8; 32], PostExpiryBackingCase)> {
+    (
+        any::<[u8; 32]>(),
+        Just(5_000u16),
+        prop::sample::select(vec![2u8, 3, 5, 8]),
+        Just(500u16),
+        Just(20u8),
+    )
+        .prop_map(
+            |(seed, fee_bps, expiry_offset, mark_move_bps, increase_divisor)| {
+                (
+                    seed,
+                    PostExpiryBackingCase {
+                        fee_bps,
+                        expiry_offset,
+                        mark_move_bps,
+                        increase_divisor,
+                    },
+                )
+            },
+        )
+}
+
+#[allow(dead_code)]
+pub fn omitted_rescue_seed_strategy() -> impl Strategy<Value = [u8; 32]> {
+    any::<[u8; 32]>()
+}
+
+#[allow(dead_code)]
+pub fn trade_retry_replay_strategy() -> impl Strategy<Value = ([u8; 32], TradeRoute)> {
+    (
+        any::<[u8; 32]>(),
+        prop::sample::select(vec![
+            TradeRoute::NoCpi,
+            TradeRoute::Cpi,
+            TradeRoute::BatchNoCpi,
+            TradeRoute::BatchCpi,
+        ]),
+    )
 }
 
 #[allow(dead_code)]

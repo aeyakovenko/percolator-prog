@@ -35,19 +35,43 @@ const MATCHER_CONTEXT_LEN: usize = 320;
 
 #[derive(Clone, Copy, Debug)]
 pub struct MarketConfig {
+    pub h_max: u64,
+    pub min_nonzero_mm_req: u128,
+    pub min_nonzero_im_req: u128,
+    pub maintenance_margin_bps: u64,
+    pub initial_margin_bps: u64,
+    pub liquidation_fee_bps: u64,
+    pub liquidation_fee_cap: u128,
     pub max_price_move_bps_per_slot: u64,
     pub max_accrual_dt_slots: u64,
     pub max_abs_funding_e9_per_slot: u64,
+    pub min_funding_lifetime_slots: u64,
     pub maintenance_fee_per_slot: u128,
+    pub actor_deposits: [u128; PRIMARY_ACTOR_COUNT],
 }
 
 impl Default for MarketConfig {
     fn default() -> Self {
         Self {
+            h_max: 10,
+            min_nonzero_mm_req: 1,
+            min_nonzero_im_req: 2,
+            maintenance_margin_bps: 10_000,
+            initial_margin_bps: 10_000,
+            liquidation_fee_bps: 0,
+            liquidation_fee_cap: 0,
             max_price_move_bps_per_slot: 1_000,
             max_accrual_dt_slots: 4,
             max_abs_funding_e9_per_slot: 0,
+            min_funding_lifetime_slots: 4,
             maintenance_fee_per_slot: 0,
+            actor_deposits: [
+                USER_DEPOSIT,
+                USER_DEPOSIT,
+                USER_DEPOSIT,
+                USER_DEPOSIT,
+                EXIT_MAKER_DEPOSIT,
+            ],
         }
     }
 }
@@ -84,6 +108,9 @@ pub struct V16Svm {
     pub foreign_vault: Pubkey,
     pub vault_authority: Pubkey,
     pub foreign_vault_authority: Pubkey,
+    pub provider_source_token: Pubkey,
+    pub provider_destination_token: Pubkey,
+    pub backing_domain_ledger: Pubkey,
     pub actors: Vec<Actor>,
     pub foreign_actor: ForeignActor,
     pub initial_token_supply: u128,
@@ -198,8 +225,18 @@ impl V16Svm {
         let foreign_portfolio = deterministic_keypair(&seed, 121).pubkey();
         let foreign_source = deterministic_keypair(&seed, 122).pubkey();
         let foreign_destination = deterministic_keypair(&seed, 123).pubkey();
+        let provider_source_token = deterministic_keypair(&seed, 124).pubkey();
+        let provider_destination_token = deterministic_keypair(&seed, 125).pubkey();
+        let backing_domain_ledger = deterministic_keypair(&seed, 126).pubkey();
+        const PROVIDER_TOKEN_BALANCE: u64 = 1_000_000_000;
         token_supply += FOREIGN_TOKEN_BALANCE as u128;
-        token_accounts.extend([foreign_source, foreign_destination]);
+        token_supply += PROVIDER_TOKEN_BALANCE as u128;
+        token_accounts.extend([
+            foreign_source,
+            foreign_destination,
+            provider_source_token,
+            provider_destination_token,
+        ]);
         svm.airdrop(&foreign_signer.pubkey(), 10_000_000_000)
             .expect("airdrop foreign actor");
         set_program_account(&mut svm, foreign_portfolio, program_id, portfolio_len);
@@ -216,6 +253,26 @@ impl V16Svm {
             mint,
             foreign_signer.pubkey(),
             0,
+        );
+        set_token_account(
+            &mut svm,
+            provider_source_token,
+            mint,
+            admin.pubkey(),
+            PROVIDER_TOKEN_BALANCE,
+        );
+        set_token_account(
+            &mut svm,
+            provider_destination_token,
+            mint,
+            admin.pubkey(),
+            0,
+        );
+        set_program_account(
+            &mut svm,
+            backing_domain_ledger,
+            program_id,
+            state::backing_domain_ledger_account_len(),
         );
         let foreign_actor = ForeignActor {
             signer: foreign_signer,
@@ -251,6 +308,9 @@ impl V16Svm {
             foreign_vault,
             vault_authority,
             foreign_vault_authority,
+            provider_source_token,
+            provider_destination_token,
+            backing_domain_ledger,
             actors,
             foreign_actor,
             initial_token_supply: token_supply,
@@ -279,11 +339,7 @@ impl V16Svm {
         for actor_index in 0..PRIMARY_ACTOR_COUNT {
             self.init_primary_portfolio(actor_index);
             self.init_matcher(actor_index);
-            let deposit = if actor_index == EXIT_MAKER_INDEX {
-                EXIT_MAKER_DEPOSIT
-            } else {
-                USER_DEPOSIT
-            };
+            let deposit = config.actor_deposits[actor_index];
             self.deposit_primary(actor_index, deposit)
                 .expect("initial primary deposit");
         }
@@ -302,21 +358,21 @@ impl V16Svm {
             ProgInstruction::InitMarket {
                 max_portfolio_assets: ASSET_COUNT as u16,
                 h_min: 0,
-                h_max: 10,
+                h_max: config.h_max,
                 initial_price: INITIAL_PRICE,
-                min_nonzero_mm_req: 1,
-                min_nonzero_im_req: 2,
-                maintenance_margin_bps: 10_000,
-                initial_margin_bps: 10_000,
+                min_nonzero_mm_req: config.min_nonzero_mm_req,
+                min_nonzero_im_req: config.min_nonzero_im_req,
+                maintenance_margin_bps: config.maintenance_margin_bps,
+                initial_margin_bps: config.initial_margin_bps,
                 max_trading_fee_bps: 10_000,
                 trade_fee_base_bps: 0,
-                liquidation_fee_bps: 0,
-                liquidation_fee_cap: 0,
+                liquidation_fee_bps: config.liquidation_fee_bps,
+                liquidation_fee_cap: config.liquidation_fee_cap,
                 min_liquidation_abs: 0,
                 max_price_move_bps_per_slot: config.max_price_move_bps_per_slot,
                 max_accrual_dt_slots: config.max_accrual_dt_slots,
                 max_abs_funding_e9_per_slot: config.max_abs_funding_e9_per_slot,
-                min_funding_lifetime_slots: config.max_accrual_dt_slots,
+                min_funding_lifetime_slots: config.min_funding_lifetime_slots,
                 max_account_b_settlement_chunks: 1,
                 max_bankrupt_close_chunks: 1,
                 max_bankrupt_close_lifetime_slots: 100,
@@ -472,6 +528,24 @@ impl V16Svm {
                 AccountMeta::new(self.vault, false),
                 AccountMeta::new_readonly(self.vault_authority, false),
                 AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[owner],
+        )
+    }
+
+    pub fn convert_released_pnl(
+        &mut self,
+        actor_index: usize,
+        amount: u128,
+    ) -> Result<TxSuccess, String> {
+        let actor = &self.actors[actor_index];
+        let owner = copy_keypair(&actor.signer);
+        self.send_program(
+            ProgInstruction::ConvertReleasedPnl { amount },
+            vec![
+                AccountMeta::new(owner.pubkey(), true),
+                AccountMeta::new(self.market, false),
+                AccountMeta::new(actor.portfolio, false),
             ],
             &[owner],
         )
@@ -674,6 +748,73 @@ impl V16Svm {
         )
     }
 
+    pub fn update_backing_fee_policy(
+        &mut self,
+        domain: u16,
+        fee_bps: u16,
+        insurance_share_bps: u16,
+    ) -> Result<TxSuccess, String> {
+        let authority = copy_keypair(&self.admin);
+        self.send_program(
+            ProgInstruction::UpdateBackingFeePolicy {
+                domain,
+                fee_bps,
+                insurance_share_bps,
+            },
+            vec![
+                AccountMeta::new(authority.pubkey(), true),
+                AccountMeta::new(self.market, false),
+            ],
+            &[authority],
+        )
+    }
+
+    pub fn top_up_backing_bucket(
+        &mut self,
+        domain: u16,
+        amount: u128,
+        expiry_slot: u64,
+    ) -> Result<TxSuccess, String> {
+        let authority = copy_keypair(&self.admin);
+        self.send_program(
+            ProgInstruction::TopUpBackingBucket {
+                domain,
+                amount,
+                expiry_slot,
+            },
+            vec![
+                AccountMeta::new(authority.pubkey(), true),
+                AccountMeta::new(self.market, false),
+                AccountMeta::new(self.provider_source_token, false),
+                AccountMeta::new(self.vault, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+                AccountMeta::new(self.backing_domain_ledger, false),
+            ],
+            &[authority],
+        )
+    }
+
+    pub fn withdraw_backing_bucket_earnings(
+        &mut self,
+        domain: u16,
+        amount: u128,
+    ) -> Result<TxSuccess, String> {
+        let authority = copy_keypair(&self.admin);
+        self.send_program(
+            ProgInstruction::WithdrawBackingBucketEarnings { domain, amount },
+            vec![
+                AccountMeta::new(authority.pubkey(), true),
+                AccountMeta::new(self.market, false),
+                AccountMeta::new(self.backing_domain_ledger, false),
+                AccountMeta::new(self.provider_destination_token, false),
+                AccountMeta::new(self.vault, false),
+                AccountMeta::new_readonly(self.vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[authority],
+        )
+    }
+
     pub fn crank(
         &mut self,
         actor_index: usize,
@@ -852,6 +993,98 @@ impl V16Svm {
         )
     }
 
+    pub fn build_retained_cpi_trade(
+        &mut self,
+        taker: usize,
+        maker: usize,
+        asset_index: u16,
+        size_q: i128,
+        limit_price: u64,
+    ) -> Transaction {
+        let taker_owner = copy_keypair(&self.actors[taker].signer);
+        let binding = &self.actors[maker];
+        self.build_program_transaction(
+            ProgInstruction::TradeCpi {
+                asset_index,
+                size_q,
+                fee_bps: 0,
+                limit_price,
+            },
+            vec![
+                AccountMeta::new(taker_owner.pubkey(), true),
+                AccountMeta::new(self.market, false),
+                AccountMeta::new(self.actors[taker].portfolio, false),
+                AccountMeta::new(binding.portfolio, false),
+                AccountMeta::new_readonly(self.matcher_program, false),
+                AccountMeta::new(binding.matcher_context, false),
+                AccountMeta::new_readonly(binding.matcher_delegate, false),
+            ],
+            &[taker_owner],
+        )
+    }
+
+    pub fn build_retained_batch_no_cpi_trade(
+        &mut self,
+        taker: usize,
+        maker: usize,
+        asset_index: u16,
+        size_q: i128,
+        exec_price: u64,
+    ) -> Transaction {
+        let taker_owner = copy_keypair(&self.actors[taker].signer);
+        let maker_owner = copy_keypair(&self.actors[maker].signer);
+        self.build_program_transaction(
+            ProgInstruction::BatchTradeNoCpi {
+                legs: vec![BatchTradeLeg {
+                    asset_index,
+                    size_q,
+                    exec_price,
+                    fee_bps: 0,
+                }],
+            },
+            vec![
+                AccountMeta::new(taker_owner.pubkey(), true),
+                AccountMeta::new(maker_owner.pubkey(), true),
+                AccountMeta::new(self.market, false),
+                AccountMeta::new(self.actors[taker].portfolio, false),
+                AccountMeta::new(self.actors[maker].portfolio, false),
+            ],
+            &[taker_owner, maker_owner],
+        )
+    }
+
+    pub fn build_retained_batch_cpi_trade(
+        &mut self,
+        taker: usize,
+        maker: usize,
+        asset_index: u16,
+        size_q: i128,
+        limit_price: u64,
+    ) -> Transaction {
+        let taker_owner = copy_keypair(&self.actors[taker].signer);
+        let binding = &self.actors[maker];
+        self.build_program_transaction(
+            ProgInstruction::BatchTradeCpi {
+                legs: vec![BatchTradeCpiLeg {
+                    asset_index,
+                    size_q,
+                    fee_bps: 0,
+                    limit_price,
+                }],
+            },
+            vec![
+                AccountMeta::new(taker_owner.pubkey(), true),
+                AccountMeta::new(self.market, false),
+                AccountMeta::new(self.actors[taker].portfolio, false),
+                AccountMeta::new(binding.portfolio, false),
+                AccountMeta::new_readonly(self.matcher_program, false),
+                AccountMeta::new(binding.matcher_context, false),
+                AccountMeta::new_readonly(binding.matcher_delegate, false),
+            ],
+            &[taker_owner],
+        )
+    }
+
     pub fn land_retained(&mut self, tx: Transaction) -> Result<TxSuccess, String> {
         self.svm
             .send_transaction(tx)
@@ -939,6 +1172,13 @@ impl V16Svm {
             self.market
         };
         self.svm.get_account(&key).expect("market").data
+    }
+
+    pub fn backing_domain_ledger_data(&self) -> Vec<u8> {
+        self.svm
+            .get_account(&self.backing_domain_ledger)
+            .expect("backing domain ledger")
+            .data
     }
 
     pub fn token_amount(&self, key: Pubkey) -> u64 {
