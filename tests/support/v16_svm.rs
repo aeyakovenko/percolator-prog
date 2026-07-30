@@ -35,6 +35,7 @@ const MATCHER_CONTEXT_LEN: usize = 320;
 
 #[derive(Clone, Copy, Debug)]
 pub struct MarketConfig {
+    pub initial_price: u64,
     pub h_max: u64,
     pub min_nonzero_mm_req: u128,
     pub min_nonzero_im_req: u128,
@@ -53,6 +54,7 @@ pub struct MarketConfig {
 impl Default for MarketConfig {
     fn default() -> Self {
         Self {
+            initial_price: INITIAL_PRICE,
             h_max: 10,
             min_nonzero_mm_req: 1,
             min_nonzero_im_req: 2,
@@ -330,9 +332,9 @@ impl V16Svm {
         self.init_market(true, config);
         self.warp_to_slot(1);
         for asset_index in 0..ASSET_COUNT as u16 {
-            self.configure_auth_mark(false, asset_index, 1, INITIAL_PRICE)
+            self.configure_auth_mark(false, asset_index, 1, config.initial_price)
                 .expect("configure primary AuthMark");
-            self.configure_auth_mark(true, asset_index, 1, INITIAL_PRICE)
+            self.configure_auth_mark(true, asset_index, 1, config.initial_price)
                 .expect("configure foreign AuthMark");
         }
 
@@ -359,7 +361,7 @@ impl V16Svm {
                 max_portfolio_assets: ASSET_COUNT as u16,
                 h_min: 0,
                 h_max: config.h_max,
-                initial_price: INITIAL_PRICE,
+                initial_price: config.initial_price,
                 min_nonzero_mm_req: config.min_nonzero_mm_req,
                 min_nonzero_im_req: config.min_nonzero_im_req,
                 maintenance_margin_bps: config.maintenance_margin_bps,
@@ -681,6 +683,50 @@ impl V16Svm {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub fn configure_hybrid_oracle(
+        &mut self,
+        asset_index: u16,
+        now_slot: u64,
+        now_unix_ts: i64,
+        oracle_leg_flags: u8,
+        feeds: [[u8; 32]; 3],
+        oracle_accounts: &[Pubkey],
+        hybrid_soft_stale_slots: u64,
+        conf_filter_bps: u16,
+    ) -> Result<TxSuccess, String> {
+        let authority = copy_keypair(&self.admin);
+        let mut accounts = vec![
+            AccountMeta::new(authority.pubkey(), true),
+            AccountMeta::new(self.market, false),
+        ];
+        accounts.extend(
+            oracle_accounts
+                .iter()
+                .copied()
+                .map(|key| AccountMeta::new_readonly(key, false)),
+        );
+        self.send_program(
+            ProgInstruction::ConfigureHybridOracle {
+                asset_index,
+                now_slot,
+                now_unix_ts,
+                oracle_leg_count: oracle_accounts.len() as u8,
+                oracle_leg_flags,
+                max_staleness_secs: 60,
+                hybrid_soft_stale_slots,
+                mark_ewma_halflife_slots: 1,
+                mark_min_fee: 0,
+                invert: 0,
+                unit_scale: 0,
+                conf_filter_bps,
+                oracle_leg_feeds: feeds,
+            },
+            accounts,
+            &[authority],
+        )
+    }
+
     pub fn configure_auth_mark_for_actor(
         &mut self,
         actor_index: usize,
@@ -842,6 +888,21 @@ impl V16Svm {
         let authority = copy_keypair(&self.admin);
         self.send_program(
             ProgInstruction::UpdateMarketInitFeePolicy { min_init_fee },
+            vec![
+                AccountMeta::new(authority.pubkey(), true),
+                AccountMeta::new(self.market, false),
+            ],
+            &[authority],
+        )
+    }
+
+    pub fn update_liquidation_fee_policy(
+        &mut self,
+        cranker_share_bps: u16,
+    ) -> Result<TxSuccess, String> {
+        let authority = copy_keypair(&self.admin);
+        self.send_program(
+            ProgInstruction::UpdateLiquidationFeePolicy { cranker_share_bps },
             vec![
                 AccountMeta::new(authority.pubkey(), true),
                 AccountMeta::new(self.market, false),
@@ -1080,6 +1141,68 @@ impl V16Svm {
                 AccountMeta::new(self.actors[actor_index].portfolio, false),
             ],
             &[],
+        )
+    }
+
+    pub fn crank_with_oracles(
+        &mut self,
+        actor_index: usize,
+        now_slot: u64,
+        observations: Vec<CrankObservationHint>,
+        oracle_accounts: &[Pubkey],
+    ) -> Result<TxSuccess, String> {
+        let mut accounts = vec![
+            AccountMeta::new(self.payer.pubkey(), true),
+            AccountMeta::new(self.market, false),
+            AccountMeta::new(self.actors[actor_index].portfolio, false),
+        ];
+        accounts.extend(
+            oracle_accounts
+                .iter()
+                .copied()
+                .map(|key| AccountMeta::new_readonly(key, false)),
+        );
+        self.send_program(
+            ProgInstruction::PermissionlessCrank {
+                now_slot,
+                observations,
+            },
+            accounts,
+            &[],
+        )
+    }
+
+    pub fn crank_with_reward(
+        &mut self,
+        cranker_index: usize,
+        actor_index: usize,
+        now_slot: u64,
+        observations: Vec<CrankObservationHint>,
+        oracle_accounts: &[Pubkey],
+    ) -> Result<TxSuccess, String> {
+        let cranker = copy_keypair(&self.actors[cranker_index].signer);
+        let mut accounts = vec![
+            AccountMeta::new(cranker.pubkey(), true),
+            AccountMeta::new(self.market, false),
+            AccountMeta::new(self.actors[actor_index].portfolio, false),
+        ];
+        accounts.extend(
+            oracle_accounts
+                .iter()
+                .copied()
+                .map(|key| AccountMeta::new_readonly(key, false)),
+        );
+        accounts.push(AccountMeta::new(
+            self.actors[cranker_index].portfolio,
+            false,
+        ));
+        self.send_program(
+            ProgInstruction::PermissionlessCrank {
+                now_slot,
+                observations,
+            },
+            accounts,
+            &[cranker],
         )
     }
 
@@ -1360,6 +1483,37 @@ impl V16Svm {
         }
     }
 
+    pub fn set_clock(&mut self, slot: u64, unix_timestamp: i64) {
+        self.warp_to_slot(slot);
+        let mut clock = self.svm.get_sysvar::<Clock>();
+        clock.unix_timestamp = unix_timestamp;
+        self.svm.set_sysvar(&clock);
+    }
+
+    pub fn set_pyth_price(
+        &mut self,
+        feed: &[u8; 32],
+        price: i64,
+        expo: i32,
+        conf: u64,
+        publish_time: i64,
+    ) -> Pubkey {
+        let key = Pubkey::new_unique();
+        self.svm
+            .set_account(
+                key,
+                Account {
+                    lamports: 1_000_000_000,
+                    data: make_pyth_data(feed, price, expo, conf, publish_time),
+                    owner: percolator_prog::oracle_v16::PYTH_RECEIVER_PROGRAM_ID,
+                    executable: false,
+                    rent_epoch: 0,
+                },
+            )
+            .expect("install external Pyth fixture");
+        key
+    }
+
     pub fn current_slot(&self) -> u64 {
         self.svm.get_sysvar::<Clock>().slot
     }
@@ -1615,6 +1769,24 @@ fn matcher_delegate_key(
         program_id,
     )
     .0
+}
+
+fn make_pyth_data(
+    feed_id: &[u8; 32],
+    price: i64,
+    expo: i32,
+    conf: u64,
+    publish_time: i64,
+) -> Vec<u8> {
+    let mut data = vec![0u8; 134];
+    data[0..8].copy_from_slice(&[0x22, 0xf1, 0x23, 0x63, 0x9d, 0x7e, 0xf4, 0xcd]);
+    data[40] = 1;
+    data[41..73].copy_from_slice(feed_id);
+    data[73..81].copy_from_slice(&price.to_le_bytes());
+    data[81..89].copy_from_slice(&conf.to_le_bytes());
+    data[89..93].copy_from_slice(&expo.to_le_bytes());
+    data[93..101].copy_from_slice(&publish_time.to_le_bytes());
+    data
 }
 
 fn set_program_account(svm: &mut LiteSVM, key: Pubkey, owner: Pubkey, data_len: usize) {

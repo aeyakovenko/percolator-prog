@@ -23,19 +23,30 @@ pub enum BlockerAdapter {
     Pr223CpiBackingFeeSiphon,
     Pr224CpiCallerFeeSiphon,
     Pr231AssetGenerationTradeReplay,
+    Pr253RoundedFundingOmission,
+    CompositeOracleRounding,
     Pr343TradeRetryReplay,
     Pr367PostExpiryBacking,
 }
 
 impl BlockerAdapter {
-    pub const fn pr(self) -> u16 {
+    pub const fn canonical_pr(self) -> u16 {
         match self {
             Self::Pr220OmittedRescue => 220,
             Self::Pr223CpiBackingFeeSiphon => 223,
             Self::Pr224CpiCallerFeeSiphon => 224,
             Self::Pr231AssetGenerationTradeReplay => 231,
+            Self::Pr253RoundedFundingOmission => 253,
+            Self::CompositeOracleRounding => 329,
             Self::Pr343TradeRetryReplay => 343,
             Self::Pr367PostExpiryBacking => 367,
+        }
+    }
+
+    pub const fn supports(self, pr: u16) -> bool {
+        match self {
+            Self::CompositeOracleRounding => pr == 329 || pr == 381,
+            _ => self.canonical_pr() == pr,
         }
     }
 }
@@ -116,7 +127,12 @@ pub const OPEN_LOFS: &[OpenLof] = &[
     ),
     OpenLof::missing(237, Privileged, PrivilegedLifecycle),
     OpenLof::missing(251, Blocker, ReplayIncarnation),
-    OpenLof::missing(253, Blocker, OracleAccrual),
+    OpenLof::quarantined(
+        253,
+        Blocker,
+        OracleAccrual,
+        BlockerAdapter::Pr253RoundedFundingOmission,
+    ),
     OpenLof::missing(254, Privileged, PrivilegedLifecycle),
     OpenLof::missing(255, Blocker, RecoveryTerminal),
     OpenLof::missing(256, Hardening, FeeConsent),
@@ -171,7 +187,12 @@ pub const OPEN_LOFS: &[OpenLof] = &[
     OpenLof::missing(325, Blocker, ReplayIncarnation),
     OpenLof::missing(326, Blocker, ReplayIncarnation),
     OpenLof::missing(328, Blocker, ReplayIncarnation),
-    OpenLof::missing(329, Blocker, OracleAccrual),
+    OpenLof::quarantined(
+        329,
+        Blocker,
+        OracleAccrual,
+        BlockerAdapter::CompositeOracleRounding,
+    ),
     OpenLof::missing(330, Blocker, RecoveryTerminal),
     OpenLof::missing(331, Blocker, OracleAccrual),
     OpenLof::missing(332, Blocker, OracleAccrual),
@@ -217,7 +238,12 @@ pub const OPEN_LOFS: &[OpenLof] = &[
     OpenLof::missing(374, Blocker, RecoveryTerminal),
     OpenLof::missing(375, Privileged, PrivilegedLifecycle),
     OpenLof::missing(380, Blocker, OracleAccrual),
-    OpenLof::missing(381, Blocker, OracleAccrual),
+    OpenLof::quarantined(
+        381,
+        Blocker,
+        OracleAccrual,
+        BlockerAdapter::CompositeOracleRounding,
+    ),
 ];
 
 pub fn validate_manifest() -> Result<(), String> {
@@ -237,12 +263,12 @@ pub fn validate_manifest() -> Result<(), String> {
     }
     for entry in OPEN_LOFS {
         if let LofEvidence::Quarantined(adapter) = entry.evidence {
-            if adapter.pr() != entry.pr {
+            if !adapter.supports(entry.pr) {
                 return Err(format!(
-                    "PR {} claims adapter {:?}, which belongs to PR {}",
+                    "PR {} claims incompatible adapter {:?} (canonical PR {})",
                     entry.pr,
                     adapter,
-                    adapter.pr()
+                    adapter.canonical_pr()
                 ));
             }
         }

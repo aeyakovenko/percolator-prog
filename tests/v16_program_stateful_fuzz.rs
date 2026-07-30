@@ -2,12 +2,13 @@ mod support;
 
 use proptest::prelude::*;
 use support::fuzz_model::{
-    asset_generation_replay_strategy, cpi_backing_fee_seed_strategy, cpi_caller_fee_strategy,
-    omitted_rescue_seed_strategy, post_expiry_backing_case_strategy,
-    reproduce_asset_generation_trade_replay, reproduce_cpi_backing_fee_siphon,
-    reproduce_cpi_caller_fee_siphon, reproduce_omitted_rescue_liquidation,
-    reproduce_post_expiry_backing_fee, reproduce_trade_retry_replay, run_scenario,
-    scenario_strategy, trade_retry_replay_strategy,
+    asset_generation_replay_strategy, composite_rounding_strategy, cpi_backing_fee_seed_strategy,
+    cpi_caller_fee_strategy, omitted_rescue_seed_strategy, post_expiry_backing_case_strategy,
+    reproduce_asset_generation_trade_replay, reproduce_composite_oracle_rounding,
+    reproduce_cpi_backing_fee_siphon, reproduce_cpi_caller_fee_siphon,
+    reproduce_omitted_rescue_liquidation, reproduce_post_expiry_backing_fee,
+    reproduce_rounded_funding_omission, reproduce_trade_retry_replay,
+    rounded_funding_seed_strategy, run_scenario, scenario_strategy, trade_retry_replay_strategy,
 };
 
 fn env_usize(name: &str, default: usize) -> usize {
@@ -116,6 +117,33 @@ proptest! {
         prop_assert!(
             result.is_ok(),
             "PR 223 no longer reproduces for seed {:?}: {}",
+            seed,
+            result.unwrap_err()
+        );
+    }
+
+    #[test]
+    fn v16_program_pr329_pr381_composite_rounding_fuzz(
+        (seed, case) in composite_rounding_strategy()
+    ) {
+        let result = reproduce_composite_oracle_rounding(seed, case);
+        prop_assert!(
+            result.is_ok(),
+            "{:?} no longer reproduces for seed {:?}: {}",
+            case,
+            seed,
+            result.unwrap_err()
+        );
+    }
+
+    #[test]
+    fn v16_program_pr253_rounded_funding_omission_fuzz(
+        seed in rounded_funding_seed_strategy()
+    ) {
+        let result = reproduce_rounded_funding_omission(seed);
+        prop_assert!(
+            result.is_ok(),
+            "PR 253 no longer reproduces for seed {:?}: {}",
             seed,
             result.unwrap_err()
         );

@@ -4,7 +4,7 @@ use super::v16_svm::{
 };
 use percolator::{BackingBucketStatusV16, MarketModeV16, PortfolioLegV16, POS_SCALE};
 use percolator_prog::{
-    constants::ORACLE_MODE_EWMA_MARK,
+    constants::{ORACLE_LEG_FLAG_DIVIDE_LEG2, ORACLE_LEG_FLAG_DIVIDE_LEG3, ORACLE_MODE_EWMA_MARK},
     ix::{BatchTradeCpiLeg, BatchTradeLeg, CrankObservationHint},
 };
 use proptest::prelude::*;
@@ -60,10 +60,12 @@ pub enum KnownBlocker {
     AssetGenerationTradeReplay,
     CpiCallerFeeSiphon,
     CpiBackingFeeSiphon,
+    CompositeOracleRounding,
+    RoundedFundingOmission,
 }
 
 impl KnownBlocker {
-    pub const COUNT: usize = 7;
+    pub const COUNT: usize = 9;
 
     pub const fn index(self) -> usize {
         match self {
@@ -74,6 +76,8 @@ impl KnownBlocker {
             Self::AssetGenerationTradeReplay => 4,
             Self::CpiCallerFeeSiphon => 5,
             Self::CpiBackingFeeSiphon => 6,
+            Self::CompositeOracleRounding => 7,
+            Self::RoundedFundingOmission => 8,
         }
     }
 }
@@ -143,6 +147,36 @@ pub struct CpiBackingFeeReproduction {
     pub provider_earnings: u128,
     pub extracted_tokens: u64,
     pub attacker_capital_delta: i128,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum CompositeRoundingCase {
+    Pr329LargeMove,
+    Pr381MicroMove,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CompositeRoundingReproduction {
+    pub blocker: KnownBlocker,
+    pub case: CompositeRoundingCase,
+    pub exact_mark: u64,
+    pub rounded_target: u64,
+    pub rounded_mark: u64,
+    pub victim_capital_loss: u128,
+    pub oi_reduction_q: u128,
+    pub cranker_reward: u128,
+    pub extracted_tokens: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RoundedFundingOmissionReproduction {
+    pub blocker: KnownBlocker,
+    pub control_f_long_num: i128,
+    pub control_f_short_num: i128,
+    pub attack_f_long_num: i128,
+    pub attack_f_short_num: i128,
+    pub victim_payout_loss: u64,
+    pub attacker_payout_gain: u64,
 }
 
 impl SubstitutionKind {
@@ -2344,6 +2378,366 @@ pub fn reproduce_cpi_backing_fee_siphon(
     })
 }
 
+pub fn reproduce_composite_oracle_rounding(
+    mut seed: [u8; 32],
+    case: CompositeRoundingCase,
+) -> Result<CompositeRoundingReproduction, String> {
+    seed[0] ^= match case {
+        CompositeRoundingCase::Pr329LargeMove => 0x29,
+        CompositeRoundingCase::Pr381MicroMove => 0x81,
+    };
+    let (
+        exact_mark,
+        initial_prices,
+        fresh_prices,
+        victim_deposit,
+        counterparty_deposit,
+        cranker_deposit,
+        size_units,
+        catch_up_steps,
+        catch_up_dt,
+        soft_stale_slots,
+    ) = match case {
+        CompositeRoundingCase::Pr329LargeMove => (
+            1_500_000u64,
+            [3i64, 1_000_000, 2],
+            [3i64, 2_000_000, 1],
+            540_000u128,
+            540_000u128,
+            1_000u128,
+            1u128,
+            12usize,
+            20u64,
+            1_000u64,
+        ),
+        CompositeRoundingCase::Pr381MicroMove => (
+            1_002_000u64,
+            [501i64, 1_000_000, 500],
+            [501i64, 500_000_000, 1],
+            50_100_000u128,
+            50_100_000u128,
+            1u128,
+            1_000u128,
+            1usize,
+            1u64,
+            3u64,
+        ),
+    };
+    let exact_composite = |prices: [i64; 3]| -> Result<u128, String> {
+        let p0 = u128::try_from(prices[0]).map_err(|_| "negative composite leg 0")?;
+        let p1 = u128::try_from(prices[1]).map_err(|_| "negative composite leg 1")?;
+        let p2 = u128::try_from(prices[2]).map_err(|_| "negative composite leg 2")?;
+        p0.checked_mul(1_000_000_000_000)
+            .and_then(|value| value.checked_div(p1.checked_mul(p2)?))
+            .ok_or("exact composite arithmetic failed".into())
+    };
+    if exact_composite(initial_prices)? != u128::from(exact_mark)
+        || exact_composite(fresh_prices)? != u128::from(exact_mark)
+    {
+        return Err(format!(
+            "{case:?} fixture does not preserve exact mark {exact_mark}"
+        ));
+    }
+
+    let mut env = V16Svm::new(
+        seed,
+        MarketConfig {
+            initial_price: exact_mark,
+            h_max: 6_480_000,
+            min_nonzero_mm_req: 599,
+            min_nonzero_im_req: 600,
+            maintenance_margin_bps: 500,
+            initial_margin_bps: 500,
+            liquidation_fee_bps: 5,
+            liquidation_fee_cap: percolator::MAX_PROTOCOL_FEE_ABS,
+            max_price_move_bps_per_slot: 24,
+            max_accrual_dt_slots: 20,
+            max_abs_funding_e9_per_slot: 1_000,
+            min_funding_lifetime_slots: 10_000_000,
+            actor_deposits: [
+                victim_deposit,
+                counterparty_deposit,
+                cranker_deposit,
+                super::v16_svm::USER_DEPOSIT,
+                super::v16_svm::EXIT_MAKER_DEPOSIT,
+            ],
+            ..MarketConfig::default()
+        },
+    );
+    env.update_liquidation_fee_policy(5_000)
+        .map_err(|error| format!("{case:?} configure cranker share: {error}"))?;
+    env.set_clock(1, 100);
+    let feeds = [[0xe1u8; 32], [0xe2u8; 32], [0xe3u8; 32]];
+    let initial_oracles: Vec<_> = initial_prices
+        .iter()
+        .enumerate()
+        .map(|(index, price)| env.set_pyth_price(&feeds[index], *price, -6, 0, 100))
+        .collect();
+    env.configure_hybrid_oracle(
+        0,
+        1,
+        100,
+        ORACLE_LEG_FLAG_DIVIDE_LEG2 | ORACLE_LEG_FLAG_DIVIDE_LEG3,
+        feeds,
+        &initial_oracles,
+        soft_stale_slots,
+        0,
+    )
+    .map_err(|error| format!("{case:?} configure exact composite: {error}"))?;
+    if env.primary_market_state().0.oracle_target_price_e6 != exact_mark {
+        return Err(format!(
+            "{case:?} initial composite target is {}, expected {exact_mark}",
+            env.primary_market_state().0.oracle_target_price_e6
+        ));
+    }
+
+    let size_q = size_units
+        .checked_mul(POS_SCALE)
+        .and_then(|value| i128::try_from(value).ok())
+        .ok_or("composite victim size overflow")?;
+    env.trade_no_cpi(0, 1, 0, size_q, exact_mark, 0)
+        .map_err(|error| format!("{case:?} open victim long: {error}"))?;
+    let victim_capital_before = env.primary_portfolio(0).capital.get();
+    let oi_before = env.primary_market_state().1.assets[0].oi_eff_long_q;
+    let cranker_capital_before = env.primary_portfolio(2).capital.get();
+    let supply_before = env.token_supply_observed();
+
+    let fresh_oracles: Vec<_> = fresh_prices
+        .iter()
+        .enumerate()
+        .map(|(index, price)| env.set_pyth_price(&feeds[index], *price, -6, 0, 101))
+        .collect();
+    let observations = || {
+        vec![CrankObservationHint {
+            asset_index: 0,
+            oracle_accounts: 3,
+        }]
+    };
+    let mut slot = 1u64;
+    for _ in 0..catch_up_steps {
+        slot = slot
+            .checked_add(catch_up_dt)
+            .ok_or("composite catch-up slot overflow")?;
+        env.set_clock(slot, 101);
+        env.crank_with_oracles(2, slot, observations(), &fresh_oracles)
+            .map_err(|error| format!("{case:?} composite catch-up at slot {slot}: {error}"))?;
+    }
+    env.crank_with_oracles(0, slot, observations(), &fresh_oracles)
+        .map_err(|error| format!("{case:?} refresh victim at rounded mark: {error}"))?;
+    let victim_cert = env
+        .primary_portfolio(0)
+        .health_cert
+        .try_to_runtime()
+        .map_err(|error| format!("{case:?} decode victim certificate: {error:?}"))?;
+    if victim_cert.certified_liq_deficit == 0 {
+        return Err(format!(
+            "{case:?} rounded composite did not falsely certify liquidation"
+        ));
+    }
+
+    env.crank_with_reward(2, 0, slot, observations(), &fresh_oracles)
+        .map_err(|error| format!("{case:?} false-price liquidation no longer lands: {error}"))?;
+    let (wrapper_after, group_after) = env.primary_market_state();
+    let victim_capital_after = env.primary_portfolio(0).capital.get();
+    let oi_after = group_after.assets[0].oi_eff_long_q;
+    let cranker_capital_after = env.primary_portfolio(2).capital.get();
+    let victim_capital_loss = victim_capital_before
+        .checked_sub(victim_capital_after)
+        .ok_or("composite liquidation increased victim capital")?;
+    let oi_reduction_q = oi_before
+        .checked_sub(oi_after)
+        .ok_or("composite liquidation increased victim OI")?;
+    let cranker_reward = cranker_capital_after
+        .checked_sub(cranker_capital_before)
+        .ok_or("composite liquidation decreased cranker capital")?;
+    if victim_capital_loss == 0 || oi_reduction_q == 0 || cranker_reward == 0 {
+        return Err(format!(
+            "{case:?} false composite was not economically committed: victim loss {victim_capital_loss}, OI reduction {oi_reduction_q}, reward {cranker_reward}"
+        ));
+    }
+    env.withdraw_primary(2, cranker_reward)
+        .map_err(|error| format!("{case:?} withdraw false-liquidation reward: {error}"))?;
+    let extracted_tokens = env.token_amount(env.actors[2].destination_token);
+    if u128::from(extracted_tokens) != cranker_reward {
+        return Err(format!(
+            "{case:?} cranker reward/SPL mismatch: {cranker_reward} vs {extracted_tokens}"
+        ));
+    }
+    if env.token_supply_observed() != supply_before {
+        return Err(format!(
+            "{case:?} false liquidation changed total SPL supply"
+        ));
+    }
+    if wrapper_after.oracle_target_price_e6 == exact_mark
+        || group_after.assets[0].effective_price == exact_mark
+    {
+        return Err(format!(
+            "{case:?} liquidation occurred without the expected rounded target/mark divergence"
+        ));
+    }
+    Ok(CompositeRoundingReproduction {
+        blocker: KnownBlocker::CompositeOracleRounding,
+        case,
+        exact_mark,
+        rounded_target: wrapper_after.oracle_target_price_e6,
+        rounded_mark: group_after.assets[0].effective_price,
+        victim_capital_loss,
+        oi_reduction_q,
+        cranker_reward,
+        extracted_tokens,
+    })
+}
+
+pub fn reproduce_rounded_funding_omission(
+    mut seed: [u8; 32],
+) -> Result<RoundedFundingOmissionReproduction, String> {
+    seed[0] ^= 0x53;
+    let control = run_rounded_funding_world(seed, false)?;
+    let attack = run_rounded_funding_world(seed, true)?;
+    if !attack.0 {
+        return Err("PR 253 no-observation crank no longer lands".into());
+    }
+    let victim_payout_loss = control
+        .3
+        .checked_sub(attack.3)
+        .ok_or("rounded-funding omission increased victim payout")?;
+    let attacker_payout_gain = attack
+        .4
+        .checked_sub(control.4)
+        .ok_or("rounded-funding omission decreased short payout")?;
+    if victim_payout_loss == 0 || victim_payout_loss != attacker_payout_gain {
+        return Err(format!(
+            "rounded-funding omission did not transfer equal SPL value: victim {}/{}; short {}/{}",
+            control.3, attack.3, control.4, attack.4
+        ));
+    }
+    if control.1 <= 0
+        || control.2 >= 0
+        || attack.1 != 0
+        || attack.2 != 0
+        || u128::from(control.3) + u128::from(control.4)
+            != u128::from(attack.3) + u128::from(attack.4)
+    {
+        return Err(format!(
+            "rounded-funding indexes/payouts do not match the omission class: control={control:?}, attack={attack:?}"
+        ));
+    }
+    Ok(RoundedFundingOmissionReproduction {
+        blocker: KnownBlocker::RoundedFundingOmission,
+        control_f_long_num: control.1,
+        control_f_short_num: control.2,
+        attack_f_long_num: attack.1,
+        attack_f_short_num: attack.2,
+        victim_payout_loss,
+        attacker_payout_gain,
+    })
+}
+
+fn run_rounded_funding_world(
+    seed: [u8; 32],
+    omit_selected_observation: bool,
+) -> Result<(bool, i128, i128, u64, u64), String> {
+    const PRICE: u64 = 100;
+    const MARK: u64 = 99;
+    const DEPOSIT: u128 = 100_000_000;
+    const SIZE_Q: i128 = 100_000 * POS_SCALE as i128;
+
+    let mut env = V16Svm::new(
+        seed,
+        MarketConfig {
+            initial_price: PRICE,
+            max_price_move_bps_per_slot: 1,
+            max_accrual_dt_slots: 1,
+            max_abs_funding_e9_per_slot: 10_000,
+            min_funding_lifetime_slots: 1,
+            actor_deposits: [
+                DEPOSIT,
+                DEPOSIT,
+                DEPOSIT,
+                DEPOSIT,
+                super::v16_svm::EXIT_MAKER_DEPOSIT,
+            ],
+            ..MarketConfig::default()
+        },
+    );
+    env.trade_no_cpi(0, 1, 0, SIZE_Q, PRICE, 0)
+        .map_err(|error| format!("open rounded-funding victim pair: {error}"))?;
+    env.trade_no_cpi(2, 3, 1, POS_SCALE as i128, PRICE, 0)
+        .map_err(|error| format!("open rounded-funding epoch pair: {error}"))?;
+
+    env.warp_to_slot(2);
+    env.push_auth_mark(0, 2, MARK)
+        .map_err(|error| format!("stage rounded funding mark: {error}"))?;
+    let asset0_observation = vec![CrankObservationHint {
+        asset_index: 0,
+        oracle_accounts: env.primary_profile(0).oracle_leg_count,
+    }];
+    env.crank(0, 2, asset0_observation.clone())
+        .map_err(|error| format!("prime rounded funding checkpoint: {error}"))?;
+    let (_, primed) = env.primary_market_state();
+    if primed.assets[0].effective_price != PRICE
+        || primed.assets[0].slot_last != 2
+        || primed.assets[0].f_long_num != 0
+    {
+        return Err("rounded-funding prime state is not price-stationary and unfunded".into());
+    }
+
+    env.warp_to_slot(3);
+    env.push_auth_mark(1, 3, MARK)
+        .map_err(|error| format!("stage unrelated epoch mark: {error}"))?;
+    env.crank(
+        2,
+        3,
+        vec![CrankObservationHint {
+            asset_index: 1,
+            oracle_accounts: env.primary_profile(1).oracle_leg_count,
+        }],
+    )
+    .map_err(|error| format!("advance unrelated market epoch: {error}"))?;
+    let refresh = env.crank(
+        0,
+        3,
+        if omit_selected_observation {
+            Vec::new()
+        } else {
+            asset0_observation
+        },
+    );
+    let missing_observation_landed = refresh.is_ok();
+    if !omit_selected_observation {
+        refresh.map_err(|error| format!("observed rounded-funding refresh: {error}"))?;
+    } else if let Err(error) = refresh {
+        return Err(format!(
+            "omitted rounded-funding observation rejected: {error}"
+        ));
+    }
+    let (_, funded) = env.primary_market_state();
+
+    env.crank(1, 3, Vec::new())
+        .map_err(|error| format!("settle rounded-funding short: {error}"))?;
+    env.trade_no_cpi(0, 1, 0, -SIZE_Q, PRICE, 0)
+        .map_err(|error| format!("close rounded-funding victim pair: {error}"))?;
+    env.trade_no_cpi(2, 3, 1, -(POS_SCALE as i128), PRICE, 0)
+        .map_err(|error| format!("close rounded-funding epoch pair: {error}"))?;
+    if env.primary_portfolio(0).pnl.get() > 0 {
+        env.convert_released_pnl(0, u128::MAX)
+            .map_err(|error| format!("convert victim funding PnL: {error}"))?;
+    }
+    let victim_capital = env.primary_portfolio(0).capital.get();
+    let short_capital = env.primary_portfolio(1).capital.get();
+    env.withdraw_primary(0, victim_capital)
+        .map_err(|error| format!("withdraw rounded-funding victim: {error}"))?;
+    env.withdraw_primary(1, short_capital)
+        .map_err(|error| format!("withdraw rounded-funding short: {error}"))?;
+    Ok((
+        missing_observation_landed,
+        funded.assets[0].f_long_num,
+        funded.assets[0].f_short_num,
+        env.token_amount(env.actors[0].destination_token),
+        env.token_amount(env.actors[1].destination_token),
+    ))
+}
+
 fn crank_adapter_steps(
     env: &mut V16Svm,
     actor: usize,
@@ -2771,6 +3165,22 @@ pub fn cpi_caller_fee_strategy() -> impl Strategy<Value = ([u8; 32], TradeRoute)
 
 #[allow(dead_code)]
 pub fn cpi_backing_fee_seed_strategy() -> impl Strategy<Value = [u8; 32]> {
+    any::<[u8; 32]>()
+}
+
+#[allow(dead_code)]
+pub fn composite_rounding_strategy() -> impl Strategy<Value = ([u8; 32], CompositeRoundingCase)> {
+    (
+        any::<[u8; 32]>(),
+        prop::sample::select(vec![
+            CompositeRoundingCase::Pr329LargeMove,
+            CompositeRoundingCase::Pr381MicroMove,
+        ]),
+    )
+}
+
+#[allow(dead_code)]
+pub fn rounded_funding_seed_strategy() -> impl Strategy<Value = [u8; 32]> {
     any::<[u8; 32]>()
 }
 

@@ -3,10 +3,11 @@ mod support;
 use support::{
     blocker_corpus::{blocker_scenarios, known_blocker_scenarios},
     fuzz_model::{
-        reproduce_asset_generation_trade_replay, reproduce_cpi_backing_fee_siphon,
-        reproduce_cpi_caller_fee_siphon, reproduce_omitted_rescue_liquidation,
-        reproduce_post_expiry_backing_fee, reproduce_trade_retry_replay, run_scenario,
-        KnownBlocker, PostExpiryBackingCase, Scenario, TradeRoute,
+        reproduce_asset_generation_trade_replay, reproduce_composite_oracle_rounding,
+        reproduce_cpi_backing_fee_siphon, reproduce_cpi_caller_fee_siphon,
+        reproduce_omitted_rescue_liquidation, reproduce_post_expiry_backing_fee,
+        reproduce_rounded_funding_omission, reproduce_trade_retry_replay, run_scenario,
+        CompositeRoundingCase, KnownBlocker, PostExpiryBackingCase, Scenario, TradeRoute,
     },
     open_lof_manifest::{missing_prs, quarantined_prs, validate_manifest},
 };
@@ -180,19 +181,60 @@ fn v16_program_pr223_unsigned_lp_backing_fee_is_withdrawable() {
 }
 
 #[test]
+fn v16_program_pr329_pr381_composite_rounding_false_liquidates() {
+    for case in [
+        CompositeRoundingCase::Pr329LargeMove,
+        CompositeRoundingCase::Pr381MicroMove,
+    ] {
+        let reproduction = reproduce_composite_oracle_rounding([0x29; 32], case)
+            .unwrap_or_else(|error| panic!("{case:?} no longer reproduces: {error}"));
+        assert_eq!(reproduction.blocker, KnownBlocker::CompositeOracleRounding);
+        assert_ne!(reproduction.rounded_target, reproduction.exact_mark);
+        assert_ne!(reproduction.rounded_mark, reproduction.exact_mark);
+        assert!(reproduction.victim_capital_loss > 0);
+        assert!(reproduction.oi_reduction_q > 0);
+        assert_eq!(
+            reproduction.cranker_reward,
+            u128::from(reproduction.extracted_tokens)
+        );
+    }
+}
+
+#[test]
+fn v16_program_pr253_omitted_rounded_funding_transfers_spl_value() {
+    let reproduction = reproduce_rounded_funding_omission([0x53; 32])
+        .unwrap_or_else(|error| panic!("PR 253 no longer reproduces: {error}"));
+    assert_eq!(reproduction.blocker, KnownBlocker::RoundedFundingOmission);
+    assert!(reproduction.control_f_long_num > 0);
+    assert!(reproduction.control_f_short_num < 0);
+    assert_eq!(reproduction.attack_f_long_num, 0);
+    assert_eq!(reproduction.attack_f_short_num, 0);
+    assert_eq!(
+        reproduction.victim_payout_loss,
+        reproduction.attacker_payout_gain
+    );
+}
+
+#[test]
 fn v16_program_open_lof_manifest_is_complete_and_honest() {
     validate_manifest().expect("open LoF manifest structure");
-    assert_eq!(quarantined_prs(), [220, 223, 224, 231, 343, 367]);
+    assert_eq!(
+        quarantined_prs(),
+        [220, 223, 224, 231, 253, 329, 343, 367, 381]
+    );
     let missing = missing_prs();
     assert_eq!(
         missing.len(),
-        93,
+        90,
         "update the explicit evidence state when an executable adapter lands"
     );
     assert!(!missing.contains(&220));
     assert!(!missing.contains(&223));
     assert!(!missing.contains(&224));
     assert!(!missing.contains(&231));
+    assert!(!missing.contains(&253));
+    assert!(!missing.contains(&329));
     assert!(!missing.contains(&343));
     assert!(!missing.contains(&367));
+    assert!(!missing.contains(&381));
 }
