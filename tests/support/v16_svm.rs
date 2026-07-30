@@ -543,6 +543,57 @@ impl V16Svm {
         )
     }
 
+    pub fn resolve_market(&mut self) -> Result<TxSuccess, String> {
+        let admin = copy_keypair(&self.admin);
+        self.send_program(
+            ProgInstruction::ResolveMarket,
+            vec![
+                AccountMeta::new(admin.pubkey(), true),
+                AccountMeta::new(self.market, false),
+            ],
+            &[admin],
+        )
+    }
+
+    pub fn close_resolved_primary(&mut self, actor_index: usize) -> Result<TxSuccess, String> {
+        let actor = &self.actors[actor_index];
+        self.send_program(
+            ProgInstruction::CloseResolved {
+                fee_rate_per_slot: 0,
+            },
+            vec![
+                AccountMeta::new_readonly(actor.signer.pubkey(), false),
+                AccountMeta::new(self.market, false),
+                AccountMeta::new(actor.portfolio, false),
+                AccountMeta::new(actor.destination_token, false),
+                AccountMeta::new(self.vault, false),
+                AccountMeta::new_readonly(self.vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[],
+        )
+    }
+
+    pub fn claim_resolved_payout_topup_primary(
+        &mut self,
+        actor_index: usize,
+    ) -> Result<TxSuccess, String> {
+        let actor = &self.actors[actor_index];
+        self.send_program(
+            ProgInstruction::ClaimResolvedPayoutTopup,
+            vec![
+                AccountMeta::new_readonly(actor.signer.pubkey(), false),
+                AccountMeta::new(self.market, false),
+                AccountMeta::new(actor.portfolio, false),
+                AccountMeta::new(actor.destination_token, false),
+                AccountMeta::new(self.vault, false),
+                AccountMeta::new_readonly(self.vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[],
+        )
+    }
+
     pub fn convert_released_pnl(
         &mut self,
         actor_index: usize,

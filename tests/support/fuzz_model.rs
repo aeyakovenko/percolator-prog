@@ -72,10 +72,11 @@ pub enum KnownBlocker {
     AssetGenerationMarkReplay,
     AssetGenerationConfigReplay,
     CrossDomainBSettlement,
+    PendingEwmaTargetOverride,
 }
 
 impl KnownBlocker {
-    pub const COUNT: usize = 19;
+    pub const COUNT: usize = 20;
 
     pub const fn index(self) -> usize {
         match self {
@@ -98,6 +99,7 @@ impl KnownBlocker {
             Self::AssetGenerationMarkReplay => 16,
             Self::AssetGenerationConfigReplay => 17,
             Self::CrossDomainBSettlement => 18,
+            Self::PendingEwmaTargetOverride => 19,
         }
     }
 }
@@ -337,6 +339,20 @@ pub struct CrossDomainBSettlementReproduction {
     pub stranded_position_q: u128,
     pub failed_terminal_reductions: u8,
     pub full_withdraw_rejected: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PendingEwmaTargetOverrideReproduction {
+    pub blocker: KnownBlocker,
+    pub route: TradeRoute,
+    pub low_price: u64,
+    pub control_target: u64,
+    pub attack_target: u64,
+    pub movement_fee: u128,
+    pub displaced_victim_pnl: u128,
+    pub attacker_profit: u128,
+    pub victim_withdrawn: u64,
+    pub attacker_withdrawn: u128,
 }
 
 impl SubstitutionKind {
@@ -3949,6 +3965,212 @@ pub fn reproduce_cross_domain_b_settlement(
     })
 }
 
+#[derive(Clone, Copy, Debug)]
+struct PendingEwmaTargetWorld {
+    low_price: u64,
+    target: u64,
+    movement_fee: u128,
+    victim_withdrawn: u64,
+    attacker_withdrawn: u128,
+    observed_token_supply: u128,
+}
+
+pub fn reproduce_pending_ewma_target_override(
+    mut seed: [u8; 32],
+    route: TradeRoute,
+) -> Result<PendingEwmaTargetOverrideReproduction, String> {
+    seed[0] ^= 0x82;
+    const ATTACKER_DEPOSITS: u128 = 24_000_000_000;
+
+    let control = run_pending_ewma_target_world(seed, route, false)?;
+    let attack = run_pending_ewma_target_world(seed, route, true)?;
+    if control.low_price != attack.low_price
+        || control.target != 10_000_000
+        || attack.target >= control.target
+        || control.movement_fee != 0
+        || attack.movement_fee == 0
+        || control.observed_token_supply != attack.observed_token_supply
+    {
+        return Err(format!(
+            "{route:?} PR 282 setup did not isolate a paid pending-target override: control={control:?}, attack={attack:?}"
+        ));
+    }
+    let displaced_victim_pnl = u128::from(control.victim_withdrawn)
+        .checked_sub(u128::from(attack.victim_withdrawn))
+        .ok_or("PR 282 wash increased independent-victim payout")?;
+    let attacker_profit = attack
+        .attacker_withdrawn
+        .checked_sub(ATTACKER_DEPOSITS)
+        .ok_or("PR 282 coalition did not recover its public deposits")?;
+    if displaced_victim_pnl == 0
+        || attacker_profit == 0
+        || attack.movement_fee >= displaced_victim_pnl
+    {
+        return Err(format!(
+            "{route:?} PR 282 did not expose underpriced independent-victim PnL displacement: control={control:?}, attack={attack:?}, victim displacement={displaced_victim_pnl}, attacker profit={attacker_profit}"
+        ));
+    }
+    Ok(PendingEwmaTargetOverrideReproduction {
+        blocker: KnownBlocker::PendingEwmaTargetOverride,
+        route,
+        low_price: attack.low_price,
+        control_target: control.target,
+        attack_target: attack.target,
+        movement_fee: attack.movement_fee,
+        displaced_victim_pnl,
+        attacker_profit,
+        victim_withdrawn: attack.victim_withdrawn,
+        attacker_withdrawn: attack.attacker_withdrawn,
+    })
+}
+
+fn run_pending_ewma_target_world(
+    seed: [u8; 32],
+    route: TradeRoute,
+    with_wash: bool,
+) -> Result<PendingEwmaTargetWorld, String> {
+    const BASIS: u64 = 10_000_000;
+    const DIRECTIONAL_Q: i128 = 1_000 * POS_SCALE as i128;
+    const WASH_Q: i128 = 100 * POS_SCALE as i128;
+    const DIRECTIONAL_DEPOSIT: u128 = 20_000_000_000;
+    const WASH_DEPOSIT: u128 = 2_000_000_000;
+
+    let mut env = V16Svm::new(
+        seed,
+        MarketConfig {
+            initial_price: BASIS,
+            max_trading_fee_bps: 10_000,
+            max_price_move_bps_per_slot: 5_000,
+            max_accrual_dt_slots: 1,
+            min_funding_lifetime_slots: 1,
+            actor_deposits: [
+                DIRECTIONAL_DEPOSIT,
+                DIRECTIONAL_DEPOSIT,
+                WASH_DEPOSIT,
+                WASH_DEPOSIT,
+                super::v16_svm::EXIT_MAKER_DEPOSIT,
+            ],
+            actor_token_balances: [
+                25_000_000_000,
+                25_000_000_000,
+                3_000_000_000,
+                3_000_000_000,
+                super::v16_svm::EXIT_MAKER_TOKEN_BALANCE,
+            ],
+            ..MarketConfig::default()
+        },
+    );
+    env.configure_ewma_mark(0, 1, BASIS, 1, 0)
+        .map_err(|error| format!("{route:?} configure pending-target EWMA: {error}"))?;
+    env.trade_no_cpi(0, 1, 0, DIRECTIONAL_Q, BASIS, 0)
+        .map_err(|error| format!("{route:?} open independent directional OI: {error}"))?;
+
+    let observations = || {
+        vec![CrankObservationHint {
+            asset_index: 0,
+            oracle_accounts: 0,
+        }]
+    };
+    for slot in 2..=5 {
+        env.warp_to_slot(slot);
+        env.push_ewma_mark(0, slot, 1).map_err(|error| {
+            format!("{route:?} publish honest low mark at slot {slot}: {error}")
+        })?;
+        for actor in [0, 1] {
+            env.crank(actor, slot, observations()).map_err(|error| {
+                format!("{route:?} accrue directional actor {actor} at slot {slot}: {error}")
+            })?;
+        }
+    }
+    let low_price = env.primary_market_state().1.assets[0].effective_price;
+    if low_price >= BASIS / 5 {
+        return Err(format!(
+            "{route:?} honest bounded move did not reach a low mark: {low_price}"
+        ));
+    }
+
+    env.warp_to_slot(6);
+    for actor in [0, 1] {
+        env.crank(actor, 6, observations()).map_err(|error| {
+            format!("{route:?} advance directional actor {actor} before rebound: {error}")
+        })?;
+    }
+    let rebound_input = BASIS
+        .checked_mul(2)
+        .and_then(|value| value.checked_sub(low_price))
+        .ok_or("PR 282 rebound input overflow")?;
+    env.push_ewma_mark(0, 6, rebound_input)
+        .map_err(|error| format!("{route:?} publish honest pending rebound: {error}"))?;
+    let pending_target = env.primary_profile(0).mark_ewma_e6;
+    let pending_effective = env.primary_market_state().1.assets[0].effective_price;
+    if pending_target != BASIS || pending_effective != low_price {
+        return Err(format!(
+            "{route:?} honest rebound did not remain circuit-breaker pending: target={pending_target}, effective={pending_effective}, expected={BASIS}/{low_price}"
+        ));
+    }
+
+    env.warp_to_slot(7);
+    let insurance_before = env.primary_market_state().1.insurance;
+    if with_wash {
+        execute_trade_route(&mut env, route, 2, 3, 0, WASH_Q, 1, 0)
+            .map_err(|error| format!("{route:?} open target-override wash: {error}"))?;
+        execute_trade_route(&mut env, route, 2, 3, 0, -WASH_Q, low_price, 0)
+            .map_err(|error| format!("{route:?} close target-override wash: {error}"))?;
+    }
+    let movement_fee = env
+        .primary_market_state()
+        .1
+        .insurance
+        .checked_sub(insurance_before)
+        .ok_or("PR 282 movement fee decreased insurance")?;
+    let target = env.primary_profile(0).mark_ewma_e6;
+
+    let mut slot = 7;
+    loop {
+        for actor in [0, 1] {
+            env.crank(actor, slot, observations()).map_err(|error| {
+                format!("{route:?} converge actor {actor} at slot {slot}: {error}")
+            })?;
+        }
+        if env.primary_market_state().1.assets[0].effective_price == target {
+            break;
+        }
+        slot = slot
+            .checked_add(1)
+            .ok_or("PR 282 convergence slot overflow")?;
+        if slot >= 24 {
+            return Err(format!(
+                "{route:?} pending target did not converge by slot 23"
+            ));
+        }
+        env.warp_to_slot(slot);
+    }
+    env.trade_no_cpi(0, 1, 0, -DIRECTIONAL_Q, target, 0)
+        .map_err(|error| format!("{route:?} close independent directional OI: {error}"))?;
+    env.resolve_market()
+        .map_err(|error| format!("{route:?} resolve pending-target world: {error}"))?;
+    for actor in 0..4 {
+        env.close_resolved_primary(actor)
+            .map_err(|error| format!("{route:?} close resolved actor {actor}: {error}"))?;
+    }
+    for actor in 0..4 {
+        let _ = env.claim_resolved_payout_topup_primary(actor);
+    }
+    let victim_withdrawn = env.token_amount(env.actors[0].destination_token);
+    let attacker_withdrawn = [1, 2, 3]
+        .into_iter()
+        .map(|actor| u128::from(env.token_amount(env.actors[actor].destination_token)))
+        .sum();
+    Ok(PendingEwmaTargetWorld {
+        low_price,
+        target,
+        movement_fee,
+        victim_withdrawn,
+        attacker_withdrawn,
+        observed_token_supply: env.token_supply_observed(),
+    })
+}
+
 fn execute_trade_route(
     env: &mut V16Svm,
     route: TradeRoute,
@@ -5037,6 +5259,19 @@ pub fn rounded_funding_seed_strategy() -> impl Strategy<Value = [u8; 32]> {
 
 #[allow(dead_code)]
 pub fn pending_ewma_inheritance_strategy() -> impl Strategy<Value = ([u8; 32], TradeRoute)> {
+    (
+        any::<[u8; 32]>(),
+        prop::sample::select(vec![
+            TradeRoute::NoCpi,
+            TradeRoute::Cpi,
+            TradeRoute::BatchNoCpi,
+            TradeRoute::BatchCpi,
+        ]),
+    )
+}
+
+#[allow(dead_code)]
+pub fn pending_ewma_target_override_strategy() -> impl Strategy<Value = ([u8; 32], TradeRoute)> {
     (
         any::<[u8; 32]>(),
         prop::sample::select(vec![

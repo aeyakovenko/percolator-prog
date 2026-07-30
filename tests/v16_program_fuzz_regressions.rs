@@ -8,12 +8,13 @@ use support::{
         reproduce_cpi_backing_fee_siphon, reproduce_cpi_caller_fee_siphon,
         reproduce_cross_domain_b_settlement, reproduce_cross_domain_backing_double_spend,
         reproduce_forfeit_funding_erasure, reproduce_omitted_rescue_liquidation,
-        reproduce_pending_ewma_inheritance, reproduce_post_expiry_backing_fee,
-        reproduce_rebalance_funding_erasure, reproduce_reclaimable_ewma_fee,
-        reproduce_rounded_funding_omission, reproduce_trade_driven_liquidation_reward,
-        reproduce_trade_funding_erasure, reproduce_trade_retry_replay, run_scenario,
-        AssetGenerationConfigPath, AssetGenerationMarkPath, CompositeRoundingCase, KnownBlocker,
-        PostExpiryBackingCase, Scenario, TradeDrivenLiquidationMode, TradeRoute,
+        reproduce_pending_ewma_inheritance, reproduce_pending_ewma_target_override,
+        reproduce_post_expiry_backing_fee, reproduce_rebalance_funding_erasure,
+        reproduce_reclaimable_ewma_fee, reproduce_rounded_funding_omission,
+        reproduce_trade_driven_liquidation_reward, reproduce_trade_funding_erasure,
+        reproduce_trade_retry_replay, run_scenario, AssetGenerationConfigPath,
+        AssetGenerationMarkPath, CompositeRoundingCase, KnownBlocker, PostExpiryBackingCase,
+        Scenario, TradeDrivenLiquidationMode, TradeRoute,
     },
     open_lof_manifest::{missing_prs, quarantined_prs, validate_manifest},
 };
@@ -244,6 +245,29 @@ fn v16_program_pr260_pending_ewma_inheritance_extracts_on_every_route() {
 }
 
 #[test]
+fn v16_program_pr282_pending_ewma_target_override_extracts_on_every_route() {
+    for route in [
+        TradeRoute::NoCpi,
+        TradeRoute::Cpi,
+        TradeRoute::BatchNoCpi,
+        TradeRoute::BatchCpi,
+    ] {
+        let reproduction = reproduce_pending_ewma_target_override([0x82; 32], route)
+            .unwrap_or_else(|error| panic!("PR 282 {route:?} no longer reproduces: {error}"));
+        assert_eq!(
+            reproduction.blocker,
+            KnownBlocker::PendingEwmaTargetOverride
+        );
+        assert_eq!(reproduction.route, route);
+        assert!(reproduction.attack_target < reproduction.control_target);
+        assert!(reproduction.movement_fee < reproduction.displaced_victim_pnl);
+        assert!(reproduction.attacker_profit > 0);
+        assert!(reproduction.attacker_withdrawn > 24_000_000_000);
+        assert!(reproduction.victim_withdrawn < 20_000_000_000);
+    }
+}
+
+#[test]
 fn v16_program_pr225_reclaimed_ewma_fee_extracts_on_every_route() {
     for route in [
         TradeRoute::NoCpi,
@@ -434,14 +458,14 @@ fn v16_program_open_lof_manifest_is_complete_and_honest() {
     assert_eq!(
         quarantined_prs(),
         [
-            220, 223, 224, 225, 231, 253, 260, 267, 271, 272, 273, 275, 277, 280, 281, 329, 343,
-            367, 381
+            220, 223, 224, 225, 231, 253, 260, 267, 271, 272, 273, 275, 277, 280, 281, 282, 329,
+            343, 367, 381
         ]
     );
     let missing = missing_prs();
     assert_eq!(
         missing.len(),
-        80,
+        79,
         "update the explicit evidence state when an executable adapter lands"
     );
     assert!(!missing.contains(&220));
@@ -459,6 +483,7 @@ fn v16_program_open_lof_manifest_is_complete_and_honest() {
     assert!(!missing.contains(&277));
     assert!(!missing.contains(&280));
     assert!(!missing.contains(&281));
+    assert!(!missing.contains(&282));
     assert!(!missing.contains(&329));
     assert!(!missing.contains(&343));
     assert!(!missing.contains(&367));

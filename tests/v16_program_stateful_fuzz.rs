@@ -7,13 +7,14 @@ use support::fuzz_model::{
     cpi_caller_fee_strategy, cross_domain_b_settlement_seed_strategy,
     cross_domain_backing_seed_strategy, forfeit_funding_erasure_seed_strategy,
     omitted_rescue_seed_strategy, pending_ewma_inheritance_strategy,
-    post_expiry_backing_case_strategy, rebalance_funding_erasure_seed_strategy,
-    reclaimable_ewma_fee_strategy, reproduce_asset_generation_config_replay,
-    reproduce_asset_generation_mark_replay, reproduce_asset_generation_trade_replay,
-    reproduce_composite_oracle_rounding, reproduce_cpi_backing_fee_siphon,
-    reproduce_cpi_caller_fee_siphon, reproduce_cross_domain_b_settlement,
-    reproduce_cross_domain_backing_double_spend, reproduce_forfeit_funding_erasure,
-    reproduce_omitted_rescue_liquidation, reproduce_pending_ewma_inheritance,
+    pending_ewma_target_override_strategy, post_expiry_backing_case_strategy,
+    rebalance_funding_erasure_seed_strategy, reclaimable_ewma_fee_strategy,
+    reproduce_asset_generation_config_replay, reproduce_asset_generation_mark_replay,
+    reproduce_asset_generation_trade_replay, reproduce_composite_oracle_rounding,
+    reproduce_cpi_backing_fee_siphon, reproduce_cpi_caller_fee_siphon,
+    reproduce_cross_domain_b_settlement, reproduce_cross_domain_backing_double_spend,
+    reproduce_forfeit_funding_erasure, reproduce_omitted_rescue_liquidation,
+    reproduce_pending_ewma_inheritance, reproduce_pending_ewma_target_override,
     reproduce_post_expiry_backing_fee, reproduce_rebalance_funding_erasure,
     reproduce_reclaimable_ewma_fee, reproduce_rounded_funding_omission,
     reproduce_trade_driven_liquidation_reward, reproduce_trade_funding_erasure,
@@ -168,6 +169,20 @@ proptest! {
         prop_assert!(
             result.is_ok(),
             "PR 260 {:?} no longer reproduces for seed {:?}: {}",
+            route,
+            seed,
+            result.unwrap_err()
+        );
+    }
+
+    #[test]
+    fn v16_program_pr282_pending_ewma_target_override_fuzz(
+        (seed, route) in pending_ewma_target_override_strategy()
+    ) {
+        let result = reproduce_pending_ewma_target_override(seed, route);
+        prop_assert!(
+            result.is_ok(),
+            "PR 282 {:?} no longer reproduces for seed {:?}: {}",
             route,
             seed,
             result.unwrap_err()
