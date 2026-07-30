@@ -1048,6 +1048,21 @@ impl V16Svm {
         )
     }
 
+    pub fn update_maintenance_fee_policy(
+        &mut self,
+        cranker_share_bps: u16,
+    ) -> Result<TxSuccess, String> {
+        let authority = copy_keypair(&self.admin);
+        self.send_program(
+            ProgInstruction::UpdateMaintenanceFeePolicy { cranker_share_bps },
+            vec![
+                AccountMeta::new(authority.pubkey(), true),
+                AccountMeta::new(self.market, false),
+            ],
+            &[authority],
+        )
+    }
+
     pub fn retire_asset(&mut self, asset_index: u16, now_slot: u64) -> Result<TxSuccess, String> {
         let authority = copy_keypair(&self.admin);
         self.send_program(
@@ -1372,6 +1387,23 @@ impl V16Svm {
             vec![
                 AccountMeta::new(self.market, false),
                 AccountMeta::new(self.actors[actor_index].portfolio, false),
+            ],
+            &[],
+        )
+    }
+
+    pub fn sync_maintenance_fee_with_reward(
+        &mut self,
+        actor_index: usize,
+        cranker_index: usize,
+        now_slot: u64,
+    ) -> Result<TxSuccess, String> {
+        self.send_program(
+            ProgInstruction::SyncMaintenanceFee { now_slot },
+            vec![
+                AccountMeta::new(self.market, false),
+                AccountMeta::new(self.actors[actor_index].portfolio, false),
+                AccountMeta::new(self.actors[cranker_index].portfolio, false),
             ],
             &[],
         )

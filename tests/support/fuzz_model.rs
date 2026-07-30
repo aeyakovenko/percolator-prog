@@ -80,10 +80,11 @@ pub enum KnownBlocker {
     CrossMarginInsuranceDrain,
     CompositeOracleTimeSkew,
     UnstagedMarkTarget,
+    PendingMarkFeeReward,
 }
 
 impl KnownBlocker {
-    pub const COUNT: usize = 24;
+    pub const COUNT: usize = 25;
 
     pub const fn index(self) -> usize {
         match self {
@@ -111,6 +112,7 @@ impl KnownBlocker {
             Self::CrossMarginInsuranceDrain => 21,
             Self::CompositeOracleTimeSkew => 22,
             Self::UnstagedMarkTarget => 23,
+            Self::PendingMarkFeeReward => 24,
         }
     }
 }
@@ -420,6 +422,18 @@ pub struct TargetStagingReproduction {
     pub victim_capital_loss: u128,
     pub attacker_withdrawn: u64,
     pub attack_cu: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PendingMarkFeeRewardReproduction {
+    pub blocker: KnownBlocker,
+    pub control_reward: u64,
+    pub attack_reward: u64,
+    pub control_winner_payout: u64,
+    pub attack_winner_payout: u64,
+    pub victim_payout: u64,
+    pub diverted_value: u64,
+    pub extracted_reward: u64,
 }
 
 impl SubstitutionKind {
@@ -3621,6 +3635,193 @@ pub fn reproduce_unstaged_mark_target(
     })
 }
 
+pub fn reproduce_pending_mark_fee_reward(
+    mut seed: [u8; 32],
+) -> Result<PendingMarkFeeRewardReproduction, String> {
+    seed[0] ^= 0x56;
+    let control = run_pending_mark_fee_reward_world(seed, false)?;
+    let attack = run_pending_mark_fee_reward_world(seed, true)?;
+    let diverted_value = attack
+        .reward
+        .checked_sub(control.reward)
+        .ok_or("PR 356 fee-first ordering did not increase cranker reward")?;
+    let winner_loss = control
+        .winner_payout
+        .checked_sub(attack.winner_payout)
+        .ok_or("PR 356 fee-first ordering increased winner payout")?;
+    if diverted_value == 0
+        || diverted_value != winner_loss
+        || control.victim_payout != attack.victim_payout
+        || control.reward + control.victim_payout + control.winner_payout
+            != attack.reward + attack.victim_payout + attack.winner_payout
+    {
+        return Err(format!(
+            "PR 356 fee ordering no longer diverts terminal value: control={control:?}, \
+             attack={attack:?}"
+        ));
+    }
+    Ok(PendingMarkFeeRewardReproduction {
+        blocker: KnownBlocker::PendingMarkFeeReward,
+        control_reward: control.reward,
+        attack_reward: attack.reward,
+        control_winner_payout: control.winner_payout,
+        attack_winner_payout: attack.winner_payout,
+        victim_payout: attack.victim_payout,
+        diverted_value,
+        extracted_reward: attack.extracted_reward,
+    })
+}
+
+#[derive(Clone, Copy, Debug)]
+struct PendingMarkFeeWorld {
+    reward: u64,
+    victim_payout: u64,
+    winner_payout: u64,
+    extracted_reward: u64,
+}
+
+fn run_pending_mark_fee_reward_world(
+    seed: [u8; 32],
+    fee_first: bool,
+) -> Result<PendingMarkFeeWorld, String> {
+    const OPEN_PRICE: u64 = 100;
+    const ADVERSE_PRICE: u64 = 50;
+    const DEPOSIT: u128 = 100_000;
+    const SIZE_Q: i128 = 1_000 * POS_SCALE as i128;
+    const FEE_PER_SLOT: u128 = 12_500;
+
+    let mut env = V16Svm::new(
+        seed,
+        MarketConfig {
+            initial_price: OPEN_PRICE,
+            maintenance_margin_bps: 10_000,
+            initial_margin_bps: 10_000,
+            max_price_move_bps_per_slot: 10_000,
+            max_accrual_dt_slots: 1,
+            min_funding_lifetime_slots: 1,
+            maintenance_fee_per_slot: FEE_PER_SLOT,
+            actor_deposits: [DEPOSIT, DEPOSIT, 1, 1, 1],
+            ..MarketConfig::default()
+        },
+    );
+    let supply_before = env.token_supply_observed();
+    env.configure_auth_mark(false, 0, 1, OPEN_PRICE)
+        .map_err(|error| format!("PR 356 configure AuthMark: {error}"))?;
+    env.update_maintenance_fee_policy(10_000)
+        .map_err(|error| format!("PR 356 configure maintenance reward: {error}"))?;
+    env.trade_no_cpi(0, 1, 0, SIZE_Q, OPEN_PRICE, 0)
+        .map_err(|error| format!("PR 356 open victim/winner positions: {error}"))?;
+
+    env.warp_to_slot(9);
+    env.push_auth_mark(0, 9, OPEN_PRICE)
+        .map_err(|error| format!("PR 356 advance authenticated fee clock: {error}"))?;
+    for _ in 0..16 {
+        let _ = env.crank(
+            2,
+            9,
+            vec![CrankObservationHint {
+                asset_index: 0,
+                oracle_accounts: 0,
+            }],
+        );
+        if env.primary_market_state().1.assets[0].slot_last == 9 {
+            break;
+        }
+    }
+    let victim_before = env.primary_portfolio(0);
+    let (_, current_group) = env.primary_market_state();
+    if victim_before.last_fee_slot.get() != 1 || current_group.assets[0].slot_last != 9 {
+        return Err(format!(
+            "PR 356 setup failed to isolate fee debt: fee_slot={}, asset_slot={}",
+            victim_before.last_fee_slot.get(),
+            current_group.assets[0].slot_last
+        ));
+    }
+
+    env.warp_to_slot(10);
+    env.push_auth_mark(0, 10, ADVERSE_PRICE)
+        .map_err(|error| format!("PR 356 publish adverse mark: {error}"))?;
+    let (pending_profile, pending_group) = env.primary_market_state();
+    if pending_profile.oracle_target_price_e6 != ADVERSE_PRICE
+        || pending_group.assets[0].raw_oracle_target_price != OPEN_PRICE
+        || pending_group.assets[0].effective_price != OPEN_PRICE
+    {
+        return Err("PR 356 fixture did not create wrapper/engine target lag".into());
+    }
+
+    if fee_first {
+        env.sync_maintenance_fee_with_reward(0, 2, 10)
+            .map_err(|error| format!("PR 356 vulnerable early fee sync rejected: {error}"))?;
+    }
+    for _ in 0..16 {
+        let _ = env.crank(
+            0,
+            10,
+            vec![CrankObservationHint {
+                asset_index: 0,
+                oracle_accounts: 0,
+            }],
+        );
+        if env.primary_market_state().1.assets[0].effective_price == ADVERSE_PRICE {
+            break;
+        }
+    }
+    if env.primary_market_state().1.assets[0].effective_price != ADVERSE_PRICE {
+        return Err("PR 356 public crank did not commit the adverse mark".into());
+    }
+    if !fee_first {
+        env.sync_maintenance_fee_with_reward(0, 2, 10)
+            .map_err(|error| format!("PR 356 mark-first fee sync: {error}"))?;
+    }
+
+    let cranker_capital = env.primary_portfolio(2).capital.get();
+    let reward = cranker_capital
+        .checked_sub(1)
+        .ok_or("PR 356 cranker capital fell below its fixture deposit")?;
+    if reward == 0 {
+        return Err("PR 356 maintenance sync paid no public reward".into());
+    }
+    env.withdraw_primary(2, cranker_capital)
+        .map_err(|error| format!("PR 356 withdraw cranker reward: {error}"))?;
+    let cranker_withdrawn = env.token_amount(env.actors[2].destination_token);
+    let extracted_reward = cranker_withdrawn
+        .checked_sub(1)
+        .ok_or("PR 356 cranker withdrawal lost fixture deposit")?;
+    if u128::from(extracted_reward) != reward {
+        return Err(format!(
+            "PR 356 cranker reward/SPL mismatch: {reward}/{extracted_reward}"
+        ));
+    }
+
+    for _ in 0..24 {
+        for actor in [0, 1] {
+            let _ = env.crank(
+                actor,
+                10,
+                vec![CrankObservationHint {
+                    asset_index: 0,
+                    oracle_accounts: 0,
+                }],
+            );
+        }
+    }
+    env.resolve_market()
+        .map_err(|error| format!("PR 356 resolve terminal world: {error}"))?;
+    let (victim_payout, _) = drain_resolved_actor(&mut env, 0)?;
+    let (winner_payout, _) = drain_resolved_actor(&mut env, 1)?;
+    if env.token_supply_observed() != supply_before {
+        return Err("PR 356 terminal payout changed SPL supply".into());
+    }
+    Ok(PendingMarkFeeWorld {
+        reward: u64::try_from(reward).map_err(|_| "PR 356 reward exceeds SPL range")?,
+        victim_payout: u64::try_from(victim_payout)
+            .map_err(|_| "PR 356 victim payout exceeds SPL range")?,
+        winner_payout: u64::try_from(winner_payout)
+            .map_err(|_| "PR 356 winner payout exceeds SPL range")?,
+        extracted_reward,
+    })
+}
+
 pub fn reproduce_rounded_funding_omission(
     mut seed: [u8; 32],
 ) -> Result<RoundedFundingOmissionReproduction, String> {
@@ -6465,6 +6666,11 @@ pub fn target_staging_strategy() -> impl Strategy<Value = ([u8; 32], TargetStagi
             TargetStagingCase::EwmaBatchTrade,
         ]),
     )
+}
+
+#[allow(dead_code)]
+pub fn pending_mark_fee_reward_seed_strategy() -> impl Strategy<Value = [u8; 32]> {
+    any::<[u8; 32]>()
 }
 
 #[allow(dead_code)]
