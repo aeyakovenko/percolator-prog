@@ -78,10 +78,11 @@ pub enum KnownBlocker {
     PendingEwmaTargetOverride,
     TerminalDustPayoutErasure,
     CrossMarginInsuranceDrain,
+    CompositeOracleTimeSkew,
 }
 
 impl KnownBlocker {
-    pub const COUNT: usize = 22;
+    pub const COUNT: usize = 23;
 
     pub const fn index(self) -> usize {
         match self {
@@ -107,6 +108,7 @@ impl KnownBlocker {
             Self::PendingEwmaTargetOverride => 19,
             Self::TerminalDustPayoutErasure => 20,
             Self::CrossMarginInsuranceDrain => 21,
+            Self::CompositeOracleTimeSkew => 22,
         }
     }
 }
@@ -383,6 +385,19 @@ pub struct CrossMarginInsuranceDrainReproduction {
     pub loser_close_calls: u16,
     pub counterparty_close_calls: u16,
     pub winner_close_calls: u16,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CompositeOracleTimeSkewReproduction {
+    pub blocker: KnownBlocker,
+    pub coherent_price: u64,
+    pub skewed_target: u64,
+    pub skewed_mark: u64,
+    pub victim_capital_loss: u128,
+    pub oi_reduction_q: u128,
+    pub cranker_reward: u128,
+    pub extracted_tokens: u64,
+    pub max_crank_cu: u64,
 }
 
 impl SubstitutionKind {
@@ -3169,6 +3184,188 @@ pub fn reproduce_composite_oracle_rounding(
         oi_reduction_q,
         cranker_reward,
         extracted_tokens,
+    })
+}
+
+pub fn reproduce_composite_oracle_time_skew(
+    mut seed: [u8; 32],
+) -> Result<CompositeOracleTimeSkewReproduction, String> {
+    seed[0] ^= 0x31;
+    const COHERENT_PRICE: u64 = 1_500_000;
+    const INITIAL_A: i64 = 3_000_000;
+    const INITIAL_B: i64 = 2_000_000;
+    const FRESH_A: i64 = 6_000_000;
+    const FRESH_B: i64 = 4_000_000;
+
+    let coherent_initial = i128::from(INITIAL_A)
+        .checked_mul(1_000_000)
+        .and_then(|value| value.checked_div(i128::from(INITIAL_B)))
+        .ok_or("PR 331 initial cross-rate arithmetic failed")?;
+    let coherent_fresh = i128::from(FRESH_A)
+        .checked_mul(1_000_000)
+        .and_then(|value| value.checked_div(i128::from(FRESH_B)))
+        .ok_or("PR 331 fresh cross-rate arithmetic failed")?;
+    if coherent_initial != i128::from(COHERENT_PRICE)
+        || coherent_fresh != i128::from(COHERENT_PRICE)
+    {
+        return Err("PR 331 fixture does not preserve its coherent cross-rate".into());
+    }
+
+    let mut env = V16Svm::new(
+        seed,
+        MarketConfig {
+            initial_price: COHERENT_PRICE,
+            h_max: 6_480_000,
+            min_nonzero_mm_req: 599,
+            min_nonzero_im_req: 600,
+            maintenance_margin_bps: 500,
+            initial_margin_bps: 500,
+            liquidation_fee_bps: 5,
+            liquidation_fee_cap: percolator::MAX_PROTOCOL_FEE_ABS,
+            max_price_move_bps_per_slot: 24,
+            max_accrual_dt_slots: 20,
+            max_abs_funding_e9_per_slot: 1_000,
+            min_funding_lifetime_slots: 10_000_000,
+            actor_deposits: [
+                540_000,
+                540_000,
+                1_000,
+                super::v16_svm::USER_DEPOSIT,
+                super::v16_svm::EXIT_MAKER_DEPOSIT,
+            ],
+            ..MarketConfig::default()
+        },
+    );
+    env.update_liquidation_fee_policy(5_000)
+        .map_err(|error| format!("PR 331 configure cranker share: {error}"))?;
+    env.set_clock(1, 100);
+    let feeds = [[0xf1u8; 32], [0xf2u8; 32], [0u8; 32]];
+    let initial_a = env.set_pyth_price(&feeds[0], INITIAL_A, -6, 0, 100);
+    let initial_b = env.set_pyth_price(&feeds[1], INITIAL_B, -6, 0, 100);
+    env.configure_hybrid_oracle(
+        0,
+        1,
+        100,
+        ORACLE_LEG_FLAG_DIVIDE_LEG2,
+        feeds,
+        &[initial_a, initial_b],
+        1_000,
+        0,
+    )
+    .map_err(|error| format!("PR 331 configure coherent cross-rate: {error}"))?;
+    if env.primary_market_state().0.oracle_target_price_e6 != COHERENT_PRICE {
+        return Err(format!(
+            "PR 331 initial target is {}, expected {COHERENT_PRICE}",
+            env.primary_market_state().0.oracle_target_price_e6
+        ));
+    }
+
+    let size_q = (POS_SCALE as i128)
+        .checked_mul(35)
+        .and_then(|value| value.checked_div(100))
+        .ok_or("PR 331 victim size overflow")?;
+    env.trade_no_cpi(1, 0, 0, size_q, COHERENT_PRICE, 0)
+        .map_err(|error| format!("PR 331 open independent victim short: {error}"))?;
+    if observed_positions(&env.primary_portfolio(0))?[0] >= 0 {
+        return Err("PR 331 fixture did not put the victim on the short side".into());
+    }
+    let victim_capital_before = env.primary_portfolio(0).capital.get();
+    let oi_before = env.primary_market_state().1.assets[0].oi_eff_short_q;
+    let cranker_capital_before = env.primary_portfolio(2).capital.get();
+    let supply_before = env.token_supply_observed();
+
+    let fresh_a = env.set_pyth_price(&feeds[0], FRESH_A, -6, 0, 101);
+    let skewed = [fresh_a, initial_b];
+    let observations = || {
+        vec![CrankObservationHint {
+            asset_index: 0,
+            oracle_accounts: 2,
+        }]
+    };
+    let mut slot = 1u64;
+    let mut max_crank_cu = 0u64;
+    for _ in 0..12 {
+        slot = slot
+            .checked_add(20)
+            .ok_or("PR 331 catch-up slot overflow")?;
+        env.set_clock(slot, 101);
+        match env.crank_with_oracles(2, slot, observations(), &skewed) {
+            Ok(success) => max_crank_cu = max_crank_cu.max(success.compute_units),
+            Err(error) => {
+                return Err(format!(
+                    "PR 331 skewed composite no longer advances at slot {slot}: {error}"
+                ))
+            }
+        }
+    }
+    let refresh = env
+        .crank_with_oracles(0, slot, observations(), &skewed)
+        .map_err(|error| format!("PR 331 refresh false-price victim: {error}"))?;
+    max_crank_cu = max_crank_cu.max(refresh.compute_units);
+    let victim_cert = env
+        .primary_portfolio(0)
+        .health_cert
+        .try_to_runtime()
+        .map_err(|error| format!("PR 331 decode victim certificate: {error:?}"))?;
+    if victim_cert.certified_liq_deficit == 0 {
+        return Err("PR 331 skewed cross-rate no longer certifies liquidation".into());
+    }
+
+    let liquidation = env
+        .crank_with_reward(2, 0, slot, observations(), &skewed)
+        .map_err(|error| format!("PR 331 false-price liquidation no longer lands: {error}"))?;
+    max_crank_cu = max_crank_cu.max(liquidation.compute_units);
+    let (wrapper_after, group_after) = env.primary_market_state();
+    let victim_capital_after = env.primary_portfolio(0).capital.get();
+    let oi_after = group_after.assets[0].oi_eff_short_q;
+    let cranker_capital_after = env.primary_portfolio(2).capital.get();
+    let victim_capital_loss = victim_capital_before
+        .checked_sub(victim_capital_after)
+        .ok_or("PR 331 false liquidation increased victim capital")?;
+    let oi_reduction_q = oi_before
+        .checked_sub(oi_after)
+        .ok_or("PR 331 false liquidation increased short OI")?;
+    let cranker_reward = cranker_capital_after
+        .checked_sub(cranker_capital_before)
+        .ok_or("PR 331 false liquidation decreased cranker capital")?;
+    if victim_capital_loss == 0 || oi_reduction_q == 0 || cranker_reward == 0 {
+        return Err(format!(
+            "PR 331 skewed reports were not economically committed: victim loss \
+             {victim_capital_loss}, OI reduction {oi_reduction_q}, reward {cranker_reward}"
+        ));
+    }
+    env.withdraw_primary(2, cranker_reward)
+        .map_err(|error| format!("PR 331 withdraw liquidation reward: {error}"))?;
+    let extracted_tokens = env.token_amount(env.actors[2].destination_token);
+    if u128::from(extracted_tokens) != cranker_reward {
+        return Err(format!(
+            "PR 331 reward/SPL mismatch: {cranker_reward} vs {extracted_tokens}"
+        ));
+    }
+    if wrapper_after.oracle_target_price_e6 <= COHERENT_PRICE
+        || group_after.assets[0].effective_price <= COHERENT_PRICE
+        || env.token_supply_observed() != supply_before
+        || max_crank_cu >= TX_CU_LIMIT
+    {
+        return Err(format!(
+            "PR 331 witness did not preserve its public value/CU conditions: target={}, mark={}, \
+             supply={}/{}, max_cu={max_crank_cu}",
+            wrapper_after.oracle_target_price_e6,
+            group_after.assets[0].effective_price,
+            env.token_supply_observed(),
+            supply_before
+        ));
+    }
+    Ok(CompositeOracleTimeSkewReproduction {
+        blocker: KnownBlocker::CompositeOracleTimeSkew,
+        coherent_price: COHERENT_PRICE,
+        skewed_target: wrapper_after.oracle_target_price_e6,
+        skewed_mark: group_after.assets[0].effective_price,
+        victim_capital_loss,
+        oi_reduction_q,
+        cranker_reward,
+        extracted_tokens,
+        max_crank_cu,
     })
 }
 
@@ -5999,6 +6196,11 @@ pub fn composite_rounding_strategy() -> impl Strategy<Value = ([u8; 32], Composi
             CompositeRoundingCase::Pr381MicroMove,
         ]),
     )
+}
+
+#[allow(dead_code)]
+pub fn composite_time_skew_seed_strategy() -> impl Strategy<Value = [u8; 32]> {
+    any::<[u8; 32]>()
 }
 
 #[allow(dead_code)]

@@ -5,17 +5,17 @@ use support::{
     fuzz_model::{
         reproduce_asset_generation_config_replay, reproduce_asset_generation_mark_replay,
         reproduce_asset_generation_trade_replay, reproduce_composite_oracle_rounding,
-        reproduce_cpi_backing_fee_siphon, reproduce_cpi_caller_fee_siphon,
-        reproduce_cross_domain_b_settlement, reproduce_cross_domain_backing_double_spend,
-        reproduce_cross_margin_insurance_drain, reproduce_forfeit_funding_erasure,
-        reproduce_omitted_rescue_liquidation, reproduce_pending_ewma_inheritance,
-        reproduce_pending_ewma_target_override, reproduce_post_expiry_backing_fee,
-        reproduce_rebalance_funding_erasure, reproduce_reclaimable_ewma_fee,
-        reproduce_rounded_funding_omission, reproduce_terminal_dust_payout_erasure,
-        reproduce_trade_driven_liquidation_reward, reproduce_trade_funding_erasure,
-        reproduce_trade_retry_replay, run_scenario, AssetGenerationConfigPath,
-        AssetGenerationMarkPath, CompositeRoundingCase, KnownBlocker, PostExpiryBackingCase,
-        Scenario, TradeDrivenLiquidationMode, TradeRoute,
+        reproduce_composite_oracle_time_skew, reproduce_cpi_backing_fee_siphon,
+        reproduce_cpi_caller_fee_siphon, reproduce_cross_domain_b_settlement,
+        reproduce_cross_domain_backing_double_spend, reproduce_cross_margin_insurance_drain,
+        reproduce_forfeit_funding_erasure, reproduce_omitted_rescue_liquidation,
+        reproduce_pending_ewma_inheritance, reproduce_pending_ewma_target_override,
+        reproduce_post_expiry_backing_fee, reproduce_rebalance_funding_erasure,
+        reproduce_reclaimable_ewma_fee, reproduce_rounded_funding_omission,
+        reproduce_terminal_dust_payout_erasure, reproduce_trade_driven_liquidation_reward,
+        reproduce_trade_funding_erasure, reproduce_trade_retry_replay, run_scenario,
+        AssetGenerationConfigPath, AssetGenerationMarkPath, CompositeRoundingCase, KnownBlocker,
+        PostExpiryBackingCase, Scenario, TradeDrivenLiquidationMode, TradeRoute,
     },
     open_lof_manifest::{missing_prs, quarantined_prs, validate_manifest},
 };
@@ -314,6 +314,24 @@ fn v16_program_pr290_cross_margin_debt_drains_unrelated_insurance() {
 }
 
 #[test]
+fn v16_program_pr331_temporally_skewed_composite_liquidates_at_false_price() {
+    let reproduction = reproduce_composite_oracle_time_skew([0x31; 32])
+        .unwrap_or_else(|error| panic!("PR 331 no longer reproduces: {error}"));
+    assert_eq!(reproduction.blocker, KnownBlocker::CompositeOracleTimeSkew);
+    assert_eq!(reproduction.coherent_price, 1_500_000);
+    assert!(reproduction.skewed_target > reproduction.coherent_price);
+    assert!(reproduction.skewed_mark > reproduction.coherent_price);
+    assert!(reproduction.victim_capital_loss > 0);
+    assert!(reproduction.oi_reduction_q > 0);
+    assert!(reproduction.cranker_reward > 0);
+    assert_eq!(
+        u128::from(reproduction.extracted_tokens),
+        reproduction.cranker_reward
+    );
+    assert!(reproduction.max_crank_cu < support::v16_svm::TX_CU_LIMIT);
+}
+
+#[test]
 fn v16_program_pr225_reclaimed_ewma_fee_extracts_on_every_route() {
     for route in [
         TradeRoute::NoCpi,
@@ -505,13 +523,13 @@ fn v16_program_open_lof_manifest_is_complete_and_honest() {
         quarantined_prs(),
         [
             220, 223, 224, 225, 231, 253, 260, 267, 271, 272, 273, 275, 277, 280, 281, 282, 283,
-            290, 329, 343, 367, 381
+            290, 329, 331, 343, 367, 381
         ]
     );
     let missing = missing_prs();
     assert_eq!(
         missing.len(),
-        77,
+        76,
         "update the explicit evidence state when an executable adapter lands"
     );
     assert!(!missing.contains(&220));
@@ -533,6 +551,7 @@ fn v16_program_open_lof_manifest_is_complete_and_honest() {
     assert!(!missing.contains(&283));
     assert!(!missing.contains(&290));
     assert!(!missing.contains(&329));
+    assert!(!missing.contains(&331));
     assert!(!missing.contains(&343));
     assert!(!missing.contains(&367));
     assert!(!missing.contains(&381));
