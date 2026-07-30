@@ -3,18 +3,20 @@ mod support;
 use proptest::prelude::*;
 use support::fuzz_model::{
     asset_generation_replay_strategy, composite_rounding_strategy, cpi_backing_fee_seed_strategy,
-    cpi_caller_fee_strategy, forfeit_funding_erasure_seed_strategy, omitted_rescue_seed_strategy,
+    cpi_caller_fee_strategy, cross_domain_backing_seed_strategy,
+    forfeit_funding_erasure_seed_strategy, omitted_rescue_seed_strategy,
     pending_ewma_inheritance_strategy, post_expiry_backing_case_strategy,
     rebalance_funding_erasure_seed_strategy, reclaimable_ewma_fee_strategy,
     reproduce_asset_generation_trade_replay, reproduce_composite_oracle_rounding,
     reproduce_cpi_backing_fee_siphon, reproduce_cpi_caller_fee_siphon,
-    reproduce_forfeit_funding_erasure, reproduce_omitted_rescue_liquidation,
-    reproduce_pending_ewma_inheritance, reproduce_post_expiry_backing_fee,
-    reproduce_rebalance_funding_erasure, reproduce_reclaimable_ewma_fee,
-    reproduce_rounded_funding_omission, reproduce_trade_driven_liquidation_reward,
-    reproduce_trade_funding_erasure, reproduce_trade_retry_replay, rounded_funding_seed_strategy,
-    run_scenario, scenario_strategy, trade_driven_liquidation_reward_strategy,
-    trade_funding_erasure_strategy, trade_retry_replay_strategy,
+    reproduce_cross_domain_backing_double_spend, reproduce_forfeit_funding_erasure,
+    reproduce_omitted_rescue_liquidation, reproduce_pending_ewma_inheritance,
+    reproduce_post_expiry_backing_fee, reproduce_rebalance_funding_erasure,
+    reproduce_reclaimable_ewma_fee, reproduce_rounded_funding_omission,
+    reproduce_trade_driven_liquidation_reward, reproduce_trade_funding_erasure,
+    reproduce_trade_retry_replay, rounded_funding_seed_strategy, run_scenario, scenario_strategy,
+    trade_driven_liquidation_reward_strategy, trade_funding_erasure_strategy,
+    trade_retry_replay_strategy,
 };
 
 fn env_usize(name: &str, default: usize) -> usize {
@@ -233,6 +235,19 @@ proptest! {
             "PR 280 {:?} {:?} no longer reproduces for seed {:?}: {}",
             mode,
             route,
+            seed,
+            result.unwrap_err()
+        );
+    }
+
+    #[test]
+    fn v16_program_pr267_cross_domain_backing_double_spend_fuzz(
+        seed in cross_domain_backing_seed_strategy()
+    ) {
+        let result = reproduce_cross_domain_backing_double_spend(seed);
+        prop_assert!(
+            result.is_ok(),
+            "PR 267 no longer reproduces for seed {:?}: {}",
             seed,
             result.unwrap_err()
         );

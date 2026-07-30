@@ -5,13 +5,13 @@ use support::{
     fuzz_model::{
         reproduce_asset_generation_trade_replay, reproduce_composite_oracle_rounding,
         reproduce_cpi_backing_fee_siphon, reproduce_cpi_caller_fee_siphon,
-        reproduce_forfeit_funding_erasure, reproduce_omitted_rescue_liquidation,
-        reproduce_pending_ewma_inheritance, reproduce_post_expiry_backing_fee,
-        reproduce_rebalance_funding_erasure, reproduce_reclaimable_ewma_fee,
-        reproduce_rounded_funding_omission, reproduce_trade_driven_liquidation_reward,
-        reproduce_trade_funding_erasure, reproduce_trade_retry_replay, run_scenario,
-        CompositeRoundingCase, KnownBlocker, PostExpiryBackingCase, Scenario,
-        TradeDrivenLiquidationMode, TradeRoute,
+        reproduce_cross_domain_backing_double_spend, reproduce_forfeit_funding_erasure,
+        reproduce_omitted_rescue_liquidation, reproduce_pending_ewma_inheritance,
+        reproduce_post_expiry_backing_fee, reproduce_rebalance_funding_erasure,
+        reproduce_reclaimable_ewma_fee, reproduce_rounded_funding_omission,
+        reproduce_trade_driven_liquidation_reward, reproduce_trade_funding_erasure,
+        reproduce_trade_retry_replay, run_scenario, CompositeRoundingCase, KnownBlocker,
+        PostExpiryBackingCase, Scenario, TradeDrivenLiquidationMode, TradeRoute,
     },
     open_lof_manifest::{missing_prs, quarantined_prs, validate_manifest},
 };
@@ -337,16 +337,40 @@ fn v16_program_pr280_trade_driven_liquidation_reward_is_extractable() {
 }
 
 #[test]
+fn v16_program_pr267_cross_domain_backing_is_spent_twice() {
+    let reproduction = reproduce_cross_domain_backing_double_spend([0x67; 32])
+        .unwrap_or_else(|error| panic!("PR 267 no longer reproduces: {error}"));
+    assert_eq!(
+        reproduction.blocker,
+        KnownBlocker::CrossDomainBackingDoubleSpend
+    );
+    assert_eq!(
+        reproduction.unfunded_claim_before_num,
+        100 * percolator::BOUND_SCALE
+    );
+    assert_eq!(
+        reproduction.funded_claim_before_num,
+        100 * percolator::BOUND_SCALE
+    );
+    assert_eq!(
+        reproduction.funded_backing_consumed_num,
+        200 * percolator::BOUND_SCALE
+    );
+    assert_eq!(reproduction.winner_capital_gain, 200);
+    assert_eq!(reproduction.extracted_tokens, 1_200);
+}
+
+#[test]
 fn v16_program_open_lof_manifest_is_complete_and_honest() {
     validate_manifest().expect("open LoF manifest structure");
     assert_eq!(
         quarantined_prs(),
-        [220, 223, 224, 225, 231, 253, 260, 271, 272, 273, 280, 329, 343, 367, 381]
+        [220, 223, 224, 225, 231, 253, 260, 267, 271, 272, 273, 280, 329, 343, 367, 381]
     );
     let missing = missing_prs();
     assert_eq!(
         missing.len(),
-        84,
+        83,
         "update the explicit evidence state when an executable adapter lands"
     );
     assert!(!missing.contains(&220));
@@ -356,6 +380,7 @@ fn v16_program_open_lof_manifest_is_complete_and_honest() {
     assert!(!missing.contains(&231));
     assert!(!missing.contains(&253));
     assert!(!missing.contains(&260));
+    assert!(!missing.contains(&267));
     assert!(!missing.contains(&271));
     assert!(!missing.contains(&272));
     assert!(!missing.contains(&273));
