@@ -57,10 +57,13 @@ pub enum KnownBlocker {
     OmittedRescueAccrualLiquidation,
     PostExpiryBackingFee,
     TradeRetryReplay,
+    AssetGenerationTradeReplay,
+    CpiCallerFeeSiphon,
+    CpiBackingFeeSiphon,
 }
 
 impl KnownBlocker {
-    pub const COUNT: usize = 4;
+    pub const COUNT: usize = 7;
 
     pub const fn index(self) -> usize {
         match self {
@@ -68,6 +71,9 @@ impl KnownBlocker {
             Self::OmittedRescueAccrualLiquidation => 1,
             Self::PostExpiryBackingFee => 2,
             Self::TradeRetryReplay => 3,
+            Self::AssetGenerationTradeReplay => 4,
+            Self::CpiCallerFeeSiphon => 5,
+            Self::CpiBackingFeeSiphon => 6,
         }
     }
 }
@@ -107,6 +113,36 @@ pub struct TradeRetryReplayReproduction {
     pub attacker_extra_payout: u64,
     pub control_total_payout: u128,
     pub replay_total_payout: u128,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AssetGenerationReplayReproduction {
+    pub blocker: KnownBlocker,
+    pub route: TradeRoute,
+    pub old_market_id: u64,
+    pub new_market_id: u64,
+    pub victim_loss: u64,
+    pub attacker_payout: u64,
+    pub total_payout: u128,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CpiCallerFeeReproduction {
+    pub blocker: KnownBlocker,
+    pub route: TradeRoute,
+    pub attacker_profit: u64,
+    pub lp_loss: u64,
+    pub withdrawn_insurance: u128,
+    pub total_payout: u128,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CpiBackingFeeReproduction {
+    pub blocker: KnownBlocker,
+    pub lp_capital_loss: u128,
+    pub provider_earnings: u128,
+    pub extracted_tokens: u64,
+    pub attacker_capital_delta: i128,
 }
 
 impl SubstitutionKind {
@@ -2009,6 +2045,431 @@ pub fn reproduce_trade_retry_replay(
     })
 }
 
+pub fn reproduce_asset_generation_trade_replay(
+    mut seed: [u8; 32],
+    route: TradeRoute,
+) -> Result<AssetGenerationReplayReproduction, String> {
+    seed[0] ^= 0x31;
+    let control = run_asset_generation_trade_world(seed, route, false)?;
+    let replay = run_asset_generation_trade_world(seed, route, true)?;
+    if control.2 != replay.2 || control.3 != replay.3 {
+        return Err(format!(
+            "{route:?} lifecycle controls used different generations: control {:?}, replay {:?}",
+            (control.2, control.3),
+            (replay.2, replay.3)
+        ));
+    }
+    let victim_loss = control
+        .0
+        .checked_sub(replay.0)
+        .ok_or("asset-generation replay increased victim payout")?;
+    let attacker_gain = replay
+        .1
+        .checked_sub(control.1)
+        .ok_or("asset-generation replay decreased attacker payout")?;
+    if victim_loss == 0 || victim_loss != attacker_gain {
+        return Err(format!(
+            "{route:?} stale generation did not transfer extractable value: victim {}/{}; attacker {}/{}",
+            control.0, replay.0, control.1, replay.1
+        ));
+    }
+    let total_payout = u128::from(replay.0) + u128::from(replay.1);
+    if total_payout != u128::from(control.0) + u128::from(control.1) {
+        return Err(format!(
+            "{route:?} stale-generation replay changed total payout"
+        ));
+    }
+    Ok(AssetGenerationReplayReproduction {
+        blocker: KnownBlocker::AssetGenerationTradeReplay,
+        route,
+        old_market_id: replay.2,
+        new_market_id: replay.3,
+        victim_loss,
+        attacker_payout: replay.1,
+        total_payout,
+    })
+}
+
+pub fn reproduce_cpi_caller_fee_siphon(
+    mut seed: [u8; 32],
+    route: TradeRoute,
+) -> Result<CpiCallerFeeReproduction, String> {
+    if !matches!(route, TradeRoute::Cpi | TradeRoute::BatchCpi) {
+        return Err(format!("{route:?} is not an unsigned-LP CPI route"));
+    }
+    seed[0] ^= 0x24;
+    const DEPOSIT: u128 = 1_000_000;
+    const ASSET: u16 = 1;
+    const PRICE: u64 = 100;
+    const SIZE_Q: i128 = 100 * POS_SCALE as i128;
+    const CALLER_FEE_BPS: u64 = 10_000;
+
+    let mut env = V16Svm::new(
+        seed,
+        MarketConfig {
+            actor_deposits: [
+                DEPOSIT,
+                DEPOSIT,
+                super::v16_svm::USER_DEPOSIT,
+                super::v16_svm::USER_DEPOSIT,
+                super::v16_svm::EXIT_MAKER_DEPOSIT,
+            ],
+            ..MarketConfig::default()
+        },
+    );
+    env.update_market_init_fee_policy(1)
+        .map_err(|error| format!("{route:?} configure permissionless init fee: {error}"))?;
+    env.warp_to_slot(2);
+    env.retire_asset(ASSET, 2)
+        .map_err(|error| format!("{route:?} retire asset before attacker creation: {error}"))?;
+    env.warp_to_slot(3);
+    env.activate_permissionless_asset_for_actor(0, ASSET, 3, PRICE, 0, 1)
+        .map_err(|error| format!("{route:?} attacker asset activation: {error}"))?;
+
+    for size_q in [SIZE_Q, -SIZE_Q] {
+        match route {
+            TradeRoute::Cpi => env
+                .trade_cpi(0, 1, ASSET, size_q, CALLER_FEE_BPS, 0)
+                .map_err(|error| format!("single CPI caller-fee leg {size_q}: {error}"))?,
+            TradeRoute::BatchCpi => env
+                .batch_trade_cpi(
+                    0,
+                    1,
+                    vec![BatchTradeCpiLeg {
+                        asset_index: ASSET,
+                        size_q,
+                        fee_bps: CALLER_FEE_BPS,
+                        limit_price: 0,
+                    }],
+                )
+                .map_err(|error| format!("batch CPI caller-fee leg {size_q}: {error}"))?,
+            _ => unreachable!(),
+        };
+    }
+    let attacker_capital = env.primary_portfolio(0).capital.get();
+    let lp_capital = env.primary_portfolio(1).capital.get();
+    let (_, group) = env.primary_market_state();
+    if group.assets[ASSET as usize].oi_eff_long_q != 0
+        || group.assets[ASSET as usize].oi_eff_short_q != 0
+    {
+        return Err(format!(
+            "{route:?} caller-fee round trip did not close flat"
+        ));
+    }
+    let withdrawn_insurance = group.insurance_domain_budget[2]
+        .checked_add(group.insurance_domain_budget[3])
+        .ok_or("CPI caller-fee insurance budget overflow")?;
+    if withdrawn_insurance == 0 {
+        return Err(format!(
+            "{route:?} caller fee created no attacker-withdrawable budget"
+        ));
+    }
+    env.withdraw_insurance_asset(0, ASSET, withdrawn_insurance)
+        .map_err(|error| format!("{route:?} withdraw caller-fee insurance: {error}"))?;
+    env.withdraw_primary(0, attacker_capital)
+        .map_err(|error| format!("{route:?} attacker capital withdrawal: {error}"))?;
+    env.withdraw_primary(1, lp_capital)
+        .map_err(|error| format!("{route:?} LP capital withdrawal: {error}"))?;
+    let attacker_payout = env.token_amount(env.actors[0].destination_token);
+    let lp_payout = env.token_amount(env.actors[1].destination_token);
+    let attacker_profit = attacker_payout
+        .checked_sub(DEPOSIT as u64)
+        .ok_or("CPI caller fee did not leave attacker above principal")?;
+    let lp_loss = (DEPOSIT as u64)
+        .checked_sub(lp_payout)
+        .ok_or("CPI caller fee left unsigned LP above principal")?;
+    if attacker_profit == 0 || attacker_profit != lp_loss {
+        return Err(format!(
+            "{route:?} caller-fee siphon was not value-neutral between attacker and LP: profit {attacker_profit}, loss {lp_loss}"
+        ));
+    }
+    let total_payout = u128::from(attacker_payout) + u128::from(lp_payout);
+    if total_payout != DEPOSIT * 2 {
+        return Err(format!(
+            "{route:?} caller-fee siphon changed total payout to {total_payout}"
+        ));
+    }
+    Ok(CpiCallerFeeReproduction {
+        blocker: KnownBlocker::CpiCallerFeeSiphon,
+        route,
+        attacker_profit,
+        lp_loss,
+        withdrawn_insurance,
+        total_payout,
+    })
+}
+
+pub fn reproduce_cpi_backing_fee_siphon(
+    mut seed: [u8; 32],
+) -> Result<CpiBackingFeeReproduction, String> {
+    seed[0] ^= 0x23;
+    const PRICE: u64 = 100;
+    const LP_DEPOSIT: u128 = 3_190;
+    const ATTACKER_DEPOSIT: u128 = 10_000;
+    const WINNING_SIZE_Q: i128 = 200 * POS_SCALE as i128;
+    const LOSING_SIZE_Q: i128 = 100 * POS_SCALE as i128;
+    const INCREASE_Q: i128 = 20 * POS_SCALE as i128;
+    const WINNING_DOMAIN: u16 = 3;
+
+    let mut env = V16Svm::new(
+        seed,
+        MarketConfig {
+            maintenance_margin_bps: 1_000,
+            initial_margin_bps: 1_000,
+            max_price_move_bps_per_slot: 500,
+            max_accrual_dt_slots: 1,
+            maintenance_fee_per_slot: 30,
+            actor_deposits: [
+                ATTACKER_DEPOSIT,
+                ATTACKER_DEPOSIT,
+                LP_DEPOSIT,
+                super::v16_svm::USER_DEPOSIT,
+                super::v16_svm::EXIT_MAKER_DEPOSIT,
+            ],
+            ..MarketConfig::default()
+        },
+    );
+    env.update_market_init_fee_policy(1)
+        .map_err(|error| format!("configure permissionless init fee: {error}"))?;
+    env.configure_auth_mark(false, 0, 1, PRICE)
+        .map_err(|error| format!("configure base AuthMark: {error}"))?;
+    env.warp_to_slot(2);
+    env.retire_asset(1, 2)
+        .map_err(|error| format!("retire attacker asset slot: {error}"))?;
+    env.warp_to_slot(3);
+    env.activate_permissionless_asset_for_actor(0, 1, 3, PRICE, 0, 1)
+        .map_err(|error| format!("activate attacker asset: {error}"))?;
+    env.configure_auth_mark_for_actor(0, 1, 3, PRICE)
+        .map_err(|error| format!("configure attacker AuthMark: {error}"))?;
+    env.top_up_backing_bucket_for_actor(0, WINNING_DOMAIN, 5_000, 100)
+        .map_err(|error| format!("fund attacker backing domain: {error}"))?;
+
+    env.trade_cpi(1, 2, 1, -WINNING_SIZE_Q, 0, 0)
+        .map_err(|error| format!("open LP winning leg: {error}"))?;
+    env.trade_cpi(1, 2, 0, -LOSING_SIZE_Q, 0, 0)
+        .map_err(|error| format!("open LP losing leg: {error}"))?;
+
+    env.warp_to_slot(4);
+    env.push_auth_mark_for_actor(0, 1, 4, PRICE)
+        .map_err(|error| format!("prime attacker asset: {error}"))?;
+    env.push_auth_mark(0, 4, PRICE)
+        .map_err(|error| format!("prime base asset: {error}"))?;
+    for (actor, asset) in [(1, 1), (2, 1), (1, 0), (2, 0)] {
+        crank_adapter_steps(&mut env, actor, 4, asset, 4)?;
+    }
+    env.sync_maintenance_fee(2, 4)
+        .map_err(|error| format!("sync LP maintenance fee: {error}"))?;
+    if env.primary_portfolio(2).capital.get() != 3_100 {
+        return Err(format!(
+            "LP maintenance setup reached capital {}, expected 3100",
+            env.primary_portfolio(2).capital.get()
+        ));
+    }
+
+    env.warp_to_slot(5);
+    env.push_auth_mark_for_actor(0, 1, 5, 105)
+        .map_err(|error| format!("push LP winning mark: {error}"))?;
+    env.push_auth_mark(0, 5, 95)
+        .map_err(|error| format!("push LP losing mark: {error}"))?;
+    for (actor, asset) in [(1, 1), (2, 1), (1, 0)] {
+        crank_adapter_steps(&mut env, actor, 5, asset, 4)?;
+    }
+    if env.primary_portfolio(2).pnl.get() != 1_000 {
+        return Err(format!(
+            "LP source-PnL setup reached {}, expected 1000",
+            env.primary_portfolio(2).pnl.get()
+        ));
+    }
+
+    env.update_backing_fee_policy_for_actor(0, WINNING_DOMAIN, 5_000, 0)
+        .map_err(|error| format!("install post-consent backing fee: {error}"))?;
+    let lp_before = env.primary_portfolio(2).capital.get();
+    let attacker_before = env.primary_portfolio(0).capital.get();
+    let provider_before = env.primary_market_state().1.source_backing_buckets
+        [WINNING_DOMAIN as usize]
+        .utilization_fee_earnings;
+    let provider_destination_before = env.token_amount(env.actors[0].destination_token);
+    let supply_before = env.token_supply_observed();
+
+    env.warp_to_slot(6);
+    env.trade_cpi(0, 2, 0, -INCREASE_Q, 0, 0)
+        .map_err(|error| format!("fee-bearing CPI increase: {error}"))?;
+    let lp_after = env.primary_portfolio(2).capital.get();
+    let provider_after = env.primary_market_state().1.source_backing_buckets
+        [WINNING_DOMAIN as usize]
+        .utilization_fee_earnings;
+    let provider_earnings = provider_after
+        .checked_sub(provider_before)
+        .ok_or("CPI backing provider earnings decreased")?;
+    let lp_capital_loss = lp_before
+        .checked_sub(lp_after)
+        .ok_or("CPI backing fee increased LP capital")?;
+    if provider_earnings == 0 || lp_capital_loss != provider_earnings {
+        return Err(format!(
+            "CPI backing fee did not transfer LP capital to provider: LP {lp_before}->{lp_after}, earnings {provider_before}->{provider_after}"
+        ));
+    }
+    env.trade_cpi(0, 2, 0, INCREASE_Q, 0, 0)
+        .map_err(|error| format!("reverse fee-bearing CPI increase: {error}"))?;
+    let attacker_after = env.primary_portfolio(0).capital.get();
+    let attacker_capital_delta = i128::try_from(attacker_after)
+        .and_then(|after| i128::try_from(attacker_before).map(|before| after - before))
+        .map_err(|_| "attacker capital does not fit i128")?;
+    if attacker_capital_delta != 0 || observed_positions(&env.primary_portfolio(0))?[0] != 0 {
+        return Err(format!(
+            "CPI backing-fee attacker did not return flat: capital delta {attacker_capital_delta}"
+        ));
+    }
+
+    env.withdraw_backing_bucket_earnings_for_actor(0, WINNING_DOMAIN, provider_earnings)
+        .map_err(|error| format!("withdraw LP-funded provider earnings: {error}"))?;
+    let provider_destination_after = env.token_amount(env.actors[0].destination_token);
+    let extracted_tokens = provider_destination_after
+        .checked_sub(provider_destination_before)
+        .ok_or("provider destination balance decreased")?;
+    if u128::from(extracted_tokens) != provider_earnings {
+        return Err(format!(
+            "CPI backing fee ledger/SPL extraction mismatch: {provider_earnings} vs {extracted_tokens}"
+        ));
+    }
+    if env.token_supply_observed() != supply_before {
+        return Err("CPI backing-fee siphon changed total SPL supply".into());
+    }
+    Ok(CpiBackingFeeReproduction {
+        blocker: KnownBlocker::CpiBackingFeeSiphon,
+        lp_capital_loss,
+        provider_earnings,
+        extracted_tokens,
+        attacker_capital_delta,
+    })
+}
+
+fn crank_adapter_steps(
+    env: &mut V16Svm,
+    actor: usize,
+    now_slot: u64,
+    asset_index: u16,
+    attempts: usize,
+) -> Result<(), String> {
+    let oracle_accounts = env.primary_profile(asset_index as usize).oracle_leg_count;
+    let observations = vec![CrankObservationHint {
+        asset_index,
+        oracle_accounts,
+    }];
+    let mut progressed = false;
+    for _ in 0..attempts {
+        match env.crank(actor, now_slot, observations.clone()) {
+            Ok(_) => progressed = true,
+            Err(error) if progressed && error.contains("Custom(22)") => break,
+            Err(error) => {
+                return Err(format!(
+                    "actor {actor} asset {asset_index} crank failed before progress: {error}"
+                ));
+            }
+        }
+    }
+    if !progressed {
+        return Err(format!(
+            "actor {actor} asset {asset_index} crank made no progress"
+        ));
+    }
+    Ok(())
+}
+
+fn run_asset_generation_trade_world(
+    seed: [u8; 32],
+    route: TradeRoute,
+    land_replay: bool,
+) -> Result<(u64, u64, u64, u64), String> {
+    const ASSET: u16 = 1;
+    const OLD_PRICE: u64 = 100;
+    const NEW_PRICE: u64 = 250;
+    const ADVERSE_PRICE: u64 = 200;
+    const SIZE_Q: i128 = 1_000 * POS_SCALE as i128;
+
+    let mut env = V16Svm::new(
+        seed,
+        MarketConfig {
+            max_price_move_bps_per_slot: 10_000,
+            max_accrual_dt_slots: 1,
+            actor_deposits: [
+                1_000_000,
+                1_000_000,
+                super::v16_svm::USER_DEPOSIT,
+                super::v16_svm::USER_DEPOSIT,
+                super::v16_svm::EXIT_MAKER_DEPOSIT,
+            ],
+            ..MarketConfig::default()
+        },
+    );
+    env.configure_auth_mark(false, ASSET, 1, OLD_PRICE)
+        .map_err(|error| format!("{route:?} configure old generation: {error}"))?;
+    env.update_market_init_fee_policy(1)
+        .map_err(|error| format!("{route:?} configure permissionless init fee: {error}"))?;
+    let old_market_id = env.primary_market_state().1.assets[ASSET as usize].market_id;
+    let retained = build_retained_trade(&mut env, route, 0, 1, ASSET, SIZE_Q, OLD_PRICE, 0);
+
+    env.warp_to_slot(3);
+    env.retire_asset(ASSET, 3)
+        .map_err(|error| format!("{route:?} retire old asset generation: {error}"))?;
+    env.warp_to_slot(4);
+    env.activate_permissionless_asset(2, ASSET, 4, NEW_PRICE, 1)
+        .map_err(|error| format!("{route:?} activate replacement generation: {error}"))?;
+    env.configure_auth_mark(false, ASSET, 4, NEW_PRICE)
+        .map_err(|error| format!("{route:?} configure replacement AuthMark: {error}"))?;
+    let new_market_id = env.primary_market_state().1.assets[ASSET as usize].market_id;
+    if new_market_id == old_market_id {
+        return Err(format!(
+            "{route:?} asset slot reuse did not change market ID {old_market_id}"
+        ));
+    }
+    if land_replay {
+        env.land_retained(retained).map_err(|error| {
+            format!("{route:?} stale-generation trade no longer lands: {error}")
+        })?;
+        let victim_position = observed_positions(&env.primary_portfolio(0))?[ASSET as usize];
+        if victim_position != SIZE_Q {
+            return Err(format!(
+                "{route:?} stale trade created position {victim_position}, expected {SIZE_Q}"
+            ));
+        }
+    }
+
+    env.warp_to_slot(5);
+    env.push_auth_mark(ASSET, 5, ADVERSE_PRICE)
+        .map_err(|error| format!("{route:?} push replacement adverse mark: {error}"))?;
+    let oracle_accounts = env.primary_profile(ASSET as usize).oracle_leg_count;
+    let observation = || {
+        vec![CrankObservationHint {
+            asset_index: ASSET,
+            oracle_accounts,
+        }]
+    };
+    env.crank(1, 5, observation())
+        .map_err(|error| format!("{route:?} refresh replacement attacker: {error}"))?;
+    env.crank(0, 5, observation())
+        .map_err(|error| format!("{route:?} refresh replacement victim: {error}"))?;
+    if land_replay {
+        let victim_position = observed_positions(&env.primary_portfolio(0))?[ASSET as usize];
+        env.trade_no_cpi(0, 1, ASSET, -victim_position, ADVERSE_PRICE, 0)
+            .map_err(|error| format!("{route:?} close stale-generation exposure: {error}"))?;
+        env.convert_released_pnl(1, u128::MAX)
+            .map_err(|error| format!("{route:?} convert stale-generation profit: {error}"))?;
+    }
+    let victim_capital = env.primary_portfolio(0).capital.get();
+    let attacker_capital = env.primary_portfolio(1).capital.get();
+    env.withdraw_primary(0, victim_capital)
+        .map_err(|error| format!("{route:?} replacement victim withdrawal: {error}"))?;
+    env.withdraw_primary(1, attacker_capital)
+        .map_err(|error| format!("{route:?} replacement attacker withdrawal: {error}"))?;
+    Ok((
+        env.token_amount(env.actors[0].destination_token),
+        env.token_amount(env.actors[1].destination_token),
+        old_market_id,
+        new_market_id,
+    ))
+}
+
 fn run_trade_retry_world(
     seed: [u8; 32],
     route: TradeRoute,
@@ -2030,22 +2491,26 @@ fn run_trade_retry_world(
         },
     );
     let size_q = -(POS_SCALE as i128);
-    let build = |env: &mut V16Svm| match route {
-        TradeRoute::NoCpi => {
-            env.build_retained_no_cpi_trade(0, 1, 0, size_q, super::v16_svm::INITIAL_PRICE)
-        }
-        TradeRoute::Cpi => {
-            env.build_retained_cpi_trade(0, 1, 0, size_q, super::v16_svm::INITIAL_PRICE)
-        }
-        TradeRoute::BatchNoCpi => {
-            env.build_retained_batch_no_cpi_trade(0, 1, 0, size_q, super::v16_svm::INITIAL_PRICE)
-        }
-        TradeRoute::BatchCpi => {
-            env.build_retained_batch_cpi_trade(0, 1, 0, size_q, super::v16_svm::INITIAL_PRICE)
-        }
-    };
-    let original = build(&mut env);
-    let retry = build(&mut env);
+    let original = build_retained_trade(
+        &mut env,
+        route,
+        0,
+        1,
+        0,
+        size_q,
+        super::v16_svm::INITIAL_PRICE,
+        super::v16_svm::INITIAL_PRICE,
+    );
+    let retry = build_retained_trade(
+        &mut env,
+        route,
+        0,
+        1,
+        0,
+        size_q,
+        super::v16_svm::INITIAL_PRICE,
+        super::v16_svm::INITIAL_PRICE,
+    );
     env.land_retained(original)
         .map_err(|error| format!("{route:?} original intent: {error}"))?;
     if land_retry {
@@ -2103,6 +2568,32 @@ fn run_trade_retry_world(
         attacker_payout,
         u128::from(victim_payout) + u128::from(attacker_payout),
     ))
+}
+
+fn build_retained_trade(
+    env: &mut V16Svm,
+    route: TradeRoute,
+    taker: usize,
+    maker: usize,
+    asset_index: u16,
+    size_q: i128,
+    exec_price: u64,
+    limit_price: u64,
+) -> Transaction {
+    match route {
+        TradeRoute::NoCpi => {
+            env.build_retained_no_cpi_trade(taker, maker, asset_index, size_q, exec_price)
+        }
+        TradeRoute::Cpi => {
+            env.build_retained_cpi_trade(taker, maker, asset_index, size_q, limit_price)
+        }
+        TradeRoute::BatchNoCpi => {
+            env.build_retained_batch_no_cpi_trade(taker, maker, asset_index, size_q, exec_price)
+        }
+        TradeRoute::BatchCpi => {
+            env.build_retained_batch_cpi_trade(taker, maker, asset_index, size_q, limit_price)
+        }
+    }
 }
 
 fn build_omitted_rescue_world(seed: [u8; 32]) -> Result<(V16Svm, u128, u128), String> {
@@ -2255,6 +2746,32 @@ pub fn trade_retry_replay_strategy() -> impl Strategy<Value = ([u8; 32], TradeRo
             TradeRoute::BatchCpi,
         ]),
     )
+}
+
+#[allow(dead_code)]
+pub fn asset_generation_replay_strategy() -> impl Strategy<Value = ([u8; 32], TradeRoute)> {
+    (
+        any::<[u8; 32]>(),
+        prop::sample::select(vec![
+            TradeRoute::NoCpi,
+            TradeRoute::Cpi,
+            TradeRoute::BatchNoCpi,
+            TradeRoute::BatchCpi,
+        ]),
+    )
+}
+
+#[allow(dead_code)]
+pub fn cpi_caller_fee_strategy() -> impl Strategy<Value = ([u8; 32], TradeRoute)> {
+    (
+        any::<[u8; 32]>(),
+        prop::sample::select(vec![TradeRoute::Cpi, TradeRoute::BatchCpi]),
+    )
+}
+
+#[allow(dead_code)]
+pub fn cpi_backing_fee_seed_strategy() -> impl Strategy<Value = [u8; 32]> {
+    any::<[u8; 32]>()
 }
 
 #[allow(dead_code)]

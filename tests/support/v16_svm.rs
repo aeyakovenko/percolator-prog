@@ -681,6 +681,28 @@ impl V16Svm {
         )
     }
 
+    pub fn configure_auth_mark_for_actor(
+        &mut self,
+        actor_index: usize,
+        asset_index: u16,
+        now_slot: u64,
+        mark: u64,
+    ) -> Result<TxSuccess, String> {
+        let authority = copy_keypair(&self.actors[actor_index].signer);
+        self.send_program(
+            ProgInstruction::ConfigureAuthMark {
+                asset_index,
+                now_slot,
+                initial_mark_e6: mark,
+            },
+            vec![
+                AccountMeta::new(authority.pubkey(), true),
+                AccountMeta::new(self.market, false),
+            ],
+            &[authority],
+        )
+    }
+
     pub fn configure_ewma_mark(
         &mut self,
         asset_index: u16,
@@ -748,6 +770,28 @@ impl V16Svm {
         )
     }
 
+    pub fn push_auth_mark_for_actor(
+        &mut self,
+        actor_index: usize,
+        asset_index: u16,
+        now_slot: u64,
+        mark: u64,
+    ) -> Result<TxSuccess, String> {
+        let authority = copy_keypair(&self.actors[actor_index].signer);
+        self.send_program(
+            ProgInstruction::PushAuthMark {
+                asset_index,
+                now_slot,
+                mark_e6: mark,
+            },
+            vec![
+                AccountMeta::new(authority.pubkey(), true),
+                AccountMeta::new(self.market, false),
+            ],
+            &[authority],
+        )
+    }
+
     pub fn update_backing_fee_policy(
         &mut self,
         domain: u16,
@@ -764,6 +808,162 @@ impl V16Svm {
             vec![
                 AccountMeta::new(authority.pubkey(), true),
                 AccountMeta::new(self.market, false),
+            ],
+            &[authority],
+        )
+    }
+
+    pub fn update_backing_fee_policy_for_actor(
+        &mut self,
+        actor_index: usize,
+        domain: u16,
+        fee_bps: u16,
+        insurance_share_bps: u16,
+    ) -> Result<TxSuccess, String> {
+        let authority = copy_keypair(&self.actors[actor_index].signer);
+        self.send_program(
+            ProgInstruction::UpdateBackingFeePolicy {
+                domain,
+                fee_bps,
+                insurance_share_bps,
+            },
+            vec![
+                AccountMeta::new(authority.pubkey(), true),
+                AccountMeta::new(self.market, false),
+            ],
+            &[authority],
+        )
+    }
+
+    pub fn update_market_init_fee_policy(
+        &mut self,
+        min_init_fee: u128,
+    ) -> Result<TxSuccess, String> {
+        let authority = copy_keypair(&self.admin);
+        self.send_program(
+            ProgInstruction::UpdateMarketInitFeePolicy { min_init_fee },
+            vec![
+                AccountMeta::new(authority.pubkey(), true),
+                AccountMeta::new(self.market, false),
+            ],
+            &[authority],
+        )
+    }
+
+    pub fn retire_asset(&mut self, asset_index: u16, now_slot: u64) -> Result<TxSuccess, String> {
+        let authority = copy_keypair(&self.admin);
+        self.send_program(
+            ProgInstruction::UpdateAssetLifecycle {
+                action: percolator_prog::processor::ASSET_ACTION_RETIRE,
+                asset_index,
+                now_slot,
+                initial_price: 0,
+                insurance_authority: authority.pubkey().to_bytes(),
+                insurance_operator: authority.pubkey().to_bytes(),
+                backing_bucket_authority: authority.pubkey().to_bytes(),
+                oracle_authority: authority.pubkey().to_bytes(),
+            },
+            vec![
+                AccountMeta::new(authority.pubkey(), true),
+                AccountMeta::new(self.market, false),
+            ],
+            &[authority],
+        )
+    }
+
+    pub fn activate_permissionless_asset(
+        &mut self,
+        creator_index: usize,
+        asset_index: u16,
+        now_slot: u64,
+        initial_price: u64,
+        fee: u128,
+    ) -> Result<TxSuccess, String> {
+        let authority = self.admin.pubkey();
+        self.activate_permissionless_asset_with_authority(
+            creator_index,
+            asset_index,
+            now_slot,
+            initial_price,
+            authority,
+            fee,
+        )
+    }
+
+    pub fn activate_permissionless_asset_for_actor(
+        &mut self,
+        creator_index: usize,
+        asset_index: u16,
+        now_slot: u64,
+        initial_price: u64,
+        authority_index: usize,
+        fee: u128,
+    ) -> Result<TxSuccess, String> {
+        let authority = self.actors[authority_index].signer.pubkey();
+        self.activate_permissionless_asset_with_authority(
+            creator_index,
+            asset_index,
+            now_slot,
+            initial_price,
+            authority,
+            fee,
+        )
+    }
+
+    fn activate_permissionless_asset_with_authority(
+        &mut self,
+        creator_index: usize,
+        asset_index: u16,
+        now_slot: u64,
+        initial_price: u64,
+        authority: Pubkey,
+        fee: u128,
+    ) -> Result<TxSuccess, String> {
+        if fee == 0 {
+            return Err("permissionless activation adapter requires a nonzero fee".into());
+        }
+        let creator = copy_keypair(&self.actors[creator_index].signer);
+        self.send_program(
+            ProgInstruction::UpdateAssetLifecycle {
+                action: percolator_prog::processor::ASSET_ACTION_ACTIVATE,
+                asset_index,
+                now_slot,
+                initial_price,
+                insurance_authority: authority.to_bytes(),
+                insurance_operator: authority.to_bytes(),
+                backing_bucket_authority: authority.to_bytes(),
+                oracle_authority: authority.to_bytes(),
+            },
+            vec![
+                AccountMeta::new(creator.pubkey(), true),
+                AccountMeta::new(self.market, false),
+                AccountMeta::new(self.actors[creator_index].source_token, false),
+                AccountMeta::new(self.vault, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[creator],
+        )
+    }
+
+    pub fn withdraw_insurance_asset(
+        &mut self,
+        actor_index: usize,
+        asset_index: u16,
+        amount: u128,
+    ) -> Result<TxSuccess, String> {
+        let authority = copy_keypair(&self.actors[actor_index].signer);
+        self.send_program(
+            ProgInstruction::WithdrawInsuranceAsset {
+                asset_index,
+                amount,
+            },
+            vec![
+                AccountMeta::new(authority.pubkey(), true),
+                AccountMeta::new(self.market, false),
+                AccountMeta::new(self.actors[actor_index].destination_token, false),
+                AccountMeta::new(self.vault, false),
+                AccountMeta::new_readonly(self.vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
             ],
             &[authority],
         )
@@ -794,6 +994,32 @@ impl V16Svm {
         )
     }
 
+    pub fn top_up_backing_bucket_for_actor(
+        &mut self,
+        actor_index: usize,
+        domain: u16,
+        amount: u128,
+        expiry_slot: u64,
+    ) -> Result<TxSuccess, String> {
+        let authority = copy_keypair(&self.actors[actor_index].signer);
+        self.send_program(
+            ProgInstruction::TopUpBackingBucket {
+                domain,
+                amount,
+                expiry_slot,
+            },
+            vec![
+                AccountMeta::new(authority.pubkey(), true),
+                AccountMeta::new(self.market, false),
+                AccountMeta::new(self.actors[actor_index].source_token, false),
+                AccountMeta::new(self.vault, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+                AccountMeta::new(self.backing_domain_ledger, false),
+            ],
+            &[authority],
+        )
+    }
+
     pub fn withdraw_backing_bucket_earnings(
         &mut self,
         domain: u16,
@@ -807,6 +1033,28 @@ impl V16Svm {
                 AccountMeta::new(self.market, false),
                 AccountMeta::new(self.backing_domain_ledger, false),
                 AccountMeta::new(self.provider_destination_token, false),
+                AccountMeta::new(self.vault, false),
+                AccountMeta::new_readonly(self.vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[authority],
+        )
+    }
+
+    pub fn withdraw_backing_bucket_earnings_for_actor(
+        &mut self,
+        actor_index: usize,
+        domain: u16,
+        amount: u128,
+    ) -> Result<TxSuccess, String> {
+        let authority = copy_keypair(&self.actors[actor_index].signer);
+        self.send_program(
+            ProgInstruction::WithdrawBackingBucketEarnings { domain, amount },
+            vec![
+                AccountMeta::new(authority.pubkey(), true),
+                AccountMeta::new(self.market, false),
+                AccountMeta::new(self.backing_domain_ledger, false),
+                AccountMeta::new(self.actors[actor_index].destination_token, false),
                 AccountMeta::new(self.vault, false),
                 AccountMeta::new_readonly(self.vault_authority, false),
                 AccountMeta::new_readonly(spl_token::ID, false),

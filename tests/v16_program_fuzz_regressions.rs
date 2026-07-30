@@ -3,10 +3,12 @@ mod support;
 use support::{
     blocker_corpus::{blocker_scenarios, known_blocker_scenarios},
     fuzz_model::{
-        reproduce_omitted_rescue_liquidation, reproduce_post_expiry_backing_fee,
-        reproduce_trade_retry_replay, run_scenario, KnownBlocker, PostExpiryBackingCase, Scenario,
-        TradeRoute,
+        reproduce_asset_generation_trade_replay, reproduce_cpi_backing_fee_siphon,
+        reproduce_cpi_caller_fee_siphon, reproduce_omitted_rescue_liquidation,
+        reproduce_post_expiry_backing_fee, reproduce_trade_retry_replay, run_scenario,
+        KnownBlocker, PostExpiryBackingCase, Scenario, TradeRoute,
     },
+    open_lof_manifest::{missing_prs, quarantined_prs, validate_manifest},
 };
 
 #[test]
@@ -129,4 +131,68 @@ fn v16_program_pr343_trade_retry_variants_extract_value_on_every_route() {
             reproduction.replay_total_payout
         );
     }
+}
+
+#[test]
+fn v16_program_pr231_asset_generation_replay_extracts_on_every_route() {
+    for route in [
+        TradeRoute::NoCpi,
+        TradeRoute::Cpi,
+        TradeRoute::BatchNoCpi,
+        TradeRoute::BatchCpi,
+    ] {
+        let reproduction = reproduce_asset_generation_trade_replay([0x31; 32], route)
+            .unwrap_or_else(|error| panic!("PR 231 {route:?} no longer reproduces: {error}"));
+        assert_eq!(
+            reproduction.blocker,
+            KnownBlocker::AssetGenerationTradeReplay
+        );
+        assert_ne!(reproduction.old_market_id, reproduction.new_market_id);
+        assert!(reproduction.victim_loss > 0);
+        assert!(reproduction.attacker_payout > 1_000_000);
+        assert_eq!(reproduction.total_payout, 2_000_000);
+    }
+}
+
+#[test]
+fn v16_program_pr224_unsigned_lp_caller_fee_is_withdrawable() {
+    for route in [TradeRoute::Cpi, TradeRoute::BatchCpi] {
+        let reproduction = reproduce_cpi_caller_fee_siphon([0x24; 32], route)
+            .unwrap_or_else(|error| panic!("PR 224 {route:?} no longer reproduces: {error}"));
+        assert_eq!(reproduction.blocker, KnownBlocker::CpiCallerFeeSiphon);
+        assert_eq!(reproduction.attacker_profit, reproduction.lp_loss);
+        assert!(reproduction.withdrawn_insurance > 0);
+        assert_eq!(reproduction.total_payout, 2_000_000);
+    }
+}
+
+#[test]
+fn v16_program_pr223_unsigned_lp_backing_fee_is_withdrawable() {
+    let reproduction = reproduce_cpi_backing_fee_siphon([0x23; 32])
+        .unwrap_or_else(|error| panic!("PR 223 no longer reproduces: {error}"));
+    assert_eq!(reproduction.blocker, KnownBlocker::CpiBackingFeeSiphon);
+    assert_eq!(reproduction.lp_capital_loss, reproduction.provider_earnings);
+    assert_eq!(
+        reproduction.provider_earnings,
+        u128::from(reproduction.extracted_tokens)
+    );
+    assert_eq!(reproduction.attacker_capital_delta, 0);
+}
+
+#[test]
+fn v16_program_open_lof_manifest_is_complete_and_honest() {
+    validate_manifest().expect("open LoF manifest structure");
+    assert_eq!(quarantined_prs(), [220, 223, 224, 231, 343, 367]);
+    let missing = missing_prs();
+    assert_eq!(
+        missing.len(),
+        93,
+        "update the explicit evidence state when an executable adapter lands"
+    );
+    assert!(!missing.contains(&220));
+    assert!(!missing.contains(&223));
+    assert!(!missing.contains(&224));
+    assert!(!missing.contains(&231));
+    assert!(!missing.contains(&343));
+    assert!(!missing.contains(&367));
 }

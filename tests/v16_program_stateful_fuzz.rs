@@ -2,9 +2,12 @@ mod support;
 
 use proptest::prelude::*;
 use support::fuzz_model::{
+    asset_generation_replay_strategy, cpi_backing_fee_seed_strategy, cpi_caller_fee_strategy,
     omitted_rescue_seed_strategy, post_expiry_backing_case_strategy,
-    reproduce_omitted_rescue_liquidation, reproduce_post_expiry_backing_fee,
-    reproduce_trade_retry_replay, run_scenario, scenario_strategy, trade_retry_replay_strategy,
+    reproduce_asset_generation_trade_replay, reproduce_cpi_backing_fee_siphon,
+    reproduce_cpi_caller_fee_siphon, reproduce_omitted_rescue_liquidation,
+    reproduce_post_expiry_backing_fee, reproduce_trade_retry_replay, run_scenario,
+    scenario_strategy, trade_retry_replay_strategy,
 };
 
 fn env_usize(name: &str, default: usize) -> usize {
@@ -72,6 +75,47 @@ proptest! {
             result.is_ok(),
             "PR 343 {:?} no longer reproduces for seed {:?}: {}",
             route,
+            seed,
+            result.unwrap_err()
+        );
+    }
+
+    #[test]
+    fn v16_program_pr231_asset_generation_replay_fuzz(
+        (seed, route) in asset_generation_replay_strategy()
+    ) {
+        let result = reproduce_asset_generation_trade_replay(seed, route);
+        prop_assert!(
+            result.is_ok(),
+            "PR 231 {:?} no longer reproduces for seed {:?}: {}",
+            route,
+            seed,
+            result.unwrap_err()
+        );
+    }
+
+    #[test]
+    fn v16_program_pr224_cpi_caller_fee_siphon_fuzz(
+        (seed, route) in cpi_caller_fee_strategy()
+    ) {
+        let result = reproduce_cpi_caller_fee_siphon(seed, route);
+        prop_assert!(
+            result.is_ok(),
+            "PR 224 {:?} no longer reproduces for seed {:?}: {}",
+            route,
+            seed,
+            result.unwrap_err()
+        );
+    }
+
+    #[test]
+    fn v16_program_pr223_cpi_backing_fee_siphon_fuzz(
+        seed in cpi_backing_fee_seed_strategy()
+    ) {
+        let result = reproduce_cpi_backing_fee_siphon(seed);
+        prop_assert!(
+            result.is_ok(),
+            "PR 223 no longer reproduces for seed {:?}: {}",
             seed,
             result.unwrap_err()
         );
