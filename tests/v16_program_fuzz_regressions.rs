@@ -3,15 +3,16 @@ mod support;
 use support::{
     blocker_corpus::{blocker_scenarios, known_blocker_scenarios},
     fuzz_model::{
-        reproduce_asset_generation_trade_replay, reproduce_composite_oracle_rounding,
-        reproduce_cpi_backing_fee_siphon, reproduce_cpi_caller_fee_siphon,
-        reproduce_cross_domain_backing_double_spend, reproduce_forfeit_funding_erasure,
-        reproduce_omitted_rescue_liquidation, reproduce_pending_ewma_inheritance,
-        reproduce_post_expiry_backing_fee, reproduce_rebalance_funding_erasure,
-        reproduce_reclaimable_ewma_fee, reproduce_rounded_funding_omission,
-        reproduce_trade_driven_liquidation_reward, reproduce_trade_funding_erasure,
-        reproduce_trade_retry_replay, run_scenario, CompositeRoundingCase, KnownBlocker,
-        PostExpiryBackingCase, Scenario, TradeDrivenLiquidationMode, TradeRoute,
+        reproduce_asset_generation_mark_replay, reproduce_asset_generation_trade_replay,
+        reproduce_composite_oracle_rounding, reproduce_cpi_backing_fee_siphon,
+        reproduce_cpi_caller_fee_siphon, reproduce_cross_domain_backing_double_spend,
+        reproduce_forfeit_funding_erasure, reproduce_omitted_rescue_liquidation,
+        reproduce_pending_ewma_inheritance, reproduce_post_expiry_backing_fee,
+        reproduce_rebalance_funding_erasure, reproduce_reclaimable_ewma_fee,
+        reproduce_rounded_funding_omission, reproduce_trade_driven_liquidation_reward,
+        reproduce_trade_funding_erasure, reproduce_trade_retry_replay, run_scenario,
+        AssetGenerationMarkPath, CompositeRoundingCase, KnownBlocker, PostExpiryBackingCase,
+        Scenario, TradeDrivenLiquidationMode, TradeRoute,
     },
     open_lof_manifest::{missing_prs, quarantined_prs, validate_manifest},
 };
@@ -361,16 +362,36 @@ fn v16_program_pr267_cross_domain_backing_is_spent_twice() {
 }
 
 #[test]
+fn v16_program_pr275_stale_mark_replays_across_asset_generation() {
+    for path in [AssetGenerationMarkPath::Auth, AssetGenerationMarkPath::Ewma] {
+        let reproduction = reproduce_asset_generation_mark_replay([0x75; 32], path)
+            .unwrap_or_else(|error| panic!("PR 275 {path:?} no longer reproduces: {error}"));
+        assert_eq!(
+            reproduction.blocker,
+            KnownBlocker::AssetGenerationMarkReplay
+        );
+        assert_eq!(reproduction.path, path);
+        assert_ne!(reproduction.old_market_id, reproduction.new_market_id);
+        assert!(reproduction.landed_mark < 100);
+        assert!(reproduction.victim_equity_loss > 0);
+        assert_eq!(
+            reproduction.victim_equity_loss,
+            u128::from(reproduction.beneficiary_extra_payout)
+        );
+    }
+}
+
+#[test]
 fn v16_program_open_lof_manifest_is_complete_and_honest() {
     validate_manifest().expect("open LoF manifest structure");
     assert_eq!(
         quarantined_prs(),
-        [220, 223, 224, 225, 231, 253, 260, 267, 271, 272, 273, 280, 329, 343, 367, 381]
+        [220, 223, 224, 225, 231, 253, 260, 267, 271, 272, 273, 275, 280, 329, 343, 367, 381]
     );
     let missing = missing_prs();
     assert_eq!(
         missing.len(),
-        83,
+        82,
         "update the explicit evidence state when an executable adapter lands"
     );
     assert!(!missing.contains(&220));
@@ -384,6 +405,7 @@ fn v16_program_open_lof_manifest_is_complete_and_honest() {
     assert!(!missing.contains(&271));
     assert!(!missing.contains(&272));
     assert!(!missing.contains(&273));
+    assert!(!missing.contains(&275));
     assert!(!missing.contains(&280));
     assert!(!missing.contains(&329));
     assert!(!missing.contains(&343));

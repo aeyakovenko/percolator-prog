@@ -69,10 +69,11 @@ pub enum KnownBlocker {
     ForfeitFundingErasure,
     TradeDrivenLiquidationReward,
     CrossDomainBackingDoubleSpend,
+    AssetGenerationMarkReplay,
 }
 
 impl KnownBlocker {
-    pub const COUNT: usize = 16;
+    pub const COUNT: usize = 17;
 
     pub const fn index(self) -> usize {
         match self {
@@ -92,6 +93,7 @@ impl KnownBlocker {
             Self::ForfeitFundingErasure => 13,
             Self::TradeDrivenLiquidationReward => 14,
             Self::CrossDomainBackingDoubleSpend => 15,
+            Self::AssetGenerationMarkReplay => 16,
         }
     }
 }
@@ -173,6 +175,12 @@ pub enum CompositeRoundingCase {
 pub enum TradeDrivenLiquidationMode {
     Ewma,
     HybridAfterHours,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum AssetGenerationMarkPath {
+    Auth,
+    Ewma,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -277,6 +285,18 @@ pub struct CrossDomainBackingDoubleSpendReproduction {
     pub funded_backing_consumed_num: u128,
     pub winner_capital_gain: u128,
     pub extracted_tokens: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AssetGenerationMarkReplayReproduction {
+    pub blocker: KnownBlocker,
+    pub path: AssetGenerationMarkPath,
+    pub old_market_id: u64,
+    pub new_market_id: u64,
+    pub landed_mark: u64,
+    pub victim_equity_loss: u128,
+    pub beneficiary_extra_payout: u64,
+    pub observed_token_supply: u128,
 }
 
 impl SubstitutionKind {
@@ -2242,6 +2262,65 @@ pub fn reproduce_asset_generation_trade_replay(
     })
 }
 
+pub fn reproduce_asset_generation_mark_replay(
+    mut seed: [u8; 32],
+    path: AssetGenerationMarkPath,
+) -> Result<AssetGenerationMarkReplayReproduction, String> {
+    seed[0] ^= 0x75;
+    let control = run_asset_generation_mark_world(seed, path, false)?;
+    let replay = run_asset_generation_mark_world(seed, path, true)?;
+    if control.old_market_id != replay.old_market_id
+        || control.new_market_id != replay.new_market_id
+        || control.old_market_id == control.new_market_id
+    {
+        return Err(format!(
+            "{path:?} mark-replay worlds did not use the same distinct generations: control {}/{}, replay {}/{}",
+            control.old_market_id,
+            control.new_market_id,
+            replay.old_market_id,
+            replay.new_market_id
+        ));
+    }
+    let victim_equity_loss = control
+        .victim_equity
+        .checked_sub(replay.victim_equity)
+        .ok_or("stale mark replay increased victim equity")?;
+    let beneficiary_extra_payout = replay
+        .beneficiary_payout
+        .checked_sub(control.beneficiary_payout)
+        .ok_or("stale mark replay decreased beneficiary payout")?;
+    if victim_equity_loss == 0
+        || victim_equity_loss != u128::from(beneficiary_extra_payout)
+        || replay.landed_mark >= control.landed_mark
+    {
+        return Err(format!(
+            "{path:?} stale report did not transfer equal extractable value: victim equity {}/{}, beneficiary payout {}/{}, mark {}/{}",
+            control.victim_equity,
+            replay.victim_equity,
+            control.beneficiary_payout,
+            replay.beneficiary_payout,
+            control.landed_mark,
+            replay.landed_mark
+        ));
+    }
+    if control.observed_token_supply != replay.observed_token_supply {
+        return Err(format!(
+            "{path:?} stale mark replay changed observed SPL supply: control {}, replay {}",
+            control.observed_token_supply, replay.observed_token_supply
+        ));
+    }
+    Ok(AssetGenerationMarkReplayReproduction {
+        blocker: KnownBlocker::AssetGenerationMarkReplay,
+        path,
+        old_market_id: replay.old_market_id,
+        new_market_id: replay.new_market_id,
+        landed_mark: replay.landed_mark,
+        victim_equity_loss,
+        beneficiary_extra_payout,
+        observed_token_supply: replay.observed_token_supply,
+    })
+}
+
 pub fn reproduce_cpi_caller_fee_siphon(
     mut seed: [u8; 32],
     route: TradeRoute,
@@ -3875,6 +3954,136 @@ fn crank_adapter_steps(
     Ok(())
 }
 
+#[derive(Clone, Copy, Debug)]
+struct AssetGenerationMarkWorld {
+    old_market_id: u64,
+    new_market_id: u64,
+    landed_mark: u64,
+    victim_equity: u128,
+    beneficiary_payout: u64,
+    observed_token_supply: u128,
+}
+
+fn run_asset_generation_mark_world(
+    seed: [u8; 32],
+    path: AssetGenerationMarkPath,
+    land_replay: bool,
+) -> Result<AssetGenerationMarkWorld, String> {
+    const ASSET: u16 = 1;
+    const PRICE: u64 = 100;
+    const STALE_ADVERSE_PRICE: u64 = 50;
+    const SIZE_Q: i128 = 5_000 * POS_SCALE as i128;
+    const DEPOSIT: u128 = 1_000_000;
+
+    let mut env = V16Svm::new(
+        seed,
+        MarketConfig {
+            max_price_move_bps_per_slot: 10_000,
+            max_accrual_dt_slots: 1,
+            min_funding_lifetime_slots: 1,
+            actor_deposits: [
+                DEPOSIT,
+                DEPOSIT,
+                DEPOSIT,
+                DEPOSIT,
+                super::v16_svm::EXIT_MAKER_DEPOSIT,
+            ],
+            ..MarketConfig::default()
+        },
+    );
+    match path {
+        AssetGenerationMarkPath::Auth => env
+            .configure_auth_mark(false, ASSET, 1, PRICE)
+            .map_err(|error| format!("{path:?} configure old AuthMark: {error}"))?,
+        AssetGenerationMarkPath::Ewma => env
+            .configure_ewma_mark(ASSET, 1, PRICE, 1, 0)
+            .map_err(|error| format!("{path:?} configure old EwmaMark: {error}"))?,
+    };
+    let old_market_id = env.primary_market_state().1.assets[ASSET as usize].market_id;
+    let retained = match path {
+        AssetGenerationMarkPath::Auth => env.build_retained_auth_mark(ASSET, STALE_ADVERSE_PRICE),
+        AssetGenerationMarkPath::Ewma => env.build_retained_ewma_mark(ASSET, STALE_ADVERSE_PRICE),
+    };
+    env.update_market_init_fee_policy(1)
+        .map_err(|error| format!("{path:?} configure permissionless init fee: {error}"))?;
+    env.warp_to_slot(3);
+    env.retire_asset(ASSET, 3)
+        .map_err(|error| format!("{path:?} retire old asset generation: {error}"))?;
+    env.warp_to_slot(4);
+    env.activate_permissionless_asset(2, ASSET, 4, PRICE, 1)
+        .map_err(|error| format!("{path:?} activate replacement generation: {error}"))?;
+    match path {
+        AssetGenerationMarkPath::Auth => env
+            .configure_auth_mark(false, ASSET, 4, PRICE)
+            .map_err(|error| format!("{path:?} configure replacement AuthMark: {error}"))?,
+        AssetGenerationMarkPath::Ewma => env
+            .configure_ewma_mark(ASSET, 4, PRICE, 1, 0)
+            .map_err(|error| format!("{path:?} configure replacement EwmaMark: {error}"))?,
+    };
+    let new_market_id = env.primary_market_state().1.assets[ASSET as usize].market_id;
+    if new_market_id == old_market_id {
+        return Err(format!(
+            "{path:?} replacement reused market ID {old_market_id}"
+        ));
+    }
+
+    env.trade_no_cpi(0, 1, ASSET, SIZE_Q, PRICE, 0)
+        .map_err(|error| format!("{path:?} open fresh-generation victim exposure: {error}"))?;
+    env.warp_to_slot(5);
+    if land_replay {
+        env.land_retained(retained)
+            .map_err(|error| format!("{path:?} stale signed mark no longer lands: {error}"))?;
+        if env.primary_profile(ASSET as usize).oracle_target_price_e6 >= PRICE {
+            return Err(format!(
+                "{path:?} stale signed mark landed without moving replacement target"
+            ));
+        }
+        env.warp_to_slot(6);
+        crank_adapter_steps(&mut env, 0, 6, ASSET, 4)
+            .map_err(|error| format!("{path:?} settle stale mark against victim: {error}"))?;
+        crank_adapter_steps(&mut env, 1, 6, ASSET, 4)
+            .map_err(|error| format!("{path:?} settle stale mark against beneficiary: {error}"))?;
+    }
+
+    let landed_mark = env.primary_market_state().1.assets[ASSET as usize].effective_price;
+    let victim = env.primary_portfolio(0);
+    let victim_equity_i128 = (victim.capital.get() as i128)
+        .checked_add(victim.pnl.get())
+        .ok_or("victim equity overflow after stale mark")?;
+    let victim_equity = u128::try_from(victim_equity_i128)
+        .map_err(|_| format!("{path:?} stale mark made victim equity negative"))?;
+    env.trade_no_cpi(1, EXIT_MAKER_INDEX, ASSET, SIZE_Q, landed_mark, 0)
+        .map_err(|error| format!("{path:?} beneficiary public exit: {error}"))?;
+    if env.primary_portfolio(1).pnl.get() > 0 {
+        env.convert_released_pnl(1, u128::MAX)
+            .map_err(|error| format!("{path:?} convert beneficiary PnL: {error}"))?;
+    }
+    let beneficiary_capital = env.primary_portfolio(1).capital.get();
+    env.withdraw_primary(1, beneficiary_capital)
+        .map_err(|error| format!("{path:?} withdraw beneficiary capital: {error}"))?;
+    let beneficiary_payout = env.token_amount(env.actors[1].destination_token);
+    if u128::from(beneficiary_payout) != beneficiary_capital {
+        return Err(format!(
+            "{path:?} beneficiary SPL payout {beneficiary_payout} did not equal capital {beneficiary_capital}"
+        ));
+    }
+    if env.token_supply_observed() != env.initial_token_supply {
+        return Err(format!(
+            "{path:?} mark replay changed SPL supply: {}/{}",
+            env.token_supply_observed(),
+            env.initial_token_supply
+        ));
+    }
+    Ok(AssetGenerationMarkWorld {
+        old_market_id,
+        new_market_id,
+        landed_mark,
+        victim_equity,
+        beneficiary_payout,
+        observed_token_supply: env.token_supply_observed(),
+    })
+}
+
 fn run_asset_generation_trade_world(
     seed: [u8; 32],
     route: TradeRoute,
@@ -4256,6 +4465,18 @@ pub fn asset_generation_replay_strategy() -> impl Strategy<Value = ([u8; 32], Tr
             TradeRoute::Cpi,
             TradeRoute::BatchNoCpi,
             TradeRoute::BatchCpi,
+        ]),
+    )
+}
+
+#[allow(dead_code)]
+pub fn asset_generation_mark_replay_strategy(
+) -> impl Strategy<Value = ([u8; 32], AssetGenerationMarkPath)> {
+    (
+        any::<[u8; 32]>(),
+        prop::sample::select(vec![
+            AssetGenerationMarkPath::Auth,
+            AssetGenerationMarkPath::Ewma,
         ]),
     )
 }
