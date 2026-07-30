@@ -935,6 +935,16 @@ cargo build-sbf --no-default-features
 # All tests (integration, unit, alignment; LiteSVM loads target/deploy/percolator_prog.so)
 cargo test --all-targets
 
+# Blocker corpus and stateful public-interface fuzz gate.
+(cd tests/fixtures/auth_matcher && cargo build-sbf --tools-version v1.52)
+cargo test --test v16_program_fuzz_regressions -- --nocapture
+cargo test --test v16_program_stateful_fuzz -- --nocapture
+
+# Longer stateful campaign.
+PERCOLATOR_FUZZ_CASES=100 PERCOLATOR_FUZZ_ACTIONS=40 \
+  PERCOLATOR_FUZZ_SHRINK_ITERS=256 \
+  cargo test --test v16_program_stateful_fuzz -- --nocapture
+
 # Kani harnesses (requires kani toolchain; proof-specific 32-byte loops override this bound)
 cargo kani --tests --default-unwind 18
 ```

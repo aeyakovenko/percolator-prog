@@ -2662,6 +2662,7 @@ dependencies = [
  "pythnet-sdk",
  "rand 0.8.5",
  "rand_xorshift 0.3.0",
+ "serde",
  "serde_json",
  "serial_test",
  "shellexpand",

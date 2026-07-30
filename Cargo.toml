@@ -69,6 +69,7 @@ serial_test = "3"
 litesvm = "0.1"
 shellexpand = "3"
 serde_json = "1"
+serde = { version = "1", features = ["derive"] }
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = [
