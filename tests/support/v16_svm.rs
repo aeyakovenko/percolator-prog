@@ -555,6 +555,34 @@ impl V16Svm {
         )
     }
 
+    pub fn configure_permissionless_resolve(
+        &mut self,
+        stale_slots: u64,
+        force_close_delay_slots: u64,
+    ) -> Result<TxSuccess, String> {
+        let admin = copy_keypair(&self.admin);
+        self.send_program(
+            ProgInstruction::ConfigurePermissionlessResolve {
+                stale_slots,
+                force_close_delay_slots,
+            },
+            vec![
+                AccountMeta::new(admin.pubkey(), true),
+                AccountMeta::new(self.market, false),
+            ],
+            &[admin],
+        )
+    }
+
+    pub fn resolve_stale_permissionless(&mut self, now_slot: u64) -> Result<TxSuccess, String> {
+        self.warp_to_slot(now_slot);
+        self.send_program(
+            ProgInstruction::ResolveStalePermissionless { now_slot },
+            vec![AccountMeta::new(self.market, false)],
+            &[],
+        )
+    }
+
     pub fn close_resolved_primary(&mut self, actor_index: usize) -> Result<TxSuccess, String> {
         let actor = &self.actors[actor_index];
         self.send_program(

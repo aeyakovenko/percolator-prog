@@ -81,10 +81,11 @@ pub enum KnownBlocker {
     CompositeOracleTimeSkew,
     UnstagedMarkTarget,
     PendingMarkFeeReward,
+    FractionalCapSettlement,
 }
 
 impl KnownBlocker {
-    pub const COUNT: usize = 25;
+    pub const COUNT: usize = 26;
 
     pub const fn index(self) -> usize {
         match self {
@@ -113,6 +114,7 @@ impl KnownBlocker {
             Self::CompositeOracleTimeSkew => 22,
             Self::UnstagedMarkTarget => 23,
             Self::PendingMarkFeeReward => 24,
+            Self::FractionalCapSettlement => 25,
         }
     }
 }
@@ -434,6 +436,19 @@ pub struct PendingMarkFeeRewardReproduction {
     pub victim_payout: u64,
     pub diverted_value: u64,
     pub extracted_reward: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FractionalCapSettlementReproduction {
+    pub blocker: KnownBlocker,
+    pub target_price: u64,
+    pub stalled_price: u64,
+    pub successful_cranks: u16,
+    pub rollback_stalls: u8,
+    pub long_payout: u64,
+    pub short_payout: u64,
+    pub long_overpayment: u64,
+    pub short_underpayment: u64,
 }
 
 impl SubstitutionKind {
@@ -3822,6 +3837,167 @@ fn run_pending_mark_fee_reward_world(
     })
 }
 
+pub fn reproduce_fractional_cap_settlement(
+    mut seed: [u8; 32],
+) -> Result<FractionalCapSettlementReproduction, String> {
+    seed[0] ^= 0x65;
+    const OPEN_PRICE: u64 = 100;
+    const TARGET_PRICE: u64 = 1;
+    const CAP_BPS: u64 = 24;
+    const MAX_DT: u64 = 20;
+    const DEPOSIT: u128 = 1_000_000;
+
+    let mut env = V16Svm::new(
+        seed,
+        MarketConfig {
+            initial_price: OPEN_PRICE,
+            max_price_move_bps_per_slot: CAP_BPS,
+            max_accrual_dt_slots: MAX_DT,
+            min_funding_lifetime_slots: MAX_DT,
+            actor_deposits: [DEPOSIT, DEPOSIT, 1, 1, 1],
+            ..MarketConfig::default()
+        },
+    );
+    let supply_before = env.token_supply_observed();
+    env.configure_permissionless_resolve(10_000, 1)
+        .map_err(|error| format!("PR 365 configure permissionless resolve: {error}"))?;
+    env.configure_auth_mark(false, 0, 1, OPEN_PRICE)
+        .map_err(|error| format!("PR 365 configure AuthMark: {error}"))?;
+    env.trade_no_cpi(0, 1, 0, POS_SCALE as i128, OPEN_PRICE, 0)
+        .map_err(|error| format!("PR 365 open independent long/short: {error}"))?;
+    env.warp_to_slot(2);
+    env.push_auth_mark(0, 2, TARGET_PRICE)
+        .map_err(|error| format!("PR 365 publish honest micro-price target: {error}"))?;
+
+    let mut slot = 2u64
+        .checked_add(MAX_DT)
+        .ok_or("PR 365 initial crank slot overflow")?;
+    let mut successful_cranks = 0u16;
+    let mut nonmoving_attempts = 0u8;
+    let mut rollback_stalls = 0u8;
+    for _ in 0..200 {
+        env.warp_to_slot(slot);
+        let price_before = env.primary_market_state().1.assets[0].effective_price;
+        let market_before = env.market_data(false);
+        let long_before = env.primary_portfolio_data(0);
+        let short_before = env.primary_portfolio_data(1);
+        match env.crank(
+            1,
+            slot,
+            vec![CrankObservationHint {
+                asset_index: 0,
+                oracle_accounts: 0,
+            }],
+        ) {
+            Ok(_) => {
+                successful_cranks = successful_cranks
+                    .checked_add(1)
+                    .ok_or("PR 365 successful crank count overflow")?;
+                let price_after = env.primary_market_state().1.assets[0].effective_price;
+                if price_after == price_before {
+                    nonmoving_attempts = nonmoving_attempts.saturating_add(1);
+                } else {
+                    nonmoving_attempts = 0;
+                    rollback_stalls = 0;
+                }
+            }
+            Err(_) => {
+                if env.market_data(false) != market_before
+                    || env.primary_portfolio_data(0) != long_before
+                    || env.primary_portfolio_data(1) != short_before
+                {
+                    return Err("PR 365 rejected crank did not roll back economic state".into());
+                }
+                rollback_stalls = rollback_stalls.saturating_add(1);
+            }
+        }
+        let price_after = env.primary_market_state().1.assets[0].effective_price;
+        if price_after == TARGET_PRICE {
+            return Err("PR 365 fractional cap now reaches its target; remove quarantine".into());
+        }
+        if (nonmoving_attempts >= 3 || rollback_stalls >= 3) && price_after > TARGET_PRICE {
+            break;
+        }
+        slot = slot
+            .checked_add(MAX_DT)
+            .ok_or("PR 365 crank slot overflow")?;
+    }
+    let stalled = env.primary_market_state().1.assets[0];
+    if successful_cranks == 0
+        || (nonmoving_attempts < 3 && rollback_stalls < 3)
+        || stalled.effective_price <= TARGET_PRICE
+        || stalled.raw_oracle_target_price != TARGET_PRICE
+    {
+        return Err(format!(
+            "PR 365 did not reach a persistent max-dt floor: price={}, raw={}, successes={}, \
+             nonmoving={}, rejected={rollback_stalls}",
+            stalled.effective_price,
+            stalled.raw_oracle_target_price,
+            successful_cranks,
+            nonmoving_attempts
+        ));
+    }
+
+    let resolve_slot = slot
+        .checked_add(10_001)
+        .ok_or("PR 365 resolve slot overflow")?;
+    env.resolve_stale_permissionless(resolve_slot)
+        .map_err(|error| format!("PR 365 permissionless stale resolve: {error}"))?;
+    env.warp_to_slot(
+        resolve_slot
+            .checked_add(1)
+            .ok_or("PR 365 close slot overflow")?,
+    );
+    let (long_payout_u128, _) = drain_resolved_actor(&mut env, 0)?;
+    let (short_payout_u128, _) = drain_resolved_actor(&mut env, 1)?;
+    let long_payout =
+        u64::try_from(long_payout_u128).map_err(|_| "PR 365 long payout exceeds SPL range")?;
+    let short_payout =
+        u64::try_from(short_payout_u128).map_err(|_| "PR 365 short payout exceeds SPL range")?;
+    let target_long_payout = u64::try_from(DEPOSIT)
+        .ok()
+        .and_then(|deposit| deposit.checked_sub(OPEN_PRICE - TARGET_PRICE))
+        .ok_or("PR 365 target long payout arithmetic failed")?;
+    let target_short_payout = u64::try_from(DEPOSIT)
+        .ok()
+        .and_then(|deposit| deposit.checked_add(OPEN_PRICE - TARGET_PRICE))
+        .ok_or("PR 365 target short payout arithmetic failed")?;
+    let long_overpayment = long_payout.checked_sub(target_long_payout).ok_or_else(|| {
+        format!(
+            "PR 365 stalled settlement underpaid the long: actual={long_payout}, target={target_long_payout}, short={short_payout}/{target_short_payout}, stalled={}",
+            stalled.effective_price
+        )
+    })?;
+    let short_underpayment = target_short_payout.checked_sub(short_payout).ok_or_else(|| {
+        format!(
+            "PR 365 stalled settlement overpaid the short: actual={short_payout}, target={target_short_payout}, long={long_payout}/{target_long_payout}, stalled={}",
+            stalled.effective_price
+        )
+    })?;
+    if long_overpayment == 0
+        || long_overpayment != short_underpayment
+        || u128::from(long_payout) + u128::from(short_payout) != DEPOSIT * 2
+        || env.token_supply_observed() != supply_before
+    {
+        return Err(format!(
+            "PR 365 stalled mark did not transfer conserved terminal value: payouts={long_payout}/{short_payout}, target={target_long_payout}/{target_short_payout}, supply={}/{}",
+            env.token_supply_observed(),
+            supply_before
+        ));
+    }
+    Ok(FractionalCapSettlementReproduction {
+        blocker: KnownBlocker::FractionalCapSettlement,
+        target_price: TARGET_PRICE,
+        stalled_price: stalled.effective_price,
+        successful_cranks,
+        rollback_stalls,
+        long_payout,
+        short_payout,
+        long_overpayment,
+        short_underpayment,
+    })
+}
+
 pub fn reproduce_rounded_funding_omission(
     mut seed: [u8; 32],
 ) -> Result<RoundedFundingOmissionReproduction, String> {
@@ -6670,6 +6846,11 @@ pub fn target_staging_strategy() -> impl Strategy<Value = ([u8; 32], TargetStagi
 
 #[allow(dead_code)]
 pub fn pending_mark_fee_reward_seed_strategy() -> impl Strategy<Value = [u8; 32]> {
+    any::<[u8; 32]>()
+}
+
+#[allow(dead_code)]
+pub fn fractional_cap_settlement_seed_strategy() -> impl Strategy<Value = [u8; 32]> {
     any::<[u8; 32]>()
 }
 
