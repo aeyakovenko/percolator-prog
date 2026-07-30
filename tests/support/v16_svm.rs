@@ -656,6 +656,14 @@ impl V16Svm {
         )
     }
 
+    pub fn finalize_reset_side(&mut self, asset_index: u16, side: u8) -> Result<TxSuccess, String> {
+        self.send_program(
+            ProgInstruction::FinalizeResetSide { asset_index, side },
+            vec![AccountMeta::new(self.market, false)],
+            &[],
+        )
+    }
+
     pub fn trade_no_cpi(
         &mut self,
         taker: usize,
@@ -1179,6 +1187,25 @@ impl V16Svm {
                 AccountMeta::new(self.vault, false),
                 AccountMeta::new_readonly(spl_token::ID, false),
                 AccountMeta::new(self.backing_domain_ledger, false),
+            ],
+            &[authority],
+        )
+    }
+
+    pub fn top_up_insurance_domain(
+        &mut self,
+        domain: u16,
+        amount: u128,
+    ) -> Result<TxSuccess, String> {
+        let authority = copy_keypair(&self.admin);
+        self.send_program(
+            ProgInstruction::TopUpInsuranceDomain { domain, amount },
+            vec![
+                AccountMeta::new(authority.pubkey(), true),
+                AccountMeta::new(self.market, false),
+                AccountMeta::new(self.provider_source_token, false),
+                AccountMeta::new(self.vault, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
             ],
             &[authority],
         )

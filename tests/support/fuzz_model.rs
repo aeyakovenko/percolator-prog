@@ -2,7 +2,10 @@ use super::v16_svm::{
     MarketConfig, TxSuccess, V16Svm, ASSET_COUNT, EXIT_MAKER_INDEX, PRIMARY_ACTOR_COUNT,
     TX_CU_LIMIT, USER_COUNT,
 };
-use percolator::{BackingBucketStatusV16, MarketModeV16, PortfolioLegV16, SideModeV16, POS_SCALE};
+use percolator::{
+    v16_domain_pair_for_asset_index, AssetLifecycleV16, BackingBucketStatusV16, MarketModeV16,
+    PortfolioLegV16, SideModeV16, POS_SCALE,
+};
 use percolator_prog::{
     constants::{ORACLE_LEG_FLAG_DIVIDE_LEG2, ORACLE_LEG_FLAG_DIVIDE_LEG3, ORACLE_MODE_EWMA_MARK},
     ix::{BatchTradeCpiLeg, BatchTradeLeg, CrankObservationHint},
@@ -74,10 +77,11 @@ pub enum KnownBlocker {
     CrossDomainBSettlement,
     PendingEwmaTargetOverride,
     TerminalDustPayoutErasure,
+    CrossMarginInsuranceDrain,
 }
 
 impl KnownBlocker {
-    pub const COUNT: usize = 21;
+    pub const COUNT: usize = 22;
 
     pub const fn index(self) -> usize {
         match self {
@@ -102,6 +106,7 @@ impl KnownBlocker {
             Self::CrossDomainBSettlement => 18,
             Self::PendingEwmaTargetOverride => 19,
             Self::TerminalDustPayoutErasure => 20,
+            Self::CrossMarginInsuranceDrain => 21,
         }
     }
 }
@@ -368,6 +373,18 @@ pub struct TerminalDustPayoutErasureReproduction {
     pub attacker_withdrawn: u128,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CrossMarginInsuranceDrainReproduction {
+    pub blocker: KnownBlocker,
+    pub unrelated_insurance_spent: u128,
+    pub attacker_payout: u128,
+    pub attacker_profit: u128,
+    pub liquidation_calls: u16,
+    pub loser_close_calls: u16,
+    pub counterparty_close_calls: u16,
+    pub winner_close_calls: u16,
+}
+
 impl SubstitutionKind {
     const ALL: [Self; 5] = [
         Self::ForeignTradePortfolio,
@@ -587,6 +604,7 @@ impl Coverage {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct ProgressRank {
     market_mark_lag: u128,
+    market_loss_lag: u128,
     market_locks: u128,
     b_work: u128,
     stale_legs: u128,
@@ -599,17 +617,16 @@ impl ProgressRank {
     }
 
     fn account_actionable(self) -> bool {
-        self.market_locks != 0 || self.b_work != 0 || self.stale_legs != 0 || self.health_work != 0
+        self.b_work != 0 || self.stale_legs != 0 || self.health_work != 0
     }
 
-    fn key(self) -> (u128, u128, u128, u128, u128) {
-        (
-            self.market_mark_lag,
-            self.market_locks,
-            self.b_work,
-            self.stale_legs,
-            self.health_work,
-        )
+    fn reduced_from(self, before: Self) -> bool {
+        self.market_mark_lag < before.market_mark_lag
+            || self.market_loss_lag < before.market_loss_lag
+            || self.market_locks < before.market_locks
+            || self.b_work < before.b_work
+            || self.stale_legs < before.stale_legs
+            || self.health_work < before.health_work
     }
 }
 
@@ -650,6 +667,7 @@ pub struct ScenarioRunner {
     protocol_positions: [i128; ASSET_COUNT],
     liveness_limit: usize,
     retained: VecDeque<RetainedTrade>,
+    last_trade_rejection: Option<String>,
     pub coverage: Coverage,
 }
 
@@ -669,6 +687,7 @@ impl ScenarioRunner {
             protocol_positions: [0; ASSET_COUNT],
             liveness_limit: scenario_liveness_limit(scenario)?,
             retained: VecDeque::new(),
+            last_trade_rejection: None,
             coverage: Coverage {
                 loaded_program_hash,
                 ..Coverage::default()
@@ -749,12 +768,20 @@ impl ScenarioRunner {
                 }
                 if !self.try_normal_exit(user, asset)? {
                     let size = self.positions[user][asset];
-                    let counterparty = self.normal_exit_counterparty(user, asset, size);
                     let legs = vec![(asset, -size)];
+                    let diagnostics = self
+                        .normal_exit_counterparties(user, asset, size)
+                        .into_iter()
+                        .map(|counterparty| {
+                            self.trade_diagnostics(user, counterparty, &legs)
+                                .map(|diagnostic| format!("maker {counterparty}: {diagnostic}"))
+                        })
+                        .collect::<Result<Vec<_>, _>>()?
+                        .join("; ");
                     return Err(format!(
                         "all public trade routes rejected normal exit for user {user} asset \
-                         {asset}; {}",
-                        self.trade_diagnostics(user, counterparty, &legs)?
+                         {asset}; last rejection={:?}; {diagnostics}",
+                        self.last_trade_rejection
                     ));
                 }
                 self.coverage.user_positions_closed += 1;
@@ -826,32 +853,163 @@ impl ScenarioRunner {
             2 => TradeRoute::BatchNoCpi,
             _ => TradeRoute::BatchCpi,
         };
-        let counterparty = self.normal_exit_counterparty(user, asset, size);
         let legs = vec![(asset, -size)];
-        for route in [
-            preferred,
-            TradeRoute::NoCpi,
-            TradeRoute::Cpi,
-            TradeRoute::BatchNoCpi,
-            TradeRoute::BatchCpi,
-        ] {
-            if self.execute_trade(route, user, counterparty, legs.clone(), 0, 0, false)? {
-                return Ok(true);
+        let mut rejections = Vec::new();
+        for counterparty in self.normal_exit_counterparties(user, asset, size) {
+            for route in [
+                preferred,
+                TradeRoute::NoCpi,
+                TradeRoute::Cpi,
+                TradeRoute::BatchNoCpi,
+                TradeRoute::BatchCpi,
+            ] {
+                if self.execute_trade(route, user, counterparty, legs.clone(), 0, 0, false)? {
+                    return Ok(true);
+                }
+                if let Some(error) = self.last_trade_rejection.clone() {
+                    rejections.push(error);
+                }
             }
         }
+        if self.try_rebalance_exit(user, asset, size)? {
+            return Ok(true);
+        }
+        if let Some(error) = self.last_trade_rejection.clone() {
+            rejections.push(error);
+        }
+        if self.try_dead_leg_forfeit_exit(user, asset, size)? {
+            return Ok(true);
+        }
+        if let Some(error) = self.last_trade_rejection.clone() {
+            if rejections.last() != Some(&error) {
+                rejections.push(error);
+            }
+        }
+        self.last_trade_rejection = Some(rejections.join(" | "));
         Ok(false)
     }
 
-    fn normal_exit_counterparty(&self, user: usize, asset: usize, size: i128) -> usize {
-        (0..PRIMARY_ACTOR_COUNT)
+    fn try_rebalance_exit(
+        &mut self,
+        user: usize,
+        asset: usize,
+        size_before: i128,
+    ) -> Result<bool, String> {
+        let before = self.snapshot();
+        match self
+            .env
+            .rebalance_reduce(user, asset as u16, size_before.unsigned_abs())
+        {
+            Ok(success) => {
+                self.coverage.observe_success(None, &success);
+                self.assert_portfolio_frame(&before, &[user])?;
+                let size_after = decoded_legs(&self.env.primary_portfolio(user))
+                    .into_iter()
+                    .filter(|leg| leg.active && leg.asset_index as usize == asset)
+                    .try_fold(0i128, |total, leg| {
+                        total
+                            .checked_add(leg.basis_pos_q)
+                            .ok_or("rebalance exit position overflow")
+                    })?;
+                let user_delta = size_after
+                    .checked_sub(size_before)
+                    .ok_or("rebalance exit delta overflow")?;
+                self.positions[user][asset] = size_after;
+                self.protocol_positions[asset] = self.protocol_positions[asset]
+                    .checked_sub(user_delta)
+                    .ok_or("rebalance exit protocol attribution overflow")?;
+                self.assert_positions_match()?;
+                Ok(size_after == 0)
+            }
+            Err(error) => {
+                self.last_trade_rejection = Some(format!(
+                    "RebalanceReduce owner {user} asset {asset}: {error}"
+                ));
+                self.assert_snapshot_unchanged(&before)?;
+                Ok(false)
+            }
+        }
+    }
+
+    fn try_dead_leg_forfeit_exit(
+        &mut self,
+        user: usize,
+        asset: usize,
+        size_before: i128,
+    ) -> Result<bool, String> {
+        let account = self.env.primary_portfolio(user);
+        let Some(leg) = decoded_legs(&account)
+            .into_iter()
+            .find(|leg| leg.active && leg.asset_index as usize == asset)
+        else {
+            return Ok(false);
+        };
+        let (_, group) = self.env.primary_market_state();
+        let engine_asset = &group.assets[asset];
+        let side_mode = match leg.side {
+            percolator::SideV16::Long => engine_asset.mode_long,
+            percolator::SideV16::Short => engine_asset.mode_short,
+        };
+        let forfeit_enabled = group.mode == MarketModeV16::Recovery
+            || engine_asset.lifecycle == AssetLifecycleV16::Recovery
+            || matches!(
+                side_mode,
+                SideModeV16::DrainOnly | SideModeV16::ResetPending
+            );
+        if !forfeit_enabled {
+            return Ok(false);
+        }
+
+        let before = self.snapshot();
+        match self
+            .env
+            .forfeit_recovery_leg(user, asset as u16, u128::from(u64::MAX))
+        {
+            Ok(success) => {
+                self.coverage.observe_success(None, &success);
+                self.assert_portfolio_frame(&before, &[user])?;
+                let size_after = decoded_legs(&self.env.primary_portfolio(user))
+                    .into_iter()
+                    .filter(|leg| leg.active && leg.asset_index as usize == asset)
+                    .try_fold(0i128, |total, leg| {
+                        total
+                            .checked_add(leg.basis_pos_q)
+                            .ok_or("dead-leg forfeit position overflow")
+                    })?;
+                let user_delta = size_after
+                    .checked_sub(size_before)
+                    .ok_or("dead-leg forfeit delta overflow")?;
+                self.positions[user][asset] = size_after;
+                self.protocol_positions[asset] = self.protocol_positions[asset]
+                    .checked_sub(user_delta)
+                    .ok_or("dead-leg forfeit protocol attribution overflow")?;
+                self.assert_positions_match()?;
+                Ok(size_after == 0)
+            }
+            Err(error) => {
+                self.last_trade_rejection = Some(format!(
+                    "ForfeitRecoveryLeg owner {user} asset {asset}: {error}"
+                ));
+                self.assert_snapshot_unchanged(&before)?;
+                Ok(false)
+            }
+        }
+    }
+
+    fn normal_exit_counterparties(&self, user: usize, asset: usize, size: i128) -> Vec<usize> {
+        let mut counterparties: Vec<_> = (0..PRIMARY_ACTOR_COUNT)
             .filter(|candidate| *candidate != user)
-            .find(|candidate| {
+            .filter(|candidate| {
                 let candidate_size = self.positions[*candidate][asset];
                 candidate_size != 0
                     && candidate_size.signum() == -size.signum()
                     && candidate_size.unsigned_abs() >= size.unsigned_abs()
             })
-            .unwrap_or(EXIT_MAKER_INDEX)
+            .collect();
+        if !counterparties.contains(&EXIT_MAKER_INDEX) {
+            counterparties.push(EXIT_MAKER_INDEX);
+        }
+        counterparties
     }
 
     fn run_required_prefix(&mut self) -> Result<(), String> {
@@ -1184,12 +1342,15 @@ impl ScenarioRunner {
         };
         match result {
             Ok(success) => {
+                self.last_trade_rejection = None;
                 self.coverage.observe_success(Some(route), &success);
                 self.record_trade(taker, maker, &legs)?;
                 self.assert_portfolio_frame(&before, &[taker, maker])?;
                 Ok(true)
             }
             Err(error) => {
+                self.last_trade_rejection =
+                    Some(format!("{route:?} taker {taker} maker {maker}: {error}"));
                 self.coverage.route_reject[route.index()] += 1;
                 self.assert_snapshot_unchanged(&before)?;
                 if must_succeed {
@@ -1298,13 +1459,15 @@ impl ScenarioRunner {
                 let rank_after = self.progress_rank(actor).map_err(CrankFailure::Invariant)?;
                 if require_progress
                     && rank_before.actionable()
-                    && rank_after.key() >= rank_before.key()
+                    && !rank_after.reduced_from(rank_before)
                 {
                     return Err(CrankFailure::Invariant(format!(
-                        "sole public crank succeeded without rank decrease: {rank_before:?} -> {rank_after:?}"
+                        "sole public crank succeeded without rank decrease: {rank_before:?} -> \
+                         {rank_after:?}; {}",
+                        self.liveness_diagnostics()
                     )));
                 }
-                if rank_after.key() < rank_before.key() {
+                if rank_after.reduced_from(rank_before) {
                     self.coverage.crank_progress += 1;
                 }
                 Ok(())
@@ -1328,7 +1491,9 @@ impl ScenarioRunner {
     fn selected_observation(&self, actor: usize) -> Result<Vec<CrankObservationHint>, String> {
         let (_, group) = self.env.primary_market_state();
         let rank = self.progress_rank(actor)?;
-        if rank.b_work != 0 || rank.market_locks != 0 {
+        let terminal_or_global_lock =
+            group.bankruptcy_hlock_active || group.threshold_stress_active;
+        if rank.b_work != 0 || terminal_or_global_lock {
             return Ok(vec![]);
         }
         Ok((0..ASSET_COUNT)
@@ -1338,7 +1503,10 @@ impl ScenarioRunner {
                 let has_price_delta = engine_asset.raw_oracle_target_price
                     != engine_asset.effective_price
                     || profile.mark_ewma_e6 != engine_asset.effective_price;
-                has_price_delta && self.env.current_slot() > engine_asset.slot_last
+                let has_loss_currentness_lag = asset_contributes_to_loss_stale(engine_asset)
+                    && group.current_slot > engine_asset.slot_last;
+                (has_price_delta || has_loss_currentness_lag)
+                    && self.env.current_slot() > engine_asset.slot_last
             })
             .map(|asset| CrankObservationHint {
                 asset_index: asset as u16,
@@ -1440,6 +1608,9 @@ impl ScenarioRunner {
     }
 
     fn drain_one_progress_step(&mut self, preferred: Option<usize>) -> Result<(), String> {
+        if self.try_finalize_reset_side()? {
+            return Ok(());
+        }
         let mut candidates = Vec::with_capacity(PRIMARY_ACTOR_COUNT);
         if let Some(actor) = preferred {
             candidates.push(actor);
@@ -1461,7 +1632,9 @@ impl ScenarioRunner {
                 Err(CrankFailure::Rejected(error)) => {
                     failures.push(format!("actor {actor} rank {before:?}: {error}"))
                 }
-                Err(CrankFailure::Invariant(error)) => return Err(error),
+                Err(CrankFailure::Invariant(error)) => {
+                    return Err(format!("actor {actor} rank {before:?}: {error}"))
+                }
             }
         }
         Err(format!(
@@ -1469,6 +1642,64 @@ impl ScenarioRunner {
              {}; {}",
             failures.join(" | "),
             self.liveness_diagnostics()
+        ))
+    }
+
+    fn try_finalize_reset_side(&mut self) -> Result<bool, String> {
+        let (_, group) = self.env.primary_market_state();
+        let pending: Vec<_> = group
+            .assets
+            .iter()
+            .take(ASSET_COUNT)
+            .enumerate()
+            .flat_map(|(asset, state)| {
+                [
+                    (asset, 0u8, state.mode_long),
+                    (asset, 1u8, state.mode_short),
+                ]
+            })
+            .filter(|(asset, side, mode)| {
+                *mode == SideModeV16::ResetPending && reset_side_finalizable(&group, *asset, *side)
+            })
+            .collect();
+        if pending.is_empty() {
+            return Ok(false);
+        }
+        let pending_before = reset_pending_side_count(&group);
+        let mut failures = Vec::new();
+        let mut stale_prerequisites = 0usize;
+        for (asset, side, _) in pending {
+            let before = self.snapshot();
+            match self.env.finalize_reset_side(asset as u16, side) {
+                Ok(success) => {
+                    self.coverage.observe_success(None, &success);
+                    self.assert_portfolio_frame(&before, &[])?;
+                    let (_, after) = self.env.primary_market_state();
+                    let pending_after = reset_pending_side_count(&after);
+                    if pending_after >= pending_before {
+                        return Err(format!(
+                            "FinalizeResetSide succeeded without lowering pending-side rank: {pending_before} -> {pending_after}"
+                        ));
+                    }
+                    return Ok(true);
+                }
+                Err(error) => {
+                    self.assert_snapshot_unchanged(&before)?;
+                    if error.contains("Custom(19)") || error.contains("custom program error: 0x13")
+                    {
+                        stale_prerequisites += 1;
+                    } else {
+                        failures.push(format!("asset {asset} side {side}: {error}"));
+                    }
+                }
+            }
+        }
+        if failures.is_empty() && stale_prerequisites != 0 {
+            return Ok(false);
+        }
+        Err(format!(
+            "all permissionless ResetPending finalizers rejected: {}",
+            failures.join(" | ")
         ))
     }
 
@@ -1480,8 +1711,9 @@ impl ScenarioRunner {
             .take(ASSET_COUNT)
             .enumerate()
             .map(|(index, asset)| {
-                (
-                    index,
+                format!(
+                    "{index}:slot={},px={}/{},k={}/{},f={}/{},mode={:?}/{:?},oi={}/{},\
+                     stored={}/{},stale={}/{},pending={}/{},weight={}/{}",
                     asset.slot_last,
                     asset.effective_price,
                     asset.raw_oracle_target_price,
@@ -1489,6 +1721,18 @@ impl ScenarioRunner {
                     asset.k_short,
                     asset.f_long_num,
                     asset.f_short_num,
+                    asset.mode_long,
+                    asset.mode_short,
+                    asset.oi_eff_long_q,
+                    asset.oi_eff_short_q,
+                    asset.stored_pos_count_long,
+                    asset.stored_pos_count_short,
+                    asset.stale_account_count_long,
+                    asset.stale_account_count_short,
+                    asset.pending_obligation_count_long,
+                    asset.pending_obligation_count_short,
+                    asset.loss_weight_sum_long,
+                    asset.loss_weight_sum_short,
                 )
             })
             .collect();
@@ -1543,6 +1787,7 @@ impl ScenarioRunner {
         let account = self.env.primary_portfolio(actor);
         let (_, group) = self.env.primary_market_state();
         let mut market_mark_lag = 0u128;
+        let mut market_loss_lag = 0u128;
         for asset in 0..ASSET_COUNT {
             let profile = self.env.primary_profile(asset);
             let engine_asset = &group.assets[asset];
@@ -1563,6 +1808,13 @@ impl ScenarioRunner {
                         )
                     })
                     .ok_or("mark-progress rank overflow")?;
+            }
+            if asset_contributes_to_loss_stale(engine_asset) {
+                market_loss_lag = market_loss_lag
+                    .checked_add(u128::from(
+                        group.current_slot.saturating_sub(engine_asset.slot_last),
+                    ))
+                    .ok_or("loss-currentness rank overflow")?;
             }
         }
         let mut b_work = 0u128;
@@ -1639,10 +1891,14 @@ impl ScenarioRunner {
         } else {
             0
         };
+        let loss_work =
+            finalizable_reset_side_count(&group).max(usize::from(group.loss_stale_active));
         Ok(ProgressRank {
             market_mark_lag,
+            market_loss_lag,
             market_locks: u128::from(group.bankruptcy_hlock_active)
                 + u128::from(group.threshold_stress_active)
+                + loss_work as u128
                 + lapsed_live_backing,
             b_work,
             stale_legs,
@@ -4401,6 +4657,269 @@ fn run_terminal_dust_payout_world(
     })
 }
 
+pub fn reproduce_cross_margin_insurance_drain(
+    mut seed: [u8; 32],
+) -> Result<CrossMarginInsuranceDrainReproduction, String> {
+    seed[0] ^= 0x90;
+    const MARK: u64 = 100;
+    const ATTACKER_DEPOSIT: u128 = 20_200;
+    const INSURANCE_TOPUP: u128 = 100_000;
+
+    let mut env = V16Svm::new(
+        seed,
+        MarketConfig {
+            initial_price: MARK,
+            max_price_move_bps_per_slot: 10_000,
+            max_accrual_dt_slots: 1,
+            min_funding_lifetime_slots: 1,
+            maintenance_fee_per_slot: 200,
+            actor_deposits: [200, 10_000, 10_000, 1, 1],
+            actor_token_balances: [1_000, 20_000, 20_000, 10, 10],
+            ..MarketConfig::default()
+        },
+    );
+    let supply_before = env.token_supply_observed();
+    env.top_up_insurance_domain(1, INSURANCE_TOPUP)
+        .map_err(|error| format!("PR 290 fund unrelated asset-0 insurance: {error}"))?;
+    env.trade_no_cpi(0, 2, 0, POS_SCALE as i128, MARK, 0)
+        .map_err(|error| format!("PR 290 open unrelated asset-0 leg: {error}"))?;
+    env.trade_no_cpi(0, 1, 1, -(POS_SCALE as i128), MARK, 0)
+        .map_err(|error| format!("PR 290 open loss-bearing asset-1 leg: {error}"))?;
+
+    env.warp_to_slot(2);
+    for asset_index in [0, 1] {
+        let observations = vec![CrankObservationHint {
+            asset_index,
+            oracle_accounts: 0,
+        }];
+        env.crank(3, 2, observations)
+            .map_err(|error| format!("PR 290 accrue asset {asset_index}: {error}"))?;
+    }
+    env.sync_maintenance_fee(0, 2)
+        .map_err(|error| format!("PR 290 exhaust loser capital: {error}"))?;
+    let fee_drained = env.primary_portfolio(0);
+    if fee_drained.capital.get() != 0
+        || !portfolio_has_active_asset(&fee_drained, 0)
+        || !portfolio_has_active_asset(&fee_drained, 1)
+    {
+        return Err(format!(
+            "PR 290 maintenance setup did not retain both zero-capital legs: capital={}, asset0={}, asset1={}",
+            fee_drained.capital.get(),
+            portfolio_has_active_asset(&fee_drained, 0),
+            portfolio_has_active_asset(&fee_drained, 1)
+        ));
+    }
+
+    let mut mark = MARK;
+    for slot in 3..=12 {
+        mark = mark.checked_mul(2).ok_or("PR 290 adverse mark overflow")?;
+        env.warp_to_slot(slot);
+        env.push_auth_mark(1, slot, mark)
+            .map_err(|error| format!("PR 290 publish asset-1 mark at slot {slot}: {error}"))?;
+        env.crank(
+            3,
+            slot,
+            vec![CrankObservationHint {
+                asset_index: 1,
+                oracle_accounts: 0,
+            }],
+        )
+        .map_err(|error| format!("PR 290 advance asset-1 mark at slot {slot}: {error}"))?;
+    }
+    env.rebalance_reduce(0, 1, POS_SCALE)
+        .map_err(|error| format!("PR 290 owner flattens loss-bearing asset-1 leg: {error}"))?;
+    let flattened = env.primary_portfolio(0);
+    if portfolio_has_active_asset(&flattened, 1)
+        || !portfolio_has_active_asset(&flattened, 0)
+        || flattened.pnl.get() >= 0
+        || flattened.capital.get() != 0
+    {
+        return Err(format!(
+            "PR 290 did not isolate account debt from the surviving asset-0 leg: capital={}, pnl={}, asset0={}, asset1={}",
+            flattened.capital.get(),
+            flattened.pnl.get(),
+            portfolio_has_active_asset(&flattened, 0),
+            portfolio_has_active_asset(&flattened, 1)
+        ));
+    }
+
+    let spent_before = env.primary_market_state().1.insurance_domain_spent[1];
+    let mut liquidation_calls = 0u16;
+    for _ in 0..512 {
+        let account = env.primary_portfolio(0);
+        if account.pnl.get() >= 0 && !portfolio_has_active_asset(&account, 0) {
+            break;
+        }
+        match env.crank(0, 12, vec![]) {
+            Ok(_) => {
+                liquidation_calls = liquidation_calls
+                    .checked_add(1)
+                    .ok_or("PR 290 liquidation call count overflow")?;
+            }
+            Err(error) if error.contains("Custom(23)") => break,
+            Err(error) => return Err(format!("PR 290 public liquidation failed: {error}")),
+        }
+    }
+    let unrelated_insurance_spent = env.primary_market_state().1.insurance_domain_spent[1]
+        .checked_sub(spent_before)
+        .ok_or("PR 290 insurance spent counter decreased")?;
+    if liquidation_calls == 0 || unrelated_insurance_spent == 0 {
+        return Err(format!(
+            "PR 290 no longer drains unrelated insurance: calls={liquidation_calls}, spent={unrelated_insurance_spent}"
+        ));
+    }
+
+    env.resolve_market()
+        .map_err(|error| format!("PR 290 resolve drained market: {error}"))?;
+    let (loser_payout, loser_close_calls) = drain_resolved_actor(&mut env, 0)?;
+    let (counterparty_payout, counterparty_close_calls) = drain_resolved_actor(&mut env, 2)?;
+    let (winner_payout, winner_close_calls) = drain_resolved_actor(&mut env, 1)?;
+    let attacker_payout = loser_payout
+        .checked_add(counterparty_payout)
+        .and_then(|value| value.checked_add(winner_payout))
+        .ok_or("PR 290 attacker payout overflow")?;
+    let attacker_profit = attacker_payout
+        .checked_sub(ATTACKER_DEPOSIT)
+        .ok_or("PR 290 attacker coalition did not recover deposits")?;
+    if attacker_profit == 0 || env.token_supply_observed() != supply_before {
+        return Err(format!(
+            "PR 290 cross-domain spend was not publicly extractable: payout={attacker_payout}, profit={attacker_profit}, supply={}/{}",
+            env.token_supply_observed(),
+            supply_before
+        ));
+    }
+    Ok(CrossMarginInsuranceDrainReproduction {
+        blocker: KnownBlocker::CrossMarginInsuranceDrain,
+        unrelated_insurance_spent,
+        attacker_payout,
+        attacker_profit,
+        liquidation_calls,
+        loser_close_calls,
+        counterparty_close_calls,
+        winner_close_calls,
+    })
+}
+
+fn drain_resolved_actor(env: &mut V16Svm, actor: usize) -> Result<(u128, u16), String> {
+    let destination = env.actors[actor].destination_token;
+    let payout_before = env.token_amount(destination);
+    let mut calls = 0u16;
+    for _ in 0..512 {
+        let market_before = env.market_data(false);
+        let portfolio_before = env.primary_portfolio_data(actor);
+        let destination_before = env.token_amount(destination);
+        if env.close_resolved_primary(actor).is_ok() {
+            calls = calls
+                .checked_add(1)
+                .ok_or("resolved close call count overflow")?;
+        }
+        let _ = env.claim_resolved_payout_topup_primary(actor);
+        if env.market_data(false) == market_before
+            && env.primary_portfolio_data(actor) == portfolio_before
+            && env.token_amount(destination) == destination_before
+        {
+            let payout = env
+                .token_amount(destination)
+                .checked_sub(payout_before)
+                .ok_or("resolved payout destination decreased")?;
+            return Ok((u128::from(payout), calls));
+        }
+    }
+    Err(format!(
+        "resolved actor {actor} did not reach a fixed point in 512 calls"
+    ))
+}
+
+fn portfolio_has_active_asset(
+    account: &percolator_prog::state::PortfolioAccountV16,
+    asset_index: usize,
+) -> bool {
+    decoded_legs(account)
+        .into_iter()
+        .any(|leg| leg.active && leg.asset_index as usize == asset_index)
+}
+
+fn reset_pending_side_count(group: &percolator_prog::state::MarketGroupV16) -> usize {
+    group
+        .assets
+        .iter()
+        .take(ASSET_COUNT)
+        .map(|asset| {
+            usize::from(asset.mode_long == SideModeV16::ResetPending)
+                + usize::from(asset.mode_short == SideModeV16::ResetPending)
+        })
+        .sum()
+}
+
+fn finalizable_reset_side_count(group: &percolator_prog::state::MarketGroupV16) -> usize {
+    group
+        .assets
+        .iter()
+        .take(ASSET_COUNT)
+        .enumerate()
+        .map(|(asset, _state)| {
+            usize::from(reset_side_finalizable(group, asset, 0))
+                + usize::from(reset_side_finalizable(group, asset, 1))
+        })
+        .sum()
+}
+
+fn reset_side_finalizable(
+    group: &percolator_prog::state::MarketGroupV16,
+    asset_index: usize,
+    side: u8,
+) -> bool {
+    let Some(asset) = group.assets.get(asset_index) else {
+        return false;
+    };
+    let Ok((long_domain, short_domain)) = v16_domain_pair_for_asset_index(asset_index) else {
+        return false;
+    };
+    let (mode, stored, stale, pending, domain) = if side == 0 {
+        (
+            asset.mode_long,
+            asset.stored_pos_count_long,
+            asset.stale_account_count_long,
+            asset.pending_obligation_count_long,
+            long_domain,
+        )
+    } else {
+        (
+            asset.mode_short,
+            asset.stored_pos_count_short,
+            asset.stale_account_count_short,
+            asset.pending_obligation_count_short,
+            short_domain,
+        )
+    };
+    mode == SideModeV16::ResetPending
+        && stored == 0
+        && stale == 0
+        && pending == 0
+        && group
+            .pending_domain_loss_barriers
+            .get(domain)
+            .copied()
+            .unwrap_or(u64::MAX)
+            == 0
+}
+
+fn asset_contributes_to_loss_stale(asset: &percolator::AssetStateV16) -> bool {
+    matches!(
+        asset.lifecycle,
+        AssetLifecycleV16::Active | AssetLifecycleV16::DrainOnly
+    ) && (asset.oi_eff_long_q != 0
+        || asset.oi_eff_short_q != 0
+        || asset.stored_pos_count_long != 0
+        || asset.stored_pos_count_short != 0
+        || asset.stale_account_count_long != 0
+        || asset.stale_account_count_short != 0
+        || asset.pending_obligation_count_long != 0
+        || asset.pending_obligation_count_short != 0
+        || asset.loss_weight_sum_long != 0
+        || asset.loss_weight_sum_short != 0)
+}
+
 fn execute_trade_route(
     env: &mut V16Svm,
     route: TradeRoute,
@@ -5519,6 +6038,11 @@ pub fn terminal_dust_payout_erasure_strategy() -> impl Strategy<Value = ([u8; 32
         any::<[u8; 32]>(),
         prop::sample::select(vec![TradeRoute::NoCpi, TradeRoute::BatchNoCpi]),
     )
+}
+
+#[allow(dead_code)]
+pub fn cross_margin_insurance_drain_seed_strategy() -> impl Strategy<Value = [u8; 32]> {
+    any::<[u8; 32]>()
 }
 
 #[allow(dead_code)]
