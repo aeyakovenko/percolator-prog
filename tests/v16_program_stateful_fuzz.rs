@@ -11,8 +11,9 @@ use support::fuzz_model::{
     reproduce_forfeit_funding_erasure, reproduce_omitted_rescue_liquidation,
     reproduce_pending_ewma_inheritance, reproduce_post_expiry_backing_fee,
     reproduce_rebalance_funding_erasure, reproduce_reclaimable_ewma_fee,
-    reproduce_rounded_funding_omission, reproduce_trade_funding_erasure,
-    reproduce_trade_retry_replay, rounded_funding_seed_strategy, run_scenario, scenario_strategy,
+    reproduce_rounded_funding_omission, reproduce_trade_driven_liquidation_reward,
+    reproduce_trade_funding_erasure, reproduce_trade_retry_replay, rounded_funding_seed_strategy,
+    run_scenario, scenario_strategy, trade_driven_liquidation_reward_strategy,
     trade_funding_erasure_strategy, trade_retry_replay_strategy,
 };
 
@@ -217,6 +218,21 @@ proptest! {
         prop_assert!(
             result.is_ok(),
             "PR 273 no longer reproduces for seed {:?}: {}",
+            seed,
+            result.unwrap_err()
+        );
+    }
+
+    #[test]
+    fn v16_program_pr280_trade_driven_liquidation_reward_fuzz(
+        (seed, mode, route) in trade_driven_liquidation_reward_strategy()
+    ) {
+        let result = reproduce_trade_driven_liquidation_reward(seed, mode, route);
+        prop_assert!(
+            result.is_ok(),
+            "PR 280 {:?} {:?} no longer reproduces for seed {:?}: {}",
+            mode,
+            route,
             seed,
             result.unwrap_err()
         );

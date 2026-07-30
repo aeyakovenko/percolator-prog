@@ -8,9 +8,10 @@ use support::{
         reproduce_forfeit_funding_erasure, reproduce_omitted_rescue_liquidation,
         reproduce_pending_ewma_inheritance, reproduce_post_expiry_backing_fee,
         reproduce_rebalance_funding_erasure, reproduce_reclaimable_ewma_fee,
-        reproduce_rounded_funding_omission, reproduce_trade_funding_erasure,
-        reproduce_trade_retry_replay, run_scenario, CompositeRoundingCase, KnownBlocker,
-        PostExpiryBackingCase, Scenario, TradeRoute,
+        reproduce_rounded_funding_omission, reproduce_trade_driven_liquidation_reward,
+        reproduce_trade_funding_erasure, reproduce_trade_retry_replay, run_scenario,
+        CompositeRoundingCase, KnownBlocker, PostExpiryBackingCase, Scenario,
+        TradeDrivenLiquidationMode, TradeRoute,
     },
     open_lof_manifest::{missing_prs, quarantined_prs, validate_manifest},
 };
@@ -312,16 +313,40 @@ fn v16_program_pr273_recovery_forfeit_erases_elapsed_funding() {
 }
 
 #[test]
+fn v16_program_pr280_trade_driven_liquidation_reward_is_extractable() {
+    for mode in [
+        TradeDrivenLiquidationMode::Ewma,
+        TradeDrivenLiquidationMode::HybridAfterHours,
+    ] {
+        for route in [TradeRoute::NoCpi, TradeRoute::BatchNoCpi] {
+            let reproduction = reproduce_trade_driven_liquidation_reward([0x80; 32], mode, route)
+                .unwrap_or_else(|error| {
+                    panic!("PR 280 {mode:?} {route:?} no longer reproduces: {error}")
+                });
+            assert_eq!(
+                reproduction.blocker,
+                KnownBlocker::TradeDrivenLiquidationReward
+            );
+            assert!(reproduction.cranker_reward > reproduction.movement_fee);
+            assert!(reproduction.victim_penalty > 0);
+            assert!(reproduction.victim_capital_loss > 0);
+            assert!(reproduction.attacker_profit > 0);
+            assert!(reproduction.attacker_extracted > 2_001);
+        }
+    }
+}
+
+#[test]
 fn v16_program_open_lof_manifest_is_complete_and_honest() {
     validate_manifest().expect("open LoF manifest structure");
     assert_eq!(
         quarantined_prs(),
-        [220, 223, 224, 225, 231, 253, 260, 271, 272, 273, 329, 343, 367, 381]
+        [220, 223, 224, 225, 231, 253, 260, 271, 272, 273, 280, 329, 343, 367, 381]
     );
     let missing = missing_prs();
     assert_eq!(
         missing.len(),
-        85,
+        84,
         "update the explicit evidence state when an executable adapter lands"
     );
     assert!(!missing.contains(&220));
@@ -334,6 +359,7 @@ fn v16_program_open_lof_manifest_is_complete_and_honest() {
     assert!(!missing.contains(&271));
     assert!(!missing.contains(&272));
     assert!(!missing.contains(&273));
+    assert!(!missing.contains(&280));
     assert!(!missing.contains(&329));
     assert!(!missing.contains(&343));
     assert!(!missing.contains(&367));

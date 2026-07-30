@@ -67,10 +67,11 @@ pub enum KnownBlocker {
     TradeFundingErasure,
     RebalanceFundingErasure,
     ForfeitFundingErasure,
+    TradeDrivenLiquidationReward,
 }
 
 impl KnownBlocker {
-    pub const COUNT: usize = 14;
+    pub const COUNT: usize = 15;
 
     pub const fn index(self) -> usize {
         match self {
@@ -88,6 +89,7 @@ impl KnownBlocker {
             Self::TradeFundingErasure => 11,
             Self::RebalanceFundingErasure => 12,
             Self::ForfeitFundingErasure => 13,
+            Self::TradeDrivenLiquidationReward => 14,
         }
     }
 }
@@ -163,6 +165,12 @@ pub struct CpiBackingFeeReproduction {
 pub enum CompositeRoundingCase {
     Pr329LargeMove,
     Pr381MicroMove,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum TradeDrivenLiquidationMode {
+    Ewma,
+    HybridAfterHours,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -244,6 +252,19 @@ pub struct ForfeitFundingErasureReproduction {
     pub attack_victim_received: u128,
     pub victim_claim_loss: i128,
     pub attacker_payout_gain: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TradeDrivenLiquidationRewardReproduction {
+    pub blocker: KnownBlocker,
+    pub mode: TradeDrivenLiquidationMode,
+    pub route: TradeRoute,
+    pub movement_fee: u128,
+    pub victim_penalty: u128,
+    pub cranker_reward: u128,
+    pub victim_capital_loss: u128,
+    pub attacker_extracted: u128,
+    pub attacker_profit: u128,
 }
 
 impl SubstitutionKind {
@@ -3118,6 +3139,209 @@ pub fn reproduce_reclaimable_ewma_fee(
     })
 }
 
+pub fn reproduce_trade_driven_liquidation_reward(
+    mut seed: [u8; 32],
+    mode: TradeDrivenLiquidationMode,
+    route: TradeRoute,
+) -> Result<TradeDrivenLiquidationRewardReproduction, String> {
+    if !matches!(route, TradeRoute::NoCpi | TradeRoute::BatchNoCpi) {
+        return Err(format!(
+            "PR 280 needs a caller-reported no-CPI price, got {route:?}"
+        ));
+    }
+    seed[0] ^= match mode {
+        TradeDrivenLiquidationMode::Ewma => 0x80,
+        TradeDrivenLiquidationMode::HybridAfterHours => 0x81,
+    };
+    const MARK: u64 = 1_000_000;
+    const VICTIM_DEPOSIT: u128 = 50_000;
+    const HONEST_DEPOSIT: u128 = 2_000_000;
+    const ATTACK_DEPOSIT: u128 = 1_000;
+    const CRANKER_DEPOSIT: u128 = 1;
+    const TINY_Q: i128 = (POS_SCALE / 10_000) as i128;
+
+    let mut env = V16Svm::new(
+        seed,
+        MarketConfig {
+            initial_price: MARK,
+            h_max: 6_480_000,
+            min_nonzero_mm_req: 599,
+            min_nonzero_im_req: 600,
+            maintenance_margin_bps: 500,
+            initial_margin_bps: 500,
+            liquidation_fee_bps: 5,
+            liquidation_fee_cap: percolator::MAX_PROTOCOL_FEE_ABS,
+            min_liquidation_abs: 500,
+            max_price_move_bps_per_slot: 24,
+            max_accrual_dt_slots: 1,
+            max_abs_funding_e9_per_slot: 1_000,
+            min_funding_lifetime_slots: 10_000_000,
+            actor_deposits: [
+                VICTIM_DEPOSIT,
+                HONEST_DEPOSIT,
+                ATTACK_DEPOSIT,
+                ATTACK_DEPOSIT,
+                CRANKER_DEPOSIT,
+            ],
+            ..MarketConfig::default()
+        },
+    );
+    env.update_liquidation_fee_policy(10_000)
+        .map_err(|error| format!("{mode:?} {route:?} set full cranker share: {error}"))?;
+
+    let mut oracle_accounts = Vec::new();
+    let (trade_slot, reported_price) = match mode {
+        TradeDrivenLiquidationMode::Ewma => {
+            env.configure_ewma_mark(0, 1, MARK, 1, 0)
+                .map_err(|error| format!("{route:?} configure EWMA: {error}"))?;
+            env.warp_to_slot(2);
+            (2, 999_800)
+        }
+        TradeDrivenLiquidationMode::HybridAfterHours => {
+            env.set_clock(1, 100);
+            let feed = [0xedu8; 32];
+            let pyth = env.set_pyth_price(&feed, MARK as i64, -6, 0, 100);
+            env.configure_hybrid_oracle(0, 1, 100, 0, [feed, [0; 32], [0; 32]], &[pyth], 1, 0)
+                .map_err(|error| format!("{route:?} configure hybrid fallback: {error}"))?;
+            oracle_accounts.push(pyth);
+            env.set_clock(3, 1_000);
+            (3, 999_850)
+        }
+    };
+
+    env.trade_no_cpi(0, 1, 0, POS_SCALE as i128, MARK, 0)
+        .map_err(|error| format!("{mode:?} {route:?} open independent victim: {error}"))?;
+    let supply_before = env.token_supply_observed();
+    let insurance_before_move = env.primary_market_state().1.insurance;
+    execute_trade_route(&mut env, route, 2, 3, 0, TINY_Q, reported_price, 0)
+        .map_err(|error| format!("{mode:?} {route:?} paid mark-moving wash trade: {error}"))?;
+    let (profile_after_move, group_after_move) = env.primary_market_state();
+    let movement_fee = group_after_move
+        .insurance
+        .checked_sub(insurance_before_move)
+        .ok_or("PR 280 wash trade decreased insurance")?;
+    let queued_mark = profile_after_move.mark_ewma_e6;
+    if movement_fee == 0 || queued_mark >= MARK {
+        return Err(format!(
+            "{mode:?} {route:?} did not create a paid downward mark move: fee {movement_fee}, mark {queued_mark}"
+        ));
+    }
+
+    let victim_capital_before = env.primary_portfolio(0).capital.get();
+    let cranker_capital_before = env.primary_portfolio(4).capital.get();
+    let observations = vec![CrankObservationHint {
+        asset_index: 0,
+        oracle_accounts: oracle_accounts.len() as u8,
+    }];
+    let mut liquidated = false;
+    for attempt in 0..8 {
+        let result = env.crank_with_reward(
+            4,
+            0,
+            trade_slot,
+            if attempt == 0 {
+                observations.clone()
+            } else {
+                Vec::new()
+            },
+            if attempt == 0 { &oracle_accounts } else { &[] },
+        );
+        result.map_err(|error| {
+            format!("{mode:?} {route:?} honest liquidation crank {attempt}: {error}")
+        })?;
+        let victim_q = decoded_legs(&env.primary_portfolio(0))
+            .into_iter()
+            .find(|leg| leg.active && leg.asset_index == 0)
+            .map(|leg| leg.basis_pos_q.unsigned_abs())
+            .unwrap_or(0);
+        if victim_q < POS_SCALE {
+            liquidated = true;
+            break;
+        }
+    }
+    if !liquidated {
+        return Err(format!(
+            "{mode:?} {route:?} paid mark move did not liquidate the independent victim"
+        ));
+    }
+    let after_liquidation = env.primary_market_state().1;
+    let cranker_reward = env
+        .primary_portfolio(4)
+        .capital
+        .get()
+        .checked_sub(cranker_capital_before)
+        .ok_or("PR 280 liquidation reduced cranker capital")?;
+    let retained_penalty = after_liquidation
+        .insurance
+        .checked_sub(group_after_move.insurance)
+        .ok_or("PR 280 liquidation reduced insurance")?;
+    let victim_penalty = cranker_reward
+        .checked_add(retained_penalty)
+        .ok_or("PR 280 victim penalty overflow")?;
+    let victim_capital_loss = victim_capital_before
+        .checked_sub(env.primary_portfolio(0).capital.get())
+        .ok_or("PR 280 liquidation increased victim capital")?;
+    if victim_penalty == 0
+        || cranker_reward == 0
+        || cranker_reward <= movement_fee
+        || victim_capital_loss == 0
+    {
+        return Err(format!(
+            "{mode:?} {route:?} liquidation reward is not a profitable victim transfer: movement {movement_fee}, penalty {victim_penalty}, reward {cranker_reward}, victim loss {victim_capital_loss}"
+        ));
+    }
+
+    for actor in [2, 3] {
+        env.crank(actor, trade_slot, Vec::new())
+            .map_err(|error| format!("{mode:?} {route:?} refresh wash actor {actor}: {error}"))?;
+    }
+    execute_trade_route(&mut env, route, 2, 3, 0, -TINY_Q, queued_mark, 0)
+        .map_err(|error| format!("{mode:?} {route:?} close wash pair: {error}"))?;
+    for actor in [2, 3] {
+        let pnl = env.primary_portfolio(actor).pnl.get();
+        if pnl > 0 {
+            env.convert_released_pnl(actor, pnl as u128)
+                .map_err(|error| format!("{mode:?} {route:?} convert actor {actor}: {error}"))?;
+        }
+    }
+    for actor in [2, 3, 4] {
+        let capital = env.primary_portfolio(actor).capital.get();
+        env.withdraw_primary(actor, capital)
+            .map_err(|error| format!("{mode:?} {route:?} withdraw actor {actor}: {error}"))?;
+    }
+    let attacker_extracted = [2, 3, 4].into_iter().try_fold(0u128, |sum, actor| {
+        sum.checked_add(u128::from(
+            env.token_amount(env.actors[actor].destination_token),
+        ))
+        .ok_or("PR 280 attacker payout overflow")
+    })?;
+    let attacker_committed = ATTACK_DEPOSIT
+        .checked_mul(2)
+        .and_then(|value| value.checked_add(CRANKER_DEPOSIT))
+        .ok_or("PR 280 attacker commitment overflow")?;
+    let attacker_profit = attacker_extracted
+        .checked_sub(attacker_committed)
+        .ok_or("PR 280 attack remained unprofitable")?;
+    if attacker_profit == 0 || env.token_supply_observed() != supply_before {
+        return Err(format!(
+            "{mode:?} {route:?} did not finish as conserved extractable profit: extracted {attacker_extracted}, committed {attacker_committed}, supply {}/{}",
+            env.token_supply_observed(),
+            supply_before
+        ));
+    }
+    Ok(TradeDrivenLiquidationRewardReproduction {
+        blocker: KnownBlocker::TradeDrivenLiquidationReward,
+        mode,
+        route,
+        movement_fee,
+        victim_penalty,
+        cranker_reward,
+        victim_capital_loss,
+        attacker_extracted,
+        attacker_profit,
+    })
+}
+
 fn execute_trade_route(
     env: &mut V16Svm,
     route: TradeRoute,
@@ -3947,6 +4171,19 @@ pub fn rebalance_funding_erasure_seed_strategy() -> impl Strategy<Value = [u8; 3
 #[allow(dead_code)]
 pub fn forfeit_funding_erasure_seed_strategy() -> impl Strategy<Value = [u8; 32]> {
     any::<[u8; 32]>()
+}
+
+#[allow(dead_code)]
+pub fn trade_driven_liquidation_reward_strategy(
+) -> impl Strategy<Value = ([u8; 32], TradeDrivenLiquidationMode, TradeRoute)> {
+    (
+        any::<[u8; 32]>(),
+        prop::sample::select(vec![
+            TradeDrivenLiquidationMode::Ewma,
+            TradeDrivenLiquidationMode::HybridAfterHours,
+        ]),
+        prop::sample::select(vec![TradeRoute::NoCpi, TradeRoute::BatchNoCpi]),
+    )
 }
 
 #[allow(dead_code)]
