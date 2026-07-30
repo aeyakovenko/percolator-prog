@@ -71,10 +71,11 @@ pub enum KnownBlocker {
     CrossDomainBackingDoubleSpend,
     AssetGenerationMarkReplay,
     AssetGenerationConfigReplay,
+    CrossDomainBSettlement,
 }
 
 impl KnownBlocker {
-    pub const COUNT: usize = 18;
+    pub const COUNT: usize = 19;
 
     pub const fn index(self) -> usize {
         match self {
@@ -96,6 +97,7 @@ impl KnownBlocker {
             Self::CrossDomainBackingDoubleSpend => 15,
             Self::AssetGenerationMarkReplay => 16,
             Self::AssetGenerationConfigReplay => 17,
+            Self::CrossDomainBSettlement => 18,
         }
     }
 }
@@ -318,6 +320,23 @@ pub struct AssetGenerationConfigReplayReproduction {
     pub victim_equity_loss: u128,
     pub beneficiary_extra_payout: u64,
     pub observed_token_supply: u128,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CrossDomainBSettlementReproduction {
+    pub blocker: KnownBlocker,
+    pub b_target_num: u128,
+    pub pnl_loss: u128,
+    pub unfunded_claim_before_num: u128,
+    pub unfunded_claim_after_num: u128,
+    pub funded_claim_before_num: u128,
+    pub funded_claim_after_num: u128,
+    pub wrong_domain_reduction_num: u128,
+    pub correct_domain_reduction_num: u128,
+    pub reduction_steps: u8,
+    pub stranded_position_q: u128,
+    pub failed_terminal_reductions: u8,
+    pub full_withdraw_rejected: bool,
 }
 
 impl SubstitutionKind {
@@ -3664,6 +3683,272 @@ pub fn reproduce_cross_domain_backing_double_spend(
     })
 }
 
+pub fn reproduce_cross_domain_b_settlement(
+    mut seed: [u8; 32],
+) -> Result<CrossDomainBSettlementReproduction, String> {
+    seed[0] ^= 0x81;
+    const INITIAL_PRICE: u64 = 100;
+    const FIRST_MARK: u64 = 105;
+    const BANKRUPTCY_MARK: u64 = 500;
+    const ATTACKER_Q: i128 = 20 * POS_SCALE as i128;
+    const UNFUNDED_DOMAIN: usize = 1;
+    const FUNDED_DOMAIN: usize = 3;
+    const ATTACKER_DEPOSIT: u128 = 100_000;
+
+    let mut env = V16Svm::new(
+        seed,
+        MarketConfig {
+            max_price_move_bps_per_slot: 10_000,
+            max_accrual_dt_slots: 1,
+            min_funding_lifetime_slots: 1,
+            actor_deposits: [
+                ATTACKER_DEPOSIT,
+                100_000,
+                250,
+                100_000,
+                super::v16_svm::EXIT_MAKER_DEPOSIT,
+            ],
+            ..MarketConfig::default()
+        },
+    );
+    let supply_before = env.token_supply_observed();
+    for asset_index in [0u16, 1u16] {
+        env.configure_auth_mark(false, asset_index, 1, INITIAL_PRICE)
+            .map_err(|error| {
+                format!("PR 281 configure asset {asset_index} initial mark: {error}")
+            })?;
+    }
+    env.top_up_backing_bucket(FUNDED_DOMAIN as u16, 20_000, 1_000)
+        .map_err(|error| format!("PR 281 fund asset-1 source domain: {error}"))?;
+    for asset_index in [0u16, 1u16] {
+        env.trade_no_cpi(0, 1, asset_index, ATTACKER_Q, INITIAL_PRICE, 0)
+            .map_err(|error| format!("PR 281 open asset {asset_index} claim pair: {error}"))?;
+    }
+
+    env.warp_to_slot(2);
+    for asset_index in [0u16, 1u16] {
+        env.push_auth_mark(asset_index, 2, FIRST_MARK)
+            .map_err(|error| format!("PR 281 move asset {asset_index}: {error}"))?;
+        crank_adapter_steps(&mut env, 0, 2, asset_index, 4)
+            .map_err(|error| format!("PR 281 settle asset {asset_index} first claim: {error}"))?;
+    }
+    let first_claims = env.primary_portfolio(0);
+    if source_claim_for_domain(&first_claims, UNFUNDED_DOMAIN) != 100 * percolator::BOUND_SCALE
+        || source_claim_for_domain(&first_claims, FUNDED_DOMAIN) != 100 * percolator::BOUND_SCALE
+    {
+        return Err(format!(
+            "PR 281 did not create independent 100-atom source claims: unfunded {}, funded {}",
+            source_claim_for_domain(&first_claims, UNFUNDED_DOMAIN),
+            source_claim_for_domain(&first_claims, FUNDED_DOMAIN)
+        ));
+    }
+
+    env.trade_no_cpi(0, 2, 1, POS_SCALE as i128, FIRST_MARK, 0)
+        .map_err(|error| format!("PR 281 open bankrupt asset-1 short: {error}"))?;
+    env.warp_to_slot(7);
+    env.push_auth_mark(1, 7, BANKRUPTCY_MARK)
+        .map_err(|error| format!("PR 281 push bankruptcy mark: {error}"))?;
+    crank_adapter_steps(&mut env, 0, 7, 1, 4)
+        .map_err(|error| format!("PR 281 settle winner before B booking: {error}"))?;
+    let observation = vec![CrankObservationHint {
+        asset_index: 1,
+        oracle_accounts: env.primary_profile(1).oracle_leg_count,
+    }];
+    let mut bankrupt_progress = false;
+    for _ in 0..12 {
+        if env.crank(2, 7, observation.clone()).is_ok() {
+            bankrupt_progress = true;
+        }
+        if env.primary_market_state().1.assets[1].b_long_num != 0 {
+            break;
+        }
+    }
+    let b_target_num = env.primary_market_state().1.assets[1].b_long_num;
+    if !bankrupt_progress || b_target_num == 0 {
+        return Err("PR 281 public liquidation did not book asset-1 social loss".into());
+    }
+
+    let before_settle = env.primary_portfolio(0);
+    let unfunded_claim_before_num = source_claim_for_domain(&before_settle, UNFUNDED_DOMAIN);
+    let funded_claim_before_num = source_claim_for_domain(&before_settle, FUNDED_DOMAIN);
+    if unfunded_claim_before_num == 0 || funded_claim_before_num <= unfunded_claim_before_num {
+        return Err(format!(
+            "PR 281 pre-settlement claims lack sparse-domain discriminator: unfunded {unfunded_claim_before_num}, funded {funded_claim_before_num}"
+        ));
+    }
+    crank_adapter_steps(&mut env, 0, 7, 1, 8)
+        .map_err(|error| format!("PR 281 settle winner B loss: {error}"))?;
+    let after_settle = env.primary_portfolio(0);
+    let settled_leg = decoded_legs(&after_settle)
+        .into_iter()
+        .find(|leg| leg.active && leg.asset_index == 1)
+        .ok_or("PR 281 winner lost active asset-1 leg during B settlement")?;
+    if settled_leg.b_snap != b_target_num {
+        return Err(format!(
+            "PR 281 winner B snapshot {} did not reach target {b_target_num}",
+            settled_leg.b_snap
+        ));
+    }
+    let pnl_loss = u128::try_from(
+        before_settle
+            .pnl
+            .get()
+            .checked_sub(after_settle.pnl.get())
+            .ok_or("PR 281 B-settlement PnL subtraction overflow")?,
+    )
+    .map_err(|_| "PR 281 B settlement did not reduce winner PnL")?;
+    let unfunded_claim_after_num = source_claim_for_domain(&after_settle, UNFUNDED_DOMAIN);
+    let funded_claim_after_num = source_claim_for_domain(&after_settle, FUNDED_DOMAIN);
+    let expected_total_reduction = pnl_loss
+        .checked_mul(percolator::BOUND_SCALE)
+        .ok_or("PR 281 claim reduction overflow")?;
+    let wrong_domain_reduction = unfunded_claim_before_num
+        .checked_sub(unfunded_claim_after_num)
+        .ok_or("PR 281 unrelated claim increased during B settlement")?;
+    let correct_domain_reduction = funded_claim_before_num
+        .checked_sub(funded_claim_after_num)
+        .ok_or("PR 281 affected claim increased during B settlement")?;
+    if pnl_loss == 0
+        || wrong_domain_reduction == 0
+        || wrong_domain_reduction.checked_add(correct_domain_reduction)
+            != Some(expected_total_reduction)
+        || correct_domain_reduction >= expected_total_reduction
+    {
+        return Err(format!(
+            "PR 281 no longer reproduces wrong-domain-first B settlement: loss {pnl_loss}, unfunded {unfunded_claim_before_num}->{unfunded_claim_after_num}, funded {funded_claim_before_num}->{funded_claim_after_num}"
+        ));
+    }
+
+    let mut reduction_steps = 0u8;
+    let (stranded_position_q, failed_terminal_reductions) = loop {
+        let position = observed_positions(&env.primary_portfolio(0))?[1];
+        if position <= 0 {
+            return Err(format!(
+                "PR 281 affected position unexpectedly exited or flipped: {position}"
+            ));
+        }
+        let position_q = position as u128;
+        let candidates = [
+            position_q,
+            (position_q / 2).max(1),
+            (position_q / 3).max(1),
+            (position_q / 4).max(1),
+            (position_q / 5).max(1),
+            (position_q / 7).max(1),
+            (position_q / 10).max(1),
+            position_q.min(POS_SCALE),
+            position_q % POS_SCALE,
+            position_q.saturating_sub(POS_SCALE),
+            1,
+        ];
+        let mut progressed = false;
+        let mut failures = Vec::new();
+        let mut all_counter_underflow = true;
+        for (candidate_index, reduce_q) in candidates.into_iter().enumerate() {
+            if reduce_q == 0 || candidates[..candidate_index].contains(&reduce_q) {
+                continue;
+            }
+            let market_before = env.market_data(false);
+            let portfolio_before = env.primary_portfolio_data(0);
+            match env.rebalance_reduce(0, 1, reduce_q) {
+                Ok(_) => {
+                    reduction_steps = reduction_steps
+                        .checked_add(1)
+                        .ok_or("PR 281 reduction step counter overflow")?;
+                    for _ in 0..4 {
+                        if env.crank(0, 7, observation.clone()).is_err() {
+                            break;
+                        }
+                    }
+                    progressed = true;
+                    break;
+                }
+                Err(error) => {
+                    if env.market_data(false) != market_before
+                        || env.primary_portfolio_data(0) != portfolio_before
+                    {
+                        return Err(format!("PR 281 failed reduction {reduce_q} mutated state"));
+                    }
+                    all_counter_underflow &= error.contains("Custom(25)");
+                    failures.push(format!("{reduce_q}: {error}"));
+                }
+            }
+        }
+        if progressed {
+            if reduction_steps >= 64 {
+                return Err("PR 281 reduction search exceeded 64 successful steps".into());
+            }
+            continue;
+        }
+        if position_q != POS_SCALE || !all_counter_underflow || failures.len() < 6 {
+            return Err(format!(
+                "PR 281 terminal reduction search stopped at unexpected position {position_q}: {}",
+                failures.join("; ")
+            ));
+        }
+        break (
+            position_q,
+            u8::try_from(failures.len()).map_err(|_| "PR 281 terminal failure count overflow")?,
+        );
+    };
+
+    for _ in 0..8 {
+        let market_before = env.market_data(false);
+        let portfolio_before = env.primary_portfolio_data(0);
+        let _ = env.crank(0, 7, observation.clone());
+        if env.market_data(false) != market_before
+            || env.primary_portfolio_data(0) != portfolio_before
+        {
+            return Err("PR 281 honest crank progressed the terminal residual".into());
+        }
+    }
+    let market_before_trade = env.market_data(false);
+    let portfolio_before_trade = env.primary_portfolio_data(0);
+    let bilateral_exit = env.trade_no_cpi(
+        0,
+        EXIT_MAKER_INDEX,
+        1,
+        -(stranded_position_q as i128),
+        BANKRUPTCY_MARK,
+        0,
+    );
+    if bilateral_exit.is_ok()
+        || env.market_data(false) != market_before_trade
+        || env.primary_portfolio_data(0) != portfolio_before_trade
+    {
+        return Err("PR 281 bilateral exit unexpectedly moved the residual".into());
+    }
+    let winner_capital = env.primary_portfolio(0).capital.get();
+    let market_before_withdraw = env.market_data(false);
+    let portfolio_before_withdraw = env.primary_portfolio_data(0);
+    let destination_before = env.token_amount(env.actors[0].destination_token);
+    let full_withdraw = env.withdraw_primary(0, winner_capital);
+    let full_withdraw_rejected = full_withdraw.is_err();
+    if !full_withdraw_rejected
+        || env.market_data(false) != market_before_withdraw
+        || env.primary_portfolio_data(0) != portfolio_before_withdraw
+        || env.token_amount(env.actors[0].destination_token) != destination_before
+        || env.token_supply_observed() != supply_before
+    {
+        return Err("PR 281 full withdrawal did not reject atomically".into());
+    }
+    Ok(CrossDomainBSettlementReproduction {
+        blocker: KnownBlocker::CrossDomainBSettlement,
+        b_target_num,
+        pnl_loss,
+        unfunded_claim_before_num,
+        unfunded_claim_after_num,
+        funded_claim_before_num,
+        funded_claim_after_num,
+        wrong_domain_reduction_num: wrong_domain_reduction,
+        correct_domain_reduction_num: correct_domain_reduction,
+        reduction_steps,
+        stranded_position_q,
+        failed_terminal_reductions,
+        full_withdraw_rejected,
+    })
+}
+
 fn execute_trade_route(
     env: &mut V16Svm,
     route: TradeRoute,
@@ -4813,6 +5098,11 @@ pub fn cross_domain_backing_seed_strategy() -> impl Strategy<Value = [u8; 32]> {
 }
 
 #[allow(dead_code)]
+pub fn cross_domain_b_settlement_seed_strategy() -> impl Strategy<Value = [u8; 32]> {
+    any::<[u8; 32]>()
+}
+
+#[allow(dead_code)]
 pub fn scenario_strategy(max_actions: usize) -> impl Strategy<Value = Scenario> {
     (
         any::<[u8; 32]>(),
@@ -4962,6 +5252,20 @@ fn decoded_legs(account: &percolator_prog::state::PortfolioAccountV16) -> Vec<Po
         .iter()
         .filter_map(|leg| leg.try_to_runtime().ok())
         .collect()
+}
+
+fn source_claim_for_domain(
+    account: &percolator_prog::state::PortfolioAccountV16,
+    domain: usize,
+) -> u128 {
+    account
+        .source_domains
+        .iter()
+        .find(|source| {
+            source.source_claim_market_id.get() != 0 && source.domain.get() as usize == domain
+        })
+        .map(|source| source.source_claim_bound_num.get())
+        .unwrap_or(0)
 }
 
 fn observed_positions(

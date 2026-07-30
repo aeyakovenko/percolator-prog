@@ -6,14 +6,14 @@ use support::{
         reproduce_asset_generation_config_replay, reproduce_asset_generation_mark_replay,
         reproduce_asset_generation_trade_replay, reproduce_composite_oracle_rounding,
         reproduce_cpi_backing_fee_siphon, reproduce_cpi_caller_fee_siphon,
-        reproduce_cross_domain_backing_double_spend, reproduce_forfeit_funding_erasure,
-        reproduce_omitted_rescue_liquidation, reproduce_pending_ewma_inheritance,
-        reproduce_post_expiry_backing_fee, reproduce_rebalance_funding_erasure,
-        reproduce_reclaimable_ewma_fee, reproduce_rounded_funding_omission,
-        reproduce_trade_driven_liquidation_reward, reproduce_trade_funding_erasure,
-        reproduce_trade_retry_replay, run_scenario, AssetGenerationConfigPath,
-        AssetGenerationMarkPath, CompositeRoundingCase, KnownBlocker, PostExpiryBackingCase,
-        Scenario, TradeDrivenLiquidationMode, TradeRoute,
+        reproduce_cross_domain_b_settlement, reproduce_cross_domain_backing_double_spend,
+        reproduce_forfeit_funding_erasure, reproduce_omitted_rescue_liquidation,
+        reproduce_pending_ewma_inheritance, reproduce_post_expiry_backing_fee,
+        reproduce_rebalance_funding_erasure, reproduce_reclaimable_ewma_fee,
+        reproduce_rounded_funding_omission, reproduce_trade_driven_liquidation_reward,
+        reproduce_trade_funding_erasure, reproduce_trade_retry_replay, run_scenario,
+        AssetGenerationConfigPath, AssetGenerationMarkPath, CompositeRoundingCase, KnownBlocker,
+        PostExpiryBackingCase, Scenario, TradeDrivenLiquidationMode, TradeRoute,
     },
     open_lof_manifest::{missing_prs, quarantined_prs, validate_manifest},
 };
@@ -407,19 +407,41 @@ fn v16_program_pr277_stale_config_replays_across_asset_generation() {
 }
 
 #[test]
+fn v16_program_pr281_wrong_domain_b_settlement_strands_dust_position() {
+    let reproduction = reproduce_cross_domain_b_settlement([0x81; 32])
+        .unwrap_or_else(|error| panic!("PR 281 no longer reproduces: {error}"));
+    assert_eq!(reproduction.blocker, KnownBlocker::CrossDomainBSettlement);
+    assert!(reproduction.b_target_num > 0);
+    assert!(reproduction.pnl_loss > 0);
+    assert!(reproduction.unfunded_claim_after_num < reproduction.unfunded_claim_before_num);
+    assert!(reproduction.funded_claim_after_num < reproduction.funded_claim_before_num);
+    assert_eq!(
+        (reproduction.unfunded_claim_before_num - reproduction.unfunded_claim_after_num)
+            + (reproduction.funded_claim_before_num - reproduction.funded_claim_after_num),
+        reproduction.pnl_loss * percolator::BOUND_SCALE
+    );
+    assert!(reproduction.wrong_domain_reduction_num > 0);
+    assert!(reproduction.correct_domain_reduction_num > 0);
+    assert!(reproduction.reduction_steps > 0);
+    assert_eq!(reproduction.stranded_position_q, percolator::POS_SCALE);
+    assert!(reproduction.failed_terminal_reductions >= 6);
+    assert!(reproduction.full_withdraw_rejected);
+}
+
+#[test]
 fn v16_program_open_lof_manifest_is_complete_and_honest() {
     validate_manifest().expect("open LoF manifest structure");
     assert_eq!(
         quarantined_prs(),
         [
-            220, 223, 224, 225, 231, 253, 260, 267, 271, 272, 273, 275, 277, 280, 329, 343, 367,
-            381
+            220, 223, 224, 225, 231, 253, 260, 267, 271, 272, 273, 275, 277, 280, 281, 329, 343,
+            367, 381
         ]
     );
     let missing = missing_prs();
     assert_eq!(
         missing.len(),
-        81,
+        80,
         "update the explicit evidence state when an executable adapter lands"
     );
     assert!(!missing.contains(&220));
@@ -436,6 +458,7 @@ fn v16_program_open_lof_manifest_is_complete_and_honest() {
     assert!(!missing.contains(&275));
     assert!(!missing.contains(&277));
     assert!(!missing.contains(&280));
+    assert!(!missing.contains(&281));
     assert!(!missing.contains(&329));
     assert!(!missing.contains(&343));
     assert!(!missing.contains(&367));
