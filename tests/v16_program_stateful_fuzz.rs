@@ -3,10 +3,12 @@ mod support;
 use proptest::prelude::*;
 use support::fuzz_model::{
     asset_generation_replay_strategy, composite_rounding_strategy, cpi_backing_fee_seed_strategy,
-    cpi_caller_fee_strategy, omitted_rescue_seed_strategy, post_expiry_backing_case_strategy,
+    cpi_caller_fee_strategy, omitted_rescue_seed_strategy, pending_ewma_inheritance_strategy,
+    post_expiry_backing_case_strategy, reclaimable_ewma_fee_strategy,
     reproduce_asset_generation_trade_replay, reproduce_composite_oracle_rounding,
     reproduce_cpi_backing_fee_siphon, reproduce_cpi_caller_fee_siphon,
-    reproduce_omitted_rescue_liquidation, reproduce_post_expiry_backing_fee,
+    reproduce_omitted_rescue_liquidation, reproduce_pending_ewma_inheritance,
+    reproduce_post_expiry_backing_fee, reproduce_reclaimable_ewma_fee,
     reproduce_rounded_funding_omission, reproduce_trade_retry_replay,
     rounded_funding_seed_strategy, run_scenario, scenario_strategy, trade_retry_replay_strategy,
 };
@@ -144,6 +146,34 @@ proptest! {
         prop_assert!(
             result.is_ok(),
             "PR 253 no longer reproduces for seed {:?}: {}",
+            seed,
+            result.unwrap_err()
+        );
+    }
+
+    #[test]
+    fn v16_program_pr260_pending_ewma_inheritance_fuzz(
+        (seed, route) in pending_ewma_inheritance_strategy()
+    ) {
+        let result = reproduce_pending_ewma_inheritance(seed, route);
+        prop_assert!(
+            result.is_ok(),
+            "PR 260 {:?} no longer reproduces for seed {:?}: {}",
+            route,
+            seed,
+            result.unwrap_err()
+        );
+    }
+
+    #[test]
+    fn v16_program_pr225_reclaimable_ewma_fee_fuzz(
+        (seed, route) in reclaimable_ewma_fee_strategy()
+    ) {
+        let result = reproduce_reclaimable_ewma_fee(seed, route);
+        prop_assert!(
+            result.is_ok(),
+            "PR 225 {:?} no longer reproduces for seed {:?}: {}",
+            route,
             seed,
             result.unwrap_err()
         );

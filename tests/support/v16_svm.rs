@@ -29,7 +29,7 @@ pub const USER_DEPOSIT: u128 = 100_000_000;
 pub const EXIT_MAKER_DEPOSIT: u128 = 2_000_000_000;
 pub const TX_CU_LIMIT: u64 = 1_400_000;
 const TOKEN_BALANCE_PER_USER: u64 = 200_000_000;
-const EXIT_MAKER_TOKEN_BALANCE: u64 = 2_500_000_000;
+pub const EXIT_MAKER_TOKEN_BALANCE: u64 = 2_500_000_000;
 const FOREIGN_TOKEN_BALANCE: u64 = 200_000_000;
 const MATCHER_CONTEXT_LEN: usize = 320;
 
@@ -41,6 +41,7 @@ pub struct MarketConfig {
     pub min_nonzero_im_req: u128,
     pub maintenance_margin_bps: u64,
     pub initial_margin_bps: u64,
+    pub max_trading_fee_bps: u64,
     pub liquidation_fee_bps: u64,
     pub liquidation_fee_cap: u128,
     pub max_price_move_bps_per_slot: u64,
@@ -49,6 +50,7 @@ pub struct MarketConfig {
     pub min_funding_lifetime_slots: u64,
     pub maintenance_fee_per_slot: u128,
     pub actor_deposits: [u128; PRIMARY_ACTOR_COUNT],
+    pub actor_token_balances: [u64; PRIMARY_ACTOR_COUNT],
 }
 
 impl Default for MarketConfig {
@@ -60,6 +62,7 @@ impl Default for MarketConfig {
             min_nonzero_im_req: 2,
             maintenance_margin_bps: 10_000,
             initial_margin_bps: 10_000,
+            max_trading_fee_bps: 10_000,
             liquidation_fee_bps: 0,
             liquidation_fee_cap: 0,
             max_price_move_bps_per_slot: 1_000,
@@ -73,6 +76,13 @@ impl Default for MarketConfig {
                 USER_DEPOSIT,
                 USER_DEPOSIT,
                 EXIT_MAKER_DEPOSIT,
+            ],
+            actor_token_balances: [
+                TOKEN_BALANCE_PER_USER,
+                TOKEN_BALANCE_PER_USER,
+                TOKEN_BALANCE_PER_USER,
+                TOKEN_BALANCE_PER_USER,
+                EXIT_MAKER_TOKEN_BALANCE,
             ],
         }
     }
@@ -178,11 +188,7 @@ impl V16Svm {
                 &matcher_program,
                 &matcher_context,
             );
-            let source_balance = if i == EXIT_MAKER_INDEX {
-                EXIT_MAKER_TOKEN_BALANCE
-            } else {
-                TOKEN_BALANCE_PER_USER
-            };
+            let source_balance = config.actor_token_balances[i];
             token_supply += source_balance as u128;
             token_accounts.extend([source_token, destination_token]);
             svm.airdrop(&signer.pubkey(), 10_000_000_000)
@@ -366,7 +372,7 @@ impl V16Svm {
                 min_nonzero_im_req: config.min_nonzero_im_req,
                 maintenance_margin_bps: config.maintenance_margin_bps,
                 initial_margin_bps: config.initial_margin_bps,
-                max_trading_fee_bps: 10_000,
+                max_trading_fee_bps: config.max_trading_fee_bps,
                 trade_fee_base_bps: 0,
                 liquidation_fee_bps: config.liquidation_fee_bps,
                 liquidation_fee_cap: config.liquidation_fee_cap,
@@ -758,6 +764,32 @@ impl V16Svm {
         mark_min_fee: u64,
     ) -> Result<TxSuccess, String> {
         let authority = copy_keypair(&self.admin);
+        self.send_program(
+            ProgInstruction::ConfigureEwmaMark {
+                asset_index,
+                now_slot,
+                initial_mark_e6: mark,
+                mark_ewma_halflife_slots: halflife_slots,
+                mark_min_fee,
+            },
+            vec![
+                AccountMeta::new(authority.pubkey(), true),
+                AccountMeta::new(self.market, false),
+            ],
+            &[authority],
+        )
+    }
+
+    pub fn configure_ewma_mark_for_actor(
+        &mut self,
+        actor_index: usize,
+        asset_index: u16,
+        now_slot: u64,
+        mark: u64,
+        halflife_slots: u64,
+        mark_min_fee: u64,
+    ) -> Result<TxSuccess, String> {
+        let authority = copy_keypair(&self.actors[actor_index].signer);
         self.send_program(
             ProgInstruction::ConfigureEwmaMark {
                 asset_index,

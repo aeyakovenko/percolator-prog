@@ -62,10 +62,12 @@ pub enum KnownBlocker {
     CpiBackingFeeSiphon,
     CompositeOracleRounding,
     RoundedFundingOmission,
+    PendingEwmaInheritance,
+    ReclaimableEwmaFee,
 }
 
 impl KnownBlocker {
-    pub const COUNT: usize = 9;
+    pub const COUNT: usize = 11;
 
     pub const fn index(self) -> usize {
         match self {
@@ -78,6 +80,8 @@ impl KnownBlocker {
             Self::CpiBackingFeeSiphon => 6,
             Self::CompositeOracleRounding => 7,
             Self::RoundedFundingOmission => 8,
+            Self::PendingEwmaInheritance => 9,
+            Self::ReclaimableEwmaFee => 10,
         }
     }
 }
@@ -177,6 +181,29 @@ pub struct RoundedFundingOmissionReproduction {
     pub attack_f_short_num: i128,
     pub victim_payout_loss: u64,
     pub attacker_payout_gain: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PendingEwmaInheritanceReproduction {
+    pub blocker: KnownBlocker,
+    pub route: TradeRoute,
+    pub seed_cost: u128,
+    pub victim_loss: u128,
+    pub attacker_gain: u128,
+    pub net_extracted_tokens: u64,
+    pub pending_mark: u64,
+    pub applied_mark: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ReclaimableEwmaFeeReproduction {
+    pub blocker: KnownBlocker,
+    pub route: TradeRoute,
+    pub fee_paid: u128,
+    pub fee_reclaimed: u128,
+    pub victim_loss: u128,
+    pub attacker_gain: u128,
+    pub effective_mark: u64,
 }
 
 impl SubstitutionKind {
@@ -2633,6 +2660,324 @@ pub fn reproduce_rounded_funding_omission(
     })
 }
 
+pub fn reproduce_pending_ewma_inheritance(
+    mut seed: [u8; 32],
+    route: TradeRoute,
+) -> Result<PendingEwmaInheritanceReproduction, String> {
+    seed[0] ^= 0x60;
+    const MARK: u64 = 1_000_000;
+    const LARGE_Q: i128 = 50 * POS_SCALE as i128;
+    const LARGE_DEPOSIT: u128 = 100_000_000;
+    const SEED_DEPOSIT: u128 = 2_000_000;
+
+    let mut env = V16Svm::new(
+        seed,
+        MarketConfig {
+            initial_price: MARK,
+            max_trading_fee_bps: 100,
+            max_price_move_bps_per_slot: 100,
+            max_accrual_dt_slots: 1,
+            actor_deposits: [
+                SEED_DEPOSIT,
+                SEED_DEPOSIT,
+                LARGE_DEPOSIT,
+                LARGE_DEPOSIT,
+                super::v16_svm::EXIT_MAKER_DEPOSIT,
+            ],
+            ..MarketConfig::default()
+        },
+    );
+    env.configure_ewma_mark(0, 1, MARK, 1, 0)
+        .map_err(|error| format!("{route:?} configure EWMA mark: {error}"))?;
+    env.top_up_backing_bucket(1, 10_000_000, 100)
+        .map_err(|error| format!("{route:?} fund EWMA source backing: {error}"))?;
+    env.warp_to_slot(2);
+    let retained = build_retained_trade(&mut env, route, 2, 3, 0, LARGE_Q, MARK, 0);
+
+    let seed_capital_before =
+        env.primary_portfolio(0).capital.get() + env.primary_portfolio(1).capital.get();
+    env.trade_no_cpi(0, 1, 0, POS_SCALE as i128, MARK * 2, 0)
+        .map_err(|error| format!("{route:?} seed paid EWMA move: {error}"))?;
+    let seed_capital_after =
+        env.primary_portfolio(0).capital.get() + env.primary_portfolio(1).capital.get();
+    let seed_cost = seed_capital_before
+        .checked_sub(seed_capital_after)
+        .ok_or("pending EWMA seed increased pair capital")?;
+    let pending_mark = env.primary_profile(0).mark_ewma_e6;
+    let effective_before = env.primary_market_state().1.assets[0].effective_price;
+    if seed_cost == 0 || pending_mark <= MARK || effective_before != MARK {
+        return Err(format!(
+            "{route:?} seed did not create a paid pending mark: cost {seed_cost}, target {pending_mark}, effective {effective_before}"
+        ));
+    }
+
+    env.land_retained(retained)
+        .map_err(|error| format!("{route:?} pre-signed large trade no longer lands: {error}"))?;
+    env.warp_to_slot(3);
+    let oracle_accounts = env.primary_profile(0).oracle_leg_count;
+    let observations = || {
+        vec![CrankObservationHint {
+            asset_index: 0,
+            oracle_accounts,
+        }]
+    };
+    env.crank(2, 3, observations())
+        .map_err(|error| format!("{route:?} apply pending EWMA to attacker: {error}"))?;
+    env.crank(3, 3, observations())
+        .map_err(|error| format!("{route:?} apply pending EWMA to victim: {error}"))?;
+    let applied_mark = env.primary_market_state().1.assets[0].effective_price;
+    if applied_mark <= MARK {
+        return Err(format!(
+            "{route:?} queued EWMA mark did not apply: {applied_mark}"
+        ));
+    }
+
+    execute_trade_route(&mut env, route, 2, 3, 0, -LARGE_Q, applied_mark, 0)
+        .map_err(|error| format!("{route:?} close inherited EWMA exposure: {error}"))?;
+    let victim_capital = env.primary_portfolio(3).capital.get();
+    let victim_loss = LARGE_DEPOSIT
+        .checked_sub(victim_capital)
+        .ok_or("pending EWMA victim capital increased")?;
+    let attacker_pnl = env.primary_portfolio(2).pnl.get();
+    if attacker_pnl != victim_loss as i128 {
+        return Err(format!(
+            "{route:?} inherited EWMA PnL does not match victim loss: pnl {attacker_pnl}, loss {victim_loss}"
+        ));
+    }
+    if victim_loss != 0 {
+        env.convert_released_pnl(2, victim_loss)
+            .map_err(|error| format!("{route:?} convert inherited EWMA PnL: {error}"))?;
+    }
+    let attacker_gain = env
+        .primary_portfolio(2)
+        .capital
+        .get()
+        .checked_sub(LARGE_DEPOSIT)
+        .ok_or("pending EWMA attacker remained below principal")?;
+    if attacker_gain != victim_loss || attacker_gain <= seed_cost {
+        return Err(format!(
+            "{route:?} pending EWMA inheritance is no longer profitable: gain {attacker_gain}, victim loss {victim_loss}, seed cost {seed_cost}"
+        ));
+    }
+    let net_extracted = attacker_gain
+        .checked_sub(seed_cost)
+        .ok_or("pending EWMA net extraction underflow")?;
+    env.withdraw_primary(2, net_extracted)
+        .map_err(|error| format!("{route:?} withdraw inherited EWMA profit: {error}"))?;
+    let net_extracted_tokens = env.token_amount(env.actors[2].destination_token);
+    if u128::from(net_extracted_tokens) != net_extracted {
+        return Err(format!(
+            "{route:?} inherited EWMA SPL extraction mismatch: {net_extracted} vs {net_extracted_tokens}"
+        ));
+    }
+    Ok(PendingEwmaInheritanceReproduction {
+        blocker: KnownBlocker::PendingEwmaInheritance,
+        route,
+        seed_cost,
+        victim_loss,
+        attacker_gain,
+        net_extracted_tokens,
+        pending_mark,
+        applied_mark,
+    })
+}
+
+pub fn reproduce_reclaimable_ewma_fee(
+    mut seed: [u8; 32],
+    route: TradeRoute,
+) -> Result<ReclaimableEwmaFeeReproduction, String> {
+    seed[0] ^= 0x25;
+    const ASSET: u16 = 1;
+    const MARK: u64 = 1_000_000;
+    const LOW_PRINT: u64 = 1;
+    const POSITION_Q: i128 = 1_000 * POS_SCALE as i128;
+    const DEPOSIT: u128 = 2_000_000_000;
+    const INIT_FEE: u128 = 1;
+    const TOKEN_BALANCE: u64 = 2_500_000_000;
+
+    let mut env = V16Svm::new(
+        seed,
+        MarketConfig {
+            initial_price: MARK,
+            h_max: 20,
+            max_trading_fee_bps: 100,
+            max_price_move_bps_per_slot: 100,
+            max_accrual_dt_slots: 20,
+            min_funding_lifetime_slots: 20,
+            actor_deposits: [
+                DEPOSIT,
+                DEPOSIT,
+                DEPOSIT,
+                DEPOSIT,
+                super::v16_svm::EXIT_MAKER_DEPOSIT,
+            ],
+            actor_token_balances: [
+                TOKEN_BALANCE,
+                TOKEN_BALANCE,
+                TOKEN_BALANCE,
+                TOKEN_BALANCE,
+                super::v16_svm::EXIT_MAKER_TOKEN_BALANCE,
+            ],
+            ..MarketConfig::default()
+        },
+    );
+    let supply_before = env.token_supply_observed();
+    env.update_market_init_fee_policy(INIT_FEE)
+        .map_err(|error| format!("{route:?} configure init fee: {error}"))?;
+    env.warp_to_slot(2);
+    env.retire_asset(ASSET, 2)
+        .map_err(|error| format!("{route:?} retire creator asset: {error}"))?;
+    env.warp_to_slot(3);
+    env.activate_permissionless_asset_for_actor(0, ASSET, 3, MARK, 0, INIT_FEE)
+        .map_err(|error| format!("{route:?} activate creator asset: {error}"))?;
+    env.configure_ewma_mark_for_actor(0, ASSET, 3, MARK, 1, 0)
+        .map_err(|error| format!("{route:?} configure creator EWMA: {error}"))?;
+
+    execute_trade_route(&mut env, route, 0, 3, ASSET, -POSITION_Q, MARK, 0)
+        .map_err(|error| format!("{route:?} open against independent LP: {error}"))?;
+    env.warp_to_slot(4);
+    let insurance_before = env.primary_market_state().1.insurance;
+    env.trade_no_cpi(1, 2, ASSET, POSITION_Q, LOW_PRINT, 0)
+        .map_err(|error| format!("{route:?} self-trade paid EWMA move: {error}"))?;
+    env.trade_no_cpi(1, 2, ASSET, -POSITION_Q, LOW_PRINT, 0)
+        .map_err(|error| format!("{route:?} flatten temporary EWMA pair: {error}"))?;
+    let (_, after_move) = env.primary_market_state();
+    let fee_paid = after_move
+        .insurance
+        .checked_sub(insurance_before)
+        .ok_or("EWMA move decreased insurance")?;
+    let queued_mark = env.primary_profile(ASSET as usize).mark_ewma_e6;
+    if fee_paid == 0 || queued_mark >= MARK {
+        return Err(format!(
+            "{route:?} self-trade did not pay for a downward EWMA: fee {fee_paid}, target {queued_mark}"
+        ));
+    }
+
+    let destination_before = env.token_amount(env.actors[0].destination_token);
+    env.withdraw_insurance_asset(0, ASSET, fee_paid)
+        .map_err(|error| format!("{route:?} EWMA movement fee no longer reclaimable: {error}"))?;
+    let destination_after = env.token_amount(env.actors[0].destination_token);
+    let fee_reclaimed = u128::from(
+        destination_after
+            .checked_sub(destination_before)
+            .ok_or("EWMA reclaim destination decreased")?,
+    );
+    if fee_reclaimed != fee_paid {
+        return Err(format!(
+            "{route:?} EWMA fee reclaim mismatch: paid {fee_paid}, reclaimed {fee_reclaimed}"
+        ));
+    }
+
+    let oracle_accounts = env.primary_profile(ASSET as usize).oracle_leg_count;
+    let observations = || {
+        vec![CrankObservationHint {
+            asset_index: ASSET,
+            oracle_accounts,
+        }]
+    };
+    env.crank(0, 4, observations())
+        .map_err(|error| format!("{route:?} apply EWMA to attacker: {error}"))?;
+    env.crank(3, 4, observations())
+        .map_err(|error| format!("{route:?} apply EWMA to victim LP: {error}"))?;
+    let effective_mark = env.primary_market_state().1.assets[ASSET as usize].effective_price;
+    if effective_mark >= MARK {
+        return Err(format!(
+            "{route:?} paid downward EWMA did not apply: {effective_mark}"
+        ));
+    }
+    execute_trade_route(&mut env, route, 0, 3, ASSET, POSITION_Q, effective_mark, 0)
+        .map_err(|error| format!("{route:?} close against independent LP: {error}"))?;
+    env.crank(0, 4, Vec::new())
+        .map_err(|error| format!("{route:?} settle attacker close: {error}"))?;
+    env.crank(3, 4, Vec::new())
+        .map_err(|error| format!("{route:?} settle victim close: {error}"))?;
+
+    for actor in 0..4 {
+        let pnl = env.primary_portfolio(actor).pnl.get();
+        if pnl > 0 {
+            env.convert_released_pnl(actor, pnl as u128)
+                .map_err(|error| format!("{route:?} convert actor {actor} PnL: {error}"))?;
+        }
+        let capital = env.primary_portfolio(actor).capital.get();
+        if capital != 0 {
+            env.withdraw_primary(actor, capital)
+                .map_err(|error| format!("{route:?} withdraw actor {actor}: {error}"))?;
+        }
+    }
+    let attacker_payout = (0..3).try_fold(0u128, |sum, actor| {
+        sum.checked_add(u128::from(
+            env.token_amount(env.actors[actor].destination_token),
+        ))
+        .ok_or("EWMA attacker payout overflow")
+    })?;
+    let victim_payout = u128::from(env.token_amount(env.actors[3].destination_token));
+    let attacker_committed = DEPOSIT
+        .checked_mul(3)
+        .and_then(|value| value.checked_add(INIT_FEE))
+        .ok_or("EWMA attacker committed-value overflow")?;
+    let victim_loss = DEPOSIT.saturating_sub(victim_payout);
+    let attacker_gain = attacker_payout.saturating_sub(attacker_committed);
+    if victim_loss == 0
+        || attacker_gain == 0
+        || attacker_gain
+            .checked_add(INIT_FEE)
+            .ok_or("EWMA attacker gain overflow")?
+            != victim_loss
+    {
+        return Err(format!(
+            "{route:?} reclaimed EWMA fee did not extract independent LP value: gain {attacker_gain}, victim loss {victim_loss}, paid {fee_paid}, reclaimed {fee_reclaimed}"
+        ));
+    }
+    if env.token_supply_observed() != supply_before {
+        return Err(format!("{route:?} EWMA reclaim changed total SPL supply"));
+    }
+    Ok(ReclaimableEwmaFeeReproduction {
+        blocker: KnownBlocker::ReclaimableEwmaFee,
+        route,
+        fee_paid,
+        fee_reclaimed,
+        victim_loss,
+        attacker_gain,
+        effective_mark,
+    })
+}
+
+fn execute_trade_route(
+    env: &mut V16Svm,
+    route: TradeRoute,
+    taker: usize,
+    maker: usize,
+    asset_index: u16,
+    size_q: i128,
+    price: u64,
+    fee_bps: u64,
+) -> Result<TxSuccess, String> {
+    match route {
+        TradeRoute::NoCpi => env.trade_no_cpi(taker, maker, asset_index, size_q, price, fee_bps),
+        TradeRoute::Cpi => env.trade_cpi(taker, maker, asset_index, size_q, fee_bps, 0),
+        TradeRoute::BatchNoCpi => env.batch_trade_no_cpi(
+            taker,
+            maker,
+            vec![BatchTradeLeg {
+                asset_index,
+                size_q,
+                exec_price: price,
+                fee_bps,
+            }],
+        ),
+        TradeRoute::BatchCpi => env.batch_trade_cpi(
+            taker,
+            maker,
+            vec![BatchTradeCpiLeg {
+                asset_index,
+                size_q,
+                fee_bps,
+                limit_price: 0,
+            }],
+        ),
+    }
+}
+
 fn run_rounded_funding_world(
     seed: [u8; 32],
     omit_selected_observation: bool,
@@ -3182,6 +3527,32 @@ pub fn composite_rounding_strategy() -> impl Strategy<Value = ([u8; 32], Composi
 #[allow(dead_code)]
 pub fn rounded_funding_seed_strategy() -> impl Strategy<Value = [u8; 32]> {
     any::<[u8; 32]>()
+}
+
+#[allow(dead_code)]
+pub fn pending_ewma_inheritance_strategy() -> impl Strategy<Value = ([u8; 32], TradeRoute)> {
+    (
+        any::<[u8; 32]>(),
+        prop::sample::select(vec![
+            TradeRoute::NoCpi,
+            TradeRoute::Cpi,
+            TradeRoute::BatchNoCpi,
+            TradeRoute::BatchCpi,
+        ]),
+    )
+}
+
+#[allow(dead_code)]
+pub fn reclaimable_ewma_fee_strategy() -> impl Strategy<Value = ([u8; 32], TradeRoute)> {
+    (
+        any::<[u8; 32]>(),
+        prop::sample::select(vec![
+            TradeRoute::NoCpi,
+            TradeRoute::Cpi,
+            TradeRoute::BatchNoCpi,
+            TradeRoute::BatchCpi,
+        ]),
+    )
 }
 
 #[allow(dead_code)]

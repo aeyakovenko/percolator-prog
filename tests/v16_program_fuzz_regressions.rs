@@ -5,7 +5,8 @@ use support::{
     fuzz_model::{
         reproduce_asset_generation_trade_replay, reproduce_composite_oracle_rounding,
         reproduce_cpi_backing_fee_siphon, reproduce_cpi_caller_fee_siphon,
-        reproduce_omitted_rescue_liquidation, reproduce_post_expiry_backing_fee,
+        reproduce_omitted_rescue_liquidation, reproduce_pending_ewma_inheritance,
+        reproduce_post_expiry_backing_fee, reproduce_reclaimable_ewma_fee,
         reproduce_rounded_funding_omission, reproduce_trade_retry_replay, run_scenario,
         CompositeRoundingCase, KnownBlocker, PostExpiryBackingCase, Scenario, TradeRoute,
     },
@@ -216,23 +217,65 @@ fn v16_program_pr253_omitted_rounded_funding_transfers_spl_value() {
 }
 
 #[test]
+fn v16_program_pr260_pending_ewma_inheritance_extracts_on_every_route() {
+    for route in [
+        TradeRoute::NoCpi,
+        TradeRoute::Cpi,
+        TradeRoute::BatchNoCpi,
+        TradeRoute::BatchCpi,
+    ] {
+        let reproduction = reproduce_pending_ewma_inheritance([0x60; 32], route)
+            .unwrap_or_else(|error| panic!("PR 260 {route:?} no longer reproduces: {error}"));
+        assert_eq!(reproduction.blocker, KnownBlocker::PendingEwmaInheritance);
+        assert!(reproduction.pending_mark > 1_000_000);
+        assert!(reproduction.applied_mark > 1_000_000);
+        assert_eq!(reproduction.attacker_gain, reproduction.victim_loss);
+        assert!(reproduction.attacker_gain > reproduction.seed_cost);
+        assert_eq!(
+            u128::from(reproduction.net_extracted_tokens),
+            reproduction.attacker_gain - reproduction.seed_cost
+        );
+    }
+}
+
+#[test]
+fn v16_program_pr225_reclaimed_ewma_fee_extracts_on_every_route() {
+    for route in [
+        TradeRoute::NoCpi,
+        TradeRoute::Cpi,
+        TradeRoute::BatchNoCpi,
+        TradeRoute::BatchCpi,
+    ] {
+        let reproduction = reproduce_reclaimable_ewma_fee([0x25; 32], route)
+            .unwrap_or_else(|error| panic!("PR 225 {route:?} no longer reproduces: {error}"));
+        assert_eq!(reproduction.blocker, KnownBlocker::ReclaimableEwmaFee);
+        assert_eq!(reproduction.fee_reclaimed, reproduction.fee_paid);
+        assert_eq!(reproduction.attacker_gain + 1, reproduction.victim_loss);
+        assert!(reproduction.attacker_gain > 0);
+        assert!(reproduction.effective_mark < 1_000_000);
+    }
+}
+
+#[test]
 fn v16_program_open_lof_manifest_is_complete_and_honest() {
     validate_manifest().expect("open LoF manifest structure");
     assert_eq!(
         quarantined_prs(),
-        [220, 223, 224, 231, 253, 329, 343, 367, 381]
+        [220, 223, 224, 225, 231, 253, 260, 329, 343, 367, 381]
     );
     let missing = missing_prs();
     assert_eq!(
         missing.len(),
-        90,
+        88,
         "update the explicit evidence state when an executable adapter lands"
     );
     assert!(!missing.contains(&220));
     assert!(!missing.contains(&223));
     assert!(!missing.contains(&224));
+    assert!(!missing.contains(&225));
     assert!(!missing.contains(&231));
     assert!(!missing.contains(&253));
+    assert!(!missing.contains(&260));
     assert!(!missing.contains(&329));
     assert!(!missing.contains(&343));
     assert!(!missing.contains(&367));
