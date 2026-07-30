@@ -70,10 +70,11 @@ pub enum KnownBlocker {
     TradeDrivenLiquidationReward,
     CrossDomainBackingDoubleSpend,
     AssetGenerationMarkReplay,
+    AssetGenerationConfigReplay,
 }
 
 impl KnownBlocker {
-    pub const COUNT: usize = 17;
+    pub const COUNT: usize = 18;
 
     pub const fn index(self) -> usize {
         match self {
@@ -94,6 +95,7 @@ impl KnownBlocker {
             Self::TradeDrivenLiquidationReward => 14,
             Self::CrossDomainBackingDoubleSpend => 15,
             Self::AssetGenerationMarkReplay => 16,
+            Self::AssetGenerationConfigReplay => 17,
         }
     }
 }
@@ -179,6 +181,12 @@ pub enum TradeDrivenLiquidationMode {
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum AssetGenerationMarkPath {
+    Auth,
+    Ewma,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum AssetGenerationConfigPath {
     Auth,
     Ewma,
 }
@@ -294,6 +302,19 @@ pub struct AssetGenerationMarkReplayReproduction {
     pub old_market_id: u64,
     pub new_market_id: u64,
     pub landed_mark: u64,
+    pub victim_equity_loss: u128,
+    pub beneficiary_extra_payout: u64,
+    pub observed_token_supply: u128,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AssetGenerationConfigReplayReproduction {
+    pub blocker: KnownBlocker,
+    pub path: AssetGenerationConfigPath,
+    pub old_market_id: u64,
+    pub new_market_id: u64,
+    pub stale_entry_price: u64,
+    pub restored_mark: u64,
     pub victim_equity_loss: u128,
     pub beneficiary_extra_payout: u64,
     pub observed_token_supply: u128,
@@ -2321,6 +2342,68 @@ pub fn reproduce_asset_generation_mark_replay(
     })
 }
 
+pub fn reproduce_asset_generation_config_replay(
+    mut seed: [u8; 32],
+    path: AssetGenerationConfigPath,
+) -> Result<AssetGenerationConfigReplayReproduction, String> {
+    seed[0] ^= 0x77;
+    let control = run_asset_generation_config_world(seed, path, false)?;
+    let replay = run_asset_generation_config_world(seed, path, true)?;
+    if control.old_market_id != replay.old_market_id
+        || control.new_market_id != replay.new_market_id
+        || control.old_market_id == control.new_market_id
+    {
+        return Err(format!(
+            "{path:?} config-replay worlds did not use the same distinct generations: control {}/{}, replay {}/{}",
+            control.old_market_id,
+            control.new_market_id,
+            replay.old_market_id,
+            replay.new_market_id
+        ));
+    }
+    let victim_equity_loss = control
+        .victim_equity
+        .checked_sub(replay.victim_equity)
+        .ok_or("stale config replay increased victim equity")?;
+    let beneficiary_extra_payout = replay
+        .beneficiary_payout
+        .checked_sub(control.beneficiary_payout)
+        .ok_or("stale config replay decreased beneficiary payout")?;
+    if replay.entry_price >= control.entry_price
+        || replay.restored_mark <= replay.entry_price
+        || victim_equity_loss == 0
+        || victim_equity_loss != u128::from(beneficiary_extra_payout)
+    {
+        return Err(format!(
+            "{path:?} stale config did not create an extractable entry-anchor transfer: entry {}/{}, restored {}, victim equity {}/{}, beneficiary payout {}/{}",
+            control.entry_price,
+            replay.entry_price,
+            replay.restored_mark,
+            control.victim_equity,
+            replay.victim_equity,
+            control.beneficiary_payout,
+            replay.beneficiary_payout
+        ));
+    }
+    if control.observed_token_supply != replay.observed_token_supply {
+        return Err(format!(
+            "{path:?} stale config replay changed observed SPL supply: control {}, replay {}",
+            control.observed_token_supply, replay.observed_token_supply
+        ));
+    }
+    Ok(AssetGenerationConfigReplayReproduction {
+        blocker: KnownBlocker::AssetGenerationConfigReplay,
+        path,
+        old_market_id: replay.old_market_id,
+        new_market_id: replay.new_market_id,
+        stale_entry_price: replay.entry_price,
+        restored_mark: replay.restored_mark,
+        victim_equity_loss,
+        beneficiary_extra_payout,
+        observed_token_supply: replay.observed_token_supply,
+    })
+}
+
 pub fn reproduce_cpi_caller_fee_siphon(
     mut seed: [u8; 32],
     route: TradeRoute,
@@ -4084,6 +4167,151 @@ fn run_asset_generation_mark_world(
     })
 }
 
+#[derive(Clone, Copy, Debug)]
+struct AssetGenerationConfigWorld {
+    old_market_id: u64,
+    new_market_id: u64,
+    entry_price: u64,
+    restored_mark: u64,
+    victim_equity: u128,
+    beneficiary_payout: u64,
+    observed_token_supply: u128,
+}
+
+fn run_asset_generation_config_world(
+    seed: [u8; 32],
+    path: AssetGenerationConfigPath,
+    land_replay: bool,
+) -> Result<AssetGenerationConfigWorld, String> {
+    const ASSET: u16 = 1;
+    const PRICE: u64 = 100;
+    const STALE_ENTRY_PRICE: u64 = 50;
+    const SIZE_Q: i128 = 5_000 * POS_SCALE as i128;
+    const DEPOSIT: u128 = 1_000_000;
+
+    let mut env = V16Svm::new(
+        seed,
+        MarketConfig {
+            max_price_move_bps_per_slot: 10_000,
+            max_accrual_dt_slots: 1,
+            min_funding_lifetime_slots: 1,
+            actor_deposits: [
+                DEPOSIT,
+                DEPOSIT,
+                DEPOSIT,
+                DEPOSIT,
+                super::v16_svm::EXIT_MAKER_DEPOSIT,
+            ],
+            ..MarketConfig::default()
+        },
+    );
+    match path {
+        AssetGenerationConfigPath::Auth => env
+            .configure_auth_mark(false, ASSET, 1, PRICE)
+            .map_err(|error| format!("{path:?} configure old AuthMark: {error}"))?,
+        AssetGenerationConfigPath::Ewma => env
+            .configure_ewma_mark(ASSET, 1, PRICE, 1, 0)
+            .map_err(|error| format!("{path:?} configure old EwmaMark: {error}"))?,
+    };
+    let old_market_id = env.primary_market_state().1.assets[ASSET as usize].market_id;
+    let stale_config = match path {
+        AssetGenerationConfigPath::Auth => env.build_retained_auth_config(ASSET, STALE_ENTRY_PRICE),
+        AssetGenerationConfigPath::Ewma => {
+            env.build_retained_ewma_config(ASSET, STALE_ENTRY_PRICE, 1, 0)
+        }
+    };
+    env.update_market_init_fee_policy(1)
+        .map_err(|error| format!("{path:?} configure permissionless init fee: {error}"))?;
+    env.warp_to_slot(3);
+    env.retire_asset(ASSET, 3)
+        .map_err(|error| format!("{path:?} retire old asset generation: {error}"))?;
+    env.warp_to_slot(4);
+    env.activate_permissionless_asset(2, ASSET, 4, PRICE, 1)
+        .map_err(|error| format!("{path:?} activate replacement generation: {error}"))?;
+    match path {
+        AssetGenerationConfigPath::Auth => env
+            .configure_auth_mark(false, ASSET, 4, PRICE)
+            .map_err(|error| format!("{path:?} configure replacement AuthMark: {error}"))?,
+        AssetGenerationConfigPath::Ewma => env
+            .configure_ewma_mark(ASSET, 4, PRICE, 1, 0)
+            .map_err(|error| format!("{path:?} configure replacement EwmaMark: {error}"))?,
+    };
+    let new_market_id = env.primary_market_state().1.assets[ASSET as usize].market_id;
+    if new_market_id == old_market_id {
+        return Err(format!(
+            "{path:?} replacement reused market ID {old_market_id}"
+        ));
+    }
+    let current_generation_trade = env.build_retained_no_cpi_trade(0, 1, ASSET, SIZE_Q, PRICE);
+
+    env.warp_to_slot(5);
+    if land_replay {
+        env.land_retained(stale_config)
+            .map_err(|error| format!("{path:?} stale signed config no longer lands: {error}"))?;
+    }
+    let entry_price = env.primary_market_state().1.assets[ASSET as usize].effective_price;
+    if land_replay && entry_price != STALE_ENTRY_PRICE {
+        return Err(format!(
+            "{path:?} stale config set entry anchor {entry_price}, expected {STALE_ENTRY_PRICE}"
+        ));
+    }
+    env.land_retained(current_generation_trade)
+        .map_err(|error| format!("{path:?} retained replacement-generation trade: {error}"))?;
+
+    env.warp_to_slot(6);
+    match path {
+        AssetGenerationConfigPath::Auth => env
+            .push_auth_mark(ASSET, 6, PRICE)
+            .map_err(|error| format!("{path:?} restore honest AuthMark: {error}"))?,
+        AssetGenerationConfigPath::Ewma => env
+            .push_ewma_mark(ASSET, 6, PRICE)
+            .map_err(|error| format!("{path:?} restore honest EwmaMark: {error}"))?,
+    };
+    crank_adapter_steps(&mut env, 0, 6, ASSET, 4)
+        .map_err(|error| format!("{path:?} settle beneficiary after restoration: {error}"))?;
+    crank_adapter_steps(&mut env, 1, 6, ASSET, 4)
+        .map_err(|error| format!("{path:?} settle victim after restoration: {error}"))?;
+    let restored_mark = env.primary_market_state().1.assets[ASSET as usize].effective_price;
+    let victim = env.primary_portfolio(1);
+    let victim_equity_i128 = (victim.capital.get() as i128)
+        .checked_add(victim.pnl.get())
+        .ok_or("victim equity overflow after stale config")?;
+    let victim_equity = u128::try_from(victim_equity_i128)
+        .map_err(|_| format!("{path:?} stale config made victim equity negative"))?;
+
+    env.trade_no_cpi(EXIT_MAKER_INDEX, 0, ASSET, SIZE_Q, restored_mark, 0)
+        .map_err(|error| format!("{path:?} beneficiary public exit: {error}"))?;
+    if env.primary_portfolio(0).pnl.get() > 0 {
+        env.convert_released_pnl(0, u128::MAX)
+            .map_err(|error| format!("{path:?} convert beneficiary PnL: {error}"))?;
+    }
+    let beneficiary_capital = env.primary_portfolio(0).capital.get();
+    env.withdraw_primary(0, beneficiary_capital)
+        .map_err(|error| format!("{path:?} withdraw beneficiary capital: {error}"))?;
+    let beneficiary_payout = env.token_amount(env.actors[0].destination_token);
+    if u128::from(beneficiary_payout) != beneficiary_capital {
+        return Err(format!(
+            "{path:?} beneficiary SPL payout {beneficiary_payout} did not equal capital {beneficiary_capital}"
+        ));
+    }
+    if env.token_supply_observed() != env.initial_token_supply {
+        return Err(format!(
+            "{path:?} config replay changed SPL supply: {}/{}",
+            env.token_supply_observed(),
+            env.initial_token_supply
+        ));
+    }
+    Ok(AssetGenerationConfigWorld {
+        old_market_id,
+        new_market_id,
+        entry_price,
+        restored_mark,
+        victim_equity,
+        beneficiary_payout,
+        observed_token_supply: env.token_supply_observed(),
+    })
+}
+
 fn run_asset_generation_trade_world(
     seed: [u8; 32],
     route: TradeRoute,
@@ -4477,6 +4705,18 @@ pub fn asset_generation_mark_replay_strategy(
         prop::sample::select(vec![
             AssetGenerationMarkPath::Auth,
             AssetGenerationMarkPath::Ewma,
+        ]),
+    )
+}
+
+#[allow(dead_code)]
+pub fn asset_generation_config_replay_strategy(
+) -> impl Strategy<Value = ([u8; 32], AssetGenerationConfigPath)> {
+    (
+        any::<[u8; 32]>(),
+        prop::sample::select(vec![
+            AssetGenerationConfigPath::Auth,
+            AssetGenerationConfigPath::Ewma,
         ]),
     )
 }

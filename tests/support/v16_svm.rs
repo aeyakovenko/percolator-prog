@@ -1566,6 +1566,50 @@ impl V16Svm {
         )
     }
 
+    pub fn build_retained_auth_config(
+        &mut self,
+        asset_index: u16,
+        initial_mark_e6: u64,
+    ) -> Transaction {
+        let authority = copy_keypair(&self.admin);
+        self.build_program_transaction(
+            ProgInstruction::ConfigureAuthMark {
+                asset_index,
+                now_slot: 0,
+                initial_mark_e6,
+            },
+            vec![
+                AccountMeta::new(authority.pubkey(), true),
+                AccountMeta::new(self.market, false),
+            ],
+            &[authority],
+        )
+    }
+
+    pub fn build_retained_ewma_config(
+        &mut self,
+        asset_index: u16,
+        initial_mark_e6: u64,
+        halflife_slots: u64,
+        mark_min_fee: u64,
+    ) -> Transaction {
+        let authority = copy_keypair(&self.admin);
+        self.build_program_transaction(
+            ProgInstruction::ConfigureEwmaMark {
+                asset_index,
+                now_slot: 0,
+                initial_mark_e6,
+                mark_ewma_halflife_slots: halflife_slots,
+                mark_min_fee,
+            },
+            vec![
+                AccountMeta::new(authority.pubkey(), true),
+                AccountMeta::new(self.market, false),
+            ],
+            &[authority],
+        )
+    }
+
     pub fn land_retained(&mut self, tx: Transaction) -> Result<TxSuccess, String> {
         self.svm
             .send_transaction(tx)
