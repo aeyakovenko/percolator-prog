@@ -73,10 +73,11 @@ pub enum KnownBlocker {
     AssetGenerationConfigReplay,
     CrossDomainBSettlement,
     PendingEwmaTargetOverride,
+    TerminalDustPayoutErasure,
 }
 
 impl KnownBlocker {
-    pub const COUNT: usize = 20;
+    pub const COUNT: usize = 21;
 
     pub const fn index(self) -> usize {
         match self {
@@ -100,6 +101,7 @@ impl KnownBlocker {
             Self::AssetGenerationConfigReplay => 17,
             Self::CrossDomainBSettlement => 18,
             Self::PendingEwmaTargetOverride => 19,
+            Self::TerminalDustPayoutErasure => 20,
         }
     }
 }
@@ -352,6 +354,17 @@ pub struct PendingEwmaTargetOverrideReproduction {
     pub displaced_victim_pnl: u128,
     pub attacker_profit: u128,
     pub victim_withdrawn: u64,
+    pub attacker_withdrawn: u128,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TerminalDustPayoutErasureReproduction {
+    pub blocker: KnownBlocker,
+    pub route: TradeRoute,
+    pub attacker_loss: u128,
+    pub victim_loss: u128,
+    pub vault_remaining: u128,
+    pub victim_withdrawn: u128,
     pub attacker_withdrawn: u128,
 }
 
@@ -4171,6 +4184,223 @@ fn run_pending_ewma_target_world(
     })
 }
 
+#[derive(Clone, Copy, Debug)]
+struct TerminalDustPayoutWorld {
+    low_price: u64,
+    victim_withdrawn: u128,
+    attacker_withdrawn: u128,
+    vault_remaining: u128,
+    observed_token_supply: u128,
+}
+
+pub fn reproduce_terminal_dust_payout_erasure(
+    mut seed: [u8; 32],
+    route: TradeRoute,
+) -> Result<TerminalDustPayoutErasureReproduction, String> {
+    seed[0] ^= 0x83;
+    const ATTACKER_DEPOSITS: u128 = 20_000_002_000;
+    const VICTIM_DEPOSIT: u128 = 20_000_000_000;
+
+    if !matches!(route, TradeRoute::NoCpi | TradeRoute::BatchNoCpi) {
+        return Err(format!("PR 283 unsupported trade route {route:?}"));
+    }
+    let control = run_terminal_dust_payout_world(seed, route, false)?;
+    let attack = run_terminal_dust_payout_world(seed, route, true)?;
+    let attacker_loss = ATTACKER_DEPOSITS
+        .checked_sub(attack.attacker_withdrawn)
+        .ok_or("PR 283 dust attack increased coalition payout")?;
+    let victim_loss = VICTIM_DEPOSIT
+        .checked_sub(attack.victim_withdrawn)
+        .ok_or("PR 283 dust attack increased victim payout")?;
+    if control.low_price != attack.low_price
+        || control.attacker_withdrawn != ATTACKER_DEPOSITS
+        || control.victim_withdrawn != VICTIM_DEPOSIT
+        || control.vault_remaining != 0
+        || attacker_loss != 1
+        || victim_loss == 0
+        || attack.vault_remaining != victim_loss + attacker_loss
+        || control.observed_token_supply != attack.observed_token_supply
+    {
+        return Err(format!(
+            "{route:?} PR 283 did not turn one atom into claimless terminal victim loss: control={control:?}, attack={attack:?}, attacker loss={attacker_loss}, victim loss={victim_loss}"
+        ));
+    }
+    Ok(TerminalDustPayoutErasureReproduction {
+        blocker: KnownBlocker::TerminalDustPayoutErasure,
+        route,
+        attacker_loss,
+        victim_loss,
+        vault_remaining: attack.vault_remaining,
+        victim_withdrawn: attack.victim_withdrawn,
+        attacker_withdrawn: attack.attacker_withdrawn,
+    })
+}
+
+fn run_terminal_dust_payout_world(
+    seed: [u8; 32],
+    route: TradeRoute,
+    with_dust: bool,
+) -> Result<TerminalDustPayoutWorld, String> {
+    const BASIS: u64 = 10_000_000;
+    const DIRECTIONAL_Q: i128 = 1_000 * POS_SCALE as i128;
+    const DUST_Q: i128 = 1;
+    const DIRECTIONAL_DEPOSIT: u128 = 20_000_000_000;
+    const DUST_DEPOSIT: u128 = 1_000;
+
+    let mut env = V16Svm::new(
+        seed,
+        MarketConfig {
+            initial_price: BASIS,
+            max_trading_fee_bps: 10_000,
+            max_price_move_bps_per_slot: 5_000,
+            max_accrual_dt_slots: 1,
+            min_funding_lifetime_slots: 1,
+            actor_deposits: [
+                DIRECTIONAL_DEPOSIT,
+                DIRECTIONAL_DEPOSIT,
+                DUST_DEPOSIT,
+                DUST_DEPOSIT,
+                super::v16_svm::EXIT_MAKER_DEPOSIT,
+            ],
+            actor_token_balances: [
+                25_000_000_000,
+                25_000_000_000,
+                1_000_000,
+                1_000_000,
+                super::v16_svm::EXIT_MAKER_TOKEN_BALANCE,
+            ],
+            ..MarketConfig::default()
+        },
+    );
+    env.configure_ewma_mark(0, 1, BASIS, 1, 0)
+        .map_err(|error| format!("{route:?} configure terminal-dust EWMA: {error}"))?;
+    env.trade_no_cpi(0, 1, 0, DIRECTIONAL_Q, BASIS, 0)
+        .map_err(|error| format!("{route:?} open terminal-dust directional OI: {error}"))?;
+
+    let observations = || {
+        vec![CrankObservationHint {
+            asset_index: 0,
+            oracle_accounts: 0,
+        }]
+    };
+    for slot in 2..=5 {
+        env.warp_to_slot(slot);
+        env.push_ewma_mark(0, slot, 1)
+            .map_err(|error| format!("{route:?} publish terminal-dust low slot {slot}: {error}"))?;
+        for actor in [0, 1] {
+            env.crank(actor, slot, observations()).map_err(|error| {
+                format!("{route:?} accrue terminal-dust actor {actor} at slot {slot}: {error}")
+            })?;
+        }
+    }
+    let low_price = env.primary_market_state().1.assets[0].effective_price;
+    if low_price >= BASIS / 5 {
+        return Err(format!(
+            "{route:?} terminal-dust setup did not reach a low mark: {low_price}"
+        ));
+    }
+    if with_dust {
+        execute_trade_route(&mut env, route, 2, 3, 0, DUST_Q, low_price, 0)
+            .map_err(|error| format!("{route:?} open one-quantum source position: {error}"))?;
+    }
+
+    env.warp_to_slot(6);
+    for actor in [0, 1] {
+        env.crank(actor, 6, observations()).map_err(|error| {
+            format!("{route:?} advance terminal-dust actor {actor} before rebound: {error}")
+        })?;
+    }
+    let rebound_input = BASIS
+        .checked_mul(2)
+        .and_then(|value| value.checked_sub(low_price))
+        .ok_or("PR 283 rebound input overflow")?;
+    env.push_ewma_mark(0, 6, rebound_input)
+        .map_err(|error| format!("{route:?} publish terminal-dust rebound: {error}"))?;
+    if env.primary_profile(0).mark_ewma_e6 != BASIS {
+        return Err(format!(
+            "{route:?} terminal-dust rebound missed basis: {}",
+            env.primary_profile(0).mark_ewma_e6
+        ));
+    }
+
+    env.warp_to_slot(7);
+    let mut slot = 7;
+    loop {
+        for actor in [0, 1] {
+            env.crank(actor, slot, observations()).map_err(|error| {
+                format!("{route:?} converge terminal-dust actor {actor} at slot {slot}: {error}")
+            })?;
+        }
+        if env.primary_market_state().1.assets[0].effective_price == BASIS {
+            break;
+        }
+        slot = slot
+            .checked_add(1)
+            .ok_or("PR 283 convergence slot overflow")?;
+        if slot >= 24 {
+            return Err(format!(
+                "{route:?} terminal-dust rebound did not converge by slot 23"
+            ));
+        }
+        env.warp_to_slot(slot);
+    }
+    if with_dust {
+        execute_trade_route(&mut env, route, 2, 3, 0, -DUST_Q, BASIS, 0)
+            .map_err(|error| format!("{route:?} close one-quantum source position: {error}"))?;
+    }
+    env.trade_no_cpi(0, 1, 0, -DIRECTIONAL_Q, BASIS, 0)
+        .map_err(|error| format!("{route:?} close terminal-dust directional OI: {error}"))?;
+    env.resolve_market()
+        .map_err(|error| format!("{route:?} resolve terminal-dust world: {error}"))?;
+    for actor in 0..PRIMARY_ACTOR_COUNT {
+        env.close_resolved_primary(actor)
+            .map_err(|error| format!("{route:?} first close resolved actor {actor}: {error}"))?;
+    }
+    for actor in 0..PRIMARY_ACTOR_COUNT {
+        for _ in 0..16 {
+            let _ = env.close_resolved_primary(actor);
+            let _ = env.claim_resolved_payout_topup_primary(actor);
+        }
+    }
+
+    let market_before = env.market_data(false);
+    let destinations_before: Vec<_> = (0..PRIMARY_ACTOR_COUNT)
+        .map(|actor| env.token_amount(env.actors[actor].destination_token))
+        .collect();
+    for actor in 0..PRIMARY_ACTOR_COUNT {
+        let _ = env.close_resolved_primary(actor);
+        let _ = env.claim_resolved_payout_topup_primary(actor);
+    }
+    let destinations_after: Vec<_> = (0..PRIMARY_ACTOR_COUNT)
+        .map(|actor| env.token_amount(env.actors[actor].destination_token))
+        .collect();
+    if env.market_data(false) != market_before || destinations_after != destinations_before {
+        return Err(format!(
+            "{route:?} terminal payout still progressed after bounded close/top-up drain"
+        ));
+    }
+
+    let victim_withdrawn = u128::from(env.token_amount(env.actors[0].destination_token));
+    let attacker_withdrawn = [1, 2, 3]
+        .into_iter()
+        .map(|actor| u128::from(env.token_amount(env.actors[actor].destination_token)))
+        .sum();
+    let vault_remaining = env.primary_market_state().1.vault;
+    if vault_remaining != u128::from(env.token_amount(env.vault)) {
+        return Err(format!(
+            "{route:?} terminal-dust engine/SPL vault mismatch: engine={vault_remaining}, SPL={}",
+            env.token_amount(env.vault)
+        ));
+    }
+    Ok(TerminalDustPayoutWorld {
+        low_price,
+        victim_withdrawn,
+        attacker_withdrawn,
+        vault_remaining,
+        observed_token_supply: env.token_supply_observed(),
+    })
+}
+
 fn execute_trade_route(
     env: &mut V16Svm,
     route: TradeRoute,
@@ -5280,6 +5510,14 @@ pub fn pending_ewma_target_override_strategy() -> impl Strategy<Value = ([u8; 32
             TradeRoute::BatchNoCpi,
             TradeRoute::BatchCpi,
         ]),
+    )
+}
+
+#[allow(dead_code)]
+pub fn terminal_dust_payout_erasure_strategy() -> impl Strategy<Value = ([u8; 32], TradeRoute)> {
+    (
+        any::<[u8; 32]>(),
+        prop::sample::select(vec![TradeRoute::NoCpi, TradeRoute::BatchNoCpi]),
     )
 }
 
