@@ -2,7 +2,7 @@ use super::v16_svm::{
     MarketConfig, TxSuccess, V16Svm, ASSET_COUNT, EXIT_MAKER_INDEX, PRIMARY_ACTOR_COUNT,
     TX_CU_LIMIT, USER_COUNT,
 };
-use percolator::{BackingBucketStatusV16, MarketModeV16, PortfolioLegV16, POS_SCALE};
+use percolator::{BackingBucketStatusV16, MarketModeV16, PortfolioLegV16, SideModeV16, POS_SCALE};
 use percolator_prog::{
     constants::{ORACLE_LEG_FLAG_DIVIDE_LEG2, ORACLE_LEG_FLAG_DIVIDE_LEG3, ORACLE_MODE_EWMA_MARK},
     ix::{BatchTradeCpiLeg, BatchTradeLeg, CrankObservationHint},
@@ -64,10 +64,13 @@ pub enum KnownBlocker {
     RoundedFundingOmission,
     PendingEwmaInheritance,
     ReclaimableEwmaFee,
+    TradeFundingErasure,
+    RebalanceFundingErasure,
+    ForfeitFundingErasure,
 }
 
 impl KnownBlocker {
-    pub const COUNT: usize = 11;
+    pub const COUNT: usize = 14;
 
     pub const fn index(self) -> usize {
         match self {
@@ -82,6 +85,9 @@ impl KnownBlocker {
             Self::RoundedFundingOmission => 8,
             Self::PendingEwmaInheritance => 9,
             Self::ReclaimableEwmaFee => 10,
+            Self::TradeFundingErasure => 11,
+            Self::RebalanceFundingErasure => 12,
+            Self::ForfeitFundingErasure => 13,
         }
     }
 }
@@ -204,6 +210,40 @@ pub struct ReclaimableEwmaFeeReproduction {
     pub victim_loss: u128,
     pub attacker_gain: u128,
     pub effective_mark: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TradeFundingErasureReproduction {
+    pub blocker: KnownBlocker,
+    pub route: TradeRoute,
+    pub control_f_long_num: i128,
+    pub control_f_short_num: i128,
+    pub attack_f_long_num: i128,
+    pub attack_f_short_num: i128,
+    pub victim_payout_loss: u64,
+    pub attacker_payout_gain: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RebalanceFundingErasureReproduction {
+    pub blocker: KnownBlocker,
+    pub control_attacker_paid: u128,
+    pub control_victim_received: u128,
+    pub attack_attacker_paid: u128,
+    pub attack_victim_received: u128,
+    pub victim_claim_loss: u128,
+    pub attacker_payout_gain: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ForfeitFundingErasureReproduction {
+    pub blocker: KnownBlocker,
+    pub control_attacker_paid: u128,
+    pub control_victim_received: u128,
+    pub attack_attacker_paid: u128,
+    pub attack_victim_received: u128,
+    pub victim_claim_loss: i128,
+    pub attacker_payout_gain: u64,
 }
 
 impl SubstitutionKind {
@@ -1123,7 +1163,10 @@ impl ScenarioRunner {
                 },
             ],
         };
-        match self.env.crank(actor, self.env.current_slot(), observations) {
+        match self
+            .env
+            .crank(actor, self.env.current_slot(), observations.clone())
+        {
             Ok(success) => {
                 self.coverage.observe_success(None, &success);
                 self.assert_portfolio_frame(&before, &[actor])
@@ -1149,7 +1192,9 @@ impl ScenarioRunner {
                     .map_err(CrankFailure::Invariant)?;
                 if require_progress && rank_before.actionable() {
                     Err(CrankFailure::Rejected(format!(
-                        "sole public crank rejected actionable rank {rank_before:?}: {error}"
+                        "sole public crank rejected actionable rank {rank_before:?} with \
+                         observations {observations:?}: {error}; {}",
+                        self.liveness_diagnostics()
                     )))
                 } else {
                     Ok(())
@@ -1164,27 +1209,20 @@ impl ScenarioRunner {
         if rank.b_work != 0 || rank.market_locks != 0 {
             return Ok(vec![]);
         }
-        let active_asset = decoded_legs(&self.env.primary_portfolio(actor))
-            .into_iter()
-            .find(|leg| leg.active)
-            .map(|leg| leg.asset_index as usize);
-        let pending_asset =
-            (0..ASSET_COUNT).find(|asset| group.assets[*asset].slot_last < self.env.current_slot());
-        let asset = if rank.stale_legs != 0 || rank.health_work != 0 {
-            active_asset
-        } else {
-            pending_asset.or(active_asset)
-        }
-        .unwrap_or(0);
-        if asset >= ASSET_COUNT {
-            return Err(format!(
-                "selected crank observation references out-of-world asset {asset}"
-            ));
-        }
-        Ok(vec![CrankObservationHint {
-            asset_index: asset as u16,
-            oracle_accounts: self.env.primary_profile(asset).oracle_leg_count,
-        }])
+        Ok((0..ASSET_COUNT)
+            .filter(|asset| {
+                let profile = self.env.primary_profile(*asset);
+                let engine_asset = &group.assets[*asset];
+                let has_price_delta = engine_asset.raw_oracle_target_price
+                    != engine_asset.effective_price
+                    || profile.mark_ewma_e6 != engine_asset.effective_price;
+                has_price_delta && self.env.current_slot() > engine_asset.slot_last
+            })
+            .map(|asset| CrankObservationHint {
+                asset_index: asset as u16,
+                oracle_accounts: self.env.primary_profile(asset).oracle_leg_count,
+            })
+            .collect())
     }
 
     fn current_liquidation_authorization(&self, actor: usize) -> bool {
@@ -1386,27 +1424,24 @@ impl ScenarioRunner {
         for asset in 0..ASSET_COUNT {
             let profile = self.env.primary_profile(asset);
             let engine_asset = &group.assets[asset];
-            market_mark_lag = market_mark_lag
-                .checked_add(
-                    profile
-                        .mark_ewma_last_slot
-                        .saturating_sub(engine_asset.slot_last) as u128,
-                )
-                .ok_or("mark-lag rank overflow")?;
-            market_mark_lag = market_mark_lag
-                .checked_add(
-                    self.env
-                        .current_slot()
-                        .saturating_sub(engine_asset.slot_last) as u128,
-                )
-                .ok_or("per-asset accrual-lag rank overflow")?;
             let engine_gap = engine_asset
                 .raw_oracle_target_price
                 .abs_diff(engine_asset.effective_price);
             let authenticated_gap = profile.mark_ewma_e6.abs_diff(engine_asset.effective_price);
-            market_mark_lag = market_mark_lag
-                .checked_add(engine_gap.max(authenticated_gap) as u128)
-                .ok_or("mark-price rank overflow")?;
+            let price_gap = engine_gap.max(authenticated_gap);
+            if price_gap != 0 && self.env.current_slot() > engine_asset.slot_last {
+                market_mark_lag = market_mark_lag
+                    .checked_add(price_gap as u128)
+                    .and_then(|rank| {
+                        rank.checked_add(
+                            self.env
+                                .current_slot()
+                                .saturating_sub(engine_asset.slot_last)
+                                as u128,
+                        )
+                    })
+                    .ok_or("mark-progress rank overflow")?;
+            }
         }
         let mut b_work = 0u128;
         let mut stale_legs = 0u128;
@@ -1460,10 +1495,33 @@ impl ScenarioRunner {
         } else {
             0
         };
+        let lapsed_live_backing = if group.mode == MarketModeV16::Live {
+            account
+                .source_domains
+                .iter()
+                .filter(|source| source.is_occupied())
+                .filter_map(|source| {
+                    group
+                        .source_backing_buckets
+                        .get(source.domain.get() as usize)
+                })
+                .filter(|bucket| {
+                    bucket.status == BackingBucketStatusV16::Fresh
+                        && bucket.expiry_slot <= group.current_slot
+                        && (bucket.fresh_unliened_backing_num != 0
+                            || bucket.valid_liened_backing_num != 0
+                            || bucket.consumed_liened_backing_num != 0
+                            || bucket.impaired_liened_backing_num != 0)
+                })
+                .count() as u128
+        } else {
+            0
+        };
         Ok(ProgressRank {
             market_mark_lag,
             market_locks: u128::from(group.bankruptcy_hlock_active)
-                + u128::from(group.threshold_stress_active),
+                + u128::from(group.threshold_stress_active)
+                + lapsed_live_backing,
             b_work,
             stale_legs,
             health_work,
@@ -2660,6 +2718,124 @@ pub fn reproduce_rounded_funding_omission(
     })
 }
 
+pub fn reproduce_trade_funding_erasure(
+    mut seed: [u8; 32],
+    route: TradeRoute,
+) -> Result<TradeFundingErasureReproduction, String> {
+    if !matches!(route, TradeRoute::Cpi | TradeRoute::BatchCpi) {
+        return Err(format!(
+            "PR 271 requires an independently authorized CPI maker, got {route:?}"
+        ));
+    }
+    seed[0] ^= 0x71;
+    let control = run_trade_funding_order_world(seed, route, false)?;
+    let attack = run_trade_funding_order_world(seed, route, true)?;
+    let victim_payout_loss = control
+        .1
+        .checked_sub(attack.1)
+        .ok_or("PR 271 close-first ordering increased victim payout")?;
+    let attacker_payout_gain = attack
+        .0
+        .checked_sub(control.0)
+        .ok_or("PR 271 close-first ordering decreased attacker payout")?;
+    if control.2 <= 0
+        || control.3 >= 0
+        || attack.2 != 0
+        || attack.3 != 0
+        || victim_payout_loss == 0
+        || victim_payout_loss != attacker_payout_gain
+        || u128::from(control.0) + u128::from(control.1)
+            != u128::from(attack.0) + u128::from(attack.1)
+    {
+        return Err(format!(
+            "PR 271 did not erase a balanced public funding transfer: control={control:?}, attack={attack:?}"
+        ));
+    }
+    Ok(TradeFundingErasureReproduction {
+        blocker: KnownBlocker::TradeFundingErasure,
+        route,
+        control_f_long_num: control.2,
+        control_f_short_num: control.3,
+        attack_f_long_num: attack.2,
+        attack_f_short_num: attack.3,
+        victim_payout_loss,
+        attacker_payout_gain,
+    })
+}
+
+pub fn reproduce_rebalance_funding_erasure(
+    mut seed: [u8; 32],
+) -> Result<RebalanceFundingErasureReproduction, String> {
+    seed[0] ^= 0x72;
+    let control = run_rebalance_funding_order_world(seed, false)?;
+    let attack = run_rebalance_funding_order_world(seed, true)?;
+    let victim_claim_loss = control
+        .1
+        .checked_sub(attack.1)
+        .ok_or("PR 272 reduce-first ordering increased victim claim")?;
+    let attacker_payout_gain = attack
+        .0
+        .checked_sub(control.0)
+        .ok_or("PR 272 reduce-first ordering decreased attacker payout")?;
+    if control.2 == 0
+        || control.2 != control.3
+        || attack.2 != 0
+        || attack.3 != 0
+        || victim_claim_loss == 0
+        || victim_claim_loss != u128::from(attacker_payout_gain)
+        || u128::from(control.0) + control.1 != u128::from(attack.0) + attack.1
+    {
+        return Err(format!(
+            "PR 272 did not erase a balanced unilateral-reduction funding transfer: control={control:?}, attack={attack:?}"
+        ));
+    }
+    Ok(RebalanceFundingErasureReproduction {
+        blocker: KnownBlocker::RebalanceFundingErasure,
+        control_attacker_paid: control.2,
+        control_victim_received: control.3,
+        attack_attacker_paid: attack.2,
+        attack_victim_received: attack.3,
+        victim_claim_loss,
+        attacker_payout_gain,
+    })
+}
+
+pub fn reproduce_forfeit_funding_erasure(
+    mut seed: [u8; 32],
+) -> Result<ForfeitFundingErasureReproduction, String> {
+    seed[0] ^= 0x73;
+    let control = run_forfeit_funding_order_world(seed, false)?;
+    let attack = run_forfeit_funding_order_world(seed, true)?;
+    let victim_claim_loss = control
+        .1
+        .checked_sub(attack.1)
+        .ok_or("PR 273 forfeit-first ordering overflowed victim claim delta")?;
+    let attacker_payout_gain = attack
+        .0
+        .checked_sub(control.0)
+        .ok_or("PR 273 forfeit-first ordering decreased attacker payout")?;
+    if control.2 == 0
+        || control.2 != control.3
+        || attack.2 != 0
+        || attack.3 != 0
+        || victim_claim_loss <= 0
+        || victim_claim_loss != i128::from(attacker_payout_gain)
+    {
+        return Err(format!(
+            "PR 273 did not erase a balanced recovery-forfeit funding transfer: control={control:?}, attack={attack:?}"
+        ));
+    }
+    Ok(ForfeitFundingErasureReproduction {
+        blocker: KnownBlocker::ForfeitFundingErasure,
+        control_attacker_paid: control.2,
+        control_victim_received: control.3,
+        attack_attacker_paid: attack.2,
+        attack_victim_received: attack.3,
+        victim_claim_loss,
+        attacker_payout_gain,
+    })
+}
+
 pub fn reproduce_pending_ewma_inheritance(
     mut seed: [u8; 32],
     route: TradeRoute,
@@ -2976,6 +3152,206 @@ fn execute_trade_route(
             }],
         ),
     }
+}
+
+fn zero_move_funding_world(seed: [u8; 32]) -> Result<V16Svm, String> {
+    const PRICE: u64 = 2;
+    const TARGET: u64 = 1;
+    const DEPOSIT: u128 = 1_000_000;
+
+    let mut env = V16Svm::new(
+        seed,
+        MarketConfig {
+            initial_price: PRICE,
+            max_price_move_bps_per_slot: 24,
+            max_accrual_dt_slots: 1,
+            max_abs_funding_e9_per_slot: 1_000,
+            min_funding_lifetime_slots: 1,
+            actor_deposits: [
+                DEPOSIT,
+                DEPOSIT,
+                DEPOSIT,
+                DEPOSIT,
+                super::v16_svm::EXIT_MAKER_DEPOSIT,
+            ],
+            ..MarketConfig::default()
+        },
+    );
+    env.warp_to_slot(2);
+    env.push_auth_mark(0, 2, TARGET)
+        .map_err(|error| format!("stage zero-move funding mark: {error}"))?;
+    Ok(env)
+}
+
+fn zero_move_observation(env: &V16Svm) -> Vec<CrankObservationHint> {
+    vec![CrankObservationHint {
+        asset_index: 0,
+        oracle_accounts: env.primary_profile(0).oracle_leg_count,
+    }]
+}
+
+fn prime_zero_move_funding(env: &mut V16Svm) -> Result<(), String> {
+    for actor in [0, 1] {
+        env.crank(actor, 2, zero_move_observation(env))
+            .map_err(|error| format!("prime zero-move funding actor {actor}: {error}"))?;
+    }
+    let (_, group) = env.primary_market_state();
+    if group.assets[0].effective_price != 2
+        || group.assets[0].f_long_num != 0
+        || group.assets[0].f_short_num != 0
+    {
+        return Err(format!(
+            "zero-move prime unexpectedly accrued or moved price: price {}, F=({}, {})",
+            group.assets[0].effective_price,
+            group.assets[0].f_long_num,
+            group.assets[0].f_short_num
+        ));
+    }
+    env.warp_to_slot(3);
+    Ok(())
+}
+
+fn run_trade_funding_order_world(
+    seed: [u8; 32],
+    route: TradeRoute,
+    close_before_crank: bool,
+) -> Result<(u64, u64, i128, i128), String> {
+    const PRICE: u64 = 2;
+    const Q: i128 = 100 * POS_SCALE as i128;
+
+    let mut env = zero_move_funding_world(seed)?;
+    execute_trade_route(&mut env, route, 0, 1, 0, -Q, PRICE, 0)
+        .map_err(|error| format!("PR 271 {route:?} open: {error}"))?;
+    prime_zero_move_funding(&mut env)?;
+
+    if !close_before_crank {
+        for actor in [0, 1] {
+            env.crank(actor, 3, zero_move_observation(&env))
+                .map_err(|error| format!("PR 271 control crank actor {actor}: {error}"))?;
+        }
+    }
+    execute_trade_route(&mut env, route, 0, 1, 0, Q, PRICE, 0)
+        .map_err(|error| format!("PR 271 {route:?} close: {error}"))?;
+    if close_before_crank {
+        for actor in [0, 1] {
+            env.crank(actor, 3, zero_move_observation(&env))
+                .map_err(|error| format!("PR 271 attack crank actor {actor}: {error}"))?;
+        }
+    }
+
+    let (_, group) = env.primary_market_state();
+    for actor in [0, 1] {
+        let pnl = env.primary_portfolio(actor).pnl.get();
+        if pnl > 0 {
+            env.convert_released_pnl(actor, pnl as u128)
+                .map_err(|error| format!("PR 271 convert actor {actor}: {error}"))?;
+        }
+        let capital = env.primary_portfolio(actor).capital.get();
+        env.withdraw_primary(actor, capital)
+            .map_err(|error| format!("PR 271 withdraw actor {actor}: {error}"))?;
+    }
+    Ok((
+        env.token_amount(env.actors[0].destination_token),
+        env.token_amount(env.actors[1].destination_token),
+        group.assets[0].f_long_num,
+        group.assets[0].f_short_num,
+    ))
+}
+
+fn run_rebalance_funding_order_world(
+    seed: [u8; 32],
+    reduce_before_crank: bool,
+) -> Result<(u64, u128, u128, u128), String> {
+    const PRICE: u64 = 2;
+    const Q: i128 = 100 * POS_SCALE as i128;
+
+    let mut env = zero_move_funding_world(seed)?;
+    env.trade_no_cpi(0, 1, 0, -Q, PRICE, 0)
+        .map_err(|error| format!("PR 272 open: {error}"))?;
+    prime_zero_move_funding(&mut env)?;
+
+    if !reduce_before_crank {
+        for actor in [0, 1] {
+            env.crank(actor, 3, zero_move_observation(&env))
+                .map_err(|error| format!("PR 272 control crank actor {actor}: {error}"))?;
+        }
+    }
+    env.rebalance_reduce(0, 0, Q as u128)
+        .map_err(|error| format!("PR 272 unilateral reduce: {error}"))?;
+    env.crank(1, 3, zero_move_observation(&env))
+        .map_err(|error| format!("PR 272 settle independent LP: {error}"))?;
+
+    let attacker = env.primary_portfolio(0);
+    let victim = env.primary_portfolio(1);
+    let victim_claim = (victim.capital.get() as i128)
+        .checked_add(victim.pnl.get())
+        .ok_or("PR 272 victim claim overflow")?;
+    let victim_claim = u128::try_from(victim_claim)
+        .map_err(|_| "PR 272 victim claim became negative".to_string())?;
+    let attacker_paid = attacker.funding_short_paid_atoms_total.get();
+    let victim_received = victim.funding_long_received_atoms_total.get();
+    let attacker_capital = attacker.capital.get();
+    env.withdraw_primary(0, attacker_capital)
+        .map_err(|error| format!("PR 272 withdraw attacker: {error}"))?;
+    Ok((
+        env.token_amount(env.actors[0].destination_token),
+        victim_claim,
+        attacker_paid,
+        victim_received,
+    ))
+}
+
+fn run_forfeit_funding_order_world(
+    seed: [u8; 32],
+    forfeit_before_crank: bool,
+) -> Result<(u64, i128, u128, u128), String> {
+    const PRICE: u64 = 2;
+    const Q_ATTACKER: i128 = 5 * POS_SCALE as i128;
+    const Q_WHALE: i128 = 95 * POS_SCALE as i128;
+
+    let mut env = zero_move_funding_world(seed)?;
+    env.trade_no_cpi(1, 2, 0, -Q_WHALE, PRICE, 0)
+        .map_err(|error| format!("PR 273 open whale/reducer pair: {error}"))?;
+    env.trade_no_cpi(0, 3, 0, -Q_ATTACKER, PRICE, 0)
+        .map_err(|error| format!("PR 273 open attacker/LP pair: {error}"))?;
+    prime_zero_move_funding(&mut env)?;
+
+    if !forfeit_before_crank {
+        for actor in 0..4 {
+            env.crank(actor, 3, zero_move_observation(&env))
+                .map_err(|error| format!("PR 273 control crank actor {actor}: {error}"))?;
+        }
+    }
+    env.rebalance_reduce(2, 0, Q_WHALE as u128)
+        .map_err(|error| format!("PR 273 force short side DrainOnly: {error}"))?;
+    let (_, after_reduce) = env.primary_market_state();
+    if after_reduce.assets[0].mode_short != SideModeV16::DrainOnly {
+        return Err(format!(
+            "PR 273 public reduction did not make short side DrainOnly: {:?}",
+            after_reduce.assets[0].mode_short
+        ));
+    }
+    env.forfeit_recovery_leg(0, 0, u128::from(u64::MAX))
+        .map_err(|error| format!("PR 273 forfeit attacker recovery leg: {error}"))?;
+    env.crank(3, 3, zero_move_observation(&env))
+        .map_err(|error| format!("PR 273 settle independent LP: {error}"))?;
+
+    let attacker = env.primary_portfolio(0);
+    let victim = env.primary_portfolio(3);
+    let attacker_paid = attacker.funding_short_paid_atoms_total.get();
+    let victim_received = victim.funding_long_received_atoms_total.get();
+    let victim_claim = (victim.capital.get() as i128)
+        .checked_add(victim.pnl.get())
+        .ok_or("PR 273 victim claim overflow")?;
+    let attacker_capital = attacker.capital.get();
+    env.withdraw_primary(0, attacker_capital)
+        .map_err(|error| format!("PR 273 withdraw attacker: {error}"))?;
+    Ok((
+        env.token_amount(env.actors[0].destination_token),
+        victim_claim,
+        attacker_paid,
+        victim_received,
+    ))
 }
 
 fn run_rounded_funding_world(
@@ -3553,6 +3929,24 @@ pub fn reclaimable_ewma_fee_strategy() -> impl Strategy<Value = ([u8; 32], Trade
             TradeRoute::BatchCpi,
         ]),
     )
+}
+
+#[allow(dead_code)]
+pub fn trade_funding_erasure_strategy() -> impl Strategy<Value = ([u8; 32], TradeRoute)> {
+    (
+        any::<[u8; 32]>(),
+        prop::sample::select(vec![TradeRoute::Cpi, TradeRoute::BatchCpi]),
+    )
+}
+
+#[allow(dead_code)]
+pub fn rebalance_funding_erasure_seed_strategy() -> impl Strategy<Value = [u8; 32]> {
+    any::<[u8; 32]>()
+}
+
+#[allow(dead_code)]
+pub fn forfeit_funding_erasure_seed_strategy() -> impl Strategy<Value = [u8; 32]> {
+    any::<[u8; 32]>()
 }
 
 #[allow(dead_code)]

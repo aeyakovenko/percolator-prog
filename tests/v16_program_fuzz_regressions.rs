@@ -5,10 +5,12 @@ use support::{
     fuzz_model::{
         reproduce_asset_generation_trade_replay, reproduce_composite_oracle_rounding,
         reproduce_cpi_backing_fee_siphon, reproduce_cpi_caller_fee_siphon,
-        reproduce_omitted_rescue_liquidation, reproduce_pending_ewma_inheritance,
-        reproduce_post_expiry_backing_fee, reproduce_reclaimable_ewma_fee,
-        reproduce_rounded_funding_omission, reproduce_trade_retry_replay, run_scenario,
-        CompositeRoundingCase, KnownBlocker, PostExpiryBackingCase, Scenario, TradeRoute,
+        reproduce_forfeit_funding_erasure, reproduce_omitted_rescue_liquidation,
+        reproduce_pending_ewma_inheritance, reproduce_post_expiry_backing_fee,
+        reproduce_rebalance_funding_erasure, reproduce_reclaimable_ewma_fee,
+        reproduce_rounded_funding_omission, reproduce_trade_funding_erasure,
+        reproduce_trade_retry_replay, run_scenario, CompositeRoundingCase, KnownBlocker,
+        PostExpiryBackingCase, Scenario, TradeRoute,
     },
     open_lof_manifest::{missing_prs, quarantined_prs, validate_manifest},
 };
@@ -58,8 +60,8 @@ fn v16_program_known_blockers_remain_explicit_until_fixed() {
             "{name} no longer reproduces PR 204; remove its quarantine and promote the seed"
         );
         assert_eq!(
-            coverage.known_blocker_exit_locks[index], 1,
-            "{name} did not prove both normal exits and the sole public crank are blocked"
+            coverage.known_blocker_exit_locks[index], 0,
+            "{name} must not be overstated as persistent user-exit DoS while bilateral exits work"
         );
     }
 }
@@ -257,16 +259,69 @@ fn v16_program_pr225_reclaimed_ewma_fee_extracts_on_every_route() {
 }
 
 #[test]
+fn v16_program_pr271_cpi_close_erases_elapsed_funding() {
+    for route in [TradeRoute::Cpi, TradeRoute::BatchCpi] {
+        let reproduction = reproduce_trade_funding_erasure([0x71; 32], route)
+            .unwrap_or_else(|error| panic!("PR 271 {route:?} no longer reproduces: {error}"));
+        assert_eq!(reproduction.blocker, KnownBlocker::TradeFundingErasure);
+        assert!(reproduction.control_f_long_num > 0);
+        assert!(reproduction.control_f_short_num < 0);
+        assert_eq!(reproduction.attack_f_long_num, 0);
+        assert_eq!(reproduction.attack_f_short_num, 0);
+        assert_eq!(
+            reproduction.victim_payout_loss,
+            reproduction.attacker_payout_gain
+        );
+    }
+}
+
+#[test]
+fn v16_program_pr272_unilateral_reduce_erases_elapsed_funding() {
+    let reproduction = reproduce_rebalance_funding_erasure([0x72; 32])
+        .unwrap_or_else(|error| panic!("PR 272 no longer reproduces: {error}"));
+    assert_eq!(reproduction.blocker, KnownBlocker::RebalanceFundingErasure);
+    assert_eq!(
+        reproduction.control_attacker_paid,
+        reproduction.control_victim_received
+    );
+    assert!(reproduction.control_attacker_paid > 0);
+    assert_eq!(reproduction.attack_attacker_paid, 0);
+    assert_eq!(reproduction.attack_victim_received, 0);
+    assert_eq!(
+        reproduction.victim_claim_loss,
+        u128::from(reproduction.attacker_payout_gain)
+    );
+}
+
+#[test]
+fn v16_program_pr273_recovery_forfeit_erases_elapsed_funding() {
+    let reproduction = reproduce_forfeit_funding_erasure([0x73; 32])
+        .unwrap_or_else(|error| panic!("PR 273 no longer reproduces: {error}"));
+    assert_eq!(reproduction.blocker, KnownBlocker::ForfeitFundingErasure);
+    assert_eq!(
+        reproduction.control_attacker_paid,
+        reproduction.control_victim_received
+    );
+    assert!(reproduction.control_attacker_paid > 0);
+    assert_eq!(reproduction.attack_attacker_paid, 0);
+    assert_eq!(reproduction.attack_victim_received, 0);
+    assert_eq!(
+        reproduction.victim_claim_loss,
+        i128::from(reproduction.attacker_payout_gain)
+    );
+}
+
+#[test]
 fn v16_program_open_lof_manifest_is_complete_and_honest() {
     validate_manifest().expect("open LoF manifest structure");
     assert_eq!(
         quarantined_prs(),
-        [220, 223, 224, 225, 231, 253, 260, 329, 343, 367, 381]
+        [220, 223, 224, 225, 231, 253, 260, 271, 272, 273, 329, 343, 367, 381]
     );
     let missing = missing_prs();
     assert_eq!(
         missing.len(),
-        88,
+        85,
         "update the explicit evidence state when an executable adapter lands"
     );
     assert!(!missing.contains(&220));
@@ -276,6 +331,9 @@ fn v16_program_open_lof_manifest_is_complete_and_honest() {
     assert!(!missing.contains(&231));
     assert!(!missing.contains(&253));
     assert!(!missing.contains(&260));
+    assert!(!missing.contains(&271));
+    assert!(!missing.contains(&272));
+    assert!(!missing.contains(&273));
     assert!(!missing.contains(&329));
     assert!(!missing.contains(&343));
     assert!(!missing.contains(&367));

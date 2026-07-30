@@ -559,6 +559,50 @@ impl V16Svm {
         )
     }
 
+    pub fn rebalance_reduce(
+        &mut self,
+        actor_index: usize,
+        asset_index: u16,
+        reduce_q: u128,
+    ) -> Result<TxSuccess, String> {
+        let actor = &self.actors[actor_index];
+        let owner = copy_keypair(&actor.signer);
+        self.send_program(
+            ProgInstruction::RebalanceReduce {
+                asset_index,
+                reduce_q,
+            },
+            vec![
+                AccountMeta::new(owner.pubkey(), true),
+                AccountMeta::new(self.market, false),
+                AccountMeta::new(actor.portfolio, false),
+            ],
+            &[owner],
+        )
+    }
+
+    pub fn forfeit_recovery_leg(
+        &mut self,
+        actor_index: usize,
+        asset_index: u16,
+        b_delta_budget: u128,
+    ) -> Result<TxSuccess, String> {
+        let actor = &self.actors[actor_index];
+        let owner = copy_keypair(&actor.signer);
+        self.send_program(
+            ProgInstruction::ForfeitRecoveryLeg {
+                asset_index,
+                b_delta_budget,
+            },
+            vec![
+                AccountMeta::new(owner.pubkey(), true),
+                AccountMeta::new(self.market, false),
+                AccountMeta::new(actor.portfolio, false),
+            ],
+            &[owner],
+        )
+    }
+
     pub fn trade_no_cpi(
         &mut self,
         taker: usize,
