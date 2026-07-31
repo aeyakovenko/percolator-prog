@@ -13,7 +13,8 @@ use support::fuzz_model::{
     delayed_asset_authority_revival_seed_strategy, deposit_retry_replay_seed_strategy,
     forfeit_funding_erasure_seed_strategy, fractional_cap_settlement_seed_strategy,
     insurance_top_up_retry_replay_seed_strategy,
-    insurance_withdrawal_generation_replay_seed_strategy, market_incarnation_deposit_seed_strategy,
+    insurance_withdrawal_generation_replay_seed_strategy,
+    maintenance_policy_generation_replay_seed_strategy, market_incarnation_deposit_seed_strategy,
     omitted_rescue_seed_strategy, pending_ewma_inheritance_strategy,
     pending_ewma_target_override_strategy, pending_mark_fee_reward_seed_strategy,
     portfolio_incarnation_deposit_seed_strategy, portfolio_incarnation_withdrawal_seed_strategy,
@@ -30,7 +31,8 @@ use support::fuzz_model::{
     reproduce_cross_margin_insurance_drain, reproduce_delayed_asset_authority_revival,
     reproduce_deposit_retry_replay, reproduce_forfeit_funding_erasure,
     reproduce_fractional_cap_settlement, reproduce_insurance_top_up_retry_replay,
-    reproduce_insurance_withdrawal_generation_replay, reproduce_market_incarnation_deposit,
+    reproduce_insurance_withdrawal_generation_replay,
+    reproduce_maintenance_policy_generation_replay, reproduce_market_incarnation_deposit,
     reproduce_omitted_rescue_liquidation, reproduce_pending_ewma_inheritance,
     reproduce_pending_ewma_target_override, reproduce_pending_mark_fee_reward,
     reproduce_portfolio_incarnation_deposit, reproduce_portfolio_incarnation_withdrawal,
@@ -436,6 +438,19 @@ proptest! {
             result.is_ok(),
             "PR 310 {:?} no longer reproduces for seed {:?}: {}",
             route,
+            seed,
+            result.unwrap_err()
+        );
+    }
+
+    #[test]
+    fn v16_program_pr325_maintenance_policy_generation_replay_fuzz(
+        seed in maintenance_policy_generation_replay_seed_strategy()
+    ) {
+        let result = reproduce_maintenance_policy_generation_replay(seed);
+        prop_assert!(
+            result.is_ok(),
+            "PR 325 no longer reproduces for seed {:?}: {}",
             seed,
             result.unwrap_err()
         );

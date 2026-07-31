@@ -101,10 +101,11 @@ pub enum KnownBlocker {
     ShutdownGenerationReplay,
     ActivationFeeConsent,
     BilateralBaseFeeConsent,
+    MaintenancePolicyGenerationReplay,
 }
 
 impl KnownBlocker {
-    pub const COUNT: usize = 45;
+    pub const COUNT: usize = 46;
 
     pub const fn index(self) -> usize {
         match self {
@@ -153,6 +154,7 @@ impl KnownBlocker {
             Self::ShutdownGenerationReplay => 42,
             Self::ActivationFeeConsent => 43,
             Self::BilateralBaseFeeConsent => 44,
+            Self::MaintenancePolicyGenerationReplay => 45,
         }
     }
 }
@@ -629,6 +631,18 @@ pub struct BilateralBaseFeeConsentReproduction {
     pub total_payout: u128,
     pub open_cu: u64,
     pub close_cu: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MaintenancePolicyGenerationReplayReproduction {
+    pub blocker: KnownBlocker,
+    pub old_asset_market_id: u64,
+    pub new_asset_market_id: u64,
+    pub victim_loss: u64,
+    pub attacker_extraction: u64,
+    pub live_oi_q: u128,
+    pub replay_cu: u64,
+    pub sync_cu: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -5778,6 +5792,156 @@ pub fn reproduce_bilateral_base_fee_consent(
     })
 }
 
+pub fn reproduce_maintenance_policy_generation_replay(
+    seed: [u8; 32],
+) -> Result<MaintenancePolicyGenerationReplayReproduction, String> {
+    const TRADER_LONG: usize = 0;
+    const TRADER_SHORT: usize = 1;
+    const FEE_PAYER: usize = 2;
+    const ATTACKER: usize = 3;
+    const PRICE: u64 = 100;
+    const TRADE_SIZE_Q: i128 = POS_SCALE as i128;
+    const DEPOSIT: u128 = 100_000;
+    const MAINTENANCE_FEE_PER_SLOT: u128 = 58;
+    const CRANKER_SHARE_BPS: u16 = 10_000;
+    const REINIT_SLOT: u64 = 10;
+    const SYNC_SLOT: u64 = 20;
+    const EXPECTED_FEE: u64 = 580;
+
+    let config = MarketConfig {
+        initial_price: PRICE,
+        maintenance_fee_per_slot: MAINTENANCE_FEE_PER_SLOT,
+        actor_deposits: [1, 1, 1, 1, 1],
+        ..MarketConfig::default()
+    };
+    let mut env = V16Svm::new(seed, config);
+    let supply_before = env.token_supply_observed();
+    let old_asset_market_id = env.primary_market_state().1.assets[0].market_id;
+    let retained_policy = env.build_retained_maintenance_fee_policy(CRANKER_SHARE_BPS);
+
+    for actor in 0..PRIMARY_ACTOR_COUNT {
+        env.withdraw_primary(actor, 1)
+            .map_err(|error| format!("PR 325 empty generation-A portfolio {actor}: {error}"))?;
+        env.close_primary_portfolio(actor)
+            .map_err(|error| format!("PR 325 close generation-A portfolio {actor}: {error}"))?;
+    }
+    env.resolve_market()
+        .map_err(|error| format!("PR 325 resolve generation A: {error}"))?;
+    env.close_primary_slab()
+        .map_err(|error| format!("PR 325 close generation-A slab: {error}"))?;
+
+    env.warp_to_slot(REINIT_SLOT);
+    env.fund_closed_primary_market()
+        .map_err(|error| format!("PR 325 re-fund closed market: {error}"))?;
+    env.recreate_primary_vault()
+        .map_err(|error| format!("PR 325 recreate canonical vault: {error}"))?;
+    env.reinitialize_primary_market(config)
+        .map_err(|error| format!("PR 325 initialize generation B: {error}"))?;
+    env.configure_auth_mark(false, 0, REINIT_SLOT, PRICE)
+        .map_err(|error| format!("PR 325 configure generation-B AuthMark: {error}"))?;
+    let new_asset_market_id = env.primary_market_state().1.assets[0].market_id;
+    if env
+        .primary_market_state()
+        .0
+        .maintenance_cranker_fee_share_bps
+        != 0
+    {
+        return Err("PR 325 generation B did not start with zero cranker share".into());
+    }
+
+    for actor in [TRADER_LONG, TRADER_SHORT, FEE_PAYER, ATTACKER] {
+        env.fund_closed_primary_portfolio(actor, 1_000_000_000)
+            .map_err(|error| format!("PR 325 re-fund portfolio {actor}: {error}"))?;
+        env.reinitialize_primary_portfolio(actor)
+            .map_err(|error| format!("PR 325 initialize portfolio {actor}: {error}"))?;
+    }
+    for actor in [TRADER_LONG, TRADER_SHORT, FEE_PAYER] {
+        env.deposit_primary(actor, DEPOSIT)
+            .map_err(|error| format!("PR 325 deposit actor {actor}: {error}"))?;
+    }
+    env.trade_no_cpi(TRADER_LONG, TRADER_SHORT, 0, TRADE_SIZE_Q, PRICE, 0)
+        .map_err(|error| format!("PR 325 establish generation-B live OI: {error}"))?;
+    let live_oi_q = env.primary_market_state().1.assets[0].oi_eff_long_q;
+    if live_oi_q == 0 {
+        return Err("PR 325 generation-B market has no live OI".into());
+    }
+
+    let replay = env
+        .land_retained(retained_policy)
+        .map_err(|error| format!("PR 325 stale maintenance policy no longer lands: {error}"))?;
+    if env
+        .primary_market_state()
+        .0
+        .maintenance_cranker_fee_share_bps
+        != CRANKER_SHARE_BPS
+    {
+        return Err("PR 325 stale policy did not install the 100% cranker split".into());
+    }
+
+    env.warp_to_slot(SYNC_SLOT);
+    let payer_before = env.primary_portfolio(FEE_PAYER).capital.get();
+    let attacker_before = env.primary_portfolio(ATTACKER).capital.get();
+    let sync = env
+        .sync_maintenance_fee_with_reward(FEE_PAYER, ATTACKER, SYNC_SLOT)
+        .map_err(|error| format!("PR 325 sync victim maintenance fee: {error}"))?;
+    let victim_loss = payer_before
+        .checked_sub(env.primary_portfolio(FEE_PAYER).capital.get())
+        .ok_or("PR 325 fee payer capital increased")?;
+    let attacker_reward = env
+        .primary_portfolio(ATTACKER)
+        .capital
+        .get()
+        .checked_sub(attacker_before)
+        .ok_or("PR 325 attacker capital decreased")?;
+    if victim_loss != EXPECTED_FEE as u128
+        || attacker_reward != victim_loss
+        || env.primary_market_state().1.insurance != 0
+    {
+        return Err(format!(
+            "PR 325 stale split did not transfer the user fee: victim={victim_loss}, \
+             attacker={attacker_reward}, insurance={}",
+            env.primary_market_state().1.insurance
+        ));
+    }
+
+    let destination = env.actors[ATTACKER].destination_token;
+    let destination_before = env.token_amount(destination);
+    let withdrawal = env
+        .withdraw_primary(ATTACKER, attacker_reward)
+        .map_err(|error| format!("PR 325 attacker could not withdraw reward: {error}"))?;
+    let attacker_extraction = env
+        .token_amount(destination)
+        .checked_sub(destination_before)
+        .ok_or("PR 325 attacker destination decreased")?;
+    let max_cu = replay
+        .compute_units
+        .max(sync.compute_units)
+        .max(withdrawal.compute_units);
+    if attacker_extraction != EXPECTED_FEE
+        || u128::from(attacker_extraction) != victim_loss
+        || max_cu >= TX_CU_LIMIT
+        || env.token_supply_observed() != supply_before
+    {
+        return Err(format!(
+            "PR 325 public extraction mismatch: victim={victim_loss}, \
+             extraction={attacker_extraction}, max_cu={max_cu}, supply={}/{}",
+            env.token_supply_observed(),
+            supply_before
+        ));
+    }
+
+    Ok(MaintenancePolicyGenerationReplayReproduction {
+        blocker: KnownBlocker::MaintenancePolicyGenerationReplay,
+        old_asset_market_id,
+        new_asset_market_id,
+        victim_loss: victim_loss as u64,
+        attacker_extraction,
+        live_oi_q,
+        replay_cu: replay.compute_units,
+        sync_cu: sync.compute_units,
+    })
+}
+
 #[derive(Clone, Copy, Debug)]
 struct BackingTopUpRetryWorld {
     provider_loss: u64,
@@ -10238,6 +10402,11 @@ pub fn bilateral_base_fee_consent_strategy() -> impl Strategy<Value = ([u8; 32],
         any::<[u8; 32]>(),
         prop::sample::select(vec![TradeRoute::NoCpi, TradeRoute::BatchNoCpi]),
     )
+}
+
+#[allow(dead_code)]
+pub fn maintenance_policy_generation_replay_seed_strategy() -> impl Strategy<Value = [u8; 32]> {
+    any::<[u8; 32]>()
 }
 
 #[allow(dead_code)]

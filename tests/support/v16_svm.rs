@@ -1382,6 +1382,18 @@ impl V16Svm {
         )
     }
 
+    pub fn build_retained_maintenance_fee_policy(&mut self, cranker_share_bps: u16) -> Transaction {
+        let authority = copy_keypair(&self.admin);
+        self.build_program_transaction(
+            ProgInstruction::UpdateMaintenanceFeePolicy { cranker_share_bps },
+            vec![
+                AccountMeta::new(authority.pubkey(), true),
+                AccountMeta::new(self.market, false),
+            ],
+            &[authority],
+        )
+    }
+
     pub fn retire_asset(&mut self, asset_index: u16, now_slot: u64) -> Result<TxSuccess, String> {
         let authority = copy_keypair(&self.admin);
         self.send_program(
