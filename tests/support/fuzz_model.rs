@@ -84,10 +84,11 @@ pub enum KnownBlocker {
     FractionalCapSettlement,
     ProspectiveFundingRewrite,
     ResolveBeforeCommittedAccrual,
+    BilateralFeeSupport,
 }
 
 impl KnownBlocker {
-    pub const COUNT: usize = 28;
+    pub const COUNT: usize = 29;
 
     pub const fn index(self) -> usize {
         match self {
@@ -119,6 +120,7 @@ impl KnownBlocker {
             Self::FractionalCapSettlement => 25,
             Self::ProspectiveFundingRewrite => 26,
             Self::ResolveBeforeCommittedAccrual => 27,
+            Self::BilateralFeeSupport => 28,
         }
     }
 }
@@ -206,6 +208,12 @@ pub enum TargetStagingCase {
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum TradeDrivenLiquidationMode {
+    Ewma,
+    HybridAfterHours,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum BilateralFeeMode {
     Ewma,
     HybridAfterHours,
 }
@@ -481,6 +489,21 @@ pub struct ResolveBeforeCommittedAccrualReproduction {
     pub control_total_payout: u128,
     pub attack_total_payout: u128,
     pub attack_resolve_cu: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BilateralFeeSupportReproduction {
+    pub blocker: KnownBlocker,
+    pub mode: BilateralFeeMode,
+    pub route: TradeRoute,
+    pub setup_mark: u64,
+    pub queued_mark: u64,
+    pub attacker_profit: u128,
+    pub victim_loss: u128,
+    pub fee_lp_loss: u128,
+    pub insurance_gain: u128,
+    pub extracted_tokens: u128,
+    pub max_cu: u64,
 }
 
 impl SubstitutionKind {
@@ -4256,6 +4279,279 @@ fn run_pending_mark_resolve_world(
     })
 }
 
+pub fn reproduce_bilateral_fee_support(
+    mut seed: [u8; 32],
+    mode: BilateralFeeMode,
+    route: TradeRoute,
+) -> Result<BilateralFeeSupportReproduction, String> {
+    if !matches!(route, TradeRoute::Cpi | TradeRoute::BatchCpi) {
+        return Err(format!(
+            "PR 369 requires a CPI matcher route, got {route:?}"
+        ));
+    }
+    seed[0] ^= match (mode, route) {
+        (BilateralFeeMode::Ewma, TradeRoute::Cpi) => 0x69,
+        (BilateralFeeMode::Ewma, TradeRoute::BatchCpi) => 0xb9,
+        (BilateralFeeMode::HybridAfterHours, TradeRoute::Cpi) => 0xe9,
+        (BilateralFeeMode::HybridAfterHours, TradeRoute::BatchCpi) => 0xf9,
+        (_, TradeRoute::NoCpi | TradeRoute::BatchNoCpi) => unreachable!(),
+    };
+    const MARK: u64 = 1_000_000;
+    const ADVERSE_MARK: u64 = 1_999_999;
+    const MOVER_Q: i128 = POS_SCALE as i128;
+    const BENEFICIARY_Q: i128 = 10 * POS_SCALE as i128;
+    const LARGE_DEPOSIT: u128 = 50_000_000;
+
+    let mut env = V16Svm::new(
+        seed,
+        MarketConfig {
+            initial_price: MARK,
+            max_trading_fee_bps: 10_000,
+            max_price_move_bps_per_slot: 10_000,
+            max_accrual_dt_slots: 1,
+            min_funding_lifetime_slots: 1,
+            actor_deposits: [
+                MARK as u128,
+                LARGE_DEPOSIT,
+                LARGE_DEPOSIT,
+                LARGE_DEPOSIT,
+                LARGE_DEPOSIT,
+            ],
+            ..MarketConfig::default()
+        },
+    );
+    let close_lp = env.add_primary_actor(seed, 0, 200_000_000, LARGE_DEPOSIT);
+    if close_lp != 5 {
+        return Err(format!("PR 369 unexpected close-LP index {close_lp}"));
+    }
+    let supply_before = env.token_supply_observed();
+    let hybrid_feed = match mode {
+        BilateralFeeMode::Ewma => {
+            env.configure_ewma_mark(0, 1, MARK, 1, 0)
+                .map_err(|error| format!("PR 369 configure EWMA mark: {error}"))?;
+            None
+        }
+        BilateralFeeMode::HybridAfterHours => {
+            env.set_clock(1, 100);
+            let feed = [0xceu8; 32];
+            let initial_oracle = env.set_pyth_price(&feed, MARK as i64, -6, 100, 100);
+            env.configure_hybrid_oracle(
+                0,
+                1,
+                100,
+                0,
+                [feed, [0u8; 32], [0u8; 32]],
+                &[initial_oracle],
+                1,
+                100,
+            )
+            .map_err(|error| format!("PR 369 configure hybrid oracle: {error}"))?;
+            Some(feed)
+        }
+    };
+
+    env.set_matcher_spreads(1, 0, 9_000)
+        .map_err(|error| format!("PR 369 configure opening passive matcher: {error}"))?;
+    env.trade_cpi(0, 1, 0, -MOVER_Q, 0, 0)
+        .map_err(|error| format!("PR 369 open future distressed short: {error}"))?;
+    env.trade_no_cpi(2, 3, 0, BENEFICIARY_Q, MARK, 0)
+        .map_err(|error| format!("PR 369 open independent beneficiary/victim book: {error}"))?;
+    env.trade_no_cpi(4, close_lp, 0, BENEFICIARY_Q, MARK, 0)
+        .map_err(|error| format!("PR 369 open independent extraction pair: {error}"))?;
+    env.set_matcher_spreads(close_lp, 0, 9_000)
+        .map_err(|error| format!("PR 369 configure extraction passive matcher: {error}"))?;
+
+    let hybrid_oracle_tail = match mode {
+        BilateralFeeMode::Ewma => {
+            env.warp_to_slot(10);
+            env.push_ewma_mark(0, 10, ADVERSE_MARK)
+                .map_err(|error| format!("PR 369 publish honest EWMA mark: {error}"))?;
+            None
+        }
+        BilateralFeeMode::HybridAfterHours => {
+            env.set_clock(10, 110);
+            Some(env.set_pyth_price(
+                &hybrid_feed.ok_or("PR 369 hybrid feed missing")?,
+                ADVERSE_MARK as i64,
+                -6,
+                100,
+                110,
+            ))
+        }
+    };
+    for actor in 0..env.actors.len() {
+        let observations = if actor == 0 || hybrid_oracle_tail.is_some() {
+            vec![CrankObservationHint {
+                asset_index: 0,
+                oracle_accounts: usize::from(hybrid_oracle_tail.is_some()) as u8,
+            }]
+        } else {
+            vec![]
+        };
+        let success = if let Some(oracle) = hybrid_oracle_tail {
+            env.crank_with_oracles(actor, 10, observations, &[oracle])
+        } else {
+            env.crank(actor, 10, observations)
+        };
+        success.map_err(|error| format!("PR 369 setup crank actor {actor}: {error}"))?;
+    }
+    let setup_mark = env.primary_market_state().1.assets[0].effective_price;
+    let mover_at_setup = env.primary_portfolio(0);
+    if mover_at_setup.capital.get() == 0 || mover_at_setup.capital.get() >= u128::from(setup_mark) {
+        return Err(format!(
+            "PR 369 fixture did not leave a live underfunded mover: capital={}, mark={setup_mark}",
+            mover_at_setup.capital.get()
+        ));
+    }
+
+    let attacker_before = portfolio_equity(&env, 0)?
+        .checked_add(portfolio_equity(&env, 2)?)
+        .ok_or("PR 369 attacker pre-equity overflow")?;
+    let victim_before = portfolio_equity(&env, 3)?;
+    let fee_lp_before = portfolio_equity(&env, 1)?;
+    let insurance_before = env.primary_market_state().1.insurance;
+
+    env.set_matcher_spreads(1, 9_000, 9_000)
+        .map_err(|error| format!("PR 369 configure exit passive matcher: {error}"))?;
+    match mode {
+        BilateralFeeMode::Ewma => env.warp_to_slot(20),
+        BilateralFeeMode::HybridAfterHours => env.set_clock(20, 1_000),
+    }
+    let exit = match route {
+        TradeRoute::Cpi => env.trade_cpi(0, 1, 0, MOVER_Q, 0, 0),
+        TradeRoute::BatchCpi => env.batch_trade_cpi(
+            0,
+            1,
+            vec![BatchTradeCpiLeg {
+                asset_index: 0,
+                size_q: MOVER_Q,
+                fee_bps: 0,
+                limit_price: 0,
+            }],
+        ),
+        TradeRoute::NoCpi | TradeRoute::BatchNoCpi => unreachable!(),
+    }
+    .map_err(|error| format!("PR 369 underfunded risk-reducing {route:?} exit: {error}"))?;
+    let mut max_cu = exit.compute_units;
+    let queued_mark = env.primary_profile(0).mark_ewma_e6;
+    if queued_mark < setup_mark {
+        return Err(format!(
+            "PR 369 accepted upward print reversed mark: {setup_mark} -> {queued_mark}"
+        ));
+    }
+
+    for actor in [2usize, 3usize] {
+        let observations = if actor == 2 || hybrid_oracle_tail.is_some() {
+            vec![CrankObservationHint {
+                asset_index: 0,
+                oracle_accounts: usize::from(hybrid_oracle_tail.is_some()) as u8,
+            }]
+        } else {
+            vec![]
+        };
+        let success = if let Some(oracle) = hybrid_oracle_tail {
+            env.crank_with_oracles(actor, 20, observations, &[oracle])
+        } else {
+            env.crank(actor, 20, observations)
+        }
+        .map_err(|error| format!("PR 369 apply subsidized mark to actor {actor}: {error}"))?;
+        max_cu = max_cu.max(success.compute_units);
+    }
+
+    let attacker_after = portfolio_equity(&env, 0)?
+        .checked_add(portfolio_equity(&env, 2)?)
+        .ok_or("PR 369 attacker post-equity overflow")?;
+    let victim_after = portfolio_equity(&env, 3)?;
+    let fee_lp_after = portfolio_equity(&env, 1)?;
+    let insurance_after = env.primary_market_state().1.insurance;
+    let victim_loss = u128::try_from(
+        victim_before
+            .checked_sub(victim_after)
+            .ok_or("PR 369 victim equity increased")?,
+    )
+    .map_err(|_| "PR 369 victim loss is negative")?;
+    let fee_lp_loss = u128::try_from(
+        fee_lp_before
+            .checked_sub(fee_lp_after)
+            .ok_or("PR 369 fee LP equity increased")?,
+    )
+    .map_err(|_| "PR 369 fee LP loss is negative")?;
+    let insurance_gain = insurance_after
+        .checked_sub(insurance_before)
+        .ok_or("PR 369 insurance decreased")?;
+
+    let close = env
+        .trade_cpi(2, close_lp, 0, -BENEFICIARY_Q, 0, 0)
+        .map_err(|error| format!("PR 369 close beneficiary through independent LP: {error}"))?;
+    max_cu = max_cu.max(close.compute_units);
+    let released = env.primary_portfolio(2).pnl.get().max(0) as u128;
+    if released == 0 {
+        return Err("PR 369 subsidized mark produced no releasable attacker PnL".into());
+    }
+    env.convert_released_pnl(2, released)
+        .map_err(|error| format!("PR 369 convert attacker PnL: {error}"))?;
+    for actor in [2usize, 0usize] {
+        let capital = env.primary_portfolio(actor).capital.get();
+        if capital != 0 {
+            let withdrawal = env
+                .withdraw_primary(actor, capital)
+                .map_err(|error| format!("PR 369 withdraw attacker actor {actor}: {error}"))?;
+            max_cu = max_cu.max(withdrawal.compute_units);
+        }
+    }
+    let extracted_tokens = u128::from(env.token_amount(env.actors[0].destination_token))
+        .checked_add(u128::from(
+            env.token_amount(env.actors[2].destination_token),
+        ))
+        .ok_or("PR 369 extracted SPL overflow")?;
+    let attacker_before =
+        u128::try_from(attacker_before).map_err(|_| "PR 369 attacker began insolvent")?;
+    let attacker_profit = extracted_tokens
+        .checked_sub(attacker_before)
+        .ok_or_else(|| {
+            format!(
+                "PR 369 one-sided fee no longer yields extraction: before={attacker_before}, \
+                 after={extracted_tokens}, internal_after={attacker_after}"
+            )
+        })?;
+    if attacker_profit == 0
+        || victim_loss == 0
+        || fee_lp_loss == 0
+        || insurance_gain == 0
+        || max_cu >= TX_CU_LIMIT
+        || env.token_supply_observed() != supply_before
+    {
+        return Err(format!(
+            "PR 369 public extraction conditions failed: profit={attacker_profit}, \
+             victim={victim_loss}, fee_lp={fee_lp_loss}, insurance={insurance_gain}, \
+             max_cu={max_cu}, supply={}/{}",
+            env.token_supply_observed(),
+            supply_before
+        ));
+    }
+    Ok(BilateralFeeSupportReproduction {
+        blocker: KnownBlocker::BilateralFeeSupport,
+        mode,
+        route,
+        setup_mark,
+        queued_mark,
+        attacker_profit,
+        victim_loss,
+        fee_lp_loss,
+        insurance_gain,
+        extracted_tokens,
+        max_cu,
+    })
+}
+
+fn portfolio_equity(env: &V16Svm, actor: usize) -> Result<i128, String> {
+    let account = env.primary_portfolio(actor);
+    i128::try_from(account.capital.get())
+        .map_err(|_| "portfolio capital exceeds signed range")?
+        .checked_add(account.pnl.get())
+        .ok_or_else(|| "portfolio equity overflow".into())
+}
+
 #[derive(Clone, Copy, Debug)]
 struct ProspectiveFundingWorld {
     coalition_payout: u128,
@@ -7273,6 +7569,19 @@ pub fn prospective_funding_rewrite_strategy() -> impl Strategy<Value = ([u8; 32]
 #[allow(dead_code)]
 pub fn resolve_before_committed_accrual_seed_strategy() -> impl Strategy<Value = [u8; 32]> {
     any::<[u8; 32]>()
+}
+
+#[allow(dead_code)]
+pub fn bilateral_fee_support_strategy(
+) -> impl Strategy<Value = ([u8; 32], BilateralFeeMode, TradeRoute)> {
+    (
+        any::<[u8; 32]>(),
+        prop::sample::select(vec![
+            BilateralFeeMode::Ewma,
+            BilateralFeeMode::HybridAfterHours,
+        ]),
+        prop::sample::select(vec![TradeRoute::Cpi, TradeRoute::BatchCpi]),
+    )
 }
 
 #[allow(dead_code)]

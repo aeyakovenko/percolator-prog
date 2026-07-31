@@ -335,6 +335,100 @@ impl V16Svm {
         out
     }
 
+    pub fn add_primary_actor(
+        &mut self,
+        seed: [u8; 32],
+        actor_label: u8,
+        source_balance: u64,
+        deposit: u128,
+    ) -> usize {
+        let base = 130u8
+            .checked_add(
+                actor_label
+                    .checked_mul(5)
+                    .expect("extra actor label multiplication"),
+            )
+            .expect("extra actor label range");
+        let signer = deterministic_keypair(&seed, base);
+        let portfolio =
+            deterministic_keypair(&seed, base.checked_add(1).expect("portfolio label")).pubkey();
+        let source_token =
+            deterministic_keypair(&seed, base.checked_add(2).expect("source label")).pubkey();
+        let destination_token =
+            deterministic_keypair(&seed, base.checked_add(3).expect("destination label")).pubkey();
+        let matcher_context =
+            deterministic_keypair(&seed, base.checked_add(4).expect("matcher label")).pubkey();
+        let matcher_delegate = matcher_delegate_key(
+            &self.program_id,
+            &self.market,
+            &portfolio,
+            &signer.pubkey(),
+            &self.matcher_program,
+            &matcher_context,
+        );
+        self.svm
+            .airdrop(&signer.pubkey(), 10_000_000_000)
+            .expect("airdrop extra primary actor");
+        set_program_account(
+            &mut self.svm,
+            portfolio,
+            self.program_id,
+            state::portfolio_account_len_for_market_slots(ASSET_COUNT).expect("portfolio len"),
+        );
+        set_token_account(
+            &mut self.svm,
+            source_token,
+            self.mint,
+            signer.pubkey(),
+            source_balance,
+        );
+        set_token_account(
+            &mut self.svm,
+            destination_token,
+            self.mint,
+            signer.pubkey(),
+            0,
+        );
+        set_program_account(
+            &mut self.svm,
+            matcher_context,
+            self.matcher_program,
+            MATCHER_CONTEXT_LEN,
+        );
+        self.svm
+            .set_account(
+                matcher_delegate,
+                Account {
+                    lamports: 1_000_000_000,
+                    data: vec![],
+                    owner: Pubkey::default(),
+                    executable: false,
+                    rent_epoch: 0,
+                },
+            )
+            .expect("set extra matcher delegate fixture");
+        self.token_accounts
+            .extend([source_token, destination_token]);
+        self.initial_token_supply = self
+            .initial_token_supply
+            .checked_add(u128::from(source_balance))
+            .expect("extra actor token supply");
+        let actor_index = self.actors.len();
+        self.actors.push(Actor {
+            signer,
+            portfolio,
+            source_token,
+            destination_token,
+            matcher_context,
+            matcher_delegate,
+        });
+        self.init_primary_portfolio(actor_index);
+        self.init_matcher(actor_index);
+        self.deposit_primary(actor_index, deposit)
+            .expect("deposit extra primary actor");
+        actor_index
+    }
+
     fn initialize_world(&mut self, config: MarketConfig) {
         self.init_market(false, config);
         self.init_market(true, config);
@@ -463,6 +557,30 @@ impl V16Svm {
             &[owner],
         )
         .expect("bind portfolio to authenticated matcher");
+    }
+
+    pub fn set_matcher_spreads(
+        &mut self,
+        actor_index: usize,
+        bid_spread_bps: u64,
+        ask_spread_bps: u64,
+    ) -> Result<TxSuccess, String> {
+        let actor = &self.actors[actor_index];
+        let owner = copy_keypair(&actor.signer);
+        let mut data = vec![4];
+        data.extend_from_slice(&bid_spread_bps.to_le_bytes());
+        data.extend_from_slice(&ask_spread_bps.to_le_bytes());
+        self.send_raw_instruction(
+            Instruction {
+                program_id: self.matcher_program,
+                accounts: vec![
+                    AccountMeta::new_readonly(owner.pubkey(), true),
+                    AccountMeta::new(actor.matcher_context, false),
+                ],
+                data,
+            },
+            &[owner],
+        )
     }
 
     pub fn deposit_primary(
