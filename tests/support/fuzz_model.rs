@@ -88,10 +88,11 @@ pub enum KnownBlocker {
     DelayedAssetAuthorityRevival,
     CollateralTopUpGenerationReplay,
     InsuranceWithdrawalGenerationReplay,
+    InsuranceTopUpRetryReplay,
 }
 
 impl KnownBlocker {
-    pub const COUNT: usize = 32;
+    pub const COUNT: usize = 33;
 
     pub const fn index(self) -> usize {
         match self {
@@ -127,6 +128,7 @@ impl KnownBlocker {
             Self::DelayedAssetAuthorityRevival => 29,
             Self::CollateralTopUpGenerationReplay => 30,
             Self::InsuranceWithdrawalGenerationReplay => 31,
+            Self::InsuranceTopUpRetryReplay => 32,
         }
     }
 }
@@ -544,6 +546,17 @@ pub struct InsuranceWithdrawalGenerationReplayReproduction {
     pub replay_cu: u64,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct InsuranceTopUpRetryReplayReproduction {
+    pub blocker: KnownBlocker,
+    pub intended_contribution: u64,
+    pub duplicate_loss: u64,
+    pub operator_extraction: u64,
+    pub insured_remainder: u128,
+    pub first_cu: u64,
+    pub replay_cu: u64,
+}
+
 impl SubstitutionKind {
     const ALL: [Self; 5] = [
         Self::ForeignTradePortfolio,
@@ -655,7 +668,7 @@ pub struct Scenario {
     pub actions: Vec<Action>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Coverage {
     pub loaded_program_hash: [u8; 32],
     pub route_success: [u64; 4],
@@ -674,6 +687,30 @@ pub struct Coverage {
     pub known_blocker_hits: [u64; KnownBlocker::COUNT],
     pub known_blocker_exit_locks: [u64; KnownBlocker::COUNT],
     pub max_cu: u64,
+}
+
+impl Default for Coverage {
+    fn default() -> Self {
+        Self {
+            loaded_program_hash: [0; 32],
+            route_success: [0; 4],
+            route_reject: [0; 4],
+            crank_progress: 0,
+            mark_updates: 0,
+            oracle_reconfigs: 0,
+            maintenance_syncs: 0,
+            withdrawals: 0,
+            substitution_rejections: [0; 5],
+            retained_landed: 0,
+            retained_rejected: 0,
+            user_positions_closed: 0,
+            liquidation_steps: 0,
+            liquidated_abs_q: 0,
+            known_blocker_hits: [0; KnownBlocker::COUNT],
+            known_blocker_exit_locks: [0; KnownBlocker::COUNT],
+            max_cu: 0,
+        }
+    }
 }
 
 impl Coverage {
@@ -4904,6 +4941,108 @@ pub fn reproduce_insurance_withdrawal_generation_replay(
     })
 }
 
+pub fn reproduce_insurance_top_up_retry_replay(
+    seed: [u8; 32],
+) -> Result<InsuranceTopUpRetryReplayReproduction, String> {
+    const ASSET: u16 = 0;
+    const DOMAIN: u16 = 0;
+    const AUTHORITY: usize = 0;
+    const OPERATOR: usize = 1;
+    const AMOUNT: u128 = 50_000;
+
+    let mut env = V16Svm::new(seed, MarketConfig::default());
+    let supply_before = env.token_supply_observed();
+    env.update_asset_authority_from_admin(
+        ASSET,
+        percolator_prog::processor::ASSET_AUTH_INSURANCE,
+        AUTHORITY,
+    )
+    .map_err(|error| format!("PR 344 install insurance authority: {error}"))?;
+    env.update_asset_authority_from_admin(
+        ASSET,
+        percolator_prog::processor::ASSET_AUTH_INSURANCE_OPERATOR,
+        OPERATOR,
+    )
+    .map_err(|error| format!("PR 344 install distinct insurance operator: {error}"))?;
+
+    let source = env.actors[AUTHORITY].source_token;
+    let destination = env.actors[OPERATOR].destination_token;
+    let source_before = env.token_amount(source);
+    let destination_before = env.token_amount(destination);
+    let intended = env.build_retained_insurance_domain_top_up_for_actor(AUTHORITY, DOMAIN, AMOUNT);
+    let retry_variant =
+        env.build_retained_insurance_domain_top_up_for_actor(AUTHORITY, DOMAIN, AMOUNT);
+
+    let first = env
+        .land_retained(intended)
+        .map_err(|error| format!("PR 344 intended top-up rejected: {error}"))?;
+    let intended_reserve = env.primary_market_state().1.insurance_domain_budget[DOMAIN as usize];
+    if intended_reserve != AMOUNT
+        || source_before
+            .checked_sub(env.token_amount(source))
+            .ok_or("PR 344 source increased after first top-up")?
+            != AMOUNT as u64
+    {
+        return Err(format!(
+            "PR 344 intended contribution mismatch: reserve={intended_reserve}, source={source_before}->{}",
+            env.token_amount(source)
+        ));
+    }
+
+    let replay = env
+        .land_retained(retry_variant)
+        .map_err(|error| format!("PR 344 retry variant no longer lands: {error}"))?;
+    let total_debit = source_before
+        .checked_sub(env.token_amount(source))
+        .ok_or("PR 344 source increased after retry")?;
+    let duplicate_loss = total_debit
+        .checked_sub(AMOUNT as u64)
+        .ok_or("PR 344 total debit below intended contribution")?;
+    let doubled_reserve = env.primary_market_state().1.insurance_domain_budget[DOMAIN as usize];
+    if duplicate_loss != AMOUNT as u64 || doubled_reserve != AMOUNT * 2 {
+        return Err(format!(
+            "PR 344 retry did not duplicate contribution: duplicate={duplicate_loss}, \
+             reserve={doubled_reserve}"
+        ));
+    }
+
+    let withdrawal = env
+        .withdraw_insurance_asset(OPERATOR, ASSET, AMOUNT)
+        .map_err(|error| format!("PR 344 operator could not extract duplicate: {error}"))?;
+    let operator_extraction = env
+        .token_amount(destination)
+        .checked_sub(destination_before)
+        .ok_or("PR 344 operator destination decreased")?;
+    let insured_remainder = env.primary_market_state().1.insurance_domain_budget[DOMAIN as usize];
+    let max_cu = first
+        .compute_units
+        .max(replay.compute_units)
+        .max(withdrawal.compute_units);
+    if operator_extraction != AMOUNT as u64
+        || insured_remainder != AMOUNT
+        || max_cu >= TX_CU_LIMIT
+        || env.token_supply_observed() != supply_before
+    {
+        return Err(format!(
+            "PR 344 public extraction conditions failed: duplicate={duplicate_loss}, \
+             operator={operator_extraction}, insured={insured_remainder}, max_cu={max_cu}, \
+             supply={}/{}",
+            env.token_supply_observed(),
+            supply_before
+        ));
+    }
+
+    Ok(InsuranceTopUpRetryReplayReproduction {
+        blocker: KnownBlocker::InsuranceTopUpRetryReplay,
+        intended_contribution: AMOUNT as u64,
+        duplicate_loss,
+        operator_extraction,
+        insured_remainder,
+        first_cu: first.compute_units,
+        replay_cu: replay.compute_units,
+    })
+}
+
 fn portfolio_equity(env: &V16Svm, actor: usize) -> Result<i128, String> {
     let account = env.primary_portfolio(actor);
     i128::try_from(account.capital.get())
@@ -7956,6 +8095,11 @@ pub fn collateral_top_up_generation_replay_seed_strategy() -> impl Strategy<Valu
 
 #[allow(dead_code)]
 pub fn insurance_withdrawal_generation_replay_seed_strategy() -> impl Strategy<Value = [u8; 32]> {
+    any::<[u8; 32]>()
+}
+
+#[allow(dead_code)]
+pub fn insurance_top_up_retry_replay_seed_strategy() -> impl Strategy<Value = [u8; 32]> {
     any::<[u8; 32]>()
 }
 
