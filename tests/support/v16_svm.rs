@@ -1340,6 +1340,30 @@ impl V16Svm {
         )
     }
 
+    pub fn update_fee_redirect_policy(&mut self, redirect_bps: u16) -> Result<TxSuccess, String> {
+        let authority = copy_keypair(&self.admin);
+        self.send_program(
+            ProgInstruction::UpdateFeeRedirectPolicy { redirect_bps },
+            vec![
+                AccountMeta::new(authority.pubkey(), true),
+                AccountMeta::new(self.market, false),
+            ],
+            &[authority],
+        )
+    }
+
+    pub fn build_retained_fee_redirect_policy(&mut self, redirect_bps: u16) -> Transaction {
+        let authority = copy_keypair(&self.admin);
+        self.build_program_transaction(
+            ProgInstruction::UpdateFeeRedirectPolicy { redirect_bps },
+            vec![
+                AccountMeta::new(authority.pubkey(), true),
+                AccountMeta::new(self.market, false),
+            ],
+            &[authority],
+        )
+    }
+
     pub fn build_retained_market_init_fee_policy(&mut self, min_init_fee: u128) -> Transaction {
         let authority = copy_keypair(&self.admin);
         self.build_program_transaction(

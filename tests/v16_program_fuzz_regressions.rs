@@ -12,9 +12,9 @@ use support::{
         reproduce_cpi_backing_fee_siphon, reproduce_cpi_caller_fee_siphon,
         reproduce_cross_domain_b_settlement, reproduce_cross_domain_backing_double_spend,
         reproduce_cross_margin_insurance_drain, reproduce_delayed_asset_authority_revival,
-        reproduce_deposit_retry_replay, reproduce_forfeit_funding_erasure,
-        reproduce_fractional_cap_settlement, reproduce_insurance_top_up_retry_replay,
-        reproduce_insurance_withdrawal_generation_replay,
+        reproduce_deposit_retry_replay, reproduce_fee_redirect_generation_replay,
+        reproduce_forfeit_funding_erasure, reproduce_fractional_cap_settlement,
+        reproduce_insurance_top_up_retry_replay, reproduce_insurance_withdrawal_generation_replay,
         reproduce_maintenance_policy_generation_replay, reproduce_market_incarnation_deposit,
         reproduce_omitted_rescue_liquidation, reproduce_pending_ewma_inheritance,
         reproduce_pending_ewma_target_override, reproduce_pending_mark_fee_reward,
@@ -619,6 +619,23 @@ fn v16_program_pr325_stale_maintenance_policy_extracts_user_fee() {
 }
 
 #[test]
+fn v16_program_pr317_stale_fee_redirect_extracts_victim_fee() {
+    let reproduction = reproduce_fee_redirect_generation_replay([0x17; 32])
+        .unwrap_or_else(|error| panic!("PR 317 no longer reproduces: {error}"));
+    assert_eq!(
+        reproduction.blocker,
+        KnownBlocker::FeeRedirectGenerationReplay
+    );
+    assert_eq!(reproduction.old_market_id, reproduction.new_market_id);
+    assert_eq!(reproduction.redirected_fee, 2_000);
+    assert_eq!(reproduction.victim_loss, 1_000);
+    assert_eq!(reproduction.attacker_profit, reproduction.victim_loss);
+    assert!(reproduction.replay_cu < 1_400_000);
+    assert!(reproduction.trade_cu < 1_400_000);
+    assert!(reproduction.withdrawal_cu < 1_400_000);
+}
+
+#[test]
 fn v16_program_pr351_backing_top_up_retry_funds_independent_winner() {
     let reproduction = reproduce_backing_top_up_retry_replay([0x35; 32])
         .unwrap_or_else(|error| panic!("PR 351 no longer reproduces: {error}"));
@@ -934,14 +951,15 @@ fn v16_program_open_lof_manifest_is_complete_and_honest() {
         quarantined_prs(),
         [
             220, 223, 224, 225, 231, 251, 253, 255, 260, 264, 265, 267, 271, 272, 273, 275, 277,
-            279, 280, 281, 282, 283, 290, 299, 305, 307, 310, 311, 314, 315, 320, 321, 325, 328,
-            329, 331, 332, 333, 343, 344, 350, 351, 355, 356, 362, 365, 366, 367, 369, 380, 381
+            279, 280, 281, 282, 283, 290, 299, 305, 307, 310, 311, 314, 315, 317, 320, 321, 325,
+            328, 329, 331, 332, 333, 343, 344, 350, 351, 355, 356, 362, 365, 366, 367, 369, 380,
+            381
         ]
     );
     let missing = missing_prs();
     assert_eq!(
         missing.len(),
-        48,
+        47,
         "update the explicit evidence state when an executable adapter lands"
     );
     assert!(!missing.contains(&220));
@@ -974,6 +992,7 @@ fn v16_program_open_lof_manifest_is_complete_and_honest() {
     assert!(!missing.contains(&311));
     assert!(!missing.contains(&314));
     assert!(!missing.contains(&315));
+    assert!(!missing.contains(&317));
     assert!(!missing.contains(&320));
     assert!(!missing.contains(&321));
     assert!(!missing.contains(&325));

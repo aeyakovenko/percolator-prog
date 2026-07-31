@@ -102,10 +102,11 @@ pub enum KnownBlocker {
     ActivationFeeConsent,
     BilateralBaseFeeConsent,
     MaintenancePolicyGenerationReplay,
+    FeeRedirectGenerationReplay,
 }
 
 impl KnownBlocker {
-    pub const COUNT: usize = 46;
+    pub const COUNT: usize = 47;
 
     pub const fn index(self) -> usize {
         match self {
@@ -155,6 +156,7 @@ impl KnownBlocker {
             Self::ActivationFeeConsent => 43,
             Self::BilateralBaseFeeConsent => 44,
             Self::MaintenancePolicyGenerationReplay => 45,
+            Self::FeeRedirectGenerationReplay => 46,
         }
     }
 }
@@ -643,6 +645,19 @@ pub struct MaintenancePolicyGenerationReplayReproduction {
     pub live_oi_q: u128,
     pub replay_cu: u64,
     pub sync_cu: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FeeRedirectGenerationReplayReproduction {
+    pub blocker: KnownBlocker,
+    pub old_market_id: u64,
+    pub new_market_id: u64,
+    pub victim_loss: u64,
+    pub attacker_profit: u64,
+    pub redirected_fee: u128,
+    pub replay_cu: u64,
+    pub trade_cu: u64,
+    pub withdrawal_cu: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -5942,6 +5957,181 @@ pub fn reproduce_maintenance_policy_generation_replay(
     })
 }
 
+pub fn reproduce_fee_redirect_generation_replay(
+    seed: [u8; 32],
+) -> Result<FeeRedirectGenerationReplayReproduction, String> {
+    const VICTIM: usize = 0;
+    const ATTACKER: usize = 1;
+    const ACTIVATION_PAYER: usize = 2;
+    const ASSET: u16 = 1;
+    const PRICE: u64 = 100;
+    const DEPOSIT: u128 = 10_000;
+    const SIZE_Q: i128 = 10 * POS_SCALE as i128;
+    const TRADE_FEE_BPS: u64 = 10_000;
+    const FEE_PER_SIDE: u64 = 1_000;
+    const TOTAL_FEE: u128 = 2 * FEE_PER_SIDE as u128;
+    const REINIT_SLOT: u64 = 10;
+    const RETIRE_SLOT: u64 = 11;
+    const ACTIVATE_SLOT: u64 = 12;
+
+    let config = MarketConfig {
+        initial_price: PRICE,
+        max_trading_fee_bps: TRADE_FEE_BPS,
+        actor_deposits: [1, 1, 1, 1, 1],
+        ..MarketConfig::default()
+    };
+    let mut env = V16Svm::new(seed, config);
+    let supply_before = env.token_supply_observed();
+    let old_market_id = env.primary_market_state().1.assets[0].market_id;
+    let retained_policy = env.build_retained_fee_redirect_policy(0);
+
+    for actor in 0..PRIMARY_ACTOR_COUNT {
+        env.withdraw_primary(actor, 1)
+            .map_err(|error| format!("PR 317 empty generation-A portfolio {actor}: {error}"))?;
+        env.close_primary_portfolio(actor)
+            .map_err(|error| format!("PR 317 close generation-A portfolio {actor}: {error}"))?;
+    }
+    env.resolve_market()
+        .map_err(|error| format!("PR 317 resolve generation A: {error}"))?;
+    env.close_primary_slab()
+        .map_err(|error| format!("PR 317 close generation-A slab: {error}"))?;
+
+    env.warp_to_slot(REINIT_SLOT);
+    env.fund_closed_primary_market()
+        .map_err(|error| format!("PR 317 re-fund closed market: {error}"))?;
+    env.recreate_primary_vault()
+        .map_err(|error| format!("PR 317 recreate canonical vault: {error}"))?;
+    env.reinitialize_primary_market(config)
+        .map_err(|error| format!("PR 317 initialize generation B: {error}"))?;
+    env.configure_auth_mark(false, 0, REINIT_SLOT, PRICE)
+        .map_err(|error| format!("PR 317 configure generation-B market 0: {error}"))?;
+    let new_market_id = env.primary_market_state().1.assets[0].market_id;
+
+    env.update_trade_fee_policy(TRADE_FEE_BPS)
+        .map_err(|error| format!("PR 317 install generation-B trade fee: {error}"))?;
+    env.update_fee_redirect_policy(10_000)
+        .map_err(|error| format!("PR 317 protect generation-B fee revenue: {error}"))?;
+    env.update_market_init_fee_policy(1)
+        .map_err(|error| format!("PR 317 configure permissionless init fee: {error}"))?;
+    env.warp_to_slot(RETIRE_SLOT);
+    env.retire_asset(ASSET, RETIRE_SLOT)
+        .map_err(|error| format!("PR 317 retire empty generation-B asset slot: {error}"))?;
+    env.warp_to_slot(ACTIVATE_SLOT);
+    env.activate_permissionless_asset_with_actor_authorities(
+        ACTIVATION_PAYER,
+        ASSET,
+        ACTIVATE_SLOT,
+        PRICE,
+        ATTACKER,
+        ATTACKER,
+        ATTACKER,
+        ATTACKER,
+        1,
+    )
+    .map_err(|error| format!("PR 317 activate attacker-operated asset: {error}"))?;
+
+    for actor in [VICTIM, ATTACKER] {
+        env.fund_closed_primary_portfolio(actor, 1_000_000_000)
+            .map_err(|error| format!("PR 317 re-fund portfolio {actor}: {error}"))?;
+        env.reinitialize_primary_portfolio(actor)
+            .map_err(|error| format!("PR 317 initialize portfolio {actor}: {error}"))?;
+        env.deposit_primary(actor, DEPOSIT)
+            .map_err(|error| format!("PR 317 deposit actor {actor}: {error}"))?;
+    }
+    if env.primary_market_state().0.fee_redirect_to_market_0_bps != 10_000 {
+        return Err("PR 317 replacement fee redirect was not installed".into());
+    }
+
+    let replay = env
+        .land_retained(retained_policy)
+        .map_err(|error| format!("PR 317 stale redirect policy no longer lands: {error}"))?;
+    if env.primary_market_state().0.fee_redirect_to_market_0_bps != 0 {
+        return Err("PR 317 stale policy did not disable the replacement redirect".into());
+    }
+
+    let trade = env
+        .trade_no_cpi(VICTIM, ATTACKER, ASSET, SIZE_Q, PRICE, 0)
+        .map_err(|error| format!("PR 317 charge replacement users: {error}"))?;
+    let (_, group_after_trade) = env.primary_market_state();
+    let attacker_domain_fee = group_after_trade.insurance_domain_budget[ASSET as usize * 2]
+        .checked_add(group_after_trade.insurance_domain_budget[ASSET as usize * 2 + 1])
+        .ok_or("PR 317 attacker domain fee overflow")?;
+    let protected_fee = group_after_trade.insurance_domain_budget[0]
+        .checked_add(group_after_trade.insurance_domain_budget[1])
+        .ok_or("PR 317 protected fee overflow")?;
+    if attacker_domain_fee != TOTAL_FEE || protected_fee != 1 {
+        return Err(format!(
+            "PR 317 stale redirect credited wrong domains: attacker={attacker_domain_fee}, \
+             protected={protected_fee}"
+        ));
+    }
+
+    let victim_destination = env.actors[VICTIM].destination_token;
+    let attacker_destination = env.actors[ATTACKER].destination_token;
+    let victim_destination_before = env.token_amount(victim_destination);
+    let attacker_destination_before = env.token_amount(attacker_destination);
+    let withdrawal = env
+        .withdraw_insurance_asset(ATTACKER, ASSET, TOTAL_FEE)
+        .map_err(|error| format!("PR 317 attacker could not withdraw redirected fees: {error}"))?;
+
+    env.update_trade_fee_policy(0)
+        .map_err(|error| format!("PR 317 disable fee before neutral close: {error}"))?;
+    env.trade_no_cpi(VICTIM, ATTACKER, ASSET, -SIZE_Q, PRICE, 0)
+        .map_err(|error| format!("PR 317 close replacement risk: {error}"))?;
+    let victim_capital = env.primary_portfolio(VICTIM).capital.get();
+    let attacker_capital = env.primary_portfolio(ATTACKER).capital.get();
+    env.withdraw_primary(VICTIM, victim_capital)
+        .map_err(|error| format!("PR 317 victim terminal withdrawal: {error}"))?;
+    env.withdraw_primary(ATTACKER, attacker_capital)
+        .map_err(|error| format!("PR 317 attacker terminal withdrawal: {error}"))?;
+
+    let victim_return = env
+        .token_amount(victim_destination)
+        .checked_sub(victim_destination_before)
+        .ok_or("PR 317 victim destination decreased")?;
+    let attacker_return = env
+        .token_amount(attacker_destination)
+        .checked_sub(attacker_destination_before)
+        .ok_or("PR 317 attacker destination decreased")?;
+    let victim_loss = u64::try_from(DEPOSIT)
+        .map_err(|_| "PR 317 deposit does not fit u64")?
+        .checked_sub(victim_return)
+        .ok_or("PR 317 victim returned more than deposited")?;
+    let attacker_profit = attacker_return
+        .checked_sub(u64::try_from(DEPOSIT).map_err(|_| "PR 317 deposit does not fit u64")?)
+        .ok_or("PR 317 attacker did not recover its deposit")?;
+    let max_cu = replay
+        .compute_units
+        .max(trade.compute_units)
+        .max(withdrawal.compute_units);
+    if victim_loss != FEE_PER_SIDE
+        || attacker_profit != victim_loss
+        || attacker_return != DEPOSIT as u64 + FEE_PER_SIDE
+        || max_cu >= TX_CU_LIMIT
+        || env.token_supply_observed() != supply_before
+    {
+        return Err(format!(
+            "PR 317 terminal extraction mismatch: victim_loss={victim_loss}, \
+             attacker_profit={attacker_profit}, attacker_return={attacker_return}, \
+             max_cu={max_cu}, supply={}/{}",
+            env.token_supply_observed(),
+            supply_before
+        ));
+    }
+
+    Ok(FeeRedirectGenerationReplayReproduction {
+        blocker: KnownBlocker::FeeRedirectGenerationReplay,
+        old_market_id,
+        new_market_id,
+        victim_loss,
+        attacker_profit,
+        redirected_fee: attacker_domain_fee,
+        replay_cu: replay.compute_units,
+        trade_cu: trade.compute_units,
+        withdrawal_cu: withdrawal.compute_units,
+    })
+}
+
 #[derive(Clone, Copy, Debug)]
 struct BackingTopUpRetryWorld {
     provider_loss: u64,
@@ -10406,6 +10596,11 @@ pub fn bilateral_base_fee_consent_strategy() -> impl Strategy<Value = ([u8; 32],
 
 #[allow(dead_code)]
 pub fn maintenance_policy_generation_replay_seed_strategy() -> impl Strategy<Value = [u8; 32]> {
+    any::<[u8; 32]>()
+}
+
+#[allow(dead_code)]
+pub fn fee_redirect_generation_replay_seed_strategy() -> impl Strategy<Value = [u8; 32]> {
     any::<[u8; 32]>()
 }
 
