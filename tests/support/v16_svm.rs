@@ -126,6 +126,7 @@ pub struct V16Svm {
     pub provider_source_token: Pubkey,
     pub provider_destination_token: Pubkey,
     pub backing_domain_ledger: Pubkey,
+    pub market_admin_destination_token: Pubkey,
     pub actors: Vec<Actor>,
     pub foreign_actor: ForeignActor,
     pub initial_token_supply: u128,
@@ -148,6 +149,9 @@ impl V16Svm {
         let token_program =
             std::fs::read(spl_token_program_path()).expect("read LiteSVM SPL Token artifact");
         svm.add_program(spl_token::ID, &token_program);
+        let associated_token_program = std::fs::read(associated_token_program_path())
+            .expect("read LiteSVM Associated Token artifact");
+        svm.add_program(associated_token_program_id(), &associated_token_program);
 
         let matcher_program = deterministic_keypair(&seed, 6).pubkey();
         let matcher_bytes =
@@ -239,6 +243,7 @@ impl V16Svm {
         let provider_source_token = deterministic_keypair(&seed, 124).pubkey();
         let provider_destination_token = deterministic_keypair(&seed, 125).pubkey();
         let backing_domain_ledger = deterministic_keypair(&seed, 126).pubkey();
+        let market_admin_destination_token = deterministic_keypair(&seed, 127).pubkey();
         const PROVIDER_TOKEN_BALANCE: u64 = 1_000_000_000;
         token_supply += FOREIGN_TOKEN_BALANCE as u128;
         token_supply += PROVIDER_TOKEN_BALANCE as u128;
@@ -247,6 +252,7 @@ impl V16Svm {
             foreign_destination,
             provider_source_token,
             provider_destination_token,
+            market_admin_destination_token,
         ]);
         svm.airdrop(&foreign_signer.pubkey(), 10_000_000_000)
             .expect("airdrop foreign actor");
@@ -275,6 +281,13 @@ impl V16Svm {
         set_token_account(
             &mut svm,
             provider_destination_token,
+            mint,
+            admin.pubkey(),
+            0,
+        );
+        set_token_account(
+            &mut svm,
+            market_admin_destination_token,
             mint,
             admin.pubkey(),
             0,
@@ -322,6 +335,7 @@ impl V16Svm {
             provider_source_token,
             provider_destination_token,
             backing_domain_ledger,
+            market_admin_destination_token,
             actors,
             foreign_actor,
             initial_token_supply: token_supply,
@@ -718,6 +732,88 @@ impl V16Svm {
             vec![
                 AccountMeta::new(admin.pubkey(), true),
                 AccountMeta::new(self.market, false),
+            ],
+            &[admin],
+        )
+    }
+
+    pub fn close_primary_slab(&mut self) -> Result<TxSuccess, String> {
+        let admin = copy_keypair(&self.admin);
+        self.send_program(
+            ProgInstruction::CloseSlab,
+            vec![
+                AccountMeta::new(admin.pubkey(), true),
+                AccountMeta::new(self.market, false),
+                AccountMeta::new(self.vault, false),
+                AccountMeta::new_readonly(self.vault_authority, false),
+                AccountMeta::new(self.market_admin_destination_token, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[admin],
+        )
+    }
+
+    pub fn fund_closed_primary_market(&mut self) -> Result<TxSuccess, String> {
+        let payer = self.payer.pubkey();
+        self.send_raw_instruction(
+            system_instruction::transfer(&payer, &self.market, 1_000_000_000),
+            &[],
+        )
+    }
+
+    pub fn recreate_primary_vault(&mut self) -> Result<TxSuccess, String> {
+        self.send_raw_instruction(
+            Instruction {
+                program_id: associated_token_program_id(),
+                accounts: vec![
+                    AccountMeta::new(self.payer.pubkey(), true),
+                    AccountMeta::new(self.vault, false),
+                    AccountMeta::new_readonly(self.vault_authority, false),
+                    AccountMeta::new_readonly(self.mint, false),
+                    AccountMeta::new_readonly(solana_sdk::system_program::ID, false),
+                    AccountMeta::new_readonly(spl_token::ID, false),
+                    AccountMeta::new_readonly(solana_sdk::sysvar::rent::ID, false),
+                ],
+                data: vec![],
+            },
+            &[],
+        )
+    }
+
+    pub fn reinitialize_primary_market(
+        &mut self,
+        config: MarketConfig,
+    ) -> Result<TxSuccess, String> {
+        let admin = copy_keypair(&self.admin);
+        self.send_program(
+            ProgInstruction::InitMarket {
+                max_portfolio_assets: ASSET_COUNT as u16,
+                h_min: 0,
+                h_max: config.h_max,
+                initial_price: config.initial_price,
+                min_nonzero_mm_req: config.min_nonzero_mm_req,
+                min_nonzero_im_req: config.min_nonzero_im_req,
+                maintenance_margin_bps: config.maintenance_margin_bps,
+                initial_margin_bps: config.initial_margin_bps,
+                max_trading_fee_bps: config.max_trading_fee_bps,
+                trade_fee_base_bps: 0,
+                liquidation_fee_bps: config.liquidation_fee_bps,
+                liquidation_fee_cap: config.liquidation_fee_cap,
+                min_liquidation_abs: config.min_liquidation_abs,
+                max_price_move_bps_per_slot: config.max_price_move_bps_per_slot,
+                max_accrual_dt_slots: config.max_accrual_dt_slots,
+                max_abs_funding_e9_per_slot: config.max_abs_funding_e9_per_slot,
+                min_funding_lifetime_slots: config.min_funding_lifetime_slots,
+                max_account_b_settlement_chunks: 1,
+                max_bankrupt_close_chunks: 1,
+                max_bankrupt_close_lifetime_slots: 100,
+                public_b_chunk_atoms: percolator::MAX_VAULT_TVL,
+                maintenance_fee_per_slot: config.maintenance_fee_per_slot,
+            },
+            vec![
+                AccountMeta::new(admin.pubkey(), true),
+                AccountMeta::new(self.market, false),
+                AccountMeta::new_readonly(self.mint, false),
             ],
             &[admin],
         )
@@ -2468,6 +2564,22 @@ fn spl_token_program_path() -> PathBuf {
         }
     }
     panic!("could not locate LiteSVM SPL Token BPF under {registry_src:?}");
+}
+
+fn associated_token_program_path() -> PathBuf {
+    let cargo_home = std::env::var_os("CARGO_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(std::env::var_os("HOME").expect("HOME")).join(".cargo"));
+    let registry_src = cargo_home.join("registry/src");
+    for registry in std::fs::read_dir(&registry_src).expect("registry/src") {
+        let registry = registry.expect("registry entry").path();
+        let candidate =
+            registry.join("litesvm-0.1.0/src/spl/programs/spl_associated_token_account-1.1.1.so");
+        if candidate.exists() {
+            return candidate;
+        }
+    }
+    panic!("could not locate LiteSVM Associated Token BPF under {registry_src:?}");
 }
 
 fn associated_token_program_id() -> Pubkey {

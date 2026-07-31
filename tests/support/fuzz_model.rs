@@ -96,10 +96,11 @@ pub enum KnownBlocker {
     DepositRetryReplay,
     PortfolioIncarnationWithdrawal,
     PortfolioIncarnationDeposit,
+    MarketIncarnationDeposit,
 }
 
 impl KnownBlocker {
-    pub const COUNT: usize = 40;
+    pub const COUNT: usize = 41;
 
     pub const fn index(self) -> usize {
         match self {
@@ -143,6 +144,7 @@ impl KnownBlocker {
             Self::DepositRetryReplay => 37,
             Self::PortfolioIncarnationWithdrawal => 38,
             Self::PortfolioIncarnationDeposit => 39,
+            Self::MarketIncarnationDeposit => 40,
         }
     }
 }
@@ -647,6 +649,18 @@ pub struct PortfolioIncarnationDepositReproduction {
     pub blocker: KnownBlocker,
     pub old_portfolio_id: u64,
     pub new_portfolio_id: u64,
+    pub stale_deposit: u64,
+    pub beneficiary_extra_payout: u128,
+    pub control_winner_payout: u128,
+    pub replay_winner_payout: u128,
+    pub replay_cu: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MarketIncarnationDepositReproduction {
+    pub blocker: KnownBlocker,
+    pub old_asset_market_id: u64,
+    pub new_asset_market_id: u64,
     pub stale_deposit: u64,
     pub beneficiary_extra_payout: u128,
     pub control_winner_payout: u128,
@@ -5933,6 +5947,206 @@ pub fn reproduce_portfolio_incarnation_deposit(
     })
 }
 
+#[derive(Clone, Copy, Debug)]
+struct MarketIncarnationDepositWorld {
+    old_asset_market_id: u64,
+    new_asset_market_id: u64,
+    source_loss: u64,
+    winner_payout: u128,
+    victim_payout: u128,
+    replay_cu: u64,
+}
+
+fn run_market_incarnation_deposit_world(
+    seed: [u8; 32],
+    land_replay: bool,
+) -> Result<MarketIncarnationDepositWorld, String> {
+    const VICTIM: usize = 0;
+    const WINNER: usize = 1;
+    const REPLACEMENT_CAPITAL: u128 = 150_000;
+    const WINNER_CAPITAL: u128 = 100_000_000;
+    const STALE_DEPOSIT: u128 = 100_000;
+    const PRICE: u64 = 100;
+    const ADVERSE_PRICE: u64 = 350;
+    const REINIT_SLOT: u64 = 11;
+
+    let config = MarketConfig {
+        initial_price: PRICE,
+        max_price_move_bps_per_slot: 10_000,
+        max_accrual_dt_slots: 1,
+        min_funding_lifetime_slots: 1,
+        actor_deposits: [1, 1, 1, 1, 1],
+        actor_token_balances: [250_001, 100_000_001, 1, 1, 1],
+        ..MarketConfig::default()
+    };
+    let mut env = V16Svm::new(seed, config);
+    let supply_before = env.token_supply_observed();
+    let old_asset_market_id = env.primary_market_state().1.assets[0].market_id;
+    let source = env.actors[VICTIM].source_token;
+    let source_before = env.token_amount(source);
+    let retained = env.build_retained_deposit(VICTIM, STALE_DEPOSIT);
+
+    for actor in 0..PRIMARY_ACTOR_COUNT {
+        env.withdraw_primary(actor, 1)
+            .map_err(|error| format!("PR 307 empty generation-A portfolio {actor}: {error}"))?;
+        env.close_primary_portfolio(actor)
+            .map_err(|error| format!("PR 307 close generation-A portfolio {actor}: {error}"))?;
+    }
+    env.resolve_market()
+        .map_err(|error| format!("PR 307 resolve generation A: {error}"))?;
+    env.close_primary_slab()
+        .map_err(|error| format!("PR 307 close generation-A slab: {error}"))?;
+
+    env.warp_to_slot(REINIT_SLOT);
+    env.fund_closed_primary_market()
+        .map_err(|error| format!("PR 307 re-fund closed market account: {error}"))?;
+    env.recreate_primary_vault()
+        .map_err(|error| format!("PR 307 recreate canonical vault: {error}"))?;
+    env.reinitialize_primary_market(config).map_err(|error| {
+        let market = env.svm.get_account(&env.market);
+        let mint = env.svm.get_account(&env.mint);
+        format!(
+            "PR 307 initialize generation-B market: {error}; market={:?}; mint={:?}",
+            market
+                .as_ref()
+                .map(|account| (account.owner, account.lamports, account.data.len())),
+            mint.as_ref()
+                .map(|account| (account.owner, account.lamports, account.data.len()))
+        )
+    })?;
+    env.configure_auth_mark(false, 0, REINIT_SLOT, PRICE)
+        .map_err(|error| format!("PR 307 configure generation-B AuthMark: {error}"))?;
+    let new_asset_market_id = env.primary_market_state().1.assets[0].market_id;
+
+    for actor in [VICTIM, WINNER] {
+        env.fund_closed_primary_portfolio(actor, 1_000_000_000)
+            .map_err(|error| format!("PR 307 re-fund portfolio {actor}: {error}"))?;
+        env.reinitialize_primary_portfolio(actor).map_err(|error| {
+            format!("PR 307 initialize generation-B portfolio {actor}: {error}")
+        })?;
+    }
+    env.deposit_primary(VICTIM, REPLACEMENT_CAPITAL)
+        .map_err(|error| format!("PR 307 fund generation-B victim: {error}"))?;
+    env.deposit_primary(WINNER, WINNER_CAPITAL)
+        .map_err(|error| format!("PR 307 fund generation-B winner: {error}"))?;
+    env.trade_no_cpi(WINNER, VICTIM, 0, 1_000 * POS_SCALE as i128, PRICE, 0)
+        .map_err(|error| format!("PR 307 open generation-B risk: {error}"))?;
+
+    let replay_cu = if land_replay {
+        env.land_retained(retained)
+            .map_err(|error| format!("PR 307 generation-A deposit no longer lands: {error}"))?
+            .compute_units
+    } else {
+        0
+    };
+    let source_loss = source_before
+        .checked_sub(env.token_amount(source))
+        .ok_or("PR 307 victim source increased")?;
+    let expected_loss = if land_replay {
+        REPLACEMENT_CAPITAL + STALE_DEPOSIT
+    } else {
+        REPLACEMENT_CAPITAL
+    };
+    if u128::from(source_loss) != expected_loss {
+        return Err(format!(
+            "PR 307 source debit mismatch: replay={land_replay}, loss={source_loss}, \
+             expected={expected_loss}"
+        ));
+    }
+
+    let mut settlement_slot = REINIT_SLOT;
+    for next in [200, ADVERSE_PRICE] {
+        settlement_slot = settlement_slot
+            .checked_add(1)
+            .ok_or("PR 307 settlement slot overflow")?;
+        env.warp_to_slot(settlement_slot);
+        env.push_auth_mark(0, settlement_slot, next)
+            .map_err(|error| format!("PR 307 publish adverse mark {next}: {error}"))?;
+        env.crank(
+            WINNER,
+            settlement_slot,
+            vec![CrankObservationHint {
+                asset_index: 0,
+                oracle_accounts: 0,
+            }],
+        )
+        .map_err(|error| format!("PR 307 commit adverse mark {next}: {error}"))?;
+    }
+    if env.primary_market_state().1.assets[0].effective_price != ADVERSE_PRICE {
+        return Err(format!(
+            "PR 307 adverse mark did not commit: {}",
+            env.primary_market_state().1.assets[0].effective_price
+        ));
+    }
+
+    env.resolve_market()
+        .map_err(|error| format!("PR 307 resolve generation-B terminal world: {error}"))?;
+    let (victim_payout, _) = drain_resolved_actor(&mut env, VICTIM)?;
+    let (first_winner_payout, _) = drain_resolved_actor(&mut env, WINNER)?;
+    let (winner_top_up, _) = drain_resolved_actor(&mut env, WINNER)?;
+    let winner_payout = first_winner_payout
+        .checked_add(winner_top_up)
+        .ok_or("PR 307 winner payout overflow")?;
+    if victim_payout != 0 || env.token_supply_observed() != supply_before {
+        return Err(format!(
+            "PR 307 terminal world mismatch: replay={land_replay}, winner={winner_payout}, \
+             victim={victim_payout}, supply={}/{}",
+            env.token_supply_observed(),
+            supply_before
+        ));
+    }
+    Ok(MarketIncarnationDepositWorld {
+        old_asset_market_id,
+        new_asset_market_id,
+        source_loss,
+        winner_payout,
+        victim_payout,
+        replay_cu,
+    })
+}
+
+pub fn reproduce_market_incarnation_deposit(
+    seed: [u8; 32],
+) -> Result<MarketIncarnationDepositReproduction, String> {
+    let control = run_market_incarnation_deposit_world(seed, false)?;
+    let replay = run_market_incarnation_deposit_world(seed, true)?;
+    let stale_deposit = replay
+        .source_loss
+        .checked_sub(control.source_loss)
+        .ok_or("PR 307 replay source loss below control")?;
+    let beneficiary_extra_payout = replay
+        .winner_payout
+        .checked_sub(control.winner_payout)
+        .ok_or("PR 307 replay winner payout below control")?;
+    if control.old_asset_market_id != replay.old_asset_market_id
+        || control.new_asset_market_id != replay.new_asset_market_id
+        || replay.old_asset_market_id != replay.new_asset_market_id
+        || control.source_loss != 150_000
+        || replay.source_loss != 250_000
+        || control.winner_payout != 100_150_000
+        || replay.winner_payout != 100_250_000
+        || control.victim_payout != 0
+        || replay.victim_payout != 0
+        || u128::from(stale_deposit) != beneficiary_extra_payout
+        || replay.replay_cu >= TX_CU_LIMIT
+    {
+        return Err(format!(
+            "PR 307 paired-world mismatch: control={control:?}, replay={replay:?}, \
+             stale={stale_deposit}, beneficiary={beneficiary_extra_payout}"
+        ));
+    }
+    Ok(MarketIncarnationDepositReproduction {
+        blocker: KnownBlocker::MarketIncarnationDeposit,
+        old_asset_market_id: replay.old_asset_market_id,
+        new_asset_market_id: replay.new_asset_market_id,
+        stale_deposit,
+        beneficiary_extra_payout,
+        control_winner_payout: control.winner_payout,
+        replay_winner_payout: replay.winner_payout,
+        replay_cu: replay.replay_cu,
+    })
+}
+
 pub fn reproduce_withdrawal_retry_liquidation(
     seed: [u8; 32],
 ) -> Result<WithdrawalRetryLiquidationReproduction, String> {
@@ -9377,6 +9591,11 @@ pub fn portfolio_incarnation_withdrawal_seed_strategy() -> impl Strategy<Value =
 
 #[allow(dead_code)]
 pub fn portfolio_incarnation_deposit_seed_strategy() -> impl Strategy<Value = [u8; 32]> {
+    any::<[u8; 32]>()
+}
+
+#[allow(dead_code)]
+pub fn market_incarnation_deposit_seed_strategy() -> impl Strategy<Value = [u8; 32]> {
     any::<[u8; 32]>()
 }
 
