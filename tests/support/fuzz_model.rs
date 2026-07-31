@@ -111,10 +111,11 @@ pub enum KnownBlocker {
     DelayedFeeRedirectPolicyReplay,
     DelayedBackingFeePolicyReplay,
     DelayedOracleIntentReplay,
+    DelayedMatcherEnableReplay,
 }
 
 impl KnownBlocker {
-    pub const COUNT: usize = 55;
+    pub const COUNT: usize = 56;
 
     pub const fn index(self) -> usize {
         match self {
@@ -173,6 +174,7 @@ impl KnownBlocker {
             Self::DelayedFeeRedirectPolicyReplay => 52,
             Self::DelayedBackingFeePolicyReplay => 53,
             Self::DelayedOracleIntentReplay => 54,
+            Self::DelayedMatcherEnableReplay => 55,
         }
     }
 }
@@ -753,6 +755,16 @@ pub struct DelayedOracleIntentReplayReproduction {
     pub beneficiary_gain: u64,
     pub replay_cu: u64,
     pub max_crank_cu: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DelayedMatcherEnableReplayReproduction {
+    pub blocker: KnownBlocker,
+    pub victim_loss: u64,
+    pub attacker_gain: u64,
+    pub control_fill_blocked: bool,
+    pub replay_cu: u64,
+    pub max_cu: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -7320,6 +7332,166 @@ pub fn reproduce_delayed_oracle_intent_replay(
     })
 }
 
+#[derive(Clone, Copy, Debug)]
+struct DelayedMatcherEnableWorld {
+    attacker_payout: u64,
+    lp_payout: u64,
+    control_fill_blocked: bool,
+    replay_cu: u64,
+    max_cu: u64,
+}
+
+fn run_delayed_matcher_enable_world(
+    seed: [u8; 32],
+    land_replay: bool,
+) -> Result<DelayedMatcherEnableWorld, String> {
+    const ATTACKER: usize = 0;
+    const LP: usize = 1;
+    const ASSET: u16 = 0;
+    const ENTRY_PRICE: u64 = 100;
+    const EXIT_PRICE: u64 = 200;
+    const SIZE_Q: i128 = 10_000 * POS_SCALE as i128;
+    const ATTACKER_DEPOSIT: u128 = 2_000_000;
+    const LP_DEPOSIT: u128 = 4_000_000;
+
+    let mut env = V16Svm::new(
+        seed,
+        MarketConfig {
+            initial_price: ENTRY_PRICE,
+            max_price_move_bps_per_slot: 10_000,
+            max_accrual_dt_slots: 1,
+            min_funding_lifetime_slots: 1,
+            actor_deposits: [
+                ATTACKER_DEPOSIT,
+                LP_DEPOSIT,
+                1,
+                1,
+                super::v16_svm::EXIT_MAKER_DEPOSIT,
+            ],
+            ..MarketConfig::default()
+        },
+    );
+    let supply_before = env.token_supply_observed();
+    let retained_enable = env.build_retained_matcher_config(LP, 1);
+    let revoke = env
+        .set_matcher_config(LP, 0)
+        .map_err(|error| format!("PR 334 newer matcher revoke: {error}"))?;
+    let mut max_cu = revoke.compute_units;
+    let mut replay_cu = 0;
+    let control_fill_blocked;
+
+    if land_replay {
+        let replay = env
+            .land_retained(retained_enable)
+            .map_err(|error| format!("PR 334 delayed enable no longer lands: {error}"))?;
+        replay_cu = replay.compute_units;
+        max_cu = max_cu.max(replay.compute_units);
+        control_fill_blocked = false;
+
+        let open = env
+            .trade_cpi(ATTACKER, LP, ASSET, SIZE_Q, 0, 0)
+            .map_err(|error| format!("PR 334 unsigned attacker open: {error}"))?;
+        max_cu = max_cu.max(open.compute_units);
+        env.warp_to_slot(2);
+        let mark = env
+            .push_auth_mark(ASSET, 2, EXIT_PRICE)
+            .map_err(|error| format!("PR 334 honest mark progression: {error}"))?;
+        max_cu = max_cu.max(mark.compute_units);
+        let observation = || {
+            vec![CrankObservationHint {
+                asset_index: ASSET,
+                oracle_accounts: 0,
+            }]
+        };
+        for actor in [ATTACKER, LP] {
+            let crank = env
+                .crank(actor, 2, observation())
+                .map_err(|error| format!("PR 334 settle actor {actor}: {error}"))?;
+            max_cu = max_cu.max(crank.compute_units);
+        }
+        let close = env
+            .trade_cpi(ATTACKER, LP, ASSET, -SIZE_Q, 0, 0)
+            .map_err(|error| format!("PR 334 unsigned attacker close: {error}"))?;
+        max_cu = max_cu.max(close.compute_units);
+        let converted = env
+            .convert_released_pnl(ATTACKER, u128::MAX)
+            .map_err(|error| format!("PR 334 convert attacker PnL: {error}"))?;
+        max_cu = max_cu.max(converted.compute_units);
+    } else {
+        control_fill_blocked = env.trade_cpi(ATTACKER, LP, ASSET, SIZE_Q, 0, 0).is_err();
+        if !control_fill_blocked {
+            return Err("PR 334 newer revoke did not block the control CPI fill".into());
+        }
+    }
+
+    for actor in [ATTACKER, LP] {
+        if observed_positions(&env.primary_portfolio(actor))?[ASSET as usize] != 0 {
+            return Err(format!("PR 334 actor {actor} retained an open position"));
+        }
+        let capital = env.primary_portfolio(actor).capital.get();
+        let withdrawal = env
+            .withdraw_primary(actor, capital)
+            .map_err(|error| format!("PR 334 withdraw actor {actor}: {error}"))?;
+        max_cu = max_cu.max(withdrawal.compute_units);
+    }
+    let attacker_payout = env.token_amount(env.actors[ATTACKER].destination_token);
+    let lp_payout = env.token_amount(env.actors[LP].destination_token);
+    if u128::from(attacker_payout) + u128::from(lp_payout) != ATTACKER_DEPOSIT + LP_DEPOSIT
+        || env.token_supply_observed() != supply_before
+        || max_cu >= TX_CU_LIMIT
+    {
+        return Err(format!(
+            "PR 334 terminal mismatch: payout={attacker_payout}/{lp_payout}, max_cu={max_cu}, \
+             supply={}/{supply_before}",
+            env.token_supply_observed()
+        ));
+    }
+
+    Ok(DelayedMatcherEnableWorld {
+        attacker_payout,
+        lp_payout,
+        control_fill_blocked,
+        replay_cu,
+        max_cu,
+    })
+}
+
+pub fn reproduce_delayed_matcher_enable_replay(
+    mut seed: [u8; 32],
+) -> Result<DelayedMatcherEnableReplayReproduction, String> {
+    seed[0] ^= 0x34;
+    let control = run_delayed_matcher_enable_world(seed, false)?;
+    let replay = run_delayed_matcher_enable_world(seed, true)?;
+    let victim_loss = control
+        .lp_payout
+        .checked_sub(replay.lp_payout)
+        .ok_or("PR 334 replay increased LP payout")?;
+    let attacker_gain = replay
+        .attacker_payout
+        .checked_sub(control.attacker_payout)
+        .ok_or("PR 334 replay decreased attacker payout")?;
+    if control.attacker_payout != 2_000_000
+        || control.lp_payout != 4_000_000
+        || victim_loss != 1_000_000
+        || victim_loss != attacker_gain
+        || !control.control_fill_blocked
+        || replay.replay_cu == 0
+    {
+        return Err(format!(
+            "PR 334 paired-world mismatch: control={control:?}, replay={replay:?}, \
+             victim_loss={victim_loss}, attacker_gain={attacker_gain}"
+        ));
+    }
+    Ok(DelayedMatcherEnableReplayReproduction {
+        blocker: KnownBlocker::DelayedMatcherEnableReplay,
+        victim_loss,
+        attacker_gain,
+        control_fill_blocked: control.control_fill_blocked,
+        replay_cu: replay.replay_cu,
+        max_cu: replay.max_cu.max(control.max_cu),
+    })
+}
+
 pub fn reproduce_fee_redirect_generation_replay(
     seed: [u8; 32],
 ) -> Result<FeeRedirectGenerationReplayReproduction, String> {
@@ -12358,6 +12530,11 @@ pub fn delayed_oracle_intent_replay_strategy(
             DelayedOracleIntentPath::ConfigureAuth,
         ]),
     )
+}
+
+#[allow(dead_code)]
+pub fn delayed_matcher_enable_replay_seed_strategy() -> impl Strategy<Value = [u8; 32]> {
+    any::<[u8; 32]>()
 }
 
 #[allow(dead_code)]

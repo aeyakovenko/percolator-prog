@@ -574,6 +574,60 @@ impl V16Svm {
         .expect("bind portfolio to authenticated matcher");
     }
 
+    pub fn set_matcher_config(
+        &mut self,
+        actor_index: usize,
+        enabled: u8,
+    ) -> Result<TxSuccess, String> {
+        assert!(enabled <= 1, "matcher enabled flag must be boolean");
+        let actor = &self.actors[actor_index];
+        let owner = copy_keypair(&actor.signer);
+        let mut accounts = vec![
+            AccountMeta::new(owner.pubkey(), true),
+            AccountMeta::new_readonly(self.market, false),
+            AccountMeta::new(actor.portfolio, false),
+        ];
+        if enabled == 1 {
+            accounts.extend([
+                AccountMeta::new_readonly(self.matcher_program, false),
+                AccountMeta::new_readonly(actor.matcher_context, false),
+                AccountMeta::new_readonly(actor.matcher_delegate, false),
+            ]);
+        }
+        self.send_program(
+            ProgInstruction::SetMatcherConfig { enabled },
+            accounts,
+            &[owner],
+        )
+    }
+
+    pub fn build_retained_matcher_config(
+        &mut self,
+        actor_index: usize,
+        enabled: u8,
+    ) -> Transaction {
+        assert!(enabled <= 1, "matcher enabled flag must be boolean");
+        let actor = &self.actors[actor_index];
+        let owner = copy_keypair(&actor.signer);
+        let mut accounts = vec![
+            AccountMeta::new(owner.pubkey(), true),
+            AccountMeta::new_readonly(self.market, false),
+            AccountMeta::new(actor.portfolio, false),
+        ];
+        if enabled == 1 {
+            accounts.extend([
+                AccountMeta::new_readonly(self.matcher_program, false),
+                AccountMeta::new_readonly(actor.matcher_context, false),
+                AccountMeta::new_readonly(actor.matcher_delegate, false),
+            ]);
+        }
+        self.build_program_transaction(
+            ProgInstruction::SetMatcherConfig { enabled },
+            accounts,
+            &[owner],
+        )
+    }
+
     pub fn set_matcher_spreads(
         &mut self,
         actor_index: usize,
