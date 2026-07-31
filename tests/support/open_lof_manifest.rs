@@ -27,6 +27,7 @@ pub enum BlockerAdapter {
     Pr251DelayedAssetAuthorityRevival,
     Pr253RoundedFundingOmission,
     Pr279CollateralTopUpGenerationReplay,
+    Pr328InsuranceWithdrawalGenerationReplay,
     Pr255ResolveBeforeCommittedAccrual,
     Pr260PendingEwmaInheritance,
     Pr267CrossDomainBackingDoubleSpend,
@@ -62,6 +63,7 @@ impl BlockerAdapter {
             Self::Pr251DelayedAssetAuthorityRevival => 251,
             Self::Pr253RoundedFundingOmission => 253,
             Self::Pr279CollateralTopUpGenerationReplay => 279,
+            Self::Pr328InsuranceWithdrawalGenerationReplay => 328,
             Self::Pr255ResolveBeforeCommittedAccrual => 255,
             Self::Pr260PendingEwmaInheritance => 260,
             Self::Pr267CrossDomainBackingDoubleSpend => 267,
@@ -92,6 +94,7 @@ impl BlockerAdapter {
             Self::Pr220OmittedRescue => pr == 220 || pr == 366,
             Self::CompositeOracleRounding => pr == 329 || pr == 381,
             Self::TargetStaging => matches!(pr, 264 | 265 | 332 | 333),
+            Self::Pr279CollateralTopUpGenerationReplay => pr == 279 || pr == 320,
             _ => self.canonical_pr() == pr,
         }
     }
@@ -307,12 +310,22 @@ pub const OPEN_LOFS: &[OpenLof] = &[
     OpenLof::missing(316, Hardening, ReplayIncarnation),
     OpenLof::missing(317, Blocker, ReplayIncarnation),
     OpenLof::missing(318, Blocker, ReplayIncarnation),
-    OpenLof::missing(320, Blocker, ReplayIncarnation),
+    OpenLof::quarantined(
+        320,
+        Blocker,
+        ReplayIncarnation,
+        BlockerAdapter::Pr279CollateralTopUpGenerationReplay,
+    ),
     OpenLof::missing(321, Blocker, ReplayIncarnation),
     OpenLof::missing(322, Blocker, ReplayIncarnation),
     OpenLof::missing(325, Blocker, ReplayIncarnation),
     OpenLof::missing(326, Blocker, ReplayIncarnation),
-    OpenLof::missing(328, Blocker, ReplayIncarnation),
+    OpenLof::quarantined(
+        328,
+        Blocker,
+        ReplayIncarnation,
+        BlockerAdapter::Pr328InsuranceWithdrawalGenerationReplay,
+    ),
     OpenLof::quarantined(
         329,
         Blocker,

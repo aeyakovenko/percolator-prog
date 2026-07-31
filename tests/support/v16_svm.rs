@@ -1936,6 +1936,30 @@ impl V16Svm {
         )
     }
 
+    pub fn build_retained_insurance_withdrawal_for_actor(
+        &mut self,
+        actor_index: usize,
+        asset_index: u16,
+        amount: u128,
+    ) -> Transaction {
+        let operator = copy_keypair(&self.actors[actor_index].signer);
+        self.build_program_transaction(
+            ProgInstruction::WithdrawInsuranceAsset {
+                asset_index,
+                amount,
+            },
+            vec![
+                AccountMeta::new(operator.pubkey(), true),
+                AccountMeta::new(self.market, false),
+                AccountMeta::new(self.actors[actor_index].destination_token, false),
+                AccountMeta::new(self.vault, false),
+                AccountMeta::new_readonly(self.vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[operator],
+        )
+    }
+
     pub fn build_retained_auth_mark(&mut self, asset_index: u16, mark_e6: u64) -> Transaction {
         let authority = copy_keypair(&self.admin);
         self.build_program_transaction(

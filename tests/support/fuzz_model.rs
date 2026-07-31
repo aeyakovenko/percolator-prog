@@ -87,10 +87,11 @@ pub enum KnownBlocker {
     BilateralFeeSupport,
     DelayedAssetAuthorityRevival,
     CollateralTopUpGenerationReplay,
+    InsuranceWithdrawalGenerationReplay,
 }
 
 impl KnownBlocker {
-    pub const COUNT: usize = 31;
+    pub const COUNT: usize = 32;
 
     pub const fn index(self) -> usize {
         match self {
@@ -125,6 +126,7 @@ impl KnownBlocker {
             Self::BilateralFeeSupport => 28,
             Self::DelayedAssetAuthorityRevival => 29,
             Self::CollateralTopUpGenerationReplay => 30,
+            Self::InsuranceWithdrawalGenerationReplay => 31,
         }
     }
 }
@@ -530,6 +532,16 @@ pub struct CollateralTopUpGenerationReplayReproduction {
     pub attacker_extraction: u64,
     pub replay_cu: u64,
     pub withdrawal_cu: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct InsuranceWithdrawalGenerationReplayReproduction {
+    pub blocker: KnownBlocker,
+    pub old_market_id: u64,
+    pub new_market_id: u64,
+    pub replacement_provider_loss: u64,
+    pub attacker_extraction: u64,
+    pub replay_cu: u64,
 }
 
 impl SubstitutionKind {
@@ -4781,6 +4793,117 @@ pub fn reproduce_collateral_top_up_generation_replay(
     })
 }
 
+pub fn reproduce_insurance_withdrawal_generation_replay(
+    seed: [u8; 32],
+) -> Result<InsuranceWithdrawalGenerationReplayReproduction, String> {
+    const ASSET: u16 = 1;
+    const DOMAIN: u16 = ASSET * 2;
+    const OPERATOR: usize = 0;
+    const REPLACEMENT_CREATOR: usize = 1;
+    const PROVIDER: usize = 2;
+    const AMOUNT: u128 = 50_000;
+
+    let mut env = V16Svm::new(seed, MarketConfig::default());
+    let supply_before = env.token_supply_observed();
+
+    env.update_asset_authority_from_admin(
+        ASSET,
+        percolator_prog::processor::ASSET_AUTH_INSURANCE_OPERATOR,
+        OPERATOR,
+    )
+    .map_err(|error| format!("PR 328 install reusable insurance operator: {error}"))?;
+    env.update_asset_authority_from_admin(
+        ASSET,
+        percolator_prog::processor::ASSET_AUTH_INSURANCE,
+        PROVIDER,
+    )
+    .map_err(|error| format!("PR 328 install independent insurance provider: {error}"))?;
+    env.top_up_insurance_domain_for_actor(PROVIDER, DOMAIN, AMOUNT)
+        .map_err(|error| format!("PR 328 fund old asset generation: {error}"))?;
+    let old_market_id = env.primary_market_state().1.assets[ASSET as usize].market_id;
+    let retained_withdrawal =
+        env.build_retained_insurance_withdrawal_for_actor(OPERATOR, ASSET, AMOUNT);
+
+    env.withdraw_insurance_asset(OPERATOR, ASSET, AMOUNT)
+        .map_err(|error| format!("PR 328 clear old-generation reserve: {error}"))?;
+    if env.primary_market_state().1.insurance_domain_budget[DOMAIN as usize] != 0 {
+        return Err("PR 328 old-generation reserve did not clear before retirement".into());
+    }
+    env.update_market_init_fee_policy(1)
+        .map_err(|error| format!("PR 328 configure permissionless init fee: {error}"))?;
+    env.warp_to_slot(2);
+    env.retire_asset(ASSET, 2)
+        .map_err(|error| format!("PR 328 retire old asset generation: {error}"))?;
+    env.warp_to_slot(3);
+    env.activate_permissionless_asset_with_actor_authorities(
+        REPLACEMENT_CREATOR,
+        ASSET,
+        3,
+        2_000_000,
+        PROVIDER,
+        OPERATOR,
+        REPLACEMENT_CREATOR,
+        REPLACEMENT_CREATOR,
+        1,
+    )
+    .map_err(|error| format!("PR 328 activate replacement generation: {error}"))?;
+    let new_market_id = env.primary_market_state().1.assets[ASSET as usize].market_id;
+    if new_market_id == old_market_id {
+        return Err(format!(
+            "PR 328 replacement reused asset market ID {old_market_id}"
+        ));
+    }
+
+    let provider_source = env.actors[PROVIDER].source_token;
+    let provider_source_before = env.token_amount(provider_source);
+    env.top_up_insurance_domain_for_actor(PROVIDER, DOMAIN, AMOUNT)
+        .map_err(|error| format!("PR 328 fund replacement reserve: {error}"))?;
+    let replacement_provider_loss = provider_source_before
+        .checked_sub(env.token_amount(provider_source))
+        .ok_or("PR 328 replacement provider source increased")?;
+    let attacker_destination = env.actors[OPERATOR].destination_token;
+    let attacker_destination_before = env.token_amount(attacker_destination);
+    let replacement_reserve = env.primary_market_state().1.insurance_domain_budget[DOMAIN as usize];
+    if replacement_provider_loss != AMOUNT as u64 || replacement_reserve != AMOUNT {
+        return Err(format!(
+            "PR 328 replacement funding mismatch: provider_loss={replacement_provider_loss}, \
+             reserve={replacement_reserve}"
+        ));
+    }
+
+    let replay = env
+        .land_retained(retained_withdrawal)
+        .map_err(|error| format!("PR 328 stale withdrawal no longer lands: {error}"))?;
+    let attacker_extraction = env
+        .token_amount(attacker_destination)
+        .checked_sub(attacker_destination_before)
+        .ok_or("PR 328 attacker destination decreased")?;
+    let reserve_after = env.primary_market_state().1.insurance_domain_budget[DOMAIN as usize];
+    if attacker_extraction != AMOUNT as u64
+        || reserve_after != 0
+        || replay.compute_units >= TX_CU_LIMIT
+        || env.token_supply_observed() != supply_before
+    {
+        return Err(format!(
+            "PR 328 public extraction conditions failed: replacement_provider_loss={replacement_provider_loss}, \
+             attacker_extraction={attacker_extraction}, reserve={replacement_reserve}->{reserve_after}, \
+             replay_cu={}, supply={}/{}",
+            replay.compute_units,
+            env.token_supply_observed(),
+            supply_before
+        ));
+    }
+
+    Ok(InsuranceWithdrawalGenerationReplayReproduction {
+        blocker: KnownBlocker::InsuranceWithdrawalGenerationReplay,
+        old_market_id,
+        new_market_id,
+        replacement_provider_loss,
+        attacker_extraction,
+        replay_cu: replay.compute_units,
+    })
+}
+
 fn portfolio_equity(env: &V16Svm, actor: usize) -> Result<i128, String> {
     let account = env.primary_portfolio(actor);
     i128::try_from(account.capital.get())
@@ -7828,6 +7951,11 @@ pub fn delayed_asset_authority_revival_seed_strategy() -> impl Strategy<Value = 
 
 #[allow(dead_code)]
 pub fn collateral_top_up_generation_replay_seed_strategy() -> impl Strategy<Value = [u8; 32]> {
+    any::<[u8; 32]>()
+}
+
+#[allow(dead_code)]
+pub fn insurance_withdrawal_generation_replay_seed_strategy() -> impl Strategy<Value = [u8; 32]> {
     any::<[u8; 32]>()
 }
 
