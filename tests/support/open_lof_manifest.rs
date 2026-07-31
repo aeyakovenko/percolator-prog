@@ -159,6 +159,8 @@ impl BlockerAdapter {
             Self::Pr279CollateralTopUpGenerationReplay => pr == 279 || pr == 320,
             Self::OracleGenerationReplayFamily => matches!(pr, 275 | 277 | 322),
             Self::AuthorityHandoffAbaReplayFamily => pr == 345 || pr == 346,
+            Self::Pr304MatcherGrantPortfolioIncarnationReplay => pr == 274 || pr == 304,
+            Self::Pr303TradePortfolioIncarnationReplay => pr == 276 || pr == 303,
             _ => self.canonical_pr() == pr,
         }
     }
@@ -298,14 +300,24 @@ pub const OPEN_LOFS: &[OpenLof] = &[
         RecoveryTerminal,
         BlockerAdapter::Pr273ForfeitFundingErasure,
     ),
-    OpenLof::missing(274, Hardening, ReplayIncarnation),
+    OpenLof::quarantined(
+        274,
+        Hardening,
+        ReplayIncarnation,
+        BlockerAdapter::Pr304MatcherGrantPortfolioIncarnationReplay,
+    ),
     OpenLof::quarantined(
         275,
         Blocker,
         ReplayIncarnation,
         BlockerAdapter::OracleGenerationReplayFamily,
     ),
-    OpenLof::missing(276, Hardening, ReplayIncarnation),
+    OpenLof::quarantined(
+        276,
+        Hardening,
+        ReplayIncarnation,
+        BlockerAdapter::Pr303TradePortfolioIncarnationReplay,
+    ),
     OpenLof::quarantined(
         277,
         Blocker,
