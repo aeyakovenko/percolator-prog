@@ -99,9 +99,9 @@ fn v16_program_pr367_post_expiry_backing_fee_is_extractable() {
 }
 
 #[test]
-fn v16_program_pr220_omitted_rescue_mark_liquidates_healthy_control() {
+fn v16_program_pr220_pr366_omitted_rescue_accrual_liquidates_healthy_control() {
     let reproduction = reproduce_omitted_rescue_liquidation([0x22; 32])
-        .expect("PR 220 no longer reproduces; remove its quarantine and promote the seed");
+        .expect("PR 220/366 no longer reproduces; remove their quarantines and promote the seed");
 
     assert_eq!(
         reproduction.blocker,
@@ -112,6 +112,9 @@ fn v16_program_pr220_omitted_rescue_mark_liquidates_healthy_control() {
         "omitted world did not liquidate the victim"
     );
     assert!(reproduction.omitted_insurance_delta > 0);
+    assert_eq!(reproduction.omitted_position_before_q, 50_000_000);
+    assert_eq!(reproduction.omitted_position_after_q, 47_995_187);
+    assert_eq!(reproduction.omitted_insurance_delta, 1_001);
     assert_eq!(
         reproduction.complete_position_after_q,
         reproduction.omitted_position_before_q
@@ -585,13 +588,13 @@ fn v16_program_open_lof_manifest_is_complete_and_honest() {
         quarantined_prs(),
         [
             220, 223, 224, 225, 231, 253, 260, 267, 271, 272, 273, 275, 277, 280, 281, 282, 283,
-            290, 329, 331, 332, 333, 343, 356, 365, 367, 381
+            290, 329, 331, 332, 333, 343, 356, 365, 366, 367, 381
         ]
     );
     let missing = missing_prs();
     assert_eq!(
         missing.len(),
-        72,
+        71,
         "update the explicit evidence state when an executable adapter lands"
     );
     assert!(!missing.contains(&220));
@@ -619,6 +622,7 @@ fn v16_program_open_lof_manifest_is_complete_and_honest() {
     assert!(!missing.contains(&343));
     assert!(!missing.contains(&356));
     assert!(!missing.contains(&365));
+    assert!(!missing.contains(&366));
     assert!(!missing.contains(&367));
     assert!(!missing.contains(&381));
 }

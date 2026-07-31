@@ -72,13 +72,13 @@ proptest! {
     }
 
     #[test]
-    fn v16_program_pr220_omitted_rescue_liquidation_fuzz(
+    fn v16_program_pr220_pr366_omitted_rescue_liquidation_fuzz(
         seed in omitted_rescue_seed_strategy()
     ) {
         let result = reproduce_omitted_rescue_liquidation(seed);
         prop_assert!(
             result.is_ok(),
-            "PR 220 no longer reproduces for seed {:?}: {}",
+            "PR 220/366 no longer reproduces for seed {:?}: {}",
             seed,
             result.unwrap_err()
         );

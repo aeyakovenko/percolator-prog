@@ -79,6 +79,7 @@ impl BlockerAdapter {
 
     pub const fn supports(self, pr: u16) -> bool {
         match self {
+            Self::Pr220OmittedRescue => pr == 220 || pr == 366,
             Self::CompositeOracleRounding => pr == 329 || pr == 381,
             Self::TargetStaging => pr == 332 || pr == 333,
             _ => self.canonical_pr() == pr,
@@ -339,7 +340,12 @@ pub const OPEN_LOFS: &[OpenLof] = &[
         OracleAccrual,
         BlockerAdapter::Pr365FractionalCapSettlement,
     ),
-    OpenLof::missing(366, Blocker, OracleAccrual),
+    OpenLof::quarantined(
+        366,
+        Blocker,
+        OracleAccrual,
+        BlockerAdapter::Pr220OmittedRescue,
+    ),
     OpenLof::quarantined(
         367,
         Blocker,
