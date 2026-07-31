@@ -95,10 +95,11 @@ pub enum KnownBlocker {
     WithdrawalRetryLiquidation,
     DepositRetryReplay,
     PortfolioIncarnationWithdrawal,
+    PortfolioIncarnationDeposit,
 }
 
 impl KnownBlocker {
-    pub const COUNT: usize = 39;
+    pub const COUNT: usize = 40;
 
     pub const fn index(self) -> usize {
         match self {
@@ -141,6 +142,7 @@ impl KnownBlocker {
             Self::WithdrawalRetryLiquidation => 36,
             Self::DepositRetryReplay => 37,
             Self::PortfolioIncarnationWithdrawal => 38,
+            Self::PortfolioIncarnationDeposit => 39,
         }
     }
 }
@@ -637,6 +639,18 @@ pub struct PortfolioIncarnationWithdrawalReproduction {
     pub restored_equity_surplus: i128,
     pub cranker_reward: u128,
     pub extracted_reward: u64,
+    pub replay_cu: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PortfolioIncarnationDepositReproduction {
+    pub blocker: KnownBlocker,
+    pub old_portfolio_id: u64,
+    pub new_portfolio_id: u64,
+    pub stale_deposit: u64,
+    pub beneficiary_extra_payout: u128,
+    pub control_winner_payout: u128,
+    pub replay_winner_payout: u128,
     pub replay_cu: u64,
 }
 
@@ -5751,6 +5765,174 @@ pub fn reproduce_deposit_retry_replay(
     })
 }
 
+#[derive(Clone, Copy, Debug)]
+struct PortfolioIncarnationDepositWorld {
+    old_portfolio_id: u64,
+    new_portfolio_id: u64,
+    source_loss: u64,
+    winner_payout: u128,
+    victim_payout: u128,
+    replay_cu: u64,
+}
+
+fn run_portfolio_incarnation_deposit_world(
+    seed: [u8; 32],
+    land_replay: bool,
+) -> Result<PortfolioIncarnationDepositWorld, String> {
+    const VICTIM: usize = 0;
+    const WINNER: usize = 1;
+    const PUBLISHER: usize = 2;
+    const REPLACEMENT_CAPITAL: u128 = 150_000;
+    const STALE_DEPOSIT: u128 = 100_000;
+    const POSITION_Q: i128 = 1_000 * POS_SCALE as i128;
+
+    let mut env = V16Svm::new(
+        seed,
+        MarketConfig {
+            initial_price: 100,
+            max_price_move_bps_per_slot: 10_000,
+            max_accrual_dt_slots: 1,
+            min_funding_lifetime_slots: 1,
+            actor_deposits: [1, REPLACEMENT_CAPITAL, 1, 1, 1],
+            actor_token_balances: [250_001, 150_000, 1, 1, 1],
+            ..MarketConfig::default()
+        },
+    );
+    let supply_before = env.token_supply_observed();
+    let old_portfolio_id = env.primary_portfolio_id(VICTIM);
+    let source = env.actors[VICTIM].source_token;
+    let source_before = env.token_amount(source);
+    let retained = env.build_retained_deposit(VICTIM, STALE_DEPOSIT);
+    env.withdraw_primary(VICTIM, 1)
+        .map_err(|error| format!("PR 305 empty incarnation A: {error}"))?;
+    env.close_primary_portfolio(VICTIM)
+        .map_err(|error| format!("PR 305 close incarnation A: {error}"))?;
+    env.fund_closed_primary_portfolio(VICTIM, 1_000_000_000)
+        .map_err(|error| format!("PR 305 re-fund closed portfolio: {error}"))?;
+    env.reinitialize_primary_portfolio(VICTIM)
+        .map_err(|error| format!("PR 305 initialize incarnation B: {error}"))?;
+    let new_portfolio_id = env.primary_portfolio_id(VICTIM);
+    if new_portfolio_id <= old_portfolio_id {
+        return Err(format!(
+            "PR 305 portfolio incarnation did not advance: {old_portfolio_id} -> \
+             {new_portfolio_id}"
+        ));
+    }
+    env.deposit_primary(VICTIM, REPLACEMENT_CAPITAL)
+        .map_err(|error| format!("PR 305 fund incarnation B: {error}"))?;
+    env.trade_no_cpi(VICTIM, WINNER, 0, -POSITION_Q, 100, 0)
+        .map_err(|error| format!("PR 305 open replacement risk: {error}"))?;
+
+    for (slot, mark) in [(2, 200), (3, 350)] {
+        env.warp_to_slot(slot);
+        env.push_auth_mark(0, slot, mark)
+            .map_err(|error| format!("PR 305 publish mark {mark}: {error}"))?;
+        env.crank(
+            PUBLISHER,
+            slot,
+            vec![CrankObservationHint {
+                asset_index: 0,
+                oracle_accounts: 0,
+            }],
+        )
+        .map_err(|error| format!("PR 305 commit mark {mark}: {error}"))?;
+        if env.primary_market_state().1.assets[0].effective_price != mark {
+            return Err(format!(
+                "PR 305 mark did not commit: slot={slot}, expected={mark}, actual={}",
+                env.primary_market_state().1.assets[0].effective_price
+            ));
+        }
+    }
+
+    let replay_cu = if land_replay {
+        env.land_retained(retained)
+            .map_err(|error| format!("PR 305 incarnation-A deposit no longer lands: {error}"))?
+            .compute_units
+    } else {
+        0
+    };
+    let source_loss = source_before
+        .checked_sub(env.token_amount(source))
+        .ok_or("PR 305 victim source increased")?;
+    let expected_loss = if land_replay {
+        REPLACEMENT_CAPITAL + STALE_DEPOSIT
+    } else {
+        REPLACEMENT_CAPITAL
+    };
+    if u128::from(source_loss) != expected_loss {
+        return Err(format!(
+            "PR 305 source debit mismatch: replay={land_replay}, loss={source_loss}, \
+             expected={expected_loss}"
+        ));
+    }
+
+    env.resolve_market()
+        .map_err(|error| format!("PR 305 resolve terminal world: {error}"))?;
+    let (first_winner_payout, _) = drain_resolved_actor(&mut env, WINNER)?;
+    let (victim_payout, _) = drain_resolved_actor(&mut env, VICTIM)?;
+    let (winner_top_up, _) = drain_resolved_actor(&mut env, WINNER)?;
+    let winner_payout = first_winner_payout
+        .checked_add(winner_top_up)
+        .ok_or("PR 305 winner payout overflow")?;
+    if victim_payout != 0 || env.token_supply_observed() != supply_before {
+        return Err(format!(
+            "PR 305 terminal world mismatch: replay={land_replay}, winner={winner_payout}, \
+             victim={victim_payout}, supply={}/{}",
+            env.token_supply_observed(),
+            supply_before
+        ));
+    }
+    Ok(PortfolioIncarnationDepositWorld {
+        old_portfolio_id,
+        new_portfolio_id,
+        source_loss,
+        winner_payout,
+        victim_payout,
+        replay_cu,
+    })
+}
+
+pub fn reproduce_portfolio_incarnation_deposit(
+    seed: [u8; 32],
+) -> Result<PortfolioIncarnationDepositReproduction, String> {
+    let control = run_portfolio_incarnation_deposit_world(seed, false)?;
+    let replay = run_portfolio_incarnation_deposit_world(seed, true)?;
+    let stale_deposit = replay
+        .source_loss
+        .checked_sub(control.source_loss)
+        .ok_or("PR 305 replay source loss below control")?;
+    let beneficiary_extra_payout = replay
+        .winner_payout
+        .checked_sub(control.winner_payout)
+        .ok_or("PR 305 replay winner payout below control")?;
+    if control.old_portfolio_id != replay.old_portfolio_id
+        || control.new_portfolio_id != replay.new_portfolio_id
+        || control.source_loss != 150_000
+        || replay.source_loss != 250_000
+        || control.winner_payout != 300_000
+        || replay.winner_payout != 400_000
+        || control.victim_payout != 0
+        || replay.victim_payout != 0
+        || u128::from(stale_deposit) != beneficiary_extra_payout
+        || replay.replay_cu >= TX_CU_LIMIT
+    {
+        return Err(format!(
+            "PR 305 paired-world mismatch: control={control:?}, replay={replay:?}, \
+             stale={stale_deposit}, beneficiary={beneficiary_extra_payout}"
+        ));
+    }
+    Ok(PortfolioIncarnationDepositReproduction {
+        blocker: KnownBlocker::PortfolioIncarnationDeposit,
+        old_portfolio_id: replay.old_portfolio_id,
+        new_portfolio_id: replay.new_portfolio_id,
+        stale_deposit,
+        beneficiary_extra_payout,
+        control_winner_payout: control.winner_payout,
+        replay_winner_payout: replay.winner_payout,
+        replay_cu: replay.replay_cu,
+    })
+}
+
 pub fn reproduce_withdrawal_retry_liquidation(
     seed: [u8; 32],
 ) -> Result<WithdrawalRetryLiquidationReproduction, String> {
@@ -9190,6 +9372,11 @@ pub fn deposit_retry_replay_seed_strategy() -> impl Strategy<Value = [u8; 32]> {
 
 #[allow(dead_code)]
 pub fn portfolio_incarnation_withdrawal_seed_strategy() -> impl Strategy<Value = [u8; 32]> {
+    any::<[u8; 32]>()
+}
+
+#[allow(dead_code)]
+pub fn portfolio_incarnation_deposit_seed_strategy() -> impl Strategy<Value = [u8; 32]> {
     any::<[u8; 32]>()
 }
 
