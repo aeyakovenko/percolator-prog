@@ -1819,6 +1819,23 @@ impl V16Svm {
         )
     }
 
+    pub fn build_retained_deposit(&mut self, actor_index: usize, amount: u128) -> Transaction {
+        let actor = &self.actors[actor_index];
+        let owner = copy_keypair(&actor.signer);
+        self.build_program_transaction(
+            ProgInstruction::Deposit { amount },
+            vec![
+                AccountMeta::new(owner.pubkey(), true),
+                AccountMeta::new(self.market, false),
+                AccountMeta::new(actor.portfolio, false),
+                AccountMeta::new(actor.source_token, false),
+                AccountMeta::new(self.vault, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[owner],
+        )
+    }
+
     pub fn build_retained_cpi_trade(
         &mut self,
         taker: usize,

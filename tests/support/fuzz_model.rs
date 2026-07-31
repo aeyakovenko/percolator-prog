@@ -93,10 +93,11 @@ pub enum KnownBlocker {
     ActivationRetryReplay,
     BackingTopUpRetryReplay,
     WithdrawalRetryLiquidation,
+    DepositRetryReplay,
 }
 
 impl KnownBlocker {
-    pub const COUNT: usize = 37;
+    pub const COUNT: usize = 38;
 
     pub const fn index(self) -> usize {
         match self {
@@ -137,6 +138,7 @@ impl KnownBlocker {
             Self::ActivationRetryReplay => 34,
             Self::BackingTopUpRetryReplay => 35,
             Self::WithdrawalRetryLiquidation => 36,
+            Self::DepositRetryReplay => 37,
         }
     }
 }
@@ -609,6 +611,17 @@ pub struct WithdrawalRetryLiquidationReproduction {
     pub restored_equity_surplus: i128,
     pub cranker_reward: u128,
     pub extracted_reward: u64,
+    pub replay_cu: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DepositRetryReplayReproduction {
+    pub blocker: KnownBlocker,
+    pub intended_contribution: u64,
+    pub duplicate_loss: u64,
+    pub beneficiary_extra_payout: u128,
+    pub control_winner_payout: u128,
+    pub replay_winner_payout: u128,
     pub replay_cu: u64,
 }
 
@@ -5573,6 +5586,156 @@ pub fn reproduce_backing_top_up_retry_replay(
     })
 }
 
+#[derive(Clone, Copy, Debug)]
+struct DepositRetryWorld {
+    source_loss: u64,
+    winner_payout: u128,
+    victim_payout: u128,
+    replay_cu: u64,
+}
+
+fn run_deposit_retry_world(seed: [u8; 32], land_retry: bool) -> Result<DepositRetryWorld, String> {
+    const VICTIM: usize = 0;
+    const WINNER: usize = 1;
+    const PUBLISHER: usize = 2;
+    const INITIAL_CAPITAL: u128 = 1_000;
+    const TOP_UP: u128 = 500;
+    const POSITION_Q: i128 = 10 * POS_SCALE as i128;
+
+    let mut env = V16Svm::new(
+        seed,
+        MarketConfig {
+            initial_price: 100,
+            max_price_move_bps_per_slot: 10_000,
+            max_accrual_dt_slots: 1,
+            min_funding_lifetime_slots: 1,
+            actor_deposits: [INITIAL_CAPITAL, INITIAL_CAPITAL, 1, 1, 1],
+            actor_token_balances: [2_000, 1_000, 1, 1, 1],
+            ..MarketConfig::default()
+        },
+    );
+    let supply_before = env.token_supply_observed();
+    env.configure_auth_mark(false, 0, 0, 100)
+        .map_err(|error| format!("PR 350 configure AuthMark: {error}"))?;
+    env.trade_no_cpi(VICTIM, WINNER, 0, -POSITION_Q, 100, 0)
+        .map_err(|error| format!("PR 350 open victim/winner positions: {error}"))?;
+
+    let source = env.actors[VICTIM].source_token;
+    let source_before = env.token_amount(source);
+    let intended = env.build_retained_deposit(VICTIM, TOP_UP);
+    let retry_variant = env.build_retained_deposit(VICTIM, TOP_UP);
+    env.land_retained(intended)
+        .map_err(|error| format!("PR 350 intended deposit rejected: {error}"))?;
+
+    for (slot, mark) in [(2, 200), (3, 300)] {
+        env.warp_to_slot(slot);
+        env.push_auth_mark(0, slot, mark)
+            .map_err(|error| format!("PR 350 publish mark {mark}: {error}"))?;
+        env.crank(
+            PUBLISHER,
+            slot,
+            vec![CrankObservationHint {
+                asset_index: 0,
+                oracle_accounts: 0,
+            }],
+        )
+        .map_err(|error| format!("PR 350 commit mark {mark}: {error}"))?;
+        if env.primary_market_state().1.assets[0].effective_price != mark {
+            return Err(format!(
+                "PR 350 mark did not commit: slot={slot}, expected={mark}, actual={}",
+                env.primary_market_state().1.assets[0].effective_price
+            ));
+        }
+    }
+
+    let replay_cu = if land_retry {
+        env.land_retained(retry_variant)
+            .map_err(|error| format!("PR 350 retained deposit no longer lands: {error}"))?
+            .compute_units
+    } else {
+        0
+    };
+    let source_loss = source_before
+        .checked_sub(env.token_amount(source))
+        .ok_or("PR 350 victim source increased")?;
+    let expected_loss = if land_retry { TOP_UP * 2 } else { TOP_UP };
+    if u128::from(source_loss) != expected_loss {
+        return Err(format!(
+            "PR 350 source debit mismatch: replay={land_retry}, loss={source_loss}, \
+             expected={expected_loss}"
+        ));
+    }
+
+    env.resolve_market()
+        .map_err(|error| format!("PR 350 resolve terminal world: {error}"))?;
+    let (first_winner_payout, _) = drain_resolved_actor(&mut env, WINNER)?;
+    let (victim_payout, _) = drain_resolved_actor(&mut env, VICTIM)?;
+    let (winner_top_up, _) = drain_resolved_actor(&mut env, WINNER)?;
+    let winner_payout = first_winner_payout
+        .checked_add(winner_top_up)
+        .ok_or("PR 350 winner payout overflow")?;
+    if victim_payout != 0 || env.token_supply_observed() != supply_before {
+        return Err(format!(
+            "PR 350 terminal world mismatch: replay={land_retry}, winner={winner_payout}, \
+             victim={victim_payout}, supply={}/{}",
+            env.token_supply_observed(),
+            supply_before
+        ));
+    }
+    Ok(DepositRetryWorld {
+        source_loss,
+        winner_payout,
+        victim_payout,
+        replay_cu,
+    })
+}
+
+pub fn reproduce_deposit_retry_replay(
+    seed: [u8; 32],
+) -> Result<DepositRetryReplayReproduction, String> {
+    let control = run_deposit_retry_world(seed, false)?;
+    let replay = run_deposit_retry_world(seed, true)?;
+    let duplicate_loss = replay
+        .source_loss
+        .checked_sub(control.source_loss)
+        .ok_or("PR 350 replay source loss below control")?;
+    let beneficiary_extra_payout = replay
+        .winner_payout
+        .checked_sub(control.winner_payout)
+        .ok_or("PR 350 replay winner payout below control")?;
+    if control.source_loss != 500
+        || control.winner_payout != 2_500
+        || replay.source_loss != 1_000
+        || replay.winner_payout != 3_000
+        || control.victim_payout != 0
+        || replay.victim_payout != 0
+        || u128::from(duplicate_loss) != beneficiary_extra_payout
+        || replay.replay_cu >= TX_CU_LIMIT
+    {
+        return Err(format!(
+            "PR 350 paired-world mismatch: control_loss={}, replay_loss={}, \
+             control_winner={}, replay_winner={}, control_victim={}, replay_victim={}, \
+             replay_cu={}",
+            control.source_loss,
+            replay.source_loss,
+            control.winner_payout,
+            replay.winner_payout,
+            control.victim_payout,
+            replay.victim_payout,
+            replay.replay_cu
+        ));
+    }
+    Ok(DepositRetryReplayReproduction {
+        blocker: KnownBlocker::DepositRetryReplay,
+        intended_contribution: control.source_loss,
+        duplicate_loss,
+        beneficiary_extra_payout,
+        control_winner_payout: control.winner_payout,
+        replay_winner_payout: replay.winner_payout,
+        replay_cu: replay.replay_cu,
+    })
+}
+
 pub fn reproduce_withdrawal_retry_liquidation(
     seed: [u8; 32],
 ) -> Result<WithdrawalRetryLiquidationReproduction, String> {
@@ -8827,6 +8990,11 @@ pub fn backing_top_up_retry_replay_seed_strategy() -> impl Strategy<Value = [u8;
 
 #[allow(dead_code)]
 pub fn withdrawal_retry_liquidation_seed_strategy() -> impl Strategy<Value = [u8; 32]> {
+    any::<[u8; 32]>()
+}
+
+#[allow(dead_code)]
+pub fn deposit_retry_replay_seed_strategy() -> impl Strategy<Value = [u8; 32]> {
     any::<[u8; 32]>()
 }
 
