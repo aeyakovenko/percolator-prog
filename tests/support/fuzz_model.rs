@@ -107,10 +107,11 @@ pub enum KnownBlocker {
     LiquidationPolicyGenerationReplay,
     DelayedMaintenancePolicyReplay,
     DelayedLiquidationPolicyReplay,
+    DelayedTradeFeePolicyReplay,
 }
 
 impl KnownBlocker {
-    pub const COUNT: usize = 51;
+    pub const COUNT: usize = 52;
 
     pub const fn index(self) -> usize {
         match self {
@@ -165,6 +166,7 @@ impl KnownBlocker {
             Self::LiquidationPolicyGenerationReplay => 48,
             Self::DelayedMaintenancePolicyReplay => 49,
             Self::DelayedLiquidationPolicyReplay => 50,
+            Self::DelayedTradeFeePolicyReplay => 51,
         }
     }
 }
@@ -691,6 +693,18 @@ pub struct DelayedLiquidationPolicyReplayReproduction {
     pub correction_cu: u64,
     pub replay_cu: u64,
     pub liquidation_cu: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DelayedTradeFeePolicyReplayReproduction {
+    pub blocker: KnownBlocker,
+    pub victim_loss: u64,
+    pub attacker_profit: u64,
+    pub extracted_fee: u64,
+    pub correction_cu: u64,
+    pub replay_cu: u64,
+    pub trade_cu: u64,
+    pub withdrawal_cu: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -6553,6 +6567,143 @@ pub fn reproduce_delayed_liquidation_policy_replay(
     })
 }
 
+pub fn reproduce_delayed_trade_fee_policy_replay(
+    seed: [u8; 32],
+) -> Result<DelayedTradeFeePolicyReplayReproduction, String> {
+    const VICTIM: usize = 0;
+    const ATTACKER: usize = 1;
+    const ACTIVATION_PAYER: usize = 2;
+    const ASSET: u16 = 1;
+    const PRICE: u64 = 100;
+    const DEPOSIT: u128 = 10_000;
+    const SIZE_Q: i128 = 10 * POS_SCALE as i128;
+    const STALE_TRADE_FEE_BPS: u64 = 10_000;
+    const CURRENT_TRADE_FEE_BPS: u64 = 0;
+    const FEE_PER_SIDE: u64 = 1_000;
+    const TOTAL_FEE: u128 = 2 * FEE_PER_SIDE as u128;
+
+    let mut env = V16Svm::new(
+        seed,
+        MarketConfig {
+            initial_price: PRICE,
+            max_trading_fee_bps: STALE_TRADE_FEE_BPS,
+            actor_deposits: [DEPOSIT, DEPOSIT, 1, 1, 1],
+            ..MarketConfig::default()
+        },
+    );
+    let supply_before = env.token_supply_observed();
+    let retained_policy = env.build_retained_trade_fee_policy(STALE_TRADE_FEE_BPS);
+    let correction = env
+        .update_trade_fee_policy(CURRENT_TRADE_FEE_BPS)
+        .map_err(|error| format!("PR 338 land current zero-fee correction: {error}"))?;
+    if env.primary_market_state().0.trade_fee_base_bps != CURRENT_TRADE_FEE_BPS {
+        return Err("PR 338 current trade-fee correction did not land".into());
+    }
+
+    env.update_market_init_fee_policy(1)
+        .map_err(|error| format!("PR 338 configure permissionless init fee: {error}"))?;
+    env.warp_to_slot(2);
+    env.retire_asset(ASSET, 2)
+        .map_err(|error| format!("PR 338 retire empty asset slot: {error}"))?;
+    env.warp_to_slot(3);
+    env.activate_permissionless_asset_with_actor_authorities(
+        ACTIVATION_PAYER,
+        ASSET,
+        3,
+        PRICE,
+        ATTACKER,
+        ATTACKER,
+        ATTACKER,
+        ATTACKER,
+        1,
+    )
+    .map_err(|error| format!("PR 338 activate attacker-operated asset: {error}"))?;
+
+    let retained_trade = env.build_retained_no_cpi_trade(VICTIM, ATTACKER, ASSET, SIZE_Q, PRICE);
+    let replay = env
+        .land_retained(retained_policy)
+        .map_err(|error| format!("PR 338 delayed trade-fee policy no longer lands: {error}"))?;
+    if env.primary_market_state().0.trade_fee_base_bps != STALE_TRADE_FEE_BPS {
+        return Err("PR 338 delayed policy did not overwrite the correction".into());
+    }
+    let trade = env
+        .land_retained(retained_trade)
+        .map_err(|error| format!("PR 338 victim's zero-fee trade rejected: {error}"))?;
+
+    let group_after_trade = env.primary_market_state().1;
+    let attacker_domain_fee = group_after_trade.insurance_domain_budget[ASSET as usize * 2]
+        .checked_add(group_after_trade.insurance_domain_budget[ASSET as usize * 2 + 1])
+        .ok_or("PR 338 attacker domain fee overflow")?;
+    if attacker_domain_fee != TOTAL_FEE {
+        return Err(format!(
+            "PR 338 delayed policy credited {attacker_domain_fee}, expected {TOTAL_FEE}"
+        ));
+    }
+
+    let victim_destination = env.actors[VICTIM].destination_token;
+    let attacker_destination = env.actors[ATTACKER].destination_token;
+    let victim_destination_before = env.token_amount(victim_destination);
+    let attacker_destination_before = env.token_amount(attacker_destination);
+    let withdrawal = env
+        .withdraw_insurance_asset(ATTACKER, ASSET, TOTAL_FEE)
+        .map_err(|error| format!("PR 338 attacker could not withdraw trade fees: {error}"))?;
+    env.update_trade_fee_policy(CURRENT_TRADE_FEE_BPS)
+        .map_err(|error| format!("PR 338 restore zero fee before neutral close: {error}"))?;
+    env.trade_no_cpi(VICTIM, ATTACKER, ASSET, -SIZE_Q, PRICE, 0)
+        .map_err(|error| format!("PR 338 close user risk: {error}"))?;
+    let victim_capital = env.primary_portfolio(VICTIM).capital.get();
+    let attacker_capital = env.primary_portfolio(ATTACKER).capital.get();
+    env.withdraw_primary(VICTIM, victim_capital)
+        .map_err(|error| format!("PR 338 victim terminal withdrawal: {error}"))?;
+    env.withdraw_primary(ATTACKER, attacker_capital)
+        .map_err(|error| format!("PR 338 attacker terminal withdrawal: {error}"))?;
+
+    let victim_return = env
+        .token_amount(victim_destination)
+        .checked_sub(victim_destination_before)
+        .ok_or("PR 338 victim destination decreased")?;
+    let attacker_return = env
+        .token_amount(attacker_destination)
+        .checked_sub(attacker_destination_before)
+        .ok_or("PR 338 attacker destination decreased")?;
+    let deposit_u64 = u64::try_from(DEPOSIT).map_err(|_| "PR 338 deposit does not fit u64")?;
+    let victim_loss = deposit_u64
+        .checked_sub(victim_return)
+        .ok_or("PR 338 victim returned more than deposited")?;
+    let attacker_profit = attacker_return
+        .checked_sub(deposit_u64)
+        .ok_or("PR 338 attacker did not recover its deposit")?;
+    let max_cu = correction
+        .compute_units
+        .max(replay.compute_units)
+        .max(trade.compute_units)
+        .max(withdrawal.compute_units);
+    if victim_loss != FEE_PER_SIDE
+        || attacker_profit != victim_loss
+        || attacker_return != deposit_u64 + FEE_PER_SIDE
+        || max_cu >= TX_CU_LIMIT
+        || env.token_supply_observed() != supply_before
+    {
+        return Err(format!(
+            "PR 338 terminal extraction mismatch: victim={victim_loss}, profit={attacker_profit}, \
+             attacker_return={attacker_return}, max_cu={max_cu}, supply={}/{}",
+            env.token_supply_observed(),
+            supply_before
+        ));
+    }
+
+    Ok(DelayedTradeFeePolicyReplayReproduction {
+        blocker: KnownBlocker::DelayedTradeFeePolicyReplay,
+        victim_loss,
+        attacker_profit,
+        extracted_fee: attacker_domain_fee as u64,
+        correction_cu: correction.compute_units,
+        replay_cu: replay.compute_units,
+        trade_cu: trade.compute_units,
+        withdrawal_cu: withdrawal.compute_units,
+    })
+}
+
 pub fn reproduce_fee_redirect_generation_replay(
     seed: [u8; 32],
 ) -> Result<FeeRedirectGenerationReplayReproduction, String> {
@@ -11563,6 +11714,11 @@ pub fn delayed_maintenance_policy_replay_seed_strategy() -> impl Strategy<Value 
 
 #[allow(dead_code)]
 pub fn delayed_liquidation_policy_replay_seed_strategy() -> impl Strategy<Value = [u8; 32]> {
+    any::<[u8; 32]>()
+}
+
+#[allow(dead_code)]
+pub fn delayed_trade_fee_policy_replay_seed_strategy() -> impl Strategy<Value = [u8; 32]> {
     any::<[u8; 32]>()
 }
 

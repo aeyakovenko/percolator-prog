@@ -1406,6 +1406,18 @@ impl V16Svm {
         )
     }
 
+    pub fn build_retained_trade_fee_policy(&mut self, trade_fee_base_bps: u64) -> Transaction {
+        let authority = copy_keypair(&self.admin);
+        self.build_program_transaction(
+            ProgInstruction::UpdateTradeFeePolicy { trade_fee_base_bps },
+            vec![
+                AccountMeta::new(authority.pubkey(), true),
+                AccountMeta::new(self.market, false),
+            ],
+            &[authority],
+        )
+    }
+
     pub fn update_fee_redirect_policy(&mut self, redirect_bps: u16) -> Result<TxSuccess, String> {
         let authority = copy_keypair(&self.admin);
         self.send_program(
