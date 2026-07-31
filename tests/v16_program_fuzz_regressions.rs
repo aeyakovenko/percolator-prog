@@ -12,10 +12,11 @@ use support::{
         reproduce_composite_oracle_time_skew, reproduce_cpi_backing_fee_siphon,
         reproduce_cpi_caller_fee_siphon, reproduce_cross_domain_b_settlement,
         reproduce_cross_domain_backing_double_spend, reproduce_cross_margin_insurance_drain,
-        reproduce_delayed_asset_authority_revival, reproduce_delayed_maintenance_policy_replay,
-        reproduce_deposit_retry_replay, reproduce_fee_redirect_generation_replay,
-        reproduce_forfeit_funding_erasure, reproduce_fractional_cap_settlement,
-        reproduce_insurance_top_up_retry_replay, reproduce_insurance_withdrawal_generation_replay,
+        reproduce_delayed_asset_authority_revival, reproduce_delayed_liquidation_policy_replay,
+        reproduce_delayed_maintenance_policy_replay, reproduce_deposit_retry_replay,
+        reproduce_fee_redirect_generation_replay, reproduce_forfeit_funding_erasure,
+        reproduce_fractional_cap_settlement, reproduce_insurance_top_up_retry_replay,
+        reproduce_insurance_withdrawal_generation_replay,
         reproduce_liquidation_policy_generation_replay,
         reproduce_maintenance_policy_generation_replay, reproduce_market_incarnation_deposit,
         reproduce_omitted_rescue_liquidation, reproduce_pending_ewma_inheritance,
@@ -654,6 +655,23 @@ fn v16_program_pr337_delayed_maintenance_policy_extracts_user_fee() {
 }
 
 #[test]
+fn v16_program_pr336_delayed_liquidation_policy_extracts_user_fee() {
+    let reproduction = reproduce_delayed_liquidation_policy_replay([0x36; 32])
+        .unwrap_or_else(|error| panic!("PR 336 no longer reproduces: {error}"));
+    assert_eq!(
+        reproduction.blocker,
+        KnownBlocker::DelayedLiquidationPolicyReplay
+    );
+    assert!(reproduction.live_oi_q > 0);
+    assert_eq!(reproduction.victim_capital_loss, 455);
+    assert_eq!(reproduction.attacker_extraction, 455);
+    assert_eq!(reproduction.insurance_delta, 0);
+    assert!(reproduction.correction_cu < 1_400_000);
+    assert!(reproduction.replay_cu < 1_400_000);
+    assert!(reproduction.liquidation_cu < 1_400_000);
+}
+
+#[test]
 fn v16_program_pr317_stale_fee_redirect_extracts_victim_fee() {
     let reproduction = reproduce_fee_redirect_generation_replay([0x17; 32])
         .unwrap_or_else(|error| panic!("PR 317 no longer reproduces: {error}"));
@@ -1016,14 +1034,14 @@ fn v16_program_open_lof_manifest_is_complete_and_honest() {
         [
             220, 223, 224, 225, 231, 251, 253, 255, 260, 264, 265, 267, 271, 272, 273, 275, 277,
             279, 280, 281, 282, 283, 290, 299, 305, 307, 310, 311, 314, 315, 317, 318, 320, 321,
-            322, 325, 326, 328, 329, 331, 332, 333, 337, 343, 344, 350, 351, 355, 356, 362, 365,
-            366, 367, 369, 380, 381
+            322, 325, 326, 328, 329, 331, 332, 333, 336, 337, 343, 344, 350, 351, 355, 356, 362,
+            365, 366, 367, 369, 380, 381
         ]
     );
     let missing = missing_prs();
     assert_eq!(
         missing.len(),
-        43,
+        42,
         "update the explicit evidence state when an executable adapter lands"
     );
     assert!(!missing.contains(&220));
@@ -1068,6 +1086,7 @@ fn v16_program_open_lof_manifest_is_complete_and_honest() {
     assert!(!missing.contains(&331));
     assert!(!missing.contains(&332));
     assert!(!missing.contains(&333));
+    assert!(!missing.contains(&336));
     assert!(!missing.contains(&337));
     assert!(!missing.contains(&343));
     assert!(!missing.contains(&344));
