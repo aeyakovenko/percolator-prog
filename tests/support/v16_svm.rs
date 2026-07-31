@@ -15,6 +15,7 @@ use solana_sdk::{
     program_pack::Pack,
     pubkey::Pubkey,
     signature::{keypair_from_seed, Keypair, Signer},
+    system_instruction,
     transaction::Transaction,
 };
 use spl_token::state::{Account as TokenAccount, AccountState, Mint};
@@ -659,6 +660,55 @@ impl V16Svm {
             ],
             &[owner],
         )
+    }
+
+    pub fn close_primary_portfolio(&mut self, actor_index: usize) -> Result<TxSuccess, String> {
+        let actor = &self.actors[actor_index];
+        let owner = copy_keypair(&actor.signer);
+        self.send_program(
+            ProgInstruction::ClosePortfolio,
+            vec![
+                AccountMeta::new(owner.pubkey(), true),
+                AccountMeta::new(self.market, false),
+                AccountMeta::new(actor.portfolio, false),
+            ],
+            &[owner],
+        )
+    }
+
+    pub fn fund_closed_primary_portfolio(
+        &mut self,
+        actor_index: usize,
+        lamports: u64,
+    ) -> Result<TxSuccess, String> {
+        let portfolio = self.actors[actor_index].portfolio;
+        let payer = self.payer.pubkey();
+        self.send_raw_instruction(
+            system_instruction::transfer(&payer, &portfolio, lamports),
+            &[],
+        )
+    }
+
+    pub fn reinitialize_primary_portfolio(
+        &mut self,
+        actor_index: usize,
+    ) -> Result<TxSuccess, String> {
+        let actor = &self.actors[actor_index];
+        let owner = copy_keypair(&actor.signer);
+        self.send_program(
+            ProgInstruction::InitPortfolio,
+            vec![
+                AccountMeta::new(owner.pubkey(), true),
+                AccountMeta::new(self.market, false),
+                AccountMeta::new(actor.portfolio, false),
+            ],
+            &[owner],
+        )
+    }
+
+    pub fn primary_portfolio_id(&self, actor_index: usize) -> u64 {
+        let data = self.primary_portfolio_data(actor_index);
+        state::read_portfolio_id(&data).expect("decode primary portfolio id")
     }
 
     pub fn resolve_market(&mut self) -> Result<TxSuccess, String> {

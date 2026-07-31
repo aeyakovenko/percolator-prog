@@ -94,10 +94,11 @@ pub enum KnownBlocker {
     BackingTopUpRetryReplay,
     WithdrawalRetryLiquidation,
     DepositRetryReplay,
+    PortfolioIncarnationWithdrawal,
 }
 
 impl KnownBlocker {
-    pub const COUNT: usize = 38;
+    pub const COUNT: usize = 39;
 
     pub const fn index(self) -> usize {
         match self {
@@ -139,6 +140,7 @@ impl KnownBlocker {
             Self::BackingTopUpRetryReplay => 35,
             Self::WithdrawalRetryLiquidation => 36,
             Self::DepositRetryReplay => 37,
+            Self::PortfolioIncarnationWithdrawal => 38,
         }
     }
 }
@@ -622,6 +624,19 @@ pub struct DepositRetryReplayReproduction {
     pub beneficiary_extra_payout: u128,
     pub control_winner_payout: u128,
     pub replay_winner_payout: u128,
+    pub replay_cu: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PortfolioIncarnationWithdrawalReproduction {
+    pub blocker: KnownBlocker,
+    pub old_portfolio_id: u64,
+    pub new_portfolio_id: u64,
+    pub stale_withdrawal: u64,
+    pub liquidation_slot: u64,
+    pub restored_equity_surplus: i128,
+    pub cranker_reward: u128,
+    pub extracted_reward: u64,
     pub replay_cu: u64,
 }
 
@@ -5902,6 +5917,181 @@ pub fn reproduce_withdrawal_retry_liquidation(
     })
 }
 
+pub fn reproduce_portfolio_incarnation_withdrawal(
+    seed: [u8; 32],
+) -> Result<PortfolioIncarnationWithdrawalReproduction, String> {
+    const LONG: usize = 0;
+    const VICTIM: usize = 1;
+    const CRANKER: usize = 2;
+    const ORIGINAL_CAPITAL: u128 = 100_000_000;
+    const REPLACEMENT_CAPITAL: u128 = 200_000_000;
+    const STALE_WITHDRAWAL: u128 = 100_000_000;
+    const POSITION_Q: i128 = 1_000 * POS_SCALE as i128;
+    const PRICE: u64 = 1_000_000;
+
+    let mut env = V16Svm::new(
+        seed,
+        MarketConfig {
+            initial_price: PRICE,
+            h_max: 6_480_000,
+            min_nonzero_mm_req: 599,
+            min_nonzero_im_req: 600,
+            maintenance_margin_bps: 500,
+            initial_margin_bps: 500,
+            liquidation_fee_bps: 5,
+            liquidation_fee_cap: percolator::MAX_PROTOCOL_FEE_ABS,
+            max_price_move_bps_per_slot: 24,
+            max_accrual_dt_slots: 20,
+            max_abs_funding_e9_per_slot: 1_000,
+            min_funding_lifetime_slots: 10_000_000,
+            actor_deposits: [2_000_000_000, ORIGINAL_CAPITAL, 1_000, 1, 1],
+            actor_token_balances: [2_100_000_000, 350_000_000, 10_000, 10, 10],
+            ..MarketConfig::default()
+        },
+    );
+    let supply_before = env.token_supply_observed();
+    env.update_liquidation_fee_policy(5_000)
+        .map_err(|error| format!("PR 299 configure cranker reward share: {error}"))?;
+
+    let old_portfolio_id = env.primary_portfolio_id(VICTIM);
+    let retained = env.build_retained_withdrawal(VICTIM, STALE_WITHDRAWAL);
+    env.withdraw_primary(VICTIM, ORIGINAL_CAPITAL)
+        .map_err(|error| format!("PR 299 empty incarnation A: {error}"))?;
+    env.close_primary_portfolio(VICTIM)
+        .map_err(|error| format!("PR 299 close incarnation A: {error}"))?;
+    env.fund_closed_primary_portfolio(VICTIM, 1_000_000_000)
+        .map_err(|error| format!("PR 299 re-fund closed portfolio: {error}"))?;
+    env.reinitialize_primary_portfolio(VICTIM)
+        .map_err(|error| format!("PR 299 initialize incarnation B: {error}"))?;
+    let new_portfolio_id = env.primary_portfolio_id(VICTIM);
+    if new_portfolio_id <= old_portfolio_id {
+        return Err(format!(
+            "PR 299 portfolio incarnation did not advance: {old_portfolio_id} -> \
+             {new_portfolio_id}"
+        ));
+    }
+    env.deposit_primary(VICTIM, REPLACEMENT_CAPITAL)
+        .map_err(|error| format!("PR 299 fund incarnation B: {error}"))?;
+
+    let fresh_trade = env.build_retained_no_cpi_trade(LONG, VICTIM, 0, POSITION_Q, PRICE);
+    let destination = env.actors[VICTIM].destination_token;
+    let destination_before = env.token_amount(destination);
+    let replay = env
+        .land_retained(retained)
+        .map_err(|error| format!("PR 299 incarnation-A withdrawal no longer lands: {error}"))?;
+    let stale_withdrawal = env
+        .token_amount(destination)
+        .checked_sub(destination_before)
+        .ok_or("PR 299 victim destination decreased")?;
+    if u128::from(stale_withdrawal) != STALE_WITHDRAWAL
+        || env.primary_portfolio(VICTIM).capital.get() != REPLACEMENT_CAPITAL - STALE_WITHDRAWAL
+    {
+        return Err(format!(
+            "PR 299 stale withdrawal mismatch: withdrew={stale_withdrawal}, capital={}",
+            env.primary_portfolio(VICTIM).capital.get()
+        ));
+    }
+    env.land_retained(fresh_trade)
+        .map_err(|error| format!("PR 299 incarnation-B trade did not land: {error}"))?;
+    if position_for_asset(&env.primary_portfolio(VICTIM), 0)? != -POSITION_Q {
+        return Err("PR 299 fresh trade did not install the replacement short".into());
+    }
+
+    let mut liquidation = None;
+    for slot in 2..=31u64 {
+        env.warp_to_slot(slot);
+        let current_mark = env.primary_market_state().1.assets[0].effective_price;
+        let next_mark = current_mark
+            .checked_add((current_mark / 500).max(1))
+            .ok_or("PR 299 mark overflow")?;
+        env.push_auth_mark(0, slot, next_mark)
+            .map_err(|error| format!("PR 299 publish mark at slot {slot}: {error}"))?;
+        env.crank(
+            VICTIM,
+            slot,
+            vec![CrankObservationHint {
+                asset_index: 0,
+                oracle_accounts: 0,
+            }],
+        )
+        .map_err(|error| format!("PR 299 refresh victim at slot {slot}: {error}"))?;
+        let cert = env
+            .primary_portfolio(VICTIM)
+            .health_cert
+            .try_to_runtime()
+            .map_err(|error| format!("PR 299 decode health certificate: {error:?}"))?;
+        let maintenance = i128::try_from(cert.certified_maintenance_req)
+            .map_err(|_| "PR 299 maintenance requirement exceeds signed range")?;
+        if cert.certified_equity < maintenance {
+            let restored_equity = cert
+                .certified_equity
+                .checked_add(STALE_WITHDRAWAL as i128)
+                .ok_or("PR 299 restored equity overflow")?;
+            if restored_equity <= maintenance {
+                return Err(format!(
+                    "PR 299 stale withdrawal is not causal: equity={}, restored={}, \
+                     maintenance={maintenance}",
+                    cert.certified_equity, restored_equity
+                ));
+            }
+            liquidation = Some((slot, restored_equity - maintenance));
+            break;
+        }
+    }
+    let (liquidation_slot, restored_equity_surplus) =
+        liquidation.ok_or("PR 299 stale withdrawal never caused liquidation")?;
+
+    let cranker_before = env.primary_portfolio(CRANKER).capital.get();
+    let liquidation_tx = env
+        .crank_with_reward(CRANKER, VICTIM, liquidation_slot, Vec::new(), &[])
+        .map_err(|error| format!("PR 299 independent liquidation failed: {error}"))?;
+    let cranker_reward = env
+        .primary_portfolio(CRANKER)
+        .capital
+        .get()
+        .checked_sub(cranker_before)
+        .ok_or("PR 299 cranker capital decreased")?;
+    if cranker_reward == 0 {
+        return Err("PR 299 stale-withdrawal liquidation paid no reward".into());
+    }
+    let reward_destination = env.actors[CRANKER].destination_token;
+    let reward_destination_before = env.token_amount(reward_destination);
+    let withdrawal = env
+        .withdraw_primary(CRANKER, cranker_reward)
+        .map_err(|error| format!("PR 299 cranker reward withdrawal failed: {error}"))?;
+    let extracted_reward = env
+        .token_amount(reward_destination)
+        .checked_sub(reward_destination_before)
+        .ok_or("PR 299 cranker destination decreased")?;
+    let max_cu = replay
+        .compute_units
+        .max(liquidation_tx.compute_units)
+        .max(withdrawal.compute_units);
+    if u128::from(extracted_reward) != cranker_reward
+        || max_cu >= TX_CU_LIMIT
+        || env.token_supply_observed() != supply_before
+    {
+        return Err(format!(
+            "PR 299 extraction mismatch: reward={cranker_reward}, extracted={extracted_reward}, \
+             max_cu={max_cu}, supply={}/{}",
+            env.token_supply_observed(),
+            supply_before
+        ));
+    }
+
+    Ok(PortfolioIncarnationWithdrawalReproduction {
+        blocker: KnownBlocker::PortfolioIncarnationWithdrawal,
+        old_portfolio_id,
+        new_portfolio_id,
+        stale_withdrawal,
+        liquidation_slot,
+        restored_equity_surplus,
+        cranker_reward,
+        extracted_reward,
+        replay_cu: replay.compute_units,
+    })
+}
+
 fn portfolio_equity(env: &V16Svm, actor: usize) -> Result<i128, String> {
     let account = env.primary_portfolio(actor);
     i128::try_from(account.capital.get())
@@ -8995,6 +9185,11 @@ pub fn withdrawal_retry_liquidation_seed_strategy() -> impl Strategy<Value = [u8
 
 #[allow(dead_code)]
 pub fn deposit_retry_replay_seed_strategy() -> impl Strategy<Value = [u8; 32]> {
+    any::<[u8; 32]>()
+}
+
+#[allow(dead_code)]
+pub fn portfolio_incarnation_withdrawal_seed_strategy() -> impl Strategy<Value = [u8; 32]> {
     any::<[u8; 32]>()
 }
 
