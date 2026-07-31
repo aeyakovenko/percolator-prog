@@ -34,13 +34,14 @@ use support::{
         reproduce_resolve_authority_incarnation_replay, reproduce_resolve_before_committed_accrual,
         reproduce_resolve_generation_replay, reproduce_rounded_funding_omission,
         reproduce_shutdown_generation_replay, reproduce_terminal_dust_payout_erasure,
-        reproduce_trade_driven_liquidation_reward, reproduce_trade_funding_erasure,
-        reproduce_trade_portfolio_incarnation_replay, reproduce_trade_retry_replay,
-        reproduce_unstaged_mark_target, reproduce_withdrawal_retry_liquidation, run_scenario,
-        AssetGenerationConfigPath, AssetGenerationMarkPath, AuthorityHandoffAbaPath,
-        BackingFeeConsentOrder, BilateralFeeMode, CompositeRoundingCase, DelayedOracleIntentPath,
-        KnownBlocker, PortfolioIncarnationTradeSide, PostExpiryBackingCase, Scenario,
-        TargetStagingCase, TradeDrivenLiquidationMode, TradeRoute,
+        reproduce_trade_driven_liquidation_reward, reproduce_trade_fee_market_generation_replay,
+        reproduce_trade_funding_erasure, reproduce_trade_portfolio_incarnation_replay,
+        reproduce_trade_retry_replay, reproduce_unstaged_mark_target,
+        reproduce_withdrawal_retry_liquidation, run_scenario, AssetGenerationConfigPath,
+        AssetGenerationMarkPath, AuthorityHandoffAbaPath, BackingFeeConsentOrder, BilateralFeeMode,
+        CompositeRoundingCase, DelayedOracleIntentPath, KnownBlocker,
+        PortfolioIncarnationTradeSide, PostExpiryBackingCase, Scenario, TargetStagingCase,
+        TradeDrivenLiquidationMode, TradeRoute,
     },
     open_lof_manifest::{missing_prs, quarantined_prs, validate_manifest},
 };
@@ -861,6 +862,24 @@ fn v16_program_pr294_stale_matcher_grant_liquidates_reinitialized_market() {
 }
 
 #[test]
+fn v16_program_pr296_stale_trade_fee_policy_extracts_from_reinitialized_market() {
+    let reproduction = reproduce_trade_fee_market_generation_replay([0x96; 32])
+        .unwrap_or_else(|error| panic!("PR 296 no longer reproduces: {error}"));
+    assert_eq!(
+        reproduction.blocker,
+        KnownBlocker::TradeFeeMarketGenerationReplay
+    );
+    assert!(reproduction.old_market_id > 0);
+    assert!(reproduction.new_market_id > 0);
+    assert_eq!(reproduction.victim_loss, 1_000);
+    assert_eq!(reproduction.attacker_profit, reproduction.victim_loss);
+    assert_eq!(reproduction.extracted_fee, 2_000);
+    assert!(reproduction.replay_cu < 1_400_000);
+    assert!(reproduction.trade_cu < 1_400_000);
+    assert!(reproduction.max_cu < 1_400_000);
+}
+
+#[test]
 fn v16_program_pr303_stale_trades_liquidate_reinitialized_portfolio() {
     for route in [
         TradeRoute::NoCpi,
@@ -1335,16 +1354,16 @@ fn v16_program_open_lof_manifest_is_complete_and_honest() {
         quarantined_prs(),
         [
             220, 223, 224, 225, 231, 251, 253, 255, 260, 264, 265, 267, 271, 272, 273, 274, 275,
-            276, 277, 278, 279, 280, 281, 282, 283, 285, 290, 294, 299, 301, 303, 304, 305, 307,
-            309, 310, 311, 314, 315, 317, 318, 320, 321, 322, 325, 326, 328, 329, 331, 332, 333,
-            334, 335, 336, 337, 338, 339, 340, 343, 344, 345, 346, 347, 349, 350, 351, 353, 355,
-            356, 362, 365, 366, 367, 369, 380, 381
+            276, 277, 278, 279, 280, 281, 282, 283, 285, 290, 294, 296, 299, 301, 303, 304, 305,
+            307, 309, 310, 311, 314, 315, 317, 318, 320, 321, 322, 325, 326, 328, 329, 331, 332,
+            333, 334, 335, 336, 337, 338, 339, 340, 343, 344, 345, 346, 347, 349, 350, 351, 353,
+            355, 356, 362, 365, 366, 367, 369, 380, 381
         ]
     );
     let missing = missing_prs();
     assert_eq!(
         missing.len(),
-        23,
+        22,
         "update the explicit evidence state when an executable adapter lands"
     );
     assert!(!missing.contains(&220));
@@ -1375,6 +1394,7 @@ fn v16_program_open_lof_manifest_is_complete_and_honest() {
     assert!(!missing.contains(&285));
     assert!(!missing.contains(&290));
     assert!(!missing.contains(&294));
+    assert!(!missing.contains(&296));
     assert!(!missing.contains(&299));
     assert!(!missing.contains(&301));
     assert!(!missing.contains(&303));

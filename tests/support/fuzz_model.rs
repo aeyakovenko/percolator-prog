@@ -128,10 +128,11 @@ pub enum KnownBlocker {
     ConvertPortfolioIncarnationReplay,
     ForfeitPortfolioIncarnationReplay,
     MatcherGrantMarketGenerationReplay,
+    TradeFeeMarketGenerationReplay,
 }
 
 impl KnownBlocker {
-    pub const COUNT: usize = 66;
+    pub const COUNT: usize = 67;
 
     pub const fn index(self) -> usize {
         match self {
@@ -201,6 +202,7 @@ impl KnownBlocker {
             Self::ConvertPortfolioIncarnationReplay => 63,
             Self::ForfeitPortfolioIncarnationReplay => 64,
             Self::MatcherGrantMarketGenerationReplay => 65,
+            Self::TradeFeeMarketGenerationReplay => 66,
         }
     }
 }
@@ -885,6 +887,19 @@ pub struct MatcherGrantMarketGenerationReplayReproduction {
     pub cranker_reward: u128,
     pub extracted_reward: u64,
     pub replay_cu: u64,
+    pub max_cu: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TradeFeeMarketGenerationReplayReproduction {
+    pub blocker: KnownBlocker,
+    pub old_market_id: u64,
+    pub new_market_id: u64,
+    pub victim_loss: u64,
+    pub attacker_profit: u64,
+    pub extracted_fee: u64,
+    pub replay_cu: u64,
+    pub trade_cu: u64,
     pub max_cu: u64,
 }
 
@@ -8972,6 +8987,224 @@ pub fn reproduce_matcher_grant_market_generation_replay(
 }
 
 #[derive(Clone, Copy, Debug)]
+struct TradeFeeMarketGenerationWorld {
+    old_market_id: u64,
+    new_market_id: u64,
+    victim_loss: u64,
+    attacker_profit: u64,
+    extracted_fee: u64,
+    replay_cu: u64,
+    trade_cu: u64,
+    max_cu: u64,
+}
+
+fn run_trade_fee_market_generation_world(
+    seed: [u8; 32],
+    land_replay: bool,
+) -> Result<TradeFeeMarketGenerationWorld, String> {
+    const VICTIM: usize = 0;
+    const ATTACKER: usize = 1;
+    const ACTIVATION_PAYER: usize = 2;
+    const ASSET: u16 = 1;
+    const PRICE: u64 = 100;
+    const DEPOSIT: u128 = 10_000;
+    const SIZE_Q: i128 = 10 * POS_SCALE as i128;
+    const STALE_TRADE_FEE_BPS: u64 = 10_000;
+    const FEE_PER_SIDE: u64 = 1_000;
+    const TOTAL_FEE: u128 = 2 * FEE_PER_SIDE as u128;
+    const REINIT_SLOT: u64 = 10;
+    const RETIRE_SLOT: u64 = 11;
+    const ACTIVATE_SLOT: u64 = 12;
+
+    let config = MarketConfig {
+        initial_price: PRICE,
+        max_trading_fee_bps: STALE_TRADE_FEE_BPS,
+        actor_deposits: [1, 1, 1, 1, 1],
+        actor_token_balances: [20_001, 20_001, 10, 1, 1],
+        ..MarketConfig::default()
+    };
+    let mut env = V16Svm::new(seed, config);
+    let supply_before = env.token_supply_observed();
+    let old_market_id = env.primary_market_state().1.assets[0].market_id;
+    let retained_policy = env.build_retained_trade_fee_policy(STALE_TRADE_FEE_BPS);
+
+    publicly_recreate_primary_market(&mut env, config, REINIT_SLOT, "PR 296")?;
+    env.configure_auth_mark(false, 0, REINIT_SLOT, PRICE)
+        .map_err(|error| format!("PR 296 configure generation-B asset 0: {error}"))?;
+    let new_market_id = env.primary_market_state().1.assets[0].market_id;
+    env.update_market_init_fee_policy(1)
+        .map_err(|error| format!("PR 296 configure permissionless init fee: {error}"))?;
+    env.warp_to_slot(RETIRE_SLOT);
+    env.retire_asset(ASSET, RETIRE_SLOT)
+        .map_err(|error| format!("PR 296 retire generation-B asset slot: {error}"))?;
+    env.warp_to_slot(ACTIVATE_SLOT);
+    env.activate_permissionless_asset_with_actor_authorities(
+        ACTIVATION_PAYER,
+        ASSET,
+        ACTIVATE_SLOT,
+        PRICE,
+        ATTACKER,
+        ATTACKER,
+        ATTACKER,
+        ATTACKER,
+        1,
+    )
+    .map_err(|error| format!("PR 296 activate attacker-operated asset: {error}"))?;
+    for actor in [VICTIM, ATTACKER] {
+        env.fund_closed_primary_portfolio(actor, 1_000_000_000)
+            .map_err(|error| format!("PR 296 re-fund portfolio {actor}: {error}"))?;
+        env.reinitialize_primary_portfolio(actor)
+            .map_err(|error| format!("PR 296 initialize portfolio {actor}: {error}"))?;
+    }
+    if env.primary_market_state().0.trade_fee_base_bps != 0
+        || env.primary_market_state().1.c_tot != 0
+    {
+        return Err("PR 296 replacement market did not start empty and zero-fee".into());
+    }
+
+    let victim_deposit = env.build_retained_deposit(VICTIM, DEPOSIT);
+    let attacker_deposit = env.build_retained_deposit(ATTACKER, DEPOSIT);
+    let retained_trade = env.build_retained_no_cpi_trade(VICTIM, ATTACKER, ASSET, SIZE_Q, PRICE);
+    let mut max_cu = 0;
+    let replay_cu = if land_replay {
+        let replay = env
+            .land_retained(retained_policy)
+            .map_err(|error| format!("PR 296 stale trade-fee policy no longer lands: {error}"))?;
+        max_cu = max_cu.max(replay.compute_units);
+        replay.compute_units
+    } else {
+        0
+    };
+    let expected_policy = if land_replay { STALE_TRADE_FEE_BPS } else { 0 };
+    if env.primary_market_state().0.trade_fee_base_bps != expected_policy {
+        return Err(format!(
+            "PR 296 policy mismatch: replay={land_replay}, expected={expected_policy}, got={}",
+            env.primary_market_state().0.trade_fee_base_bps
+        ));
+    }
+    for (label, retained) in [("victim", victim_deposit), ("attacker", attacker_deposit)] {
+        let deposit = env
+            .land_retained(retained)
+            .map_err(|error| format!("PR 296 pre-signed {label} deposit rejected: {error}"))?;
+        max_cu = max_cu.max(deposit.compute_units);
+    }
+    let trade = env
+        .land_retained(retained_trade)
+        .map_err(|error| format!("PR 296 pre-signed zero-fee trade rejected: {error}"))?;
+    max_cu = max_cu.max(trade.compute_units);
+
+    let group_after_trade = env.primary_market_state().1;
+    let attacker_domain_fee = group_after_trade.insurance_domain_budget[ASSET as usize * 2]
+        .checked_add(group_after_trade.insurance_domain_budget[ASSET as usize * 2 + 1])
+        .ok_or("PR 296 attacker domain fee overflow")?;
+    let expected_domain_fee = if land_replay { TOTAL_FEE } else { 0 };
+    if attacker_domain_fee != expected_domain_fee {
+        return Err(format!(
+            "PR 296 fee mismatch: replay={land_replay}, fee={attacker_domain_fee}, \
+             expected={expected_domain_fee}"
+        ));
+    }
+
+    let victim_destination = env.actors[VICTIM].destination_token;
+    let attacker_destination = env.actors[ATTACKER].destination_token;
+    let victim_destination_before = env.token_amount(victim_destination);
+    let attacker_destination_before = env.token_amount(attacker_destination);
+    if land_replay {
+        let withdrawal = env
+            .withdraw_insurance_asset(ATTACKER, ASSET, TOTAL_FEE)
+            .map_err(|error| format!("PR 296 attacker fee withdrawal: {error}"))?;
+        max_cu = max_cu.max(withdrawal.compute_units);
+        let correction = env
+            .update_trade_fee_policy(0)
+            .map_err(|error| format!("PR 296 restore zero fee before neutral close: {error}"))?;
+        max_cu = max_cu.max(correction.compute_units);
+    }
+    let close = env
+        .trade_no_cpi(VICTIM, ATTACKER, ASSET, -SIZE_Q, PRICE, 0)
+        .map_err(|error| format!("PR 296 neutral close: {error}"))?;
+    max_cu = max_cu.max(close.compute_units);
+    for actor in [VICTIM, ATTACKER] {
+        let capital = env.primary_portfolio(actor).capital.get();
+        let withdrawal = env
+            .withdraw_primary(actor, capital)
+            .map_err(|error| format!("PR 296 terminal withdrawal for {actor}: {error}"))?;
+        max_cu = max_cu.max(withdrawal.compute_units);
+    }
+    let victim_return = env
+        .token_amount(victim_destination)
+        .checked_sub(victim_destination_before)
+        .ok_or("PR 296 victim destination decreased")?;
+    let attacker_return = env
+        .token_amount(attacker_destination)
+        .checked_sub(attacker_destination_before)
+        .ok_or("PR 296 attacker destination decreased")?;
+    let deposit_u64 = u64::try_from(DEPOSIT).map_err(|_| "PR 296 deposit exceeds u64")?;
+    let victim_loss = deposit_u64
+        .checked_sub(victim_return)
+        .ok_or("PR 296 victim returned more than deposited")?;
+    let attacker_profit = attacker_return
+        .checked_sub(deposit_u64)
+        .ok_or("PR 296 attacker did not recover its deposit")?;
+    let expected_loss = if land_replay { FEE_PER_SIDE } else { 0 };
+    if victim_loss != expected_loss
+        || attacker_profit != expected_loss
+        || env.token_supply_observed() != supply_before
+        || max_cu >= TX_CU_LIMIT
+    {
+        return Err(format!(
+            "PR 296 terminal mismatch: replay={land_replay}, victim={victim_loss}, \
+             attacker={attacker_profit}, max_cu={max_cu}, supply={}/{supply_before}",
+            env.token_supply_observed()
+        ));
+    }
+    Ok(TradeFeeMarketGenerationWorld {
+        old_market_id,
+        new_market_id,
+        victim_loss,
+        attacker_profit,
+        extracted_fee: u64::try_from(attacker_domain_fee)
+            .map_err(|_| "PR 296 extracted fee exceeds u64")?,
+        replay_cu,
+        trade_cu: trade.compute_units,
+        max_cu,
+    })
+}
+
+pub fn reproduce_trade_fee_market_generation_replay(
+    mut seed: [u8; 32],
+) -> Result<TradeFeeMarketGenerationReplayReproduction, String> {
+    seed[0] ^= 0x96;
+    let control = run_trade_fee_market_generation_world(seed, false)?;
+    let replay = run_trade_fee_market_generation_world(seed, true)?;
+    if control.old_market_id != replay.old_market_id
+        || control.new_market_id != replay.new_market_id
+        || control.victim_loss != 0
+        || control.attacker_profit != 0
+        || control.extracted_fee != 0
+        || replay.victim_loss != 1_000
+        || replay.attacker_profit != replay.victim_loss
+        || replay.extracted_fee != 2_000
+        || replay.replay_cu == 0
+        || replay.max_cu >= TX_CU_LIMIT
+    {
+        return Err(format!(
+            "PR 296 paired-world mismatch: control={control:?}, replay={replay:?}"
+        ));
+    }
+    Ok(TradeFeeMarketGenerationReplayReproduction {
+        blocker: KnownBlocker::TradeFeeMarketGenerationReplay,
+        old_market_id: replay.old_market_id,
+        new_market_id: replay.new_market_id,
+        victim_loss: replay.victim_loss,
+        attacker_profit: replay.attacker_profit,
+        extracted_fee: replay.extracted_fee,
+        replay_cu: replay.replay_cu,
+        trade_cu: replay.trade_cu,
+        max_cu: replay.max_cu.max(control.max_cu),
+    })
+}
+
+#[derive(Clone, Copy, Debug)]
 struct TradePortfolioIncarnationWorld {
     original_portfolio_id: u64,
     replacement_portfolio_id: u64,
@@ -14781,6 +15014,11 @@ pub fn matcher_grant_portfolio_incarnation_replay_seed_strategy() -> impl Strate
 
 #[allow(dead_code)]
 pub fn matcher_grant_market_generation_replay_seed_strategy() -> impl Strategy<Value = [u8; 32]> {
+    any::<[u8; 32]>()
+}
+
+#[allow(dead_code)]
+pub fn trade_fee_market_generation_replay_seed_strategy() -> impl Strategy<Value = [u8; 32]> {
     any::<[u8; 32]>()
 }
 
