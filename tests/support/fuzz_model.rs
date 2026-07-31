@@ -113,10 +113,11 @@ pub enum KnownBlocker {
     DelayedOracleIntentReplay,
     DelayedMatcherEnableReplay,
     BackingFeeConsentReplay,
+    AuthorityHandoffAbaReplay,
 }
 
 impl KnownBlocker {
-    pub const COUNT: usize = 57;
+    pub const COUNT: usize = 58;
 
     pub const fn index(self) -> usize {
         match self {
@@ -177,6 +178,7 @@ impl KnownBlocker {
             Self::DelayedOracleIntentReplay => 54,
             Self::DelayedMatcherEnableReplay => 55,
             Self::BackingFeeConsentReplay => 56,
+            Self::AuthorityHandoffAbaReplay => 57,
         }
     }
 }
@@ -297,6 +299,12 @@ pub enum DelayedOracleIntentPath {
 pub enum BackingFeeConsentOrder {
     FundedThenPolicy,
     PolicyThenTopUp,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AuthorityHandoffAbaPath {
+    Market,
+    AssetInsuranceOperator,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -785,6 +793,18 @@ pub struct BackingFeeConsentReplayReproduction {
     pub replay_cu: u64,
     pub trade_cu: u64,
     pub max_cu: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AuthorityHandoffAbaReplayReproduction {
+    pub blocker: KnownBlocker,
+    pub path: AuthorityHandoffAbaPath,
+    pub attacker_extraction: u64,
+    pub control_withdrawal_blocked: bool,
+    pub reserve_before: u128,
+    pub reserve_after: u128,
+    pub replay_cu: u64,
+    pub withdrawal_cu: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -7795,6 +7815,198 @@ pub fn reproduce_backing_fee_consent_replay(
     })
 }
 
+#[derive(Clone, Copy, Debug)]
+struct AuthorityHandoffAbaWorld {
+    attacker_extraction: u64,
+    control_withdrawal_blocked: bool,
+    reserve_before: u128,
+    reserve_after: u128,
+    replay_cu: u64,
+    withdrawal_cu: u64,
+}
+
+fn authority_aba_reserve(env: &V16Svm, path: AuthorityHandoffAbaPath) -> u128 {
+    let group = env.primary_market_state().1;
+    match path {
+        AuthorityHandoffAbaPath::Market => {
+            group.insurance_domain_budget[0] + group.insurance_domain_budget[1]
+        }
+        AuthorityHandoffAbaPath::AssetInsuranceOperator => group.insurance_domain_budget[2],
+    }
+}
+
+fn run_authority_handoff_aba_world(
+    seed: [u8; 32],
+    path: AuthorityHandoffAbaPath,
+    land_replay: bool,
+) -> Result<AuthorityHandoffAbaWorld, String> {
+    const ATTACKER: usize = 0;
+    const INTERIM: usize = 1;
+    const PROVIDER: usize = 2;
+    const ORIGINAL: usize = 3;
+    const ASSET: u16 = 1;
+    const AMOUNT: u128 = 50_000;
+
+    let mut env = V16Svm::new(
+        seed,
+        MarketConfig {
+            actor_deposits: [1, 1, 1, 1, 1],
+            ..MarketConfig::default()
+        },
+    );
+    let supply_before = env.token_supply_observed();
+    let retained = match path {
+        AuthorityHandoffAbaPath::Market => {
+            let retained = env.build_retained_market_authority_handoff_from_admin(ATTACKER);
+            env.update_market_authority_from_admin(INTERIM)
+                .map_err(|error| format!("PR 345 A-to-C handoff: {error}"))?;
+            env.update_market_authority_to_admin(INTERIM)
+                .map_err(|error| format!("PR 345 C-to-A handoff: {error}"))?;
+            env.top_up_insurance_domain(0, AMOUNT)
+                .map_err(|error| format!("PR 345 fresh base-insurance contribution: {error}"))?;
+            retained
+        }
+        AuthorityHandoffAbaPath::AssetInsuranceOperator => {
+            env.update_asset_authority_from_admin(
+                ASSET,
+                percolator_prog::processor::ASSET_AUTH_INSURANCE,
+                PROVIDER,
+            )
+            .map_err(|error| format!("PR 346 install independent provider: {error}"))?;
+            env.update_asset_authority_from_admin(
+                ASSET,
+                percolator_prog::processor::ASSET_AUTH_INSURANCE_OPERATOR,
+                ORIGINAL,
+            )
+            .map_err(|error| format!("PR 346 install original operator: {error}"))?;
+            env.burn_asset_admin(ASSET)
+                .map_err(|error| format!("PR 346 burn asset admin: {error}"))?;
+            if env.primary_profile(ASSET as usize).asset_admin != [0; 32] {
+                return Err("PR 346 asset admin remained live".into());
+            }
+            let retained = env.build_retained_asset_authority_handoff_between_actors(
+                ASSET,
+                percolator_prog::processor::ASSET_AUTH_INSURANCE_OPERATOR,
+                ORIGINAL,
+                ATTACKER,
+            );
+            env.update_asset_authority_between_actors(
+                ASSET,
+                percolator_prog::processor::ASSET_AUTH_INSURANCE_OPERATOR,
+                ORIGINAL,
+                INTERIM,
+            )
+            .map_err(|error| format!("PR 346 A-to-C handoff: {error}"))?;
+            env.update_asset_authority_between_actors(
+                ASSET,
+                percolator_prog::processor::ASSET_AUTH_INSURANCE_OPERATOR,
+                INTERIM,
+                ORIGINAL,
+            )
+            .map_err(|error| format!("PR 346 C-to-A handoff: {error}"))?;
+            env.top_up_insurance_domain_for_actor(PROVIDER, 2, AMOUNT)
+                .map_err(|error| format!("PR 346 independent provider contribution: {error}"))?;
+            retained
+        }
+    };
+    let reserve_before = authority_aba_reserve(&env, path);
+    if reserve_before != AMOUNT {
+        return Err(format!(
+            "PR 345/346 {path:?} reserve {reserve_before}, expected {AMOUNT}"
+        ));
+    }
+    let destination = env.actors[ATTACKER].destination_token;
+    let destination_before = env.token_amount(destination);
+    let (control_withdrawal_blocked, replay_cu, withdrawal_cu) = if land_replay {
+        let replay = env
+            .land_retained(retained)
+            .map_err(|error| format!("PR 345/346 {path:?} retained handoff: {error}"))?;
+        let withdrawal = env
+            .withdraw_insurance_asset(
+                ATTACKER,
+                match path {
+                    AuthorityHandoffAbaPath::Market => 0,
+                    AuthorityHandoffAbaPath::AssetInsuranceOperator => ASSET,
+                },
+                AMOUNT,
+            )
+            .map_err(|error| format!("PR 345/346 {path:?} attacker withdrawal: {error}"))?;
+        (false, replay.compute_units, withdrawal.compute_units)
+    } else {
+        let blocked = env
+            .withdraw_insurance_asset(
+                ATTACKER,
+                match path {
+                    AuthorityHandoffAbaPath::Market => 0,
+                    AuthorityHandoffAbaPath::AssetInsuranceOperator => ASSET,
+                },
+                AMOUNT,
+            )
+            .is_err();
+        if !blocked {
+            return Err(format!(
+                "PR 345/346 {path:?} control attacker withdrawal succeeded"
+            ));
+        }
+        (true, 0, 0)
+    };
+    let attacker_extraction = env
+        .token_amount(destination)
+        .checked_sub(destination_before)
+        .ok_or("PR 345/346 attacker destination decreased")?;
+    let reserve_after = authority_aba_reserve(&env, path);
+    if env.token_supply_observed() != supply_before {
+        return Err(format!(
+            "PR 345/346 {path:?} changed SPL supply: {}/{}",
+            env.token_supply_observed(),
+            supply_before
+        ));
+    }
+    Ok(AuthorityHandoffAbaWorld {
+        attacker_extraction,
+        control_withdrawal_blocked,
+        reserve_before,
+        reserve_after,
+        replay_cu,
+        withdrawal_cu,
+    })
+}
+
+pub fn reproduce_authority_handoff_aba_replay(
+    mut seed: [u8; 32],
+    path: AuthorityHandoffAbaPath,
+) -> Result<AuthorityHandoffAbaReplayReproduction, String> {
+    seed[0] ^= match path {
+        AuthorityHandoffAbaPath::Market => 0x45,
+        AuthorityHandoffAbaPath::AssetInsuranceOperator => 0x46,
+    };
+    let control = run_authority_handoff_aba_world(seed, path, false)?;
+    let replay = run_authority_handoff_aba_world(seed, path, true)?;
+    if !control.control_withdrawal_blocked
+        || control.attacker_extraction != 0
+        || control.reserve_after != 50_000
+        || replay.attacker_extraction != 50_000
+        || replay.reserve_after != 0
+        || replay.replay_cu == 0
+        || replay.withdrawal_cu == 0
+        || control.reserve_before != replay.reserve_before
+    {
+        return Err(format!(
+            "PR 345/346 {path:?} paired-world mismatch: control={control:?}, replay={replay:?}"
+        ));
+    }
+    Ok(AuthorityHandoffAbaReplayReproduction {
+        blocker: KnownBlocker::AuthorityHandoffAbaReplay,
+        path,
+        attacker_extraction: replay.attacker_extraction,
+        control_withdrawal_blocked: control.control_withdrawal_blocked,
+        reserve_before: replay.reserve_before,
+        reserve_after: replay.reserve_after,
+        replay_cu: replay.replay_cu,
+        withdrawal_cu: replay.withdrawal_cu,
+    })
+}
+
 pub fn reproduce_fee_redirect_generation_replay(
     seed: [u8; 32],
 ) -> Result<FeeRedirectGenerationReplayReproduction, String> {
@@ -12848,6 +13060,18 @@ pub fn backing_fee_consent_replay_strategy(
         prop::sample::select(vec![
             BackingFeeConsentOrder::FundedThenPolicy,
             BackingFeeConsentOrder::PolicyThenTopUp,
+        ]),
+    )
+}
+
+#[allow(dead_code)]
+pub fn authority_handoff_aba_replay_strategy(
+) -> impl Strategy<Value = ([u8; 32], AuthorityHandoffAbaPath)> {
+    (
+        any::<[u8; 32]>(),
+        prop::sample::select(vec![
+            AuthorityHandoffAbaPath::Market,
+            AuthorityHandoffAbaPath::AssetInsuranceOperator,
         ]),
     )
 }

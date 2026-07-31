@@ -50,6 +50,7 @@ pub enum BlockerAdapter {
     Pr335DelayedOracleIntentReplay,
     Pr334DelayedMatcherEnableReplay,
     Pr339BackingFeeConsentReplay,
+    AuthorityHandoffAbaReplayFamily,
     Pr317FeeRedirectGenerationReplay,
     Pr318BackingFeeGenerationReplay,
     Pr362ActivationRetryReplay,
@@ -110,6 +111,7 @@ impl BlockerAdapter {
             Self::Pr335DelayedOracleIntentReplay => 335,
             Self::Pr334DelayedMatcherEnableReplay => 334,
             Self::Pr339BackingFeeConsentReplay => 339,
+            Self::AuthorityHandoffAbaReplayFamily => 345,
             Self::Pr317FeeRedirectGenerationReplay => 317,
             Self::Pr318BackingFeeGenerationReplay => 318,
             Self::Pr362ActivationRetryReplay => 362,
@@ -144,6 +146,7 @@ impl BlockerAdapter {
             Self::TargetStaging => matches!(pr, 264 | 265 | 332 | 333),
             Self::Pr279CollateralTopUpGenerationReplay => pr == 279 || pr == 320,
             Self::OracleGenerationReplayFamily => matches!(pr, 275 | 277 | 322),
+            Self::AuthorityHandoffAbaReplayFamily => pr == 345 || pr == 346,
             _ => self.canonical_pr() == pr,
         }
     }
@@ -509,8 +512,18 @@ pub const OPEN_LOFS: &[OpenLof] = &[
         ReplayIncarnation,
         BlockerAdapter::Pr344InsuranceTopUpRetryReplay,
     ),
-    OpenLof::missing(345, Blocker, ReplayIncarnation),
-    OpenLof::missing(346, Blocker, ReplayIncarnation),
+    OpenLof::quarantined(
+        345,
+        Blocker,
+        ReplayIncarnation,
+        BlockerAdapter::AuthorityHandoffAbaReplayFamily,
+    ),
+    OpenLof::quarantined(
+        346,
+        Blocker,
+        ReplayIncarnation,
+        BlockerAdapter::AuthorityHandoffAbaReplayFamily,
+    ),
     OpenLof::missing(347, Blocker, ReplayIncarnation),
     OpenLof::quarantined(
         349,

@@ -4,14 +4,15 @@ use proptest::prelude::*;
 use support::fuzz_model::{
     activation_fee_consent_seed_strategy, activation_retry_replay_seed_strategy,
     asset_generation_config_replay_strategy, asset_generation_mark_replay_strategy,
-    asset_generation_replay_strategy, backing_fee_consent_replay_strategy,
-    backing_fee_generation_replay_seed_strategy, backing_top_up_generation_replay_seed_strategy,
-    backing_top_up_retry_replay_seed_strategy, bilateral_base_fee_consent_strategy,
-    bilateral_fee_support_strategy, collateral_top_up_generation_replay_seed_strategy,
-    composite_rounding_strategy, composite_time_skew_seed_strategy, cpi_backing_fee_seed_strategy,
-    cpi_caller_fee_strategy, cross_domain_b_settlement_seed_strategy,
-    cross_domain_backing_seed_strategy, cross_margin_insurance_drain_seed_strategy,
-    delayed_asset_authority_revival_seed_strategy, delayed_backing_fee_policy_replay_seed_strategy,
+    asset_generation_replay_strategy, authority_handoff_aba_replay_strategy,
+    backing_fee_consent_replay_strategy, backing_fee_generation_replay_seed_strategy,
+    backing_top_up_generation_replay_seed_strategy, backing_top_up_retry_replay_seed_strategy,
+    bilateral_base_fee_consent_strategy, bilateral_fee_support_strategy,
+    collateral_top_up_generation_replay_seed_strategy, composite_rounding_strategy,
+    composite_time_skew_seed_strategy, cpi_backing_fee_seed_strategy, cpi_caller_fee_strategy,
+    cross_domain_b_settlement_seed_strategy, cross_domain_backing_seed_strategy,
+    cross_margin_insurance_drain_seed_strategy, delayed_asset_authority_revival_seed_strategy,
+    delayed_backing_fee_policy_replay_seed_strategy,
     delayed_fee_redirect_policy_replay_seed_strategy,
     delayed_liquidation_policy_replay_seed_strategy,
     delayed_maintenance_policy_replay_seed_strategy, delayed_matcher_enable_replay_seed_strategy,
@@ -29,21 +30,21 @@ use support::fuzz_model::{
     rebalance_funding_erasure_seed_strategy, reclaimable_ewma_fee_strategy,
     reproduce_activation_fee_consent, reproduce_activation_retry_replay,
     reproduce_asset_generation_config_replay, reproduce_asset_generation_mark_replay,
-    reproduce_asset_generation_trade_replay, reproduce_backing_fee_consent_replay,
-    reproduce_backing_fee_generation_replay, reproduce_backing_top_up_generation_replay,
-    reproduce_backing_top_up_retry_replay, reproduce_bilateral_base_fee_consent,
-    reproduce_bilateral_fee_support, reproduce_collateral_top_up_generation_replay,
-    reproduce_composite_oracle_rounding, reproduce_composite_oracle_time_skew,
-    reproduce_cpi_backing_fee_siphon, reproduce_cpi_caller_fee_siphon,
-    reproduce_cross_domain_b_settlement, reproduce_cross_domain_backing_double_spend,
-    reproduce_cross_margin_insurance_drain, reproduce_delayed_asset_authority_revival,
-    reproduce_delayed_backing_fee_policy_replay, reproduce_delayed_fee_redirect_policy_replay,
-    reproduce_delayed_liquidation_policy_replay, reproduce_delayed_maintenance_policy_replay,
-    reproduce_delayed_matcher_enable_replay, reproduce_delayed_oracle_intent_replay,
-    reproduce_delayed_trade_fee_policy_replay, reproduce_deposit_retry_replay,
-    reproduce_fee_redirect_generation_replay, reproduce_forfeit_funding_erasure,
-    reproduce_fractional_cap_settlement, reproduce_insurance_top_up_retry_replay,
-    reproduce_insurance_withdrawal_generation_replay,
+    reproduce_asset_generation_trade_replay, reproduce_authority_handoff_aba_replay,
+    reproduce_backing_fee_consent_replay, reproduce_backing_fee_generation_replay,
+    reproduce_backing_top_up_generation_replay, reproduce_backing_top_up_retry_replay,
+    reproduce_bilateral_base_fee_consent, reproduce_bilateral_fee_support,
+    reproduce_collateral_top_up_generation_replay, reproduce_composite_oracle_rounding,
+    reproduce_composite_oracle_time_skew, reproduce_cpi_backing_fee_siphon,
+    reproduce_cpi_caller_fee_siphon, reproduce_cross_domain_b_settlement,
+    reproduce_cross_domain_backing_double_spend, reproduce_cross_margin_insurance_drain,
+    reproduce_delayed_asset_authority_revival, reproduce_delayed_backing_fee_policy_replay,
+    reproduce_delayed_fee_redirect_policy_replay, reproduce_delayed_liquidation_policy_replay,
+    reproduce_delayed_maintenance_policy_replay, reproduce_delayed_matcher_enable_replay,
+    reproduce_delayed_oracle_intent_replay, reproduce_delayed_trade_fee_policy_replay,
+    reproduce_deposit_retry_replay, reproduce_fee_redirect_generation_replay,
+    reproduce_forfeit_funding_erasure, reproduce_fractional_cap_settlement,
+    reproduce_insurance_top_up_retry_replay, reproduce_insurance_withdrawal_generation_replay,
     reproduce_liquidation_policy_generation_replay, reproduce_maintenance_policy_generation_replay,
     reproduce_market_incarnation_deposit, reproduce_omitted_rescue_liquidation,
     reproduce_pending_ewma_inheritance, reproduce_pending_ewma_target_override,
@@ -556,6 +557,20 @@ proptest! {
             result.is_ok(),
             "PR 339 {:?} no longer reproduces for seed {:?}: {}",
             order,
+            seed,
+            result.unwrap_err()
+        );
+    }
+
+    #[test]
+    fn v16_program_pr345_pr346_authority_handoff_aba_replay_fuzz(
+        (seed, path) in authority_handoff_aba_replay_strategy()
+    ) {
+        let result = reproduce_authority_handoff_aba_replay(seed, path);
+        prop_assert!(
+            result.is_ok(),
+            "PR 345/346 {:?} no longer reproduces for seed {:?}: {}",
+            path,
             seed,
             result.unwrap_err()
         );

@@ -1810,6 +1810,35 @@ impl V16Svm {
         self.send_asset_authority_handoff(asset_index, kind, current, incoming)
     }
 
+    pub fn update_asset_authority_between_actors(
+        &mut self,
+        asset_index: u16,
+        kind: u8,
+        current_actor_index: usize,
+        incoming_actor_index: usize,
+    ) -> Result<TxSuccess, String> {
+        let current = copy_keypair(&self.actors[current_actor_index].signer);
+        let incoming = copy_keypair(&self.actors[incoming_actor_index].signer);
+        self.send_asset_authority_handoff(asset_index, kind, current, incoming)
+    }
+
+    pub fn burn_asset_admin(&mut self, asset_index: u16) -> Result<TxSuccess, String> {
+        let current = copy_keypair(&self.admin);
+        self.send_program(
+            ProgInstruction::UpdateAssetAuthority {
+                asset_index,
+                kind: percolator_prog::processor::ASSET_AUTH_ADMIN,
+                new_pubkey: [0; 32],
+            },
+            vec![
+                AccountMeta::new(current.pubkey(), true),
+                AccountMeta::new_readonly(Pubkey::default(), false),
+                AccountMeta::new(self.market, false),
+            ],
+            &[current],
+        )
+    }
+
     fn send_asset_authority_handoff(
         &mut self,
         asset_index: u16,
@@ -2429,6 +2458,85 @@ impl V16Svm {
             ProgInstruction::UpdateAssetAuthority {
                 asset_index,
                 kind,
+                new_pubkey: incoming.pubkey().to_bytes(),
+            },
+            vec![
+                AccountMeta::new(current.pubkey(), true),
+                AccountMeta::new(incoming.pubkey(), true),
+                AccountMeta::new(self.market, false),
+            ],
+            &[current, incoming],
+        )
+    }
+
+    pub fn build_retained_asset_authority_handoff_between_actors(
+        &mut self,
+        asset_index: u16,
+        kind: u8,
+        current_actor_index: usize,
+        incoming_actor_index: usize,
+    ) -> Transaction {
+        let current = copy_keypair(&self.actors[current_actor_index].signer);
+        let incoming = copy_keypair(&self.actors[incoming_actor_index].signer);
+        self.build_program_transaction(
+            ProgInstruction::UpdateAssetAuthority {
+                asset_index,
+                kind,
+                new_pubkey: incoming.pubkey().to_bytes(),
+            },
+            vec![
+                AccountMeta::new(current.pubkey(), true),
+                AccountMeta::new(incoming.pubkey(), true),
+                AccountMeta::new(self.market, false),
+            ],
+            &[current, incoming],
+        )
+    }
+
+    pub fn build_retained_market_authority_handoff_from_admin(
+        &mut self,
+        new_actor_index: usize,
+    ) -> Transaction {
+        let current = copy_keypair(&self.admin);
+        let incoming = copy_keypair(&self.actors[new_actor_index].signer);
+        self.build_program_transaction(
+            ProgInstruction::UpdateAuthority {
+                new_pubkey: incoming.pubkey().to_bytes(),
+            },
+            vec![
+                AccountMeta::new(current.pubkey(), true),
+                AccountMeta::new(incoming.pubkey(), true),
+                AccountMeta::new(self.market, false),
+            ],
+            &[current, incoming],
+        )
+    }
+
+    pub fn update_market_authority_from_admin(
+        &mut self,
+        new_actor_index: usize,
+    ) -> Result<TxSuccess, String> {
+        let current = copy_keypair(&self.admin);
+        let incoming = copy_keypair(&self.actors[new_actor_index].signer);
+        self.send_market_authority_handoff(current, incoming)
+    }
+
+    pub fn update_market_authority_to_admin(
+        &mut self,
+        current_actor_index: usize,
+    ) -> Result<TxSuccess, String> {
+        let current = copy_keypair(&self.actors[current_actor_index].signer);
+        let incoming = copy_keypair(&self.admin);
+        self.send_market_authority_handoff(current, incoming)
+    }
+
+    fn send_market_authority_handoff(
+        &mut self,
+        current: Keypair,
+        incoming: Keypair,
+    ) -> Result<TxSuccess, String> {
+        self.send_program(
+            ProgInstruction::UpdateAuthority {
                 new_pubkey: incoming.pubkey().to_bytes(),
             },
             vec![
