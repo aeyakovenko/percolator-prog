@@ -1310,6 +1310,28 @@ impl V16Svm {
         )
     }
 
+    pub fn build_retained_backing_fee_policy_for_actor(
+        &mut self,
+        actor_index: usize,
+        domain: u16,
+        fee_bps: u16,
+        insurance_share_bps: u16,
+    ) -> Transaction {
+        let authority = copy_keypair(&self.actors[actor_index].signer);
+        self.build_program_transaction(
+            ProgInstruction::UpdateBackingFeePolicy {
+                domain,
+                fee_bps,
+                insurance_share_bps,
+            },
+            vec![
+                AccountMeta::new(authority.pubkey(), true),
+                AccountMeta::new(self.market, false),
+            ],
+            &[authority],
+        )
+    }
+
     pub fn update_market_init_fee_policy(
         &mut self,
         min_init_fee: u128,

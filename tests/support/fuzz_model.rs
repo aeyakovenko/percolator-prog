@@ -103,10 +103,11 @@ pub enum KnownBlocker {
     BilateralBaseFeeConsent,
     MaintenancePolicyGenerationReplay,
     FeeRedirectGenerationReplay,
+    BackingFeeGenerationReplay,
 }
 
 impl KnownBlocker {
-    pub const COUNT: usize = 47;
+    pub const COUNT: usize = 48;
 
     pub const fn index(self) -> usize {
         match self {
@@ -157,6 +158,7 @@ impl KnownBlocker {
             Self::BilateralBaseFeeConsent => 44,
             Self::MaintenancePolicyGenerationReplay => 45,
             Self::FeeRedirectGenerationReplay => 46,
+            Self::BackingFeeGenerationReplay => 47,
         }
     }
 }
@@ -655,6 +657,19 @@ pub struct FeeRedirectGenerationReplayReproduction {
     pub victim_loss: u64,
     pub attacker_profit: u64,
     pub redirected_fee: u128,
+    pub replay_cu: u64,
+    pub trade_cu: u64,
+    pub withdrawal_cu: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BackingFeeGenerationReplayReproduction {
+    pub blocker: KnownBlocker,
+    pub old_market_id: u64,
+    pub new_market_id: u64,
+    pub victim_loss: u64,
+    pub attacker_extraction: u64,
+    pub backing_earnings: u128,
     pub replay_cu: u64,
     pub trade_cu: u64,
     pub withdrawal_cu: u64,
@@ -6132,6 +6147,194 @@ pub fn reproduce_fee_redirect_generation_replay(
     })
 }
 
+pub fn reproduce_backing_fee_generation_replay(
+    seed: [u8; 32],
+) -> Result<BackingFeeGenerationReplayReproduction, String> {
+    const VICTIM: usize = 0;
+    const ATTACKER: usize = 1;
+    const OLD_POLICY_AUTHORITY: usize = 2;
+    const ACTIVATION_PAYER: usize = 3;
+    const ASSET: u16 = 1;
+    const WINNING_DOMAIN: u16 = ASSET * 2 + 1;
+    const INITIAL_PRICE: u64 = 100;
+    const ASSET_WIN_MARK: u64 = 105;
+    const BASE_LOSS_MARK: u64 = 95;
+    const ASSET_SIZE_Q: i128 = 2_000 * POS_SCALE as i128;
+    const BASE_SIZE_Q: i128 = 1_000 * POS_SCALE as i128;
+    const SAFE_INCREASE_Q: i128 = 100 * POS_SCALE as i128;
+    const VICTIM_DEPOSIT: u128 = 31_300;
+    const ATTACKER_DEPOSIT: u128 = 100_000;
+    const BACKING_PRINCIPAL: u128 = 15_000;
+    const FORCED_FEE_BPS: u16 = 5_000;
+    const EXPECTED_FEE: u64 = 75;
+
+    let config = MarketConfig {
+        initial_price: INITIAL_PRICE,
+        maintenance_margin_bps: 1_000,
+        initial_margin_bps: 1_000,
+        max_price_move_bps_per_slot: 500,
+        max_accrual_dt_slots: 1,
+        min_funding_lifetime_slots: 1,
+        actor_deposits: [VICTIM_DEPOSIT, ATTACKER_DEPOSIT, 1, 1, 1],
+        ..MarketConfig::default()
+    };
+    let mut env = V16Svm::new(seed, config);
+    let supply_before = env.token_supply_observed();
+    env.update_asset_authority_from_admin(
+        ASSET,
+        percolator_prog::processor::ASSET_AUTH_INSURANCE,
+        OLD_POLICY_AUTHORITY,
+    )
+    .map_err(|error| format!("PR 318 install generation-A policy authority: {error}"))?;
+    let old_market_id = env.primary_market_state().1.assets[ASSET as usize].market_id;
+    let retained_policy = env.build_retained_backing_fee_policy_for_actor(
+        OLD_POLICY_AUTHORITY,
+        WINNING_DOMAIN,
+        FORCED_FEE_BPS,
+        0,
+    );
+
+    env.update_market_init_fee_policy(1)
+        .map_err(|error| format!("PR 318 configure permissionless init fee: {error}"))?;
+    env.warp_to_slot(2);
+    env.retire_asset(ASSET, 2)
+        .map_err(|error| format!("PR 318 retire generation-A asset: {error}"))?;
+    env.warp_to_slot(3);
+    env.activate_permissionless_asset_with_actor_authorities(
+        ACTIVATION_PAYER,
+        ASSET,
+        3,
+        INITIAL_PRICE,
+        OLD_POLICY_AUTHORITY,
+        ATTACKER,
+        ATTACKER,
+        ATTACKER,
+        1,
+    )
+    .map_err(|error| format!("PR 318 activate attacker-backed replacement: {error}"))?;
+    let new_market_id = env.primary_market_state().1.assets[ASSET as usize].market_id;
+    if new_market_id == old_market_id {
+        return Err(format!(
+            "PR 318 replacement reused asset market ID {old_market_id}"
+        ));
+    }
+    env.configure_auth_mark(false, 0, 3, INITIAL_PRICE)
+        .map_err(|error| format!("PR 318 configure base AuthMark: {error}"))?;
+    env.configure_auth_mark_for_actor(ATTACKER, ASSET, 3, INITIAL_PRICE)
+        .map_err(|error| format!("PR 318 configure replacement AuthMark: {error}"))?;
+    env.top_up_backing_bucket_for_actor(ATTACKER, WINNING_DOMAIN, BACKING_PRINCIPAL, 100)
+        .map_err(|error| format!("PR 318 fund replacement backing: {error}"))?;
+
+    env.trade_no_cpi(VICTIM, ATTACKER, ASSET, ASSET_SIZE_Q, INITIAL_PRICE, 0)
+        .map_err(|error| format!("PR 318 establish source-backed winning leg: {error}"))?;
+    env.trade_no_cpi(VICTIM, ATTACKER, 0, BASE_SIZE_Q, INITIAL_PRICE, 0)
+        .map_err(|error| format!("PR 318 establish offsetting losing leg: {error}"))?;
+
+    env.warp_to_slot(4);
+    env.push_auth_mark_for_actor(ATTACKER, ASSET, 4, ASSET_WIN_MARK)
+        .map_err(|error| format!("PR 318 push replacement winning mark: {error}"))?;
+    env.push_auth_mark(0, 4, BASE_LOSS_MARK)
+        .map_err(|error| format!("PR 318 push base losing mark: {error}"))?;
+    for (actor, asset_index) in [(ATTACKER, ASSET), (VICTIM, ASSET), (ATTACKER, 0)] {
+        let oracle_accounts = env.primary_profile(asset_index as usize).oracle_leg_count;
+        env.crank(
+            actor,
+            4,
+            vec![CrankObservationHint {
+                asset_index,
+                oracle_accounts,
+            }],
+        )
+        .map_err(|error| format!("PR 318 crank actor {actor} asset {asset_index}: {error}"))?;
+    }
+    if env.primary_portfolio(VICTIM).pnl.get() != 10_000 {
+        return Err(format!(
+            "PR 318 victim source-backed claim mismatch: {}",
+            env.primary_portfolio(VICTIM).pnl.get()
+        ));
+    }
+
+    let retained_trade =
+        env.build_retained_no_cpi_trade(VICTIM, ATTACKER, 0, SAFE_INCREASE_Q, BASE_LOSS_MARK);
+    let victim_capital_before = env.primary_portfolio(VICTIM).capital.get();
+    let attacker_capital_before = env.primary_portfolio(ATTACKER).capital.get();
+    let earnings_before = env.primary_market_state().1.source_backing_buckets
+        [WINNING_DOMAIN as usize]
+        .utilization_fee_earnings;
+
+    let replay = env
+        .land_retained(retained_policy)
+        .map_err(|error| format!("PR 318 stale backing policy no longer lands: {error}"))?;
+    let replacement_profile = env.primary_profile(ASSET as usize);
+    if replacement_profile.backing_trade_fee_bps_short != FORCED_FEE_BPS
+        || replacement_profile.backing_trade_fee_insurance_share_bps_short != 0
+    {
+        return Err("PR 318 stale policy did not mutate the replacement fee".into());
+    }
+
+    let trade = env
+        .land_retained(retained_trade)
+        .map_err(|error| format!("PR 318 victim pre-signed trade rejected: {error}"))?;
+    let victim_loss = victim_capital_before
+        .checked_sub(env.primary_portfolio(VICTIM).capital.get())
+        .ok_or("PR 318 victim capital increased")?;
+    let attacker_capital_after = env.primary_portfolio(ATTACKER).capital.get();
+    let earnings_after = env.primary_market_state().1.source_backing_buckets
+        [WINNING_DOMAIN as usize]
+        .utilization_fee_earnings;
+    let backing_earnings = earnings_after
+        .checked_sub(earnings_before)
+        .ok_or("PR 318 backing earnings decreased")?;
+    if victim_loss != EXPECTED_FEE as u128
+        || backing_earnings != victim_loss
+        || attacker_capital_after != attacker_capital_before
+    {
+        return Err(format!(
+            "PR 318 stale fee transfer mismatch: victim={victim_loss}, \
+             earnings={backing_earnings}, attacker_capital={attacker_capital_before}/\
+             {attacker_capital_after}"
+        ));
+    }
+
+    let attacker_destination = env.actors[ATTACKER].destination_token;
+    let destination_before = env.token_amount(attacker_destination);
+    let withdrawal = env
+        .withdraw_backing_bucket_earnings_for_actor(ATTACKER, WINNING_DOMAIN, backing_earnings)
+        .map_err(|error| format!("PR 318 attacker could not withdraw victim fee: {error}"))?;
+    let attacker_extraction = env
+        .token_amount(attacker_destination)
+        .checked_sub(destination_before)
+        .ok_or("PR 318 attacker destination decreased")?;
+    let max_cu = replay
+        .compute_units
+        .max(trade.compute_units)
+        .max(withdrawal.compute_units);
+    if attacker_extraction != EXPECTED_FEE
+        || u128::from(attacker_extraction) != victim_loss
+        || max_cu >= TX_CU_LIMIT
+        || env.token_supply_observed() != supply_before
+    {
+        return Err(format!(
+            "PR 318 public extraction mismatch: victim={victim_loss}, \
+             extraction={attacker_extraction}, max_cu={max_cu}, supply={}/{}",
+            env.token_supply_observed(),
+            supply_before
+        ));
+    }
+
+    Ok(BackingFeeGenerationReplayReproduction {
+        blocker: KnownBlocker::BackingFeeGenerationReplay,
+        old_market_id,
+        new_market_id,
+        victim_loss: victim_loss as u64,
+        attacker_extraction,
+        backing_earnings,
+        replay_cu: replay.compute_units,
+        trade_cu: trade.compute_units,
+        withdrawal_cu: withdrawal.compute_units,
+    })
+}
+
 #[derive(Clone, Copy, Debug)]
 struct BackingTopUpRetryWorld {
     provider_loss: u64,
@@ -10601,6 +10804,11 @@ pub fn maintenance_policy_generation_replay_seed_strategy() -> impl Strategy<Val
 
 #[allow(dead_code)]
 pub fn fee_redirect_generation_replay_seed_strategy() -> impl Strategy<Value = [u8; 32]> {
+    any::<[u8; 32]>()
+}
+
+#[allow(dead_code)]
+pub fn backing_fee_generation_replay_seed_strategy() -> impl Strategy<Value = [u8; 32]> {
     any::<[u8; 32]>()
 }
 
