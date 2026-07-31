@@ -26,6 +26,12 @@ pub enum TradeRoute {
     BatchCpi,
 }
 
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum PortfolioIncarnationTradeSide {
+    AccountA,
+    AccountB,
+}
+
 impl TradeRoute {
     fn index(self) -> usize {
         match self {
@@ -118,10 +124,11 @@ pub enum KnownBlocker {
     ResolveAuthorityIncarnationReplay,
     PortfolioCloseIncarnationReplay,
     MatcherGrantPortfolioIncarnationReplay,
+    TradePortfolioIncarnationReplay,
 }
 
 impl KnownBlocker {
-    pub const COUNT: usize = 62;
+    pub const COUNT: usize = 63;
 
     pub const fn index(self) -> usize {
         match self {
@@ -187,6 +194,7 @@ impl KnownBlocker {
             Self::ResolveAuthorityIncarnationReplay => 59,
             Self::PortfolioCloseIncarnationReplay => 60,
             Self::MatcherGrantPortfolioIncarnationReplay => 61,
+            Self::TradePortfolioIncarnationReplay => 62,
         }
     }
 }
@@ -854,6 +862,21 @@ pub struct MatcherGrantPortfolioIncarnationReplayReproduction {
     pub original_portfolio_id: u64,
     pub replacement_portfolio_id: u64,
     pub control_trade_blocked: bool,
+    pub liquidation_slot: u64,
+    pub cranker_reward: u128,
+    pub extracted_reward: u64,
+    pub replay_cu: u64,
+    pub max_cu: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TradePortfolioIncarnationReplayReproduction {
+    pub blocker: KnownBlocker,
+    pub route: TradeRoute,
+    pub replacement_side: PortfolioIncarnationTradeSide,
+    pub original_portfolio_id: u64,
+    pub replacement_portfolio_id: u64,
+    pub control_position_q: i128,
     pub liquidation_slot: u64,
     pub cranker_reward: u128,
     pub extracted_reward: u64,
@@ -8743,6 +8766,237 @@ pub fn reproduce_matcher_grant_portfolio_incarnation_replay(
     })
 }
 
+#[derive(Clone, Copy, Debug)]
+struct TradePortfolioIncarnationWorld {
+    original_portfolio_id: u64,
+    replacement_portfolio_id: u64,
+    position_after_landing_q: i128,
+    liquidation_slot: u64,
+    cranker_reward: u128,
+    extracted_reward: u64,
+    replay_cu: u64,
+    max_cu: u64,
+}
+
+fn run_trade_portfolio_incarnation_world(
+    seed: [u8; 32],
+    route: TradeRoute,
+    replacement_side: PortfolioIncarnationTradeSide,
+    land_replay: bool,
+) -> Result<TradePortfolioIncarnationWorld, String> {
+    const COUNTERPARTY: usize = 0;
+    const VICTIM: usize = 1;
+    const CRANKER: usize = 2;
+    const PRICE: u64 = 1_000_000;
+    const REPLACEMENT_CAPITAL: u128 = 100_000;
+    const POSITION_Q: i128 = POS_SCALE as i128;
+
+    let mut env = V16Svm::new(
+        seed,
+        MarketConfig {
+            initial_price: PRICE,
+            h_max: 6_480_000,
+            min_nonzero_mm_req: 599,
+            min_nonzero_im_req: 600,
+            maintenance_margin_bps: 500,
+            initial_margin_bps: 500,
+            liquidation_fee_bps: 5,
+            liquidation_fee_cap: percolator::MAX_PROTOCOL_FEE_ABS,
+            max_price_move_bps_per_slot: 24,
+            max_accrual_dt_slots: 20,
+            max_abs_funding_e9_per_slot: 1_000,
+            min_funding_lifetime_slots: 10_000_000,
+            actor_deposits: [100_000_000, 1, 1_000, 1, 1],
+            actor_token_balances: [101_000_000, 200_000, 10_000, 10, 10],
+            ..MarketConfig::default()
+        },
+    );
+    let supply_before = env.token_supply_observed();
+    env.update_liquidation_fee_policy(10_000)
+        .map_err(|error| format!("PR 303 configure cranker reward: {error}"))?;
+
+    let original_portfolio_id = env.primary_portfolio_id(VICTIM);
+    let (taker, maker, size_q) = match replacement_side {
+        PortfolioIncarnationTradeSide::AccountA => (VICTIM, COUNTERPARTY, -POSITION_Q),
+        PortfolioIncarnationTradeSide::AccountB => (COUNTERPARTY, VICTIM, POSITION_Q),
+    };
+    let retained = build_retained_trade(&mut env, route, taker, maker, 0, size_q, PRICE, 0);
+    env.set_matcher_config(VICTIM, 0)
+        .map_err(|error| format!("PR 303 disable incarnation-A matcher: {error}"))?;
+    env.withdraw_primary(VICTIM, 1)
+        .map_err(|error| format!("PR 303 empty incarnation A: {error}"))?;
+    env.close_primary_portfolio(VICTIM)
+        .map_err(|error| format!("PR 303 close incarnation A: {error}"))?;
+    env.fund_closed_primary_portfolio(VICTIM, 1_000_000_000)
+        .map_err(|error| format!("PR 303 fund replacement account: {error}"))?;
+    env.reinitialize_primary_portfolio(VICTIM)
+        .map_err(|error| format!("PR 303 initialize incarnation B: {error}"))?;
+    let replacement_portfolio_id = env.primary_portfolio_id(VICTIM);
+    if replacement_portfolio_id <= original_portfolio_id {
+        return Err(format!(
+            "PR 303 portfolio ID did not advance: {original_portfolio_id}->{replacement_portfolio_id}"
+        ));
+    }
+    env.deposit_primary(VICTIM, REPLACEMENT_CAPITAL)
+        .map_err(|error| format!("PR 303 fund incarnation B: {error}"))?;
+    if matches!(route, TradeRoute::Cpi | TradeRoute::BatchCpi) && maker == VICTIM {
+        env.set_matcher_config(VICTIM, 1)
+            .map_err(|error| format!("PR 303 authorize B's current matcher: {error}"))?;
+    }
+
+    let mut replay_cu = 0;
+    let mut max_cu = 0;
+    if land_replay {
+        let replay = env
+            .land_retained(retained)
+            .map_err(|error| format!("PR 303 stale {route:?} no longer lands: {error}"))?;
+        replay_cu = replay.compute_units;
+        max_cu = max_cu.max(replay.compute_units);
+    }
+    let position_after_landing_q = decoded_legs(&env.primary_portfolio(VICTIM))
+        .into_iter()
+        .find(|leg| leg.active && leg.asset_index == 0)
+        .map(|leg| leg.basis_pos_q)
+        .unwrap_or(0);
+    let expected_position = if land_replay { -POSITION_Q } else { 0 };
+    if position_after_landing_q != expected_position {
+        return Err(format!(
+            "PR 303 {route:?}/{replacement_side:?} replacement position mismatch: \
+             expected={expected_position}, got={position_after_landing_q}"
+        ));
+    }
+
+    let mut liquidation_slot = 0;
+    for slot in 1..=30u64 {
+        env.warp_to_slot(slot);
+        env.push_auth_mark(0, slot, 2_000_000)
+            .map_err(|error| format!("PR 303 publish mark at slot {slot}: {error}"))?;
+        let crank = env
+            .crank(
+                VICTIM,
+                slot,
+                vec![CrankObservationHint {
+                    asset_index: 0,
+                    oracle_accounts: 0,
+                }],
+            )
+            .map_err(|error| format!("PR 303 refresh B at slot {slot}: {error}"))?;
+        max_cu = max_cu.max(crank.compute_units);
+        if !land_replay {
+            continue;
+        }
+        let cert = env
+            .primary_portfolio(VICTIM)
+            .health_cert
+            .try_to_runtime()
+            .map_err(|error| format!("PR 303 decode health certificate: {error:?}"))?;
+        let maintenance = i128::try_from(cert.certified_maintenance_req)
+            .map_err(|_| "PR 303 maintenance requirement exceeds signed range")?;
+        if cert.certified_equity < maintenance {
+            liquidation_slot = slot;
+            break;
+        }
+    }
+
+    let cranker_before = env.primary_portfolio(CRANKER).capital.get();
+    let mut cranker_reward = 0;
+    let mut extracted_reward = 0;
+    if land_replay {
+        if liquidation_slot == 0 {
+            return Err(format!(
+                "PR 303 stale {route:?}/{replacement_side:?} never made B liquidatable"
+            ));
+        }
+        let liquidation = env
+            .crank_with_reward(CRANKER, VICTIM, liquidation_slot, Vec::new(), &[])
+            .map_err(|error| format!("PR 303 independent liquidation: {error}"))?;
+        max_cu = max_cu.max(liquidation.compute_units);
+        cranker_reward = env
+            .primary_portfolio(CRANKER)
+            .capital
+            .get()
+            .checked_sub(cranker_before)
+            .ok_or("PR 303 cranker capital decreased")?;
+        if cranker_reward == 0 {
+            return Err("PR 303 stale trade paid no liquidation reward".into());
+        }
+        let destination = env.actors[CRANKER].destination_token;
+        let destination_before = env.token_amount(destination);
+        let withdrawal = env
+            .withdraw_primary(CRANKER, cranker_reward)
+            .map_err(|error| format!("PR 303 withdraw liquidation reward: {error}"))?;
+        max_cu = max_cu.max(withdrawal.compute_units);
+        extracted_reward = env
+            .token_amount(destination)
+            .checked_sub(destination_before)
+            .ok_or("PR 303 cranker destination decreased")?;
+    }
+    if u128::from(extracted_reward) != cranker_reward
+        || (!land_replay && env.primary_portfolio(CRANKER).capital.get() != cranker_before)
+        || env.token_supply_observed() != supply_before
+        || max_cu >= TX_CU_LIMIT
+    {
+        return Err(format!(
+            "PR 303 terminal mismatch: route={route:?}, side={replacement_side:?}, \
+             reward={cranker_reward}, extracted={extracted_reward}, max_cu={max_cu}, \
+             supply={}/{}",
+            env.token_supply_observed(),
+            supply_before
+        ));
+    }
+    Ok(TradePortfolioIncarnationWorld {
+        original_portfolio_id,
+        replacement_portfolio_id,
+        position_after_landing_q,
+        liquidation_slot,
+        cranker_reward,
+        extracted_reward,
+        replay_cu,
+        max_cu,
+    })
+}
+
+pub fn reproduce_trade_portfolio_incarnation_replay(
+    mut seed: [u8; 32],
+    route: TradeRoute,
+    replacement_side: PortfolioIncarnationTradeSide,
+) -> Result<TradePortfolioIncarnationReplayReproduction, String> {
+    seed[0] ^= 0x03 ^ route.index() as u8;
+    if replacement_side == PortfolioIncarnationTradeSide::AccountB {
+        seed[1] ^= 0xb0;
+    }
+    let control = run_trade_portfolio_incarnation_world(seed, route, replacement_side, false)?;
+    let replay = run_trade_portfolio_incarnation_world(seed, route, replacement_side, true)?;
+    if control.original_portfolio_id != replay.original_portfolio_id
+        || control.replacement_portfolio_id != replay.replacement_portfolio_id
+        || control.position_after_landing_q != 0
+        || control.cranker_reward != 0
+        || control.extracted_reward != 0
+        || replay.position_after_landing_q != -(POS_SCALE as i128)
+        || replay.cranker_reward == 0
+        || u128::from(replay.extracted_reward) != replay.cranker_reward
+        || replay.replay_cu == 0
+    {
+        return Err(format!(
+            "PR 303 paired-world mismatch: route={route:?}, side={replacement_side:?}, \
+             control={control:?}, replay={replay:?}"
+        ));
+    }
+    Ok(TradePortfolioIncarnationReplayReproduction {
+        blocker: KnownBlocker::TradePortfolioIncarnationReplay,
+        route,
+        replacement_side,
+        original_portfolio_id: replay.original_portfolio_id,
+        replacement_portfolio_id: replay.replacement_portfolio_id,
+        control_position_q: control.position_after_landing_q,
+        liquidation_slot: replay.liquidation_slot,
+        cranker_reward: replay.cranker_reward,
+        extracted_reward: replay.extracted_reward,
+        replay_cu: replay.replay_cu,
+        max_cu: replay.max_cu.max(control.max_cu),
+    })
+}
+
 pub fn reproduce_fee_redirect_generation_replay(
     seed: [u8; 32],
 ) -> Result<FeeRedirectGenerationReplayReproduction, String> {
@@ -13831,6 +14085,24 @@ pub fn portfolio_close_incarnation_replay_seed_strategy() -> impl Strategy<Value
 pub fn matcher_grant_portfolio_incarnation_replay_seed_strategy() -> impl Strategy<Value = [u8; 32]>
 {
     any::<[u8; 32]>()
+}
+
+#[allow(dead_code)]
+pub fn trade_portfolio_incarnation_replay_strategy(
+) -> impl Strategy<Value = ([u8; 32], TradeRoute, PortfolioIncarnationTradeSide)> {
+    (
+        any::<[u8; 32]>(),
+        prop::sample::select(vec![
+            TradeRoute::NoCpi,
+            TradeRoute::Cpi,
+            TradeRoute::BatchNoCpi,
+            TradeRoute::BatchCpi,
+        ]),
+        prop::sample::select(vec![
+            PortfolioIncarnationTradeSide::AccountA,
+            PortfolioIncarnationTradeSide::AccountB,
+        ]),
+    )
 }
 
 #[allow(dead_code)]
