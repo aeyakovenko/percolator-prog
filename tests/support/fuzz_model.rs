@@ -90,10 +90,11 @@ pub enum KnownBlocker {
     InsuranceWithdrawalGenerationReplay,
     InsuranceTopUpRetryReplay,
     BackingTopUpGenerationReplay,
+    ActivationRetryReplay,
 }
 
 impl KnownBlocker {
-    pub const COUNT: usize = 34;
+    pub const COUNT: usize = 35;
 
     pub const fn index(self) -> usize {
         match self {
@@ -131,6 +132,7 @@ impl KnownBlocker {
             Self::InsuranceWithdrawalGenerationReplay => 31,
             Self::InsuranceTopUpRetryReplay => 32,
             Self::BackingTopUpGenerationReplay => 33,
+            Self::ActivationRetryReplay => 34,
         }
     }
 }
@@ -569,6 +571,18 @@ pub struct BackingTopUpGenerationReplayReproduction {
     pub attacker_payout: u128,
     pub replay_cu: u64,
     pub max_cu: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ActivationRetryReplayReproduction {
+    pub blocker: KnownBlocker,
+    pub first_market_id: u64,
+    pub replay_market_id: u64,
+    pub intended_fee: u64,
+    pub duplicate_loss: u64,
+    pub beneficiary_extraction: u64,
+    pub insured_remainder: u128,
+    pub replay_cu: u64,
 }
 
 impl SubstitutionKind {
@@ -5254,6 +5268,124 @@ pub fn reproduce_insurance_top_up_retry_replay(
     })
 }
 
+pub fn reproduce_activation_retry_replay(
+    seed: [u8; 32],
+) -> Result<ActivationRetryReplayReproduction, String> {
+    const ASSET: u16 = 1;
+    const CREATOR: usize = 0;
+    const BENEFICIARY: usize = 1;
+    const FEE: u128 = 500;
+
+    let mut env = V16Svm::new(seed, MarketConfig::default());
+    let supply_before = env.token_supply_observed();
+    env.update_market_init_fee_policy(FEE)
+        .map_err(|error| format!("PR 362 configure permissionless init fee: {error}"))?;
+    env.update_asset_authority_from_admin(
+        0,
+        percolator_prog::processor::ASSET_AUTH_INSURANCE_OPERATOR,
+        BENEFICIARY,
+    )
+    .map_err(|error| format!("PR 362 install independent fee beneficiary: {error}"))?;
+
+    env.warp_to_slot(2);
+    env.retire_asset(ASSET, 2)
+        .map_err(|error| format!("PR 362 retire reusable slot: {error}"))?;
+    env.warp_to_slot(3);
+    let creator_source = env.actors[CREATOR].source_token;
+    let source_before = env.token_amount(creator_source);
+    let intended = env.build_retained_permissionless_asset_activation(
+        CREATOR, ASSET, 3, 100, CREATOR, CREATOR, CREATOR, CREATOR,
+    );
+    let retry_variant = env.build_retained_permissionless_asset_activation(
+        CREATOR, ASSET, 3, 100, CREATOR, CREATOR, CREATOR, CREATOR,
+    );
+
+    let first = env
+        .land_retained(intended)
+        .map_err(|error| format!("PR 362 intended activation rejected: {error}"))?;
+    let first_market_id = env.primary_market_state().1.assets[ASSET as usize].market_id;
+    let first_debit = source_before
+        .checked_sub(env.token_amount(creator_source))
+        .ok_or("PR 362 creator source increased after intended activation")?;
+    let first_insurance = env.primary_market_state().1.insurance_domain_budget[0]
+        .checked_add(env.primary_market_state().1.insurance_domain_budget[1])
+        .ok_or("PR 362 first insurance total overflow")?;
+    if first_debit != FEE as u64 || first_insurance != FEE {
+        return Err(format!(
+            "PR 362 intended activation accounting mismatch: debit={first_debit}, \
+             insurance={first_insurance}"
+        ));
+    }
+
+    env.warp_to_slot(4);
+    env.retire_asset(ASSET, 4)
+        .map_err(|error| format!("PR 362 retire first activated generation: {error}"))?;
+    env.warp_to_slot(5);
+    let replay = env
+        .land_retained(retry_variant)
+        .map_err(|error| format!("PR 362 retained activation no longer lands: {error}"))?;
+    let replay_market_id = env.primary_market_state().1.assets[ASSET as usize].market_id;
+    let total_debit = source_before
+        .checked_sub(env.token_amount(creator_source))
+        .ok_or("PR 362 creator source increased after retry")?;
+    let duplicate_loss = total_debit
+        .checked_sub(FEE as u64)
+        .ok_or("PR 362 total debit below intended fee")?;
+    let doubled_insurance = env.primary_market_state().1.insurance_domain_budget[0]
+        .checked_add(env.primary_market_state().1.insurance_domain_budget[1])
+        .ok_or("PR 362 doubled insurance total overflow")?;
+    if replay_market_id == first_market_id
+        || duplicate_loss != FEE as u64
+        || doubled_insurance != FEE * 2
+    {
+        return Err(format!(
+            "PR 362 replay did not create and fund a new generation: ids={first_market_id}/\
+             {replay_market_id}, duplicate={duplicate_loss}, insurance={doubled_insurance}"
+        ));
+    }
+
+    let beneficiary_destination = env.actors[BENEFICIARY].destination_token;
+    let destination_before = env.token_amount(beneficiary_destination);
+    let withdrawal = env
+        .withdraw_insurance_asset(BENEFICIARY, 0, FEE)
+        .map_err(|error| format!("PR 362 beneficiary could not extract duplicate fee: {error}"))?;
+    let beneficiary_extraction = env
+        .token_amount(beneficiary_destination)
+        .checked_sub(destination_before)
+        .ok_or("PR 362 beneficiary destination decreased")?;
+    let insured_remainder = env.primary_market_state().1.insurance_domain_budget[0]
+        .checked_add(env.primary_market_state().1.insurance_domain_budget[1])
+        .ok_or("PR 362 remaining insurance total overflow")?;
+    let max_cu = first
+        .compute_units
+        .max(replay.compute_units)
+        .max(withdrawal.compute_units);
+    if beneficiary_extraction != FEE as u64
+        || insured_remainder != FEE
+        || max_cu >= TX_CU_LIMIT
+        || env.token_supply_observed() != supply_before
+    {
+        return Err(format!(
+            "PR 362 public extraction mismatch: duplicate={duplicate_loss}, \
+             beneficiary={beneficiary_extraction}, insured={insured_remainder}, max_cu={max_cu}, \
+             supply={}/{}",
+            env.token_supply_observed(),
+            supply_before
+        ));
+    }
+
+    Ok(ActivationRetryReplayReproduction {
+        blocker: KnownBlocker::ActivationRetryReplay,
+        first_market_id,
+        replay_market_id,
+        intended_fee: FEE as u64,
+        duplicate_loss,
+        beneficiary_extraction,
+        insured_remainder,
+        replay_cu: replay.compute_units,
+    })
+}
+
 fn portfolio_equity(env: &V16Svm, actor: usize) -> Result<i128, String> {
     let account = env.primary_portfolio(actor);
     i128::try_from(account.capital.get())
@@ -8316,6 +8448,11 @@ pub fn insurance_withdrawal_generation_replay_seed_strategy() -> impl Strategy<V
 
 #[allow(dead_code)]
 pub fn insurance_top_up_retry_replay_seed_strategy() -> impl Strategy<Value = [u8; 32]> {
+    any::<[u8; 32]>()
+}
+
+#[allow(dead_code)]
+pub fn activation_retry_replay_seed_strategy() -> impl Strategy<Value = [u8; 32]> {
     any::<[u8; 32]>()
 }
 

@@ -1961,6 +1961,53 @@ impl V16Svm {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub fn build_retained_permissionless_asset_activation(
+        &mut self,
+        creator_index: usize,
+        asset_index: u16,
+        now_slot: u64,
+        initial_price: u64,
+        insurance_authority_index: usize,
+        insurance_operator_index: usize,
+        backing_bucket_authority_index: usize,
+        oracle_authority_index: usize,
+    ) -> Transaction {
+        let creator = copy_keypair(&self.actors[creator_index].signer);
+        self.build_program_transaction(
+            ProgInstruction::UpdateAssetLifecycle {
+                action: percolator_prog::processor::ASSET_ACTION_ACTIVATE,
+                asset_index,
+                now_slot,
+                initial_price,
+                insurance_authority: self.actors[insurance_authority_index]
+                    .signer
+                    .pubkey()
+                    .to_bytes(),
+                insurance_operator: self.actors[insurance_operator_index]
+                    .signer
+                    .pubkey()
+                    .to_bytes(),
+                backing_bucket_authority: self.actors[backing_bucket_authority_index]
+                    .signer
+                    .pubkey()
+                    .to_bytes(),
+                oracle_authority: self.actors[oracle_authority_index]
+                    .signer
+                    .pubkey()
+                    .to_bytes(),
+            },
+            vec![
+                AccountMeta::new(creator.pubkey(), true),
+                AccountMeta::new(self.market, false),
+                AccountMeta::new(self.actors[creator_index].source_token, false),
+                AccountMeta::new(self.vault, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[creator],
+        )
+    }
+
     pub fn build_retained_insurance_withdrawal_for_actor(
         &mut self,
         actor_index: usize,
