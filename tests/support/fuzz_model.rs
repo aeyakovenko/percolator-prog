@@ -104,10 +104,11 @@ pub enum KnownBlocker {
     MaintenancePolicyGenerationReplay,
     FeeRedirectGenerationReplay,
     BackingFeeGenerationReplay,
+    LiquidationPolicyGenerationReplay,
 }
 
 impl KnownBlocker {
-    pub const COUNT: usize = 48;
+    pub const COUNT: usize = 49;
 
     pub const fn index(self) -> usize {
         match self {
@@ -159,6 +160,7 @@ impl KnownBlocker {
             Self::MaintenancePolicyGenerationReplay => 45,
             Self::FeeRedirectGenerationReplay => 46,
             Self::BackingFeeGenerationReplay => 47,
+            Self::LiquidationPolicyGenerationReplay => 48,
         }
     }
 }
@@ -648,6 +650,19 @@ pub struct MaintenancePolicyGenerationReplayReproduction {
     pub live_oi_q: u128,
     pub replay_cu: u64,
     pub sync_cu: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LiquidationPolicyGenerationReplayReproduction {
+    pub blocker: KnownBlocker,
+    pub old_asset_market_id: u64,
+    pub new_asset_market_id: u64,
+    pub victim_capital_loss: u64,
+    pub attacker_extraction: u64,
+    pub insurance_delta: u128,
+    pub live_oi_q: u128,
+    pub replay_cu: u64,
+    pub liquidation_cu: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -5881,6 +5896,33 @@ pub fn reproduce_bilateral_base_fee_consent(
     })
 }
 
+fn publicly_recreate_primary_market(
+    env: &mut V16Svm,
+    config: MarketConfig,
+    reinit_slot: u64,
+    context: &str,
+) -> Result<(), String> {
+    for actor in 0..PRIMARY_ACTOR_COUNT {
+        env.withdraw_primary(actor, 1)
+            .map_err(|error| format!("{context} empty generation-A portfolio {actor}: {error}"))?;
+        env.close_primary_portfolio(actor)
+            .map_err(|error| format!("{context} close generation-A portfolio {actor}: {error}"))?;
+    }
+    env.resolve_market()
+        .map_err(|error| format!("{context} resolve generation A: {error}"))?;
+    env.close_primary_slab()
+        .map_err(|error| format!("{context} close generation-A slab: {error}"))?;
+
+    env.warp_to_slot(reinit_slot);
+    env.fund_closed_primary_market()
+        .map_err(|error| format!("{context} re-fund closed market: {error}"))?;
+    env.recreate_primary_vault()
+        .map_err(|error| format!("{context} recreate canonical vault: {error}"))?;
+    env.reinitialize_primary_market(config)
+        .map_err(|error| format!("{context} initialize generation B: {error}"))?;
+    Ok(())
+}
+
 pub fn reproduce_maintenance_policy_generation_replay(
     seed: [u8; 32],
 ) -> Result<MaintenancePolicyGenerationReplayReproduction, String> {
@@ -5908,24 +5950,7 @@ pub fn reproduce_maintenance_policy_generation_replay(
     let old_asset_market_id = env.primary_market_state().1.assets[0].market_id;
     let retained_policy = env.build_retained_maintenance_fee_policy(CRANKER_SHARE_BPS);
 
-    for actor in 0..PRIMARY_ACTOR_COUNT {
-        env.withdraw_primary(actor, 1)
-            .map_err(|error| format!("PR 325 empty generation-A portfolio {actor}: {error}"))?;
-        env.close_primary_portfolio(actor)
-            .map_err(|error| format!("PR 325 close generation-A portfolio {actor}: {error}"))?;
-    }
-    env.resolve_market()
-        .map_err(|error| format!("PR 325 resolve generation A: {error}"))?;
-    env.close_primary_slab()
-        .map_err(|error| format!("PR 325 close generation-A slab: {error}"))?;
-
-    env.warp_to_slot(REINIT_SLOT);
-    env.fund_closed_primary_market()
-        .map_err(|error| format!("PR 325 re-fund closed market: {error}"))?;
-    env.recreate_primary_vault()
-        .map_err(|error| format!("PR 325 recreate canonical vault: {error}"))?;
-    env.reinitialize_primary_market(config)
-        .map_err(|error| format!("PR 325 initialize generation B: {error}"))?;
+    publicly_recreate_primary_market(&mut env, config, REINIT_SLOT, "PR 325")?;
     env.configure_auth_mark(false, 0, REINIT_SLOT, PRICE)
         .map_err(|error| format!("PR 325 configure generation-B AuthMark: {error}"))?;
     let new_asset_market_id = env.primary_market_state().1.assets[0].market_id;
@@ -6028,6 +6053,210 @@ pub fn reproduce_maintenance_policy_generation_replay(
         live_oi_q,
         replay_cu: replay.compute_units,
         sync_cu: sync.compute_units,
+    })
+}
+
+pub fn reproduce_liquidation_policy_generation_replay(
+    seed: [u8; 32],
+) -> Result<LiquidationPolicyGenerationReplayReproduction, String> {
+    const LONG: usize = 0;
+    const VICTIM: usize = 1;
+    const ATTACKER: usize = 2;
+    const INITIAL_PRICE: u64 = 1_000_000;
+    const LIQUIDATION_TARGET: u64 = 2_000_000;
+    const LONG_DEPOSIT: u128 = 100_000_000;
+    const VICTIM_DEPOSIT: u128 = 100_000;
+    const POSITION_Q: i128 = POS_SCALE as i128;
+    const CRANKER_SHARE_BPS: u16 = 10_000;
+    const REINIT_SLOT: u64 = 10;
+
+    let config = MarketConfig {
+        initial_price: INITIAL_PRICE,
+        h_max: 6_480_000,
+        min_nonzero_mm_req: 599,
+        min_nonzero_im_req: 600,
+        maintenance_margin_bps: 500,
+        initial_margin_bps: 500,
+        liquidation_fee_bps: 5,
+        liquidation_fee_cap: percolator::MAX_PROTOCOL_FEE_ABS,
+        max_price_move_bps_per_slot: 24,
+        max_accrual_dt_slots: 20,
+        max_abs_funding_e9_per_slot: 1_000,
+        min_funding_lifetime_slots: 10_000_000,
+        actor_deposits: [1, 1, 1, 1, 1],
+        ..MarketConfig::default()
+    };
+    let mut env = V16Svm::new(seed, config);
+    let supply_before = env.token_supply_observed();
+    let old_asset_market_id = env.primary_market_state().1.assets[0].market_id;
+    let retained_policy = env.build_retained_liquidation_fee_policy(CRANKER_SHARE_BPS);
+
+    publicly_recreate_primary_market(&mut env, config, REINIT_SLOT, "PR 326")?;
+    env.configure_auth_mark(false, 0, REINIT_SLOT, INITIAL_PRICE)
+        .map_err(|error| format!("PR 326 configure generation-B AuthMark: {error}"))?;
+    let new_asset_market_id = env.primary_market_state().1.assets[0].market_id;
+    if env
+        .primary_market_state()
+        .0
+        .liquidation_cranker_fee_share_bps
+        != 0
+    {
+        return Err("PR 326 generation B did not start with zero cranker share".into());
+    }
+
+    for actor in [LONG, VICTIM, ATTACKER] {
+        env.fund_closed_primary_portfolio(actor, 1_000_000_000)
+            .map_err(|error| format!("PR 326 re-fund portfolio {actor}: {error}"))?;
+        env.reinitialize_primary_portfolio(actor)
+            .map_err(|error| format!("PR 326 initialize portfolio {actor}: {error}"))?;
+    }
+    env.deposit_primary(LONG, LONG_DEPOSIT)
+        .map_err(|error| format!("PR 326 deposit long: {error}"))?;
+    env.deposit_primary(VICTIM, VICTIM_DEPOSIT)
+        .map_err(|error| format!("PR 326 deposit victim: {error}"))?;
+    env.trade_no_cpi(LONG, VICTIM, 0, POSITION_Q, INITIAL_PRICE, 0)
+        .map_err(|error| format!("PR 326 establish generation-B live OI: {error}"))?;
+    let live_oi_q = env.primary_market_state().1.assets[0].oi_eff_long_q;
+    if live_oi_q == 0 || position_for_asset(&env.primary_portfolio(VICTIM), 0)? != -POSITION_Q {
+        return Err("PR 326 generation-B victim position was not live".into());
+    }
+
+    let replay = env
+        .land_retained(retained_policy)
+        .map_err(|error| format!("PR 326 stale liquidation policy no longer lands: {error}"))?;
+    if env
+        .primary_market_state()
+        .0
+        .liquidation_cranker_fee_share_bps
+        != CRANKER_SHARE_BPS
+    {
+        return Err("PR 326 stale policy did not install the 100% cranker split".into());
+    }
+
+    let observations = vec![CrankObservationHint {
+        asset_index: 0,
+        oracle_accounts: 0,
+    }];
+    let mut liquidation_slot = None;
+    for slot in 11..=40u64 {
+        env.warp_to_slot(slot);
+        env.push_auth_mark(0, slot, LIQUIDATION_TARGET)
+            .map_err(|error| format!("PR 326 publish liquidation mark at slot {slot}: {error}"))?;
+        env.crank(VICTIM, slot, observations.clone())
+            .map_err(|error| format!("PR 326 refresh victim at slot {slot}: {error}"))?;
+        if position_for_asset(&env.primary_portfolio(VICTIM), 0)? != -POSITION_Q {
+            return Err(format!(
+                "PR 326 victim liquidated before reward-bearing crank at slot {slot}"
+            ));
+        }
+        let cert = env
+            .primary_portfolio(VICTIM)
+            .health_cert
+            .try_to_runtime()
+            .map_err(|error| format!("PR 326 decode health certificate: {error:?}"))?;
+        let maintenance = i128::try_from(cert.certified_maintenance_req)
+            .map_err(|_| "PR 326 maintenance requirement exceeds signed range")?;
+        if cert.certified_equity < maintenance {
+            liquidation_slot = Some(slot);
+            break;
+        }
+    }
+    let liquidation_slot = liquidation_slot.ok_or("PR 326 victim never became liquidatable")?;
+    let victim_capital_before = env.primary_portfolio(VICTIM).capital.get();
+    let attacker_capital_before = env.primary_portfolio(ATTACKER).capital.get();
+    let insurance_before = env.primary_market_state().1.insurance;
+    let vault_before = env.token_amount(env.vault);
+    let mut liquidation_cu = 0;
+    for attempt in 0..8 {
+        let crank = env
+            .crank_with_reward(
+                ATTACKER,
+                VICTIM,
+                liquidation_slot,
+                if attempt == 0 {
+                    observations.clone()
+                } else {
+                    Vec::new()
+                },
+                &[],
+            )
+            .map_err(|error| format!("PR 326 reward crank {attempt}: {error}"))?;
+        liquidation_cu = liquidation_cu.max(crank.compute_units);
+        if position_for_asset(&env.primary_portfolio(VICTIM), 0)?.unsigned_abs()
+            < POSITION_Q.unsigned_abs()
+        {
+            break;
+        }
+    }
+
+    let victim_capital_loss = victim_capital_before
+        .checked_sub(env.primary_portfolio(VICTIM).capital.get())
+        .ok_or("PR 326 liquidation increased victim capital")?;
+    let attacker_reward = env
+        .primary_portfolio(ATTACKER)
+        .capital
+        .get()
+        .checked_sub(attacker_capital_before)
+        .ok_or("PR 326 liquidation reduced attacker capital")?;
+    let insurance_delta = env
+        .primary_market_state()
+        .1
+        .insurance
+        .checked_sub(insurance_before)
+        .ok_or("PR 326 liquidation reduced insurance")?;
+    if attacker_reward == 0
+        || victim_capital_loss != attacker_reward
+        || insurance_delta != 0
+        || position_for_asset(&env.primary_portfolio(VICTIM), 0)?.unsigned_abs()
+            >= POSITION_Q.unsigned_abs()
+    {
+        return Err(format!(
+            "PR 326 stale split did not redirect a real liquidation fee: victim={victim_capital_loss}, \
+             reward={attacker_reward}, insurance={insurance_delta}, position={}",
+            position_for_asset(&env.primary_portfolio(VICTIM), 0)?
+        ));
+    }
+
+    let destination = env.actors[ATTACKER].destination_token;
+    let destination_before = env.token_amount(destination);
+    let withdrawal = env
+        .withdraw_primary(ATTACKER, attacker_reward)
+        .map_err(|error| format!("PR 326 attacker could not withdraw reward: {error}"))?;
+    let attacker_extraction = env
+        .token_amount(destination)
+        .checked_sub(destination_before)
+        .ok_or("PR 326 attacker destination decreased")?;
+    let expected_vault = vault_before
+        .checked_sub(attacker_extraction)
+        .ok_or("PR 326 extraction exceeded canonical vault")?;
+    let max_cu = replay
+        .compute_units
+        .max(liquidation_cu)
+        .max(withdrawal.compute_units);
+    if u128::from(attacker_extraction) != attacker_reward
+        || env.token_amount(env.vault) != expected_vault
+        || max_cu >= TX_CU_LIMIT
+        || env.token_supply_observed() != supply_before
+    {
+        return Err(format!(
+            "PR 326 public extraction mismatch: reward={attacker_reward}, extraction={attacker_extraction}, \
+             vault={}/{vault_before}, max_cu={max_cu}, supply={}/{}",
+            env.token_amount(env.vault),
+            env.token_supply_observed(),
+            supply_before
+        ));
+    }
+
+    Ok(LiquidationPolicyGenerationReplayReproduction {
+        blocker: KnownBlocker::LiquidationPolicyGenerationReplay,
+        old_asset_market_id,
+        new_asset_market_id,
+        victim_capital_loss: victim_capital_loss as u64,
+        attacker_extraction,
+        insurance_delta,
+        live_oi_q,
+        replay_cu: replay.compute_units,
+        liquidation_cu,
     })
 }
 
@@ -11026,6 +11255,11 @@ pub fn bilateral_base_fee_consent_strategy() -> impl Strategy<Value = ([u8; 32],
 
 #[allow(dead_code)]
 pub fn maintenance_policy_generation_replay_seed_strategy() -> impl Strategy<Value = [u8; 32]> {
+    any::<[u8; 32]>()
+}
+
+#[allow(dead_code)]
+pub fn liquidation_policy_generation_replay_seed_strategy() -> impl Strategy<Value = [u8; 32]> {
     any::<[u8; 32]>()
 }
 

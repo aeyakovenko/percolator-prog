@@ -15,6 +15,7 @@ use support::fuzz_model::{
     forfeit_funding_erasure_seed_strategy, fractional_cap_settlement_seed_strategy,
     insurance_top_up_retry_replay_seed_strategy,
     insurance_withdrawal_generation_replay_seed_strategy,
+    liquidation_policy_generation_replay_seed_strategy,
     maintenance_policy_generation_replay_seed_strategy, market_incarnation_deposit_seed_strategy,
     omitted_rescue_seed_strategy, pending_ewma_inheritance_strategy,
     pending_ewma_target_override_strategy, pending_mark_fee_reward_seed_strategy,
@@ -34,16 +35,17 @@ use support::fuzz_model::{
     reproduce_fee_redirect_generation_replay, reproduce_forfeit_funding_erasure,
     reproduce_fractional_cap_settlement, reproduce_insurance_top_up_retry_replay,
     reproduce_insurance_withdrawal_generation_replay,
-    reproduce_maintenance_policy_generation_replay, reproduce_market_incarnation_deposit,
-    reproduce_omitted_rescue_liquidation, reproduce_pending_ewma_inheritance,
-    reproduce_pending_ewma_target_override, reproduce_pending_mark_fee_reward,
-    reproduce_portfolio_incarnation_deposit, reproduce_portfolio_incarnation_withdrawal,
-    reproduce_post_expiry_backing_fee, reproduce_prospective_funding_rewrite,
-    reproduce_rebalance_funding_erasure, reproduce_reclaimable_ewma_fee,
-    reproduce_resolve_before_committed_accrual, reproduce_resolve_generation_replay,
-    reproduce_rounded_funding_omission, reproduce_shutdown_generation_replay,
-    reproduce_terminal_dust_payout_erasure, reproduce_trade_driven_liquidation_reward,
-    reproduce_trade_funding_erasure, reproduce_trade_retry_replay, reproduce_unstaged_mark_target,
+    reproduce_liquidation_policy_generation_replay, reproduce_maintenance_policy_generation_replay,
+    reproduce_market_incarnation_deposit, reproduce_omitted_rescue_liquidation,
+    reproduce_pending_ewma_inheritance, reproduce_pending_ewma_target_override,
+    reproduce_pending_mark_fee_reward, reproduce_portfolio_incarnation_deposit,
+    reproduce_portfolio_incarnation_withdrawal, reproduce_post_expiry_backing_fee,
+    reproduce_prospective_funding_rewrite, reproduce_rebalance_funding_erasure,
+    reproduce_reclaimable_ewma_fee, reproduce_resolve_before_committed_accrual,
+    reproduce_resolve_generation_replay, reproduce_rounded_funding_omission,
+    reproduce_shutdown_generation_replay, reproduce_terminal_dust_payout_erasure,
+    reproduce_trade_driven_liquidation_reward, reproduce_trade_funding_erasure,
+    reproduce_trade_retry_replay, reproduce_unstaged_mark_target,
     reproduce_withdrawal_retry_liquidation, resolve_before_committed_accrual_seed_strategy,
     resolve_generation_replay_seed_strategy, rounded_funding_seed_strategy, run_scenario,
     scenario_strategy, shutdown_generation_replay_seed_strategy, target_staging_strategy,
@@ -453,6 +455,19 @@ proptest! {
         prop_assert!(
             result.is_ok(),
             "PR 325 no longer reproduces for seed {:?}: {}",
+            seed,
+            result.unwrap_err()
+        );
+    }
+
+    #[test]
+    fn v16_program_pr326_liquidation_policy_generation_replay_fuzz(
+        seed in liquidation_policy_generation_replay_seed_strategy()
+    ) {
+        let result = reproduce_liquidation_policy_generation_replay(seed);
+        prop_assert!(
+            result.is_ok(),
+            "PR 326 no longer reproduces for seed {:?}: {}",
             seed,
             result.unwrap_err()
         );

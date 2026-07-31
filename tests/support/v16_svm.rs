@@ -1457,6 +1457,18 @@ impl V16Svm {
         )
     }
 
+    pub fn build_retained_liquidation_fee_policy(&mut self, cranker_share_bps: u16) -> Transaction {
+        let authority = copy_keypair(&self.admin);
+        self.build_program_transaction(
+            ProgInstruction::UpdateLiquidationFeePolicy { cranker_share_bps },
+            vec![
+                AccountMeta::new(authority.pubkey(), true),
+                AccountMeta::new(self.market, false),
+            ],
+            &[authority],
+        )
+    }
+
     pub fn update_maintenance_fee_policy(
         &mut self,
         cranker_share_bps: u16,
