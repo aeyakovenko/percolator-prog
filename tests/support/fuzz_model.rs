@@ -89,10 +89,11 @@ pub enum KnownBlocker {
     CollateralTopUpGenerationReplay,
     InsuranceWithdrawalGenerationReplay,
     InsuranceTopUpRetryReplay,
+    BackingTopUpGenerationReplay,
 }
 
 impl KnownBlocker {
-    pub const COUNT: usize = 33;
+    pub const COUNT: usize = 34;
 
     pub const fn index(self) -> usize {
         match self {
@@ -129,6 +130,7 @@ impl KnownBlocker {
             Self::CollateralTopUpGenerationReplay => 30,
             Self::InsuranceWithdrawalGenerationReplay => 31,
             Self::InsuranceTopUpRetryReplay => 32,
+            Self::BackingTopUpGenerationReplay => 33,
         }
     }
 }
@@ -555,6 +557,18 @@ pub struct InsuranceTopUpRetryReplayReproduction {
     pub insured_remainder: u128,
     pub first_cu: u64,
     pub replay_cu: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BackingTopUpGenerationReplayReproduction {
+    pub blocker: KnownBlocker,
+    pub old_market_id: u64,
+    pub new_market_id: u64,
+    pub provider_loss: u64,
+    pub attacker_profit: u128,
+    pub attacker_payout: u128,
+    pub replay_cu: u64,
+    pub max_cu: u64,
 }
 
 impl SubstitutionKind {
@@ -4830,6 +4844,203 @@ pub fn reproduce_collateral_top_up_generation_replay(
     })
 }
 
+pub fn reproduce_backing_top_up_generation_replay(
+    seed: [u8; 32],
+) -> Result<BackingTopUpGenerationReplayReproduction, String> {
+    const ASSET: u16 = 1;
+    const DOMAIN: u16 = ASSET * 2 + 1;
+    const WINNER: usize = 0;
+    const LOSER: usize = 1;
+    const PROVIDER: usize = 2;
+    const REPLACEMENT_CREATOR: usize = 3;
+    const TOP_UP: u128 = 150;
+    const EXPIRY_SLOT: u64 = 8;
+    const INITIAL_PRICE: u64 = 100;
+    const SIZE_Q: i128 = 20 * POS_SCALE as i128;
+    const WINNER_DEPOSIT: u128 = 2_000;
+    const LOSER_DEPOSIT: u128 = 250;
+
+    let mut env = V16Svm::new(
+        seed,
+        MarketConfig {
+            initial_price: INITIAL_PRICE,
+            maintenance_margin_bps: 1_000,
+            initial_margin_bps: 1_000,
+            max_price_move_bps_per_slot: 500,
+            max_accrual_dt_slots: 1,
+            min_funding_lifetime_slots: 1,
+            actor_deposits: [WINNER_DEPOSIT, LOSER_DEPOSIT, 1, 1, 1],
+            ..MarketConfig::default()
+        },
+    );
+    let supply_before = env.token_supply_observed();
+    env.configure_permissionless_resolve(20, 5)
+        .map_err(|error| format!("PR 321 configure permissionless resolve: {error}"))?;
+    env.update_market_init_fee_policy(1)
+        .map_err(|error| format!("PR 321 configure permissionless init fee: {error}"))?;
+    env.update_asset_authority_from_admin(
+        ASSET,
+        percolator_prog::processor::ASSET_AUTH_BACKING_BUCKET,
+        PROVIDER,
+    )
+    .map_err(|error| format!("PR 321 install old-generation backing authority: {error}"))?;
+
+    let old_market_id = env.primary_market_state().1.assets[ASSET as usize].market_id;
+    let provider_source = env.actors[PROVIDER].source_token;
+    let provider_source_before = env.token_amount(provider_source);
+    let retained_top_up =
+        env.build_retained_backing_bucket_top_up_for_actor(PROVIDER, DOMAIN, TOP_UP, EXPIRY_SLOT);
+
+    env.warp_to_slot(2);
+    env.retire_asset(ASSET, 2)
+        .map_err(|error| format!("PR 321 retire old asset generation: {error}"))?;
+    env.warp_to_slot(3);
+    env.activate_permissionless_asset_with_actor_authorities(
+        REPLACEMENT_CREATOR,
+        ASSET,
+        3,
+        INITIAL_PRICE,
+        REPLACEMENT_CREATOR,
+        REPLACEMENT_CREATOR,
+        PROVIDER,
+        REPLACEMENT_CREATOR,
+        1,
+    )
+    .map_err(|error| format!("PR 321 activate replacement generation: {error}"))?;
+    let new_market_id = env.primary_market_state().1.assets[ASSET as usize].market_id;
+    if new_market_id == old_market_id {
+        return Err(format!(
+            "PR 321 replacement reused asset market ID {old_market_id}"
+        ));
+    }
+    if env.primary_profile(ASSET as usize).backing_bucket_authority
+        != env.actors[PROVIDER].signer.pubkey().to_bytes()
+    {
+        return Err("PR 321 replacement did not reuse the signed backing authority".into());
+    }
+
+    let replay = env
+        .land_retained(retained_top_up)
+        .map_err(|error| format!("PR 321 stale backing top-up no longer lands: {error}"))?;
+    let provider_debit = provider_source_before
+        .checked_sub(env.token_amount(provider_source))
+        .ok_or("PR 321 provider source increased")?;
+    let replayed_bucket = env.primary_market_state().1.source_backing_buckets[DOMAIN as usize];
+    if provider_debit != TOP_UP as u64
+        || replayed_bucket.fresh_unliened_backing_num != TOP_UP * percolator::BOUND_SCALE
+    {
+        return Err(format!(
+            "PR 321 stale top-up did not fund replacement: provider_debit={provider_debit}, \
+             fresh_backing_num={}",
+            replayed_bucket.fresh_unliened_backing_num
+        ));
+    }
+
+    let mut max_cu = replay.compute_units;
+    let configure = env
+        .configure_auth_mark_for_actor(REPLACEMENT_CREATOR, ASSET, 3, INITIAL_PRICE)
+        .map_err(|error| format!("PR 321 configure replacement AuthMark: {error}"))?;
+    max_cu = max_cu.max(configure.compute_units);
+    let trade = env
+        .trade_no_cpi(WINNER, LOSER, ASSET, SIZE_Q, INITIAL_PRICE, 0)
+        .map_err(|error| format!("PR 321 open replacement-market positions: {error}"))?;
+    max_cu = max_cu.max(trade.compute_units);
+
+    for (slot, mark) in [(4, 105), (5, 110), (6, 115), (7, 120)] {
+        env.warp_to_slot(slot);
+        let push = env
+            .push_auth_mark_for_actor(REPLACEMENT_CREATOR, ASSET, slot, mark)
+            .map_err(|error| format!("PR 321 publish mark {mark} at slot {slot}: {error}"))?;
+        max_cu = max_cu.max(push.compute_units);
+        let observation = vec![CrankObservationHint {
+            asset_index: ASSET,
+            oracle_accounts: 0,
+        }];
+        let mut successful_cranks = 0u8;
+        for actor in [WINNER, LOSER] {
+            for _ in 0..8 {
+                match env.crank(actor, slot, observation.clone()) {
+                    Ok(crank) => {
+                        max_cu = max_cu.max(crank.compute_units);
+                        successful_cranks = successful_cranks.saturating_add(1);
+                    }
+                    Err(_) => break,
+                }
+                if env.primary_market_state().1.assets[ASSET as usize].effective_price == mark {
+                    break;
+                }
+            }
+        }
+        if successful_cranks == 0
+            || env.primary_market_state().1.assets[ASSET as usize].effective_price != mark
+        {
+            return Err(format!(
+                "PR 321 public crank did not commit mark {mark} at slot {slot}"
+            ));
+        }
+    }
+
+    let winner = env.primary_portfolio(WINNER);
+    let loser = env.primary_portfolio(LOSER);
+    if winner.pnl.get() != 400 || loser.capital.get() != 0 || loser.pnl.get() >= 0 {
+        return Err(format!(
+            "PR 321 replacement positions did not consume backing: winner_pnl={}, \
+             loser_capital={}, loser_pnl={}",
+            winner.pnl.get(),
+            loser.capital.get(),
+            loser.pnl.get()
+        ));
+    }
+
+    let resolve = env
+        .resolve_stale_permissionless(30)
+        .map_err(|error| format!("PR 321 permissionless terminal resolve: {error}"))?;
+    max_cu = max_cu.max(resolve.compute_units);
+    env.warp_to_slot(36);
+    let (first_winner_payout, _) = drain_resolved_actor(&mut env, WINNER)?;
+    let (loser_payout, _) = drain_resolved_actor(&mut env, LOSER)?;
+    let (winner_top_up, _) = drain_resolved_actor(&mut env, WINNER)?;
+    let attacker_payout = first_winner_payout
+        .checked_add(winner_top_up)
+        .and_then(|payout| payout.checked_add(loser_payout))
+        .ok_or("PR 321 attacker payout overflow")?;
+    let attacker_profit = attacker_payout
+        .checked_sub(WINNER_DEPOSIT + LOSER_DEPOSIT)
+        .ok_or("PR 321 attacker coalition did not recover its deposits")?;
+    let recoverable = env.primary_market_state().1.source_backing_buckets[DOMAIN as usize]
+        .fresh_unliened_backing_num
+        / percolator::BOUND_SCALE;
+    let provider_loss = TOP_UP
+        .checked_sub(recoverable)
+        .ok_or("PR 321 recoverable backing exceeds provider top-up")?;
+    if provider_loss == 0
+        || attacker_profit != provider_loss
+        || provider_debit != TOP_UP as u64
+        || max_cu >= TX_CU_LIMIT
+        || env.token_supply_observed() != supply_before
+    {
+        return Err(format!(
+            "PR 321 terminal extraction mismatch: provider_debit={provider_debit}, \
+             provider_loss={provider_loss}, attacker_payout={attacker_payout}, \
+             attacker_profit={attacker_profit}, max_cu={max_cu}, supply={}/{}",
+            env.token_supply_observed(),
+            supply_before
+        ));
+    }
+
+    Ok(BackingTopUpGenerationReplayReproduction {
+        blocker: KnownBlocker::BackingTopUpGenerationReplay,
+        old_market_id,
+        new_market_id,
+        provider_loss: u64::try_from(provider_loss)
+            .map_err(|_| "PR 321 provider loss exceeds SPL range")?,
+        attacker_profit,
+        attacker_payout,
+        replay_cu: replay.compute_units,
+        max_cu,
+    })
+}
+
 pub fn reproduce_insurance_withdrawal_generation_replay(
     seed: [u8; 32],
 ) -> Result<InsuranceWithdrawalGenerationReplayReproduction, String> {
@@ -8090,6 +8301,11 @@ pub fn delayed_asset_authority_revival_seed_strategy() -> impl Strategy<Value = 
 
 #[allow(dead_code)]
 pub fn collateral_top_up_generation_replay_seed_strategy() -> impl Strategy<Value = [u8; 32]> {
+    any::<[u8; 32]>()
+}
+
+#[allow(dead_code)]
+pub fn backing_top_up_generation_replay_seed_strategy() -> impl Strategy<Value = [u8; 32]> {
     any::<[u8; 32]>()
 }
 

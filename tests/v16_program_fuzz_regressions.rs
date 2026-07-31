@@ -4,24 +4,24 @@ use support::{
     blocker_corpus::{blocker_scenarios, known_blocker_scenarios},
     fuzz_model::{
         reproduce_asset_generation_config_replay, reproduce_asset_generation_mark_replay,
-        reproduce_asset_generation_trade_replay, reproduce_bilateral_fee_support,
-        reproduce_collateral_top_up_generation_replay, reproduce_composite_oracle_rounding,
-        reproduce_composite_oracle_time_skew, reproduce_cpi_backing_fee_siphon,
-        reproduce_cpi_caller_fee_siphon, reproduce_cross_domain_b_settlement,
-        reproduce_cross_domain_backing_double_spend, reproduce_cross_margin_insurance_drain,
-        reproduce_delayed_asset_authority_revival, reproduce_forfeit_funding_erasure,
-        reproduce_fractional_cap_settlement, reproduce_insurance_top_up_retry_replay,
-        reproduce_insurance_withdrawal_generation_replay, reproduce_omitted_rescue_liquidation,
-        reproduce_pending_ewma_inheritance, reproduce_pending_ewma_target_override,
-        reproduce_pending_mark_fee_reward, reproduce_post_expiry_backing_fee,
-        reproduce_prospective_funding_rewrite, reproduce_rebalance_funding_erasure,
-        reproduce_reclaimable_ewma_fee, reproduce_resolve_before_committed_accrual,
-        reproduce_rounded_funding_omission, reproduce_terminal_dust_payout_erasure,
-        reproduce_trade_driven_liquidation_reward, reproduce_trade_funding_erasure,
-        reproduce_trade_retry_replay, reproduce_unstaged_mark_target, run_scenario,
-        AssetGenerationConfigPath, AssetGenerationMarkPath, BilateralFeeMode,
-        CompositeRoundingCase, KnownBlocker, PostExpiryBackingCase, Scenario, TargetStagingCase,
-        TradeDrivenLiquidationMode, TradeRoute,
+        reproduce_asset_generation_trade_replay, reproduce_backing_top_up_generation_replay,
+        reproduce_bilateral_fee_support, reproduce_collateral_top_up_generation_replay,
+        reproduce_composite_oracle_rounding, reproduce_composite_oracle_time_skew,
+        reproduce_cpi_backing_fee_siphon, reproduce_cpi_caller_fee_siphon,
+        reproduce_cross_domain_b_settlement, reproduce_cross_domain_backing_double_spend,
+        reproduce_cross_margin_insurance_drain, reproduce_delayed_asset_authority_revival,
+        reproduce_forfeit_funding_erasure, reproduce_fractional_cap_settlement,
+        reproduce_insurance_top_up_retry_replay, reproduce_insurance_withdrawal_generation_replay,
+        reproduce_omitted_rescue_liquidation, reproduce_pending_ewma_inheritance,
+        reproduce_pending_ewma_target_override, reproduce_pending_mark_fee_reward,
+        reproduce_post_expiry_backing_fee, reproduce_prospective_funding_rewrite,
+        reproduce_rebalance_funding_erasure, reproduce_reclaimable_ewma_fee,
+        reproduce_resolve_before_committed_accrual, reproduce_rounded_funding_omission,
+        reproduce_terminal_dust_payout_erasure, reproduce_trade_driven_liquidation_reward,
+        reproduce_trade_funding_erasure, reproduce_trade_retry_replay,
+        reproduce_unstaged_mark_target, run_scenario, AssetGenerationConfigPath,
+        AssetGenerationMarkPath, BilateralFeeMode, CompositeRoundingCase, KnownBlocker,
+        PostExpiryBackingCase, Scenario, TargetStagingCase, TradeDrivenLiquidationMode, TradeRoute,
     },
     open_lof_manifest::{missing_prs, quarantined_prs, validate_manifest},
 };
@@ -506,6 +506,22 @@ fn v16_program_pr279_stale_collateral_top_up_funds_replacement_operator() {
 }
 
 #[test]
+fn v16_program_pr321_stale_backing_top_up_funds_replacement_winner() {
+    let reproduction = reproduce_backing_top_up_generation_replay([0x21; 32])
+        .unwrap_or_else(|error| panic!("PR 321 no longer reproduces: {error}"));
+    assert_eq!(
+        reproduction.blocker,
+        KnownBlocker::BackingTopUpGenerationReplay
+    );
+    assert_ne!(reproduction.old_market_id, reproduction.new_market_id);
+    assert_eq!(reproduction.provider_loss, 150);
+    assert_eq!(reproduction.attacker_profit, 150);
+    assert_eq!(reproduction.attacker_payout, 2_400);
+    assert!(reproduction.replay_cu < 1_400_000);
+    assert!(reproduction.max_cu < 1_400_000);
+}
+
+#[test]
 fn v16_program_pr328_stale_withdrawal_drains_replacement_reserve() {
     let reproduction = reproduce_insurance_withdrawal_generation_replay([0x28; 32])
         .unwrap_or_else(|error| panic!("PR 328 no longer reproduces: {error}"));
@@ -727,14 +743,14 @@ fn v16_program_open_lof_manifest_is_complete_and_honest() {
         quarantined_prs(),
         [
             220, 223, 224, 225, 231, 251, 253, 255, 260, 264, 265, 267, 271, 272, 273, 275, 277,
-            279, 280, 281, 282, 283, 290, 320, 328, 329, 331, 332, 333, 343, 344, 356, 365, 366,
-            367, 369, 380, 381
+            279, 280, 281, 282, 283, 290, 320, 321, 328, 329, 331, 332, 333, 343, 344, 356, 365,
+            366, 367, 369, 380, 381
         ]
     );
     let missing = missing_prs();
     assert_eq!(
         missing.len(),
-        61,
+        60,
         "update the explicit evidence state when an executable adapter lands"
     );
     assert!(!missing.contains(&220));
@@ -761,6 +777,7 @@ fn v16_program_open_lof_manifest_is_complete_and_honest() {
     assert!(!missing.contains(&283));
     assert!(!missing.contains(&290));
     assert!(!missing.contains(&320));
+    assert!(!missing.contains(&321));
     assert!(!missing.contains(&328));
     assert!(!missing.contains(&329));
     assert!(!missing.contains(&331));

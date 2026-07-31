@@ -1936,6 +1936,31 @@ impl V16Svm {
         )
     }
 
+    pub fn build_retained_backing_bucket_top_up_for_actor(
+        &mut self,
+        actor_index: usize,
+        domain: u16,
+        amount: u128,
+        expiry_slot: u64,
+    ) -> Transaction {
+        let authority = copy_keypair(&self.actors[actor_index].signer);
+        self.build_program_transaction(
+            ProgInstruction::TopUpBackingBucket {
+                domain,
+                amount,
+                expiry_slot,
+            },
+            vec![
+                AccountMeta::new(authority.pubkey(), true),
+                AccountMeta::new(self.market, false),
+                AccountMeta::new(self.actors[actor_index].source_token, false),
+                AccountMeta::new(self.vault, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[authority],
+        )
+    }
+
     pub fn build_retained_insurance_withdrawal_for_actor(
         &mut self,
         actor_index: usize,
