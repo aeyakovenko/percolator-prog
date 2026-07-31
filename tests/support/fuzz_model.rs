@@ -114,10 +114,11 @@ pub enum KnownBlocker {
     DelayedMatcherEnableReplay,
     BackingFeeConsentReplay,
     AuthorityHandoffAbaReplay,
+    DelayedResolvePolicyReplay,
 }
 
 impl KnownBlocker {
-    pub const COUNT: usize = 58;
+    pub const COUNT: usize = 59;
 
     pub const fn index(self) -> usize {
         match self {
@@ -179,6 +180,7 @@ impl KnownBlocker {
             Self::DelayedMatcherEnableReplay => 55,
             Self::BackingFeeConsentReplay => 56,
             Self::AuthorityHandoffAbaReplay => 57,
+            Self::DelayedResolvePolicyReplay => 58,
         }
     }
 }
@@ -805,6 +807,18 @@ pub struct AuthorityHandoffAbaReplayReproduction {
     pub reserve_after: u128,
     pub replay_cu: u64,
     pub withdrawal_cu: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DelayedResolvePolicyReplayReproduction {
+    pub blocker: KnownBlocker,
+    pub victim_loss: u64,
+    pub attacker_gain: u64,
+    pub replay_crank_blocked: bool,
+    pub frozen_price: u64,
+    pub control_price: u64,
+    pub replay_cu: u64,
+    pub resolve_cu: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -8007,6 +8021,187 @@ pub fn reproduce_authority_handoff_aba_replay(
     })
 }
 
+#[derive(Clone, Copy, Debug)]
+struct DelayedResolvePolicyWorld {
+    victim_payout: u64,
+    attacker_payout: u64,
+    replay_crank_blocked: bool,
+    settlement_price: u64,
+    replay_cu: u64,
+    resolve_cu: u64,
+}
+
+fn run_delayed_resolve_policy_world(
+    seed: [u8; 32],
+    land_replay: bool,
+) -> Result<DelayedResolvePolicyWorld, String> {
+    const VICTIM: usize = 0;
+    const ATTACKER: usize = 1;
+    const PRICE: u64 = 100;
+    const TARGET: u64 = 110;
+    const SIZE_Q: i128 = 10_000 * POS_SCALE as i128;
+    const DEPOSIT: u128 = 1_000_000;
+    const OLD_STALE_SLOTS: u64 = 2;
+    const CURRENT_STALE_SLOTS: u64 = 100;
+    const FORCE_CLOSE_DELAY: u64 = 5;
+    const TARGET_SLOT: u64 = 2;
+    const RESOLVE_SLOT: u64 = 4;
+
+    let mut env = V16Svm::new(
+        seed,
+        MarketConfig {
+            initial_price: PRICE,
+            max_price_move_bps_per_slot: 10_000,
+            max_accrual_dt_slots: 1,
+            min_funding_lifetime_slots: 1,
+            actor_deposits: [DEPOSIT, DEPOSIT, 1, 1, 1],
+            ..MarketConfig::default()
+        },
+    );
+    let supply_before = env.token_supply_observed();
+    env.trade_no_cpi(VICTIM, ATTACKER, 0, SIZE_Q, PRICE, 0)
+        .map_err(|error| format!("PR 347 open independent long/short: {error}"))?;
+    let retained_policy =
+        env.build_retained_permissionless_resolve_policy(OLD_STALE_SLOTS, FORCE_CLOSE_DELAY);
+    env.configure_permissionless_resolve(OLD_STALE_SLOTS, FORCE_CLOSE_DELAY)
+        .map_err(|error| format!("PR 347 land initial short policy: {error}"))?;
+    env.configure_permissionless_resolve(CURRENT_STALE_SLOTS, FORCE_CLOSE_DELAY)
+        .map_err(|error| format!("PR 347 land long-window correction: {error}"))?;
+    env.warp_to_slot(TARGET_SLOT);
+    env.push_auth_mark(0, TARGET_SLOT, TARGET)
+        .map_err(|error| format!("PR 347 commit authenticated target: {error}"))?;
+    let before_replay = env.primary_market_state();
+    if before_replay.0.mark_ewma_e6 != TARGET
+        || before_replay.1.assets[0].effective_price != PRICE
+        || before_replay.0.permissionless_resolve_stale_slots != CURRENT_STALE_SLOTS
+    {
+        return Err(format!(
+            "PR 347 target staging mismatch: wrapper={}, effective={}, stale={}",
+            before_replay.0.mark_ewma_e6,
+            before_replay.1.assets[0].effective_price,
+            before_replay.0.permissionless_resolve_stale_slots
+        ));
+    }
+    env.warp_to_slot(RESOLVE_SLOT);
+
+    let mut replay_cu = 0;
+    let replay_crank_blocked;
+    let resolve_cu;
+    if land_replay {
+        let replay = env
+            .land_retained(retained_policy)
+            .map_err(|error| format!("PR 347 delayed short policy no longer lands: {error}"))?;
+        replay_cu = replay.compute_units;
+        let market_before_crank = env.market_data(false);
+        let victim_before_crank = env.primary_portfolio_data(VICTIM);
+        replay_crank_blocked = env
+            .crank(
+                VICTIM,
+                RESOLVE_SLOT,
+                vec![CrankObservationHint {
+                    asset_index: 0,
+                    oracle_accounts: 0,
+                }],
+            )
+            .is_err();
+        if !replay_crank_blocked
+            || env.market_data(false) != market_before_crank
+            || env.primary_portfolio_data(VICTIM) != victim_before_crank
+        {
+            return Err("PR 347 displaced timer did not atomically block the honest crank".into());
+        }
+        resolve_cu = env
+            .resolve_stale_permissionless(RESOLVE_SLOT)
+            .map_err(|error| format!("PR 347 permissionless stale resolve: {error}"))?
+            .compute_units;
+    } else {
+        replay_crank_blocked = false;
+        for actor in [VICTIM, ATTACKER] {
+            env.crank(
+                actor,
+                RESOLVE_SLOT,
+                vec![CrankObservationHint {
+                    asset_index: 0,
+                    oracle_accounts: 0,
+                }],
+            )
+            .map_err(|error| format!("PR 347 control crank actor {actor}: {error}"))?;
+        }
+        resolve_cu = env
+            .resolve_market()
+            .map_err(|error| format!("PR 347 control terminal resolve: {error}"))?
+            .compute_units;
+    }
+    let settlement_price = env.primary_market_state().1.assets[0].effective_price;
+    env.warp_to_slot(RESOLVE_SLOT + FORCE_CLOSE_DELAY);
+    let (attacker_payout, _) = drain_resolved_actor(&mut env, ATTACKER)?;
+    let (victim_payout, _) = drain_resolved_actor(&mut env, VICTIM)?;
+    let victim_payout =
+        u64::try_from(victim_payout).map_err(|_| "PR 347 victim payout exceeds SPL range")?;
+    let attacker_payout =
+        u64::try_from(attacker_payout).map_err(|_| "PR 347 attacker payout exceeds SPL range")?;
+    if u128::from(victim_payout) + u128::from(attacker_payout) != 2 * DEPOSIT
+        || env.token_supply_observed() != supply_before
+        || replay_cu >= TX_CU_LIMIT
+        || resolve_cu >= TX_CU_LIMIT
+    {
+        return Err(format!(
+            "PR 347 terminal mismatch: payout={victim_payout}/{attacker_payout}, \
+             replay_cu={replay_cu}, resolve_cu={resolve_cu}, supply={}/{}",
+            env.token_supply_observed(),
+            supply_before
+        ));
+    }
+    Ok(DelayedResolvePolicyWorld {
+        victim_payout,
+        attacker_payout,
+        replay_crank_blocked,
+        settlement_price,
+        replay_cu,
+        resolve_cu,
+    })
+}
+
+pub fn reproduce_delayed_resolve_policy_replay(
+    mut seed: [u8; 32],
+) -> Result<DelayedResolvePolicyReplayReproduction, String> {
+    seed[0] ^= 0x47;
+    let control = run_delayed_resolve_policy_world(seed, false)?;
+    let replay = run_delayed_resolve_policy_world(seed, true)?;
+    let victim_loss = control
+        .victim_payout
+        .checked_sub(replay.victim_payout)
+        .ok_or("PR 347 replay increased victim payout")?;
+    let attacker_gain = replay
+        .attacker_payout
+        .checked_sub(control.attacker_payout)
+        .ok_or("PR 347 replay decreased attacker payout")?;
+    if control.victim_payout != 1_100_000
+        || control.attacker_payout != 900_000
+        || replay.victim_payout != 1_000_000
+        || replay.attacker_payout != 1_000_000
+        || victim_loss != attacker_gain
+        || !replay.replay_crank_blocked
+        || control.settlement_price != 110
+        || replay.settlement_price != 100
+    {
+        return Err(format!(
+            "PR 347 paired-world mismatch: control={control:?}, replay={replay:?}, \
+             victim_loss={victim_loss}, attacker_gain={attacker_gain}"
+        ));
+    }
+    Ok(DelayedResolvePolicyReplayReproduction {
+        blocker: KnownBlocker::DelayedResolvePolicyReplay,
+        victim_loss,
+        attacker_gain,
+        replay_crank_blocked: replay.replay_crank_blocked,
+        frozen_price: replay.settlement_price,
+        control_price: control.settlement_price,
+        replay_cu: replay.replay_cu,
+        resolve_cu: replay.resolve_cu,
+    })
+}
+
 pub fn reproduce_fee_redirect_generation_replay(
     seed: [u8; 32],
 ) -> Result<FeeRedirectGenerationReplayReproduction, String> {
@@ -13074,6 +13269,11 @@ pub fn authority_handoff_aba_replay_strategy(
             AuthorityHandoffAbaPath::AssetInsuranceOperator,
         ]),
     )
+}
+
+#[allow(dead_code)]
+pub fn delayed_resolve_policy_replay_seed_strategy() -> impl Strategy<Value = [u8; 32]> {
+    any::<[u8; 32]>()
 }
 
 #[allow(dead_code)]

@@ -2293,6 +2293,25 @@ impl V16Svm {
         )
     }
 
+    pub fn build_retained_permissionless_resolve_policy(
+        &mut self,
+        stale_slots: u64,
+        force_close_delay_slots: u64,
+    ) -> Transaction {
+        let admin = copy_keypair(&self.admin);
+        self.build_program_transaction(
+            ProgInstruction::ConfigurePermissionlessResolve {
+                stale_slots,
+                force_close_delay_slots,
+            },
+            vec![
+                AccountMeta::new(admin.pubkey(), true),
+                AccountMeta::new(self.market, false),
+            ],
+            &[admin],
+        )
+    }
+
     pub fn build_retained_shutdown_asset(
         &mut self,
         asset_index: u16,
