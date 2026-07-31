@@ -1418,6 +1418,32 @@ impl V16Svm {
         )
     }
 
+    pub fn force_close_abandoned_asset(
+        &mut self,
+        cranker_index: usize,
+        account_a_index: usize,
+        account_b_index: usize,
+        asset_index: u16,
+        now_slot: u64,
+        close_q: u128,
+    ) -> Result<TxSuccess, String> {
+        let cranker = copy_keypair(&self.actors[cranker_index].signer);
+        self.send_program(
+            ProgInstruction::ForceCloseAbandonedAsset {
+                asset_index,
+                now_slot,
+                close_q,
+            },
+            vec![
+                AccountMeta::new(cranker.pubkey(), true),
+                AccountMeta::new(self.market, false),
+                AccountMeta::new(self.actors[account_a_index].portfolio, false),
+                AccountMeta::new(self.actors[account_b_index].portfolio, false),
+            ],
+            &[cranker],
+        )
+    }
+
     pub fn activate_permissionless_asset(
         &mut self,
         creator_index: usize,
@@ -2011,6 +2037,31 @@ impl V16Svm {
         let admin = copy_keypair(&self.admin);
         self.build_program_transaction(
             ProgInstruction::ResolveMarket,
+            vec![
+                AccountMeta::new(admin.pubkey(), true),
+                AccountMeta::new(self.market, false),
+            ],
+            &[admin],
+        )
+    }
+
+    pub fn build_retained_shutdown_asset(
+        &mut self,
+        asset_index: u16,
+        now_slot: u64,
+    ) -> Transaction {
+        let admin = copy_keypair(&self.admin);
+        self.build_program_transaction(
+            ProgInstruction::UpdateAssetLifecycle {
+                action: percolator_prog::processor::ASSET_ACTION_SHUTDOWN,
+                asset_index,
+                now_slot,
+                initial_price: 0,
+                insurance_authority: admin.pubkey().to_bytes(),
+                insurance_operator: admin.pubkey().to_bytes(),
+                backing_bucket_authority: admin.pubkey().to_bytes(),
+                oracle_authority: admin.pubkey().to_bytes(),
+            },
             vec![
                 AccountMeta::new(admin.pubkey(), true),
                 AccountMeta::new(self.market, false),
