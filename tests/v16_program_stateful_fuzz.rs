@@ -33,10 +33,11 @@ use support::fuzz_model::{
     reproduce_rounded_funding_omission, reproduce_terminal_dust_payout_erasure,
     reproduce_trade_driven_liquidation_reward, reproduce_trade_funding_erasure,
     reproduce_trade_retry_replay, reproduce_unstaged_mark_target,
-    resolve_before_committed_accrual_seed_strategy, rounded_funding_seed_strategy, run_scenario,
-    scenario_strategy, target_staging_strategy, terminal_dust_payout_erasure_strategy,
-    trade_driven_liquidation_reward_strategy, trade_funding_erasure_strategy,
-    trade_retry_replay_strategy,
+    reproduce_withdrawal_retry_liquidation, resolve_before_committed_accrual_seed_strategy,
+    rounded_funding_seed_strategy, run_scenario, scenario_strategy, target_staging_strategy,
+    terminal_dust_payout_erasure_strategy, trade_driven_liquidation_reward_strategy,
+    trade_funding_erasure_strategy, trade_retry_replay_strategy,
+    withdrawal_retry_liquidation_seed_strategy,
 };
 
 fn env_usize(name: &str, default: usize) -> usize {
@@ -413,6 +414,19 @@ proptest! {
         prop_assert!(
             result.is_ok(),
             "PR 351 no longer reproduces for seed {:?}: {}",
+            seed,
+            result.unwrap_err()
+        );
+    }
+
+    #[test]
+    fn v16_program_pr355_withdrawal_retry_liquidation_fuzz(
+        seed in withdrawal_retry_liquidation_seed_strategy()
+    ) {
+        let result = reproduce_withdrawal_retry_liquidation(seed);
+        prop_assert!(
+            result.is_ok(),
+            "PR 355 no longer reproduces for seed {:?}: {}",
             seed,
             result.unwrap_err()
         );

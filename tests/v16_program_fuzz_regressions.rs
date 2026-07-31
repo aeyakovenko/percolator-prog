@@ -20,9 +20,10 @@ use support::{
         reproduce_resolve_before_committed_accrual, reproduce_rounded_funding_omission,
         reproduce_terminal_dust_payout_erasure, reproduce_trade_driven_liquidation_reward,
         reproduce_trade_funding_erasure, reproduce_trade_retry_replay,
-        reproduce_unstaged_mark_target, run_scenario, AssetGenerationConfigPath,
-        AssetGenerationMarkPath, BilateralFeeMode, CompositeRoundingCase, KnownBlocker,
-        PostExpiryBackingCase, Scenario, TargetStagingCase, TradeDrivenLiquidationMode, TradeRoute,
+        reproduce_unstaged_mark_target, reproduce_withdrawal_retry_liquidation, run_scenario,
+        AssetGenerationConfigPath, AssetGenerationMarkPath, BilateralFeeMode,
+        CompositeRoundingCase, KnownBlocker, PostExpiryBackingCase, Scenario, TargetStagingCase,
+        TradeDrivenLiquidationMode, TradeRoute,
     },
     open_lof_manifest::{missing_prs, quarantined_prs, validate_manifest},
 };
@@ -579,6 +580,22 @@ fn v16_program_pr351_backing_top_up_retry_funds_independent_winner() {
 }
 
 #[test]
+fn v16_program_pr355_withdrawal_retry_liquidates_fresh_risk() {
+    let reproduction = reproduce_withdrawal_retry_liquidation([0x55; 32])
+        .unwrap_or_else(|error| panic!("PR 355 no longer reproduces: {error}"));
+    assert_eq!(
+        reproduction.blocker,
+        KnownBlocker::WithdrawalRetryLiquidation
+    );
+    assert_eq!(reproduction.intended_withdrawal, 50_000_000);
+    assert_eq!(reproduction.duplicate_withdrawal, 50_000_000);
+    assert!(reproduction.restored_equity_surplus > 0);
+    assert_eq!(reproduction.cranker_reward, 7_917);
+    assert_eq!(reproduction.extracted_reward, 7_917);
+    assert!(reproduction.replay_cu < 1_400_000);
+}
+
+#[test]
 fn v16_program_pr225_reclaimed_ewma_fee_extracts_on_every_route() {
     for route in [
         TradeRoute::NoCpi,
@@ -770,14 +787,14 @@ fn v16_program_open_lof_manifest_is_complete_and_honest() {
         quarantined_prs(),
         [
             220, 223, 224, 225, 231, 251, 253, 255, 260, 264, 265, 267, 271, 272, 273, 275, 277,
-            279, 280, 281, 282, 283, 290, 320, 321, 328, 329, 331, 332, 333, 343, 344, 351, 356,
-            362, 365, 366, 367, 369, 380, 381
+            279, 280, 281, 282, 283, 290, 320, 321, 328, 329, 331, 332, 333, 343, 344, 351, 355,
+            356, 362, 365, 366, 367, 369, 380, 381
         ]
     );
     let missing = missing_prs();
     assert_eq!(
         missing.len(),
-        58,
+        57,
         "update the explicit evidence state when an executable adapter lands"
     );
     assert!(!missing.contains(&220));
@@ -813,6 +830,7 @@ fn v16_program_open_lof_manifest_is_complete_and_honest() {
     assert!(!missing.contains(&343));
     assert!(!missing.contains(&344));
     assert!(!missing.contains(&351));
+    assert!(!missing.contains(&355));
     assert!(!missing.contains(&356));
     assert!(!missing.contains(&362));
     assert!(!missing.contains(&365));

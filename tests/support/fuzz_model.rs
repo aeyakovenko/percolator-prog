@@ -92,10 +92,11 @@ pub enum KnownBlocker {
     BackingTopUpGenerationReplay,
     ActivationRetryReplay,
     BackingTopUpRetryReplay,
+    WithdrawalRetryLiquidation,
 }
 
 impl KnownBlocker {
-    pub const COUNT: usize = 36;
+    pub const COUNT: usize = 37;
 
     pub const fn index(self) -> usize {
         match self {
@@ -135,6 +136,7 @@ impl KnownBlocker {
             Self::BackingTopUpGenerationReplay => 33,
             Self::ActivationRetryReplay => 34,
             Self::BackingTopUpRetryReplay => 35,
+            Self::WithdrawalRetryLiquidation => 36,
         }
     }
 }
@@ -595,6 +597,18 @@ pub struct BackingTopUpRetryReplayReproduction {
     pub beneficiary_extra_payout: u128,
     pub control_winner_payout: u128,
     pub replay_winner_payout: u128,
+    pub replay_cu: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WithdrawalRetryLiquidationReproduction {
+    pub blocker: KnownBlocker,
+    pub intended_withdrawal: u64,
+    pub duplicate_withdrawal: u64,
+    pub liquidation_slot: u64,
+    pub restored_equity_surplus: i128,
+    pub cranker_reward: u128,
+    pub extracted_reward: u64,
     pub replay_cu: u64,
 }
 
@@ -5559,6 +5573,172 @@ pub fn reproduce_backing_top_up_retry_replay(
     })
 }
 
+pub fn reproduce_withdrawal_retry_liquidation(
+    seed: [u8; 32],
+) -> Result<WithdrawalRetryLiquidationReproduction, String> {
+    const LONG: usize = 0;
+    const VICTIM: usize = 1;
+    const CRANKER: usize = 2;
+    const STARTING_CAPITAL: u128 = 200_000_000;
+    const WITHDRAWAL: u128 = 50_000_000;
+    const POSITION_Q: i128 = 1_000 * POS_SCALE as i128;
+    const PRICE: u64 = 1_000_000;
+
+    let mut env = V16Svm::new(
+        seed,
+        MarketConfig {
+            initial_price: PRICE,
+            h_max: 6_480_000,
+            min_nonzero_mm_req: 599,
+            min_nonzero_im_req: 600,
+            maintenance_margin_bps: 500,
+            initial_margin_bps: 500,
+            liquidation_fee_bps: 5,
+            liquidation_fee_cap: percolator::MAX_PROTOCOL_FEE_ABS,
+            max_price_move_bps_per_slot: 24,
+            max_accrual_dt_slots: 20,
+            max_abs_funding_e9_per_slot: 1_000,
+            min_funding_lifetime_slots: 10_000_000,
+            actor_deposits: [2_000_000_000, STARTING_CAPITAL, 1_000, 1, 1],
+            actor_token_balances: [2_100_000_000, 300_000_000, 10_000, 10, 10],
+            ..MarketConfig::default()
+        },
+    );
+    let supply_before = env.token_supply_observed();
+    env.update_liquidation_fee_policy(5_000)
+        .map_err(|error| format!("PR 355 configure cranker reward share: {error}"))?;
+
+    let victim_destination = env.actors[VICTIM].destination_token;
+    let destination_before = env.token_amount(victim_destination);
+    let intended = env.build_retained_withdrawal(VICTIM, WITHDRAWAL);
+    let retry_variant = env.build_retained_withdrawal(VICTIM, WITHDRAWAL);
+    env.land_retained(intended)
+        .map_err(|error| format!("PR 355 intended withdrawal rejected: {error}"))?;
+    if env.primary_portfolio(VICTIM).capital.get() != STARTING_CAPITAL - WITHDRAWAL
+        || env.token_amount(victim_destination) - destination_before != WITHDRAWAL as u64
+    {
+        return Err("PR 355 intended withdrawal accounting mismatch".into());
+    }
+
+    let fresh_trade = env.build_retained_no_cpi_trade(LONG, VICTIM, 0, POSITION_Q, PRICE);
+    let replay = env
+        .land_retained(retry_variant)
+        .map_err(|error| format!("PR 355 retained withdrawal no longer lands: {error}"))?;
+    let total_withdrawn = env
+        .token_amount(victim_destination)
+        .checked_sub(destination_before)
+        .ok_or("PR 355 victim destination decreased")?;
+    let duplicate_withdrawal = total_withdrawn
+        .checked_sub(WITHDRAWAL as u64)
+        .ok_or("PR 355 total withdrawal below intended amount")?;
+    if duplicate_withdrawal != WITHDRAWAL as u64
+        || env.primary_portfolio(VICTIM).capital.get() != STARTING_CAPITAL - 2 * WITHDRAWAL
+    {
+        return Err(format!(
+            "PR 355 retained withdrawal mismatch: duplicate={duplicate_withdrawal}, capital={}",
+            env.primary_portfolio(VICTIM).capital.get()
+        ));
+    }
+    env.land_retained(fresh_trade)
+        .map_err(|error| format!("PR 355 fresh signed trade did not land: {error}"))?;
+    if position_for_asset(&env.primary_portfolio(VICTIM), 0)? != -POSITION_Q {
+        return Err("PR 355 fresh trade did not install the victim short".into());
+    }
+
+    let mut liquidation = None;
+    for slot in 2..=31u64 {
+        env.warp_to_slot(slot);
+        let current_mark = env.primary_market_state().1.assets[0].effective_price;
+        let next_mark = current_mark
+            .checked_add((current_mark / 500).max(1))
+            .ok_or("PR 355 mark overflow")?;
+        env.push_auth_mark(0, slot, next_mark)
+            .map_err(|error| format!("PR 355 publish mark at slot {slot}: {error}"))?;
+        env.crank(
+            VICTIM,
+            slot,
+            vec![CrankObservationHint {
+                asset_index: 0,
+                oracle_accounts: 0,
+            }],
+        )
+        .map_err(|error| format!("PR 355 refresh victim at slot {slot}: {error}"))?;
+        let cert = env
+            .primary_portfolio(VICTIM)
+            .health_cert
+            .try_to_runtime()
+            .map_err(|error| format!("PR 355 decode health certificate: {error:?}"))?;
+        let maintenance = i128::try_from(cert.certified_maintenance_req)
+            .map_err(|_| "PR 355 maintenance requirement exceeds signed range")?;
+        if cert.certified_equity < maintenance {
+            let restored_equity = cert
+                .certified_equity
+                .checked_add(WITHDRAWAL as i128)
+                .ok_or("PR 355 restored equity overflow")?;
+            if restored_equity <= maintenance {
+                return Err(format!(
+                    "PR 355 duplicate is not causal: equity={}, restored={restored_equity}, \
+                     maintenance={maintenance}",
+                    cert.certified_equity
+                ));
+            }
+            liquidation = Some((slot, restored_equity - maintenance));
+            break;
+        }
+    }
+    let (liquidation_slot, restored_equity_surplus) =
+        liquidation.ok_or("PR 355 duplicate withdrawal never caused liquidation")?;
+
+    let cranker_before = env.primary_portfolio(CRANKER).capital.get();
+    let liquidation_tx = env
+        .crank_with_reward(CRANKER, VICTIM, liquidation_slot, Vec::new(), &[])
+        .map_err(|error| format!("PR 355 independent liquidation failed: {error}"))?;
+    let cranker_reward = env
+        .primary_portfolio(CRANKER)
+        .capital
+        .get()
+        .checked_sub(cranker_before)
+        .ok_or("PR 355 cranker capital decreased")?;
+    if cranker_reward == 0 {
+        return Err("PR 355 replay-induced liquidation paid no reward".into());
+    }
+    let reward_destination = env.actors[CRANKER].destination_token;
+    let reward_destination_before = env.token_amount(reward_destination);
+    let withdrawal = env
+        .withdraw_primary(CRANKER, cranker_reward)
+        .map_err(|error| format!("PR 355 cranker reward withdrawal failed: {error}"))?;
+    let extracted_reward = env
+        .token_amount(reward_destination)
+        .checked_sub(reward_destination_before)
+        .ok_or("PR 355 cranker destination decreased")?;
+    let max_cu = replay
+        .compute_units
+        .max(liquidation_tx.compute_units)
+        .max(withdrawal.compute_units);
+    if u128::from(extracted_reward) != cranker_reward
+        || max_cu >= TX_CU_LIMIT
+        || env.token_supply_observed() != supply_before
+    {
+        return Err(format!(
+            "PR 355 extraction mismatch: reward={cranker_reward}, extracted={extracted_reward}, \
+             max_cu={max_cu}, supply={}/{}",
+            env.token_supply_observed(),
+            supply_before
+        ));
+    }
+
+    Ok(WithdrawalRetryLiquidationReproduction {
+        blocker: KnownBlocker::WithdrawalRetryLiquidation,
+        intended_withdrawal: WITHDRAWAL as u64,
+        duplicate_withdrawal,
+        liquidation_slot,
+        restored_equity_surplus,
+        cranker_reward,
+        extracted_reward,
+        replay_cu: replay.compute_units,
+    })
+}
+
 fn portfolio_equity(env: &V16Svm, actor: usize) -> Result<i128, String> {
     let account = env.primary_portfolio(actor);
     i128::try_from(account.capital.get())
@@ -8441,6 +8621,17 @@ fn position_abs_for_asset(
         .ok_or_else(|| format!("portfolio has no active asset {asset_index}"))
 }
 
+fn position_for_asset(
+    account: &percolator_prog::state::PortfolioAccountV16,
+    asset_index: usize,
+) -> Result<i128, String> {
+    decoded_legs(account)
+        .into_iter()
+        .find(|leg| leg.active && leg.asset_index as usize == asset_index)
+        .map(|leg| leg.basis_pos_q)
+        .ok_or_else(|| format!("portfolio has no active asset {asset_index}"))
+}
+
 #[allow(dead_code)]
 pub fn post_expiry_backing_case_strategy(
 ) -> impl Strategy<Value = ([u8; 32], PostExpiryBackingCase)> {
@@ -8631,6 +8822,11 @@ pub fn activation_retry_replay_seed_strategy() -> impl Strategy<Value = [u8; 32]
 
 #[allow(dead_code)]
 pub fn backing_top_up_retry_replay_seed_strategy() -> impl Strategy<Value = [u8; 32]> {
+    any::<[u8; 32]>()
+}
+
+#[allow(dead_code)]
+pub fn withdrawal_retry_liquidation_seed_strategy() -> impl Strategy<Value = [u8; 32]> {
     any::<[u8; 32]>()
 }
 
