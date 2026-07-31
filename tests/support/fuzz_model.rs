@@ -117,10 +117,11 @@ pub enum KnownBlocker {
     DelayedResolvePolicyReplay,
     ResolveAuthorityIncarnationReplay,
     PortfolioCloseIncarnationReplay,
+    MatcherGrantPortfolioIncarnationReplay,
 }
 
 impl KnownBlocker {
-    pub const COUNT: usize = 61;
+    pub const COUNT: usize = 62;
 
     pub const fn index(self) -> usize {
         match self {
@@ -185,6 +186,7 @@ impl KnownBlocker {
             Self::DelayedResolvePolicyReplay => 58,
             Self::ResolveAuthorityIncarnationReplay => 59,
             Self::PortfolioCloseIncarnationReplay => 60,
+            Self::MatcherGrantPortfolioIncarnationReplay => 61,
         }
     }
 }
@@ -844,6 +846,19 @@ pub struct PortfolioCloseIncarnationReplayReproduction {
     pub drained_lamports: u64,
     pub market_lamport_gain: u64,
     pub replay_cu: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MatcherGrantPortfolioIncarnationReplayReproduction {
+    pub blocker: KnownBlocker,
+    pub original_portfolio_id: u64,
+    pub replacement_portfolio_id: u64,
+    pub control_trade_blocked: bool,
+    pub liquidation_slot: u64,
+    pub cranker_reward: u128,
+    pub extracted_reward: u64,
+    pub replay_cu: u64,
+    pub max_cu: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -8504,6 +8519,230 @@ pub fn reproduce_portfolio_close_incarnation_replay(
     })
 }
 
+#[derive(Clone, Copy, Debug)]
+struct MatcherGrantPortfolioIncarnationWorld {
+    original_portfolio_id: u64,
+    replacement_portfolio_id: u64,
+    control_trade_blocked: bool,
+    liquidation_slot: u64,
+    cranker_reward: u128,
+    extracted_reward: u64,
+    replay_cu: u64,
+    max_cu: u64,
+}
+
+fn run_matcher_grant_portfolio_incarnation_world(
+    seed: [u8; 32],
+    land_replay: bool,
+) -> Result<MatcherGrantPortfolioIncarnationWorld, String> {
+    const LONG: usize = 0;
+    const VICTIM: usize = 1;
+    const CRANKER: usize = 2;
+    const PRICE: u64 = 1_000_000;
+    const REPLACEMENT_CAPITAL: u128 = 100_000_000;
+    const POSITION_Q: i128 = 1_000 * POS_SCALE as i128;
+
+    let mut env = V16Svm::new(
+        seed,
+        MarketConfig {
+            initial_price: PRICE,
+            h_max: 6_480_000,
+            min_nonzero_mm_req: 599,
+            min_nonzero_im_req: 600,
+            maintenance_margin_bps: 500,
+            initial_margin_bps: 500,
+            liquidation_fee_bps: 5,
+            liquidation_fee_cap: percolator::MAX_PROTOCOL_FEE_ABS,
+            max_price_move_bps_per_slot: 24,
+            max_accrual_dt_slots: 20,
+            max_abs_funding_e9_per_slot: 1_000,
+            min_funding_lifetime_slots: 10_000_000,
+            actor_deposits: [2_000_000_000, 1, 1_000, 1, 1],
+            actor_token_balances: [2_100_000_000, 200_000_000, 10_000, 10, 10],
+            ..MarketConfig::default()
+        },
+    );
+    let supply_before = env.token_supply_observed();
+    env.update_liquidation_fee_policy(10_000)
+        .map_err(|error| format!("PR 304 configure cranker reward: {error}"))?;
+    let original_portfolio_id = env.primary_portfolio_id(VICTIM);
+    let retained_grant = env.build_retained_matcher_config(VICTIM, 1);
+    env.set_matcher_config(VICTIM, 0)
+        .map_err(|error| format!("PR 304 disable incarnation-A matcher: {error}"))?;
+    env.withdraw_primary(VICTIM, 1)
+        .map_err(|error| format!("PR 304 empty incarnation A: {error}"))?;
+    env.close_primary_portfolio(VICTIM)
+        .map_err(|error| format!("PR 304 close incarnation A: {error}"))?;
+    env.fund_closed_primary_portfolio(VICTIM, 1_000_000_000)
+        .map_err(|error| format!("PR 304 fund replacement account: {error}"))?;
+    env.reinitialize_primary_portfolio(VICTIM)
+        .map_err(|error| format!("PR 304 initialize incarnation B: {error}"))?;
+    let replacement_portfolio_id = env.primary_portfolio_id(VICTIM);
+    if replacement_portfolio_id <= original_portfolio_id {
+        return Err(format!(
+            "PR 304 portfolio ID did not advance: {original_portfolio_id}->{replacement_portfolio_id}"
+        ));
+    }
+    env.deposit_primary(VICTIM, REPLACEMENT_CAPITAL)
+        .map_err(|error| format!("PR 304 fund incarnation B: {error}"))?;
+
+    let mut replay_cu = 0;
+    let mut max_cu = 0;
+    let control_trade_blocked;
+    if land_replay {
+        let replay = env
+            .land_retained(retained_grant)
+            .map_err(|error| format!("PR 304 stale matcher grant no longer lands: {error}"))?;
+        replay_cu = replay.compute_units;
+        max_cu = max_cu.max(replay.compute_units);
+        let trade = env
+            .trade_cpi(LONG, VICTIM, 0, POSITION_Q, 0, 0)
+            .map_err(|error| format!("PR 304 fresh unsigned trade against B: {error}"))?;
+        max_cu = max_cu.max(trade.compute_units);
+        control_trade_blocked = false;
+    } else {
+        let market_before = env.market_data(false);
+        let long_before = env.primary_portfolio_data(LONG);
+        let victim_before = env.primary_portfolio_data(VICTIM);
+        let matcher_before = env.all_matcher_context_data();
+        control_trade_blocked = env.trade_cpi(LONG, VICTIM, 0, POSITION_Q, 0, 0).is_err();
+        if !control_trade_blocked
+            || env.market_data(false) != market_before
+            || env.primary_portfolio_data(LONG) != long_before
+            || env.primary_portfolio_data(VICTIM) != victim_before
+            || env.all_matcher_context_data() != matcher_before
+            || env.token_supply_observed() != supply_before
+        {
+            return Err("PR 304 disabled control matcher did not reject atomically".into());
+        }
+        return Ok(MatcherGrantPortfolioIncarnationWorld {
+            original_portfolio_id,
+            replacement_portfolio_id,
+            control_trade_blocked,
+            liquidation_slot: 0,
+            cranker_reward: 0,
+            extracted_reward: 0,
+            replay_cu,
+            max_cu,
+        });
+    }
+    if position_for_asset(&env.primary_portfolio(VICTIM), 0)? != -POSITION_Q {
+        return Err("PR 304 fresh CPI trade did not install B's short".into());
+    }
+
+    let mut liquidation_slot = 0;
+    for slot in 2..=31u64 {
+        env.warp_to_slot(slot);
+        let current_mark = env.primary_market_state().1.assets[0].effective_price;
+        let next_mark = current_mark
+            .checked_add((current_mark / 500).max(1))
+            .ok_or("PR 304 mark overflow")?;
+        env.push_auth_mark(0, slot, next_mark)
+            .map_err(|error| format!("PR 304 publish mark at slot {slot}: {error}"))?;
+        let crank = env
+            .crank(
+                VICTIM,
+                slot,
+                vec![CrankObservationHint {
+                    asset_index: 0,
+                    oracle_accounts: 0,
+                }],
+            )
+            .map_err(|error| format!("PR 304 refresh B at slot {slot}: {error}"))?;
+        max_cu = max_cu.max(crank.compute_units);
+        let cert = env
+            .primary_portfolio(VICTIM)
+            .health_cert
+            .try_to_runtime()
+            .map_err(|error| format!("PR 304 decode health certificate: {error:?}"))?;
+        let maintenance = i128::try_from(cert.certified_maintenance_req)
+            .map_err(|_| "PR 304 maintenance requirement exceeds signed range")?;
+        if cert.certified_equity < maintenance {
+            liquidation_slot = slot;
+            break;
+        }
+    }
+    if liquidation_slot == 0 {
+        return Err("PR 304 replayed matcher trade never made B liquidatable".into());
+    }
+    let cranker_before = env.primary_portfolio(CRANKER).capital.get();
+    let liquidation = env
+        .crank_with_reward(CRANKER, VICTIM, liquidation_slot, Vec::new(), &[])
+        .map_err(|error| format!("PR 304 independent liquidation: {error}"))?;
+    max_cu = max_cu.max(liquidation.compute_units);
+    let cranker_reward = env
+        .primary_portfolio(CRANKER)
+        .capital
+        .get()
+        .checked_sub(cranker_before)
+        .ok_or("PR 304 cranker capital decreased")?;
+    if cranker_reward == 0 {
+        return Err("PR 304 liquidation paid no reward".into());
+    }
+    let destination = env.actors[CRANKER].destination_token;
+    let destination_before = env.token_amount(destination);
+    let withdrawal = env
+        .withdraw_primary(CRANKER, cranker_reward)
+        .map_err(|error| format!("PR 304 withdraw liquidation reward: {error}"))?;
+    max_cu = max_cu.max(withdrawal.compute_units);
+    let extracted_reward = env
+        .token_amount(destination)
+        .checked_sub(destination_before)
+        .ok_or("PR 304 cranker destination decreased")?;
+    if u128::from(extracted_reward) != cranker_reward
+        || env.token_supply_observed() != supply_before
+        || max_cu >= TX_CU_LIMIT
+    {
+        return Err(format!(
+            "PR 304 extraction mismatch: reward={cranker_reward}, extracted={extracted_reward}, \
+             max_cu={max_cu}, supply={}/{}",
+            env.token_supply_observed(),
+            supply_before
+        ));
+    }
+    Ok(MatcherGrantPortfolioIncarnationWorld {
+        original_portfolio_id,
+        replacement_portfolio_id,
+        control_trade_blocked,
+        liquidation_slot,
+        cranker_reward,
+        extracted_reward,
+        replay_cu,
+        max_cu,
+    })
+}
+
+pub fn reproduce_matcher_grant_portfolio_incarnation_replay(
+    mut seed: [u8; 32],
+) -> Result<MatcherGrantPortfolioIncarnationReplayReproduction, String> {
+    seed[0] ^= 0x04;
+    let control = run_matcher_grant_portfolio_incarnation_world(seed, false)?;
+    let replay = run_matcher_grant_portfolio_incarnation_world(seed, true)?;
+    if control.original_portfolio_id != replay.original_portfolio_id
+        || control.replacement_portfolio_id != replay.replacement_portfolio_id
+        || !control.control_trade_blocked
+        || control.cranker_reward != 0
+        || replay.cranker_reward == 0
+        || u128::from(replay.extracted_reward) != replay.cranker_reward
+        || replay.replay_cu == 0
+    {
+        return Err(format!(
+            "PR 304 paired-world mismatch: control={control:?}, replay={replay:?}"
+        ));
+    }
+    Ok(MatcherGrantPortfolioIncarnationReplayReproduction {
+        blocker: KnownBlocker::MatcherGrantPortfolioIncarnationReplay,
+        original_portfolio_id: replay.original_portfolio_id,
+        replacement_portfolio_id: replay.replacement_portfolio_id,
+        control_trade_blocked: control.control_trade_blocked,
+        liquidation_slot: replay.liquidation_slot,
+        cranker_reward: replay.cranker_reward,
+        extracted_reward: replay.extracted_reward,
+        replay_cu: replay.replay_cu,
+        max_cu: replay.max_cu,
+    })
+}
+
 pub fn reproduce_fee_redirect_generation_replay(
     seed: [u8; 32],
 ) -> Result<FeeRedirectGenerationReplayReproduction, String> {
@@ -13585,6 +13824,12 @@ pub fn resolve_authority_incarnation_replay_seed_strategy() -> impl Strategy<Val
 
 #[allow(dead_code)]
 pub fn portfolio_close_incarnation_replay_seed_strategy() -> impl Strategy<Value = [u8; 32]> {
+    any::<[u8; 32]>()
+}
+
+#[allow(dead_code)]
+pub fn matcher_grant_portfolio_incarnation_replay_seed_strategy() -> impl Strategy<Value = [u8; 32]>
+{
     any::<[u8; 32]>()
 }
 
