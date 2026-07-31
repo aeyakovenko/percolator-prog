@@ -82,10 +82,11 @@ pub enum KnownBlocker {
     UnstagedMarkTarget,
     PendingMarkFeeReward,
     FractionalCapSettlement,
+    ProspectiveFundingRewrite,
 }
 
 impl KnownBlocker {
-    pub const COUNT: usize = 26;
+    pub const COUNT: usize = 27;
 
     pub const fn index(self) -> usize {
         match self {
@@ -115,6 +116,7 @@ impl KnownBlocker {
             Self::UnstagedMarkTarget => 23,
             Self::PendingMarkFeeReward => 24,
             Self::FractionalCapSettlement => 25,
+            Self::ProspectiveFundingRewrite => 26,
         }
     }
 }
@@ -449,6 +451,21 @@ pub struct FractionalCapSettlementReproduction {
     pub short_payout: u64,
     pub long_overpayment: u64,
     pub short_underpayment: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ProspectiveFundingRewriteReproduction {
+    pub blocker: KnownBlocker,
+    pub route: TradeRoute,
+    pub control_f_short_num: i128,
+    pub attack_f_short_num: i128,
+    pub stamp_fee: u128,
+    pub final_mark: u64,
+    pub final_effective_price: u64,
+    pub victim_payout_loss: u128,
+    pub attacker_coalition_gain: u128,
+    pub control_total_payout: u128,
+    pub attack_total_payout: u128,
 }
 
 impl SubstitutionKind {
@@ -3998,6 +4015,214 @@ pub fn reproduce_fractional_cap_settlement(
     })
 }
 
+pub fn reproduce_prospective_funding_rewrite(
+    mut seed: [u8; 32],
+    route: TradeRoute,
+) -> Result<ProspectiveFundingRewriteReproduction, String> {
+    if !matches!(route, TradeRoute::NoCpi | TradeRoute::BatchNoCpi) {
+        return Err(format!(
+            "{route:?} is not a reported-price route covered by PR 380"
+        ));
+    }
+    seed[0] ^= match route {
+        TradeRoute::NoCpi => 0x80,
+        TradeRoute::BatchNoCpi => 0xb8,
+        TradeRoute::Cpi | TradeRoute::BatchCpi => unreachable!(),
+    };
+    let control = run_prospective_funding_world(seed, route, false)?;
+    let attack = run_prospective_funding_world(seed, route, true)?;
+    if control.stamp_fee != attack.stamp_fee
+        || control.final_mark != attack.final_mark
+        || control.final_effective_price != attack.final_effective_price
+        || control.f_short_num <= 0
+        || attack.f_short_num != 0
+    {
+        return Err(format!(
+            "PR 380 worlds do not isolate funding timestamp order: control={control:?}, \
+             attack={attack:?}"
+        ));
+    }
+    let victim_payout_loss = control
+        .victim_payout
+        .checked_sub(attack.victim_payout)
+        .ok_or("PR 380 trade-first ordering increased victim payout")?;
+    let attacker_coalition_gain = attack
+        .coalition_payout
+        .checked_sub(control.coalition_payout)
+        .ok_or("PR 380 trade-first ordering decreased coalition payout")?;
+    if victim_payout_loss == 0
+        || victim_payout_loss != attacker_coalition_gain
+        || control.total_payout != attack.total_payout
+    {
+        return Err(format!(
+            "PR 380 prospective rewrite did not transfer conserved SPL value: \
+             control={control:?}, attack={attack:?}"
+        ));
+    }
+    Ok(ProspectiveFundingRewriteReproduction {
+        blocker: KnownBlocker::ProspectiveFundingRewrite,
+        route,
+        control_f_short_num: control.f_short_num,
+        attack_f_short_num: attack.f_short_num,
+        stamp_fee: attack.stamp_fee,
+        final_mark: attack.final_mark,
+        final_effective_price: attack.final_effective_price,
+        victim_payout_loss,
+        attacker_coalition_gain,
+        control_total_payout: control.total_payout,
+        attack_total_payout: attack.total_payout,
+    })
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ProspectiveFundingWorld {
+    coalition_payout: u128,
+    victim_payout: u128,
+    stamp_fee: u128,
+    final_mark: u64,
+    final_effective_price: u64,
+    f_short_num: i128,
+    total_payout: u128,
+}
+
+fn run_prospective_funding_world(
+    seed: [u8; 32],
+    route: TradeRoute,
+    stamp_before_catchup: bool,
+) -> Result<ProspectiveFundingWorld, String> {
+    const PRICE: u64 = 1_000_000;
+    const DEPOSIT: u128 = 100_000_000;
+    const MARK_HALFLIFE: u64 = 1_000_000;
+    const PREP_SLOT: u64 = 1_001;
+    const CATCHUP_SLOT: u64 = 1_102;
+    const PUSH_TARGET: u64 = 556_555_556;
+    const STAMP_EXEC_PRICE: u64 = 1_010_100;
+
+    let mut env = V16Svm::new(
+        seed,
+        MarketConfig {
+            initial_price: PRICE,
+            max_price_move_bps_per_slot: 1,
+            max_accrual_dt_slots: 1_000,
+            max_abs_funding_e9_per_slot: 10_000,
+            min_funding_lifetime_slots: 1_000,
+            actor_deposits: [DEPOSIT, DEPOSIT, DEPOSIT, DEPOSIT, 1],
+            ..MarketConfig::default()
+        },
+    );
+    let supply_before = env.token_supply_observed();
+    let configured_slot = env.current_slot();
+    env.configure_ewma_mark(0, configured_slot, PRICE, MARK_HALFLIFE, 0)
+        .map_err(|error| format!("PR 380 configure EWMA mark: {error}"))?;
+    execute_trade_route(&mut env, route, 0, 1, 0, POS_SCALE as i128, PRICE, 0)
+        .map_err(|error| format!("PR 380 open independent funding pair: {error}"))?;
+    execute_trade_route(&mut env, route, 2, 3, 0, POS_SCALE as i128, PRICE, 0)
+        .map_err(|error| format!("PR 380 open stamper pair: {error}"))?;
+
+    env.warp_to_slot(PREP_SLOT);
+    for _ in 0..4 {
+        env.crank(
+            1,
+            PREP_SLOT,
+            vec![CrankObservationHint {
+                asset_index: 0,
+                oracle_accounts: 0,
+            }],
+        )
+        .map_err(|error| format!("PR 380 prime funding clock: {error}"))?;
+        if env.primary_market_state().1.assets[0].slot_last == PREP_SLOT {
+            break;
+        }
+    }
+    if env.primary_market_state().1.assets[0].slot_last != PREP_SLOT {
+        return Err(format!(
+            "PR 380 engine clock did not reach prep slot: {}",
+            env.primary_market_state().1.assets[0].slot_last
+        ));
+    }
+    env.push_ewma_mark(0, PREP_SLOT, PUSH_TARGET)
+        .map_err(|error| format!("PR 380 publish honest premium: {error}"))?;
+    let after_push = env.primary_profile(0);
+    if after_push.mark_ewma_e6 != 1_500_000
+        || env.primary_market_state().1.assets[0].effective_price != PRICE
+    {
+        return Err(format!(
+            "PR 380 premium setup drifted: mark={}, effective={}",
+            after_push.mark_ewma_e6,
+            env.primary_market_state().1.assets[0].effective_price
+        ));
+    }
+
+    env.warp_to_slot(CATCHUP_SLOT);
+    let insurance_before_stamp = env.primary_market_state().1.insurance;
+    let stamp = |env: &mut V16Svm| {
+        execute_trade_route(
+            env,
+            route,
+            2,
+            3,
+            0,
+            -(POS_SCALE as i128),
+            STAMP_EXEC_PRICE,
+            0,
+        )
+    };
+    let catchup = |env: &mut V16Svm| {
+        env.crank(
+            1,
+            CATCHUP_SLOT,
+            vec![CrankObservationHint {
+                asset_index: 0,
+                oracle_accounts: 0,
+            }],
+        )
+    };
+    if stamp_before_catchup {
+        stamp(&mut env).map_err(|error| format!("PR 380 trade-first stamp: {error}"))?;
+        catchup(&mut env).map_err(|error| format!("PR 380 trade-first catch-up: {error}"))?;
+    } else {
+        catchup(&mut env).map_err(|error| format!("PR 380 control catch-up: {error}"))?;
+        stamp(&mut env).map_err(|error| format!("PR 380 control stamp: {error}"))?;
+    }
+
+    let (profile_after, group_after) = env.primary_market_state();
+    let stamp_fee = group_after
+        .insurance
+        .checked_sub(insurance_before_stamp)
+        .ok_or("PR 380 stamp decreased insurance")?;
+    if group_after.assets[0].slot_last != CATCHUP_SLOT {
+        return Err(format!(
+            "PR 380 catch-up stopped at slot {}",
+            group_after.assets[0].slot_last
+        ));
+    }
+    env.resolve_market()
+        .map_err(|error| format!("PR 380 resolve payout world: {error}"))?;
+    let (stamper_short_payout, _) = drain_resolved_actor(&mut env, 3)?;
+    let (victim_payout, _) = drain_resolved_actor(&mut env, 1)?;
+    let (attacker_payout, _) = drain_resolved_actor(&mut env, 0)?;
+    let (stamper_long_payout, _) = drain_resolved_actor(&mut env, 2)?;
+    let coalition_payout = attacker_payout
+        .checked_add(stamper_long_payout)
+        .and_then(|value| value.checked_add(stamper_short_payout))
+        .ok_or("PR 380 coalition payout overflow")?;
+    let total_payout = coalition_payout
+        .checked_add(victim_payout)
+        .ok_or("PR 380 total payout overflow")?;
+    if env.token_supply_observed() != supply_before {
+        return Err("PR 380 terminal world changed SPL supply".into());
+    }
+    Ok(ProspectiveFundingWorld {
+        coalition_payout,
+        victim_payout,
+        stamp_fee,
+        final_mark: profile_after.mark_ewma_e6,
+        final_effective_price: group_after.assets[0].effective_price,
+        f_short_num: group_after.assets[0].f_short_num,
+        total_payout,
+    })
+}
+
 pub fn reproduce_rounded_funding_omission(
     mut seed: [u8; 32],
 ) -> Result<RoundedFundingOmissionReproduction, String> {
@@ -6852,6 +7077,14 @@ pub fn pending_mark_fee_reward_seed_strategy() -> impl Strategy<Value = [u8; 32]
 #[allow(dead_code)]
 pub fn fractional_cap_settlement_seed_strategy() -> impl Strategy<Value = [u8; 32]> {
     any::<[u8; 32]>()
+}
+
+#[allow(dead_code)]
+pub fn prospective_funding_rewrite_strategy() -> impl Strategy<Value = ([u8; 32], TradeRoute)> {
+    (
+        any::<[u8; 32]>(),
+        prop::sample::select(vec![TradeRoute::NoCpi, TradeRoute::BatchNoCpi]),
+    )
 }
 
 #[allow(dead_code)]

@@ -11,13 +11,13 @@ use support::{
         reproduce_forfeit_funding_erasure, reproduce_fractional_cap_settlement,
         reproduce_omitted_rescue_liquidation, reproduce_pending_ewma_inheritance,
         reproduce_pending_ewma_target_override, reproduce_pending_mark_fee_reward,
-        reproduce_post_expiry_backing_fee, reproduce_rebalance_funding_erasure,
-        reproduce_reclaimable_ewma_fee, reproduce_rounded_funding_omission,
-        reproduce_terminal_dust_payout_erasure, reproduce_trade_driven_liquidation_reward,
-        reproduce_trade_funding_erasure, reproduce_trade_retry_replay,
-        reproduce_unstaged_mark_target, run_scenario, AssetGenerationConfigPath,
-        AssetGenerationMarkPath, CompositeRoundingCase, KnownBlocker, PostExpiryBackingCase,
-        Scenario, TargetStagingCase, TradeDrivenLiquidationMode, TradeRoute,
+        reproduce_post_expiry_backing_fee, reproduce_prospective_funding_rewrite,
+        reproduce_rebalance_funding_erasure, reproduce_reclaimable_ewma_fee,
+        reproduce_rounded_funding_omission, reproduce_terminal_dust_payout_erasure,
+        reproduce_trade_driven_liquidation_reward, reproduce_trade_funding_erasure,
+        reproduce_trade_retry_replay, reproduce_unstaged_mark_target, run_scenario,
+        AssetGenerationConfigPath, AssetGenerationMarkPath, CompositeRoundingCase, KnownBlocker,
+        PostExpiryBackingCase, Scenario, TargetStagingCase, TradeDrivenLiquidationMode, TradeRoute,
     },
     open_lof_manifest::{missing_prs, quarantined_prs, validate_manifest},
 };
@@ -397,6 +397,31 @@ fn v16_program_pr365_fractional_cap_floor_changes_terminal_payouts() {
 }
 
 #[test]
+fn v16_program_pr380_trade_first_rewrites_elapsed_funding() {
+    for route in [TradeRoute::NoCpi, TradeRoute::BatchNoCpi] {
+        let reproduction = reproduce_prospective_funding_rewrite([0x80; 32], route)
+            .unwrap_or_else(|error| panic!("PR 380 {route:?} no longer reproduces: {error}"));
+        assert_eq!(
+            reproduction.blocker,
+            KnownBlocker::ProspectiveFundingRewrite
+        );
+        assert_eq!(reproduction.route, route);
+        assert!(reproduction.control_f_short_num > 0);
+        assert_eq!(reproduction.attack_f_short_num, 0);
+        assert!(reproduction.stamp_fee > 0);
+        assert_eq!(
+            reproduction.victim_payout_loss,
+            reproduction.attacker_coalition_gain
+        );
+        assert!(reproduction.victim_payout_loss > 0);
+        assert_eq!(
+            reproduction.control_total_payout,
+            reproduction.attack_total_payout
+        );
+    }
+}
+
+#[test]
 fn v16_program_pr225_reclaimed_ewma_fee_extracts_on_every_route() {
     for route in [
         TradeRoute::NoCpi,
@@ -588,13 +613,13 @@ fn v16_program_open_lof_manifest_is_complete_and_honest() {
         quarantined_prs(),
         [
             220, 223, 224, 225, 231, 253, 260, 267, 271, 272, 273, 275, 277, 280, 281, 282, 283,
-            290, 329, 331, 332, 333, 343, 356, 365, 366, 367, 381
+            290, 329, 331, 332, 333, 343, 356, 365, 366, 367, 380, 381
         ]
     );
     let missing = missing_prs();
     assert_eq!(
         missing.len(),
-        71,
+        70,
         "update the explicit evidence state when an executable adapter lands"
     );
     assert!(!missing.contains(&220));
@@ -624,5 +649,6 @@ fn v16_program_open_lof_manifest_is_complete_and_honest() {
     assert!(!missing.contains(&365));
     assert!(!missing.contains(&366));
     assert!(!missing.contains(&367));
+    assert!(!missing.contains(&380));
     assert!(!missing.contains(&381));
 }

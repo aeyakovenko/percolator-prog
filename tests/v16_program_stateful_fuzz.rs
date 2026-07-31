@@ -10,16 +10,17 @@ use support::fuzz_model::{
     fractional_cap_settlement_seed_strategy, omitted_rescue_seed_strategy,
     pending_ewma_inheritance_strategy, pending_ewma_target_override_strategy,
     pending_mark_fee_reward_seed_strategy, post_expiry_backing_case_strategy,
-    rebalance_funding_erasure_seed_strategy, reclaimable_ewma_fee_strategy,
-    reproduce_asset_generation_config_replay, reproduce_asset_generation_mark_replay,
-    reproduce_asset_generation_trade_replay, reproduce_composite_oracle_rounding,
-    reproduce_composite_oracle_time_skew, reproduce_cpi_backing_fee_siphon,
-    reproduce_cpi_caller_fee_siphon, reproduce_cross_domain_b_settlement,
-    reproduce_cross_domain_backing_double_spend, reproduce_cross_margin_insurance_drain,
-    reproduce_forfeit_funding_erasure, reproduce_fractional_cap_settlement,
-    reproduce_omitted_rescue_liquidation, reproduce_pending_ewma_inheritance,
-    reproduce_pending_ewma_target_override, reproduce_pending_mark_fee_reward,
-    reproduce_post_expiry_backing_fee, reproduce_rebalance_funding_erasure,
+    prospective_funding_rewrite_strategy, rebalance_funding_erasure_seed_strategy,
+    reclaimable_ewma_fee_strategy, reproduce_asset_generation_config_replay,
+    reproduce_asset_generation_mark_replay, reproduce_asset_generation_trade_replay,
+    reproduce_composite_oracle_rounding, reproduce_composite_oracle_time_skew,
+    reproduce_cpi_backing_fee_siphon, reproduce_cpi_caller_fee_siphon,
+    reproduce_cross_domain_b_settlement, reproduce_cross_domain_backing_double_spend,
+    reproduce_cross_margin_insurance_drain, reproduce_forfeit_funding_erasure,
+    reproduce_fractional_cap_settlement, reproduce_omitted_rescue_liquidation,
+    reproduce_pending_ewma_inheritance, reproduce_pending_ewma_target_override,
+    reproduce_pending_mark_fee_reward, reproduce_post_expiry_backing_fee,
+    reproduce_prospective_funding_rewrite, reproduce_rebalance_funding_erasure,
     reproduce_reclaimable_ewma_fee, reproduce_rounded_funding_omission,
     reproduce_terminal_dust_payout_erasure, reproduce_trade_driven_liquidation_reward,
     reproduce_trade_funding_erasure, reproduce_trade_retry_replay, reproduce_unstaged_mark_target,
@@ -269,6 +270,20 @@ proptest! {
         prop_assert!(
             result.is_ok(),
             "PR 365 no longer reproduces for seed {:?}: {}",
+            seed,
+            result.unwrap_err()
+        );
+    }
+
+    #[test]
+    fn v16_program_pr380_prospective_funding_rewrite_fuzz(
+        (seed, route) in prospective_funding_rewrite_strategy()
+    ) {
+        let result = reproduce_prospective_funding_rewrite(seed, route);
+        prop_assert!(
+            result.is_ok(),
+            "PR 380 {:?} no longer reproduces for seed {:?}: {}",
+            route,
             seed,
             result.unwrap_err()
         );
