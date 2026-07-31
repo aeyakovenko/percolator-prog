@@ -91,10 +91,11 @@ pub enum KnownBlocker {
     InsuranceTopUpRetryReplay,
     BackingTopUpGenerationReplay,
     ActivationRetryReplay,
+    BackingTopUpRetryReplay,
 }
 
 impl KnownBlocker {
-    pub const COUNT: usize = 35;
+    pub const COUNT: usize = 36;
 
     pub const fn index(self) -> usize {
         match self {
@@ -133,6 +134,7 @@ impl KnownBlocker {
             Self::InsuranceTopUpRetryReplay => 32,
             Self::BackingTopUpGenerationReplay => 33,
             Self::ActivationRetryReplay => 34,
+            Self::BackingTopUpRetryReplay => 35,
         }
     }
 }
@@ -582,6 +584,17 @@ pub struct ActivationRetryReplayReproduction {
     pub duplicate_loss: u64,
     pub beneficiary_extraction: u64,
     pub insured_remainder: u128,
+    pub replay_cu: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BackingTopUpRetryReplayReproduction {
+    pub blocker: KnownBlocker,
+    pub intended_contribution: u64,
+    pub duplicate_loss: u64,
+    pub beneficiary_extra_payout: u128,
+    pub control_winner_payout: u128,
+    pub replay_winner_payout: u128,
     pub replay_cu: u64,
 }
 
@@ -5386,6 +5399,166 @@ pub fn reproduce_activation_retry_replay(
     })
 }
 
+#[derive(Clone, Copy, Debug)]
+struct BackingTopUpRetryWorld {
+    provider_loss: u64,
+    winner_payout: u128,
+    loser_payout: u128,
+    replay_cu: u64,
+}
+
+fn run_backing_top_up_retry_world(
+    seed: [u8; 32],
+    land_retry: bool,
+) -> Result<BackingTopUpRetryWorld, String> {
+    const ASSET: u16 = 0;
+    const DOMAIN: u16 = 1;
+    const WINNER: usize = 0;
+    const LOSER: usize = 1;
+    const PROVIDER: usize = 2;
+    const PUBLISHER: usize = 3;
+    const BACKING: u128 = 500;
+    const SIZE_Q: i128 = 10 * POS_SCALE as i128;
+
+    let mut env = V16Svm::new(
+        seed,
+        MarketConfig {
+            initial_price: 100,
+            max_price_move_bps_per_slot: 10_000,
+            max_accrual_dt_slots: 1,
+            min_funding_lifetime_slots: 1,
+            actor_deposits: [1_000, 1_000, 1, 1, 1],
+            ..MarketConfig::default()
+        },
+    );
+    let supply_before = env.token_supply_observed();
+    env.update_asset_authority_from_admin(
+        ASSET,
+        percolator_prog::processor::ASSET_AUTH_BACKING_BUCKET,
+        PROVIDER,
+    )
+    .map_err(|error| format!("PR 351 install backing provider: {error}"))?;
+    let provider_source = env.actors[PROVIDER].source_token;
+    let source_before = env.token_amount(provider_source);
+    let intended =
+        env.build_retained_backing_bucket_top_up_for_actor(PROVIDER, DOMAIN, BACKING, 10_000);
+    let retry_variant =
+        env.build_retained_backing_bucket_top_up_for_actor(PROVIDER, DOMAIN, BACKING, 10_000);
+    env.land_retained(intended)
+        .map_err(|error| format!("PR 351 intended top-up rejected: {error}"))?;
+
+    env.trade_no_cpi(WINNER, LOSER, ASSET, SIZE_Q, 100, 0)
+        .map_err(|error| format!("PR 351 open winner/loser positions: {error}"))?;
+    for (slot, mark) in [(2, 200), (3, 350)] {
+        env.warp_to_slot(slot);
+        env.push_auth_mark(ASSET, slot, mark)
+            .map_err(|error| format!("PR 351 publish mark {mark}: {error}"))?;
+        let observation = vec![CrankObservationHint {
+            asset_index: ASSET,
+            oracle_accounts: 0,
+        }];
+        for _ in 0..8 {
+            if env.crank(PUBLISHER, slot, observation.clone()).is_err() {
+                break;
+            }
+            if env.primary_market_state().1.assets[ASSET as usize].effective_price == mark {
+                break;
+            }
+        }
+        if env.primary_market_state().1.assets[ASSET as usize].effective_price != mark {
+            return Err(format!(
+                "PR 351 public crank did not commit mark {mark} at slot {slot}"
+            ));
+        }
+    }
+
+    let replay_cu = if land_retry {
+        env.land_retained(retry_variant)
+            .map_err(|error| format!("PR 351 retained top-up no longer lands: {error}"))?
+            .compute_units
+    } else {
+        0
+    };
+    let provider_loss = source_before
+        .checked_sub(env.token_amount(provider_source))
+        .ok_or("PR 351 provider source increased")?;
+    let expected_loss = if land_retry { BACKING * 2 } else { BACKING };
+    if u128::from(provider_loss) != expected_loss {
+        return Err(format!(
+            "PR 351 provider debit mismatch: replay={land_retry}, loss={provider_loss}, \
+             expected={expected_loss}"
+        ));
+    }
+
+    env.resolve_market()
+        .map_err(|error| format!("PR 351 resolve terminal world: {error}"))?;
+    let (first_winner_payout, _) = drain_resolved_actor(&mut env, WINNER)?;
+    let (loser_payout, _) = drain_resolved_actor(&mut env, LOSER)?;
+    let (winner_top_up, _) = drain_resolved_actor(&mut env, WINNER)?;
+    let winner_payout = first_winner_payout
+        .checked_add(winner_top_up)
+        .ok_or("PR 351 winner payout overflow")?;
+    if loser_payout != 0 || env.token_supply_observed() != supply_before {
+        return Err(format!(
+            "PR 351 terminal world mismatch: replay={land_retry}, winner={winner_payout}, \
+             loser={loser_payout}, supply={}/{}",
+            env.token_supply_observed(),
+            supply_before
+        ));
+    }
+    Ok(BackingTopUpRetryWorld {
+        provider_loss,
+        winner_payout,
+        loser_payout,
+        replay_cu,
+    })
+}
+
+pub fn reproduce_backing_top_up_retry_replay(
+    seed: [u8; 32],
+) -> Result<BackingTopUpRetryReplayReproduction, String> {
+    let control = run_backing_top_up_retry_world(seed, false)?;
+    let replay = run_backing_top_up_retry_world(seed, true)?;
+    let duplicate_loss = replay
+        .provider_loss
+        .checked_sub(control.provider_loss)
+        .ok_or("PR 351 replay provider loss below control")?;
+    let beneficiary_extra_payout = replay
+        .winner_payout
+        .checked_sub(control.winner_payout)
+        .ok_or("PR 351 replay winner payout below control")?;
+    if control.provider_loss != 500
+        || control.winner_payout != 2_500
+        || replay.provider_loss != 1_000
+        || replay.winner_payout != 3_000
+        || control.loser_payout != 0
+        || replay.loser_payout != 0
+        || u128::from(duplicate_loss) != beneficiary_extra_payout
+        || replay.replay_cu >= TX_CU_LIMIT
+    {
+        return Err(format!(
+            "PR 351 paired-world mismatch: control_loss={}, replay_loss={}, \
+             control_winner={}, replay_winner={}, control_loser={}, replay_loser={}, replay_cu={}",
+            control.provider_loss,
+            replay.provider_loss,
+            control.winner_payout,
+            replay.winner_payout,
+            control.loser_payout,
+            replay.loser_payout,
+            replay.replay_cu
+        ));
+    }
+    Ok(BackingTopUpRetryReplayReproduction {
+        blocker: KnownBlocker::BackingTopUpRetryReplay,
+        intended_contribution: control.provider_loss,
+        duplicate_loss,
+        beneficiary_extra_payout,
+        control_winner_payout: control.winner_payout,
+        replay_winner_payout: replay.winner_payout,
+        replay_cu: replay.replay_cu,
+    })
+}
+
 fn portfolio_equity(env: &V16Svm, actor: usize) -> Result<i128, String> {
     let account = env.primary_portfolio(actor);
     i128::try_from(account.capital.get())
@@ -8453,6 +8626,11 @@ pub fn insurance_top_up_retry_replay_seed_strategy() -> impl Strategy<Value = [u
 
 #[allow(dead_code)]
 pub fn activation_retry_replay_seed_strategy() -> impl Strategy<Value = [u8; 32]> {
+    any::<[u8; 32]>()
+}
+
+#[allow(dead_code)]
+pub fn backing_top_up_retry_replay_seed_strategy() -> impl Strategy<Value = [u8; 32]> {
     any::<[u8; 32]>()
 }
 
