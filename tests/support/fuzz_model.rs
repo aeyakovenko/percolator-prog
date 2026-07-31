@@ -115,10 +115,11 @@ pub enum KnownBlocker {
     BackingFeeConsentReplay,
     AuthorityHandoffAbaReplay,
     DelayedResolvePolicyReplay,
+    ResolveAuthorityIncarnationReplay,
 }
 
 impl KnownBlocker {
-    pub const COUNT: usize = 59;
+    pub const COUNT: usize = 60;
 
     pub const fn index(self) -> usize {
         match self {
@@ -181,6 +182,7 @@ impl KnownBlocker {
             Self::BackingFeeConsentReplay => 56,
             Self::AuthorityHandoffAbaReplay => 57,
             Self::DelayedResolvePolicyReplay => 58,
+            Self::ResolveAuthorityIncarnationReplay => 59,
         }
     }
 }
@@ -819,6 +821,17 @@ pub struct DelayedResolvePolicyReplayReproduction {
     pub control_price: u64,
     pub replay_cu: u64,
     pub resolve_cu: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ResolveAuthorityIncarnationReplayReproduction {
+    pub blocker: KnownBlocker,
+    pub victim_loss: u64,
+    pub winner_gain: u64,
+    pub replay_price: u64,
+    pub control_price: u64,
+    pub replay_cu: u64,
+    pub max_crank_cu: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -8202,6 +8215,172 @@ pub fn reproduce_delayed_resolve_policy_replay(
     })
 }
 
+#[derive(Clone, Copy, Debug)]
+struct ResolveAuthorityIncarnationWorld {
+    victim_payout: u64,
+    winner_payout: u64,
+    settlement_price: u64,
+    replay_cu: u64,
+    max_crank_cu: u64,
+}
+
+fn run_resolve_authority_incarnation_world(
+    seed: [u8; 32],
+    land_replay: bool,
+) -> Result<ResolveAuthorityIncarnationWorld, String> {
+    const WINNER: usize = 0;
+    const VICTIM: usize = 1;
+    const INTERIM: usize = 2;
+    const PRICE: u64 = 100;
+    const ADVERSE_PRICE: u64 = 110;
+    const SIZE_Q: i128 = 10_000 * POS_SCALE as i128;
+    const DEPOSIT: u128 = 1_000_000;
+
+    let mut env = V16Svm::new(
+        seed,
+        MarketConfig {
+            initial_price: PRICE,
+            max_price_move_bps_per_slot: 10_000,
+            max_accrual_dt_slots: 1,
+            min_funding_lifetime_slots: 1,
+            actor_deposits: [DEPOSIT, DEPOSIT, 1, 1, 1],
+            ..MarketConfig::default()
+        },
+    );
+    let supply_before = env.token_supply_observed();
+    let retained_resolve = env.build_retained_resolve_market();
+    env.update_market_authority_from_admin(INTERIM)
+        .map_err(|error| format!("PR 353 A-to-C handoff: {error}"))?;
+    env.update_market_authority_to_admin(INTERIM)
+        .map_err(|error| format!("PR 353 C-to-A handoff: {error}"))?;
+    env.trade_no_cpi(WINNER, VICTIM, 0, SIZE_Q, PRICE, 0)
+        .map_err(|error| format!("PR 353 open independent winner/victim OI: {error}"))?;
+    env.warp_to_slot(10);
+    env.push_auth_mark(0, 10, ADVERSE_PRICE)
+        .map_err(|error| format!("PR 353 push temporary adverse mark: {error}"))?;
+    let mut max_crank_cu = 0;
+    for actor in [VICTIM, WINNER] {
+        let crank = env
+            .crank(
+                actor,
+                10,
+                vec![CrankObservationHint {
+                    asset_index: 0,
+                    oracle_accounts: 0,
+                }],
+            )
+            .map_err(|error| format!("PR 353 adverse-mark crank actor {actor}: {error}"))?;
+        max_crank_cu = max_crank_cu.max(crank.compute_units);
+    }
+    if env.primary_market_state().1.assets[0].effective_price != ADVERSE_PRICE {
+        return Err("PR 353 adverse mark did not become effective".into());
+    }
+
+    let replay_cu;
+    let settlement_price;
+    if land_replay {
+        replay_cu = env
+            .land_retained(retained_resolve)
+            .map_err(|error| format!("PR 353 prior-incarnation resolve no longer lands: {error}"))?
+            .compute_units;
+        settlement_price = env.primary_market_state().1.assets[0].effective_price;
+        env.warp_to_slot(11);
+    } else {
+        env.warp_to_slot(12);
+        env.push_auth_mark(0, 12, PRICE)
+            .map_err(|error| format!("PR 353 restore honest mark: {error}"))?;
+        for actor in [VICTIM, WINNER] {
+            let crank = env
+                .crank(
+                    actor,
+                    12,
+                    vec![CrankObservationHint {
+                        asset_index: 0,
+                        oracle_accounts: 0,
+                    }],
+                )
+                .map_err(|error| format!("PR 353 restored-mark crank actor {actor}: {error}"))?;
+            max_crank_cu = max_crank_cu.max(crank.compute_units);
+        }
+        settlement_price = env.primary_market_state().1.assets[0].effective_price;
+        env.resolve_market()
+            .map_err(|error| format!("PR 353 current-incarnation resolve: {error}"))?;
+        env.warp_to_slot(13);
+        replay_cu = 0;
+    }
+    let (victim_payout, winner_payout) = if land_replay {
+        let (victim_payout, _) = drain_resolved_actor(&mut env, VICTIM)?;
+        let (winner_payout, _) = drain_resolved_actor(&mut env, WINNER)?;
+        (victim_payout, winner_payout)
+    } else {
+        let (winner_payout, _) = drain_resolved_actor(&mut env, WINNER)?;
+        let (victim_payout, _) = drain_resolved_actor(&mut env, VICTIM)?;
+        (victim_payout, winner_payout)
+    };
+    let victim_payout =
+        u64::try_from(victim_payout).map_err(|_| "PR 353 victim payout exceeds SPL range")?;
+    let winner_payout =
+        u64::try_from(winner_payout).map_err(|_| "PR 353 winner payout exceeds SPL range")?;
+    if u128::from(victim_payout) + u128::from(winner_payout) != 2 * DEPOSIT
+        || env.token_supply_observed() != supply_before
+        || replay_cu >= TX_CU_LIMIT
+        || max_crank_cu >= TX_CU_LIMIT
+    {
+        return Err(format!(
+            "PR 353 terminal mismatch: payout={victim_payout}/{winner_payout}, \
+             replay_cu={replay_cu}, crank_cu={max_crank_cu}, supply={}/{}",
+            env.token_supply_observed(),
+            supply_before
+        ));
+    }
+    Ok(ResolveAuthorityIncarnationWorld {
+        victim_payout,
+        winner_payout,
+        settlement_price,
+        replay_cu,
+        max_crank_cu,
+    })
+}
+
+pub fn reproduce_resolve_authority_incarnation_replay(
+    mut seed: [u8; 32],
+) -> Result<ResolveAuthorityIncarnationReplayReproduction, String> {
+    seed[0] ^= 0x53;
+    let control = run_resolve_authority_incarnation_world(seed, false)?;
+    let replay = run_resolve_authority_incarnation_world(seed, true)?;
+    let victim_loss = control
+        .victim_payout
+        .checked_sub(replay.victim_payout)
+        .ok_or("PR 353 replay increased victim payout")?;
+    let winner_gain = replay
+        .winner_payout
+        .checked_sub(control.winner_payout)
+        .ok_or("PR 353 replay decreased winner payout")?;
+    if control.victim_payout != 1_000_000
+        || control.winner_payout != 1_000_000
+        || replay.victim_payout != 900_000
+        || replay.winner_payout != 1_100_000
+        || victim_loss != winner_gain
+        || control.settlement_price != 100
+        || replay.settlement_price != 110
+        || replay.replay_cu == 0
+    {
+        return Err(format!(
+            "PR 353 paired-world mismatch: control={control:?}, replay={replay:?}, \
+             victim_loss={victim_loss}, winner_gain={winner_gain}"
+        ));
+    }
+    Ok(ResolveAuthorityIncarnationReplayReproduction {
+        blocker: KnownBlocker::ResolveAuthorityIncarnationReplay,
+        victim_loss,
+        winner_gain,
+        replay_price: replay.settlement_price,
+        control_price: control.settlement_price,
+        replay_cu: replay.replay_cu,
+        max_crank_cu: replay.max_crank_cu.max(control.max_crank_cu),
+    })
+}
+
 pub fn reproduce_fee_redirect_generation_replay(
     seed: [u8; 32],
 ) -> Result<FeeRedirectGenerationReplayReproduction, String> {
@@ -13273,6 +13452,11 @@ pub fn authority_handoff_aba_replay_strategy(
 
 #[allow(dead_code)]
 pub fn delayed_resolve_policy_replay_seed_strategy() -> impl Strategy<Value = [u8; 32]> {
+    any::<[u8; 32]>()
+}
+
+#[allow(dead_code)]
+pub fn resolve_authority_incarnation_replay_seed_strategy() -> impl Strategy<Value = [u8; 32]> {
     any::<[u8; 32]>()
 }
 

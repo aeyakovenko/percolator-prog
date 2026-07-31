@@ -52,14 +52,15 @@ use support::fuzz_model::{
     reproduce_pending_mark_fee_reward, reproduce_portfolio_incarnation_deposit,
     reproduce_portfolio_incarnation_withdrawal, reproduce_post_expiry_backing_fee,
     reproduce_prospective_funding_rewrite, reproduce_rebalance_funding_erasure,
-    reproduce_reclaimable_ewma_fee, reproduce_resolve_before_committed_accrual,
-    reproduce_resolve_generation_replay, reproduce_rounded_funding_omission,
-    reproduce_shutdown_generation_replay, reproduce_terminal_dust_payout_erasure,
-    reproduce_trade_driven_liquidation_reward, reproduce_trade_funding_erasure,
-    reproduce_trade_retry_replay, reproduce_unstaged_mark_target,
-    reproduce_withdrawal_retry_liquidation, resolve_before_committed_accrual_seed_strategy,
-    resolve_generation_replay_seed_strategy, rounded_funding_seed_strategy, run_scenario,
-    scenario_strategy, shutdown_generation_replay_seed_strategy, target_staging_strategy,
+    reproduce_reclaimable_ewma_fee, reproduce_resolve_authority_incarnation_replay,
+    reproduce_resolve_before_committed_accrual, reproduce_resolve_generation_replay,
+    reproduce_rounded_funding_omission, reproduce_shutdown_generation_replay,
+    reproduce_terminal_dust_payout_erasure, reproduce_trade_driven_liquidation_reward,
+    reproduce_trade_funding_erasure, reproduce_trade_retry_replay, reproduce_unstaged_mark_target,
+    reproduce_withdrawal_retry_liquidation, resolve_authority_incarnation_replay_seed_strategy,
+    resolve_before_committed_accrual_seed_strategy, resolve_generation_replay_seed_strategy,
+    rounded_funding_seed_strategy, run_scenario, scenario_strategy,
+    shutdown_generation_replay_seed_strategy, target_staging_strategy,
     terminal_dust_payout_erasure_strategy, trade_driven_liquidation_reward_strategy,
     trade_funding_erasure_strategy, trade_retry_replay_strategy,
     withdrawal_retry_liquidation_seed_strategy,
@@ -585,6 +586,19 @@ proptest! {
         prop_assert!(
             result.is_ok(),
             "PR 347 no longer reproduces for seed {:?}: {}",
+            seed,
+            result.unwrap_err()
+        );
+    }
+
+    #[test]
+    fn v16_program_pr353_resolve_authority_incarnation_replay_fuzz(
+        seed in resolve_authority_incarnation_replay_seed_strategy()
+    ) {
+        let result = reproduce_resolve_authority_incarnation_replay(seed);
+        prop_assert!(
+            result.is_ok(),
+            "PR 353 no longer reproduces for seed {:?}: {}",
             seed,
             result.unwrap_err()
         );
