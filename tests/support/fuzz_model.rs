@@ -100,10 +100,11 @@ pub enum KnownBlocker {
     ResolveGenerationReplay,
     ShutdownGenerationReplay,
     ActivationFeeConsent,
+    BilateralBaseFeeConsent,
 }
 
 impl KnownBlocker {
-    pub const COUNT: usize = 44;
+    pub const COUNT: usize = 45;
 
     pub const fn index(self) -> usize {
         match self {
@@ -151,6 +152,7 @@ impl KnownBlocker {
             Self::ResolveGenerationReplay => 41,
             Self::ShutdownGenerationReplay => 42,
             Self::ActivationFeeConsent => 43,
+            Self::BilateralBaseFeeConsent => 44,
         }
     }
 }
@@ -613,6 +615,20 @@ pub struct ActivationFeeConsentReproduction {
     pub insured_remainder: u128,
     pub policy_replay_cu: u64,
     pub activation_cu: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BilateralBaseFeeConsentReproduction {
+    pub blocker: KnownBlocker,
+    pub route: TradeRoute,
+    pub signed_fee_bps: u64,
+    pub installed_fee_bps: u64,
+    pub victim_loss: u64,
+    pub beneficiary_profit: u64,
+    pub insurance_extraction: u64,
+    pub total_payout: u128,
+    pub open_cu: u64,
+    pub close_cu: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -5622,6 +5638,146 @@ pub fn reproduce_activation_fee_consent(
     })
 }
 
+pub fn reproduce_bilateral_base_fee_consent(
+    seed: [u8; 32],
+    route: TradeRoute,
+) -> Result<BilateralBaseFeeConsentReproduction, String> {
+    if !matches!(route, TradeRoute::NoCpi | TradeRoute::BatchNoCpi) {
+        return Err(format!(
+            "PR 310 requires a bilateral no-CPI route: {route:?}"
+        ));
+    }
+
+    const ASSET: u16 = 0;
+    const BENEFICIARY: usize = 0;
+    const VICTIM: usize = 1;
+    const DEPOSIT: u128 = 100_000_000;
+    const PRICE: u64 = 1_000_000;
+    const SIZE_Q: i128 = POS_SCALE as i128;
+    const SIGNED_FEE_BPS: u64 = 0;
+    const INSTALLED_FEE_BPS: u64 = 500;
+    const FEE_PER_SIDE_PER_TRADE: u64 = 50_000;
+    const TOTAL_INSURANCE_FEE: u128 = 4 * FEE_PER_SIDE_PER_TRADE as u128;
+
+    let mut env = V16Svm::new(seed, MarketConfig::default());
+    let supply_before = env.token_supply_observed();
+    env.update_asset_authority_from_admin(
+        ASSET,
+        percolator_prog::processor::ASSET_AUTH_INSURANCE_OPERATOR,
+        BENEFICIARY,
+    )
+    .map_err(|error| format!("PR 310 install independent fee beneficiary: {error}"))?;
+
+    let build_trade = |env: &mut V16Svm, size_q: i128| match route {
+        TradeRoute::NoCpi => env.build_retained_no_cpi_trade_with_fee(
+            BENEFICIARY,
+            VICTIM,
+            ASSET,
+            size_q,
+            PRICE,
+            SIGNED_FEE_BPS,
+        ),
+        TradeRoute::BatchNoCpi => env.build_retained_batch_no_cpi_trade_with_fee(
+            BENEFICIARY,
+            VICTIM,
+            ASSET,
+            size_q,
+            PRICE,
+            SIGNED_FEE_BPS,
+        ),
+        TradeRoute::Cpi | TradeRoute::BatchCpi => unreachable!(),
+    };
+    let retained_open = build_trade(&mut env, SIZE_Q);
+    let retained_close = build_trade(&mut env, -SIZE_Q);
+
+    env.update_trade_fee_policy(INSTALLED_FEE_BPS)
+        .map_err(|error| format!("PR 310 raise live base fee after signing: {error}"))?;
+    let open = env
+        .land_retained(retained_open)
+        .map_err(|error| format!("PR 310 retained open no longer lands: {error}"))?;
+    let close = env
+        .land_retained(retained_close)
+        .map_err(|error| format!("PR 310 retained close no longer lands: {error}"))?;
+
+    let beneficiary_capital = env.primary_portfolio(BENEFICIARY).capital.get();
+    let victim_capital = env.primary_portfolio(VICTIM).capital.get();
+    let insurance = env.primary_market_state().1.insurance_domain_budget[0]
+        .checked_add(env.primary_market_state().1.insurance_domain_budget[1])
+        .ok_or("PR 310 insurance total overflow")?;
+    let expected_capital = DEPOSIT
+        .checked_sub(2 * FEE_PER_SIDE_PER_TRADE as u128)
+        .ok_or("PR 310 expected capital underflow")?;
+    if beneficiary_capital != expected_capital
+        || victim_capital != expected_capital
+        || insurance != TOTAL_INSURANCE_FEE
+    {
+        return Err(format!(
+            "PR 310 retained trades did not charge the live fee: capital={beneficiary_capital}/\
+             {victim_capital}, insurance={insurance}"
+        ));
+    }
+
+    let beneficiary_destination = env.actors[BENEFICIARY].destination_token;
+    let victim_destination = env.actors[VICTIM].destination_token;
+    let insurance_withdrawal = env
+        .withdraw_insurance_asset(BENEFICIARY, ASSET, TOTAL_INSURANCE_FEE)
+        .map_err(|error| format!("PR 310 beneficiary could not extract insurance: {error}"))?;
+    let beneficiary_withdrawal = env
+        .withdraw_primary(BENEFICIARY, beneficiary_capital)
+        .map_err(|error| format!("PR 310 beneficiary could not exit: {error}"))?;
+    let victim_withdrawal = env
+        .withdraw_primary(VICTIM, victim_capital)
+        .map_err(|error| format!("PR 310 victim could not exit: {error}"))?;
+
+    let beneficiary_payout = env.token_amount(beneficiary_destination);
+    let victim_payout = env.token_amount(victim_destination);
+    let beneficiary_profit = beneficiary_payout
+        .checked_sub(DEPOSIT as u64)
+        .ok_or("PR 310 beneficiary did not recover its deposit")?;
+    let victim_loss = (DEPOSIT as u64)
+        .checked_sub(victim_payout)
+        .ok_or("PR 310 victim payout exceeded its deposit")?;
+    let total_payout = u128::from(beneficiary_payout) + u128::from(victim_payout);
+    let max_cu = open
+        .compute_units
+        .max(close.compute_units)
+        .max(insurance_withdrawal.compute_units)
+        .max(beneficiary_withdrawal.compute_units)
+        .max(victim_withdrawal.compute_units);
+    if victim_loss != 100_000
+        || beneficiary_profit != victim_loss
+        || beneficiary_payout != 100_100_000
+        || victim_payout != 99_900_000
+        || total_payout != 2 * DEPOSIT
+        || env.primary_market_state().1.insurance_domain_budget[0]
+            + env.primary_market_state().1.insurance_domain_budget[1]
+            != 0
+        || max_cu >= TX_CU_LIMIT
+        || env.token_supply_observed() != supply_before
+    {
+        return Err(format!(
+            "PR 310 terminal extraction mismatch: payouts={beneficiary_payout}/{victim_payout}, \
+             loss/profit={victim_loss}/{beneficiary_profit}, total={total_payout}, max_cu={max_cu}, \
+             supply={}/{}",
+            env.token_supply_observed(),
+            supply_before
+        ));
+    }
+
+    Ok(BilateralBaseFeeConsentReproduction {
+        blocker: KnownBlocker::BilateralBaseFeeConsent,
+        route,
+        signed_fee_bps: SIGNED_FEE_BPS,
+        installed_fee_bps: INSTALLED_FEE_BPS,
+        victim_loss,
+        beneficiary_profit,
+        insurance_extraction: TOTAL_INSURANCE_FEE as u64,
+        total_payout,
+        open_cu: open.compute_units,
+        close_cu: close.compute_units,
+    })
+}
+
 #[derive(Clone, Copy, Debug)]
 struct BackingTopUpRetryWorld {
     provider_loss: u64,
@@ -10074,6 +10230,14 @@ pub fn activation_retry_replay_seed_strategy() -> impl Strategy<Value = [u8; 32]
 #[allow(dead_code)]
 pub fn activation_fee_consent_seed_strategy() -> impl Strategy<Value = [u8; 32]> {
     any::<[u8; 32]>()
+}
+
+#[allow(dead_code)]
+pub fn bilateral_base_fee_consent_strategy() -> impl Strategy<Value = ([u8; 32], TradeRoute)> {
+    (
+        any::<[u8; 32]>(),
+        prop::sample::select(vec![TradeRoute::NoCpi, TradeRoute::BatchNoCpi]),
+    )
 }
 
 #[allow(dead_code)]

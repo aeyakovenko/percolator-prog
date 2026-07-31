@@ -1325,6 +1325,21 @@ impl V16Svm {
         )
     }
 
+    pub fn update_trade_fee_policy(
+        &mut self,
+        trade_fee_base_bps: u64,
+    ) -> Result<TxSuccess, String> {
+        let authority = copy_keypair(&self.admin);
+        self.send_program(
+            ProgInstruction::UpdateTradeFeePolicy { trade_fee_base_bps },
+            vec![
+                AccountMeta::new(authority.pubkey(), true),
+                AccountMeta::new(self.market, false),
+            ],
+            &[authority],
+        )
+    }
+
     pub fn build_retained_market_init_fee_policy(&mut self, min_init_fee: u128) -> Transaction {
         let authority = copy_keypair(&self.admin);
         self.build_program_transaction(
@@ -2007,6 +2022,18 @@ impl V16Svm {
         size_q: i128,
         exec_price: u64,
     ) -> Transaction {
+        self.build_retained_no_cpi_trade_with_fee(taker, maker, asset_index, size_q, exec_price, 0)
+    }
+
+    pub fn build_retained_no_cpi_trade_with_fee(
+        &mut self,
+        taker: usize,
+        maker: usize,
+        asset_index: u16,
+        size_q: i128,
+        exec_price: u64,
+        fee_bps: u64,
+    ) -> Transaction {
         let taker_owner = copy_keypair(&self.actors[taker].signer);
         let maker_owner = copy_keypair(&self.actors[maker].signer);
         self.build_program_transaction(
@@ -2014,7 +2041,7 @@ impl V16Svm {
                 asset_index,
                 size_q,
                 exec_price,
-                fee_bps: 0,
+                fee_bps,
             },
             vec![
                 AccountMeta::new(taker_owner.pubkey(), true),
@@ -2137,6 +2164,25 @@ impl V16Svm {
         size_q: i128,
         exec_price: u64,
     ) -> Transaction {
+        self.build_retained_batch_no_cpi_trade_with_fee(
+            taker,
+            maker,
+            asset_index,
+            size_q,
+            exec_price,
+            0,
+        )
+    }
+
+    pub fn build_retained_batch_no_cpi_trade_with_fee(
+        &mut self,
+        taker: usize,
+        maker: usize,
+        asset_index: u16,
+        size_q: i128,
+        exec_price: u64,
+        fee_bps: u64,
+    ) -> Transaction {
         let taker_owner = copy_keypair(&self.actors[taker].signer);
         let maker_owner = copy_keypair(&self.actors[maker].signer);
         self.build_program_transaction(
@@ -2145,7 +2191,7 @@ impl V16Svm {
                     asset_index,
                     size_q,
                     exec_price,
-                    fee_bps: 0,
+                    fee_bps,
                 }],
             },
             vec![
