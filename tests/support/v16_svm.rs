@@ -1376,6 +1376,48 @@ impl V16Svm {
         )
     }
 
+    pub fn shutdown_asset(&mut self, asset_index: u16, now_slot: u64) -> Result<TxSuccess, String> {
+        let authority = copy_keypair(&self.admin);
+        self.send_program(
+            ProgInstruction::UpdateAssetLifecycle {
+                action: percolator_prog::processor::ASSET_ACTION_SHUTDOWN,
+                asset_index,
+                now_slot,
+                initial_price: 0,
+                insurance_authority: authority.pubkey().to_bytes(),
+                insurance_operator: authority.pubkey().to_bytes(),
+                backing_bucket_authority: authority.pubkey().to_bytes(),
+                oracle_authority: authority.pubkey().to_bytes(),
+            },
+            vec![
+                AccountMeta::new(authority.pubkey(), true),
+                AccountMeta::new(self.market, false),
+            ],
+            &[authority],
+        )
+    }
+
+    pub fn restart_asset_oracle(
+        &mut self,
+        asset_index: u16,
+        now_slot: u64,
+        initial_price: u64,
+    ) -> Result<TxSuccess, String> {
+        let authority = copy_keypair(&self.admin);
+        self.send_program(
+            ProgInstruction::RestartAssetOracle {
+                asset_index,
+                now_slot,
+                initial_price,
+            },
+            vec![
+                AccountMeta::new(authority.pubkey(), true),
+                AccountMeta::new(self.market, false),
+            ],
+            &[authority],
+        )
+    }
+
     pub fn activate_permissionless_asset(
         &mut self,
         creator_index: usize,
@@ -1962,6 +2004,18 @@ impl V16Svm {
                 AccountMeta::new_readonly(spl_token::ID, false),
             ],
             &[owner],
+        )
+    }
+
+    pub fn build_retained_resolve_market(&mut self) -> Transaction {
+        let admin = copy_keypair(&self.admin);
+        self.build_program_transaction(
+            ProgInstruction::ResolveMarket,
+            vec![
+                AccountMeta::new(admin.pubkey(), true),
+                AccountMeta::new(self.market, false),
+            ],
+            &[admin],
         )
     }
 

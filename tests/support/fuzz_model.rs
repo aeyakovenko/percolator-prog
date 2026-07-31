@@ -97,10 +97,11 @@ pub enum KnownBlocker {
     PortfolioIncarnationWithdrawal,
     PortfolioIncarnationDeposit,
     MarketIncarnationDeposit,
+    ResolveGenerationReplay,
 }
 
 impl KnownBlocker {
-    pub const COUNT: usize = 41;
+    pub const COUNT: usize = 42;
 
     pub const fn index(self) -> usize {
         match self {
@@ -145,6 +146,7 @@ impl KnownBlocker {
             Self::PortfolioIncarnationWithdrawal => 38,
             Self::PortfolioIncarnationDeposit => 39,
             Self::MarketIncarnationDeposit => 40,
+            Self::ResolveGenerationReplay => 41,
         }
     }
 }
@@ -663,6 +665,20 @@ pub struct MarketIncarnationDepositReproduction {
     pub new_asset_market_id: u64,
     pub stale_deposit: u64,
     pub beneficiary_extra_payout: u128,
+    pub control_winner_payout: u128,
+    pub replay_winner_payout: u128,
+    pub replay_cu: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ResolveGenerationReplayReproduction {
+    pub blocker: KnownBlocker,
+    pub old_market_id: u64,
+    pub new_market_id: u64,
+    pub victim_loss: u64,
+    pub beneficiary_gain: u64,
+    pub control_victim_payout: u128,
+    pub replay_victim_payout: u128,
     pub control_winner_payout: u128,
     pub replay_winner_payout: u128,
     pub replay_cu: u64,
@@ -6147,6 +6163,175 @@ pub fn reproduce_market_incarnation_deposit(
     })
 }
 
+#[derive(Clone, Copy, Debug)]
+struct ResolveGenerationReplayWorld {
+    old_market_id: u64,
+    new_market_id: u64,
+    victim_payout: u128,
+    winner_payout: u128,
+    replay_cu: u64,
+}
+
+fn run_resolve_generation_replay_world(
+    seed: [u8; 32],
+    land_replay: bool,
+) -> Result<ResolveGenerationReplayWorld, String> {
+    const WINNER: usize = 0;
+    const VICTIM: usize = 1;
+    const PRICE: u64 = 100;
+    const ADVERSE_PRICE: u64 = 110;
+    const DEPOSIT: u128 = 1_000_000;
+    const SIZE_Q: i128 = 10_000 * POS_SCALE as i128;
+
+    let mut env = V16Svm::new(
+        seed,
+        MarketConfig {
+            initial_price: PRICE,
+            max_price_move_bps_per_slot: 1_000,
+            max_accrual_dt_slots: 4,
+            min_funding_lifetime_slots: 4,
+            actor_deposits: [1, 1, 1, 1, 1],
+            actor_token_balances: [DEPOSIT as u64, DEPOSIT as u64, 1, 1, 1],
+            ..MarketConfig::default()
+        },
+    );
+    let supply_before = env.token_supply_observed();
+    env.configure_permissionless_resolve(1_000_000, 1)
+        .map_err(|error| format!("PR 311 configure shutdown delay: {error}"))?;
+    let old_market_id = env.primary_market_state().1.assets[0].market_id;
+    let retained = env.build_retained_resolve_market();
+
+    env.warp_to_slot(2);
+    env.shutdown_asset(0, 2)
+        .map_err(|error| format!("PR 311 shut down generation A: {error}"))?;
+    env.warp_to_slot(3);
+    env.restart_asset_oracle(0, 3, PRICE)
+        .map_err(|error| format!("PR 311 restart generation B: {error}"))?;
+    env.configure_auth_mark(false, 0, 3, PRICE)
+        .map_err(|error| format!("PR 311 configure generation-B AuthMark: {error}"))?;
+    let new_market_id = env.primary_market_state().1.assets[0].market_id;
+    if new_market_id <= old_market_id {
+        return Err(format!(
+            "PR 311 asset generation did not advance: {old_market_id} -> {new_market_id}"
+        ));
+    }
+
+    for actor in [WINNER, VICTIM] {
+        env.deposit_primary(actor, DEPOSIT - 1)
+            .map_err(|error| format!("PR 311 fund generation-B actor {actor}: {error}"))?;
+    }
+    env.trade_no_cpi(WINNER, VICTIM, 0, SIZE_Q, PRICE, 0)
+        .map_err(|error| format!("PR 311 open generation-B positions: {error}"))?;
+
+    env.warp_to_slot(10);
+    env.push_auth_mark(0, 10, ADVERSE_PRICE)
+        .map_err(|error| format!("PR 311 publish temporary adverse mark: {error}"))?;
+    for actor in [VICTIM, WINNER] {
+        env.crank(
+            actor,
+            10,
+            vec![CrankObservationHint {
+                asset_index: 0,
+                oracle_accounts: 0,
+            }],
+        )
+        .map_err(|error| format!("PR 311 refresh actor {actor} at adverse mark: {error}"))?;
+    }
+    if env.primary_market_state().1.assets[0].effective_price != ADVERSE_PRICE {
+        return Err("PR 311 temporary adverse mark did not commit".into());
+    }
+
+    let replay_cu = if land_replay {
+        env.land_retained(retained)
+            .map_err(|error| format!("PR 311 generation-A resolve no longer lands: {error}"))?
+            .compute_units
+    } else {
+        env.warp_to_slot(11);
+        env.push_auth_mark(0, 11, PRICE)
+            .map_err(|error| format!("PR 311 restore authenticated mark: {error}"))?;
+        for actor in [VICTIM, WINNER] {
+            env.crank(
+                actor,
+                11,
+                vec![CrankObservationHint {
+                    asset_index: 0,
+                    oracle_accounts: 0,
+                }],
+            )
+            .map_err(|error| format!("PR 311 refresh actor {actor} at restored mark: {error}"))?;
+        }
+        if env.primary_market_state().1.assets[0].effective_price != PRICE {
+            return Err("PR 311 control mark did not return to entry".into());
+        }
+        env.trade_no_cpi(WINNER, VICTIM, 0, -SIZE_Q, PRICE, 0)
+            .map_err(|error| format!("PR 311 close control positions: {error}"))?;
+        0
+    };
+
+    if !land_replay {
+        env.resolve_market()
+            .map_err(|error| format!("PR 311 resolve control world: {error}"))?;
+    }
+    env.warp_to_slot(12);
+    let (victim_payout, _) = drain_resolved_actor(&mut env, VICTIM)?;
+    let (winner_payout, _) = drain_resolved_actor(&mut env, WINNER)?;
+    if env.token_supply_observed() != supply_before {
+        return Err(format!(
+            "PR 311 terminal supply mismatch: replay={land_replay}, supply={}/{supply_before}",
+            env.token_supply_observed()
+        ));
+    }
+    Ok(ResolveGenerationReplayWorld {
+        old_market_id,
+        new_market_id,
+        victim_payout,
+        winner_payout,
+        replay_cu,
+    })
+}
+
+pub fn reproduce_resolve_generation_replay(
+    seed: [u8; 32],
+) -> Result<ResolveGenerationReplayReproduction, String> {
+    let control = run_resolve_generation_replay_world(seed, false)?;
+    let replay = run_resolve_generation_replay_world(seed, true)?;
+    let victim_loss = control
+        .victim_payout
+        .checked_sub(replay.victim_payout)
+        .ok_or("PR 311 replay increased victim payout")?;
+    let beneficiary_gain = replay
+        .winner_payout
+        .checked_sub(control.winner_payout)
+        .ok_or("PR 311 replay reduced winner payout")?;
+    if control.old_market_id != replay.old_market_id
+        || control.new_market_id != replay.new_market_id
+        || control.victim_payout != 1_000_000
+        || replay.victim_payout != 900_000
+        || control.winner_payout != 1_000_000
+        || replay.winner_payout != 1_100_000
+        || victim_loss != beneficiary_gain
+        || victim_loss != 100_000
+        || replay.replay_cu >= TX_CU_LIMIT
+    {
+        return Err(format!(
+            "PR 311 paired-world mismatch: control={control:?}, replay={replay:?}, \
+             victim_loss={victim_loss}, beneficiary_gain={beneficiary_gain}"
+        ));
+    }
+    Ok(ResolveGenerationReplayReproduction {
+        blocker: KnownBlocker::ResolveGenerationReplay,
+        old_market_id: replay.old_market_id,
+        new_market_id: replay.new_market_id,
+        victim_loss: victim_loss as u64,
+        beneficiary_gain: beneficiary_gain as u64,
+        control_victim_payout: control.victim_payout,
+        replay_victim_payout: replay.victim_payout,
+        control_winner_payout: control.winner_payout,
+        replay_winner_payout: replay.winner_payout,
+        replay_cu: replay.replay_cu,
+    })
+}
+
 pub fn reproduce_withdrawal_retry_liquidation(
     seed: [u8; 32],
 ) -> Result<WithdrawalRetryLiquidationReproduction, String> {
@@ -9596,6 +9781,11 @@ pub fn portfolio_incarnation_deposit_seed_strategy() -> impl Strategy<Value = [u
 
 #[allow(dead_code)]
 pub fn market_incarnation_deposit_seed_strategy() -> impl Strategy<Value = [u8; 32]> {
+    any::<[u8; 32]>()
+}
+
+#[allow(dead_code)]
+pub fn resolve_generation_replay_seed_strategy() -> impl Strategy<Value = [u8; 32]> {
     any::<[u8; 32]>()
 }
 

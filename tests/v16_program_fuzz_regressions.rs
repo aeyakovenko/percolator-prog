@@ -19,13 +19,13 @@ use support::{
         reproduce_portfolio_incarnation_deposit, reproduce_portfolio_incarnation_withdrawal,
         reproduce_post_expiry_backing_fee, reproduce_prospective_funding_rewrite,
         reproduce_rebalance_funding_erasure, reproduce_reclaimable_ewma_fee,
-        reproduce_resolve_before_committed_accrual, reproduce_rounded_funding_omission,
-        reproduce_terminal_dust_payout_erasure, reproduce_trade_driven_liquidation_reward,
-        reproduce_trade_funding_erasure, reproduce_trade_retry_replay,
-        reproduce_unstaged_mark_target, reproduce_withdrawal_retry_liquidation, run_scenario,
-        AssetGenerationConfigPath, AssetGenerationMarkPath, BilateralFeeMode,
-        CompositeRoundingCase, KnownBlocker, PostExpiryBackingCase, Scenario, TargetStagingCase,
-        TradeDrivenLiquidationMode, TradeRoute,
+        reproduce_resolve_before_committed_accrual, reproduce_resolve_generation_replay,
+        reproduce_rounded_funding_omission, reproduce_terminal_dust_payout_erasure,
+        reproduce_trade_driven_liquidation_reward, reproduce_trade_funding_erasure,
+        reproduce_trade_retry_replay, reproduce_unstaged_mark_target,
+        reproduce_withdrawal_retry_liquidation, run_scenario, AssetGenerationConfigPath,
+        AssetGenerationMarkPath, BilateralFeeMode, CompositeRoundingCase, KnownBlocker,
+        PostExpiryBackingCase, Scenario, TargetStagingCase, TradeDrivenLiquidationMode, TradeRoute,
     },
     open_lof_manifest::{missing_prs, quarantined_prs, validate_manifest},
 };
@@ -646,6 +646,21 @@ fn v16_program_pr307_stale_deposit_funds_reinitialized_market_winner() {
 }
 
 #[test]
+fn v16_program_pr311_stale_resolve_crystallizes_replacement_loss() {
+    let reproduction = reproduce_resolve_generation_replay([0x11; 32])
+        .unwrap_or_else(|error| panic!("PR 311 no longer reproduces: {error}"));
+    assert_eq!(reproduction.blocker, KnownBlocker::ResolveGenerationReplay);
+    assert!(reproduction.new_market_id > reproduction.old_market_id);
+    assert_eq!(reproduction.victim_loss, 100_000);
+    assert_eq!(reproduction.beneficiary_gain, 100_000);
+    assert_eq!(reproduction.control_victim_payout, 1_000_000);
+    assert_eq!(reproduction.replay_victim_payout, 900_000);
+    assert_eq!(reproduction.control_winner_payout, 1_000_000);
+    assert_eq!(reproduction.replay_winner_payout, 1_100_000);
+    assert!(reproduction.replay_cu < 1_400_000);
+}
+
+#[test]
 fn v16_program_pr355_withdrawal_retry_liquidates_fresh_risk() {
     let reproduction = reproduce_withdrawal_retry_liquidation([0x55; 32])
         .unwrap_or_else(|error| panic!("PR 355 no longer reproduces: {error}"));
@@ -853,14 +868,14 @@ fn v16_program_open_lof_manifest_is_complete_and_honest() {
         quarantined_prs(),
         [
             220, 223, 224, 225, 231, 251, 253, 255, 260, 264, 265, 267, 271, 272, 273, 275, 277,
-            279, 280, 281, 282, 283, 290, 299, 305, 307, 320, 321, 328, 329, 331, 332, 333, 343,
-            344, 350, 351, 355, 356, 362, 365, 366, 367, 369, 380, 381
+            279, 280, 281, 282, 283, 290, 299, 305, 307, 311, 320, 321, 328, 329, 331, 332, 333,
+            343, 344, 350, 351, 355, 356, 362, 365, 366, 367, 369, 380, 381
         ]
     );
     let missing = missing_prs();
     assert_eq!(
         missing.len(),
-        53,
+        52,
         "update the explicit evidence state when an executable adapter lands"
     );
     assert!(!missing.contains(&220));
@@ -889,6 +904,7 @@ fn v16_program_open_lof_manifest_is_complete_and_honest() {
     assert!(!missing.contains(&299));
     assert!(!missing.contains(&305));
     assert!(!missing.contains(&307));
+    assert!(!missing.contains(&311));
     assert!(!missing.contains(&320));
     assert!(!missing.contains(&321));
     assert!(!missing.contains(&328));
