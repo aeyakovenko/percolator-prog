@@ -112,10 +112,11 @@ pub enum KnownBlocker {
     DelayedBackingFeePolicyReplay,
     DelayedOracleIntentReplay,
     DelayedMatcherEnableReplay,
+    BackingFeeConsentReplay,
 }
 
 impl KnownBlocker {
-    pub const COUNT: usize = 56;
+    pub const COUNT: usize = 57;
 
     pub const fn index(self) -> usize {
         match self {
@@ -175,6 +176,7 @@ impl KnownBlocker {
             Self::DelayedBackingFeePolicyReplay => 53,
             Self::DelayedOracleIntentReplay => 54,
             Self::DelayedMatcherEnableReplay => 55,
+            Self::BackingFeeConsentReplay => 56,
         }
     }
 }
@@ -289,6 +291,12 @@ pub enum AssetGenerationConfigPath {
 pub enum DelayedOracleIntentPath {
     PushAuth,
     ConfigureAuth,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BackingFeeConsentOrder {
+    FundedThenPolicy,
+    PolicyThenTopUp,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -764,6 +772,18 @@ pub struct DelayedMatcherEnableReplayReproduction {
     pub attacker_gain: u64,
     pub control_fill_blocked: bool,
     pub replay_cu: u64,
+    pub max_cu: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BackingFeeConsentReplayReproduction {
+    pub blocker: KnownBlocker,
+    pub order: BackingFeeConsentOrder,
+    pub provider_loss: u64,
+    pub operator_gain: u64,
+    pub charged_fee: u64,
+    pub replay_cu: u64,
+    pub trade_cu: u64,
     pub max_cu: u64,
 }
 
@@ -7492,6 +7512,289 @@ pub fn reproduce_delayed_matcher_enable_replay(
     })
 }
 
+#[derive(Clone, Copy, Debug)]
+struct BackingFeeConsentWorld {
+    provider_withdrawn: u64,
+    operator_withdrawn: u64,
+    charged_fee: u64,
+    replay_cu: u64,
+    trade_cu: u64,
+    max_cu: u64,
+}
+
+fn run_backing_fee_consent_world(
+    seed: [u8; 32],
+    order: BackingFeeConsentOrder,
+    land_replay: bool,
+) -> Result<BackingFeeConsentWorld, String> {
+    const MARKET_TRADER: usize = 0;
+    const PROVIDER: usize = 1;
+    const POLICY_AUTHORITY: usize = 2;
+    const OPERATOR: usize = 3;
+    const LP: usize = EXIT_MAKER_INDEX;
+    const ASSET: u16 = 1;
+    const WINNING_DOMAIN: u16 = ASSET * 2 + 1;
+    const INITIAL_PRICE: u64 = 100;
+    const BACKING_FEE_BPS: u16 = 5_000;
+    const WINNING_SIZE_Q: i128 = 200 * POS_SCALE as i128;
+    const LOSING_SIZE_Q: i128 = 100 * POS_SCALE as i128;
+    const INCREASE_Q: i128 = 20 * POS_SCALE as i128;
+    const BACKING_PRINCIPAL: u128 = 5_000;
+    const EXPECTED_FEE: u64 = 70;
+
+    let mut env = V16Svm::new(
+        seed,
+        MarketConfig {
+            initial_price: INITIAL_PRICE,
+            h_max: 2,
+            maintenance_margin_bps: 1_000,
+            initial_margin_bps: 1_000,
+            max_price_move_bps_per_slot: 500,
+            max_accrual_dt_slots: 1,
+            min_funding_lifetime_slots: 1,
+            maintenance_fee_per_slot: 30,
+            actor_deposits: [10_000, 1, 1, 10_000, 3_130],
+            ..MarketConfig::default()
+        },
+    );
+    let supply_before = env.token_supply_observed();
+    let mut max_cu = 0;
+    for (kind, actor) in [
+        (
+            percolator_prog::processor::ASSET_AUTH_INSURANCE,
+            POLICY_AUTHORITY,
+        ),
+        (
+            percolator_prog::processor::ASSET_AUTH_INSURANCE_OPERATOR,
+            OPERATOR,
+        ),
+        (
+            percolator_prog::processor::ASSET_AUTH_BACKING_BUCKET,
+            PROVIDER,
+        ),
+        (
+            percolator_prog::processor::ASSET_AUTH_ORACLE,
+            POLICY_AUTHORITY,
+        ),
+    ] {
+        let handoff = env
+            .update_asset_authority_from_admin(ASSET, kind, actor)
+            .map_err(|error| format!("PR 339 authority handoff {kind}: {error}"))?;
+        max_cu = max_cu.max(handoff.compute_units);
+    }
+
+    let mut stale_policy = Some(env.build_retained_backing_fee_policy_for_actor(
+        POLICY_AUTHORITY,
+        WINNING_DOMAIN,
+        BACKING_FEE_BPS,
+        10_000,
+    ));
+    let correction = env
+        .update_backing_fee_policy_for_actor(POLICY_AUTHORITY, WINNING_DOMAIN, BACKING_FEE_BPS, 0)
+        .map_err(|error| format!("PR 339 accepted provider split: {error}"))?;
+    max_cu = max_cu.max(correction.compute_units);
+    let retained_top_up = env.build_retained_backing_bucket_top_up_for_actor(
+        PROVIDER,
+        WINNING_DOMAIN,
+        BACKING_PRINCIPAL,
+        100,
+    );
+    let retained_trade = env.build_retained_no_cpi_trade(OPERATOR, LP, 0, -INCREASE_Q, 95);
+    let mut replay_cu = 0;
+
+    match order {
+        BackingFeeConsentOrder::FundedThenPolicy => {
+            let top_up = env
+                .top_up_backing_bucket_for_actor(PROVIDER, WINNING_DOMAIN, BACKING_PRINCIPAL, 100)
+                .map_err(|error| format!("PR 339 provider top-up: {error}"))?;
+            max_cu = max_cu.max(top_up.compute_units);
+        }
+        BackingFeeConsentOrder::PolicyThenTopUp => {
+            if land_replay {
+                let replay = env
+                    .land_retained(
+                        stale_policy
+                            .take()
+                            .ok_or("PR 339 stale policy already consumed")?,
+                    )
+                    .map_err(|error| format!("PR 339 stale pre-top-up split: {error}"))?;
+                replay_cu = replay.compute_units;
+                max_cu = max_cu.max(replay.compute_units);
+            }
+            let top_up = env
+                .land_retained(retained_top_up)
+                .map_err(|error| format!("PR 339 retained provider top-up: {error}"))?;
+            max_cu = max_cu.max(top_up.compute_units);
+        }
+    }
+
+    env.trade_no_cpi(MARKET_TRADER, LP, ASSET, -WINNING_SIZE_Q, INITIAL_PRICE, 0)
+        .map_err(|error| format!("PR 339 establish LP winning leg: {error}"))?;
+    env.trade_no_cpi(MARKET_TRADER, LP, 0, -LOSING_SIZE_Q, INITIAL_PRICE, 0)
+        .map_err(|error| format!("PR 339 establish LP losing leg: {error}"))?;
+    env.warp_to_slot(2);
+    env.push_auth_mark_for_actor(POLICY_AUTHORITY, ASSET, 2, INITIAL_PRICE)
+        .map_err(|error| format!("PR 339 prime winning mark: {error}"))?;
+    env.push_auth_mark(0, 2, INITIAL_PRICE)
+        .map_err(|error| format!("PR 339 prime base mark: {error}"))?;
+    for (actor, asset) in [
+        (MARKET_TRADER, ASSET),
+        (LP, ASSET),
+        (MARKET_TRADER, 0),
+        (LP, 0),
+    ] {
+        crank_adapter_steps(&mut env, actor, 2, asset, 4)
+            .map_err(|error| format!("PR 339 prime settlement: {error}"))?;
+    }
+    env.sync_maintenance_fee(LP, 2)
+        .map_err(|error| format!("PR 339 sync LP maintenance fee: {error}"))?;
+
+    env.warp_to_slot(3);
+    env.push_auth_mark_for_actor(POLICY_AUTHORITY, ASSET, 3, 105)
+        .map_err(|error| format!("PR 339 push winning mark: {error}"))?;
+    env.push_auth_mark(0, 3, 95)
+        .map_err(|error| format!("PR 339 push losing mark: {error}"))?;
+    for (actor, asset) in [(MARKET_TRADER, ASSET), (LP, ASSET), (MARKET_TRADER, 0)] {
+        crank_adapter_steps(&mut env, actor, 3, asset, 4)
+            .map_err(|error| format!("PR 339 source-backed settlement: {error}"))?;
+    }
+    if env.primary_portfolio(LP).pnl.get() != 1_000 {
+        return Err(format!(
+            "PR 339 LP source-backed PnL {}, expected 1000",
+            env.primary_portfolio(LP).pnl.get()
+        ));
+    }
+
+    if order == BackingFeeConsentOrder::FundedThenPolicy && land_replay {
+        let replay = env
+            .land_retained(
+                stale_policy
+                    .take()
+                    .ok_or("PR 339 stale policy already consumed")?,
+            )
+            .map_err(|error| format!("PR 339 stale funded-bucket split: {error}"))?;
+        replay_cu = replay.compute_units;
+        max_cu = max_cu.max(replay.compute_units);
+    }
+    let before = env.primary_market_state().1;
+    let provider_before =
+        before.source_backing_buckets[WINNING_DOMAIN as usize].utilization_fee_earnings;
+    let insurance_before = before.insurance_domain_budget[WINNING_DOMAIN as usize];
+    let lp_before = env.primary_portfolio(LP).capital.get();
+    let trade = env
+        .land_retained(retained_trade)
+        .map_err(|error| format!("PR 339 retained fee-bearing trade: {error}"))?;
+    max_cu = max_cu.max(trade.compute_units);
+    let after = env.primary_market_state().1;
+    let provider_fee = after.source_backing_buckets[WINNING_DOMAIN as usize]
+        .utilization_fee_earnings
+        .checked_sub(provider_before)
+        .ok_or("PR 339 provider earnings decreased")?;
+    let insurance_fee = after.insurance_domain_budget[WINNING_DOMAIN as usize]
+        .checked_sub(insurance_before)
+        .ok_or("PR 339 insurance budget decreased")?;
+    let charged_fee = lp_before
+        .checked_sub(env.primary_portfolio(LP).capital.get())
+        .ok_or("PR 339 trade increased LP capital")?;
+    if provider_fee + insurance_fee != u128::from(EXPECTED_FEE)
+        || charged_fee != u128::from(EXPECTED_FEE)
+    {
+        return Err(format!(
+            "PR 339 fee mismatch: provider={provider_fee}, insurance={insurance_fee}, \
+             charged={charged_fee}"
+        ));
+    }
+
+    let provider_destination = env.actors[PROVIDER].destination_token;
+    let operator_destination = env.actors[OPERATOR].destination_token;
+    let provider_destination_before = env.token_amount(provider_destination);
+    let operator_destination_before = env.token_amount(operator_destination);
+    if provider_fee > 0 {
+        let withdrawal = env
+            .withdraw_backing_bucket_earnings_for_actor(PROVIDER, WINNING_DOMAIN, provider_fee)
+            .map_err(|error| format!("PR 339 provider earnings withdrawal: {error}"))?;
+        max_cu = max_cu.max(withdrawal.compute_units);
+    }
+    if insurance_fee > 0 {
+        let withdrawal = env
+            .withdraw_insurance_asset(OPERATOR, ASSET, insurance_fee)
+            .map_err(|error| format!("PR 339 operator insurance withdrawal: {error}"))?;
+        max_cu = max_cu.max(withdrawal.compute_units);
+    }
+    let provider_withdrawn = env
+        .token_amount(provider_destination)
+        .checked_sub(provider_destination_before)
+        .ok_or("PR 339 provider destination decreased")?;
+    let operator_withdrawn = env
+        .token_amount(operator_destination)
+        .checked_sub(operator_destination_before)
+        .ok_or("PR 339 operator destination decreased")?;
+    if u128::from(provider_withdrawn) != provider_fee
+        || u128::from(operator_withdrawn) != insurance_fee
+        || env.token_supply_observed() != supply_before
+        || max_cu >= TX_CU_LIMIT
+    {
+        return Err(format!(
+            "PR 339 extraction mismatch: provider={provider_withdrawn}/{provider_fee}, \
+             operator={operator_withdrawn}/{insurance_fee}, max_cu={max_cu}, supply={}/{}",
+            env.token_supply_observed(),
+            supply_before
+        ));
+    }
+
+    Ok(BackingFeeConsentWorld {
+        provider_withdrawn,
+        operator_withdrawn,
+        charged_fee: charged_fee as u64,
+        replay_cu,
+        trade_cu: trade.compute_units,
+        max_cu,
+    })
+}
+
+pub fn reproduce_backing_fee_consent_replay(
+    mut seed: [u8; 32],
+    order: BackingFeeConsentOrder,
+) -> Result<BackingFeeConsentReplayReproduction, String> {
+    seed[0] ^= match order {
+        BackingFeeConsentOrder::FundedThenPolicy => 0x39,
+        BackingFeeConsentOrder::PolicyThenTopUp => 0x93,
+    };
+    let control = run_backing_fee_consent_world(seed, order, false)?;
+    let replay = run_backing_fee_consent_world(seed, order, true)?;
+    let provider_loss = control
+        .provider_withdrawn
+        .checked_sub(replay.provider_withdrawn)
+        .ok_or("PR 339 replay increased provider payout")?;
+    let operator_gain = replay
+        .operator_withdrawn
+        .checked_sub(control.operator_withdrawn)
+        .ok_or("PR 339 replay decreased operator payout")?;
+    if control.provider_withdrawn != 70
+        || control.operator_withdrawn != 0
+        || replay.provider_withdrawn != 0
+        || replay.operator_withdrawn != 70
+        || provider_loss != operator_gain
+        || replay.replay_cu == 0
+        || control.charged_fee != replay.charged_fee
+    {
+        return Err(format!(
+            "PR 339 {order:?} paired-world mismatch: control={control:?}, replay={replay:?}, \
+             provider_loss={provider_loss}, operator_gain={operator_gain}"
+        ));
+    }
+    Ok(BackingFeeConsentReplayReproduction {
+        blocker: KnownBlocker::BackingFeeConsentReplay,
+        order,
+        provider_loss,
+        operator_gain,
+        charged_fee: replay.charged_fee,
+        replay_cu: replay.replay_cu,
+        trade_cu: replay.trade_cu,
+        max_cu: replay.max_cu.max(control.max_cu),
+    })
+}
+
 pub fn reproduce_fee_redirect_generation_replay(
     seed: [u8; 32],
 ) -> Result<FeeRedirectGenerationReplayReproduction, String> {
@@ -12535,6 +12838,18 @@ pub fn delayed_oracle_intent_replay_strategy(
 #[allow(dead_code)]
 pub fn delayed_matcher_enable_replay_seed_strategy() -> impl Strategy<Value = [u8; 32]> {
     any::<[u8; 32]>()
+}
+
+#[allow(dead_code)]
+pub fn backing_fee_consent_replay_strategy(
+) -> impl Strategy<Value = ([u8; 32], BackingFeeConsentOrder)> {
+    (
+        any::<[u8; 32]>(),
+        prop::sample::select(vec![
+            BackingFeeConsentOrder::FundedThenPolicy,
+            BackingFeeConsentOrder::PolicyThenTopUp,
+        ]),
+    )
 }
 
 #[allow(dead_code)]
