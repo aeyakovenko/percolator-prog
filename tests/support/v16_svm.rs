@@ -744,6 +744,20 @@ impl V16Svm {
         )
     }
 
+    pub fn build_retained_close_primary_portfolio(&mut self, actor_index: usize) -> Transaction {
+        let actor = &self.actors[actor_index];
+        let owner = copy_keypair(&actor.signer);
+        self.build_program_transaction(
+            ProgInstruction::ClosePortfolio,
+            vec![
+                AccountMeta::new(owner.pubkey(), true),
+                AccountMeta::new(self.market, false),
+                AccountMeta::new(actor.portfolio, false),
+            ],
+            &[owner],
+        )
+    }
+
     pub fn fund_closed_primary_portfolio(
         &mut self,
         actor_index: usize,
@@ -2891,6 +2905,13 @@ impl V16Svm {
         TokenAccount::unpack(&account.data)
             .expect("decode token account")
             .amount
+    }
+
+    pub fn account_lamports(&self, key: Pubkey) -> u64 {
+        self.svm
+            .get_account(&key)
+            .map(|account| account.lamports)
+            .unwrap_or(0)
     }
 
     pub fn token_supply_observed(&self) -> u128 {

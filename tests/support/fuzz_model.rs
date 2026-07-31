@@ -116,10 +116,11 @@ pub enum KnownBlocker {
     AuthorityHandoffAbaReplay,
     DelayedResolvePolicyReplay,
     ResolveAuthorityIncarnationReplay,
+    PortfolioCloseIncarnationReplay,
 }
 
 impl KnownBlocker {
-    pub const COUNT: usize = 60;
+    pub const COUNT: usize = 61;
 
     pub const fn index(self) -> usize {
         match self {
@@ -183,6 +184,7 @@ impl KnownBlocker {
             Self::AuthorityHandoffAbaReplay => 57,
             Self::DelayedResolvePolicyReplay => 58,
             Self::ResolveAuthorityIncarnationReplay => 59,
+            Self::PortfolioCloseIncarnationReplay => 60,
         }
     }
 }
@@ -832,6 +834,16 @@ pub struct ResolveAuthorityIncarnationReplayReproduction {
     pub control_price: u64,
     pub replay_cu: u64,
     pub max_crank_cu: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PortfolioCloseIncarnationReplayReproduction {
+    pub blocker: KnownBlocker,
+    pub original_portfolio_id: u64,
+    pub replacement_portfolio_id: u64,
+    pub drained_lamports: u64,
+    pub market_lamport_gain: u64,
+    pub replay_cu: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -8381,6 +8393,117 @@ pub fn reproduce_resolve_authority_incarnation_replay(
     })
 }
 
+#[derive(Clone, Copy, Debug)]
+struct PortfolioCloseIncarnationWorld {
+    original_portfolio_id: u64,
+    replacement_portfolio_id: u64,
+    replacement_lamports_before: u64,
+    replacement_lamports_after: u64,
+    market_lamport_gain: u64,
+    replay_cu: u64,
+}
+
+fn run_portfolio_close_incarnation_world(
+    seed: [u8; 32],
+    land_replay: bool,
+) -> Result<PortfolioCloseIncarnationWorld, String> {
+    const VICTIM: usize = 0;
+    const REPLACEMENT_FUNDING: u64 = 1_000_000_000;
+
+    let mut env = V16Svm::new(
+        seed,
+        MarketConfig {
+            actor_deposits: [1, 1, 1, 1, 1],
+            ..MarketConfig::default()
+        },
+    );
+    let supply_before = env.token_supply_observed();
+    env.withdraw_primary(VICTIM, 1)
+        .map_err(|error| format!("PR 309 empty incarnation A: {error}"))?;
+    let original_portfolio_id = env.primary_portfolio_id(VICTIM);
+    let retained_close = env.build_retained_close_primary_portfolio(VICTIM);
+    env.close_primary_portfolio(VICTIM)
+        .map_err(|error| format!("PR 309 close incarnation A: {error}"))?;
+    env.fund_closed_primary_portfolio(VICTIM, REPLACEMENT_FUNDING)
+        .map_err(|error| format!("PR 309 fund replacement account: {error}"))?;
+    env.reinitialize_primary_portfolio(VICTIM)
+        .map_err(|error| format!("PR 309 initialize incarnation B: {error}"))?;
+    let replacement_portfolio_id = env.primary_portfolio_id(VICTIM);
+    if replacement_portfolio_id <= original_portfolio_id {
+        return Err(format!(
+            "PR 309 portfolio ID did not advance: {original_portfolio_id}->{replacement_portfolio_id}"
+        ));
+    }
+    let portfolio = env.actors[VICTIM].portfolio;
+    let replacement_lamports_before = env.account_lamports(portfolio);
+    let market_lamports_before = env.account_lamports(env.market);
+    let replay_cu = if land_replay {
+        env.land_retained(retained_close)
+            .map_err(|error| format!("PR 309 stale close no longer lands: {error}"))?
+            .compute_units
+    } else {
+        0
+    };
+    let replacement_lamports_after = env.account_lamports(portfolio);
+    let market_lamport_gain = env
+        .account_lamports(env.market)
+        .checked_sub(market_lamports_before)
+        .ok_or("PR 309 market lamports decreased")?;
+    if replacement_lamports_before < REPLACEMENT_FUNDING
+        || env.token_supply_observed() != supply_before
+        || replay_cu >= TX_CU_LIMIT
+    {
+        return Err(format!(
+            "PR 309 lifecycle mismatch: replacement_lamports={replacement_lamports_before}, \
+             replay_cu={replay_cu}, supply={}/{}",
+            env.token_supply_observed(),
+            supply_before
+        ));
+    }
+    Ok(PortfolioCloseIncarnationWorld {
+        original_portfolio_id,
+        replacement_portfolio_id,
+        replacement_lamports_before,
+        replacement_lamports_after,
+        market_lamport_gain,
+        replay_cu,
+    })
+}
+
+pub fn reproduce_portfolio_close_incarnation_replay(
+    mut seed: [u8; 32],
+) -> Result<PortfolioCloseIncarnationReplayReproduction, String> {
+    seed[0] ^= 0x09;
+    let control = run_portfolio_close_incarnation_world(seed, false)?;
+    let replay = run_portfolio_close_incarnation_world(seed, true)?;
+    let drained_lamports = control
+        .replacement_lamports_after
+        .checked_sub(replay.replacement_lamports_after)
+        .ok_or("PR 309 replay increased replacement lamports")?;
+    if control.original_portfolio_id != replay.original_portfolio_id
+        || control.replacement_portfolio_id != replay.replacement_portfolio_id
+        || control.replacement_lamports_before != control.replacement_lamports_after
+        || replay.replacement_lamports_after != 0
+        || drained_lamports != replay.replacement_lamports_before
+        || replay.market_lamport_gain != drained_lamports
+        || control.market_lamport_gain != 0
+        || replay.replay_cu == 0
+    {
+        return Err(format!(
+            "PR 309 paired-world mismatch: control={control:?}, replay={replay:?}, \
+             drained={drained_lamports}"
+        ));
+    }
+    Ok(PortfolioCloseIncarnationReplayReproduction {
+        blocker: KnownBlocker::PortfolioCloseIncarnationReplay,
+        original_portfolio_id: replay.original_portfolio_id,
+        replacement_portfolio_id: replay.replacement_portfolio_id,
+        drained_lamports,
+        market_lamport_gain: replay.market_lamport_gain,
+        replay_cu: replay.replay_cu,
+    })
+}
+
 pub fn reproduce_fee_redirect_generation_replay(
     seed: [u8; 32],
 ) -> Result<FeeRedirectGenerationReplayReproduction, String> {
@@ -13457,6 +13580,11 @@ pub fn delayed_resolve_policy_replay_seed_strategy() -> impl Strategy<Value = [u
 
 #[allow(dead_code)]
 pub fn resolve_authority_incarnation_replay_seed_strategy() -> impl Strategy<Value = [u8; 32]> {
+    any::<[u8; 32]>()
+}
+
+#[allow(dead_code)]
+pub fn portfolio_close_incarnation_replay_seed_strategy() -> impl Strategy<Value = [u8; 32]> {
     any::<[u8; 32]>()
 }
 
