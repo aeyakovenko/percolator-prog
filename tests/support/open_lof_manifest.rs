@@ -50,8 +50,7 @@ pub enum BlockerAdapter {
     Pr271TradeFundingErasure,
     Pr272RebalanceFundingErasure,
     Pr273ForfeitFundingErasure,
-    Pr275AssetGenerationMarkReplay,
-    Pr277AssetGenerationConfigReplay,
+    OracleGenerationReplayFamily,
     Pr280TradeDrivenLiquidationReward,
     Pr281CrossDomainBSettlement,
     Pr282PendingEwmaTargetOverride,
@@ -102,8 +101,7 @@ impl BlockerAdapter {
             Self::Pr271TradeFundingErasure => 271,
             Self::Pr272RebalanceFundingErasure => 272,
             Self::Pr273ForfeitFundingErasure => 273,
-            Self::Pr275AssetGenerationMarkReplay => 275,
-            Self::Pr277AssetGenerationConfigReplay => 277,
+            Self::OracleGenerationReplayFamily => 322,
             Self::Pr280TradeDrivenLiquidationReward => 280,
             Self::Pr281CrossDomainBSettlement => 281,
             Self::Pr282PendingEwmaTargetOverride => 282,
@@ -127,6 +125,7 @@ impl BlockerAdapter {
             Self::CompositeOracleRounding => pr == 329 || pr == 381,
             Self::TargetStaging => matches!(pr, 264 | 265 | 332 | 333),
             Self::Pr279CollateralTopUpGenerationReplay => pr == 279 || pr == 320,
+            Self::OracleGenerationReplayFamily => matches!(pr, 275 | 277 | 322),
             _ => self.canonical_pr() == pr,
         }
     }
@@ -271,14 +270,14 @@ pub const OPEN_LOFS: &[OpenLof] = &[
         275,
         Blocker,
         ReplayIncarnation,
-        BlockerAdapter::Pr275AssetGenerationMarkReplay,
+        BlockerAdapter::OracleGenerationReplayFamily,
     ),
     OpenLof::missing(276, Hardening, ReplayIncarnation),
     OpenLof::quarantined(
         277,
         Blocker,
         ReplayIncarnation,
-        BlockerAdapter::Pr277AssetGenerationConfigReplay,
+        BlockerAdapter::OracleGenerationReplayFamily,
     ),
     OpenLof::missing(278, Hardening, ReplayIncarnation),
     OpenLof::quarantined(
@@ -399,7 +398,12 @@ pub const OPEN_LOFS: &[OpenLof] = &[
         ReplayIncarnation,
         BlockerAdapter::Pr321BackingTopUpGenerationReplay,
     ),
-    OpenLof::missing(322, Blocker, ReplayIncarnation),
+    OpenLof::quarantined(
+        322,
+        Blocker,
+        ReplayIncarnation,
+        BlockerAdapter::OracleGenerationReplayFamily,
+    ),
     OpenLof::quarantined(
         325,
         Blocker,

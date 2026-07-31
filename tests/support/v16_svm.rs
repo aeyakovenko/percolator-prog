@@ -1130,6 +1130,50 @@ impl V16Svm {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub fn build_retained_hybrid_oracle_config(
+        &mut self,
+        asset_index: u16,
+        now_slot: u64,
+        now_unix_ts: i64,
+        oracle_leg_flags: u8,
+        feeds: [[u8; 32]; 3],
+        oracle_accounts: &[Pubkey],
+        hybrid_soft_stale_slots: u64,
+        conf_filter_bps: u16,
+    ) -> Transaction {
+        let authority = copy_keypair(&self.admin);
+        let mut accounts = vec![
+            AccountMeta::new(authority.pubkey(), true),
+            AccountMeta::new(self.market, false),
+        ];
+        accounts.extend(
+            oracle_accounts
+                .iter()
+                .copied()
+                .map(|key| AccountMeta::new_readonly(key, false)),
+        );
+        self.build_program_transaction(
+            ProgInstruction::ConfigureHybridOracle {
+                asset_index,
+                now_slot,
+                now_unix_ts,
+                oracle_leg_count: oracle_accounts.len() as u8,
+                oracle_leg_flags,
+                max_staleness_secs: 60,
+                hybrid_soft_stale_slots,
+                mark_ewma_halflife_slots: 1,
+                mark_min_fee: 0,
+                invert: 0,
+                unit_scale: 0,
+                conf_filter_bps,
+                oracle_leg_feeds: feeds,
+            },
+            accounts,
+            &[authority],
+        )
+    }
+
     pub fn configure_auth_mark_for_actor(
         &mut self,
         actor_index: usize,

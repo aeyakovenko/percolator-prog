@@ -685,13 +685,13 @@ proptest! {
     }
 
     #[test]
-    fn v16_program_pr277_asset_generation_config_replay_fuzz(
+    fn v16_program_pr277_pr322_asset_generation_config_replay_fuzz(
         (seed, path) in asset_generation_config_replay_strategy()
     ) {
         let result = reproduce_asset_generation_config_replay(seed, path);
         prop_assert!(
             result.is_ok(),
-            "PR 277 {:?} no longer reproduces for seed {:?}: {}",
+            "PR 277/322 {:?} no longer reproduces for seed {:?}: {}",
             path,
             seed,
             result.unwrap_err()

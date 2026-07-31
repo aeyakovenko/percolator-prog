@@ -266,6 +266,7 @@ pub enum AssetGenerationMarkPath {
 pub enum AssetGenerationConfigPath {
     Auth,
     Ewma,
+    Hybrid,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -3067,6 +3068,64 @@ pub fn reproduce_asset_generation_config_replay(
     path: AssetGenerationConfigPath,
 ) -> Result<AssetGenerationConfigReplayReproduction, String> {
     seed[0] ^= 0x77;
+    if path == AssetGenerationConfigPath::Hybrid {
+        let control = run_asset_generation_hybrid_config_world(seed, false)?;
+        let replay = run_asset_generation_hybrid_config_world(seed, true)?;
+        if control.old_market_id != replay.old_market_id
+            || control.new_market_id != replay.new_market_id
+            || control.old_market_id == control.new_market_id
+        {
+            return Err(format!(
+                "{path:?} config-replay worlds did not use the same distinct generations: control {}/{}, replay {}/{}",
+                control.old_market_id,
+                control.new_market_id,
+                replay.old_market_id,
+                replay.new_market_id
+            ));
+        }
+        let victim_equity_loss = control
+            .victim_equity
+            .checked_sub(replay.victim_equity)
+            .ok_or("stale Hybrid config increased victim payout")?;
+        let beneficiary_extra_payout = replay
+            .beneficiary_payout
+            .checked_sub(control.beneficiary_payout)
+            .ok_or("stale Hybrid config decreased beneficiary payout")?;
+        if replay.entry_price != control.entry_price
+            || replay.restored_mark <= control.restored_mark
+            || victim_equity_loss == 0
+            || victim_equity_loss != u128::from(beneficiary_extra_payout)
+            || control.victim_equity + u128::from(control.beneficiary_payout)
+                != replay.victim_equity + u128::from(replay.beneficiary_payout)
+        {
+            return Err(format!(
+                "{path:?} stale config did not create a terminal transfer: mark {}/{}, victim {}/{}, beneficiary {}/{}",
+                control.entry_price,
+                replay.entry_price,
+                control.victim_equity,
+                replay.victim_equity,
+                control.beneficiary_payout,
+                replay.beneficiary_payout
+            ));
+        }
+        if control.observed_token_supply != replay.observed_token_supply {
+            return Err(format!(
+                "{path:?} stale config replay changed observed SPL supply: control {}, replay {}",
+                control.observed_token_supply, replay.observed_token_supply
+            ));
+        }
+        return Ok(AssetGenerationConfigReplayReproduction {
+            blocker: KnownBlocker::AssetGenerationConfigReplay,
+            path,
+            old_market_id: replay.old_market_id,
+            new_market_id: replay.new_market_id,
+            stale_entry_price: replay.entry_price,
+            restored_mark: replay.restored_mark,
+            victim_equity_loss,
+            beneficiary_extra_payout,
+            observed_token_supply: replay.observed_token_supply,
+        });
+    }
     let control = run_asset_generation_config_world(seed, path, false)?;
     let replay = run_asset_generation_config_world(seed, path, true)?;
     if control.old_market_id != replay.old_market_id
@@ -10122,6 +10181,169 @@ struct AssetGenerationConfigWorld {
     observed_token_supply: u128,
 }
 
+fn run_asset_generation_hybrid_config_world(
+    seed: [u8; 32],
+    land_replay: bool,
+) -> Result<AssetGenerationConfigWorld, String> {
+    const ASSET: u16 = 1;
+    const HONEST_PRICE: u64 = 100;
+    const REPLAY_PRICE: u64 = 105;
+    const SIZE_Q: i128 = 20 * POS_SCALE as i128;
+    const DEPOSIT: u128 = 1_000;
+    const VICTIM: usize = 0;
+    const BENEFICIARY: usize = 1;
+
+    let mut env = V16Svm::new(
+        seed,
+        MarketConfig {
+            initial_price: HONEST_PRICE,
+            maintenance_margin_bps: 1_000,
+            initial_margin_bps: 1_000,
+            max_price_move_bps_per_slot: 500,
+            max_accrual_dt_slots: 1,
+            min_funding_lifetime_slots: 1,
+            actor_deposits: [
+                DEPOSIT,
+                DEPOSIT,
+                DEPOSIT,
+                DEPOSIT,
+                super::v16_svm::EXIT_MAKER_DEPOSIT,
+            ],
+            ..MarketConfig::default()
+        },
+    );
+    env.set_clock(1, 100);
+    let feed = [0x22u8; 32];
+    let replay_oracle = env.set_pyth_price(&feed, HONEST_PRICE as i64, -6, 0, 100);
+    env.configure_hybrid_oracle(
+        ASSET,
+        1,
+        100,
+        0,
+        [feed, [0; 32], [0; 32]],
+        &[replay_oracle],
+        1,
+        0,
+    )
+    .map_err(|error| format!("Hybrid configure generation-A oracle: {error}"))?;
+    let old_market_id = env.primary_market_state().1.assets[ASSET as usize].market_id;
+    let stale_config = env.build_retained_hybrid_oracle_config(
+        ASSET,
+        5,
+        100,
+        0,
+        [feed, [0; 32], [0; 32]],
+        &[replay_oracle],
+        1,
+        0,
+    );
+
+    env.update_market_init_fee_policy(1)
+        .map_err(|error| format!("Hybrid configure permissionless init fee: {error}"))?;
+    env.warp_to_slot(3);
+    env.retire_asset(ASSET, 3)
+        .map_err(|error| format!("Hybrid retire generation-A asset: {error}"))?;
+    env.warp_to_slot(4);
+    env.activate_permissionless_asset(2, ASSET, 4, HONEST_PRICE, 1)
+        .map_err(|error| format!("Hybrid activate replacement generation: {error}"))?;
+    env.configure_auth_mark(false, ASSET, 4, HONEST_PRICE)
+        .map_err(|error| format!("Hybrid configure replacement AuthMark: {error}"))?;
+    let new_market_id = env.primary_market_state().1.assets[ASSET as usize].market_id;
+    if new_market_id == old_market_id {
+        return Err(format!(
+            "Hybrid replacement reused market ID {old_market_id}"
+        ));
+    }
+
+    env.warp_to_slot(5);
+    if land_replay {
+        env.land_retained(stale_config)
+            .map_err(|error| format!("Hybrid stale signed config no longer lands: {error}"))?;
+    }
+    let entry_price = env.primary_market_state().1.assets[ASSET as usize].effective_price;
+    if entry_price != HONEST_PRICE {
+        return Err(format!(
+            "Hybrid entry mark {entry_price}, expected {HONEST_PRICE}"
+        ));
+    }
+
+    env.trade_no_cpi(BENEFICIARY, VICTIM, ASSET, SIZE_Q, HONEST_PRICE, 0)
+        .map_err(|error| format!("Hybrid open replacement user exposure: {error}"))?;
+    env.set_clock(6, 101);
+    let moved_oracle = env.set_pyth_price(&feed, REPLAY_PRICE as i64, -6, 0, 101);
+    if land_replay {
+        let observations = vec![CrankObservationHint {
+            asset_index: ASSET,
+            oracle_accounts: 1,
+        }];
+        for actor in [BENEFICIARY, VICTIM] {
+            env.crank_with_oracles(actor, 6, observations.clone(), &[moved_oracle])
+                .map_err(|error| format!("Hybrid settle actor {actor} at replay mark: {error}"))?;
+        }
+    } else {
+        crank_adapter_steps(&mut env, BENEFICIARY, 6, ASSET, 2)
+            .map_err(|error| format!("Hybrid settle control beneficiary: {error}"))?;
+        crank_adapter_steps(&mut env, VICTIM, 6, ASSET, 2)
+            .map_err(|error| format!("Hybrid settle control victim: {error}"))?;
+    }
+    let restored_mark = env.primary_market_state().1.assets[ASSET as usize].effective_price;
+    let expected_settled_mark = if land_replay {
+        REPLAY_PRICE
+    } else {
+        HONEST_PRICE
+    };
+    if restored_mark != expected_settled_mark {
+        return Err(format!(
+            "Hybrid settled mark {restored_mark}, expected {expected_settled_mark}"
+        ));
+    }
+
+    env.trade_no_cpi(
+        EXIT_MAKER_INDEX,
+        BENEFICIARY,
+        ASSET,
+        SIZE_Q,
+        restored_mark,
+        0,
+    )
+    .map_err(|error| format!("Hybrid beneficiary public close: {error}"))?;
+    env.trade_no_cpi(VICTIM, EXIT_MAKER_INDEX, ASSET, SIZE_Q, restored_mark, 0)
+        .map_err(|error| format!("Hybrid victim public close: {error}"))?;
+    if env.primary_portfolio(BENEFICIARY).pnl.get() > 0 {
+        env.convert_released_pnl(BENEFICIARY, u128::MAX)
+            .map_err(|error| format!("Hybrid convert beneficiary PnL: {error}"))?;
+    }
+    let beneficiary_capital = env.primary_portfolio(BENEFICIARY).capital.get();
+    let victim_capital = env.primary_portfolio(VICTIM).capital.get();
+    env.withdraw_primary(BENEFICIARY, beneficiary_capital)
+        .map_err(|error| format!("Hybrid withdraw beneficiary capital: {error}"))?;
+    env.withdraw_primary(VICTIM, victim_capital)
+        .map_err(|error| format!("Hybrid withdraw victim capital: {error}"))?;
+    let beneficiary_payout = env.token_amount(env.actors[BENEFICIARY].destination_token);
+    let victim_payout = env.token_amount(env.actors[VICTIM].destination_token);
+    if u128::from(beneficiary_payout) != beneficiary_capital
+        || u128::from(victim_payout) != victim_capital
+        || env.token_supply_observed() != env.initial_token_supply
+    {
+        return Err(format!(
+            "Hybrid terminal payout mismatch: victim={victim_payout}/{victim_capital}, \
+             beneficiary={beneficiary_payout}/{beneficiary_capital}, supply={}/{}",
+            env.token_supply_observed(),
+            env.initial_token_supply
+        ));
+    }
+
+    Ok(AssetGenerationConfigWorld {
+        old_market_id,
+        new_market_id,
+        entry_price,
+        restored_mark,
+        victim_equity: u128::from(victim_payout),
+        beneficiary_payout,
+        observed_token_supply: env.token_supply_observed(),
+    })
+}
+
 fn run_asset_generation_config_world(
     seed: [u8; 32],
     path: AssetGenerationConfigPath,
@@ -10156,6 +10378,7 @@ fn run_asset_generation_config_world(
         AssetGenerationConfigPath::Ewma => env
             .configure_ewma_mark(ASSET, 1, PRICE, 1, 0)
             .map_err(|error| format!("{path:?} configure old EwmaMark: {error}"))?,
+        AssetGenerationConfigPath::Hybrid => unreachable!("Hybrid uses its terminal world"),
     };
     let old_market_id = env.primary_market_state().1.assets[ASSET as usize].market_id;
     let stale_config = match path {
@@ -10163,6 +10386,7 @@ fn run_asset_generation_config_world(
         AssetGenerationConfigPath::Ewma => {
             env.build_retained_ewma_config(ASSET, STALE_ENTRY_PRICE, 1, 0)
         }
+        AssetGenerationConfigPath::Hybrid => unreachable!("Hybrid uses its terminal world"),
     };
     env.update_market_init_fee_policy(1)
         .map_err(|error| format!("{path:?} configure permissionless init fee: {error}"))?;
@@ -10179,6 +10403,7 @@ fn run_asset_generation_config_world(
         AssetGenerationConfigPath::Ewma => env
             .configure_ewma_mark(ASSET, 4, PRICE, 1, 0)
             .map_err(|error| format!("{path:?} configure replacement EwmaMark: {error}"))?,
+        AssetGenerationConfigPath::Hybrid => unreachable!("Hybrid uses its terminal world"),
     };
     let new_market_id = env.primary_market_state().1.assets[ASSET as usize].market_id;
     if new_market_id == old_market_id {
@@ -10210,6 +10435,7 @@ fn run_asset_generation_config_world(
         AssetGenerationConfigPath::Ewma => env
             .push_ewma_mark(ASSET, 6, PRICE)
             .map_err(|error| format!("{path:?} restore honest EwmaMark: {error}"))?,
+        AssetGenerationConfigPath::Hybrid => unreachable!("Hybrid uses its terminal world"),
     };
     crank_adapter_steps(&mut env, 0, 6, ASSET, 4)
         .map_err(|error| format!("{path:?} settle beneficiary after restoration: {error}"))?;
@@ -10672,6 +10898,7 @@ pub fn asset_generation_config_replay_strategy(
         prop::sample::select(vec![
             AssetGenerationConfigPath::Auth,
             AssetGenerationConfigPath::Ewma,
+            AssetGenerationConfigPath::Hybrid,
         ]),
     )
 }

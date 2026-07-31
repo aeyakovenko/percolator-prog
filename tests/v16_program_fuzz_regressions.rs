@@ -917,26 +917,38 @@ fn v16_program_pr275_stale_mark_replays_across_asset_generation() {
 }
 
 #[test]
-fn v16_program_pr277_stale_config_replays_across_asset_generation() {
+fn v16_program_pr277_pr322_stale_config_replays_across_asset_generation() {
     for path in [
         AssetGenerationConfigPath::Auth,
         AssetGenerationConfigPath::Ewma,
+        AssetGenerationConfigPath::Hybrid,
     ] {
         let reproduction = reproduce_asset_generation_config_replay([0x77; 32], path)
-            .unwrap_or_else(|error| panic!("PR 277 {path:?} no longer reproduces: {error}"));
+            .unwrap_or_else(|error| panic!("PR 277/322 {path:?} no longer reproduces: {error}"));
         assert_eq!(
             reproduction.blocker,
             KnownBlocker::AssetGenerationConfigReplay
         );
         assert_eq!(reproduction.path, path);
         assert_ne!(reproduction.old_market_id, reproduction.new_market_id);
-        assert_eq!(reproduction.stale_entry_price, 50);
+        assert_eq!(
+            reproduction.stale_entry_price,
+            if path == AssetGenerationConfigPath::Hybrid {
+                100
+            } else {
+                50
+            }
+        );
         assert!(reproduction.restored_mark > reproduction.stale_entry_price);
         assert!(reproduction.victim_equity_loss > 0);
         assert_eq!(
             reproduction.victim_equity_loss,
             u128::from(reproduction.beneficiary_extra_payout)
         );
+        if path == AssetGenerationConfigPath::Hybrid {
+            assert_eq!(reproduction.victim_equity_loss, 100);
+            assert_eq!(reproduction.beneficiary_extra_payout, 100);
+        }
     }
 }
 
@@ -970,14 +982,14 @@ fn v16_program_open_lof_manifest_is_complete_and_honest() {
         [
             220, 223, 224, 225, 231, 251, 253, 255, 260, 264, 265, 267, 271, 272, 273, 275, 277,
             279, 280, 281, 282, 283, 290, 299, 305, 307, 310, 311, 314, 315, 317, 318, 320, 321,
-            325, 328, 329, 331, 332, 333, 343, 344, 350, 351, 355, 356, 362, 365, 366, 367, 369,
-            380, 381
+            322, 325, 328, 329, 331, 332, 333, 343, 344, 350, 351, 355, 356, 362, 365, 366, 367,
+            369, 380, 381
         ]
     );
     let missing = missing_prs();
     assert_eq!(
         missing.len(),
-        46,
+        45,
         "update the explicit evidence state when an executable adapter lands"
     );
     assert!(!missing.contains(&220));
@@ -1014,6 +1026,7 @@ fn v16_program_open_lof_manifest_is_complete_and_honest() {
     assert!(!missing.contains(&318));
     assert!(!missing.contains(&320));
     assert!(!missing.contains(&321));
+    assert!(!missing.contains(&322));
     assert!(!missing.contains(&325));
     assert!(!missing.contains(&328));
     assert!(!missing.contains(&329));
