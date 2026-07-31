@@ -236,7 +236,7 @@ proptest! {
     }
 
     #[test]
-    fn v16_program_pr332_pr333_unstaged_mark_target_fuzz(
+    fn v16_program_pr264_pr265_pr332_pr333_unstaged_mark_target_fuzz(
         (seed, case) in target_staging_strategy()
     ) {
         let result = reproduce_unstaged_mark_target(seed, case);

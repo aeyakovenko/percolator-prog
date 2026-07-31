@@ -197,6 +197,7 @@ pub enum CompositeRoundingCase {
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum TargetStagingCase {
     AuthMarkPush,
+    EwmaMarkPush,
     EwmaSingleTrade,
     EwmaBatchTrade,
 }
@@ -1511,6 +1512,7 @@ impl ScenarioRunner {
     ) -> Result<(), CrankFailure> {
         let before = self.snapshot();
         let rank_before = self.progress_rank(actor).map_err(CrankFailure::Invariant)?;
+        let diagnostics_before = self.liveness_diagnostics();
         let liquidation_authorized = self.current_liquidation_authorization(actor);
         let observations = match hints {
             HintMode::Complete => self
@@ -1546,7 +1548,7 @@ impl ScenarioRunner {
                 {
                     return Err(CrankFailure::Invariant(format!(
                         "sole public crank succeeded without rank decrease: {rank_before:?} -> \
-                         {rank_after:?}; {}",
+                         {rank_after:?}; before={diagnostics_before}; after={}",
                         self.liveness_diagnostics()
                     )));
                 }
@@ -1869,6 +1871,7 @@ impl ScenarioRunner {
     fn progress_rank(&self, actor: usize) -> Result<ProgressRank, String> {
         let account = self.env.primary_portfolio(actor);
         let (_, group) = self.env.primary_market_state();
+        let authenticated_slot = self.env.current_slot();
         let mut market_mark_lag = 0u128;
         let mut market_loss_lag = 0u128;
         for asset in 0..ASSET_COUNT {
@@ -1895,7 +1898,7 @@ impl ScenarioRunner {
             if asset_contributes_to_loss_stale(engine_asset) {
                 market_loss_lag = market_loss_lag
                     .checked_add(u128::from(
-                        group.current_slot.saturating_sub(engine_asset.slot_last),
+                        authenticated_slot.saturating_sub(engine_asset.slot_last),
                     ))
                     .ok_or("loss-currentness rank overflow")?;
             }
@@ -3443,6 +3446,7 @@ pub fn reproduce_unstaged_mark_target(
 ) -> Result<TargetStagingReproduction, String> {
     seed[0] ^= match case {
         TargetStagingCase::AuthMarkPush => 0x32,
+        TargetStagingCase::EwmaMarkPush => 0xa2,
         TargetStagingCase::EwmaSingleTrade => 0x33,
         TargetStagingCase::EwmaBatchTrade => 0xb3,
     };
@@ -3453,7 +3457,7 @@ pub fn reproduce_unstaged_mark_target(
     const EXISTING_SIZE_Q: i128 = POS_SCALE as i128;
 
     let (mut env, attacker, lp, attack_size_q, wrapper_target, engine_epoch_before) = match case {
-        TargetStagingCase::AuthMarkPush => {
+        TargetStagingCase::AuthMarkPush | TargetStagingCase::EwmaMarkPush => {
             let mut env = V16Svm::new(
                 seed,
                 MarketConfig {
@@ -3470,14 +3474,37 @@ pub fn reproduce_unstaged_mark_target(
                     ..MarketConfig::default()
                 },
             );
-            env.configure_auth_mark(false, 0, 0, OLD_MARK)
-                .map_err(|error| format!("PR 332 configure AuthMark: {error}"))?;
+            match case {
+                TargetStagingCase::AuthMarkPush => {
+                    env.configure_auth_mark(false, 0, 0, OLD_MARK)
+                        .map_err(|error| format!("PR 264/332 configure AuthMark: {error}"))?
+                }
+                TargetStagingCase::EwmaMarkPush => env
+                    .configure_ewma_mark(0, 0, OLD_MARK, 1, 0)
+                    .map_err(|error| format!("PR 265/332 configure EWMA mark: {error}"))?,
+                TargetStagingCase::EwmaSingleTrade | TargetStagingCase::EwmaBatchTrade => {
+                    unreachable!()
+                }
+            };
             env.trade_cpi(0, 1, 0, EXISTING_SIZE_Q, 0, 0)
                 .map_err(|error| format!("PR 332 open liveness-control position: {error}"))?;
             let epoch_before = env.primary_market_state().1.oracle_epoch;
             env.warp_to_slot(2);
-            env.push_auth_mark(0, 1, AUTH_TARGET)
-                .map_err(|error| format!("PR 332 push honest AuthMark: {error}"))?;
+            let wrapper_target = match case {
+                TargetStagingCase::AuthMarkPush => {
+                    env.push_auth_mark(0, 2, AUTH_TARGET)
+                        .map_err(|error| format!("PR 264/332 push honest AuthMark: {error}"))?;
+                    AUTH_TARGET
+                }
+                TargetStagingCase::EwmaMarkPush => {
+                    env.push_ewma_mark(0, 2, AUTH_TARGET)
+                        .map_err(|error| format!("PR 265/332 push honest EWMA mark: {error}"))?;
+                    EWMA_TARGET
+                }
+                TargetStagingCase::EwmaSingleTrade | TargetStagingCase::EwmaBatchTrade => {
+                    unreachable!()
+                }
+            };
             (
                 env,
                 0usize,
@@ -3485,7 +3512,7 @@ pub fn reproduce_unstaged_mark_target(
                 ATTACK_SIZE_Q
                     .checked_add(EXISTING_SIZE_Q)
                     .ok_or("PR 332 total attack size overflow")?,
-                AUTH_TARGET,
+                wrapper_target,
                 epoch_before,
             )
         }
@@ -3513,7 +3540,7 @@ pub fn reproduce_unstaged_mark_target(
             let route = match case {
                 TargetStagingCase::EwmaSingleTrade => TradeRoute::NoCpi,
                 TargetStagingCase::EwmaBatchTrade => TradeRoute::BatchNoCpi,
-                TargetStagingCase::AuthMarkPush => unreachable!(),
+                TargetStagingCase::AuthMarkPush | TargetStagingCase::EwmaMarkPush => unreachable!(),
             };
             execute_trade_route(&mut env, route, 0, 1, 0, EXISTING_SIZE_Q, 200, 0)
                 .map_err(|error| format!("PR 333 publish trade-driven EWMA target: {error}"))?;
@@ -3549,7 +3576,7 @@ pub fn reproduce_unstaged_mark_target(
     let (_, staged_group) = env.primary_market_state();
     let stale_engine_target = staged_group.assets[0].raw_oracle_target_price;
     let expected_profile_target = match case {
-        TargetStagingCase::AuthMarkPush => wrapper_target,
+        TargetStagingCase::AuthMarkPush | TargetStagingCase::EwmaMarkPush => wrapper_target,
         TargetStagingCase::EwmaSingleTrade | TargetStagingCase::EwmaBatchTrade => OLD_MARK,
     };
     if profile.mark_ewma_e6 != wrapper_target
@@ -7063,6 +7090,7 @@ pub fn target_staging_strategy() -> impl Strategy<Value = ([u8; 32], TargetStagi
         any::<[u8; 32]>(),
         prop::sample::select(vec![
             TargetStagingCase::AuthMarkPush,
+            TargetStagingCase::EwmaMarkPush,
             TargetStagingCase::EwmaSingleTrade,
             TargetStagingCase::EwmaBatchTrade,
         ]),

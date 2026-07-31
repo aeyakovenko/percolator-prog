@@ -83,7 +83,7 @@ impl BlockerAdapter {
         match self {
             Self::Pr220OmittedRescue => pr == 220 || pr == 366,
             Self::CompositeOracleRounding => pr == 329 || pr == 381,
-            Self::TargetStaging => pr == 332 || pr == 333,
+            Self::TargetStaging => matches!(pr, 264 | 265 | 332 | 333),
             _ => self.canonical_pr() == pr,
         }
     }
@@ -187,8 +187,8 @@ pub const OPEN_LOFS: &[OpenLof] = &[
         OracleAccrual,
         BlockerAdapter::Pr260PendingEwmaInheritance,
     ),
-    OpenLof::missing(264, Blocker, OracleAccrual),
-    OpenLof::missing(265, Blocker, OracleAccrual),
+    OpenLof::quarantined(264, Blocker, OracleAccrual, BlockerAdapter::TargetStaging),
+    OpenLof::quarantined(265, Blocker, OracleAccrual, BlockerAdapter::TargetStaging),
     OpenLof::quarantined(
         267,
         Blocker,

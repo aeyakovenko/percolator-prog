@@ -337,9 +337,10 @@ fn v16_program_pr331_temporally_skewed_composite_liquidates_at_false_price() {
 }
 
 #[test]
-fn v16_program_pr332_pr333_unstaged_mark_targets_open_stale_cpi_window() {
+fn v16_program_pr264_pr265_pr332_pr333_unstaged_targets_open_stale_cpi_window() {
     for case in [
         TargetStagingCase::AuthMarkPush,
+        TargetStagingCase::EwmaMarkPush,
         TargetStagingCase::EwmaSingleTrade,
         TargetStagingCase::EwmaBatchTrade,
     ] {
@@ -612,14 +613,14 @@ fn v16_program_open_lof_manifest_is_complete_and_honest() {
     assert_eq!(
         quarantined_prs(),
         [
-            220, 223, 224, 225, 231, 253, 260, 267, 271, 272, 273, 275, 277, 280, 281, 282, 283,
-            290, 329, 331, 332, 333, 343, 356, 365, 366, 367, 380, 381
+            220, 223, 224, 225, 231, 253, 260, 264, 265, 267, 271, 272, 273, 275, 277, 280, 281,
+            282, 283, 290, 329, 331, 332, 333, 343, 356, 365, 366, 367, 380, 381
         ]
     );
     let missing = missing_prs();
     assert_eq!(
         missing.len(),
-        70,
+        68,
         "update the explicit evidence state when an executable adapter lands"
     );
     assert!(!missing.contains(&220));
@@ -629,6 +630,8 @@ fn v16_program_open_lof_manifest_is_complete_and_honest() {
     assert!(!missing.contains(&231));
     assert!(!missing.contains(&253));
     assert!(!missing.contains(&260));
+    assert!(!missing.contains(&264));
+    assert!(!missing.contains(&265));
     assert!(!missing.contains(&267));
     assert!(!missing.contains(&271));
     assert!(!missing.contains(&272));

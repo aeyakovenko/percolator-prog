@@ -1,0 +1,2 @@
+# Capped multi-asset accrual must reduce lag against the authenticated SVM clock.
+cc ae38afa847b894e708ef1fc22b677c38412329c0288c02092378d04e838086ce
