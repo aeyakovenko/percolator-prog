@@ -1313,16 +1313,16 @@ fn v16_program_open_lof_manifest_is_complete_and_honest() {
         quarantined_prs(),
         [
             220, 223, 224, 225, 231, 251, 253, 255, 260, 264, 265, 267, 271, 272, 273, 274, 275,
-            276, 277, 278, 279, 280, 281, 282, 283, 290, 299, 301, 303, 304, 305, 307, 309, 310,
-            311, 314, 315, 317, 318, 320, 321, 322, 325, 326, 328, 329, 331, 332, 333, 334, 335,
-            336, 337, 338, 339, 340, 343, 344, 345, 346, 347, 349, 350, 351, 353, 355, 356, 362,
-            365, 366, 367, 369, 380, 381
+            276, 277, 278, 279, 280, 281, 282, 283, 285, 290, 299, 301, 303, 304, 305, 307, 309,
+            310, 311, 314, 315, 317, 318, 320, 321, 322, 325, 326, 328, 329, 331, 332, 333, 334,
+            335, 336, 337, 338, 339, 340, 343, 344, 345, 346, 347, 349, 350, 351, 353, 355, 356,
+            362, 365, 366, 367, 369, 380, 381
         ]
     );
     let missing = missing_prs();
     assert_eq!(
         missing.len(),
-        25,
+        24,
         "update the explicit evidence state when an executable adapter lands"
     );
     assert!(!missing.contains(&220));
@@ -1350,6 +1350,7 @@ fn v16_program_open_lof_manifest_is_complete_and_honest() {
     assert!(!missing.contains(&281));
     assert!(!missing.contains(&282));
     assert!(!missing.contains(&283));
+    assert!(!missing.contains(&285));
     assert!(!missing.contains(&290));
     assert!(!missing.contains(&299));
     assert!(!missing.contains(&301));
