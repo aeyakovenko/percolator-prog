@@ -14,10 +14,11 @@ use support::{
         reproduce_cross_domain_backing_double_spend, reproduce_cross_margin_insurance_drain,
         reproduce_delayed_asset_authority_revival, reproduce_delayed_backing_fee_policy_replay,
         reproduce_delayed_fee_redirect_policy_replay, reproduce_delayed_liquidation_policy_replay,
-        reproduce_delayed_maintenance_policy_replay, reproduce_delayed_trade_fee_policy_replay,
-        reproduce_deposit_retry_replay, reproduce_fee_redirect_generation_replay,
-        reproduce_forfeit_funding_erasure, reproduce_fractional_cap_settlement,
-        reproduce_insurance_top_up_retry_replay, reproduce_insurance_withdrawal_generation_replay,
+        reproduce_delayed_maintenance_policy_replay, reproduce_delayed_oracle_intent_replay,
+        reproduce_delayed_trade_fee_policy_replay, reproduce_deposit_retry_replay,
+        reproduce_fee_redirect_generation_replay, reproduce_forfeit_funding_erasure,
+        reproduce_fractional_cap_settlement, reproduce_insurance_top_up_retry_replay,
+        reproduce_insurance_withdrawal_generation_replay,
         reproduce_liquidation_policy_generation_replay,
         reproduce_maintenance_policy_generation_replay, reproduce_market_incarnation_deposit,
         reproduce_omitted_rescue_liquidation, reproduce_pending_ewma_inheritance,
@@ -31,8 +32,8 @@ use support::{
         reproduce_trade_funding_erasure, reproduce_trade_retry_replay,
         reproduce_unstaged_mark_target, reproduce_withdrawal_retry_liquidation, run_scenario,
         AssetGenerationConfigPath, AssetGenerationMarkPath, BilateralFeeMode,
-        CompositeRoundingCase, KnownBlocker, PostExpiryBackingCase, Scenario, TargetStagingCase,
-        TradeDrivenLiquidationMode, TradeRoute,
+        CompositeRoundingCase, DelayedOracleIntentPath, KnownBlocker, PostExpiryBackingCase,
+        Scenario, TargetStagingCase, TradeDrivenLiquidationMode, TradeRoute,
     },
     open_lof_manifest::{missing_prs, quarantined_prs, validate_manifest},
 };
@@ -724,6 +725,33 @@ fn v16_program_pr349_delayed_backing_fee_extracts_user_fee() {
 }
 
 #[test]
+fn v16_program_pr335_delayed_oracle_intents_extract_user_collateral() {
+    for path in [
+        DelayedOracleIntentPath::PushAuth,
+        DelayedOracleIntentPath::ConfigureAuth,
+    ] {
+        let reproduction = reproduce_delayed_oracle_intent_replay([0x35; 32], path)
+            .unwrap_or_else(|error| panic!("PR 335 {path:?} no longer reproduces: {error}"));
+        assert_eq!(
+            reproduction.blocker,
+            KnownBlocker::DelayedOracleIntentReplay
+        );
+        assert_eq!(reproduction.path, path);
+        assert_eq!(reproduction.victim_loss, 250_000);
+        assert_eq!(reproduction.victim_loss, reproduction.beneficiary_gain);
+        match path {
+            DelayedOracleIntentPath::PushAuth => assert_eq!(reproduction.restored_mark, 50),
+            DelayedOracleIntentPath::ConfigureAuth => {
+                assert_eq!(reproduction.stale_mark, 50);
+                assert_eq!(reproduction.restored_mark, 100);
+            }
+        }
+        assert!(reproduction.replay_cu < 1_400_000);
+        assert!(reproduction.max_crank_cu < 1_400_000);
+    }
+}
+
+#[test]
 fn v16_program_pr317_stale_fee_redirect_extracts_victim_fee() {
     let reproduction = reproduce_fee_redirect_generation_replay([0x17; 32])
         .unwrap_or_else(|error| panic!("PR 317 no longer reproduces: {error}"));
@@ -1086,14 +1114,14 @@ fn v16_program_open_lof_manifest_is_complete_and_honest() {
         [
             220, 223, 224, 225, 231, 251, 253, 255, 260, 264, 265, 267, 271, 272, 273, 275, 277,
             279, 280, 281, 282, 283, 290, 299, 305, 307, 310, 311, 314, 315, 317, 318, 320, 321,
-            322, 325, 326, 328, 329, 331, 332, 333, 336, 337, 338, 340, 343, 344, 349, 350, 351,
-            355, 356, 362, 365, 366, 367, 369, 380, 381
+            322, 325, 326, 328, 329, 331, 332, 333, 335, 336, 337, 338, 340, 343, 344, 349, 350,
+            351, 355, 356, 362, 365, 366, 367, 369, 380, 381
         ]
     );
     let missing = missing_prs();
     assert_eq!(
         missing.len(),
-        39,
+        38,
         "update the explicit evidence state when an executable adapter lands"
     );
     assert!(!missing.contains(&220));
@@ -1138,6 +1166,7 @@ fn v16_program_open_lof_manifest_is_complete_and_honest() {
     assert!(!missing.contains(&331));
     assert!(!missing.contains(&332));
     assert!(!missing.contains(&333));
+    assert!(!missing.contains(&335));
     assert!(!missing.contains(&336));
     assert!(!missing.contains(&337));
     assert!(!missing.contains(&338));

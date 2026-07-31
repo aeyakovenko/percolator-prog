@@ -110,10 +110,11 @@ pub enum KnownBlocker {
     DelayedTradeFeePolicyReplay,
     DelayedFeeRedirectPolicyReplay,
     DelayedBackingFeePolicyReplay,
+    DelayedOracleIntentReplay,
 }
 
 impl KnownBlocker {
-    pub const COUNT: usize = 54;
+    pub const COUNT: usize = 55;
 
     pub const fn index(self) -> usize {
         match self {
@@ -171,6 +172,7 @@ impl KnownBlocker {
             Self::DelayedTradeFeePolicyReplay => 51,
             Self::DelayedFeeRedirectPolicyReplay => 52,
             Self::DelayedBackingFeePolicyReplay => 53,
+            Self::DelayedOracleIntentReplay => 54,
         }
     }
 }
@@ -279,6 +281,12 @@ pub enum AssetGenerationConfigPath {
     Auth,
     Ewma,
     Hybrid,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DelayedOracleIntentPath {
+    PushAuth,
+    ConfigureAuth,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -733,6 +741,18 @@ pub struct DelayedBackingFeePolicyReplayReproduction {
     pub replay_cu: u64,
     pub trade_cu: u64,
     pub withdrawal_cu: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DelayedOracleIntentReplayReproduction {
+    pub blocker: KnownBlocker,
+    pub path: DelayedOracleIntentPath,
+    pub stale_mark: u64,
+    pub restored_mark: u64,
+    pub victim_loss: u64,
+    pub beneficiary_gain: u64,
+    pub replay_cu: u64,
+    pub max_crank_cu: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -7048,6 +7068,258 @@ pub fn reproduce_delayed_backing_fee_policy_replay(
     })
 }
 
+#[derive(Clone, Copy, Debug)]
+struct DelayedOracleIntentWorld {
+    stale_mark: u64,
+    restored_mark: u64,
+    victim_payout: u64,
+    beneficiary_payout: u64,
+    replay_cu: u64,
+    max_crank_cu: u64,
+}
+
+fn crank_delayed_oracle_actor(
+    env: &mut V16Svm,
+    actor: usize,
+    slot: u64,
+    asset: u16,
+    context: &str,
+) -> Result<u64, String> {
+    let observations = vec![CrankObservationHint {
+        asset_index: asset,
+        oracle_accounts: 0,
+    }];
+    let mut max_cu = 0;
+    let mut progressed = false;
+    for _ in 0..4 {
+        match env.crank(actor, slot, observations.clone()) {
+            Ok(crank) => {
+                progressed = true;
+                max_cu = max_cu.max(crank.compute_units);
+            }
+            Err(error) if progressed && error.contains("Custom(22)") => break,
+            Err(error) => return Err(format!("{context} crank actor {actor}: {error}")),
+        }
+    }
+    if !progressed {
+        return Err(format!("{context} crank actor {actor} made no progress"));
+    }
+    Ok(max_cu)
+}
+
+fn run_delayed_oracle_intent_world(
+    seed: [u8; 32],
+    path: DelayedOracleIntentPath,
+    land_replay: bool,
+) -> Result<DelayedOracleIntentWorld, String> {
+    const VICTIM: usize = 0;
+    const BENEFICIARY: usize = 1;
+    const ASSET: u16 = 1;
+    const HONEST_PRICE: u64 = 100;
+    const STALE_PRICE: u64 = 50;
+    const SIZE_Q: i128 = 5_000 * POS_SCALE as i128;
+    const DEPOSIT: u128 = 1_000_000;
+
+    let mut env = V16Svm::new(
+        seed,
+        MarketConfig {
+            initial_price: HONEST_PRICE,
+            max_price_move_bps_per_slot: 10_000,
+            max_accrual_dt_slots: 1,
+            min_funding_lifetime_slots: 1,
+            actor_deposits: [DEPOSIT, DEPOSIT, 1, 1, super::v16_svm::EXIT_MAKER_DEPOSIT],
+            ..MarketConfig::default()
+        },
+    );
+    let supply_before = env.token_supply_observed();
+    env.configure_auth_mark(false, ASSET, 1, HONEST_PRICE)
+        .map_err(|error| format!("PR 335 {path:?} configure initial AuthMark: {error}"))?;
+    let retained = match path {
+        DelayedOracleIntentPath::PushAuth => env.build_retained_auth_mark(ASSET, STALE_PRICE),
+        DelayedOracleIntentPath::ConfigureAuth => {
+            env.build_retained_auth_config(ASSET, STALE_PRICE)
+        }
+    };
+    let victim_position_q = match path {
+        DelayedOracleIntentPath::PushAuth => SIZE_Q,
+        DelayedOracleIntentPath::ConfigureAuth => -SIZE_Q,
+    };
+
+    let mut replay_cu = 0;
+    if path == DelayedOracleIntentPath::PushAuth {
+        env.trade_no_cpi(
+            VICTIM,
+            BENEFICIARY,
+            ASSET,
+            victim_position_q,
+            HONEST_PRICE,
+            0,
+        )
+        .map_err(|error| format!("PR 335 {path:?} open independent positions: {error}"))?;
+        env.warp_to_slot(2);
+        env.push_auth_mark(ASSET, 2, HONEST_PRICE)
+            .map_err(|error| format!("PR 335 {path:?} land newer correction: {error}"))?;
+        if land_replay {
+            replay_cu = env
+                .land_retained(retained)
+                .map_err(|error| format!("PR 335 {path:?} delayed push no longer lands: {error}"))?
+                .compute_units;
+        }
+    } else {
+        env.configure_auth_mark(false, ASSET, 1, HONEST_PRICE)
+            .map_err(|error| format!("PR 335 {path:?} land newer correction: {error}"))?;
+        if land_replay {
+            replay_cu = env
+                .land_retained(retained)
+                .map_err(|error| {
+                    format!("PR 335 {path:?} delayed configuration no longer lands: {error}")
+                })?
+                .compute_units;
+        }
+    }
+    let stale_mark = env.primary_market_state().1.assets[ASSET as usize].effective_price;
+    let expected_stale_mark = if land_replay && path == DelayedOracleIntentPath::ConfigureAuth {
+        STALE_PRICE
+    } else {
+        HONEST_PRICE
+    };
+    if stale_mark != expected_stale_mark {
+        return Err(format!(
+            "PR 335 {path:?} pre-settlement mark {stale_mark}, expected {expected_stale_mark}"
+        ));
+    }
+
+    if path == DelayedOracleIntentPath::ConfigureAuth {
+        env.trade_no_cpi(
+            VICTIM,
+            BENEFICIARY,
+            ASSET,
+            victim_position_q,
+            HONEST_PRICE,
+            0,
+        )
+        .map_err(|error| format!("PR 335 {path:?} open independent positions: {error}"))?;
+        env.warp_to_slot(2);
+        env.push_auth_mark(ASSET, 2, HONEST_PRICE)
+            .map_err(|error| format!("PR 335 {path:?} restore honest mark: {error}"))?;
+    }
+
+    let mut max_crank_cu = 0;
+    for actor in [VICTIM, BENEFICIARY] {
+        max_crank_cu = max_crank_cu.max(crank_delayed_oracle_actor(
+            &mut env,
+            actor,
+            2,
+            ASSET,
+            &format!("PR 335 {path:?}"),
+        )?);
+    }
+    let restored_mark = env.primary_market_state().1.assets[ASSET as usize].effective_price;
+    let expected_restored_mark = if land_replay && path == DelayedOracleIntentPath::PushAuth {
+        STALE_PRICE
+    } else {
+        HONEST_PRICE
+    };
+    if restored_mark != expected_restored_mark {
+        return Err(format!(
+            "PR 335 {path:?} settled mark {restored_mark}, expected {expected_restored_mark}"
+        ));
+    }
+
+    env.trade_no_cpi(
+        VICTIM,
+        EXIT_MAKER_INDEX,
+        ASSET,
+        -victim_position_q,
+        restored_mark,
+        0,
+    )
+    .map_err(|error| format!("PR 335 {path:?} victim close: {error}"))?;
+    env.trade_no_cpi(
+        BENEFICIARY,
+        EXIT_MAKER_INDEX,
+        ASSET,
+        victim_position_q,
+        restored_mark,
+        0,
+    )
+    .map_err(|error| format!("PR 335 {path:?} beneficiary close: {error}"))?;
+    for actor in [VICTIM, BENEFICIARY] {
+        let pnl = env.primary_portfolio(actor).pnl.get();
+        if pnl > 0 {
+            env.convert_released_pnl(actor, pnl as u128)
+                .map_err(|error| format!("PR 335 {path:?} convert actor {actor}: {error}"))?;
+        }
+        let capital = env.primary_portfolio(actor).capital.get();
+        env.withdraw_primary(actor, capital)
+            .map_err(|error| format!("PR 335 {path:?} withdraw actor {actor}: {error}"))?;
+    }
+    let victim_payout = env.token_amount(env.actors[VICTIM].destination_token);
+    let beneficiary_payout = env.token_amount(env.actors[BENEFICIARY].destination_token);
+    if u128::from(victim_payout) + u128::from(beneficiary_payout) != 2 * DEPOSIT
+        || env.token_supply_observed() != supply_before
+        || replay_cu >= TX_CU_LIMIT
+        || max_crank_cu >= TX_CU_LIMIT
+    {
+        return Err(format!(
+            "PR 335 {path:?} terminal mismatch: payout={victim_payout}/{beneficiary_payout}, \
+             replay_cu={replay_cu}, crank_cu={max_crank_cu}, supply={}/{}",
+            env.token_supply_observed(),
+            supply_before
+        ));
+    }
+
+    Ok(DelayedOracleIntentWorld {
+        stale_mark,
+        restored_mark,
+        victim_payout,
+        beneficiary_payout,
+        replay_cu,
+        max_crank_cu,
+    })
+}
+
+pub fn reproduce_delayed_oracle_intent_replay(
+    mut seed: [u8; 32],
+    path: DelayedOracleIntentPath,
+) -> Result<DelayedOracleIntentReplayReproduction, String> {
+    seed[0] ^= match path {
+        DelayedOracleIntentPath::PushAuth => 0x35,
+        DelayedOracleIntentPath::ConfigureAuth => 0x53,
+    };
+    let control = run_delayed_oracle_intent_world(seed, path, false)?;
+    let replay = run_delayed_oracle_intent_world(seed, path, true)?;
+    let victim_loss = control
+        .victim_payout
+        .checked_sub(replay.victim_payout)
+        .ok_or("PR 335 replay increased victim payout")?;
+    let beneficiary_gain = replay
+        .beneficiary_payout
+        .checked_sub(control.beneficiary_payout)
+        .ok_or("PR 335 replay decreased beneficiary payout")?;
+    if control.victim_payout != 1_000_000
+        || control.beneficiary_payout != 1_000_000
+        || victim_loss == 0
+        || victim_loss != beneficiary_gain
+        || replay.replay_cu == 0
+    {
+        return Err(format!(
+            "PR 335 {path:?} paired-world mismatch: control={control:?}, replay={replay:?}, \
+             victim_loss={victim_loss}, beneficiary_gain={beneficiary_gain}"
+        ));
+    }
+    Ok(DelayedOracleIntentReplayReproduction {
+        blocker: KnownBlocker::DelayedOracleIntentReplay,
+        path,
+        stale_mark: replay.stale_mark,
+        restored_mark: replay.restored_mark,
+        victim_loss,
+        beneficiary_gain,
+        replay_cu: replay.replay_cu,
+        max_crank_cu: replay.max_crank_cu,
+    })
+}
+
 pub fn reproduce_fee_redirect_generation_replay(
     seed: [u8; 32],
 ) -> Result<FeeRedirectGenerationReplayReproduction, String> {
@@ -12074,6 +12346,18 @@ pub fn delayed_fee_redirect_policy_replay_seed_strategy() -> impl Strategy<Value
 #[allow(dead_code)]
 pub fn delayed_backing_fee_policy_replay_seed_strategy() -> impl Strategy<Value = [u8; 32]> {
     any::<[u8; 32]>()
+}
+
+#[allow(dead_code)]
+pub fn delayed_oracle_intent_replay_strategy(
+) -> impl Strategy<Value = ([u8; 32], DelayedOracleIntentPath)> {
+    (
+        any::<[u8; 32]>(),
+        prop::sample::select(vec![
+            DelayedOracleIntentPath::PushAuth,
+            DelayedOracleIntentPath::ConfigureAuth,
+        ]),
+    )
 }
 
 #[allow(dead_code)]
