@@ -1,2 +1,4 @@
 # Capped multi-asset accrual must reduce lag against the authenticated SVM clock.
 cc ae38afa847b894e708ef1fc22b677c38412329c0288c02092378d04e838086ce
+# Honest observations use authenticated time, not the engine's lagging group cursor.
+cc 3d5b8e3f5c34ff3b99925588948b34f01881b1a69f1b46fb42e4672c673ccb2a

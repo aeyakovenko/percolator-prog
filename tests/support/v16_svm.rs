@@ -1269,6 +1269,56 @@ impl V16Svm {
         )
     }
 
+    pub fn activate_permissionless_asset_with_actor_authorities(
+        &mut self,
+        creator_index: usize,
+        asset_index: u16,
+        now_slot: u64,
+        initial_price: u64,
+        insurance_authority_index: usize,
+        insurance_operator_index: usize,
+        backing_bucket_authority_index: usize,
+        oracle_authority_index: usize,
+        fee: u128,
+    ) -> Result<TxSuccess, String> {
+        if fee == 0 {
+            return Err("permissionless activation adapter requires a nonzero fee".into());
+        }
+        let creator = copy_keypair(&self.actors[creator_index].signer);
+        self.send_program(
+            ProgInstruction::UpdateAssetLifecycle {
+                action: percolator_prog::processor::ASSET_ACTION_ACTIVATE,
+                asset_index,
+                now_slot,
+                initial_price,
+                insurance_authority: self.actors[insurance_authority_index]
+                    .signer
+                    .pubkey()
+                    .to_bytes(),
+                insurance_operator: self.actors[insurance_operator_index]
+                    .signer
+                    .pubkey()
+                    .to_bytes(),
+                backing_bucket_authority: self.actors[backing_bucket_authority_index]
+                    .signer
+                    .pubkey()
+                    .to_bytes(),
+                oracle_authority: self.actors[oracle_authority_index]
+                    .signer
+                    .pubkey()
+                    .to_bytes(),
+            },
+            vec![
+                AccountMeta::new(creator.pubkey(), true),
+                AccountMeta::new(self.market, false),
+                AccountMeta::new(self.actors[creator_index].source_token, false),
+                AccountMeta::new(self.vault, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[creator],
+        )
+    }
+
     fn activate_permissionless_asset_with_authority(
         &mut self,
         creator_index: usize,
@@ -1863,6 +1913,26 @@ impl V16Svm {
                 AccountMeta::new(self.market, false),
             ],
             &[current, incoming],
+        )
+    }
+
+    pub fn build_retained_insurance_domain_top_up_for_actor(
+        &mut self,
+        actor_index: usize,
+        domain: u16,
+        amount: u128,
+    ) -> Transaction {
+        let authority = copy_keypair(&self.actors[actor_index].signer);
+        self.build_program_transaction(
+            ProgInstruction::TopUpInsuranceDomain { domain, amount },
+            vec![
+                AccountMeta::new(authority.pubkey(), true),
+                AccountMeta::new(self.market, false),
+                AccountMeta::new(self.actors[actor_index].source_token, false),
+                AccountMeta::new(self.vault, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[authority],
         )
     }
 
