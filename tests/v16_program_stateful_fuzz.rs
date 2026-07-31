@@ -11,9 +11,9 @@ use support::fuzz_model::{
     composite_time_skew_seed_strategy, cpi_backing_fee_seed_strategy, cpi_caller_fee_strategy,
     cross_domain_b_settlement_seed_strategy, cross_domain_backing_seed_strategy,
     cross_margin_insurance_drain_seed_strategy, delayed_asset_authority_revival_seed_strategy,
-    deposit_retry_replay_seed_strategy, fee_redirect_generation_replay_seed_strategy,
-    forfeit_funding_erasure_seed_strategy, fractional_cap_settlement_seed_strategy,
-    insurance_top_up_retry_replay_seed_strategy,
+    delayed_maintenance_policy_replay_seed_strategy, deposit_retry_replay_seed_strategy,
+    fee_redirect_generation_replay_seed_strategy, forfeit_funding_erasure_seed_strategy,
+    fractional_cap_settlement_seed_strategy, insurance_top_up_retry_replay_seed_strategy,
     insurance_withdrawal_generation_replay_seed_strategy,
     liquidation_policy_generation_replay_seed_strategy,
     maintenance_policy_generation_replay_seed_strategy, market_incarnation_deposit_seed_strategy,
@@ -31,10 +31,10 @@ use support::fuzz_model::{
     reproduce_composite_oracle_time_skew, reproduce_cpi_backing_fee_siphon,
     reproduce_cpi_caller_fee_siphon, reproduce_cross_domain_b_settlement,
     reproduce_cross_domain_backing_double_spend, reproduce_cross_margin_insurance_drain,
-    reproduce_delayed_asset_authority_revival, reproduce_deposit_retry_replay,
-    reproduce_fee_redirect_generation_replay, reproduce_forfeit_funding_erasure,
-    reproduce_fractional_cap_settlement, reproduce_insurance_top_up_retry_replay,
-    reproduce_insurance_withdrawal_generation_replay,
+    reproduce_delayed_asset_authority_revival, reproduce_delayed_maintenance_policy_replay,
+    reproduce_deposit_retry_replay, reproduce_fee_redirect_generation_replay,
+    reproduce_forfeit_funding_erasure, reproduce_fractional_cap_settlement,
+    reproduce_insurance_top_up_retry_replay, reproduce_insurance_withdrawal_generation_replay,
     reproduce_liquidation_policy_generation_replay, reproduce_maintenance_policy_generation_replay,
     reproduce_market_incarnation_deposit, reproduce_omitted_rescue_liquidation,
     reproduce_pending_ewma_inheritance, reproduce_pending_ewma_target_override,
@@ -468,6 +468,19 @@ proptest! {
         prop_assert!(
             result.is_ok(),
             "PR 326 no longer reproduces for seed {:?}: {}",
+            seed,
+            result.unwrap_err()
+        );
+    }
+
+    #[test]
+    fn v16_program_pr337_delayed_maintenance_policy_replay_fuzz(
+        seed in delayed_maintenance_policy_replay_seed_strategy()
+    ) {
+        let result = reproduce_delayed_maintenance_policy_replay(seed);
+        prop_assert!(
+            result.is_ok(),
+            "PR 337 no longer reproduces for seed {:?}: {}",
             seed,
             result.unwrap_err()
         );

@@ -105,10 +105,11 @@ pub enum KnownBlocker {
     FeeRedirectGenerationReplay,
     BackingFeeGenerationReplay,
     LiquidationPolicyGenerationReplay,
+    DelayedMaintenancePolicyReplay,
 }
 
 impl KnownBlocker {
-    pub const COUNT: usize = 49;
+    pub const COUNT: usize = 50;
 
     pub const fn index(self) -> usize {
         match self {
@@ -161,6 +162,7 @@ impl KnownBlocker {
             Self::FeeRedirectGenerationReplay => 46,
             Self::BackingFeeGenerationReplay => 47,
             Self::LiquidationPolicyGenerationReplay => 48,
+            Self::DelayedMaintenancePolicyReplay => 49,
         }
     }
 }
@@ -663,6 +665,18 @@ pub struct LiquidationPolicyGenerationReplayReproduction {
     pub live_oi_q: u128,
     pub replay_cu: u64,
     pub liquidation_cu: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DelayedMaintenancePolicyReplayReproduction {
+    pub blocker: KnownBlocker,
+    pub victim_loss: u64,
+    pub attacker_extraction: u64,
+    pub insurance_delta: u128,
+    pub live_oi_q: u128,
+    pub correction_cu: u64,
+    pub replay_cu: u64,
+    pub sync_cu: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -6056,6 +6070,132 @@ pub fn reproduce_maintenance_policy_generation_replay(
     })
 }
 
+pub fn reproduce_delayed_maintenance_policy_replay(
+    seed: [u8; 32],
+) -> Result<DelayedMaintenancePolicyReplayReproduction, String> {
+    const TRADER_LONG: usize = 0;
+    const TRADER_SHORT: usize = 1;
+    const FEE_PAYER: usize = 2;
+    const ATTACKER: usize = 3;
+    const PRICE: u64 = 100;
+    const TRADE_SIZE_Q: i128 = POS_SCALE as i128;
+    const DEPOSIT: u128 = 100_000;
+    const MAINTENANCE_FEE_PER_SLOT: u128 = 58;
+    const STALE_CRANKER_SHARE_BPS: u16 = 10_000;
+    const CURRENT_CRANKER_SHARE_BPS: u16 = 0;
+    const SYNC_SLOT: u64 = 11;
+    const EXPECTED_FEE: u64 = 580;
+
+    let mut env = V16Svm::new(
+        seed,
+        MarketConfig {
+            initial_price: PRICE,
+            maintenance_fee_per_slot: MAINTENANCE_FEE_PER_SLOT,
+            actor_deposits: [DEPOSIT, DEPOSIT, DEPOSIT, 1, 1],
+            ..MarketConfig::default()
+        },
+    );
+    let supply_before = env.token_supply_observed();
+    let retained_policy = env.build_retained_maintenance_fee_policy(STALE_CRANKER_SHARE_BPS);
+    let correction = env
+        .update_maintenance_fee_policy(CURRENT_CRANKER_SHARE_BPS)
+        .map_err(|error| format!("PR 337 land current zero-share correction: {error}"))?;
+    if env
+        .primary_market_state()
+        .0
+        .maintenance_cranker_fee_share_bps
+        != CURRENT_CRANKER_SHARE_BPS
+    {
+        return Err("PR 337 current maintenance policy did not land".into());
+    }
+
+    env.trade_no_cpi(TRADER_LONG, TRADER_SHORT, 0, TRADE_SIZE_Q, PRICE, 0)
+        .map_err(|error| format!("PR 337 establish independent live OI: {error}"))?;
+    let live_oi_q = env.primary_market_state().1.assets[0].oi_eff_long_q;
+    if live_oi_q == 0 {
+        return Err("PR 337 market has no live OI".into());
+    }
+    let replay = env
+        .land_retained(retained_policy)
+        .map_err(|error| format!("PR 337 delayed maintenance policy no longer lands: {error}"))?;
+    if env
+        .primary_market_state()
+        .0
+        .maintenance_cranker_fee_share_bps
+        != STALE_CRANKER_SHARE_BPS
+    {
+        return Err("PR 337 delayed policy did not overwrite the correction".into());
+    }
+
+    env.warp_to_slot(SYNC_SLOT);
+    let victim_capital_before = env.primary_portfolio(FEE_PAYER).capital.get();
+    let attacker_capital_before = env.primary_portfolio(ATTACKER).capital.get();
+    let insurance_before = env.primary_market_state().1.insurance;
+    let sync = env
+        .sync_maintenance_fee_with_reward(FEE_PAYER, ATTACKER, SYNC_SLOT)
+        .map_err(|error| format!("PR 337 sync victim maintenance fee: {error}"))?;
+    let victim_loss = victim_capital_before
+        .checked_sub(env.primary_portfolio(FEE_PAYER).capital.get())
+        .ok_or("PR 337 fee payer capital increased")?;
+    let attacker_reward = env
+        .primary_portfolio(ATTACKER)
+        .capital
+        .get()
+        .checked_sub(attacker_capital_before)
+        .ok_or("PR 337 attacker capital decreased")?;
+    let insurance_delta = env
+        .primary_market_state()
+        .1
+        .insurance
+        .checked_sub(insurance_before)
+        .ok_or("PR 337 insurance decreased")?;
+    if victim_loss != EXPECTED_FEE as u128 || attacker_reward != victim_loss || insurance_delta != 0
+    {
+        return Err(format!(
+            "PR 337 delayed split mismatch: victim={victim_loss}, reward={attacker_reward}, \
+             insurance={insurance_delta}"
+        ));
+    }
+
+    let destination = env.actors[ATTACKER].destination_token;
+    let destination_before = env.token_amount(destination);
+    let withdrawal = env
+        .withdraw_primary(ATTACKER, attacker_reward)
+        .map_err(|error| format!("PR 337 attacker could not withdraw reward: {error}"))?;
+    let attacker_extraction = env
+        .token_amount(destination)
+        .checked_sub(destination_before)
+        .ok_or("PR 337 attacker destination decreased")?;
+    let max_cu = correction
+        .compute_units
+        .max(replay.compute_units)
+        .max(sync.compute_units)
+        .max(withdrawal.compute_units);
+    if attacker_extraction != EXPECTED_FEE
+        || u128::from(attacker_extraction) != victim_loss
+        || max_cu >= TX_CU_LIMIT
+        || env.token_supply_observed() != supply_before
+    {
+        return Err(format!(
+            "PR 337 terminal extraction mismatch: victim={victim_loss}, \
+             extraction={attacker_extraction}, max_cu={max_cu}, supply={}/{}",
+            env.token_supply_observed(),
+            supply_before
+        ));
+    }
+
+    Ok(DelayedMaintenancePolicyReplayReproduction {
+        blocker: KnownBlocker::DelayedMaintenancePolicyReplay,
+        victim_loss: victim_loss as u64,
+        attacker_extraction,
+        insurance_delta,
+        live_oi_q,
+        correction_cu: correction.compute_units,
+        replay_cu: replay.compute_units,
+        sync_cu: sync.compute_units,
+    })
+}
+
 pub fn reproduce_liquidation_policy_generation_replay(
     seed: [u8; 32],
 ) -> Result<LiquidationPolicyGenerationReplayReproduction, String> {
@@ -11260,6 +11400,11 @@ pub fn maintenance_policy_generation_replay_seed_strategy() -> impl Strategy<Val
 
 #[allow(dead_code)]
 pub fn liquidation_policy_generation_replay_seed_strategy() -> impl Strategy<Value = [u8; 32]> {
+    any::<[u8; 32]>()
+}
+
+#[allow(dead_code)]
+pub fn delayed_maintenance_policy_replay_seed_strategy() -> impl Strategy<Value = [u8; 32]> {
     any::<[u8; 32]>()
 }
 
