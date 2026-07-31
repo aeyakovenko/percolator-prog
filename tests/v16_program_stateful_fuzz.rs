@@ -2,42 +2,43 @@ mod support;
 
 use proptest::prelude::*;
 use support::fuzz_model::{
-    activation_retry_replay_seed_strategy, asset_generation_config_replay_strategy,
-    asset_generation_mark_replay_strategy, asset_generation_replay_strategy,
-    backing_top_up_generation_replay_seed_strategy, backing_top_up_retry_replay_seed_strategy,
-    bilateral_fee_support_strategy, collateral_top_up_generation_replay_seed_strategy,
-    composite_rounding_strategy, composite_time_skew_seed_strategy, cpi_backing_fee_seed_strategy,
-    cpi_caller_fee_strategy, cross_domain_b_settlement_seed_strategy,
-    cross_domain_backing_seed_strategy, cross_margin_insurance_drain_seed_strategy,
-    delayed_asset_authority_revival_seed_strategy, deposit_retry_replay_seed_strategy,
-    forfeit_funding_erasure_seed_strategy, fractional_cap_settlement_seed_strategy,
-    insurance_top_up_retry_replay_seed_strategy,
+    activation_fee_consent_seed_strategy, activation_retry_replay_seed_strategy,
+    asset_generation_config_replay_strategy, asset_generation_mark_replay_strategy,
+    asset_generation_replay_strategy, backing_top_up_generation_replay_seed_strategy,
+    backing_top_up_retry_replay_seed_strategy, bilateral_fee_support_strategy,
+    collateral_top_up_generation_replay_seed_strategy, composite_rounding_strategy,
+    composite_time_skew_seed_strategy, cpi_backing_fee_seed_strategy, cpi_caller_fee_strategy,
+    cross_domain_b_settlement_seed_strategy, cross_domain_backing_seed_strategy,
+    cross_margin_insurance_drain_seed_strategy, delayed_asset_authority_revival_seed_strategy,
+    deposit_retry_replay_seed_strategy, forfeit_funding_erasure_seed_strategy,
+    fractional_cap_settlement_seed_strategy, insurance_top_up_retry_replay_seed_strategy,
     insurance_withdrawal_generation_replay_seed_strategy, market_incarnation_deposit_seed_strategy,
     omitted_rescue_seed_strategy, pending_ewma_inheritance_strategy,
     pending_ewma_target_override_strategy, pending_mark_fee_reward_seed_strategy,
     portfolio_incarnation_deposit_seed_strategy, portfolio_incarnation_withdrawal_seed_strategy,
     post_expiry_backing_case_strategy, prospective_funding_rewrite_strategy,
     rebalance_funding_erasure_seed_strategy, reclaimable_ewma_fee_strategy,
-    reproduce_activation_retry_replay, reproduce_asset_generation_config_replay,
-    reproduce_asset_generation_mark_replay, reproduce_asset_generation_trade_replay,
-    reproduce_backing_top_up_generation_replay, reproduce_backing_top_up_retry_replay,
-    reproduce_bilateral_fee_support, reproduce_collateral_top_up_generation_replay,
-    reproduce_composite_oracle_rounding, reproduce_composite_oracle_time_skew,
-    reproduce_cpi_backing_fee_siphon, reproduce_cpi_caller_fee_siphon,
-    reproduce_cross_domain_b_settlement, reproduce_cross_domain_backing_double_spend,
-    reproduce_cross_margin_insurance_drain, reproduce_delayed_asset_authority_revival,
-    reproduce_deposit_retry_replay, reproduce_forfeit_funding_erasure,
-    reproduce_fractional_cap_settlement, reproduce_insurance_top_up_retry_replay,
-    reproduce_insurance_withdrawal_generation_replay, reproduce_market_incarnation_deposit,
-    reproduce_omitted_rescue_liquidation, reproduce_pending_ewma_inheritance,
-    reproduce_pending_ewma_target_override, reproduce_pending_mark_fee_reward,
-    reproduce_portfolio_incarnation_deposit, reproduce_portfolio_incarnation_withdrawal,
-    reproduce_post_expiry_backing_fee, reproduce_prospective_funding_rewrite,
-    reproduce_rebalance_funding_erasure, reproduce_reclaimable_ewma_fee,
-    reproduce_resolve_before_committed_accrual, reproduce_resolve_generation_replay,
-    reproduce_rounded_funding_omission, reproduce_shutdown_generation_replay,
-    reproduce_terminal_dust_payout_erasure, reproduce_trade_driven_liquidation_reward,
-    reproduce_trade_funding_erasure, reproduce_trade_retry_replay, reproduce_unstaged_mark_target,
+    reproduce_activation_fee_consent, reproduce_activation_retry_replay,
+    reproduce_asset_generation_config_replay, reproduce_asset_generation_mark_replay,
+    reproduce_asset_generation_trade_replay, reproduce_backing_top_up_generation_replay,
+    reproduce_backing_top_up_retry_replay, reproduce_bilateral_fee_support,
+    reproduce_collateral_top_up_generation_replay, reproduce_composite_oracle_rounding,
+    reproduce_composite_oracle_time_skew, reproduce_cpi_backing_fee_siphon,
+    reproduce_cpi_caller_fee_siphon, reproduce_cross_domain_b_settlement,
+    reproduce_cross_domain_backing_double_spend, reproduce_cross_margin_insurance_drain,
+    reproduce_delayed_asset_authority_revival, reproduce_deposit_retry_replay,
+    reproduce_forfeit_funding_erasure, reproduce_fractional_cap_settlement,
+    reproduce_insurance_top_up_retry_replay, reproduce_insurance_withdrawal_generation_replay,
+    reproduce_market_incarnation_deposit, reproduce_omitted_rescue_liquidation,
+    reproduce_pending_ewma_inheritance, reproduce_pending_ewma_target_override,
+    reproduce_pending_mark_fee_reward, reproduce_portfolio_incarnation_deposit,
+    reproduce_portfolio_incarnation_withdrawal, reproduce_post_expiry_backing_fee,
+    reproduce_prospective_funding_rewrite, reproduce_rebalance_funding_erasure,
+    reproduce_reclaimable_ewma_fee, reproduce_resolve_before_committed_accrual,
+    reproduce_resolve_generation_replay, reproduce_rounded_funding_omission,
+    reproduce_shutdown_generation_replay, reproduce_terminal_dust_payout_erasure,
+    reproduce_trade_driven_liquidation_reward, reproduce_trade_funding_erasure,
+    reproduce_trade_retry_replay, reproduce_unstaged_mark_target,
     reproduce_withdrawal_retry_liquidation, resolve_before_committed_accrual_seed_strategy,
     resolve_generation_replay_seed_strategy, rounded_funding_seed_strategy, run_scenario,
     scenario_strategy, shutdown_generation_replay_seed_strategy, target_staging_strategy,
@@ -407,6 +408,19 @@ proptest! {
         prop_assert!(
             result.is_ok(),
             "PR 362 no longer reproduces for seed {:?}: {}",
+            seed,
+            result.unwrap_err()
+        );
+    }
+
+    #[test]
+    fn v16_program_pr314_activation_fee_consent_fuzz(
+        seed in activation_fee_consent_seed_strategy()
+    ) {
+        let result = reproduce_activation_fee_consent(seed);
+        prop_assert!(
+            result.is_ok(),
+            "PR 314 no longer reproduces for seed {:?}: {}",
             seed,
             result.unwrap_err()
         );

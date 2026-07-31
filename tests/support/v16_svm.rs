@@ -1325,6 +1325,18 @@ impl V16Svm {
         )
     }
 
+    pub fn build_retained_market_init_fee_policy(&mut self, min_init_fee: u128) -> Transaction {
+        let authority = copy_keypair(&self.admin);
+        self.build_program_transaction(
+            ProgInstruction::UpdateMarketInitFeePolicy { min_init_fee },
+            vec![
+                AccountMeta::new(authority.pubkey(), true),
+                AccountMeta::new(self.market, false),
+            ],
+            &[authority],
+        )
+    }
+
     pub fn update_liquidation_fee_policy(
         &mut self,
         cranker_share_bps: u16,

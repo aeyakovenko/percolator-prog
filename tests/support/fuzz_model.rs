@@ -99,10 +99,11 @@ pub enum KnownBlocker {
     MarketIncarnationDeposit,
     ResolveGenerationReplay,
     ShutdownGenerationReplay,
+    ActivationFeeConsent,
 }
 
 impl KnownBlocker {
-    pub const COUNT: usize = 43;
+    pub const COUNT: usize = 44;
 
     pub const fn index(self) -> usize {
         match self {
@@ -149,6 +150,7 @@ impl KnownBlocker {
             Self::MarketIncarnationDeposit => 40,
             Self::ResolveGenerationReplay => 41,
             Self::ShutdownGenerationReplay => 42,
+            Self::ActivationFeeConsent => 43,
         }
     }
 }
@@ -599,6 +601,18 @@ pub struct ActivationRetryReplayReproduction {
     pub beneficiary_extraction: u64,
     pub insured_remainder: u128,
     pub replay_cu: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ActivationFeeConsentReproduction {
+    pub blocker: KnownBlocker,
+    pub advertised_fee: u64,
+    pub charged_fee: u64,
+    pub unexpected_loss: u64,
+    pub beneficiary_extraction: u64,
+    pub insured_remainder: u128,
+    pub policy_replay_cu: u64,
+    pub activation_cu: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -5502,6 +5516,112 @@ pub fn reproduce_activation_retry_replay(
     })
 }
 
+pub fn reproduce_activation_fee_consent(
+    seed: [u8; 32],
+) -> Result<ActivationFeeConsentReproduction, String> {
+    const ASSET: u16 = 1;
+    const CREATOR: usize = 0;
+    const BENEFICIARY: usize = 1;
+    const ADVERTISED_FEE: u128 = 1;
+    const CHARGED_FEE: u128 = 1_000;
+    const UNEXPECTED_FEE: u128 = CHARGED_FEE - ADVERTISED_FEE;
+
+    let mut env = V16Svm::new(seed, MarketConfig::default());
+    let supply_before = env.token_supply_observed();
+    env.update_asset_authority_from_admin(
+        0,
+        percolator_prog::processor::ASSET_AUTH_INSURANCE_OPERATOR,
+        BENEFICIARY,
+    )
+    .map_err(|error| format!("PR 314 install independent fee beneficiary: {error}"))?;
+
+    env.warp_to_slot(2);
+    env.retire_asset(ASSET, 2)
+        .map_err(|error| format!("PR 314 retire reusable slot: {error}"))?;
+    let delayed_policy = env.build_retained_market_init_fee_policy(CHARGED_FEE);
+    env.update_market_init_fee_policy(ADVERTISED_FEE)
+        .map_err(|error| format!("PR 314 publish creator-visible fee: {error}"))?;
+    let visible_fee = env.primary_market_state().0.permissionless_market_init_fee;
+    if visible_fee != ADVERTISED_FEE {
+        return Err(format!(
+            "PR 314 creator did not observe the advertised fee: {visible_fee}"
+        ));
+    }
+
+    env.warp_to_slot(3);
+    let creator_source = env.actors[CREATOR].source_token;
+    let source_before = env.token_amount(creator_source);
+    let activation = env.build_retained_permissionless_asset_activation(
+        CREATOR, ASSET, 3, 100, CREATOR, CREATOR, CREATOR, CREATOR,
+    );
+    let policy_replay = env
+        .land_retained(delayed_policy)
+        .map_err(|error| format!("PR 314 delayed high-fee policy rejected: {error}"))?;
+    let installed_fee = env.primary_market_state().0.permissionless_market_init_fee;
+    if installed_fee != CHARGED_FEE {
+        return Err(format!(
+            "PR 314 delayed policy did not restore the high fee: {installed_fee}"
+        ));
+    }
+    let activation = env
+        .land_retained(activation)
+        .map_err(|error| format!("PR 314 retained activation no longer lands: {error}"))?;
+
+    let charged_fee = source_before
+        .checked_sub(env.token_amount(creator_source))
+        .ok_or("PR 314 creator source increased after activation")?;
+    let insurance_after_charge = env.primary_market_state().1.insurance_domain_budget[0]
+        .checked_add(env.primary_market_state().1.insurance_domain_budget[1])
+        .ok_or("PR 314 insurance total overflow")?;
+    if charged_fee != CHARGED_FEE as u64 || insurance_after_charge != CHARGED_FEE {
+        return Err(format!(
+            "PR 314 unsigned fee was not charged into insurance: debit={charged_fee}, \
+             insurance={insurance_after_charge}"
+        ));
+    }
+
+    let beneficiary_destination = env.actors[BENEFICIARY].destination_token;
+    let destination_before = env.token_amount(beneficiary_destination);
+    let withdrawal = env
+        .withdraw_insurance_asset(BENEFICIARY, 0, UNEXPECTED_FEE)
+        .map_err(|error| format!("PR 314 beneficiary could not extract unsigned fee: {error}"))?;
+    let beneficiary_extraction = env
+        .token_amount(beneficiary_destination)
+        .checked_sub(destination_before)
+        .ok_or("PR 314 beneficiary destination decreased")?;
+    let insured_remainder = env.primary_market_state().1.insurance_domain_budget[0]
+        .checked_add(env.primary_market_state().1.insurance_domain_budget[1])
+        .ok_or("PR 314 remaining insurance total overflow")?;
+    let max_cu = policy_replay
+        .compute_units
+        .max(activation.compute_units)
+        .max(withdrawal.compute_units);
+    if beneficiary_extraction != UNEXPECTED_FEE as u64
+        || insured_remainder != ADVERTISED_FEE
+        || max_cu >= TX_CU_LIMIT
+        || env.token_supply_observed() != supply_before
+    {
+        return Err(format!(
+            "PR 314 public extraction mismatch: charged={charged_fee}, \
+             beneficiary={beneficiary_extraction}, insured={insured_remainder}, max_cu={max_cu}, \
+             supply={}/{}",
+            env.token_supply_observed(),
+            supply_before
+        ));
+    }
+
+    Ok(ActivationFeeConsentReproduction {
+        blocker: KnownBlocker::ActivationFeeConsent,
+        advertised_fee: ADVERTISED_FEE as u64,
+        charged_fee,
+        unexpected_loss: charged_fee - ADVERTISED_FEE as u64,
+        beneficiary_extraction,
+        insured_remainder,
+        policy_replay_cu: policy_replay.compute_units,
+        activation_cu: activation.compute_units,
+    })
+}
+
 #[derive(Clone, Copy, Debug)]
 struct BackingTopUpRetryWorld {
     provider_loss: u64,
@@ -9948,6 +10068,11 @@ pub fn insurance_top_up_retry_replay_seed_strategy() -> impl Strategy<Value = [u
 
 #[allow(dead_code)]
 pub fn activation_retry_replay_seed_strategy() -> impl Strategy<Value = [u8; 32]> {
+    any::<[u8; 32]>()
+}
+
+#[allow(dead_code)]
+pub fn activation_fee_consent_seed_strategy() -> impl Strategy<Value = [u8; 32]> {
     any::<[u8; 32]>()
 }
 
