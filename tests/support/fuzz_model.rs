@@ -12,7 +12,7 @@ use percolator_prog::{
 };
 use proptest::prelude::*;
 use serde::{Deserialize, Serialize};
-use solana_sdk::transaction::Transaction;
+use solana_sdk::{signature::Signer, transaction::Transaction};
 use std::collections::VecDeque;
 
 const MIN_LIVENESS_DRAIN_LIMIT: usize = 256;
@@ -85,10 +85,11 @@ pub enum KnownBlocker {
     ProspectiveFundingRewrite,
     ResolveBeforeCommittedAccrual,
     BilateralFeeSupport,
+    DelayedAssetAuthorityRevival,
 }
 
 impl KnownBlocker {
-    pub const COUNT: usize = 29;
+    pub const COUNT: usize = 30;
 
     pub const fn index(self) -> usize {
         match self {
@@ -121,6 +122,7 @@ impl KnownBlocker {
             Self::ProspectiveFundingRewrite => 26,
             Self::ResolveBeforeCommittedAccrual => 27,
             Self::BilateralFeeSupport => 28,
+            Self::DelayedAssetAuthorityRevival => 29,
         }
     }
 }
@@ -504,6 +506,17 @@ pub struct BilateralFeeSupportReproduction {
     pub insurance_gain: u128,
     pub extracted_tokens: u128,
     pub max_cu: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DelayedAssetAuthorityRevivalReproduction {
+    pub blocker: KnownBlocker,
+    pub provider_loss: u64,
+    pub attacker_extraction: u64,
+    pub funded_reserve: u128,
+    pub reserve_after: u128,
+    pub handoff_cu: u64,
+    pub withdrawal_cu: u64,
 }
 
 impl SubstitutionKind {
@@ -4544,6 +4557,114 @@ pub fn reproduce_bilateral_fee_support(
     })
 }
 
+pub fn reproduce_delayed_asset_authority_revival(
+    seed: [u8; 32],
+) -> Result<DelayedAssetAuthorityRevivalReproduction, String> {
+    const ASSET: u16 = 0;
+    const DOMAIN: u16 = 0;
+    const DISPLACED_OPERATOR: usize = 0;
+    const REPLACEMENT_OPERATOR: usize = 1;
+    const PROVIDER: usize = 2;
+    const AMOUNT: u128 = 50_000;
+
+    let mut env = V16Svm::new(seed, MarketConfig::default());
+    let supply_before = env.token_supply_observed();
+    let provider_source = env.actors[PROVIDER].source_token;
+    let attacker_destination = env.actors[DISPLACED_OPERATOR].destination_token;
+    let provider_source_before = env.token_amount(provider_source);
+    let attacker_destination_before = env.token_amount(attacker_destination);
+
+    let retained_handoff = env.build_retained_asset_authority_handoff_from_admin(
+        ASSET,
+        percolator_prog::processor::ASSET_AUTH_INSURANCE_OPERATOR,
+        DISPLACED_OPERATOR,
+    );
+    env.update_asset_authority_from_admin(
+        ASSET,
+        percolator_prog::processor::ASSET_AUTH_INSURANCE_OPERATOR,
+        REPLACEMENT_OPERATOR,
+    )
+    .map_err(|error| format!("PR 251 install replacement operator: {error}"))?;
+    env.update_asset_authority_from_admin(
+        ASSET,
+        percolator_prog::processor::ASSET_AUTH_INSURANCE,
+        PROVIDER,
+    )
+    .map_err(|error| format!("PR 251 install independent insurance provider: {error}"))?;
+
+    let profile = env.primary_profile(ASSET as usize);
+    if profile.insurance_operator != env.actors[REPLACEMENT_OPERATOR].signer.pubkey().to_bytes()
+        || profile.insurance_authority != env.actors[PROVIDER].signer.pubkey().to_bytes()
+    {
+        return Err("PR 251 replacement authority handoffs did not commit".into());
+    }
+
+    let top_up = env
+        .top_up_insurance_domain_for_actor(PROVIDER, DOMAIN, AMOUNT)
+        .map_err(|error| format!("PR 251 independent provider top-up: {error}"))?;
+    let funded_reserve = env.primary_market_state().1.insurance_domain_budget[DOMAIN as usize];
+    let provider_debit = provider_source_before
+        .checked_sub(env.token_amount(provider_source))
+        .ok_or("PR 251 provider source increased")?;
+    if funded_reserve != AMOUNT || provider_debit != AMOUNT as u64 {
+        return Err(format!(
+            "PR 251 provider funding did not reach the live reserve: debit={provider_debit}, \
+             reserve={funded_reserve}"
+        ));
+    }
+
+    let handoff = env
+        .land_retained(retained_handoff)
+        .map_err(|error| format!("PR 251 stale admin handoff no longer lands: {error}"))?;
+    if env.primary_profile(ASSET as usize).insurance_operator
+        != env.actors[DISPLACED_OPERATOR].signer.pubkey().to_bytes()
+    {
+        return Err(
+            "PR 251 retained handoff landed without reviving the displaced operator".into(),
+        );
+    }
+
+    let withdrawal = env
+        .withdraw_insurance_asset(DISPLACED_OPERATOR, ASSET, AMOUNT)
+        .map_err(|error| format!("PR 251 revived operator could not drain reserve: {error}"))?;
+    let attacker_extraction = env
+        .token_amount(attacker_destination)
+        .checked_sub(attacker_destination_before)
+        .ok_or("PR 251 attacker destination decreased")?;
+    let provider_loss = provider_source_before
+        .checked_sub(env.token_amount(provider_source))
+        .ok_or("PR 251 provider source increased after withdrawal")?;
+    let reserve_after = env.primary_market_state().1.insurance_domain_budget[DOMAIN as usize];
+    let max_cu = top_up
+        .compute_units
+        .max(handoff.compute_units)
+        .max(withdrawal.compute_units);
+    if provider_loss != AMOUNT as u64
+        || attacker_extraction != AMOUNT as u64
+        || reserve_after != 0
+        || max_cu >= TX_CU_LIMIT
+        || env.token_supply_observed() != supply_before
+    {
+        return Err(format!(
+            "PR 251 public extraction conditions failed: provider_loss={provider_loss}, \
+             attacker_extraction={attacker_extraction}, reserve={funded_reserve}->{reserve_after}, \
+             max_cu={max_cu}, supply={}/{}",
+            env.token_supply_observed(),
+            supply_before
+        ));
+    }
+
+    Ok(DelayedAssetAuthorityRevivalReproduction {
+        blocker: KnownBlocker::DelayedAssetAuthorityRevival,
+        provider_loss,
+        attacker_extraction,
+        funded_reserve,
+        reserve_after,
+        handoff_cu: handoff.compute_units,
+        withdrawal_cu: withdrawal.compute_units,
+    })
+}
+
 fn portfolio_equity(env: &V16Svm, actor: usize) -> Result<i128, String> {
     let account = env.primary_portfolio(actor);
     i128::try_from(account.capital.get())
@@ -7582,6 +7703,11 @@ pub fn bilateral_fee_support_strategy(
         ]),
         prop::sample::select(vec![TradeRoute::Cpi, TradeRoute::BatchCpi]),
     )
+}
+
+#[allow(dead_code)]
+pub fn delayed_asset_authority_revival_seed_strategy() -> impl Strategy<Value = [u8; 32]> {
+    any::<[u8; 32]>()
 }
 
 #[allow(dead_code)]

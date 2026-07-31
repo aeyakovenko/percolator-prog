@@ -8,18 +8,18 @@ use support::{
         reproduce_composite_oracle_rounding, reproduce_composite_oracle_time_skew,
         reproduce_cpi_backing_fee_siphon, reproduce_cpi_caller_fee_siphon,
         reproduce_cross_domain_b_settlement, reproduce_cross_domain_backing_double_spend,
-        reproduce_cross_margin_insurance_drain, reproduce_forfeit_funding_erasure,
-        reproduce_fractional_cap_settlement, reproduce_omitted_rescue_liquidation,
-        reproduce_pending_ewma_inheritance, reproduce_pending_ewma_target_override,
-        reproduce_pending_mark_fee_reward, reproduce_post_expiry_backing_fee,
-        reproduce_prospective_funding_rewrite, reproduce_rebalance_funding_erasure,
-        reproduce_reclaimable_ewma_fee, reproduce_resolve_before_committed_accrual,
-        reproduce_rounded_funding_omission, reproduce_terminal_dust_payout_erasure,
-        reproduce_trade_driven_liquidation_reward, reproduce_trade_funding_erasure,
-        reproduce_trade_retry_replay, reproduce_unstaged_mark_target, run_scenario,
-        AssetGenerationConfigPath, AssetGenerationMarkPath, BilateralFeeMode,
-        CompositeRoundingCase, KnownBlocker, PostExpiryBackingCase, Scenario, TargetStagingCase,
-        TradeDrivenLiquidationMode, TradeRoute,
+        reproduce_cross_margin_insurance_drain, reproduce_delayed_asset_authority_revival,
+        reproduce_forfeit_funding_erasure, reproduce_fractional_cap_settlement,
+        reproduce_omitted_rescue_liquidation, reproduce_pending_ewma_inheritance,
+        reproduce_pending_ewma_target_override, reproduce_pending_mark_fee_reward,
+        reproduce_post_expiry_backing_fee, reproduce_prospective_funding_rewrite,
+        reproduce_rebalance_funding_erasure, reproduce_reclaimable_ewma_fee,
+        reproduce_resolve_before_committed_accrual, reproduce_rounded_funding_omission,
+        reproduce_terminal_dust_payout_erasure, reproduce_trade_driven_liquidation_reward,
+        reproduce_trade_funding_erasure, reproduce_trade_retry_replay,
+        reproduce_unstaged_mark_target, run_scenario, AssetGenerationConfigPath,
+        AssetGenerationMarkPath, BilateralFeeMode, CompositeRoundingCase, KnownBlocker,
+        PostExpiryBackingCase, Scenario, TargetStagingCase, TradeDrivenLiquidationMode, TradeRoute,
     },
     open_lof_manifest::{missing_prs, quarantined_prs, validate_manifest},
 };
@@ -472,6 +472,22 @@ fn v16_program_pr369_one_sided_cpi_fee_subsidizes_attacker_mark_gain() {
 }
 
 #[test]
+fn v16_program_pr251_delayed_admin_handoff_revives_withdrawal_authority() {
+    let reproduction = reproduce_delayed_asset_authority_revival([0x51; 32])
+        .unwrap_or_else(|error| panic!("PR 251 no longer reproduces: {error}"));
+    assert_eq!(
+        reproduction.blocker,
+        KnownBlocker::DelayedAssetAuthorityRevival
+    );
+    assert_eq!(reproduction.funded_reserve, 50_000);
+    assert_eq!(reproduction.provider_loss, 50_000);
+    assert_eq!(reproduction.attacker_extraction, 50_000);
+    assert_eq!(reproduction.reserve_after, 0);
+    assert!(reproduction.handoff_cu < 1_400_000);
+    assert!(reproduction.withdrawal_cu < 1_400_000);
+}
+
+#[test]
 fn v16_program_pr225_reclaimed_ewma_fee_extracts_on_every_route() {
     for route in [
         TradeRoute::NoCpi,
@@ -662,14 +678,14 @@ fn v16_program_open_lof_manifest_is_complete_and_honest() {
     assert_eq!(
         quarantined_prs(),
         [
-            220, 223, 224, 225, 231, 253, 255, 260, 264, 265, 267, 271, 272, 273, 275, 277, 280,
-            281, 282, 283, 290, 329, 331, 332, 333, 343, 356, 365, 366, 367, 369, 380, 381
+            220, 223, 224, 225, 231, 251, 253, 255, 260, 264, 265, 267, 271, 272, 273, 275, 277,
+            280, 281, 282, 283, 290, 329, 331, 332, 333, 343, 356, 365, 366, 367, 369, 380, 381
         ]
     );
     let missing = missing_prs();
     assert_eq!(
         missing.len(),
-        66,
+        65,
         "update the explicit evidence state when an executable adapter lands"
     );
     assert!(!missing.contains(&220));
@@ -677,6 +693,7 @@ fn v16_program_open_lof_manifest_is_complete_and_honest() {
     assert!(!missing.contains(&224));
     assert!(!missing.contains(&225));
     assert!(!missing.contains(&231));
+    assert!(!missing.contains(&251));
     assert!(!missing.contains(&253));
     assert!(!missing.contains(&255));
     assert!(!missing.contains(&260));

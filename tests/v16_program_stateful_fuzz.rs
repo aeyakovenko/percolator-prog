@@ -6,17 +6,18 @@ use support::fuzz_model::{
     asset_generation_replay_strategy, bilateral_fee_support_strategy, composite_rounding_strategy,
     composite_time_skew_seed_strategy, cpi_backing_fee_seed_strategy, cpi_caller_fee_strategy,
     cross_domain_b_settlement_seed_strategy, cross_domain_backing_seed_strategy,
-    cross_margin_insurance_drain_seed_strategy, forfeit_funding_erasure_seed_strategy,
-    fractional_cap_settlement_seed_strategy, omitted_rescue_seed_strategy,
-    pending_ewma_inheritance_strategy, pending_ewma_target_override_strategy,
-    pending_mark_fee_reward_seed_strategy, post_expiry_backing_case_strategy,
-    prospective_funding_rewrite_strategy, rebalance_funding_erasure_seed_strategy,
-    reclaimable_ewma_fee_strategy, reproduce_asset_generation_config_replay,
-    reproduce_asset_generation_mark_replay, reproduce_asset_generation_trade_replay,
-    reproduce_bilateral_fee_support, reproduce_composite_oracle_rounding,
-    reproduce_composite_oracle_time_skew, reproduce_cpi_backing_fee_siphon,
-    reproduce_cpi_caller_fee_siphon, reproduce_cross_domain_b_settlement,
-    reproduce_cross_domain_backing_double_spend, reproduce_cross_margin_insurance_drain,
+    cross_margin_insurance_drain_seed_strategy, delayed_asset_authority_revival_seed_strategy,
+    forfeit_funding_erasure_seed_strategy, fractional_cap_settlement_seed_strategy,
+    omitted_rescue_seed_strategy, pending_ewma_inheritance_strategy,
+    pending_ewma_target_override_strategy, pending_mark_fee_reward_seed_strategy,
+    post_expiry_backing_case_strategy, prospective_funding_rewrite_strategy,
+    rebalance_funding_erasure_seed_strategy, reclaimable_ewma_fee_strategy,
+    reproduce_asset_generation_config_replay, reproduce_asset_generation_mark_replay,
+    reproduce_asset_generation_trade_replay, reproduce_bilateral_fee_support,
+    reproduce_composite_oracle_rounding, reproduce_composite_oracle_time_skew,
+    reproduce_cpi_backing_fee_siphon, reproduce_cpi_caller_fee_siphon,
+    reproduce_cross_domain_b_settlement, reproduce_cross_domain_backing_double_spend,
+    reproduce_cross_margin_insurance_drain, reproduce_delayed_asset_authority_revival,
     reproduce_forfeit_funding_erasure, reproduce_fractional_cap_settlement,
     reproduce_omitted_rescue_liquidation, reproduce_pending_ewma_inheritance,
     reproduce_pending_ewma_target_override, reproduce_pending_mark_fee_reward,
@@ -314,6 +315,19 @@ proptest! {
             "PR 369 {:?} {:?} no longer reproduces for seed {:?}: {}",
             mode,
             route,
+            seed,
+            result.unwrap_err()
+        );
+    }
+
+    #[test]
+    fn v16_program_pr251_delayed_asset_authority_revival_fuzz(
+        seed in delayed_asset_authority_revival_seed_strategy()
+    ) {
+        let result = reproduce_delayed_asset_authority_revival(seed);
+        prop_assert!(
+            result.is_ok(),
+            "PR 251 no longer reproduces for seed {:?}: {}",
             seed,
             result.unwrap_err()
         );
