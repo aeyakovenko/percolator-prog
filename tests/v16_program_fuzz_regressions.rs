@@ -13,11 +13,12 @@ use support::{
         reproduce_pending_ewma_target_override, reproduce_pending_mark_fee_reward,
         reproduce_post_expiry_backing_fee, reproduce_prospective_funding_rewrite,
         reproduce_rebalance_funding_erasure, reproduce_reclaimable_ewma_fee,
-        reproduce_rounded_funding_omission, reproduce_terminal_dust_payout_erasure,
-        reproduce_trade_driven_liquidation_reward, reproduce_trade_funding_erasure,
-        reproduce_trade_retry_replay, reproduce_unstaged_mark_target, run_scenario,
-        AssetGenerationConfigPath, AssetGenerationMarkPath, CompositeRoundingCase, KnownBlocker,
-        PostExpiryBackingCase, Scenario, TargetStagingCase, TradeDrivenLiquidationMode, TradeRoute,
+        reproduce_resolve_before_committed_accrual, reproduce_rounded_funding_omission,
+        reproduce_terminal_dust_payout_erasure, reproduce_trade_driven_liquidation_reward,
+        reproduce_trade_funding_erasure, reproduce_trade_retry_replay,
+        reproduce_unstaged_mark_target, run_scenario, AssetGenerationConfigPath,
+        AssetGenerationMarkPath, CompositeRoundingCase, KnownBlocker, PostExpiryBackingCase,
+        Scenario, TargetStagingCase, TradeDrivenLiquidationMode, TradeRoute,
     },
     open_lof_manifest::{missing_prs, quarantined_prs, validate_manifest},
 };
@@ -423,6 +424,28 @@ fn v16_program_pr380_trade_first_rewrites_elapsed_funding() {
 }
 
 #[test]
+fn v16_program_pr255_stale_resolve_discards_pending_authenticated_mark() {
+    let reproduction = reproduce_resolve_before_committed_accrual([0x55; 32])
+        .unwrap_or_else(|error| panic!("PR 255 no longer reproduces: {error}"));
+    assert_eq!(
+        reproduction.blocker,
+        KnownBlocker::ResolveBeforeCommittedAccrual
+    );
+    assert!(reproduction.control_mark > reproduction.attack_mark);
+    assert_eq!(
+        reproduction.victim_payout_loss,
+        reproduction.attacker_payout_gain
+    );
+    assert_eq!(reproduction.victim_payout_loss, 10_000_000);
+    assert_eq!(
+        reproduction.control_total_payout,
+        reproduction.attack_total_payout
+    );
+    assert_eq!(reproduction.attack_total_payout, 4_000_000_000);
+    assert!(reproduction.attack_resolve_cu < 1_400_000);
+}
+
+#[test]
 fn v16_program_pr225_reclaimed_ewma_fee_extracts_on_every_route() {
     for route in [
         TradeRoute::NoCpi,
@@ -613,14 +636,14 @@ fn v16_program_open_lof_manifest_is_complete_and_honest() {
     assert_eq!(
         quarantined_prs(),
         [
-            220, 223, 224, 225, 231, 253, 260, 264, 265, 267, 271, 272, 273, 275, 277, 280, 281,
-            282, 283, 290, 329, 331, 332, 333, 343, 356, 365, 366, 367, 380, 381
+            220, 223, 224, 225, 231, 253, 255, 260, 264, 265, 267, 271, 272, 273, 275, 277, 280,
+            281, 282, 283, 290, 329, 331, 332, 333, 343, 356, 365, 366, 367, 380, 381
         ]
     );
     let missing = missing_prs();
     assert_eq!(
         missing.len(),
-        68,
+        67,
         "update the explicit evidence state when an executable adapter lands"
     );
     assert!(!missing.contains(&220));
@@ -629,6 +652,7 @@ fn v16_program_open_lof_manifest_is_complete_and_honest() {
     assert!(!missing.contains(&225));
     assert!(!missing.contains(&231));
     assert!(!missing.contains(&253));
+    assert!(!missing.contains(&255));
     assert!(!missing.contains(&260));
     assert!(!missing.contains(&264));
     assert!(!missing.contains(&265));

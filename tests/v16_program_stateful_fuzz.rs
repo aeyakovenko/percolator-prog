@@ -21,12 +21,14 @@ use support::fuzz_model::{
     reproduce_pending_ewma_inheritance, reproduce_pending_ewma_target_override,
     reproduce_pending_mark_fee_reward, reproduce_post_expiry_backing_fee,
     reproduce_prospective_funding_rewrite, reproduce_rebalance_funding_erasure,
-    reproduce_reclaimable_ewma_fee, reproduce_rounded_funding_omission,
-    reproduce_terminal_dust_payout_erasure, reproduce_trade_driven_liquidation_reward,
-    reproduce_trade_funding_erasure, reproduce_trade_retry_replay, reproduce_unstaged_mark_target,
-    rounded_funding_seed_strategy, run_scenario, scenario_strategy, target_staging_strategy,
-    terminal_dust_payout_erasure_strategy, trade_driven_liquidation_reward_strategy,
-    trade_funding_erasure_strategy, trade_retry_replay_strategy,
+    reproduce_reclaimable_ewma_fee, reproduce_resolve_before_committed_accrual,
+    reproduce_rounded_funding_omission, reproduce_terminal_dust_payout_erasure,
+    reproduce_trade_driven_liquidation_reward, reproduce_trade_funding_erasure,
+    reproduce_trade_retry_replay, reproduce_unstaged_mark_target,
+    resolve_before_committed_accrual_seed_strategy, rounded_funding_seed_strategy, run_scenario,
+    scenario_strategy, target_staging_strategy, terminal_dust_payout_erasure_strategy,
+    trade_driven_liquidation_reward_strategy, trade_funding_erasure_strategy,
+    trade_retry_replay_strategy,
 };
 
 fn env_usize(name: &str, default: usize) -> usize {
@@ -284,6 +286,19 @@ proptest! {
             result.is_ok(),
             "PR 380 {:?} no longer reproduces for seed {:?}: {}",
             route,
+            seed,
+            result.unwrap_err()
+        );
+    }
+
+    #[test]
+    fn v16_program_pr255_resolve_before_committed_accrual_fuzz(
+        seed in resolve_before_committed_accrual_seed_strategy()
+    ) {
+        let result = reproduce_resolve_before_committed_accrual(seed);
+        prop_assert!(
+            result.is_ok(),
+            "PR 255 no longer reproduces for seed {:?}: {}",
             seed,
             result.unwrap_err()
         );

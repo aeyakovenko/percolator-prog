@@ -83,10 +83,11 @@ pub enum KnownBlocker {
     PendingMarkFeeReward,
     FractionalCapSettlement,
     ProspectiveFundingRewrite,
+    ResolveBeforeCommittedAccrual,
 }
 
 impl KnownBlocker {
-    pub const COUNT: usize = 27;
+    pub const COUNT: usize = 28;
 
     pub const fn index(self) -> usize {
         match self {
@@ -117,6 +118,7 @@ impl KnownBlocker {
             Self::PendingMarkFeeReward => 24,
             Self::FractionalCapSettlement => 25,
             Self::ProspectiveFundingRewrite => 26,
+            Self::ResolveBeforeCommittedAccrual => 27,
         }
     }
 }
@@ -467,6 +469,18 @@ pub struct ProspectiveFundingRewriteReproduction {
     pub attacker_coalition_gain: u128,
     pub control_total_payout: u128,
     pub attack_total_payout: u128,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ResolveBeforeCommittedAccrualReproduction {
+    pub blocker: KnownBlocker,
+    pub control_mark: u64,
+    pub attack_mark: u64,
+    pub victim_payout_loss: u64,
+    pub attacker_payout_gain: u64,
+    pub control_total_payout: u128,
+    pub attack_total_payout: u128,
+    pub attack_resolve_cu: u64,
 }
 
 impl SubstitutionKind {
@@ -4101,6 +4115,147 @@ pub fn reproduce_prospective_funding_rewrite(
     })
 }
 
+pub fn reproduce_resolve_before_committed_accrual(
+    mut seed: [u8; 32],
+) -> Result<ResolveBeforeCommittedAccrualReproduction, String> {
+    seed[0] ^= 0x55;
+    let control = run_pending_mark_resolve_world(seed, true)?;
+    let attack = run_pending_mark_resolve_world(seed, false)?;
+    let victim_payout_loss = control
+        .long_payout
+        .checked_sub(attack.long_payout)
+        .ok_or("PR 255 resolve-first ordering increased victim payout")?;
+    let attacker_payout_gain = attack
+        .short_payout
+        .checked_sub(control.short_payout)
+        .ok_or("PR 255 resolve-first ordering decreased attacker payout")?;
+    if control.effective_mark <= attack.effective_mark
+        || victim_payout_loss == 0
+        || victim_payout_loss != attacker_payout_gain
+        || control.total_payout != attack.total_payout
+        || attack.resolve_cu >= TX_CU_LIMIT
+    {
+        return Err(format!(
+            "PR 255 stale resolve did not discard a conserved pending-mark transfer: \
+             control={control:?}, attack={attack:?}"
+        ));
+    }
+    Ok(ResolveBeforeCommittedAccrualReproduction {
+        blocker: KnownBlocker::ResolveBeforeCommittedAccrual,
+        control_mark: control.effective_mark,
+        attack_mark: attack.effective_mark,
+        victim_payout_loss,
+        attacker_payout_gain,
+        control_total_payout: control.total_payout,
+        attack_total_payout: attack.total_payout,
+        attack_resolve_cu: attack.resolve_cu,
+    })
+}
+
+#[derive(Clone, Copy, Debug)]
+struct PendingMarkResolveWorld {
+    effective_mark: u64,
+    long_payout: u64,
+    short_payout: u64,
+    total_payout: u128,
+    resolve_cu: u64,
+}
+
+fn run_pending_mark_resolve_world(
+    seed: [u8; 32],
+    commit_mark_before_resolve: bool,
+) -> Result<PendingMarkResolveWorld, String> {
+    const PRICE: u64 = 1_000_000;
+    const MARK: u64 = 1_010_000;
+    const DEPOSIT: u128 = 2_000_000_000;
+    const SIZE_Q: i128 = 1_000 * POS_SCALE as i128;
+    const PUSH_SLOT: u64 = 2;
+    const RESOLVE_SLOT: u64 = 5;
+
+    let mut env = V16Svm::new(
+        seed,
+        MarketConfig {
+            initial_price: PRICE,
+            h_max: 20,
+            max_trading_fee_bps: 100,
+            max_price_move_bps_per_slot: 100,
+            max_accrual_dt_slots: 20,
+            min_funding_lifetime_slots: 20,
+            actor_deposits: [
+                DEPOSIT,
+                DEPOSIT,
+                super::v16_svm::USER_DEPOSIT,
+                super::v16_svm::USER_DEPOSIT,
+                super::v16_svm::EXIT_MAKER_DEPOSIT,
+            ],
+            actor_token_balances: [
+                super::v16_svm::EXIT_MAKER_TOKEN_BALANCE,
+                super::v16_svm::EXIT_MAKER_TOKEN_BALANCE,
+                200_000_000,
+                200_000_000,
+                super::v16_svm::EXIT_MAKER_TOKEN_BALANCE,
+            ],
+            ..MarketConfig::default()
+        },
+    );
+    let supply_before = env.token_supply_observed();
+    env.configure_permissionless_resolve(3, 1)
+        .map_err(|error| format!("PR 255 configure permissionless resolve: {error}"))?;
+    env.trade_no_cpi(0, 1, 0, SIZE_Q, PRICE, 0)
+        .map_err(|error| format!("PR 255 open independent long/short pair: {error}"))?;
+    env.warp_to_slot(PUSH_SLOT);
+    env.push_auth_mark(0, PUSH_SLOT, MARK)
+        .map_err(|error| format!("PR 255 publish honest pending AuthMark: {error}"))?;
+    let (_, pending) = env.primary_market_state();
+    if env.primary_profile(0).mark_ewma_e6 != MARK || pending.assets[0].effective_price != PRICE {
+        return Err(format!(
+            "PR 255 fixture did not retain a pending authenticated mark: profile={}, engine={}",
+            env.primary_profile(0).mark_ewma_e6,
+            pending.assets[0].effective_price
+        ));
+    }
+    if commit_mark_before_resolve {
+        env.crank(
+            0,
+            PUSH_SLOT,
+            vec![CrankObservationHint {
+                asset_index: 0,
+                oracle_accounts: 0,
+            }],
+        )
+        .map_err(|error| format!("PR 255 control mark accrual: {error}"))?;
+    }
+
+    let resolve = env
+        .resolve_stale_permissionless(RESOLVE_SLOT)
+        .map_err(|error| format!("PR 255 public stale resolve: {error}"))?;
+    let (_, resolved) = env.primary_market_state();
+    if resolved.mode != MarketModeV16::Resolved {
+        return Err("PR 255 stale resolver did not terminalize the market".into());
+    }
+    let effective_mark = resolved.assets[0].effective_price;
+    env.warp_to_slot(RESOLVE_SLOT + 1);
+    let (short_payout, _) = drain_resolved_actor(&mut env, 1)?;
+    let (long_payout, _) = drain_resolved_actor(&mut env, 0)?;
+    let long_payout =
+        u64::try_from(long_payout).map_err(|_| "PR 255 long payout exceeds SPL range")?;
+    let short_payout =
+        u64::try_from(short_payout).map_err(|_| "PR 255 short payout exceeds SPL range")?;
+    let total_payout = u128::from(long_payout)
+        .checked_add(u128::from(short_payout))
+        .ok_or("PR 255 terminal payout overflow")?;
+    if env.token_supply_observed() != supply_before {
+        return Err("PR 255 terminal world changed SPL supply".into());
+    }
+    Ok(PendingMarkResolveWorld {
+        effective_mark,
+        long_payout,
+        short_payout,
+        total_payout,
+        resolve_cu: resolve.compute_units,
+    })
+}
+
 #[derive(Clone, Copy, Debug)]
 struct ProspectiveFundingWorld {
     coalition_payout: u128,
@@ -7113,6 +7268,11 @@ pub fn prospective_funding_rewrite_strategy() -> impl Strategy<Value = ([u8; 32]
         any::<[u8; 32]>(),
         prop::sample::select(vec![TradeRoute::NoCpi, TradeRoute::BatchNoCpi]),
     )
+}
+
+#[allow(dead_code)]
+pub fn resolve_before_committed_accrual_seed_strategy() -> impl Strategy<Value = [u8; 32]> {
+    any::<[u8; 32]>()
 }
 
 #[allow(dead_code)]
