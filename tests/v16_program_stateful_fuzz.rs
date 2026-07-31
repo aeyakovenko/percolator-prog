@@ -20,7 +20,8 @@ use support::fuzz_model::{
     delayed_oracle_intent_replay_strategy, delayed_resolve_policy_replay_seed_strategy,
     delayed_trade_fee_policy_replay_seed_strategy, deposit_retry_replay_seed_strategy,
     fee_redirect_generation_replay_seed_strategy, forfeit_funding_erasure_seed_strategy,
-    fractional_cap_settlement_seed_strategy, insurance_top_up_retry_replay_seed_strategy,
+    forfeit_portfolio_incarnation_replay_seed_strategy, fractional_cap_settlement_seed_strategy,
+    insurance_top_up_retry_replay_seed_strategy,
     insurance_withdrawal_generation_replay_seed_strategy,
     liquidation_policy_generation_replay_seed_strategy,
     maintenance_policy_generation_replay_seed_strategy, market_incarnation_deposit_seed_strategy,
@@ -46,8 +47,9 @@ use support::fuzz_model::{
     reproduce_delayed_matcher_enable_replay, reproduce_delayed_oracle_intent_replay,
     reproduce_delayed_resolve_policy_replay, reproduce_delayed_trade_fee_policy_replay,
     reproduce_deposit_retry_replay, reproduce_fee_redirect_generation_replay,
-    reproduce_forfeit_funding_erasure, reproduce_fractional_cap_settlement,
-    reproduce_insurance_top_up_retry_replay, reproduce_insurance_withdrawal_generation_replay,
+    reproduce_forfeit_funding_erasure, reproduce_forfeit_portfolio_incarnation_replay,
+    reproduce_fractional_cap_settlement, reproduce_insurance_top_up_retry_replay,
+    reproduce_insurance_withdrawal_generation_replay,
     reproduce_liquidation_policy_generation_replay, reproduce_maintenance_policy_generation_replay,
     reproduce_market_incarnation_deposit, reproduce_matcher_grant_portfolio_incarnation_replay,
     reproduce_omitted_rescue_liquidation, reproduce_pending_ewma_inheritance,
@@ -657,6 +659,19 @@ proptest! {
         prop_assert!(
             result.is_ok(),
             "PR 301 no longer reproduces for seed {:?}: {}",
+            seed,
+            result.unwrap_err()
+        );
+    }
+
+    #[test]
+    fn v16_program_pr278_forfeit_portfolio_incarnation_replay_fuzz(
+        seed in forfeit_portfolio_incarnation_replay_seed_strategy()
+    ) {
+        let result = reproduce_forfeit_portfolio_incarnation_replay(seed);
+        prop_assert!(
+            result.is_ok(),
+            "PR 278 no longer reproduces for seed {:?}: {}",
             seed,
             result.unwrap_err()
         );

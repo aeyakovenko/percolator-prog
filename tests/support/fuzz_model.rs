@@ -126,10 +126,11 @@ pub enum KnownBlocker {
     MatcherGrantPortfolioIncarnationReplay,
     TradePortfolioIncarnationReplay,
     ConvertPortfolioIncarnationReplay,
+    ForfeitPortfolioIncarnationReplay,
 }
 
 impl KnownBlocker {
-    pub const COUNT: usize = 64;
+    pub const COUNT: usize = 65;
 
     pub const fn index(self) -> usize {
         match self {
@@ -197,6 +198,7 @@ impl KnownBlocker {
             Self::MatcherGrantPortfolioIncarnationReplay => 61,
             Self::TradePortfolioIncarnationReplay => 62,
             Self::ConvertPortfolioIncarnationReplay => 63,
+            Self::ForfeitPortfolioIncarnationReplay => 64,
         }
     }
 }
@@ -896,6 +898,19 @@ pub struct ConvertPortfolioIncarnationReplayReproduction {
     pub cranker_extraction: u64,
     pub replay_cu: u64,
     pub sync_cu: u64,
+    pub max_cu: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ForfeitPortfolioIncarnationReplayReproduction {
+    pub blocker: KnownBlocker,
+    pub original_portfolio_id: u64,
+    pub replacement_portfolio_id: u64,
+    pub victim_loss: u64,
+    pub stranded_vault: u128,
+    pub control_slab_closed: bool,
+    pub replay_slab_blocked: bool,
+    pub replay_cu: u64,
     pub max_cu: u64,
 }
 
@@ -9281,6 +9296,224 @@ pub fn reproduce_convert_portfolio_incarnation_replay(
     })
 }
 
+#[derive(Clone, Copy, Debug)]
+struct ForfeitPortfolioIncarnationWorld {
+    original_portfolio_id: u64,
+    replacement_portfolio_id: u64,
+    victim_payout: u64,
+    attacker_payout: u64,
+    vault_remaining: u128,
+    slab_closed: bool,
+    replay_cu: u64,
+    max_cu: u64,
+}
+
+fn run_forfeit_portfolio_incarnation_world(
+    seed: [u8; 32],
+    land_replay: bool,
+) -> Result<ForfeitPortfolioIncarnationWorld, String> {
+    const VICTIM: usize = 0;
+    const ATTACKER: usize = 1;
+    const PRICE: u64 = 100;
+    const WIN_PRICE: u64 = 150;
+    const DEPOSIT: u128 = 1_000_000;
+    const SIZE_Q: i128 = 5_000 * POS_SCALE as i128;
+
+    let mut env = V16Svm::new(
+        seed,
+        MarketConfig {
+            initial_price: PRICE,
+            maintenance_margin_bps: 1_000,
+            initial_margin_bps: 1_000,
+            max_price_move_bps_per_slot: 500,
+            max_accrual_dt_slots: 1,
+            min_funding_lifetime_slots: 1,
+            actor_deposits: [DEPOSIT, DEPOSIT, 1, 1, 1],
+            actor_token_balances: [2_000_000, 1_000_000, 1, 1, 1],
+            ..MarketConfig::default()
+        },
+    );
+    let supply_before = env.token_supply_observed();
+    env.configure_permissionless_resolve(100, 1)
+        .map_err(|error| format!("PR 278 configure permissionless resolve: {error}"))?;
+    for actor in 2..PRIMARY_ACTOR_COUNT {
+        env.withdraw_primary(actor, 1)
+            .map_err(|error| format!("PR 278 empty unused actor {actor}: {error}"))?;
+        env.close_primary_portfolio(actor)
+            .map_err(|error| format!("PR 278 close unused actor {actor}: {error}"))?;
+    }
+
+    let original_portfolio_id = env.primary_portfolio_id(VICTIM);
+    env.trade_no_cpi(VICTIM, ATTACKER, 0, SIZE_Q, PRICE, 0)
+        .map_err(|error| format!("PR 278 open incarnation-A position: {error}"))?;
+    env.warp_to_slot(2);
+    env.shutdown_asset(0, 2)
+        .map_err(|error| format!("PR 278 shutdown generation A: {error}"))?;
+    let retained = env.build_retained_forfeit_recovery_leg(VICTIM, 0, 1);
+    env.forfeit_recovery_leg(VICTIM, 0, 1)
+        .map_err(|error| format!("PR 278 forfeit victim generation-A leg: {error}"))?;
+    env.forfeit_recovery_leg(ATTACKER, 0, 1)
+        .map_err(|error| format!("PR 278 forfeit counterparty generation-A leg: {error}"))?;
+    env.withdraw_primary(VICTIM, DEPOSIT)
+        .map_err(|error| format!("PR 278 withdraw incarnation A: {error}"))?;
+    env.close_primary_portfolio(VICTIM)
+        .map_err(|error| format!("PR 278 close incarnation A: {error}"))?;
+
+    env.warp_to_slot(3);
+    env.restart_asset_oracle(0, 3, PRICE)
+        .map_err(|error| format!("PR 278 restart asset generation: {error}"))?;
+    env.configure_auth_mark(false, 0, 3, PRICE)
+        .map_err(|error| format!("PR 278 configure replacement AuthMark: {error}"))?;
+    env.fund_closed_primary_portfolio(VICTIM, 1_000_000_000)
+        .map_err(|error| format!("PR 278 fund replacement account: {error}"))?;
+    env.reinitialize_primary_portfolio(VICTIM)
+        .map_err(|error| format!("PR 278 initialize incarnation B: {error}"))?;
+    let replacement_portfolio_id = env.primary_portfolio_id(VICTIM);
+    if replacement_portfolio_id <= original_portfolio_id {
+        return Err(format!(
+            "PR 278 portfolio ID did not advance: {original_portfolio_id}->{replacement_portfolio_id}"
+        ));
+    }
+    env.deposit_primary(VICTIM, DEPOSIT)
+        .map_err(|error| format!("PR 278 fund incarnation B: {error}"))?;
+    env.trade_no_cpi(VICTIM, ATTACKER, 0, SIZE_Q, PRICE, 0)
+        .map_err(|error| format!("PR 278 open incarnation-B position: {error}"))?;
+
+    env.warp_to_slot(13);
+    env.push_auth_mark(0, 13, WIN_PRICE)
+        .map_err(|error| format!("PR 278 publish honest winning mark: {error}"))?;
+    let mut max_cu = 0;
+    for step in 0..4 {
+        let crank = env
+            .crank(
+                ATTACKER,
+                13,
+                vec![CrankObservationHint {
+                    asset_index: 0,
+                    oracle_accounts: 0,
+                }],
+            )
+            .map_err(|error| format!("PR 278 mark crank {step}: {error}"))?;
+        max_cu = max_cu.max(crank.compute_units);
+    }
+    let effective_mark = env.primary_market_state().1.assets[0].effective_price;
+    let pending_victim_profit = SIZE_Q
+        .unsigned_abs()
+        .checked_mul(u128::from(effective_mark - PRICE))
+        .ok_or("PR 278 pending winner PnL overflow")?
+        / POS_SCALE;
+    if effective_mark != 120
+        || pending_victim_profit != 100_000
+        || env.primary_portfolio(VICTIM).pnl.get() != 0
+    {
+        return Err(format!(
+            "PR 278 pending winner setup mismatch: mark={effective_mark}, \
+             pending={pending_victim_profit}, pnl={}",
+            env.primary_portfolio(VICTIM).pnl.get()
+        ));
+    }
+
+    env.warp_to_slot(14);
+    let shutdown = env
+        .shutdown_asset(0, 14)
+        .map_err(|error| format!("PR 278 shutdown replacement generation: {error}"))?;
+    max_cu = max_cu.max(shutdown.compute_units);
+    let mut replay_cu = 0;
+    if land_replay {
+        let replay = env
+            .land_retained(retained)
+            .map_err(|error| format!("PR 278 stale forfeit no longer lands: {error}"))?;
+        replay_cu = replay.compute_units;
+        max_cu = max_cu.max(replay.compute_units);
+    }
+    let resolve = env
+        .resolve_market()
+        .map_err(|error| format!("PR 278 resolve terminal world: {error}"))?;
+    max_cu = max_cu.max(resolve.compute_units);
+    env.warp_to_slot(15);
+    let (attacker_payout, _) = drain_resolved_actor(&mut env, ATTACKER)?;
+    let (victim_payout, _) = drain_resolved_actor(&mut env, VICTIM)?;
+    let attacker_payout =
+        u64::try_from(attacker_payout).map_err(|_| "PR 278 attacker payout exceeds SPL amount")?;
+    let victim_payout =
+        u64::try_from(victim_payout).map_err(|_| "PR 278 victim payout exceeds SPL amount")?;
+    env.close_primary_portfolio(ATTACKER)
+        .map_err(|error| format!("PR 278 close counterparty portfolio: {error}"))?;
+    env.close_primary_portfolio(VICTIM)
+        .map_err(|error| format!("PR 278 close victim portfolio: {error}"))?;
+    let terminal = env.primary_market_state().1;
+    let vault_remaining = terminal.vault;
+    if terminal.c_tot != 0
+        || terminal.insurance != 0
+        || terminal.materialized_portfolio_count != 0
+        || vault_remaining != u128::from(env.token_amount(env.vault))
+        || env.token_supply_observed() != supply_before
+        || max_cu >= TX_CU_LIMIT
+    {
+        return Err(format!(
+            "PR 278 terminal state mismatch: replay={land_replay}, c_tot={}, insurance={}, \
+             portfolios={}, vault={vault_remaining}/{}, supply={}/{supply_before}, max_cu={max_cu}",
+            terminal.c_tot,
+            terminal.insurance,
+            terminal.materialized_portfolio_count,
+            env.token_amount(env.vault),
+            env.token_supply_observed()
+        ));
+    }
+    let slab_closed = env.close_primary_slab().is_ok();
+    Ok(ForfeitPortfolioIncarnationWorld {
+        original_portfolio_id,
+        replacement_portfolio_id,
+        victim_payout,
+        attacker_payout,
+        vault_remaining,
+        slab_closed,
+        replay_cu,
+        max_cu,
+    })
+}
+
+pub fn reproduce_forfeit_portfolio_incarnation_replay(
+    mut seed: [u8; 32],
+) -> Result<ForfeitPortfolioIncarnationReplayReproduction, String> {
+    seed[0] ^= 0x78;
+    let control = run_forfeit_portfolio_incarnation_world(seed, false)?;
+    let replay = run_forfeit_portfolio_incarnation_world(seed, true)?;
+    let victim_loss = control
+        .victim_payout
+        .checked_sub(replay.victim_payout)
+        .ok_or("PR 278 replay increased victim payout")?;
+    if control.original_portfolio_id != replay.original_portfolio_id
+        || control.replacement_portfolio_id != replay.replacement_portfolio_id
+        || control.victim_payout != 1_100_000
+        || replay.victim_payout != 1_000_000
+        || control.attacker_payout != replay.attacker_payout
+        || control.attacker_payout != 900_000
+        || victim_loss != 100_000
+        || control.vault_remaining != 0
+        || replay.vault_remaining != u128::from(victim_loss)
+        || !control.slab_closed
+        || replay.slab_closed
+        || replay.replay_cu == 0
+    {
+        return Err(format!(
+            "PR 278 paired-world mismatch: control={control:?}, replay={replay:?}, \
+             victim_loss={victim_loss}"
+        ));
+    }
+    Ok(ForfeitPortfolioIncarnationReplayReproduction {
+        blocker: KnownBlocker::ForfeitPortfolioIncarnationReplay,
+        original_portfolio_id: replay.original_portfolio_id,
+        replacement_portfolio_id: replay.replacement_portfolio_id,
+        victim_loss,
+        stranded_vault: replay.vault_remaining,
+        control_slab_closed: control.slab_closed,
+        replay_slab_blocked: !replay.slab_closed,
+        replay_cu: replay.replay_cu,
+        max_cu: replay.max_cu.max(control.max_cu),
+    })
+}
+
 pub fn reproduce_fee_redirect_generation_replay(
     seed: [u8; 32],
 ) -> Result<FeeRedirectGenerationReplayReproduction, String> {
@@ -14391,6 +14624,11 @@ pub fn trade_portfolio_incarnation_replay_strategy(
 
 #[allow(dead_code)]
 pub fn convert_portfolio_incarnation_replay_seed_strategy() -> impl Strategy<Value = [u8; 32]> {
+    any::<[u8; 32]>()
+}
+
+#[allow(dead_code)]
+pub fn forfeit_portfolio_incarnation_replay_seed_strategy() -> impl Strategy<Value = [u8; 32]> {
     any::<[u8; 32]>()
 }
 

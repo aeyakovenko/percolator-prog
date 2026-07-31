@@ -2266,6 +2266,28 @@ impl V16Svm {
         )
     }
 
+    pub fn build_retained_forfeit_recovery_leg(
+        &mut self,
+        actor_index: usize,
+        asset_index: u16,
+        b_delta_budget: u128,
+    ) -> Transaction {
+        let actor = &self.actors[actor_index];
+        let owner = copy_keypair(&actor.signer);
+        self.build_program_transaction(
+            ProgInstruction::ForfeitRecoveryLeg {
+                asset_index,
+                b_delta_budget,
+            },
+            vec![
+                AccountMeta::new(owner.pubkey(), true),
+                AccountMeta::new(self.market, false),
+                AccountMeta::new(actor.portfolio, false),
+            ],
+            &[owner],
+        )
+    }
+
     pub fn build_retained_no_cpi_trade_with_fee(
         &mut self,
         taker: usize,
