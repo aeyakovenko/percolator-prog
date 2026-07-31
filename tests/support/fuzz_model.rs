@@ -109,10 +109,11 @@ pub enum KnownBlocker {
     DelayedLiquidationPolicyReplay,
     DelayedTradeFeePolicyReplay,
     DelayedFeeRedirectPolicyReplay,
+    DelayedBackingFeePolicyReplay,
 }
 
 impl KnownBlocker {
-    pub const COUNT: usize = 53;
+    pub const COUNT: usize = 54;
 
     pub const fn index(self) -> usize {
         match self {
@@ -169,6 +170,7 @@ impl KnownBlocker {
             Self::DelayedLiquidationPolicyReplay => 50,
             Self::DelayedTradeFeePolicyReplay => 51,
             Self::DelayedFeeRedirectPolicyReplay => 52,
+            Self::DelayedBackingFeePolicyReplay => 53,
         }
     }
 }
@@ -715,6 +717,18 @@ pub struct DelayedFeeRedirectPolicyReplayReproduction {
     pub victim_loss: u64,
     pub attacker_profit: u64,
     pub extracted_fee: u64,
+    pub correction_cu: u64,
+    pub replay_cu: u64,
+    pub trade_cu: u64,
+    pub withdrawal_cu: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DelayedBackingFeePolicyReplayReproduction {
+    pub blocker: KnownBlocker,
+    pub victim_loss: u64,
+    pub provider_extraction: u64,
+    pub backing_earnings: u128,
     pub correction_cu: u64,
     pub replay_cu: u64,
     pub trade_cu: u64,
@@ -6867,6 +6881,173 @@ pub fn reproduce_delayed_fee_redirect_policy_replay(
     })
 }
 
+pub fn reproduce_delayed_backing_fee_policy_replay(
+    seed: [u8; 32],
+) -> Result<DelayedBackingFeePolicyReplayReproduction, String> {
+    const VICTIM: usize = 0;
+    const PROVIDER: usize = 1;
+    const POLICY_AUTHORITY: usize = 2;
+    const ASSET: u16 = 1;
+    const WINNING_DOMAIN: u16 = ASSET * 2 + 1;
+    const INITIAL_PRICE: u64 = 100;
+    const ASSET_WIN_MARK: u64 = 105;
+    const BASE_LOSS_MARK: u64 = 95;
+    const ASSET_SIZE_Q: i128 = 2_000 * POS_SCALE as i128;
+    const BASE_SIZE_Q: i128 = 1_000 * POS_SCALE as i128;
+    const SAFE_INCREASE_Q: i128 = 100 * POS_SCALE as i128;
+    const VICTIM_DEPOSIT: u128 = 31_300;
+    const PROVIDER_DEPOSIT: u128 = 100_000;
+    const BACKING_PRINCIPAL: u128 = 15_000;
+    const STALE_FEE_BPS: u16 = 5_000;
+    const CURRENT_FEE_BPS: u16 = 0;
+    const EXPECTED_FEE: u64 = 75;
+
+    let mut env = V16Svm::new(
+        seed,
+        MarketConfig {
+            initial_price: INITIAL_PRICE,
+            maintenance_margin_bps: 1_000,
+            initial_margin_bps: 1_000,
+            max_price_move_bps_per_slot: 500,
+            max_accrual_dt_slots: 1,
+            min_funding_lifetime_slots: 1,
+            actor_deposits: [VICTIM_DEPOSIT, PROVIDER_DEPOSIT, 1, 1, 1],
+            ..MarketConfig::default()
+        },
+    );
+    let supply_before = env.token_supply_observed();
+    env.update_asset_authority_from_admin(
+        ASSET,
+        percolator_prog::processor::ASSET_AUTH_INSURANCE,
+        POLICY_AUTHORITY,
+    )
+    .map_err(|error| format!("PR 349 install fee-policy authority: {error}"))?;
+    env.update_asset_authority_from_admin(
+        ASSET,
+        percolator_prog::processor::ASSET_AUTH_BACKING_BUCKET,
+        PROVIDER,
+    )
+    .map_err(|error| format!("PR 349 install backing provider: {error}"))?;
+    let retained_policy = env.build_retained_backing_fee_policy_for_actor(
+        POLICY_AUTHORITY,
+        WINNING_DOMAIN,
+        STALE_FEE_BPS,
+        0,
+    );
+    let correction = env
+        .update_backing_fee_policy_for_actor(POLICY_AUTHORITY, WINNING_DOMAIN, CURRENT_FEE_BPS, 0)
+        .map_err(|error| format!("PR 349 land current zero-fee correction: {error}"))?;
+    env.configure_auth_mark(false, ASSET, 1, INITIAL_PRICE)
+        .map_err(|error| format!("PR 349 configure asset AuthMark: {error}"))?;
+    env.top_up_backing_bucket_for_actor(PROVIDER, WINNING_DOMAIN, BACKING_PRINCIPAL, 100)
+        .map_err(|error| format!("PR 349 fund provider backing: {error}"))?;
+
+    env.trade_no_cpi(VICTIM, PROVIDER, ASSET, ASSET_SIZE_Q, INITIAL_PRICE, 0)
+        .map_err(|error| format!("PR 349 establish source-backed winning leg: {error}"))?;
+    env.trade_no_cpi(VICTIM, PROVIDER, 0, BASE_SIZE_Q, INITIAL_PRICE, 0)
+        .map_err(|error| format!("PR 349 establish offsetting losing leg: {error}"))?;
+    env.warp_to_slot(2);
+    env.push_auth_mark(ASSET, 2, ASSET_WIN_MARK)
+        .map_err(|error| format!("PR 349 push winning mark: {error}"))?;
+    env.push_auth_mark(0, 2, BASE_LOSS_MARK)
+        .map_err(|error| format!("PR 349 push losing mark: {error}"))?;
+    for (actor, asset_index) in [(PROVIDER, ASSET), (VICTIM, ASSET), (PROVIDER, 0)] {
+        let oracle_accounts = env.primary_profile(asset_index as usize).oracle_leg_count;
+        env.crank(
+            actor,
+            2,
+            vec![CrankObservationHint {
+                asset_index,
+                oracle_accounts,
+            }],
+        )
+        .map_err(|error| format!("PR 349 crank actor {actor} asset {asset_index}: {error}"))?;
+    }
+    if env.primary_portfolio(VICTIM).pnl.get() != 10_000 {
+        return Err(format!(
+            "PR 349 source-backed claim mismatch: {}",
+            env.primary_portfolio(VICTIM).pnl.get()
+        ));
+    }
+
+    let retained_trade =
+        env.build_retained_no_cpi_trade(VICTIM, PROVIDER, 0, SAFE_INCREASE_Q, BASE_LOSS_MARK);
+    let victim_capital_before = env.primary_portfolio(VICTIM).capital.get();
+    let provider_capital_before = env.primary_portfolio(PROVIDER).capital.get();
+    let earnings_before = env.primary_market_state().1.source_backing_buckets
+        [WINNING_DOMAIN as usize]
+        .utilization_fee_earnings;
+    let replay = env
+        .land_retained(retained_policy)
+        .map_err(|error| format!("PR 349 delayed backing policy no longer lands: {error}"))?;
+    let profile = env.primary_profile(ASSET as usize);
+    if profile.backing_trade_fee_bps_short != STALE_FEE_BPS
+        || profile.backing_trade_fee_insurance_share_bps_short != 0
+    {
+        return Err("PR 349 delayed policy did not overwrite the correction".into());
+    }
+    let trade = env
+        .land_retained(retained_trade)
+        .map_err(|error| format!("PR 349 victim's zero-fee increase rejected: {error}"))?;
+    let victim_loss = victim_capital_before
+        .checked_sub(env.primary_portfolio(VICTIM).capital.get())
+        .ok_or("PR 349 victim capital increased")?;
+    let earnings_after = env.primary_market_state().1.source_backing_buckets
+        [WINNING_DOMAIN as usize]
+        .utilization_fee_earnings;
+    let backing_earnings = earnings_after
+        .checked_sub(earnings_before)
+        .ok_or("PR 349 backing earnings decreased")?;
+    if victim_loss != EXPECTED_FEE as u128
+        || backing_earnings != victim_loss
+        || env.primary_portfolio(PROVIDER).capital.get() != provider_capital_before
+    {
+        return Err(format!(
+            "PR 349 delayed fee mismatch: victim={victim_loss}, earnings={backing_earnings}, \
+             provider_capital={provider_capital_before}/{}",
+            env.primary_portfolio(PROVIDER).capital.get()
+        ));
+    }
+
+    let destination = env.actors[PROVIDER].destination_token;
+    let destination_before = env.token_amount(destination);
+    let withdrawal = env
+        .withdraw_backing_bucket_earnings_for_actor(PROVIDER, WINNING_DOMAIN, backing_earnings)
+        .map_err(|error| format!("PR 349 provider could not withdraw victim fee: {error}"))?;
+    let provider_extraction = env
+        .token_amount(destination)
+        .checked_sub(destination_before)
+        .ok_or("PR 349 provider destination decreased")?;
+    let max_cu = correction
+        .compute_units
+        .max(replay.compute_units)
+        .max(trade.compute_units)
+        .max(withdrawal.compute_units);
+    if provider_extraction != EXPECTED_FEE
+        || u128::from(provider_extraction) != victim_loss
+        || max_cu >= TX_CU_LIMIT
+        || env.token_supply_observed() != supply_before
+    {
+        return Err(format!(
+            "PR 349 terminal extraction mismatch: victim={victim_loss}, \
+             extraction={provider_extraction}, max_cu={max_cu}, supply={}/{}",
+            env.token_supply_observed(),
+            supply_before
+        ));
+    }
+
+    Ok(DelayedBackingFeePolicyReplayReproduction {
+        blocker: KnownBlocker::DelayedBackingFeePolicyReplay,
+        victim_loss: victim_loss as u64,
+        provider_extraction,
+        backing_earnings,
+        correction_cu: correction.compute_units,
+        replay_cu: replay.compute_units,
+        trade_cu: trade.compute_units,
+        withdrawal_cu: withdrawal.compute_units,
+    })
+}
+
 pub fn reproduce_fee_redirect_generation_replay(
     seed: [u8; 32],
 ) -> Result<FeeRedirectGenerationReplayReproduction, String> {
@@ -11887,6 +12068,11 @@ pub fn delayed_trade_fee_policy_replay_seed_strategy() -> impl Strategy<Value = 
 
 #[allow(dead_code)]
 pub fn delayed_fee_redirect_policy_replay_seed_strategy() -> impl Strategy<Value = [u8; 32]> {
+    any::<[u8; 32]>()
+}
+
+#[allow(dead_code)]
+pub fn delayed_backing_fee_policy_replay_seed_strategy() -> impl Strategy<Value = [u8; 32]> {
     any::<[u8; 32]>()
 }
 
