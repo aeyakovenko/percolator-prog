@@ -2248,6 +2248,24 @@ impl V16Svm {
         self.build_retained_no_cpi_trade_with_fee(taker, maker, asset_index, size_q, exec_price, 0)
     }
 
+    pub fn build_retained_convert_released_pnl(
+        &mut self,
+        actor_index: usize,
+        amount: u128,
+    ) -> Transaction {
+        let actor = &self.actors[actor_index];
+        let owner = copy_keypair(&actor.signer);
+        self.build_program_transaction(
+            ProgInstruction::ConvertReleasedPnl { amount },
+            vec![
+                AccountMeta::new(owner.pubkey(), true),
+                AccountMeta::new(self.market, false),
+                AccountMeta::new(actor.portfolio, false),
+            ],
+            &[owner],
+        )
+    }
+
     pub fn build_retained_no_cpi_trade_with_fee(
         &mut self,
         taker: usize,

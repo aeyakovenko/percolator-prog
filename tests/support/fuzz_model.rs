@@ -125,10 +125,11 @@ pub enum KnownBlocker {
     PortfolioCloseIncarnationReplay,
     MatcherGrantPortfolioIncarnationReplay,
     TradePortfolioIncarnationReplay,
+    ConvertPortfolioIncarnationReplay,
 }
 
 impl KnownBlocker {
-    pub const COUNT: usize = 63;
+    pub const COUNT: usize = 64;
 
     pub const fn index(self) -> usize {
         match self {
@@ -195,6 +196,7 @@ impl KnownBlocker {
             Self::PortfolioCloseIncarnationReplay => 60,
             Self::MatcherGrantPortfolioIncarnationReplay => 61,
             Self::TradePortfolioIncarnationReplay => 62,
+            Self::ConvertPortfolioIncarnationReplay => 63,
         }
     }
 }
@@ -881,6 +883,19 @@ pub struct TradePortfolioIncarnationReplayReproduction {
     pub cranker_reward: u128,
     pub extracted_reward: u64,
     pub replay_cu: u64,
+    pub max_cu: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ConvertPortfolioIncarnationReplayReproduction {
+    pub blocker: KnownBlocker,
+    pub original_portfolio_id: u64,
+    pub replacement_portfolio_id: u64,
+    pub released_pnl: u128,
+    pub victim_loss: u64,
+    pub cranker_extraction: u64,
+    pub replay_cu: u64,
+    pub sync_cu: u64,
     pub max_cu: u64,
 }
 
@@ -8997,6 +9012,275 @@ pub fn reproduce_trade_portfolio_incarnation_replay(
     })
 }
 
+fn create_released_pnl_for_incarnation(
+    env: &mut V16Svm,
+    winner: usize,
+    loser: usize,
+    winner_deposit: u128,
+    loser_deposit: u128,
+    mark_slot: u64,
+    start_price: u64,
+    label: &str,
+) -> Result<u128, String> {
+    const POSITION_Q: i128 = 20 * POS_SCALE as i128;
+
+    env.deposit_primary(winner, winner_deposit)
+        .map_err(|error| format!("{label} fund winner: {error}"))?;
+    env.deposit_primary(loser, loser_deposit)
+        .map_err(|error| format!("{label} fund loser: {error}"))?;
+    env.trade_no_cpi(winner, loser, 0, POSITION_Q, start_price, 0)
+        .map_err(|error| format!("{label} open backed trade: {error}"))?;
+    env.warp_to_slot(mark_slot);
+    env.push_auth_mark(0, mark_slot, start_price + 5)
+        .map_err(|error| format!("{label} publish winning mark: {error}"))?;
+    for actor in [loser, winner] {
+        env.crank(
+            actor,
+            mark_slot,
+            vec![CrankObservationHint {
+                asset_index: 0,
+                oracle_accounts: 0,
+            }],
+        )
+        .map_err(|error| format!("{label} refresh actor {actor}: {error}"))?;
+    }
+    env.trade_no_cpi(winner, loser, 0, -POSITION_Q, start_price + 5, 0)
+        .map_err(|error| format!("{label} close backed trade: {error}"))?;
+    let released = env.primary_portfolio(winner).pnl.get();
+    if released <= 0 {
+        return Err(format!(
+            "{label} produced no released winner PnL: {released}"
+        ));
+    }
+    u128::try_from(released).map_err(|_| format!("{label} released PnL conversion overflow"))
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ConvertPortfolioIncarnationWorld {
+    original_portfolio_id: u64,
+    replacement_portfolio_id: u64,
+    released_pnl: u128,
+    victim_payout: u64,
+    cranker_extraction: u64,
+    replay_cu: u64,
+    sync_cu: u64,
+    max_cu: u64,
+}
+
+fn run_convert_portfolio_incarnation_world(
+    seed: [u8; 32],
+    land_replay: bool,
+) -> Result<ConvertPortfolioIncarnationWorld, String> {
+    const LOSER_A: usize = 0;
+    const VICTIM: usize = 1;
+    const CRANKER: usize = 2;
+    const LOSER_B: usize = 3;
+    const PRICE_A: u64 = 100;
+    const PRICE_B: u64 = 105;
+    const TARGET_CAPITAL: u128 = 1_000_000;
+
+    let mut env = V16Svm::new(
+        seed,
+        MarketConfig {
+            initial_price: PRICE_A,
+            h_max: 10,
+            min_nonzero_mm_req: 1,
+            min_nonzero_im_req: 2,
+            maintenance_margin_bps: 1_000,
+            initial_margin_bps: 1_000,
+            max_price_move_bps_per_slot: 500,
+            max_accrual_dt_slots: 1,
+            min_funding_lifetime_slots: 1,
+            maintenance_fee_per_slot: 1,
+            actor_deposits: [1, 1, 1, 1, 1],
+            actor_token_balances: [2_000_000, 3_000_000, 10_000, 2_000_000, 10],
+            ..MarketConfig::default()
+        },
+    );
+    let supply_before = env.token_supply_observed();
+    env.update_maintenance_fee_policy(10_000)
+        .map_err(|error| format!("PR 301 configure cranker reward: {error}"))?;
+    env.top_up_backing_bucket(1, 300, 1_000)
+        .map_err(|error| format!("PR 301 top up short backing: {error}"))?;
+
+    let released_a = create_released_pnl_for_incarnation(
+        &mut env,
+        VICTIM,
+        LOSER_A,
+        TARGET_CAPITAL - 1,
+        TARGET_CAPITAL - 1,
+        2,
+        PRICE_A,
+        "PR 301 incarnation A",
+    )?;
+    let original_portfolio_id = env.primary_portfolio_id(VICTIM);
+    let retained = env.build_retained_convert_released_pnl(VICTIM, u128::MAX);
+    env.convert_released_pnl(VICTIM, released_a)
+        .map_err(|error| format!("PR 301 convert incarnation-A PnL: {error}"))?;
+    let capital_a = env.primary_portfolio(VICTIM).capital.get();
+    env.withdraw_primary(VICTIM, capital_a)
+        .map_err(|error| format!("PR 301 withdraw incarnation A: {error}"))?;
+    env.close_primary_portfolio(VICTIM)
+        .map_err(|error| format!("PR 301 close incarnation A: {error}"))?;
+    env.fund_closed_primary_portfolio(VICTIM, 1_000_000_000)
+        .map_err(|error| format!("PR 301 fund replacement account: {error}"))?;
+    env.reinitialize_primary_portfolio(VICTIM)
+        .map_err(|error| format!("PR 301 initialize incarnation B: {error}"))?;
+    let replacement_portfolio_id = env.primary_portfolio_id(VICTIM);
+    if replacement_portfolio_id <= original_portfolio_id {
+        return Err(format!(
+            "PR 301 portfolio ID did not advance: {original_portfolio_id}->{replacement_portfolio_id}"
+        ));
+    }
+
+    let victim_destination = env.actors[VICTIM].destination_token;
+    let victim_destination_before = env.token_amount(victim_destination);
+    let released_pnl = create_released_pnl_for_incarnation(
+        &mut env,
+        VICTIM,
+        LOSER_B,
+        TARGET_CAPITAL,
+        TARGET_CAPITAL - 1,
+        3,
+        PRICE_B,
+        "PR 301 incarnation B",
+    )?;
+    let ordinary_capital = env.primary_portfolio(VICTIM).capital.get();
+    env.withdraw_primary(VICTIM, ordinary_capital)
+        .map_err(|error| format!("PR 301 withdraw B ordinary capital: {error}"))?;
+    env.crank(
+        VICTIM,
+        3,
+        vec![CrankObservationHint {
+            asset_index: 0,
+            oracle_accounts: 0,
+        }],
+    )
+    .map_err(|error| format!("PR 301 settle empty-capital B: {error}"))?;
+    if env.primary_portfolio(VICTIM).capital.get() != 0
+        || env.primary_portfolio(VICTIM).pnl.get() != released_pnl as i128
+    {
+        return Err(format!(
+            "PR 301 B precondition mismatch: capital={}, pnl={}, expected={released_pnl}",
+            env.primary_portfolio(VICTIM).capital.get(),
+            env.primary_portfolio(VICTIM).pnl.get()
+        ));
+    }
+
+    let mut replay_cu = 0;
+    let mut max_cu = 0;
+    if land_replay {
+        let replay = env
+            .land_retained(retained)
+            .map_err(|error| format!("PR 301 incarnation-A conversion no longer lands: {error}"))?;
+        replay_cu = replay.compute_units;
+        max_cu = max_cu.max(replay.compute_units);
+    }
+    env.warp_to_slot(10);
+    let cranker_before = env.primary_portfolio(CRANKER).capital.get();
+    let sync = env
+        .sync_maintenance_fee_with_reward(VICTIM, CRANKER, 10)
+        .map_err(|error| format!("PR 301 permissionless fee sync: {error}"))?;
+    let sync_cu = sync.compute_units;
+    max_cu = max_cu.max(sync_cu);
+    let cranker_reward = env
+        .primary_portfolio(CRANKER)
+        .capital
+        .get()
+        .checked_sub(cranker_before)
+        .ok_or("PR 301 cranker capital decreased")?;
+    if !land_replay {
+        if cranker_reward != 0 {
+            return Err(format!(
+                "PR 301 control paid a {cranker_reward}-atom maintenance reward"
+            ));
+        }
+        env.convert_released_pnl(VICTIM, u128::MAX)
+            .map_err(|error| format!("PR 301 fresh B conversion: {error}"))?;
+    }
+
+    let victim_capital = env.primary_portfolio(VICTIM).capital.get();
+    let victim_withdrawal = env
+        .withdraw_primary(VICTIM, victim_capital)
+        .map_err(|error| format!("PR 301 withdraw B terminal capital: {error}"))?;
+    max_cu = max_cu.max(victim_withdrawal.compute_units);
+    let victim_payout = env
+        .token_amount(victim_destination)
+        .checked_sub(victim_destination_before)
+        .ok_or("PR 301 victim destination decreased")?;
+
+    let mut cranker_extraction = 0;
+    if cranker_reward > 0 {
+        let cranker_destination = env.actors[CRANKER].destination_token;
+        let cranker_destination_before = env.token_amount(cranker_destination);
+        let withdrawal = env
+            .withdraw_primary(CRANKER, cranker_reward)
+            .map_err(|error| format!("PR 301 withdraw cranker reward: {error}"))?;
+        max_cu = max_cu.max(withdrawal.compute_units);
+        cranker_extraction = env
+            .token_amount(cranker_destination)
+            .checked_sub(cranker_destination_before)
+            .ok_or("PR 301 cranker destination decreased")?;
+    }
+    if u128::from(cranker_extraction) != cranker_reward
+        || env.token_supply_observed() != supply_before
+        || max_cu >= TX_CU_LIMIT
+    {
+        return Err(format!(
+            "PR 301 terminal mismatch: replay={land_replay}, victim={victim_payout}, \
+             reward={cranker_reward}/{cranker_extraction}, max_cu={max_cu}, supply={}/{}",
+            env.token_supply_observed(),
+            supply_before
+        ));
+    }
+    Ok(ConvertPortfolioIncarnationWorld {
+        original_portfolio_id,
+        replacement_portfolio_id,
+        released_pnl,
+        victim_payout,
+        cranker_extraction,
+        replay_cu,
+        sync_cu,
+        max_cu,
+    })
+}
+
+pub fn reproduce_convert_portfolio_incarnation_replay(
+    mut seed: [u8; 32],
+) -> Result<ConvertPortfolioIncarnationReplayReproduction, String> {
+    seed[0] ^= 0x01;
+    let control = run_convert_portfolio_incarnation_world(seed, false)?;
+    let replay = run_convert_portfolio_incarnation_world(seed, true)?;
+    let victim_loss = control
+        .victim_payout
+        .checked_sub(replay.victim_payout)
+        .ok_or("PR 301 replay increased victim payout")?;
+    if control.original_portfolio_id != replay.original_portfolio_id
+        || control.replacement_portfolio_id != replay.replacement_portfolio_id
+        || control.released_pnl != replay.released_pnl
+        || control.cranker_extraction != 0
+        || replay.cranker_extraction == 0
+        || victim_loss != replay.cranker_extraction
+        || replay.replay_cu == 0
+    {
+        return Err(format!(
+            "PR 301 paired-world mismatch: control={control:?}, replay={replay:?}, \
+             victim_loss={victim_loss}"
+        ));
+    }
+    Ok(ConvertPortfolioIncarnationReplayReproduction {
+        blocker: KnownBlocker::ConvertPortfolioIncarnationReplay,
+        original_portfolio_id: replay.original_portfolio_id,
+        replacement_portfolio_id: replay.replacement_portfolio_id,
+        released_pnl: replay.released_pnl,
+        victim_loss,
+        cranker_extraction: replay.cranker_extraction,
+        replay_cu: replay.replay_cu,
+        sync_cu: replay.sync_cu,
+        max_cu: replay.max_cu.max(control.max_cu),
+    })
+}
+
 pub fn reproduce_fee_redirect_generation_replay(
     seed: [u8; 32],
 ) -> Result<FeeRedirectGenerationReplayReproduction, String> {
@@ -14103,6 +14387,11 @@ pub fn trade_portfolio_incarnation_replay_strategy(
             PortfolioIncarnationTradeSide::AccountB,
         ]),
     )
+}
+
+#[allow(dead_code)]
+pub fn convert_portfolio_incarnation_replay_seed_strategy() -> impl Strategy<Value = [u8; 32]> {
+    any::<[u8; 32]>()
 }
 
 #[allow(dead_code)]

@@ -10,17 +10,17 @@ use support::{
         reproduce_backing_top_up_generation_replay, reproduce_backing_top_up_retry_replay,
         reproduce_bilateral_base_fee_consent, reproduce_bilateral_fee_support,
         reproduce_collateral_top_up_generation_replay, reproduce_composite_oracle_rounding,
-        reproduce_composite_oracle_time_skew, reproduce_cpi_backing_fee_siphon,
-        reproduce_cpi_caller_fee_siphon, reproduce_cross_domain_b_settlement,
-        reproduce_cross_domain_backing_double_spend, reproduce_cross_margin_insurance_drain,
-        reproduce_delayed_asset_authority_revival, reproduce_delayed_backing_fee_policy_replay,
-        reproduce_delayed_fee_redirect_policy_replay, reproduce_delayed_liquidation_policy_replay,
-        reproduce_delayed_maintenance_policy_replay, reproduce_delayed_matcher_enable_replay,
-        reproduce_delayed_oracle_intent_replay, reproduce_delayed_resolve_policy_replay,
-        reproduce_delayed_trade_fee_policy_replay, reproduce_deposit_retry_replay,
-        reproduce_fee_redirect_generation_replay, reproduce_forfeit_funding_erasure,
-        reproduce_fractional_cap_settlement, reproduce_insurance_top_up_retry_replay,
-        reproduce_insurance_withdrawal_generation_replay,
+        reproduce_composite_oracle_time_skew, reproduce_convert_portfolio_incarnation_replay,
+        reproduce_cpi_backing_fee_siphon, reproduce_cpi_caller_fee_siphon,
+        reproduce_cross_domain_b_settlement, reproduce_cross_domain_backing_double_spend,
+        reproduce_cross_margin_insurance_drain, reproduce_delayed_asset_authority_revival,
+        reproduce_delayed_backing_fee_policy_replay, reproduce_delayed_fee_redirect_policy_replay,
+        reproduce_delayed_liquidation_policy_replay, reproduce_delayed_maintenance_policy_replay,
+        reproduce_delayed_matcher_enable_replay, reproduce_delayed_oracle_intent_replay,
+        reproduce_delayed_resolve_policy_replay, reproduce_delayed_trade_fee_policy_replay,
+        reproduce_deposit_retry_replay, reproduce_fee_redirect_generation_replay,
+        reproduce_forfeit_funding_erasure, reproduce_fractional_cap_settlement,
+        reproduce_insurance_top_up_retry_replay, reproduce_insurance_withdrawal_generation_replay,
         reproduce_liquidation_policy_generation_replay,
         reproduce_maintenance_policy_generation_replay, reproduce_market_incarnation_deposit,
         reproduce_matcher_grant_portfolio_incarnation_replay, reproduce_omitted_rescue_liquidation,
@@ -875,6 +875,23 @@ fn v16_program_pr303_stale_trades_liquidate_reinitialized_portfolio() {
 }
 
 #[test]
+fn v16_program_pr301_stale_pnl_conversion_pays_cranker_from_replacement() {
+    let reproduction = reproduce_convert_portfolio_incarnation_replay([0x01; 32])
+        .unwrap_or_else(|error| panic!("PR 301 no longer reproduces: {error}"));
+    assert_eq!(
+        reproduction.blocker,
+        KnownBlocker::ConvertPortfolioIncarnationReplay
+    );
+    assert!(reproduction.replacement_portfolio_id > reproduction.original_portfolio_id);
+    assert_eq!(reproduction.released_pnl, 100);
+    assert_eq!(reproduction.victim_loss, reproduction.cranker_extraction);
+    assert_eq!(reproduction.victim_loss, 8);
+    assert!(reproduction.replay_cu < 1_400_000);
+    assert!(reproduction.sync_cu < 1_400_000);
+    assert!(reproduction.max_cu < 1_400_000);
+}
+
+#[test]
 fn v16_program_pr335_delayed_oracle_intents_extract_user_collateral() {
     for path in [
         DelayedOracleIntentPath::PushAuth,
@@ -1278,16 +1295,16 @@ fn v16_program_open_lof_manifest_is_complete_and_honest() {
         quarantined_prs(),
         [
             220, 223, 224, 225, 231, 251, 253, 255, 260, 264, 265, 267, 271, 272, 273, 275, 277,
-            279, 280, 281, 282, 283, 290, 299, 303, 304, 305, 307, 309, 310, 311, 314, 315, 317,
-            318, 320, 321, 322, 325, 326, 328, 329, 331, 332, 333, 334, 335, 336, 337, 338, 339,
-            340, 343, 344, 345, 346, 347, 349, 350, 351, 353, 355, 356, 362, 365, 366, 367, 369,
-            380, 381
+            279, 280, 281, 282, 283, 290, 299, 301, 303, 304, 305, 307, 309, 310, 311, 314, 315,
+            317, 318, 320, 321, 322, 325, 326, 328, 329, 331, 332, 333, 334, 335, 336, 337, 338,
+            339, 340, 343, 344, 345, 346, 347, 349, 350, 351, 353, 355, 356, 362, 365, 366, 367,
+            369, 380, 381
         ]
     );
     let missing = missing_prs();
     assert_eq!(
         missing.len(),
-        29,
+        28,
         "update the explicit evidence state when an executable adapter lands"
     );
     assert!(!missing.contains(&220));
@@ -1314,6 +1331,7 @@ fn v16_program_open_lof_manifest_is_complete_and_honest() {
     assert!(!missing.contains(&283));
     assert!(!missing.contains(&290));
     assert!(!missing.contains(&299));
+    assert!(!missing.contains(&301));
     assert!(!missing.contains(&303));
     assert!(!missing.contains(&304));
     assert!(!missing.contains(&305));
