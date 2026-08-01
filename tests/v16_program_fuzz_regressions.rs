@@ -19,9 +19,9 @@ use support::{
         reproduce_delayed_matcher_enable_replay, reproduce_delayed_oracle_intent_replay,
         reproduce_delayed_resolve_policy_replay, reproduce_delayed_trade_fee_policy_replay,
         reproduce_deposit_retry_replay, reproduce_fee_redirect_generation_replay,
-        reproduce_forfeit_funding_erasure, reproduce_forfeit_portfolio_incarnation_replay,
-        reproduce_fractional_cap_settlement, reproduce_insurance_top_up_retry_replay,
-        reproduce_insurance_withdrawal_generation_replay,
+        reproduce_forfeit_funding_erasure, reproduce_forfeit_market_generation_replay,
+        reproduce_forfeit_portfolio_incarnation_replay, reproduce_fractional_cap_settlement,
+        reproduce_insurance_top_up_retry_replay, reproduce_insurance_withdrawal_generation_replay,
         reproduce_liquidation_policy_generation_replay,
         reproduce_maintenance_policy_generation_replay, reproduce_market_incarnation_deposit,
         reproduce_matcher_grant_market_generation_replay,
@@ -951,6 +951,24 @@ fn v16_program_pr278_stale_forfeit_discards_replacement_winner_payout() {
 }
 
 #[test]
+fn v16_program_pr295_stale_forfeit_discards_reinitialized_market_winner_payout() {
+    let reproduction = reproduce_forfeit_market_generation_replay([0x95; 32])
+        .unwrap_or_else(|error| panic!("PR 295 no longer reproduces: {error}"));
+    assert_eq!(
+        reproduction.blocker,
+        KnownBlocker::ForfeitMarketGenerationReplay
+    );
+    assert!(reproduction.old_market_id > 0);
+    assert!(reproduction.new_market_id > 0);
+    assert_eq!(reproduction.victim_loss, 100_000);
+    assert_eq!(reproduction.stranded_vault, 100_000);
+    assert!(reproduction.control_slab_closed);
+    assert!(reproduction.replay_slab_blocked);
+    assert!(reproduction.replay_cu < 1_400_000);
+    assert!(reproduction.max_cu < 1_400_000);
+}
+
+#[test]
 fn v16_program_pr335_delayed_oracle_intents_extract_user_collateral() {
     for path in [
         DelayedOracleIntentPath::PushAuth,
@@ -1354,16 +1372,16 @@ fn v16_program_open_lof_manifest_is_complete_and_honest() {
         quarantined_prs(),
         [
             220, 223, 224, 225, 231, 251, 253, 255, 260, 264, 265, 267, 271, 272, 273, 274, 275,
-            276, 277, 278, 279, 280, 281, 282, 283, 285, 290, 294, 296, 299, 301, 303, 304, 305,
-            307, 309, 310, 311, 314, 315, 317, 318, 320, 321, 322, 325, 326, 328, 329, 331, 332,
-            333, 334, 335, 336, 337, 338, 339, 340, 343, 344, 345, 346, 347, 349, 350, 351, 353,
-            355, 356, 362, 365, 366, 367, 369, 380, 381
+            276, 277, 278, 279, 280, 281, 282, 283, 285, 290, 294, 295, 296, 299, 301, 303, 304,
+            305, 307, 309, 310, 311, 314, 315, 317, 318, 320, 321, 322, 325, 326, 328, 329, 331,
+            332, 333, 334, 335, 336, 337, 338, 339, 340, 343, 344, 345, 346, 347, 349, 350, 351,
+            353, 355, 356, 362, 365, 366, 367, 369, 380, 381
         ]
     );
     let missing = missing_prs();
     assert_eq!(
         missing.len(),
-        22,
+        21,
         "update the explicit evidence state when an executable adapter lands"
     );
     assert!(!missing.contains(&220));
@@ -1394,6 +1412,7 @@ fn v16_program_open_lof_manifest_is_complete_and_honest() {
     assert!(!missing.contains(&285));
     assert!(!missing.contains(&290));
     assert!(!missing.contains(&294));
+    assert!(!missing.contains(&295));
     assert!(!missing.contains(&296));
     assert!(!missing.contains(&299));
     assert!(!missing.contains(&301));
