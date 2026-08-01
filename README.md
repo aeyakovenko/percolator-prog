@@ -327,7 +327,9 @@ Authority fields are split by scope:
 - **`AssetOracleProfileV16.asset_admin`**: per-asset cold key that rotates that asset's scoped authorities
 - **`AssetOracleProfileV16.insurance_authority` / `insurance_operator` / `backing_bucket_authority` / `oracle_authority`**: per-asset operational authorities
 
-Matcher requests do not use a persisted market nonce. The wrapper invokes the matcher and requires the response to echo the request id, LP identity, asset index, oracle price, and requested size/sign constraints.
+Matcher requests do not use a persisted market nonce. The wrapper invokes the matcher and requires
+the response to echo the request id, LP identity, asset index, oracle price, and requested size/sign
+constraints. Matcher-config mutations use a separate portfolio-local sequence.
 
 ### Vault token account (market collateral)
 - SPL Token account holding collateral for this market
@@ -355,6 +357,12 @@ Unsigned LP matcher fills require an enabled matcher config stored directly on t
 `SetMatcherConfig` (tag 68) is signed by the LP owner and writes:
 
 `matcher_program, matcher_context, matcher_delegate, enabled`
+
+Its payload also carries `expected_sequence`. The caller reads the current portfolio matcher
+sequence, signs that exact value, and each successful enable or disable increments it. A legacy
+portfolio with no matcher tail, or a legacy tail whose enabled word is 0/1, starts at sequence 0.
+This ordering prevents a retained older signed transaction from restoring a matcher after the LP
+revokes or replaces it.
 
 During `TradeCpi` / `BatchTradeCpi`, Percolator reads this LP-account config and requires the
 instruction's matcher program, matcher context, and matcher delegate PDA to match it byte-for-byte.
@@ -448,7 +456,8 @@ This section describes intent and operational ordering, not argument-by-argument
     legs (the matcher's return-data cap).
 - **SetMatcherConfig** (tag 68)
   - LP-owner-signed opt-in/out for unsigned LP matcher fills. This writes the matcher config tail
-    on the LP portfolio: matcher program, matcher context, matcher delegate, and enabled flag.
+    on the LP portfolio: matcher program, matcher context, matcher delegate, enabled flag, and
+    monotonic mutation sequence. The payload must carry the current `expected_sequence`.
 
 ### Oracle / mark management
 - External-oracle markets authenticate configured oracle account(s) in the oracle configuration/crank
@@ -761,7 +770,8 @@ Call `InitMarket` with:
   - deploy or choose matcher program
   - create matcher context account owned by matcher program
   - create a portfolio with `InitPortfolio`
-  - call `SetMatcherConfig` with the LP owner signing the exact matcher program/context/delegate tuple
+  - read the portfolio matcher sequence and call `SetMatcherConfig` with the LP owner signing the
+    exact matcher program/context/delegate tuple and current `expected_sequence`
   - deposit collateral with `Deposit`
 - User:
   - create a portfolio with `InitPortfolio`
