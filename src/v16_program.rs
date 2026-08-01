@@ -658,6 +658,8 @@ pub mod state {
         pub matcher_program: [u8; 32],
         pub matcher_context: [u8; 32],
         pub matcher_delegate: [u8; 32],
+        // On disk, bit 0 is enabled and bits 1..=63 are the mutation sequence.
+        // Public readers normalize this field back to 0 or 1.
         pub enabled: u64,
     }
 
@@ -758,15 +760,27 @@ pub mod state {
         check_header(data, KIND_PORTFOLIO)?;
         let bytes = matcher_config_bytes(data)?;
         let config_len = core::mem::size_of::<PortfolioMatcherConfigV16>();
-        let cfg: PortfolioMatcherConfigV16 = bytemuck::pod_read_unaligned(
+        let mut cfg: PortfolioMatcherConfigV16 = bytemuck::pod_read_unaligned(
             bytes
                 .get(..config_len)
                 .ok_or(PercolatorError::InvalidAccountLen)?,
         );
-        if cfg.enabled > 1 {
-            return Err(ProgramError::InvalidAccountData);
-        }
+        cfg.enabled &= 1;
         Ok(cfg)
+    }
+
+    #[inline]
+    pub fn read_portfolio_matcher_config_sequence(data: &[u8]) -> Result<u64, ProgramError> {
+        check_header(data, KIND_PORTFOLIO)?;
+        if data.len() < PORTFOLIO_MATCHER_CONFIG_OFF + PORTFOLIO_MATCHER_CONFIG_LEN {
+            return Ok(0);
+        }
+        let bytes = matcher_config_bytes(data)?;
+        let word = read_u64(
+            bytes,
+            core::mem::size_of::<PortfolioMatcherConfigV16>() - core::mem::size_of::<u64>(),
+        )?;
+        Ok(word >> 1)
     }
 
     #[inline]
@@ -774,8 +788,18 @@ pub mod state {
         data: &mut [u8],
         cfg: &PortfolioMatcherConfigV16,
     ) -> Result<(), ProgramError> {
+        let sequence = read_portfolio_matcher_config_sequence(data)?;
+        write_portfolio_matcher_config_at_sequence(data, cfg, sequence)
+    }
+
+    #[inline]
+    pub(crate) fn write_portfolio_matcher_config_at_sequence(
+        data: &mut [u8],
+        cfg: &PortfolioMatcherConfigV16,
+        sequence: u64,
+    ) -> Result<(), ProgramError> {
         check_header(data, KIND_PORTFOLIO)?;
-        if cfg.enabled > 1 {
+        if cfg.enabled > 1 || sequence > (u64::MAX >> 1) {
             return Err(ProgramError::InvalidAccountData);
         }
         let bytes = matcher_config_bytes_mut(data)?;
@@ -783,10 +807,12 @@ pub mod state {
             *b = 0;
         }
         let config_len = core::mem::size_of::<PortfolioMatcherConfigV16>();
+        let mut encoded = *cfg;
+        encoded.enabled = (sequence << 1) | cfg.enabled;
         bytes
             .get_mut(..config_len)
             .ok_or(PercolatorError::InvalidAccountLen)?
-            .copy_from_slice(bytemuck::bytes_of(cfg));
+            .copy_from_slice(bytemuck::bytes_of(&encoded));
         Ok(())
     }
 
@@ -2509,6 +2535,8 @@ pub mod ix {
         },
         SetMatcherConfig {
             enabled: u8,
+            /// Must equal the portfolio tail's current monotonic matcher mutation sequence.
+            expected_sequence: u64,
         },
         ClosePortfolio,
         TopUpInsurance {
@@ -2776,6 +2804,7 @@ pub mod ix {
                 }
                 68 => Self::SetMatcherConfig {
                     enabled: read_u8(&mut rest)?,
+                    expected_sequence: read_u64(&mut rest)?,
                 },
                 8 => Self::ClosePortfolio,
                 9 => Self::TopUpInsurance {
@@ -3063,9 +3092,13 @@ pub mod ix {
                         push_u64(&mut out, leg.limit_price);
                     }
                 }
-                Self::SetMatcherConfig { enabled } => {
+                Self::SetMatcherConfig {
+                    enabled,
+                    expected_sequence,
+                } => {
                     out.push(68);
                     out.push(enabled);
+                    push_u64(&mut out, expected_sequence);
                 }
                 Self::ClosePortfolio => out.push(8),
                 Self::TopUpInsurance { amount } => {
@@ -5255,9 +5288,10 @@ pub mod processor {
             Instruction::BatchTradeCpi { legs } => {
                 handle_batch_trade_cpi(program_id, accounts, &legs)
             }
-            Instruction::SetMatcherConfig { enabled } => {
-                handle_set_matcher_config(program_id, accounts, enabled)
-            }
+            Instruction::SetMatcherConfig {
+                enabled,
+                expected_sequence,
+            } => handle_set_matcher_config(program_id, accounts, enabled, expected_sequence),
             Instruction::ClosePortfolio => handle_close_portfolio(program_id, accounts),
             Instruction::TopUpInsurance { amount } => {
                 handle_top_up_insurance(program_id, accounts, amount)
@@ -6711,6 +6745,7 @@ pub mod processor {
         program_id: &Pubkey,
         accounts: &'a [AccountInfo<'a>],
         enabled: u8,
+        expected_sequence: u64,
     ) -> ProgramResult {
         if enabled > 1 {
             return Err(PercolatorError::InvalidInstruction.into());
@@ -6734,6 +6769,15 @@ pub mod processor {
         if lp_portfolio_ai.data_len() < required_len {
             lp_portfolio_ai.realloc(required_len, true)?;
         }
+        let current_sequence =
+            state::read_portfolio_matcher_config_sequence(&lp_portfolio_ai.try_borrow_data()?)?;
+        if current_sequence != expected_sequence {
+            return Err(PercolatorError::InvalidInstruction.into());
+        }
+        let next_sequence = current_sequence
+            .checked_add(1)
+            .filter(|sequence| *sequence <= (u64::MAX >> 1))
+            .ok_or(PercolatorError::InvalidInstruction)?;
         let cfg = if enabled == 0 {
             state::PortfolioMatcherConfigV16::default()
         } else {
@@ -6764,7 +6808,11 @@ pub mod processor {
                 enabled: 1,
             }
         };
-        state::write_portfolio_matcher_config(&mut lp_portfolio_ai.try_borrow_mut_data()?, &cfg)
+        state::write_portfolio_matcher_config_at_sequence(
+            &mut lp_portfolio_ai.try_borrow_mut_data()?,
+            &cfg,
+            next_sequence,
+        )
     }
 
     /// Maximum legs in a single matcher batch CPI: the matcher returns N*64 bytes via

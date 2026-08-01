@@ -2022,8 +2022,15 @@ impl V16CuEnv {
                 AccountMeta::new_readonly(matcher_delegate, false),
             ]);
         }
+        let expected_sequence = state::read_portfolio_matcher_config_sequence(
+            &self.svm.get_account(&maker_account).unwrap().data,
+        )
+        .expect("read matcher config sequence");
         self.send(
-            ProgInstruction::SetMatcherConfig { enabled },
+            ProgInstruction::SetMatcherConfig {
+                enabled,
+                expected_sequence,
+            },
             accounts,
             &[maker_owner],
         )?;
@@ -20553,6 +20560,129 @@ fn v16_attack_disabled_lp_matcher_config_blocks_cpi_fills() {
 }
 
 #[test]
+fn v16_matcher_config_sequence_rejects_withheld_enable_after_revoke() {
+    let mut env = V16CuEnv::new();
+    let matcher_program = Pubkey::new_unique();
+    let matcher_bytes = std::fs::read(auth_matcher_program_path()).expect("read auth matcher BPF");
+    env.svm.add_program(matcher_program, &matcher_bytes);
+    let lp_owner = Keypair::new();
+    let lp = env.create_portfolio(&lp_owner);
+    let matcher_context = Pubkey::new_unique();
+    let matcher_delegate = matcher_delegate_key(
+        &env.program_id,
+        &env.market,
+        &lp,
+        &lp_owner.pubkey(),
+        &matcher_program,
+        &matcher_context,
+    );
+    env.try_init_auth_matcher_context_with_delegate(
+        matcher_program,
+        &lp_owner,
+        lp,
+        matcher_context,
+        matcher_delegate,
+    )
+    .expect("initialize matcher context without configuring the LP");
+
+    let program_id = env.program_id;
+    let market = env.market;
+    let config_accounts = || {
+        vec![
+            AccountMeta::new(lp_owner.pubkey(), true),
+            AccountMeta::new_readonly(market, false),
+            AccountMeta::new(lp, false),
+            AccountMeta::new_readonly(matcher_program, false),
+            AccountMeta::new_readonly(matcher_context, false),
+            AccountMeta::new_readonly(matcher_delegate, false),
+        ]
+    };
+    let enable_at = |expected_sequence| Instruction {
+        program_id,
+        accounts: config_accounts(),
+        data: ProgInstruction::SetMatcherConfig {
+            enabled: 1,
+            expected_sequence,
+        }
+        .encode(),
+    };
+    env.svm.expire_blockhash();
+    let retained_blockhash = env.svm.latest_blockhash();
+    let enable_a = Transaction::new_signed_with_payer(
+        &[
+            ComputeBudgetInstruction::set_compute_unit_price(1),
+            enable_at(0),
+        ],
+        Some(&env.payer.pubkey()),
+        &[&env.payer, &lp_owner],
+        retained_blockhash,
+    );
+    let enable_b = Transaction::new_signed_with_payer(
+        &[
+            ComputeBudgetInstruction::set_compute_unit_price(2),
+            enable_at(0),
+        ],
+        Some(&env.payer.pubkey()),
+        &[&env.payer, &lp_owner],
+        retained_blockhash,
+    );
+    env.svm
+        .send_transaction(enable_a)
+        .expect("first relayed enable");
+    assert_eq!(
+        state::read_portfolio_matcher_config_sequence(&env.svm.get_account(&lp).unwrap().data)
+            .unwrap(),
+        1,
+    );
+
+    env.send(
+        ProgInstruction::SetMatcherConfig {
+            enabled: 0,
+            expected_sequence: 1,
+        },
+        vec![
+            AccountMeta::new(lp_owner.pubkey(), true),
+            AccountMeta::new_readonly(env.market, false),
+            AccountMeta::new(lp, false),
+        ],
+        &[&lp_owner],
+    )
+    .expect("owner revokes matcher");
+    let lp_after_revoke = env.svm.get_account(&lp).unwrap();
+    assert_eq!(env.portfolio_matcher_config(lp).enabled, 0);
+    assert_eq!(
+        state::read_portfolio_matcher_config_sequence(&lp_after_revoke.data).unwrap(),
+        2,
+    );
+
+    assert!(
+        env.svm.send_transaction(enable_b).is_err(),
+        "a withheld sequence-0 enable must not cross the sequence-1 revoke",
+    );
+    assert_eq!(
+        env.svm.get_account(&lp).unwrap(),
+        lp_after_revoke,
+        "stale matcher mutation must roll back atomically",
+    );
+
+    env.send(
+        ProgInstruction::SetMatcherConfig {
+            enabled: 1,
+            expected_sequence: 2,
+        },
+        config_accounts(),
+        &[&lp_owner],
+    )
+    .expect("fresh post-revoke enable remains live");
+    assert_eq!(env.portfolio_matcher_config(lp).enabled, 1);
+    assert_eq!(
+        state::read_portfolio_matcher_config_sequence(&env.svm.get_account(&lp).unwrap().data)
+            .unwrap(),
+        3,
+    );
+}
+
+#[test]
 fn v16_attack_non_owner_cannot_change_lp_matcher_config() {
     let mut env = V16CuEnv::new();
     let matcher_program = Pubkey::new_unique();
@@ -20573,7 +20703,10 @@ fn v16_attack_non_owner_cannot_change_lp_matcher_config() {
 
     env.svm.expire_blockhash();
     let revoke = env.send(
-        ProgInstruction::SetMatcherConfig { enabled: 0 },
+        ProgInstruction::SetMatcherConfig {
+            enabled: 0,
+            expected_sequence: 0,
+        },
         vec![
             AccountMeta::new(attacker.pubkey(), true),
             AccountMeta::new_readonly(env.market, false),
@@ -20638,7 +20771,10 @@ fn v16_attack_cross_lp_cannot_overwrite_lp_matcher_config() {
 
     env.svm.expire_blockhash();
     let overwrite = env.send(
-        ProgInstruction::SetMatcherConfig { enabled: 0 },
+        ProgInstruction::SetMatcherConfig {
+            enabled: 0,
+            expected_sequence: 0,
+        },
         vec![
             AccountMeta::new(attacker_owner.pubkey(), true),
             AccountMeta::new_readonly(env.market, false),
@@ -21003,7 +21139,10 @@ fn v16_attack_set_lp_matcher_config_cannot_target_protocol_accounts() {
     let send_with_lp_account = |env: &mut V16CuEnv, lp_account: Pubkey| {
         env.svm.expire_blockhash();
         env.send(
-            ProgInstruction::SetMatcherConfig { enabled: 1 },
+            ProgInstruction::SetMatcherConfig {
+                enabled: 1,
+                expected_sequence: 0,
+            },
             vec![
                 AccountMeta::new(lp_owner.pubkey(), true),
                 AccountMeta::new_readonly(env.market, false),
@@ -21077,7 +21216,10 @@ fn v16_attack_matcher_config_and_fills_reject_self_program_context() {
     let lp_before_config = env.svm.get_account(&lp).unwrap();
     env.svm.expire_blockhash();
     let self_config = env.send(
-        ProgInstruction::SetMatcherConfig { enabled: 1 },
+        ProgInstruction::SetMatcherConfig {
+            enabled: 1,
+            expected_sequence: 0,
+        },
         vec![
             AccountMeta::new(lp_owner.pubkey(), true),
             AccountMeta::new_readonly(env.market, false),
@@ -21333,7 +21475,10 @@ fn v16_attack_set_matcher_config_bad_legacy_context_rolls_back_realloc() {
     let lp_before = env.svm.get_account(&lp).unwrap();
     env.svm.expire_blockhash();
     let rejected = env.send(
-        ProgInstruction::SetMatcherConfig { enabled: 1 },
+        ProgInstruction::SetMatcherConfig {
+            enabled: 1,
+            expected_sequence: 0,
+        },
         vec![
             AccountMeta::new(lp_owner.pubkey(), true),
             AccountMeta::new_readonly(env.market, false),
@@ -30540,7 +30685,10 @@ fn v16_attack_trade_paths_reject_cross_market_portfolio_substitution() {
         &mut env.svm,
         env.program_id,
         &env.payer,
-        ProgInstruction::SetMatcherConfig { enabled: 1 },
+        ProgInstruction::SetMatcherConfig {
+            enabled: 1,
+            expected_sequence: 0,
+        },
         vec![
             AccountMeta::new(cpi_lp.pubkey(), true),
             AccountMeta::new_readonly(market_b, false),
