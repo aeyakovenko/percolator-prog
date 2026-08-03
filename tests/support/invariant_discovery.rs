@@ -1187,6 +1187,58 @@ impl SourceLienReversalDiscovery {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CrossDomainRoundingOrder {
+    Forward,
+    Reverse,
+}
+
+impl CrossDomainRoundingOrder {
+    pub const ALL: [Self; 2] = [Self::Forward, Self::Reverse];
+
+    fn assets(self) -> [u16; 2] {
+        match self {
+            Self::Forward => [0, 1],
+            Self::Reverse => [1, 0],
+        }
+    }
+
+    fn discriminator(self) -> u8 {
+        match self {
+            Self::Forward => 0,
+            Self::Reverse => 1,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CrossDomainRoundingDiscovery {
+    pub order: CrossDomainRoundingOrder,
+    pub fractional_source_domains: u8,
+    pub positive_pnl_before_reversal: i128,
+    pub funded_capital: u128,
+    pub stranded_position_q: u128,
+    pub blocked_public_routes: u8,
+    pub later_honest_crank_blocked: bool,
+    pub exact_rollback: bool,
+    pub canonical_vault_liquidity: u128,
+    pub token_supply_conserved: bool,
+}
+
+impl CrossDomainRoundingDiscovery {
+    pub fn is_persistent_funded_exit_lock(&self) -> bool {
+        self.fractional_source_domains == 2
+            && self.positive_pnl_before_reversal > 0
+            && self.funded_capital != 0
+            && self.stranded_position_q != 0
+            && self.blocked_public_routes == 6
+            && self.later_honest_crank_blocked
+            && self.exact_rollback
+            && self.canonical_vault_liquidity >= self.funded_capital
+            && self.token_supply_conserved
+    }
+}
+
 impl BackingExpiryDiscovery {
     pub fn is_violation(&self) -> bool {
         self.authenticated_slot > self.expiry_slot
@@ -8692,6 +8744,239 @@ pub fn discover_source_lien_reversal_exit_locks(
     SourceLienReversalExitRoute::ALL
         .into_iter()
         .map(|route| discover_one_source_lien_reversal_exit(seed, route, increase_divisor))
+        .collect()
+}
+
+fn discover_one_cross_domain_rounding_exit_lock(
+    mut seed: [u8; 32],
+    order: CrossDomainRoundingOrder,
+) -> Result<CrossDomainRoundingDiscovery, String> {
+    const TARGET: usize = 0;
+    const HELPER: usize = 1;
+    const TARGET_SHORTS: [usize; 2] = [2, 3];
+    const FIRST_HELPER_SHORT: usize = 4;
+    const OPEN_PRICE: u64 = 100;
+    const REVERSAL_PRICE: u64 = 1;
+
+    seed[0] ^= 0x6a;
+    seed[1] ^= order.discriminator();
+    let mut env = V16Svm::new(
+        seed,
+        MarketConfig {
+            initial_price: OPEN_PRICE,
+            h_max: 2,
+            maintenance_margin_bps: 10_000,
+            initial_margin_bps: 10_000,
+            max_price_move_bps_per_slot: 10_000,
+            max_accrual_dt_slots: 1,
+            min_funding_lifetime_slots: 1,
+            actor_deposits: [10_000, 10_000, 102, 102, 200],
+            ..MarketConfig::default()
+        },
+    );
+    let second_helper_short = env.add_primary_actor(seed, 0, 1_000, 200);
+    let helper_shorts = [FIRST_HELPER_SHORT, second_helper_short];
+    let supply_before = env.token_supply_observed();
+    let assets = order.assets();
+    let oracle_accounts = [
+        env.primary_profile(0).oracle_leg_count,
+        env.primary_profile(1).oracle_leg_count,
+    ];
+    let observation = |asset_index| {
+        vec![CrankObservationHint {
+            asset_index,
+            oracle_accounts: oracle_accounts[asset_index as usize],
+        }]
+    };
+
+    let mut slot = env.current_slot();
+    for (offset, asset_index) in assets.into_iter().enumerate() {
+        env.trade_no_cpi(
+            TARGET,
+            TARGET_SHORTS[offset],
+            asset_index,
+            POS_SCALE as i128,
+            OPEN_PRICE,
+            0,
+        )
+        .map_err(|error| format!("open target asset {asset_index}: {error}"))?;
+
+        slot = slot
+            .checked_add(1)
+            .ok_or_else(|| "cross-domain setup slot overflow".to_string())?;
+        env.warp_to_slot(slot);
+        env.push_auth_mark(asset_index, slot, OPEN_PRICE)
+            .map_err(|error| format!("publish opening mark for asset {asset_index}: {error}"))?;
+        env.crank(TARGET, slot, observation(asset_index))
+            .map_err(|error| format!("crank target opening asset {asset_index}: {error}"))?;
+        env.crank(TARGET_SHORTS[offset], slot, observation(asset_index))
+            .map_err(|error| format!("crank target short opening asset {asset_index}: {error}"))?;
+
+        env.trade_no_cpi(
+            HELPER,
+            helper_shorts[offset],
+            asset_index,
+            2 * POS_SCALE as i128,
+            OPEN_PRICE,
+            0,
+        )
+        .map_err(|error| format!("open helper asset {asset_index}: {error}"))?;
+    }
+
+    for gain_price in [200, 300] {
+        slot = slot
+            .checked_add(1)
+            .ok_or_else(|| "cross-domain gain slot overflow".to_string())?;
+        env.warp_to_slot(slot);
+        for asset_index in assets {
+            env.push_auth_mark(asset_index, slot, gain_price)
+                .map_err(|error| format!("publish gain mark for asset {asset_index}: {error}"))?;
+        }
+        for (offset, asset_index) in assets.into_iter().enumerate() {
+            env.crank(TARGET_SHORTS[offset], slot, observation(asset_index))
+                .map_err(|error| format!("crank target short gain asset {asset_index}: {error}"))?;
+        }
+    }
+    for (offset, asset_index) in assets.into_iter().enumerate() {
+        env.crank(helper_shorts[offset], slot, observation(asset_index))
+            .map_err(|error| format!("crank helper short gain asset {asset_index}: {error}"))?;
+    }
+    for actor in [TARGET, HELPER] {
+        env.crank(actor, slot, observation(0))
+            .map_err(|error| format!("crank aggregate winner {actor}: {error}"))?;
+    }
+
+    let positive_pnl_before_reversal = env.primary_portfolio(TARGET).pnl.get();
+    let market_before_reversal = env.primary_market_state().1;
+    let fractional_source_domains = [1usize, 3]
+        .into_iter()
+        .filter(|domain| {
+            let rate = market_before_reversal.source_credit[*domain].credit_rate_num;
+            rate != 0 && rate < percolator::CREDIT_RATE_SCALE
+        })
+        .count() as u8;
+
+    let affected_asset = assets[0];
+    slot = slot
+        .checked_add(1)
+        .ok_or_else(|| "cross-domain reversal slot overflow".to_string())?;
+    env.warp_to_slot(slot);
+    env.push_auth_mark(affected_asset, slot, REVERSAL_PRICE)
+        .map_err(|error| format!("publish reversal mark for asset {affected_asset}: {error}"))?;
+    env.crank(TARGET_SHORTS[0], slot, observation(affected_asset))
+        .map_err(|error| format!("crank reversal counterparty asset {affected_asset}: {error}"))?;
+
+    let target_before_exit = env.primary_portfolio(TARGET);
+    let funded_capital = target_before_exit.capital.get();
+    let stranded_position_q = assets.into_iter().try_fold(0u128, |sum, asset_index| {
+        sum.checked_add(discovery_position(&target_before_exit, asset_index)?.unsigned_abs())
+            .ok_or_else(|| "cross-domain position total overflow".to_string())
+    })?;
+    let canonical_vault_liquidity = u128::from(env.token_amount(env.vault));
+    if env.primary_market_state().1.vault != canonical_vault_liquidity {
+        return Err("cross-domain rounding vault diverged from SPL custody".into());
+    }
+
+    let mut blocked_public_routes = 0u8;
+    let mut exact_rollback = true;
+    for route in SourceLienReversalExitRoute::ALL {
+        let before = fingerprint(&env);
+        let result = match route {
+            SourceLienReversalExitRoute::PermissionlessCrank => {
+                env.crank(TARGET, slot, observation(affected_asset))
+            }
+            SourceLienReversalExitRoute::RebalanceReduce => {
+                env.rebalance_reduce(TARGET, affected_asset, POS_SCALE)
+            }
+            SourceLienReversalExitRoute::TradeNoCpi => env.trade_no_cpi(
+                TARGET,
+                TARGET_SHORTS[0],
+                affected_asset,
+                -(POS_SCALE as i128),
+                REVERSAL_PRICE,
+                0,
+            ),
+            SourceLienReversalExitRoute::BatchNoCpi => env.batch_trade_no_cpi(
+                TARGET,
+                TARGET_SHORTS[0],
+                vec![BatchTradeLeg {
+                    asset_index: affected_asset,
+                    size_q: -(POS_SCALE as i128),
+                    exec_price: REVERSAL_PRICE,
+                    fee_bps: 0,
+                }],
+            ),
+            SourceLienReversalExitRoute::TradeCpi => env.trade_cpi(
+                TARGET,
+                TARGET_SHORTS[0],
+                affected_asset,
+                -(POS_SCALE as i128),
+                0,
+                0,
+            ),
+            SourceLienReversalExitRoute::BatchCpi => env.batch_trade_cpi(
+                TARGET,
+                TARGET_SHORTS[0],
+                vec![BatchTradeCpiLeg {
+                    asset_index: affected_asset,
+                    size_q: -(POS_SCALE as i128),
+                    fee_bps: 0,
+                    limit_price: 0,
+                }],
+            ),
+        };
+        let after = fingerprint(&env);
+        match result {
+            Ok(_) if after != before => break,
+            Ok(_) => blocked_public_routes = blocked_public_routes.saturating_add(1),
+            Err(_) => {
+                blocked_public_routes = blocked_public_routes.saturating_add(1);
+                exact_rollback &= after == before;
+            }
+        }
+    }
+
+    let mut later_honest_crank_blocked = false;
+    if blocked_public_routes == SourceLienReversalExitRoute::ALL.len() as u8 {
+        slot = slot
+            .checked_add(1)
+            .ok_or_else(|| "cross-domain later slot overflow".to_string())?;
+        env.warp_to_slot(slot);
+        env.push_auth_mark(affected_asset, slot, REVERSAL_PRICE)
+            .map_err(|error| format!("publish later reversal mark: {error}"))?;
+        let _ = env.crank(TARGET_SHORTS[0], slot, observation(affected_asset));
+        let before = fingerprint(&env);
+        let result = env.crank(TARGET, slot, observation(affected_asset));
+        let after = fingerprint(&env);
+        later_honest_crank_blocked = match result {
+            Ok(_) => after == before,
+            Err(_) => {
+                exact_rollback &= after == before;
+                true
+            }
+        };
+    }
+
+    Ok(CrossDomainRoundingDiscovery {
+        order,
+        fractional_source_domains,
+        positive_pnl_before_reversal,
+        funded_capital,
+        stranded_position_q,
+        blocked_public_routes,
+        later_honest_crank_blocked,
+        exact_rollback,
+        canonical_vault_liquidity,
+        token_supply_conserved: env.token_supply_observed() == supply_before,
+    })
+}
+
+pub fn discover_cross_domain_rounding_exit_locks(
+    seed: [u8; 32],
+) -> Result<Vec<CrossDomainRoundingDiscovery>, String> {
+    CrossDomainRoundingOrder::ALL
+        .into_iter()
+        .map(|order| discover_one_cross_domain_rounding_exit_lock(seed, order))
         .collect()
 }
 

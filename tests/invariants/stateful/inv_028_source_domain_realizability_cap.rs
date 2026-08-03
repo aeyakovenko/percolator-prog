@@ -9,6 +9,9 @@
 //! and tests canonical crank, unilateral reduction, and all four trade routes from independent
 //! worlds. A finding requires every route to reject as LockActive with exact SVM rollback while
 //! real capital, exposure, and canonical SPL liquidity remain.
+//! `v16_program_cross_domain_rounding_exit_matrix_discovers_funded_lock` independently constructs
+//! two fractional source domains in both asset orders, reverses one source, and requires all six
+//! public exit families plus a later honest crank to remain blocked before accepting a finding.
 //!
 //! Guarantee boundary: this is a public counterexample on the vulnerable pin, not certification
 //! of every source-credit lifecycle. Fixed-pin certification still requires the proof, model, and
@@ -49,6 +52,31 @@ proptest! {
             prop_assert!(
                 discovery.is_persistent_funded_exit_lock(),
                 "source-lien reversal retained a public exit: {:?}",
+                discovery
+            );
+        }
+    }
+
+    #[test]
+    fn v16_program_cross_domain_rounding_exit_matrix_discovers_funded_lock(
+        seed in any::<[u8; 32]>(),
+    ) {
+        let discoveries = discover_cross_domain_rounding_exit_locks(seed);
+        prop_assert!(
+            discoveries.is_ok(),
+            "cross-domain rounding matrix setup failed: {}",
+            discoveries.unwrap_err()
+        );
+        let discoveries = discoveries.unwrap();
+        prop_assert_eq!(
+            discoveries.len(),
+            CrossDomainRoundingOrder::ALL.len(),
+            "both asset orders need independent public worlds"
+        );
+        for discovery in discoveries {
+            prop_assert!(
+                discovery.is_persistent_funded_exit_lock(),
+                "cross-domain rounding retained a public exit: {:?}",
                 discovery
             );
         }

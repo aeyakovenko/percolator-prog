@@ -76,7 +76,7 @@
 303	LoF	HARDENING	INV-003	independent-discovery	[HARDENING LoF] Bind trades to portfolio incarnations
 304	LoF	HARDENING	INV-003	independent-discovery	[HARDENING LoF] Bind matcher grants to portfolio incarnations
 305	LoF	HARDENING	INV-003	independent-discovery	[HARDENING LoF] Bind deposits to portfolio incarnations
-306	DoS	BLOCKER	INV-034	missing	[BLOCKER DoS] Prove cross-domain source rounding progress
+306	DoS	BLOCKER	INV-028	independent-discovery	[BLOCKER DoS] Prove cross-domain source rounding progress
 307	LoF	HARDENING	INV-001	independent-discovery	[HARDENING LoF] Bind deposits to market generations
 308	DoS	BLOCKER	INV-071	missing	[BLOCKER DoS] Settle B by collateral-atom budget
 309	LoF	HARDENING	INV-003	independent-discovery	[HARDENING LoF] Bind portfolio close to its incarnation
