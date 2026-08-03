@@ -177,9 +177,9 @@ fn v16_open_security_finding_benchmark_is_complete_and_non_overclaiming() {
 
     assert_eq!(rows, 143, "refresh the dated GitHub finding snapshot");
     assert_eq!(direct, 0, "direct adapter inventory changed");
-    assert_eq!(missing, 16, "explicit finding gaps changed");
+    assert_eq!(missing, 15, "explicit finding gaps changed");
     assert_eq!(
-        independent, 118,
+        independent, 119,
         "promote only genuinely finding-agnostic invariant discoveries"
     );
     assert_eq!(nonqualifying, 9, "nonqualifying evidence roster changed");
@@ -290,6 +290,7 @@ fn v16_open_security_finding_benchmark_is_complete_and_non_overclaiming() {
                     | "terminal-snapshot-must-use-current-authenticated-oracle-state"
                     | "funded-resolved-adl-winner-has-bounded-public-exit"
                     | "fractional-reset-carry-cannot-block-permissionless-liquidation"
+                    | "post-adl-split-cannot-increase-withdrawable-backing-funded-value"
                     | "zero-effective-oi-funded-residue-must-enter-bounded-cleanup"
                     | "partial-adl-recovery-residue-must-have-permissionless-cleanup"
                     | "fractional-social-loss-carry-cannot-lock-funded-owner-exit"

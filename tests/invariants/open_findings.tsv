@@ -23,7 +23,7 @@
 236	DoS	HARDENING	INV-073	independent-discovery	[HARDENING DoS] Prevent permissionless asset from forcing global recovery
 237	LoF	PRIVILEGED	INV-027	nonqualifying	[PRIVILEGED LoF] Lock live insurance while users remain exposed
 246	DoS	BLOCKER	INV-071	independent-discovery	[BLOCKER DoS] Prevent permissionless micro-price crank pinning
-250	LoF	REAL	INV-061	missing	[REAL LoF] Prove ADL split-transfer backing drain is closed
+250	LoF	REAL	INV-061	independent-discovery	[REAL LoF] Prove ADL split-transfer backing drain is closed
 251	LoF	BLOCKER	INV-005	independent-discovery	[BLOCKER LoF] Prevent delayed asset-authority revival
 252	DoS	BLOCKER	INV-073	independent-discovery	[BLOCKER DoS] Restore terminal exit after partial Recovery forfeit (#236)
 253	LoF	BLOCKER	INV-038	independent-discovery	[BLOCKER LoF] Preserve rounded premium funding on auto-crank
