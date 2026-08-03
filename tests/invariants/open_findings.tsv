@@ -61,7 +61,7 @@
 287	LoF	BLOCKER	INV-067	nonqualifying	[BLOCKER LoF] Preserve funded shutdown reclaim windows
 288	DoS	BLOCKER	INV-067	nonqualifying	[BLOCKER DoS] Keep claimant Recovery deadlines monotonic
 290	LoF	BLOCKER	INV-034	independent-discovery	[BLOCKER LoF] Reject cross-domain bankruptcy insurance drain
-291	DoS	REAL	INV-063	missing	[REAL DoS] Pin lapsed backing settlement fix
+291	DoS	REAL	INV-063	independent-discovery	[REAL DoS] Pin lapsed backing settlement fix
 292	LoF	HARDENING	INV-003	independent-discovery	[HARDENING LoF] Bind rebalance reductions to portfolio incarnations
 293	LoF	HARDENING	INV-001	independent-discovery	[HARDENING LoF] Bind RebalanceReduce to market generations
 294	LoF	HARDENING	INV-001	independent-discovery	[HARDENING LoF] Bind matcher grants to market generations

@@ -177,9 +177,9 @@ fn v16_open_security_finding_benchmark_is_complete_and_non_overclaiming() {
 
     assert_eq!(rows, 143, "refresh the dated GitHub finding snapshot");
     assert_eq!(direct, 0, "direct adapter inventory changed");
-    assert_eq!(missing, 13, "explicit finding gaps changed");
+    assert_eq!(missing, 12, "explicit finding gaps changed");
     assert_eq!(
-        independent, 119,
+        independent, 120,
         "promote only genuinely finding-agnostic invariant discoveries"
     );
     assert_eq!(nonqualifying, 11, "nonqualifying evidence roster changed");
@@ -208,6 +208,7 @@ fn v16_open_security_finding_benchmark_is_complete_and_non_overclaiming() {
         include_str!("../stateful/inv_061_deterministic_bounded_liquidation.rs"),
         include_str!("../cu/inv_061_deterministic_bounded_liquidation.rs"),
         include_str!("../stateful/inv_063_backing_expiry_normalization.rs"),
+        include_str!("../cu/inv_063_backing_expiry_normalization.rs"),
         include_str!(
             "../stateful/inv_067_terminal_payout_completeness_and_exact_once_settlement.rs"
         ),
@@ -274,6 +275,7 @@ fn v16_open_security_finding_benchmark_is_complete_and_non_overclaiming() {
                     | "expired-backing-cannot-create-withdrawable-provider-value"
                     | "expired-backing-cannot-capitalize-and-extract-independent-principal"
                     | "expired-retained-operation-cannot-consume-principal-and-lock-terminal-users"
+                    | "lapsed-backing-must-not-lock-resolved-user-exit"
                     | "vanished-source-claim-must-have-a-bounded-public-unwind"
                     | "expired-source-lien-must-have-bounded-public-reconciliation"
                     | "fractional-source-domains-must-have-a-bounded-public-unwind"

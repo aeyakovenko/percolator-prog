@@ -2,7 +2,7 @@
 //!
 //! Normative obligation: Expired backing is normalized before every consumer and cannot remain economically fresh.
 //!
-//! Evidence in this file (I/C plus invariant-specific M assertions): `v16_program_post_snapshot_expiry_prerequisite_hits_live_stale_lock`, `v16_probe_post_expiry_trade_cannot_charge_backing_fee`. These tests exercise the deployed public
+//! Evidence in this file (I/C plus invariant-specific M assertions): `v16_program_lapsed_backing_settlement_matrix_discovers_resolved_exit_lock`, `v16_program_post_snapshot_expiry_prerequisite_hits_live_stale_lock`, `v16_probe_post_expiry_trade_cannot_charge_backing_fee`. These tests exercise the deployed public
 //! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
 //! rollback, liveness, or compute outcomes appropriate to the invariant.
 //!
@@ -14,6 +14,139 @@
 //! counterexample. It must remain visible until the fixed engine/program pin makes it green.
 
 use super::*;
+
+#[test]
+fn v16_program_lapsed_backing_settlement_matrix_discovers_resolved_exit_lock() {
+    const PRICE: u64 = 100;
+    const UP_PRICE: u64 = 101;
+    const DEPOSIT: u128 = 100_000_000;
+    const SIZE_Q: i128 = 100_000 * POS_SCALE as i128;
+
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(1, 10_000, 10_000, 100);
+    env.configure_auth_mark_for_asset_as_admin(0, 0, PRICE);
+
+    let neutral_owner = Keypair::new();
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let neutral = env.create_portfolio(&neutral_owner);
+    let long = env.create_portfolio(&long_owner);
+    let short = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long, DEPOSIT);
+    env.deposit(&short_owner, short, DEPOSIT);
+    env.trade_asset_with_cu(0, &long_owner, long, &short_owner, short, SIZE_Q, PRICE, 0);
+
+    env.svm.warp_to_slot(2);
+    env.push_auth_mark_for_asset_as_admin(0, 2, UP_PRICE);
+    env.crank(
+        neutral,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 2,
+            observations: crank_observations(0),
+        },
+    );
+    env.svm.warp_to_slot(3);
+    env.crank(
+        long,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 3,
+            observations: crank_observations(0),
+        },
+    );
+    assert!(
+        env.portfolio_state(long).pnl.get() > 0,
+        "the setup must materialize a backed positive mark claim"
+    );
+    env.top_up_backing_bucket(1, 10, 5);
+
+    env.svm.warp_to_slot(4);
+    env.push_auth_mark_for_asset_as_admin(0, 4, PRICE);
+    env.crank(
+        neutral,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 4,
+            observations: crank_observations(0),
+        },
+    );
+    env.svm.warp_to_slot(5);
+    env.crank(
+        neutral,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 5,
+            observations: crank_observations(0),
+        },
+    );
+    env.resolve();
+
+    let long_destination = env.token_account(long_owner.pubkey(), 0);
+    let short_destination = env.token_account(short_owner.pubkey(), 0);
+    let mut rejected = 0usize;
+    for (owner, portfolio, destination) in [
+        (&long_owner, long, long_destination),
+        (&short_owner, short, short_destination),
+    ]
+    .into_iter()
+    .cycle()
+    .take(32)
+    {
+        env.svm.expire_blockhash();
+        let before_market = env.svm.get_account(&env.market).unwrap();
+        let before_portfolio = env.svm.get_account(&portfolio).unwrap();
+        let before_vault = env.svm.get_account(&env.vault).unwrap();
+        let _ = env.send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 5,
+                observations: vec![],
+            },
+            vec![
+                AccountMeta::new(env.payer.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(portfolio, false),
+            ],
+            &[],
+        );
+        env.svm.expire_blockhash();
+        let close = env.send(
+            ProgInstruction::CloseResolved {
+                fee_rate_per_slot: 0,
+            },
+            vec![
+                AccountMeta::new_readonly(owner.pubkey(), false),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(portfolio, false),
+                AccountMeta::new(destination, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(env.vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[],
+        );
+        if close.is_err() {
+            rejected += 1;
+            assert_eq!(env.svm.get_account(&env.market).unwrap(), before_market);
+            assert_eq!(env.svm.get_account(&portfolio).unwrap(), before_portfolio);
+            assert_eq!(env.svm.get_account(&env.vault).unwrap(), before_vault);
+        }
+    }
+
+    let long_after = env.portfolio_state(long);
+    let short_after = env.portfolio_state(short);
+    assert!(
+        rejected > 0,
+        "the matrix did not exercise the stale close path"
+    );
+    let long_locked = has_active_leg_for_asset(&long_after, 0) || long_after.capital.get() != 0;
+    let short_locked = has_active_leg_for_asset(&short_after, 0) || short_after.capital.get() != 0;
+    assert!(
+        long_locked || short_locked,
+        "bounded canonical retries unexpectedly cleared both resolved positions"
+    );
+    if long_locked {
+        assert_eq!(env.token_amount(long_destination), 0);
+    }
+    if short_locked {
+        assert_eq!(env.token_amount(short_destination), 0);
+    }
+}
 
 #[test]
 fn v16_program_post_snapshot_expiry_prerequisite_hits_live_stale_lock() {
