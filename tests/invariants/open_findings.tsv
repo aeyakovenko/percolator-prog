@@ -57,7 +57,7 @@
 283	LoF	BLOCKER	INV-067	independent-discovery	[BLOCKER LoF] Prevent dust backing from erasing terminal payouts
 284	LoF	BLOCKER	INV-036	independent-discovery	[BLOCKER LoF] Route negative batch fees to the correct insurance side
 285	LoF	HARDENING	INV-003	independent-discovery	[HARDENING LoF] Bind retained portfolio authority to incarnation
-286	LoF	BLOCKER	INV-063	missing	[BLOCKER LoF] Preserve payouts after post-snapshot backing expiry
+286	LoF	BLOCKER	INV-063	nonqualifying	[BLOCKER LoF] Preserve payouts after post-snapshot backing expiry
 287	LoF	BLOCKER	INV-067	nonqualifying	[BLOCKER LoF] Preserve funded shutdown reclaim windows
 288	DoS	BLOCKER	INV-067	nonqualifying	[BLOCKER DoS] Keep claimant Recovery deadlines monotonic
 290	LoF	BLOCKER	INV-034	independent-discovery	[BLOCKER LoF] Reject cross-domain bankruptcy insurance drain

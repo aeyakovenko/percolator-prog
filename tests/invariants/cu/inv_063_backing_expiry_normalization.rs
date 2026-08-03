@@ -2,7 +2,7 @@
 //!
 //! Normative obligation: Expired backing is normalized before every consumer and cannot remain economically fresh.
 //!
-//! Evidence in this file (I/C plus invariant-specific M assertions): `v16_probe_post_expiry_trade_cannot_charge_backing_fee`. These tests exercise the deployed public
+//! Evidence in this file (I/C plus invariant-specific M assertions): `v16_program_post_snapshot_expiry_prerequisite_hits_live_stale_lock`, `v16_probe_post_expiry_trade_cannot_charge_backing_fee`. These tests exercise the deployed public
 //! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
 //! rollback, liveness, or compute outcomes appropriate to the invariant.
 //!
@@ -14,6 +14,166 @@
 //! counterexample. It must remain visible until the fixed engine/program pin makes it green.
 
 use super::*;
+
+#[test]
+fn v16_program_post_snapshot_expiry_prerequisite_hits_live_stale_lock() {
+    const CAPITAL: u128 = 1_000;
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(2, 10_000, 10_000, 10_000);
+    env.configure_auth_mark_for_asset_as_admin(0, 0, 100);
+    env.configure_auth_mark_for_asset_as_admin(1, 0, 100);
+
+    let victim_owner = Keypair::new();
+    let victim_loser_owner = Keypair::new();
+    let attacker_owner = Keypair::new();
+    let attacker_loser_owner = Keypair::new();
+    let keeper_owner = Keypair::new();
+    let victim = env.create_portfolio(&victim_owner);
+    let victim_loser = env.create_portfolio(&victim_loser_owner);
+    let attacker = env.create_portfolio(&attacker_owner);
+    let attacker_loser = env.create_portfolio(&attacker_loser_owner);
+    let keeper = env.create_portfolio(&keeper_owner);
+    for (owner, portfolio) in [
+        (&victim_owner, victim),
+        (&victim_loser_owner, victim_loser),
+        (&attacker_owner, attacker),
+        (&attacker_loser_owner, attacker_loser),
+    ] {
+        env.deposit(owner, portfolio, CAPITAL);
+    }
+    env.trade_asset_with_cu(
+        0,
+        &victim_owner,
+        victim,
+        &victim_loser_owner,
+        victim_loser,
+        POS_SCALE as i128,
+        100,
+        0,
+    );
+    env.trade_asset_with_cu(
+        1,
+        &attacker_owner,
+        attacker,
+        &attacker_loser_owner,
+        attacker_loser,
+        POS_SCALE as i128,
+        100,
+        0,
+    );
+
+    env.svm.warp_to_slot(2);
+    env.push_auth_mark_for_asset_as_admin(0, 2, 140);
+    env.push_auth_mark_for_asset_as_admin(1, 2, 140);
+    env.svm.expire_blockhash();
+    env.send(
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 2,
+            observations: vec![
+                CrankObservationHint {
+                    asset_index: 0,
+                    oracle_accounts: 0,
+                },
+                CrankObservationHint {
+                    asset_index: 1,
+                    oracle_accounts: 0,
+                },
+            ],
+        },
+        vec![
+            AccountMeta::new(env.payer.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(keeper, false),
+        ],
+        &[],
+    )
+    .expect("public keeper publishes both marks");
+    for portfolio in [victim_loser, victim] {
+        env.crank(
+            portfolio,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 2,
+                observations: crank_observations(0),
+            },
+        );
+    }
+    for portfolio in [attacker_loser, attacker] {
+        env.crank(
+            portfolio,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 2,
+                observations: crank_observations(1),
+            },
+        );
+    }
+    env.trade_asset_with_cu(
+        0,
+        &victim_owner,
+        victim,
+        &victim_loser_owner,
+        victim_loser,
+        -(POS_SCALE as i128),
+        140,
+        0,
+    );
+    assert!(env.portfolio_state(victim).pnl.get() > 0);
+    assert!(env.portfolio_state(attacker).pnl.get() > 0);
+
+    let flat = env.market_state().1;
+    let lapse_slot = flat.source_backing_buckets[3]
+        .expiry_slot
+        .max(flat.source_backing_buckets[1].expiry_slot)
+        .checked_add(1)
+        .unwrap();
+    env.svm.warp_to_slot(lapse_slot);
+    env.push_auth_mark_for_asset_as_admin(1, lapse_slot, 130);
+    env.crank(
+        keeper,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: lapse_slot,
+            observations: crank_observations(1),
+        },
+    );
+    assert_eq!(
+        env.market_state().1.source_backing_buckets[3].status,
+        BackingBucketStatusV16::Fresh
+    );
+    assert!(env.market_state().1.source_backing_buckets[3].expiry_slot < lapse_slot);
+
+    let close_slot = lapse_slot + 1;
+    env.svm.warp_to_slot(close_slot);
+    env.push_auth_mark_for_asset_as_admin(1, close_slot, 140);
+    env.crank(
+        keeper,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: close_slot,
+            observations: crank_observations(1),
+        },
+    );
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let attacker_before = env.svm.get_account(&attacker).unwrap();
+    let loser_before = env.svm.get_account(&attacker_loser).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    env.svm.expire_blockhash();
+    let close = env.try_trade_asset_with_cu(
+        1,
+        &attacker_owner,
+        attacker,
+        &attacker_loser_owner,
+        attacker_loser,
+        -(POS_SCALE as i128),
+        140,
+        0,
+    );
+    assert!(
+        close.is_err(),
+        "the PR204 prerequisite unexpectedly progressed"
+    );
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+    assert_eq!(env.svm.get_account(&attacker).unwrap(), attacker_before);
+    assert_eq!(env.svm.get_account(&attacker_loser).unwrap(), loser_before);
+    assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+    assert!(has_active_leg_for_asset(&env.portfolio_state(attacker), 1));
+}
 
 #[test]
 fn v16_probe_post_expiry_trade_cannot_charge_backing_fee() {
