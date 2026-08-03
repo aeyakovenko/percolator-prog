@@ -99,7 +99,7 @@
 325	LoF	BLOCKER	INV-014	independent-discovery	[BLOCKER LoF] Bind maintenance fee policy to market generation
 326	LoF	BLOCKER	INV-014	independent-discovery	[BLOCKER LoF] Bind liquidation fee policy to market generation
 328	LoF	BLOCKER	INV-002	independent-discovery	[BLOCKER LoF] Bind insurance withdrawals to asset generations
-329	LoF	BLOCKER	INV-038	direct-regression	[BLOCKER LoF] Round composite oracle prices once
+329	LoF	BLOCKER	INV-038	independent-discovery	[BLOCKER LoF] Round composite oracle prices once
 330	LoF	BLOCKER	INV-067	missing	[BLOCKER LoF] Recover terminal bankruptcy double charge
 331	LoF	BLOCKER	INV-020	direct-regression	[BLOCKER LoF] Reject temporally skewed composite oracle reports
 332	LoF	BLOCKER	INV-045	independent-discovery	[BLOCKER LoF] Stage authenticated mark targets before CPI fills
@@ -145,5 +145,5 @@
 377	DoS	BLOCKER	INV-027	missing	[BLOCKER DoS] Keep fresh insurance withdrawable after asset restart
 379	DoS	REAL	INV-028	missing	[REAL DoS] Preserve source capacity in combined engine pin (restacked)
 380	LoF	BLOCKER	INV-039	independent-discovery	[BLOCKER LoF] Preserve funding across prospective EWMA updates
-381	LoF	BLOCKER	INV-038	direct-regression	[BLOCKER LoF] Round composite oracle prices once
+381	LoF	BLOCKER	INV-038	independent-discovery	[BLOCKER LoF] Round composite oracle prices once
 393	LoF	REAL	INV-010	missing	[REAL LoF] Order matcher config mutations

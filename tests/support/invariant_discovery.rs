@@ -1,6 +1,9 @@
 use super::v16_svm::{MarketConfig, V16Svm, INITIAL_PRICE, PRIMARY_ACTOR_COUNT, USER_DEPOSIT};
 use percolator::{MarketModeV16, SideModeV16, POS_SCALE};
-use percolator_prog::ix::{BatchTradeCpiLeg, BatchTradeLeg, CrankObservationHint};
+use percolator_prog::{
+    constants::{ORACLE_LEG_FLAG_DIVIDE_LEG2, ORACLE_LEG_FLAG_DIVIDE_LEG3},
+    ix::{BatchTradeCpiLeg, BatchTradeLeg, CrankObservationHint},
+};
 use serde::{Deserialize, Serialize};
 use solana_sdk::{account::Account, transaction::Transaction};
 
@@ -158,6 +161,23 @@ pub enum PendingMarkSource {
 pub enum TradeDrivenMarkMode {
     Ewma,
     HybridAfterHours,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum CompositeRoundingScale {
+    LargeMove,
+    MicroMove,
+}
+
+impl CompositeRoundingScale {
+    pub const ALL: [Self; 2] = [Self::LargeMove, Self::MicroMove];
+
+    fn discriminator(self) -> u8 {
+        match self {
+            Self::LargeMove => 0,
+            Self::MicroMove => 1,
+        }
+    }
 }
 
 impl TradeDrivenMarkMode {
@@ -656,6 +676,29 @@ pub struct BilateralMarkFeeDiscovery {
     pub fee_counterparty_loss: u128,
     pub insurance_gain: u128,
     pub extracted_tokens: u128,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CompositeRoundingDiscovery {
+    pub scale: CompositeRoundingScale,
+    pub exact_mark: u64,
+    pub rounded_target: u64,
+    pub rounded_mark: u64,
+    pub victim_capital_loss: u128,
+    pub oi_reduction_q: u128,
+    pub cranker_reward: u128,
+    pub extracted_tokens: u64,
+}
+
+impl CompositeRoundingDiscovery {
+    pub fn is_violation(&self) -> bool {
+        self.rounded_target != self.exact_mark
+            && self.rounded_mark != self.exact_mark
+            && self.victim_capital_loss != 0
+            && self.oi_reduction_q != 0
+            && self.cranker_reward != 0
+            && self.cranker_reward == u128::from(self.extracted_tokens)
+    }
 }
 
 impl BilateralMarkFeeDiscovery {
@@ -4912,4 +4955,198 @@ pub fn discover_bilateral_mark_fee_violations(
         }
     }
     Ok(discoveries)
+}
+
+fn discover_one_composite_rounding_violation(
+    mut seed: [u8; 32],
+    scale: CompositeRoundingScale,
+) -> Result<CompositeRoundingDiscovery, String> {
+    seed[0] ^= 0x4e;
+    seed[1] ^= scale.discriminator();
+    let (
+        exact_mark,
+        initial_prices,
+        fresh_prices,
+        victim_deposit,
+        counterparty_deposit,
+        cranker_deposit,
+        size_units,
+        catch_up_steps,
+        catch_up_dt,
+        soft_stale_slots,
+    ) = match scale {
+        CompositeRoundingScale::LargeMove => (
+            1_500_000u64,
+            [3i64, 1_000_000, 2],
+            [3i64, 2_000_000, 1],
+            540_000u128,
+            540_000u128,
+            1_000u128,
+            1u128,
+            12usize,
+            20u64,
+            1_000u64,
+        ),
+        CompositeRoundingScale::MicroMove => (
+            1_002_000u64,
+            [501i64, 1_000_000, 500],
+            [501i64, 500_000_000, 1],
+            50_100_000u128,
+            50_100_000u128,
+            1u128,
+            1_000u128,
+            1usize,
+            1u64,
+            3u64,
+        ),
+    };
+    let exact_composite = |prices: [i64; 3]| -> Result<u128, String> {
+        let p0 = u128::try_from(prices[0]).map_err(|_| "negative composite leg 0")?;
+        let p1 = u128::try_from(prices[1]).map_err(|_| "negative composite leg 1")?;
+        let p2 = u128::try_from(prices[2]).map_err(|_| "negative composite leg 2")?;
+        p0.checked_mul(1_000_000_000_000)
+            .and_then(|value| value.checked_div(p1.checked_mul(p2)?))
+            .ok_or_else(|| "exact composite arithmetic failed".to_string())
+    };
+    if exact_composite(initial_prices)? != u128::from(exact_mark)
+        || exact_composite(fresh_prices)? != u128::from(exact_mark)
+    {
+        return Err(format!("{scale:?} fixture changed exact composite value"));
+    }
+
+    let mut env = V16Svm::new(
+        seed,
+        MarketConfig {
+            initial_price: exact_mark,
+            h_max: 6_480_000,
+            min_nonzero_mm_req: 599,
+            min_nonzero_im_req: 600,
+            maintenance_margin_bps: 500,
+            initial_margin_bps: 500,
+            liquidation_fee_bps: 5,
+            liquidation_fee_cap: percolator::MAX_PROTOCOL_FEE_ABS,
+            max_price_move_bps_per_slot: 24,
+            max_accrual_dt_slots: 20,
+            max_abs_funding_e9_per_slot: 1_000,
+            min_funding_lifetime_slots: 10_000_000,
+            actor_deposits: [
+                victim_deposit,
+                counterparty_deposit,
+                cranker_deposit,
+                USER_DEPOSIT,
+                1,
+            ],
+            ..MarketConfig::default()
+        },
+    );
+    env.update_liquidation_fee_policy(5_000)
+        .map_err(|error| format!("{scale:?} configure cranker share: {error}"))?;
+    env.set_clock(1, 100);
+    let feeds = [[0xe1u8; 32], [0xe2u8; 32], [0xe3u8; 32]];
+    let initial_oracles: Vec<_> = initial_prices
+        .iter()
+        .enumerate()
+        .map(|(index, price)| env.set_pyth_price(&feeds[index], *price, -6, 0, 100))
+        .collect();
+    env.configure_hybrid_oracle(
+        0,
+        1,
+        100,
+        ORACLE_LEG_FLAG_DIVIDE_LEG2 | ORACLE_LEG_FLAG_DIVIDE_LEG3,
+        feeds,
+        &initial_oracles,
+        soft_stale_slots,
+        0,
+    )
+    .map_err(|error| format!("{scale:?} configure exact composite: {error}"))?;
+    if env.primary_market_state().0.oracle_target_price_e6 != exact_mark {
+        return Err(format!(
+            "{scale:?} initial target differs from exact composite"
+        ));
+    }
+
+    let size_q = size_units
+        .checked_mul(POS_SCALE)
+        .and_then(|value| i128::try_from(value).ok())
+        .ok_or_else(|| "composite victim size overflow".to_string())?;
+    env.trade_no_cpi(0, 1, 0, size_q, exact_mark, 0)
+        .map_err(|error| format!("{scale:?} open victim exposure: {error}"))?;
+    let victim_capital_before = env.primary_portfolio(0).capital.get();
+    let oi_before = env.primary_market_state().1.assets[0].oi_eff_long_q;
+    let cranker_capital_before = env.primary_portfolio(2).capital.get();
+    let supply_before = env.token_supply_observed();
+
+    let fresh_oracles: Vec<_> = fresh_prices
+        .iter()
+        .enumerate()
+        .map(|(index, price)| env.set_pyth_price(&feeds[index], *price, -6, 0, 101))
+        .collect();
+    let observations = || {
+        vec![CrankObservationHint {
+            asset_index: 0,
+            oracle_accounts: 3,
+        }]
+    };
+    let mut slot = 1u64;
+    for _ in 0..catch_up_steps {
+        slot = slot
+            .checked_add(catch_up_dt)
+            .ok_or_else(|| "composite catch-up slot overflow".to_string())?;
+        env.set_clock(slot, 101);
+        env.crank_with_oracles(2, slot, observations(), &fresh_oracles)
+            .map_err(|error| format!("{scale:?} catch-up at slot {slot}: {error}"))?;
+    }
+    env.crank_with_oracles(0, slot, observations(), &fresh_oracles)
+        .map_err(|error| format!("{scale:?} refresh victim: {error}"))?;
+    let victim_cert = env
+        .primary_portfolio(0)
+        .health_cert
+        .try_to_runtime()
+        .map_err(|error| format!("{scale:?} decode victim certificate: {error:?}"))?;
+    if victim_cert.certified_liq_deficit == 0 {
+        return Err(format!(
+            "{scale:?} rounded composite did not certify liquidation"
+        ));
+    }
+
+    env.crank_with_reward(2, 0, slot, observations(), &fresh_oracles)
+        .map_err(|error| format!("{scale:?} rounded-price liquidation: {error}"))?;
+    let (wrapper_after, group_after) = env.primary_market_state();
+    let victim_capital_loss = victim_capital_before
+        .checked_sub(env.primary_portfolio(0).capital.get())
+        .ok_or_else(|| "composite liquidation increased victim capital".to_string())?;
+    let oi_reduction_q = oi_before
+        .checked_sub(group_after.assets[0].oi_eff_long_q)
+        .ok_or_else(|| "composite liquidation increased victim OI".to_string())?;
+    let cranker_reward = env
+        .primary_portfolio(2)
+        .capital
+        .get()
+        .checked_sub(cranker_capital_before)
+        .ok_or_else(|| "composite liquidation reduced cranker capital".to_string())?;
+    env.withdraw_primary(2, cranker_reward)
+        .map_err(|error| format!("{scale:?} withdraw liquidation reward: {error}"))?;
+    let extracted_tokens = env.token_amount(env.actors[2].destination_token);
+    if env.token_supply_observed() != supply_before {
+        return Err("composite rounding world changed SPL supply".into());
+    }
+    Ok(CompositeRoundingDiscovery {
+        scale,
+        exact_mark,
+        rounded_target: wrapper_after.oracle_target_price_e6,
+        rounded_mark: group_after.assets[0].effective_price,
+        victim_capital_loss,
+        oi_reduction_q,
+        cranker_reward,
+        extracted_tokens,
+    })
+}
+
+pub fn discover_composite_rounding_violations(
+    seed: [u8; 32],
+) -> Result<Vec<CompositeRoundingDiscovery>, String> {
+    CompositeRoundingScale::ALL
+        .into_iter()
+        .map(|scale| discover_one_composite_rounding_violation(seed, scale))
+        .collect()
 }

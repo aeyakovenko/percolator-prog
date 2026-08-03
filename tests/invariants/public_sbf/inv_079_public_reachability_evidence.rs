@@ -174,10 +174,10 @@ fn v16_open_security_finding_benchmark_is_complete_and_non_overclaiming() {
     }
 
     assert_eq!(rows, 145, "refresh the dated GitHub finding snapshot");
-    assert_eq!(direct, 12, "direct adapter inventory changed");
+    assert_eq!(direct, 10, "direct adapter inventory changed");
     assert_eq!(missing, 62, "explicit finding gaps changed");
     assert_eq!(
-        independent, 71,
+        independent, 73,
         "promote only genuinely finding-agnostic invariant discoveries"
     );
 
@@ -189,6 +189,7 @@ fn v16_open_security_finding_benchmark_is_complete_and_non_overclaiming() {
         include_str!("../stateful/inv_008_intent_uniqueness_and_bounded_replay.rs"),
         include_str!("../stateful/inv_014_delayed_policy_and_policy_epoch_safety.rs"),
         include_str!("../stateful/inv_036_fee_destination_and_policy_version_integrity.rs"),
+        include_str!("../stateful/inv_038_rounding_and_ratio_conservation.rs"),
         include_str!("../stateful/inv_039_pending_loss_obligation_durability.rs"),
         include_str!("../stateful/inv_045_no_free_mark_movement.rs"),
     ];
@@ -237,6 +238,7 @@ fn v16_open_security_finding_benchmark_is_complete_and_non_overclaiming() {
                     | "mark-movement-reserve-must-remain-encumbered"
                     | "mark-movement-cost-must-cover-liquidation-extraction"
                     | "mark-movement-fees-must-be-bilaterally-supported"
+                    | "composite-price-is-rounded-once-after-exact-composition"
             ),
             "unknown independent oracle: {}",
             fields[3]
