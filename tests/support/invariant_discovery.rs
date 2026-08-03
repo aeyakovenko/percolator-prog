@@ -734,6 +734,23 @@ pub struct TerminalDustDiscovery {
     pub dust_supply: u128,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CrossDomainInsuranceDiscovery {
+    pub unrelated_insurance_spent: u128,
+    pub coalition_payout: u128,
+    pub coalition_profit: u128,
+    pub progress_calls: u16,
+}
+
+impl CrossDomainInsuranceDiscovery {
+    pub fn is_violation(&self) -> bool {
+        self.unrelated_insurance_spent != 0
+            && self.coalition_profit != 0
+            && self.progress_calls != 0
+            && self.coalition_payout != 0
+    }
+}
+
 impl TerminalDustDiscovery {
     pub fn is_violation(&self) -> bool {
         self.attacker_loss == 1
@@ -5844,4 +5861,125 @@ pub fn discover_terminal_dust_violations(
         .into_iter()
         .map(|route| discover_one_terminal_dust_violation(seed, route))
         .collect()
+}
+
+pub fn discover_cross_domain_insurance_violation(
+    mut seed: [u8; 32],
+) -> Result<CrossDomainInsuranceDiscovery, String> {
+    const MARK: u64 = 100;
+    const COALITION_DEPOSIT: u128 = 20_200;
+    const INSURANCE_TOP_UP: u128 = 100_000;
+
+    seed[0] ^= 0x9d;
+    let mut env = V16Svm::new(
+        seed,
+        MarketConfig {
+            initial_price: MARK,
+            max_price_move_bps_per_slot: 10_000,
+            max_accrual_dt_slots: 1,
+            min_funding_lifetime_slots: 1,
+            maintenance_fee_per_slot: 200,
+            actor_deposits: [200, 10_000, 10_000, 1, 1],
+            actor_token_balances: [1_000, 20_000, 20_000, 10, 10],
+            ..MarketConfig::default()
+        },
+    );
+    let supply_before = env.token_supply_observed();
+    env.top_up_insurance_domain(1, INSURANCE_TOP_UP)
+        .map_err(|error| format!("fund unrelated insurance domain: {error}"))?;
+    env.trade_no_cpi(0, 2, 0, POS_SCALE as i128, MARK, 0)
+        .map_err(|error| format!("open surviving asset-0 leg: {error}"))?;
+    env.trade_no_cpi(0, 1, 1, -(POS_SCALE as i128), MARK, 0)
+        .map_err(|error| format!("open loss-bearing asset-1 leg: {error}"))?;
+
+    env.warp_to_slot(2);
+    for asset_index in [0u16, 1] {
+        env.crank(
+            3,
+            2,
+            vec![CrankObservationHint {
+                asset_index,
+                oracle_accounts: 0,
+            }],
+        )
+        .map_err(|error| format!("accrue asset {asset_index}: {error}"))?;
+    }
+    env.sync_maintenance_fee(0, 2)
+        .map_err(|error| format!("exhaust debtor capital: {error}"))?;
+    if env.primary_portfolio(0).capital.get() != 0 {
+        return Err("maintenance setup did not exhaust debtor capital".into());
+    }
+
+    let mut mark = MARK;
+    for slot in 3..=12 {
+        mark = mark
+            .checked_mul(2)
+            .ok_or_else(|| "cross-domain adverse mark overflow".to_string())?;
+        env.warp_to_slot(slot);
+        env.push_auth_mark(1, slot, mark)
+            .map_err(|error| format!("publish asset-1 mark at slot {slot}: {error}"))?;
+        env.crank(
+            3,
+            slot,
+            vec![CrankObservationHint {
+                asset_index: 1,
+                oracle_accounts: 0,
+            }],
+        )
+        .map_err(|error| format!("advance asset-1 mark at slot {slot}: {error}"))?;
+    }
+    env.rebalance_reduce(0, 1, POS_SCALE)
+        .map_err(|error| format!("flatten loss-bearing asset-1 leg: {error}"))?;
+    if env.primary_portfolio(0).pnl.get() >= 0
+        || env.primary_market_state().1.assets[0].stored_pos_count_long == 0
+    {
+        return Err(
+            "cross-domain setup did not retain debt plus surviving asset-0 exposure".into(),
+        );
+    }
+
+    let spent_before = env.primary_market_state().1.insurance_domain_spent[1];
+    let mut progress_calls = 0u16;
+    for _ in 0..512 {
+        let account = env.primary_portfolio(0);
+        if account.pnl.get() >= 0
+            && env.primary_market_state().1.assets[0].stored_pos_count_long == 0
+        {
+            break;
+        }
+        match env.crank(0, 12, Vec::new()) {
+            Ok(_) => {
+                progress_calls = progress_calls
+                    .checked_add(1)
+                    .ok_or_else(|| "cross-domain progress count overflow".to_string())?;
+            }
+            Err(error) if error.contains("Custom(23)") => break,
+            Err(error) => return Err(format!("cross-domain liquidation failed: {error}")),
+        }
+    }
+    let unrelated_insurance_spent = env.primary_market_state().1.insurance_domain_spent[1]
+        .checked_sub(spent_before)
+        .ok_or_else(|| "unrelated insurance spent counter decreased".to_string())?;
+
+    env.resolve_market()
+        .map_err(|error| format!("resolve cross-domain world: {error}"))?;
+    let loser_payout = drain_resolved_discovery_actor(&mut env, 0)?;
+    let counterparty_payout = drain_resolved_discovery_actor(&mut env, 2)?;
+    let winner_payout = drain_resolved_discovery_actor(&mut env, 1)?;
+    let coalition_payout = loser_payout
+        .checked_add(counterparty_payout)
+        .and_then(|value| value.checked_add(winner_payout))
+        .ok_or_else(|| "cross-domain coalition payout overflow".to_string())?;
+    let coalition_profit = coalition_payout
+        .checked_sub(COALITION_DEPOSIT)
+        .ok_or_else(|| "cross-domain coalition did not recover deposits".to_string())?;
+    if env.token_supply_observed() != supply_before {
+        return Err("cross-domain insurance world changed SPL supply".into());
+    }
+    Ok(CrossDomainInsuranceDiscovery {
+        unrelated_insurance_spent,
+        coalition_payout,
+        coalition_profit,
+        progress_calls,
+    })
 }
