@@ -92,6 +92,7 @@ INV-053	full-refresh/omitted-later-leg	v16_program_full_refresh_equivalence_disc
 INV-061	resolved-adl/close-order	v16_program_resolved_adl_close_order_matrix_discovers_funded_exit_lock	funded-resolved-adl-winner-has-bounded-public-exit	216
 INV-073	partial-adl/exact-effective-reduction	v16_program_partial_adl_effective_exit_matrix_discovers_zero_oi_residue_lock	zero-effective-oi-funded-residue-must-enter-bounded-cleanup	268
 INV-073	crossed-adl/exact-effective-trade	v16_program_crossed_adl_effective_exit_matrix_discovers_zero_oi_residue_lock	zero-effective-oi-funded-residue-must-enter-bounded-cleanup	266
+INV-073	partial-adl/recovery-force-close	v16_program_recovery_residue_matrix_discovers_abandoned_owner_lock	partial-adl-recovery-residue-must-have-permissionless-cleanup	203
 INV-073	expired-partial-close/unrelated-funded-account	v16_program_expired_partial_close_matrix_discovers_global_terminal_lock	account-local-expired-close-cannot-create-global-funded-recovery-sink	368
 INV-073	recovery-mode/explicit-terminal-routes	v16_program_expired_partial_close_matrix_discovers_global_terminal_lock	recovery-mode-must-have-a-public-terminal-continuation	252
 INV-071	micro-price/eager-crank-schedule	v16_program_micro_price_schedule_matrix_discovers_clock_consuming_noop_cranks	successful-crank-cannot-consume-zero-delta-price-time	246
