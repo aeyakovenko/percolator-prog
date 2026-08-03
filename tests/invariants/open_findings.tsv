@@ -6,7 +6,7 @@
 202	DoS	REAL	INV-073	missing	[REAL DoS] Keep partially ADL-reduced users exit-live
 203	DoS	BLOCKER	INV-073	missing	[BLOCKER DoS] Force-close abandoned ADL Recovery residues
 204	DoS	REAL	INV-063	missing	[REAL DoS] Unstick Live auto-crank after source-backing expiry
-212	DoS	BLOCKER	INV-077	missing	[BLOCKER DoS] Prove bounded max-source account progress
+212	DoS	BLOCKER	INV-077	independent-discovery	[BLOCKER DoS] Prove bounded max-source account progress
 213	DoS	REAL	INV-028	independent-discovery	[REAL DoS] Unwind live source liens after mark reversal
 214	DoS	BLOCKER	INV-028	missing	[BLOCKER DoS] Reconcile expired source liens
 216	DoS	BLOCKER	INV-061	independent-discovery	[BLOCKER DoS] Allow ADL winners to close after resolution

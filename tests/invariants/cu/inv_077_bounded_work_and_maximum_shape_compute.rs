@@ -2,7 +2,7 @@
 //!
 //! Normative obligation: Required exits and recovery paths remain below the CU ceiling at supported maximum shape.
 //!
-//! Evidence in this file (I/C plus invariant-specific M assertions): `v16_program_max_source_conversion_amount_matrix_discovers_claim_lock`, `v16_program_max_shape_resolved_close_order_matrix_discovers_terminal_cu_lock`, `v16_bpf_public_full_14_leg_composite_oracle_liquidation_progress_is_bounded`, `v16_bpf_public_full_14_leg_three_feed_oracle_refresh_is_bounded`, `v16_bpf_public_14_leg_28_source_domain_exit_is_under_tx_limit`, `v16_bpf_10m_market_high_asset_resolved_exit_stays_bounded`, `v16_bpf_10m_market_rebalance_reduce_high_asset_stays_bounded`, `v16_bpf_permissionless_crank_16_observation_decode_cap_is_under_tx_limit`, `v16_bpf_public_stale_7_leg_tradenocpi_boundary_is_bounded`, `v16_bpf_10m_market_resolution_stays_bounded`, `v16_bpf_10m_flat_user_withdraw_and_close_stay_bounded`, `v16_attack_public_max_source_force_close_abandoned_asset_stays_bounded`, `v16_attack_max_source_owner_rebalance_reduce_stays_bounded`, `v16_attack_max_source_force_close_abandoned_asset_stays_bounded`, `v16_attack_public_14_leg_32_source_recovery_forfeit_stays_bounded`, `v16_attack_max_source_maintenance_sync_stays_bounded`, `v16_attack_public_14_leg_32_source_domain_exit_stays_bounded`, `v16_attack_public_max_source_flat_principal_withdraw_stays_bounded`, `v16_attack_public_14_leg_32_source_collateral_deposit_stays_bounded`. These tests exercise the deployed public
+//! Evidence in this file (I/C plus invariant-specific M assertions): `v16_program_max_source_conversion_amount_matrix_discovers_claim_lock`, `v16_program_max_shape_resolved_close_order_matrix_discovers_terminal_cu_lock`, `v16_program_max_source_liquidation_asset_matrix_discovers_funded_cu_lock`, `v16_bpf_public_full_14_leg_composite_oracle_liquidation_progress_is_bounded`, `v16_bpf_public_full_14_leg_three_feed_oracle_refresh_is_bounded`, `v16_bpf_public_14_leg_28_source_domain_exit_is_under_tx_limit`, `v16_bpf_10m_market_high_asset_resolved_exit_stays_bounded`, `v16_bpf_10m_market_rebalance_reduce_high_asset_stays_bounded`, `v16_bpf_permissionless_crank_16_observation_decode_cap_is_under_tx_limit`, `v16_bpf_public_stale_7_leg_tradenocpi_boundary_is_bounded`, `v16_bpf_10m_market_resolution_stays_bounded`, `v16_bpf_10m_flat_user_withdraw_and_close_stay_bounded`, `v16_attack_public_max_source_force_close_abandoned_asset_stays_bounded`, `v16_attack_max_source_owner_rebalance_reduce_stays_bounded`, `v16_attack_max_source_force_close_abandoned_asset_stays_bounded`, `v16_attack_public_14_leg_32_source_recovery_forfeit_stays_bounded`, `v16_attack_max_source_maintenance_sync_stays_bounded`, `v16_attack_public_14_leg_32_source_domain_exit_stays_bounded`, `v16_attack_public_max_source_flat_principal_withdraw_stays_bounded`, `v16_attack_public_14_leg_32_source_collateral_deposit_stays_bounded`. These tests exercise the deployed public
 //! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
 //! rollback, liveness, or compute outcomes appropriate to the invariant.
 //!
@@ -272,6 +272,289 @@ fn run_max_shape_resolved_close_order(reverse: bool) {
 fn v16_program_max_shape_resolved_close_order_matrix_discovers_terminal_cu_lock() {
     for reverse in [false, true] {
         run_max_shape_resolved_close_order(reverse);
+    }
+}
+
+fn run_max_source_liquidation_asset(adverse_asset: u16) {
+    const ASSETS: u16 = 14;
+    const OPEN_PRICE: u64 = 100;
+    const PROFIT_PRICE: u64 = 101;
+    const ADVERSE_PRICE: u64 = 105;
+    const BACKING: u128 = 10_000_000;
+
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(ASSETS, 1_000, 1_000, 500);
+    env.svm.warp_to_slot(1);
+    for asset_index in 0..ASSETS {
+        env.configure_auth_mark_for_asset_as_admin(asset_index, 1, OPEN_PRICE);
+    }
+    let owner = Keypair::new();
+    let counterparty_owner = Keypair::new();
+    let keeper_owner = Keypair::new();
+    let account = env.create_portfolio(&owner);
+    let counterparty = env.create_portfolio(&counterparty_owner);
+    let keeper = env.create_portfolio(&keeper_owner);
+    env.deposit(&owner, account, 1_550);
+    env.deposit(&counterparty_owner, counterparty, 1_000_000_000);
+
+    let matcher_program = Pubkey::new_unique();
+    let matcher_bytes = std::fs::read(auth_matcher_program_path()).expect("read auth matcher SBF");
+    env.svm.add_program(matcher_program, &matcher_bytes);
+    let (matcher_context, matcher_delegate, _) =
+        env.init_auth_matcher_context(matcher_program, &counterparty_owner, counterparty);
+
+    env.send(
+        ProgInstruction::BatchTradeNoCpi {
+            legs: (0..ASSETS)
+                .map(|asset_index| BatchTradeLeg {
+                    asset_index,
+                    size_q: ((if asset_index == adverse_asset { 140 } else { 1 }) * POS_SCALE)
+                        as i128,
+                    exec_price: OPEN_PRICE,
+                    fee_bps: 0,
+                })
+                .collect(),
+        },
+        vec![
+            AccountMeta::new(owner.pubkey(), true),
+            AccountMeta::new(counterparty_owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(account, false),
+            AccountMeta::new(counterparty, false),
+        ],
+        &[&owner, &counterparty_owner],
+    )
+    .expect("open public max-source liquidation portfolio");
+    env.update_backing_fee_policy_with_cu(0, 1, 0);
+    for domain in 0..(ASSETS * 2) {
+        env.top_up_backing_bucket(domain, BACKING, 100);
+    }
+
+    env.svm.warp_to_slot(2);
+    for asset_index in 0..ASSETS {
+        env.push_auth_mark_for_asset_as_admin(asset_index, 2, PROFIT_PRICE);
+        env.crank(
+            account,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 2,
+                observations: crank_observations(asset_index),
+            },
+        );
+        env.crank(
+            counterparty,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 2,
+                observations: vec![],
+            },
+        );
+    }
+    for portfolio in [account, counterparty] {
+        env.crank(
+            portfolio,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 2,
+                observations: vec![],
+            },
+        );
+    }
+    for asset_index in 0..ASSETS {
+        let units = if asset_index == adverse_asset { 140 } else { 1 };
+        env.trade_asset_with_cu(
+            asset_index,
+            &owner,
+            account,
+            &counterparty_owner,
+            counterparty,
+            -((2 * units * POS_SCALE) as i128),
+            PROFIT_PRICE,
+            0,
+        );
+    }
+
+    env.svm.warp_to_slot(3);
+    for asset_index in 0..ASSETS {
+        env.push_auth_mark_for_asset_as_admin(asset_index, 3, OPEN_PRICE);
+        env.crank(
+            account,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 3,
+                observations: crank_observations(asset_index),
+            },
+        );
+        env.crank(
+            counterparty,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 3,
+                observations: vec![],
+            },
+        );
+    }
+    for portfolio in [account, counterparty] {
+        env.crank(
+            portfolio,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 3,
+                observations: vec![],
+            },
+        );
+    }
+    env.crank(
+        account,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 3,
+            observations: vec![],
+        },
+    );
+    let current = env.portfolio_state(account);
+    assert_eq!(
+        current
+            .source_domains
+            .iter()
+            .filter(|source| source.is_occupied())
+            .count(),
+        (ASSETS * 2) as usize
+    );
+
+    env.svm.warp_to_slot(4);
+    env.push_auth_mark_for_asset_as_admin(adverse_asset, 4, ADVERSE_PRICE);
+    env.crank(
+        keeper,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 4,
+            observations: crank_observations(adverse_asset),
+        },
+    );
+    let trapped = env.portfolio_state(account);
+    let exposure_before: u128 = trapped
+        .legs
+        .iter()
+        .filter_map(|leg| leg.try_to_runtime().ok())
+        .filter(|leg| leg.active)
+        .map(|leg| leg.basis_pos_q.unsigned_abs())
+        .sum();
+    assert_ne!(trapped.capital.get(), 0);
+    let vault_before = env.token_amount(env.vault);
+
+    macro_rules! assert_blocked {
+        ($label:literal, $attempt:expr) => {{
+            env.svm.expire_blockhash();
+            let market_before = env.svm.get_account(&env.market).unwrap();
+            let account_before = env.svm.get_account(&account).unwrap();
+            let counterparty_before = env.svm.get_account(&counterparty).unwrap();
+            let result = $attempt;
+            assert!(result.is_err(), "{} unexpectedly supplied progress", $label);
+            if $label == "max-source liquidation crank" {
+                let error = format!("{:?}", result.as_ref().unwrap_err());
+                assert!(
+                    (error.contains("ComputationalBudgetExceeded")
+                        || error.contains("ProgramFailedToComplete"))
+                        && error.contains("exceeded CUs meter"),
+                    "max-source crank failed for a non-CU reason: {error}"
+                );
+            }
+            assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+            assert_eq!(env.svm.get_account(&account).unwrap(), account_before);
+            assert_eq!(
+                env.svm.get_account(&counterparty).unwrap(),
+                counterparty_before
+            );
+            assert_eq!(env.token_amount(env.vault), vault_before);
+        }};
+    }
+
+    assert_blocked!(
+        "max-source liquidation crank",
+        env.send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 4,
+                observations: vec![],
+            },
+            vec![
+                AccountMeta::new(env.payer.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(account, false),
+            ],
+            &[],
+        )
+    );
+    assert_blocked!(
+        "max-source unilateral reduction",
+        env.send(
+            ProgInstruction::RebalanceReduce {
+                asset_index: adverse_asset,
+                reduce_q: POS_SCALE,
+            },
+            vec![
+                AccountMeta::new(owner.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(account, false),
+            ],
+            &[&owner],
+        )
+    );
+    assert_blocked!(
+        "max-source signed trade reduction",
+        env.try_trade_asset_with_cu(
+            adverse_asset,
+            &owner,
+            account,
+            &counterparty_owner,
+            counterparty,
+            POS_SCALE as i128,
+            ADVERSE_PRICE,
+            0,
+        )
+    );
+    assert_blocked!(
+        "max-source signed batch reduction",
+        env.send(
+            ProgInstruction::BatchTradeNoCpi {
+                legs: vec![BatchTradeLeg {
+                    asset_index: adverse_asset,
+                    size_q: POS_SCALE as i128,
+                    exec_price: ADVERSE_PRICE,
+                    fee_bps: 0,
+                }],
+            },
+            vec![
+                AccountMeta::new(owner.pubkey(), true),
+                AccountMeta::new(counterparty_owner.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(account, false),
+                AccountMeta::new(counterparty, false),
+            ],
+            &[&owner, &counterparty_owner],
+        )
+    );
+    assert_blocked!(
+        "max-source authenticated CPI reduction",
+        env.try_trade_cpi_with_cu_on_asset(
+            &owner,
+            account,
+            &counterparty_owner,
+            counterparty,
+            matcher_program,
+            matcher_context,
+            matcher_delegate,
+            adverse_asset,
+            POS_SCALE as i128,
+            0,
+        )
+    );
+    let after = env.portfolio_state(account);
+    let exposure_after: u128 = after
+        .legs
+        .iter()
+        .filter_map(|leg| leg.try_to_runtime().ok())
+        .filter(|leg| leg.active)
+        .map(|leg| leg.basis_pos_q.unsigned_abs())
+        .sum();
+    assert_eq!(exposure_after, exposure_before);
+}
+
+#[test]
+fn v16_program_max_source_liquidation_asset_matrix_discovers_funded_cu_lock() {
+    for adverse_asset in [0, 13] {
+        run_max_source_liquidation_asset(adverse_asset);
     }
 }
 
