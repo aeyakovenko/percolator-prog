@@ -175,9 +175,9 @@ fn v16_open_security_finding_benchmark_is_complete_and_non_overclaiming() {
 
     assert_eq!(rows, 143, "refresh the dated GitHub finding snapshot");
     assert_eq!(direct, 0, "direct adapter inventory changed");
-    assert_eq!(missing, 51, "explicit finding gaps changed");
+    assert_eq!(missing, 50, "explicit finding gaps changed");
     assert_eq!(
-        independent, 92,
+        independent, 93,
         "promote only genuinely finding-agnostic invariant discoveries"
     );
 
@@ -199,6 +199,7 @@ fn v16_open_security_finding_benchmark_is_complete_and_non_overclaiming() {
         include_str!("../stateful/inv_039_pending_loss_obligation_durability.rs"),
         include_str!("../stateful/inv_045_no_free_mark_movement.rs"),
         include_str!("../stateful/inv_053_full_health_recertification_equivalence.rs"),
+        include_str!("../stateful/inv_061_deterministic_bounded_liquidation.rs"),
         include_str!("../stateful/inv_063_backing_expiry_normalization.rs"),
         include_str!(
             "../stateful/inv_067_terminal_payout_completeness_and_exact_once_settlement.rs"
@@ -265,6 +266,7 @@ fn v16_open_security_finding_benchmark_is_complete_and_non_overclaiming() {
                     | "funded-role-principal-cannot-be-redirected-without-incumbent-consent"
                     | "committed-funding-must-accrue-before-lifecycle-terminalization"
                     | "terminal-snapshot-must-use-current-authenticated-oracle-state"
+                    | "funded-resolved-adl-winner-has-bounded-public-exit"
             ),
             "unknown independent oracle: {}",
             fields[3]

@@ -2,7 +2,7 @@ use super::v16_svm::{
     MarketConfig, V16Svm, EXIT_MAKER_DEPOSIT, EXIT_MAKER_INDEX, INITIAL_PRICE, PRIMARY_ACTOR_COUNT,
     USER_DEPOSIT,
 };
-use percolator::{BackingBucketStatusV16, MarketModeV16, SideModeV16, POS_SCALE};
+use percolator::{BackingBucketStatusV16, MarketModeV16, SideModeV16, ADL_ONE, POS_SCALE};
 use percolator_prog::{
     constants::{ORACLE_LEG_FLAG_DIVIDE_LEG2, ORACLE_LEG_FLAG_DIVIDE_LEG3},
     ix::{BatchTradeCpiLeg, BatchTradeLeg, CrankObservationHint},
@@ -224,6 +224,23 @@ pub enum PendingMarkSource {
 pub enum TradeDrivenMarkMode {
     Ewma,
     HybridAfterHours,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ResolvedAdlCloseOrder {
+    WinnerThenLoser,
+    LoserThenWinner,
+}
+
+impl ResolvedAdlCloseOrder {
+    pub const ALL: [Self; 2] = [Self::WinnerThenLoser, Self::LoserThenWinner];
+
+    fn discriminator(self) -> u8 {
+        match self {
+            Self::WinnerThenLoser => 0,
+            Self::LoserThenWinner => 1,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -644,6 +661,38 @@ pub struct FundedRoleDiscovery {
     pub provider_source_debit: u128,
     pub takeover_landed: bool,
     pub replacement_gain: u128,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ResolvedAdlCloseDiscovery {
+    pub order: ResolvedAdlCloseOrder,
+    pub winner_basis_q: u128,
+    pub effective_long_oi_q: u128,
+    pub winner_funded_value: u128,
+    pub canonical_vault_liquidity: u128,
+    pub loser_close_landed: bool,
+    pub winner_close_failures: u8,
+    pub all_counter_underflow: bool,
+    pub exact_rollback: bool,
+    pub withdraw_rejected: bool,
+    pub portfolio_close_rejected: bool,
+    pub winner_external_payout: u64,
+}
+
+impl ResolvedAdlCloseDiscovery {
+    pub fn is_violation(&self) -> bool {
+        self.winner_basis_q > self.effective_long_oi_q
+            && self.effective_long_oi_q != 0
+            && self.winner_funded_value != 0
+            && self.canonical_vault_liquidity >= self.winner_funded_value
+            && self.loser_close_landed
+            && self.winner_close_failures >= 8
+            && self.all_counter_underflow
+            && self.exact_rollback
+            && self.withdraw_rejected
+            && self.portfolio_close_rejected
+            && self.winner_external_payout == 0
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -7233,6 +7282,150 @@ pub fn discover_cross_domain_backing_violation(
         winner_capital_gain,
         extracted_tokens,
     })
+}
+
+fn discover_one_resolved_adl_close_lock(
+    mut seed: [u8; 32],
+    order: ResolvedAdlCloseOrder,
+) -> Result<ResolvedAdlCloseDiscovery, String> {
+    const WINNER: usize = 0;
+    const LOSER: usize = 1;
+    const OPEN_MARK: u64 = 100;
+    const BANKRUPTCY_MARK: u64 = 500;
+    const WINNER_DEPOSIT: u128 = 1_000;
+    const LOSER_DEPOSIT: u128 = 900;
+    const TRADE_SIZE_Q: i128 = (2 * POS_SCALE) as i128;
+    const ATTEMPTS: u8 = 8;
+
+    seed[0] ^= 0x61;
+    seed[1] ^= order.discriminator();
+    let mut env = V16Svm::new(
+        seed,
+        MarketConfig {
+            initial_price: OPEN_MARK,
+            maintenance_margin_bps: 10_000,
+            initial_margin_bps: 10_000,
+            max_price_move_bps_per_slot: 10_000,
+            max_accrual_dt_slots: 1,
+            min_funding_lifetime_slots: 1,
+            actor_deposits: [WINNER_DEPOSIT, LOSER_DEPOSIT, 0, 0, 0],
+            ..MarketConfig::default()
+        },
+    );
+    let supply_before = env.token_supply_observed();
+    env.trade_no_cpi(WINNER, LOSER, 0, TRADE_SIZE_Q, OPEN_MARK, 0)
+        .map_err(|error| format!("open resolved-ADL pair: {error}"))?;
+    env.warp_to_slot(6);
+    env.push_auth_mark(0, 6, BANKRUPTCY_MARK)
+        .map_err(|error| format!("publish resolved-ADL bankruptcy mark: {error}"))?;
+    let observation = vec![CrankObservationHint {
+        asset_index: 0,
+        oracle_accounts: 0,
+    }];
+    let mut setup_progress = 0u8;
+    for actor in [LOSER, WINNER, LOSER, LOSER] {
+        if env.crank(actor, 6, observation.clone()).is_ok() {
+            setup_progress = setup_progress.saturating_add(1);
+        }
+    }
+    if setup_progress == 0 {
+        return Err("resolved-ADL setup made no public crank progress".into());
+    }
+
+    let (_, after_adl) = env.primary_market_state();
+    let winner_before_resolve = env.primary_portfolio(WINNER);
+    let winner_leg = winner_before_resolve
+        .legs
+        .iter()
+        .filter_map(|leg| leg.try_to_runtime().ok())
+        .find(|leg| leg.active && leg.asset_index == 0)
+        .ok_or_else(|| "resolved-ADL winner has no active leg".to_string())?;
+    let winner_basis_q = winner_leg.basis_pos_q.unsigned_abs();
+    let effective_long_oi_q = after_adl.assets[0].oi_eff_long_q;
+    if after_adl.assets[0].a_long >= ADL_ONE
+        || winner_basis_q <= effective_long_oi_q
+        || effective_long_oi_q == 0
+    {
+        return Err(format!(
+            "resolved-ADL setup did not create a scaled winner: a_long={}, basis={winner_basis_q}, oi={effective_long_oi_q}",
+            after_adl.assets[0].a_long
+        ));
+    }
+
+    env.resolve_market()
+        .map_err(|error| format!("resolve ADL market: {error}"))?;
+    let winner_at_resolve = env.primary_portfolio(WINNER);
+    let winner_funded_value = winner_at_resolve
+        .capital
+        .get()
+        .checked_add(winner_at_resolve.pnl.get().max(0) as u128)
+        .ok_or_else(|| "resolved-ADL winner value overflow".to_string())?;
+    let winner_destination = env.actors[WINNER].destination_token;
+    let winner_destination_before = env.token_amount(winner_destination);
+
+    let mut winner_close_failures = 0u8;
+    let mut all_counter_underflow = true;
+    let mut exact_rollback = true;
+    let mut loser_close_landed = false;
+    if order == ResolvedAdlCloseOrder::LoserThenWinner {
+        loser_close_landed = env.close_resolved_primary_signed(LOSER).is_ok();
+    }
+    for attempt in 0..ATTEMPTS {
+        let before = fingerprint(&env);
+        match env.close_resolved_primary_signed(WINNER) {
+            Ok(_) => break,
+            Err(error) => {
+                winner_close_failures = winner_close_failures.saturating_add(1);
+                all_counter_underflow &= error.contains("Custom(25)");
+                exact_rollback &= fingerprint(&env) == before;
+            }
+        }
+        if attempt == 0 && order == ResolvedAdlCloseOrder::WinnerThenLoser {
+            loser_close_landed = env.close_resolved_primary_signed(LOSER).is_ok();
+        }
+    }
+    let canonical_vault_liquidity = u128::from(env.token_amount(env.vault));
+    if env.primary_market_state().1.vault != canonical_vault_liquidity {
+        return Err("resolved-ADL internal vault diverged from SPL custody".into());
+    }
+
+    let before_withdraw = fingerprint(&env);
+    let withdraw_rejected = env.withdraw_primary(WINNER, 1).is_err();
+    exact_rollback &= fingerprint(&env) == before_withdraw;
+    let before_portfolio_close = fingerprint(&env);
+    let portfolio_close_rejected = env.close_primary_portfolio(WINNER).is_err();
+    exact_rollback &= fingerprint(&env) == before_portfolio_close;
+    if env.token_supply_observed() != supply_before {
+        return Err("resolved-ADL close attempts changed SPL supply".into());
+    }
+    let winner_external_payout = env
+        .token_amount(winner_destination)
+        .checked_sub(winner_destination_before)
+        .ok_or_else(|| "resolved-ADL winner destination decreased".to_string())?;
+
+    Ok(ResolvedAdlCloseDiscovery {
+        order,
+        winner_basis_q,
+        effective_long_oi_q,
+        winner_funded_value,
+        canonical_vault_liquidity,
+        loser_close_landed,
+        winner_close_failures,
+        all_counter_underflow,
+        exact_rollback,
+        withdraw_rejected,
+        portfolio_close_rejected,
+        winner_external_payout,
+    })
+}
+
+pub fn discover_resolved_adl_close_locks(
+    seed: [u8; 32],
+) -> Result<Vec<ResolvedAdlCloseDiscovery>, String> {
+    ResolvedAdlCloseOrder::ALL
+        .into_iter()
+        .map(|order| discover_one_resolved_adl_close_lock(seed, order))
+        .collect()
 }
 
 fn discovery_source_claim(

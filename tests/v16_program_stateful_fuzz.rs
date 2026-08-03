@@ -88,14 +88,15 @@ use support::invariant_discovery::{
     discover_pending_mark_fee_ordering, discover_pending_mark_inheritance_violations,
     discover_pending_target_override_violations, discover_portfolio_incarnation_replays,
     discover_position_episode_replays, discover_prospective_accrual_violations,
-    discover_shutdown_commit_ordering, discover_source_fee_consent_violations,
-    discover_superseded_intents, discover_terminal_commit_ordering,
-    discover_terminal_dust_violations, discover_terminal_generation_replay,
-    discover_trade_driven_liquidation_violations, AccrualOrderingKind, AssetIntentKind,
-    AuthorityIntentKind, BackingExpiryCase, BackingProviderConsentOrder, CompositeRoundingScale,
-    DiscoveryTradeRoute, FeeConsentKind, FundedRoleKind, MarketIntentKind, PendingMarkSource,
-    PortfolioIntentKind, PositionEpisodeKind, ProspectiveAccrualRoute, RetryIntentKind,
-    SourceFeeConsentKind, SupersededIntentKind, TerminalGenerationKind, TradeDrivenMarkMode,
+    discover_resolved_adl_close_locks, discover_shutdown_commit_ordering,
+    discover_source_fee_consent_violations, discover_superseded_intents,
+    discover_terminal_commit_ordering, discover_terminal_dust_violations,
+    discover_terminal_generation_replay, discover_trade_driven_liquidation_violations,
+    AccrualOrderingKind, AssetIntentKind, AuthorityIntentKind, BackingExpiryCase,
+    BackingProviderConsentOrder, CompositeRoundingScale, DiscoveryTradeRoute, FeeConsentKind,
+    FundedRoleKind, MarketIntentKind, PendingMarkSource, PortfolioIntentKind, PositionEpisodeKind,
+    ProspectiveAccrualRoute, ResolvedAdlCloseOrder, RetryIntentKind, SourceFeeConsentKind,
+    SupersededIntentKind, TerminalGenerationKind, TradeDrivenMarkMode,
 };
 
 fn env_usize(name: &str, default: usize) -> usize {
@@ -156,6 +157,9 @@ mod inv_045_no_free_mark_movement;
 
 #[path = "invariants/stateful/inv_053_full_health_recertification_equivalence.rs"]
 mod inv_053_full_health_recertification_equivalence;
+
+#[path = "invariants/stateful/inv_061_deterministic_bounded_liquidation.rs"]
+mod inv_061_deterministic_bounded_liquidation;
 
 #[path = "invariants/stateful/inv_063_backing_expiry_normalization.rs"]
 mod inv_063_backing_expiry_normalization;
