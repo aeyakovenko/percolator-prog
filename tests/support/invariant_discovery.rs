@@ -1,6 +1,6 @@
 use super::v16_svm::{MarketConfig, V16Svm, INITIAL_PRICE, PRIMARY_ACTOR_COUNT, USER_DEPOSIT};
 use percolator::{MarketModeV16, SideModeV16, POS_SCALE};
-use percolator_prog::ix::{BatchTradeCpiLeg, CrankObservationHint};
+use percolator_prog::ix::{BatchTradeCpiLeg, BatchTradeLeg, CrankObservationHint};
 use serde::{Deserialize, Serialize};
 use solana_sdk::{account::Account, transaction::Transaction};
 
@@ -138,6 +138,23 @@ pub enum AccrualOrderingKind {
     BatchCpiTradeClose,
     RebalanceReduce,
     RecoveryForfeit,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ProspectiveAccrualRoute {
+    NoCpi,
+    BatchNoCpi,
+}
+
+impl ProspectiveAccrualRoute {
+    pub const ALL: [Self; 2] = [Self::NoCpi, Self::BatchNoCpi];
+
+    fn discriminator(self) -> u8 {
+        match self {
+            Self::NoCpi => 0,
+            Self::BatchNoCpi => 1,
+        }
+    }
 }
 
 impl AccrualOrderingKind {
@@ -483,6 +500,29 @@ pub struct TerminalCommitOrderingDiscovery {
     pub counterparty_payout_gain: u64,
     pub committed_total_payout: u128,
     pub reordered_total_payout: u128,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProspectiveAccrualDiscovery {
+    pub route: ProspectiveAccrualRoute,
+    pub control_f_short_num: i128,
+    pub reordered_f_short_num: i128,
+    pub victim_payout_loss: u128,
+    pub coalition_payout_gain: u128,
+    pub control_total_payout: u128,
+    pub reordered_total_payout: u128,
+    pub final_mark: u64,
+    pub final_effective_price: u64,
+}
+
+impl ProspectiveAccrualDiscovery {
+    pub fn is_violation(&self) -> bool {
+        self.control_f_short_num > 0
+            && self.reordered_f_short_num == 0
+            && self.victim_payout_loss != 0
+            && self.victim_payout_loss == self.coalition_payout_gain
+            && self.control_total_payout == self.reordered_total_payout
+    }
 }
 
 impl TerminalCommitOrderingDiscovery {
@@ -3168,4 +3208,204 @@ pub fn discover_terminal_commit_ordering(
         committed_total_payout,
         reordered_total_payout,
     })
+}
+
+fn execute_reported_price_route(
+    env: &mut V16Svm,
+    route: ProspectiveAccrualRoute,
+    taker: usize,
+    maker: usize,
+    size_q: i128,
+    price: u64,
+) -> Result<(), String> {
+    match route {
+        ProspectiveAccrualRoute::NoCpi => env
+            .trade_no_cpi(taker, maker, 0, size_q, price, 0)
+            .map(|_| ())
+            .map_err(|error| format!("reported-price trade: {error}")),
+        ProspectiveAccrualRoute::BatchNoCpi => env
+            .batch_trade_no_cpi(
+                taker,
+                maker,
+                vec![BatchTradeLeg {
+                    asset_index: 0,
+                    size_q,
+                    exec_price: price,
+                    fee_bps: 0,
+                }],
+            )
+            .map(|_| ())
+            .map_err(|error| format!("batch reported-price trade: {error}")),
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ProspectiveAccrualWorld {
+    coalition_payout: u128,
+    victim_payout: u128,
+    final_mark: u64,
+    final_effective_price: u64,
+    f_short_num: i128,
+    total_payout: u128,
+}
+
+fn run_prospective_accrual_world(
+    seed: [u8; 32],
+    route: ProspectiveAccrualRoute,
+    stamp_before_catchup: bool,
+) -> Result<ProspectiveAccrualWorld, String> {
+    const PRICE: u64 = 1_000_000;
+    const DEPOSIT: u128 = 100_000_000;
+    const MARK_HALFLIFE: u64 = 1_000_000;
+    const PREP_SLOT: u64 = 1_001;
+    const CATCHUP_SLOT: u64 = 1_102;
+    const PUSH_TARGET: u64 = 556_555_556;
+    const STAMP_EXEC_PRICE: u64 = 1_010_100;
+    let mut env = V16Svm::new(
+        seed,
+        MarketConfig {
+            initial_price: PRICE,
+            max_price_move_bps_per_slot: 1,
+            max_accrual_dt_slots: 1_000,
+            max_abs_funding_e9_per_slot: 10_000,
+            min_funding_lifetime_slots: 1_000,
+            actor_deposits: [DEPOSIT, DEPOSIT, DEPOSIT, DEPOSIT, 1],
+            ..MarketConfig::default()
+        },
+    );
+    let supply_before = env.token_supply_observed();
+    let configured_slot = env.current_slot();
+    env.configure_ewma_mark(0, configured_slot, PRICE, MARK_HALFLIFE, 0)
+        .map_err(|error| format!("configure prospective EWMA: {error}"))?;
+    execute_reported_price_route(&mut env, route, 0, 1, POS_SCALE as i128, PRICE)?;
+    execute_reported_price_route(&mut env, route, 2, 3, POS_SCALE as i128, PRICE)?;
+    env.warp_to_slot(PREP_SLOT);
+    for _ in 0..4 {
+        env.crank(
+            1,
+            PREP_SLOT,
+            vec![CrankObservationHint {
+                asset_index: 0,
+                oracle_accounts: 0,
+            }],
+        )
+        .map_err(|error| format!("prime prospective funding clock: {error}"))?;
+        if env.primary_market_state().1.assets[0].slot_last == PREP_SLOT {
+            break;
+        }
+    }
+    if env.primary_market_state().1.assets[0].slot_last != PREP_SLOT {
+        return Err("prospective funding clock did not reach prep slot".into());
+    }
+    env.push_ewma_mark(0, PREP_SLOT, PUSH_TARGET)
+        .map_err(|error| format!("publish prospective funding premium: {error}"))?;
+    let after_push = env.primary_profile(0);
+    if after_push.mark_ewma_e6 != 1_500_000
+        || env.primary_market_state().1.assets[0].effective_price != PRICE
+    {
+        return Err(format!(
+            "prospective premium setup drifted: mark={}, effective={}",
+            after_push.mark_ewma_e6,
+            env.primary_market_state().1.assets[0].effective_price
+        ));
+    }
+
+    env.warp_to_slot(CATCHUP_SLOT);
+    let stamp = |env: &mut V16Svm| {
+        execute_reported_price_route(env, route, 2, 3, -(POS_SCALE as i128), STAMP_EXEC_PRICE)
+    };
+    let catchup = |env: &mut V16Svm| {
+        env.crank(
+            1,
+            CATCHUP_SLOT,
+            vec![CrankObservationHint {
+                asset_index: 0,
+                oracle_accounts: 0,
+            }],
+        )
+        .map(|_| ())
+    };
+    if stamp_before_catchup {
+        stamp(&mut env).map_err(|error| format!("trade-first prospective stamp: {error}"))?;
+        catchup(&mut env).map_err(|error| format!("trade-first prospective catch-up: {error}"))?;
+    } else {
+        catchup(&mut env).map_err(|error| format!("control prospective catch-up: {error}"))?;
+        stamp(&mut env).map_err(|error| format!("control prospective stamp: {error}"))?;
+    }
+    let (profile_after, group_after) = env.primary_market_state();
+    if group_after.assets[0].slot_last != CATCHUP_SLOT {
+        return Err(format!(
+            "prospective catch-up stopped at slot {}",
+            group_after.assets[0].slot_last
+        ));
+    }
+    env.resolve_market()
+        .map_err(|error| format!("resolve prospective funding world: {error}"))?;
+    let stamper_short_payout = drain_resolved_discovery_actor(&mut env, 3)?;
+    let victim_payout = drain_resolved_discovery_actor(&mut env, 1)?;
+    let attacker_payout = drain_resolved_discovery_actor(&mut env, 0)?;
+    let stamper_long_payout = drain_resolved_discovery_actor(&mut env, 2)?;
+    let coalition_payout = attacker_payout
+        .checked_add(stamper_long_payout)
+        .and_then(|value| value.checked_add(stamper_short_payout))
+        .ok_or_else(|| "prospective coalition payout overflow".to_string())?;
+    let total_payout = coalition_payout
+        .checked_add(victim_payout)
+        .ok_or_else(|| "prospective total payout overflow".to_string())?;
+    if env.token_supply_observed() != supply_before {
+        return Err("prospective funding world changed SPL supply".into());
+    }
+    Ok(ProspectiveAccrualWorld {
+        coalition_payout,
+        victim_payout,
+        final_mark: profile_after.mark_ewma_e6,
+        final_effective_price: group_after.assets[0].effective_price,
+        f_short_num: group_after.assets[0].f_short_num,
+        total_payout,
+    })
+}
+
+fn discover_one_prospective_accrual_violation(
+    mut seed: [u8; 32],
+    route: ProspectiveAccrualRoute,
+) -> Result<ProspectiveAccrualDiscovery, String> {
+    seed[0] ^= 0xb6;
+    seed[1] ^= route.discriminator();
+    let control = run_prospective_accrual_world(seed, route, false)?;
+    let reordered = run_prospective_accrual_world(seed, route, true)?;
+    if control.final_mark != reordered.final_mark
+        || control.final_effective_price != reordered.final_effective_price
+    {
+        return Err(format!(
+            "{route:?} paired worlds changed final prices: control={control:?}, reordered={reordered:?}"
+        ));
+    }
+    let victim_payout_loss = control
+        .victim_payout
+        .checked_sub(reordered.victim_payout)
+        .ok_or_else(|| "trade-first ordering increased victim payout".to_string())?;
+    let coalition_payout_gain = reordered
+        .coalition_payout
+        .checked_sub(control.coalition_payout)
+        .ok_or_else(|| "trade-first ordering decreased coalition payout".to_string())?;
+    Ok(ProspectiveAccrualDiscovery {
+        route,
+        control_f_short_num: control.f_short_num,
+        reordered_f_short_num: reordered.f_short_num,
+        victim_payout_loss,
+        coalition_payout_gain,
+        control_total_payout: control.total_payout,
+        reordered_total_payout: reordered.total_payout,
+        final_mark: reordered.final_mark,
+        final_effective_price: reordered.final_effective_price,
+    })
+}
+
+pub fn discover_prospective_accrual_violations(
+    seed: [u8; 32],
+) -> Result<Vec<ProspectiveAccrualDiscovery>, String> {
+    ProspectiveAccrualRoute::ALL
+        .into_iter()
+        .map(|route| discover_one_prospective_accrual_violation(seed, route))
+        .collect()
 }

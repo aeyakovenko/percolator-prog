@@ -174,10 +174,10 @@ fn v16_open_security_finding_benchmark_is_complete_and_non_overclaiming() {
     }
 
     assert_eq!(rows, 145, "refresh the dated GitHub finding snapshot");
-    assert_eq!(direct, 23, "direct adapter inventory changed");
+    assert_eq!(direct, 22, "direct adapter inventory changed");
     assert_eq!(missing, 62, "explicit finding gaps changed");
     assert_eq!(
-        independent, 60,
+        independent, 61,
         "promote only genuinely finding-agnostic invariant discoveries"
     );
 
@@ -228,6 +228,7 @@ fn v16_open_security_finding_benchmark_is_complete_and_non_overclaiming() {
                     | "provider-approved-fee-split-is-durable-and-attributed"
                     | "pending-balanced-transfer-cannot-be-erased-by-operation-order"
                     | "pending-value-must-commit-before-terminal-snapshot"
+                    | "prospective-accrual-cannot-be-rewritten-by-trade-order"
             ),
             "unknown independent oracle: {}",
             fields[3]

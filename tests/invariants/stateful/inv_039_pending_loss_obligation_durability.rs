@@ -6,8 +6,12 @@
 //! `v16_program_accrual_boundary_operation_matrix_discovers_erased_transfers` builds one
 //! zero-price-move funding checkpoint and permutes settlement against CPI close, batch CPI close,
 //! unilateral reduction, and recovery forfeit. The common oracle requires both sides to book the
-//! same nonzero transfer and compares conserved claims across the two orders. Direct impact tests
-//! remain below. These tests exercise the deployed public
+//! same nonzero transfer and compares conserved claims across the two orders.
+//! `v16_program_prospective_accrual_route_matrix_discovers_timestamp_rewrite` independently
+//! varies single and batch no-CPI trade routes around the same funding catch-up boundary. It
+//! requires identical terminal prices and total payout while detecting an erased funding index,
+//! an equal victim payout loss, and coalition gain. Direct impact tests remain below. These tests
+//! exercise the deployed public
 //! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
 //! rollback, liveness, or compute outcomes appropriate to the invariant.
 //!
@@ -49,6 +53,42 @@ proptest! {
             violations,
             AccrualOrderingKind::ALL.to_vec(),
             "vulnerable-pin accrual-ordering corpus changed"
+        );
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig {
+        cases: env_usize("PERCOLATOR_FUZZ_CASES", 8) as u32,
+        max_shrink_iters: env_usize("PERCOLATOR_FUZZ_SHRINK_ITERS", 64) as u32,
+        failure_persistence: Some(Box::new(
+            proptest::test_runner::FileFailurePersistence::Direct(
+                "proptest-regressions/inv_039_prospective_accrual_discovery.txt",
+            ),
+        )),
+        ..ProptestConfig::default()
+    })]
+
+    #[test]
+    fn v16_program_prospective_accrual_route_matrix_discovers_timestamp_rewrite(
+        seed in any::<[u8; 32]>()
+    ) {
+        let discoveries = discover_prospective_accrual_violations(seed)
+            .map_err(TestCaseError::fail)?;
+        prop_assert_eq!(discoveries.len(), ProspectiveAccrualRoute::ALL.len());
+        for (expected, discovery) in ProspectiveAccrualRoute::ALL.into_iter().zip(&discoveries) {
+            prop_assert_eq!(discovery.route, expected);
+        }
+        let violations: Vec<_> = discoveries
+            .iter()
+            .filter(|discovery| discovery.is_violation())
+            .map(|discovery| discovery.route)
+            .collect();
+        eprintln!("independent prospective-accrual discoveries: {violations:?}");
+        prop_assert_eq!(
+            violations,
+            ProspectiveAccrualRoute::ALL.to_vec(),
+            "vulnerable-pin prospective-accrual corpus changed"
         );
     }
 }

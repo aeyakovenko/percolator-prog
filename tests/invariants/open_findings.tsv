@@ -144,6 +144,6 @@
 376	DoS	BLOCKER	INV-073	missing	[BLOCKER DoS] Let asset-0 backing provider complete recovery
 377	DoS	BLOCKER	INV-027	missing	[BLOCKER DoS] Keep fresh insurance withdrawable after asset restart
 379	DoS	REAL	INV-028	missing	[REAL DoS] Preserve source capacity in combined engine pin (restacked)
-380	LoF	BLOCKER	INV-039	direct-regression	[BLOCKER LoF] Preserve funding across prospective EWMA updates
+380	LoF	BLOCKER	INV-039	independent-discovery	[BLOCKER LoF] Preserve funding across prospective EWMA updates
 381	LoF	BLOCKER	INV-038	direct-regression	[BLOCKER LoF] Round composite oracle prices once
 393	LoF	REAL	INV-010	missing	[REAL LoF] Order matcher config mutations
