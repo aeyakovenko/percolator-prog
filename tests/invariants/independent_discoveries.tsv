@@ -90,6 +90,7 @@ INV-031	cross-source-claims/backing-consume	v16_program_two_source_claims_discov
 INV-035	bankruptcy-residual/cross-domain-b	v16_program_two_asset_bankruptcy_discovers_cross_domain_b_settlement	b-loss-reduces-only-the-originating-source-domain	281
 INV-053	full-refresh/omitted-later-leg	v16_program_full_refresh_equivalence_discovers_omitted_rescue_liquidation	liquidation-certificate-cannot-be-healthier-than-full-refresh	220,366
 INV-061	resolved-adl/close-order	v16_program_resolved_adl_close_order_matrix_discovers_funded_exit_lock	funded-resolved-adl-winner-has-bounded-public-exit	216
+INV-061	bankruptcy/reset-carry-liquidation	v16_program_reset_carry_liquidation_matrix_discovers_crank_lock	fractional-reset-carry-cannot-block-permissionless-liquidation	218
 INV-073	partial-adl/exact-effective-reduction	v16_program_partial_adl_effective_exit_matrix_discovers_zero_oi_residue_lock	zero-effective-oi-funded-residue-must-enter-bounded-cleanup	268
 INV-073	crossed-adl/exact-effective-trade	v16_program_crossed_adl_effective_exit_matrix_discovers_zero_oi_residue_lock	zero-effective-oi-funded-residue-must-enter-bounded-cleanup	266
 INV-073	partial-adl/recovery-force-close	v16_program_recovery_residue_matrix_discovers_abandoned_owner_lock	partial-adl-recovery-residue-must-have-permissionless-cleanup	203

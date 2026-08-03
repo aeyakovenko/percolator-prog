@@ -177,9 +177,9 @@ fn v16_open_security_finding_benchmark_is_complete_and_non_overclaiming() {
 
     assert_eq!(rows, 143, "refresh the dated GitHub finding snapshot");
     assert_eq!(direct, 0, "direct adapter inventory changed");
-    assert_eq!(missing, 20, "explicit finding gaps changed");
+    assert_eq!(missing, 19, "explicit finding gaps changed");
     assert_eq!(
-        independent, 115,
+        independent, 116,
         "promote only genuinely finding-agnostic invariant discoveries"
     );
     assert_eq!(nonqualifying, 8, "nonqualifying evidence roster changed");
@@ -206,6 +206,7 @@ fn v16_open_security_finding_benchmark_is_complete_and_non_overclaiming() {
         include_str!("../stateful/inv_045_no_free_mark_movement.rs"),
         include_str!("../stateful/inv_053_full_health_recertification_equivalence.rs"),
         include_str!("../stateful/inv_061_deterministic_bounded_liquidation.rs"),
+        include_str!("../cu/inv_061_deterministic_bounded_liquidation.rs"),
         include_str!("../stateful/inv_063_backing_expiry_normalization.rs"),
         include_str!(
             "../stateful/inv_067_terminal_payout_completeness_and_exact_once_settlement.rs"
@@ -288,6 +289,7 @@ fn v16_open_security_finding_benchmark_is_complete_and_non_overclaiming() {
                     | "committed-funding-must-accrue-before-lifecycle-terminalization"
                     | "terminal-snapshot-must-use-current-authenticated-oracle-state"
                     | "funded-resolved-adl-winner-has-bounded-public-exit"
+                    | "fractional-reset-carry-cannot-block-permissionless-liquidation"
                     | "zero-effective-oi-funded-residue-must-enter-bounded-cleanup"
                     | "partial-adl-recovery-residue-must-have-permissionless-cleanup"
                     | "fractional-social-loss-carry-cannot-lock-funded-owner-exit"
