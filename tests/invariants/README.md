@@ -143,8 +143,8 @@ charter.
 ## Known-finding benchmark
 
 `open_findings.tsv` is the unified 2026-08-03 snapshot of 145 open PRs whose titles identify a
-public-route LoF or DoS class. It maps every row to a primary invariant. PR135 currently has 35
-**Direct regression** rows, 67 **Missing** rows, and 43 **Independent discovery** rows. The independent
+public-route LoF or DoS class. It maps every row to a primary invariant. PR135 currently has 32
+**Direct regression** rows, 65 **Missing** rows, and 48 **Independent discovery** rows. The independent
 rows are backed by finding-agnostic fingerprints in `independent_discoveries.tsv`; that mapping is
 evidence metadata and is never consumed by a generator or oracle. The older
 `tests/support/open_lof_manifest.rs` retains the executable adapter mapping for its 99-LoF snapshot.

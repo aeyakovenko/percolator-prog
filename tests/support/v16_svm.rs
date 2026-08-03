@@ -2266,6 +2266,28 @@ impl V16Svm {
         )
     }
 
+    pub fn build_retained_rebalance_reduce(
+        &mut self,
+        actor_index: usize,
+        asset_index: u16,
+        reduce_q: u128,
+    ) -> Transaction {
+        let actor = &self.actors[actor_index];
+        let owner = copy_keypair(&actor.signer);
+        self.build_program_transaction(
+            ProgInstruction::RebalanceReduce {
+                asset_index,
+                reduce_q,
+            },
+            vec![
+                AccountMeta::new(owner.pubkey(), true),
+                AccountMeta::new(self.market, false),
+                AccountMeta::new(actor.portfolio, false),
+            ],
+            &[owner],
+        )
+    }
+
     pub fn build_retained_forfeit_recovery_leg(
         &mut self,
         actor_index: usize,

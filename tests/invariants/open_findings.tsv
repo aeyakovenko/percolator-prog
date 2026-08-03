@@ -51,7 +51,7 @@
 275	LoF	BLOCKER	INV-002	independent-discovery	[BLOCKER LoF] Bind signed mark pushes to asset generations
 276	LoF	HARDENING	INV-003	independent-discovery	[HARDENING LoF] Bind signed trades to portfolio incarnations
 277	LoF	BLOCKER	INV-002	independent-discovery	[BLOCKER LoF] Bind oracle configuration to asset generations
-278	LoF	HARDENING	INV-003	direct-regression	[HARDENING LoF] Bind recovery forfeits to portfolio incarnations
+278	LoF	HARDENING	INV-003	independent-discovery	[HARDENING LoF] Bind recovery forfeits to portfolio incarnations
 279	LoF	BLOCKER	INV-002	independent-discovery	[BLOCKER LoF] Bind collateral top-ups to asset generations
 280	LoF	BLOCKER	INV-045	direct-regression	[BLOCKER LoF] Stop trade-driven mark movers farming liquidation rewards
 281	LoF	BLOCKER	INV-035	direct-regression	[BLOCKER LoF] Keep B settlement source-domain local
@@ -64,16 +64,16 @@
 288	DoS	BLOCKER	INV-067	missing	[BLOCKER DoS] Keep claimant Recovery deadlines monotonic
 290	LoF	BLOCKER	INV-034	direct-regression	[BLOCKER LoF] Reject cross-domain bankruptcy insurance drain
 291	DoS	REAL	INV-063	missing	[REAL DoS] Pin lapsed backing settlement fix
-292	LoF	HARDENING	INV-003	missing	[HARDENING LoF] Bind rebalance reductions to portfolio incarnations
-293	LoF	HARDENING	INV-001	missing	[HARDENING LoF] Bind RebalanceReduce to market generations
+292	LoF	HARDENING	INV-003	independent-discovery	[HARDENING LoF] Bind rebalance reductions to portfolio incarnations
+293	LoF	HARDENING	INV-001	independent-discovery	[HARDENING LoF] Bind RebalanceReduce to market generations
 294	LoF	HARDENING	INV-001	independent-discovery	[HARDENING LoF] Bind matcher grants to market generations
-295	LoF	HARDENING	INV-001	direct-regression	[HARDENING LoF] Bind recovery forfeits to market generations
+295	LoF	HARDENING	INV-001	independent-discovery	[HARDENING LoF] Bind recovery forfeits to market generations
 296	LoF	BLOCKER	INV-001	independent-discovery	[BLOCKER LoF] Bind trade-fee policy to market generations
 297	DoS	BLOCKER	INV-071	missing	[BLOCKER DoS] Prove prospective K/F source expiry progress
 298	DoS	BLOCKER	INV-071	missing	[BLOCKER DoS] Expire prospective loss backing before resolved settlement
 299	LoF	HARDENING	INV-003	independent-discovery	[HARDENING LoF] Bind withdrawals to portfolio incarnations
 300	DoS	BLOCKER	INV-028	missing	[BLOCKER DoS] Prevent foreign expiry from stranding resolved source liens
-301	LoF	HARDENING	INV-003	direct-regression	[HARDENING LoF] Bind PnL conversion to portfolio incarnations
+301	LoF	HARDENING	INV-003	independent-discovery	[HARDENING LoF] Bind PnL conversion to portfolio incarnations
 302	DoS	BLOCKER	INV-030	missing	[BLOCKER DoS] Route prospective loss after source impairment
 303	LoF	HARDENING	INV-003	independent-discovery	[HARDENING LoF] Bind trades to portfolio incarnations
 304	LoF	HARDENING	INV-003	independent-discovery	[HARDENING LoF] Bind matcher grants to portfolio incarnations

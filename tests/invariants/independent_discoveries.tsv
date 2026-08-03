@@ -6,6 +6,9 @@ INV-003	portfolio-incarnation/withdraw	v16_program_portfolio_incarnation_operati
 INV-003	portfolio-incarnation/close	v16_program_portfolio_incarnation_operation_matrix_discovers_stale_intents	stale-intent-must-reject-and-roll-back-exactly	309
 INV-003	portfolio-incarnation/matcher-policy	v16_program_portfolio_incarnation_operation_matrix_discovers_stale_intents	stale-intent-must-reject-and-roll-back-exactly	274,285,304
 INV-003	portfolio-incarnation/trade-family	v16_program_portfolio_incarnation_operation_matrix_discovers_stale_intents	stale-intent-must-reject-and-roll-back-exactly	276,285,303
+INV-003	portfolio-incarnation/pnl-conversion	v16_program_portfolio_incarnation_operation_matrix_discovers_stale_intents	stale-intent-must-reject-and-roll-back-exactly	301
+INV-003	portfolio-incarnation/rebalance-reduce	v16_program_portfolio_incarnation_operation_matrix_discovers_stale_intents	stale-intent-must-reject-and-roll-back-exactly	292
+INV-003	portfolio-incarnation/recovery-forfeit	v16_program_portfolio_incarnation_operation_matrix_discovers_stale_intents	stale-intent-must-reject-and-roll-back-exactly	278
 INV-001	market-incarnation/deposit	v16_program_market_incarnation_operation_matrix_discovers_stale_intents	stale-intent-must-reject-and-roll-back-exactly	307
 INV-001	market-incarnation/matcher-policy	v16_program_market_incarnation_operation_matrix_discovers_stale_intents	stale-intent-must-reject-and-roll-back-exactly	294
 INV-001	market-incarnation/trade-fee-policy	v16_program_market_incarnation_operation_matrix_discovers_stale_intents	stale-intent-must-reject-and-roll-back-exactly	296
@@ -13,6 +16,8 @@ INV-001	market-incarnation/fee-redirect-policy	v16_program_market_incarnation_op
 INV-001	market-incarnation/shutdown	v16_program_market_incarnation_operation_matrix_discovers_stale_intents	stale-intent-must-reject-and-roll-back-exactly	315
 INV-014	market-incarnation/maintenance-fee-policy	v16_program_market_incarnation_operation_matrix_discovers_stale_intents	stale-intent-must-reject-and-roll-back-exactly	325
 INV-014	market-incarnation/liquidation-fee-policy	v16_program_market_incarnation_operation_matrix_discovers_stale_intents	stale-intent-must-reject-and-roll-back-exactly	326
+INV-001	market-incarnation/rebalance-reduce	v16_program_market_incarnation_operation_matrix_discovers_stale_intents	stale-intent-must-reject-and-roll-back-exactly	293
+INV-001	market-incarnation/recovery-forfeit	v16_program_market_incarnation_operation_matrix_discovers_stale_intents	stale-intent-must-reject-and-roll-back-exactly	295
 INV-002	asset-generation/trade-family	v16_program_asset_generation_operation_matrix_discovers_stale_intents	stale-intent-must-reject-and-roll-back-exactly	231
 INV-002	asset-generation/mark-push-family	v16_program_asset_generation_operation_matrix_discovers_stale_intents	stale-intent-must-reject-and-roll-back-exactly	275
 INV-002	asset-generation/oracle-config-family	v16_program_asset_generation_operation_matrix_discovers_stale_intents	stale-intent-must-reject-and-roll-back-exactly	277,322

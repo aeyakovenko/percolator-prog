@@ -1,5 +1,6 @@
 use super::v16_svm::{MarketConfig, V16Svm, INITIAL_PRICE, PRIMARY_ACTOR_COUNT, USER_DEPOSIT};
 use percolator::POS_SCALE;
+use percolator_prog::ix::CrankObservationHint;
 use serde::{Deserialize, Serialize};
 use solana_sdk::{account::Account, transaction::Transaction};
 
@@ -13,10 +14,13 @@ pub enum PortfolioIntentKind {
     TradeCpi,
     BatchTradeNoCpi,
     BatchTradeCpi,
+    ConvertReleasedPnl,
+    RebalanceReduce,
+    ForfeitRecoveryLeg,
 }
 
 impl PortfolioIntentKind {
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 11] = [
         Self::Deposit,
         Self::Withdraw,
         Self::Close,
@@ -25,6 +29,9 @@ impl PortfolioIntentKind {
         Self::TradeCpi,
         Self::BatchTradeNoCpi,
         Self::BatchTradeCpi,
+        Self::ConvertReleasedPnl,
+        Self::RebalanceReduce,
+        Self::ForfeitRecoveryLeg,
     ];
 }
 
@@ -39,6 +46,8 @@ pub enum MarketIntentKind {
     ShutdownAsset,
     ResolveMarket,
     ResolvePolicy,
+    RebalanceReduce,
+    ForfeitRecoveryLeg,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -245,7 +254,7 @@ impl AssetIntentKind {
 }
 
 impl MarketIntentKind {
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 11] = [
         Self::Deposit,
         Self::MatcherEnable,
         Self::TradeFeePolicy,
@@ -255,6 +264,8 @@ impl MarketIntentKind {
         Self::ShutdownAsset,
         Self::ResolveMarket,
         Self::ResolvePolicy,
+        Self::RebalanceReduce,
+        Self::ForfeitRecoveryLeg,
     ];
 
     fn discriminator(self) -> u8 {
@@ -268,6 +279,8 @@ impl MarketIntentKind {
             Self::ShutdownAsset => 6,
             Self::ResolveMarket => 7,
             Self::ResolvePolicy => 8,
+            Self::RebalanceReduce => 9,
+            Self::ForfeitRecoveryLeg => 10,
         }
     }
 }
@@ -464,6 +477,11 @@ fn retained_portfolio_intent(env: &mut V16Svm, kind: PortfolioIntentKind) -> Tra
         PortfolioIntentKind::BatchTradeCpi => {
             env.build_retained_batch_cpi_trade(SUBJECT, COUNTERPARTY, 0, size_q, 0)
         }
+        PortfolioIntentKind::ConvertReleasedPnl
+        | PortfolioIntentKind::RebalanceReduce
+        | PortfolioIntentKind::ForfeitRecoveryLeg => {
+            unreachable!("lifecycle-bearing portfolio intents use dedicated setup")
+        }
     }
 }
 
@@ -474,47 +492,22 @@ fn replacement_capital(kind: PortfolioIntentKind) -> u128 {
     }
 }
 
-fn discover_one_portfolio_incarnation_replay(
-    mut seed: [u8; 32],
+fn finish_portfolio_incarnation_discovery(
+    env: &mut V16Svm,
     kind: PortfolioIntentKind,
+    old_portfolio_id: u64,
+    new_portfolio_id: u64,
+    retained: Transaction,
+    supply_before: u128,
 ) -> Result<IncarnationDiscovery, String> {
-    const SUBJECT: usize = 0;
-    seed[0] ^= 0xa3;
-    seed[1] ^= kind as u8;
-    let mut env = V16Svm::new(seed, MarketConfig::default());
-    let supply_before = env.token_supply_observed();
-    let old_portfolio_id = env.primary_portfolio_id(SUBJECT);
-    let retained = retained_portfolio_intent(&mut env, kind);
-
-    let old_capital = env.primary_portfolio(SUBJECT).capital.get();
-    env.withdraw_primary(SUBJECT, old_capital)
-        .map_err(|error| format!("empty old portfolio: {error}"))?;
-    env.close_primary_portfolio(SUBJECT)
-        .map_err(|error| format!("close old portfolio: {error}"))?;
-    env.fund_closed_primary_portfolio(SUBJECT, 1_000_000_000)
-        .map_err(|error| format!("fund replacement portfolio: {error}"))?;
-    env.reinitialize_primary_portfolio(SUBJECT)
-        .map_err(|error| format!("initialize replacement portfolio: {error}"))?;
-    let new_portfolio_id = env.primary_portfolio_id(SUBJECT);
     if new_portfolio_id <= old_portfolio_id {
         return Err(format!(
             "portfolio incarnation did not advance: {old_portfolio_id} -> {new_portfolio_id}"
         ));
     }
-
-    let replacement_capital = replacement_capital(kind);
-    if replacement_capital != 0 {
-        env.deposit_primary(SUBJECT, replacement_capital)
-            .map_err(|error| format!("fund replacement portfolio: {error}"))?;
-    }
-    if kind == PortfolioIntentKind::MatcherDisable {
-        env.set_matcher_config(SUBJECT, 1)
-            .map_err(|error| format!("establish replacement matcher policy: {error}"))?;
-    }
-
-    let before = fingerprint(&env);
+    let before = fingerprint(env);
     let result = env.land_retained(retained);
-    let after = fingerprint(&env);
+    let after = fingerprint(env);
     if env.token_supply_observed() != supply_before {
         return Err(format!(
             "{kind:?} incarnation probe changed SPL supply: {supply_before} -> {}",
@@ -557,6 +550,287 @@ fn discover_one_portfolio_incarnation_replay(
     }
 }
 
+fn create_released_pnl(
+    env: &mut V16Svm,
+    winner: usize,
+    loser: usize,
+    winner_deposit: u128,
+    loser_deposit: u128,
+    mark_slot: u64,
+    start_price: u64,
+) -> Result<u128, String> {
+    const POSITION_Q: i128 = 20 * POS_SCALE as i128;
+    env.deposit_primary(winner, winner_deposit)
+        .map_err(|error| format!("fund PnL winner: {error}"))?;
+    env.deposit_primary(loser, loser_deposit)
+        .map_err(|error| format!("fund PnL loser: {error}"))?;
+    env.trade_no_cpi(winner, loser, 0, POSITION_Q, start_price, 0)
+        .map_err(|error| format!("open PnL-producing trade: {error}"))?;
+    env.warp_to_slot(mark_slot);
+    env.push_auth_mark(0, mark_slot, start_price + 5)
+        .map_err(|error| format!("publish PnL-producing mark: {error}"))?;
+    for actor in [loser, winner] {
+        env.crank(
+            actor,
+            mark_slot,
+            vec![CrankObservationHint {
+                asset_index: 0,
+                oracle_accounts: 0,
+            }],
+        )
+        .map_err(|error| format!("refresh PnL actor {actor}: {error}"))?;
+    }
+    env.trade_no_cpi(winner, loser, 0, -POSITION_Q, start_price + 5, 0)
+        .map_err(|error| format!("close PnL-producing trade: {error}"))?;
+    let released = env.primary_portfolio(winner).pnl.get();
+    if released <= 0 {
+        return Err(format!("expected positive released PnL, got {released}"));
+    }
+    u128::try_from(released).map_err(|_| "released PnL conversion overflow".to_string())
+}
+
+fn discover_convert_portfolio_incarnation_replay(
+    seed: [u8; 32],
+) -> Result<IncarnationDiscovery, String> {
+    const SUBJECT: usize = 1;
+    const OLD_COUNTERPARTY: usize = 0;
+    const NEW_COUNTERPARTY: usize = 3;
+    const PRICE: u64 = 100;
+    const TARGET_CAPITAL: u128 = 1_000_000;
+    let kind = PortfolioIntentKind::ConvertReleasedPnl;
+    let mut env = V16Svm::new(
+        seed,
+        MarketConfig {
+            initial_price: PRICE,
+            h_max: 10,
+            min_nonzero_mm_req: 1,
+            min_nonzero_im_req: 2,
+            maintenance_margin_bps: 1_000,
+            initial_margin_bps: 1_000,
+            max_price_move_bps_per_slot: 500,
+            max_accrual_dt_slots: 1,
+            min_funding_lifetime_slots: 1,
+            actor_deposits: [1; PRIMARY_ACTOR_COUNT],
+            actor_token_balances: [2_000_000, 3_000_000, 10_000, 2_000_000, 10],
+            ..MarketConfig::default()
+        },
+    );
+    let supply_before = env.token_supply_observed();
+    env.top_up_backing_bucket(1, 300, 1_000)
+        .map_err(|error| format!("fund short-side backing: {error}"))?;
+    let released = create_released_pnl(
+        &mut env,
+        SUBJECT,
+        OLD_COUNTERPARTY,
+        TARGET_CAPITAL - 1,
+        TARGET_CAPITAL - 1,
+        2,
+        PRICE,
+    )?;
+    let old_portfolio_id = env.primary_portfolio_id(SUBJECT);
+    let retained = env.build_retained_convert_released_pnl(SUBJECT, u128::MAX);
+    env.convert_released_pnl(SUBJECT, released)
+        .map_err(|error| format!("consume old-incarnation PnL: {error}"))?;
+    let capital = env.primary_portfolio(SUBJECT).capital.get();
+    env.withdraw_primary(SUBJECT, capital)
+        .map_err(|error| format!("empty old PnL portfolio: {error}"))?;
+    env.close_primary_portfolio(SUBJECT)
+        .map_err(|error| format!("close old PnL portfolio: {error}"))?;
+    env.fund_closed_primary_portfolio(SUBJECT, 1_000_000_000)
+        .map_err(|error| format!("fund replacement PnL portfolio: {error}"))?;
+    env.reinitialize_primary_portfolio(SUBJECT)
+        .map_err(|error| format!("initialize replacement PnL portfolio: {error}"))?;
+    let new_portfolio_id = env.primary_portfolio_id(SUBJECT);
+    create_released_pnl(
+        &mut env,
+        SUBJECT,
+        NEW_COUNTERPARTY,
+        TARGET_CAPITAL,
+        TARGET_CAPITAL - 1,
+        3,
+        PRICE + 5,
+    )?;
+    finish_portfolio_incarnation_discovery(
+        &mut env,
+        kind,
+        old_portfolio_id,
+        new_portfolio_id,
+        retained,
+        supply_before,
+    )
+}
+
+fn discover_rebalance_portfolio_incarnation_replay(
+    seed: [u8; 32],
+) -> Result<IncarnationDiscovery, String> {
+    const SUBJECT: usize = 0;
+    const COUNTERPARTY: usize = 1;
+    const PRICE: u64 = 100;
+    const DEPOSIT: u128 = 1_000_000;
+    const OLD_SIZE_Q: i128 = 2_000 * POS_SCALE as i128;
+    const NEW_SIZE_Q: i128 = 1_000 * POS_SCALE as i128;
+    let kind = PortfolioIntentKind::RebalanceReduce;
+    let mut env = V16Svm::new(
+        seed,
+        MarketConfig {
+            initial_price: PRICE,
+            actor_deposits: [DEPOSIT, DEPOSIT, 1, 1, 1],
+            actor_token_balances: [2_000_000, 2_000_000, 1, 1, 1],
+            ..MarketConfig::default()
+        },
+    );
+    let supply_before = env.token_supply_observed();
+    env.trade_no_cpi(SUBJECT, COUNTERPARTY, 0, OLD_SIZE_Q, PRICE, 0)
+        .map_err(|error| format!("open old rebalance position: {error}"))?;
+    let old_portfolio_id = env.primary_portfolio_id(SUBJECT);
+    let retained = env.build_retained_rebalance_reduce(SUBJECT, 0, NEW_SIZE_Q.unsigned_abs());
+    env.trade_no_cpi(SUBJECT, COUNTERPARTY, 0, -OLD_SIZE_Q, PRICE, 0)
+        .map_err(|error| format!("close old rebalance position: {error}"))?;
+    env.withdraw_primary(SUBJECT, DEPOSIT)
+        .map_err(|error| format!("empty old rebalance portfolio: {error}"))?;
+    env.close_primary_portfolio(SUBJECT)
+        .map_err(|error| format!("close old rebalance portfolio: {error}"))?;
+    env.fund_closed_primary_portfolio(SUBJECT, 1_000_000_000)
+        .map_err(|error| format!("fund replacement rebalance portfolio: {error}"))?;
+    env.reinitialize_primary_portfolio(SUBJECT)
+        .map_err(|error| format!("initialize replacement rebalance portfolio: {error}"))?;
+    let new_portfolio_id = env.primary_portfolio_id(SUBJECT);
+    env.deposit_primary(SUBJECT, DEPOSIT)
+        .map_err(|error| format!("fund replacement rebalance portfolio: {error}"))?;
+    env.trade_no_cpi(SUBJECT, COUNTERPARTY, 0, NEW_SIZE_Q, PRICE, 0)
+        .map_err(|error| format!("open replacement rebalance position: {error}"))?;
+    finish_portfolio_incarnation_discovery(
+        &mut env,
+        kind,
+        old_portfolio_id,
+        new_portfolio_id,
+        retained,
+        supply_before,
+    )
+}
+
+fn discover_forfeit_portfolio_incarnation_replay(
+    seed: [u8; 32],
+) -> Result<IncarnationDiscovery, String> {
+    const SUBJECT: usize = 0;
+    const COUNTERPARTY: usize = 1;
+    const PRICE: u64 = 100;
+    const DEPOSIT: u128 = 1_000_000;
+    const SIZE_Q: i128 = 5_000 * POS_SCALE as i128;
+    let kind = PortfolioIntentKind::ForfeitRecoveryLeg;
+    let mut env = V16Svm::new(
+        seed,
+        MarketConfig {
+            initial_price: PRICE,
+            maintenance_margin_bps: 1_000,
+            initial_margin_bps: 1_000,
+            max_price_move_bps_per_slot: 500,
+            max_accrual_dt_slots: 1,
+            min_funding_lifetime_slots: 1,
+            actor_deposits: [DEPOSIT, DEPOSIT, 1, 1, 1],
+            actor_token_balances: [2_000_000, 2_000_000, 1, 1, 1],
+            ..MarketConfig::default()
+        },
+    );
+    let supply_before = env.token_supply_observed();
+    env.configure_permissionless_resolve(100, 1)
+        .map_err(|error| format!("configure recovery lifecycle: {error}"))?;
+    env.trade_no_cpi(SUBJECT, COUNTERPARTY, 0, SIZE_Q, PRICE, 0)
+        .map_err(|error| format!("open old recovery leg: {error}"))?;
+    env.warp_to_slot(2);
+    env.shutdown_asset(0, 2)
+        .map_err(|error| format!("shutdown old asset generation: {error}"))?;
+    let old_portfolio_id = env.primary_portfolio_id(SUBJECT);
+    let retained = env.build_retained_forfeit_recovery_leg(SUBJECT, 0, 1);
+    for actor in [SUBJECT, COUNTERPARTY] {
+        env.forfeit_recovery_leg(actor, 0, 1)
+            .map_err(|error| format!("clear old recovery leg for actor {actor}: {error}"))?;
+    }
+    env.withdraw_primary(SUBJECT, DEPOSIT)
+        .map_err(|error| format!("empty old recovery portfolio: {error}"))?;
+    env.close_primary_portfolio(SUBJECT)
+        .map_err(|error| format!("close old recovery portfolio: {error}"))?;
+    env.warp_to_slot(3);
+    env.restart_asset_oracle(0, 3, PRICE)
+        .map_err(|error| format!("restart asset for replacement recovery leg: {error}"))?;
+    env.configure_auth_mark(false, 0, 3, PRICE)
+        .map_err(|error| format!("configure replacement recovery mark: {error}"))?;
+    env.fund_closed_primary_portfolio(SUBJECT, 1_000_000_000)
+        .map_err(|error| format!("fund replacement recovery portfolio: {error}"))?;
+    env.reinitialize_primary_portfolio(SUBJECT)
+        .map_err(|error| format!("initialize replacement recovery portfolio: {error}"))?;
+    let new_portfolio_id = env.primary_portfolio_id(SUBJECT);
+    env.deposit_primary(SUBJECT, DEPOSIT)
+        .map_err(|error| format!("fund replacement recovery portfolio: {error}"))?;
+    env.trade_no_cpi(SUBJECT, COUNTERPARTY, 0, SIZE_Q, PRICE, 0)
+        .map_err(|error| format!("open replacement recovery leg: {error}"))?;
+    env.warp_to_slot(4);
+    env.shutdown_asset(0, 4)
+        .map_err(|error| format!("shutdown replacement asset generation: {error}"))?;
+    finish_portfolio_incarnation_discovery(
+        &mut env,
+        kind,
+        old_portfolio_id,
+        new_portfolio_id,
+        retained,
+        supply_before,
+    )
+}
+
+fn discover_one_portfolio_incarnation_replay(
+    mut seed: [u8; 32],
+    kind: PortfolioIntentKind,
+) -> Result<IncarnationDiscovery, String> {
+    const SUBJECT: usize = 0;
+    seed[0] ^= 0xa3;
+    seed[1] ^= kind as u8;
+    match kind {
+        PortfolioIntentKind::ConvertReleasedPnl => {
+            return discover_convert_portfolio_incarnation_replay(seed);
+        }
+        PortfolioIntentKind::RebalanceReduce => {
+            return discover_rebalance_portfolio_incarnation_replay(seed);
+        }
+        PortfolioIntentKind::ForfeitRecoveryLeg => {
+            return discover_forfeit_portfolio_incarnation_replay(seed);
+        }
+        _ => {}
+    }
+    let mut env = V16Svm::new(seed, MarketConfig::default());
+    let supply_before = env.token_supply_observed();
+    let old_portfolio_id = env.primary_portfolio_id(SUBJECT);
+    let retained = retained_portfolio_intent(&mut env, kind);
+
+    let old_capital = env.primary_portfolio(SUBJECT).capital.get();
+    env.withdraw_primary(SUBJECT, old_capital)
+        .map_err(|error| format!("empty old portfolio: {error}"))?;
+    env.close_primary_portfolio(SUBJECT)
+        .map_err(|error| format!("close old portfolio: {error}"))?;
+    env.fund_closed_primary_portfolio(SUBJECT, 1_000_000_000)
+        .map_err(|error| format!("fund replacement portfolio: {error}"))?;
+    env.reinitialize_primary_portfolio(SUBJECT)
+        .map_err(|error| format!("initialize replacement portfolio: {error}"))?;
+    let new_portfolio_id = env.primary_portfolio_id(SUBJECT);
+    let replacement_capital = replacement_capital(kind);
+    if replacement_capital != 0 {
+        env.deposit_primary(SUBJECT, replacement_capital)
+            .map_err(|error| format!("fund replacement portfolio: {error}"))?;
+    }
+    if kind == PortfolioIntentKind::MatcherDisable {
+        env.set_matcher_config(SUBJECT, 1)
+            .map_err(|error| format!("establish replacement matcher policy: {error}"))?;
+    }
+
+    finish_portfolio_incarnation_discovery(
+        &mut env,
+        kind,
+        old_portfolio_id,
+        new_portfolio_id,
+        retained,
+        supply_before,
+    )
+}
+
 pub fn discover_portfolio_incarnation_replays(
     seed: [u8; 32],
 ) -> Result<Vec<IncarnationDiscovery>, String> {
@@ -578,6 +852,9 @@ fn retained_market_intent(env: &mut V16Svm, kind: MarketIntentKind) -> Transacti
         MarketIntentKind::ShutdownAsset => env.build_retained_shutdown_asset(0, 12),
         MarketIntentKind::ResolveMarket => env.build_retained_resolve_market(),
         MarketIntentKind::ResolvePolicy => env.build_retained_permissionless_resolve_policy(17, 29),
+        MarketIntentKind::RebalanceReduce | MarketIntentKind::ForfeitRecoveryLeg => {
+            unreachable!("lifecycle-bearing market intents use dedicated setup")
+        }
     }
 }
 
@@ -607,6 +884,175 @@ fn publicly_recreate_market(
     Ok(())
 }
 
+fn finish_market_incarnation_discovery(
+    env: &mut V16Svm,
+    kind: MarketIntentKind,
+    old_market_id: u64,
+    new_market_id: u64,
+    retained: Transaction,
+    supply_before: u128,
+) -> Result<MarketIncarnationDiscovery, String> {
+    let before = fingerprint(env);
+    let result = env.land_retained(retained);
+    let after = fingerprint(env);
+    if env.token_supply_observed() != supply_before {
+        return Err(format!(
+            "{kind:?} market-incarnation probe changed SPL supply: {supply_before} -> {}",
+            env.token_supply_observed()
+        ));
+    }
+
+    match result {
+        Ok(success) => {
+            let mutated_economic_state = before != after;
+            if !mutated_economic_state {
+                return Err(format!(
+                    "{kind:?} stale market transaction succeeded without an observable state delta"
+                ));
+            }
+            Ok(MarketIncarnationDiscovery {
+                kind,
+                old_market_id,
+                new_market_id,
+                accepted_stale_intent: true,
+                mutated_economic_state,
+                compute_units: Some(success.compute_units),
+            })
+        }
+        Err(_) => {
+            if before != after {
+                return Err(format!(
+                    "{kind:?} rejected stale market transaction did not roll back exactly"
+                ));
+            }
+            Ok(MarketIncarnationDiscovery {
+                kind,
+                old_market_id,
+                new_market_id,
+                accepted_stale_intent: false,
+                mutated_economic_state: false,
+                compute_units: None,
+            })
+        }
+    }
+}
+
+fn initialize_replacement_traders(
+    env: &mut V16Svm,
+    actors: &[usize],
+    deposit: u128,
+) -> Result<(), String> {
+    for &actor in actors {
+        env.fund_closed_primary_portfolio(actor, 1_000_000_000)
+            .map_err(|error| format!("fund replacement trader {actor}: {error}"))?;
+        env.reinitialize_primary_portfolio(actor)
+            .map_err(|error| format!("initialize replacement trader {actor}: {error}"))?;
+        env.deposit_primary(actor, deposit)
+            .map_err(|error| format!("deposit replacement trader {actor}: {error}"))?;
+    }
+    Ok(())
+}
+
+fn discover_rebalance_market_incarnation_replay(
+    seed: [u8; 32],
+) -> Result<MarketIncarnationDiscovery, String> {
+    const SUBJECT: usize = 0;
+    const COUNTERPARTY: usize = 1;
+    const PRICE: u64 = 100;
+    const DEPOSIT: u128 = 1_000_000;
+    const OLD_SIZE_Q: i128 = 2_000 * POS_SCALE as i128;
+    const NEW_SIZE_Q: i128 = 1_000 * POS_SCALE as i128;
+    const REINIT_SLOT: u64 = 10;
+    let kind = MarketIntentKind::RebalanceReduce;
+    let config = MarketConfig {
+        initial_price: PRICE,
+        actor_deposits: [DEPOSIT, DEPOSIT, 1, 1, 1],
+        actor_token_balances: [2_000_000, 2_000_000, 1, 1, 1],
+        ..MarketConfig::default()
+    };
+    let mut env = V16Svm::new(seed, config);
+    let supply_before = env.token_supply_observed();
+    let old_market_id = env.primary_market_state().1.assets[0].market_id;
+    env.trade_no_cpi(SUBJECT, COUNTERPARTY, 0, OLD_SIZE_Q, PRICE, 0)
+        .map_err(|error| format!("open old-market rebalance position: {error}"))?;
+    let retained = env.build_retained_rebalance_reduce(SUBJECT, 0, NEW_SIZE_Q.unsigned_abs());
+    env.trade_no_cpi(SUBJECT, COUNTERPARTY, 0, -OLD_SIZE_Q, PRICE, 0)
+        .map_err(|error| format!("close old-market rebalance position: {error}"))?;
+    publicly_recreate_market(&mut env, config, REINIT_SLOT)?;
+    env.configure_auth_mark(false, 0, REINIT_SLOT, PRICE)
+        .map_err(|error| format!("configure replacement-market mark: {error}"))?;
+    let new_market_id = env.primary_market_state().1.assets[0].market_id;
+    initialize_replacement_traders(&mut env, &[SUBJECT, COUNTERPARTY], DEPOSIT)?;
+    env.trade_no_cpi(SUBJECT, COUNTERPARTY, 0, NEW_SIZE_Q, PRICE, 0)
+        .map_err(|error| format!("open replacement-market rebalance position: {error}"))?;
+    finish_market_incarnation_discovery(
+        &mut env,
+        kind,
+        old_market_id,
+        new_market_id,
+        retained,
+        supply_before,
+    )
+}
+
+fn discover_forfeit_market_incarnation_replay(
+    seed: [u8; 32],
+) -> Result<MarketIncarnationDiscovery, String> {
+    const SUBJECT: usize = 0;
+    const COUNTERPARTY: usize = 1;
+    const PRICE: u64 = 100;
+    const DEPOSIT: u128 = 1_000_000;
+    const SIZE_Q: i128 = 5_000 * POS_SCALE as i128;
+    const REINIT_SLOT: u64 = 10;
+    let kind = MarketIntentKind::ForfeitRecoveryLeg;
+    let config = MarketConfig {
+        initial_price: PRICE,
+        maintenance_margin_bps: 1_000,
+        initial_margin_bps: 1_000,
+        max_price_move_bps_per_slot: 500,
+        max_accrual_dt_slots: 1,
+        min_funding_lifetime_slots: 1,
+        actor_deposits: [DEPOSIT, DEPOSIT, 1, 1, 1],
+        actor_token_balances: [2_000_000, 2_000_000, 1, 1, 1],
+        ..MarketConfig::default()
+    };
+    let mut env = V16Svm::new(seed, config);
+    let supply_before = env.token_supply_observed();
+    env.configure_permissionless_resolve(100, 1)
+        .map_err(|error| format!("configure old-market recovery lifecycle: {error}"))?;
+    let old_market_id = env.primary_market_state().1.assets[0].market_id;
+    env.trade_no_cpi(SUBJECT, COUNTERPARTY, 0, SIZE_Q, PRICE, 0)
+        .map_err(|error| format!("open old-market recovery leg: {error}"))?;
+    env.warp_to_slot(2);
+    env.shutdown_asset(0, 2)
+        .map_err(|error| format!("shutdown old market asset: {error}"))?;
+    let retained = env.build_retained_forfeit_recovery_leg(SUBJECT, 0, 1);
+    for actor in [SUBJECT, COUNTERPARTY] {
+        env.forfeit_recovery_leg(actor, 0, 1)
+            .map_err(|error| format!("clear old-market recovery actor {actor}: {error}"))?;
+    }
+    publicly_recreate_market(&mut env, config, REINIT_SLOT)?;
+    env.configure_permissionless_resolve(100, 1)
+        .map_err(|error| format!("configure replacement recovery lifecycle: {error}"))?;
+    env.configure_auth_mark(false, 0, REINIT_SLOT, PRICE)
+        .map_err(|error| format!("configure replacement recovery mark: {error}"))?;
+    let new_market_id = env.primary_market_state().1.assets[0].market_id;
+    initialize_replacement_traders(&mut env, &[SUBJECT, COUNTERPARTY], DEPOSIT)?;
+    env.trade_no_cpi(SUBJECT, COUNTERPARTY, 0, SIZE_Q, PRICE, 0)
+        .map_err(|error| format!("open replacement-market recovery leg: {error}"))?;
+    env.warp_to_slot(REINIT_SLOT + 1);
+    env.shutdown_asset(0, REINIT_SLOT + 1)
+        .map_err(|error| format!("shutdown replacement market asset: {error}"))?;
+    finish_market_incarnation_discovery(
+        &mut env,
+        kind,
+        old_market_id,
+        new_market_id,
+        retained,
+        supply_before,
+    )
+}
+
 fn discover_one_market_incarnation_replay(
     mut seed: [u8; 32],
     kind: MarketIntentKind,
@@ -615,6 +1061,15 @@ fn discover_one_market_incarnation_replay(
     const REINIT_SLOT: u64 = 10;
     seed[0] ^= 0xb7;
     seed[1] ^= kind.discriminator();
+    match kind {
+        MarketIntentKind::RebalanceReduce => {
+            return discover_rebalance_market_incarnation_replay(seed);
+        }
+        MarketIntentKind::ForfeitRecoveryLeg => {
+            return discover_forfeit_market_incarnation_replay(seed);
+        }
+        _ => {}
+    }
     let config = MarketConfig {
         initial_price: INITIAL_PRICE,
         h_max: 6_480_000,
@@ -658,49 +1113,14 @@ fn discover_one_market_incarnation_replay(
         env.warp_to_slot(12);
     }
 
-    let before = fingerprint(&env);
-    let result = env.land_retained(retained);
-    let after = fingerprint(&env);
-    if env.token_supply_observed() != supply_before {
-        return Err(format!(
-            "{kind:?} market-incarnation probe changed SPL supply: {supply_before} -> {}",
-            env.token_supply_observed()
-        ));
-    }
-
-    match result {
-        Ok(success) => {
-            let mutated_economic_state = before != after;
-            if !mutated_economic_state {
-                return Err(format!(
-                    "{kind:?} stale market transaction succeeded without an observable state delta"
-                ));
-            }
-            Ok(MarketIncarnationDiscovery {
-                kind,
-                old_market_id,
-                new_market_id,
-                accepted_stale_intent: true,
-                mutated_economic_state,
-                compute_units: Some(success.compute_units),
-            })
-        }
-        Err(_) => {
-            if before != after {
-                return Err(format!(
-                    "{kind:?} rejected stale market transaction did not roll back exactly"
-                ));
-            }
-            Ok(MarketIncarnationDiscovery {
-                kind,
-                old_market_id,
-                new_market_id,
-                accepted_stale_intent: false,
-                mutated_economic_state: false,
-                compute_units: None,
-            })
-        }
-    }
+    finish_market_incarnation_discovery(
+        &mut env,
+        kind,
+        old_market_id,
+        new_market_id,
+        retained,
+        supply_before,
+    )
 }
 
 pub fn discover_market_incarnation_replays(
