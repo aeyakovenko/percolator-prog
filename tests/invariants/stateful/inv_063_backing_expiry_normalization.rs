@@ -11,6 +11,10 @@
 //! boundaries independently of any finding manifest, compares omitted and delayed operations,
 //! and requires a finding only when the delayed operation consumes independent principal and
 //! leaves funded resolved users unable to progress through owner or permissionless routes.
+//! `v16_program_expired_backing_consumer_matrix_discovers_principal_extraction` generates released
+//! source-backed claims and varies the expiry boundary. It reports a violation only when a
+//! favorable consumer lands after authenticated expiry, consumes the provider ledger, and moves
+//! the exact credited amount into the claimant's external SPL account.
 //!
 //! Guarantee boundary: a quarantined counterexample demonstrates public reachability; it does
 //! not certify the invariant on an unfixed pin. Certification requires the fixed-pin assertion
@@ -77,6 +81,32 @@ proptest! {
             prop_assert!(
                 discovery.is_persistent_funded_lock(),
                 "retained operation did not reproduce an exact funded terminal lock: {:?}",
+                discovery
+            );
+        }
+    }
+
+    #[test]
+    fn v16_program_expired_backing_consumer_matrix_discovers_principal_extraction(
+        seed in any::<[u8; 32]>(),
+        expiry_offset in prop::sample::select(vec![1u8, 2, 4, 6]),
+    ) {
+        let discoveries = discover_expired_backing_consumers(seed, expiry_offset);
+        prop_assert!(
+            discoveries.is_ok(),
+            "expired-backing consumer discovery failed at offset {expiry_offset}: {}",
+            discoveries.unwrap_err()
+        );
+        let discoveries = discoveries.unwrap();
+        prop_assert_eq!(
+            discoveries.len(),
+            ExpiredBackingConsumerKind::ALL.len(),
+            "every favorable backing consumer needs a generated expiry world"
+        );
+        for discovery in discoveries {
+            prop_assert!(
+                discovery.is_expired_principal_extraction(),
+                "expired backing consumer did not extract exact provider principal: {:?}",
                 discovery
             );
         }

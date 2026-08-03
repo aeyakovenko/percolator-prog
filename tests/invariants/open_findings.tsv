@@ -126,7 +126,7 @@
 360	LoF	BLOCKER	INV-039	independent-discovery	[BLOCKER LoF] Reject unsigned stale-cohort novation
 361	DoS	BLOCKER	INV-063	independent-discovery	[BLOCKER DoS] Reject retained backing top-ups after signed expiry
 362	LoF	BLOCKER	INV-008	independent-discovery	[BLOCKER LoF] Make retired-slot activation intents one-shot
-363	LoF	BLOCKER	INV-063	missing	[BLOCKER LoF] Observe backing expiry before PnL conversion
+363	LoF	BLOCKER	INV-063	independent-discovery	[BLOCKER LoF] Observe backing expiry before PnL conversion
 364	DoS	BLOCKER	INV-028	missing	[BLOCKER DoS] Release flat source liens before PnL conversion
 365	LoF	BLOCKER	INV-038	independent-discovery	[BLOCKER LoF] Carry fractional oracle caps across max-dt cranks
 366	LoF	BLOCKER	INV-053	independent-discovery	[BLOCKER LoF] Gate liquidation on pending later-leg accrual

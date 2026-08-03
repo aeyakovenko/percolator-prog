@@ -1084,6 +1084,49 @@ impl RetainedMaturityDiscovery {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExpiredBackingConsumerKind {
+    ReleasedPnlConversion,
+}
+
+impl ExpiredBackingConsumerKind {
+    pub const ALL: [Self; 1] = [Self::ReleasedPnlConversion];
+
+    fn discriminator(self) -> u8 {
+        match self {
+            Self::ReleasedPnlConversion => 0,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ExpiredBackingConsumerDiscovery {
+    pub kind: ExpiredBackingConsumerKind,
+    pub expiry_slot: u64,
+    pub authenticated_slot: u64,
+    pub engine_slot: u64,
+    pub released_pnl: u128,
+    pub conversion_landed: bool,
+    pub capital_credit: u128,
+    pub consumed_backing_num: u128,
+    pub extracted_tokens: u64,
+    pub token_supply_conserved: bool,
+}
+
+impl ExpiredBackingConsumerDiscovery {
+    pub fn is_expired_principal_extraction(&self) -> bool {
+        self.authenticated_slot > self.expiry_slot
+            && self.engine_slot < self.authenticated_slot
+            && self.released_pnl != 0
+            && self.conversion_landed
+            && self.capital_credit == self.released_pnl
+            && self.released_pnl.checked_mul(percolator::BOUND_SCALE)
+                == Some(self.consumed_backing_num)
+            && u128::from(self.extracted_tokens) == self.released_pnl
+            && self.token_supply_conserved
+    }
+}
+
 impl BackingExpiryDiscovery {
     pub fn is_violation(&self) -> bool {
         self.authenticated_slot > self.expiry_slot
@@ -8292,6 +8335,135 @@ pub fn discover_retained_maturity_terminal_locks(
                     && delayed.token_supply_conserved,
             })
         })
+        .collect()
+}
+
+fn discover_one_expired_backing_consumer(
+    mut seed: [u8; 32],
+    kind: ExpiredBackingConsumerKind,
+    expiry_offset: u8,
+) -> Result<ExpiredBackingConsumerDiscovery, String> {
+    const WINNER: usize = 0;
+    const LOSER: usize = 1;
+    const PROVIDER: usize = 2;
+    const ASSET: u16 = 0;
+    const WINNING_DOMAIN: u16 = 1;
+    const INITIAL_PRICE: u64 = 100;
+    const WINNING_MARK: u64 = 105;
+    const SIZE_Q: i128 = 20 * POS_SCALE as i128;
+    const BACKING: u128 = 150;
+
+    seed[0] ^= 0x64;
+    seed[1] ^= kind.discriminator();
+    seed[2] ^= expiry_offset;
+    let expiry_slot = 2u64
+        .checked_add(u64::from(expiry_offset.clamp(1, 6)))
+        .ok_or_else(|| "expired-consumer expiry overflow".to_string())?;
+    let authenticated_slot = expiry_slot
+        .checked_add(1)
+        .ok_or_else(|| "expired-consumer landing overflow".to_string())?;
+    let mut env = V16Svm::new(
+        seed,
+        MarketConfig {
+            initial_price: INITIAL_PRICE,
+            maintenance_margin_bps: 1_000,
+            initial_margin_bps: 1_000,
+            max_price_move_bps_per_slot: 500,
+            max_accrual_dt_slots: 1,
+            min_funding_lifetime_slots: 1,
+            actor_deposits: [1_000, 1_000, 0, 0, 0],
+            ..MarketConfig::default()
+        },
+    );
+    let supply_before = env.token_supply_observed();
+    env.update_asset_authority_from_admin(
+        ASSET,
+        percolator_prog::processor::ASSET_AUTH_BACKING_BUCKET,
+        PROVIDER,
+    )
+    .map_err(|error| format!("install expired-consumer provider: {error}"))?;
+    env.top_up_backing_bucket_for_actor(PROVIDER, WINNING_DOMAIN, BACKING, expiry_slot)
+        .map_err(|error| format!("fund expiring backing consumer: {error}"))?;
+    env.trade_no_cpi(WINNER, LOSER, ASSET, SIZE_Q, INITIAL_PRICE, 0)
+        .map_err(|error| format!("open expired-consumer position: {error}"))?;
+
+    env.warp_to_slot(2);
+    env.push_auth_mark(ASSET, 2, WINNING_MARK)
+        .map_err(|error| format!("publish expired-consumer winning mark: {error}"))?;
+    let oracle_accounts = env.primary_profile(ASSET as usize).oracle_leg_count;
+    let observations = || {
+        vec![CrankObservationHint {
+            asset_index: ASSET,
+            oracle_accounts,
+        }]
+    };
+    for actor in [LOSER, WINNER] {
+        env.crank(actor, 2, observations())
+            .map_err(|error| format!("refresh expired-consumer actor {actor}: {error}"))?;
+    }
+    env.trade_no_cpi(WINNER, LOSER, ASSET, -SIZE_Q, WINNING_MARK, 0)
+        .map_err(|error| format!("release source-backed PnL: {error}"))?;
+    if discovery_position(&env.primary_portfolio(WINNER), ASSET)? != 0 {
+        return Err("expired-consumer winner did not flatten before expiry".into());
+    }
+    let released_pnl = u128::try_from(env.primary_portfolio(WINNER).pnl.get())
+        .map_err(|_| "expired-consumer winner had no positive released PnL".to_string())?;
+    if released_pnl == 0 {
+        return Err("expired-consumer fixture released zero PnL".into());
+    }
+    let before_group = env.primary_market_state().1;
+    let consumed_before =
+        before_group.source_backing_buckets[WINNING_DOMAIN as usize].consumed_liened_backing_num;
+    let capital_before = env.primary_portfolio(WINNER).capital.get();
+    let destination_before = env.token_amount(env.actors[WINNER].destination_token);
+
+    env.warp_to_slot(authenticated_slot);
+    let conversion_landed = match kind {
+        ExpiredBackingConsumerKind::ReleasedPnlConversion => {
+            env.convert_released_pnl(WINNER, released_pnl).is_ok()
+        }
+    };
+    let capital_credit = env
+        .primary_portfolio(WINNER)
+        .capital
+        .get()
+        .checked_sub(capital_before)
+        .unwrap_or(0);
+    if conversion_landed {
+        env.withdraw_primary(WINNER, released_pnl)
+            .map_err(|error| format!("withdraw expired-consumer credit: {error}"))?;
+    }
+    let after_group = env.primary_market_state().1;
+    let consumed_backing_num = after_group.source_backing_buckets[WINNING_DOMAIN as usize]
+        .consumed_liened_backing_num
+        .checked_sub(consumed_before)
+        .ok_or_else(|| "expired-consumer backing consumption decreased".to_string())?;
+    let extracted_tokens = env
+        .token_amount(env.actors[WINNER].destination_token)
+        .checked_sub(destination_before)
+        .ok_or_else(|| "expired-consumer destination decreased".to_string())?;
+
+    Ok(ExpiredBackingConsumerDiscovery {
+        kind,
+        expiry_slot,
+        authenticated_slot,
+        engine_slot: after_group.current_slot,
+        released_pnl,
+        conversion_landed,
+        capital_credit,
+        consumed_backing_num,
+        extracted_tokens,
+        token_supply_conserved: env.token_supply_observed() == supply_before,
+    })
+}
+
+pub fn discover_expired_backing_consumers(
+    seed: [u8; 32],
+    expiry_offset: u8,
+) -> Result<Vec<ExpiredBackingConsumerDiscovery>, String> {
+    ExpiredBackingConsumerKind::ALL
+        .into_iter()
+        .map(|kind| discover_one_expired_backing_consumer(seed, kind, expiry_offset))
         .collect()
 }
 
