@@ -175,9 +175,9 @@ fn v16_open_security_finding_benchmark_is_complete_and_non_overclaiming() {
 
     assert_eq!(rows, 143, "refresh the dated GitHub finding snapshot");
     assert_eq!(direct, 0, "direct adapter inventory changed");
-    assert_eq!(missing, 52, "explicit finding gaps changed");
+    assert_eq!(missing, 51, "explicit finding gaps changed");
     assert_eq!(
-        independent, 91,
+        independent, 92,
         "promote only genuinely finding-agnostic invariant discoveries"
     );
 
@@ -264,6 +264,7 @@ fn v16_open_security_finding_benchmark_is_complete_and_non_overclaiming() {
                     | "stale-matcher-enable-cannot-revive-revoked-value-authority"
                     | "funded-role-principal-cannot-be-redirected-without-incumbent-consent"
                     | "committed-funding-must-accrue-before-lifecycle-terminalization"
+                    | "terminal-snapshot-must-use-current-authenticated-oracle-state"
             ),
             "unknown independent oracle: {}",
             fields[3]

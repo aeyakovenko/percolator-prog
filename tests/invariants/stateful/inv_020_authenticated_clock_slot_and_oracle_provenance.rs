@@ -6,6 +6,10 @@
 //! `v16_program_composite_timestamp_coherence_discovers_cross_epoch_liquidation` keeps a two-leg
 //! cross-rate mathematically constant, advances only one leg, and requires the public wrapper to
 //! reject the incoherent observation before it can certify liquidation or extract a reward.
+//! `v16_program_hybrid_terminal_snapshot_discovers_expired_leg_settlement` builds a two-leg Hybrid
+//! feed at the exact freshness boundary, advances one expired leg through a valid external report,
+//! and compares terminal payouts with and without public ingestion. The oracle requires an exact
+//! victim loss and counterparty gain under the stale administrative snapshot.
 //! Direct impact tests remain below. These tests exercise the deployed public
 //! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
 //! rollback, liveness, or compute outcomes appropriate to the invariant.
@@ -39,6 +43,19 @@ proptest! {
             discovery.is_violation(),
             "vulnerable-pin composite timestamp handling changed: {:?}",
             discovery
+        );
+    }
+
+    #[test]
+    fn v16_program_hybrid_terminal_snapshot_discovers_expired_leg_settlement(
+        seed in any::<[u8; 32]>()
+    ) {
+        let discovery = discover_hybrid_terminal_snapshot_violation(seed)
+            .map_err(TestCaseError::fail)?;
+        eprintln!("independent Hybrid terminal snapshot discovery: {discovery:?}");
+        prop_assert!(
+            discovery.is_violation(),
+            "vulnerable-pin Hybrid terminal snapshot changed: {discovery:?}"
         );
     }
 }

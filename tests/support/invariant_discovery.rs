@@ -854,6 +854,17 @@ pub struct CompositeTimeCoherenceDiscovery {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HybridTerminalSnapshotDiscovery {
+    pub stale_resolve_landed: bool,
+    pub stale_terminal_mark: u64,
+    pub current_terminal_mark: u64,
+    pub victim_payout_loss: u128,
+    pub counterparty_payout_gain: u128,
+    pub stale_total_payout: u128,
+    pub current_total_payout: u128,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TerminalDustDiscovery {
     pub route: ProspectiveAccrualRoute,
     pub attacker_loss: u128,
@@ -997,6 +1008,16 @@ impl CompositeTimeCoherenceDiscovery {
             && self.oi_reduction_q != 0
             && self.cranker_reward != 0
             && self.cranker_reward == u128::from(self.extracted_tokens)
+    }
+}
+
+impl HybridTerminalSnapshotDiscovery {
+    pub fn is_violation(&self) -> bool {
+        self.stale_resolve_landed
+            && self.current_terminal_mark > self.stale_terminal_mark
+            && self.victim_payout_loss != 0
+            && self.victim_payout_loss == self.counterparty_payout_gain
+            && self.stale_total_payout == self.current_total_payout
     }
 }
 
@@ -6515,6 +6536,128 @@ pub fn discover_fractional_movement_stall(
         nonmoving_stalls,
         long_overpayment,
         short_underpayment,
+    })
+}
+
+#[derive(Clone, Copy, Debug)]
+struct HybridTerminalWorld {
+    resolve_landed: bool,
+    terminal_mark: u64,
+    victim_payout: u128,
+    counterparty_payout: u128,
+}
+
+fn run_hybrid_terminal_world(
+    mut seed: [u8; 32],
+    ingest_current_reports: bool,
+) -> Result<HybridTerminalWorld, String> {
+    const VICTIM: usize = 0;
+    const COUNTERPARTY: usize = 1;
+    const ORACLE_AUTHORITY: usize = 2;
+    const OPEN_PRICE: u64 = 100_000;
+    const CAPITAL: u128 = 100_000_000;
+    const SIZE_Q: i128 = 1_000 * POS_SCALE as i128;
+    const FEEDS: [[u8; 32]; 3] = [[0xacu8; 32], [0xadu8; 32], [0u8; 32]];
+    seed[0] ^= 0x61;
+    seed[1] ^= u8::from(ingest_current_reports);
+    let mut env = V16Svm::new(
+        seed,
+        MarketConfig {
+            initial_price: OPEN_PRICE,
+            actor_deposits: [CAPITAL, CAPITAL, 1, 1, 1],
+            ..MarketConfig::default()
+        },
+    );
+    let supply_before = env.token_supply_observed();
+    env.set_clock(1, 160);
+    let initial_leg_0 = env.set_pyth_price(&FEEDS[0], OPEN_PRICE as i64, -6, 0, 160);
+    let initial_leg_1 = env.set_pyth_price(&FEEDS[1], 1_000_000, -6, 0, 100);
+    env.configure_hybrid_oracle(0, 1, 160, 0, FEEDS, &[initial_leg_0, initial_leg_1], 3, 500)
+        .map_err(|error| format!("configure terminal Hybrid oracle: {error}"))?;
+    env.update_asset_authority_from_admin(
+        0,
+        percolator_prog::processor::ASSET_AUTH_ORACLE,
+        ORACLE_AUTHORITY,
+    )
+    .map_err(|error| format!("separate terminal oracle authority: {error}"))?;
+    env.trade_no_cpi(VICTIM, COUNTERPARTY, 0, SIZE_Q, OPEN_PRICE, 0)
+        .map_err(|error| format!("open Hybrid terminal pair: {error}"))?;
+
+    env.set_clock(100, 220);
+    let current_leg_0 = env.set_pyth_price(&FEEDS[0], OPEN_PRICE as i64, -6, 0, 160);
+    let current_leg_1 = env.set_pyth_price(&FEEDS[1], 1_100_000, -6, 0, 220);
+    if ingest_current_reports {
+        env.crank_with_oracles(
+            ORACLE_AUTHORITY,
+            100,
+            vec![CrankObservationHint {
+                asset_index: 0,
+                oracle_accounts: 2,
+            }],
+            &[current_leg_0, current_leg_1],
+        )
+        .map_err(|error| format!("ingest current Hybrid reports: {error}"))?;
+    }
+    let before_resolve = fingerprint(&env);
+    let resolve = env.resolve_market();
+    let resolve_landed = resolve.is_ok();
+    if !resolve_landed {
+        if fingerprint(&env) != before_resolve {
+            return Err("rejected stale Hybrid resolve did not roll back exactly".into());
+        }
+        return Ok(HybridTerminalWorld {
+            resolve_landed,
+            terminal_mark: env.primary_market_state().1.assets[0].effective_price,
+            victim_payout: 0,
+            counterparty_payout: 0,
+        });
+    }
+    let terminal_mark = env.primary_market_state().1.assets[0].effective_price;
+    let counterparty_payout = drain_resolved_discovery_actor(&mut env, COUNTERPARTY)?;
+    let victim_payout = drain_resolved_discovery_actor(&mut env, VICTIM)?;
+    if env.token_supply_observed() != supply_before {
+        return Err("Hybrid terminal world changed SPL supply".into());
+    }
+    Ok(HybridTerminalWorld {
+        resolve_landed,
+        terminal_mark,
+        victim_payout,
+        counterparty_payout,
+    })
+}
+
+pub fn discover_hybrid_terminal_snapshot_violation(
+    seed: [u8; 32],
+) -> Result<HybridTerminalSnapshotDiscovery, String> {
+    let stale = run_hybrid_terminal_world(seed, false)?;
+    let current = run_hybrid_terminal_world(seed, true)?;
+    if !current.resolve_landed {
+        return Err("current Hybrid terminal control did not resolve".into());
+    }
+    let victim_payout_loss = current
+        .victim_payout
+        .checked_sub(stale.victim_payout)
+        .ok_or_else(|| "stale Hybrid resolve increased victim payout".to_string())?;
+    let counterparty_payout_gain = stale
+        .counterparty_payout
+        .checked_sub(current.counterparty_payout)
+        .ok_or_else(|| "stale Hybrid resolve decreased counterparty payout".to_string())?;
+    let stale_total_payout = stale
+        .victim_payout
+        .checked_add(stale.counterparty_payout)
+        .ok_or_else(|| "stale Hybrid payout overflow".to_string())?;
+    let current_total_payout = current
+        .victim_payout
+        .checked_add(current.counterparty_payout)
+        .ok_or_else(|| "current Hybrid payout overflow".to_string())?;
+    Ok(HybridTerminalSnapshotDiscovery {
+        stale_resolve_landed: stale.resolve_landed,
+        stale_terminal_mark: stale.terminal_mark,
+        current_terminal_mark: current.terminal_mark,
+        victim_payout_loss,
+        counterparty_payout_gain,
+        stale_total_payout,
+        current_total_payout,
     })
 }
 
