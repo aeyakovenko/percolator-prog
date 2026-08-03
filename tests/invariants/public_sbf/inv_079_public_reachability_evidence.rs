@@ -177,12 +177,12 @@ fn v16_open_security_finding_benchmark_is_complete_and_non_overclaiming() {
 
     assert_eq!(rows, 143, "refresh the dated GitHub finding snapshot");
     assert_eq!(direct, 0, "direct adapter inventory changed");
-    assert_eq!(missing, 10, "explicit finding gaps changed");
+    assert_eq!(missing, 9, "explicit finding gaps changed");
     assert_eq!(
         independent, 121,
         "promote only genuinely finding-agnostic invariant discoveries"
     );
-    assert_eq!(nonqualifying, 12, "nonqualifying evidence roster changed");
+    assert_eq!(nonqualifying, 13, "nonqualifying evidence roster changed");
 
     let independent_sources = [
         include_str!("../stateful/inv_001_market_incarnation_binding.rs"),
@@ -332,6 +332,7 @@ fn v16_open_security_finding_benchmark_is_complete_and_non_overclaiming() {
     let nonqualifying_sources = [
         include_str!("inv_079_public_reachability_evidence.rs"),
         include_str!("../cu/inv_005_authority_incarnation_binding.rs"),
+        include_str!("../cu/inv_028_source_domain_realizability_cap.rs"),
         include_str!("../cu/inv_061_deterministic_bounded_liquidation.rs"),
         include_str!("../cu/inv_063_backing_expiry_normalization.rs"),
         include_str!("../cu/inv_071_crank_progress.rs"),

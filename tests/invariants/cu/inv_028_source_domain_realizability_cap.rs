@@ -15,11 +15,122 @@
 //! progress from the source-lien rank rather than the return code. It records repeated successful
 //! no-op cranks, permits any genuine partial reductions, and requires every remaining owner route
 //! to roll back exactly once the reduction sequence reaches a funded nonzero fixed point.
+//! `v16_program_foreign_expiry_lien_prerequisite_matrix_keeps_bucket_fresh` constructs the exact
+//! two-winner precursor and proves whether the lien-free close can create the impaired aggregate
+//! state required by the later foreign-expiry finding.
 //!
 //! Guarantee boundary: this is a public maximum-shape counterexample on the vulnerable engine
 //! pin. It does not certify the fixed admission reservation rule.
 
 use super::*;
+
+#[test]
+fn v16_program_foreign_expiry_lien_prerequisite_matrix_keeps_bucket_fresh() {
+    const Q: i128 = 1_000 * POS_SCALE as i128;
+    const PRICE: u64 = 100;
+    const UP_PRICE: u64 = 105;
+
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(1, 1_000, 5_000, 500);
+    env.configure_auth_mark_for_asset_as_admin(0, 0, PRICE);
+    env.top_up_backing_bucket(1, 100_000, 3);
+
+    let target_owner = Keypair::new();
+    let target_peer_owner = Keypair::new();
+    let trigger_owner = Keypair::new();
+    let trigger_peer_owner = Keypair::new();
+    let target = env.create_portfolio(&target_owner);
+    let target_peer = env.create_portfolio(&target_peer_owner);
+    let trigger = env.create_portfolio(&trigger_owner);
+    let trigger_peer = env.create_portfolio(&trigger_peer_owner);
+    for (owner, portfolio, capital) in [
+        (&target_owner, target, 52_501),
+        (&target_peer_owner, target_peer, 1_000_000),
+        (&trigger_owner, trigger, 1_000_000),
+        (&trigger_peer_owner, trigger_peer, 1_000_000),
+    ] {
+        env.deposit(owner, portfolio, capital);
+    }
+    env.trade_with_cu(
+        &target_owner,
+        target,
+        &target_peer_owner,
+        target_peer,
+        Q,
+        PRICE,
+        0,
+    );
+    env.trade_with_cu(
+        &trigger_owner,
+        trigger,
+        &trigger_peer_owner,
+        trigger_peer,
+        Q,
+        PRICE,
+        0,
+    );
+
+    env.svm.warp_to_slot(2);
+    env.push_auth_mark_for_asset_as_admin(0, 2, UP_PRICE);
+    for portfolio in [target_peer, trigger_peer, target, trigger] {
+        env.crank(
+            portfolio,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 2,
+                observations: crank_observations(0),
+            },
+        );
+    }
+    assert_eq!(env.portfolio_state(target).pnl.get(), 5_000);
+    assert_eq!(env.portfolio_state(trigger).pnl.get(), 5_000);
+    env.trade_with_cu(
+        &target_owner,
+        target,
+        &target_peer_owner,
+        target_peer,
+        POS_SCALE as i128,
+        UP_PRICE,
+        0,
+    );
+    let lien = env.portfolio_state(target).source_domains[0];
+    assert!(lien.source_claim_counterparty_liened_num.get() > 0);
+    assert!(lien.source_lien_counterparty_backing_num.get() > 0);
+    let trigger_source = env.portfolio_state(trigger).source_domains[0];
+    assert!(trigger_source.source_claim_bound_num.get() > 0);
+    assert_eq!(trigger_source.source_claim_liened_num.get(), 0);
+
+    env.svm.warp_to_slot(3);
+    env.resolve();
+    let trigger_destination = env.token_account(trigger_owner.pubkey(), 0);
+    env.svm.expire_blockhash();
+    env.send(
+        ProgInstruction::CloseResolved {
+            fee_rate_per_slot: 0,
+        },
+        vec![
+            AccountMeta::new_readonly(trigger_owner.pubkey(), false),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(trigger, false),
+            AccountMeta::new(trigger_destination, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[],
+    )
+    .expect("the lien-free winner must commit the foreign expiry");
+    let impaired_market = env.market_state().1;
+    assert_eq!(
+        impaired_market.source_backing_buckets[1].status,
+        BackingBucketStatusV16::Fresh,
+        "the pinned predecessor unexpectedly created PR300's impaired prerequisite"
+    );
+    assert_eq!(
+        impaired_market.source_backing_buckets[1].impaired_liened_backing_num,
+        0
+    );
+    assert!(has_active_leg_for_asset(&env.portfolio_state(target), 0));
+    assert!(env.portfolio_state(target).capital.get() != 0);
+}
 
 #[derive(Clone, Copy, Debug)]
 enum SourceCapacityFillOrder {
