@@ -177,9 +177,9 @@ fn v16_open_security_finding_benchmark_is_complete_and_non_overclaiming() {
 
     assert_eq!(rows, 143, "refresh the dated GitHub finding snapshot");
     assert_eq!(direct, 0, "direct adapter inventory changed");
-    assert_eq!(missing, 17, "explicit finding gaps changed");
+    assert_eq!(missing, 16, "explicit finding gaps changed");
     assert_eq!(
-        independent, 117,
+        independent, 118,
         "promote only genuinely finding-agnostic invariant discoveries"
     );
     assert_eq!(nonqualifying, 9, "nonqualifying evidence roster changed");
@@ -294,6 +294,7 @@ fn v16_open_security_finding_benchmark_is_complete_and_non_overclaiming() {
                     | "partial-adl-recovery-residue-must-have-permissionless-cleanup"
                     | "fractional-social-loss-carry-cannot-lock-funded-owner-exit"
                     | "fragmented-recovery-must-have-a-permissionless-pairwise-close-path"
+                    | "permissionless-asset-local-close-cannot-freeze-unrelated-funded-users"
                     | "account-local-expired-close-cannot-create-global-funded-recovery-sink"
                     | "recovery-mode-must-have-a-public-terminal-continuation"
                     | "successful-crank-cannot-consume-zero-delta-price-time"

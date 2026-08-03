@@ -2,7 +2,7 @@
 //!
 //! Normative obligation: Every publicly reachable funded state has a finite public path to capital or terminal disposition.
 //!
-//! Evidence in this file (I/C plus invariant-specific M assertions): `v16_program_fragmented_recovery_pair_matrix_discovers_force_close_lock`, `v16_program_fractional_social_loss_exit_matrix_discovers_dust_lock`, `v16_program_recovery_residue_matrix_discovers_abandoned_owner_lock`, `v16_program_expired_partial_close_matrix_discovers_global_terminal_lock`, `v16_program_crossed_adl_effective_exit_matrix_discovers_zero_oi_residue_lock`, `v16_program_partial_adl_effective_exit_matrix_discovers_zero_oi_residue_lock`, `v16_attack_source_backed_force_close_preserves_bounded_resolved_exits`, `v16_probe_liquidation_then_shutdown_preserves_bounded_owner_exit`, `v16_attack_permissionless_close_resolved_survives_drained_owner_system_account`, `v16_attack_permissionless_asset_epoch_grief_has_atomic_max_leg_exit`. These tests exercise the deployed public
+//! Evidence in this file (I/C plus invariant-specific M assertions): `v16_program_permissionless_asset_expired_close_matrix_discovers_global_recovery`, `v16_program_fragmented_recovery_pair_matrix_discovers_force_close_lock`, `v16_program_fractional_social_loss_exit_matrix_discovers_dust_lock`, `v16_program_recovery_residue_matrix_discovers_abandoned_owner_lock`, `v16_program_expired_partial_close_matrix_discovers_global_terminal_lock`, `v16_program_crossed_adl_effective_exit_matrix_discovers_zero_oi_residue_lock`, `v16_program_partial_adl_effective_exit_matrix_discovers_zero_oi_residue_lock`, `v16_attack_source_backed_force_close_preserves_bounded_resolved_exits`, `v16_probe_liquidation_then_shutdown_preserves_bounded_owner_exit`, `v16_attack_permissionless_close_resolved_survives_drained_owner_system_account`, `v16_attack_permissionless_asset_epoch_grief_has_atomic_max_leg_exit`. These tests exercise the deployed public
 //! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
 //! rollback, liveness, or compute outcomes appropriate to the invariant.
 //!
@@ -11,6 +11,145 @@
 //! plus every additional verification method required by the charter.
 
 use super::*;
+
+#[test]
+fn v16_program_permissionless_asset_expired_close_matrix_discovers_global_recovery() {
+    for base_deposit in [1_000u128, 1_001] {
+        let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+            max_portfolio_assets: 1,
+            max_bankrupt_close_lifetime_slots: 2,
+            public_b_chunk_atoms: 1,
+            ..V16CuMarketParams::default()
+        });
+        env.configure_auth_mark_with_cu(0, 100);
+        env.configure_permissionless_resolve_with_cu(100, 5);
+        env.update_market_init_fee_policy_with_cu(1);
+
+        let base_long_owner = Keypair::new();
+        let base_short_owner = Keypair::new();
+        let base_long = env.create_portfolio(&base_long_owner);
+        let base_short = env.create_portfolio(&base_short_owner);
+        env.deposit(&base_long_owner, base_long, base_deposit);
+        env.deposit(&base_short_owner, base_short, base_deposit);
+        env.trade_asset_with_cu(
+            0,
+            &base_long_owner,
+            base_long,
+            &base_short_owner,
+            base_short,
+            POS_SCALE as i128,
+            100,
+            0,
+        );
+
+        let creator = Keypair::new();
+        let creator_key = creator.pubkey();
+        env.activate_permissionless_asset_with_fee(
+            &creator,
+            1,
+            1,
+            100,
+            creator_key,
+            creator_key,
+            creator_key,
+            creator_key,
+            1,
+        );
+        env.configure_auth_mark_for_asset_with_authority(1, &creator, 1, 100);
+        let attack_long_owner = Keypair::new();
+        let attack_short_owner = Keypair::new();
+        let attack_long = env.create_portfolio(&attack_long_owner);
+        let attack_short = env.create_portfolio(&attack_short_owner);
+        env.deposit(&attack_long_owner, attack_long, 10);
+        env.deposit(&attack_short_owner, attack_short, 2);
+        env.trade_asset_with_cu(
+            1,
+            &attack_long_owner,
+            attack_long,
+            &attack_short_owner,
+            attack_short,
+            (POS_SCALE / 50) as i128,
+            100,
+            0,
+        );
+
+        for (slot, mark) in [(2u64, 200u64), (3, 300)] {
+            env.svm.warp_to_slot(slot);
+            env.push_auth_mark_for_asset_with_authority(1, &creator, slot, mark);
+            env.crank(
+                attack_long,
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: slot,
+                    observations: crank_observations(1),
+                },
+            );
+        }
+        env.crank(
+            attack_short,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 3,
+                observations: crank_observations(1),
+            },
+        );
+        assert_eq!(env.portfolio_state(attack_short).capital.get(), 0);
+        assert!(env.portfolio_state(attack_short).pnl.get() < 0);
+
+        env.svm.warp_to_slot(4);
+        env.try_shutdown_asset_with_authority(&creator, 1, 4)
+            .expect("permissionless creator shuts down only its own asset");
+        env.forfeit_recovery_leg_with_cu(&attack_short_owner, attack_short, 1, 1);
+        let ledger = close_progress(&env.portfolio_state(attack_short));
+        assert!(ledger.active && ledger.residual_remaining > 0);
+        assert_eq!(env.market_state().1.mode, MarketModeV16::Live);
+
+        let expired_slot = ledger.max_close_slot + 1;
+        env.svm.warp_to_slot(expired_slot);
+        env.svm.expire_blockhash();
+        env.send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 0,
+                observations: vec![],
+            },
+            vec![
+                AccountMeta::new_readonly(env.payer.pubkey(), false),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(attack_short, false),
+            ],
+            &[],
+        )
+        .expect("expired local close chooses a public continuation");
+        assert_eq!(env.market_state().1.mode, MarketModeV16::Recovery);
+
+        let market_before = env.svm.get_account(&env.market).unwrap();
+        let base_long_before = env.svm.get_account(&base_long).unwrap();
+        let base_short_before = env.svm.get_account(&base_short).unwrap();
+        let vault_before = env.svm.get_account(&env.vault).unwrap();
+        env.svm.expire_blockhash();
+        let base_exit = env.try_trade_asset_with_cu(
+            0,
+            &base_long_owner,
+            base_long,
+            &base_short_owner,
+            base_short,
+            -(POS_SCALE as i128),
+            100,
+            0,
+        );
+        assert!(
+            base_exit.is_err(),
+            "global Recovery did not freeze the base exit"
+        );
+        assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+        assert_eq!(env.svm.get_account(&base_long).unwrap(), base_long_before);
+        assert_eq!(env.svm.get_account(&base_short).unwrap(), base_short_before);
+        assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+        assert!(has_active_leg_for_asset(&env.portfolio_state(base_long), 0));
+        assert!(has_active_leg_for_asset(
+            &env.portfolio_state(base_short),
+            0
+        ));
+    }
+}
 
 #[test]
 fn v16_program_fragmented_recovery_pair_matrix_discovers_force_close_lock() {
