@@ -181,14 +181,14 @@ cargo test --test v16_cu
 cargo kani --tests
 ```
 
-At PR135 commit `1082c060a5461380560c28c162433143ed238714`, the full `v16_cu` command has
-631 passing tests and these two intentionally red TDD probes:
+On engine pin `143e68c4917ed0400a27b952f036a5677047cd84`, the full `v16_cu` inventory has
+664 passing tests and these two intentionally red public-route TDD probes:
 
 - `v16_attack_pending_later_rounded_rescue_funding_requires_observation` (INV-053)
 - `v16_probe_post_expiry_trade_cannot_charge_backing_fee` (INV-063)
 
-They fail identically before and after the file-only reorganization. Until their fixes land, use
-the following command to verify that all non-red CU tests pass without concealing the open probes:
+The unfiltered command intentionally returns nonzero until both defects are fixed. Use the
+following command to verify all non-red CU tests without weakening or concealing the open probes:
 
 ```bash
 cargo test --test v16_cu -- \
