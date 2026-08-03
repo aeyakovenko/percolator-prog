@@ -24,7 +24,7 @@ verification methods are in [`../../INVARIANTS.md`](../../INVARIANTS.md).
 | --- | ---: | --- |
 | `public_sbf/` | 74 | Deterministic public SBF/LiteSVM counterexamples, regressions, and manifest checks |
 | `stateful/` | 111 | Proptest-generated public routes, including forty-three finding-agnostic discovery properties |
-| `cu/` | 77 | Positive public-route, metamorphic, rollback, liveness, and max-shape CU tests |
+| `cu/` | 78 | Positive public-route, metamorphic, rollback, liveness, and max-shape CU tests |
 | `kani/` | 40 | Symbolic wrapper arithmetic, matcher-binding, and strict-decoder proofs |
 
 The deterministic and stateful LoF adapters currently reproduce quarantined vulnerable behavior.
@@ -54,7 +54,7 @@ charter.
 | INV-002 | Independent + Direct | `public_sbf/inv_002_asset_generation_binding.rs`, `stateful/inv_002_asset_generation_binding.rs` |
 | INV-003 | Independent + Direct | `public_sbf/inv_003_portfolio_incarnation_binding.rs`, `stateful/inv_003_portfolio_incarnation_binding.rs` |
 | INV-004 | Independent | `stateful/inv_004_position_episode_binding.rs` |
-| INV-005 | Independent + Direct | `public_sbf/inv_005_authority_incarnation_binding.rs`, `stateful/inv_005_authority_incarnation_binding.rs` |
+| INV-005 | Independent + Direct + SVM/CU | `public_sbf/inv_005_authority_incarnation_binding.rs`, `stateful/inv_005_authority_incarnation_binding.rs`, `cu/inv_005_authority_incarnation_binding.rs` |
 | INV-006 | Gap | - |
 | INV-007 | Gap | - |
 | INV-008 | Independent + Direct | `public_sbf/inv_008_intent_uniqueness_and_bounded_replay.rs`, `stateful/inv_008_intent_uniqueness_and_bounded_replay.rs` |
@@ -144,7 +144,7 @@ charter.
 
 `open_findings.tsv` is the unified 2026-08-03 snapshot of 143 open PRs whose titles identify a
 public-route LoF or DoS class. It maps every row to a primary invariant. PR135 currently has 0
-**Direct regression** rows, 34 **Missing** rows, 107 **Independent discovery** rows, and two
+**Direct regression** rows, 29 **Missing** rows, 107 **Independent discovery** rows, and seven
 **Nonqualifying** rows. The independent
 rows are backed by finding-agnostic fingerprints in `independent_discoveries.tsv`; that mapping is
 evidence metadata and is never consumed by a generator or oracle. The older

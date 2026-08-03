@@ -177,12 +177,12 @@ fn v16_open_security_finding_benchmark_is_complete_and_non_overclaiming() {
 
     assert_eq!(rows, 143, "refresh the dated GitHub finding snapshot");
     assert_eq!(direct, 0, "direct adapter inventory changed");
-    assert_eq!(missing, 34, "explicit finding gaps changed");
+    assert_eq!(missing, 29, "explicit finding gaps changed");
     assert_eq!(
         independent, 107,
         "promote only genuinely finding-agnostic invariant discoveries"
     );
-    assert_eq!(nonqualifying, 2, "nonqualifying evidence roster changed");
+    assert_eq!(nonqualifying, 7, "nonqualifying evidence roster changed");
 
     let independent_sources = [
         include_str!("../stateful/inv_001_market_incarnation_binding.rs"),
@@ -313,6 +313,7 @@ fn v16_open_security_finding_benchmark_is_complete_and_non_overclaiming() {
 
     let nonqualifying_sources = [
         include_str!("inv_079_public_reachability_evidence.rs"),
+        include_str!("../cu/inv_005_authority_incarnation_binding.rs"),
         include_str!("../cu/inv_077_bounded_work_and_maximum_shape_compute.rs"),
     ];
     let mut classified_prs = std::collections::BTreeSet::new();

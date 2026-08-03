@@ -60539,6 +60539,9 @@ fn setup_max_source_live_pair(
 // A trade that lands after the backing provider's signed expiry must not create a
 // new source lien and charge the trader for support that has already lapsed.
 
+#[path = "invariants/cu/inv_005_authority_incarnation_binding.rs"]
+mod inv_005_authority_incarnation_binding;
+
 #[path = "invariants/cu/inv_018_quote_mint_vault_token_program_and_authority_integrity.rs"]
 mod inv_018_quote_mint_vault_token_program_and_authority_integrity;
 
