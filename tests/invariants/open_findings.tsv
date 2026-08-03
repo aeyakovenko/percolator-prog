@@ -144,4 +144,4 @@
 379	DoS	REAL	INV-028	missing	[REAL DoS] Preserve source capacity in combined engine pin (restacked)
 380	LoF	BLOCKER	INV-039	independent-discovery	[BLOCKER LoF] Preserve funding across prospective EWMA updates
 381	LoF	BLOCKER	INV-038	independent-discovery	[BLOCKER LoF] Round composite oracle prices once
-393	LoF	REAL	INV-010	missing	[REAL LoF] Order matcher config mutations
+393	LoF	REAL	INV-010	independent-discovery	[REAL LoF] Order matcher config mutations

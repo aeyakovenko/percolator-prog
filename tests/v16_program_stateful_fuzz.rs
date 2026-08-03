@@ -82,18 +82,19 @@ use support::invariant_discovery::{
     discover_cross_domain_insurance_violation, discover_fee_consent_violations,
     discover_fractional_movement_stall, discover_full_refresh_omission_violation,
     discover_intent_retries, discover_mark_movement_reserve_violations,
-    discover_market_incarnation_replays, discover_observation_omission_violation,
-    discover_pending_mark_admission_violations, discover_pending_mark_fee_ordering,
-    discover_pending_mark_inheritance_violations, discover_pending_target_override_violations,
-    discover_portfolio_incarnation_replays, discover_position_episode_replays,
-    discover_prospective_accrual_violations, discover_source_fee_consent_violations,
-    discover_superseded_intents, discover_terminal_commit_ordering,
-    discover_terminal_dust_violations, discover_terminal_generation_replay,
-    discover_trade_driven_liquidation_violations, AccrualOrderingKind, AssetIntentKind,
-    AuthorityIntentKind, BackingExpiryCase, BackingProviderConsentOrder, CompositeRoundingScale,
-    DiscoveryTradeRoute, FeeConsentKind, MarketIntentKind, PendingMarkSource, PortfolioIntentKind,
-    PositionEpisodeKind, ProspectiveAccrualRoute, RetryIntentKind, SourceFeeConsentKind,
-    SupersededIntentKind, TerminalGenerationKind, TradeDrivenMarkMode,
+    discover_market_incarnation_replays, discover_matcher_mutation_order_violation,
+    discover_observation_omission_violation, discover_pending_mark_admission_violations,
+    discover_pending_mark_fee_ordering, discover_pending_mark_inheritance_violations,
+    discover_pending_target_override_violations, discover_portfolio_incarnation_replays,
+    discover_position_episode_replays, discover_prospective_accrual_violations,
+    discover_source_fee_consent_violations, discover_superseded_intents,
+    discover_terminal_commit_ordering, discover_terminal_dust_violations,
+    discover_terminal_generation_replay, discover_trade_driven_liquidation_violations,
+    AccrualOrderingKind, AssetIntentKind, AuthorityIntentKind, BackingExpiryCase,
+    BackingProviderConsentOrder, CompositeRoundingScale, DiscoveryTradeRoute, FeeConsentKind,
+    MarketIntentKind, PendingMarkSource, PortfolioIntentKind, PositionEpisodeKind,
+    ProspectiveAccrualRoute, RetryIntentKind, SourceFeeConsentKind, SupersededIntentKind,
+    TerminalGenerationKind, TradeDrivenMarkMode,
 };
 
 fn env_usize(name: &str, default: usize) -> usize {
@@ -121,6 +122,9 @@ mod inv_005_authority_incarnation_binding;
 
 #[path = "invariants/stateful/inv_008_intent_uniqueness_and_bounded_replay.rs"]
 mod inv_008_intent_uniqueness_and_bounded_replay;
+
+#[path = "invariants/stateful/inv_010_out_of_order_safety.rs"]
+mod inv_010_out_of_order_safety;
 
 #[path = "invariants/stateful/inv_014_delayed_policy_and_policy_epoch_safety.rs"]
 mod inv_014_delayed_policy_and_policy_epoch_safety;

@@ -175,9 +175,9 @@ fn v16_open_security_finding_benchmark_is_complete_and_non_overclaiming() {
 
     assert_eq!(rows, 143, "refresh the dated GitHub finding snapshot");
     assert_eq!(direct, 0, "direct adapter inventory changed");
-    assert_eq!(missing, 55, "explicit finding gaps changed");
+    assert_eq!(missing, 54, "explicit finding gaps changed");
     assert_eq!(
-        independent, 88,
+        independent, 89,
         "promote only genuinely finding-agnostic invariant discoveries"
     );
 
@@ -188,6 +188,7 @@ fn v16_open_security_finding_benchmark_is_complete_and_non_overclaiming() {
         include_str!("../stateful/inv_004_position_episode_binding.rs"),
         include_str!("../stateful/inv_005_authority_incarnation_binding.rs"),
         include_str!("../stateful/inv_008_intent_uniqueness_and_bounded_replay.rs"),
+        include_str!("../stateful/inv_010_out_of_order_safety.rs"),
         include_str!("../stateful/inv_014_delayed_policy_and_policy_epoch_safety.rs"),
         include_str!("../stateful/inv_020_authenticated_clock_slot_and_oracle_provenance.rs"),
         include_str!("../stateful/inv_031_no_double_use_of_claim_backing_or_insurance_atoms.rs"),
@@ -260,6 +261,7 @@ fn v16_open_security_finding_benchmark_is_complete_and_non_overclaiming() {
                     | "expired-backing-cannot-create-withdrawable-provider-value"
                     | "old-generation-terminal-capability-cannot-crystallize-replacement-value"
                     | "stale-position-episode-consent-cannot-transfer-or-orphan-value"
+                    | "stale-matcher-enable-cannot-revive-revoked-value-authority"
             ),
             "unknown independent oracle: {}",
             fields[3]
