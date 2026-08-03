@@ -177,9 +177,9 @@ fn v16_open_security_finding_benchmark_is_complete_and_non_overclaiming() {
 
     assert_eq!(rows, 143, "refresh the dated GitHub finding snapshot");
     assert_eq!(direct, 0, "direct adapter inventory changed");
-    assert_eq!(missing, 28, "explicit finding gaps changed");
+    assert_eq!(missing, 27, "explicit finding gaps changed");
     assert_eq!(
-        independent, 108,
+        independent, 109,
         "promote only genuinely finding-agnostic invariant discoveries"
     );
     assert_eq!(nonqualifying, 7, "nonqualifying evidence roster changed");

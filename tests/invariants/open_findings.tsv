@@ -37,7 +37,7 @@
 261	DoS	HARDENING	INV-020	independent-discovery	[HARDENING DoS] Reject expired Hybrid terminal snapshots
 264	LoF	BLOCKER	INV-045	independent-discovery	[BLOCKER LoF] Bind AuthMark targets before exposure migration
 265	LoF	BLOCKER	INV-045	independent-discovery	[BLOCKER LoF] Publish EWMA oracle targets before exposure changes
-266	DoS	BLOCKER	INV-073	missing	[BLOCKER DoS] Keep exact-OI ADL survivors exit-live
+266	DoS	BLOCKER	INV-073	independent-discovery	[BLOCKER DoS] Keep exact-OI ADL survivors exit-live
 267	LoF	BLOCKER	INV-031	independent-discovery	[BLOCKER LoF] Keep source backing domain-local
 268	DoS	BLOCKER	INV-073	independent-discovery	[BLOCKER DoS] Keep unilateral exact-OI ADL survivors exit-live
 269	DoS	BLOCKER	INV-077	nonqualifying	[BLOCKER DoS] Keep max-shape zero-delta stale resolution live

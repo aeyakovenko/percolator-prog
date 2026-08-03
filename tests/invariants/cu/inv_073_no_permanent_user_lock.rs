@@ -2,7 +2,7 @@
 //!
 //! Normative obligation: Every publicly reachable funded state has a finite public path to capital or terminal disposition.
 //!
-//! Evidence in this file (I/C plus invariant-specific M assertions): `v16_program_partial_adl_effective_exit_matrix_discovers_zero_oi_residue_lock`, `v16_attack_source_backed_force_close_preserves_bounded_resolved_exits`, `v16_probe_liquidation_then_shutdown_preserves_bounded_owner_exit`, `v16_attack_permissionless_close_resolved_survives_drained_owner_system_account`, `v16_attack_permissionless_asset_epoch_grief_has_atomic_max_leg_exit`. These tests exercise the deployed public
+//! Evidence in this file (I/C plus invariant-specific M assertions): `v16_program_crossed_adl_effective_exit_matrix_discovers_zero_oi_residue_lock`, `v16_program_partial_adl_effective_exit_matrix_discovers_zero_oi_residue_lock`, `v16_attack_source_backed_force_close_preserves_bounded_resolved_exits`, `v16_probe_liquidation_then_shutdown_preserves_bounded_owner_exit`, `v16_attack_permissionless_close_resolved_survives_drained_owner_system_account`, `v16_attack_permissionless_asset_epoch_grief_has_atomic_max_leg_exit`. These tests exercise the deployed public
 //! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
 //! rollback, liveness, or compute outcomes appropriate to the invariant.
 //!
@@ -11,6 +11,161 @@
 //! plus every additional verification method required by the charter.
 
 use super::*;
+
+#[test]
+fn v16_program_crossed_adl_effective_exit_matrix_discovers_zero_oi_residue_lock() {
+    const PRICE: u64 = 1;
+    const OPEN_Q: i128 = 13_000 * POS_SCALE as i128;
+
+    for maintenance_fee_per_slot in [27u128, 28] {
+        let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+            h_max: 6_480_000,
+            initial_price: PRICE,
+            maintenance_margin_bps: 500,
+            initial_margin_bps: 500,
+            min_nonzero_mm_req: 599,
+            min_nonzero_im_req: 600,
+            max_price_move_bps_per_slot: 24,
+            max_accrual_dt_slots: 20,
+            max_abs_funding_e9_per_slot: 0,
+            min_funding_lifetime_slots: 10_000_000,
+            liquidation_fee_bps: 0,
+            maintenance_fee_per_slot,
+            ..V16CuMarketParams::default()
+        });
+        let survivor_owner = Keypair::new();
+        let counterparty_owner = Keypair::new();
+        let survivor = env.create_portfolio(&survivor_owner);
+        let counterparty = env.create_portfolio(&counterparty_owner);
+        env.deposit(&survivor_owner, survivor, 1_000);
+        env.deposit(&counterparty_owner, counterparty, 1_189);
+
+        env.svm.warp_to_slot(8);
+        env.trade_asset_with_cu(
+            0,
+            &survivor_owner,
+            survivor,
+            &counterparty_owner,
+            counterparty,
+            OPEN_Q,
+            PRICE,
+            0,
+        );
+        env.svm.warp_to_slot(27);
+        env.crank(
+            survivor,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 27,
+                observations: crank_observations(0),
+            },
+        );
+        env.svm.warp_to_slot(35);
+        env.sync_maintenance_fee_with_cu(counterparty, None, 35);
+        env.crank_steps(
+            counterparty,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 35,
+                observations: crank_observations(0),
+            },
+            2,
+        );
+
+        let before = env.market_state().1;
+        let effective_q = before.assets[0].oi_eff_long_q;
+        let stored_q = active_leg_for_asset(&env.portfolio_state(survivor), 0)
+            .basis_pos_q
+            .unsigned_abs();
+        assert_eq!(before.assets[0].oi_eff_short_q, effective_q);
+        assert!(effective_q > 0 && stored_q > effective_q);
+
+        env.svm.expire_blockhash();
+        env.try_trade_asset_with_cu(
+            0,
+            &counterparty_owner,
+            counterparty,
+            &survivor_owner,
+            survivor,
+            effective_q as i128,
+            PRICE,
+            0,
+        )
+        .expect("exact-effective crossed reduction");
+
+        let crossed = env.market_state().1;
+        let residual = active_leg_for_asset(&env.portfolio_state(survivor), 0)
+            .basis_pos_q
+            .unsigned_abs();
+        assert_eq!(crossed.assets[0].oi_eff_long_q, 0);
+        assert_eq!(crossed.assets[0].oi_eff_short_q, 0);
+        assert_eq!(crossed.assets[0].mode_long, SideModeV16::Normal);
+        assert!(residual > 0);
+        assert!(env.portfolio_state(survivor).capital.get() > 0);
+
+        let fixed_market = env.svm.get_account(&env.market).unwrap();
+        let fixed_survivor = env.svm.get_account(&survivor).unwrap();
+        for _ in 0..4 {
+            env.svm.expire_blockhash();
+            let cu = env
+                .send(
+                    ProgInstruction::PermissionlessCrank {
+                        now_slot: 35,
+                        observations: vec![],
+                    },
+                    vec![
+                        AccountMeta::new(env.payer.pubkey(), true),
+                        AccountMeta::new(env.market, false),
+                        AccountMeta::new(survivor, false),
+                    ],
+                    &[],
+                )
+                .expect("crossed zero-OI residue crank");
+            assert_cu_within("crossed zero-OI residue crank", cu, CRANK_CU_LIMIT);
+            assert_eq!(env.svm.get_account(&env.market).unwrap(), fixed_market);
+            assert_eq!(env.svm.get_account(&survivor).unwrap(), fixed_survivor);
+        }
+
+        env.svm.expire_blockhash();
+        let owner_exit = env.send(
+            ProgInstruction::RebalanceReduce {
+                asset_index: 0,
+                reduce_q: residual,
+            },
+            vec![
+                AccountMeta::new(survivor_owner.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(survivor, false),
+            ],
+            &[&survivor_owner],
+        );
+        assert!(owner_exit.is_err());
+        assert_eq!(env.svm.get_account(&env.market).unwrap(), fixed_market);
+        assert_eq!(env.svm.get_account(&survivor).unwrap(), fixed_survivor);
+
+        let counterparty_before = env.svm.get_account(&counterparty).unwrap();
+        env.svm.expire_blockhash();
+        let matched_exit = env.try_trade_asset_with_cu(
+            0,
+            &counterparty_owner,
+            counterparty,
+            &survivor_owner,
+            survivor,
+            residual as i128,
+            PRICE,
+            0,
+        );
+        assert!(matched_exit.is_err());
+        assert_eq!(env.svm.get_account(&env.market).unwrap(), fixed_market);
+        assert_eq!(env.svm.get_account(&survivor).unwrap(), fixed_survivor);
+        assert_eq!(
+            env.svm.get_account(&counterparty).unwrap(),
+            counterparty_before
+        );
+        assert_eq!(
+            env.market_state().1.vault as u64,
+            env.token_amount(env.vault)
+        );
+    }
+}
 
 #[test]
 fn v16_program_partial_adl_effective_exit_matrix_discovers_zero_oi_residue_lock() {
