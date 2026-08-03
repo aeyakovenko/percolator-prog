@@ -5,6 +5,9 @@
 //! Evidence in this file (F over public I routes):
 //! `v16_program_superseded_control_matrix_discovers_stale_overwrites` generates retained controls,
 //! installs a distinct newer authorized value, and applies one common stale-overwrite oracle.
+//! `v16_program_fee_consent_operation_matrix_discovers_unsigned_debits` varies public trade and
+//! activation routes and compares each affected signer's actual debit with the fee terms present
+//! when that signer created durable consent.
 //! Direct impact regressions remain below. These tests exercise the deployed public
 //! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
 //! rollback, liveness, or compute outcomes appropriate to the invariant.
@@ -47,6 +50,42 @@ proptest! {
             violations,
             SupersededIntentKind::ALL.to_vec(),
             "vulnerable-pin supersession discovery corpus changed"
+        );
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig {
+        cases: env_usize("PERCOLATOR_FUZZ_CASES", 8) as u32,
+        max_shrink_iters: env_usize("PERCOLATOR_FUZZ_SHRINK_ITERS", 64) as u32,
+        failure_persistence: Some(Box::new(
+            proptest::test_runner::FileFailurePersistence::Direct(
+                "proptest-regressions/inv_014_fee_consent_discovery.txt",
+            ),
+        )),
+        ..ProptestConfig::default()
+    })]
+
+    #[test]
+    fn v16_program_fee_consent_operation_matrix_discovers_unsigned_debits(
+        seed in any::<[u8; 32]>()
+    ) {
+        let discoveries = discover_fee_consent_violations(seed)
+            .map_err(TestCaseError::fail)?;
+        prop_assert_eq!(discoveries.len(), FeeConsentKind::ALL.len());
+        for (expected, discovery) in FeeConsentKind::ALL.into_iter().zip(&discoveries) {
+            prop_assert_eq!(discovery.kind, expected);
+        }
+        let violations: Vec<_> = discoveries
+            .iter()
+            .filter(|discovery| discovery.is_violation())
+            .map(|discovery| discovery.kind)
+            .collect();
+        eprintln!("independent fee-consent discoveries: {violations:?}");
+        prop_assert_eq!(
+            violations,
+            FeeConsentKind::ALL.to_vec(),
+            "vulnerable-pin fee-consent discovery corpus changed"
         );
     }
 }

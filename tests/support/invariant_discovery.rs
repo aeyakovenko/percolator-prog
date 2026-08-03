@@ -1,6 +1,6 @@
 use super::v16_svm::{MarketConfig, V16Svm, INITIAL_PRICE, PRIMARY_ACTOR_COUNT, USER_DEPOSIT};
 use percolator::POS_SCALE;
-use percolator_prog::ix::CrankObservationHint;
+use percolator_prog::ix::{BatchTradeCpiLeg, CrankObservationHint};
 use serde::{Deserialize, Serialize};
 use solana_sdk::{account::Account, transaction::Transaction};
 
@@ -104,6 +104,44 @@ pub enum SupersededIntentKind {
     MaintenanceFeePolicy,
     ResolvePolicy,
     BackingFeePolicy,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum FeeConsentKind {
+    LiveBaseFeeHike,
+    RetainedNoCpiBaseFee,
+    RetainedBatchNoCpiBaseFee,
+    CpiBaseFee,
+    BatchCpiBaseFee,
+    CpiCallerFee,
+    BatchCpiCallerFee,
+    PermissionlessActivationFee,
+}
+
+impl FeeConsentKind {
+    pub const ALL: [Self; 8] = [
+        Self::LiveBaseFeeHike,
+        Self::RetainedNoCpiBaseFee,
+        Self::RetainedBatchNoCpiBaseFee,
+        Self::CpiBaseFee,
+        Self::BatchCpiBaseFee,
+        Self::CpiCallerFee,
+        Self::BatchCpiCallerFee,
+        Self::PermissionlessActivationFee,
+    ];
+
+    fn discriminator(self) -> u8 {
+        match self {
+            Self::LiveBaseFeeHike => 0,
+            Self::RetainedNoCpiBaseFee => 1,
+            Self::RetainedBatchNoCpiBaseFee => 2,
+            Self::CpiBaseFee => 3,
+            Self::BatchCpiBaseFee => 4,
+            Self::CpiCallerFee => 5,
+            Self::BatchCpiCallerFee => 6,
+            Self::PermissionlessActivationFee => 7,
+        }
+    }
 }
 
 impl SupersededIntentKind {
@@ -330,6 +368,24 @@ pub struct IntentReplayDiscovery {
     pub accepted_retry: bool,
     pub duplicated_economic_effect: bool,
     pub retry_compute_units: Option<u64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FeeConsentDiscovery {
+    pub kind: FeeConsentKind,
+    pub accepted_unconsented_terms: bool,
+    pub mutated_economic_state: bool,
+    pub authorized_debit: u128,
+    pub observed_debit: u128,
+    pub compute_units: Option<u64>,
+}
+
+impl FeeConsentDiscovery {
+    pub fn is_violation(&self) -> bool {
+        self.accepted_unconsented_terms
+            && self.mutated_economic_state
+            && self.observed_debit > self.authorized_debit
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1828,4 +1884,261 @@ pub fn discover_superseded_intents(seed: [u8; 32]) -> Result<Vec<SupersessionDis
         discoveries.push(discovery);
     }
     Ok(discoveries)
+}
+
+fn finish_fee_consent_discovery(
+    env: &V16Svm,
+    kind: FeeConsentKind,
+    before: EconomicFingerprint,
+    execution: Result<u64, String>,
+    authorized_debit: u128,
+    observed_debit: u128,
+    supply_before: u128,
+) -> Result<FeeConsentDiscovery, String> {
+    let after = fingerprint(env);
+    if env.token_supply_observed() != supply_before {
+        return Err(format!(
+            "{kind:?} consent probe changed SPL supply: {supply_before} -> {}",
+            env.token_supply_observed()
+        ));
+    }
+    match execution {
+        Ok(compute_units) => {
+            let mutated_economic_state = before != after;
+            if !mutated_economic_state {
+                return Err(format!(
+                    "{kind:?} accepted unconsented terms without an observable state delta"
+                ));
+            }
+            Ok(FeeConsentDiscovery {
+                kind,
+                accepted_unconsented_terms: true,
+                mutated_economic_state,
+                authorized_debit,
+                observed_debit,
+                compute_units: Some(compute_units),
+            })
+        }
+        Err(_) => {
+            if before != after {
+                return Err(format!("{kind:?} rejected terms did not roll back exactly"));
+            }
+            if observed_debit != 0 {
+                return Err(format!(
+                    "{kind:?} rejected terms still debited {observed_debit} atoms"
+                ));
+            }
+            Ok(FeeConsentDiscovery {
+                kind,
+                accepted_unconsented_terms: false,
+                mutated_economic_state: false,
+                authorized_debit,
+                observed_debit,
+                compute_units: None,
+            })
+        }
+    }
+}
+
+fn total_capital(env: &V16Svm, actors: &[usize]) -> Result<u128, String> {
+    actors.iter().try_fold(0u128, |total, &actor| {
+        total
+            .checked_add(env.primary_portfolio(actor).capital.get())
+            .ok_or_else(|| "portfolio capital total overflow".to_string())
+    })
+}
+
+fn debit_between(before: u128, after: u128, context: &str) -> Result<u128, String> {
+    before
+        .checked_sub(after)
+        .ok_or_else(|| format!("{context} increased signer value from {before} to {after}"))
+}
+
+fn discover_trade_fee_consent_violation(
+    seed: [u8; 32],
+    kind: FeeConsentKind,
+) -> Result<FeeConsentDiscovery, String> {
+    const TAKER: usize = 0;
+    const LP: usize = 1;
+    const BASE_FEE_BPS: u64 = 500;
+    const CALLER_FEE_BPS: u64 = 10_000;
+    let size_q = POS_SCALE as i128;
+    let mut env = V16Svm::new(seed, MarketConfig::default());
+    let supply_before = env.token_supply_observed();
+
+    if kind == FeeConsentKind::LiveBaseFeeHike {
+        env.trade_no_cpi(TAKER, LP, 0, size_q, INITIAL_PRICE, 0)
+            .map_err(|error| format!("open under original live fee: {error}"))?;
+        let capital_before = total_capital(&env, &[TAKER, LP])?;
+        let before = fingerprint(&env);
+        let update = env.update_trade_fee_policy(BASE_FEE_BPS);
+        let execution = match update {
+            Ok(update) => env
+                .trade_no_cpi(TAKER, LP, 0, -size_q, INITIAL_PRICE, 0)
+                .map(|close| update.compute_units.max(close.compute_units)),
+            Err(error) => Err(error),
+        };
+        let observed_debit = debit_between(
+            capital_before,
+            total_capital(&env, &[TAKER, LP])?,
+            "live base-fee hike",
+        )?;
+        return finish_fee_consent_discovery(
+            &env,
+            kind,
+            before,
+            execution,
+            0,
+            observed_debit,
+            supply_before,
+        );
+    }
+
+    let retained = match kind {
+        FeeConsentKind::RetainedNoCpiBaseFee => {
+            Some(env.build_retained_no_cpi_trade(TAKER, LP, 0, size_q, INITIAL_PRICE))
+        }
+        FeeConsentKind::RetainedBatchNoCpiBaseFee => {
+            Some(env.build_retained_batch_no_cpi_trade(TAKER, LP, 0, size_q, INITIAL_PRICE))
+        }
+        _ => None,
+    };
+    if matches!(
+        kind,
+        FeeConsentKind::RetainedNoCpiBaseFee
+            | FeeConsentKind::RetainedBatchNoCpiBaseFee
+            | FeeConsentKind::CpiBaseFee
+            | FeeConsentKind::BatchCpiBaseFee
+    ) {
+        env.update_trade_fee_policy(BASE_FEE_BPS)
+            .map_err(|error| format!("install post-consent base fee: {error}"))?;
+    }
+
+    let capital_before = match kind {
+        FeeConsentKind::CpiBaseFee
+        | FeeConsentKind::BatchCpiBaseFee
+        | FeeConsentKind::CpiCallerFee
+        | FeeConsentKind::BatchCpiCallerFee => env.primary_portfolio(LP).capital.get(),
+        _ => total_capital(&env, &[TAKER, LP])?,
+    };
+    let before = fingerprint(&env);
+    let execution = match kind {
+        FeeConsentKind::RetainedNoCpiBaseFee | FeeConsentKind::RetainedBatchNoCpiBaseFee => env
+            .land_retained(retained.expect("retained bilateral trade"))
+            .map(|success| success.compute_units),
+        FeeConsentKind::CpiBaseFee => env
+            .trade_cpi(TAKER, LP, 0, size_q, 0, 0)
+            .map(|success| success.compute_units),
+        FeeConsentKind::BatchCpiBaseFee => env
+            .batch_trade_cpi(
+                TAKER,
+                LP,
+                vec![BatchTradeCpiLeg {
+                    asset_index: 0,
+                    size_q,
+                    fee_bps: 0,
+                    limit_price: 0,
+                }],
+            )
+            .map(|success| success.compute_units),
+        FeeConsentKind::CpiCallerFee => env
+            .trade_cpi(TAKER, LP, 0, size_q, CALLER_FEE_BPS, 0)
+            .map(|success| success.compute_units),
+        FeeConsentKind::BatchCpiCallerFee => env
+            .batch_trade_cpi(
+                TAKER,
+                LP,
+                vec![BatchTradeCpiLeg {
+                    asset_index: 0,
+                    size_q,
+                    fee_bps: CALLER_FEE_BPS,
+                    limit_price: 0,
+                }],
+            )
+            .map(|success| success.compute_units),
+        FeeConsentKind::LiveBaseFeeHike | FeeConsentKind::PermissionlessActivationFee => {
+            unreachable!()
+        }
+    };
+    let capital_after = match kind {
+        FeeConsentKind::CpiBaseFee
+        | FeeConsentKind::BatchCpiBaseFee
+        | FeeConsentKind::CpiCallerFee
+        | FeeConsentKind::BatchCpiCallerFee => env.primary_portfolio(LP).capital.get(),
+        _ => total_capital(&env, &[TAKER, LP])?,
+    };
+    let observed_debit = debit_between(capital_before, capital_after, "trade fee consent")?;
+    finish_fee_consent_discovery(
+        &env,
+        kind,
+        before,
+        execution,
+        0,
+        observed_debit,
+        supply_before,
+    )
+}
+
+fn discover_activation_fee_consent_violation(
+    seed: [u8; 32],
+) -> Result<FeeConsentDiscovery, String> {
+    const CREATOR: usize = 0;
+    const ASSET: u16 = 1;
+    const ADVERTISED_FEE: u128 = 1;
+    const CHANGED_FEE: u128 = 1_000;
+    let kind = FeeConsentKind::PermissionlessActivationFee;
+    let mut env = V16Svm::new(seed, MarketConfig::default());
+    let supply_before = env.token_supply_observed();
+    env.warp_to_slot(2);
+    env.retire_asset(ASSET, 2)
+        .map_err(|error| format!("retire activation slot: {error}"))?;
+    env.update_market_init_fee_policy(ADVERTISED_FEE)
+        .map_err(|error| format!("publish activation fee: {error}"))?;
+    env.warp_to_slot(3);
+    let retained = env.build_retained_permissionless_asset_activation(
+        CREATOR, ASSET, 3, 100, CREATOR, CREATOR, CREATOR, CREATOR,
+    );
+    env.update_market_init_fee_policy(CHANGED_FEE)
+        .map_err(|error| format!("change activation fee after consent: {error}"))?;
+    let source = env.actors[CREATOR].source_token;
+    let source_before = u128::from(env.token_amount(source));
+    let before = fingerprint(&env);
+    let execution = env
+        .land_retained(retained)
+        .map(|success| success.compute_units);
+    let observed_debit = debit_between(
+        source_before,
+        u128::from(env.token_amount(source)),
+        "permissionless activation fee",
+    )?;
+    finish_fee_consent_discovery(
+        &env,
+        kind,
+        before,
+        execution,
+        ADVERTISED_FEE,
+        observed_debit,
+        supply_before,
+    )
+}
+
+fn discover_one_fee_consent_violation(
+    mut seed: [u8; 32],
+    kind: FeeConsentKind,
+) -> Result<FeeConsentDiscovery, String> {
+    seed[0] ^= 0x6d;
+    seed[1] ^= kind.discriminator();
+    match kind {
+        FeeConsentKind::PermissionlessActivationFee => {
+            discover_activation_fee_consent_violation(seed)
+        }
+        _ => discover_trade_fee_consent_violation(seed, kind),
+    }
+}
+
+pub fn discover_fee_consent_violations(seed: [u8; 32]) -> Result<Vec<FeeConsentDiscovery>, String> {
+    FeeConsentKind::ALL
+        .into_iter()
+        .map(|kind| discover_one_fee_consent_violation(seed, kind))
+        .collect()
 }

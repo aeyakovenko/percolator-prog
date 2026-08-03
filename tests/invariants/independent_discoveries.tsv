@@ -43,3 +43,8 @@ INV-014	control-supersession/trade-fee-policy	v16_program_superseded_control_mat
 INV-014	control-supersession/fee-redirect-policy	v16_program_superseded_control_matrix_discovers_stale_overwrites	newer-authorized-control-cannot-be-overwritten-by-stale-intent	340
 INV-014	control-supersession/resolve-policy	v16_program_superseded_control_matrix_discovers_stale_overwrites	newer-authorized-control-cannot-be-overwritten-by-stale-intent	347
 INV-014	control-supersession/backing-fee-policy	v16_program_superseded_control_matrix_discovers_stale_overwrites	newer-authorized-control-cannot-be-overwritten-by-stale-intent	349
+INV-014	fee-consent/live-base-fee-hike	v16_program_fee_consent_operation_matrix_discovers_unsigned_debits	signer-debit-never-exceeds-consented-fee-terms	256
+INV-036	fee-consent/bilateral-base-fee	v16_program_fee_consent_operation_matrix_discovers_unsigned_debits	signer-debit-never-exceeds-consented-fee-terms	310
+INV-014	fee-consent/cpi-base-fee	v16_program_fee_consent_operation_matrix_discovers_unsigned_debits	signer-debit-never-exceeds-consented-fee-terms	313
+INV-036	fee-consent/cpi-caller-fee	v16_program_fee_consent_operation_matrix_discovers_unsigned_debits	signer-debit-never-exceeds-consented-fee-terms	224
+INV-036	fee-consent/permissionless-activation	v16_program_fee_consent_operation_matrix_discovers_unsigned_debits	signer-debit-never-exceeds-consented-fee-terms	314

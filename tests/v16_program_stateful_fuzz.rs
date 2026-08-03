@@ -77,9 +77,9 @@ use support::fuzz_model::{
 };
 use support::invariant_discovery::{
     discover_asset_generation_replays, discover_authority_incarnation_replays,
-    discover_intent_retries, discover_market_incarnation_replays,
+    discover_fee_consent_violations, discover_intent_retries, discover_market_incarnation_replays,
     discover_portfolio_incarnation_replays, discover_superseded_intents, AssetIntentKind,
-    AuthorityIntentKind, MarketIntentKind, PortfolioIntentKind, RetryIntentKind,
+    AuthorityIntentKind, FeeConsentKind, MarketIntentKind, PortfolioIntentKind, RetryIntentKind,
     SupersededIntentKind,
 };
 

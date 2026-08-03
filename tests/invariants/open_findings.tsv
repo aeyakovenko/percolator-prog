@@ -15,7 +15,7 @@
 219	DoS	BLOCKER	INV-073	missing	[BLOCKER DoS] Reset both zero-OI sides to preserve exit
 220	LoF	BLOCKER	INV-053	direct-regression	[BLOCKER LoF] Prevent liquidation on an omitted rescue mark
 223	LoF	PRIVILEGED	INV-036	direct-regression	[PRIVILEGED LoF] Require matcher consent for CPI backing fees
-224	LoF	BLOCKER	INV-036	direct-regression	[BLOCKER LoF] Prevent CPI caller-fee LP siphon
+224	LoF	BLOCKER	INV-036	independent-discovery	[BLOCKER LoF] Prevent CPI caller-fee LP siphon
 225	LoF	BLOCKER	INV-045	direct-regression	[BLOCKER LoF] Keep EWMA movement fees non-reclaimable
 228	DoS	HARDENING	INV-073	missing	[HARDENING DoS] Unstick fragmented recovery force-close
 229	DoS	BLOCKER	INV-074	missing	[BLOCKER DoS] Scope bankruptcy locks to affected assets
@@ -29,7 +29,7 @@
 253	LoF	BLOCKER	INV-038	direct-regression	[BLOCKER LoF] Preserve rounded premium funding on auto-crank
 254	LoF	PRIVILEGED	INV-045	missing	[PRIVILEGED LoF] Accrue committed funding before asset shutdown
 255	LoF	BLOCKER	INV-039	direct-regression	[BLOCKER LoF] Require committed accrual before market resolve
-256	LoF	HARDENING	INV-014	missing	[HARDENING LoF] Prevent live fee hikes from taxing user capital
+256	LoF	HARDENING	INV-014	independent-discovery	[HARDENING LoF] Prevent live fee hikes from taxing user capital
 257	DoS	HARDENING	INV-073	missing	[HARDENING DoS] Keep funded Recovery deadlines monotonic
 258	LoF	PRIVILEGED	INV-061	missing	[PRIVILEGED LoF] Freeze funded hard-stale deadlines
 259	LoF	PRIVILEGED	INV-014	missing	[PRIVILEGED LoF] Bind direct trades to backing-fee consent
@@ -82,11 +82,11 @@
 307	LoF	HARDENING	INV-001	independent-discovery	[HARDENING LoF] Bind deposits to market generations
 308	DoS	BLOCKER	INV-071	missing	[BLOCKER DoS] Settle B by collateral-atom budget
 309	LoF	HARDENING	INV-003	independent-discovery	[HARDENING LoF] Bind portfolio close to its incarnation
-310	LoF	PRIVILEGED	INV-036	direct-regression	[PRIVILEGED LoF] Bind bilateral trades to live base-fee consent
+310	LoF	PRIVILEGED	INV-036	independent-discovery	[PRIVILEGED LoF] Bind bilateral trades to live base-fee consent
 311	LoF	BLOCKER	INV-002	independent-discovery	[BLOCKER LoF] Bind market resolution to asset generations
 312	LoF	BLOCKER	INV-002	missing	[BLOCKER LoF] Bind resolve policy to asset generations
-313	LoF	PRIVILEGED	INV-014	missing	[PRIVILEGED LoF] Require LP consent for CPI base fees
-314	LoF	BLOCKER	INV-036	direct-regression	[BLOCKER LoF] Bind permissionless activation fees to creator consent
+313	LoF	PRIVILEGED	INV-014	independent-discovery	[PRIVILEGED LoF] Require LP consent for CPI base fees
+314	LoF	BLOCKER	INV-036	independent-discovery	[BLOCKER LoF] Bind permissionless activation fees to creator consent
 315	LoF	BLOCKER	INV-001	independent-discovery	[BLOCKER LoF] Bind asset shutdown to market generations
 316	LoF	HARDENING	INV-004	missing	[HARDENING LoF] Bind rebalance consent to position episodes
 317	LoF	BLOCKER	INV-001	independent-discovery	[BLOCKER LoF] Bind fee redirects to market generations
