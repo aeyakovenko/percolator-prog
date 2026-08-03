@@ -690,6 +690,29 @@ pub struct CompositeRoundingDiscovery {
     pub extracted_tokens: u64,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ObservationOmissionDiscovery {
+    pub omitted_landed: bool,
+    pub control_f_long_num: i128,
+    pub control_f_short_num: i128,
+    pub omitted_f_long_num: i128,
+    pub omitted_f_short_num: i128,
+    pub victim_payout_loss: u128,
+    pub counterparty_payout_gain: u128,
+}
+
+impl ObservationOmissionDiscovery {
+    pub fn is_violation(&self) -> bool {
+        self.omitted_landed
+            && self.control_f_long_num > 0
+            && self.control_f_short_num < 0
+            && self.omitted_f_long_num == 0
+            && self.omitted_f_short_num == 0
+            && self.victim_payout_loss != 0
+            && self.victim_payout_loss == self.counterparty_payout_gain
+    }
+}
+
 impl CompositeRoundingDiscovery {
     pub fn is_violation(&self) -> bool {
         self.rounded_target != self.exact_mark
@@ -5149,4 +5172,143 @@ pub fn discover_composite_rounding_violations(
         .into_iter()
         .map(|scale| discover_one_composite_rounding_violation(seed, scale))
         .collect()
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ObservationOmissionWorld {
+    call_landed: bool,
+    f_long_num: i128,
+    f_short_num: i128,
+    victim_payout: u128,
+    counterparty_payout: u128,
+}
+
+fn run_observation_omission_world(
+    seed: [u8; 32],
+    omit_selected_observation: bool,
+) -> Result<ObservationOmissionWorld, String> {
+    const PRICE: u64 = 100;
+    const MARK: u64 = 99;
+    const DEPOSIT: u128 = 100_000_000;
+    const SIZE_Q: i128 = 100_000 * POS_SCALE as i128;
+
+    let mut env = V16Svm::new(
+        seed,
+        MarketConfig {
+            initial_price: PRICE,
+            max_price_move_bps_per_slot: 1,
+            max_accrual_dt_slots: 1,
+            max_abs_funding_e9_per_slot: 10_000,
+            min_funding_lifetime_slots: 1,
+            actor_deposits: [DEPOSIT, DEPOSIT, DEPOSIT, DEPOSIT, 1],
+            ..MarketConfig::default()
+        },
+    );
+    let supply_before = env.token_supply_observed();
+    env.trade_no_cpi(0, 1, 0, SIZE_Q, PRICE, 0)
+        .map_err(|error| format!("open selected-asset pair: {error}"))?;
+    env.trade_no_cpi(2, 3, 1, POS_SCALE as i128, PRICE, 0)
+        .map_err(|error| format!("open unrelated-epoch pair: {error}"))?;
+
+    env.warp_to_slot(2);
+    env.push_auth_mark(0, 2, MARK)
+        .map_err(|error| format!("stage selected rounded mark: {error}"))?;
+    let selected_observation = vec![CrankObservationHint {
+        asset_index: 0,
+        oracle_accounts: env.primary_profile(0).oracle_leg_count,
+    }];
+    env.crank(0, 2, selected_observation.clone())
+        .map_err(|error| format!("prime selected checkpoint: {error}"))?;
+    let primed = env.primary_market_state().1.assets[0];
+    if primed.effective_price != PRICE || primed.slot_last != 2 || primed.f_long_num != 0 {
+        return Err("selected checkpoint was not stationary and unfunded".into());
+    }
+
+    env.warp_to_slot(3);
+    env.push_auth_mark(1, 3, MARK)
+        .map_err(|error| format!("stage unrelated epoch mark: {error}"))?;
+    env.crank(
+        2,
+        3,
+        vec![CrankObservationHint {
+            asset_index: 1,
+            oracle_accounts: env.primary_profile(1).oracle_leg_count,
+        }],
+    )
+    .map_err(|error| format!("advance unrelated epoch: {error}"))?;
+    let refresh = env.crank(
+        0,
+        3,
+        if omit_selected_observation {
+            Vec::new()
+        } else {
+            selected_observation
+        },
+    );
+    let call_landed = refresh.is_ok();
+    refresh.map_err(|error| format!("selected funding refresh rejected: {error}"))?;
+    let funded = env.primary_market_state().1.assets[0];
+
+    env.crank(1, 3, Vec::new())
+        .map_err(|error| format!("settle selected counterparty: {error}"))?;
+    env.trade_no_cpi(0, 1, 0, -SIZE_Q, PRICE, 0)
+        .map_err(|error| format!("close selected pair: {error}"))?;
+    env.trade_no_cpi(2, 3, 1, -(POS_SCALE as i128), PRICE, 0)
+        .map_err(|error| format!("close unrelated pair: {error}"))?;
+    if env.primary_portfolio(0).pnl.get() > 0 {
+        env.convert_released_pnl(0, u128::MAX)
+            .map_err(|error| format!("convert selected funding PnL: {error}"))?;
+    }
+    let victim_capital = env.primary_portfolio(0).capital.get();
+    let counterparty_capital = env.primary_portfolio(1).capital.get();
+    env.withdraw_primary(0, victim_capital)
+        .map_err(|error| format!("withdraw selected victim: {error}"))?;
+    env.withdraw_primary(1, counterparty_capital)
+        .map_err(|error| format!("withdraw selected counterparty: {error}"))?;
+    if env.token_supply_observed() != supply_before {
+        return Err("observation-omission world changed SPL supply".into());
+    }
+    Ok(ObservationOmissionWorld {
+        call_landed,
+        f_long_num: funded.f_long_num,
+        f_short_num: funded.f_short_num,
+        victim_payout: u128::from(env.token_amount(env.actors[0].destination_token)),
+        counterparty_payout: u128::from(env.token_amount(env.actors[1].destination_token)),
+    })
+}
+
+pub fn discover_observation_omission_violation(
+    mut seed: [u8; 32],
+) -> Result<ObservationOmissionDiscovery, String> {
+    seed[0] ^= 0x5f;
+    let control = run_observation_omission_world(seed, false)?;
+    let omitted = run_observation_omission_world(seed, true)?;
+    let victim_payout_loss = control
+        .victim_payout
+        .checked_sub(omitted.victim_payout)
+        .ok_or_else(|| "omitted observation increased victim payout".to_string())?;
+    let counterparty_payout_gain = omitted
+        .counterparty_payout
+        .checked_sub(control.counterparty_payout)
+        .ok_or_else(|| "omitted observation decreased counterparty payout".to_string())?;
+    let control_total = control
+        .victim_payout
+        .checked_add(control.counterparty_payout)
+        .ok_or_else(|| "control omission total overflow".to_string())?;
+    let omitted_total = omitted
+        .victim_payout
+        .checked_add(omitted.counterparty_payout)
+        .ok_or_else(|| "omitted observation total overflow".to_string())?;
+    if control_total != omitted_total {
+        return Err("observation-omission worlds did not conserve payouts".into());
+    }
+    Ok(ObservationOmissionDiscovery {
+        omitted_landed: omitted.call_landed,
+        control_f_long_num: control.f_long_num,
+        control_f_short_num: control.f_short_num,
+        omitted_f_long_num: omitted.f_long_num,
+        omitted_f_short_num: omitted.f_short_num,
+        victim_payout_loss,
+        counterparty_payout_gain,
+    })
 }

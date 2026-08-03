@@ -6,7 +6,11 @@
 //! `v16_program_composite_scale_matrix_discovers_route_rounding_value` holds the exact rational
 //! composite price constant while changing its factorization at large and micro scales. It then
 //! requires wrapper target, engine mark, liquidation eligibility, and extracted reward to agree
-//! with exact single-round arithmetic. Direct impact tests remain below. These tests exercise the deployed public
+//! with exact single-round arithmetic.
+//! `v16_program_selected_observation_omission_discovers_rounded_transfer_loss` compares identical
+//! public worlds with and without the selected asset observation after an unrelated epoch advance;
+//! a successful omission must preserve funding indexes and terminal payouts exactly. Direct impact
+//! tests remain below. These tests exercise the deployed public
 //! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
 //! rollback, liveness, or compute outcomes appropriate to the invariant.
 //!
@@ -15,6 +19,33 @@
 //! plus every additional verification method required by the charter.
 
 use super::*;
+
+proptest! {
+    #![proptest_config(ProptestConfig {
+        cases: env_usize("PERCOLATOR_FUZZ_CASES", 8) as u32,
+        max_shrink_iters: env_usize("PERCOLATOR_FUZZ_SHRINK_ITERS", 64) as u32,
+        failure_persistence: Some(Box::new(
+            proptest::test_runner::FileFailurePersistence::Direct(
+                "proptest-regressions/inv_038_observation_omission_discovery.txt",
+            ),
+        )),
+        ..ProptestConfig::default()
+    })]
+
+    #[test]
+    fn v16_program_selected_observation_omission_discovers_rounded_transfer_loss(
+        seed in any::<[u8; 32]>()
+    ) {
+        let discovery = discover_observation_omission_violation(seed)
+            .map_err(TestCaseError::fail)?;
+        eprintln!("independent observation-omission discovery: {discovery:?}");
+        prop_assert!(
+            discovery.is_violation(),
+            "vulnerable-pin observation omission changed: {:?}",
+            discovery
+        );
+    }
+}
 
 proptest! {
     #![proptest_config(ProptestConfig {

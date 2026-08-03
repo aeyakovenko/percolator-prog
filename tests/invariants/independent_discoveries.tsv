@@ -68,3 +68,4 @@ INV-045	trade-driven-mark/liquidation-economics	v16_program_mark_mode_route_matr
 INV-045	mark-movement/bilateral-fee-support	v16_program_matcher_route_matrix_discovers_one_sided_mark_fees	mark-movement-fees-must-be-bilaterally-supported	369
 INV-038	composite-rounding/large-factorization	v16_program_composite_scale_matrix_discovers_route_rounding_value	composite-price-is-rounded-once-after-exact-composition	329
 INV-038	composite-rounding/micro-factorization	v16_program_composite_scale_matrix_discovers_route_rounding_value	composite-price-is-rounded-once-after-exact-composition	381
+INV-038	observation-omission/rounded-funding	v16_program_selected_observation_omission_discovers_rounded_transfer_loss	omitted-observation-cannot-erase-balanced-rounded-transfer	253
