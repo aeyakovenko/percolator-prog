@@ -9,8 +9,11 @@
 //! with exact single-round arithmetic.
 //! `v16_program_selected_observation_omission_discovers_rounded_transfer_loss` compares identical
 //! public worlds with and without the selected asset observation after an unrelated epoch advance;
-//! a successful omission must preserve funding indexes and terminal payouts exactly. Direct impact
-//! tests remain below. These tests exercise the deployed public
+//! a successful omission must preserve funding indexes and terminal payouts exactly.
+//! `v16_program_fractional_max_dt_cranks_discover_terminal_value_stall` repeatedly executes the
+//! bounded public crank at maximum elapsed time and requires fractional cap residue to accumulate
+//! until the target is reached; it also reconciles any stalled price against terminal payouts.
+//! Direct impact tests remain below. These tests exercise the deployed public
 //! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
 //! rollback, liveness, or compute outcomes appropriate to the invariant.
 //!
@@ -19,6 +22,33 @@
 //! plus every additional verification method required by the charter.
 
 use super::*;
+
+proptest! {
+    #![proptest_config(ProptestConfig {
+        cases: env_usize("PERCOLATOR_FUZZ_CASES", 8) as u32,
+        max_shrink_iters: env_usize("PERCOLATOR_FUZZ_SHRINK_ITERS", 64) as u32,
+        failure_persistence: Some(Box::new(
+            proptest::test_runner::FileFailurePersistence::Direct(
+                "proptest-regressions/inv_038_fractional_movement_discovery.txt",
+            ),
+        )),
+        ..ProptestConfig::default()
+    })]
+
+    #[test]
+    fn v16_program_fractional_max_dt_cranks_discover_terminal_value_stall(
+        seed in any::<[u8; 32]>()
+    ) {
+        let discovery = discover_fractional_movement_stall(seed)
+            .map_err(TestCaseError::fail)?;
+        eprintln!("independent fractional-movement discovery: {discovery:?}");
+        prop_assert!(
+            discovery.is_violation(),
+            "vulnerable-pin fractional movement changed: {:?}",
+            discovery
+        );
+    }
+}
 
 proptest! {
     #![proptest_config(ProptestConfig {

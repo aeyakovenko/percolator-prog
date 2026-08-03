@@ -701,6 +701,27 @@ pub struct ObservationOmissionDiscovery {
     pub counterparty_payout_gain: u128,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FractionalMovementDiscovery {
+    pub target_price: u64,
+    pub stalled_price: u64,
+    pub successful_cranks: u16,
+    pub rejected_stalls: u8,
+    pub nonmoving_stalls: u8,
+    pub long_overpayment: u128,
+    pub short_underpayment: u128,
+}
+
+impl FractionalMovementDiscovery {
+    pub fn is_violation(&self) -> bool {
+        self.successful_cranks != 0
+            && self.stalled_price > self.target_price
+            && (self.rejected_stalls >= 3 || self.nonmoving_stalls >= 3)
+            && self.long_overpayment != 0
+            && self.long_overpayment == self.short_underpayment
+    }
+}
+
 impl ObservationOmissionDiscovery {
     pub fn is_violation(&self) -> bool {
         self.omitted_landed
@@ -5310,5 +5331,143 @@ pub fn discover_observation_omission_violation(
         omitted_f_short_num: omitted.f_short_num,
         victim_payout_loss,
         counterparty_payout_gain,
+    })
+}
+
+pub fn discover_fractional_movement_stall(
+    mut seed: [u8; 32],
+) -> Result<FractionalMovementDiscovery, String> {
+    const OPEN_PRICE: u64 = 100;
+    const TARGET_PRICE: u64 = 1;
+    const CAP_BPS: u64 = 24;
+    const MAX_DT: u64 = 20;
+    const DEPOSIT: u128 = 1_000_000;
+
+    seed[0] ^= 0x6a;
+    let mut env = V16Svm::new(
+        seed,
+        MarketConfig {
+            initial_price: OPEN_PRICE,
+            max_price_move_bps_per_slot: CAP_BPS,
+            max_accrual_dt_slots: MAX_DT,
+            min_funding_lifetime_slots: MAX_DT,
+            actor_deposits: [DEPOSIT, DEPOSIT, 1, 1, 1],
+            ..MarketConfig::default()
+        },
+    );
+    let supply_before = env.token_supply_observed();
+    env.configure_permissionless_resolve(10_000, 1)
+        .map_err(|error| format!("configure fractional stale resolution: {error}"))?;
+    env.configure_auth_mark(false, 0, 1, OPEN_PRICE)
+        .map_err(|error| format!("configure fractional authenticated mark: {error}"))?;
+    env.trade_no_cpi(0, 1, 0, POS_SCALE as i128, OPEN_PRICE, 0)
+        .map_err(|error| format!("open fractional-movement pair: {error}"))?;
+    env.warp_to_slot(2);
+    env.push_auth_mark(0, 2, TARGET_PRICE)
+        .map_err(|error| format!("publish fractional target: {error}"))?;
+
+    let mut slot = 2u64
+        .checked_add(MAX_DT)
+        .ok_or_else(|| "initial fractional crank slot overflow".to_string())?;
+    let mut successful_cranks = 0u16;
+    let mut nonmoving_stalls = 0u8;
+    let mut rejected_stalls = 0u8;
+    for _ in 0..200 {
+        env.warp_to_slot(slot);
+        let price_before = env.primary_market_state().1.assets[0].effective_price;
+        let market_before = env.market_data(false);
+        let long_before = env.primary_portfolio_data(0);
+        let short_before = env.primary_portfolio_data(1);
+        match env.crank(
+            1,
+            slot,
+            vec![CrankObservationHint {
+                asset_index: 0,
+                oracle_accounts: 0,
+            }],
+        ) {
+            Ok(_) => {
+                successful_cranks = successful_cranks
+                    .checked_add(1)
+                    .ok_or_else(|| "fractional successful-crank count overflow".to_string())?;
+                let price_after = env.primary_market_state().1.assets[0].effective_price;
+                if price_after == price_before {
+                    nonmoving_stalls = nonmoving_stalls.saturating_add(1);
+                } else {
+                    nonmoving_stalls = 0;
+                    rejected_stalls = 0;
+                }
+            }
+            Err(_) => {
+                if env.market_data(false) != market_before
+                    || env.primary_portfolio_data(0) != long_before
+                    || env.primary_portfolio_data(1) != short_before
+                {
+                    return Err("rejected fractional crank did not roll back".into());
+                }
+                rejected_stalls = rejected_stalls.saturating_add(1);
+            }
+        }
+        let price_after = env.primary_market_state().1.assets[0].effective_price;
+        if price_after == TARGET_PRICE {
+            return Err("fractional movement reached target; no stall discovered".into());
+        }
+        if (nonmoving_stalls >= 3 || rejected_stalls >= 3) && price_after > TARGET_PRICE {
+            break;
+        }
+        slot = slot
+            .checked_add(MAX_DT)
+            .ok_or_else(|| "fractional crank slot overflow".to_string())?;
+    }
+    let stalled_price = env.primary_market_state().1.assets[0].effective_price;
+    if successful_cranks == 0
+        || (nonmoving_stalls < 3 && rejected_stalls < 3)
+        || stalled_price <= TARGET_PRICE
+    {
+        return Err(format!(
+            "fractional target did not reach stable stall: price={stalled_price}, success={successful_cranks}, no-op={nonmoving_stalls}, reject={rejected_stalls}"
+        ));
+    }
+
+    let resolve_slot = slot
+        .checked_add(10_001)
+        .ok_or_else(|| "fractional resolve slot overflow".to_string())?;
+    env.resolve_stale_permissionless(resolve_slot)
+        .map_err(|error| format!("resolve fractional-stall market: {error}"))?;
+    env.warp_to_slot(
+        resolve_slot
+            .checked_add(1)
+            .ok_or_else(|| "fractional close slot overflow".to_string())?,
+    );
+    let long_payout = drain_resolved_discovery_actor(&mut env, 0)?;
+    let short_payout = drain_resolved_discovery_actor(&mut env, 1)?;
+    let target_long_payout = DEPOSIT
+        .checked_sub(u128::from(OPEN_PRICE - TARGET_PRICE))
+        .ok_or_else(|| "target long payout underflow".to_string())?;
+    let target_short_payout = DEPOSIT
+        .checked_add(u128::from(OPEN_PRICE - TARGET_PRICE))
+        .ok_or_else(|| "target short payout overflow".to_string())?;
+    let long_overpayment = long_payout
+        .checked_sub(target_long_payout)
+        .ok_or_else(|| "fractional stall underpaid long".to_string())?;
+    let short_underpayment = target_short_payout
+        .checked_sub(short_payout)
+        .ok_or_else(|| "fractional stall overpaid short".to_string())?;
+    if long_payout
+        .checked_add(short_payout)
+        .ok_or_else(|| "fractional payout total overflow".to_string())?
+        != DEPOSIT * 2
+        || env.token_supply_observed() != supply_before
+    {
+        return Err("fractional stall did not conserve terminal payout/SPL supply".into());
+    }
+    Ok(FractionalMovementDiscovery {
+        target_price: TARGET_PRICE,
+        stalled_price,
+        successful_cranks,
+        rejected_stalls,
+        nonmoving_stalls,
+        long_overpayment,
+        short_underpayment,
     })
 }

@@ -69,3 +69,4 @@ INV-045	mark-movement/bilateral-fee-support	v16_program_matcher_route_matrix_dis
 INV-038	composite-rounding/large-factorization	v16_program_composite_scale_matrix_discovers_route_rounding_value	composite-price-is-rounded-once-after-exact-composition	329
 INV-038	composite-rounding/micro-factorization	v16_program_composite_scale_matrix_discovers_route_rounding_value	composite-price-is-rounded-once-after-exact-composition	381
 INV-038	observation-omission/rounded-funding	v16_program_selected_observation_omission_discovers_rounded_transfer_loss	omitted-observation-cannot-erase-balanced-rounded-transfer	253
+INV-038	fractional-movement/max-dt-crank	v16_program_fractional_max_dt_cranks_discover_terminal_value_stall	fractional-cap-residue-must-accumulate-to-target	365

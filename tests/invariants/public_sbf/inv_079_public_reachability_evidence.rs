@@ -174,10 +174,10 @@ fn v16_open_security_finding_benchmark_is_complete_and_non_overclaiming() {
     }
 
     assert_eq!(rows, 145, "refresh the dated GitHub finding snapshot");
-    assert_eq!(direct, 9, "direct adapter inventory changed");
+    assert_eq!(direct, 8, "direct adapter inventory changed");
     assert_eq!(missing, 62, "explicit finding gaps changed");
     assert_eq!(
-        independent, 74,
+        independent, 75,
         "promote only genuinely finding-agnostic invariant discoveries"
     );
 
@@ -240,6 +240,7 @@ fn v16_open_security_finding_benchmark_is_complete_and_non_overclaiming() {
                     | "mark-movement-fees-must-be-bilaterally-supported"
                     | "composite-price-is-rounded-once-after-exact-composition"
                     | "omitted-observation-cannot-erase-balanced-rounded-transfer"
+                    | "fractional-cap-residue-must-accumulate-to-target"
             ),
             "unknown independent oracle: {}",
             fields[3]
