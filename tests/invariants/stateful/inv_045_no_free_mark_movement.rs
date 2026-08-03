@@ -10,7 +10,10 @@
 //! `v16_program_trade_route_matrix_discovers_pending_mark_inheritance` signs exposure before a
 //! paid mark move and lands it through every trade route while the move is pending. Its oracle
 //! requires movement cost to cover any later third-party value transfer and verifies net SPL
-//! extraction. Direct impact tests remain below. These tests exercise the deployed public
+//! extraction. `v16_program_trade_route_matrix_discovers_pending_target_override` compares an
+//! honest pending rebound with the same world plus a later round trip. It rejects any cheap target
+//! rewrite that displaces more independent payout than it costs. Direct impact tests remain below.
+//! These tests exercise the deployed public
 //! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
 //! rollback, liveness, or compute outcomes appropriate to the invariant.
 //!
@@ -52,6 +55,42 @@ proptest! {
             violations,
             PendingMarkSource::ALL.to_vec(),
             "vulnerable-pin pending-mark admission corpus changed"
+        );
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig {
+        cases: env_usize("PERCOLATOR_FUZZ_CASES", 8) as u32,
+        max_shrink_iters: env_usize("PERCOLATOR_FUZZ_SHRINK_ITERS", 64) as u32,
+        failure_persistence: Some(Box::new(
+            proptest::test_runner::FileFailurePersistence::Direct(
+                "proptest-regressions/inv_045_pending_target_override_discovery.txt",
+            ),
+        )),
+        ..ProptestConfig::default()
+    })]
+
+    #[test]
+    fn v16_program_trade_route_matrix_discovers_pending_target_override(
+        seed in any::<[u8; 32]>()
+    ) {
+        let discoveries = discover_pending_target_override_violations(seed)
+            .map_err(TestCaseError::fail)?;
+        prop_assert_eq!(discoveries.len(), DiscoveryTradeRoute::ALL.len());
+        for (expected, discovery) in DiscoveryTradeRoute::ALL.into_iter().zip(&discoveries) {
+            prop_assert_eq!(discovery.route, expected);
+        }
+        let violations: Vec<_> = discoveries
+            .iter()
+            .filter(|discovery| discovery.is_violation())
+            .map(|discovery| discovery.route)
+            .collect();
+        eprintln!("independent pending-target override discoveries: {violations:?}");
+        prop_assert_eq!(
+            violations,
+            DiscoveryTradeRoute::ALL.to_vec(),
+            "vulnerable-pin pending-target override corpus changed"
         );
     }
 }

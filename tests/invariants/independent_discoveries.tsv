@@ -61,3 +61,4 @@ INV-045	mark-publication/ewma-push	v16_program_mark_publication_matrix_discovers
 INV-045	mark-publication/reported-price-trade	v16_program_mark_publication_matrix_discovers_stale_risk_admission	pending-mark-cannot-authorize-stale-price-risk-increase	333
 INV-045	mark-publication/cpi-risk-admission	v16_program_mark_publication_matrix_discovers_stale_risk_admission	pending-mark-cannot-authorize-stale-price-risk-increase	332
 INV-045	pending-mark-inheritance/all-trade-routes	v16_program_trade_route_matrix_discovers_pending_mark_inheritance	mark-movement-cost-must-cover-later-third-party-transfer	260
+INV-045	pending-target-override/all-trade-routes	v16_program_trade_route_matrix_discovers_pending_target_override	later-trade-cannot-cheaply-rewrite-prior-pending-mark	282

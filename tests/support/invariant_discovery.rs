@@ -584,6 +584,29 @@ pub struct PendingMarkInheritanceDiscovery {
     pub extracted_profit: u64,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PendingTargetOverrideDiscovery {
+    pub route: DiscoveryTradeRoute,
+    pub control_target: u64,
+    pub reordered_target: u64,
+    pub movement_fee: u128,
+    pub victim_payout_loss: u128,
+    pub coalition_profit: u128,
+    pub control_supply: u128,
+    pub reordered_supply: u128,
+}
+
+impl PendingTargetOverrideDiscovery {
+    pub fn is_violation(&self) -> bool {
+        self.reordered_target < self.control_target
+            && self.movement_fee != 0
+            && self.victim_payout_loss != 0
+            && self.coalition_profit != 0
+            && self.movement_fee < self.victim_payout_loss
+            && self.control_supply == self.reordered_supply
+    }
+}
+
 impl PendingMarkInheritanceDiscovery {
     pub fn is_violation(&self) -> bool {
         self.pending_mark == self.committed_mark
@@ -3861,5 +3884,189 @@ pub fn discover_pending_mark_inheritance_violations(
     DiscoveryTradeRoute::ALL
         .into_iter()
         .map(|route| discover_one_pending_mark_inheritance(seed, route))
+        .collect()
+}
+
+#[derive(Clone, Copy, Debug)]
+struct PendingTargetWorld {
+    target: u64,
+    movement_fee: u128,
+    victim_payout: u128,
+    coalition_payout: u128,
+    supply: u128,
+}
+
+fn run_pending_target_world(
+    seed: [u8; 32],
+    route: DiscoveryTradeRoute,
+    insert_reported_price_round_trip: bool,
+) -> Result<PendingTargetWorld, String> {
+    const BASIS: u64 = 10_000_000;
+    const DIRECTIONAL_Q: i128 = 1_000 * POS_SCALE as i128;
+    const ROUND_TRIP_Q: i128 = 100 * POS_SCALE as i128;
+    const DIRECTIONAL_DEPOSIT: u128 = 20_000_000_000;
+    const ROUND_TRIP_DEPOSIT: u128 = 2_000_000_000;
+
+    let mut env = V16Svm::new(
+        seed,
+        MarketConfig {
+            initial_price: BASIS,
+            max_trading_fee_bps: 10_000,
+            max_price_move_bps_per_slot: 5_000,
+            max_accrual_dt_slots: 1,
+            min_funding_lifetime_slots: 1,
+            actor_deposits: [
+                DIRECTIONAL_DEPOSIT,
+                DIRECTIONAL_DEPOSIT,
+                ROUND_TRIP_DEPOSIT,
+                ROUND_TRIP_DEPOSIT,
+                1,
+            ],
+            actor_token_balances: [
+                25_000_000_000,
+                25_000_000_000,
+                3_000_000_000,
+                3_000_000_000,
+                1,
+            ],
+            ..MarketConfig::default()
+        },
+    );
+    env.configure_ewma_mark(0, 1, BASIS, 1, 0)
+        .map_err(|error| format!("{route:?} configure EWMA: {error}"))?;
+    env.trade_no_cpi(0, 1, 0, DIRECTIONAL_Q, BASIS, 0)
+        .map_err(|error| format!("{route:?} open directional OI: {error}"))?;
+    let observations = || {
+        vec![CrankObservationHint {
+            asset_index: 0,
+            oracle_accounts: 0,
+        }]
+    };
+    for slot in 2..=5 {
+        env.warp_to_slot(slot);
+        env.push_ewma_mark(0, slot, 1)
+            .map_err(|error| format!("{route:?} publish low mark at slot {slot}: {error}"))?;
+        for actor in [0, 1] {
+            env.crank(actor, slot, observations())
+                .map_err(|error| format!("{route:?} accrue actor {actor}: {error}"))?;
+        }
+    }
+    let low_price = env.primary_market_state().1.assets[0].effective_price;
+    if low_price >= BASIS / 5 {
+        return Err(format!("{route:?} bounded mark did not reach low regime"));
+    }
+
+    env.warp_to_slot(6);
+    for actor in [0, 1] {
+        env.crank(actor, 6, observations())
+            .map_err(|error| format!("{route:?} advance actor before rebound: {error}"))?;
+    }
+    let rebound_input = BASIS
+        .checked_mul(2)
+        .and_then(|value| value.checked_sub(low_price))
+        .ok_or_else(|| "pending-target rebound input overflow".to_string())?;
+    env.push_ewma_mark(0, 6, rebound_input)
+        .map_err(|error| format!("{route:?} publish pending rebound: {error}"))?;
+    if env.primary_profile(0).mark_ewma_e6 != BASIS
+        || env.primary_market_state().1.assets[0].effective_price != low_price
+    {
+        return Err(format!("{route:?} honest rebound did not remain pending"));
+    }
+
+    env.warp_to_slot(7);
+    let insurance_before = env.primary_market_state().1.insurance;
+    if insert_reported_price_round_trip {
+        execute_discovery_trade_route(&mut env, route, 2, 3, 0, ROUND_TRIP_Q, 1)
+            .map_err(|error| format!("{route:?} open target-mutating round trip: {error}"))?;
+        execute_discovery_trade_route(&mut env, route, 2, 3, 0, -ROUND_TRIP_Q, low_price)
+            .map_err(|error| format!("{route:?} close target-mutating round trip: {error}"))?;
+    }
+    let movement_fee = env
+        .primary_market_state()
+        .1
+        .insurance
+        .checked_sub(insurance_before)
+        .ok_or_else(|| "target mutation reduced insurance".to_string())?;
+    let target = env.primary_profile(0).mark_ewma_e6;
+
+    let mut slot = 7u64;
+    loop {
+        for actor in [0, 1] {
+            env.crank(actor, slot, observations())
+                .map_err(|error| format!("{route:?} converge actor {actor}: {error}"))?;
+        }
+        if env.primary_market_state().1.assets[0].effective_price == target {
+            break;
+        }
+        slot = slot
+            .checked_add(1)
+            .ok_or_else(|| "target convergence slot overflow".to_string())?;
+        if slot >= 24 {
+            return Err(format!("{route:?} pending target did not converge"));
+        }
+        env.warp_to_slot(slot);
+    }
+    env.trade_no_cpi(0, 1, 0, -DIRECTIONAL_Q, target, 0)
+        .map_err(|error| format!("{route:?} close directional OI: {error}"))?;
+    env.resolve_market()
+        .map_err(|error| format!("{route:?} resolve target world: {error}"))?;
+    for actor in 0..4 {
+        env.close_resolved_primary(actor)
+            .map_err(|error| format!("{route:?} close resolved actor {actor}: {error}"))?;
+    }
+    for actor in 0..4 {
+        let _ = env.claim_resolved_payout_topup_primary(actor);
+    }
+    let victim_payout = u128::from(env.token_amount(env.actors[0].destination_token));
+    let coalition_payout = [1usize, 2, 3].into_iter().try_fold(0u128, |sum, actor| {
+        sum.checked_add(u128::from(
+            env.token_amount(env.actors[actor].destination_token),
+        ))
+        .ok_or_else(|| "pending-target coalition payout overflow".to_string())
+    })?;
+    Ok(PendingTargetWorld {
+        target,
+        movement_fee,
+        victim_payout,
+        coalition_payout,
+        supply: env.token_supply_observed(),
+    })
+}
+
+fn discover_one_pending_target_override(
+    mut seed: [u8; 32],
+    route: DiscoveryTradeRoute,
+) -> Result<PendingTargetOverrideDiscovery, String> {
+    const COALITION_DEPOSITS: u128 = 24_000_000_000;
+    seed[0] ^= 0xe9;
+    seed[1] ^= route.discriminator();
+    let control = run_pending_target_world(seed, route, false)?;
+    let reordered = run_pending_target_world(seed, route, true)?;
+    let victim_payout_loss = control
+        .victim_payout
+        .checked_sub(reordered.victim_payout)
+        .ok_or_else(|| "target mutation increased victim payout".to_string())?;
+    let coalition_profit = reordered
+        .coalition_payout
+        .checked_sub(COALITION_DEPOSITS)
+        .ok_or_else(|| "target mutation coalition did not recover deposits".to_string())?;
+    Ok(PendingTargetOverrideDiscovery {
+        route,
+        control_target: control.target,
+        reordered_target: reordered.target,
+        movement_fee: reordered.movement_fee,
+        victim_payout_loss,
+        coalition_profit,
+        control_supply: control.supply,
+        reordered_supply: reordered.supply,
+    })
+}
+
+pub fn discover_pending_target_override_violations(
+    seed: [u8; 32],
+) -> Result<Vec<PendingTargetOverrideDiscovery>, String> {
+    DiscoveryTradeRoute::ALL
+        .into_iter()
+        .map(|route| discover_one_pending_target_override(seed, route))
         .collect()
 }
