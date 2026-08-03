@@ -84,6 +84,47 @@ pub enum RetryIntentKind {
     AssetActivation,
 }
 
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum SupersededIntentKind {
+    MatcherConfig,
+    PushAuthMark,
+    ConfigureAuthMark,
+    TradeFeePolicy,
+    FeeRedirectPolicy,
+    LiquidationFeePolicy,
+    MaintenanceFeePolicy,
+    ResolvePolicy,
+    BackingFeePolicy,
+}
+
+impl SupersededIntentKind {
+    pub const ALL: [Self; 9] = [
+        Self::MatcherConfig,
+        Self::PushAuthMark,
+        Self::ConfigureAuthMark,
+        Self::TradeFeePolicy,
+        Self::FeeRedirectPolicy,
+        Self::LiquidationFeePolicy,
+        Self::MaintenanceFeePolicy,
+        Self::ResolvePolicy,
+        Self::BackingFeePolicy,
+    ];
+
+    fn discriminator(self) -> u8 {
+        match self {
+            Self::MatcherConfig => 0,
+            Self::PushAuthMark => 1,
+            Self::ConfigureAuthMark => 2,
+            Self::TradeFeePolicy => 3,
+            Self::FeeRedirectPolicy => 4,
+            Self::LiquidationFeePolicy => 5,
+            Self::MaintenanceFeePolicy => 6,
+            Self::ResolvePolicy => 7,
+            Self::BackingFeePolicy => 8,
+        }
+    }
+}
+
 impl RetryIntentKind {
     pub const ALL: [Self; 9] = [
         Self::Deposit,
@@ -276,6 +317,20 @@ pub struct IntentReplayDiscovery {
     pub accepted_retry: bool,
     pub duplicated_economic_effect: bool,
     pub retry_compute_units: Option<u64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SupersessionDiscovery {
+    pub kind: SupersededIntentKind,
+    pub accepted_stale_intent: bool,
+    pub overwrote_newer_state: bool,
+    pub compute_units: Option<u64>,
+}
+
+impl SupersessionDiscovery {
+    pub fn is_violation(&self) -> bool {
+        self.accepted_stale_intent && self.overwrote_newer_state
+    }
 }
 
 impl IntentReplayDiscovery {
@@ -1206,4 +1261,151 @@ pub fn discover_intent_retries(seed: [u8; 32]) -> Result<Vec<IntentReplayDiscove
         .into_iter()
         .map(|kind| discover_one_intent_retry(seed, kind))
         .collect()
+}
+
+fn prepare_superseded_intent(
+    env: &mut V16Svm,
+    kind: SupersededIntentKind,
+) -> Result<Transaction, String> {
+    const AUTHORITY: usize = 2;
+    match kind {
+        SupersededIntentKind::MatcherConfig => {
+            let retained = env.build_retained_matcher_config(0, 1);
+            env.set_matcher_config(0, 0)
+                .map_err(|error| format!("install newer matcher policy: {error}"))?;
+            Ok(retained)
+        }
+        SupersededIntentKind::PushAuthMark => {
+            env.configure_auth_mark(false, 0, 0, INITIAL_PRICE)
+                .map_err(|error| format!("configure AuthMark: {error}"))?;
+            let retained = env.build_retained_auth_mark(0, INITIAL_PRICE * 9 / 10);
+            env.warp_to_slot(1);
+            env.push_auth_mark(0, 1, INITIAL_PRICE * 11 / 10)
+                .map_err(|error| format!("install newer authenticated mark: {error}"))?;
+            Ok(retained)
+        }
+        SupersededIntentKind::ConfigureAuthMark => {
+            let retained = env.build_retained_auth_config(0, INITIAL_PRICE * 9 / 10);
+            env.warp_to_slot(1);
+            env.configure_auth_mark(false, 0, 1, INITIAL_PRICE * 11 / 10)
+                .map_err(|error| format!("install newer AuthMark configuration: {error}"))?;
+            Ok(retained)
+        }
+        SupersededIntentKind::TradeFeePolicy => {
+            let retained = env.build_retained_trade_fee_policy(9_000);
+            env.update_trade_fee_policy(1_000)
+                .map_err(|error| format!("install newer trade-fee policy: {error}"))?;
+            Ok(retained)
+        }
+        SupersededIntentKind::FeeRedirectPolicy => {
+            let retained = env.build_retained_fee_redirect_policy(9_000);
+            env.update_fee_redirect_policy(1_000)
+                .map_err(|error| format!("install newer fee-redirect policy: {error}"))?;
+            Ok(retained)
+        }
+        SupersededIntentKind::LiquidationFeePolicy => {
+            let retained = env.build_retained_liquidation_fee_policy(9_000);
+            env.update_liquidation_fee_policy(1_000)
+                .map_err(|error| format!("install newer liquidation-fee policy: {error}"))?;
+            Ok(retained)
+        }
+        SupersededIntentKind::MaintenanceFeePolicy => {
+            let retained = env.build_retained_maintenance_fee_policy(9_000);
+            env.update_maintenance_fee_policy(1_000)
+                .map_err(|error| format!("install newer maintenance-fee policy: {error}"))?;
+            Ok(retained)
+        }
+        SupersededIntentKind::ResolvePolicy => {
+            let retained = env.build_retained_permissionless_resolve_policy(17, 29);
+            env.configure_permissionless_resolve(31, 43)
+                .map_err(|error| format!("install newer resolve policy: {error}"))?;
+            Ok(retained)
+        }
+        SupersededIntentKind::BackingFeePolicy => {
+            env.update_asset_authority_from_admin(
+                0,
+                percolator_prog::processor::ASSET_AUTH_INSURANCE,
+                AUTHORITY,
+            )
+            .map_err(|error| format!("install backing-fee policy authority: {error}"))?;
+            let retained = env.build_retained_backing_fee_policy_for_actor(AUTHORITY, 0, 5_000, 0);
+            env.update_backing_fee_policy_for_actor(AUTHORITY, 0, 0, 0)
+                .map_err(|error| format!("install newer backing-fee policy: {error}"))?;
+            Ok(retained)
+        }
+    }
+}
+
+fn discover_one_superseded_intent(
+    mut seed: [u8; 32],
+    kind: SupersededIntentKind,
+) -> Result<SupersessionDiscovery, String> {
+    seed[0] ^= 0xf3;
+    seed[1] ^= kind.discriminator();
+    let mut env = V16Svm::new(seed, MarketConfig::default());
+    let supply_before = env.token_supply_observed();
+    let retained = prepare_superseded_intent(&mut env, kind)?;
+    let newer_state = fingerprint(&env);
+    let result = env.land_retained(retained);
+    let after = fingerprint(&env);
+    if env.token_supply_observed() != supply_before {
+        return Err(format!(
+            "{kind:?} supersession probe changed SPL supply: {supply_before} -> {}",
+            env.token_supply_observed()
+        ));
+    }
+
+    match result {
+        Ok(success) => {
+            let overwrote_newer_state = newer_state != after;
+            if !overwrote_newer_state {
+                return Err(format!(
+                    "{kind:?} stale control succeeded without overwriting newer state"
+                ));
+            }
+            Ok(SupersessionDiscovery {
+                kind,
+                accepted_stale_intent: true,
+                overwrote_newer_state,
+                compute_units: Some(success.compute_units),
+            })
+        }
+        Err(_) => {
+            if newer_state != after {
+                return Err(format!(
+                    "{kind:?} rejected stale control did not roll back exactly"
+                ));
+            }
+            Ok(SupersessionDiscovery {
+                kind,
+                accepted_stale_intent: false,
+                overwrote_newer_state: false,
+                compute_units: None,
+            })
+        }
+    }
+}
+
+pub fn discover_superseded_intents(seed: [u8; 32]) -> Result<Vec<SupersessionDiscovery>, String> {
+    let trace = std::env::var_os("PERCOLATOR_DISCOVERY_TRACE").is_some();
+    let mut discoveries = Vec::with_capacity(SupersededIntentKind::ALL.len());
+    for kind in SupersededIntentKind::ALL {
+        if trace {
+            eprintln!("supersession probe start: {kind:?}");
+        }
+        let discovery = discover_one_superseded_intent(seed, kind).map_err(|error| {
+            if trace {
+                eprintln!("supersession probe error: {kind:?}: {error}");
+            }
+            error
+        })?;
+        if trace {
+            eprintln!(
+                "supersession probe finish: {kind:?} violation={}",
+                discovery.is_violation()
+            );
+        }
+        discoveries.push(discovery);
+    }
+    Ok(discoveries)
 }

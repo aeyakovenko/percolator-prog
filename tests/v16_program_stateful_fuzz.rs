@@ -78,8 +78,9 @@ use support::fuzz_model::{
 use support::invariant_discovery::{
     discover_asset_generation_replays, discover_authority_incarnation_replays,
     discover_intent_retries, discover_market_incarnation_replays,
-    discover_portfolio_incarnation_replays, AssetIntentKind, AuthorityIntentKind, MarketIntentKind,
-    PortfolioIntentKind, RetryIntentKind,
+    discover_portfolio_incarnation_replays, discover_superseded_intents, AssetIntentKind,
+    AuthorityIntentKind, MarketIntentKind, PortfolioIntentKind, RetryIntentKind,
+    SupersededIntentKind,
 };
 
 fn env_usize(name: &str, default: usize) -> usize {

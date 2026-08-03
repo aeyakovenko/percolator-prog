@@ -2,7 +2,10 @@
 //!
 //! Normative obligation: Delayed requests remain bounded by the policy and economics the signer authorized.
 //!
-//! Evidence in this file (F over public I routes): `v16_program_pr325_maintenance_policy_generation_replay_fuzz`, `v16_program_pr326_liquidation_policy_generation_replay_fuzz`, `v16_program_pr337_delayed_maintenance_policy_replay_fuzz`, `v16_program_pr336_delayed_liquidation_policy_replay_fuzz`, `v16_program_pr338_delayed_trade_fee_policy_replay_fuzz`, `v16_program_pr340_delayed_fee_redirect_policy_replay_fuzz`, `v16_program_pr349_delayed_backing_fee_policy_replay_fuzz`, `v16_program_pr339_backing_fee_consent_replay_fuzz`, `v16_program_pr347_delayed_resolve_policy_replay_fuzz`, `v16_program_pr335_delayed_oracle_intent_replay_fuzz`, `v16_program_pr334_delayed_matcher_enable_replay_fuzz`. These tests exercise the deployed public
+//! Evidence in this file (F over public I routes):
+//! `v16_program_superseded_control_matrix_discovers_stale_overwrites` generates retained controls,
+//! installs a distinct newer authorized value, and applies one common stale-overwrite oracle.
+//! Direct impact regressions remain below. These tests exercise the deployed public
 //! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
 //! rollback, liveness, or compute outcomes appropriate to the invariant.
 //!
@@ -11,6 +14,42 @@
 //! plus every additional verification method required by the charter.
 
 use super::*;
+
+proptest! {
+    #![proptest_config(ProptestConfig {
+        cases: env_usize("PERCOLATOR_FUZZ_CASES", 8) as u32,
+        max_shrink_iters: env_usize("PERCOLATOR_FUZZ_SHRINK_ITERS", 64) as u32,
+        failure_persistence: Some(Box::new(
+            proptest::test_runner::FileFailurePersistence::Direct(
+                "proptest-regressions/inv_014_supersession_discovery.txt",
+            ),
+        )),
+        ..ProptestConfig::default()
+    })]
+
+    #[test]
+    fn v16_program_superseded_control_matrix_discovers_stale_overwrites(
+        seed in any::<[u8; 32]>()
+    ) {
+        let discoveries = discover_superseded_intents(seed)
+            .map_err(TestCaseError::fail)?;
+        prop_assert_eq!(discoveries.len(), SupersededIntentKind::ALL.len());
+        for (expected, discovery) in SupersededIntentKind::ALL.into_iter().zip(&discoveries) {
+            prop_assert_eq!(discovery.kind, expected);
+        }
+        let violations: Vec<_> = discoveries
+            .iter()
+            .filter(|discovery| discovery.is_violation())
+            .map(|discovery| discovery.kind)
+            .collect();
+        eprintln!("independent INV-014 discoveries: {violations:?}");
+        prop_assert_eq!(
+            violations,
+            SupersededIntentKind::ALL.to_vec(),
+            "vulnerable-pin supersession discovery corpus changed"
+        );
+    }
+}
 
 proptest! {
     #![proptest_config(ProptestConfig {

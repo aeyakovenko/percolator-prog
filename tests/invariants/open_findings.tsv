@@ -104,19 +104,19 @@
 331	LoF	BLOCKER	INV-020	direct-regression	[BLOCKER LoF] Reject temporally skewed composite oracle reports
 332	LoF	BLOCKER	INV-045	direct-regression	[BLOCKER LoF] Stage authenticated mark targets before CPI fills
 333	LoF	BLOCKER	INV-045	direct-regression	[BLOCKER LoF] Stage trade-driven mark targets before later fills
-334	LoF	BLOCKER	INV-014	direct-regression	[BLOCKER LoF] Sequence-bind matcher config intents
-335	LoF	BLOCKER	INV-014	direct-regression	[BLOCKER LoF] Reject delayed authenticated mark intents
-336	LoF	BLOCKER	INV-014	direct-regression	[BLOCKER LoF] Reject delayed liquidation-fee policy replay
-337	LoF	BLOCKER	INV-014	direct-regression	[BLOCKER LoF] Reject delayed maintenance-fee policy replay
-338	LoF	BLOCKER	INV-014	direct-regression	[BLOCKER LoF] Reject delayed trade-fee policy replay
+334	LoF	BLOCKER	INV-014	independent-discovery	[BLOCKER LoF] Sequence-bind matcher config intents
+335	LoF	BLOCKER	INV-014	independent-discovery	[BLOCKER LoF] Reject delayed authenticated mark intents
+336	LoF	BLOCKER	INV-014	independent-discovery	[BLOCKER LoF] Reject delayed liquidation-fee policy replay
+337	LoF	BLOCKER	INV-014	independent-discovery	[BLOCKER LoF] Reject delayed maintenance-fee policy replay
+338	LoF	BLOCKER	INV-014	independent-discovery	[BLOCKER LoF] Reject delayed trade-fee policy replay
 339	LoF	BLOCKER	INV-014	direct-regression	[BLOCKER LoF] Bind backing top-ups to provider-approved fee terms
-340	LoF	BLOCKER	INV-014	direct-regression	[BLOCKER LoF] Reject delayed fee-redirect policy replay
+340	LoF	BLOCKER	INV-014	independent-discovery	[BLOCKER LoF] Reject delayed fee-redirect policy replay
 343	LoF	BLOCKER	INV-008	independent-discovery	[BLOCKER LoF] Make trade intents one-shot across retry variants
 344	LoF	BLOCKER	INV-008	independent-discovery	[BLOCKER LoF] Make insurance top-ups one-shot across retry variants
 345	LoF	BLOCKER	INV-005	independent-discovery	[BLOCKER LoF] Prevent market-authority handoff ABA replay
 346	LoF	BLOCKER	INV-005	independent-discovery	[BLOCKER LoF] Make asset-authority handoffs one-shot
-347	LoF	BLOCKER	INV-014	direct-regression	[BLOCKER LoF] Reject delayed stale-resolution policy replay
-349	LoF	BLOCKER	INV-014	direct-regression	[BLOCKER LoF] Reject delayed backing-fee policy replay
+347	LoF	BLOCKER	INV-014	independent-discovery	[BLOCKER LoF] Reject delayed stale-resolution policy replay
+349	LoF	BLOCKER	INV-014	independent-discovery	[BLOCKER LoF] Reject delayed backing-fee policy replay
 350	LoF	BLOCKER	INV-008	independent-discovery	[BLOCKER LoF] Make deposit intents one-shot across retry variants
 351	LoF	BLOCKER	INV-008	independent-discovery	[BLOCKER LoF] Make backing top-ups one-shot across retry variants
 353	LoF	BLOCKER	INV-005	independent-discovery	[BLOCKER LoF] Bind terminal resolves to authority incarnations

@@ -174,10 +174,10 @@ fn v16_open_security_finding_benchmark_is_complete_and_non_overclaiming() {
     }
 
     assert_eq!(rows, 145, "refresh the dated GitHub finding snapshot");
-    assert_eq!(direct, 43, "direct adapter inventory changed");
+    assert_eq!(direct, 35, "direct adapter inventory changed");
     assert_eq!(missing, 67, "explicit finding gaps changed");
     assert_eq!(
-        independent, 35,
+        independent, 43,
         "promote only genuinely finding-agnostic invariant discoveries"
     );
 
@@ -187,6 +187,7 @@ fn v16_open_security_finding_benchmark_is_complete_and_non_overclaiming() {
         include_str!("../stateful/inv_003_portfolio_incarnation_binding.rs"),
         include_str!("../stateful/inv_005_authority_incarnation_binding.rs"),
         include_str!("../stateful/inv_008_intent_uniqueness_and_bounded_replay.rs"),
+        include_str!("../stateful/inv_014_delayed_policy_and_policy_epoch_safety.rs"),
     ];
     let mut fingerprints = std::collections::BTreeSet::new();
     let mut mapped_prs = std::collections::BTreeSet::new();
@@ -220,6 +221,7 @@ fn v16_open_security_finding_benchmark_is_complete_and_non_overclaiming() {
                 fields[3],
                 "stale-intent-must-reject-and-roll-back-exactly"
                     | "same-economic-intent-executes-at-most-once-and-rejection-rolls-back"
+                    | "newer-authorized-control-cannot-be-overwritten-by-stale-intent"
             ),
             "unknown independent oracle: {}",
             fields[3]

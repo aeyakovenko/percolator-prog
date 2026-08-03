@@ -30,3 +30,11 @@ INV-008	intent-retry/trade-family	v16_program_retry_operation_matrix_discovers_d
 INV-008	intent-retry/insurance-top-up	v16_program_retry_operation_matrix_discovers_duplicate_economic_execution	same-economic-intent-executes-at-most-once-and-rejection-rolls-back	344
 INV-008	intent-retry/backing-top-up	v16_program_retry_operation_matrix_discovers_duplicate_economic_execution	same-economic-intent-executes-at-most-once-and-rejection-rolls-back	351
 INV-008	intent-retry/asset-activation	v16_program_retry_operation_matrix_discovers_duplicate_economic_execution	same-economic-intent-executes-at-most-once-and-rejection-rolls-back	362
+INV-014	control-supersession/matcher-config	v16_program_superseded_control_matrix_discovers_stale_overwrites	newer-authorized-control-cannot-be-overwritten-by-stale-intent	334
+INV-014	control-supersession/authenticated-mark	v16_program_superseded_control_matrix_discovers_stale_overwrites	newer-authorized-control-cannot-be-overwritten-by-stale-intent	335
+INV-014	control-supersession/liquidation-fee-policy	v16_program_superseded_control_matrix_discovers_stale_overwrites	newer-authorized-control-cannot-be-overwritten-by-stale-intent	336
+INV-014	control-supersession/maintenance-fee-policy	v16_program_superseded_control_matrix_discovers_stale_overwrites	newer-authorized-control-cannot-be-overwritten-by-stale-intent	337
+INV-014	control-supersession/trade-fee-policy	v16_program_superseded_control_matrix_discovers_stale_overwrites	newer-authorized-control-cannot-be-overwritten-by-stale-intent	338
+INV-014	control-supersession/fee-redirect-policy	v16_program_superseded_control_matrix_discovers_stale_overwrites	newer-authorized-control-cannot-be-overwritten-by-stale-intent	340
+INV-014	control-supersession/resolve-policy	v16_program_superseded_control_matrix_discovers_stale_overwrites	newer-authorized-control-cannot-be-overwritten-by-stale-intent	347
+INV-014	control-supersession/backing-fee-policy	v16_program_superseded_control_matrix_discovers_stale_overwrites	newer-authorized-control-cannot-be-overwritten-by-stale-intent	349
