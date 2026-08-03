@@ -606,6 +606,27 @@ pub struct PendingMarkFeeOrderingDiscovery {
     pub extracted_reward: u64,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MarkMovementReserveDiscovery {
+    pub route: DiscoveryTradeRoute,
+    pub movement_fee: u128,
+    pub withdrawn_reserve: u128,
+    pub victim_loss: u128,
+    pub coalition_gain: u128,
+    pub committed_mark: u64,
+}
+
+impl MarkMovementReserveDiscovery {
+    pub fn is_violation(&self) -> bool {
+        self.movement_fee != 0
+            && self.withdrawn_reserve == self.movement_fee
+            && self.victim_loss != 0
+            && self.coalition_gain != 0
+            && self.coalition_gain < self.victim_loss
+            && self.coalition_gain.checked_add(1) == Some(self.victim_loss)
+    }
+}
+
 impl PendingMarkFeeOrderingDiscovery {
     pub fn is_violation(&self) -> bool {
         let reward_gain = self.reordered_reward.saturating_sub(self.control_reward);
@@ -4258,4 +4279,152 @@ pub fn discover_pending_mark_fee_ordering(
         victim_payout: reordered.victim_payout,
         extracted_reward: reordered.extracted_reward,
     })
+}
+
+fn discover_one_mark_movement_reserve_violation(
+    mut seed: [u8; 32],
+    route: DiscoveryTradeRoute,
+) -> Result<MarkMovementReserveDiscovery, String> {
+    const ASSET: u16 = 1;
+    const MARK: u64 = 1_000_000;
+    const LOW_PRINT: u64 = 1;
+    const POSITION_Q: i128 = 1_000 * POS_SCALE as i128;
+    const DEPOSIT: u128 = 2_000_000_000;
+    const INIT_FEE: u128 = 1;
+
+    seed[0] ^= 0x1b;
+    seed[1] ^= route.discriminator();
+    let mut env = V16Svm::new(
+        seed,
+        MarketConfig {
+            initial_price: MARK,
+            h_max: 20,
+            max_trading_fee_bps: 100,
+            max_price_move_bps_per_slot: 100,
+            max_accrual_dt_slots: 20,
+            min_funding_lifetime_slots: 20,
+            actor_deposits: [DEPOSIT, DEPOSIT, DEPOSIT, DEPOSIT, 1],
+            actor_token_balances: [
+                2_500_000_000,
+                2_500_000_000,
+                2_500_000_000,
+                2_500_000_000,
+                1,
+            ],
+            ..MarketConfig::default()
+        },
+    );
+    let supply_before = env.token_supply_observed();
+    env.update_market_init_fee_policy(INIT_FEE)
+        .map_err(|error| format!("{route:?} configure activation fee: {error}"))?;
+    env.warp_to_slot(2);
+    env.retire_asset(ASSET, 2)
+        .map_err(|error| format!("{route:?} retire reusable asset: {error}"))?;
+    env.warp_to_slot(3);
+    env.activate_permissionless_asset_for_actor(0, ASSET, 3, MARK, 0, INIT_FEE)
+        .map_err(|error| format!("{route:?} activate fee-provider asset: {error}"))?;
+    env.configure_ewma_mark_for_actor(0, ASSET, 3, MARK, 1, 0)
+        .map_err(|error| format!("{route:?} configure fee-provider EWMA: {error}"))?;
+
+    execute_discovery_trade_route(&mut env, route, 0, 3, ASSET, -POSITION_Q, MARK)
+        .map_err(|error| format!("{route:?} open independent exposure: {error}"))?;
+    env.warp_to_slot(4);
+    let insurance_before = env.primary_market_state().1.insurance;
+    env.trade_no_cpi(1, 2, ASSET, POSITION_Q, LOW_PRINT, 0)
+        .map_err(|error| format!("{route:?} pay downward mark movement: {error}"))?;
+    env.trade_no_cpi(1, 2, ASSET, -POSITION_Q, LOW_PRINT, 0)
+        .map_err(|error| format!("{route:?} flatten mark-moving pair: {error}"))?;
+    let movement_fee = env
+        .primary_market_state()
+        .1
+        .insurance
+        .checked_sub(insurance_before)
+        .ok_or_else(|| "mark movement reduced insurance".to_string())?;
+    let queued_mark = env.primary_profile(ASSET as usize).mark_ewma_e6;
+    if movement_fee == 0 || queued_mark >= MARK {
+        return Err(format!(
+            "{route:?} failed to create paid downward mark: fee={movement_fee}, mark={queued_mark}"
+        ));
+    }
+
+    let destination_before = env.token_amount(env.actors[0].destination_token);
+    env.withdraw_insurance_asset(0, ASSET, movement_fee)
+        .map_err(|error| format!("{route:?} withdraw movement reserve: {error}"))?;
+    let withdrawn_reserve = u128::from(
+        env.token_amount(env.actors[0].destination_token)
+            .checked_sub(destination_before)
+            .ok_or_else(|| "reserve destination decreased".to_string())?,
+    );
+
+    let oracle_accounts = env.primary_profile(ASSET as usize).oracle_leg_count;
+    let observations = || {
+        vec![CrankObservationHint {
+            asset_index: ASSET,
+            oracle_accounts,
+        }]
+    };
+    env.crank(0, 4, observations())
+        .map_err(|error| format!("{route:?} apply mark to coalition: {error}"))?;
+    env.crank(3, 4, observations())
+        .map_err(|error| format!("{route:?} apply mark to victim: {error}"))?;
+    let committed_mark = env.primary_market_state().1.assets[ASSET as usize].effective_price;
+    if committed_mark >= MARK {
+        return Err(format!("{route:?} downward mark did not commit"));
+    }
+    execute_discovery_trade_route(&mut env, route, 0, 3, ASSET, POSITION_Q, committed_mark)
+        .map_err(|error| format!("{route:?} close independent exposure: {error}"))?;
+    env.crank(0, 4, Vec::new())
+        .map_err(|error| format!("{route:?} settle coalition close: {error}"))?;
+    env.crank(3, 4, Vec::new())
+        .map_err(|error| format!("{route:?} settle victim close: {error}"))?;
+
+    for actor in 0..4 {
+        let pnl = env.primary_portfolio(actor).pnl.get();
+        if pnl > 0 {
+            env.convert_released_pnl(actor, pnl as u128)
+                .map_err(|error| format!("{route:?} convert actor {actor} PnL: {error}"))?;
+        }
+        let capital = env.primary_portfolio(actor).capital.get();
+        if capital != 0 {
+            env.withdraw_primary(actor, capital)
+                .map_err(|error| format!("{route:?} withdraw actor {actor}: {error}"))?;
+        }
+    }
+    let coalition_payout = [0usize, 1, 2].into_iter().try_fold(0u128, |sum, actor| {
+        sum.checked_add(u128::from(
+            env.token_amount(env.actors[actor].destination_token),
+        ))
+        .ok_or_else(|| "movement-reserve coalition payout overflow".to_string())
+    })?;
+    let victim_payout = u128::from(env.token_amount(env.actors[3].destination_token));
+    let coalition_committed = DEPOSIT
+        .checked_mul(3)
+        .and_then(|value| value.checked_add(INIT_FEE))
+        .ok_or_else(|| "movement-reserve coalition commitment overflow".to_string())?;
+    let victim_loss = DEPOSIT
+        .checked_sub(victim_payout)
+        .ok_or_else(|| "movement-reserve victim payout exceeded deposit".to_string())?;
+    let coalition_gain = coalition_payout
+        .checked_sub(coalition_committed)
+        .ok_or_else(|| "movement-reserve coalition did not recover deposits".to_string())?;
+    if env.token_supply_observed() != supply_before {
+        return Err("movement-reserve world changed SPL supply".into());
+    }
+    Ok(MarkMovementReserveDiscovery {
+        route,
+        movement_fee,
+        withdrawn_reserve,
+        victim_loss,
+        coalition_gain,
+        committed_mark,
+    })
+}
+
+pub fn discover_mark_movement_reserve_violations(
+    seed: [u8; 32],
+) -> Result<Vec<MarkMovementReserveDiscovery>, String> {
+    DiscoveryTradeRoute::ALL
+        .into_iter()
+        .map(|route| discover_one_mark_movement_reserve_violation(seed, route))
+        .collect()
 }

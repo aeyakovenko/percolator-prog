@@ -16,7 +16,7 @@
 220	LoF	BLOCKER	INV-053	direct-regression	[BLOCKER LoF] Prevent liquidation on an omitted rescue mark
 223	LoF	PRIVILEGED	INV-036	independent-discovery	[PRIVILEGED LoF] Require matcher consent for CPI backing fees
 224	LoF	BLOCKER	INV-036	independent-discovery	[BLOCKER LoF] Prevent CPI caller-fee LP siphon
-225	LoF	BLOCKER	INV-045	direct-regression	[BLOCKER LoF] Keep EWMA movement fees non-reclaimable
+225	LoF	BLOCKER	INV-045	independent-discovery	[BLOCKER LoF] Keep EWMA movement fees non-reclaimable
 228	DoS	HARDENING	INV-073	missing	[HARDENING DoS] Unstick fragmented recovery force-close
 229	DoS	BLOCKER	INV-074	missing	[BLOCKER DoS] Scope bankruptcy locks to affected assets
 231	LoF	BLOCKER	INV-002	independent-discovery	[BLOCKER LoF] Prevent signed intent replay across market generations

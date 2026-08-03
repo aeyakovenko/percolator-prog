@@ -15,7 +15,10 @@
 //! rewrite that displaces more independent payout than it costs.
 //! `v16_program_pending_mark_fee_ordering_discovers_reward_diversion` permutes fee synchronization
 //! against mark commitment and requires reward accounting to be independent of pending adverse
-//! value. Direct impact tests remain below. These tests exercise the deployed public
+//! value. `v16_program_trade_route_matrix_discovers_withdrawable_mark_reserve` creates a paid mark
+//! move, withdraws its reserve while unrelated exposure depends on it, and verifies the resulting
+//! victim loss and coalition SPL gain across all trade routes. Direct impact tests remain below.
+//! These tests exercise the deployed public
 //! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
 //! rollback, liveness, or compute outcomes appropriate to the invariant.
 //!
@@ -24,6 +27,42 @@
 //! plus every additional verification method required by the charter.
 
 use super::*;
+
+proptest! {
+    #![proptest_config(ProptestConfig {
+        cases: env_usize("PERCOLATOR_FUZZ_CASES", 8) as u32,
+        max_shrink_iters: env_usize("PERCOLATOR_FUZZ_SHRINK_ITERS", 64) as u32,
+        failure_persistence: Some(Box::new(
+            proptest::test_runner::FileFailurePersistence::Direct(
+                "proptest-regressions/inv_045_mark_movement_reserve_discovery.txt",
+            ),
+        )),
+        ..ProptestConfig::default()
+    })]
+
+    #[test]
+    fn v16_program_trade_route_matrix_discovers_withdrawable_mark_reserve(
+        seed in any::<[u8; 32]>()
+    ) {
+        let discoveries = discover_mark_movement_reserve_violations(seed)
+            .map_err(TestCaseError::fail)?;
+        prop_assert_eq!(discoveries.len(), DiscoveryTradeRoute::ALL.len());
+        for (expected, discovery) in DiscoveryTradeRoute::ALL.into_iter().zip(&discoveries) {
+            prop_assert_eq!(discovery.route, expected);
+        }
+        let violations: Vec<_> = discoveries
+            .iter()
+            .filter(|discovery| discovery.is_violation())
+            .map(|discovery| discovery.route)
+            .collect();
+        eprintln!("independent mark-movement reserve discoveries: {violations:?}");
+        prop_assert_eq!(
+            violations,
+            DiscoveryTradeRoute::ALL.to_vec(),
+            "vulnerable-pin mark-movement reserve corpus changed"
+        );
+    }
+}
 
 proptest! {
     #![proptest_config(ProptestConfig {
