@@ -2,7 +2,7 @@
 //!
 //! Normative obligation: Every publicly reachable funded state has a finite public path to capital or terminal disposition.
 //!
-//! Evidence in this file (I/C plus invariant-specific M assertions): `v16_program_recovery_residue_matrix_discovers_abandoned_owner_lock`, `v16_program_expired_partial_close_matrix_discovers_global_terminal_lock`, `v16_program_crossed_adl_effective_exit_matrix_discovers_zero_oi_residue_lock`, `v16_program_partial_adl_effective_exit_matrix_discovers_zero_oi_residue_lock`, `v16_attack_source_backed_force_close_preserves_bounded_resolved_exits`, `v16_probe_liquidation_then_shutdown_preserves_bounded_owner_exit`, `v16_attack_permissionless_close_resolved_survives_drained_owner_system_account`, `v16_attack_permissionless_asset_epoch_grief_has_atomic_max_leg_exit`. These tests exercise the deployed public
+//! Evidence in this file (I/C plus invariant-specific M assertions): `v16_program_fractional_social_loss_exit_matrix_discovers_dust_lock`, `v16_program_recovery_residue_matrix_discovers_abandoned_owner_lock`, `v16_program_expired_partial_close_matrix_discovers_global_terminal_lock`, `v16_program_crossed_adl_effective_exit_matrix_discovers_zero_oi_residue_lock`, `v16_program_partial_adl_effective_exit_matrix_discovers_zero_oi_residue_lock`, `v16_attack_source_backed_force_close_preserves_bounded_resolved_exits`, `v16_probe_liquidation_then_shutdown_preserves_bounded_owner_exit`, `v16_attack_permissionless_close_resolved_survives_drained_owner_system_account`, `v16_attack_permissionless_asset_epoch_grief_has_atomic_max_leg_exit`. These tests exercise the deployed public
 //! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
 //! rollback, liveness, or compute outcomes appropriate to the invariant.
 //!
@@ -11,6 +11,181 @@
 //! plus every additional verification method required by the charter.
 
 use super::*;
+
+#[test]
+fn v16_program_fractional_social_loss_exit_matrix_discovers_dust_lock() {
+    let mut params = V16CuMarketParams::default();
+    params.initial_price = 1;
+    params.max_price_move_bps_per_slot = 10_000;
+    let mut env = V16CuEnv::new_with_init_params(params);
+    env.configure_auth_mark_with_cu(0, 1);
+
+    let l1o = Keypair::new();
+    let l2o = Keypair::new();
+    let l3o = Keypair::new();
+    let l4o = Keypair::new();
+    let s1o = Keypair::new();
+    let s2o = Keypair::new();
+    let s3o = Keypair::new();
+    let s4o = Keypair::new();
+    let l1 = env.create_portfolio(&l1o);
+    let l2 = env.create_portfolio(&l2o);
+    let l3 = env.create_portfolio(&l3o);
+    let l4 = env.create_portfolio(&l4o);
+    let s1 = env.create_portfolio(&s1o);
+    let s2 = env.create_portfolio(&s2o);
+    let s3 = env.create_portfolio(&s3o);
+    let s4 = env.create_portfolio(&s4o);
+
+    for (owner, portfolio, deposit) in [
+        (&l1o, l1, 1_000),
+        (&l2o, l2, 1_000),
+        (&l3o, l3, 1_000),
+        (&l4o, l4, 1_000),
+        (&s1o, s1, 2),
+        (&s2o, s2, 1_000),
+        (&s3o, s3, 1_000),
+        (&s4o, s4, 1_000),
+    ] {
+        env.deposit(owner, portfolio, deposit);
+    }
+    for (long_owner, long, short_owner, short) in [
+        (&l1o, l1, &s1o, s1),
+        (&l2o, l2, &s2o, s2),
+        (&l3o, l3, &s3o, s3),
+        (&l4o, l4, &s4o, s4),
+    ] {
+        env.trade_asset_with_cu(
+            0,
+            long_owner,
+            long,
+            short_owner,
+            short,
+            POS_SCALE as i128,
+            1,
+            0,
+        );
+    }
+
+    for (slot, mark) in [(1u64, 2u64), (2, 3), (3, 4), (4, 5)] {
+        env.svm.warp_to_slot(slot);
+        env.push_auth_mark_with_cu(slot, mark);
+        env.crank(
+            s2,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: slot,
+                observations: crank_observations(0),
+            },
+        );
+    }
+    for portfolio in [s1, l1, l2, l3, l4, s2, s3, s4] {
+        env.svm.expire_blockhash();
+        let _ = env.send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 4,
+                observations: crank_observations(0),
+            },
+            vec![
+                AccountMeta::new(env.payer.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(portfolio, false),
+            ],
+            &[],
+        );
+    }
+    for _ in 0..4 {
+        if !has_active_leg_for_asset(&env.portfolio_state(s1), 0) {
+            break;
+        }
+        env.crank(
+            s1,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 4,
+                observations: crank_observations(0),
+            },
+        );
+    }
+    let bankruptcy = env.market_state().1;
+    assert_eq!(bankruptcy.mode, MarketModeV16::Live);
+    assert!(!has_active_leg_for_asset(&env.portfolio_state(s1), 0));
+    assert_ne!(bankruptcy.assets[0].b_long_num, 0);
+
+    for _ in 0..4 {
+        let leg = active_leg_for_asset(&env.portfolio_state(l1), 0);
+        if !leg.b_stale && leg.b_snap == env.market_state().1.assets[0].b_long_num {
+            break;
+        }
+        env.crank(
+            l1,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 4,
+                observations: crank_observations(0),
+            },
+        );
+    }
+    assert_eq!(
+        active_leg_for_asset(&env.portfolio_state(l1), 0).b_rem,
+        percolator::SOCIAL_LOSS_DEN / 2
+    );
+    env.rebalance_reduce_with_cu(&l1o, l1, 0, POS_SCALE);
+    assert!(!has_active_leg_for_asset(&env.portfolio_state(l1), 0));
+    assert_eq!(
+        env.market_state().1.assets[0].social_loss_dust_long_num,
+        percolator::SOCIAL_LOSS_DEN / 2
+    );
+
+    for _ in 0..4 {
+        let leg = active_leg_for_asset(&env.portfolio_state(l2), 0);
+        if !leg.b_stale && leg.b_snap == env.market_state().1.assets[0].b_long_num {
+            break;
+        }
+        env.crank(
+            l2,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 4,
+                observations: crank_observations(0),
+            },
+        );
+    }
+    assert_eq!(
+        active_leg_for_asset(&env.portfolio_state(l2), 0).b_rem,
+        percolator::SOCIAL_LOSS_DEN / 2
+    );
+
+    let fixed_market = env.svm.get_account(&env.market).unwrap();
+    let fixed_long = env.svm.get_account(&l2).unwrap();
+    let fixed_short = env.svm.get_account(&s2).unwrap();
+    let fixed_vault = env.svm.get_account(&env.vault).unwrap();
+    for route in [0u8, 1] {
+        env.svm.expire_blockhash();
+        let result = if route == 0 {
+            env.send(
+                ProgInstruction::RebalanceReduce {
+                    asset_index: 0,
+                    reduce_q: POS_SCALE,
+                },
+                vec![
+                    AccountMeta::new(l2o.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(l2, false),
+                ],
+                &[&l2o],
+            )
+        } else {
+            env.try_trade_asset_with_cu(0, &l2o, l2, &s2o, s2, -(POS_SCALE as i128), 5, 0)
+        };
+        assert!(
+            result.is_err(),
+            "fractional carry exit route {route} progressed"
+        );
+        assert_eq!(env.svm.get_account(&env.market).unwrap(), fixed_market);
+        assert_eq!(env.svm.get_account(&l2).unwrap(), fixed_long);
+        assert_eq!(env.svm.get_account(&s2).unwrap(), fixed_short);
+        assert_eq!(env.svm.get_account(&env.vault).unwrap(), fixed_vault);
+    }
+    assert!(has_active_leg_for_asset(&env.portfolio_state(l2), 0));
+    assert!(env.portfolio_state(l2).capital.get() != 0 || env.portfolio_state(l2).pnl.get() != 0);
+}
 
 #[test]
 fn v16_program_recovery_residue_matrix_discovers_abandoned_owner_lock() {
