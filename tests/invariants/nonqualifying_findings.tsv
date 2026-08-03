@@ -3,6 +3,7 @@
 # pr	classification	evidence	reason
 202	correct-input-progress	v16_program_partial_adl_effective_exit_matrix_discovers_zero_oi_residue_lock	The stale max-basis request rejects, but the public effective-OI amount makes the requested reduction; the later lock is the separately tracked zero-OI cleanup finding.
 204	bounded-public-exit	v16_program_known_blockers_remain_explicit_until_fixed	Authenticated same-price observations let the owner leave the publicly reached lapsed-backing state, so it is not a persistent exit lock.
+219	prerequisite-unreachable	v16_program_reset_carry_liquidation_matrix_discovers_crank_lock	The proposed bilateral-zero-OI state is downstream of PR218's fix; on the pinned program the second bankruptcy rejects exactly while both effective-OI counters remain nonzero.
 237	privileged-self-action	v16_program_privileged_policy_boundary_matrix_rejects_untrusted_callers	Only the configured insurance authority can invoke the alleged withdrawal; an untrusted public caller rejects with exact market and custody rollback.
 257	privileged-self-action	v16_program_privileged_policy_boundary_matrix_rejects_untrusted_callers	Only the configured market authority can rewrite the recovery delay; an untrusted public caller rejects with exact rollback.
 258	privileged-self-action	v16_program_privileged_policy_boundary_matrix_rejects_untrusted_callers	Only the configured market authority can rewrite the hard-stale deadline; an untrusted public caller rejects with exact rollback.

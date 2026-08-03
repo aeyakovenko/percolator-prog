@@ -144,7 +144,7 @@ charter.
 
 `open_findings.tsv` is the unified 2026-08-03 snapshot of 143 open PRs whose titles identify a
 public-route LoF or DoS class. It maps every row to a primary invariant. PR135 currently has 0
-**Direct regression** rows, 19 **Missing** rows, 116 **Independent discovery** rows, and eight
+**Direct regression** rows, 18 **Missing** rows, 116 **Independent discovery** rows, and nine
 **Nonqualifying** rows. The independent
 rows are backed by finding-agnostic fingerprints in `independent_discoveries.tsv`; that mapping is
 evidence metadata and is never consumed by a generator or oracle. The older

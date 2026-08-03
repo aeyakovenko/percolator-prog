@@ -12,7 +12,7 @@
 216	DoS	BLOCKER	INV-061	independent-discovery	[BLOCKER DoS] Allow ADL winners to close after resolution
 217	DoS	BLOCKER	INV-073	independent-discovery	[BLOCKER DoS] Keep social-loss dust from blocking owner exit
 218	DoS	BLOCKER	INV-061	independent-discovery	[BLOCKER DoS] Keep reset carry from blocking liquidation
-219	DoS	BLOCKER	INV-073	missing	[BLOCKER DoS] Reset both zero-OI sides to preserve exit
+219	DoS	BLOCKER	INV-073	nonqualifying	[BLOCKER DoS] Reset both zero-OI sides to preserve exit
 220	LoF	BLOCKER	INV-053	independent-discovery	[BLOCKER LoF] Prevent liquidation on an omitted rescue mark
 223	LoF	PRIVILEGED	INV-036	independent-discovery	[PRIVILEGED LoF] Require matcher consent for CPI backing fees
 224	LoF	BLOCKER	INV-036	independent-discovery	[BLOCKER LoF] Prevent CPI caller-fee LP siphon
