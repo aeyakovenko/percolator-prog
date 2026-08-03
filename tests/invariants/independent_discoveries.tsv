@@ -95,6 +95,7 @@ INV-073	partial-adl/exact-effective-reduction	v16_program_partial_adl_effective_
 INV-073	crossed-adl/exact-effective-trade	v16_program_crossed_adl_effective_exit_matrix_discovers_zero_oi_residue_lock	zero-effective-oi-funded-residue-must-enter-bounded-cleanup	266
 INV-073	partial-adl/recovery-force-close	v16_program_recovery_residue_matrix_discovers_abandoned_owner_lock	partial-adl-recovery-residue-must-have-permissionless-cleanup	203
 INV-073	social-loss/fractional-carry-exit-routes	v16_program_fractional_social_loss_exit_matrix_discovers_dust_lock	fractional-social-loss-carry-cannot-lock-funded-owner-exit	217
+INV-073	recovery/fragmented-opposite-oi	v16_program_fragmented_recovery_pair_matrix_discovers_force_close_lock	fragmented-recovery-must-have-a-permissionless-pairwise-close-path	228
 INV-073	expired-partial-close/unrelated-funded-account	v16_program_expired_partial_close_matrix_discovers_global_terminal_lock	account-local-expired-close-cannot-create-global-funded-recovery-sink	368
 INV-073	recovery-mode/explicit-terminal-routes	v16_program_expired_partial_close_matrix_discovers_global_terminal_lock	recovery-mode-must-have-a-public-terminal-continuation	252
 INV-071	micro-price/eager-crank-schedule	v16_program_micro_price_schedule_matrix_discovers_clock_consuming_noop_cranks	successful-crank-cannot-consume-zero-delta-price-time	246

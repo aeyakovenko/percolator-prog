@@ -2,7 +2,7 @@
 //!
 //! Normative obligation: Every publicly reachable funded state has a finite public path to capital or terminal disposition.
 //!
-//! Evidence in this file (I/C plus invariant-specific M assertions): `v16_program_fractional_social_loss_exit_matrix_discovers_dust_lock`, `v16_program_recovery_residue_matrix_discovers_abandoned_owner_lock`, `v16_program_expired_partial_close_matrix_discovers_global_terminal_lock`, `v16_program_crossed_adl_effective_exit_matrix_discovers_zero_oi_residue_lock`, `v16_program_partial_adl_effective_exit_matrix_discovers_zero_oi_residue_lock`, `v16_attack_source_backed_force_close_preserves_bounded_resolved_exits`, `v16_probe_liquidation_then_shutdown_preserves_bounded_owner_exit`, `v16_attack_permissionless_close_resolved_survives_drained_owner_system_account`, `v16_attack_permissionless_asset_epoch_grief_has_atomic_max_leg_exit`. These tests exercise the deployed public
+//! Evidence in this file (I/C plus invariant-specific M assertions): `v16_program_fragmented_recovery_pair_matrix_discovers_force_close_lock`, `v16_program_fractional_social_loss_exit_matrix_discovers_dust_lock`, `v16_program_recovery_residue_matrix_discovers_abandoned_owner_lock`, `v16_program_expired_partial_close_matrix_discovers_global_terminal_lock`, `v16_program_crossed_adl_effective_exit_matrix_discovers_zero_oi_residue_lock`, `v16_program_partial_adl_effective_exit_matrix_discovers_zero_oi_residue_lock`, `v16_attack_source_backed_force_close_preserves_bounded_resolved_exits`, `v16_probe_liquidation_then_shutdown_preserves_bounded_owner_exit`, `v16_attack_permissionless_close_resolved_survives_drained_owner_system_account`, `v16_attack_permissionless_asset_epoch_grief_has_atomic_max_leg_exit`. These tests exercise the deployed public
 //! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
 //! rollback, liveness, or compute outcomes appropriate to the invariant.
 //!
@@ -11,6 +11,137 @@
 //! plus every additional verification method required by the charter.
 
 use super::*;
+
+#[test]
+fn v16_program_fragmented_recovery_pair_matrix_discovers_force_close_lock() {
+    const ASSET: u16 = 1;
+    const OPEN_MARK: u64 = 100;
+    const SHUTDOWN_MARK: u64 = 110;
+    const SHUTDOWN_SLOT: u64 = 10;
+    const FORCE_CLOSE_DELAY: u64 = 5;
+    const FRAGMENTS: usize = 10;
+    const FRAGMENT_Q: u128 = POS_SCALE;
+    const LARGE_Q: u128 = FRAGMENTS as u128 * FRAGMENT_Q;
+
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(2, 5_000, 10_000, 1_000);
+    env.configure_permissionless_resolve_with_cu(1_000, FORCE_CLOSE_DELAY);
+    env.configure_auth_mark_for_asset_as_admin(ASSET, 1, OPEN_MARK);
+
+    let large_owner = Keypair::new();
+    let large = env.create_portfolio(&large_owner);
+    env.deposit(&large_owner, large, 1_000);
+    let mut smalls = Vec::new();
+    for _ in 0..FRAGMENTS {
+        let owner = Keypair::new();
+        let small = env.create_portfolio(&owner);
+        env.deposit(&owner, small, 100);
+        env.trade_asset_with_cu(
+            ASSET,
+            &large_owner,
+            large,
+            &owner,
+            small,
+            -(FRAGMENT_Q as i128),
+            OPEN_MARK,
+            0,
+        );
+        smalls.push(small);
+    }
+
+    env.svm.warp_to_slot(SHUTDOWN_SLOT);
+    env.push_auth_mark_for_asset_as_admin(ASSET, SHUTDOWN_SLOT, SHUTDOWN_MARK);
+    for portfolio in core::iter::once(large).chain(smalls.iter().copied()) {
+        env.crank(
+            portfolio,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: SHUTDOWN_SLOT,
+                observations: crank_observations(ASSET),
+            },
+        );
+    }
+    let cert = health_cert(&env.portfolio_state(large));
+    assert_eq!(cert.certified_liq_deficit, 0);
+    assert!(
+        cert.certified_equity >= cert.certified_maintenance_req as i128
+            && cert.certified_equity < cert.certified_initial_req as i128
+    );
+    assert_eq!(
+        active_leg_for_asset(&env.portfolio_state(large), ASSET as usize).basis_pos_q,
+        -(LARGE_Q as i128)
+    );
+
+    env.update_asset_lifecycle_as_admin_with_cu(
+        percolator_prog::processor::ASSET_ACTION_SHUTDOWN,
+        ASSET,
+        SHUTDOWN_SLOT,
+        0,
+    );
+    let close_slot = SHUTDOWN_SLOT + FORCE_CLOSE_DELAY + 1;
+    env.svm.warp_to_slot(close_slot);
+    let cranker = Keypair::new();
+    let mut successful_pairs = 0usize;
+    for small in smalls.iter().copied() {
+        let market_before = env.svm.get_account(&env.market).unwrap();
+        let large_before = env.svm.get_account(&large).unwrap();
+        let small_before = env.svm.get_account(&small).unwrap();
+        let vault_before = env.svm.get_account(&env.vault).unwrap();
+        env.svm.expire_blockhash();
+        match env.try_force_close_abandoned_asset_with_cu(
+            &cranker, large, small, ASSET, close_slot, FRAGMENT_Q,
+        ) {
+            Ok(cu) => {
+                assert_cu_within("fragmented Recovery pair close", cu, TRADE_CU_LIMIT);
+                successful_pairs += 1;
+            }
+            Err(_) => {
+                assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+                assert_eq!(env.svm.get_account(&large).unwrap(), large_before);
+                assert_eq!(env.svm.get_account(&small).unwrap(), small_before);
+                assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+                break;
+            }
+        }
+    }
+    assert!(successful_pairs < FRAGMENTS);
+    assert!(has_active_leg_for_asset(
+        &env.portfolio_state(large),
+        ASSET as usize
+    ));
+    assert!(
+        env.portfolio_state(large).capital.get() != 0 || env.portfolio_state(large).pnl.get() != 0
+    );
+
+    let remaining: Vec<_> = smalls
+        .iter()
+        .copied()
+        .filter(|small| has_active_leg_for_asset(&env.portfolio_state(*small), ASSET as usize))
+        .collect();
+    assert!(!remaining.is_empty());
+    for small in remaining {
+        let market_before = env.svm.get_account(&env.market).unwrap();
+        let large_before = env.svm.get_account(&large).unwrap();
+        let small_before = env.svm.get_account(&small).unwrap();
+        let vault_before = env.svm.get_account(&env.vault).unwrap();
+        env.svm.expire_blockhash();
+        let retry = env.try_force_close_abandoned_asset_with_cu(
+            &cranker, large, small, ASSET, close_slot, FRAGMENT_Q,
+        );
+        assert!(
+            retry.is_err(),
+            "an alternate fragment unexpectedly progressed"
+        );
+        assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+        assert_eq!(env.svm.get_account(&large).unwrap(), large_before);
+        assert_eq!(env.svm.get_account(&small).unwrap(), small_before);
+        assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+    }
+    let group = env.market_state().1;
+    assert!(group.assets[ASSET as usize].oi_eff_long_q != 0);
+    assert_eq!(
+        group.assets[ASSET as usize].oi_eff_long_q,
+        group.assets[ASSET as usize].oi_eff_short_q
+    );
+}
 
 #[test]
 fn v16_program_fractional_social_loss_exit_matrix_discovers_dust_lock() {
