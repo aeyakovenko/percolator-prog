@@ -14,7 +14,7 @@
 218	DoS	BLOCKER	INV-061	missing	[BLOCKER DoS] Keep reset carry from blocking liquidation
 219	DoS	BLOCKER	INV-073	missing	[BLOCKER DoS] Reset both zero-OI sides to preserve exit
 220	LoF	BLOCKER	INV-053	direct-regression	[BLOCKER LoF] Prevent liquidation on an omitted rescue mark
-223	LoF	PRIVILEGED	INV-036	direct-regression	[PRIVILEGED LoF] Require matcher consent for CPI backing fees
+223	LoF	PRIVILEGED	INV-036	independent-discovery	[PRIVILEGED LoF] Require matcher consent for CPI backing fees
 224	LoF	BLOCKER	INV-036	independent-discovery	[BLOCKER LoF] Prevent CPI caller-fee LP siphon
 225	LoF	BLOCKER	INV-045	direct-regression	[BLOCKER LoF] Keep EWMA movement fees non-reclaimable
 228	DoS	HARDENING	INV-073	missing	[HARDENING DoS] Unstick fragmented recovery force-close
@@ -32,7 +32,7 @@
 256	LoF	HARDENING	INV-014	independent-discovery	[HARDENING LoF] Prevent live fee hikes from taxing user capital
 257	DoS	HARDENING	INV-073	missing	[HARDENING DoS] Keep funded Recovery deadlines monotonic
 258	LoF	PRIVILEGED	INV-061	missing	[PRIVILEGED LoF] Freeze funded hard-stale deadlines
-259	LoF	PRIVILEGED	INV-014	missing	[PRIVILEGED LoF] Bind direct trades to backing-fee consent
+259	LoF	PRIVILEGED	INV-014	independent-discovery	[PRIVILEGED LoF] Bind direct trades to backing-fee consent
 260	LoF	BLOCKER	INV-045	direct-regression	[BLOCKER LoF] Prevent pending EWMA PnL inheritance
 261	DoS	HARDENING	INV-020	missing	[HARDENING DoS] Reject expired Hybrid terminal snapshots
 262	LoF	REAL	INV-045	missing	[REAL LoF] Commit authenticated marks before terminal resolve

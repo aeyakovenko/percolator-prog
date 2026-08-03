@@ -2,7 +2,11 @@
 //!
 //! Normative obligation: Charged fees reach only the authorized destination under the bound policy version.
 //!
-//! Evidence in this file (F over public I routes): `v16_program_pr224_cpi_caller_fee_siphon_fuzz`, `v16_program_pr223_cpi_backing_fee_siphon_fuzz`, `v16_program_pr314_activation_fee_consent_fuzz`, `v16_program_pr310_bilateral_base_fee_consent_fuzz`. These tests exercise the deployed public
+//! Evidence in this file (F over public I routes):
+//! `v16_program_source_fee_consent_route_matrix_discovers_unsigned_debits` constructs positive
+//! source-backed PnL and varies the consuming trade across CPI/no-CPI and single/batch routes. Its
+//! common oracle requires the LP debit to stay within prior consent and traces any debit into the
+//! backing provider's earnings. Finding-specific impact regressions remain below. These tests exercise the deployed public
 //! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
 //! rollback, liveness, or compute outcomes appropriate to the invariant.
 //!
@@ -11,6 +15,42 @@
 //! plus every additional verification method required by the charter.
 
 use super::*;
+
+proptest! {
+    #![proptest_config(ProptestConfig {
+        cases: env_usize("PERCOLATOR_FUZZ_CASES", 8) as u32,
+        max_shrink_iters: env_usize("PERCOLATOR_FUZZ_SHRINK_ITERS", 64) as u32,
+        failure_persistence: Some(Box::new(
+            proptest::test_runner::FileFailurePersistence::Direct(
+                "proptest-regressions/inv_036_source_fee_consent_discovery.txt",
+            ),
+        )),
+        ..ProptestConfig::default()
+    })]
+
+    #[test]
+    fn v16_program_source_fee_consent_route_matrix_discovers_unsigned_debits(
+        seed in any::<[u8; 32]>()
+    ) {
+        let discoveries = discover_source_fee_consent_violations(seed)
+            .map_err(TestCaseError::fail)?;
+        prop_assert_eq!(discoveries.len(), SourceFeeConsentKind::ALL.len());
+        for (expected, discovery) in SourceFeeConsentKind::ALL.into_iter().zip(&discoveries) {
+            prop_assert_eq!(discovery.kind, expected);
+        }
+        let violations: Vec<_> = discoveries
+            .iter()
+            .filter(|discovery| discovery.is_violation())
+            .map(|discovery| discovery.kind)
+            .collect();
+        eprintln!("independent source-fee consent discoveries: {violations:?}");
+        prop_assert_eq!(
+            violations,
+            vec![SourceFeeConsentKind::NoCpi, SourceFeeConsentKind::Cpi],
+            "source-fee route differential changed; inspect both newly vulnerable and newly safe paths"
+        );
+    }
+}
 
 proptest! {
     #![proptest_config(ProptestConfig {

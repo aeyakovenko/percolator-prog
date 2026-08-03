@@ -118,6 +118,27 @@ pub enum FeeConsentKind {
     PermissionlessActivationFee,
 }
 
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum SourceFeeConsentKind {
+    NoCpi,
+    BatchNoCpi,
+    Cpi,
+    BatchCpi,
+}
+
+impl SourceFeeConsentKind {
+    pub const ALL: [Self; 4] = [Self::NoCpi, Self::BatchNoCpi, Self::Cpi, Self::BatchCpi];
+
+    fn discriminator(self) -> u8 {
+        match self {
+            Self::NoCpi => 0,
+            Self::BatchNoCpi => 1,
+            Self::Cpi => 2,
+            Self::BatchCpi => 3,
+        }
+    }
+}
+
 impl FeeConsentKind {
     pub const ALL: [Self; 8] = [
         Self::LiveBaseFeeHike,
@@ -378,6 +399,23 @@ pub struct FeeConsentDiscovery {
     pub authorized_debit: u128,
     pub observed_debit: u128,
     pub compute_units: Option<u64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SourceFeeConsentDiscovery {
+    pub kind: SourceFeeConsentKind,
+    pub accepted_unconsented_fee: bool,
+    pub lp_capital_debit: u128,
+    pub provider_earnings_credit: u128,
+    pub compute_units: Option<u64>,
+}
+
+impl SourceFeeConsentDiscovery {
+    pub fn is_violation(&self) -> bool {
+        self.accepted_unconsented_fee
+            && self.lp_capital_debit != 0
+            && self.lp_capital_debit == self.provider_earnings_credit
+    }
 }
 
 impl FeeConsentDiscovery {
@@ -2140,5 +2178,212 @@ pub fn discover_fee_consent_violations(seed: [u8; 32]) -> Result<Vec<FeeConsentD
     FeeConsentKind::ALL
         .into_iter()
         .map(|kind| discover_one_fee_consent_violation(seed, kind))
+        .collect()
+}
+
+fn crank_discovery_steps(
+    env: &mut V16Svm,
+    actor: usize,
+    slot: u64,
+    asset_index: u16,
+) -> Result<(), String> {
+    let oracle_accounts = env.primary_profile(asset_index as usize).oracle_leg_count;
+    for step in 0..4 {
+        env.crank(
+            actor,
+            slot,
+            vec![CrankObservationHint {
+                asset_index,
+                oracle_accounts,
+            }],
+        )
+        .map_err(|error| {
+            format!("source-fee crank actor {actor} asset {asset_index} step {step}: {error}")
+        })?;
+    }
+    Ok(())
+}
+
+fn prepare_source_backed_fee_world(seed: [u8; 32]) -> Result<V16Svm, String> {
+    const PROVIDER: usize = 0;
+    const MARKET_TRADER: usize = 1;
+    const LP: usize = 2;
+    const ASSET: u16 = 1;
+    const WINNING_DOMAIN: u16 = ASSET * 2 + 1;
+    const PRICE: u64 = 100;
+    const WINNING_SIZE_Q: i128 = 200 * POS_SCALE as i128;
+    const LOSING_SIZE_Q: i128 = 100 * POS_SCALE as i128;
+    let mut env = V16Svm::new(
+        seed,
+        MarketConfig {
+            initial_price: PRICE,
+            h_max: 2,
+            maintenance_margin_bps: 1_000,
+            initial_margin_bps: 1_000,
+            max_price_move_bps_per_slot: 500,
+            max_accrual_dt_slots: 1,
+            min_funding_lifetime_slots: 1,
+            maintenance_fee_per_slot: 30,
+            actor_deposits: [10_000, 10_000, 3_190, USER_DEPOSIT, USER_DEPOSIT],
+            ..MarketConfig::default()
+        },
+    );
+    env.update_market_init_fee_policy(1)
+        .map_err(|error| format!("configure source asset activation: {error}"))?;
+    env.configure_auth_mark(false, 0, 1, PRICE)
+        .map_err(|error| format!("configure base source-fee mark: {error}"))?;
+    env.warp_to_slot(2);
+    env.retire_asset(ASSET, 2)
+        .map_err(|error| format!("retire source asset slot: {error}"))?;
+    env.warp_to_slot(3);
+    env.activate_permissionless_asset_for_actor(PROVIDER, ASSET, 3, PRICE, PROVIDER, 1)
+        .map_err(|error| format!("activate source-backed asset: {error}"))?;
+    env.configure_auth_mark_for_actor(PROVIDER, ASSET, 3, PRICE)
+        .map_err(|error| format!("configure source-backed mark: {error}"))?;
+    env.top_up_backing_bucket_for_actor(PROVIDER, WINNING_DOMAIN, 5_000, 100)
+        .map_err(|error| format!("fund source-backing bucket: {error}"))?;
+    env.trade_no_cpi(MARKET_TRADER, LP, ASSET, -WINNING_SIZE_Q, PRICE, 0)
+        .map_err(|error| format!("open source-backed winning leg: {error}"))?;
+    env.trade_no_cpi(MARKET_TRADER, LP, 0, -LOSING_SIZE_Q, PRICE, 0)
+        .map_err(|error| format!("open source-backed losing leg: {error}"))?;
+
+    env.warp_to_slot(4);
+    env.push_auth_mark_for_actor(PROVIDER, ASSET, 4, PRICE)
+        .map_err(|error| format!("prime source-backed mark: {error}"))?;
+    env.push_auth_mark(0, 4, PRICE)
+        .map_err(|error| format!("prime base mark: {error}"))?;
+    for (actor, asset_index) in [
+        (MARKET_TRADER, ASSET),
+        (LP, ASSET),
+        (MARKET_TRADER, 0),
+        (LP, 0),
+    ] {
+        crank_discovery_steps(&mut env, actor, 4, asset_index)?;
+    }
+    env.sync_maintenance_fee(LP, 4)
+        .map_err(|error| format!("sync source-backed LP maintenance fee: {error}"))?;
+
+    env.warp_to_slot(5);
+    env.push_auth_mark_for_actor(PROVIDER, ASSET, 5, PRICE + 5)
+        .map_err(|error| format!("publish source-backed winning mark: {error}"))?;
+    env.push_auth_mark(0, 5, PRICE - 5)
+        .map_err(|error| format!("publish offsetting losing mark: {error}"))?;
+    for (actor, asset_index) in [(MARKET_TRADER, ASSET), (LP, ASSET), (MARKET_TRADER, 0)] {
+        crank_discovery_steps(&mut env, actor, 5, asset_index)?;
+    }
+    if env.primary_portfolio(LP).pnl.get() <= 0 {
+        return Err(format!(
+            "source-fee fixture produced no positive LP claim: {}",
+            env.primary_portfolio(LP).pnl.get()
+        ));
+    }
+    Ok(env)
+}
+
+fn discover_one_source_fee_consent_violation(
+    mut seed: [u8; 32],
+    kind: SourceFeeConsentKind,
+) -> Result<SourceFeeConsentDiscovery, String> {
+    const PROVIDER: usize = 0;
+    const LP: usize = 2;
+    const WINNING_DOMAIN: u16 = 3;
+    const INCREASE_Q: i128 = 20 * POS_SCALE as i128;
+    const EXEC_PRICE: u64 = 95;
+    seed[0] ^= 0x7b;
+    seed[1] ^= kind.discriminator();
+    let mut env = prepare_source_backed_fee_world(seed)?;
+    let supply_before = env.token_supply_observed();
+    let retained = match kind {
+        SourceFeeConsentKind::NoCpi => {
+            Some(env.build_retained_no_cpi_trade(PROVIDER, LP, 0, -INCREASE_Q, EXEC_PRICE))
+        }
+        SourceFeeConsentKind::BatchNoCpi => {
+            Some(env.build_retained_batch_no_cpi_trade(PROVIDER, LP, 0, -INCREASE_Q, EXEC_PRICE))
+        }
+        SourceFeeConsentKind::Cpi | SourceFeeConsentKind::BatchCpi => None,
+    };
+    env.update_backing_fee_policy_for_actor(PROVIDER, WINNING_DOMAIN, 5_000, 0)
+        .map_err(|error| format!("install post-consent source-backing fee: {error}"))?;
+    env.warp_to_slot(6);
+    let lp_before = env.primary_portfolio(LP).capital.get();
+    let provider_before = env.primary_market_state().1.source_backing_buckets
+        [WINNING_DOMAIN as usize]
+        .utilization_fee_earnings;
+    let before = fingerprint(&env);
+    let execution = match kind {
+        SourceFeeConsentKind::NoCpi | SourceFeeConsentKind::BatchNoCpi => env
+            .land_retained(retained.expect("retained source-fee trade"))
+            .map(|success| success.compute_units),
+        SourceFeeConsentKind::Cpi => env
+            .trade_cpi(PROVIDER, LP, 0, -INCREASE_Q, 0, 0)
+            .map(|success| success.compute_units),
+        SourceFeeConsentKind::BatchCpi => env
+            .batch_trade_cpi(
+                PROVIDER,
+                LP,
+                vec![BatchTradeCpiLeg {
+                    asset_index: 0,
+                    size_q: -INCREASE_Q,
+                    fee_bps: 0,
+                    limit_price: 0,
+                }],
+            )
+            .map(|success| success.compute_units),
+    };
+    let after = fingerprint(&env);
+    let lp_capital_debit = debit_between(
+        lp_before,
+        env.primary_portfolio(LP).capital.get(),
+        "source-backed LP fee",
+    )?;
+    let provider_earnings_credit = env.primary_market_state().1.source_backing_buckets
+        [WINNING_DOMAIN as usize]
+        .utilization_fee_earnings
+        .checked_sub(provider_before)
+        .ok_or_else(|| "source-backing provider earnings decreased".to_string())?;
+    if env.token_supply_observed() != supply_before {
+        return Err(format!(
+            "{kind:?} source-fee probe changed SPL supply: {supply_before} -> {}",
+            env.token_supply_observed()
+        ));
+    }
+    match execution {
+        Ok(compute_units) => {
+            if before == after {
+                return Err(format!(
+                    "{kind:?} source-fee trade succeeded without state mutation"
+                ));
+            }
+            Ok(SourceFeeConsentDiscovery {
+                kind,
+                accepted_unconsented_fee: true,
+                lp_capital_debit,
+                provider_earnings_credit,
+                compute_units: Some(compute_units),
+            })
+        }
+        Err(_) => {
+            if before != after || lp_capital_debit != 0 || provider_earnings_credit != 0 {
+                return Err(format!(
+                    "{kind:?} rejected source-fee trade did not roll back exactly"
+                ));
+            }
+            Ok(SourceFeeConsentDiscovery {
+                kind,
+                accepted_unconsented_fee: false,
+                lp_capital_debit: 0,
+                provider_earnings_credit: 0,
+                compute_units: None,
+            })
+        }
+    }
+}
+
+pub fn discover_source_fee_consent_violations(
+    seed: [u8; 32],
+) -> Result<Vec<SourceFeeConsentDiscovery>, String> {
+    SourceFeeConsentKind::ALL
+        .into_iter()
+        .map(|kind| discover_one_source_fee_consent_violation(seed, kind))
         .collect()
 }
