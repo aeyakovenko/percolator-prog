@@ -35,8 +35,6 @@
 259	LoF	PRIVILEGED	INV-014	independent-discovery	[PRIVILEGED LoF] Bind direct trades to backing-fee consent
 260	LoF	BLOCKER	INV-045	independent-discovery	[BLOCKER LoF] Prevent pending EWMA PnL inheritance
 261	DoS	HARDENING	INV-020	missing	[HARDENING DoS] Reject expired Hybrid terminal snapshots
-262	LoF	REAL	INV-045	missing	[REAL LoF] Commit authenticated marks before terminal resolve
-263	LoF	REAL	INV-045	missing	[REAL LoF] Settle adverse marks before unilateral reduction
 264	LoF	BLOCKER	INV-045	independent-discovery	[BLOCKER LoF] Bind AuthMark targets before exposure migration
 265	LoF	BLOCKER	INV-045	independent-discovery	[BLOCKER LoF] Publish EWMA oracle targets before exposure changes
 266	DoS	BLOCKER	INV-073	missing	[BLOCKER DoS] Keep exact-OI ADL survivors exit-live
