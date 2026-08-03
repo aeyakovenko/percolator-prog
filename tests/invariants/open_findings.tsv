@@ -136,7 +136,7 @@
 370	LoF	BLOCKER	INV-073	missing	[BLOCKER LoF] Preserve pending accrual during terminal recovery
 371	DoS	BLOCKER	INV-073	independent-discovery	[BLOCKER DoS] Keep winner-first Recovery forfeits live
 372	LoF	BLOCKER	INV-067	nonqualifying	[BLOCKER LoF] Preserve prior same-domain claim across Recovery forfeit
-373	LoF	BLOCKER	INV-067	missing	[BLOCKER LoF] Prove retained Recovery haircuts preserve prior claims
+373	LoF	BLOCKER	INV-067	nonqualifying	[BLOCKER LoF] Prove retained Recovery haircuts preserve prior claims
 374	LoF	BLOCKER	INV-063	missing	[BLOCKER LoF] Reconcile expired backing in Recovery forfeits
 375	LoF	PRIVILEGED	INV-005	independent-discovery	[PRIVILEGED LoF] Prevent asset-admin seizure of funded roles
 376	DoS	BLOCKER	INV-073	missing	[BLOCKER DoS] Let asset-0 backing provider complete recovery

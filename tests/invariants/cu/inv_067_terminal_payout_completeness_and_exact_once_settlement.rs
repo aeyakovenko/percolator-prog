@@ -12,11 +12,174 @@
 //! `v16_program_prior_claim_forfeit_prerequisite_matrix_preserves_withdrawable_value` creates a
 //! closed, backed claim followed by a new position episode and proves that the pinned predecessor
 //! preserves and pays the historical claim after counterparty-first Recovery.
+//! `v16_program_retained_recovery_haircut_prerequisite_matrix_keeps_prior_claim_floor` lands a
+//! retained forfeit after a real B haircut and proves the predecessor still pays at least the
+//! complete earlier claim.
 //!
 //! Guarantee boundary: this is a public counterexample on the vulnerable engine pin, not a proof of
 //! the corrected terminal residual transition.
 
 use super::*;
+
+#[test]
+fn v16_program_retained_recovery_haircut_prerequisite_matrix_keeps_prior_claim_floor() {
+    const PRICE: u64 = 1_000_000;
+    const FIRST_PROFIT_MARK: u64 = 952_000;
+    const ASSET: u16 = 1;
+    const SOURCE_DOMAIN: u16 = ASSET * 2;
+
+    let mut params = production_risk_params();
+    params.max_portfolio_assets = 2;
+    params.public_b_chunk_atoms = percolator::MAX_VAULT_TVL;
+    let mut env = V16CuEnv::new_with_init_params(params);
+    env.configure_permissionless_resolve_with_cu(100, 5);
+    env.configure_auth_mark_for_asset_as_admin(0, 0, PRICE);
+    env.configure_auth_mark_for_asset_as_admin(ASSET, 0, PRICE);
+    env.top_up_backing_bucket(SOURCE_DOMAIN, 200_000, 10_000);
+
+    let victim_owner = Keypair::new();
+    let first_peer_owner = Keypair::new();
+    let attacker_owner = Keypair::new();
+    let victim = env.create_portfolio(&victim_owner);
+    let first_peer = env.create_portfolio(&first_peer_owner);
+    let attacker = env.create_portfolio(&attacker_owner);
+    env.deposit(&victim_owner, victim, 1_000_000);
+    env.deposit(&first_peer_owner, first_peer, 1_000_000);
+    env.deposit(&attacker_owner, attacker, 51_000);
+
+    env.trade_asset_with_cu(
+        ASSET,
+        &first_peer_owner,
+        first_peer,
+        &victim_owner,
+        victim,
+        POS_SCALE as i128,
+        PRICE,
+        0,
+    );
+    env.svm.warp_to_slot(20);
+    env.push_auth_mark_for_asset_as_admin(ASSET, 20, FIRST_PROFIT_MARK);
+    env.crank(
+        victim,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 20,
+            observations: crank_observations(ASSET),
+        },
+    );
+    env.trade_asset_with_cu(
+        ASSET,
+        &first_peer_owner,
+        first_peer,
+        &victim_owner,
+        victim,
+        -(POS_SCALE as i128),
+        FIRST_PROFIT_MARK,
+        0,
+    );
+    let first_episode = env.portfolio_state(victim);
+    let historical_pnl = first_episode.pnl.get();
+    let historical_claim = state::portfolio_source_domain(&first_episode, SOURCE_DOMAIN as usize)
+        .source_claim_bound_num
+        .get();
+    assert_eq!(historical_pnl, 48_000);
+    assert!(historical_claim > 0);
+
+    env.trade_asset_with_cu(
+        ASSET,
+        &attacker_owner,
+        attacker,
+        &victim_owner,
+        victim,
+        POS_SCALE as i128,
+        FIRST_PROFIT_MARK,
+        0,
+    );
+    for (slot, mark) in [(40, 904_000), (45, 892_000), (50, 892_576)] {
+        env.svm.warp_to_slot(slot);
+        env.push_auth_mark_for_asset_as_admin(ASSET, slot, mark);
+        env.crank(
+            victim,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: slot,
+                observations: crank_observations(ASSET),
+            },
+        );
+    }
+    env.update_asset_lifecycle_as_admin_with_cu(processor::ASSET_ACTION_SHUTDOWN, ASSET, 50, 0);
+    let before_attack = env.portfolio_state(victim);
+    assert_eq!(
+        active_leg_for_asset(&before_attack, ASSET as usize).b_snap,
+        env.market_state().1.assets[ASSET as usize].b_short_num
+    );
+    let retained_forfeit = Transaction::new_signed_with_payer(
+        &[
+            heap_ix(),
+            cu_ix(),
+            Instruction {
+                program_id: env.program_id,
+                accounts: vec![
+                    AccountMeta::new(victim_owner.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(victim, false),
+                ],
+                data: ProgInstruction::ForfeitRecoveryLeg {
+                    asset_index: ASSET,
+                    b_delta_budget: u128::MAX,
+                }
+                .encode(),
+            },
+        ],
+        Some(&env.payer.pubkey()),
+        &[&env.payer, &victim_owner],
+        env.svm.latest_blockhash(),
+    );
+
+    env.forfeit_recovery_leg_with_cu(&attacker_owner, attacker, ASSET, u128::MAX);
+    let before_forfeit = env.portfolio_state(victim);
+    assert!(
+        active_leg_for_asset(&before_forfeit, ASSET as usize).b_snap
+            < env.market_state().1.assets[ASSET as usize].b_short_num
+    );
+    assert_eq!(before_forfeit.pnl.get(), historical_pnl + 59_424);
+
+    env.svm
+        .send_transaction(retained_forfeit)
+        .expect("unprivileged relayer lands retained signed forfeit");
+    let after = env.portfolio_state(victim);
+    assert!(!has_active_leg_for_asset(&after, ASSET as usize));
+    assert_eq!(
+        after.pnl.get(),
+        99_000,
+        "the pinned predecessor's retained-value behavior changed"
+    );
+    assert!(
+        state::portfolio_source_domain(&after, SOURCE_DOMAIN as usize)
+            .source_claim_bound_num
+            .get()
+            >= historical_claim,
+        "the pinned predecessor consumed the older closed claim"
+    );
+
+    env.resolve();
+    let destination = env.token_account(victim_owner.pubkey(), 0);
+    env.send(
+        ProgInstruction::CloseResolved {
+            fee_rate_per_slot: 0,
+        },
+        vec![
+            AccountMeta::new_readonly(victim_owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(victim, false),
+            AccountMeta::new(destination, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&victim_owner],
+    )
+    .expect("terminal payout remains bounded");
+    assert_eq!(env.token_amount(destination), 1_099_000);
+}
 
 #[test]
 fn v16_program_prior_claim_forfeit_prerequisite_matrix_preserves_withdrawable_value() {
