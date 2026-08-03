@@ -79,13 +79,14 @@ use support::invariant_discovery::{
     discover_accrual_ordering_violations, discover_asset_generation_replays,
     discover_authority_incarnation_replays, discover_backing_provider_consent_violations,
     discover_fee_consent_violations, discover_intent_retries, discover_market_incarnation_replays,
-    discover_pending_mark_admission_violations, discover_pending_mark_inheritance_violations,
-    discover_pending_target_override_violations, discover_portfolio_incarnation_replays,
-    discover_prospective_accrual_violations, discover_source_fee_consent_violations,
-    discover_superseded_intents, discover_terminal_commit_ordering, AccrualOrderingKind,
-    AssetIntentKind, AuthorityIntentKind, BackingProviderConsentOrder, DiscoveryTradeRoute,
-    FeeConsentKind, MarketIntentKind, PendingMarkSource, PortfolioIntentKind,
-    ProspectiveAccrualRoute, RetryIntentKind, SourceFeeConsentKind, SupersededIntentKind,
+    discover_pending_mark_admission_violations, discover_pending_mark_fee_ordering,
+    discover_pending_mark_inheritance_violations, discover_pending_target_override_violations,
+    discover_portfolio_incarnation_replays, discover_prospective_accrual_violations,
+    discover_source_fee_consent_violations, discover_superseded_intents,
+    discover_terminal_commit_ordering, AccrualOrderingKind, AssetIntentKind, AuthorityIntentKind,
+    BackingProviderConsentOrder, DiscoveryTradeRoute, FeeConsentKind, MarketIntentKind,
+    PendingMarkSource, PortfolioIntentKind, ProspectiveAccrualRoute, RetryIntentKind,
+    SourceFeeConsentKind, SupersededIntentKind,
 };
 
 fn env_usize(name: &str, default: usize) -> usize {

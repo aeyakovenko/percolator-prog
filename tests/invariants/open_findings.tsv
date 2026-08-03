@@ -122,7 +122,7 @@
 353	LoF	BLOCKER	INV-005	independent-discovery	[BLOCKER LoF] Bind terminal resolves to authority incarnations
 354	DoS	BLOCKER	INV-004	missing	[BLOCKER DoS] Bind recovery forfeits to position episodes
 355	LoF	BLOCKER	INV-008	independent-discovery	[BLOCKER LoF] Make withdrawals one-shot across retry variants
-356	LoF	BLOCKER	INV-045	direct-regression	[BLOCKER LoF] Block fee rewards ahead of committed marks
+356	LoF	BLOCKER	INV-045	independent-discovery	[BLOCKER LoF] Block fee rewards ahead of committed marks
 357	DoS	BLOCKER	INV-077	missing	[BLOCKER DoS] Bound max-source PnL conversion
 359	DoS	BLOCKER	INV-077	missing	[BLOCKER DoS] Keep max-shape resolved close under CU limit
 360	LoF	BLOCKER	INV-039	missing	[BLOCKER LoF] Reject unsigned stale-cohort novation

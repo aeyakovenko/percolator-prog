@@ -596,6 +596,28 @@ pub struct PendingTargetOverrideDiscovery {
     pub reordered_supply: u128,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PendingMarkFeeOrderingDiscovery {
+    pub control_reward: u128,
+    pub reordered_reward: u128,
+    pub control_winner_payout: u128,
+    pub reordered_winner_payout: u128,
+    pub victim_payout: u128,
+    pub extracted_reward: u64,
+}
+
+impl PendingMarkFeeOrderingDiscovery {
+    pub fn is_violation(&self) -> bool {
+        let reward_gain = self.reordered_reward.saturating_sub(self.control_reward);
+        let winner_loss = self
+            .control_winner_payout
+            .saturating_sub(self.reordered_winner_payout);
+        reward_gain != 0
+            && reward_gain == winner_loss
+            && self.extracted_reward as u128 == self.reordered_reward
+    }
+}
+
 impl PendingTargetOverrideDiscovery {
     pub fn is_violation(&self) -> bool {
         self.reordered_target < self.control_target
@@ -4069,4 +4091,171 @@ pub fn discover_pending_target_override_violations(
         .into_iter()
         .map(|route| discover_one_pending_target_override(seed, route))
         .collect()
+}
+
+#[derive(Clone, Copy, Debug)]
+struct PendingMarkFeeWorld {
+    reward: u128,
+    victim_payout: u128,
+    winner_payout: u128,
+    extracted_reward: u64,
+}
+
+fn run_pending_mark_fee_world(
+    seed: [u8; 32],
+    fee_before_mark_commit: bool,
+) -> Result<PendingMarkFeeWorld, String> {
+    const OPEN_PRICE: u64 = 100;
+    const ADVERSE_PRICE: u64 = 50;
+    const DEPOSIT: u128 = 100_000;
+    const SIZE_Q: i128 = 1_000 * POS_SCALE as i128;
+    const FEE_PER_SLOT: u128 = 12_500;
+
+    let mut env = V16Svm::new(
+        seed,
+        MarketConfig {
+            initial_price: OPEN_PRICE,
+            maintenance_margin_bps: 10_000,
+            initial_margin_bps: 10_000,
+            max_price_move_bps_per_slot: 10_000,
+            max_accrual_dt_slots: 1,
+            min_funding_lifetime_slots: 1,
+            maintenance_fee_per_slot: FEE_PER_SLOT,
+            actor_deposits: [DEPOSIT, DEPOSIT, 1, 1, 1],
+            ..MarketConfig::default()
+        },
+    );
+    let supply_before = env.token_supply_observed();
+    env.configure_auth_mark(false, 0, 1, OPEN_PRICE)
+        .map_err(|error| format!("configure fee-order authenticated mark: {error}"))?;
+    env.update_maintenance_fee_policy(10_000)
+        .map_err(|error| format!("configure maintenance reward: {error}"))?;
+    env.trade_no_cpi(0, 1, 0, SIZE_Q, OPEN_PRICE, 0)
+        .map_err(|error| format!("open fee-order positions: {error}"))?;
+
+    env.warp_to_slot(9);
+    env.push_auth_mark(0, 9, OPEN_PRICE)
+        .map_err(|error| format!("advance authenticated fee clock: {error}"))?;
+    for _ in 0..16 {
+        let _ = env.crank(
+            2,
+            9,
+            vec![CrankObservationHint {
+                asset_index: 0,
+                oracle_accounts: 0,
+            }],
+        );
+        if env.primary_market_state().1.assets[0].slot_last == 9 {
+            break;
+        }
+    }
+    if env.primary_portfolio(0).last_fee_slot.get() != 1
+        || env.primary_market_state().1.assets[0].slot_last != 9
+    {
+        return Err("fee-order setup did not isolate maintenance debt".into());
+    }
+
+    env.warp_to_slot(10);
+    env.push_auth_mark(0, 10, ADVERSE_PRICE)
+        .map_err(|error| format!("publish adverse pending mark: {error}"))?;
+    let (pending_profile, pending_group) = env.primary_market_state();
+    if pending_profile.oracle_target_price_e6 != ADVERSE_PRICE
+        || pending_group.assets[0].effective_price != OPEN_PRICE
+    {
+        return Err("fee-order setup did not retain the adverse mark".into());
+    }
+
+    if fee_before_mark_commit {
+        env.sync_maintenance_fee_with_reward(0, 2, 10)
+            .map_err(|error| format!("early fee sync rejected: {error}"))?;
+    }
+    for _ in 0..16 {
+        let _ = env.crank(
+            0,
+            10,
+            vec![CrankObservationHint {
+                asset_index: 0,
+                oracle_accounts: 0,
+            }],
+        );
+        if env.primary_market_state().1.assets[0].effective_price == ADVERSE_PRICE {
+            break;
+        }
+    }
+    if env.primary_market_state().1.assets[0].effective_price != ADVERSE_PRICE {
+        return Err("adverse pending mark did not commit".into());
+    }
+    if !fee_before_mark_commit {
+        env.sync_maintenance_fee_with_reward(0, 2, 10)
+            .map_err(|error| format!("mark-first fee sync rejected: {error}"))?;
+    }
+
+    let cranker_capital = env.primary_portfolio(2).capital.get();
+    let reward = cranker_capital
+        .checked_sub(1)
+        .ok_or_else(|| "cranker capital fell below deposit".to_string())?;
+    env.withdraw_primary(2, cranker_capital)
+        .map_err(|error| format!("withdraw maintenance reward: {error}"))?;
+    let extracted_reward = env
+        .token_amount(env.actors[2].destination_token)
+        .checked_sub(1)
+        .ok_or_else(|| "cranker withdrawal lost deposit".to_string())?;
+    if u128::from(extracted_reward) != reward {
+        return Err("maintenance reward did not reach SPL destination".into());
+    }
+
+    for _ in 0..24 {
+        for actor in [0, 1] {
+            let _ = env.crank(
+                actor,
+                10,
+                vec![CrankObservationHint {
+                    asset_index: 0,
+                    oracle_accounts: 0,
+                }],
+            );
+        }
+    }
+    env.resolve_market()
+        .map_err(|error| format!("resolve fee-order world: {error}"))?;
+    let victim_payout = drain_resolved_discovery_actor(&mut env, 0)?;
+    let winner_payout = drain_resolved_discovery_actor(&mut env, 1)?;
+    if env.token_supply_observed() != supply_before {
+        return Err("fee-order world changed SPL supply".into());
+    }
+    Ok(PendingMarkFeeWorld {
+        reward,
+        victim_payout,
+        winner_payout,
+        extracted_reward,
+    })
+}
+
+pub fn discover_pending_mark_fee_ordering(
+    mut seed: [u8; 32],
+) -> Result<PendingMarkFeeOrderingDiscovery, String> {
+    seed[0] ^= 0xfa;
+    let control = run_pending_mark_fee_world(seed, false)?;
+    let reordered = run_pending_mark_fee_world(seed, true)?;
+    let control_total = control
+        .reward
+        .checked_add(control.victim_payout)
+        .and_then(|value| value.checked_add(control.winner_payout))
+        .ok_or_else(|| "control fee-order total overflow".to_string())?;
+    let reordered_total = reordered
+        .reward
+        .checked_add(reordered.victim_payout)
+        .and_then(|value| value.checked_add(reordered.winner_payout))
+        .ok_or_else(|| "reordered fee-order total overflow".to_string())?;
+    if control.victim_payout != reordered.victim_payout || control_total != reordered_total {
+        return Err("fee-order paired worlds did not conserve terminal value".into());
+    }
+    Ok(PendingMarkFeeOrderingDiscovery {
+        control_reward: control.reward,
+        reordered_reward: reordered.reward,
+        control_winner_payout: control.winner_payout,
+        reordered_winner_payout: reordered.winner_payout,
+        victim_payout: reordered.victim_payout,
+        extracted_reward: reordered.extracted_reward,
+    })
 }

@@ -12,8 +12,10 @@
 //! requires movement cost to cover any later third-party value transfer and verifies net SPL
 //! extraction. `v16_program_trade_route_matrix_discovers_pending_target_override` compares an
 //! honest pending rebound with the same world plus a later round trip. It rejects any cheap target
-//! rewrite that displaces more independent payout than it costs. Direct impact tests remain below.
-//! These tests exercise the deployed public
+//! rewrite that displaces more independent payout than it costs.
+//! `v16_program_pending_mark_fee_ordering_discovers_reward_diversion` permutes fee synchronization
+//! against mark commitment and requires reward accounting to be independent of pending adverse
+//! value. Direct impact tests remain below. These tests exercise the deployed public
 //! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
 //! rollback, liveness, or compute outcomes appropriate to the invariant.
 //!
@@ -55,6 +57,33 @@ proptest! {
             violations,
             PendingMarkSource::ALL.to_vec(),
             "vulnerable-pin pending-mark admission corpus changed"
+        );
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig {
+        cases: env_usize("PERCOLATOR_FUZZ_CASES", 8) as u32,
+        max_shrink_iters: env_usize("PERCOLATOR_FUZZ_SHRINK_ITERS", 64) as u32,
+        failure_persistence: Some(Box::new(
+            proptest::test_runner::FileFailurePersistence::Direct(
+                "proptest-regressions/inv_045_pending_mark_fee_ordering_discovery.txt",
+            ),
+        )),
+        ..ProptestConfig::default()
+    })]
+
+    #[test]
+    fn v16_program_pending_mark_fee_ordering_discovers_reward_diversion(
+        seed in any::<[u8; 32]>()
+    ) {
+        let discovery = discover_pending_mark_fee_ordering(seed)
+            .map_err(TestCaseError::fail)?;
+        eprintln!("independent pending-mark fee-order discovery: {discovery:?}");
+        prop_assert!(
+            discovery.is_violation(),
+            "vulnerable-pin pending-mark fee ordering changed: {:?}",
+            discovery
         );
     }
 }
