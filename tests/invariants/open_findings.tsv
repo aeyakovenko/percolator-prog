@@ -3,7 +3,7 @@
 # Evidence is PR135 evidence, not the PR author claim or fix status.
 # pr	kind	severity	primary_invariant	evidence	title
 190	DoS	BLOCKER	INV-071	independent-discovery	[BLOCKER DoS] Commit recovery-required auto-crank progress
-202	DoS	REAL	INV-073	missing	[REAL DoS] Keep partially ADL-reduced users exit-live
+202	DoS	REAL	INV-073	nonqualifying	[REAL DoS] Keep partially ADL-reduced users exit-live
 203	DoS	BLOCKER	INV-073	missing	[BLOCKER DoS] Force-close abandoned ADL Recovery residues
 204	DoS	REAL	INV-063	nonqualifying	[REAL DoS] Unstick Live auto-crank after source-backing expiry
 212	DoS	BLOCKER	INV-077	independent-discovery	[BLOCKER DoS] Prove bounded max-source account progress
