@@ -174,15 +174,16 @@ fn v16_open_security_finding_benchmark_is_complete_and_non_overclaiming() {
     }
 
     assert_eq!(rows, 145, "refresh the dated GitHub finding snapshot");
-    assert_eq!(direct, 63, "direct adapter inventory changed");
+    assert_eq!(direct, 53, "direct adapter inventory changed");
     assert_eq!(missing, 67, "explicit finding gaps changed");
     assert_eq!(
-        independent, 15,
+        independent, 25,
         "promote only genuinely finding-agnostic invariant discoveries"
     );
 
     let independent_sources = [
         include_str!("../stateful/inv_001_market_incarnation_binding.rs"),
+        include_str!("../stateful/inv_002_asset_generation_binding.rs"),
         include_str!("../stateful/inv_003_portfolio_incarnation_binding.rs"),
     ];
     let mut fingerprints = std::collections::BTreeSet::new();

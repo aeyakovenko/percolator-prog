@@ -2,7 +2,10 @@
 //!
 //! Normative obligation: Asset-scoped consent cannot cross retirement, slot reuse, or asset-generation changes.
 //!
-//! Evidence in this file (F over public I routes): `v16_program_pr231_asset_generation_replay_fuzz`, `v16_program_pr279_collateral_top_up_generation_replay_fuzz`, `v16_program_pr321_backing_top_up_generation_replay_fuzz`, `v16_program_pr328_insurance_withdrawal_generation_replay_fuzz`, `v16_program_pr318_backing_fee_generation_replay_fuzz`, `v16_program_pr311_resolve_generation_replay_fuzz`, `v16_program_pr275_asset_generation_mark_replay_fuzz`, `v16_program_pr277_pr322_asset_generation_config_replay_fuzz`. These tests exercise the deployed public
+//! Evidence in this file (F over public I routes):
+//! `v16_program_asset_generation_operation_matrix_discovers_stale_intents` enumerates a
+//! finding-agnostic retained-operation registry over public retirement/reactivation. Direct impact
+//! regressions remain below. These tests exercise the deployed public
 //! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
 //! rollback, liveness, or compute outcomes appropriate to the invariant.
 //!
@@ -11,6 +14,43 @@
 //! plus every additional verification method required by the charter.
 
 use super::*;
+
+proptest! {
+    #![proptest_config(ProptestConfig {
+        cases: env_usize("PERCOLATOR_FUZZ_CASES", 8) as u32,
+        max_shrink_iters: env_usize("PERCOLATOR_FUZZ_SHRINK_ITERS", 64) as u32,
+        failure_persistence: Some(Box::new(
+            proptest::test_runner::FileFailurePersistence::Direct(
+                "proptest-regressions/inv_002_asset_generation_discovery.txt",
+            ),
+        )),
+        ..ProptestConfig::default()
+    })]
+
+    #[test]
+    fn v16_program_asset_generation_operation_matrix_discovers_stale_intents(
+        seed in any::<[u8; 32]>()
+    ) {
+        let discoveries = discover_asset_generation_replays(seed)
+            .map_err(TestCaseError::fail)?;
+        prop_assert_eq!(discoveries.len(), AssetIntentKind::ALL.len());
+        for (expected, discovery) in AssetIntentKind::ALL.into_iter().zip(&discoveries) {
+            prop_assert_eq!(discovery.kind, expected);
+            prop_assert!(discovery.new_asset_id > discovery.old_asset_id);
+        }
+        let violations: Vec<_> = discoveries
+            .iter()
+            .filter(|discovery| discovery.is_violation())
+            .map(|discovery| discovery.kind)
+            .collect();
+        eprintln!("independent INV-002 discoveries: {violations:?}");
+        prop_assert_eq!(
+            violations,
+            AssetIntentKind::ALL.to_vec(),
+            "vulnerable-pin asset-generation discovery corpus changed"
+        );
+    }
+}
 
 proptest! {
     #![proptest_config(ProptestConfig {

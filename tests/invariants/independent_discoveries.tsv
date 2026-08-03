@@ -13,3 +13,11 @@ INV-001	market-incarnation/fee-redirect-policy	v16_program_market_incarnation_op
 INV-001	market-incarnation/shutdown	v16_program_market_incarnation_operation_matrix_discovers_stale_intents	stale-intent-must-reject-and-roll-back-exactly	315
 INV-014	market-incarnation/maintenance-fee-policy	v16_program_market_incarnation_operation_matrix_discovers_stale_intents	stale-intent-must-reject-and-roll-back-exactly	325
 INV-014	market-incarnation/liquidation-fee-policy	v16_program_market_incarnation_operation_matrix_discovers_stale_intents	stale-intent-must-reject-and-roll-back-exactly	326
+INV-002	asset-generation/trade-family	v16_program_asset_generation_operation_matrix_discovers_stale_intents	stale-intent-must-reject-and-roll-back-exactly	231
+INV-002	asset-generation/mark-push-family	v16_program_asset_generation_operation_matrix_discovers_stale_intents	stale-intent-must-reject-and-roll-back-exactly	275
+INV-002	asset-generation/oracle-config-family	v16_program_asset_generation_operation_matrix_discovers_stale_intents	stale-intent-must-reject-and-roll-back-exactly	277,322
+INV-002	asset-generation/insurance-top-up	v16_program_asset_generation_operation_matrix_discovers_stale_intents	stale-intent-must-reject-and-roll-back-exactly	279,320
+INV-002	asset-generation/backing-top-up	v16_program_asset_generation_operation_matrix_discovers_stale_intents	stale-intent-must-reject-and-roll-back-exactly	321
+INV-002	asset-generation/insurance-withdrawal	v16_program_asset_generation_operation_matrix_discovers_stale_intents	stale-intent-must-reject-and-roll-back-exactly	328
+INV-002	asset-generation/backing-fee-policy	v16_program_asset_generation_operation_matrix_discovers_stale_intents	stale-intent-must-reject-and-roll-back-exactly	318
+INV-002	asset-generation/market-resolve	v16_program_asset_generation_operation_matrix_discovers_stale_intents	stale-intent-must-reject-and-roll-back-exactly	311

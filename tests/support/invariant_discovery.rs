@@ -41,6 +41,75 @@ pub enum MarketIntentKind {
     ResolvePolicy,
 }
 
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum AssetIntentKind {
+    TradeNoCpi,
+    TradeCpi,
+    BatchTradeNoCpi,
+    BatchTradeCpi,
+    PushAuthMark,
+    PushEwmaMark,
+    ConfigureAuthMark,
+    ConfigureEwmaMark,
+    ConfigureHybridOracle,
+    InsuranceTopUp,
+    BackingTopUp,
+    InsuranceWithdrawal,
+    BackingFeePolicy,
+    ResolveMarket,
+    ResolvePolicy,
+}
+
+impl AssetIntentKind {
+    pub const ALL: [Self; 15] = [
+        Self::TradeNoCpi,
+        Self::TradeCpi,
+        Self::BatchTradeNoCpi,
+        Self::BatchTradeCpi,
+        Self::PushAuthMark,
+        Self::PushEwmaMark,
+        Self::ConfigureAuthMark,
+        Self::ConfigureEwmaMark,
+        Self::ConfigureHybridOracle,
+        Self::InsuranceTopUp,
+        Self::BackingTopUp,
+        Self::InsuranceWithdrawal,
+        Self::BackingFeePolicy,
+        Self::ResolveMarket,
+        Self::ResolvePolicy,
+    ];
+
+    fn discriminator(self) -> u8 {
+        match self {
+            Self::TradeNoCpi => 0,
+            Self::TradeCpi => 1,
+            Self::BatchTradeNoCpi => 2,
+            Self::BatchTradeCpi => 3,
+            Self::PushAuthMark => 4,
+            Self::PushEwmaMark => 5,
+            Self::ConfigureAuthMark => 6,
+            Self::ConfigureEwmaMark => 7,
+            Self::ConfigureHybridOracle => 8,
+            Self::InsuranceTopUp => 9,
+            Self::BackingTopUp => 10,
+            Self::InsuranceWithdrawal => 11,
+            Self::BackingFeePolicy => 12,
+            Self::ResolveMarket => 13,
+            Self::ResolvePolicy => 14,
+        }
+    }
+
+    fn uses_actor_authorities(self) -> bool {
+        matches!(
+            self,
+            Self::InsuranceTopUp
+                | Self::BackingTopUp
+                | Self::InsuranceWithdrawal
+                | Self::BackingFeePolicy
+        )
+    }
+}
+
 impl MarketIntentKind {
     pub const ALL: [Self; 9] = [
         Self::Deposit,
@@ -87,6 +156,22 @@ pub struct MarketIncarnationDiscovery {
     pub accepted_stale_intent: bool,
     pub mutated_economic_state: bool,
     pub compute_units: Option<u64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AssetGenerationDiscovery {
+    pub kind: AssetIntentKind,
+    pub old_asset_id: u64,
+    pub new_asset_id: u64,
+    pub accepted_stale_intent: bool,
+    pub mutated_economic_state: bool,
+    pub compute_units: Option<u64>,
+}
+
+impl AssetGenerationDiscovery {
+    pub fn is_violation(&self) -> bool {
+        self.accepted_stale_intent && self.mutated_economic_state
+    }
 }
 
 impl MarketIncarnationDiscovery {
@@ -448,4 +533,300 @@ pub fn discover_market_incarnation_replays(
         .into_iter()
         .map(|kind| discover_one_market_incarnation_replay(seed, kind))
         .collect()
+}
+
+fn configure_old_asset_intent(
+    env: &mut V16Svm,
+    kind: AssetIntentKind,
+    asset_index: u16,
+    authority_actor: usize,
+) -> Result<Option<solana_sdk::pubkey::Pubkey>, String> {
+    match kind {
+        AssetIntentKind::PushAuthMark => env
+            .configure_auth_mark(false, asset_index, 1, INITIAL_PRICE)
+            .map(|_| None)
+            .map_err(|error| format!("configure old AuthMark: {error}")),
+        AssetIntentKind::PushEwmaMark => env
+            .configure_ewma_mark(asset_index, 1, INITIAL_PRICE, 1, 0)
+            .map(|_| None)
+            .map_err(|error| format!("configure old EwmaMark: {error}")),
+        AssetIntentKind::InsuranceTopUp => env
+            .update_asset_authority_from_admin(
+                asset_index,
+                percolator_prog::processor::ASSET_AUTH_INSURANCE,
+                authority_actor,
+            )
+            .map(|_| None)
+            .map_err(|error| format!("install old insurance authority: {error}")),
+        AssetIntentKind::InsuranceWithdrawal => {
+            for authority_kind in [
+                percolator_prog::processor::ASSET_AUTH_INSURANCE,
+                percolator_prog::processor::ASSET_AUTH_INSURANCE_OPERATOR,
+            ] {
+                env.update_asset_authority_from_admin(asset_index, authority_kind, authority_actor)
+                    .map_err(|error| format!("install old insurance role: {error}"))?;
+            }
+            Ok(None)
+        }
+        AssetIntentKind::BackingTopUp | AssetIntentKind::BackingFeePolicy => env
+            .update_asset_authority_from_admin(
+                asset_index,
+                percolator_prog::processor::ASSET_AUTH_BACKING_BUCKET,
+                authority_actor,
+            )
+            .map(|_| None)
+            .map_err(|error| format!("install old backing authority: {error}")),
+        AssetIntentKind::ConfigureHybridOracle => {
+            env.set_clock(1, 100);
+            let feed = [0x5au8; 32];
+            Ok(Some(env.set_pyth_price(
+                &feed,
+                INITIAL_PRICE as i64,
+                -6,
+                0,
+                101,
+            )))
+        }
+        _ => Ok(None),
+    }
+}
+
+fn retained_asset_intent(
+    env: &mut V16Svm,
+    kind: AssetIntentKind,
+    asset_index: u16,
+    authority_actor: usize,
+    oracle_account: Option<solana_sdk::pubkey::Pubkey>,
+) -> Transaction {
+    const SUBJECT: usize = 0;
+    const COUNTERPARTY: usize = 1;
+    const AMOUNT: u128 = 1_000;
+    let size_q = POS_SCALE as i128 / 4;
+    let stale_price = INITIAL_PRICE / 2;
+    let domain = asset_index * 2;
+    match kind {
+        AssetIntentKind::TradeNoCpi => env.build_retained_no_cpi_trade(
+            SUBJECT,
+            COUNTERPARTY,
+            asset_index,
+            size_q,
+            INITIAL_PRICE,
+        ),
+        AssetIntentKind::TradeCpi => {
+            env.build_retained_cpi_trade(SUBJECT, COUNTERPARTY, asset_index, size_q, 0)
+        }
+        AssetIntentKind::BatchTradeNoCpi => env.build_retained_batch_no_cpi_trade(
+            SUBJECT,
+            COUNTERPARTY,
+            asset_index,
+            size_q,
+            INITIAL_PRICE,
+        ),
+        AssetIntentKind::BatchTradeCpi => {
+            env.build_retained_batch_cpi_trade(SUBJECT, COUNTERPARTY, asset_index, size_q, 0)
+        }
+        AssetIntentKind::PushAuthMark => env.build_retained_auth_mark(asset_index, stale_price),
+        AssetIntentKind::PushEwmaMark => env.build_retained_ewma_mark(asset_index, stale_price),
+        AssetIntentKind::ConfigureAuthMark => {
+            env.build_retained_auth_config(asset_index, stale_price)
+        }
+        AssetIntentKind::ConfigureEwmaMark => {
+            env.build_retained_ewma_config(asset_index, stale_price, 1, 0)
+        }
+        AssetIntentKind::ConfigureHybridOracle => {
+            let feed = [0x5au8; 32];
+            env.build_retained_hybrid_oracle_config(
+                asset_index,
+                5,
+                101,
+                0,
+                [feed, [0; 32], [0; 32]],
+                &[oracle_account.expect("hybrid oracle fixture")],
+                1,
+                0,
+            )
+        }
+        AssetIntentKind::InsuranceTopUp => {
+            env.build_retained_insurance_domain_top_up_for_actor(authority_actor, domain, AMOUNT)
+        }
+        AssetIntentKind::BackingTopUp => {
+            env.build_retained_backing_bucket_top_up_for_actor(authority_actor, domain, AMOUNT, 100)
+        }
+        AssetIntentKind::InsuranceWithdrawal => {
+            env.build_retained_insurance_withdrawal_for_actor(authority_actor, asset_index, AMOUNT)
+        }
+        AssetIntentKind::BackingFeePolicy => {
+            env.build_retained_backing_fee_policy_for_actor(authority_actor, domain, 100, 5_000)
+        }
+        AssetIntentKind::ResolveMarket => env.build_retained_resolve_market(),
+        AssetIntentKind::ResolvePolicy => env.build_retained_permissionless_resolve_policy(17, 29),
+    }
+}
+
+fn configure_replacement_asset(
+    env: &mut V16Svm,
+    kind: AssetIntentKind,
+    asset_index: u16,
+    authority_actor: usize,
+) -> Result<(), String> {
+    match kind {
+        AssetIntentKind::TradeNoCpi
+        | AssetIntentKind::TradeCpi
+        | AssetIntentKind::BatchTradeNoCpi
+        | AssetIntentKind::BatchTradeCpi
+        | AssetIntentKind::PushAuthMark
+        | AssetIntentKind::ConfigureAuthMark
+        | AssetIntentKind::ConfigureEwmaMark
+        | AssetIntentKind::ConfigureHybridOracle => env
+            .configure_auth_mark(false, asset_index, 4, INITIAL_PRICE)
+            .map(|_| ())
+            .map_err(|error| format!("configure replacement AuthMark: {error}")),
+        AssetIntentKind::PushEwmaMark => env
+            .configure_ewma_mark(asset_index, 4, INITIAL_PRICE, 1, 0)
+            .map(|_| ())
+            .map_err(|error| format!("configure replacement EwmaMark: {error}")),
+        AssetIntentKind::InsuranceWithdrawal => env
+            .top_up_insurance_domain_for_actor(authority_actor, asset_index * 2, 1_000)
+            .map(|_| ())
+            .map_err(|error| format!("fund replacement insurance reserve: {error}")),
+        _ => Ok(()),
+    }
+}
+
+fn discover_one_asset_generation_replay(
+    mut seed: [u8; 32],
+    kind: AssetIntentKind,
+) -> Result<AssetGenerationDiscovery, String> {
+    const ASSET: u16 = 1;
+    const AUTHORITY_ACTOR: usize = 2;
+    const ACTIVATION_PAYER: usize = 3;
+    seed[0] ^= 0xc9;
+    seed[1] ^= kind.discriminator();
+    let mut env = V16Svm::new(seed, MarketConfig::default());
+    let supply_before = env.token_supply_observed();
+    let oracle_account = configure_old_asset_intent(&mut env, kind, ASSET, AUTHORITY_ACTOR)?;
+    if kind == AssetIntentKind::InsuranceWithdrawal {
+        env.top_up_insurance_domain_for_actor(AUTHORITY_ACTOR, ASSET * 2, 1_000)
+            .map_err(|error| format!("fund old insurance reserve: {error}"))?;
+    }
+    let old_asset_id = env.primary_market_state().1.assets[ASSET as usize].market_id;
+    let retained = retained_asset_intent(&mut env, kind, ASSET, AUTHORITY_ACTOR, oracle_account);
+    if kind == AssetIntentKind::InsuranceWithdrawal {
+        env.withdraw_insurance_asset(AUTHORITY_ACTOR, ASSET, 1_000)
+            .map_err(|error| format!("clear old insurance reserve: {error}"))?;
+    }
+
+    env.update_market_init_fee_policy(1)
+        .map_err(|error| format!("configure permissionless asset activation: {error}"))?;
+    env.warp_to_slot(3);
+    env.retire_asset(ASSET, 3)
+        .map_err(|error| format!("retire old asset: {error}"))?;
+    env.warp_to_slot(4);
+    if kind.uses_actor_authorities() {
+        env.activate_permissionless_asset_with_actor_authorities(
+            ACTIVATION_PAYER,
+            ASSET,
+            4,
+            INITIAL_PRICE,
+            AUTHORITY_ACTOR,
+            AUTHORITY_ACTOR,
+            AUTHORITY_ACTOR,
+            AUTHORITY_ACTOR,
+            1,
+        )
+        .map_err(|error| format!("activate actor-authority replacement asset: {error}"))?;
+    } else {
+        env.activate_permissionless_asset(ACTIVATION_PAYER, ASSET, 4, INITIAL_PRICE, 1)
+            .map_err(|error| format!("activate replacement asset: {error}"))?;
+    }
+    let new_asset_id = env.primary_market_state().1.assets[ASSET as usize].market_id;
+    if new_asset_id <= old_asset_id {
+        return Err(format!(
+            "asset generation did not advance: {old_asset_id} -> {new_asset_id}"
+        ));
+    }
+    configure_replacement_asset(&mut env, kind, ASSET, AUTHORITY_ACTOR)?;
+    if matches!(
+        kind,
+        AssetIntentKind::PushAuthMark
+            | AssetIntentKind::PushEwmaMark
+            | AssetIntentKind::ConfigureAuthMark
+            | AssetIntentKind::ConfigureEwmaMark
+            | AssetIntentKind::ConfigureHybridOracle
+    ) {
+        env.warp_to_slot(5);
+    }
+    if kind == AssetIntentKind::ConfigureHybridOracle {
+        env.set_clock(5, 101);
+    }
+
+    let before = fingerprint(&env);
+    let result = env.land_retained(retained);
+    let after = fingerprint(&env);
+    if env.token_supply_observed() != supply_before {
+        return Err(format!(
+            "{kind:?} asset-generation probe changed SPL supply: {supply_before} -> {}",
+            env.token_supply_observed()
+        ));
+    }
+
+    match result {
+        Ok(success) => {
+            let mutated_economic_state = before != after;
+            if !mutated_economic_state {
+                return Err(format!(
+                    "{kind:?} stale asset transaction succeeded without an observable state delta"
+                ));
+            }
+            Ok(AssetGenerationDiscovery {
+                kind,
+                old_asset_id,
+                new_asset_id,
+                accepted_stale_intent: true,
+                mutated_economic_state,
+                compute_units: Some(success.compute_units),
+            })
+        }
+        Err(_) => {
+            if before != after {
+                return Err(format!(
+                    "{kind:?} rejected stale asset transaction did not roll back exactly"
+                ));
+            }
+            Ok(AssetGenerationDiscovery {
+                kind,
+                old_asset_id,
+                new_asset_id,
+                accepted_stale_intent: false,
+                mutated_economic_state: false,
+                compute_units: None,
+            })
+        }
+    }
+}
+
+pub fn discover_asset_generation_replays(
+    seed: [u8; 32],
+) -> Result<Vec<AssetGenerationDiscovery>, String> {
+    let trace = std::env::var_os("PERCOLATOR_DISCOVERY_TRACE").is_some();
+    let mut discoveries = Vec::with_capacity(AssetIntentKind::ALL.len());
+    for kind in AssetIntentKind::ALL {
+        if trace {
+            eprintln!("asset-generation probe start: {kind:?}");
+        }
+        let discovery = discover_one_asset_generation_replay(seed, kind).map_err(|error| {
+            if trace {
+                eprintln!("asset-generation probe error: {kind:?}: {error}");
+            }
+            error
+        })?;
+        if trace {
+            eprintln!(
+                "asset-generation probe finish: {kind:?} violation={}",
+                discovery.is_violation()
+            );
+        }
+        discoveries.push(discovery);
+    }
+    Ok(discoveries)
 }
