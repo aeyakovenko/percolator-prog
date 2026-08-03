@@ -1,4 +1,7 @@
-use super::v16_svm::{MarketConfig, V16Svm, INITIAL_PRICE, PRIMARY_ACTOR_COUNT, USER_DEPOSIT};
+use super::v16_svm::{
+    MarketConfig, V16Svm, EXIT_MAKER_DEPOSIT, EXIT_MAKER_INDEX, INITIAL_PRICE, PRIMARY_ACTOR_COUNT,
+    USER_DEPOSIT,
+};
 use percolator::{MarketModeV16, SideModeV16, POS_SCALE};
 use percolator_prog::{
     constants::{ORACLE_LEG_FLAG_DIVIDE_LEG2, ORACLE_LEG_FLAG_DIVIDE_LEG3},
@@ -749,6 +752,30 @@ pub struct CrossDomainBackingDiscovery {
     pub funded_backing_consumed_num: u128,
     pub winner_capital_gain: u128,
     pub extracted_tokens: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CrossDomainBDiscovery {
+    pub b_target_num: u128,
+    pub pnl_loss: u128,
+    pub wrong_domain_reduction_num: u128,
+    pub correct_domain_reduction_num: u128,
+    pub stranded_position_q: u128,
+    pub failed_terminal_reductions: u8,
+    pub full_withdraw_rejected: bool,
+}
+
+impl CrossDomainBDiscovery {
+    pub fn is_violation(&self) -> bool {
+        self.b_target_num != 0
+            && self.pnl_loss != 0
+            && self.wrong_domain_reduction_num != 0
+            && self.correct_domain_reduction_num
+                < self.pnl_loss.saturating_mul(percolator::BOUND_SCALE)
+            && self.stranded_position_q == POS_SCALE
+            && self.failed_terminal_reductions >= 6
+            && self.full_withdraw_rejected
+    }
 }
 
 impl CrossDomainBackingDiscovery {
@@ -6126,5 +6153,302 @@ pub fn discover_cross_domain_backing_violation(
         funded_backing_consumed_num,
         winner_capital_gain,
         extracted_tokens,
+    })
+}
+
+fn discovery_source_claim(
+    account: &percolator_prog::state::PortfolioAccountV16,
+    domain: usize,
+) -> u128 {
+    account
+        .source_domains
+        .iter()
+        .find(|source| {
+            source.source_claim_market_id.get() != 0 && source.domain.get() as usize == domain
+        })
+        .map(|source| source.source_claim_bound_num.get())
+        .unwrap_or(0)
+}
+
+fn discovery_position(
+    account: &percolator_prog::state::PortfolioAccountV16,
+    asset_index: u16,
+) -> Result<i128, String> {
+    account.legs.iter().try_fold(0i128, |sum, leg| {
+        let decoded = leg
+            .try_to_runtime()
+            .map_err(|error| format!("decode portfolio leg: {error:?}"))?;
+        if decoded.active && decoded.asset_index == u32::from(asset_index) {
+            sum.checked_add(decoded.basis_pos_q)
+                .ok_or_else(|| "portfolio position overflow".to_string())
+        } else {
+            Ok(sum)
+        }
+    })
+}
+
+fn crank_asset_progress(
+    env: &mut V16Svm,
+    actor: usize,
+    slot: u64,
+    asset_index: u16,
+    attempts: usize,
+) -> Result<(), String> {
+    let oracle_accounts = env.primary_profile(asset_index as usize).oracle_leg_count;
+    let mut progressed = false;
+    for _ in 0..attempts {
+        match env.crank(
+            actor,
+            slot,
+            vec![CrankObservationHint {
+                asset_index,
+                oracle_accounts,
+            }],
+        ) {
+            Ok(_) => progressed = true,
+            Err(error) if progressed && error.contains("Custom(22)") => break,
+            Err(error) => {
+                return Err(format!(
+                    "actor {actor} asset {asset_index} failed before progress: {error}"
+                ))
+            }
+        }
+    }
+    if !progressed {
+        return Err(format!(
+            "actor {actor} asset {asset_index} made no progress"
+        ));
+    }
+    Ok(())
+}
+
+pub fn discover_cross_domain_b_violation(
+    mut seed: [u8; 32],
+) -> Result<CrossDomainBDiscovery, String> {
+    const INITIAL_PRICE: u64 = 100;
+    const FIRST_MARK: u64 = 105;
+    const BANKRUPTCY_MARK: u64 = 500;
+    const WINNER_Q: i128 = 20 * POS_SCALE as i128;
+    const UNFUNDED_DOMAIN: usize = 1;
+    const FUNDED_DOMAIN: usize = 3;
+    const WINNER_DEPOSIT: u128 = 100_000;
+
+    seed[0] ^= 0xbf;
+    let mut env = V16Svm::new(
+        seed,
+        MarketConfig {
+            max_price_move_bps_per_slot: 10_000,
+            max_accrual_dt_slots: 1,
+            min_funding_lifetime_slots: 1,
+            actor_deposits: [WINNER_DEPOSIT, 100_000, 250, 100_000, EXIT_MAKER_DEPOSIT],
+            ..MarketConfig::default()
+        },
+    );
+    let supply_before = env.token_supply_observed();
+    for asset_index in [0u16, 1] {
+        env.configure_auth_mark(false, asset_index, 1, INITIAL_PRICE)
+            .map_err(|error| format!("configure asset {asset_index} mark: {error}"))?;
+    }
+    env.top_up_backing_bucket(FUNDED_DOMAIN as u16, 20_000, 1_000)
+        .map_err(|error| format!("fund affected source domain: {error}"))?;
+    for asset_index in [0u16, 1] {
+        env.trade_no_cpi(0, 1, asset_index, WINNER_Q, INITIAL_PRICE, 0)
+            .map_err(|error| format!("open asset {asset_index} claim pair: {error}"))?;
+    }
+
+    env.warp_to_slot(2);
+    for asset_index in [0u16, 1] {
+        env.push_auth_mark(asset_index, 2, FIRST_MARK)
+            .map_err(|error| format!("move asset {asset_index}: {error}"))?;
+        crank_asset_progress(&mut env, 0, 2, asset_index, 4)?;
+    }
+    let first_claims = env.primary_portfolio(0);
+    if discovery_source_claim(&first_claims, UNFUNDED_DOMAIN) != 100 * percolator::BOUND_SCALE
+        || discovery_source_claim(&first_claims, FUNDED_DOMAIN) != 100 * percolator::BOUND_SCALE
+    {
+        return Err("B-settlement setup did not create equal source claims".into());
+    }
+
+    env.trade_no_cpi(0, 2, 1, POS_SCALE as i128, FIRST_MARK, 0)
+        .map_err(|error| format!("open bankrupt asset-1 counterposition: {error}"))?;
+    env.warp_to_slot(7);
+    env.push_auth_mark(1, 7, BANKRUPTCY_MARK)
+        .map_err(|error| format!("publish bankruptcy mark: {error}"))?;
+    crank_asset_progress(&mut env, 0, 7, 1, 4)?;
+    let observation = vec![CrankObservationHint {
+        asset_index: 1,
+        oracle_accounts: env.primary_profile(1).oracle_leg_count,
+    }];
+    let mut bankrupt_progress = false;
+    for _ in 0..12 {
+        if env.crank(2, 7, observation.clone()).is_ok() {
+            bankrupt_progress = true;
+        }
+        if env.primary_market_state().1.assets[1].b_long_num != 0 {
+            break;
+        }
+    }
+    let b_target_num = env.primary_market_state().1.assets[1].b_long_num;
+    if !bankrupt_progress || b_target_num == 0 {
+        return Err("public liquidation did not book asset-1 B loss".into());
+    }
+
+    let before_settle = env.primary_portfolio(0);
+    let unfunded_claim_before_num = discovery_source_claim(&before_settle, UNFUNDED_DOMAIN);
+    let funded_claim_before_num = discovery_source_claim(&before_settle, FUNDED_DOMAIN);
+    if unfunded_claim_before_num == 0 || funded_claim_before_num <= unfunded_claim_before_num {
+        return Err("B-settlement claims lack domain discriminator".into());
+    }
+    crank_asset_progress(&mut env, 0, 7, 1, 8)?;
+    let after_settle = env.primary_portfolio(0);
+    let settled_b_snap = after_settle
+        .legs
+        .iter()
+        .filter_map(|leg| leg.try_to_runtime().ok())
+        .find(|leg| leg.active && leg.asset_index == 1)
+        .map(|leg| leg.b_snap)
+        .ok_or_else(|| "winner lost affected leg during B settlement".to_string())?;
+    if settled_b_snap != b_target_num {
+        return Err("winner B snapshot did not reach market target".into());
+    }
+    let pnl_loss = u128::try_from(
+        before_settle
+            .pnl
+            .get()
+            .checked_sub(after_settle.pnl.get())
+            .ok_or_else(|| "B-settlement PnL subtraction overflow".to_string())?,
+    )
+    .map_err(|_| "B settlement did not reduce winner PnL".to_string())?;
+    let unfunded_claim_after_num = discovery_source_claim(&after_settle, UNFUNDED_DOMAIN);
+    let funded_claim_after_num = discovery_source_claim(&after_settle, FUNDED_DOMAIN);
+    let wrong_domain_reduction_num = unfunded_claim_before_num
+        .checked_sub(unfunded_claim_after_num)
+        .ok_or_else(|| "unaffected source claim increased".to_string())?;
+    let correct_domain_reduction_num = funded_claim_before_num
+        .checked_sub(funded_claim_after_num)
+        .ok_or_else(|| "affected source claim increased".to_string())?;
+    let expected_reduction = pnl_loss
+        .checked_mul(percolator::BOUND_SCALE)
+        .ok_or_else(|| "B claim reduction overflow".to_string())?;
+    if wrong_domain_reduction_num.checked_add(correct_domain_reduction_num)
+        != Some(expected_reduction)
+    {
+        return Err("B-settlement claim reductions did not reconcile to PnL loss".into());
+    }
+
+    let mut reduction_steps = 0u8;
+    let (stranded_position_q, failed_terminal_reductions) = loop {
+        let position = discovery_position(&env.primary_portfolio(0), 1)?;
+        if position <= 0 {
+            return Err(format!("affected position exited unexpectedly: {position}"));
+        }
+        let position_q = position as u128;
+        let candidates = [
+            position_q,
+            (position_q / 2).max(1),
+            (position_q / 3).max(1),
+            (position_q / 4).max(1),
+            (position_q / 5).max(1),
+            (position_q / 7).max(1),
+            (position_q / 10).max(1),
+            position_q.min(POS_SCALE),
+            position_q % POS_SCALE,
+            position_q.saturating_sub(POS_SCALE),
+            1,
+        ];
+        let mut progressed = false;
+        let mut failures = 0u8;
+        let mut all_counter_underflow = true;
+        for (candidate_index, reduce_q) in candidates.into_iter().enumerate() {
+            if reduce_q == 0 || candidates[..candidate_index].contains(&reduce_q) {
+                continue;
+            }
+            let market_before = env.market_data(false);
+            let portfolio_before = env.primary_portfolio_data(0);
+            match env.rebalance_reduce(0, 1, reduce_q) {
+                Ok(_) => {
+                    reduction_steps = reduction_steps
+                        .checked_add(1)
+                        .ok_or_else(|| "B reduction-step count overflow".to_string())?;
+                    for _ in 0..4 {
+                        if env.crank(0, 7, observation.clone()).is_err() {
+                            break;
+                        }
+                    }
+                    progressed = true;
+                    break;
+                }
+                Err(error) => {
+                    if env.market_data(false) != market_before
+                        || env.primary_portfolio_data(0) != portfolio_before
+                    {
+                        return Err(format!("failed B reduction {reduce_q} mutated state"));
+                    }
+                    all_counter_underflow &= error.contains("Custom(25)");
+                    failures = failures.saturating_add(1);
+                }
+            }
+        }
+        if progressed {
+            if reduction_steps >= 64 {
+                return Err("B reduction search exceeded 64 steps".into());
+            }
+            continue;
+        }
+        if position_q != POS_SCALE || !all_counter_underflow || failures < 6 {
+            return Err(format!(
+                "B terminal reduction stopped unexpectedly: position={position_q}, failures={failures}"
+            ));
+        }
+        break (position_q, failures);
+    };
+
+    for _ in 0..8 {
+        let market_before = env.market_data(false);
+        let portfolio_before = env.primary_portfolio_data(0);
+        let _ = env.crank(0, 7, observation.clone());
+        if env.market_data(false) != market_before
+            || env.primary_portfolio_data(0) != portfolio_before
+        {
+            return Err("honest crank progressed terminal B residual".into());
+        }
+    }
+    let market_before_trade = env.market_data(false);
+    let portfolio_before_trade = env.primary_portfolio_data(0);
+    let bilateral_exit = env.trade_no_cpi(
+        0,
+        EXIT_MAKER_INDEX,
+        1,
+        -(stranded_position_q as i128),
+        BANKRUPTCY_MARK,
+        0,
+    );
+    if bilateral_exit.is_ok()
+        || env.market_data(false) != market_before_trade
+        || env.primary_portfolio_data(0) != portfolio_before_trade
+    {
+        return Err("bilateral exit moved terminal B residual".into());
+    }
+    let winner_capital = env.primary_portfolio(0).capital.get();
+    let market_before_withdraw = env.market_data(false);
+    let portfolio_before_withdraw = env.primary_portfolio_data(0);
+    let destination_before = env.token_amount(env.actors[0].destination_token);
+    let full_withdraw_rejected = env.withdraw_primary(0, winner_capital).is_err();
+    if !full_withdraw_rejected
+        || env.market_data(false) != market_before_withdraw
+        || env.primary_portfolio_data(0) != portfolio_before_withdraw
+        || env.token_amount(env.actors[0].destination_token) != destination_before
+        || env.token_supply_observed() != supply_before
+    {
+        return Err("terminal B withdrawal did not reject atomically".into());
+    }
+    Ok(CrossDomainBDiscovery {
+        b_target_num,
+        pnl_loss,
+        wrong_domain_reduction_num,
+        correct_domain_reduction_num,
+        stranded_position_q,
+        failed_terminal_reductions,
+        full_withdraw_rejected,
     })
 }

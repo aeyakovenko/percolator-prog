@@ -174,10 +174,10 @@ fn v16_open_security_finding_benchmark_is_complete_and_non_overclaiming() {
     }
 
     assert_eq!(rows, 145, "refresh the dated GitHub finding snapshot");
-    assert_eq!(direct, 4, "direct adapter inventory changed");
+    assert_eq!(direct, 3, "direct adapter inventory changed");
     assert_eq!(missing, 62, "explicit finding gaps changed");
     assert_eq!(
-        independent, 79,
+        independent, 80,
         "promote only genuinely finding-agnostic invariant discoveries"
     );
 
@@ -191,6 +191,7 @@ fn v16_open_security_finding_benchmark_is_complete_and_non_overclaiming() {
         include_str!("../stateful/inv_020_authenticated_clock_slot_and_oracle_provenance.rs"),
         include_str!("../stateful/inv_031_no_double_use_of_claim_backing_or_insurance_atoms.rs"),
         include_str!("../stateful/inv_034_domain_and_instance_isolation.rs"),
+        include_str!("../stateful/inv_035_no_global_b_pool_residuals_remain_local.rs"),
         include_str!("../stateful/inv_036_fee_destination_and_policy_version_integrity.rs"),
         include_str!("../stateful/inv_038_rounding_and_ratio_conservation.rs"),
         include_str!("../stateful/inv_039_pending_loss_obligation_durability.rs"),
@@ -251,6 +252,7 @@ fn v16_open_security_finding_benchmark_is_complete_and_non_overclaiming() {
                     | "terminal-payout-is-invariant-to-flattened-dust-position"
                     | "insurance-spend-remains-source-domain-local"
                     | "backing-atoms-cannot-support-claims-from-another-source"
+                    | "b-loss-reduces-only-the-originating-source-domain"
             ),
             "unknown independent oracle: {}",
             fields[3]
