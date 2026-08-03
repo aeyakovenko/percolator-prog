@@ -2,7 +2,7 @@
 //!
 //! Normative obligation: Required exits and recovery paths remain below the CU ceiling at supported maximum shape.
 //!
-//! Evidence in this file (I/C plus invariant-specific M assertions): `v16_bpf_public_full_14_leg_composite_oracle_liquidation_progress_is_bounded`, `v16_bpf_public_full_14_leg_three_feed_oracle_refresh_is_bounded`, `v16_bpf_public_14_leg_28_source_domain_exit_is_under_tx_limit`, `v16_bpf_10m_market_high_asset_resolved_exit_stays_bounded`, `v16_bpf_10m_market_rebalance_reduce_high_asset_stays_bounded`, `v16_bpf_permissionless_crank_16_observation_decode_cap_is_under_tx_limit`, `v16_bpf_public_stale_7_leg_tradenocpi_boundary_is_bounded`, `v16_bpf_10m_market_resolution_stays_bounded`, `v16_bpf_10m_flat_user_withdraw_and_close_stay_bounded`, `v16_attack_public_max_source_force_close_abandoned_asset_stays_bounded`, `v16_attack_max_source_owner_rebalance_reduce_stays_bounded`, `v16_attack_max_source_force_close_abandoned_asset_stays_bounded`, `v16_attack_public_14_leg_32_source_recovery_forfeit_stays_bounded`, `v16_attack_max_source_maintenance_sync_stays_bounded`, `v16_attack_public_14_leg_32_source_domain_exit_stays_bounded`, `v16_attack_public_max_source_flat_principal_withdraw_stays_bounded`, `v16_attack_public_14_leg_32_source_collateral_deposit_stays_bounded`. These tests exercise the deployed public
+//! Evidence in this file (I/C plus invariant-specific M assertions): `v16_program_max_source_conversion_amount_matrix_discovers_claim_lock`, `v16_bpf_public_full_14_leg_composite_oracle_liquidation_progress_is_bounded`, `v16_bpf_public_full_14_leg_three_feed_oracle_refresh_is_bounded`, `v16_bpf_public_14_leg_28_source_domain_exit_is_under_tx_limit`, `v16_bpf_10m_market_high_asset_resolved_exit_stays_bounded`, `v16_bpf_10m_market_rebalance_reduce_high_asset_stays_bounded`, `v16_bpf_permissionless_crank_16_observation_decode_cap_is_under_tx_limit`, `v16_bpf_public_stale_7_leg_tradenocpi_boundary_is_bounded`, `v16_bpf_10m_market_resolution_stays_bounded`, `v16_bpf_10m_flat_user_withdraw_and_close_stay_bounded`, `v16_attack_public_max_source_force_close_abandoned_asset_stays_bounded`, `v16_attack_max_source_owner_rebalance_reduce_stays_bounded`, `v16_attack_max_source_force_close_abandoned_asset_stays_bounded`, `v16_attack_public_14_leg_32_source_recovery_forfeit_stays_bounded`, `v16_attack_max_source_maintenance_sync_stays_bounded`, `v16_attack_public_14_leg_32_source_domain_exit_stays_bounded`, `v16_attack_public_max_source_flat_principal_withdraw_stays_bounded`, `v16_attack_public_14_leg_32_source_collateral_deposit_stays_bounded`. These tests exercise the deployed public
 //! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
 //! rollback, liveness, or compute outcomes appropriate to the invariant.
 //!
@@ -11,6 +11,109 @@
 //! plus every additional verification method required by the charter.
 
 use super::*;
+
+#[test]
+fn v16_program_max_source_conversion_amount_matrix_discovers_claim_lock() {
+    let (mut env, taker_owner, lp_owner, taker, lp, slot) = setup_max_source_live_pair(0, 1);
+    env.svm.expire_blockhash();
+    env.trade_asset_with_cu(
+        MAX_SOURCE_LIVE_ASSETS - 1,
+        &taker_owner,
+        taker,
+        &lp_owner,
+        lp,
+        -MAX_SOURCE_LIVE_SIZE_Q,
+        100,
+        0,
+    );
+
+    let flat = env.portfolio_state(lp);
+    assert!(
+        percolator::active_bitmap_is_empty(active_bitmap(&flat)),
+        "the conversion matrix starts from a publicly flattened LP"
+    );
+    assert_eq!(
+        flat.source_domains
+            .iter()
+            .filter(|source| source.is_occupied())
+            .count(),
+        percolator::PORTFOLIO_SOURCE_DOMAIN_CAP,
+        "ordinary profitable episodes must reach the public source cap"
+    );
+    let positive_pnl = flat.pnl.get();
+    assert!(positive_pnl > 0, "the flat LP must retain a backed claim");
+    let vault_before = env.token_amount(env.vault);
+    assert!(u128::from(vault_before) >= positive_pnl as u128);
+
+    for amount in [1, MAX_SOURCE_LIVE_SIZE_Q as u128, positive_pnl as u128] {
+        env.svm.expire_blockhash();
+        let market_before = env.svm.get_account(&env.market).unwrap();
+        let lp_before = env.svm.get_account(&lp).unwrap();
+        let result = env.send(
+            ProgInstruction::ConvertReleasedPnl { amount },
+            vec![
+                AccountMeta::new(lp_owner.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(lp, false),
+            ],
+            &[&lp_owner],
+        );
+        assert!(
+            result.is_err(),
+            "max-source conversion amount {amount} unexpectedly escaped the CU lock"
+        );
+        let error = format!("{:?}", result.as_ref().unwrap_err());
+        assert!(
+            (error.contains("ComputationalBudgetExceeded")
+                || error.contains("ProgramFailedToComplete"))
+                && error.contains("exceeded CUs meter"),
+            "amount {amount} failed for a non-CU reason: {error}"
+        );
+        assert_eq!(
+            env.svm.get_account(&env.market).unwrap(),
+            market_before,
+            "failed amount {amount} conversion mutated the market"
+        );
+        assert_eq!(
+            env.svm.get_account(&lp).unwrap(),
+            lp_before,
+            "failed amount {amount} conversion mutated the LP"
+        );
+        assert_eq!(
+            env.token_amount(env.vault),
+            vault_before,
+            "failed amount {amount} conversion moved SPL custody"
+        );
+    }
+
+    env.svm.warp_to_slot(slot + 1);
+    env.svm.expire_blockhash();
+    let market_before_crank = env.svm.get_account(&env.market).unwrap();
+    let lp_before_crank = env.svm.get_account(&lp).unwrap();
+    let _ = env.crank(
+        lp,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: slot + 1,
+            observations: vec![],
+        },
+    );
+    let after_crank = env.portfolio_state(lp);
+    assert_eq!(after_crank.pnl.get(), positive_pnl);
+    assert_eq!(
+        after_crank
+            .source_domains
+            .iter()
+            .filter(|source| source.is_occupied())
+            .count(),
+        percolator::PORTFOLIO_SOURCE_DOMAIN_CAP,
+        "a later honest crank must not be mistaken for source-claim progress"
+    );
+    assert!(
+        env.svm.get_account(&env.market).unwrap() == market_before_crank
+            && env.svm.get_account(&lp).unwrap() == lp_before_crank,
+        "the no-action crank unexpectedly changed the terminal claim rank"
+    );
+}
 
 #[test]
 fn v16_bpf_public_full_14_leg_composite_oracle_liquidation_progress_is_bounded() {
