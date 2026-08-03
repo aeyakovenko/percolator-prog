@@ -23,7 +23,7 @@ verification methods are in [`../../INVARIANTS.md`](../../INVARIANTS.md).
 | Suite | Tests | Evidence |
 | --- | ---: | --- |
 | `public_sbf/` | 74 | Deterministic public SBF/LiteSVM counterexamples, regressions, and manifest checks |
-| `stateful/` | 95 | Proptest-generated public routes, including twenty-seven finding-agnostic discovery properties |
+| `stateful/` | 96 | Proptest-generated public routes, including twenty-eight finding-agnostic discovery properties |
 | `cu/` | 69 | Positive public-route, metamorphic, rollback, liveness, and max-shape CU tests |
 | `kani/` | 40 | Symbolic wrapper arithmetic, matcher-binding, and strict-decoder proofs |
 
@@ -102,7 +102,7 @@ charter.
 | INV-050 | SVM/CU | `cu/inv_050_cross_zero_decomposition.rs` |
 | INV-051 | Gap | - |
 | INV-052 | Gap | - |
-| INV-053 | Direct + SVM/CU | `public_sbf/inv_053_full_health_recertification_equivalence.rs`, `stateful/inv_053_full_health_recertification_equivalence.rs`, `cu/inv_053_full_health_recertification_equivalence.rs` |
+| INV-053 | Independent + Direct + SVM/CU | `public_sbf/inv_053_full_health_recertification_equivalence.rs`, `stateful/inv_053_full_health_recertification_equivalence.rs`, `cu/inv_053_full_health_recertification_equivalence.rs` |
 | INV-054 | SVM/CU | `cu/inv_054_certificate_epoch_completeness.rs` |
 | INV-055 | SVM/CU | `cu/inv_055_state_indexed_admission.rs` |
 | INV-056 | Gap | - |
@@ -143,8 +143,8 @@ charter.
 ## Known-finding benchmark
 
 `open_findings.tsv` is the unified 2026-08-03 snapshot of 145 open PRs whose titles identify a
-public-route LoF or DoS class. It maps every row to a primary invariant. PR135 currently has 23
-**Direct regression** rows, 62 **Missing** rows, and 60 **Independent discovery** rows. The independent
+public-route LoF or DoS class. It maps every row to a primary invariant. PR135 currently has 1
+**Direct regression** row, 62 **Missing** rows, and 82 **Independent discovery** rows. The independent
 rows are backed by finding-agnostic fingerprints in `independent_discoveries.tsv`; that mapping is
 evidence metadata and is never consumed by a generator or oracle. The older
 `tests/support/open_lof_manifest.rs` retains the executable adapter mapping for its 99-LoF snapshot.

@@ -13,7 +13,7 @@
 217	DoS	BLOCKER	INV-073	missing	[BLOCKER DoS] Keep social-loss dust from blocking owner exit
 218	DoS	BLOCKER	INV-061	missing	[BLOCKER DoS] Keep reset carry from blocking liquidation
 219	DoS	BLOCKER	INV-073	missing	[BLOCKER DoS] Reset both zero-OI sides to preserve exit
-220	LoF	BLOCKER	INV-053	direct-regression	[BLOCKER LoF] Prevent liquidation on an omitted rescue mark
+220	LoF	BLOCKER	INV-053	independent-discovery	[BLOCKER LoF] Prevent liquidation on an omitted rescue mark
 223	LoF	PRIVILEGED	INV-036	independent-discovery	[PRIVILEGED LoF] Require matcher consent for CPI backing fees
 224	LoF	BLOCKER	INV-036	independent-discovery	[BLOCKER LoF] Prevent CPI caller-fee LP siphon
 225	LoF	BLOCKER	INV-045	independent-discovery	[BLOCKER LoF] Keep EWMA movement fees non-reclaimable
@@ -131,7 +131,7 @@
 363	LoF	BLOCKER	INV-063	missing	[BLOCKER LoF] Observe backing expiry before PnL conversion
 364	DoS	BLOCKER	INV-028	missing	[BLOCKER DoS] Release flat source liens before PnL conversion
 365	LoF	BLOCKER	INV-038	independent-discovery	[BLOCKER LoF] Carry fractional oracle caps across max-dt cranks
-366	LoF	BLOCKER	INV-053	direct-regression	[BLOCKER LoF] Gate liquidation on pending later-leg accrual
+366	LoF	BLOCKER	INV-053	independent-discovery	[BLOCKER LoF] Gate liquidation on pending later-leg accrual
 367	LoF	BLOCKER	INV-063	direct-regression	[BLOCKER LoF] Reject post-expiry backing liens
 368	DoS	BLOCKER	INV-045	missing	[BLOCKER DoS] Prevent expired partial recovery from locking market
 369	LoF	BLOCKER	INV-045	independent-discovery	[BLOCKER LoF] Require bilateral fee support for EWMA movement

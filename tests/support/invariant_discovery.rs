@@ -765,6 +765,29 @@ pub struct CrossDomainBDiscovery {
     pub full_withdraw_rejected: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FullRefreshDiscovery {
+    pub omitted_position_before_q: u128,
+    pub omitted_position_after_q: u128,
+    pub omitted_liq_deficit: u128,
+    pub omitted_insurance_delta: u128,
+    pub complete_position_before_q: u128,
+    pub complete_position_after_q: u128,
+    pub complete_liq_deficit: u128,
+    pub complete_insurance_delta: u128,
+}
+
+impl FullRefreshDiscovery {
+    pub fn is_violation(&self) -> bool {
+        self.omitted_liq_deficit != 0
+            && self.omitted_position_after_q < self.omitted_position_before_q
+            && self.omitted_insurance_delta != 0
+            && self.complete_position_before_q == self.complete_position_after_q
+            && self.complete_liq_deficit == 0
+            && self.complete_insurance_delta == 0
+    }
+}
+
 impl CrossDomainBDiscovery {
     pub fn is_violation(&self) -> bool {
         self.b_target_num != 0
@@ -6220,6 +6243,164 @@ fn crank_asset_progress(
         ));
     }
     Ok(())
+}
+
+fn build_full_refresh_discovery_world(seed: [u8; 32]) -> Result<(V16Svm, u128, u128), String> {
+    const ADVERSE_PRICE: u64 = 1_000_000;
+    const ADVERSE_TARGET: u64 = 997_600;
+    const RESCUE_PRICE: u64 = 100;
+    const RESCUE_MARK: u64 = 99;
+    const ADVERSE_SIZE_Q: i128 = 50 * POS_SCALE as i128;
+    const RESCUE_SIZE_Q: i128 = 100_000 * POS_SCALE as i128;
+
+    let mut env = V16Svm::new(
+        seed,
+        MarketConfig {
+            h_max: 6_480_000,
+            min_nonzero_mm_req: 599,
+            min_nonzero_im_req: 600,
+            maintenance_margin_bps: 500,
+            initial_margin_bps: 500,
+            liquidation_fee_bps: 5,
+            liquidation_fee_cap: percolator::MAX_PROTOCOL_FEE_ABS,
+            max_price_move_bps_per_slot: 24,
+            max_accrual_dt_slots: 1,
+            max_abs_funding_e9_per_slot: 10_000,
+            min_funding_lifetime_slots: 1,
+            actor_deposits: [
+                3_115_000,
+                50_000_000,
+                USER_DEPOSIT,
+                USER_DEPOSIT,
+                EXIT_MAKER_DEPOSIT,
+            ],
+            ..MarketConfig::default()
+        },
+    );
+    env.configure_auth_mark(false, 0, 1, RESCUE_PRICE)
+        .map_err(|error| format!("configure rescue mark: {error}"))?;
+    env.configure_auth_mark(false, 1, 1, ADVERSE_PRICE)
+        .map_err(|error| format!("configure adverse mark: {error}"))?;
+    env.top_up_backing_bucket(1, 200_000, 10)
+        .map_err(|error| format!("top up rescue backing: {error}"))?;
+    env.trade_no_cpi(0, 1, 1, ADVERSE_SIZE_Q, ADVERSE_PRICE, 0)
+        .map_err(|error| format!("open adverse first leg: {error}"))?;
+    env.trade_no_cpi(0, 1, 0, RESCUE_SIZE_Q, RESCUE_PRICE, 0)
+        .map_err(|error| format!("open rescue later leg: {error}"))?;
+
+    let opened = env.primary_portfolio(0);
+    let active_assets = opened
+        .legs
+        .iter()
+        .filter_map(|leg| leg.try_to_runtime().ok())
+        .filter(|leg| leg.active)
+        .map(|leg| leg.asset_index)
+        .collect::<Vec<_>>();
+    if active_assets != [1, 0] {
+        return Err(format!(
+            "full-refresh fixture lost first/later leg ordering: {active_assets:?}"
+        ));
+    }
+    let position_before_q = discovery_position(&opened, 1)?.unsigned_abs();
+
+    env.warp_to_slot(2);
+    env.push_auth_mark(0, 2, RESCUE_MARK)
+        .map_err(|error| format!("stage rounded rescue mark: {error}"))?;
+    crank_asset_progress(&mut env, 2, 2, 0, 4)?;
+    let primed = env.primary_market_state().1;
+    if primed.assets[0].effective_price != RESCUE_PRICE
+        || primed.assets[0].slot_last != 2
+        || primed.assets[0].f_long_num != 0
+    {
+        return Err("rescue leg did not reach the rounded zero-funding state".into());
+    }
+
+    env.warp_to_slot(3);
+    env.push_auth_mark(1, 3, ADVERSE_TARGET)
+        .map_err(|error| format!("stage adverse mark: {error}"))?;
+    crank_asset_progress(&mut env, 2, 3, 1, 4)?;
+    let stale_group = env.primary_market_state().1;
+    if stale_group.assets[0].effective_price != RESCUE_PRICE || stale_group.assets[0].slot_last != 2
+    {
+        return Err("adverse prefix consumed the later rescue observation".into());
+    }
+    Ok((env, position_before_q, stale_group.insurance))
+}
+
+pub fn discover_full_refresh_omission_violation(
+    mut seed: [u8; 32],
+) -> Result<FullRefreshDiscovery, String> {
+    seed[0] ^= 0x22;
+    let (mut omitted, _, omitted_insurance_before) = build_full_refresh_discovery_world(seed)?;
+    omitted
+        .crank(0, 3, Vec::new())
+        .map_err(|error| format!("omitted-observation refresh: {error}"))?;
+    let omitted_account = omitted.primary_portfolio(0);
+    let omitted_cert = omitted_account
+        .health_cert
+        .try_to_runtime()
+        .map_err(|error| format!("decode omitted certificate: {error:?}"))?;
+    let omitted_position_before_q = discovery_position(&omitted_account, 1)?.unsigned_abs();
+    omitted
+        .crank(0, 3, Vec::new())
+        .map_err(|error| format!("omitted-observation liquidation: {error}"))?;
+    let omitted_position_after_q =
+        discovery_position(&omitted.primary_portfolio(0), 1)?.unsigned_abs();
+    let omitted_insurance_delta = omitted
+        .primary_market_state()
+        .1
+        .insurance
+        .checked_sub(omitted_insurance_before)
+        .ok_or_else(|| "omitted path decreased insurance".to_string())?;
+
+    let (mut complete, complete_position_before_q, complete_insurance_before) =
+        build_full_refresh_discovery_world(seed)?;
+    let rescue_oracle_accounts = complete.primary_profile(0).oracle_leg_count;
+    complete
+        .crank(
+            2,
+            3,
+            vec![CrankObservationHint {
+                asset_index: 0,
+                oracle_accounts: rescue_oracle_accounts,
+            }],
+        )
+        .map_err(|error| format!("complete-world rescue observation: {error}"))?;
+    if complete.primary_market_state().1.assets[0].f_long_num == 0 {
+        return Err("complete-world rescue observation booked no funding".into());
+    }
+    complete
+        .crank(1, 3, Vec::new())
+        .map_err(|error| format!("complete-world counterparty refresh: {error}"))?;
+    complete
+        .crank(0, 3, Vec::new())
+        .map_err(|error| format!("complete-world user refresh: {error}"))?;
+    let complete_account = complete.primary_portfolio(0);
+    let complete_position_after_q = discovery_position(&complete_account, 1)?.unsigned_abs();
+    let complete_cert = complete_account
+        .health_cert
+        .try_to_runtime()
+        .map_err(|error| format!("decode complete certificate: {error:?}"))?;
+    let complete_insurance_delta = complete
+        .primary_market_state()
+        .1
+        .insurance
+        .checked_sub(complete_insurance_before)
+        .ok_or_else(|| "complete path decreased insurance".to_string())?;
+
+    if complete_position_before_q != omitted_position_before_q {
+        return Err("paired full-refresh fixtures opened different positions".into());
+    }
+    Ok(FullRefreshDiscovery {
+        omitted_position_before_q,
+        omitted_position_after_q,
+        omitted_liq_deficit: omitted_cert.certified_liq_deficit,
+        omitted_insurance_delta,
+        complete_position_before_q,
+        complete_position_after_q,
+        complete_liq_deficit: complete_cert.certified_liq_deficit,
+        complete_insurance_delta,
+    })
 }
 
 pub fn discover_cross_domain_b_violation(
