@@ -2,7 +2,7 @@
 //!
 //! Normative obligation: Every successful crank strictly decreases a finite liveness rank or enters a lower terminal mode.
 //!
-//! Evidence in this file (I/C plus invariant-specific M assertions): `v16_program_bankruptcy_escalation_matrix_discovers_funded_survivor_lock`, `v16_program_micro_price_schedule_matrix_discovers_clock_consuming_noop_cranks`, `v16_attack_resolved_permissionless_crank_survives_drained_owner_system_account`, `v16_attack_stale_liquidation_budget_observation_crank_progresses_without_reward_or_value`, `v16_attack_auto_crank_prioritizes_b_stale_over_liquidation_reward_tail`, `v16_attack_auto_crank_reaches_later_material_liquidation_past_tiny_first_leg`. These tests exercise the deployed public
+//! Evidence in this file (I/C plus invariant-specific M assertions): `v16_program_b_budget_prerequisite_matrix_hits_resolved_adl_lock`, `v16_program_bankruptcy_escalation_matrix_discovers_funded_survivor_lock`, `v16_program_micro_price_schedule_matrix_discovers_clock_consuming_noop_cranks`, `v16_attack_resolved_permissionless_crank_survives_drained_owner_system_account`, `v16_attack_stale_liquidation_budget_observation_crank_progresses_without_reward_or_value`, `v16_attack_auto_crank_prioritizes_b_stale_over_liquidation_reward_tail`, `v16_attack_auto_crank_reaches_later_material_liquidation_past_tiny_first_leg`. These tests exercise the deployed public
 //! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
 //! rollback, liveness, or compute outcomes appropriate to the invariant.
 //!
@@ -11,6 +11,174 @@
 //! plus every additional verification method required by the charter.
 
 use super::*;
+
+#[test]
+fn v16_program_b_budget_prerequisite_matrix_hits_resolved_adl_lock() {
+    const SCALE: u64 = 100_000_000;
+    const INITIAL_PRICE: u64 = 10_000 * SCALE;
+
+    let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+        initial_price: INITIAL_PRICE,
+        min_nonzero_mm_req: 1,
+        min_nonzero_im_req: 2,
+        maintenance_margin_bps: 250,
+        initial_margin_bps: 500,
+        max_trading_fee_bps: 10,
+        liquidation_fee_bps: 0,
+        liquidation_fee_cap: 0,
+        max_price_move_bps_per_slot: 100,
+        max_accrual_dt_slots: 1,
+        public_b_chunk_atoms: percolator::MAX_VAULT_TVL,
+        ..V16CuMarketParams::default()
+    });
+    env.configure_auth_mark_with_cu(0, INITIAL_PRICE);
+    let owners = [Keypair::new(), Keypair::new(), Keypair::new()];
+    let accounts = [
+        env.create_portfolio(&owners[0]),
+        env.create_portfolio(&owners[1]),
+        env.create_portfolio(&owners[2]),
+    ];
+    for index in 0..accounts.len() {
+        env.deposit(&owners[index], accounts[index], 20_000 * u128::from(SCALE));
+    }
+    let crank_at = |env: &mut V16CuEnv, portfolio: Pubkey, slot: u64| {
+        env.svm.expire_blockhash();
+        env.send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: slot,
+                observations: crank_observations(0),
+            },
+            vec![
+                AccountMeta::new(env.payer.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(portfolio, false),
+            ],
+            &[],
+        )
+        .expect("public crank in B-budget setup")
+    };
+
+    env.svm.warp_to_slot(1);
+    env.push_auth_mark_with_cu(1, 9_976 * SCALE);
+    crank_at(&mut env, accounts[2], 1);
+    env.trade_asset_with_cu(
+        0,
+        &owners[0],
+        accounts[0],
+        &owners[1],
+        accounts[1],
+        -(29 * POS_SCALE as i128),
+        9_976 * SCALE,
+        3,
+    );
+    env.rebalance_reduce_with_cu(&owners[0], accounts[0], 0, 25 * POS_SCALE);
+    env.trade_asset_with_cu(
+        0,
+        &owners[2],
+        accounts[2],
+        &owners[0],
+        accounts[0],
+        32 * POS_SCALE as i128,
+        9_976 * SCALE,
+        0,
+    );
+    env.trade_asset_with_cu(
+        0,
+        &owners[0],
+        accounts[0],
+        &owners[1],
+        accounts[1],
+        POS_SCALE as i128,
+        9_976 * SCALE,
+        0,
+    );
+    env.trade_asset_with_cu(
+        0,
+        &owners[0],
+        accounts[0],
+        &owners[1],
+        accounts[1],
+        13 * POS_SCALE as i128,
+        9_976 * SCALE,
+        7,
+    );
+    crank_at(&mut env, accounts[0], 1);
+
+    env.svm.warp_to_slot(2);
+    env.push_auth_mark_with_cu(2, 9_931 * SCALE);
+    crank_at(&mut env, accounts[2], 2);
+    env.trade_asset_with_cu(
+        0,
+        &owners[0],
+        accounts[0],
+        &owners[1],
+        accounts[1],
+        POS_SCALE as i128,
+        9_931 * SCALE,
+        0,
+    );
+
+    env.svm.warp_to_slot(3);
+    env.push_auth_mark_with_cu(3, 9_860 * SCALE);
+    crank_at(&mut env, accounts[0], 3);
+    env.trade_asset_with_cu(
+        0,
+        &owners[0],
+        accounts[0],
+        &owners[1],
+        accounts[1],
+        POS_SCALE as i128,
+        9_860 * SCALE,
+        0,
+    );
+
+    env.svm.warp_to_slot(4);
+    env.push_auth_mark_with_cu(4, 9_801 * SCALE);
+    crank_at(&mut env, accounts[2], 4);
+    env.trade_asset_with_cu(
+        0,
+        &owners[0],
+        accounts[0],
+        &owners[1],
+        accounts[1],
+        POS_SCALE as i128,
+        9_801 * SCALE,
+        0,
+    );
+
+    env.resolve();
+    let dest = env.token_account(owners[2].pubkey(), 0);
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let portfolio_before = env.svm.get_account(&accounts[2]).unwrap();
+    let dest_before = env.svm.get_account(&dest).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    env.svm.expire_blockhash();
+    let prerequisite = env.send(
+        ProgInstruction::CloseResolved {
+            fee_rate_per_slot: 0,
+        },
+        vec![
+            AccountMeta::new_readonly(owners[2].pubkey(), false),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(accounts[2], false),
+            AccountMeta::new(dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[],
+    );
+    assert!(
+        prerequisite.is_err(),
+        "the PR216 prerequisite unexpectedly landed on the pinned engine"
+    );
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+    assert_eq!(env.svm.get_account(&accounts[2]).unwrap(), portfolio_before);
+    assert_eq!(env.svm.get_account(&dest).unwrap(), dest_before);
+    assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+    let blocked = env.portfolio_state(accounts[2]);
+    assert!(blocked.capital.get() != 0 || blocked.pnl.get() != 0);
+}
 
 #[test]
 fn v16_program_bankruptcy_escalation_matrix_discovers_funded_survivor_lock() {
