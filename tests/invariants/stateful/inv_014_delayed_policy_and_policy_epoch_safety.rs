@@ -1,0 +1,171 @@
+//! INV-014 - Delayed-policy and policy-epoch safety.
+//!
+//! Normative obligation: Delayed requests remain bounded by the policy and economics the signer authorized.
+//!
+//! Evidence in this file (F over public I routes): `v16_program_pr325_maintenance_policy_generation_replay_fuzz`, `v16_program_pr326_liquidation_policy_generation_replay_fuzz`, `v16_program_pr337_delayed_maintenance_policy_replay_fuzz`, `v16_program_pr336_delayed_liquidation_policy_replay_fuzz`, `v16_program_pr338_delayed_trade_fee_policy_replay_fuzz`, `v16_program_pr340_delayed_fee_redirect_policy_replay_fuzz`, `v16_program_pr349_delayed_backing_fee_policy_replay_fuzz`, `v16_program_pr339_backing_fee_consent_replay_fuzz`, `v16_program_pr347_delayed_resolve_policy_replay_fuzz`, `v16_program_pr335_delayed_oracle_intent_replay_fuzz`, `v16_program_pr334_delayed_matcher_enable_replay_fuzz`. These tests exercise the deployed public
+//! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
+//! rollback, liveness, or compute outcomes appropriate to the invariant.
+//!
+//! Guarantee boundary: a quarantined counterexample demonstrates public reachability; it does
+//! not certify the invariant on an unfixed pin. Certification requires the fixed-pin assertion
+//! plus every additional verification method required by the charter.
+
+use super::*;
+
+proptest! {
+    #![proptest_config(ProptestConfig {
+        cases: env_usize("PERCOLATOR_FUZZ_CASES", 8) as u32,
+        max_shrink_iters: env_usize("PERCOLATOR_FUZZ_SHRINK_ITERS", 64) as u32,
+        failure_persistence: Some(Box::new(
+            proptest::test_runner::FileFailurePersistence::Direct(
+                "proptest-regressions/v16_program_stateful_fuzz.txt",
+            ),
+        )),
+        ..ProptestConfig::default()
+    })]
+
+    #[test]
+    fn v16_program_pr325_maintenance_policy_generation_replay_fuzz(
+        seed in maintenance_policy_generation_replay_seed_strategy()
+    ) {
+        let result = reproduce_maintenance_policy_generation_replay(seed);
+        prop_assert!(
+            result.is_ok(),
+            "PR 325 no longer reproduces for seed {:?}: {}",
+            seed,
+            result.unwrap_err()
+        );
+    }
+
+    #[test]
+    fn v16_program_pr326_liquidation_policy_generation_replay_fuzz(
+        seed in liquidation_policy_generation_replay_seed_strategy()
+    ) {
+        let result = reproduce_liquidation_policy_generation_replay(seed);
+        prop_assert!(
+            result.is_ok(),
+            "PR 326 no longer reproduces for seed {:?}: {}",
+            seed,
+            result.unwrap_err()
+        );
+    }
+
+    #[test]
+    fn v16_program_pr337_delayed_maintenance_policy_replay_fuzz(
+        seed in delayed_maintenance_policy_replay_seed_strategy()
+    ) {
+        let result = reproduce_delayed_maintenance_policy_replay(seed);
+        prop_assert!(
+            result.is_ok(),
+            "PR 337 no longer reproduces for seed {:?}: {}",
+            seed,
+            result.unwrap_err()
+        );
+    }
+
+    #[test]
+    fn v16_program_pr336_delayed_liquidation_policy_replay_fuzz(
+        seed in delayed_liquidation_policy_replay_seed_strategy()
+    ) {
+        let result = reproduce_delayed_liquidation_policy_replay(seed);
+        prop_assert!(
+            result.is_ok(),
+            "PR 336 no longer reproduces for seed {:?}: {}",
+            seed,
+            result.unwrap_err()
+        );
+    }
+
+    #[test]
+    fn v16_program_pr338_delayed_trade_fee_policy_replay_fuzz(
+        seed in delayed_trade_fee_policy_replay_seed_strategy()
+    ) {
+        let result = reproduce_delayed_trade_fee_policy_replay(seed);
+        prop_assert!(
+            result.is_ok(),
+            "PR 338 no longer reproduces for seed {:?}: {}",
+            seed,
+            result.unwrap_err()
+        );
+    }
+
+    #[test]
+    fn v16_program_pr340_delayed_fee_redirect_policy_replay_fuzz(
+        seed in delayed_fee_redirect_policy_replay_seed_strategy()
+    ) {
+        let result = reproduce_delayed_fee_redirect_policy_replay(seed);
+        prop_assert!(
+            result.is_ok(),
+            "PR 340 no longer reproduces for seed {:?}: {}",
+            seed,
+            result.unwrap_err()
+        );
+    }
+
+    #[test]
+    fn v16_program_pr349_delayed_backing_fee_policy_replay_fuzz(
+        seed in delayed_backing_fee_policy_replay_seed_strategy()
+    ) {
+        let result = reproduce_delayed_backing_fee_policy_replay(seed);
+        prop_assert!(
+            result.is_ok(),
+            "PR 349 no longer reproduces for seed {:?}: {}",
+            seed,
+            result.unwrap_err()
+        );
+    }
+
+    #[test]
+    fn v16_program_pr339_backing_fee_consent_replay_fuzz(
+        (seed, order) in backing_fee_consent_replay_strategy()
+    ) {
+        let result = reproduce_backing_fee_consent_replay(seed, order);
+        prop_assert!(
+            result.is_ok(),
+            "PR 339 {:?} no longer reproduces for seed {:?}: {}",
+            order,
+            seed,
+            result.unwrap_err()
+        );
+    }
+
+    #[test]
+    fn v16_program_pr347_delayed_resolve_policy_replay_fuzz(
+        seed in delayed_resolve_policy_replay_seed_strategy()
+    ) {
+        let result = reproduce_delayed_resolve_policy_replay(seed);
+        prop_assert!(
+            result.is_ok(),
+            "PR 347 no longer reproduces for seed {:?}: {}",
+            seed,
+            result.unwrap_err()
+        );
+    }
+
+    #[test]
+    fn v16_program_pr335_delayed_oracle_intent_replay_fuzz(
+        (seed, path) in delayed_oracle_intent_replay_strategy()
+    ) {
+        let result = reproduce_delayed_oracle_intent_replay(seed, path);
+        prop_assert!(
+            result.is_ok(),
+            "PR 335 {:?} no longer reproduces for seed {:?}: {}",
+            path,
+            seed,
+            result.unwrap_err()
+        );
+    }
+
+    #[test]
+    fn v16_program_pr334_delayed_matcher_enable_replay_fuzz(
+        seed in delayed_matcher_enable_replay_seed_strategy()
+    ) {
+        let result = reproduce_delayed_matcher_enable_replay(seed);
+        prop_assert!(
+            result.is_ok(),
+            "PR 334 no longer reproduces for seed {:?}: {}",
+            seed,
+            result.unwrap_err()
+        );
+    }
+}

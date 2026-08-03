@@ -1,0 +1,36 @@
+//! INV-081 - Success-state validity over complete public routes.
+//!
+//! Normative obligation: Every successful wrapper-plus-engine route preserves global invariants and authorized deltas.
+//!
+//! Evidence in this file (F over public I routes): `v16_program_stateful_public_interface_fuzz`. These tests exercise the deployed public
+//! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
+//! rollback, liveness, or compute outcomes appropriate to the invariant.
+//!
+//! Guarantee boundary: a quarantined counterexample demonstrates public reachability; it does
+//! not certify the invariant on an unfixed pin. Certification requires the fixed-pin assertion
+//! plus every additional verification method required by the charter.
+
+use super::*;
+
+proptest! {
+    #![proptest_config(ProptestConfig {
+        cases: env_usize("PERCOLATOR_FUZZ_CASES", 8) as u32,
+        max_shrink_iters: env_usize("PERCOLATOR_FUZZ_SHRINK_ITERS", 64) as u32,
+        failure_persistence: Some(Box::new(
+            proptest::test_runner::FileFailurePersistence::Direct(
+                "proptest-regressions/v16_program_stateful_fuzz.txt",
+            ),
+        )),
+        ..ProptestConfig::default()
+    })]
+
+    #[test]
+    fn v16_program_stateful_public_interface_fuzz(
+        scenario in scenario_strategy(env_usize("PERCOLATOR_FUZZ_ACTIONS", 12))
+    ) {
+        let serialized = serde_json::to_string_pretty(&scenario).unwrap();
+        let result = run_scenario(&scenario);
+        prop_assert!(result.is_ok(), "stateful public-interface scenario failed: {}\n{}",
+            result.unwrap_err(), serialized);
+    }
+}

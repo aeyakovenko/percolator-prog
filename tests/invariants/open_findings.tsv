@@ -1,0 +1,149 @@
+# Open public-route security finding benchmark
+# Snapshot: 2026-08-03 UTC; source: GitHub open PR titles
+# Evidence is PR135 evidence, not the PR author claim or fix status.
+# pr	kind	severity	primary_invariant	evidence	title
+190	DoS	BLOCKER	INV-073	missing	[BLOCKER DoS] Commit recovery-required auto-crank progress
+202	DoS	REAL	INV-073	missing	[REAL DoS] Keep partially ADL-reduced users exit-live
+203	DoS	BLOCKER	INV-073	missing	[BLOCKER DoS] Force-close abandoned ADL Recovery residues
+204	DoS	REAL	INV-063	missing	[REAL DoS] Unstick Live auto-crank after source-backing expiry
+212	DoS	BLOCKER	INV-077	missing	[BLOCKER DoS] Prove bounded max-source account progress
+213	DoS	REAL	INV-028	missing	[REAL DoS] Unwind live source liens after mark reversal
+214	DoS	BLOCKER	INV-028	missing	[BLOCKER DoS] Reconcile expired source liens
+216	DoS	BLOCKER	INV-061	missing	[BLOCKER DoS] Allow ADL winners to close after resolution
+217	DoS	BLOCKER	INV-073	missing	[BLOCKER DoS] Keep social-loss dust from blocking owner exit
+218	DoS	BLOCKER	INV-061	missing	[BLOCKER DoS] Keep reset carry from blocking liquidation
+219	DoS	BLOCKER	INV-073	missing	[BLOCKER DoS] Reset both zero-OI sides to preserve exit
+220	LoF	BLOCKER	INV-053	direct-regression	[BLOCKER LoF] Prevent liquidation on an omitted rescue mark
+223	LoF	PRIVILEGED	INV-036	direct-regression	[PRIVILEGED LoF] Require matcher consent for CPI backing fees
+224	LoF	BLOCKER	INV-036	direct-regression	[BLOCKER LoF] Prevent CPI caller-fee LP siphon
+225	LoF	BLOCKER	INV-045	direct-regression	[BLOCKER LoF] Keep EWMA movement fees non-reclaimable
+228	DoS	HARDENING	INV-073	missing	[HARDENING DoS] Unstick fragmented recovery force-close
+229	DoS	BLOCKER	INV-074	missing	[BLOCKER DoS] Scope bankruptcy locks to affected assets
+231	LoF	BLOCKER	INV-002	direct-regression	[BLOCKER LoF] Prevent signed intent replay across market generations
+236	DoS	HARDENING	INV-073	missing	[HARDENING DoS] Prevent permissionless asset from forcing global recovery
+237	LoF	PRIVILEGED	INV-027	missing	[PRIVILEGED LoF] Lock live insurance while users remain exposed
+246	DoS	BLOCKER	INV-071	missing	[BLOCKER DoS] Prevent permissionless micro-price crank pinning
+250	LoF	REAL	INV-061	missing	[REAL LoF] Prove ADL split-transfer backing drain is closed
+251	LoF	BLOCKER	INV-005	direct-regression	[BLOCKER LoF] Prevent delayed asset-authority revival
+252	DoS	BLOCKER	INV-073	missing	[BLOCKER DoS] Restore terminal exit after partial Recovery forfeit (#236)
+253	LoF	BLOCKER	INV-038	direct-regression	[BLOCKER LoF] Preserve rounded premium funding on auto-crank
+254	LoF	PRIVILEGED	INV-045	missing	[PRIVILEGED LoF] Accrue committed funding before asset shutdown
+255	LoF	BLOCKER	INV-039	direct-regression	[BLOCKER LoF] Require committed accrual before market resolve
+256	LoF	HARDENING	INV-014	missing	[HARDENING LoF] Prevent live fee hikes from taxing user capital
+257	DoS	HARDENING	INV-073	missing	[HARDENING DoS] Keep funded Recovery deadlines monotonic
+258	LoF	PRIVILEGED	INV-061	missing	[PRIVILEGED LoF] Freeze funded hard-stale deadlines
+259	LoF	PRIVILEGED	INV-014	missing	[PRIVILEGED LoF] Bind direct trades to backing-fee consent
+260	LoF	BLOCKER	INV-045	direct-regression	[BLOCKER LoF] Prevent pending EWMA PnL inheritance
+261	DoS	HARDENING	INV-020	missing	[HARDENING DoS] Reject expired Hybrid terminal snapshots
+262	LoF	REAL	INV-045	missing	[REAL LoF] Commit authenticated marks before terminal resolve
+263	LoF	REAL	INV-045	missing	[REAL LoF] Settle adverse marks before unilateral reduction
+264	LoF	BLOCKER	INV-045	direct-regression	[BLOCKER LoF] Bind AuthMark targets before exposure migration
+265	LoF	BLOCKER	INV-045	direct-regression	[BLOCKER LoF] Publish EWMA oracle targets before exposure changes
+266	DoS	BLOCKER	INV-073	missing	[BLOCKER DoS] Keep exact-OI ADL survivors exit-live
+267	LoF	BLOCKER	INV-031	direct-regression	[BLOCKER LoF] Keep source backing domain-local
+268	DoS	BLOCKER	INV-073	missing	[BLOCKER DoS] Keep unilateral exact-OI ADL survivors exit-live
+269	DoS	BLOCKER	INV-077	missing	[BLOCKER DoS] Keep max-shape zero-delta stale resolution live
+270	DoS	BLOCKER	INV-028	missing	[BLOCKER DoS] Keep source-heavy portfolios settlement-live
+271	LoF	BLOCKER	INV-039	direct-regression	[BLOCKER LoF] Settle zero-move funding before trades
+272	LoF	BLOCKER	INV-039	direct-regression	[BLOCKER LoF] Settle zero-move funding before unilateral reduction
+273	LoF	BLOCKER	INV-039	direct-regression	[BLOCKER LoF] Accrue zero-move funding before recovery-leg forfeit
+274	LoF	HARDENING	INV-003	direct-regression	[HARDENING LoF] Bind matcher grants to portfolio incarnations
+275	LoF	BLOCKER	INV-002	direct-regression	[BLOCKER LoF] Bind signed mark pushes to asset generations
+276	LoF	HARDENING	INV-003	direct-regression	[HARDENING LoF] Bind signed trades to portfolio incarnations
+277	LoF	BLOCKER	INV-002	direct-regression	[BLOCKER LoF] Bind oracle configuration to asset generations
+278	LoF	HARDENING	INV-003	direct-regression	[HARDENING LoF] Bind recovery forfeits to portfolio incarnations
+279	LoF	BLOCKER	INV-002	direct-regression	[BLOCKER LoF] Bind collateral top-ups to asset generations
+280	LoF	BLOCKER	INV-045	direct-regression	[BLOCKER LoF] Stop trade-driven mark movers farming liquidation rewards
+281	LoF	BLOCKER	INV-035	direct-regression	[BLOCKER LoF] Keep B settlement source-domain local
+282	LoF	BLOCKER	INV-045	direct-regression	[BLOCKER LoF] Price pending EWMA overrides at target notional
+283	LoF	BLOCKER	INV-067	direct-regression	[BLOCKER LoF] Prevent dust backing from erasing terminal payouts
+284	LoF	BLOCKER	INV-036	missing	[BLOCKER LoF] Route negative batch fees to the correct insurance side
+285	LoF	HARDENING	INV-003	direct-regression	[HARDENING LoF] Bind retained portfolio authority to incarnation
+286	LoF	BLOCKER	INV-063	missing	[BLOCKER LoF] Preserve payouts after post-snapshot backing expiry
+287	LoF	BLOCKER	INV-067	missing	[BLOCKER LoF] Preserve funded shutdown reclaim windows
+288	DoS	BLOCKER	INV-067	missing	[BLOCKER DoS] Keep claimant Recovery deadlines monotonic
+290	LoF	BLOCKER	INV-034	direct-regression	[BLOCKER LoF] Reject cross-domain bankruptcy insurance drain
+291	DoS	REAL	INV-063	missing	[REAL DoS] Pin lapsed backing settlement fix
+292	LoF	HARDENING	INV-003	missing	[HARDENING LoF] Bind rebalance reductions to portfolio incarnations
+293	LoF	HARDENING	INV-001	missing	[HARDENING LoF] Bind RebalanceReduce to market generations
+294	LoF	HARDENING	INV-001	direct-regression	[HARDENING LoF] Bind matcher grants to market generations
+295	LoF	HARDENING	INV-001	direct-regression	[HARDENING LoF] Bind recovery forfeits to market generations
+296	LoF	BLOCKER	INV-001	direct-regression	[BLOCKER LoF] Bind trade-fee policy to market generations
+297	DoS	BLOCKER	INV-071	missing	[BLOCKER DoS] Prove prospective K/F source expiry progress
+298	DoS	BLOCKER	INV-071	missing	[BLOCKER DoS] Expire prospective loss backing before resolved settlement
+299	LoF	HARDENING	INV-003	direct-regression	[HARDENING LoF] Bind withdrawals to portfolio incarnations
+300	DoS	BLOCKER	INV-028	missing	[BLOCKER DoS] Prevent foreign expiry from stranding resolved source liens
+301	LoF	HARDENING	INV-003	direct-regression	[HARDENING LoF] Bind PnL conversion to portfolio incarnations
+302	DoS	BLOCKER	INV-030	missing	[BLOCKER DoS] Route prospective loss after source impairment
+303	LoF	HARDENING	INV-003	direct-regression	[HARDENING LoF] Bind trades to portfolio incarnations
+304	LoF	HARDENING	INV-003	direct-regression	[HARDENING LoF] Bind matcher grants to portfolio incarnations
+305	LoF	HARDENING	INV-003	direct-regression	[HARDENING LoF] Bind deposits to portfolio incarnations
+306	DoS	BLOCKER	INV-034	missing	[BLOCKER DoS] Prove cross-domain source rounding progress
+307	LoF	HARDENING	INV-001	direct-regression	[HARDENING LoF] Bind deposits to market generations
+308	DoS	BLOCKER	INV-071	missing	[BLOCKER DoS] Settle B by collateral-atom budget
+309	LoF	HARDENING	INV-003	direct-regression	[HARDENING LoF] Bind portfolio close to its incarnation
+310	LoF	PRIVILEGED	INV-036	direct-regression	[PRIVILEGED LoF] Bind bilateral trades to live base-fee consent
+311	LoF	BLOCKER	INV-002	direct-regression	[BLOCKER LoF] Bind market resolution to asset generations
+312	LoF	BLOCKER	INV-002	missing	[BLOCKER LoF] Bind resolve policy to asset generations
+313	LoF	PRIVILEGED	INV-014	missing	[PRIVILEGED LoF] Require LP consent for CPI base fees
+314	LoF	BLOCKER	INV-036	direct-regression	[BLOCKER LoF] Bind permissionless activation fees to creator consent
+315	LoF	BLOCKER	INV-001	direct-regression	[BLOCKER LoF] Bind asset shutdown to market generations
+316	LoF	HARDENING	INV-004	missing	[HARDENING LoF] Bind rebalance consent to position episodes
+317	LoF	BLOCKER	INV-001	direct-regression	[BLOCKER LoF] Bind fee redirects to market generations
+318	LoF	BLOCKER	INV-002	direct-regression	[BLOCKER LoF] Bind backing fees to asset generations
+320	LoF	BLOCKER	INV-002	direct-regression	[BLOCKER LoF] Bind insurance top-ups to asset generations
+321	LoF	BLOCKER	INV-002	direct-regression	[BLOCKER LoF] Bind backing top-ups to asset generations
+322	LoF	BLOCKER	INV-002	direct-regression	[BLOCKER LoF] Bind oracle updates to asset generations
+323	DoS	BLOCKER	INV-001	missing	[BLOCKER DoS] Bind market resolution to its generation
+324	DoS	BLOCKER	INV-001	missing	[BLOCKER DoS] Bind stale resolution policy to market generation
+325	LoF	BLOCKER	INV-014	direct-regression	[BLOCKER LoF] Bind maintenance fee policy to market generation
+326	LoF	BLOCKER	INV-014	direct-regression	[BLOCKER LoF] Bind liquidation fee policy to market generation
+328	LoF	BLOCKER	INV-002	direct-regression	[BLOCKER LoF] Bind insurance withdrawals to asset generations
+329	LoF	BLOCKER	INV-038	direct-regression	[BLOCKER LoF] Round composite oracle prices once
+330	LoF	BLOCKER	INV-067	missing	[BLOCKER LoF] Recover terminal bankruptcy double charge
+331	LoF	BLOCKER	INV-020	direct-regression	[BLOCKER LoF] Reject temporally skewed composite oracle reports
+332	LoF	BLOCKER	INV-045	direct-regression	[BLOCKER LoF] Stage authenticated mark targets before CPI fills
+333	LoF	BLOCKER	INV-045	direct-regression	[BLOCKER LoF] Stage trade-driven mark targets before later fills
+334	LoF	BLOCKER	INV-014	direct-regression	[BLOCKER LoF] Sequence-bind matcher config intents
+335	LoF	BLOCKER	INV-014	direct-regression	[BLOCKER LoF] Reject delayed authenticated mark intents
+336	LoF	BLOCKER	INV-014	direct-regression	[BLOCKER LoF] Reject delayed liquidation-fee policy replay
+337	LoF	BLOCKER	INV-014	direct-regression	[BLOCKER LoF] Reject delayed maintenance-fee policy replay
+338	LoF	BLOCKER	INV-014	direct-regression	[BLOCKER LoF] Reject delayed trade-fee policy replay
+339	LoF	BLOCKER	INV-014	direct-regression	[BLOCKER LoF] Bind backing top-ups to provider-approved fee terms
+340	LoF	BLOCKER	INV-014	direct-regression	[BLOCKER LoF] Reject delayed fee-redirect policy replay
+343	LoF	BLOCKER	INV-008	direct-regression	[BLOCKER LoF] Make trade intents one-shot across retry variants
+344	LoF	BLOCKER	INV-008	direct-regression	[BLOCKER LoF] Make insurance top-ups one-shot across retry variants
+345	LoF	BLOCKER	INV-005	direct-regression	[BLOCKER LoF] Prevent market-authority handoff ABA replay
+346	LoF	BLOCKER	INV-005	direct-regression	[BLOCKER LoF] Make asset-authority handoffs one-shot
+347	LoF	BLOCKER	INV-014	direct-regression	[BLOCKER LoF] Reject delayed stale-resolution policy replay
+349	LoF	BLOCKER	INV-014	direct-regression	[BLOCKER LoF] Reject delayed backing-fee policy replay
+350	LoF	BLOCKER	INV-008	direct-regression	[BLOCKER LoF] Make deposit intents one-shot across retry variants
+351	LoF	BLOCKER	INV-008	direct-regression	[BLOCKER LoF] Make backing top-ups one-shot across retry variants
+353	LoF	BLOCKER	INV-005	direct-regression	[BLOCKER LoF] Bind terminal resolves to authority incarnations
+354	DoS	BLOCKER	INV-004	missing	[BLOCKER DoS] Bind recovery forfeits to position episodes
+355	LoF	BLOCKER	INV-008	direct-regression	[BLOCKER LoF] Make withdrawals one-shot across retry variants
+356	LoF	BLOCKER	INV-045	direct-regression	[BLOCKER LoF] Block fee rewards ahead of committed marks
+357	DoS	BLOCKER	INV-077	missing	[BLOCKER DoS] Bound max-source PnL conversion
+359	DoS	BLOCKER	INV-077	missing	[BLOCKER DoS] Keep max-shape resolved close under CU limit
+360	LoF	BLOCKER	INV-039	missing	[BLOCKER LoF] Reject unsigned stale-cohort novation
+361	DoS	BLOCKER	INV-027	missing	[BLOCKER DoS] Reject retained backing top-ups after signed expiry
+362	LoF	BLOCKER	INV-008	direct-regression	[BLOCKER LoF] Make retired-slot activation intents one-shot
+363	LoF	BLOCKER	INV-063	missing	[BLOCKER LoF] Observe backing expiry before PnL conversion
+364	DoS	BLOCKER	INV-028	missing	[BLOCKER DoS] Release flat source liens before PnL conversion
+365	LoF	BLOCKER	INV-038	direct-regression	[BLOCKER LoF] Carry fractional oracle caps across max-dt cranks
+366	LoF	BLOCKER	INV-053	direct-regression	[BLOCKER LoF] Gate liquidation on pending later-leg accrual
+367	LoF	BLOCKER	INV-063	direct-regression	[BLOCKER LoF] Reject post-expiry backing liens
+368	DoS	BLOCKER	INV-045	missing	[BLOCKER DoS] Prevent expired partial recovery from locking market
+369	LoF	BLOCKER	INV-045	direct-regression	[BLOCKER LoF] Require bilateral fee support for EWMA movement
+370	LoF	BLOCKER	INV-073	missing	[BLOCKER LoF] Preserve pending accrual during terminal recovery
+371	DoS	BLOCKER	INV-073	missing	[BLOCKER DoS] Keep winner-first Recovery forfeits live
+372	LoF	BLOCKER	INV-067	missing	[BLOCKER LoF] Preserve prior same-domain claim across Recovery forfeit
+373	LoF	BLOCKER	INV-067	missing	[BLOCKER LoF] Prove retained Recovery haircuts preserve prior claims
+374	LoF	BLOCKER	INV-063	missing	[BLOCKER LoF] Reconcile expired backing in Recovery forfeits
+375	LoF	PRIVILEGED	INV-005	missing	[PRIVILEGED LoF] Prevent asset-admin seizure of funded roles
+376	DoS	BLOCKER	INV-073	missing	[BLOCKER DoS] Let asset-0 backing provider complete recovery
+377	DoS	BLOCKER	INV-027	missing	[BLOCKER DoS] Keep fresh insurance withdrawable after asset restart
+379	DoS	REAL	INV-028	missing	[REAL DoS] Preserve source capacity in combined engine pin (restacked)
+380	LoF	BLOCKER	INV-039	direct-regression	[BLOCKER LoF] Preserve funding across prospective EWMA updates
+381	LoF	BLOCKER	INV-038	direct-regression	[BLOCKER LoF] Round composite oracle prices once
+393	LoF	REAL	INV-010	missing	[REAL LoF] Order matcher config mutations

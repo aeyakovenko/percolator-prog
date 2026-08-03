@@ -783,6 +783,11 @@ Run `PermissionlessCrank` continuously.
 
 Percolator's security model is "engine correctness + wrapper enforcement".
 
+The normative whole-route charter is [`INVARIANTS.md`](INVARIANTS.md). Its executable PR135
+coverage and explicit gaps are indexed in
+[`tests/invariants/README.md`](tests/invariants/README.md). Passing a finding-specific regression is
+not treated as independent bug discovery or full invariant certification.
+
 ### Wrapper-level properties (Kani-proven)
 The current Kani suite is in `tests/v16_kani.rs`. It proves wrapper ABI and local validation properties:
 
