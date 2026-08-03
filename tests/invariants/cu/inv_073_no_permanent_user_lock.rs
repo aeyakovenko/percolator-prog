@@ -2,7 +2,7 @@
 //!
 //! Normative obligation: Every publicly reachable funded state has a finite public path to capital or terminal disposition.
 //!
-//! Evidence in this file (I/C plus invariant-specific M assertions): `v16_program_permissionless_asset_expired_close_matrix_discovers_global_recovery`, `v16_program_fragmented_recovery_pair_matrix_discovers_force_close_lock`, `v16_program_fractional_social_loss_exit_matrix_discovers_dust_lock`, `v16_program_recovery_residue_matrix_discovers_abandoned_owner_lock`, `v16_program_expired_partial_close_matrix_discovers_global_terminal_lock`, `v16_program_crossed_adl_effective_exit_matrix_discovers_zero_oi_residue_lock`, `v16_program_partial_adl_effective_exit_matrix_discovers_zero_oi_residue_lock`, `v16_attack_source_backed_force_close_preserves_bounded_resolved_exits`, `v16_probe_liquidation_then_shutdown_preserves_bounded_owner_exit`, `v16_attack_permissionless_close_resolved_survives_drained_owner_system_account`, `v16_attack_permissionless_asset_epoch_grief_has_atomic_max_leg_exit`. These tests exercise the deployed public
+//! Evidence in this file (I/C plus invariant-specific M assertions): `v16_program_winner_first_recovery_matrix_discovers_provider_lien_lock`, `v16_program_permissionless_asset_expired_close_matrix_discovers_global_recovery`, `v16_program_fragmented_recovery_pair_matrix_discovers_force_close_lock`, `v16_program_fractional_social_loss_exit_matrix_discovers_dust_lock`, `v16_program_recovery_residue_matrix_discovers_abandoned_owner_lock`, `v16_program_expired_partial_close_matrix_discovers_global_terminal_lock`, `v16_program_crossed_adl_effective_exit_matrix_discovers_zero_oi_residue_lock`, `v16_program_partial_adl_effective_exit_matrix_discovers_zero_oi_residue_lock`, `v16_attack_source_backed_force_close_preserves_bounded_resolved_exits`, `v16_probe_liquidation_then_shutdown_preserves_bounded_owner_exit`, `v16_attack_permissionless_close_resolved_survives_drained_owner_system_account`, `v16_attack_permissionless_asset_epoch_grief_has_atomic_max_leg_exit`. These tests exercise the deployed public
 //! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
 //! rollback, liveness, or compute outcomes appropriate to the invariant.
 //!
@@ -11,6 +11,119 @@
 //! plus every additional verification method required by the charter.
 
 use super::*;
+
+#[test]
+fn v16_program_winner_first_recovery_matrix_discovers_provider_lien_lock() {
+    const PRICE: u64 = 1_000_000;
+    const ASSET: u16 = 1;
+    const SOURCE_DOMAIN: u16 = ASSET * 2;
+    const BACKING: u128 = 100_000;
+
+    let mut params = production_risk_params();
+    params.max_portfolio_assets = 2;
+    params.public_b_chunk_atoms = 8_000;
+    let mut env = V16CuEnv::new_with_init_params(params);
+    env.configure_permissionless_resolve_with_cu(100, 5);
+    env.configure_auth_mark_for_asset_as_admin(0, 0, PRICE);
+    env.configure_auth_mark_for_asset_as_admin(ASSET, 0, PRICE);
+
+    let loser_owner = Keypair::new();
+    let winner_owner = Keypair::new();
+    let base_peer_owner = Keypair::new();
+    let loser = env.create_portfolio(&loser_owner);
+    let winner = env.create_portfolio(&winner_owner);
+    let base_peer = env.create_portfolio(&base_peer_owner);
+    env.deposit(&loser_owner, loser, 51_000);
+    env.deposit(&winner_owner, winner, 100_000);
+    env.deposit(&base_peer_owner, base_peer, 100_000);
+    env.top_up_backing_bucket(SOURCE_DOMAIN, BACKING, 10_000);
+    env.trade_asset_with_cu(
+        ASSET,
+        &loser_owner,
+        loser,
+        &winner_owner,
+        winner,
+        POS_SCALE as i128,
+        PRICE,
+        0,
+    );
+
+    env.svm.warp_to_slot(20);
+    env.push_auth_mark_for_asset_as_admin(ASSET, 20, 952_000);
+    env.crank(
+        winner,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 20,
+            observations: crank_observations(ASSET),
+        },
+    );
+    env.trade_asset_with_cu(
+        0,
+        &winner_owner,
+        winner,
+        &base_peer_owner,
+        base_peer,
+        POS_SCALE as i128 * 3 / 2,
+        PRICE,
+        0,
+    );
+    let lien_before =
+        state::portfolio_source_domain(&env.portfolio_state(winner), SOURCE_DOMAIN as usize);
+    assert!(lien_before.source_lien_counterparty_backing_num.get() > 0);
+
+    for (slot, mark) in [(25, 940_000), (30, 940_576)] {
+        env.svm.warp_to_slot(slot);
+        env.push_auth_mark_for_asset_as_admin(ASSET, slot, mark);
+        env.crank(
+            winner,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: slot,
+                observations: crank_observations(ASSET),
+            },
+        );
+    }
+    env.update_asset_lifecycle_as_admin_with_cu(processor::ASSET_ACTION_SHUTDOWN, ASSET, 30, 0);
+    env.forfeit_recovery_leg_with_cu(&winner_owner, winner, ASSET, u128::MAX);
+    assert!(!has_active_leg_for_asset(
+        &env.portfolio_state(winner),
+        ASSET as usize
+    ));
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let loser_before = env.svm.get_account(&loser).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    for _ in 0..16 {
+        env.svm.expire_blockhash();
+        let forfeit = env.send(
+            ProgInstruction::ForfeitRecoveryLeg {
+                asset_index: ASSET,
+                b_delta_budget: u128::MAX,
+            },
+            vec![
+                AccountMeta::new(loser_owner.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(loser, false),
+            ],
+            &[&loser_owner],
+        );
+        assert!(
+            forfeit.is_err(),
+            "the loser unexpectedly escaped the fixed point"
+        );
+        assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+        assert_eq!(env.svm.get_account(&loser).unwrap(), loser_before);
+        assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+    }
+
+    let loser_after = env.portfolio_state(loser);
+    assert!(has_active_leg_for_asset(&loser_after, ASSET as usize));
+    let market_after = env.market_state().1;
+    let bucket = &market_after.source_backing_buckets[SOURCE_DOMAIN as usize];
+    assert!(
+        bucket.valid_liened_backing_num != 0 || bucket.impaired_liened_backing_num != 0,
+        "the failed loser continuation retained no provider encumbrance"
+    );
+}
 
 #[test]
 fn v16_program_permissionless_asset_expired_close_matrix_discovers_global_recovery() {
