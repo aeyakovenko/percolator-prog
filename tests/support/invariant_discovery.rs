@@ -154,6 +154,27 @@ pub enum PendingMarkSource {
     ReportedPriceBatch,
 }
 
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum DiscoveryTradeRoute {
+    NoCpi,
+    BatchNoCpi,
+    Cpi,
+    BatchCpi,
+}
+
+impl DiscoveryTradeRoute {
+    pub const ALL: [Self; 4] = [Self::NoCpi, Self::BatchNoCpi, Self::Cpi, Self::BatchCpi];
+
+    fn discriminator(self) -> u8 {
+        match self {
+            Self::NoCpi => 0,
+            Self::BatchNoCpi => 1,
+            Self::Cpi => 2,
+            Self::BatchCpi => 3,
+        }
+    }
+}
+
 impl PendingMarkSource {
     pub const ALL: [Self; 4] = [
         Self::AuthenticatedPush,
@@ -550,6 +571,27 @@ pub struct PendingMarkAdmissionDiscovery {
     pub attacker_profit: u128,
     pub victim_loss: u128,
     pub extracted_tokens: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PendingMarkInheritanceDiscovery {
+    pub route: DiscoveryTradeRoute,
+    pub movement_cost: u128,
+    pub pending_mark: u64,
+    pub committed_mark: u64,
+    pub victim_loss: u128,
+    pub attacker_gain: u128,
+    pub extracted_profit: u64,
+}
+
+impl PendingMarkInheritanceDiscovery {
+    pub fn is_violation(&self) -> bool {
+        self.pending_mark == self.committed_mark
+            && self.movement_cost != 0
+            && self.attacker_gain == self.victim_loss
+            && self.attacker_gain > self.movement_cost
+            && u128::from(self.extracted_profit) == self.attacker_gain - self.movement_cost
+    }
 }
 
 impl PendingMarkAdmissionDiscovery {
@@ -3286,6 +3328,74 @@ fn execute_reported_price_route(
     }
 }
 
+fn execute_discovery_trade_route(
+    env: &mut V16Svm,
+    route: DiscoveryTradeRoute,
+    taker: usize,
+    maker: usize,
+    asset_index: u16,
+    size_q: i128,
+    price: u64,
+) -> Result<(), String> {
+    match route {
+        DiscoveryTradeRoute::NoCpi => env
+            .trade_no_cpi(taker, maker, asset_index, size_q, price, 0)
+            .map(|_| ()),
+        DiscoveryTradeRoute::BatchNoCpi => env
+            .batch_trade_no_cpi(
+                taker,
+                maker,
+                vec![BatchTradeLeg {
+                    asset_index,
+                    size_q,
+                    exec_price: price,
+                    fee_bps: 0,
+                }],
+            )
+            .map(|_| ()),
+        DiscoveryTradeRoute::Cpi => env
+            .trade_cpi(taker, maker, asset_index, size_q, 0, 0)
+            .map(|_| ()),
+        DiscoveryTradeRoute::BatchCpi => env
+            .batch_trade_cpi(
+                taker,
+                maker,
+                vec![BatchTradeCpiLeg {
+                    asset_index,
+                    size_q,
+                    fee_bps: 0,
+                    limit_price: 0,
+                }],
+            )
+            .map(|_| ()),
+    }
+}
+
+fn build_retained_discovery_trade(
+    env: &mut V16Svm,
+    route: DiscoveryTradeRoute,
+    taker: usize,
+    maker: usize,
+    asset_index: u16,
+    size_q: i128,
+    price: u64,
+) -> Transaction {
+    match route {
+        DiscoveryTradeRoute::NoCpi => {
+            env.build_retained_no_cpi_trade(taker, maker, asset_index, size_q, price)
+        }
+        DiscoveryTradeRoute::BatchNoCpi => {
+            env.build_retained_batch_no_cpi_trade(taker, maker, asset_index, size_q, price)
+        }
+        DiscoveryTradeRoute::Cpi => {
+            env.build_retained_cpi_trade(taker, maker, asset_index, size_q, 0)
+        }
+        DiscoveryTradeRoute::BatchCpi => {
+            env.build_retained_batch_cpi_trade(taker, maker, asset_index, size_q, 0)
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 struct ProspectiveAccrualWorld {
     coalition_payout: u128,
@@ -3623,5 +3733,133 @@ pub fn discover_pending_mark_admission_violations(
     PendingMarkSource::ALL
         .into_iter()
         .map(|source| discover_one_pending_mark_admission(seed, source))
+        .collect()
+}
+
+fn discover_one_pending_mark_inheritance(
+    mut seed: [u8; 32],
+    route: DiscoveryTradeRoute,
+) -> Result<PendingMarkInheritanceDiscovery, String> {
+    const MARK: u64 = 1_000_000;
+    const LARGE_Q: i128 = 50 * POS_SCALE as i128;
+    const LARGE_DEPOSIT: u128 = 100_000_000;
+    const SEED_DEPOSIT: u128 = 2_000_000;
+
+    seed[0] ^= 0xd8;
+    seed[1] ^= route.discriminator();
+    let mut env = V16Svm::new(
+        seed,
+        MarketConfig {
+            initial_price: MARK,
+            max_trading_fee_bps: 100,
+            max_price_move_bps_per_slot: 100,
+            max_accrual_dt_slots: 1,
+            actor_deposits: [SEED_DEPOSIT, SEED_DEPOSIT, LARGE_DEPOSIT, LARGE_DEPOSIT, 1],
+            ..MarketConfig::default()
+        },
+    );
+    let supply_before = env.token_supply_observed();
+    env.configure_ewma_mark(0, 1, MARK, 1, 0)
+        .map_err(|error| format!("{route:?} configure EWMA mark: {error}"))?;
+    env.top_up_backing_bucket(1, 10_000_000, 100)
+        .map_err(|error| format!("{route:?} fund source backing: {error}"))?;
+    env.warp_to_slot(2);
+    let retained = build_retained_discovery_trade(&mut env, route, 2, 3, 0, LARGE_Q, MARK);
+
+    let seed_capital_before = env
+        .primary_portfolio(0)
+        .capital
+        .get()
+        .checked_add(env.primary_portfolio(1).capital.get())
+        .ok_or_else(|| "seed-pair capital overflow".to_string())?;
+    env.trade_no_cpi(0, 1, 0, POS_SCALE as i128, MARK * 2, 0)
+        .map_err(|error| format!("{route:?} seed paid EWMA move: {error}"))?;
+    let seed_capital_after = env
+        .primary_portfolio(0)
+        .capital
+        .get()
+        .checked_add(env.primary_portfolio(1).capital.get())
+        .ok_or_else(|| "post-move seed-pair capital overflow".to_string())?;
+    let movement_cost = seed_capital_before
+        .checked_sub(seed_capital_after)
+        .ok_or_else(|| "EWMA move increased seed-pair capital".to_string())?;
+    let pending_mark = env.primary_profile(0).mark_ewma_e6;
+    if movement_cost == 0
+        || pending_mark <= MARK
+        || env.primary_market_state().1.assets[0].effective_price != MARK
+    {
+        return Err(format!(
+            "{route:?} did not create a paid pending mark: cost={movement_cost}, target={pending_mark}"
+        ));
+    }
+
+    env.land_retained(retained)
+        .map_err(|error| format!("{route:?} retained trade no longer lands: {error}"))?;
+    env.warp_to_slot(3);
+    let oracle_accounts = env.primary_profile(0).oracle_leg_count;
+    let observations = || {
+        vec![CrankObservationHint {
+            asset_index: 0,
+            oracle_accounts,
+        }]
+    };
+    env.crank(2, 3, observations())
+        .map_err(|error| format!("{route:?} apply pending mark to attacker: {error}"))?;
+    env.crank(3, 3, observations())
+        .map_err(|error| format!("{route:?} apply pending mark to victim: {error}"))?;
+    let committed_mark = env.primary_market_state().1.assets[0].effective_price;
+    if committed_mark != pending_mark {
+        return Err(format!(
+            "{route:?} pending mark did not commit: {committed_mark}/{pending_mark}"
+        ));
+    }
+
+    execute_discovery_trade_route(&mut env, route, 2, 3, 0, -LARGE_Q, committed_mark)
+        .map_err(|error| format!("{route:?} close inherited exposure: {error}"))?;
+    let victim_loss = LARGE_DEPOSIT
+        .checked_sub(env.primary_portfolio(3).capital.get())
+        .ok_or_else(|| "pending-mark victim capital increased".to_string())?;
+    let attacker_pnl = env.primary_portfolio(2).pnl.get();
+    if attacker_pnl != victim_loss as i128 {
+        return Err(format!(
+            "{route:?} inherited PnL mismatch: pnl={attacker_pnl}, loss={victim_loss}"
+        ));
+    }
+    env.convert_released_pnl(2, victim_loss)
+        .map_err(|error| format!("{route:?} convert inherited PnL: {error}"))?;
+    let attacker_gain = env
+        .primary_portfolio(2)
+        .capital
+        .get()
+        .checked_sub(LARGE_DEPOSIT)
+        .ok_or_else(|| "attacker remained below principal".to_string())?;
+    let net_profit = attacker_gain
+        .checked_sub(movement_cost)
+        .ok_or_else(|| "mark movement cost exceeded attacker gain".to_string())?;
+    env.withdraw_primary(2, net_profit)
+        .map_err(|error| format!("{route:?} withdraw net inherited profit: {error}"))?;
+    let extracted_profit = env.token_amount(env.actors[2].destination_token);
+    if u128::from(extracted_profit) != net_profit || env.token_supply_observed() != supply_before {
+        return Err(format!(
+            "{route:?} inherited profit was not externally extractable: {extracted_profit}/{net_profit}"
+        ));
+    }
+    Ok(PendingMarkInheritanceDiscovery {
+        route,
+        movement_cost,
+        pending_mark,
+        committed_mark,
+        victim_loss,
+        attacker_gain,
+        extracted_profit,
+    })
+}
+
+pub fn discover_pending_mark_inheritance_violations(
+    seed: [u8; 32],
+) -> Result<Vec<PendingMarkInheritanceDiscovery>, String> {
+    DiscoveryTradeRoute::ALL
+        .into_iter()
+        .map(|route| discover_one_pending_mark_inheritance(seed, route))
         .collect()
 }

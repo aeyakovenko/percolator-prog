@@ -174,10 +174,10 @@ fn v16_open_security_finding_benchmark_is_complete_and_non_overclaiming() {
     }
 
     assert_eq!(rows, 145, "refresh the dated GitHub finding snapshot");
-    assert_eq!(direct, 18, "direct adapter inventory changed");
+    assert_eq!(direct, 17, "direct adapter inventory changed");
     assert_eq!(missing, 62, "explicit finding gaps changed");
     assert_eq!(
-        independent, 65,
+        independent, 66,
         "promote only genuinely finding-agnostic invariant discoveries"
     );
 
@@ -231,6 +231,7 @@ fn v16_open_security_finding_benchmark_is_complete_and_non_overclaiming() {
                     | "pending-value-must-commit-before-terminal-snapshot"
                     | "prospective-accrual-cannot-be-rewritten-by-trade-order"
                     | "pending-mark-cannot-authorize-stale-price-risk-increase"
+                    | "mark-movement-cost-must-cover-later-third-party-transfer"
             ),
             "unknown independent oracle: {}",
             fields[3]

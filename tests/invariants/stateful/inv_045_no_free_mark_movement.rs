@@ -6,7 +6,11 @@
 //! `v16_program_mark_publication_matrix_discovers_stale_risk_admission` publishes marks through
 //! authenticated, EWMA, single-trade, and batch-trade routes, then applies one common oracle:
 //! wrapper/engine mark lag cannot admit stale-price risk whose later close transfers and extracts
-//! another user's capital. Direct impact tests remain below. These tests exercise the deployed public
+//! another user's capital.
+//! `v16_program_trade_route_matrix_discovers_pending_mark_inheritance` signs exposure before a
+//! paid mark move and lands it through every trade route while the move is pending. Its oracle
+//! requires movement cost to cover any later third-party value transfer and verifies net SPL
+//! extraction. Direct impact tests remain below. These tests exercise the deployed public
 //! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
 //! rollback, liveness, or compute outcomes appropriate to the invariant.
 //!
@@ -48,6 +52,42 @@ proptest! {
             violations,
             PendingMarkSource::ALL.to_vec(),
             "vulnerable-pin pending-mark admission corpus changed"
+        );
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig {
+        cases: env_usize("PERCOLATOR_FUZZ_CASES", 8) as u32,
+        max_shrink_iters: env_usize("PERCOLATOR_FUZZ_SHRINK_ITERS", 64) as u32,
+        failure_persistence: Some(Box::new(
+            proptest::test_runner::FileFailurePersistence::Direct(
+                "proptest-regressions/inv_045_pending_mark_inheritance_discovery.txt",
+            ),
+        )),
+        ..ProptestConfig::default()
+    })]
+
+    #[test]
+    fn v16_program_trade_route_matrix_discovers_pending_mark_inheritance(
+        seed in any::<[u8; 32]>()
+    ) {
+        let discoveries = discover_pending_mark_inheritance_violations(seed)
+            .map_err(TestCaseError::fail)?;
+        prop_assert_eq!(discoveries.len(), DiscoveryTradeRoute::ALL.len());
+        for (expected, discovery) in DiscoveryTradeRoute::ALL.into_iter().zip(&discoveries) {
+            prop_assert_eq!(discovery.route, expected);
+        }
+        let violations: Vec<_> = discoveries
+            .iter()
+            .filter(|discovery| discovery.is_violation())
+            .map(|discovery| discovery.route)
+            .collect();
+        eprintln!("independent pending-mark inheritance discoveries: {violations:?}");
+        prop_assert_eq!(
+            violations,
+            DiscoveryTradeRoute::ALL.to_vec(),
+            "vulnerable-pin pending-mark inheritance corpus changed"
         );
     }
 }

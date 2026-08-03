@@ -33,7 +33,7 @@
 257	DoS	HARDENING	INV-073	missing	[HARDENING DoS] Keep funded Recovery deadlines monotonic
 258	LoF	PRIVILEGED	INV-061	missing	[PRIVILEGED LoF] Freeze funded hard-stale deadlines
 259	LoF	PRIVILEGED	INV-014	independent-discovery	[PRIVILEGED LoF] Bind direct trades to backing-fee consent
-260	LoF	BLOCKER	INV-045	direct-regression	[BLOCKER LoF] Prevent pending EWMA PnL inheritance
+260	LoF	BLOCKER	INV-045	independent-discovery	[BLOCKER LoF] Prevent pending EWMA PnL inheritance
 261	DoS	HARDENING	INV-020	missing	[HARDENING DoS] Reject expired Hybrid terminal snapshots
 262	LoF	REAL	INV-045	missing	[REAL LoF] Commit authenticated marks before terminal resolve
 263	LoF	REAL	INV-045	missing	[REAL LoF] Settle adverse marks before unilateral reduction
