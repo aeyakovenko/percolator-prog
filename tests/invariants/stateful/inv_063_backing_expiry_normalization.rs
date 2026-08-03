@@ -7,6 +7,10 @@
 //! trade while backing is fresh, lands it after authenticated Clock expiry, and requires an
 //! invariant failure only when stale engine time debits victim capital and the backing provider
 //! withdraws that exact debit as SPL tokens.
+//! `v16_program_retained_maturity_matrix_discovers_terminal_funded_lock` generates signed expiry
+//! boundaries independently of any finding manifest, compares omitted and delayed operations,
+//! and requires a finding only when the delayed operation consumes independent principal and
+//! leaves funded resolved users unable to progress through owner or permissionless routes.
 //!
 //! Guarantee boundary: a quarantined counterexample demonstrates public reachability; it does
 //! not certify the invariant on an unfixed pin. Certification requires the fixed-pin assertion
@@ -50,5 +54,31 @@ proptest! {
             "expired backing did not create an externally extractable victim debit: {:?}",
             discovery
         );
+    }
+
+    #[test]
+    fn v16_program_retained_maturity_matrix_discovers_terminal_funded_lock(
+        seed in any::<[u8; 32]>(),
+        expiry_offset in prop::sample::select(vec![2u8, 3, 4, 6]),
+    ) {
+        let discoveries = discover_retained_maturity_terminal_locks(seed, expiry_offset);
+        prop_assert!(
+            discoveries.is_ok(),
+            "retained-maturity discovery failed at offset {expiry_offset}: {}",
+            discoveries.unwrap_err()
+        );
+        let discoveries = discoveries.unwrap();
+        prop_assert_eq!(
+            discoveries.len(),
+            RetainedMaturityKind::ALL.len(),
+            "every retained maturity operation needs a generated world"
+        );
+        for discovery in discoveries {
+            prop_assert!(
+                discovery.is_persistent_funded_lock(),
+                "retained operation did not reproduce an exact funded terminal lock: {:?}",
+                discovery
+            );
+        }
     }
 }

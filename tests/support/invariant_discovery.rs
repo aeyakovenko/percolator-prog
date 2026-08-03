@@ -1030,6 +1030,60 @@ pub struct BackingExpiryDiscovery {
     pub extracted_tokens: u64,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RetainedMaturityKind {
+    BackingTopUp,
+}
+
+impl RetainedMaturityKind {
+    pub const ALL: [Self; 1] = [Self::BackingTopUp];
+
+    fn discriminator(self) -> u8 {
+        match self {
+            Self::BackingTopUp => 0,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RetainedMaturityDiscovery {
+    pub kind: RetainedMaturityKind,
+    pub expiry_slot: u64,
+    pub landing_slot: u64,
+    pub retained_landed: bool,
+    pub control_users_terminal: bool,
+    pub delayed_users_terminal: bool,
+    pub delayed_funded_value: u128,
+    pub delayed_vault_liquidity: u128,
+    pub delayed_close_failures: u16,
+    pub delayed_progress_failures: u16,
+    pub exact_rollback: bool,
+    pub provider_principal_consumed: u128,
+    pub provider_recovery: u128,
+    pub control_external_payout: u128,
+    pub delayed_external_payout: u128,
+    pub token_supply_conserved: bool,
+}
+
+impl RetainedMaturityDiscovery {
+    pub fn is_persistent_funded_lock(&self) -> bool {
+        self.landing_slot > self.expiry_slot
+            && self.retained_landed
+            && self.control_users_terminal
+            && !self.delayed_users_terminal
+            && self.delayed_funded_value != 0
+            && self.delayed_vault_liquidity >= self.delayed_funded_value
+            && self.delayed_close_failures >= 4
+            && self.delayed_progress_failures != 0
+            && self.exact_rollback
+            && self.provider_principal_consumed != 0
+            && self.provider_recovery == 0
+            && self.control_external_payout != 0
+            && self.delayed_external_payout == 0
+            && self.token_supply_conserved
+    }
+}
+
 impl BackingExpiryDiscovery {
     pub fn is_violation(&self) -> bool {
         self.authenticated_slot > self.expiry_slot
@@ -7996,6 +8050,249 @@ pub fn discover_backing_expiry_violation(
         provider_earnings,
         extracted_tokens,
     })
+}
+
+#[derive(Clone, Copy, Debug)]
+struct RetainedMaturityWorld {
+    retained_landed: bool,
+    users_terminal: bool,
+    funded_value: u128,
+    vault_liquidity: u128,
+    close_failures: u16,
+    progress_failures: u16,
+    exact_rollback: bool,
+    provider_principal_consumed: u128,
+    provider_recovery: u128,
+    external_payout: u128,
+    token_supply_conserved: bool,
+}
+
+fn discovery_portfolio_is_terminal(
+    account: &percolator_prog::state::PortfolioAccountV16,
+) -> Result<bool, String> {
+    let has_active_leg = account.legs.iter().try_fold(false, |active, leg| {
+        leg.try_to_runtime()
+            .map(|decoded| active || decoded.active)
+            .map_err(|error| format!("decode terminal portfolio leg: {error:?}"))
+    })?;
+    Ok(account.capital.get() == 0
+        && account.pnl.get() == 0
+        && !has_active_leg
+        && account
+            .source_domains
+            .iter()
+            .all(|source| source.source_claim_bound_num.get() == 0))
+}
+
+fn discovery_portfolio_funded_value(
+    account: &percolator_prog::state::PortfolioAccountV16,
+) -> Result<u128, String> {
+    Ok(account.capital.get())
+}
+
+fn run_retained_maturity_world(
+    mut seed: [u8; 32],
+    kind: RetainedMaturityKind,
+    expiry_offset: u8,
+    submit_retained: bool,
+) -> Result<(u64, u64, RetainedMaturityWorld), String> {
+    const WINNER: usize = 0;
+    const LOSER: usize = 1;
+    const PROVIDER: usize = 2;
+    const PUBLISHER: usize = 3;
+    const ASSET: u16 = 1;
+    const WINNING_DOMAIN: u16 = ASSET * 2 + 1;
+    const OPEN_PRICE: u64 = 100;
+    const SETTLED_SLOT: u64 = 3;
+    const BACKING: u128 = 500;
+    const SIZE_Q: i128 = 10 * POS_SCALE as i128;
+    const CONTROL_ATTEMPTS: usize = 16;
+    const DELAYED_ATTEMPTS: usize = 4;
+
+    seed[0] ^= 0x63;
+    seed[1] ^= kind.discriminator();
+    seed[2] ^= expiry_offset;
+    let expiry_slot = SETTLED_SLOT
+        .checked_add(u64::from(expiry_offset.clamp(2, 6)))
+        .ok_or_else(|| "retained maturity expiry overflow".to_string())?;
+    let landing_slot = expiry_slot
+        .checked_add(1)
+        .ok_or_else(|| "retained maturity landing overflow".to_string())?;
+    let resolve_slot = landing_slot
+        .checked_add(6)
+        .ok_or_else(|| "retained maturity resolve overflow".to_string())?;
+    let mut env = V16Svm::new(
+        seed,
+        MarketConfig {
+            initial_price: OPEN_PRICE,
+            maintenance_margin_bps: 10_000,
+            initial_margin_bps: 10_000,
+            max_price_move_bps_per_slot: 10_000,
+            max_accrual_dt_slots: 1,
+            min_funding_lifetime_slots: 1,
+            actor_deposits: [1_000, 1_000, 0, 0, 0],
+            ..MarketConfig::default()
+        },
+    );
+    let supply_before = env.token_supply_observed();
+    env.update_asset_authority_from_admin(
+        ASSET,
+        percolator_prog::processor::ASSET_AUTH_BACKING_BUCKET,
+        PROVIDER,
+    )
+    .map_err(|error| format!("install retained-maturity backing provider: {error}"))?;
+    env.configure_permissionless_resolve(
+        resolve_slot
+            .checked_sub(SETTLED_SLOT)
+            .ok_or_else(|| "retained maturity stale-window underflow".to_string())?,
+        1,
+    )
+    .map_err(|error| format!("configure retained-maturity resolution: {error}"))?;
+    env.trade_no_cpi(WINNER, LOSER, ASSET, SIZE_Q, OPEN_PRICE, 0)
+        .map_err(|error| format!("open retained-maturity position pair: {error}"))?;
+
+    let oracle_accounts = env.primary_profile(ASSET as usize).oracle_leg_count;
+    let observations = || {
+        vec![CrankObservationHint {
+            asset_index: ASSET,
+            oracle_accounts,
+        }]
+    };
+    for (slot, mark) in [(2, 200), (SETTLED_SLOT, 350)] {
+        env.warp_to_slot(slot);
+        env.push_auth_mark(ASSET, slot, mark)
+            .map_err(|error| format!("publish retained-maturity mark {mark}: {error}"))?;
+        env.crank(PUBLISHER, slot, observations())
+            .map_err(|error| format!("commit retained-maturity mark {mark}: {error}"))?;
+    }
+    if env.primary_market_state().1.assets[ASSET as usize].effective_price != 350 {
+        return Err("retained-maturity setup did not commit the adverse mark".into());
+    }
+
+    let provider_source_before = env.token_amount(env.actors[PROVIDER].source_token);
+    let retained = match kind {
+        RetainedMaturityKind::BackingTopUp => env.build_retained_backing_bucket_top_up_for_actor(
+            PROVIDER,
+            WINNING_DOMAIN,
+            BACKING,
+            expiry_slot,
+        ),
+    };
+    env.warp_to_slot(landing_slot);
+    let retained_landed = submit_retained && env.land_retained(retained).is_ok();
+    if env.current_slot() != landing_slot || landing_slot <= expiry_slot {
+        return Err("retained maturity did not cross the authenticated expiry boundary".into());
+    }
+
+    env.resolve_stale_permissionless(resolve_slot)
+        .map_err(|error| format!("resolve retained-maturity world: {error}"))?;
+    env.warp_to_slot(resolve_slot + 1);
+    let mut close_failures = 0u16;
+    let mut progress_failures = 0u16;
+    let mut exact_rollback = true;
+    let attempts = if submit_retained {
+        DELAYED_ATTEMPTS
+    } else {
+        CONTROL_ATTEMPTS
+    };
+    for _ in 0..attempts {
+        for actor in [LOSER, WINNER] {
+            if discovery_portfolio_is_terminal(&env.primary_portfolio(actor))? {
+                continue;
+            }
+            let before = fingerprint(&env);
+            if env.close_resolved_primary_signed(actor).is_err() {
+                close_failures = close_failures.saturating_add(1);
+                exact_rollback &= fingerprint(&env) == before;
+            }
+            if discovery_portfolio_is_terminal(&env.primary_portfolio(actor))? {
+                continue;
+            }
+            let before = fingerprint(&env);
+            if env.crank(actor, resolve_slot + 1, observations()).is_err() {
+                progress_failures = progress_failures.saturating_add(1);
+                exact_rollback &= fingerprint(&env) == before;
+            }
+        }
+        if discovery_portfolio_is_terminal(&env.primary_portfolio(WINNER))?
+            && discovery_portfolio_is_terminal(&env.primary_portfolio(LOSER))?
+        {
+            break;
+        }
+    }
+
+    let users_terminal = discovery_portfolio_is_terminal(&env.primary_portfolio(WINNER))?
+        && discovery_portfolio_is_terminal(&env.primary_portfolio(LOSER))?;
+    let funded_value = discovery_portfolio_funded_value(&env.primary_portfolio(WINNER))?
+        .checked_add(discovery_portfolio_funded_value(
+            &env.primary_portfolio(LOSER),
+        )?)
+        .ok_or_else(|| "retained maturity funded value overflow".to_string())?;
+    let vault_liquidity = u128::from(env.token_amount(env.vault));
+    if env.primary_market_state().1.vault != vault_liquidity {
+        return Err("retained-maturity internal vault diverged from SPL custody".into());
+    }
+    let provider_principal_consumed = provider_source_before
+        .checked_sub(env.token_amount(env.actors[PROVIDER].source_token))
+        .ok_or_else(|| "retained-maturity provider source increased".to_string())?;
+    let provider_recovery = u128::from(env.token_amount(env.actors[PROVIDER].destination_token));
+    let external_payout = [WINNER, LOSER].into_iter().try_fold(0u128, |sum, actor| {
+        sum.checked_add(u128::from(
+            env.token_amount(env.actors[actor].destination_token),
+        ))
+        .ok_or_else(|| "retained maturity payout overflow".to_string())
+    })?;
+
+    Ok((
+        expiry_slot,
+        landing_slot,
+        RetainedMaturityWorld {
+            retained_landed,
+            users_terminal,
+            funded_value,
+            vault_liquidity,
+            close_failures,
+            progress_failures,
+            exact_rollback,
+            provider_principal_consumed: u128::from(provider_principal_consumed),
+            provider_recovery,
+            external_payout,
+            token_supply_conserved: env.token_supply_observed() == supply_before,
+        },
+    ))
+}
+
+pub fn discover_retained_maturity_terminal_locks(
+    seed: [u8; 32],
+    expiry_offset: u8,
+) -> Result<Vec<RetainedMaturityDiscovery>, String> {
+    RetainedMaturityKind::ALL
+        .into_iter()
+        .map(|kind| {
+            let (_, _, control) = run_retained_maturity_world(seed, kind, expiry_offset, false)?;
+            let (expiry_slot, landing_slot, delayed) =
+                run_retained_maturity_world(seed, kind, expiry_offset, true)?;
+            Ok(RetainedMaturityDiscovery {
+                kind,
+                expiry_slot,
+                landing_slot,
+                retained_landed: delayed.retained_landed,
+                control_users_terminal: control.users_terminal,
+                delayed_users_terminal: delayed.users_terminal,
+                delayed_funded_value: delayed.funded_value,
+                delayed_vault_liquidity: delayed.vault_liquidity,
+                delayed_close_failures: delayed.close_failures,
+                delayed_progress_failures: delayed.progress_failures,
+                exact_rollback: delayed.exact_rollback,
+                provider_principal_consumed: delayed.provider_principal_consumed,
+                provider_recovery: delayed.provider_recovery,
+                control_external_payout: control.external_payout,
+                delayed_external_payout: delayed.external_payout,
+                token_supply_conserved: control.token_supply_conserved
+                    && delayed.token_supply_conserved,
+            })
+        })
+        .collect()
 }
 
 pub fn discover_cross_domain_b_violation(

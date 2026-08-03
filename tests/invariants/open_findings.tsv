@@ -124,7 +124,7 @@
 357	DoS	BLOCKER	INV-077	missing	[BLOCKER DoS] Bound max-source PnL conversion
 359	DoS	BLOCKER	INV-077	missing	[BLOCKER DoS] Keep max-shape resolved close under CU limit
 360	LoF	BLOCKER	INV-039	independent-discovery	[BLOCKER LoF] Reject unsigned stale-cohort novation
-361	DoS	BLOCKER	INV-027	missing	[BLOCKER DoS] Reject retained backing top-ups after signed expiry
+361	DoS	BLOCKER	INV-063	independent-discovery	[BLOCKER DoS] Reject retained backing top-ups after signed expiry
 362	LoF	BLOCKER	INV-008	independent-discovery	[BLOCKER LoF] Make retired-slot activation intents one-shot
 363	LoF	BLOCKER	INV-063	missing	[BLOCKER LoF] Observe backing expiry before PnL conversion
 364	DoS	BLOCKER	INV-028	missing	[BLOCKER DoS] Release flat source liens before PnL conversion
