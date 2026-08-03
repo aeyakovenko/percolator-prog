@@ -174,10 +174,10 @@ fn v16_open_security_finding_benchmark_is_complete_and_non_overclaiming() {
     }
 
     assert_eq!(rows, 145, "refresh the dated GitHub finding snapshot");
-    assert_eq!(direct, 28, "direct adapter inventory changed");
+    assert_eq!(direct, 27, "direct adapter inventory changed");
     assert_eq!(missing, 62, "explicit finding gaps changed");
     assert_eq!(
-        independent, 55,
+        independent, 56,
         "promote only genuinely finding-agnostic invariant discoveries"
     );
 
@@ -224,6 +224,7 @@ fn v16_open_security_finding_benchmark_is_complete_and_non_overclaiming() {
                     | "same-economic-intent-executes-at-most-once-and-rejection-rolls-back"
                     | "newer-authorized-control-cannot-be-overwritten-by-stale-intent"
                     | "signer-debit-never-exceeds-consented-fee-terms"
+                    | "provider-approved-fee-split-is-durable-and-attributed"
             ),
             "unknown independent oracle: {}",
             fields[3]

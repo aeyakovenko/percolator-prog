@@ -126,6 +126,23 @@ pub enum SourceFeeConsentKind {
     BatchCpi,
 }
 
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum BackingProviderConsentOrder {
+    FundThenPolicy,
+    PolicyThenRetainedFund,
+}
+
+impl BackingProviderConsentOrder {
+    pub const ALL: [Self; 2] = [Self::FundThenPolicy, Self::PolicyThenRetainedFund];
+
+    fn discriminator(self) -> u8 {
+        match self {
+            Self::FundThenPolicy => 0,
+            Self::PolicyThenRetainedFund => 1,
+        }
+    }
+}
+
 impl SourceFeeConsentKind {
     pub const ALL: [Self; 4] = [Self::NoCpi, Self::BatchNoCpi, Self::Cpi, Self::BatchCpi];
 
@@ -408,6 +425,27 @@ pub struct SourceFeeConsentDiscovery {
     pub lp_capital_debit: u128,
     pub provider_earnings_credit: u128,
     pub compute_units: Option<u64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BackingProviderConsentDiscovery {
+    pub order: BackingProviderConsentOrder,
+    pub accepted_provider_terms: bool,
+    pub lp_capital_debit: u128,
+    pub provider_earnings_credit: u128,
+    pub operator_insurance_credit: u128,
+    pub operator_withdrawn: u64,
+    pub compute_units: Option<u64>,
+}
+
+impl BackingProviderConsentDiscovery {
+    pub fn is_violation(&self) -> bool {
+        self.accepted_provider_terms
+            && self.lp_capital_debit != 0
+            && self.provider_earnings_credit == 0
+            && self.operator_insurance_credit == self.lp_capital_debit
+            && u128::from(self.operator_withdrawn) == self.lp_capital_debit
+    }
 }
 
 impl SourceFeeConsentDiscovery {
@@ -2385,5 +2423,254 @@ pub fn discover_source_fee_consent_violations(
     SourceFeeConsentKind::ALL
         .into_iter()
         .map(|kind| discover_one_source_fee_consent_violation(seed, kind))
+        .collect()
+}
+
+fn rejected_backing_provider_consent(
+    env: &V16Svm,
+    order: BackingProviderConsentOrder,
+    before: EconomicFingerprint,
+    supply_before: u128,
+) -> Result<BackingProviderConsentDiscovery, String> {
+    if before != fingerprint(env) {
+        return Err(format!(
+            "{order:?} rejected provider-policy transition did not roll back exactly"
+        ));
+    }
+    if env.token_supply_observed() != supply_before {
+        return Err(format!(
+            "{order:?} rejected provider-policy transition changed SPL supply"
+        ));
+    }
+    Ok(BackingProviderConsentDiscovery {
+        order,
+        accepted_provider_terms: false,
+        lp_capital_debit: 0,
+        provider_earnings_credit: 0,
+        operator_insurance_credit: 0,
+        operator_withdrawn: 0,
+        compute_units: None,
+    })
+}
+
+fn discover_one_backing_provider_consent_violation(
+    mut seed: [u8; 32],
+    order: BackingProviderConsentOrder,
+) -> Result<BackingProviderConsentDiscovery, String> {
+    const MARKET_TRADER: usize = 0;
+    const PROVIDER: usize = 1;
+    const POLICY_AUTHORITY: usize = 2;
+    const OPERATOR: usize = 3;
+    const LP: usize = PRIMARY_ACTOR_COUNT - 1;
+    const ASSET: u16 = 1;
+    const WINNING_DOMAIN: u16 = ASSET * 2 + 1;
+    const PRICE: u64 = 100;
+    const WINNING_SIZE_Q: i128 = 200 * POS_SCALE as i128;
+    const LOSING_SIZE_Q: i128 = 100 * POS_SCALE as i128;
+    const INCREASE_Q: i128 = 20 * POS_SCALE as i128;
+    const BACKING_PRINCIPAL: u128 = 5_000;
+    const BACKING_FEE_BPS: u16 = 5_000;
+    seed[0] ^= 0x8f;
+    seed[1] ^= order.discriminator();
+    let mut env = V16Svm::new(
+        seed,
+        MarketConfig {
+            initial_price: PRICE,
+            h_max: 2,
+            maintenance_margin_bps: 1_000,
+            initial_margin_bps: 1_000,
+            max_price_move_bps_per_slot: 500,
+            max_accrual_dt_slots: 1,
+            min_funding_lifetime_slots: 1,
+            maintenance_fee_per_slot: 30,
+            actor_deposits: [10_000, 1, 1, 10_000, 3_130],
+            ..MarketConfig::default()
+        },
+    );
+    let supply_before = env.token_supply_observed();
+    for (authority_kind, actor) in [
+        (
+            percolator_prog::processor::ASSET_AUTH_INSURANCE,
+            POLICY_AUTHORITY,
+        ),
+        (
+            percolator_prog::processor::ASSET_AUTH_INSURANCE_OPERATOR,
+            OPERATOR,
+        ),
+        (
+            percolator_prog::processor::ASSET_AUTH_BACKING_BUCKET,
+            PROVIDER,
+        ),
+        (
+            percolator_prog::processor::ASSET_AUTH_ORACLE,
+            POLICY_AUTHORITY,
+        ),
+    ] {
+        env.update_asset_authority_from_admin(ASSET, authority_kind, actor)
+            .map_err(|error| {
+                format!("install provider-consent authority {authority_kind}: {error}")
+            })?;
+    }
+    env.update_backing_fee_policy_for_actor(POLICY_AUTHORITY, WINNING_DOMAIN, BACKING_FEE_BPS, 0)
+        .map_err(|error| format!("publish provider-approved fee split: {error}"))?;
+    let retained_top_up = env.build_retained_backing_bucket_top_up_for_actor(
+        PROVIDER,
+        WINNING_DOMAIN,
+        BACKING_PRINCIPAL,
+        100,
+    );
+
+    let mut max_cu = 0;
+    match order {
+        BackingProviderConsentOrder::FundThenPolicy => {
+            let top_up = env
+                .top_up_backing_bucket_for_actor(PROVIDER, WINNING_DOMAIN, BACKING_PRINCIPAL, 100)
+                .map_err(|error| format!("fund provider-approved bucket: {error}"))?;
+            max_cu = max_cu.max(top_up.compute_units);
+            let before_policy = fingerprint(&env);
+            match env.update_backing_fee_policy_for_actor(
+                POLICY_AUTHORITY,
+                WINNING_DOMAIN,
+                BACKING_FEE_BPS,
+                10_000,
+            ) {
+                Ok(policy) => max_cu = max_cu.max(policy.compute_units),
+                Err(_) => {
+                    return rejected_backing_provider_consent(
+                        &env,
+                        order,
+                        before_policy,
+                        supply_before,
+                    );
+                }
+            }
+        }
+        BackingProviderConsentOrder::PolicyThenRetainedFund => {
+            let policy = env
+                .update_backing_fee_policy_for_actor(
+                    POLICY_AUTHORITY,
+                    WINNING_DOMAIN,
+                    BACKING_FEE_BPS,
+                    10_000,
+                )
+                .map_err(|error| format!("replace provider-visible fee split: {error}"))?;
+            max_cu = max_cu.max(policy.compute_units);
+            let before_top_up = fingerprint(&env);
+            match env.land_retained(retained_top_up) {
+                Ok(top_up) => max_cu = max_cu.max(top_up.compute_units),
+                Err(_) => {
+                    return rejected_backing_provider_consent(
+                        &env,
+                        order,
+                        before_top_up,
+                        supply_before,
+                    );
+                }
+            }
+        }
+    }
+
+    env.trade_no_cpi(MARKET_TRADER, LP, ASSET, -WINNING_SIZE_Q, PRICE, 0)
+        .map_err(|error| format!("open provider-backed winning leg: {error}"))?;
+    env.trade_no_cpi(MARKET_TRADER, LP, 0, -LOSING_SIZE_Q, PRICE, 0)
+        .map_err(|error| format!("open provider-backed losing leg: {error}"))?;
+    env.warp_to_slot(2);
+    env.push_auth_mark_for_actor(POLICY_AUTHORITY, ASSET, 2, PRICE)
+        .map_err(|error| format!("prime provider-backed mark: {error}"))?;
+    env.push_auth_mark(0, 2, PRICE)
+        .map_err(|error| format!("prime provider base mark: {error}"))?;
+    for (actor, asset_index) in [
+        (MARKET_TRADER, ASSET),
+        (LP, ASSET),
+        (MARKET_TRADER, 0),
+        (LP, 0),
+    ] {
+        crank_discovery_steps(&mut env, actor, 2, asset_index)?;
+    }
+    env.sync_maintenance_fee(LP, 2)
+        .map_err(|error| format!("sync provider-backed LP fee: {error}"))?;
+    env.warp_to_slot(3);
+    env.push_auth_mark_for_actor(POLICY_AUTHORITY, ASSET, 3, PRICE + 5)
+        .map_err(|error| format!("publish provider-backed winning mark: {error}"))?;
+    env.push_auth_mark(0, 3, PRICE - 5)
+        .map_err(|error| format!("publish provider-backed losing mark: {error}"))?;
+    for (actor, asset_index) in [(MARKET_TRADER, ASSET), (LP, ASSET), (MARKET_TRADER, 0)] {
+        crank_discovery_steps(&mut env, actor, 3, asset_index)?;
+    }
+    if env.primary_portfolio(LP).pnl.get() <= 0 {
+        return Err(format!(
+            "provider-consent fixture produced no positive LP claim: {}",
+            env.primary_portfolio(LP).pnl.get()
+        ));
+    }
+
+    let retained_trade = env.build_retained_no_cpi_trade(OPERATOR, LP, 0, -INCREASE_Q, PRICE - 5);
+    let before = env.primary_market_state().1;
+    let provider_before =
+        before.source_backing_buckets[WINNING_DOMAIN as usize].utilization_fee_earnings;
+    let operator_before = before.insurance_domain_budget[WINNING_DOMAIN as usize];
+    let lp_before = env.primary_portfolio(LP).capital.get();
+    let trade = env
+        .land_retained(retained_trade)
+        .map_err(|error| format!("land provider-fee-generating trade: {error}"))?;
+    max_cu = max_cu.max(trade.compute_units);
+    let after = env.primary_market_state().1;
+    let provider_earnings_credit = after.source_backing_buckets[WINNING_DOMAIN as usize]
+        .utilization_fee_earnings
+        .checked_sub(provider_before)
+        .ok_or_else(|| "provider earnings decreased".to_string())?;
+    let operator_insurance_credit = after.insurance_domain_budget[WINNING_DOMAIN as usize]
+        .checked_sub(operator_before)
+        .ok_or_else(|| "operator insurance budget decreased".to_string())?;
+    let lp_capital_debit = debit_between(
+        lp_before,
+        env.primary_portfolio(LP).capital.get(),
+        "provider-consent LP debit",
+    )?;
+    if provider_earnings_credit
+        .checked_add(operator_insurance_credit)
+        .ok_or_else(|| "provider fee split overflow".to_string())?
+        != lp_capital_debit
+    {
+        return Err(format!(
+            "provider fee attribution mismatch: lp={lp_capital_debit}, provider={provider_earnings_credit}, operator={operator_insurance_credit}"
+        ));
+    }
+
+    let operator_destination = env.actors[OPERATOR].destination_token;
+    let operator_destination_before = env.token_amount(operator_destination);
+    if operator_insurance_credit != 0 {
+        let withdrawal = env
+            .withdraw_insurance_asset(OPERATOR, ASSET, operator_insurance_credit)
+            .map_err(|error| format!("withdraw redirected provider fee: {error}"))?;
+        max_cu = max_cu.max(withdrawal.compute_units);
+    }
+    let operator_withdrawn = env
+        .token_amount(operator_destination)
+        .checked_sub(operator_destination_before)
+        .ok_or_else(|| "operator destination decreased".to_string())?;
+    if env.token_supply_observed() != supply_before {
+        return Err(format!(
+            "{order:?} provider-consent probe changed SPL supply: {supply_before} -> {}",
+            env.token_supply_observed()
+        ));
+    }
+    Ok(BackingProviderConsentDiscovery {
+        order,
+        accepted_provider_terms: true,
+        lp_capital_debit,
+        provider_earnings_credit,
+        operator_insurance_credit,
+        operator_withdrawn,
+        compute_units: Some(max_cu),
+    })
+}
+
+pub fn discover_backing_provider_consent_violations(
+    seed: [u8; 32],
+) -> Result<Vec<BackingProviderConsentDiscovery>, String> {
+    BackingProviderConsentOrder::ALL
+        .into_iter()
+        .map(|order| discover_one_backing_provider_consent_violation(seed, order))
         .collect()
 }

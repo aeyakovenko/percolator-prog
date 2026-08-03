@@ -109,7 +109,7 @@
 336	LoF	BLOCKER	INV-014	independent-discovery	[BLOCKER LoF] Reject delayed liquidation-fee policy replay
 337	LoF	BLOCKER	INV-014	independent-discovery	[BLOCKER LoF] Reject delayed maintenance-fee policy replay
 338	LoF	BLOCKER	INV-014	independent-discovery	[BLOCKER LoF] Reject delayed trade-fee policy replay
-339	LoF	BLOCKER	INV-014	direct-regression	[BLOCKER LoF] Bind backing top-ups to provider-approved fee terms
+339	LoF	BLOCKER	INV-014	independent-discovery	[BLOCKER LoF] Bind backing top-ups to provider-approved fee terms
 340	LoF	BLOCKER	INV-014	independent-discovery	[BLOCKER LoF] Reject delayed fee-redirect policy replay
 343	LoF	BLOCKER	INV-008	independent-discovery	[BLOCKER LoF] Make trade intents one-shot across retry variants
 344	LoF	BLOCKER	INV-008	independent-discovery	[BLOCKER LoF] Make insurance top-ups one-shot across retry variants
