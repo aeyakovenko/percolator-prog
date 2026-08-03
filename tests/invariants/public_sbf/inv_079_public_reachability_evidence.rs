@@ -175,9 +175,9 @@ fn v16_open_security_finding_benchmark_is_complete_and_non_overclaiming() {
 
     assert_eq!(rows, 143, "refresh the dated GitHub finding snapshot");
     assert_eq!(direct, 0, "direct adapter inventory changed");
-    assert_eq!(missing, 45, "explicit finding gaps changed");
+    assert_eq!(missing, 44, "explicit finding gaps changed");
     assert_eq!(
-        independent, 98,
+        independent, 99,
         "promote only genuinely finding-agnostic invariant discoveries"
     );
 
@@ -265,6 +265,7 @@ fn v16_open_security_finding_benchmark_is_complete_and_non_overclaiming() {
                     | "expired-retained-operation-cannot-consume-principal-and-lock-terminal-users"
                     | "vanished-source-claim-must-have-a-bounded-public-unwind"
                     | "fractional-source-domains-must-have-a-bounded-public-unwind"
+                    | "flat-backed-claim-must-have-bounded-terminal-conversion"
                     | "old-generation-terminal-capability-cannot-crystallize-replacement-value"
                     | "stale-position-episode-consent-cannot-transfer-or-orphan-value"
                     | "stale-matcher-enable-cannot-revive-revoked-value-authority"

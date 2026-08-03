@@ -12,6 +12,10 @@
 //! `v16_program_cross_domain_rounding_exit_matrix_discovers_funded_lock` independently constructs
 //! two fractional source domains in both asset orders, reverses one source, and requires all six
 //! public exit families plus a later honest crank to remain blocked before accepting a finding.
+//! `v16_program_flat_source_lien_route_matrix_discovers_backed_claim_lock` flattens all exposure
+//! while retaining a real source lien, then requires full/partial conversion, close, later honest
+//! cranks, and CPI/no-CPI single/batch reopen-and-flatten escapes all to leave the backed PnL claim
+//! uncollectible before accepting a finding.
 //!
 //! Guarantee boundary: this is a public counterexample on the vulnerable pin, not certification
 //! of every source-credit lifecycle. Fixed-pin certification still requires the proof, model, and
@@ -77,6 +81,32 @@ proptest! {
             prop_assert!(
                 discovery.is_persistent_funded_exit_lock(),
                 "cross-domain rounding retained a public exit: {:?}",
+                discovery
+            );
+        }
+    }
+
+    #[test]
+    fn v16_program_flat_source_lien_route_matrix_discovers_backed_claim_lock(
+        seed in any::<[u8; 32]>(),
+        provider_withdrawal in prop::sample::select(vec![50u128]),
+    ) {
+        let discoveries = discover_flat_source_lien_claim_locks(seed, provider_withdrawal);
+        prop_assert!(
+            discoveries.is_ok(),
+            "flat source-lien setup failed: {}",
+            discoveries.unwrap_err()
+        );
+        let discoveries = discoveries.unwrap();
+        prop_assert_eq!(
+            discoveries.len(),
+            FlatSourceLienEscapeRoute::ALL.len(),
+            "every trade family needs an independent flat-lien escape world"
+        );
+        for discovery in discoveries {
+            prop_assert!(
+                discovery.is_persistent_backed_claim_lock(),
+                "flat source lien retained a terminal claim route: {:?}",
                 discovery
             );
         }

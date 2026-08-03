@@ -2033,6 +2033,26 @@ impl V16Svm {
         )
     }
 
+    pub fn withdraw_backing_bucket(
+        &mut self,
+        domain: u16,
+        amount: u128,
+    ) -> Result<TxSuccess, String> {
+        let authority = copy_keypair(&self.admin);
+        self.send_program(
+            ProgInstruction::WithdrawBackingBucket { domain, amount },
+            vec![
+                AccountMeta::new(authority.pubkey(), true),
+                AccountMeta::new(self.market, false),
+                AccountMeta::new(self.provider_destination_token, false),
+                AccountMeta::new(self.vault, false),
+                AccountMeta::new_readonly(self.vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[authority],
+        )
+    }
+
     pub fn withdraw_backing_bucket_earnings(
         &mut self,
         domain: u16,
