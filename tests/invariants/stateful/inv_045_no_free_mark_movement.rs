@@ -20,8 +20,11 @@
 //! victim loss and coalition SPL gain across all trade routes.
 //! `v16_program_mark_mode_route_matrix_discovers_profitable_liquidation_moves` crosses EWMA and
 //! hybrid-after-hours modes with single and batch reported-price routes, then requires total
-//! movement cost to cover any liquidation reward and coalition extraction. Direct impact tests
-//! remain below. These tests exercise the deployed public
+//! movement cost to cover any liquidation reward and coalition extraction.
+//! `v16_program_matcher_route_matrix_discovers_one_sided_mark_fees` crosses the same modes with
+//! single and batch CPI matcher exits and requires every mark-moving fee to be bilaterally funded;
+//! it measures independent victim loss, fee-counterparty loss, insurance credit, and external
+//! coalition profit. Direct impact tests remain below. These tests exercise the deployed public
 //! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
 //! rollback, liveness, or compute outcomes appropriate to the invariant.
 //!
@@ -30,6 +33,46 @@
 //! plus every additional verification method required by the charter.
 
 use super::*;
+
+proptest! {
+    #![proptest_config(ProptestConfig {
+        cases: env_usize("PERCOLATOR_FUZZ_CASES", 8) as u32,
+        max_shrink_iters: env_usize("PERCOLATOR_FUZZ_SHRINK_ITERS", 64) as u32,
+        failure_persistence: Some(Box::new(
+            proptest::test_runner::FileFailurePersistence::Direct(
+                "proptest-regressions/inv_045_bilateral_mark_fee_discovery.txt",
+            ),
+        )),
+        ..ProptestConfig::default()
+    })]
+
+    #[test]
+    fn v16_program_matcher_route_matrix_discovers_one_sided_mark_fees(
+        seed in any::<[u8; 32]>()
+    ) {
+        let discoveries = discover_bilateral_mark_fee_violations(seed)
+            .map_err(TestCaseError::fail)?;
+        prop_assert_eq!(discoveries.len(), TradeDrivenMarkMode::ALL.len() * 2);
+        let violations: Vec<_> = discoveries
+            .iter()
+            .filter(|discovery| discovery.is_violation())
+            .map(|discovery| (discovery.mode, discovery.route))
+            .collect();
+        let expected: Vec<_> = TradeDrivenMarkMode::ALL
+            .into_iter()
+            .flat_map(|mode| {
+                [DiscoveryTradeRoute::Cpi, DiscoveryTradeRoute::BatchCpi]
+                    .map(|route| (mode, route))
+            })
+            .collect();
+        eprintln!("independent bilateral mark-fee discoveries: {violations:?}");
+        prop_assert_eq!(
+            violations,
+            expected,
+            "vulnerable-pin bilateral mark-fee corpus changed"
+        );
+    }
+}
 
 proptest! {
     #![proptest_config(ProptestConfig {

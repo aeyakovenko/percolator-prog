@@ -645,6 +645,30 @@ pub struct TradeDrivenLiquidationDiscovery {
     pub extracted_tokens: u128,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BilateralMarkFeeDiscovery {
+    pub mode: TradeDrivenMarkMode,
+    pub route: DiscoveryTradeRoute,
+    pub setup_mark: u64,
+    pub queued_mark: u64,
+    pub coalition_profit: u128,
+    pub victim_loss: u128,
+    pub fee_counterparty_loss: u128,
+    pub insurance_gain: u128,
+    pub extracted_tokens: u128,
+}
+
+impl BilateralMarkFeeDiscovery {
+    pub fn is_violation(&self) -> bool {
+        self.queued_mark >= self.setup_mark
+            && self.coalition_profit != 0
+            && self.victim_loss != 0
+            && self.fee_counterparty_loss != 0
+            && self.insurance_gain != 0
+            && self.extracted_tokens != 0
+    }
+}
+
 impl TradeDrivenLiquidationDiscovery {
     pub fn is_violation(&self) -> bool {
         self.movement_fee != 0
@@ -4652,6 +4676,239 @@ pub fn discover_trade_driven_liquidation_violations(
     for mode in TradeDrivenMarkMode::ALL {
         for route in ProspectiveAccrualRoute::ALL {
             discoveries.push(discover_one_trade_driven_liquidation(seed, mode, route)?);
+        }
+    }
+    Ok(discoveries)
+}
+
+fn discovery_portfolio_equity(env: &V16Svm, actor: usize) -> Result<i128, String> {
+    let account = env.primary_portfolio(actor);
+    i128::try_from(account.capital.get())
+        .map_err(|_| "portfolio capital exceeds signed range".to_string())?
+        .checked_add(account.pnl.get())
+        .ok_or_else(|| "portfolio equity overflow".to_string())
+}
+
+fn discover_one_bilateral_mark_fee_violation(
+    mut seed: [u8; 32],
+    mode: TradeDrivenMarkMode,
+    route: DiscoveryTradeRoute,
+) -> Result<BilateralMarkFeeDiscovery, String> {
+    if !matches!(
+        route,
+        DiscoveryTradeRoute::Cpi | DiscoveryTradeRoute::BatchCpi
+    ) {
+        return Err(format!("{route:?} is not a matcher-priced route"));
+    }
+    const MARK: u64 = 1_000_000;
+    const ADVERSE_MARK: u64 = 1_999_999;
+    const MOVER_Q: i128 = POS_SCALE as i128;
+    const BENEFICIARY_Q: i128 = 10 * POS_SCALE as i128;
+    const LARGE_DEPOSIT: u128 = 50_000_000;
+
+    seed[0] ^= 0x3d;
+    seed[1] ^= mode.discriminator();
+    seed[2] ^= route.discriminator();
+    let mut env = V16Svm::new(
+        seed,
+        MarketConfig {
+            initial_price: MARK,
+            max_trading_fee_bps: 10_000,
+            max_price_move_bps_per_slot: 10_000,
+            max_accrual_dt_slots: 1,
+            min_funding_lifetime_slots: 1,
+            actor_deposits: [
+                MARK as u128,
+                LARGE_DEPOSIT,
+                LARGE_DEPOSIT,
+                LARGE_DEPOSIT,
+                LARGE_DEPOSIT,
+            ],
+            ..MarketConfig::default()
+        },
+    );
+    let close_lp = env.add_primary_actor(seed, 0, 200_000_000, LARGE_DEPOSIT);
+    let supply_before = env.token_supply_observed();
+    let hybrid_feed = match mode {
+        TradeDrivenMarkMode::Ewma => {
+            env.configure_ewma_mark(0, 1, MARK, 1, 0)
+                .map_err(|error| format!("configure bilateral EWMA: {error}"))?;
+            None
+        }
+        TradeDrivenMarkMode::HybridAfterHours => {
+            env.set_clock(1, 100);
+            let feed = [0xceu8; 32];
+            let initial_oracle = env.set_pyth_price(&feed, MARK as i64, -6, 100, 100);
+            env.configure_hybrid_oracle(
+                0,
+                1,
+                100,
+                0,
+                [feed, [0; 32], [0; 32]],
+                &[initial_oracle],
+                1,
+                100,
+            )
+            .map_err(|error| format!("configure bilateral hybrid: {error}"))?;
+            Some(feed)
+        }
+    };
+
+    env.set_matcher_spreads(1, 0, 9_000)
+        .map_err(|error| format!("configure opening passive matcher: {error}"))?;
+    env.trade_cpi(0, 1, 0, -MOVER_Q, 0, 0)
+        .map_err(|error| format!("open future underfunded mover: {error}"))?;
+    env.trade_no_cpi(2, 3, 0, BENEFICIARY_Q, MARK, 0)
+        .map_err(|error| format!("open independent beneficiary book: {error}"))?;
+    env.trade_no_cpi(4, close_lp, 0, BENEFICIARY_Q, MARK, 0)
+        .map_err(|error| format!("open independent extraction book: {error}"))?;
+    env.set_matcher_spreads(close_lp, 0, 9_000)
+        .map_err(|error| format!("configure extraction matcher: {error}"))?;
+
+    let hybrid_tail = match mode {
+        TradeDrivenMarkMode::Ewma => {
+            env.warp_to_slot(10);
+            env.push_ewma_mark(0, 10, ADVERSE_MARK)
+                .map_err(|error| format!("publish bilateral EWMA mark: {error}"))?;
+            None
+        }
+        TradeDrivenMarkMode::HybridAfterHours => {
+            env.set_clock(10, 110);
+            Some(env.set_pyth_price(
+                &hybrid_feed.ok_or_else(|| "hybrid feed missing".to_string())?,
+                ADVERSE_MARK as i64,
+                -6,
+                100,
+                110,
+            ))
+        }
+    };
+    for actor in 0..env.actors.len() {
+        let observations = if actor == 0 || hybrid_tail.is_some() {
+            vec![CrankObservationHint {
+                asset_index: 0,
+                oracle_accounts: u8::from(hybrid_tail.is_some()),
+            }]
+        } else {
+            Vec::new()
+        };
+        if let Some(oracle) = hybrid_tail {
+            env.crank_with_oracles(actor, 10, observations, &[oracle])
+        } else {
+            env.crank(actor, 10, observations)
+        }
+        .map_err(|error| format!("setup crank actor {actor}: {error}"))?;
+    }
+    let setup_mark = env.primary_market_state().1.assets[0].effective_price;
+    let mover_capital = env.primary_portfolio(0).capital.get();
+    if mover_capital == 0 || mover_capital >= u128::from(setup_mark) {
+        return Err(format!(
+            "fixture did not leave a live underfunded mover: capital={mover_capital}, mark={setup_mark}"
+        ));
+    }
+
+    let coalition_equity_before = discovery_portfolio_equity(&env, 0)?
+        .checked_add(discovery_portfolio_equity(&env, 2)?)
+        .ok_or_else(|| "coalition pre-equity overflow".to_string())?;
+    let victim_equity_before = discovery_portfolio_equity(&env, 3)?;
+    let fee_counterparty_equity_before = discovery_portfolio_equity(&env, 1)?;
+    let insurance_before = env.primary_market_state().1.insurance;
+
+    env.set_matcher_spreads(1, 9_000, 9_000)
+        .map_err(|error| format!("configure exit matcher: {error}"))?;
+    match mode {
+        TradeDrivenMarkMode::Ewma => env.warp_to_slot(20),
+        TradeDrivenMarkMode::HybridAfterHours => env.set_clock(20, 1_000),
+    }
+    execute_discovery_trade_route(&mut env, route, 0, 1, 0, MOVER_Q, 0)
+        .map_err(|error| format!("underfunded risk-reducing exit: {error}"))?;
+    let queued_mark = env.primary_profile(0).mark_ewma_e6;
+    for actor in [2usize, 3] {
+        let observations = if actor == 2 || hybrid_tail.is_some() {
+            vec![CrankObservationHint {
+                asset_index: 0,
+                oracle_accounts: u8::from(hybrid_tail.is_some()),
+            }]
+        } else {
+            Vec::new()
+        };
+        if let Some(oracle) = hybrid_tail {
+            env.crank_with_oracles(actor, 20, observations, &[oracle])
+        } else {
+            env.crank(actor, 20, observations)
+        }
+        .map_err(|error| format!("apply bilateral mark to actor {actor}: {error}"))?;
+    }
+
+    let victim_loss = u128::try_from(
+        victim_equity_before
+            .checked_sub(discovery_portfolio_equity(&env, 3)?)
+            .ok_or_else(|| "bilateral mark increased victim equity".to_string())?,
+    )
+    .map_err(|_| "bilateral victim loss is negative".to_string())?;
+    let fee_counterparty_loss = u128::try_from(
+        fee_counterparty_equity_before
+            .checked_sub(discovery_portfolio_equity(&env, 1)?)
+            .ok_or_else(|| "bilateral mark increased fee counterparty equity".to_string())?,
+    )
+    .map_err(|_| "fee counterparty loss is negative".to_string())?;
+    let insurance_gain = env
+        .primary_market_state()
+        .1
+        .insurance
+        .checked_sub(insurance_before)
+        .ok_or_else(|| "bilateral mark reduced insurance".to_string())?;
+
+    env.trade_cpi(2, close_lp, 0, -BENEFICIARY_Q, 0, 0)
+        .map_err(|error| format!("close beneficiary through independent LP: {error}"))?;
+    let released = env.primary_portfolio(2).pnl.get().max(0) as u128;
+    if released == 0 {
+        return Err("bilateral mark produced no releasable coalition PnL".into());
+    }
+    env.convert_released_pnl(2, released)
+        .map_err(|error| format!("convert bilateral coalition PnL: {error}"))?;
+    for actor in [2usize, 0] {
+        let capital = env.primary_portfolio(actor).capital.get();
+        if capital != 0 {
+            env.withdraw_primary(actor, capital)
+                .map_err(|error| format!("withdraw bilateral actor {actor}: {error}"))?;
+        }
+    }
+    let extracted_tokens = u128::from(env.token_amount(env.actors[0].destination_token))
+        .checked_add(u128::from(
+            env.token_amount(env.actors[2].destination_token),
+        ))
+        .ok_or_else(|| "bilateral extracted SPL overflow".to_string())?;
+    let coalition_equity_before = u128::try_from(coalition_equity_before)
+        .map_err(|_| "coalition began insolvent".to_string())?;
+    let coalition_profit = extracted_tokens
+        .checked_sub(coalition_equity_before)
+        .ok_or_else(|| "bilateral coalition did not extract above pre-equity".to_string())?;
+    if env.token_supply_observed() != supply_before {
+        return Err("bilateral mark-fee world changed SPL supply".into());
+    }
+    Ok(BilateralMarkFeeDiscovery {
+        mode,
+        route,
+        setup_mark,
+        queued_mark,
+        coalition_profit,
+        victim_loss,
+        fee_counterparty_loss,
+        insurance_gain,
+        extracted_tokens,
+    })
+}
+
+pub fn discover_bilateral_mark_fee_violations(
+    seed: [u8; 32],
+) -> Result<Vec<BilateralMarkFeeDiscovery>, String> {
+    let mut discoveries = Vec::new();
+    for mode in TradeDrivenMarkMode::ALL {
+        for route in [DiscoveryTradeRoute::Cpi, DiscoveryTradeRoute::BatchCpi] {
+            discoveries.push(discover_one_bilateral_mark_fee_violation(
+                seed, mode, route,
+            )?);
         }
     }
     Ok(discoveries)
