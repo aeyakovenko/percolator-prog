@@ -742,6 +742,29 @@ pub struct CrossDomainInsuranceDiscovery {
     pub progress_calls: u16,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CrossDomainBackingDiscovery {
+    pub unfunded_claim_before_num: u128,
+    pub funded_claim_before_num: u128,
+    pub funded_backing_consumed_num: u128,
+    pub winner_capital_gain: u128,
+    pub extracted_tokens: u64,
+}
+
+impl CrossDomainBackingDiscovery {
+    pub fn is_violation(&self) -> bool {
+        self.unfunded_claim_before_num != 0
+            && self.funded_claim_before_num == self.unfunded_claim_before_num
+            && self.funded_backing_consumed_num == self.funded_claim_before_num.saturating_mul(2)
+            && self.winner_capital_gain
+                == self
+                    .funded_backing_consumed_num
+                    .checked_div(percolator::BOUND_SCALE)
+                    .unwrap_or(0)
+            && u128::from(self.extracted_tokens) > self.winner_capital_gain
+    }
+}
+
 impl CrossDomainInsuranceDiscovery {
     pub fn is_violation(&self) -> bool {
         self.unrelated_insurance_spent != 0
@@ -5981,5 +6004,127 @@ pub fn discover_cross_domain_insurance_violation(
         coalition_payout,
         coalition_profit,
         progress_calls,
+    })
+}
+
+pub fn discover_cross_domain_backing_violation(
+    mut seed: [u8; 32],
+) -> Result<CrossDomainBackingDiscovery, String> {
+    const INITIAL_PRICE: u64 = 100;
+    const MOVED_PRICE: u64 = 105;
+    const SIZE_Q: i128 = 20 * POS_SCALE as i128;
+    const CLAIM_PER_ASSET: u128 = 100;
+    const UNFUNDED_SOURCE_DOMAIN: usize = 1;
+    const FUNDED_SOURCE_DOMAIN: usize = 3;
+    const DEPOSIT: u128 = 1_000;
+
+    seed[0] ^= 0xae;
+    let mut env = V16Svm::new(
+        seed,
+        MarketConfig {
+            initial_price: INITIAL_PRICE,
+            maintenance_margin_bps: 1_000,
+            initial_margin_bps: 1_000,
+            max_price_move_bps_per_slot: 500,
+            max_accrual_dt_slots: 1,
+            min_funding_lifetime_slots: 1,
+            actor_deposits: [DEPOSIT; PRIMARY_ACTOR_COUNT],
+            ..MarketConfig::default()
+        },
+    );
+    let supply_before = env.token_supply_observed();
+    let provider_source_before = env.token_amount(env.provider_source_token);
+    env.top_up_backing_bucket(FUNDED_SOURCE_DOMAIN as u16, 2 * CLAIM_PER_ASSET, 10)
+        .map_err(|error| format!("fund higher source domain: {error}"))?;
+    if provider_source_before.checked_sub(env.token_amount(env.provider_source_token))
+        != Some((2 * CLAIM_PER_ASSET) as u64)
+    {
+        return Err("provider top-up did not debit exact principal".into());
+    }
+
+    for asset in [0u16, 1] {
+        env.trade_no_cpi(0, 1, asset, SIZE_Q, INITIAL_PRICE, 0)
+            .map_err(|error| format!("open winner asset {asset}: {error}"))?;
+    }
+    env.warp_to_slot(2);
+    for asset in [0u16, 1] {
+        env.push_auth_mark(asset, 2, MOVED_PRICE)
+            .map_err(|error| format!("move asset {asset}: {error}"))?;
+        env.crank(
+            0,
+            2,
+            vec![CrankObservationHint {
+                asset_index: asset,
+                oracle_accounts: env.primary_profile(asset as usize).oracle_leg_count,
+            }],
+        )
+        .map_err(|error| format!("refresh winner asset {asset}: {error}"))?;
+    }
+    let before = env.primary_market_state().1;
+    let unfunded_claim_before_num =
+        before.source_credit[UNFUNDED_SOURCE_DOMAIN].positive_claim_bound_num;
+    let funded_claim_before_num =
+        before.source_credit[FUNDED_SOURCE_DOMAIN].positive_claim_bound_num;
+    if env.primary_portfolio(0).pnl.get() != (2 * CLAIM_PER_ASSET) as i128
+        || unfunded_claim_before_num != CLAIM_PER_ASSET * percolator::BOUND_SCALE
+        || funded_claim_before_num != CLAIM_PER_ASSET * percolator::BOUND_SCALE
+        || before.source_credit[UNFUNDED_SOURCE_DOMAIN].fresh_reserved_backing_num != 0
+        || before.source_credit[FUNDED_SOURCE_DOMAIN].fresh_reserved_backing_num
+            != 2 * CLAIM_PER_ASSET * percolator::BOUND_SCALE
+    {
+        return Err(
+            "source-domain fixture did not create one unfunded and one funded claim".into(),
+        );
+    }
+
+    for asset in [0u16, 1] {
+        env.trade_no_cpi(0, 2, asset, -SIZE_Q, MOVED_PRICE, 0)
+            .map_err(|error| format!("flatten winner asset {asset}: {error}"))?;
+    }
+    env.convert_released_pnl(0, CLAIM_PER_ASSET)
+        .map_err(|error| format!("first aggregate conversion: {error}"))?;
+    let after_first = env.primary_market_state().1;
+    if after_first.source_credit[UNFUNDED_SOURCE_DOMAIN].positive_claim_bound_num != 0
+        || after_first.source_credit[FUNDED_SOURCE_DOMAIN].positive_claim_bound_num
+            != CLAIM_PER_ASSET * percolator::BOUND_SCALE
+        || after_first.source_backing_buckets[FUNDED_SOURCE_DOMAIN].consumed_liened_backing_num
+            != CLAIM_PER_ASSET * percolator::BOUND_SCALE
+    {
+        return Err(
+            "first conversion did not expose source claim/backing desynchronization".into(),
+        );
+    }
+
+    env.trade_no_cpi(0, 2, 0, POS_SCALE as i128, MOVED_PRICE, 0)
+        .map_err(|error| format!("refresh-certificate open: {error}"))?;
+    env.trade_no_cpi(0, 2, 0, -(POS_SCALE as i128), MOVED_PRICE, 0)
+        .map_err(|error| format!("refresh-certificate close: {error}"))?;
+    env.convert_released_pnl(0, CLAIM_PER_ASSET)
+        .map_err(|error| format!("second aggregate conversion: {error}"))?;
+    let after_second = env.primary_market_state().1;
+    let funded_backing_consumed_num =
+        after_second.source_backing_buckets[FUNDED_SOURCE_DOMAIN].consumed_liened_backing_num;
+    let winner_capital_gain = env
+        .primary_portfolio(0)
+        .capital
+        .get()
+        .checked_sub(DEPOSIT)
+        .ok_or_else(|| "winner did not gain capital".to_string())?;
+    if env.primary_portfolio(0).pnl.get() != 0 {
+        return Err("winner retained PnL after second conversion".into());
+    }
+    let winner_capital = env.primary_portfolio(0).capital.get();
+    env.withdraw_primary(0, winner_capital)
+        .map_err(|error| format!("withdraw cross-domain winner: {error}"))?;
+    let extracted_tokens = env.token_amount(env.actors[0].destination_token);
+    if env.token_supply_observed() != supply_before {
+        return Err("cross-domain backing world changed SPL supply".into());
+    }
+    Ok(CrossDomainBackingDiscovery {
+        unfunded_claim_before_num,
+        funded_claim_before_num,
+        funded_backing_consumed_num,
+        winner_capital_gain,
+        extracted_tokens,
     })
 }

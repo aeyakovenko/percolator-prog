@@ -40,7 +40,7 @@
 264	LoF	BLOCKER	INV-045	independent-discovery	[BLOCKER LoF] Bind AuthMark targets before exposure migration
 265	LoF	BLOCKER	INV-045	independent-discovery	[BLOCKER LoF] Publish EWMA oracle targets before exposure changes
 266	DoS	BLOCKER	INV-073	missing	[BLOCKER DoS] Keep exact-OI ADL survivors exit-live
-267	LoF	BLOCKER	INV-031	direct-regression	[BLOCKER LoF] Keep source backing domain-local
+267	LoF	BLOCKER	INV-031	independent-discovery	[BLOCKER LoF] Keep source backing domain-local
 268	DoS	BLOCKER	INV-073	missing	[BLOCKER DoS] Keep unilateral exact-OI ADL survivors exit-live
 269	DoS	BLOCKER	INV-077	missing	[BLOCKER DoS] Keep max-shape zero-delta stale resolution live
 270	DoS	BLOCKER	INV-028	missing	[BLOCKER DoS] Keep source-heavy portfolios settlement-live

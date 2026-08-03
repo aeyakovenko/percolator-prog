@@ -73,3 +73,4 @@ INV-038	fractional-movement/max-dt-crank	v16_program_fractional_max_dt_cranks_di
 INV-020	composite-oracle/timestamp-coherence	v16_program_composite_timestamp_coherence_discovers_cross_epoch_liquidation	composite-oracle-legs-must-share-one-coherent-observation-epoch	331
 INV-067	terminal-payout/dust-round-trip	v16_program_reported_route_matrix_discovers_terminal_dust_erasure	terminal-payout-is-invariant-to-flattened-dust-position	283
 INV-034	cross-asset-debt/foreign-insurance	v16_program_cross_asset_debt_discovers_foreign_insurance_spend	insurance-spend-remains-source-domain-local	290
+INV-031	cross-source-claims/backing-consume	v16_program_two_source_claims_discover_backing_double_consume	backing-atoms-cannot-support-claims-from-another-source	267
