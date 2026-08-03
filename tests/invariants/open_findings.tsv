@@ -72,7 +72,7 @@
 299	LoF	HARDENING	INV-003	independent-discovery	[HARDENING LoF] Bind withdrawals to portfolio incarnations
 300	DoS	BLOCKER	INV-028	nonqualifying	[BLOCKER DoS] Prevent foreign expiry from stranding resolved source liens
 301	LoF	HARDENING	INV-003	independent-discovery	[HARDENING LoF] Bind PnL conversion to portfolio incarnations
-302	DoS	BLOCKER	INV-030	missing	[BLOCKER DoS] Route prospective loss after source impairment
+302	DoS	BLOCKER	INV-030	nonqualifying	[BLOCKER DoS] Route prospective loss after source impairment
 303	LoF	HARDENING	INV-003	independent-discovery	[HARDENING LoF] Bind trades to portfolio incarnations
 304	LoF	HARDENING	INV-003	independent-discovery	[HARDENING LoF] Bind matcher grants to portfolio incarnations
 305	LoF	HARDENING	INV-003	independent-discovery	[HARDENING LoF] Bind deposits to portfolio incarnations

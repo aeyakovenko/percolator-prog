@@ -15,9 +15,10 @@
 //! progress from the source-lien rank rather than the return code. It records repeated successful
 //! no-op cranks, permits any genuine partial reductions, and requires every remaining owner route
 //! to roll back exactly once the reduction sequence reaches a funded nonzero fixed point.
-//! `v16_program_foreign_expiry_lien_prerequisite_matrix_keeps_bucket_fresh` constructs the exact
-//! two-winner precursor and proves whether the lien-free close can create the impaired aggregate
-//! state required by the later foreign-expiry finding.
+//! `v16_program_shared_expiry_prerequisite_matrix_keeps_bucket_fresh` constructs the exact
+//! two-winner precursor with both a live source lien and a prospective adverse K/F delta, then
+//! proves whether the lien-free close can create the impaired aggregate state required by either
+//! downstream finding.
 //!
 //! Guarantee boundary: this is a public maximum-shape counterexample on the vulnerable engine
 //! pin. It does not certify the fixed admission reservation rule.
@@ -25,7 +26,7 @@
 use super::*;
 
 #[test]
-fn v16_program_foreign_expiry_lien_prerequisite_matrix_keeps_bucket_fresh() {
+fn v16_program_shared_expiry_prerequisite_matrix_keeps_bucket_fresh() {
     const Q: i128 = 1_000 * POS_SCALE as i128;
     const PRICE: u64 = 100;
     const UP_PRICE: u64 = 105;
@@ -71,7 +72,7 @@ fn v16_program_foreign_expiry_lien_prerequisite_matrix_keeps_bucket_fresh() {
 
     env.svm.warp_to_slot(2);
     env.push_auth_mark_for_asset_as_admin(0, 2, UP_PRICE);
-    for portfolio in [target_peer, trigger_peer, target, trigger] {
+    for portfolio in [target_peer, target, trigger] {
         env.crank(
             portfolio,
             ProgInstruction::PermissionlessCrank {
@@ -82,6 +83,12 @@ fn v16_program_foreign_expiry_lien_prerequisite_matrix_keeps_bucket_fresh() {
     }
     assert_eq!(env.portfolio_state(target).pnl.get(), 5_000);
     assert_eq!(env.portfolio_state(trigger).pnl.get(), 5_000);
+    let prospective_loser = env.portfolio_state(trigger_peer);
+    assert_eq!(prospective_loser.pnl.get(), 0);
+    assert!(
+        env.market_state().1.assets[0].k_short < active_leg_for_asset(&prospective_loser, 0).k_snap,
+        "the opposing loser must retain an adverse prospective K/F delta"
+    );
     env.trade_with_cu(
         &target_owner,
         target,
