@@ -177,12 +177,12 @@ fn v16_open_security_finding_benchmark_is_complete_and_non_overclaiming() {
 
     assert_eq!(rows, 143, "refresh the dated GitHub finding snapshot");
     assert_eq!(direct, 0, "direct adapter inventory changed");
-    assert_eq!(missing, 36, "explicit finding gaps changed");
+    assert_eq!(missing, 35, "explicit finding gaps changed");
     assert_eq!(
         independent, 106,
         "promote only genuinely finding-agnostic invariant discoveries"
     );
-    assert_eq!(nonqualifying, 1, "nonqualifying evidence roster changed");
+    assert_eq!(nonqualifying, 2, "nonqualifying evidence roster changed");
 
     let independent_sources = [
         include_str!("../stateful/inv_001_market_incarnation_binding.rs"),
@@ -310,9 +310,10 @@ fn v16_open_security_finding_benchmark_is_complete_and_non_overclaiming() {
         "every promoted benchmark row needs a finding-agnostic fingerprint"
     );
 
-    let nonqualifying_sources = [include_str!(
-        "../cu/inv_077_bounded_work_and_maximum_shape_compute.rs"
-    )];
+    let nonqualifying_sources = [
+        include_str!("inv_079_public_reachability_evidence.rs"),
+        include_str!("../cu/inv_077_bounded_work_and_maximum_shape_compute.rs"),
+    ];
     let mut classified_prs = std::collections::BTreeSet::new();
     for line in include_str!("../nonqualifying_findings.tsv").lines() {
         if line.starts_with('#') || line.is_empty() {

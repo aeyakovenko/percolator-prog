@@ -1,4 +1,5 @@
 # Open finding claims that do not meet the public LoF/DoS acceptance rule on the pinned program.
 # Every row needs executable public-route evidence or a canonical independently discovered duplicate.
 # pr	classification	evidence	reason
+204	bounded-public-exit	v16_program_known_blockers_remain_explicit_until_fixed	Authenticated same-price observations let the owner leave the publicly reached lapsed-backing state, so it is not a persistent exit lock.
 269	current-pin-safe	v16_program_dense_zero_delta_resolution_shape_matrix_keeps_terminal_exit_bounded	Public max-shape stale resolution and funded terminal payout both fit on the pinned program.
