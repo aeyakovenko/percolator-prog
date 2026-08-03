@@ -706,6 +706,16 @@ pub struct TerminalCommitOrderingDiscovery {
     pub reordered_total_payout: u128,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ShutdownCommitOrderingDiscovery {
+    pub control_f_long_num: i128,
+    pub control_f_short_num: i128,
+    pub shutdown_f_long_num: i128,
+    pub shutdown_f_short_num: i128,
+    pub victim_payout_loss: u128,
+    pub counterparty_payout_gain: u128,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProspectiveAccrualDiscovery {
     pub route: ProspectiveAccrualRoute,
@@ -1115,6 +1125,17 @@ impl TerminalCommitOrderingDiscovery {
             && self.victim_payout_loss != 0
             && self.victim_payout_loss == self.counterparty_payout_gain
             && self.committed_total_payout == self.reordered_total_payout
+    }
+}
+
+impl ShutdownCommitOrderingDiscovery {
+    pub fn is_violation(&self) -> bool {
+        self.control_f_long_num > 0
+            && self.control_f_short_num < 0
+            && self.shutdown_f_long_num == 0
+            && self.shutdown_f_short_num == 0
+            && self.victim_payout_loss != 0
+            && self.victim_payout_loss == self.counterparty_payout_gain
     }
 }
 
@@ -4405,6 +4426,139 @@ pub fn discover_terminal_commit_ordering(
         counterparty_payout_gain,
         committed_total_payout,
         reordered_total_payout,
+    })
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ShutdownCommitWorld {
+    f_long_num: i128,
+    f_short_num: i128,
+    long_payout: u128,
+    short_payout: u128,
+}
+
+fn run_shutdown_commit_world(
+    mut seed: [u8; 32],
+    commit_before_shutdown: bool,
+) -> Result<ShutdownCommitWorld, String> {
+    const LONG: usize = 0;
+    const SHORT: usize = 1;
+    const ORACLE: usize = 2;
+    const PRICE: u64 = 100;
+    const MARK: u64 = 99;
+    const SIZE_Q: i128 = 100_000 * POS_SCALE as i128;
+    const DEPOSIT: u128 = 100_000_000;
+    const PRIME_SLOT: u64 = 2;
+    const SHUTDOWN_SLOT: u64 = 3;
+    const FORCE_CLOSE_SLOT: u64 = 4;
+    seed[0] ^= 0x54;
+    seed[1] ^= u8::from(commit_before_shutdown);
+    let mut env = V16Svm::new(
+        seed,
+        MarketConfig {
+            initial_price: PRICE,
+            max_price_move_bps_per_slot: 1,
+            max_accrual_dt_slots: 1,
+            max_abs_funding_e9_per_slot: 10_000,
+            min_funding_lifetime_slots: 1,
+            actor_deposits: [DEPOSIT, DEPOSIT, 1, 1, 1],
+            actor_token_balances: [DEPOSIT as u64, DEPOSIT as u64, 2, 2, 2],
+            ..MarketConfig::default()
+        },
+    );
+    let supply_before = env.token_supply_observed();
+    env.configure_permissionless_resolve(1_000, 1)
+        .map_err(|error| format!("configure shutdown recovery: {error}"))?;
+    env.update_asset_authority_from_admin(0, percolator_prog::processor::ASSET_AUTH_ORACLE, ORACLE)
+        .map_err(|error| format!("separate shutdown oracle: {error}"))?;
+    env.trade_no_cpi(LONG, SHORT, 0, SIZE_Q, PRICE, 0)
+        .map_err(|error| format!("open shutdown funding pair: {error}"))?;
+
+    env.warp_to_slot(PRIME_SLOT);
+    env.push_auth_mark_for_actor(ORACLE, 0, PRIME_SLOT, MARK)
+        .map_err(|error| format!("publish committed shutdown mark: {error}"))?;
+    env.crank(
+        LONG,
+        PRIME_SLOT,
+        vec![CrankObservationHint {
+            asset_index: 0,
+            oracle_accounts: 0,
+        }],
+    )
+    .map_err(|error| format!("prime shutdown funding checkpoint: {error}"))?;
+    let (_, primed) = env.primary_market_state();
+    if primed.assets[0].effective_price != PRICE
+        || primed.assets[0].f_long_num != 0
+        || primed.assets[0].f_short_num != 0
+    {
+        return Err("shutdown fixture did not isolate a zero-price-move funding segment".into());
+    }
+
+    env.warp_to_slot(SHUTDOWN_SLOT);
+    if commit_before_shutdown {
+        env.crank(
+            LONG,
+            SHUTDOWN_SLOT,
+            vec![CrankObservationHint {
+                asset_index: 0,
+                oracle_accounts: 0,
+            }],
+        )
+        .map_err(|error| format!("commit funding before shutdown: {error}"))?;
+    }
+    env.shutdown_asset(0, SHUTDOWN_SLOT)
+        .map_err(|error| format!("shutdown exposed asset: {error}"))?;
+    let (_, shutdown) = env.primary_market_state();
+    if shutdown.assets[0].effective_price != PRICE {
+        return Err("shutdown funding fixture unexpectedly moved effective price".into());
+    }
+    let f_long_num = shutdown.assets[0].f_long_num;
+    let f_short_num = shutdown.assets[0].f_short_num;
+
+    env.warp_to_slot(FORCE_CLOSE_SLOT);
+    env.force_close_abandoned_asset(ORACLE, LONG, SHORT, 0, FORCE_CLOSE_SLOT, SIZE_Q as u128)
+        .map_err(|error| format!("force close shutdown pair: {error}"))?;
+    env.resolve_market()
+        .map_err(|error| format!("resolve shutdown fixture: {error}"))?;
+    env.warp_to_slot(FORCE_CLOSE_SLOT + 1);
+    let long_payout = drain_resolved_discovery_actor(&mut env, LONG)?;
+    let short_payout = drain_resolved_discovery_actor(&mut env, SHORT)?;
+    if env.token_supply_observed() != supply_before {
+        return Err("shutdown commit world changed SPL supply".into());
+    }
+    Ok(ShutdownCommitWorld {
+        f_long_num,
+        f_short_num,
+        long_payout,
+        short_payout,
+    })
+}
+
+pub fn discover_shutdown_commit_ordering(
+    seed: [u8; 32],
+) -> Result<ShutdownCommitOrderingDiscovery, String> {
+    let control = run_shutdown_commit_world(seed, true)?;
+    let shutdown_first = run_shutdown_commit_world(seed, false)?;
+    let victim_payout_loss = control
+        .long_payout
+        .checked_sub(shutdown_first.long_payout)
+        .ok_or_else(|| "shutdown-first ordering increased long payout".to_string())?;
+    let counterparty_payout_gain = shutdown_first
+        .short_payout
+        .checked_sub(control.short_payout)
+        .ok_or_else(|| "shutdown-first ordering decreased short payout".to_string())?;
+    if control.long_payout + control.short_payout
+        != shutdown_first.long_payout + shutdown_first.short_payout
+    {
+        return Err("shutdown order worlds did not conserve terminal payouts".into());
+    }
+    Ok(ShutdownCommitOrderingDiscovery {
+        control_f_long_num: control.f_long_num,
+        control_f_short_num: control.f_short_num,
+        shutdown_f_long_num: shutdown_first.f_long_num,
+        shutdown_f_short_num: shutdown_first.f_short_num,
+        victim_payout_loss,
+        counterparty_payout_gain,
     })
 }
 

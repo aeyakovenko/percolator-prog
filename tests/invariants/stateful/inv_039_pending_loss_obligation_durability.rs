@@ -10,7 +10,11 @@
 //! `v16_program_prospective_accrual_route_matrix_discovers_timestamp_rewrite` independently
 //! varies single and batch no-CPI trade routes around the same funding catch-up boundary. It
 //! requires identical terminal prices and total payout while detecting an erased funding index,
-//! an equal victim payout loss, and coalition gain. Direct impact tests remain below. These tests
+//! an equal victim payout loss, and coalition gain.
+//! `v16_program_shutdown_commit_ordering_discovers_erased_funding` applies the same ordering
+//! oracle to asset shutdown while constraining the effective price to remain unchanged. Any payout
+//! difference is therefore a committed funding transfer erased by the lifecycle transition.
+//! Direct impact tests remain below. These tests
 //! exercise the deployed public
 //! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
 //! rollback, liveness, or compute outcomes appropriate to the invariant.
@@ -53,6 +57,19 @@ proptest! {
             violations,
             AccrualOrderingKind::ALL.to_vec(),
             "vulnerable-pin accrual-ordering corpus changed"
+        );
+    }
+
+    #[test]
+    fn v16_program_shutdown_commit_ordering_discovers_erased_funding(
+        seed in any::<[u8; 32]>()
+    ) {
+        let discovery = discover_shutdown_commit_ordering(seed)
+            .map_err(TestCaseError::fail)?;
+        eprintln!("independent shutdown-commit discovery: {discovery:?}");
+        prop_assert!(
+            discovery.is_violation(),
+            "vulnerable-pin shutdown ordering changed: {discovery:?}"
         );
     }
 }
