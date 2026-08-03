@@ -60,6 +60,58 @@ pub enum AssetIntentKind {
     ResolvePolicy,
 }
 
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum AuthorityIntentKind {
+    MarketAuthorityHandoff,
+    AssetAdminHandoff,
+    InsuranceAuthorityHandoff,
+    InsuranceOperatorHandoff,
+    BackingAuthorityHandoff,
+    OracleAuthorityHandoff,
+    ResolveMarket,
+}
+
+impl AuthorityIntentKind {
+    pub const ALL: [Self; 7] = [
+        Self::MarketAuthorityHandoff,
+        Self::AssetAdminHandoff,
+        Self::InsuranceAuthorityHandoff,
+        Self::InsuranceOperatorHandoff,
+        Self::BackingAuthorityHandoff,
+        Self::OracleAuthorityHandoff,
+        Self::ResolveMarket,
+    ];
+
+    fn discriminator(self) -> u8 {
+        match self {
+            Self::MarketAuthorityHandoff => 0,
+            Self::AssetAdminHandoff => 1,
+            Self::InsuranceAuthorityHandoff => 2,
+            Self::InsuranceOperatorHandoff => 3,
+            Self::BackingAuthorityHandoff => 4,
+            Self::OracleAuthorityHandoff => 5,
+            Self::ResolveMarket => 6,
+        }
+    }
+
+    fn asset_authority_kind(self) -> Option<u8> {
+        match self {
+            Self::AssetAdminHandoff => Some(percolator_prog::processor::ASSET_AUTH_ADMIN),
+            Self::InsuranceAuthorityHandoff => {
+                Some(percolator_prog::processor::ASSET_AUTH_INSURANCE)
+            }
+            Self::InsuranceOperatorHandoff => {
+                Some(percolator_prog::processor::ASSET_AUTH_INSURANCE_OPERATOR)
+            }
+            Self::BackingAuthorityHandoff => {
+                Some(percolator_prog::processor::ASSET_AUTH_BACKING_BUCKET)
+            }
+            Self::OracleAuthorityHandoff => Some(percolator_prog::processor::ASSET_AUTH_ORACLE),
+            Self::MarketAuthorityHandoff | Self::ResolveMarket => None,
+        }
+    }
+}
+
 impl AssetIntentKind {
     pub const ALL: [Self; 15] = [
         Self::TradeNoCpi,
@@ -166,6 +218,20 @@ pub struct AssetGenerationDiscovery {
     pub accepted_stale_intent: bool,
     pub mutated_economic_state: bool,
     pub compute_units: Option<u64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AuthorityIncarnationDiscovery {
+    pub kind: AuthorityIntentKind,
+    pub accepted_stale_intent: bool,
+    pub mutated_economic_state: bool,
+    pub compute_units: Option<u64>,
+}
+
+impl AuthorityIncarnationDiscovery {
+    pub fn is_violation(&self) -> bool {
+        self.accepted_stale_intent && self.mutated_economic_state
+    }
 }
 
 impl AssetGenerationDiscovery {
@@ -829,4 +895,115 @@ pub fn discover_asset_generation_replays(
         discoveries.push(discovery);
     }
     Ok(discoveries)
+}
+
+fn discover_one_authority_incarnation_replay(
+    mut seed: [u8; 32],
+    kind: AuthorityIntentKind,
+) -> Result<AuthorityIncarnationDiscovery, String> {
+    const ASSET: u16 = 1;
+    const AUTHORITY_A: usize = 0;
+    const AUTHORITY_B: usize = 1;
+    const TARGET: usize = 2;
+    seed[0] ^= 0xd5;
+    seed[1] ^= kind.discriminator();
+    let mut env = V16Svm::new(seed, MarketConfig::default());
+    let supply_before = env.token_supply_observed();
+
+    let retained = match kind {
+        AuthorityIntentKind::MarketAuthorityHandoff => {
+            env.build_retained_market_authority_handoff_from_admin(TARGET)
+        }
+        AuthorityIntentKind::ResolveMarket => env.build_retained_resolve_market(),
+        _ => {
+            let authority_kind = kind
+                .asset_authority_kind()
+                .expect("asset authority operation");
+            env.update_asset_authority_from_admin(ASSET, authority_kind, AUTHORITY_A)
+                .map_err(|error| format!("install authority A: {error}"))?;
+            env.build_retained_asset_authority_handoff_between_actors(
+                ASSET,
+                authority_kind,
+                AUTHORITY_A,
+                TARGET,
+            )
+        }
+    };
+
+    match kind {
+        AuthorityIntentKind::MarketAuthorityHandoff | AuthorityIntentKind::ResolveMarket => {
+            env.update_market_authority_from_admin(AUTHORITY_B)
+                .map_err(|error| format!("rotate market authority A to B: {error}"))?;
+            env.update_market_authority_to_admin(AUTHORITY_B)
+                .map_err(|error| format!("rotate market authority B to A: {error}"))?;
+        }
+        _ => {
+            let authority_kind = kind
+                .asset_authority_kind()
+                .expect("asset authority operation");
+            env.update_asset_authority_between_actors(
+                ASSET,
+                authority_kind,
+                AUTHORITY_A,
+                AUTHORITY_B,
+            )
+            .map_err(|error| format!("rotate asset authority A to B: {error}"))?;
+            env.update_asset_authority_between_actors(
+                ASSET,
+                authority_kind,
+                AUTHORITY_B,
+                AUTHORITY_A,
+            )
+            .map_err(|error| format!("rotate asset authority B to A: {error}"))?;
+        }
+    }
+
+    let before = fingerprint(&env);
+    let result = env.land_retained(retained);
+    let after = fingerprint(&env);
+    if env.token_supply_observed() != supply_before {
+        return Err(format!(
+            "{kind:?} authority-incarnation probe changed SPL supply: {supply_before} -> {}",
+            env.token_supply_observed()
+        ));
+    }
+
+    match result {
+        Ok(success) => {
+            let mutated_economic_state = before != after;
+            if !mutated_economic_state {
+                return Err(format!(
+                    "{kind:?} stale authority transaction succeeded without an observable state delta"
+                ));
+            }
+            Ok(AuthorityIncarnationDiscovery {
+                kind,
+                accepted_stale_intent: true,
+                mutated_economic_state,
+                compute_units: Some(success.compute_units),
+            })
+        }
+        Err(_) => {
+            if before != after {
+                return Err(format!(
+                    "{kind:?} rejected stale authority transaction did not roll back exactly"
+                ));
+            }
+            Ok(AuthorityIncarnationDiscovery {
+                kind,
+                accepted_stale_intent: false,
+                mutated_economic_state: false,
+                compute_units: None,
+            })
+        }
+    }
+}
+
+pub fn discover_authority_incarnation_replays(
+    seed: [u8; 32],
+) -> Result<Vec<AuthorityIncarnationDiscovery>, String> {
+    AuthorityIntentKind::ALL
+        .into_iter()
+        .map(|kind| discover_one_authority_incarnation_replay(seed, kind))
+        .collect()
 }

@@ -2,7 +2,10 @@
 //!
 //! Normative obligation: Authority consent cannot revive after rotation, disablement, or A-to-B-to-A reuse.
 //!
-//! Evidence in this file (F over public I routes): `v16_program_pr251_delayed_asset_authority_revival_fuzz`, `v16_program_pr345_pr346_authority_handoff_aba_replay_fuzz`, `v16_program_pr353_resolve_authority_incarnation_replay_fuzz`. These tests exercise the deployed public
+//! Evidence in this file (F over public I routes):
+//! `v16_program_authority_incarnation_operation_matrix_discovers_aba_replays` enumerates market
+//! and asset authority scopes without finding metadata. Direct impact regressions remain below.
+//! These tests exercise the deployed public
 //! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
 //! rollback, liveness, or compute outcomes appropriate to the invariant.
 //!
@@ -11,6 +14,42 @@
 //! plus every additional verification method required by the charter.
 
 use super::*;
+
+proptest! {
+    #![proptest_config(ProptestConfig {
+        cases: env_usize("PERCOLATOR_FUZZ_CASES", 8) as u32,
+        max_shrink_iters: env_usize("PERCOLATOR_FUZZ_SHRINK_ITERS", 64) as u32,
+        failure_persistence: Some(Box::new(
+            proptest::test_runner::FileFailurePersistence::Direct(
+                "proptest-regressions/inv_005_authority_incarnation_discovery.txt",
+            ),
+        )),
+        ..ProptestConfig::default()
+    })]
+
+    #[test]
+    fn v16_program_authority_incarnation_operation_matrix_discovers_aba_replays(
+        seed in any::<[u8; 32]>()
+    ) {
+        let discoveries = discover_authority_incarnation_replays(seed)
+            .map_err(TestCaseError::fail)?;
+        prop_assert_eq!(discoveries.len(), AuthorityIntentKind::ALL.len());
+        for (expected, discovery) in AuthorityIntentKind::ALL.into_iter().zip(&discoveries) {
+            prop_assert_eq!(discovery.kind, expected);
+        }
+        let violations: Vec<_> = discoveries
+            .iter()
+            .filter(|discovery| discovery.is_violation())
+            .map(|discovery| discovery.kind)
+            .collect();
+        eprintln!("independent INV-005 discoveries: {violations:?}");
+        prop_assert_eq!(
+            violations,
+            AuthorityIntentKind::ALL.to_vec(),
+            "vulnerable-pin authority-incarnation discovery corpus changed"
+        );
+    }
+}
 
 proptest! {
     #![proptest_config(ProptestConfig {

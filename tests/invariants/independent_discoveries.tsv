@@ -21,3 +21,6 @@ INV-002	asset-generation/backing-top-up	v16_program_asset_generation_operation_m
 INV-002	asset-generation/insurance-withdrawal	v16_program_asset_generation_operation_matrix_discovers_stale_intents	stale-intent-must-reject-and-roll-back-exactly	328
 INV-002	asset-generation/backing-fee-policy	v16_program_asset_generation_operation_matrix_discovers_stale_intents	stale-intent-must-reject-and-roll-back-exactly	318
 INV-002	asset-generation/market-resolve	v16_program_asset_generation_operation_matrix_discovers_stale_intents	stale-intent-must-reject-and-roll-back-exactly	311
+INV-005	authority-incarnation/market-handoff	v16_program_authority_incarnation_operation_matrix_discovers_aba_replays	stale-intent-must-reject-and-roll-back-exactly	345
+INV-005	authority-incarnation/asset-role-handoff	v16_program_authority_incarnation_operation_matrix_discovers_aba_replays	stale-intent-must-reject-and-roll-back-exactly	251,346
+INV-005	authority-incarnation/terminal-resolve	v16_program_authority_incarnation_operation_matrix_discovers_aba_replays	stale-intent-must-reject-and-roll-back-exactly	353

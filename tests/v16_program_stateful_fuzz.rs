@@ -76,8 +76,9 @@ use support::fuzz_model::{
     withdrawal_retry_liquidation_seed_strategy,
 };
 use support::invariant_discovery::{
-    discover_asset_generation_replays, discover_market_incarnation_replays,
-    discover_portfolio_incarnation_replays, AssetIntentKind, MarketIntentKind, PortfolioIntentKind,
+    discover_asset_generation_replays, discover_authority_incarnation_replays,
+    discover_market_incarnation_replays, discover_portfolio_incarnation_replays, AssetIntentKind,
+    AuthorityIntentKind, MarketIntentKind, PortfolioIntentKind,
 };
 
 fn env_usize(name: &str, default: usize) -> usize {
