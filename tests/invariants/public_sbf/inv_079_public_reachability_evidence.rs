@@ -174,10 +174,10 @@ fn v16_open_security_finding_benchmark_is_complete_and_non_overclaiming() {
     }
 
     assert_eq!(rows, 145, "refresh the dated GitHub finding snapshot");
-    assert_eq!(direct, 27, "direct adapter inventory changed");
+    assert_eq!(direct, 24, "direct adapter inventory changed");
     assert_eq!(missing, 62, "explicit finding gaps changed");
     assert_eq!(
-        independent, 56,
+        independent, 59,
         "promote only genuinely finding-agnostic invariant discoveries"
     );
 
@@ -189,6 +189,7 @@ fn v16_open_security_finding_benchmark_is_complete_and_non_overclaiming() {
         include_str!("../stateful/inv_008_intent_uniqueness_and_bounded_replay.rs"),
         include_str!("../stateful/inv_014_delayed_policy_and_policy_epoch_safety.rs"),
         include_str!("../stateful/inv_036_fee_destination_and_policy_version_integrity.rs"),
+        include_str!("../stateful/inv_039_pending_loss_obligation_durability.rs"),
     ];
     let mut fingerprints = std::collections::BTreeSet::new();
     let mut mapped_prs = std::collections::BTreeSet::new();
@@ -225,6 +226,7 @@ fn v16_open_security_finding_benchmark_is_complete_and_non_overclaiming() {
                     | "newer-authorized-control-cannot-be-overwritten-by-stale-intent"
                     | "signer-debit-never-exceeds-consented-fee-terms"
                     | "provider-approved-fee-split-is-durable-and-attributed"
+                    | "pending-balanced-transfer-cannot-be-erased-by-operation-order"
             ),
             "unknown independent oracle: {}",
             fields[3]

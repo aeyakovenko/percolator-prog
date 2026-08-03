@@ -76,13 +76,13 @@ use support::fuzz_model::{
     withdrawal_retry_liquidation_seed_strategy,
 };
 use support::invariant_discovery::{
-    discover_asset_generation_replays, discover_authority_incarnation_replays,
-    discover_backing_provider_consent_violations, discover_fee_consent_violations,
-    discover_intent_retries, discover_market_incarnation_replays,
+    discover_accrual_ordering_violations, discover_asset_generation_replays,
+    discover_authority_incarnation_replays, discover_backing_provider_consent_violations,
+    discover_fee_consent_violations, discover_intent_retries, discover_market_incarnation_replays,
     discover_portfolio_incarnation_replays, discover_source_fee_consent_violations,
-    discover_superseded_intents, AssetIntentKind, AuthorityIntentKind, BackingProviderConsentOrder,
-    FeeConsentKind, MarketIntentKind, PortfolioIntentKind, RetryIntentKind, SourceFeeConsentKind,
-    SupersededIntentKind,
+    discover_superseded_intents, AccrualOrderingKind, AssetIntentKind, AuthorityIntentKind,
+    BackingProviderConsentOrder, FeeConsentKind, MarketIntentKind, PortfolioIntentKind,
+    RetryIntentKind, SourceFeeConsentKind, SupersededIntentKind,
 };
 
 fn env_usize(name: &str, default: usize) -> usize {

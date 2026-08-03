@@ -44,9 +44,9 @@
 268	DoS	BLOCKER	INV-073	missing	[BLOCKER DoS] Keep unilateral exact-OI ADL survivors exit-live
 269	DoS	BLOCKER	INV-077	missing	[BLOCKER DoS] Keep max-shape zero-delta stale resolution live
 270	DoS	BLOCKER	INV-028	missing	[BLOCKER DoS] Keep source-heavy portfolios settlement-live
-271	LoF	BLOCKER	INV-039	direct-regression	[BLOCKER LoF] Settle zero-move funding before trades
-272	LoF	BLOCKER	INV-039	direct-regression	[BLOCKER LoF] Settle zero-move funding before unilateral reduction
-273	LoF	BLOCKER	INV-039	direct-regression	[BLOCKER LoF] Accrue zero-move funding before recovery-leg forfeit
+271	LoF	BLOCKER	INV-039	independent-discovery	[BLOCKER LoF] Settle zero-move funding before trades
+272	LoF	BLOCKER	INV-039	independent-discovery	[BLOCKER LoF] Settle zero-move funding before unilateral reduction
+273	LoF	BLOCKER	INV-039	independent-discovery	[BLOCKER LoF] Accrue zero-move funding before recovery-leg forfeit
 274	LoF	HARDENING	INV-003	independent-discovery	[HARDENING LoF] Bind matcher grants to portfolio incarnations
 275	LoF	BLOCKER	INV-002	independent-discovery	[BLOCKER LoF] Bind signed mark pushes to asset generations
 276	LoF	HARDENING	INV-003	independent-discovery	[HARDENING LoF] Bind signed trades to portfolio incarnations

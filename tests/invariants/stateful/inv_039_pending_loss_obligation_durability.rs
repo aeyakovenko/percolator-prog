@@ -2,7 +2,12 @@
 //!
 //! Normative obligation: Pending accrual and loss obligations cannot be erased by route choice or lifecycle changes.
 //!
-//! Evidence in this file (F over public I routes): `v16_program_pr380_prospective_funding_rewrite_fuzz`, `v16_program_pr255_resolve_before_committed_accrual_fuzz`, `v16_program_pr271_trade_funding_erasure_fuzz`, `v16_program_pr272_rebalance_funding_erasure_fuzz`, `v16_program_pr273_forfeit_funding_erasure_fuzz`. These tests exercise the deployed public
+//! Evidence in this file (F over public I routes):
+//! `v16_program_accrual_boundary_operation_matrix_discovers_erased_transfers` builds one
+//! zero-price-move funding checkpoint and permutes settlement against CPI close, batch CPI close,
+//! unilateral reduction, and recovery forfeit. The common oracle requires both sides to book the
+//! same nonzero transfer and compares conserved claims across the two orders. Direct impact tests
+//! remain below. These tests exercise the deployed public
 //! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
 //! rollback, liveness, or compute outcomes appropriate to the invariant.
 //!
@@ -11,6 +16,42 @@
 //! plus every additional verification method required by the charter.
 
 use super::*;
+
+proptest! {
+    #![proptest_config(ProptestConfig {
+        cases: env_usize("PERCOLATOR_FUZZ_CASES", 8) as u32,
+        max_shrink_iters: env_usize("PERCOLATOR_FUZZ_SHRINK_ITERS", 64) as u32,
+        failure_persistence: Some(Box::new(
+            proptest::test_runner::FileFailurePersistence::Direct(
+                "proptest-regressions/inv_039_accrual_ordering_discovery.txt",
+            ),
+        )),
+        ..ProptestConfig::default()
+    })]
+
+    #[test]
+    fn v16_program_accrual_boundary_operation_matrix_discovers_erased_transfers(
+        seed in any::<[u8; 32]>()
+    ) {
+        let discoveries = discover_accrual_ordering_violations(seed)
+            .map_err(TestCaseError::fail)?;
+        prop_assert_eq!(discoveries.len(), AccrualOrderingKind::ALL.len());
+        for (expected, discovery) in AccrualOrderingKind::ALL.into_iter().zip(&discoveries) {
+            prop_assert_eq!(discovery.kind, expected);
+        }
+        let violations: Vec<_> = discoveries
+            .iter()
+            .filter(|discovery| discovery.is_violation())
+            .map(|discovery| discovery.kind)
+            .collect();
+        eprintln!("independent accrual-ordering discoveries: {violations:?}");
+        prop_assert_eq!(
+            violations,
+            AccrualOrderingKind::ALL.to_vec(),
+            "vulnerable-pin accrual-ordering corpus changed"
+        );
+    }
+}
 
 proptest! {
     #![proptest_config(ProptestConfig {

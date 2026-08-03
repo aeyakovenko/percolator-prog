@@ -1,5 +1,5 @@
 use super::v16_svm::{MarketConfig, V16Svm, INITIAL_PRICE, PRIMARY_ACTOR_COUNT, USER_DEPOSIT};
-use percolator::POS_SCALE;
+use percolator::{SideModeV16, POS_SCALE};
 use percolator_prog::ix::{BatchTradeCpiLeg, CrankObservationHint};
 use serde::{Deserialize, Serialize};
 use solana_sdk::{account::Account, transaction::Transaction};
@@ -130,6 +130,32 @@ pub enum SourceFeeConsentKind {
 pub enum BackingProviderConsentOrder {
     FundThenPolicy,
     PolicyThenRetainedFund,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum AccrualOrderingKind {
+    CpiTradeClose,
+    BatchCpiTradeClose,
+    RebalanceReduce,
+    RecoveryForfeit,
+}
+
+impl AccrualOrderingKind {
+    pub const ALL: [Self; 4] = [
+        Self::CpiTradeClose,
+        Self::BatchCpiTradeClose,
+        Self::RebalanceReduce,
+        Self::RecoveryForfeit,
+    ];
+
+    fn discriminator(self) -> u8 {
+        match self {
+            Self::CpiTradeClose => 0,
+            Self::BatchCpiTradeClose => 1,
+            Self::RebalanceReduce => 2,
+            Self::RecoveryForfeit => 3,
+        }
+    }
 }
 
 impl BackingProviderConsentOrder {
@@ -436,6 +462,28 @@ pub struct BackingProviderConsentDiscovery {
     pub operator_insurance_credit: u128,
     pub operator_withdrawn: u64,
     pub compute_units: Option<u64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AccrualOrderingDiscovery {
+    pub kind: AccrualOrderingKind,
+    pub control_paid: u128,
+    pub control_received: u128,
+    pub reordered_paid: u128,
+    pub reordered_received: u128,
+    pub victim_claim_loss: u128,
+    pub attacker_claim_gain: u128,
+}
+
+impl AccrualOrderingDiscovery {
+    pub fn is_violation(&self) -> bool {
+        self.control_paid != 0
+            && self.control_paid == self.control_received
+            && self.reordered_paid == 0
+            && self.reordered_received == 0
+            && self.victim_claim_loss != 0
+            && self.victim_claim_loss == self.attacker_claim_gain
+    }
 }
 
 impl BackingProviderConsentDiscovery {
@@ -2672,5 +2720,296 @@ pub fn discover_backing_provider_consent_violations(
     BackingProviderConsentOrder::ALL
         .into_iter()
         .map(|order| discover_one_backing_provider_consent_violation(seed, order))
+        .collect()
+}
+
+#[derive(Clone, Copy, Debug)]
+struct AccrualOrderingWorld {
+    attacker_claim: u128,
+    victim_claim: u128,
+    paid: u128,
+    received: u128,
+}
+
+fn zero_move_funding_discovery_world(seed: [u8; 32]) -> Result<V16Svm, String> {
+    const PRICE: u64 = 2;
+    const TARGET: u64 = 1;
+    const DEPOSIT: u128 = 1_000_000;
+    let mut env = V16Svm::new(
+        seed,
+        MarketConfig {
+            initial_price: PRICE,
+            max_price_move_bps_per_slot: 24,
+            max_accrual_dt_slots: 1,
+            max_abs_funding_e9_per_slot: 1_000,
+            min_funding_lifetime_slots: 1,
+            actor_deposits: [DEPOSIT, DEPOSIT, DEPOSIT, DEPOSIT, USER_DEPOSIT],
+            ..MarketConfig::default()
+        },
+    );
+    env.warp_to_slot(2);
+    env.push_auth_mark(0, 2, TARGET)
+        .map_err(|error| format!("stage zero-move funding target: {error}"))?;
+    Ok(env)
+}
+
+fn zero_move_observation_discovery(env: &V16Svm) -> Vec<CrankObservationHint> {
+    vec![CrankObservationHint {
+        asset_index: 0,
+        oracle_accounts: env.primary_profile(0).oracle_leg_count,
+    }]
+}
+
+fn prime_zero_move_funding_discovery(env: &mut V16Svm) -> Result<(), String> {
+    for actor in [0, 1] {
+        env.crank(actor, 2, zero_move_observation_discovery(env))
+            .map_err(|error| format!("prime zero-move actor {actor}: {error}"))?;
+    }
+    let (_, group) = env.primary_market_state();
+    if group.assets[0].effective_price != 2
+        || group.assets[0].f_long_num != 0
+        || group.assets[0].f_short_num != 0
+    {
+        return Err(format!(
+            "zero-move prime unexpectedly changed price/funding: price={}, F=({}, {})",
+            group.assets[0].effective_price,
+            group.assets[0].f_long_num,
+            group.assets[0].f_short_num
+        ));
+    }
+    env.warp_to_slot(3);
+    Ok(())
+}
+
+fn portfolio_claim(env: &V16Svm, actor: usize) -> Result<u128, String> {
+    let portfolio = env.primary_portfolio(actor);
+    let claim = i128::try_from(portfolio.capital.get())
+        .map_err(|_| format!("actor {actor} capital exceeds i128"))?
+        .checked_add(portfolio.pnl.get())
+        .ok_or_else(|| format!("actor {actor} claim overflow"))?;
+    u128::try_from(claim).map_err(|_| format!("actor {actor} claim became negative"))
+}
+
+fn funding_totals(env: &V16Svm, payer: usize, receiver: usize) -> (u128, u128) {
+    (
+        env.primary_portfolio(payer)
+            .funding_short_paid_atoms_total
+            .get(),
+        env.primary_portfolio(receiver)
+            .funding_long_received_atoms_total
+            .get(),
+    )
+}
+
+fn execute_cpi_close_kind(
+    env: &mut V16Svm,
+    kind: AccrualOrderingKind,
+    size_q: i128,
+) -> Result<(), String> {
+    match kind {
+        AccrualOrderingKind::CpiTradeClose => env
+            .trade_cpi(0, 1, 0, size_q, 0, 0)
+            .map(|_| ())
+            .map_err(|error| format!("CPI accrual-boundary trade: {error}")),
+        AccrualOrderingKind::BatchCpiTradeClose => env
+            .batch_trade_cpi(
+                0,
+                1,
+                vec![BatchTradeCpiLeg {
+                    asset_index: 0,
+                    size_q,
+                    fee_bps: 0,
+                    limit_price: 0,
+                }],
+            )
+            .map(|_| ())
+            .map_err(|error| format!("batch CPI accrual-boundary trade: {error}")),
+        _ => unreachable!(),
+    }
+}
+
+fn run_trade_accrual_ordering_world(
+    seed: [u8; 32],
+    kind: AccrualOrderingKind,
+    action_before_settlement: bool,
+) -> Result<AccrualOrderingWorld, String> {
+    const PRICE: u64 = 2;
+    const Q: i128 = 100 * POS_SCALE as i128;
+    let mut env = zero_move_funding_discovery_world(seed)?;
+    let supply_before = env.token_supply_observed();
+    execute_cpi_close_kind(&mut env, kind, -Q)?;
+    prime_zero_move_funding_discovery(&mut env)?;
+    if !action_before_settlement {
+        for actor in [0, 1] {
+            env.crank(actor, 3, zero_move_observation_discovery(&env))
+                .map_err(|error| format!("settle trade actor {actor}: {error}"))?;
+        }
+    }
+    execute_cpi_close_kind(&mut env, kind, Q)?;
+    if action_before_settlement {
+        for actor in [0, 1] {
+            env.crank(actor, 3, zero_move_observation_discovery(&env))
+                .map_err(|error| format!("late-settle trade actor {actor}: {error}"))?;
+        }
+    }
+    let (paid, received) = funding_totals(&env, 0, 1);
+    for actor in [0, 1] {
+        let pnl = env.primary_portfolio(actor).pnl.get();
+        if pnl > 0 {
+            env.convert_released_pnl(actor, pnl as u128)
+                .map_err(|error| format!("convert trade actor {actor} PnL: {error}"))?;
+        }
+        let capital = env.primary_portfolio(actor).capital.get();
+        env.withdraw_primary(actor, capital)
+            .map_err(|error| format!("withdraw trade actor {actor}: {error}"))?;
+    }
+    if env.token_supply_observed() != supply_before {
+        return Err("trade accrual-order world changed SPL supply".into());
+    }
+    Ok(AccrualOrderingWorld {
+        attacker_claim: u128::from(env.token_amount(env.actors[0].destination_token)),
+        victim_claim: u128::from(env.token_amount(env.actors[1].destination_token)),
+        paid,
+        received,
+    })
+}
+
+fn run_rebalance_accrual_ordering_world(
+    seed: [u8; 32],
+    action_before_settlement: bool,
+) -> Result<AccrualOrderingWorld, String> {
+    const PRICE: u64 = 2;
+    const Q: i128 = 100 * POS_SCALE as i128;
+    let mut env = zero_move_funding_discovery_world(seed)?;
+    let supply_before = env.token_supply_observed();
+    env.trade_no_cpi(0, 1, 0, -Q, PRICE, 0)
+        .map_err(|error| format!("open rebalance accrual pair: {error}"))?;
+    prime_zero_move_funding_discovery(&mut env)?;
+    if !action_before_settlement {
+        for actor in [0, 1] {
+            env.crank(actor, 3, zero_move_observation_discovery(&env))
+                .map_err(|error| format!("settle rebalance actor {actor}: {error}"))?;
+        }
+    }
+    env.rebalance_reduce(0, 0, Q.unsigned_abs())
+        .map_err(|error| format!("unilateral accrual-boundary reduction: {error}"))?;
+    env.crank(1, 3, zero_move_observation_discovery(&env))
+        .map_err(|error| format!("settle rebalance counterparty: {error}"))?;
+    let (paid, received) = funding_totals(&env, 0, 1);
+    let victim_claim = portfolio_claim(&env, 1)?;
+    let attacker_capital = env.primary_portfolio(0).capital.get();
+    env.withdraw_primary(0, attacker_capital)
+        .map_err(|error| format!("withdraw rebalance actor: {error}"))?;
+    if env.token_supply_observed() != supply_before {
+        return Err("rebalance accrual-order world changed SPL supply".into());
+    }
+    Ok(AccrualOrderingWorld {
+        attacker_claim: u128::from(env.token_amount(env.actors[0].destination_token)),
+        victim_claim,
+        paid,
+        received,
+    })
+}
+
+fn run_forfeit_accrual_ordering_world(
+    seed: [u8; 32],
+    action_before_settlement: bool,
+) -> Result<AccrualOrderingWorld, String> {
+    const PRICE: u64 = 2;
+    const Q_ATTACKER: i128 = 5 * POS_SCALE as i128;
+    const Q_WHALE: i128 = 95 * POS_SCALE as i128;
+    let mut env = zero_move_funding_discovery_world(seed)?;
+    let supply_before = env.token_supply_observed();
+    env.trade_no_cpi(1, 2, 0, -Q_WHALE, PRICE, 0)
+        .map_err(|error| format!("open forfeit whale pair: {error}"))?;
+    env.trade_no_cpi(0, 3, 0, -Q_ATTACKER, PRICE, 0)
+        .map_err(|error| format!("open forfeit accrual pair: {error}"))?;
+    prime_zero_move_funding_discovery(&mut env)?;
+    if !action_before_settlement {
+        for actor in 0..4 {
+            env.crank(actor, 3, zero_move_observation_discovery(&env))
+                .map_err(|error| format!("settle forfeit actor {actor}: {error}"))?;
+        }
+    }
+    env.rebalance_reduce(2, 0, Q_WHALE.unsigned_abs())
+        .map_err(|error| format!("enter recovery side mode: {error}"))?;
+    if env.primary_market_state().1.assets[0].mode_short != SideModeV16::DrainOnly {
+        return Err("public reduction did not enter short-side DrainOnly".into());
+    }
+    env.forfeit_recovery_leg(0, 0, u128::from(u64::MAX))
+        .map_err(|error| format!("forfeit accrual-boundary recovery leg: {error}"))?;
+    env.crank(3, 3, zero_move_observation_discovery(&env))
+        .map_err(|error| format!("settle forfeit counterparty: {error}"))?;
+    let (paid, received) = funding_totals(&env, 0, 3);
+    let victim_claim = portfolio_claim(&env, 3)?;
+    let attacker_capital = env.primary_portfolio(0).capital.get();
+    env.withdraw_primary(0, attacker_capital)
+        .map_err(|error| format!("withdraw forfeit actor: {error}"))?;
+    if env.token_supply_observed() != supply_before {
+        return Err("forfeit accrual-order world changed SPL supply".into());
+    }
+    Ok(AccrualOrderingWorld {
+        attacker_claim: u128::from(env.token_amount(env.actors[0].destination_token)),
+        victim_claim,
+        paid,
+        received,
+    })
+}
+
+fn discover_one_accrual_ordering_violation(
+    mut seed: [u8; 32],
+    kind: AccrualOrderingKind,
+) -> Result<AccrualOrderingDiscovery, String> {
+    seed[0] ^= 0x9d;
+    seed[1] ^= kind.discriminator();
+    let run = |action_before_settlement| match kind {
+        AccrualOrderingKind::CpiTradeClose | AccrualOrderingKind::BatchCpiTradeClose => {
+            run_trade_accrual_ordering_world(seed, kind, action_before_settlement)
+        }
+        AccrualOrderingKind::RebalanceReduce => {
+            run_rebalance_accrual_ordering_world(seed, action_before_settlement)
+        }
+        AccrualOrderingKind::RecoveryForfeit => {
+            run_forfeit_accrual_ordering_world(seed, action_before_settlement)
+        }
+    };
+    let control = run(false)?;
+    let reordered = run(true)?;
+    let victim_claim_loss = control
+        .victim_claim
+        .checked_sub(reordered.victim_claim)
+        .ok_or_else(|| format!("{kind:?} reordered path increased victim claim"))?;
+    let attacker_claim_gain = reordered
+        .attacker_claim
+        .checked_sub(control.attacker_claim)
+        .ok_or_else(|| format!("{kind:?} reordered path decreased attacker claim"))?;
+    if control
+        .attacker_claim
+        .checked_add(control.victim_claim)
+        .ok_or_else(|| "control claim total overflow".to_string())?
+        != reordered
+            .attacker_claim
+            .checked_add(reordered.victim_claim)
+            .ok_or_else(|| "reordered claim total overflow".to_string())?
+    {
+        return Err(format!("{kind:?} paired worlds did not conserve claims"));
+    }
+    Ok(AccrualOrderingDiscovery {
+        kind,
+        control_paid: control.paid,
+        control_received: control.received,
+        reordered_paid: reordered.paid,
+        reordered_received: reordered.received,
+        victim_claim_loss,
+        attacker_claim_gain,
+    })
+}
+
+pub fn discover_accrual_ordering_violations(
+    seed: [u8; 32],
+) -> Result<Vec<AccrualOrderingDiscovery>, String> {
+    AccrualOrderingKind::ALL
+        .into_iter()
+        .map(|kind| discover_one_accrual_ordering_violation(seed, kind))
         .collect()
 }
