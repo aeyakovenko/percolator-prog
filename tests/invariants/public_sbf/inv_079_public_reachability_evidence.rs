@@ -174,10 +174,10 @@ fn v16_open_security_finding_benchmark_is_complete_and_non_overclaiming() {
     }
 
     assert_eq!(rows, 145, "refresh the dated GitHub finding snapshot");
-    assert_eq!(direct, 22, "direct adapter inventory changed");
+    assert_eq!(direct, 18, "direct adapter inventory changed");
     assert_eq!(missing, 62, "explicit finding gaps changed");
     assert_eq!(
-        independent, 61,
+        independent, 65,
         "promote only genuinely finding-agnostic invariant discoveries"
     );
 
@@ -190,6 +190,7 @@ fn v16_open_security_finding_benchmark_is_complete_and_non_overclaiming() {
         include_str!("../stateful/inv_014_delayed_policy_and_policy_epoch_safety.rs"),
         include_str!("../stateful/inv_036_fee_destination_and_policy_version_integrity.rs"),
         include_str!("../stateful/inv_039_pending_loss_obligation_durability.rs"),
+        include_str!("../stateful/inv_045_no_free_mark_movement.rs"),
     ];
     let mut fingerprints = std::collections::BTreeSet::new();
     let mut mapped_prs = std::collections::BTreeSet::new();
@@ -229,6 +230,7 @@ fn v16_open_security_finding_benchmark_is_complete_and_non_overclaiming() {
                     | "pending-balanced-transfer-cannot-be-erased-by-operation-order"
                     | "pending-value-must-commit-before-terminal-snapshot"
                     | "prospective-accrual-cannot-be-rewritten-by-trade-order"
+                    | "pending-mark-cannot-authorize-stale-price-risk-increase"
             ),
             "unknown independent oracle: {}",
             fields[3]

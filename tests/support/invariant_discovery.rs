@@ -146,6 +146,32 @@ pub enum ProspectiveAccrualRoute {
     BatchNoCpi,
 }
 
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum PendingMarkSource {
+    AuthenticatedPush,
+    EwmaPush,
+    ReportedPriceTrade,
+    ReportedPriceBatch,
+}
+
+impl PendingMarkSource {
+    pub const ALL: [Self; 4] = [
+        Self::AuthenticatedPush,
+        Self::EwmaPush,
+        Self::ReportedPriceTrade,
+        Self::ReportedPriceBatch,
+    ];
+
+    fn discriminator(self) -> u8 {
+        match self {
+            Self::AuthenticatedPush => 0,
+            Self::EwmaPush => 1,
+            Self::ReportedPriceTrade => 2,
+            Self::ReportedPriceBatch => 3,
+        }
+    }
+}
+
 impl ProspectiveAccrualRoute {
     pub const ALL: [Self; 2] = [Self::NoCpi, Self::BatchNoCpi];
 
@@ -513,6 +539,27 @@ pub struct ProspectiveAccrualDiscovery {
     pub reordered_total_payout: u128,
     pub final_mark: u64,
     pub final_effective_price: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PendingMarkAdmissionDiscovery {
+    pub source: PendingMarkSource,
+    pub published_target: u64,
+    pub stale_engine_target: u64,
+    pub committed_mark: u64,
+    pub attacker_profit: u128,
+    pub victim_loss: u128,
+    pub extracted_tokens: u64,
+}
+
+impl PendingMarkAdmissionDiscovery {
+    pub fn is_violation(&self) -> bool {
+        self.published_target > self.stale_engine_target
+            && self.committed_mark == self.published_target
+            && self.attacker_profit != 0
+            && self.attacker_profit == self.victim_loss
+            && self.attacker_profit == u128::from(self.extracted_tokens)
+    }
 }
 
 impl ProspectiveAccrualDiscovery {
@@ -3407,5 +3454,174 @@ pub fn discover_prospective_accrual_violations(
     ProspectiveAccrualRoute::ALL
         .into_iter()
         .map(|route| discover_one_prospective_accrual_violation(seed, route))
+        .collect()
+}
+
+fn discover_one_pending_mark_admission(
+    mut seed: [u8; 32],
+    source: PendingMarkSource,
+) -> Result<PendingMarkAdmissionDiscovery, String> {
+    const OLD_MARK: u64 = 100;
+    const AUTH_TARGET: u64 = 200;
+    const EWMA_TARGET: u64 = 150;
+    const ATTACK_SIZE_Q: i128 = 10_000 * POS_SCALE as i128;
+    const EXISTING_SIZE_Q: i128 = POS_SCALE as i128;
+
+    seed[0] ^= 0xc7;
+    seed[1] ^= source.discriminator();
+    let (mut env, attacker, victim, attack_size_q, published_target) =
+        match source {
+            PendingMarkSource::AuthenticatedPush | PendingMarkSource::EwmaPush => {
+                let mut env = V16Svm::new(
+                    seed,
+                    MarketConfig {
+                        initial_price: OLD_MARK,
+                        max_price_move_bps_per_slot: 10_000,
+                        max_accrual_dt_slots: 1,
+                        actor_deposits: [1_000_100, 4_000_000, USER_DEPOSIT, USER_DEPOSIT, 1],
+                        ..MarketConfig::default()
+                    },
+                );
+                match source {
+                    PendingMarkSource::AuthenticatedPush => env
+                        .configure_auth_mark(false, 0, 0, OLD_MARK)
+                        .map_err(|error| format!("configure authenticated mark: {error}"))?,
+                    PendingMarkSource::EwmaPush => env
+                        .configure_ewma_mark(0, 0, OLD_MARK, 1, 0)
+                        .map_err(|error| format!("configure EWMA mark: {error}"))?,
+                    PendingMarkSource::ReportedPriceTrade
+                    | PendingMarkSource::ReportedPriceBatch => unreachable!(),
+                };
+                env.trade_cpi(0, 1, 0, EXISTING_SIZE_Q, 0, 0)
+                    .map_err(|error| format!("open liveness-control position: {error}"))?;
+                env.warp_to_slot(2);
+                let published_target = match source {
+                    PendingMarkSource::AuthenticatedPush => {
+                        env.push_auth_mark(0, 2, AUTH_TARGET)
+                            .map_err(|error| format!("publish authenticated mark: {error}"))?;
+                        AUTH_TARGET
+                    }
+                    PendingMarkSource::EwmaPush => {
+                        env.push_ewma_mark(0, 2, AUTH_TARGET)
+                            .map_err(|error| format!("publish EWMA target: {error}"))?;
+                        EWMA_TARGET
+                    }
+                    PendingMarkSource::ReportedPriceTrade
+                    | PendingMarkSource::ReportedPriceBatch => unreachable!(),
+                };
+                let attack_size_q = ATTACK_SIZE_Q
+                    .checked_add(EXISTING_SIZE_Q)
+                    .ok_or_else(|| "pending-mark attack size overflow".to_string())?;
+                (env, 0usize, 1usize, attack_size_q, published_target)
+            }
+            PendingMarkSource::ReportedPriceTrade | PendingMarkSource::ReportedPriceBatch => {
+                let mut env = V16Svm::new(
+                    seed,
+                    MarketConfig {
+                        initial_price: OLD_MARK,
+                        max_price_move_bps_per_slot: 10_000,
+                        max_accrual_dt_slots: 1,
+                        actor_deposits: [1_000, 1_000, 1_000_000, 4_000_000, 1],
+                        ..MarketConfig::default()
+                    },
+                );
+                env.configure_ewma_mark(0, 0, OLD_MARK, 1, 0)
+                    .map_err(|error| format!("configure trade-driven EWMA: {error}"))?;
+                env.warp_to_slot(2);
+                let route = match source {
+                    PendingMarkSource::ReportedPriceTrade => ProspectiveAccrualRoute::NoCpi,
+                    PendingMarkSource::ReportedPriceBatch => ProspectiveAccrualRoute::BatchNoCpi,
+                    PendingMarkSource::AuthenticatedPush | PendingMarkSource::EwmaPush => {
+                        unreachable!()
+                    }
+                };
+                execute_reported_price_route(&mut env, route, 0, 1, EXISTING_SIZE_Q, AUTH_TARGET)?;
+                execute_reported_price_route(&mut env, route, 0, 1, -EXISTING_SIZE_Q, OLD_MARK)?;
+                (env, 2usize, 3usize, ATTACK_SIZE_Q, EWMA_TARGET)
+            }
+        };
+
+    let supply_before = env.token_supply_observed();
+    let (pending_profile, pending_group) = env.primary_market_state();
+    let stale_engine_target = pending_group.assets[0].raw_oracle_target_price;
+    if pending_profile.mark_ewma_e6 != published_target
+        || pending_group.assets[0].effective_price != OLD_MARK
+        || stale_engine_target != OLD_MARK
+    {
+        return Err(format!(
+            "{source:?} did not create wrapper/engine mark lag: profile={}, raw={}, effective={}",
+            pending_profile.mark_ewma_e6,
+            stale_engine_target,
+            pending_group.assets[0].effective_price
+        ));
+    }
+
+    let victim_capital_before = env.primary_portfolio(victim).capital.get();
+    env.trade_cpi(attacker, victim, 0, ATTACK_SIZE_Q, 0, 0)
+        .map_err(|error| format!("{source:?} stale-price risk increase rejected: {error}"))?;
+    env.warp_to_slot(3);
+    for _ in 0..8 {
+        for actor in [attacker, victim] {
+            let _ = env.crank(
+                actor,
+                3,
+                vec![CrankObservationHint {
+                    asset_index: 0,
+                    oracle_accounts: 0,
+                }],
+            );
+        }
+        if env.primary_market_state().1.assets[0].effective_price == published_target {
+            break;
+        }
+    }
+    let committed_mark = env.primary_market_state().1.assets[0].effective_price;
+    if committed_mark != published_target {
+        return Err(format!(
+            "{source:?} pending mark did not commit: {committed_mark}/{published_target}"
+        ));
+    }
+
+    env.trade_cpi(attacker, victim, 0, -attack_size_q, 0, 0)
+        .map_err(|error| format!("{source:?} close stale-price exposure: {error}"))?;
+    let attacker_profit = u128::try_from(env.primary_portfolio(attacker).pnl.get())
+        .map_err(|_| format!("{source:?} attacker did not realize positive PnL"))?;
+    let victim_loss = victim_capital_before
+        .checked_sub(env.primary_portfolio(victim).capital.get())
+        .ok_or_else(|| format!("{source:?} victim capital increased"))?;
+    if attacker_profit == 0 || attacker_profit != victim_loss {
+        return Err(format!(
+            "{source:?} stale-mark transfer mismatch: attacker={attacker_profit}, victim={victim_loss}"
+        ));
+    }
+    env.convert_released_pnl(attacker, attacker_profit)
+        .map_err(|error| format!("{source:?} convert stale-mark PnL: {error}"))?;
+    env.withdraw_primary(attacker, attacker_profit)
+        .map_err(|error| format!("{source:?} withdraw stale-mark PnL: {error}"))?;
+    let extracted_tokens = env.token_amount(env.actors[attacker].destination_token);
+    if u128::from(extracted_tokens) != attacker_profit
+        || env.token_supply_observed() != supply_before
+    {
+        return Err(format!(
+            "{source:?} stale-mark value was not externally extractable: tokens={extracted_tokens}, profit={attacker_profit}"
+        ));
+    }
+    Ok(PendingMarkAdmissionDiscovery {
+        source,
+        published_target,
+        stale_engine_target,
+        committed_mark,
+        attacker_profit,
+        victim_loss,
+        extracted_tokens,
+    })
+}
+
+pub fn discover_pending_mark_admission_violations(
+    seed: [u8; 32],
+) -> Result<Vec<PendingMarkAdmissionDiscovery>, String> {
+    PendingMarkSource::ALL
+        .into_iter()
+        .map(|source| discover_one_pending_mark_admission(seed, source))
         .collect()
 }

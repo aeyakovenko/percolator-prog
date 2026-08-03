@@ -37,8 +37,8 @@
 261	DoS	HARDENING	INV-020	missing	[HARDENING DoS] Reject expired Hybrid terminal snapshots
 262	LoF	REAL	INV-045	missing	[REAL LoF] Commit authenticated marks before terminal resolve
 263	LoF	REAL	INV-045	missing	[REAL LoF] Settle adverse marks before unilateral reduction
-264	LoF	BLOCKER	INV-045	direct-regression	[BLOCKER LoF] Bind AuthMark targets before exposure migration
-265	LoF	BLOCKER	INV-045	direct-regression	[BLOCKER LoF] Publish EWMA oracle targets before exposure changes
+264	LoF	BLOCKER	INV-045	independent-discovery	[BLOCKER LoF] Bind AuthMark targets before exposure migration
+265	LoF	BLOCKER	INV-045	independent-discovery	[BLOCKER LoF] Publish EWMA oracle targets before exposure changes
 266	DoS	BLOCKER	INV-073	missing	[BLOCKER DoS] Keep exact-OI ADL survivors exit-live
 267	LoF	BLOCKER	INV-031	direct-regression	[BLOCKER LoF] Keep source backing domain-local
 268	DoS	BLOCKER	INV-073	missing	[BLOCKER DoS] Keep unilateral exact-OI ADL survivors exit-live
@@ -102,8 +102,8 @@
 329	LoF	BLOCKER	INV-038	direct-regression	[BLOCKER LoF] Round composite oracle prices once
 330	LoF	BLOCKER	INV-067	missing	[BLOCKER LoF] Recover terminal bankruptcy double charge
 331	LoF	BLOCKER	INV-020	direct-regression	[BLOCKER LoF] Reject temporally skewed composite oracle reports
-332	LoF	BLOCKER	INV-045	direct-regression	[BLOCKER LoF] Stage authenticated mark targets before CPI fills
-333	LoF	BLOCKER	INV-045	direct-regression	[BLOCKER LoF] Stage trade-driven mark targets before later fills
+332	LoF	BLOCKER	INV-045	independent-discovery	[BLOCKER LoF] Stage authenticated mark targets before CPI fills
+333	LoF	BLOCKER	INV-045	independent-discovery	[BLOCKER LoF] Stage trade-driven mark targets before later fills
 334	LoF	BLOCKER	INV-014	independent-discovery	[BLOCKER LoF] Sequence-bind matcher config intents
 335	LoF	BLOCKER	INV-014	independent-discovery	[BLOCKER LoF] Reject delayed authenticated mark intents
 336	LoF	BLOCKER	INV-014	independent-discovery	[BLOCKER LoF] Reject delayed liquidation-fee policy replay

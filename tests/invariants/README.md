@@ -23,7 +23,7 @@ verification methods are in [`../../INVARIANTS.md`](../../INVARIANTS.md).
 | Suite | Tests | Evidence |
 | --- | ---: | --- |
 | `public_sbf/` | 74 | Deterministic public SBF/LiteSVM counterexamples, regressions, and manifest checks |
-| `stateful/` | 80 | Proptest-generated public routes, including twelve finding-agnostic discovery properties |
+| `stateful/` | 81 | Proptest-generated public routes, including thirteen finding-agnostic discovery properties |
 | `cu/` | 69 | Positive public-route, metamorphic, rollback, liveness, and max-shape CU tests |
 | `kani/` | 40 | Symbolic wrapper arithmetic, matcher-binding, and strict-decoder proofs |
 
@@ -94,7 +94,7 @@ charter.
 | INV-042 | Gap | - |
 | INV-043 | Gap | - |
 | INV-044 | Gap | - |
-| INV-045 | Direct + P + SVM/CU | `public_sbf/inv_045_no_free_mark_movement.rs`, `stateful/inv_045_no_free_mark_movement.rs`, `kani/inv_045_no_free_mark_movement.rs`, `cu/inv_045_no_free_mark_movement.rs` |
+| INV-045 | Independent + Direct + P + SVM/CU | `public_sbf/inv_045_no_free_mark_movement.rs`, `stateful/inv_045_no_free_mark_movement.rs`, `kani/inv_045_no_free_mark_movement.rs`, `cu/inv_045_no_free_mark_movement.rs` |
 | INV-046 | SVM/CU | `cu/inv_046_trade_availability_without_unsafe_mark_admission.rs` |
 | INV-047 | SVM/CU | `cu/inv_047_equivalent_route_semantics.rs` |
 | INV-048 | Gap | - |
