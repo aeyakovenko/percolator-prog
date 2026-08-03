@@ -155,6 +155,23 @@ pub enum PendingMarkSource {
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum TradeDrivenMarkMode {
+    Ewma,
+    HybridAfterHours,
+}
+
+impl TradeDrivenMarkMode {
+    pub const ALL: [Self; 2] = [Self::Ewma, Self::HybridAfterHours];
+
+    fn discriminator(self) -> u8 {
+        match self {
+            Self::Ewma => 0,
+            Self::HybridAfterHours => 1,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum DiscoveryTradeRoute {
     NoCpi,
     BatchNoCpi,
@@ -614,6 +631,29 @@ pub struct MarkMovementReserveDiscovery {
     pub victim_loss: u128,
     pub coalition_gain: u128,
     pub committed_mark: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TradeDrivenLiquidationDiscovery {
+    pub mode: TradeDrivenMarkMode,
+    pub route: ProspectiveAccrualRoute,
+    pub movement_fee: u128,
+    pub liquidation_reward: u128,
+    pub victim_capital_loss: u128,
+    pub oi_reduction_q: u128,
+    pub coalition_profit: u128,
+    pub extracted_tokens: u128,
+}
+
+impl TradeDrivenLiquidationDiscovery {
+    pub fn is_violation(&self) -> bool {
+        self.movement_fee != 0
+            && self.liquidation_reward > self.movement_fee
+            && self.victim_capital_loss != 0
+            && self.oi_reduction_q != 0
+            && self.coalition_profit != 0
+            && self.extracted_tokens != 0
+    }
 }
 
 impl MarkMovementReserveDiscovery {
@@ -4427,4 +4467,192 @@ pub fn discover_mark_movement_reserve_violations(
         .into_iter()
         .map(|route| discover_one_mark_movement_reserve_violation(seed, route))
         .collect()
+}
+
+fn discover_one_trade_driven_liquidation(
+    mut seed: [u8; 32],
+    mode: TradeDrivenMarkMode,
+    route: ProspectiveAccrualRoute,
+) -> Result<TradeDrivenLiquidationDiscovery, String> {
+    const MARK: u64 = 1_000_000;
+    const VICTIM_DEPOSIT: u128 = 50_000;
+    const HONEST_DEPOSIT: u128 = 2_000_000;
+    const ATTACK_DEPOSIT: u128 = 1_000;
+    const CRANKER_DEPOSIT: u128 = 1;
+    const TINY_Q: i128 = (POS_SCALE / 10_000) as i128;
+
+    seed[0] ^= 0x2c;
+    seed[1] ^= mode.discriminator();
+    seed[2] ^= route.discriminator();
+    let mut env = V16Svm::new(
+        seed,
+        MarketConfig {
+            initial_price: MARK,
+            h_max: 6_480_000,
+            min_nonzero_mm_req: 599,
+            min_nonzero_im_req: 600,
+            maintenance_margin_bps: 500,
+            initial_margin_bps: 500,
+            liquidation_fee_bps: 5,
+            liquidation_fee_cap: percolator::MAX_PROTOCOL_FEE_ABS,
+            min_liquidation_abs: 500,
+            max_price_move_bps_per_slot: 24,
+            max_accrual_dt_slots: 1,
+            max_abs_funding_e9_per_slot: 1_000,
+            min_funding_lifetime_slots: 10_000_000,
+            actor_deposits: [
+                VICTIM_DEPOSIT,
+                HONEST_DEPOSIT,
+                ATTACK_DEPOSIT,
+                ATTACK_DEPOSIT,
+                CRANKER_DEPOSIT,
+            ],
+            ..MarketConfig::default()
+        },
+    );
+    env.update_liquidation_fee_policy(10_000)
+        .map_err(|error| format!("{mode:?} configure liquidation reward: {error}"))?;
+
+    let mut oracle_accounts = Vec::new();
+    let (trade_slot, reported_price) = match mode {
+        TradeDrivenMarkMode::Ewma => {
+            env.configure_ewma_mark(0, 1, MARK, 1, 0)
+                .map_err(|error| format!("{route:?} configure EWMA: {error}"))?;
+            env.warp_to_slot(2);
+            (2, 999_800)
+        }
+        TradeDrivenMarkMode::HybridAfterHours => {
+            env.set_clock(1, 100);
+            let feed = [0xedu8; 32];
+            let initial_oracle = env.set_pyth_price(&feed, MARK as i64, -6, 0, 100);
+            env.configure_hybrid_oracle(
+                0,
+                1,
+                100,
+                0,
+                [feed, [0; 32], [0; 32]],
+                &[initial_oracle],
+                1,
+                0,
+            )
+            .map_err(|error| format!("{route:?} configure hybrid fallback: {error}"))?;
+            oracle_accounts.push(env.set_pyth_price(&feed, 999_850, -6, 0, 1_000));
+            env.set_clock(3, 1_000);
+            (3, 999_850)
+        }
+    };
+
+    env.trade_no_cpi(0, 1, 0, POS_SCALE as i128, MARK, 0)
+        .map_err(|error| format!("{mode:?} open independent victim: {error}"))?;
+    let supply_before = env.token_supply_observed();
+    let victim_capital_before = env.primary_portfolio(0).capital.get();
+    let victim_oi_before = env.primary_market_state().1.assets[0].oi_eff_long_q;
+    let insurance_before = env.primary_market_state().1.insurance;
+    execute_reported_price_route(&mut env, route, 2, 3, TINY_Q, reported_price)
+        .map_err(|error| format!("{mode:?} {route:?} move mark: {error}"))?;
+    let (profile_after_move, group_after_move) = env.primary_market_state();
+    let movement_fee = group_after_move
+        .insurance
+        .checked_sub(insurance_before)
+        .ok_or_else(|| "trade-driven mark movement reduced insurance".to_string())?;
+    let queued_mark = profile_after_move.mark_ewma_e6;
+    if movement_fee == 0 || queued_mark >= MARK {
+        return Err(format!(
+            "{mode:?} {route:?} did not create paid adverse mark: fee={movement_fee}, mark={queued_mark}"
+        ));
+    }
+
+    let cranker_before = env.primary_portfolio(4).capital.get();
+    for attempt in 0..8 {
+        env.crank_with_reward(
+            4,
+            0,
+            trade_slot,
+            if attempt == 0 {
+                vec![CrankObservationHint {
+                    asset_index: 0,
+                    oracle_accounts: oracle_accounts.len() as u8,
+                }]
+            } else {
+                Vec::new()
+            },
+            if attempt == 0 { &oracle_accounts } else { &[] },
+        )
+        .map_err(|error| format!("{mode:?} {route:?} liquidation crank {attempt}: {error}"))?;
+        if env.primary_market_state().1.assets[0].oi_eff_long_q < victim_oi_before {
+            break;
+        }
+    }
+    let victim_oi_after = env.primary_market_state().1.assets[0].oi_eff_long_q;
+    let oi_reduction_q = victim_oi_before
+        .checked_sub(victim_oi_after)
+        .ok_or_else(|| "liquidation increased victim-side OI".to_string())?;
+    let liquidation_reward = env
+        .primary_portfolio(4)
+        .capital
+        .get()
+        .checked_sub(cranker_before)
+        .ok_or_else(|| "liquidation reduced cranker capital".to_string())?;
+    let victim_capital_loss = victim_capital_before
+        .checked_sub(env.primary_portfolio(0).capital.get())
+        .ok_or_else(|| "liquidation increased victim capital".to_string())?;
+
+    for actor in [2usize, 3] {
+        env.crank(actor, trade_slot, Vec::new())
+            .map_err(|error| format!("{mode:?} refresh coalition actor {actor}: {error}"))?;
+    }
+    execute_reported_price_route(&mut env, route, 2, 3, -TINY_Q, queued_mark)
+        .map_err(|error| format!("{mode:?} {route:?} close mark-moving pair: {error}"))?;
+    for actor in [2usize, 3] {
+        let pnl = env.primary_portfolio(actor).pnl.get();
+        if pnl > 0 {
+            env.convert_released_pnl(actor, pnl as u128)
+                .map_err(|error| format!("{mode:?} convert actor {actor} PnL: {error}"))?;
+        }
+    }
+    for actor in [2usize, 3, 4] {
+        let capital = env.primary_portfolio(actor).capital.get();
+        if capital != 0 {
+            env.withdraw_primary(actor, capital)
+                .map_err(|error| format!("{mode:?} withdraw coalition actor {actor}: {error}"))?;
+        }
+    }
+    let extracted_tokens = [2usize, 3, 4].into_iter().try_fold(0u128, |sum, actor| {
+        sum.checked_add(u128::from(
+            env.token_amount(env.actors[actor].destination_token),
+        ))
+        .ok_or_else(|| "trade-driven coalition payout overflow".to_string())
+    })?;
+    let coalition_committed = ATTACK_DEPOSIT
+        .checked_mul(2)
+        .and_then(|value| value.checked_add(CRANKER_DEPOSIT))
+        .ok_or_else(|| "trade-driven coalition commitment overflow".to_string())?;
+    let coalition_profit = extracted_tokens
+        .checked_sub(coalition_committed)
+        .ok_or_else(|| "trade-driven coalition did not recover deposits".to_string())?;
+    if env.token_supply_observed() != supply_before {
+        return Err("trade-driven liquidation changed SPL supply".into());
+    }
+    Ok(TradeDrivenLiquidationDiscovery {
+        mode,
+        route,
+        movement_fee,
+        liquidation_reward,
+        victim_capital_loss,
+        oi_reduction_q,
+        coalition_profit,
+        extracted_tokens,
+    })
+}
+
+pub fn discover_trade_driven_liquidation_violations(
+    seed: [u8; 32],
+) -> Result<Vec<TradeDrivenLiquidationDiscovery>, String> {
+    let mut discoveries = Vec::new();
+    for mode in TradeDrivenMarkMode::ALL {
+        for route in ProspectiveAccrualRoute::ALL {
+            discoveries.push(discover_one_trade_driven_liquidation(seed, mode, route)?);
+        }
+    }
+    Ok(discoveries)
 }

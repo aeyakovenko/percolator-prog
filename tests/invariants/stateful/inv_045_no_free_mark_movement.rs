@@ -17,8 +17,11 @@
 //! against mark commitment and requires reward accounting to be independent of pending adverse
 //! value. `v16_program_trade_route_matrix_discovers_withdrawable_mark_reserve` creates a paid mark
 //! move, withdraws its reserve while unrelated exposure depends on it, and verifies the resulting
-//! victim loss and coalition SPL gain across all trade routes. Direct impact tests remain below.
-//! These tests exercise the deployed public
+//! victim loss and coalition SPL gain across all trade routes.
+//! `v16_program_mark_mode_route_matrix_discovers_profitable_liquidation_moves` crosses EWMA and
+//! hybrid-after-hours modes with single and batch reported-price routes, then requires total
+//! movement cost to cover any liquidation reward and coalition extraction. Direct impact tests
+//! remain below. These tests exercise the deployed public
 //! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
 //! rollback, liveness, or compute outcomes appropriate to the invariant.
 //!
@@ -27,6 +30,46 @@
 //! plus every additional verification method required by the charter.
 
 use super::*;
+
+proptest! {
+    #![proptest_config(ProptestConfig {
+        cases: env_usize("PERCOLATOR_FUZZ_CASES", 8) as u32,
+        max_shrink_iters: env_usize("PERCOLATOR_FUZZ_SHRINK_ITERS", 64) as u32,
+        failure_persistence: Some(Box::new(
+            proptest::test_runner::FileFailurePersistence::Direct(
+                "proptest-regressions/inv_045_trade_driven_liquidation_discovery.txt",
+            ),
+        )),
+        ..ProptestConfig::default()
+    })]
+
+    #[test]
+    fn v16_program_mark_mode_route_matrix_discovers_profitable_liquidation_moves(
+        seed in any::<[u8; 32]>()
+    ) {
+        let discoveries = discover_trade_driven_liquidation_violations(seed)
+            .map_err(TestCaseError::fail)?;
+        prop_assert_eq!(
+            discoveries.len(),
+            TradeDrivenMarkMode::ALL.len() * ProspectiveAccrualRoute::ALL.len()
+        );
+        let violations: Vec<_> = discoveries
+            .iter()
+            .filter(|discovery| discovery.is_violation())
+            .map(|discovery| (discovery.mode, discovery.route))
+            .collect();
+        let expected: Vec<_> = TradeDrivenMarkMode::ALL
+            .into_iter()
+            .flat_map(|mode| ProspectiveAccrualRoute::ALL.map(|route| (mode, route)))
+            .collect();
+        eprintln!("independent trade-driven liquidation discoveries: {violations:?}");
+        prop_assert_eq!(
+            violations,
+            expected,
+            "vulnerable-pin trade-driven liquidation corpus changed"
+        );
+    }
+}
 
 proptest! {
     #![proptest_config(ProptestConfig {

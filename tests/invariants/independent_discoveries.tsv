@@ -64,3 +64,4 @@ INV-045	pending-mark-inheritance/all-trade-routes	v16_program_trade_route_matrix
 INV-045	pending-target-override/all-trade-routes	v16_program_trade_route_matrix_discovers_pending_target_override	later-trade-cannot-cheaply-rewrite-prior-pending-mark	282
 INV-045	pending-mark/fee-sync-order	v16_program_pending_mark_fee_ordering_discovers_reward_diversion	fee-reward-cannot-outrank-uncommitted-adverse-value	356
 INV-045	mark-movement/reserve-withdrawal	v16_program_trade_route_matrix_discovers_withdrawable_mark_reserve	mark-movement-reserve-must-remain-encumbered	225
+INV-045	trade-driven-mark/liquidation-economics	v16_program_mark_mode_route_matrix_discovers_profitable_liquidation_moves	mark-movement-cost-must-cover-liquidation-extraction	280
