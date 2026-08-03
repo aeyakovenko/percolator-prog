@@ -93,6 +93,7 @@ INV-061	resolved-adl/close-order	v16_program_resolved_adl_close_order_matrix_dis
 INV-073	partial-adl/exact-effective-reduction	v16_program_partial_adl_effective_exit_matrix_discovers_zero_oi_residue_lock	zero-effective-oi-funded-residue-must-enter-bounded-cleanup	268
 INV-073	crossed-adl/exact-effective-trade	v16_program_crossed_adl_effective_exit_matrix_discovers_zero_oi_residue_lock	zero-effective-oi-funded-residue-must-enter-bounded-cleanup	266
 INV-073	expired-partial-close/unrelated-funded-account	v16_program_expired_partial_close_matrix_discovers_global_terminal_lock	account-local-expired-close-cannot-create-global-funded-recovery-sink	368
+INV-073	recovery-mode/explicit-terminal-routes	v16_program_expired_partial_close_matrix_discovers_global_terminal_lock	recovery-mode-must-have-a-public-terminal-continuation	252
 INV-071	micro-price/eager-crank-schedule	v16_program_micro_price_schedule_matrix_discovers_clock_consuming_noop_cranks	successful-crank-cannot-consume-zero-delta-price-time	246
 INV-071	bankruptcy-escalation/funded-survivor	v16_program_bankruptcy_escalation_matrix_discovers_funded_survivor_lock	recovery-required-transition-must-not-rollback-funded-survivor-progress	190
 INV-063	backing-expiry/authenticated-clock	v16_program_backing_expiry_boundary_discovers_extractable_stale_fee	expired-backing-cannot-create-withdrawable-provider-value	367

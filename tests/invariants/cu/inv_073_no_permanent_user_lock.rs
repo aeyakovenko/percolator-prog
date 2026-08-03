@@ -123,6 +123,33 @@ fn v16_program_expired_partial_close_matrix_discovers_global_terminal_lock() {
             assert_eq!(env.svm.get_account(&env.vault).unwrap(), fixed_vault);
         }
 
+        let admin = env.admin.insecure_clone();
+        env.svm.expire_blockhash();
+        let authorized_resolve = env.send(
+            ProgInstruction::ResolveMarket,
+            vec![
+                AccountMeta::new(admin.pubkey(), true),
+                AccountMeta::new(env.market, false),
+            ],
+            &[&admin],
+        );
+        assert!(authorized_resolve.is_err());
+        assert_eq!(env.svm.get_account(&env.market).unwrap(), fixed_market);
+        assert_eq!(env.svm.get_account(&idle).unwrap(), fixed_idle);
+        assert_eq!(env.svm.get_account(&env.vault).unwrap(), fixed_vault);
+
+        env.svm.warp_to_slot(200);
+        env.svm.expire_blockhash();
+        let stale_resolve = env.send(
+            ProgInstruction::ResolveStalePermissionless { now_slot: 0 },
+            vec![AccountMeta::new(env.market, false)],
+            &[],
+        );
+        assert!(stale_resolve.is_err());
+        assert_eq!(env.svm.get_account(&env.market).unwrap(), fixed_market);
+        assert_eq!(env.svm.get_account(&idle).unwrap(), fixed_idle);
+        assert_eq!(env.svm.get_account(&env.vault).unwrap(), fixed_vault);
+
         let idle_dest = env.token_account(idle_owner.pubkey(), 0);
         let idle_dest_before = env.svm.get_account(&idle_dest).unwrap();
         env.svm.expire_blockhash();
