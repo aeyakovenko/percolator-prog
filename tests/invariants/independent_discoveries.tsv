@@ -1,0 +1,8 @@
+# Finding-agnostic invariant discoveries mapped to the external benchmark.
+# This file is evidence metadata only. Generators and oracles must not read it.
+# invariant	fingerprint	generator	oracle	benchmark_prs
+INV-003	portfolio-incarnation/deposit	v16_program_portfolio_incarnation_operation_matrix_discovers_stale_intents	stale-intent-must-reject-and-roll-back-exactly	305
+INV-003	portfolio-incarnation/withdraw	v16_program_portfolio_incarnation_operation_matrix_discovers_stale_intents	stale-intent-must-reject-and-roll-back-exactly	299
+INV-003	portfolio-incarnation/close	v16_program_portfolio_incarnation_operation_matrix_discovers_stale_intents	stale-intent-must-reject-and-roll-back-exactly	309
+INV-003	portfolio-incarnation/matcher-policy	v16_program_portfolio_incarnation_operation_matrix_discovers_stale_intents	stale-intent-must-reject-and-roll-back-exactly	274,285,304
+INV-003	portfolio-incarnation/trade-family	v16_program_portfolio_incarnation_operation_matrix_discovers_stale_intents	stale-intent-must-reject-and-roll-back-exactly	276,285,303

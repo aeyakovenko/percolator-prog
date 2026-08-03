@@ -2,7 +2,10 @@
 //!
 //! Normative obligation: Portfolio-scoped consent cannot cross close and same-pubkey recreation.
 //!
-//! Evidence in this file (F over public I routes): `v16_program_pr309_portfolio_close_incarnation_replay_fuzz`, `v16_program_pr304_matcher_grant_portfolio_incarnation_replay_fuzz`, `v16_program_pr303_trade_portfolio_incarnation_replay_fuzz`, `v16_program_pr301_convert_portfolio_incarnation_replay_fuzz`, `v16_program_pr278_forfeit_portfolio_incarnation_replay_fuzz`, `v16_program_pr299_portfolio_incarnation_withdrawal_fuzz`, `v16_program_pr305_portfolio_incarnation_deposit_fuzz`. These tests exercise the deployed public
+//! Evidence in this file (F over public I routes):
+//! `v16_program_portfolio_incarnation_operation_matrix_discovers_stale_intents` enumerates the
+//! retained portfolio-operation registry without PR IDs or finding metadata. Finding-specific
+//! generated regressions remain below as impact confirmation. These tests exercise the deployed public
 //! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
 //! rollback, liveness, or compute outcomes appropriate to the invariant.
 //!
@@ -11,6 +14,43 @@
 //! plus every additional verification method required by the charter.
 
 use super::*;
+
+proptest! {
+    #![proptest_config(ProptestConfig {
+        cases: env_usize("PERCOLATOR_FUZZ_CASES", 8) as u32,
+        max_shrink_iters: env_usize("PERCOLATOR_FUZZ_SHRINK_ITERS", 64) as u32,
+        failure_persistence: Some(Box::new(
+            proptest::test_runner::FileFailurePersistence::Direct(
+                "proptest-regressions/v16_program_stateful_fuzz.txt",
+            ),
+        )),
+        ..ProptestConfig::default()
+    })]
+
+    #[test]
+    fn v16_program_portfolio_incarnation_operation_matrix_discovers_stale_intents(
+        seed in any::<[u8; 32]>()
+    ) {
+        let discoveries = discover_portfolio_incarnation_replays(seed)
+            .map_err(TestCaseError::fail)?;
+        prop_assert_eq!(discoveries.len(), PortfolioIntentKind::ALL.len());
+        for (expected, discovery) in PortfolioIntentKind::ALL.into_iter().zip(&discoveries) {
+            prop_assert_eq!(discovery.kind, expected);
+            prop_assert!(discovery.new_portfolio_id > discovery.old_portfolio_id);
+        }
+        let violations: Vec<_> = discoveries
+            .iter()
+            .filter(|discovery| discovery.is_violation())
+            .map(|discovery| discovery.kind)
+            .collect();
+        eprintln!("independent INV-003 discoveries: {violations:?}");
+        prop_assert_eq!(
+            violations,
+            PortfolioIntentKind::ALL.to_vec(),
+            "vulnerable-pin discovery corpus changed; inspect every operation-class delta"
+        );
+    }
+}
 
 proptest! {
     #![proptest_config(ProptestConfig {

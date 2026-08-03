@@ -47,9 +47,9 @@
 271	LoF	BLOCKER	INV-039	direct-regression	[BLOCKER LoF] Settle zero-move funding before trades
 272	LoF	BLOCKER	INV-039	direct-regression	[BLOCKER LoF] Settle zero-move funding before unilateral reduction
 273	LoF	BLOCKER	INV-039	direct-regression	[BLOCKER LoF] Accrue zero-move funding before recovery-leg forfeit
-274	LoF	HARDENING	INV-003	direct-regression	[HARDENING LoF] Bind matcher grants to portfolio incarnations
+274	LoF	HARDENING	INV-003	independent-discovery	[HARDENING LoF] Bind matcher grants to portfolio incarnations
 275	LoF	BLOCKER	INV-002	direct-regression	[BLOCKER LoF] Bind signed mark pushes to asset generations
-276	LoF	HARDENING	INV-003	direct-regression	[HARDENING LoF] Bind signed trades to portfolio incarnations
+276	LoF	HARDENING	INV-003	independent-discovery	[HARDENING LoF] Bind signed trades to portfolio incarnations
 277	LoF	BLOCKER	INV-002	direct-regression	[BLOCKER LoF] Bind oracle configuration to asset generations
 278	LoF	HARDENING	INV-003	direct-regression	[HARDENING LoF] Bind recovery forfeits to portfolio incarnations
 279	LoF	BLOCKER	INV-002	direct-regression	[BLOCKER LoF] Bind collateral top-ups to asset generations
@@ -58,7 +58,7 @@
 282	LoF	BLOCKER	INV-045	direct-regression	[BLOCKER LoF] Price pending EWMA overrides at target notional
 283	LoF	BLOCKER	INV-067	direct-regression	[BLOCKER LoF] Prevent dust backing from erasing terminal payouts
 284	LoF	BLOCKER	INV-036	missing	[BLOCKER LoF] Route negative batch fees to the correct insurance side
-285	LoF	HARDENING	INV-003	direct-regression	[HARDENING LoF] Bind retained portfolio authority to incarnation
+285	LoF	HARDENING	INV-003	independent-discovery	[HARDENING LoF] Bind retained portfolio authority to incarnation
 286	LoF	BLOCKER	INV-063	missing	[BLOCKER LoF] Preserve payouts after post-snapshot backing expiry
 287	LoF	BLOCKER	INV-067	missing	[BLOCKER LoF] Preserve funded shutdown reclaim windows
 288	DoS	BLOCKER	INV-067	missing	[BLOCKER DoS] Keep claimant Recovery deadlines monotonic
@@ -71,17 +71,17 @@
 296	LoF	BLOCKER	INV-001	direct-regression	[BLOCKER LoF] Bind trade-fee policy to market generations
 297	DoS	BLOCKER	INV-071	missing	[BLOCKER DoS] Prove prospective K/F source expiry progress
 298	DoS	BLOCKER	INV-071	missing	[BLOCKER DoS] Expire prospective loss backing before resolved settlement
-299	LoF	HARDENING	INV-003	direct-regression	[HARDENING LoF] Bind withdrawals to portfolio incarnations
+299	LoF	HARDENING	INV-003	independent-discovery	[HARDENING LoF] Bind withdrawals to portfolio incarnations
 300	DoS	BLOCKER	INV-028	missing	[BLOCKER DoS] Prevent foreign expiry from stranding resolved source liens
 301	LoF	HARDENING	INV-003	direct-regression	[HARDENING LoF] Bind PnL conversion to portfolio incarnations
 302	DoS	BLOCKER	INV-030	missing	[BLOCKER DoS] Route prospective loss after source impairment
-303	LoF	HARDENING	INV-003	direct-regression	[HARDENING LoF] Bind trades to portfolio incarnations
-304	LoF	HARDENING	INV-003	direct-regression	[HARDENING LoF] Bind matcher grants to portfolio incarnations
-305	LoF	HARDENING	INV-003	direct-regression	[HARDENING LoF] Bind deposits to portfolio incarnations
+303	LoF	HARDENING	INV-003	independent-discovery	[HARDENING LoF] Bind trades to portfolio incarnations
+304	LoF	HARDENING	INV-003	independent-discovery	[HARDENING LoF] Bind matcher grants to portfolio incarnations
+305	LoF	HARDENING	INV-003	independent-discovery	[HARDENING LoF] Bind deposits to portfolio incarnations
 306	DoS	BLOCKER	INV-034	missing	[BLOCKER DoS] Prove cross-domain source rounding progress
 307	LoF	HARDENING	INV-001	direct-regression	[HARDENING LoF] Bind deposits to market generations
 308	DoS	BLOCKER	INV-071	missing	[BLOCKER DoS] Settle B by collateral-atom budget
-309	LoF	HARDENING	INV-003	direct-regression	[HARDENING LoF] Bind portfolio close to its incarnation
+309	LoF	HARDENING	INV-003	independent-discovery	[HARDENING LoF] Bind portfolio close to its incarnation
 310	LoF	PRIVILEGED	INV-036	direct-regression	[PRIVILEGED LoF] Bind bilateral trades to live base-fee consent
 311	LoF	BLOCKER	INV-002	direct-regression	[BLOCKER LoF] Bind market resolution to asset generations
 312	LoF	BLOCKER	INV-002	missing	[BLOCKER LoF] Bind resolve policy to asset generations

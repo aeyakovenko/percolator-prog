@@ -140,6 +140,7 @@ fn v16_open_security_finding_benchmark_is_complete_and_non_overclaiming() {
     let mut direct = 0usize;
     let mut missing = 0usize;
     let mut independent = 0usize;
+    let mut benchmark_evidence = std::collections::BTreeMap::new();
 
     for line in include_str!("../open_findings.tsv").lines() {
         if line.starts_with('#') || line.is_empty() {
@@ -168,15 +169,66 @@ fn v16_open_security_finding_benchmark_is_complete_and_non_overclaiming() {
             "certified" => {}
             evidence => panic!("unknown evidence level {evidence}"),
         }
+        benchmark_evidence.insert(pr, fields[4]);
         rows += 1;
     }
 
     assert_eq!(rows, 145, "refresh the dated GitHub finding snapshot");
-    assert_eq!(direct, 78, "direct adapter inventory changed");
+    assert_eq!(direct, 70, "direct adapter inventory changed");
     assert_eq!(missing, 67, "explicit finding gaps changed");
     assert_eq!(
-        independent, 0,
+        independent, 8,
         "promote only genuinely finding-agnostic invariant discoveries"
+    );
+
+    let independent_source = include_str!("../stateful/inv_003_portfolio_incarnation_binding.rs");
+    let mut fingerprints = std::collections::BTreeSet::new();
+    let mut mapped_prs = std::collections::BTreeSet::new();
+    for line in include_str!("../independent_discoveries.tsv").lines() {
+        if line.starts_with('#') || line.is_empty() {
+            continue;
+        }
+        let fields: Vec<&str> = line.splitn(5, '\t').collect();
+        assert_eq!(fields.len(), 5, "malformed discovery row: {line}");
+        let invariant: u16 = fields[0]
+            .strip_prefix("INV-")
+            .expect("mapped discovery invariant")
+            .parse()
+            .expect("numeric discovery invariant ID");
+        assert!((1..=89).contains(&invariant));
+        assert!(
+            fingerprints.insert((invariant, fields[1])),
+            "duplicate invariant discovery fingerprint: {} {}",
+            fields[0],
+            fields[1]
+        );
+        assert!(
+            independent_source.contains(&format!("fn {}", fields[2])),
+            "discovery generator is not an executable invariant-owned test: {}",
+            fields[2]
+        );
+        assert_eq!(
+            fields[3], "stale-intent-must-reject-and-roll-back-exactly",
+            "unknown independent oracle"
+        );
+        for raw_pr in fields[4].split(',') {
+            let pr: u16 = raw_pr.parse().expect("numeric discovery PR ID");
+            assert_eq!(
+                benchmark_evidence.get(&pr),
+                Some(&"independent-discovery"),
+                "discovery mapping must point to a promoted benchmark row"
+            );
+            mapped_prs.insert(pr);
+        }
+    }
+
+    let promoted_prs: std::collections::BTreeSet<_> = benchmark_evidence
+        .iter()
+        .filter_map(|(pr, evidence)| (*evidence == "independent-discovery").then_some(*pr))
+        .collect();
+    assert_eq!(
+        mapped_prs, promoted_prs,
+        "every promoted benchmark row needs a finding-agnostic fingerprint"
     );
 }
 
