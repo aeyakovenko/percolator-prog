@@ -177,9 +177,9 @@ fn v16_open_security_finding_benchmark_is_complete_and_non_overclaiming() {
 
     assert_eq!(rows, 143, "refresh the dated GitHub finding snapshot");
     assert_eq!(direct, 0, "direct adapter inventory changed");
-    assert_eq!(missing, 26, "explicit finding gaps changed");
+    assert_eq!(missing, 25, "explicit finding gaps changed");
     assert_eq!(
-        independent, 109,
+        independent, 110,
         "promote only genuinely finding-agnostic invariant discoveries"
     );
     assert_eq!(nonqualifying, 8, "nonqualifying evidence roster changed");
@@ -200,6 +200,7 @@ fn v16_open_security_finding_benchmark_is_complete_and_non_overclaiming() {
         include_str!("../stateful/inv_034_domain_and_instance_isolation.rs"),
         include_str!("../stateful/inv_035_no_global_b_pool_residuals_remain_local.rs"),
         include_str!("../stateful/inv_036_fee_destination_and_policy_version_integrity.rs"),
+        include_str!("../cu/inv_036_fee_destination_and_policy_version_integrity.rs"),
         include_str!("../stateful/inv_038_rounding_and_ratio_conservation.rs"),
         include_str!("../stateful/inv_039_pending_loss_obligation_durability.rs"),
         include_str!("../stateful/inv_045_no_free_mark_movement.rs"),
@@ -248,6 +249,7 @@ fn v16_open_security_finding_benchmark_is_complete_and_non_overclaiming() {
                     | "newer-authorized-control-cannot-be-overwritten-by-stale-intent"
                     | "signer-debit-never-exceeds-consented-fee-terms"
                     | "provider-approved-fee-split-is-durable-and-attributed"
+                    | "account-oriented-fees-must-map-to-economic-side-before-terminal-use"
                     | "pending-balanced-transfer-cannot-be-erased-by-operation-order"
                     | "pending-value-must-commit-before-terminal-snapshot"
                     | "prospective-accrual-cannot-be-rewritten-by-trade-order"

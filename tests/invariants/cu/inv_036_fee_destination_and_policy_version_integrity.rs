@@ -2,7 +2,7 @@
 //!
 //! Normative obligation: Charged fees reach only the authorized destination under the bound policy version.
 //!
-//! Evidence in this file (I/C plus invariant-specific M assertions): `v16_attack_mixed_direction_batch_fees_conserve_by_asset`. These tests exercise the deployed public
+//! Evidence in this file (I/C plus invariant-specific M assertions): `v16_program_signed_direction_route_matrix_discovers_terminal_side_fee_loss`, `v16_attack_mixed_direction_batch_fees_conserve_by_asset`. These tests exercise the deployed public
 //! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
 //! rollback, liveness, or compute outcomes appropriate to the invariant.
 //!
@@ -11,6 +11,167 @@
 //! plus every additional verification method required by the charter.
 
 use super::*;
+
+#[derive(Debug, PartialEq, Eq)]
+struct DirectionalFeeTerminalOutcome {
+    winner_payout: u128,
+    long_budget: u128,
+    short_budget: u128,
+    terminal_vault: u128,
+}
+
+fn run_directional_fee_terminal_world(
+    path: NoCpiReportedPricePath,
+) -> DirectionalFeeTerminalOutcome {
+    const MARK: u64 = 1_000_000;
+    const FEE: u128 = MARK as u128;
+    let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+        initial_price: MARK,
+        maintenance_fee_per_slot: FEE - 1,
+        ..V16CuMarketParams::default()
+    });
+    env.configure_auth_mark_with_cu(0, MARK);
+    env.update_maintenance_fee_policy_with_cu(10_000);
+
+    let low_owner = Keypair::new();
+    let victim_owner = Keypair::new();
+    let reward_owner = Keypair::new();
+    let low = env.create_portfolio(&low_owner);
+    let victim = env.create_portfolio(&victim_owner);
+    let reward = env.create_portfolio(&reward_owner);
+    env.deposit(&low_owner, low, FEE);
+    env.deposit(&victim_owner, victim, 2 * FEE);
+    env.trade_asset_with_cu(
+        0,
+        &low_owner,
+        low,
+        &victim_owner,
+        victim,
+        POS_SCALE as i128,
+        MARK,
+        0,
+    );
+
+    env.svm.warp_to_slot(1);
+    env.push_auth_mark_with_cu(1, MARK);
+    for portfolio in [low, victim] {
+        for _ in 0..2 {
+            env.svm.expire_blockhash();
+            let _ = env.send(
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: 1,
+                    observations: crank_observations(0),
+                },
+                vec![
+                    AccountMeta::new(env.payer.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(portfolio, false),
+                ],
+                &[],
+            );
+        }
+    }
+    env.sync_maintenance_fee_with_cu(low, Some(reward), 1);
+    assert_eq!(env.portfolio_state(low).capital.get(), 1);
+
+    env.svm.expire_blockhash();
+    try_no_cpi_reported_price_trade_with_cu(
+        &mut env,
+        path,
+        &low_owner,
+        low,
+        &victim_owner,
+        victim,
+        -(POS_SCALE as i128),
+        MARK,
+        10_000,
+    )
+    .expect("risk-reducing directional-fee trade");
+    let after_fee = env.market_state().1;
+    let long_budget = after_fee.insurance_domain_budget[0];
+    let short_budget = after_fee.insurance_domain_budget[1];
+    assert_eq!(env.portfolio_state(low).capital.get(), 0);
+    assert_eq!(env.portfolio_state(victim).capital.get(), FEE);
+
+    let reward_dest = env.withdraw(&reward_owner, reward, FEE - 1);
+    assert_eq!(env.token_amount(reward_dest) as u128, FEE - 1);
+    env.close_portfolio_with_cu(&reward_owner, reward);
+    env.close_portfolio_with_cu(&low_owner, low);
+
+    let bankrupt_owner = Keypair::new();
+    let keeper_owner = Keypair::new();
+    let bankrupt = env.create_portfolio(&bankrupt_owner);
+    let keeper = env.create_portfolio(&keeper_owner);
+    env.deposit(&bankrupt_owner, bankrupt, FEE);
+    env.trade_asset_with_cu(
+        0,
+        &victim_owner,
+        victim,
+        &bankrupt_owner,
+        bankrupt,
+        POS_SCALE as i128,
+        MARK,
+        0,
+    );
+
+    for slot in [2u64, 3] {
+        env.svm.warp_to_slot(slot);
+        env.push_auth_mark_with_cu(slot, 3 * MARK);
+        for _ in 0..3 {
+            env.svm.expire_blockhash();
+            let _ = env.send(
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: slot,
+                    observations: crank_observations(0),
+                },
+                vec![
+                    AccountMeta::new(env.payer.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(keeper, false),
+                ],
+                &[],
+            );
+        }
+    }
+    assert_eq!(env.market_state().1.assets[0].effective_price, 3 * MARK);
+    env.resolve();
+
+    let mut winner_payout = 0u128;
+    for _ in 0..8 {
+        let loser = env.close_resolved(&bankrupt_owner, bankrupt);
+        assert_eq!(env.token_amount(loser), 0);
+        let winner = env.close_resolved(&victim_owner, victim);
+        winner_payout += u128::from(env.token_amount(winner));
+        let victim_state = env.portfolio_state(victim);
+        if victim_state.capital.get() == 0
+            && victim_state.pnl.get() == 0
+            && !has_active_leg_for_asset(&victim_state, 0)
+        {
+            break;
+        }
+    }
+    let terminal = env.market_state().1;
+    assert_eq!(terminal.vault as u64, env.token_amount(env.vault));
+    DirectionalFeeTerminalOutcome {
+        winner_payout,
+        long_budget,
+        short_budget,
+        terminal_vault: terminal.vault,
+    }
+}
+
+#[test]
+fn v16_program_signed_direction_route_matrix_discovers_terminal_side_fee_loss() {
+    let single = run_directional_fee_terminal_world(NoCpiReportedPricePath::Single);
+    let batch = run_directional_fee_terminal_world(NoCpiReportedPricePath::Batch);
+    assert_eq!(single.winner_payout, 1_000_000);
+    assert!(single.long_budget > single.short_budget);
+    assert_eq!(batch.winner_payout, 0);
+    assert!(batch.short_budget > batch.long_budget);
+    assert_eq!(single.long_budget, batch.short_budget);
+    assert_eq!(single.short_budget, batch.long_budget);
+    assert!(batch.terminal_vault > single.terminal_vault);
+}
 
 #[test]
 fn v16_attack_mixed_direction_batch_fees_conserve_by_asset() {
