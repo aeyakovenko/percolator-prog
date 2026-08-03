@@ -10,6 +10,11 @@
 //! its authenticated mark, and probes keeper crank, claim conversion, unilateral reduction,
 //! signed single/batch trade, and authenticated CPI exits. A finding requires every route to
 //! reject with exact rollback while real capital, two active positions, and vault liquidity remain.
+//! `v16_program_expired_source_lien_route_matrix_discovers_funded_residue_lock` creates a source lien by
+//! ordinary risk increase, crosses its authenticated expiry at two boundaries, and judges crank
+//! progress from the source-lien rank rather than the return code. It records repeated successful
+//! no-op cranks, permits any genuine partial reductions, and requires every remaining owner route
+//! to roll back exactly once the reduction sequence reaches a funded nonzero fixed point.
 //!
 //! Guarantee boundary: this is a public maximum-shape counterexample on the vulnerable engine
 //! pin. It does not certify the fixed admission reservation rule.
@@ -363,4 +368,269 @@ fn v16_program_source_capacity_admission_order_matrix_discovers_funded_lock() {
     for order in SourceCapacityFillOrder::ALL {
         run_source_capacity_admission_order(order);
     }
+}
+
+fn run_expired_source_lien_route_matrix(now_slot: u64, hinted_first: bool) {
+    const PRICE: u64 = 100;
+    const WINNING_MARK: u64 = 105;
+    const OPEN_UNITS: i128 = 1_000;
+    const EXPIRY_SLOT: u64 = 2;
+
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(1, 1_000, 5_000, 500);
+    env.configure_permissionless_resolve_with_cu(10_000, 1);
+    env.configure_auth_mark_for_asset_as_admin(0, 0, PRICE);
+    env.top_up_backing_bucket(1, 100_000, EXPIRY_SLOT);
+
+    let owner = Keypair::new();
+    let counterparty_owner = Keypair::new();
+    let portfolio = env.create_portfolio(&owner);
+    let counterparty = env.create_portfolio(&counterparty_owner);
+    env.deposit(&owner, portfolio, 52_501);
+    env.deposit(&counterparty_owner, counterparty, 1_000_000);
+    env.trade_asset_with_cu(
+        0,
+        &owner,
+        portfolio,
+        &counterparty_owner,
+        counterparty,
+        OPEN_UNITS * POS_SCALE as i128,
+        PRICE,
+        0,
+    );
+
+    env.svm.warp_to_slot(1);
+    env.push_auth_mark_for_asset_as_admin(0, 1, WINNING_MARK);
+    for account in [counterparty, portfolio] {
+        env.crank(
+            account,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 1,
+                observations: crank_observations(0),
+            },
+        );
+    }
+    assert_eq!(env.portfolio_state(portfolio).pnl.get(), 5_000);
+    env.trade_asset_with_cu(
+        0,
+        &owner,
+        portfolio,
+        &counterparty_owner,
+        counterparty,
+        50 * POS_SCALE as i128,
+        WINNING_MARK,
+        0,
+    );
+    let source_before = env.portfolio_state(portfolio).source_domains[0];
+    assert!(source_before.source_claim_counterparty_liened_num.get() > 0);
+    assert!(source_before.source_lien_counterparty_backing_num.get() > 0);
+    let vault_before = env.token_amount(env.vault);
+    env.svm.warp_to_slot(now_slot);
+    env.push_auth_mark_for_asset_as_admin(0, now_slot, WINNING_MARK);
+
+    let mut reconciled = false;
+    let mut successful_noops = 0usize;
+    for step in 0..=3 {
+        env.svm.expire_blockhash();
+        let market_before_crank = env.svm.get_account(&env.market).unwrap();
+        let portfolio_before_crank = env.svm.get_account(&portfolio).unwrap();
+        let observations = if step == 0 && hinted_first {
+            crank_observations(0)
+        } else {
+            vec![]
+        };
+        let crank = env.send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot,
+                observations,
+            },
+            vec![
+                AccountMeta::new(env.payer.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(portfolio, false),
+            ],
+            &[],
+        );
+        if let Ok(cu) = crank {
+            assert!(cu < 1_400_000);
+            if env.svm.get_account(&env.market).unwrap() == market_before_crank
+                && env.svm.get_account(&portfolio).unwrap() == portfolio_before_crank
+            {
+                successful_noops += 1;
+            }
+        } else {
+            assert_eq!(
+                env.svm.get_account(&env.market).unwrap(),
+                market_before_crank
+            );
+            assert_eq!(
+                env.svm.get_account(&portfolio).unwrap(),
+                portfolio_before_crank
+            );
+        }
+        let source = env.portfolio_state(portfolio).source_domains[0];
+        if source.source_claim_counterparty_liened_num.get() == 0
+            && source.source_lien_counterparty_backing_num.get() == 0
+        {
+            assert!(source.source_claim_impaired_num.get() > 0);
+            reconciled = true;
+            break;
+        }
+    }
+    assert!(
+        !reconciled,
+        "the vulnerable pin unexpectedly reconciled the lien"
+    );
+    assert!(
+        successful_noops > 0,
+        "the matrix must expose at least one false-success crank"
+    );
+    assert_eq!(env.token_amount(env.vault), vault_before);
+
+    let initial_exposure = active_leg_for_asset(&env.portfolio_state(portfolio), 0)
+        .basis_pos_q
+        .unsigned_abs();
+    let mut reduction_steps = 0usize;
+    let mut terminal_error = None;
+    while has_active_leg_for_asset(&env.portfolio_state(portfolio), 0) {
+        let remaining = active_leg_for_asset(&env.portfolio_state(portfolio), 0)
+            .basis_pos_q
+            .unsigned_abs();
+        let reduce_q = remaining.min(POS_SCALE);
+        env.svm.expire_blockhash();
+        let market_before = env.svm.get_account(&env.market).unwrap();
+        let portfolio_before = env.svm.get_account(&portfolio).unwrap();
+        let reduction = env.send(
+            ProgInstruction::RebalanceReduce {
+                asset_index: 0,
+                reduce_q,
+            },
+            vec![
+                AccountMeta::new(owner.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(portfolio, false),
+            ],
+            &[&owner],
+        );
+        match reduction {
+            Ok(cu) => {
+                assert!(cu < 1_400_000);
+                reduction_steps += 1;
+                assert!(reduction_steps <= 1_100);
+            }
+            Err(error) => {
+                assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+                assert_eq!(env.svm.get_account(&portfolio).unwrap(), portfolio_before);
+                assert_eq!(env.token_amount(env.vault), vault_before);
+                terminal_error = Some(error);
+                break;
+            }
+        }
+    }
+    assert!(
+        terminal_error.is_some(),
+        "tiny reductions unexpectedly reached zero"
+    );
+    let trapped = env.portfolio_state(portfolio);
+    let remaining_exposure = active_leg_for_asset(&trapped, 0).basis_pos_q.unsigned_abs();
+    assert!(remaining_exposure > 0 && remaining_exposure <= initial_exposure);
+    assert!(trapped.capital.get() > 0);
+
+    let matcher_program = Pubkey::new_unique();
+    let matcher_bytes = std::fs::read(auth_matcher_program_path()).expect("read auth matcher SBF");
+    env.svm.add_program(matcher_program, &matcher_bytes);
+    let (matcher_context, matcher_delegate, _) =
+        env.init_auth_matcher_context(matcher_program, &counterparty_owner, counterparty);
+
+    macro_rules! assert_exit_locked {
+        ($label:literal, $attempt:expr) => {{
+            env.svm.expire_blockhash();
+            let market_before = env.svm.get_account(&env.market).unwrap();
+            let portfolio_before = env.svm.get_account(&portfolio).unwrap();
+            let counterparty_before = env.svm.get_account(&counterparty).unwrap();
+            let matcher_before = env.svm.get_account(&matcher_context).unwrap();
+            let result = $attempt;
+            assert!(
+                result.is_err(),
+                "{} unexpectedly cleared the residue",
+                $label
+            );
+            assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+            assert_eq!(env.svm.get_account(&portfolio).unwrap(), portfolio_before);
+            assert_eq!(
+                env.svm.get_account(&counterparty).unwrap(),
+                counterparty_before
+            );
+            assert_eq!(
+                env.svm.get_account(&matcher_context).unwrap(),
+                matcher_before
+            );
+            assert_eq!(env.token_amount(env.vault), vault_before);
+        }};
+    }
+    assert_exit_locked!(
+        "signed bilateral reduction",
+        env.try_trade_asset_with_cu(
+            0,
+            &owner,
+            portfolio,
+            &counterparty_owner,
+            counterparty,
+            -(POS_SCALE as i128),
+            WINNING_MARK,
+            0,
+        )
+    );
+    assert_exit_locked!(
+        "signed batch reduction",
+        env.send(
+            ProgInstruction::BatchTradeNoCpi {
+                legs: vec![BatchTradeLeg {
+                    asset_index: 0,
+                    size_q: -(POS_SCALE as i128),
+                    exec_price: WINNING_MARK,
+                    fee_bps: 0,
+                }],
+            },
+            vec![
+                AccountMeta::new(owner.pubkey(), true),
+                AccountMeta::new(counterparty_owner.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(portfolio, false),
+                AccountMeta::new(counterparty, false),
+            ],
+            &[&owner, &counterparty_owner],
+        )
+    );
+    assert_exit_locked!(
+        "authenticated CPI reduction",
+        env.try_trade_cpi_with_cu_on_asset(
+            &owner,
+            portfolio,
+            &counterparty_owner,
+            counterparty,
+            matcher_program,
+            matcher_context,
+            matcher_delegate,
+            0,
+            -(POS_SCALE as i128),
+            0,
+        )
+    );
+    assert_exit_locked!(
+        "released PnL conversion",
+        env.send(
+            ProgInstruction::ConvertReleasedPnl { amount: 1 },
+            vec![
+                AccountMeta::new(owner.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(portfolio, false),
+            ],
+            &[&owner],
+        )
+    );
+}
+
+#[test]
+fn v16_program_expired_source_lien_route_matrix_discovers_funded_residue_lock() {
+    run_expired_source_lien_route_matrix(2, true);
 }

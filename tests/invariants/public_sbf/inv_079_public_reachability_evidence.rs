@@ -177,9 +177,9 @@ fn v16_open_security_finding_benchmark_is_complete_and_non_overclaiming() {
 
     assert_eq!(rows, 143, "refresh the dated GitHub finding snapshot");
     assert_eq!(direct, 0, "direct adapter inventory changed");
-    assert_eq!(missing, 38, "explicit finding gaps changed");
+    assert_eq!(missing, 37, "explicit finding gaps changed");
     assert_eq!(
-        independent, 104,
+        independent, 105,
         "promote only genuinely finding-agnostic invariant discoveries"
     );
     assert_eq!(nonqualifying, 1, "nonqualifying evidence roster changed");
@@ -269,6 +269,7 @@ fn v16_open_security_finding_benchmark_is_complete_and_non_overclaiming() {
                     | "expired-backing-cannot-capitalize-and-extract-independent-principal"
                     | "expired-retained-operation-cannot-consume-principal-and-lock-terminal-users"
                     | "vanished-source-claim-must-have-a-bounded-public-unwind"
+                    | "expired-source-lien-must-have-bounded-public-reconciliation"
                     | "fractional-source-domains-must-have-a-bounded-public-unwind"
                     | "flat-backed-claim-must-have-bounded-terminal-conversion"
                     | "admitted-live-leg-must-reserve-a-settlement-source-slot"
@@ -339,7 +340,10 @@ fn v16_open_security_finding_benchmark_is_complete_and_non_overclaiming() {
             "nonqualifying claim lacks executable public-route evidence: {}",
             fields[2]
         );
-        assert!(!fields[3].trim().is_empty(), "nonqualifying reason is empty");
+        assert!(
+            !fields[3].trim().is_empty(),
+            "nonqualifying reason is empty"
+        );
         assert_eq!(
             benchmark_evidence.get(&pr),
             Some(&"nonqualifying"),

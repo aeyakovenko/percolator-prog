@@ -24,7 +24,7 @@ verification methods are in [`../../INVARIANTS.md`](../../INVARIANTS.md).
 | --- | ---: | --- |
 | `public_sbf/` | 74 | Deterministic public SBF/LiteSVM counterexamples, regressions, and manifest checks |
 | `stateful/` | 111 | Proptest-generated public routes, including forty-three finding-agnostic discovery properties |
-| `cu/` | 74 | Positive public-route, metamorphic, rollback, liveness, and max-shape CU tests |
+| `cu/` | 75 | Positive public-route, metamorphic, rollback, liveness, and max-shape CU tests |
 | `kani/` | 40 | Symbolic wrapper arithmetic, matcher-binding, and strict-decoder proofs |
 
 The deterministic and stateful LoF adapters currently reproduce quarantined vulnerable behavior.
@@ -144,7 +144,7 @@ charter.
 
 `open_findings.tsv` is the unified 2026-08-03 snapshot of 143 open PRs whose titles identify a
 public-route LoF or DoS class. It maps every row to a primary invariant. PR135 currently has 0
-**Direct regression** rows, 38 **Missing** rows, 104 **Independent discovery** rows, and one
+**Direct regression** rows, 37 **Missing** rows, 105 **Independent discovery** rows, and one
 **Nonqualifying** row. The independent
 rows are backed by finding-agnostic fingerprints in `independent_discoveries.tsv`; that mapping is
 evidence metadata and is never consumed by a generator or oracle. The older
