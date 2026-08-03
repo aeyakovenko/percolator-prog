@@ -177,9 +177,9 @@ fn v16_open_security_finding_benchmark_is_complete_and_non_overclaiming() {
 
     assert_eq!(rows, 143, "refresh the dated GitHub finding snapshot");
     assert_eq!(direct, 0, "direct adapter inventory changed");
-    assert_eq!(missing, 35, "explicit finding gaps changed");
+    assert_eq!(missing, 34, "explicit finding gaps changed");
     assert_eq!(
-        independent, 106,
+        independent, 107,
         "promote only genuinely finding-agnostic invariant discoveries"
     );
     assert_eq!(nonqualifying, 2, "nonqualifying evidence roster changed");
@@ -285,6 +285,7 @@ fn v16_open_security_finding_benchmark_is_complete_and_non_overclaiming() {
                     | "terminal-snapshot-must-use-current-authenticated-oracle-state"
                     | "funded-resolved-adl-winner-has-bounded-public-exit"
                     | "successful-crank-cannot-consume-zero-delta-price-time"
+                    | "recovery-required-transition-must-not-rollback-funded-survivor-progress"
                     | "unsigned-lp-cannot-inherit-preexisting-settlement-cohort"
             ),
             "unknown independent oracle: {}",

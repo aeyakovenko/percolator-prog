@@ -2,7 +2,7 @@
 //!
 //! Normative obligation: Every successful crank strictly decreases a finite liveness rank or enters a lower terminal mode.
 //!
-//! Evidence in this file (I/C plus invariant-specific M assertions): `v16_program_micro_price_schedule_matrix_discovers_clock_consuming_noop_cranks`, `v16_attack_resolved_permissionless_crank_survives_drained_owner_system_account`, `v16_attack_stale_liquidation_budget_observation_crank_progresses_without_reward_or_value`, `v16_attack_auto_crank_prioritizes_b_stale_over_liquidation_reward_tail`, `v16_attack_auto_crank_reaches_later_material_liquidation_past_tiny_first_leg`. These tests exercise the deployed public
+//! Evidence in this file (I/C plus invariant-specific M assertions): `v16_program_bankruptcy_escalation_matrix_discovers_funded_survivor_lock`, `v16_program_micro_price_schedule_matrix_discovers_clock_consuming_noop_cranks`, `v16_attack_resolved_permissionless_crank_survives_drained_owner_system_account`, `v16_attack_stale_liquidation_budget_observation_crank_progresses_without_reward_or_value`, `v16_attack_auto_crank_prioritizes_b_stale_over_liquidation_reward_tail`, `v16_attack_auto_crank_reaches_later_material_liquidation_past_tiny_first_leg`. These tests exercise the deployed public
 //! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
 //! rollback, liveness, or compute outcomes appropriate to the invariant.
 //!
@@ -11,6 +11,236 @@
 //! plus every additional verification method required by the charter.
 
 use super::*;
+
+#[test]
+fn v16_program_bankruptcy_escalation_matrix_discovers_funded_survivor_lock() {
+    const OPEN_PRICE: u64 = 1_000_000;
+    const ADVERSE_PRICE: u64 = 1_070_000;
+
+    for short_capital in [55_000u128, 56_000] {
+        let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+            public_b_chunk_atoms: 1,
+            max_bankrupt_close_lifetime_slots: 1,
+            ..production_risk_params()
+        });
+        env.update_liquidation_fee_policy_with_cu(0);
+        env.configure_auth_mark_with_cu(0, OPEN_PRICE);
+
+        let long_owner = Keypair::new();
+        let short_owner = Keypair::new();
+        let long = env.create_portfolio(&long_owner);
+        let short = env.create_portfolio(&short_owner);
+        env.deposit(&long_owner, long, 100_000_000);
+        env.deposit(&short_owner, short, short_capital);
+        env.trade_asset_with_cu(
+            0,
+            &long_owner,
+            long,
+            &short_owner,
+            short,
+            POS_SCALE as i128,
+            OPEN_PRICE,
+            0,
+        );
+
+        let mut blocked_slot = None;
+        for slot in 1..=40u64 {
+            env.svm.warp_to_slot(slot);
+            let _ = env.push_auth_mark_with_cu(slot, ADVERSE_PRICE);
+            let market_before = env.svm.get_account(&env.market).unwrap();
+            let short_before = env.svm.get_account(&short).unwrap();
+            let cert_before = health_cert(&env.portfolio_state(short));
+            env.svm.expire_blockhash();
+            let result = env.send(
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: slot,
+                    observations: crank_observations(0),
+                },
+                vec![
+                    AccountMeta::new(env.payer.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(short, false),
+                ],
+                &[],
+            );
+            if let Err(error) = result {
+                if cert_before.valid && cert_before.certified_liq_deficit != 0 {
+                    assert!(
+                        error.contains("Custom(23)")
+                            || error.contains("custom program error: 0x17"),
+                        "current bankrupt crank failed for an unrelated reason: {error}"
+                    );
+                    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+                    assert_eq!(env.svm.get_account(&short).unwrap(), short_before);
+                    blocked_slot = Some(slot);
+                    break;
+                }
+            }
+        }
+
+        let blocked_slot = blocked_slot.expect(
+            "a one-atom close budget and one-slot lifetime must reach the escalation boundary",
+        );
+        let (_, blocked_group) = env.market_state();
+        assert_eq!(blocked_group.mode, MarketModeV16::Live);
+        assert!(blocked_group.vault >= blocked_group.c_tot + blocked_group.insurance);
+        assert_eq!(blocked_group.vault as u64, env.token_amount(env.vault));
+        assert!(
+            env.portfolio_state(long).capital.get() != 0
+                || env.portfolio_state(long).pnl.get() != 0,
+            "the rollback boundary must retain funded counterparty value"
+        );
+
+        let fixed_point_market = env.svm.get_account(&env.market).unwrap();
+        let fixed_point_long = env.svm.get_account(&long).unwrap();
+        let fixed_point_short = env.svm.get_account(&short).unwrap();
+        let fixed_point_vault = env.token_amount(env.vault);
+        for _ in 0..3 {
+            env.svm.expire_blockhash();
+            let retry = env.send(
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: blocked_slot,
+                    observations: crank_observations(0),
+                },
+                vec![
+                    AccountMeta::new(env.payer.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(short, false),
+                ],
+                &[],
+            );
+            assert!(
+                retry.is_err(),
+                "identical honest crank unexpectedly progressed"
+            );
+            assert_eq!(
+                env.svm.get_account(&env.market).unwrap(),
+                fixed_point_market
+            );
+            assert_eq!(env.svm.get_account(&long).unwrap(), fixed_point_long);
+            assert_eq!(env.svm.get_account(&short).unwrap(), fixed_point_short);
+            assert_eq!(env.token_amount(env.vault), fixed_point_vault);
+        }
+
+        let short_q = active_leg_for_asset(&env.portfolio_state(short), 0)
+            .basis_pos_q
+            .unsigned_abs();
+        env.svm.expire_blockhash();
+        let reduce_cu = env
+            .send(
+                ProgInstruction::RebalanceReduce {
+                    asset_index: 0,
+                    reduce_q: short_q,
+                },
+                vec![
+                    AccountMeta::new(short_owner.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(short, false),
+                ],
+                &[&short_owner],
+            )
+            .expect("owner reduction remains a bounded alternative to crank escalation");
+        assert_cu_within(
+            "bankruptcy escalation owner reduction",
+            reduce_cu,
+            CUSTODY_CU_LIMIT,
+        );
+        assert!(
+            !has_active_leg_for_asset(&env.portfolio_state(short), 0),
+            "owner reduction must remove the bankrupt leg"
+        );
+
+        let mut long_reduced = false;
+        let mut last_long_error = String::new();
+        let mut fixed_point_repeats = 0usize;
+        for _ in 0..32 {
+            if !has_active_leg_for_asset(&env.portfolio_state(long), 0) {
+                long_reduced = true;
+                break;
+            }
+            let long_q = active_leg_for_asset(&env.portfolio_state(long), 0)
+                .basis_pos_q
+                .unsigned_abs();
+            let market_before_reduce = env.svm.get_account(&env.market).unwrap();
+            let long_before_reduce = env.svm.get_account(&long).unwrap();
+            env.svm.expire_blockhash();
+            match env.send(
+                ProgInstruction::RebalanceReduce {
+                    asset_index: 0,
+                    reduce_q: long_q,
+                },
+                vec![
+                    AccountMeta::new(long_owner.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(long, false),
+                ],
+                &[&long_owner],
+            ) {
+                Ok(_) => {
+                    long_reduced = true;
+                    break;
+                }
+                Err(error) => {
+                    last_long_error = error;
+                    assert_eq!(
+                        env.svm.get_account(&env.market).unwrap(),
+                        market_before_reduce
+                    );
+                    assert_eq!(env.svm.get_account(&long).unwrap(), long_before_reduce);
+                }
+            }
+            let market_before_crank = env.svm.get_account(&env.market).unwrap();
+            let long_before_crank = env.svm.get_account(&long).unwrap();
+            env.svm.expire_blockhash();
+            let crank = env.send(
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: blocked_slot,
+                    observations: crank_observations(0),
+                },
+                vec![
+                    AccountMeta::new(env.payer.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(long, false),
+                ],
+                &[],
+            );
+            let unchanged = env.svm.get_account(&env.market).unwrap() == market_before_crank
+                && env.svm.get_account(&long).unwrap() == long_before_crank;
+            if crank.is_err() {
+                assert!(unchanged, "rejected crank must roll back exactly");
+            }
+            fixed_point_repeats = if unchanged {
+                fixed_point_repeats + 1
+            } else {
+                0
+            };
+            if fixed_point_repeats >= 3 {
+                break;
+            }
+        }
+        assert!(
+            !long_reduced && has_active_leg_for_asset(&env.portfolio_state(long), 0),
+            "the generated survivor no longer reproduces the funded lock"
+        );
+        assert!(
+            fixed_point_repeats >= 3,
+            "continuations did not reach a fixed point"
+        );
+        let survivor = env.portfolio_state(long);
+        assert!(
+            survivor.capital.get() != 0 || survivor.pnl.get() != 0,
+            "the locked survivor must retain user value"
+        );
+        assert!(
+            !last_long_error.is_empty(),
+            "owner reduction must have been attempted at the fixed point"
+        );
+        assert_eq!(
+            env.market_state().1.vault as u64,
+            env.token_amount(env.vault)
+        );
+    }
+}
 
 #[derive(Debug)]
 struct MicroPriceScheduleOutcome {
