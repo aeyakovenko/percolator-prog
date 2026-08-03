@@ -66,9 +66,9 @@
 291	DoS	REAL	INV-063	missing	[REAL DoS] Pin lapsed backing settlement fix
 292	LoF	HARDENING	INV-003	missing	[HARDENING LoF] Bind rebalance reductions to portfolio incarnations
 293	LoF	HARDENING	INV-001	missing	[HARDENING LoF] Bind RebalanceReduce to market generations
-294	LoF	HARDENING	INV-001	direct-regression	[HARDENING LoF] Bind matcher grants to market generations
+294	LoF	HARDENING	INV-001	independent-discovery	[HARDENING LoF] Bind matcher grants to market generations
 295	LoF	HARDENING	INV-001	direct-regression	[HARDENING LoF] Bind recovery forfeits to market generations
-296	LoF	BLOCKER	INV-001	direct-regression	[BLOCKER LoF] Bind trade-fee policy to market generations
+296	LoF	BLOCKER	INV-001	independent-discovery	[BLOCKER LoF] Bind trade-fee policy to market generations
 297	DoS	BLOCKER	INV-071	missing	[BLOCKER DoS] Prove prospective K/F source expiry progress
 298	DoS	BLOCKER	INV-071	missing	[BLOCKER DoS] Expire prospective loss backing before resolved settlement
 299	LoF	HARDENING	INV-003	independent-discovery	[HARDENING LoF] Bind withdrawals to portfolio incarnations
@@ -79,7 +79,7 @@
 304	LoF	HARDENING	INV-003	independent-discovery	[HARDENING LoF] Bind matcher grants to portfolio incarnations
 305	LoF	HARDENING	INV-003	independent-discovery	[HARDENING LoF] Bind deposits to portfolio incarnations
 306	DoS	BLOCKER	INV-034	missing	[BLOCKER DoS] Prove cross-domain source rounding progress
-307	LoF	HARDENING	INV-001	direct-regression	[HARDENING LoF] Bind deposits to market generations
+307	LoF	HARDENING	INV-001	independent-discovery	[HARDENING LoF] Bind deposits to market generations
 308	DoS	BLOCKER	INV-071	missing	[BLOCKER DoS] Settle B by collateral-atom budget
 309	LoF	HARDENING	INV-003	independent-discovery	[HARDENING LoF] Bind portfolio close to its incarnation
 310	LoF	PRIVILEGED	INV-036	direct-regression	[PRIVILEGED LoF] Bind bilateral trades to live base-fee consent
@@ -87,17 +87,17 @@
 312	LoF	BLOCKER	INV-002	missing	[BLOCKER LoF] Bind resolve policy to asset generations
 313	LoF	PRIVILEGED	INV-014	missing	[PRIVILEGED LoF] Require LP consent for CPI base fees
 314	LoF	BLOCKER	INV-036	direct-regression	[BLOCKER LoF] Bind permissionless activation fees to creator consent
-315	LoF	BLOCKER	INV-001	direct-regression	[BLOCKER LoF] Bind asset shutdown to market generations
+315	LoF	BLOCKER	INV-001	independent-discovery	[BLOCKER LoF] Bind asset shutdown to market generations
 316	LoF	HARDENING	INV-004	missing	[HARDENING LoF] Bind rebalance consent to position episodes
-317	LoF	BLOCKER	INV-001	direct-regression	[BLOCKER LoF] Bind fee redirects to market generations
+317	LoF	BLOCKER	INV-001	independent-discovery	[BLOCKER LoF] Bind fee redirects to market generations
 318	LoF	BLOCKER	INV-002	direct-regression	[BLOCKER LoF] Bind backing fees to asset generations
 320	LoF	BLOCKER	INV-002	direct-regression	[BLOCKER LoF] Bind insurance top-ups to asset generations
 321	LoF	BLOCKER	INV-002	direct-regression	[BLOCKER LoF] Bind backing top-ups to asset generations
 322	LoF	BLOCKER	INV-002	direct-regression	[BLOCKER LoF] Bind oracle updates to asset generations
 323	DoS	BLOCKER	INV-001	missing	[BLOCKER DoS] Bind market resolution to its generation
 324	DoS	BLOCKER	INV-001	missing	[BLOCKER DoS] Bind stale resolution policy to market generation
-325	LoF	BLOCKER	INV-014	direct-regression	[BLOCKER LoF] Bind maintenance fee policy to market generation
-326	LoF	BLOCKER	INV-014	direct-regression	[BLOCKER LoF] Bind liquidation fee policy to market generation
+325	LoF	BLOCKER	INV-014	independent-discovery	[BLOCKER LoF] Bind maintenance fee policy to market generation
+326	LoF	BLOCKER	INV-014	independent-discovery	[BLOCKER LoF] Bind liquidation fee policy to market generation
 328	LoF	BLOCKER	INV-002	direct-regression	[BLOCKER LoF] Bind insurance withdrawals to asset generations
 329	LoF	BLOCKER	INV-038	direct-regression	[BLOCKER LoF] Round composite oracle prices once
 330	LoF	BLOCKER	INV-067	missing	[BLOCKER LoF] Recover terminal bankruptcy double charge

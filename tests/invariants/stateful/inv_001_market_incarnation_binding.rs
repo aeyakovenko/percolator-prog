@@ -2,7 +2,10 @@
 //!
 //! Normative obligation: Retained requests cannot cross a market close, recreation, or generation change.
 //!
-//! Evidence in this file (F over public I routes): `v16_program_pr294_matcher_grant_market_generation_replay_fuzz`, `v16_program_pr296_trade_fee_market_generation_replay_fuzz`, `v16_program_pr295_forfeit_market_generation_replay_fuzz`, `v16_program_pr317_fee_redirect_generation_replay_fuzz`, `v16_program_pr307_market_incarnation_deposit_fuzz`, `v16_program_pr315_shutdown_generation_replay_fuzz`. These tests exercise the deployed public
+//! Evidence in this file (F over public I routes):
+//! `v16_program_market_incarnation_operation_matrix_discovers_stale_intents` enumerates a
+//! finding-agnostic retained-operation registry over public market close/recreate. Direct impact
+//! regressions remain below. These tests exercise the deployed public
 //! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
 //! rollback, liveness, or compute outcomes appropriate to the invariant.
 //!
@@ -11,6 +14,42 @@
 //! plus every additional verification method required by the charter.
 
 use super::*;
+
+proptest! {
+    #![proptest_config(ProptestConfig {
+        cases: env_usize("PERCOLATOR_FUZZ_CASES", 8) as u32,
+        max_shrink_iters: env_usize("PERCOLATOR_FUZZ_SHRINK_ITERS", 64) as u32,
+        failure_persistence: Some(Box::new(
+            proptest::test_runner::FileFailurePersistence::Direct(
+                "proptest-regressions/v16_program_stateful_fuzz.txt",
+            ),
+        )),
+        ..ProptestConfig::default()
+    })]
+
+    #[test]
+    fn v16_program_market_incarnation_operation_matrix_discovers_stale_intents(
+        seed in any::<[u8; 32]>()
+    ) {
+        let discoveries = discover_market_incarnation_replays(seed)
+            .map_err(TestCaseError::fail)?;
+        prop_assert_eq!(discoveries.len(), MarketIntentKind::ALL.len());
+        for (expected, discovery) in MarketIntentKind::ALL.into_iter().zip(&discoveries) {
+            prop_assert_eq!(discovery.kind, expected);
+        }
+        let violations: Vec<_> = discoveries
+            .iter()
+            .filter(|discovery| discovery.is_violation())
+            .map(|discovery| discovery.kind)
+            .collect();
+        eprintln!("independent INV-001 discoveries: {violations:?}");
+        prop_assert_eq!(
+            violations,
+            MarketIntentKind::ALL.to_vec(),
+            "vulnerable-pin market-incarnation discovery corpus changed"
+        );
+    }
+}
 
 proptest! {
     #![proptest_config(ProptestConfig {

@@ -174,14 +174,17 @@ fn v16_open_security_finding_benchmark_is_complete_and_non_overclaiming() {
     }
 
     assert_eq!(rows, 145, "refresh the dated GitHub finding snapshot");
-    assert_eq!(direct, 70, "direct adapter inventory changed");
+    assert_eq!(direct, 63, "direct adapter inventory changed");
     assert_eq!(missing, 67, "explicit finding gaps changed");
     assert_eq!(
-        independent, 8,
+        independent, 15,
         "promote only genuinely finding-agnostic invariant discoveries"
     );
 
-    let independent_source = include_str!("../stateful/inv_003_portfolio_incarnation_binding.rs");
+    let independent_sources = [
+        include_str!("../stateful/inv_001_market_incarnation_binding.rs"),
+        include_str!("../stateful/inv_003_portfolio_incarnation_binding.rs"),
+    ];
     let mut fingerprints = std::collections::BTreeSet::new();
     let mut mapped_prs = std::collections::BTreeSet::new();
     for line in include_str!("../independent_discoveries.tsv").lines() {
@@ -203,7 +206,9 @@ fn v16_open_security_finding_benchmark_is_complete_and_non_overclaiming() {
             fields[1]
         );
         assert!(
-            independent_source.contains(&format!("fn {}", fields[2])),
+            independent_sources
+                .iter()
+                .any(|source| source.contains(&format!("fn {}", fields[2]))),
             "discovery generator is not an executable invariant-owned test: {}",
             fields[2]
         );

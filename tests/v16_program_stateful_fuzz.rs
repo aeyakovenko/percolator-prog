@@ -75,7 +75,10 @@ use support::fuzz_model::{
     trade_portfolio_incarnation_replay_strategy, trade_retry_replay_strategy,
     withdrawal_retry_liquidation_seed_strategy,
 };
-use support::invariant_discovery::{discover_portfolio_incarnation_replays, PortfolioIntentKind};
+use support::invariant_discovery::{
+    discover_market_incarnation_replays, discover_portfolio_incarnation_replays, MarketIntentKind,
+    PortfolioIntentKind,
+};
 
 fn env_usize(name: &str, default: usize) -> usize {
     std::env::var(name)
