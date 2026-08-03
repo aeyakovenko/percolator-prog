@@ -2,7 +2,7 @@ use super::v16_svm::{
     MarketConfig, V16Svm, EXIT_MAKER_DEPOSIT, EXIT_MAKER_INDEX, INITIAL_PRICE, PRIMARY_ACTOR_COUNT,
     USER_DEPOSIT,
 };
-use percolator::{MarketModeV16, SideModeV16, POS_SCALE};
+use percolator::{BackingBucketStatusV16, MarketModeV16, SideModeV16, POS_SCALE};
 use percolator_prog::{
     constants::{ORACLE_LEG_FLAG_DIVIDE_LEG2, ORACLE_LEG_FLAG_DIVIDE_LEG3},
     ix::{BatchTradeCpiLeg, BatchTradeLeg, CrankObservationHint},
@@ -775,6 +775,34 @@ pub struct FullRefreshDiscovery {
     pub complete_position_after_q: u128,
     pub complete_liq_deficit: u128,
     pub complete_insurance_delta: u128,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BackingExpiryCase {
+    pub fee_bps: u16,
+    pub expiry_offset: u8,
+    pub mark_move_bps: u16,
+    pub increase_divisor: u8,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BackingExpiryDiscovery {
+    pub expiry_slot: u64,
+    pub authenticated_slot: u64,
+    pub engine_slot: u64,
+    pub victim_capital_loss: u128,
+    pub provider_earnings: u128,
+    pub extracted_tokens: u64,
+}
+
+impl BackingExpiryDiscovery {
+    pub fn is_violation(&self) -> bool {
+        self.authenticated_slot > self.expiry_slot
+            && self.engine_slot < self.authenticated_slot
+            && self.victim_capital_loss != 0
+            && self.provider_earnings == self.victim_capital_loss
+            && u128::from(self.extracted_tokens) == self.provider_earnings
+    }
 }
 
 impl FullRefreshDiscovery {
@@ -6400,6 +6428,120 @@ pub fn discover_full_refresh_omission_violation(
         complete_position_after_q,
         complete_liq_deficit: complete_cert.certified_liq_deficit,
         complete_insurance_delta,
+    })
+}
+
+pub fn discover_backing_expiry_violation(
+    mut seed: [u8; 32],
+    case: BackingExpiryCase,
+) -> Result<BackingExpiryDiscovery, String> {
+    const PRICE: u64 = 100;
+    const DOMAIN: u16 = 1;
+    const BUCKET_AMOUNT: u128 = 100_000;
+    const OPEN_Q: i128 = 1_000 * POS_SCALE as i128;
+
+    seed[0] ^= 0x67;
+    let mut env = V16Svm::new(
+        seed,
+        MarketConfig {
+            maintenance_margin_bps: 1_000,
+            initial_margin_bps: 5_000,
+            max_price_move_bps_per_slot: 500,
+            max_accrual_dt_slots: 1,
+            min_funding_lifetime_slots: 1,
+            actor_deposits: [
+                52_501,
+                1_000_000,
+                USER_DEPOSIT,
+                USER_DEPOSIT,
+                EXIT_MAKER_DEPOSIT,
+            ],
+            ..MarketConfig::default()
+        },
+    );
+    let fee_bps = case.fee_bps.clamp(1, 10_000);
+    let expiry_offset = u64::from(case.expiry_offset.clamp(2, 8));
+    let mark_move_bps = u64::from(case.mark_move_bps.clamp(100, 1_000));
+    let increase_divisor = i128::from(case.increase_divisor.clamp(10, 100));
+    let increase_q = OPEN_Q
+        .checked_div(increase_divisor)
+        .ok_or_else(|| "backing-expiry increase divisor is zero".to_string())?;
+
+    env.configure_auth_mark(false, 0, env.current_slot(), PRICE)
+        .map_err(|error| format!("configure backing-expiry mark: {error}"))?;
+    env.update_backing_fee_policy(DOMAIN, fee_bps, 0)
+        .map_err(|error| format!("configure backing fee policy: {error}"))?;
+    let expiry_slot = env
+        .current_slot()
+        .checked_add(expiry_offset)
+        .ok_or_else(|| "backing expiry slot overflow".to_string())?;
+    env.top_up_backing_bucket(DOMAIN, BUCKET_AMOUNT, expiry_slot)
+        .map_err(|error| format!("top up backing bucket: {error}"))?;
+    env.trade_no_cpi(0, 1, 0, OPEN_Q, PRICE, 0)
+        .map_err(|error| format!("open source-backed position: {error}"))?;
+
+    let mark_slot = env
+        .current_slot()
+        .checked_add(1)
+        .ok_or_else(|| "backing mark slot overflow".to_string())?;
+    env.warp_to_slot(mark_slot);
+    let winning_mark = PRICE
+        .checked_mul(
+            10_000u64
+                .checked_add(mark_move_bps)
+                .ok_or_else(|| "backing mark bps overflow".to_string())?,
+        )
+        .and_then(|value| value.checked_div(10_000))
+        .ok_or_else(|| "backing winning mark overflow".to_string())?;
+    env.push_auth_mark(0, mark_slot, winning_mark)
+        .map_err(|error| format!("push backing winning mark: {error}"))?;
+    crank_asset_progress(&mut env, 1, mark_slot, 0, 4)?;
+    crank_asset_progress(&mut env, 0, mark_slot, 0, 4)?;
+
+    let before_group = env.primary_market_state().1;
+    let before_bucket = before_group.source_backing_buckets[DOMAIN as usize];
+    if before_bucket.status != BackingBucketStatusV16::Fresh
+        || before_bucket.expiry_slot != expiry_slot
+    {
+        return Err("backing was not fresh before retained trade construction".into());
+    }
+    let capital_before = env.primary_portfolio(0).capital.get();
+    let provider_before = env.token_amount(env.provider_destination_token);
+    let supply_before = env.token_supply_observed();
+    let retained = env.build_retained_no_cpi_trade(0, 1, 0, increase_q, winning_mark);
+
+    let authenticated_slot = expiry_slot
+        .checked_add(1)
+        .ok_or_else(|| "post-expiry landing slot overflow".to_string())?;
+    env.warp_to_slot(authenticated_slot);
+    env.land_retained(retained)
+        .map_err(|error| format!("retained trade after authenticated expiry: {error}"))?;
+
+    let after_group = env.primary_market_state().1;
+    let after_bucket = after_group.source_backing_buckets[DOMAIN as usize];
+    let provider_earnings = after_bucket
+        .utilization_fee_earnings
+        .checked_sub(before_bucket.utilization_fee_earnings)
+        .ok_or_else(|| "post-expiry provider earnings decreased".to_string())?;
+    let victim_capital_loss = capital_before
+        .checked_sub(env.primary_portfolio(0).capital.get())
+        .ok_or_else(|| "post-expiry trade increased victim capital".to_string())?;
+    env.withdraw_backing_bucket_earnings(DOMAIN, provider_earnings)
+        .map_err(|error| format!("withdraw expired-backing earnings: {error}"))?;
+    let extracted_tokens = env
+        .token_amount(env.provider_destination_token)
+        .checked_sub(provider_before)
+        .ok_or_else(|| "provider token balance decreased".to_string())?;
+    if env.token_supply_observed() != supply_before {
+        return Err("expired-backing extraction changed SPL supply".into());
+    }
+    Ok(BackingExpiryDiscovery {
+        expiry_slot,
+        authenticated_slot,
+        engine_slot: after_group.current_slot,
+        victim_capital_loss,
+        provider_earnings,
+        extracted_tokens,
     })
 }
 

@@ -174,10 +174,10 @@ fn v16_open_security_finding_benchmark_is_complete_and_non_overclaiming() {
     }
 
     assert_eq!(rows, 145, "refresh the dated GitHub finding snapshot");
-    assert_eq!(direct, 1, "direct adapter inventory changed");
+    assert_eq!(direct, 0, "direct adapter inventory changed");
     assert_eq!(missing, 62, "explicit finding gaps changed");
     assert_eq!(
-        independent, 82,
+        independent, 83,
         "promote only genuinely finding-agnostic invariant discoveries"
     );
 
@@ -197,6 +197,7 @@ fn v16_open_security_finding_benchmark_is_complete_and_non_overclaiming() {
         include_str!("../stateful/inv_039_pending_loss_obligation_durability.rs"),
         include_str!("../stateful/inv_045_no_free_mark_movement.rs"),
         include_str!("../stateful/inv_053_full_health_recertification_equivalence.rs"),
+        include_str!("../stateful/inv_063_backing_expiry_normalization.rs"),
         include_str!(
             "../stateful/inv_067_terminal_payout_completeness_and_exact_once_settlement.rs"
         ),
@@ -255,6 +256,7 @@ fn v16_open_security_finding_benchmark_is_complete_and_non_overclaiming() {
                     | "backing-atoms-cannot-support-claims-from-another-source"
                     | "b-loss-reduces-only-the-originating-source-domain"
                     | "liquidation-certificate-cannot-be-healthier-than-full-refresh"
+                    | "expired-backing-cannot-create-withdrawable-provider-value"
             ),
             "unknown independent oracle: {}",
             fields[3]
