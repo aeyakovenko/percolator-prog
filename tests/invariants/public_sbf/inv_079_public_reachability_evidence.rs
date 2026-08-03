@@ -177,9 +177,9 @@ fn v16_open_security_finding_benchmark_is_complete_and_non_overclaiming() {
 
     assert_eq!(rows, 143, "refresh the dated GitHub finding snapshot");
     assert_eq!(direct, 0, "direct adapter inventory changed");
-    assert_eq!(missing, 11, "explicit finding gaps changed");
+    assert_eq!(missing, 10, "explicit finding gaps changed");
     assert_eq!(
-        independent, 120,
+        independent, 121,
         "promote only genuinely finding-agnostic invariant discoveries"
     );
     assert_eq!(nonqualifying, 12, "nonqualifying evidence roster changed");
@@ -302,6 +302,7 @@ fn v16_open_security_finding_benchmark_is_complete_and_non_overclaiming() {
                     | "recovery-mode-must-have-a-public-terminal-continuation"
                     | "successful-crank-cannot-consume-zero-delta-price-time"
                     | "recovery-required-transition-must-not-rollback-funded-survivor-progress"
+                    | "prospective-loss-must-not-create-backing-in-lapsed-domain"
                     | "asset-local-bankruptcy-cannot-lock-unrelated-backed-claim"
                     | "unsigned-lp-cannot-inherit-preexisting-settlement-cohort"
             ),

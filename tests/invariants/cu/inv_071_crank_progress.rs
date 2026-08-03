@@ -2,7 +2,7 @@
 //!
 //! Normative obligation: Every successful crank strictly decreases a finite liveness rank or enters a lower terminal mode.
 //!
-//! Evidence in this file (I/C plus invariant-specific M assertions): `v16_program_prospective_source_expiry_prerequisite_matrix_keeps_exit_live`, `v16_program_b_budget_prerequisite_matrix_hits_resolved_adl_lock`, `v16_program_bankruptcy_escalation_matrix_discovers_funded_survivor_lock`, `v16_program_micro_price_schedule_matrix_discovers_clock_consuming_noop_cranks`, `v16_attack_resolved_permissionless_crank_survives_drained_owner_system_account`, `v16_attack_stale_liquidation_budget_observation_crank_progresses_without_reward_or_value`, `v16_attack_auto_crank_prioritizes_b_stale_over_liquidation_reward_tail`, `v16_attack_auto_crank_reaches_later_material_liquidation_past_tiny_first_leg`. These tests exercise the deployed public
+//! Evidence in this file (I/C plus invariant-specific M assertions): `v16_program_prospective_loss_expiry_matrix_discovers_resolved_exit_lock`, `v16_program_prospective_source_expiry_prerequisite_matrix_keeps_exit_live`, `v16_program_b_budget_prerequisite_matrix_hits_resolved_adl_lock`, `v16_program_bankruptcy_escalation_matrix_discovers_funded_survivor_lock`, `v16_program_micro_price_schedule_matrix_discovers_clock_consuming_noop_cranks`, `v16_attack_resolved_permissionless_crank_survives_drained_owner_system_account`, `v16_attack_stale_liquidation_budget_observation_crank_progresses_without_reward_or_value`, `v16_attack_auto_crank_prioritizes_b_stale_over_liquidation_reward_tail`, `v16_attack_auto_crank_reaches_later_material_liquidation_past_tiny_first_leg`. These tests exercise the deployed public
 //! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
 //! rollback, liveness, or compute outcomes appropriate to the invariant.
 //!
@@ -11,6 +11,182 @@
 //! plus every additional verification method required by the charter.
 
 use super::*;
+
+#[test]
+fn v16_program_prospective_loss_expiry_matrix_discovers_resolved_exit_lock() {
+    const PRICE: u64 = 100;
+    const LOW_PRICE: u64 = 98;
+    const DEPOSIT: u128 = 100_000_000;
+    const SIZE_Q: i128 = 100_000 * POS_SCALE as i128;
+
+    let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+        max_portfolio_assets: 2,
+        initial_price: PRICE,
+        max_price_move_bps_per_slot: 200,
+        max_accrual_dt_slots: 1,
+        min_funding_lifetime_slots: 1,
+        ..V16CuMarketParams::default()
+    });
+    env.svm.warp_to_slot(1);
+    env.configure_auth_mark_for_asset_as_admin(0, 1, PRICE);
+    env.configure_auth_mark_for_asset_as_admin(1, 1, PRICE);
+
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let neutral_owner = Keypair::new();
+    let fee_peer_owner = Keypair::new();
+    let long = env.create_portfolio(&long_owner);
+    let short = env.create_portfolio(&short_owner);
+    let neutral = env.create_portfolio(&neutral_owner);
+    let fee_peer = env.create_portfolio(&fee_peer_owner);
+    for (owner, portfolio) in [
+        (&long_owner, long),
+        (&short_owner, short),
+        (&neutral_owner, neutral),
+        (&fee_peer_owner, fee_peer),
+    ] {
+        env.deposit(owner, portfolio, DEPOSIT);
+    }
+    env.trade_with_cu(&long_owner, long, &short_owner, short, SIZE_Q, PRICE, 0);
+    env.trade_asset_with_cu(
+        1,
+        &short_owner,
+        short,
+        &fee_peer_owner,
+        fee_peer,
+        SIZE_Q,
+        PRICE,
+        0,
+    );
+    env.top_up_backing_bucket(0, 1_000_000, 8);
+
+    env.svm.warp_to_slot(2);
+    env.push_auth_mark_for_asset_as_admin(0, 2, LOW_PRICE);
+    env.push_auth_mark_for_asset_as_admin(1, 2, LOW_PRICE);
+    for asset_index in [0, 1] {
+        env.crank(
+            neutral,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 2,
+                observations: crank_observations(asset_index),
+            },
+        );
+    }
+    env.svm.warp_to_slot(3);
+    env.crank(
+        short,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 3,
+            observations: crank_observations(0),
+        },
+    );
+    assert!(env
+        .portfolio_state(short)
+        .source_domains
+        .iter()
+        .all(|source| !source.is_occupied()));
+    env.trade_with_cu(
+        &short_owner,
+        short,
+        &neutral_owner,
+        neutral,
+        SIZE_Q,
+        LOW_PRICE,
+        0,
+    );
+
+    env.svm.warp_to_slot(9);
+    for _ in 0..8 {
+        if env.market_state().1.assets[0].slot_last == 9 {
+            break;
+        }
+        env.crank(
+            neutral,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 9,
+                observations: crank_observations(0),
+            },
+        );
+    }
+    let long_before = env.portfolio_state(long);
+    let market_before = env.market_state().1;
+    assert_eq!(long_before.pnl.get(), 0);
+    assert!(
+        market_before.assets[0].k_long < active_leg_for_asset(&long_before, 0).k_snap,
+        "the target must retain a prospective negative K delta"
+    );
+    assert!(long_before
+        .source_domains
+        .iter()
+        .all(|source| !source.is_occupied()));
+    assert_eq!(
+        market_before.source_backing_buckets[0].status,
+        BackingBucketStatusV16::Fresh
+    );
+    assert_eq!(market_before.source_backing_buckets[0].expiry_slot, 8);
+    env.resolve();
+
+    let destinations = [
+        env.token_account(long_owner.pubkey(), 0),
+        env.token_account(short_owner.pubkey(), 0),
+        env.token_account(neutral_owner.pubkey(), 0),
+        env.token_account(fee_peer_owner.pubkey(), 0),
+    ];
+    let accounts = [
+        (&long_owner, long),
+        (&short_owner, short),
+        (&neutral_owner, neutral),
+        (&fee_peer_owner, fee_peer),
+    ];
+    let mut rejected = 0usize;
+    for ((owner, portfolio), destination) in accounts.into_iter().zip(destinations).cycle().take(64)
+    {
+        env.svm.expire_blockhash();
+        let before_market = env.svm.get_account(&env.market).unwrap();
+        let before_portfolio = env.svm.get_account(&portfolio).unwrap();
+        let before_vault = env.svm.get_account(&env.vault).unwrap();
+        let close = env.send(
+            ProgInstruction::CloseResolved {
+                fee_rate_per_slot: 0,
+            },
+            vec![
+                AccountMeta::new_readonly(owner.pubkey(), false),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(portfolio, false),
+                AccountMeta::new(destination, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(env.vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[],
+        );
+        if close.is_err() {
+            rejected += 1;
+            assert_eq!(env.svm.get_account(&env.market).unwrap(), before_market);
+            assert_eq!(env.svm.get_account(&portfolio).unwrap(), before_portfolio);
+            assert_eq!(env.svm.get_account(&env.vault).unwrap(), before_vault);
+        }
+    }
+
+    let states = [
+        env.portfolio_state(long),
+        env.portfolio_state(short),
+        env.portfolio_state(neutral),
+        env.portfolio_state(fee_peer),
+    ];
+    let locked = states.iter().any(|portfolio| {
+        portfolio.capital.get() != 0
+            || !percolator::active_bitmap_is_empty(active_bitmap(portfolio))
+    });
+    assert_eq!(
+        rejected, 16,
+        "only the prospective-loss account should reject once per schedule round"
+    );
+    assert!(locked, "rejections retained no funded user state");
+    assert!(has_active_leg_for_asset(&states[0], 0));
+    assert!(states[0].capital.get() != 0);
+    assert_eq!(env.token_amount(destinations[0]), 0);
+}
 
 #[test]
 fn v16_program_prospective_source_expiry_prerequisite_matrix_keeps_exit_live() {

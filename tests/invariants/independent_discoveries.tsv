@@ -102,6 +102,7 @@ INV-073	expired-partial-close/unrelated-funded-account	v16_program_expired_parti
 INV-073	recovery-mode/explicit-terminal-routes	v16_program_expired_partial_close_matrix_discovers_global_terminal_lock	recovery-mode-must-have-a-public-terminal-continuation	252
 INV-071	micro-price/eager-crank-schedule	v16_program_micro_price_schedule_matrix_discovers_clock_consuming_noop_cranks	successful-crank-cannot-consume-zero-delta-price-time	246
 INV-071	bankruptcy-escalation/funded-survivor	v16_program_bankruptcy_escalation_matrix_discovers_funded_survivor_lock	recovery-required-transition-must-not-rollback-funded-survivor-progress	190
+INV-071	prospective-loss/lapsed-source	v16_program_prospective_loss_expiry_matrix_discovers_resolved_exit_lock	prospective-loss-must-not-create-backing-in-lapsed-domain	298
 INV-074	bankruptcy-scope/unrelated-backed-claim	v16_program_unrelated_bankruptcy_scope_matrix_discovers_backed_claim_lock	asset-local-bankruptcy-cannot-lock-unrelated-backed-claim	229
 INV-063	backing-expiry/authenticated-clock	v16_program_backing_expiry_boundary_discovers_extractable_stale_fee	expired-backing-cannot-create-withdrawable-provider-value	367
 INV-063	backing-expiry/favorable-consumers	v16_program_expired_backing_consumer_matrix_discovers_principal_extraction	expired-backing-cannot-capitalize-and-extract-independent-principal	363
