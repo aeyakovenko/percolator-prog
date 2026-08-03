@@ -124,6 +124,29 @@ pub enum AuthorityIntentKind {
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum FundedRoleKind {
+    BackingProvider,
+    InsuranceOperator,
+    TerminalInsuranceAuthority,
+}
+
+impl FundedRoleKind {
+    pub const ALL: [Self; 3] = [
+        Self::BackingProvider,
+        Self::InsuranceOperator,
+        Self::TerminalInsuranceAuthority,
+    ];
+
+    fn discriminator(self) -> u8 {
+        match self {
+            Self::BackingProvider => 0,
+            Self::InsuranceOperator => 1,
+            Self::TerminalInsuranceAuthority => 2,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum RetryIntentKind {
     Deposit,
     Withdraw,
@@ -613,6 +636,14 @@ pub struct AuthorityIncarnationDiscovery {
     pub accepted_stale_intent: bool,
     pub mutated_economic_state: bool,
     pub compute_units: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FundedRoleDiscovery {
+    pub kind: FundedRoleKind,
+    pub provider_source_debit: u128,
+    pub takeover_landed: bool,
+    pub replacement_gain: u128,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1166,6 +1197,14 @@ impl IntentReplayDiscovery {
 impl AuthorityIncarnationDiscovery {
     pub fn is_violation(&self) -> bool {
         self.accepted_stale_intent && self.mutated_economic_state
+    }
+}
+
+impl FundedRoleDiscovery {
+    pub fn is_violation(&self) -> bool {
+        self.takeover_landed
+            && self.provider_source_debit != 0
+            && self.replacement_gain == self.provider_source_debit
     }
 }
 
@@ -2709,6 +2748,154 @@ pub fn discover_authority_incarnation_replays(
     AuthorityIntentKind::ALL
         .into_iter()
         .map(|kind| discover_one_authority_incarnation_replay(seed, kind))
+        .collect()
+}
+
+fn discover_one_funded_role_seizure(
+    mut seed: [u8; 32],
+    kind: FundedRoleKind,
+) -> Result<FundedRoleDiscovery, String> {
+    const PROVIDER: usize = 0;
+    const REPLACEMENT: usize = 1;
+    const ASSET_ADMIN: usize = 2;
+    const ASSET: u16 = 0;
+    const DOMAIN: u16 = 0;
+    const PRINCIPAL: u128 = 500;
+    seed[0] ^= 0x75;
+    seed[1] ^= kind.discriminator();
+    let mut env = V16Svm::new(
+        seed,
+        MarketConfig {
+            actor_deposits: [1; PRIMARY_ACTOR_COUNT],
+            ..MarketConfig::default()
+        },
+    );
+    let supply_before = env.token_supply_observed();
+
+    env.update_asset_authority_from_admin(
+        ASSET,
+        percolator_prog::processor::ASSET_AUTH_ADMIN,
+        ASSET_ADMIN,
+    )
+    .map_err(|error| format!("delegate cold asset admin: {error}"))?;
+
+    let seized_role = match kind {
+        FundedRoleKind::BackingProvider => {
+            env.update_asset_authority_between_actors(
+                ASSET,
+                percolator_prog::processor::ASSET_AUTH_BACKING_BUCKET,
+                ASSET_ADMIN,
+                PROVIDER,
+            )
+            .map_err(|error| format!("install independent backing provider: {error}"))?;
+            percolator_prog::processor::ASSET_AUTH_BACKING_BUCKET
+        }
+        FundedRoleKind::InsuranceOperator => {
+            for authority_kind in [
+                percolator_prog::processor::ASSET_AUTH_INSURANCE,
+                percolator_prog::processor::ASSET_AUTH_INSURANCE_OPERATOR,
+            ] {
+                env.update_asset_authority_between_actors(
+                    ASSET,
+                    authority_kind,
+                    ASSET_ADMIN,
+                    PROVIDER,
+                )
+                .map_err(|error| {
+                    format!("install independent insurance role {authority_kind}: {error}")
+                })?;
+            }
+            percolator_prog::processor::ASSET_AUTH_INSURANCE_OPERATOR
+        }
+        FundedRoleKind::TerminalInsuranceAuthority => {
+            env.update_asset_authority_between_actors(
+                ASSET,
+                percolator_prog::processor::ASSET_AUTH_INSURANCE,
+                ASSET_ADMIN,
+                PROVIDER,
+            )
+            .map_err(|error| format!("install independent insurance authority: {error}"))?;
+            percolator_prog::processor::ASSET_AUTH_INSURANCE
+        }
+    };
+
+    let provider_source = env.actors[PROVIDER].source_token;
+    let provider_source_before = u128::from(env.token_amount(provider_source));
+    match kind {
+        FundedRoleKind::BackingProvider => env
+            .top_up_backing_bucket_for_actor(PROVIDER, DOMAIN, PRINCIPAL, 100_000)
+            .map_err(|error| format!("fund backing principal: {error}"))?,
+        FundedRoleKind::InsuranceOperator | FundedRoleKind::TerminalInsuranceAuthority => env
+            .top_up_insurance_domain_for_actor(PROVIDER, DOMAIN, PRINCIPAL)
+            .map_err(|error| format!("fund insurance principal: {error}"))?,
+    };
+    let provider_source_after = u128::from(env.token_amount(provider_source));
+    let provider_source_debit = provider_source_before
+        .checked_sub(provider_source_after)
+        .ok_or_else(|| "funded-role provider source increased".to_string())?;
+    if provider_source_debit != PRINCIPAL {
+        return Err(format!(
+            "{kind:?} did not commit the expected principal: {provider_source_debit}"
+        ));
+    }
+
+    let before_takeover = fingerprint(&env);
+    let takeover =
+        env.update_asset_authority_between_actors(ASSET, seized_role, ASSET_ADMIN, REPLACEMENT);
+    let takeover_landed = takeover.is_ok();
+    if !takeover_landed && fingerprint(&env) != before_takeover {
+        return Err(format!(
+            "{kind:?} rejected takeover did not roll back exactly"
+        ));
+    }
+
+    if kind == FundedRoleKind::TerminalInsuranceAuthority {
+        for actor in 0..PRIMARY_ACTOR_COUNT {
+            env.withdraw_primary(actor, 1)
+                .map_err(|error| format!("withdraw terminal fixture actor {actor}: {error}"))?;
+            env.close_primary_portfolio(actor)
+                .map_err(|error| format!("close terminal fixture actor {actor}: {error}"))?;
+        }
+        env.resolve_market()
+            .map_err(|error| format!("resolve terminal insurance fixture: {error}"))?;
+    }
+
+    let replacement_destination = env.actors[REPLACEMENT].destination_token;
+    let replacement_before = u128::from(env.token_amount(replacement_destination));
+    if takeover_landed {
+        match kind {
+            FundedRoleKind::BackingProvider => env
+                .withdraw_backing_bucket_for_actor(REPLACEMENT, DOMAIN, PRINCIPAL)
+                .map_err(|error| format!("replacement withdraw backing principal: {error}"))?,
+            FundedRoleKind::InsuranceOperator => env
+                .withdraw_insurance_asset(REPLACEMENT, ASSET, PRINCIPAL)
+                .map_err(|error| format!("replacement withdraw live insurance: {error}"))?,
+            FundedRoleKind::TerminalInsuranceAuthority => env
+                .withdraw_terminal_insurance_for_actor(REPLACEMENT, PRINCIPAL)
+                .map_err(|error| format!("replacement withdraw terminal insurance: {error}"))?,
+        };
+    }
+    let replacement_gain = u128::from(env.token_amount(replacement_destination))
+        .checked_sub(replacement_before)
+        .ok_or_else(|| "funded-role replacement destination decreased".to_string())?;
+    if env.token_supply_observed() != supply_before {
+        return Err(format!(
+            "{kind:?} funded-role probe changed SPL supply: {supply_before} -> {}",
+            env.token_supply_observed()
+        ));
+    }
+    Ok(FundedRoleDiscovery {
+        kind,
+        provider_source_debit,
+        takeover_landed,
+        replacement_gain,
+    })
+}
+
+pub fn discover_funded_role_seizures(seed: [u8; 32]) -> Result<Vec<FundedRoleDiscovery>, String> {
+    FundedRoleKind::ALL
+        .into_iter()
+        .map(|kind| discover_one_funded_role_seizure(seed, kind))
         .collect()
 }
 

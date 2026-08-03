@@ -4,7 +4,12 @@
 //!
 //! Evidence in this file (F over public I routes):
 //! `v16_program_authority_incarnation_operation_matrix_discovers_aba_replays` enumerates market
-//! and asset authority scopes without finding metadata. Direct impact regressions remain below.
+//! and asset authority scopes without finding metadata.
+//! `v16_program_funded_role_matrix_discovers_admin_seizure` independently funds each value-bearing
+//! asset role, delegates a distinct cold asset admin, and measures whether that admin can redirect
+//! the incumbent's principal to a replacement key. The economic oracle requires an exact provider
+//! source debit and equal replacement SPL-token credit; a configuration-only handoff is not enough.
+//! Direct impact regressions remain below.
 //! These tests exercise the deployed public
 //! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
 //! rollback, liveness, or compute outcomes appropriate to the invariant.
@@ -48,6 +53,22 @@ proptest! {
             AuthorityIntentKind::ALL.to_vec(),
             "vulnerable-pin authority-incarnation discovery corpus changed"
         );
+    }
+
+    #[test]
+    fn v16_program_funded_role_matrix_discovers_admin_seizure(
+        seed in any::<[u8; 32]>()
+    ) {
+        let discoveries = discover_funded_role_seizures(seed)
+            .map_err(TestCaseError::fail)?;
+        prop_assert_eq!(discoveries.len(), FundedRoleKind::ALL.len());
+        for (expected, discovery) in FundedRoleKind::ALL.into_iter().zip(&discoveries) {
+            prop_assert_eq!(discovery.kind, expected);
+            prop_assert!(
+                discovery.is_violation(),
+                "vulnerable-pin funded-role discovery changed: {discovery:?}"
+            );
+        }
     }
 }
 

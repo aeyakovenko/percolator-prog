@@ -138,7 +138,7 @@
 372	LoF	BLOCKER	INV-067	missing	[BLOCKER LoF] Preserve prior same-domain claim across Recovery forfeit
 373	LoF	BLOCKER	INV-067	missing	[BLOCKER LoF] Prove retained Recovery haircuts preserve prior claims
 374	LoF	BLOCKER	INV-063	missing	[BLOCKER LoF] Reconcile expired backing in Recovery forfeits
-375	LoF	PRIVILEGED	INV-005	missing	[PRIVILEGED LoF] Prevent asset-admin seizure of funded roles
+375	LoF	PRIVILEGED	INV-005	independent-discovery	[PRIVILEGED LoF] Prevent asset-admin seizure of funded roles
 376	DoS	BLOCKER	INV-073	missing	[BLOCKER DoS] Let asset-0 backing provider complete recovery
 377	DoS	BLOCKER	INV-027	missing	[BLOCKER DoS] Keep fresh insurance withdrawable after asset restart
 379	DoS	REAL	INV-028	missing	[REAL DoS] Preserve source capacity in combined engine pin (restacked)

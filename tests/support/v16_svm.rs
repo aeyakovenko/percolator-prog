@@ -1817,6 +1817,26 @@ impl V16Svm {
         )
     }
 
+    pub fn withdraw_terminal_insurance_for_actor(
+        &mut self,
+        actor_index: usize,
+        amount: u128,
+    ) -> Result<TxSuccess, String> {
+        let authority = copy_keypair(&self.actors[actor_index].signer);
+        self.send_program(
+            ProgInstruction::WithdrawInsurance { amount },
+            vec![
+                AccountMeta::new(authority.pubkey(), true),
+                AccountMeta::new(self.market, false),
+                AccountMeta::new(self.actors[actor_index].destination_token, false),
+                AccountMeta::new(self.vault, false),
+                AccountMeta::new_readonly(self.vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[authority],
+        )
+    }
+
     pub fn update_asset_authority_from_admin(
         &mut self,
         asset_index: u16,
@@ -1964,6 +1984,27 @@ impl V16Svm {
                 AccountMeta::new(self.vault, false),
                 AccountMeta::new_readonly(spl_token::ID, false),
                 AccountMeta::new(self.backing_domain_ledger, false),
+            ],
+            &[authority],
+        )
+    }
+
+    pub fn withdraw_backing_bucket_for_actor(
+        &mut self,
+        actor_index: usize,
+        domain: u16,
+        amount: u128,
+    ) -> Result<TxSuccess, String> {
+        let authority = copy_keypair(&self.actors[actor_index].signer);
+        self.send_program(
+            ProgInstruction::WithdrawBackingBucket { domain, amount },
+            vec![
+                AccountMeta::new(authority.pubkey(), true),
+                AccountMeta::new(self.market, false),
+                AccountMeta::new(self.actors[actor_index].destination_token, false),
+                AccountMeta::new(self.vault, false),
+                AccountMeta::new_readonly(self.vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
             ],
             &[authority],
         )

@@ -29,6 +29,7 @@ INV-002	asset-generation/market-resolve	v16_program_asset_generation_operation_m
 INV-005	authority-incarnation/market-handoff	v16_program_authority_incarnation_operation_matrix_discovers_aba_replays	stale-intent-must-reject-and-roll-back-exactly	345
 INV-005	authority-incarnation/asset-role-handoff	v16_program_authority_incarnation_operation_matrix_discovers_aba_replays	stale-intent-must-reject-and-roll-back-exactly	251,346
 INV-005	authority-incarnation/terminal-resolve	v16_program_authority_incarnation_operation_matrix_discovers_aba_replays	stale-intent-must-reject-and-roll-back-exactly	353
+INV-005	funded-role/asset-admin-seizure	v16_program_funded_role_matrix_discovers_admin_seizure	funded-role-principal-cannot-be-redirected-without-incumbent-consent	375
 INV-008	intent-retry/deposit	v16_program_retry_operation_matrix_discovers_duplicate_economic_execution	same-economic-intent-executes-at-most-once-and-rejection-rolls-back	350
 INV-008	intent-retry/withdraw	v16_program_retry_operation_matrix_discovers_duplicate_economic_execution	same-economic-intent-executes-at-most-once-and-rejection-rolls-back	355
 INV-008	intent-retry/trade-family	v16_program_retry_operation_matrix_discovers_duplicate_economic_execution	same-economic-intent-executes-at-most-once-and-rejection-rolls-back	343
