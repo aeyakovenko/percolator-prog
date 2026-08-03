@@ -24,7 +24,7 @@ verification methods are in [`../../INVARIANTS.md`](../../INVARIANTS.md).
 | --- | ---: | --- |
 | `public_sbf/` | 74 | Deterministic public SBF/LiteSVM counterexamples, regressions, and manifest checks |
 | `stateful/` | 111 | Proptest-generated public routes, including forty-three finding-agnostic discovery properties |
-| `cu/` | 69 | Positive public-route, metamorphic, rollback, liveness, and max-shape CU tests |
+| `cu/` | 70 | Positive public-route, metamorphic, rollback, liveness, and max-shape CU tests |
 | `kani/` | 40 | Symbolic wrapper arithmetic, matcher-binding, and strict-decoder proofs |
 
 The deterministic and stateful LoF adapters currently reproduce quarantined vulnerable behavior.
@@ -77,7 +77,7 @@ charter.
 | INV-025 | Gap | - |
 | INV-026 | Gap | - |
 | INV-027 | SVM/CU | `cu/inv_027_protected_principal_seniority.rs` |
-| INV-028 | Independent | `stateful/inv_028_source_domain_realizability_cap.rs` |
+| INV-028 | Independent + SVM/CU | `stateful/inv_028_source_domain_realizability_cap.rs`, `cu/inv_028_source_domain_realizability_cap.rs` |
 | INV-029 | Gap | - |
 | INV-030 | Gap | - |
 | INV-031 | Independent + Direct | `public_sbf/inv_031_no_double_use_of_claim_backing_or_insurance_atoms.rs`, `stateful/inv_031_no_double_use_of_claim_backing_or_insurance_atoms.rs` |
@@ -144,7 +144,7 @@ charter.
 
 `open_findings.tsv` is the unified 2026-08-03 snapshot of 143 open PRs whose titles identify a
 public-route LoF or DoS class. It maps every row to a primary invariant. PR135 currently has 0
-**Direct regression** rows, 44 **Missing** rows, and 99 **Independent discovery** rows. The independent
+**Direct regression** rows, 42 **Missing** rows, and 101 **Independent discovery** rows. The independent
 rows are backed by finding-agnostic fingerprints in `independent_discoveries.tsv`; that mapping is
 evidence metadata and is never consumed by a generator or oracle. The older
 `tests/support/open_lof_manifest.rs` retains the executable adapter mapping for its 99-LoF snapshot.

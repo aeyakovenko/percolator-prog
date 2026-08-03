@@ -78,6 +78,7 @@ INV-020	hybrid-terminal/expired-composite-leg	v16_program_hybrid_terminal_snapsh
 INV-028	source-lien/reversal-exit-matrix	v16_program_source_lien_reversal_exit_matrix_discovers_funded_lock	vanished-source-claim-must-have-a-bounded-public-unwind	213
 INV-028	cross-domain-rounding/public-exit-matrix	v16_program_cross_domain_rounding_exit_matrix_discovers_funded_lock	fractional-source-domains-must-have-a-bounded-public-unwind	306
 INV-028	flat-source-lien/terminal-claim-routes	v16_program_flat_source_lien_route_matrix_discovers_backed_claim_lock	flat-backed-claim-must-have-bounded-terminal-conversion	364
+INV-028	source-capacity/admission-order-matrix	v16_program_source_capacity_admission_order_matrix_discovers_funded_lock	admitted-live-leg-must-reserve-a-settlement-source-slot	270,379
 INV-067	terminal-payout/dust-round-trip	v16_program_reported_route_matrix_discovers_terminal_dust_erasure	terminal-payout-is-invariant-to-flattened-dust-position	283
 INV-034	cross-asset-debt/foreign-insurance	v16_program_cross_asset_debt_discovers_foreign_insurance_spend	insurance-spend-remains-source-domain-local	290
 INV-031	cross-source-claims/backing-consume	v16_program_two_source_claims_discover_backing_double_consume	backing-atoms-cannot-support-claims-from-another-source	267

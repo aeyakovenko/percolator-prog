@@ -60551,6 +60551,9 @@ mod inv_020_authenticated_clock_slot_and_oracle_provenance;
 #[path = "invariants/cu/inv_027_protected_principal_seniority.rs"]
 mod inv_027_protected_principal_seniority;
 
+#[path = "invariants/cu/inv_028_source_domain_realizability_cap.rs"]
+mod inv_028_source_domain_realizability_cap;
+
 #[path = "invariants/cu/inv_032_exact_counterparty_lien_lifecycle.rs"]
 mod inv_032_exact_counterparty_lien_lifecycle;
 

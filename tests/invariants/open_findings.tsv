@@ -41,7 +41,7 @@
 267	LoF	BLOCKER	INV-031	independent-discovery	[BLOCKER LoF] Keep source backing domain-local
 268	DoS	BLOCKER	INV-073	missing	[BLOCKER DoS] Keep unilateral exact-OI ADL survivors exit-live
 269	DoS	BLOCKER	INV-077	missing	[BLOCKER DoS] Keep max-shape zero-delta stale resolution live
-270	DoS	BLOCKER	INV-028	missing	[BLOCKER DoS] Keep source-heavy portfolios settlement-live
+270	DoS	BLOCKER	INV-028	independent-discovery	[BLOCKER DoS] Keep source-heavy portfolios settlement-live
 271	LoF	BLOCKER	INV-039	independent-discovery	[BLOCKER LoF] Settle zero-move funding before trades
 272	LoF	BLOCKER	INV-039	independent-discovery	[BLOCKER LoF] Settle zero-move funding before unilateral reduction
 273	LoF	BLOCKER	INV-039	independent-discovery	[BLOCKER LoF] Accrue zero-move funding before recovery-leg forfeit
@@ -141,7 +141,7 @@
 375	LoF	PRIVILEGED	INV-005	independent-discovery	[PRIVILEGED LoF] Prevent asset-admin seizure of funded roles
 376	DoS	BLOCKER	INV-073	missing	[BLOCKER DoS] Let asset-0 backing provider complete recovery
 377	DoS	BLOCKER	INV-027	missing	[BLOCKER DoS] Keep fresh insurance withdrawable after asset restart
-379	DoS	REAL	INV-028	missing	[REAL DoS] Preserve source capacity in combined engine pin (restacked)
+379	DoS	REAL	INV-028	independent-discovery	[REAL DoS] Preserve source capacity in combined engine pin (restacked)
 380	LoF	BLOCKER	INV-039	independent-discovery	[BLOCKER LoF] Preserve funding across prospective EWMA updates
 381	LoF	BLOCKER	INV-038	independent-discovery	[BLOCKER LoF] Round composite oracle prices once
 393	LoF	REAL	INV-010	independent-discovery	[REAL LoF] Order matcher config mutations
