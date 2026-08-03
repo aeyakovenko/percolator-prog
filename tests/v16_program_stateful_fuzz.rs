@@ -90,15 +90,16 @@ use support::invariant_discovery::{
     discover_portfolio_incarnation_replays, discover_position_episode_replays,
     discover_prospective_accrual_violations, discover_resolved_adl_close_locks,
     discover_retained_maturity_terminal_locks, discover_shutdown_commit_ordering,
-    discover_source_fee_consent_violations, discover_stale_cohort_novations,
-    discover_superseded_intents, discover_terminal_commit_ordering,
-    discover_terminal_dust_violations, discover_terminal_generation_replay,
-    discover_trade_driven_liquidation_violations, AccrualOrderingKind, AssetIntentKind,
-    AuthorityIntentKind, BackingExpiryCase, BackingProviderConsentOrder, CompositeRoundingScale,
-    DiscoveryTradeRoute, ExpiredBackingConsumerKind, FeeConsentKind, FundedRoleKind,
-    MarketIntentKind, PendingMarkSource, PortfolioIntentKind, PositionEpisodeKind,
-    ProspectiveAccrualRoute, ResolvedAdlCloseOrder, RetainedMaturityKind, RetryIntentKind,
-    SourceFeeConsentKind, StaleCohortRoute, SupersededIntentKind, TerminalGenerationKind,
+    discover_source_fee_consent_violations, discover_source_lien_reversal_exit_locks,
+    discover_stale_cohort_novations, discover_superseded_intents,
+    discover_terminal_commit_ordering, discover_terminal_dust_violations,
+    discover_terminal_generation_replay, discover_trade_driven_liquidation_violations,
+    AccrualOrderingKind, AssetIntentKind, AuthorityIntentKind, BackingExpiryCase,
+    BackingProviderConsentOrder, CompositeRoundingScale, DiscoveryTradeRoute,
+    ExpiredBackingConsumerKind, FeeConsentKind, FundedRoleKind, MarketIntentKind,
+    PendingMarkSource, PortfolioIntentKind, PositionEpisodeKind, ProspectiveAccrualRoute,
+    ResolvedAdlCloseOrder, RetainedMaturityKind, RetryIntentKind, SourceFeeConsentKind,
+    SourceLienReversalExitRoute, StaleCohortRoute, SupersededIntentKind, TerminalGenerationKind,
     TradeDrivenMarkMode,
 };
 
@@ -136,6 +137,9 @@ mod inv_014_delayed_policy_and_policy_epoch_safety;
 
 #[path = "invariants/stateful/inv_020_authenticated_clock_slot_and_oracle_provenance.rs"]
 mod inv_020_authenticated_clock_slot_and_oracle_provenance;
+
+#[path = "invariants/stateful/inv_028_source_domain_realizability_cap.rs"]
+mod inv_028_source_domain_realizability_cap;
 
 #[path = "invariants/stateful/inv_031_no_double_use_of_claim_backing_or_insurance_atoms.rs"]
 mod inv_031_no_double_use_of_claim_backing_or_insurance_atoms;

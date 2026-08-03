@@ -175,9 +175,9 @@ fn v16_open_security_finding_benchmark_is_complete_and_non_overclaiming() {
 
     assert_eq!(rows, 143, "refresh the dated GitHub finding snapshot");
     assert_eq!(direct, 0, "direct adapter inventory changed");
-    assert_eq!(missing, 47, "explicit finding gaps changed");
+    assert_eq!(missing, 46, "explicit finding gaps changed");
     assert_eq!(
-        independent, 96,
+        independent, 97,
         "promote only genuinely finding-agnostic invariant discoveries"
     );
 
@@ -191,6 +191,7 @@ fn v16_open_security_finding_benchmark_is_complete_and_non_overclaiming() {
         include_str!("../stateful/inv_010_out_of_order_safety.rs"),
         include_str!("../stateful/inv_014_delayed_policy_and_policy_epoch_safety.rs"),
         include_str!("../stateful/inv_020_authenticated_clock_slot_and_oracle_provenance.rs"),
+        include_str!("../stateful/inv_028_source_domain_realizability_cap.rs"),
         include_str!("../stateful/inv_031_no_double_use_of_claim_backing_or_insurance_atoms.rs"),
         include_str!("../stateful/inv_034_domain_and_instance_isolation.rs"),
         include_str!("../stateful/inv_035_no_global_b_pool_residuals_remain_local.rs"),
@@ -262,6 +263,7 @@ fn v16_open_security_finding_benchmark_is_complete_and_non_overclaiming() {
                     | "expired-backing-cannot-create-withdrawable-provider-value"
                     | "expired-backing-cannot-capitalize-and-extract-independent-principal"
                     | "expired-retained-operation-cannot-consume-principal-and-lock-terminal-users"
+                    | "vanished-source-claim-must-have-a-bounded-public-unwind"
                     | "old-generation-terminal-capability-cannot-crystallize-replacement-value"
                     | "stale-position-episode-consent-cannot-transfer-or-orphan-value"
                     | "stale-matcher-enable-cannot-revive-revoked-value-authority"

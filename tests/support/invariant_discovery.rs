@@ -1127,6 +1127,66 @@ impl ExpiredBackingConsumerDiscovery {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SourceLienReversalExitRoute {
+    PermissionlessCrank,
+    RebalanceReduce,
+    TradeNoCpi,
+    BatchNoCpi,
+    TradeCpi,
+    BatchCpi,
+}
+
+impl SourceLienReversalExitRoute {
+    pub const ALL: [Self; 6] = [
+        Self::PermissionlessCrank,
+        Self::RebalanceReduce,
+        Self::TradeNoCpi,
+        Self::BatchNoCpi,
+        Self::TradeCpi,
+        Self::BatchCpi,
+    ];
+
+    fn discriminator(self) -> u8 {
+        match self {
+            Self::PermissionlessCrank => 0,
+            Self::RebalanceReduce => 1,
+            Self::TradeNoCpi => 2,
+            Self::BatchNoCpi => 3,
+            Self::TradeCpi => 4,
+            Self::BatchCpi => 5,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SourceLienReversalDiscovery {
+    pub route: SourceLienReversalExitRoute,
+    pub source_claim_liened_num: u128,
+    pub funded_capital: u128,
+    pub stranded_position_q: u128,
+    pub canonical_vault_liquidity: u128,
+    pub attempts: u8,
+    pub lock_active_rejections: u8,
+    pub exact_rollback: bool,
+    pub external_payout: u64,
+    pub token_supply_conserved: bool,
+}
+
+impl SourceLienReversalDiscovery {
+    pub fn is_persistent_funded_exit_lock(&self) -> bool {
+        self.source_claim_liened_num != 0
+            && self.funded_capital != 0
+            && self.stranded_position_q != 0
+            && self.canonical_vault_liquidity >= self.funded_capital
+            && self.attempts >= 2
+            && self.lock_active_rejections == self.attempts
+            && self.exact_rollback
+            && self.external_payout == 0
+            && self.token_supply_conserved
+    }
+}
+
 impl BackingExpiryDiscovery {
     pub fn is_violation(&self) -> bool {
         self.authenticated_slot > self.expiry_slot
@@ -8464,6 +8524,174 @@ pub fn discover_expired_backing_consumers(
     ExpiredBackingConsumerKind::ALL
         .into_iter()
         .map(|kind| discover_one_expired_backing_consumer(seed, kind, expiry_offset))
+        .collect()
+}
+
+fn discover_one_source_lien_reversal_exit(
+    mut seed: [u8; 32],
+    route: SourceLienReversalExitRoute,
+    increase_divisor: u8,
+) -> Result<SourceLienReversalDiscovery, String> {
+    const OWNER: usize = 0;
+    const COUNTERPARTY: usize = 1;
+    const KEEPER: usize = 2;
+    const ASSET: u16 = 0;
+    const DOMAIN: usize = 1;
+    const OPEN_PRICE: u64 = 100;
+    const WINNING_PRICE: u64 = 105;
+    const OPEN_Q: i128 = 1_000 * POS_SCALE as i128;
+    const ATTEMPTS: u8 = 2;
+
+    seed[0] ^= 0x68;
+    seed[1] ^= route.discriminator();
+    seed[2] ^= increase_divisor;
+    let increase_q = OPEN_Q
+        .checked_div(i128::from(increase_divisor.clamp(10, 40)))
+        .ok_or_else(|| "source-lien increase divisor is zero".to_string())?;
+    let mut env = V16Svm::new(
+        seed,
+        MarketConfig {
+            initial_price: OPEN_PRICE,
+            h_max: 10,
+            maintenance_margin_bps: 1_000,
+            initial_margin_bps: 5_000,
+            max_price_move_bps_per_slot: 500,
+            max_accrual_dt_slots: 1,
+            min_funding_lifetime_slots: 1,
+            actor_deposits: [52_501, 1_000_000, 0, 0, 0],
+            ..MarketConfig::default()
+        },
+    );
+    let supply_before = env.token_supply_observed();
+    env.top_up_backing_bucket(DOMAIN as u16, 100_000, 100)
+        .map_err(|error| format!("fund source-lien reversal backing: {error}"))?;
+    env.trade_no_cpi(OWNER, COUNTERPARTY, ASSET, OPEN_Q, OPEN_PRICE, 0)
+        .map_err(|error| format!("open source-lien reversal pair: {error}"))?;
+
+    env.warp_to_slot(2);
+    env.push_auth_mark(ASSET, 2, WINNING_PRICE)
+        .map_err(|error| format!("publish source-lien winning mark: {error}"))?;
+    let oracle_accounts = env.primary_profile(ASSET as usize).oracle_leg_count;
+    let observation = || {
+        vec![CrankObservationHint {
+            asset_index: ASSET,
+            oracle_accounts,
+        }]
+    };
+    env.crank(KEEPER, 2, observation())
+        .map_err(|error| format!("publish source-lien winning mark: {error}"))?;
+    for actor in [COUNTERPARTY, OWNER] {
+        crank_asset_progress(&mut env, actor, 2, ASSET, 4)?;
+    }
+    if env.primary_portfolio(OWNER).pnl.get() <= 0 {
+        return Err("source-lien reversal owner earned no positive PnL".into());
+    }
+    env.trade_no_cpi(OWNER, COUNTERPARTY, ASSET, increase_q, WINNING_PRICE, 0)
+        .map_err(|error| format!("create source-credit lien: {error}"))?;
+    let liened_account = env.primary_portfolio(OWNER);
+    let source_claim_liened_num = liened_account
+        .source_domains
+        .iter()
+        .find(|source| {
+            source.source_claim_market_id.get() != 0 && source.domain.get() as usize == DOMAIN
+        })
+        .map(|source| source.source_claim_liened_num.get())
+        .unwrap_or(0);
+    if source_claim_liened_num == 0 {
+        return Err("risk increase created no source-credit lien".into());
+    }
+
+    env.warp_to_slot(3);
+    env.push_auth_mark(ASSET, 3, OPEN_PRICE)
+        .map_err(|error| format!("publish source-lien reversal mark: {error}"))?;
+    env.crank(KEEPER, 3, observation())
+        .map_err(|error| format!("publish source-lien reversal mark: {error}"))?;
+    crank_asset_progress(&mut env, COUNTERPARTY, 3, ASSET, 4)?;
+
+    let funded_capital = env.primary_portfolio(OWNER).capital.get();
+    let stranded_position_q =
+        discovery_position(&env.primary_portfolio(OWNER), ASSET)?.unsigned_abs();
+    let canonical_vault_liquidity = u128::from(env.token_amount(env.vault));
+    if env.primary_market_state().1.vault != canonical_vault_liquidity {
+        return Err("source-lien reversal vault diverged from SPL custody".into());
+    }
+    let destination_before = env.token_amount(env.actors[OWNER].destination_token);
+    let mut lock_active_rejections = 0u8;
+    let mut exact_rollback = true;
+    for _ in 0..ATTEMPTS {
+        let before = fingerprint(&env);
+        let result = match route {
+            SourceLienReversalExitRoute::PermissionlessCrank => env.crank(OWNER, 3, vec![]),
+            SourceLienReversalExitRoute::RebalanceReduce => {
+                env.rebalance_reduce(OWNER, ASSET, POS_SCALE)
+            }
+            SourceLienReversalExitRoute::TradeNoCpi => env.trade_no_cpi(
+                OWNER,
+                COUNTERPARTY,
+                ASSET,
+                -(POS_SCALE as i128),
+                OPEN_PRICE,
+                0,
+            ),
+            SourceLienReversalExitRoute::BatchNoCpi => env.batch_trade_no_cpi(
+                OWNER,
+                COUNTERPARTY,
+                vec![BatchTradeLeg {
+                    asset_index: ASSET,
+                    size_q: -(POS_SCALE as i128),
+                    exec_price: OPEN_PRICE,
+                    fee_bps: 0,
+                }],
+            ),
+            SourceLienReversalExitRoute::TradeCpi => {
+                env.trade_cpi(OWNER, COUNTERPARTY, ASSET, -(POS_SCALE as i128), 0, 0)
+            }
+            SourceLienReversalExitRoute::BatchCpi => env.batch_trade_cpi(
+                OWNER,
+                COUNTERPARTY,
+                vec![BatchTradeCpiLeg {
+                    asset_index: ASSET,
+                    size_q: -(POS_SCALE as i128),
+                    fee_bps: 0,
+                    limit_price: 0,
+                }],
+            ),
+        };
+        match result {
+            Ok(_) => {}
+            Err(error) => {
+                if error.contains("Custom(21)") || error.contains("custom program error: 0x15") {
+                    lock_active_rejections = lock_active_rejections.saturating_add(1);
+                }
+                exact_rollback &= fingerprint(&env) == before;
+            }
+        }
+    }
+    let external_payout = env
+        .token_amount(env.actors[OWNER].destination_token)
+        .checked_sub(destination_before)
+        .ok_or_else(|| "source-lien reversal destination decreased".to_string())?;
+    Ok(SourceLienReversalDiscovery {
+        route,
+        source_claim_liened_num,
+        funded_capital,
+        stranded_position_q,
+        canonical_vault_liquidity,
+        attempts: ATTEMPTS,
+        lock_active_rejections,
+        exact_rollback,
+        external_payout,
+        token_supply_conserved: env.token_supply_observed() == supply_before,
+    })
+}
+
+pub fn discover_source_lien_reversal_exit_locks(
+    seed: [u8; 32],
+    increase_divisor: u8,
+) -> Result<Vec<SourceLienReversalDiscovery>, String> {
+    SourceLienReversalExitRoute::ALL
+        .into_iter()
+        .map(|route| discover_one_source_lien_reversal_exit(seed, route, increase_divisor))
         .collect()
 }
 

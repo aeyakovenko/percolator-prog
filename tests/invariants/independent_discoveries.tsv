@@ -75,6 +75,7 @@ INV-038	observation-omission/rounded-funding	v16_program_selected_observation_om
 INV-038	fractional-movement/max-dt-crank	v16_program_fractional_max_dt_cranks_discover_terminal_value_stall	fractional-cap-residue-must-accumulate-to-target	365
 INV-020	composite-oracle/timestamp-coherence	v16_program_composite_timestamp_coherence_discovers_cross_epoch_liquidation	composite-oracle-legs-must-share-one-coherent-observation-epoch	331
 INV-020	hybrid-terminal/expired-composite-leg	v16_program_hybrid_terminal_snapshot_discovers_expired_leg_settlement	terminal-snapshot-must-use-current-authenticated-oracle-state	261
+INV-028	source-lien/reversal-exit-matrix	v16_program_source_lien_reversal_exit_matrix_discovers_funded_lock	vanished-source-claim-must-have-a-bounded-public-unwind	213
 INV-067	terminal-payout/dust-round-trip	v16_program_reported_route_matrix_discovers_terminal_dust_erasure	terminal-payout-is-invariant-to-flattened-dust-position	283
 INV-034	cross-asset-debt/foreign-insurance	v16_program_cross_asset_debt_discovers_foreign_insurance_spend	insurance-spend-remains-source-domain-local	290
 INV-031	cross-source-claims/backing-consume	v16_program_two_source_claims_discover_backing_double_consume	backing-atoms-cannot-support-claims-from-another-source	267
