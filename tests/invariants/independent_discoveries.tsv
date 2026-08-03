@@ -24,3 +24,9 @@ INV-002	asset-generation/market-resolve	v16_program_asset_generation_operation_m
 INV-005	authority-incarnation/market-handoff	v16_program_authority_incarnation_operation_matrix_discovers_aba_replays	stale-intent-must-reject-and-roll-back-exactly	345
 INV-005	authority-incarnation/asset-role-handoff	v16_program_authority_incarnation_operation_matrix_discovers_aba_replays	stale-intent-must-reject-and-roll-back-exactly	251,346
 INV-005	authority-incarnation/terminal-resolve	v16_program_authority_incarnation_operation_matrix_discovers_aba_replays	stale-intent-must-reject-and-roll-back-exactly	353
+INV-008	intent-retry/deposit	v16_program_retry_operation_matrix_discovers_duplicate_economic_execution	same-economic-intent-executes-at-most-once-and-rejection-rolls-back	350
+INV-008	intent-retry/withdraw	v16_program_retry_operation_matrix_discovers_duplicate_economic_execution	same-economic-intent-executes-at-most-once-and-rejection-rolls-back	355
+INV-008	intent-retry/trade-family	v16_program_retry_operation_matrix_discovers_duplicate_economic_execution	same-economic-intent-executes-at-most-once-and-rejection-rolls-back	343
+INV-008	intent-retry/insurance-top-up	v16_program_retry_operation_matrix_discovers_duplicate_economic_execution	same-economic-intent-executes-at-most-once-and-rejection-rolls-back	344
+INV-008	intent-retry/backing-top-up	v16_program_retry_operation_matrix_discovers_duplicate_economic_execution	same-economic-intent-executes-at-most-once-and-rejection-rolls-back	351
+INV-008	intent-retry/asset-activation	v16_program_retry_operation_matrix_discovers_duplicate_economic_execution	same-economic-intent-executes-at-most-once-and-rejection-rolls-back	362

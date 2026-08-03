@@ -71,6 +71,47 @@ pub enum AuthorityIntentKind {
     ResolveMarket,
 }
 
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum RetryIntentKind {
+    Deposit,
+    Withdraw,
+    TradeNoCpi,
+    TradeCpi,
+    BatchTradeNoCpi,
+    BatchTradeCpi,
+    InsuranceTopUp,
+    BackingTopUp,
+    AssetActivation,
+}
+
+impl RetryIntentKind {
+    pub const ALL: [Self; 9] = [
+        Self::Deposit,
+        Self::Withdraw,
+        Self::TradeNoCpi,
+        Self::TradeCpi,
+        Self::BatchTradeNoCpi,
+        Self::BatchTradeCpi,
+        Self::InsuranceTopUp,
+        Self::BackingTopUp,
+        Self::AssetActivation,
+    ];
+
+    fn discriminator(self) -> u8 {
+        match self {
+            Self::Deposit => 0,
+            Self::Withdraw => 1,
+            Self::TradeNoCpi => 2,
+            Self::TradeCpi => 3,
+            Self::BatchTradeNoCpi => 4,
+            Self::BatchTradeCpi => 5,
+            Self::InsuranceTopUp => 6,
+            Self::BackingTopUp => 7,
+            Self::AssetActivation => 8,
+        }
+    }
+}
+
 impl AuthorityIntentKind {
     pub const ALL: [Self; 7] = [
         Self::MarketAuthorityHandoff,
@@ -226,6 +267,21 @@ pub struct AuthorityIncarnationDiscovery {
     pub accepted_stale_intent: bool,
     pub mutated_economic_state: bool,
     pub compute_units: Option<u64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IntentReplayDiscovery {
+    pub kind: RetryIntentKind,
+    pub first_compute_units: u64,
+    pub accepted_retry: bool,
+    pub duplicated_economic_effect: bool,
+    pub retry_compute_units: Option<u64>,
+}
+
+impl IntentReplayDiscovery {
+    pub fn is_violation(&self) -> bool {
+        self.accepted_retry && self.duplicated_economic_effect
+    }
 }
 
 impl AuthorityIncarnationDiscovery {
@@ -1005,5 +1061,149 @@ pub fn discover_authority_incarnation_replays(
     AuthorityIntentKind::ALL
         .into_iter()
         .map(|kind| discover_one_authority_incarnation_replay(seed, kind))
+        .collect()
+}
+
+fn retained_retry_pair(env: &mut V16Svm, kind: RetryIntentKind) -> (Transaction, Transaction) {
+    const SUBJECT: usize = 0;
+    const COUNTERPARTY: usize = 1;
+    const AUTHORITY: usize = 2;
+    const ASSET: u16 = 0;
+    const AMOUNT: u128 = 1_000;
+    let size_q = POS_SCALE as i128 / 4;
+    let build = |env: &mut V16Svm| match kind {
+        RetryIntentKind::Deposit => env.build_retained_deposit(SUBJECT, AMOUNT),
+        RetryIntentKind::Withdraw => env.build_retained_withdrawal(SUBJECT, AMOUNT),
+        RetryIntentKind::TradeNoCpi => {
+            env.build_retained_no_cpi_trade(SUBJECT, COUNTERPARTY, ASSET, size_q, INITIAL_PRICE)
+        }
+        RetryIntentKind::TradeCpi => {
+            env.build_retained_cpi_trade(SUBJECT, COUNTERPARTY, ASSET, size_q, 0)
+        }
+        RetryIntentKind::BatchTradeNoCpi => env.build_retained_batch_no_cpi_trade(
+            SUBJECT,
+            COUNTERPARTY,
+            ASSET,
+            size_q,
+            INITIAL_PRICE,
+        ),
+        RetryIntentKind::BatchTradeCpi => {
+            env.build_retained_batch_cpi_trade(SUBJECT, COUNTERPARTY, ASSET, size_q, 0)
+        }
+        RetryIntentKind::InsuranceTopUp => {
+            env.build_retained_insurance_domain_top_up_for_actor(AUTHORITY, 0, AMOUNT)
+        }
+        RetryIntentKind::BackingTopUp => {
+            env.build_retained_backing_bucket_top_up_for_actor(AUTHORITY, 1, AMOUNT, 100)
+        }
+        RetryIntentKind::AssetActivation => env.build_retained_permissionless_asset_activation(
+            SUBJECT,
+            1,
+            3,
+            INITIAL_PRICE,
+            AUTHORITY,
+            AUTHORITY,
+            AUTHORITY,
+            AUTHORITY,
+        ),
+    };
+    (build(env), build(env))
+}
+
+fn discover_one_intent_retry(
+    mut seed: [u8; 32],
+    kind: RetryIntentKind,
+) -> Result<IntentReplayDiscovery, String> {
+    const AUTHORITY: usize = 2;
+    seed[0] ^= 0xe1;
+    seed[1] ^= kind.discriminator();
+    let mut env = V16Svm::new(seed, MarketConfig::default());
+    let supply_before = env.token_supply_observed();
+
+    match kind {
+        RetryIntentKind::InsuranceTopUp => {
+            env.update_asset_authority_from_admin(
+                0,
+                percolator_prog::processor::ASSET_AUTH_INSURANCE,
+                AUTHORITY,
+            )
+            .map_err(|error| format!("install insurance authority: {error}"))?;
+        }
+        RetryIntentKind::BackingTopUp => {
+            env.update_asset_authority_from_admin(
+                0,
+                percolator_prog::processor::ASSET_AUTH_BACKING_BUCKET,
+                AUTHORITY,
+            )
+            .map_err(|error| format!("install backing authority: {error}"))?;
+        }
+        RetryIntentKind::AssetActivation => {
+            env.update_market_init_fee_policy(500)
+                .map_err(|error| format!("configure activation fee: {error}"))?;
+            env.warp_to_slot(2);
+            env.retire_asset(1, 2)
+                .map_err(|error| format!("retire reusable asset slot: {error}"))?;
+            env.warp_to_slot(3);
+        }
+        _ => {}
+    }
+
+    let (intended, retry) = retained_retry_pair(&mut env, kind);
+    let first = env
+        .land_retained(intended)
+        .map_err(|error| format!("{kind:?} intended execution rejected: {error}"))?;
+
+    if kind == RetryIntentKind::AssetActivation {
+        env.warp_to_slot(4);
+        env.retire_asset(1, 4)
+            .map_err(|error| format!("retire first activated generation: {error}"))?;
+        env.warp_to_slot(5);
+    }
+
+    let before_retry = fingerprint(&env);
+    let result = env.land_retained(retry);
+    let after_retry = fingerprint(&env);
+    if env.token_supply_observed() != supply_before {
+        return Err(format!(
+            "{kind:?} retry probe changed SPL supply: {supply_before} -> {}",
+            env.token_supply_observed()
+        ));
+    }
+
+    match result {
+        Ok(success) => {
+            let duplicated_economic_effect = before_retry != after_retry;
+            if !duplicated_economic_effect {
+                return Err(format!(
+                    "{kind:?} retry succeeded without an observable economic delta"
+                ));
+            }
+            Ok(IntentReplayDiscovery {
+                kind,
+                first_compute_units: first.compute_units,
+                accepted_retry: true,
+                duplicated_economic_effect,
+                retry_compute_units: Some(success.compute_units),
+            })
+        }
+        Err(_) => {
+            if before_retry != after_retry {
+                return Err(format!("{kind:?} rejected retry did not roll back exactly"));
+            }
+            Ok(IntentReplayDiscovery {
+                kind,
+                first_compute_units: first.compute_units,
+                accepted_retry: false,
+                duplicated_economic_effect: false,
+                retry_compute_units: None,
+            })
+        }
+    }
+}
+
+pub fn discover_intent_retries(seed: [u8; 32]) -> Result<Vec<IntentReplayDiscovery>, String> {
+    RetryIntentKind::ALL
+        .into_iter()
+        .map(|kind| discover_one_intent_retry(seed, kind))
         .collect()
 }
