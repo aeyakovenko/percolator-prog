@@ -56,7 +56,7 @@
 280	LoF	BLOCKER	INV-045	independent-discovery	[BLOCKER LoF] Stop trade-driven mark movers farming liquidation rewards
 281	LoF	BLOCKER	INV-035	direct-regression	[BLOCKER LoF] Keep B settlement source-domain local
 282	LoF	BLOCKER	INV-045	independent-discovery	[BLOCKER LoF] Price pending EWMA overrides at target notional
-283	LoF	BLOCKER	INV-067	direct-regression	[BLOCKER LoF] Prevent dust backing from erasing terminal payouts
+283	LoF	BLOCKER	INV-067	independent-discovery	[BLOCKER LoF] Prevent dust backing from erasing terminal payouts
 284	LoF	BLOCKER	INV-036	missing	[BLOCKER LoF] Route negative batch fees to the correct insurance side
 285	LoF	HARDENING	INV-003	independent-discovery	[HARDENING LoF] Bind retained portfolio authority to incarnation
 286	LoF	BLOCKER	INV-063	missing	[BLOCKER LoF] Preserve payouts after post-snapshot backing expiry

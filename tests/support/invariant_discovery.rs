@@ -723,6 +723,27 @@ pub struct CompositeTimeCoherenceDiscovery {
     pub extracted_tokens: u64,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TerminalDustDiscovery {
+    pub route: ProspectiveAccrualRoute,
+    pub attacker_loss: u128,
+    pub victim_loss: u128,
+    pub vault_remaining: u128,
+    pub control_vault_remaining: u128,
+    pub control_supply: u128,
+    pub dust_supply: u128,
+}
+
+impl TerminalDustDiscovery {
+    pub fn is_violation(&self) -> bool {
+        self.attacker_loss == 1
+            && self.victim_loss != 0
+            && self.control_vault_remaining == 0
+            && self.vault_remaining == self.attacker_loss + self.victim_loss
+            && self.control_supply == self.dust_supply
+    }
+}
+
 impl CompositeTimeCoherenceDiscovery {
     pub fn is_violation(&self) -> bool {
         self.skewed_target > self.coherent_price
@@ -5626,4 +5647,201 @@ pub fn discover_composite_time_coherence_violation(
         cranker_reward,
         extracted_tokens,
     })
+}
+
+#[derive(Clone, Copy, Debug)]
+struct TerminalDustWorld {
+    low_price: u64,
+    victim_payout: u128,
+    coalition_payout: u128,
+    vault_remaining: u128,
+    supply: u128,
+}
+
+fn run_terminal_dust_world(
+    seed: [u8; 32],
+    route: ProspectiveAccrualRoute,
+    include_dust_round_trip: bool,
+) -> Result<TerminalDustWorld, String> {
+    const BASIS: u64 = 10_000_000;
+    const DIRECTIONAL_Q: i128 = 1_000 * POS_SCALE as i128;
+    const DUST_Q: i128 = 1;
+    const DIRECTIONAL_DEPOSIT: u128 = 20_000_000_000;
+    const DUST_DEPOSIT: u128 = 1_000;
+
+    let mut env = V16Svm::new(
+        seed,
+        MarketConfig {
+            initial_price: BASIS,
+            max_trading_fee_bps: 10_000,
+            max_price_move_bps_per_slot: 5_000,
+            max_accrual_dt_slots: 1,
+            min_funding_lifetime_slots: 1,
+            actor_deposits: [
+                DIRECTIONAL_DEPOSIT,
+                DIRECTIONAL_DEPOSIT,
+                DUST_DEPOSIT,
+                DUST_DEPOSIT,
+                1,
+            ],
+            actor_token_balances: [25_000_000_000, 25_000_000_000, 1_000_000, 1_000_000, 1],
+            ..MarketConfig::default()
+        },
+    );
+    env.configure_ewma_mark(0, 1, BASIS, 1, 0)
+        .map_err(|error| format!("{route:?} configure terminal EWMA: {error}"))?;
+    env.trade_no_cpi(0, 1, 0, DIRECTIONAL_Q, BASIS, 0)
+        .map_err(|error| format!("{route:?} open terminal directional OI: {error}"))?;
+    let observations = || {
+        vec![CrankObservationHint {
+            asset_index: 0,
+            oracle_accounts: 0,
+        }]
+    };
+    for slot in 2..=5 {
+        env.warp_to_slot(slot);
+        env.push_ewma_mark(0, slot, 1)
+            .map_err(|error| format!("{route:?} publish terminal low mark: {error}"))?;
+        for actor in [0, 1] {
+            env.crank(actor, slot, observations())
+                .map_err(|error| format!("{route:?} accrue terminal actor {actor}: {error}"))?;
+        }
+    }
+    let low_price = env.primary_market_state().1.assets[0].effective_price;
+    if low_price >= BASIS / 5 {
+        return Err(format!("{route:?} terminal setup did not reach low mark"));
+    }
+    if include_dust_round_trip {
+        execute_reported_price_route(&mut env, route, 2, 3, DUST_Q, low_price)
+            .map_err(|error| format!("{route:?} open dust position: {error}"))?;
+    }
+
+    env.warp_to_slot(6);
+    for actor in [0, 1] {
+        env.crank(actor, 6, observations())
+            .map_err(|error| format!("{route:?} advance terminal actor: {error}"))?;
+    }
+    let rebound_input = BASIS
+        .checked_mul(2)
+        .and_then(|value| value.checked_sub(low_price))
+        .ok_or_else(|| "terminal rebound input overflow".to_string())?;
+    env.push_ewma_mark(0, 6, rebound_input)
+        .map_err(|error| format!("{route:?} publish terminal rebound: {error}"))?;
+    if env.primary_profile(0).mark_ewma_e6 != BASIS {
+        return Err(format!("{route:?} terminal rebound missed basis"));
+    }
+
+    env.warp_to_slot(7);
+    let mut slot = 7u64;
+    loop {
+        for actor in [0, 1] {
+            env.crank(actor, slot, observations())
+                .map_err(|error| format!("{route:?} converge terminal actor: {error}"))?;
+        }
+        if env.primary_market_state().1.assets[0].effective_price == BASIS {
+            break;
+        }
+        slot = slot
+            .checked_add(1)
+            .ok_or_else(|| "terminal convergence slot overflow".to_string())?;
+        if slot >= 24 {
+            return Err(format!("{route:?} terminal rebound did not converge"));
+        }
+        env.warp_to_slot(slot);
+    }
+    if include_dust_round_trip {
+        execute_reported_price_route(&mut env, route, 2, 3, -DUST_Q, BASIS)
+            .map_err(|error| format!("{route:?} close dust position: {error}"))?;
+    }
+    env.trade_no_cpi(0, 1, 0, -DIRECTIONAL_Q, BASIS, 0)
+        .map_err(|error| format!("{route:?} close terminal directional OI: {error}"))?;
+    env.resolve_market()
+        .map_err(|error| format!("{route:?} resolve terminal-dust world: {error}"))?;
+    for actor in 0..PRIMARY_ACTOR_COUNT {
+        env.close_resolved_primary(actor)
+            .map_err(|error| format!("{route:?} initial resolved close actor {actor}: {error}"))?;
+    }
+    for _ in 0..16 {
+        for actor in 0..PRIMARY_ACTOR_COUNT {
+            let _ = env.close_resolved_primary(actor);
+            let _ = env.claim_resolved_payout_topup_primary(actor);
+        }
+    }
+    let market_before = env.market_data(false);
+    let destinations_before: Vec<_> = (0..PRIMARY_ACTOR_COUNT)
+        .map(|actor| env.token_amount(env.actors[actor].destination_token))
+        .collect();
+    for actor in 0..PRIMARY_ACTOR_COUNT {
+        let _ = env.close_resolved_primary(actor);
+        let _ = env.claim_resolved_payout_topup_primary(actor);
+    }
+    let destinations_after: Vec<_> = (0..PRIMARY_ACTOR_COUNT)
+        .map(|actor| env.token_amount(env.actors[actor].destination_token))
+        .collect();
+    if env.market_data(false) != market_before || destinations_after != destinations_before {
+        return Err(format!("{route:?} terminal payout was not quiescent"));
+    }
+
+    let victim_payout = u128::from(env.token_amount(env.actors[0].destination_token));
+    let coalition_payout = [1usize, 2, 3].into_iter().try_fold(0u128, |sum, actor| {
+        sum.checked_add(u128::from(
+            env.token_amount(env.actors[actor].destination_token),
+        ))
+        .ok_or_else(|| "terminal-dust coalition payout overflow".to_string())
+    })?;
+    let vault_remaining = env.primary_market_state().1.vault;
+    if vault_remaining != u128::from(env.token_amount(env.vault)) {
+        return Err("terminal-dust engine/SPL vault mismatch".into());
+    }
+    Ok(TerminalDustWorld {
+        low_price,
+        victim_payout,
+        coalition_payout,
+        vault_remaining,
+        supply: env.token_supply_observed(),
+    })
+}
+
+fn discover_one_terminal_dust_violation(
+    mut seed: [u8; 32],
+    route: ProspectiveAccrualRoute,
+) -> Result<TerminalDustDiscovery, String> {
+    const COALITION_DEPOSITS: u128 = 20_000_002_000;
+    const VICTIM_DEPOSIT: u128 = 20_000_000_000;
+    seed[0] ^= 0x8c;
+    seed[1] ^= route.discriminator();
+    let control = run_terminal_dust_world(seed, route, false)?;
+    let dust = run_terminal_dust_world(seed, route, true)?;
+    if control.low_price != dust.low_price
+        || control.victim_payout != VICTIM_DEPOSIT
+        || control.coalition_payout != COALITION_DEPOSITS
+    {
+        return Err(format!(
+            "{route:?} terminal control world did not fully reconcile"
+        ));
+    }
+    let attacker_loss = COALITION_DEPOSITS
+        .checked_sub(dust.coalition_payout)
+        .ok_or_else(|| "dust round trip increased coalition payout".to_string())?;
+    let victim_loss = VICTIM_DEPOSIT
+        .checked_sub(dust.victim_payout)
+        .ok_or_else(|| "dust round trip increased victim payout".to_string())?;
+    Ok(TerminalDustDiscovery {
+        route,
+        attacker_loss,
+        victim_loss,
+        vault_remaining: dust.vault_remaining,
+        control_vault_remaining: control.vault_remaining,
+        control_supply: control.supply,
+        dust_supply: dust.supply,
+    })
+}
+
+pub fn discover_terminal_dust_violations(
+    seed: [u8; 32],
+) -> Result<Vec<TerminalDustDiscovery>, String> {
+    ProspectiveAccrualRoute::ALL
+        .into_iter()
+        .map(|route| discover_one_terminal_dust_violation(seed, route))
+        .collect()
 }

@@ -174,10 +174,10 @@ fn v16_open_security_finding_benchmark_is_complete_and_non_overclaiming() {
     }
 
     assert_eq!(rows, 145, "refresh the dated GitHub finding snapshot");
-    assert_eq!(direct, 7, "direct adapter inventory changed");
+    assert_eq!(direct, 6, "direct adapter inventory changed");
     assert_eq!(missing, 62, "explicit finding gaps changed");
     assert_eq!(
-        independent, 76,
+        independent, 77,
         "promote only genuinely finding-agnostic invariant discoveries"
     );
 
@@ -193,6 +193,9 @@ fn v16_open_security_finding_benchmark_is_complete_and_non_overclaiming() {
         include_str!("../stateful/inv_038_rounding_and_ratio_conservation.rs"),
         include_str!("../stateful/inv_039_pending_loss_obligation_durability.rs"),
         include_str!("../stateful/inv_045_no_free_mark_movement.rs"),
+        include_str!(
+            "../stateful/inv_067_terminal_payout_completeness_and_exact_once_settlement.rs"
+        ),
     ];
     let mut fingerprints = std::collections::BTreeSet::new();
     let mut mapped_prs = std::collections::BTreeSet::new();
@@ -243,6 +246,7 @@ fn v16_open_security_finding_benchmark_is_complete_and_non_overclaiming() {
                     | "omitted-observation-cannot-erase-balanced-rounded-transfer"
                     | "fractional-cap-residue-must-accumulate-to-target"
                     | "composite-oracle-legs-must-share-one-coherent-observation-epoch"
+                    | "terminal-payout-is-invariant-to-flattened-dust-position"
             ),
             "unknown independent oracle: {}",
             fields[3]

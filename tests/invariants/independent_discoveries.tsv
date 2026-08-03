@@ -71,3 +71,4 @@ INV-038	composite-rounding/micro-factorization	v16_program_composite_scale_matri
 INV-038	observation-omission/rounded-funding	v16_program_selected_observation_omission_discovers_rounded_transfer_loss	omitted-observation-cannot-erase-balanced-rounded-transfer	253
 INV-038	fractional-movement/max-dt-crank	v16_program_fractional_max_dt_cranks_discover_terminal_value_stall	fractional-cap-residue-must-accumulate-to-target	365
 INV-020	composite-oracle/timestamp-coherence	v16_program_composite_timestamp_coherence_discovers_cross_epoch_liquidation	composite-oracle-legs-must-share-one-coherent-observation-epoch	331
+INV-067	terminal-payout/dust-round-trip	v16_program_reported_route_matrix_discovers_terminal_dust_erasure	terminal-payout-is-invariant-to-flattened-dust-position	283

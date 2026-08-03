@@ -23,7 +23,7 @@ verification methods are in [`../../INVARIANTS.md`](../../INVARIANTS.md).
 | Suite | Tests | Evidence |
 | --- | ---: | --- |
 | `public_sbf/` | 74 | Deterministic public SBF/LiteSVM counterexamples, regressions, and manifest checks |
-| `stateful/` | 91 | Proptest-generated public routes, including twenty-three finding-agnostic discovery properties |
+| `stateful/` | 92 | Proptest-generated public routes, including twenty-four finding-agnostic discovery properties |
 | `cu/` | 69 | Positive public-route, metamorphic, rollback, liveness, and max-shape CU tests |
 | `kani/` | 40 | Symbolic wrapper arithmetic, matcher-binding, and strict-decoder proofs |
 
@@ -116,7 +116,7 @@ charter.
 | INV-064 | Gap | - |
 | INV-065 | Gap | - |
 | INV-066 | SVM/CU | `cu/inv_066_resolved_payout_fairness_and_order_independence.rs` |
-| INV-067 | Direct | `public_sbf/inv_067_terminal_payout_completeness_and_exact_once_settlement.rs`, `stateful/inv_067_terminal_payout_completeness_and_exact_once_settlement.rs` |
+| INV-067 | Independent + Direct | `public_sbf/inv_067_terminal_payout_completeness_and_exact_once_settlement.rs`, `stateful/inv_067_terminal_payout_completeness_and_exact_once_settlement.rs` |
 | INV-068 | Gap | - |
 | INV-069 | Gap | - |
 | INV-070 | Gap | - |
