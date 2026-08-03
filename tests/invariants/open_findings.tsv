@@ -139,7 +139,7 @@
 373	LoF	BLOCKER	INV-067	nonqualifying	[BLOCKER LoF] Prove retained Recovery haircuts preserve prior claims
 374	LoF	BLOCKER	INV-063	nonqualifying	[BLOCKER LoF] Reconcile expired backing in Recovery forfeits
 375	LoF	PRIVILEGED	INV-005	independent-discovery	[PRIVILEGED LoF] Prevent asset-admin seizure of funded roles
-376	DoS	BLOCKER	INV-073	missing	[BLOCKER DoS] Let asset-0 backing provider complete recovery
+376	DoS	BLOCKER	INV-073	independent-discovery	[BLOCKER DoS] Let asset-0 backing provider complete recovery
 377	DoS	BLOCKER	INV-027	missing	[BLOCKER DoS] Keep fresh insurance withdrawable after asset restart
 379	DoS	REAL	INV-028	independent-discovery	[REAL DoS] Preserve source capacity in combined engine pin (restacked)
 380	LoF	BLOCKER	INV-039	independent-discovery	[BLOCKER LoF] Preserve funding across prospective EWMA updates

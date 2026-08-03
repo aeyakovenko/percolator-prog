@@ -2,7 +2,7 @@
 //!
 //! Normative obligation: Every publicly reachable funded state has a finite public path to capital or terminal disposition.
 //!
-//! Evidence in this file (I/C plus invariant-specific M assertions): `v16_program_winner_first_recovery_matrix_discovers_provider_lien_lock`, `v16_program_permissionless_asset_expired_close_matrix_discovers_global_recovery`, `v16_program_fragmented_recovery_pair_matrix_discovers_force_close_lock`, `v16_program_fractional_social_loss_exit_matrix_discovers_dust_lock`, `v16_program_recovery_residue_matrix_discovers_abandoned_owner_lock`, `v16_program_expired_partial_close_matrix_discovers_global_terminal_lock`, `v16_program_crossed_adl_effective_exit_matrix_discovers_zero_oi_residue_lock`, `v16_program_partial_adl_effective_exit_matrix_discovers_zero_oi_residue_lock`, `v16_attack_source_backed_force_close_preserves_bounded_resolved_exits`, `v16_probe_liquidation_then_shutdown_preserves_bounded_owner_exit`, `v16_attack_permissionless_close_resolved_survives_drained_owner_system_account`, `v16_attack_permissionless_asset_epoch_grief_has_atomic_max_leg_exit`. These tests exercise the deployed public
+//! Evidence in this file (I/C plus invariant-specific M assertions): `v16_program_asset0_recovery_matrix_discovers_provider_and_restart_lock`, `v16_program_winner_first_recovery_matrix_discovers_provider_lien_lock`, `v16_program_permissionless_asset_expired_close_matrix_discovers_global_recovery`, `v16_program_fragmented_recovery_pair_matrix_discovers_force_close_lock`, `v16_program_fractional_social_loss_exit_matrix_discovers_dust_lock`, `v16_program_recovery_residue_matrix_discovers_abandoned_owner_lock`, `v16_program_expired_partial_close_matrix_discovers_global_terminal_lock`, `v16_program_crossed_adl_effective_exit_matrix_discovers_zero_oi_residue_lock`, `v16_program_partial_adl_effective_exit_matrix_discovers_zero_oi_residue_lock`, `v16_attack_source_backed_force_close_preserves_bounded_resolved_exits`, `v16_probe_liquidation_then_shutdown_preserves_bounded_owner_exit`, `v16_attack_permissionless_close_resolved_survives_drained_owner_system_account`, `v16_attack_permissionless_asset_epoch_grief_has_atomic_max_leg_exit`. These tests exercise the deployed public
 //! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
 //! rollback, liveness, or compute outcomes appropriate to the invariant.
 //!
@@ -11,6 +11,154 @@
 //! plus every additional verification method required by the charter.
 
 use super::*;
+
+#[test]
+fn v16_program_asset0_recovery_matrix_discovers_provider_and_restart_lock() {
+    let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+        initial_price: 1_000,
+        min_nonzero_mm_req: 599,
+        min_nonzero_im_req: 600,
+        maintenance_margin_bps: 5_000,
+        initial_margin_bps: 5_000,
+        max_price_move_bps_per_slot: 4_900,
+        max_bankrupt_close_lifetime_slots: 1,
+        ..V16CuMarketParams::default()
+    });
+    let marketauth = env.admin.insecure_clone();
+    let backing_provider = Keypair::new();
+    env.configure_permissionless_resolve_with_cu(1_000, 1);
+    env.configure_auth_mark_with_cu(0, 1_000);
+    env.try_update_per_asset_authority_with_cu(
+        &marketauth,
+        Some(&backing_provider),
+        0,
+        processor::ASSET_AUTH_BACKING_BUCKET,
+        backing_provider.pubkey().to_bytes(),
+    )
+    .expect("record external backing provider");
+    env.top_up_insurance(2);
+
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let keeper_owner = Keypair::new();
+    let long = env.create_portfolio(&long_owner);
+    let short = env.create_portfolio(&short_owner);
+    let keeper = env.create_portfolio(&keeper_owner);
+    env.deposit(&long_owner, long, 600);
+    env.deposit(&short_owner, short, 600);
+    env.trade_asset_with_cu(
+        0,
+        &long_owner,
+        long,
+        &short_owner,
+        short,
+        POS_SCALE as i128,
+        1_000,
+        0,
+    );
+
+    env.svm.warp_to_slot(1);
+    env.push_auth_mark_with_cu(1, 399);
+    for slot in [1u64, 2] {
+        env.svm.warp_to_slot(slot);
+        env.crank(
+            keeper,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: slot,
+                observations: crank_observations(0),
+            },
+        );
+    }
+    for _ in 0..5 {
+        env.crank(
+            long,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 2,
+                observations: vec![],
+            },
+        );
+    }
+    let bankrupt = env.market_state().1;
+    assert!(bankrupt.bankruptcy_hlock_active);
+    assert_eq!(bankrupt.insurance_domain_budget_remaining_total, 1);
+    let recovered_principal =
+        bankrupt.source_backing_buckets[0].fresh_unliened_backing_num / BOUND_SCALE;
+    assert!(recovered_principal > 0);
+
+    env.update_asset_lifecycle_as_admin_with_cu(processor::ASSET_ACTION_SHUTDOWN, 0, 2, 0);
+    for (owner, portfolio) in [(&long_owner, long), (&short_owner, short)] {
+        for _ in 0..8 {
+            if percolator::active_bitmap_is_empty(active_bitmap(&env.portfolio_state(portfolio))) {
+                break;
+            }
+            env.forfeit_recovery_leg_with_cu(owner, portfolio, 0, percolator::MAX_VAULT_TVL);
+        }
+    }
+    for side in [0u8, 1] {
+        env.finalize_reset_side_with_cu(0, side);
+    }
+    let recovered = env.market_state().1;
+    assert_eq!(recovered.assets[0].lifecycle, AssetLifecycleV16::Recovery);
+    assert_eq!(recovered.assets[0].oi_eff_long_q, 0);
+    assert_eq!(recovered.assets[0].oi_eff_short_q, 0);
+    assert_eq!(recovered.assets[0].stored_pos_count_long, 0);
+    assert_eq!(recovered.assets[0].stored_pos_count_short, 0);
+    let principal = recovered.source_backing_buckets[0].fresh_unliened_backing_num / BOUND_SCALE;
+    assert_eq!(principal, recovered_principal);
+
+    env.svm.warp_to_slot(3);
+    let provider_destination = env.token_account(backing_provider.pubkey(), 0);
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    let destination_before = env.svm.get_account(&provider_destination).unwrap();
+    for _ in 0..16 {
+        env.svm.expire_blockhash();
+        let withdrawal = env.send(
+            ProgInstruction::WithdrawBackingBucket {
+                domain: 0,
+                amount: principal,
+            },
+            vec![
+                AccountMeta::new(backing_provider.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(provider_destination, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(env.vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[&backing_provider],
+        );
+        assert!(withdrawal.is_err());
+        assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+        assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+        assert_eq!(
+            env.svm.get_account(&provider_destination).unwrap(),
+            destination_before
+        );
+    }
+    assert_eq!(env.token_amount(provider_destination), 0);
+
+    env.svm.expire_blockhash();
+    let restart = env.send(
+        ProgInstruction::RestartAssetOracle {
+            asset_index: 0,
+            now_slot: 3,
+            initial_price: 1_000,
+        },
+        vec![
+            AccountMeta::new(marketauth.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&marketauth],
+    );
+    assert!(restart.is_err());
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+    assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+    assert_eq!(
+        env.market_state().1.source_backing_buckets[0].fresh_unliened_backing_num / BOUND_SCALE,
+        principal
+    );
+}
 
 #[test]
 fn v16_program_winner_first_recovery_matrix_discovers_provider_lien_lock() {

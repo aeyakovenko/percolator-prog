@@ -99,6 +99,7 @@ INV-073	partial-adl/recovery-force-close	v16_program_recovery_residue_matrix_dis
 INV-073	social-loss/fractional-carry-exit-routes	v16_program_fractional_social_loss_exit_matrix_discovers_dust_lock	fractional-social-loss-carry-cannot-lock-funded-owner-exit	217
 INV-073	recovery/fragmented-opposite-oi	v16_program_fragmented_recovery_pair_matrix_discovers_force_close_lock	fragmented-recovery-must-have-a-permissionless-pairwise-close-path	228
 INV-073	recovery/winner-first-provider-lien	v16_program_winner_first_recovery_matrix_discovers_provider_lien_lock	forfeit-order-cannot-lock-provider-backed-recovery	371
+INV-073	asset0-recovery/provider-backing	v16_program_asset0_recovery_matrix_discovers_provider_and_restart_lock	recovered-provider-backing-must-have-withdraw-or-restart-progress	376
 INV-073	permissionless-asset/expired-local-close	v16_program_permissionless_asset_expired_close_matrix_discovers_global_recovery	permissionless-asset-local-close-cannot-freeze-unrelated-funded-users	236
 INV-073	expired-partial-close/unrelated-funded-account	v16_program_expired_partial_close_matrix_discovers_global_terminal_lock	account-local-expired-close-cannot-create-global-funded-recovery-sink	368
 INV-073	recovery-mode/explicit-terminal-routes	v16_program_expired_partial_close_matrix_discovers_global_terminal_lock	recovery-mode-must-have-a-public-terminal-continuation	252
