@@ -5,7 +5,11 @@
 //! Evidence in this file (F over public I routes):
 //! `v16_program_market_incarnation_operation_matrix_discovers_stale_intents` enumerates a
 //! finding-agnostic retained-operation registry over public market close/recreate. Direct impact
-//! regressions remain below. These tests exercise the deployed public
+//! regressions remain below.
+//! `v16_program_market_generation_terminal_matrix_discovers_replacement_value_transfer` strengthens
+//! terminal routes beyond acceptance: a retained old-generation resolve or resolve policy
+//! crystallizes replacement-user PnL and transfers the exact victim loss to the winner. These
+//! tests exercise the deployed public
 //! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
 //! rollback, liveness, or compute outcomes appropriate to the invariant.
 //!
@@ -48,6 +52,34 @@ proptest! {
             MarketIntentKind::ALL.to_vec(),
             "vulnerable-pin market-incarnation discovery corpus changed"
         );
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig {
+        cases: env_usize("PERCOLATOR_FUZZ_CASES", 8) as u32,
+        max_shrink_iters: env_usize("PERCOLATOR_FUZZ_SHRINK_ITERS", 64) as u32,
+        failure_persistence: Some(Box::new(
+            proptest::test_runner::FileFailurePersistence::Direct(
+                "proptest-regressions/inv_001_terminal_generation_discovery.txt",
+            ),
+        )),
+        ..ProptestConfig::default()
+    })]
+
+    #[test]
+    fn v16_program_market_generation_terminal_matrix_discovers_replacement_value_transfer(
+        seed in any::<[u8; 32]>()
+    ) {
+        for kind in TerminalGenerationKind::MARKET {
+            let discovery = discover_terminal_generation_replay(seed, kind)
+                .map_err(TestCaseError::fail)?;
+            prop_assert!(
+                discovery.is_violation(),
+                "old-generation terminal capability did not transfer replacement value: {:?}",
+                discovery
+            );
+        }
     }
 }
 

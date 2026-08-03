@@ -88,10 +88,11 @@ use support::invariant_discovery::{
     discover_portfolio_incarnation_replays, discover_prospective_accrual_violations,
     discover_source_fee_consent_violations, discover_superseded_intents,
     discover_terminal_commit_ordering, discover_terminal_dust_violations,
-    discover_trade_driven_liquidation_violations, AccrualOrderingKind, AssetIntentKind,
-    AuthorityIntentKind, BackingExpiryCase, BackingProviderConsentOrder, CompositeRoundingScale,
-    DiscoveryTradeRoute, FeeConsentKind, MarketIntentKind, PendingMarkSource, PortfolioIntentKind,
-    ProspectiveAccrualRoute, RetryIntentKind, SourceFeeConsentKind, SupersededIntentKind,
+    discover_terminal_generation_replay, discover_trade_driven_liquidation_violations,
+    AccrualOrderingKind, AssetIntentKind, AuthorityIntentKind, BackingExpiryCase,
+    BackingProviderConsentOrder, CompositeRoundingScale, DiscoveryTradeRoute, FeeConsentKind,
+    MarketIntentKind, PendingMarkSource, PortfolioIntentKind, ProspectiveAccrualRoute,
+    RetryIntentKind, SourceFeeConsentKind, SupersededIntentKind, TerminalGenerationKind,
     TradeDrivenMarkMode,
 };
 

@@ -76,6 +76,26 @@ pub enum AssetIntentKind {
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum TerminalGenerationKind {
+    MarketResolve,
+    MarketResolvePolicy,
+    AssetResolvePolicy,
+}
+
+impl TerminalGenerationKind {
+    pub const MARKET: [Self; 2] = [Self::MarketResolve, Self::MarketResolvePolicy];
+    pub const ASSET: [Self; 1] = [Self::AssetResolvePolicy];
+
+    fn discriminator(self) -> u8 {
+        match self {
+            Self::MarketResolve => 0,
+            Self::MarketResolvePolicy => 1,
+            Self::AssetResolvePolicy => 2,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum AuthorityIntentKind {
     MarketAuthorityHandoff,
     AssetAdminHandoff,
@@ -519,6 +539,25 @@ pub struct AssetGenerationDiscovery {
     pub accepted_stale_intent: bool,
     pub mutated_economic_state: bool,
     pub compute_units: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TerminalGenerationDiscovery {
+    pub kind: TerminalGenerationKind,
+    pub old_generation: u64,
+    pub new_generation: u64,
+    pub victim_payout: u128,
+    pub winner_payout: u128,
+    pub victim_loss: u128,
+    pub winner_gain: u128,
+}
+
+impl TerminalGenerationDiscovery {
+    pub fn is_violation(&self) -> bool {
+        self.victim_loss != 0
+            && self.victim_loss == self.winner_gain
+            && self.victim_payout < self.winner_payout
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1836,6 +1875,128 @@ pub fn discover_market_incarnation_replays(
         .into_iter()
         .map(|kind| discover_one_market_incarnation_replay(seed, kind))
         .collect()
+}
+
+pub fn discover_terminal_generation_replay(
+    mut seed: [u8; 32],
+    kind: TerminalGenerationKind,
+) -> Result<TerminalGenerationDiscovery, String> {
+    const PRICE: u64 = 100;
+    const ADVERSE_MARK: u64 = 110;
+    const DEPOSIT: u128 = 1_000_000;
+    const SIZE_Q: i128 = 10_000 * POS_SCALE as i128;
+    const RESTART_SLOT: u64 = 10;
+    const MARK_SLOT: u64 = 20;
+
+    seed[0] ^= 0xd4;
+    seed[1] ^= kind.discriminator();
+    let config = MarketConfig {
+        initial_price: PRICE,
+        actor_deposits: [DEPOSIT; PRIMARY_ACTOR_COUNT],
+        actor_token_balances: [2_000_000; PRIMARY_ACTOR_COUNT],
+        ..MarketConfig::default()
+    };
+    let mut env = V16Svm::new(seed, config);
+    let supply_before = env.token_supply_observed();
+    if kind == TerminalGenerationKind::AssetResolvePolicy {
+        env.configure_permissionless_resolve(1_000_000, 1)
+            .map_err(|error| format!("configure old asset lifecycle: {error}"))?;
+    }
+    let old_generation = env.primary_market_state().1.assets[0].market_id;
+    let retained = match kind {
+        TerminalGenerationKind::MarketResolve => env.build_retained_resolve_market(),
+        TerminalGenerationKind::MarketResolvePolicy
+        | TerminalGenerationKind::AssetResolvePolicy => {
+            env.build_retained_permissionless_resolve_policy(1, 1)
+        }
+    };
+
+    match kind {
+        TerminalGenerationKind::MarketResolve | TerminalGenerationKind::MarketResolvePolicy => {
+            publicly_recreate_market(&mut env, config, RESTART_SLOT)?;
+            env.configure_auth_mark(false, 0, RESTART_SLOT, PRICE)
+                .map_err(|error| format!("configure replacement-market mark: {error}"))?;
+            initialize_replacement_traders(&mut env, &[0, 1], DEPOSIT)?;
+        }
+        TerminalGenerationKind::AssetResolvePolicy => {
+            env.warp_to_slot(RESTART_SLOT - 1);
+            env.shutdown_asset(0, RESTART_SLOT - 1)
+                .map_err(|error| format!("shutdown old asset generation: {error}"))?;
+            env.warp_to_slot(RESTART_SLOT);
+            env.restart_asset_oracle(0, RESTART_SLOT, PRICE)
+                .map_err(|error| format!("restart replacement asset: {error}"))?;
+            env.configure_auth_mark(false, 0, RESTART_SLOT, PRICE)
+                .map_err(|error| format!("configure replacement-asset mark: {error}"))?;
+        }
+    }
+    let new_generation = env.primary_market_state().1.assets[0].market_id;
+    if kind == TerminalGenerationKind::AssetResolvePolicy && new_generation <= old_generation {
+        return Err(format!(
+            "asset restart did not advance generation: {old_generation}->{new_generation}"
+        ));
+    }
+
+    env.trade_no_cpi(0, 1, 0, SIZE_Q, PRICE, 0)
+        .map_err(|error| format!("open replacement user positions: {error}"))?;
+    env.warp_to_slot(MARK_SLOT);
+    env.push_auth_mark(0, MARK_SLOT, ADVERSE_MARK)
+        .map_err(|error| format!("publish replacement adverse mark: {error}"))?;
+    let observation = vec![CrankObservationHint {
+        asset_index: 0,
+        oracle_accounts: env.primary_profile(0).oracle_leg_count,
+    }];
+    env.crank(0, MARK_SLOT, observation.clone())
+        .map_err(|error| format!("refresh replacement winner: {error}"))?;
+    env.crank(1, MARK_SLOT, observation)
+        .map_err(|error| format!("refresh replacement victim: {error}"))?;
+    if env.primary_market_state().1.assets[0].effective_price != ADVERSE_MARK {
+        return Err("replacement market did not commit adverse mark".into());
+    }
+
+    env.land_retained(retained)
+        .map_err(|error| format!("old-generation terminal intent rejected: {error}"))?;
+    if kind != TerminalGenerationKind::MarketResolve {
+        env.warp_to_slot(MARK_SLOT + 2);
+        env.resolve_stale_permissionless(MARK_SLOT + 2)
+            .map_err(|error| format!("stale policy did not terminalize replacement: {error}"))?;
+    }
+    if env.primary_market_state().1.mode != MarketModeV16::Resolved {
+        return Err("old-generation capability did not resolve replacement market".into());
+    }
+
+    env.warp_to_slot(MARK_SLOT + 3);
+    let victim_destination = env.actors[1].destination_token;
+    let winner_destination = env.actors[0].destination_token;
+    let victim_before = env.token_amount(victim_destination);
+    let winner_before = env.token_amount(winner_destination);
+    env.close_resolved_primary(1)
+        .map_err(|error| format!("close terminal replay victim: {error}"))?;
+    env.close_resolved_primary(0)
+        .map_err(|error| format!("close terminal replay winner: {error}"))?;
+    let victim_payout = u128::from(
+        env.token_amount(victim_destination)
+            .checked_sub(victim_before)
+            .ok_or_else(|| "terminal victim destination decreased".to_string())?,
+    );
+    let winner_payout = u128::from(
+        env.token_amount(winner_destination)
+            .checked_sub(winner_before)
+            .ok_or_else(|| "terminal winner destination decreased".to_string())?,
+    );
+    let victim_loss = DEPOSIT.saturating_sub(victim_payout);
+    let winner_gain = winner_payout.saturating_sub(DEPOSIT);
+    if env.token_supply_observed() != supply_before {
+        return Err("terminal generation replay changed SPL supply".into());
+    }
+    Ok(TerminalGenerationDiscovery {
+        kind,
+        old_generation,
+        new_generation,
+        victim_payout,
+        winner_payout,
+        victim_loss,
+        winner_gain,
+    })
 }
 
 fn configure_old_asset_intent(

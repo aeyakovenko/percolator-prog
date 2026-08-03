@@ -175,9 +175,9 @@ fn v16_open_security_finding_benchmark_is_complete_and_non_overclaiming() {
 
     assert_eq!(rows, 145, "refresh the dated GitHub finding snapshot");
     assert_eq!(direct, 0, "direct adapter inventory changed");
-    assert_eq!(missing, 62, "explicit finding gaps changed");
+    assert_eq!(missing, 59, "explicit finding gaps changed");
     assert_eq!(
-        independent, 83,
+        independent, 86,
         "promote only genuinely finding-agnostic invariant discoveries"
     );
 
@@ -257,6 +257,7 @@ fn v16_open_security_finding_benchmark_is_complete_and_non_overclaiming() {
                     | "b-loss-reduces-only-the-originating-source-domain"
                     | "liquidation-certificate-cannot-be-healthier-than-full-refresh"
                     | "expired-backing-cannot-create-withdrawable-provider-value"
+                    | "old-generation-terminal-capability-cannot-crystallize-replacement-value"
             ),
             "unknown independent oracle: {}",
             fields[3]
