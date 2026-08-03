@@ -2,7 +2,7 @@
 //!
 //! Normative obligation: Required exits and recovery paths remain below the CU ceiling at supported maximum shape.
 //!
-//! Evidence in this file (I/C plus invariant-specific M assertions): `v16_program_max_source_conversion_amount_matrix_discovers_claim_lock`, `v16_program_max_shape_resolved_close_order_matrix_discovers_terminal_cu_lock`, `v16_program_max_source_liquidation_asset_matrix_discovers_funded_cu_lock`, `v16_bpf_public_full_14_leg_composite_oracle_liquidation_progress_is_bounded`, `v16_bpf_public_full_14_leg_three_feed_oracle_refresh_is_bounded`, `v16_bpf_public_14_leg_28_source_domain_exit_is_under_tx_limit`, `v16_bpf_10m_market_high_asset_resolved_exit_stays_bounded`, `v16_bpf_10m_market_rebalance_reduce_high_asset_stays_bounded`, `v16_bpf_permissionless_crank_16_observation_decode_cap_is_under_tx_limit`, `v16_bpf_public_stale_7_leg_tradenocpi_boundary_is_bounded`, `v16_bpf_10m_market_resolution_stays_bounded`, `v16_bpf_10m_flat_user_withdraw_and_close_stay_bounded`, `v16_attack_public_max_source_force_close_abandoned_asset_stays_bounded`, `v16_attack_max_source_owner_rebalance_reduce_stays_bounded`, `v16_attack_max_source_force_close_abandoned_asset_stays_bounded`, `v16_attack_public_14_leg_32_source_recovery_forfeit_stays_bounded`, `v16_attack_max_source_maintenance_sync_stays_bounded`, `v16_attack_public_14_leg_32_source_domain_exit_stays_bounded`, `v16_attack_public_max_source_flat_principal_withdraw_stays_bounded`, `v16_attack_public_14_leg_32_source_collateral_deposit_stays_bounded`. These tests exercise the deployed public
+//! Evidence in this file (I/C plus invariant-specific M assertions): `v16_program_max_source_conversion_amount_matrix_discovers_claim_lock`, `v16_program_max_shape_resolved_close_order_matrix_discovers_terminal_cu_lock`, `v16_program_max_source_liquidation_asset_matrix_discovers_funded_cu_lock`, `v16_program_dense_zero_delta_resolution_shape_matrix_keeps_terminal_exit_bounded`, `v16_bpf_public_full_14_leg_composite_oracle_liquidation_progress_is_bounded`, `v16_bpf_public_full_14_leg_three_feed_oracle_refresh_is_bounded`, `v16_bpf_public_14_leg_28_source_domain_exit_is_under_tx_limit`, `v16_bpf_10m_market_high_asset_resolved_exit_stays_bounded`, `v16_bpf_10m_market_rebalance_reduce_high_asset_stays_bounded`, `v16_bpf_permissionless_crank_16_observation_decode_cap_is_under_tx_limit`, `v16_bpf_public_stale_7_leg_tradenocpi_boundary_is_bounded`, `v16_bpf_10m_market_resolution_stays_bounded`, `v16_bpf_10m_flat_user_withdraw_and_close_stay_bounded`, `v16_attack_public_max_source_force_close_abandoned_asset_stays_bounded`, `v16_attack_max_source_owner_rebalance_reduce_stays_bounded`, `v16_attack_max_source_force_close_abandoned_asset_stays_bounded`, `v16_attack_public_14_leg_32_source_recovery_forfeit_stays_bounded`, `v16_attack_max_source_maintenance_sync_stays_bounded`, `v16_attack_public_14_leg_32_source_domain_exit_stays_bounded`, `v16_attack_public_max_source_flat_principal_withdraw_stays_bounded`, `v16_attack_public_14_leg_32_source_collateral_deposit_stays_bounded`. These tests exercise the deployed public
 //! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
 //! rollback, liveness, or compute outcomes appropriate to the invariant.
 //!
@@ -556,6 +556,221 @@ fn v16_program_max_source_liquidation_asset_matrix_discovers_funded_cu_lock() {
     for adverse_asset in [0, 13] {
         run_max_source_liquidation_asset(adverse_asset);
     }
+}
+
+fn run_dense_zero_delta_resolution_shape(asset_count: u16) {
+    const PRICE: u64 = 100;
+    const MAX_LEGS: u16 = percolator_prog::constants::WRAPPER_MAX_PORTFOLIO_ASSETS as u16;
+
+    let mut env = V16CuEnv::new_with_init_params_and_market_capacity(
+        V16CuMarketParams {
+            max_portfolio_assets: percolator_prog::constants::WRAPPER_MAX_PORTFOLIO_ASSETS,
+            max_price_move_bps_per_slot: 1,
+            max_abs_funding_e9_per_slot: 0,
+            ..V16CuMarketParams::default()
+        },
+        asset_count as usize,
+    );
+    let admin = env.admin.insecure_clone();
+    let initial_slots = env.market_state().1.config.max_market_slots as u16;
+    for asset_index in 0..initial_slots {
+        env.configure_auth_mark_for_asset_as_admin(asset_index, 0, PRICE);
+    }
+    for asset_index in initial_slots..asset_count {
+        let activation_slot = asset_index as u64;
+        env.svm.warp_to_slot(activation_slot);
+        env.svm.expire_blockhash();
+        env.send(
+            ProgInstruction::UpdateAssetLifecycle {
+                action: processor::ASSET_ACTION_ACTIVATE,
+                asset_index,
+                now_slot: activation_slot,
+                initial_price: PRICE,
+                insurance_authority: admin.pubkey().to_bytes(),
+                insurance_operator: admin.pubkey().to_bytes(),
+                backing_bucket_authority: admin.pubkey().to_bytes(),
+                oracle_authority: admin.pubkey().to_bytes(),
+            },
+            vec![
+                AccountMeta::new(admin.pubkey(), true),
+                AccountMeta::new(env.market, false),
+            ],
+            &[&admin],
+        )
+        .unwrap_or_else(|error| {
+            panic!("public activation failed for asset {asset_index}: {error}")
+        });
+        env.configure_auth_mark_for_asset_as_admin(asset_index, activation_slot, PRICE);
+    }
+    assert_eq!(
+        env.market_state().1.config.max_market_slots,
+        u32::from(asset_count)
+    );
+
+    let open_batch = |env: &mut V16CuEnv,
+                      long_owner: &Keypair,
+                      long: Pubkey,
+                      short_owner: &Keypair,
+                      short: Pubkey,
+                      start: u16,
+                      end: u16| {
+        env.svm.expire_blockhash();
+        env.send(
+            ProgInstruction::BatchTradeNoCpi {
+                legs: (start..end)
+                    .map(|asset_index| BatchTradeLeg {
+                        asset_index,
+                        size_q: POS_SCALE as i128,
+                        exec_price: PRICE,
+                        fee_bps: 0,
+                    })
+                    .collect(),
+            },
+            vec![
+                AccountMeta::new(long_owner.pubkey(), true),
+                AccountMeta::new(short_owner.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(long, false),
+                AccountMeta::new(short, false),
+            ],
+            &[long_owner, short_owner],
+        )
+    };
+
+    let victim_owner = Keypair::new();
+    let counterparty_owner = Keypair::new();
+    let victim = env.create_portfolio(&victim_owner);
+    let counterparty = env.create_portfolio(&counterparty_owner);
+    env.deposit(&victim_owner, victim, 1_000_000);
+    env.deposit(&counterparty_owner, counterparty, 1_000_000);
+    open_batch(
+        &mut env,
+        &victim_owner,
+        victim,
+        &counterparty_owner,
+        counterparty,
+        0,
+        MAX_LEGS.min(asset_count),
+    )
+    .expect("public victim exposure");
+
+    for start in (MAX_LEGS..asset_count).step_by(MAX_LEGS as usize) {
+        let end = start.saturating_add(MAX_LEGS).min(asset_count);
+        let long_owner = Keypair::new();
+        let short_owner = Keypair::new();
+        let long = env.create_portfolio(&long_owner);
+        let short = env.create_portfolio(&short_owner);
+        env.deposit(&long_owner, long, 1_000_000);
+        env.deposit(&short_owner, short, 1_000_000);
+        open_batch(&mut env, &long_owner, long, &short_owner, short, start, end)
+            .unwrap_or_else(|error| panic!("public exposure failed at asset {start}: {error}"));
+    }
+    let (_, exposed) = env.market_state();
+    assert_eq!(
+        exposed.assets[asset_count as usize - 1].oi_eff_long_q,
+        POS_SCALE
+    );
+
+    env.svm.expire_blockhash();
+    env.send(
+        ProgInstruction::ConfigurePermissionlessResolve {
+            stale_slots: 1,
+            force_close_delay_slots: 1,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&admin],
+    )
+    .expect("configure permissionless stale resolution");
+
+    let mark_slot = u64::from(asset_count) + 1;
+    env.svm.warp_to_slot(mark_slot);
+    for asset_index in 0..asset_count {
+        env.push_auth_mark_for_asset_as_admin(asset_index, mark_slot, PRICE - 1);
+    }
+    let resolve_slot = mark_slot + 2;
+    env.svm.warp_to_slot(resolve_slot);
+
+    env.svm.expire_blockhash();
+    let stale_exit = env.send(
+        ProgInstruction::TradeNoCpi {
+            asset_index: 0,
+            size_q: -(POS_SCALE as i128),
+            exec_price: PRICE,
+            fee_bps: 0,
+        },
+        vec![
+            AccountMeta::new(victim_owner.pubkey(), true),
+            AccountMeta::new(counterparty_owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(victim, false),
+            AccountMeta::new(counterparty, false),
+        ],
+        &[&victim_owner, &counterparty_owner],
+    );
+    let stale_error = stale_exit.expect_err("mature staleness must block ordinary trading");
+    assert!(
+        stale_error.contains("Custom(27)") || stale_error.contains("custom program error: 0x1b"),
+        "ordinary exit failed for the wrong reason: {stale_error}"
+    );
+
+    env.svm.expire_blockhash();
+    let market_before_hinted_crank = env.svm.get_account(&env.market).unwrap();
+    let victim_before_hinted_crank = env.svm.get_account(&victim).unwrap();
+    let hinted_crank = env.send(
+        ProgInstruction::PermissionlessCrank {
+            now_slot: resolve_slot,
+            observations: crank_observations(0),
+        },
+        vec![
+            AccountMeta::new(env.payer.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(victim, false),
+        ],
+        &[],
+    );
+    let hinted_error = hinted_crank.expect_err("mature market must reject fresh observations");
+    assert!(
+        hinted_error.contains("Custom(27)") || hinted_error.contains("custom program error: 0x1b"),
+        "hinted crank failed for the wrong reason: {hinted_error}"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before_hinted_crank
+    );
+    assert_eq!(
+        env.svm.get_account(&victim).unwrap(),
+        victim_before_hinted_crank
+    );
+
+    env.svm.expire_blockhash();
+    let resolve_cu = env
+        .send(
+            ProgInstruction::ResolveStalePermissionless {
+                now_slot: resolve_slot,
+            },
+            vec![AccountMeta::new(env.market, false)],
+            &[],
+        )
+        .expect("publicly constructed zero-delta market remains resolvable");
+    assert!(resolve_cu < 1_400_000);
+    assert_eq!(env.market_state().1.mode, MarketModeV16::Resolved);
+
+    env.svm.warp_to_slot(resolve_slot + 1);
+    let destination = env.close_resolved(&victim_owner, victim);
+    assert_eq!(
+        env.token_amount(destination),
+        1_000_000,
+        "the funded user receives its full terminal entitlement"
+    );
+}
+
+#[test]
+fn v16_program_dense_zero_delta_resolution_shape_matrix_keeps_terminal_exit_bounded() {
+    run_dense_zero_delta_resolution_shape(128);
+    run_dense_zero_delta_resolution_shape(5_834);
 }
 
 #[test]

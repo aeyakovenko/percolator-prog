@@ -140,6 +140,7 @@ fn v16_open_security_finding_benchmark_is_complete_and_non_overclaiming() {
     let mut direct = 0usize;
     let mut missing = 0usize;
     let mut independent = 0usize;
+    let mut nonqualifying = 0usize;
     let mut benchmark_evidence = std::collections::BTreeMap::new();
 
     for line in include_str!("../open_findings.tsv").lines() {
@@ -166,6 +167,7 @@ fn v16_open_security_finding_benchmark_is_complete_and_non_overclaiming() {
             "direct-regression" => direct += 1,
             "missing" => missing += 1,
             "independent-discovery" => independent += 1,
+            "nonqualifying" => nonqualifying += 1,
             "certified" => {}
             evidence => panic!("unknown evidence level {evidence}"),
         }
@@ -175,11 +177,12 @@ fn v16_open_security_finding_benchmark_is_complete_and_non_overclaiming() {
 
     assert_eq!(rows, 143, "refresh the dated GitHub finding snapshot");
     assert_eq!(direct, 0, "direct adapter inventory changed");
-    assert_eq!(missing, 39, "explicit finding gaps changed");
+    assert_eq!(missing, 38, "explicit finding gaps changed");
     assert_eq!(
         independent, 104,
         "promote only genuinely finding-agnostic invariant discoveries"
     );
+    assert_eq!(nonqualifying, 1, "nonqualifying evidence roster changed");
 
     let independent_sources = [
         include_str!("../stateful/inv_001_market_incarnation_binding.rs"),
@@ -302,6 +305,54 @@ fn v16_open_security_finding_benchmark_is_complete_and_non_overclaiming() {
     assert_eq!(
         mapped_prs, promoted_prs,
         "every promoted benchmark row needs a finding-agnostic fingerprint"
+    );
+
+    let nonqualifying_sources = [include_str!(
+        "../cu/inv_077_bounded_work_and_maximum_shape_compute.rs"
+    )];
+    let mut classified_prs = std::collections::BTreeSet::new();
+    for line in include_str!("../nonqualifying_findings.tsv").lines() {
+        if line.starts_with('#') || line.is_empty() {
+            continue;
+        }
+        let fields: Vec<&str> = line.splitn(4, '\t').collect();
+        assert_eq!(fields.len(), 4, "malformed nonqualifying row: {line}");
+        let pr: u16 = fields[0].parse().expect("numeric nonqualifying PR ID");
+        assert!(
+            classified_prs.insert(pr),
+            "duplicate nonqualifying PR row: {pr}"
+        );
+        assert!(matches!(
+            fields[1],
+            "current-pin-safe"
+                | "bounded-public-exit"
+                | "nonextractable"
+                | "privileged-self-action"
+                | "duplicate"
+                | "prerequisite-unreachable"
+                | "transient-only"
+        ));
+        assert!(
+            nonqualifying_sources
+                .iter()
+                .any(|source| source.contains(&format!("fn {}", fields[2]))),
+            "nonqualifying claim lacks executable public-route evidence: {}",
+            fields[2]
+        );
+        assert!(!fields[3].trim().is_empty(), "nonqualifying reason is empty");
+        assert_eq!(
+            benchmark_evidence.get(&pr),
+            Some(&"nonqualifying"),
+            "classification must point to a nonqualifying benchmark row"
+        );
+    }
+    let benchmark_nonqualifying: std::collections::BTreeSet<_> = benchmark_evidence
+        .iter()
+        .filter_map(|(pr, evidence)| (*evidence == "nonqualifying").then_some(*pr))
+        .collect();
+    assert_eq!(
+        classified_prs, benchmark_nonqualifying,
+        "every nonqualifying benchmark row needs machine-checked evidence"
     );
 }
 
