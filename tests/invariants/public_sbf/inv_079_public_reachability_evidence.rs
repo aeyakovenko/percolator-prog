@@ -177,9 +177,9 @@ fn v16_open_security_finding_benchmark_is_complete_and_non_overclaiming() {
 
     assert_eq!(rows, 143, "refresh the dated GitHub finding snapshot");
     assert_eq!(direct, 0, "direct adapter inventory changed");
-    assert_eq!(missing, 29, "explicit finding gaps changed");
+    assert_eq!(missing, 28, "explicit finding gaps changed");
     assert_eq!(
-        independent, 107,
+        independent, 108,
         "promote only genuinely finding-agnostic invariant discoveries"
     );
     assert_eq!(nonqualifying, 7, "nonqualifying evidence roster changed");
@@ -210,6 +210,7 @@ fn v16_open_security_finding_benchmark_is_complete_and_non_overclaiming() {
             "../stateful/inv_067_terminal_payout_completeness_and_exact_once_settlement.rs"
         ),
         include_str!("../cu/inv_071_crank_progress.rs"),
+        include_str!("../cu/inv_073_no_permanent_user_lock.rs"),
         include_str!("../cu/inv_077_bounded_work_and_maximum_shape_compute.rs"),
     ];
     let mut fingerprints = std::collections::BTreeSet::new();
@@ -284,6 +285,7 @@ fn v16_open_security_finding_benchmark_is_complete_and_non_overclaiming() {
                     | "committed-funding-must-accrue-before-lifecycle-terminalization"
                     | "terminal-snapshot-must-use-current-authenticated-oracle-state"
                     | "funded-resolved-adl-winner-has-bounded-public-exit"
+                    | "zero-effective-oi-funded-residue-must-enter-bounded-cleanup"
                     | "successful-crank-cannot-consume-zero-delta-price-time"
                     | "recovery-required-transition-must-not-rollback-funded-survivor-progress"
                     | "unsigned-lp-cannot-inherit-preexisting-settlement-cohort"

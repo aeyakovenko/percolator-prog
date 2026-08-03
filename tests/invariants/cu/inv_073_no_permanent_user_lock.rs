@@ -2,7 +2,7 @@
 //!
 //! Normative obligation: Every publicly reachable funded state has a finite public path to capital or terminal disposition.
 //!
-//! Evidence in this file (I/C plus invariant-specific M assertions): `v16_attack_source_backed_force_close_preserves_bounded_resolved_exits`, `v16_probe_liquidation_then_shutdown_preserves_bounded_owner_exit`, `v16_attack_permissionless_close_resolved_survives_drained_owner_system_account`, `v16_attack_permissionless_asset_epoch_grief_has_atomic_max_leg_exit`. These tests exercise the deployed public
+//! Evidence in this file (I/C plus invariant-specific M assertions): `v16_program_partial_adl_effective_exit_matrix_discovers_zero_oi_residue_lock`, `v16_attack_source_backed_force_close_preserves_bounded_resolved_exits`, `v16_probe_liquidation_then_shutdown_preserves_bounded_owner_exit`, `v16_attack_permissionless_close_resolved_survives_drained_owner_system_account`, `v16_attack_permissionless_asset_epoch_grief_has_atomic_max_leg_exit`. These tests exercise the deployed public
 //! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
 //! rollback, liveness, or compute outcomes appropriate to the invariant.
 //!
@@ -11,6 +11,159 @@
 //! plus every additional verification method required by the charter.
 
 use super::*;
+
+#[test]
+fn v16_program_partial_adl_effective_exit_matrix_discovers_zero_oi_residue_lock() {
+    for long_capital in [1_000u128, 1_001] {
+        let mut env = V16CuEnv::new_with_market_params_and_price_move(1, 10_000, 10_000, 10_000);
+        env.configure_auth_mark_with_cu(0, 100);
+        let long_owner = Keypair::new();
+        let short_owner = Keypair::new();
+        let long = env.create_portfolio(&long_owner);
+        let short = env.create_portfolio(&short_owner);
+        env.deposit(&long_owner, long, long_capital);
+        env.deposit(&short_owner, short, 900);
+        env.trade_asset_with_cu(
+            0,
+            &long_owner,
+            long,
+            &short_owner,
+            short,
+            (2 * POS_SCALE) as i128,
+            100,
+            0,
+        );
+
+        env.svm.warp_to_slot(6);
+        env.push_auth_mark_with_cu(6, 500);
+        for portfolio in [short, long] {
+            env.svm.expire_blockhash();
+            let _ = env.send(
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: 6,
+                    observations: crank_observations(0),
+                },
+                vec![
+                    AccountMeta::new(env.payer.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(portfolio, false),
+                ],
+                &[],
+            );
+        }
+        let _ = env.crank_steps(
+            short,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 6,
+                observations: crank_observations(0),
+            },
+            2,
+        );
+
+        let (_, adl) = env.market_state();
+        let effective_exit_q = adl.assets[0].oi_eff_long_q;
+        assert!(effective_exit_q > 0 && effective_exit_q < 2 * POS_SCALE);
+        assert_eq!(adl.assets[0].oi_eff_short_q, effective_exit_q);
+        assert_eq!(
+            active_leg_for_asset(&env.portfolio_state(long), 0).basis_pos_q,
+            (2 * POS_SCALE) as i128,
+            "ADL must leave stored basis larger than current effective OI"
+        );
+
+        let reduction_cu = env.rebalance_reduce_with_cu(&long_owner, long, 0, effective_exit_q);
+        assert_cu_within(
+            "partial-ADL exact-effective owner reduction",
+            reduction_cu,
+            CUSTODY_CU_LIMIT,
+        );
+        let (_, reduced) = env.market_state();
+        assert_eq!(reduced.assets[0].oi_eff_long_q, 0);
+        assert_eq!(reduced.assets[0].oi_eff_short_q, 0);
+
+        let residual_before = active_leg_for_asset(&env.portfolio_state(long), 0).basis_pos_q;
+        assert!(residual_before > 0);
+        assert_eq!(reduced.assets[0].mode_long, SideModeV16::Normal);
+        assert_eq!(reduced.assets[0].stored_pos_count_long, 1);
+        let fixed_market = env.svm.get_account(&env.market).unwrap();
+        let fixed_long = env.svm.get_account(&long).unwrap();
+        for _ in 0..4 {
+            env.svm.expire_blockhash();
+            let crank = env
+                .send(
+                    ProgInstruction::PermissionlessCrank {
+                        now_slot: 6,
+                        observations: crank_observations(0),
+                    },
+                    vec![
+                        AccountMeta::new(env.payer.pubkey(), true),
+                        AccountMeta::new(env.market, false),
+                        AccountMeta::new(long, false),
+                    ],
+                    &[],
+                )
+                .expect("honest crank reaches the zero-OI residue fixed point");
+            assert_cu_within("zero-OI residue crank", crank, CRANK_CU_LIMIT);
+            assert_eq!(env.svm.get_account(&env.market).unwrap(), fixed_market);
+            assert_eq!(env.svm.get_account(&long).unwrap(), fixed_long);
+        }
+
+        env.svm.expire_blockhash();
+        let owner_retry = env.send(
+            ProgInstruction::RebalanceReduce {
+                asset_index: 0,
+                reduce_q: residual_before.unsigned_abs(),
+            },
+            vec![
+                AccountMeta::new(long_owner.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(long, false),
+            ],
+            &[&long_owner],
+        );
+        assert!(
+            owner_retry.is_err(),
+            "zero-OI owner retry unexpectedly detached"
+        );
+        assert_eq!(env.svm.get_account(&env.market).unwrap(), fixed_market);
+        assert_eq!(env.svm.get_account(&long).unwrap(), fixed_long);
+
+        let fresh_owner = Keypair::new();
+        let fresh = env.create_portfolio(&fresh_owner);
+        env.deposit(&fresh_owner, fresh, 10_000);
+        let trade_market = env.svm.get_account(&env.market).unwrap();
+        let trade_long = env.svm.get_account(&long).unwrap();
+        let trade_fresh = env.svm.get_account(&fresh).unwrap();
+        env.svm.expire_blockhash();
+        let matched_exit = env.try_trade_asset_with_cu(
+            0,
+            &long_owner,
+            long,
+            &fresh_owner,
+            fresh,
+            -residual_before,
+            500,
+            0,
+        );
+        assert!(
+            matched_exit.is_err(),
+            "fresh willing counterparty unexpectedly detached zero-OI residue"
+        );
+        assert_eq!(env.svm.get_account(&env.market).unwrap(), trade_market);
+        assert_eq!(env.svm.get_account(&long).unwrap(), trade_long);
+        assert_eq!(env.svm.get_account(&fresh).unwrap(), trade_fresh);
+
+        let locked = env.portfolio_state(long);
+        assert!(locked.capital.get() != 0 || locked.pnl.get() != 0);
+        assert_eq!(
+            active_leg_for_asset(&locked, 0).basis_pos_q,
+            residual_before
+        );
+        assert_eq!(
+            env.market_state().1.vault as u64,
+            env.token_amount(env.vault)
+        );
+    }
+}
 
 #[test]
 fn v16_attack_source_backed_force_close_preserves_bounded_resolved_exits() {

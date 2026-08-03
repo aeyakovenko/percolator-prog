@@ -39,7 +39,7 @@
 265	LoF	BLOCKER	INV-045	independent-discovery	[BLOCKER LoF] Publish EWMA oracle targets before exposure changes
 266	DoS	BLOCKER	INV-073	missing	[BLOCKER DoS] Keep exact-OI ADL survivors exit-live
 267	LoF	BLOCKER	INV-031	independent-discovery	[BLOCKER LoF] Keep source backing domain-local
-268	DoS	BLOCKER	INV-073	missing	[BLOCKER DoS] Keep unilateral exact-OI ADL survivors exit-live
+268	DoS	BLOCKER	INV-073	independent-discovery	[BLOCKER DoS] Keep unilateral exact-OI ADL survivors exit-live
 269	DoS	BLOCKER	INV-077	nonqualifying	[BLOCKER DoS] Keep max-shape zero-delta stale resolution live
 270	DoS	BLOCKER	INV-028	independent-discovery	[BLOCKER DoS] Keep source-heavy portfolios settlement-live
 271	LoF	BLOCKER	INV-039	independent-discovery	[BLOCKER LoF] Settle zero-move funding before trades
