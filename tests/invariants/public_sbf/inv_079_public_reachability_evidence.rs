@@ -175,9 +175,9 @@ fn v16_open_security_finding_benchmark_is_complete_and_non_overclaiming() {
 
     assert_eq!(rows, 143, "refresh the dated GitHub finding snapshot");
     assert_eq!(direct, 0, "direct adapter inventory changed");
-    assert_eq!(missing, 41, "explicit finding gaps changed");
+    assert_eq!(missing, 40, "explicit finding gaps changed");
     assert_eq!(
-        independent, 102,
+        independent, 103,
         "promote only genuinely finding-agnostic invariant discoveries"
     );
 
@@ -270,6 +270,7 @@ fn v16_open_security_finding_benchmark_is_complete_and_non_overclaiming() {
                     | "flat-backed-claim-must-have-bounded-terminal-conversion"
                     | "admitted-live-leg-must-reserve-a-settlement-source-slot"
                     | "max-source-backed-claim-conversion-must-fit-one-bounded-step"
+                    | "max-source-terminal-claim-must-have-a-bounded-close-step"
                     | "old-generation-terminal-capability-cannot-crystallize-replacement-value"
                     | "stale-position-episode-consent-cannot-transfer-or-orphan-value"
                     | "stale-matcher-enable-cannot-revive-revoked-value-authority"
