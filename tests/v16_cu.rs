@@ -60605,6 +60605,9 @@ mod inv_063_backing_expiry_normalization;
 #[path = "invariants/cu/inv_066_resolved_payout_fairness_and_order_independence.rs"]
 mod inv_066_resolved_payout_fairness_and_order_independence;
 
+#[path = "invariants/cu/inv_067_terminal_payout_completeness_and_exact_once_settlement.rs"]
+mod inv_067_terminal_payout_completeness_and_exact_once_settlement;
+
 #[path = "invariants/cu/inv_071_crank_progress.rs"]
 mod inv_071_crank_progress;
 

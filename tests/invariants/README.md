@@ -24,7 +24,7 @@ verification methods are in [`../../INVARIANTS.md`](../../INVARIANTS.md).
 | --- | ---: | --- |
 | `public_sbf/` | 74 | Deterministic public SBF/LiteSVM counterexamples, regressions, and manifest checks |
 | `stateful/` | 111 | Proptest-generated public routes, including forty-three finding-agnostic discovery properties |
-| `cu/` | 96 | Positive public-route, metamorphic, rollback, liveness, and max-shape CU tests |
+| `cu/` | 97 | Positive public-route, metamorphic, rollback, liveness, and max-shape CU tests |
 | `kani/` | 40 | Symbolic wrapper arithmetic, matcher-binding, and strict-decoder proofs |
 
 The deterministic and stateful LoF adapters currently reproduce quarantined vulnerable behavior.
@@ -116,7 +116,7 @@ charter.
 | INV-064 | Gap | - |
 | INV-065 | Gap | - |
 | INV-066 | SVM/CU | `cu/inv_066_resolved_payout_fairness_and_order_independence.rs` |
-| INV-067 | Independent + Direct | `public_sbf/inv_067_terminal_payout_completeness_and_exact_once_settlement.rs`, `stateful/inv_067_terminal_payout_completeness_and_exact_once_settlement.rs` |
+| INV-067 | Independent + Direct + SVM/CU | `public_sbf/inv_067_terminal_payout_completeness_and_exact_once_settlement.rs`, `stateful/inv_067_terminal_payout_completeness_and_exact_once_settlement.rs`, `cu/inv_067_terminal_payout_completeness_and_exact_once_settlement.rs` |
 | INV-068 | Gap | - |
 | INV-069 | Gap | - |
 | INV-070 | Gap | - |
@@ -144,7 +144,7 @@ charter.
 
 `open_findings.tsv` is the unified 2026-08-03 snapshot of 143 open PRs whose titles identify a
 public-route LoF or DoS class. It maps every row to a primary invariant. PR135 currently has 0
-**Direct regression** rows, 8 **Missing** rows, 121 **Independent discovery** rows, and fourteen
+**Direct regression** rows, 7 **Missing** rows, 122 **Independent discovery** rows, and fourteen
 **Nonqualifying** rows. The independent
 rows are backed by finding-agnostic fingerprints in `independent_discoveries.tsv`; that mapping is
 evidence metadata and is never consumed by a generator or oracle. The older

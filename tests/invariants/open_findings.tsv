@@ -98,7 +98,7 @@
 326	LoF	BLOCKER	INV-014	independent-discovery	[BLOCKER LoF] Bind liquidation fee policy to market generation
 328	LoF	BLOCKER	INV-002	independent-discovery	[BLOCKER LoF] Bind insurance withdrawals to asset generations
 329	LoF	BLOCKER	INV-038	independent-discovery	[BLOCKER LoF] Round composite oracle prices once
-330	LoF	BLOCKER	INV-067	missing	[BLOCKER LoF] Recover terminal bankruptcy double charge
+330	LoF	BLOCKER	INV-067	independent-discovery	[BLOCKER LoF] Recover terminal bankruptcy double charge
 331	LoF	BLOCKER	INV-020	independent-discovery	[BLOCKER LoF] Reject temporally skewed composite oracle reports
 332	LoF	BLOCKER	INV-045	independent-discovery	[BLOCKER LoF] Stage authenticated mark targets before CPI fills
 333	LoF	BLOCKER	INV-045	independent-discovery	[BLOCKER LoF] Stage trade-driven mark targets before later fills

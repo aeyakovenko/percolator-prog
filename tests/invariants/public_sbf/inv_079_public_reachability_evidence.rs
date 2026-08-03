@@ -177,9 +177,9 @@ fn v16_open_security_finding_benchmark_is_complete_and_non_overclaiming() {
 
     assert_eq!(rows, 143, "refresh the dated GitHub finding snapshot");
     assert_eq!(direct, 0, "direct adapter inventory changed");
-    assert_eq!(missing, 8, "explicit finding gaps changed");
+    assert_eq!(missing, 7, "explicit finding gaps changed");
     assert_eq!(
-        independent, 121,
+        independent, 122,
         "promote only genuinely finding-agnostic invariant discoveries"
     );
     assert_eq!(nonqualifying, 14, "nonqualifying evidence roster changed");
@@ -212,6 +212,7 @@ fn v16_open_security_finding_benchmark_is_complete_and_non_overclaiming() {
         include_str!(
             "../stateful/inv_067_terminal_payout_completeness_and_exact_once_settlement.rs"
         ),
+        include_str!("../cu/inv_067_terminal_payout_completeness_and_exact_once_settlement.rs"),
         include_str!("../cu/inv_071_crank_progress.rs"),
         include_str!("../cu/inv_073_no_permanent_user_lock.rs"),
         include_str!("../cu/inv_074_scope_locality.rs"),
@@ -268,6 +269,7 @@ fn v16_open_security_finding_benchmark_is_complete_and_non_overclaiming() {
                     | "fractional-cap-residue-must-accumulate-to-target"
                     | "composite-oracle-legs-must-share-one-coherent-observation-epoch"
                     | "terminal-payout-is-invariant-to-flattened-dust-position"
+                    | "terminal-residual-cannot-double-charge-provider-principal"
                     | "insurance-spend-remains-source-domain-local"
                     | "backing-atoms-cannot-support-claims-from-another-source"
                     | "b-loss-reduces-only-the-originating-source-domain"
