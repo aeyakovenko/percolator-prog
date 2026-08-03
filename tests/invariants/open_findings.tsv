@@ -18,7 +18,7 @@
 224	LoF	BLOCKER	INV-036	independent-discovery	[BLOCKER LoF] Prevent CPI caller-fee LP siphon
 225	LoF	BLOCKER	INV-045	independent-discovery	[BLOCKER LoF] Keep EWMA movement fees non-reclaimable
 228	DoS	HARDENING	INV-073	missing	[HARDENING DoS] Unstick fragmented recovery force-close
-229	DoS	BLOCKER	INV-074	missing	[BLOCKER DoS] Scope bankruptcy locks to affected assets
+229	DoS	BLOCKER	INV-074	independent-discovery	[BLOCKER DoS] Scope bankruptcy locks to affected assets
 231	LoF	BLOCKER	INV-002	independent-discovery	[BLOCKER LoF] Prevent signed intent replay across market generations
 236	DoS	HARDENING	INV-073	missing	[HARDENING DoS] Prevent permissionless asset from forcing global recovery
 237	LoF	PRIVILEGED	INV-027	nonqualifying	[PRIVILEGED LoF] Lock live insurance while users remain exposed
