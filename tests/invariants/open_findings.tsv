@@ -28,7 +28,7 @@
 252	DoS	BLOCKER	INV-073	missing	[BLOCKER DoS] Restore terminal exit after partial Recovery forfeit (#236)
 253	LoF	BLOCKER	INV-038	direct-regression	[BLOCKER LoF] Preserve rounded premium funding on auto-crank
 254	LoF	PRIVILEGED	INV-045	missing	[PRIVILEGED LoF] Accrue committed funding before asset shutdown
-255	LoF	BLOCKER	INV-039	direct-regression	[BLOCKER LoF] Require committed accrual before market resolve
+255	LoF	BLOCKER	INV-039	independent-discovery	[BLOCKER LoF] Require committed accrual before market resolve
 256	LoF	HARDENING	INV-014	independent-discovery	[HARDENING LoF] Prevent live fee hikes from taxing user capital
 257	DoS	HARDENING	INV-073	missing	[HARDENING DoS] Keep funded Recovery deadlines monotonic
 258	LoF	PRIVILEGED	INV-061	missing	[PRIVILEGED LoF] Freeze funded hard-stale deadlines

@@ -1,5 +1,5 @@
 use super::v16_svm::{MarketConfig, V16Svm, INITIAL_PRICE, PRIMARY_ACTOR_COUNT, USER_DEPOSIT};
-use percolator::{SideModeV16, POS_SCALE};
+use percolator::{MarketModeV16, SideModeV16, POS_SCALE};
 use percolator_prog::ix::{BatchTradeCpiLeg, CrankObservationHint};
 use serde::{Deserialize, Serialize};
 use solana_sdk::{account::Account, transaction::Transaction};
@@ -473,6 +473,25 @@ pub struct AccrualOrderingDiscovery {
     pub reordered_received: u128,
     pub victim_claim_loss: u128,
     pub attacker_claim_gain: u128,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TerminalCommitOrderingDiscovery {
+    pub committed_mark: u64,
+    pub reordered_mark: u64,
+    pub victim_payout_loss: u64,
+    pub counterparty_payout_gain: u64,
+    pub committed_total_payout: u128,
+    pub reordered_total_payout: u128,
+}
+
+impl TerminalCommitOrderingDiscovery {
+    pub fn is_violation(&self) -> bool {
+        self.committed_mark > self.reordered_mark
+            && self.victim_payout_loss != 0
+            && self.victim_payout_loss == self.counterparty_payout_gain
+            && self.committed_total_payout == self.reordered_total_payout
+    }
 }
 
 impl AccrualOrderingDiscovery {
@@ -3012,4 +3031,141 @@ pub fn discover_accrual_ordering_violations(
         .into_iter()
         .map(|kind| discover_one_accrual_ordering_violation(seed, kind))
         .collect()
+}
+
+fn drain_resolved_discovery_actor(env: &mut V16Svm, actor: usize) -> Result<u128, String> {
+    let destination = env.actors[actor].destination_token;
+    let payout_before = env.token_amount(destination);
+    for _ in 0..512 {
+        let market_before = env.market_data(false);
+        let portfolio_before = env.primary_portfolio_data(actor);
+        let destination_before = env.token_amount(destination);
+        let _ = env.close_resolved_primary(actor);
+        let _ = env.claim_resolved_payout_topup_primary(actor);
+        if env.market_data(false) == market_before
+            && env.primary_portfolio_data(actor) == portfolio_before
+            && env.token_amount(destination) == destination_before
+        {
+            return env
+                .token_amount(destination)
+                .checked_sub(payout_before)
+                .map(u128::from)
+                .ok_or_else(|| format!("resolved actor {actor} payout decreased"));
+        }
+    }
+    Err(format!(
+        "resolved actor {actor} did not reach a fixed point in 512 calls"
+    ))
+}
+
+#[derive(Clone, Copy, Debug)]
+struct TerminalCommitWorld {
+    effective_mark: u64,
+    long_payout: u64,
+    short_payout: u64,
+}
+
+fn run_terminal_commit_world(
+    seed: [u8; 32],
+    commit_before_resolve: bool,
+) -> Result<TerminalCommitWorld, String> {
+    const PRICE: u64 = 1_000_000;
+    const MARK: u64 = 1_010_000;
+    const DEPOSIT: u128 = 2_000_000_000;
+    const SIZE_Q: i128 = 1_000 * POS_SCALE as i128;
+    const PUSH_SLOT: u64 = 2;
+    const RESOLVE_SLOT: u64 = 5;
+    let mut env = V16Svm::new(
+        seed,
+        MarketConfig {
+            initial_price: PRICE,
+            h_max: 20,
+            max_trading_fee_bps: 100,
+            max_price_move_bps_per_slot: 100,
+            max_accrual_dt_slots: 20,
+            min_funding_lifetime_slots: 20,
+            actor_deposits: [DEPOSIT, DEPOSIT, USER_DEPOSIT, USER_DEPOSIT, USER_DEPOSIT],
+            actor_token_balances: [
+                2_500_000_000,
+                2_500_000_000,
+                200_000_000,
+                200_000_000,
+                2_500_000_000,
+            ],
+            ..MarketConfig::default()
+        },
+    );
+    let supply_before = env.token_supply_observed();
+    env.configure_permissionless_resolve(3, 1)
+        .map_err(|error| format!("configure terminal resolve: {error}"))?;
+    env.trade_no_cpi(0, 1, 0, SIZE_Q, PRICE, 0)
+        .map_err(|error| format!("open terminal ordering pair: {error}"))?;
+    env.warp_to_slot(PUSH_SLOT);
+    env.push_auth_mark(0, PUSH_SLOT, MARK)
+        .map_err(|error| format!("publish pending terminal mark: {error}"))?;
+    let (_, pending) = env.primary_market_state();
+    if env.primary_profile(0).mark_ewma_e6 != MARK || pending.assets[0].effective_price != PRICE {
+        return Err("terminal ordering fixture did not retain a pending mark".into());
+    }
+    if commit_before_resolve {
+        env.crank(
+            0,
+            PUSH_SLOT,
+            vec![CrankObservationHint {
+                asset_index: 0,
+                oracle_accounts: 0,
+            }],
+        )
+        .map_err(|error| format!("commit pending terminal mark: {error}"))?;
+    }
+    env.resolve_stale_permissionless(RESOLVE_SLOT)
+        .map_err(|error| format!("permissionless terminal resolve: {error}"))?;
+    let (_, resolved) = env.primary_market_state();
+    if resolved.mode != MarketModeV16::Resolved {
+        return Err("permissionless resolver did not terminalize market".into());
+    }
+    let effective_mark = resolved.assets[0].effective_price;
+    env.warp_to_slot(RESOLVE_SLOT + 1);
+    let short_payout = drain_resolved_discovery_actor(&mut env, 1)?;
+    let long_payout = drain_resolved_discovery_actor(&mut env, 0)?;
+    if env.token_supply_observed() != supply_before {
+        return Err("terminal ordering world changed SPL supply".into());
+    }
+    Ok(TerminalCommitWorld {
+        effective_mark,
+        long_payout: u64::try_from(long_payout)
+            .map_err(|_| "long terminal payout exceeds SPL range")?,
+        short_payout: u64::try_from(short_payout)
+            .map_err(|_| "short terminal payout exceeds SPL range")?,
+    })
+}
+
+pub fn discover_terminal_commit_ordering(
+    mut seed: [u8; 32],
+) -> Result<TerminalCommitOrderingDiscovery, String> {
+    seed[0] ^= 0xa5;
+    let committed = run_terminal_commit_world(seed, true)?;
+    let reordered = run_terminal_commit_world(seed, false)?;
+    let victim_payout_loss = committed
+        .long_payout
+        .checked_sub(reordered.long_payout)
+        .ok_or_else(|| "resolve-first ordering increased victim payout".to_string())?;
+    let counterparty_payout_gain = reordered
+        .short_payout
+        .checked_sub(committed.short_payout)
+        .ok_or_else(|| "resolve-first ordering decreased counterparty payout".to_string())?;
+    let committed_total_payout = u128::from(committed.long_payout)
+        .checked_add(u128::from(committed.short_payout))
+        .ok_or_else(|| "committed terminal payout overflow".to_string())?;
+    let reordered_total_payout = u128::from(reordered.long_payout)
+        .checked_add(u128::from(reordered.short_payout))
+        .ok_or_else(|| "reordered terminal payout overflow".to_string())?;
+    Ok(TerminalCommitOrderingDiscovery {
+        committed_mark: committed.effective_mark,
+        reordered_mark: reordered.effective_mark,
+        victim_payout_loss,
+        counterparty_payout_gain,
+        committed_total_payout,
+        reordered_total_payout,
+    })
 }
