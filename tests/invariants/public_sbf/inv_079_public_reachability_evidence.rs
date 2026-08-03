@@ -177,12 +177,12 @@ fn v16_open_security_finding_benchmark_is_complete_and_non_overclaiming() {
 
     assert_eq!(rows, 143, "refresh the dated GitHub finding snapshot");
     assert_eq!(direct, 0, "direct adapter inventory changed");
-    assert_eq!(missing, 2, "explicit finding gaps changed");
+    assert_eq!(missing, 0, "all benchmark rows need executable disposition");
     assert_eq!(
         independent, 124,
         "promote only genuinely finding-agnostic invariant discoveries"
     );
-    assert_eq!(nonqualifying, 17, "nonqualifying evidence roster changed");
+    assert_eq!(nonqualifying, 19, "nonqualifying evidence roster changed");
 
     let independent_sources = [
         include_str!("../stateful/inv_001_market_incarnation_binding.rs"),
