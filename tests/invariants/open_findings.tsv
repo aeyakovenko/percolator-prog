@@ -131,7 +131,7 @@
 365	LoF	BLOCKER	INV-038	independent-discovery	[BLOCKER LoF] Carry fractional oracle caps across max-dt cranks
 366	LoF	BLOCKER	INV-053	independent-discovery	[BLOCKER LoF] Gate liquidation on pending later-leg accrual
 367	LoF	BLOCKER	INV-063	independent-discovery	[BLOCKER LoF] Reject post-expiry backing liens
-368	DoS	BLOCKER	INV-045	missing	[BLOCKER DoS] Prevent expired partial recovery from locking market
+368	DoS	BLOCKER	INV-073	independent-discovery	[BLOCKER DoS] Prevent expired partial recovery from locking market
 369	LoF	BLOCKER	INV-045	independent-discovery	[BLOCKER LoF] Require bilateral fee support for EWMA movement
 370	LoF	BLOCKER	INV-073	missing	[BLOCKER LoF] Preserve pending accrual during terminal recovery
 371	DoS	BLOCKER	INV-073	missing	[BLOCKER DoS] Keep winner-first Recovery forfeits live

@@ -2,7 +2,7 @@
 //!
 //! Normative obligation: Every publicly reachable funded state has a finite public path to capital or terminal disposition.
 //!
-//! Evidence in this file (I/C plus invariant-specific M assertions): `v16_program_crossed_adl_effective_exit_matrix_discovers_zero_oi_residue_lock`, `v16_program_partial_adl_effective_exit_matrix_discovers_zero_oi_residue_lock`, `v16_attack_source_backed_force_close_preserves_bounded_resolved_exits`, `v16_probe_liquidation_then_shutdown_preserves_bounded_owner_exit`, `v16_attack_permissionless_close_resolved_survives_drained_owner_system_account`, `v16_attack_permissionless_asset_epoch_grief_has_atomic_max_leg_exit`. These tests exercise the deployed public
+//! Evidence in this file (I/C plus invariant-specific M assertions): `v16_program_expired_partial_close_matrix_discovers_global_terminal_lock`, `v16_program_crossed_adl_effective_exit_matrix_discovers_zero_oi_residue_lock`, `v16_program_partial_adl_effective_exit_matrix_discovers_zero_oi_residue_lock`, `v16_attack_source_backed_force_close_preserves_bounded_resolved_exits`, `v16_probe_liquidation_then_shutdown_preserves_bounded_owner_exit`, `v16_attack_permissionless_close_resolved_survives_drained_owner_system_account`, `v16_attack_permissionless_asset_epoch_grief_has_atomic_max_leg_exit`. These tests exercise the deployed public
 //! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
 //! rollback, liveness, or compute outcomes appropriate to the invariant.
 //!
@@ -11,6 +11,166 @@
 //! plus every additional verification method required by the charter.
 
 use super::*;
+
+#[test]
+fn v16_program_expired_partial_close_matrix_discovers_global_terminal_lock() {
+    for idle_capital in [100u128, 101] {
+        let mut params = production_risk_params();
+        params.max_bankrupt_close_lifetime_slots = 1;
+        params.public_b_chunk_atoms = 8_000;
+        let mut env = V16CuEnv::new_with_init_params(params);
+        env.configure_permissionless_resolve_with_cu(100, 5);
+        env.configure_auth_mark_with_cu(0, 1_000_000);
+
+        let loss_owner = Keypair::new();
+        let counterparty_owner = Keypair::new();
+        let idle_owner = Keypair::new();
+        let loss = env.create_portfolio(&loss_owner);
+        let counterparty = env.create_portfolio(&counterparty_owner);
+        let idle = env.create_portfolio(&idle_owner);
+        env.deposit(&loss_owner, loss, 51_000);
+        env.deposit(&counterparty_owner, counterparty, 100_000);
+        env.deposit(&idle_owner, idle, idle_capital);
+        env.trade_asset_with_cu(
+            0,
+            &loss_owner,
+            loss,
+            &counterparty_owner,
+            counterparty,
+            POS_SCALE as i128,
+            1_000_000,
+            0,
+        );
+
+        for (slot, mark) in [(20u64, 952_000u64), (25, 940_000), (30, 940_576)] {
+            env.svm.warp_to_slot(slot);
+            env.push_auth_mark_with_cu(slot, mark);
+            env.crank(
+                counterparty,
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: slot,
+                    observations: crank_observations(0),
+                },
+            );
+        }
+        env.update_asset_lifecycle_as_admin_with_cu(
+            percolator_prog::processor::ASSET_ACTION_SHUTDOWN,
+            0,
+            30,
+            0,
+        );
+
+        env.svm.expire_blockhash();
+        env.send(
+            ProgInstruction::ForfeitRecoveryLeg {
+                asset_index: 0,
+                b_delta_budget: percolator::MAX_VAULT_TVL,
+            },
+            vec![
+                AccountMeta::new(loss_owner.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(loss, false),
+            ],
+            &[&loss_owner],
+        )
+        .expect("one public recovery-forfeit chunk");
+        let ledger = close_progress(&env.portfolio_state(loss));
+        assert!(ledger.active && ledger.residual_remaining > 0);
+        assert_eq!(env.market_state().1.mode, MarketModeV16::Live);
+
+        env.svm.warp_to_slot(ledger.max_close_slot + 1);
+        env.svm.expire_blockhash();
+        env.send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 0,
+                observations: vec![],
+            },
+            vec![
+                AccountMeta::new_readonly(env.payer.pubkey(), false),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(loss, false),
+            ],
+            &[],
+        )
+        .expect("expired close ledger chooses a terminal continuation");
+        let (_, recovery) = env.market_state();
+        assert_eq!(recovery.mode, MarketModeV16::Recovery);
+        assert_eq!(recovery.vault as u64, env.token_amount(env.vault));
+
+        let fixed_market = env.svm.get_account(&env.market).unwrap();
+        let fixed_idle = env.svm.get_account(&idle).unwrap();
+        let fixed_vault = env.svm.get_account(&env.vault).unwrap();
+        for _ in 0..3 {
+            env.svm.expire_blockhash();
+            let continuation = env.send(
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: u64::MAX,
+                    observations: vec![],
+                },
+                vec![
+                    AccountMeta::new_readonly(env.payer.pubkey(), false),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(loss, false),
+                ],
+                &[],
+            );
+            if let Ok(cu) = continuation {
+                assert_cu_within("Recovery fixed-point crank", cu, CRANK_CU_LIMIT);
+            }
+            assert_eq!(env.market_state().1.mode, MarketModeV16::Recovery);
+            assert_eq!(env.svm.get_account(&env.market).unwrap(), fixed_market);
+            assert_eq!(env.svm.get_account(&idle).unwrap(), fixed_idle);
+            assert_eq!(env.svm.get_account(&env.vault).unwrap(), fixed_vault);
+        }
+
+        let idle_dest = env.token_account(idle_owner.pubkey(), 0);
+        let idle_dest_before = env.svm.get_account(&idle_dest).unwrap();
+        env.svm.expire_blockhash();
+        let live_withdraw = env.send(
+            ProgInstruction::Withdraw {
+                amount: idle_capital,
+            },
+            vec![
+                AccountMeta::new(idle_owner.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(idle, false),
+                AccountMeta::new(idle_dest, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(env.vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[&idle_owner],
+        );
+        assert!(live_withdraw.is_err());
+        assert_eq!(env.svm.get_account(&env.market).unwrap(), fixed_market);
+        assert_eq!(env.svm.get_account(&idle).unwrap(), fixed_idle);
+        assert_eq!(env.svm.get_account(&env.vault).unwrap(), fixed_vault);
+        assert_eq!(env.svm.get_account(&idle_dest).unwrap(), idle_dest_before);
+
+        env.svm.expire_blockhash();
+        let resolved_close = env.send(
+            ProgInstruction::CloseResolved {
+                fee_rate_per_slot: 0,
+            },
+            vec![
+                AccountMeta::new_readonly(idle_owner.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(idle, false),
+                AccountMeta::new(idle_dest, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(env.vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[&idle_owner],
+        );
+        assert!(resolved_close.is_err());
+        assert_eq!(env.svm.get_account(&env.market).unwrap(), fixed_market);
+        assert_eq!(env.svm.get_account(&idle).unwrap(), fixed_idle);
+        assert_eq!(env.svm.get_account(&env.vault).unwrap(), fixed_vault);
+        assert_eq!(env.svm.get_account(&idle_dest).unwrap(), idle_dest_before);
+        assert_eq!(env.portfolio_state(idle).capital.get(), idle_capital);
+    }
+}
 
 #[test]
 fn v16_program_crossed_adl_effective_exit_matrix_discovers_zero_oi_residue_lock() {
