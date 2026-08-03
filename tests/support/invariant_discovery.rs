@@ -712,6 +712,28 @@ pub struct FractionalMovementDiscovery {
     pub short_underpayment: u128,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CompositeTimeCoherenceDiscovery {
+    pub coherent_price: u64,
+    pub skewed_target: u64,
+    pub skewed_mark: u64,
+    pub victim_capital_loss: u128,
+    pub oi_reduction_q: u128,
+    pub cranker_reward: u128,
+    pub extracted_tokens: u64,
+}
+
+impl CompositeTimeCoherenceDiscovery {
+    pub fn is_violation(&self) -> bool {
+        self.skewed_target > self.coherent_price
+            && self.skewed_mark > self.coherent_price
+            && self.victim_capital_loss != 0
+            && self.oi_reduction_q != 0
+            && self.cranker_reward != 0
+            && self.cranker_reward == u128::from(self.extracted_tokens)
+    }
+}
+
 impl FractionalMovementDiscovery {
     pub fn is_violation(&self) -> bool {
         self.successful_cranks != 0
@@ -5469,5 +5491,139 @@ pub fn discover_fractional_movement_stall(
         nonmoving_stalls,
         long_overpayment,
         short_underpayment,
+    })
+}
+
+pub fn discover_composite_time_coherence_violation(
+    mut seed: [u8; 32],
+) -> Result<CompositeTimeCoherenceDiscovery, String> {
+    const COHERENT_PRICE: u64 = 1_500_000;
+    const INITIAL_A: i64 = 3_000_000;
+    const INITIAL_B: i64 = 2_000_000;
+    const FRESH_A: i64 = 6_000_000;
+    const FRESH_B: i64 = 4_000_000;
+
+    seed[0] ^= 0x7b;
+    let coherent_initial = i128::from(INITIAL_A)
+        .checked_mul(1_000_000)
+        .and_then(|value| value.checked_div(i128::from(INITIAL_B)))
+        .ok_or_else(|| "initial coherent cross-rate arithmetic failed".to_string())?;
+    let coherent_fresh = i128::from(FRESH_A)
+        .checked_mul(1_000_000)
+        .and_then(|value| value.checked_div(i128::from(FRESH_B)))
+        .ok_or_else(|| "fresh coherent cross-rate arithmetic failed".to_string())?;
+    if coherent_initial != i128::from(COHERENT_PRICE)
+        || coherent_fresh != i128::from(COHERENT_PRICE)
+    {
+        return Err("composite-time fixture changed coherent cross-rate".into());
+    }
+
+    let mut env = V16Svm::new(
+        seed,
+        MarketConfig {
+            initial_price: COHERENT_PRICE,
+            h_max: 6_480_000,
+            min_nonzero_mm_req: 599,
+            min_nonzero_im_req: 600,
+            maintenance_margin_bps: 500,
+            initial_margin_bps: 500,
+            liquidation_fee_bps: 5,
+            liquidation_fee_cap: percolator::MAX_PROTOCOL_FEE_ABS,
+            max_price_move_bps_per_slot: 24,
+            max_accrual_dt_slots: 20,
+            max_abs_funding_e9_per_slot: 1_000,
+            min_funding_lifetime_slots: 10_000_000,
+            actor_deposits: [540_000, 540_000, 1_000, USER_DEPOSIT, 1],
+            ..MarketConfig::default()
+        },
+    );
+    env.update_liquidation_fee_policy(5_000)
+        .map_err(|error| format!("configure coherent cranker share: {error}"))?;
+    env.set_clock(1, 100);
+    let feeds = [[0xf1u8; 32], [0xf2u8; 32], [0u8; 32]];
+    let initial_a = env.set_pyth_price(&feeds[0], INITIAL_A, -6, 0, 100);
+    let initial_b = env.set_pyth_price(&feeds[1], INITIAL_B, -6, 0, 100);
+    env.configure_hybrid_oracle(
+        0,
+        1,
+        100,
+        ORACLE_LEG_FLAG_DIVIDE_LEG2,
+        feeds,
+        &[initial_a, initial_b],
+        1_000,
+        0,
+    )
+    .map_err(|error| format!("configure coherent cross-rate: {error}"))?;
+    if env.primary_market_state().0.oracle_target_price_e6 != COHERENT_PRICE {
+        return Err("initial composite target differs from coherent cross-rate".into());
+    }
+
+    let size_q = (POS_SCALE as i128)
+        .checked_mul(35)
+        .and_then(|value| value.checked_div(100))
+        .ok_or_else(|| "composite-time victim size overflow".to_string())?;
+    env.trade_no_cpi(1, 0, 0, size_q, COHERENT_PRICE, 0)
+        .map_err(|error| format!("open coherent-price victim short: {error}"))?;
+    let victim_capital_before = env.primary_portfolio(0).capital.get();
+    let oi_before = env.primary_market_state().1.assets[0].oi_eff_short_q;
+    let cranker_capital_before = env.primary_portfolio(2).capital.get();
+    let supply_before = env.token_supply_observed();
+
+    let fresh_a = env.set_pyth_price(&feeds[0], FRESH_A, -6, 0, 101);
+    let skewed = [fresh_a, initial_b];
+    let observations = || {
+        vec![CrankObservationHint {
+            asset_index: 0,
+            oracle_accounts: 2,
+        }]
+    };
+    let mut slot = 1u64;
+    for _ in 0..12 {
+        slot = slot
+            .checked_add(20)
+            .ok_or_else(|| "composite-time catch-up slot overflow".to_string())?;
+        env.set_clock(slot, 101);
+        env.crank_with_oracles(2, slot, observations(), &skewed)
+            .map_err(|error| format!("skewed composite catch-up at slot {slot}: {error}"))?;
+    }
+    env.crank_with_oracles(0, slot, observations(), &skewed)
+        .map_err(|error| format!("refresh skewed-price victim: {error}"))?;
+    let victim_cert = env
+        .primary_portfolio(0)
+        .health_cert
+        .try_to_runtime()
+        .map_err(|error| format!("decode skewed victim certificate: {error:?}"))?;
+    if victim_cert.certified_liq_deficit == 0 {
+        return Err("skewed composite did not certify liquidation".into());
+    }
+    env.crank_with_reward(2, 0, slot, observations(), &skewed)
+        .map_err(|error| format!("skewed-price liquidation: {error}"))?;
+    let (wrapper_after, group_after) = env.primary_market_state();
+    let victim_capital_loss = victim_capital_before
+        .checked_sub(env.primary_portfolio(0).capital.get())
+        .ok_or_else(|| "skewed liquidation increased victim capital".to_string())?;
+    let oi_reduction_q = oi_before
+        .checked_sub(group_after.assets[0].oi_eff_short_q)
+        .ok_or_else(|| "skewed liquidation increased short OI".to_string())?;
+    let cranker_reward = env
+        .primary_portfolio(2)
+        .capital
+        .get()
+        .checked_sub(cranker_capital_before)
+        .ok_or_else(|| "skewed liquidation reduced cranker capital".to_string())?;
+    env.withdraw_primary(2, cranker_reward)
+        .map_err(|error| format!("withdraw skewed liquidation reward: {error}"))?;
+    let extracted_tokens = env.token_amount(env.actors[2].destination_token);
+    if env.token_supply_observed() != supply_before {
+        return Err("composite-time world changed SPL supply".into());
+    }
+    Ok(CompositeTimeCoherenceDiscovery {
+        coherent_price: COHERENT_PRICE,
+        skewed_target: wrapper_after.oracle_target_price_e6,
+        skewed_mark: group_after.assets[0].effective_price,
+        victim_capital_loss,
+        oi_reduction_q,
+        cranker_reward,
+        extracted_tokens,
     })
 }

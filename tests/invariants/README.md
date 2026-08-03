@@ -23,7 +23,7 @@ verification methods are in [`../../INVARIANTS.md`](../../INVARIANTS.md).
 | Suite | Tests | Evidence |
 | --- | ---: | --- |
 | `public_sbf/` | 74 | Deterministic public SBF/LiteSVM counterexamples, regressions, and manifest checks |
-| `stateful/` | 90 | Proptest-generated public routes, including twenty-two finding-agnostic discovery properties |
+| `stateful/` | 91 | Proptest-generated public routes, including twenty-three finding-agnostic discovery properties |
 | `cu/` | 69 | Positive public-route, metamorphic, rollback, liveness, and max-shape CU tests |
 | `kani/` | 40 | Symbolic wrapper arithmetic, matcher-binding, and strict-decoder proofs |
 
@@ -69,7 +69,7 @@ charter.
 | INV-017 | Gap | - |
 | INV-018 | SVM/CU | `cu/inv_018_quote_mint_vault_token_program_and_authority_integrity.rs` |
 | INV-019 | P + SVM/CU | `kani/inv_019_cpi_invocation_and_return_data_binding.rs`, `cu/inv_019_cpi_invocation_and_return_data_binding.rs` |
-| INV-020 | Direct + SVM/CU | `public_sbf/inv_020_authenticated_clock_slot_and_oracle_provenance.rs`, `stateful/inv_020_authenticated_clock_slot_and_oracle_provenance.rs`, `cu/inv_020_authenticated_clock_slot_and_oracle_provenance.rs` |
+| INV-020 | Independent + Direct + SVM/CU | `public_sbf/inv_020_authenticated_clock_slot_and_oracle_provenance.rs`, `stateful/inv_020_authenticated_clock_slot_and_oracle_provenance.rs`, `cu/inv_020_authenticated_clock_slot_and_oracle_provenance.rs` |
 | INV-021 | Gap | - |
 | INV-022 | P | `kani/inv_022_instruction_decoding_and_schema_upgrade_safety.rs` |
 | INV-023 | Gap | - |

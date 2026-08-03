@@ -2,7 +2,11 @@
 //!
 //! Normative obligation: Time and oracle observations are authenticated, coherent, and cannot be caller-rewound.
 //!
-//! Evidence in this file (F over public I routes): `v16_program_pr331_composite_oracle_time_skew_fuzz`. These tests exercise the deployed public
+//! Evidence in this file (F over public I routes):
+//! `v16_program_composite_timestamp_coherence_discovers_cross_epoch_liquidation` keeps a two-leg
+//! cross-rate mathematically constant, advances only one leg, and requires the public wrapper to
+//! reject the incoherent observation before it can certify liquidation or extract a reward.
+//! Direct impact tests remain below. These tests exercise the deployed public
 //! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
 //! rollback, liveness, or compute outcomes appropriate to the invariant.
 //!
@@ -11,6 +15,33 @@
 //! plus every additional verification method required by the charter.
 
 use super::*;
+
+proptest! {
+    #![proptest_config(ProptestConfig {
+        cases: env_usize("PERCOLATOR_FUZZ_CASES", 8) as u32,
+        max_shrink_iters: env_usize("PERCOLATOR_FUZZ_SHRINK_ITERS", 64) as u32,
+        failure_persistence: Some(Box::new(
+            proptest::test_runner::FileFailurePersistence::Direct(
+                "proptest-regressions/inv_020_composite_time_coherence_discovery.txt",
+            ),
+        )),
+        ..ProptestConfig::default()
+    })]
+
+    #[test]
+    fn v16_program_composite_timestamp_coherence_discovers_cross_epoch_liquidation(
+        seed in any::<[u8; 32]>()
+    ) {
+        let discovery = discover_composite_time_coherence_violation(seed)
+            .map_err(TestCaseError::fail)?;
+        eprintln!("independent composite-time discovery: {discovery:?}");
+        prop_assert!(
+            discovery.is_violation(),
+            "vulnerable-pin composite timestamp handling changed: {:?}",
+            discovery
+        );
+    }
+}
 
 proptest! {
     #![proptest_config(ProptestConfig {
