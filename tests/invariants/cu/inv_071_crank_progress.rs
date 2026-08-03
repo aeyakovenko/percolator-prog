@@ -2,7 +2,7 @@
 //!
 //! Normative obligation: Every successful crank strictly decreases a finite liveness rank or enters a lower terminal mode.
 //!
-//! Evidence in this file (I/C plus invariant-specific M assertions): `v16_attack_resolved_permissionless_crank_survives_drained_owner_system_account`, `v16_attack_stale_liquidation_budget_observation_crank_progresses_without_reward_or_value`, `v16_attack_auto_crank_prioritizes_b_stale_over_liquidation_reward_tail`, `v16_attack_auto_crank_reaches_later_material_liquidation_past_tiny_first_leg`. These tests exercise the deployed public
+//! Evidence in this file (I/C plus invariant-specific M assertions): `v16_program_micro_price_schedule_matrix_discovers_clock_consuming_noop_cranks`, `v16_attack_resolved_permissionless_crank_survives_drained_owner_system_account`, `v16_attack_stale_liquidation_budget_observation_crank_progresses_without_reward_or_value`, `v16_attack_auto_crank_prioritizes_b_stale_over_liquidation_reward_tail`, `v16_attack_auto_crank_reaches_later_material_liquidation_past_tiny_first_leg`. These tests exercise the deployed public
 //! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
 //! rollback, liveness, or compute outcomes appropriate to the invariant.
 //!
@@ -11,6 +11,115 @@
 //! plus every additional verification method required by the charter.
 
 use super::*;
+
+#[derive(Debug)]
+struct MicroPriceScheduleOutcome {
+    effective_price: u64,
+    raw_target: u64,
+    asset_slot_last: u64,
+    successful_calls: usize,
+    zero_delta_clock_advances: usize,
+    vault_tokens: u64,
+}
+
+fn run_micro_price_schedule(eager: bool) -> MicroPriceScheduleOutcome {
+    const PRICE: u64 = 100;
+    const TARGET: u64 = 200;
+    const FINAL_SLOT: u64 = 5;
+
+    let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+        initial_price: PRICE,
+        max_price_move_bps_per_slot: 24,
+        max_accrual_dt_slots: 20,
+        min_funding_lifetime_slots: 20,
+        ..V16CuMarketParams::default()
+    });
+    env.configure_auth_mark_with_cu(0, PRICE);
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long = env.create_portfolio(&long_owner);
+    let short = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long, 10_000);
+    env.deposit(&short_owner, short, 10_000);
+    env.trade_with_cu(
+        &long_owner,
+        long,
+        &short_owner,
+        short,
+        POS_SCALE as i128,
+        PRICE,
+        0,
+    );
+    let vault_tokens = env.token_amount(env.vault);
+
+    env.svm.warp_to_slot(1);
+    env.push_auth_mark_with_cu(1, TARGET);
+    let schedule: Vec<u64> = if eager {
+        (1..=FINAL_SLOT).collect()
+    } else {
+        vec![FINAL_SLOT]
+    };
+    let mut successful_calls = 0usize;
+    let mut zero_delta_clock_advances = 0usize;
+    for slot in schedule {
+        env.svm.warp_to_slot(slot);
+        let (_, before) = env.market_state();
+        env.svm.expire_blockhash();
+        let cu = env
+            .send(
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: slot,
+                    observations: crank_observations(0),
+                },
+                vec![
+                    AccountMeta::new(env.payer.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(long, false),
+                ],
+                &[],
+            )
+            .expect("public price crank");
+        assert!(cu < 1_400_000);
+        successful_calls += 1;
+        let (_, after) = env.market_state();
+        if after.assets[0].effective_price == before.assets[0].effective_price
+            && after.assets[0].slot_last > before.assets[0].slot_last
+        {
+            zero_delta_clock_advances += 1;
+        }
+        assert_eq!(env.token_amount(env.vault), vault_tokens);
+    }
+
+    let (_, group) = env.market_state();
+    MicroPriceScheduleOutcome {
+        effective_price: group.assets[0].effective_price,
+        raw_target: group.assets[0].raw_oracle_target_price,
+        asset_slot_last: group.assets[0].slot_last,
+        successful_calls,
+        zero_delta_clock_advances,
+        vault_tokens: env.token_amount(env.vault),
+    }
+}
+
+#[test]
+fn v16_program_micro_price_schedule_matrix_discovers_clock_consuming_noop_cranks() {
+    let delayed = run_micro_price_schedule(false);
+    let eager = run_micro_price_schedule(true);
+    assert_eq!(delayed.raw_target, 200);
+    assert_eq!(eager.raw_target, delayed.raw_target);
+    assert!(
+        delayed.effective_price > 100,
+        "five elapsed slots must make one price atom representable: {delayed:?}"
+    );
+    assert_eq!(
+        eager.effective_price, 100,
+        "per-slot cranks must reproduce target pinning: {eager:?}"
+    );
+    assert_eq!(eager.asset_slot_last, 5);
+    assert_eq!(eager.successful_calls, 5);
+    assert_eq!(eager.zero_delta_clock_advances, 5);
+    assert_eq!(eager.vault_tokens, delayed.vault_tokens);
+}
 
 #[test]
 fn v16_attack_resolved_permissionless_crank_survives_drained_owner_system_account() {
