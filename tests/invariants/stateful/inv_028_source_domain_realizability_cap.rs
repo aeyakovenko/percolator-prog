@@ -38,7 +38,10 @@ proptest! {
     #[test]
     fn v16_program_source_lien_reversal_exit_matrix_discovers_funded_lock(
         seed in any::<[u8; 32]>(),
-        increase_divisor in prop::sample::select(vec![10u8, 20, 25, 40]),
+        // These sizes all pass public admission and create a nonzero source-credit lien. A 10%
+        // increase is correctly rejected as LockActive during setup, before the reversal state
+        // this property is intended to exercise.
+        increase_divisor in prop::sample::select(vec![20u8, 25, 40]),
     ) {
         let discoveries = discover_source_lien_reversal_exit_locks(seed, increase_divisor);
         prop_assert!(
