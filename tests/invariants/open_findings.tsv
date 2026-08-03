@@ -86,7 +86,7 @@
 313	LoF	PRIVILEGED	INV-014	independent-discovery	[PRIVILEGED LoF] Require LP consent for CPI base fees
 314	LoF	BLOCKER	INV-036	independent-discovery	[BLOCKER LoF] Bind permissionless activation fees to creator consent
 315	LoF	BLOCKER	INV-001	independent-discovery	[BLOCKER LoF] Bind asset shutdown to market generations
-316	LoF	HARDENING	INV-004	missing	[HARDENING LoF] Bind rebalance consent to position episodes
+316	LoF	HARDENING	INV-004	independent-discovery	[HARDENING LoF] Bind rebalance consent to position episodes
 317	LoF	BLOCKER	INV-001	independent-discovery	[BLOCKER LoF] Bind fee redirects to market generations
 318	LoF	BLOCKER	INV-002	independent-discovery	[BLOCKER LoF] Bind backing fees to asset generations
 320	LoF	BLOCKER	INV-002	independent-discovery	[BLOCKER LoF] Bind insurance top-ups to asset generations
@@ -118,7 +118,7 @@
 350	LoF	BLOCKER	INV-008	independent-discovery	[BLOCKER LoF] Make deposit intents one-shot across retry variants
 351	LoF	BLOCKER	INV-008	independent-discovery	[BLOCKER LoF] Make backing top-ups one-shot across retry variants
 353	LoF	BLOCKER	INV-005	independent-discovery	[BLOCKER LoF] Bind terminal resolves to authority incarnations
-354	DoS	BLOCKER	INV-004	missing	[BLOCKER DoS] Bind recovery forfeits to position episodes
+354	DoS	BLOCKER	INV-004	independent-discovery	[BLOCKER DoS] Bind recovery forfeits to position episodes
 355	LoF	BLOCKER	INV-008	independent-discovery	[BLOCKER LoF] Make withdrawals one-shot across retry variants
 356	LoF	BLOCKER	INV-045	independent-discovery	[BLOCKER LoF] Block fee rewards ahead of committed marks
 357	DoS	BLOCKER	INV-077	missing	[BLOCKER DoS] Bound max-source PnL conversion

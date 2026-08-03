@@ -82,6 +82,23 @@ pub enum TerminalGenerationKind {
     AssetResolvePolicy,
 }
 
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum PositionEpisodeKind {
+    RebalanceReduce,
+    RecoveryForfeit,
+}
+
+impl PositionEpisodeKind {
+    pub const ALL: [Self; 2] = [Self::RebalanceReduce, Self::RecoveryForfeit];
+
+    fn discriminator(self) -> u8 {
+        match self {
+            Self::RebalanceReduce => 0,
+            Self::RecoveryForfeit => 1,
+        }
+    }
+}
+
 impl TerminalGenerationKind {
     pub const MARKET: [Self; 2] = [Self::MarketResolve, Self::MarketResolvePolicy];
     pub const ASSET: [Self; 1] = [Self::AssetResolvePolicy];
@@ -550,6 +567,36 @@ pub struct TerminalGenerationDiscovery {
     pub winner_payout: u128,
     pub victim_loss: u128,
     pub winner_gain: u128,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PositionEpisodeDiscovery {
+    pub kind: PositionEpisodeKind,
+    pub stale_intent_landed: bool,
+    pub victim_loss: u128,
+    pub counterparty_gain: u128,
+    pub unowned_vault_residual: u128,
+    pub terminal_close_blocked: bool,
+}
+
+impl PositionEpisodeDiscovery {
+    pub fn is_violation(&self) -> bool {
+        if !self.stale_intent_landed {
+            return false;
+        }
+        match self.kind {
+            PositionEpisodeKind::RebalanceReduce => {
+                self.victim_loss != 0
+                    && self.victim_loss == self.counterparty_gain
+                    && self.unowned_vault_residual == 0
+            }
+            PositionEpisodeKind::RecoveryForfeit => {
+                self.victim_loss != 0
+                    && self.unowned_vault_residual == self.victim_loss
+                    && self.terminal_close_blocked
+            }
+        }
+    }
 }
 
 impl TerminalGenerationDiscovery {
@@ -1997,6 +2044,246 @@ pub fn discover_terminal_generation_replay(
         victim_loss,
         winner_gain,
     })
+}
+
+fn discover_rebalance_position_episode(seed: [u8; 32]) -> Result<PositionEpisodeDiscovery, String> {
+    const PRICE: u64 = 100;
+    const ADVERSE_MARK: u64 = 50;
+    const DEPOSIT: u128 = 1_000_000;
+    const OLD_SIZE_Q: i128 = 2_000 * POS_SCALE as i128;
+    const NEW_SIZE_Q: i128 = 1_000 * POS_SCALE as i128;
+
+    let mut env = V16Svm::new(
+        seed,
+        MarketConfig {
+            initial_price: PRICE,
+            max_price_move_bps_per_slot: 10_000,
+            max_accrual_dt_slots: 1,
+            actor_deposits: [DEPOSIT, DEPOSIT, 0, 0, 0],
+            actor_token_balances: [2_000_000, 2_000_000, 1, 1, 1],
+            ..MarketConfig::default()
+        },
+    );
+    let supply_before = env.token_supply_observed();
+    env.configure_auth_mark(false, 0, 1, PRICE)
+        .map_err(|error| format!("configure position-episode mark: {error}"))?;
+    env.trade_no_cpi(0, 1, 0, OLD_SIZE_Q, PRICE, 0)
+        .map_err(|error| format!("open old position episode: {error}"))?;
+    let retained = env.build_retained_rebalance_reduce(0, 0, NEW_SIZE_Q.unsigned_abs());
+    env.trade_no_cpi(0, 1, 0, -OLD_SIZE_Q, PRICE, 0)
+        .map_err(|error| format!("close old position episode: {error}"))?;
+    if discovery_position(&env.primary_portfolio(0), 0)? != 0 {
+        return Err("old rebalance position episode did not close".into());
+    }
+    env.trade_no_cpi(0, 1, 0, NEW_SIZE_Q, PRICE, 0)
+        .map_err(|error| format!("open replacement position episode: {error}"))?;
+
+    env.warp_to_slot(2);
+    env.push_auth_mark(0, 2, ADVERSE_MARK)
+        .map_err(|error| format!("publish adverse replacement mark: {error}"))?;
+    env.crank(
+        0,
+        2,
+        vec![CrankObservationHint {
+            asset_index: 0,
+            oracle_accounts: env.primary_profile(0).oracle_leg_count,
+        }],
+    )
+    .map_err(|error| format!("refresh replacement position at adverse mark: {error}"))?;
+    if env.primary_portfolio(0).capital.get() >= DEPOSIT {
+        return Err("adverse mark did not debit replacement owner".into());
+    }
+    env.land_retained(retained)
+        .map_err(|error| format!("old-episode rebalance intent rejected: {error}"))?;
+    if discovery_position(&env.primary_portfolio(0), 0)? != 0 {
+        return Err("stale rebalance did not close replacement episode".into());
+    }
+
+    env.warp_to_slot(3);
+    env.push_auth_mark(0, 3, PRICE)
+        .map_err(|error| format!("restore neutral mark: {error}"))?;
+    let observation = vec![CrankObservationHint {
+        asset_index: 0,
+        oracle_accounts: env.primary_profile(0).oracle_leg_count,
+    }];
+    let _ = env.crank(1, 3, observation.clone());
+    let _ = env.crank(0, 3, observation);
+    env.resolve_market()
+        .map_err(|error| format!("resolve rebalance episode world: {error}"))?;
+    env.warp_to_slot(4);
+    let victim_payout = drain_resolved_discovery_actor(&mut env, 0)?;
+    let counterparty_payout = drain_resolved_discovery_actor(&mut env, 1)?;
+    let victim_loss = DEPOSIT
+        .checked_sub(victim_payout)
+        .ok_or_else(|| "rebalance replay increased victim payout".to_string())?;
+    let counterparty_gain = counterparty_payout
+        .checked_sub(DEPOSIT)
+        .ok_or_else(|| "rebalance replay decreased counterparty payout".to_string())?;
+    if env.token_supply_observed() != supply_before {
+        return Err("rebalance episode replay changed SPL supply".into());
+    }
+    Ok(PositionEpisodeDiscovery {
+        kind: PositionEpisodeKind::RebalanceReduce,
+        stale_intent_landed: true,
+        victim_loss,
+        counterparty_gain,
+        unowned_vault_residual: 0,
+        terminal_close_blocked: false,
+    })
+}
+
+fn discover_recovery_position_episode(seed: [u8; 32]) -> Result<PositionEpisodeDiscovery, String> {
+    const VICTIM_CAPITAL: u128 = 20_000;
+    const FIRST_LOSER_CAPITAL: u128 = 10_000;
+    const SECOND_LOSER_CAPITAL: u128 = 20_000;
+    const FIRST_GAIN: i128 = 10_000;
+    const SECOND_GAIN: u128 = 20_000;
+    const POSITION_Q: i128 = 10_000 * POS_SCALE as i128;
+
+    let mut env = V16Svm::new(
+        seed,
+        MarketConfig {
+            initial_price: 1,
+            max_trading_fee_bps: 10,
+            max_price_move_bps_per_slot: 10_000,
+            max_accrual_dt_slots: 1,
+            max_bankrupt_close_lifetime_slots: 1,
+            public_b_chunk_atoms: 1,
+            actor_deposits: [
+                VICTIM_CAPITAL,
+                FIRST_LOSER_CAPITAL,
+                SECOND_LOSER_CAPITAL,
+                0,
+                0,
+            ],
+            actor_token_balances: [100_000, 100_000, 100_000, 1, 1],
+            ..MarketConfig::default()
+        },
+    );
+    let supply_before = env.token_supply_observed();
+    env.configure_auth_mark(false, 0, 1, 1)
+        .map_err(|error| format!("configure recovery-episode mark: {error}"))?;
+    env.trade_no_cpi(0, 1, 0, POSITION_Q, 1, 0)
+        .map_err(|error| format!("open first recovery episode: {error}"))?;
+    env.warp_to_slot(2);
+    env.push_auth_mark(0, 2, 2)
+        .map_err(|error| format!("publish first bankruptcy mark: {error}"))?;
+    let observation = vec![CrankObservationHint {
+        asset_index: 0,
+        oracle_accounts: env.primary_profile(0).oracle_leg_count,
+    }];
+    env.crank(1, 2, observation.clone())
+        .map_err(|error| format!("observe first bankrupt loser: {error}"))?;
+    for step in 0..3 {
+        env.crank(1, 2, Vec::new())
+            .map_err(|error| format!("advance first bankrupt loser step {step}: {error}"))?;
+    }
+    env.crank(0, 2, Vec::new())
+        .map_err(|error| format!("settle first recovery winner: {error}"))?;
+    if env.primary_portfolio(0).pnl.get() != FIRST_GAIN
+        || env.primary_market_state().1.assets[0].mode_long != SideModeV16::ResetPending
+    {
+        return Err("first bankruptcy did not create settled forfeitable recovery".into());
+    }
+
+    let intended = env.build_retained_forfeit_recovery_leg(0, 0, 1);
+    let retained = env.build_retained_forfeit_recovery_leg(0, 0, 1);
+    env.land_retained(intended)
+        .map_err(|error| format!("land intended first-episode forfeit: {error}"))?;
+    env.finalize_reset_side(0, 0)
+        .map_err(|error| format!("finalize first recovery episode: {error}"))?;
+    if discovery_position(&env.primary_portfolio(0), 0)? != 0 {
+        return Err("first recovery episode remained active".into());
+    }
+
+    env.trade_no_cpi(0, 2, 0, POSITION_Q, 2, 0)
+        .map_err(|error| format!("open replacement recovery episode: {error}"))?;
+    env.warp_to_slot(3);
+    env.push_auth_mark(0, 3, 4)
+        .map_err(|error| format!("publish second bankruptcy mark: {error}"))?;
+    env.crank(2, 3, observation)
+        .map_err(|error| format!("observe second bankrupt loser: {error}"))?;
+    for step in 0..3 {
+        env.crank(2, 3, Vec::new())
+            .map_err(|error| format!("advance second bankrupt loser step {step}: {error}"))?;
+    }
+    if env.primary_market_state().1.assets[0].mode_long != SideModeV16::ResetPending
+        || env.primary_portfolio(0).pnl.get() != FIRST_GAIN
+    {
+        return Err("replacement recovery episode did not retain a fresh backed gain".into());
+    }
+    env.land_retained(retained)
+        .map_err(|error| format!("old-episode recovery forfeit rejected: {error}"))?;
+    if discovery_position(&env.primary_portfolio(0), 0)? != 0 {
+        return Err("stale recovery forfeit did not delete replacement episode".into());
+    }
+    env.finalize_reset_side(0, 0)
+        .map_err(|error| format!("finalize replacement recovery episode: {error}"))?;
+    env.resolve_market()
+        .map_err(|error| format!("resolve recovery episode world: {error}"))?;
+    env.warp_to_slot(4);
+
+    let victim_payout = drain_resolved_discovery_actor(&mut env, 0)?;
+    for actor in 1..PRIMARY_ACTOR_COUNT {
+        let _ = drain_resolved_discovery_actor(&mut env, actor)?;
+    }
+    let expected_victim_payout = VICTIM_CAPITAL
+        .checked_add(FIRST_GAIN as u128)
+        .and_then(|value| value.checked_add(SECOND_GAIN))
+        .ok_or_else(|| "recovery expected payout overflow".to_string())?;
+    let victim_loss = expected_victim_payout
+        .checked_sub(victim_payout)
+        .ok_or_else(|| "recovery replay increased victim payout".to_string())?;
+    for actor in 0..PRIMARY_ACTOR_COUNT {
+        env.close_primary_portfolio(actor)
+            .map_err(|error| format!("close drained recovery actor {actor}: {error}"))?;
+    }
+    let drained = env.primary_market_state().1;
+    let unowned_vault_residual = drained
+        .vault
+        .checked_sub(drained.c_tot)
+        .and_then(|value| value.checked_sub(drained.insurance))
+        .ok_or_else(|| "recovery residual accounting underflow".to_string())?;
+    let market_before_close = env.market_data(false);
+    let vault_before_close = env.svm.get_account(&env.vault);
+    let terminal_close_blocked = env.close_primary_slab().is_err();
+    if !terminal_close_blocked
+        || env.market_data(false) != market_before_close
+        || env.svm.get_account(&env.vault) != vault_before_close
+        || env.token_supply_observed() != supply_before
+    {
+        return Err("recovery residual did not block terminal close atomically".into());
+    }
+    Ok(PositionEpisodeDiscovery {
+        kind: PositionEpisodeKind::RecoveryForfeit,
+        stale_intent_landed: true,
+        victim_loss,
+        counterparty_gain: 0,
+        unowned_vault_residual,
+        terminal_close_blocked,
+    })
+}
+
+pub fn discover_position_episode_replays(
+    mut seed: [u8; 32],
+) -> Result<Vec<PositionEpisodeDiscovery>, String> {
+    PositionEpisodeKind::ALL
+        .into_iter()
+        .map(|kind| {
+            let mut scenario_seed = seed;
+            scenario_seed[0] ^= 0xe4;
+            scenario_seed[1] ^= kind.discriminator();
+            seed[2] = seed[2].wrapping_add(1);
+            match kind {
+                PositionEpisodeKind::RebalanceReduce => {
+                    discover_rebalance_position_episode(scenario_seed)
+                }
+                PositionEpisodeKind::RecoveryForfeit => {
+                    discover_recovery_position_episode(scenario_seed)
+                }
+            }
+        })
+        .collect()
 }
 
 fn configure_old_asset_intent(
