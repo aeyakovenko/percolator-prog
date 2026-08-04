@@ -7,6 +7,10 @@
 //! trade while backing is fresh, lands it after authenticated Clock expiry, and requires an
 //! invariant failure only when stale engine time debits victim capital and the backing provider
 //! withdraws that exact debit as SPL tokens.
+//! `v16_program_expired_backing_trade_route_matrix` repeats the freshness check through all four
+//! public trade routes. The oracle detects newly-created counterparty-backed liens independently
+//! of fee routing, requires exact extractable loss on fee-supporting routes, and separately proves
+//! that a risk-reducing trade remains available after expiry.
 //! `v16_program_retained_maturity_matrix_discovers_terminal_funded_lock` generates signed expiry
 //! boundaries independently of any finding manifest, compares omitted and delayed operations,
 //! and requires a finding only when the delayed operation consumes independent principal and
@@ -21,6 +25,39 @@
 //! plus every additional verification method required by the charter.
 
 use super::*;
+
+fn assert_expired_backing_trade_route(discovery: &ExpiredBackingTradeRouteDiscovery) {
+    assert!(
+        discovery.created_expired_counterparty_lien(),
+        "{:?} did not expose an authenticated-expiry lien violation: {discovery:?}",
+        discovery.route
+    );
+    if matches!(
+        discovery.route,
+        DiscoveryTradeRoute::NoCpi | DiscoveryTradeRoute::Cpi
+    ) {
+        assert!(
+            discovery.extracted_expired_backing_fee(),
+            "{:?} did not expose exact backing-fee extraction: {discovery:?}",
+            discovery.route
+        );
+    }
+    assert!(
+        discovery.preserves_risk_reduction(),
+        "{:?} did not preserve a post-expiry reducing trade: {discovery:?}",
+        discovery.route
+    );
+}
+
+#[test]
+fn v16_program_expired_backing_trade_route_matrix() {
+    let discoveries = discover_expired_backing_trade_routes([0x63; 32], 2)
+        .expect("build every public trade-route expiry world");
+    assert_eq!(discoveries.len(), DiscoveryTradeRoute::ALL.len());
+    for discovery in &discoveries {
+        assert_expired_backing_trade_route(discovery);
+    }
+}
 
 proptest! {
     #![proptest_config(ProptestConfig {
@@ -57,6 +94,30 @@ proptest! {
             discovery.is_violation(),
             "expired backing did not create an externally extractable victim debit: {:?}",
             discovery
+        );
+    }
+
+    #[test]
+    fn v16_program_expired_backing_trade_routes_discover_stale_lien_creation(
+        seed in any::<[u8; 32]>(),
+        route in prop::sample::select(DiscoveryTradeRoute::ALL.to_vec()),
+        expiry_offset in prop::sample::select(vec![1u8, 2, 4, 6]),
+    ) {
+        let discovery = discover_expired_backing_trade_route(seed, route, expiry_offset)
+            .map_err(TestCaseError::fail)?;
+        prop_assert!(
+            discovery.created_expired_counterparty_lien(),
+            "{route:?} did not expose an authenticated-expiry lien violation: {discovery:?}"
+        );
+        if matches!(route, DiscoveryTradeRoute::NoCpi | DiscoveryTradeRoute::Cpi) {
+            prop_assert!(
+                discovery.extracted_expired_backing_fee(),
+                "{route:?} did not expose exact backing-fee extraction: {discovery:?}"
+            );
+        }
+        prop_assert!(
+            discovery.preserves_risk_reduction(),
+            "{route:?} did not preserve post-expiry risk reduction: {discovery:?}"
         );
     }
 

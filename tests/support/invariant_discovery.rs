@@ -309,6 +309,23 @@ impl DiscoveryTradeRoute {
     }
 }
 
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ActiveLegOrder {
+    RescueFirst,
+    RescueLast,
+}
+
+impl ActiveLegOrder {
+    pub const ALL: [Self; 2] = [Self::RescueFirst, Self::RescueLast];
+
+    fn discriminator(self) -> u8 {
+        match self {
+            Self::RescueFirst => 0,
+            Self::RescueLast => 1,
+        }
+    }
+}
+
 impl PendingMarkSource {
     pub const ALL: [Self; 4] = [
         Self::AuthenticatedPush,
@@ -1031,6 +1048,24 @@ pub struct BackingExpiryDiscovery {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ExpiredBackingTradeRouteDiscovery {
+    pub route: DiscoveryTradeRoute,
+    pub expiry_slot: u64,
+    pub authenticated_slot: u64,
+    pub engine_slot: u64,
+    pub risk_increase_landed: bool,
+    pub rejected_exact_rollback: bool,
+    pub counterparty_lien_increase_num: u128,
+    pub victim_capital_loss: u128,
+    pub provider_earnings: u128,
+    pub extracted_tokens: u64,
+    pub risk_reduction_landed: bool,
+    pub position_before_reduction_q: u128,
+    pub position_after_reduction_q: u128,
+    pub token_supply_conserved: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RetainedMaturityKind {
     BackingTopUp,
 }
@@ -1307,6 +1342,28 @@ impl BackingExpiryDiscovery {
             && self.victim_capital_loss != 0
             && self.provider_earnings == self.victim_capital_loss
             && u128::from(self.extracted_tokens) == self.provider_earnings
+    }
+}
+
+impl ExpiredBackingTradeRouteDiscovery {
+    pub fn created_expired_counterparty_lien(&self) -> bool {
+        self.authenticated_slot > self.expiry_slot
+            && self.engine_slot < self.authenticated_slot
+            && self.risk_increase_landed
+            && self.counterparty_lien_increase_num != 0
+            && self.token_supply_conserved
+    }
+
+    pub fn extracted_expired_backing_fee(&self) -> bool {
+        self.created_expired_counterparty_lien()
+            && self.victim_capital_loss != 0
+            && self.provider_earnings == self.victim_capital_loss
+            && u128::from(self.extracted_tokens) == self.provider_earnings
+    }
+
+    pub fn preserves_risk_reduction(&self) -> bool {
+        self.risk_reduction_landed
+            && self.position_after_reduction_q < self.position_before_reduction_q
     }
 }
 
@@ -7961,6 +8018,36 @@ fn discovery_position(
     })
 }
 
+fn discovery_total_abs_position(
+    account: &percolator_prog::state::PortfolioAccountV16,
+) -> Result<u128, String> {
+    account.legs.iter().try_fold(0u128, |sum, leg| {
+        let decoded = leg
+            .try_to_runtime()
+            .map_err(|error| format!("decode portfolio leg: {error:?}"))?;
+        if decoded.active {
+            sum.checked_add(decoded.basis_pos_q.unsigned_abs())
+                .ok_or_else(|| "portfolio absolute-position sum overflow".to_string())
+        } else {
+            Ok(sum)
+        }
+    })
+}
+
+fn discovery_counterparty_lien_for_domain(
+    account: &percolator_prog::state::PortfolioAccountV16,
+    domain: u16,
+) -> u128 {
+    account
+        .source_domains
+        .iter()
+        .find(|source| {
+            source.source_claim_market_id.get() != 0 && source.domain.get() == u32::from(domain)
+        })
+        .map(|source| source.source_lien_counterparty_backing_num.get())
+        .unwrap_or(0)
+}
+
 fn crank_asset_progress(
     env: &mut V16Svm,
     actor: usize,
@@ -7996,7 +8083,11 @@ fn crank_asset_progress(
     Ok(())
 }
 
-fn build_full_refresh_discovery_world(seed: [u8; 32]) -> Result<(V16Svm, u128, u128), String> {
+fn build_full_refresh_discovery_world(
+    seed: [u8; 32],
+    route: DiscoveryTradeRoute,
+    leg_order: ActiveLegOrder,
+) -> Result<(V16Svm, u128, u128), String> {
     const ADVERSE_PRICE: u64 = 1_000_000;
     const ADVERSE_TARGET: u64 = 997_600;
     const RESCUE_PRICE: u64 = 100;
@@ -8034,10 +8125,20 @@ fn build_full_refresh_discovery_world(seed: [u8; 32]) -> Result<(V16Svm, u128, u
         .map_err(|error| format!("configure adverse mark: {error}"))?;
     env.top_up_backing_bucket(1, 200_000, 10)
         .map_err(|error| format!("top up rescue backing: {error}"))?;
-    env.trade_no_cpi(0, 1, 1, ADVERSE_SIZE_Q, ADVERSE_PRICE, 0)
-        .map_err(|error| format!("open adverse first leg: {error}"))?;
-    env.trade_no_cpi(0, 1, 0, RESCUE_SIZE_Q, RESCUE_PRICE, 0)
-        .map_err(|error| format!("open rescue later leg: {error}"))?;
+    let ordered_legs = match leg_order {
+        ActiveLegOrder::RescueFirst => [
+            (0, RESCUE_SIZE_Q, RESCUE_PRICE, "rescue"),
+            (1, ADVERSE_SIZE_Q, ADVERSE_PRICE, "adverse"),
+        ],
+        ActiveLegOrder::RescueLast => [
+            (1, ADVERSE_SIZE_Q, ADVERSE_PRICE, "adverse"),
+            (0, RESCUE_SIZE_Q, RESCUE_PRICE, "rescue"),
+        ],
+    };
+    for (asset_index, size_q, price, label) in ordered_legs {
+        execute_discovery_trade_route(&mut env, route, 0, 1, asset_index, size_q, price)
+            .map_err(|error| format!("open {label} leg via {route:?}: {error}"))?;
+    }
 
     let opened = env.primary_portfolio(0);
     let active_assets = opened
@@ -8047,12 +8148,16 @@ fn build_full_refresh_discovery_world(seed: [u8; 32]) -> Result<(V16Svm, u128, u
         .filter(|leg| leg.active)
         .map(|leg| leg.asset_index)
         .collect::<Vec<_>>();
-    if active_assets != [1, 0] {
+    let expected_assets = match leg_order {
+        ActiveLegOrder::RescueFirst => [0, 1],
+        ActiveLegOrder::RescueLast => [1, 0],
+    };
+    if active_assets != expected_assets {
         return Err(format!(
-            "full-refresh fixture lost first/later leg ordering: {active_assets:?}"
+            "full-refresh fixture lost {leg_order:?} ordering via {route:?}: {active_assets:?}"
         ));
     }
-    let position_before_q = discovery_position(&opened, 1)?.unsigned_abs();
+    let position_before_q = discovery_total_abs_position(&opened)?;
 
     env.warp_to_slot(2);
     env.push_auth_mark(0, 2, RESCUE_MARK)
@@ -8079,10 +8184,25 @@ fn build_full_refresh_discovery_world(seed: [u8; 32]) -> Result<(V16Svm, u128, u
 }
 
 pub fn discover_full_refresh_omission_violation(
+    seed: [u8; 32],
+) -> Result<FullRefreshDiscovery, String> {
+    discover_active_leg_currentness_violation(
+        seed,
+        DiscoveryTradeRoute::NoCpi,
+        ActiveLegOrder::RescueLast,
+    )
+}
+
+pub fn discover_active_leg_currentness_violation(
     mut seed: [u8; 32],
+    route: DiscoveryTradeRoute,
+    leg_order: ActiveLegOrder,
 ) -> Result<FullRefreshDiscovery, String> {
     seed[0] ^= 0x22;
-    let (mut omitted, _, omitted_insurance_before) = build_full_refresh_discovery_world(seed)?;
+    seed[1] ^= route.discriminator();
+    seed[2] ^= leg_order.discriminator();
+    let (mut omitted, _, omitted_insurance_before) =
+        build_full_refresh_discovery_world(seed, route, leg_order)?;
     omitted
         .crank(0, 3, Vec::new())
         .map_err(|error| format!("omitted-observation refresh: {error}"))?;
@@ -8091,12 +8211,11 @@ pub fn discover_full_refresh_omission_violation(
         .health_cert
         .try_to_runtime()
         .map_err(|error| format!("decode omitted certificate: {error:?}"))?;
-    let omitted_position_before_q = discovery_position(&omitted_account, 1)?.unsigned_abs();
+    let omitted_position_before_q = discovery_total_abs_position(&omitted_account)?;
     omitted
         .crank(0, 3, Vec::new())
         .map_err(|error| format!("omitted-observation liquidation: {error}"))?;
-    let omitted_position_after_q =
-        discovery_position(&omitted.primary_portfolio(0), 1)?.unsigned_abs();
+    let omitted_position_after_q = discovery_total_abs_position(&omitted.primary_portfolio(0))?;
     let omitted_insurance_delta = omitted
         .primary_market_state()
         .1
@@ -8105,7 +8224,7 @@ pub fn discover_full_refresh_omission_violation(
         .ok_or_else(|| "omitted path decreased insurance".to_string())?;
 
     let (mut complete, complete_position_before_q, complete_insurance_before) =
-        build_full_refresh_discovery_world(seed)?;
+        build_full_refresh_discovery_world(seed, route, leg_order)?;
     let rescue_oracle_accounts = complete.primary_profile(0).oracle_leg_count;
     complete
         .crank(
@@ -8127,7 +8246,7 @@ pub fn discover_full_refresh_omission_violation(
         .crank(0, 3, Vec::new())
         .map_err(|error| format!("complete-world user refresh: {error}"))?;
     let complete_account = complete.primary_portfolio(0);
-    let complete_position_after_q = discovery_position(&complete_account, 1)?.unsigned_abs();
+    let complete_position_after_q = discovery_total_abs_position(&complete_account)?;
     let complete_cert = complete_account
         .health_cert
         .try_to_runtime()
@@ -8266,6 +8385,175 @@ pub fn discover_backing_expiry_violation(
         provider_earnings,
         extracted_tokens,
     })
+}
+
+pub fn discover_expired_backing_trade_route(
+    mut seed: [u8; 32],
+    route: DiscoveryTradeRoute,
+    expiry_offset: u8,
+) -> Result<ExpiredBackingTradeRouteDiscovery, String> {
+    const WINNER: usize = 0;
+    const LOSER: usize = 1;
+    const ASSET: u16 = 0;
+    const DOMAIN: u16 = 1;
+    const PRICE: u64 = 100;
+    const WINNING_MARK: u64 = 105;
+    const OPEN_Q: i128 = 1_000 * POS_SCALE as i128;
+    const INCREASE_Q: i128 = 50 * POS_SCALE as i128;
+    const BUCKET_AMOUNT: u128 = 100_000;
+
+    seed[0] ^= 0x6f;
+    seed[1] ^= route.discriminator();
+    seed[2] ^= expiry_offset;
+    let mut env = V16Svm::new(
+        seed,
+        MarketConfig {
+            initial_price: PRICE,
+            maintenance_margin_bps: 1_000,
+            initial_margin_bps: 5_000,
+            max_price_move_bps_per_slot: 500,
+            max_accrual_dt_slots: 1,
+            min_funding_lifetime_slots: 1,
+            actor_deposits: [
+                52_501,
+                1_000_000,
+                USER_DEPOSIT,
+                USER_DEPOSIT,
+                EXIT_MAKER_DEPOSIT,
+            ],
+            ..MarketConfig::default()
+        },
+    );
+    let start_slot = env.current_slot();
+    let expiry_slot = start_slot
+        .checked_add(u64::from(expiry_offset.clamp(2, 6)))
+        .ok_or_else(|| "trade-route expiry overflow".to_string())?;
+    let authenticated_slot = expiry_slot
+        .checked_add(1)
+        .ok_or_else(|| "trade-route landing slot overflow".to_string())?;
+    let supply_before = env.token_supply_observed();
+    env.configure_auth_mark(false, ASSET, start_slot, PRICE)
+        .map_err(|error| format!("configure trade-route mark: {error}"))?;
+    // Both batch routes intentionally reject active backing-fee policy. They still need the
+    // freshness invariant because a zero-fee fill can create a counterparty-backed lien.
+    if matches!(route, DiscoveryTradeRoute::NoCpi | DiscoveryTradeRoute::Cpi) {
+        env.update_backing_fee_policy(DOMAIN, 5_000, 0)
+            .map_err(|error| format!("configure trade-route backing fee: {error}"))?;
+    }
+    env.top_up_backing_bucket(DOMAIN, BUCKET_AMOUNT, expiry_slot)
+        .map_err(|error| format!("fund trade-route backing: {error}"))?;
+    env.trade_no_cpi(WINNER, LOSER, ASSET, OPEN_Q, PRICE, 0)
+        .map_err(|error| format!("open trade-route position: {error}"))?;
+
+    let mark_slot = start_slot
+        .checked_add(1)
+        .ok_or_else(|| "trade-route mark slot overflow".to_string())?;
+    env.warp_to_slot(mark_slot);
+    env.push_auth_mark(ASSET, mark_slot, WINNING_MARK)
+        .map_err(|error| format!("publish trade-route winning mark: {error}"))?;
+    crank_asset_progress(&mut env, LOSER, mark_slot, ASSET, 4)?;
+    crank_asset_progress(&mut env, WINNER, mark_slot, ASSET, 4)?;
+
+    let before_group = env.primary_market_state().1;
+    let before_bucket = before_group.source_backing_buckets[DOMAIN as usize];
+    if before_bucket.status != BackingBucketStatusV16::Fresh
+        || before_bucket.expiry_slot != expiry_slot
+        || before_group.current_slot >= authenticated_slot
+    {
+        return Err("trade-route backing was not cached-fresh before retention".into());
+    }
+    let lien_before =
+        discovery_counterparty_lien_for_domain(&env.primary_portfolio(WINNER), DOMAIN)
+            .checked_add(discovery_counterparty_lien_for_domain(
+                &env.primary_portfolio(LOSER),
+                DOMAIN,
+            ))
+            .ok_or_else(|| "trade-route before-lien overflow".to_string())?;
+    let capital_before = env.primary_portfolio(WINNER).capital.get();
+    let provider_before = env.token_amount(env.provider_destination_token);
+    let retained = build_retained_discovery_trade(
+        &mut env,
+        route,
+        WINNER,
+        LOSER,
+        ASSET,
+        INCREASE_Q,
+        WINNING_MARK,
+    );
+    let before_retained = fingerprint(&env);
+
+    env.warp_to_slot(authenticated_slot);
+    let retained_result = env.land_retained(retained);
+    let risk_increase_landed = retained_result.is_ok();
+    let rejected_exact_rollback = retained_result.is_err() && fingerprint(&env) == before_retained;
+    let after_group = env.primary_market_state().1;
+    let engine_slot = after_group.current_slot;
+    let lien_after = discovery_counterparty_lien_for_domain(&env.primary_portfolio(WINNER), DOMAIN)
+        .checked_add(discovery_counterparty_lien_for_domain(
+            &env.primary_portfolio(LOSER),
+            DOMAIN,
+        ))
+        .ok_or_else(|| "trade-route after-lien overflow".to_string())?;
+    let counterparty_lien_increase_num = lien_after
+        .checked_sub(lien_before)
+        .ok_or_else(|| "trade-route counterparty lien decreased".to_string())?;
+    let victim_capital_loss = capital_before
+        .checked_sub(env.primary_portfolio(WINNER).capital.get())
+        .unwrap_or(0);
+    let provider_earnings = after_group.source_backing_buckets[DOMAIN as usize]
+        .utilization_fee_earnings
+        .checked_sub(before_bucket.utilization_fee_earnings)
+        .ok_or_else(|| "trade-route provider earnings decreased".to_string())?;
+    if provider_earnings != 0 {
+        env.withdraw_backing_bucket_earnings(DOMAIN, provider_earnings)
+            .map_err(|error| format!("withdraw trade-route backing fee: {error}"))?;
+    }
+    let extracted_tokens = env
+        .token_amount(env.provider_destination_token)
+        .checked_sub(provider_before)
+        .ok_or_else(|| "trade-route provider destination decreased".to_string())?;
+
+    let position_before_reduction_q =
+        discovery_position(&env.primary_portfolio(WINNER), ASSET)?.unsigned_abs();
+    let risk_reduction_landed = execute_discovery_trade_route(
+        &mut env,
+        route,
+        WINNER,
+        LOSER,
+        ASSET,
+        -INCREASE_Q,
+        WINNING_MARK,
+    )
+    .is_ok();
+    let position_after_reduction_q =
+        discovery_position(&env.primary_portfolio(WINNER), ASSET)?.unsigned_abs();
+
+    Ok(ExpiredBackingTradeRouteDiscovery {
+        route,
+        expiry_slot,
+        authenticated_slot,
+        engine_slot,
+        risk_increase_landed,
+        rejected_exact_rollback,
+        counterparty_lien_increase_num,
+        victim_capital_loss,
+        provider_earnings,
+        extracted_tokens,
+        risk_reduction_landed,
+        position_before_reduction_q,
+        position_after_reduction_q,
+        token_supply_conserved: env.token_supply_observed() == supply_before,
+    })
+}
+
+pub fn discover_expired_backing_trade_routes(
+    seed: [u8; 32],
+    expiry_offset: u8,
+) -> Result<Vec<ExpiredBackingTradeRouteDiscovery>, String> {
+    DiscoveryTradeRoute::ALL
+        .into_iter()
+        .map(|route| discover_expired_backing_trade_route(seed, route, expiry_offset))
+        .collect()
 }
 
 #[derive(Clone, Copy, Debug)]
