@@ -3071,14 +3071,17 @@ impl V16Svm {
             .sum()
     }
 
-    pub fn all_token_account_data(&self) -> Vec<Vec<u8>> {
+    pub fn all_token_account_data(&self) -> Vec<(Pubkey, Vec<u8>)> {
         self.token_accounts
             .iter()
             .map(|key| {
-                self.svm
-                    .get_account(key)
-                    .expect("tracked token account")
-                    .data
+                (
+                    *key,
+                    self.svm
+                        .get_account(key)
+                        .expect("tracked token account")
+                        .data,
+                )
             })
             .collect()
     }

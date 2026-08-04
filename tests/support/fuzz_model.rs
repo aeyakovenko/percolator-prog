@@ -4,15 +4,16 @@ use super::v16_svm::{
 };
 use percolator::{
     v16_domain_pair_for_asset_index, AssetLifecycleV16, BackingBucketStatusV16, MarketModeV16,
-    PortfolioLegV16, SideModeV16, POS_SCALE,
+    PortfolioLegV16, SideModeV16, SideV16, POS_SCALE,
 };
 use percolator_prog::{
     constants::{ORACLE_LEG_FLAG_DIVIDE_LEG2, ORACLE_LEG_FLAG_DIVIDE_LEG3, ORACLE_MODE_EWMA_MARK},
     ix::{BatchTradeCpiLeg, BatchTradeLeg, CrankObservationHint},
+    state::MarketGroupV16,
 };
 use proptest::prelude::*;
 use serde::{Deserialize, Serialize};
-use solana_sdk::{signature::Signer, transaction::Transaction};
+use solana_sdk::{pubkey::Pubkey, signature::Signer, transaction::Transaction};
 use std::collections::VecDeque;
 
 const MIN_LIVENESS_DRAIN_LIMIT: usize = 256;
@@ -1131,6 +1132,10 @@ pub enum Action {
         actor: u8,
         hints: HintMode,
     },
+    Deposit {
+        actor: u8,
+        amount: u16,
+    },
     Withdraw {
         actor: u8,
         amount: u16,
@@ -1205,7 +1210,9 @@ pub struct Coverage {
     pub mark_updates: u64,
     pub oracle_reconfigs: u64,
     pub maintenance_syncs: u64,
+    pub deposits: u64,
     pub withdrawals: u64,
+    pub token_frame_checks: u64,
     pub substitution_rejections: [u64; 5],
     pub retained_landed: u64,
     pub retained_rejected: u64,
@@ -1227,7 +1234,9 @@ impl Default for Coverage {
             mark_updates: 0,
             oracle_reconfigs: 0,
             maintenance_syncs: 0,
+            deposits: 0,
             withdrawals: 0,
+            token_frame_checks: 0,
             substitution_rejections: [0; 5],
             retained_landed: 0,
             retained_rejected: 0,
@@ -1255,6 +1264,12 @@ impl Coverage {
         }
         if self.crank_progress == 0 {
             return Err("sole public crank never demonstrated rank-decreasing progress".into());
+        }
+        if self.deposits == 0 {
+            return Err("owner-authorized deposit route had no successful public execution".into());
+        }
+        if self.token_frame_checks == 0 {
+            return Err("successful public routes had no per-account SPL frame checks".into());
         }
         for (index, rejections) in self.substitution_rejections.iter().copied().enumerate() {
             if rejections == 0 {
@@ -1301,7 +1316,9 @@ impl Coverage {
         self.mark_updates += other.mark_updates;
         self.oracle_reconfigs += other.oracle_reconfigs;
         self.maintenance_syncs += other.maintenance_syncs;
+        self.deposits += other.deposits;
         self.withdrawals += other.withdrawals;
+        self.token_frame_checks += other.token_frame_checks;
         self.retained_landed += other.retained_landed;
         self.retained_rejected += other.retained_rejected;
         self.user_positions_closed += other.user_positions_closed;
@@ -1361,7 +1378,7 @@ struct Snapshot {
     primary_portfolios: Vec<Vec<u8>>,
     foreign_portfolio: Vec<u8>,
     backing_domain_ledger: Vec<u8>,
-    token_accounts: Vec<Vec<u8>>,
+    token_accounts: Vec<(Pubkey, Vec<u8>)>,
     matcher_contexts: Vec<Vec<u8>>,
 }
 
@@ -1529,6 +1546,7 @@ impl ScenarioRunner {
                 continue;
             }
             let before = self.snapshot();
+            let vault_before = u128::from(self.env.token_amount(self.env.vault));
             let destination_before = self
                 .env
                 .token_amount(self.env.actors[actor].destination_token);
@@ -1542,11 +1560,19 @@ impl ScenarioRunner {
             let destination_after = self
                 .env
                 .token_amount(self.env.actors[actor].destination_token);
-            if destination_after as u128 - destination_before as u128 != capital {
+            let vault_after = u128::from(self.env.token_amount(self.env.vault));
+            if u128::from(destination_after).checked_sub(u128::from(destination_before))
+                != Some(capital)
+                || vault_after.checked_add(capital) != Some(vault_before)
+            {
                 return Err(format!(
-                    "actor {actor} withdrawal destination delta did not equal authorized debit"
+                    "actor {actor} withdrawal vault/destination delta did not equal authorized debit"
                 ));
             }
+            self.assert_token_frame(
+                &before,
+                &[self.env.actors[actor].destination_token, self.env.vault],
+            )?;
             if self.env.primary_portfolio(actor).capital.get() != 0 {
                 return Err(format!(
                     "actor {actor} retained capital after full withdrawal"
@@ -1556,12 +1582,35 @@ impl ScenarioRunner {
         }
         let foreign_capital = self.env.foreign_market_state().1.c_tot;
         if foreign_capital != 0 {
+            let before = self.snapshot();
+            let vault_before = u128::from(self.env.token_amount(self.env.foreign_vault));
+            let destination_before = u128::from(
+                self.env
+                    .token_amount(self.env.foreign_actor.destination_token),
+            );
             let success = self
                 .env
                 .withdraw_foreign(foreign_capital)
                 .map_err(|error| format!("foreign user cannot withdraw: {error}"))?;
             self.coverage.withdrawals += 1;
             self.coverage.observe_success(None, &success);
+            let vault_after = u128::from(self.env.token_amount(self.env.foreign_vault));
+            let destination_after = u128::from(
+                self.env
+                    .token_amount(self.env.foreign_actor.destination_token),
+            );
+            if vault_after.checked_add(foreign_capital) != Some(vault_before)
+                || destination_before.checked_add(foreign_capital) != Some(destination_after)
+            {
+                return Err("foreign withdrawal did not preserve exact token deltas".into());
+            }
+            self.assert_token_frame(
+                &before,
+                &[
+                    self.env.foreign_actor.destination_token,
+                    self.env.foreign_vault,
+                ],
+            )?;
         }
         self.assert_global_invariants()
     }
@@ -1627,6 +1676,7 @@ impl ScenarioRunner {
             Ok(success) => {
                 self.coverage.observe_success(None, &success);
                 self.assert_portfolio_frame(&before, &[user])?;
+                self.assert_no_token_side_effects(&before)?;
                 let size_after = decoded_legs(&self.env.primary_portfolio(user))
                     .into_iter()
                     .filter(|leg| leg.active && leg.asset_index as usize == asset)
@@ -1692,6 +1742,7 @@ impl ScenarioRunner {
             Ok(success) => {
                 self.coverage.observe_success(None, &success);
                 self.assert_portfolio_frame(&before, &[user])?;
+                self.assert_no_token_side_effects(&before)?;
                 let size_after = decoded_legs(&self.env.primary_portfolio(user))
                     .into_iter()
                     .filter(|leg| leg.active && leg.asset_index as usize == asset)
@@ -1738,6 +1789,7 @@ impl ScenarioRunner {
 
     fn run_required_prefix(&mut self) -> Result<(), String> {
         let q = POS_SCALE as i128;
+        self.execute_deposit(0, 1, true)?;
         self.execute_trade(TradeRoute::NoCpi, 0, 1, vec![(0, q)], 0, 0, true)?;
         self.execute_trade(TradeRoute::Cpi, 2, 3, vec![(0, q)], 0, 0, true)?;
         self.execute_trade(
@@ -1775,12 +1827,14 @@ impl ScenarioRunner {
                     / 10_000,
             )
             .ok_or("required mark overflow")?;
+        let before = self.snapshot();
         let mark_success = self
             .env
             .push_auth_mark(0, next_slot, required_mark)
             .map_err(|error| format!("required mark update failed: {error}"))?;
         self.coverage.mark_updates += 1;
         self.coverage.observe_success(None, &mark_success);
+        self.assert_no_token_side_effects(&before)?;
         self.drain_actor(0, self.liveness_limit)?;
         self.assert_global_invariants()
     }
@@ -1853,6 +1907,7 @@ impl ScenarioRunner {
                         self.coverage.oracle_reconfigs += 1;
                         self.coverage.observe_success(None, &success);
                         self.assert_portfolio_frame(&before, &[])?;
+                        self.assert_no_token_side_effects(&before)?;
                     }
                     Err(_) => self.assert_snapshot_unchanged(&before)?,
                 }
@@ -1885,6 +1940,7 @@ impl ScenarioRunner {
                         self.coverage.mark_updates += 1;
                         self.coverage.observe_success(None, &success);
                         self.assert_portfolio_frame(&before, &[])?;
+                        self.assert_no_token_side_effects(&before)?;
                     }
                     Err(_) => self.assert_snapshot_unchanged(&before)?,
                 }
@@ -1895,11 +1951,19 @@ impl ScenarioRunner {
                 self.execute_crank(actor, hints, matches!(hints, HintMode::Complete))
                     .map_err(CrankFailure::into_message)
             }
+            Action::Deposit { actor, amount } => self
+                .execute_deposit(
+                    actor as usize % USER_COUNT,
+                    u128::from(amount.max(1)),
+                    false,
+                )
+                .map(|_| ()),
             Action::Withdraw { actor, amount } => {
                 let actor = actor as usize % USER_COUNT;
                 let amount = amount as u128;
                 let before = self.snapshot();
                 let capital_before = self.env.primary_portfolio(actor).capital.get();
+                let before_vault = u128::from(self.env.token_amount(self.env.vault));
                 let destination_before = self
                     .env
                     .token_amount(self.env.actors[actor].destination_token);
@@ -1914,11 +1978,17 @@ impl ScenarioRunner {
                             .token_amount(self.env.actors[actor].destination_token);
                         if capital_before.checked_sub(amount) != Some(capital_after)
                             || destination_after as u128 != destination_before as u128 + amount
+                            || u128::from(self.env.token_amount(self.env.vault)).checked_add(amount)
+                                != Some(before_vault)
                         {
                             return Err(
                                 "withdrawal debit/credit did not match owner authorization".into(),
                             );
                         }
+                        self.assert_token_frame(
+                            &before,
+                            &[self.env.actors[actor].destination_token, self.env.vault],
+                        )?;
                     }
                     Err(_) => self.assert_snapshot_unchanged(&before)?,
                 }
@@ -1934,6 +2004,7 @@ impl ScenarioRunner {
                         self.coverage.maintenance_syncs += 1;
                         self.coverage.observe_success(None, &success);
                         self.assert_portfolio_frame(&before, &[actor])?;
+                        self.assert_no_token_side_effects(&before)?;
                     }
                     Err(_) => self.assert_snapshot_unchanged(&before)?,
                 }
@@ -1986,6 +2057,7 @@ impl ScenarioRunner {
                             .observe_success(Some(TradeRoute::NoCpi), &success);
                         self.record_trade(retained.taker, retained.maker, &retained.legs)?;
                         self.assert_portfolio_frame(&before, &[retained.taker, retained.maker])?;
+                        self.assert_no_token_side_effects(&before)?;
                     }
                     Err(_) => {
                         self.coverage.retained_rejected += 1;
@@ -1997,6 +2069,49 @@ impl ScenarioRunner {
             Action::AdvanceBlockhash => {
                 self.env.expire_blockhash();
                 Ok(())
+            }
+        }
+    }
+
+    fn execute_deposit(
+        &mut self,
+        actor: usize,
+        amount: u128,
+        must_succeed: bool,
+    ) -> Result<bool, String> {
+        let before = self.snapshot();
+        let source = self.env.actors[actor].source_token;
+        let source_before = u128::from(self.env.token_amount(source));
+        let vault_before = u128::from(self.env.token_amount(self.env.vault));
+        let capital_before = self.env.primary_portfolio(actor).capital.get();
+        match self.env.deposit_primary(actor, amount) {
+            Ok(success) => {
+                self.coverage.deposits += 1;
+                self.coverage.observe_success(None, &success);
+                self.assert_portfolio_frame(&before, &[actor])?;
+                let source_after = u128::from(self.env.token_amount(source));
+                let vault_after = u128::from(self.env.token_amount(self.env.vault));
+                let capital_after = self.env.primary_portfolio(actor).capital.get();
+                if source_after.checked_add(amount) != Some(source_before)
+                    || vault_before.checked_add(amount) != Some(vault_after)
+                    || capital_before.checked_add(amount) != Some(capital_after)
+                {
+                    return Err(format!(
+                        "deposit {amount} for actor {actor} did not preserve exact source/vault/capital deltas"
+                    ));
+                }
+                self.assert_token_frame(&before, &[source, self.env.vault])?;
+                Ok(true)
+            }
+            Err(error) => {
+                self.assert_snapshot_unchanged(&before)?;
+                if must_succeed {
+                    Err(format!(
+                        "valid owner deposit {amount} failed for actor {actor}: {error}"
+                    ))
+                } else {
+                    Ok(false)
+                }
             }
         }
     }
@@ -2070,6 +2185,7 @@ impl ScenarioRunner {
                 self.coverage.observe_success(Some(route), &success);
                 self.record_trade(taker, maker, &legs)?;
                 self.assert_portfolio_frame(&before, &[taker, maker])?;
+                self.assert_no_token_side_effects(&before)?;
                 Ok(true)
             }
             Err(error) => {
@@ -2178,6 +2294,8 @@ impl ScenarioRunner {
             Ok(success) => {
                 self.coverage.observe_success(None, &success);
                 self.assert_portfolio_frame(&before, &[actor])
+                    .map_err(CrankFailure::Invariant)?;
+                self.assert_no_token_side_effects(&before)
                     .map_err(CrankFailure::Invariant)?;
                 self.record_permissionless_position_changes(actor, liquidation_authorized)
                     .map_err(CrankFailure::Invariant)?;
@@ -2399,6 +2517,7 @@ impl ScenarioRunner {
                 Ok(success) => {
                     self.coverage.observe_success(None, &success);
                     self.assert_portfolio_frame(&before, &[])?;
+                    self.assert_no_token_side_effects(&before)?;
                     let (_, after) = self.env.primary_market_state();
                     let pending_after = reset_pending_side_count(&after);
                     if pending_after >= pending_before {
@@ -2689,19 +2808,89 @@ impl ScenarioRunner {
     }
 
     fn assert_positions_match(&self) -> Result<(), String> {
+        let (_, group) = self.env.primary_market_state();
         let mut observed = [[0i128; ASSET_COUNT]; PRIMARY_ACTOR_COUNT];
+        let mut observed_long_oi = [0u128; ASSET_COUNT];
+        let mut observed_short_oi = [0u128; ASSET_COUNT];
+        let mut observed_long_count = [0u64; ASSET_COUNT];
+        let mut observed_short_count = [0u64; ASSET_COUNT];
+        let mut asset_has_stale_leg = [false; ASSET_COUNT];
         for (actor, row) in observed.iter_mut().enumerate() {
-            for leg in decoded_legs(&self.env.primary_portfolio(actor)) {
-                if leg.active {
-                    let asset = leg.asset_index as usize;
-                    if asset >= ASSET_COUNT {
-                        return Err(format!("actor {actor} has out-of-world asset {asset}"));
+            let account = self.env.primary_portfolio(actor);
+            let mut seen_assets = [false; ASSET_COUNT];
+            for (slot, encoded_leg) in account.legs.iter().enumerate() {
+                let leg = encoded_leg.try_to_runtime().map_err(|error| {
+                    format!("actor {actor} leg slot {slot} failed to decode: {error:?}")
+                })?;
+                let bitmap_word = slot / u64::BITS as usize;
+                let bitmap_bit = slot % u64::BITS as usize;
+                let active_bit = account
+                    .active_bitmap
+                    .get(bitmap_word)
+                    .map(|word| word.get() & (1u64 << bitmap_bit) != 0)
+                    .unwrap_or(false);
+                if active_bit != leg.active {
+                    return Err(format!(
+                        "actor {actor} leg slot {slot} disagrees with active bitmap"
+                    ));
+                }
+                if !leg.active {
+                    if !leg.is_empty() {
+                        return Err(format!(
+                            "actor {actor} leg slot {slot} hides nonempty inactive state"
+                        ));
                     }
-                    row[asset] = row[asset]
-                        .checked_add(leg.basis_pos_q)
-                        .ok_or("observed position overflow")?;
+                    continue;
+                }
+                let asset = leg.asset_index as usize;
+                if asset >= ASSET_COUNT {
+                    return Err(format!("actor {actor} has out-of-world asset {asset}"));
+                }
+                if seen_assets[asset] {
+                    return Err(format!(
+                        "actor {actor} has duplicate active legs for asset {asset}"
+                    ));
+                }
+                seen_assets[asset] = true;
+                if leg.market_id != group.assets[asset].market_id {
+                    return Err(format!(
+                        "actor {actor} asset {asset} leg generation {} != current {}",
+                        leg.market_id, group.assets[asset].market_id
+                    ));
+                }
+                if leg.basis_pos_q == i128::MIN
+                    || (leg.basis_pos_q > 0 && leg.side != SideV16::Long)
+                    || (leg.basis_pos_q < 0 && leg.side != SideV16::Short)
+                {
+                    return Err(format!(
+                        "actor {actor} asset {asset} has inconsistent side/basis {:?}/{}",
+                        leg.side, leg.basis_pos_q
+                    ));
+                }
+                row[asset] = row[asset]
+                    .checked_add(leg.basis_pos_q)
+                    .ok_or("observed position overflow")?;
+                asset_has_stale_leg[asset] |= leg.stale || leg.b_stale;
+                match leg.side {
+                    SideV16::Long => {
+                        observed_long_oi[asset] = observed_long_oi[asset]
+                            .checked_add(leg.basis_pos_q.unsigned_abs())
+                            .ok_or("observed long OI overflow")?;
+                        observed_long_count[asset] = observed_long_count[asset]
+                            .checked_add(1)
+                            .ok_or("observed long position-count overflow")?;
+                    }
+                    SideV16::Short => {
+                        observed_short_oi[asset] = observed_short_oi[asset]
+                            .checked_add(leg.basis_pos_q.unsigned_abs())
+                            .ok_or("observed short OI overflow")?;
+                        observed_short_count[asset] = observed_short_count[asset]
+                            .checked_add(1)
+                            .ok_or("observed short position-count overflow")?;
+                    }
                 }
             }
+            self.assert_source_domain_shape(actor, &account, &group)?;
         }
         if observed != self.positions {
             return Err(format!(
@@ -2710,6 +2899,41 @@ impl ScenarioRunner {
             ));
         }
         for asset in 0..ASSET_COUNT {
+            let engine_asset = &group.assets[asset];
+            if group.mode == MarketModeV16::Live
+                && engine_asset.oi_eff_long_q != engine_asset.oi_eff_short_q
+            {
+                return Err(format!(
+                    "live asset {asset} has unmatched effective OI {}/{}",
+                    engine_asset.oi_eff_long_q, engine_asset.oi_eff_short_q
+                ));
+            }
+            if observed_long_count[asset] != engine_asset.stored_pos_count_long
+                || observed_short_count[asset] != engine_asset.stored_pos_count_short
+            {
+                return Err(format!(
+                    "asset {asset} stored position counts {}/{} != independent {}/{}",
+                    engine_asset.stored_pos_count_long,
+                    engine_asset.stored_pos_count_short,
+                    observed_long_count[asset],
+                    observed_short_count[asset]
+                ));
+            }
+            if self.protocol_positions[asset] == 0
+                && !asset_has_stale_leg[asset]
+                && engine_asset.pending_obligation_count_long == 0
+                && engine_asset.pending_obligation_count_short == 0
+                && (observed_long_oi[asset] != engine_asset.oi_eff_long_q
+                    || observed_short_oi[asset] != engine_asset.oi_eff_short_q)
+            {
+                return Err(format!(
+                    "asset {asset} effective OI {}/{} != current-leg sum {}/{}",
+                    engine_asset.oi_eff_long_q,
+                    engine_asset.oi_eff_short_q,
+                    observed_long_oi[asset],
+                    observed_short_oi[asset]
+                ));
+            }
             let user_net: i128 = observed.iter().map(|positions| positions[asset]).sum();
             let net = user_net
                 .checked_add(self.protocol_positions[asset])
@@ -2719,6 +2943,66 @@ impl ScenarioRunner {
                     "asset {asset} position attribution diverged: users={user_net}, \
                      protocol={}, net={net}",
                     self.protocol_positions[asset]
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn assert_source_domain_shape(
+        &self,
+        actor: usize,
+        account: &percolator_prog::state::PortfolioAccountV16,
+        group: &MarketGroupV16,
+    ) -> Result<(), String> {
+        let mut seen = [false; ASSET_COUNT * 2];
+        for (slot, source) in account.source_domains.iter().copied().enumerate() {
+            if !source.is_occupied() {
+                if source.domain.get() != 0 || source.source_claim_market_id.get() != 0 {
+                    return Err(format!(
+                        "actor {actor} source slot {slot} retains a noncanonical empty tag"
+                    ));
+                }
+                continue;
+            }
+            let domain = source.domain.get() as usize;
+            if domain >= seen.len() {
+                return Err(format!(
+                    "actor {actor} source slot {slot} has out-of-world domain {domain}"
+                ));
+            }
+            if seen[domain] {
+                return Err(format!(
+                    "actor {actor} has duplicate source-credit domain {domain}"
+                ));
+            }
+            seen[domain] = true;
+            let asset = domain / 2;
+            if source.source_claim_market_id.get() != group.assets[asset].market_id {
+                return Err(format!(
+                    "actor {actor} source domain {domain} generation {} != current {}",
+                    source.source_claim_market_id.get(),
+                    group.assets[asset].market_id
+                ));
+            }
+            let classified_lien = source
+                .source_claim_counterparty_liened_num
+                .get()
+                .checked_add(source.source_claim_insurance_liened_num.get())
+                .ok_or("classified source-lien overflow")?;
+            if classified_lien != source.source_claim_liened_num.get() {
+                return Err(format!(
+                    "actor {actor} source domain {domain} double-counts or drops lien face"
+                ));
+            }
+            let total_locked = source
+                .source_claim_liened_num
+                .get()
+                .checked_add(source.source_claim_impaired_num.get())
+                .ok_or("source locked-claim overflow")?;
+            if total_locked > source.source_claim_bound_num.get() {
+                return Err(format!(
+                    "actor {actor} source domain {domain} locks more than its claim bound"
                 ));
             }
         }
@@ -2814,6 +3098,37 @@ impl ScenarioRunner {
         if before.foreign_market != self.env.market_data(true) {
             return Err("primary action mutated foreign market".into());
         }
+        Ok(())
+    }
+
+    fn assert_no_token_side_effects(&mut self, before: &Snapshot) -> Result<(), String> {
+        self.assert_token_frame(before, &[])
+    }
+
+    fn assert_token_frame(
+        &mut self,
+        before: &Snapshot,
+        mutable_tokens: &[Pubkey],
+    ) -> Result<(), String> {
+        let after = self.env.all_token_account_data();
+        if before.token_accounts.len() != after.len() {
+            return Err("tracked SPL account set changed during public instruction".into());
+        }
+        for ((before_key, before_data), (after_key, after_data)) in
+            before.token_accounts.iter().zip(after.iter())
+        {
+            if before_key != after_key {
+                return Err(
+                    "tracked SPL account ordering changed during public instruction".into(),
+                );
+            }
+            if !mutable_tokens.contains(before_key) && before_data != after_data {
+                return Err(format!(
+                    "public instruction mutated unauthorized SPL account {before_key}"
+                ));
+            }
+        }
+        self.coverage.token_frame_checks += 1;
         Ok(())
     }
 
@@ -2951,12 +3266,14 @@ fn run_liquidation_exit_probe(mut seed: [u8; 32]) -> Result<Coverage, String> {
     let adverse_mark = super::v16_svm::INITIAL_PRICE
         .checked_mul(2)
         .ok_or("liquidation mark overflow")?;
+    let before_mark = runner.snapshot();
     let mark = runner
         .env
         .push_auth_mark(0, mark_slot, adverse_mark)
         .map_err(|error| format!("liquidation probe mark rejected: {error}"))?;
     runner.coverage.mark_updates += 1;
     runner.coverage.observe_success(None, &mark);
+    runner.assert_no_token_side_effects(&before_mark)?;
     runner.drain_actor(0, runner.liveness_limit)?;
     if runner.coverage.liquidation_steps == 0 {
         return Err("adverse-price probe reached no public liquidation step".into());
@@ -2984,6 +3301,8 @@ fn run_liquidation_exit_probe(mut seed: [u8; 32]) -> Result<Coverage, String> {
     }
 
     let capital = runner.env.primary_portfolio(0).capital.get();
+    let before_withdrawal = runner.snapshot();
+    let vault_before = u128::from(runner.env.token_amount(runner.env.vault));
     let destination_before = runner
         .env
         .token_amount(runner.env.actors[0].destination_token);
@@ -2996,9 +3315,16 @@ fn run_liquidation_exit_probe(mut seed: [u8; 32]) -> Result<Coverage, String> {
     let destination_after = runner
         .env
         .token_amount(runner.env.actors[0].destination_token);
-    if destination_after as u128 != destination_before as u128 + capital {
+    let vault_after = u128::from(runner.env.token_amount(runner.env.vault));
+    if u128::from(destination_before).checked_add(capital) != Some(u128::from(destination_after))
+        || vault_after.checked_add(capital) != Some(vault_before)
+    {
         return Err("liquidated user's owner withdrawal was not credited exactly".into());
     }
+    runner.assert_token_frame(
+        &before_withdrawal,
+        &[runner.env.actors[0].destination_token, runner.env.vault],
+    )?;
     runner.assert_global_invariants()?;
     Ok(runner.coverage)
 }
@@ -15517,6 +15843,8 @@ fn action_strategy() -> impl Strategy<Value = Action> {
             ],
         )
             .prop_map(|(actor, hints)| Action::Crank { actor, hints }),
+        2 => (any::<u8>(), 1u16..=500)
+            .prop_map(|(actor, amount)| Action::Deposit { actor, amount }),
         2 => (any::<u8>(), 0u16..=500)
             .prop_map(|(actor, amount)| Action::Withdraw { actor, amount }),
         2 => (any::<u8>(), 1u8..=4)

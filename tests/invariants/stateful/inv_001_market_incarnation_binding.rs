@@ -6,6 +6,8 @@
 //! `v16_program_market_incarnation_operation_matrix_discovers_stale_intents` enumerates a
 //! finding-agnostic retained-operation registry over public market close/recreate. Direct impact
 //! regressions remain below.
+//! Secondary coverage: INV-014 for retained maintenance- and liquidation-fee policies whose
+//! authorization must not survive a market-generation change.
 //! `v16_program_market_generation_terminal_matrix_discovers_replacement_value_transfer` strengthens
 //! terminal routes beyond acceptance: a retained old-generation resolve or resolve policy
 //! crystallizes replacement-user PnL and transfers the exact victim loss to the winner. These

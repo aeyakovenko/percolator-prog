@@ -2,9 +2,19 @@
 //!
 //! Normative obligation: Every successful wrapper-plus-engine route preserves global invariants and authorized deltas.
 //!
-//! Evidence in this file (F over public I routes): `v16_program_stateful_public_interface_fuzz`. These tests exercise the deployed public
-//! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
-//! rollback, liveness, or compute outcomes appropriate to the invariant.
+//! Evidence in this file (F over public I routes): `v16_program_stateful_public_interface_fuzz`
+//! generates deposits, withdrawals, all four trade routes, retained transactions, oracle changes,
+//! cranks, fee synchronization, and hostile account substitution. After every public transition it
+//! independently rejects undecodable or hidden legs, duplicate same-asset legs, stale generation
+//! bindings, source-lien classification mismatches, stored-position/OI drift, and net-position
+//! drift. Successful non-token routes must preserve every tracked SPL account byte-for-byte;
+//! deposits and withdrawals may mutate only their canonical source/destination and vault, with
+//! exact authorized deltas. Every rejected route must roll back all tracked economic state.
+//!
+//! Secondary coverage: INV-024, INV-031, INV-034, INV-048, INV-049, and INV-080. The OI oracle
+//! compares account-leg sums only when no stale leg, pending obligation, or protocol-attributed
+//! liquidation position makes that comparison incomplete; live long/short OI equality is always
+//! checked.
 //!
 //! Guarantee boundary: a quarantined counterexample demonstrates public reachability; it does
 //! not certify the invariant on an unfixed pin. Certification requires the fixed-pin assertion

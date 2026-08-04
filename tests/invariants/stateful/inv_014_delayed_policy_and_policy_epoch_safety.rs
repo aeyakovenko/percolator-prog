@@ -8,6 +8,8 @@
 //! `v16_program_fee_consent_operation_matrix_discovers_unsigned_debits` varies public trade and
 //! activation routes and compares each affected signer's actual debit with the fee terms present
 //! when that signer created durable consent.
+//! Secondary coverage: INV-036 where those debits become an unauthorized fee destination or
+//! redirect value away from the signer-approved policy.
 //! `v16_program_backing_provider_consent_order_matrix_discovers_fee_redirection` varies fee-policy
 //! changes before and after a retained backing top-up, then traces the generated LP fee through
 //! provider/insurance ledgers and an operator SPL withdrawal.

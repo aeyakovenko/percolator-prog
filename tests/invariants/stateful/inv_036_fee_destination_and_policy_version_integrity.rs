@@ -9,6 +9,8 @@
 //! backing provider's earnings. Finding-specific impact regressions remain below. These tests exercise the deployed public
 //! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
 //! rollback, liveness, or compute outcomes appropriate to the invariant.
+//! Secondary coverage: INV-014 because the same route matrix varies the policy state retained by
+//! the signer and rejects economic terms introduced after consent.
 //!
 //! Guarantee boundary: a quarantined counterexample demonstrates public reachability; it does
 //! not certify the invariant on an unfixed pin. Certification requires the fixed-pin assertion

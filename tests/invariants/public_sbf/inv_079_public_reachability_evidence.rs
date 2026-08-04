@@ -142,6 +142,7 @@ fn v16_open_security_finding_benchmark_is_complete_and_non_overclaiming() {
     let mut independent = 0usize;
     let mut nonqualifying = 0usize;
     let mut benchmark_evidence = std::collections::BTreeMap::new();
+    let mut benchmark_invariants = std::collections::BTreeMap::new();
 
     for line in include_str!("../open_findings.tsv").lines() {
         if line.starts_with('#') || line.is_empty() {
@@ -172,6 +173,7 @@ fn v16_open_security_finding_benchmark_is_complete_and_non_overclaiming() {
             evidence => panic!("unknown evidence level {evidence}"),
         }
         benchmark_evidence.insert(pr, fields[4]);
+        benchmark_invariants.insert(pr, invariant);
         rows += 1;
     }
 
@@ -184,39 +186,153 @@ fn v16_open_security_finding_benchmark_is_complete_and_non_overclaiming() {
     );
     assert_eq!(nonqualifying, 19, "nonqualifying evidence roster changed");
 
-    let independent_sources = [
-        include_str!("../stateful/inv_001_market_incarnation_binding.rs"),
-        include_str!("../stateful/inv_002_asset_generation_binding.rs"),
-        include_str!("../stateful/inv_003_portfolio_incarnation_binding.rs"),
-        include_str!("../stateful/inv_004_position_episode_binding.rs"),
-        include_str!("../stateful/inv_005_authority_incarnation_binding.rs"),
-        include_str!("../stateful/inv_008_intent_uniqueness_and_bounded_replay.rs"),
-        include_str!("../stateful/inv_010_out_of_order_safety.rs"),
-        include_str!("../stateful/inv_014_delayed_policy_and_policy_epoch_safety.rs"),
-        include_str!("../stateful/inv_020_authenticated_clock_slot_and_oracle_provenance.rs"),
-        include_str!("../stateful/inv_028_source_domain_realizability_cap.rs"),
-        include_str!("../cu/inv_028_source_domain_realizability_cap.rs"),
-        include_str!("../stateful/inv_031_no_double_use_of_claim_backing_or_insurance_atoms.rs"),
-        include_str!("../stateful/inv_034_domain_and_instance_isolation.rs"),
-        include_str!("../stateful/inv_035_no_global_b_pool_residuals_remain_local.rs"),
-        include_str!("../stateful/inv_036_fee_destination_and_policy_version_integrity.rs"),
-        include_str!("../cu/inv_036_fee_destination_and_policy_version_integrity.rs"),
-        include_str!("../stateful/inv_038_rounding_and_ratio_conservation.rs"),
-        include_str!("../stateful/inv_039_pending_loss_obligation_durability.rs"),
-        include_str!("../stateful/inv_045_no_free_mark_movement.rs"),
-        include_str!("../stateful/inv_053_full_health_recertification_equivalence.rs"),
-        include_str!("../stateful/inv_061_deterministic_bounded_liquidation.rs"),
-        include_str!("../cu/inv_061_deterministic_bounded_liquidation.rs"),
-        include_str!("../stateful/inv_063_backing_expiry_normalization.rs"),
-        include_str!("../cu/inv_063_backing_expiry_normalization.rs"),
-        include_str!(
-            "../stateful/inv_067_terminal_payout_completeness_and_exact_once_settlement.rs"
+    let independent_sources: &[(u16, &[u16], &str)] = &[
+        (
+            1,
+            &[1, 14],
+            include_str!("../stateful/inv_001_market_incarnation_binding.rs"),
         ),
-        include_str!("../cu/inv_067_terminal_payout_completeness_and_exact_once_settlement.rs"),
-        include_str!("../cu/inv_071_crank_progress.rs"),
-        include_str!("../cu/inv_073_no_permanent_user_lock.rs"),
-        include_str!("../cu/inv_074_scope_locality.rs"),
-        include_str!("../cu/inv_077_bounded_work_and_maximum_shape_compute.rs"),
+        (
+            2,
+            &[2],
+            include_str!("../stateful/inv_002_asset_generation_binding.rs"),
+        ),
+        (
+            3,
+            &[3],
+            include_str!("../stateful/inv_003_portfolio_incarnation_binding.rs"),
+        ),
+        (
+            4,
+            &[4],
+            include_str!("../stateful/inv_004_position_episode_binding.rs"),
+        ),
+        (
+            5,
+            &[5],
+            include_str!("../stateful/inv_005_authority_incarnation_binding.rs"),
+        ),
+        (
+            8,
+            &[8],
+            include_str!("../stateful/inv_008_intent_uniqueness_and_bounded_replay.rs"),
+        ),
+        (
+            10,
+            &[10],
+            include_str!("../stateful/inv_010_out_of_order_safety.rs"),
+        ),
+        (
+            14,
+            &[14, 36],
+            include_str!("../stateful/inv_014_delayed_policy_and_policy_epoch_safety.rs"),
+        ),
+        (
+            20,
+            &[20],
+            include_str!("../stateful/inv_020_authenticated_clock_slot_and_oracle_provenance.rs"),
+        ),
+        (
+            28,
+            &[28],
+            include_str!("../stateful/inv_028_source_domain_realizability_cap.rs"),
+        ),
+        (
+            28,
+            &[28],
+            include_str!("../cu/inv_028_source_domain_realizability_cap.rs"),
+        ),
+        (
+            31,
+            &[31],
+            include_str!(
+                "../stateful/inv_031_no_double_use_of_claim_backing_or_insurance_atoms.rs"
+            ),
+        ),
+        (
+            34,
+            &[34],
+            include_str!("../stateful/inv_034_domain_and_instance_isolation.rs"),
+        ),
+        (
+            35,
+            &[35],
+            include_str!("../stateful/inv_035_no_global_b_pool_residuals_remain_local.rs"),
+        ),
+        (
+            36,
+            &[36, 14],
+            include_str!("../stateful/inv_036_fee_destination_and_policy_version_integrity.rs"),
+        ),
+        (
+            36,
+            &[36],
+            include_str!("../cu/inv_036_fee_destination_and_policy_version_integrity.rs"),
+        ),
+        (
+            38,
+            &[38],
+            include_str!("../stateful/inv_038_rounding_and_ratio_conservation.rs"),
+        ),
+        (
+            39,
+            &[39],
+            include_str!("../stateful/inv_039_pending_loss_obligation_durability.rs"),
+        ),
+        (
+            45,
+            &[45],
+            include_str!("../stateful/inv_045_no_free_mark_movement.rs"),
+        ),
+        (
+            53,
+            &[53],
+            include_str!("../stateful/inv_053_full_health_recertification_equivalence.rs"),
+        ),
+        (
+            61,
+            &[61],
+            include_str!("../stateful/inv_061_deterministic_bounded_liquidation.rs"),
+        ),
+        (
+            61,
+            &[61],
+            include_str!("../cu/inv_061_deterministic_bounded_liquidation.rs"),
+        ),
+        (
+            63,
+            &[63],
+            include_str!("../stateful/inv_063_backing_expiry_normalization.rs"),
+        ),
+        (
+            63,
+            &[63],
+            include_str!("../cu/inv_063_backing_expiry_normalization.rs"),
+        ),
+        (
+            67,
+            &[67],
+            include_str!(
+                "../stateful/inv_067_terminal_payout_completeness_and_exact_once_settlement.rs"
+            ),
+        ),
+        (
+            67,
+            &[67],
+            include_str!("../cu/inv_067_terminal_payout_completeness_and_exact_once_settlement.rs"),
+        ),
+        (71, &[71], include_str!("../cu/inv_071_crank_progress.rs")),
+        (
+            73,
+            &[73],
+            include_str!("../cu/inv_073_no_permanent_user_lock.rs"),
+        ),
+        (74, &[74], include_str!("../cu/inv_074_scope_locality.rs")),
+        (
+            77,
+            &[77],
+            include_str!("../cu/inv_077_bounded_work_and_maximum_shape_compute.rs"),
+        ),
     ];
     let mut fingerprints = std::collections::BTreeSet::new();
     let mut mapped_prs = std::collections::BTreeSet::new();
@@ -239,11 +355,22 @@ fn v16_open_security_finding_benchmark_is_complete_and_non_overclaiming() {
             fields[1]
         );
         assert!(
-            independent_sources
-                .iter()
-                .any(|source| source.contains(&format!("fn {}", fields[2]))),
-            "discovery generator is not an executable invariant-owned test: {}",
-            fields[2]
+            independent_sources.iter().any(|(owner, covered, source)| {
+                covered.contains(&invariant)
+                    && source_defines_test(source, fields[2])
+                    && (*owner == invariant
+                        || source.contains(&format!("Secondary coverage: INV-{invariant:03}")))
+            }),
+            "discovery generator is not an executable INV-{invariant:03}-owned or explicitly \
+             secondary test: {}",
+            fields[2],
+        );
+        assert!(
+            include_str!("../README.md").lines().any(|line| {
+                line.starts_with(&format!("| INV-{invariant:03} |"))
+                    && line.contains("| Independent")
+            }),
+            "INV-{invariant:03} has discovery metadata but its coverage row is not Independent"
         );
         assert!(
             matches!(
@@ -320,6 +447,11 @@ fn v16_open_security_finding_benchmark_is_complete_and_non_overclaiming() {
                 Some(&"independent-discovery"),
                 "discovery mapping must point to a promoted benchmark row"
             );
+            assert_eq!(
+                benchmark_invariants.get(&pr),
+                Some(&invariant),
+                "discovery and benchmark must agree on PR {pr}'s primary invariant"
+            );
             mapped_prs.insert(pr);
         }
     }
@@ -392,6 +524,31 @@ fn v16_open_security_finding_benchmark_is_complete_and_non_overclaiming() {
         classified_prs, benchmark_nonqualifying,
         "every nonqualifying benchmark row needs machine-checked evidence"
     );
+}
+
+fn source_defines_test(source: &str, function: &str) -> bool {
+    let expected = format!("fn {function}");
+    let mut test_attribute = false;
+
+    for line in source.lines() {
+        let line = line.trim();
+        if line == "#[test]" {
+            test_attribute = true;
+        } else if line.starts_with("fn ") {
+            if test_attribute
+                && line
+                    .strip_prefix(&expected)
+                    .is_some_and(|tail| tail.trim_start().starts_with('('))
+            {
+                return true;
+            }
+            test_attribute = false;
+        } else if test_attribute && !line.is_empty() && !line.starts_with("#") {
+            test_attribute = false;
+        }
+    }
+
+    false
 }
 
 fn invariant_ids(markdown: &str, prefix: &str) -> Vec<u16> {

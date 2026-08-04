@@ -23,7 +23,7 @@ verification methods are in [`../../INVARIANTS.md`](../../INVARIANTS.md).
 | Suite | Tests | Evidence |
 | --- | ---: | --- |
 | `public_sbf/` | 74 | Deterministic public SBF/LiteSVM counterexamples, regressions, and manifest checks |
-| `stateful/` | 111 | Proptest-generated public routes, including forty-three finding-agnostic discovery properties |
+| `stateful/` | 112 | Proptest-generated public routes, including generalized active-leg/currentness and authenticated-expiry route matrices |
 | `cu/` | 102 | Positive public-route, metamorphic, rollback, liveness, and max-shape CU tests |
 | `kani/` | 40 | Symbolic wrapper arithmetic, matcher-binding, and strict-decoder proofs |
 
@@ -38,6 +38,8 @@ Status meanings:
 - **Direct** - finding-specific deterministic plus generated public-route evidence.
 - **Independent** - a finding-agnostic public-action generator reached a normative invariant
   failure; finding-specific tests separately confirm concrete economic impact.
+- **F** - a finding-agnostic stateful public-action generator enforces the invariant after each
+  transition, without claiming that it independently rediscovered a benchmark finding.
 - **SVM/CU** - positive whole-route enforcement, liveness, rollback, metamorphic, or CU evidence.
 - **P** - an invariant-owned Kani proof over deployed wrapper code; whole-route composition may
   still be outstanding.
@@ -73,7 +75,7 @@ charter.
 | INV-021 | Gap | - |
 | INV-022 | P | `kani/inv_022_instruction_decoding_and_schema_upgrade_safety.rs` |
 | INV-023 | Gap | - |
-| INV-024 | Gap | - |
+| INV-024 | F + Partial | `stateful/inv_081_success_state_validity_over_complete_public_routes.rs` (external SPL frames and exact deposit/withdraw flow; full internal attribution remains open) |
 | INV-025 | Gap | - |
 | INV-026 | Gap | - |
 | INV-027 | SVM/CU | `cu/inv_027_protected_principal_seniority.rs` |
@@ -85,7 +87,7 @@ charter.
 | INV-033 | Gap | - |
 | INV-034 | Independent + Direct + SVM/CU | `public_sbf/inv_034_domain_and_instance_isolation.rs`, `stateful/inv_034_domain_and_instance_isolation.rs`, `cu/inv_034_domain_and_instance_isolation.rs` |
 | INV-035 | Independent + Direct | `public_sbf/inv_035_no_global_b_pool_residuals_remain_local.rs`, `stateful/inv_035_no_global_b_pool_residuals_remain_local.rs` |
-| INV-036 | Direct + SVM/CU | `public_sbf/inv_036_fee_destination_and_policy_version_integrity.rs`, `stateful/inv_036_fee_destination_and_policy_version_integrity.rs`, `cu/inv_036_fee_destination_and_policy_version_integrity.rs` |
+| INV-036 | Independent + Direct + SVM/CU | `public_sbf/inv_036_fee_destination_and_policy_version_integrity.rs`, `stateful/inv_036_fee_destination_and_policy_version_integrity.rs`, `cu/inv_036_fee_destination_and_policy_version_integrity.rs` |
 | INV-037 | Gap | - |
 | INV-038 | Independent + Direct | `public_sbf/inv_038_rounding_and_ratio_conservation.rs`, `stateful/inv_038_rounding_and_ratio_conservation.rs` |
 | INV-039 | Independent + Direct | `public_sbf/inv_039_pending_loss_obligation_durability.rs`, `stateful/inv_039_pending_loss_obligation_durability.rs` |
@@ -97,8 +99,8 @@ charter.
 | INV-045 | Independent + Direct + P + SVM/CU | `public_sbf/inv_045_no_free_mark_movement.rs`, `stateful/inv_045_no_free_mark_movement.rs`, `kani/inv_045_no_free_mark_movement.rs`, `cu/inv_045_no_free_mark_movement.rs` |
 | INV-046 | SVM/CU | `cu/inv_046_trade_availability_without_unsafe_mark_admission.rs` |
 | INV-047 | SVM/CU | `cu/inv_047_equivalent_route_semantics.rs` |
-| INV-048 | Gap | - |
-| INV-049 | Gap | - |
+| INV-048 | F | `stateful/inv_081_success_state_validity_over_complete_public_routes.rs` |
+| INV-049 | F | `stateful/inv_081_success_state_validity_over_complete_public_routes.rs` |
 | INV-050 | SVM/CU | `cu/inv_050_cross_zero_decomposition.rs` |
 | INV-051 | Gap | - |
 | INV-052 | Gap | - |
@@ -120,9 +122,9 @@ charter.
 | INV-068 | Gap | - |
 | INV-069 | Gap | - |
 | INV-070 | Gap | - |
-| INV-071 | SVM/CU | `cu/inv_071_crank_progress.rs` |
+| INV-071 | Independent + SVM/CU | `cu/inv_071_crank_progress.rs` |
 | INV-072 | Gap | - |
-| INV-073 | SVM/CU | `cu/inv_073_no_permanent_user_lock.rs` |
+| INV-073 | Independent + SVM/CU | `cu/inv_073_no_permanent_user_lock.rs` |
 | INV-074 | Independent + SVM/CU | `cu/inv_074_scope_locality.rs` |
 | INV-075 | Gap | - |
 | INV-076 | Gap | - |
@@ -130,7 +132,7 @@ charter.
 | INV-078 | SVM/CU | `cu/inv_078_permissionless_recovery_coverage.rs` |
 | INV-079 | Direct | `public_sbf/inv_079_public_reachability_evidence.rs` |
 | INV-080 | SVM/CU | `cu/inv_080_error_propagation_and_exact_rollback.rs` |
-| INV-081 | Direct | `public_sbf/inv_081_success_state_validity_over_complete_public_routes.rs`, `stateful/inv_081_success_state_validity_over_complete_public_routes.rs` |
+| INV-081 | F + Direct | `public_sbf/inv_081_success_state_validity_over_complete_public_routes.rs`, `stateful/inv_081_success_state_validity_over_complete_public_routes.rs` |
 | INV-082 | Gap | - |
 | INV-083 | Gap | - |
 | INV-084 | Gap | - |
@@ -162,6 +164,13 @@ Every benchmark increment must:
 6. require exact SPL/lamport loss or a persistent funded-state exit lock;
 7. reject “CU abort” as DoS unless every required user-progress route is unexecutable;
 8. remain green while honestly reporting incomplete discovery coverage.
+
+Every undiscovered qualifying trace is a test-suite gap. It must be classified as either a missing
+normative oracle or missing public-sequence coverage (route, lifecycle mode, ordering, boundary,
+account shape, or environmental variant). An `independent-discovery` row is accepted only when its
+primary invariant matches the benchmark, its generator is an actual `#[test]` in that invariant's
+module or an explicitly documented secondary owner, and the coverage index reports the same
+invariant as Independent. Metadata alone cannot promote a finding.
 
 `nonqualifying_findings.tsv` is the equally strict negative roster. It may remove an open claim
 from the gap count only when an invariant-owned public SBF test proves the pinned program is safe,
