@@ -10575,11 +10575,6 @@ fn v16_attack_pending_selected_mark_requires_observation() {
     );
 }
 
-// Liquidation must not omit funding on a later active leg merely because that
-// leg's capped effective-price movement rounds to zero. An order-insensitive
-// stale refresh may land first, but the irreversible liquidation must wait for
-// every active leg whose authenticated accrual would change.
-
 #[test]
 fn v16_bpf_no_cranker_liquidation_rejects_invalid_final_market_shape() {
     let mut env = V16CuEnv::new();
