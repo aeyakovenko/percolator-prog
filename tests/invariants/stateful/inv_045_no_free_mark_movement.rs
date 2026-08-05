@@ -22,16 +22,16 @@
 //! `v16_program_mark_mode_route_matrix_discovers_profitable_liquidation_moves` crosses EWMA and
 //! hybrid-after-hours modes with single and batch reported-price routes, then requires total
 //! movement cost to cover any liquidation reward and coalition extraction.
-//! `v16_program_matcher_route_matrix_discovers_one_sided_mark_fees` crosses the same modes with
+//! `v16_program_matcher_route_matrix_rejects_one_sided_mark_subsidy` crosses the same modes with
 //! single and batch CPI matcher exits and requires every mark-moving fee to be bilaterally funded;
 //! it measures independent victim loss, fee-counterparty loss, insurance credit, and external
 //! coalition profit. Direct impact tests remain below. These tests exercise the deployed public
 //! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
 //! rollback, liveness, or compute outcomes appropriate to the invariant.
 //!
-//! Guarantee boundary: the pending-mark fee-order matrix is fixed-pin certification over generated
-//! seeds. The other named generators still expose quarantined counterexamples and do not certify
-//! their sub-routes until the corresponding fixes are integrated.
+//! Guarantee boundary: the pending-mark fee-order and bilateral-fee matrices are fixed-pin
+//! certification over generated seeds. The other named generators still expose quarantined
+//! counterexamples and do not certify their sub-routes until the corresponding fixes are integrated.
 
 use super::*;
 
@@ -48,15 +48,14 @@ proptest! {
     })]
 
     #[test]
-    fn v16_program_matcher_route_matrix_discovers_one_sided_mark_fees(
+    fn v16_program_matcher_route_matrix_rejects_one_sided_mark_subsidy(
         seed in any::<[u8; 32]>()
     ) {
         let discoveries = discover_bilateral_mark_fee_violations(seed)
             .map_err(TestCaseError::fail)?;
         prop_assert_eq!(discoveries.len(), TradeDrivenMarkMode::ALL.len() * 2);
-        let violations: Vec<_> = discoveries
+        let covered: Vec<_> = discoveries
             .iter()
-            .filter(|discovery| discovery.is_violation())
             .map(|discovery| (discovery.mode, discovery.route))
             .collect();
         let expected: Vec<_> = TradeDrivenMarkMode::ALL
@@ -66,12 +65,23 @@ proptest! {
                     .map(|route| (mode, route))
             })
             .collect();
-        eprintln!("independent bilateral mark-fee discoveries: {violations:?}");
+        eprintln!("independent bilateral mark-fee coverage: {covered:?}");
         prop_assert_eq!(
-            violations,
+            covered,
             expected,
-            "vulnerable-pin bilateral mark-fee corpus changed"
+            "bilateral mark-fee route corpus changed"
         );
+        for discovery in discoveries {
+            prop_assert!(!discovery.is_violation(), "{discovery:?}");
+            prop_assert!(discovery.queued_mark >= discovery.setup_mark);
+            prop_assert_eq!(discovery.coalition_excess, 0);
+            if discovery.queued_mark == discovery.setup_mark {
+                prop_assert_eq!(discovery.victim_loss, 0);
+            }
+            prop_assert!(discovery.extracted_tokens <= discovery.coalition_equity_before);
+            prop_assert!(discovery.fee_counterparty_loss > 0);
+            prop_assert!(discovery.insurance_gain > 0);
+        }
     }
 }
 
@@ -357,15 +367,19 @@ proptest! {
     fn v16_program_pr369_bilateral_fee_support_fuzz(
         (seed, mode, route) in bilateral_fee_support_strategy()
     ) {
-        let result = reproduce_bilateral_fee_support(seed, mode, route);
-        prop_assert!(
-            result.is_ok(),
-            "PR 369 {:?} {:?} no longer reproduces for seed {:?}: {}",
-            mode,
-            route,
-            seed,
-            result.unwrap_err()
-        );
+        let reproduction = reproduce_bilateral_fee_support(seed, mode, route)
+            .map_err(TestCaseError::fail)?;
+        prop_assert_eq!(reproduction.mode, mode);
+        prop_assert_eq!(reproduction.route, route);
+        prop_assert_eq!(reproduction.coalition_excess, 0);
+        prop_assert!(reproduction.extracted_tokens <= reproduction.coalition_equity_before);
+        prop_assert!(reproduction.queued_mark >= reproduction.setup_mark);
+        if reproduction.queued_mark == reproduction.setup_mark {
+            prop_assert_eq!(reproduction.victim_loss, 0);
+        }
+        prop_assert!(reproduction.fee_lp_loss > 0);
+        prop_assert!(reproduction.insurance_gain > 0);
+        prop_assert!(reproduction.max_cu < crate::support::v16_svm::TX_CU_LIMIT);
     }
 
     #[test]

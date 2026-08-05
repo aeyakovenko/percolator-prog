@@ -613,7 +613,8 @@ pub struct BilateralFeeSupportReproduction {
     pub route: TradeRoute,
     pub setup_mark: u64,
     pub queued_mark: u64,
-    pub attacker_profit: u128,
+    pub coalition_equity_before: u128,
+    pub coalition_excess: u128,
     pub victim_loss: u128,
     pub fee_lp_loss: u128,
     pub insurance_gain: u128,
@@ -5574,25 +5575,16 @@ pub fn reproduce_bilateral_fee_support(
         .ok_or("PR 369 extracted SPL overflow")?;
     let attacker_before =
         u128::try_from(attacker_before).map_err(|_| "PR 369 attacker began insolvent")?;
-    let attacker_profit = extracted_tokens
-        .checked_sub(attacker_before)
-        .ok_or_else(|| {
-            format!(
-                "PR 369 one-sided fee no longer yields extraction: before={attacker_before}, \
-                 after={extracted_tokens}, internal_after={attacker_after}"
-            )
-        })?;
-    if attacker_profit == 0
-        || victim_loss == 0
-        || fee_lp_loss == 0
+    let coalition_excess = extracted_tokens.saturating_sub(attacker_before);
+    if fee_lp_loss == 0
         || insurance_gain == 0
         || max_cu >= TX_CU_LIMIT
         || env.token_supply_observed() != supply_before
     {
         return Err(format!(
-            "PR 369 public extraction conditions failed: profit={attacker_profit}, \
+            "PR 369 public safety fixture failed: excess={coalition_excess}, \
              victim={victim_loss}, fee_lp={fee_lp_loss}, insurance={insurance_gain}, \
-             max_cu={max_cu}, supply={}/{}",
+             internal_after={attacker_after}, max_cu={max_cu}, supply={}/{}",
             env.token_supply_observed(),
             supply_before
         ));
@@ -5603,7 +5595,8 @@ pub fn reproduce_bilateral_fee_support(
         route,
         setup_mark,
         queued_mark,
-        attacker_profit,
+        coalition_equity_before: attacker_before,
+        coalition_excess,
         victim_loss,
         fee_lp_loss,
         insurance_gain,

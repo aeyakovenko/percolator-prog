@@ -97,3 +97,39 @@ fn kani_v16_collected_base_fee_cannot_fund_mark_movement() {
     );
     assert_eq!(mark, old_mark);
 }
+
+#[kani::proof]
+fn kani_v16_one_sided_externality_fee_cannot_fund_mark_movement() {
+    let old_mark = kani::any::<u64>();
+    let quoted_mark = kani::any::<u64>();
+    let base_fee_per_side = kani::any::<u32>() as u128;
+    let paying_side_externality = kani::any::<u32>() as u128;
+    let mark_externality_notional = kani::any::<u32>() as u128 + 1;
+    kani::assume(old_mark > 0 && quoted_mark > 0);
+
+    let mark_a_underfunded = policy_v16::collected_fee_supported_mark(
+        old_mark,
+        quoted_mark,
+        base_fee_per_side * 2,
+        mark_externality_notional,
+        base_fee_per_side,
+        base_fee_per_side + paying_side_externality,
+    )
+    .unwrap();
+    let mark_b_underfunded = policy_v16::collected_fee_supported_mark(
+        old_mark,
+        quoted_mark,
+        base_fee_per_side * 2,
+        mark_externality_notional,
+        base_fee_per_side + paying_side_externality,
+        base_fee_per_side,
+    )
+    .unwrap();
+
+    kani::cover!(
+        quoted_mark != old_mark && paying_side_externality > 0,
+        "one counterparty pays an externality fee against a moving quote"
+    );
+    assert_eq!(mark_a_underfunded, old_mark);
+    assert_eq!(mark_b_underfunded, old_mark);
+}

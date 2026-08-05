@@ -918,7 +918,8 @@ pub struct BilateralMarkFeeDiscovery {
     pub route: DiscoveryTradeRoute,
     pub setup_mark: u64,
     pub queued_mark: u64,
-    pub coalition_profit: u128,
+    pub coalition_equity_before: u128,
+    pub coalition_excess: u128,
     pub victim_loss: u128,
     pub fee_counterparty_loss: u128,
     pub insurance_gain: u128,
@@ -1508,8 +1509,8 @@ impl CompositeRoundingDiscovery {
 
 impl BilateralMarkFeeDiscovery {
     pub fn is_violation(&self) -> bool {
-        self.queued_mark >= self.setup_mark
-            && self.coalition_profit != 0
+        self.queued_mark > self.setup_mark
+            && self.coalition_excess != 0
             && self.victim_loss != 0
             && self.fee_counterparty_loss != 0
             && self.insurance_gain != 0
@@ -6516,9 +6517,7 @@ fn discover_one_bilateral_mark_fee_violation(
         .ok_or_else(|| "bilateral extracted SPL overflow".to_string())?;
     let coalition_equity_before = u128::try_from(coalition_equity_before)
         .map_err(|_| "coalition began insolvent".to_string())?;
-    let coalition_profit = extracted_tokens
-        .checked_sub(coalition_equity_before)
-        .ok_or_else(|| "bilateral coalition did not extract above pre-equity".to_string())?;
+    let coalition_excess = extracted_tokens.saturating_sub(coalition_equity_before);
     if env.token_supply_observed() != supply_before {
         return Err("bilateral mark-fee world changed SPL supply".into());
     }
@@ -6527,7 +6526,8 @@ fn discover_one_bilateral_mark_fee_violation(
         route,
         setup_mark,
         queued_mark,
-        coalition_profit,
+        coalition_equity_before,
+        coalition_excess,
         victim_loss,
         fee_counterparty_loss,
         insurance_gain,

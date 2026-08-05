@@ -2,13 +2,13 @@
 //!
 //! Normative obligation: Every mark movement remains elapsed-time bounded and economically paid across every trade route.
 //!
-//! Evidence in this file (I plus invariant-specific F/M assertions): `v16_program_pr260_pending_ewma_inheritance_extracts_on_every_route`, `v16_program_pr282_pending_ewma_target_override_extracts_on_every_route`, `v16_program_pr264_pr265_pr332_pr333_unstaged_targets_open_stale_cpi_window`, `v16_program_pr356_pending_mark_fee_sync_rejects_then_preserves_terminal_value`, `v16_program_pr369_one_sided_cpi_fee_subsidizes_attacker_mark_gain`, `v16_program_pr225_reclaimed_ewma_fee_extracts_on_every_route`, `v16_program_pr280_trade_driven_liquidation_reward_is_extractable`. These tests exercise the deployed public
+//! Evidence in this file (I plus invariant-specific F/M assertions): `v16_program_pr260_pending_ewma_inheritance_extracts_on_every_route`, `v16_program_pr282_pending_ewma_target_override_extracts_on_every_route`, `v16_program_pr264_pr265_pr332_pr333_unstaged_targets_open_stale_cpi_window`, `v16_program_pr356_pending_mark_fee_sync_rejects_then_preserves_terminal_value`, `v16_program_pr369_one_sided_cpi_fee_cannot_subsidize_mark_gain`, `v16_program_pr225_reclaimed_ewma_fee_extracts_on_every_route`, `v16_program_pr280_trade_driven_liquidation_reward_is_extractable`. These tests exercise the deployed public
 //! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
 //! rollback, liveness, or compute outcomes appropriate to the invariant.
 //!
-//! Guarantee boundary: PR356 is a fixed-pin regression covering authenticated mark/fee ordering,
-//! exact rejection rollback, post-commit retry, and terminal payout equivalence. The other named
-//! exploit adapters remain quarantined counterexamples and do not certify their sub-routes.
+//! Guarantee boundary: PR356 and PR369 are fixed-pin regressions covering authenticated mark/fee
+//! ordering and bilateral CPI fee support. The other named exploit adapters remain quarantined
+//! counterexamples and do not certify their sub-routes.
 
 use super::*;
 
@@ -97,23 +97,25 @@ fn v16_program_pr356_pending_mark_fee_sync_rejects_then_preserves_terminal_value
 }
 
 #[test]
-fn v16_program_pr369_one_sided_cpi_fee_subsidizes_attacker_mark_gain() {
+fn v16_program_pr369_one_sided_cpi_fee_cannot_subsidize_mark_gain() {
     for mode in [BilateralFeeMode::Ewma, BilateralFeeMode::HybridAfterHours] {
         for route in [TradeRoute::Cpi, TradeRoute::BatchCpi] {
             let reproduction = reproduce_bilateral_fee_support([0x69; 32], mode, route)
                 .unwrap_or_else(|error| {
-                    panic!("PR 369 {mode:?} {route:?} no longer reproduces: {error}")
+                    panic!("PR 369 {mode:?} {route:?} fixed route failed: {error}")
                 });
             assert_eq!(reproduction.blocker, KnownBlocker::BilateralFeeSupport);
             assert_eq!(reproduction.mode, mode);
             assert_eq!(reproduction.route, route);
-            let expected = match mode {
-                BilateralFeeMode::Ewma => (1_988_158, 781_589, 881_590),
-                BilateralFeeMode::HybridAfterHours => (2_090_398, 903_989, 903_990),
-            };
-            assert_eq!(reproduction.queued_mark, expected.0);
-            assert_eq!(reproduction.attacker_profit, expected.1);
-            assert_eq!(reproduction.victim_loss, expected.2);
+            assert!(reproduction.queued_mark >= reproduction.setup_mark);
+            assert_eq!(reproduction.coalition_excess, 0);
+            assert!(
+                reproduction.extracted_tokens <= reproduction.coalition_equity_before,
+                "one-sided fee support extracted coalition value"
+            );
+            if reproduction.queued_mark == reproduction.setup_mark {
+                assert_eq!(reproduction.victim_loss, 0);
+            }
             assert!(reproduction.fee_lp_loss > 0);
             assert!(reproduction.insurance_gain > 0);
             assert!(reproduction.max_cu < 1_400_000);

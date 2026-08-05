@@ -69,7 +69,7 @@ INV-045	pending-target-override/all-trade-routes	v16_program_trade_route_matrix_
 INV-045	pending-mark/fee-sync-order	v16_program_pending_mark_fee_ordering_rejects_and_preserves_terminal_value	fee-reward-cannot-outrank-uncommitted-adverse-value	356
 INV-045	mark-movement/reserve-withdrawal	v16_program_trade_route_matrix_discovers_withdrawable_mark_reserve	mark-movement-reserve-must-remain-encumbered	225
 INV-045	trade-driven-mark/liquidation-economics	v16_program_mark_mode_route_matrix_discovers_profitable_liquidation_moves	mark-movement-cost-must-cover-liquidation-extraction	280
-INV-045	mark-movement/bilateral-fee-support	v16_program_matcher_route_matrix_discovers_one_sided_mark_fees	mark-movement-fees-must-be-bilaterally-supported	369
+INV-045	mark-movement/bilateral-fee-support	v16_program_matcher_route_matrix_rejects_one_sided_mark_subsidy	mark-movement-fees-must-be-bilaterally-supported	369
 INV-038	composite-rounding/large-factorization	v16_program_composite_scale_matrix_discovers_route_rounding_value	composite-price-is-rounded-once-after-exact-composition	329
 INV-038	composite-rounding/micro-factorization	v16_program_composite_scale_matrix_discovers_route_rounding_value	composite-price-is-rounded-once-after-exact-composition	381
 INV-038	observation-omission/rounded-funding	v16_program_selected_observation_omission_rejects_and_preserves_rounded_transfer	omitted-observation-cannot-erase-balanced-rounded-transfer	253
