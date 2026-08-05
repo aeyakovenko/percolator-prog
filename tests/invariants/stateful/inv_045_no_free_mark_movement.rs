@@ -13,9 +13,10 @@
 //! extraction. `v16_program_trade_route_matrix_discovers_pending_target_override` compares an
 //! honest pending rebound with the same world plus a later round trip. It rejects any cheap target
 //! rewrite that displaces more independent payout than it costs.
-//! `v16_program_pending_mark_fee_ordering_discovers_reward_diversion` permutes fee synchronization
-//! against mark commitment and requires reward accounting to be independent of pending adverse
-//! value. `v16_program_trade_route_matrix_discovers_withdrawable_mark_reserve` creates a paid mark
+//! `v16_program_pending_mark_fee_ordering_rejects_and_preserves_terminal_value` permutes fee
+//! synchronization against mark commitment. It requires the pending-order attempt to reject with
+//! exact rollback, then verifies the post-commit retry and terminal payouts equal the canonical
+//! ordering. `v16_program_trade_route_matrix_discovers_withdrawable_mark_reserve` creates a paid mark
 //! move, withdraws its reserve while unrelated exposure depends on it, and verifies the resulting
 //! victim loss and coalition SPL gain across all trade routes.
 //! `v16_program_mark_mode_route_matrix_discovers_profitable_liquidation_moves` crosses EWMA and
@@ -28,9 +29,9 @@
 //! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
 //! rollback, liveness, or compute outcomes appropriate to the invariant.
 //!
-//! Guarantee boundary: a quarantined counterexample demonstrates public reachability; it does
-//! not certify the invariant on an unfixed pin. Certification requires the fixed-pin assertion
-//! plus every additional verification method required by the charter.
+//! Guarantee boundary: the pending-mark fee-order matrix is fixed-pin certification over generated
+//! seeds. The other named generators still expose quarantined counterexamples and do not certify
+//! their sub-routes until the corresponding fixes are integrated.
 
 use super::*;
 
@@ -199,15 +200,15 @@ proptest! {
     })]
 
     #[test]
-    fn v16_program_pending_mark_fee_ordering_discovers_reward_diversion(
+    fn v16_program_pending_mark_fee_ordering_rejects_and_preserves_terminal_value(
         seed in any::<[u8; 32]>()
     ) {
         let discovery = discover_pending_mark_fee_ordering(seed)
             .map_err(TestCaseError::fail)?;
-        eprintln!("independent pending-mark fee-order discovery: {discovery:?}");
+        eprintln!("pending-mark fee-order verification: {discovery:?}");
         prop_assert!(
-            discovery.is_violation(),
-            "vulnerable-pin pending-mark fee ordering changed: {:?}",
+            discovery.rejects_pending_sync_and_preserves_terminal_value(),
+            "pending-mark fee ordering did not reject and preserve value: {:?}",
             discovery
         );
     }
@@ -340,13 +341,13 @@ proptest! {
     }
 
     #[test]
-    fn v16_program_pr356_pending_mark_fee_reward_fuzz(
+    fn v16_program_pr356_pending_mark_fee_guard_fuzz(
         seed in pending_mark_fee_reward_seed_strategy()
     ) {
         let result = reproduce_pending_mark_fee_reward(seed);
         prop_assert!(
             result.is_ok(),
-            "PR 356 no longer reproduces for seed {:?}: {}",
+            "PR 356 fixed route failed for seed {:?}: {}",
             seed,
             result.unwrap_err()
         );

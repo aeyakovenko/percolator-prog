@@ -556,12 +556,13 @@ pub struct TargetStagingReproduction {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PendingMarkFeeRewardReproduction {
     pub blocker: KnownBlocker,
+    pub pending_sync_rejected_lock: bool,
+    pub pending_sync_exact_rollback: bool,
     pub control_reward: u64,
-    pub attack_reward: u64,
+    pub reordered_reward: u64,
     pub control_winner_payout: u64,
-    pub attack_winner_payout: u64,
+    pub reordered_winner_payout: u64,
     pub victim_payout: u64,
-    pub diverted_value: u64,
     pub extracted_reward: u64,
 }
 
@@ -4783,40 +4784,36 @@ pub fn reproduce_pending_mark_fee_reward(
 ) -> Result<PendingMarkFeeRewardReproduction, String> {
     seed[0] ^= 0x56;
     let control = run_pending_mark_fee_reward_world(seed, false)?;
-    let attack = run_pending_mark_fee_reward_world(seed, true)?;
-    let diverted_value = attack
-        .reward
-        .checked_sub(control.reward)
-        .ok_or("PR 356 fee-first ordering did not increase cranker reward")?;
-    let winner_loss = control
-        .winner_payout
-        .checked_sub(attack.winner_payout)
-        .ok_or("PR 356 fee-first ordering increased winner payout")?;
-    if diverted_value == 0
-        || diverted_value != winner_loss
-        || control.victim_payout != attack.victim_payout
-        || control.reward + control.victim_payout + control.winner_payout
-            != attack.reward + attack.victim_payout + attack.winner_payout
+    let reordered = run_pending_mark_fee_reward_world(seed, true)?;
+    if !reordered.pending_sync_rejected_lock
+        || !reordered.pending_sync_exact_rollback
+        || control.reward != reordered.reward
+        || control.victim_payout != reordered.victim_payout
+        || control.winner_payout != reordered.winner_payout
+        || control.extracted_reward != reordered.extracted_reward
     {
         return Err(format!(
-            "PR 356 fee ordering no longer diverts terminal value: control={control:?}, \
-             attack={attack:?}"
+            "PR 356 fixed route did not reject and converge after mark commitment: \
+             control={control:?}, reordered={reordered:?}"
         ));
     }
     Ok(PendingMarkFeeRewardReproduction {
         blocker: KnownBlocker::PendingMarkFeeReward,
+        pending_sync_rejected_lock: reordered.pending_sync_rejected_lock,
+        pending_sync_exact_rollback: reordered.pending_sync_exact_rollback,
         control_reward: control.reward,
-        attack_reward: attack.reward,
+        reordered_reward: reordered.reward,
         control_winner_payout: control.winner_payout,
-        attack_winner_payout: attack.winner_payout,
-        victim_payout: attack.victim_payout,
-        diverted_value,
-        extracted_reward: attack.extracted_reward,
+        reordered_winner_payout: reordered.winner_payout,
+        victim_payout: reordered.victim_payout,
+        extracted_reward: reordered.extracted_reward,
     })
 }
 
 #[derive(Clone, Copy, Debug)]
 struct PendingMarkFeeWorld {
+    pending_sync_rejected_lock: bool,
+    pending_sync_exact_rollback: bool,
     reward: u64,
     victim_payout: u64,
     winner_payout: u64,
@@ -4892,9 +4889,33 @@ fn run_pending_mark_fee_reward_world(
         return Err("PR 356 fixture did not create wrapper/engine target lag".into());
     }
 
+    let mut pending_sync_rejected_lock = false;
+    let mut pending_sync_exact_rollback = true;
     if fee_first {
-        env.sync_maintenance_fee_with_reward(0, 2, 10)
-            .map_err(|error| format!("PR 356 vulnerable early fee sync rejected: {error}"))?;
+        let before = (
+            env.svm.get_account(&env.market),
+            env.svm.get_account(&env.actors[0].portfolio),
+            env.svm.get_account(&env.actors[2].portfolio),
+        );
+        match env.sync_maintenance_fee_with_reward(0, 2, 10) {
+            Ok(_) => return Err("PR 356 pending-mark fee sync still landed".into()),
+            Err(error)
+                if error.contains("Custom(21)") || error.contains("custom program error: 0x15") =>
+            {
+                pending_sync_rejected_lock = true;
+                pending_sync_exact_rollback = before
+                    == (
+                        env.svm.get_account(&env.market),
+                        env.svm.get_account(&env.actors[0].portfolio),
+                        env.svm.get_account(&env.actors[2].portfolio),
+                    );
+            }
+            Err(error) => {
+                return Err(format!(
+                    "PR 356 pending-mark fee sync returned an unexpected error: {error}"
+                ))
+            }
+        }
     }
     for _ in 0..16 {
         let _ = env.crank(
@@ -4912,10 +4933,8 @@ fn run_pending_mark_fee_reward_world(
     if env.primary_market_state().1.assets[0].effective_price != ADVERSE_PRICE {
         return Err("PR 356 public crank did not commit the adverse mark".into());
     }
-    if !fee_first {
-        env.sync_maintenance_fee_with_reward(0, 2, 10)
-            .map_err(|error| format!("PR 356 mark-first fee sync: {error}"))?;
-    }
+    env.sync_maintenance_fee_with_reward(0, 2, 10)
+        .map_err(|error| format!("PR 356 post-commit fee sync: {error}"))?;
 
     let cranker_capital = env.primary_portfolio(2).capital.get();
     let reward = cranker_capital
@@ -4956,6 +4975,8 @@ fn run_pending_mark_fee_reward_world(
         return Err("PR 356 terminal payout changed SPL supply".into());
     }
     Ok(PendingMarkFeeWorld {
+        pending_sync_rejected_lock,
+        pending_sync_exact_rollback,
         reward: u64::try_from(reward).map_err(|_| "PR 356 reward exceeds SPL range")?,
         victim_payout: u64::try_from(victim_payout)
             .map_err(|_| "PR 356 victim payout exceeds SPL range")?,

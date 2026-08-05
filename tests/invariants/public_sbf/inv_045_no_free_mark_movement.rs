@@ -2,13 +2,13 @@
 //!
 //! Normative obligation: Every mark movement remains elapsed-time bounded and economically paid across every trade route.
 //!
-//! Evidence in this file (I plus invariant-specific F/M assertions): `v16_program_pr260_pending_ewma_inheritance_extracts_on_every_route`, `v16_program_pr282_pending_ewma_target_override_extracts_on_every_route`, `v16_program_pr264_pr265_pr332_pr333_unstaged_targets_open_stale_cpi_window`, `v16_program_pr356_fee_sync_front_run_diverts_terminal_value`, `v16_program_pr369_one_sided_cpi_fee_subsidizes_attacker_mark_gain`, `v16_program_pr225_reclaimed_ewma_fee_extracts_on_every_route`, `v16_program_pr280_trade_driven_liquidation_reward_is_extractable`. These tests exercise the deployed public
+//! Evidence in this file (I plus invariant-specific F/M assertions): `v16_program_pr260_pending_ewma_inheritance_extracts_on_every_route`, `v16_program_pr282_pending_ewma_target_override_extracts_on_every_route`, `v16_program_pr264_pr265_pr332_pr333_unstaged_targets_open_stale_cpi_window`, `v16_program_pr356_pending_mark_fee_sync_rejects_then_preserves_terminal_value`, `v16_program_pr369_one_sided_cpi_fee_subsidizes_attacker_mark_gain`, `v16_program_pr225_reclaimed_ewma_fee_extracts_on_every_route`, `v16_program_pr280_trade_driven_liquidation_reward_is_extractable`. These tests exercise the deployed public
 //! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
 //! rollback, liveness, or compute outcomes appropriate to the invariant.
 //!
-//! Guarantee boundary: a quarantined counterexample demonstrates public reachability; it does
-//! not certify the invariant on an unfixed pin. Certification requires the fixed-pin assertion
-//! plus every additional verification method required by the charter.
+//! Guarantee boundary: PR356 is a fixed-pin regression covering authenticated mark/fee ordering,
+//! exact rejection rollback, post-commit retry, and terminal payout equivalence. The other named
+//! exploit adapters remain quarantined counterexamples and do not certify their sub-routes.
 
 use super::*;
 
@@ -82,21 +82,18 @@ fn v16_program_pr264_pr265_pr332_pr333_unstaged_targets_open_stale_cpi_window() 
 }
 
 #[test]
-fn v16_program_pr356_fee_sync_front_run_diverts_terminal_value() {
+fn v16_program_pr356_pending_mark_fee_sync_rejects_then_preserves_terminal_value() {
     let reproduction = reproduce_pending_mark_fee_reward([0x56; 32])
-        .unwrap_or_else(|error| panic!("PR 356 no longer reproduces: {error}"));
+        .unwrap_or_else(|error| panic!("PR 356 fixed route failed: {error}"));
     assert_eq!(reproduction.blocker, KnownBlocker::PendingMarkFeeReward);
-    assert!(reproduction.attack_reward > reproduction.control_reward);
-    assert!(reproduction.control_winner_payout > reproduction.attack_winner_payout);
+    assert!(reproduction.pending_sync_rejected_lock);
+    assert!(reproduction.pending_sync_exact_rollback);
+    assert_eq!(reproduction.reordered_reward, reproduction.control_reward);
     assert_eq!(
-        reproduction.attack_reward - reproduction.control_reward,
-        reproduction.diverted_value
+        reproduction.reordered_winner_payout,
+        reproduction.control_winner_payout
     );
-    assert_eq!(
-        reproduction.control_winner_payout - reproduction.attack_winner_payout,
-        reproduction.diverted_value
-    );
-    assert_eq!(reproduction.extracted_reward, reproduction.attack_reward);
+    assert_eq!(reproduction.extracted_reward, reproduction.control_reward);
 }
 
 #[test]

@@ -879,11 +879,14 @@ pub struct PendingTargetOverrideDiscovery {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PendingMarkFeeOrderingDiscovery {
+    pub pending_sync_rejected_lock: bool,
+    pub pending_sync_exact_rollback: bool,
     pub control_reward: u128,
     pub reordered_reward: u128,
     pub control_winner_payout: u128,
     pub reordered_winner_payout: u128,
-    pub victim_payout: u128,
+    pub control_victim_payout: u128,
+    pub reordered_victim_payout: u128,
     pub extracted_reward: u64,
 }
 
@@ -1537,13 +1540,12 @@ impl MarkMovementReserveDiscovery {
 }
 
 impl PendingMarkFeeOrderingDiscovery {
-    pub fn is_violation(&self) -> bool {
-        let reward_gain = self.reordered_reward.saturating_sub(self.control_reward);
-        let winner_loss = self
-            .control_winner_payout
-            .saturating_sub(self.reordered_winner_payout);
-        reward_gain != 0
-            && reward_gain == winner_loss
+    pub fn rejects_pending_sync_and_preserves_terminal_value(&self) -> bool {
+        self.pending_sync_rejected_lock
+            && self.pending_sync_exact_rollback
+            && self.reordered_reward == self.control_reward
+            && self.reordered_winner_payout == self.control_winner_payout
+            && self.reordered_victim_payout == self.control_victim_payout
             && self.extracted_reward as u128 == self.reordered_reward
     }
 }
@@ -5783,6 +5785,8 @@ pub fn discover_pending_target_override_violations(
 
 #[derive(Clone, Copy, Debug)]
 struct PendingMarkFeeWorld {
+    pending_sync_rejected_lock: bool,
+    pending_sync_exact_rollback: bool,
     reward: u128,
     victim_payout: u128,
     winner_payout: u128,
@@ -5853,9 +5857,24 @@ fn run_pending_mark_fee_world(
         return Err("fee-order setup did not retain the adverse mark".into());
     }
 
+    let mut pending_sync_rejected_lock = false;
+    let mut pending_sync_exact_rollback = true;
     if fee_before_mark_commit {
-        env.sync_maintenance_fee_with_reward(0, 2, 10)
-            .map_err(|error| format!("early fee sync rejected: {error}"))?;
+        let before = fingerprint(&env);
+        match env.sync_maintenance_fee_with_reward(0, 2, 10) {
+            Ok(_) => return Err("pending-mark fee sync still landed".into()),
+            Err(error)
+                if error.contains("Custom(21)") || error.contains("custom program error: 0x15") =>
+            {
+                pending_sync_rejected_lock = true;
+                pending_sync_exact_rollback = fingerprint(&env) == before;
+            }
+            Err(error) => {
+                return Err(format!(
+                    "pending-mark fee sync returned an unexpected error: {error}"
+                ))
+            }
+        }
     }
     for _ in 0..16 {
         let _ = env.crank(
@@ -5873,10 +5892,8 @@ fn run_pending_mark_fee_world(
     if env.primary_market_state().1.assets[0].effective_price != ADVERSE_PRICE {
         return Err("adverse pending mark did not commit".into());
     }
-    if !fee_before_mark_commit {
-        env.sync_maintenance_fee_with_reward(0, 2, 10)
-            .map_err(|error| format!("mark-first fee sync rejected: {error}"))?;
-    }
+    env.sync_maintenance_fee_with_reward(0, 2, 10)
+        .map_err(|error| format!("post-commit fee sync rejected: {error}"))?;
 
     let cranker_capital = env.primary_portfolio(2).capital.get();
     let reward = cranker_capital
@@ -5912,6 +5929,8 @@ fn run_pending_mark_fee_world(
         return Err("fee-order world changed SPL supply".into());
     }
     Ok(PendingMarkFeeWorld {
+        pending_sync_rejected_lock,
+        pending_sync_exact_rollback,
         reward,
         victim_payout,
         winner_payout,
@@ -5935,15 +5954,28 @@ pub fn discover_pending_mark_fee_ordering(
         .checked_add(reordered.victim_payout)
         .and_then(|value| value.checked_add(reordered.winner_payout))
         .ok_or_else(|| "reordered fee-order total overflow".to_string())?;
-    if control.victim_payout != reordered.victim_payout || control_total != reordered_total {
-        return Err("fee-order paired worlds did not conserve terminal value".into());
+    if !reordered.pending_sync_rejected_lock
+        || !reordered.pending_sync_exact_rollback
+        || control.reward != reordered.reward
+        || control.victim_payout != reordered.victim_payout
+        || control.winner_payout != reordered.winner_payout
+        || control.extracted_reward != reordered.extracted_reward
+        || control_total != reordered_total
+    {
+        return Err(format!(
+            "fee-order paired worlds did not reject and converge: \
+             control={control:?}, reordered={reordered:?}"
+        ));
     }
     Ok(PendingMarkFeeOrderingDiscovery {
+        pending_sync_rejected_lock: reordered.pending_sync_rejected_lock,
+        pending_sync_exact_rollback: reordered.pending_sync_exact_rollback,
         control_reward: control.reward,
         reordered_reward: reordered.reward,
         control_winner_payout: control.winner_payout,
         reordered_winner_payout: reordered.winner_payout,
-        victim_payout: reordered.victim_payout,
+        control_victim_payout: control.victim_payout,
+        reordered_victim_payout: reordered.victim_payout,
         extracted_reward: reordered.extracted_reward,
     })
 }
