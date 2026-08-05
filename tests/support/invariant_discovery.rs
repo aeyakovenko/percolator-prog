@@ -1152,22 +1152,31 @@ pub struct ExpiredBackingConsumerDiscovery {
     pub engine_slot: u64,
     pub released_pnl: u128,
     pub conversion_landed: bool,
+    pub conversion_rejected_stale: bool,
+    pub rejected_exact_rollback: bool,
     pub capital_credit: u128,
     pub consumed_backing_num: u128,
     pub extracted_tokens: u64,
+    pub senior_capital_before: u128,
+    pub senior_withdraw_landed: bool,
+    pub senior_withdrawn_tokens: u64,
     pub token_supply_conserved: bool,
 }
 
 impl ExpiredBackingConsumerDiscovery {
-    pub fn is_expired_principal_extraction(&self) -> bool {
+    pub fn rejects_lapsed_conversion_and_preserves_senior_exit(&self) -> bool {
         self.authenticated_slot > self.expiry_slot
             && self.engine_slot < self.authenticated_slot
             && self.released_pnl != 0
-            && self.conversion_landed
-            && self.capital_credit == self.released_pnl
-            && self.released_pnl.checked_mul(percolator::BOUND_SCALE)
-                == Some(self.consumed_backing_num)
-            && u128::from(self.extracted_tokens) == self.released_pnl
+            && !self.conversion_landed
+            && self.conversion_rejected_stale
+            && self.rejected_exact_rollback
+            && self.capital_credit == 0
+            && self.consumed_backing_num == 0
+            && self.extracted_tokens == 0
+            && self.senior_capital_before != 0
+            && self.senior_withdraw_landed
+            && u128::from(self.senior_withdrawn_tokens) == self.senior_capital_before
             && self.token_supply_conserved
     }
 }
@@ -8963,17 +8972,32 @@ fn discover_one_expired_backing_consumer(
     let destination_before = env.token_amount(env.actors[WINNER].destination_token);
 
     env.warp_to_slot(authenticated_slot);
-    let conversion_landed = match kind {
+    let before_rejection = fingerprint(&env);
+    let conversion_result = match kind {
         ExpiredBackingConsumerKind::ReleasedPnlConversion => {
-            env.convert_released_pnl(WINNER, released_pnl).is_ok()
+            env.convert_released_pnl(WINNER, released_pnl)
         }
     };
+    let conversion_landed = conversion_result.is_ok();
+    let conversion_rejected_stale = matches!(
+        &conversion_result,
+        Err(error) if error.contains("Custom(19)")
+    );
+    if let Err(error) = &conversion_result {
+        if !conversion_rejected_stale {
+            return Err(format!(
+                "expired-consumer conversion returned an unexpected error: {error}"
+            ));
+        }
+    }
+    let rejected_exact_rollback =
+        conversion_result.is_err() && fingerprint(&env) == before_rejection;
     let capital_credit = env
         .primary_portfolio(WINNER)
         .capital
         .get()
         .checked_sub(capital_before)
-        .unwrap_or(0);
+        .ok_or_else(|| "expired-consumer conversion decreased capital".to_string())?;
     if conversion_landed {
         env.withdraw_primary(WINNER, released_pnl)
             .map_err(|error| format!("withdraw expired-consumer credit: {error}"))?;
@@ -8987,6 +9011,12 @@ fn discover_one_expired_backing_consumer(
         .token_amount(env.actors[WINNER].destination_token)
         .checked_sub(destination_before)
         .ok_or_else(|| "expired-consumer destination decreased".to_string())?;
+    let senior_destination_before = env.token_amount(env.actors[WINNER].destination_token);
+    let senior_withdraw_landed = env.withdraw_primary(WINNER, capital_before).is_ok();
+    let senior_withdrawn_tokens = env
+        .token_amount(env.actors[WINNER].destination_token)
+        .checked_sub(senior_destination_before)
+        .ok_or_else(|| "expired-consumer senior destination decreased".to_string())?;
 
     Ok(ExpiredBackingConsumerDiscovery {
         kind,
@@ -8995,9 +9025,14 @@ fn discover_one_expired_backing_consumer(
         engine_slot: after_group.current_slot,
         released_pnl,
         conversion_landed,
+        conversion_rejected_stale,
+        rejected_exact_rollback,
         capital_credit,
         consumed_backing_num,
         extracted_tokens,
+        senior_capital_before: capital_before,
+        senior_withdraw_landed,
+        senior_withdrawn_tokens,
         token_supply_conserved: env.token_supply_observed() == supply_before,
     })
 }

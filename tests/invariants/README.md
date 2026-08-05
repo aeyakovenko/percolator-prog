@@ -22,14 +22,15 @@ verification methods are in [`../../INVARIANTS.md`](../../INVARIANTS.md).
 
 | Suite | Tests | Evidence |
 | --- | ---: | --- |
-| `public_sbf/` | 74 | Deterministic public SBF/LiteSVM counterexamples, regressions, and manifest checks |
+| `public_sbf/` | 75 | Deterministic public SBF/LiteSVM counterexamples, regressions, and manifest checks |
 | `stateful/` | 112 | Proptest-generated public routes, including generalized active-leg/currentness and authenticated-expiry route matrices |
 | `cu/` | 102 | Positive public-route, metamorphic, rollback, liveness, and max-shape CU tests |
 | `kani/` | 40 | Symbolic wrapper arithmetic, matcher-binding, and strict-decoder proofs |
 
-The deterministic and stateful LoF adapters currently reproduce quarantined vulnerable behavior.
-Their presence proves that a finding is reachable through the public wrapper; it does not certify
-the invariant until a fixed pin rejects the attack or preserves the required safe outcome.
+Most deterministic and stateful LoF adapters still reproduce quarantined vulnerable behavior;
+fixed-pin regressions explicitly require safe rejection or preservation instead. A vulnerable-pin
+counterexample proves public reachability but does not certify the invariant until the fixed pin
+rejects the attack or preserves the required safe outcome.
 
 ## Coverage status
 

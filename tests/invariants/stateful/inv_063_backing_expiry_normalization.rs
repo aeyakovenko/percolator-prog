@@ -14,14 +14,14 @@
 //! boundaries independently of any finding manifest, compares omitted and delayed operations,
 //! and requires a finding only when the delayed operation consumes independent principal and
 //! leaves funded resolved users unable to progress through owner or permissionless routes.
-//! `v16_program_expired_backing_consumer_matrix_discovers_principal_extraction` generates released
-//! source-backed claims and varies the expiry boundary. It reports a violation only when a
-//! favorable consumer lands after authenticated expiry, consumes the provider ledger, and moves
-//! the exact credited amount into the claimant's external SPL account.
+//! `v16_program_expired_backing_consumer_matrix_rejects_lapsed_conversion` generates released
+//! source-backed claims and varies the expiry boundary. Conversion must reject at authenticated
+//! expiry with exact rollback and zero provider-principal movement, while the flat claimant can
+//! still withdraw all senior capital.
 //!
-//! Guarantee boundary: the first three tests are fixed-pin bounded evidence for trade consumers.
-//! The retained-maturity and favorable-consumer tests remain public counterexample discovery for
-//! separate open findings and do not certify those sub-routes until their fixes are integrated.
+//! Guarantee boundary: the trade and conversion consumers have fixed-pin bounded evidence. The
+//! retained-maturity test remains public counterexample discovery for a separate open finding and
+//! does not certify that sub-route until its fix is integrated.
 
 use super::*;
 
@@ -131,14 +131,14 @@ proptest! {
     }
 
     #[test]
-    fn v16_program_expired_backing_consumer_matrix_discovers_principal_extraction(
+    fn v16_program_expired_backing_consumer_matrix_rejects_lapsed_conversion(
         seed in any::<[u8; 32]>(),
         expiry_offset in prop::sample::select(vec![1u8, 2, 4, 6]),
     ) {
         let discoveries = discover_expired_backing_consumers(seed, expiry_offset);
         prop_assert!(
             discoveries.is_ok(),
-            "expired-backing consumer discovery failed at offset {expiry_offset}: {}",
+            "expired-backing consumer verification failed at offset {expiry_offset}: {}",
             discoveries.unwrap_err()
         );
         let discoveries = discoveries.unwrap();
@@ -149,8 +149,8 @@ proptest! {
         );
         for discovery in discoveries {
             prop_assert!(
-                discovery.is_expired_principal_extraction(),
-                "expired backing consumer did not extract exact provider principal: {:?}",
+                discovery.rejects_lapsed_conversion_and_preserves_senior_exit(),
+                "expired backing consumer was not rejected safely with a senior exit: {:?}",
                 discovery
             );
         }
