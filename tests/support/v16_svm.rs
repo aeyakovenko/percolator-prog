@@ -3176,6 +3176,11 @@ fn program_path() -> PathBuf {
     if let Some(path) = std::env::var_os("PERCOLATOR_FUZZ_SBF") {
         return PathBuf::from(path);
     }
+    if let Some(target_dir) = std::env::var_os("CARGO_TARGET_DIR") {
+        return PathBuf::from(target_dir)
+            .join("deploy")
+            .join("percolator_prog.so");
+    }
     artifact_path("target/deploy/percolator_prog.so", "production Percolator")
 }
 
