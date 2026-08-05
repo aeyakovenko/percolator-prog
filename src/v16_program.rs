@@ -47,7 +47,7 @@ pub mod constants {
 
     pub const HEADER_LEN: usize = 16;
     pub const WRAPPER_CONFIG_LEN: usize = 448;
-    pub const ASSET_ORACLE_PROFILE_LEN: usize = 400;
+    pub const ASSET_ORACLE_PROFILE_LEN: usize = 424;
     pub const ASSET_ORACLE_WRAPPER_LEN: usize = 512;
     pub const MARKET_GROUP_LEN: usize = size_of::<MarketGroupV16HeaderAccount>();
     pub const MARKET_ASSET_SLOT_LEN: usize = size_of::<Market<[u8; ASSET_ORACLE_WRAPPER_LEN]>>();
@@ -589,7 +589,15 @@ pub mod state {
         // (insurance/operator/backing/oracle) and itself, and can be burned (set to 0). Isolated:
         // it can never act on another asset. Set to the activator at creation.
         pub asset_admin: [u8; 32],
+        /// Mark whose premium applies at the engine asset's current `slot_last`.
+        /// Zero is the legacy, not-yet-initialized sentinel.
+        pub funding_mark_e6: u64,
+        /// First prospective mark that must not affect funding before its slot.
+        pub funding_mark_pending_e6: u64,
+        pub funding_mark_pending_slot: u64,
     }
+
+    const _: [(); ASSET_ORACLE_PROFILE_LEN] = [(); core::mem::size_of::<AssetOracleProfileV16>()];
 
     /// Aggregate backing-domain accounting for an authority-controlled vault.
     /// This intentionally contains no per-depositor state; external authority
@@ -1126,6 +1134,11 @@ pub mod state {
             || profile._padding0 != [0u8; 6]
             || profile.oracle_leg_count as usize > ORACLE_LEG_CAP
             || (profile.oracle_leg_flags & !ORACLE_LEG_FLAGS_MASK) != 0
+            || (profile.funding_mark_e6 != 0 && !valid_engine_oracle_price(profile.funding_mark_e6))
+            || ((profile.funding_mark_pending_e6 == 0) != (profile.funding_mark_pending_slot == 0))
+            || (profile.funding_mark_pending_e6 != 0
+                && (!valid_engine_oracle_price(profile.funding_mark_pending_e6)
+                    || profile.funding_mark_e6 == 0))
         {
             return Err(ProgramError::InvalidAccountData);
         }
@@ -1232,6 +1245,9 @@ pub mod state {
             oracle_leg_prices_e6: [0u64; ORACLE_LEG_CAP],
             oracle_leg_publish_times: [0i64; ORACLE_LEG_CAP],
             asset_admin: [0u8; 32],
+            funding_mark_e6: initial_price,
+            funding_mark_pending_e6: 0,
+            funding_mark_pending_slot: 0,
         }
     }
 
@@ -1269,6 +1285,9 @@ pub mod state {
             oracle_leg_prices_e6: config.oracle_leg_prices_e6,
             oracle_leg_publish_times: config.oracle_leg_publish_times,
             asset_admin: config.marketauth,
+            funding_mark_e6: config.mark_ewma_e6,
+            funding_mark_pending_e6: 0,
+            funding_mark_pending_slot: 0,
         }
     }
 
@@ -2303,7 +2322,16 @@ pub mod state {
         check_header(data, KIND_MARKET)?;
         write_wrapper_config_to_bytes(data, config)?;
         if config.oracle_mode != ORACLE_MODE_MANUAL {
-            let base_profile = asset_oracle_profile_from_config(config);
+            let existing_profile = read_asset_oracle_profile(data, 0)?;
+            let mut base_profile = asset_oracle_profile_from_config(config);
+            base_profile.insurance_authority = existing_profile.insurance_authority;
+            base_profile.insurance_operator = existing_profile.insurance_operator;
+            base_profile.backing_bucket_authority = existing_profile.backing_bucket_authority;
+            base_profile.oracle_authority = existing_profile.oracle_authority;
+            base_profile.asset_admin = existing_profile.asset_admin;
+            base_profile.funding_mark_e6 = existing_profile.funding_mark_e6;
+            base_profile.funding_mark_pending_e6 = existing_profile.funding_mark_pending_e6;
+            base_profile.funding_mark_pending_slot = existing_profile.funding_mark_pending_slot;
             write_asset_oracle_profile(data, 0, &base_profile)?;
         }
         write_market_wire(data, group)?;
@@ -9460,6 +9488,9 @@ pub mod processor {
                             .map_err(map_v16_error)?;
                         profile.mark_ewma_e6 = frozen_mark;
                         profile.mark_ewma_last_slot = authenticated_slot;
+                        profile.funding_mark_e6 = frozen_mark;
+                        profile.funding_mark_pending_e6 = 0;
+                        profile.funding_mark_pending_slot = 0;
                         profile.oracle_target_price_e6 = frozen_mark;
                         profile.oracle_target_publish_time = 0;
                         profile.last_good_oracle_slot = authenticated_slot;
@@ -10029,6 +10060,9 @@ pub mod processor {
                 oracle_leg_feeds,
                 oracle_leg_prices_e6: [0u64; constants::ORACLE_LEG_CAP],
                 oracle_leg_publish_times: [0i64; constants::ORACLE_LEG_CAP],
+                funding_mark_e6: 0,
+                funding_mark_pending_e6: 0,
+                funding_mark_pending_slot: 0,
             };
 
             let (price, publish_time, advanced) = oracle_v16::read_external_price_e6_profile(
@@ -10044,6 +10078,7 @@ pub mod processor {
             profile.oracle_target_publish_time = publish_time;
             profile.mark_ewma_e6 = price;
             profile.mark_ewma_last_slot = authenticated_slot;
+            profile.funding_mark_e6 = price;
             reset_empty_asset_oracle_anchor_view(
                 &mut group,
                 asset_index_usize,
@@ -10155,6 +10190,9 @@ pub mod processor {
                 oracle_leg_feeds: [[0u8; 32]; constants::ORACLE_LEG_CAP],
                 oracle_leg_prices_e6: [0u64; constants::ORACLE_LEG_CAP],
                 oracle_leg_publish_times: [0i64; constants::ORACLE_LEG_CAP],
+                funding_mark_e6: initial_mark_e6,
+                funding_mark_pending_e6: 0,
+                funding_mark_pending_slot: 0,
             };
 
             reset_empty_asset_oracle_anchor_view(
@@ -10263,6 +10301,9 @@ pub mod processor {
                 oracle_leg_feeds: [[0u8; 32]; constants::ORACLE_LEG_CAP],
                 oracle_leg_prices_e6: [0u64; constants::ORACLE_LEG_CAP],
                 oracle_leg_publish_times: [0i64; constants::ORACLE_LEG_CAP],
+                funding_mark_e6: initial_mark_e6,
+                funding_mark_pending_e6: 0,
+                funding_mark_pending_slot: 0,
             };
 
             reset_empty_asset_oracle_anchor_view(
@@ -10362,8 +10403,21 @@ pub mod processor {
             if next_mark == 0 || next_mark > percolator::MAX_ORACLE_PRICE {
                 return Err(PercolatorError::OracleInvalid.into());
             }
-            profile.mark_ewma_e6 = next_mark;
-            profile.mark_ewma_last_slot = authenticated_slot;
+            if next_mark != profile.mark_ewma_e6 {
+                let asset_slot = group.markets[asset_index_usize]
+                    .engine
+                    .asset
+                    .slot_last
+                    .get();
+                record_funding_mark_transition_view(
+                    &mut profile,
+                    asset_slot,
+                    next_mark,
+                    authenticated_slot,
+                )?;
+                profile.mark_ewma_e6 = next_mark;
+                profile.mark_ewma_last_slot = authenticated_slot;
+            }
             profile.oracle_target_price_e6 = next_mark;
             profile.oracle_target_publish_time = 0;
             profile.last_good_oracle_slot = authenticated_slot;
@@ -10426,8 +10480,21 @@ pub mod processor {
             {
                 return Err(PercolatorError::EngineStale.into());
             }
-            profile.mark_ewma_e6 = mark_e6;
-            profile.mark_ewma_last_slot = authenticated_slot;
+            if mark_e6 != profile.mark_ewma_e6 {
+                let asset_slot = group.markets[asset_index_usize]
+                    .engine
+                    .asset
+                    .slot_last
+                    .get();
+                record_funding_mark_transition_view(
+                    &mut profile,
+                    asset_slot,
+                    mark_e6,
+                    authenticated_slot,
+                )?;
+                profile.mark_ewma_e6 = mark_e6;
+                profile.mark_ewma_last_slot = authenticated_slot;
+            }
             profile.oracle_target_price_e6 = mark_e6;
             profile.oracle_target_publish_time = 0;
             profile.last_good_oracle_slot = authenticated_slot;
@@ -10756,6 +10823,7 @@ pub mod processor {
                     &oracle_profile,
                     &group,
                     asset_index,
+                    authenticated_now_slot,
                     crank_price,
                 )?;
                 group
@@ -10770,7 +10838,6 @@ pub mod processor {
                         oracle_profile.last_good_oracle_slot,
                     );
                 }
-                write_oracle_profile_to_view(&mut group, asset_index, &oracle_profile)?;
                 if asset_index == 0 && oracle_v16::profile_is_price_managed(&oracle_profile) {
                     cfg.oracle_mode = oracle_profile.oracle_mode;
                     cfg.oracle_leg_count = oracle_profile.oracle_leg_count;
@@ -10799,10 +10866,20 @@ pub mod processor {
                         true,
                     )
                     .map_err(map_v16_error)?;
+                let asset_slot_after = group.markets[asset_index].engine.asset.slot_last.get();
+                advance_funding_mark_checkpoint_view(&mut oracle_profile, asset_slot_after);
+                let next_funding_rate_e9 = permissionless_funding_rate_e9_view(
+                    &oracle_profile,
+                    &group,
+                    asset_index,
+                    authenticated_now_slot,
+                    crank_price,
+                )?;
+                write_oracle_profile_to_view(&mut group, asset_index, &oracle_profile)?;
                 observations.push(AutoCrankObservationV16 {
                     asset_index,
                     effective_price: crank_price,
-                    funding_rate_e9: computed_funding_rate_e9,
+                    funding_rate_e9: next_funding_rate_e9,
                 });
             }
             if !oracle_tail.is_empty() {
@@ -10847,6 +10924,13 @@ pub mod processor {
                 Err(V16Error::NonProgress) if !observations.is_empty() => None,
                 Err(err) => return Err(map_v16_error(err)),
             };
+            for observation in observations.iter() {
+                let asset_index = observation.asset_index;
+                let mut profile = read_oracle_profile_from_view(&group, &cfg, asset_index)?;
+                let asset_slot = group.markets[asset_index].engine.asset.slot_last.get();
+                advance_funding_mark_checkpoint_view(&mut profile, asset_slot);
+                write_oracle_profile_to_view(&mut group, asset_index, &profile)?;
+            }
 
             let selected_fee_asset = match result.as_ref().map(|r| &r.selected) {
                 Some(AutoCrankPlanV16::RefreshAccount {
@@ -11131,7 +11215,8 @@ pub mod processor {
             dt,
             exposed,
         );
-        let funding_rate = permissionless_funding_rate_e9_view(&profile, group, asset_index, next)?;
+        let funding_rate =
+            permissionless_funding_rate_e9_view(&profile, group, asset_index, now_slot, next)?;
         if next != current || funding_rate != 0 {
             return Err(PercolatorError::EngineNonProgress.into());
         }
@@ -11935,6 +12020,8 @@ pub mod processor {
         if asset_index >= group.header.config.max_market_slots.get() as usize {
             return Err(PercolatorError::InvalidInstruction.into());
         }
+        let asset_slot = group.markets[asset_index].engine.asset.slot_last.get();
+        advance_funding_mark_checkpoint_view(profile, asset_slot);
         if oracle_v16::profile_is_ewma_mark(profile) || oracle_v16::profile_is_auth_mark(profile) {
             let target = profile.mark_ewma_e6;
             if target == 0 {
@@ -12009,7 +12096,10 @@ pub mod processor {
             exposed,
         );
         profile.oracle_target_price_e6 = target;
-        if !oracle_v16::profile_hybrid_soft_stale_matured(profile, now_slot) {
+        if !oracle_v16::profile_hybrid_soft_stale_matured(profile, now_slot)
+            && price != profile.mark_ewma_e6
+        {
+            record_funding_mark_transition_view(profile, asset_slot, price, now_slot)?;
             profile.mark_ewma_e6 = price;
             profile.mark_ewma_last_slot = now_slot;
         }
@@ -12020,6 +12110,7 @@ pub mod processor {
         profile: &state::AssetOracleProfileV16,
         group: &state::MarketViewMutV16<'_>,
         asset_index: usize,
+        now_slot: u64,
         effective_price: u64,
     ) -> Result<i128, ProgramError> {
         if !oracle_v16::profile_is_price_managed(profile) {
@@ -12035,11 +12126,90 @@ pub mod processor {
             return Err(PercolatorError::InvalidInstruction.into());
         }
         let asset = group.markets[asset_index].engine.asset;
-        if profile.mark_ewma_last_slot > asset.slot_last.get() {
+        let asset_slot = asset.slot_last.get();
+        let active_mark = if profile.funding_mark_e6 != 0 {
+            profile.funding_mark_e6
+        } else if profile.mark_ewma_last_slot <= asset_slot {
+            profile.mark_ewma_e6
+        } else {
+            // A legacy profile cannot recover the mark that preceded an already-pending update.
+            // Preserve the old non-retroactive behavior until the engine catches up.
             return Ok(0);
-        }
-        policy_v16::premium_funding_rate_e9(profile.mark_ewma_e6, effective_price, max_abs_rate)
+        };
+        let segment_dt = asset_segment_dt_view(group, asset_index, now_slot)?;
+        let has_pending =
+            profile.funding_mark_pending_e6 != 0 && profile.funding_mark_pending_slot > asset_slot;
+        // A prospective mark must not rewrite either side of the premium for elapsed time. When a
+        // pending mark exists, derive the counterfactual index from the committed mark as well.
+        let funding_index = if has_pending {
+            let exposed = asset.oi_eff_long_q.get() != 0 || asset.oi_eff_short_q.get() != 0;
+            oracle_v16::effective_price_from_target(
+                asset.effective_price.get(),
+                active_mark,
+                group.header.config.max_price_move_bps_per_slot.get(),
+                segment_dt,
+                exposed,
+            )
+        } else {
+            effective_price
+        };
+        policy_v16::premium_funding_rate_e9(active_mark, funding_index, max_abs_rate)
             .ok_or(PercolatorError::EngineArithmeticOverflow.into())
+    }
+
+    fn advance_funding_mark_checkpoint_view(
+        profile: &mut state::AssetOracleProfileV16,
+        asset_slot: u64,
+    ) {
+        if profile.funding_mark_e6 == 0 && profile.mark_ewma_last_slot <= asset_slot {
+            profile.funding_mark_e6 = profile.mark_ewma_e6;
+        }
+        if profile.funding_mark_pending_e6 != 0 && profile.funding_mark_pending_slot <= asset_slot {
+            let activated_slot = profile.funding_mark_pending_slot;
+            profile.funding_mark_e6 = profile.funding_mark_pending_e6;
+            profile.funding_mark_pending_e6 = 0;
+            profile.funding_mark_pending_slot = 0;
+            if profile.mark_ewma_last_slot > activated_slot {
+                if profile.mark_ewma_last_slot <= asset_slot {
+                    profile.funding_mark_e6 = profile.mark_ewma_e6;
+                } else {
+                    profile.funding_mark_pending_e6 = profile.mark_ewma_e6;
+                    profile.funding_mark_pending_slot = profile.mark_ewma_last_slot;
+                }
+            }
+        }
+    }
+
+    fn record_funding_mark_transition_view(
+        profile: &mut state::AssetOracleProfileV16,
+        asset_slot: u64,
+        next_mark_e6: u64,
+        mark_slot: u64,
+    ) -> ProgramResult {
+        advance_funding_mark_checkpoint_view(profile, asset_slot);
+        if profile.funding_mark_e6 == 0 {
+            // A legacy profile can already have a prospective mark when first read by this code,
+            // so its prior checkpoint is unrecoverable. Keep trades live until a crank catches up.
+            return Ok(());
+        }
+        if profile.funding_mark_pending_e6 != 0 {
+            if mark_slot < profile.funding_mark_pending_slot {
+                return Err(PercolatorError::EngineStale.into());
+            }
+            if mark_slot == profile.funding_mark_pending_slot {
+                profile.funding_mark_pending_e6 = next_mark_e6;
+            }
+            // Retain the first pending boundary. Later fills cannot postpone already-owed funding;
+            // the profile's ordinary mark fields retain the latest transition for the next epoch.
+            return Ok(());
+        }
+        if mark_slot <= asset_slot {
+            profile.funding_mark_e6 = next_mark_e6;
+        } else {
+            profile.funding_mark_pending_e6 = next_mark_e6;
+            profile.funding_mark_pending_slot = mark_slot;
+        }
+        Ok(())
     }
 
     fn update_hybrid_mark_after_trade_view(
@@ -12063,6 +12233,8 @@ pub mod processor {
         }
         let old = profile.mark_ewma_e6;
         if post_trade_mark_e6 != old {
+            let asset_slot = group.markets[asset_index].engine.asset.slot_last.get();
+            record_funding_mark_transition_view(profile, asset_slot, post_trade_mark_e6, now_slot)?;
             profile.mark_ewma_e6 = post_trade_mark_e6;
             profile.mark_ewma_last_slot = now_slot;
         }
