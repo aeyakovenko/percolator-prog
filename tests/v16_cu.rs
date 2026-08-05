@@ -205,8 +205,17 @@ fn canonical_retired_engine_slot(
 }
 
 fn program_path() -> PathBuf {
-    let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    path.push("target/deploy/percolator_prog.so");
+    let path = if let Some(path) = std::env::var_os("PERCOLATOR_FUZZ_SBF") {
+        PathBuf::from(path)
+    } else if let Some(target_dir) = std::env::var_os("CARGO_TARGET_DIR") {
+        PathBuf::from(target_dir)
+            .join("deploy")
+            .join("percolator_prog.so")
+    } else {
+        let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        path.push("target/deploy/percolator_prog.so");
+        path
+    };
     assert!(
         path.exists(),
         "BPF not found at {:?}. Run `cargo build-sbf --no-default-features` first",

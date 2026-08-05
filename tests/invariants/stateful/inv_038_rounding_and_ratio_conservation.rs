@@ -3,7 +3,7 @@
 //! Normative obligation: Every rounded allocation plus explicit residue equals its exact source amount.
 //!
 //! Evidence in this file (F over public I routes):
-//! `v16_program_composite_scale_matrix_discovers_route_rounding_value` holds the exact rational
+//! `v16_program_composite_scale_matrix_preserves_exact_composition` holds the exact rational
 //! composite price constant while changing its factorization at large and micro scales. It then
 //! requires wrapper target, engine mark, liquidation eligibility, and extracted reward to agree
 //! with exact single-round arithmetic.
@@ -18,9 +18,8 @@
 //! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
 //! rollback, liveness, or compute outcomes appropriate to the invariant.
 //!
-//! Guarantee boundary: a quarantined counterexample demonstrates public reachability; it does
-//! not certify the invariant on an unfixed pin. Certification requires the fixed-pin assertion
-//! plus every additional verification method required by the charter.
+//! Guarantee boundary: the composite-rounding and selected-observation matrices are fixed-pin
+//! certification. The fractional movement matrix remains a quarantined counterexample.
 
 use super::*;
 
@@ -91,7 +90,7 @@ proptest! {
     })]
 
     #[test]
-    fn v16_program_composite_scale_matrix_discovers_route_rounding_value(
+    fn v16_program_composite_scale_matrix_preserves_exact_composition(
         seed in any::<[u8; 32]>()
     ) {
         let discoveries = discover_composite_rounding_violations(seed)
@@ -100,17 +99,16 @@ proptest! {
         for (expected, discovery) in CompositeRoundingScale::ALL.into_iter().zip(&discoveries) {
             prop_assert_eq!(discovery.scale, expected);
         }
-        let violations: Vec<_> = discoveries
-            .iter()
-            .filter(|discovery| discovery.is_violation())
-            .map(|discovery| discovery.scale)
-            .collect();
-        eprintln!("independent composite-rounding discoveries: {violations:?}");
-        prop_assert_eq!(
-            violations,
-            CompositeRoundingScale::ALL.to_vec(),
-            "vulnerable-pin composite-rounding corpus changed"
-        );
+        for discovery in discoveries {
+            prop_assert!(!discovery.is_violation(), "{discovery:?}");
+            prop_assert_eq!(discovery.rounded_target, discovery.exact_mark);
+            prop_assert_eq!(discovery.rounded_mark, discovery.exact_mark);
+            prop_assert_eq!(discovery.certified_liq_deficit, 0);
+            prop_assert_eq!(discovery.victim_capital_loss, 0);
+            prop_assert_eq!(discovery.oi_reduction_q, 0);
+            prop_assert_eq!(discovery.cranker_reward, 0);
+            prop_assert_eq!(discovery.extracted_tokens, 0);
+        }
     }
 }
 
@@ -127,17 +125,19 @@ proptest! {
     })]
 
     #[test]
-    fn v16_program_pr329_pr381_composite_rounding_fuzz(
+    fn v16_program_pr329_pr381_composite_rounding_preservation_fuzz(
         (seed, case) in composite_rounding_strategy()
     ) {
-        let result = reproduce_composite_oracle_rounding(seed, case);
-        prop_assert!(
-            result.is_ok(),
-            "{:?} no longer reproduces for seed {:?}: {}",
-            case,
-            seed,
-            result.unwrap_err()
-        );
+        let reproduction = reproduce_composite_oracle_rounding(seed, case)
+            .map_err(TestCaseError::fail)?;
+        prop_assert_eq!(reproduction.case, case);
+        prop_assert_eq!(reproduction.rounded_target, reproduction.exact_mark);
+        prop_assert_eq!(reproduction.rounded_mark, reproduction.exact_mark);
+        prop_assert_eq!(reproduction.certified_liq_deficit, 0);
+        prop_assert_eq!(reproduction.victim_capital_loss, 0);
+        prop_assert_eq!(reproduction.oi_reduction_q, 0);
+        prop_assert_eq!(reproduction.cranker_reward, 0);
+        prop_assert_eq!(reproduction.extracted_tokens, 0);
     }
 
     #[test]

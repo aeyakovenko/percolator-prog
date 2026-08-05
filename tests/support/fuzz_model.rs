@@ -349,6 +349,7 @@ pub struct CompositeRoundingReproduction {
     pub exact_mark: u64,
     pub rounded_target: u64,
     pub rounded_mark: u64,
+    pub certified_liq_deficit: u128,
     pub victim_capital_loss: u128,
     pub oi_reduction_q: u128,
     pub cranker_reward: u128,
@@ -4285,14 +4286,11 @@ pub fn reproduce_composite_oracle_rounding(
         .health_cert
         .try_to_runtime()
         .map_err(|error| format!("{case:?} decode victim certificate: {error:?}"))?;
-    if victim_cert.certified_liq_deficit == 0 {
-        return Err(format!(
-            "{case:?} rounded composite did not falsely certify liquidation"
-        ));
+    let certified_liq_deficit = victim_cert.certified_liq_deficit;
+    if certified_liq_deficit != 0 {
+        env.crank_with_reward(2, 0, slot, observations(), &fresh_oracles)
+            .map_err(|error| format!("{case:?} false-price liquidation failed: {error}"))?;
     }
-
-    env.crank_with_reward(2, 0, slot, observations(), &fresh_oracles)
-        .map_err(|error| format!("{case:?} false-price liquidation no longer lands: {error}"))?;
     let (wrapper_after, group_after) = env.primary_market_state();
     let victim_capital_after = env.primary_portfolio(0).capital.get();
     let oi_after = group_after.assets[0].oi_eff_long_q;
@@ -4306,13 +4304,10 @@ pub fn reproduce_composite_oracle_rounding(
     let cranker_reward = cranker_capital_after
         .checked_sub(cranker_capital_before)
         .ok_or("composite liquidation decreased cranker capital")?;
-    if victim_capital_loss == 0 || oi_reduction_q == 0 || cranker_reward == 0 {
-        return Err(format!(
-            "{case:?} false composite was not economically committed: victim loss {victim_capital_loss}, OI reduction {oi_reduction_q}, reward {cranker_reward}"
-        ));
+    if cranker_reward != 0 {
+        env.withdraw_primary(2, cranker_reward)
+            .map_err(|error| format!("{case:?} withdraw false-liquidation reward: {error}"))?;
     }
-    env.withdraw_primary(2, cranker_reward)
-        .map_err(|error| format!("{case:?} withdraw false-liquidation reward: {error}"))?;
     let extracted_tokens = env.token_amount(env.actors[2].destination_token);
     if u128::from(extracted_tokens) != cranker_reward {
         return Err(format!(
@@ -4324,19 +4319,13 @@ pub fn reproduce_composite_oracle_rounding(
             "{case:?} false liquidation changed total SPL supply"
         ));
     }
-    if wrapper_after.oracle_target_price_e6 == exact_mark
-        || group_after.assets[0].effective_price == exact_mark
-    {
-        return Err(format!(
-            "{case:?} liquidation occurred without the expected rounded target/mark divergence"
-        ));
-    }
     Ok(CompositeRoundingReproduction {
         blocker: KnownBlocker::CompositeOracleRounding,
         case,
         exact_mark,
         rounded_target: wrapper_after.oracle_target_price_e6,
         rounded_mark: group_after.assets[0].effective_price,
+        certified_liq_deficit,
         victim_capital_loss,
         oi_reduction_q,
         cranker_reward,

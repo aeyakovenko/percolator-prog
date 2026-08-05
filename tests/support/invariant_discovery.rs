@@ -932,6 +932,7 @@ pub struct CompositeRoundingDiscovery {
     pub exact_mark: u64,
     pub rounded_target: u64,
     pub rounded_mark: u64,
+    pub certified_liq_deficit: u128,
     pub victim_capital_loss: u128,
     pub oi_reduction_q: u128,
     pub cranker_reward: u128,
@@ -1500,6 +1501,7 @@ impl CompositeRoundingDiscovery {
     pub fn is_violation(&self) -> bool {
         self.rounded_target != self.exact_mark
             && self.rounded_mark != self.exact_mark
+            && self.certified_liq_deficit != 0
             && self.victim_capital_loss != 0
             && self.oi_reduction_q != 0
             && self.cranker_reward != 0
@@ -6695,14 +6697,11 @@ fn discover_one_composite_rounding_violation(
         .health_cert
         .try_to_runtime()
         .map_err(|error| format!("{scale:?} decode victim certificate: {error:?}"))?;
-    if victim_cert.certified_liq_deficit == 0 {
-        return Err(format!(
-            "{scale:?} rounded composite did not certify liquidation"
-        ));
+    let certified_liq_deficit = victim_cert.certified_liq_deficit;
+    if certified_liq_deficit != 0 {
+        env.crank_with_reward(2, 0, slot, observations(), &fresh_oracles)
+            .map_err(|error| format!("{scale:?} rounded-price liquidation: {error}"))?;
     }
-
-    env.crank_with_reward(2, 0, slot, observations(), &fresh_oracles)
-        .map_err(|error| format!("{scale:?} rounded-price liquidation: {error}"))?;
     let (wrapper_after, group_after) = env.primary_market_state();
     let victim_capital_loss = victim_capital_before
         .checked_sub(env.primary_portfolio(0).capital.get())
@@ -6716,8 +6715,10 @@ fn discover_one_composite_rounding_violation(
         .get()
         .checked_sub(cranker_capital_before)
         .ok_or_else(|| "composite liquidation reduced cranker capital".to_string())?;
-    env.withdraw_primary(2, cranker_reward)
-        .map_err(|error| format!("{scale:?} withdraw liquidation reward: {error}"))?;
+    if cranker_reward != 0 {
+        env.withdraw_primary(2, cranker_reward)
+            .map_err(|error| format!("{scale:?} withdraw liquidation reward: {error}"))?;
+    }
     let extracted_tokens = env.token_amount(env.actors[2].destination_token);
     if env.token_supply_observed() != supply_before {
         return Err("composite rounding world changed SPL supply".into());
@@ -6727,6 +6728,7 @@ fn discover_one_composite_rounding_violation(
         exact_mark,
         rounded_target: wrapper_after.oracle_target_price_e6,
         rounded_mark: group_after.assets[0].effective_price,
+        certified_liq_deficit,
         victim_capital_loss,
         oi_reduction_q,
         cranker_reward,

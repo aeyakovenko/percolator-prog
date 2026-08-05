@@ -2,33 +2,31 @@
 //!
 //! Normative obligation: Every rounded allocation plus explicit residue equals its exact source amount.
 //!
-//! Evidence in this file (I plus invariant-specific F/M assertions): `v16_program_pr329_pr381_composite_rounding_false_liquidates`, `v16_program_pr253_omitted_rounded_funding_rejects_and_recovers`, `v16_program_pr365_fractional_cap_floor_changes_terminal_payouts`. These tests exercise the deployed public
+//! Evidence in this file (I plus invariant-specific F/M assertions): `v16_program_pr329_pr381_composite_rounding_preserves_exact_price_and_health`, `v16_program_pr253_omitted_rounded_funding_rejects_and_recovers`, `v16_program_pr365_fractional_cap_floor_changes_terminal_payouts`. These tests exercise the deployed public
 //! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
 //! rollback, liveness, or compute outcomes appropriate to the invariant.
 //!
-//! Guarantee boundary: a quarantined counterexample demonstrates public reachability; it does
-//! not certify the invariant on an unfixed pin. Certification requires the fixed-pin assertion
-//! plus every additional verification method required by the charter.
+//! Guarantee boundary: PR329/381 and PR253 are fixed-pin public-route certifications. The
+//! fractional-cap test remains a quarantined counterexample and does not certify that sub-route.
 
 use super::*;
 
 #[test]
-fn v16_program_pr329_pr381_composite_rounding_false_liquidates() {
+fn v16_program_pr329_pr381_composite_rounding_preserves_exact_price_and_health() {
     for case in [
         CompositeRoundingCase::Pr329LargeMove,
         CompositeRoundingCase::Pr381MicroMove,
     ] {
         let reproduction = reproduce_composite_oracle_rounding([0x29; 32], case)
-            .unwrap_or_else(|error| panic!("{case:?} no longer reproduces: {error}"));
+            .unwrap_or_else(|error| panic!("{case:?} fixed route failed: {error}"));
         assert_eq!(reproduction.blocker, KnownBlocker::CompositeOracleRounding);
-        assert_ne!(reproduction.rounded_target, reproduction.exact_mark);
-        assert_ne!(reproduction.rounded_mark, reproduction.exact_mark);
-        assert!(reproduction.victim_capital_loss > 0);
-        assert!(reproduction.oi_reduction_q > 0);
-        assert_eq!(
-            reproduction.cranker_reward,
-            u128::from(reproduction.extracted_tokens)
-        );
+        assert_eq!(reproduction.rounded_target, reproduction.exact_mark);
+        assert_eq!(reproduction.rounded_mark, reproduction.exact_mark);
+        assert_eq!(reproduction.certified_liq_deficit, 0);
+        assert_eq!(reproduction.victim_capital_loss, 0);
+        assert_eq!(reproduction.oi_reduction_q, 0);
+        assert_eq!(reproduction.cranker_reward, 0);
+        assert_eq!(reproduction.extracted_tokens, 0);
     }
 }
 
