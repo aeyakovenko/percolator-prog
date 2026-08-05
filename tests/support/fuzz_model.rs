@@ -221,14 +221,22 @@ pub struct PostExpiryBackingCase {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PostExpiryBackingReproduction {
     pub blocker: KnownBlocker,
+    pub risk_increase_rejected_stale: bool,
+    pub rejected_exact_rollback: bool,
     pub victim_capital_loss: u128,
     pub provider_earnings: u128,
     pub extracted_tokens: u64,
+    pub risk_reduction_landed: bool,
+    pub position_before_reduction_q: u128,
+    pub position_after_reduction_q: u128,
+    pub token_supply_conserved: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct OmittedRescueReproduction {
     pub blocker: KnownBlocker,
+    pub omitted_rejected_nonprogress: bool,
+    pub omitted_exact_rollback: bool,
     pub omitted_position_before_q: u128,
     pub omitted_position_after_q: u128,
     pub omitted_insurance_delta: u128,
@@ -350,6 +358,8 @@ pub struct CompositeRoundingReproduction {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RoundedFundingOmissionReproduction {
     pub blocker: KnownBlocker,
+    pub omitted_rejected_nonprogress: bool,
+    pub omitted_exact_rollback: bool,
     pub control_f_long_num: i128,
     pub control_f_short_num: i128,
     pub attack_f_long_num: i128,
@@ -3329,6 +3339,36 @@ fn run_liquidation_exit_probe(mut seed: [u8; 32]) -> Result<Coverage, String> {
     Ok(runner.coverage)
 }
 
+fn tracked_economic_accounts(env: &V16Svm) -> Vec<(Pubkey, Option<solana_sdk::account::Account>)> {
+    let mut keys = vec![
+        env.market,
+        env.foreign_market,
+        env.mint,
+        env.vault,
+        env.foreign_vault,
+        env.backing_domain_ledger,
+        env.provider_source_token,
+        env.provider_destination_token,
+        env.market_admin_destination_token,
+        env.foreign_actor.portfolio,
+        env.foreign_actor.source_token,
+        env.foreign_actor.destination_token,
+    ];
+    for actor in &env.actors {
+        keys.extend([
+            actor.portfolio,
+            actor.source_token,
+            actor.destination_token,
+            actor.matcher_context,
+        ]);
+    }
+    keys.sort_unstable();
+    keys.dedup();
+    keys.into_iter()
+        .map(|key| (key, env.svm.get_account(&key)))
+        .collect()
+}
+
 pub fn reproduce_post_expiry_backing_fee(
     mut seed: [u8; 32],
     case: PostExpiryBackingCase,
@@ -3424,8 +3464,21 @@ pub fn reproduce_post_expiry_backing_fee(
     if env.current_slot() <= expiry_slot {
         return Err("authenticated Clock did not pass backing expiry".into());
     }
-    env.land_retained(retained)
-        .map_err(|error| format!("retained post-expiry trade no longer lands: {error}"))?;
+    let before_rejection = tracked_economic_accounts(&env);
+    let retained_result = env.land_retained(retained);
+    let risk_increase_rejected_stale = matches!(
+        &retained_result,
+        Err(error) if error.contains("Custom(19)")
+    );
+    if let Err(error) = &retained_result {
+        if !risk_increase_rejected_stale {
+            return Err(format!(
+                "retained post-expiry trade returned an unexpected error: {error}"
+            ));
+        }
+    }
+    let rejected_exact_rollback =
+        retained_result.is_err() && tracked_economic_accounts(&env) == before_rejection;
 
     let (_, after_group) = env.primary_market_state();
     if after_group.current_slot >= env.current_slot() {
@@ -3443,32 +3496,30 @@ pub fn reproduce_post_expiry_backing_fee(
     let victim_capital_loss = capital_before
         .checked_sub(capital_after)
         .ok_or("post-expiry trade increased victim capital")?;
-    if provider_earnings == 0 || victim_capital_loss == 0 {
-        return Err(format!(
-            "post-expiry trade created no extractable loss: capital {capital_before}->{capital_after}, earnings {}->{}",
-            before_bucket.utilization_fee_earnings, after_bucket.utilization_fee_earnings
-        ));
+    if provider_earnings != 0 {
+        env.withdraw_backing_bucket_earnings(domain, provider_earnings)
+            .map_err(|error| format!("withdraw unexpected post-expiry earnings: {error}"))?;
     }
-
-    env.withdraw_backing_bucket_earnings(domain, provider_earnings)
-        .map_err(|error| format!("withdraw post-expiry provider earnings: {error}"))?;
-    let provider_after = env.token_amount(env.provider_destination_token);
-    let extracted_tokens = provider_after
+    let extracted_tokens = env
+        .token_amount(env.provider_destination_token)
         .checked_sub(provider_before)
         .ok_or("provider destination token balance decreased")?;
-    if u128::from(extracted_tokens) != provider_earnings {
-        return Err(format!(
-            "provider could not extract exact post-expiry earnings: ledger {provider_earnings}, SPL {extracted_tokens}"
-        ));
-    }
-    if env.token_supply_observed() != supply_before {
-        return Err("post-expiry extraction changed total SPL supply".into());
-    }
+    let position_before_reduction_q = position_abs_for_asset(&env.primary_portfolio(0), 0)?;
+    let risk_reduction_landed = env
+        .trade_no_cpi(0, 1, 0, -increase_q, winning_mark, 0)
+        .is_ok();
+    let position_after_reduction_q = position_abs_for_asset(&env.primary_portfolio(0), 0)?;
     Ok(PostExpiryBackingReproduction {
         blocker: KnownBlocker::PostExpiryBackingFee,
+        risk_increase_rejected_stale,
+        rejected_exact_rollback,
         victim_capital_loss,
         provider_earnings,
         extracted_tokens,
+        risk_reduction_landed,
+        position_before_reduction_q,
+        position_after_reduction_q,
+        token_supply_conserved: env.token_supply_observed() == supply_before,
     })
 }
 
@@ -3477,31 +3528,38 @@ pub fn reproduce_omitted_rescue_liquidation(
 ) -> Result<OmittedRescueReproduction, String> {
     seed[0] ^= 0x22;
     let (mut omitted, position_before_q, insurance_before) = build_omitted_rescue_world(seed)?;
-    omitted
-        .crank(0, 3, Vec::new())
-        .map_err(|error| format!("omitted-observation stale refresh: {error}"))?;
-    let stale = omitted.primary_portfolio(0);
-    let stale_cert = stale
-        .health_cert
-        .try_to_runtime()
-        .map_err(|error| format!("decode omitted-observation certificate: {error:?}"))?;
-    if stale_cert.certified_liq_deficit == 0 {
-        return Err("omitted later-leg funding did not create a liquidatable certificate".into());
-    }
-    let omitted_position_before_q = position_abs_for_asset(&stale, 1)?;
-    omitted
-        .crank(0, 3, Vec::new())
-        .map_err(|error| format!("PR 220 liquidation no longer lands: {error}"))?;
+    let omitted_position_before_q = position_abs_for_asset(&omitted.primary_portfolio(0), 1)?;
+    let first_before = tracked_economic_accounts(&omitted);
+    let first_result = omitted.crank(0, 3, Vec::new());
+    let (omitted_rejected_nonprogress, omitted_exact_rollback) = match first_result {
+        Err(error) if error.contains("Custom(22)") => {
+            (true, tracked_economic_accounts(&omitted) == first_before)
+        }
+        Err(error) => {
+            return Err(format!(
+                "omitted-observation first crank returned an unexpected error: {error}"
+            ))
+        }
+        Ok(_) => {
+            let second_before = tracked_economic_accounts(&omitted);
+            match omitted.crank(0, 3, Vec::new()) {
+                Err(error) if error.contains("Custom(22)") => {
+                    (true, tracked_economic_accounts(&omitted) == second_before)
+                }
+                Err(error) => {
+                    return Err(format!(
+                        "omitted-observation liquidation returned an unexpected error: {error}"
+                    ))
+                }
+                Ok(_) => (false, false),
+            }
+        }
+    };
     let omitted_position_after_q = position_abs_for_asset(&omitted.primary_portfolio(0), 1)?;
     let omitted_insurance_after = omitted.primary_market_state().1.insurance;
     let omitted_insurance_delta = omitted_insurance_after
         .checked_sub(insurance_before)
         .ok_or("omitted-observation liquidation decreased insurance")?;
-    if omitted_position_after_q >= omitted_position_before_q || omitted_insurance_delta == 0 {
-        return Err(format!(
-            "omitted observation did not transfer liquidation value: position {omitted_position_before_q}->{omitted_position_after_q}, insurance {insurance_before}->{omitted_insurance_after}"
-        ));
-    }
 
     let (mut complete, complete_position_before_q, complete_insurance_before) =
         build_omitted_rescue_world(seed)?;
@@ -3548,6 +3606,8 @@ pub fn reproduce_omitted_rescue_liquidation(
 
     Ok(OmittedRescueReproduction {
         blocker: KnownBlocker::OmittedRescueAccrualLiquidation,
+        omitted_rejected_nonprogress,
+        omitted_exact_rollback,
         omitted_position_before_q,
         omitted_position_after_q,
         omitted_insurance_delta,
@@ -12352,29 +12412,16 @@ pub fn reproduce_rounded_funding_omission(
     seed[0] ^= 0x53;
     let control = run_rounded_funding_world(seed, false)?;
     let attack = run_rounded_funding_world(seed, true)?;
-    if !attack.0 {
-        return Err("PR 253 no-observation crank no longer lands".into());
-    }
     let victim_payout_loss = control
-        .3
-        .checked_sub(attack.3)
+        .victim_payout
+        .checked_sub(attack.victim_payout)
         .ok_or("rounded-funding omission increased victim payout")?;
     let attacker_payout_gain = attack
-        .4
-        .checked_sub(control.4)
+        .counterparty_payout
+        .checked_sub(control.counterparty_payout)
         .ok_or("rounded-funding omission decreased short payout")?;
-    if victim_payout_loss == 0 || victim_payout_loss != attacker_payout_gain {
-        return Err(format!(
-            "rounded-funding omission did not transfer equal SPL value: victim {}/{}; short {}/{}",
-            control.3, attack.3, control.4, attack.4
-        ));
-    }
-    if control.1 <= 0
-        || control.2 >= 0
-        || attack.1 != 0
-        || attack.2 != 0
-        || u128::from(control.3) + u128::from(control.4)
-            != u128::from(attack.3) + u128::from(attack.4)
+    if u128::from(control.victim_payout) + u128::from(control.counterparty_payout)
+        != u128::from(attack.victim_payout) + u128::from(attack.counterparty_payout)
     {
         return Err(format!(
             "rounded-funding indexes/payouts do not match the omission class: control={control:?}, attack={attack:?}"
@@ -12382,10 +12429,12 @@ pub fn reproduce_rounded_funding_omission(
     }
     Ok(RoundedFundingOmissionReproduction {
         blocker: KnownBlocker::RoundedFundingOmission,
-        control_f_long_num: control.1,
-        control_f_short_num: control.2,
-        attack_f_long_num: attack.1,
-        attack_f_short_num: attack.2,
+        omitted_rejected_nonprogress: attack.omitted_rejected_nonprogress,
+        omitted_exact_rollback: attack.omitted_exact_rollback,
+        control_f_long_num: control.f_long_num,
+        control_f_short_num: control.f_short_num,
+        attack_f_long_num: attack.f_long_num,
+        attack_f_short_num: attack.f_short_num,
         victim_payout_loss,
         attacker_payout_gain,
     })
@@ -14330,10 +14379,20 @@ fn run_forfeit_funding_order_world(
     ))
 }
 
+#[derive(Clone, Copy, Debug)]
+struct RoundedFundingWorld {
+    omitted_rejected_nonprogress: bool,
+    omitted_exact_rollback: bool,
+    f_long_num: i128,
+    f_short_num: i128,
+    victim_payout: u64,
+    counterparty_payout: u64,
+}
+
 fn run_rounded_funding_world(
     seed: [u8; 32],
     omit_selected_observation: bool,
-) -> Result<(bool, i128, i128, u64, u64), String> {
+) -> Result<RoundedFundingWorld, String> {
     const PRICE: u64 = 100;
     const MARK: u64 = 99;
     const DEPOSIT: u128 = 100_000_000;
@@ -14391,23 +14450,35 @@ fn run_rounded_funding_world(
         }],
     )
     .map_err(|error| format!("advance unrelated market epoch: {error}"))?;
+    let before_omission = tracked_economic_accounts(&env);
     let refresh = env.crank(
         0,
         3,
         if omit_selected_observation {
             Vec::new()
         } else {
-            asset0_observation
+            asset0_observation.clone()
         },
     );
-    let missing_observation_landed = refresh.is_ok();
-    if !omit_selected_observation {
+    let (omitted_rejected_nonprogress, omitted_exact_rollback) = if omit_selected_observation {
+        match refresh {
+            Err(error) if error.contains("Custom(22)") => {
+                let exact = tracked_economic_accounts(&env) == before_omission;
+                env.crank(0, 3, asset0_observation)
+                    .map_err(|error| format!("observed recovery after rejection: {error}"))?;
+                (true, exact)
+            }
+            Err(error) => {
+                return Err(format!(
+                    "omitted rounded-funding observation returned an unexpected error: {error}"
+                ))
+            }
+            Ok(_) => (false, false),
+        }
+    } else {
         refresh.map_err(|error| format!("observed rounded-funding refresh: {error}"))?;
-    } else if let Err(error) = refresh {
-        return Err(format!(
-            "omitted rounded-funding observation rejected: {error}"
-        ));
-    }
+        (false, false)
+    };
     let (_, funded) = env.primary_market_state();
 
     env.crank(1, 3, Vec::new())
@@ -14426,13 +14497,14 @@ fn run_rounded_funding_world(
         .map_err(|error| format!("withdraw rounded-funding victim: {error}"))?;
     env.withdraw_primary(1, short_capital)
         .map_err(|error| format!("withdraw rounded-funding short: {error}"))?;
-    Ok((
-        missing_observation_landed,
-        funded.assets[0].f_long_num,
-        funded.assets[0].f_short_num,
-        env.token_amount(env.actors[0].destination_token),
-        env.token_amount(env.actors[1].destination_token),
-    ))
+    Ok(RoundedFundingWorld {
+        omitted_rejected_nonprogress,
+        omitted_exact_rollback,
+        f_long_num: funded.assets[0].f_long_num,
+        f_short_num: funded.assets[0].f_short_num,
+        victim_payout: env.token_amount(env.actors[0].destination_token),
+        counterparty_payout: env.token_amount(env.actors[1].destination_token),
+    })
 }
 
 fn crank_adapter_steps(

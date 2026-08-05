@@ -191,19 +191,8 @@ cargo kani --tests
 ```
 
 On engine pin `143e68c4917ed0400a27b952f036a5677047cd84`, the full `v16_cu` inventory has
-664 passing tests and these two intentionally red public-route TDD probes:
-
-- `v16_attack_pending_later_rounded_rescue_funding_requires_observation` (INV-053)
-- `v16_probe_post_expiry_trade_cannot_charge_backing_fee` (INV-063)
-
-The unfiltered command intentionally returns nonzero until both defects are fixed. Use the
-following command to verify all non-red CU tests without weakening or concealing the open probes:
-
-```bash
-cargo test --test v16_cu -- \
-  --skip v16_attack_pending_later_rounded_rescue_funding_requires_observation \
-  --skip v16_probe_post_expiry_trade_cannot_charge_backing_fee
-```
+666 passing tests. The former red PR220/PR366 and PR367 probes are fixed-pin regressions under
+INV-053 and INV-063; the unfiltered command is the required verification command.
 
 Use `PERCOLATOR_FUZZ_CASES`, `PERCOLATOR_FUZZ_ACTIONS`, and
 `PERCOLATOR_FUZZ_SHRINK_ITERS` to raise the generated stateful budget. Kani harness names now include

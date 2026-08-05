@@ -72,7 +72,7 @@ INV-045	trade-driven-mark/liquidation-economics	v16_program_mark_mode_route_matr
 INV-045	mark-movement/bilateral-fee-support	v16_program_matcher_route_matrix_discovers_one_sided_mark_fees	mark-movement-fees-must-be-bilaterally-supported	369
 INV-038	composite-rounding/large-factorization	v16_program_composite_scale_matrix_discovers_route_rounding_value	composite-price-is-rounded-once-after-exact-composition	329
 INV-038	composite-rounding/micro-factorization	v16_program_composite_scale_matrix_discovers_route_rounding_value	composite-price-is-rounded-once-after-exact-composition	381
-INV-038	observation-omission/rounded-funding	v16_program_selected_observation_omission_discovers_rounded_transfer_loss	omitted-observation-cannot-erase-balanced-rounded-transfer	253
+INV-038	observation-omission/rounded-funding	v16_program_selected_observation_omission_rejects_and_preserves_rounded_transfer	omitted-observation-cannot-erase-balanced-rounded-transfer	253
 INV-038	fractional-movement/max-dt-crank	v16_program_fractional_max_dt_cranks_discover_terminal_value_stall	fractional-cap-residue-must-accumulate-to-target	365
 INV-020	composite-oracle/timestamp-coherence	v16_program_composite_timestamp_coherence_discovers_cross_epoch_liquidation	composite-oracle-legs-must-share-one-coherent-observation-epoch	331
 INV-020	hybrid-terminal/expired-composite-leg	v16_program_hybrid_terminal_snapshot_discovers_expired_leg_settlement	terminal-snapshot-must-use-current-authenticated-oracle-state	261
@@ -89,7 +89,7 @@ INV-067	terminal-bankruptcy/claim-free-residual	v16_program_terminal_bankruptcy_
 INV-034	cross-asset-debt/foreign-insurance	v16_program_cross_asset_debt_discovers_foreign_insurance_spend	insurance-spend-remains-source-domain-local	290
 INV-031	cross-source-claims/backing-consume	v16_program_two_source_claims_discover_backing_double_consume	backing-atoms-cannot-support-claims-from-another-source	267
 INV-035	bankruptcy-residual/cross-domain-b	v16_program_two_asset_bankruptcy_discovers_cross_domain_b_settlement	b-loss-reduces-only-the-originating-source-domain	281
-INV-053	full-refresh/omitted-later-leg	v16_program_full_refresh_equivalence_discovers_omitted_rescue_liquidation	liquidation-certificate-cannot-be-healthier-than-full-refresh	220,366
+INV-053	full-refresh/omitted-later-leg	v16_program_full_refresh_equivalence_rejects_omitted_rescue_liquidation	liquidation-certificate-cannot-be-healthier-than-full-refresh	220,366
 INV-061	resolved-adl/close-order	v16_program_resolved_adl_close_order_matrix_discovers_funded_exit_lock	funded-resolved-adl-winner-has-bounded-public-exit	216
 INV-061	bankruptcy/reset-carry-liquidation	v16_program_reset_carry_liquidation_matrix_discovers_crank_lock	fractional-reset-carry-cannot-block-permissionless-liquidation	218
 INV-061	post-adl/split-transfer-extraction	v16_program_post_adl_transfer_extraction_matrix_discovers_backing_drain	post-adl-split-cannot-increase-withdrawable-backing-funded-value	250
@@ -107,7 +107,7 @@ INV-071	micro-price/eager-crank-schedule	v16_program_micro_price_schedule_matrix
 INV-071	bankruptcy-escalation/funded-survivor	v16_program_bankruptcy_escalation_matrix_discovers_funded_survivor_lock	recovery-required-transition-must-not-rollback-funded-survivor-progress	190
 INV-071	prospective-loss/lapsed-source	v16_program_prospective_loss_expiry_matrix_discovers_resolved_exit_lock	prospective-loss-must-not-create-backing-in-lapsed-domain	298
 INV-074	bankruptcy-scope/unrelated-backed-claim	v16_program_unrelated_bankruptcy_scope_matrix_discovers_backed_claim_lock	asset-local-bankruptcy-cannot-lock-unrelated-backed-claim	229
-INV-063	backing-expiry/authenticated-clock	v16_program_backing_expiry_boundary_discovers_extractable_stale_fee	expired-backing-cannot-create-withdrawable-provider-value	367
+INV-063	backing-expiry/authenticated-clock	v16_program_backing_expiry_boundary_rejects_stale_fee_and_preserves_exit	expired-backing-cannot-create-withdrawable-provider-value	367
 INV-063	backing-expiry/favorable-consumers	v16_program_expired_backing_consumer_matrix_discovers_principal_extraction	expired-backing-cannot-capitalize-and-extract-independent-principal	363
 INV-063	retained-maturity/terminal-progress	v16_program_retained_maturity_matrix_discovers_terminal_funded_lock	expired-retained-operation-cannot-consume-principal-and-lock-terminal-users	361
 INV-063	resolved-settlement/lapsed-backing	v16_program_lapsed_backing_settlement_matrix_discovers_resolved_exit_lock	lapsed-backing-must-not-lock-resolved-user-exit	291

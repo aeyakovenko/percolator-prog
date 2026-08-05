@@ -6,13 +6,13 @@
 //! `v16_program_active_leg_currentness_route_order_matrix` and its generated companion build two
 //! identical multi-leg portfolios through every public trade route and both active-leg orders.
 //! The control refreshes every economically relevant leg; the adversarial path omits a pending
-//! funding observation. A violation requires the omitted route to certify and execute liquidation
-//! with an insurance transfer while the fully refreshed route preserves the same position with
-//! zero deficit. This matrix is independent of the wrapper's selected-leg implementation.
+//! funding observation. Every route/order pair requires the unsafe liquidation attempt to return
+//! `EngineNonProgress` with exact economic rollback, while the fully observed route preserves the
+//! same position with zero deficit and no insurance transfer. This matrix is independent of the
+//! wrapper's selected-leg ordering.
 //!
-//! Guarantee boundary: a quarantined counterexample demonstrates public reachability; it does
-//! not certify the invariant on an unfixed pin. Certification requires the fixed-pin assertion
-//! plus every additional verification method required by the charter.
+//! Guarantee boundary: this is bounded generated public-route evidence over four trade routes and
+//! both active-leg orders. It does not replace a proof over every reachable portfolio state.
 
 use super::*;
 
@@ -26,8 +26,8 @@ fn v16_program_active_leg_currentness_route_order_matrix() {
                     panic!("{route:?}/{leg_order:?} currentness world failed: {error}")
                 });
             assert!(
-                discovery.is_violation(),
-                "{route:?}/{leg_order:?} did not expose omitted active-leg accrual: {discovery:?}"
+                discovery.preserves_full_refresh_equivalence(),
+                "{route:?}/{leg_order:?} did not reject omitted active-leg accrual safely: {discovery:?}"
             );
         }
     }
@@ -46,7 +46,7 @@ proptest! {
     })]
 
     #[test]
-    fn v16_program_full_refresh_equivalence_discovers_omitted_rescue_liquidation(
+    fn v16_program_full_refresh_equivalence_rejects_omitted_rescue_liquidation(
         seed in any::<[u8; 32]>(),
         route in prop::sample::select(DiscoveryTradeRoute::ALL.to_vec()),
         leg_order in prop::sample::select(ActiveLegOrder::ALL.to_vec()),
@@ -54,7 +54,7 @@ proptest! {
         let result = discover_active_leg_currentness_violation(seed, route, leg_order);
         prop_assert!(
             result.is_ok(),
-            "full-refresh discovery failed for seed {:?}, route {:?}, order {:?}: {}",
+            "full-refresh verification failed for seed {:?}, route {:?}, order {:?}: {}",
             seed,
             route,
             leg_order,
@@ -62,8 +62,8 @@ proptest! {
         );
         let discovery = result.unwrap();
         prop_assert!(
-            discovery.is_violation(),
-            "partial refresh did not create a false liquidation relative to full refresh: {:?}",
+            discovery.preserves_full_refresh_equivalence(),
+            "partial refresh did not reject safely relative to full refresh: {:?}",
             discovery
         );
     }

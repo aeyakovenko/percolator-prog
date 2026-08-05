@@ -6,12 +6,9 @@
 //! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
 //! rollback, liveness, or compute outcomes appropriate to the invariant.
 //!
-//! Guarantee boundary: a quarantined counterexample demonstrates public reachability; it does
-//! not certify the invariant on an unfixed pin. Certification requires the fixed-pin assertion
-//! plus every additional verification method required by the charter.
-//!
-//! Current result on PR135 base `1082c060`: the first test is an intentionally red public-route
-//! TDD counterexample. The other tests in this module remain positive regression evidence.
+//! Guarantee boundary: the first test certifies the minimized PR220/PR366 trace on the fixed
+//! program and checks exact rollback plus the fully observed healthy control. The stateful matrix
+//! supplies bounded coverage over all four trade routes and both active-leg orders.
 
 use super::*;
 

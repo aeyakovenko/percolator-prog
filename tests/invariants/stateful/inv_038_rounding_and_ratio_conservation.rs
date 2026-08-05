@@ -7,9 +7,10 @@
 //! composite price constant while changing its factorization at large and micro scales. It then
 //! requires wrapper target, engine mark, liquidation eligibility, and extracted reward to agree
 //! with exact single-round arithmetic.
-//! `v16_program_selected_observation_omission_discovers_rounded_transfer_loss` compares identical
+//! `v16_program_selected_observation_omission_rejects_and_preserves_rounded_transfer` compares identical
 //! public worlds with and without the selected asset observation after an unrelated epoch advance;
-//! a successful omission must preserve funding indexes and terminal payouts exactly.
+//! omission must reject with exact rollback, after which the observed continuation must preserve
+//! funding indexes and terminal payouts exactly.
 //! `v16_program_fractional_max_dt_cranks_discover_terminal_value_stall` repeatedly executes the
 //! bounded public crank at maximum elapsed time and requires fractional cap residue to accumulate
 //! until the target is reached; it also reconciles any stalled price against terminal payouts.
@@ -63,15 +64,15 @@ proptest! {
     })]
 
     #[test]
-    fn v16_program_selected_observation_omission_discovers_rounded_transfer_loss(
+    fn v16_program_selected_observation_omission_rejects_and_preserves_rounded_transfer(
         seed in any::<[u8; 32]>()
     ) {
         let discovery = discover_observation_omission_violation(seed)
             .map_err(TestCaseError::fail)?;
-        eprintln!("independent observation-omission discovery: {discovery:?}");
+        eprintln!("independent observation-omission verification: {discovery:?}");
         prop_assert!(
-            discovery.is_violation(),
-            "vulnerable-pin observation omission changed: {:?}",
+            discovery.preserves_rounded_transfer(),
+            "observation omission did not reject and recover safely: {:?}",
             discovery
         );
     }
@@ -140,16 +141,17 @@ proptest! {
     }
 
     #[test]
-    fn v16_program_pr253_rounded_funding_omission_fuzz(
+    fn v16_program_pr253_rounded_funding_omission_rejection_fuzz(
         seed in rounded_funding_seed_strategy()
     ) {
-        let result = reproduce_rounded_funding_omission(seed);
-        prop_assert!(
-            result.is_ok(),
-            "PR 253 no longer reproduces for seed {:?}: {}",
-            seed,
-            result.unwrap_err()
-        );
+        let reproduction = reproduce_rounded_funding_omission(seed)
+            .map_err(TestCaseError::fail)?;
+        prop_assert!(reproduction.omitted_rejected_nonprogress);
+        prop_assert!(reproduction.omitted_exact_rollback);
+        prop_assert_eq!(reproduction.attack_f_long_num, reproduction.control_f_long_num);
+        prop_assert_eq!(reproduction.attack_f_short_num, reproduction.control_f_short_num);
+        prop_assert_eq!(reproduction.victim_payout_loss, 0);
+        prop_assert_eq!(reproduction.attacker_payout_gain, 0);
     }
 
     #[test]

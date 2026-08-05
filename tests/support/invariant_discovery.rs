@@ -937,6 +937,8 @@ pub struct CompositeRoundingDiscovery {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ObservationOmissionDiscovery {
     pub omitted_landed: bool,
+    pub omitted_rejected_nonprogress: bool,
+    pub omitted_exact_rollback: bool,
     pub control_f_long_num: i128,
     pub control_f_short_num: i128,
     pub omitted_f_long_num: i128,
@@ -1019,6 +1021,8 @@ pub struct CrossDomainBDiscovery {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FullRefreshDiscovery {
+    pub omitted_rejected_nonprogress: bool,
+    pub omitted_exact_rollback: bool,
     pub omitted_position_before_q: u128,
     pub omitted_position_after_q: u128,
     pub omitted_liq_deficit: u128,
@@ -1042,9 +1046,15 @@ pub struct BackingExpiryDiscovery {
     pub expiry_slot: u64,
     pub authenticated_slot: u64,
     pub engine_slot: u64,
+    pub risk_increase_rejected_stale: bool,
+    pub rejected_exact_rollback: bool,
     pub victim_capital_loss: u128,
     pub provider_earnings: u128,
     pub extracted_tokens: u64,
+    pub risk_reduction_landed: bool,
+    pub position_before_reduction_q: u128,
+    pub position_after_reduction_q: u128,
+    pub token_supply_conserved: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1336,42 +1346,45 @@ impl FlatSourceLienDiscovery {
 }
 
 impl BackingExpiryDiscovery {
-    pub fn is_violation(&self) -> bool {
+    pub fn preserves_expiry_normalization(&self) -> bool {
         self.authenticated_slot > self.expiry_slot
             && self.engine_slot < self.authenticated_slot
-            && self.victim_capital_loss != 0
-            && self.provider_earnings == self.victim_capital_loss
-            && u128::from(self.extracted_tokens) == self.provider_earnings
+            && self.risk_increase_rejected_stale
+            && self.rejected_exact_rollback
+            && self.victim_capital_loss == 0
+            && self.provider_earnings == 0
+            && self.extracted_tokens == 0
+            && self.risk_reduction_landed
+            && self.position_after_reduction_q < self.position_before_reduction_q
+            && self.token_supply_conserved
     }
 }
 
 impl ExpiredBackingTradeRouteDiscovery {
-    pub fn created_expired_counterparty_lien(&self) -> bool {
-        self.authenticated_slot > self.expiry_slot
-            && self.engine_slot < self.authenticated_slot
-            && self.risk_increase_landed
-            && self.counterparty_lien_increase_num != 0
-            && self.token_supply_conserved
-    }
-
-    pub fn extracted_expired_backing_fee(&self) -> bool {
-        self.created_expired_counterparty_lien()
-            && self.victim_capital_loss != 0
-            && self.provider_earnings == self.victim_capital_loss
-            && u128::from(self.extracted_tokens) == self.provider_earnings
-    }
-
     pub fn preserves_risk_reduction(&self) -> bool {
         self.risk_reduction_landed
             && self.position_after_reduction_q < self.position_before_reduction_q
     }
+
+    pub fn rejects_expired_risk_increase_safely(&self) -> bool {
+        self.authenticated_slot > self.expiry_slot
+            && self.engine_slot < self.authenticated_slot
+            && !self.risk_increase_landed
+            && self.rejected_exact_rollback
+            && self.counterparty_lien_increase_num == 0
+            && self.victim_capital_loss == 0
+            && self.provider_earnings == 0
+            && self.extracted_tokens == 0
+            && self.token_supply_conserved
+    }
 }
 
 impl FullRefreshDiscovery {
-    pub fn is_violation(&self) -> bool {
-        self.omitted_liq_deficit != 0
-            && self.omitted_position_after_q < self.omitted_position_before_q
-            && self.omitted_insurance_delta != 0
+    pub fn preserves_full_refresh_equivalence(&self) -> bool {
+        self.omitted_rejected_nonprogress
+            && self.omitted_exact_rollback
+            && self.omitted_position_after_q == self.omitted_position_before_q
+            && self.omitted_insurance_delta == 0
             && self.complete_position_before_q == self.complete_position_after_q
             && self.complete_liq_deficit == 0
             && self.complete_insurance_delta == 0
@@ -1456,14 +1469,16 @@ impl FractionalMovementDiscovery {
 }
 
 impl ObservationOmissionDiscovery {
-    pub fn is_violation(&self) -> bool {
-        self.omitted_landed
+    pub fn preserves_rounded_transfer(&self) -> bool {
+        !self.omitted_landed
+            && self.omitted_rejected_nonprogress
+            && self.omitted_exact_rollback
             && self.control_f_long_num > 0
             && self.control_f_short_num < 0
-            && self.omitted_f_long_num == 0
-            && self.omitted_f_short_num == 0
-            && self.victim_payout_loss != 0
-            && self.victim_payout_loss == self.counterparty_payout_gain
+            && self.omitted_f_long_num == self.control_f_long_num
+            && self.omitted_f_short_num == self.control_f_short_num
+            && self.victim_payout_loss == 0
+            && self.counterparty_payout_gain == 0
     }
 }
 
@@ -6689,6 +6704,8 @@ pub fn discover_composite_rounding_violations(
 #[derive(Clone, Copy, Debug)]
 struct ObservationOmissionWorld {
     call_landed: bool,
+    rejected_nonprogress: bool,
+    exact_rollback: bool,
     f_long_num: i128,
     f_short_num: i128,
     victim_payout: u128,
@@ -6748,17 +6765,36 @@ fn run_observation_omission_world(
         }],
     )
     .map_err(|error| format!("advance unrelated epoch: {error}"))?;
+    let before_omission = fingerprint(&env);
     let refresh = env.crank(
         0,
         3,
         if omit_selected_observation {
             Vec::new()
         } else {
-            selected_observation
+            selected_observation.clone()
         },
     );
     let call_landed = refresh.is_ok();
-    refresh.map_err(|error| format!("selected funding refresh rejected: {error}"))?;
+    let (rejected_nonprogress, exact_rollback) = if omit_selected_observation {
+        match refresh {
+            Err(error) if error.contains("Custom(22)") => {
+                let exact = fingerprint(&env) == before_omission;
+                env.crank(0, 3, selected_observation)
+                    .map_err(|error| format!("observed recovery after rejection: {error}"))?;
+                (true, exact)
+            }
+            Err(error) => {
+                return Err(format!(
+                    "omitted selected observation returned an unexpected error: {error}"
+                ))
+            }
+            Ok(_) => (false, false),
+        }
+    } else {
+        refresh.map_err(|error| format!("selected funding refresh rejected: {error}"))?;
+        (false, false)
+    };
     let funded = env.primary_market_state().1.assets[0];
 
     env.crank(1, 3, Vec::new())
@@ -6782,6 +6818,8 @@ fn run_observation_omission_world(
     }
     Ok(ObservationOmissionWorld {
         call_landed,
+        rejected_nonprogress,
+        exact_rollback,
         f_long_num: funded.f_long_num,
         f_short_num: funded.f_short_num,
         victim_payout: u128::from(env.token_amount(env.actors[0].destination_token)),
@@ -6816,6 +6854,8 @@ pub fn discover_observation_omission_violation(
     }
     Ok(ObservationOmissionDiscovery {
         omitted_landed: omitted.call_landed,
+        omitted_rejected_nonprogress: omitted.rejected_nonprogress,
+        omitted_exact_rollback: omitted.exact_rollback,
         control_f_long_num: control.f_long_num,
         control_f_short_num: control.f_short_num,
         omitted_f_long_num: omitted.f_long_num,
@@ -8203,19 +8243,37 @@ pub fn discover_active_leg_currentness_violation(
     seed[2] ^= leg_order.discriminator();
     let (mut omitted, _, omitted_insurance_before) =
         build_full_refresh_discovery_world(seed, route, leg_order)?;
-    omitted
-        .crank(0, 3, Vec::new())
-        .map_err(|error| format!("omitted-observation refresh: {error}"))?;
+    let omitted_position_before_q = discovery_total_abs_position(&omitted.primary_portfolio(0))?;
+    let first_before = fingerprint(&omitted);
+    let first_result = omitted.crank(0, 3, Vec::new());
+    let (omitted_rejected_nonprogress, omitted_exact_rollback) = match first_result {
+        Err(error) if error.contains("Custom(22)") => (true, fingerprint(&omitted) == first_before),
+        Err(error) => {
+            return Err(format!(
+                "omitted-observation first crank returned an unexpected error: {error}"
+            ))
+        }
+        Ok(_) => {
+            let second_before = fingerprint(&omitted);
+            match omitted.crank(0, 3, Vec::new()) {
+                Err(error) if error.contains("Custom(22)") => {
+                    (true, fingerprint(&omitted) == second_before)
+                }
+                Err(error) => {
+                    return Err(format!(
+                        "omitted-observation liquidation returned an unexpected error: {error}"
+                    ))
+                }
+                Ok(_) => (false, false),
+            }
+        }
+    };
     let omitted_account = omitted.primary_portfolio(0);
     let omitted_cert = omitted_account
         .health_cert
         .try_to_runtime()
         .map_err(|error| format!("decode omitted certificate: {error:?}"))?;
-    let omitted_position_before_q = discovery_total_abs_position(&omitted_account)?;
-    omitted
-        .crank(0, 3, Vec::new())
-        .map_err(|error| format!("omitted-observation liquidation: {error}"))?;
-    let omitted_position_after_q = discovery_total_abs_position(&omitted.primary_portfolio(0))?;
+    let omitted_position_after_q = discovery_total_abs_position(&omitted_account)?;
     let omitted_insurance_delta = omitted
         .primary_market_state()
         .1
@@ -8262,6 +8320,8 @@ pub fn discover_active_leg_currentness_violation(
         return Err("paired full-refresh fixtures opened different positions".into());
     }
     Ok(FullRefreshDiscovery {
+        omitted_rejected_nonprogress,
+        omitted_exact_rollback,
         omitted_position_before_q,
         omitted_position_after_q,
         omitted_liq_deficit: omitted_cert.certified_liq_deficit,
@@ -8356,8 +8416,20 @@ pub fn discover_backing_expiry_violation(
         .checked_add(1)
         .ok_or_else(|| "post-expiry landing slot overflow".to_string())?;
     env.warp_to_slot(authenticated_slot);
-    env.land_retained(retained)
-        .map_err(|error| format!("retained trade after authenticated expiry: {error}"))?;
+    let before_rejection = fingerprint(&env);
+    let retained_result = env.land_retained(retained);
+    let risk_increase_rejected_stale = matches!(
+        &retained_result,
+        Err(error) if error.contains("Custom(19)")
+    );
+    if let Err(error) = &retained_result {
+        if !risk_increase_rejected_stale {
+            return Err(format!(
+                "retained post-expiry trade returned an unexpected error: {error}"
+            ));
+        }
+    }
+    let rejected_exact_rollback = retained_result.is_err() && fingerprint(&env) == before_rejection;
 
     let after_group = env.primary_market_state().1;
     let after_bucket = after_group.source_backing_buckets[DOMAIN as usize];
@@ -8368,22 +8440,34 @@ pub fn discover_backing_expiry_violation(
     let victim_capital_loss = capital_before
         .checked_sub(env.primary_portfolio(0).capital.get())
         .ok_or_else(|| "post-expiry trade increased victim capital".to_string())?;
-    env.withdraw_backing_bucket_earnings(DOMAIN, provider_earnings)
-        .map_err(|error| format!("withdraw expired-backing earnings: {error}"))?;
+    if provider_earnings != 0 {
+        env.withdraw_backing_bucket_earnings(DOMAIN, provider_earnings)
+            .map_err(|error| format!("withdraw unexpected post-expiry earnings: {error}"))?;
+    }
     let extracted_tokens = env
         .token_amount(env.provider_destination_token)
         .checked_sub(provider_before)
-        .ok_or_else(|| "provider token balance decreased".to_string())?;
-    if env.token_supply_observed() != supply_before {
-        return Err("expired-backing extraction changed SPL supply".into());
-    }
+        .ok_or_else(|| "provider destination token balance decreased".to_string())?;
+    let position_before_reduction_q =
+        discovery_position(&env.primary_portfolio(0), 0)?.unsigned_abs();
+    let risk_reduction_landed = env
+        .trade_no_cpi(0, 1, 0, -increase_q, winning_mark, 0)
+        .is_ok();
+    let position_after_reduction_q =
+        discovery_position(&env.primary_portfolio(0), 0)?.unsigned_abs();
     Ok(BackingExpiryDiscovery {
         expiry_slot,
         authenticated_slot,
         engine_slot: after_group.current_slot,
+        risk_increase_rejected_stale,
+        rejected_exact_rollback,
         victim_capital_loss,
         provider_earnings,
         extracted_tokens,
+        risk_reduction_landed,
+        position_before_reduction_q,
+        position_after_reduction_q,
+        token_supply_conserved: env.token_supply_observed() == supply_before,
     })
 }
 
