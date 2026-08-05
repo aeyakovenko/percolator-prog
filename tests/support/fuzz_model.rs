@@ -3580,11 +3580,27 @@ pub fn reproduce_omitted_rescue_liquidation(
     if complete.primary_market_state().1.assets[0].f_long_num == 0 {
         return Err("complete-world rescue observation booked no long funding".into());
     }
+    let complete_oracle_account_counts = [
+        complete.primary_profile(0).oracle_leg_count,
+        complete.primary_profile(1).oracle_leg_count,
+    ];
+    let complete_observations = || {
+        vec![
+            CrankObservationHint {
+                asset_index: 0,
+                oracle_accounts: complete_oracle_account_counts[0],
+            },
+            CrankObservationHint {
+                asset_index: 1,
+                oracle_accounts: complete_oracle_account_counts[1],
+            },
+        ]
+    };
     complete
-        .crank(1, 3, Vec::new())
+        .crank(1, 3, complete_observations())
         .map_err(|error| format!("complete-world counterparty refresh: {error}"))?;
     complete
-        .crank(0, 3, Vec::new())
+        .crank(0, 3, complete_observations())
         .map_err(|error| format!("complete-world user refresh: {error}"))?;
     let complete_account = complete.primary_portfolio(0);
     let complete_position_after_q = position_abs_for_asset(&complete_account, 1)?;
@@ -5141,23 +5157,20 @@ pub fn reproduce_prospective_funding_rewrite(
     mut seed: [u8; 32],
     route: TradeRoute,
 ) -> Result<ProspectiveFundingRewriteReproduction, String> {
-    if !matches!(route, TradeRoute::NoCpi | TradeRoute::BatchNoCpi) {
-        return Err(format!(
-            "{route:?} is not a reported-price route covered by PR 380"
-        ));
-    }
     seed[0] ^= match route {
         TradeRoute::NoCpi => 0x80,
+        TradeRoute::Cpi => 0xc8,
         TradeRoute::BatchNoCpi => 0xb8,
-        TradeRoute::Cpi | TradeRoute::BatchCpi => unreachable!(),
+        TradeRoute::BatchCpi => 0xd8,
     };
     let control = run_prospective_funding_world(seed, route, false)?;
     let attack = run_prospective_funding_world(seed, route, true)?;
-    if control.stamp_fee != attack.stamp_fee
-        || control.final_mark != attack.final_mark
-        || control.final_effective_price != attack.final_effective_price
-        || control.f_short_num <= 0
-        || attack.f_short_num != 0
+    let fixed_execution_price = matches!(route, TradeRoute::NoCpi | TradeRoute::BatchNoCpi);
+    if control.f_short_num <= 0
+        || (fixed_execution_price
+            && (control.stamp_fee != attack.stamp_fee
+                || control.final_mark != attack.final_mark
+                || control.final_effective_price != attack.final_effective_price))
     {
         return Err(format!(
             "PR 380 worlds do not isolate funding timestamp order: control={control:?}, \
@@ -5172,12 +5185,12 @@ pub fn reproduce_prospective_funding_rewrite(
         .coalition_payout
         .checked_sub(control.coalition_payout)
         .ok_or("PR 380 trade-first ordering decreased coalition payout")?;
-    if victim_payout_loss == 0
-        || victim_payout_loss != attacker_coalition_gain
-        || control.total_payout != attack.total_payout
+    if fixed_execution_price
+        && (victim_payout_loss != attacker_coalition_gain
+            || control.total_payout != attack.total_payout)
     {
         return Err(format!(
-            "PR 380 prospective rewrite did not transfer conserved SPL value: \
+            "PR 380 prospective worlds do not conserve order-independent SPL value: \
              control={control:?}, attack={attack:?}"
         ));
     }
@@ -12330,6 +12343,9 @@ fn run_prospective_funding_world(
         .map_err(|error| format!("PR 380 publish honest premium: {error}"))?;
     let after_push = env.primary_profile(0);
     if after_push.mark_ewma_e6 != 1_500_000
+        || after_push.funding_mark_e6 != after_push.mark_ewma_e6
+        || after_push.funding_mark_pending_e6 != 0
+        || after_push.funding_mark_pending_slot != 0
         || env.primary_market_state().1.assets[0].effective_price != PRICE
     {
         return Err(format!(
@@ -12365,6 +12381,15 @@ fn run_prospective_funding_world(
     };
     if stamp_before_catchup {
         stamp(&mut env).map_err(|error| format!("PR 380 trade-first stamp: {error}"))?;
+        let staged = env.primary_profile(0);
+        if staged.funding_mark_e6 != after_push.funding_mark_e6
+            || staged.funding_mark_pending_e6 == 0
+            || staged.funding_mark_pending_slot != CATCHUP_SLOT
+        {
+            return Err(format!(
+                "PR 380 trade-first mark was not staged prospectively: {staged:?}"
+            ));
+        }
         catchup(&mut env).map_err(|error| format!("PR 380 trade-first catch-up: {error}"))?;
     } else {
         catchup(&mut env).map_err(|error| format!("PR 380 control catch-up: {error}"))?;
@@ -12372,6 +12397,15 @@ fn run_prospective_funding_world(
     }
 
     let (profile_after, group_after) = env.primary_market_state();
+    let checkpoint_after = env.primary_profile(0);
+    if checkpoint_after.funding_mark_e6 != checkpoint_after.mark_ewma_e6
+        || checkpoint_after.funding_mark_pending_e6 != 0
+        || checkpoint_after.funding_mark_pending_slot != 0
+    {
+        return Err(format!(
+            "PR 380 funding checkpoint did not commit after catch-up: {checkpoint_after:?}"
+        ));
+    }
     let stamp_fee = group_after
         .insurance
         .checked_sub(insurance_before_stamp)
@@ -15461,7 +15495,12 @@ pub fn fractional_cap_settlement_seed_strategy() -> impl Strategy<Value = [u8; 3
 pub fn prospective_funding_rewrite_strategy() -> impl Strategy<Value = ([u8; 32], TradeRoute)> {
     (
         any::<[u8; 32]>(),
-        prop::sample::select(vec![TradeRoute::NoCpi, TradeRoute::BatchNoCpi]),
+        prop::sample::select(vec![
+            TradeRoute::NoCpi,
+            TradeRoute::Cpi,
+            TradeRoute::BatchNoCpi,
+            TradeRoute::BatchCpi,
+        ]),
     )
 }
 

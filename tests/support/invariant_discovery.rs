@@ -209,7 +209,9 @@ pub enum AccrualOrderingKind {
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ProspectiveAccrualRoute {
     NoCpi,
+    Cpi,
     BatchNoCpi,
+    BatchCpi,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -345,12 +347,14 @@ impl PendingMarkSource {
 }
 
 impl ProspectiveAccrualRoute {
-    pub const ALL: [Self; 2] = [Self::NoCpi, Self::BatchNoCpi];
+    pub const ALL: [Self; 4] = [Self::NoCpi, Self::Cpi, Self::BatchNoCpi, Self::BatchCpi];
 
     fn discriminator(self) -> u8 {
         match self {
             Self::NoCpi => 0,
-            Self::BatchNoCpi => 1,
+            Self::Cpi => 1,
+            Self::BatchNoCpi => 2,
+            Self::BatchCpi => 3,
         }
     }
 }
@@ -5050,6 +5054,10 @@ fn execute_reported_price_route(
             .trade_no_cpi(taker, maker, 0, size_q, price, 0)
             .map(|_| ())
             .map_err(|error| format!("reported-price trade: {error}")),
+        ProspectiveAccrualRoute::Cpi => env
+            .trade_cpi(taker, maker, 0, size_q, 0, 0)
+            .map(|_| ())
+            .map_err(|error| format!("CPI reported-price trade: {error}")),
         ProspectiveAccrualRoute::BatchNoCpi => env
             .batch_trade_no_cpi(
                 taker,
@@ -5063,6 +5071,19 @@ fn execute_reported_price_route(
             )
             .map(|_| ())
             .map_err(|error| format!("batch reported-price trade: {error}")),
+        ProspectiveAccrualRoute::BatchCpi => env
+            .batch_trade_cpi(
+                taker,
+                maker,
+                vec![BatchTradeCpiLeg {
+                    asset_index: 0,
+                    size_q,
+                    fee_bps: 0,
+                    limit_price: 0,
+                }],
+            )
+            .map(|_| ())
+            .map_err(|error| format!("batch CPI reported-price trade: {error}")),
     }
 }
 
@@ -5196,6 +5217,9 @@ fn run_prospective_accrual_world(
         .map_err(|error| format!("publish prospective funding premium: {error}"))?;
     let after_push = env.primary_profile(0);
     if after_push.mark_ewma_e6 != 1_500_000
+        || after_push.funding_mark_e6 != after_push.mark_ewma_e6
+        || after_push.funding_mark_pending_e6 != 0
+        || after_push.funding_mark_pending_slot != 0
         || env.primary_market_state().1.assets[0].effective_price != PRICE
     {
         return Err(format!(
@@ -5222,12 +5246,30 @@ fn run_prospective_accrual_world(
     };
     if stamp_before_catchup {
         stamp(&mut env).map_err(|error| format!("trade-first prospective stamp: {error}"))?;
+        let staged = env.primary_profile(0);
+        if staged.funding_mark_e6 != after_push.funding_mark_e6
+            || staged.funding_mark_pending_e6 == 0
+            || staged.funding_mark_pending_slot != CATCHUP_SLOT
+        {
+            return Err(format!(
+                "trade-first prospective mark did not retain its first boundary: {staged:?}"
+            ));
+        }
         catchup(&mut env).map_err(|error| format!("trade-first prospective catch-up: {error}"))?;
     } else {
         catchup(&mut env).map_err(|error| format!("control prospective catch-up: {error}"))?;
         stamp(&mut env).map_err(|error| format!("control prospective stamp: {error}"))?;
     }
     let (profile_after, group_after) = env.primary_market_state();
+    let checkpoint_after = env.primary_profile(0);
+    if checkpoint_after.funding_mark_e6 != checkpoint_after.mark_ewma_e6
+        || checkpoint_after.funding_mark_pending_e6 != 0
+        || checkpoint_after.funding_mark_pending_slot != 0
+    {
+        return Err(format!(
+            "prospective checkpoint did not commit after catch-up: {checkpoint_after:?}"
+        ));
+    }
     if group_after.assets[0].slot_last != CATCHUP_SLOT {
         return Err(format!(
             "prospective catch-up stopped at slot {}",
@@ -5268,8 +5310,13 @@ fn discover_one_prospective_accrual_violation(
     seed[1] ^= route.discriminator();
     let control = run_prospective_accrual_world(seed, route, false)?;
     let reordered = run_prospective_accrual_world(seed, route, true)?;
-    if control.final_mark != reordered.final_mark
-        || control.final_effective_price != reordered.final_effective_price
+    let fixed_execution_price = matches!(
+        route,
+        ProspectiveAccrualRoute::NoCpi | ProspectiveAccrualRoute::BatchNoCpi
+    );
+    if fixed_execution_price
+        && (control.final_mark != reordered.final_mark
+            || control.final_effective_price != reordered.final_effective_price)
     {
         return Err(format!(
             "{route:?} paired worlds changed final prices: control={control:?}, reordered={reordered:?}"
@@ -6210,7 +6257,17 @@ fn discover_one_trade_driven_liquidation(
     let victim_capital_before = env.primary_portfolio(0).capital.get();
     let victim_oi_before = env.primary_market_state().1.assets[0].oi_eff_long_q;
     let insurance_before = env.primary_market_state().1.insurance;
-    execute_reported_price_route(&mut env, route, 2, 3, TINY_Q, reported_price)
+    let move_size_q = if matches!(
+        route,
+        ProspectiveAccrualRoute::Cpi | ProspectiveAccrualRoute::BatchCpi
+    ) {
+        env.set_matcher_spreads(3, 2, 0)
+            .map_err(|error| format!("{mode:?} {route:?} configure adverse matcher: {error}"))?;
+        -TINY_Q
+    } else {
+        TINY_Q
+    };
+    execute_reported_price_route(&mut env, route, 2, 3, move_size_q, reported_price)
         .map_err(|error| format!("{mode:?} {route:?} move mark: {error}"))?;
     let (profile_after_move, group_after_move) = env.primary_market_state();
     let movement_fee = group_after_move
@@ -6263,7 +6320,7 @@ fn discover_one_trade_driven_liquidation(
         env.crank(actor, trade_slot, Vec::new())
             .map_err(|error| format!("{mode:?} refresh coalition actor {actor}: {error}"))?;
     }
-    execute_reported_price_route(&mut env, route, 2, 3, -TINY_Q, queued_mark)
+    execute_reported_price_route(&mut env, route, 2, 3, -move_size_q, queued_mark)
         .map_err(|error| format!("{mode:?} {route:?} close mark-moving pair: {error}"))?;
     for actor in [2usize, 3] {
         let pnl = env.primary_portfolio(actor).pnl.get();
@@ -8341,11 +8398,27 @@ pub fn discover_active_leg_currentness_violation(
     if complete.primary_market_state().1.assets[0].f_long_num == 0 {
         return Err("complete-world rescue observation booked no funding".into());
     }
+    let complete_oracle_account_counts = [
+        complete.primary_profile(0).oracle_leg_count,
+        complete.primary_profile(1).oracle_leg_count,
+    ];
+    let complete_observations = || {
+        vec![
+            CrankObservationHint {
+                asset_index: 0,
+                oracle_accounts: complete_oracle_account_counts[0],
+            },
+            CrankObservationHint {
+                asset_index: 1,
+                oracle_accounts: complete_oracle_account_counts[1],
+            },
+        ]
+    };
     complete
-        .crank(1, 3, Vec::new())
+        .crank(1, 3, complete_observations())
         .map_err(|error| format!("complete-world counterparty refresh: {error}"))?;
     complete
-        .crank(0, 3, Vec::new())
+        .crank(0, 3, complete_observations())
         .map_err(|error| format!("complete-world user refresh: {error}"))?;
     let complete_account = complete.primary_portfolio(0);
     let complete_position_after_q = discovery_total_abs_position(&complete_account)?;

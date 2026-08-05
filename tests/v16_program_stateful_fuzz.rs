@@ -71,7 +71,7 @@ use support::fuzz_model::{
     terminal_dust_payout_erasure_strategy, trade_driven_liquidation_reward_strategy,
     trade_fee_market_generation_replay_seed_strategy, trade_funding_erasure_strategy,
     trade_portfolio_incarnation_replay_strategy, trade_retry_replay_strategy,
-    withdrawal_retry_liquidation_seed_strategy,
+    withdrawal_retry_liquidation_seed_strategy, TradeRoute,
 };
 use support::invariant_discovery::{
     discover_accrual_ordering_violations, discover_active_leg_currentness_violation,

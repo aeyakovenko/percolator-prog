@@ -58,7 +58,7 @@ INV-039	accrual-ordering/rebalance-reduce	v16_program_accrual_boundary_operation
 INV-039	accrual-ordering/recovery-forfeit	v16_program_accrual_boundary_operation_matrix_discovers_erased_transfers	pending-balanced-transfer-cannot-be-erased-by-operation-order	273
 INV-039	terminal-commit/pending-authenticated-mark	v16_program_terminal_commit_ordering_discovers_discarded_pending_value	pending-value-must-commit-before-terminal-snapshot	255
 INV-039	terminal-commit/asset-shutdown-funding	v16_program_shutdown_commit_ordering_discovers_erased_funding	committed-funding-must-accrue-before-lifecycle-terminalization	254
-INV-039	prospective-accrual/reported-price-routes	v16_program_prospective_accrual_route_matrix_discovers_timestamp_rewrite	prospective-accrual-cannot-be-rewritten-by-trade-order	380
+INV-039	prospective-accrual/all-trade-routes	v16_program_prospective_accrual_route_matrix_preserves_elapsed_funding	prospective-accrual-cannot-be-rewritten-by-trade-order	380
 INV-039	stale-cohort/unsigned-cpi-routes	v16_program_stale_cohort_route_matrix_discovers_unsigned_historical_loss	unsigned-lp-cannot-inherit-preexisting-settlement-cohort	360
 INV-045	mark-publication/authenticated-push	v16_program_mark_publication_matrix_discovers_stale_risk_admission	pending-mark-cannot-authorize-stale-price-risk-increase	264
 INV-045	mark-publication/ewma-push	v16_program_mark_publication_matrix_discovers_stale_risk_admission	pending-mark-cannot-authorize-stale-price-risk-increase	265

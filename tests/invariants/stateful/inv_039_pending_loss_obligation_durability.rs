@@ -7,10 +7,11 @@
 //! zero-price-move funding checkpoint and permutes settlement against CPI close, batch CPI close,
 //! unilateral reduction, and recovery forfeit. The common oracle requires both sides to book the
 //! same nonzero transfer and compares conserved claims across the two orders.
-//! `v16_program_prospective_accrual_route_matrix_discovers_timestamp_rewrite` independently
-//! varies single and batch no-CPI trade routes around the same funding catch-up boundary. It
-//! requires identical terminal prices and total payout while detecting an erased funding index,
-//! an equal victim payout loss, and coalition gain.
+//! `v16_program_prospective_accrual_route_matrix_preserves_elapsed_funding` independently varies
+//! all single/batch CPI/no-CPI trade routes around the same funding catch-up boundary. Every route
+//! requires identical funding indices and unrelated-victim payout. No-CPI routes additionally
+//! require identical terminal prices and payouts because their signed execution price is fixed;
+//! CPI matcher quotes legitimately vary with the crank-first versus trade-first oracle input.
 //! `v16_program_shutdown_commit_ordering_discovers_erased_funding` applies the same ordering
 //! oracle to asset shutdown while constraining the effective price to remain unchanged. Any payout
 //! difference is therefore a committed funding transfer erased by the lifecycle transition.
@@ -24,11 +25,39 @@
 //! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
 //! rollback, liveness, or compute outcomes appropriate to the invariant.
 //!
-//! Guarantee boundary: a quarantined counterexample demonstrates public reachability; it does
-//! not certify the invariant on an unfixed pin. Certification requires the fixed-pin assertion
-//! plus every additional verification method required by the charter.
+//! Guarantee boundary: the prospective-accrual route matrix is fixed-pin certification. The other
+//! named matrices remain quarantined counterexamples until their corresponding fixes land.
 
 use super::*;
+
+#[test]
+fn v16_host_market_roundtrip_preserves_funding_mark_checkpoint() {
+    let mut env = crate::support::v16_svm::V16Svm::new(
+        [0x39; 32],
+        crate::support::v16_svm::MarketConfig::default(),
+    );
+    let slot = env.current_slot();
+    env.configure_ewma_mark(0, slot, 1_000_000, 600, 0).unwrap();
+    let mut data = env.svm.get_account(&env.market).unwrap().data;
+    let (cfg, group) = percolator_prog::state::read_market(&data).unwrap();
+    let mut profile = percolator_prog::state::read_asset_oracle_profile(&data, 0).unwrap();
+    profile.funding_mark_e6 = profile.mark_ewma_e6;
+    profile.funding_mark_pending_e6 = profile.mark_ewma_e6 + 1;
+    profile.funding_mark_pending_slot = group.current_slot + 1;
+    percolator_prog::state::write_asset_oracle_profile(&mut data, 0, &profile).unwrap();
+
+    percolator_prog::state::write_market(&mut data, &cfg, &group).unwrap();
+    let after = percolator_prog::state::read_asset_oracle_profile(&data, 0).unwrap();
+    assert_eq!(after.funding_mark_e6, profile.funding_mark_e6);
+    assert_eq!(
+        after.funding_mark_pending_e6,
+        profile.funding_mark_pending_e6
+    );
+    assert_eq!(
+        after.funding_mark_pending_slot,
+        profile.funding_mark_pending_slot
+    );
+}
 
 proptest! {
     #![proptest_config(ProptestConfig {
@@ -128,7 +157,7 @@ proptest! {
     })]
 
     #[test]
-    fn v16_program_prospective_accrual_route_matrix_discovers_timestamp_rewrite(
+    fn v16_program_prospective_accrual_route_matrix_preserves_elapsed_funding(
         seed in any::<[u8; 32]>()
     ) {
         let discoveries = discover_prospective_accrual_violations(seed)
@@ -137,17 +166,25 @@ proptest! {
         for (expected, discovery) in ProspectiveAccrualRoute::ALL.into_iter().zip(&discoveries) {
             prop_assert_eq!(discovery.route, expected);
         }
-        let violations: Vec<_> = discoveries
-            .iter()
-            .filter(|discovery| discovery.is_violation())
-            .map(|discovery| discovery.route)
-            .collect();
-        eprintln!("independent prospective-accrual discoveries: {violations:?}");
-        prop_assert_eq!(
-            violations,
-            ProspectiveAccrualRoute::ALL.to_vec(),
-            "vulnerable-pin prospective-accrual corpus changed"
-        );
+        for discovery in discoveries {
+            prop_assert!(!discovery.is_violation(), "{discovery:?}");
+            prop_assert!(discovery.control_f_short_num > 0);
+            prop_assert_eq!(
+                discovery.reordered_f_short_num,
+                discovery.control_f_short_num
+            );
+            prop_assert_eq!(discovery.victim_payout_loss, 0);
+            if matches!(
+                discovery.route,
+                ProspectiveAccrualRoute::NoCpi | ProspectiveAccrualRoute::BatchNoCpi
+            ) {
+                prop_assert_eq!(discovery.coalition_payout_gain, 0);
+                prop_assert_eq!(
+                    discovery.reordered_total_payout,
+                    discovery.control_total_payout
+                );
+            }
+        }
     }
 }
 
@@ -191,17 +228,25 @@ proptest! {
     })]
 
     #[test]
-    fn v16_program_pr380_prospective_funding_rewrite_fuzz(
+    fn v16_program_pr380_prospective_funding_preservation_fuzz(
         (seed, route) in prospective_funding_rewrite_strategy()
     ) {
-        let result = reproduce_prospective_funding_rewrite(seed, route);
-        prop_assert!(
-            result.is_ok(),
-            "PR 380 {:?} no longer reproduces for seed {:?}: {}",
-            route,
-            seed,
-            result.unwrap_err()
+        let reproduction = reproduce_prospective_funding_rewrite(seed, route)
+            .map_err(TestCaseError::fail)?;
+        prop_assert_eq!(reproduction.route, route);
+        prop_assert!(reproduction.control_f_short_num > 0);
+        prop_assert_eq!(
+            reproduction.attack_f_short_num,
+            reproduction.control_f_short_num
         );
+        prop_assert_eq!(reproduction.victim_payout_loss, 0);
+        if matches!(route, TradeRoute::NoCpi | TradeRoute::BatchNoCpi) {
+            prop_assert_eq!(reproduction.attacker_coalition_gain, 0);
+            prop_assert_eq!(
+                reproduction.attack_total_payout,
+                reproduction.control_total_payout
+            );
+        }
     }
 
     #[test]

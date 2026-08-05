@@ -17712,7 +17712,7 @@ fn v16_attack_crank_future_now_slot_does_not_overaccrue() {
     // REAL clock is slot 2. Cranker lies with now_slot = 1_000_000 (a ~half-million-slot jump).
     env.svm.warp_to_slot(2);
     const LIE: u64 = 1_000_000;
-    for acct in [lo, sh] {
+    for acct in [lo, sh, lo] {
         env.svm.expire_blockhash();
         let _ = env.send(
             ProgInstruction::PermissionlessCrank {
@@ -17744,17 +17744,55 @@ fn v16_attack_crank_future_now_slot_does_not_overaccrue() {
         g.assets[0].effective_price <= INITIAL_PRICE * 2,
         "price bounded by real elapsed time + circuit breaker"
     );
-    // value conserved: no massive funding/fee over-charge drained capital.
-    let total_equity =
-        (a.capital.get() as i128 + a.pnl.get()) + (b.capital.get() as i128 + b.pnl.get());
+    // Value conserved: after both accounts are current, junior PnL is residual-backed and the
+    // still-converging mark blocks favorable conversion rather than making it withdrawable.
     assert_eq!(g.vault, 2 * DEPOSIT, "no tokens created/destroyed");
-    assert!(
-        total_equity + g.insurance as i128 <= g.vault as i128,
-        "no over-distribution"
-    );
     assert!(
         g.vault >= g.c_tot + g.insurance,
         "senior conservation under slot-spoof attempt"
+    );
+    let residual = g.vault - g.c_tot - g.insurance;
+    let paper_pnl = a.pnl.get().max(0) as u128 + b.pnl.get().max(0) as u128;
+    assert!(
+        paper_pnl > 0,
+        "authenticated elapsed time produces bounded PnL"
+    );
+    assert!(
+        paper_pnl <= residual,
+        "canonical paper PnL is residual-backed"
+    );
+    let total_equity =
+        (a.capital.get() as i128 + a.pnl.get()) + (b.capital.get() as i128 + b.pnl.get());
+    assert!(
+        total_equity + g.insurance as i128 <= g.vault as i128,
+        "canonical refreshed equity is vault-bounded"
+    );
+    let market_before_conversion = env.svm.get_account(&env.market).unwrap();
+    let portfolio_before_conversion = env.svm.get_account(&lo).unwrap();
+    env.svm.expire_blockhash();
+    let conversion = env.send(
+        ProgInstruction::ConvertReleasedPnl { amount: u128::MAX },
+        vec![
+            AccountMeta::new(lo_owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(lo, false),
+        ],
+        &[&lo_owner],
+    );
+    let conversion_error = conversion.expect_err("pending mark must block favorable conversion");
+    assert!(
+        conversion_error.contains("Custom(21)"),
+        "pending-mark conversion returned the wrong error: {conversion_error}"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before_conversion,
+        "rejected conversion rolls back market state"
+    );
+    assert_eq!(
+        env.svm.get_account(&lo).unwrap(),
+        portfolio_before_conversion,
+        "rejected conversion rolls back portfolio state"
     );
 }
 

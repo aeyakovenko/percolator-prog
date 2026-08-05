@@ -108,6 +108,8 @@ fn v16_attack_pending_later_rounded_rescue_funding_requires_observation() {
     );
     let insurance_before = stale_group.insurance;
 
+    let market_before_omission = env.svm.get_account(&env.market).unwrap();
+    let user_before_omission = env.svm.get_account(&user_account).unwrap();
     env.svm.expire_blockhash();
     let omitted = env.send(
         ProgInstruction::PermissionlessCrank {
@@ -121,58 +123,20 @@ fn v16_attack_pending_later_rounded_rescue_funding_requires_observation() {
         ],
         &[],
     );
+    let omitted_error = omitted.expect_err("missing rescue observation must reject");
     assert!(
-        omitted.is_ok(),
-        "ordinary stale refresh remains order-insensitive: {omitted:?}"
+        omitted_error.contains("Custom(22)"),
+        "missing rescue observation returned the wrong error: {omitted_error}"
     );
-    let stale = env.portfolio_state(user_account);
-    assert!(
-        health_cert(&stale).certified_liq_deficit > 0,
-        "omitting later-leg rescue funding must reproduce a liquidatable certificate: {:?}",
-        health_cert(&stale)
-    );
-    let stale_position = active_leg_for_asset(&stale, 1).basis_pos_q.unsigned_abs();
-    let market_before_liquidation = env.svm.get_account(&env.market).unwrap();
-    let user_before_liquidation = env.svm.get_account(&user_account).unwrap();
-    env.svm.expire_blockhash();
-    let liquidation = env.send(
-        ProgInstruction::PermissionlessCrank {
-            now_slot: ATTACK_SLOT,
-            observations: vec![],
-        },
-        vec![
-            AccountMeta::new(env.payer.pubkey(), true),
-            AccountMeta::new(env.market, false),
-            AccountMeta::new(user_account, false),
-        ],
-        &[],
-    );
-    if liquidation.is_ok() {
-        let liquidated = env.portfolio_state(user_account);
-        let liquidated_position = if has_active_leg_for_asset(&liquidated, 1) {
-            active_leg_for_asset(&liquidated, 1)
-                .basis_pos_q
-                .unsigned_abs()
-        } else {
-            0
-        };
-        assert!(liquidated_position < stale_position);
-        assert!(env.market_state().1.insurance > insurance_before);
-        panic!(
-            "omitted later-leg rescue funding reduced user position {stale_position}->{liquidated_position} and charged insurance {}->{}",
-            insurance_before,
-            env.market_state().1.insurance
-        );
-    }
     assert_eq!(
         env.svm.get_account(&env.market).unwrap(),
-        market_before_liquidation,
-        "rejected stale-funding liquidation must roll back market state"
+        market_before_omission,
+        "rejected stale-funding refresh must roll back market state"
     );
     assert_eq!(
         env.svm.get_account(&user_account).unwrap(),
-        user_before_liquidation,
-        "rejected stale-funding liquidation must roll back the victim"
+        user_before_omission,
+        "rejected stale-funding refresh must roll back the victim"
     );
 
     // Supplying the later-leg observation books the rescue funding and leaves
@@ -186,12 +150,24 @@ fn v16_attack_pending_later_rounded_rescue_funding_requires_observation() {
         },
     );
     assert!(env.market_state().1.assets[0].f_long_num > 0);
+    let complete_observations = || {
+        vec![
+            CrankObservationHint {
+                asset_index: 0,
+                oracle_accounts: 0,
+            },
+            CrankObservationHint {
+                asset_index: 1,
+                oracle_accounts: 0,
+            },
+        ]
+    };
     env.svm.expire_blockhash();
     env.crank(
         counterparty_account,
         ProgInstruction::PermissionlessCrank {
             now_slot: ATTACK_SLOT,
-            observations: vec![],
+            observations: complete_observations(),
         },
     );
     env.svm.expire_blockhash();
@@ -199,7 +175,7 @@ fn v16_attack_pending_later_rounded_rescue_funding_requires_observation() {
         user_account,
         ProgInstruction::PermissionlessCrank {
             now_slot: ATTACK_SLOT,
-            observations: vec![],
+            observations: complete_observations(),
         },
     );
     let healthy = env.portfolio_state(user_account);

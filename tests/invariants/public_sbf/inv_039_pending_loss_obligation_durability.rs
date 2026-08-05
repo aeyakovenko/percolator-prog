@@ -2,38 +2,44 @@
 //!
 //! Normative obligation: Pending accrual and loss obligations cannot be erased by route choice or lifecycle changes.
 //!
-//! Evidence in this file (I plus invariant-specific F/M assertions): `v16_program_pr380_trade_first_rewrites_elapsed_funding`, `v16_program_pr255_stale_resolve_discards_pending_authenticated_mark`, `v16_program_pr271_cpi_close_erases_elapsed_funding`, `v16_program_pr272_unilateral_reduce_erases_elapsed_funding`, `v16_program_pr273_recovery_forfeit_erases_elapsed_funding`. These tests exercise the deployed public
+//! Evidence in this file (I plus invariant-specific F/M assertions): `v16_program_pr380_trade_order_preserves_elapsed_funding`, `v16_program_pr255_stale_resolve_discards_pending_authenticated_mark`, `v16_program_pr271_cpi_close_erases_elapsed_funding`, `v16_program_pr272_unilateral_reduce_erases_elapsed_funding`, `v16_program_pr273_recovery_forfeit_erases_elapsed_funding`. These tests exercise the deployed public
 //! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
 //! rollback, liveness, or compute outcomes appropriate to the invariant.
 //!
-//! Guarantee boundary: a quarantined counterexample demonstrates public reachability; it does
-//! not certify the invariant on an unfixed pin. Certification requires the fixed-pin assertion
-//! plus every additional verification method required by the charter.
+//! Guarantee boundary: PR380 is fixed-pin certification across all four trade routes. The other
+//! named tests remain quarantined counterexamples until their corresponding fixes are integrated.
 
 use super::*;
 
 #[test]
-fn v16_program_pr380_trade_first_rewrites_elapsed_funding() {
-    for route in [TradeRoute::NoCpi, TradeRoute::BatchNoCpi] {
+fn v16_program_pr380_trade_order_preserves_elapsed_funding() {
+    for route in [
+        TradeRoute::NoCpi,
+        TradeRoute::Cpi,
+        TradeRoute::BatchNoCpi,
+        TradeRoute::BatchCpi,
+    ] {
         let reproduction = reproduce_prospective_funding_rewrite([0x80; 32], route)
-            .unwrap_or_else(|error| panic!("PR 380 {route:?} no longer reproduces: {error}"));
+            .unwrap_or_else(|error| panic!("PR 380 {route:?} fixed route failed: {error}"));
         assert_eq!(
             reproduction.blocker,
             KnownBlocker::ProspectiveFundingRewrite
         );
         assert_eq!(reproduction.route, route);
         assert!(reproduction.control_f_short_num > 0);
-        assert_eq!(reproduction.attack_f_short_num, 0);
+        assert_eq!(
+            reproduction.attack_f_short_num,
+            reproduction.control_f_short_num
+        );
         assert!(reproduction.stamp_fee > 0);
-        assert_eq!(
-            reproduction.victim_payout_loss,
-            reproduction.attacker_coalition_gain
-        );
-        assert!(reproduction.victim_payout_loss > 0);
-        assert_eq!(
-            reproduction.control_total_payout,
-            reproduction.attack_total_payout
-        );
+        assert_eq!(reproduction.victim_payout_loss, 0);
+        if matches!(route, TradeRoute::NoCpi | TradeRoute::BatchNoCpi) {
+            assert_eq!(reproduction.attacker_coalition_gain, 0);
+            assert_eq!(
+                reproduction.control_total_payout,
+                reproduction.attack_total_payout
+            );
+        }
     }
 }
 
