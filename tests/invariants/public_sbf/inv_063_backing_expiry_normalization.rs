@@ -2,12 +2,13 @@
 //!
 //! Normative obligation: Expired backing is normalized before every consumer and cannot remain economically fresh.
 //!
-//! Evidence in this file (I plus invariant-specific F/M assertions): `v16_program_pr367_post_expiry_backing_fee_rejects_and_preserves_exit`, `v16_program_pr363_expired_backing_conversion_rejects_and_preserves_senior_exit`. These tests exercise the deployed public
+//! Evidence in this file (I plus invariant-specific F/M assertions): `v16_program_pr367_post_expiry_backing_fee_rejects_and_preserves_exit`, `v16_program_pr363_expired_backing_conversion_rejects_and_preserves_senior_exit`, `v16_program_pr361_retained_expired_topup_rejects_and_preserves_terminal_payouts`. These tests exercise the deployed public
 //! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
 //! rollback, liveness, or compute outcomes appropriate to the invariant.
 //!
-//! Guarantee boundary: these fixed-pin regressions cover the minimized PR367 trade and PR363 PnL
-//! conversion traces. The generated expiry matrices supply broader bounded route/boundary evidence.
+//! Guarantee boundary: these fixed-pin regressions cover the minimized PR367 trade, PR363 PnL
+//! conversion, and PR361 retained top-up traces. The generated expiry matrices supply broader
+//! bounded route/boundary evidence.
 
 use super::*;
 
@@ -54,5 +55,18 @@ fn v16_program_pr363_expired_backing_conversion_rejects_and_preserves_senior_exi
     assert!(
         discovery.rejects_lapsed_conversion_and_preserves_senior_exit(),
         "fixed PR363 trace did not reject safely with a senior exit: {discovery:?}"
+    );
+}
+
+#[test]
+fn v16_program_pr361_retained_expired_topup_rejects_and_preserves_terminal_payouts() {
+    let mut discoveries = discover_retained_maturity_terminal_locks([0x61; 32], 3)
+        .expect("verify the fixed PR361 public trace");
+    assert_eq!(discoveries.len(), 1);
+    let discovery = discoveries.pop().unwrap();
+    assert_eq!(discovery.kind, RetainedMaturityKind::BackingTopUp);
+    assert!(
+        discovery.rejects_expired_intent_and_preserves_terminal_progress(),
+        "fixed PR361 trace did not reject while preserving terminal payouts: {discovery:?}"
     );
 }

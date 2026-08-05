@@ -43,7 +43,10 @@ use support::{
         PortfolioIncarnationTradeSide, PostExpiryBackingCase, Scenario, TargetStagingCase,
         TradeDrivenLiquidationMode, TradeRoute,
     },
-    invariant_discovery::{discover_expired_backing_consumers, ExpiredBackingConsumerKind},
+    invariant_discovery::{
+        discover_expired_backing_consumers, discover_retained_maturity_terminal_locks,
+        ExpiredBackingConsumerKind, RetainedMaturityKind,
+    },
     open_lof_manifest::{missing_prs, quarantined_prs, validate_manifest},
 };
 

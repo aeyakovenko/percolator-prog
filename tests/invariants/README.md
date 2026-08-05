@@ -22,7 +22,7 @@ verification methods are in [`../../INVARIANTS.md`](../../INVARIANTS.md).
 
 | Suite | Tests | Evidence |
 | --- | ---: | --- |
-| `public_sbf/` | 75 | Deterministic public SBF/LiteSVM counterexamples, regressions, and manifest checks |
+| `public_sbf/` | 76 | Deterministic public SBF/LiteSVM counterexamples, regressions, and manifest checks |
 | `stateful/` | 112 | Proptest-generated public routes, including generalized active-leg/currentness and authenticated-expiry route matrices |
 | `cu/` | 102 | Positive public-route, metamorphic, rollback, liveness, and max-shape CU tests |
 | `kani/` | 40 | Symbolic wrapper arithmetic, matcher-binding, and strict-decoder proofs |

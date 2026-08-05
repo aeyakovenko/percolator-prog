@@ -10,18 +10,17 @@
 //! `v16_program_expired_backing_trade_route_matrix` repeats the freshness check through all four
 //! public trade routes. It rejects newly-created counterparty-backed liens independently of fee
 //! routing and separately proves that a risk-reducing trade remains available after expiry.
-//! `v16_program_retained_maturity_matrix_discovers_terminal_funded_lock` generates signed expiry
-//! boundaries independently of any finding manifest, compares omitted and delayed operations,
-//! and requires a finding only when the delayed operation consumes independent principal and
-//! leaves funded resolved users unable to progress through owner or permissionless routes.
+//! `v16_program_retained_maturity_matrix_rejects_expired_topup_and_preserves_terminal_progress`
+//! generates signed expiry boundaries independently of any finding manifest and compares omitted
+//! and delayed operations. An expired delayed top-up must reject with exact rollback, leave provider
+//! principal untouched, and preserve the control world's terminal payouts.
 //! `v16_program_expired_backing_consumer_matrix_rejects_lapsed_conversion` generates released
 //! source-backed claims and varies the expiry boundary. Conversion must reject at authenticated
 //! expiry with exact rollback and zero provider-principal movement, while the flat claimant can
 //! still withdraw all senior capital.
 //!
-//! Guarantee boundary: the trade and conversion consumers have fixed-pin bounded evidence. The
-//! retained-maturity test remains public counterexample discovery for a separate open finding and
-//! does not certify that sub-route until its fix is integrated.
+//! Guarantee boundary: the trade, conversion, and retained-top-up consumers have fixed-pin bounded
+//! evidence over the generated route and expiry boundaries represented here.
 
 use super::*;
 
@@ -105,14 +104,14 @@ proptest! {
     }
 
     #[test]
-    fn v16_program_retained_maturity_matrix_discovers_terminal_funded_lock(
+    fn v16_program_retained_maturity_matrix_rejects_expired_topup_and_preserves_terminal_progress(
         seed in any::<[u8; 32]>(),
         expiry_offset in prop::sample::select(vec![2u8, 3, 4, 6]),
     ) {
         let discoveries = discover_retained_maturity_terminal_locks(seed, expiry_offset);
         prop_assert!(
             discoveries.is_ok(),
-            "retained-maturity discovery failed at offset {expiry_offset}: {}",
+            "retained-maturity verification failed at offset {expiry_offset}: {}",
             discoveries.unwrap_err()
         );
         let discoveries = discoveries.unwrap();
@@ -123,8 +122,8 @@ proptest! {
         );
         for discovery in discoveries {
             prop_assert!(
-                discovery.is_persistent_funded_lock(),
-                "retained operation did not reproduce an exact funded terminal lock: {:?}",
+                discovery.rejects_expired_intent_and_preserves_terminal_progress(),
+                "expired retained operation did not reject while preserving terminal progress: {:?}",
                 discovery
             );
         }

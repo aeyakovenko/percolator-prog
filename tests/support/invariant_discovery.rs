@@ -1096,6 +1096,8 @@ pub struct RetainedMaturityDiscovery {
     pub expiry_slot: u64,
     pub landing_slot: u64,
     pub retained_landed: bool,
+    pub retained_rejected_expired: bool,
+    pub retained_exact_rollback: bool,
     pub control_users_terminal: bool,
     pub delayed_users_terminal: bool,
     pub delayed_funded_value: u128,
@@ -1111,20 +1113,19 @@ pub struct RetainedMaturityDiscovery {
 }
 
 impl RetainedMaturityDiscovery {
-    pub fn is_persistent_funded_lock(&self) -> bool {
+    pub fn rejects_expired_intent_and_preserves_terminal_progress(&self) -> bool {
         self.landing_slot > self.expiry_slot
-            && self.retained_landed
+            && !self.retained_landed
+            && self.retained_rejected_expired
+            && self.retained_exact_rollback
             && self.control_users_terminal
-            && !self.delayed_users_terminal
-            && self.delayed_funded_value != 0
-            && self.delayed_vault_liquidity >= self.delayed_funded_value
-            && self.delayed_close_failures >= 4
-            && self.delayed_progress_failures != 0
+            && self.delayed_users_terminal
+            && self.delayed_funded_value == 0
             && self.exact_rollback
-            && self.provider_principal_consumed != 0
+            && self.provider_principal_consumed == 0
             && self.provider_recovery == 0
             && self.control_external_payout != 0
-            && self.delayed_external_payout == 0
+            && self.delayed_external_payout == self.control_external_payout
             && self.token_supply_conserved
     }
 }
@@ -8652,6 +8653,8 @@ pub fn discover_expired_backing_trade_routes(
 #[derive(Clone, Copy, Debug)]
 struct RetainedMaturityWorld {
     retained_landed: bool,
+    retained_rejected_expired: bool,
+    retained_exact_rollback: bool,
     users_terminal: bool,
     funded_value: u128,
     vault_liquidity: u128,
@@ -8776,7 +8779,20 @@ fn run_retained_maturity_world(
         ),
     };
     env.warp_to_slot(landing_slot);
-    let retained_landed = submit_retained && env.land_retained(retained).is_ok();
+    let (retained_landed, retained_rejected_expired, retained_exact_rollback) = if submit_retained {
+        let before = fingerprint(&env);
+        match env.land_retained(retained) {
+            Ok(_) => (true, false, false),
+            Err(error) if error.contains("Custom(9)") => (false, true, fingerprint(&env) == before),
+            Err(error) => {
+                return Err(format!(
+                    "retained maturity submission returned an unexpected error: {error}"
+                ))
+            }
+        }
+    } else {
+        (false, false, true)
+    };
     if env.current_slot() != landing_slot || landing_slot <= expiry_slot {
         return Err("retained maturity did not cross the authenticated expiry boundary".into());
     }
@@ -8787,7 +8803,7 @@ fn run_retained_maturity_world(
     let mut close_failures = 0u16;
     let mut progress_failures = 0u16;
     let mut exact_rollback = true;
-    let attempts = if submit_retained {
+    let attempts = if retained_landed {
         DELAYED_ATTEMPTS
     } else {
         CONTROL_ATTEMPTS
@@ -8845,6 +8861,8 @@ fn run_retained_maturity_world(
         landing_slot,
         RetainedMaturityWorld {
             retained_landed,
+            retained_rejected_expired,
+            retained_exact_rollback,
             users_terminal,
             funded_value,
             vault_liquidity,
@@ -8874,6 +8892,8 @@ pub fn discover_retained_maturity_terminal_locks(
                 expiry_slot,
                 landing_slot,
                 retained_landed: delayed.retained_landed,
+                retained_rejected_expired: delayed.retained_rejected_expired,
+                retained_exact_rollback: delayed.retained_exact_rollback,
                 control_users_terminal: control.users_terminal,
                 delayed_users_terminal: delayed.users_terminal,
                 delayed_funded_value: delayed.funded_value,
