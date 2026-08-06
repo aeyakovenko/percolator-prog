@@ -32,6 +32,11 @@ fixed-pin regressions explicitly require safe rejection or preservation instead.
 counterexample proves public reachability but does not certify the invariant until the fixed pin
 rejects the attack or preserves the required safe outcome.
 
+The current fixed pin enforces matcher consent for CPI backing fees (PR223), ignores unsigned CPI
+caller fees (PR224), and requires bilateral no-CPI consent to the live base fee (PR310). PR310 also
+removes the silent-debit impact from PR296 and PR338, but their stale generation/ordering policy
+writes still land and remain explicit INV-001/INV-014 gaps. Fee-redirect replays remain exploitable.
+
 ## Coverage status
 
 Status meanings:

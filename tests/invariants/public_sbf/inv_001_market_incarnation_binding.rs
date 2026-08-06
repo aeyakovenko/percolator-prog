@@ -2,13 +2,15 @@
 //!
 //! Normative obligation: Retained requests cannot cross a market close, recreation, or generation change.
 //!
-//! Evidence in this file (I plus invariant-specific F/M assertions): `v16_program_pr294_stale_matcher_grant_liquidates_reinitialized_market`, `v16_program_pr296_stale_trade_fee_policy_extracts_from_reinitialized_market`, `v16_program_pr295_stale_forfeit_discards_reinitialized_market_winner_payout`, `v16_program_pr317_stale_fee_redirect_extracts_victim_fee`, `v16_program_pr307_stale_deposit_funds_reinitialized_market_winner`, `v16_program_pr315_stale_shutdown_force_closes_replacement_loss`. These tests exercise the deployed public
+//! Evidence in this file (I plus invariant-specific F/M assertions): `v16_program_pr294_stale_matcher_grant_liquidates_reinitialized_market`, `v16_program_pr296_stale_trade_fee_policy_cannot_silently_debit_reinitialized_market`, `v16_program_pr295_stale_forfeit_discards_reinitialized_market_winner_payout`, `v16_program_pr317_stale_fee_redirect_extracts_victim_fee`, `v16_program_pr307_stale_deposit_funds_reinitialized_market_winner`, `v16_program_pr315_stale_shutdown_force_closes_replacement_loss`. These tests exercise the deployed public
 //! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
 //! rollback, liveness, or compute outcomes appropriate to the invariant.
 //!
 //! Guarantee boundary: a quarantined counterexample demonstrates public reachability; it does
 //! not certify the invariant on an unfixed pin. Certification requires the fixed-pin assertion
 //! plus every additional verification method required by the charter.
+//! PR 296's economic extraction is blocked by signed base-fee consent, but the test deliberately
+//! records that the stale policy itself still lands; generation binding remains open.
 
 use super::*;
 
@@ -34,21 +36,25 @@ fn v16_program_pr294_stale_matcher_grant_liquidates_reinitialized_market() {
 }
 
 #[test]
-fn v16_program_pr296_stale_trade_fee_policy_extracts_from_reinitialized_market() {
-    let reproduction = reproduce_trade_fee_market_generation_replay([0x96; 32])
-        .unwrap_or_else(|error| panic!("PR 296 no longer reproduces: {error}"));
+fn v16_program_pr296_stale_trade_fee_policy_cannot_silently_debit_reinitialized_market() {
+    let protection = verify_trade_fee_market_generation_nonextraction([0x96; 32])
+        .unwrap_or_else(|error| panic!("PR 296 non-extraction protection failed: {error}"));
     assert_eq!(
-        reproduction.blocker,
+        protection.blocker,
         KnownBlocker::TradeFeeMarketGenerationReplay
     );
-    assert!(reproduction.old_market_id > 0);
-    assert!(reproduction.new_market_id > 0);
-    assert_eq!(reproduction.victim_loss, 1_000);
-    assert_eq!(reproduction.attacker_profit, reproduction.victim_loss);
-    assert_eq!(reproduction.extracted_fee, 2_000);
-    assert!(reproduction.replay_cu < 1_400_000);
-    assert!(reproduction.trade_cu < 1_400_000);
-    assert!(reproduction.max_cu < 1_400_000);
+    assert!(protection.old_market_id > 0);
+    assert!(protection.new_market_id > 0);
+    assert!(protection.stale_policy_landed);
+    assert!(protection.stale_trade_rejected);
+    assert!(protection.rejected_exact_rollback);
+    assert!(protection.recovery_trade_landed);
+    assert_eq!(protection.victim_loss, 0);
+    assert_eq!(protection.attacker_profit, 0);
+    assert_eq!(protection.extracted_fee, 0);
+    assert!(protection.replay_cu < 1_400_000);
+    assert!(protection.trade_cu < 1_400_000);
+    assert!(protection.max_cu < 1_400_000);
 }
 
 #[test]

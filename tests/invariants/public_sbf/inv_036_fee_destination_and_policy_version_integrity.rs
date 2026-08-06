@@ -2,14 +2,14 @@
 //!
 //! Normative obligation: Charged fees reach only the authorized destination under the bound policy version.
 //!
-//! Evidence in this file (I plus invariant-specific F/M assertions): `v16_program_pr224_unsigned_lp_caller_fee_is_ignored`, `v16_program_pr223_unsigned_lp_backing_fee_requires_matcher_consent`, `v16_program_pr314_activation_fee_consent_extracts_unsigned_increase`, `v16_program_pr310_bilateral_base_fee_consent_extracts_victim_fee`. These tests exercise the deployed public
+//! Evidence in this file (I plus invariant-specific F/M assertions): `v16_program_pr224_unsigned_lp_caller_fee_is_ignored`, `v16_program_pr223_unsigned_lp_backing_fee_requires_matcher_consent`, `v16_program_pr314_activation_fee_consent_extracts_unsigned_increase`, `v16_program_pr310_bilateral_base_fee_requires_fresh_consent`. These tests exercise the deployed public
 //! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
 //! rollback, liveness, or compute outcomes appropriate to the invariant.
 //!
 //! Guarantee boundary: a quarantined counterexample demonstrates public reachability; it does
 //! not certify the invariant on an unfixed pin. Certification requires the fixed-pin assertion
 //! plus every additional verification method required by the charter.
-//! PRs 223 and 224 are fixed-pin assertions here; the remaining finding-specific tests are counterexamples.
+//! PRs 223, 224, and 310 are fixed-pin assertions here; PR 314 remains a counterexample.
 
 use super::*;
 
@@ -68,19 +68,24 @@ fn v16_program_pr314_activation_fee_consent_extracts_unsigned_increase() {
 }
 
 #[test]
-fn v16_program_pr310_bilateral_base_fee_consent_extracts_victim_fee() {
+fn v16_program_pr310_bilateral_base_fee_requires_fresh_consent() {
     for route in [TradeRoute::NoCpi, TradeRoute::BatchNoCpi] {
-        let reproduction = reproduce_bilateral_base_fee_consent([0x10; 32], route)
-            .unwrap_or_else(|error| panic!("PR 310 {route:?} no longer reproduces: {error}"));
-        assert_eq!(reproduction.blocker, KnownBlocker::BilateralBaseFeeConsent);
-        assert_eq!(reproduction.route, route);
-        assert_eq!(reproduction.signed_fee_bps, 0);
-        assert_eq!(reproduction.installed_fee_bps, 500);
-        assert_eq!(reproduction.victim_loss, 100_000);
-        assert_eq!(reproduction.beneficiary_profit, 100_000);
-        assert_eq!(reproduction.insurance_extraction, 200_000);
-        assert_eq!(reproduction.total_payout, 200_000_000);
-        assert!(reproduction.open_cu < 1_400_000);
-        assert!(reproduction.close_cu < 1_400_000);
+        let protection = verify_bilateral_base_fee_consent([0x10; 32], route)
+            .unwrap_or_else(|error| panic!("PR 310 {route:?} protection failed: {error}"));
+        assert_eq!(protection.blocker, KnownBlocker::BilateralBaseFeeConsent);
+        assert_eq!(protection.route, route);
+        assert_eq!(protection.signed_fee_bps, 0);
+        assert_eq!(protection.installed_fee_bps, 500);
+        assert!(protection.stale_open_rejected);
+        assert!(protection.stale_close_rejected);
+        assert!(protection.rejected_exact_rollback);
+        assert_eq!(protection.unconsented_victim_loss, 0);
+        assert_eq!(protection.unconsented_insurance_delta, 0);
+        assert_eq!(protection.consented_victim_fee, 100_000);
+        assert_eq!(protection.consented_insurance_fee, 200_000);
+        assert_eq!(protection.total_payout, 200_000_000);
+        assert!(protection.open_cu < 1_400_000);
+        assert!(protection.close_cu < 1_400_000);
+        assert!(protection.token_supply_conserved);
     }
 }

@@ -3955,7 +3955,7 @@ fn discover_trade_fee_consent_violation(
         let update = env.update_trade_fee_policy(BASE_FEE_BPS);
         let execution = match update {
             Ok(update) => env
-                .trade_no_cpi(TAKER, LP, 0, -size_q, INITIAL_PRICE, 0)
+                .trade_no_cpi(TAKER, LP, 0, -size_q, INITIAL_PRICE, BASE_FEE_BPS)
                 .map(|close| update.compute_units.max(close.compute_units)),
             Err(error) => Err(error),
         };

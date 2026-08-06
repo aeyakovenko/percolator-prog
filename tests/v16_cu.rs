@@ -35297,9 +35297,9 @@ fn v16_attack_trade_fee_policy_follows_asset0_insurance_authority() {
         short,
         POS_SCALE as i128,
         100,
-        0,
+        500,
     )
-    .expect("trade succeeds with caller fee_bps=0 after the insurance authority sets the floor");
+    .expect("trade succeeds after both owners consent to the authority-set fee floor");
     let (_, group) = env.market_state();
     assert!(
         group.insurance > insurance_before,
@@ -38205,7 +38205,7 @@ fn ewma_no_cpi_fee_and_mark_for_reported_price(
         account_b,
         size_q,
         reported_price,
-        0,
+        100,
     )
     .unwrap_or_else(|err| {
         panic!("{path:?}: no-CPI EWMA trade with reported_price={reported_price} failed: {err}")
@@ -54836,13 +54836,11 @@ fn v16_attack_switchboard_owner_and_key_binding_reject_spoofed_feed() {
     );
 }
 
-// Fee-RATE evasion: execute_trade floors the caller-supplied fee_bps to the config base
-// (hybrid_trade_fee_bps_view: base = max(caller_fee_bps, cfg.trade_fee_base_bps), src/v16_program.rs).
-// A trader passing fee_bps=0 must still pay the config trade_fee_base_bps -- complements the exec_price
-// BASIS-evasion guard (v16_attack_tradenocpi_fee_cannot_be_evaded_via_exec_price). The default market is
-// manual-priced (no dynamic mark-externality fee), so the only fee source is the base via the floor.
+// A bilateral trade's signed fee must consent to the current mutable base-fee policy. Rejecting a
+// lower value prevents fee evasion without letting a post-sign policy update increase either
+// owner's charge. The default market is manual-priced, so only the configured base fee applies.
 #[test]
-fn v16_attack_trade_caller_fee_bps_floored_to_config_base() {
+fn v16_attack_trade_requires_signed_base_fee_consent() {
     let mut env = V16CuEnv::new();
     env.update_trade_fee_policy_with_cu(500); // config base fee = 5%
     let la = Keypair::new();
@@ -54853,25 +54851,34 @@ fn v16_attack_trade_caller_fee_bps_floored_to_config_base() {
     env.deposit(&lb, pb, 1_000_000);
     let ins0 = env.market_state().1.insurance;
 
-    // Trader passes fee_bps = 0 trying to evade the fee.
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let a_before = env.svm.get_account(&pa).unwrap();
+    let b_before = env.svm.get_account(&pb).unwrap();
+
     env.svm.expire_blockhash();
     let r = env.try_trade_asset_with_cu(0, &la, pa, &lb, pb, POS_SCALE as i128, 100, 0);
     assert!(
-        r.is_ok(),
-        "fee_bps=0 must be FLOORED to the config base (not rejected): {r:?}"
+        r.is_err(),
+        "fee_bps below the live base must reject rather than evade or silently increase: {r:?}"
     );
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+    assert_eq!(env.svm.get_account(&pa).unwrap(), a_before);
+    assert_eq!(env.svm.get_account(&pb).unwrap(), b_before);
+
+    env.svm.expire_blockhash();
+    env.trade_asset_with_cu(0, &la, pa, &lb, pb, POS_SCALE as i128, 100, 500);
 
     let (_, g1) = env.market_state();
     assert!(
         g1.insurance > ins0,
-        "caller fee_bps=0 must be floored to trade_fee_base_bps (config base fee charged), not evaded; \
+        "a trade that signs the configured base must pay it; \
          insurance {ins0} -> {}",
         g1.insurance
     );
     assert_eq!(
         g1.vault,
         g1.c_tot + g1.insurance,
-        "exact conservation after the floored-fee trade"
+        "exact conservation after the consented base-fee trade"
     );
 }
 

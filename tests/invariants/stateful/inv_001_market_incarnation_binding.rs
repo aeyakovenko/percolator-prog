@@ -111,16 +111,18 @@ proptest! {
     }
 
     #[test]
-    fn v16_program_pr296_trade_fee_market_generation_replay_fuzz(
+    fn v16_program_pr296_trade_fee_market_generation_nonextraction_fuzz(
         seed in trade_fee_market_generation_replay_seed_strategy()
     ) {
-        let result = reproduce_trade_fee_market_generation_replay(seed);
-        prop_assert!(
-            result.is_ok(),
-            "PR 296 no longer reproduces for seed {:?}: {}",
-            seed,
-            result.unwrap_err()
-        );
+        let protection = verify_trade_fee_market_generation_nonextraction(seed)
+            .map_err(TestCaseError::fail)?;
+        prop_assert!(protection.stale_policy_landed);
+        prop_assert!(protection.stale_trade_rejected);
+        prop_assert!(protection.rejected_exact_rollback);
+        prop_assert!(protection.recovery_trade_landed);
+        prop_assert_eq!(protection.victim_loss, 0);
+        prop_assert_eq!(protection.attacker_profit, 0);
+        prop_assert_eq!(protection.extracted_fee, 0);
     }
 
     #[test]

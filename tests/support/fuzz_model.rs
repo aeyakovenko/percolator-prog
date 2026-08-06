@@ -720,17 +720,22 @@ pub struct ActivationFeeConsentReproduction {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct BilateralBaseFeeConsentReproduction {
+pub struct BilateralBaseFeeConsentProtection {
     pub blocker: KnownBlocker,
     pub route: TradeRoute,
     pub signed_fee_bps: u64,
     pub installed_fee_bps: u64,
-    pub victim_loss: u64,
-    pub beneficiary_profit: u64,
-    pub insurance_extraction: u64,
+    pub stale_open_rejected: bool,
+    pub stale_close_rejected: bool,
+    pub rejected_exact_rollback: bool,
+    pub unconsented_victim_loss: u64,
+    pub unconsented_insurance_delta: u128,
+    pub consented_victim_fee: u64,
+    pub consented_insurance_fee: u64,
     pub total_payout: u128,
     pub open_cu: u64,
     pub close_cu: u64,
+    pub token_supply_conserved: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -783,8 +788,11 @@ pub struct DelayedLiquidationPolicyReplayReproduction {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct DelayedTradeFeePolicyReplayReproduction {
+pub struct DelayedTradeFeePolicyReplayProtection {
     pub blocker: KnownBlocker,
+    pub stale_policy_landed: bool,
+    pub stale_trade_rejected: bool,
+    pub rejected_exact_rollback: bool,
     pub victim_loss: u64,
     pub attacker_profit: u64,
     pub extracted_fee: u64,
@@ -792,6 +800,7 @@ pub struct DelayedTradeFeePolicyReplayReproduction {
     pub replay_cu: u64,
     pub trade_cu: u64,
     pub withdrawal_cu: u64,
+    pub token_supply_conserved: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -927,10 +936,14 @@ pub struct MatcherGrantMarketGenerationReplayReproduction {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct TradeFeeMarketGenerationReplayReproduction {
+pub struct TradeFeeMarketGenerationReplayProtection {
     pub blocker: KnownBlocker,
     pub old_market_id: u64,
     pub new_market_id: u64,
+    pub stale_policy_landed: bool,
+    pub stale_trade_rejected: bool,
+    pub rejected_exact_rollback: bool,
+    pub recovery_trade_landed: bool,
     pub victim_loss: u64,
     pub attacker_profit: u64,
     pub extracted_fee: u64,
@@ -7505,10 +7518,10 @@ pub fn reproduce_activation_fee_consent(
     })
 }
 
-pub fn reproduce_bilateral_base_fee_consent(
+pub fn verify_bilateral_base_fee_consent(
     seed: [u8; 32],
     route: TradeRoute,
-) -> Result<BilateralBaseFeeConsentReproduction, String> {
+) -> Result<BilateralBaseFeeConsentProtection, String> {
     if !matches!(route, TradeRoute::NoCpi | TradeRoute::BatchNoCpi) {
         return Err(format!(
             "PR 310 requires a bilateral no-CPI route: {route:?}"
@@ -7535,14 +7548,14 @@ pub fn reproduce_bilateral_base_fee_consent(
     )
     .map_err(|error| format!("PR 310 install independent fee beneficiary: {error}"))?;
 
-    let build_trade = |env: &mut V16Svm, size_q: i128| match route {
+    let build_trade = |env: &mut V16Svm, size_q: i128, fee_bps: u64| match route {
         TradeRoute::NoCpi => env.build_retained_no_cpi_trade_with_fee(
             BENEFICIARY,
             VICTIM,
             ASSET,
             size_q,
             PRICE,
-            SIGNED_FEE_BPS,
+            fee_bps,
         ),
         TradeRoute::BatchNoCpi => env.build_retained_batch_no_cpi_trade_with_fee(
             BENEFICIARY,
@@ -7550,21 +7563,68 @@ pub fn reproduce_bilateral_base_fee_consent(
             ASSET,
             size_q,
             PRICE,
-            SIGNED_FEE_BPS,
+            fee_bps,
         ),
         TradeRoute::Cpi | TradeRoute::BatchCpi => unreachable!(),
     };
-    let retained_open = build_trade(&mut env, SIZE_Q);
-    let retained_close = build_trade(&mut env, -SIZE_Q);
+    let retained_open = build_trade(&mut env, SIZE_Q, SIGNED_FEE_BPS);
+    let retained_close = build_trade(&mut env, -SIZE_Q, SIGNED_FEE_BPS);
 
     env.update_trade_fee_policy(INSTALLED_FEE_BPS)
         .map_err(|error| format!("PR 310 raise live base fee after signing: {error}"))?;
+    let state_after_policy = tracked_economic_accounts(&env);
+    let victim_before_rejections = env.primary_portfolio(VICTIM).capital.get();
+    let insurance_before_rejections = env.primary_market_state().1.insurance_domain_budget[0]
+        .checked_add(env.primary_market_state().1.insurance_domain_budget[1])
+        .ok_or("PR 310 pre-rejection insurance total overflow")?;
+    let stale_open_error = match env.land_retained(retained_open) {
+        Ok(_) => return Err("PR 310 stale-fee retained open unexpectedly landed".into()),
+        Err(error) => error,
+    };
+    let stale_open_rejected = stale_open_error.contains("Custom(9)")
+        || stale_open_error.contains("custom program error: 0x9");
+    let rollback_after_open = tracked_economic_accounts(&env) == state_after_policy;
+    let stale_close_error = match env.land_retained(retained_close) {
+        Ok(_) => return Err("PR 310 stale-fee retained close unexpectedly landed".into()),
+        Err(error) => error,
+    };
+    let stale_close_rejected = stale_close_error.contains("Custom(9)")
+        || stale_close_error.contains("custom program error: 0x9");
+    let rejected_exact_rollback =
+        rollback_after_open && tracked_economic_accounts(&env) == state_after_policy;
+    let unconsented_victim_loss = u64::try_from(
+        victim_before_rejections
+            .checked_sub(env.primary_portfolio(VICTIM).capital.get())
+            .ok_or("PR 310 rejected retained trades increased victim capital")?,
+    )
+    .map_err(|_| "PR 310 unconsented victim loss does not fit u64")?;
+    let insurance_after_rejections = env.primary_market_state().1.insurance_domain_budget[0]
+        .checked_add(env.primary_market_state().1.insurance_domain_budget[1])
+        .ok_or("PR 310 post-rejection insurance total overflow")?;
+    let unconsented_insurance_delta = insurance_after_rejections
+        .checked_sub(insurance_before_rejections)
+        .ok_or("PR 310 rejected retained trades decreased insurance")?;
+    if !stale_open_rejected
+        || !stale_close_rejected
+        || !rejected_exact_rollback
+        || unconsented_victim_loss != 0
+        || unconsented_insurance_delta != 0
+    {
+        return Err(format!(
+            "PR 310 stale-fee rejection failed: open={stale_open_error}, close={stale_close_error}, \
+             rollback={rejected_exact_rollback}, victim_loss={unconsented_victim_loss}, \
+             insurance_delta={unconsented_insurance_delta}"
+        ));
+    }
+
+    let freshly_consented_open = build_trade(&mut env, SIZE_Q, INSTALLED_FEE_BPS);
+    let freshly_consented_close = build_trade(&mut env, -SIZE_Q, INSTALLED_FEE_BPS);
     let open = env
-        .land_retained(retained_open)
-        .map_err(|error| format!("PR 310 retained open no longer lands: {error}"))?;
+        .land_retained(freshly_consented_open)
+        .map_err(|error| format!("PR 310 freshly consented open failed: {error}"))?;
     let close = env
-        .land_retained(retained_close)
-        .map_err(|error| format!("PR 310 retained close no longer lands: {error}"))?;
+        .land_retained(freshly_consented_close)
+        .map_err(|error| format!("PR 310 freshly consented close failed: {error}"))?;
 
     let beneficiary_capital = env.primary_portfolio(BENEFICIARY).capital.get();
     let victim_capital = env.primary_portfolio(VICTIM).capital.get();
@@ -7598,10 +7658,7 @@ pub fn reproduce_bilateral_base_fee_consent(
 
     let beneficiary_payout = env.token_amount(beneficiary_destination);
     let victim_payout = env.token_amount(victim_destination);
-    let beneficiary_profit = beneficiary_payout
-        .checked_sub(DEPOSIT as u64)
-        .ok_or("PR 310 beneficiary did not recover its deposit")?;
-    let victim_loss = (DEPOSIT as u64)
+    let consented_victim_fee = (DEPOSIT as u64)
         .checked_sub(victim_payout)
         .ok_or("PR 310 victim payout exceeded its deposit")?;
     let total_payout = u128::from(beneficiary_payout) + u128::from(victim_payout);
@@ -7611,8 +7668,8 @@ pub fn reproduce_bilateral_base_fee_consent(
         .max(insurance_withdrawal.compute_units)
         .max(beneficiary_withdrawal.compute_units)
         .max(victim_withdrawal.compute_units);
-    if victim_loss != 100_000
-        || beneficiary_profit != victim_loss
+    let token_supply_conserved = env.token_supply_observed() == supply_before;
+    if consented_victim_fee != 100_000
         || beneficiary_payout != 100_100_000
         || victim_payout != 99_900_000
         || total_payout != 2 * DEPOSIT
@@ -7620,28 +7677,33 @@ pub fn reproduce_bilateral_base_fee_consent(
             + env.primary_market_state().1.insurance_domain_budget[1]
             != 0
         || max_cu >= TX_CU_LIMIT
-        || env.token_supply_observed() != supply_before
+        || !token_supply_conserved
     {
         return Err(format!(
             "PR 310 terminal extraction mismatch: payouts={beneficiary_payout}/{victim_payout}, \
-             loss/profit={victim_loss}/{beneficiary_profit}, total={total_payout}, max_cu={max_cu}, \
+             consented_victim_fee={consented_victim_fee}, total={total_payout}, max_cu={max_cu}, \
              supply={}/{}",
             env.token_supply_observed(),
             supply_before
         ));
     }
 
-    Ok(BilateralBaseFeeConsentReproduction {
+    Ok(BilateralBaseFeeConsentProtection {
         blocker: KnownBlocker::BilateralBaseFeeConsent,
         route,
         signed_fee_bps: SIGNED_FEE_BPS,
         installed_fee_bps: INSTALLED_FEE_BPS,
-        victim_loss,
-        beneficiary_profit,
-        insurance_extraction: TOTAL_INSURANCE_FEE as u64,
+        stale_open_rejected,
+        stale_close_rejected,
+        rejected_exact_rollback,
+        unconsented_victim_loss,
+        unconsented_insurance_delta,
+        consented_victim_fee,
+        consented_insurance_fee: TOTAL_INSURANCE_FEE as u64,
         total_payout,
         open_cu: open.compute_units,
         close_cu: close.compute_units,
+        token_supply_conserved,
     })
 }
 
@@ -8364,9 +8426,9 @@ fn finish_delayed_asset_fee_extraction(
     })
 }
 
-pub fn reproduce_delayed_trade_fee_policy_replay(
+pub fn verify_delayed_trade_fee_policy_nonextraction(
     seed: [u8; 32],
-) -> Result<DelayedTradeFeePolicyReplayReproduction, String> {
+) -> Result<DelayedTradeFeePolicyReplayProtection, String> {
     const VICTIM: usize = 0;
     const ATTACKER: usize = 1;
     const ACTIVATION_PAYER: usize = 2;
@@ -8376,9 +8438,6 @@ pub fn reproduce_delayed_trade_fee_policy_replay(
     const SIZE_Q: i128 = 10 * POS_SCALE as i128;
     const STALE_TRADE_FEE_BPS: u64 = 10_000;
     const CURRENT_TRADE_FEE_BPS: u64 = 0;
-    const FEE_PER_SIDE: u64 = 1_000;
-    const TOTAL_FEE: u128 = 2 * FEE_PER_SIDE as u128;
-
     let mut env = V16Svm::new(
         seed,
         MarketConfig {
@@ -8423,41 +8482,117 @@ pub fn reproduce_delayed_trade_fee_policy_replay(
     if env.primary_market_state().0.trade_fee_base_bps != STALE_TRADE_FEE_BPS {
         return Err("PR 338 delayed policy did not overwrite the correction".into());
     }
-    let trade = env
-        .land_retained(retained_trade)
-        .map_err(|error| format!("PR 338 victim's zero-fee trade rejected: {error}"))?;
+    let stale_policy_landed = true;
+    let before_rejection = tracked_economic_accounts(&env);
+    let victim_capital_before = env.primary_portfolio(VICTIM).capital.get();
+    let attacker_capital_before = env.primary_portfolio(ATTACKER).capital.get();
+    let stale_trade_error = match env.land_retained(retained_trade) {
+        Ok(_) => return Err("PR 338 stale zero-fee trade unexpectedly landed".into()),
+        Err(error) => error,
+    };
+    let stale_trade_rejected = stale_trade_error.contains("Custom(9)")
+        || stale_trade_error.contains("custom program error: 0x9");
+    let rejected_exact_rollback = tracked_economic_accounts(&env) == before_rejection;
+    if !stale_trade_rejected
+        || !rejected_exact_rollback
+        || env.primary_portfolio(VICTIM).capital.get() != victim_capital_before
+        || env.primary_portfolio(ATTACKER).capital.get() != attacker_capital_before
+    {
+        return Err(format!(
+            "PR 338 stale trade did not reject atomically: {stale_trade_error}"
+        ));
+    }
 
-    let extraction = finish_delayed_asset_fee_extraction(
-        &mut env,
-        supply_before,
-        VICTIM,
-        ATTACKER,
-        ASSET,
-        SIZE_Q,
-        PRICE,
-        DEPOSIT,
-        FEE_PER_SIDE,
-        TOTAL_FEE,
-        "PR 338",
-    )?;
-    let max_cu = correction
+    let recovery_correction = env
+        .update_trade_fee_policy(CURRENT_TRADE_FEE_BPS)
+        .map_err(|error| format!("PR 338 restore visible zero-fee policy: {error}"))?;
+    let open = env
+        .trade_no_cpi(
+            VICTIM,
+            ATTACKER,
+            ASSET,
+            SIZE_Q,
+            PRICE,
+            CURRENT_TRADE_FEE_BPS,
+        )
+        .map_err(|error| format!("PR 338 freshly signed zero-fee open failed: {error}"))?;
+    let close = env
+        .trade_no_cpi(
+            VICTIM,
+            ATTACKER,
+            ASSET,
+            -SIZE_Q,
+            PRICE,
+            CURRENT_TRADE_FEE_BPS,
+        )
+        .map_err(|error| format!("PR 338 freshly signed zero-fee close failed: {error}"))?;
+
+    let victim_destination = env.actors[VICTIM].destination_token;
+    let attacker_destination = env.actors[ATTACKER].destination_token;
+    let victim_destination_before = env.token_amount(victim_destination);
+    let attacker_destination_before = env.token_amount(attacker_destination);
+    let victim_capital = env.primary_portfolio(VICTIM).capital.get();
+    let attacker_capital = env.primary_portfolio(ATTACKER).capital.get();
+    let victim_withdrawal = env
+        .withdraw_primary(VICTIM, victim_capital)
+        .map_err(|error| format!("PR 338 victim terminal withdrawal: {error}"))?;
+    let attacker_withdrawal = env
+        .withdraw_primary(ATTACKER, attacker_capital)
+        .map_err(|error| format!("PR 338 attacker terminal withdrawal: {error}"))?;
+    let victim_return = env
+        .token_amount(victim_destination)
+        .checked_sub(victim_destination_before)
+        .ok_or("PR 338 victim destination decreased")?;
+    let attacker_return = env
+        .token_amount(attacker_destination)
+        .checked_sub(attacker_destination_before)
+        .ok_or("PR 338 attacker destination decreased")?;
+    let deposit_u64 = u64::try_from(DEPOSIT).map_err(|_| "PR 338 deposit exceeds u64")?;
+    let victim_loss = deposit_u64
+        .checked_sub(victim_return)
+        .ok_or("PR 338 victim returned more than deposited")?;
+    let attacker_profit = attacker_return
+        .checked_sub(deposit_u64)
+        .ok_or("PR 338 attacker did not recover its deposit")?;
+    let extracted_fee = env.primary_market_state().1.insurance_domain_budget[ASSET as usize * 2]
+        .checked_add(env.primary_market_state().1.insurance_domain_budget[ASSET as usize * 2 + 1])
+        .ok_or("PR 338 fee total overflow")?;
+    let correction_cu = correction
         .compute_units
+        .max(recovery_correction.compute_units);
+    let trade_cu = open.compute_units.max(close.compute_units);
+    let withdrawal_cu = victim_withdrawal
+        .compute_units
+        .max(attacker_withdrawal.compute_units);
+    let token_supply_conserved = env.token_supply_observed() == supply_before;
+    let max_cu = correction_cu
         .max(replay.compute_units)
-        .max(trade.compute_units)
-        .max(extraction.withdrawal_cu);
+        .max(trade_cu)
+        .max(withdrawal_cu);
     if max_cu >= TX_CU_LIMIT {
         return Err(format!("PR 338 instruction exceeded CU limit: {max_cu}"));
     }
+    if victim_loss != 0 || attacker_profit != 0 || extracted_fee != 0 || !token_supply_conserved {
+        return Err(format!(
+            "PR 338 stale policy still extracted value: victim={victim_loss}, \
+             attacker={attacker_profit}, fee={extracted_fee}, supply={}/{supply_before}",
+            env.token_supply_observed()
+        ));
+    }
 
-    Ok(DelayedTradeFeePolicyReplayReproduction {
+    Ok(DelayedTradeFeePolicyReplayProtection {
         blocker: KnownBlocker::DelayedTradeFeePolicyReplay,
-        victim_loss: extraction.victim_loss,
-        attacker_profit: extraction.attacker_profit,
-        extracted_fee: extraction.extracted_fee,
-        correction_cu: correction.compute_units,
+        stale_policy_landed,
+        stale_trade_rejected,
+        rejected_exact_rollback,
+        victim_loss,
+        attacker_profit,
+        extracted_fee: u64::try_from(extracted_fee).map_err(|_| "PR 338 fee exceeds u64")?,
+        correction_cu,
         replay_cu: replay.compute_units,
-        trade_cu: trade.compute_units,
-        withdrawal_cu: extraction.withdrawal_cu,
+        trade_cu,
+        withdrawal_cu,
+        token_supply_conserved,
     })
 }
 
@@ -8516,7 +8651,14 @@ pub fn reproduce_delayed_fee_redirect_policy_replay(
     )
     .map_err(|error| format!("PR 340 activate attacker-operated asset: {error}"))?;
 
-    let retained_trade = env.build_retained_no_cpi_trade(VICTIM, ATTACKER, ASSET, SIZE_Q, PRICE);
+    let retained_trade = env.build_retained_no_cpi_trade_with_fee(
+        VICTIM,
+        ATTACKER,
+        ASSET,
+        SIZE_Q,
+        PRICE,
+        TRADE_FEE_BPS,
+    );
     let replay = env
         .land_retained(retained_policy)
         .map_err(|error| format!("PR 340 delayed redirect policy no longer lands: {error}"))?;
@@ -10494,6 +10636,10 @@ pub fn reproduce_matcher_grant_market_generation_replay(
 struct TradeFeeMarketGenerationWorld {
     old_market_id: u64,
     new_market_id: u64,
+    stale_policy_landed: bool,
+    stale_trade_rejected: bool,
+    rejected_exact_rollback: bool,
+    recovery_trade_landed: bool,
     victim_loss: u64,
     attacker_profit: u64,
     extracted_fee: u64,
@@ -10514,8 +10660,6 @@ fn run_trade_fee_market_generation_world(
     const DEPOSIT: u128 = 10_000;
     const SIZE_Q: i128 = 10 * POS_SCALE as i128;
     const STALE_TRADE_FEE_BPS: u64 = 10_000;
-    const FEE_PER_SIDE: u64 = 1_000;
-    const TOTAL_FEE: u128 = 2 * FEE_PER_SIDE as u128;
     const REINIT_SLOT: u64 = 10;
     const RETIRE_SLOT: u64 = 11;
     const ACTIVATE_SLOT: u64 = 12;
@@ -10592,20 +10736,45 @@ fn run_trade_fee_market_generation_world(
             .map_err(|error| format!("PR 296 pre-signed {label} deposit rejected: {error}"))?;
         max_cu = max_cu.max(deposit.compute_units);
     }
-    let trade = env
-        .land_retained(retained_trade)
-        .map_err(|error| format!("PR 296 pre-signed zero-fee trade rejected: {error}"))?;
-    max_cu = max_cu.max(trade.compute_units);
+    let (stale_trade_rejected, rejected_exact_rollback, recovery_trade_landed, trade_cu) =
+        if land_replay {
+            let before_rejection = tracked_economic_accounts(&env);
+            let error = match env.land_retained(retained_trade) {
+                Ok(_) => return Err("PR 296 stale-fee retained trade unexpectedly landed".into()),
+                Err(error) => error,
+            };
+            let rejected =
+                error.contains("Custom(9)") || error.contains("custom program error: 0x9");
+            let rolled_back = tracked_economic_accounts(&env) == before_rejection;
+            if !rejected || !rolled_back {
+                return Err(format!(
+                    "PR 296 stale-fee retained trade did not reject atomically: {error}"
+                ));
+            }
+            let correction = env
+                .update_trade_fee_policy(0)
+                .map_err(|error| format!("PR 296 restore zero fee after rejection: {error}"))?;
+            max_cu = max_cu.max(correction.compute_units);
+            let recovery_trade = env
+                .trade_no_cpi(VICTIM, ATTACKER, ASSET, SIZE_Q, PRICE, 0)
+                .map_err(|error| format!("PR 296 fresh zero-fee trade failed: {error}"))?;
+            max_cu = max_cu.max(recovery_trade.compute_units);
+            (true, true, true, recovery_trade.compute_units)
+        } else {
+            let trade = env
+                .land_retained(retained_trade)
+                .map_err(|error| format!("PR 296 control zero-fee trade rejected: {error}"))?;
+            max_cu = max_cu.max(trade.compute_units);
+            (false, true, false, trade.compute_units)
+        };
 
     let group_after_trade = env.primary_market_state().1;
     let attacker_domain_fee = group_after_trade.insurance_domain_budget[ASSET as usize * 2]
         .checked_add(group_after_trade.insurance_domain_budget[ASSET as usize * 2 + 1])
         .ok_or("PR 296 attacker domain fee overflow")?;
-    let expected_domain_fee = if land_replay { TOTAL_FEE } else { 0 };
-    if attacker_domain_fee != expected_domain_fee {
+    if attacker_domain_fee != 0 {
         return Err(format!(
-            "PR 296 fee mismatch: replay={land_replay}, fee={attacker_domain_fee}, \
-             expected={expected_domain_fee}"
+            "PR 296 rejected stale terms still created attacker-domain fee {attacker_domain_fee}"
         ));
     }
 
@@ -10613,16 +10782,6 @@ fn run_trade_fee_market_generation_world(
     let attacker_destination = env.actors[ATTACKER].destination_token;
     let victim_destination_before = env.token_amount(victim_destination);
     let attacker_destination_before = env.token_amount(attacker_destination);
-    if land_replay {
-        let withdrawal = env
-            .withdraw_insurance_asset(ATTACKER, ASSET, TOTAL_FEE)
-            .map_err(|error| format!("PR 296 attacker fee withdrawal: {error}"))?;
-        max_cu = max_cu.max(withdrawal.compute_units);
-        let correction = env
-            .update_trade_fee_policy(0)
-            .map_err(|error| format!("PR 296 restore zero fee before neutral close: {error}"))?;
-        max_cu = max_cu.max(correction.compute_units);
-    }
     let close = env
         .trade_no_cpi(VICTIM, ATTACKER, ASSET, -SIZE_Q, PRICE, 0)
         .map_err(|error| format!("PR 296 neutral close: {error}"))?;
@@ -10649,9 +10808,8 @@ fn run_trade_fee_market_generation_world(
     let attacker_profit = attacker_return
         .checked_sub(deposit_u64)
         .ok_or("PR 296 attacker did not recover its deposit")?;
-    let expected_loss = if land_replay { FEE_PER_SIDE } else { 0 };
-    if victim_loss != expected_loss
-        || attacker_profit != expected_loss
+    if victim_loss != 0
+        || attacker_profit != 0
         || env.token_supply_observed() != supply_before
         || max_cu >= TX_CU_LIMIT
     {
@@ -10664,19 +10822,23 @@ fn run_trade_fee_market_generation_world(
     Ok(TradeFeeMarketGenerationWorld {
         old_market_id,
         new_market_id,
+        stale_policy_landed: land_replay,
+        stale_trade_rejected,
+        rejected_exact_rollback,
+        recovery_trade_landed,
         victim_loss,
         attacker_profit,
         extracted_fee: u64::try_from(attacker_domain_fee)
             .map_err(|_| "PR 296 extracted fee exceeds u64")?,
         replay_cu,
-        trade_cu: trade.compute_units,
+        trade_cu,
         max_cu,
     })
 }
 
-pub fn reproduce_trade_fee_market_generation_replay(
+pub fn verify_trade_fee_market_generation_nonextraction(
     mut seed: [u8; 32],
-) -> Result<TradeFeeMarketGenerationReplayReproduction, String> {
+) -> Result<TradeFeeMarketGenerationReplayProtection, String> {
     seed[0] ^= 0x96;
     let control = run_trade_fee_market_generation_world(seed, false)?;
     let replay = run_trade_fee_market_generation_world(seed, true)?;
@@ -10685,9 +10847,13 @@ pub fn reproduce_trade_fee_market_generation_replay(
         || control.victim_loss != 0
         || control.attacker_profit != 0
         || control.extracted_fee != 0
-        || replay.victim_loss != 1_000
-        || replay.attacker_profit != replay.victim_loss
-        || replay.extracted_fee != 2_000
+        || !replay.stale_policy_landed
+        || !replay.stale_trade_rejected
+        || !replay.rejected_exact_rollback
+        || !replay.recovery_trade_landed
+        || replay.victim_loss != 0
+        || replay.attacker_profit != 0
+        || replay.extracted_fee != 0
         || replay.replay_cu == 0
         || replay.max_cu >= TX_CU_LIMIT
     {
@@ -10695,10 +10861,14 @@ pub fn reproduce_trade_fee_market_generation_replay(
             "PR 296 paired-world mismatch: control={control:?}, replay={replay:?}"
         ));
     }
-    Ok(TradeFeeMarketGenerationReplayReproduction {
+    Ok(TradeFeeMarketGenerationReplayProtection {
         blocker: KnownBlocker::TradeFeeMarketGenerationReplay,
         old_market_id: replay.old_market_id,
         new_market_id: replay.new_market_id,
+        stale_policy_landed: replay.stale_policy_landed,
+        stale_trade_rejected: replay.stale_trade_rejected,
+        rejected_exact_rollback: replay.rejected_exact_rollback,
+        recovery_trade_landed: replay.recovery_trade_landed,
         victim_loss: replay.victim_loss,
         attacker_profit: replay.attacker_profit,
         extracted_fee: replay.extracted_fee,
@@ -11779,7 +11949,7 @@ pub fn reproduce_fee_redirect_generation_replay(
     }
 
     let trade = env
-        .trade_no_cpi(VICTIM, ATTACKER, ASSET, SIZE_Q, PRICE, 0)
+        .trade_no_cpi(VICTIM, ATTACKER, ASSET, SIZE_Q, PRICE, TRADE_FEE_BPS)
         .map_err(|error| format!("PR 317 charge replacement users: {error}"))?;
     let (_, group_after_trade) = env.primary_market_state();
     let attacker_domain_fee = group_after_trade.insurance_domain_budget[ASSET as usize * 2]

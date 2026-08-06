@@ -2,13 +2,15 @@
 //!
 //! Normative obligation: Delayed requests remain bounded by the policy and economics the signer authorized.
 //!
-//! Evidence in this file (I plus invariant-specific F/M assertions): `v16_program_pr325_stale_maintenance_policy_extracts_user_fee`, `v16_program_pr326_stale_liquidation_policy_extracts_user_fee`, `v16_program_pr337_delayed_maintenance_policy_extracts_user_fee`, `v16_program_pr336_delayed_liquidation_policy_extracts_user_fee`, `v16_program_pr338_delayed_trade_fee_policy_extracts_user_fee`, `v16_program_pr340_delayed_fee_redirect_extracts_user_fee`, `v16_program_pr349_delayed_backing_fee_extracts_user_fee`, `v16_program_pr339_reordered_backing_terms_divert_provider_fee`, `v16_program_pr347_stale_policy_cannot_freeze_authenticated_mark`, `v16_program_pr335_delayed_oracle_intents_extract_user_collateral`, `v16_program_pr334_delayed_matcher_enable_extracts_lp_collateral`. These tests exercise the deployed public
+//! Evidence in this file (I plus invariant-specific F/M assertions): `v16_program_pr325_stale_maintenance_policy_extracts_user_fee`, `v16_program_pr326_stale_liquidation_policy_extracts_user_fee`, `v16_program_pr337_delayed_maintenance_policy_extracts_user_fee`, `v16_program_pr336_delayed_liquidation_policy_extracts_user_fee`, `v16_program_pr338_delayed_trade_fee_policy_cannot_silently_debit_user`, `v16_program_pr340_delayed_fee_redirect_extracts_user_fee`, `v16_program_pr349_delayed_backing_fee_extracts_user_fee`, `v16_program_pr339_reordered_backing_terms_divert_provider_fee`, `v16_program_pr347_stale_policy_cannot_freeze_authenticated_mark`, `v16_program_pr335_delayed_oracle_intents_extract_user_collateral`, `v16_program_pr334_delayed_matcher_enable_extracts_lp_collateral`. These tests exercise the deployed public
 //! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
 //! rollback, liveness, or compute outcomes appropriate to the invariant.
 //!
 //! Guarantee boundary: a quarantined counterexample demonstrates public reachability; it does
 //! not certify the invariant on an unfixed pin. Certification requires the fixed-pin assertion
 //! plus every additional verification method required by the charter.
+//! PR 338's silent debit is blocked by signed base-fee consent, but the stale policy overwrite is
+//! retained as an explicit ordering gap. Redirect-policy replays remain economically exploitable.
 
 use super::*;
 
@@ -78,20 +80,24 @@ fn v16_program_pr336_delayed_liquidation_policy_extracts_user_fee() {
 }
 
 #[test]
-fn v16_program_pr338_delayed_trade_fee_policy_extracts_user_fee() {
-    let reproduction = reproduce_delayed_trade_fee_policy_replay([0x38; 32])
-        .unwrap_or_else(|error| panic!("PR 338 no longer reproduces: {error}"));
+fn v16_program_pr338_delayed_trade_fee_policy_cannot_silently_debit_user() {
+    let protection = verify_delayed_trade_fee_policy_nonextraction([0x38; 32])
+        .unwrap_or_else(|error| panic!("PR 338 non-extraction protection failed: {error}"));
     assert_eq!(
-        reproduction.blocker,
+        protection.blocker,
         KnownBlocker::DelayedTradeFeePolicyReplay
     );
-    assert_eq!(reproduction.victim_loss, 1_000);
-    assert_eq!(reproduction.attacker_profit, 1_000);
-    assert_eq!(reproduction.extracted_fee, 2_000);
-    assert!(reproduction.correction_cu < 1_400_000);
-    assert!(reproduction.replay_cu < 1_400_000);
-    assert!(reproduction.trade_cu < 1_400_000);
-    assert!(reproduction.withdrawal_cu < 1_400_000);
+    assert!(protection.stale_policy_landed);
+    assert!(protection.stale_trade_rejected);
+    assert!(protection.rejected_exact_rollback);
+    assert_eq!(protection.victim_loss, 0);
+    assert_eq!(protection.attacker_profit, 0);
+    assert_eq!(protection.extracted_fee, 0);
+    assert!(protection.correction_cu < 1_400_000);
+    assert!(protection.replay_cu < 1_400_000);
+    assert!(protection.trade_cu < 1_400_000);
+    assert!(protection.withdrawal_cu < 1_400_000);
+    assert!(protection.token_supply_conserved);
 }
 
 #[test]

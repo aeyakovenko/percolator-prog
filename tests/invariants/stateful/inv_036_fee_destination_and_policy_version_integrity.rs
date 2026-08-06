@@ -15,7 +15,7 @@
 //! Guarantee boundary: a quarantined counterexample demonstrates public reachability; it does
 //! not certify the invariant on an unfixed pin. Certification requires the fixed-pin assertion
 //! plus every additional verification method required by the charter.
-//! PRs 223 and 224 are fixed-pin assertions here; the remaining finding-specific tests are counterexamples.
+//! PRs 223, 224, and 310 are fixed-pin assertions here; PR 314 remains a counterexample.
 
 use super::*;
 
@@ -118,16 +118,22 @@ proptest! {
     }
 
     #[test]
-    fn v16_program_pr310_bilateral_base_fee_consent_fuzz(
+    fn v16_program_pr310_bilateral_base_fee_consent_protection_fuzz(
         (seed, route) in bilateral_base_fee_consent_strategy()
     ) {
-        let result = reproduce_bilateral_base_fee_consent(seed, route);
-        prop_assert!(
-            result.is_ok(),
-            "PR 310 {:?} no longer reproduces for seed {:?}: {}",
-            route,
-            seed,
-            result.unwrap_err()
-        );
+        let protection = verify_bilateral_base_fee_consent(seed, route)
+            .map_err(TestCaseError::fail)?;
+        prop_assert_eq!(protection.route, route);
+        prop_assert!(protection.stale_open_rejected);
+        prop_assert!(protection.stale_close_rejected);
+        prop_assert!(protection.rejected_exact_rollback);
+        prop_assert_eq!(protection.unconsented_victim_loss, 0);
+        prop_assert_eq!(protection.unconsented_insurance_delta, 0);
+        prop_assert_eq!(protection.consented_victim_fee, 100_000);
+        prop_assert_eq!(protection.consented_insurance_fee, 200_000);
+        prop_assert_eq!(protection.total_payout, 200_000_000);
+        prop_assert!(protection.open_cu < crate::support::v16_svm::TX_CU_LIMIT);
+        prop_assert!(protection.close_cu < crate::support::v16_svm::TX_CU_LIMIT);
+        prop_assert!(protection.token_supply_conserved);
     }
 }

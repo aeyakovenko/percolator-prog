@@ -127,13 +127,11 @@ proptest! {
             violations,
             vec![
                 FeeConsentKind::LiveBaseFeeHike,
-                FeeConsentKind::RetainedNoCpiBaseFee,
-                FeeConsentKind::RetainedBatchNoCpiBaseFee,
                 FeeConsentKind::CpiBaseFee,
                 FeeConsentKind::BatchCpiBaseFee,
                 FeeConsentKind::PermissionlessActivationFee,
             ],
-            "fee-consent classification changed; CPI caller fees must remain non-authoritative"
+            "fee-consent classification changed; retained no-CPI and CPI caller fees must remain protected"
         );
     }
 }
@@ -203,16 +201,18 @@ proptest! {
     }
 
     #[test]
-    fn v16_program_pr338_delayed_trade_fee_policy_replay_fuzz(
+    fn v16_program_pr338_delayed_trade_fee_policy_nonextraction_fuzz(
         seed in delayed_trade_fee_policy_replay_seed_strategy()
     ) {
-        let result = reproduce_delayed_trade_fee_policy_replay(seed);
-        prop_assert!(
-            result.is_ok(),
-            "PR 338 no longer reproduces for seed {:?}: {}",
-            seed,
-            result.unwrap_err()
-        );
+        let protection = verify_delayed_trade_fee_policy_nonextraction(seed)
+            .map_err(TestCaseError::fail)?;
+        prop_assert!(protection.stale_policy_landed);
+        prop_assert!(protection.stale_trade_rejected);
+        prop_assert!(protection.rejected_exact_rollback);
+        prop_assert_eq!(protection.victim_loss, 0);
+        prop_assert_eq!(protection.attacker_profit, 0);
+        prop_assert_eq!(protection.extracted_fee, 0);
+        prop_assert!(protection.token_supply_conserved);
     }
 
     #[test]
