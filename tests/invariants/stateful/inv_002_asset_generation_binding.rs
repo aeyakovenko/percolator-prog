@@ -5,7 +5,8 @@
 //! Evidence in this file (F over public I routes):
 //! `v16_program_asset_generation_operation_matrix_discovers_stale_intents` enumerates a
 //! finding-agnostic retained-operation registry over public retirement/reactivation. Direct impact
-//! regressions remain below.
+//! regressions remain below. Oracle controls use a retained `u64::MAX` sequence, proving the
+//! generation property independently of the monotonic control-sequence layer.
 //! `v16_program_asset_generation_terminal_policy_discovers_replacement_value_transfer` proves
 //! economic impact by replaying an old asset-generation resolve policy only after replacement
 //! users have opened and accrued opposite PnL. These tests exercise the deployed public
@@ -55,9 +56,6 @@ proptest! {
         prop_assert_eq!(
             violations,
             vec![
-                AssetIntentKind::ConfigureAuthMark,
-                AssetIntentKind::ConfigureEwmaMark,
-                AssetIntentKind::ConfigureHybridOracle,
                 AssetIntentKind::InsuranceTopUp,
                 AssetIntentKind::BackingTopUp,
                 AssetIntentKind::InsuranceWithdrawal,
@@ -76,8 +74,11 @@ proptest! {
                 AssetIntentKind::BatchTradeCpi,
                 AssetIntentKind::PushAuthMark,
                 AssetIntentKind::PushEwmaMark,
+                AssetIntentKind::ConfigureAuthMark,
+                AssetIntentKind::ConfigureEwmaMark,
+                AssetIntentKind::ConfigureHybridOracle,
             ],
-            "trade intents and generation-A mark pushes must reject after slot reuse"
+            "trade and oracle intents must reject after slot reuse"
         );
     }
 }
@@ -206,16 +207,19 @@ proptest! {
     }
 
     #[test]
-    fn v16_program_pr277_pr322_asset_generation_config_replay_fuzz(
+    fn v16_program_pr277_pr322_asset_generation_config_binding_fuzz(
         (seed, path) in asset_generation_config_replay_strategy()
     ) {
-        let result = reproduce_asset_generation_config_replay(seed, path);
-        prop_assert!(
-            result.is_ok(),
-            "PR 277/322 {:?} no longer reproduces for seed {:?}: {}",
-            path,
-            seed,
-            result.unwrap_err()
-        );
+        let kind = match path {
+            AssetGenerationConfigPath::Auth => AssetIntentKind::ConfigureAuthMark,
+            AssetGenerationConfigPath::Ewma => AssetIntentKind::ConfigureEwmaMark,
+            AssetGenerationConfigPath::Hybrid => AssetIntentKind::ConfigureHybridOracle,
+        };
+        let protection = discover_asset_generation_replay(seed, kind)
+            .map_err(TestCaseError::fail)?;
+        prop_assert!(protection.new_asset_id > protection.old_asset_id);
+        prop_assert!(!protection.accepted_stale_intent);
+        prop_assert!(!protection.mutated_economic_state);
+        prop_assert_eq!(protection.compute_units, None);
     }
 }

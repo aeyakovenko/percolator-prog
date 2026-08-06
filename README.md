@@ -201,7 +201,7 @@ Assets 1..N are **truly permissionless ⇒ untrusted**. The protocol must guaran
   `UpdateAssetLifecycle { action: RETIRE, asset_index: 0 }` rejects, so asset 0 is never returned to
   the permissionless reusable-slot pool. Once any asset 0..N is in RECOVERY and every position/loss plus
   value-bearing source/backing/reservation state for that asset is gone,
-  `RestartAssetOracle { asset_index, ... }` signed by that asset's `asset_admin` atomically retires the old market id,
+  `RestartAssetOracle { asset_index, market_id, ... }` signed by that asset's `asset_admin` atomically retires the old market id,
   activates a fresh market id at the supplied initial price, preserves that asset's authority keys and
   funded insurance-domain budgets, and returns the asset to ACTIVE. New legs bind to the new monotonic
   `market_id`; stale legs cannot leak through restart. **✅**
@@ -396,7 +396,7 @@ This section describes intent and operational ordering, not argument-by-argument
     until `force_close_delay_slots` elapses; signer is `marketauth` or that asset's `asset_admin`
   - ordinary `RETIRE` rejects `asset_index = 0`; asset 0 is restarted, not reused
 - **RestartAssetOracle** (tag 69)
-  - `RestartAssetOracle { asset_index, now_slot, initial_price }`, signed by that asset's `asset_admin`
+  - `RestartAssetOracle { asset_index, market_id, now_slot, initial_price, observation_sequence }`, signed by that asset's `asset_admin`
   - after the target asset is already RECOVERY and empty of positions/loss plus value-bearing
     source/backing/reservation state, atomically retires the old market id, activates a fresh market id
     at the supplied initial price, preserves authority keys and funded insurance-domain budgets, then
@@ -467,6 +467,9 @@ This section describes intent and operational ordering, not argument-by-argument
   accounting.
 - AuthMark markets use **ConfigureAuthMark** (tag 62) and **PushAuthMark** (tag 63), signed by the configured mark authority, to store a direct authority mark without EWMA smoothing.
 - EwmaMark markets use **ConfigureEwmaMark** (tag 35) and **PushEwmaMark** (tag 36), signed by the configured mark authority, to update a smoothed EWMA mark input.
+- Every oracle configuration, mark push, and restart binds the current asset `market_id` plus its
+  scope-local `observation_sequence`; a retained request for a retired generation rejects before
+  sequence consumption or mutation.
 - The per-slot effective-price movement cap is a risk parameter set at init; there is no standalone `SetOraclePriceCap` instruction in the current ABI.
 
 ### Insurance management
@@ -575,7 +578,7 @@ AuthMark and EwmaMark are authority-pushed pricing modes for markets that do not
 
 AuthMark is the direct authority-mark path:
 
-- **Direct mark API**: `ConfigureAuthMark { asset_index, now_slot, initial_mark_e6 }` and `PushAuthMark { asset_index, now_slot, mark_e6 }`.
+- **Direct mark API**: `ConfigureAuthMark { asset_index, market_id, now_slot, initial_mark_e6, observation_sequence }` and `PushAuthMark { asset_index, market_id, now_slot, mark_e6, observation_sequence }`.
 - **No EWMA configuration**: there is no halflife, mark-min-fee, feed id, confidence filter, invert flag, or unit-scale configuration in the AuthMark API.
 - **Authority boundary**: only the configured mark authority can push a new mark; public cranks can only consume the stored mark.
 - **Adapter-friendly**: a separate oracle adapter PDA can verify Pyth, Chainlink, Switchboard, or custom feed policy, then sign `PushAuthMark` with the resulting mark.

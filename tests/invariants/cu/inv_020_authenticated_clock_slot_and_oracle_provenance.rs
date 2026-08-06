@@ -70,6 +70,7 @@ fn v16_attack_recovery_oracle_push_cannot_extend_force_close_deadline() {
     env.svm.expire_blockhash();
     let push = env.send(
         ProgInstruction::PushAuthMark {
+            market_id: 0,
             observation_sequence: u64::MAX,
             asset_index: 1,
             now_slot: FORCE_CLOSE_SLOT - 1,

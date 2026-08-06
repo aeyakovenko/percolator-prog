@@ -217,6 +217,7 @@ fn v16_program_asset0_recovery_matrix_discovers_provider_and_restart_lock() {
     env.svm.expire_blockhash();
     let restart = env.send(
         ProgInstruction::RestartAssetOracle {
+            market_id: 0,
             asset_index: 0,
             now_slot: 3,
             initial_price: 1_000,
@@ -1920,6 +1921,7 @@ fn v16_attack_permissionless_asset_epoch_grief_has_atomic_max_leg_exit() {
     env.svm.warp_to_slot(3);
     env.send(
         ProgInstruction::PushAuthMark {
+            market_id: 0,
             observation_sequence: u64::MAX,
             asset_index: ATTACK_ASSET,
             now_slot: 3,

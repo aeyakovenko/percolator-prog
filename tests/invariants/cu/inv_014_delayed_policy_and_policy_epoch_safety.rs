@@ -104,6 +104,7 @@ fn v16_oracle_modes_share_one_supersession_sequence() {
     send_admin_control(
         &mut env,
         ProgInstruction::ConfigureEwmaMark {
+            market_id: 0,
             asset_index: 0,
             now_slot: 1,
             initial_mark_e6: 100,
@@ -119,6 +120,7 @@ fn v16_oracle_modes_share_one_supersession_sequence() {
     let stale_auth = send_admin_control(
         &mut env,
         ProgInstruction::ConfigureAuthMark {
+            market_id: 0,
             asset_index: 0,
             now_slot: 1,
             initial_mark_e6: 200,
@@ -135,6 +137,7 @@ fn v16_oracle_modes_share_one_supersession_sequence() {
     send_admin_control(
         &mut env,
         ProgInstruction::ConfigureAuthMark {
+            market_id: 0,
             asset_index: 0,
             now_slot: 1,
             initial_mark_e6: 200,
@@ -156,6 +159,7 @@ fn v16_oracle_modes_share_one_supersession_sequence() {
         env.program_id,
         &env.payer,
         ProgInstruction::ConfigureHybridOracle {
+            market_id: 0,
             asset_index: 0,
             now_slot: 1,
             now_unix_ts: clock.unix_timestamp,
@@ -187,6 +191,7 @@ fn v16_oracle_modes_share_one_supersession_sequence() {
         env.program_id,
         &env.payer,
         ProgInstruction::ConfigureHybridOracle {
+            market_id: 0,
             asset_index: 0,
             now_slot: 1,
             now_unix_ts: clock.unix_timestamp,
@@ -216,6 +221,7 @@ fn v16_oracle_modes_share_one_supersession_sequence() {
     let stale_ewma = send_admin_control(
         &mut env,
         ProgInstruction::ConfigureEwmaMark {
+            market_id: 0,
             asset_index: 0,
             now_slot: 1,
             initial_mark_e6: 400,

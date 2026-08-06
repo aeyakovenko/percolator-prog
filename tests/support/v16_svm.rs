@@ -1279,9 +1279,15 @@ impl V16Svm {
         } else {
             (copy_keypair(&self.admin), self.market)
         };
+        let market_id = if foreign {
+            self.foreign_market_state().1.assets[asset_index as usize].market_id
+        } else {
+            self.primary_market_state().1.assets[asset_index as usize].market_id
+        };
         self.send_program(
             ProgInstruction::ConfigureAuthMark {
                 asset_index,
+                market_id,
                 now_slot,
                 initial_mark_e6: mark,
                 observation_sequence,
@@ -1310,6 +1316,7 @@ impl V16Svm {
             self.primary_control_sequences(asset_index as usize)
                 .oracle_observation,
         );
+        let market_id = self.primary_market_state().1.assets[asset_index as usize].market_id;
         let authority = copy_keypair(&self.admin);
         let mut accounts = vec![
             AccountMeta::new(authority.pubkey(), true),
@@ -1324,6 +1331,7 @@ impl V16Svm {
         self.send_program(
             ProgInstruction::ConfigureHybridOracle {
                 asset_index,
+                market_id,
                 now_slot,
                 now_unix_ts,
                 oracle_leg_count: oracle_accounts.len() as u8,
@@ -1359,6 +1367,33 @@ impl V16Svm {
             self.primary_control_sequences(asset_index as usize)
                 .oracle_observation,
         );
+        self.build_retained_hybrid_oracle_config_with_sequence(
+            asset_index,
+            now_slot,
+            now_unix_ts,
+            oracle_leg_flags,
+            feeds,
+            oracle_accounts,
+            hybrid_soft_stale_slots,
+            conf_filter_bps,
+            observation_sequence,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn build_retained_hybrid_oracle_config_with_sequence(
+        &mut self,
+        asset_index: u16,
+        now_slot: u64,
+        now_unix_ts: i64,
+        oracle_leg_flags: u8,
+        feeds: [[u8; 32]; 3],
+        oracle_accounts: &[Pubkey],
+        hybrid_soft_stale_slots: u64,
+        conf_filter_bps: u16,
+        observation_sequence: u64,
+    ) -> Transaction {
+        let market_id = self.primary_market_state().1.assets[asset_index as usize].market_id;
         let authority = copy_keypair(&self.admin);
         let mut accounts = vec![
             AccountMeta::new(authority.pubkey(), true),
@@ -1373,6 +1408,7 @@ impl V16Svm {
         self.build_program_transaction(
             ProgInstruction::ConfigureHybridOracle {
                 asset_index,
+                market_id,
                 now_slot,
                 now_unix_ts,
                 oracle_leg_count: oracle_accounts.len() as u8,
@@ -1403,10 +1439,12 @@ impl V16Svm {
             self.primary_control_sequences(asset_index as usize)
                 .oracle_observation,
         );
+        let market_id = self.primary_market_state().1.assets[asset_index as usize].market_id;
         let authority = copy_keypair(&self.actors[actor_index].signer);
         self.send_program(
             ProgInstruction::ConfigureAuthMark {
                 asset_index,
+                market_id,
                 now_slot,
                 initial_mark_e6: mark,
                 observation_sequence,
@@ -1431,10 +1469,12 @@ impl V16Svm {
             self.primary_control_sequences(asset_index as usize)
                 .oracle_observation,
         );
+        let market_id = self.primary_market_state().1.assets[asset_index as usize].market_id;
         let authority = copy_keypair(&self.admin);
         self.send_program(
             ProgInstruction::ConfigureEwmaMark {
                 asset_index,
+                market_id,
                 now_slot,
                 initial_mark_e6: mark,
                 mark_ewma_halflife_slots: halflife_slots,
@@ -1462,10 +1502,12 @@ impl V16Svm {
             self.primary_control_sequences(asset_index as usize)
                 .oracle_observation,
         );
+        let market_id = self.primary_market_state().1.assets[asset_index as usize].market_id;
         let authority = copy_keypair(&self.actors[actor_index].signer);
         self.send_program(
             ProgInstruction::ConfigureEwmaMark {
                 asset_index,
+                market_id,
                 now_slot,
                 initial_mark_e6: mark,
                 mark_ewma_halflife_slots: halflife_slots,
@@ -1490,10 +1532,12 @@ impl V16Svm {
             self.primary_control_sequences(asset_index as usize)
                 .oracle_observation,
         );
+        let market_id = self.primary_market_state().1.assets[asset_index as usize].market_id;
         let authority = copy_keypair(&self.admin);
         self.send_program(
             ProgInstruction::PushEwmaMark {
                 asset_index,
+                market_id,
                 now_slot,
                 mark_e6: mark,
                 observation_sequence,
@@ -1516,10 +1560,12 @@ impl V16Svm {
             self.primary_control_sequences(asset_index as usize)
                 .oracle_observation,
         );
+        let market_id = self.primary_market_state().1.assets[asset_index as usize].market_id;
         let authority = copy_keypair(&self.admin);
         self.send_program(
             ProgInstruction::PushAuthMark {
                 asset_index,
+                market_id,
                 now_slot,
                 mark_e6: mark,
                 observation_sequence,
@@ -1543,10 +1589,12 @@ impl V16Svm {
             self.primary_control_sequences(asset_index as usize)
                 .oracle_observation,
         );
+        let market_id = self.primary_market_state().1.assets[asset_index as usize].market_id;
         let authority = copy_keypair(&self.actors[actor_index].signer);
         self.send_program(
             ProgInstruction::PushAuthMark {
                 asset_index,
+                market_id,
                 now_slot,
                 mark_e6: mark,
                 observation_sequence,
@@ -1877,10 +1925,67 @@ impl V16Svm {
             self.primary_control_sequences(asset_index as usize)
                 .oracle_observation,
         );
+        let market_id = self.primary_market_state().1.assets[asset_index as usize].market_id;
         let authority = copy_keypair(&self.admin);
         self.send_program(
             ProgInstruction::RestartAssetOracle {
                 asset_index,
+                market_id,
+                now_slot,
+                initial_price,
+                observation_sequence,
+            },
+            vec![
+                AccountMeta::new(authority.pubkey(), true),
+                AccountMeta::new(self.market, false),
+            ],
+            &[authority],
+        )
+    }
+
+    pub fn restart_asset_oracle_for_actor(
+        &mut self,
+        actor_index: usize,
+        asset_index: u16,
+        now_slot: u64,
+        initial_price: u64,
+    ) -> Result<TxSuccess, String> {
+        let observation_sequence = next_control_sequence(
+            self.primary_control_sequences(asset_index as usize)
+                .oracle_observation,
+        );
+        let market_id = self.primary_market_state().1.assets[asset_index as usize].market_id;
+        let authority = copy_keypair(&self.actors[actor_index].signer);
+        self.send_program(
+            ProgInstruction::RestartAssetOracle {
+                asset_index,
+                market_id,
+                now_slot,
+                initial_price,
+                observation_sequence,
+            },
+            vec![
+                AccountMeta::new(authority.pubkey(), true),
+                AccountMeta::new(self.market, false),
+            ],
+            &[authority],
+        )
+    }
+
+    pub fn build_retained_restart_asset_oracle_for_actor_with_sequence(
+        &mut self,
+        actor_index: usize,
+        asset_index: u16,
+        now_slot: u64,
+        initial_price: u64,
+        observation_sequence: u64,
+    ) -> Transaction {
+        let market_id = self.primary_market_state().1.assets[asset_index as usize].market_id;
+        let authority = copy_keypair(&self.actors[actor_index].signer);
+        self.build_program_transaction(
+            ProgInstruction::RestartAssetOracle {
+                asset_index,
+                market_id,
                 now_slot,
                 initial_price,
                 observation_sequence,
@@ -3131,10 +3236,21 @@ impl V16Svm {
             self.primary_control_sequences(asset_index as usize)
                 .oracle_observation,
         );
+        self.build_retained_auth_mark_with_sequence(asset_index, mark_e6, observation_sequence)
+    }
+
+    pub fn build_retained_auth_mark_with_sequence(
+        &mut self,
+        asset_index: u16,
+        mark_e6: u64,
+        observation_sequence: u64,
+    ) -> Transaction {
+        let market_id = self.primary_market_state().1.assets[asset_index as usize].market_id;
         let authority = copy_keypair(&self.admin);
         self.build_program_transaction(
             ProgInstruction::PushAuthMark {
                 asset_index,
+                market_id,
                 now_slot: 0,
                 mark_e6,
                 observation_sequence,
@@ -3152,10 +3268,21 @@ impl V16Svm {
             self.primary_control_sequences(asset_index as usize)
                 .oracle_observation,
         );
+        self.build_retained_ewma_mark_with_sequence(asset_index, mark_e6, observation_sequence)
+    }
+
+    pub fn build_retained_ewma_mark_with_sequence(
+        &mut self,
+        asset_index: u16,
+        mark_e6: u64,
+        observation_sequence: u64,
+    ) -> Transaction {
+        let market_id = self.primary_market_state().1.assets[asset_index as usize].market_id;
         let authority = copy_keypair(&self.admin);
         self.build_program_transaction(
             ProgInstruction::PushEwmaMark {
                 asset_index,
+                market_id,
                 now_slot: 0,
                 mark_e6,
                 observation_sequence,
@@ -3177,10 +3304,25 @@ impl V16Svm {
             self.primary_control_sequences(asset_index as usize)
                 .oracle_observation,
         );
+        self.build_retained_auth_config_with_sequence(
+            asset_index,
+            initial_mark_e6,
+            observation_sequence,
+        )
+    }
+
+    pub fn build_retained_auth_config_with_sequence(
+        &mut self,
+        asset_index: u16,
+        initial_mark_e6: u64,
+        observation_sequence: u64,
+    ) -> Transaction {
+        let market_id = self.primary_market_state().1.assets[asset_index as usize].market_id;
         let authority = copy_keypair(&self.admin);
         self.build_program_transaction(
             ProgInstruction::ConfigureAuthMark {
                 asset_index,
+                market_id,
                 now_slot: 0,
                 initial_mark_e6,
                 observation_sequence,
@@ -3204,10 +3346,29 @@ impl V16Svm {
             self.primary_control_sequences(asset_index as usize)
                 .oracle_observation,
         );
+        self.build_retained_ewma_config_with_sequence(
+            asset_index,
+            initial_mark_e6,
+            halflife_slots,
+            mark_min_fee,
+            observation_sequence,
+        )
+    }
+
+    pub fn build_retained_ewma_config_with_sequence(
+        &mut self,
+        asset_index: u16,
+        initial_mark_e6: u64,
+        halflife_slots: u64,
+        mark_min_fee: u64,
+        observation_sequence: u64,
+    ) -> Transaction {
+        let market_id = self.primary_market_state().1.assets[asset_index as usize].market_id;
         let authority = copy_keypair(&self.admin);
         self.build_program_transaction(
             ProgInstruction::ConfigureEwmaMark {
                 asset_index,
+                market_id,
                 now_slot: 0,
                 initial_mark_e6,
                 mark_ewma_halflife_slots: halflife_slots,

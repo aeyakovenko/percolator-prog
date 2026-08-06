@@ -1139,6 +1139,7 @@ impl V16CuEnv {
             self.program_id,
             &self.payer,
             ProgInstruction::RestartAssetOracle {
+                market_id: 0,
                 asset_index,
                 now_slot,
                 initial_price,
@@ -2711,6 +2712,7 @@ impl V16CuEnv {
             self.program_id,
             &self.payer,
             ProgInstruction::ConfigureHybridOracle {
+                market_id: 0,
                 asset_index: 0,
                 now_slot,
                 now_unix_ts,
@@ -2828,6 +2830,7 @@ impl V16CuEnv {
             self.program_id,
             &self.payer,
             ProgInstruction::ConfigureHybridOracle {
+                market_id: 0,
                 asset_index,
                 now_slot,
                 now_unix_ts,
@@ -2862,6 +2865,7 @@ impl V16CuEnv {
             self.program_id,
             &self.payer,
             ProgInstruction::ConfigureEwmaMark {
+                market_id: 0,
                 asset_index: 0,
                 now_slot,
                 initial_mark_e6,
@@ -2886,6 +2890,7 @@ impl V16CuEnv {
             self.program_id,
             &self.payer,
             ProgInstruction::PushEwmaMark {
+                market_id: 0,
                 asset_index: 0,
                 now_slot,
                 mark_e6,
@@ -2908,6 +2913,7 @@ impl V16CuEnv {
             self.program_id,
             &self.payer,
             ProgInstruction::ConfigureAuthMark {
+                market_id: 0,
                 asset_index: 0,
                 now_slot,
                 initial_mark_e6,
@@ -2930,6 +2936,7 @@ impl V16CuEnv {
             self.program_id,
             &self.payer,
             ProgInstruction::PushAuthMark {
+                market_id: 0,
                 asset_index: 0,
                 now_slot,
                 mark_e6,
@@ -2959,6 +2966,7 @@ impl V16CuEnv {
             self.program_id,
             &self.payer,
             ProgInstruction::ConfigureAuthMark {
+                market_id: 0,
                 asset_index,
                 now_slot,
                 initial_mark_e6,
@@ -2988,6 +2996,7 @@ impl V16CuEnv {
             self.program_id,
             &self.payer,
             ProgInstruction::PushAuthMark {
+                market_id: 0,
                 asset_index,
                 now_slot,
                 mark_e6,
@@ -3019,6 +3028,7 @@ impl V16CuEnv {
             self.program_id,
             &self.payer,
             ProgInstruction::ConfigureAuthMark {
+                market_id: 0,
                 asset_index,
                 now_slot,
                 initial_mark_e6,
@@ -3050,6 +3060,7 @@ impl V16CuEnv {
             self.program_id,
             &self.payer,
             ProgInstruction::PushAuthMark {
+                market_id: 0,
                 asset_index,
                 now_slot,
                 mark_e6,
@@ -4076,10 +4087,11 @@ fn send_tx(
     svm: &mut LiteSVM,
     program_id: Pubkey,
     payer: &Keypair,
-    ix: ProgInstruction,
+    mut ix: ProgInstruction,
     accounts: Vec<AccountMeta>,
     extra_signers: &[&Keypair],
 ) -> Result<u64, String> {
+    bind_current_oracle_generation(svm, &accounts, &mut ix);
     let instruction = Instruction {
         program_id,
         accounts,
@@ -4097,6 +4109,57 @@ fn send_tx(
     svm.send_transaction(tx)
         .map(|meta| meta.compute_units_consumed)
         .map_err(|e| format!("{e:?}"))
+}
+
+fn bind_current_oracle_generation(
+    svm: &LiteSVM,
+    accounts: &[AccountMeta],
+    ix: &mut ProgInstruction,
+) {
+    let (asset_index, market_id) = match ix {
+        ProgInstruction::ConfigureHybridOracle {
+            asset_index,
+            market_id,
+            ..
+        }
+        | ProgInstruction::ConfigureEwmaMark {
+            asset_index,
+            market_id,
+            ..
+        }
+        | ProgInstruction::PushEwmaMark {
+            asset_index,
+            market_id,
+            ..
+        }
+        | ProgInstruction::ConfigureAuthMark {
+            asset_index,
+            market_id,
+            ..
+        }
+        | ProgInstruction::PushAuthMark {
+            asset_index,
+            market_id,
+            ..
+        }
+        | ProgInstruction::RestartAssetOracle {
+            asset_index,
+            market_id,
+            ..
+        } => (*asset_index as usize, market_id),
+        _ => return,
+    };
+    if *market_id != 0 {
+        return;
+    }
+    let market_key = accounts.get(1).expect("oracle market account").pubkey;
+    let market = svm.get_account(&market_key).expect("oracle market state");
+    let (_, group) = state::read_market(&market.data).expect("valid oracle market state");
+    let Some(asset) = group.assets.get(asset_index) else {
+        return;
+    };
+    *market_id = asset.market_id;
+    assert_ne!(*market_id, 0, "active asset generation must be nonzero");
 }
 
 fn is_engine_stale_error(error: &str) -> bool {
@@ -5659,6 +5722,7 @@ fn v16_attack_privileged_reactivate_rekeys_retired_slot_authorities() {
     env.svm.expire_blockhash();
     let old_oracle_reconfig = env.send(
         ProgInstruction::ConfigureAuthMark {
+            market_id: 0,
             observation_sequence: u64::MAX,
             asset_index: 1,
             now_slot: 5,
@@ -5684,6 +5748,7 @@ fn v16_attack_privileged_reactivate_rekeys_retired_slot_authorities() {
     env.svm.expire_blockhash();
     let new_oracle_reconfig = env.send(
         ProgInstruction::ConfigureAuthMark {
+            market_id: 0,
             observation_sequence: u64::MAX,
             asset_index: 1,
             now_slot: 5,
@@ -6807,6 +6872,7 @@ fn v16_bpf_asset0_shutdown_force_closes_preserves_insurance_and_restarts() {
         env.program_id,
         &env.payer,
         ProgInstruction::RestartAssetOracle {
+            market_id: 0,
             asset_index: 0,
             now_slot: 3,
             initial_price: 250,
@@ -6879,6 +6945,7 @@ fn v16_bpf_asset0_shutdown_force_closes_preserves_insurance_and_restarts() {
         env.program_id,
         &env.payer,
         ProgInstruction::RestartAssetOracle {
+            market_id: 0,
             asset_index: 0,
             now_slot: 8,
             initial_price: 250,
@@ -6900,6 +6967,7 @@ fn v16_bpf_asset0_shutdown_force_closes_preserves_insurance_and_restarts() {
         env.program_id,
         &env.payer,
         ProgInstruction::RestartAssetOracle {
+            market_id: 0,
             asset_index: 0,
             now_slot: 8,
             initial_price: 250,
@@ -6983,6 +7051,7 @@ fn v16_bpf_asset0_shutdown_force_closes_preserves_insurance_and_restarts() {
         env.program_id,
         &env.payer,
         ProgInstruction::ConfigureAuthMark {
+            market_id: 0,
             observation_sequence: u64::MAX,
             asset_index: 0,
             now_slot: 8,
@@ -16679,6 +16748,7 @@ fn v16_attack_cross_margin_two_asset_conservation() {
         env.program_id,
         &env.payer,
         ProgInstruction::ConfigureAuthMark {
+            market_id: 0,
             observation_sequence: 1,
             asset_index: 1,
             now_slot: 0,
@@ -16747,6 +16817,7 @@ fn v16_attack_cross_margin_divergent_moves_conserve() {
         0,
         100,
         ProgInstruction::ConfigureAuthMark {
+            market_id: 0,
             observation_sequence: 1,
             asset_index: 1,
             now_slot: 0,
@@ -16771,6 +16842,7 @@ fn v16_attack_cross_margin_divergent_moves_conserve() {
         10,
         90,
         ProgInstruction::PushAuthMark {
+            market_id: 0,
             observation_sequence: 2,
             asset_index: 1,
             now_slot: 10,
@@ -17856,6 +17928,7 @@ fn v16_regression_cross_margin_insolvency_no_value_extraction() {
     cfg(
         &mut env,
         ProgInstruction::ConfigureAuthMark {
+            market_id: 0,
             observation_sequence: 1,
             asset_index: 1,
             now_slot: 0,
@@ -17898,6 +17971,7 @@ fn v16_regression_cross_margin_insolvency_no_value_extraction() {
         cfg(
             &mut env,
             ProgInstruction::PushAuthMark {
+                market_id: 0,
                 observation_sequence: slot + 1,
                 asset_index: 1,
                 now_slot: slot,
@@ -18113,6 +18187,7 @@ fn v16_attack_resolved_cross_margin_deep_insolvency_winds_down_publicly() {
     cfg_asset1(
         &mut env,
         ProgInstruction::ConfigureAuthMark {
+            market_id: 0,
             observation_sequence: 1,
             asset_index: 1,
             now_slot: 0,
@@ -18153,6 +18228,7 @@ fn v16_attack_resolved_cross_margin_deep_insolvency_winds_down_publicly() {
         cfg_asset1(
             &mut env,
             ProgInstruction::PushAuthMark {
+                market_id: 0,
                 observation_sequence: slot + 1,
                 asset_index: 1,
                 now_slot: slot,
@@ -19708,6 +19784,7 @@ fn v16_attack_extreme_auth_mark_push_rejected_or_safe() {
             env.program_id,
             &env.payer,
             ProgInstruction::PushAuthMark {
+                market_id: 0,
                 observation_sequence: u64::MAX,
                 asset_index: 0,
                 now_slot: 5,
@@ -20602,6 +20679,7 @@ fn v16_attack_cross_margin_solvent_account_not_unfairly_liquidated() {
     cfg(
         &mut env,
         ProgInstruction::ConfigureAuthMark {
+            market_id: 0,
             observation_sequence: 1,
             asset_index: 1,
             now_slot: 0,
@@ -20642,6 +20720,7 @@ fn v16_attack_cross_margin_solvent_account_not_unfairly_liquidated() {
     cfg(
         &mut env,
         ProgInstruction::PushAuthMark {
+            market_id: 0,
             observation_sequence: 2,
             asset_index: 1,
             now_slot: 10,
@@ -23546,6 +23625,7 @@ fn v16_attack_non_admin_cannot_resolve_or_configure() {
         env.program_id,
         &env.payer,
         ProgInstruction::ConfigureAuthMark {
+            market_id: 0,
             observation_sequence: u64::MAX,
             asset_index: 0,
             now_slot: 0,
@@ -23829,6 +23909,7 @@ fn v16_attack_out_of_range_asset_index_rejected() {
             env.program_id,
             &env.payer,
             ProgInstruction::PushAuthMark {
+                market_id: 0,
                 observation_sequence: u64::MAX,
                 asset_index: bad,
                 now_slot: 1,
@@ -28167,6 +28248,7 @@ fn v16_attack_permissionless_asset_oracle_cannot_block_base_resolve_matured() {
     env.svm.expire_blockhash();
     let stale_asset_push = env.send(
         ProgInstruction::PushAuthMark {
+            market_id: 0,
             observation_sequence: u64::MAX,
             asset_index: 1,
             now_slot: 40,
@@ -30656,6 +30738,7 @@ fn v16_attack_cross_margin_divergent_close_conserves() {
     cfg(
         &mut env,
         ProgInstruction::ConfigureAuthMark {
+            market_id: 0,
             observation_sequence: 1,
             asset_index: 1,
             now_slot: 0,
@@ -30678,6 +30761,7 @@ fn v16_attack_cross_margin_divergent_close_conserves() {
     cfg(
         &mut env,
         ProgInstruction::PushAuthMark {
+            market_id: 0,
             observation_sequence: 2,
             asset_index: 1,
             now_slot: 10,
@@ -33502,6 +33586,7 @@ fn v16_attack_max_leg_multi_asset_conserves() {
             env.program_id,
             &env.payer,
             ProgInstruction::ConfigureAuthMark {
+                market_id: 0,
                 observation_sequence: u64::MAX,
                 asset_index: ai,
                 now_slot: 0,
@@ -33751,6 +33836,7 @@ fn v16_attack_ewma_mark_halflife_zero_safe() {
         env.program_id,
         &env.payer,
         ProgInstruction::ConfigureEwmaMark {
+            market_id: 0,
             observation_sequence: u64::MAX,
             asset_index: 0,
             now_slot: 0,
@@ -34112,6 +34198,7 @@ fn v16_attack_retire_asset_authority_gated() {
         env.program_id,
         &env.payer,
         ProgInstruction::ConfigureAuthMark {
+            market_id: 0,
             observation_sequence: u64::MAX,
             asset_index: 1,
             now_slot: 0,
@@ -34228,6 +34315,7 @@ fn v16_attack_per_asset_crank_isolation() {
         env.program_id,
         &env.payer,
         ProgInstruction::ConfigureAuthMark {
+            market_id: 0,
             observation_sequence: u64::MAX,
             asset_index: 1,
             now_slot: 0,
@@ -35280,6 +35368,7 @@ fn v16_attack_per_asset_funding_isolation() {
         env.program_id,
         &env.payer,
         ProgInstruction::ConfigureEwmaMark {
+            market_id: 0,
             observation_sequence: u64::MAX,
             asset_index: 1,
             now_slot: 0,
@@ -35418,6 +35507,7 @@ fn v16_attack_fee_redirect_split_lands_correctly() {
         env.program_id,
         &env.payer,
         ProgInstruction::ConfigureAuthMark {
+            market_id: 0,
             observation_sequence: u64::MAX,
             asset_index: 1,
             now_slot: 0,
@@ -36069,6 +36159,7 @@ fn v16_attack_fee_redirect_full_boundary() {
         env.program_id,
         &env.payer,
         ProgInstruction::ConfigureAuthMark {
+            market_id: 0,
             observation_sequence: u64::MAX,
             asset_index: 1,
             now_slot: 0,
@@ -37719,6 +37810,7 @@ fn v16_attack_force_close_healthy_asset_rejected() {
         env.program_id,
         &env.payer,
         ProgInstruction::ConfigureAuthMark {
+            market_id: 0,
             observation_sequence: u64::MAX,
             asset_index: 1,
             now_slot: 0,
@@ -38056,6 +38148,7 @@ fn v16_attack_force_close_rejects_cross_market_portfolio_substitution() {
         env.program_id,
         &env.payer,
         ProgInstruction::ConfigureAuthMark {
+            market_id: 0,
             observation_sequence: u64::MAX,
             asset_index: 1,
             now_slot: 1,
@@ -41632,6 +41725,7 @@ fn v16_attack_cross_margin_netting_conserves() {
     env.svm.expire_blockhash();
     let _ = env.send(
         ProgInstruction::PushAuthMark {
+            market_id: 0,
             observation_sequence: u64::MAX,
             asset_index: 1,
             now_slot: 2,
@@ -43367,6 +43461,7 @@ fn v16_attack_hybrid_oracle_scalar_bounds_reject_atomically() {
             env.program_id,
             &env.payer,
             ProgInstruction::ConfigureHybridOracle {
+                market_id: 0,
                 observation_sequence: u64::MAX,
                 asset_index: 0,
                 now_slot: 1,
@@ -43416,6 +43511,7 @@ fn v16_attack_hybrid_oracle_scalar_bounds_reject_atomically() {
         env.program_id,
         &env.payer,
         ProgInstruction::ConfigureHybridOracle {
+            market_id: 0,
             observation_sequence: u64::MAX,
             asset_index: 0,
             now_slot: 1,
@@ -43527,6 +43623,7 @@ fn v16_attack_pushed_mark_cannot_override_external_oracle_asset() {
     env.svm.expire_blockhash();
     let auth_push = env.send(
         ProgInstruction::PushAuthMark {
+            market_id: 0,
             observation_sequence: u64::MAX,
             asset_index: 0,
             now_slot: 2,
@@ -43551,6 +43648,7 @@ fn v16_attack_pushed_mark_cannot_override_external_oracle_asset() {
     env.svm.expire_blockhash();
     let ewma_push = env.send(
         ProgInstruction::PushEwmaMark {
+            market_id: 0,
             observation_sequence: u64::MAX,
             asset_index: 0,
             now_slot: 2,
@@ -44885,6 +44983,7 @@ fn v16_attack_non_authority_cannot_push_auth_mark() {
         env.program_id,
         &env.payer,
         ProgInstruction::PushAuthMark {
+            market_id: 0,
             observation_sequence: u64::MAX,
             asset_index: 0,
             now_slot: 2,
@@ -44914,6 +45013,7 @@ fn v16_attack_non_authority_cannot_push_auth_mark() {
         env.program_id,
         &env.payer,
         ProgInstruction::PushAuthMark {
+            market_id: 0,
             observation_sequence: u64::MAX,
             asset_index: 0,
             now_slot: 2,
@@ -44949,6 +45049,7 @@ fn v16_attack_non_authority_cannot_reconfigure_oracle_modes() {
         env.program_id,
         &env.payer,
         ProgInstruction::ConfigureEwmaMark {
+            market_id: 0,
             observation_sequence: 1,
             asset_index: 0,
             now_slot: 1,
@@ -44978,6 +45079,7 @@ fn v16_attack_non_authority_cannot_reconfigure_oracle_modes() {
         env.program_id,
         &env.payer,
         ProgInstruction::ConfigureAuthMark {
+            market_id: 0,
             observation_sequence: u64::MAX,
             asset_index: 0,
             now_slot: 1,
@@ -45009,6 +45111,7 @@ fn v16_attack_non_authority_cannot_reconfigure_oracle_modes() {
         env.program_id,
         &env.payer,
         ProgInstruction::ConfigureHybridOracle {
+            market_id: 0,
             observation_sequence: u64::MAX,
             asset_index: 0,
             now_slot: 1,
@@ -45048,6 +45151,7 @@ fn v16_attack_non_authority_cannot_reconfigure_oracle_modes() {
         env.program_id,
         &env.payer,
         ProgInstruction::ConfigureEwmaMark {
+            market_id: 0,
             observation_sequence: u64::MAX,
             asset_index: 0,
             now_slot: 1,
@@ -45102,6 +45206,7 @@ fn v16_attack_mark_input_bounds_reject_atomically() {
     reject_unchanged(
         &mut env,
         ProgInstruction::ConfigureAuthMark {
+            market_id: 0,
             observation_sequence: u64::MAX,
             asset_index: 0,
             now_slot: 1,
@@ -45112,6 +45217,7 @@ fn v16_attack_mark_input_bounds_reject_atomically() {
     reject_unchanged(
         &mut env,
         ProgInstruction::ConfigureAuthMark {
+            market_id: 0,
             observation_sequence: u64::MAX,
             asset_index: 0,
             now_slot: 1,
@@ -45122,6 +45228,7 @@ fn v16_attack_mark_input_bounds_reject_atomically() {
     reject_unchanged(
         &mut env,
         ProgInstruction::ConfigureEwmaMark {
+            market_id: 0,
             observation_sequence: u64::MAX,
             asset_index: 0,
             now_slot: 1,
@@ -45134,6 +45241,7 @@ fn v16_attack_mark_input_bounds_reject_atomically() {
     reject_unchanged(
         &mut env,
         ProgInstruction::ConfigureEwmaMark {
+            market_id: 0,
             observation_sequence: u64::MAX,
             asset_index: 0,
             now_slot: 1,
@@ -45146,6 +45254,7 @@ fn v16_attack_mark_input_bounds_reject_atomically() {
     reject_unchanged(
         &mut env,
         ProgInstruction::ConfigureEwmaMark {
+            market_id: 0,
             observation_sequence: 1,
             asset_index: 0,
             now_slot: 1,
@@ -45162,6 +45271,7 @@ fn v16_attack_mark_input_bounds_reject_atomically() {
         env.program_id,
         &env.payer,
         ProgInstruction::ConfigureEwmaMark {
+            market_id: 0,
             observation_sequence: 1,
             asset_index: 0,
             now_slot: 1,
@@ -45191,6 +45301,7 @@ fn v16_attack_mark_input_bounds_reject_atomically() {
     reject_unchanged(
         &mut env,
         ProgInstruction::PushEwmaMark {
+            market_id: 0,
             observation_sequence: u64::MAX,
             asset_index: 0,
             now_slot: 2,
@@ -45201,6 +45312,7 @@ fn v16_attack_mark_input_bounds_reject_atomically() {
     reject_unchanged(
         &mut env,
         ProgInstruction::PushEwmaMark {
+            market_id: 0,
             observation_sequence: u64::MAX,
             asset_index: 0,
             now_slot: 2,
@@ -45215,6 +45327,7 @@ fn v16_attack_mark_input_bounds_reject_atomically() {
         env.program_id,
         &env.payer,
         ProgInstruction::PushEwmaMark {
+            market_id: 0,
             observation_sequence: 2,
             asset_index: 0,
             now_slot: 2,
@@ -45239,6 +45352,7 @@ fn v16_attack_mark_input_bounds_reject_atomically() {
         env.program_id,
         &env.payer,
         ProgInstruction::ConfigureAuthMark {
+            market_id: 0,
             observation_sequence: 3,
             asset_index: 0,
             now_slot: 3,
@@ -45259,6 +45373,7 @@ fn v16_attack_mark_input_bounds_reject_atomically() {
     reject_unchanged(
         &mut env,
         ProgInstruction::PushAuthMark {
+            market_id: 0,
             observation_sequence: u64::MAX,
             asset_index: 0,
             now_slot: 4,
@@ -45269,6 +45384,7 @@ fn v16_attack_mark_input_bounds_reject_atomically() {
     reject_unchanged(
         &mut env,
         ProgInstruction::PushAuthMark {
+            market_id: 0,
             observation_sequence: u64::MAX,
             asset_index: 0,
             now_slot: 4,
@@ -45283,6 +45399,7 @@ fn v16_attack_mark_input_bounds_reject_atomically() {
         env.program_id,
         &env.payer,
         ProgInstruction::PushAuthMark {
+            market_id: 0,
             observation_sequence: 4,
             asset_index: 0,
             now_slot: 4,
@@ -45343,6 +45460,7 @@ fn v16_attack_oracle_reconfiguration_rejects_after_positions_enter_market() {
         env.program_id,
         &env.payer,
         ProgInstruction::ConfigureAuthMark {
+            market_id: 0,
             observation_sequence: u64::MAX,
             asset_index: 0,
             now_slot: 1,
@@ -45370,6 +45488,7 @@ fn v16_attack_oracle_reconfiguration_rejects_after_positions_enter_market() {
         env.program_id,
         &env.payer,
         ProgInstruction::ConfigureEwmaMark {
+            market_id: 0,
             observation_sequence: u64::MAX,
             asset_index: 0,
             now_slot: 1,
@@ -45403,6 +45522,7 @@ fn v16_attack_oracle_reconfiguration_rejects_after_positions_enter_market() {
         env.program_id,
         &env.payer,
         ProgInstruction::ConfigureHybridOracle {
+            market_id: 0,
             observation_sequence: u64::MAX,
             asset_index: 0,
             now_slot: 1,
@@ -45821,6 +45941,7 @@ fn v16_attack_market_exceeds_64_assets_position_holds_any_14_legs() {
             env.program_id,
             &env.payer,
             ProgInstruction::ConfigureAuthMark {
+                market_id: 0,
                 observation_sequence: u64::MAX,
                 asset_index: ai,
                 now_slot: TRADE_SLOT,
@@ -48604,6 +48725,7 @@ fn v16_attack_non_admin_activate_cannot_install_authorities() {
     env.svm.expire_blockhash();
     let r_mark = env.send(
         ProgInstruction::ConfigureAuthMark {
+            market_id: 0,
             observation_sequence: u64::MAX,
             asset_index: 1,
             now_slot: 1,
@@ -48744,6 +48866,7 @@ fn v16_bpf_10m_market_liquidation_high_asset_stays_bounded() {
         env.program_id,
         &env.payer,
         ProgInstruction::ConfigureEwmaMark {
+            market_id: 0,
             observation_sequence: 1,
             asset_index: HIGH_ASSET as u16,
             now_slot: TRADE_SLOT,
@@ -48791,6 +48914,7 @@ fn v16_bpf_10m_market_liquidation_high_asset_stays_bounded() {
         env.program_id,
         &env.payer,
         ProgInstruction::PushEwmaMark {
+            market_id: 0,
             observation_sequence: 2,
             asset_index: HIGH_ASSET as u16,
             now_slot: LIQUIDATION_SLOT,
@@ -58170,6 +58294,7 @@ fn v16_attack_cross_asset_oracle_authority_cannot_push_other_asset_mark() {
         env.program_id,
         &env.payer,
         ProgInstruction::PushAuthMark {
+            market_id: 0,
             observation_sequence: u64::MAX,
             asset_index: 0,
             now_slot: 2,
@@ -58200,6 +58325,7 @@ fn v16_attack_cross_asset_oracle_authority_cannot_push_other_asset_mark() {
         env.program_id,
         &env.payer,
         ProgInstruction::PushAuthMark {
+            market_id: 0,
             observation_sequence: u64::MAX,
             asset_index: 0,
             now_slot: 2,
@@ -58242,6 +58368,7 @@ fn v16_attack_cross_asset_oracle_authority_cannot_push_other_asset_ewma_mark() {
         env.program_id,
         &env.payer,
         ProgInstruction::ConfigureEwmaMark {
+            market_id: 0,
             observation_sequence: 1,
             asset_index: 1,
             now_slot: 1,
@@ -58266,6 +58393,7 @@ fn v16_attack_cross_asset_oracle_authority_cannot_push_other_asset_ewma_mark() {
         env.program_id,
         &env.payer,
         ProgInstruction::PushEwmaMark {
+            market_id: 0,
             observation_sequence: 2,
             asset_index: 1,
             now_slot: 2,
@@ -58290,6 +58418,7 @@ fn v16_attack_cross_asset_oracle_authority_cannot_push_other_asset_ewma_mark() {
         env.program_id,
         &env.payer,
         ProgInstruction::PushEwmaMark {
+            market_id: 0,
             observation_sequence: 2,
             asset_index: 0,
             now_slot: 2,
@@ -58319,6 +58448,7 @@ fn v16_attack_cross_asset_oracle_authority_cannot_push_other_asset_ewma_mark() {
         env.program_id,
         &env.payer,
         ProgInstruction::PushEwmaMark {
+            market_id: 0,
             observation_sequence: 2,
             asset_index: 0,
             now_slot: 2,
@@ -58374,6 +58504,7 @@ fn v16_attack_cross_asset_oracle_authority_cannot_reconfigure_other_asset_modes(
             env.program_id,
             &env.payer,
             ProgInstruction::ConfigureAuthMark {
+                market_id: 0,
                 observation_sequence: u64::MAX,
                 asset_index: 0,
                 now_slot: 1,
@@ -58401,6 +58532,7 @@ fn v16_attack_cross_asset_oracle_authority_cannot_reconfigure_other_asset_modes(
             env.program_id,
             &env.payer,
             ProgInstruction::ConfigureAuthMark {
+                market_id: 0,
                 observation_sequence: u64::MAX,
                 asset_index: 1,
                 now_slot: 1,
@@ -58435,6 +58567,7 @@ fn v16_attack_cross_asset_oracle_authority_cannot_reconfigure_other_asset_modes(
             env.program_id,
             &env.payer,
             ProgInstruction::ConfigureEwmaMark {
+                market_id: 0,
                 observation_sequence: u64::MAX,
                 asset_index: 0,
                 now_slot: 1,
@@ -58464,6 +58597,7 @@ fn v16_attack_cross_asset_oracle_authority_cannot_reconfigure_other_asset_modes(
             env.program_id,
             &env.payer,
             ProgInstruction::ConfigureEwmaMark {
+                market_id: 0,
                 observation_sequence: u64::MAX,
                 asset_index: 1,
                 now_slot: 1,
@@ -58505,6 +58639,7 @@ fn v16_attack_cross_asset_oracle_authority_cannot_reconfigure_other_asset_modes(
             env.program_id,
             &env.payer,
             ProgInstruction::ConfigureHybridOracle {
+                market_id: 0,
                 observation_sequence: u64::MAX,
                 asset_index: 0,
                 now_slot: 1,
@@ -58543,6 +58678,7 @@ fn v16_attack_cross_asset_oracle_authority_cannot_reconfigure_other_asset_modes(
             env.program_id,
             &env.payer,
             ProgInstruction::ConfigureHybridOracle {
+                market_id: 0,
                 observation_sequence: u64::MAX,
                 asset_index: 1,
                 now_slot: 1,
@@ -59218,6 +59354,7 @@ fn v16_attack_oracle_authority_rotation_revokes_old_grants_new() {
     env.svm.expire_blockhash();
     let r0 = env.send(
         ProgInstruction::PushAuthMark {
+            market_id: 0,
             observation_sequence: 2,
             asset_index: 0,
             now_slot: 2,
@@ -59262,6 +59399,7 @@ fn v16_attack_oracle_authority_rotation_revokes_old_grants_new() {
     env.svm.expire_blockhash();
     let r_old = env.send(
         ProgInstruction::PushAuthMark {
+            market_id: 0,
             observation_sequence: 3,
             asset_index: 0,
             now_slot: 3,
@@ -59286,6 +59424,7 @@ fn v16_attack_oracle_authority_rotation_revokes_old_grants_new() {
     env.svm.expire_blockhash();
     let r_new = env.send(
         ProgInstruction::PushAuthMark {
+            market_id: 0,
             observation_sequence: 3,
             asset_index: 0,
             now_slot: 3,
@@ -60926,6 +61065,7 @@ fn v16_attack_update_authority_handoff_rekeys_asset0_default_runtime_authorities
         env.program_id,
         &env.payer,
         ProgInstruction::PushAuthMark {
+            market_id: 0,
             observation_sequence: u64::MAX,
             asset_index: 0,
             now_slot: 2,

@@ -3069,17 +3069,21 @@ fn retained_asset_intent(
         AssetIntentKind::BatchTradeCpi => {
             env.build_retained_batch_cpi_trade(SUBJECT, COUNTERPARTY, asset_index, size_q, 0)
         }
-        AssetIntentKind::PushAuthMark => env.build_retained_auth_mark(asset_index, stale_price),
-        AssetIntentKind::PushEwmaMark => env.build_retained_ewma_mark(asset_index, stale_price),
+        AssetIntentKind::PushAuthMark => {
+            env.build_retained_auth_mark_with_sequence(asset_index, stale_price, u64::MAX)
+        }
+        AssetIntentKind::PushEwmaMark => {
+            env.build_retained_ewma_mark_with_sequence(asset_index, stale_price, u64::MAX)
+        }
         AssetIntentKind::ConfigureAuthMark => {
-            env.build_retained_auth_config(asset_index, stale_price)
+            env.build_retained_auth_config_with_sequence(asset_index, stale_price, u64::MAX)
         }
         AssetIntentKind::ConfigureEwmaMark => {
-            env.build_retained_ewma_config(asset_index, stale_price, 1, 0)
+            env.build_retained_ewma_config_with_sequence(asset_index, stale_price, 1, 0, u64::MAX)
         }
         AssetIntentKind::ConfigureHybridOracle => {
             let feed = [0x5au8; 32];
-            env.build_retained_hybrid_oracle_config(
+            env.build_retained_hybrid_oracle_config_with_sequence(
                 asset_index,
                 5,
                 101,
@@ -3088,6 +3092,7 @@ fn retained_asset_intent(
                 &[oracle_account.expect("hybrid oracle fixture")],
                 1,
                 0,
+                u64::MAX,
             )
         }
         AssetIntentKind::InsuranceTopUp => {
