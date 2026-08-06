@@ -2,14 +2,14 @@
 //!
 //! Normative obligation: Charged fees reach only the authorized destination under the bound policy version.
 //!
-//! Evidence in this file (I plus invariant-specific F/M assertions): `v16_program_pr224_unsigned_lp_caller_fee_is_ignored`, `v16_program_pr223_unsigned_lp_backing_fee_requires_matcher_consent`, `v16_program_pr314_permissionless_activation_fee_requires_creator_consent`, `v16_program_pr310_bilateral_base_fee_requires_fresh_consent`. These tests exercise the deployed public
+//! Evidence in this file (I plus invariant-specific F/M assertions): `v16_program_pr224_unsigned_lp_caller_fee_is_ignored`, `v16_program_pr223_unsigned_lp_backing_fee_requires_matcher_consent`, `v16_program_pr314_permissionless_activation_fee_requires_creator_consent`, `v16_program_pr313_cpi_base_fee_requires_lp_consent`, `v16_program_pr310_bilateral_base_fee_requires_fresh_consent`. These tests exercise the deployed public
 //! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
 //! rollback, liveness, or compute outcomes appropriate to the invariant.
 //!
 //! Guarantee boundary: a quarantined counterexample demonstrates public reachability; it does
 //! not certify the invariant on an unfixed pin. Certification requires the fixed-pin assertion
 //! plus every additional verification method required by the charter.
-//! PRs 223, 224, 310, and 314 are fixed-pin assertions here.
+//! PRs 223, 224, 310, 313, and 314 are fixed-pin assertions here.
 
 use super::*;
 
@@ -72,6 +72,33 @@ fn v16_program_pr314_permissionless_activation_fee_requires_creator_consent() {
     assert!(protection.policy_replay_cu < 1_400_000);
     assert!(protection.activation_cu < 1_400_000);
     assert!(protection.token_supply_conserved);
+}
+
+#[test]
+fn v16_program_pr313_cpi_base_fee_requires_lp_consent() {
+    for route in [TradeRoute::Cpi, TradeRoute::BatchCpi] {
+        let protection = verify_cpi_base_fee_consent([0x13; 32], route)
+            .unwrap_or_else(|error| panic!("PR 313 {route:?} protection failed: {error}"));
+        assert_eq!(protection.blocker, KnownBlocker::BilateralBaseFeeConsent);
+        assert_eq!(protection.route, route);
+        assert_eq!(protection.rejecting_cap_bps, 499);
+        assert_eq!(protection.installed_fee_bps, 500);
+        assert!(protection.invalid_cap_rejected);
+        assert!(protection.invalid_cap_exact_rollback);
+        assert!(protection.stale_fill_rejected);
+        assert!(protection.stale_fill_exact_rollback);
+        assert!(protection.position_epoch_preserved);
+        assert_eq!(protection.unconsented_lp_loss, 0);
+        assert_eq!(protection.unconsented_insurance_delta, 0);
+        assert_eq!(protection.consented_cap_bps, 500);
+        assert_eq!(protection.consented_lp_fee, 100_000);
+        assert_eq!(protection.consented_insurance_fee, 200_000);
+        assert_eq!(protection.total_payout, 200_000_000);
+        assert!(protection.open_cu < 1_400_000);
+        assert!(protection.close_cu < 1_400_000);
+        assert!(protection.max_route_cu < 1_400_000);
+        assert!(protection.token_supply_conserved);
+    }
 }
 
 #[test]

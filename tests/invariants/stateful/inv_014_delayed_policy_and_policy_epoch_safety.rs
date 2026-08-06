@@ -125,12 +125,8 @@ proptest! {
         eprintln!("independent fee-consent discoveries: {violations:?}");
         prop_assert_eq!(
             violations,
-            vec![
-                FeeConsentKind::LiveBaseFeeHike,
-                FeeConsentKind::CpiBaseFee,
-                FeeConsentKind::BatchCpiBaseFee,
-            ],
-            "fee-consent classification changed; retained no-CPI, CPI caller, and permissionless activation fees must remain protected"
+            vec![FeeConsentKind::LiveBaseFeeHike],
+            "fee-consent classification changed; retained no-CPI, CPI LP/caller, and permissionless activation fees must remain protected"
         );
     }
 }

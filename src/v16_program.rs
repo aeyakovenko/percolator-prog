@@ -668,13 +668,23 @@ pub mod state {
         pub matcher_program: [u8; 32],
         pub matcher_context: [u8; 32],
         pub matcher_delegate: [u8; 32],
-        /// Bit 0 is the legacy matcher-enabled flag. Bits 1..63 are the position episode.
-        /// Legacy accounts contain exactly 0 or 1 here and therefore decode as episode zero.
+        /// Bit 0 is the matcher-enabled flag, bits 1..49 are the position episode, and
+        /// bits 50..63 are the LP's maximum accepted market base fee in basis points.
+        /// Legacy accounts contain a small episode plus the enabled bit, so their fee cap
+        /// decodes as zero and nonzero post-upgrade fees fail closed until the LP reauthorizes.
+        /// A legacy episode reaching bit 49 would be incompatible, but that requires at least
+        /// 2^49 successful position-episode changes and is unreachable within the SVM lifetime.
         pub control: u64,
     }
 
     impl PortfolioMatcherConfigV16 {
         const ENABLED_MASK: u64 = 1;
+        const POSITION_EPOCH_SHIFT: u32 = 1;
+        const POSITION_EPOCH_BITS: u32 = 49;
+        const POSITION_EPOCH_MAX: u64 = (1u64 << Self::POSITION_EPOCH_BITS) - 1;
+        const POSITION_EPOCH_MASK: u64 = Self::POSITION_EPOCH_MAX << Self::POSITION_EPOCH_SHIFT;
+        const TRADE_FEE_CAP_SHIFT: u32 = Self::POSITION_EPOCH_SHIFT + Self::POSITION_EPOCH_BITS;
+        const TRADE_FEE_CAP_MASK: u64 = 0x3fffu64 << Self::TRADE_FEE_CAP_SHIFT;
 
         #[inline]
         pub fn enabled(&self) -> u64 {
@@ -683,7 +693,25 @@ pub mod state {
 
         #[inline]
         pub fn position_epoch(&self) -> u64 {
-            self.control >> 1
+            (self.control & Self::POSITION_EPOCH_MASK) >> Self::POSITION_EPOCH_SHIFT
+        }
+
+        #[inline]
+        pub fn trade_fee_cap_bps(&self) -> u16 {
+            ((self.control & Self::TRADE_FEE_CAP_MASK) >> Self::TRADE_FEE_CAP_SHIFT) as u16
+        }
+
+        #[inline]
+        pub const fn position_epoch_max() -> u64 {
+            Self::POSITION_EPOCH_MAX
+        }
+
+        #[inline]
+        fn validate(&self) -> Result<(), ProgramError> {
+            if self.trade_fee_cap_bps() > 10_000 {
+                return Err(ProgramError::InvalidAccountData);
+            }
+            Ok(())
         }
 
         #[inline]
@@ -692,6 +720,19 @@ pub mod state {
                 return Err(PercolatorError::InvalidInstruction.into());
             }
             self.control = (self.control & !Self::ENABLED_MASK) | u64::from(enabled);
+            Ok(())
+        }
+
+        #[inline]
+        pub fn set_trade_fee_cap_bps(
+            &mut self,
+            trade_fee_cap_bps: u16,
+        ) -> Result<(), ProgramError> {
+            if trade_fee_cap_bps > 10_000 {
+                return Err(PercolatorError::InvalidInstruction.into());
+            }
+            self.control = (self.control & !Self::TRADE_FEE_CAP_MASK)
+                | (u64::from(trade_fee_cap_bps) << Self::TRADE_FEE_CAP_SHIFT);
             Ok(())
         }
     }
@@ -798,6 +839,7 @@ pub mod state {
                 .get(..config_len)
                 .ok_or(PercolatorError::InvalidAccountLen)?,
         );
+        cfg.validate()?;
         Ok(cfg)
     }
 
@@ -807,6 +849,7 @@ pub mod state {
         cfg: &PortfolioMatcherConfigV16,
     ) -> Result<(), ProgramError> {
         check_header(data, KIND_PORTFOLIO)?;
+        cfg.validate()?;
         let bytes = matcher_config_bytes_mut(data)?;
         for b in bytes.iter_mut() {
             *b = 0;
@@ -855,18 +898,31 @@ pub mod state {
     #[inline]
     pub fn read_portfolio_position_epoch(data: &[u8]) -> Result<u64, ProgramError> {
         check_header(data, KIND_PORTFOLIO)?;
-        Ok(read_u64(data, PORTFOLIO_MATCHER_CONTROL_OFF)? >> 1)
+        let control = read_u64(data, PORTFOLIO_MATCHER_CONTROL_OFF)?;
+        let cfg = PortfolioMatcherConfigV16 {
+            control,
+            ..PortfolioMatcherConfigV16::default()
+        };
+        cfg.validate()?;
+        Ok(cfg.position_epoch())
     }
 
     #[inline]
     pub fn next_portfolio_position_control(control: u64) -> Result<(u64, u64), ProgramError> {
-        let next = (control >> 1)
+        let cfg = PortfolioMatcherConfigV16 {
+            control,
+            ..PortfolioMatcherConfigV16::default()
+        };
+        cfg.validate()?;
+        let next = cfg
+            .position_epoch()
             .checked_add(1)
             .ok_or(PercolatorError::EngineCounterOverflow)?;
-        if next > (u64::MAX >> 1) {
+        if next > PortfolioMatcherConfigV16::POSITION_EPOCH_MAX {
             return Err(PercolatorError::EngineCounterOverflow.into());
         }
-        let next_control = (next << 1) | (control & PortfolioMatcherConfigV16::ENABLED_MASK);
+        let next_control = (control & !PortfolioMatcherConfigV16::POSITION_EPOCH_MASK)
+            | (next << PortfolioMatcherConfigV16::POSITION_EPOCH_SHIFT);
         Ok((next, next_control))
     }
 
@@ -2588,6 +2644,7 @@ pub mod ix {
         },
         SetMatcherConfig {
             enabled: u8,
+            trade_fee_cap_bps: u16,
         },
         ClosePortfolio,
         TopUpInsurance {
@@ -2858,9 +2915,18 @@ pub mod ix {
                     }
                     Self::BatchTradeCpi { legs }
                 }
-                68 => Self::SetMatcherConfig {
-                    enabled: read_u8(&mut rest)?,
-                },
+                68 => {
+                    let enabled = read_u8(&mut rest)?;
+                    let trade_fee_cap_bps = if rest.is_empty() {
+                        0
+                    } else {
+                        read_u16(&mut rest)?
+                    };
+                    Self::SetMatcherConfig {
+                        enabled,
+                        trade_fee_cap_bps,
+                    }
+                }
                 8 => Self::ClosePortfolio,
                 9 => Self::TopUpInsurance {
                     amount: read_u128(&mut rest)?,
@@ -3152,9 +3218,13 @@ pub mod ix {
                         push_u64(&mut out, leg.limit_price);
                     }
                 }
-                Self::SetMatcherConfig { enabled } => {
+                Self::SetMatcherConfig {
+                    enabled,
+                    trade_fee_cap_bps,
+                } => {
                     out.push(68);
                     out.push(enabled);
+                    push_u16(&mut out, trade_fee_cap_bps);
                 }
                 Self::ClosePortfolio => out.push(8),
                 Self::TopUpInsurance { amount } => {
@@ -5446,9 +5516,10 @@ pub mod processor {
             Instruction::BatchTradeCpi { legs } => {
                 handle_batch_trade_cpi(program_id, accounts, &legs)
             }
-            Instruction::SetMatcherConfig { enabled } => {
-                handle_set_matcher_config(program_id, accounts, enabled)
-            }
+            Instruction::SetMatcherConfig {
+                enabled,
+                trade_fee_cap_bps,
+            } => handle_set_matcher_config(program_id, accounts, enabled, trade_fee_cap_bps),
             Instruction::ClosePortfolio => handle_close_portfolio(program_id, accounts),
             Instruction::TopUpInsurance { amount } => {
                 handle_top_up_insurance(program_id, accounts, amount)
@@ -6827,7 +6898,7 @@ pub mod processor {
         matcher_prog_key: &Pubkey,
         matcher_ctx_key: &Pubkey,
         matcher_delegate_key: &Pubkey,
-    ) -> Result<usize, ProgramError> {
+    ) -> Result<(usize, u16), ProgramError> {
         let cfg = state::read_portfolio_matcher_config(&account_b_ai.try_borrow_data()?)?;
         if cfg.enabled() != 1
             || cfg.matcher_program != matcher_prog_key.to_bytes()
@@ -6836,7 +6907,7 @@ pub mod processor {
         {
             return Err(PercolatorError::Unauthorized.into());
         }
-        Ok(7)
+        Ok((7, cfg.trade_fee_cap_bps()))
     }
 
     fn validate_matcher_tail<'a>(
@@ -6953,12 +7024,15 @@ pub mod processor {
             matcher_ctx.key,
         );
         expect_key(matcher_delegate, &delegate)?;
-        let tail_start = matcher_tail_start_or_verify_lp_config(
+        let (tail_start, lp_trade_fee_cap_bps) = matcher_tail_start_or_verify_lp_config(
             account_b_ai,
             matcher_prog.key,
             matcher_ctx.key,
             matcher_delegate.key,
         )?;
+        if cfg_pre.trade_fee_base_bps > u64::from(lp_trade_fee_cap_bps) {
+            return Err(PercolatorError::InvalidInstruction.into());
+        }
         let tail = accounts
             .get(tail_start..)
             .ok_or(ProgramError::NotEnoughAccountKeys)?;
@@ -7074,8 +7148,9 @@ pub mod processor {
         program_id: &Pubkey,
         accounts: &'a [AccountInfo<'a>],
         enabled: u8,
+        trade_fee_cap_bps: u16,
     ) -> ProgramResult {
-        if enabled > 1 {
+        if enabled > 1 || trade_fee_cap_bps > 10_000 || (enabled == 0 && trade_fee_cap_bps != 0) {
             return Err(PercolatorError::InvalidInstruction.into());
         }
         let lp_owner = account(accounts, 0)?;
@@ -7133,6 +7208,7 @@ pub mod processor {
             }
         };
         cfg.set_enabled(enabled)?;
+        cfg.set_trade_fee_cap_bps(trade_fee_cap_bps)?;
         state::write_portfolio_matcher_config(&mut lp_portfolio_ai.try_borrow_mut_data()?, &cfg)
     }
 
@@ -7320,12 +7396,15 @@ pub mod processor {
             matcher_ctx.key,
         );
         expect_key(matcher_delegate, &delegate)?;
-        let tail_start = matcher_tail_start_or_verify_lp_config(
+        let (tail_start, lp_trade_fee_cap_bps) = matcher_tail_start_or_verify_lp_config(
             account_b_ai,
             matcher_prog.key,
             matcher_ctx.key,
             matcher_delegate.key,
         )?;
+        if cpi_fee_bps > u64::from(lp_trade_fee_cap_bps) {
+            return Err(PercolatorError::InvalidInstruction.into());
+        }
         let tail = accounts
             .get(tail_start..)
             .ok_or(ProgramError::NotEnoughAccountKeys)?;
@@ -13361,7 +13440,9 @@ pub mod processor {
             let mut matcher = state::read_portfolio_matcher_config(&data).unwrap();
             assert_eq!(matcher.enabled(), 0);
             assert_eq!(matcher.position_epoch(), 0);
+            assert_eq!(matcher.trade_fee_cap_bps(), 0);
             matcher.set_enabled(1).unwrap();
+            matcher.set_trade_fee_cap_bps(500).unwrap();
             state::write_portfolio_matcher_config(&mut data, &matcher).unwrap();
             assert_eq!(state::bump_portfolio_position_epoch(&mut data).unwrap(), 1);
             assert_eq!(state::read_portfolio_position_epoch(&data).unwrap(), 1);
@@ -13372,7 +13453,9 @@ pub mod processor {
                 "an episode bump preserves matcher state"
             );
             assert_eq!(matcher.position_epoch(), 1);
+            assert_eq!(matcher.trade_fee_cap_bps(), 500);
             matcher.set_enabled(0).unwrap();
+            matcher.set_trade_fee_cap_bps(0).unwrap();
             state::write_portfolio_matcher_config(&mut data, &matcher).unwrap();
             assert_eq!(state::read_portfolio_position_epoch(&data).unwrap(), 1);
             assert_eq!(
@@ -13382,10 +13465,20 @@ pub mod processor {
                 0,
                 "matcher revocation preserves the position episode"
             );
+            assert_eq!(
+                state::read_portfolio_matcher_config(&data)
+                    .unwrap()
+                    .trade_fee_cap_bps(),
+                0,
+                "matcher revocation clears fee consent"
+            );
 
-            data[constants::PORTFOLIO_MATCHER_CONTROL_OFF
-                ..constants::PORTFOLIO_MATCHER_CONTROL_OFF + 8]
-                .copy_from_slice(&((u64::MAX >> 1) << 1).to_le_bytes());
+            let mut matcher = state::read_portfolio_matcher_config(&data).unwrap();
+            let enabled = matcher.enabled();
+            matcher.control =
+                (state::PortfolioMatcherConfigV16::position_epoch_max() << 1) | enabled;
+            matcher.set_trade_fee_cap_bps(500).unwrap();
+            state::write_portfolio_matcher_config(&mut data, &matcher).unwrap();
             let before = data.clone();
             assert_eq!(
                 state::bump_portfolio_position_epoch(&mut data),

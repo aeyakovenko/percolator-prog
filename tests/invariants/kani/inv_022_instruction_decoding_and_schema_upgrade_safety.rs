@@ -150,6 +150,43 @@ fn kani_v16_amount_instructions_decode_preserves_wire_fields() {
 }
 
 #[kani::proof]
+fn kani_v16_set_matcher_config_decode_preserves_fee_consent() {
+    let enabled: u8 = kani::any();
+    let trade_fee_cap_bps: u16 = kani::any();
+    let data = Instruction::SetMatcherConfig {
+        enabled,
+        trade_fee_cap_bps,
+    }
+    .encode();
+
+    match Instruction::decode(&data).unwrap() {
+        Instruction::SetMatcherConfig {
+            enabled: decoded_enabled,
+            trade_fee_cap_bps: decoded_cap,
+        } => {
+            assert_eq!(decoded_enabled, enabled);
+            assert_eq!(decoded_cap, trade_fee_cap_bps);
+        }
+        _ => unreachable!(),
+    }
+
+    let legacy = [68, enabled];
+    match Instruction::decode(&legacy).unwrap() {
+        Instruction::SetMatcherConfig {
+            enabled: decoded_enabled,
+            trade_fee_cap_bps: decoded_cap,
+        } => {
+            assert_eq!(decoded_enabled, enabled);
+            assert_eq!(decoded_cap, 0);
+        }
+        _ => unreachable!(),
+    }
+
+    let trailing = [68, enabled, data[2], data[3], 0];
+    assert!(Instruction::decode(&trailing).is_err());
+}
+
+#[kani::proof]
 fn kani_v16_domain_topup_and_asset_insurance_decode_preserves_wire_fields() {
     let domain: u16 = kani::any();
     let asset_index: u16 = kani::any();

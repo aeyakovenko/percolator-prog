@@ -2064,6 +2064,21 @@ impl V16CuEnv {
         maker_owner: &Keypair,
         maker_account: Pubkey,
     ) -> (Pubkey, Pubkey, u64) {
+        self.init_auth_matcher_context_with_trade_fee_cap(
+            matcher_program,
+            maker_owner,
+            maker_account,
+            10_000,
+        )
+    }
+
+    fn init_auth_matcher_context_with_trade_fee_cap(
+        &mut self,
+        matcher_program: Pubkey,
+        maker_owner: &Keypair,
+        maker_account: Pubkey,
+        trade_fee_cap_bps: u16,
+    ) -> (Pubkey, Pubkey, u64) {
         let ctx = Pubkey::new_unique();
         let delegate = matcher_delegate_key(
             &self.program_id,
@@ -2082,13 +2097,14 @@ impl V16CuEnv {
                 delegate,
             )
             .expect("init auth matcher context");
-        self.set_matcher_config(
+        self.set_matcher_config_with_trade_fee_cap(
             matcher_program,
             maker_owner,
             maker_account,
             ctx,
             delegate,
             1,
+            trade_fee_cap_bps,
         );
         (ctx, delegate, cu)
     }
@@ -2160,18 +2176,19 @@ impl V16CuEnv {
         matcher_delegate: Pubkey,
         enabled: u8,
     ) -> Pubkey {
-        self.try_set_matcher_config(
+        self.set_matcher_config_with_trade_fee_cap(
             matcher_program,
             maker_owner,
             maker_account,
             matcher_context,
             matcher_delegate,
             enabled,
+            if enabled == 0 { 0 } else { 10_000 },
         )
-        .expect("set matcher config")
     }
 
-    fn try_set_matcher_config(
+    #[allow(clippy::too_many_arguments)]
+    fn set_matcher_config_with_trade_fee_cap(
         &mut self,
         matcher_program: Pubkey,
         maker_owner: &Keypair,
@@ -2179,6 +2196,30 @@ impl V16CuEnv {
         matcher_context: Pubkey,
         matcher_delegate: Pubkey,
         enabled: u8,
+        trade_fee_cap_bps: u16,
+    ) -> Pubkey {
+        self.try_set_matcher_config_with_trade_fee_cap(
+            matcher_program,
+            maker_owner,
+            maker_account,
+            matcher_context,
+            matcher_delegate,
+            enabled,
+            trade_fee_cap_bps,
+        )
+        .expect("set matcher config")
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn try_set_matcher_config_with_trade_fee_cap(
+        &mut self,
+        matcher_program: Pubkey,
+        maker_owner: &Keypair,
+        maker_account: Pubkey,
+        matcher_context: Pubkey,
+        matcher_delegate: Pubkey,
+        enabled: u8,
+        trade_fee_cap_bps: u16,
     ) -> Result<Pubkey, String> {
         self.svm.expire_blockhash();
         let mut accounts = vec![
@@ -2194,7 +2235,10 @@ impl V16CuEnv {
             ]);
         }
         self.send(
-            ProgInstruction::SetMatcherConfig { enabled },
+            ProgInstruction::SetMatcherConfig {
+                enabled,
+                trade_fee_cap_bps,
+            },
             accounts,
             &[maker_owner],
         )?;
@@ -21201,7 +21245,10 @@ fn v16_attack_non_owner_cannot_change_lp_matcher_config() {
 
     env.svm.expire_blockhash();
     let revoke = env.send(
-        ProgInstruction::SetMatcherConfig { enabled: 0 },
+        ProgInstruction::SetMatcherConfig {
+            enabled: 0,
+            trade_fee_cap_bps: 0,
+        },
         vec![
             AccountMeta::new(attacker.pubkey(), true),
             AccountMeta::new_readonly(env.market, false),
@@ -21267,7 +21314,10 @@ fn v16_attack_cross_lp_cannot_overwrite_lp_matcher_config() {
 
     env.svm.expire_blockhash();
     let overwrite = env.send(
-        ProgInstruction::SetMatcherConfig { enabled: 0 },
+        ProgInstruction::SetMatcherConfig {
+            enabled: 0,
+            trade_fee_cap_bps: 0,
+        },
         vec![
             AccountMeta::new(attacker_owner.pubkey(), true),
             AccountMeta::new_readonly(env.market, false),
@@ -21632,7 +21682,10 @@ fn v16_attack_set_lp_matcher_config_cannot_target_protocol_accounts() {
     let send_with_lp_account = |env: &mut V16CuEnv, lp_account: Pubkey| {
         env.svm.expire_blockhash();
         env.send(
-            ProgInstruction::SetMatcherConfig { enabled: 1 },
+            ProgInstruction::SetMatcherConfig {
+                enabled: 1,
+                trade_fee_cap_bps: 10_000,
+            },
             vec![
                 AccountMeta::new(lp_owner.pubkey(), true),
                 AccountMeta::new_readonly(env.market, false),
@@ -21707,7 +21760,10 @@ fn v16_attack_matcher_config_and_fills_reject_self_program_context() {
     let lp_before_config = env.svm.get_account(&lp).unwrap();
     env.svm.expire_blockhash();
     let self_config = env.send(
-        ProgInstruction::SetMatcherConfig { enabled: 1 },
+        ProgInstruction::SetMatcherConfig {
+            enabled: 1,
+            trade_fee_cap_bps: 10_000,
+        },
         vec![
             AccountMeta::new(lp_owner.pubkey(), true),
             AccountMeta::new_readonly(env.market, false),
@@ -21963,7 +22019,10 @@ fn v16_attack_set_matcher_config_bad_legacy_context_rolls_back_realloc() {
     let lp_before = env.svm.get_account(&lp).unwrap();
     env.svm.expire_blockhash();
     let rejected = env.send(
-        ProgInstruction::SetMatcherConfig { enabled: 1 },
+        ProgInstruction::SetMatcherConfig {
+            enabled: 1,
+            trade_fee_cap_bps: 10_000,
+        },
         vec![
             AccountMeta::new(lp_owner.pubkey(), true),
             AccountMeta::new_readonly(env.market, false),
@@ -31197,7 +31256,10 @@ fn v16_attack_trade_paths_reject_cross_market_portfolio_substitution() {
         &mut env.svm,
         env.program_id,
         &env.payer,
-        ProgInstruction::SetMatcherConfig { enabled: 1 },
+        ProgInstruction::SetMatcherConfig {
+            enabled: 1,
+            trade_fee_cap_bps: 10_000,
+        },
         vec![
             AccountMeta::new(cpi_lp.pubkey(), true),
             AccountMeta::new_readonly(market_b, false),

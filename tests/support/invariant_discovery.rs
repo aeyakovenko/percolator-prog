@@ -3987,6 +3987,13 @@ fn discover_trade_fee_consent_violation(
     };
     if matches!(
         kind,
+        FeeConsentKind::CpiBaseFee | FeeConsentKind::BatchCpiBaseFee
+    ) {
+        env.set_matcher_config_with_trade_fee_cap(LP, 1, 0)
+            .map_err(|error| format!("bind zero LP base-fee consent: {error}"))?;
+    }
+    if matches!(
+        kind,
         FeeConsentKind::RetainedNoCpiBaseFee
             | FeeConsentKind::RetainedBatchNoCpiBaseFee
             | FeeConsentKind::CpiBaseFee

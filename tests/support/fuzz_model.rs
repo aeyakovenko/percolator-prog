@@ -283,6 +283,29 @@ pub struct CpiCallerFeeProtection {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CpiBaseFeeConsentProtection {
+    pub blocker: KnownBlocker,
+    pub route: TradeRoute,
+    pub rejecting_cap_bps: u16,
+    pub installed_fee_bps: u64,
+    pub invalid_cap_rejected: bool,
+    pub invalid_cap_exact_rollback: bool,
+    pub stale_fill_rejected: bool,
+    pub stale_fill_exact_rollback: bool,
+    pub position_epoch_preserved: bool,
+    pub unconsented_lp_loss: u64,
+    pub unconsented_insurance_delta: u128,
+    pub consented_cap_bps: u16,
+    pub consented_lp_fee: u64,
+    pub consented_insurance_fee: u64,
+    pub total_payout: u128,
+    pub open_cu: u64,
+    pub close_cu: u64,
+    pub max_route_cu: u64,
+    pub token_supply_conserved: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CpiBackingFeeProtection {
     pub blocker: KnownBlocker,
     pub matcher_cap_bps: u16,
@@ -4930,6 +4953,200 @@ pub fn verify_cpi_caller_fee_protection(
         insurance_withdraw_rejected,
         rejected_exact_rollback,
         total_payout,
+        token_supply_conserved,
+    })
+}
+
+pub fn verify_cpi_base_fee_consent(
+    mut seed: [u8; 32],
+    route: TradeRoute,
+) -> Result<CpiBaseFeeConsentProtection, String> {
+    if !matches!(route, TradeRoute::Cpi | TradeRoute::BatchCpi) {
+        return Err(format!(
+            "PR 313 requires an unsigned-LP CPI route: {route:?}"
+        ));
+    }
+    seed[0] ^= 0x13;
+    const ASSET: u16 = 0;
+    const BENEFICIARY: usize = 0;
+    const LP: usize = 1;
+    const DEPOSIT: u128 = 100_000_000;
+    const SIZE_Q: i128 = POS_SCALE as i128;
+    const REJECTING_CAP_BPS: u16 = 499;
+    const INSTALLED_FEE_BPS: u64 = 500;
+    const CONSENTED_CAP_BPS: u16 = 500;
+    const FEE_PER_SIDE_PER_TRADE: u64 = 50_000;
+    const TOTAL_INSURANCE_FEE: u128 = 4 * FEE_PER_SIDE_PER_TRADE as u128;
+
+    let mut env = V16Svm::new(seed, MarketConfig::default());
+    let supply_before = env.token_supply_observed();
+    env.update_asset_authority_from_admin(
+        ASSET,
+        percolator_prog::processor::ASSET_AUTH_INSURANCE_OPERATOR,
+        BENEFICIARY,
+    )
+    .map_err(|error| format!("PR 313 install independent fee beneficiary: {error}"))?;
+
+    let epoch_before_consent = env.primary_portfolio_position_epoch(LP);
+    env.set_matcher_config_with_trade_fee_cap(LP, 1, REJECTING_CAP_BPS)
+        .map_err(|error| format!("PR 313 bind rejecting LP fee cap: {error}"))?;
+    let cap_state = tracked_economic_accounts(&env);
+    let invalid_cap_error = match env.set_matcher_config_with_trade_fee_cap(LP, 1, 10_001) {
+        Ok(_) => return Err("PR 313 matcher accepted a fee cap above 100%".into()),
+        Err(error) => error,
+    };
+    let invalid_cap_rejected = invalid_cap_error.contains("Custom(9)")
+        || invalid_cap_error.contains("custom program error: 0x9");
+    let invalid_cap_exact_rollback = tracked_economic_accounts(&env) == cap_state;
+    let position_epoch_preserved = env.primary_portfolio_position_epoch(LP) == epoch_before_consent;
+    if !invalid_cap_rejected || !invalid_cap_exact_rollback || !position_epoch_preserved {
+        return Err(format!(
+            "PR 313 invalid cap did not reject atomically: error={invalid_cap_error}, \
+             rollback={invalid_cap_exact_rollback}, epoch={epoch_before_consent}/{}",
+            env.primary_portfolio_position_epoch(LP)
+        ));
+    }
+
+    env.update_trade_fee_policy(INSTALLED_FEE_BPS)
+        .map_err(|error| format!("PR 313 raise live base fee after LP consent: {error}"))?;
+    let send_fill = |env: &mut V16Svm, size_q: i128| match route {
+        TradeRoute::Cpi => env.trade_cpi(BENEFICIARY, LP, ASSET, size_q, 0, 0),
+        TradeRoute::BatchCpi => env.batch_trade_cpi(
+            BENEFICIARY,
+            LP,
+            vec![BatchTradeCpiLeg {
+                asset_index: ASSET,
+                size_q,
+                fee_bps: 0,
+                limit_price: 0,
+            }],
+        ),
+        _ => unreachable!(),
+    };
+
+    let state_after_policy = tracked_economic_accounts(&env);
+    let lp_before_rejection = env.primary_portfolio(LP).capital.get();
+    let insurance_before_rejection = env.primary_market_state().1.insurance_domain_budget[0]
+        .checked_add(env.primary_market_state().1.insurance_domain_budget[1])
+        .ok_or("PR 313 pre-rejection insurance total overflow")?;
+    let stale_fill_error = match send_fill(&mut env, SIZE_Q) {
+        Ok(_) => return Err("PR 313 CPI fill above the LP fee cap landed".into()),
+        Err(error) => error,
+    };
+    let stale_fill_rejected = stale_fill_error.contains("Custom(9)")
+        || stale_fill_error.contains("custom program error: 0x9");
+    let stale_fill_exact_rollback = tracked_economic_accounts(&env) == state_after_policy;
+    let unconsented_lp_loss = u64::try_from(
+        lp_before_rejection
+            .checked_sub(env.primary_portfolio(LP).capital.get())
+            .ok_or("PR 313 rejected CPI fill increased LP capital")?,
+    )
+    .map_err(|_| "PR 313 unconsented LP loss does not fit u64")?;
+    let insurance_after_rejection = env.primary_market_state().1.insurance_domain_budget[0]
+        .checked_add(env.primary_market_state().1.insurance_domain_budget[1])
+        .ok_or("PR 313 post-rejection insurance total overflow")?;
+    let unconsented_insurance_delta = insurance_after_rejection
+        .checked_sub(insurance_before_rejection)
+        .ok_or("PR 313 rejected CPI fill decreased insurance")?;
+    if !stale_fill_rejected
+        || !stale_fill_exact_rollback
+        || unconsented_lp_loss != 0
+        || unconsented_insurance_delta != 0
+    {
+        return Err(format!(
+            "PR 313 stale fee consent failed: error={stale_fill_error}, \
+             rollback={stale_fill_exact_rollback}, lp_loss={unconsented_lp_loss}, \
+             insurance_delta={unconsented_insurance_delta}"
+        ));
+    }
+
+    let cap_update = env
+        .set_matcher_config_with_trade_fee_cap(LP, 1, CONSENTED_CAP_BPS)
+        .map_err(|error| format!("PR 313 install fresh LP fee consent: {error}"))?;
+    if env.primary_portfolio_position_epoch(LP) != epoch_before_consent {
+        return Err("PR 313 matcher fee consent changed the position episode".into());
+    }
+    let open = send_fill(&mut env, SIZE_Q)
+        .map_err(|error| format!("PR 313 freshly consented CPI open failed: {error}"))?;
+    let close = send_fill(&mut env, -SIZE_Q)
+        .map_err(|error| format!("PR 313 freshly consented CPI close failed: {error}"))?;
+
+    let beneficiary_capital = env.primary_portfolio(BENEFICIARY).capital.get();
+    let lp_capital = env.primary_portfolio(LP).capital.get();
+    let insurance = env.primary_market_state().1.insurance_domain_budget[0]
+        .checked_add(env.primary_market_state().1.insurance_domain_budget[1])
+        .ok_or("PR 313 consented insurance total overflow")?;
+    let expected_capital = DEPOSIT
+        .checked_sub(2 * FEE_PER_SIDE_PER_TRADE as u128)
+        .ok_or("PR 313 expected capital underflow")?;
+    if beneficiary_capital != expected_capital
+        || lp_capital != expected_capital
+        || insurance != TOTAL_INSURANCE_FEE
+    {
+        return Err(format!(
+            "PR 313 consented CPI accounting mismatch: capital={beneficiary_capital}/\
+             {lp_capital}, insurance={insurance}"
+        ));
+    }
+
+    let insurance_withdrawal = env
+        .withdraw_insurance_asset(BENEFICIARY, ASSET, TOTAL_INSURANCE_FEE)
+        .map_err(|error| format!("PR 313 beneficiary insurance withdrawal failed: {error}"))?;
+    let beneficiary_withdrawal = env
+        .withdraw_primary(BENEFICIARY, beneficiary_capital)
+        .map_err(|error| format!("PR 313 beneficiary exit failed: {error}"))?;
+    let lp_withdrawal = env
+        .withdraw_primary(LP, lp_capital)
+        .map_err(|error| format!("PR 313 LP exit failed: {error}"))?;
+    let beneficiary_payout = env.token_amount(env.actors[BENEFICIARY].destination_token);
+    let lp_payout = env.token_amount(env.actors[LP].destination_token);
+    let consented_lp_fee = (DEPOSIT as u64)
+        .checked_sub(lp_payout)
+        .ok_or("PR 313 LP payout exceeded its deposit")?;
+    let total_payout = u128::from(beneficiary_payout) + u128::from(lp_payout);
+    let max_route_cu = cap_update
+        .compute_units
+        .max(open.compute_units)
+        .max(close.compute_units)
+        .max(insurance_withdrawal.compute_units)
+        .max(beneficiary_withdrawal.compute_units)
+        .max(lp_withdrawal.compute_units);
+    let token_supply_conserved = env.token_supply_observed() == supply_before;
+    if beneficiary_payout != 100_100_000
+        || lp_payout != 99_900_000
+        || consented_lp_fee != 100_000
+        || total_payout != 2 * DEPOSIT
+        || max_route_cu >= TX_CU_LIMIT
+        || !token_supply_conserved
+    {
+        return Err(format!(
+            "PR 313 terminal mismatch: payouts={beneficiary_payout}/{lp_payout}, \
+             lp_fee={consented_lp_fee}, total={total_payout}, max_cu={max_route_cu}, \
+             supply={}/{}",
+            env.token_supply_observed(),
+            supply_before
+        ));
+    }
+
+    Ok(CpiBaseFeeConsentProtection {
+        blocker: KnownBlocker::BilateralBaseFeeConsent,
+        route,
+        rejecting_cap_bps: REJECTING_CAP_BPS,
+        installed_fee_bps: INSTALLED_FEE_BPS,
+        invalid_cap_rejected,
+        invalid_cap_exact_rollback,
+        stale_fill_rejected,
+        stale_fill_exact_rollback,
+        position_epoch_preserved,
+        unconsented_lp_loss,
+        unconsented_insurance_delta,
+        consented_cap_bps: CONSENTED_CAP_BPS,
+        consented_lp_fee,
+        consented_insurance_fee: TOTAL_INSURANCE_FEE as u64,
+        total_payout,
+        open_cu: open.compute_units,
+        close_cu: close.compute_units,
+        max_route_cu,
         token_supply_conserved,
     })
 }
@@ -16821,6 +17038,14 @@ pub fn asset_generation_config_replay_strategy(
 
 #[allow(dead_code)]
 pub fn cpi_caller_fee_strategy() -> impl Strategy<Value = ([u8; 32], TradeRoute)> {
+    (
+        any::<[u8; 32]>(),
+        prop::sample::select(vec![TradeRoute::Cpi, TradeRoute::BatchCpi]),
+    )
+}
+
+#[allow(dead_code)]
+pub fn cpi_base_fee_consent_strategy() -> impl Strategy<Value = ([u8; 32], TradeRoute)> {
     (
         any::<[u8; 32]>(),
         prop::sample::select(vec![TradeRoute::Cpi, TradeRoute::BatchCpi]),

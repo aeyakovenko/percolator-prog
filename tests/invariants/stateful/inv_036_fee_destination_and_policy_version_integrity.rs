@@ -15,7 +15,7 @@
 //! Guarantee boundary: a quarantined counterexample demonstrates public reachability; it does
 //! not certify the invariant on an unfixed pin. Certification requires the fixed-pin assertion
 //! plus every additional verification method required by the charter.
-//! PRs 223, 224, 310, and 314 are fixed-pin assertions here.
+//! PRs 223, 224, 310, 313, and 314 are fixed-pin assertions here.
 
 use super::*;
 
@@ -120,6 +120,27 @@ proptest! {
         prop_assert!(protection.asset_active);
         prop_assert!(protection.policy_replay_cu < crate::support::v16_svm::TX_CU_LIMIT);
         prop_assert!(protection.activation_cu < crate::support::v16_svm::TX_CU_LIMIT);
+        prop_assert!(protection.token_supply_conserved);
+    }
+
+    #[test]
+    fn v16_program_pr313_cpi_base_fee_consent_protection_fuzz(
+        (seed, route) in cpi_base_fee_consent_strategy()
+    ) {
+        let protection = verify_cpi_base_fee_consent(seed, route)
+            .map_err(TestCaseError::fail)?;
+        prop_assert_eq!(protection.route, route);
+        prop_assert!(protection.invalid_cap_rejected);
+        prop_assert!(protection.invalid_cap_exact_rollback);
+        prop_assert!(protection.stale_fill_rejected);
+        prop_assert!(protection.stale_fill_exact_rollback);
+        prop_assert!(protection.position_epoch_preserved);
+        prop_assert_eq!(protection.unconsented_lp_loss, 0);
+        prop_assert_eq!(protection.unconsented_insurance_delta, 0);
+        prop_assert_eq!(protection.consented_lp_fee, 100_000);
+        prop_assert_eq!(protection.consented_insurance_fee, 200_000);
+        prop_assert_eq!(protection.total_payout, 200_000_000);
+        prop_assert!(protection.max_route_cu < crate::support::v16_svm::TX_CU_LIMIT);
         prop_assert!(protection.token_supply_conserved);
     }
 

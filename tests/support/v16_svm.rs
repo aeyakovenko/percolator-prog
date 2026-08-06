@@ -564,7 +564,10 @@ impl V16Svm {
         )
         .expect("initialize authenticated matcher context");
         self.send_program(
-            ProgInstruction::SetMatcherConfig { enabled: 1 },
+            ProgInstruction::SetMatcherConfig {
+                enabled: 1,
+                trade_fee_cap_bps: 10_000,
+            },
             vec![
                 AccountMeta::new(owner.pubkey(), true),
                 AccountMeta::new_readonly(self.market, false),
@@ -583,6 +586,19 @@ impl V16Svm {
         actor_index: usize,
         enabled: u8,
     ) -> Result<TxSuccess, String> {
+        self.set_matcher_config_with_trade_fee_cap(
+            actor_index,
+            enabled,
+            if enabled == 0 { 0 } else { 10_000 },
+        )
+    }
+
+    pub fn set_matcher_config_with_trade_fee_cap(
+        &mut self,
+        actor_index: usize,
+        enabled: u8,
+        trade_fee_cap_bps: u16,
+    ) -> Result<TxSuccess, String> {
         assert!(enabled <= 1, "matcher enabled flag must be boolean");
         let actor = &self.actors[actor_index];
         let owner = copy_keypair(&actor.signer);
@@ -599,7 +615,10 @@ impl V16Svm {
             ]);
         }
         self.send_program(
-            ProgInstruction::SetMatcherConfig { enabled },
+            ProgInstruction::SetMatcherConfig {
+                enabled,
+                trade_fee_cap_bps,
+            },
             accounts,
             &[owner],
         )
@@ -609,6 +628,19 @@ impl V16Svm {
         &mut self,
         actor_index: usize,
         enabled: u8,
+    ) -> Transaction {
+        self.build_retained_matcher_config_with_trade_fee_cap(
+            actor_index,
+            enabled,
+            if enabled == 0 { 0 } else { 10_000 },
+        )
+    }
+
+    pub fn build_retained_matcher_config_with_trade_fee_cap(
+        &mut self,
+        actor_index: usize,
+        enabled: u8,
+        trade_fee_cap_bps: u16,
     ) -> Transaction {
         assert!(enabled <= 1, "matcher enabled flag must be boolean");
         let actor = &self.actors[actor_index];
@@ -626,7 +658,10 @@ impl V16Svm {
             ]);
         }
         self.build_program_transaction(
-            ProgInstruction::SetMatcherConfig { enabled },
+            ProgInstruction::SetMatcherConfig {
+                enabled,
+                trade_fee_cap_bps,
+            },
             accounts,
             &[owner],
         )
