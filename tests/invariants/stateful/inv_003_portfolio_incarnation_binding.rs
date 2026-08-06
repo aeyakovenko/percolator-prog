@@ -4,14 +4,14 @@
 //!
 //! Evidence in this file (F over public I routes):
 //! `v16_program_portfolio_incarnation_operation_matrix_classifies_stale_intents` enumerates the
-//! retained portfolio-operation registry without PR IDs or finding metadata. It requires the two
-//! position-episode-bound routes to reject with exact rollback and preserves explicit counterexamples
-//! for the nine routes that remain open. Finding-specific generated regressions remain below as impact
+//! retained portfolio-operation registry without PR IDs or finding metadata. It requires matcher
+//! and position-episode-bound routes to reject with exact rollback and preserves explicit
+//! counterexamples for the eight routes that remain open. Finding-specific generated regressions remain below as impact
 //! confirmation. These tests exercise the deployed public
 //! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
 //! rollback, liveness, or compute outcomes appropriate to the invariant.
 //!
-//! Guarantee boundary: the fixed roster certifies only rebalance and recovery-forfeit episode
+//! Guarantee boundary: the fixed roster certifies matcher disable, rebalance, and recovery-forfeit
 //! binding. The open roster remains public counterexample evidence, not certification of INV-003.
 
 use super::*;
@@ -49,7 +49,6 @@ proptest! {
             PortfolioIntentKind::Deposit,
             PortfolioIntentKind::Withdraw,
             PortfolioIntentKind::Close,
-            PortfolioIntentKind::MatcherDisable,
             PortfolioIntentKind::TradeNoCpi,
             PortfolioIntentKind::TradeCpi,
             PortfolioIntentKind::BatchTradeNoCpi,
@@ -62,6 +61,7 @@ proptest! {
             "INV-003 fixed/open roster changed; inspect every operation-class delta"
         );
         for fixed in [
+            PortfolioIntentKind::MatcherDisable,
             PortfolioIntentKind::RebalanceReduce,
             PortfolioIntentKind::ForfeitRecoveryLeg,
         ] {
@@ -102,16 +102,18 @@ proptest! {
     }
 
     #[test]
-    fn v16_program_pr304_matcher_grant_portfolio_incarnation_replay_fuzz(
+    fn v16_program_pr304_matcher_grant_portfolio_incarnation_protection_fuzz(
         seed in matcher_grant_portfolio_incarnation_replay_seed_strategy()
     ) {
-        let result = reproduce_matcher_grant_portfolio_incarnation_replay(seed);
-        prop_assert!(
-            result.is_ok(),
-            "PR 304 no longer reproduces for seed {:?}: {}",
-            seed,
-            result.unwrap_err()
-        );
+        let protection = verify_matcher_grant_portfolio_incarnation_protection(seed)
+            .map_err(TestCaseError::fail)?;
+        prop_assert!(protection.stale_replay_rejected);
+        prop_assert!(protection.rejected_exact_rollback);
+        prop_assert!(protection.control_trade_blocked);
+        prop_assert!(protection.fresh_grant_landed);
+        prop_assert!(protection.fresh_round_trip_landed);
+        prop_assert!(protection.owner_exit_landed);
+        prop_assert!(protection.max_cu < 1_400_000);
     }
 
     #[test]

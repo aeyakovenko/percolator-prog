@@ -67,7 +67,11 @@ pub mod constants {
     pub const PORTFOLIO_MATCHER_CONTROL_OFF: usize = PORTFOLIO_MATCHER_CONFIG_OFF + 96;
     pub const PORTFOLIO_ID_OFF: usize = PORTFOLIO_MATCHER_CONFIG_OFF + PORTFOLIO_MATCHER_CONFIG_LEN;
     pub const PORTFOLIO_ID_LEN: usize = 8;
-    pub const PORTFOLIO_ACCOUNT_LEN: usize = PORTFOLIO_ID_OFF + PORTFOLIO_ID_LEN;
+    pub const PORTFOLIO_MATCHER_SEQUENCE_OFF: usize = PORTFOLIO_ID_OFF + PORTFOLIO_ID_LEN;
+    pub const PORTFOLIO_MATCHER_SEQUENCE_LEN: usize = 8;
+    pub const PORTFOLIO_LEGACY_ACCOUNT_LEN: usize = PORTFOLIO_MATCHER_SEQUENCE_OFF;
+    pub const PORTFOLIO_ACCOUNT_LEN: usize =
+        PORTFOLIO_MATCHER_SEQUENCE_OFF + PORTFOLIO_MATCHER_SEQUENCE_LEN;
     pub const MAX_MATCHER_TAIL_ACCOUNTS: usize = 32;
     pub const MATCHER_ABI_VERSION: u32 = 3;
     pub const MATCHER_CONTEXT_MIN_LEN: usize = 64;
@@ -163,8 +167,10 @@ pub mod state {
             ORACLE_LEG_FLAGS_MASK, ORACLE_MODE_AUTH_MARK, ORACLE_MODE_EWMA_MARK,
             ORACLE_MODE_HYBRID_AFTER_HOURS, ORACLE_MODE_MANUAL, PORTFOLIO_ACCOUNT_LEN,
             PORTFOLIO_ENGINE_ACCOUNT_LEN, PORTFOLIO_ID_LEN, PORTFOLIO_ID_OFF,
-            PORTFOLIO_MATCHER_CONFIG_LEN, PORTFOLIO_MATCHER_CONFIG_OFF,
-            PORTFOLIO_MATCHER_CONTROL_OFF, PORTFOLIO_STATE_LEN, VERSION, WRAPPER_CONFIG_LEN,
+            PORTFOLIO_LEGACY_ACCOUNT_LEN, PORTFOLIO_MATCHER_CONFIG_LEN,
+            PORTFOLIO_MATCHER_CONFIG_OFF, PORTFOLIO_MATCHER_CONTROL_OFF,
+            PORTFOLIO_MATCHER_SEQUENCE_LEN, PORTFOLIO_MATCHER_SEQUENCE_OFF, PORTFOLIO_STATE_LEN,
+            VERSION, WRAPPER_CONFIG_LEN,
         },
         error::PercolatorError,
     };
@@ -882,6 +888,54 @@ pub mod state {
             .ok_or(PercolatorError::InvalidAccountLen)?
             .copy_from_slice(&id.to_le_bytes());
         Ok(())
+    }
+
+    #[inline]
+    pub fn read_portfolio_matcher_sequence(data: &[u8]) -> Result<u64, ProgramError> {
+        check_header(data, KIND_PORTFOLIO)?;
+        if data.len() == PORTFOLIO_LEGACY_ACCOUNT_LEN {
+            return Ok(0);
+        }
+        read_u64(data, PORTFOLIO_MATCHER_SEQUENCE_OFF)
+    }
+
+    #[inline]
+    fn write_portfolio_matcher_sequence(
+        data: &mut [u8],
+        sequence: u64,
+    ) -> Result<(), ProgramError> {
+        check_header(data, KIND_PORTFOLIO)?;
+        data.get_mut(
+            PORTFOLIO_MATCHER_SEQUENCE_OFF
+                ..PORTFOLIO_MATCHER_SEQUENCE_OFF + PORTFOLIO_MATCHER_SEQUENCE_LEN,
+        )
+        .ok_or(PercolatorError::InvalidAccountLen)?
+        .copy_from_slice(&sequence.to_le_bytes());
+        Ok(())
+    }
+
+    #[inline]
+    pub fn advance_portfolio_matcher_sequence(
+        data: &mut [u8],
+        expected_sequence: u64,
+    ) -> Result<u64, ProgramError> {
+        let current = read_portfolio_matcher_sequence(data)?;
+        let next = next_portfolio_matcher_sequence(current, expected_sequence)?;
+        write_portfolio_matcher_sequence(data, next)?;
+        Ok(next)
+    }
+
+    #[inline]
+    pub fn next_portfolio_matcher_sequence(
+        current: u64,
+        expected_sequence: u64,
+    ) -> Result<u64, ProgramError> {
+        if current != expected_sequence {
+            return Err(PercolatorError::EngineStale.into());
+        }
+        current
+            .checked_add(1)
+            .ok_or(PercolatorError::EngineCounterOverflow.into())
     }
 
     #[inline]
@@ -2643,6 +2697,8 @@ pub mod ix {
             legs: Vec<BatchTradeCpiLeg>,
         },
         SetMatcherConfig {
+            portfolio_id: u64,
+            expected_sequence: u64,
             enabled: u8,
             trade_fee_cap_bps: u16,
         },
@@ -2915,18 +2971,12 @@ pub mod ix {
                     }
                     Self::BatchTradeCpi { legs }
                 }
-                68 => {
-                    let enabled = read_u8(&mut rest)?;
-                    let trade_fee_cap_bps = if rest.is_empty() {
-                        0
-                    } else {
-                        read_u16(&mut rest)?
-                    };
-                    Self::SetMatcherConfig {
-                        enabled,
-                        trade_fee_cap_bps,
-                    }
-                }
+                68 => Self::SetMatcherConfig {
+                    portfolio_id: read_u64(&mut rest)?,
+                    expected_sequence: read_u64(&mut rest)?,
+                    enabled: read_u8(&mut rest)?,
+                    trade_fee_cap_bps: read_u16(&mut rest)?,
+                },
                 8 => Self::ClosePortfolio,
                 9 => Self::TopUpInsurance {
                     amount: read_u128(&mut rest)?,
@@ -3219,10 +3269,14 @@ pub mod ix {
                     }
                 }
                 Self::SetMatcherConfig {
+                    portfolio_id,
+                    expected_sequence,
                     enabled,
                     trade_fee_cap_bps,
                 } => {
                     out.push(68);
+                    push_u64(&mut out, portfolio_id);
+                    push_u64(&mut out, expected_sequence);
                     out.push(enabled);
                     push_u16(&mut out, trade_fee_cap_bps);
                 }
@@ -5517,9 +5571,18 @@ pub mod processor {
                 handle_batch_trade_cpi(program_id, accounts, &legs)
             }
             Instruction::SetMatcherConfig {
+                portfolio_id,
+                expected_sequence,
                 enabled,
                 trade_fee_cap_bps,
-            } => handle_set_matcher_config(program_id, accounts, enabled, trade_fee_cap_bps),
+            } => handle_set_matcher_config(
+                program_id,
+                accounts,
+                portfolio_id,
+                expected_sequence,
+                enabled,
+                trade_fee_cap_bps,
+            ),
             Instruction::ClosePortfolio => handle_close_portfolio(program_id, accounts),
             Instruction::TopUpInsurance { amount } => {
                 handle_top_up_insurance(program_id, accounts, amount)
@@ -7147,6 +7210,8 @@ pub mod processor {
     fn handle_set_matcher_config<'a>(
         program_id: &Pubkey,
         accounts: &'a [AccountInfo<'a>],
+        portfolio_id: u64,
+        expected_sequence: u64,
         enabled: u8,
         trade_fee_cap_bps: u16,
     ) -> ProgramResult {
@@ -7168,6 +7233,17 @@ pub mod processor {
         {
             return Err(PercolatorError::Unauthorized.into());
         }
+        let (current_portfolio_id, current_sequence) = {
+            let data = lp_portfolio_ai.try_borrow_data()?;
+            (
+                state::read_portfolio_id(&data)?,
+                state::read_portfolio_matcher_sequence(&data)?,
+            )
+        };
+        if portfolio_id != current_portfolio_id || expected_sequence != current_sequence {
+            return Err(PercolatorError::EngineStale.into());
+        }
+        state::next_portfolio_matcher_sequence(current_sequence, expected_sequence)?;
         let required_len = state::portfolio_account_len_for_market_slots(0)?;
         if lp_portfolio_ai.data_len() < required_len {
             lp_portfolio_ai.realloc(required_len, true)?;
@@ -7209,7 +7285,10 @@ pub mod processor {
         };
         cfg.set_enabled(enabled)?;
         cfg.set_trade_fee_cap_bps(trade_fee_cap_bps)?;
-        state::write_portfolio_matcher_config(&mut lp_portfolio_ai.try_borrow_mut_data()?, &cfg)
+        let mut data = lp_portfolio_ai.try_borrow_mut_data()?;
+        state::write_portfolio_matcher_config(&mut data, &cfg)?;
+        state::advance_portfolio_matcher_sequence(&mut data, expected_sequence)?;
+        Ok(())
     }
 
     /// Maximum legs in a single matcher batch CPI: the matcher returns N*64 bytes via
@@ -13433,8 +13512,22 @@ pub mod processor {
             .expect("initialize portfolio");
             assert_eq!(
                 data.len(),
-                constants::PORTFOLIO_ID_OFF + constants::PORTFOLIO_ID_LEN,
-                "the episode binding must not grow the deployed portfolio layout"
+                constants::PORTFOLIO_ACCOUNT_LEN,
+                "the wrapper tail contains matcher config, portfolio ID, and matcher sequence"
+            );
+            assert_eq!(state::read_portfolio_matcher_sequence(&data).unwrap(), 0);
+            assert_eq!(
+                state::advance_portfolio_matcher_sequence(&mut data, 0).unwrap(),
+                1
+            );
+            let sequence_before = data.clone();
+            assert_eq!(
+                state::advance_portfolio_matcher_sequence(&mut data, 0),
+                Err(PercolatorError::EngineStale.into())
+            );
+            assert_eq!(
+                data, sequence_before,
+                "stale sequence must not mutate state"
             );
             assert_eq!(state::read_portfolio_position_epoch(&data).unwrap(), 0);
             let mut matcher = state::read_portfolio_matcher_config(&data).unwrap();

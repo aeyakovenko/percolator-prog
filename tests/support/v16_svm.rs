@@ -542,11 +542,10 @@ impl V16Svm {
     }
 
     fn init_matcher(&mut self, actor_index: usize) {
-        let actor = &self.actors[actor_index];
-        let owner = copy_keypair(&actor.signer);
-        let context = actor.matcher_context;
-        let delegate = actor.matcher_delegate;
-        let portfolio = actor.portfolio;
+        let owner = copy_keypair(&self.actors[actor_index].signer);
+        let context = self.actors[actor_index].matcher_context;
+        let delegate = self.actors[actor_index].matcher_delegate;
+        let portfolio = self.actors[actor_index].portfolio;
         self.send_raw_instruction(
             Instruction {
                 program_id: self.matcher_program,
@@ -563,8 +562,12 @@ impl V16Svm {
             &[copy_keypair(&owner)],
         )
         .expect("initialize authenticated matcher context");
+        let portfolio_id = self.primary_portfolio_id(actor_index);
+        let expected_sequence = self.primary_portfolio_matcher_sequence(actor_index);
         self.send_program(
             ProgInstruction::SetMatcherConfig {
+                portfolio_id,
+                expected_sequence,
                 enabled: 1,
                 trade_fee_cap_bps: 10_000,
             },
@@ -600,22 +603,28 @@ impl V16Svm {
         trade_fee_cap_bps: u16,
     ) -> Result<TxSuccess, String> {
         assert!(enabled <= 1, "matcher enabled flag must be boolean");
-        let actor = &self.actors[actor_index];
-        let owner = copy_keypair(&actor.signer);
+        let portfolio_id = self.primary_portfolio_id(actor_index);
+        let expected_sequence = self.primary_portfolio_matcher_sequence(actor_index);
+        let owner = copy_keypair(&self.actors[actor_index].signer);
+        let portfolio = self.actors[actor_index].portfolio;
+        let matcher_context = self.actors[actor_index].matcher_context;
+        let matcher_delegate = self.actors[actor_index].matcher_delegate;
         let mut accounts = vec![
             AccountMeta::new(owner.pubkey(), true),
             AccountMeta::new_readonly(self.market, false),
-            AccountMeta::new(actor.portfolio, false),
+            AccountMeta::new(portfolio, false),
         ];
         if enabled == 1 {
             accounts.extend([
                 AccountMeta::new_readonly(self.matcher_program, false),
-                AccountMeta::new_readonly(actor.matcher_context, false),
-                AccountMeta::new_readonly(actor.matcher_delegate, false),
+                AccountMeta::new_readonly(matcher_context, false),
+                AccountMeta::new_readonly(matcher_delegate, false),
             ]);
         }
         self.send_program(
             ProgInstruction::SetMatcherConfig {
+                portfolio_id,
+                expected_sequence,
                 enabled,
                 trade_fee_cap_bps,
             },
@@ -643,22 +652,28 @@ impl V16Svm {
         trade_fee_cap_bps: u16,
     ) -> Transaction {
         assert!(enabled <= 1, "matcher enabled flag must be boolean");
-        let actor = &self.actors[actor_index];
-        let owner = copy_keypair(&actor.signer);
+        let portfolio_id = self.primary_portfolio_id(actor_index);
+        let expected_sequence = self.primary_portfolio_matcher_sequence(actor_index);
+        let owner = copy_keypair(&self.actors[actor_index].signer);
+        let portfolio = self.actors[actor_index].portfolio;
+        let matcher_context = self.actors[actor_index].matcher_context;
+        let matcher_delegate = self.actors[actor_index].matcher_delegate;
         let mut accounts = vec![
             AccountMeta::new(owner.pubkey(), true),
             AccountMeta::new_readonly(self.market, false),
-            AccountMeta::new(actor.portfolio, false),
+            AccountMeta::new(portfolio, false),
         ];
         if enabled == 1 {
             accounts.extend([
                 AccountMeta::new_readonly(self.matcher_program, false),
-                AccountMeta::new_readonly(actor.matcher_context, false),
-                AccountMeta::new_readonly(actor.matcher_delegate, false),
+                AccountMeta::new_readonly(matcher_context, false),
+                AccountMeta::new_readonly(matcher_delegate, false),
             ]);
         }
         self.build_program_transaction(
             ProgInstruction::SetMatcherConfig {
+                portfolio_id,
+                expected_sequence,
                 enabled,
                 trade_fee_cap_bps,
             },
@@ -857,6 +872,11 @@ impl V16Svm {
     pub fn primary_portfolio_position_epoch(&self, actor_index: usize) -> u64 {
         let data = self.primary_portfolio_data(actor_index);
         state::read_portfolio_position_epoch(&data).expect("decode primary position epoch")
+    }
+
+    pub fn primary_portfolio_matcher_sequence(&self, actor_index: usize) -> u64 {
+        let data = self.primary_portfolio_data(actor_index);
+        state::read_portfolio_matcher_sequence(&data).expect("decode primary matcher sequence")
     }
 
     pub fn resolve_market(&mut self) -> Result<TxSuccess, String> {

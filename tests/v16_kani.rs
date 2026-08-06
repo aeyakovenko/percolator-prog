@@ -12,6 +12,9 @@ use percolator_prog::policy_v16;
 #[path = "invariants/kani/inv_004_position_episode_binding.rs"]
 mod inv_004_position_episode_binding;
 
+#[path = "invariants/kani/inv_010_out_of_order_safety.rs"]
+mod inv_010_out_of_order_safety;
+
 fn assert_rejects_trailing_byte(ix: Instruction, extra: u8) {
     let mut data = ix.encode();
     data.push(extra);

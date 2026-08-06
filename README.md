@@ -268,8 +268,9 @@ Positions and PnL use native `i128`/`u128` (`POS_SCALE = 1_000_000`, `ADL_ONE = 
 ### Two trade paths
 - **TradeNoCpi**: no external matcher; used for baseline integration, local testing, and deterministic program-test scenarios.
 - **TradeCpi**: production matcher path; the LP owner configures a matcher program/context once on
-  the LP portfolio with `SetMatcherConfig` (tag 68). Fills then run without the LP owner
-  signing each transaction. Direct LP-signed bilateral trading is `TradeNoCpi`.
+  the LP portfolio with `SetMatcherConfig` (tag 68). Each mutation binds the current
+  `portfolio_id` and matcher sequence, then advances the sequence. Fills then run without the LP
+  owner signing each transaction. Direct LP-signed bilateral trading is `TradeNoCpi`.
 
 ### MatchingEngine trait
 The `MatchingEngine` trait is defined in the Percolator program (not in the engine crate). The engine is a pure recorder of state transitions and does not define the matching interface. Two implementations exist: `NoOpMatcher` (TradeNoCpi) and `CpiMatcher` (TradeCpi).
@@ -354,7 +355,12 @@ Unsigned LP matcher fills require an enabled matcher config stored directly on t
 
 `SetMatcherConfig` (tag 68) is signed by the LP owner and writes:
 
-`matcher_program, matcher_context, matcher_delegate, enabled`
+`matcher_program, matcher_context, matcher_delegate, enabled, trade_fee_cap_bps`
+
+The signed instruction carries `portfolio_id` and `expected_sequence`. It succeeds only for the
+current portfolio incarnation and current sequence, then increments the sequence exactly once.
+This prevents a retained enable from crossing a later revoke. Prior-layout portfolios with a
+portfolio ID but no sequence tail read sequence zero and grow atomically on their first mutation.
 
 During `TradeCpi` / `BatchTradeCpi`, Percolator reads this LP-account config and requires the
 instruction's matcher program, matcher context, and matcher delegate PDA to match it byte-for-byte.
@@ -448,7 +454,9 @@ This section describes intent and operational ordering, not argument-by-argument
     legs (the matcher's return-data cap).
 - **SetMatcherConfig** (tag 68)
   - LP-owner-signed opt-in/out for unsigned LP matcher fills. This writes the matcher config tail
-    on the LP portfolio: matcher program, matcher context, matcher delegate, and enabled flag.
+    on the LP portfolio: matcher program, matcher context, matcher delegate, enabled flag, and live
+    base-fee cap. The payload is `portfolio_id: u64, expected_sequence: u64, enabled: u8,
+    trade_fee_cap_bps: u16`; stale incarnation or sequence values reject before mutation.
 
 ### Oracle / mark management
 - External-oracle markets authenticate configured oracle account(s) in the oracle configuration/crank

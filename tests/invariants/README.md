@@ -22,10 +22,10 @@ verification methods are in [`../../INVARIANTS.md`](../../INVARIANTS.md).
 
 | Suite | Tests | Evidence |
 | --- | ---: | --- |
-| `public_sbf/` | 80 | Deterministic public SBF/LiteSVM counterexamples, regressions, and manifest checks |
+| `public_sbf/` | 81 | Deterministic public SBF/LiteSVM counterexamples, regressions, and manifest checks |
 | `stateful/` | 118 | Proptest-generated public routes, including generalized active-leg/currentness, source-claim attribution, source-credit-rate, and authenticated-expiry route matrices |
 | `cu/` | 104 | Positive public-route, metamorphic, rollback, liveness, and max-shape CU tests |
-| `kani/` | 42 | Symbolic wrapper arithmetic, matcher-binding, and strict-decoder proofs |
+| `kani/` | 43 | Symbolic wrapper arithmetic, matcher-binding, and strict-decoder proofs |
 
 Most deterministic and stateful LoF adapters still reproduce quarantined vulnerable behavior;
 fixed-pin regressions explicitly require safe rejection or preservation instead. A vulnerable-pin
@@ -33,9 +33,12 @@ counterexample proves public reachability but does not certify the invariant unt
 rejects the attack or preserves the required safe outcome.
 
 The current fixed pin enforces matcher consent for CPI backing fees (PR223), ignores unsigned CPI
-caller fees (PR224), and requires bilateral no-CPI consent to the live base fee (PR310). PR310 also
-removes the silent-debit impact from PR296 and PR338, but their stale generation/ordering policy
-writes still land and remain explicit INV-001/INV-014 gaps. Fee-redirect replays remain exploitable.
+caller fees (PR224), requires bilateral no-CPI consent to the live base fee (PR310), and caps an
+unsigned CPI LP's live base fee by its signed matcher policy. Matcher mutations now bind the
+portfolio incarnation and a monotonic portfolio-local sequence, closing same-market portfolio
+recreation and revoke-order replay. Whole-market recreation remains vulnerable when replacement
+portfolio IDs and sequences are publicly realigned; INV-001 keeps that counterexample explicit.
+PR296/PR338 policy writes and fee-redirect replays also remain explicit INV-001/INV-014 gaps.
 
 ## Coverage status
 
@@ -67,7 +70,7 @@ charter.
 | INV-007 | Gap | - |
 | INV-008 | Independent + Direct | `public_sbf/inv_008_intent_uniqueness_and_bounded_replay.rs`, `stateful/inv_008_intent_uniqueness_and_bounded_replay.rs` |
 | INV-009 | Gap | - |
-| INV-010 | Independent | `stateful/inv_010_out_of_order_safety.rs` |
+| INV-010 | Independent + P | `stateful/inv_010_out_of_order_safety.rs`, `kani/inv_010_out_of_order_safety.rs` |
 | INV-011 | Gap | - |
 | INV-012 | Gap | - |
 | INV-013 | Gap | - |

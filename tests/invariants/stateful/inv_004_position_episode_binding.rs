@@ -11,8 +11,8 @@
 //! exposure. A request built against the current episode must still land and change that exposure,
 //! proving the rejection is neither vacuous nor a blanket risk-reduction DoS. No program-owned
 //! bytes are injected. `v16_program_all_trade_routes_advance_position_episode_once_and_errors_do_not`
-//! also proves that the episode is packed into the existing matcher-control word: matcher
-//! revoke/re-enable preserves it and the deployed portfolio account length never grows.
+//! also proves that the episode is packed into the matcher-control word: matcher revoke/re-enable
+//! preserves it, the separate matcher-sequence tail, and the deployed portfolio account length.
 //!
 //! Guarantee boundary: this certifies the two retained position-consent routes represented here;
 //! other retained instruction families require their own identity and episode bindings.
@@ -51,10 +51,10 @@ fn v16_program_all_trade_routes_advance_position_episode_once_and_errors_do_not(
         assert_eq!(
             portfolio_lens,
             [
-                constants::PORTFOLIO_ID_OFF + constants::PORTFOLIO_ID_LEN,
-                constants::PORTFOLIO_ID_OFF + constants::PORTFOLIO_ID_LEN,
+                constants::PORTFOLIO_ACCOUNT_LEN,
+                constants::PORTFOLIO_ACCOUNT_LEN,
             ],
-            "the position episode must reuse the deployed fixed account layout"
+            "position and matcher episodes must use the deployed fixed account layout"
         );
 
         let execute = |env: &mut V16Svm, signed_size: i128| match route {

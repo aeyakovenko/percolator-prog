@@ -1723,19 +1723,32 @@ pub struct SupersessionDiscovery {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MatcherMutationOrderDiscovery {
     pub revoked_trade_rejected: bool,
-    pub stale_enable_landed: bool,
-    pub unauthorized_trade_landed: bool,
-    pub lp_loss: u128,
-    pub attacker_gain: u128,
+    pub stale_enable_rejected: bool,
+    pub stale_enable_exact_rollback: bool,
+    pub post_stale_trade_rejected: bool,
+    pub fresh_enable_landed: bool,
+    pub fresh_round_trip_landed: bool,
+    pub sequence_before_revoke: u64,
+    pub sequence_after_revoke: u64,
+    pub sequence_after_stale: u64,
+    pub sequence_after_fresh: u64,
+    pub total_payout: u128,
+    pub token_supply_conserved: bool,
 }
 
 impl MatcherMutationOrderDiscovery {
-    pub fn is_violation(&self) -> bool {
+    pub fn satisfies_invariant(&self) -> bool {
         self.revoked_trade_rejected
-            && self.stale_enable_landed
-            && self.unauthorized_trade_landed
-            && self.lp_loss != 0
-            && self.lp_loss == self.attacker_gain
+            && self.stale_enable_rejected
+            && self.stale_enable_exact_rollback
+            && self.post_stale_trade_rejected
+            && self.fresh_enable_landed
+            && self.fresh_round_trip_landed
+            && self.sequence_after_revoke == self.sequence_before_revoke + 1
+            && self.sequence_after_stale == self.sequence_after_revoke
+            && self.sequence_after_fresh == self.sequence_after_revoke + 1
+            && self.total_payout == 2_000_000
+            && self.token_supply_conserved
     }
 }
 
@@ -2513,6 +2526,13 @@ fn discover_one_market_incarnation_replay(
             .map_err(|error| format!("fund replacement portfolio: {error}"))?;
         env.reinitialize_primary_portfolio(SUBJECT)
             .map_err(|error| format!("initialize replacement portfolio: {error}"))?;
+    }
+    if kind == MarketIntentKind::MatcherEnable {
+        // Market recreation resets both portfolio IDs and matcher sequences. Advance the
+        // replacement through a legitimate owner mutation so an old generation's expected
+        // sequence collides again; sequence binding alone is not market-incarnation binding.
+        env.set_matcher_config(SUBJECT, 0)
+            .map_err(|error| format!("align replacement matcher sequence: {error}"))?;
     }
     if kind == MarketIntentKind::ShutdownAsset {
         env.configure_permissionless_resolve(1_000_000, 1)
@@ -3791,11 +3811,10 @@ pub fn discover_superseded_intents(seed: [u8; 32]) -> Result<Vec<SupersessionDis
     Ok(discoveries)
 }
 
-pub fn discover_matcher_mutation_order_violation(
+pub fn verify_matcher_mutation_order_safety(
     mut seed: [u8; 32],
 ) -> Result<MatcherMutationOrderDiscovery, String> {
     const PRICE: u64 = 100;
-    const MARK: u64 = 110;
     const DEPOSIT: u128 = 1_000_000;
     const SIZE_Q: i128 = 10_000 * POS_SCALE as i128;
     const LP: usize = 0;
@@ -3814,9 +3833,11 @@ pub fn discover_matcher_mutation_order_violation(
     let supply_before = env.token_supply_observed();
     env.configure_auth_mark(false, 0, 1, PRICE)
         .map_err(|error| format!("configure matcher-order mark: {error}"))?;
+    let sequence_before_revoke = env.primary_portfolio_matcher_sequence(LP);
     let retained_enable = env.build_retained_matcher_config(LP, 1);
     env.set_matcher_config(LP, 0)
         .map_err(|error| format!("revoke LP matcher: {error}"))?;
+    let sequence_after_revoke = env.primary_portfolio_matcher_sequence(LP);
 
     let market_after_revoke = env.market_data(false);
     let lp_after_revoke = env.primary_portfolio_data(LP);
@@ -3830,41 +3851,70 @@ pub fn discover_matcher_mutation_order_violation(
         return Err("revoked matcher did not reject CPI fill atomically".into());
     }
 
-    env.land_retained(retained_enable)
-        .map_err(|error| format!("withheld matcher enable rejected: {error}"))?;
+    let stale_state = fingerprint(&env);
+    let stale_enable_rejected = env.land_retained(retained_enable).is_err();
+    let stale_enable_exact_rollback = fingerprint(&env) == stale_state;
+    let sequence_after_stale = env.primary_portfolio_matcher_sequence(LP);
+    let post_stale_state = fingerprint(&env);
+    let post_stale_trade_rejected = env.trade_cpi(ATTACKER, LP, 0, SIZE_Q, 0, 0).is_err()
+        && fingerprint(&env) == post_stale_state;
+    if !stale_enable_rejected
+        || !stale_enable_exact_rollback
+        || !post_stale_trade_rejected
+        || sequence_after_stale != sequence_after_revoke
+    {
+        return Err(format!(
+            "stale matcher enable was not rejected atomically: rejected={stale_enable_rejected}, \
+             rollback={stale_enable_exact_rollback}, trade_rejected={post_stale_trade_rejected}, \
+             sequence={sequence_after_revoke}/{sequence_after_stale}"
+        ));
+    }
+
+    env.set_matcher_config(LP, 1)
+        .map_err(|error| format!("fresh matcher enable rejected: {error}"))?;
+    let sequence_after_fresh = env.primary_portfolio_matcher_sequence(LP);
+    let fresh_enable_landed = sequence_after_fresh == sequence_after_revoke + 1;
     env.trade_cpi(ATTACKER, LP, 0, SIZE_Q, 0, 0)
-        .map_err(|error| format!("re-enabled unauthorized CPI trade: {error}"))?;
-    env.warp_to_slot(2);
-    env.push_auth_mark(0, 2, MARK)
-        .map_err(|error| format!("publish matcher-order adverse mark: {error}"))?;
-    let observation = vec![CrankObservationHint {
-        asset_index: 0,
-        oracle_accounts: env.primary_profile(0).oracle_leg_count,
-    }];
-    env.crank(ATTACKER, 2, observation.clone())
-        .map_err(|error| format!("refresh matcher attacker: {error}"))?;
-    env.crank(LP, 2, observation)
-        .map_err(|error| format!("refresh matcher LP: {error}"))?;
-    env.resolve_market()
-        .map_err(|error| format!("resolve matcher-order world: {error}"))?;
-    env.warp_to_slot(3);
-    let lp_payout = drain_resolved_discovery_actor(&mut env, LP)?;
-    let attacker_payout = drain_resolved_discovery_actor(&mut env, ATTACKER)?;
-    let lp_loss = DEPOSIT
-        .checked_sub(lp_payout)
-        .ok_or_else(|| "stale matcher enable increased LP payout".to_string())?;
-    let attacker_gain = attacker_payout
-        .checked_sub(DEPOSIT)
-        .ok_or_else(|| "stale matcher enable decreased attacker payout".to_string())?;
-    if env.token_supply_observed() != supply_before {
-        return Err("matcher mutation-order world changed SPL supply".into());
+        .map_err(|error| format!("fresh matcher open rejected: {error}"))?;
+    env.trade_cpi(ATTACKER, LP, 0, -SIZE_Q, 0, 0)
+        .map_err(|error| format!("fresh matcher close rejected: {error}"))?;
+    let fresh_round_trip_landed = env.primary_portfolio(LP).capital.get() == DEPOSIT
+        && env.primary_portfolio(ATTACKER).capital.get() == DEPOSIT;
+    let lp_withdrawal = env
+        .withdraw_primary(LP, DEPOSIT)
+        .map_err(|error| format!("fresh matcher LP exit failed: {error}"))?;
+    let attacker_withdrawal = env
+        .withdraw_primary(ATTACKER, DEPOSIT)
+        .map_err(|error| format!("fresh matcher taker exit failed: {error}"))?;
+    let total_payout = u128::from(env.token_amount(env.actors[LP].destination_token))
+        + u128::from(env.token_amount(env.actors[ATTACKER].destination_token));
+    let token_supply_conserved = env.token_supply_observed() == supply_before;
+    if !fresh_enable_landed
+        || !fresh_round_trip_landed
+        || total_payout != 2 * DEPOSIT
+        || lp_withdrawal.compute_units >= crate::support::v16_svm::TX_CU_LIMIT
+        || attacker_withdrawal.compute_units >= crate::support::v16_svm::TX_CU_LIMIT
+        || !token_supply_conserved
+    {
+        return Err(format!(
+            "fresh matcher control failed: enable={fresh_enable_landed}, \
+             round_trip={fresh_round_trip_landed}, payout={total_payout}, \
+             supply={token_supply_conserved}"
+        ));
     }
     Ok(MatcherMutationOrderDiscovery {
         revoked_trade_rejected,
-        stale_enable_landed: true,
-        unauthorized_trade_landed: true,
-        lp_loss,
-        attacker_gain,
+        stale_enable_rejected,
+        stale_enable_exact_rollback,
+        post_stale_trade_rejected,
+        fresh_enable_landed,
+        fresh_round_trip_landed,
+        sequence_before_revoke,
+        sequence_after_revoke,
+        sequence_after_stale,
+        sequence_after_fresh,
+        total_payout,
+        token_supply_conserved,
     })
 }
 

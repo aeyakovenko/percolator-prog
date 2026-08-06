@@ -4,14 +4,14 @@
 //! affected signer’s latest authorization.
 //!
 //! Evidence in this file (F over public I routes):
-//! `v16_program_matcher_mutation_order_discovers_revoked_lp_value_transfer` retains an LP-signed
-//! matcher enable, lands the LP’s later revoke, proves CPI fills are then rejected, and finally
-//! replays the earlier enable. A violation requires an attacker-controlled CPI fill to become live
-//! again and an honest oracle move to transfer the LP’s exact terminal SPL loss to the attacker.
-//! Account bytes are captured around the rejected control fill to prove SVM rollback.
+//! `v16_program_matcher_mutation_order_rejects_revoked_capability` retains an LP-signed matcher
+//! enable, lands the LP's later revoke, and proves both a CPI fill and replay of the earlier enable
+//! reject with exact rollback. It then signs against the current sequence and executes a complete
+//! CPI open/close and SPL withdrawal path, proving the guard does not disable fresh LP consent.
+//! The matcher sequence is read from the real portfolio account before and after each transition.
 //!
-//! Guarantee boundary: this is a vulnerable-pin counterexample. A fixed implementation must reject
-//! the stale mutation while preserving a fresh post-revoke enable path.
+//! Guarantee boundary: this fixed-pin regression covers the portfolio-scoped matcher capability.
+//! Other retained policy domains are owned by INV-014 and require their own scope-local sequences.
 
 use super::*;
 
@@ -28,15 +28,15 @@ proptest! {
     })]
 
     #[test]
-    fn v16_program_matcher_mutation_order_discovers_revoked_lp_value_transfer(
+    fn v16_program_matcher_mutation_order_rejects_revoked_capability(
         seed in any::<[u8; 32]>()
     ) {
-        let discovery = discover_matcher_mutation_order_violation(seed)
+        let protection = verify_matcher_mutation_order_safety(seed)
             .map_err(TestCaseError::fail)?;
         prop_assert!(
-            discovery.is_violation(),
-            "stale matcher mutation lacked independent LP loss: {:?}",
-            discovery
+            protection.satisfies_invariant(),
+            "matcher supersession protection failed: {:?}",
+            protection
         );
     }
 }

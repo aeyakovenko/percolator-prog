@@ -3,8 +3,11 @@
 //! Normative obligation: Delayed requests remain bounded by the policy and economics the signer authorized.
 //!
 //! Evidence in this file (F over public I routes):
-//! `v16_program_superseded_control_matrix_discovers_stale_overwrites` generates retained controls,
-//! installs a distinct newer authorized value, and applies one common stale-overwrite oracle.
+//! `v16_program_superseded_control_matrix_discovers_remaining_stale_overwrites` generates retained
+//! controls, installs a distinct newer authorized value, and applies one common stale-overwrite
+//! oracle. MatcherConfig is the fixed control: its portfolio-scoped sequence must reject stale
+//! replay. The remaining policy domains stay explicit counterexamples until they gain scope-local
+//! sequence protection.
 //! `v16_program_fee_consent_operation_matrix_discovers_unsigned_debits` varies fresh-signed,
 //! retained, unsigned-LP, and activation routes and compares each affected signer's actual debit
 //! with the fee terms that signer authorized. The fresh-signed live control proves a policy update
@@ -37,7 +40,7 @@ proptest! {
     })]
 
     #[test]
-    fn v16_program_superseded_control_matrix_discovers_stale_overwrites(
+    fn v16_program_superseded_control_matrix_discovers_remaining_stale_overwrites(
         seed in any::<[u8; 32]>()
     ) {
         let discoveries = discover_superseded_intents(seed)
@@ -52,11 +55,11 @@ proptest! {
             .map(|discovery| discovery.kind)
             .collect();
         eprintln!("independent INV-014 discoveries: {violations:?}");
-        prop_assert_eq!(
-            violations,
-            SupersededIntentKind::ALL.to_vec(),
-            "vulnerable-pin supersession discovery corpus changed"
-        );
+        let expected_violations: Vec<_> = SupersededIntentKind::ALL
+            .into_iter()
+            .filter(|kind| *kind != SupersededIntentKind::MatcherConfig)
+            .collect();
+        prop_assert_eq!(violations, expected_violations, "fixed matcher control or remaining vulnerable supersession corpus changed");
     }
 }
 
@@ -277,16 +280,4 @@ proptest! {
         );
     }
 
-    #[test]
-    fn v16_program_pr334_delayed_matcher_enable_replay_fuzz(
-        seed in delayed_matcher_enable_replay_seed_strategy()
-    ) {
-        let result = reproduce_delayed_matcher_enable_replay(seed);
-        prop_assert!(
-            result.is_ok(),
-            "PR 334 no longer reproduces for seed {:?}: {}",
-            seed,
-            result.unwrap_err()
-        );
-    }
 }

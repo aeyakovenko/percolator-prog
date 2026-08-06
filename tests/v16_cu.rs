@@ -8,6 +8,7 @@ use percolator_prog::{
     constants::{
         ASSET_ORACLE_WRAPPER_LEN, MARKET_GROUP_OFF, MATCHER_ABI_VERSION, MATCHER_CONTEXT_MIN_LEN,
         ORACLE_LEG_FLAG_DIVIDE_LEG2, ORACLE_LEG_FLAG_DIVIDE_LEG3, PORTFOLIO_ENGINE_ACCOUNT_LEN,
+        PORTFOLIO_LEGACY_ACCOUNT_LEN,
     },
     ix::{BatchTradeCpiLeg, BatchTradeLeg, CrankObservationHint, Instruction as ProgInstruction},
     oracle_v16, processor, state,
@@ -1420,6 +1421,11 @@ impl V16CuEnv {
         state::read_portfolio_id(&account.data).unwrap()
     }
 
+    fn portfolio_matcher_sequence(&self, portfolio: Pubkey) -> u64 {
+        let account = self.svm.get_account(&portfolio).expect("portfolio account");
+        state::read_portfolio_matcher_sequence(&account.data).unwrap()
+    }
+
     fn portfolio_position_epoch(&self, portfolio: Pubkey) -> u64 {
         let account = self.svm.get_account(&portfolio).expect("portfolio account");
         state::read_portfolio_position_epoch(&account.data).unwrap()
@@ -2221,6 +2227,8 @@ impl V16CuEnv {
         enabled: u8,
         trade_fee_cap_bps: u16,
     ) -> Result<Pubkey, String> {
+        let portfolio_id = self.portfolio_id(maker_account);
+        let expected_sequence = self.portfolio_matcher_sequence(maker_account);
         self.svm.expire_blockhash();
         let mut accounts = vec![
             AccountMeta::new(maker_owner.pubkey(), true),
@@ -2236,6 +2244,8 @@ impl V16CuEnv {
         }
         self.send(
             ProgInstruction::SetMatcherConfig {
+                portfolio_id,
+                expected_sequence,
                 enabled,
                 trade_fee_cap_bps,
             },
@@ -21242,10 +21252,14 @@ fn v16_attack_non_owner_cannot_change_lp_matcher_config() {
     let market_before = env.svm.get_account(&env.market).unwrap();
     let lp_before = env.svm.get_account(&lp).unwrap();
     let ctx_before = env.svm.get_account(&ctx).unwrap();
+    let portfolio_id = env.portfolio_id(lp);
+    let expected_sequence = env.portfolio_matcher_sequence(lp);
 
     env.svm.expire_blockhash();
     let revoke = env.send(
         ProgInstruction::SetMatcherConfig {
+            portfolio_id,
+            expected_sequence,
             enabled: 0,
             trade_fee_cap_bps: 0,
         },
@@ -21311,10 +21325,14 @@ fn v16_attack_cross_lp_cannot_overwrite_lp_matcher_config() {
     let market_before = env.svm.get_account(&env.market).unwrap();
     let victim_before = env.svm.get_account(&victim_lp).unwrap();
     let attacker_before = env.svm.get_account(&attacker_lp).unwrap();
+    let portfolio_id = env.portfolio_id(victim_lp);
+    let expected_sequence = env.portfolio_matcher_sequence(victim_lp);
 
     env.svm.expire_blockhash();
     let overwrite = env.send(
         ProgInstruction::SetMatcherConfig {
+            portfolio_id,
+            expected_sequence,
             enabled: 0,
             trade_fee_cap_bps: 0,
         },
@@ -21678,11 +21696,15 @@ fn v16_attack_set_lp_matcher_config_cannot_target_protocol_accounts() {
     );
     env.try_init_auth_matcher_context_with_delegate(matcher_program, &lp_owner, lp, ctx, delegate)
         .expect("init auth matcher context without setting percolator auth");
+    let portfolio_id = env.portfolio_id(lp);
+    let expected_sequence = env.portfolio_matcher_sequence(lp);
 
     let send_with_lp_account = |env: &mut V16CuEnv, lp_account: Pubkey| {
         env.svm.expire_blockhash();
         env.send(
             ProgInstruction::SetMatcherConfig {
+                portfolio_id,
+                expected_sequence,
                 enabled: 1,
                 trade_fee_cap_bps: 10_000,
             },
@@ -21758,9 +21780,13 @@ fn v16_attack_matcher_config_and_fills_reject_self_program_context() {
 
     let market_before_config = env.svm.get_account(&env.market).unwrap();
     let lp_before_config = env.svm.get_account(&lp).unwrap();
+    let portfolio_id = env.portfolio_id(lp);
+    let expected_sequence = env.portfolio_matcher_sequence(lp);
     env.svm.expire_blockhash();
     let self_config = env.send(
         ProgInstruction::SetMatcherConfig {
+            portfolio_id,
+            expected_sequence,
             enabled: 1,
             trade_fee_cap_bps: 10_000,
         },
@@ -21903,15 +21929,18 @@ fn v16_attack_set_matcher_config_reallocs_legacy_lp_portfolio_safely() {
     let lp_owner = Keypair::new();
     let taker = env.create_portfolio(&taker_owner);
     let lp = env.create_portfolio(&lp_owner);
+    let portfolio_id = env.portfolio_id(lp);
 
     let mut legacy_lp = env.svm.get_account(&lp).unwrap();
-    legacy_lp.data.truncate(PORTFOLIO_ENGINE_ACCOUNT_LEN);
+    legacy_lp.data.truncate(PORTFOLIO_LEGACY_ACCOUNT_LEN);
     env.svm.set_account(lp, legacy_lp).unwrap();
     assert_eq!(
         env.svm.get_account(&lp).unwrap().data.len(),
-        PORTFOLIO_ENGINE_ACCOUNT_LEN,
-        "test setup simulates a legacy LP portfolio with no matcher-config tail"
+        PORTFOLIO_LEGACY_ACCOUNT_LEN,
+        "test setup simulates the prior portfolio layout with no matcher-sequence tail"
     );
+    assert_eq!(env.portfolio_id(lp), portfolio_id);
+    assert_eq!(env.portfolio_matcher_sequence(lp), 0);
 
     let ctx = Pubkey::new_unique();
     let delegate = matcher_delegate_key(
@@ -21937,6 +21966,8 @@ fn v16_attack_set_matcher_config_reallocs_legacy_lp_portfolio_safely() {
     assert_eq!(auth_state.matcher_program, matcher_program.to_bytes());
     assert_eq!(auth_state.matcher_context, ctx.to_bytes());
     assert_eq!(auth_state.matcher_delegate, delegate.to_bytes());
+    assert_eq!(env.portfolio_id(lp), portfolio_id);
+    assert_eq!(env.portfolio_matcher_sequence(lp), 1);
 
     env.deposit(&taker_owner, taker, 1_000_000);
     env.deposit(&lp_owner, lp, 1_000_000);
@@ -21971,15 +22002,18 @@ fn v16_attack_set_matcher_config_bad_legacy_context_rolls_back_realloc() {
     env.svm.add_program(matcher_program, &matcher_bytes);
     let lp_owner = Keypair::new();
     let lp = env.create_portfolio(&lp_owner);
+    let portfolio_id = env.portfolio_id(lp);
 
     let mut legacy_lp = env.svm.get_account(&lp).unwrap();
-    legacy_lp.data.truncate(PORTFOLIO_ENGINE_ACCOUNT_LEN);
+    legacy_lp.data.truncate(PORTFOLIO_LEGACY_ACCOUNT_LEN);
     env.svm.set_account(lp, legacy_lp).unwrap();
     assert_eq!(
         env.svm.get_account(&lp).unwrap().data.len(),
-        PORTFOLIO_ENGINE_ACCOUNT_LEN,
-        "test setup simulates a legacy LP portfolio with no matcher-config tail"
+        PORTFOLIO_LEGACY_ACCOUNT_LEN,
+        "test setup simulates the prior portfolio layout with no matcher-sequence tail"
     );
+    assert_eq!(env.portfolio_id(lp), portfolio_id);
+    assert_eq!(env.portfolio_matcher_sequence(lp), 0);
 
     let bad_ctx = Pubkey::new_unique();
     env.svm
@@ -22017,9 +22051,12 @@ fn v16_attack_set_matcher_config_bad_legacy_context_rolls_back_realloc() {
 
     let market_before = env.svm.get_account(&env.market).unwrap();
     let lp_before = env.svm.get_account(&lp).unwrap();
+    let expected_sequence = env.portfolio_matcher_sequence(lp);
     env.svm.expire_blockhash();
     let rejected = env.send(
         ProgInstruction::SetMatcherConfig {
+            portfolio_id,
+            expected_sequence,
             enabled: 1,
             trade_fee_cap_bps: 10_000,
         },
@@ -22049,9 +22086,11 @@ fn v16_attack_set_matcher_config_bad_legacy_context_rolls_back_realloc() {
     );
     assert_eq!(
         env.svm.get_account(&lp).unwrap().data.len(),
-        PORTFOLIO_ENGINE_ACCOUNT_LEN,
-        "failed SetMatcherConfig must not leave a matcher-tail-sized legacy account"
+        PORTFOLIO_LEGACY_ACCOUNT_LEN,
+        "failed SetMatcherConfig must not leave a matcher-sequence-sized legacy account"
     );
+    assert_eq!(env.portfolio_id(lp), portfolio_id);
+    assert_eq!(env.portfolio_matcher_sequence(lp), 0);
 
     let ctx = Pubkey::new_unique();
     let delegate = matcher_delegate_key(
@@ -22076,6 +22115,8 @@ fn v16_attack_set_matcher_config_bad_legacy_context_rolls_back_realloc() {
     assert_eq!(auth_state.matcher_program, matcher_program.to_bytes());
     assert_eq!(auth_state.matcher_context, ctx.to_bytes());
     assert_eq!(auth_state.matcher_delegate, delegate.to_bytes());
+    assert_eq!(env.portfolio_id(lp), portfolio_id);
+    assert_eq!(env.portfolio_matcher_sequence(lp), 1);
 }
 
 #[test]
@@ -31252,11 +31293,15 @@ fn v16_attack_trade_paths_reject_cross_market_portfolio_substitution() {
             },
         )
         .unwrap();
+    let cpi_lp_portfolio_id = env.portfolio_id(p_cpi_lp);
+    let cpi_lp_matcher_sequence = env.portfolio_matcher_sequence(p_cpi_lp);
     send_tx(
         &mut env.svm,
         env.program_id,
         &env.payer,
         ProgInstruction::SetMatcherConfig {
+            portfolio_id: cpi_lp_portfolio_id,
+            expected_sequence: cpi_lp_matcher_sequence,
             enabled: 1,
             trade_fee_cap_bps: 10_000,
         },

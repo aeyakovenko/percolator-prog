@@ -2,13 +2,14 @@
 //!
 //! Normative obligation: Portfolio-scoped consent cannot cross close and same-pubkey recreation.
 //!
-//! Evidence in this file (I plus invariant-specific F/M assertions): `v16_program_pr309_stale_close_drains_replacement_account_lamports`, `v16_program_pr304_stale_matcher_grant_liquidates_reinitialized_portfolio`, `v16_program_pr303_stale_trades_liquidate_reinitialized_portfolio`, `v16_program_pr301_stale_pnl_conversion_pays_cranker_from_replacement`, `v16_program_pr278_stale_forfeit_rejects_and_preserves_replacement_winner_payout`, `v16_program_pr299_stale_withdrawal_liquidates_reinitialized_portfolio`, `v16_program_pr305_stale_deposit_funds_reinitialized_portfolio_winner`. These tests exercise the deployed public
+//! Evidence in this file (I plus invariant-specific F/M assertions): `v16_program_pr309_stale_close_drains_replacement_account_lamports`, `v16_program_pr304_stale_matcher_grant_rejects_for_reinitialized_portfolio`, `v16_program_pr303_stale_trades_liquidate_reinitialized_portfolio`, `v16_program_pr301_stale_pnl_conversion_pays_cranker_from_replacement`, `v16_program_pr278_stale_forfeit_rejects_and_preserves_replacement_winner_payout`, `v16_program_pr299_stale_withdrawal_liquidates_reinitialized_portfolio`, `v16_program_pr305_stale_deposit_funds_reinitialized_portfolio_winner`. These tests exercise the deployed public
 //! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
 //! rollback, liveness, or compute outcomes appropriate to the invariant.
 //!
 //! Guarantee boundary: a quarantined counterexample demonstrates public reachability; it does
 //! not certify the invariant on an unfixed pin. Certification requires the fixed-pin assertion
 //! plus every additional verification method required by the charter.
+//! PR304 is fixed-pin coverage; the other named vulnerable routes retain their explicit status.
 
 use super::*;
 
@@ -27,23 +28,21 @@ fn v16_program_pr309_stale_close_drains_replacement_account_lamports() {
 }
 
 #[test]
-fn v16_program_pr304_stale_matcher_grant_liquidates_reinitialized_portfolio() {
-    let reproduction = reproduce_matcher_grant_portfolio_incarnation_replay([0x04; 32])
-        .unwrap_or_else(|error| panic!("PR 304 no longer reproduces: {error}"));
+fn v16_program_pr304_stale_matcher_grant_rejects_for_reinitialized_portfolio() {
+    let protection = verify_matcher_grant_portfolio_incarnation_protection([0x04; 32])
+        .unwrap_or_else(|error| panic!("PR 304 protection failed: {error}"));
     assert_eq!(
-        reproduction.blocker,
+        protection.blocker,
         KnownBlocker::MatcherGrantPortfolioIncarnationReplay
     );
-    assert!(reproduction.replacement_portfolio_id > reproduction.original_portfolio_id);
-    assert!(reproduction.control_trade_blocked);
-    assert!(reproduction.liquidation_slot > 0);
-    assert_eq!(
-        reproduction.cranker_reward,
-        u128::from(reproduction.extracted_reward)
-    );
-    assert_eq!(reproduction.cranker_reward, 15_835);
-    assert!(reproduction.replay_cu < 1_400_000);
-    assert!(reproduction.max_cu < 1_400_000);
+    assert!(protection.replacement_portfolio_id > protection.original_portfolio_id);
+    assert!(protection.stale_replay_rejected);
+    assert!(protection.rejected_exact_rollback);
+    assert!(protection.control_trade_blocked);
+    assert!(protection.fresh_grant_landed);
+    assert!(protection.fresh_round_trip_landed);
+    assert!(protection.owner_exit_landed);
+    assert!(protection.max_cu < 1_400_000);
 }
 
 #[test]

@@ -2,7 +2,7 @@
 //!
 //! Normative obligation: Delayed requests remain bounded by the policy and economics the signer authorized.
 //!
-//! Evidence in this file (I plus invariant-specific F/M assertions): `v16_program_pr325_stale_maintenance_policy_extracts_user_fee`, `v16_program_pr326_stale_liquidation_policy_extracts_user_fee`, `v16_program_pr337_delayed_maintenance_policy_extracts_user_fee`, `v16_program_pr336_delayed_liquidation_policy_extracts_user_fee`, `v16_program_pr338_delayed_trade_fee_policy_cannot_silently_debit_user`, `v16_program_pr340_delayed_fee_redirect_extracts_user_fee`, `v16_program_pr349_delayed_backing_fee_extracts_user_fee`, `v16_program_pr339_reordered_backing_terms_divert_provider_fee`, `v16_program_pr347_stale_policy_cannot_freeze_authenticated_mark`, `v16_program_pr335_delayed_oracle_intents_extract_user_collateral`, `v16_program_pr334_delayed_matcher_enable_extracts_lp_collateral`. These tests exercise the deployed public
+//! Evidence in this file (I plus invariant-specific F/M assertions): `v16_program_pr325_stale_maintenance_policy_extracts_user_fee`, `v16_program_pr326_stale_liquidation_policy_extracts_user_fee`, `v16_program_pr337_delayed_maintenance_policy_extracts_user_fee`, `v16_program_pr336_delayed_liquidation_policy_extracts_user_fee`, `v16_program_pr338_delayed_trade_fee_policy_cannot_silently_debit_user`, `v16_program_pr340_delayed_fee_redirect_extracts_user_fee`, `v16_program_pr349_delayed_backing_fee_extracts_user_fee`, `v16_program_pr339_reordered_backing_terms_divert_provider_fee`, `v16_program_pr347_stale_policy_cannot_freeze_authenticated_mark`, `v16_program_pr335_delayed_oracle_intents_extract_user_collateral`, `v16_program_pr334_delayed_matcher_enable_rejects_after_revoke`. These tests exercise the deployed public
 //! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
 //! rollback, liveness, or compute outcomes appropriate to the invariant.
 //!
@@ -11,6 +11,8 @@
 //! plus every additional verification method required by the charter.
 //! PR 338's silent debit is blocked by signed base-fee consent, but the stale policy overwrite is
 //! retained as an explicit ordering gap. Redirect-policy replays remain economically exploitable.
+//! PR334 is fixed-pin coverage: stale matcher consent rejects, while fresh sequenced consent keeps
+//! CPI trading and terminal withdrawals live.
 
 use super::*;
 
@@ -202,16 +204,8 @@ fn v16_program_pr335_delayed_oracle_intents_extract_user_collateral() {
 }
 
 #[test]
-fn v16_program_pr334_delayed_matcher_enable_extracts_lp_collateral() {
-    let reproduction = reproduce_delayed_matcher_enable_replay([0x34; 32])
-        .unwrap_or_else(|error| panic!("PR 334 no longer reproduces: {error}"));
-    assert_eq!(
-        reproduction.blocker,
-        KnownBlocker::DelayedMatcherEnableReplay
-    );
-    assert!(reproduction.control_fill_blocked);
-    assert_eq!(reproduction.victim_loss, 1_000_000);
-    assert_eq!(reproduction.attacker_gain, 1_000_000);
-    assert!(reproduction.replay_cu < 1_400_000);
-    assert!(reproduction.max_cu < 1_400_000);
+fn v16_program_pr334_delayed_matcher_enable_rejects_after_revoke() {
+    let protection = verify_matcher_mutation_order_safety([0x34; 32])
+        .unwrap_or_else(|error| panic!("PR 334 fixed route failed: {error}"));
+    assert!(protection.satisfies_invariant(), "{protection:?}");
 }

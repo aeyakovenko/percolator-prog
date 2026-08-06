@@ -119,7 +119,6 @@ pub enum KnownBlocker {
     DelayedFeeRedirectPolicyReplay,
     DelayedBackingFeePolicyReplay,
     DelayedOracleIntentReplay,
-    DelayedMatcherEnableReplay,
     BackingFeeConsentReplay,
     AuthorityHandoffAbaReplay,
     DelayedResolvePolicyReplay,
@@ -135,7 +134,7 @@ pub enum KnownBlocker {
 }
 
 impl KnownBlocker {
-    pub const COUNT: usize = 68;
+    pub const COUNT: usize = 67;
 
     pub const fn index(self) -> usize {
         match self {
@@ -194,19 +193,18 @@ impl KnownBlocker {
             Self::DelayedFeeRedirectPolicyReplay => 52,
             Self::DelayedBackingFeePolicyReplay => 53,
             Self::DelayedOracleIntentReplay => 54,
-            Self::DelayedMatcherEnableReplay => 55,
-            Self::BackingFeeConsentReplay => 56,
-            Self::AuthorityHandoffAbaReplay => 57,
-            Self::DelayedResolvePolicyReplay => 58,
-            Self::ResolveAuthorityIncarnationReplay => 59,
-            Self::PortfolioCloseIncarnationReplay => 60,
-            Self::MatcherGrantPortfolioIncarnationReplay => 61,
-            Self::TradePortfolioIncarnationReplay => 62,
-            Self::ConvertPortfolioIncarnationReplay => 63,
-            Self::ForfeitPortfolioIncarnationReplay => 64,
-            Self::MatcherGrantMarketGenerationReplay => 65,
-            Self::TradeFeeMarketGenerationReplay => 66,
-            Self::ForfeitMarketGenerationReplay => 67,
+            Self::BackingFeeConsentReplay => 55,
+            Self::AuthorityHandoffAbaReplay => 56,
+            Self::DelayedResolvePolicyReplay => 57,
+            Self::ResolveAuthorityIncarnationReplay => 58,
+            Self::PortfolioCloseIncarnationReplay => 59,
+            Self::MatcherGrantPortfolioIncarnationReplay => 60,
+            Self::TradePortfolioIncarnationReplay => 61,
+            Self::ConvertPortfolioIncarnationReplay => 62,
+            Self::ForfeitPortfolioIncarnationReplay => 63,
+            Self::MatcherGrantMarketGenerationReplay => 64,
+            Self::TradeFeeMarketGenerationReplay => 65,
+            Self::ForfeitMarketGenerationReplay => 66,
         }
     }
 }
@@ -870,16 +868,6 @@ pub struct DelayedOracleIntentReplayReproduction {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct DelayedMatcherEnableReplayReproduction {
-    pub blocker: KnownBlocker,
-    pub victim_loss: u64,
-    pub attacker_gain: u64,
-    pub control_fill_blocked: bool,
-    pub replay_cu: u64,
-    pub max_cu: u64,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BackingFeeConsentReplayReproduction {
     pub blocker: KnownBlocker,
     pub order: BackingFeeConsentOrder,
@@ -940,15 +928,16 @@ pub struct PortfolioCloseIncarnationReplayReproduction {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct MatcherGrantPortfolioIncarnationReplayReproduction {
+pub struct MatcherGrantPortfolioIncarnationReplayProtection {
     pub blocker: KnownBlocker,
     pub original_portfolio_id: u64,
     pub replacement_portfolio_id: u64,
+    pub stale_replay_rejected: bool,
+    pub rejected_exact_rollback: bool,
     pub control_trade_blocked: bool,
-    pub liquidation_slot: u64,
-    pub cranker_reward: u128,
-    pub extracted_reward: u64,
-    pub replay_cu: u64,
+    pub fresh_grant_landed: bool,
+    pub fresh_round_trip_landed: bool,
+    pub owner_exit_landed: bool,
     pub max_cu: u64,
 }
 
@@ -9398,166 +9387,6 @@ pub fn reproduce_delayed_oracle_intent_replay(
 }
 
 #[derive(Clone, Copy, Debug)]
-struct DelayedMatcherEnableWorld {
-    attacker_payout: u64,
-    lp_payout: u64,
-    control_fill_blocked: bool,
-    replay_cu: u64,
-    max_cu: u64,
-}
-
-fn run_delayed_matcher_enable_world(
-    seed: [u8; 32],
-    land_replay: bool,
-) -> Result<DelayedMatcherEnableWorld, String> {
-    const ATTACKER: usize = 0;
-    const LP: usize = 1;
-    const ASSET: u16 = 0;
-    const ENTRY_PRICE: u64 = 100;
-    const EXIT_PRICE: u64 = 200;
-    const SIZE_Q: i128 = 10_000 * POS_SCALE as i128;
-    const ATTACKER_DEPOSIT: u128 = 2_000_000;
-    const LP_DEPOSIT: u128 = 4_000_000;
-
-    let mut env = V16Svm::new(
-        seed,
-        MarketConfig {
-            initial_price: ENTRY_PRICE,
-            max_price_move_bps_per_slot: 10_000,
-            max_accrual_dt_slots: 1,
-            min_funding_lifetime_slots: 1,
-            actor_deposits: [
-                ATTACKER_DEPOSIT,
-                LP_DEPOSIT,
-                1,
-                1,
-                super::v16_svm::EXIT_MAKER_DEPOSIT,
-            ],
-            ..MarketConfig::default()
-        },
-    );
-    let supply_before = env.token_supply_observed();
-    let retained_enable = env.build_retained_matcher_config(LP, 1);
-    let revoke = env
-        .set_matcher_config(LP, 0)
-        .map_err(|error| format!("PR 334 newer matcher revoke: {error}"))?;
-    let mut max_cu = revoke.compute_units;
-    let mut replay_cu = 0;
-    let control_fill_blocked;
-
-    if land_replay {
-        let replay = env
-            .land_retained(retained_enable)
-            .map_err(|error| format!("PR 334 delayed enable no longer lands: {error}"))?;
-        replay_cu = replay.compute_units;
-        max_cu = max_cu.max(replay.compute_units);
-        control_fill_blocked = false;
-
-        let open = env
-            .trade_cpi(ATTACKER, LP, ASSET, SIZE_Q, 0, 0)
-            .map_err(|error| format!("PR 334 unsigned attacker open: {error}"))?;
-        max_cu = max_cu.max(open.compute_units);
-        env.warp_to_slot(2);
-        let mark = env
-            .push_auth_mark(ASSET, 2, EXIT_PRICE)
-            .map_err(|error| format!("PR 334 honest mark progression: {error}"))?;
-        max_cu = max_cu.max(mark.compute_units);
-        let observation = || {
-            vec![CrankObservationHint {
-                asset_index: ASSET,
-                oracle_accounts: 0,
-            }]
-        };
-        for actor in [ATTACKER, LP] {
-            let crank = env
-                .crank(actor, 2, observation())
-                .map_err(|error| format!("PR 334 settle actor {actor}: {error}"))?;
-            max_cu = max_cu.max(crank.compute_units);
-        }
-        let close = env
-            .trade_cpi(ATTACKER, LP, ASSET, -SIZE_Q, 0, 0)
-            .map_err(|error| format!("PR 334 unsigned attacker close: {error}"))?;
-        max_cu = max_cu.max(close.compute_units);
-        let converted = env
-            .convert_released_pnl(ATTACKER, u128::MAX)
-            .map_err(|error| format!("PR 334 convert attacker PnL: {error}"))?;
-        max_cu = max_cu.max(converted.compute_units);
-    } else {
-        control_fill_blocked = env.trade_cpi(ATTACKER, LP, ASSET, SIZE_Q, 0, 0).is_err();
-        if !control_fill_blocked {
-            return Err("PR 334 newer revoke did not block the control CPI fill".into());
-        }
-    }
-
-    for actor in [ATTACKER, LP] {
-        if observed_positions(&env.primary_portfolio(actor))?[ASSET as usize] != 0 {
-            return Err(format!("PR 334 actor {actor} retained an open position"));
-        }
-        let capital = env.primary_portfolio(actor).capital.get();
-        let withdrawal = env
-            .withdraw_primary(actor, capital)
-            .map_err(|error| format!("PR 334 withdraw actor {actor}: {error}"))?;
-        max_cu = max_cu.max(withdrawal.compute_units);
-    }
-    let attacker_payout = env.token_amount(env.actors[ATTACKER].destination_token);
-    let lp_payout = env.token_amount(env.actors[LP].destination_token);
-    if u128::from(attacker_payout) + u128::from(lp_payout) != ATTACKER_DEPOSIT + LP_DEPOSIT
-        || env.token_supply_observed() != supply_before
-        || max_cu >= TX_CU_LIMIT
-    {
-        return Err(format!(
-            "PR 334 terminal mismatch: payout={attacker_payout}/{lp_payout}, max_cu={max_cu}, \
-             supply={}/{supply_before}",
-            env.token_supply_observed()
-        ));
-    }
-
-    Ok(DelayedMatcherEnableWorld {
-        attacker_payout,
-        lp_payout,
-        control_fill_blocked,
-        replay_cu,
-        max_cu,
-    })
-}
-
-pub fn reproduce_delayed_matcher_enable_replay(
-    mut seed: [u8; 32],
-) -> Result<DelayedMatcherEnableReplayReproduction, String> {
-    seed[0] ^= 0x34;
-    let control = run_delayed_matcher_enable_world(seed, false)?;
-    let replay = run_delayed_matcher_enable_world(seed, true)?;
-    let victim_loss = control
-        .lp_payout
-        .checked_sub(replay.lp_payout)
-        .ok_or("PR 334 replay increased LP payout")?;
-    let attacker_gain = replay
-        .attacker_payout
-        .checked_sub(control.attacker_payout)
-        .ok_or("PR 334 replay decreased attacker payout")?;
-    if control.attacker_payout != 2_000_000
-        || control.lp_payout != 4_000_000
-        || victim_loss != 1_000_000
-        || victim_loss != attacker_gain
-        || !control.control_fill_blocked
-        || replay.replay_cu == 0
-    {
-        return Err(format!(
-            "PR 334 paired-world mismatch: control={control:?}, replay={replay:?}, \
-             victim_loss={victim_loss}, attacker_gain={attacker_gain}"
-        ));
-    }
-    Ok(DelayedMatcherEnableReplayReproduction {
-        blocker: KnownBlocker::DelayedMatcherEnableReplay,
-        victim_loss,
-        attacker_gain,
-        control_fill_blocked: control.control_fill_blocked,
-        replay_cu: replay.replay_cu,
-        max_cu: replay.max_cu.max(control.max_cu),
-    })
-}
-
-#[derive(Clone, Copy, Debug)]
 struct BackingFeeConsentWorld {
     provider_withdrawn: u64,
     operator_withdrawn: u64,
@@ -10528,11 +10357,12 @@ pub fn reproduce_portfolio_close_incarnation_replay(
 struct MatcherGrantPortfolioIncarnationWorld {
     original_portfolio_id: u64,
     replacement_portfolio_id: u64,
+    stale_replay_rejected: bool,
+    rejected_exact_rollback: bool,
     control_trade_blocked: bool,
-    liquidation_slot: u64,
-    cranker_reward: u128,
-    extracted_reward: u64,
-    replay_cu: u64,
+    fresh_grant_landed: bool,
+    fresh_round_trip_landed: bool,
+    owner_exit_landed: bool,
     max_cu: u64,
 }
 
@@ -10691,11 +10521,12 @@ fn exercise_matcher_grant_replay(
 
 fn run_matcher_grant_portfolio_incarnation_world(
     seed: [u8; 32],
-    land_replay: bool,
 ) -> Result<MatcherGrantPortfolioIncarnationWorld, String> {
+    const LONG: usize = 0;
     const VICTIM: usize = 1;
     const PRICE: u64 = 1_000_000;
     const REPLACEMENT_CAPITAL: u128 = 100_000_000;
+    const POSITION_Q: i128 = 1_000 * POS_SCALE as i128;
 
     let mut env = V16Svm::new(
         seed,
@@ -10717,6 +10548,7 @@ fn run_matcher_grant_portfolio_incarnation_world(
             ..MarketConfig::default()
         },
     );
+    let supply_before = env.token_supply_observed();
     env.update_liquidation_fee_policy(10_000)
         .map_err(|error| format!("PR 304 configure cranker reward: {error}"))?;
     let original_portfolio_id = env.primary_portfolio_id(VICTIM);
@@ -10739,48 +10571,100 @@ fn run_matcher_grant_portfolio_incarnation_world(
     }
     env.deposit_primary(VICTIM, REPLACEMENT_CAPITAL)
         .map_err(|error| format!("PR 304 fund incarnation B: {error}"))?;
-    let outcome =
-        exercise_matcher_grant_replay(&mut env, retained_grant, land_replay, 2, "PR 304")?;
+
+    let before_replay = tracked_economic_accounts(&env);
+    let stale_replay_rejected = env.land_retained(retained_grant).is_err();
+    let rejected_exact_rollback = tracked_economic_accounts(&env) == before_replay;
+    let before_control_trade = tracked_economic_accounts(&env);
+    let control_trade_blocked = env.trade_cpi(LONG, VICTIM, 0, POSITION_Q, 0, 0).is_err()
+        && tracked_economic_accounts(&env) == before_control_trade;
+    if !stale_replay_rejected || !rejected_exact_rollback || !control_trade_blocked {
+        return Err(format!(
+            "PR 304 stale grant was not rejected atomically: rejected={stale_replay_rejected}, \
+             rollback={rejected_exact_rollback}, trade_blocked={control_trade_blocked}"
+        ));
+    }
+
+    let fresh = env
+        .set_matcher_config(VICTIM, 1)
+        .map_err(|error| format!("PR 304 fresh incarnation-B grant: {error}"))?;
+    let open = env
+        .trade_cpi(LONG, VICTIM, 0, POSITION_Q, 0, 0)
+        .map_err(|error| format!("PR 304 fresh incarnation-B open: {error}"))?;
+    let close = env
+        .trade_cpi(LONG, VICTIM, 0, -POSITION_Q, 0, 0)
+        .map_err(|error| format!("PR 304 fresh incarnation-B close: {error}"))?;
+    let fresh_grant_landed = true;
+    let fresh_round_trip_landed = observed_positions(&env.primary_portfolio(LONG))?[0] == 0
+        && observed_positions(&env.primary_portfolio(VICTIM))?[0] == 0
+        && env.primary_portfolio(VICTIM).capital.get() == REPLACEMENT_CAPITAL;
+    let destination = env.actors[VICTIM].destination_token;
+    let destination_before = env.token_amount(destination);
+    let withdrawal = env
+        .withdraw_primary(VICTIM, REPLACEMENT_CAPITAL)
+        .map_err(|error| format!("PR 304 owner exit after fresh round trip: {error}"))?;
+    let replacement_capital_u64 = u64::try_from(REPLACEMENT_CAPITAL)
+        .map_err(|_| "PR 304 replacement capital exceeds SPL range")?;
+    let owner_exit_landed = env
+        .token_amount(destination)
+        .checked_sub(destination_before)
+        == Some(replacement_capital_u64);
+    let max_cu = fresh
+        .compute_units
+        .max(open.compute_units)
+        .max(close.compute_units)
+        .max(withdrawal.compute_units);
+    if !fresh_round_trip_landed
+        || !owner_exit_landed
+        || env.token_supply_observed() != supply_before
+        || max_cu >= TX_CU_LIMIT
+    {
+        return Err(format!(
+            "PR 304 fresh route mismatch: round_trip={fresh_round_trip_landed}, \
+             exit={owner_exit_landed}, max_cu={max_cu}, supply={}/{supply_before}",
+            env.token_supply_observed()
+        ));
+    }
     Ok(MatcherGrantPortfolioIncarnationWorld {
         original_portfolio_id,
         replacement_portfolio_id,
-        control_trade_blocked: outcome.control_trade_blocked,
-        liquidation_slot: outcome.liquidation_slot,
-        cranker_reward: outcome.cranker_reward,
-        extracted_reward: outcome.extracted_reward,
-        replay_cu: outcome.replay_cu,
-        max_cu: outcome.max_cu,
+        stale_replay_rejected,
+        rejected_exact_rollback,
+        control_trade_blocked,
+        fresh_grant_landed,
+        fresh_round_trip_landed,
+        owner_exit_landed,
+        max_cu,
     })
 }
 
-pub fn reproduce_matcher_grant_portfolio_incarnation_replay(
+pub fn verify_matcher_grant_portfolio_incarnation_protection(
     mut seed: [u8; 32],
-) -> Result<MatcherGrantPortfolioIncarnationReplayReproduction, String> {
+) -> Result<MatcherGrantPortfolioIncarnationReplayProtection, String> {
     seed[0] ^= 0x04;
-    let control = run_matcher_grant_portfolio_incarnation_world(seed, false)?;
-    let replay = run_matcher_grant_portfolio_incarnation_world(seed, true)?;
-    if control.original_portfolio_id != replay.original_portfolio_id
-        || control.replacement_portfolio_id != replay.replacement_portfolio_id
-        || !control.control_trade_blocked
-        || control.cranker_reward != 0
-        || replay.cranker_reward == 0
-        || u128::from(replay.extracted_reward) != replay.cranker_reward
-        || replay.replay_cu == 0
+    let protection = run_matcher_grant_portfolio_incarnation_world(seed)?;
+    if protection.replacement_portfolio_id <= protection.original_portfolio_id
+        || !protection.stale_replay_rejected
+        || !protection.rejected_exact_rollback
+        || !protection.control_trade_blocked
+        || !protection.fresh_grant_landed
+        || !protection.fresh_round_trip_landed
+        || !protection.owner_exit_landed
+        || protection.max_cu >= TX_CU_LIMIT
     {
-        return Err(format!(
-            "PR 304 paired-world mismatch: control={control:?}, replay={replay:?}"
-        ));
+        return Err(format!("PR 304 protection mismatch: {protection:?}"));
     }
-    Ok(MatcherGrantPortfolioIncarnationReplayReproduction {
+    Ok(MatcherGrantPortfolioIncarnationReplayProtection {
         blocker: KnownBlocker::MatcherGrantPortfolioIncarnationReplay,
-        original_portfolio_id: replay.original_portfolio_id,
-        replacement_portfolio_id: replay.replacement_portfolio_id,
-        control_trade_blocked: control.control_trade_blocked,
-        liquidation_slot: replay.liquidation_slot,
-        cranker_reward: replay.cranker_reward,
-        extracted_reward: replay.extracted_reward,
-        replay_cu: replay.replay_cu,
-        max_cu: replay.max_cu,
+        original_portfolio_id: protection.original_portfolio_id,
+        replacement_portfolio_id: protection.replacement_portfolio_id,
+        stale_replay_rejected: protection.stale_replay_rejected,
+        rejected_exact_rollback: protection.rejected_exact_rollback,
+        control_trade_blocked: protection.control_trade_blocked,
+        fresh_grant_landed: protection.fresh_grant_landed,
+        fresh_round_trip_landed: protection.fresh_round_trip_landed,
+        owner_exit_landed: protection.owner_exit_landed,
+        max_cu: protection.max_cu,
     })
 }
 
@@ -10853,6 +10737,8 @@ fn run_matcher_grant_market_generation_world(
         env.deposit_primary(actor, capital)
             .map_err(|error| format!("PR 294 deposit portfolio {actor}: {error}"))?;
     }
+    env.set_matcher_config(VICTIM, 0)
+        .map_err(|error| format!("PR 294 align replacement matcher sequence: {error}"))?;
 
     let first_mark_slot = REINIT_SLOT
         .checked_add(1)
@@ -17215,11 +17101,6 @@ pub fn delayed_oracle_intent_replay_strategy(
             DelayedOracleIntentPath::ConfigureAuth,
         ]),
     )
-}
-
-#[allow(dead_code)]
-pub fn delayed_matcher_enable_replay_seed_strategy() -> impl Strategy<Value = [u8; 32]> {
-    any::<[u8; 32]>()
 }
 
 #[allow(dead_code)]

@@ -151,9 +151,13 @@ fn kani_v16_amount_instructions_decode_preserves_wire_fields() {
 
 #[kani::proof]
 fn kani_v16_set_matcher_config_decode_preserves_fee_consent() {
+    let portfolio_id: u64 = kani::any();
+    let expected_sequence: u64 = kani::any();
     let enabled: u8 = kani::any();
     let trade_fee_cap_bps: u16 = kani::any();
     let data = Instruction::SetMatcherConfig {
+        portfolio_id,
+        expected_sequence,
         enabled,
         trade_fee_cap_bps,
     }
@@ -161,9 +165,13 @@ fn kani_v16_set_matcher_config_decode_preserves_fee_consent() {
 
     match Instruction::decode(&data).unwrap() {
         Instruction::SetMatcherConfig {
+            portfolio_id: decoded_portfolio_id,
+            expected_sequence: decoded_sequence,
             enabled: decoded_enabled,
             trade_fee_cap_bps: decoded_cap,
         } => {
+            assert_eq!(decoded_portfolio_id, portfolio_id);
+            assert_eq!(decoded_sequence, expected_sequence);
             assert_eq!(decoded_enabled, enabled);
             assert_eq!(decoded_cap, trade_fee_cap_bps);
         }
@@ -171,18 +179,10 @@ fn kani_v16_set_matcher_config_decode_preserves_fee_consent() {
     }
 
     let legacy = [68, enabled];
-    match Instruction::decode(&legacy).unwrap() {
-        Instruction::SetMatcherConfig {
-            enabled: decoded_enabled,
-            trade_fee_cap_bps: decoded_cap,
-        } => {
-            assert_eq!(decoded_enabled, enabled);
-            assert_eq!(decoded_cap, 0);
-        }
-        _ => unreachable!(),
-    }
+    assert!(Instruction::decode(&legacy).is_err());
 
-    let trailing = [68, enabled, data[2], data[3], 0];
+    let mut trailing = data.clone();
+    trailing.push(0);
     assert!(Instruction::decode(&trailing).is_err());
 }
 
