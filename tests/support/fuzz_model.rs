@@ -10,7 +10,7 @@ use percolator::{
 use percolator_prog::{
     constants::{ORACLE_LEG_FLAG_DIVIDE_LEG2, ORACLE_LEG_FLAG_DIVIDE_LEG3, ORACLE_MODE_EWMA_MARK},
     ix::{BatchTradeCpiLeg, BatchTradeLeg, CrankObservationHint},
-    state::MarketGroupV16,
+    state::{MarketGroupV16, PortfolioAccountV16},
 };
 use proptest::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -1492,6 +1492,73 @@ fn assert_source_credit_rates(label: &str, group: &MarketGroupV16) -> Result<(),
     Ok(())
 }
 
+fn assert_source_claim_bound_attribution(
+    label: &str,
+    group: &MarketGroupV16,
+    portfolios: &[PortfolioAccountV16],
+) -> Result<(), String> {
+    let expected_portfolios = u64::try_from(portfolios.len())
+        .map_err(|_| format!("{label} portfolio census does not fit u64"))?;
+    if group.materialized_portfolio_count != expected_portfolios {
+        return Err(format!(
+            "{label} source-claim census is incomplete: market records {} materialized \
+             portfolios, harness has {expected_portfolios}",
+            group.materialized_portfolio_count
+        ));
+    }
+
+    let mut attributed = vec![0u128; group.source_credit.len()];
+    for (portfolio_index, portfolio) in portfolios.iter().enumerate() {
+        for (slot, source) in portfolio.source_domains.iter().copied().enumerate() {
+            if !source.is_occupied() {
+                continue;
+            }
+            let domain = source.domain.get() as usize;
+            let domain_sum = attributed.get_mut(domain).ok_or_else(|| {
+                format!(
+                    "{label} portfolio {portfolio_index} source slot {slot} names missing domain \
+                     {domain}"
+                )
+            })?;
+            *domain_sum = domain_sum
+                .checked_add(source.source_claim_bound_num.get())
+                .ok_or_else(|| {
+                    format!("{label} source domain {domain} portfolio attribution overflow")
+                })?;
+        }
+    }
+
+    let mut domain_total = 0u128;
+    for (domain, source) in group.source_credit.iter().copied().enumerate() {
+        if attributed[domain] != source.positive_claim_bound_num {
+            return Err(format!(
+                "{label} source domain {domain} market claim bound {} != independent portfolio \
+                 attribution {}",
+                source.positive_claim_bound_num, attributed[domain]
+            ));
+        }
+        domain_total = domain_total
+            .checked_add(source.positive_claim_bound_num)
+            .ok_or_else(|| format!("{label} aggregate source-claim bound overflow"))?;
+    }
+    if domain_total != group.source_claim_bound_total_num {
+        return Err(format!(
+            "{label} source-claim aggregate {} != market O(1) total {}",
+            domain_total, group.source_claim_bound_total_num
+        ));
+    }
+    Ok(())
+}
+
+fn assert_primary_source_claim_bound_attribution(label: &str, env: &V16Svm) -> Result<(), String> {
+    let (_, group) = env.primary_market_state();
+    let portfolios: Vec<_> = (0..PRIMARY_ACTOR_COUNT)
+        .map(|actor| env.primary_portfolio(actor))
+        .collect();
+    assert_source_credit_rates(label, &group)?;
+    assert_source_claim_bound_attribution(label, &group, &portfolios)
+}
+
 #[derive(Clone)]
 struct Snapshot {
     primary_market: Vec<u8>,
@@ -2928,6 +2995,9 @@ impl ScenarioRunner {
         }
         assert_source_credit_rates("primary", &primary)?;
         assert_source_credit_rates("foreign", &foreign)?;
+        assert_source_claim_bound_attribution("primary", &primary, &primary_portfolios)?;
+        let foreign_portfolios = [self.env.foreign_portfolio()];
+        assert_source_claim_bound_attribution("foreign", &foreign, &foreign_portfolios)?;
         self.assert_positions_match()
     }
 
@@ -3296,6 +3366,361 @@ pub fn run_scenario(scenario: &Scenario) -> Result<Coverage, String> {
     progress_runner.coverage.merge(liquidation_coverage);
     progress_runner.coverage.assert_pull_request_non_vacuity()?;
     Ok(progress_runner.coverage)
+}
+
+#[allow(dead_code)]
+pub fn verify_positive_claim_bound_attribution_lifecycle(
+    mut seed: [u8; 32],
+    position_units: u8,
+    price_move: u8,
+    reverse_conversion_order: bool,
+) -> Result<(), String> {
+    const WINNERS: [usize; 2] = [0, 1];
+    const LOSERS: [usize; 2] = [2, 3];
+    const MARKET_CRANKER: usize = 4;
+    const ASSET: u16 = 0;
+    const SOURCE_DOMAIN: usize = 1;
+    const START_PRICE: u64 = 100;
+    const EXPIRY_SLOT: u64 = 20;
+
+    fn convert_and_check(
+        env: &mut V16Svm,
+        actor: usize,
+        domain: usize,
+        amount: u128,
+        step: &str,
+    ) -> Result<(), String> {
+        let (_, before_group) = env.primary_market_state();
+        let before_account = env.primary_portfolio(actor);
+        let before_claim = source_claim_for_domain(&before_account, domain);
+        let before_pnl = before_account.pnl.get();
+        let before_capital = before_account.capital.get();
+        let before_vault_tokens = env.token_amount(env.vault);
+        let amount_i128 = i128::try_from(amount)
+            .map_err(|_| format!("{step} conversion amount does not fit i128"))?;
+        let burn_num = amount
+            .checked_mul(percolator::BOUND_SCALE)
+            .ok_or_else(|| format!("{step} claim-burn conversion overflow"))?;
+        if amount == 0 || before_pnl < amount_i128 || before_claim < burn_num {
+            return Err(format!(
+                "{step} invalid generated conversion: amount={amount}, pnl={before_pnl}, \
+                 claim={before_claim}"
+            ));
+        }
+
+        env.convert_released_pnl(actor, amount)
+            .map_err(|error| format!("{step} public ConvertReleasedPnl: {error}"))?;
+        let (_, after_group) = env.primary_market_state();
+        let after_account = env.primary_portfolio(actor);
+        let after_claim = source_claim_for_domain(&after_account, domain);
+        if after_claim.checked_add(burn_num) != Some(before_claim)
+            || after_group.source_credit[domain]
+                .positive_claim_bound_num
+                .checked_add(burn_num)
+                != Some(before_group.source_credit[domain].positive_claim_bound_num)
+            || after_group
+                .source_claim_bound_total_num
+                .checked_add(burn_num)
+                != Some(before_group.source_claim_bound_total_num)
+        {
+            return Err(format!(
+                "{step} did not burn exactly one attributed claim delta: account \
+                 {before_claim}->{after_claim}, domain {}->{}, total {}->{}",
+                before_group.source_credit[domain].positive_claim_bound_num,
+                after_group.source_credit[domain].positive_claim_bound_num,
+                before_group.source_claim_bound_total_num,
+                after_group.source_claim_bound_total_num
+            ));
+        }
+        if after_account.pnl.get() != before_pnl - amount_i128
+            || after_account.capital.get().checked_sub(before_capital) != Some(amount)
+            || after_group.vault != before_group.vault
+            || env.token_amount(env.vault) != before_vault_tokens
+        {
+            return Err(format!(
+                "{step} conversion did not preserve custody and reclassify exactly {amount}"
+            ));
+        }
+        assert_primary_source_claim_bound_attribution(step, env)
+    }
+
+    seed[0] ^= 0x29;
+    let position_units = u128::from(position_units.clamp(1, 4));
+    let price_move = u64::from(price_move.clamp(5, 20));
+    let position_q_u128 = position_units
+        .checked_mul(POS_SCALE)
+        .ok_or("INV-029 position multiplication overflow")?;
+    let position_q =
+        i128::try_from(position_q_u128).map_err(|_| "INV-029 position does not fit i128")?;
+    let winning_price = START_PRICE
+        .checked_add(price_move)
+        .ok_or("INV-029 winning price overflow")?;
+    let reduced_price_move = price_move / 2;
+    let reduced_price = START_PRICE
+        .checked_add(reduced_price_move)
+        .ok_or("INV-029 reduced price overflow")?;
+    let expected_claim_per_winner = position_units
+        .checked_mul(u128::from(price_move))
+        .ok_or("INV-029 expected claim overflow")?;
+    let backing = expected_claim_per_winner
+        .checked_mul(WINNERS.len() as u128)
+        .and_then(|value| value.checked_add(100))
+        .ok_or("INV-029 backing setup overflow")?;
+
+    let mut env = V16Svm::new(
+        seed,
+        MarketConfig {
+            initial_price: START_PRICE,
+            max_price_move_bps_per_slot: 10_000,
+            max_accrual_dt_slots: 1,
+            min_funding_lifetime_slots: 1,
+            actor_deposits: [1_000, 1_000, 1_000, 1_000, 1],
+            actor_token_balances: [1_000, 1_000, 1_000, 1_000, 1],
+            ..MarketConfig::default()
+        },
+    );
+    env.configure_auth_mark(false, ASSET, 1, START_PRICE)
+        .map_err(|error| format!("INV-029 configure AuthMark: {error}"))?;
+    env.top_up_backing_bucket(SOURCE_DOMAIN as u16, backing, EXPIRY_SLOT)
+        .map_err(|error| format!("INV-029 backing top-up: {error}"))?;
+    assert_primary_source_claim_bound_attribution("INV-029 initialized", &env)?;
+
+    for (&winner, &loser) in WINNERS.iter().zip(LOSERS.iter()) {
+        env.trade_no_cpi(winner, loser, ASSET, position_q, START_PRICE, 0)
+            .map_err(|error| format!("INV-029 open pair {winner}/{loser}: {error}"))?;
+        assert_primary_source_claim_bound_attribution("INV-029 after open", &env)?;
+    }
+    for slot in 2..=3 {
+        env.warp_to_slot(slot);
+        env.push_auth_mark(ASSET, slot, winning_price)
+            .map_err(|error| format!("INV-029 publish winning mark at {slot}: {error}"))?;
+        crank_adapter_steps(&mut env, MARKET_CRANKER, slot, ASSET, 8)?;
+    }
+    for actor in 0..4 {
+        crank_adapter_steps(&mut env, actor, 3, ASSET, 16)?;
+        assert_primary_source_claim_bound_attribution("INV-029 after account crank", &env)?;
+    }
+
+    let (_, peak_group) = env.primary_market_state();
+    let peak_claims = WINNERS
+        .map(|winner| source_claim_for_domain(&env.primary_portfolio(winner), SOURCE_DOMAIN));
+    let expected_claim_num = expected_claim_per_winner
+        .checked_mul(percolator::BOUND_SCALE)
+        .ok_or("INV-029 expected claim-num overflow")?;
+    let expected_peak_domain_claim = expected_claim_num
+        .checked_mul(WINNERS.len() as u128)
+        .ok_or("INV-029 peak domain claim overflow")?;
+    if peak_claims != [expected_claim_num; 2]
+        || peak_group.source_credit[SOURCE_DOMAIN].positive_claim_bound_num
+            != expected_peak_domain_claim
+    {
+        return Err(format!(
+            "INV-029 setup did not create two independently attributed claims: \
+             claims={peak_claims:?}, domain={}",
+            peak_group.source_credit[SOURCE_DOMAIN].positive_claim_bound_num
+        ));
+    }
+
+    for slot in 4..=5 {
+        env.warp_to_slot(slot);
+        env.push_auth_mark(ASSET, slot, reduced_price)
+            .map_err(|error| format!("INV-029 publish reduced mark at {slot}: {error}"))?;
+        crank_adapter_steps(&mut env, MARKET_CRANKER, slot, ASSET, 8)?;
+    }
+    for actor in 0..4 {
+        crank_adapter_steps(&mut env, actor, 5, ASSET, 16)?;
+        assert_primary_source_claim_bound_attribution("INV-029 after partial claim burn", &env)?;
+    }
+    let reduced_claim_per_winner = position_units
+        .checked_mul(u128::from(reduced_price_move))
+        .and_then(|value| value.checked_mul(percolator::BOUND_SCALE))
+        .ok_or("INV-029 reduced claim-num overflow")?;
+    let expected_reduced_domain_claim = reduced_claim_per_winner
+        .checked_mul(WINNERS.len() as u128)
+        .ok_or("INV-029 reduced domain claim overflow")?;
+    let (_, reduced_group) = env.primary_market_state();
+    let reduced_claims = WINNERS
+        .map(|winner| source_claim_for_domain(&env.primary_portfolio(winner), SOURCE_DOMAIN));
+    if reduced_claims != [reduced_claim_per_winner; 2]
+        || reduced_group.source_credit[SOURCE_DOMAIN].positive_claim_bound_num
+            != expected_reduced_domain_claim
+        || reduced_group.source_credit[SOURCE_DOMAIN].positive_claim_bound_num
+            >= peak_group.source_credit[SOURCE_DOMAIN].positive_claim_bound_num
+    {
+        return Err(format!(
+            "INV-029 less-favorable authenticated mark did not partially burn both claims: \
+             peak={peak_claims:?}, reduced={reduced_claims:?}, domain={}",
+            reduced_group.source_credit[SOURCE_DOMAIN].positive_claim_bound_num
+        ));
+    }
+
+    for (&winner, &loser) in WINNERS.iter().zip(LOSERS.iter()) {
+        env.trade_no_cpi(winner, loser, ASSET, -position_q, reduced_price, 0)
+            .map_err(|error| format!("INV-029 close pair {winner}/{loser}: {error}"))?;
+        assert_primary_source_claim_bound_attribution("INV-029 after close", &env)?;
+        if position_abs_for_asset(&env.primary_portfolio(winner), ASSET as usize).is_ok() {
+            return Err(format!(
+                "INV-029 winner {winner} retained a leg after full close"
+            ));
+        }
+    }
+    let (_, closed_group) = env.primary_market_state();
+    if closed_group.source_credit[SOURCE_DOMAIN].positive_claim_bound_num
+        != reduced_group.source_credit[SOURCE_DOMAIN].positive_claim_bound_num
+    {
+        return Err("INV-029 flattening changed claim attribution before conversion".into());
+    }
+    let expected_reduced_pnl = i128::try_from(
+        position_units
+            .checked_mul(u128::from(reduced_price_move))
+            .ok_or("INV-029 reduced PnL overflow")?,
+    )
+    .map_err(|_| "INV-029 reduced PnL does not fit i128")?;
+    let closed_pnls = [0usize, 1, 2, 3].map(|actor| env.primary_portfolio(actor).pnl.get());
+    let expected_recovery_pnl = i128::try_from(
+        position_units
+            .checked_mul(u128::from(price_move - reduced_price_move))
+            .ok_or("INV-029 recovery PnL overflow")?,
+    )
+    .map_err(|_| "INV-029 recovery PnL does not fit i128")?;
+    if closed_pnls
+        != [
+            expected_reduced_pnl,
+            expected_reduced_pnl,
+            expected_recovery_pnl,
+            expected_recovery_pnl,
+        ]
+    {
+        return Err(format!(
+            "INV-029 closing both pairs at the effective mark changed economic PnL: expected \
+             winners={expected_reduced_pnl}, settled-loss recovery={expected_recovery_pnl}, \
+             observed={closed_pnls:?}, \
+             effective_price={}, raw_target={}",
+            closed_group.assets[ASSET as usize].effective_price,
+            closed_group.assets[ASSET as usize].raw_oracle_target_price
+        ));
+    }
+
+    let order = if reverse_conversion_order {
+        [WINNERS[1], WINNERS[0]]
+    } else {
+        WINNERS
+    };
+    let first_pnl = env.primary_portfolio(order[0]).pnl.get();
+    let first_pnl = u128::try_from(first_pnl)
+        .map_err(|_| "INV-029 first winner did not retain positive released PnL")?;
+    convert_and_check(
+        &mut env,
+        order[0],
+        SOURCE_DOMAIN,
+        first_pnl,
+        "INV-029 first-winner conversion",
+    )?;
+    crank_adapter_steps(&mut env, order[1], 5, ASSET, 16).map_err(|error| {
+        format!("INV-029 recertify second winner after peer conversion: {error}")
+    })?;
+    assert_primary_source_claim_bound_attribution("INV-029 after peer recertification", &env)?;
+    let second_pnl = env.primary_portfolio(order[1]).pnl.get();
+    let second_pnl = u128::try_from(second_pnl)
+        .map_err(|_| "INV-029 second winner did not retain positive released PnL")?;
+    convert_and_check(
+        &mut env,
+        order[1],
+        SOURCE_DOMAIN,
+        second_pnl,
+        "INV-029 second-winner conversion",
+    )?;
+
+    const RECOVERY_SOURCE_DOMAIN: usize = 0;
+    let recovery_claim_per_loser = u128::try_from(expected_recovery_pnl)
+        .map_err(|_| "INV-029 recovery claim does not fit u128")?;
+    let recovery_claim_num = recovery_claim_per_loser
+        .checked_mul(percolator::BOUND_SCALE)
+        .ok_or("INV-029 recovery claim-num overflow")?;
+    let expected_recovery_domain_claim = recovery_claim_num
+        .checked_mul(LOSERS.len() as u128)
+        .ok_or("INV-029 recovery domain claim overflow")?;
+    let recovery_claims = LOSERS.map(|loser| {
+        source_claim_for_domain(&env.primary_portfolio(loser), RECOVERY_SOURCE_DOMAIN)
+    });
+    let (_, winner_converted_group) = env.primary_market_state();
+    if recovery_claims != [recovery_claim_num; 2]
+        || winner_converted_group.source_credit[RECOVERY_SOURCE_DOMAIN].positive_claim_bound_num
+            != expected_recovery_domain_claim
+    {
+        return Err(format!(
+            "INV-029 settled-loss recovery was not attributed to the opposite source domain: \
+             claims={recovery_claims:?}, domain={}",
+            winner_converted_group.source_credit[RECOVERY_SOURCE_DOMAIN].positive_claim_bound_num
+        ));
+    }
+    let recovery_backing = recovery_claim_per_loser
+        .checked_mul(LOSERS.len() as u128)
+        .and_then(|value| value.checked_add(100))
+        .ok_or("INV-029 recovery backing overflow")?;
+    env.top_up_backing_bucket_without_ledger(
+        RECOVERY_SOURCE_DOMAIN as u16,
+        recovery_backing,
+        EXPIRY_SLOT,
+    )
+    .map_err(|error| format!("INV-029 recovery-domain backing top-up: {error}"))?;
+    assert_primary_source_claim_bound_attribution("INV-029 after recovery backing", &env)?;
+
+    let loser_order = if reverse_conversion_order {
+        [LOSERS[1], LOSERS[0]]
+    } else {
+        LOSERS
+    };
+    for (index, loser) in loser_order.into_iter().enumerate() {
+        crank_adapter_steps(&mut env, loser, 5, ASSET, 16)
+            .map_err(|error| format!("INV-029 recertify recovery claimant {loser}: {error}"))?;
+        assert_primary_source_claim_bound_attribution("INV-029 recovery recertification", &env)?;
+        let recovery_pnl = u128::try_from(env.primary_portfolio(loser).pnl.get())
+            .map_err(|_| format!("INV-029 recovery claimant {loser} lost positive PnL"))?;
+        convert_and_check(
+            &mut env,
+            loser,
+            RECOVERY_SOURCE_DOMAIN,
+            recovery_pnl,
+            if index == 0 {
+                "INV-029 first recovery conversion"
+            } else {
+                "INV-029 second recovery conversion"
+            },
+        )?;
+    }
+
+    let (_, terminal_group) = env.primary_market_state();
+    if terminal_group.source_credit[SOURCE_DOMAIN].positive_claim_bound_num != 0
+        || terminal_group.source_claim_bound_total_num != 0
+        || WINNERS.iter().any(|winner| {
+            source_claim_for_domain(&env.primary_portfolio(*winner), SOURCE_DOMAIN) != 0
+        })
+    {
+        let domain_claims: Vec<_> = terminal_group
+            .source_credit
+            .iter()
+            .map(|source| source.positive_claim_bound_num)
+            .collect();
+        let portfolio_claims: Vec<_> = (0..PRIMARY_ACTOR_COUNT)
+            .map(|actor| {
+                let portfolio = env.primary_portfolio(actor);
+                let claims: Vec<_> = portfolio
+                    .source_domains
+                    .iter()
+                    .filter(|source| source.is_occupied())
+                    .map(|source| (source.domain.get(), source.source_claim_bound_num.get()))
+                    .collect();
+                (actor, portfolio.pnl.get(), claims)
+            })
+            .collect();
+        return Err(format!(
+            "INV-029 completed conversions left source claims: total={}, domains={domain_claims:?}, \
+             portfolios={portfolio_claims:?}",
+            terminal_group.source_claim_bound_total_num
+        ));
+    }
+    assert_primary_source_claim_bound_attribution("INV-029 terminal", &env)
 }
 
 #[allow(dead_code)]

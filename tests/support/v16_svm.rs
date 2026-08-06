@@ -1947,6 +1947,30 @@ impl V16Svm {
         )
     }
 
+    pub fn top_up_backing_bucket_without_ledger(
+        &mut self,
+        domain: u16,
+        amount: u128,
+        expiry_slot: u64,
+    ) -> Result<TxSuccess, String> {
+        let authority = copy_keypair(&self.admin);
+        self.send_program(
+            ProgInstruction::TopUpBackingBucket {
+                domain,
+                amount,
+                expiry_slot,
+            },
+            vec![
+                AccountMeta::new(authority.pubkey(), true),
+                AccountMeta::new(self.market, false),
+                AccountMeta::new(self.provider_source_token, false),
+                AccountMeta::new(self.vault, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[authority],
+        )
+    }
+
     pub fn top_up_insurance_domain_for_actor(
         &mut self,
         actor_index: usize,

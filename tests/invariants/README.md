@@ -23,7 +23,7 @@ verification methods are in [`../../INVARIANTS.md`](../../INVARIANTS.md).
 | Suite | Tests | Evidence |
 | --- | ---: | --- |
 | `public_sbf/` | 80 | Deterministic public SBF/LiteSVM counterexamples, regressions, and manifest checks |
-| `stateful/` | 117 | Proptest-generated public routes, including generalized active-leg/currentness, source-credit-rate, and authenticated-expiry route matrices |
+| `stateful/` | 118 | Proptest-generated public routes, including generalized active-leg/currentness, source-claim attribution, source-credit-rate, and authenticated-expiry route matrices |
 | `cu/` | 104 | Positive public-route, metamorphic, rollback, liveness, and max-shape CU tests |
 | `kani/` | 41 | Symbolic wrapper arithmetic, matcher-binding, and strict-decoder proofs |
 
@@ -81,7 +81,7 @@ charter.
 | INV-026 | Gap | - |
 | INV-027 | SVM/CU | `cu/inv_027_protected_principal_seniority.rs` |
 | INV-028 | Independent + SVM/CU | `stateful/inv_028_source_domain_realizability_cap.rs`, `cu/inv_028_source_domain_realizability_cap.rs` |
-| INV-029 | Gap | - |
+| INV-029 | F | `stateful/inv_029_positive_claim_bounds_never_understate.rs` |
 | INV-030 | Independent + SVM/CU | `stateful/inv_030_credit_rate_determinism_and_fail_closed_behavior.rs`, `cu/inv_063_backing_expiry_normalization.rs` (secondary expiry/progress owner) |
 | INV-031 | Independent + Direct | `public_sbf/inv_031_no_double_use_of_claim_backing_or_insurance_atoms.rs`, `stateful/inv_031_no_double_use_of_claim_backing_or_insurance_atoms.rs` |
 | INV-032 | SVM/CU | `cu/inv_032_exact_counterparty_lien_lifecycle.rs` |
