@@ -2,7 +2,7 @@
 //!
 //! Normative obligation: Accepted LoF and DoS findings reproduce through valid public instructions and exact external effects.
 //!
-//! Evidence in this file (I plus invariant-specific F/M assertions): `v16_program_known_blockers_remain_explicit_until_fixed`, `v16_program_open_lof_manifest_snapshot_is_structurally_honest`, `v16_open_security_finding_benchmark_is_complete_and_non_overclaiming`, `v16_invariant_charter_and_index_are_complete`. These tests exercise the deployed public
+//! Evidence in this file (I plus invariant-specific F/M assertions): `v16_program_fixed_blockers_remain_progressing`, `v16_program_open_lof_manifest_snapshot_is_structurally_honest`, `v16_open_security_finding_benchmark_is_complete_and_non_overclaiming`, `v16_invariant_charter_and_index_are_complete`. These tests exercise the deployed public
 //! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
 //! rollback, liveness, or compute outcomes appropriate to the invariant.
 //!
@@ -13,18 +13,18 @@
 use super::*;
 
 #[test]
-fn v16_program_known_blockers_remain_explicit_until_fixed() {
-    for (name, scenario) in known_blocker_scenarios() {
+fn v16_program_fixed_blockers_remain_progressing() {
+    for (name, scenario) in fixed_blocker_scenarios() {
         let coverage = run_scenario(&scenario).unwrap_or_else(|error| {
             panic!(
-                "known blocker scenario {name} changed failure class\nscenario={}\n{error}",
+                "fixed blocker scenario {name} no longer converges\nscenario={}\n{error}",
                 serde_json::to_string_pretty(&scenario).unwrap()
             )
         });
         let index = KnownBlocker::LiveLapsedSourceBacking.index();
-        assert_ne!(
+        assert_eq!(
             coverage.known_blocker_hits[index], 0,
-            "{name} no longer reproduces PR 204; remove its quarantine and promote the seed"
+            "{name} still reaches the PR 204 quarantine"
         );
         assert_eq!(
             coverage.known_blocker_exit_locks[index], 0,

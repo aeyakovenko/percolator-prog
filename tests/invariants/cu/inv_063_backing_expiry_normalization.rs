@@ -2,13 +2,15 @@
 //!
 //! Normative obligation: Expired backing is normalized before every consumer and cannot remain economically fresh.
 //!
-//! Evidence in this file (I/C plus invariant-specific M assertions): `v16_program_retained_recovery_expiry_prerequisite_matrix_avoids_provider_capitalization`, `v16_program_lapsed_backing_settlement_matrix_discovers_resolved_exit_lock`, `v16_program_post_snapshot_expiry_prerequisite_hits_live_stale_lock`, `v16_probe_post_expiry_trade_cannot_charge_backing_fee`. These tests exercise the deployed public
+//! Evidence in this file (I/C plus invariant-specific M assertions): `v16_program_retained_recovery_expiry_prerequisite_matrix_avoids_provider_capitalization`, `v16_program_lapsed_backing_settlement_matrix_discovers_resolved_exit_lock`, `v16_program_post_snapshot_expiry_prerequisite_hits_live_stale_lock`, `v16_probe_post_expiry_trade_cannot_charge_backing_fee`, `v16_attack_lapsed_live_source_backing_expires_bounded_and_owner_can_reduce`. These tests exercise the deployed public
 //! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
 //! rollback, liveness, or compute outcomes appropriate to the invariant.
 //!
 //! Guarantee boundary: the post-expiry trade test certifies the minimized PR367 trace on the fixed
 //! program and checks exact rollback plus a surviving risk-reducing trade. Other tests in this
-//! module retain their own finding-specific status.
+//! module retain their own finding-specific status. The lapsed-Live test is also whole-route
+//! SVM/CU evidence for INV-030, INV-071, and INV-073: it proves one bounded expiry step, one bounded
+//! certification step, custody preservation, and a subsequent owner reduction.
 
 use super::*;
 
@@ -622,4 +624,144 @@ fn v16_probe_post_expiry_trade_cannot_charge_backing_fee() {
         WINNING_MARK,
         0,
     );
+}
+
+#[test]
+fn v16_attack_lapsed_live_source_backing_expires_bounded_and_owner_can_reduce() {
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(1, 1_000, 1_000, 500);
+    env.configure_permissionless_resolve_with_cu(10_000, 1);
+    env.configure_auth_mark_with_cu(0, 100);
+    let long_owner = Keypair::new();
+    let long = env.create_portfolio(&long_owner);
+    let short_owner = Keypair::new();
+    let short = env.create_portfolio(&short_owner);
+    let keeper_owner = Keypair::new();
+    let keeper = env.create_portfolio(&keeper_owner);
+    env.deposit(&long_owner, long, 40);
+    env.deposit(&short_owner, short, 410);
+    env.trade_asset_with_cu(
+        0,
+        &long_owner,
+        long,
+        &short_owner,
+        short,
+        (2 * POS_SCALE) as i128,
+        100,
+        0,
+    );
+
+    for slot in 2..=30 {
+        env.svm.warp_to_slot(slot);
+        env.push_auth_mark_with_cu(slot, 300);
+        env.crank(
+            keeper,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: slot,
+                observations: crank_observations(0),
+            },
+        );
+    }
+    for portfolio in [short, long, short] {
+        env.crank(
+            portfolio,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 30,
+                observations: crank_observations(0),
+            },
+        );
+    }
+    let after_adl = env.market_state().1;
+    let long_leg = active_leg_for_asset(&env.portfolio_state(long), 0);
+    let short_leg = active_leg_for_asset(&env.portfolio_state(short), 0);
+    assert_eq!(after_adl.assets[0].b_long_num, 0);
+    assert_eq!(after_adl.assets[0].b_short_num, 0);
+    assert!(!long_leg.b_stale && !short_leg.b_stale);
+    let generated_backing = after_adl.source_backing_buckets[1];
+    assert_eq!(generated_backing.status, BackingBucketStatusV16::Fresh);
+    assert!(generated_backing.fresh_unliened_backing_num > 0);
+
+    for slot in 31..=160 {
+        env.svm.warp_to_slot(slot);
+        env.push_auth_mark_with_cu(slot, 1);
+        env.crank(
+            keeper,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: slot,
+                observations: crank_observations(0),
+            },
+        );
+    }
+    let before_expiry = env.market_state().1;
+    let lapsed = before_expiry.source_backing_buckets[1];
+    assert_eq!(lapsed.status, BackingBucketStatusV16::Fresh);
+    assert!(lapsed.expiry_slot < 160);
+    assert!(env.portfolio_state(long).pnl.get() > 0);
+    let vault_before = before_expiry.vault;
+    let vault_tokens_before = env.token_amount(env.vault);
+
+    env.svm.expire_blockhash();
+    let expiry_cu = env
+        .send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 160,
+                observations: vec![],
+            },
+            vec![
+                AccountMeta::new(env.payer.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(long, false),
+            ],
+            &[],
+        )
+        .expect("permissionless refresh must commit one lapsed-backing expiry step");
+    assert_cu_within("lapsed source-backing expiry", expiry_cu, CRANK_CU_LIMIT);
+
+    let after_expiry = env.market_state().1;
+    let expired = after_expiry.source_backing_buckets[1];
+    assert_eq!(expired.status, BackingBucketStatusV16::Expired);
+    assert_eq!(expired.fresh_unliened_backing_num, 0);
+    assert_ne!(
+        health_cert(&env.portfolio_state(long)).cert_risk_epoch,
+        after_expiry.risk_epoch,
+        "expiry advances risk state and leaves one bounded certification step"
+    );
+    assert_eq!(after_expiry.vault, vault_before);
+    assert_eq!(env.token_amount(env.vault), vault_tokens_before);
+
+    env.svm.expire_blockhash();
+    let certify_cu = env
+        .send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 160,
+                observations: vec![],
+            },
+            vec![
+                AccountMeta::new(env.payer.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(long, false),
+            ],
+            &[],
+        )
+        .expect("the next bounded auto-crank must certify after expiry");
+    assert_cu_within(
+        "post-expiry account certification",
+        certify_cu,
+        CRANK_CU_LIMIT,
+    );
+    assert!(health_cert(&env.portfolio_state(long)).valid);
+
+    let position_before = active_leg_for_asset(&env.portfolio_state(long), 0)
+        .basis_pos_q
+        .unsigned_abs();
+    let exit_cu = env.rebalance_reduce_with_cu(&long_owner, long, 0, POS_SCALE / 4);
+    assert_cu_within("post-expiry owner reduction", exit_cu, CUSTODY_CU_LIMIT);
+    assert_eq!(
+        active_leg_for_asset(&env.portfolio_state(long), 0)
+            .basis_pos_q
+            .unsigned_abs(),
+        position_before - POS_SCALE / 4
+    );
+    let done = env.market_state().1;
+    assert_eq!(done.vault, vault_before);
+    assert_eq!(done.vault as u64, env.token_amount(env.vault));
 }

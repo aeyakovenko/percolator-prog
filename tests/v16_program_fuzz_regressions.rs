@@ -1,7 +1,7 @@
 mod support;
 
 use support::{
-    blocker_corpus::{blocker_scenarios, known_blocker_scenarios},
+    blocker_corpus::{blocker_scenarios, fixed_blocker_scenarios},
     fuzz_model::{
         reproduce_activation_fee_consent, reproduce_activation_retry_replay,
         reproduce_asset_generation_config_replay, reproduce_asset_generation_mark_replay,

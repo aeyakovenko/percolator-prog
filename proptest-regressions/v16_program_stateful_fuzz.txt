@@ -2,3 +2,4 @@
 cc ae38afa847b894e708ef1fc22b677c38412329c0288c02092378d04e838086ce
 # Honest observations use authenticated time, not the engine's lagging group cursor.
 cc 3d5b8e3f5c34ff3b99925588948b34f01881b1a69f1b46fb42e4672c673ccb2a
+cc 8a7a18b27837e54344e17eb56af2690131e14e86c44dc64e87ed72215fe53758 # shrinks to scenario = Scenario { seed: [0, 0, 0, 0, 0, 0, 0, 0, 14, 227, 81, 66, 27, 66, 109, 41, 170, 164, 196, 203, 210, 208, 47, 210, 64, 229, 115, 46, 229, 64, 132, 71], config: SmallMarketConfig { max_price_move_bps_per_slot: 1, max_accrual_dt_slots: 4, max_abs_funding_e9_per_slot: 10000, maintenance_fee_per_slot: 0 }, actions: [PushMark { asset: 45, dt: 1, move_bps: 325 }] }

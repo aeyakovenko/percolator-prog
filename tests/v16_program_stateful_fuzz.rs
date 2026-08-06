@@ -71,7 +71,7 @@ use support::fuzz_model::{
     terminal_dust_payout_erasure_strategy, trade_driven_liquidation_reward_strategy,
     trade_fee_market_generation_replay_seed_strategy, trade_funding_erasure_strategy,
     trade_portfolio_incarnation_replay_strategy, trade_retry_replay_strategy,
-    withdrawal_retry_liquidation_seed_strategy, TradeRoute,
+    verify_source_credit_rate_lifecycle, withdrawal_retry_liquidation_seed_strategy, TradeRoute,
 };
 use support::invariant_discovery::{
     discover_accrual_ordering_violations, discover_active_leg_currentness_violation,
@@ -144,6 +144,9 @@ mod inv_020_authenticated_clock_slot_and_oracle_provenance;
 
 #[path = "invariants/stateful/inv_028_source_domain_realizability_cap.rs"]
 mod inv_028_source_domain_realizability_cap;
+
+#[path = "invariants/stateful/inv_030_credit_rate_determinism_and_fail_closed_behavior.rs"]
+mod inv_030_credit_rate_determinism_and_fail_closed_behavior;
 
 #[path = "invariants/stateful/inv_031_no_double_use_of_claim_backing_or_insurance_atoms.rs"]
 mod inv_031_no_double_use_of_claim_backing_or_insurance_atoms;

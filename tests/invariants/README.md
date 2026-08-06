@@ -23,8 +23,8 @@ verification methods are in [`../../INVARIANTS.md`](../../INVARIANTS.md).
 | Suite | Tests | Evidence |
 | --- | ---: | --- |
 | `public_sbf/` | 80 | Deterministic public SBF/LiteSVM counterexamples, regressions, and manifest checks |
-| `stateful/` | 116 | Proptest-generated public routes, including generalized active-leg/currentness and authenticated-expiry route matrices |
-| `cu/` | 103 | Positive public-route, metamorphic, rollback, liveness, and max-shape CU tests |
+| `stateful/` | 117 | Proptest-generated public routes, including generalized active-leg/currentness, source-credit-rate, and authenticated-expiry route matrices |
+| `cu/` | 104 | Positive public-route, metamorphic, rollback, liveness, and max-shape CU tests |
 | `kani/` | 41 | Symbolic wrapper arithmetic, matcher-binding, and strict-decoder proofs |
 
 Most deterministic and stateful LoF adapters still reproduce quarantined vulnerable behavior;
@@ -82,7 +82,7 @@ charter.
 | INV-027 | SVM/CU | `cu/inv_027_protected_principal_seniority.rs` |
 | INV-028 | Independent + SVM/CU | `stateful/inv_028_source_domain_realizability_cap.rs`, `cu/inv_028_source_domain_realizability_cap.rs` |
 | INV-029 | Gap | - |
-| INV-030 | Gap | - |
+| INV-030 | Independent + SVM/CU | `stateful/inv_030_credit_rate_determinism_and_fail_closed_behavior.rs`, `cu/inv_063_backing_expiry_normalization.rs` (secondary expiry/progress owner) |
 | INV-031 | Independent + Direct | `public_sbf/inv_031_no_double_use_of_claim_backing_or_insurance_atoms.rs`, `stateful/inv_031_no_double_use_of_claim_backing_or_insurance_atoms.rs` |
 | INV-032 | SVM/CU | `cu/inv_032_exact_counterparty_lien_lifecycle.rs` |
 | INV-033 | Gap | - |
@@ -191,9 +191,10 @@ cargo test --test v16_cu
 cargo kani --tests
 ```
 
-On engine pin `143e68c4917ed0400a27b952f036a5677047cd84`, the full `v16_cu` inventory has
-667 passing tests. The former red PR220/PR366 and PR367 probes are fixed-pin regressions under
-INV-053 and INV-063; the unfiltered command is the required verification command.
+On engine pin `c09d4575144f5be5fd0e8564d72fa22665a7e5bc`, the full `v16_cu` inventory has
+668 passing tests. The former red PR220/PR366, PR367, and live source-backing expiry probes are
+fixed-pin regressions under INV-030, INV-053, and INV-063; the unfiltered command is the required
+verification command.
 
 Use `PERCOLATOR_FUZZ_CASES`, `PERCOLATOR_FUZZ_ACTIONS`, and
 `PERCOLATOR_FUZZ_SHRINK_ITERS` to raise the generated stateful budget. Kani harness names now include

@@ -259,7 +259,7 @@ pub fn blocker_scenarios() -> Vec<(&'static str, Scenario)> {
 }
 
 #[allow(dead_code)]
-pub fn known_blocker_scenarios() -> Vec<(&'static str, Scenario)> {
+pub fn fixed_blocker_scenarios() -> Vec<(&'static str, Scenario)> {
     vec![(
         "pr204_live_lapsed_source_backing_auto_crank",
         Scenario {

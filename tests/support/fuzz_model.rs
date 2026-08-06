@@ -4,7 +4,8 @@ use super::v16_svm::{
 };
 use percolator::{
     v16_domain_pair_for_asset_index, AssetLifecycleV16, BackingBucketStatusV16, MarketModeV16,
-    PortfolioLegV16, SideModeV16, SideV16, POS_SCALE,
+    PortfolioLegV16, SideModeV16, SideV16, CREDIT_RATE_SCALE, PORTFOLIO_SOURCE_DOMAIN_CAP,
+    POS_SCALE,
 };
 use percolator_prog::{
     constants::{ORACLE_LEG_FLAG_DIVIDE_LEG2, ORACLE_LEG_FLAG_DIVIDE_LEG3, ORACLE_MODE_EWMA_MARK},
@@ -1391,6 +1392,106 @@ impl ProgressRank {
     }
 }
 
+fn add_mod_with_carry(lhs: u128, rhs: u128, modulus: u128) -> (u128, u128) {
+    debug_assert!(modulus != 0 && lhs < modulus && rhs < modulus);
+    let gap = modulus - rhs;
+    if lhs >= gap {
+        (1, lhs - gap)
+    } else {
+        (0, lhs + rhs)
+    }
+}
+
+// Exact floor(lhs * rhs / denominator) without using the engine's U256 implementation or
+// overflowing u128. INV-030 uses this as an independent persisted-state oracle.
+fn reference_mul_div_floor(lhs: u128, rhs: u128, denominator: u128) -> Result<u128, String> {
+    if denominator == 0 {
+        return Err("source-credit reference division by zero".into());
+    }
+    let whole = lhs / denominator;
+    let mut quotient = whole
+        .checked_mul(rhs)
+        .ok_or("source-credit reference quotient overflow")?;
+    let reduced_lhs = lhs % denominator;
+    let mut remainder = 0u128;
+    let mut fractional = 0u128;
+    for bit in (0..u128::BITS).rev() {
+        fractional = fractional
+            .checked_mul(2)
+            .ok_or("source-credit reference fractional overflow")?;
+        let (double_carry, doubled) = add_mod_with_carry(remainder, remainder, denominator);
+        fractional = fractional
+            .checked_add(double_carry)
+            .ok_or("source-credit reference fractional carry overflow")?;
+        remainder = doubled;
+        if rhs & (1u128 << bit) != 0 {
+            let (add_carry, next) = add_mod_with_carry(remainder, reduced_lhs, denominator);
+            fractional = fractional
+                .checked_add(add_carry)
+                .ok_or("source-credit reference add carry overflow")?;
+            remainder = next;
+        }
+    }
+    quotient = quotient
+        .checked_add(fractional)
+        .ok_or("source-credit reference result overflow")?;
+    Ok(quotient)
+}
+
+fn assert_source_credit_rates(label: &str, group: &MarketGroupV16) -> Result<(), String> {
+    for (domain, source) in group.source_credit.iter().copied().enumerate() {
+        if source.exact_positive_claim_num > source.positive_claim_bound_num {
+            return Err(format!(
+                "{label} source domain {domain} exact claim exceeds its bound"
+            ));
+        }
+        if source.fresh_reserved_backing_num < source.valid_liened_backing_num {
+            return Err(format!(
+                "{label} source domain {domain} liens more counterparty backing than reserved"
+            ));
+        }
+        let insurance_encumbered = source
+            .valid_liened_insurance_num
+            .checked_add(source.impaired_liened_insurance_num)
+            .ok_or_else(|| format!("{label} source domain {domain} insurance lien overflow"))?;
+        if source.insurance_credit_reserved_num < insurance_encumbered {
+            return Err(format!(
+                "{label} source domain {domain} liens more insurance than reserved"
+            ));
+        }
+        let available = source
+            .fresh_reserved_backing_num
+            .checked_sub(source.valid_liened_backing_num)
+            .and_then(|counterparty| {
+                source
+                    .insurance_credit_reserved_num
+                    .checked_sub(insurance_encumbered)
+                    .and_then(|insurance| counterparty.checked_add(insurance))
+            })
+            .ok_or_else(|| format!("{label} source domain {domain} available backing invalid"))?;
+        let expected = if source.positive_claim_bound_num == 0
+            || available >= source.positive_claim_bound_num
+        {
+            CREDIT_RATE_SCALE
+        } else {
+            reference_mul_div_floor(
+                available,
+                CREDIT_RATE_SCALE,
+                source.positive_claim_bound_num,
+            )?
+            .min(CREDIT_RATE_SCALE)
+        };
+        if source.credit_rate_num != expected {
+            return Err(format!(
+                "{label} source domain {domain} persisted credit rate {} != independent \
+                 {expected} (available={available}, claim_bound={})",
+                source.credit_rate_num, source.positive_claim_bound_num
+            ));
+        }
+    }
+    Ok(())
+}
+
 #[derive(Clone)]
 struct Snapshot {
     primary_market: Vec<u8>,
@@ -2466,7 +2567,8 @@ impl ScenarioRunner {
             self.drain_one_progress_step(None)?;
         }
         Err(format!(
-            "permissionless drain exceeded deterministic bound {limit}"
+            "permissionless drain exceeded deterministic bound {limit}; {}",
+            self.liveness_diagnostics()
         ))
     }
 
@@ -2824,6 +2926,8 @@ impl ScenarioRunner {
         if foreign.vault < foreign_senior {
             return Err("unbacked foreign value".into());
         }
+        assert_source_credit_rates("primary", &primary)?;
+        assert_source_credit_rates("foreign", &foreign)?;
         self.assert_positions_match()
     }
 
@@ -3194,6 +3298,152 @@ pub fn run_scenario(scenario: &Scenario) -> Result<Coverage, String> {
     Ok(progress_runner.coverage)
 }
 
+#[allow(dead_code)]
+pub fn verify_source_credit_rate_lifecycle(
+    mut seed: [u8; 32],
+    initial_backing: u16,
+    added_backing: u16,
+    price_move: u8,
+) -> Result<(), String> {
+    const WINNERS: [usize; 2] = [0, 1];
+    const LOSERS: [usize; 2] = [2, 3];
+    const MARKET_CRANKER: usize = 4;
+    const ASSET: u16 = 0;
+    const SOURCE_DOMAIN: usize = 1;
+    const START_PRICE: u64 = 100;
+    const POSITION_Q: i128 = POS_SCALE as i128;
+    const EXPIRY_SLOT: u64 = 6;
+
+    seed[0] ^= 0x30;
+    let initial_backing = u128::from(initial_backing.clamp(1, 100));
+    let added_backing = u128::from(added_backing.clamp(1, 100));
+    let price_move = u64::from(price_move.clamp(5, 20));
+    let winning_price = 230u64
+        .checked_add(price_move)
+        .ok_or("INV-030 winning price overflow")?;
+    let mut env = V16Svm::new(
+        seed,
+        MarketConfig {
+            initial_price: START_PRICE,
+            max_price_move_bps_per_slot: 10_000,
+            max_accrual_dt_slots: 1,
+            min_funding_lifetime_slots: 1,
+            actor_deposits: [150, 150, 150, 150, 1],
+            actor_token_balances: [150, 150, 150, 150, 1],
+            ..MarketConfig::default()
+        },
+    );
+    env.configure_auth_mark(false, ASSET, 1, START_PRICE)
+        .map_err(|error| format!("INV-030 configure AuthMark: {error}"))?;
+    env.top_up_backing_bucket(SOURCE_DOMAIN as u16, initial_backing, EXPIRY_SLOT)
+        .map_err(|error| format!("INV-030 initial backing top-up: {error}"))?;
+    for (&winner, &loser) in WINNERS.iter().zip(LOSERS.iter()) {
+        env.trade_no_cpi(winner, loser, ASSET, POSITION_Q, START_PRICE, 0)
+            .map_err(|error| format!("INV-030 open balanced pair {winner}/{loser}: {error}"))?;
+    }
+
+    for slot in 2..=3 {
+        env.warp_to_slot(slot);
+        env.push_auth_mark(ASSET, slot, winning_price)
+            .map_err(|error| format!("INV-030 publish winning mark at {slot}: {error}"))?;
+        crank_adapter_steps(&mut env, MARKET_CRANKER, slot, ASSET, 8)?;
+    }
+    for winner in WINNERS {
+        crank_adapter_steps(&mut env, winner, 3, ASSET, 16)?;
+    }
+    let (_, after_claim) = env.primary_market_state();
+    assert_source_credit_rates("INV-030 after claim", &after_claim)?;
+    let claim_source = after_claim.source_credit[SOURCE_DOMAIN];
+    if claim_source.positive_claim_bound_num == 0
+        || claim_source.credit_rate_num == 0
+        || claim_source.credit_rate_num >= CREDIT_RATE_SCALE
+    {
+        return Err(format!(
+            "INV-030 setup did not create a discounted source claim: {claim_source:?}"
+        ));
+    }
+    let baseline_rate = claim_source.credit_rate_num;
+    let claim_bound = claim_source.positive_claim_bound_num;
+
+    env.top_up_backing_bucket(SOURCE_DOMAIN as u16, added_backing, EXPIRY_SLOT)
+        .map_err(|error| format!("INV-030 incremental backing top-up: {error}"))?;
+    let (_, after_add) = env.primary_market_state();
+    assert_source_credit_rates("INV-030 after backing add", &after_add)?;
+    let raised_rate = after_add.source_credit[SOURCE_DOMAIN].credit_rate_num;
+    if raised_rate <= baseline_rate || raised_rate >= CREDIT_RATE_SCALE {
+        return Err(format!(
+            "INV-030 fresh backing did not strictly and conservatively raise the rate: \
+             {baseline_rate}->{raised_rate}, claim={claim_bound}"
+        ));
+    }
+    let vault_before_expiry = after_add.vault;
+    let vault_tokens_before_expiry = env.token_amount(env.vault);
+
+    env.warp_to_slot(EXPIRY_SLOT);
+    env.push_auth_mark(ASSET, EXPIRY_SLOT, winning_price)
+        .map_err(|error| format!("INV-030 publish expiry-boundary mark: {error}"))?;
+    crank_adapter_steps(&mut env, WINNERS[0], EXPIRY_SLOT, ASSET, 24)?;
+    let (_, after_expiry) = env.primary_market_state();
+    assert_source_credit_rates("INV-030 after expiry", &after_expiry)?;
+    let expired_bucket = after_expiry.source_backing_buckets[SOURCE_DOMAIN];
+    let expired_source = after_expiry.source_credit[SOURCE_DOMAIN];
+    if expired_bucket.status == BackingBucketStatusV16::Fresh
+        || expired_source.positive_claim_bound_num != claim_bound
+        || expired_source.credit_rate_num != 0
+    {
+        return Err(format!(
+            "INV-030 expiry did not fail closed without deleting the claim: \
+             bucket={expired_bucket:?}, source={expired_source:?}, claim={claim_bound}"
+        ));
+    }
+    if after_expiry.vault != vault_before_expiry
+        || env.token_amount(env.vault) != vault_tokens_before_expiry
+    {
+        return Err("INV-030 backing expiry moved internal or SPL custody".into());
+    }
+
+    let position_before_exit =
+        position_abs_for_asset(&env.primary_portfolio(WINNERS[0]), ASSET as usize)?;
+    env.rebalance_reduce(WINNERS[0], ASSET, POS_SCALE / 4)
+        .map_err(|error| format!("INV-030 owner reduction after fail-closed expiry: {error}"))?;
+    let position_after_exit =
+        position_abs_for_asset(&env.primary_portfolio(WINNERS[0]), ASSET as usize)?;
+    if position_after_exit != position_before_exit - POS_SCALE / 4
+        || env.token_amount(env.vault) != vault_tokens_before_expiry
+    {
+        return Err(format!(
+            "INV-030 owner reduction did not preserve custody and reduce risk: \
+             {position_before_exit}->{position_after_exit}"
+        ));
+    }
+
+    let refill = initial_backing
+        .checked_add(added_backing)
+        .ok_or("INV-030 refill overflow")?;
+    env.top_up_backing_bucket(
+        SOURCE_DOMAIN as u16,
+        refill,
+        EXPIRY_SLOT
+            .checked_add(10)
+            .ok_or("INV-030 refill expiry overflow")?,
+    )
+    .map_err(|error| format!("INV-030 refill expired source: {error}"))?;
+    let (_, after_refill) = env.primary_market_state();
+    assert_source_credit_rates("INV-030 after refill", &after_refill)?;
+    let refilled_source = after_refill.source_credit[SOURCE_DOMAIN];
+    if after_refill.source_backing_buckets[SOURCE_DOMAIN].status != BackingBucketStatusV16::Fresh
+        || refilled_source.credit_rate_num == 0
+        || refilled_source.credit_rate_num >= CREDIT_RATE_SCALE
+    {
+        return Err(format!(
+            "INV-030 independently backed refill did not restore bounded credit: \
+             {:?}",
+            refilled_source
+        ));
+    }
+    Ok(())
+}
+
 fn scenario_liveness_limit(scenario: &Scenario) -> Result<usize, String> {
     let cap_bps_per_step = scenario
         .config
@@ -3234,10 +3484,22 @@ fn scenario_liveness_limit(scenario: &Scenario) -> Result<usize, String> {
         .checked_mul(ASSET_COUNT as u64)
         .and_then(|value| value.checked_mul(16))
         .ok_or("liveness account-step bound overflow")?;
+    let global_step_fanout = (PRIMARY_ACTOR_COUNT as u64)
+        .checked_add(1)
+        .ok_or("liveness fanout overflow")?;
     let derived = mark_steps
-        .checked_mul(2)
+        // A market step can invalidate every modeled portfolio certificate once;
+        // the extra step is the market continuation itself.
+        .checked_mul(global_step_fanout)
         .and_then(|value| value.checked_add(slot_steps))
         .and_then(|value| value.checked_add(account_steps))
+        // Each global source domain can add one bounded Fresh -> Expired/Impaired
+        // continuation plus one certificate refresh per modeled portfolio.
+        .and_then(|value| {
+            (PORTFOLIO_SOURCE_DOMAIN_CAP as u64)
+                .checked_mul(global_step_fanout)
+                .and_then(|source_steps| value.checked_add(source_steps))
+        })
         .and_then(|value| value.checked_add(64))
         .ok_or("liveness total bound overflow")?;
     let derived =
