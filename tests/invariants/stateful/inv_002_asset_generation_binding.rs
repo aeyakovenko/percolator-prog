@@ -56,8 +56,6 @@ proptest! {
         prop_assert_eq!(
             violations,
             vec![
-                AssetIntentKind::InsuranceTopUp,
-                AssetIntentKind::BackingTopUp,
                 AssetIntentKind::InsuranceWithdrawal,
                 AssetIntentKind::BackingFeePolicy,
                 AssetIntentKind::ResolveMarket,
@@ -77,8 +75,10 @@ proptest! {
                 AssetIntentKind::ConfigureAuthMark,
                 AssetIntentKind::ConfigureEwmaMark,
                 AssetIntentKind::ConfigureHybridOracle,
+                AssetIntentKind::InsuranceTopUp,
+                AssetIntentKind::BackingTopUp,
             ],
-            "trade and oracle intents must reject after slot reuse"
+            "trade, oracle, and top-up intents must reject after slot reuse"
         );
     }
 }
@@ -139,32 +139,39 @@ proptest! {
         prop_assert!(!protection.accepted_stale_intent);
         prop_assert!(!protection.mutated_economic_state);
         prop_assert_eq!(protection.compute_units, None);
+        prop_assert!(protection.rejection_was_generation_mismatch);
+        prop_assert!(protection.fresh_intent_landed);
+        prop_assert!(protection.fresh_intent_mutated_economic_state);
     }
 
     #[test]
-    fn v16_program_pr279_collateral_top_up_generation_replay_fuzz(
+    fn v16_program_pr279_insurance_top_up_generation_binding_fuzz(
         seed in collateral_top_up_generation_replay_seed_strategy()
     ) {
-        let result = reproduce_collateral_top_up_generation_replay(seed);
-        prop_assert!(
-            result.is_ok(),
-            "PR 279 no longer reproduces for seed {:?}: {}",
-            seed,
-            result.unwrap_err()
-        );
+        let protection = discover_asset_generation_replay(seed, AssetIntentKind::InsuranceTopUp)
+            .map_err(TestCaseError::fail)?;
+        prop_assert!(protection.new_asset_id > protection.old_asset_id);
+        prop_assert!(!protection.accepted_stale_intent);
+        prop_assert!(!protection.mutated_economic_state);
+        prop_assert_eq!(protection.compute_units, None);
+        prop_assert!(protection.rejection_was_generation_mismatch);
+        prop_assert!(protection.fresh_intent_landed);
+        prop_assert!(protection.fresh_intent_mutated_economic_state);
     }
 
     #[test]
-    fn v16_program_pr321_backing_top_up_generation_replay_fuzz(
+    fn v16_program_pr321_backing_top_up_generation_binding_fuzz(
         seed in backing_top_up_generation_replay_seed_strategy()
     ) {
-        let result = reproduce_backing_top_up_generation_replay(seed);
-        prop_assert!(
-            result.is_ok(),
-            "PR 321 no longer reproduces for seed {:?}: {}",
-            seed,
-            result.unwrap_err()
-        );
+        let protection = discover_asset_generation_replay(seed, AssetIntentKind::BackingTopUp)
+            .map_err(TestCaseError::fail)?;
+        prop_assert!(protection.new_asset_id > protection.old_asset_id);
+        prop_assert!(!protection.accepted_stale_intent);
+        prop_assert!(!protection.mutated_economic_state);
+        prop_assert_eq!(protection.compute_units, None);
+        prop_assert!(protection.rejection_was_generation_mismatch);
+        prop_assert!(protection.fresh_intent_landed);
+        prop_assert!(protection.fresh_intent_mutated_economic_state);
     }
 
     #[test]
@@ -221,5 +228,8 @@ proptest! {
         prop_assert!(!protection.accepted_stale_intent);
         prop_assert!(!protection.mutated_economic_state);
         prop_assert_eq!(protection.compute_units, None);
+        prop_assert!(protection.rejection_was_generation_mismatch);
+        prop_assert!(protection.fresh_intent_landed);
+        prop_assert!(protection.fresh_intent_mutated_economic_state);
     }
 }

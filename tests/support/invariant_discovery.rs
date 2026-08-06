@@ -4,6 +4,7 @@ use super::v16_svm::{
 use percolator::{BackingBucketStatusV16, MarketModeV16, SideModeV16, ADL_ONE, POS_SCALE};
 use percolator_prog::{
     constants::{ORACLE_LEG_FLAG_DIVIDE_LEG2, ORACLE_LEG_FLAG_DIVIDE_LEG3},
+    error::PercolatorError,
     ix::{BatchTradeCpiLeg, BatchTradeLeg, CrankObservationHint},
 };
 use serde::{Deserialize, Serialize};
@@ -652,6 +653,9 @@ pub struct AssetGenerationDiscovery {
     pub accepted_stale_intent: bool,
     pub mutated_economic_state: bool,
     pub compute_units: Option<u64>,
+    pub rejection_was_generation_mismatch: bool,
+    pub fresh_intent_landed: bool,
+    pub fresh_intent_mutated_economic_state: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -3237,12 +3241,43 @@ fn discover_one_asset_generation_replay(
                 accepted_stale_intent: true,
                 mutated_economic_state,
                 compute_units: Some(success.compute_units),
+                rejection_was_generation_mismatch: false,
+                fresh_intent_landed: false,
+                fresh_intent_mutated_economic_state: false,
             })
         }
-        Err(_) => {
+        Err(error) => {
             if before != after {
                 return Err(format!(
                     "{kind:?} rejected stale asset transaction did not roll back exactly"
+                ));
+            }
+            let expected = format!(
+                "Custom({})",
+                PercolatorError::AssetGenerationMismatch as u32
+            );
+            if !error.contains(&expected) {
+                return Err(format!(
+                    "{kind:?} stale asset transaction rejected for the wrong reason: expected {expected}, got {error}"
+                ));
+            }
+
+            let fresh =
+                retained_asset_intent(&mut env, kind, ASSET, AUTHORITY_ACTOR, oracle_account);
+            let before_fresh = fingerprint(&env);
+            let fresh_result = env.land_retained(fresh);
+            let after_fresh = fingerprint(&env);
+            let fresh_intent_landed = fresh_result.is_ok();
+            let fresh_intent_mutated_economic_state = before_fresh != after_fresh;
+            if !fresh_intent_landed || !fresh_intent_mutated_economic_state {
+                return Err(format!(
+                    "{kind:?} current-generation control was not live: result={fresh_result:?}, mutated={fresh_intent_mutated_economic_state}"
+                ));
+            }
+            if env.token_supply_observed() != supply_before {
+                return Err(format!(
+                    "{kind:?} current-generation control changed SPL supply: {supply_before} -> {}",
+                    env.token_supply_observed()
                 ));
             }
             Ok(AssetGenerationDiscovery {
@@ -3252,6 +3287,9 @@ fn discover_one_asset_generation_replay(
                 accepted_stale_intent: false,
                 mutated_economic_state: false,
                 compute_units: None,
+                rejection_was_generation_mismatch: true,
+                fresh_intent_landed,
+                fresh_intent_mutated_economic_state,
             })
         }
     }

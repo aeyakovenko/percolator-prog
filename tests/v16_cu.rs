@@ -3190,7 +3190,10 @@ impl V16CuEnv {
             &mut self.svm,
             self.program_id,
             &self.payer,
-            ProgInstruction::TopUpInsurance { amount },
+            ProgInstruction::TopUpInsurance {
+                market_id: 0,
+                amount,
+            },
             vec![
                 AccountMeta::new(self.admin.pubkey(), true),
                 AccountMeta::new(self.market, false),
@@ -3215,6 +3218,7 @@ impl V16CuEnv {
             self.program_id,
             &self.payer,
             ProgInstruction::TopUpBackingBucket {
+                market_id: 0,
                 domain,
                 amount,
                 expiry_slot,
@@ -3249,7 +3253,10 @@ impl V16CuEnv {
             &mut self.svm,
             self.program_id,
             &self.payer,
-            ProgInstruction::TopUpInsurance { amount },
+            ProgInstruction::TopUpInsurance {
+                market_id: 0,
+                amount,
+            },
             vec![
                 AccountMeta::new(self.admin.pubkey(), true),
                 AccountMeta::new(self.market, false),
@@ -3285,7 +3292,10 @@ impl V16CuEnv {
             &mut self.svm,
             self.program_id,
             &self.payer,
-            ProgInstruction::TopUpInsurance { amount },
+            ProgInstruction::TopUpInsurance {
+                market_id: 0,
+                amount,
+            },
             vec![
                 AccountMeta::new(self.admin.pubkey(), true),
                 AccountMeta::new(self.market, false),
@@ -3324,7 +3334,11 @@ impl V16CuEnv {
             &mut self.svm,
             self.program_id,
             &self.payer,
-            ProgInstruction::TopUpInsuranceDomain { domain, amount },
+            ProgInstruction::TopUpInsuranceDomain {
+                market_id: 0,
+                domain,
+                amount,
+            },
             vec![
                 AccountMeta::new(authority.pubkey(), true),
                 AccountMeta::new(self.market, false),
@@ -3363,7 +3377,11 @@ impl V16CuEnv {
             &mut self.svm,
             self.program_id,
             &self.payer,
-            ProgInstruction::TopUpInsuranceDomain { domain, amount },
+            ProgInstruction::TopUpInsuranceDomain {
+                market_id: 0,
+                domain,
+                amount,
+            },
             vec![
                 AccountMeta::new(authority.pubkey(), true),
                 AccountMeta::new(self.market, false),
@@ -3402,6 +3420,7 @@ impl V16CuEnv {
             self.program_id,
             &self.payer,
             ProgInstruction::TopUpBackingBucket {
+                market_id: 0,
                 domain,
                 amount,
                 expiry_slot,
@@ -3444,6 +3463,7 @@ impl V16CuEnv {
             self.program_id,
             &self.payer,
             ProgInstruction::TopUpBackingBucket {
+                market_id: 0,
                 domain,
                 amount,
                 expiry_slot,
@@ -3476,6 +3496,7 @@ impl V16CuEnv {
             self.program_id,
             &self.payer,
             ProgInstruction::TopUpBackingBucket {
+                market_id: 0,
                 domain,
                 amount,
                 expiry_slot,
@@ -4091,7 +4112,7 @@ fn send_tx(
     accounts: Vec<AccountMeta>,
     extra_signers: &[&Keypair],
 ) -> Result<u64, String> {
-    bind_current_oracle_generation(svm, &accounts, &mut ix);
+    bind_current_asset_generation(svm, &accounts, &mut ix);
     let instruction = Instruction {
         program_id,
         accounts,
@@ -4111,7 +4132,7 @@ fn send_tx(
         .map_err(|e| format!("{e:?}"))
 }
 
-fn bind_current_oracle_generation(
+fn bind_current_asset_generation(
     svm: &LiteSVM,
     accounts: &[AccountMeta],
     ix: &mut ProgInstruction,
@@ -4147,14 +4168,23 @@ fn bind_current_oracle_generation(
             market_id,
             ..
         } => (*asset_index as usize, market_id),
+        ProgInstruction::TopUpInsurance { market_id, .. } => (0, market_id),
+        ProgInstruction::TopUpInsuranceDomain {
+            domain, market_id, ..
+        }
+        | ProgInstruction::TopUpBackingBucket {
+            domain, market_id, ..
+        } => (*domain as usize / 2, market_id),
         _ => return,
     };
     if *market_id != 0 {
         return;
     }
-    let market_key = accounts.get(1).expect("oracle market account").pubkey;
-    let market = svm.get_account(&market_key).expect("oracle market state");
-    let (_, group) = state::read_market(&market.data).expect("valid oracle market state");
+    let market_key = accounts.get(1).expect("asset-scoped market account").pubkey;
+    let market = svm
+        .get_account(&market_key)
+        .expect("asset-scoped market state");
+    let (_, group) = state::read_market(&market.data).expect("valid asset-scoped market state");
     let Some(asset) = group.assets.get(asset_index) else {
         return;
     };
@@ -4452,6 +4482,7 @@ fn v16_bpf_mainnet_realistic_system_spl_ata_bootstrap_deposits_and_ledgers() {
         program_id,
         &payer,
         ProgInstruction::TopUpBackingBucket {
+            market_id: 0,
             domain: 1,
             amount: 77,
             expiry_slot: 10,
@@ -4508,7 +4539,10 @@ fn v16_bpf_mainnet_realistic_system_spl_ata_bootstrap_deposits_and_ledgers() {
         &mut svm,
         program_id,
         &payer,
-        ProgInstruction::TopUpInsurance { amount: 33 },
+        ProgInstruction::TopUpInsurance {
+            market_id: 0,
+            amount: 33,
+        },
         vec![
             AccountMeta::new(admin.pubkey(), true),
             AccountMeta::new(market.pubkey(), false),
@@ -4761,6 +4795,7 @@ fn top_up_backing_bucket_to_market(
         env.program_id,
         &env.payer,
         ProgInstruction::TopUpBackingBucket {
+            market_id: 0,
             domain,
             amount,
             expiry_slot,
@@ -5000,7 +5035,10 @@ fn v16_bpf_failed_insurance_topup_transfer_rolls_back_budget_and_ledger() {
         &mut env.svm,
         env.program_id,
         &env.payer,
-        ProgInstruction::TopUpInsurance { amount: 100 },
+        ProgInstruction::TopUpInsurance {
+            market_id: 0,
+            amount: 100,
+        },
         vec![
             AccountMeta::new(env.admin.pubkey(), true),
             AccountMeta::new(env.market, false),
@@ -5052,6 +5090,7 @@ fn v16_bpf_failed_domain_insurance_topup_transfer_rolls_back_budget_and_ledger()
         env.program_id,
         &env.payer,
         ProgInstruction::TopUpInsuranceDomain {
+            market_id: 0,
             domain: 1,
             amount: 100,
         },
@@ -5108,6 +5147,7 @@ fn v16_bpf_failed_backing_topup_transfer_rolls_back_bucket_and_ledger() {
         env.program_id,
         &env.payer,
         ProgInstruction::TopUpBackingBucket {
+            market_id: 0,
             domain: 1,
             amount: 100,
             expiry_slot: 10,
@@ -6595,6 +6635,7 @@ fn v16_attack_retired_asset_domain_authority_cannot_refund_slot_and_block_reuse(
     env.svm.expire_blockhash();
     let insurance_topup = env.send(
         ProgInstruction::TopUpInsuranceDomain {
+            market_id: 0,
             domain: 2,
             amount: 77,
         },
@@ -6623,6 +6664,7 @@ fn v16_attack_retired_asset_domain_authority_cannot_refund_slot_and_block_reuse(
     env.svm.expire_blockhash();
     let backing_topup = env.send(
         ProgInstruction::TopUpBackingBucket {
+            market_id: 0,
             domain: 2,
             amount: 88,
             expiry_slot: 10,
@@ -24130,6 +24172,7 @@ fn v16_attack_backing_ledger_market_binding_enforced() {
         env.program_id,
         &env.payer,
         ProgInstruction::TopUpBackingBucket {
+            market_id: 0,
             domain: 1,
             amount: 100,
             expiry_slot: 10,
@@ -24491,6 +24534,7 @@ fn v16_attack_insurance_ledger_market_binding_enforced() {
         env.program_id,
         &env.payer,
         ProgInstruction::TopUpInsuranceDomain {
+            market_id: 0,
             domain: 0,
             amount: 100,
         },
@@ -24756,7 +24800,10 @@ fn v16_attack_topup_optional_ledgers_reject_cross_market_reuse() {
         &mut env.svm,
         env.program_id,
         &env.payer,
-        ProgInstruction::TopUpInsurance { amount: 25 },
+        ProgInstruction::TopUpInsurance {
+            market_id: 0,
+            amount: 25,
+        },
         vec![
             AccountMeta::new(admin.pubkey(), true),
             AccountMeta::new(market_b, false),
@@ -24786,6 +24833,7 @@ fn v16_attack_topup_optional_ledgers_reject_cross_market_reuse() {
         env.program_id,
         &env.payer,
         ProgInstruction::TopUpInsuranceDomain {
+            market_id: 0,
             domain: 0,
             amount: 30,
         },
@@ -24818,6 +24866,7 @@ fn v16_attack_topup_optional_ledgers_reject_cross_market_reuse() {
         env.program_id,
         &env.payer,
         ProgInstruction::TopUpBackingBucket {
+            market_id: 0,
             domain: 1,
             amount: 40,
             expiry_slot: 10,
@@ -24850,7 +24899,10 @@ fn v16_attack_topup_optional_ledgers_reject_cross_market_reuse() {
         &mut env.svm,
         env.program_id,
         &env.payer,
-        ProgInstruction::TopUpInsurance { amount: 25 },
+        ProgInstruction::TopUpInsurance {
+            market_id: 0,
+            amount: 25,
+        },
         vec![
             AccountMeta::new(admin.pubkey(), true),
             AccountMeta::new(market_b, false),
@@ -24882,6 +24934,7 @@ fn v16_attack_topup_optional_ledgers_reject_cross_market_reuse() {
         env.program_id,
         &env.payer,
         ProgInstruction::TopUpInsuranceDomain {
+            market_id: 0,
             domain: 0,
             amount: 30,
         },
@@ -24914,6 +24967,7 @@ fn v16_attack_topup_optional_ledgers_reject_cross_market_reuse() {
         env.program_id,
         &env.payer,
         ProgInstruction::TopUpBackingBucket {
+            market_id: 0,
             domain: 1,
             amount: 40,
             expiry_slot: 10,
@@ -25043,7 +25097,10 @@ fn v16_attack_terminal_insurance_ledger_rejects_cross_market_reuse() {
         &mut env.svm,
         env.program_id,
         &env.payer,
-        ProgInstruction::TopUpInsurance { amount: 100 },
+        ProgInstruction::TopUpInsurance {
+            market_id: 0,
+            amount: 100,
+        },
         vec![
             AccountMeta::new(admin.pubkey(), true),
             AccountMeta::new(market_b, false),
@@ -25179,7 +25236,10 @@ fn v16_attack_terminal_withdraw_insurance_rejects_portfolio_as_ledger() {
         &mut env.svm,
         env.program_id,
         &env.payer,
-        ProgInstruction::TopUpInsurance { amount: 100 },
+        ProgInstruction::TopUpInsurance {
+            market_id: 0,
+            amount: 100,
+        },
         vec![
             AccountMeta::new(admin.pubkey(), true),
             AccountMeta::new(market_b, false),
@@ -25548,7 +25608,10 @@ fn v16_attack_value_paths_cannot_use_portfolio_as_optional_ledger() {
     let top_up_insurance_source = env.token_account(admin.pubkey(), 25);
     env.svm.expire_blockhash();
     let top_up_insurance = env.send(
-        ProgInstruction::TopUpInsurance { amount: 25 },
+        ProgInstruction::TopUpInsurance {
+            market_id: 0,
+            amount: 25,
+        },
         vec![
             AccountMeta::new(admin.pubkey(), true),
             AccountMeta::new(env.market, false),
@@ -25574,6 +25637,7 @@ fn v16_attack_value_paths_cannot_use_portfolio_as_optional_ledger() {
     env.svm.expire_blockhash();
     let top_up_domain = env.send(
         ProgInstruction::TopUpInsuranceDomain {
+            market_id: 0,
             domain: 0,
             amount: 20,
         },
@@ -25602,6 +25666,7 @@ fn v16_attack_value_paths_cannot_use_portfolio_as_optional_ledger() {
     env.svm.expire_blockhash();
     let top_up_backing = env.send(
         ProgInstruction::TopUpBackingBucket {
+            market_id: 0,
             domain: 1,
             amount: 30,
             expiry_slot: 10,
@@ -25765,7 +25830,10 @@ fn v16_attack_value_paths_cannot_use_market_as_optional_ledger() {
     let top_up_insurance_source = env.token_account(admin.pubkey(), 25);
     env.svm.expire_blockhash();
     let top_up_insurance = env.send(
-        ProgInstruction::TopUpInsurance { amount: 25 },
+        ProgInstruction::TopUpInsurance {
+            market_id: 0,
+            amount: 25,
+        },
         vec![
             AccountMeta::new(admin.pubkey(), true),
             AccountMeta::new(env.market, false),
@@ -25787,6 +25855,7 @@ fn v16_attack_value_paths_cannot_use_market_as_optional_ledger() {
     env.svm.expire_blockhash();
     let top_up_domain = env.send(
         ProgInstruction::TopUpInsuranceDomain {
+            market_id: 0,
             domain: 0,
             amount: 20,
         },
@@ -25811,6 +25880,7 @@ fn v16_attack_value_paths_cannot_use_market_as_optional_ledger() {
     env.svm.expire_blockhash();
     let top_up_backing = env.send(
         ProgInstruction::TopUpBackingBucket {
+            market_id: 0,
             domain: 1,
             amount: 30,
             expiry_slot: 10,
@@ -26033,12 +26103,16 @@ fn v16_attack_topups_cannot_use_vault_as_source() {
 
     reject_alias(
         &mut env,
-        ProgInstruction::TopUpInsurance { amount: 500 },
+        ProgInstruction::TopUpInsurance {
+            market_id: 0,
+            amount: 500,
+        },
         "TopUpInsurance",
     );
     reject_alias(
         &mut env,
         ProgInstruction::TopUpInsuranceDomain {
+            market_id: 0,
             domain: 0,
             amount: 500,
         },
@@ -26048,6 +26122,7 @@ fn v16_attack_topups_cannot_use_vault_as_source() {
     reject_alias(
         &mut env,
         ProgInstruction::TopUpBackingBucket {
+            market_id: 0,
             domain: 1,
             amount: 500,
             expiry_slot,
@@ -26359,7 +26434,10 @@ fn v16_attack_insurance_topup_pinned_to_canonical_vault() {
         &mut env.svm,
         env.program_id,
         &env.payer,
-        ProgInstruction::TopUpInsurance { amount: 500 },
+        ProgInstruction::TopUpInsurance {
+            market_id: 0,
+            amount: 500,
+        },
         vec![
             AccountMeta::new(env.admin.pubkey(), true),
             AccountMeta::new(env.market, false),
@@ -26424,6 +26502,7 @@ fn v16_attack_domain_topups_pinned_to_canonical_vault() {
         env.program_id,
         &env.payer,
         ProgInstruction::TopUpInsuranceDomain {
+            market_id: 0,
             domain: 0,
             amount: 500,
         },
@@ -26466,6 +26545,7 @@ fn v16_attack_domain_topups_pinned_to_canonical_vault() {
         env.program_id,
         &env.payer,
         ProgInstruction::TopUpBackingBucket {
+            market_id: 0,
             domain: 1,
             amount: 700,
             expiry_slot: 10_000,
@@ -26533,6 +26613,7 @@ fn v16_attack_domain_indexed_calls_reject_out_of_range_atomically() {
         env.program_id,
         &env.payer,
         ProgInstruction::TopUpInsuranceDomain {
+            market_id: 0,
             domain: BAD_DOMAIN,
             amount: 123,
         },
@@ -26563,6 +26644,7 @@ fn v16_attack_domain_indexed_calls_reject_out_of_range_atomically() {
         env.program_id,
         &env.payer,
         ProgInstruction::TopUpBackingBucket {
+            market_id: 0,
             domain: BAD_DOMAIN,
             amount: 456,
             expiry_slot: 10_000,
@@ -30131,6 +30213,7 @@ fn v16_attack_topup_insurance_domain_authority_gated() {
         env.program_id,
         &env.payer,
         ProgInstruction::TopUpInsuranceDomain {
+            market_id: 0,
             domain: 0,
             amount: 500,
         },
@@ -33040,6 +33123,7 @@ fn v16_attack_topup_backing_bucket_authority_gated() {
         env.program_id,
         &env.payer,
         ProgInstruction::TopUpBackingBucket {
+            market_id: 0,
             domain: 0,
             amount: 500,
             expiry_slot: 10_000,
@@ -33205,6 +33289,7 @@ fn v16_attack_cross_asset_backing_authority_cannot_withdraw_other_asset_earnings
         env.program_id,
         &env.payer,
         ProgInstruction::TopUpBackingBucket {
+            market_id: 0,
             domain: 2,
             amount: 300,
             expiry_slot: 10_000,
@@ -34814,7 +34899,10 @@ fn v16_attack_topups_cannot_bypass_cumulative_tvl_cap() {
 
         env.svm.expire_blockhash();
         let result = env.send(
-            ProgInstruction::TopUpInsurance { amount: 2 },
+            ProgInstruction::TopUpInsurance {
+                market_id: 0,
+                amount: 2,
+            },
             vec![
                 AccountMeta::new(admin.pubkey(), true),
                 AccountMeta::new(env.market, false),
@@ -34861,6 +34949,7 @@ fn v16_attack_topups_cannot_bypass_cumulative_tvl_cap() {
         env.svm.expire_blockhash();
         let result = env.send(
             ProgInstruction::TopUpInsuranceDomain {
+                market_id: 0,
                 domain: 0,
                 amount: 2,
             },
@@ -34887,6 +34976,7 @@ fn v16_attack_topups_cannot_bypass_cumulative_tvl_cap() {
         env.svm.expire_blockhash();
         env.send(
             ProgInstruction::TopUpInsuranceDomain {
+                market_id: 0,
                 domain: 0,
                 amount: 1,
             },
@@ -34926,6 +35016,7 @@ fn v16_attack_topups_cannot_bypass_cumulative_tvl_cap() {
         env.svm.expire_blockhash();
         let result = env.send(
             ProgInstruction::TopUpBackingBucket {
+                market_id: 0,
                 domain: 1,
                 amount: 2,
                 expiry_slot: 10_000,
@@ -36607,6 +36698,7 @@ fn v16_attack_backing_bucket_topup_withdraw_input_gates() {
             env.program_id,
             &env.payer,
             ProgInstruction::TopUpBackingBucket {
+                market_id: 0,
                 domain: 0,
                 amount,
                 expiry_slot: expiry,
@@ -56729,7 +56821,10 @@ fn v16_attack_live_value_paths_reject_when_resolve_matured() {
 
     env.svm.expire_blockhash();
     let stale_global_insurance = env.send(
-        ProgInstruction::TopUpInsurance { amount: 20 },
+        ProgInstruction::TopUpInsurance {
+            market_id: 0,
+            amount: 20,
+        },
         vec![
             AccountMeta::new(admin.pubkey(), true),
             AccountMeta::new(env.market, false),
@@ -56747,6 +56842,7 @@ fn v16_attack_live_value_paths_reject_when_resolve_matured() {
     env.svm.expire_blockhash();
     let stale_insurance = env.send(
         ProgInstruction::TopUpInsuranceDomain {
+            market_id: 0,
             domain: 0,
             amount: 25,
         },
@@ -56767,6 +56863,7 @@ fn v16_attack_live_value_paths_reject_when_resolve_matured() {
     env.svm.expire_blockhash();
     let stale_backing = env.send(
         ProgInstruction::TopUpBackingBucket {
+            market_id: 0,
             domain: 1,
             amount: 30,
             expiry_slot: 100,
@@ -59501,7 +59598,10 @@ fn v16_attack_value_topups_reject_delegated_canonical_vault() {
         &mut env.svm,
         env.program_id,
         &env.payer,
-        ProgInstruction::TopUpInsurance { amount: 11 },
+        ProgInstruction::TopUpInsurance {
+            market_id: 0,
+            amount: 11,
+        },
         vec![
             AccountMeta::new(admin.pubkey(), true),
             AccountMeta::new(env.market, false),
@@ -59530,6 +59630,7 @@ fn v16_attack_value_topups_reject_delegated_canonical_vault() {
         env.program_id,
         &env.payer,
         ProgInstruction::TopUpInsuranceDomain {
+            market_id: 0,
             domain: 0,
             amount: 12,
         },
@@ -59561,6 +59662,7 @@ fn v16_attack_value_topups_reject_delegated_canonical_vault() {
         env.program_id,
         &env.payer,
         ProgInstruction::TopUpBackingBucket {
+            market_id: 0,
             domain: 1,
             amount: 13,
             expiry_slot: 10_000,
@@ -61118,6 +61220,7 @@ fn v16_attack_backing_topup_rejects_lapsed_expiry() {
         env.svm.expire_blockhash();
         env.send(
             ProgInstruction::TopUpBackingBucket {
+                market_id: 0,
                 domain: 1,
                 amount: 50,
                 expiry_slot: expiry,

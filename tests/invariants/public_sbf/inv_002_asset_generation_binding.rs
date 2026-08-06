@@ -2,7 +2,7 @@
 //!
 //! Normative obligation: Asset-scoped consent cannot cross retirement, slot reuse, or asset-generation changes.
 //!
-//! Evidence in this file (I plus invariant-specific F/M assertions): `v16_program_pr231_asset_generation_replay_rejects_on_every_route`, `v16_program_pr279_stale_collateral_top_up_funds_replacement_operator`, `v16_program_pr321_stale_backing_top_up_funds_replacement_winner`, `v16_program_pr328_stale_withdrawal_drains_replacement_reserve`, `v16_program_pr318_stale_backing_fee_extracts_victim_capital`, `v16_program_pr311_stale_resolve_crystallizes_replacement_loss`, `v16_program_pr275_stale_mark_pushes_reject_across_asset_generation`, `v16_program_pr277_pr322_stale_oracle_controls_reject_across_asset_generation`. These tests exercise the deployed public
+//! Evidence in this file (I plus invariant-specific F/M assertions): `v16_program_pr231_asset_generation_replay_rejects_on_every_route`, `v16_program_pr279_stale_insurance_top_up_rejects_across_asset_generation`, `v16_program_pr279_asset_zero_top_up_rejects_after_restart`, `v16_program_pr321_stale_backing_top_up_rejects_across_asset_generation`, `v16_program_pr328_stale_withdrawal_drains_replacement_reserve`, `v16_program_pr318_stale_backing_fee_extracts_victim_capital`, `v16_program_pr311_stale_resolve_crystallizes_replacement_loss`, `v16_program_pr275_stale_mark_pushes_reject_across_asset_generation`, `v16_program_pr277_pr322_stale_oracle_controls_reject_across_asset_generation`. These tests exercise the deployed public
 //! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
 //! rollback, liveness, or compute outcomes appropriate to the invariant. Oracle controls are
 //! retained with `u64::MAX` sequences so sequence reset or forward-gap ordering cannot make the
@@ -33,38 +33,102 @@ fn v16_program_pr231_asset_generation_replay_rejects_on_every_route() {
         assert!(!protection.accepted_stale_intent);
         assert!(!protection.mutated_economic_state);
         assert_eq!(protection.compute_units, None);
+        assert!(protection.rejection_was_generation_mismatch);
+        assert!(protection.fresh_intent_landed);
+        assert!(protection.fresh_intent_mutated_economic_state);
     }
 }
 
 #[test]
-fn v16_program_pr279_stale_collateral_top_up_funds_replacement_operator() {
-    let reproduction = reproduce_collateral_top_up_generation_replay([0x79; 32])
-        .unwrap_or_else(|error| panic!("PR 279 no longer reproduces: {error}"));
-    assert_eq!(
-        reproduction.blocker,
-        KnownBlocker::CollateralTopUpGenerationReplay
-    );
-    assert_ne!(reproduction.old_market_id, reproduction.new_market_id);
-    assert_eq!(reproduction.victim_loss, 250_000);
-    assert_eq!(reproduction.attacker_extraction, 250_000);
-    assert!(reproduction.replay_cu < 1_400_000);
-    assert!(reproduction.withdrawal_cu < 1_400_000);
+fn v16_program_pr279_stale_insurance_top_up_rejects_across_asset_generation() {
+    let protection = discover_asset_generation_replay([0x79; 32], AssetIntentKind::InsuranceTopUp)
+        .unwrap_or_else(|error| panic!("PR 279 protection failed: {error}"));
+    assert_eq!(protection.kind, AssetIntentKind::InsuranceTopUp);
+    assert!(protection.new_asset_id > protection.old_asset_id);
+    assert!(!protection.accepted_stale_intent);
+    assert!(!protection.mutated_economic_state);
+    assert_eq!(protection.compute_units, None);
+    assert!(protection.rejection_was_generation_mismatch);
+    assert!(protection.fresh_intent_landed);
+    assert!(protection.fresh_intent_mutated_economic_state);
 }
 
 #[test]
-fn v16_program_pr321_stale_backing_top_up_funds_replacement_winner() {
-    let reproduction = reproduce_backing_top_up_generation_replay([0x21; 32])
-        .unwrap_or_else(|error| panic!("PR 321 no longer reproduces: {error}"));
-    assert_eq!(
-        reproduction.blocker,
-        KnownBlocker::BackingTopUpGenerationReplay
+fn v16_program_pr321_stale_backing_top_up_rejects_across_asset_generation() {
+    let protection = discover_asset_generation_replay([0x21; 32], AssetIntentKind::BackingTopUp)
+        .unwrap_or_else(|error| panic!("PR 321 protection failed: {error}"));
+    assert_eq!(protection.kind, AssetIntentKind::BackingTopUp);
+    assert!(protection.new_asset_id > protection.old_asset_id);
+    assert!(!protection.accepted_stale_intent);
+    assert!(!protection.mutated_economic_state);
+    assert_eq!(protection.compute_units, None);
+    assert!(protection.rejection_was_generation_mismatch);
+    assert!(protection.fresh_intent_landed);
+    assert!(protection.fresh_intent_mutated_economic_state);
+}
+
+#[test]
+fn v16_program_pr279_asset_zero_top_up_rejects_after_restart() {
+    const ASSET: u16 = 0;
+    const REUSED_INSURANCE_AUTHORITY: usize = 2;
+    const AMOUNT: u128 = 1_000;
+    const PRICE: u64 = 100;
+
+    let mut env = V16Svm::new([0x7a; 32], MarketConfig::default());
+    env.configure_permissionless_resolve(100, 1)
+        .expect("configure finite recovery delay");
+    env.update_asset_authority_from_admin(
+        ASSET,
+        percolator_prog::processor::ASSET_AUTH_INSURANCE,
+        REUSED_INSURANCE_AUTHORITY,
+    )
+    .expect("install generation-A insurance authority");
+    let old_market_id = env.primary_market_state().1.assets[ASSET as usize].market_id;
+    let retained =
+        env.build_retained_insurance_top_up_for_actor(REUSED_INSURANCE_AUTHORITY, AMOUNT);
+
+    env.warp_to_slot(1);
+    env.shutdown_asset(ASSET, 1)
+        .expect("put generation A into Recovery");
+    env.warp_to_slot(2);
+    env.restart_asset_oracle(ASSET, 2, PRICE)
+        .expect("restart empty asset 0 into generation B");
+    let new_market_id = env.primary_market_state().1.assets[ASSET as usize].market_id;
+    assert!(new_market_id > old_market_id);
+
+    let market_before = env.market_data(false);
+    let tokens_before = env.all_token_account_data();
+    let supply_before = env.token_supply_observed();
+    let error = env
+        .land_retained(retained)
+        .expect_err("generation-A top-up must not fund generation B");
+    let expected = format!(
+        "Custom({})",
+        PercolatorError::AssetGenerationMismatch as u32
     );
-    assert_ne!(reproduction.old_market_id, reproduction.new_market_id);
-    assert_eq!(reproduction.provider_loss, 150);
-    assert_eq!(reproduction.attacker_profit, 150);
-    assert_eq!(reproduction.attacker_payout, 2_400);
-    assert!(reproduction.replay_cu < 1_400_000);
-    assert!(reproduction.max_cu < 1_400_000);
+    assert!(
+        error.contains(&expected),
+        "stale top-up must return {expected}, got {error}"
+    );
+    assert_eq!(env.market_data(false), market_before);
+    assert_eq!(env.all_token_account_data(), tokens_before);
+    assert_eq!(env.token_supply_observed(), supply_before);
+
+    let source = env.actors[REUSED_INSURANCE_AUTHORITY].source_token;
+    let source_before = env.token_amount(source);
+    let vault_before = env.token_amount(env.vault);
+    let fresh = env.build_retained_insurance_top_up_for_actor(REUSED_INSURANCE_AUTHORITY, AMOUNT);
+    env.land_retained(fresh)
+        .expect("current-generation asset-0 top-up remains live");
+    assert_eq!(
+        env.token_amount(source),
+        source_before - u64::try_from(AMOUNT).unwrap()
+    );
+    assert_eq!(
+        env.token_amount(env.vault),
+        vault_before + u64::try_from(AMOUNT).unwrap()
+    );
+    assert_eq!(env.token_supply_observed(), supply_before);
 }
 
 #[test]
@@ -123,6 +187,9 @@ fn v16_program_pr275_stale_mark_pushes_reject_across_asset_generation() {
         assert!(!protection.accepted_stale_intent);
         assert!(!protection.mutated_economic_state);
         assert_eq!(protection.compute_units, None);
+        assert!(protection.rejection_was_generation_mismatch);
+        assert!(protection.fresh_intent_landed);
+        assert!(protection.fresh_intent_mutated_economic_state);
     }
 }
 
@@ -140,6 +207,9 @@ fn v16_program_pr277_pr322_stale_oracle_controls_reject_across_asset_generation(
         assert!(!protection.accepted_stale_intent);
         assert!(!protection.mutated_economic_state);
         assert_eq!(protection.compute_units, None);
+        assert!(protection.rejection_was_generation_mismatch);
+        assert!(protection.fresh_intent_landed);
+        assert!(protection.fresh_intent_mutated_economic_state);
     }
 }
 

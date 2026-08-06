@@ -4,9 +4,8 @@ use support::{
     blocker_corpus::{blocker_scenarios, fixed_blocker_scenarios},
     fuzz_model::{
         reproduce_activation_retry_replay, reproduce_authority_handoff_aba_replay,
-        reproduce_backing_fee_generation_replay, reproduce_backing_top_up_generation_replay,
-        reproduce_backing_top_up_retry_replay, reproduce_bilateral_fee_support,
-        reproduce_collateral_top_up_generation_replay, reproduce_composite_oracle_rounding,
+        reproduce_backing_fee_generation_replay, reproduce_backing_top_up_retry_replay,
+        reproduce_bilateral_fee_support, reproduce_composite_oracle_rounding,
         reproduce_composite_oracle_time_skew, reproduce_convert_portfolio_incarnation_replay,
         reproduce_cross_domain_b_settlement, reproduce_cross_domain_backing_double_spend,
         reproduce_cross_margin_insurance_drain, reproduce_delayed_asset_authority_revival,

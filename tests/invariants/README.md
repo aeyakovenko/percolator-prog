@@ -22,10 +22,10 @@ verification methods are in [`../../INVARIANTS.md`](../../INVARIANTS.md).
 
 | Suite | Tests | Evidence |
 | --- | ---: | --- |
-| `public_sbf/` | 75 | Deterministic public SBF/LiteSVM counterexamples, regressions, and manifest checks |
+| `public_sbf/` | 76 | Deterministic public SBF/LiteSVM counterexamples, regressions, and manifest checks |
 | `stateful/` | 109 | Proptest-generated public routes, including generalized active-leg/currentness, source-claim attribution, source-credit-rate, and authenticated-expiry route matrices |
 | `cu/` | 107 | Positive public-route, metamorphic, rollback, liveness, and max-shape CU tests |
-| `kani/` | 50 | Symbolic wrapper arithmetic, matcher-binding, ordering, and strict-decoder proof harnesses |
+| `kani/` | 51 | Symbolic wrapper arithmetic, matcher-binding, ordering, and strict-decoder proof harnesses; the newest top-up wire-format harness has not been run locally |
 
 Most deterministic and stateful LoF adapters still reproduce quarantined vulnerable behavior;
 fixed-pin regressions explicitly require safe rejection or preservation instead. A vulnerable-pin
@@ -41,11 +41,12 @@ portfolio IDs and sequences are publicly realigned; INV-001 keeps that counterex
 All 14 retained matcher, oracle, fee, and resolve controls now use scope-local monotonic sequences,
 closing same-market delayed overwrites including PR335/336/337/338/340/347/349. Market-generation
 replay (including PR296/325/326), authority A -> B -> A revival, and PR339 backing-provider fee
-consent remain explicit INV-001/INV-005/INV-014 gaps. All four signed trade routes and all six
-oracle configuration, mark-push, and restart routes now bind the asset's monotonic `market_id`,
-closing PR231/PR277/PR322 slot-reuse replay even against a retained `u64::MAX` sequence. The
-INV-002 matrix continues to report the six non-oracle asset-control families that still lack
-generation binding.
+consent remain explicit INV-001/INV-005/INV-014 gaps. All four signed trade routes, all six oracle
+configuration/mark-push/restart routes, both insurance top-up routes, and backing-bucket top-up now
+bind the asset's monotonic `market_id`. This closes PR231/PR277/PR279/PR321/PR322 slot-reuse replay,
+including an asset-0 shutdown/restart with the same insurance authority and oracle requests retained
+with `u64::MAX` sequence. The INV-002 matrix now reports four remaining asset-control families:
+insurance withdrawal, backing-fee policy, whole-market resolve, and permissionless-resolve policy.
 
 ## Coverage status
 
@@ -91,7 +92,7 @@ charter.
 | INV-019 | P + SVM/CU | `kani/inv_019_cpi_invocation_and_return_data_binding.rs`, `cu/inv_019_cpi_invocation_and_return_data_binding.rs` |
 | INV-020 | Independent + Direct + SVM/CU | `public_sbf/inv_020_authenticated_clock_slot_and_oracle_provenance.rs`, `stateful/inv_020_authenticated_clock_slot_and_oracle_provenance.rs`, `cu/inv_020_authenticated_clock_slot_and_oracle_provenance.rs` |
 | INV-021 | Gap | - |
-| INV-022 | P | `kani/inv_022_instruction_decoding_and_schema_upgrade_safety.rs` |
+| INV-022 | P + P harness | `kani/inv_022_instruction_decoding_and_schema_upgrade_safety.rs` |
 | INV-023 | Gap | - |
 | INV-024 | F + Partial | `stateful/inv_081_success_state_validity_over_complete_public_routes.rs` (external SPL frames and exact deposit/withdraw flow; full internal attribution remains open) |
 | INV-025 | Gap | - |
