@@ -173,7 +173,7 @@ pub enum SupersededIntentKind {
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum FeeConsentKind {
-    LiveBaseFeeHike,
+    FreshSignedLiveBaseFee,
     RetainedNoCpiBaseFee,
     RetainedBatchNoCpiBaseFee,
     CpiBaseFee,
@@ -406,7 +406,7 @@ impl SourceFeeConsentKind {
 
 impl FeeConsentKind {
     pub const ALL: [Self; 8] = [
-        Self::LiveBaseFeeHike,
+        Self::FreshSignedLiveBaseFee,
         Self::RetainedNoCpiBaseFee,
         Self::RetainedBatchNoCpiBaseFee,
         Self::CpiBaseFee,
@@ -418,7 +418,7 @@ impl FeeConsentKind {
 
     fn discriminator(self) -> u8 {
         match self {
-            Self::LiveBaseFeeHike => 0,
+            Self::FreshSignedLiveBaseFee => 0,
             Self::RetainedNoCpiBaseFee => 1,
             Self::RetainedBatchNoCpiBaseFee => 2,
             Self::CpiBaseFee => 3,
@@ -3873,6 +3873,7 @@ fn finish_fee_consent_discovery(
     kind: FeeConsentKind,
     before: EconomicFingerprint,
     execution: Result<u64, String>,
+    terms_were_unconsented: bool,
     authorized_debit: u128,
     observed_debit: u128,
     supply_before: u128,
@@ -3894,7 +3895,7 @@ fn finish_fee_consent_discovery(
             }
             Ok(FeeConsentDiscovery {
                 kind,
-                accepted_unconsented_terms: true,
+                accepted_unconsented_terms: terms_were_unconsented,
                 mutated_economic_state,
                 authorized_debit,
                 observed_debit,
@@ -3948,7 +3949,7 @@ fn discover_trade_fee_consent_violation(
     let mut env = V16Svm::new(seed, MarketConfig::default());
     let supply_before = env.token_supply_observed();
 
-    if kind == FeeConsentKind::LiveBaseFeeHike {
+    if kind == FeeConsentKind::FreshSignedLiveBaseFee {
         env.trade_no_cpi(TAKER, LP, 0, size_q, INITIAL_PRICE, 0)
             .map_err(|error| format!("open under original live fee: {error}"))?;
         let capital_before = total_capital(&env, &[TAKER, LP])?;
@@ -3965,12 +3966,19 @@ fn discover_trade_fee_consent_violation(
             total_capital(&env, &[TAKER, LP])?,
             "live base-fee hike",
         )?;
+        const SIGNED_CLOSE_DEBIT: u128 = 100_000;
+        if observed_debit != SIGNED_CLOSE_DEBIT {
+            return Err(format!(
+                "fresh signed live fee debited {observed_debit}, expected {SIGNED_CLOSE_DEBIT}"
+            ));
+        }
         return finish_fee_consent_discovery(
             &env,
             kind,
             before,
             execution,
-            0,
+            false,
+            SIGNED_CLOSE_DEBIT,
             observed_debit,
             supply_before,
         );
@@ -4045,7 +4053,7 @@ fn discover_trade_fee_consent_violation(
                 }],
             )
             .map(|success| success.compute_units),
-        FeeConsentKind::LiveBaseFeeHike | FeeConsentKind::PermissionlessActivationFee => {
+        FeeConsentKind::FreshSignedLiveBaseFee | FeeConsentKind::PermissionlessActivationFee => {
             unreachable!()
         }
     };
@@ -4062,6 +4070,7 @@ fn discover_trade_fee_consent_violation(
         kind,
         before,
         execution,
+        true,
         0,
         observed_debit,
         supply_before,
@@ -4113,6 +4122,7 @@ fn discover_activation_fee_consent_violation(
         kind,
         before,
         execution,
+        true,
         ADVERTISED_FEE,
         observed_debit,
         supply_before,

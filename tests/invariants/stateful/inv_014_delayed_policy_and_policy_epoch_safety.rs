@@ -5,9 +5,10 @@
 //! Evidence in this file (F over public I routes):
 //! `v16_program_superseded_control_matrix_discovers_stale_overwrites` generates retained controls,
 //! installs a distinct newer authorized value, and applies one common stale-overwrite oracle.
-//! `v16_program_fee_consent_operation_matrix_discovers_unsigned_debits` varies public trade and
-//! activation routes and compares each affected signer's actual debit with the fee terms present
-//! when that signer created durable consent.
+//! `v16_program_fee_consent_operation_matrix_discovers_unsigned_debits` varies fresh-signed,
+//! retained, unsigned-LP, and activation routes and compares each affected signer's actual debit
+//! with the fee terms that signer authorized. The fresh-signed live control proves a policy update
+//! is not mislabeled when both traders sign the updated fee and the exact debit stays in bounds.
 //! Secondary coverage: INV-036 where those debits become an unauthorized fee destination or
 //! redirect value away from the signer-approved policy.
 //! `v16_program_backing_provider_consent_order_matrix_discovers_fee_redirection` varies fee-policy
@@ -123,10 +124,9 @@ proptest! {
             .map(|discovery| discovery.kind)
             .collect();
         eprintln!("independent fee-consent discoveries: {violations:?}");
-        prop_assert_eq!(
-            violations,
-            vec![FeeConsentKind::LiveBaseFeeHike],
-            "fee-consent classification changed; retained no-CPI, CPI LP/caller, and permissionless activation fees must remain protected"
+        prop_assert!(
+            violations.is_empty(),
+            "fee-consent classification changed; fresh-signed fees must remain bounded and retained no-CPI, CPI LP/caller, and permissionless activation fees must remain protected: {violations:?}"
         );
     }
 }
