@@ -567,6 +567,7 @@ fn v16_program_terminal_bankruptcy_residual_matrix_preserves_provider_value() {
     let provider_destination = env.token_account(provider.pubkey(), 0);
     env.send(
         ProgInstruction::WithdrawInsuranceAsset {
+            market_id: 0,
             asset_index: 0,
             amount: 2 * DOMAIN_TRANCHE,
         },

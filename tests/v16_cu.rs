@@ -1189,6 +1189,7 @@ impl V16CuEnv {
             self.program_id,
             &self.payer,
             ProgInstruction::UpdateBackingFeePolicy {
+                market_id: 0,
                 domain,
                 fee_bps,
                 insurance_share_bps,
@@ -3533,6 +3534,7 @@ impl V16CuEnv {
             self.program_id,
             &self.payer,
             ProgInstruction::WithdrawInsuranceAsset {
+                market_id: 0,
                 asset_index: 0,
                 amount,
             },
@@ -3561,6 +3563,7 @@ impl V16CuEnv {
             self.program_id,
             &self.payer,
             ProgInstruction::WithdrawInsuranceAsset {
+                market_id: 0,
                 asset_index: (domain / 2) as u16,
                 amount,
             },
@@ -3692,6 +3695,7 @@ impl V16CuEnv {
             self.program_id,
             &self.payer,
             ProgInstruction::WithdrawInsuranceAsset {
+                market_id: 0,
                 asset_index,
                 amount,
             },
@@ -4169,10 +4173,18 @@ fn bind_current_asset_generation(
             ..
         } => (*asset_index as usize, market_id),
         ProgInstruction::TopUpInsurance { market_id, .. } => (0, market_id),
+        ProgInstruction::WithdrawInsuranceAsset {
+            asset_index,
+            market_id,
+            ..
+        } => (*asset_index as usize, market_id),
         ProgInstruction::TopUpInsuranceDomain {
             domain, market_id, ..
         }
         | ProgInstruction::TopUpBackingBucket {
+            domain, market_id, ..
+        }
+        | ProgInstruction::UpdateBackingFeePolicy {
             domain, market_id, ..
         } => (*domain as usize / 2, market_id),
         _ => return,
@@ -24363,6 +24375,7 @@ fn v16_attack_insurance_ledger_authority_binding_enforced() {
         env.program_id,
         &env.payer,
         ProgInstruction::WithdrawInsuranceAsset {
+            market_id: 0,
             asset_index: 0,
             amount: 40,
         },
@@ -24410,6 +24423,7 @@ fn v16_attack_insurance_ledger_authority_binding_enforced() {
         env.program_id,
         &env.payer,
         ProgInstruction::WithdrawInsuranceAsset {
+            market_id: 0,
             asset_index: 0,
             amount: 40,
         },
@@ -24591,6 +24605,7 @@ fn v16_attack_insurance_ledger_market_binding_enforced() {
         env.program_id,
         &env.payer,
         ProgInstruction::WithdrawInsuranceAsset {
+            market_id: 0,
             asset_index: 0,
             amount: 40,
         },
@@ -24649,6 +24664,7 @@ fn v16_attack_insurance_ledger_market_binding_enforced() {
         env.program_id,
         &env.payer,
         ProgInstruction::WithdrawInsuranceAsset {
+            market_id: 0,
             asset_index: 0,
             amount: 40,
         },
@@ -25696,6 +25712,7 @@ fn v16_attack_value_paths_cannot_use_portfolio_as_optional_ledger() {
     env.svm.expire_blockhash();
     let withdraw_insurance = env.send(
         ProgInstruction::WithdrawInsuranceAsset {
+            market_id: 0,
             asset_index: 0,
             amount: 10,
         },
@@ -25906,6 +25923,7 @@ fn v16_attack_value_paths_cannot_use_market_as_optional_ledger() {
     env.svm.expire_blockhash();
     let withdraw_insurance = env.send(
         ProgInstruction::WithdrawInsuranceAsset {
+            market_id: 0,
             asset_index: 0,
             amount: 10,
         },
@@ -26676,6 +26694,7 @@ fn v16_attack_domain_indexed_calls_reject_out_of_range_atomically() {
         env.program_id,
         &env.payer,
         ProgInstruction::WithdrawInsuranceAsset {
+            market_id: 0,
             asset_index: BAD_DOMAIN as u16,
             amount: 1,
         },
@@ -26793,6 +26812,7 @@ fn v16_attack_domain_indexed_calls_reject_out_of_range_atomically() {
         env.program_id,
         &env.payer,
         ProgInstruction::UpdateBackingFeePolicy {
+            market_id: 0,
             policy_sequence: u64::MAX,
             domain: BAD_DOMAIN,
             fee_bps: 77,
@@ -29474,6 +29494,7 @@ fn v16_attack_withdraw_insurance_asset_operator_gated() {
         env.program_id,
         &env.payer,
         ProgInstruction::WithdrawInsuranceAsset {
+            market_id: 0,
             asset_index: 0,
             amount: 500_000,
         },
@@ -29539,6 +29560,7 @@ fn v16_attack_withdraw_insurance_asset_rejects_noncanonical_vault() {
         env.program_id,
         &env.payer,
         ProgInstruction::WithdrawInsuranceAsset {
+            market_id: 0,
             asset_index: 0,
             amount: 40,
         },
@@ -29589,6 +29611,7 @@ fn v16_attack_withdraw_insurance_asset_rejects_noncanonical_vault() {
         env.program_id,
         &env.payer,
         ProgInstruction::WithdrawInsuranceAsset {
+            market_id: 0,
             asset_index: 0,
             amount: 40,
         },
@@ -29671,6 +29694,7 @@ fn v16_attack_live_asset_insurance_withdraw_uses_operator_not_authority() {
         env.program_id,
         &env.payer,
         ProgInstruction::WithdrawInsuranceAsset {
+            market_id: 0,
             asset_index: 1,
             amount: 40,
         },
@@ -35678,6 +35702,7 @@ fn v16_attack_backing_fee_policy_authority_gated() {
         env.program_id,
         &env.payer,
         ProgInstruction::UpdateBackingFeePolicy {
+            market_id: 0,
             policy_sequence: u64::MAX,
             domain: 0,
             fee_bps: 77,
@@ -35700,6 +35725,7 @@ fn v16_attack_backing_fee_policy_authority_gated() {
         env.program_id,
         &env.payer,
         ProgInstruction::UpdateBackingFeePolicy {
+            market_id: 0,
             policy_sequence: u64::MAX,
             domain: 0,
             fee_bps: 77,
@@ -35759,6 +35785,7 @@ fn v16_attack_cross_asset_insurance_authority_cannot_update_other_backing_fee_po
         env.program_id,
         &env.payer,
         ProgInstruction::UpdateBackingFeePolicy {
+            market_id: 0,
             policy_sequence: u64::MAX,
             domain: 0,
             fee_bps: 91,
@@ -35786,6 +35813,7 @@ fn v16_attack_cross_asset_insurance_authority_cannot_update_other_backing_fee_po
         env.program_id,
         &env.payer,
         ProgInstruction::UpdateBackingFeePolicy {
+            market_id: 0,
             policy_sequence: u64::MAX,
             domain: 2,
             fee_bps: 91,
@@ -35889,6 +35917,7 @@ fn v16_attack_global_policy_bounds_reject_grief_values() {
     reject_unchanged(
         &mut env,
         ProgInstruction::UpdateBackingFeePolicy {
+            market_id: 0,
             policy_sequence: u64::MAX,
             domain: 0,
             fee_bps: 0,
@@ -36123,6 +36152,7 @@ fn v16_attack_permissionless_asset_authority_cannot_update_marketwide_policies()
     );
     assert!(
         attempt(ProgInstruction::UpdateBackingFeePolicy {
+            market_id: 0,
             policy_sequence: u64::MAX,
             domain: 0,
             fee_bps: 55,
@@ -36168,6 +36198,7 @@ fn v16_attack_permissionless_asset_authority_cannot_update_marketwide_policies()
         env.program_id,
         &env.payer,
         ProgInstruction::UpdateBackingFeePolicy {
+            market_id: 0,
             policy_sequence: u64::MAX,
             domain: 2,
             fee_bps: 111,
@@ -48225,6 +48256,7 @@ fn v16_attack_dual_mint_domain_insurance_no_double_withdraw() {
     env.svm.expire_blockhash();
     let double_withdraw = env.send(
         ProgInstruction::WithdrawInsuranceAsset {
+            market_id: 0,
             asset_index: 0,
             amount: 1,
         },
@@ -48258,6 +48290,7 @@ fn v16_attack_dual_mint_domain_insurance_no_double_withdraw() {
     env.svm.expire_blockhash();
     let legitimate_secondary = env.send(
         ProgInstruction::WithdrawInsuranceAsset {
+            market_id: 0,
             asset_index: 0,
             amount: 1,
         },
@@ -48599,6 +48632,7 @@ fn v16_attack_market_admin_cannot_drain_foreign_asset_or_user_collateral() {
     env.svm.expire_blockhash();
     let r_foreign = env.send(
         ProgInstruction::WithdrawInsuranceAsset {
+            market_id: 0,
             asset_index: 1,
             amount: 500,
         },
@@ -48627,6 +48661,7 @@ fn v16_attack_market_admin_cannot_drain_foreign_asset_or_user_collateral() {
     env.svm.expire_blockhash();
     let r_owner = env.send(
         ProgInstruction::WithdrawInsuranceAsset {
+            market_id: 0,
             asset_index: 1,
             amount: 200,
         },
@@ -49834,6 +49869,7 @@ fn v16_bpf_terminal_asset_insurance_partial_ledger_middle_domain_stays_bounded_o
     let withdraw_cu = env
         .send(
             ProgInstruction::WithdrawInsuranceAsset {
+                market_id: 0,
                 asset_index: MIDDLE_ASSET as u16,
                 amount: PARTIAL,
             },
@@ -51392,6 +51428,7 @@ fn v16_attack_non_active_asset_cannot_enable_backing_fee_batch_gate() {
             env.program_id,
             &env.payer,
             ProgInstruction::UpdateBackingFeePolicy {
+                market_id: 0,
                 policy_sequence: u64::MAX,
                 domain: 2,
                 fee_bps: 77,
@@ -51487,6 +51524,7 @@ fn v16_attack_retired_reused_asset_backing_fee_policy_cannot_stick_batch_gate() 
                 env.program_id,
                 &env.payer,
                 ProgInstruction::UpdateBackingFeePolicy {
+                    market_id: 0,
                     policy_sequence: u64::MAX,
                     domain: 2,
                     fee_bps,
@@ -58256,6 +58294,7 @@ fn v16_attack_live_domain_withdrawals_reject_when_resolve_matured() {
     env.svm.expire_blockhash();
     let stale_insurance = env.send(
         ProgInstruction::WithdrawInsuranceAsset {
+            market_id: 0,
             asset_index: 0,
             amount: 20,
         },
@@ -60670,6 +60709,7 @@ fn v16_attack_asset0_operator_rotation_rekeys_live_insurance_withdraw() {
         env.program_id,
         &env.payer,
         ProgInstruction::WithdrawInsuranceAsset {
+            market_id: 0,
             asset_index: 0,
             amount: 100,
         },
@@ -60710,6 +60750,7 @@ fn v16_attack_asset0_operator_rotation_rekeys_live_insurance_withdraw() {
         env.program_id,
         &env.payer,
         ProgInstruction::WithdrawInsuranceAsset {
+            market_id: 0,
             asset_index: 0,
             amount: 100,
         },

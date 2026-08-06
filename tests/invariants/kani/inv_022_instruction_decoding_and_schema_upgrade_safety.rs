@@ -220,16 +220,19 @@ fn kani_v16_domain_topup_and_asset_insurance_decode_preserves_wire_fields() {
         _ => unreachable!(),
     }
 
-    let mut withdraw = [0u8; 19];
+    let mut withdraw = [0u8; 27];
     withdraw[0] = 57;
     withdraw[1..3].copy_from_slice(&asset_index.to_le_bytes());
-    withdraw[3..19].copy_from_slice(&amount.to_le_bytes());
+    withdraw[3..11].copy_from_slice(&market_id.to_le_bytes());
+    withdraw[11..27].copy_from_slice(&amount.to_le_bytes());
     match Instruction::decode(&withdraw).unwrap() {
         Instruction::WithdrawInsuranceAsset {
             asset_index: got_asset,
+            market_id: got_market_id,
             amount: got_amount,
         } => {
             assert_eq!(got_asset, asset_index);
+            assert_eq!(got_market_id, market_id);
             assert_eq!(got_amount, amount);
         }
         _ => unreachable!(),
@@ -376,14 +379,18 @@ fn kani_v16_top_up_backing_bucket_decode_preserves_wire_fields() {
 }
 
 #[kani::proof]
-fn kani_v16_asset_topups_reject_generationless_legacy_payloads() {
+fn kani_v16_asset_controls_reject_generationless_legacy_payloads() {
     let legacy_insurance = [9u8; 17];
     let legacy_domain_insurance = [56u8; 19];
     let legacy_backing = [24u8; 27];
+    let legacy_withdrawal = [57u8; 19];
+    let legacy_backing_policy = [51u8; 15];
 
     assert!(Instruction::decode(&legacy_insurance).is_err());
     assert!(Instruction::decode(&legacy_domain_insurance).is_err());
     assert!(Instruction::decode(&legacy_backing).is_err());
+    assert!(Instruction::decode(&legacy_withdrawal).is_err());
+    assert!(Instruction::decode(&legacy_backing_policy).is_err());
 }
 
 #[kani::proof]
@@ -835,25 +842,29 @@ fn kani_v16_update_maintenance_fee_policy_decode_preserves_wire_fields() {
 #[kani::proof]
 fn kani_v16_update_backing_fee_policy_decode_preserves_wire_fields() {
     let domain: u16 = kani::any();
+    let market_id: u64 = kani::any();
     let fee_bps: u16 = kani::any();
     let insurance_share_bps: u16 = kani::any();
     let policy_sequence: u64 = kani::any();
 
-    let mut data = [0u8; 15];
+    let mut data = [0u8; 23];
     data[0] = 51;
     data[1..3].copy_from_slice(&domain.to_le_bytes());
-    data[3..5].copy_from_slice(&fee_bps.to_le_bytes());
-    data[5..7].copy_from_slice(&insurance_share_bps.to_le_bytes());
-    data[7..15].copy_from_slice(&policy_sequence.to_le_bytes());
+    data[3..11].copy_from_slice(&market_id.to_le_bytes());
+    data[11..13].copy_from_slice(&fee_bps.to_le_bytes());
+    data[13..15].copy_from_slice(&insurance_share_bps.to_le_bytes());
+    data[15..23].copy_from_slice(&policy_sequence.to_le_bytes());
 
     match Instruction::decode(&data).unwrap() {
         Instruction::UpdateBackingFeePolicy {
             domain: got_domain,
+            market_id: got_market_id,
             fee_bps: got_fee_bps,
             insurance_share_bps: got_insurance_share_bps,
             policy_sequence: got_sequence,
         } => {
             assert_eq!(got_domain, domain);
+            assert_eq!(got_market_id, market_id);
             assert_eq!(got_fee_bps, fee_bps);
             assert_eq!(got_insurance_share_bps, insurance_share_bps);
             assert_eq!(got_sequence, policy_sequence);
@@ -1305,6 +1316,7 @@ fn kani_v16_custody_payloads_reject_trailing_byte() {
     assert_rejects_trailing_byte(
         Instruction::WithdrawInsuranceAsset {
             asset_index: 0,
+            market_id: 1,
             amount: 1,
         },
         extra,
@@ -1388,6 +1400,7 @@ fn kani_v16_admin_policy_payloads_reject_trailing_byte() {
     assert_rejects_trailing_byte(
         Instruction::UpdateBackingFeePolicy {
             domain: 0,
+            market_id: 1,
             fee_bps: 25,
             insurance_share_bps: 0,
             policy_sequence: 1,

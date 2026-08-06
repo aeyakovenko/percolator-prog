@@ -1619,10 +1619,12 @@ impl V16Svm {
         } else {
             sequences.backing_fee_short
         });
+        let market_id = self.primary_market_state().1.assets[domain as usize / 2].market_id;
         let authority = copy_keypair(&self.admin);
         self.send_program(
             ProgInstruction::UpdateBackingFeePolicy {
                 domain,
+                market_id,
                 fee_bps,
                 insurance_share_bps,
                 policy_sequence,
@@ -1648,10 +1650,12 @@ impl V16Svm {
         } else {
             sequences.backing_fee_short
         });
+        let market_id = self.primary_market_state().1.assets[domain as usize / 2].market_id;
         let authority = copy_keypair(&self.actors[actor_index].signer);
         self.send_program(
             ProgInstruction::UpdateBackingFeePolicy {
                 domain,
+                market_id,
                 fee_bps,
                 insurance_share_bps,
                 policy_sequence,
@@ -1677,10 +1681,12 @@ impl V16Svm {
         } else {
             sequences.backing_fee_short
         });
+        let market_id = self.primary_market_state().1.assets[domain as usize / 2].market_id;
         let authority = copy_keypair(&self.actors[actor_index].signer);
         self.build_program_transaction(
             ProgInstruction::UpdateBackingFeePolicy {
                 domain,
+                market_id,
                 fee_bps,
                 insurance_share_bps,
                 policy_sequence,
@@ -2157,9 +2163,11 @@ impl V16Svm {
         amount: u128,
     ) -> Result<TxSuccess, String> {
         let authority = copy_keypair(&self.actors[actor_index].signer);
+        let market_id = self.primary_market_state().1.assets[asset_index as usize].market_id;
         self.send_program(
             ProgInstruction::WithdrawInsuranceAsset {
                 asset_index,
+                market_id,
                 amount,
             },
             vec![
@@ -3257,9 +3265,11 @@ impl V16Svm {
         amount: u128,
     ) -> Transaction {
         let operator = copy_keypair(&self.actors[actor_index].signer);
+        let market_id = self.primary_market_state().1.assets[asset_index as usize].market_id;
         self.build_program_transaction(
             ProgInstruction::WithdrawInsuranceAsset {
                 asset_index,
+                market_id,
                 amount,
             },
             vec![

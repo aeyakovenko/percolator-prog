@@ -42,11 +42,12 @@ All 14 retained matcher, oracle, fee, and resolve controls now use scope-local m
 closing same-market delayed overwrites including PR335/336/337/338/340/347/349. Market-generation
 replay (including PR296/325/326), authority A -> B -> A revival, and PR339 backing-provider fee
 consent remain explicit INV-001/INV-005/INV-014 gaps. All four signed trade routes, all six oracle
-configuration/mark-push/restart routes, both insurance top-up routes, and backing-bucket top-up now
-bind the asset's monotonic `market_id`. This closes PR231/PR277/PR279/PR321/PR322 slot-reuse replay,
-including an asset-0 shutdown/restart with the same insurance authority and oracle requests retained
-with `u64::MAX` sequence. The INV-002 matrix now reports four remaining asset-control families:
-insurance withdrawal, backing-fee policy, whole-market resolve, and permissionless-resolve policy.
+configuration/mark-push/restart routes, both insurance top-up routes, backing-bucket top-up,
+asset-insurance withdrawal, and backing-fee policy updates now bind the asset's monotonic
+`market_id`. This closes PR231/PR277/PR279/PR318/PR321/PR322/PR328 slot-reuse replay, including an
+asset-0 shutdown/restart with the same insurance authority and oracle requests retained with
+`u64::MAX` sequence. The INV-002 matrix now reports only two remaining global-control families:
+whole-market resolve and permissionless-resolve policy.
 
 ## Coverage status
 

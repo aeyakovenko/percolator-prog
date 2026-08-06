@@ -2847,6 +2847,7 @@ pub mod ix {
         },
         UpdateBackingFeePolicy {
             domain: u16,
+            market_id: u64,
             fee_bps: u16,
             insurance_share_bps: u16,
             policy_sequence: u64,
@@ -2954,6 +2955,7 @@ pub mod ix {
         },
         WithdrawInsuranceAsset {
             asset_index: u16,
+            market_id: u64,
             amount: u128,
         },
         CureAndCancelClose {
@@ -3143,6 +3145,7 @@ pub mod ix {
                 },
                 51 => Self::UpdateBackingFeePolicy {
                     domain: read_u16(&mut rest)?,
+                    market_id: read_u64(&mut rest)?,
                     fee_bps: read_u16(&mut rest)?,
                     insurance_share_bps: read_u16(&mut rest)?,
                     policy_sequence: read_u64(&mut rest)?,
@@ -3261,6 +3264,7 @@ pub mod ix {
                 },
                 57 => Self::WithdrawInsuranceAsset {
                     asset_index: read_u16(&mut rest)?,
+                    market_id: read_u64(&mut rest)?,
                     amount: read_u128(&mut rest)?,
                 },
                 42 => Self::CureAndCancelClose {
@@ -3503,12 +3507,14 @@ pub mod ix {
                 }
                 Self::UpdateBackingFeePolicy {
                     domain,
+                    market_id,
                     fee_bps,
                     insurance_share_bps,
                     policy_sequence,
                 } => {
                     out.push(51);
                     push_u16(&mut out, domain);
+                    push_u64(&mut out, market_id);
                     push_u16(&mut out, fee_bps);
                     push_u16(&mut out, insurance_share_bps);
                     push_u64(&mut out, policy_sequence);
@@ -3721,10 +3727,12 @@ pub mod ix {
                 }
                 Self::WithdrawInsuranceAsset {
                     asset_index,
+                    market_id,
                     amount,
                 } => {
                     out.push(57);
                     push_u16(&mut out, asset_index);
+                    push_u64(&mut out, market_id);
                     push_u128(&mut out, amount);
                 }
                 Self::CureAndCancelClose { optional_deposit } => {
@@ -5965,6 +5973,7 @@ pub mod processor {
             ),
             Instruction::UpdateBackingFeePolicy {
                 domain,
+                market_id,
                 fee_bps,
                 insurance_share_bps,
                 policy_sequence,
@@ -5972,6 +5981,7 @@ pub mod processor {
                 program_id,
                 accounts,
                 domain,
+                market_id,
                 fee_bps,
                 insurance_share_bps,
                 policy_sequence,
@@ -6177,8 +6187,15 @@ pub mod processor {
             }
             Instruction::WithdrawInsuranceAsset {
                 asset_index,
+                market_id,
                 amount,
-            } => handle_withdraw_insurance_asset(program_id, accounts, asset_index, amount),
+            } => handle_withdraw_insurance_asset(
+                program_id,
+                accounts,
+                asset_index,
+                market_id,
+                amount,
+            ),
             Instruction::CureAndCancelClose { optional_deposit } => {
                 handle_cure_and_cancel_close(program_id, accounts, optional_deposit)
             }
@@ -9075,6 +9092,7 @@ pub mod processor {
         program_id: &Pubkey,
         accounts: &'a [AccountInfo<'a>],
         asset_index: u16,
+        expected_market_id: u64,
         amount: u128,
     ) -> ProgramResult {
         let operator = account(accounts, 0)?;
@@ -9104,12 +9122,12 @@ pub mod processor {
         let amount_u64 = amount_to_u64(amount)?;
         {
             let market_data = market_ai.try_borrow_data()?;
-            let (cfg, mode, configured_slots, _) =
-                state::read_market_config_mode_and_capacity(&market_data)?;
-            if (mode != MarketModeV16::Live && mode != MarketModeV16::Resolved)
-                || asset_index >= configured_slots
-                || long_domain >= configured_slots.saturating_mul(2)
-            {
+            let (cfg, mode, _, market_id, _, _) =
+                state::read_market_trade_preflight(&market_data, asset_index)?;
+            if market_id != expected_market_id {
+                return Err(PercolatorError::AssetGenerationMismatch.into());
+            }
+            if mode != MarketModeV16::Live && mode != MarketModeV16::Resolved {
                 return Err(PercolatorError::InvalidInstruction.into());
             }
             let (vault_authority, _) = derive_vault_authority(program_id, market_ai.key);
@@ -9136,6 +9154,7 @@ pub mod processor {
             if asset_index >= configured_slots || asset_index >= group.markets.len() {
                 return Err(PercolatorError::InvalidInstruction.into());
             }
+            require_asset_generation_view(&group, asset_index, expected_market_id)?;
             let authorities = domain_authorities_from_view(&group, &cfg, long_domain)?;
             let ledger_authority = if live_mode {
                 let shutdown_drain =
@@ -10824,6 +10843,7 @@ pub mod processor {
         program_id: &Pubkey,
         accounts: &'a [AccountInfo<'a>],
         domain: u16,
+        expected_market_id: u64,
         fee_bps: u16,
         insurance_share_bps: u16,
         policy_sequence: u64,
@@ -10835,8 +10855,11 @@ pub mod processor {
         expect_owner(market_ai, program_id)?;
         let domain = domain as usize;
         let asset_index = domain / 2;
-        let (mut cfg, mode, _, _, _, max_trading_fee_bps) =
+        let (mut cfg, mode, _, market_id, _, max_trading_fee_bps) =
             state::read_market_trade_preflight(&market_ai.try_borrow_data()?, asset_index)?;
+        if market_id != expected_market_id {
+            return Err(PercolatorError::AssetGenerationMismatch.into());
+        }
         if mode != MarketModeV16::Live {
             return Err(PercolatorError::EngineLockActive.into());
         }
@@ -10876,6 +10899,7 @@ pub mod processor {
             if asset_index >= group.markets.len() {
                 return Err(PercolatorError::EngineLockActive.into());
             }
+            require_asset_generation_view(&group, asset_index, expected_market_id)?;
             let lifecycle = group.markets[asset_index].engine.asset.lifecycle;
             if lifecycle == ASSET_LIFECYCLE_RETIRED
                 || (fee_bps != 0 && lifecycle != ASSET_LIFECYCLE_ACTIVE)

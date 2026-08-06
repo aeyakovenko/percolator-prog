@@ -29,6 +29,7 @@ fn v16_program_privileged_policy_boundary_matrix_rejects_untrusted_callers() {
     env.svm.expire_blockhash();
     let withdrawal = env.send(
         ProgInstruction::WithdrawInsuranceAsset {
+            market_id: 0,
             asset_index: 0,
             amount: 1,
         },

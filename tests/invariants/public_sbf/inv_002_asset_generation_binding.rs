@@ -2,7 +2,7 @@
 //!
 //! Normative obligation: Asset-scoped consent cannot cross retirement, slot reuse, or asset-generation changes.
 //!
-//! Evidence in this file (I plus invariant-specific F/M assertions): `v16_program_pr231_asset_generation_replay_rejects_on_every_route`, `v16_program_pr279_stale_insurance_top_up_rejects_across_asset_generation`, `v16_program_pr279_asset_zero_top_up_rejects_after_restart`, `v16_program_pr321_stale_backing_top_up_rejects_across_asset_generation`, `v16_program_pr328_stale_withdrawal_drains_replacement_reserve`, `v16_program_pr318_stale_backing_fee_extracts_victim_capital`, `v16_program_pr311_stale_resolve_crystallizes_replacement_loss`, `v16_program_pr275_stale_mark_pushes_reject_across_asset_generation`, `v16_program_pr277_pr322_stale_oracle_controls_reject_across_asset_generation`. These tests exercise the deployed public
+//! Evidence in this file (I plus invariant-specific F/M assertions): `v16_program_pr231_asset_generation_replay_rejects_on_every_route`, `v16_program_pr279_stale_insurance_top_up_rejects_across_asset_generation`, `v16_program_pr279_asset_zero_top_up_rejects_after_restart`, `v16_program_pr321_stale_backing_top_up_rejects_across_asset_generation`, `v16_program_pr328_stale_insurance_withdrawal_rejects_across_asset_generation`, `v16_program_pr318_stale_backing_fee_policy_rejects_across_asset_generation`, `v16_program_pr311_stale_resolve_crystallizes_replacement_loss`, `v16_program_pr275_stale_mark_pushes_reject_across_asset_generation`, `v16_program_pr277_pr322_stale_oracle_controls_reject_across_asset_generation`. These tests exercise the deployed public
 //! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
 //! rollback, liveness, or compute outcomes appropriate to the invariant. Oracle controls are
 //! retained with `u64::MAX` sequences so sequence reset or forward-gap ordering cannot make the
@@ -132,34 +132,33 @@ fn v16_program_pr279_asset_zero_top_up_rejects_after_restart() {
 }
 
 #[test]
-fn v16_program_pr328_stale_withdrawal_drains_replacement_reserve() {
-    let reproduction = reproduce_insurance_withdrawal_generation_replay([0x28; 32])
-        .unwrap_or_else(|error| panic!("PR 328 no longer reproduces: {error}"));
-    assert_eq!(
-        reproduction.blocker,
-        KnownBlocker::InsuranceWithdrawalGenerationReplay
-    );
-    assert_ne!(reproduction.old_market_id, reproduction.new_market_id);
-    assert_eq!(reproduction.replacement_provider_loss, 50_000);
-    assert_eq!(reproduction.attacker_extraction, 50_000);
-    assert!(reproduction.replay_cu < 1_400_000);
+fn v16_program_pr328_stale_insurance_withdrawal_rejects_across_asset_generation() {
+    let protection =
+        discover_asset_generation_replay([0x28; 32], AssetIntentKind::InsuranceWithdrawal)
+            .unwrap_or_else(|error| panic!("PR 328 protection failed: {error}"));
+    assert_eq!(protection.kind, AssetIntentKind::InsuranceWithdrawal);
+    assert!(protection.new_asset_id > protection.old_asset_id);
+    assert!(!protection.accepted_stale_intent);
+    assert!(!protection.mutated_economic_state);
+    assert_eq!(protection.compute_units, None);
+    assert!(protection.rejection_was_generation_mismatch);
+    assert!(protection.fresh_intent_landed);
+    assert!(protection.fresh_intent_mutated_economic_state);
 }
 
 #[test]
-fn v16_program_pr318_stale_backing_fee_extracts_victim_capital() {
-    let reproduction = reproduce_backing_fee_generation_replay([0x18; 32])
-        .unwrap_or_else(|error| panic!("PR 318 no longer reproduces: {error}"));
-    assert_eq!(
-        reproduction.blocker,
-        KnownBlocker::BackingFeeGenerationReplay
-    );
-    assert_ne!(reproduction.old_market_id, reproduction.new_market_id);
-    assert_eq!(reproduction.backing_earnings, 75);
-    assert_eq!(reproduction.victim_loss, 75);
-    assert_eq!(reproduction.attacker_extraction, reproduction.victim_loss);
-    assert!(reproduction.replay_cu < 1_400_000);
-    assert!(reproduction.trade_cu < 1_400_000);
-    assert!(reproduction.withdrawal_cu < 1_400_000);
+fn v16_program_pr318_stale_backing_fee_policy_rejects_across_asset_generation() {
+    let protection =
+        discover_asset_generation_replay([0x18; 32], AssetIntentKind::BackingFeePolicy)
+            .unwrap_or_else(|error| panic!("PR 318 protection failed: {error}"));
+    assert_eq!(protection.kind, AssetIntentKind::BackingFeePolicy);
+    assert!(protection.new_asset_id > protection.old_asset_id);
+    assert!(!protection.accepted_stale_intent);
+    assert!(!protection.mutated_economic_state);
+    assert_eq!(protection.compute_units, None);
+    assert!(protection.rejection_was_generation_mismatch);
+    assert!(protection.fresh_intent_landed);
+    assert!(protection.fresh_intent_mutated_economic_state);
 }
 
 #[test]

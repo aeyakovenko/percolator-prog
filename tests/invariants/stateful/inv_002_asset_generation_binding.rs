@@ -56,8 +56,6 @@ proptest! {
         prop_assert_eq!(
             violations,
             vec![
-                AssetIntentKind::InsuranceWithdrawal,
-                AssetIntentKind::BackingFeePolicy,
                 AssetIntentKind::ResolveMarket,
                 AssetIntentKind::ResolvePolicy,
             ],
@@ -77,8 +75,10 @@ proptest! {
                 AssetIntentKind::ConfigureHybridOracle,
                 AssetIntentKind::InsuranceTopUp,
                 AssetIntentKind::BackingTopUp,
+                AssetIntentKind::InsuranceWithdrawal,
+                AssetIntentKind::BackingFeePolicy,
             ],
-            "trade, oracle, and top-up intents must reject after slot reuse"
+            "asset-local trade, oracle, value, and policy intents must reject after slot reuse"
         );
     }
 }
@@ -175,29 +175,33 @@ proptest! {
     }
 
     #[test]
-    fn v16_program_pr328_insurance_withdrawal_generation_replay_fuzz(
+    fn v16_program_pr328_insurance_withdrawal_generation_binding_fuzz(
         seed in insurance_withdrawal_generation_replay_seed_strategy()
     ) {
-        let result = reproduce_insurance_withdrawal_generation_replay(seed);
-        prop_assert!(
-            result.is_ok(),
-            "PR 328 no longer reproduces for seed {:?}: {}",
-            seed,
-            result.unwrap_err()
-        );
+        let protection = discover_asset_generation_replay(seed, AssetIntentKind::InsuranceWithdrawal)
+            .map_err(TestCaseError::fail)?;
+        prop_assert!(protection.new_asset_id > protection.old_asset_id);
+        prop_assert!(!protection.accepted_stale_intent);
+        prop_assert!(!protection.mutated_economic_state);
+        prop_assert_eq!(protection.compute_units, None);
+        prop_assert!(protection.rejection_was_generation_mismatch);
+        prop_assert!(protection.fresh_intent_landed);
+        prop_assert!(protection.fresh_intent_mutated_economic_state);
     }
 
     #[test]
-    fn v16_program_pr318_backing_fee_generation_replay_fuzz(
+    fn v16_program_pr318_backing_fee_generation_binding_fuzz(
         seed in backing_fee_generation_replay_seed_strategy()
     ) {
-        let result = reproduce_backing_fee_generation_replay(seed);
-        prop_assert!(
-            result.is_ok(),
-            "PR 318 no longer reproduces for seed {:?}: {}",
-            seed,
-            result.unwrap_err()
-        );
+        let protection = discover_asset_generation_replay(seed, AssetIntentKind::BackingFeePolicy)
+            .map_err(TestCaseError::fail)?;
+        prop_assert!(protection.new_asset_id > protection.old_asset_id);
+        prop_assert!(!protection.accepted_stale_intent);
+        prop_assert!(!protection.mutated_economic_state);
+        prop_assert_eq!(protection.compute_units, None);
+        prop_assert!(protection.rejection_was_generation_mismatch);
+        prop_assert!(protection.fresh_intent_landed);
+        prop_assert!(protection.fresh_intent_mutated_economic_state);
     }
 
     #[test]
