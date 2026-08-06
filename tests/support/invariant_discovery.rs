@@ -1,6 +1,5 @@
 use super::v16_svm::{
-    MarketConfig, V16Svm, EXIT_MAKER_DEPOSIT, EXIT_MAKER_INDEX, INITIAL_PRICE, PRIMARY_ACTOR_COUNT,
-    USER_DEPOSIT,
+    MarketConfig, V16Svm, EXIT_MAKER_DEPOSIT, INITIAL_PRICE, PRIMARY_ACTOR_COUNT, USER_DEPOSIT,
 };
 use percolator::{BackingBucketStatusV16, MarketModeV16, SideModeV16, ADL_ONE, POS_SCALE};
 use percolator_prog::{
@@ -655,6 +654,7 @@ pub struct TerminalGenerationDiscovery {
 pub struct PositionEpisodeDiscovery {
     pub kind: PositionEpisodeKind,
     pub stale_intent_landed: bool,
+    pub authorized_prior_forfeit: u128,
     pub victim_loss: u128,
     pub counterparty_gain: u128,
     pub unowned_vault_residual: u128,
@@ -674,7 +674,10 @@ impl PositionEpisodeDiscovery {
             }
             PositionEpisodeKind::RecoveryForfeit => {
                 self.victim_loss != 0
-                    && self.unowned_vault_residual == self.victim_loss
+                    && self.unowned_vault_residual
+                        == self
+                            .authorized_prior_forfeit
+                            .saturating_add(self.victim_loss)
                     && self.terminal_close_blocked
             }
         }
@@ -1067,9 +1070,10 @@ pub struct CrossDomainBDiscovery {
     pub pnl_loss: u128,
     pub wrong_domain_reduction_num: u128,
     pub correct_domain_reduction_num: u128,
-    pub stranded_position_q: u128,
-    pub failed_terminal_reductions: u8,
-    pub full_withdraw_rejected: bool,
+    pub reduction_steps: u8,
+    pub affected_position_after_q: i128,
+    pub principal_withdrawn: u128,
+    pub token_supply_conserved: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1267,28 +1271,33 @@ impl SourceLienReversalExitRoute {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SourceLienReversalDiscovery {
     pub route: SourceLienReversalExitRoute,
     pub source_claim_liened_num: u128,
     pub funded_capital: u128,
-    pub stranded_position_q: u128,
+    pub position_before_q: u128,
+    pub position_after_q: u128,
     pub canonical_vault_liquidity: u128,
     pub attempts: u8,
+    pub successful_calls: u8,
     pub lock_active_rejections: u8,
+    pub rejection_errors: Vec<String>,
     pub exact_rollback: bool,
     pub external_payout: u64,
     pub token_supply_conserved: bool,
 }
 
 impl SourceLienReversalDiscovery {
-    pub fn is_persistent_funded_exit_lock(&self) -> bool {
+    pub fn preserves_bounded_funded_exit(&self) -> bool {
         self.source_claim_liened_num != 0
             && self.funded_capital != 0
-            && self.stranded_position_q != 0
+            && self.position_before_q != 0
+            && self.position_after_q < self.position_before_q
             && self.canonical_vault_liquidity >= self.funded_capital
             && self.attempts >= 2
-            && self.lock_active_rejections == self.attempts
+            && self.successful_calls != 0
+            && self.successful_calls + self.lock_active_rejections <= self.attempts
             && self.exact_rollback
             && self.external_payout == 0
             && self.token_supply_conserved
@@ -1455,15 +1464,16 @@ impl FullRefreshDiscovery {
 }
 
 impl CrossDomainBDiscovery {
-    pub fn is_violation(&self) -> bool {
+    pub fn preserves_domain_locality_and_exit(&self) -> bool {
         self.b_target_num != 0
             && self.pnl_loss != 0
-            && self.wrong_domain_reduction_num != 0
+            && self.wrong_domain_reduction_num == 0
             && self.correct_domain_reduction_num
-                < self.pnl_loss.saturating_mul(percolator::BOUND_SCALE)
-            && self.stranded_position_q == POS_SCALE
-            && self.failed_terminal_reductions >= 6
-            && self.full_withdraw_rejected
+                == self.pnl_loss.saturating_mul(percolator::BOUND_SCALE)
+            && self.reduction_steps != 0
+            && self.affected_position_after_q == 0
+            && self.principal_withdrawn != 0
+            && self.token_supply_conserved
     }
 }
 
@@ -2776,6 +2786,7 @@ fn discover_rebalance_position_episode(seed: [u8; 32]) -> Result<PositionEpisode
     Ok(PositionEpisodeDiscovery {
         kind: PositionEpisodeKind::RebalanceReduce,
         stale_intent_landed: true,
+        authorized_prior_forfeit: 0,
         victim_loss,
         counterparty_gain,
         unowned_vault_residual: 0,
@@ -2787,7 +2798,6 @@ fn discover_recovery_position_episode(seed: [u8; 32]) -> Result<PositionEpisodeD
     const VICTIM_CAPITAL: u128 = 20_000;
     const FIRST_LOSER_CAPITAL: u128 = 10_000;
     const SECOND_LOSER_CAPITAL: u128 = 20_000;
-    const FIRST_GAIN: i128 = 10_000;
     const SECOND_GAIN: u128 = 20_000;
     const POSITION_Q: i128 = 10_000 * POS_SCALE as i128;
 
@@ -2829,18 +2839,17 @@ fn discover_recovery_position_episode(seed: [u8; 32]) -> Result<PositionEpisodeD
         env.crank(1, 2, Vec::new())
             .map_err(|error| format!("advance first bankrupt loser step {step}: {error}"))?;
     }
-    env.crank(0, 2, Vec::new())
-        .map_err(|error| format!("settle first recovery winner: {error}"))?;
-    if env.primary_portfolio(0).pnl.get() != FIRST_GAIN
-        || env.primary_market_state().1.assets[0].mode_long != SideModeV16::ResetPending
+    if env.primary_market_state().1.assets[0].mode_long != SideModeV16::ResetPending
+        || discovery_position(&env.primary_portfolio(0), 0)? == 0
     {
-        return Err("first bankruptcy did not create settled forfeitable recovery".into());
+        return Err("first bankruptcy did not create a live forfeitable recovery leg".into());
     }
 
-    let intended = env.build_retained_forfeit_recovery_leg(0, 0, 1);
-    let retained = env.build_retained_forfeit_recovery_leg(0, 0, 1);
-    env.land_retained(intended)
-        .map_err(|error| format!("land intended first-episode forfeit: {error}"))?;
+    let intended = env.build_retained_forfeit_recovery_leg(0, 0, u128::from(u64::MAX));
+    let retained = env.build_retained_forfeit_recovery_leg(0, 0, u128::from(u64::MAX));
+    if let Err(error) = env.land_retained(intended) {
+        return Err(format!("land intended first-episode forfeit: {error}"));
+    }
     env.finalize_reset_side(0, 0)
         .map_err(|error| format!("finalize first recovery episode: {error}"))?;
     if discovery_position(&env.primary_portfolio(0), 0)? != 0 {
@@ -2859,9 +2868,9 @@ fn discover_recovery_position_episode(seed: [u8; 32]) -> Result<PositionEpisodeD
             .map_err(|error| format!("advance second bankrupt loser step {step}: {error}"))?;
     }
     if env.primary_market_state().1.assets[0].mode_long != SideModeV16::ResetPending
-        || env.primary_portfolio(0).pnl.get() != FIRST_GAIN
+        || discovery_position(&env.primary_portfolio(0), 0)? == 0
     {
-        return Err("replacement recovery episode did not retain a fresh backed gain".into());
+        return Err("replacement recovery episode was not live before stale consent".into());
     }
     env.land_retained(retained)
         .map_err(|error| format!("old-episode recovery forfeit rejected: {error}"))?;
@@ -2879,8 +2888,7 @@ fn discover_recovery_position_episode(seed: [u8; 32]) -> Result<PositionEpisodeD
         let _ = drain_resolved_discovery_actor(&mut env, actor)?;
     }
     let expected_victim_payout = VICTIM_CAPITAL
-        .checked_add(FIRST_GAIN as u128)
-        .and_then(|value| value.checked_add(SECOND_GAIN))
+        .checked_add(SECOND_GAIN)
         .ok_or_else(|| "recovery expected payout overflow".to_string())?;
     let victim_loss = expected_victim_payout
         .checked_sub(victim_payout)
@@ -2908,6 +2916,7 @@ fn discover_recovery_position_episode(seed: [u8; 32]) -> Result<PositionEpisodeD
     Ok(PositionEpisodeDiscovery {
         kind: PositionEpisodeKind::RecoveryForfeit,
         stale_intent_landed: true,
+        authorized_prior_forfeit: FIRST_LOSER_CAPITAL,
         victim_loss,
         counterparty_gain: 0,
         unowned_vault_residual,
@@ -9908,14 +9917,17 @@ fn discover_one_source_lien_reversal_exit(
     crank_asset_progress(&mut env, COUNTERPARTY, 3, ASSET, 4)?;
 
     let funded_capital = env.primary_portfolio(OWNER).capital.get();
-    let stranded_position_q =
+    let position_before_q =
         discovery_position(&env.primary_portfolio(OWNER), ASSET)?.unsigned_abs();
     let canonical_vault_liquidity = u128::from(env.token_amount(env.vault));
     if env.primary_market_state().1.vault != canonical_vault_liquidity {
         return Err("source-lien reversal vault diverged from SPL custody".into());
     }
     let destination_before = env.token_amount(env.actors[OWNER].destination_token);
+    let mut attempts = ATTEMPTS;
+    let mut successful_calls = 0u8;
     let mut lock_active_rejections = 0u8;
+    let mut rejection_errors = Vec::new();
     let mut exact_rollback = true;
     for _ in 0..ATTEMPTS {
         let before = fingerprint(&env);
@@ -9957,15 +9969,31 @@ fn discover_one_source_lien_reversal_exit(
             ),
         };
         match result {
-            Ok(_) => {}
+            Ok(_) => successful_calls = successful_calls.saturating_add(1),
             Err(error) => {
                 if error.contains("Custom(21)") || error.contains("custom program error: 0x15") {
                     lock_active_rejections = lock_active_rejections.saturating_add(1);
                 }
                 exact_rollback &= fingerprint(&env) == before;
+                rejection_errors.push(error);
             }
         }
     }
+    if route == SourceLienReversalExitRoute::PermissionlessCrank {
+        attempts = attempts.saturating_add(1);
+        let before = fingerprint(&env);
+        match env.rebalance_reduce(OWNER, ASSET, POS_SCALE) {
+            Ok(_) => successful_calls = successful_calls.saturating_add(1),
+            Err(error) => {
+                if error.contains("Custom(21)") || error.contains("custom program error: 0x15") {
+                    lock_active_rejections = lock_active_rejections.saturating_add(1);
+                }
+                exact_rollback &= fingerprint(&env) == before;
+                rejection_errors.push(error);
+            }
+        }
+    }
+    let position_after_q = discovery_position(&env.primary_portfolio(OWNER), ASSET)?.unsigned_abs();
     let external_payout = env
         .token_amount(env.actors[OWNER].destination_token)
         .checked_sub(destination_before)
@@ -9974,10 +10002,13 @@ fn discover_one_source_lien_reversal_exit(
         route,
         source_claim_liened_num,
         funded_capital,
-        stranded_position_q,
+        position_before_q,
+        position_after_q,
         canonical_vault_liquidity,
-        attempts: ATTEMPTS,
+        attempts,
+        successful_calls,
         lock_active_rejections,
+        rejection_errors,
         exact_rollback,
         external_payout,
         token_supply_conserved: env.token_supply_observed() == supply_before,
@@ -10572,17 +10603,20 @@ pub fn discover_cross_domain_b_violation(
     let expected_reduction = pnl_loss
         .checked_mul(percolator::BOUND_SCALE)
         .ok_or_else(|| "B claim reduction overflow".to_string())?;
-    if wrong_domain_reduction_num.checked_add(correct_domain_reduction_num)
-        != Some(expected_reduction)
-    {
-        return Err("B-settlement claim reductions did not reconcile to PnL loss".into());
+    if wrong_domain_reduction_num != 0 || correct_domain_reduction_num != expected_reduction {
+        return Err(format!(
+            "B-settlement was not source-domain local: loss={pnl_loss}, unrelated={wrong_domain_reduction_num}, affected={correct_domain_reduction_num}"
+        ));
     }
 
     let mut reduction_steps = 0u8;
-    let (stranded_position_q, failed_terminal_reductions) = loop {
+    loop {
         let position = discovery_position(&env.primary_portfolio(0), 1)?;
-        if position <= 0 {
-            return Err(format!("affected position exited unexpectedly: {position}"));
+        if position == 0 {
+            break;
+        }
+        if position < 0 {
+            return Err(format!("affected position flipped during exit: {position}"));
         }
         let position_q = position as u128;
         let candidates = [
@@ -10599,8 +10633,7 @@ pub fn discover_cross_domain_b_violation(
             1,
         ];
         let mut progressed = false;
-        let mut failures = 0u8;
-        let mut all_counter_underflow = true;
+        let mut failures = Vec::new();
         for (candidate_index, reduce_q) in candidates.into_iter().enumerate() {
             if reduce_q == 0 || candidates[..candidate_index].contains(&reduce_q) {
                 continue;
@@ -10626,8 +10659,7 @@ pub fn discover_cross_domain_b_violation(
                     {
                         return Err(format!("failed B reduction {reduce_q} mutated state"));
                     }
-                    all_counter_underflow &= error.contains("Custom(25)");
-                    failures = failures.saturating_add(1);
+                    failures.push(format!("{reduce_q}: {error}"));
                 }
             }
         }
@@ -10637,60 +10669,51 @@ pub fn discover_cross_domain_b_violation(
             }
             continue;
         }
-        if position_q != POS_SCALE || !all_counter_underflow || failures < 6 {
-            return Err(format!(
-                "B terminal reduction stopped unexpectedly: position={position_q}, failures={failures}"
-            ));
-        }
-        break (position_q, failures);
-    };
+        return Err(format!(
+            "no bounded public reduction progressed position {position_q}: {}",
+            failures.join("; ")
+        ));
+    }
+    let affected_position_after_q = discovery_position(&env.primary_portfolio(0), 1)?;
+    let asset_zero_position_q = discovery_position(&env.primary_portfolio(0), 0)?;
+    if asset_zero_position_q <= 0 {
+        return Err(format!(
+            "unrelated asset position changed unexpectedly: {asset_zero_position_q}"
+        ));
+    }
+    env.trade_no_cpi(0, 1, 0, -asset_zero_position_q, FIRST_MARK, 0)
+        .map_err(|error| format!("close unrelated asset after B settlement: {error}"))?;
+    if discovery_position(&env.primary_portfolio(0), 0)? != 0
+        || discovery_position(&env.primary_portfolio(0), 1)? != 0
+    {
+        return Err("winner did not reach a flat public state".into());
+    }
 
-    for _ in 0..8 {
-        let market_before = env.market_data(false);
-        let portfolio_before = env.primary_portfolio_data(0);
-        let _ = env.crank(0, 7, observation.clone());
-        if env.market_data(false) != market_before
-            || env.primary_portfolio_data(0) != portfolio_before
-        {
-            return Err("honest crank progressed terminal B residual".into());
-        }
-    }
-    let market_before_trade = env.market_data(false);
-    let portfolio_before_trade = env.primary_portfolio_data(0);
-    let bilateral_exit = env.trade_no_cpi(
-        0,
-        EXIT_MAKER_INDEX,
-        1,
-        -(stranded_position_q as i128),
-        BANKRUPTCY_MARK,
-        0,
-    );
-    if bilateral_exit.is_ok()
-        || env.market_data(false) != market_before_trade
-        || env.primary_portfolio_data(0) != portfolio_before_trade
-    {
-        return Err("bilateral exit moved terminal B residual".into());
-    }
     let winner_capital = env.primary_portfolio(0).capital.get();
-    let market_before_withdraw = env.market_data(false);
-    let portfolio_before_withdraw = env.primary_portfolio_data(0);
     let destination_before = env.token_amount(env.actors[0].destination_token);
-    let full_withdraw_rejected = env.withdraw_primary(0, winner_capital).is_err();
-    if !full_withdraw_rejected
-        || env.market_data(false) != market_before_withdraw
-        || env.primary_portfolio_data(0) != portfolio_before_withdraw
-        || env.token_amount(env.actors[0].destination_token) != destination_before
-        || env.token_supply_observed() != supply_before
-    {
-        return Err("terminal B withdrawal did not reject atomically".into());
+    env.withdraw_primary(0, winner_capital)
+        .map_err(|error| format!("withdraw flat winner principal: {error}"))?;
+    let principal_withdrawn = u128::from(
+        env.token_amount(env.actors[0].destination_token)
+            .checked_sub(destination_before)
+            .ok_or_else(|| "winner destination decreased".to_string())?,
+    );
+    let token_supply_conserved = env.token_supply_observed() == supply_before;
+    if principal_withdrawn != winner_capital || !token_supply_conserved {
+        return Err(format!(
+            "winner principal reconciliation failed: withdrew={principal_withdrawn}/{winner_capital}, supply={}/{}",
+            env.token_supply_observed(),
+            supply_before
+        ));
     }
     Ok(CrossDomainBDiscovery {
         b_target_num,
         pnl_loss,
         wrong_domain_reduction_num,
         correct_domain_reduction_num,
-        stranded_position_q,
-        failed_terminal_reductions,
-        full_withdraw_rejected,
+        reduction_steps,
+        affected_position_after_q,
+        principal_withdrawn,
+        token_supply_conserved,
     })
 }

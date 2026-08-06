@@ -4,11 +4,11 @@
 //! reconciliation of a vanished claim cannot permanently lock funded user exposure.
 //!
 //! Evidence in this file (F over public I routes):
-//! `v16_program_source_lien_reversal_exit_matrix_discovers_funded_lock` generates a positive
+//! `v16_program_source_lien_reversal_exit_matrix_preserves_bounded_exit` generates a positive
 //! source-backed claim, liens it through a public risk increase, reverses the authenticated mark,
 //! and tests canonical crank, unilateral reduction, and all four trade routes from independent
-//! worlds. A finding requires every route to reject as LockActive with exact SVM rollback while
-//! real capital, exposure, and canonical SPL liquidity remain.
+//! worlds. Every route must unwind the vanished claim and reduce exposure in bounded calls; any
+//! rejected attempt must preserve exact SVM rollback while real capital and custody remain.
 //! `v16_program_cross_domain_rounding_exit_matrix_discovers_funded_lock` independently constructs
 //! two fractional source domains in both asset orders, reverses one source, and requires all six
 //! public exit families plus a later honest crank to remain blocked before accepting a finding.
@@ -17,9 +17,9 @@
 //! cranks, and CPI/no-CPI single/batch reopen-and-flatten escapes all to leave the backed PnL claim
 //! uncollectible before accepting a finding.
 //!
-//! Guarantee boundary: this is a public counterexample on the vulnerable pin, not certification
-//! of every source-credit lifecycle. Fixed-pin certification still requires the proof, model, and
-//! reachability methods named by the invariant charter.
+//! Guarantee boundary: the reversal matrix certifies the fixed source-lien unwind across all six
+//! wrapper routes. The remaining tests in this file retain separate counterexamples for unrelated
+//! cross-domain rounding and flat-lien findings.
 
 use super::*;
 
@@ -36,7 +36,7 @@ proptest! {
     })]
 
     #[test]
-    fn v16_program_source_lien_reversal_exit_matrix_discovers_funded_lock(
+    fn v16_program_source_lien_reversal_exit_matrix_preserves_bounded_exit(
         seed in any::<[u8; 32]>(),
         // These sizes all pass public admission and create a nonzero source-credit lien. A 10%
         // increase is correctly rejected as LockActive during setup, before the reversal state
@@ -55,13 +55,14 @@ proptest! {
             SourceLienReversalExitRoute::ALL.len(),
             "every public exit route needs an independent reversal world"
         );
-        for discovery in discoveries {
-            prop_assert!(
-                discovery.is_persistent_funded_exit_lock(),
-                "source-lien reversal retained a public exit: {:?}",
-                discovery
-            );
-        }
+        let violations = discoveries
+            .iter()
+            .filter(|discovery| !discovery.preserves_bounded_funded_exit())
+            .collect::<Vec<_>>();
+        prop_assert!(
+            violations.is_empty(),
+            "source-lien reversal failed to preserve bounded public exits: {violations:#?}"
+        );
     }
 
     #[test]

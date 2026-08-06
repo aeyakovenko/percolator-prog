@@ -11,10 +11,12 @@
 //! deposits and withdrawals may mutate only their canonical source/destination and vault, with
 //! exact authorized deltas. Every rejected route must roll back all tracked economic state.
 //!
-//! Secondary coverage: INV-024, INV-031, INV-034, INV-048, INV-049, and INV-080. The OI oracle
-//! compares account-leg sums only when no stale leg, pending obligation, or protocol-attributed
-//! liquidation position makes that comparison incomplete; live long/short OI equality is always
-//! checked.
+//! Secondary coverage: INV-024, INV-031, INV-034, INV-048, INV-049, INV-051, and INV-080. The OI
+//! oracle always checks live long/short equality, effective OI cannot exceed the complete raw-leg
+//! census, and any Live Active/DrainOnly side with zero effective OI plus surviving non-obligation
+//! basis must be `ResetPending`. Exact raw-leg equality is required only when no stale leg,
+//! pending obligation, or protocol-attributed unilateral reduction makes raw basis intentionally
+//! larger than pooled effective OI.
 //!
 //! Guarantee boundary: a quarantined counterexample demonstrates public reachability; it does
 //! not certify the invariant on an unfixed pin. Certification requires the fixed-pin assertion

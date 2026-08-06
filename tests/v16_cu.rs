@@ -60908,6 +60908,9 @@ mod inv_047_equivalent_route_semantics;
 #[path = "invariants/cu/inv_050_cross_zero_decomposition.rs"]
 mod inv_050_cross_zero_decomposition;
 
+#[path = "invariants/cu/inv_051_canonical_adl_effective_quantity.rs"]
+mod inv_051_canonical_adl_effective_quantity;
+
 #[path = "invariants/cu/inv_053_full_health_recertification_equivalence.rs"]
 mod inv_053_full_health_recertification_equivalence;
 

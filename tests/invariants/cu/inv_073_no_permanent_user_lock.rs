@@ -2,7 +2,7 @@
 //!
 //! Normative obligation: Every publicly reachable funded state has a finite public path to capital or terminal disposition.
 //!
-//! Evidence in this file (I/C plus invariant-specific M assertions): `v16_program_asset0_recovery_matrix_discovers_provider_and_restart_lock`, `v16_program_winner_first_recovery_matrix_discovers_provider_lien_lock`, `v16_program_permissionless_asset_expired_close_matrix_discovers_global_recovery`, `v16_program_fragmented_recovery_pair_matrix_discovers_force_close_lock`, `v16_program_fractional_social_loss_exit_matrix_discovers_dust_lock`, `v16_program_recovery_residue_matrix_discovers_abandoned_owner_lock`, `v16_program_expired_partial_close_matrix_discovers_global_terminal_lock`, `v16_program_crossed_adl_effective_exit_matrix_discovers_zero_oi_residue_lock`, `v16_program_partial_adl_effective_exit_matrix_discovers_zero_oi_residue_lock`, `v16_program_funding_disabled_round_trip_mark_preserves_stale_terminal_progress`, `v16_attack_source_backed_force_close_preserves_bounded_resolved_exits`, `v16_probe_liquidation_then_shutdown_preserves_bounded_owner_exit`, `v16_attack_permissionless_close_resolved_survives_drained_owner_system_account`, `v16_attack_permissionless_asset_epoch_grief_has_atomic_max_leg_exit`. These tests exercise the deployed public
+//! Evidence in this file (I/C plus invariant-specific M assertions): `v16_program_asset0_recovery_matrix_discovers_provider_and_restart_lock`, `v16_program_winner_first_recovery_matrix_discovers_provider_lien_lock`, `v16_program_permissionless_asset_expired_close_matrix_discovers_global_recovery`, `v16_program_fragmented_recovery_pair_matrix_discovers_force_close_lock`, `v16_program_fractional_social_loss_exit_matrix_discovers_dust_lock`, `v16_program_recovery_residue_matrix_discovers_abandoned_owner_lock`, `v16_program_expired_partial_close_matrix_discovers_global_terminal_lock`, `v16_program_funding_disabled_round_trip_mark_preserves_stale_terminal_progress`, `v16_attack_source_backed_force_close_preserves_bounded_resolved_exits`, `v16_probe_liquidation_then_shutdown_preserves_bounded_owner_exit`, `v16_attack_permissionless_close_resolved_survives_drained_owner_system_account`, `v16_attack_permissionless_asset_epoch_grief_has_atomic_max_leg_exit`. The two ADL zero-OI helpers are executed and owned by INV-051. These tests exercise the deployed public
 //! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
 //! rollback, liveness, or compute outcomes appropriate to the invariant.
 //!
@@ -1130,8 +1130,7 @@ fn v16_program_expired_partial_close_matrix_discovers_global_terminal_lock() {
     }
 }
 
-#[test]
-fn v16_program_crossed_adl_effective_exit_matrix_discovers_zero_oi_residue_lock() {
+pub(super) fn assert_inv_051_crossed_adl_effective_exit_matrix_preserves_bounded_cleanup() {
     const PRICE: u64 = 1;
     const OPEN_Q: i128 = 13_000 * POS_SCALE as i128;
 
@@ -1215,33 +1214,12 @@ fn v16_program_crossed_adl_effective_exit_matrix_discovers_zero_oi_residue_lock(
             .unsigned_abs();
         assert_eq!(crossed.assets[0].oi_eff_long_q, 0);
         assert_eq!(crossed.assets[0].oi_eff_short_q, 0);
-        assert_eq!(crossed.assets[0].mode_long, SideModeV16::Normal);
+        assert_eq!(crossed.assets[0].mode_long, SideModeV16::ResetPending);
         assert!(residual > 0);
         assert!(env.portfolio_state(survivor).capital.get() > 0);
 
         let fixed_market = env.svm.get_account(&env.market).unwrap();
         let fixed_survivor = env.svm.get_account(&survivor).unwrap();
-        for _ in 0..4 {
-            env.svm.expire_blockhash();
-            let cu = env
-                .send(
-                    ProgInstruction::PermissionlessCrank {
-                        now_slot: 35,
-                        observations: vec![],
-                    },
-                    vec![
-                        AccountMeta::new(env.payer.pubkey(), true),
-                        AccountMeta::new(env.market, false),
-                        AccountMeta::new(survivor, false),
-                    ],
-                    &[],
-                )
-                .expect("crossed zero-OI residue crank");
-            assert_cu_within("crossed zero-OI residue crank", cu, CRANK_CU_LIMIT);
-            assert_eq!(env.svm.get_account(&env.market).unwrap(), fixed_market);
-            assert_eq!(env.svm.get_account(&survivor).unwrap(), fixed_survivor);
-        }
-
         env.svm.expire_blockhash();
         let owner_exit = env.send(
             ProgInstruction::RebalanceReduce {
@@ -1278,6 +1256,34 @@ fn v16_program_crossed_adl_effective_exit_matrix_discovers_zero_oi_residue_lock(
             env.svm.get_account(&counterparty).unwrap(),
             counterparty_before
         );
+
+        env.svm.expire_blockhash();
+        let cleanup_cu = env
+            .send(
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: 35,
+                    observations: vec![],
+                },
+                vec![
+                    AccountMeta::new(env.payer.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(survivor, false),
+                ],
+                &[],
+            )
+            .expect("one public crank must clear the crossed zero-OI residue");
+        assert_cu_within(
+            "crossed zero-OI residue cleanup",
+            cleanup_cu,
+            CRANK_CU_LIMIT,
+        );
+        let cleaned = env.portfolio_state(survivor);
+        assert!(!has_active_leg_for_asset(&cleaned, 0));
+        assert_eq!(env.market_state().1.assets[0].oi_eff_long_q, 0);
+        let withdrawable = cleaned.capital.get();
+        assert!(withdrawable > 0);
+        let destination = env.withdraw(&survivor_owner, survivor, withdrawable);
+        assert_eq!(env.token_amount(destination), withdrawable as u64);
         assert_eq!(
             env.market_state().1.vault as u64,
             env.token_amount(env.vault)
@@ -1285,8 +1291,7 @@ fn v16_program_crossed_adl_effective_exit_matrix_discovers_zero_oi_residue_lock(
     }
 }
 
-#[test]
-fn v16_program_partial_adl_effective_exit_matrix_discovers_zero_oi_residue_lock() {
+pub(super) fn assert_inv_051_unilateral_adl_effective_exit_matrix_preserves_bounded_cleanup() {
     for long_capital in [1_000u128, 1_001] {
         let mut env = V16CuEnv::new_with_market_params_and_price_move(1, 10_000, 10_000, 10_000);
         env.configure_auth_mark_with_cu(0, 100);
@@ -1355,31 +1360,10 @@ fn v16_program_partial_adl_effective_exit_matrix_discovers_zero_oi_residue_lock(
 
         let residual_before = active_leg_for_asset(&env.portfolio_state(long), 0).basis_pos_q;
         assert!(residual_before > 0);
-        assert_eq!(reduced.assets[0].mode_long, SideModeV16::Normal);
+        assert_eq!(reduced.assets[0].mode_long, SideModeV16::ResetPending);
         assert_eq!(reduced.assets[0].stored_pos_count_long, 1);
         let fixed_market = env.svm.get_account(&env.market).unwrap();
         let fixed_long = env.svm.get_account(&long).unwrap();
-        for _ in 0..4 {
-            env.svm.expire_blockhash();
-            let crank = env
-                .send(
-                    ProgInstruction::PermissionlessCrank {
-                        now_slot: 6,
-                        observations: crank_observations(0),
-                    },
-                    vec![
-                        AccountMeta::new(env.payer.pubkey(), true),
-                        AccountMeta::new(env.market, false),
-                        AccountMeta::new(long, false),
-                    ],
-                    &[],
-                )
-                .expect("honest crank reaches the zero-OI residue fixed point");
-            assert_cu_within("zero-OI residue crank", crank, CRANK_CU_LIMIT);
-            assert_eq!(env.svm.get_account(&env.market).unwrap(), fixed_market);
-            assert_eq!(env.svm.get_account(&long).unwrap(), fixed_long);
-        }
-
         env.svm.expire_blockhash();
         let owner_retry = env.send(
             ProgInstruction::RebalanceReduce {
@@ -1425,12 +1409,33 @@ fn v16_program_partial_adl_effective_exit_matrix_discovers_zero_oi_residue_lock(
         assert_eq!(env.svm.get_account(&long).unwrap(), trade_long);
         assert_eq!(env.svm.get_account(&fresh).unwrap(), trade_fresh);
 
-        let locked = env.portfolio_state(long);
-        assert!(locked.capital.get() != 0 || locked.pnl.get() != 0);
-        assert_eq!(
-            active_leg_for_asset(&locked, 0).basis_pos_q,
-            residual_before
+        env.svm.expire_blockhash();
+        let cleanup_cu = env
+            .send(
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: 6,
+                    observations: vec![],
+                },
+                vec![
+                    AccountMeta::new(env.payer.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(long, false),
+                ],
+                &[],
+            )
+            .expect("one honest crank must clear the unilateral zero-OI residue");
+        assert_cu_within(
+            "unilateral zero-OI residue cleanup",
+            cleanup_cu,
+            CRANK_CU_LIMIT,
         );
+        let cleaned = env.portfolio_state(long);
+        assert!(!has_active_leg_for_asset(&cleaned, 0));
+        assert_eq!(env.market_state().1.assets[0].oi_eff_long_q, 0);
+        let withdrawable = cleaned.capital.get();
+        assert!(withdrawable > 0);
+        let destination = env.withdraw(&long_owner, long, withdrawable);
+        assert_eq!(env.token_amount(destination), withdrawable as u64);
         assert_eq!(
             env.market_state().1.vault as u64,
             env.token_amount(env.vault)

@@ -487,9 +487,9 @@ pub struct CrossDomainBSettlementReproduction {
     pub wrong_domain_reduction_num: u128,
     pub correct_domain_reduction_num: u128,
     pub reduction_steps: u8,
-    pub stranded_position_q: u128,
-    pub failed_terminal_reductions: u8,
-    pub full_withdraw_rejected: bool,
+    pub affected_position_after_q: i128,
+    pub principal_withdrawn: u128,
+    pub token_supply_conserved: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2237,13 +2237,23 @@ impl ScenarioRunner {
                 let Some(retained) = self.retained.pop_front() else {
                     return Ok(());
                 };
+                let taker_before = self.env.primary_portfolio(retained.taker);
+                let maker_before = self.env.primary_portfolio(retained.maker);
+                let (_, group_before) = self.env.primary_market_state();
                 let before = self.snapshot();
                 match self.env.land_retained(retained.transaction) {
                     Ok(success) => {
                         self.coverage.retained_landed += 1;
                         self.coverage
                             .observe_success(Some(TradeRoute::NoCpi), &success);
-                        self.record_trade(retained.taker, retained.maker, &retained.legs)?;
+                        self.record_trade(
+                            retained.taker,
+                            retained.maker,
+                            &retained.legs,
+                            &taker_before,
+                            &maker_before,
+                            &group_before,
+                        )?;
                         self.assert_portfolio_frame(&before, &[retained.taker, retained.maker])?;
                         self.assert_no_token_side_effects(&before)?;
                     }
@@ -2318,6 +2328,8 @@ impl ScenarioRunner {
         if legs.is_empty() {
             return Ok(false);
         }
+        let taker_before = self.env.primary_portfolio(taker);
+        let maker_before = self.env.primary_portfolio(maker);
         let before = self.snapshot();
         let market = self.env.primary_market_state().1;
         let result = match route {
@@ -2371,7 +2383,7 @@ impl ScenarioRunner {
             Ok(success) => {
                 self.last_trade_rejection = None;
                 self.coverage.observe_success(Some(route), &success);
-                self.record_trade(taker, maker, &legs)?;
+                self.record_trade(taker, maker, &legs, &taker_before, &maker_before, &market)?;
                 self.assert_portfolio_frame(&before, &[taker, maker])?;
                 self.assert_no_token_side_effects(&before)?;
                 Ok(true)
@@ -2436,15 +2448,36 @@ impl ScenarioRunner {
         taker: usize,
         maker: usize,
         legs: &[(usize, i128)],
+        taker_before: &PortfolioAccountV16,
+        maker_before: &PortfolioAccountV16,
+        group_before: &MarketGroupV16,
     ) -> Result<(), String> {
+        let mut taker_deltas = [0i128; ASSET_COUNT];
+        let mut maker_deltas = [0i128; ASSET_COUNT];
         for &(asset, size) in legs {
-            self.positions[taker][asset] = self.positions[taker][asset]
+            taker_deltas[asset] = taker_deltas[asset]
                 .checked_add(size)
                 .ok_or("taker ghost position overflow")?;
-            self.positions[maker][asset] = self.positions[maker][asset]
+            maker_deltas[asset] = maker_deltas[asset]
                 .checked_sub(size)
                 .ok_or("maker ghost position overflow")?;
         }
+        self.reconcile_account_position_changes(
+            taker,
+            taker_before,
+            group_before,
+            taker_deltas,
+            false,
+            "matched trade taker",
+        )?;
+        self.reconcile_account_position_changes(
+            maker,
+            maker_before,
+            group_before,
+            maker_deltas,
+            false,
+            "matched trade maker",
+        )?;
         self.assert_positions_match()
     }
 
@@ -2454,6 +2487,8 @@ impl ScenarioRunner {
         hints: HintMode,
         require_progress: bool,
     ) -> Result<(), CrankFailure> {
+        let account_before = self.env.primary_portfolio(actor);
+        let (_, group_before) = self.env.primary_market_state();
         let before = self.snapshot();
         let rank_before = self.progress_rank(actor).map_err(CrankFailure::Invariant)?;
         let diagnostics_before = self.liveness_diagnostics();
@@ -2485,8 +2520,15 @@ impl ScenarioRunner {
                     .map_err(CrankFailure::Invariant)?;
                 self.assert_no_token_side_effects(&before)
                     .map_err(CrankFailure::Invariant)?;
-                self.record_permissionless_position_changes(actor, liquidation_authorized)
-                    .map_err(CrankFailure::Invariant)?;
+                self.reconcile_account_position_changes(
+                    actor,
+                    &account_before,
+                    &group_before,
+                    [0; ASSET_COUNT],
+                    liquidation_authorized,
+                    "permissionless crank",
+                )
+                .map_err(CrankFailure::Invariant)?;
                 let rank_after = self.progress_rank(actor).map_err(CrankFailure::Invariant)?;
                 if require_progress
                     && rank_before.actionable()
@@ -2561,44 +2603,98 @@ impl ScenarioRunner {
             && cert.active_bitmap_at_cert == account.active_bitmap.map(|word| word.get())
     }
 
-    fn record_permissionless_position_changes(
+    fn prior_reset_cleanup_eligible(
+        account_before: &PortfolioAccountV16,
+        group_before: &MarketGroupV16,
+        asset: usize,
+    ) -> bool {
+        decoded_legs(account_before)
+            .iter()
+            .find(|leg| leg.active && leg.asset_index as usize == asset)
+            .map(|leg| {
+                let engine_asset = &group_before.assets[asset];
+                let (mode, epoch, effective_oi) = match leg.side {
+                    SideV16::Long => (
+                        engine_asset.mode_long,
+                        engine_asset.epoch_long,
+                        engine_asset.oi_eff_long_q,
+                    ),
+                    SideV16::Short => (
+                        engine_asset.mode_short,
+                        engine_asset.epoch_short,
+                        engine_asset.oi_eff_short_q,
+                    ),
+                };
+                mode == SideModeV16::ResetPending
+                    && effective_oi == 0
+                    && leg.epoch_snap.checked_add(1) == Some(epoch)
+            })
+            .unwrap_or(false)
+    }
+
+    fn reconcile_account_position_changes(
         &mut self,
         actor: usize,
-        liquidation_authorized: bool,
+        account_before: &PortfolioAccountV16,
+        group_before: &MarketGroupV16,
+        expected_deltas: [i128; ASSET_COUNT],
+        allow_unspecified_reduction: bool,
+        context: &str,
     ) -> Result<(), String> {
+        let before_positions = observed_positions(account_before)?;
+        if before_positions != self.positions[actor] {
+            return Err(format!(
+                "{context} actor {actor} pre-state diverged from ghost: observed={before_positions:?}, ghost={:?}",
+                self.positions[actor]
+            ));
+        }
         let observed = observed_positions(&self.env.primary_portfolio(actor))?;
         for (asset, new) in observed.into_iter().enumerate() {
-            let old = self.positions[actor][asset];
-            if old == new {
-                continue;
-            }
-            if !liquidation_authorized {
-                return Err(format!(
-                    "permissionless crank changed actor {actor} asset {asset} position \
-                     without a current liquidation certificate: {old} -> {new}"
-                ));
-            }
-            let same_side_or_flat = (old > 0 && new >= 0) || (old < 0 && new <= 0);
-            if old == 0 || !same_side_or_flat || new.unsigned_abs() >= old.unsigned_abs() {
-                return Err(format!(
-                    "liquidation did not strictly reduce same-side risk for actor {actor} \
-                     asset {asset}: {old} -> {new}"
-                ));
-            }
+            let old = before_positions[asset];
             let delta = new
                 .checked_sub(old)
-                .ok_or("liquidation position delta overflow")?;
+                .ok_or("observed account position delta overflow")?;
+            let expected = expected_deltas[asset];
+            let ordinary_post = old
+                .checked_add(expected)
+                .ok_or("expected account position overflow")?;
+            if new == ordinary_post {
+                self.positions[actor][asset] = new;
+                continue;
+            }
+            let prior_reset_cleanup =
+                Self::prior_reset_cleanup_eligible(account_before, group_before, asset)
+                    && new == expected;
+            let same_side_or_flat = (old > 0 && new >= 0) || (old < 0 && new <= 0);
+            let strict_reduction =
+                old != 0 && same_side_or_flat && new.unsigned_abs() < old.unsigned_abs();
+            let liquidation_reduction =
+                expected == 0 && allow_unspecified_reduction && strict_reduction;
+            if !prior_reset_cleanup && !liquidation_reduction {
+                return Err(format!(
+                    "{context} changed actor {actor} asset {asset} from {old} to {new} (delta \
+                     {delta}) instead of signed post-state {ordinary_post}; no liquidation or \
+                     prior-reset witness explains the difference"
+                ));
+            }
+            let unilateral_delta = delta
+                .checked_sub(expected)
+                .ok_or("unilateral position delta overflow")?;
             self.protocol_positions[asset] = self.protocol_positions[asset]
-                .checked_sub(delta)
-                .ok_or("protocol liquidation position overflow")?;
+                .checked_sub(unilateral_delta)
+                .ok_or("protocol unilateral-position attribution overflow")?;
             self.positions[actor][asset] = new;
-            let reduced = old.unsigned_abs() - new.unsigned_abs();
-            self.coverage.liquidation_steps += 1;
-            self.coverage.liquidated_abs_q = self
-                .coverage
-                .liquidated_abs_q
-                .checked_add(reduced)
-                .ok_or("liquidation coverage overflow")?;
+            if !prior_reset_cleanup {
+                let reduced = old.unsigned_abs() - new.unsigned_abs();
+                self.coverage.liquidation_steps += 1;
+                self.coverage.liquidated_abs_q = self
+                    .coverage
+                    .liquidated_abs_q
+                    .checked_add(reduced)
+                    .ok_or("liquidation coverage overflow")?;
+            } else {
+                self.coverage.user_positions_closed += u64::from(new == 0);
+            }
         }
         Ok(())
     }
@@ -3052,6 +3148,27 @@ impl ScenarioRunner {
                         leg.market_id, group.assets[asset].market_id
                     ));
                 }
+                let (side_mode, side_epoch) = match leg.side {
+                    SideV16::Long => (
+                        group.assets[asset].mode_long,
+                        group.assets[asset].epoch_long,
+                    ),
+                    SideV16::Short => (
+                        group.assets[asset].mode_short,
+                        group.assets[asset].epoch_short,
+                    ),
+                };
+                let epoch_bound = if side_mode == SideModeV16::ResetPending {
+                    leg.epoch_snap.checked_add(1) == Some(side_epoch)
+                } else {
+                    leg.epoch_snap == side_epoch
+                };
+                if !epoch_bound {
+                    return Err(format!(
+                        "actor {actor} asset {asset} {:?} leg epoch {} is not bound to {:?} epoch {}",
+                        leg.side, leg.epoch_snap, side_mode, side_epoch
+                    ));
+                }
                 if leg.basis_pos_q == i128::MIN
                     || (leg.basis_pos_q > 0 && leg.side != SideV16::Long)
                     || (leg.basis_pos_q < 0 && leg.side != SideV16::Short)
@@ -3112,6 +3229,59 @@ impl ScenarioRunner {
                     observed_long_count[asset],
                     observed_short_count[asset]
                 ));
+            }
+            if engine_asset.oi_eff_long_q > observed_long_oi[asset]
+                || engine_asset.oi_eff_short_q > observed_short_oi[asset]
+            {
+                return Err(format!(
+                    "asset {asset} effective OI {}/{} exceeds independently observed raw basis {}/{}",
+                    engine_asset.oi_eff_long_q,
+                    engine_asset.oi_eff_short_q,
+                    observed_long_oi[asset],
+                    observed_short_oi[asset]
+                ));
+            }
+            for (side, effective_oi, raw_basis, stored_count, pending_count, mode, loss_weight) in [
+                (
+                    "long",
+                    engine_asset.oi_eff_long_q,
+                    observed_long_oi[asset],
+                    engine_asset.stored_pos_count_long,
+                    engine_asset.pending_obligation_count_long,
+                    engine_asset.mode_long,
+                    engine_asset.loss_weight_sum_long,
+                ),
+                (
+                    "short",
+                    engine_asset.oi_eff_short_q,
+                    observed_short_oi[asset],
+                    engine_asset.stored_pos_count_short,
+                    engine_asset.pending_obligation_count_short,
+                    engine_asset.mode_short,
+                    engine_asset.loss_weight_sum_short,
+                ),
+            ] {
+                if mode == SideModeV16::ResetPending && (effective_oi != 0 || loss_weight != 0) {
+                    return Err(format!(
+                        "asset {asset} {side} ResetPending retained effective OI {effective_oi} or loss weight {loss_weight}"
+                    ));
+                }
+                let live_reducible = group.mode == MarketModeV16::Live
+                    && matches!(
+                        engine_asset.lifecycle,
+                        AssetLifecycleV16::Active | AssetLifecycleV16::DrainOnly
+                    );
+                if live_reducible
+                    && effective_oi == 0
+                    && raw_basis != 0
+                    && stored_count != 0
+                    && pending_count == 0
+                    && mode != SideModeV16::ResetPending
+                {
+                    return Err(format!(
+                        "asset {asset} {side} has zero effective OI with raw basis {raw_basis} in {mode:?}; no bounded reset continuation"
+                    ));
+                }
             }
             if self.protocol_positions[asset] == 0
                 && !asset_has_stale_leg[asset]
@@ -3905,13 +4075,16 @@ fn scenario_liveness_limit(scenario: &Scenario) -> Result<usize, String> {
     )
     .checked_mul(ASSET_COUNT as u64)
     .ok_or("liveness slot-step bound overflow")?;
-    let account_steps = (PRIMARY_ACTOR_COUNT as u64)
-        .checked_mul(ASSET_COUNT as u64)
-        .and_then(|value| value.checked_mul(16))
-        .ok_or("liveness account-step bound overflow")?;
     let global_step_fanout = (PRIMARY_ACTOR_COUNT as u64)
         .checked_add(1)
         .ok_or("liveness fanout overflow")?;
+    let account_steps = (PRIMARY_ACTOR_COUNT as u64)
+        .checked_mul(ASSET_COUNT as u64)
+        .and_then(|value| value.checked_mul(16))
+        // Settling one account's source-attributed K/F claim may advance risk_epoch and
+        // invalidate every modeled certificate once before the account-local sweep converges.
+        .and_then(|value| value.checked_mul(global_step_fanout))
+        .ok_or("liveness account-step bound overflow")?;
     let derived = mark_steps
         // A market step can invalidate every modeled portfolio certificate once;
         // the extra step is the market continuation itself.
@@ -14168,22 +14341,23 @@ pub fn reproduce_cross_domain_b_settlement(
         .checked_sub(funded_claim_after_num)
         .ok_or("PR 281 affected claim increased during B settlement")?;
     if pnl_loss == 0
-        || wrong_domain_reduction == 0
-        || wrong_domain_reduction.checked_add(correct_domain_reduction)
-            != Some(expected_total_reduction)
-        || correct_domain_reduction >= expected_total_reduction
+        || wrong_domain_reduction != 0
+        || correct_domain_reduction != expected_total_reduction
     {
         return Err(format!(
-            "PR 281 no longer reproduces wrong-domain-first B settlement: loss {pnl_loss}, unfunded {unfunded_claim_before_num}->{unfunded_claim_after_num}, funded {funded_claim_before_num}->{funded_claim_after_num}"
+            "PR 281 domain-local B settlement failed: loss {pnl_loss}, unfunded {unfunded_claim_before_num}->{unfunded_claim_after_num}, funded {funded_claim_before_num}->{funded_claim_after_num}"
         ));
     }
 
     let mut reduction_steps = 0u8;
-    let (stranded_position_q, failed_terminal_reductions) = loop {
+    loop {
         let position = observed_positions(&env.primary_portfolio(0))?[1];
-        if position <= 0 {
+        if position == 0 {
+            break;
+        }
+        if position < 0 {
             return Err(format!(
-                "PR 281 affected position unexpectedly exited or flipped: {position}"
+                "PR 281 affected position flipped while reducing: {position}"
             ));
         }
         let position_q = position as u128;
@@ -14202,7 +14376,6 @@ pub fn reproduce_cross_domain_b_settlement(
         ];
         let mut progressed = false;
         let mut failures = Vec::new();
-        let mut all_counter_underflow = true;
         for (candidate_index, reduce_q) in candidates.into_iter().enumerate() {
             if reduce_q == 0 || candidates[..candidate_index].contains(&reduce_q) {
                 continue;
@@ -14228,7 +14401,6 @@ pub fn reproduce_cross_domain_b_settlement(
                     {
                         return Err(format!("PR 281 failed reduction {reduce_q} mutated state"));
                     }
-                    all_counter_underflow &= error.contains("Custom(25)");
                     failures.push(format!("{reduce_q}: {error}"));
                 }
             }
@@ -14239,57 +14411,40 @@ pub fn reproduce_cross_domain_b_settlement(
             }
             continue;
         }
-        if position_q != POS_SCALE || !all_counter_underflow || failures.len() < 6 {
-            return Err(format!(
-                "PR 281 terminal reduction search stopped at unexpected position {position_q}: {}",
-                failures.join("; ")
-            ));
-        }
-        break (
-            position_q,
-            u8::try_from(failures.len()).map_err(|_| "PR 281 terminal failure count overflow")?,
-        );
-    };
+        return Err(format!(
+            "PR 281 no bounded public reduction progressed position {position_q}: {}",
+            failures.join("; ")
+        ));
+    }
+    let affected_position_after_q = observed_positions(&env.primary_portfolio(0))?[1];
+    let asset_zero_position_q = observed_positions(&env.primary_portfolio(0))?[0];
+    if asset_zero_position_q <= 0 {
+        return Err(format!(
+            "PR 281 unrelated asset position changed unexpectedly: {asset_zero_position_q}"
+        ));
+    }
+    env.trade_no_cpi(0, 1, 0, -asset_zero_position_q, FIRST_MARK, 0)
+        .map_err(|error| format!("PR 281 close unrelated asset after B settlement: {error}"))?;
+    if observed_positions(&env.primary_portfolio(0))? != [0; ASSET_COUNT] {
+        return Err("PR 281 owner did not reach a flat public state".into());
+    }
 
-    for _ in 0..8 {
-        let market_before = env.market_data(false);
-        let portfolio_before = env.primary_portfolio_data(0);
-        let _ = env.crank(0, 7, observation.clone());
-        if env.market_data(false) != market_before
-            || env.primary_portfolio_data(0) != portfolio_before
-        {
-            return Err("PR 281 honest crank progressed the terminal residual".into());
-        }
-    }
-    let market_before_trade = env.market_data(false);
-    let portfolio_before_trade = env.primary_portfolio_data(0);
-    let bilateral_exit = env.trade_no_cpi(
-        0,
-        EXIT_MAKER_INDEX,
-        1,
-        -(stranded_position_q as i128),
-        BANKRUPTCY_MARK,
-        0,
-    );
-    if bilateral_exit.is_ok()
-        || env.market_data(false) != market_before_trade
-        || env.primary_portfolio_data(0) != portfolio_before_trade
-    {
-        return Err("PR 281 bilateral exit unexpectedly moved the residual".into());
-    }
     let winner_capital = env.primary_portfolio(0).capital.get();
-    let market_before_withdraw = env.market_data(false);
-    let portfolio_before_withdraw = env.primary_portfolio_data(0);
     let destination_before = env.token_amount(env.actors[0].destination_token);
-    let full_withdraw = env.withdraw_primary(0, winner_capital);
-    let full_withdraw_rejected = full_withdraw.is_err();
-    if !full_withdraw_rejected
-        || env.market_data(false) != market_before_withdraw
-        || env.primary_portfolio_data(0) != portfolio_before_withdraw
-        || env.token_amount(env.actors[0].destination_token) != destination_before
-        || env.token_supply_observed() != supply_before
-    {
-        return Err("PR 281 full withdrawal did not reject atomically".into());
+    env.withdraw_primary(0, winner_capital)
+        .map_err(|error| format!("PR 281 withdraw flat owner principal: {error}"))?;
+    let principal_withdrawn = u128::from(
+        env.token_amount(env.actors[0].destination_token)
+            .checked_sub(destination_before)
+            .ok_or("PR 281 owner destination decreased")?,
+    );
+    let token_supply_conserved = env.token_supply_observed() == supply_before;
+    if principal_withdrawn != winner_capital || !token_supply_conserved {
+        return Err(format!(
+            "PR 281 terminal principal reconciliation failed: withdrew {principal_withdrawn}/{winner_capital}, supply {}/{}",
+            env.token_supply_observed(),
+            supply_before
+        ));
     }
     Ok(CrossDomainBSettlementReproduction {
         blocker: KnownBlocker::CrossDomainBSettlement,
@@ -14302,9 +14457,9 @@ pub fn reproduce_cross_domain_b_settlement(
         wrong_domain_reduction_num: wrong_domain_reduction,
         correct_domain_reduction_num: correct_domain_reduction,
         reduction_steps,
-        stranded_position_q,
-        failed_terminal_reductions,
-        full_withdraw_rejected,
+        affected_position_after_q,
+        principal_withdrawn,
+        token_supply_conserved,
     })
 }
 
@@ -16712,11 +16867,6 @@ pub fn trade_driven_liquidation_reward_strategy(
 
 #[allow(dead_code)]
 pub fn cross_domain_backing_seed_strategy() -> impl Strategy<Value = [u8; 32]> {
-    any::<[u8; 32]>()
-}
-
-#[allow(dead_code)]
-pub fn cross_domain_b_settlement_seed_strategy() -> impl Strategy<Value = [u8; 32]> {
     any::<[u8; 32]>()
 }
 

@@ -78,7 +78,7 @@ INV-038	observation-omission/rounded-funding	v16_program_selected_observation_om
 INV-038	fractional-movement/max-dt-crank	v16_program_fractional_max_dt_cranks_discover_terminal_value_stall	fractional-cap-residue-must-accumulate-to-target	365
 INV-020	composite-oracle/timestamp-coherence	v16_program_composite_timestamp_coherence_discovers_cross_epoch_liquidation	composite-oracle-legs-must-share-one-coherent-observation-epoch	331
 INV-020	hybrid-terminal/expired-composite-leg	v16_program_hybrid_terminal_snapshot_discovers_expired_leg_settlement	terminal-snapshot-must-use-current-authenticated-oracle-state	261
-INV-028	source-lien/reversal-exit-matrix	v16_program_source_lien_reversal_exit_matrix_discovers_funded_lock	vanished-source-claim-must-have-a-bounded-public-unwind	213
+INV-028	source-lien/reversal-exit-matrix	v16_program_source_lien_reversal_exit_matrix_preserves_bounded_exit	vanished-source-claim-has-a-bounded-public-unwind	213
 INV-028	source-lien/authenticated-expiry-routes	v16_program_expired_source_lien_route_matrix_discovers_funded_residue_lock	expired-source-lien-must-have-bounded-public-reconciliation	214
 INV-028	cross-domain-rounding/public-exit-matrix	v16_program_cross_domain_rounding_exit_matrix_discovers_funded_lock	fractional-source-domains-must-have-a-bounded-public-unwind	306
 INV-028	flat-source-lien/terminal-claim-routes	v16_program_flat_source_lien_route_matrix_discovers_backed_claim_lock	flat-backed-claim-must-have-bounded-terminal-conversion	364
@@ -90,7 +90,7 @@ INV-067	terminal-payout/dust-round-trip	v16_program_reported_route_matrix_discov
 INV-067	terminal-bankruptcy/claim-free-residual	v16_program_terminal_bankruptcy_residual_matrix_discovers_provider_double_charge	terminal-residual-cannot-double-charge-provider-principal	330
 INV-034	cross-asset-debt/foreign-insurance	v16_program_cross_asset_debt_discovers_foreign_insurance_spend	insurance-spend-remains-source-domain-local	290
 INV-031	cross-source-claims/backing-consume	v16_program_two_source_claims_discover_backing_double_consume	backing-atoms-cannot-support-claims-from-another-source	267
-INV-035	bankruptcy-residual/cross-domain-b	v16_program_two_asset_bankruptcy_discovers_cross_domain_b_settlement	b-loss-reduces-only-the-originating-source-domain	281
+INV-035	bankruptcy-residual/cross-domain-b	v16_program_two_asset_bankruptcy_preserves_domain_local_settlement_and_exit	b-loss-reduces-only-the-originating-source-domain-and-owner-exits	281
 INV-053	full-refresh/omitted-later-leg	v16_program_full_refresh_equivalence_rejects_omitted_rescue_liquidation	liquidation-certificate-cannot-be-healthier-than-full-refresh	220,366
 INV-061	resolved-adl/close-order	v16_program_resolved_adl_close_order_matrix_discovers_funded_exit_lock	funded-resolved-adl-winner-has-bounded-public-exit	216
 INV-061	bankruptcy/reset-carry-liquidation	v16_program_reset_carry_liquidation_matrix_discovers_crank_lock	fractional-reset-carry-cannot-block-permissionless-liquidation	218

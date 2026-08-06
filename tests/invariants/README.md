@@ -103,7 +103,7 @@ charter.
 | INV-048 | F | `stateful/inv_081_success_state_validity_over_complete_public_routes.rs` |
 | INV-049 | F | `stateful/inv_081_success_state_validity_over_complete_public_routes.rs` |
 | INV-050 | SVM/CU | `cu/inv_050_cross_zero_decomposition.rs` |
-| INV-051 | Gap | - |
+| INV-051 | F + SVM/CU | `cu/inv_051_canonical_adl_effective_quantity.rs`, `stateful/inv_081_success_state_validity_over_complete_public_routes.rs` (shared post-transition pooled-OI/reset oracle) |
 | INV-052 | Gap | - |
 | INV-053 | Independent + Direct + SVM/CU | `public_sbf/inv_053_full_health_recertification_equivalence.rs`, `stateful/inv_053_full_health_recertification_equivalence.rs`, `cu/inv_053_full_health_recertification_equivalence.rs` |
 | INV-054 | SVM/CU | `cu/inv_054_certificate_epoch_completeness.rs` |
