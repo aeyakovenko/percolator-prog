@@ -15,6 +15,7 @@
 //! Guarantee boundary: a quarantined counterexample demonstrates public reachability; it does
 //! not certify the invariant on an unfixed pin. Certification requires the fixed-pin assertion
 //! plus every additional verification method required by the charter.
+//! PR 224 is a fixed-pin assertion here; the remaining finding-specific tests are counterexamples.
 
 use super::*;
 
@@ -67,17 +68,21 @@ proptest! {
     })]
 
     #[test]
-    fn v16_program_pr224_cpi_caller_fee_siphon_fuzz(
+    fn v16_program_pr224_cpi_caller_fee_protection_fuzz(
         (seed, route) in cpi_caller_fee_strategy()
     ) {
-        let result = reproduce_cpi_caller_fee_siphon(seed, route);
-        prop_assert!(
-            result.is_ok(),
-            "PR 224 {:?} no longer reproduces for seed {:?}: {}",
-            route,
-            seed,
-            result.unwrap_err()
-        );
+        let protection = verify_cpi_caller_fee_protection(seed, route)
+            .map_err(TestCaseError::fail)?;
+        prop_assert_eq!(protection.route, route);
+        prop_assert_eq!(protection.requested_fee_bps, 10_000);
+        prop_assert_eq!(protection.attacker_profit, 0);
+        prop_assert_eq!(protection.lp_loss, 0);
+        prop_assert_eq!(protection.withdrawable_insurance, 0);
+        prop_assert!(protection.insurance_withdraw_rejected);
+        prop_assert!(protection.rejected_exact_rollback);
+        prop_assert_eq!(protection.total_payout, 2_000_000);
+        prop_assert!(protection.token_supply_conserved);
+        prop_assert!(protection.max_trade_cu < crate::support::v16_svm::TX_CU_LIMIT);
     }
 
     #[test]

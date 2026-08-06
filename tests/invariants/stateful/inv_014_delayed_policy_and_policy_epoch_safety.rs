@@ -125,8 +125,15 @@ proptest! {
         eprintln!("independent fee-consent discoveries: {violations:?}");
         prop_assert_eq!(
             violations,
-            FeeConsentKind::ALL.to_vec(),
-            "vulnerable-pin fee-consent discovery corpus changed"
+            vec![
+                FeeConsentKind::LiveBaseFeeHike,
+                FeeConsentKind::RetainedNoCpiBaseFee,
+                FeeConsentKind::RetainedBatchNoCpiBaseFee,
+                FeeConsentKind::CpiBaseFee,
+                FeeConsentKind::BatchCpiBaseFee,
+                FeeConsentKind::PermissionlessActivationFee,
+            ],
+            "fee-consent classification changed; CPI caller fees must remain non-authoritative"
         );
     }
 }

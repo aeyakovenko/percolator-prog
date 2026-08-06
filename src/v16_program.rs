@@ -7028,7 +7028,10 @@ pub mod processor {
             asset_index,
             ret.exec_size,
             ret.exec_price_e6,
-            fee_bps,
+            // The LP does not sign the CPI instruction, and the matcher ABI does not carry a fee
+            // approval. Caller input is bounded above, but only the market base fee may debit the
+            // unsigned LP; mark-movement fees are still derived inside the shared trade path.
+            cfg_pre.trade_fee_base_bps,
             max_market_slots,
         )
     }
@@ -7210,6 +7213,7 @@ pub mod processor {
             stale_matured,
             backing_fee_policy_active,
             fee_bounds_ok,
+            cpi_fee_bps,
         ) = {
             let market_data = market_ai.try_borrow_data()?;
             let (
@@ -7246,6 +7250,7 @@ pub mod processor {
                 stale_matured,
                 cfg_pre.backing_trade_fee_policy_count != 0,
                 fee_bounds_ok,
+                cfg_pre.trade_fee_base_bps,
             )
         };
         if mode_pre != MarketModeV16::Live {
@@ -7398,7 +7403,8 @@ pub mod processor {
                 asset_index: leg.asset_index,
                 size_q: ret.exec_size,
                 exec_price: ret.exec_price_e6,
-                fee_bps: leg.fee_bps,
+                // As in the single CPI route, the caller's fee is not LP-authorized.
+                fee_bps: cpi_fee_bps,
             });
         }
 

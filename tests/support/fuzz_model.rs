@@ -268,13 +268,18 @@ pub struct AssetGenerationReplayReproduction {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct CpiCallerFeeReproduction {
+pub struct CpiCallerFeeProtection {
     pub blocker: KnownBlocker,
     pub route: TradeRoute,
+    pub requested_fee_bps: u64,
+    pub max_trade_cu: u64,
     pub attacker_profit: u64,
     pub lp_loss: u64,
-    pub withdrawn_insurance: u128,
+    pub withdrawable_insurance: u128,
+    pub insurance_withdraw_rejected: bool,
+    pub rejected_exact_rollback: bool,
     pub total_payout: u128,
+    pub token_supply_conserved: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -4767,10 +4772,10 @@ pub fn reproduce_asset_generation_config_replay(
     })
 }
 
-pub fn reproduce_cpi_caller_fee_siphon(
+pub fn verify_cpi_caller_fee_protection(
     mut seed: [u8; 32],
     route: TradeRoute,
-) -> Result<CpiCallerFeeReproduction, String> {
+) -> Result<CpiCallerFeeProtection, String> {
     if !matches!(route, TradeRoute::Cpi | TradeRoute::BatchCpi) {
         return Err(format!("{route:?} is not an unsigned-LP CPI route"));
     }
@@ -4794,6 +4799,7 @@ pub fn reproduce_cpi_caller_fee_siphon(
             ..MarketConfig::default()
         },
     );
+    let supply_before = env.token_supply_observed();
     env.update_market_init_fee_policy(1)
         .map_err(|error| format!("{route:?} configure permissionless init fee: {error}"))?;
     env.warp_to_slot(2);
@@ -4803,8 +4809,9 @@ pub fn reproduce_cpi_caller_fee_siphon(
     env.activate_permissionless_asset_for_actor(0, ASSET, 3, PRICE, 0, 1)
         .map_err(|error| format!("{route:?} attacker asset activation: {error}"))?;
 
+    let mut max_trade_cu = 0;
     for size_q in [SIZE_Q, -SIZE_Q] {
-        match route {
+        let success = match route {
             TradeRoute::Cpi => env
                 .trade_cpi(0, 1, ASSET, size_q, CALLER_FEE_BPS, 0)
                 .map_err(|error| format!("single CPI caller-fee leg {size_q}: {error}"))?,
@@ -4822,6 +4829,7 @@ pub fn reproduce_cpi_caller_fee_siphon(
                 .map_err(|error| format!("batch CPI caller-fee leg {size_q}: {error}"))?,
             _ => unreachable!(),
         };
+        max_trade_cu = max_trade_cu.max(success.compute_units);
     }
     let attacker_capital = env.primary_portfolio(0).capital.get();
     let lp_capital = env.primary_portfolio(1).capital.get();
@@ -4833,46 +4841,69 @@ pub fn reproduce_cpi_caller_fee_siphon(
             "{route:?} caller-fee round trip did not close flat"
         ));
     }
-    let withdrawn_insurance = group.insurance_domain_budget[2]
+    let withdrawable_insurance = group.insurance_domain_budget[2]
         .checked_add(group.insurance_domain_budget[3])
         .ok_or("CPI caller-fee insurance budget overflow")?;
-    if withdrawn_insurance == 0 {
+    let attacker_profit = attacker_capital.saturating_sub(DEPOSIT) as u64;
+    let lp_loss = DEPOSIT.saturating_sub(lp_capital) as u64;
+    if attacker_capital != DEPOSIT
+        || lp_capital != DEPOSIT
+        || attacker_profit != 0
+        || lp_loss != 0
+        || withdrawable_insurance != 0
+    {
         return Err(format!(
-            "{route:?} caller fee created no attacker-withdrawable budget"
+            "{route:?} caller fee remained economically authoritative: attacker capital {attacker_capital}, LP capital {lp_capital}, attacker profit {attacker_profit}, LP loss {lp_loss}, asset insurance {withdrawable_insurance}"
         ));
     }
-    env.withdraw_insurance_asset(0, ASSET, withdrawn_insurance)
-        .map_err(|error| format!("{route:?} withdraw caller-fee insurance: {error}"))?;
+    let before_rejection = tracked_economic_accounts(&env);
+    let withdraw_error = match env.withdraw_insurance_asset(0, ASSET, 1) {
+        Ok(_) => return Err(format!("{route:?} caller withdrew nonexistent insurance")),
+        Err(error) => error,
+    };
+    let insurance_withdraw_rejected = withdraw_error.contains("Custom(21)")
+        || withdraw_error.contains("custom program error: 0x15");
+    let rejected_exact_rollback = tracked_economic_accounts(&env) == before_rejection;
+    if !insurance_withdraw_rejected || !rejected_exact_rollback {
+        return Err(format!(
+            "{route:?} rejected insurance extraction was not a locked, exact rollback: {withdraw_error}"
+        ));
+    }
     env.withdraw_primary(0, attacker_capital)
         .map_err(|error| format!("{route:?} attacker capital withdrawal: {error}"))?;
     env.withdraw_primary(1, lp_capital)
         .map_err(|error| format!("{route:?} LP capital withdrawal: {error}"))?;
     let attacker_payout = env.token_amount(env.actors[0].destination_token);
     let lp_payout = env.token_amount(env.actors[1].destination_token);
-    let attacker_profit = attacker_payout
-        .checked_sub(DEPOSIT as u64)
-        .ok_or("CPI caller fee did not leave attacker above principal")?;
-    let lp_loss = (DEPOSIT as u64)
-        .checked_sub(lp_payout)
-        .ok_or("CPI caller fee left unsigned LP above principal")?;
-    if attacker_profit == 0 || attacker_profit != lp_loss {
+    if attacker_payout != DEPOSIT as u64 || lp_payout != DEPOSIT as u64 {
         return Err(format!(
-            "{route:?} caller-fee siphon was not value-neutral between attacker and LP: profit {attacker_profit}, loss {lp_loss}"
+            "{route:?} caller fee changed terminal principal: attacker {attacker_payout}, LP {lp_payout}"
         ));
     }
     let total_payout = u128::from(attacker_payout) + u128::from(lp_payout);
     if total_payout != DEPOSIT * 2 {
         return Err(format!(
-            "{route:?} caller-fee siphon changed total payout to {total_payout}"
+            "{route:?} caller-fee protection changed total payout to {total_payout}"
         ));
     }
-    Ok(CpiCallerFeeReproduction {
+    let token_supply_conserved = env.token_supply_observed() == supply_before;
+    if !token_supply_conserved {
+        return Err(format!(
+            "{route:?} caller-fee protection changed SPL supply"
+        ));
+    }
+    Ok(CpiCallerFeeProtection {
         blocker: KnownBlocker::CpiCallerFeeSiphon,
         route,
+        requested_fee_bps: CALLER_FEE_BPS,
+        max_trade_cu,
         attacker_profit,
         lp_loss,
-        withdrawn_insurance,
+        withdrawable_insurance,
+        insurance_withdraw_rejected,
+        rejected_exact_rollback,
         total_payout,
+        token_supply_conserved,
     })
 }
 

@@ -182,7 +182,14 @@ fn v16_attack_mixed_direction_batch_fees_conserve_by_asset() {
     }
 
     for path in [Path::NoCpi, Path::Cpi] {
-        let mut env = V16CuEnv::new_with_market_params_and_price_move(2, 1_000, 1_000, 500);
+        let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+            max_portfolio_assets: 2,
+            maintenance_margin_bps: 1_000,
+            initial_margin_bps: 1_000,
+            max_price_move_bps_per_slot: 500,
+            trade_fee_base_bps: 100,
+            ..V16CuMarketParams::default()
+        });
         env.configure_auth_mark_for_asset_as_admin(0, 1, 100);
         env.configure_auth_mark_for_asset_as_admin(1, 1, 100);
         let taker = Keypair::new();

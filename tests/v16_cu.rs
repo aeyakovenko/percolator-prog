@@ -9276,7 +9276,10 @@ fn v16_attack_close_portfolio_rejects_occupied_source_domain_without_claim_bound
 
 #[test]
 fn v16_bpf_tradecpi_executes_through_external_matcher_and_is_bounded() {
-    let mut env = V16CuEnv::new();
+    let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+        trade_fee_base_bps: 100,
+        ..V16CuMarketParams::default()
+    });
     let matcher_program = Pubkey::new_unique();
     let matcher_bytes = std::fs::read(matcher_program_path()).expect("read matcher BPF");
     env.svm.add_program(matcher_program, &matcher_bytes);
@@ -9344,7 +9347,10 @@ fn v16_bpf_tradecpi_executes_through_external_matcher_and_is_bounded() {
 
 #[test]
 fn v16_bpf_tradecpi_external_matcher_executes_on_added_asset() {
-    let mut env = V16CuEnv::new();
+    let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+        trade_fee_base_bps: 100,
+        ..V16CuMarketParams::default()
+    });
     let matcher_program = Pubkey::new_unique();
     let matcher_bytes = std::fs::read(matcher_program_path()).expect("read matcher BPF");
     env.svm.add_program(matcher_program, &matcher_bytes);
@@ -41293,7 +41299,10 @@ fn v16_attack_tradecpi_short_fill_rejects_atomically() {
 #[test]
 fn v16_attack_tradecpi_fee_is_mark_pinned_not_matcher_quoted() {
     let fee_for_spread = |base_spread: u32, max_total: u32| -> u128 {
-        let mut env = V16CuEnv::new();
+        let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+            trade_fee_base_bps: 100,
+            ..V16CuMarketParams::default()
+        });
         let matcher_program = Pubkey::new_unique();
         let matcher_bytes = std::fs::read(matcher_program_path()).expect("read matcher BPF");
         env.svm.add_program(matcher_program, &matcher_bytes);
@@ -50935,8 +50944,8 @@ fn v16_attack_inactive_asset_tradecpi_rejects_before_hostile_matcher_cpi() {
 }
 
 // security.md sweep — BatchTradeCpi fee bounds on permissionless LP fills (#37/#49): in CPI mode the
-// taker supplies fee_bps while the LP owner does not sign the fill. An over-max fee must therefore
-// reject the whole batch, or a taker could drain an LP into protocol insurance through a matcher fill.
+// taker supplies fee_bps while the LP owner does not sign the fill. Over-max values are malformed,
+// while an in-range caller value cannot raise the unsigned LP's charge above the market base fee.
 #[test]
 fn v16_attack_batch_cpi_fee_bps_bounded_for_permissionless_lp() {
     let mut env = V16CuEnv::new();
@@ -51015,14 +51024,13 @@ fn v16_attack_batch_cpi_fee_bps_bounded_for_permissionless_lp() {
         "max allowed BatchTradeCpi fee_bps should still execute: {ok:?}"
     );
     let group = env.market_state().1;
-    assert!(
-        group.insurance > before.insurance,
-        "valid max fee accrues to insurance"
-    );
     assert_eq!(
-        group.vault, before.vault,
-        "valid fee is internal capital->insurance"
+        group.insurance, before.insurance,
+        "an in-range caller fee cannot charge the unsigned LP"
     );
+    assert_eq!(env.portfolio_state(taker_account).capital.get(), 1_000_000);
+    assert_eq!(env.portfolio_state(lp_account).capital.get(), 1_000_000);
+    assert_eq!(group.vault, before.vault, "caller fee moves no custody");
     assert!(
         group.vault >= group.c_tot + group.insurance,
         "senior conservation"
