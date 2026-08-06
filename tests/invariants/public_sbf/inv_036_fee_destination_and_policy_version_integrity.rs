@@ -60,16 +60,15 @@ fn v16_program_pr314_permissionless_activation_fee_requires_creator_consent() {
     assert_eq!(protection.blocker, KnownBlocker::ActivationFeeConsent);
     assert_eq!(protection.signed_max_fee, 1);
     assert_eq!(protection.installed_unauthorized_fee, 1_000);
-    assert!(protection.stale_activation_rejected);
+    assert!(protection.stale_policy_rejected);
     assert!(protection.rejected_exact_rollback);
     assert_eq!(protection.unconsented_creator_loss, 0);
     assert_eq!(protection.unconsented_insurance_delta, 0);
-    assert_eq!(protection.consented_max_fee, 1_000);
-    assert_eq!(protection.current_fee, 7);
-    assert_eq!(protection.charged_fee, 7);
-    assert_eq!(protection.insured_fee, 7);
+    assert_eq!(protection.consented_max_fee, 1);
+    assert_eq!(protection.current_fee, 1);
+    assert_eq!(protection.charged_fee, 1);
+    assert_eq!(protection.insured_fee, 1);
     assert!(protection.asset_active);
-    assert!(protection.policy_replay_cu < 1_400_000);
     assert!(protection.activation_cu < 1_400_000);
     assert!(protection.token_supply_conserved);
 }

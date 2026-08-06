@@ -34,6 +34,10 @@ pub const EXIT_MAKER_TOKEN_BALANCE: u64 = 2_500_000_000;
 const FOREIGN_TOKEN_BALANCE: u64 = 200_000_000;
 const MATCHER_CONTEXT_LEN: usize = 320;
 
+fn next_control_sequence(current: u64) -> u64 {
+    current.checked_add(1).expect("control sequence exhausted")
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct MarketConfig {
     pub initial_price: u64,
@@ -978,11 +982,14 @@ impl V16Svm {
         stale_slots: u64,
         force_close_delay_slots: u64,
     ) -> Result<TxSuccess, String> {
+        let policy_sequence =
+            next_control_sequence(self.primary_control_sequences(0).permissionless_resolve);
         let admin = copy_keypair(&self.admin);
         self.send_program(
             ProgInstruction::ConfigurePermissionlessResolve {
                 stale_slots,
                 force_close_delay_slots,
+                policy_sequence,
             },
             vec![
                 AccountMeta::new(admin.pubkey(), true),
@@ -1252,6 +1259,17 @@ impl V16Svm {
         now_slot: u64,
         mark: u64,
     ) -> Result<TxSuccess, String> {
+        let observation_sequence = if foreign {
+            next_control_sequence(
+                self.foreign_control_sequences(asset_index as usize)
+                    .oracle_observation,
+            )
+        } else {
+            next_control_sequence(
+                self.primary_control_sequences(asset_index as usize)
+                    .oracle_observation,
+            )
+        };
         let (authority, market) = if foreign {
             (copy_keypair(&self.foreign_admin), self.foreign_market)
         } else {
@@ -1262,6 +1280,7 @@ impl V16Svm {
                 asset_index,
                 now_slot,
                 initial_mark_e6: mark,
+                observation_sequence,
             },
             vec![
                 AccountMeta::new(authority.pubkey(), true),
@@ -1283,6 +1302,10 @@ impl V16Svm {
         hybrid_soft_stale_slots: u64,
         conf_filter_bps: u16,
     ) -> Result<TxSuccess, String> {
+        let observation_sequence = next_control_sequence(
+            self.primary_control_sequences(asset_index as usize)
+                .oracle_observation,
+        );
         let authority = copy_keypair(&self.admin);
         let mut accounts = vec![
             AccountMeta::new(authority.pubkey(), true),
@@ -1309,6 +1332,7 @@ impl V16Svm {
                 unit_scale: 0,
                 conf_filter_bps,
                 oracle_leg_feeds: feeds,
+                observation_sequence,
             },
             accounts,
             &[authority],
@@ -1327,6 +1351,10 @@ impl V16Svm {
         hybrid_soft_stale_slots: u64,
         conf_filter_bps: u16,
     ) -> Transaction {
+        let observation_sequence = next_control_sequence(
+            self.primary_control_sequences(asset_index as usize)
+                .oracle_observation,
+        );
         let authority = copy_keypair(&self.admin);
         let mut accounts = vec![
             AccountMeta::new(authority.pubkey(), true),
@@ -1353,6 +1381,7 @@ impl V16Svm {
                 unit_scale: 0,
                 conf_filter_bps,
                 oracle_leg_feeds: feeds,
+                observation_sequence,
             },
             accounts,
             &[authority],
@@ -1366,12 +1395,17 @@ impl V16Svm {
         now_slot: u64,
         mark: u64,
     ) -> Result<TxSuccess, String> {
+        let observation_sequence = next_control_sequence(
+            self.primary_control_sequences(asset_index as usize)
+                .oracle_observation,
+        );
         let authority = copy_keypair(&self.actors[actor_index].signer);
         self.send_program(
             ProgInstruction::ConfigureAuthMark {
                 asset_index,
                 now_slot,
                 initial_mark_e6: mark,
+                observation_sequence,
             },
             vec![
                 AccountMeta::new(authority.pubkey(), true),
@@ -1389,6 +1423,10 @@ impl V16Svm {
         halflife_slots: u64,
         mark_min_fee: u64,
     ) -> Result<TxSuccess, String> {
+        let observation_sequence = next_control_sequence(
+            self.primary_control_sequences(asset_index as usize)
+                .oracle_observation,
+        );
         let authority = copy_keypair(&self.admin);
         self.send_program(
             ProgInstruction::ConfigureEwmaMark {
@@ -1397,6 +1435,7 @@ impl V16Svm {
                 initial_mark_e6: mark,
                 mark_ewma_halflife_slots: halflife_slots,
                 mark_min_fee,
+                observation_sequence,
             },
             vec![
                 AccountMeta::new(authority.pubkey(), true),
@@ -1415,6 +1454,10 @@ impl V16Svm {
         halflife_slots: u64,
         mark_min_fee: u64,
     ) -> Result<TxSuccess, String> {
+        let observation_sequence = next_control_sequence(
+            self.primary_control_sequences(asset_index as usize)
+                .oracle_observation,
+        );
         let authority = copy_keypair(&self.actors[actor_index].signer);
         self.send_program(
             ProgInstruction::ConfigureEwmaMark {
@@ -1423,6 +1466,7 @@ impl V16Svm {
                 initial_mark_e6: mark,
                 mark_ewma_halflife_slots: halflife_slots,
                 mark_min_fee,
+                observation_sequence,
             },
             vec![
                 AccountMeta::new(authority.pubkey(), true),
@@ -1438,12 +1482,17 @@ impl V16Svm {
         now_slot: u64,
         mark: u64,
     ) -> Result<TxSuccess, String> {
+        let observation_sequence = next_control_sequence(
+            self.primary_control_sequences(asset_index as usize)
+                .oracle_observation,
+        );
         let authority = copy_keypair(&self.admin);
         self.send_program(
             ProgInstruction::PushEwmaMark {
                 asset_index,
                 now_slot,
                 mark_e6: mark,
+                observation_sequence,
             },
             vec![
                 AccountMeta::new(authority.pubkey(), true),
@@ -1459,12 +1508,17 @@ impl V16Svm {
         now_slot: u64,
         mark: u64,
     ) -> Result<TxSuccess, String> {
+        let observation_sequence = next_control_sequence(
+            self.primary_control_sequences(asset_index as usize)
+                .oracle_observation,
+        );
         let authority = copy_keypair(&self.admin);
         self.send_program(
             ProgInstruction::PushAuthMark {
                 asset_index,
                 now_slot,
                 mark_e6: mark,
+                observation_sequence,
             },
             vec![
                 AccountMeta::new(authority.pubkey(), true),
@@ -1481,12 +1535,17 @@ impl V16Svm {
         now_slot: u64,
         mark: u64,
     ) -> Result<TxSuccess, String> {
+        let observation_sequence = next_control_sequence(
+            self.primary_control_sequences(asset_index as usize)
+                .oracle_observation,
+        );
         let authority = copy_keypair(&self.actors[actor_index].signer);
         self.send_program(
             ProgInstruction::PushAuthMark {
                 asset_index,
                 now_slot,
                 mark_e6: mark,
+                observation_sequence,
             },
             vec![
                 AccountMeta::new(authority.pubkey(), true),
@@ -1502,12 +1561,19 @@ impl V16Svm {
         fee_bps: u16,
         insurance_share_bps: u16,
     ) -> Result<TxSuccess, String> {
+        let sequences = self.primary_control_sequences(domain as usize / 2);
+        let policy_sequence = next_control_sequence(if domain % 2 == 0 {
+            sequences.backing_fee_long
+        } else {
+            sequences.backing_fee_short
+        });
         let authority = copy_keypair(&self.admin);
         self.send_program(
             ProgInstruction::UpdateBackingFeePolicy {
                 domain,
                 fee_bps,
                 insurance_share_bps,
+                policy_sequence,
             },
             vec![
                 AccountMeta::new(authority.pubkey(), true),
@@ -1524,12 +1590,19 @@ impl V16Svm {
         fee_bps: u16,
         insurance_share_bps: u16,
     ) -> Result<TxSuccess, String> {
+        let sequences = self.primary_control_sequences(domain as usize / 2);
+        let policy_sequence = next_control_sequence(if domain % 2 == 0 {
+            sequences.backing_fee_long
+        } else {
+            sequences.backing_fee_short
+        });
         let authority = copy_keypair(&self.actors[actor_index].signer);
         self.send_program(
             ProgInstruction::UpdateBackingFeePolicy {
                 domain,
                 fee_bps,
                 insurance_share_bps,
+                policy_sequence,
             },
             vec![
                 AccountMeta::new(authority.pubkey(), true),
@@ -1546,12 +1619,19 @@ impl V16Svm {
         fee_bps: u16,
         insurance_share_bps: u16,
     ) -> Transaction {
+        let sequences = self.primary_control_sequences(domain as usize / 2);
+        let policy_sequence = next_control_sequence(if domain % 2 == 0 {
+            sequences.backing_fee_long
+        } else {
+            sequences.backing_fee_short
+        });
         let authority = copy_keypair(&self.actors[actor_index].signer);
         self.build_program_transaction(
             ProgInstruction::UpdateBackingFeePolicy {
                 domain,
                 fee_bps,
                 insurance_share_bps,
+                policy_sequence,
             },
             vec![
                 AccountMeta::new(authority.pubkey(), true),
@@ -1565,9 +1645,14 @@ impl V16Svm {
         &mut self,
         min_init_fee: u128,
     ) -> Result<TxSuccess, String> {
+        let policy_sequence =
+            next_control_sequence(self.primary_control_sequences(0).market_init_fee);
         let authority = copy_keypair(&self.admin);
         self.send_program(
-            ProgInstruction::UpdateMarketInitFeePolicy { min_init_fee },
+            ProgInstruction::UpdateMarketInitFeePolicy {
+                min_init_fee,
+                policy_sequence,
+            },
             vec![
                 AccountMeta::new(authority.pubkey(), true),
                 AccountMeta::new(self.market, false),
@@ -1580,9 +1665,13 @@ impl V16Svm {
         &mut self,
         trade_fee_base_bps: u64,
     ) -> Result<TxSuccess, String> {
+        let policy_sequence = next_control_sequence(self.primary_control_sequences(0).trade_fee);
         let authority = copy_keypair(&self.admin);
         self.send_program(
-            ProgInstruction::UpdateTradeFeePolicy { trade_fee_base_bps },
+            ProgInstruction::UpdateTradeFeePolicy {
+                trade_fee_base_bps,
+                policy_sequence,
+            },
             vec![
                 AccountMeta::new(authority.pubkey(), true),
                 AccountMeta::new(self.market, false),
@@ -1592,9 +1681,13 @@ impl V16Svm {
     }
 
     pub fn build_retained_trade_fee_policy(&mut self, trade_fee_base_bps: u64) -> Transaction {
+        let policy_sequence = next_control_sequence(self.primary_control_sequences(0).trade_fee);
         let authority = copy_keypair(&self.admin);
         self.build_program_transaction(
-            ProgInstruction::UpdateTradeFeePolicy { trade_fee_base_bps },
+            ProgInstruction::UpdateTradeFeePolicy {
+                trade_fee_base_bps,
+                policy_sequence,
+            },
             vec![
                 AccountMeta::new(authority.pubkey(), true),
                 AccountMeta::new(self.market, false),
@@ -1604,9 +1697,13 @@ impl V16Svm {
     }
 
     pub fn update_fee_redirect_policy(&mut self, redirect_bps: u16) -> Result<TxSuccess, String> {
+        let policy_sequence = next_control_sequence(self.primary_control_sequences(0).fee_redirect);
         let authority = copy_keypair(&self.admin);
         self.send_program(
-            ProgInstruction::UpdateFeeRedirectPolicy { redirect_bps },
+            ProgInstruction::UpdateFeeRedirectPolicy {
+                redirect_bps,
+                policy_sequence,
+            },
             vec![
                 AccountMeta::new(authority.pubkey(), true),
                 AccountMeta::new(self.market, false),
@@ -1616,9 +1713,13 @@ impl V16Svm {
     }
 
     pub fn build_retained_fee_redirect_policy(&mut self, redirect_bps: u16) -> Transaction {
+        let policy_sequence = next_control_sequence(self.primary_control_sequences(0).fee_redirect);
         let authority = copy_keypair(&self.admin);
         self.build_program_transaction(
-            ProgInstruction::UpdateFeeRedirectPolicy { redirect_bps },
+            ProgInstruction::UpdateFeeRedirectPolicy {
+                redirect_bps,
+                policy_sequence,
+            },
             vec![
                 AccountMeta::new(authority.pubkey(), true),
                 AccountMeta::new(self.market, false),
@@ -1628,9 +1729,14 @@ impl V16Svm {
     }
 
     pub fn build_retained_market_init_fee_policy(&mut self, min_init_fee: u128) -> Transaction {
+        let policy_sequence =
+            next_control_sequence(self.primary_control_sequences(0).market_init_fee);
         let authority = copy_keypair(&self.admin);
         self.build_program_transaction(
-            ProgInstruction::UpdateMarketInitFeePolicy { min_init_fee },
+            ProgInstruction::UpdateMarketInitFeePolicy {
+                min_init_fee,
+                policy_sequence,
+            },
             vec![
                 AccountMeta::new(authority.pubkey(), true),
                 AccountMeta::new(self.market, false),
@@ -1643,9 +1749,14 @@ impl V16Svm {
         &mut self,
         cranker_share_bps: u16,
     ) -> Result<TxSuccess, String> {
+        let policy_sequence =
+            next_control_sequence(self.primary_control_sequences(0).liquidation_fee);
         let authority = copy_keypair(&self.admin);
         self.send_program(
-            ProgInstruction::UpdateLiquidationFeePolicy { cranker_share_bps },
+            ProgInstruction::UpdateLiquidationFeePolicy {
+                cranker_share_bps,
+                policy_sequence,
+            },
             vec![
                 AccountMeta::new(authority.pubkey(), true),
                 AccountMeta::new(self.market, false),
@@ -1655,9 +1766,14 @@ impl V16Svm {
     }
 
     pub fn build_retained_liquidation_fee_policy(&mut self, cranker_share_bps: u16) -> Transaction {
+        let policy_sequence =
+            next_control_sequence(self.primary_control_sequences(0).liquidation_fee);
         let authority = copy_keypair(&self.admin);
         self.build_program_transaction(
-            ProgInstruction::UpdateLiquidationFeePolicy { cranker_share_bps },
+            ProgInstruction::UpdateLiquidationFeePolicy {
+                cranker_share_bps,
+                policy_sequence,
+            },
             vec![
                 AccountMeta::new(authority.pubkey(), true),
                 AccountMeta::new(self.market, false),
@@ -1670,9 +1786,14 @@ impl V16Svm {
         &mut self,
         cranker_share_bps: u16,
     ) -> Result<TxSuccess, String> {
+        let policy_sequence =
+            next_control_sequence(self.primary_control_sequences(0).maintenance_fee);
         let authority = copy_keypair(&self.admin);
         self.send_program(
-            ProgInstruction::UpdateMaintenanceFeePolicy { cranker_share_bps },
+            ProgInstruction::UpdateMaintenanceFeePolicy {
+                cranker_share_bps,
+                policy_sequence,
+            },
             vec![
                 AccountMeta::new(authority.pubkey(), true),
                 AccountMeta::new(self.market, false),
@@ -1682,9 +1803,14 @@ impl V16Svm {
     }
 
     pub fn build_retained_maintenance_fee_policy(&mut self, cranker_share_bps: u16) -> Transaction {
+        let policy_sequence =
+            next_control_sequence(self.primary_control_sequences(0).maintenance_fee);
         let authority = copy_keypair(&self.admin);
         self.build_program_transaction(
-            ProgInstruction::UpdateMaintenanceFeePolicy { cranker_share_bps },
+            ProgInstruction::UpdateMaintenanceFeePolicy {
+                cranker_share_bps,
+                policy_sequence,
+            },
             vec![
                 AccountMeta::new(authority.pubkey(), true),
                 AccountMeta::new(self.market, false),
@@ -1743,12 +1869,17 @@ impl V16Svm {
         now_slot: u64,
         initial_price: u64,
     ) -> Result<TxSuccess, String> {
+        let observation_sequence = next_control_sequence(
+            self.primary_control_sequences(asset_index as usize)
+                .oracle_observation,
+        );
         let authority = copy_keypair(&self.admin);
         self.send_program(
             ProgInstruction::RestartAssetOracle {
                 asset_index,
                 now_slot,
                 initial_price,
+                observation_sequence,
             },
             vec![
                 AccountMeta::new(authority.pubkey(), true),
@@ -2588,11 +2719,14 @@ impl V16Svm {
         stale_slots: u64,
         force_close_delay_slots: u64,
     ) -> Transaction {
+        let policy_sequence =
+            next_control_sequence(self.primary_control_sequences(0).permissionless_resolve);
         let admin = copy_keypair(&self.admin);
         self.build_program_transaction(
             ProgInstruction::ConfigurePermissionlessResolve {
                 stale_slots,
                 force_close_delay_slots,
+                policy_sequence,
             },
             vec![
                 AccountMeta::new(admin.pubkey(), true),
@@ -2977,12 +3111,17 @@ impl V16Svm {
     }
 
     pub fn build_retained_auth_mark(&mut self, asset_index: u16, mark_e6: u64) -> Transaction {
+        let observation_sequence = next_control_sequence(
+            self.primary_control_sequences(asset_index as usize)
+                .oracle_observation,
+        );
         let authority = copy_keypair(&self.admin);
         self.build_program_transaction(
             ProgInstruction::PushAuthMark {
                 asset_index,
                 now_slot: 0,
                 mark_e6,
+                observation_sequence,
             },
             vec![
                 AccountMeta::new(authority.pubkey(), true),
@@ -2993,12 +3132,17 @@ impl V16Svm {
     }
 
     pub fn build_retained_ewma_mark(&mut self, asset_index: u16, mark_e6: u64) -> Transaction {
+        let observation_sequence = next_control_sequence(
+            self.primary_control_sequences(asset_index as usize)
+                .oracle_observation,
+        );
         let authority = copy_keypair(&self.admin);
         self.build_program_transaction(
             ProgInstruction::PushEwmaMark {
                 asset_index,
                 now_slot: 0,
                 mark_e6,
+                observation_sequence,
             },
             vec![
                 AccountMeta::new(authority.pubkey(), true),
@@ -3013,12 +3157,17 @@ impl V16Svm {
         asset_index: u16,
         initial_mark_e6: u64,
     ) -> Transaction {
+        let observation_sequence = next_control_sequence(
+            self.primary_control_sequences(asset_index as usize)
+                .oracle_observation,
+        );
         let authority = copy_keypair(&self.admin);
         self.build_program_transaction(
             ProgInstruction::ConfigureAuthMark {
                 asset_index,
                 now_slot: 0,
                 initial_mark_e6,
+                observation_sequence,
             },
             vec![
                 AccountMeta::new(authority.pubkey(), true),
@@ -3035,6 +3184,10 @@ impl V16Svm {
         halflife_slots: u64,
         mark_min_fee: u64,
     ) -> Transaction {
+        let observation_sequence = next_control_sequence(
+            self.primary_control_sequences(asset_index as usize)
+                .oracle_observation,
+        );
         let authority = copy_keypair(&self.admin);
         self.build_program_transaction(
             ProgInstruction::ConfigureEwmaMark {
@@ -3043,6 +3196,7 @@ impl V16Svm {
                 initial_mark_e6,
                 mark_ewma_halflife_slots: halflife_slots,
                 mark_min_fee,
+                observation_sequence,
             },
             vec![
                 AccountMeta::new(authority.pubkey(), true),
@@ -3131,6 +3285,21 @@ impl V16Svm {
         let account = self.svm.get_account(&self.market).expect("primary market");
         state::read_asset_oracle_profile(&account.data, asset_index)
             .expect("decode primary oracle profile")
+    }
+
+    pub fn primary_control_sequences(&self, asset_index: usize) -> state::AssetControlSequencesV16 {
+        let account = self.svm.get_account(&self.market).expect("primary market");
+        state::read_asset_control_sequences(&account.data, asset_index)
+            .expect("decode primary control sequences")
+    }
+
+    pub fn foreign_control_sequences(&self, asset_index: usize) -> state::AssetControlSequencesV16 {
+        let account = self
+            .svm
+            .get_account(&self.foreign_market)
+            .expect("foreign market");
+        state::read_asset_control_sequences(&account.data, asset_index)
+            .expect("decode foreign control sequences")
     }
 
     pub fn primary_portfolio(&self, actor_index: usize) -> PortfolioAccountV16 {

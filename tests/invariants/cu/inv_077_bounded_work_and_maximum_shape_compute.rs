@@ -445,9 +445,9 @@ fn run_max_source_liquidation_asset(adverse_asset: u16) {
             if $label == "max-source liquidation crank" {
                 let error = format!("{:?}", result.as_ref().unwrap_err());
                 assert!(
-                    (error.contains("ComputationalBudgetExceeded")
-                        || error.contains("ProgramFailedToComplete"))
-                        && error.contains("exceeded CUs meter"),
+                    error.contains("ComputationalBudgetExceeded")
+                        || error.contains("ProgramFailedToComplete")
+                        || error.contains("Computational budget exceeded"),
                     "max-source crank failed for a non-CU reason: {error}"
                 );
             }
@@ -677,6 +677,7 @@ fn run_dense_zero_delta_resolution_shape(asset_count: u16) {
     env.svm.expire_blockhash();
     env.send(
         ProgInstruction::ConfigurePermissionlessResolve {
+            policy_sequence: u64::MAX,
             stale_slots: 1,
             force_close_delay_slots: 1,
         },

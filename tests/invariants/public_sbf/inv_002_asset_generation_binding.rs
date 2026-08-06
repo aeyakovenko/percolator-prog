@@ -2,7 +2,7 @@
 //!
 //! Normative obligation: Asset-scoped consent cannot cross retirement, slot reuse, or asset-generation changes.
 //!
-//! Evidence in this file (I plus invariant-specific F/M assertions): `v16_program_pr231_asset_generation_replay_extracts_on_every_route`, `v16_program_pr279_stale_collateral_top_up_funds_replacement_operator`, `v16_program_pr321_stale_backing_top_up_funds_replacement_winner`, `v16_program_pr328_stale_withdrawal_drains_replacement_reserve`, `v16_program_pr318_stale_backing_fee_extracts_victim_capital`, `v16_program_pr311_stale_resolve_crystallizes_replacement_loss`, `v16_program_pr275_stale_mark_replays_across_asset_generation`, `v16_program_pr277_pr322_stale_config_replays_across_asset_generation`. These tests exercise the deployed public
+//! Evidence in this file (I plus invariant-specific F/M assertions): `v16_program_pr231_asset_generation_replay_extracts_on_every_route`, `v16_program_pr279_stale_collateral_top_up_funds_replacement_operator`, `v16_program_pr321_stale_backing_top_up_funds_replacement_winner`, `v16_program_pr328_stale_withdrawal_drains_replacement_reserve`, `v16_program_pr318_stale_backing_fee_extracts_victim_capital`, `v16_program_pr311_stale_resolve_crystallizes_replacement_loss`, `v16_program_pr275_stale_mark_pushes_reject_across_asset_generation`, `v16_program_pr277_pr322_stale_config_replays_across_asset_generation`. These tests exercise the deployed public
 //! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
 //! rollback, liveness, or compute outcomes appropriate to the invariant.
 //!
@@ -111,22 +111,15 @@ fn v16_program_pr311_stale_resolve_crystallizes_replacement_loss() {
 }
 
 #[test]
-fn v16_program_pr275_stale_mark_replays_across_asset_generation() {
-    for path in [AssetGenerationMarkPath::Auth, AssetGenerationMarkPath::Ewma] {
-        let reproduction = reproduce_asset_generation_mark_replay([0x75; 32], path)
-            .unwrap_or_else(|error| panic!("PR 275 {path:?} no longer reproduces: {error}"));
-        assert_eq!(
-            reproduction.blocker,
-            KnownBlocker::AssetGenerationMarkReplay
-        );
-        assert_eq!(reproduction.path, path);
-        assert_ne!(reproduction.old_market_id, reproduction.new_market_id);
-        assert!(reproduction.landed_mark < 100);
-        assert!(reproduction.victim_equity_loss > 0);
-        assert_eq!(
-            reproduction.victim_equity_loss,
-            u128::from(reproduction.beneficiary_extra_payout)
-        );
+fn v16_program_pr275_stale_mark_pushes_reject_across_asset_generation() {
+    for kind in [AssetIntentKind::PushAuthMark, AssetIntentKind::PushEwmaMark] {
+        let protection = discover_asset_generation_replay([0x75; 32], kind)
+            .unwrap_or_else(|error| panic!("PR 275 {kind:?} protection failed: {error}"));
+        assert_eq!(protection.kind, kind);
+        assert!(protection.new_asset_id > protection.old_asset_id);
+        assert!(!protection.accepted_stale_intent);
+        assert!(!protection.mutated_economic_state);
+        assert_eq!(protection.compute_units, None);
     }
 }
 

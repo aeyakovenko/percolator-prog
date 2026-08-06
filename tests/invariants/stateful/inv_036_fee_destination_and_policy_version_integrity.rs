@@ -110,7 +110,7 @@ proptest! {
     ) {
         let protection = verify_activation_fee_consent(seed)
             .map_err(TestCaseError::fail)?;
-        prop_assert!(protection.stale_activation_rejected);
+        prop_assert!(protection.stale_policy_rejected);
         prop_assert!(protection.rejected_exact_rollback);
         prop_assert_eq!(protection.unconsented_creator_loss, 0);
         prop_assert_eq!(protection.unconsented_insurance_delta, 0);
@@ -118,7 +118,6 @@ proptest! {
         prop_assert_eq!(protection.insured_fee, u128::from(protection.current_fee));
         prop_assert!(protection.current_fee <= protection.consented_max_fee);
         prop_assert!(protection.asset_active);
-        prop_assert!(protection.policy_replay_cu < crate::support::v16_svm::TX_CU_LIMIT);
         prop_assert!(protection.activation_cu < crate::support::v16_svm::TX_CU_LIMIT);
         prop_assert!(protection.token_supply_conserved);
     }

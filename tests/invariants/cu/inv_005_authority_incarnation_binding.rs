@@ -56,6 +56,7 @@ fn v16_program_privileged_policy_boundary_matrix_rejects_untrusted_callers() {
     env.svm.expire_blockhash();
     let policy = env.send(
         ProgInstruction::ConfigurePermissionlessResolve {
+            policy_sequence: u64::MAX,
             stale_slots: 1,
             force_close_delay_slots: 1,
         },

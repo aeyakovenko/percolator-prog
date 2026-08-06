@@ -163,12 +163,17 @@ pub enum SupersededIntentKind {
     MatcherConfig,
     PushAuthMark,
     ConfigureAuthMark,
+    PushEwmaMark,
+    ConfigureEwmaMark,
+    ConfigureHybridOracle,
     TradeFeePolicy,
     FeeRedirectPolicy,
     LiquidationFeePolicy,
     MaintenanceFeePolicy,
+    MarketInitFeePolicy,
     ResolvePolicy,
     BackingFeePolicy,
+    BackingFeePolicyShort,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -431,16 +436,21 @@ impl FeeConsentKind {
 }
 
 impl SupersededIntentKind {
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 14] = [
         Self::MatcherConfig,
         Self::PushAuthMark,
         Self::ConfigureAuthMark,
+        Self::PushEwmaMark,
+        Self::ConfigureEwmaMark,
+        Self::ConfigureHybridOracle,
         Self::TradeFeePolicy,
         Self::FeeRedirectPolicy,
         Self::LiquidationFeePolicy,
         Self::MaintenanceFeePolicy,
+        Self::MarketInitFeePolicy,
         Self::ResolvePolicy,
         Self::BackingFeePolicy,
+        Self::BackingFeePolicyShort,
     ];
 
     fn discriminator(self) -> u8 {
@@ -448,12 +458,17 @@ impl SupersededIntentKind {
             Self::MatcherConfig => 0,
             Self::PushAuthMark => 1,
             Self::ConfigureAuthMark => 2,
-            Self::TradeFeePolicy => 3,
-            Self::FeeRedirectPolicy => 4,
-            Self::LiquidationFeePolicy => 5,
-            Self::MaintenanceFeePolicy => 6,
-            Self::ResolvePolicy => 7,
-            Self::BackingFeePolicy => 8,
+            Self::PushEwmaMark => 3,
+            Self::ConfigureEwmaMark => 4,
+            Self::ConfigureHybridOracle => 5,
+            Self::TradeFeePolicy => 6,
+            Self::FeeRedirectPolicy => 7,
+            Self::LiquidationFeePolicy => 8,
+            Self::MaintenanceFeePolicy => 9,
+            Self::MarketInitFeePolicy => 10,
+            Self::ResolvePolicy => 11,
+            Self::BackingFeePolicy => 12,
+            Self::BackingFeePolicyShort => 13,
         }
     }
 }
@@ -3103,10 +3118,7 @@ fn configure_replacement_asset(
         | AssetIntentKind::TradeCpi
         | AssetIntentKind::BatchTradeNoCpi
         | AssetIntentKind::BatchTradeCpi
-        | AssetIntentKind::PushAuthMark
-        | AssetIntentKind::ConfigureAuthMark
-        | AssetIntentKind::ConfigureEwmaMark
-        | AssetIntentKind::ConfigureHybridOracle => env
+        | AssetIntentKind::PushAuthMark => env
             .configure_auth_mark(false, asset_index, 4, INITIAL_PRICE)
             .map(|_| ())
             .map_err(|error| format!("configure replacement AuthMark: {error}")),
@@ -3114,6 +3126,12 @@ fn configure_replacement_asset(
             .configure_ewma_mark(asset_index, 4, INITIAL_PRICE, 1, 0)
             .map(|_| ())
             .map_err(|error| format!("configure replacement EwmaMark: {error}")),
+        // Configuration requests must be rejected by generation binding even when they are the
+        // first oracle configuration attempted after slot reuse. Consuming the observation
+        // sequence with a replacement configuration first would hide that replay ordering.
+        AssetIntentKind::ConfigureAuthMark
+        | AssetIntentKind::ConfigureEwmaMark
+        | AssetIntentKind::ConfigureHybridOracle => Ok(()),
         AssetIntentKind::InsuranceWithdrawal => env
             .top_up_insurance_domain_for_actor(authority_actor, asset_index * 2, 1_000)
             .map(|_| ())
@@ -3258,6 +3276,13 @@ pub fn discover_asset_generation_replays(
         discoveries.push(discovery);
     }
     Ok(discoveries)
+}
+
+pub fn discover_asset_generation_replay(
+    seed: [u8; 32],
+    kind: AssetIntentKind,
+) -> Result<AssetGenerationDiscovery, String> {
+    discover_one_asset_generation_replay(seed, kind)
 }
 
 fn discover_one_authority_incarnation_replay(
@@ -3692,6 +3717,40 @@ fn prepare_superseded_intent(
                 .map_err(|error| format!("install newer AuthMark configuration: {error}"))?;
             Ok(retained)
         }
+        SupersededIntentKind::PushEwmaMark => {
+            env.configure_ewma_mark(0, 0, INITIAL_PRICE, 1, 0)
+                .map_err(|error| format!("configure EWMA mark: {error}"))?;
+            let retained = env.build_retained_ewma_mark(0, INITIAL_PRICE * 9 / 10);
+            env.warp_to_slot(1);
+            env.push_ewma_mark(0, 1, INITIAL_PRICE * 11 / 10)
+                .map_err(|error| format!("install newer EWMA observation: {error}"))?;
+            Ok(retained)
+        }
+        SupersededIntentKind::ConfigureEwmaMark => {
+            let retained = env.build_retained_ewma_config(0, INITIAL_PRICE * 9 / 10, 1, 0);
+            env.warp_to_slot(1);
+            env.configure_ewma_mark(0, 1, INITIAL_PRICE * 11 / 10, 1, 0)
+                .map_err(|error| format!("install newer EWMA configuration: {error}"))?;
+            Ok(retained)
+        }
+        SupersededIntentKind::ConfigureHybridOracle => {
+            const FEED_ID: [u8; 32] = [0x41; 32];
+            env.set_clock(1, 100);
+            let feed = env.set_pyth_price(&FEED_ID, INITIAL_PRICE as i64, 0, 0, 100);
+            let retained = env.build_retained_hybrid_oracle_config(
+                0,
+                1,
+                100,
+                0,
+                [FEED_ID, [0; 32], [0; 32]],
+                &[feed],
+                3,
+                500,
+            );
+            env.configure_auth_mark(false, 0, 1, INITIAL_PRICE * 11 / 10)
+                .map_err(|error| format!("install newer cross-mode configuration: {error}"))?;
+            Ok(retained)
+        }
         SupersededIntentKind::TradeFeePolicy => {
             let retained = env.build_retained_trade_fee_policy(9_000);
             env.update_trade_fee_policy(1_000)
@@ -3716,6 +3775,12 @@ fn prepare_superseded_intent(
                 .map_err(|error| format!("install newer maintenance-fee policy: {error}"))?;
             Ok(retained)
         }
+        SupersededIntentKind::MarketInitFeePolicy => {
+            let retained = env.build_retained_market_init_fee_policy(9_000);
+            env.update_market_init_fee_policy(1_000)
+                .map_err(|error| format!("install newer market-init-fee policy: {error}"))?;
+            Ok(retained)
+        }
         SupersededIntentKind::ResolvePolicy => {
             let retained = env.build_retained_permissionless_resolve_policy(17, 29);
             env.configure_permissionless_resolve(31, 43)
@@ -3732,6 +3797,18 @@ fn prepare_superseded_intent(
             let retained = env.build_retained_backing_fee_policy_for_actor(AUTHORITY, 0, 5_000, 0);
             env.update_backing_fee_policy_for_actor(AUTHORITY, 0, 0, 0)
                 .map_err(|error| format!("install newer backing-fee policy: {error}"))?;
+            Ok(retained)
+        }
+        SupersededIntentKind::BackingFeePolicyShort => {
+            env.update_asset_authority_from_admin(
+                0,
+                percolator_prog::processor::ASSET_AUTH_INSURANCE,
+                AUTHORITY,
+            )
+            .map_err(|error| format!("install short backing-fee policy authority: {error}"))?;
+            let retained = env.build_retained_backing_fee_policy_for_actor(AUTHORITY, 1, 5_000, 0);
+            env.update_backing_fee_policy_for_actor(AUTHORITY, 1, 0, 0)
+                .map_err(|error| format!("install newer short backing-fee policy: {error}"))?;
             Ok(retained)
         }
     }

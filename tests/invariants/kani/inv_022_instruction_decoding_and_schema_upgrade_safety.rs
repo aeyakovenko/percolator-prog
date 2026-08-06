@@ -384,6 +384,7 @@ fn kani_v16_asset_lifecycle_decode_preserves_wire_fields() {
     let asset_index: u16 = kani::any();
     let now_slot: u64 = kani::any();
     let initial_price: u64 = kani::any();
+    let observation_sequence: u64 = kani::any();
     let max_init_fee: u128 = kani::any();
     let insurance_authority: [u8; 32] = kani::any();
     let insurance_operator: [u8; 32] = kani::any();
@@ -395,6 +396,7 @@ fn kani_v16_asset_lifecycle_decode_preserves_wire_fields() {
         asset_index,
         now_slot,
         initial_price,
+        observation_sequence,
         max_init_fee,
         insurance_authority,
         insurance_operator,
@@ -619,11 +621,13 @@ fn kani_v16_restart_asset_oracle_decode_preserves_wire_fields() {
     let asset_index: u16 = kani::any();
     let now_slot: u64 = kani::any();
     let initial_price: u64 = kani::any();
+    let observation_sequence: u64 = kani::any();
 
     let data = Instruction::RestartAssetOracle {
         asset_index,
         now_slot,
         initial_price,
+        observation_sequence,
     }
     .encode();
 
@@ -632,10 +636,12 @@ fn kani_v16_restart_asset_oracle_decode_preserves_wire_fields() {
             asset_index: got_asset_index,
             now_slot: got_slot,
             initial_price: got_price,
+            observation_sequence: got_sequence,
         } => {
             assert_eq!(got_asset_index, asset_index);
             assert_eq!(got_slot, now_slot);
             assert_eq!(got_price, initial_price);
+            assert_eq!(got_sequence, observation_sequence);
         }
         _ => unreachable!(),
     }
@@ -674,15 +680,21 @@ fn kani_v16_batch_trade_nocpi_decode_does_not_collide_with_restart_asset_oracle(
 #[kani::proof]
 fn kani_v16_update_liquidation_fee_policy_decode_preserves_wire_fields() {
     let cranker_share_bps: u16 = kani::any();
+    let policy_sequence: u64 = kani::any();
 
-    let mut data = [0u8; 3];
+    let mut data = [0u8; 11];
     data[0] = 37;
     data[1..3].copy_from_slice(&cranker_share_bps.to_le_bytes());
+    data[3..11].copy_from_slice(&policy_sequence.to_le_bytes());
 
     match Instruction::decode(&data).unwrap() {
         Instruction::UpdateLiquidationFeePolicy {
             cranker_share_bps: got,
-        } => assert_eq!(got, cranker_share_bps),
+            policy_sequence: got_sequence,
+        } => {
+            assert_eq!(got, cranker_share_bps);
+            assert_eq!(got_sequence, policy_sequence);
+        }
         _ => unreachable!(),
     }
 }
@@ -690,15 +702,21 @@ fn kani_v16_update_liquidation_fee_policy_decode_preserves_wire_fields() {
 #[kani::proof]
 fn kani_v16_update_maintenance_fee_policy_decode_preserves_wire_fields() {
     let cranker_share_bps: u16 = kani::any();
+    let policy_sequence: u64 = kani::any();
 
-    let mut data = [0u8; 3];
+    let mut data = [0u8; 11];
     data[0] = 49;
     data[1..3].copy_from_slice(&cranker_share_bps.to_le_bytes());
+    data[3..11].copy_from_slice(&policy_sequence.to_le_bytes());
 
     match Instruction::decode(&data).unwrap() {
         Instruction::UpdateMaintenanceFeePolicy {
             cranker_share_bps: got,
-        } => assert_eq!(got, cranker_share_bps),
+            policy_sequence: got_sequence,
+        } => {
+            assert_eq!(got, cranker_share_bps);
+            assert_eq!(got_sequence, policy_sequence);
+        }
         _ => unreachable!(),
     }
 }
@@ -708,22 +726,26 @@ fn kani_v16_update_backing_fee_policy_decode_preserves_wire_fields() {
     let domain: u16 = kani::any();
     let fee_bps: u16 = kani::any();
     let insurance_share_bps: u16 = kani::any();
+    let policy_sequence: u64 = kani::any();
 
-    let mut data = [0u8; 7];
+    let mut data = [0u8; 15];
     data[0] = 51;
     data[1..3].copy_from_slice(&domain.to_le_bytes());
     data[3..5].copy_from_slice(&fee_bps.to_le_bytes());
     data[5..7].copy_from_slice(&insurance_share_bps.to_le_bytes());
+    data[7..15].copy_from_slice(&policy_sequence.to_le_bytes());
 
     match Instruction::decode(&data).unwrap() {
         Instruction::UpdateBackingFeePolicy {
             domain: got_domain,
             fee_bps: got_fee_bps,
             insurance_share_bps: got_insurance_share_bps,
+            policy_sequence: got_sequence,
         } => {
             assert_eq!(got_domain, domain);
             assert_eq!(got_fee_bps, fee_bps);
             assert_eq!(got_insurance_share_bps, insurance_share_bps);
+            assert_eq!(got_sequence, policy_sequence);
         }
         _ => unreachable!(),
     }
@@ -732,15 +754,21 @@ fn kani_v16_update_backing_fee_policy_decode_preserves_wire_fields() {
 #[kani::proof]
 fn kani_v16_update_trade_fee_policy_decode_preserves_wire_fields() {
     let trade_fee_base_bps: u64 = kani::any();
+    let policy_sequence: u64 = kani::any();
 
-    let mut data = [0u8; 9];
+    let mut data = [0u8; 17];
     data[0] = 55;
     data[1..9].copy_from_slice(&trade_fee_base_bps.to_le_bytes());
+    data[9..17].copy_from_slice(&policy_sequence.to_le_bytes());
 
     match Instruction::decode(&data).unwrap() {
         Instruction::UpdateTradeFeePolicy {
             trade_fee_base_bps: got,
-        } => assert_eq!(got, trade_fee_base_bps),
+            policy_sequence: got_sequence,
+        } => {
+            assert_eq!(got, trade_fee_base_bps);
+            assert_eq!(got_sequence, policy_sequence);
+        }
         _ => unreachable!(),
     }
 }
@@ -748,13 +776,21 @@ fn kani_v16_update_trade_fee_policy_decode_preserves_wire_fields() {
 #[kani::proof]
 fn kani_v16_update_fee_redirect_policy_decode_preserves_wire_fields() {
     let redirect_bps: u16 = kani::any();
+    let policy_sequence: u64 = kani::any();
 
-    let mut data = [0u8; 3];
+    let mut data = [0u8; 11];
     data[0] = 58;
     data[1..3].copy_from_slice(&redirect_bps.to_le_bytes());
+    data[3..11].copy_from_slice(&policy_sequence.to_le_bytes());
 
     match Instruction::decode(&data).unwrap() {
-        Instruction::UpdateFeeRedirectPolicy { redirect_bps: got } => assert_eq!(got, redirect_bps),
+        Instruction::UpdateFeeRedirectPolicy {
+            redirect_bps: got,
+            policy_sequence: got_sequence,
+        } => {
+            assert_eq!(got, redirect_bps);
+            assert_eq!(got_sequence, policy_sequence);
+        }
         _ => unreachable!(),
     }
 }
@@ -762,14 +798,20 @@ fn kani_v16_update_fee_redirect_policy_decode_preserves_wire_fields() {
 #[kani::proof]
 fn kani_v16_update_market_init_fee_policy_decode_preserves_wire_fields() {
     let min_init_fee: u128 = kani::any();
+    let policy_sequence: u64 = kani::any();
 
-    let mut data = [0u8; 17];
+    let mut data = [0u8; 25];
     data[0] = 59;
     data[1..17].copy_from_slice(&min_init_fee.to_le_bytes());
+    data[17..25].copy_from_slice(&policy_sequence.to_le_bytes());
 
     match Instruction::decode(&data).unwrap() {
-        Instruction::UpdateMarketInitFeePolicy { min_init_fee: got } => {
-            assert_eq!(got, min_init_fee)
+        Instruction::UpdateMarketInitFeePolicy {
+            min_init_fee: got,
+            policy_sequence: got_sequence,
+        } => {
+            assert_eq!(got, min_init_fee);
+            assert_eq!(got_sequence, policy_sequence);
         }
         _ => unreachable!(),
     }
@@ -810,19 +852,23 @@ fn kani_v16_base_unit_payloads_decode_preserves_wire_fields() {
 fn kani_v16_permissionless_resolve_decode_preserves_wire_fields() {
     let stale_slots: u64 = kani::any();
     let force_close_delay_slots: u64 = kani::any();
+    let policy_sequence: u64 = kani::any();
     let now_slot: u64 = kani::any();
 
-    let mut configure = [0u8; 17];
+    let mut configure = [0u8; 25];
     configure[0] = 38;
     configure[1..9].copy_from_slice(&stale_slots.to_le_bytes());
     configure[9..17].copy_from_slice(&force_close_delay_slots.to_le_bytes());
+    configure[17..25].copy_from_slice(&policy_sequence.to_le_bytes());
     match Instruction::decode(&configure).unwrap() {
         Instruction::ConfigurePermissionlessResolve {
             stale_slots: got_stale,
             force_close_delay_slots: got_delay,
+            policy_sequence: got_sequence,
         } => {
             assert_eq!(got_stale, stale_slots);
             assert_eq!(got_delay, force_close_delay_slots);
+            assert_eq!(got_sequence, policy_sequence);
         }
         _ => unreachable!(),
     }
@@ -854,12 +900,13 @@ fn kani_v16_configure_hybrid_oracle_decode_preserves_wire_fields() {
     let mark_min_fee: u64 = kani::any();
     let unit_scale: u32 = kani::any();
     let feeds: [[u8; 32]; 3] = kani::any();
+    let observation_sequence: u64 = kani::any();
     let feed_index: usize = kani::any();
     let byte_index: usize = kani::any();
     kani::assume(feed_index < feeds.len());
     kani::assume(byte_index < feeds[0].len());
 
-    let mut data = [0u8; 156];
+    let mut data = [0u8; 164];
     data[0] = 34;
     data[1..3].copy_from_slice(&asset_index.to_le_bytes());
     data[3..11].copy_from_slice(&now_slot.to_le_bytes());
@@ -876,6 +923,7 @@ fn kani_v16_configure_hybrid_oracle_decode_preserves_wire_fields() {
     data[60..92].copy_from_slice(&feeds[0]);
     data[92..124].copy_from_slice(&feeds[1]);
     data[124..156].copy_from_slice(&feeds[2]);
+    data[156..164].copy_from_slice(&observation_sequence.to_le_bytes());
 
     match Instruction::decode(&data).unwrap() {
         Instruction::ConfigureHybridOracle {
@@ -892,6 +940,7 @@ fn kani_v16_configure_hybrid_oracle_decode_preserves_wire_fields() {
             unit_scale: got_unit_scale,
             conf_filter_bps: got_conf,
             oracle_leg_feeds: got_feeds,
+            observation_sequence: got_sequence,
         } => {
             assert_eq!(got_asset_index, asset_index);
             assert_eq!(got_now_slot, now_slot);
@@ -905,6 +954,7 @@ fn kani_v16_configure_hybrid_oracle_decode_preserves_wire_fields() {
             assert_eq!(got_invert, invert);
             assert_eq!(got_unit_scale, unit_scale);
             assert_eq!(got_conf, conf_filter_bps);
+            assert_eq!(got_sequence, observation_sequence);
             // Arbitrary indices make this equivalent to whole-matrix equality without lowering
             // the 96-byte symbolic comparison to a SAT-heavy memcmp loop.
             assert_eq!(
@@ -925,14 +975,16 @@ fn kani_v16_ewma_mark_decode_preserves_wire_fields() {
     let mark_ewma_halflife_slots: u64 = kani::any();
     let mark_min_fee: u64 = kani::any();
     let push_mark_e6: u64 = kani::any();
+    let observation_sequence: u64 = kani::any();
 
-    let mut configure = [0u8; 35];
+    let mut configure = [0u8; 43];
     configure[0] = 35;
     configure[1..3].copy_from_slice(&asset_index.to_le_bytes());
     configure[3..11].copy_from_slice(&now_slot.to_le_bytes());
     configure[11..19].copy_from_slice(&initial_mark_e6.to_le_bytes());
     configure[19..27].copy_from_slice(&mark_ewma_halflife_slots.to_le_bytes());
     configure[27..35].copy_from_slice(&mark_min_fee.to_le_bytes());
+    configure[35..43].copy_from_slice(&observation_sequence.to_le_bytes());
     match Instruction::decode(&configure).unwrap() {
         Instruction::ConfigureEwmaMark {
             asset_index: got_asset_index,
@@ -940,66 +992,77 @@ fn kani_v16_ewma_mark_decode_preserves_wire_fields() {
             initial_mark_e6: got_mark,
             mark_ewma_halflife_slots: got_halflife,
             mark_min_fee: got_min_fee,
+            observation_sequence: got_sequence,
         } => {
             assert_eq!(got_asset_index, asset_index);
             assert_eq!(got_now, now_slot);
             assert_eq!(got_mark, initial_mark_e6);
             assert_eq!(got_halflife, mark_ewma_halflife_slots);
             assert_eq!(got_min_fee, mark_min_fee);
+            assert_eq!(got_sequence, observation_sequence);
         }
         _ => unreachable!(),
     }
 
-    let mut push = [0u8; 19];
+    let mut push = [0u8; 27];
     push[0] = 36;
     push[1..3].copy_from_slice(&asset_index.to_le_bytes());
     push[3..11].copy_from_slice(&now_slot.to_le_bytes());
     push[11..19].copy_from_slice(&push_mark_e6.to_le_bytes());
+    push[19..27].copy_from_slice(&observation_sequence.to_le_bytes());
     match Instruction::decode(&push).unwrap() {
         Instruction::PushEwmaMark {
             asset_index: got_asset_index,
             now_slot: got_now,
             mark_e6: got_mark,
+            observation_sequence: got_sequence,
         } => {
             assert_eq!(got_asset_index, asset_index);
             assert_eq!(got_now, now_slot);
             assert_eq!(got_mark, push_mark_e6);
+            assert_eq!(got_sequence, observation_sequence);
         }
         _ => unreachable!(),
     }
 
-    let mut configure_auth = [0u8; 19];
+    let mut configure_auth = [0u8; 27];
     configure_auth[0] = 62;
     configure_auth[1..3].copy_from_slice(&asset_index.to_le_bytes());
     configure_auth[3..11].copy_from_slice(&now_slot.to_le_bytes());
     configure_auth[11..19].copy_from_slice(&initial_mark_e6.to_le_bytes());
+    configure_auth[19..27].copy_from_slice(&observation_sequence.to_le_bytes());
     match Instruction::decode(&configure_auth).unwrap() {
         Instruction::ConfigureAuthMark {
             asset_index: got_asset_index,
             now_slot: got_now,
             initial_mark_e6: got_mark,
+            observation_sequence: got_sequence,
         } => {
             assert_eq!(got_asset_index, asset_index);
             assert_eq!(got_now, now_slot);
             assert_eq!(got_mark, initial_mark_e6);
+            assert_eq!(got_sequence, observation_sequence);
         }
         _ => unreachable!(),
     }
 
-    let mut push_auth = [0u8; 19];
+    let mut push_auth = [0u8; 27];
     push_auth[0] = 63;
     push_auth[1..3].copy_from_slice(&asset_index.to_le_bytes());
     push_auth[3..11].copy_from_slice(&now_slot.to_le_bytes());
     push_auth[11..19].copy_from_slice(&push_mark_e6.to_le_bytes());
+    push_auth[19..27].copy_from_slice(&observation_sequence.to_le_bytes());
     match Instruction::decode(&push_auth).unwrap() {
         Instruction::PushAuthMark {
             asset_index: got_asset_index,
             now_slot: got_now,
             mark_e6: got_mark,
+            observation_sequence: got_sequence,
         } => {
             assert_eq!(got_asset_index, asset_index);
             assert_eq!(got_now, now_slot);
             assert_eq!(got_mark, push_mark_e6);
+            assert_eq!(got_sequence, observation_sequence);
         }
         _ => unreachable!(),
     }
@@ -1140,12 +1203,14 @@ fn kani_v16_admin_policy_payloads_reject_trailing_byte() {
     assert_rejects_trailing_byte(
         Instruction::UpdateLiquidationFeePolicy {
             cranker_share_bps: 4_000,
+            policy_sequence: 1,
         },
         extra,
     );
     assert_rejects_trailing_byte(
         Instruction::UpdateMaintenanceFeePolicy {
             cranker_share_bps: 4_000,
+            policy_sequence: 1,
         },
         extra,
     );
@@ -1154,21 +1219,29 @@ fn kani_v16_admin_policy_payloads_reject_trailing_byte() {
             domain: 0,
             fee_bps: 25,
             insurance_share_bps: 0,
+            policy_sequence: 1,
         },
         extra,
     );
     assert_rejects_trailing_byte(
         Instruction::UpdateTradeFeePolicy {
             trade_fee_base_bps: 25,
+            policy_sequence: 1,
         },
         extra,
     );
     assert_rejects_trailing_byte(
-        Instruction::UpdateFeeRedirectPolicy { redirect_bps: 250 },
+        Instruction::UpdateFeeRedirectPolicy {
+            redirect_bps: 250,
+            policy_sequence: 1,
+        },
         extra,
     );
     assert_rejects_trailing_byte(
-        Instruction::UpdateMarketInitFeePolicy { min_init_fee: 50 },
+        Instruction::UpdateMarketInitFeePolicy {
+            min_init_fee: 50,
+            policy_sequence: 1,
+        },
         extra,
     );
     assert_rejects_trailing_byte(
@@ -1182,6 +1255,7 @@ fn kani_v16_admin_policy_payloads_reject_trailing_byte() {
         Instruction::ConfigurePermissionlessResolve {
             stale_slots: 5,
             force_close_delay_slots: 1,
+            policy_sequence: 1,
         },
         extra,
     );
@@ -1211,6 +1285,7 @@ fn kani_v16_oracle_asset_payloads_reject_trailing_byte() {
             unit_scale: 0,
             conf_filter_bps: 500,
             oracle_leg_feeds: [[1u8; 32], [0u8; 32], [0u8; 32]],
+            observation_sequence: 1,
         },
         extra,
     );
@@ -1221,6 +1296,7 @@ fn kani_v16_oracle_asset_payloads_reject_trailing_byte() {
             initial_mark_e6: 100,
             mark_ewma_halflife_slots: 1,
             mark_min_fee: 0,
+            observation_sequence: 1,
         },
         extra,
     );
@@ -1229,6 +1305,7 @@ fn kani_v16_oracle_asset_payloads_reject_trailing_byte() {
             asset_index: 0,
             now_slot: 2,
             mark_e6: 101,
+            observation_sequence: 2,
         },
         extra,
     );
@@ -1237,6 +1314,7 @@ fn kani_v16_oracle_asset_payloads_reject_trailing_byte() {
             asset_index: 0,
             now_slot: 1,
             initial_mark_e6: 100,
+            observation_sequence: 1,
         },
         extra,
     );
@@ -1245,6 +1323,16 @@ fn kani_v16_oracle_asset_payloads_reject_trailing_byte() {
             asset_index: 0,
             now_slot: 2,
             mark_e6: 101,
+            observation_sequence: 2,
+        },
+        extra,
+    );
+    assert_rejects_trailing_byte(
+        Instruction::RestartAssetOracle {
+            asset_index: 0,
+            now_slot: 3,
+            initial_price: 100,
+            observation_sequence: 3,
         },
         extra,
     );

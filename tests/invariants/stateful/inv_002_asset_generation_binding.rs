@@ -46,11 +46,35 @@ proptest! {
             .filter(|discovery| discovery.is_violation())
             .map(|discovery| discovery.kind)
             .collect();
+        let protected: Vec<_> = discoveries
+            .iter()
+            .filter(|discovery| !discovery.is_violation())
+            .map(|discovery| discovery.kind)
+            .collect();
         eprintln!("independent INV-002 discoveries: {violations:?}");
         prop_assert_eq!(
             violations,
-            AssetIntentKind::ALL.to_vec(),
-            "vulnerable-pin asset-generation discovery corpus changed"
+            vec![
+                AssetIntentKind::TradeNoCpi,
+                AssetIntentKind::TradeCpi,
+                AssetIntentKind::BatchTradeNoCpi,
+                AssetIntentKind::BatchTradeCpi,
+                AssetIntentKind::ConfigureAuthMark,
+                AssetIntentKind::ConfigureEwmaMark,
+                AssetIntentKind::ConfigureHybridOracle,
+                AssetIntentKind::InsuranceTopUp,
+                AssetIntentKind::BackingTopUp,
+                AssetIntentKind::InsuranceWithdrawal,
+                AssetIntentKind::BackingFeePolicy,
+                AssetIntentKind::ResolveMarket,
+                AssetIntentKind::ResolvePolicy,
+            ],
+            "asset-generation discovery/protection split changed"
+        );
+        prop_assert_eq!(
+            protected,
+            vec![AssetIntentKind::PushAuthMark, AssetIntentKind::PushEwmaMark],
+            "only generation-A mark pushes with a replacement mode configuration are sequence-protected"
         );
     }
 }
@@ -169,20 +193,6 @@ proptest! {
         prop_assert!(
             result.is_ok(),
             "PR 311 no longer reproduces for seed {:?}: {}",
-            seed,
-            result.unwrap_err()
-        );
-    }
-
-    #[test]
-    fn v16_program_pr275_asset_generation_mark_replay_fuzz(
-        (seed, path) in asset_generation_mark_replay_strategy()
-    ) {
-        let result = reproduce_asset_generation_mark_replay(seed, path);
-        prop_assert!(
-            result.is_ok(),
-            "PR 275 {:?} no longer reproduces for seed {:?}: {}",
-            path,
             seed,
             result.unwrap_err()
         );

@@ -733,7 +733,7 @@ pub struct ActivationFeeConsentProtection {
     pub blocker: KnownBlocker,
     pub signed_max_fee: u64,
     pub installed_unauthorized_fee: u64,
-    pub stale_activation_rejected: bool,
+    pub stale_policy_rejected: bool,
     pub rejected_exact_rollback: bool,
     pub unconsented_creator_loss: u64,
     pub unconsented_insurance_delta: u128,
@@ -742,7 +742,6 @@ pub struct ActivationFeeConsentProtection {
     pub charged_fee: u64,
     pub insured_fee: u128,
     pub asset_active: bool,
-    pub policy_replay_cu: u64,
     pub activation_cu: u64,
     pub token_supply_conserved: bool,
 }
@@ -7633,8 +7632,7 @@ pub fn verify_activation_fee_consent(
     const BENEFICIARY: usize = 1;
     const SIGNED_MAX_FEE: u128 = 1;
     const INSTALLED_UNAUTHORIZED_FEE: u128 = 1_000;
-    const CONSENTED_MAX_FEE: u128 = 1_000;
-    const CURRENT_FEE: u128 = 7;
+    const CONSENTED_MAX_FEE: u128 = SIGNED_MAX_FEE;
 
     let mut env = V16Svm::new(seed, MarketConfig::default());
     let supply_before = env.token_supply_observed();
@@ -7672,26 +7670,17 @@ pub fn verify_activation_fee_consent(
         CREATOR,
         CREATOR,
     );
-    let policy_replay = env
-        .land_retained(delayed_policy)
-        .map_err(|error| format!("PR 314 delayed high-fee policy rejected: {error}"))?;
-    let installed_fee = env.primary_market_state().0.permissionless_market_init_fee;
-    if installed_fee != INSTALLED_UNAUTHORIZED_FEE {
-        return Err(format!(
-            "PR 314 delayed policy did not restore the high fee: {installed_fee}"
-        ));
-    }
     let insurance_before_rejection = env.primary_market_state().1.insurance_domain_budget[0]
         .checked_add(env.primary_market_state().1.insurance_domain_budget[1])
         .ok_or("PR 314 pre-rejection insurance total overflow")?;
-    let state_after_policy = tracked_economic_accounts(&env);
-    let stale_error = match env.land_retained(activation) {
-        Ok(_) => return Err("PR 314 activation above the signed fee cap landed".into()),
+    let state_before_policy = tracked_economic_accounts(&env);
+    let stale_error = match env.land_retained(delayed_policy) {
+        Ok(_) => return Err("PR 314 delayed high-fee policy unexpectedly landed".into()),
         Err(error) => error,
     };
-    let stale_activation_rejected =
-        stale_error.contains("Custom(8)") || stale_error.contains("custom program error: 0x8");
-    let rejected_exact_rollback = tracked_economic_accounts(&env) == state_after_policy;
+    let stale_policy_rejected =
+        stale_error.contains("Custom(19)") || stale_error.contains("custom program error: 0x13");
+    let rejected_exact_rollback = tracked_economic_accounts(&env) == state_before_policy;
     let unconsented_creator_loss = source_before
         .checked_sub(env.token_amount(creator_source))
         .ok_or("PR 314 rejected activation increased creator source")?;
@@ -7701,39 +7690,27 @@ pub fn verify_activation_fee_consent(
     let unconsented_insurance_delta = insurance_after_rejection
         .checked_sub(insurance_before_rejection)
         .ok_or("PR 314 rejected activation decreased insurance")?;
-    if !stale_activation_rejected
+    if !stale_policy_rejected
         || !rejected_exact_rollback
         || unconsented_creator_loss != 0
         || unconsented_insurance_delta != 0
+        || env.primary_market_state().0.permissionless_market_init_fee != SIGNED_MAX_FEE
         || env.primary_market_state().1.assets[ASSET as usize].lifecycle
             == AssetLifecycleV16::Active
     {
         return Err(format!(
-            "PR 314 stale activation protection failed: error={stale_error}, \
+            "PR 314 stale policy protection failed: error={stale_error}, \
              rollback={rejected_exact_rollback}, creator_loss={unconsented_creator_loss}, \
              insurance_delta={unconsented_insurance_delta}"
         ));
     }
 
-    env.update_market_init_fee_policy(CURRENT_FEE)
-        .map_err(|error| format!("PR 314 install current lower fee: {error}"))?;
-    let consented = env.build_retained_permissionless_asset_activation(
-        CREATOR,
-        ASSET,
-        3,
-        100,
-        CONSENTED_MAX_FEE,
-        CREATOR,
-        CREATOR,
-        CREATOR,
-        CREATOR,
-    );
     let source_before_consent = env.token_amount(creator_source);
     let insurance_before_consent = env.primary_market_state().1.insurance_domain_budget[0]
         .checked_add(env.primary_market_state().1.insurance_domain_budget[1])
         .ok_or("PR 314 pre-consent insurance total overflow")?;
     let consented_activation = env
-        .land_retained(consented)
+        .land_retained(activation)
         .map_err(|error| format!("PR 314 activation within signed cap rejected: {error}"))?;
     let charged_fee = source_before_consent
         .checked_sub(env.token_amount(creator_source))
@@ -7747,17 +7724,15 @@ pub fn verify_activation_fee_consent(
     let asset_active =
         env.primary_market_state().1.assets[ASSET as usize].lifecycle == AssetLifecycleV16::Active;
     let token_supply_conserved = env.token_supply_observed() == supply_before;
-    if charged_fee != CURRENT_FEE as u64
-        || insured_fee != CURRENT_FEE
+    if charged_fee != SIGNED_MAX_FEE as u64
+        || insured_fee != SIGNED_MAX_FEE
         || !asset_active
-        || policy_replay.compute_units >= TX_CU_LIMIT
         || consented_activation.compute_units >= TX_CU_LIMIT
         || !token_supply_conserved
     {
         return Err(format!(
             "PR 314 consented activation mismatch: charged={charged_fee}, insured={insured_fee}, \
-             active={asset_active}, policy_cu={}, activation_cu={}, supply={}/{}",
-            policy_replay.compute_units,
+             active={asset_active}, activation_cu={}, supply={}/{}",
             consented_activation.compute_units,
             env.token_supply_observed(),
             supply_before
@@ -7768,16 +7743,15 @@ pub fn verify_activation_fee_consent(
         blocker: KnownBlocker::ActivationFeeConsent,
         signed_max_fee: SIGNED_MAX_FEE as u64,
         installed_unauthorized_fee: INSTALLED_UNAUTHORIZED_FEE as u64,
-        stale_activation_rejected,
+        stale_policy_rejected,
         rejected_exact_rollback,
         unconsented_creator_loss,
         unconsented_insurance_delta,
         consented_max_fee: CONSENTED_MAX_FEE as u64,
-        current_fee: CURRENT_FEE as u64,
+        current_fee: SIGNED_MAX_FEE as u64,
         charged_fee,
         insured_fee,
         asset_active,
-        policy_replay_cu: policy_replay.compute_units,
         activation_cu: consented_activation.compute_units,
         token_supply_conserved,
     })
@@ -12044,6 +12018,8 @@ pub fn reproduce_fee_redirect_generation_replay(
     let mut env = V16Svm::new(seed, config);
     let supply_before = env.token_supply_observed();
     let old_market_id = env.primary_market_state().1.assets[0].market_id;
+    env.update_fee_redirect_policy(10_000)
+        .map_err(|error| format!("PR 317 seed generation-A redirect sequence: {error}"))?;
     let retained_policy = env.build_retained_fee_redirect_policy(0);
 
     for actor in 0..PRIMARY_ACTOR_COUNT {
@@ -16265,8 +16241,6 @@ fn run_asset_generation_hybrid_config_world(
     env.warp_to_slot(4);
     env.activate_permissionless_asset(2, ASSET, 4, HONEST_PRICE, 1)
         .map_err(|error| format!("Hybrid activate replacement generation: {error}"))?;
-    env.configure_auth_mark(false, ASSET, 4, HONEST_PRICE)
-        .map_err(|error| format!("Hybrid configure replacement AuthMark: {error}"))?;
     let new_market_id = env.primary_market_state().1.assets[ASSET as usize].market_id;
     if new_market_id == old_market_id {
         return Err(format!(
@@ -16415,15 +16389,6 @@ fn run_asset_generation_config_world(
     env.warp_to_slot(4);
     env.activate_permissionless_asset(2, ASSET, 4, PRICE, 1)
         .map_err(|error| format!("{path:?} activate replacement generation: {error}"))?;
-    match path {
-        AssetGenerationConfigPath::Auth => env
-            .configure_auth_mark(false, ASSET, 4, PRICE)
-            .map_err(|error| format!("{path:?} configure replacement AuthMark: {error}"))?,
-        AssetGenerationConfigPath::Ewma => env
-            .configure_ewma_mark(ASSET, 4, PRICE, 1, 0)
-            .map_err(|error| format!("{path:?} configure replacement EwmaMark: {error}"))?,
-        AssetGenerationConfigPath::Hybrid => unreachable!("Hybrid uses its terminal world"),
-    };
     let new_market_id = env.primary_market_state().1.assets[ASSET as usize].market_id;
     if new_market_id == old_market_id {
         return Err(format!(
@@ -16436,6 +16401,16 @@ fn run_asset_generation_config_world(
     if land_replay {
         env.land_retained(stale_config)
             .map_err(|error| format!("{path:?} stale signed config no longer lands: {error}"))?;
+    } else {
+        match path {
+            AssetGenerationConfigPath::Auth => env
+                .configure_auth_mark(false, ASSET, 5, PRICE)
+                .map_err(|error| format!("{path:?} configure current AuthMark: {error}"))?,
+            AssetGenerationConfigPath::Ewma => env
+                .configure_ewma_mark(ASSET, 5, PRICE, 1, 0)
+                .map_err(|error| format!("{path:?} configure current EwmaMark: {error}"))?,
+            AssetGenerationConfigPath::Hybrid => unreachable!("Hybrid uses its terminal world"),
+        };
     }
     let entry_price = env.primary_market_state().1.assets[ASSET as usize].effective_price;
     if land_replay && entry_price != STALE_ENTRY_PRICE {

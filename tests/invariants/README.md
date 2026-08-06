@@ -22,10 +22,10 @@ verification methods are in [`../../INVARIANTS.md`](../../INVARIANTS.md).
 
 | Suite | Tests | Evidence |
 | --- | ---: | --- |
-| `public_sbf/` | 81 | Deterministic public SBF/LiteSVM counterexamples, regressions, and manifest checks |
-| `stateful/` | 118 | Proptest-generated public routes, including generalized active-leg/currentness, source-claim attribution, source-credit-rate, and authenticated-expiry route matrices |
-| `cu/` | 104 | Positive public-route, metamorphic, rollback, liveness, and max-shape CU tests |
-| `kani/` | 43 | Symbolic wrapper arithmetic, matcher-binding, and strict-decoder proofs |
+| `public_sbf/` | 74 | Deterministic public SBF/LiteSVM counterexamples, regressions, and manifest checks |
+| `stateful/` | 109 | Proptest-generated public routes, including generalized active-leg/currentness, source-claim attribution, source-credit-rate, and authenticated-expiry route matrices |
+| `cu/` | 106 | Positive public-route, metamorphic, rollback, liveness, and max-shape CU tests |
+| `kani/` | 48 | Symbolic wrapper arithmetic, matcher-binding, ordering, and strict-decoder proof harnesses |
 
 Most deterministic and stateful LoF adapters still reproduce quarantined vulnerable behavior;
 fixed-pin regressions explicitly require safe rejection or preservation instead. A vulnerable-pin
@@ -38,7 +38,10 @@ unsigned CPI LP's live base fee by its signed matcher policy. Matcher mutations 
 portfolio incarnation and a monotonic portfolio-local sequence, closing same-market portfolio
 recreation and revoke-order replay. Whole-market recreation remains vulnerable when replacement
 portfolio IDs and sequences are publicly realigned; INV-001 keeps that counterexample explicit.
-PR296/PR338 policy writes and fee-redirect replays also remain explicit INV-001/INV-014 gaps.
+All 14 retained matcher, oracle, fee, and resolve controls now use scope-local monotonic sequences,
+closing same-market delayed overwrites including PR335/336/337/338/340/347/349. Market-generation
+replay (including PR296/325/326), authority A -> B -> A revival, and PR339 backing-provider fee
+consent remain explicit INV-001/INV-005/INV-014 gaps.
 
 ## Coverage status
 
@@ -52,6 +55,8 @@ Status meanings:
 - **SVM/CU** - positive whole-route enforcement, liveness, rollback, metamorphic, or CU evidence.
 - **P** - an invariant-owned Kani proof over deployed wrapper code; whole-route composition may
   still be outstanding.
+- **P harness** - an invariant-owned Kani harness is present, but its new result has not yet been
+  executed in the current verification run.
 - **Partial** - relevant legacy evidence exists outside the PR135 invariant modules or not all
   charter-required methods are present.
 - **Gap** - no invariant-owned executable evidence yet.
@@ -74,7 +79,7 @@ charter.
 | INV-011 | Gap | - |
 | INV-012 | Gap | - |
 | INV-013 | Gap | - |
-| INV-014 | Independent + Direct | `public_sbf/inv_014_delayed_policy_and_policy_epoch_safety.rs`, `stateful/inv_014_delayed_policy_and_policy_epoch_safety.rs` |
+| INV-014 | Independent + Direct + SVM/CU + P harness | `public_sbf/inv_014_delayed_policy_and_policy_epoch_safety.rs`, `stateful/inv_014_delayed_policy_and_policy_epoch_safety.rs`, `cu/inv_014_delayed_policy_and_policy_epoch_safety.rs`, `kani/inv_014_delayed_policy_and_policy_epoch_safety.rs` |
 | INV-015 | Gap | - |
 | INV-016 | Gap | - |
 | INV-017 | Gap | - |
@@ -200,7 +205,7 @@ cargo kani --tests
 ```
 
 On engine pin `9ffc4749a4b7e486f814090c7b43fb01a6df5dcf`, the full `v16_cu` inventory has
-668 passing tests. The former red PR220/PR366, PR367, and live source-backing expiry probes are
+670 passing tests. The former red PR220/PR366, PR367, and live source-backing expiry probes are
 fixed-pin regressions under INV-030, INV-053, and INV-063; the unfiltered command is the required
 verification command.
 

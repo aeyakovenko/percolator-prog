@@ -3,11 +3,10 @@
 //! Normative obligation: Delayed requests remain bounded by the policy and economics the signer authorized.
 //!
 //! Evidence in this file (F over public I routes):
-//! `v16_program_superseded_control_matrix_discovers_remaining_stale_overwrites` generates retained
-//! controls, installs a distinct newer authorized value, and applies one common stale-overwrite
-//! oracle. MatcherConfig is the fixed control: its portfolio-scoped sequence must reject stale
-//! replay. The remaining policy domains stay explicit counterexamples until they gain scope-local
-//! sequence protection.
+//! `v16_program_superseded_control_matrix_rejects_stale_overwrites` generates retained controls,
+//! installs a distinct newer authorized value, then applies the stale bytes. The matrix covers
+//! matcher consent, every mark mode, both backing sides, and every market-wide fee/resolve lane.
+//! Every stale request must reject with an exact whole-account rollback.
 //! `v16_program_fee_consent_operation_matrix_discovers_unsigned_debits` varies fresh-signed,
 //! retained, unsigned-LP, and activation routes and compares each affected signer's actual debit
 //! with the fee terms that signer authorized. The fresh-signed live control proves a policy update
@@ -40,7 +39,7 @@ proptest! {
     })]
 
     #[test]
-    fn v16_program_superseded_control_matrix_discovers_remaining_stale_overwrites(
+    fn v16_program_superseded_control_matrix_rejects_stale_overwrites(
         seed in any::<[u8; 32]>()
     ) {
         let discoveries = discover_superseded_intents(seed)
@@ -49,17 +48,12 @@ proptest! {
         for (expected, discovery) in SupersededIntentKind::ALL.into_iter().zip(&discoveries) {
             prop_assert_eq!(discovery.kind, expected);
         }
-        let violations: Vec<_> = discoveries
-            .iter()
-            .filter(|discovery| discovery.is_violation())
-            .map(|discovery| discovery.kind)
-            .collect();
-        eprintln!("independent INV-014 discoveries: {violations:?}");
-        let expected_violations: Vec<_> = SupersededIntentKind::ALL
-            .into_iter()
-            .filter(|kind| *kind != SupersededIntentKind::MatcherConfig)
-            .collect();
-        prop_assert_eq!(violations, expected_violations, "fixed matcher control or remaining vulnerable supersession corpus changed");
+        for discovery in discoveries {
+            prop_assert!(!discovery.accepted_stale_intent, "{:?} accepted stale signed bytes", discovery.kind);
+            prop_assert!(!discovery.overwrote_newer_state, "{:?} overwrote the newer state", discovery.kind);
+            prop_assert_eq!(discovery.compute_units, None, "{:?} unexpectedly committed", discovery.kind);
+            prop_assert!(!discovery.is_violation(), "{:?} violated INV-014", discovery.kind);
+        }
     }
 }
 
@@ -167,114 +161,6 @@ proptest! {
         prop_assert!(
             result.is_ok(),
             "PR 326 no longer reproduces for seed {:?}: {}",
-            seed,
-            result.unwrap_err()
-        );
-    }
-
-    #[test]
-    fn v16_program_pr337_delayed_maintenance_policy_replay_fuzz(
-        seed in delayed_maintenance_policy_replay_seed_strategy()
-    ) {
-        let result = reproduce_delayed_maintenance_policy_replay(seed);
-        prop_assert!(
-            result.is_ok(),
-            "PR 337 no longer reproduces for seed {:?}: {}",
-            seed,
-            result.unwrap_err()
-        );
-    }
-
-    #[test]
-    fn v16_program_pr336_delayed_liquidation_policy_replay_fuzz(
-        seed in delayed_liquidation_policy_replay_seed_strategy()
-    ) {
-        let result = reproduce_delayed_liquidation_policy_replay(seed);
-        prop_assert!(
-            result.is_ok(),
-            "PR 336 no longer reproduces for seed {:?}: {}",
-            seed,
-            result.unwrap_err()
-        );
-    }
-
-    #[test]
-    fn v16_program_pr338_delayed_trade_fee_policy_nonextraction_fuzz(
-        seed in delayed_trade_fee_policy_replay_seed_strategy()
-    ) {
-        let protection = verify_delayed_trade_fee_policy_nonextraction(seed)
-            .map_err(TestCaseError::fail)?;
-        prop_assert!(protection.stale_policy_landed);
-        prop_assert!(protection.stale_trade_rejected);
-        prop_assert!(protection.rejected_exact_rollback);
-        prop_assert_eq!(protection.victim_loss, 0);
-        prop_assert_eq!(protection.attacker_profit, 0);
-        prop_assert_eq!(protection.extracted_fee, 0);
-        prop_assert!(protection.token_supply_conserved);
-    }
-
-    #[test]
-    fn v16_program_pr340_delayed_fee_redirect_policy_replay_fuzz(
-        seed in delayed_fee_redirect_policy_replay_seed_strategy()
-    ) {
-        let result = reproduce_delayed_fee_redirect_policy_replay(seed);
-        prop_assert!(
-            result.is_ok(),
-            "PR 340 no longer reproduces for seed {:?}: {}",
-            seed,
-            result.unwrap_err()
-        );
-    }
-
-    #[test]
-    fn v16_program_pr349_delayed_backing_fee_policy_replay_fuzz(
-        seed in delayed_backing_fee_policy_replay_seed_strategy()
-    ) {
-        let result = reproduce_delayed_backing_fee_policy_replay(seed);
-        prop_assert!(
-            result.is_ok(),
-            "PR 349 no longer reproduces for seed {:?}: {}",
-            seed,
-            result.unwrap_err()
-        );
-    }
-
-    #[test]
-    fn v16_program_pr339_backing_fee_consent_replay_fuzz(
-        (seed, order) in backing_fee_consent_replay_strategy()
-    ) {
-        let result = reproduce_backing_fee_consent_replay(seed, order);
-        prop_assert!(
-            result.is_ok(),
-            "PR 339 {:?} no longer reproduces for seed {:?}: {}",
-            order,
-            seed,
-            result.unwrap_err()
-        );
-    }
-
-    #[test]
-    fn v16_program_pr347_delayed_resolve_policy_replay_fuzz(
-        seed in delayed_resolve_policy_replay_seed_strategy()
-    ) {
-        let result = reproduce_delayed_resolve_policy_replay(seed);
-        prop_assert!(
-            result.is_ok(),
-            "PR 347 fixed terminal-catch-up route failed for seed {:?}: {}",
-            seed,
-            result.unwrap_err()
-        );
-    }
-
-    #[test]
-    fn v16_program_pr335_delayed_oracle_intent_replay_fuzz(
-        (seed, path) in delayed_oracle_intent_replay_strategy()
-    ) {
-        let result = reproduce_delayed_oracle_intent_replay(seed, path);
-        prop_assert!(
-            result.is_ok(),
-            "PR 335 {:?} no longer reproduces for seed {:?}: {}",
-            path,
             seed,
             result.unwrap_err()
         );
