@@ -708,15 +708,22 @@ pub struct ActivationRetryReplayReproduction {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ActivationFeeConsentReproduction {
+pub struct ActivationFeeConsentProtection {
     pub blocker: KnownBlocker,
-    pub advertised_fee: u64,
+    pub signed_max_fee: u64,
+    pub installed_unauthorized_fee: u64,
+    pub stale_activation_rejected: bool,
+    pub rejected_exact_rollback: bool,
+    pub unconsented_creator_loss: u64,
+    pub unconsented_insurance_delta: u128,
+    pub consented_max_fee: u64,
+    pub current_fee: u64,
     pub charged_fee: u64,
-    pub unexpected_loss: u64,
-    pub beneficiary_extraction: u64,
-    pub insured_remainder: u128,
+    pub insured_fee: u128,
+    pub asset_active: bool,
     pub policy_replay_cu: u64,
     pub activation_cu: u64,
+    pub token_supply_conserved: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -7320,10 +7327,10 @@ pub fn reproduce_activation_retry_replay(
     let creator_source = env.actors[CREATOR].source_token;
     let source_before = env.token_amount(creator_source);
     let intended = env.build_retained_permissionless_asset_activation(
-        CREATOR, ASSET, 3, 100, CREATOR, CREATOR, CREATOR, CREATOR,
+        CREATOR, ASSET, 3, 100, FEE, CREATOR, CREATOR, CREATOR, CREATOR,
     );
     let retry_variant = env.build_retained_permissionless_asset_activation(
-        CREATOR, ASSET, 3, 100, CREATOR, CREATOR, CREATOR, CREATOR,
+        CREATOR, ASSET, 3, 100, FEE, CREATOR, CREATOR, CREATOR, CREATOR,
     );
 
     let first = env
@@ -7412,15 +7419,16 @@ pub fn reproduce_activation_retry_replay(
     })
 }
 
-pub fn reproduce_activation_fee_consent(
+pub fn verify_activation_fee_consent(
     seed: [u8; 32],
-) -> Result<ActivationFeeConsentReproduction, String> {
+) -> Result<ActivationFeeConsentProtection, String> {
     const ASSET: u16 = 1;
     const CREATOR: usize = 0;
     const BENEFICIARY: usize = 1;
-    const ADVERTISED_FEE: u128 = 1;
-    const CHARGED_FEE: u128 = 1_000;
-    const UNEXPECTED_FEE: u128 = CHARGED_FEE - ADVERTISED_FEE;
+    const SIGNED_MAX_FEE: u128 = 1;
+    const INSTALLED_UNAUTHORIZED_FEE: u128 = 1_000;
+    const CONSENTED_MAX_FEE: u128 = 1_000;
+    const CURRENT_FEE: u128 = 7;
 
     let mut env = V16Svm::new(seed, MarketConfig::default());
     let supply_before = env.token_supply_observed();
@@ -7434,11 +7442,11 @@ pub fn reproduce_activation_fee_consent(
     env.warp_to_slot(2);
     env.retire_asset(ASSET, 2)
         .map_err(|error| format!("PR 314 retire reusable slot: {error}"))?;
-    let delayed_policy = env.build_retained_market_init_fee_policy(CHARGED_FEE);
-    env.update_market_init_fee_policy(ADVERTISED_FEE)
+    let delayed_policy = env.build_retained_market_init_fee_policy(INSTALLED_UNAUTHORIZED_FEE);
+    env.update_market_init_fee_policy(SIGNED_MAX_FEE)
         .map_err(|error| format!("PR 314 publish creator-visible fee: {error}"))?;
     let visible_fee = env.primary_market_state().0.permissionless_market_init_fee;
-    if visible_fee != ADVERTISED_FEE {
+    if visible_fee != SIGNED_MAX_FEE {
         return Err(format!(
             "PR 314 creator did not observe the advertised fee: {visible_fee}"
         ));
@@ -7448,73 +7456,124 @@ pub fn reproduce_activation_fee_consent(
     let creator_source = env.actors[CREATOR].source_token;
     let source_before = env.token_amount(creator_source);
     let activation = env.build_retained_permissionless_asset_activation(
-        CREATOR, ASSET, 3, 100, CREATOR, CREATOR, CREATOR, CREATOR,
+        CREATOR,
+        ASSET,
+        3,
+        100,
+        SIGNED_MAX_FEE,
+        CREATOR,
+        CREATOR,
+        CREATOR,
+        CREATOR,
     );
     let policy_replay = env
         .land_retained(delayed_policy)
         .map_err(|error| format!("PR 314 delayed high-fee policy rejected: {error}"))?;
     let installed_fee = env.primary_market_state().0.permissionless_market_init_fee;
-    if installed_fee != CHARGED_FEE {
+    if installed_fee != INSTALLED_UNAUTHORIZED_FEE {
         return Err(format!(
             "PR 314 delayed policy did not restore the high fee: {installed_fee}"
         ));
     }
-    let activation = env
-        .land_retained(activation)
-        .map_err(|error| format!("PR 314 retained activation no longer lands: {error}"))?;
-
-    let charged_fee = source_before
-        .checked_sub(env.token_amount(creator_source))
-        .ok_or("PR 314 creator source increased after activation")?;
-    let insurance_after_charge = env.primary_market_state().1.insurance_domain_budget[0]
+    let insurance_before_rejection = env.primary_market_state().1.insurance_domain_budget[0]
         .checked_add(env.primary_market_state().1.insurance_domain_budget[1])
-        .ok_or("PR 314 insurance total overflow")?;
-    if charged_fee != CHARGED_FEE as u64 || insurance_after_charge != CHARGED_FEE {
+        .ok_or("PR 314 pre-rejection insurance total overflow")?;
+    let state_after_policy = tracked_economic_accounts(&env);
+    let stale_error = match env.land_retained(activation) {
+        Ok(_) => return Err("PR 314 activation above the signed fee cap landed".into()),
+        Err(error) => error,
+    };
+    let stale_activation_rejected =
+        stale_error.contains("Custom(8)") || stale_error.contains("custom program error: 0x8");
+    let rejected_exact_rollback = tracked_economic_accounts(&env) == state_after_policy;
+    let unconsented_creator_loss = source_before
+        .checked_sub(env.token_amount(creator_source))
+        .ok_or("PR 314 rejected activation increased creator source")?;
+    let insurance_after_rejection = env.primary_market_state().1.insurance_domain_budget[0]
+        .checked_add(env.primary_market_state().1.insurance_domain_budget[1])
+        .ok_or("PR 314 post-rejection insurance total overflow")?;
+    let unconsented_insurance_delta = insurance_after_rejection
+        .checked_sub(insurance_before_rejection)
+        .ok_or("PR 314 rejected activation decreased insurance")?;
+    if !stale_activation_rejected
+        || !rejected_exact_rollback
+        || unconsented_creator_loss != 0
+        || unconsented_insurance_delta != 0
+        || env.primary_market_state().1.assets[ASSET as usize].lifecycle
+            == AssetLifecycleV16::Active
+    {
         return Err(format!(
-            "PR 314 unsigned fee was not charged into insurance: debit={charged_fee}, \
-             insurance={insurance_after_charge}"
+            "PR 314 stale activation protection failed: error={stale_error}, \
+             rollback={rejected_exact_rollback}, creator_loss={unconsented_creator_loss}, \
+             insurance_delta={unconsented_insurance_delta}"
         ));
     }
 
-    let beneficiary_destination = env.actors[BENEFICIARY].destination_token;
-    let destination_before = env.token_amount(beneficiary_destination);
-    let withdrawal = env
-        .withdraw_insurance_asset(BENEFICIARY, 0, UNEXPECTED_FEE)
-        .map_err(|error| format!("PR 314 beneficiary could not extract unsigned fee: {error}"))?;
-    let beneficiary_extraction = env
-        .token_amount(beneficiary_destination)
-        .checked_sub(destination_before)
-        .ok_or("PR 314 beneficiary destination decreased")?;
-    let insured_remainder = env.primary_market_state().1.insurance_domain_budget[0]
+    env.update_market_init_fee_policy(CURRENT_FEE)
+        .map_err(|error| format!("PR 314 install current lower fee: {error}"))?;
+    let consented = env.build_retained_permissionless_asset_activation(
+        CREATOR,
+        ASSET,
+        3,
+        100,
+        CONSENTED_MAX_FEE,
+        CREATOR,
+        CREATOR,
+        CREATOR,
+        CREATOR,
+    );
+    let source_before_consent = env.token_amount(creator_source);
+    let insurance_before_consent = env.primary_market_state().1.insurance_domain_budget[0]
         .checked_add(env.primary_market_state().1.insurance_domain_budget[1])
-        .ok_or("PR 314 remaining insurance total overflow")?;
-    let max_cu = policy_replay
-        .compute_units
-        .max(activation.compute_units)
-        .max(withdrawal.compute_units);
-    if beneficiary_extraction != UNEXPECTED_FEE as u64
-        || insured_remainder != ADVERTISED_FEE
-        || max_cu >= TX_CU_LIMIT
-        || env.token_supply_observed() != supply_before
+        .ok_or("PR 314 pre-consent insurance total overflow")?;
+    let consented_activation = env
+        .land_retained(consented)
+        .map_err(|error| format!("PR 314 activation within signed cap rejected: {error}"))?;
+    let charged_fee = source_before_consent
+        .checked_sub(env.token_amount(creator_source))
+        .ok_or("PR 314 consented activation increased creator source")?;
+    let insurance_after_consent = env.primary_market_state().1.insurance_domain_budget[0]
+        .checked_add(env.primary_market_state().1.insurance_domain_budget[1])
+        .ok_or("PR 314 post-consent insurance total overflow")?;
+    let insured_fee = insurance_after_consent
+        .checked_sub(insurance_before_consent)
+        .ok_or("PR 314 consented activation decreased insurance")?;
+    let asset_active =
+        env.primary_market_state().1.assets[ASSET as usize].lifecycle == AssetLifecycleV16::Active;
+    let token_supply_conserved = env.token_supply_observed() == supply_before;
+    if charged_fee != CURRENT_FEE as u64
+        || insured_fee != CURRENT_FEE
+        || !asset_active
+        || policy_replay.compute_units >= TX_CU_LIMIT
+        || consented_activation.compute_units >= TX_CU_LIMIT
+        || !token_supply_conserved
     {
         return Err(format!(
-            "PR 314 public extraction mismatch: charged={charged_fee}, \
-             beneficiary={beneficiary_extraction}, insured={insured_remainder}, max_cu={max_cu}, \
-             supply={}/{}",
+            "PR 314 consented activation mismatch: charged={charged_fee}, insured={insured_fee}, \
+             active={asset_active}, policy_cu={}, activation_cu={}, supply={}/{}",
+            policy_replay.compute_units,
+            consented_activation.compute_units,
             env.token_supply_observed(),
             supply_before
         ));
     }
 
-    Ok(ActivationFeeConsentReproduction {
+    Ok(ActivationFeeConsentProtection {
         blocker: KnownBlocker::ActivationFeeConsent,
-        advertised_fee: ADVERTISED_FEE as u64,
+        signed_max_fee: SIGNED_MAX_FEE as u64,
+        installed_unauthorized_fee: INSTALLED_UNAUTHORIZED_FEE as u64,
+        stale_activation_rejected,
+        rejected_exact_rollback,
+        unconsented_creator_loss,
+        unconsented_insurance_delta,
+        consented_max_fee: CONSENTED_MAX_FEE as u64,
+        current_fee: CURRENT_FEE as u64,
         charged_fee,
-        unexpected_loss: charged_fee - ADVERTISED_FEE as u64,
-        beneficiary_extraction,
-        insured_remainder,
+        insured_fee,
+        asset_active,
         policy_replay_cu: policy_replay.compute_units,
-        activation_cu: activation.compute_units,
+        activation_cu: consented_activation.compute_units,
+        token_supply_conserved,
     })
 }
 

@@ -15,7 +15,7 @@
 //! Guarantee boundary: a quarantined counterexample demonstrates public reachability; it does
 //! not certify the invariant on an unfixed pin. Certification requires the fixed-pin assertion
 //! plus every additional verification method required by the charter.
-//! PRs 223, 224, and 310 are fixed-pin assertions here; PR 314 remains a counterexample.
+//! PRs 223, 224, 310, and 314 are fixed-pin assertions here.
 
 use super::*;
 
@@ -108,13 +108,19 @@ proptest! {
     fn v16_program_pr314_activation_fee_consent_fuzz(
         seed in activation_fee_consent_seed_strategy()
     ) {
-        let result = reproduce_activation_fee_consent(seed);
-        prop_assert!(
-            result.is_ok(),
-            "PR 314 no longer reproduces for seed {:?}: {}",
-            seed,
-            result.unwrap_err()
-        );
+        let protection = verify_activation_fee_consent(seed)
+            .map_err(TestCaseError::fail)?;
+        prop_assert!(protection.stale_activation_rejected);
+        prop_assert!(protection.rejected_exact_rollback);
+        prop_assert_eq!(protection.unconsented_creator_loss, 0);
+        prop_assert_eq!(protection.unconsented_insurance_delta, 0);
+        prop_assert_eq!(protection.charged_fee, protection.current_fee);
+        prop_assert_eq!(protection.insured_fee, u128::from(protection.current_fee));
+        prop_assert!(protection.current_fee <= protection.consented_max_fee);
+        prop_assert!(protection.asset_active);
+        prop_assert!(protection.policy_replay_cu < crate::support::v16_svm::TX_CU_LIMIT);
+        prop_assert!(protection.activation_cu < crate::support::v16_svm::TX_CU_LIMIT);
+        prop_assert!(protection.token_supply_conserved);
     }
 
     #[test]

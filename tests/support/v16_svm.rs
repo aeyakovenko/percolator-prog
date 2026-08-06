@@ -1646,6 +1646,7 @@ impl V16Svm {
                 asset_index,
                 now_slot,
                 initial_price: 0,
+                max_init_fee: u128::MAX,
                 insurance_authority: authority.pubkey().to_bytes(),
                 insurance_operator: authority.pubkey().to_bytes(),
                 backing_bucket_authority: authority.pubkey().to_bytes(),
@@ -1667,6 +1668,7 @@ impl V16Svm {
                 asset_index,
                 now_slot,
                 initial_price: 0,
+                max_init_fee: u128::MAX,
                 insurance_authority: authority.pubkey().to_bytes(),
                 insurance_operator: authority.pubkey().to_bytes(),
                 backing_bucket_authority: authority.pubkey().to_bytes(),
@@ -1788,6 +1790,7 @@ impl V16Svm {
                 asset_index,
                 now_slot,
                 initial_price,
+                max_init_fee: fee,
                 insurance_authority: self.actors[insurance_authority_index]
                     .signer
                     .pubkey()
@@ -1835,6 +1838,7 @@ impl V16Svm {
                 asset_index,
                 now_slot,
                 initial_price,
+                max_init_fee: fee,
                 insurance_authority: authority.to_bytes(),
                 insurance_operator: authority.to_bytes(),
                 backing_bucket_authority: authority.to_bytes(),
@@ -2555,6 +2559,7 @@ impl V16Svm {
                 asset_index,
                 now_slot,
                 initial_price: 0,
+                max_init_fee: u128::MAX,
                 insurance_authority: admin.pubkey().to_bytes(),
                 insurance_operator: admin.pubkey().to_bytes(),
                 backing_bucket_authority: admin.pubkey().to_bytes(),
@@ -2850,6 +2855,7 @@ impl V16Svm {
         asset_index: u16,
         now_slot: u64,
         initial_price: u64,
+        max_init_fee: u128,
         insurance_authority_index: usize,
         insurance_operator_index: usize,
         backing_bucket_authority_index: usize,
@@ -2862,6 +2868,7 @@ impl V16Svm {
                 asset_index,
                 now_slot,
                 initial_price,
+                max_init_fee,
                 insurance_authority: self.actors[insurance_authority_index]
                     .signer
                     .pubkey()

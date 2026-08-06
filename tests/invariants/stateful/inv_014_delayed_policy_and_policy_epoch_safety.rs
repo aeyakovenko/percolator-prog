@@ -129,9 +129,8 @@ proptest! {
                 FeeConsentKind::LiveBaseFeeHike,
                 FeeConsentKind::CpiBaseFee,
                 FeeConsentKind::BatchCpiBaseFee,
-                FeeConsentKind::PermissionlessActivationFee,
             ],
-            "fee-consent classification changed; retained no-CPI and CPI caller fees must remain protected"
+            "fee-consent classification changed; retained no-CPI, CPI caller, and permissionless activation fees must remain protected"
         );
     }
 }

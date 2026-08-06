@@ -2,14 +2,14 @@
 //!
 //! Normative obligation: Charged fees reach only the authorized destination under the bound policy version.
 //!
-//! Evidence in this file (I plus invariant-specific F/M assertions): `v16_program_pr224_unsigned_lp_caller_fee_is_ignored`, `v16_program_pr223_unsigned_lp_backing_fee_requires_matcher_consent`, `v16_program_pr314_activation_fee_consent_extracts_unsigned_increase`, `v16_program_pr310_bilateral_base_fee_requires_fresh_consent`. These tests exercise the deployed public
+//! Evidence in this file (I plus invariant-specific F/M assertions): `v16_program_pr224_unsigned_lp_caller_fee_is_ignored`, `v16_program_pr223_unsigned_lp_backing_fee_requires_matcher_consent`, `v16_program_pr314_permissionless_activation_fee_requires_creator_consent`, `v16_program_pr310_bilateral_base_fee_requires_fresh_consent`. These tests exercise the deployed public
 //! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
 //! rollback, liveness, or compute outcomes appropriate to the invariant.
 //!
 //! Guarantee boundary: a quarantined counterexample demonstrates public reachability; it does
 //! not certify the invariant on an unfixed pin. Certification requires the fixed-pin assertion
 //! plus every additional verification method required by the charter.
-//! PRs 223, 224, and 310 are fixed-pin assertions here; PR 314 remains a counterexample.
+//! PRs 223, 224, 310, and 314 are fixed-pin assertions here.
 
 use super::*;
 
@@ -54,17 +54,24 @@ fn v16_program_pr223_unsigned_lp_backing_fee_requires_matcher_consent() {
 }
 
 #[test]
-fn v16_program_pr314_activation_fee_consent_extracts_unsigned_increase() {
-    let reproduction = reproduce_activation_fee_consent([0x14; 32])
-        .unwrap_or_else(|error| panic!("PR 314 no longer reproduces: {error}"));
-    assert_eq!(reproduction.blocker, KnownBlocker::ActivationFeeConsent);
-    assert_eq!(reproduction.advertised_fee, 1);
-    assert_eq!(reproduction.charged_fee, 1_000);
-    assert_eq!(reproduction.unexpected_loss, 999);
-    assert_eq!(reproduction.beneficiary_extraction, 999);
-    assert_eq!(reproduction.insured_remainder, 1);
-    assert!(reproduction.policy_replay_cu < 1_400_000);
-    assert!(reproduction.activation_cu < 1_400_000);
+fn v16_program_pr314_permissionless_activation_fee_requires_creator_consent() {
+    let protection = verify_activation_fee_consent([0x14; 32])
+        .unwrap_or_else(|error| panic!("PR 314 protection failed: {error}"));
+    assert_eq!(protection.blocker, KnownBlocker::ActivationFeeConsent);
+    assert_eq!(protection.signed_max_fee, 1);
+    assert_eq!(protection.installed_unauthorized_fee, 1_000);
+    assert!(protection.stale_activation_rejected);
+    assert!(protection.rejected_exact_rollback);
+    assert_eq!(protection.unconsented_creator_loss, 0);
+    assert_eq!(protection.unconsented_insurance_delta, 0);
+    assert_eq!(protection.consented_max_fee, 1_000);
+    assert_eq!(protection.current_fee, 7);
+    assert_eq!(protection.charged_fee, 7);
+    assert_eq!(protection.insured_fee, 7);
+    assert!(protection.asset_active);
+    assert!(protection.policy_replay_cu < 1_400_000);
+    assert!(protection.activation_cu < 1_400_000);
+    assert!(protection.token_supply_conserved);
 }
 
 #[test]

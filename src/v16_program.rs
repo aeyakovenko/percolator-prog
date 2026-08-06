@@ -2714,6 +2714,7 @@ pub mod ix {
             asset_index: u16,
             now_slot: u64,
             initial_price: u64,
+            max_init_fee: u128,
             insurance_authority: [u8; 32],
             insurance_operator: [u8; 32],
             backing_bucket_authority: [u8; 32],
@@ -2991,6 +2992,7 @@ pub mod ix {
                     asset_index: read_u16(&mut rest)?,
                     now_slot: read_u64(&mut rest)?,
                     initial_price: read_u64(&mut rest)?,
+                    max_init_fee: read_u128(&mut rest)?,
                     insurance_authority: read_bytes32(&mut rest)?,
                     insurance_operator: read_bytes32(&mut rest)?,
                     backing_bucket_authority: read_bytes32(&mut rest)?,
@@ -3368,6 +3370,7 @@ pub mod ix {
                     asset_index,
                     now_slot,
                     initial_price,
+                    max_init_fee,
                     insurance_authority,
                     insurance_operator,
                     backing_bucket_authority,
@@ -3378,6 +3381,7 @@ pub mod ix {
                     push_u16(&mut out, asset_index);
                     push_u64(&mut out, now_slot);
                     push_u64(&mut out, initial_price);
+                    push_u128(&mut out, max_init_fee);
                     out.extend_from_slice(&insurance_authority);
                     out.extend_from_slice(&insurance_operator);
                     out.extend_from_slice(&backing_bucket_authority);
@@ -5615,6 +5619,7 @@ pub mod processor {
                 asset_index,
                 now_slot,
                 initial_price,
+                max_init_fee,
                 insurance_authority,
                 insurance_operator,
                 backing_bucket_authority,
@@ -5626,6 +5631,7 @@ pub mod processor {
                 asset_index,
                 now_slot,
                 initial_price,
+                max_init_fee,
                 insurance_authority,
                 insurance_operator,
                 backing_bucket_authority,
@@ -9694,6 +9700,7 @@ pub mod processor {
         asset_index: u16,
         now_slot: u64,
         initial_price: u64,
+        max_init_fee: u128,
         insurance_authority: [u8; 32],
         insurance_operator: [u8; 32],
         backing_bucket_authority: [u8; 32],
@@ -9735,7 +9742,7 @@ pub mod processor {
                     cfg_pre.permissionless_market_init_fee,
                     asset_index,
                 )?;
-                if fee == 0 {
+                if fee == 0 || fee > max_init_fee {
                     return Err(PercolatorError::Unauthorized.into());
                 }
                 fee
@@ -9774,7 +9781,10 @@ pub mod processor {
                             cfg.permissionless_market_init_fee,
                             asset_index,
                         )?;
-                        if expected_fee == 0 || expected_fee != init_fee {
+                        if expected_fee == 0
+                            || expected_fee > max_init_fee
+                            || expected_fee != init_fee
+                        {
                             return Err(PercolatorError::Unauthorized.into());
                         }
                     }

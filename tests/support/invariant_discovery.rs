@@ -3536,6 +3536,7 @@ fn retained_retry_pair(env: &mut V16Svm, kind: RetryIntentKind) -> (Transaction,
             1,
             3,
             INITIAL_PRICE,
+            500,
             AUTHORITY,
             AUTHORITY,
             AUTHORITY,
@@ -4077,7 +4078,15 @@ fn discover_activation_fee_consent_violation(
         .map_err(|error| format!("publish activation fee: {error}"))?;
     env.warp_to_slot(3);
     let retained = env.build_retained_permissionless_asset_activation(
-        CREATOR, ASSET, 3, 100, CREATOR, CREATOR, CREATOR, CREATOR,
+        CREATOR,
+        ASSET,
+        3,
+        100,
+        ADVERTISED_FEE,
+        CREATOR,
+        CREATOR,
+        CREATOR,
+        CREATOR,
     );
     env.update_market_init_fee_policy(CHANGED_FEE)
         .map_err(|error| format!("change activation fee after consent: {error}"))?;

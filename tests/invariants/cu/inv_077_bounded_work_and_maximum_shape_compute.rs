@@ -588,6 +588,7 @@ fn run_dense_zero_delta_resolution_shape(asset_count: u16) {
                 asset_index,
                 now_slot: activation_slot,
                 initial_price: PRICE,
+                max_init_fee: u128::MAX,
                 insurance_authority: admin.pubkey().to_bytes(),
                 insurance_operator: admin.pubkey().to_bytes(),
                 backing_bucket_authority: admin.pubkey().to_bytes(),
