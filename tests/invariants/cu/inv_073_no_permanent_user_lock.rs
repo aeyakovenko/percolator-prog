@@ -1896,6 +1896,7 @@ fn v16_attack_permissionless_asset_epoch_grief_has_atomic_max_leg_exit() {
     let open_legs: Vec<BatchTradeLeg> = (0..LEGS)
         .map(|asset_index| BatchTradeLeg {
             asset_index,
+            market_id: first_generation_market_id(asset_index),
             size_q: POS_SCALE as i128,
             exec_price: PRICE,
             fee_bps: 0,
@@ -1992,6 +1993,7 @@ fn v16_attack_permissionless_asset_epoch_grief_has_atomic_max_leg_exit() {
         ],
         data: ProgInstruction::TradeCpi {
             asset_index: 0,
+            market_id: first_generation_market_id(0),
             size_q: -(POS_SCALE as i128),
             fee_bps: 0,
             limit_price: PRICE,

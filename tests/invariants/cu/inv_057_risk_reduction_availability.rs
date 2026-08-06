@@ -192,6 +192,7 @@ fn v16_attack_recovery_cpi_routes_allow_user_exit_before_force_close() {
             ProgInstruction::BatchTradeCpi {
                 legs: vec![BatchTradeCpiLeg {
                     asset_index: 1,
+                    market_id: recovery_group.assets[1].market_id,
                     size_q: -(POS_SCALE as i128),
                     fee_bps: 0,
                     limit_price: 0,
@@ -248,6 +249,7 @@ fn v16_attack_stale_batch_nocpi_recovers_after_public_precrank() {
     let reduce_legs: Vec<BatchTradeLeg> = (0..LEGS as u16)
         .map(|asset_index| BatchTradeLeg {
             asset_index,
+            market_id: first_generation_market_id(asset_index),
             size_q: -(POS_SCALE as i128),
             exec_price: 95,
             fee_bps: 0,
@@ -392,6 +394,7 @@ fn v16_attack_stale_batch_cpi_recovers_after_public_precrank() {
     let reduce_legs: Vec<BatchTradeCpiLeg> = (0..LEGS as u16)
         .map(|asset_index| BatchTradeCpiLeg {
             asset_index,
+            market_id: first_generation_market_id(asset_index),
             size_q: -(POS_SCALE as i128),
             fee_bps: 0,
             limit_price: 0,
@@ -583,6 +586,7 @@ fn v16_attack_stale_tradecpi_recovers_after_public_precrank_with_max_tail() {
     let stale_trade = env.send(
         ProgInstruction::TradeCpi {
             asset_index: 0,
+            market_id: first_generation_market_id(0),
             size_q: -(POS_SCALE as i128),
             fee_bps: 0,
             limit_price: 0,
@@ -683,6 +687,7 @@ fn v16_attack_stale_tradecpi_recovers_after_public_precrank_with_max_tail() {
         .send(
             ProgInstruction::TradeCpi {
                 asset_index: 0,
+                market_id: refreshed_group.assets[0].market_id,
                 size_q: -(POS_SCALE as i128),
                 fee_bps: 0,
                 limit_price: 0,

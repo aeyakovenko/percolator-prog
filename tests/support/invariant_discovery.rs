@@ -4145,6 +4145,7 @@ fn discover_trade_fee_consent_violation(
         | FeeConsentKind::BatchCpiCallerFee => env.primary_portfolio(LP).capital.get(),
         _ => total_capital(&env, &[TAKER, LP])?,
     };
+    let trade_market_id = env.primary_market_state().1.assets[0].market_id;
     let before = fingerprint(&env);
     let execution = match kind {
         FeeConsentKind::RetainedNoCpiBaseFee | FeeConsentKind::RetainedBatchNoCpiBaseFee => env
@@ -4159,6 +4160,7 @@ fn discover_trade_fee_consent_violation(
                 LP,
                 vec![BatchTradeCpiLeg {
                     asset_index: 0,
+                    market_id: trade_market_id,
                     size_q,
                     fee_bps: 0,
                     limit_price: 0,
@@ -4174,6 +4176,7 @@ fn discover_trade_fee_consent_violation(
                 LP,
                 vec![BatchTradeCpiLeg {
                     asset_index: 0,
+                    market_id: trade_market_id,
                     size_q,
                     fee_bps: CALLER_FEE_BPS,
                     limit_price: 0,
@@ -4402,6 +4405,7 @@ fn discover_one_source_fee_consent_violation(
         .map_err(|error| format!("install post-consent source-backing fee: {error}"))?;
     env.warp_to_slot(6);
     let lp_before = env.primary_portfolio(LP).capital.get();
+    let trade_market_id = env.primary_market_state().1.assets[0].market_id;
     let provider_before = env.primary_market_state().1.source_backing_buckets
         [WINNING_DOMAIN as usize]
         .utilization_fee_earnings;
@@ -4419,6 +4423,7 @@ fn discover_one_source_fee_consent_violation(
                 LP,
                 vec![BatchTradeCpiLeg {
                     asset_index: 0,
+                    market_id: trade_market_id,
                     size_q: -INCREASE_Q,
                     fee_bps: 0,
                     limit_price: 0,
@@ -4865,6 +4870,7 @@ fn execute_cpi_close_kind(
     kind: AccrualOrderingKind,
     size_q: i128,
 ) -> Result<(), String> {
+    let market_id = env.primary_market_state().1.assets[0].market_id;
     match kind {
         AccrualOrderingKind::CpiTradeClose => env
             .trade_cpi(0, 1, 0, size_q, 0, 0)
@@ -4876,6 +4882,7 @@ fn execute_cpi_close_kind(
                 1,
                 vec![BatchTradeCpiLeg {
                     asset_index: 0,
+                    market_id,
                     size_q,
                     fee_bps: 0,
                     limit_price: 0,
@@ -5801,6 +5808,7 @@ fn execute_reported_price_route(
     size_q: i128,
     price: u64,
 ) -> Result<(), String> {
+    let market_id = env.primary_market_state().1.assets[0].market_id;
     match route {
         ProspectiveAccrualRoute::NoCpi => env
             .trade_no_cpi(taker, maker, 0, size_q, price, 0)
@@ -5816,6 +5824,7 @@ fn execute_reported_price_route(
                 maker,
                 vec![BatchTradeLeg {
                     asset_index: 0,
+                    market_id,
                     size_q,
                     exec_price: price,
                     fee_bps: 0,
@@ -5829,6 +5838,7 @@ fn execute_reported_price_route(
                 maker,
                 vec![BatchTradeCpiLeg {
                     asset_index: 0,
+                    market_id,
                     size_q,
                     fee_bps: 0,
                     limit_price: 0,
@@ -5848,6 +5858,7 @@ fn execute_discovery_trade_route(
     size_q: i128,
     price: u64,
 ) -> Result<(), String> {
+    let market_id = env.primary_market_state().1.assets[asset_index as usize].market_id;
     match route {
         DiscoveryTradeRoute::NoCpi => env
             .trade_no_cpi(taker, maker, asset_index, size_q, price, 0)
@@ -5858,6 +5869,7 @@ fn execute_discovery_trade_route(
                 maker,
                 vec![BatchTradeLeg {
                     asset_index,
+                    market_id,
                     size_q,
                     exec_price: price,
                     fee_bps: 0,
@@ -5873,6 +5885,7 @@ fn execute_discovery_trade_route(
                 maker,
                 vec![BatchTradeCpiLeg {
                     asset_index,
+                    market_id,
                     size_q,
                     fee_bps: 0,
                     limit_price: 0,
@@ -8791,6 +8804,7 @@ fn discover_one_stale_cohort_novation(
     let pre_stale_long_count = pre_novation_group.assets[0].stale_account_count_long;
     let pre_stale_short_count = pre_novation_group.assets[0].stale_account_count_short;
     let pre_negative_pnl_count = pre_novation_group.negative_pnl_account_count;
+    let trade_market_id = pre_novation_group.assets[0].market_id;
     let novation_landed = match route {
         StaleCohortRoute::NoCpi => env
             .trade_no_cpi(WINNER, ENTRANT, 0, -SIZE_Q, LOSS_PRICE, 0)
@@ -8801,6 +8815,7 @@ fn discover_one_stale_cohort_novation(
                 ENTRANT,
                 vec![BatchTradeLeg {
                     asset_index: 0,
+                    market_id: trade_market_id,
                     size_q: -SIZE_Q,
                     exec_price: LOSS_PRICE,
                     fee_bps: 0,
@@ -8814,6 +8829,7 @@ fn discover_one_stale_cohort_novation(
                 ENTRANT,
                 vec![BatchTradeCpiLeg {
                     asset_index: 0,
+                    market_id: trade_market_id,
                     size_q: -SIZE_Q,
                     fee_bps: 0,
                     limit_price: 0,
@@ -10080,6 +10096,7 @@ fn discover_one_source_lien_reversal_exit(
     let mut lock_active_rejections = 0u8;
     let mut rejection_errors = Vec::new();
     let mut exact_rollback = true;
+    let trade_market_id = env.primary_market_state().1.assets[ASSET as usize].market_id;
     for _ in 0..ATTEMPTS {
         let before = fingerprint(&env);
         let result = match route {
@@ -10100,6 +10117,7 @@ fn discover_one_source_lien_reversal_exit(
                 COUNTERPARTY,
                 vec![BatchTradeLeg {
                     asset_index: ASSET,
+                    market_id: trade_market_id,
                     size_q: -(POS_SCALE as i128),
                     exec_price: OPEN_PRICE,
                     fee_bps: 0,
@@ -10113,6 +10131,7 @@ fn discover_one_source_lien_reversal_exit(
                 COUNTERPARTY,
                 vec![BatchTradeCpiLeg {
                     asset_index: ASSET,
+                    market_id: trade_market_id,
                     size_q: -(POS_SCALE as i128),
                     fee_bps: 0,
                     limit_price: 0,
@@ -10308,6 +10327,7 @@ fn discover_one_cross_domain_rounding_exit_lock(
 
     let mut blocked_public_routes = 0u8;
     let mut exact_rollback = true;
+    let trade_market_id = env.primary_market_state().1.assets[affected_asset as usize].market_id;
     for route in SourceLienReversalExitRoute::ALL {
         let before = fingerprint(&env);
         let result = match route {
@@ -10330,6 +10350,7 @@ fn discover_one_cross_domain_rounding_exit_lock(
                 TARGET_SHORTS[0],
                 vec![BatchTradeLeg {
                     asset_index: affected_asset,
+                    market_id: trade_market_id,
                     size_q: -(POS_SCALE as i128),
                     exec_price: REVERSAL_PRICE,
                     fee_bps: 0,
@@ -10348,6 +10369,7 @@ fn discover_one_cross_domain_rounding_exit_lock(
                 TARGET_SHORTS[0],
                 vec![BatchTradeCpiLeg {
                     asset_index: affected_asset,
+                    market_id: trade_market_id,
                     size_q: -(POS_SCALE as i128),
                     fee_bps: 0,
                     limit_price: 0,
@@ -10559,33 +10581,38 @@ fn discover_one_flat_source_lien_claim_lock(
     let mut round_trip_completed = false;
     let mut round_trip_released_claim = false;
     if close_rejected {
-        let route_trade = |env: &mut V16Svm, size_q: i128| match escape_route {
-            FlatSourceLienEscapeRoute::TradeNoCpi => {
-                env.trade_no_cpi(WINNER, COUNTERPARTY, 0, size_q, 105, 0)
+        let route_trade = |env: &mut V16Svm, size_q: i128| {
+            let market_id = env.primary_market_state().1.assets[0].market_id;
+            match escape_route {
+                FlatSourceLienEscapeRoute::TradeNoCpi => {
+                    env.trade_no_cpi(WINNER, COUNTERPARTY, 0, size_q, 105, 0)
+                }
+                FlatSourceLienEscapeRoute::BatchNoCpi => env.batch_trade_no_cpi(
+                    WINNER,
+                    COUNTERPARTY,
+                    vec![BatchTradeLeg {
+                        asset_index: 0,
+                        market_id,
+                        size_q,
+                        exec_price: 105,
+                        fee_bps: 0,
+                    }],
+                ),
+                FlatSourceLienEscapeRoute::TradeCpi => {
+                    env.trade_cpi(WINNER, COUNTERPARTY, 0, size_q, 0, 0)
+                }
+                FlatSourceLienEscapeRoute::BatchCpi => env.batch_trade_cpi(
+                    WINNER,
+                    COUNTERPARTY,
+                    vec![BatchTradeCpiLeg {
+                        asset_index: 0,
+                        market_id,
+                        size_q,
+                        fee_bps: 0,
+                        limit_price: 0,
+                    }],
+                ),
             }
-            FlatSourceLienEscapeRoute::BatchNoCpi => env.batch_trade_no_cpi(
-                WINNER,
-                COUNTERPARTY,
-                vec![BatchTradeLeg {
-                    asset_index: 0,
-                    size_q,
-                    exec_price: 105,
-                    fee_bps: 0,
-                }],
-            ),
-            FlatSourceLienEscapeRoute::TradeCpi => {
-                env.trade_cpi(WINNER, COUNTERPARTY, 0, size_q, 0, 0)
-            }
-            FlatSourceLienEscapeRoute::BatchCpi => env.batch_trade_cpi(
-                WINNER,
-                COUNTERPARTY,
-                vec![BatchTradeCpiLeg {
-                    asset_index: 0,
-                    size_q,
-                    fee_bps: 0,
-                    limit_price: 0,
-                }],
-            ),
         };
         let before_open = fingerprint(&env);
         let open = route_trade(&mut env, POS_SCALE as i128);

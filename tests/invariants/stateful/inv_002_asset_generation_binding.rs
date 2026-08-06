@@ -55,10 +55,6 @@ proptest! {
         prop_assert_eq!(
             violations,
             vec![
-                AssetIntentKind::TradeNoCpi,
-                AssetIntentKind::TradeCpi,
-                AssetIntentKind::BatchTradeNoCpi,
-                AssetIntentKind::BatchTradeCpi,
                 AssetIntentKind::ConfigureAuthMark,
                 AssetIntentKind::ConfigureEwmaMark,
                 AssetIntentKind::ConfigureHybridOracle,
@@ -73,8 +69,15 @@ proptest! {
         );
         prop_assert_eq!(
             protected,
-            vec![AssetIntentKind::PushAuthMark, AssetIntentKind::PushEwmaMark],
-            "only generation-A mark pushes with a replacement mode configuration are sequence-protected"
+            vec![
+                AssetIntentKind::TradeNoCpi,
+                AssetIntentKind::TradeCpi,
+                AssetIntentKind::BatchTradeNoCpi,
+                AssetIntentKind::BatchTradeCpi,
+                AssetIntentKind::PushAuthMark,
+                AssetIntentKind::PushEwmaMark,
+            ],
+            "trade intents and generation-A mark pushes must reject after slot reuse"
         );
     }
 }
@@ -123,14 +126,18 @@ proptest! {
     fn v16_program_pr231_asset_generation_replay_fuzz(
         (seed, route) in asset_generation_replay_strategy()
     ) {
-        let result = reproduce_asset_generation_trade_replay(seed, route);
-        prop_assert!(
-            result.is_ok(),
-            "PR 231 {:?} no longer reproduces for seed {:?}: {}",
-            route,
-            seed,
-            result.unwrap_err()
-        );
+        let kind = match route {
+            TradeRoute::NoCpi => AssetIntentKind::TradeNoCpi,
+            TradeRoute::Cpi => AssetIntentKind::TradeCpi,
+            TradeRoute::BatchNoCpi => AssetIntentKind::BatchTradeNoCpi,
+            TradeRoute::BatchCpi => AssetIntentKind::BatchTradeCpi,
+        };
+        let protection = discover_asset_generation_replay(seed, kind)
+            .map_err(TestCaseError::fail)?;
+        prop_assert!(protection.new_asset_id > protection.old_asset_id);
+        prop_assert!(!protection.accepted_stale_intent);
+        prop_assert!(!protection.mutated_economic_state);
+        prop_assert_eq!(protection.compute_units, None);
     }
 
     #[test]

@@ -79,6 +79,7 @@ fn v16_attack_tradecpi_rejects_program_owned_matcher_tail_before_cpi() {
             Route::Single => env.send(
                 ProgInstruction::TradeCpi {
                     asset_index: 0,
+                    market_id: first_generation_market_id(0),
                     size_q: (5 * POS_SCALE) as i128,
                     fee_bps: 100,
                     limit_price: 0,
@@ -91,12 +92,14 @@ fn v16_attack_tradecpi_rejects_program_owned_matcher_tail_before_cpi() {
                     legs: vec![
                         BatchTradeCpiLeg {
                             asset_index: 0,
+                            market_id: first_generation_market_id(0),
                             size_q: (5 * POS_SCALE) as i128,
                             fee_bps: 100,
                             limit_price: 0,
                         },
                         BatchTradeCpiLeg {
                             asset_index: 1,
+                            market_id: first_generation_market_id(1),
                             size_q: -(5 * POS_SCALE as i128),
                             fee_bps: 100,
                             limit_price: 0,

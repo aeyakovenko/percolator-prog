@@ -73,6 +73,7 @@ fn v16_attack_batch_nocpi_exit_only_rejects_cross_zero_flip() {
             ProgInstruction::BatchTradeNoCpi {
                 legs: vec![BatchTradeLeg {
                     asset_index: 0,
+                    market_id: first_generation_market_id(0),
                     size_q: -(2 * POS_SCALE as i128),
                     exec_price: 100,
                     fee_bps: 0,
@@ -101,6 +102,7 @@ fn v16_attack_batch_nocpi_exit_only_rejects_cross_zero_flip() {
                 ProgInstruction::BatchTradeNoCpi {
                     legs: vec![BatchTradeLeg {
                         asset_index: 0,
+                        market_id: first_generation_market_id(0),
                         size_q: -(POS_SCALE as i128),
                         exec_price: 100,
                         fee_bps: 0,

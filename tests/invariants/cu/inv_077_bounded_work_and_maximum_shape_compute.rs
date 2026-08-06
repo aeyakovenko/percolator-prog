@@ -307,6 +307,7 @@ fn run_max_source_liquidation_asset(adverse_asset: u16) {
             legs: (0..ASSETS)
                 .map(|asset_index| BatchTradeLeg {
                     asset_index,
+                    market_id: first_generation_market_id(asset_index),
                     size_q: ((if asset_index == adverse_asset { 140 } else { 1 }) * POS_SCALE)
                         as i128,
                     exec_price: OPEN_PRICE,
@@ -512,6 +513,7 @@ fn run_max_source_liquidation_asset(adverse_asset: u16) {
             ProgInstruction::BatchTradeNoCpi {
                 legs: vec![BatchTradeLeg {
                     asset_index: adverse_asset,
+                    market_id: first_generation_market_id(adverse_asset),
                     size_q: POS_SCALE as i128,
                     exec_price: ADVERSE_PRICE,
                     fee_bps: 0,
@@ -623,6 +625,7 @@ fn run_dense_zero_delta_resolution_shape(asset_count: u16) {
                 legs: (start..end)
                     .map(|asset_index| BatchTradeLeg {
                         asset_index,
+                        market_id: first_generation_market_id(asset_index),
                         size_q: POS_SCALE as i128,
                         exec_price: PRICE,
                         fee_bps: 0,
@@ -701,6 +704,7 @@ fn run_dense_zero_delta_resolution_shape(asset_count: u16) {
     let stale_exit = env.send(
         ProgInstruction::TradeNoCpi {
             asset_index: 0,
+            market_id: first_generation_market_id(0),
             size_q: -(POS_SCALE as i128),
             exec_price: PRICE,
             fee_bps: 0,
@@ -810,6 +814,7 @@ fn v16_bpf_public_full_14_leg_composite_oracle_liquidation_progress_is_bounded()
     let legs = (0..14)
         .map(|asset_index| BatchTradeLeg {
             asset_index,
+            market_id: first_generation_market_id(asset_index),
             size_q: (10 * POS_SCALE) as i128,
             exec_price: 100,
             fee_bps: 0,
@@ -955,6 +960,7 @@ fn v16_bpf_public_full_14_leg_three_feed_oracle_refresh_is_bounded() {
             legs: (0..ASSET_COUNT)
                 .map(|asset_index| BatchTradeLeg {
                     asset_index,
+                    market_id: first_generation_market_id(asset_index),
                     size_q: POS_SCALE as i128,
                     exec_price: MARK,
                     fee_bps: 0,
@@ -1079,6 +1085,7 @@ fn v16_bpf_public_14_leg_28_source_domain_exit_is_under_tx_limit() {
     let legs = (0..ASSETS)
         .map(|asset_index| BatchTradeLeg {
             asset_index,
+            market_id: first_generation_market_id(asset_index),
             size_q: (10 * POS_SCALE) as i128,
             exec_price: OPEN_PRICE,
             fee_bps: 0,
@@ -1457,6 +1464,7 @@ fn v16_bpf_public_stale_7_leg_tradenocpi_boundary_is_bounded() {
     let legs: Vec<BatchTradeLeg> = (0..7)
         .map(|asset_index| BatchTradeLeg {
             asset_index,
+            market_id: first_generation_market_id(asset_index),
             size_q: POS_SCALE as i128,
             exec_price: 100,
             fee_bps: 0,

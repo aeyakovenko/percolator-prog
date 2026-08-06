@@ -2401,6 +2401,7 @@ impl ScenarioRunner {
                     .map(|(asset, size)| {
                         Ok(BatchTradeLeg {
                             asset_index: *asset as u16,
+                            market_id: market.assets[*asset].market_id,
                             size_q: *size,
                             exec_price: moved_price(
                                 market.assets[*asset].effective_price,
@@ -2417,6 +2418,7 @@ impl ScenarioRunner {
                     .iter()
                     .map(|(asset, size)| BatchTradeCpiLeg {
                         asset_index: *asset as u16,
+                        market_id: market.assets[*asset].market_id,
                         size_q: *size,
                         fee_bps,
                         limit_price: 0,
@@ -4847,6 +4849,7 @@ pub fn verify_cpi_caller_fee_protection(
     env.activate_permissionless_asset_for_actor(0, ASSET, 3, PRICE, 0, 1)
         .map_err(|error| format!("{route:?} attacker asset activation: {error}"))?;
 
+    let market_id = env.primary_market_state().1.assets[ASSET as usize].market_id;
     let mut max_trade_cu = 0;
     for size_q in [SIZE_Q, -SIZE_Q] {
         let success = match route {
@@ -4859,6 +4862,7 @@ pub fn verify_cpi_caller_fee_protection(
                     1,
                     vec![BatchTradeCpiLeg {
                         asset_index: ASSET,
+                        market_id,
                         size_q,
                         fee_bps: CALLER_FEE_BPS,
                         limit_price: 0,
@@ -4997,19 +5001,23 @@ pub fn verify_cpi_base_fee_consent(
 
     env.update_trade_fee_policy(INSTALLED_FEE_BPS)
         .map_err(|error| format!("PR 313 raise live base fee after LP consent: {error}"))?;
-    let send_fill = |env: &mut V16Svm, size_q: i128| match route {
-        TradeRoute::Cpi => env.trade_cpi(BENEFICIARY, LP, ASSET, size_q, 0, 0),
-        TradeRoute::BatchCpi => env.batch_trade_cpi(
-            BENEFICIARY,
-            LP,
-            vec![BatchTradeCpiLeg {
-                asset_index: ASSET,
-                size_q,
-                fee_bps: 0,
-                limit_price: 0,
-            }],
-        ),
-        _ => unreachable!(),
+    let send_fill = |env: &mut V16Svm, size_q: i128| {
+        let market_id = env.primary_market_state().1.assets[ASSET as usize].market_id;
+        match route {
+            TradeRoute::Cpi => env.trade_cpi(BENEFICIARY, LP, ASSET, size_q, 0, 0),
+            TradeRoute::BatchCpi => env.batch_trade_cpi(
+                BENEFICIARY,
+                LP,
+                vec![BatchTradeCpiLeg {
+                    asset_index: ASSET,
+                    market_id,
+                    size_q,
+                    fee_bps: 0,
+                    limit_price: 0,
+                }],
+            ),
+            _ => unreachable!(),
+        }
     };
 
     let state_after_policy = tracked_economic_accounts(&env);
@@ -6766,6 +6774,7 @@ pub fn reproduce_bilateral_fee_support(
         BilateralFeeMode::Ewma => env.warp_to_slot(20),
         BilateralFeeMode::HybridAfterHours => env.set_clock(20, 1_000),
     }
+    let market_id = env.primary_market_state().1.assets[0].market_id;
     let exit = match route {
         TradeRoute::Cpi => env.trade_cpi(0, 1, 0, MOVER_Q, 0, 0),
         TradeRoute::BatchCpi => env.batch_trade_cpi(
@@ -6773,6 +6782,7 @@ pub fn reproduce_bilateral_fee_support(
             1,
             vec![BatchTradeCpiLeg {
                 asset_index: 0,
+                market_id,
                 size_q: MOVER_Q,
                 fee_bps: 0,
                 limit_price: 0,
@@ -15596,6 +15606,7 @@ fn execute_trade_route(
     price: u64,
     fee_bps: u64,
 ) -> Result<TxSuccess, String> {
+    let market_id = env.primary_market_state().1.assets[asset_index as usize].market_id;
     match route {
         TradeRoute::NoCpi => env.trade_no_cpi(taker, maker, asset_index, size_q, price, fee_bps),
         TradeRoute::Cpi => env.trade_cpi(taker, maker, asset_index, size_q, fee_bps, 0),
@@ -15604,6 +15615,7 @@ fn execute_trade_route(
             maker,
             vec![BatchTradeLeg {
                 asset_index,
+                market_id,
                 size_q,
                 exec_price: price,
                 fee_bps,
@@ -15614,6 +15626,7 @@ fn execute_trade_route(
             maker,
             vec![BatchTradeCpiLeg {
                 asset_index,
+                market_id,
                 size_q,
                 fee_bps,
                 limit_price: 0,

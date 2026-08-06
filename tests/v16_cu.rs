@@ -10,6 +10,7 @@ use percolator_prog::{
         ORACLE_LEG_FLAG_DIVIDE_LEG2, ORACLE_LEG_FLAG_DIVIDE_LEG3, PORTFOLIO_ENGINE_ACCOUNT_LEN,
         PORTFOLIO_LEGACY_ACCOUNT_LEN,
     },
+    error::PercolatorError,
     ix::{BatchTradeCpiLeg, BatchTradeLeg, CrankObservationHint, Instruction as ProgInstruction},
     oracle_v16, processor, state,
     state::{MarketGroupV16, PortfolioAccountV16},
@@ -37,6 +38,10 @@ const MATCHER_CONTEXT_LEN: usize = 320;
 
 fn next_control_sequence(current: u64) -> u64 {
     current.checked_add(1).expect("control sequence exhausted")
+}
+
+const fn first_generation_market_id(asset_index: u16) -> u64 {
+    asset_index as u64 + 1
 }
 
 fn crank_observations(asset_index: u16) -> Vec<CrankObservationHint> {
@@ -1438,6 +1443,10 @@ impl V16CuEnv {
         state::read_market(&account.data).unwrap()
     }
 
+    fn asset_market_id(&self, asset_index: u16) -> u64 {
+        self.market_state().1.assets[asset_index as usize].market_id
+    }
+
     fn portfolio_state(&self, portfolio: Pubkey) -> PortfolioAccountV16 {
         let account = self.svm.get_account(&portfolio).expect("portfolio account");
         state::read_portfolio(&account.data).unwrap()
@@ -1694,9 +1703,17 @@ impl V16CuEnv {
         exec_price: u64,
         fee_bps: u64,
     ) -> Result<u64, String> {
+        let market_id = self
+            .market_state()
+            .1
+            .assets
+            .get(asset_index as usize)
+            .map(|asset| asset.market_id)
+            .unwrap_or(0);
         self.send(
             ProgInstruction::TradeNoCpi {
                 asset_index,
+                market_id,
                 size_q,
                 exec_price,
                 fee_bps,
@@ -2416,6 +2433,7 @@ impl V16CuEnv {
         size_q: i128,
         fee_bps: u64,
     ) -> Result<u64, String> {
+        let market_id = self.asset_market_id(asset_index);
         let metas = vec![
             AccountMeta::new(owner_a.pubkey(), true),
             AccountMeta::new(self.market, false),
@@ -2428,6 +2446,7 @@ impl V16CuEnv {
         self.send(
             ProgInstruction::TradeCpi {
                 asset_index,
+                market_id,
                 size_q,
                 fee_bps,
                 limit_price: 0,
@@ -6233,6 +6252,224 @@ fn v16_bpf_permissionless_market_shutdown_force_closes_recovers_and_reuses_slot(
         ),
         "reuse must change only the canonical fresh-activation bytes and no stale retired-slot residue may leak"
     );
+}
+
+#[derive(Clone, Copy, Debug)]
+enum AssetGenerationTradePath {
+    TradeNoCpi,
+    BatchTradeNoCpi,
+    TradeCpi,
+    BatchTradeCpi,
+}
+
+// A transaction signed for one asset generation (for example, with a durable nonce) must not
+// execute after public retirement and permissionless slot reuse. Every route rejects before
+// mutation; the replacement generation then accepts the same trade when its current market_id is
+// signed, so the guard does not block trading.
+fn assert_signed_trade_cannot_replay_across_asset_slot_reuse() {
+    const ASSET: u16 = 1;
+    const OLD_PRICE: u64 = 100;
+    const NEW_PRICE: u64 = 250;
+
+    for path in [
+        AssetGenerationTradePath::TradeNoCpi,
+        AssetGenerationTradePath::BatchTradeNoCpi,
+        AssetGenerationTradePath::TradeCpi,
+        AssetGenerationTradePath::BatchTradeCpi,
+    ] {
+        let mut env = V16CuEnv::new();
+        env.update_market_init_fee_policy_with_cu(1);
+        env.svm.warp_to_slot(1);
+        env.activate_asset(ASSET, 1, OLD_PRICE);
+
+        let trader_a = Keypair::new();
+        let trader_b = Keypair::new();
+        let account_a = env.create_portfolio(&trader_a);
+        let account_b = env.create_portfolio(&trader_b);
+        env.deposit(&trader_a, account_a, 1_000_000);
+        env.deposit(&trader_b, account_b, 1_000_000);
+        let (matcher_program, matcher_ctx, matcher_delegate) =
+            auth_matcher_for_lp_via_system_create(&mut env, &trader_b, account_b);
+
+        let old_market_id = env.asset_market_id(ASSET);
+        let stale_instruction = match path {
+            AssetGenerationTradePath::TradeNoCpi => ProgInstruction::TradeNoCpi {
+                asset_index: ASSET,
+                market_id: old_market_id,
+                size_q: POS_SCALE as i128,
+                exec_price: OLD_PRICE,
+                fee_bps: 0,
+            },
+            AssetGenerationTradePath::BatchTradeNoCpi => ProgInstruction::BatchTradeNoCpi {
+                legs: vec![BatchTradeLeg {
+                    asset_index: ASSET,
+                    market_id: old_market_id,
+                    size_q: POS_SCALE as i128,
+                    exec_price: OLD_PRICE,
+                    fee_bps: 0,
+                }],
+            },
+            AssetGenerationTradePath::TradeCpi => ProgInstruction::TradeCpi {
+                asset_index: ASSET,
+                market_id: old_market_id,
+                size_q: POS_SCALE as i128,
+                fee_bps: 0,
+                limit_price: 0,
+            },
+            AssetGenerationTradePath::BatchTradeCpi => ProgInstruction::BatchTradeCpi {
+                legs: vec![BatchTradeCpiLeg {
+                    asset_index: ASSET,
+                    market_id: old_market_id,
+                    size_q: POS_SCALE as i128,
+                    fee_bps: 0,
+                    limit_price: 0,
+                }],
+            },
+        };
+        let cpi = matches!(
+            path,
+            AssetGenerationTradePath::TradeCpi | AssetGenerationTradePath::BatchTradeCpi
+        );
+        let stale_accounts = if cpi {
+            vec![
+                AccountMeta::new(trader_a.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(account_a, false),
+                AccountMeta::new(account_b, false),
+                AccountMeta::new_readonly(matcher_program, false),
+                AccountMeta::new(matcher_ctx, false),
+                AccountMeta::new_readonly(matcher_delegate, false),
+            ]
+        } else {
+            vec![
+                AccountMeta::new(trader_a.pubkey(), true),
+                AccountMeta::new(trader_b.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(account_a, false),
+                AccountMeta::new(account_b, false),
+            ]
+        };
+        let stale_trade_ix = Instruction {
+            program_id: env.program_id,
+            accounts: stale_accounts.clone(),
+            data: stale_instruction.encode(),
+        };
+        let stale_trade = if cpi {
+            Transaction::new_signed_with_payer(
+                &[heap_ix(), cu_ix(), stale_trade_ix],
+                Some(&env.payer.pubkey()),
+                &[&env.payer, &trader_a],
+                env.svm.latest_blockhash(),
+            )
+        } else {
+            Transaction::new_signed_with_payer(
+                &[heap_ix(), cu_ix(), stale_trade_ix],
+                Some(&env.payer.pubkey()),
+                &[&env.payer, &trader_a, &trader_b],
+                env.svm.latest_blockhash(),
+            )
+        };
+
+        env.svm.warp_to_slot(3);
+        env.update_asset_lifecycle_as_admin_with_cu(
+            percolator_prog::processor::ASSET_ACTION_RETIRE,
+            ASSET,
+            3,
+            0,
+        );
+        let replacement_authority = Keypair::new();
+        env.svm.warp_to_slot(4);
+        env.activate_permissionless_asset_with_fee(
+            &replacement_authority,
+            ASSET,
+            4,
+            NEW_PRICE,
+            replacement_authority.pubkey(),
+            replacement_authority.pubkey(),
+            replacement_authority.pubkey(),
+            replacement_authority.pubkey(),
+            1,
+        );
+        let new_market_id = env.asset_market_id(ASSET);
+        assert_ne!(
+            new_market_id, old_market_id,
+            "{path:?}: slot reuse creates a new market generation"
+        );
+
+        let market_before = env.svm.get_account(&env.market).unwrap();
+        let account_a_before = env.svm.get_account(&account_a).unwrap();
+        let account_b_before = env.svm.get_account(&account_b).unwrap();
+        let matcher_before = env.svm.get_account(&matcher_ctx).unwrap();
+        let replay_error = env
+            .svm
+            .send_transaction(stale_trade)
+            .expect_err("old generation must reject");
+        let replay_error = format!("{replay_error:?}");
+        let expected_error = format!(
+            "Custom({})",
+            PercolatorError::AssetGenerationMismatch as u32
+        );
+        assert!(
+            replay_error.contains(&expected_error),
+            "{path:?}: stale generation must fail with {expected_error}, got {replay_error}"
+        );
+        assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+        assert_eq!(env.svm.get_account(&account_a).unwrap(), account_a_before);
+        assert_eq!(env.svm.get_account(&account_b).unwrap(), account_b_before);
+        assert_eq!(env.svm.get_account(&matcher_ctx).unwrap(), matcher_before);
+
+        let current_instruction = match path {
+            AssetGenerationTradePath::TradeNoCpi => ProgInstruction::TradeNoCpi {
+                asset_index: ASSET,
+                market_id: new_market_id,
+                size_q: POS_SCALE as i128,
+                exec_price: NEW_PRICE,
+                fee_bps: 0,
+            },
+            AssetGenerationTradePath::BatchTradeNoCpi => ProgInstruction::BatchTradeNoCpi {
+                legs: vec![BatchTradeLeg {
+                    asset_index: ASSET,
+                    market_id: new_market_id,
+                    size_q: POS_SCALE as i128,
+                    exec_price: NEW_PRICE,
+                    fee_bps: 0,
+                }],
+            },
+            AssetGenerationTradePath::TradeCpi => ProgInstruction::TradeCpi {
+                asset_index: ASSET,
+                market_id: new_market_id,
+                size_q: POS_SCALE as i128,
+                fee_bps: 0,
+                limit_price: 0,
+            },
+            AssetGenerationTradePath::BatchTradeCpi => ProgInstruction::BatchTradeCpi {
+                legs: vec![BatchTradeCpiLeg {
+                    asset_index: ASSET,
+                    market_id: new_market_id,
+                    size_q: POS_SCALE as i128,
+                    fee_bps: 0,
+                    limit_price: 0,
+                }],
+            },
+        };
+        let current_trade = if cpi {
+            env.send(current_instruction, stale_accounts, &[&trader_a])
+        } else {
+            env.send(current_instruction, stale_accounts, &[&trader_a, &trader_b])
+        };
+        assert!(
+            current_trade.is_ok(),
+            "{path:?}: the replacement generation remains tradeable: {current_trade:?}"
+        );
+        let account_a_after = env.portfolio_state(account_a);
+        let account_b_after = env.portfolio_state(account_b);
+        let leg_a = active_leg_for_asset(&account_a_after, ASSET as usize);
+        let leg_b = active_leg_for_asset(&account_b_after, ASSET as usize);
+        assert_eq!(leg_a.market_id, new_market_id);
+        assert_eq!(leg_b.market_id, new_market_id);
+        assert_eq!(leg_a.basis_pos_q, POS_SCALE as i128);
+        assert_eq!(leg_b.basis_pos_q, -(POS_SCALE as i128));
+    }
 }
 
 #[test]
@@ -14074,6 +14311,7 @@ fn execute_account_residual_counter_trade_path(
                 ProgInstruction::BatchTradeNoCpi {
                     legs: vec![BatchTradeLeg {
                         asset_index: 0,
+                        market_id: first_generation_market_id((0) as u16),
                         size_q,
                         exec_price,
                         fee_bps: 0,
@@ -14096,6 +14334,7 @@ fn execute_account_residual_counter_trade_path(
                 ProgInstruction::BatchTradeCpi {
                     legs: vec![BatchTradeCpiLeg {
                         asset_index: 0,
+                        market_id: first_generation_market_id((0) as u16),
                         size_q,
                         fee_bps: 0,
                         limit_price: 0,
@@ -14242,12 +14481,14 @@ fn v16_bpf_account_residual_reward_counter_accumulates_across_batch_legs() {
                     legs: vec![
                         BatchTradeCpiLeg {
                             asset_index: 0,
+                            market_id: first_generation_market_id((0) as u16),
                             size_q: POS_SCALE as i128,
                             fee_bps: 0,
                             limit_price: 0,
                         },
                         BatchTradeCpiLeg {
                             asset_index: 1,
+                            market_id: first_generation_market_id((1) as u16),
                             size_q: -(POS_SCALE as i128),
                             fee_bps: 0,
                             limit_price: 0,
@@ -14272,12 +14513,14 @@ fn v16_bpf_account_residual_reward_counter_accumulates_across_batch_legs() {
                     legs: vec![
                         BatchTradeLeg {
                             asset_index: 0,
+                            market_id: first_generation_market_id((0) as u16),
                             size_q: POS_SCALE as i128,
                             exec_price: PRICE,
                             fee_bps: 0,
                         },
                         BatchTradeLeg {
                             asset_index: 1,
+                            market_id: first_generation_market_id((1) as u16),
                             size_q: -(POS_SCALE as i128),
                             exec_price: PRICE,
                             fee_bps: 0,
@@ -14421,6 +14664,7 @@ fn execute_backing_residual_counter_trade_path(
                 ProgInstruction::BatchTradeNoCpi {
                     legs: vec![BatchTradeLeg {
                         asset_index: 0,
+                        market_id: first_generation_market_id((0) as u16),
                         size_q,
                         exec_price,
                         fee_bps: 0,
@@ -14442,6 +14686,7 @@ fn execute_backing_residual_counter_trade_path(
                 ProgInstruction::BatchTradeCpi {
                     legs: vec![BatchTradeCpiLeg {
                         asset_index: 0,
+                        market_id: first_generation_market_id((0) as u16),
                         size_q,
                         fee_bps: 0,
                         limit_price: 0,
@@ -16617,6 +16862,7 @@ fn v16_attack_account_type_confusion_rejected() {
     let r2 = env.send(
         ProgInstruction::TradeNoCpi {
             asset_index: 0,
+            market_id: first_generation_market_id((0) as u16),
             size_q: POS_SCALE as i128,
             exec_price: 100,
             fee_bps: 0,
@@ -20152,6 +20398,7 @@ fn v16_attack_batch_subatom_fee_reconstruction_uses_ceil_notional() {
         ProgInstruction::BatchTradeNoCpi {
             legs: vec![BatchTradeLeg {
                 asset_index: 0,
+                market_id: first_generation_market_id((0) as u16),
                 size_q: sub_atom_size,
                 exec_price: 100,
                 fee_bps: 1,
@@ -21256,6 +21503,7 @@ fn v16_attack_disabled_lp_matcher_config_blocks_cpi_fills() {
     let single = env.send(
         ProgInstruction::TradeCpi {
             asset_index: 0,
+            market_id: first_generation_market_id((0) as u16),
             size_q: (5 * POS_SCALE) as i128,
             fee_bps: 100,
             limit_price: 0,
@@ -21285,6 +21533,7 @@ fn v16_attack_disabled_lp_matcher_config_blocks_cpi_fills() {
         ProgInstruction::BatchTradeCpi {
             legs: vec![BatchTradeCpiLeg {
                 asset_index: 0,
+                market_id: first_generation_market_id((0) as u16),
                 size_q: (5 * POS_SCALE) as i128,
                 fee_bps: 100,
                 limit_price: 0,
@@ -21538,6 +21787,7 @@ fn v16_attack_tradecpi_matcher_config_arguments_must_match_account_bytes() {
         env.send(
             ProgInstruction::TradeCpi {
                 asset_index: 0,
+                market_id: first_generation_market_id((0) as u16),
                 size_q: (5 * POS_SCALE) as i128,
                 fee_bps: 100,
                 limit_price: 0,
@@ -21657,12 +21907,14 @@ fn v16_attack_batch_tradecpi_matcher_config_arguments_must_match_account_bytes()
             legs: vec![
                 BatchTradeCpiLeg {
                     asset_index: 0,
+                    market_id: first_generation_market_id((0) as u16),
                     size_q: sz,
                     fee_bps: 100,
                     limit_price: 0,
                 },
                 BatchTradeCpiLeg {
                     asset_index: 1,
+                    market_id: first_generation_market_id((1) as u16),
                     size_q: -sz,
                     fee_bps: 100,
                     limit_price: 0,
@@ -21696,6 +21948,7 @@ fn v16_attack_batch_tradecpi_matcher_config_arguments_must_match_account_bytes()
         ProgInstruction::BatchTradeCpi {
             legs: vec![BatchTradeCpiLeg {
                 asset_index: 0,
+                market_id: first_generation_market_id((0) as u16),
                 size_q: sz,
                 fee_bps: 100,
                 limit_price: 0,
@@ -21936,6 +22189,7 @@ fn v16_attack_matcher_config_and_fills_reject_self_program_context() {
         env.send(
             ProgInstruction::TradeCpi {
                 asset_index: 0,
+                market_id: first_generation_market_id((0) as u16),
                 size_q: (5 * POS_SCALE) as i128,
                 fee_bps: 100,
                 limit_price: 0,
@@ -21969,6 +22223,7 @@ fn v16_attack_matcher_config_and_fills_reject_self_program_context() {
         ProgInstruction::BatchTradeCpi {
             legs: vec![BatchTradeCpiLeg {
                 asset_index: 0,
+                market_id: first_generation_market_id((0) as u16),
                 size_q: (5 * POS_SCALE) as i128,
                 fee_bps: 100,
                 limit_price: 0,
@@ -22299,6 +22554,7 @@ fn v16_attack_permissionless_lp_cpi_rejects_wrong_delegate_owner_or_account_bind
     let batch_ix = ProgInstruction::BatchTradeCpi {
         legs: vec![BatchTradeCpiLeg {
             asset_index: 0,
+            market_id: first_generation_market_id((0) as u16),
             size_q: sz,
             fee_bps: 100,
             limit_price: 0,
@@ -22369,6 +22625,7 @@ fn v16_attack_nocpi_trades_still_require_lp_owner_signature() {
     let single = env.send(
         ProgInstruction::TradeNoCpi {
             asset_index: 0,
+            market_id: first_generation_market_id((0) as u16),
             size_q: (10 * POS_SCALE) as i128,
             exec_price: 100,
             fee_bps: 0,
@@ -22392,12 +22649,14 @@ fn v16_attack_nocpi_trades_still_require_lp_owner_signature() {
             legs: vec![
                 BatchTradeLeg {
                     asset_index: 0,
+                    market_id: first_generation_market_id((0) as u16),
                     size_q: (5 * POS_SCALE) as i128,
                     exec_price: 100,
                     fee_bps: 0,
                 },
                 BatchTradeLeg {
                     asset_index: 1,
+                    market_id: first_generation_market_id((1) as u16),
                     size_q: -(5 * POS_SCALE as i128),
                     exec_price: 100,
                     fee_bps: 0,
@@ -22452,6 +22711,7 @@ fn v16_attack_tradecpi_limit_price_enforced() {
         env.send(
             ProgInstruction::TradeCpi {
                 asset_index: 0,
+                market_id: first_generation_market_id((0) as u16),
                 size_q: (10 * POS_SCALE) as i128,
                 fee_bps: 100,
                 limit_price: limit,
@@ -22580,6 +22840,7 @@ fn v16_attack_tradecpi_self_trade_rejected() {
     let r = env.send(
         ProgInstruction::TradeCpi {
             asset_index: 0,
+            market_id: first_generation_market_id((0) as u16),
             size_q: (10 * POS_SCALE) as i128,
             fee_bps: 100,
             limit_price: 0,
@@ -23212,6 +23473,7 @@ fn v16_attack_non_owner_cannot_withdraw_or_trade() {
     let r_tr = env.send(
         ProgInstruction::TradeNoCpi {
             asset_index: 0,
+            market_id: first_generation_market_id((0) as u16),
             size_q: POS_SCALE as i128,
             exec_price: 100,
             fee_bps: 0,
@@ -27798,6 +28060,7 @@ fn v16_attack_non_base_slot_zero_profile_stale_rejects_trade() {
     let stale_trade = env.send(
         ProgInstruction::TradeNoCpi {
             asset_index: 1,
+            market_id: first_generation_market_id((1) as u16),
             size_q: POS_SCALE as i128,
             exec_price: 100,
             fee_bps: 0,
@@ -28091,6 +28354,7 @@ fn v16_attack_non_base_trade_rejects_after_base_resolve_matured() {
     let stale_trade = env.send(
         ProgInstruction::TradeNoCpi {
             asset_index: 1,
+            market_id: first_generation_market_id((1) as u16),
             size_q: POS_SCALE as i128,
             exec_price: 101,
             fee_bps: 0,
@@ -28236,6 +28500,7 @@ fn v16_attack_non_base_tradecpi_rejects_before_matcher_after_base_resolve_mature
         .send(
             ProgInstruction::TradeCpi {
                 asset_index: 1,
+                market_id: first_generation_market_id((1) as u16),
                 size_q: POS_SCALE as i128,
                 fee_bps: 100,
                 limit_price: 0,
@@ -28264,6 +28529,7 @@ fn v16_attack_non_base_tradecpi_rejects_before_matcher_after_base_resolve_mature
         .send(
             ProgInstruction::TradeCpi {
                 asset_index: 1,
+                market_id: first_generation_market_id((1) as u16),
                 size_q: POS_SCALE as i128,
                 fee_bps: 100,
                 limit_price: 0,
@@ -29435,6 +29701,7 @@ fn v16_attack_rebalance_reduce_rejects_cross_market_portfolio_substitution() {
         &env.payer,
         ProgInstruction::TradeNoCpi {
             asset_index: 0,
+            market_id: first_generation_market_id((0) as u16),
             size_q: POS_SCALE as i128,
             exec_price: 100,
             fee_bps: 0,
@@ -29600,6 +29867,7 @@ fn v16_attack_forfeit_recovery_leg_rejects_cross_market_portfolio_substitution()
         &env.payer,
         ProgInstruction::TradeNoCpi {
             asset_index: 0,
+            market_id: first_generation_market_id((0) as u16),
             size_q: POS_SCALE as i128,
             exec_price: 100,
             fee_bps: 0,
@@ -31243,6 +31511,7 @@ fn v16_attack_trade_paths_reject_cross_market_portfolio_substitution() {
             "TradeNoCpi",
             ProgInstruction::TradeNoCpi {
                 asset_index: 0,
+                market_id: first_generation_market_id((0) as u16),
                 size_q: POS_SCALE as i128,
                 exec_price: 100,
                 fee_bps: 100,
@@ -31261,6 +31530,7 @@ fn v16_attack_trade_paths_reject_cross_market_portfolio_substitution() {
             ProgInstruction::BatchTradeNoCpi {
                 legs: vec![BatchTradeLeg {
                     asset_index: 0,
+                    market_id: first_generation_market_id((0) as u16),
                     size_q: POS_SCALE as i128,
                     exec_price: 100,
                     fee_bps: 100,
@@ -31279,6 +31549,7 @@ fn v16_attack_trade_paths_reject_cross_market_portfolio_substitution() {
             "TradeCpi",
             ProgInstruction::TradeCpi {
                 asset_index: 0,
+                market_id: first_generation_market_id((0) as u16),
                 size_q: POS_SCALE as i128,
                 fee_bps: 100,
                 limit_price: 0,
@@ -31299,6 +31570,7 @@ fn v16_attack_trade_paths_reject_cross_market_portfolio_substitution() {
             ProgInstruction::BatchTradeCpi {
                 legs: vec![BatchTradeCpiLeg {
                     asset_index: 0,
+                    market_id: first_generation_market_id((0) as u16),
                     size_q: POS_SCALE as i128,
                     fee_bps: 100,
                     limit_price: 0,
@@ -31340,6 +31612,7 @@ fn v16_attack_trade_paths_reject_cross_market_portfolio_substitution() {
         &env.payer,
         ProgInstruction::TradeNoCpi {
             asset_index: 0,
+            market_id: first_generation_market_id((0) as u16),
             size_q: POS_SCALE as i128,
             exec_price: 100,
             fee_bps: 100,
@@ -31447,6 +31720,7 @@ fn v16_attack_trade_paths_reject_cross_market_portfolio_substitution() {
         ProgInstruction::BatchTradeCpi {
             legs: vec![BatchTradeCpiLeg {
                 asset_index: 0,
+                market_id: first_generation_market_id((0) as u16),
                 size_q: POS_SCALE as i128,
                 fee_bps: 100,
                 limit_price: 0,
@@ -32130,6 +32404,7 @@ fn v16_attack_permissionless_crank_rejects_cross_market_target_portfolio() {
         &env.payer,
         ProgInstruction::TradeNoCpi {
             asset_index: 0,
+            market_id: first_generation_market_id((0) as u16),
             size_q: POS_SCALE as i128,
             exec_price: 100,
             fee_bps: 0,
@@ -37848,6 +38123,7 @@ fn v16_attack_force_close_rejects_cross_market_portfolio_substitution() {
         &env.payer,
         ProgInstruction::TradeNoCpi {
             asset_index: 1,
+            market_id: first_generation_market_id((1) as u16),
             size_q: POS_SCALE as i128,
             exec_price: 100,
             fee_bps: 0,
@@ -38294,6 +38570,7 @@ fn try_no_cpi_reported_price_trade_with_cu(
             ProgInstruction::BatchTradeNoCpi {
                 legs: vec![BatchTradeLeg {
                     asset_index: 0,
+                    market_id: first_generation_market_id((0) as u16),
                     size_q,
                     exec_price,
                     fee_bps,
@@ -41765,6 +42042,7 @@ fn v16_attack_tradecpi_matcher_tail_cannot_carry_protocol_state() {
     };
     let ix = |asset_index, size_q| ProgInstruction::TradeCpi {
         asset_index,
+        market_id: first_generation_market_id((asset_index) as u16),
         size_q,
         fee_bps: 100,
         limit_price: 0,
@@ -41897,6 +42175,7 @@ fn v16_attack_tradecpi_matcher_tail_cannot_forward_taker_signer() {
     let rejected = env.send(
         ProgInstruction::TradeCpi {
             asset_index: 0,
+            market_id: first_generation_market_id((0) as u16),
             size_q: (5 * POS_SCALE) as i128,
             fee_bps: 100,
             limit_price: 0,
@@ -41987,12 +42266,14 @@ fn v16_attack_batch_tradecpi_matcher_tail_cannot_carry_protocol_state() {
         legs: vec![
             BatchTradeCpiLeg {
                 asset_index: 0,
+                market_id: first_generation_market_id((0) as u16),
                 size_q: sz,
                 fee_bps: 100,
                 limit_price: 0,
             },
             BatchTradeCpiLeg {
                 asset_index: 1,
+                market_id: first_generation_market_id((1) as u16),
                 size_q: -sz,
                 fee_bps: 100,
                 limit_price: 0,
@@ -42144,12 +42425,14 @@ fn v16_attack_batch_tradecpi_matcher_tail_cannot_forward_taker_signer() {
     let legs = vec![
         BatchTradeCpiLeg {
             asset_index: 0,
+            market_id: first_generation_market_id((0) as u16),
             size_q: (5 * POS_SCALE) as i128,
             fee_bps: 100,
             limit_price: 0,
         },
         BatchTradeCpiLeg {
             asset_index: 1,
+            market_id: first_generation_market_id((1) as u16),
             size_q: -(5 * POS_SCALE as i128),
             fee_bps: 100,
             limit_price: 0,
@@ -43704,6 +43987,7 @@ fn v16_attack_tradenocpi_self_trade_rejected() {
     let r = env.send(
         ProgInstruction::TradeNoCpi {
             asset_index: 0,
+            market_id: first_generation_market_id((0) as u16),
             size_q: POS_SCALE as i128,
             exec_price: 100,
             fee_bps: 100,
@@ -43753,6 +44037,7 @@ fn v16_attack_batch_trade_self_trade_rejected() {
     env.deposit(&owner, p, 1_000_000);
     let batch_leg = BatchTradeLeg {
         asset_index: 0,
+        market_id: first_generation_market_id((0) as u16),
         size_q: POS_SCALE as i128,
         exec_price: 100,
         fee_bps: 100,
@@ -43798,6 +44083,7 @@ fn v16_attack_batch_trade_self_trade_rejected() {
         ProgInstruction::BatchTradeCpi {
             legs: vec![BatchTradeCpiLeg {
                 asset_index: 0,
+                market_id: first_generation_market_id((0) as u16),
                 size_q: POS_SCALE as i128,
                 fee_bps: 100,
                 limit_price: 0,
@@ -49481,12 +49767,14 @@ fn v16_bpf_batch_trade_executes_mixed_direction_spread() {
                 legs: vec![
                     BatchTradeLeg {
                         asset_index: 0,
+                        market_id: first_generation_market_id((0) as u16),
                         size_q: sz,
                         exec_price: 100,
                         fee_bps: 0,
                     },
                     BatchTradeLeg {
                         asset_index: 1,
+                        market_id: first_generation_market_id((1) as u16),
                         size_q: -sz,
                         exec_price: 100,
                         fee_bps: 0,
@@ -49539,12 +49827,14 @@ fn v16_attack_batch_duplicate_asset_legs_reject_atomically() {
             legs: vec![
                 BatchTradeLeg {
                     asset_index: 0,
+                    market_id: first_generation_market_id((0) as u16),
                     size_q: sz,
                     exec_price: 100,
                     fee_bps: 100,
                 },
                 BatchTradeLeg {
                     asset_index: 0,
+                    market_id: first_generation_market_id((0) as u16),
                     size_q: -sz,
                     exec_price: 100,
                     fee_bps: 100,
@@ -49600,12 +49890,14 @@ fn v16_attack_batch_duplicate_asset_legs_reject_atomically() {
             legs: vec![
                 BatchTradeCpiLeg {
                     asset_index: 0,
+                    market_id: first_generation_market_id((0) as u16),
                     size_q: sz,
                     fee_bps: 100,
                     limit_price: 0,
                 },
                 BatchTradeCpiLeg {
                     asset_index: 0,
+                    market_id: first_generation_market_id((0) as u16),
                     size_q: -sz,
                     fee_bps: 100,
                     limit_price: 0,
@@ -49659,12 +49951,14 @@ fn v16_attack_batch_duplicate_asset_legs_reject_atomically() {
             legs: vec![
                 BatchTradeCpiLeg {
                     asset_index: 0,
+                    market_id: first_generation_market_id((0) as u16),
                     size_q: sz,
                     fee_bps: 100,
                     limit_price: 0,
                 },
                 BatchTradeCpiLeg {
                     asset_index: 1,
+                    market_id: first_generation_market_id((1) as u16),
                     size_q: -sz,
                     fee_bps: 100,
                     limit_price: 0,
@@ -49789,12 +50083,14 @@ fn v16_attack_batch_tradecpi_duplicate_assets_reject_before_hostile_matcher_cpi(
         vec![
             BatchTradeCpiLeg {
                 asset_index: 0,
+                market_id: first_generation_market_id((0) as u16),
                 size_q: sz,
                 fee_bps: 100,
                 limit_price: 0,
             },
             BatchTradeCpiLeg {
                 asset_index: 1,
+                market_id: first_generation_market_id((1) as u16),
                 size_q: -sz,
                 fee_bps: 100,
                 limit_price: 0,
@@ -49819,12 +50115,14 @@ fn v16_attack_batch_tradecpi_duplicate_assets_reject_before_hostile_matcher_cpi(
         vec![
             BatchTradeCpiLeg {
                 asset_index: 0,
+                market_id: first_generation_market_id((0) as u16),
                 size_q: sz,
                 fee_bps: 100,
                 limit_price: 0,
             },
             BatchTradeCpiLeg {
                 asset_index: 0,
+                market_id: first_generation_market_id((0) as u16),
                 size_q: -sz,
                 fee_bps: 100,
                 limit_price: 0,
@@ -49938,6 +50236,7 @@ fn v16_attack_drain_only_existing_risk_increase_rejects_before_hostile_matcher_c
             "TradeCpi",
             ProgInstruction::TradeCpi {
                 asset_index: 0,
+                market_id: first_generation_market_id((0) as u16),
                 size_q: POS_SCALE as i128,
                 fee_bps: 0,
                 limit_price: 0,
@@ -49948,6 +50247,7 @@ fn v16_attack_drain_only_existing_risk_increase_rejects_before_hostile_matcher_c
             ProgInstruction::BatchTradeCpi {
                 legs: vec![BatchTradeCpiLeg {
                     asset_index: 0,
+                    market_id: first_generation_market_id((0) as u16),
                     size_q: POS_SCALE as i128,
                     fee_bps: 0,
                     limit_price: 0,
@@ -50025,12 +50325,14 @@ fn v16_bpf_batch_trade_checks_margin_on_final_portfolio_only() {
                 legs: vec![
                     BatchTradeLeg {
                         asset_index: 1,
+                        market_id: first_generation_market_id((1) as u16),
                         size_q: sz,
                         exec_price: 100,
                         fee_bps: 0,
                     },
                     BatchTradeLeg {
                         asset_index: 0,
+                        market_id: first_generation_market_id((0) as u16),
                         size_q: sz,
                         exec_price: 100,
                         fee_bps: 0,
@@ -50076,6 +50378,7 @@ fn v16_bpf_batch_trade_14_legs_under_tx_limit() {
     let legs: Vec<BatchTradeLeg> = (0..14u16)
         .map(|a| BatchTradeLeg {
             asset_index: a,
+            market_id: first_generation_market_id((a) as u16),
             size_q: POS_SCALE as i128,
             exec_price: 100,
             fee_bps: 100,
@@ -50138,6 +50441,7 @@ fn v16_attack_batch_over_portfolio_leg_cap_rejects_atomically() {
         (0..count)
             .map(|asset_index| BatchTradeLeg {
                 asset_index,
+                market_id: first_generation_market_id((asset_index) as u16),
                 size_q: POS_SCALE as i128,
                 exec_price: 100,
                 fee_bps: 0,
@@ -50148,6 +50452,7 @@ fn v16_attack_batch_over_portfolio_leg_cap_rejects_atomically() {
         (0..count)
             .map(|asset_index| BatchTradeCpiLeg {
                 asset_index,
+                market_id: first_generation_market_id((asset_index) as u16),
                 size_q: POS_SCALE as i128,
                 fee_bps: 0,
                 limit_price: 0,
@@ -50365,6 +50670,7 @@ fn v16_attack_batch_tradecpi_configured_leg_cap_rejects_before_hostile_matcher_c
         let legs: Vec<BatchTradeCpiLeg> = (0..count)
             .map(|asset_index| BatchTradeCpiLeg {
                 asset_index,
+                market_id: first_generation_market_id((asset_index) as u16),
                 size_q: POS_SCALE as i128,
                 fee_bps: 0,
                 limit_price: 0,
@@ -50450,6 +50756,7 @@ fn v16_attack_batch_decode_oversized_vectors_reject_before_allocation() {
     let no_cpi_legs: Vec<BatchTradeLeg> = (0..u16::from(u8::MAX))
         .map(|asset_index| BatchTradeLeg {
             asset_index,
+            market_id: first_generation_market_id((asset_index) as u16),
             size_q: POS_SCALE as i128,
             exec_price: 100,
             fee_bps: 0,
@@ -50484,6 +50791,7 @@ fn v16_attack_batch_decode_oversized_vectors_reject_before_allocation() {
     let cpi_legs: Vec<BatchTradeCpiLeg> = (0..u16::from(u8::MAX))
         .map(|asset_index| BatchTradeCpiLeg {
             asset_index,
+            market_id: first_generation_market_id((asset_index) as u16),
             size_q: POS_SCALE as i128,
             fee_bps: 0,
             limit_price: 0,
@@ -50536,12 +50844,14 @@ fn v16_bpf_batch_trade_cpi_executes_mixed_spread_through_matcher() {
                 legs: vec![
                     BatchTradeCpiLeg {
                         asset_index: 0,
+                        market_id: first_generation_market_id((0) as u16),
                         size_q: sz,
                         fee_bps: 100,
                         limit_price: 0,
                     },
                     BatchTradeCpiLeg {
                         asset_index: 1,
+                        market_id: first_generation_market_id((1) as u16),
                         size_q: -sz,
                         fee_bps: 100,
                         limit_price: 0,
@@ -50604,6 +50914,7 @@ fn v16_attack_batch_trades_reject_with_backing_fee_policy() {
         ProgInstruction::BatchTradeNoCpi {
             legs: vec![BatchTradeLeg {
                 asset_index: 0,
+                market_id: first_generation_market_id((0) as u16),
                 size_q: sz,
                 exec_price: 100,
                 fee_bps: 0,
@@ -50642,6 +50953,7 @@ fn v16_attack_batch_trades_reject_with_backing_fee_policy() {
         ProgInstruction::BatchTradeCpi {
             legs: vec![BatchTradeCpiLeg {
                 asset_index: 0,
+                market_id: first_generation_market_id((0) as u16),
                 size_q: sz,
                 fee_bps: 0,
                 limit_price: 0,
@@ -50734,6 +51046,7 @@ fn v16_attack_backing_fee_policy_count_clears_batch_liveness() {
             ProgInstruction::BatchTradeNoCpi {
                 legs: vec![BatchTradeLeg {
                     asset_index: 0,
+                    market_id: first_generation_market_id((0) as u16),
                     size_q: sz,
                     exec_price: 100,
                     fee_bps: 0,
@@ -50779,6 +51092,7 @@ fn v16_attack_backing_fee_policy_count_clears_batch_liveness() {
         ProgInstruction::BatchTradeNoCpi {
             legs: vec![BatchTradeLeg {
                 asset_index: 0,
+                market_id: first_generation_market_id((0) as u16),
                 size_q: sz,
                 exec_price: 100,
                 fee_bps: 0,
@@ -50895,6 +51209,7 @@ fn v16_attack_non_active_asset_cannot_enable_backing_fee_batch_gate() {
             ProgInstruction::BatchTradeNoCpi {
                 legs: vec![BatchTradeLeg {
                     asset_index: 0,
+                    market_id: first_generation_market_id((0) as u16),
                     size_q: sz,
                     exec_price: 100,
                     fee_bps: 0,
@@ -51041,6 +51356,7 @@ fn v16_attack_retired_reused_asset_backing_fee_policy_cannot_stick_batch_gate() 
         ProgInstruction::BatchTradeNoCpi {
             legs: vec![BatchTradeLeg {
                 asset_index: 0,
+                market_id: first_generation_market_id((0) as u16),
                 size_q: sz,
                 exec_price: 100,
                 fee_bps: 0,
@@ -51166,6 +51482,7 @@ fn v16_attack_inactive_asset_tradecpi_rejects_before_hostile_matcher_cpi() {
             .send(
                 ProgInstruction::TradeCpi {
                     asset_index: 1,
+                    market_id: first_generation_market_id((1) as u16),
                     size_q: POS_SCALE as i128,
                     fee_bps: 0,
                     limit_price: 0,
@@ -51233,6 +51550,7 @@ fn v16_attack_inactive_asset_tradecpi_rejects_before_hostile_matcher_cpi() {
                     ProgInstruction::BatchTradeCpi {
                         legs: vec![BatchTradeCpiLeg {
                             asset_index: 1,
+                            market_id: first_generation_market_id((1) as u16),
                             size_q: POS_SCALE as i128,
                             fee_bps: 0,
                             limit_price: 0,
@@ -51245,6 +51563,7 @@ fn v16_attack_inactive_asset_tradecpi_rejects_before_hostile_matcher_cpi() {
                 env.send(
                     ProgInstruction::TradeCpi {
                         asset_index: 1,
+                        market_id: first_generation_market_id((1) as u16),
                         size_q: POS_SCALE as i128,
                         fee_bps: 0,
                         limit_price: 0,
@@ -51299,6 +51618,7 @@ fn v16_attack_batch_cpi_fee_bps_bounded_for_permissionless_lp() {
             ProgInstruction::BatchTradeCpi {
                 legs: vec![BatchTradeCpiLeg {
                     asset_index: 0,
+                    market_id: first_generation_market_id((0) as u16),
                     size_q: (5 * POS_SCALE) as i128,
                     fee_bps,
                     limit_price: 0,
@@ -51388,6 +51708,7 @@ fn v16_bpf_batch_trade_cpi_14_legs_under_tx_limit() {
     let legs: Vec<BatchTradeCpiLeg> = (0..14u16)
         .map(|a| BatchTradeCpiLeg {
             asset_index: a,
+            market_id: first_generation_market_id((a) as u16),
             size_q: POS_SCALE as i128,
             fee_bps: 100,
             limit_price: 0,
@@ -51536,6 +51857,7 @@ fn v16_attack_10m_batch_tradecpi_max_tail_rejects_before_cu_exhaustion() {
     let seed_legs: Vec<BatchTradeLeg> = (FIRST_TAIL_ASSET..N)
         .map(|asset_index| BatchTradeLeg {
             asset_index: asset_index as u16,
+            market_id: first_generation_market_id((asset_index as u16) as u16),
             size_q: POS_SCALE as i128,
             exec_price: PRICE,
             fee_bps: 100,
@@ -51568,6 +51890,7 @@ fn v16_attack_10m_batch_tradecpi_max_tail_rejects_before_cu_exhaustion() {
     let legs: Vec<BatchTradeCpiLeg> = (FIRST_TAIL_ASSET..N)
         .map(|asset_index| BatchTradeCpiLeg {
             asset_index: asset_index as u16,
+            market_id: first_generation_market_id((asset_index as u16) as u16),
             size_q: POS_SCALE as i128,
             fee_bps: 100,
             limit_price: 0,
@@ -51667,12 +51990,14 @@ fn v16_attack_batch_fees_isolated_to_each_asset_domain() {
             legs: vec![
                 BatchTradeLeg {
                     asset_index: 0,
+                    market_id: first_generation_market_id((0) as u16),
                     size_q: sz,
                     exec_price: 100,
                     fee_bps: 100,
                 },
                 BatchTradeLeg {
                     asset_index: 1,
+                    market_id: first_generation_market_id((1) as u16),
                     size_q: sz,
                     exec_price: 100,
                     fee_bps: 500,
@@ -51723,12 +52048,14 @@ fn v16_attack_batch_cannot_force_counterparty_underwater() {
             legs: vec![
                 BatchTradeLeg {
                     asset_index: 0,
+                    market_id: first_generation_market_id((0) as u16),
                     size_q: sz,
                     exec_price: 100,
                     fee_bps: 0,
                 },
                 BatchTradeLeg {
                     asset_index: 1,
+                    market_id: first_generation_market_id((1) as u16),
                     size_q: sz,
                     exec_price: 100,
                     fee_bps: 0,
@@ -51866,12 +52193,14 @@ fn v16_attack_batch_cpi_per_leg_limit_aborts_whole_batch() {
             legs: vec![
                 BatchTradeCpiLeg {
                     asset_index: 0,
+                    market_id: first_generation_market_id((0) as u16),
                     size_q: sz,
                     fee_bps: 100,
                     limit_price: 1_000_000,
                 },
                 BatchTradeCpiLeg {
                     asset_index: 1,
+                    market_id: first_generation_market_id((1) as u16),
                     size_q: sz,
                     fee_bps: 100,
                     limit_price: 100,
@@ -51897,12 +52226,14 @@ fn v16_attack_batch_cpi_per_leg_limit_aborts_whole_batch() {
             legs: vec![
                 BatchTradeCpiLeg {
                     asset_index: 0,
+                    market_id: first_generation_market_id((0) as u16),
                     size_q: sz,
                     fee_bps: 100,
                     limit_price: 1_000_000,
                 },
                 BatchTradeCpiLeg {
                     asset_index: 1,
+                    market_id: first_generation_market_id((1) as u16),
                     size_q: sz,
                     fee_bps: 100,
                     limit_price: 1_000_000,
@@ -51952,12 +52283,14 @@ fn v16_attack_batch_tradecpi_zero_fill_rejects_atomically() {
     let legs = vec![
         BatchTradeCpiLeg {
             asset_index: 0,
+            market_id: first_generation_market_id((0) as u16),
             size_q: sz,
             fee_bps: 100,
             limit_price: 0,
         },
         BatchTradeCpiLeg {
             asset_index: 1,
+            market_id: first_generation_market_id((1) as u16),
             size_q: sz,
             fee_bps: 100,
             limit_price: 0,
@@ -52064,12 +52397,14 @@ fn v16_attack_batch_tradecpi_rejects_stale_resolve_matured_atomically() {
     let legs = vec![
         BatchTradeCpiLeg {
             asset_index: 0,
+            market_id: first_generation_market_id((0) as u16),
             size_q: sz,
             fee_bps: 100,
             limit_price: 0,
         },
         BatchTradeCpiLeg {
             asset_index: 1,
+            market_id: first_generation_market_id((1) as u16),
             size_q: -sz,
             fee_bps: 100,
             limit_price: 0,
@@ -52217,12 +52552,14 @@ fn v16_attack_batch_tradecpi_stale_rejects_before_hostile_matcher_cpi() {
     let legs = vec![
         BatchTradeCpiLeg {
             asset_index: 0,
+            market_id: first_generation_market_id((0) as u16),
             size_q: sz,
             fee_bps: 100,
             limit_price: 0,
         },
         BatchTradeCpiLeg {
             asset_index: 1,
+            market_id: first_generation_market_id((1) as u16),
             size_q: sz,
             fee_bps: 100,
             limit_price: 0,
@@ -52405,6 +52742,7 @@ fn v16_attack_tradecpi_active_stale_rejects_before_hostile_matcher_cpi() {
             .send(
                 ProgInstruction::TradeCpi {
                     asset_index: 0,
+                    market_id: first_generation_market_id((0) as u16),
                     size_q: -(POS_SCALE as i128),
                     fee_bps: 0,
                     limit_price: 0,
@@ -52437,6 +52775,7 @@ fn v16_attack_tradecpi_active_stale_rejects_before_hostile_matcher_cpi() {
             .send(
                 ProgInstruction::TradeCpi {
                     asset_index: 0,
+                    market_id: first_generation_market_id((0) as u16),
                     size_q: -(POS_SCALE as i128),
                     fee_bps: 0,
                     limit_price: 0,
@@ -52532,12 +52871,14 @@ fn v16_attack_tradecpi_active_stale_rejects_before_hostile_matcher_cpi() {
         let legs = vec![
             BatchTradeCpiLeg {
                 asset_index: 0,
+                market_id: first_generation_market_id((0) as u16),
                 size_q: -(POS_SCALE as i128),
                 fee_bps: 0,
                 limit_price: 0,
             },
             BatchTradeCpiLeg {
                 asset_index: 1,
+                market_id: first_generation_market_id((1) as u16),
                 size_q: -(POS_SCALE as i128),
                 fee_bps: 0,
                 limit_price: 0,
@@ -52684,6 +53025,7 @@ fn v16_attack_batch_tradecpi_fee_bps_rejects_before_hostile_matcher_cpi() {
             ProgInstruction::BatchTradeCpi {
                 legs: vec![BatchTradeCpiLeg {
                     asset_index: 0,
+                    market_id: first_generation_market_id((0) as u16),
                     size_q: (5 * POS_SCALE) as i128,
                     fee_bps,
                     limit_price: 0,
@@ -52818,6 +53160,7 @@ fn v16_attack_batch_tradecpi_backing_fee_policy_rejects_before_hostile_matcher_c
             ProgInstruction::BatchTradeCpi {
                 legs: vec![BatchTradeCpiLeg {
                     asset_index: 0,
+                    market_id: first_generation_market_id((0) as u16),
                     size_q: (5 * POS_SCALE) as i128,
                     fee_bps: 0,
                     limit_price: 0,
@@ -52925,6 +53268,7 @@ fn v16_attack_batch_nocpi_stale_reject_rolls_back_legacy_realloc() {
             ProgInstruction::BatchTradeNoCpi {
                 legs: vec![BatchTradeLeg {
                     asset_index: 0,
+                    market_id: first_generation_market_id((0) as u16),
                     size_q,
                     exec_price: 100,
                     fee_bps: 100,
@@ -53198,12 +53542,14 @@ fn v16_attack_hostile_matcher_batch_returns_all_rejected() {
                 legs: vec![
                     BatchTradeCpiLeg {
                         asset_index: 0,
+                        market_id: first_generation_market_id((0) as u16),
                         size_q: sz,
                         fee_bps: 100,
                         limit_price: 0,
                     },
                     BatchTradeCpiLeg {
                         asset_index: 1,
+                        market_id: first_generation_market_id((1) as u16),
                         size_q: sz,
                         fee_bps: 100,
                         limit_price: 0,
@@ -53347,6 +53693,7 @@ fn v16_attack_tradecpi_rejects_unapproved_unsigned_lp_matcher() {
     let r = env.send(
         ProgInstruction::TradeCpi {
             asset_index: 0,
+            market_id: first_generation_market_id((0) as u16),
             size_q: (5 * POS_SCALE) as i128,
             fee_bps: 100,
             limit_price: 0,
@@ -53444,12 +53791,14 @@ fn v16_attack_batch_tradecpi_rejects_unapproved_unsigned_lp_matcher() {
             legs: vec![
                 BatchTradeCpiLeg {
                     asset_index: 0,
+                    market_id: first_generation_market_id((0) as u16),
                     size_q: sz,
                     fee_bps: 100,
                     limit_price: 0,
                 },
                 BatchTradeCpiLeg {
                     asset_index: 1,
+                    market_id: first_generation_market_id((1) as u16),
                     size_q: -sz,
                     fee_bps: 100,
                     limit_price: 0,
@@ -54461,6 +54810,7 @@ fn v16_attack_hostile_matcher_single_tradecpi_returns_all_rejected() {
         let result = env.send(
             ProgInstruction::TradeCpi {
                 asset_index: 0,
+                market_id: first_generation_market_id((0) as u16),
                 size_q: sz,
                 fee_bps: 100,
                 limit_price: 0,
@@ -54603,12 +54953,14 @@ fn v16_attack_hostile_matcher_no_write_cannot_replay_stale_batch_return_data() {
             legs: vec![
                 BatchTradeCpiLeg {
                     asset_index: 0,
+                    market_id: first_generation_market_id((0) as u16),
                     size_q,
                     fee_bps: 100,
                     limit_price: 0,
                 },
                 BatchTradeCpiLeg {
                     asset_index: 1,
+                    market_id: first_generation_market_id((1) as u16),
                     size_q: -size_q,
                     fee_bps: 100,
                     limit_price: 0,
@@ -54717,6 +55069,7 @@ fn v16_attack_hostile_matcher_no_write_cannot_replay_stale_single_context() {
         ],
         data: ProgInstruction::TradeCpi {
             asset_index: 0,
+            market_id: first_generation_market_id((0) as u16),
             size_q,
             fee_bps: 100,
             limit_price: 0,
@@ -56231,6 +56584,7 @@ fn v16_attack_live_value_paths_reject_when_resolve_matured() {
     let stale_trade = env.send(
         ProgInstruction::TradeNoCpi {
             asset_index: 0,
+            market_id: first_generation_market_id((0) as u16),
             size_q: POS_SCALE as i128,
             exec_price: 100,
             fee_bps: 0,
@@ -60765,6 +61119,7 @@ fn assert_drain_only_existing_risk_can_exit_through_cpi(route: DrainOnlyCpiExitR
             ProgInstruction::BatchTradeCpi {
                 legs: vec![BatchTradeCpiLeg {
                     asset_index: 0,
+                    market_id: before.assets[0].market_id,
                     size_q: -(POS_SCALE as i128),
                     fee_bps: 0,
                     limit_price: 0,
@@ -60921,7 +61276,9 @@ fn assert_cpi_matcher_price_caps_paid_ewma_move(path: CpiEwmaTradePath, size_q: 
             9_000,
             9_000,
         );
-    let insurance_before = env.market_state().1.insurance;
+    let (_, market_before) = env.market_state();
+    let insurance_before = market_before.insurance;
+    let market_id = market_before.assets[0].market_id;
 
     env.svm.expire_blockhash();
     let trade = match path {
@@ -60941,6 +61298,7 @@ fn assert_cpi_matcher_price_caps_paid_ewma_move(path: CpiEwmaTradePath, size_q: 
             ProgInstruction::BatchTradeCpi {
                 legs: vec![BatchTradeCpiLeg {
                     asset_index: 0,
+                    market_id,
                     size_q,
                     fee_bps: 0,
                     limit_price: 0,
@@ -61231,6 +61589,7 @@ fn assert_underfunded_cpi_ewma_exit_uses_collected_fee(path: CpiEwmaTradePath) {
             ProgInstruction::BatchTradeCpi {
                 legs: vec![BatchTradeCpiLeg {
                     asset_index: 0,
+                    market_id: group_before.assets[0].market_id,
                     size_q: SIZE_Q,
                     fee_bps: 0,
                     limit_price: 0,
@@ -61500,6 +61859,9 @@ fn setup_max_source_live_pair(
 
 // A trade that lands after the backing provider's signed expiry must not create a
 // new source lien and charge the trader for support that has already lapsed.
+
+#[path = "invariants/cu/inv_002_asset_generation_binding.rs"]
+mod inv_002_asset_generation_binding;
 
 #[path = "invariants/cu/inv_005_authority_incarnation_binding.rs"]
 mod inv_005_authority_incarnation_binding;

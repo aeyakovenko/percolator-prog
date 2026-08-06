@@ -24,8 +24,8 @@ verification methods are in [`../../INVARIANTS.md`](../../INVARIANTS.md).
 | --- | ---: | --- |
 | `public_sbf/` | 74 | Deterministic public SBF/LiteSVM counterexamples, regressions, and manifest checks |
 | `stateful/` | 109 | Proptest-generated public routes, including generalized active-leg/currentness, source-claim attribution, source-credit-rate, and authenticated-expiry route matrices |
-| `cu/` | 106 | Positive public-route, metamorphic, rollback, liveness, and max-shape CU tests |
-| `kani/` | 48 | Symbolic wrapper arithmetic, matcher-binding, ordering, and strict-decoder proof harnesses |
+| `cu/` | 107 | Positive public-route, metamorphic, rollback, liveness, and max-shape CU tests |
+| `kani/` | 49 | Symbolic wrapper arithmetic, matcher-binding, ordering, and strict-decoder proof harnesses |
 
 Most deterministic and stateful LoF adapters still reproduce quarantined vulnerable behavior;
 fixed-pin regressions explicitly require safe rejection or preservation instead. A vulnerable-pin
@@ -41,7 +41,9 @@ portfolio IDs and sequences are publicly realigned; INV-001 keeps that counterex
 All 14 retained matcher, oracle, fee, and resolve controls now use scope-local monotonic sequences,
 closing same-market delayed overwrites including PR335/336/337/338/340/347/349. Market-generation
 replay (including PR296/325/326), authority A -> B -> A revival, and PR339 backing-provider fee
-consent remain explicit INV-001/INV-005/INV-014 gaps.
+consent remain explicit INV-001/INV-005/INV-014 gaps. All four signed trade routes now bind the
+asset's monotonic `market_id`, closing PR231 slot-reuse replay while the INV-002 matrix continues to
+report the nine retained asset-control families that still lack generation binding.
 
 ## Coverage status
 
@@ -67,7 +69,7 @@ charter.
 | Invariant | Status | Primary PR135 owner |
 | --- | --- | --- |
 | INV-001 | Independent + Direct | `public_sbf/inv_001_market_incarnation_binding.rs`, `stateful/inv_001_market_incarnation_binding.rs` |
-| INV-002 | Independent + Direct | `public_sbf/inv_002_asset_generation_binding.rs`, `stateful/inv_002_asset_generation_binding.rs` |
+| INV-002 | Independent + Direct + SVM/CU | `public_sbf/inv_002_asset_generation_binding.rs`, `stateful/inv_002_asset_generation_binding.rs`, `cu/inv_002_asset_generation_binding.rs` |
 | INV-003 | Independent + Direct | `public_sbf/inv_003_portfolio_incarnation_binding.rs`, `stateful/inv_003_portfolio_incarnation_binding.rs` |
 | INV-004 | Independent | `stateful/inv_004_position_episode_binding.rs`, `kani/inv_004_position_episode_binding.rs` |
 | INV-005 | Independent + Direct + SVM/CU | `public_sbf/inv_005_authority_incarnation_binding.rs`, `stateful/inv_005_authority_incarnation_binding.rs`, `cu/inv_005_authority_incarnation_binding.rs` |
@@ -205,7 +207,7 @@ cargo kani --tests
 ```
 
 On engine pin `9ffc4749a4b7e486f814090c7b43fb01a6df5dcf`, the full `v16_cu` inventory has
-670 passing tests. The former red PR220/PR366, PR367, and live source-backing expiry probes are
+671 passing tests. The former red PR220/PR366, PR367, and live source-backing expiry probes are
 fixed-pin regressions under INV-030, INV-053, and INV-063; the unfiltered command is the required
 verification command.
 

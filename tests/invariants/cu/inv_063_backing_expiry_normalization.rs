@@ -558,6 +558,7 @@ fn v16_probe_post_expiry_trade_cannot_charge_backing_fee() {
                 ],
                 data: ProgInstruction::TradeNoCpi {
                     asset_index: 0,
+                    market_id: before.assets[0].market_id,
                     size_q: INCREASE_Q,
                     exec_price: WINNING_MARK,
                     fee_bps: 0,

@@ -88,12 +88,14 @@ fn v16_attack_batch_nocpi_mixed_exit_and_fresh_open_rejects_atomically() {
                 legs: vec![
                     BatchTradeLeg {
                         asset_index: 0,
+                        market_id: first_generation_market_id(0),
                         size_q: -(POS_SCALE as i128),
                         exec_price: 100,
                         fee_bps: 0,
                     },
                     BatchTradeLeg {
                         asset_index: 1,
+                        market_id: first_generation_market_id(1),
                         size_q: POS_SCALE as i128,
                         exec_price: 100,
                         fee_bps: 0,
@@ -135,6 +137,7 @@ fn v16_attack_batch_nocpi_mixed_exit_and_fresh_open_rejects_atomically() {
                 ProgInstruction::BatchTradeNoCpi {
                     legs: vec![BatchTradeLeg {
                         asset_index: 0,
+                        market_id: first_generation_market_id(0),
                         size_q: -(POS_SCALE as i128),
                         exec_price: 100,
                         fee_bps: 0,
@@ -208,6 +211,7 @@ fn v16_attack_spare_capacity_asset_rejects_public_routes_before_matcher() {
     env.deposit(&lp, lp_account, 1_000_000);
     let bad_asset = 1u16;
     let size = POS_SCALE as i128;
+    let bad_asset_market_id = env.asset_market_id(bad_asset);
 
     let market_before = env.svm.get_account(&env.market).unwrap();
     let taker_before = env.svm.get_account(&taker_account).unwrap();
@@ -258,6 +262,7 @@ fn v16_attack_spare_capacity_asset_rejects_public_routes_before_matcher() {
         ProgInstruction::BatchTradeNoCpi {
             legs: vec![BatchTradeLeg {
                 asset_index: bad_asset,
+                market_id: bad_asset_market_id,
                 size_q: size,
                 exec_price: 100,
                 fee_bps: 0,
@@ -329,6 +334,7 @@ fn v16_attack_spare_capacity_asset_rejects_public_routes_before_matcher() {
         ProgInstruction::BatchTradeCpi {
             legs: vec![BatchTradeCpiLeg {
                 asset_index: bad_asset,
+                market_id: bad_asset_market_id,
                 size_q: size,
                 fee_bps: 0,
                 limit_price: 0,

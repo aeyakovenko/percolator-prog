@@ -1157,11 +1157,13 @@ impl V16Svm {
         exec_price: u64,
         fee_bps: u64,
     ) -> Result<TxSuccess, String> {
+        let market_id = self.primary_market_state().1.assets[asset_index as usize].market_id;
         let taker_owner = copy_keypair(&self.actors[taker].signer);
         let maker_owner = copy_keypair(&self.actors[maker].signer);
         self.send_program(
             ProgInstruction::TradeNoCpi {
                 asset_index,
+                market_id,
                 size_q,
                 exec_price,
                 fee_bps,
@@ -1207,11 +1209,13 @@ impl V16Svm {
         fee_bps: u64,
         limit_price: u64,
     ) -> Result<TxSuccess, String> {
+        let market_id = self.primary_market_state().1.assets[asset_index as usize].market_id;
         let taker_owner = copy_keypair(&self.actors[taker].signer);
         let binding = &self.actors[maker];
         self.send_program(
             ProgInstruction::TradeCpi {
                 asset_index,
+                market_id,
                 size_q,
                 fee_bps,
                 limit_price,
@@ -2464,11 +2468,13 @@ impl V16Svm {
         actor_index: usize,
         size_q: i128,
     ) -> Result<TxSuccess, String> {
+        let market_id = self.primary_market_state().1.assets[0].market_id;
         let primary_owner = copy_keypair(&self.actors[actor_index].signer);
         let foreign_owner = copy_keypair(&self.foreign_actor.signer);
         self.send_program(
             ProgInstruction::TradeNoCpi {
                 asset_index: 0,
+                market_id,
                 size_q,
                 exec_price: INITIAL_PRICE,
                 fee_bps: 0,
@@ -2551,12 +2557,14 @@ impl V16Svm {
         maker: usize,
         substituted_binding: usize,
     ) -> Result<TxSuccess, String> {
+        let market_id = self.primary_market_state().1.assets[0].market_id;
         let taker_owner = copy_keypair(&self.actors[taker].signer);
         let maker_portfolio = self.actors[maker].portfolio;
         let binding = &self.actors[substituted_binding];
         self.send_program(
             ProgInstruction::TradeCpi {
                 asset_index: 0,
+                market_id,
                 size_q: POS_SCALE as i128 / 4,
                 fee_bps: 0,
                 limit_price: 0,
@@ -2664,11 +2672,13 @@ impl V16Svm {
         exec_price: u64,
         fee_bps: u64,
     ) -> Transaction {
+        let market_id = self.primary_market_state().1.assets[asset_index as usize].market_id;
         let taker_owner = copy_keypair(&self.actors[taker].signer);
         let maker_owner = copy_keypair(&self.actors[maker].signer);
         self.build_program_transaction(
             ProgInstruction::TradeNoCpi {
                 asset_index,
+                market_id,
                 size_q,
                 exec_price,
                 fee_bps,
@@ -2787,11 +2797,13 @@ impl V16Svm {
         size_q: i128,
         limit_price: u64,
     ) -> Transaction {
+        let market_id = self.primary_market_state().1.assets[asset_index as usize].market_id;
         let taker_owner = copy_keypair(&self.actors[taker].signer);
         let binding = &self.actors[maker];
         self.build_program_transaction(
             ProgInstruction::TradeCpi {
                 asset_index,
+                market_id,
                 size_q,
                 fee_bps: 0,
                 limit_price,
@@ -2836,12 +2848,14 @@ impl V16Svm {
         exec_price: u64,
         fee_bps: u64,
     ) -> Transaction {
+        let market_id = self.primary_market_state().1.assets[asset_index as usize].market_id;
         let taker_owner = copy_keypair(&self.actors[taker].signer);
         let maker_owner = copy_keypair(&self.actors[maker].signer);
         self.build_program_transaction(
             ProgInstruction::BatchTradeNoCpi {
                 legs: vec![BatchTradeLeg {
                     asset_index,
+                    market_id,
                     size_q,
                     exec_price,
                     fee_bps,
@@ -2866,12 +2880,14 @@ impl V16Svm {
         size_q: i128,
         limit_price: u64,
     ) -> Transaction {
+        let market_id = self.primary_market_state().1.assets[asset_index as usize].market_id;
         let taker_owner = copy_keypair(&self.actors[taker].signer);
         let binding = &self.actors[maker];
         self.build_program_transaction(
             ProgInstruction::BatchTradeCpi {
                 legs: vec![BatchTradeCpiLeg {
                     asset_index,
+                    market_id,
                     size_q,
                     fee_bps: 0,
                     limit_price,

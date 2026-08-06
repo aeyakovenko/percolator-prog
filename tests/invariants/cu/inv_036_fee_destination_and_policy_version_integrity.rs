@@ -214,12 +214,14 @@ fn v16_attack_mixed_direction_batch_fees_conserve_by_asset() {
                         legs: vec![
                             BatchTradeLeg {
                                 asset_index: 0,
+                                market_id: first_generation_market_id(0),
                                 size_q: sz,
                                 exec_price: 100,
                                 fee_bps: 100,
                             },
                             BatchTradeLeg {
                                 asset_index: 1,
+                                market_id: first_generation_market_id(1),
                                 size_q: -sz,
                                 exec_price: 100,
                                 fee_bps: 100,
@@ -249,12 +251,14 @@ fn v16_attack_mixed_direction_batch_fees_conserve_by_asset() {
                         legs: vec![
                             BatchTradeCpiLeg {
                                 asset_index: 0,
+                                market_id: first_generation_market_id(0),
                                 size_q: sz,
                                 fee_bps: 100,
                                 limit_price: 0,
                             },
                             BatchTradeCpiLeg {
                                 asset_index: 1,
+                                market_id: first_generation_market_id(1),
                                 size_q: -sz,
                                 fee_bps: 100,
                                 limit_price: 0,

@@ -422,6 +422,7 @@ fn run_source_capacity_admission_order(order: SourceCapacityFillOrder) {
             ProgInstruction::BatchTradeNoCpi {
                 legs: vec![BatchTradeLeg {
                     asset_index: NEW_ASSET,
+                    market_id: env.asset_market_id(NEW_ASSET),
                     size_q: -(POS_SCALE as i128),
                     exec_price: HIGH,
                     fee_bps: 0,
@@ -709,6 +710,7 @@ fn run_expired_source_lien_route_matrix(now_slot: u64, hinted_first: bool) {
             ProgInstruction::BatchTradeNoCpi {
                 legs: vec![BatchTradeLeg {
                     asset_index: 0,
+                    market_id: env.asset_market_id(0),
                     size_q: -(POS_SCALE as i128),
                     exec_price: WINNING_MARK,
                     fee_bps: 0,

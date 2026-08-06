@@ -57,30 +57,35 @@ fn v16_program_all_trade_routes_advance_position_episode_once_and_errors_do_not(
             "position and matcher episodes must use the deployed fixed account layout"
         );
 
-        let execute = |env: &mut V16Svm, signed_size: i128| match route {
-            0 => env.trade_no_cpi(0, 1, 0, signed_size, PRICE, 0),
-            1 => env.trade_cpi(0, 1, 0, signed_size, 0, 0),
-            2 => env.batch_trade_no_cpi(
-                0,
-                1,
-                vec![BatchTradeLeg {
-                    asset_index: 0,
-                    size_q: signed_size,
-                    exec_price: PRICE,
-                    fee_bps: 0,
-                }],
-            ),
-            3 => env.batch_trade_cpi(
-                0,
-                1,
-                vec![BatchTradeCpiLeg {
-                    asset_index: 0,
-                    size_q: signed_size,
-                    fee_bps: 0,
-                    limit_price: 0,
-                }],
-            ),
-            _ => unreachable!(),
+        let execute = |env: &mut V16Svm, signed_size: i128| {
+            let market_id = env.primary_market_state().1.assets[0].market_id;
+            match route {
+                0 => env.trade_no_cpi(0, 1, 0, signed_size, PRICE, 0),
+                1 => env.trade_cpi(0, 1, 0, signed_size, 0, 0),
+                2 => env.batch_trade_no_cpi(
+                    0,
+                    1,
+                    vec![BatchTradeLeg {
+                        asset_index: 0,
+                        market_id,
+                        size_q: signed_size,
+                        exec_price: PRICE,
+                        fee_bps: 0,
+                    }],
+                ),
+                3 => env.batch_trade_cpi(
+                    0,
+                    1,
+                    vec![BatchTradeCpiLeg {
+                        asset_index: 0,
+                        market_id,
+                        size_q: signed_size,
+                        fee_bps: 0,
+                        limit_price: 0,
+                    }],
+                ),
+                _ => unreachable!(),
+            }
         };
 
         let before_open = [
