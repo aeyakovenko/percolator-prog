@@ -480,6 +480,8 @@ fn run_max_source_liquidation_asset(adverse_asset: u16) {
         "max-source unilateral reduction",
         env.send(
             ProgInstruction::RebalanceReduce {
+                portfolio_id: env.portfolio_id(account),
+                position_epoch: env.portfolio_position_epoch(account),
                 asset_index: adverse_asset,
                 reduce_q: POS_SCALE,
             },
@@ -1886,6 +1888,8 @@ fn v16_attack_public_14_leg_32_source_recovery_forfeit_stays_bounded() {
         let cu = env
             .send(
                 ProgInstruction::ForfeitRecoveryLeg {
+                    portfolio_id: env.portfolio_id(portfolio),
+                    position_epoch: env.portfolio_position_epoch(portfolio),
                     asset_index: MAX_SOURCE_LIVE_ASSETS - 1,
                     b_delta_budget: u128::MAX,
                 },

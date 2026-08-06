@@ -479,9 +479,13 @@ This section describes intent and operational ordering, not argument-by-argument
 - **CureAndCancelClose** (tag 42)
   - owner-signed close recovery path; optional deposit is transferred first, then the engine cancels the pending close if the cure succeeds
 - **ForfeitRecoveryLeg** (tag 43)
-  - owner-signed recovery-leg forfeit for a selected asset and bounded B-delta budget
+  - owner-signed recovery-leg forfeit bound to the current `portfolio_id` and `position_epoch`, for
+    a selected asset and bounded B-delta budget
 - **RebalanceReduce** (tag 44)
-  - owner-signed risk-reducing rebalance against the wrapper-authenticated effective price vector
+  - owner-signed risk-reducing rebalance bound to the current `portfolio_id` and `position_epoch`,
+    against the wrapper-authenticated effective price vector
+  - `position_epoch` advances after every successful trade, liquidation, recovery force-close,
+    rebalance, or recovery forfeit; refresh-only cranks and rejected instructions do not advance it
 - **ClaimResolvedPayoutTopup** (tag 46)
   - permissionless resolved-payout top-up claim; pays only the stored owner receipt token account
 
@@ -691,6 +695,7 @@ The wrapper proof suite does not re-prove engine conservation. It proves wrapper
 
 Current wrapper Kani anchors live in `tests/v16_kani.rs` and cover:
 
+- packed position-episode monotonicity and matcher-state preservation
 - instruction decode/encode preservation for active wrapper payloads, including authority, oracle, policy, lifecycle, and custody instructions
 - rejection of unknown tags, truncated payloads, and trailing bytes
 - matcher-return validation against malformed/malicious fills (`kani_v16_matcher_return_accepts_only_bound_echoed_fills`)

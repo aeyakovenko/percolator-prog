@@ -25,7 +25,7 @@ verification methods are in [`../../INVARIANTS.md`](../../INVARIANTS.md).
 | `public_sbf/` | 80 | Deterministic public SBF/LiteSVM counterexamples, regressions, and manifest checks |
 | `stateful/` | 118 | Proptest-generated public routes, including generalized active-leg/currentness, source-claim attribution, source-credit-rate, and authenticated-expiry route matrices |
 | `cu/` | 104 | Positive public-route, metamorphic, rollback, liveness, and max-shape CU tests |
-| `kani/` | 41 | Symbolic wrapper arithmetic, matcher-binding, and strict-decoder proofs |
+| `kani/` | 42 | Symbolic wrapper arithmetic, matcher-binding, and strict-decoder proofs |
 
 Most deterministic and stateful LoF adapters still reproduce quarantined vulnerable behavior;
 fixed-pin regressions explicitly require safe rejection or preservation instead. A vulnerable-pin
@@ -56,7 +56,7 @@ charter.
 | INV-001 | Independent + Direct | `public_sbf/inv_001_market_incarnation_binding.rs`, `stateful/inv_001_market_incarnation_binding.rs` |
 | INV-002 | Independent + Direct | `public_sbf/inv_002_asset_generation_binding.rs`, `stateful/inv_002_asset_generation_binding.rs` |
 | INV-003 | Independent + Direct | `public_sbf/inv_003_portfolio_incarnation_binding.rs`, `stateful/inv_003_portfolio_incarnation_binding.rs` |
-| INV-004 | Independent | `stateful/inv_004_position_episode_binding.rs` |
+| INV-004 | Independent | `stateful/inv_004_position_episode_binding.rs`, `kani/inv_004_position_episode_binding.rs` |
 | INV-005 | Independent + Direct + SVM/CU | `public_sbf/inv_005_authority_incarnation_binding.rs`, `stateful/inv_005_authority_incarnation_binding.rs`, `cu/inv_005_authority_incarnation_binding.rs` |
 | INV-006 | Gap | - |
 | INV-007 | Gap | - |
@@ -191,7 +191,7 @@ cargo test --test v16_cu
 cargo kani --tests
 ```
 
-On engine pin `c09d4575144f5be5fd0e8564d72fa22665a7e5bc`, the full `v16_cu` inventory has
+On engine pin `9ffc4749a4b7e486f814090c7b43fb01a6df5dcf`, the full `v16_cu` inventory has
 668 passing tests. The former red PR220/PR366, PR367, and live source-backing expiry probes are
 fixed-pin regressions under INV-030, INV-053, and INV-063; the unfiltered command is the required
 verification command.

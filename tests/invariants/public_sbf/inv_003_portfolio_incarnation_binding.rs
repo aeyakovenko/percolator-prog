@@ -2,7 +2,7 @@
 //!
 //! Normative obligation: Portfolio-scoped consent cannot cross close and same-pubkey recreation.
 //!
-//! Evidence in this file (I plus invariant-specific F/M assertions): `v16_program_pr309_stale_close_drains_replacement_account_lamports`, `v16_program_pr304_stale_matcher_grant_liquidates_reinitialized_portfolio`, `v16_program_pr303_stale_trades_liquidate_reinitialized_portfolio`, `v16_program_pr301_stale_pnl_conversion_pays_cranker_from_replacement`, `v16_program_pr278_stale_forfeit_discards_replacement_winner_payout`, `v16_program_pr299_stale_withdrawal_liquidates_reinitialized_portfolio`, `v16_program_pr305_stale_deposit_funds_reinitialized_portfolio_winner`. These tests exercise the deployed public
+//! Evidence in this file (I plus invariant-specific F/M assertions): `v16_program_pr309_stale_close_drains_replacement_account_lamports`, `v16_program_pr304_stale_matcher_grant_liquidates_reinitialized_portfolio`, `v16_program_pr303_stale_trades_liquidate_reinitialized_portfolio`, `v16_program_pr301_stale_pnl_conversion_pays_cranker_from_replacement`, `v16_program_pr278_stale_forfeit_rejects_and_preserves_replacement_winner_payout`, `v16_program_pr299_stale_withdrawal_liquidates_reinitialized_portfolio`, `v16_program_pr305_stale_deposit_funds_reinitialized_portfolio_winner`. These tests exercise the deployed public
 //! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
 //! rollback, liveness, or compute outcomes appropriate to the invariant.
 //!
@@ -101,19 +101,32 @@ fn v16_program_pr301_stale_pnl_conversion_pays_cranker_from_replacement() {
 }
 
 #[test]
-fn v16_program_pr278_stale_forfeit_discards_replacement_winner_payout() {
+fn v16_program_pr278_stale_forfeit_rejects_and_preserves_replacement_winner_payout() {
     let reproduction = reproduce_forfeit_portfolio_incarnation_replay([0x78; 32])
-        .unwrap_or_else(|error| panic!("PR 278 no longer reproduces: {error}"));
+        .unwrap_or_else(|error| panic!("PR 278 fixed regression failed: {error}"));
     assert_eq!(
         reproduction.blocker,
         KnownBlocker::ForfeitPortfolioIncarnationReplay
     );
     assert!(reproduction.replacement_portfolio_id > reproduction.original_portfolio_id);
-    assert!(reproduction.victim_loss > 0);
-    assert_eq!(reproduction.stranded_vault, reproduction.victim_loss.into());
+    assert!(reproduction.stale_replay_rejected);
+    assert!(reproduction.rejected_exact_rollback);
+    assert_eq!(
+        reproduction.replay_victim_payout,
+        reproduction.control_victim_payout
+    );
+    assert_eq!(
+        reproduction.replay_attacker_payout,
+        reproduction.control_attacker_payout
+    );
+    assert_eq!(
+        reproduction
+            .replay_victim_payout
+            .checked_add(reproduction.replay_attacker_payout),
+        Some(2_000_000)
+    );
     assert!(reproduction.control_slab_closed);
-    assert!(reproduction.replay_slab_blocked);
-    assert!(reproduction.replay_cu < 1_400_000);
+    assert!(reproduction.replay_slab_closed);
     assert!(reproduction.max_cu < 1_400_000);
 }
 

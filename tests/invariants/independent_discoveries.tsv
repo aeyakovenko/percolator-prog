@@ -1,14 +1,14 @@
 # Finding-agnostic invariant discoveries mapped to the external benchmark.
 # This file is evidence metadata only. Generators and oracles must not read it.
 # invariant	fingerprint	generator	oracle	benchmark_prs
-INV-003	portfolio-incarnation/deposit	v16_program_portfolio_incarnation_operation_matrix_discovers_stale_intents	stale-intent-must-reject-and-roll-back-exactly	305
-INV-003	portfolio-incarnation/withdraw	v16_program_portfolio_incarnation_operation_matrix_discovers_stale_intents	stale-intent-must-reject-and-roll-back-exactly	299
-INV-003	portfolio-incarnation/close	v16_program_portfolio_incarnation_operation_matrix_discovers_stale_intents	stale-intent-must-reject-and-roll-back-exactly	309
-INV-003	portfolio-incarnation/matcher-policy	v16_program_portfolio_incarnation_operation_matrix_discovers_stale_intents	stale-intent-must-reject-and-roll-back-exactly	274,285,304
-INV-003	portfolio-incarnation/trade-family	v16_program_portfolio_incarnation_operation_matrix_discovers_stale_intents	stale-intent-must-reject-and-roll-back-exactly	276,285,303
-INV-003	portfolio-incarnation/pnl-conversion	v16_program_portfolio_incarnation_operation_matrix_discovers_stale_intents	stale-intent-must-reject-and-roll-back-exactly	301
-INV-003	portfolio-incarnation/rebalance-reduce	v16_program_portfolio_incarnation_operation_matrix_discovers_stale_intents	stale-intent-must-reject-and-roll-back-exactly	292
-INV-003	portfolio-incarnation/recovery-forfeit	v16_program_portfolio_incarnation_operation_matrix_discovers_stale_intents	stale-intent-must-reject-and-roll-back-exactly	278
+INV-003	portfolio-incarnation/deposit	v16_program_portfolio_incarnation_operation_matrix_classifies_stale_intents	stale-intent-must-reject-and-roll-back-exactly	305
+INV-003	portfolio-incarnation/withdraw	v16_program_portfolio_incarnation_operation_matrix_classifies_stale_intents	stale-intent-must-reject-and-roll-back-exactly	299
+INV-003	portfolio-incarnation/close	v16_program_portfolio_incarnation_operation_matrix_classifies_stale_intents	stale-intent-must-reject-and-roll-back-exactly	309
+INV-003	portfolio-incarnation/matcher-policy	v16_program_portfolio_incarnation_operation_matrix_classifies_stale_intents	stale-intent-must-reject-and-roll-back-exactly	274,285,304
+INV-003	portfolio-incarnation/trade-family	v16_program_portfolio_incarnation_operation_matrix_classifies_stale_intents	stale-intent-must-reject-and-roll-back-exactly	276,285,303
+INV-003	portfolio-incarnation/pnl-conversion	v16_program_portfolio_incarnation_operation_matrix_classifies_stale_intents	stale-intent-must-reject-and-roll-back-exactly	301
+INV-003	portfolio-incarnation/rebalance-reduce	v16_program_portfolio_incarnation_operation_matrix_classifies_stale_intents	stale-intent-must-reject-and-roll-back-exactly	292
+INV-003	portfolio-incarnation/recovery-forfeit	v16_program_portfolio_incarnation_operation_matrix_classifies_stale_intents	stale-intent-must-reject-and-roll-back-exactly	278
 INV-001	market-incarnation/deposit	v16_program_market_incarnation_operation_matrix_discovers_stale_intents	stale-intent-must-reject-and-roll-back-exactly	307
 INV-001	market-incarnation/matcher-policy	v16_program_market_incarnation_operation_matrix_discovers_stale_intents	stale-intent-must-reject-and-roll-back-exactly	294
 INV-001	market-incarnation/trade-fee-policy	v16_program_market_incarnation_operation_matrix_discovers_stale_intents	stale-intent-must-reject-and-roll-back-exactly	296
@@ -78,7 +78,7 @@ INV-038	observation-omission/rounded-funding	v16_program_selected_observation_om
 INV-038	fractional-movement/max-dt-crank	v16_program_fractional_max_dt_cranks_discover_terminal_value_stall	fractional-cap-residue-must-accumulate-to-target	365
 INV-020	composite-oracle/timestamp-coherence	v16_program_composite_timestamp_coherence_discovers_cross_epoch_liquidation	composite-oracle-legs-must-share-one-coherent-observation-epoch	331
 INV-020	hybrid-terminal/expired-composite-leg	v16_program_hybrid_terminal_snapshot_discovers_expired_leg_settlement	terminal-snapshot-must-use-current-authenticated-oracle-state	261
-INV-028	source-lien/reversal-exit-matrix	v16_program_source_lien_reversal_exit_matrix_preserves_bounded_exit	vanished-source-claim-has-a-bounded-public-unwind	213
+INV-028	source-lien/reversal-exit-matrix	v16_program_source_lien_reversal_exit_matrix_preserves_bounded_exit	vanished-source-claim-must-have-a-bounded-public-unwind	213
 INV-028	source-lien/authenticated-expiry-routes	v16_program_expired_source_lien_route_matrix_discovers_funded_residue_lock	expired-source-lien-must-have-bounded-public-reconciliation	214
 INV-028	cross-domain-rounding/public-exit-matrix	v16_program_cross_domain_rounding_exit_matrix_discovers_funded_lock	fractional-source-domains-must-have-a-bounded-public-unwind	306
 INV-028	flat-source-lien/terminal-claim-routes	v16_program_flat_source_lien_route_matrix_discovers_backed_claim_lock	flat-backed-claim-must-have-bounded-terminal-conversion	364
@@ -87,7 +87,7 @@ INV-077	max-source/conversion-amount-matrix	v16_program_max_source_conversion_am
 INV-077	max-source/resolved-close-order-matrix	v16_program_max_shape_resolved_close_order_matrix_discovers_terminal_cu_lock	max-source-terminal-claim-must-have-a-bounded-close-step	359
 INV-077	max-source/liquidation-asset-matrix	v16_program_max_source_liquidation_asset_matrix_discovers_funded_cu_lock	max-source-liquidatable-account-must-have-a-bounded-public-reduction	212
 INV-067	terminal-payout/dust-round-trip	v16_program_reported_route_matrix_discovers_terminal_dust_erasure	terminal-payout-is-invariant-to-flattened-dust-position	283
-INV-067	terminal-bankruptcy/claim-free-residual	v16_program_terminal_bankruptcy_residual_matrix_discovers_provider_double_charge	terminal-residual-cannot-double-charge-provider-principal	330
+INV-067	terminal-bankruptcy/claim-free-residual	v16_program_terminal_bankruptcy_residual_matrix_preserves_provider_value	terminal-residual-cannot-double-charge-provider-principal	330
 INV-034	cross-asset-debt/foreign-insurance	v16_program_cross_asset_debt_discovers_foreign_insurance_spend	insurance-spend-remains-source-domain-local	290
 INV-031	cross-source-claims/backing-consume	v16_program_two_source_claims_discover_backing_double_consume	backing-atoms-cannot-support-claims-from-another-source	267
 INV-035	bankruptcy-residual/cross-domain-b	v16_program_two_asset_bankruptcy_preserves_domain_local_settlement_and_exit	b-loss-reduces-only-the-originating-source-domain-and-owner-exits	281
@@ -95,18 +95,18 @@ INV-053	full-refresh/omitted-later-leg	v16_program_full_refresh_equivalence_reje
 INV-061	resolved-adl/close-order	v16_program_resolved_adl_close_order_matrix_discovers_funded_exit_lock	funded-resolved-adl-winner-has-bounded-public-exit	216
 INV-061	bankruptcy/reset-carry-liquidation	v16_program_reset_carry_liquidation_matrix_discovers_crank_lock	fractional-reset-carry-cannot-block-permissionless-liquidation	218
 INV-061	post-adl/split-transfer-extraction	v16_program_post_adl_transfer_extraction_matrix_discovers_backing_drain	post-adl-split-cannot-increase-withdrawable-backing-funded-value	250
-INV-073	partial-adl/exact-effective-reduction	v16_program_partial_adl_effective_exit_matrix_discovers_zero_oi_residue_lock	zero-effective-oi-funded-residue-must-enter-bounded-cleanup	268
-INV-073	crossed-adl/exact-effective-trade	v16_program_crossed_adl_effective_exit_matrix_discovers_zero_oi_residue_lock	zero-effective-oi-funded-residue-must-enter-bounded-cleanup	266
-INV-073	partial-adl/recovery-force-close	v16_program_recovery_residue_matrix_discovers_abandoned_owner_lock	partial-adl-recovery-residue-must-have-permissionless-cleanup	203
+INV-073	partial-adl/exact-effective-reduction	v16_program_unilateral_adl_effective_exit_matrix_preserves_bounded_cleanup	zero-effective-oi-funded-residue-must-enter-bounded-cleanup	268
+INV-073	crossed-adl/exact-effective-trade	v16_program_crossed_adl_effective_exit_matrix_preserves_bounded_cleanup	zero-effective-oi-funded-residue-must-enter-bounded-cleanup	266
+INV-073	partial-adl/recovery-force-close	v16_program_recovery_residue_matrix_clears_abandoned_owner_residue	partial-adl-recovery-residue-has-permissionless-bounded-cleanup	203
 INV-073	social-loss/fractional-carry-exit-routes	v16_program_fractional_social_loss_exit_matrix_discovers_dust_lock	fractional-social-loss-carry-cannot-lock-funded-owner-exit	217
-INV-073	recovery/fragmented-opposite-oi	v16_program_fragmented_recovery_pair_matrix_discovers_force_close_lock	fragmented-recovery-must-have-a-permissionless-pairwise-close-path	228
+INV-073	recovery/fragmented-opposite-oi	v16_program_fragmented_recovery_pair_matrix_clears_every_fragment	fragmented-recovery-must-have-a-permissionless-pairwise-close-path	228
 INV-073	recovery/winner-first-provider-lien	v16_program_winner_first_recovery_matrix_discovers_provider_lien_lock	forfeit-order-cannot-lock-provider-backed-recovery	371
 INV-073	asset0-recovery/provider-backing	v16_program_asset0_recovery_matrix_discovers_provider_and_restart_lock	recovered-provider-backing-must-have-withdraw-or-restart-progress	376
 INV-073	permissionless-asset/expired-local-close	v16_program_permissionless_asset_expired_close_matrix_discovers_global_recovery	permissionless-asset-local-close-cannot-freeze-unrelated-funded-users	236
-INV-073	expired-partial-close/unrelated-funded-account	v16_program_expired_partial_close_matrix_discovers_global_terminal_lock	account-local-expired-close-cannot-create-global-funded-recovery-sink	368
-INV-073	recovery-mode/explicit-terminal-routes	v16_program_expired_partial_close_matrix_discovers_global_terminal_lock	recovery-mode-must-have-a-public-terminal-continuation	252
+INV-073	expired-partial-close/unrelated-funded-account	v16_program_expired_partial_close_matrix_resolves_and_preserves_idle_exit	account-local-expired-close-preserves-unrelated-resolved-exit	368
+INV-073	recovery-mode/explicit-terminal-routes	v16_program_expired_partial_close_matrix_resolves_and_preserves_idle_exit	recovery-escalation-reaches-public-resolved-continuation	252
 INV-071	micro-price/eager-crank-schedule	v16_program_micro_price_schedule_matrix_discovers_clock_consuming_noop_cranks	successful-crank-cannot-consume-zero-delta-price-time	246
-INV-071	bankruptcy-escalation/funded-survivor	v16_program_bankruptcy_escalation_matrix_discovers_funded_survivor_lock	recovery-required-transition-must-not-rollback-funded-survivor-progress	190
+INV-071	bankruptcy-escalation/funded-survivor	v16_program_bankruptcy_escalation_matrix_commits_recovery_and_resolves	recovery-required-transition-must-not-rollback-funded-survivor-progress	190
 INV-071	prospective-loss/lapsed-source	v16_program_prospective_loss_expiry_matrix_discovers_resolved_exit_lock	prospective-loss-must-not-create-backing-in-lapsed-domain	298
 INV-074	bankruptcy-scope/unrelated-backed-claim	v16_program_unrelated_bankruptcy_scope_matrix_discovers_backed_claim_lock	asset-local-bankruptcy-cannot-lock-unrelated-backed-claim	229
 INV-063	backing-expiry/authenticated-clock	v16_program_backing_expiry_boundary_rejects_stale_fee_and_preserves_exit	expired-backing-cannot-create-withdrawable-provider-value	367
@@ -116,6 +116,6 @@ INV-063	resolved-settlement/lapsed-backing	v16_program_lapsed_backing_settlement
 INV-001	terminal-generation/authority-resolve	v16_program_market_generation_terminal_matrix_discovers_replacement_value_transfer	old-generation-terminal-capability-cannot-crystallize-replacement-value	323
 INV-001	terminal-generation/resolve-policy	v16_program_market_generation_terminal_matrix_discovers_replacement_value_transfer	old-generation-terminal-capability-cannot-crystallize-replacement-value	324
 INV-002	terminal-generation/asset-resolve-policy	v16_program_asset_generation_terminal_policy_discovers_replacement_value_transfer	old-generation-terminal-capability-cannot-crystallize-replacement-value	312
-INV-004	position-episode/rebalance-reduce	v16_program_position_episode_matrix_discovers_stale_value_transfers	stale-position-episode-consent-cannot-transfer-or-orphan-value	316
-INV-004	position-episode/recovery-forfeit	v16_program_position_episode_matrix_discovers_stale_value_transfers	stale-position-episode-consent-cannot-transfer-or-orphan-value	354
+INV-004	position-episode/rebalance-reduce	v16_program_position_episode_matrix_rejects_stale_consent_atomically	stale-position-episode-consent-cannot-transfer-or-orphan-value	316
+INV-004	position-episode/recovery-forfeit	v16_program_position_episode_matrix_rejects_stale_consent_atomically	stale-position-episode-consent-cannot-transfer-or-orphan-value	354
 INV-010	matcher-mutation/revoke-order	v16_program_matcher_mutation_order_discovers_revoked_lp_value_transfer	stale-matcher-enable-cannot-revive-revoked-value-authority	393

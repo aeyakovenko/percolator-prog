@@ -797,6 +797,11 @@ impl V16Svm {
         state::read_portfolio_id(&data).expect("decode primary portfolio id")
     }
 
+    pub fn primary_portfolio_position_epoch(&self, actor_index: usize) -> u64 {
+        let data = self.primary_portfolio_data(actor_index);
+        state::read_portfolio_position_epoch(&data).expect("decode primary position epoch")
+    }
+
     pub fn resolve_market(&mut self) -> Result<TxSuccess, String> {
         let admin = copy_keypair(&self.admin);
         self.send_program(
@@ -1005,10 +1010,14 @@ impl V16Svm {
         asset_index: u16,
         reduce_q: u128,
     ) -> Result<TxSuccess, String> {
+        let portfolio_id = self.primary_portfolio_id(actor_index);
+        let position_epoch = self.primary_portfolio_position_epoch(actor_index);
         let actor = &self.actors[actor_index];
         let owner = copy_keypair(&actor.signer);
         self.send_program(
             ProgInstruction::RebalanceReduce {
+                portfolio_id,
+                position_epoch,
                 asset_index,
                 reduce_q,
             },
@@ -1027,10 +1036,14 @@ impl V16Svm {
         asset_index: u16,
         b_delta_budget: u128,
     ) -> Result<TxSuccess, String> {
+        let portfolio_id = self.primary_portfolio_id(actor_index);
+        let position_epoch = self.primary_portfolio_position_epoch(actor_index);
         let actor = &self.actors[actor_index];
         let owner = copy_keypair(&actor.signer);
         self.send_program(
             ProgInstruction::ForfeitRecoveryLeg {
+                portfolio_id,
+                position_epoch,
                 asset_index,
                 b_delta_budget,
             },
@@ -2384,10 +2397,14 @@ impl V16Svm {
         asset_index: u16,
         reduce_q: u128,
     ) -> Transaction {
+        let portfolio_id = self.primary_portfolio_id(actor_index);
+        let position_epoch = self.primary_portfolio_position_epoch(actor_index);
         let actor = &self.actors[actor_index];
         let owner = copy_keypair(&actor.signer);
         self.build_program_transaction(
             ProgInstruction::RebalanceReduce {
+                portfolio_id,
+                position_epoch,
                 asset_index,
                 reduce_q,
             },
@@ -2406,10 +2423,14 @@ impl V16Svm {
         asset_index: u16,
         b_delta_budget: u128,
     ) -> Transaction {
+        let portfolio_id = self.primary_portfolio_id(actor_index);
+        let position_epoch = self.primary_portfolio_position_epoch(actor_index);
         let actor = &self.actors[actor_index];
         let owner = copy_keypair(&actor.signer);
         self.build_program_transaction(
             ProgInstruction::ForfeitRecoveryLeg {
+                portfolio_id,
+                position_epoch,
                 asset_index,
                 b_delta_budget,
             },

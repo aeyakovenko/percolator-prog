@@ -1417,6 +1417,11 @@ impl V16CuEnv {
         state::read_portfolio_id(&account.data).unwrap()
     }
 
+    fn portfolio_position_epoch(&self, portfolio: Pubkey) -> u64 {
+        let account = self.svm.get_account(&portfolio).expect("portfolio account");
+        state::read_portfolio_position_epoch(&account.data).unwrap()
+    }
+
     fn mutate_market<F>(&mut self, f: F)
     where
         F: FnOnce(&mut state::WrapperConfigV16, &mut MarketGroupV16),
@@ -3640,8 +3645,12 @@ impl V16CuEnv {
         asset_index: u16,
         b_delta_budget: u128,
     ) -> u64 {
+        let portfolio_id = self.portfolio_id(portfolio);
+        let position_epoch = self.portfolio_position_epoch(portfolio);
         self.send(
             ProgInstruction::ForfeitRecoveryLeg {
+                portfolio_id,
+                position_epoch,
                 asset_index,
                 b_delta_budget,
             },
@@ -3662,8 +3671,12 @@ impl V16CuEnv {
         asset_index: u16,
         reduce_q: u128,
     ) -> u64 {
+        let portfolio_id = self.portfolio_id(portfolio);
+        let position_epoch = self.portfolio_position_epoch(portfolio);
         self.send(
             ProgInstruction::RebalanceReduce {
+                portfolio_id,
+                position_epoch,
                 asset_index,
                 reduce_q,
             },
@@ -8048,7 +8061,6 @@ fn v16_bpf_stale_asset_does_not_block_current_unrelated_trade() {
         100,
         0,
     );
-
     let cranker_owner = Keypair::new();
     let cranker_portfolio = env.create_portfolio(&cranker_owner);
     env.svm.warp_to_slot(3);
@@ -9461,7 +9473,7 @@ fn v16_bpf_permissionless_liquidation_is_bounded() {
 }
 
 #[test]
-fn v16_bpf_tradenocpi_rejects_off_mark_recycle_when_deficit_cannot_settle() {
+fn v16_bpf_tradenocpi_allows_off_mark_strict_reduction_without_value_extraction() {
     let mut env = V16CuEnv::new();
     env.top_up_insurance(1_000_000);
     env.svm.warp_to_slot(1);
@@ -9501,43 +9513,64 @@ fn v16_bpf_tradenocpi_rejects_off_mark_recycle_when_deficit_cannot_settle() {
         },
     );
     let before_market = env.svm.get_account(&env.market).unwrap();
-    let before_extractor = env.svm.get_account(&extractor).unwrap();
     let before_probe = env.svm.get_account(&probe).unwrap();
     let (_, before_group) = state::read_market(&before_market.data).unwrap();
     assert_eq!(before_group.insurance, 1_000_000);
     let before_probe_state = state::read_portfolio(&before_probe.data).unwrap();
+    let vault_tokens_before = env.token_amount(env.vault);
     assert!(
         health_cert(&before_probe_state).certified_liq_deficit != 0,
         "probe must be liquidatable before the attempted recycling trade"
     );
 
-    let close = env.try_trade_asset_with_cu(
-        0,
-        &extractor_owner,
-        extractor,
-        &probe_owner,
-        probe,
-        -((10 * POS_SCALE) as i128),
-        500,
-        0,
+    let close_cu = env
+        .try_trade_asset_with_cu(
+            0,
+            &extractor_owner,
+            extractor,
+            &probe_owner,
+            probe,
+            -((10 * POS_SCALE) as i128),
+            500,
+            0,
+        )
+        .expect("an extreme reported price cannot block a bilateral strict reduction");
+    assert_cu_within(
+        "off-mark TradeNoCpi strict reduction",
+        close_cu,
+        TRADE_CU_LIMIT,
     );
-    assert!(
-        close.is_err(),
-        "liquidatable probe must not recycle an unsettled deficit through an off-mark close"
+    let (_, after_group) = env.market_state();
+    let after_extractor = env.portfolio_state(extractor);
+    let after_probe = env.portfolio_state(probe);
+    let pair_equity_after = after_extractor.capital.get() as i128
+        + after_extractor.pnl.get()
+        + after_probe.capital.get() as i128
+        + after_probe.pnl.get();
+    assert!(!has_active_leg_for_asset(&after_extractor, 0));
+    assert!(!has_active_leg_for_asset(&after_probe, 0));
+    assert_eq!(after_group.assets[0].oi_eff_long_q, 0);
+    assert_eq!(after_group.assets[0].oi_eff_short_q, 0);
+    assert_eq!(
+        after_group.assets[0].effective_price,
+        before_group.assets[0].effective_price
     );
     assert_eq!(
-        env.svm.get_account(&env.market).unwrap().data,
-        before_market.data
+        after_group.assets[0].raw_oracle_target_price,
+        before_group.assets[0].raw_oracle_target_price
     );
-    assert_eq!(
-        env.svm.get_account(&extractor).unwrap().data,
-        before_extractor.data
-    );
-    assert_eq!(env.svm.get_account(&probe).unwrap().data, before_probe.data);
+    assert_eq!(after_group.insurance, before_group.insurance);
+    assert_eq!(after_group.vault, before_group.vault);
+    assert_eq!(env.token_amount(env.vault), vault_tokens_before);
+    let fair_gain = 10 * (before_group.assets[0].effective_price as i128 - 100);
+    assert_eq!(after_extractor.pnl.get(), fair_gain);
+    assert_eq!(after_probe.pnl.get(), -(fair_gain - 1_000));
+    assert_eq!(pair_equity_after, 11_000);
+    assert!(after_group.vault >= after_group.c_tot + after_group.insurance);
 }
 
 #[test]
-fn v16_bpf_tradecpi_rejects_off_mark_recycle_when_deficit_cannot_settle() {
+fn v16_bpf_tradecpi_allows_off_mark_strict_reduction_without_value_extraction() {
     let mut env = V16CuEnv::new();
     let matcher_program = Pubkey::new_unique();
     let matcher_bytes = std::fs::read(matcher_program_path()).expect("read matcher BPF");
@@ -9588,48 +9621,75 @@ fn v16_bpf_tradecpi_rejects_off_mark_recycle_when_deficit_cannot_settle() {
             9_000,
         );
     let before_market = env.svm.get_account(&env.market).unwrap();
-    let before_extractor = env.svm.get_account(&extractor).unwrap();
     let before_probe = env.svm.get_account(&probe).unwrap();
     let before_matcher = env.svm.get_account(&matcher_ctx).unwrap();
+    let (before_cfg, before_group) = state::read_market(&before_market.data).unwrap();
     let before_probe_state = state::read_portfolio(&before_probe.data).unwrap();
+    let vault_tokens_before = env.token_amount(env.vault);
     assert!(
         health_cert(&before_probe_state).certified_liq_deficit != 0,
         "probe must be liquidatable before the attempted matcher recycling trade"
     );
 
-    let close = env.try_trade_cpi_with_cu_on_asset(
-        &probe_owner,
-        probe,
-        &extractor_owner,
-        extractor,
-        matcher_program,
-        matcher_ctx,
-        matcher_delegate,
-        0,
-        (10 * POS_SCALE) as i128,
-        0,
+    let close_cu = env
+        .try_trade_cpi_with_cu_on_asset(
+            &probe_owner,
+            probe,
+            &extractor_owner,
+            extractor,
+            matcher_program,
+            matcher_ctx,
+            matcher_delegate,
+            0,
+            (10 * POS_SCALE) as i128,
+            0,
+        )
+        .expect("an extreme matcher quote cannot block a bilateral strict reduction");
+    assert_cu_within(
+        "off-mark TradeCpi strict reduction",
+        close_cu,
+        TRADE_CU_LIMIT,
     );
-    assert!(
-        close.is_err(),
-        "liquidatable probe must not recycle an unsettled deficit through an off-mark matcher fill"
+    let (after_cfg, after_group) = env.market_state();
+    let after_extractor = env.portfolio_state(extractor);
+    let after_probe = env.portfolio_state(probe);
+    let pair_equity_after = after_extractor.capital.get() as i128
+        + after_extractor.pnl.get()
+        + after_probe.capital.get() as i128
+        + after_probe.pnl.get();
+    assert!(!has_active_leg_for_asset(&after_extractor, 0));
+    assert!(!has_active_leg_for_asset(&after_probe, 0));
+    assert_eq!(after_group.assets[0].oi_eff_long_q, 0);
+    assert_eq!(after_group.assets[0].oi_eff_short_q, 0);
+    assert_eq!(
+        after_group.assets[0].effective_price,
+        before_group.assets[0].effective_price
     );
     assert_eq!(
-        env.svm.get_account(&env.market).unwrap().data,
-        before_market.data
+        after_group.assets[0].raw_oracle_target_price,
+        before_group.assets[0].raw_oracle_target_price
     );
-    assert_eq!(
-        env.svm.get_account(&extractor).unwrap().data,
-        before_extractor.data
-    );
-    assert_eq!(env.svm.get_account(&probe).unwrap().data, before_probe.data);
-    assert_eq!(
+    assert_eq!(after_group.insurance, before_group.insurance);
+    assert_eq!(after_group.vault, before_group.vault);
+    assert_eq!(env.token_amount(env.vault), vault_tokens_before);
+    let fair_gain = 10 * (before_group.assets[0].effective_price as i128 - 100);
+    assert_eq!(after_extractor.pnl.get(), fair_gain);
+    assert_eq!(after_probe.pnl.get(), -(fair_gain - 1_000));
+    assert_eq!(pair_equity_after, 11_000);
+    assert!(after_group.vault >= after_group.c_tot + after_group.insurance);
+    assert_eq!(after_cfg.matcher_req_seq, before_cfg.matcher_req_seq + 1);
+    assert_ne!(
         env.svm.get_account(&matcher_ctx).unwrap().data,
-        before_matcher.data
+        before_matcher.data,
+        "the successful CPI fill commits its matcher response"
     );
 }
 
+// Defense in depth: the bankrupt pre-state below is injected directly and is not public
+// reachability evidence. It verifies the wrapper/engine boundary still permits strict reduction
+// without using the hostile raw price or creating value if such a state is ever encountered.
 #[test]
-fn v16_bpf_tradenocpi_rejects_when_counterparty_starts_bankrupt() {
+fn v16_bpf_tradenocpi_reduces_injected_bankrupt_counterparty_without_value_creation() {
     let mut env = V16CuEnv::new();
     env.top_up_insurance(1_000_000);
 
@@ -9658,9 +9718,14 @@ fn v16_bpf_tradenocpi_rejects_when_counterparty_starts_bankrupt() {
     );
 
     let before_market = env.svm.get_account(&env.market).unwrap();
-    let before_extractor = env.svm.get_account(&extractor).unwrap();
     let before_probe = env.svm.get_account(&probe).unwrap();
+    let (_, before_group) = state::read_market(&before_market.data).unwrap();
+    let before_extractor_state = env.portfolio_state(extractor);
     let before_probe_state = state::read_portfolio(&before_probe.data).unwrap();
+    let pair_equity_before = before_extractor_state.capital.get() as i128
+        + before_extractor_state.pnl.get()
+        + before_probe_state.capital.get() as i128
+        + before_probe_state.pnl.get();
     assert_eq!(before_probe_state.capital.get(), 0);
     assert!(
         before_probe_state.pnl.get() < 0,
@@ -9672,33 +9737,49 @@ fn v16_bpf_tradenocpi_rejects_when_counterparty_starts_bankrupt() {
         "refreshed probe certificate must confirm negative equity before the attempted trade"
     );
 
-    let close = env.try_trade_asset_with_cu(
-        0,
-        &extractor_owner,
-        extractor,
-        &probe_owner,
-        probe,
-        -((10 * POS_SCALE) as i128),
-        500,
-        0,
+    let close_cu = env
+        .try_trade_asset_with_cu(
+            0,
+            &extractor_owner,
+            extractor,
+            &probe_owner,
+            probe,
+            -((10 * POS_SCALE) as i128),
+            500,
+            0,
+        )
+        .expect("a hostile price cannot block strict reduction of an injected bankrupt state");
+    assert_cu_within(
+        "injected-bankruptcy TradeNoCpi strict reduction",
+        close_cu,
+        TRADE_CU_LIMIT,
     );
-    assert!(
-        close.is_err(),
-        "bankrupt probe must not use an off-mark close as a normal bilateral trade"
-    );
+    let (_, after_group) = env.market_state();
+    let after_extractor = env.portfolio_state(extractor);
+    let after_probe = env.portfolio_state(probe);
+    let pair_equity_after = after_extractor.capital.get() as i128
+        + after_extractor.pnl.get()
+        + after_probe.capital.get() as i128
+        + after_probe.pnl.get();
+    assert!(!has_active_leg_for_asset(&after_extractor, 0));
+    assert!(!has_active_leg_for_asset(&after_probe, 0));
+    assert_eq!(after_group.assets[0].oi_eff_long_q, 0);
+    assert_eq!(after_group.assets[0].oi_eff_short_q, 0);
     assert_eq!(
-        env.svm.get_account(&env.market).unwrap().data,
-        before_market.data
+        after_group.assets[0].effective_price,
+        before_group.assets[0].effective_price
     );
-    assert_eq!(
-        env.svm.get_account(&extractor).unwrap().data,
-        before_extractor.data
-    );
-    assert_eq!(env.svm.get_account(&probe).unwrap().data, before_probe.data);
+    assert_eq!(after_group.insurance, before_group.insurance);
+    assert_eq!(after_group.vault, before_group.vault);
+    assert_eq!(after_extractor.pnl.get(), 0);
+    assert_eq!(after_probe.pnl.get(), -500);
+    assert_eq!(pair_equity_after, pair_equity_before);
 }
 
+// Defense in depth: the bankrupt pre-state is injected directly, so this is not public
+// reachability evidence. It checks the CPI route has the same strict-reduction semantics.
 #[test]
-fn v16_bpf_tradecpi_rejects_when_counterparty_starts_bankrupt() {
+fn v16_bpf_tradecpi_reduces_injected_bankrupt_counterparty_without_value_creation() {
     let mut env = V16CuEnv::new();
     let matcher_program = Pubkey::new_unique();
     let matcher_bytes = std::fs::read(matcher_program_path()).expect("read matcher BPF");
@@ -9738,10 +9819,15 @@ fn v16_bpf_tradecpi_rejects_when_counterparty_starts_bankrupt() {
         );
 
     let before_market = env.svm.get_account(&env.market).unwrap();
-    let before_extractor = env.svm.get_account(&extractor).unwrap();
     let before_probe = env.svm.get_account(&probe).unwrap();
     let before_matcher = env.svm.get_account(&matcher_ctx).unwrap();
+    let (before_cfg, before_group) = state::read_market(&before_market.data).unwrap();
+    let before_extractor_state = env.portfolio_state(extractor);
     let before_probe_state = state::read_portfolio(&before_probe.data).unwrap();
+    let pair_equity_before = before_extractor_state.capital.get() as i128
+        + before_extractor_state.pnl.get()
+        + before_probe_state.capital.get() as i128
+        + before_probe_state.pnl.get();
     assert_eq!(before_probe_state.capital.get(), 0);
     assert!(
         before_probe_state.pnl.get() < 0,
@@ -9753,39 +9839,58 @@ fn v16_bpf_tradecpi_rejects_when_counterparty_starts_bankrupt() {
         "refreshed probe certificate must confirm negative equity before the attempted matcher trade"
     );
 
-    let close = env.try_trade_cpi_with_cu_on_asset(
-        &probe_owner,
-        probe,
-        &extractor_owner,
-        extractor,
-        matcher_program,
-        matcher_ctx,
-        matcher_delegate,
-        0,
-        (10 * POS_SCALE) as i128,
-        0,
+    let close_cu = env
+        .try_trade_cpi_with_cu_on_asset(
+            &probe_owner,
+            probe,
+            &extractor_owner,
+            extractor,
+            matcher_program,
+            matcher_ctx,
+            matcher_delegate,
+            0,
+            (10 * POS_SCALE) as i128,
+            0,
+        )
+        .expect(
+            "a hostile matcher quote cannot block strict reduction of an injected bankrupt state",
+        );
+    assert_cu_within(
+        "injected-bankruptcy TradeCpi strict reduction",
+        close_cu,
+        TRADE_CU_LIMIT,
     );
-    assert!(
-        close.is_err(),
-        "bankrupt probe must not use an off-mark matcher fill as a normal bilateral trade"
-    );
+    let (after_cfg, after_group) = env.market_state();
+    let after_extractor = env.portfolio_state(extractor);
+    let after_probe = env.portfolio_state(probe);
+    let pair_equity_after = after_extractor.capital.get() as i128
+        + after_extractor.pnl.get()
+        + after_probe.capital.get() as i128
+        + after_probe.pnl.get();
+    assert!(!has_active_leg_for_asset(&after_extractor, 0));
+    assert!(!has_active_leg_for_asset(&after_probe, 0));
+    assert_eq!(after_group.assets[0].oi_eff_long_q, 0);
+    assert_eq!(after_group.assets[0].oi_eff_short_q, 0);
     assert_eq!(
-        env.svm.get_account(&env.market).unwrap().data,
-        before_market.data
+        after_group.assets[0].effective_price,
+        before_group.assets[0].effective_price
     );
-    assert_eq!(
-        env.svm.get_account(&extractor).unwrap().data,
-        before_extractor.data
-    );
-    assert_eq!(env.svm.get_account(&probe).unwrap().data, before_probe.data);
-    assert_eq!(
+    assert_eq!(after_group.insurance, before_group.insurance);
+    assert_eq!(after_group.vault, before_group.vault);
+    assert_eq!(after_extractor.pnl.get(), 0);
+    assert_eq!(after_probe.pnl.get(), -500);
+    assert_eq!(pair_equity_after, pair_equity_before);
+    assert_eq!(after_cfg.matcher_req_seq, before_cfg.matcher_req_seq + 1);
+    assert_ne!(
         env.svm.get_account(&matcher_ctx).unwrap().data,
         before_matcher.data
     );
 }
 
+// Defense in depth: both bankrupt states are injected directly. This verifies the bilateral
+// reduction boundary without treating the setup as a publicly reachable finding.
 #[test]
-fn v16_bpf_tradenocpi_rejects_when_both_counterparties_start_bankrupt() {
+fn v16_bpf_tradenocpi_reduces_two_injected_bankrupt_accounts_without_value_creation() {
     let mut env = V16CuEnv::new();
     env.top_up_insurance(1_000_000);
 
@@ -9822,41 +9927,55 @@ fn v16_bpf_tradenocpi_rejects_when_both_counterparties_start_bankrupt() {
     );
 
     let before_market = env.svm.get_account(&env.market).unwrap();
-    let before_long = env.svm.get_account(&long_account).unwrap();
-    let before_short = env.svm.get_account(&short_account).unwrap();
-    let before_long_state = state::read_portfolio(&before_long.data).unwrap();
-    let before_short_state = state::read_portfolio(&before_short.data).unwrap();
+    let (_, before_group) = state::read_market(&before_market.data).unwrap();
+    let before_long_state = env.portfolio_state(long_account);
+    let before_short_state = env.portfolio_state(short_account);
+    let pair_equity_before = before_long_state.capital.get() as i128
+        + before_long_state.pnl.get()
+        + before_short_state.capital.get() as i128
+        + before_short_state.pnl.get();
     assert!(health_cert(&before_long_state).valid);
     assert!(health_cert(&before_short_state).valid);
     assert!(health_cert(&before_long_state).certified_equity < 0);
     assert!(health_cert(&before_short_state).certified_equity < 0);
 
-    let close = env.try_trade_asset_with_cu(
-        0,
-        &long_owner,
-        long_account,
-        &short_owner,
-        short_account,
-        -((10 * POS_SCALE) as i128),
-        100,
-        0,
+    let close_cu = env
+        .try_trade_asset_with_cu(
+            0,
+            &long_owner,
+            long_account,
+            &short_owner,
+            short_account,
+            -((10 * POS_SCALE) as i128),
+            100,
+            0,
+        )
+        .expect("two injected bankrupt accounts must still be able to strictly reduce");
+    assert_cu_within(
+        "two-injected-bankrupt TradeNoCpi strict reduction",
+        close_cu,
+        TRADE_CU_LIMIT,
     );
-    assert!(
-        close.is_err(),
-        "two bankrupt counterparties must not use TradeNoCpi as a bankruptcy close"
-    );
+    let (_, after_group) = env.market_state();
+    let after_long = env.portfolio_state(long_account);
+    let after_short = env.portfolio_state(short_account);
+    let pair_equity_after = after_long.capital.get() as i128
+        + after_long.pnl.get()
+        + after_short.capital.get() as i128
+        + after_short.pnl.get();
+    assert!(!has_active_leg_for_asset(&after_long, 0));
+    assert!(!has_active_leg_for_asset(&after_short, 0));
+    assert_eq!(after_group.assets[0].oi_eff_long_q, 0);
+    assert_eq!(after_group.assets[0].oi_eff_short_q, 0);
     assert_eq!(
-        env.svm.get_account(&env.market).unwrap().data,
-        before_market.data
+        after_group.assets[0].effective_price,
+        before_group.assets[0].effective_price
     );
-    assert_eq!(
-        env.svm.get_account(&long_account).unwrap().data,
-        before_long.data
-    );
-    assert_eq!(
-        env.svm.get_account(&short_account).unwrap().data,
-        before_short.data
-    );
+    assert_eq!(after_group.insurance, before_group.insurance);
+    assert_eq!(after_group.vault, before_group.vault);
+    assert_eq!(after_long.pnl.get(), -500);
+    assert_eq!(after_short.pnl.get(), -500);
+    assert_eq!(pair_equity_after, pair_equity_before);
 }
 
 #[test]
@@ -10025,6 +10144,7 @@ fn v16_attack_auto_crank_current_solvent_partial_liquidation_makes_progress() {
         100,
         0,
     );
+    let position_epoch_after_trade = env.portfolio_position_epoch(short_account);
 
     env.svm.warp_to_slot(2);
     env.push_auth_mark_with_cu(2, 300);
@@ -10047,6 +10167,11 @@ fn v16_attack_auto_crank_current_solvent_partial_liquidation_makes_progress() {
     let before_group = env.market_state().1;
     let before_short = env.portfolio_state(short_account);
     let before_cert = health_cert(&before_short);
+    assert_eq!(
+        env.portfolio_position_epoch(short_account),
+        position_epoch_after_trade,
+        "refresh-only cranks must not invalidate signed position consent"
+    );
     assert!(
         before_cert.certified_liq_deficit != 0 && before_cert.certified_equity > 0,
         "setup must be solvent but liquidatable before partial liquidation: {before_cert:?}"
@@ -10075,6 +10200,11 @@ fn v16_attack_auto_crank_current_solvent_partial_liquidation_makes_progress() {
     let after_short = env.portfolio_state(short_account);
     let closed = oi_pre.saturating_sub(after_group.assets[0].oi_eff_short_q);
     assert!(closed > 0, "partial liquidation must reduce open interest");
+    assert_eq!(
+        env.portfolio_position_epoch(short_account),
+        position_epoch_after_trade + 1,
+        "a successful liquidation must advance the position episode exactly once"
+    );
     assert!(
         closed < oi_pre,
         "solvent liquidation should preserve the engine-selected remaining position: closed={closed}"
@@ -16517,6 +16647,8 @@ fn v16_attack_public_helpers_cannot_use_market_as_portfolio_alias() {
     env.svm.expire_blockhash();
     let reduce = env.send(
         ProgInstruction::RebalanceReduce {
+            portfolio_id: 1,
+            position_epoch: 0,
             asset_index: 0,
             reduce_q: POS_SCALE,
         },
@@ -16536,6 +16668,8 @@ fn v16_attack_public_helpers_cannot_use_market_as_portfolio_alias() {
     env.svm.expire_blockhash();
     let forfeit = env.send(
         ProgInstruction::ForfeitRecoveryLeg {
+            portfolio_id: 1,
+            position_epoch: 0,
             asset_index: 0,
             b_delta_budget: 1,
         },
@@ -17370,43 +17504,71 @@ fn v16_regression_cross_margin_insolvency_no_value_extraction() {
             }
         }
     }
-    // A live liquidation cannot safely close this deeply insolvent cross-margin victim. It must
-    // return recovery-required and roll back, not partially apply a value-creating close.
-    let close_ix = ProgInstruction::PermissionlessCrank {
-        now_slot: 2,
-        observations: crank_observations(0),
+    // Deep insolvency must remain permissionlessly reducible. Each successful call performs one
+    // bounded engine-selected step; it may reduce exposure or escalate to terminal recovery, but
+    // it cannot move custody or create value.
+    let position_abs = |account: &PortfolioAccountV16| -> u128 {
+        [0usize, 1]
+            .into_iter()
+            .map(|asset_index| {
+                if has_active_leg_for_asset(account, asset_index) {
+                    active_leg_for_asset(account, asset_index)
+                        .basis_pos_q
+                        .unsigned_abs()
+                } else {
+                    0
+                }
+            })
+            .sum()
     };
-    let close_accounts = vec![
-        AccountMeta::new(env.payer.pubkey(), true),
-        AccountMeta::new(env.market, false),
-        AccountMeta::new(victim, false),
-    ];
-    env.svm.expire_blockhash();
-    let first = env.send(close_ix.clone(), close_accounts.clone(), &[]);
-    let (market_before_reject, reject) = if first.is_ok() {
-        assert!(
-            has_active_leg_for_asset(&env.portfolio_state(victim), 0),
-            "first auto-crank close attempt may only refresh before the rejecting liquidation"
-        );
-        let before = env.svm.get_account(&env.market).unwrap();
+    let victim_before_progress = env.portfolio_state(victim);
+    let exposure_before = position_abs(&victim_before_progress);
+    let (_, group_before_progress) = env.market_state();
+    let vault_tokens_before = env.token_amount(env.vault);
+    let mut successful_steps = 0usize;
+    for _ in 0..8 {
+        if env.market_state().1.mode != MarketModeV16::Live {
+            break;
+        }
         env.svm.expire_blockhash();
-        (before, env.send(close_ix, close_accounts, &[]))
-    } else {
-        (env.svm.get_account(&env.market).unwrap(), first)
-    };
+        let step = env.send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 2,
+                observations: vec![
+                    CrankObservationHint {
+                        asset_index: 0,
+                        oracle_accounts: 0,
+                    },
+                    CrankObservationHint {
+                        asset_index: 1,
+                        oracle_accounts: 0,
+                    },
+                ],
+            },
+            vec![
+                AccountMeta::new(env.payer.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(victim, false),
+            ],
+            &[],
+        );
+        if let Ok(cu) = step {
+            successful_steps += 1;
+            assert_cu_within("cross-margin insolvency progress", cu, CRANK_CU_LIMIT);
+        }
+    }
+    let victim_after_progress = env.portfolio_state(victim);
+    let (_, group_after_progress) = env.market_state();
+    assert!(successful_steps != 0);
     assert!(
-        reject.is_err(),
-        "deep cross-margin insolvency must not live-liquidate"
+        position_abs(&victim_after_progress) < exposure_before
+            || group_after_progress.mode != MarketModeV16::Live,
+        "bounded public cranks must reduce exposure or enter terminal recovery"
     );
-    let err = format!("{:?}", reject);
+    assert_eq!(group_after_progress.vault, group_before_progress.vault);
+    assert_eq!(env.token_amount(env.vault), vault_tokens_before);
     assert!(
-        err.contains("Custom(23)"),
-        "expected EngineRecoveryRequired, got {err}"
-    );
-    assert_eq!(
-        env.svm.get_account(&env.market).unwrap().data,
-        market_before_reject.data,
-        "rejected cross-margin liquidation rolls back market bytes"
+        group_after_progress.vault >= group_after_progress.c_tot + group_after_progress.insurance
     );
 
     let v = state::read_portfolio(&env.svm.get_account(&victim).unwrap().data).unwrap();
@@ -17626,7 +17788,35 @@ fn v16_attack_resolved_cross_margin_deep_insolvency_winds_down_publicly() {
         has_active_leg_for_asset(&before, 0) && has_active_leg_for_asset(&before, 1),
         "setup leaves unattributed multi-asset exposure"
     );
-    env.resolve();
+    for _ in 0..3 {
+        match env.market_state().1.mode {
+            MarketModeV16::Resolved => break,
+            MarketModeV16::Recovery => {
+                env.svm.expire_blockhash();
+                let cu = env
+                    .send(
+                        ProgInstruction::PermissionlessCrank {
+                            now_slot: 2,
+                            observations: vec![],
+                        },
+                        vec![
+                            AccountMeta::new_readonly(env.payer.pubkey(), false),
+                            AccountMeta::new(env.market, false),
+                            AccountMeta::new(victim, false),
+                        ],
+                        &[],
+                    )
+                    .expect("Recovery has a permissionless terminal continuation");
+                assert_cu_within(
+                    "cross-margin Recovery terminal continuation",
+                    cu,
+                    CRANK_CU_LIMIT,
+                );
+            }
+            mode => panic!("permissionless insolvency sequence stalled in {mode:?}"),
+        }
+    }
+    assert_eq!(env.market_state().1.mode, MarketModeV16::Resolved);
 
     env.svm.expire_blockhash();
     let loser_crank_cu = env
@@ -20876,7 +21066,8 @@ fn v16_attack_disabled_lp_matcher_config_blocks_cpi_fills() {
     env.set_matcher_config(matcher_program, &lp_owner, lp, ctx, delegate, 0);
     let auth_state = env.portfolio_matcher_config(lp);
     assert_eq!(
-        auth_state.enabled, 0,
+        auth_state.enabled(),
+        0,
         "LP owner revoked unsigned matcher fills"
     );
     let market_before = env.svm.get_account(&env.market).unwrap();
@@ -21004,7 +21195,8 @@ fn v16_attack_non_owner_cannot_change_lp_matcher_config() {
     assert_eq!(env.svm.get_account(&ctx).unwrap(), ctx_before);
     let auth_state = env.portfolio_matcher_config(lp);
     assert_eq!(
-        auth_state.enabled, 1,
+        auth_state.enabled(),
+        1,
         "LP matcher config remains enabled after attacker attempt"
     );
 
@@ -21444,7 +21636,8 @@ fn v16_attack_set_lp_matcher_config_cannot_target_protocol_accounts() {
     env.set_matcher_config(matcher_program, &lp_owner, lp, ctx, delegate, 1);
     let auth_state = env.portfolio_matcher_config(lp);
     assert_eq!(
-        auth_state.enabled, 1,
+        auth_state.enabled(),
+        1,
         "a real LP account stores the matcher program/context config"
     );
     assert_eq!(auth_state.matcher_program, matcher_program.to_bytes());
@@ -21524,7 +21717,7 @@ fn v16_attack_matcher_config_and_fills_reject_self_program_context() {
             matcher_program: env.program_id.to_bytes(),
             matcher_context: env.market.to_bytes(),
             matcher_delegate: self_delegate.to_bytes(),
-            enabled: 1,
+            control: 1,
         },
     )
     .expect("inject stale self-matcher config for fill-time guard");
@@ -21661,7 +21854,7 @@ fn v16_attack_set_matcher_config_reallocs_legacy_lp_portfolio_safely() {
         "SetMatcherConfig must realloc legacy LP storage before writing the matcher tail"
     );
     let auth_state = env.portfolio_matcher_config(lp);
-    assert_eq!(auth_state.enabled, 1);
+    assert_eq!(auth_state.enabled(), 1);
     assert_eq!(auth_state.matcher_program, matcher_program.to_bytes());
     assert_eq!(auth_state.matcher_context, ctx.to_bytes());
     assert_eq!(auth_state.matcher_delegate, delegate.to_bytes());
@@ -21797,7 +21990,7 @@ fn v16_attack_set_matcher_config_bad_legacy_context_rolls_back_realloc() {
         "valid SetMatcherConfig still grows the legacy LP storage"
     );
     let auth_state = env.portfolio_matcher_config(lp);
-    assert_eq!(auth_state.enabled, 1);
+    assert_eq!(auth_state.enabled(), 1);
     assert_eq!(auth_state.matcher_program, matcher_program.to_bytes());
     assert_eq!(auth_state.matcher_context, ctx.to_bytes());
     assert_eq!(auth_state.matcher_delegate, delegate.to_bytes());
@@ -28874,6 +29067,8 @@ fn v16_attack_rebalance_reduce_owner_gated() {
     env.svm.expire_blockhash();
     let r_grief = env.send(
         ProgInstruction::RebalanceReduce {
+            portfolio_id: env.portfolio_id(pa),
+            position_epoch: env.portfolio_position_epoch(pa),
             asset_index: 0,
             reduce_q: POS_SCALE,
         },
@@ -28903,6 +29098,8 @@ fn v16_attack_rebalance_reduce_owner_gated() {
     env.svm.expire_blockhash();
     let r_owner = env.send(
         ProgInstruction::RebalanceReduce {
+            portfolio_id: env.portfolio_id(pa),
+            position_epoch: env.portfolio_position_epoch(pa),
             asset_index: 0,
             reduce_q: POS_SCALE,
         },
@@ -29017,6 +29214,10 @@ fn v16_attack_rebalance_reduce_rejects_cross_market_portfolio_substitution() {
     let foreign_before = env.svm.get_account(&foreign).unwrap();
     let local_before = env.svm.get_account(&local).unwrap();
     let vault_b_before = env.svm.get_account(&vault_b).unwrap();
+    let foreign_portfolio_id = env.portfolio_id(foreign);
+    let foreign_position_epoch = env.portfolio_position_epoch(foreign);
+    let local_portfolio_id = env.portfolio_id(local);
+    let local_position_epoch = env.portfolio_position_epoch(local);
     let reduce_q = POS_SCALE / 2;
     env.svm.expire_blockhash();
     let rejected = send_tx(
@@ -29024,6 +29225,8 @@ fn v16_attack_rebalance_reduce_rejects_cross_market_portfolio_substitution() {
         env.program_id,
         &env.payer,
         ProgInstruction::RebalanceReduce {
+            portfolio_id: foreign_portfolio_id,
+            position_epoch: foreign_position_epoch,
             asset_index: 0,
             reduce_q,
         },
@@ -29058,6 +29261,8 @@ fn v16_attack_rebalance_reduce_rejects_cross_market_portfolio_substitution() {
         env.program_id,
         &env.payer,
         ProgInstruction::RebalanceReduce {
+            portfolio_id: local_portfolio_id,
+            position_epoch: local_position_epoch,
             asset_index: 0,
             reduce_q,
         },
@@ -29180,6 +29385,11 @@ fn v16_attack_forfeit_recovery_leg_rejects_cross_market_portfolio_substitution()
         "control forfeit target is genuinely bound to market B"
     );
 
+    let foreign_portfolio_id = env.portfolio_id(foreign);
+    let foreign_position_epoch = env.portfolio_position_epoch(foreign);
+    let local_portfolio_id = env.portfolio_id(local);
+    let local_position_epoch = env.portfolio_position_epoch(local);
+
     let market_a_before = env.svm.get_account(&env.market).unwrap();
     let market_b_before = env.svm.get_account(&market_b).unwrap();
     let foreign_before = env.svm.get_account(&foreign).unwrap();
@@ -29192,6 +29402,8 @@ fn v16_attack_forfeit_recovery_leg_rejects_cross_market_portfolio_substitution()
         env.program_id,
         &env.payer,
         ProgInstruction::ForfeitRecoveryLeg {
+            portfolio_id: foreign_portfolio_id,
+            position_epoch: foreign_position_epoch,
             asset_index: 0,
             b_delta_budget: 1,
         },
@@ -29227,6 +29439,8 @@ fn v16_attack_forfeit_recovery_leg_rejects_cross_market_portfolio_substitution()
         env.program_id,
         &env.payer,
         ProgInstruction::ForfeitRecoveryLeg {
+            portfolio_id: local_portfolio_id,
+            position_epoch: local_position_epoch,
             asset_index: 0,
             b_delta_budget: 1,
         },
@@ -29373,6 +29587,8 @@ fn v16_attack_recovery_tools_owner_gated() {
     env.svm.expire_blockhash();
     let r1 = env.send(
         ProgInstruction::ForfeitRecoveryLeg {
+            portfolio_id: env.portfolio_id(pa),
+            position_epoch: env.portfolio_position_epoch(pa),
             asset_index: 0,
             b_delta_budget: 1,
         },
@@ -29704,6 +29920,14 @@ fn v16_attack_reset_pending_rejects_fresh_counterparty_and_completes_recovery() 
             observations: Vec::new(),
         },
     );
+    let (_, group_after_cleanup) = env.market_state();
+    let reset_pending_after_cleanup = group_after_cleanup.assets[0];
+    assert_eq!(
+        reset_pending_after_cleanup.mode_long,
+        SideModeV16::ResetPending
+    );
+    assert_eq!(reset_pending_after_cleanup.stored_pos_count_long, 0);
+    assert!(!has_active_leg_for_asset(&env.portfolio_state(long), 0));
     let fresh_short_owner = Keypair::new();
     let fresh_short = env.create_portfolio(&fresh_short_owner);
     env.deposit(&fresh_short_owner, fresh_short, 20_000);
@@ -29738,13 +29962,11 @@ fn v16_attack_reset_pending_rejects_fresh_counterparty_and_completes_recovery() 
     assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
 
     let (_, group) = env.market_state();
-    assert_eq!(group.assets[0], reset_pending);
+    assert_eq!(group.assets[0], reset_pending_after_cleanup);
     assert!(percolator::active_bitmap_is_empty(active_bitmap(
         &env.portfolio_state(fresh_short)
     )));
 
-    let forfeit_cu = env.forfeit_recovery_leg_with_cu(&long_owner, long, 0, 1);
-    assert_cu_within("ForfeitRecoveryLeg", forfeit_cu, CUSTODY_CU_LIMIT);
     let finalize_cu = env.finalize_reset_side_with_cu(0, 0);
     assert_cu_within("FinalizeResetSide", finalize_cu, CUSTODY_CU_LIMIT);
     let (_, finalized) = env.market_state();
@@ -37066,6 +37288,8 @@ fn v16_attack_force_close_requires_opposite_sides() {
     let market_before = env.svm.get_account(&env.market).unwrap();
     let long_a_before = env.svm.get_account(&long_a).unwrap();
     let long_b_before = env.svm.get_account(&long_b).unwrap();
+    let long_epoch_before = env.portfolio_position_epoch(long_a);
+    let short_epoch_before = env.portfolio_position_epoch(short_a);
     let cranker = Keypair::new();
     let same_side = env.try_force_close_abandoned_asset_with_cu(
         &cranker,
@@ -37094,6 +37318,8 @@ fn v16_attack_force_close_requires_opposite_sides() {
         long_b_before,
         "same-side force-close leaves second account byte-identical"
     );
+    assert_eq!(env.portfolio_position_epoch(long_a), long_epoch_before);
+    assert_eq!(env.portfolio_position_epoch(short_a), short_epoch_before);
 
     let ok = env.try_force_close_abandoned_asset_with_cu(
         &cranker,
@@ -37106,6 +37332,16 @@ fn v16_attack_force_close_requires_opposite_sides() {
     assert!(
         ok.is_ok(),
         "valid opposite-side force-close still succeeds: {ok:?}"
+    );
+    assert_eq!(
+        env.portfolio_position_epoch(long_a),
+        long_epoch_before + 1,
+        "force-close advances the long position episode exactly once"
+    );
+    assert_eq!(
+        env.portfolio_position_epoch(short_a),
+        short_epoch_before + 1,
+        "force-close advances the short position episode exactly once"
     );
     let group = env.market_state().1;
     assert_eq!(
@@ -54715,6 +54951,8 @@ fn v16_attack_forfeit_recovery_leg_owner_gated_and_zero_budget_rejected() {
     env.svm.expire_blockhash();
     let r_grief = env.send(
         ProgInstruction::ForfeitRecoveryLeg {
+            portfolio_id: env.portfolio_id(pa),
+            position_epoch: env.portfolio_position_epoch(pa),
             asset_index: 0,
             b_delta_budget: 1_000,
         },
@@ -54744,6 +54982,8 @@ fn v16_attack_forfeit_recovery_leg_owner_gated_and_zero_budget_rejected() {
     env.svm.expire_blockhash();
     let r_zero = env.send(
         ProgInstruction::ForfeitRecoveryLeg {
+            portfolio_id: env.portfolio_id(pa),
+            position_epoch: env.portfolio_position_epoch(pa),
             asset_index: 0,
             b_delta_budget: 0,
         },
@@ -56652,6 +56892,8 @@ fn v16_attack_forfeit_recovery_leg_rejects_when_resolve_matured() {
     env.svm.expire_blockhash();
     let rejected = env.send(
         ProgInstruction::ForfeitRecoveryLeg {
+            portfolio_id: env.portfolio_id(stale_long),
+            position_epoch: env.portfolio_position_epoch(stale_long),
             asset_index: 0,
             b_delta_budget: 1,
         },
@@ -56751,6 +56993,8 @@ fn v16_attack_rebalance_reduce_rejects_when_resolve_matured() {
     env.svm.expire_blockhash();
     let rejected = env.send(
         ProgInstruction::RebalanceReduce {
+            portfolio_id: env.portfolio_id(long),
+            position_epoch: env.portfolio_position_epoch(long),
             asset_index: 0,
             reduce_q: remaining,
         },
@@ -58066,6 +58310,8 @@ fn v16_attack_rebalance_reduce_overshoot_clamps_to_flat_no_flip() {
     env.svm.expire_blockhash();
     let r = env.send(
         ProgInstruction::RebalanceReduce {
+            portfolio_id: env.portfolio_id(pa),
+            position_epoch: env.portfolio_position_epoch(pa),
             asset_index: 0,
             reduce_q: 3 * POS_SCALE,
         },

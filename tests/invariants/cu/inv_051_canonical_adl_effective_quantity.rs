@@ -14,6 +14,8 @@
 //! bounded no-observation crank that removes the raw residue, conserved SPL custody, and recovery
 //! of the owner's remaining capital. The stateful global oracle in `support/fuzz_model.rs` applies
 //! the same zero-OI/reset condition after every successful generated public instruction.
+//! Secondary coverage: INV-073, because each matrix also proves that the funded owner has a
+//! bounded public cleanup and capital-exit sequence after pooled OI reaches zero.
 //!
 //! Guarantee boundary: this closes the exact-zero pooled-OI boundary for crossed trades and
 //! unilateral rebalance. Liquidation reaches the same engine reset helper and has engine contract

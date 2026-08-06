@@ -8,6 +8,9 @@ use percolator_prog::matcher_abi::{
 };
 use percolator_prog::policy_v16;
 
+#[path = "invariants/kani/inv_004_position_episode_binding.rs"]
+mod inv_004_position_episode_binding;
+
 fn assert_rejects_trailing_byte(ix: Instruction, extra: u8) {
     let mut data = ix.encode();
     data.push(extra);

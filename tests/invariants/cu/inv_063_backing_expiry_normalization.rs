@@ -158,6 +158,8 @@ fn v16_program_retained_recovery_expiry_prerequisite_matrix_avoids_provider_capi
                     AccountMeta::new(victim, false),
                 ],
                 data: ProgInstruction::ForfeitRecoveryLeg {
+                    portfolio_id: env.portfolio_id(victim),
+                    position_epoch: env.portfolio_position_epoch(victim),
                     asset_index: ASSET,
                     b_delta_budget: u128::MAX,
                 }

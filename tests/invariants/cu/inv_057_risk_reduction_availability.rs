@@ -918,6 +918,8 @@ fn v16_attack_non_base_local_stale_owner_reduce_remains_live() {
     env.svm.expire_blockhash();
     let reduce = env.send(
         ProgInstruction::RebalanceReduce {
+            portfolio_id: env.portfolio_id(taker_portfolio),
+            position_epoch: env.portfolio_position_epoch(taker_portfolio),
             asset_index: 1,
             reduce_q: POS_SCALE,
         },

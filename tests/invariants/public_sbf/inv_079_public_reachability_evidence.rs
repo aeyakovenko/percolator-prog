@@ -285,6 +285,11 @@ fn v16_open_security_finding_benchmark_is_complete_and_non_overclaiming() {
             include_str!("../stateful/inv_045_no_free_mark_movement.rs"),
         ),
         (
+            51,
+            &[51, 73],
+            include_str!("../cu/inv_051_canonical_adl_effective_quantity.rs"),
+        ),
+        (
             53,
             &[53],
             include_str!("../stateful/inv_053_full_health_recertification_equivalence.rs"),
@@ -399,7 +404,7 @@ fn v16_open_security_finding_benchmark_is_complete_and_non_overclaiming() {
                     | "terminal-residual-cannot-double-charge-provider-principal"
                     | "insurance-spend-remains-source-domain-local"
                     | "backing-atoms-cannot-support-claims-from-another-source"
-                    | "b-loss-reduces-only-the-originating-source-domain"
+                    | "b-loss-reduces-only-the-originating-source-domain-and-owner-exits"
                     | "liquidation-certificate-cannot-be-healthier-than-full-refresh"
                     | "expired-backing-cannot-create-withdrawable-provider-value"
                     | "expired-backing-cannot-capitalize-and-extract-independent-principal"
@@ -425,14 +430,14 @@ fn v16_open_security_finding_benchmark_is_complete_and_non_overclaiming() {
                     | "fractional-reset-carry-cannot-block-permissionless-liquidation"
                     | "post-adl-split-cannot-increase-withdrawable-backing-funded-value"
                     | "zero-effective-oi-funded-residue-must-enter-bounded-cleanup"
-                    | "partial-adl-recovery-residue-must-have-permissionless-cleanup"
+                    | "partial-adl-recovery-residue-has-permissionless-bounded-cleanup"
                     | "fractional-social-loss-carry-cannot-lock-funded-owner-exit"
                     | "fragmented-recovery-must-have-a-permissionless-pairwise-close-path"
                     | "forfeit-order-cannot-lock-provider-backed-recovery"
                     | "recovered-provider-backing-must-have-withdraw-or-restart-progress"
                     | "permissionless-asset-local-close-cannot-freeze-unrelated-funded-users"
-                    | "account-local-expired-close-cannot-create-global-funded-recovery-sink"
-                    | "recovery-mode-must-have-a-public-terminal-continuation"
+                    | "account-local-expired-close-preserves-unrelated-resolved-exit"
+                    | "recovery-escalation-reaches-public-resolved-continuation"
                     | "successful-crank-cannot-consume-zero-delta-price-time"
                     | "recovery-required-transition-must-not-rollback-funded-survivor-progress"
                     | "prospective-loss-must-not-create-backing-in-lapsed-domain"
@@ -472,6 +477,7 @@ fn v16_open_security_finding_benchmark_is_complete_and_non_overclaiming() {
         include_str!("inv_079_public_reachability_evidence.rs"),
         include_str!("../cu/inv_005_authority_incarnation_binding.rs"),
         include_str!("../cu/inv_028_source_domain_realizability_cap.rs"),
+        include_str!("../cu/inv_051_canonical_adl_effective_quantity.rs"),
         include_str!("../cu/inv_061_deterministic_bounded_liquidation.rs"),
         include_str!("../cu/inv_063_backing_expiry_normalization.rs"),
         include_str!("../cu/inv_067_terminal_payout_completeness_and_exact_once_settlement.rs"),

@@ -653,34 +653,26 @@ pub struct TerminalGenerationDiscovery {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PositionEpisodeDiscovery {
     pub kind: PositionEpisodeKind,
-    pub stale_intent_landed: bool,
-    pub authorized_prior_forfeit: u128,
-    pub victim_loss: u128,
-    pub counterparty_gain: u128,
-    pub unowned_vault_residual: u128,
-    pub terminal_close_blocked: bool,
+    pub stale_intent_rejected: bool,
+    pub exact_rollback: bool,
+    pub fresh_intent_landed: bool,
+    pub portfolio_id_unchanged: bool,
+    pub episode_advanced: bool,
+    pub replacement_exposure_preserved: bool,
+    pub fresh_intent_changed_exposure: bool,
+    pub token_supply_preserved: bool,
 }
 
 impl PositionEpisodeDiscovery {
-    pub fn is_violation(&self) -> bool {
-        if !self.stale_intent_landed {
-            return false;
-        }
-        match self.kind {
-            PositionEpisodeKind::RebalanceReduce => {
-                self.victim_loss != 0
-                    && self.victim_loss == self.counterparty_gain
-                    && self.unowned_vault_residual == 0
-            }
-            PositionEpisodeKind::RecoveryForfeit => {
-                self.victim_loss != 0
-                    && self.unowned_vault_residual
-                        == self
-                            .authorized_prior_forfeit
-                            .saturating_add(self.victim_loss)
-                    && self.terminal_close_blocked
-            }
-        }
+    pub fn satisfies_invariant(&self) -> bool {
+        self.stale_intent_rejected
+            && self.exact_rollback
+            && self.fresh_intent_landed
+            && self.portfolio_id_unchanged
+            && self.episode_advanced
+            && self.replacement_exposure_preserved
+            && self.fresh_intent_changed_exposure
+            && self.token_supply_preserved
     }
 }
 
@@ -2730,6 +2722,8 @@ fn discover_rebalance_position_episode(seed: [u8; 32]) -> Result<PositionEpisode
         .map_err(|error| format!("configure position-episode mark: {error}"))?;
     env.trade_no_cpi(0, 1, 0, OLD_SIZE_Q, PRICE, 0)
         .map_err(|error| format!("open old position episode: {error}"))?;
+    let signed_portfolio_id = env.primary_portfolio_id(0);
+    let signed_position_epoch = env.primary_portfolio_position_epoch(0);
     let retained = env.build_retained_rebalance_reduce(0, 0, NEW_SIZE_Q.unsigned_abs());
     env.trade_no_cpi(0, 1, 0, -OLD_SIZE_Q, PRICE, 0)
         .map_err(|error| format!("close old position episode: {error}"))?;
@@ -2754,43 +2748,52 @@ fn discover_rebalance_position_episode(seed: [u8; 32]) -> Result<PositionEpisode
     if env.primary_portfolio(0).capital.get() >= DEPOSIT {
         return Err("adverse mark did not debit replacement owner".into());
     }
-    env.land_retained(retained)
-        .map_err(|error| format!("old-episode rebalance intent rejected: {error}"))?;
-    if discovery_position(&env.primary_portfolio(0), 0)? != 0 {
-        return Err("stale rebalance did not close replacement episode".into());
+    let portfolio_id_unchanged = env.primary_portfolio_id(0) == signed_portfolio_id;
+    let episode_advanced = env.primary_portfolio_position_epoch(0) > signed_position_epoch;
+    let replacement_before = discovery_position(&env.primary_portfolio(0), 0)?;
+    if replacement_before == 0 {
+        return Err("replacement rebalance episode has no exposure".into());
+    }
+    let market_before = env.market_data(false);
+    let portfolio_before = env.primary_portfolio_data(0);
+    let vault_before = env.svm.get_account(&env.vault);
+    let supply_before_replay = env.token_supply_observed();
+    let stale_intent_rejected = env.land_retained(retained).is_err();
+    let exact_rollback = env.market_data(false) == market_before
+        && env.primary_portfolio_data(0) == portfolio_before
+        && env.svm.get_account(&env.vault) == vault_before
+        && env.token_supply_observed() == supply_before_replay;
+    let replacement_after_stale = discovery_position(&env.primary_portfolio(0), 0)?;
+    let replacement_exposure_preserved = replacement_after_stale == replacement_before;
+
+    if !stale_intent_rejected {
+        return Ok(PositionEpisodeDiscovery {
+            kind: PositionEpisodeKind::RebalanceReduce,
+            stale_intent_rejected,
+            exact_rollback,
+            fresh_intent_landed: false,
+            portfolio_id_unchanged,
+            episode_advanced,
+            replacement_exposure_preserved,
+            fresh_intent_changed_exposure: false,
+            token_supply_preserved: env.token_supply_observed() == supply_before,
+        });
     }
 
-    env.warp_to_slot(3);
-    env.push_auth_mark(0, 3, PRICE)
-        .map_err(|error| format!("restore neutral mark: {error}"))?;
-    let observation = vec![CrankObservationHint {
-        asset_index: 0,
-        oracle_accounts: env.primary_profile(0).oracle_leg_count,
-    }];
-    let _ = env.crank(1, 3, observation.clone());
-    let _ = env.crank(0, 3, observation);
-    env.resolve_market()
-        .map_err(|error| format!("resolve rebalance episode world: {error}"))?;
-    env.warp_to_slot(4);
-    let victim_payout = drain_resolved_discovery_actor(&mut env, 0)?;
-    let counterparty_payout = drain_resolved_discovery_actor(&mut env, 1)?;
-    let victim_loss = DEPOSIT
-        .checked_sub(victim_payout)
-        .ok_or_else(|| "rebalance replay increased victim payout".to_string())?;
-    let counterparty_gain = counterparty_payout
-        .checked_sub(DEPOSIT)
-        .ok_or_else(|| "rebalance replay decreased counterparty payout".to_string())?;
-    if env.token_supply_observed() != supply_before {
-        return Err("rebalance episode replay changed SPL supply".into());
-    }
+    let current = env.build_retained_rebalance_reduce(0, 0, NEW_SIZE_Q.unsigned_abs());
+    let fresh_intent_landed = env.land_retained(current).is_ok();
+    let replacement_after_fresh = discovery_position(&env.primary_portfolio(0), 0)?;
+    let fresh_intent_changed_exposure = fresh_intent_landed && replacement_after_fresh == 0;
     Ok(PositionEpisodeDiscovery {
         kind: PositionEpisodeKind::RebalanceReduce,
-        stale_intent_landed: true,
-        authorized_prior_forfeit: 0,
-        victim_loss,
-        counterparty_gain,
-        unowned_vault_residual: 0,
-        terminal_close_blocked: false,
+        stale_intent_rejected,
+        exact_rollback,
+        fresh_intent_landed,
+        portfolio_id_unchanged,
+        episode_advanced,
+        replacement_exposure_preserved,
+        fresh_intent_changed_exposure,
+        token_supply_preserved: env.token_supply_observed() == supply_before,
     })
 }
 
@@ -2798,7 +2801,6 @@ fn discover_recovery_position_episode(seed: [u8; 32]) -> Result<PositionEpisodeD
     const VICTIM_CAPITAL: u128 = 20_000;
     const FIRST_LOSER_CAPITAL: u128 = 10_000;
     const SECOND_LOSER_CAPITAL: u128 = 20_000;
-    const SECOND_GAIN: u128 = 20_000;
     const POSITION_Q: i128 = 10_000 * POS_SCALE as i128;
 
     let mut env = V16Svm::new(
@@ -2845,6 +2847,8 @@ fn discover_recovery_position_episode(seed: [u8; 32]) -> Result<PositionEpisodeD
         return Err("first bankruptcy did not create a live forfeitable recovery leg".into());
     }
 
+    let signed_portfolio_id = env.primary_portfolio_id(0);
+    let signed_position_epoch = env.primary_portfolio_position_epoch(0);
     let intended = env.build_retained_forfeit_recovery_leg(0, 0, u128::from(u64::MAX));
     let retained = env.build_retained_forfeit_recovery_leg(0, 0, u128::from(u64::MAX));
     if let Err(error) = env.land_retained(intended) {
@@ -2872,55 +2876,49 @@ fn discover_recovery_position_episode(seed: [u8; 32]) -> Result<PositionEpisodeD
     {
         return Err("replacement recovery episode was not live before stale consent".into());
     }
-    env.land_retained(retained)
-        .map_err(|error| format!("old-episode recovery forfeit rejected: {error}"))?;
-    if discovery_position(&env.primary_portfolio(0), 0)? != 0 {
-        return Err("stale recovery forfeit did not delete replacement episode".into());
-    }
-    env.finalize_reset_side(0, 0)
-        .map_err(|error| format!("finalize replacement recovery episode: {error}"))?;
-    env.resolve_market()
-        .map_err(|error| format!("resolve recovery episode world: {error}"))?;
-    env.warp_to_slot(4);
+    let portfolio_id_unchanged = env.primary_portfolio_id(0) == signed_portfolio_id;
+    let episode_advanced = env.primary_portfolio_position_epoch(0) > signed_position_epoch;
+    let replacement_before = discovery_position(&env.primary_portfolio(0), 0)?;
+    let market_before = env.market_data(false);
+    let portfolio_before = env.primary_portfolio_data(0);
+    let vault_before = env.svm.get_account(&env.vault);
+    let supply_before_replay = env.token_supply_observed();
+    let stale_intent_rejected = env.land_retained(retained).is_err();
+    let exact_rollback = env.market_data(false) == market_before
+        && env.primary_portfolio_data(0) == portfolio_before
+        && env.svm.get_account(&env.vault) == vault_before
+        && env.token_supply_observed() == supply_before_replay;
+    let replacement_after_stale = discovery_position(&env.primary_portfolio(0), 0)?;
+    let replacement_exposure_preserved = replacement_after_stale == replacement_before;
 
-    let victim_payout = drain_resolved_discovery_actor(&mut env, 0)?;
-    for actor in 1..PRIMARY_ACTOR_COUNT {
-        let _ = drain_resolved_discovery_actor(&mut env, actor)?;
+    if !stale_intent_rejected {
+        return Ok(PositionEpisodeDiscovery {
+            kind: PositionEpisodeKind::RecoveryForfeit,
+            stale_intent_rejected,
+            exact_rollback,
+            fresh_intent_landed: false,
+            portfolio_id_unchanged,
+            episode_advanced,
+            replacement_exposure_preserved,
+            fresh_intent_changed_exposure: false,
+            token_supply_preserved: env.token_supply_observed() == supply_before,
+        });
     }
-    let expected_victim_payout = VICTIM_CAPITAL
-        .checked_add(SECOND_GAIN)
-        .ok_or_else(|| "recovery expected payout overflow".to_string())?;
-    let victim_loss = expected_victim_payout
-        .checked_sub(victim_payout)
-        .ok_or_else(|| "recovery replay increased victim payout".to_string())?;
-    for actor in 0..PRIMARY_ACTOR_COUNT {
-        env.close_primary_portfolio(actor)
-            .map_err(|error| format!("close drained recovery actor {actor}: {error}"))?;
-    }
-    let drained = env.primary_market_state().1;
-    let unowned_vault_residual = drained
-        .vault
-        .checked_sub(drained.c_tot)
-        .and_then(|value| value.checked_sub(drained.insurance))
-        .ok_or_else(|| "recovery residual accounting underflow".to_string())?;
-    let market_before_close = env.market_data(false);
-    let vault_before_close = env.svm.get_account(&env.vault);
-    let terminal_close_blocked = env.close_primary_slab().is_err();
-    if !terminal_close_blocked
-        || env.market_data(false) != market_before_close
-        || env.svm.get_account(&env.vault) != vault_before_close
-        || env.token_supply_observed() != supply_before
-    {
-        return Err("recovery residual did not block terminal close atomically".into());
-    }
+
+    let current = env.build_retained_forfeit_recovery_leg(0, 0, u128::from(u64::MAX));
+    let fresh_intent_landed = env.land_retained(current).is_ok();
+    let replacement_after_fresh = discovery_position(&env.primary_portfolio(0), 0)?;
+    let fresh_intent_changed_exposure = fresh_intent_landed && replacement_after_fresh == 0;
     Ok(PositionEpisodeDiscovery {
         kind: PositionEpisodeKind::RecoveryForfeit,
-        stale_intent_landed: true,
-        authorized_prior_forfeit: FIRST_LOSER_CAPITAL,
-        victim_loss,
-        counterparty_gain: 0,
-        unowned_vault_residual,
-        terminal_close_blocked,
+        stale_intent_rejected,
+        exact_rollback,
+        fresh_intent_landed,
+        portfolio_id_unchanged,
+        episode_advanced,
+        replacement_exposure_preserved,
+        fresh_intent_changed_exposure,
+        token_supply_preserved: env.token_supply_observed() == supply_before,
     })
 }
 

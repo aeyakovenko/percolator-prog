@@ -4,11 +4,10 @@
 //! exactly once, and no settled value remains ownerless after every claimant exits.
 //!
 //! Evidence in this file (I/C):
-//! `v16_program_terminal_bankruptcy_residual_matrix_discovers_provider_double_charge` executes a
-//! complete public bankruptcy lifecycle with real insurance and backing principal. It independently
-//! reconciles user SPL payouts, provider withdrawals, and remaining custody. The matrix fails the
-//! invariant only when the provider bears the same 20M deficit twice and the duplicate charge is
-//! left ownerless in the canonical vault.
+//! `v16_program_terminal_bankruptcy_residual_matrix_preserves_provider_value` executes a complete
+//! public bankruptcy lifecycle with real insurance and backing principal. It independently
+//! reconciles user SPL payouts, provider withdrawals, and remaining custody, requiring every atom
+//! to end either in a user payout or the provider destination with zero ownerless vault residue.
 //! `v16_program_prior_claim_forfeit_prerequisite_matrix_preserves_withdrawable_value` creates a
 //! closed, backed claim followed by a new position episode and proves that the pinned predecessor
 //! preserves and pays the historical claim after counterparty-first Recovery.
@@ -16,8 +15,8 @@
 //! retained forfeit after a real B haircut and proves the predecessor still pays at least the
 //! complete earlier claim.
 //!
-//! Guarantee boundary: this is a public counterexample on the vulnerable engine pin, not a proof of
-//! the corrected terminal residual transition.
+//! Guarantee boundary: this is one adversarial public lifecycle matrix, not an exhaustive proof of
+//! every terminal residual partition.
 
 use super::*;
 
@@ -123,6 +122,8 @@ fn v16_program_retained_recovery_haircut_prerequisite_matrix_keeps_prior_claim_f
                     AccountMeta::new(victim, false),
                 ],
                 data: ProgInstruction::ForfeitRecoveryLeg {
+                    portfolio_id: env.portfolio_id(victim),
+                    position_epoch: env.portfolio_position_epoch(victim),
                     asset_index: ASSET,
                     b_delta_budget: u128::MAX,
                 }
@@ -268,6 +269,8 @@ fn v16_program_prior_claim_forfeit_prerequisite_matrix_preserves_withdrawable_va
     env.svm.expire_blockhash();
     env.send(
         ProgInstruction::ForfeitRecoveryLeg {
+            portfolio_id: env.portfolio_id(victim),
+            position_epoch: env.portfolio_position_epoch(victim),
             asset_index: ASSET,
             b_delta_budget: u128::MAX,
         },
@@ -334,7 +337,7 @@ fn v16_program_prior_claim_forfeit_prerequisite_matrix_preserves_withdrawable_va
 }
 
 #[test]
-fn v16_program_terminal_bankruptcy_residual_matrix_discovers_provider_double_charge() {
+fn v16_program_terminal_bankruptcy_residual_matrix_preserves_provider_value() {
     const DOMAIN_TRANCHE: u128 = 100_000_000;
     const PROVIDER_PRINCIPAL: u128 = 4 * DOMAIN_TRANCHE;
     const TRADER_CAPITAL: u128 = 10_000_000;
@@ -444,29 +447,41 @@ fn v16_program_terminal_bankruptcy_residual_matrix_discovers_provider_double_cha
     )));
 
     public_crank(&mut env, long, slot, false).expect("refresh reset winner");
-    env.send(
-        ProgInstruction::ForfeitRecoveryLeg {
-            asset_index: 0,
-            b_delta_budget: percolator::MAX_VAULT_TVL,
-        },
-        vec![
-            AccountMeta::new(long_owner.pubkey(), true),
-            AccountMeta::new(env.market, false),
-            AccountMeta::new(long, false),
-        ],
-        &[&long_owner],
-    )
-    .expect("winner clears recovery leg");
-    for side in [0u8, 1] {
+    if has_active_leg_for_asset(&env.portfolio_state(long), 0) {
         env.send(
-            ProgInstruction::FinalizeResetSide {
+            ProgInstruction::ForfeitRecoveryLeg {
+                portfolio_id: env.portfolio_id(long),
+                position_epoch: env.portfolio_position_epoch(long),
                 asset_index: 0,
-                side,
+                b_delta_budget: percolator::MAX_VAULT_TVL,
             },
-            vec![AccountMeta::new(env.market, false)],
-            &[],
+            vec![
+                AccountMeta::new(long_owner.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(long, false),
+            ],
+            &[&long_owner],
         )
-        .expect("finalize side reset");
+        .expect("winner clears recovery leg");
+    }
+    for side in [0u8, 1] {
+        let asset = env.market_state().1.assets[0];
+        let mode = if side == 0 {
+            asset.mode_long
+        } else {
+            asset.mode_short
+        };
+        if mode == SideModeV16::ResetPending {
+            env.send(
+                ProgInstruction::FinalizeResetSide {
+                    asset_index: 0,
+                    side,
+                },
+                vec![AccountMeta::new(env.market, false)],
+                &[],
+            )
+            .expect("finalize side reset");
+        }
     }
     assert!(percolator::active_bitmap_is_empty(active_bitmap(
         &env.portfolio_state(long)
@@ -534,16 +549,26 @@ fn v16_program_terminal_bankruptcy_residual_matrix_discovers_provider_double_cha
     let after_users = env.market_state().1;
     assert_eq!(after_users.materialized_portfolio_count, 0);
     assert_eq!(after_users.c_tot, 0);
+    let backing_after_users: u128 = [0usize, 1]
+        .into_iter()
+        .map(|domain| {
+            after_users.source_backing_buckets[domain].fresh_unliened_backing_num / BOUND_SCALE
+        })
+        .sum();
+    let claim_free_residual = after_users
+        .vault
+        .checked_sub(after_users.insurance + backing_after_users)
+        .expect("terminal classified stock cannot exceed custody");
     assert_eq!(
-        after_users.insurance, 180_000_000,
-        "the vulnerable transition must omit exactly one 20M residual recredit"
+        claim_free_residual, 20_000_000,
+        "the provider withdrawal must lazily recover the exact duplicated insurance charge"
     );
 
     let provider_destination = env.token_account(provider.pubkey(), 0);
     env.send(
         ProgInstruction::WithdrawInsuranceAsset {
             asset_index: 0,
-            amount: after_users.insurance,
+            amount: 2 * DOMAIN_TRANCHE,
         },
         vec![
             AccountMeta::new(provider.pubkey(), true),
@@ -579,7 +604,7 @@ fn v16_program_terminal_bankruptcy_residual_matrix_discovers_provider_double_cha
             .expect("withdraw remaining source backing");
         }
     }
-    assert_eq!(env.token_amount(provider_destination) as u128, 360_000_000);
-    assert_eq!(env.market_state().1.vault, 20_000_000);
-    assert_eq!(env.token_amount(env.vault), 20_000_000);
+    assert_eq!(env.token_amount(provider_destination) as u128, 380_000_000);
+    assert_eq!(env.market_state().1.vault, 0);
+    assert_eq!(env.token_amount(env.vault), 0);
 }

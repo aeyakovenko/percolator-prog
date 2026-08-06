@@ -3,15 +3,16 @@
 //! Normative obligation: Portfolio-scoped consent cannot cross close and same-pubkey recreation.
 //!
 //! Evidence in this file (F over public I routes):
-//! `v16_program_portfolio_incarnation_operation_matrix_discovers_stale_intents` enumerates the
-//! retained portfolio-operation registry without PR IDs or finding metadata. Finding-specific
-//! generated regressions remain below as impact confirmation. These tests exercise the deployed public
+//! `v16_program_portfolio_incarnation_operation_matrix_classifies_stale_intents` enumerates the
+//! retained portfolio-operation registry without PR IDs or finding metadata. It requires the two
+//! position-episode-bound routes to reject with exact rollback and preserves explicit counterexamples
+//! for the nine routes that remain open. Finding-specific generated regressions remain below as impact
+//! confirmation. These tests exercise the deployed public
 //! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
 //! rollback, liveness, or compute outcomes appropriate to the invariant.
 //!
-//! Guarantee boundary: a quarantined counterexample demonstrates public reachability; it does
-//! not certify the invariant on an unfixed pin. Certification requires the fixed-pin assertion
-//! plus every additional verification method required by the charter.
+//! Guarantee boundary: the fixed roster certifies only rebalance and recovery-forfeit episode
+//! binding. The open roster remains public counterexample evidence, not certification of INV-003.
 
 use super::*;
 
@@ -28,7 +29,7 @@ proptest! {
     })]
 
     #[test]
-    fn v16_program_portfolio_incarnation_operation_matrix_discovers_stale_intents(
+    fn v16_program_portfolio_incarnation_operation_matrix_classifies_stale_intents(
         seed in any::<[u8; 32]>()
     ) {
         let discoveries = discover_portfolio_incarnation_replays(seed)
@@ -44,11 +45,34 @@ proptest! {
             .map(|discovery| discovery.kind)
             .collect();
         eprintln!("independent INV-003 discoveries: {violations:?}");
+        let expected_violations = vec![
+            PortfolioIntentKind::Deposit,
+            PortfolioIntentKind::Withdraw,
+            PortfolioIntentKind::Close,
+            PortfolioIntentKind::MatcherDisable,
+            PortfolioIntentKind::TradeNoCpi,
+            PortfolioIntentKind::TradeCpi,
+            PortfolioIntentKind::BatchTradeNoCpi,
+            PortfolioIntentKind::BatchTradeCpi,
+            PortfolioIntentKind::ConvertReleasedPnl,
+        ];
         prop_assert_eq!(
             violations,
-            PortfolioIntentKind::ALL.to_vec(),
-            "vulnerable-pin discovery corpus changed; inspect every operation-class delta"
+            expected_violations,
+            "INV-003 fixed/open roster changed; inspect every operation-class delta"
         );
+        for fixed in [
+            PortfolioIntentKind::RebalanceReduce,
+            PortfolioIntentKind::ForfeitRecoveryLeg,
+        ] {
+            let discovery = discoveries
+                .iter()
+                .find(|discovery| discovery.kind == fixed)
+                .expect("complete portfolio-intent registry");
+            prop_assert!(!discovery.accepted_stale_intent);
+            prop_assert!(!discovery.mutated_economic_state);
+            prop_assert_eq!(discovery.compute_units, None);
+        }
     }
 }
 
@@ -119,13 +143,13 @@ proptest! {
     }
 
     #[test]
-    fn v16_program_pr278_forfeit_portfolio_incarnation_replay_fuzz(
+    fn v16_program_pr278_forfeit_portfolio_incarnation_rejection_fuzz(
         seed in forfeit_portfolio_incarnation_replay_seed_strategy()
     ) {
         let result = reproduce_forfeit_portfolio_incarnation_replay(seed);
         prop_assert!(
             result.is_ok(),
-            "PR 278 no longer reproduces for seed {:?}: {}",
+            "PR 278 fixed replay regression failed for seed {:?}: {}",
             seed,
             result.unwrap_err()
         );

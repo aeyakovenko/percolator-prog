@@ -13,8 +13,9 @@ extern crate std;
 use alloc::vec::Vec;
 use percolator::{
     v16_domain_count_for_market_slots, AutoCrankObservationV16, AutoCrankOutcomeV16,
-    AutoCrankPlanV16, AutoCrankWorkV16, MarketModeV16, RebalanceRequestV16, SideV16,
-    SourceCreditStateV16, TradeRequestV16, V16Config, V16Error, BOUND_SCALE,
+    AutoCrankPlanV16, AutoCrankWorkV16, MarketModeV16, PermissionlessProgressOutcomeV16,
+    RebalanceRequestV16, SideV16, SourceCreditStateV16, TradeRequestV16, V16Config, V16Error,
+    BOUND_SCALE,
 };
 use solana_program::{
     account_info::AccountInfo,
@@ -63,6 +64,7 @@ pub mod constants {
     pub const PORTFOLIO_ENGINE_ACCOUNT_LEN: usize = HEADER_LEN + PORTFOLIO_STATE_LEN;
     pub const PORTFOLIO_MATCHER_CONFIG_OFF: usize = PORTFOLIO_ENGINE_ACCOUNT_LEN;
     pub const PORTFOLIO_MATCHER_CONFIG_LEN: usize = 104;
+    pub const PORTFOLIO_MATCHER_CONTROL_OFF: usize = PORTFOLIO_MATCHER_CONFIG_OFF + 96;
     pub const PORTFOLIO_ID_OFF: usize = PORTFOLIO_MATCHER_CONFIG_OFF + PORTFOLIO_MATCHER_CONFIG_LEN;
     pub const PORTFOLIO_ID_LEN: usize = 8;
     pub const PORTFOLIO_ACCOUNT_LEN: usize = PORTFOLIO_ID_OFF + PORTFOLIO_ID_LEN;
@@ -161,8 +163,8 @@ pub mod state {
             ORACLE_LEG_FLAGS_MASK, ORACLE_MODE_AUTH_MARK, ORACLE_MODE_EWMA_MARK,
             ORACLE_MODE_HYBRID_AFTER_HOURS, ORACLE_MODE_MANUAL, PORTFOLIO_ACCOUNT_LEN,
             PORTFOLIO_ENGINE_ACCOUNT_LEN, PORTFOLIO_ID_LEN, PORTFOLIO_ID_OFF,
-            PORTFOLIO_MATCHER_CONFIG_LEN, PORTFOLIO_MATCHER_CONFIG_OFF, PORTFOLIO_STATE_LEN,
-            VERSION, WRAPPER_CONFIG_LEN,
+            PORTFOLIO_MATCHER_CONFIG_LEN, PORTFOLIO_MATCHER_CONFIG_OFF,
+            PORTFOLIO_MATCHER_CONTROL_OFF, PORTFOLIO_STATE_LEN, VERSION, WRAPPER_CONFIG_LEN,
         },
         error::PercolatorError,
     };
@@ -666,7 +668,32 @@ pub mod state {
         pub matcher_program: [u8; 32],
         pub matcher_context: [u8; 32],
         pub matcher_delegate: [u8; 32],
-        pub enabled: u64,
+        /// Bit 0 is the legacy matcher-enabled flag. Bits 1..63 are the position episode.
+        /// Legacy accounts contain exactly 0 or 1 here and therefore decode as episode zero.
+        pub control: u64,
+    }
+
+    impl PortfolioMatcherConfigV16 {
+        const ENABLED_MASK: u64 = 1;
+
+        #[inline]
+        pub fn enabled(&self) -> u64 {
+            self.control & Self::ENABLED_MASK
+        }
+
+        #[inline]
+        pub fn position_epoch(&self) -> u64 {
+            self.control >> 1
+        }
+
+        #[inline]
+        pub fn set_enabled(&mut self, enabled: u8) -> Result<(), ProgramError> {
+            if enabled > 1 {
+                return Err(PercolatorError::InvalidInstruction.into());
+            }
+            self.control = (self.control & !Self::ENABLED_MASK) | u64::from(enabled);
+            Ok(())
+        }
     }
 
     pub type AssetOracleStorageV16 = [u8; ASSET_ORACLE_WRAPPER_LEN];
@@ -771,9 +798,6 @@ pub mod state {
                 .get(..config_len)
                 .ok_or(PercolatorError::InvalidAccountLen)?,
         );
-        if cfg.enabled > 1 {
-            return Err(ProgramError::InvalidAccountData);
-        }
         Ok(cfg)
     }
 
@@ -783,9 +807,6 @@ pub mod state {
         cfg: &PortfolioMatcherConfigV16,
     ) -> Result<(), ProgramError> {
         check_header(data, KIND_PORTFOLIO)?;
-        if cfg.enabled > 1 {
-            return Err(ProgramError::InvalidAccountData);
-        }
         let bytes = matcher_config_bytes_mut(data)?;
         for b in bytes.iter_mut() {
             *b = 0;
@@ -829,6 +850,35 @@ pub mod state {
             .checked_add(1)
             .ok_or(PercolatorError::EngineCounterOverflow)?;
         Ok((id, next))
+    }
+
+    #[inline]
+    pub fn read_portfolio_position_epoch(data: &[u8]) -> Result<u64, ProgramError> {
+        check_header(data, KIND_PORTFOLIO)?;
+        Ok(read_u64(data, PORTFOLIO_MATCHER_CONTROL_OFF)? >> 1)
+    }
+
+    #[inline]
+    pub fn next_portfolio_position_control(control: u64) -> Result<(u64, u64), ProgramError> {
+        let next = (control >> 1)
+            .checked_add(1)
+            .ok_or(PercolatorError::EngineCounterOverflow)?;
+        if next > (u64::MAX >> 1) {
+            return Err(PercolatorError::EngineCounterOverflow.into());
+        }
+        let next_control = (next << 1) | (control & PortfolioMatcherConfigV16::ENABLED_MASK);
+        Ok((next, next_control))
+    }
+
+    #[inline]
+    pub fn bump_portfolio_position_epoch(data: &mut [u8]) -> Result<u64, ProgramError> {
+        check_header(data, KIND_PORTFOLIO)?;
+        let control = read_u64(data, PORTFOLIO_MATCHER_CONTROL_OFF)?;
+        let (next, next_control) = next_portfolio_position_control(control)?;
+        data.get_mut(PORTFOLIO_MATCHER_CONTROL_OFF..PORTFOLIO_MATCHER_CONTROL_OFF + 8)
+            .ok_or(PercolatorError::InvalidAccountLen)?
+            .copy_from_slice(&next_control.to_le_bytes());
+        Ok(next)
     }
 
     #[inline]
@@ -1320,7 +1370,8 @@ pub mod state {
     ) -> Result<usize, ProgramError> {
         // Fixed-size: source-domains are a fixed sparse array embedded in PORTFOLIO_STATE_LEN.
         // Independent of the market's asset count N (O(1) portfolio). The wrapper-owned
-        // matcher config and program-assigned incarnation ID live after the engine portfolio body.
+        // matcher config, program-assigned incarnation ID, and position episode live after the
+        // engine portfolio body.
         Ok(PORTFOLIO_ACCOUNT_LEN)
     }
 
@@ -2679,10 +2730,14 @@ pub mod ix {
             optional_deposit: u128,
         },
         ForfeitRecoveryLeg {
+            portfolio_id: u64,
+            position_epoch: u64,
             asset_index: u16,
             b_delta_budget: u128,
         },
         RebalanceReduce {
+            portfolio_id: u64,
+            position_epoch: u64,
             asset_index: u16,
             reduce_q: u128,
         },
@@ -2952,10 +3007,14 @@ pub mod ix {
                     optional_deposit: read_u128(&mut rest)?,
                 },
                 43 => Self::ForfeitRecoveryLeg {
+                    portfolio_id: read_u64(&mut rest)?,
+                    position_epoch: read_u64(&mut rest)?,
                     asset_index: read_u16(&mut rest)?,
                     b_delta_budget: read_u128(&mut rest)?,
                 },
                 44 => Self::RebalanceReduce {
+                    portfolio_id: read_u64(&mut rest)?,
+                    position_epoch: read_u64(&mut rest)?,
                     asset_index: read_u16(&mut rest)?,
                     reduce_q: read_u128(&mut rest)?,
                 },
@@ -3341,18 +3400,26 @@ pub mod ix {
                     push_u128(&mut out, optional_deposit);
                 }
                 Self::ForfeitRecoveryLeg {
+                    portfolio_id,
+                    position_epoch,
                     asset_index,
                     b_delta_budget,
                 } => {
                     out.push(43);
+                    push_u64(&mut out, portfolio_id);
+                    push_u64(&mut out, position_epoch);
                     push_u16(&mut out, asset_index);
                     push_u128(&mut out, b_delta_budget);
                 }
                 Self::RebalanceReduce {
+                    portfolio_id,
+                    position_epoch,
                     asset_index,
                     reduce_q,
                 } => {
                     out.push(44);
+                    push_u64(&mut out, portfolio_id);
+                    push_u64(&mut out, position_epoch);
                     push_u16(&mut out, asset_index);
                     push_u128(&mut out, reduce_q);
                 }
@@ -5565,13 +5632,31 @@ pub mod processor {
                 handle_cure_and_cancel_close(program_id, accounts, optional_deposit)
             }
             Instruction::ForfeitRecoveryLeg {
+                portfolio_id,
+                position_epoch,
                 asset_index,
                 b_delta_budget,
-            } => handle_forfeit_recovery_leg(program_id, accounts, asset_index, b_delta_budget),
+            } => handle_forfeit_recovery_leg(
+                program_id,
+                accounts,
+                portfolio_id,
+                position_epoch,
+                asset_index,
+                b_delta_budget,
+            ),
             Instruction::RebalanceReduce {
+                portfolio_id,
+                position_epoch,
                 asset_index,
                 reduce_q,
-            } => handle_rebalance_reduce(program_id, accounts, asset_index, reduce_q),
+            } => handle_rebalance_reduce(
+                program_id,
+                accounts,
+                portfolio_id,
+                position_epoch,
+                asset_index,
+                reduce_q,
+            ),
             Instruction::FinalizeResetSide { asset_index, side } => {
                 handle_finalize_reset_side(program_id, accounts, asset_index, side)
             }
@@ -6065,6 +6150,10 @@ pub mod processor {
                 source_lien_before_b.as_ref(),
                 source_lien_after_b.as_ref(),
             )?;
+            drop(account_a);
+            drop(account_b);
+            state::bump_portfolio_position_epoch(&mut account_a_data)?;
+            state::bump_portfolio_position_epoch(&mut account_b_data)?;
         }
         if let Some(cfg) = cfg_after {
             state::write_wrapper_config(&mut market_ai.try_borrow_mut_data()?, &cfg)?;
@@ -6339,6 +6428,10 @@ pub mod processor {
                 source_lien_before_b.as_ref(),
                 source_lien_after_b.as_ref(),
             )?;
+            drop(account_a);
+            drop(account_b);
+            state::bump_portfolio_position_epoch(&mut account_a_data)?;
+            state::bump_portfolio_position_epoch(&mut account_b_data)?;
         }
         if let Some(cfg) = cfg_after {
             state::write_wrapper_config(&mut market_ai.try_borrow_mut_data()?, &cfg)?;
@@ -6605,6 +6698,48 @@ pub mod processor {
         account_b
             .validate_with_market(&group.as_view())
             .map_err(map_v16_error)?;
+        let position_a = signed_position_for_asset_view(&group, &account_a, asset_index_usize)?;
+        let position_b = signed_position_for_asset_view(&group, &account_b, asset_index_usize)?;
+        if position_a == 0 || position_b == 0 {
+            let residue_is_a = match (position_a != 0, position_b != 0) {
+                (true, false) => true,
+                (false, true) => false,
+                _ => return Err(PercolatorError::EngineNonProgress.into()),
+            };
+            let residue_position = if residue_is_a { position_a } else { position_b };
+            let side_oi = if residue_position > 0 {
+                asset.oi_eff_long_q.get()
+            } else {
+                asset.oi_eff_short_q.get()
+            };
+            if side_oi != 0 {
+                return Err(PercolatorError::EngineInvalidLeg.into());
+            }
+            if residue_is_a {
+                group
+                    .forfeit_recovery_leg_not_atomic(&mut account_a, asset_index_usize, close_q)
+                    .map_err(map_v16_error)?;
+            } else {
+                group
+                    .forfeit_recovery_leg_not_atomic(&mut account_b, asset_index_usize, close_q)
+                    .map_err(map_v16_error)?;
+            }
+            group.validate_shape().map_err(map_v16_error)?;
+            account_a
+                .validate_with_market(&group.as_view())
+                .map_err(map_v16_error)?;
+            account_b
+                .validate_with_market(&group.as_view())
+                .map_err(map_v16_error)?;
+            drop(account_a);
+            drop(account_b);
+            if residue_is_a {
+                state::bump_portfolio_position_epoch(&mut account_a_data)?;
+            } else {
+                state::bump_portfolio_position_epoch(&mut account_b_data)?;
+            }
+            return Ok(());
+        }
         let leg_a = active_leg_for_asset_view(&account_a, asset_index_usize)?;
         let leg_b = active_leg_for_asset_view(&account_b, asset_index_usize)?;
         if leg_a.side == leg_b.side {
@@ -6647,7 +6782,12 @@ pub mod processor {
             .map_err(map_v16_error)?;
         account_b
             .validate_with_market(&group.as_view())
-            .map_err(map_v16_error)
+            .map_err(map_v16_error)?;
+        drop(account_a);
+        drop(account_b);
+        state::bump_portfolio_position_epoch(&mut account_a_data)?;
+        state::bump_portfolio_position_epoch(&mut account_b_data)?;
+        Ok(())
     }
 
     fn matcher_tail_start_or_verify_lp_config<'a>(
@@ -6657,7 +6797,7 @@ pub mod processor {
         matcher_delegate_key: &Pubkey,
     ) -> Result<usize, ProgramError> {
         let cfg = state::read_portfolio_matcher_config(&account_b_ai.try_borrow_data()?)?;
-        if cfg.enabled != 1
+        if cfg.enabled() != 1
             || cfg.matcher_program != matcher_prog_key.to_bytes()
             || cfg.matcher_context != matcher_ctx_key.to_bytes()
             || cfg.matcher_delegate != matcher_delegate_key.to_bytes()
@@ -6921,8 +7061,13 @@ pub mod processor {
         if lp_portfolio_ai.data_len() < required_len {
             lp_portfolio_ai.realloc(required_len, true)?;
         }
-        let cfg = if enabled == 0 {
-            state::PortfolioMatcherConfigV16::default()
+        let prior_control =
+            state::read_portfolio_matcher_config(&lp_portfolio_ai.try_borrow_data()?)?.control;
+        let mut cfg = if enabled == 0 {
+            state::PortfolioMatcherConfigV16 {
+                control: prior_control,
+                ..state::PortfolioMatcherConfigV16::default()
+            }
         } else {
             let matcher_prog = account(accounts, 3)?;
             let matcher_ctx = account(accounts, 4)?;
@@ -6948,9 +7093,10 @@ pub mod processor {
                 matcher_program: matcher_prog.key.to_bytes(),
                 matcher_context: matcher_ctx.key.to_bytes(),
                 matcher_delegate: matcher_delegate.key.to_bytes(),
-                enabled: 1,
+                control: prior_control,
             }
         };
+        cfg.set_enabled(enabled)?;
         state::write_portfolio_matcher_config(&mut lp_portfolio_ai.try_borrow_mut_data()?, &cfg)
     }
 
@@ -8373,6 +8519,9 @@ pub mod processor {
                 if !live_authority_matches(&authorities.insurance_authority, operator.key) {
                     return Err(PercolatorError::Unauthorized.into());
                 }
+                group
+                    .recredit_terminal_claim_free_residual_for_asset_not_atomic(asset_index)
+                    .map_err(map_v16_error)?;
                 authorities.insurance_authority
             };
             let available = market_insurance_withdraw_capacity_view(&group, asset_index)?;
@@ -8616,7 +8765,7 @@ pub mod processor {
         if amount == 0 {
             return Err(PercolatorError::InvalidInstruction.into());
         }
-        with_one_portfolio_view(program_id, accounts, true, |group, portfolio, cfg| {
+        with_one_portfolio_view(program_id, accounts, true, None, |group, portfolio, cfg| {
             if group.header.mode != 0 {
                 return Err(V16Error::LockActive);
             }
@@ -8705,58 +8854,78 @@ pub mod processor {
     fn handle_forfeit_recovery_leg<'a>(
         program_id: &Pubkey,
         accounts: &'a [AccountInfo<'a>],
+        expected_portfolio_id: u64,
+        expected_position_epoch: u64,
         asset_index: u16,
         b_delta_budget: u128,
     ) -> ProgramResult {
         if b_delta_budget == 0 {
             return Err(PercolatorError::InvalidInstruction.into());
         }
-        with_one_portfolio_view(program_id, accounts, true, |group, portfolio, cfg| {
-            if group.header.mode == 0 && permissionless_resolve_matured_now_view(cfg, group) {
-                return Err(V16Error::LockActive);
-            }
-            accrue_zero_move_funding_before_position_change_view(
-                cfg,
-                group,
-                asset_index as usize,
-                true,
-            )?;
-            group
-                .forfeit_recovery_leg_not_atomic(portfolio, asset_index as usize, b_delta_budget)
-                .map(|_| ())
-        })
+        with_one_portfolio_view(
+            program_id,
+            accounts,
+            true,
+            Some((expected_portfolio_id, expected_position_epoch)),
+            |group, portfolio, cfg| {
+                if group.header.mode == 0 && permissionless_resolve_matured_now_view(cfg, group) {
+                    return Err(V16Error::LockActive);
+                }
+                accrue_zero_move_funding_before_position_change_view(
+                    cfg,
+                    group,
+                    asset_index as usize,
+                    true,
+                )?;
+                group
+                    .forfeit_recovery_leg_not_atomic(
+                        portfolio,
+                        asset_index as usize,
+                        b_delta_budget,
+                    )
+                    .map(|_| ())
+            },
+        )
     }
 
     #[inline(never)]
     fn handle_rebalance_reduce<'a>(
         program_id: &Pubkey,
         accounts: &'a [AccountInfo<'a>],
+        expected_portfolio_id: u64,
+        expected_position_epoch: u64,
         asset_index: u16,
         reduce_q: u128,
     ) -> ProgramResult {
         if reduce_q == 0 {
             return Err(PercolatorError::InvalidInstruction.into());
         }
-        with_one_portfolio_view(program_id, accounts, true, |group, portfolio, cfg| {
-            if group.header.mode == 0 && permissionless_resolve_matured_now_view(cfg, group) {
-                return Err(V16Error::LockActive);
-            }
-            accrue_zero_move_funding_before_position_change_view(
-                cfg,
-                group,
-                asset_index as usize,
-                true,
-            )?;
-            group
-                .rebalance_reduce_position_not_atomic(
-                    portfolio,
-                    RebalanceRequestV16 {
-                        asset_index: asset_index as usize,
-                        reduce_q,
-                    },
-                )
-                .map(|_| ())
-        })
+        with_one_portfolio_view(
+            program_id,
+            accounts,
+            true,
+            Some((expected_portfolio_id, expected_position_epoch)),
+            |group, portfolio, cfg| {
+                if group.header.mode == 0 && permissionless_resolve_matured_now_view(cfg, group) {
+                    return Err(V16Error::LockActive);
+                }
+                accrue_zero_move_funding_before_position_change_view(
+                    cfg,
+                    group,
+                    asset_index as usize,
+                    true,
+                )?;
+                group
+                    .rebalance_reduce_position_not_atomic(
+                        portfolio,
+                        RebalanceRequestV16 {
+                            asset_index: asset_index as usize,
+                            reduce_q,
+                        },
+                    )
+                    .map(|_| ())
+            },
+        )
     }
 
     #[inline(never)]
@@ -11233,9 +11402,14 @@ pub mod processor {
                 | Some(AutoCrankPlanV16::Liquidate { asset_index: i }) => *i,
                 _ => observations.first().map(|o| o.asset_index).unwrap_or(0),
             };
-            let selected_liquidation = matches!(
-                result.as_ref().map(|r| &r.selected),
-                Some(AutoCrankPlanV16::Liquidate { .. })
+            let completed_liquidation = matches!(
+                result.as_ref().map(|r| (r.selected, r.outcome)),
+                Some((
+                    AutoCrankPlanV16::Liquidate { .. },
+                    AutoCrankOutcomeV16::Progressed(
+                        PermissionlessProgressOutcomeV16::AccountCurrent
+                    )
+                ))
             );
             if matches!(
                 result.as_ref().map(|r| &r.outcome),
@@ -11249,7 +11423,7 @@ pub mod processor {
                 .get()
                 .saturating_sub(insurance_before);
             let mut retained_for_domains = retained_fee;
-            if selected_liquidation {
+            if completed_liquidation {
                 if let Some(cranker_ai) = cranker_portfolio_ai {
                     let mut cranker_data = cranker_ai.try_borrow_mut_data()?;
                     let mut cranker = state::portfolio_view_mut_for_market_slots(
@@ -11285,8 +11459,10 @@ pub mod processor {
                 selected_fee_asset,
                 retained_for_domains,
             )?;
-            if selected_liquidation {
+            if completed_liquidation {
                 group.validate_shape().map_err(map_v16_error)?;
+                drop(portfolio);
+                state::bump_portfolio_position_epoch(&mut portfolio_data)?;
             }
             cfg_after = cfg;
         }
@@ -11755,6 +11931,7 @@ pub mod processor {
         program_id: &Pubkey,
         accounts: &'a [AccountInfo<'a>],
         owner_must_sign: bool,
+        position_binding: Option<(u64, u64)>,
         f: F,
     ) -> ProgramResult
     where
@@ -11780,6 +11957,13 @@ pub mod processor {
         let mut market_data = market_ai.try_borrow_mut_data()?;
         let (cfg, mut group) = state::market_view_mut(&mut market_data)?;
         let mut portfolio_data = portfolio_ai.try_borrow_mut_data()?;
+        if let Some((expected_portfolio_id, expected_position_epoch)) = position_binding {
+            if state::read_portfolio_id(&portfolio_data)? != expected_portfolio_id
+                || state::read_portfolio_position_epoch(&portfolio_data)? != expected_position_epoch
+            {
+                return Err(PercolatorError::EngineProvenanceMismatch.into());
+            }
+        }
         let mut portfolio =
             state::portfolio_view_mut_for_market_slots(&mut portfolio_data, max_market_slots)?;
         expect_portfolio_view_account_key(&portfolio, portfolio_ai.key)?;
@@ -11790,7 +11974,12 @@ pub mod processor {
         group.validate_shape().map_err(map_v16_error)?;
         portfolio
             .validate_with_market(&group.as_view())
-            .map_err(map_v16_error)
+            .map_err(map_v16_error)?;
+        if position_binding.is_some() {
+            drop(portfolio);
+            state::bump_portfolio_position_epoch(&mut portfolio_data)?;
+        }
+        Ok(())
     }
 
     // Sparse: (domain, value) per occupied source-domain slot (<= PORTFOLIO_SOURCE_DOMAIN_CAP).
@@ -13097,6 +13286,62 @@ pub mod processor {
             assert_eq!(
                 state::allocate_portfolio_id(u64::MAX),
                 Err(PercolatorError::EngineCounterOverflow.into())
+            );
+        }
+
+        #[test]
+        fn portfolio_position_epoch_is_zero_initialized_checked_and_monotonic() {
+            let mut data = vec![
+                0u8;
+                state::portfolio_account_len_for_market_slots(1)
+                    .expect("portfolio account length")
+            ];
+            state::init_portfolio_account_zero_copy(
+                &mut data, [1u8; 32], [2u8; 32], [3u8; 32], 0, 1, 7,
+            )
+            .expect("initialize portfolio");
+            assert_eq!(
+                data.len(),
+                constants::PORTFOLIO_ID_OFF + constants::PORTFOLIO_ID_LEN,
+                "the episode binding must not grow the deployed portfolio layout"
+            );
+            assert_eq!(state::read_portfolio_position_epoch(&data).unwrap(), 0);
+            let mut matcher = state::read_portfolio_matcher_config(&data).unwrap();
+            assert_eq!(matcher.enabled(), 0);
+            assert_eq!(matcher.position_epoch(), 0);
+            matcher.set_enabled(1).unwrap();
+            state::write_portfolio_matcher_config(&mut data, &matcher).unwrap();
+            assert_eq!(state::bump_portfolio_position_epoch(&mut data).unwrap(), 1);
+            assert_eq!(state::read_portfolio_position_epoch(&data).unwrap(), 1);
+            let mut matcher = state::read_portfolio_matcher_config(&data).unwrap();
+            assert_eq!(
+                matcher.enabled(),
+                1,
+                "an episode bump preserves matcher state"
+            );
+            assert_eq!(matcher.position_epoch(), 1);
+            matcher.set_enabled(0).unwrap();
+            state::write_portfolio_matcher_config(&mut data, &matcher).unwrap();
+            assert_eq!(state::read_portfolio_position_epoch(&data).unwrap(), 1);
+            assert_eq!(
+                state::read_portfolio_matcher_config(&data)
+                    .unwrap()
+                    .enabled(),
+                0,
+                "matcher revocation preserves the position episode"
+            );
+
+            data[constants::PORTFOLIO_MATCHER_CONTROL_OFF
+                ..constants::PORTFOLIO_MATCHER_CONTROL_OFF + 8]
+                .copy_from_slice(&((u64::MAX >> 1) << 1).to_le_bytes());
+            let before = data.clone();
+            assert_eq!(
+                state::bump_portfolio_position_epoch(&mut data),
+                Err(PercolatorError::EngineCounterOverflow.into())
+            );
+            assert_eq!(
+                data, before,
+                "overflow must not mutate matcher or episode state"
             );
         }
 

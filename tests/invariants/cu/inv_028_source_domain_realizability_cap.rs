@@ -469,6 +469,8 @@ fn run_source_capacity_admission_order(order: SourceCapacityFillOrder) {
         "unilateral reduction",
         env.send(
             ProgInstruction::RebalanceReduce {
+                portfolio_id: env.portfolio_id(portfolio),
+                position_epoch: env.portfolio_position_epoch(portfolio),
                 asset_index: NEW_ASSET,
                 reduce_q: POS_SCALE,
             },
@@ -620,6 +622,8 @@ fn run_expired_source_lien_route_matrix(now_slot: u64, hinted_first: bool) {
         let portfolio_before = env.svm.get_account(&portfolio).unwrap();
         let reduction = env.send(
             ProgInstruction::RebalanceReduce {
+                portfolio_id: env.portfolio_id(portfolio),
+                position_epoch: env.portfolio_position_epoch(portfolio),
                 asset_index: 0,
                 reduce_q,
             },

@@ -973,11 +973,14 @@ pub struct ForfeitPortfolioIncarnationReplayReproduction {
     pub blocker: KnownBlocker,
     pub original_portfolio_id: u64,
     pub replacement_portfolio_id: u64,
-    pub victim_loss: u64,
-    pub stranded_vault: u128,
+    pub stale_replay_rejected: bool,
+    pub rejected_exact_rollback: bool,
+    pub control_victim_payout: u64,
+    pub replay_victim_payout: u64,
+    pub control_attacker_payout: u64,
+    pub replay_attacker_payout: u64,
     pub control_slab_closed: bool,
-    pub replay_slab_blocked: bool,
-    pub replay_cu: u64,
+    pub replay_slab_closed: bool,
     pub max_cu: u64,
 }
 
@@ -11119,7 +11122,8 @@ struct ForfeitPortfolioIncarnationWorld {
     attacker_payout: u64,
     vault_remaining: u128,
     slab_closed: bool,
-    replay_cu: u64,
+    stale_replay_rejected: bool,
+    rejected_exact_rollback: bool,
     max_cu: u64,
 }
 
@@ -11129,6 +11133,8 @@ struct ForfeitReplayTerminalOutcome {
     attacker_payout: u64,
     vault_remaining: u128,
     slab_closed: bool,
+    stale_replay_rejected: bool,
+    rejected_exact_rollback: bool,
     replay_cu: u64,
     max_cu: u64,
 }
@@ -11138,6 +11144,7 @@ fn finish_forfeit_replay_terminal(
     env: &mut V16Svm,
     retained: Transaction,
     land_replay: bool,
+    expect_replay_rejection: bool,
     mark_slot: u64,
     shutdown_slot: u64,
     drain_slot: u64,
@@ -11225,13 +11232,38 @@ fn finish_forfeit_replay_terminal(
         ));
     }
     let mut replay_cu = 0;
-    if land_replay {
+    let (stale_replay_rejected, rejected_exact_rollback) = if land_replay && expect_replay_rejection
+    {
+        let before_rejection = tracked_economic_accounts(env);
+        let replay = env.land_retained(retained);
+        let rejected = matches!(
+            &replay,
+            Err(error)
+                if error.contains("Custom(16)")
+                    || error.contains("custom program error: 0x10")
+        );
+        if !rejected {
+            return Err(format!(
+                "{context} stale forfeit did not reject with the position-binding error: {replay:?}"
+            ));
+        }
+        let exact_rollback = tracked_economic_accounts(env) == before_rejection;
+        if !exact_rollback {
+            return Err(format!(
+                "{context} rejected stale forfeit did not roll back economic accounts exactly"
+            ));
+        }
+        (true, true)
+    } else if land_replay {
         let replay = env
             .land_retained(retained)
             .map_err(|error| format!("{context} stale forfeit no longer lands: {error}"))?;
         replay_cu = replay.compute_units;
         max_cu = max_cu.max(replay.compute_units);
-    }
+        (false, true)
+    } else {
+        (false, true)
+    };
     let resolve = env
         .resolve_market()
         .map_err(|error| format!("{context} resolve terminal world: {error}"))?;
@@ -11272,6 +11304,8 @@ fn finish_forfeit_replay_terminal(
         attacker_payout,
         vault_remaining,
         slab_closed,
+        stale_replay_rejected,
+        rejected_exact_rollback,
         replay_cu,
         max_cu,
     })
@@ -11350,6 +11384,7 @@ fn run_forfeit_portfolio_incarnation_world(
         &mut env,
         retained,
         land_replay,
+        true,
         13,
         14,
         15,
@@ -11363,7 +11398,8 @@ fn run_forfeit_portfolio_incarnation_world(
         attacker_payout: outcome.attacker_payout,
         vault_remaining: outcome.vault_remaining,
         slab_closed: outcome.slab_closed,
-        replay_cu: outcome.replay_cu,
+        stale_replay_rejected: outcome.stale_replay_rejected,
+        rejected_exact_rollback: outcome.rejected_exact_rollback,
         max_cu: outcome.max_cu,
     })
 }
@@ -11374,36 +11410,34 @@ pub fn reproduce_forfeit_portfolio_incarnation_replay(
     seed[0] ^= 0x78;
     let control = run_forfeit_portfolio_incarnation_world(seed, false)?;
     let replay = run_forfeit_portfolio_incarnation_world(seed, true)?;
-    let victim_loss = control
-        .victim_payout
-        .checked_sub(replay.victim_payout)
-        .ok_or("PR 278 replay increased victim payout")?;
     if control.original_portfolio_id != replay.original_portfolio_id
         || control.replacement_portfolio_id != replay.replacement_portfolio_id
         || control.victim_payout.checked_add(control.attacker_payout) != Some(2_000_000)
-        || replay.victim_payout != 1_000_000
-        || control.attacker_payout != replay.attacker_payout
-        || victim_loss == 0
+        || replay.victim_payout != control.victim_payout
+        || replay.attacker_payout != control.attacker_payout
         || control.vault_remaining != 0
-        || replay.vault_remaining != u128::from(victim_loss)
+        || replay.vault_remaining != 0
         || !control.slab_closed
-        || replay.slab_closed
-        || replay.replay_cu == 0
+        || !replay.slab_closed
+        || !replay.stale_replay_rejected
+        || !replay.rejected_exact_rollback
     {
         return Err(format!(
-            "PR 278 paired-world mismatch: control={control:?}, replay={replay:?}, \
-             victim_loss={victim_loss}"
+            "PR 278 fixed paired-world mismatch: control={control:?}, replay={replay:?}"
         ));
     }
     Ok(ForfeitPortfolioIncarnationReplayReproduction {
         blocker: KnownBlocker::ForfeitPortfolioIncarnationReplay,
         original_portfolio_id: replay.original_portfolio_id,
         replacement_portfolio_id: replay.replacement_portfolio_id,
-        victim_loss,
-        stranded_vault: replay.vault_remaining,
+        stale_replay_rejected: replay.stale_replay_rejected,
+        rejected_exact_rollback: replay.rejected_exact_rollback,
+        control_victim_payout: control.victim_payout,
+        replay_victim_payout: replay.victim_payout,
+        control_attacker_payout: control.attacker_payout,
+        replay_attacker_payout: replay.attacker_payout,
         control_slab_closed: control.slab_closed,
-        replay_slab_blocked: !replay.slab_closed,
-        replay_cu: replay.replay_cu,
+        replay_slab_closed: replay.slab_closed,
         max_cu: replay.max_cu.max(control.max_cu),
     })
 }
@@ -11499,6 +11533,7 @@ fn run_forfeit_market_generation_world(
         &mut env,
         retained,
         land_replay,
+        false,
         REINIT_SLOT + 10,
         REINIT_SLOT + 11,
         REINIT_SLOT + 12,
