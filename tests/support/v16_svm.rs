@@ -656,6 +656,28 @@ impl V16Svm {
         )
     }
 
+    pub fn set_matcher_backing_fee_cap(
+        &mut self,
+        actor_index: usize,
+        backing_fee_cap_bps: u16,
+    ) -> Result<TxSuccess, String> {
+        let actor = &self.actors[actor_index];
+        let owner = copy_keypair(&actor.signer);
+        let mut data = vec![5];
+        data.extend_from_slice(&backing_fee_cap_bps.to_le_bytes());
+        self.send_raw_instruction(
+            Instruction {
+                program_id: self.matcher_program,
+                accounts: vec![
+                    AccountMeta::new_readonly(owner.pubkey(), true),
+                    AccountMeta::new(actor.matcher_context, false),
+                ],
+                data,
+            },
+            &[owner],
+        )
+    }
+
     pub fn deposit_primary(
         &mut self,
         actor_index: usize,

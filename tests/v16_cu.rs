@@ -52679,7 +52679,8 @@ fn v16_attack_batch_nocpi_stale_reject_rolls_back_legacy_realloc() {
 #[test]
 fn v16_attack_matcher_return_antispoof_rejections() {
     use percolator_prog::matcher_abi::{
-        validate_matcher_return, MatcherReturn, FLAG_PARTIAL_OK, FLAG_REJECTED, FLAG_VALID,
+        validate_matcher_return, MatcherReturn, FLAG_BACKING_FEE_CAP_SHIFT, FLAG_PARTIAL_OK,
+        FLAG_REJECTED, FLAG_VALID,
     };
     const LP: u64 = 7;
     const ASSET: u16 = 1;
@@ -52704,6 +52705,10 @@ fn v16_attack_matcher_return_antispoof_rejections() {
     partial.exec_size = (5 * POS_SCALE) as i128;
     partial.flags = FLAG_VALID | FLAG_PARTIAL_OK;
     assert!(chk(&partial).is_ok(), "flagged partial fill validates");
+    let mut capped = valid;
+    capped.flags = FLAG_VALID | (5_000u32 << FLAG_BACKING_FEE_CAP_SHIFT);
+    assert!(chk(&capped).is_ok(), "an in-range LP fee cap validates");
+    assert_eq!(capped.backing_fee_cap_bps(), 5_000);
 
     // --- hostile replies, each must REJECT ---
     let cases: &[(&str, fn(MatcherReturn) -> MatcherReturn)] = &[
@@ -52744,7 +52749,11 @@ fn v16_attack_matcher_return_antispoof_rejections() {
             r
         }),
         ("unknown flag bit", |mut r| {
-            r.flags = FLAG_VALID | 0x100;
+            r.flags = FLAG_VALID | (1 << 31);
+            r
+        }),
+        ("backing fee cap above 10000 bps", |mut r| {
+            r.flags = FLAG_VALID | (10_001 << FLAG_BACKING_FEE_CAP_SHIFT);
             r
         }),
         ("zero exec_price", |mut r| {

@@ -15,7 +15,7 @@
 //! Guarantee boundary: a quarantined counterexample demonstrates public reachability; it does
 //! not certify the invariant on an unfixed pin. Certification requires the fixed-pin assertion
 //! plus every additional verification method required by the charter.
-//! PR 224 is a fixed-pin assertion here; the remaining finding-specific tests are counterexamples.
+//! PRs 223 and 224 are fixed-pin assertions here; the remaining finding-specific tests are counterexamples.
 
 use super::*;
 
@@ -49,8 +49,8 @@ proptest! {
         eprintln!("independent source-fee consent discoveries: {violations:?}");
         prop_assert_eq!(
             violations,
-            vec![SourceFeeConsentKind::NoCpi, SourceFeeConsentKind::Cpi],
-            "source-fee route differential changed; inspect both newly vulnerable and newly safe paths"
+            vec![SourceFeeConsentKind::NoCpi],
+            "source-fee route differential changed; CPI must require matcher consent"
         );
     }
 }
@@ -86,16 +86,22 @@ proptest! {
     }
 
     #[test]
-    fn v16_program_pr223_cpi_backing_fee_siphon_fuzz(
+    fn v16_program_pr223_cpi_backing_fee_consent_fuzz(
         seed in cpi_backing_fee_seed_strategy()
     ) {
-        let result = reproduce_cpi_backing_fee_siphon(seed);
-        prop_assert!(
-            result.is_ok(),
-            "PR 223 no longer reproduces for seed {:?}: {}",
-            seed,
-            result.unwrap_err()
-        );
+        let protection = verify_cpi_backing_fee_consent(seed)
+            .map_err(TestCaseError::fail)?;
+        prop_assert_eq!(protection.matcher_cap_bps, 5_000);
+        prop_assert!(protection.rejected_without_consent);
+        prop_assert!(protection.rejected_exact_rollback);
+        prop_assert_eq!(protection.unconsented_provider_earnings, 0);
+        prop_assert_eq!(protection.lp_capital_loss, protection.provider_earnings);
+        prop_assert!(protection.provider_earnings > 0);
+        prop_assert_eq!(protection.provider_earnings, u128::from(protection.extracted_tokens));
+        prop_assert_eq!(protection.attacker_capital_delta, 0);
+        prop_assert!(protection.zero_cap_risk_reduction_landed);
+        prop_assert!(protection.max_route_cu < crate::support::v16_svm::TX_CU_LIMIT);
+        prop_assert!(protection.token_supply_conserved);
     }
 
     #[test]

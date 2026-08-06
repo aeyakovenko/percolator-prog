@@ -2,14 +2,14 @@
 //!
 //! Normative obligation: Charged fees reach only the authorized destination under the bound policy version.
 //!
-//! Evidence in this file (I plus invariant-specific F/M assertions): `v16_program_pr224_unsigned_lp_caller_fee_is_ignored`, `v16_program_pr223_unsigned_lp_backing_fee_is_withdrawable`, `v16_program_pr314_activation_fee_consent_extracts_unsigned_increase`, `v16_program_pr310_bilateral_base_fee_consent_extracts_victim_fee`. These tests exercise the deployed public
+//! Evidence in this file (I plus invariant-specific F/M assertions): `v16_program_pr224_unsigned_lp_caller_fee_is_ignored`, `v16_program_pr223_unsigned_lp_backing_fee_requires_matcher_consent`, `v16_program_pr314_activation_fee_consent_extracts_unsigned_increase`, `v16_program_pr310_bilateral_base_fee_consent_extracts_victim_fee`. These tests exercise the deployed public
 //! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
 //! rollback, liveness, or compute outcomes appropriate to the invariant.
 //!
 //! Guarantee boundary: a quarantined counterexample demonstrates public reachability; it does
 //! not certify the invariant on an unfixed pin. Certification requires the fixed-pin assertion
 //! plus every additional verification method required by the charter.
-//! PR 224 is a fixed-pin assertion here; the remaining finding-specific tests are counterexamples.
+//! PRs 223 and 224 are fixed-pin assertions here; the remaining finding-specific tests are counterexamples.
 
 use super::*;
 
@@ -33,16 +33,24 @@ fn v16_program_pr224_unsigned_lp_caller_fee_is_ignored() {
 }
 
 #[test]
-fn v16_program_pr223_unsigned_lp_backing_fee_is_withdrawable() {
-    let reproduction = reproduce_cpi_backing_fee_siphon([0x23; 32])
-        .unwrap_or_else(|error| panic!("PR 223 no longer reproduces: {error}"));
-    assert_eq!(reproduction.blocker, KnownBlocker::CpiBackingFeeSiphon);
-    assert_eq!(reproduction.lp_capital_loss, reproduction.provider_earnings);
+fn v16_program_pr223_unsigned_lp_backing_fee_requires_matcher_consent() {
+    let protection = verify_cpi_backing_fee_consent([0x23; 32])
+        .unwrap_or_else(|error| panic!("PR 223 protection failed: {error}"));
+    assert_eq!(protection.blocker, KnownBlocker::CpiBackingFeeSiphon);
+    assert_eq!(protection.matcher_cap_bps, 5_000);
+    assert!(protection.rejected_without_consent);
+    assert!(protection.rejected_exact_rollback);
+    assert_eq!(protection.unconsented_provider_earnings, 0);
+    assert_eq!(protection.lp_capital_loss, protection.provider_earnings);
+    assert!(protection.provider_earnings > 0);
     assert_eq!(
-        reproduction.provider_earnings,
-        u128::from(reproduction.extracted_tokens)
+        protection.provider_earnings,
+        u128::from(protection.extracted_tokens)
     );
-    assert_eq!(reproduction.attacker_capital_delta, 0);
+    assert_eq!(protection.attacker_capital_delta, 0);
+    assert!(protection.zero_cap_risk_reduction_landed);
+    assert!(protection.max_route_cu < support::v16_svm::TX_CU_LIMIT);
+    assert!(protection.token_supply_conserved);
 }
 
 #[test]

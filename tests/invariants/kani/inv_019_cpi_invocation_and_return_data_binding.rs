@@ -59,6 +59,9 @@ fn kani_v16_matcher_return_accepts_only_bound_echoed_fills() {
     if abi_version != percolator_prog::constants::MATCHER_ABI_VERSION
         || (flags & FLAG_VALID) == 0
         || (flags & FLAG_REJECTED) != 0
+        || (flags & !(FLAG_VALID | FLAG_PARTIAL_OK | FLAG_REJECTED | FLAG_BACKING_FEE_CAP_MASK))
+            != 0
+        || ((flags & FLAG_BACKING_FEE_CAP_MASK) >> FLAG_BACKING_FEE_CAP_SHIFT) > 10_000
         || lp_ret != lp_account_id
         || oracle_ret != oracle_price_e6
         || asset_ret != asset_index as u64
@@ -73,6 +76,7 @@ fn kani_v16_matcher_return_accepts_only_bound_echoed_fills() {
     if result.is_ok() {
         assert!((flags & FLAG_VALID) != 0);
         assert!((flags & FLAG_REJECTED) == 0);
+        assert!(ret.backing_fee_cap_bps() <= 10_000);
         assert_eq!(lp_ret, lp_account_id);
         assert_eq!(oracle_ret, oracle_price_e6);
         assert_eq!(asset_ret, asset_index as u64);

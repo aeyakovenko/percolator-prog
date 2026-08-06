@@ -4,7 +4,8 @@ extern crate kani;
 
 use percolator_prog::ix::{CrankObservationHint, Instruction};
 use percolator_prog::matcher_abi::{
-    validate_matcher_return, MatcherReturn, FLAG_PARTIAL_OK, FLAG_REJECTED, FLAG_VALID,
+    validate_matcher_return, MatcherReturn, FLAG_BACKING_FEE_CAP_MASK, FLAG_BACKING_FEE_CAP_SHIFT,
+    FLAG_PARTIAL_OK, FLAG_REJECTED, FLAG_VALID,
 };
 use percolator_prog::policy_v16;
 

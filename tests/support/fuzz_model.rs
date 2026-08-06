@@ -283,12 +283,19 @@ pub struct CpiCallerFeeProtection {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct CpiBackingFeeReproduction {
+pub struct CpiBackingFeeProtection {
     pub blocker: KnownBlocker,
+    pub matcher_cap_bps: u16,
+    pub rejected_without_consent: bool,
+    pub rejected_exact_rollback: bool,
+    pub unconsented_provider_earnings: u128,
     pub lp_capital_loss: u128,
     pub provider_earnings: u128,
     pub extracted_tokens: u64,
     pub attacker_capital_delta: i128,
+    pub zero_cap_risk_reduction_landed: bool,
+    pub max_route_cu: u64,
+    pub token_supply_conserved: bool,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -4907,9 +4914,9 @@ pub fn verify_cpi_caller_fee_protection(
     })
 }
 
-pub fn reproduce_cpi_backing_fee_siphon(
+pub fn verify_cpi_backing_fee_consent(
     mut seed: [u8; 32],
-) -> Result<CpiBackingFeeReproduction, String> {
+) -> Result<CpiBackingFeeProtection, String> {
     seed[0] ^= 0x23;
     const PRICE: u64 = 100;
     const LP_DEPOSIT: u128 = 3_190;
@@ -5000,8 +5007,37 @@ pub fn reproduce_cpi_backing_fee_siphon(
     let supply_before = env.token_supply_observed();
 
     env.warp_to_slot(6);
-    env.trade_cpi(0, 2, 0, -INCREASE_Q, 0, 0)
-        .map_err(|error| format!("fee-bearing CPI increase: {error}"))?;
+    let before_rejection = tracked_economic_accounts(&env);
+    let rejection = match env.trade_cpi(0, 2, 0, -INCREASE_Q, 0, 0) {
+        Ok(_) => return Err("zero-cap matcher accepted an LP backing fee".into()),
+        Err(error) => error,
+    };
+    let rejected_without_consent =
+        rejection.contains("Custom(8)") || rejection.contains("custom program error: 0x8");
+    let rejected_exact_rollback = tracked_economic_accounts(&env) == before_rejection;
+    let unconsented_provider_earnings = env.primary_market_state().1.source_backing_buckets
+        [WINNING_DOMAIN as usize]
+        .utilization_fee_earnings
+        .checked_sub(provider_before)
+        .ok_or("rejected CPI backing fee decreased provider earnings")?;
+    if !rejected_without_consent
+        || !rejected_exact_rollback
+        || env.primary_portfolio(2).capital.get() != lp_before
+        || env.primary_portfolio(0).capital.get() != attacker_before
+        || unconsented_provider_earnings != 0
+    {
+        return Err(format!(
+            "unconsented CPI backing fee did not reject atomically: {rejection}"
+        ));
+    }
+
+    const MATCHER_CAP_BPS: u16 = 5_000;
+    let cap_update = env
+        .set_matcher_backing_fee_cap(2, MATCHER_CAP_BPS)
+        .map_err(|error| format!("LP backing-fee consent: {error}"))?;
+    let consented_trade = env
+        .trade_cpi(0, 2, 0, -INCREASE_Q, 0, 0)
+        .map_err(|error| format!("consented fee-bearing CPI increase: {error}"))?;
     let lp_after = env.primary_portfolio(2).capital.get();
     let provider_after = env.primary_market_state().1.source_backing_buckets
         [WINNING_DOMAIN as usize]
@@ -5014,18 +5050,32 @@ pub fn reproduce_cpi_backing_fee_siphon(
         .ok_or("CPI backing fee increased LP capital")?;
     if provider_earnings == 0 || lp_capital_loss != provider_earnings {
         return Err(format!(
-            "CPI backing fee did not transfer LP capital to provider: LP {lp_before}->{lp_after}, earnings {provider_before}->{provider_after}"
+            "consented CPI backing fee did not transfer LP capital to provider: LP {lp_before}->{lp_after}, earnings {provider_before}->{provider_after}"
         ));
     }
-    env.trade_cpi(0, 2, 0, INCREASE_Q, 0, 0)
+    let zero_cap_update = env
+        .set_matcher_backing_fee_cap(2, 0)
+        .map_err(|error| format!("restore zero matcher cap: {error}"))?;
+    let earnings_before_reduction = env.primary_market_state().1.source_backing_buckets
+        [WINNING_DOMAIN as usize]
+        .utilization_fee_earnings;
+    let risk_reduction = env
+        .trade_cpi(0, 2, 0, INCREASE_Q, 0, 0)
         .map_err(|error| format!("reverse fee-bearing CPI increase: {error}"))?;
+    let zero_cap_risk_reduction_landed = env.primary_market_state().1.source_backing_buckets
+        [WINNING_DOMAIN as usize]
+        .utilization_fee_earnings
+        == earnings_before_reduction;
     let attacker_after = env.primary_portfolio(0).capital.get();
     let attacker_capital_delta = i128::try_from(attacker_after)
         .and_then(|after| i128::try_from(attacker_before).map(|before| after - before))
         .map_err(|_| "attacker capital does not fit i128")?;
-    if attacker_capital_delta != 0 || observed_positions(&env.primary_portfolio(0))?[0] != 0 {
+    if !zero_cap_risk_reduction_landed
+        || attacker_capital_delta != 0
+        || observed_positions(&env.primary_portfolio(0))?[0] != 0
+    {
         return Err(format!(
-            "CPI backing-fee attacker did not return flat: capital delta {attacker_capital_delta}"
+            "zero-cap CPI risk reduction failed: landed {zero_cap_risk_reduction_landed}, capital delta {attacker_capital_delta}"
         ));
     }
 
@@ -5040,15 +5090,28 @@ pub fn reproduce_cpi_backing_fee_siphon(
             "CPI backing fee ledger/SPL extraction mismatch: {provider_earnings} vs {extracted_tokens}"
         ));
     }
-    if env.token_supply_observed() != supply_before {
-        return Err("CPI backing-fee siphon changed total SPL supply".into());
+    let token_supply_conserved = env.token_supply_observed() == supply_before;
+    if !token_supply_conserved {
+        return Err("CPI backing-fee consent path changed total SPL supply".into());
     }
-    Ok(CpiBackingFeeReproduction {
+    let max_route_cu = cap_update
+        .compute_units
+        .max(consented_trade.compute_units)
+        .max(zero_cap_update.compute_units)
+        .max(risk_reduction.compute_units);
+    Ok(CpiBackingFeeProtection {
         blocker: KnownBlocker::CpiBackingFeeSiphon,
+        matcher_cap_bps: MATCHER_CAP_BPS,
+        rejected_without_consent,
+        rejected_exact_rollback,
+        unconsented_provider_earnings,
         lp_capital_loss,
         provider_earnings,
         extracted_tokens,
         attacker_capital_delta,
+        zero_cap_risk_reduction_landed,
+        max_route_cu,
+        token_supply_conserved,
     })
 }
 

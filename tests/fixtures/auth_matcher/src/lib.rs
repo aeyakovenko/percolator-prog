@@ -13,12 +13,14 @@ entrypoint!(process);
 
 const ABI: u32 = 3;
 const FLAG_VALID: u32 = 1;
+const FLAG_BACKING_FEE_CAP_SHIFT: u32 = 8;
 const CTX_STATE_OFFSET: usize = 64;
 const CTX_DELEGATE_OFFSET: usize = CTX_STATE_OFFSET + 1;
 const CTX_OWNER_OFFSET: usize = CTX_DELEGATE_OFFSET + 32;
 const CTX_BID_SPREAD_OFFSET: usize = CTX_OWNER_OFFSET + 32;
 const CTX_ASK_SPREAD_OFFSET: usize = CTX_BID_SPREAD_OFFSET + 8;
-const CTX_MIN_LEN: usize = CTX_ASK_SPREAD_OFFSET + 8;
+const CTX_BACKING_FEE_CAP_OFFSET: usize = CTX_ASK_SPREAD_OFFSET + 8;
+const CTX_MIN_LEN: usize = CTX_BACKING_FEE_CAP_OFFSET + 2;
 
 fn write_return(
     out: &mut [u8],
@@ -28,9 +30,11 @@ fn write_return(
     exec_price: u64,
     oracle_price: u64,
     size: i128,
+    backing_fee_cap_bps: u16,
 ) {
+    let flags = FLAG_VALID | ((backing_fee_cap_bps as u32) << FLAG_BACKING_FEE_CAP_SHIFT);
     out[0..4].copy_from_slice(&ABI.to_le_bytes());
-    out[4..8].copy_from_slice(&FLAG_VALID.to_le_bytes());
+    out[4..8].copy_from_slice(&flags.to_le_bytes());
     out[8..16].copy_from_slice(&exec_price.to_le_bytes());
     out[16..32].copy_from_slice(&size.to_le_bytes());
     out[32..40].copy_from_slice(&req_id.to_le_bytes());
@@ -45,6 +49,7 @@ fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Progra
         Some(&0) => process_single(program_id, accounts, data),
         Some(&3) => process_batch(program_id, accounts, data),
         Some(&4) => process_configure(program_id, accounts, data),
+        Some(&5) => process_configure_backing_fee_cap(program_id, accounts, data),
         _ => Err(ProgramError::InvalidInstructionData),
     }
 }
@@ -90,7 +95,9 @@ fn process_init(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult 
     ctx_data[CTX_DELEGATE_OFFSET..CTX_OWNER_OFFSET].copy_from_slice(delegate.key.as_ref());
     ctx_data[CTX_OWNER_OFFSET..CTX_BID_SPREAD_OFFSET].copy_from_slice(lp_owner.key.as_ref());
     ctx_data[CTX_BID_SPREAD_OFFSET..CTX_ASK_SPREAD_OFFSET].copy_from_slice(&0u64.to_le_bytes());
-    ctx_data[CTX_ASK_SPREAD_OFFSET..CTX_MIN_LEN].copy_from_slice(&0u64.to_le_bytes());
+    ctx_data[CTX_ASK_SPREAD_OFFSET..CTX_BACKING_FEE_CAP_OFFSET]
+        .copy_from_slice(&0u64.to_le_bytes());
+    ctx_data[CTX_BACKING_FEE_CAP_OFFSET..CTX_MIN_LEN].copy_from_slice(&0u16.to_le_bytes());
     Ok(())
 }
 
@@ -121,7 +128,41 @@ fn process_configure(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8])
     }
     ctx_data[CTX_BID_SPREAD_OFFSET..CTX_ASK_SPREAD_OFFSET]
         .copy_from_slice(&bid_spread_bps.to_le_bytes());
-    ctx_data[CTX_ASK_SPREAD_OFFSET..CTX_MIN_LEN].copy_from_slice(&ask_spread_bps.to_le_bytes());
+    ctx_data[CTX_ASK_SPREAD_OFFSET..CTX_BACKING_FEE_CAP_OFFSET]
+        .copy_from_slice(&ask_spread_bps.to_le_bytes());
+    Ok(())
+}
+
+fn process_configure_backing_fee_cap(
+    program_id: &Pubkey,
+    accounts: &[AccountInfo],
+    data: &[u8],
+) -> ProgramResult {
+    if data.len() != 3 {
+        return Err(ProgramError::InvalidInstructionData);
+    }
+    let account_iter = &mut accounts.iter();
+    let lp_owner = next_account_info(account_iter)?;
+    let ctx = next_account_info(account_iter)?;
+    if !lp_owner.is_signer
+        || !ctx.is_writable
+        || ctx.owner != program_id
+        || ctx.data_len() < CTX_MIN_LEN
+    {
+        return Err(ProgramError::InvalidAccountData);
+    }
+    let backing_fee_cap_bps = u16::from_le_bytes(data[1..3].try_into().unwrap());
+    if backing_fee_cap_bps > 10_000 {
+        return Err(ProgramError::InvalidInstructionData);
+    }
+    let mut ctx_data = ctx.try_borrow_mut_data()?;
+    if ctx_data[CTX_STATE_OFFSET] != 1
+        || ctx_data[CTX_OWNER_OFFSET..CTX_BID_SPREAD_OFFSET] != lp_owner.key.as_ref()[..]
+    {
+        return Err(ProgramError::InvalidAccountData);
+    }
+    ctx_data[CTX_BACKING_FEE_CAP_OFFSET..CTX_MIN_LEN]
+        .copy_from_slice(&backing_fee_cap_bps.to_le_bytes());
     Ok(())
 }
 
@@ -148,7 +189,7 @@ fn quote_price(ctx: &AccountInfo, oracle: u64, request: i128) -> Result<u64, Pro
             .unwrap(),
     );
     let ask_spread_bps = u64::from_le_bytes(
-        ctx_data[CTX_ASK_SPREAD_OFFSET..CTX_MIN_LEN]
+        ctx_data[CTX_ASK_SPREAD_OFFSET..CTX_BACKING_FEE_CAP_OFFSET]
             .try_into()
             .unwrap(),
     );
@@ -167,6 +208,15 @@ fn quote_price(ctx: &AccountInfo, oracle: u64, request: i128) -> Result<u64, Pro
         .ok_or(ProgramError::ArithmeticOverflow)
 }
 
+fn backing_fee_cap_bps(ctx: &AccountInfo) -> Result<u16, ProgramError> {
+    let data = ctx.try_borrow_data()?;
+    Ok(u16::from_le_bytes(
+        data[CTX_BACKING_FEE_CAP_OFFSET..CTX_MIN_LEN]
+            .try_into()
+            .unwrap(),
+    ))
+}
+
 fn process_single(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramResult {
     if data.len() < 67 {
         return Err(ProgramError::InvalidInstructionData);
@@ -181,8 +231,18 @@ fn process_single(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) ->
     let oracle = u64::from_le_bytes(data[19..27].try_into().unwrap());
     let req = i128::from_le_bytes(data[27..43].try_into().unwrap());
     let quote = quote_price(ctx, oracle, req)?;
+    let backing_fee_cap_bps = backing_fee_cap_bps(ctx)?;
     let mut ctx_data = ctx.try_borrow_mut_data()?;
-    write_return(&mut ctx_data[0..64], req_id, lp, asset, quote, oracle, req);
+    write_return(
+        &mut ctx_data[0..64],
+        req_id,
+        lp,
+        asset,
+        quote,
+        oracle,
+        req,
+        backing_fee_cap_bps,
+    );
     Ok(())
 }
 
@@ -200,6 +260,7 @@ fn process_batch(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> 
     check_ctx(program_id, delegate, ctx)?;
     let req_id = u64::from_le_bytes(data[2..10].try_into().unwrap());
     let lp = u64::from_le_bytes(data[10..18].try_into().unwrap());
+    let backing_fee_cap_bps = backing_fee_cap_bps(ctx)?;
     let mut out = [0u8; 16 * 64];
     for i in 0..n {
         let base = 18 + i * 26;
@@ -215,6 +276,7 @@ fn process_batch(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> 
             quote,
             oracle,
             req,
+            backing_fee_cap_bps,
         );
     }
     set_return_data(&out[..n * 64]);
