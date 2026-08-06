@@ -44,7 +44,9 @@ use support::{
         TradeDrivenLiquidationMode, TradeRoute,
     },
     invariant_discovery::{
-        discover_expired_backing_consumers, discover_retained_maturity_terminal_locks,
+        discover_expired_backing_consumers, discover_multi_segment_accrual_ordering_violations,
+        discover_pending_zero_move_terminal_ordering, discover_retained_maturity_terminal_locks,
+        discover_shutdown_catchup_liveness, discover_shutdown_commit_ordering, AccrualOrderingKind,
         ExpiredBackingConsumerKind, RetainedMaturityKind,
     },
     open_lof_manifest::{missing_prs, quarantined_prs, validate_manifest},

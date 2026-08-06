@@ -210,12 +210,13 @@ fn v16_program_lapsed_backing_settlement_matrix_discovers_resolved_exit_lock() {
 
     env.svm.warp_to_slot(2);
     env.push_auth_mark_for_asset_as_admin(0, 2, UP_PRICE);
-    env.crank(
+    env.crank_steps_after_market_catchup(
         neutral,
         ProgInstruction::PermissionlessCrank {
             now_slot: 2,
             observations: crank_observations(0),
         },
+        1,
     );
     env.svm.warp_to_slot(3);
     env.crank(

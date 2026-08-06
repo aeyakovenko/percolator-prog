@@ -22,10 +22,10 @@ verification methods are in [`../../INVARIANTS.md`](../../INVARIANTS.md).
 
 | Suite | Tests | Evidence |
 | --- | ---: | --- |
-| `public_sbf/` | 76 | Deterministic public SBF/LiteSVM counterexamples, regressions, and manifest checks |
-| `stateful/` | 112 | Proptest-generated public routes, including generalized active-leg/currentness and authenticated-expiry route matrices |
-| `cu/` | 102 | Positive public-route, metamorphic, rollback, liveness, and max-shape CU tests |
-| `kani/` | 40 | Symbolic wrapper arithmetic, matcher-binding, and strict-decoder proofs |
+| `public_sbf/` | 80 | Deterministic public SBF/LiteSVM counterexamples, regressions, and manifest checks |
+| `stateful/` | 116 | Proptest-generated public routes, including generalized active-leg/currentness and authenticated-expiry route matrices |
+| `cu/` | 103 | Positive public-route, metamorphic, rollback, liveness, and max-shape CU tests |
+| `kani/` | 41 | Symbolic wrapper arithmetic, matcher-binding, and strict-decoder proofs |
 
 Most deterministic and stateful LoF adapters still reproduce quarantined vulnerable behavior;
 fixed-pin regressions explicitly require safe rejection or preservation instead. A vulnerable-pin
@@ -192,7 +192,7 @@ cargo kani --tests
 ```
 
 On engine pin `143e68c4917ed0400a27b952f036a5677047cd84`, the full `v16_cu` inventory has
-666 passing tests. The former red PR220/PR366 and PR367 probes are fixed-pin regressions under
+667 passing tests. The former red PR220/PR366 and PR367 probes are fixed-pin regressions under
 INV-053 and INV-063; the unfiltered command is the required verification command.
 
 Use `PERCOLATOR_FUZZ_CASES`, `PERCOLATOR_FUZZ_ACTIONS`, and

@@ -418,6 +418,8 @@ fn v16_open_security_finding_benchmark_is_complete_and_non_overclaiming() {
                     | "stale-matcher-enable-cannot-revive-revoked-value-authority"
                     | "funded-role-principal-cannot-be-redirected-without-incumbent-consent"
                     | "committed-funding-must-accrue-before-lifecycle-terminalization"
+                    | "pending-mark-boundary-must-activate-before-post-boundary-funding"
+                    | "stale-shutdown-must-retain-a-bounded-public-progress-path"
                     | "terminal-snapshot-must-use-current-authenticated-oracle-state"
                     | "funded-resolved-adl-winner-has-bounded-public-exit"
                     | "fractional-reset-carry-cannot-block-permissionless-liquidation"
@@ -436,6 +438,7 @@ fn v16_open_security_finding_benchmark_is_complete_and_non_overclaiming() {
                     | "prospective-loss-must-not-create-backing-in-lapsed-domain"
                     | "asset-local-bankruptcy-cannot-lock-unrelated-backed-claim"
                     | "unsigned-lp-cannot-inherit-preexisting-settlement-cohort"
+                    | "fresh-counterparty-must-not-inherit-preexisting-settlement-cohort"
             ),
             "unknown independent oracle: {}",
             fields[3]

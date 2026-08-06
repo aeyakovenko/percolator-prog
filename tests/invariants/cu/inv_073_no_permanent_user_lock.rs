@@ -2,7 +2,7 @@
 //!
 //! Normative obligation: Every publicly reachable funded state has a finite public path to capital or terminal disposition.
 //!
-//! Evidence in this file (I/C plus invariant-specific M assertions): `v16_program_asset0_recovery_matrix_discovers_provider_and_restart_lock`, `v16_program_winner_first_recovery_matrix_discovers_provider_lien_lock`, `v16_program_permissionless_asset_expired_close_matrix_discovers_global_recovery`, `v16_program_fragmented_recovery_pair_matrix_discovers_force_close_lock`, `v16_program_fractional_social_loss_exit_matrix_discovers_dust_lock`, `v16_program_recovery_residue_matrix_discovers_abandoned_owner_lock`, `v16_program_expired_partial_close_matrix_discovers_global_terminal_lock`, `v16_program_crossed_adl_effective_exit_matrix_discovers_zero_oi_residue_lock`, `v16_program_partial_adl_effective_exit_matrix_discovers_zero_oi_residue_lock`, `v16_attack_source_backed_force_close_preserves_bounded_resolved_exits`, `v16_probe_liquidation_then_shutdown_preserves_bounded_owner_exit`, `v16_attack_permissionless_close_resolved_survives_drained_owner_system_account`, `v16_attack_permissionless_asset_epoch_grief_has_atomic_max_leg_exit`. These tests exercise the deployed public
+//! Evidence in this file (I/C plus invariant-specific M assertions): `v16_program_asset0_recovery_matrix_discovers_provider_and_restart_lock`, `v16_program_winner_first_recovery_matrix_discovers_provider_lien_lock`, `v16_program_permissionless_asset_expired_close_matrix_discovers_global_recovery`, `v16_program_fragmented_recovery_pair_matrix_discovers_force_close_lock`, `v16_program_fractional_social_loss_exit_matrix_discovers_dust_lock`, `v16_program_recovery_residue_matrix_discovers_abandoned_owner_lock`, `v16_program_expired_partial_close_matrix_discovers_global_terminal_lock`, `v16_program_crossed_adl_effective_exit_matrix_discovers_zero_oi_residue_lock`, `v16_program_partial_adl_effective_exit_matrix_discovers_zero_oi_residue_lock`, `v16_program_funding_disabled_round_trip_mark_preserves_stale_terminal_progress`, `v16_attack_source_backed_force_close_preserves_bounded_resolved_exits`, `v16_probe_liquidation_then_shutdown_preserves_bounded_owner_exit`, `v16_attack_permissionless_close_resolved_survives_drained_owner_system_account`, `v16_attack_permissionless_asset_epoch_grief_has_atomic_max_leg_exit`. These tests exercise the deployed public
 //! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
 //! rollback, liveness, or compute outcomes appropriate to the invariant.
 //!
@@ -11,6 +11,82 @@
 //! plus every additional verification method required by the charter.
 
 use super::*;
+
+#[test]
+fn v16_program_funding_disabled_round_trip_mark_preserves_stale_terminal_progress() {
+    const PRICE: u64 = 100;
+    const HIGH_MARK: u64 = 101;
+    const RESOLVE_SLOT: u64 = 103;
+
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(2, 10_000, 10_000, 10_000);
+    env.configure_permissionless_resolve_with_cu(100, 1);
+    env.svm.warp_to_slot(1);
+    env.configure_auth_mark_for_asset_as_admin(0, 1, PRICE);
+    env.configure_auth_mark_for_asset_as_admin(1, 1, PRICE);
+
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long = env.create_portfolio(&long_owner);
+    let short = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long, 1_000_000);
+    env.deposit(&short_owner, short, 1_000_000);
+    env.trade_asset_with_cu(
+        0,
+        &long_owner,
+        long,
+        &short_owner,
+        short,
+        POS_SCALE as i128,
+        PRICE,
+        0,
+    );
+
+    env.svm.warp_to_slot(2);
+    env.push_auth_mark_for_asset_as_admin(0, 2, HIGH_MARK);
+    env.svm.warp_to_slot(3);
+    env.push_auth_mark_for_asset_as_admin(0, 3, PRICE);
+
+    // Advance the engine's global cursor through an unrelated asset. The first asset now retains
+    // a historical pending checkpoint that cannot be replayed at its original slot, but its latest
+    // authenticated endpoint equals the official price and funding is disabled, so net K/F is zero.
+    env.svm.warp_to_slot(10);
+    env.crank(
+        long,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 10,
+            observations: crank_observations(1),
+        },
+    );
+    let market_data = env.svm.get_account(&env.market).unwrap().data;
+    let (_, before) = state::read_market(&market_data).unwrap();
+    let profile = state::read_asset_oracle_profile(&market_data, 0).unwrap();
+    assert_eq!(before.config.max_abs_funding_e9_per_slot, 0);
+    assert_eq!(before.assets[0].effective_price, PRICE);
+    assert_eq!(profile.mark_ewma_e6, PRICE);
+    assert_ne!(profile.funding_mark_pending_e6, 0);
+    assert!(before.current_slot > profile.funding_mark_pending_slot);
+
+    env.svm.warp_to_slot(RESOLVE_SLOT);
+    env.svm.expire_blockhash();
+    let resolve_cu = env
+        .send(
+            ProgInstruction::ResolveStalePermissionless {
+                now_slot: RESOLVE_SLOT,
+            },
+            vec![AccountMeta::new(env.market, false)],
+            &[],
+        )
+        .expect("net-zero obsolete checkpoint must not lock stale resolution");
+    assert!(resolve_cu < 1_400_000);
+    assert_eq!(env.market_state().1.mode, MarketModeV16::Resolved);
+    assert_eq!(env.market_state().1.assets[0].effective_price, PRICE);
+
+    env.svm.warp_to_slot(RESOLVE_SLOT + 1);
+    let long_destination = env.close_resolved(&long_owner, long);
+    let short_destination = env.close_resolved(&short_owner, short);
+    assert_eq!(env.token_amount(long_destination), 1_000_000);
+    assert_eq!(env.token_amount(short_destination), 1_000_000);
+}
 
 #[test]
 fn v16_program_asset0_recovery_matrix_discovers_provider_and_restart_lock() {
@@ -450,7 +526,15 @@ fn v16_program_fragmented_recovery_pair_matrix_discovers_force_close_lock() {
 
     env.svm.warp_to_slot(SHUTDOWN_SLOT);
     env.push_auth_mark_for_asset_as_admin(ASSET, SHUTDOWN_SLOT, SHUTDOWN_MARK);
-    for portfolio in core::iter::once(large).chain(smalls.iter().copied()) {
+    env.crank_steps_after_market_catchup(
+        large,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: SHUTDOWN_SLOT,
+            observations: crank_observations(ASSET),
+        },
+        1,
+    );
+    for portfolio in smalls.iter().copied() {
         env.crank(
             portfolio,
             ProgInstruction::PermissionlessCrank {
@@ -758,7 +842,7 @@ fn v16_program_recovery_residue_matrix_discovers_abandoned_owner_lock() {
                 &[],
             );
         }
-        env.crank_steps(
+        env.crank_steps_after_market_catchup(
             short,
             ProgInstruction::PermissionlessCrank {
                 now_slot: 6,
@@ -1240,7 +1324,7 @@ fn v16_program_partial_adl_effective_exit_matrix_discovers_zero_oi_residue_lock(
                 &[],
             );
         }
-        let _ = env.crank_steps(
+        let _ = env.crank_steps_after_market_catchup(
             short,
             ProgInstruction::PermissionlessCrank {
                 now_slot: 6,

@@ -2,7 +2,7 @@
 //!
 //! Normative obligation: Delayed requests remain bounded by the policy and economics the signer authorized.
 //!
-//! Evidence in this file (I plus invariant-specific F/M assertions): `v16_program_pr325_stale_maintenance_policy_extracts_user_fee`, `v16_program_pr326_stale_liquidation_policy_extracts_user_fee`, `v16_program_pr337_delayed_maintenance_policy_extracts_user_fee`, `v16_program_pr336_delayed_liquidation_policy_extracts_user_fee`, `v16_program_pr338_delayed_trade_fee_policy_extracts_user_fee`, `v16_program_pr340_delayed_fee_redirect_extracts_user_fee`, `v16_program_pr349_delayed_backing_fee_extracts_user_fee`, `v16_program_pr339_reordered_backing_terms_divert_provider_fee`, `v16_program_pr347_delayed_resolve_policy_freezes_authenticated_mark`, `v16_program_pr335_delayed_oracle_intents_extract_user_collateral`, `v16_program_pr334_delayed_matcher_enable_extracts_lp_collateral`. These tests exercise the deployed public
+//! Evidence in this file (I plus invariant-specific F/M assertions): `v16_program_pr325_stale_maintenance_policy_extracts_user_fee`, `v16_program_pr326_stale_liquidation_policy_extracts_user_fee`, `v16_program_pr337_delayed_maintenance_policy_extracts_user_fee`, `v16_program_pr336_delayed_liquidation_policy_extracts_user_fee`, `v16_program_pr338_delayed_trade_fee_policy_extracts_user_fee`, `v16_program_pr340_delayed_fee_redirect_extracts_user_fee`, `v16_program_pr349_delayed_backing_fee_extracts_user_fee`, `v16_program_pr339_reordered_backing_terms_divert_provider_fee`, `v16_program_pr347_stale_policy_cannot_freeze_authenticated_mark`, `v16_program_pr335_delayed_oracle_intents_extract_user_collateral`, `v16_program_pr334_delayed_matcher_enable_extracts_lp_collateral`. These tests exercise the deployed public
 //! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
 //! rollback, liveness, or compute outcomes appropriate to the invariant.
 //!
@@ -148,18 +148,22 @@ fn v16_program_pr339_reordered_backing_terms_divert_provider_fee() {
 }
 
 #[test]
-fn v16_program_pr347_delayed_resolve_policy_freezes_authenticated_mark() {
+fn v16_program_pr347_stale_policy_cannot_freeze_authenticated_mark() {
     let reproduction = reproduce_delayed_resolve_policy_replay([0x47; 32])
-        .unwrap_or_else(|error| panic!("PR 347 no longer reproduces: {error}"));
+        .unwrap_or_else(|error| panic!("PR 347 fixed route failed: {error}"));
     assert_eq!(
         reproduction.blocker,
         KnownBlocker::DelayedResolvePolicyReplay
     );
-    assert!(reproduction.replay_crank_blocked);
+    assert!(reproduction.unsafe_resolve_rejected);
+    assert!(reproduction.rejected_exact_rollback);
+    assert!(reproduction.catchup_steps > 0);
+    assert!(reproduction.catchup_steps <= 16);
+    assert!(reproduction.max_crank_cu < 1_400_000);
     assert_eq!(reproduction.control_price, 110);
-    assert_eq!(reproduction.frozen_price, 100);
-    assert_eq!(reproduction.victim_loss, 100_000);
-    assert_eq!(reproduction.attacker_gain, 100_000);
+    assert_eq!(reproduction.replay_price, reproduction.control_price);
+    assert_eq!(reproduction.victim_loss, 0);
+    assert_eq!(reproduction.attacker_gain, 0);
     assert!(reproduction.replay_cu < 1_400_000);
     assert!(reproduction.resolve_cu < 1_400_000);
 }

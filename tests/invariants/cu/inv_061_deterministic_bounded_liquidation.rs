@@ -101,15 +101,21 @@ fn run_post_adl_transfer_world(split_before_mark: bool) -> PostAdlTransferOutcom
     let backing_before = env.market_state().1.source_backing_buckets[0];
     env.svm.warp_to_slot(2);
     env.push_auth_mark_with_cu(2, CLOSE_PRICE);
-    for portfolio in [long, claimant] {
-        env.crank(
-            portfolio,
-            ProgInstruction::PermissionlessCrank {
-                now_slot: 2,
-                observations: crank_observations(0),
-            },
-        );
-    }
+    env.crank_steps_after_market_catchup(
+        long,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 2,
+            observations: crank_observations(0),
+        },
+        1,
+    );
+    env.crank(
+        claimant,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 2,
+            observations: crank_observations(0),
+        },
+    );
     let long_value_after = account_value(&env.portfolio_state(long));
     let opposing_loss = (long_value_before - long_value_after) as u128;
     assert!(opposing_loss > 0);
@@ -338,6 +344,7 @@ fn v16_program_reset_carry_liquidation_matrix_discovers_crank_lock() {
     let s1o = Keypair::new();
     let s2o = Keypair::new();
     let s3o = Keypair::new();
+    let neutral_owner = Keypair::new();
     let l1 = env.create_portfolio(&l1o);
     let l2 = env.create_portfolio(&l2o);
     let l3 = env.create_portfolio(&l3o);
@@ -346,6 +353,7 @@ fn v16_program_reset_carry_liquidation_matrix_discovers_crank_lock() {
     let s1 = env.create_portfolio(&s1o);
     let s2 = env.create_portfolio(&s2o);
     let s3 = env.create_portfolio(&s3o);
+    let neutral = env.create_portfolio(&neutral_owner);
 
     for (owner, portfolio, deposit) in [
         (&l1o, l1, 1_000),
@@ -439,11 +447,19 @@ fn v16_program_reset_carry_liquidation_matrix_discovers_crank_lock() {
     assert!(has_active_leg_for_asset(&env.portfolio_state(s2), 0));
     assert!(health_cert(&env.portfolio_state(s2)).certified_liq_deficit != 0);
 
-    let fixed_market = env.svm.get_account(&env.market).unwrap();
-    let fixed_loser = env.svm.get_account(&s2).unwrap();
-    let fixed_vault = env.svm.get_account(&env.vault).unwrap();
     for slot in 6..=8u64 {
         env.svm.warp_to_slot(slot);
+        env.crank_steps_after_market_catchup(
+            neutral,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: slot,
+                observations: crank_observations(0),
+            },
+            1,
+        );
+        let fixed_market = env.svm.get_account(&env.market).unwrap();
+        let fixed_loser = env.svm.get_account(&s2).unwrap();
+        let fixed_vault = env.svm.get_account(&env.vault).unwrap();
         env.svm.expire_blockhash();
         let liquidation = env.send(
             ProgInstruction::PermissionlessCrank {

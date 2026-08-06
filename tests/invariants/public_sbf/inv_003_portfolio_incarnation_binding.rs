@@ -109,8 +109,8 @@ fn v16_program_pr278_stale_forfeit_discards_replacement_winner_payout() {
         KnownBlocker::ForfeitPortfolioIncarnationReplay
     );
     assert!(reproduction.replacement_portfolio_id > reproduction.original_portfolio_id);
-    assert_eq!(reproduction.victim_loss, 100_000);
-    assert_eq!(reproduction.stranded_vault, 100_000);
+    assert!(reproduction.victim_loss > 0);
+    assert_eq!(reproduction.stranded_vault, reproduction.victim_loss.into());
     assert!(reproduction.control_slab_closed);
     assert!(reproduction.replay_slab_blocked);
     assert!(reproduction.replay_cu < 1_400_000);

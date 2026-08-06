@@ -336,12 +336,13 @@ fn run_source_capacity_admission_order(order: SourceCapacityFillOrder) {
     slot += 1;
     env.svm.warp_to_slot(slot);
     env.push_auth_mark_for_asset_as_admin(NEW_ASSET, slot, HIGH);
-    env.crank(
+    env.crank_steps_after_market_catchup(
         counterparty,
         ProgInstruction::PermissionlessCrank {
             now_slot: slot,
             observations: crank_observations(NEW_ASSET),
         },
+        1,
     );
 
     let trapped = env.portfolio_state(portfolio);

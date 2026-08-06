@@ -108,7 +108,7 @@ fn v16_program_pr369_one_sided_cpi_fee_cannot_subsidize_mark_gain() {
             assert_eq!(reproduction.mode, mode);
             assert_eq!(reproduction.route, route);
             assert!(reproduction.queued_mark >= reproduction.setup_mark);
-            assert_eq!(reproduction.coalition_excess, 0);
+            assert_eq!(reproduction.coalition_excess, 0, "{reproduction:?}");
             assert!(
                 reproduction.extracted_tokens <= reproduction.coalition_equity_before,
                 "one-sided fee support extracted coalition value"

@@ -516,6 +516,7 @@ struct V16CuEnv {
     vault: Pubkey,
     vault_authority: Pubkey,
     portfolio_account_len: usize,
+    portfolios: Vec<Pubkey>,
 }
 
 #[derive(Clone, Copy)]
@@ -794,6 +795,7 @@ impl V16CuEnv {
                 params.max_portfolio_assets as usize,
             )
             .unwrap(),
+            portfolios: Vec::new(),
         }
     }
 
@@ -827,6 +829,7 @@ impl V16CuEnv {
                 &[owner],
             )
             .expect("init portfolio");
+        self.portfolios.push(portfolio);
         (portfolio, cu)
     }
 
@@ -905,27 +908,174 @@ impl V16CuEnv {
         now_slot: u64,
         initial_price: u64,
     ) -> u64 {
-        send_tx(
-            &mut self.svm,
-            self.program_id,
-            &self.payer,
-            ProgInstruction::UpdateAssetLifecycle {
-                action,
-                asset_index,
-                now_slot,
-                initial_price,
-                insurance_authority: self.admin.pubkey().to_bytes(),
-                insurance_operator: self.admin.pubkey().to_bytes(),
-                backing_bucket_authority: self.admin.pubkey().to_bytes(),
-                oracle_authority: self.admin.pubkey().to_bytes(),
-            },
-            vec![
-                AccountMeta::new(self.admin.pubkey(), true),
-                AccountMeta::new(self.market, false),
-            ],
-            &[&self.admin],
+        let authenticated_slot = self.svm.get_sysvar::<Clock>().slot;
+        let max_attempts = self.terminal_accrual_attempt_bound(asset_index, authenticated_slot);
+        let mut max_cu = 0;
+        for _ in 0..max_attempts {
+            self.svm.expire_blockhash();
+            let result = send_tx(
+                &mut self.svm,
+                self.program_id,
+                &self.payer,
+                ProgInstruction::UpdateAssetLifecycle {
+                    action,
+                    asset_index,
+                    now_slot,
+                    initial_price,
+                    insurance_authority: self.admin.pubkey().to_bytes(),
+                    insurance_operator: self.admin.pubkey().to_bytes(),
+                    backing_bucket_authority: self.admin.pubkey().to_bytes(),
+                    oracle_authority: self.admin.pubkey().to_bytes(),
+                },
+                vec![
+                    AccountMeta::new(self.admin.pubkey(), true),
+                    AccountMeta::new(self.market, false),
+                ],
+                &[&self.admin],
+            );
+            match result {
+                Ok(cu) => return max_cu.max(cu),
+                Err(err)
+                    if action == percolator_prog::processor::ASSET_ACTION_SHUTDOWN
+                        && is_engine_stale_error(&err) =>
+                {
+                    max_cu = max_cu.max(
+                        self.public_terminal_accrual_step(asset_index, authenticated_slot)
+                            .unwrap_or_else(|crank_err| {
+                                panic!(
+                                    "public accrual before asset shutdown failed: {crank_err}; shutdown error: {err}"
+                                )
+                            }),
+                    );
+                }
+                Err(err) => panic!("update asset lifecycle as admin: {err}"),
+            }
+        }
+        panic!(
+            "asset lifecycle transition remained stale after {max_attempts} bounded public accrual attempts"
         )
-        .expect("update asset lifecycle as admin")
+    }
+
+    fn terminal_accrual_attempt_bound(&self, asset_index: u16, now_slot: u64) -> usize {
+        let market_data = self.svm.get_account(&self.market).unwrap().data;
+        let (_, group) = state::read_market(&market_data).unwrap();
+        let asset = &group.assets[asset_index as usize];
+        let max_dt = group.config.max_accrual_dt_slots.max(1);
+        let elapsed = now_slot.saturating_sub(asset.slot_last);
+        let segments = elapsed / max_dt + u64::from(elapsed % max_dt != 0);
+        usize::try_from(segments.saturating_add(4).min(16_384)).unwrap()
+    }
+
+    fn public_terminal_accrual_step(
+        &mut self,
+        asset_index: u16,
+        now_slot: u64,
+    ) -> Result<u64, String> {
+        let portfolios: Vec<Pubkey> = self
+            .portfolios
+            .iter()
+            .rev()
+            .copied()
+            .filter(|key| {
+                self.svm
+                    .get_account(key)
+                    .is_some_and(|account| account.owner == self.program_id)
+            })
+            .collect();
+        if portfolios.is_empty() {
+            return Err("no live public portfolio is available for accrual".to_string());
+        }
+        let market_data = self.svm.get_account(&self.market).unwrap().data;
+        let (cfg, _) = state::read_market(&market_data).unwrap();
+        let profile = state::read_asset_oracle_profile(&market_data, asset_index as usize)
+            .map_err(|err| format!("read oracle profile: {err:?}"))?;
+        let resolve_matured = cfg.permissionless_resolve_stale_slots != 0
+            && (now_slot.saturating_sub(cfg.last_good_oracle_slot)
+                >= cfg.permissionless_resolve_stale_slots
+                || now_slot.saturating_sub(profile.last_good_oracle_slot)
+                    >= cfg.permissionless_resolve_stale_slots);
+        let oracle_account_count = if resolve_matured {
+            0
+        } else {
+            profile.oracle_leg_count
+        };
+        let oracle_accounts: Vec<AccountMeta> = profile.oracle_leg_feeds
+            [..oracle_account_count as usize]
+            .iter()
+            .copied()
+            .map(Pubkey::new_from_array)
+            .map(|key| AccountMeta::new_readonly(key, false))
+            .collect();
+        let mut failures = Vec::new();
+        for portfolio in portfolios {
+            let mut accounts = vec![
+                AccountMeta::new(self.payer.pubkey(), true),
+                AccountMeta::new(self.market, false),
+                AccountMeta::new(portfolio, false),
+            ];
+            accounts.extend(oracle_accounts.iter().cloned());
+            self.svm.expire_blockhash();
+            match self.send(
+                ProgInstruction::PermissionlessCrank {
+                    now_slot,
+                    observations: crank_observations_with_accounts(
+                        asset_index,
+                        oracle_account_count,
+                    ),
+                },
+                accounts,
+                &[],
+            ) {
+                Ok(cu) => return Ok(cu),
+                Err(err) => failures.push(err),
+            }
+        }
+        Err(format!(
+            "all live public portfolios rejected the accrual crank: {}",
+            failures.join(" | ")
+        ))
+    }
+
+    fn public_terminal_accrual_any_exposed(&mut self, now_slot: u64) -> Result<u64, String> {
+        let market_data = self.svm.get_account(&self.market).unwrap().data;
+        let (_, group) = state::read_market(&market_data).unwrap();
+        let exposed_assets: Vec<u16> = group
+            .assets
+            .iter()
+            .enumerate()
+            .filter(|(_, asset)| asset.oi_eff_long_q != 0 || asset.oi_eff_short_q != 0)
+            .map(|(asset_index, _)| asset_index as u16)
+            .collect();
+        let mut failures = Vec::new();
+        for asset_index in exposed_assets {
+            match self.public_terminal_accrual_step(asset_index, now_slot) {
+                Ok(cu) => return Ok(cu),
+                Err(err) => {
+                    let market_data = self.svm.get_account(&self.market).unwrap().data;
+                    let (_, group) = state::read_market(&market_data).unwrap();
+                    let asset = group.assets[asset_index as usize];
+                    let profile =
+                        state::read_asset_oracle_profile(&market_data, asset_index as usize)
+                            .unwrap();
+                    failures.push(format!(
+                        "asset {asset_index} slot={} current={} effective={} raw={} mark={} mark_slot={} funding_mark={} pending={} pending_slot={}: {err}",
+                        asset.slot_last,
+                        group.current_slot,
+                        asset.effective_price,
+                        asset.raw_oracle_target_price,
+                        profile.mark_ewma_e6,
+                        profile.mark_ewma_last_slot,
+                        profile.funding_mark_e6,
+                        profile.funding_mark_pending_e6,
+                        profile.funding_mark_pending_slot,
+                    ));
+                }
+            }
+        }
+        Err(format!(
+            "no exposed asset accepted a terminal accrual step: {}",
+            failures.join(" | ")
+        ))
     }
 
     fn try_shutdown_asset_with_authority(
@@ -2238,18 +2388,51 @@ impl V16CuEnv {
     }
 
     fn resolve(&mut self) -> u64 {
-        send_tx(
-            &mut self.svm,
-            self.program_id,
-            &self.payer,
-            ProgInstruction::ResolveMarket,
-            vec![
-                AccountMeta::new(self.admin.pubkey(), true),
-                AccountMeta::new(self.market, false),
-            ],
-            &[&self.admin],
-        )
-        .expect("resolve market")
+        let now_slot = self.svm.get_sysvar::<Clock>().slot;
+        let market_data = self.svm.get_account(&self.market).unwrap().data;
+        let (_, group) = state::read_market(&market_data).unwrap();
+        let max_attempts = group
+            .assets
+            .iter()
+            .filter(|asset| asset.oi_eff_long_q != 0 || asset.oi_eff_short_q != 0)
+            .map(|asset| {
+                let max_dt = group.config.max_accrual_dt_slots.max(1);
+                let elapsed = now_slot.saturating_sub(asset.slot_last);
+                elapsed / max_dt + u64::from(elapsed % max_dt != 0) + 2
+            })
+            .sum::<u64>()
+            .saturating_add(1)
+            .min(16_384) as usize;
+        let mut max_cu = 0;
+        for _ in 0..max_attempts.max(1) {
+            self.svm.expire_blockhash();
+            let result = send_tx(
+                &mut self.svm,
+                self.program_id,
+                &self.payer,
+                ProgInstruction::ResolveMarket,
+                vec![
+                    AccountMeta::new(self.admin.pubkey(), true),
+                    AccountMeta::new(self.market, false),
+                ],
+                &[&self.admin],
+            );
+            match result {
+                Ok(cu) => return max_cu.max(cu),
+                Err(err) if is_engine_stale_error(&err) => {
+                    max_cu = max_cu.max(
+                        self.public_terminal_accrual_any_exposed(now_slot)
+                            .unwrap_or_else(|crank_err| {
+                                panic!(
+                                    "public accrual before market resolve failed: {crank_err}; resolve error: {err}"
+                                )
+                            }),
+                    );
+                }
+                Err(err) => panic!("resolve market: {err}"),
+            }
+        }
+        panic!("market resolve remained stale after {max_attempts} bounded public accrual attempts")
     }
 
     fn close_slab_with_cu(&mut self) -> u64 {
@@ -2717,15 +2900,48 @@ impl V16CuEnv {
 
     fn resolve_stale_permissionless_with_cu(&mut self, now_slot: u64) -> u64 {
         self.svm.warp_to_slot(now_slot);
-        send_tx(
-            &mut self.svm,
-            self.program_id,
-            &self.payer,
-            ProgInstruction::ResolveStalePermissionless { now_slot },
-            vec![AccountMeta::new(self.market, false)],
-            &[],
+        let market_data = self.svm.get_account(&self.market).unwrap().data;
+        let (_, group) = state::read_market(&market_data).unwrap();
+        let max_dt = group.config.max_accrual_dt_slots.max(1);
+        let max_attempts = group
+            .assets
+            .iter()
+            .filter(|asset| asset.oi_eff_long_q != 0 || asset.oi_eff_short_q != 0)
+            .map(|asset| {
+                let elapsed = now_slot.saturating_sub(asset.slot_last);
+                elapsed / max_dt + u64::from(elapsed % max_dt != 0) + 2
+            })
+            .sum::<u64>()
+            .saturating_add(1)
+            .min(16_384) as usize;
+        let mut max_cu = 0;
+        for _ in 0..max_attempts.max(1) {
+            self.svm.expire_blockhash();
+            match send_tx(
+                &mut self.svm,
+                self.program_id,
+                &self.payer,
+                ProgInstruction::ResolveStalePermissionless { now_slot },
+                vec![AccountMeta::new(self.market, false)],
+                &[],
+            ) {
+                Ok(cu) => return max_cu.max(cu),
+                Err(err) if is_engine_stale_error(&err) => {
+                    max_cu = max_cu.max(
+                        self.public_terminal_accrual_any_exposed(now_slot)
+                            .unwrap_or_else(|crank_err| {
+                                panic!(
+                                    "public accrual before permissionless resolve failed: {crank_err}; resolve error: {err}"
+                                )
+                            }),
+                    );
+                }
+                Err(err) => panic!("resolve stale permissionless: {err}"),
+            }
+        }
+        panic!(
+            "permissionless market resolve remained stale after {max_attempts} bounded public accrual attempts"
         )
-        .expect("resolve stale permissionless")
     }
 
     fn close_resolved(&mut self, owner: &Keypair, portfolio: Pubkey) -> Pubkey {
@@ -2733,6 +2949,15 @@ impl V16CuEnv {
     }
 
     fn close_resolved_with_cu(&mut self, owner: &Keypair, portfolio: Pubkey) -> (Pubkey, u64) {
+        let (dest, result) = self.try_close_resolved_with_cu(owner, portfolio);
+        (dest, result.expect("close resolved"))
+    }
+
+    fn try_close_resolved_with_cu(
+        &mut self,
+        owner: &Keypair,
+        portfolio: Pubkey,
+    ) -> (Pubkey, Result<u64, String>) {
         let dest = Pubkey::new_unique();
         self.svm
             .set_account(
@@ -2746,24 +2971,22 @@ impl V16CuEnv {
                 },
             )
             .unwrap();
-        let cu = self
-            .send(
-                ProgInstruction::CloseResolved {
-                    fee_rate_per_slot: 0,
-                },
-                vec![
-                    AccountMeta::new_readonly(owner.pubkey(), false),
-                    AccountMeta::new(self.market, false),
-                    AccountMeta::new(portfolio, false),
-                    AccountMeta::new(dest, false),
-                    AccountMeta::new(self.vault, false),
-                    AccountMeta::new_readonly(self.vault_authority, false),
-                    AccountMeta::new_readonly(spl_token::ID, false),
-                ],
-                &[],
-            )
-            .expect("close resolved");
-        (dest, cu)
+        let result = self.send(
+            ProgInstruction::CloseResolved {
+                fee_rate_per_slot: 0,
+            },
+            vec![
+                AccountMeta::new_readonly(owner.pubkey(), false),
+                AccountMeta::new(self.market, false),
+                AccountMeta::new(portfolio, false),
+                AccountMeta::new(dest, false),
+                AccountMeta::new(self.vault, false),
+                AccountMeta::new_readonly(self.vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[],
+        );
+        (dest, result)
     }
 
     fn top_up_insurance(&mut self, amount: u128) -> Pubkey {
@@ -3514,6 +3737,30 @@ impl V16CuEnv {
         max_cu
     }
 
+    fn crank_steps_after_market_catchup(
+        &mut self,
+        portfolio: Pubkey,
+        ix: ProgInstruction,
+        attempts: usize,
+    ) -> u64 {
+        let mut max_cu = 0;
+        let mut account_steps = 0;
+        let mut transactions = 0;
+        while account_steps < attempts {
+            transactions += 1;
+            assert!(
+                transactions <= 16_384,
+                "crank did not finish bounded market catch-up"
+            );
+            let cu = self.crank(portfolio, ix.clone());
+            max_cu = max_cu.max(cu);
+            if !self.crank_observations_need_more_catchup(&ix) {
+                account_steps += 1;
+            }
+        }
+        max_cu
+    }
+
     fn crank_with_oracle_tail(
         &mut self,
         portfolio: Pubkey,
@@ -3561,6 +3808,28 @@ impl V16CuEnv {
             }
         }
         max_cu
+    }
+
+    fn crank_observations_need_more_catchup(&self, ix: &ProgInstruction) -> bool {
+        let ProgInstruction::PermissionlessCrank { observations, .. } = ix else {
+            return false;
+        };
+        if observations.is_empty() {
+            return false;
+        }
+        let authenticated_slot = self.svm.get_sysvar::<Clock>().slot;
+        let Some(market) = self.svm.get_account(&self.market) else {
+            return false;
+        };
+        let Ok((_, group)) = state::read_market(&market.data) else {
+            return false;
+        };
+        observations.iter().any(|hint| {
+            group
+                .assets
+                .get(hint.asset_index as usize)
+                .is_some_and(|asset| asset.slot_last < authenticated_slot)
+        })
     }
 
     fn try_force_close_abandoned_asset_with_cu(
@@ -3654,6 +3923,10 @@ fn send_tx(
     svm.send_transaction(tx)
         .map(|meta| meta.compute_units_consumed)
         .map_err(|e| format!("{e:?}"))
+}
+
+fn is_engine_stale_error(error: &str) -> bool {
+    error.contains("Custom(19)") || error.contains("custom program error: 0x13")
 }
 
 fn send_raw_tx(
@@ -10775,7 +11048,7 @@ fn v16_bpf_full_14_leg_liquidation_crank_is_under_tx_limit() {
     env.force_portfolio_capital_for_benchmark(long_account, 1_000);
 
     env.svm.warp_to_slot(16);
-    let liquidation_cu = env.crank_steps(
+    let liquidation_cu = env.crank_steps_after_market_catchup(
         long_account,
         ProgInstruction::PermissionlessCrank {
             now_slot: 16,
@@ -17418,7 +17691,7 @@ fn v16_attack_resolved_cross_margin_deep_insolvency_winds_down_publicly() {
 // over-claim. Total tokens paid out must never exceed total deposited.
 #[test]
 fn v16_regression_resolved_open_positions_recover_fairly_order_robust() {
-    let mut env = V16CuEnv::new();
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(1, 1_000, 1_000, 500);
     env.configure_auth_mark_with_cu(0, 100);
     let lo_owner = Keypair::new();
     let lo = env.create_portfolio(&lo_owner);
@@ -27417,16 +27690,7 @@ fn v16_attack_non_base_trade_rejects_after_base_resolve_matured() {
         "rejected stale non-base trade leaves LP state unchanged"
     );
 
-    env.svm.expire_blockhash();
-    let resolve = env.send(
-        ProgInstruction::ResolveStalePermissionless { now_slot: 0 },
-        vec![AccountMeta::new(env.market, false)],
-        &[],
-    );
-    assert!(
-        resolve.is_ok(),
-        "base resolve remains available after rejected non-base trade: {resolve:?}"
-    );
+    env.resolve();
     assert_eq!(env.market_state().1.mode, MarketModeV16::Resolved);
 }
 
@@ -29850,23 +30114,30 @@ fn v16_attack_deposit_with_parked_pnl_clean() {
     // price up -> long accrues parked pnl; settle.
     env.svm.warp_to_slot(10);
     env.push_auth_mark_with_cu(10, 110);
-    for slot in [10u64, 11] {
-        env.svm.warp_to_slot(slot);
-        for p in [sh, lo] {
-            env.svm.expire_blockhash();
-            let _ = env.send(
-                ProgInstruction::PermissionlessCrank {
-                    now_slot: slot,
-                    observations: crank_observations(0),
-                },
-                vec![
-                    AccountMeta::new(env.payer.pubkey(), true),
-                    AccountMeta::new(env.market, false),
-                    AccountMeta::new(p, false),
-                ],
-                &[],
-            );
-        }
+    env.crank_steps_after_market_catchup(
+        sh,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 10,
+            observations: crank_observations(0),
+        },
+        1,
+    );
+    env.crank(
+        lo,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 10,
+            observations: crank_observations(0),
+        },
+    );
+    env.svm.warp_to_slot(11);
+    for p in [sh, lo] {
+        env.crank(
+            p,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 11,
+                observations: crank_observations(0),
+            },
+        );
     }
     let a0 = env.portfolio_state(lo);
     assert!(a0.pnl.get() > 0, "long has parked pnl (non-vacuous)");
@@ -33545,23 +33816,30 @@ fn v16_attack_third_party_withdraw_preserves_pnl_backing() {
     // price up -> long parks pnl, short realizes loss (freeing residual).
     env.svm.warp_to_slot(10);
     env.push_auth_mark_with_cu(10, 110);
-    for slot in [10u64, 11] {
-        env.svm.warp_to_slot(slot);
-        for p in [psh, plo] {
-            env.svm.expire_blockhash();
-            let _ = env.send(
-                ProgInstruction::PermissionlessCrank {
-                    now_slot: slot,
-                    observations: crank_observations(0),
-                },
-                vec![
-                    AccountMeta::new(env.payer.pubkey(), true),
-                    AccountMeta::new(env.market, false),
-                    AccountMeta::new(p, false),
-                ],
-                &[],
-            );
-        }
+    env.crank_steps_after_market_catchup(
+        psh,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 10,
+            observations: crank_observations(0),
+        },
+        1,
+    );
+    env.crank(
+        plo,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 10,
+            observations: crank_observations(0),
+        },
+    );
+    env.svm.warp_to_slot(11);
+    for p in [psh, plo] {
+        env.crank(
+            p,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 11,
+                observations: crank_observations(0),
+            },
+        );
     }
     let long_pnl = env.portfolio_state(plo).pnl.get();
     assert!(long_pnl > 0, "long has parked pnl (non-vacuous)");
@@ -38062,7 +38340,7 @@ fn v16_attack_adl_deleverage_conserves_and_shrinks_winner_claim() {
         );
     }
     // Engine-selected partial liquidation restores health and proportionally deleverages the winner.
-    env.crank_steps(
+    env.crank_steps_after_market_catchup(
         b,
         ProgInstruction::PermissionlessCrank {
             now_slot: 6,
@@ -38141,7 +38419,7 @@ fn v16_engine_selected_deep_insolvency_close_is_full_and_conserving() {
         );
     }
     let g_pre = env.market_state().1;
-    env.crank_steps(
+    env.crank_steps_after_market_catchup(
         b,
         ProgInstruction::PermissionlessCrank {
             now_slot: 6,
@@ -38538,7 +38816,7 @@ fn v16_attack_adl_then_settlement_winner_cannot_escape_deleverage() {
             &[],
         );
     }
-    env.crank_steps(
+    env.crank_steps_after_market_catchup(
         b,
         ProgInstruction::PermissionlessCrank {
             now_slot: 6,
@@ -38949,7 +39227,7 @@ fn v16_attack_liquidation_isolated_across_assets() {
             &[],
         );
     }
-    env.crank_steps(
+    env.crank_steps_after_market_catchup(
         b0,
         ProgInstruction::PermissionlessCrank {
             now_slot: 6,
@@ -40396,17 +40674,13 @@ fn v16_attack_margin_gap_zone_no_liq_no_risk_increase() {
     env.svm.warp_to_slot(2);
     env.push_auth_mark_with_cu(2, 110);
     env.svm.expire_blockhash();
-    let _ = env.send(
+    env.crank_steps_after_market_catchup(
+        x,
         ProgInstruction::PermissionlessCrank {
             now_slot: 2,
             observations: crank_observations(0),
         },
-        vec![
-            AccountMeta::new(env.payer.pubkey(), true),
-            AccountMeta::new(env.market, false),
-            AccountMeta::new(x, false),
-        ],
-        &[],
+        1,
     );
     let xs = env.portfolio_state(x);
     let eq = health_cert(&xs).certified_equity;
@@ -47675,7 +47949,7 @@ fn v16_bpf_10m_market_liquidation_high_asset_stays_bounded() {
     );
     assert_cu_within("10MiB PushEwmaMark", push_cu, CUSTODY_CU_LIMIT);
 
-    let liquidation_cu = env.crank_steps(
+    let liquidation_cu = env.crank_steps_after_market_catchup(
         short,
         ProgInstruction::PermissionlessCrank {
             now_slot: LIQUIDATION_SLOT,
@@ -48591,8 +48865,8 @@ fn v16_bpf_force_close_liveness_survives_14_stale_leg_grief_via_precrank() {
         now_slot: slot,
         observations: crank_observations(0),
     };
-    let c_long = env.crank(pa, refresh(22));
-    let c_short = env.crank(pb, refresh(22));
+    let c_long = env.crank_steps_after_market_catchup(pa, refresh(22), 1);
+    let c_short = env.crank_steps_after_market_catchup(pb, refresh(22), 1);
     assert!(
         c_long < 1_400_000 && c_short < 1_400_000,
         "each permissionless Refresh fits a tx: long={c_long} short={c_short}"
@@ -55002,15 +55276,21 @@ fn v16_attack_convert_released_pnl_rejects_when_resolve_matured() {
 
     env.svm.warp_to_slot(3);
     env.push_auth_mark_with_cu(3, 100);
-    for portfolio in [fresh, stale] {
-        env.crank(
-            portfolio,
-            ProgInstruction::PermissionlessCrank {
-                now_slot: 3,
-                observations: crank_observations(0),
-            },
-        );
-    }
+    env.crank_steps_after_market_catchup(
+        fresh,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 3,
+            observations: crank_observations(0),
+        },
+        1,
+    );
+    env.crank(
+        stale,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 3,
+            observations: crank_observations(0),
+        },
+    );
     assert!(
         env.portfolio_state(stale).pnl.get() > 0,
         "stale-path setup must have real released PnL to convert"
@@ -55071,16 +55351,7 @@ fn v16_attack_convert_released_pnl_rejects_when_resolve_matured() {
     );
     assert_eq!(stale_state_after.pnl.get(), stale_state_before.pnl.get());
 
-    env.svm.expire_blockhash();
-    let resolve = env.send(
-        ProgInstruction::ResolveStalePermissionless { now_slot: 0 },
-        vec![AccountMeta::new(env.market, false)],
-        &[],
-    );
-    assert!(
-        resolve.is_ok(),
-        "permissionless resolve still succeeds after rejected stale ConvertReleasedPnl: {resolve:?}"
-    );
+    env.resolve();
     assert_eq!(env.market_state().1.mode, MarketModeV16::Resolved);
 }
 
@@ -60129,16 +60400,23 @@ fn assert_underfunded_ewma_exit_uses_collected_fee(path: NoCpiReportedPricePath)
     // maintenance boundary, but with less capital than the maximum fee on a full exit.
     env.svm.warp_to_slot(10);
     env.push_ewma_mark_with_cu(10, 1);
-    for account in [long, short] {
-        env.svm.expire_blockhash();
-        env.crank(
-            account,
-            ProgInstruction::PermissionlessCrank {
-                now_slot: 10,
-                observations: crank_observations(0),
-            },
-        );
-    }
+    env.svm.expire_blockhash();
+    env.crank_steps_after_market_catchup(
+        long,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 10,
+            observations: crank_observations(0),
+        },
+        1,
+    );
+    env.svm.expire_blockhash();
+    env.crank(
+        short,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 10,
+            observations: crank_observations(0),
+        },
+    );
 
     env.svm.warp_to_slot(20);
     let (cfg_before, group_before) = env.market_state();
@@ -60251,16 +60529,23 @@ fn assert_underfunded_cpi_ewma_exit_uses_collected_fee(path: CpiEwmaTradePath) {
 
     env.svm.warp_to_slot(10);
     env.push_ewma_mark_with_cu(10, ADVERSE_MARK);
-    for account in [taker, lp] {
-        env.svm.expire_blockhash();
-        env.crank(
-            account,
-            ProgInstruction::PermissionlessCrank {
-                now_slot: 10,
-                observations: crank_observations(0),
-            },
-        );
-    }
+    env.svm.expire_blockhash();
+    env.crank_steps_after_market_catchup(
+        taker,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 10,
+            observations: crank_observations(0),
+        },
+        1,
+    );
+    env.svm.expire_blockhash();
+    env.crank(
+        lp,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 10,
+            observations: crank_observations(0),
+        },
+    );
 
     let (exit_ctx, exit_delegate, _) = env.init_matcher_context_with_passive_spread_authorized(
         matcher_program,

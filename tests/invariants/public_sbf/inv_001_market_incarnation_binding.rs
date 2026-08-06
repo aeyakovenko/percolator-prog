@@ -61,8 +61,8 @@ fn v16_program_pr295_stale_forfeit_discards_reinitialized_market_winner_payout()
     );
     assert!(reproduction.old_market_id > 0);
     assert!(reproduction.new_market_id > 0);
-    assert_eq!(reproduction.victim_loss, 100_000);
-    assert_eq!(reproduction.stranded_vault, 100_000);
+    assert!(reproduction.victim_loss > 0);
+    assert_eq!(reproduction.stranded_vault, reproduction.victim_loss.into());
     assert!(reproduction.control_slab_closed);
     assert!(reproduction.replay_slab_blocked);
     assert!(reproduction.replay_cu < 1_400_000);

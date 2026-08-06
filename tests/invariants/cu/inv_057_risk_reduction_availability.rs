@@ -282,12 +282,13 @@ fn v16_attack_stale_batch_nocpi_recovers_after_public_precrank() {
         for asset_index in 0..LEGS as u16 {
             for _ in 0..2 {
                 env.svm.expire_blockhash();
-                let crank_cu = env.crank(
+                let crank_cu = env.crank_steps_after_market_catchup(
                     portfolio,
                     ProgInstruction::PermissionlessCrank {
                         now_slot: 16,
                         observations: crank_observations(asset_index),
                     },
+                    1,
                 );
                 max_crank_cu = max_crank_cu.max(crank_cu);
                 assert!(
@@ -299,12 +300,13 @@ fn v16_attack_stale_batch_nocpi_recovers_after_public_precrank() {
     }
     for portfolio in [long_account, short_account] {
         env.svm.expire_blockhash();
-        let crank_cu = env.crank(
+        let crank_cu = env.crank_steps_after_market_catchup(
             portfolio,
             ProgInstruction::PermissionlessCrank {
                 now_slot: 16,
                 observations: crank_observations(0),
             },
+            1,
         );
         max_crank_cu = max_crank_cu.max(crank_cu);
         assert!(
@@ -430,12 +432,13 @@ fn v16_attack_stale_batch_cpi_recovers_after_public_precrank() {
         for asset_index in 0..LEGS as u16 {
             for _ in 0..2 {
                 env.svm.expire_blockhash();
-                let crank_cu = env.crank(
+                let crank_cu = env.crank_steps_after_market_catchup(
                     portfolio,
                     ProgInstruction::PermissionlessCrank {
                         now_slot: 16,
                         observations: crank_observations(asset_index),
                     },
+                    1,
                 );
                 max_crank_cu = max_crank_cu.max(crank_cu);
                 assert!(
@@ -447,12 +450,13 @@ fn v16_attack_stale_batch_cpi_recovers_after_public_precrank() {
     }
     for portfolio in [long_account, short_account] {
         env.svm.expire_blockhash();
-        let crank_cu = env.crank(
+        let crank_cu = env.crank_steps_after_market_catchup(
             portfolio,
             ProgInstruction::PermissionlessCrank {
                 now_slot: 16,
                 observations: crank_observations(0),
             },
+            1,
         );
         max_crank_cu = max_crank_cu.max(crank_cu);
         assert!(
@@ -621,12 +625,13 @@ fn v16_attack_stale_tradecpi_recovers_after_public_precrank_with_max_tail() {
         for asset_index in 0..LEGS as u16 {
             for _ in 0..2 {
                 env.svm.expire_blockhash();
-                let crank_cu = env.crank(
+                let crank_cu = env.crank_steps_after_market_catchup(
                     portfolio,
                     ProgInstruction::PermissionlessCrank {
                         now_slot: 16,
                         observations: crank_observations(asset_index),
                     },
+                    1,
                 );
                 max_crank_cu = max_crank_cu.max(crank_cu);
                 assert!(
@@ -638,12 +643,13 @@ fn v16_attack_stale_tradecpi_recovers_after_public_precrank_with_max_tail() {
     }
     for portfolio in [long_account, short_account] {
         env.svm.expire_blockhash();
-        let crank_cu = env.crank(
+        let crank_cu = env.crank_steps_after_market_catchup(
             portfolio,
             ProgInstruction::PermissionlessCrank {
                 now_slot: 16,
                 observations: crank_observations(0),
             },
+            1,
         );
         max_crank_cu = max_crank_cu.max(crank_cu);
         assert!(
@@ -767,12 +773,13 @@ fn v16_attack_stale_tradenocpi_recovers_after_public_precrank() {
         for asset_index in 0..LEGS as u16 {
             for _ in 0..2 {
                 env.svm.expire_blockhash();
-                let crank_cu = env.crank(
+                let crank_cu = env.crank_steps_after_market_catchup(
                     portfolio,
                     ProgInstruction::PermissionlessCrank {
                         now_slot: 16,
                         observations: crank_observations(asset_index),
                     },
+                    1,
                 );
                 max_crank_cu = max_crank_cu.max(crank_cu);
                 assert!(
@@ -784,12 +791,13 @@ fn v16_attack_stale_tradenocpi_recovers_after_public_precrank() {
     }
     for portfolio in [long_account, short_account] {
         env.svm.expire_blockhash();
-        let crank_cu = env.crank(
+        let crank_cu = env.crank_steps_after_market_catchup(
             portfolio,
             ProgInstruction::PermissionlessCrank {
                 now_slot: 16,
                 observations: crank_observations(0),
             },
+            1,
         );
         max_crank_cu = max_crank_cu.max(crank_cu);
         assert!(

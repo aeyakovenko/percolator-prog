@@ -688,7 +688,7 @@ fn run_dense_zero_delta_resolution_shape(asset_count: u16) {
     let mark_slot = u64::from(asset_count) + 1;
     env.svm.warp_to_slot(mark_slot);
     for asset_index in 0..asset_count {
-        env.push_auth_mark_for_asset_as_admin(asset_index, mark_slot, PRICE - 1);
+        env.push_auth_mark_for_asset_as_admin(asset_index, mark_slot, PRICE);
     }
     let resolve_slot = mark_slot + 2;
     env.svm.warp_to_slot(resolve_slot);
@@ -731,9 +731,10 @@ fn run_dense_zero_delta_resolution_shape(asset_count: u16) {
         ],
         &[],
     );
-    let hinted_error = hinted_crank.expect_err("mature market must reject fresh observations");
+    let hinted_error =
+        hinted_crank.expect_err("mature zero-delta hint must reject without mutation");
     assert!(
-        hinted_error.contains("Custom(27)") || hinted_error.contains("custom program error: 0x1b"),
+        hinted_error.contains("Custom(22)") || hinted_error.contains("custom program error: 0x16"),
         "hinted crank failed for the wrong reason: {hinted_error}"
     );
     assert_eq!(

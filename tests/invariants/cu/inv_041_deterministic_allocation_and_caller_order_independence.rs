@@ -53,12 +53,13 @@ fn v16_attack_force_close_dust_chunking_is_value_path_independent() {
 
         env.svm.warp_to_slot(2);
         env.push_auth_mark_for_asset_as_admin(0, 2, CLOSE_PRICE);
-        env.crank(
+        env.crank_steps_after_market_catchup(
             long,
             ProgInstruction::PermissionlessCrank {
                 now_slot: 2,
                 observations: crank_observations(0),
             },
+            1,
         );
         env.crank(
             short,

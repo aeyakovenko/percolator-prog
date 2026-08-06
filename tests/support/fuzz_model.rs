@@ -600,10 +600,14 @@ pub struct ResolveBeforeCommittedAccrualReproduction {
     pub blocker: KnownBlocker,
     pub control_mark: u64,
     pub attack_mark: u64,
+    pub unsafe_resolve_rejected: bool,
+    pub rejected_exact_rollback: bool,
     pub victim_payout_loss: u64,
     pub attacker_payout_gain: u64,
     pub control_total_payout: u128,
     pub attack_total_payout: u128,
+    pub catchup_steps: u16,
+    pub catchup_cu: u64,
     pub attack_resolve_cu: u64,
 }
 
@@ -852,8 +856,11 @@ pub struct DelayedResolvePolicyReplayReproduction {
     pub blocker: KnownBlocker,
     pub victim_loss: u64,
     pub attacker_gain: u64,
-    pub replay_crank_blocked: bool,
-    pub frozen_price: u64,
+    pub unsafe_resolve_rejected: bool,
+    pub rejected_exact_rollback: bool,
+    pub catchup_steps: u16,
+    pub max_crank_cu: u64,
+    pub replay_price: u64,
     pub control_price: u64,
     pub replay_cu: u64,
     pub resolve_cu: u64,
@@ -5223,14 +5230,18 @@ pub fn reproduce_resolve_before_committed_accrual(
         .short_payout
         .checked_sub(control.short_payout)
         .ok_or("PR 255 resolve-first ordering decreased attacker payout")?;
-    if control.effective_mark <= attack.effective_mark
-        || victim_payout_loss == 0
-        || victim_payout_loss != attacker_payout_gain
+    if control.effective_mark != attack.effective_mark
+        || !attack.unsafe_resolve_rejected
+        || !attack.rejected_exact_rollback
+        || victim_payout_loss != 0
+        || attacker_payout_gain != 0
         || control.total_payout != attack.total_payout
+        || attack.catchup_steps == 0
+        || attack.catchup_cu >= TX_CU_LIMIT
         || attack.resolve_cu >= TX_CU_LIMIT
     {
         return Err(format!(
-            "PR 255 stale resolve did not discard a conserved pending-mark transfer: \
+            "PR 255 stale resolve did not reject, catch up, and preserve terminal value: \
              control={control:?}, attack={attack:?}"
         ));
     }
@@ -5238,10 +5249,14 @@ pub fn reproduce_resolve_before_committed_accrual(
         blocker: KnownBlocker::ResolveBeforeCommittedAccrual,
         control_mark: control.effective_mark,
         attack_mark: attack.effective_mark,
+        unsafe_resolve_rejected: attack.unsafe_resolve_rejected,
+        rejected_exact_rollback: attack.rejected_exact_rollback,
         victim_payout_loss,
         attacker_payout_gain,
         control_total_payout: control.total_payout,
         attack_total_payout: attack.total_payout,
+        catchup_steps: attack.catchup_steps,
+        catchup_cu: attack.catchup_cu,
         attack_resolve_cu: attack.resolve_cu,
     })
 }
@@ -5249,9 +5264,13 @@ pub fn reproduce_resolve_before_committed_accrual(
 #[derive(Clone, Copy, Debug)]
 struct PendingMarkResolveWorld {
     effective_mark: u64,
+    unsafe_resolve_rejected: bool,
+    rejected_exact_rollback: bool,
     long_payout: u64,
     short_payout: u64,
     total_payout: u128,
+    catchup_steps: u16,
+    catchup_cu: u64,
     resolve_cu: u64,
 }
 
@@ -5320,9 +5339,69 @@ fn run_pending_mark_resolve_world(
         .map_err(|error| format!("PR 255 control mark accrual: {error}"))?;
     }
 
-    let resolve = env
-        .resolve_stale_permissionless(RESOLVE_SLOT)
-        .map_err(|error| format!("PR 255 public stale resolve: {error}"))?;
+    let mut unsafe_resolve_rejected = false;
+    let mut rejected_exact_rollback = false;
+    let mut catchup_steps = 0u16;
+    let mut catchup_cu = 0;
+    let mut resolve_cu = None;
+    if !commit_mark_before_resolve {
+        let before_rejection = tracked_economic_accounts(&env);
+        let resolve = env.resolve_stale_permissionless(RESOLVE_SLOT);
+        unsafe_resolve_rejected = matches!(
+            &resolve,
+            Err(error)
+                if error.contains("Custom(19)") || error.contains("custom program error: 0x13")
+        );
+        if !unsafe_resolve_rejected {
+            return Err(format!(
+                "PR 255 unsafe stale resolve returned an unexpected result: {resolve:?}"
+            ));
+        }
+        rejected_exact_rollback = tracked_economic_accounts(&env) == before_rejection;
+        for _ in 0..16 {
+            let catchup = env
+                .crank(
+                    0,
+                    RESOLVE_SLOT,
+                    vec![CrankObservationHint {
+                        asset_index: 0,
+                        oracle_accounts: 0,
+                    }],
+                )
+                .map_err(|error| format!("PR 255 stored-state catch-up crank: {error}"))?;
+            catchup_steps = catchup_steps
+                .checked_add(1)
+                .ok_or("PR 255 catch-up step overflow")?;
+            catchup_cu = catchup_cu.max(catchup.compute_units);
+
+            let before_retry = tracked_economic_accounts(&env);
+            match env.resolve_stale_permissionless(RESOLVE_SLOT) {
+                Ok(resolve) => {
+                    resolve_cu = Some(resolve.compute_units);
+                    break;
+                }
+                Err(error)
+                    if error.contains("Custom(19)")
+                        || error.contains("custom program error: 0x13") =>
+                {
+                    rejected_exact_rollback &= tracked_economic_accounts(&env) == before_retry;
+                }
+                Err(error) => {
+                    return Err(format!(
+                        "PR 255 public stale resolve retry returned unexpected error: {error}"
+                    ));
+                }
+            }
+        }
+        if resolve_cu.is_none() {
+            return Err("PR 255 did not resolve within 16 bounded catch-up calls".into());
+        }
+    } else {
+        let resolve = env
+            .resolve_stale_permissionless(RESOLVE_SLOT)
+            .map_err(|error| format!("PR 255 control stale resolve: {error}"))?;
+        resolve_cu = Some(resolve.compute_units);
+    }
     let (_, resolved) = env.primary_market_state();
     if resolved.mode != MarketModeV16::Resolved {
         return Err("PR 255 stale resolver did not terminalize the market".into());
@@ -5343,10 +5422,14 @@ fn run_pending_mark_resolve_world(
     }
     Ok(PendingMarkResolveWorld {
         effective_mark,
+        unsafe_resolve_rejected,
+        rejected_exact_rollback,
         long_payout,
         short_payout,
         total_payout,
-        resolve_cu: resolve.compute_units,
+        catchup_steps,
+        catchup_cu,
+        resolve_cu: resolve_cu.ok_or("PR 255 missing successful resolve CU")?,
     })
 }
 
@@ -5450,21 +5533,34 @@ pub fn reproduce_bilateral_fee_support(
             ))
         }
     };
-    for actor in 0..env.actors.len() {
-        let observations = if actor == 0 || hybrid_oracle_tail.is_some() {
-            vec![CrankObservationHint {
-                asset_index: 0,
-                oracle_accounts: usize::from(hybrid_oracle_tail.is_some()) as u8,
-            }]
-        } else {
-            vec![]
-        };
+    let mut setup_max_cu = 0;
+    for step in 0..16 {
+        if env.primary_market_state().1.assets[0].slot_last >= 10 {
+            break;
+        }
+        let observations = vec![CrankObservationHint {
+            asset_index: 0,
+            oracle_accounts: usize::from(hybrid_oracle_tail.is_some()) as u8,
+        }];
         let success = if let Some(oracle) = hybrid_oracle_tail {
-            env.crank_with_oracles(actor, 10, observations, &[oracle])
+            env.crank_with_oracles(0, 10, observations, &[oracle])
         } else {
-            env.crank(actor, 10, observations)
-        };
-        success.map_err(|error| format!("PR 369 setup crank actor {actor}: {error}"))?;
+            env.crank(0, 10, observations)
+        }
+        .map_err(|error| format!("PR 369 setup market crank {step}: {error}"))?;
+        setup_max_cu = setup_max_cu.max(success.compute_units);
+    }
+    if env.primary_market_state().1.assets[0].slot_last < 10 {
+        return Err("PR 369 setup market did not reach the authenticated slot".into());
+    }
+    // The final market-catchup call dispatches actor 0. Give every other portfolio the same one
+    // account-level selector step that the pre-catchup-only wrapper performed in its setup loop.
+    for actor in 1..env.actors.len() {
+        match env.crank(actor, 10, Vec::new()) {
+            Ok(success) => setup_max_cu = setup_max_cu.max(success.compute_units),
+            Err(error) if error.contains("Custom(22)") => {}
+            Err(error) => return Err(format!("PR 369 setup account crank {actor}: {error}")),
+        }
     }
     let setup_mark = env.primary_market_state().1.assets[0].effective_price;
     let mover_at_setup = env.primary_portfolio(0);
@@ -5503,7 +5599,7 @@ pub fn reproduce_bilateral_fee_support(
         TradeRoute::NoCpi | TradeRoute::BatchNoCpi => unreachable!(),
     }
     .map_err(|error| format!("PR 369 underfunded risk-reducing {route:?} exit: {error}"))?;
-    let mut max_cu = exit.compute_units;
+    let mut max_cu = setup_max_cu.max(exit.compute_units);
     let queued_mark = env.primary_profile(0).mark_ewma_e6;
     if queued_mark < setup_mark {
         return Err(format!(
@@ -8565,7 +8661,10 @@ pub fn reproduce_authority_handoff_aba_replay(
 struct DelayedResolvePolicyWorld {
     victim_payout: u64,
     attacker_payout: u64,
-    replay_crank_blocked: bool,
+    unsafe_resolve_rejected: bool,
+    rejected_exact_rollback: bool,
+    catchup_steps: u16,
+    max_crank_cu: u64,
     settlement_price: u64,
     replay_cu: u64,
     resolve_cu: u64,
@@ -8625,47 +8724,81 @@ fn run_delayed_resolve_policy_world(
     env.warp_to_slot(RESOLVE_SLOT);
 
     let mut replay_cu = 0;
-    let replay_crank_blocked;
+    let mut unsafe_resolve_rejected = false;
+    let mut rejected_exact_rollback = false;
+    let mut catchup_steps = 0u16;
+    let mut max_crank_cu = 0;
     let resolve_cu;
     if land_replay {
         let replay = env
             .land_retained(retained_policy)
             .map_err(|error| format!("PR 347 delayed short policy no longer lands: {error}"))?;
         replay_cu = replay.compute_units;
-        let market_before_crank = env.market_data(false);
-        let victim_before_crank = env.primary_portfolio_data(VICTIM);
-        replay_crank_blocked = env
-            .crank(
-                VICTIM,
-                RESOLVE_SLOT,
-                vec![CrankObservationHint {
-                    asset_index: 0,
-                    oracle_accounts: 0,
-                }],
-            )
-            .is_err();
-        if !replay_crank_blocked
-            || env.market_data(false) != market_before_crank
-            || env.primary_portfolio_data(VICTIM) != victim_before_crank
-        {
-            return Err("PR 347 displaced timer did not atomically block the honest crank".into());
+        let before_rejection = tracked_economic_accounts(&env);
+        let initial_resolve = env.resolve_stale_permissionless(RESOLVE_SLOT);
+        unsafe_resolve_rejected = matches!(
+            &initial_resolve,
+            Err(error)
+                if error.contains("Custom(19)")
+                    || error.contains("custom program error: 0x13")
+        );
+        rejected_exact_rollback = tracked_economic_accounts(&env) == before_rejection;
+        if !unsafe_resolve_rejected || !rejected_exact_rollback {
+            return Err(format!(
+                "PR 347 stale-policy resolve did not reject and roll back exactly: \
+                 result={initial_resolve:?}"
+            ));
         }
-        resolve_cu = env
-            .resolve_stale_permissionless(RESOLVE_SLOT)
-            .map_err(|error| format!("PR 347 permissionless stale resolve: {error}"))?
-            .compute_units;
+        let mut landed_resolve_cu = None;
+        for step in 0..16 {
+            let catchup = env
+                .crank(
+                    VICTIM,
+                    RESOLVE_SLOT,
+                    vec![CrankObservationHint {
+                        asset_index: 0,
+                        oracle_accounts: 0,
+                    }],
+                )
+                .map_err(|error| format!("PR 347 public catch-up crank {step}: {error}"))?;
+            catchup_steps = catchup_steps
+                .checked_add(1)
+                .ok_or("PR 347 catch-up step overflow")?;
+            max_crank_cu = max_crank_cu.max(catchup.compute_units);
+            let before_retry = tracked_economic_accounts(&env);
+            match env.resolve_stale_permissionless(RESOLVE_SLOT) {
+                Ok(resolve) => {
+                    landed_resolve_cu = Some(resolve.compute_units);
+                    break;
+                }
+                Err(error)
+                    if error.contains("Custom(19)")
+                        || error.contains("custom program error: 0x13") =>
+                {
+                    rejected_exact_rollback &= tracked_economic_accounts(&env) == before_retry;
+                }
+                Err(error) => {
+                    return Err(format!(
+                        "PR 347 stale-policy resolve retry returned unexpected error: {error}"
+                    ));
+                }
+            }
+        }
+        resolve_cu = landed_resolve_cu
+            .ok_or("PR 347 stale-policy resolve did not land after bounded public catch-up")?;
     } else {
-        replay_crank_blocked = false;
         for actor in [VICTIM, ATTACKER] {
-            env.crank(
-                actor,
-                RESOLVE_SLOT,
-                vec![CrankObservationHint {
-                    asset_index: 0,
-                    oracle_accounts: 0,
-                }],
-            )
-            .map_err(|error| format!("PR 347 control crank actor {actor}: {error}"))?;
+            let crank = env
+                .crank(
+                    actor,
+                    RESOLVE_SLOT,
+                    vec![CrankObservationHint {
+                        asset_index: 0,
+                        oracle_accounts: 0,
+                    }],
+                )
+                .map_err(|error| format!("PR 347 control crank actor {actor}: {error}"))?;
+            max_crank_cu = max_crank_cu.max(crank.compute_units);
         }
         resolve_cu = env
             .resolve_market()
@@ -8695,7 +8828,10 @@ fn run_delayed_resolve_policy_world(
     Ok(DelayedResolvePolicyWorld {
         victim_payout,
         attacker_payout,
-        replay_crank_blocked,
+        unsafe_resolve_rejected,
+        rejected_exact_rollback,
+        catchup_steps,
+        max_crank_cu,
         settlement_price,
         replay_cu,
         resolve_cu,
@@ -8718,12 +8854,16 @@ pub fn reproduce_delayed_resolve_policy_replay(
         .ok_or("PR 347 replay decreased attacker payout")?;
     if control.victim_payout != 1_100_000
         || control.attacker_payout != 900_000
-        || replay.victim_payout != 1_000_000
-        || replay.attacker_payout != 1_000_000
+        || replay.victim_payout != control.victim_payout
+        || replay.attacker_payout != control.attacker_payout
         || victim_loss != attacker_gain
-        || !replay.replay_crank_blocked
+        || victim_loss != 0
+        || !replay.unsafe_resolve_rejected
+        || !replay.rejected_exact_rollback
+        || replay.catchup_steps == 0
+        || replay.catchup_steps > 16
         || control.settlement_price != 110
-        || replay.settlement_price != 100
+        || replay.settlement_price != control.settlement_price
     {
         return Err(format!(
             "PR 347 paired-world mismatch: control={control:?}, replay={replay:?}, \
@@ -8734,8 +8874,11 @@ pub fn reproduce_delayed_resolve_policy_replay(
         blocker: KnownBlocker::DelayedResolvePolicyReplay,
         victim_loss,
         attacker_gain,
-        replay_crank_blocked: replay.replay_crank_blocked,
-        frozen_price: replay.settlement_price,
+        unsafe_resolve_rejected: replay.unsafe_resolve_rejected,
+        rejected_exact_rollback: replay.rejected_exact_rollback,
+        catchup_steps: replay.catchup_steps,
+        max_crank_cu: replay.max_crank_cu.max(control.max_crank_cu),
+        replay_price: replay.settlement_price,
         control_price: control.settlement_price,
         replay_cu: replay.replay_cu,
         resolve_cu: replay.resolve_cu,
@@ -8785,24 +8928,12 @@ fn run_resolve_authority_incarnation_world(
     env.warp_to_slot(10);
     env.push_auth_mark(0, 10, ADVERSE_PRICE)
         .map_err(|error| format!("PR 353 push temporary adverse mark: {error}"))?;
-    let mut max_crank_cu = 0;
-    for actor in [VICTIM, WINNER] {
-        let crank = env
-            .crank(
-                actor,
-                10,
-                vec![CrankObservationHint {
-                    asset_index: 0,
-                    oracle_accounts: 0,
-                }],
-            )
-            .map_err(|error| format!("PR 353 adverse-mark crank actor {actor}: {error}"))?;
-        max_crank_cu = max_crank_cu.max(crank.compute_units);
-    }
+    let mut max_crank_cu =
+        crank_market_then_accounts_once(&mut env, INTERIM, &[VICTIM, WINNER], 10, 0, 16)
+            .map_err(|error| format!("PR 353 settle adverse mark: {error}"))?;
     if env.primary_market_state().1.assets[0].effective_price != ADVERSE_PRICE {
         return Err("PR 353 adverse mark did not become effective".into());
     }
-
     let replay_cu;
     let settlement_price;
     if land_replay {
@@ -8816,23 +8947,22 @@ fn run_resolve_authority_incarnation_world(
         env.warp_to_slot(12);
         env.push_auth_mark(0, 12, PRICE)
             .map_err(|error| format!("PR 353 restore honest mark: {error}"))?;
-        for actor in [VICTIM, WINNER] {
-            let crank = env
-                .crank(
-                    actor,
-                    12,
-                    vec![CrankObservationHint {
-                        asset_index: 0,
-                        oracle_accounts: 0,
-                    }],
-                )
-                .map_err(|error| format!("PR 353 restored-mark crank actor {actor}: {error}"))?;
-            max_crank_cu = max_crank_cu.max(crank.compute_units);
+        let boundary_cu =
+            crank_market_then_accounts_once(&mut env, INTERIM, &[VICTIM, WINNER], 12, 0, 16)
+                .map_err(|error| format!("PR 353 settle restored-mark boundary: {error}"))?;
+        max_crank_cu = max_crank_cu.max(boundary_cu);
+        env.warp_to_slot(13);
+        let restored_cu =
+            crank_market_then_accounts_once(&mut env, INTERIM, &[VICTIM, WINNER], 13, 0, 16)
+                .map_err(|error| format!("PR 353 settle restored mark: {error}"))?;
+        max_crank_cu = max_crank_cu.max(restored_cu);
+        if env.primary_market_state().1.assets[0].effective_price != PRICE {
+            return Err("PR 353 restored mark did not commit within bounded public cranks".into());
         }
         settlement_price = env.primary_market_state().1.assets[0].effective_price;
         env.resolve_market()
             .map_err(|error| format!("PR 353 current-incarnation resolve: {error}"))?;
-        env.warp_to_slot(13);
+        env.warp_to_slot(14);
         replay_cu = 0;
     }
     let (victim_payout, winner_payout) = if land_replay {
@@ -10195,10 +10325,45 @@ fn finish_forfeit_replay_terminal(
     }
 
     env.warp_to_slot(shutdown_slot);
-    let shutdown = env
-        .shutdown_asset(0, shutdown_slot)
-        .map_err(|error| format!("{context} shutdown replacement generation: {error}"))?;
-    max_cu = max_cu.max(shutdown.compute_units);
+    let mut shutdown_landed = false;
+    for step in 0..16 {
+        match env.shutdown_asset(0, shutdown_slot) {
+            Ok(shutdown) => {
+                max_cu = max_cu.max(shutdown.compute_units);
+                shutdown_landed = true;
+                break;
+            }
+            Err(error)
+                if error.contains("Custom(19)") || error.contains("custom program error: 0x13") =>
+            {
+                let catchup = env
+                    .crank(
+                        ATTACKER,
+                        shutdown_slot,
+                        vec![CrankObservationHint {
+                            asset_index: 0,
+                            oracle_accounts: 0,
+                        }],
+                    )
+                    .map_err(|crank_error| {
+                        format!(
+                            "{context} shutdown catch-up crank {step} after {error}: {crank_error}"
+                        )
+                    })?;
+                max_cu = max_cu.max(catchup.compute_units);
+            }
+            Err(error) => {
+                return Err(format!(
+                    "{context} shutdown replacement generation returned unexpected error: {error}"
+                ));
+            }
+        }
+    }
+    if !shutdown_landed {
+        return Err(format!(
+            "{context} shutdown replacement generation did not land after bounded public catch-up"
+        ));
+    }
     let mut replay_cu = 0;
     if land_replay {
         let replay = env
@@ -10355,11 +10520,10 @@ pub fn reproduce_forfeit_portfolio_incarnation_replay(
         .ok_or("PR 278 replay increased victim payout")?;
     if control.original_portfolio_id != replay.original_portfolio_id
         || control.replacement_portfolio_id != replay.replacement_portfolio_id
-        || control.victim_payout != 1_100_000
+        || control.victim_payout.checked_add(control.attacker_payout) != Some(2_000_000)
         || replay.victim_payout != 1_000_000
         || control.attacker_payout != replay.attacker_payout
-        || control.attacker_payout != 900_000
-        || victim_loss != 100_000
+        || victim_loss == 0
         || control.vault_remaining != 0
         || replay.vault_remaining != u128::from(victim_loss)
         || !control.slab_closed
@@ -10505,11 +10669,10 @@ pub fn reproduce_forfeit_market_generation_replay(
         .ok_or("PR 295 replay increased victim payout")?;
     if control.old_market_id != replay.old_market_id
         || control.new_market_id != replay.new_market_id
-        || control.victim_payout != 1_100_000
+        || control.victim_payout.checked_add(control.attacker_payout) != Some(2_000_000)
         || replay.victim_payout != 1_000_000
         || control.attacker_payout != replay.attacker_payout
-        || control.attacker_payout != 900_000
-        || victim_loss != 100_000
+        || victim_loss == 0
         || control.vault_remaining != 0
         || replay.vault_remaining != u128::from(victim_loss)
         || !control.slab_closed
@@ -11638,17 +11801,8 @@ fn run_resolve_generation_replay_world(
     env.warp_to_slot(10);
     env.push_auth_mark(0, 10, ADVERSE_PRICE)
         .map_err(|error| format!("PR 311 publish temporary adverse mark: {error}"))?;
-    for actor in [VICTIM, WINNER] {
-        env.crank(
-            actor,
-            10,
-            vec![CrankObservationHint {
-                asset_index: 0,
-                oracle_accounts: 0,
-            }],
-        )
-        .map_err(|error| format!("PR 311 refresh actor {actor} at adverse mark: {error}"))?;
-    }
+    crank_market_then_accounts_once(&mut env, 2, &[VICTIM, WINNER], 10, 0, 16)
+        .map_err(|error| format!("PR 311 settle adverse mark: {error}"))?;
     if env.primary_market_state().1.assets[0].effective_price != ADVERSE_PRICE {
         return Err("PR 311 temporary adverse mark did not commit".into());
     }
@@ -11661,17 +11815,8 @@ fn run_resolve_generation_replay_world(
         env.warp_to_slot(11);
         env.push_auth_mark(0, 11, PRICE)
             .map_err(|error| format!("PR 311 restore authenticated mark: {error}"))?;
-        for actor in [VICTIM, WINNER] {
-            env.crank(
-                actor,
-                11,
-                vec![CrankObservationHint {
-                    asset_index: 0,
-                    oracle_accounts: 0,
-                }],
-            )
-            .map_err(|error| format!("PR 311 refresh actor {actor} at restored mark: {error}"))?;
-        }
+        crank_market_then_accounts_once(&mut env, 2, &[VICTIM, WINNER], 11, 0, 16)
+            .map_err(|error| format!("PR 311 settle restored mark: {error}"))?;
         if env.primary_market_state().1.assets[0].effective_price != PRICE {
             return Err("PR 311 control mark did not return to entry".into());
         }
@@ -11808,17 +11953,8 @@ fn run_shutdown_generation_replay_world(
     env.warp_to_slot(10);
     env.push_auth_mark(0, 10, ADVERSE_PRICE)
         .map_err(|error| format!("PR 315 publish temporary adverse mark: {error}"))?;
-    for actor in [VICTIM, WINNER] {
-        env.crank(
-            actor,
-            10,
-            vec![CrankObservationHint {
-                asset_index: 0,
-                oracle_accounts: 0,
-            }],
-        )
-        .map_err(|error| format!("PR 315 refresh actor {actor} at adverse mark: {error}"))?;
-    }
+    crank_market_then_accounts_once(&mut env, CRANKER, &[VICTIM, WINNER], 10, 0, 16)
+        .map_err(|error| format!("PR 315 settle adverse mark: {error}"))?;
     if env.primary_market_state().1.assets[0].effective_price != ADVERSE_PRICE {
         return Err("PR 315 temporary adverse mark did not commit".into());
     }
@@ -11840,17 +11976,8 @@ fn run_shutdown_generation_replay_world(
         env.warp_to_slot(12);
         env.push_auth_mark(0, 12, PRICE)
             .map_err(|error| format!("PR 315 restore authenticated mark: {error}"))?;
-        for actor in [VICTIM, WINNER] {
-            env.crank(
-                actor,
-                12,
-                vec![CrankObservationHint {
-                    asset_index: 0,
-                    oracle_accounts: 0,
-                }],
-            )
-            .map_err(|error| format!("PR 315 refresh actor {actor} at restored mark: {error}"))?;
-        }
+        crank_market_then_accounts_once(&mut env, CRANKER, &[VICTIM, WINNER], 12, 0, 16)
+            .map_err(|error| format!("PR 315 settle restored mark: {error}"))?;
         if env.primary_market_state().1.assets[0].effective_price != PRICE {
             return Err("PR 315 control mark did not return to entry".into());
         }
@@ -12499,10 +12626,10 @@ pub fn reproduce_trade_funding_erasure(
         .ok_or("PR 271 close-first ordering decreased attacker payout")?;
     if control.2 <= 0
         || control.3 >= 0
-        || attack.2 != 0
-        || attack.3 != 0
-        || victim_payout_loss == 0
-        || victim_payout_loss != attacker_payout_gain
+        || attack.2 != control.2
+        || attack.3 != control.3
+        || victim_payout_loss != 0
+        || attacker_payout_gain != 0
         || u128::from(control.0) + u128::from(control.1)
             != u128::from(attack.0) + u128::from(attack.1)
     {
@@ -12538,10 +12665,10 @@ pub fn reproduce_rebalance_funding_erasure(
         .ok_or("PR 272 reduce-first ordering decreased attacker payout")?;
     if control.2 == 0
         || control.2 != control.3
-        || attack.2 != 0
-        || attack.3 != 0
-        || victim_claim_loss == 0
-        || victim_claim_loss != u128::from(attacker_payout_gain)
+        || attack.2 != control.2
+        || attack.3 != control.3
+        || victim_claim_loss != 0
+        || attacker_payout_gain != 0
         || u128::from(control.0) + control.1 != u128::from(attack.0) + attack.1
     {
         return Err(format!(
@@ -12575,10 +12702,10 @@ pub fn reproduce_forfeit_funding_erasure(
         .ok_or("PR 273 forfeit-first ordering decreased attacker payout")?;
     if control.2 == 0
         || control.2 != control.3
-        || attack.2 != 0
-        || attack.3 != 0
-        || victim_claim_loss <= 0
-        || victim_claim_loss != i128::from(attacker_payout_gain)
+        || attack.2 != control.2
+        || attack.3 != control.3
+        || victim_claim_loss != 0
+        || attacker_payout_gain != 0
     {
         return Err(format!(
             "PR 273 did not erase a balanced recovery-forfeit funding transfer: control={control:?}, attack={attack:?}"
@@ -13293,7 +13420,7 @@ pub fn reproduce_cross_domain_b_settlement(
     env.warp_to_slot(7);
     env.push_auth_mark(1, 7, BANKRUPTCY_MARK)
         .map_err(|error| format!("PR 281 push bankruptcy mark: {error}"))?;
-    crank_adapter_steps(&mut env, 0, 7, 1, 4)
+    crank_adapter_steps(&mut env, 0, 7, 1, 12)
         .map_err(|error| format!("PR 281 settle winner before B booking: {error}"))?;
     let observation = vec![CrankObservationHint {
         asset_index: 1,
@@ -14520,6 +14647,10 @@ fn run_rounded_funding_world(
 
     env.crank(1, 3, Vec::new())
         .map_err(|error| format!("settle rounded-funding short: {error}"))?;
+    for actor in [2usize, 3usize] {
+        crank_adapter_steps(&mut env, actor, 3, 1, 8)
+            .map_err(|error| format!("settle rounded-funding epoch actor {actor}: {error}"))?;
+    }
     env.trade_no_cpi(0, 1, 0, -SIZE_Q, PRICE, 0)
         .map_err(|error| format!("close rounded-funding victim pair: {error}"))?;
     env.trade_no_cpi(2, 3, 1, -(POS_SCALE as i128), PRICE, 0)
@@ -14550,16 +14681,20 @@ fn crank_adapter_steps(
     now_slot: u64,
     asset_index: u16,
     attempts: usize,
-) -> Result<(), String> {
+) -> Result<u64, String> {
     let oracle_accounts = env.primary_profile(asset_index as usize).oracle_leg_count;
     let observations = vec![CrankObservationHint {
         asset_index,
         oracle_accounts,
     }];
     let mut progressed = false;
+    let mut max_cu = 0;
     for _ in 0..attempts {
         match env.crank(actor, now_slot, observations.clone()) {
-            Ok(_) => progressed = true,
+            Ok(success) => {
+                progressed = true;
+                max_cu = max_cu.max(success.compute_units);
+            }
             Err(error) if progressed && error.contains("Custom(22)") => break,
             Err(error) => {
                 return Err(format!(
@@ -14573,7 +14708,52 @@ fn crank_adapter_steps(
             "actor {actor} asset {asset_index} crank made no progress"
         ));
     }
-    Ok(())
+    Ok(max_cu)
+}
+
+fn crank_market_then_accounts_once(
+    env: &mut V16Svm,
+    market_cranker: usize,
+    accounts: &[usize],
+    now_slot: u64,
+    asset_index: u16,
+    attempts: usize,
+) -> Result<u64, String> {
+    let observations = vec![CrankObservationHint {
+        asset_index,
+        oracle_accounts: env.primary_profile(asset_index as usize).oracle_leg_count,
+    }];
+    let mut max_cu = 0;
+    for step in 0..attempts {
+        if env.primary_market_state().1.assets[asset_index as usize].slot_last >= now_slot {
+            break;
+        }
+        let success = env
+            .crank(market_cranker, now_slot, observations.clone())
+            .map_err(|error| {
+                format!(
+                    "market catch-up actor {market_cranker} asset {asset_index} step {step}: {error}"
+                )
+            })?;
+        max_cu = max_cu.max(success.compute_units);
+    }
+    if env.primary_market_state().1.assets[asset_index as usize].slot_last < now_slot {
+        return Err(format!(
+            "market asset {asset_index} did not reach slot {now_slot} in {attempts} calls"
+        ));
+    }
+    for &actor in accounts {
+        match env.crank(actor, now_slot, Vec::new()) {
+            Ok(success) => max_cu = max_cu.max(success.compute_units),
+            Err(error) if error.contains("Custom(22)") => {}
+            Err(error) => {
+                return Err(format!(
+                    "account selector actor {actor} asset {asset_index}: {error}"
+                ))
+            }
+        }
+    }
+    Ok(max_cu)
 }
 
 #[derive(Clone, Copy, Debug)]

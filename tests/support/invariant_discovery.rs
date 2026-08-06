@@ -236,17 +236,21 @@ pub enum ResolvedAdlCloseOrder {
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum StaleCohortRoute {
+    NoCpi,
+    BatchNoCpi,
     Cpi,
     BatchCpi,
 }
 
 impl StaleCohortRoute {
-    pub const ALL: [Self; 2] = [Self::Cpi, Self::BatchCpi];
+    pub const ALL: [Self; 4] = [Self::NoCpi, Self::BatchNoCpi, Self::Cpi, Self::BatchCpi];
 
     fn discriminator(self) -> u8 {
         match self {
-            Self::Cpi => 0,
-            Self::BatchCpi => 1,
+            Self::NoCpi => 0,
+            Self::BatchNoCpi => 1,
+            Self::Cpi => 2,
+            Self::BatchCpi => 3,
         }
     }
 }
@@ -720,7 +724,10 @@ pub struct ResolvedAdlCloseDiscovery {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct StaleCohortNovationDiscovery {
     pub route: StaleCohortRoute,
-    pub unsigned_transfer_landed: bool,
+    pub novation_landed: bool,
+    pub pre_stale_long_count: u64,
+    pub pre_stale_short_count: u64,
+    pub pre_negative_pnl_count: u64,
     pub settlement_cranks: u8,
     pub winner_extracted: u64,
     pub entrant_extracted: u64,
@@ -733,7 +740,7 @@ pub struct StaleCohortNovationDiscovery {
 
 impl StaleCohortNovationDiscovery {
     pub fn is_violation(&self) -> bool {
-        self.unsigned_transfer_landed
+        self.novation_landed
             && self.settlement_cranks != 0
             && self.winner_profit != 0
             && self.entrant_principal_loss != 0
@@ -806,6 +813,9 @@ pub struct BackingProviderConsentDiscovery {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AccrualOrderingDiscovery {
     pub kind: AccrualOrderingKind,
+    pub unsafe_action_rejected: bool,
+    pub rejected_exact_rollback: bool,
+    pub retry_landed: bool,
     pub control_paid: u128,
     pub control_received: u128,
     pub reordered_paid: u128,
@@ -818,9 +828,29 @@ pub struct AccrualOrderingDiscovery {
 pub struct TerminalCommitOrderingDiscovery {
     pub committed_mark: u64,
     pub reordered_mark: u64,
+    pub unsafe_resolve_rejected: bool,
+    pub rejected_exact_rollback: bool,
+    pub catchup_steps: u16,
+    pub max_catchup_cu: u64,
     pub victim_payout_loss: u64,
     pub counterparty_payout_gain: u64,
     pub committed_total_payout: u128,
+    pub reordered_total_payout: u128,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PendingZeroMoveTerminalDiscovery {
+    pub control_f_long_num: i128,
+    pub control_f_short_num: i128,
+    pub reordered_f_long_num: i128,
+    pub reordered_f_short_num: i128,
+    pub unsafe_resolve_rejected: bool,
+    pub rejected_exact_rollback: bool,
+    pub catchup_steps: u16,
+    pub max_catchup_cu: u64,
+    pub victim_payout_loss: u128,
+    pub attacker_payout_gain: u128,
+    pub control_total_payout: u128,
     pub reordered_total_payout: u128,
 }
 
@@ -832,6 +862,20 @@ pub struct ShutdownCommitOrderingDiscovery {
     pub shutdown_f_short_num: i128,
     pub victim_payout_loss: u128,
     pub counterparty_payout_gain: u128,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ShutdownCatchupDiscovery {
+    pub initial_shutdown_rejected: bool,
+    pub rejected_exact_rollback: bool,
+    pub catchup_steps: u16,
+    pub max_catchup_cu: u64,
+    pub retry_landed: bool,
+    pub f_long_num: i128,
+    pub f_short_num: i128,
+    pub users_terminal: bool,
+    pub total_payout: u128,
+    pub token_supply_conserved: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1607,6 +1651,16 @@ impl TerminalCommitOrderingDiscovery {
     }
 }
 
+impl PendingZeroMoveTerminalDiscovery {
+    pub fn is_violation(&self) -> bool {
+        self.control_f_long_num != self.reordered_f_long_num
+            || self.control_f_short_num != self.reordered_f_short_num
+            || self.victim_payout_loss != 0
+            || self.attacker_payout_gain != 0
+            || self.control_total_payout != self.reordered_total_payout
+    }
+}
+
 impl ShutdownCommitOrderingDiscovery {
     pub fn is_violation(&self) -> bool {
         self.control_f_long_num > 0
@@ -1620,12 +1674,13 @@ impl ShutdownCommitOrderingDiscovery {
 
 impl AccrualOrderingDiscovery {
     pub fn is_violation(&self) -> bool {
+        let omitted = self.control_paid.checked_sub(self.reordered_paid);
         self.control_paid != 0
             && self.control_paid == self.control_received
-            && self.reordered_paid == 0
-            && self.reordered_received == 0
-            && self.victim_claim_loss != 0
-            && self.victim_claim_loss == self.attacker_claim_gain
+            && self.reordered_paid == self.reordered_received
+            && matches!(omitted, Some(value) if value != 0
+                && value == self.victim_claim_loss
+                && value == self.attacker_claim_gain)
     }
 }
 
@@ -2525,8 +2580,46 @@ pub fn discover_terminal_generation_replay(
         }
         TerminalGenerationKind::AssetResolvePolicy => {
             env.warp_to_slot(RESTART_SLOT - 1);
-            env.shutdown_asset(0, RESTART_SLOT - 1)
-                .map_err(|error| format!("shutdown old asset generation: {error}"))?;
+            let shutdown_slot = RESTART_SLOT - 1;
+            let before_shutdown = fingerprint(&env);
+            let initial_shutdown = env.shutdown_asset(0, shutdown_slot);
+            let mut shutdown_landed = initial_shutdown.is_ok();
+            if let Err(error) = initial_shutdown {
+                if !is_engine_stale_error(&error) || fingerprint(&env) != before_shutdown {
+                    return Err(format!(
+                        "shutdown old asset generation did not reject stale state exactly: {error}"
+                    ));
+                }
+                for step in 0..16 {
+                    let oracle_accounts = env.primary_profile(0).oracle_leg_count;
+                    env.crank(
+                        0,
+                        shutdown_slot,
+                        vec![CrankObservationHint {
+                            asset_index: 0,
+                            oracle_accounts,
+                        }],
+                    )
+                    .map_err(|crank_error| {
+                        format!("old-asset shutdown catch-up crank {step}: {crank_error}")
+                    })?;
+                    match env.shutdown_asset(0, shutdown_slot) {
+                        Ok(_) => {
+                            shutdown_landed = true;
+                            break;
+                        }
+                        Err(error) if is_engine_stale_error(&error) => {}
+                        Err(error) => {
+                            return Err(format!(
+                                "old-asset shutdown retry returned unexpected error: {error}"
+                            ));
+                        }
+                    }
+                }
+            }
+            if !shutdown_landed {
+                return Err("old asset did not shut down after bounded public catch-up".into());
+            }
             env.warp_to_slot(RESTART_SLOT);
             env.restart_asset_oracle(0, RESTART_SLOT, PRICE)
                 .map_err(|error| format!("restart replacement asset: {error}"))?;
@@ -4486,6 +4579,26 @@ struct AccrualOrderingWorld {
     victim_claim: u128,
     paid: u128,
     received: u128,
+    unsafe_action_rejected: bool,
+    rejected_exact_rollback: bool,
+    retry_landed: bool,
+}
+
+fn accrual_ordering_snapshot(env: &V16Svm) -> (Vec<u8>, Vec<Vec<u8>>, Vec<u64>, u128) {
+    (
+        env.market_data(false),
+        (0..PRIMARY_ACTOR_COUNT)
+            .map(|actor| env.primary_portfolio_data(actor))
+            .collect(),
+        (0..PRIMARY_ACTOR_COUNT)
+            .map(|actor| env.token_amount(env.actors[actor].destination_token))
+            .collect(),
+        env.token_supply_observed(),
+    )
+}
+
+fn is_engine_stale_error(error: &str) -> bool {
+    error.contains("Custom(19)") || error.contains("custom program error: 0x13")
 }
 
 fn zero_move_funding_discovery_world(seed: [u8; 32]) -> Result<V16Svm, String> {
@@ -4517,7 +4630,7 @@ fn zero_move_observation_discovery(env: &V16Svm) -> Vec<CrankObservationHint> {
     }]
 }
 
-fn prime_zero_move_funding_discovery(env: &mut V16Svm) -> Result<(), String> {
+fn prime_zero_move_funding_discovery(env: &mut V16Svm, settlement_slot: u64) -> Result<(), String> {
     for actor in [0, 1] {
         env.crank(actor, 2, zero_move_observation_discovery(env))
             .map_err(|error| format!("prime zero-move actor {actor}: {error}"))?;
@@ -4534,7 +4647,36 @@ fn prime_zero_move_funding_discovery(env: &mut V16Svm) -> Result<(), String> {
             group.assets[0].f_short_num
         ));
     }
-    env.warp_to_slot(3);
+    if settlement_slot <= 2 {
+        return Err("zero-move settlement slot must follow checkpoint activation".into());
+    }
+    env.warp_to_slot(settlement_slot);
+    Ok(())
+}
+
+fn accrue_zero_move_asset_to_slot(env: &mut V16Svm, settlement_slot: u64) -> Result<(), String> {
+    for _ in 0..16 {
+        if env.primary_market_state().1.assets[0].slot_last >= settlement_slot {
+            return Ok(());
+        }
+        env.crank(4, settlement_slot, zero_move_observation_discovery(env))
+            .map_err(|error| format!("advance zero-move asset cursor: {error}"))?;
+    }
+    Err(format!(
+        "zero-move asset did not reach slot {settlement_slot} in bounded cranks"
+    ))
+}
+
+fn settle_zero_move_actors(
+    env: &mut V16Svm,
+    settlement_slot: u64,
+    actors: &[usize],
+) -> Result<(), String> {
+    accrue_zero_move_asset_to_slot(env, settlement_slot)?;
+    for &actor in actors {
+        env.crank(actor, settlement_slot, zero_move_observation_discovery(env))
+            .map_err(|error| format!("settle zero-move actor {actor}: {error}"))?;
+    }
     Ok(())
 }
 
@@ -4589,24 +4731,38 @@ fn run_trade_accrual_ordering_world(
     seed: [u8; 32],
     kind: AccrualOrderingKind,
     action_before_settlement: bool,
+    settlement_slot: u64,
+    recover_rejected_action: bool,
 ) -> Result<AccrualOrderingWorld, String> {
     const PRICE: u64 = 2;
     const Q: i128 = 100 * POS_SCALE as i128;
     let mut env = zero_move_funding_discovery_world(seed)?;
     let supply_before = env.token_supply_observed();
     execute_cpi_close_kind(&mut env, kind, -Q)?;
-    prime_zero_move_funding_discovery(&mut env)?;
+    prime_zero_move_funding_discovery(&mut env, settlement_slot)?;
     if !action_before_settlement {
-        for actor in [0, 1] {
-            env.crank(actor, 3, zero_move_observation_discovery(&env))
-                .map_err(|error| format!("settle trade actor {actor}: {error}"))?;
-        }
+        settle_zero_move_actors(&mut env, settlement_slot, &[0, 1])?;
     }
-    execute_cpi_close_kind(&mut env, kind, Q)?;
-    if action_before_settlement {
-        for actor in [0, 1] {
-            env.crank(actor, 3, zero_move_observation_discovery(&env))
-                .map_err(|error| format!("late-settle trade actor {actor}: {error}"))?;
+    let mut unsafe_action_rejected = false;
+    let mut rejected_exact_rollback = false;
+    let mut retry_landed = false;
+    if action_before_settlement && recover_rejected_action {
+        let before = accrual_ordering_snapshot(&env);
+        let result = execute_cpi_close_kind(&mut env, kind, Q);
+        unsafe_action_rejected = matches!(&result, Err(error) if is_engine_stale_error(error));
+        if !unsafe_action_rejected {
+            return Err(format!(
+                "{kind:?} multi-segment close returned unexpected result: {result:?}"
+            ));
+        }
+        rejected_exact_rollback = accrual_ordering_snapshot(&env) == before;
+        settle_zero_move_actors(&mut env, settlement_slot, &[0, 1])?;
+        execute_cpi_close_kind(&mut env, kind, Q)?;
+        retry_landed = true;
+    } else {
+        execute_cpi_close_kind(&mut env, kind, Q)?;
+        if action_before_settlement {
+            settle_zero_move_actors(&mut env, settlement_slot, &[0, 1])?;
         }
     }
     let (paid, received) = funding_totals(&env, 0, 1);
@@ -4628,12 +4784,17 @@ fn run_trade_accrual_ordering_world(
         victim_claim: u128::from(env.token_amount(env.actors[1].destination_token)),
         paid,
         received,
+        unsafe_action_rejected,
+        rejected_exact_rollback,
+        retry_landed,
     })
 }
 
 fn run_rebalance_accrual_ordering_world(
     seed: [u8; 32],
     action_before_settlement: bool,
+    settlement_slot: u64,
+    recover_rejected_action: bool,
 ) -> Result<AccrualOrderingWorld, String> {
     const PRICE: u64 = 2;
     const Q: i128 = 100 * POS_SCALE as i128;
@@ -4641,17 +4802,32 @@ fn run_rebalance_accrual_ordering_world(
     let supply_before = env.token_supply_observed();
     env.trade_no_cpi(0, 1, 0, -Q, PRICE, 0)
         .map_err(|error| format!("open rebalance accrual pair: {error}"))?;
-    prime_zero_move_funding_discovery(&mut env)?;
+    prime_zero_move_funding_discovery(&mut env, settlement_slot)?;
     if !action_before_settlement {
-        for actor in [0, 1] {
-            env.crank(actor, 3, zero_move_observation_discovery(&env))
-                .map_err(|error| format!("settle rebalance actor {actor}: {error}"))?;
-        }
+        settle_zero_move_actors(&mut env, settlement_slot, &[0, 1])?;
     }
-    env.rebalance_reduce(0, 0, Q.unsigned_abs())
-        .map_err(|error| format!("unilateral accrual-boundary reduction: {error}"))?;
-    env.crank(1, 3, zero_move_observation_discovery(&env))
-        .map_err(|error| format!("settle rebalance counterparty: {error}"))?;
+    let mut unsafe_action_rejected = false;
+    let mut rejected_exact_rollback = false;
+    let mut retry_landed = false;
+    if action_before_settlement && recover_rejected_action {
+        let before = accrual_ordering_snapshot(&env);
+        let result = env.rebalance_reduce(0, 0, Q.unsigned_abs());
+        unsafe_action_rejected = matches!(&result, Err(error) if is_engine_stale_error(error));
+        if !unsafe_action_rejected {
+            return Err(format!(
+                "multi-segment unilateral reduction returned unexpected result: {result:?}"
+            ));
+        }
+        rejected_exact_rollback = accrual_ordering_snapshot(&env) == before;
+        settle_zero_move_actors(&mut env, settlement_slot, &[0, 1])?;
+        env.rebalance_reduce(0, 0, Q.unsigned_abs())
+            .map_err(|error| format!("retry unilateral accrual-boundary reduction: {error}"))?;
+        retry_landed = true;
+    } else {
+        env.rebalance_reduce(0, 0, Q.unsigned_abs())
+            .map_err(|error| format!("unilateral accrual-boundary reduction: {error}"))?;
+        settle_zero_move_actors(&mut env, settlement_slot, &[1])?;
+    }
     let (paid, received) = funding_totals(&env, 0, 1);
     let victim_claim = portfolio_claim(&env, 1)?;
     let attacker_capital = env.primary_portfolio(0).capital.get();
@@ -4665,12 +4841,17 @@ fn run_rebalance_accrual_ordering_world(
         victim_claim,
         paid,
         received,
+        unsafe_action_rejected,
+        rejected_exact_rollback,
+        retry_landed,
     })
 }
 
 fn run_forfeit_accrual_ordering_world(
     seed: [u8; 32],
     action_before_settlement: bool,
+    settlement_slot: u64,
+    recover_rejected_action: bool,
 ) -> Result<AccrualOrderingWorld, String> {
     const PRICE: u64 = 2;
     const Q_ATTACKER: i128 = 5 * POS_SCALE as i128;
@@ -4681,22 +4862,37 @@ fn run_forfeit_accrual_ordering_world(
         .map_err(|error| format!("open forfeit whale pair: {error}"))?;
     env.trade_no_cpi(0, 3, 0, -Q_ATTACKER, PRICE, 0)
         .map_err(|error| format!("open forfeit accrual pair: {error}"))?;
-    prime_zero_move_funding_discovery(&mut env)?;
+    prime_zero_move_funding_discovery(&mut env, settlement_slot)?;
     if !action_before_settlement {
-        for actor in 0..4 {
-            env.crank(actor, 3, zero_move_observation_discovery(&env))
-                .map_err(|error| format!("settle forfeit actor {actor}: {error}"))?;
-        }
+        settle_zero_move_actors(&mut env, settlement_slot, &[0, 1, 2, 3])?;
     }
-    env.rebalance_reduce(2, 0, Q_WHALE.unsigned_abs())
-        .map_err(|error| format!("enter recovery side mode: {error}"))?;
+    let mut unsafe_action_rejected = false;
+    let mut rejected_exact_rollback = false;
+    let mut retry_landed = false;
+    if action_before_settlement && recover_rejected_action {
+        let before = accrual_ordering_snapshot(&env);
+        let result = env.rebalance_reduce(2, 0, Q_WHALE.unsigned_abs());
+        unsafe_action_rejected = matches!(&result, Err(error) if is_engine_stale_error(error));
+        if !unsafe_action_rejected {
+            return Err(format!(
+                "multi-segment recovery transition returned unexpected result: {result:?}"
+            ));
+        }
+        rejected_exact_rollback = accrual_ordering_snapshot(&env) == before;
+        settle_zero_move_actors(&mut env, settlement_slot, &[0, 1, 2, 3])?;
+        env.rebalance_reduce(2, 0, Q_WHALE.unsigned_abs())
+            .map_err(|error| format!("retry recovery side transition: {error}"))?;
+        retry_landed = true;
+    } else {
+        env.rebalance_reduce(2, 0, Q_WHALE.unsigned_abs())
+            .map_err(|error| format!("enter recovery side mode: {error}"))?;
+    }
     if env.primary_market_state().1.assets[0].mode_short != SideModeV16::DrainOnly {
         return Err("public reduction did not enter short-side DrainOnly".into());
     }
     env.forfeit_recovery_leg(0, 0, u128::from(u64::MAX))
         .map_err(|error| format!("forfeit accrual-boundary recovery leg: {error}"))?;
-    env.crank(3, 3, zero_move_observation_discovery(&env))
-        .map_err(|error| format!("settle forfeit counterparty: {error}"))?;
+    settle_zero_move_actors(&mut env, settlement_slot, &[3])?;
     let (paid, received) = funding_totals(&env, 0, 3);
     let victim_claim = portfolio_claim(&env, 3)?;
     let attacker_capital = env.primary_portfolio(0).capital.get();
@@ -4710,25 +4906,42 @@ fn run_forfeit_accrual_ordering_world(
         victim_claim,
         paid,
         received,
+        unsafe_action_rejected,
+        rejected_exact_rollback,
+        retry_landed,
     })
 }
 
 fn discover_one_accrual_ordering_violation(
     mut seed: [u8; 32],
     kind: AccrualOrderingKind,
+    settlement_slot: u64,
+    recover_rejected_action: bool,
 ) -> Result<AccrualOrderingDiscovery, String> {
     seed[0] ^= 0x9d;
     seed[1] ^= kind.discriminator();
     let run = |action_before_settlement| match kind {
         AccrualOrderingKind::CpiTradeClose | AccrualOrderingKind::BatchCpiTradeClose => {
-            run_trade_accrual_ordering_world(seed, kind, action_before_settlement)
+            run_trade_accrual_ordering_world(
+                seed,
+                kind,
+                action_before_settlement,
+                settlement_slot,
+                recover_rejected_action,
+            )
         }
-        AccrualOrderingKind::RebalanceReduce => {
-            run_rebalance_accrual_ordering_world(seed, action_before_settlement)
-        }
-        AccrualOrderingKind::RecoveryForfeit => {
-            run_forfeit_accrual_ordering_world(seed, action_before_settlement)
-        }
+        AccrualOrderingKind::RebalanceReduce => run_rebalance_accrual_ordering_world(
+            seed,
+            action_before_settlement,
+            settlement_slot,
+            recover_rejected_action,
+        ),
+        AccrualOrderingKind::RecoveryForfeit => run_forfeit_accrual_ordering_world(
+            seed,
+            action_before_settlement,
+            settlement_slot,
+            recover_rejected_action,
+        ),
     };
     let control = run(false)?;
     let reordered = run(true)?;
@@ -4753,6 +4966,9 @@ fn discover_one_accrual_ordering_violation(
     }
     Ok(AccrualOrderingDiscovery {
         kind,
+        unsafe_action_rejected: reordered.unsafe_action_rejected,
+        rejected_exact_rollback: reordered.rejected_exact_rollback,
+        retry_landed: reordered.retry_landed,
         control_paid: control.paid,
         control_received: control.received,
         reordered_paid: reordered.paid,
@@ -4767,7 +4983,16 @@ pub fn discover_accrual_ordering_violations(
 ) -> Result<Vec<AccrualOrderingDiscovery>, String> {
     AccrualOrderingKind::ALL
         .into_iter()
-        .map(|kind| discover_one_accrual_ordering_violation(seed, kind))
+        .map(|kind| discover_one_accrual_ordering_violation(seed, kind, 3, false))
+        .collect()
+}
+
+pub fn discover_multi_segment_accrual_ordering_violations(
+    seed: [u8; 32],
+) -> Result<Vec<AccrualOrderingDiscovery>, String> {
+    AccrualOrderingKind::ALL
+        .into_iter()
+        .map(|kind| discover_one_accrual_ordering_violation(seed, kind, 5, true))
         .collect()
 }
 
@@ -4799,6 +5024,10 @@ fn drain_resolved_discovery_actor(env: &mut V16Svm, actor: usize) -> Result<u128
 #[derive(Clone, Copy, Debug)]
 struct TerminalCommitWorld {
     effective_mark: u64,
+    unsafe_resolve_rejected: bool,
+    rejected_exact_rollback: bool,
+    catchup_steps: u16,
+    max_catchup_cu: u64,
     long_payout: u64,
     short_payout: u64,
 }
@@ -4856,8 +5085,68 @@ fn run_terminal_commit_world(
         )
         .map_err(|error| format!("commit pending terminal mark: {error}"))?;
     }
-    env.resolve_stale_permissionless(RESOLVE_SLOT)
-        .map_err(|error| format!("permissionless terminal resolve: {error}"))?;
+    let mut unsafe_resolve_rejected = false;
+    let mut rejected_exact_rollback = false;
+    let mut catchup_steps = 0u16;
+    let mut max_catchup_cu = 0u64;
+    let mut resolved = false;
+    if !commit_before_resolve {
+        let before_rejection = fingerprint(&env);
+        let result = env.resolve_stale_permissionless(RESOLVE_SLOT);
+        unsafe_resolve_rejected = matches!(
+            &result,
+            Err(error)
+                if error.contains("Custom(19)") || error.contains("custom program error: 0x13")
+        );
+        if !unsafe_resolve_rejected {
+            return Err(format!(
+                "unsafe permissionless terminal resolve returned unexpected result: {result:?}"
+            ));
+        }
+        rejected_exact_rollback = fingerprint(&env) == before_rejection;
+        for _ in 0..16 {
+            let catchup = env
+                .crank(
+                    0,
+                    RESOLVE_SLOT,
+                    vec![CrankObservationHint {
+                        asset_index: 0,
+                        oracle_accounts: 0,
+                    }],
+                )
+                .map_err(|error| format!("permissionless terminal catch-up: {error}"))?;
+            catchup_steps = catchup_steps
+                .checked_add(1)
+                .ok_or_else(|| "terminal catch-up step overflow".to_string())?;
+            max_catchup_cu = max_catchup_cu.max(catchup.compute_units);
+            let before_retry = fingerprint(&env);
+            match env.resolve_stale_permissionless(RESOLVE_SLOT) {
+                Ok(_) => {
+                    resolved = true;
+                    break;
+                }
+                Err(error)
+                    if error.contains("Custom(19)")
+                        || error.contains("custom program error: 0x13") =>
+                {
+                    rejected_exact_rollback &= fingerprint(&env) == before_retry;
+                }
+                Err(error) => {
+                    return Err(format!(
+                        "permissionless terminal resolve retry returned unexpected error: {error}"
+                    ));
+                }
+            }
+        }
+        if !resolved {
+            return Err("terminal world did not resolve within 16 bounded catch-up calls".into());
+        }
+    } else {
+        env.resolve_stale_permissionless(RESOLVE_SLOT)
+            .map_err(|error| format!("committed terminal resolve: {error}"))?;
+        resolved = true;
+    }
+    debug_assert!(resolved);
     let (_, resolved) = env.primary_market_state();
     if resolved.mode != MarketModeV16::Resolved {
         return Err("permissionless resolver did not terminalize market".into());
@@ -4871,6 +5160,10 @@ fn run_terminal_commit_world(
     }
     Ok(TerminalCommitWorld {
         effective_mark,
+        unsafe_resolve_rejected,
+        rejected_exact_rollback,
+        catchup_steps,
+        max_catchup_cu,
         long_payout: u64::try_from(long_payout)
             .map_err(|_| "long terminal payout exceeds SPL range")?,
         short_payout: u64::try_from(short_payout)
@@ -4901,9 +5194,190 @@ pub fn discover_terminal_commit_ordering(
     Ok(TerminalCommitOrderingDiscovery {
         committed_mark: committed.effective_mark,
         reordered_mark: reordered.effective_mark,
+        unsafe_resolve_rejected: reordered.unsafe_resolve_rejected,
+        rejected_exact_rollback: reordered.rejected_exact_rollback,
+        catchup_steps: reordered.catchup_steps,
+        max_catchup_cu: reordered.max_catchup_cu,
         victim_payout_loss,
         counterparty_payout_gain,
         committed_total_payout,
+        reordered_total_payout,
+    })
+}
+
+#[derive(Clone, Copy, Debug)]
+struct PendingZeroMoveTerminalWorld {
+    f_long_num: i128,
+    f_short_num: i128,
+    unsafe_resolve_rejected: bool,
+    rejected_exact_rollback: bool,
+    catchup_steps: u16,
+    max_catchup_cu: u64,
+    payer_payout: u128,
+    receiver_payout: u128,
+}
+
+fn run_pending_zero_move_terminal_world(
+    seed: [u8; 32],
+    commit_before_maturity: bool,
+) -> Result<PendingZeroMoveTerminalWorld, String> {
+    const PRICE: u64 = 2;
+    const MARK: u64 = 1;
+    const DEPOSIT: u128 = 1_000_000;
+    const SIZE_Q: i128 = 100 * POS_SCALE as i128;
+    const PUSH_SLOT: u64 = 2;
+    const RESOLVE_SLOT: u64 = 5;
+    let mut env = V16Svm::new(
+        seed,
+        MarketConfig {
+            initial_price: PRICE,
+            max_price_move_bps_per_slot: 24,
+            max_accrual_dt_slots: 20,
+            max_abs_funding_e9_per_slot: 1_000,
+            min_funding_lifetime_slots: 20,
+            actor_deposits: [DEPOSIT, DEPOSIT, USER_DEPOSIT, USER_DEPOSIT, USER_DEPOSIT],
+            ..MarketConfig::default()
+        },
+    );
+    let supply_before = env.token_supply_observed();
+    env.configure_permissionless_resolve(3, 1)
+        .map_err(|error| format!("configure zero-move terminal resolve: {error}"))?;
+    env.trade_no_cpi(0, 1, 0, -SIZE_Q, PRICE, 0)
+        .map_err(|error| format!("open zero-move terminal pair: {error}"))?;
+    env.warp_to_slot(PUSH_SLOT);
+    env.push_auth_mark(0, PUSH_SLOT, MARK)
+        .map_err(|error| format!("publish zero-move pending mark: {error}"))?;
+    let oracle_accounts = env.primary_profile(0).oracle_leg_count;
+    let observations = || {
+        vec![CrankObservationHint {
+            asset_index: 0,
+            oracle_accounts,
+        }]
+    };
+    let profile = env.primary_profile(0);
+    let (_, pending_group) = env.primary_market_state();
+    if profile.funding_mark_pending_e6 != MARK
+        || profile.funding_mark_pending_slot != PUSH_SLOT
+        || pending_group.assets[0].effective_price != PRICE
+    {
+        return Err(format!(
+            "zero-move terminal fixture did not retain the publication boundary: profile={profile:?}, engine_price={}",
+            pending_group.assets[0].effective_price
+        ));
+    }
+    if commit_before_maturity {
+        env.crank(0, PUSH_SLOT, observations())
+            .map_err(|error| format!("commit zero-move publication boundary: {error}"))?;
+    }
+
+    env.warp_to_slot(RESOLVE_SLOT);
+    let mut unsafe_resolve_rejected = false;
+    let mut rejected_exact_rollback = false;
+    if !commit_before_maturity {
+        let before = fingerprint(&env);
+        let result = env.resolve_stale_permissionless(RESOLVE_SLOT);
+        unsafe_resolve_rejected = matches!(&result, Err(error) if is_engine_stale_error(error));
+        if !unsafe_resolve_rejected {
+            return Err(format!(
+                "zero-move unsafe terminal resolve returned unexpected result: {result:?}"
+            ));
+        }
+        rejected_exact_rollback = fingerprint(&env) == before;
+    }
+
+    let mut catchup_steps = 0u16;
+    let mut max_catchup_cu = 0u64;
+    let mut resolved = false;
+    for _ in 0..16 {
+        let catchup = env
+            .crank(0, RESOLVE_SLOT, observations())
+            .map_err(|error| format!("zero-move terminal catch-up crank: {error}"))?;
+        catchup_steps = catchup_steps
+            .checked_add(1)
+            .ok_or_else(|| "zero-move terminal catch-up count overflow".to_string())?;
+        max_catchup_cu = max_catchup_cu.max(catchup.compute_units);
+        if commit_before_maturity && env.primary_market_state().1.assets[0].slot_last < RESOLVE_SLOT
+        {
+            continue;
+        }
+        let before = fingerprint(&env);
+        match env.resolve_stale_permissionless(RESOLVE_SLOT) {
+            Ok(_) => {
+                resolved = true;
+                break;
+            }
+            Err(error) if is_engine_stale_error(&error) => {
+                rejected_exact_rollback &= fingerprint(&env) == before;
+            }
+            Err(error) => {
+                return Err(format!(
+                    "zero-move terminal resolve retry returned unexpected error: {error}"
+                ));
+            }
+        }
+    }
+    if !resolved {
+        return Err("zero-move terminal world did not resolve in 16 bounded cranks".into());
+    }
+    let (_, resolved_group) = env.primary_market_state();
+    let f_long_num = resolved_group.assets[0].f_long_num;
+    let f_short_num = resolved_group.assets[0].f_short_num;
+    if resolved_group.assets[0].effective_price != PRICE {
+        return Err("zero-move terminal fixture unexpectedly moved effective price".into());
+    }
+    env.warp_to_slot(RESOLVE_SLOT + 1);
+    let receiver_payout = drain_resolved_discovery_actor(&mut env, 1)?;
+    let payer_payout = drain_resolved_discovery_actor(&mut env, 0)?;
+    if env.token_supply_observed() != supply_before {
+        return Err("zero-move terminal world changed SPL supply".into());
+    }
+    Ok(PendingZeroMoveTerminalWorld {
+        f_long_num,
+        f_short_num,
+        unsafe_resolve_rejected,
+        rejected_exact_rollback,
+        catchup_steps,
+        max_catchup_cu,
+        payer_payout,
+        receiver_payout,
+    })
+}
+
+pub fn discover_pending_zero_move_terminal_ordering(
+    mut seed: [u8; 32],
+) -> Result<PendingZeroMoveTerminalDiscovery, String> {
+    seed[0] ^= 0x39;
+    seed[1] ^= 0xa5;
+    let control = run_pending_zero_move_terminal_world(seed, true)?;
+    let reordered = run_pending_zero_move_terminal_world(seed, false)?;
+    let victim_payout_loss = control
+        .receiver_payout
+        .checked_sub(reordered.receiver_payout)
+        .ok_or_else(|| "zero-move reordered path increased receiver payout".to_string())?;
+    let attacker_payout_gain = reordered
+        .payer_payout
+        .checked_sub(control.payer_payout)
+        .ok_or_else(|| "zero-move reordered path decreased payer payout".to_string())?;
+    let control_total_payout = control
+        .payer_payout
+        .checked_add(control.receiver_payout)
+        .ok_or_else(|| "zero-move control payout overflow".to_string())?;
+    let reordered_total_payout = reordered
+        .payer_payout
+        .checked_add(reordered.receiver_payout)
+        .ok_or_else(|| "zero-move reordered payout overflow".to_string())?;
+    Ok(PendingZeroMoveTerminalDiscovery {
+        control_f_long_num: control.f_long_num,
+        control_f_short_num: control.f_short_num,
+        reordered_f_long_num: reordered.f_long_num,
+        reordered_f_short_num: reordered.f_short_num,
+        unsafe_resolve_rejected: reordered.unsafe_resolve_rejected,
+        rejected_exact_rollback: reordered.rejected_exact_rollback,
+        catchup_steps: reordered.catchup_steps,
+        max_catchup_cu: reordered.max_catchup_cu,
+        victim_payout_loss,
+        attacker_payout_gain,
+        control_total_payout,
         reordered_total_payout,
     })
 }
@@ -5038,6 +5512,124 @@ pub fn discover_shutdown_commit_ordering(
         shutdown_f_short_num: shutdown_first.f_short_num,
         victim_payout_loss,
         counterparty_payout_gain,
+    })
+}
+
+pub fn discover_shutdown_catchup_liveness(
+    mut seed: [u8; 32],
+) -> Result<ShutdownCatchupDiscovery, String> {
+    const LONG: usize = 0;
+    const SHORT: usize = 1;
+    const ORACLE: usize = 2;
+    const PRICE: u64 = 2;
+    const MARK: u64 = 1;
+    const SIZE_Q: i128 = 100 * POS_SCALE as i128;
+    const DEPOSIT: u128 = 1_000_000;
+    const PUBLISH_SLOT: u64 = 2;
+    const SHUTDOWN_SLOT: u64 = 5;
+    seed[0] ^= 0x54;
+    seed[1] ^= 0x39;
+    let mut env = V16Svm::new(
+        seed,
+        MarketConfig {
+            initial_price: PRICE,
+            max_price_move_bps_per_slot: 24,
+            max_accrual_dt_slots: 1,
+            max_abs_funding_e9_per_slot: 1_000,
+            min_funding_lifetime_slots: 1,
+            actor_deposits: [DEPOSIT, DEPOSIT, 1, 1, 1],
+            ..MarketConfig::default()
+        },
+    );
+    let supply_before = env.token_supply_observed();
+    env.configure_permissionless_resolve(1_000, 1)
+        .map_err(|error| format!("configure shutdown catch-up policy: {error}"))?;
+    env.update_asset_authority_from_admin(0, percolator_prog::processor::ASSET_AUTH_ORACLE, ORACLE)
+        .map_err(|error| format!("separate shutdown catch-up oracle: {error}"))?;
+    env.trade_no_cpi(LONG, SHORT, 0, SIZE_Q, PRICE, 0)
+        .map_err(|error| format!("open shutdown catch-up pair: {error}"))?;
+    env.warp_to_slot(PUBLISH_SLOT);
+    env.push_auth_mark_for_actor(ORACLE, 0, PUBLISH_SLOT, MARK)
+        .map_err(|error| format!("publish shutdown catch-up mark: {error}"))?;
+    env.warp_to_slot(SHUTDOWN_SLOT);
+
+    let before_rejection = fingerprint(&env);
+    let initial = env.shutdown_asset(0, SHUTDOWN_SLOT);
+    let initial_shutdown_rejected = matches!(&initial, Err(error) if is_engine_stale_error(error));
+    if !initial_shutdown_rejected {
+        return Err(format!(
+            "shutdown with a pending checkpoint returned unexpected result: {initial:?}"
+        ));
+    }
+    let rejected_exact_rollback = fingerprint(&env) == before_rejection;
+
+    let oracle_accounts = env.primary_profile(0).oracle_leg_count;
+    let mut catchup_steps = 0u16;
+    let mut max_catchup_cu = 0u64;
+    for _ in 0..16 {
+        if env.primary_market_state().1.assets[0].slot_last >= SHUTDOWN_SLOT
+            && env.primary_profile(0).funding_mark_pending_e6 == 0
+        {
+            break;
+        }
+        let catchup = env
+            .crank(
+                LONG,
+                SHUTDOWN_SLOT,
+                vec![CrankObservationHint {
+                    asset_index: 0,
+                    oracle_accounts,
+                }],
+            )
+            .map_err(|error| format!("shutdown permissionless catch-up crank: {error}"))?;
+        catchup_steps = catchup_steps
+            .checked_add(1)
+            .ok_or_else(|| "shutdown catch-up count overflow".to_string())?;
+        max_catchup_cu = max_catchup_cu.max(catchup.compute_units);
+    }
+    if env.primary_market_state().1.assets[0].slot_last < SHUTDOWN_SLOT
+        || env.primary_profile(0).funding_mark_pending_e6 != 0
+    {
+        return Err("shutdown checkpoint did not catch up in 16 public cranks".into());
+    }
+    let retry = env
+        .shutdown_asset(0, SHUTDOWN_SLOT)
+        .map_err(|error| format!("shutdown retry after public catch-up: {error}"))?;
+    let (_, shutdown) = env.primary_market_state();
+    let retry_landed = shutdown.assets[0].lifecycle == percolator::AssetLifecycleV16::Recovery;
+    let f_long_num = shutdown.assets[0].f_long_num;
+    let f_short_num = shutdown.assets[0].f_short_num;
+    if !retry_landed {
+        return Err("shutdown retry did not enter asset recovery".into());
+    }
+    if retry.compute_units >= 1_400_000 {
+        return Err("shutdown retry exceeded the transaction CU ceiling".into());
+    }
+
+    env.warp_to_slot(SHUTDOWN_SLOT + 1);
+    env.force_close_abandoned_asset(ORACLE, LONG, SHORT, 0, SHUTDOWN_SLOT + 1, SIZE_Q as u128)
+        .map_err(|error| format!("force close shutdown catch-up pair: {error}"))?;
+    env.resolve_market()
+        .map_err(|error| format!("resolve shutdown catch-up market: {error}"))?;
+    env.warp_to_slot(SHUTDOWN_SLOT + 2);
+    let long_payout = drain_resolved_discovery_actor(&mut env, LONG)?;
+    let short_payout = drain_resolved_discovery_actor(&mut env, SHORT)?;
+    let users_terminal = discovery_portfolio_is_terminal(&env.primary_portfolio(LONG))?
+        && discovery_portfolio_is_terminal(&env.primary_portfolio(SHORT))?;
+    let total_payout = long_payout
+        .checked_add(short_payout)
+        .ok_or_else(|| "shutdown catch-up payout overflow".to_string())?;
+    Ok(ShutdownCatchupDiscovery {
+        initial_shutdown_rejected,
+        rejected_exact_rollback,
+        catchup_steps,
+        max_catchup_cu,
+        retry_landed,
+        f_long_num,
+        f_short_num,
+        users_terminal,
+        total_payout,
+        token_supply_conserved: env.token_supply_observed() == supply_before,
     })
 }
 
@@ -6478,7 +7070,29 @@ fn discover_one_bilateral_mark_fee_violation(
             ))
         }
     };
-    for actor in 0..env.actors.len() {
+    let setup_actor_count = env.actors.len();
+    for step in 0..16 {
+        if env.primary_market_state().1.assets[0].slot_last >= 10 {
+            break;
+        }
+        let observations = vec![CrankObservationHint {
+            asset_index: 0,
+            oracle_accounts: u8::from(hybrid_tail.is_some()),
+        }];
+        let result = if let Some(oracle) = hybrid_tail {
+            env.crank_with_oracles(1, 10, observations, &[oracle])
+        } else {
+            env.crank(1, 10, observations)
+        };
+        result.map_err(|error| format!("setup market catch-up step {step}: {error}"))?;
+    }
+    if env.primary_market_state().1.assets[0].slot_last < 10 {
+        return Err("bilateral setup market did not reach slot 10".into());
+    }
+    for actor in 0..setup_actor_count {
+        if actor == 1 {
+            continue;
+        }
         let observations = if actor == 0 || hybrid_tail.is_some() {
             vec![CrankObservationHint {
                 asset_index: 0,
@@ -6857,15 +7471,10 @@ fn run_observation_omission_world(
     env.warp_to_slot(3);
     env.push_auth_mark(1, 3, MARK)
         .map_err(|error| format!("stage unrelated epoch mark: {error}"))?;
-    env.crank(
-        2,
-        3,
-        vec![CrankObservationHint {
-            asset_index: 1,
-            oracle_accounts: env.primary_profile(1).oracle_leg_count,
-        }],
-    )
-    .map_err(|error| format!("advance unrelated epoch: {error}"))?;
+    crank_asset_progress(&mut env, 2, 3, 1, 8)
+        .map_err(|error| format!("advance unrelated epoch: {error}"))?;
+    crank_asset_progress(&mut env, 3, 3, 1, 8)
+        .map_err(|error| format!("refresh unrelated counterparty: {error}"))?;
     let before_omission = fingerprint(&env);
     let refresh = env.crank(
         0,
@@ -7129,6 +7738,10 @@ fn run_hybrid_terminal_world(
         seed,
         MarketConfig {
             initial_price: OPEN_PRICE,
+            h_max: 20,
+            max_price_move_bps_per_slot: 500,
+            max_accrual_dt_slots: 20,
+            min_funding_lifetime_slots: 20,
             actor_deposits: [CAPITAL, CAPITAL, 1, 1, 1],
             ..MarketConfig::default()
         },
@@ -7162,6 +7775,27 @@ fn run_hybrid_terminal_world(
             &[current_leg_0, current_leg_1],
         )
         .map_err(|error| format!("ingest current Hybrid reports: {error}"))?;
+        let authenticated_slot = env.current_slot();
+        let mut accrual_ready = false;
+        for step in 0..16 {
+            if env.primary_market_state().1.assets[0].slot_last >= authenticated_slot {
+                accrual_ready = true;
+                break;
+            }
+            env.crank_with_oracles(
+                ORACLE_AUTHORITY,
+                authenticated_slot,
+                vec![CrankObservationHint {
+                    asset_index: 0,
+                    oracle_accounts: 2,
+                }],
+                &[current_leg_0, current_leg_1],
+            )
+            .map_err(|error| format!("current Hybrid terminal catch-up crank {step}: {error}"))?;
+        }
+        if !accrual_ready {
+            return Err("current Hybrid terminal state did not catch up in bounded cranks".into());
+        }
     }
     let before_resolve = fingerprint(&env);
     let resolve = env.resolve_market();
@@ -7197,7 +7831,9 @@ pub fn discover_hybrid_terminal_snapshot_violation(
     let stale = run_hybrid_terminal_world(seed, false)?;
     let current = run_hybrid_terminal_world(seed, true)?;
     if !current.resolve_landed {
-        return Err("current Hybrid terminal control did not resolve".into());
+        return Err(format!(
+            "current Hybrid terminal control did not resolve: stale={stale:?}, current={current:?}"
+        ));
     }
     let victim_payout_loss = current
         .victim_payout
@@ -7834,19 +8470,10 @@ fn discover_one_resolved_adl_close_lock(
     env.warp_to_slot(6);
     env.push_auth_mark(0, 6, BANKRUPTCY_MARK)
         .map_err(|error| format!("publish resolved-ADL bankruptcy mark: {error}"))?;
-    let observation = vec![CrankObservationHint {
-        asset_index: 0,
-        oracle_accounts: 0,
-    }];
-    let mut setup_progress = 0u8;
-    for actor in [LOSER, WINNER, LOSER, LOSER] {
-        if env.crank(actor, 6, observation.clone()).is_ok() {
-            setup_progress = setup_progress.saturating_add(1);
-        }
-    }
-    if setup_progress == 0 {
-        return Err("resolved-ADL setup made no public crank progress".into());
-    }
+    crank_asset_progress(&mut env, LOSER, 6, 0, 16)
+        .map_err(|error| format!("resolved-ADL loser progress: {error}"))?;
+    crank_asset_progress(&mut env, WINNER, 6, 0, 16)
+        .map_err(|error| format!("resolved-ADL winner progress: {error}"))?;
 
     let (_, after_adl) = env.primary_market_state();
     let winner_before_resolve = env.primary_portfolio(WINNER);
@@ -8000,7 +8627,26 @@ fn discover_one_stale_cohort_novation(
             env.primary_portfolio(LOSER).pnl.get()
         ));
     }
-    let unsigned_transfer_landed = match route {
+    let (_, pre_novation_group) = env.primary_market_state();
+    let pre_stale_long_count = pre_novation_group.assets[0].stale_account_count_long;
+    let pre_stale_short_count = pre_novation_group.assets[0].stale_account_count_short;
+    let pre_negative_pnl_count = pre_novation_group.negative_pnl_account_count;
+    let novation_landed = match route {
+        StaleCohortRoute::NoCpi => env
+            .trade_no_cpi(WINNER, ENTRANT, 0, -SIZE_Q, LOSS_PRICE, 0)
+            .is_ok(),
+        StaleCohortRoute::BatchNoCpi => env
+            .batch_trade_no_cpi(
+                WINNER,
+                ENTRANT,
+                vec![BatchTradeLeg {
+                    asset_index: 0,
+                    size_q: -SIZE_Q,
+                    exec_price: LOSS_PRICE,
+                    fee_bps: 0,
+                }],
+            )
+            .is_ok(),
         StaleCohortRoute::Cpi => env.trade_cpi(WINNER, ENTRANT, 0, -SIZE_Q, 0, 0).is_ok(),
         StaleCohortRoute::BatchCpi => env
             .batch_trade_cpi(
@@ -8015,10 +8661,13 @@ fn discover_one_stale_cohort_novation(
             )
             .is_ok(),
     };
-    if !unsigned_transfer_landed {
+    if !novation_landed {
         return Ok(StaleCohortNovationDiscovery {
             route,
-            unsigned_transfer_landed,
+            novation_landed,
+            pre_stale_long_count,
+            pre_stale_short_count,
+            pre_negative_pnl_count,
             settlement_cranks: 0,
             winner_extracted: 0,
             entrant_extracted: 0,
@@ -8107,7 +8756,10 @@ fn discover_one_stale_cohort_novation(
 
     Ok(StaleCohortNovationDiscovery {
         route,
-        unsigned_transfer_landed,
+        novation_landed,
+        pre_stale_long_count,
+        pre_stale_short_count,
+        pre_negative_pnl_count,
         settlement_cranks,
         winner_extracted,
         entrant_extracted,
@@ -9864,7 +10516,7 @@ pub fn discover_cross_domain_b_violation(
     env.warp_to_slot(7);
     env.push_auth_mark(1, 7, BANKRUPTCY_MARK)
         .map_err(|error| format!("publish bankruptcy mark: {error}"))?;
-    crank_asset_progress(&mut env, 0, 7, 1, 4)?;
+    crank_asset_progress(&mut env, 0, 7, 1, 16)?;
     let observation = vec![CrankObservationHint {
         asset_index: 1,
         oracle_accounts: env.primary_profile(1).oracle_leg_count,

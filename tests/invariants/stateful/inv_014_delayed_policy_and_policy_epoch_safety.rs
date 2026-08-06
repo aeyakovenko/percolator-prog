@@ -255,7 +255,7 @@ proptest! {
         let result = reproduce_delayed_resolve_policy_replay(seed);
         prop_assert!(
             result.is_ok(),
-            "PR 347 no longer reproduces for seed {:?}: {}",
+            "PR 347 fixed terminal-catch-up route failed for seed {:?}: {}",
             seed,
             result.unwrap_err()
         );

@@ -4678,6 +4678,21 @@ pub mod processor {
         Ok(profile)
     }
 
+    fn read_oracle_profile_unchecked_from_view(
+        group: &state::MarketViewMutV16<'_>,
+        asset_index: usize,
+    ) -> Result<state::AssetOracleProfileV16, ProgramError> {
+        let market = group
+            .markets
+            .get(asset_index)
+            .ok_or(PercolatorError::InvalidInstruction)?;
+        let bytes = market
+            .wrapper
+            .get(..constants::ASSET_ORACLE_PROFILE_LEN)
+            .ok_or(PercolatorError::InvalidAccountLen)?;
+        Ok(bytemuck::pod_read_unaligned(bytes))
+    }
+
     fn write_oracle_profile_to_view_if_separate(
         group: &mut state::MarketViewMutV16<'_>,
         asset_index: usize,
@@ -5923,6 +5938,19 @@ pub mod processor {
             } else {
                 size_q.unsigned_abs()
             };
+            let account_a_position =
+                signed_position_for_asset_view(&group, &account_a, asset_index as usize)?;
+            let account_b_position =
+                signed_position_for_asset_view(&group, &account_b, asset_index as usize)?;
+            let reduces_existing = trade_delta_reduces_existing(account_a_position, size_q)
+                || trade_delta_reduces_existing(account_b_position, -size_q);
+            accrue_zero_move_funding_before_position_change_for_profile_view(
+                &mut oracle_profile,
+                &mut group,
+                asset_index as usize,
+                reduces_existing,
+            )
+            .map_err(map_v16_error)?;
             // F-TRADENOCPI-FEE / F-NOCPI-MARK-FEE: request.exec_price is used by the engine only as
             // fee notional. In price-managed EWMA/stale-hybrid modes, the caller's reported print is
             // also the mark-discovery input, so first normalize it to the same per-asset dt price
@@ -6170,7 +6198,7 @@ pub mod processor {
                 if requests.iter().any(|r| r.asset_index == asset_index) {
                     return Err(PercolatorError::InvalidInstruction.into());
                 }
-                let oracle_profile = read_oracle_profile_from_view(&group, &cfg, asset_index)?;
+                let mut oracle_profile = read_oracle_profile_from_view(&group, &cfg, asset_index)?;
                 reject_permissionless_resolve_matured_live_for_profile_view(
                     &cfg,
                     &oracle_profile,
@@ -6180,6 +6208,19 @@ pub mod processor {
                     return Err(PercolatorError::InvalidInstruction.into());
                 }
                 let abs_size = leg.size_q.unsigned_abs();
+                let account_a_position =
+                    signed_position_for_asset_view(&group, &account_a, asset_index)?;
+                let account_b_position =
+                    signed_position_for_asset_view(&group, &account_b, asset_index)?;
+                let reduces_existing = trade_delta_reduces_existing(account_a_position, leg.size_q)
+                    || trade_delta_reduces_existing(account_b_position, -leg.size_q);
+                accrue_zero_move_funding_before_position_change_for_profile_view(
+                    &mut oracle_profile,
+                    &mut group,
+                    asset_index,
+                    reduces_existing,
+                )
+                .map_err(map_v16_error)?;
                 let fee_basis_price = accepted_reported_trade_price_view(
                     &oracle_profile,
                     &group,
@@ -6769,6 +6810,13 @@ pub mod processor {
         let (_, _, max_market_slots, _) =
             state::read_market_config_mode_and_capacity(&market_ai.try_borrow_data()?)?;
         let cpi_requests = [(asset_index, size_q)];
+        accrue_zero_move_funding_before_matcher_view(
+            market_ai,
+            account_a_ai,
+            account_b_ai,
+            max_market_slots,
+            &cpi_requests,
+        )?;
         ensure_cpi_trade_portfolios_current_before_matcher(
             market_ai,
             account_a_ai,
@@ -7128,6 +7176,13 @@ pub mod processor {
             matcher_legs.push((leg.asset_index, oracle_prices[i], leg.size_q));
             cpi_requests.push((leg.asset_index, leg.size_q));
         }
+        accrue_zero_move_funding_before_matcher_view(
+            market_ai,
+            account_a_ai,
+            account_b_ai,
+            max_market_slots,
+            &cpi_requests,
+        )?;
         ensure_cpi_trade_portfolios_current_before_matcher(
             market_ai,
             account_a_ai,
@@ -8660,6 +8715,12 @@ pub mod processor {
             if group.header.mode == 0 && permissionless_resolve_matured_now_view(cfg, group) {
                 return Err(V16Error::LockActive);
             }
+            accrue_zero_move_funding_before_position_change_view(
+                cfg,
+                group,
+                asset_index as usize,
+                true,
+            )?;
             group
                 .forfeit_recovery_leg_not_atomic(portfolio, asset_index as usize, b_delta_budget)
                 .map(|_| ())
@@ -8680,6 +8741,12 @@ pub mod processor {
             if group.header.mode == 0 && permissionless_resolve_matured_now_view(cfg, group) {
                 return Err(V16Error::LockActive);
             }
+            accrue_zero_move_funding_before_position_change_view(
+                cfg,
+                group,
+                asset_index as usize,
+                true,
+            )?;
             group
                 .rebalance_reduce_position_not_atomic(
                     portfolio,
@@ -8845,6 +8912,177 @@ pub mod processor {
         Ok(())
     }
 
+    fn required_market_resolve_accrual_for_profile_view(
+        profile: &state::AssetOracleProfileV16,
+        group: &state::MarketViewMutV16<'_>,
+        asset_index: usize,
+        resolved_slot: u64,
+        include_pending_mark: bool,
+    ) -> Result<Option<(u64, u64, i128)>, ProgramError> {
+        if asset_index >= group.header.config.max_market_slots.get() as usize
+            || asset_index >= group.markets.len()
+        {
+            return Err(PercolatorError::InvalidInstruction.into());
+        }
+        let asset = group.markets[asset_index].engine.asset;
+        let exposed = asset.oi_eff_long_q.get() != 0 || asset.oi_eff_short_q.get() != 0;
+        if !exposed
+            || asset.slot_last.get() >= resolved_slot
+            || !oracle_v16::profile_is_price_managed(profile)
+        {
+            return Ok(None);
+        }
+
+        let pending_mark = profile.funding_mark_pending_e6 != 0
+            && profile.funding_mark_pending_slot > asset.slot_last.get()
+            && profile.funding_mark_pending_slot <= resolved_slot;
+        let activation_step = include_pending_mark && pending_mark;
+        let accrual_slot = if activation_step {
+            profile.funding_mark_pending_slot
+        } else {
+            resolved_slot
+        };
+        let target = if pending_mark && profile.funding_mark_e6 != 0 {
+            profile.funding_mark_e6
+        } else {
+            profile.mark_ewma_e6
+        };
+        if target == 0 || target > percolator::MAX_ORACLE_PRICE {
+            return Err(PercolatorError::OracleInvalid.into());
+        }
+        let current = asset.effective_price.get();
+        // With funding disabled, an intermediate mark path whose latest authenticated endpoint
+        // equals the official engine price has zero net K/F value. A stale resolver may therefore
+        // terminalize without replaying obsolete checkpoints that another asset's later crank can
+        // make chronologically unreachable through the engine's global current-slot guard.
+        if group.header.config.max_abs_funding_e9_per_slot.get() == 0
+            && profile.mark_ewma_e6 == current
+        {
+            return Ok(None);
+        }
+        let segment_dt = asset_segment_dt_view(group, asset_index, accrual_slot)?;
+        let next_price = oracle_v16::effective_price_from_target(
+            current,
+            target,
+            group.header.config.max_price_move_bps_per_slot.get(),
+            segment_dt,
+            exposed,
+        );
+        let funding_rate_e9 = permissionless_funding_rate_e9_view(
+            profile,
+            group,
+            asset_index,
+            accrual_slot,
+            next_price,
+        )?;
+        let balanced = asset.oi_eff_long_q.get() != 0 && asset.oi_eff_short_q.get() != 0;
+        if !activation_step && next_price == current && (!balanced || funding_rate_e9 == 0) {
+            return Ok(None);
+        }
+        Ok(Some((accrual_slot, next_price, funding_rate_e9)))
+    }
+
+    #[inline(never)]
+    fn reject_market_resolve_before_committed_accrual_view(
+        _cfg: &WrapperConfigV16,
+        group: &state::MarketViewMutV16<'_>,
+        resolved_slot: u64,
+        include_pending_mark: bool,
+    ) -> ProgramResult {
+        let configured_slots = group.header.config.max_market_slots.get() as usize;
+        if configured_slots > group.markets.len() {
+            return Err(PercolatorError::EngineInvalidConfig.into());
+        }
+        let mut asset_index = 0usize;
+        while asset_index < configured_slots {
+            let asset = group.markets[asset_index].engine.asset;
+            if (asset.oi_eff_long_q.get() != 0 || asset.oi_eff_short_q.get() != 0)
+                && asset.slot_last.get() < resolved_slot
+            {
+                let profile = read_oracle_profile_unchecked_from_view(group, asset_index)?;
+                let zero_value_interval = group.header.config.max_abs_funding_e9_per_slot.get()
+                    == 0
+                    && profile.mark_ewma_e6 == asset.effective_price.get();
+                if zero_value_interval {
+                    asset_index += 1;
+                    continue;
+                }
+                state::validate_asset_oracle_profile(&profile)?;
+                if required_market_resolve_accrual_for_profile_view(
+                    &profile,
+                    group,
+                    asset_index,
+                    resolved_slot,
+                    include_pending_mark,
+                )?
+                .is_some()
+                {
+                    return Err(PercolatorError::EngineStale.into());
+                }
+            }
+            asset_index += 1;
+        }
+        Ok(())
+    }
+
+    fn accrue_committed_funding_before_asset_shutdown_view(
+        profile: &mut state::AssetOracleProfileV16,
+        group: &mut state::MarketViewMutV16<'_>,
+        asset_index: usize,
+        authenticated_slot: u64,
+    ) -> ProgramResult {
+        if asset_index >= group.header.config.max_market_slots.get() as usize
+            || asset_index >= group.markets.len()
+        {
+            return Err(PercolatorError::InvalidInstruction.into());
+        }
+        let asset_slot = group.markets[asset_index].engine.asset.slot_last.get();
+        if authenticated_slot < asset_slot {
+            return Err(PercolatorError::EngineStale.into());
+        }
+        advance_funding_mark_checkpoint_view(profile, asset_slot);
+        if profile.funding_mark_pending_e6 != 0
+            && profile.funding_mark_pending_slot <= authenticated_slot
+        {
+            return Err(PercolatorError::EngineStale.into());
+        }
+        let frozen_price = group.markets[asset_index]
+            .engine
+            .asset
+            .effective_price
+            .get();
+        if frozen_price == 0 || frozen_price > percolator::MAX_ORACLE_PRICE {
+            return Err(PercolatorError::OracleInvalid.into());
+        }
+        let funding_rate_e9 = permissionless_funding_rate_e9_view(
+            profile,
+            group,
+            asset_index,
+            authenticated_slot,
+            frozen_price,
+        )?;
+        let asset = group.markets[asset_index].engine.asset;
+        let balanced = asset.oi_eff_long_q.get() != 0 && asset.oi_eff_short_q.get() != 0;
+        if !balanced || funding_rate_e9 == 0 {
+            return Ok(());
+        }
+        let dt_total = authenticated_slot - asset_slot;
+        if dt_total > group.header.config.max_accrual_dt_slots.get() {
+            return Err(PercolatorError::EngineStale.into());
+        }
+        group
+            .accrue_asset_to_not_atomic(
+                asset_index,
+                authenticated_slot,
+                frozen_price,
+                funding_rate_e9,
+                true,
+            )
+            .map_err(map_v16_error)?;
+        advance_funding_mark_checkpoint_view(profile, authenticated_slot);
+        Ok(())
+    }
+
     #[inline(never)]
     fn handle_resolve_market<'a>(
         program_id: &Pubkey,
@@ -8867,6 +9105,7 @@ pub mod processor {
         if slot < group.header.current_slot.get() {
             return Err(PercolatorError::EngineStale.into());
         }
+        reject_market_resolve_before_committed_accrual_view(&cfg, &group, slot, false)?;
         group
             .resolve_market_not_atomic(slot)
             .map_err(map_v16_error)?;
@@ -9475,6 +9714,12 @@ pub mod processor {
                 }
                 match group.markets[asset_index].engine.asset.lifecycle {
                     ASSET_LIFECYCLE_ACTIVE | ASSET_LIFECYCLE_DRAIN_ONLY => {
+                        accrue_committed_funding_before_asset_shutdown_view(
+                            &mut profile,
+                            &mut group,
+                            asset_index,
+                            authenticated_slot,
+                        )?;
                         let frozen_mark = group.markets[asset_index]
                             .engine
                             .asset
@@ -9955,6 +10200,12 @@ pub mod processor {
         if !oracle_v16::permissionless_stale_matured(&cfg, authenticated_slot) {
             return Err(PercolatorError::OracleStale.into());
         }
+        reject_market_resolve_before_committed_accrual_view(
+            &cfg,
+            &group,
+            authenticated_slot,
+            true,
+        )?;
         group
             .resolve_market_not_atomic(authenticated_slot)
             .map_err(map_v16_error)?;
@@ -10742,6 +10993,7 @@ pub mod processor {
             if summary.liquidatable
                 && !summary.b_stale
                 && permissionless_resolve_matured_now_view(&cfg, &group)
+                && observation_hints.is_empty()
             {
                 return Err(PercolatorError::OracleStale.into());
             }
@@ -10775,6 +11027,8 @@ pub mod processor {
             let insurance_before = group.header.insurance.get();
             let mut observations: Vec<AutoCrankObservationV16> =
                 Vec::with_capacity(percolator::V16_MAX_PORTFOLIO_ASSETS_N);
+            let mut settlement_only_after_maturity = None;
+            let mut bounded_market_catchup_only = false;
             let clock_unix_ts = Clock::get().ok().map(|c| c.unix_timestamp);
             for hint in observation_hints.iter() {
                 let asset_index = hint.asset_index as usize;
@@ -10785,7 +11039,26 @@ pub mod processor {
                 }
                 let oracle_account_count = hint.oracle_accounts as usize;
                 let mut oracle_profile = read_oracle_profile_from_view(&group, &cfg, asset_index)?;
-                if oracle_account_count != oracle_profile.oracle_leg_count as usize {
+                let asset_slot_before = group.markets[asset_index].engine.asset.slot_last.get();
+                advance_funding_mark_checkpoint_view(&mut oracle_profile, asset_slot_before);
+                let resolve_matured = global_or_profile_resolve_matured_at_slot(
+                    &cfg,
+                    &oracle_profile,
+                    authenticated_now_slot,
+                );
+                if let Some(expected) = settlement_only_after_maturity {
+                    if expected != resolve_matured {
+                        return Err(PercolatorError::InvalidInstruction.into());
+                    }
+                } else {
+                    settlement_only_after_maturity = Some(resolve_matured);
+                }
+                if resolve_matured && oracle_account_count != 0 {
+                    return Err(PercolatorError::OracleStale.into());
+                }
+                if !resolve_matured
+                    && oracle_account_count != oracle_profile.oracle_leg_count as usize
+                {
                     return Err(PercolatorError::InvalidInstruction.into());
                 }
                 if oracle_tail.len() < oracle_account_count {
@@ -10800,32 +11073,44 @@ pub mod processor {
                         .oracle_target_publish_time
                         .saturating_add(i64::try_from(elapsed_slots).unwrap_or(i64::MAX))
                 });
-                reject_non_base_oracle_update_after_global_resolve_matured(
-                    &cfg,
-                    asset_index,
-                    authenticated_now_slot,
-                )?;
-                reject_permissionless_resolve_matured_live_for_profile_view(
-                    &cfg,
-                    &oracle_profile,
-                    &group,
-                )?;
-                let crank_price = hybrid_effective_price_for_crank_view(
-                    &cfg,
-                    &mut oracle_profile,
-                    &group,
-                    asset_index,
-                    authenticated_now_slot,
-                    now_unix_ts,
-                    observation_tail,
-                )?;
-                let computed_funding_rate_e9 = permissionless_funding_rate_e9_view(
-                    &oracle_profile,
-                    &group,
-                    asset_index,
-                    authenticated_now_slot,
-                    crank_price,
-                )?;
+                let (accrual_slot, crank_price, computed_funding_rate_e9) = if resolve_matured {
+                    required_market_resolve_accrual_for_profile_view(
+                        &oracle_profile,
+                        &group,
+                        asset_index,
+                        authenticated_now_slot,
+                        true,
+                    )?
+                    .ok_or(PercolatorError::EngineNonProgress)?
+                } else {
+                    reject_non_base_oracle_update_after_global_resolve_matured(
+                        &cfg,
+                        asset_index,
+                        authenticated_now_slot,
+                    )?;
+                    reject_permissionless_resolve_matured_live_for_profile_view(
+                        &cfg,
+                        &oracle_profile,
+                        &group,
+                    )?;
+                    let crank_price = hybrid_effective_price_for_crank_view(
+                        &cfg,
+                        &mut oracle_profile,
+                        &group,
+                        asset_index,
+                        authenticated_now_slot,
+                        now_unix_ts,
+                        observation_tail,
+                    )?;
+                    let funding_rate_e9 = permissionless_funding_rate_e9_view(
+                        &oracle_profile,
+                        &group,
+                        asset_index,
+                        authenticated_now_slot,
+                        crank_price,
+                    )?;
+                    (authenticated_now_slot, crank_price, funding_rate_e9)
+                };
                 group
                     .set_asset_raw_oracle_target_not_atomic(
                         asset_index,
@@ -10860,19 +11145,20 @@ pub mod processor {
                 group
                     .accrue_asset_to_not_atomic(
                         asset_index,
-                        authenticated_now_slot,
+                        accrual_slot,
                         crank_price,
                         computed_funding_rate_e9,
                         true,
                     )
                     .map_err(map_v16_error)?;
                 let asset_slot_after = group.markets[asset_index].engine.asset.slot_last.get();
+                bounded_market_catchup_only |= asset_slot_after < authenticated_now_slot;
                 advance_funding_mark_checkpoint_view(&mut oracle_profile, asset_slot_after);
                 let next_funding_rate_e9 = permissionless_funding_rate_e9_view(
                     &oracle_profile,
                     &group,
                     asset_index,
-                    authenticated_now_slot,
+                    accrual_slot,
                     crank_price,
                 )?;
                 write_oracle_profile_to_view(&mut group, asset_index, &oracle_profile)?;
@@ -10884,6 +11170,13 @@ pub mod processor {
             }
             if !oracle_tail.is_empty() {
                 return Err(PercolatorError::InvalidInstruction.into());
+            }
+
+            if settlement_only_after_maturity.unwrap_or(false) || bounded_market_catchup_only {
+                group.validate_shape().map_err(map_v16_error)?;
+                drop(group);
+                state::write_wrapper_config(&mut market_data, &cfg)?;
+                return Ok(());
             }
 
             let mut portfolio_data = portfolio_ai.try_borrow_mut_data()?;
@@ -11344,6 +11637,10 @@ pub mod processor {
 
     fn requested_delta_must_increase_risk(current_q: i128, delta_q: i128) -> bool {
         current_q == 0 || (current_q > 0 && delta_q > 0) || (current_q < 0 && delta_q < 0)
+    }
+
+    fn trade_delta_reduces_existing(current_q: i128, delta_q: i128) -> bool {
+        (current_q > 0 && delta_q < 0) || (current_q < 0 && delta_q > 0)
     }
 
     fn ensure_cpi_trade_asset_lifecycle_before_matcher(
@@ -12155,6 +12452,222 @@ pub mod processor {
         };
         policy_v16::premium_funding_rate_e9(active_mark, funding_index, max_abs_rate)
             .ok_or(PercolatorError::EngineArithmeticOverflow.into())
+    }
+
+    fn stored_mark_target_for_zero_move_accrual_view(
+        profile: &state::AssetOracleProfileV16,
+        group: &state::MarketViewMutV16<'_>,
+        asset_index: usize,
+        now_slot: u64,
+    ) -> Result<u64, V16Error> {
+        let asset = group
+            .markets
+            .get(asset_index)
+            .ok_or(V16Error::InvalidConfig)?
+            .engine
+            .asset;
+        let target = if oracle_v16::profile_is_auth_mark(profile)
+            || oracle_v16::profile_is_ewma_mark(profile)
+            || (oracle_v16::profile_is_hybrid(profile)
+                && oracle_v16::profile_hybrid_soft_stale_matured(profile, now_slot))
+        {
+            profile.mark_ewma_e6
+        } else {
+            asset.raw_oracle_target_price.get()
+        };
+        if target == 0 || target > percolator::MAX_ORACLE_PRICE {
+            return Err(V16Error::InvalidConfig);
+        }
+        Ok(target)
+    }
+
+    fn zero_move_funding_segment_for_profile_view(
+        profile: &state::AssetOracleProfileV16,
+        group: &mut state::MarketViewMutV16<'_>,
+        asset_index: usize,
+    ) -> Result<Option<(u64, i128)>, V16Error> {
+        if !oracle_v16::profile_is_price_managed(profile)
+            || asset_index >= group.header.config.max_market_slots.get() as usize
+            || asset_index >= group.markets.len()
+        {
+            return Ok(None);
+        }
+        let now_slot = authenticated_market_slot_or_fallback_view(group);
+        let asset = group.markets[asset_index].engine.asset;
+        let segment_dt = asset_segment_dt_view(group, asset_index, now_slot)
+            .map_err(|_| V16Error::InvalidConfig)?;
+        if segment_dt == 0 || asset.oi_eff_long_q.get() == 0 || asset.oi_eff_short_q.get() == 0 {
+            return Ok(None);
+        }
+        let effective_price = asset.effective_price.get();
+        let target =
+            stored_mark_target_for_zero_move_accrual_view(profile, group, asset_index, now_slot)?;
+        let bounded_price = oracle_v16::effective_price_from_target(
+            effective_price,
+            target,
+            group.header.config.max_price_move_bps_per_slot.get(),
+            segment_dt,
+            true,
+        );
+        // This helper settles only the interval a normal crank would process without changing K.
+        // Price-moving intervals stay on the ordinary observation-bearing crank route.
+        if bounded_price != effective_price {
+            return Ok(None);
+        }
+        let funding_rate_e9 = permissionless_funding_rate_e9_view(
+            profile,
+            group,
+            asset_index,
+            now_slot,
+            effective_price,
+        )
+        .map_err(|_| V16Error::ArithmeticOverflow)?;
+        if funding_rate_e9 == 0 {
+            return Ok(None);
+        }
+        Ok(Some((effective_price, funding_rate_e9)))
+    }
+
+    fn pending_zero_move_funding_requires_crank_view(
+        profile: &state::AssetOracleProfileV16,
+        group: &mut state::MarketViewMutV16<'_>,
+        asset_index: usize,
+    ) -> Result<bool, V16Error> {
+        if profile.funding_mark_pending_e6 == 0
+            || asset_index >= group.header.config.max_market_slots.get() as usize
+            || asset_index >= group.markets.len()
+        {
+            return Ok(false);
+        }
+        let now_slot = authenticated_market_slot_or_fallback_view(group);
+        let asset = group.markets[asset_index].engine.asset;
+        if asset.oi_eff_long_q.get() == 0
+            || asset.oi_eff_short_q.get() == 0
+            || profile.funding_mark_pending_slot > now_slot
+            || asset.slot_last.get() >= profile.funding_mark_pending_slot
+        {
+            return Ok(false);
+        }
+        let segment_dt = asset_segment_dt_view(group, asset_index, now_slot)
+            .map_err(|_| V16Error::InvalidConfig)?;
+        if segment_dt == 0 {
+            return Ok(false);
+        }
+        let effective_price = asset.effective_price.get();
+        let pending_price = profile.funding_mark_pending_e6;
+        let bounded_price = oracle_v16::effective_price_from_target(
+            effective_price,
+            pending_price,
+            group.header.config.max_price_move_bps_per_slot.get(),
+            segment_dt,
+            true,
+        );
+        let pending_rate = policy_v16::premium_funding_rate_e9(
+            pending_price,
+            effective_price,
+            group.header.config.max_abs_funding_e9_per_slot.get(),
+        )
+        .ok_or(V16Error::ArithmeticOverflow)?;
+        Ok(bounded_price == effective_price && pending_rate != 0)
+    }
+
+    fn accrue_zero_move_funding_before_position_change_for_profile_view(
+        profile: &mut state::AssetOracleProfileV16,
+        group: &mut state::MarketViewMutV16<'_>,
+        asset_index: usize,
+        require_full_catchup: bool,
+    ) -> Result<(), V16Error> {
+        if asset_index >= group.header.config.max_market_slots.get() as usize
+            || asset_index >= group.markets.len()
+        {
+            return Ok(());
+        }
+        let asset_slot = group.markets[asset_index].engine.asset.slot_last.get();
+        advance_funding_mark_checkpoint_view(profile, asset_slot);
+        let Some((effective_price, funding_rate_e9)) =
+            zero_move_funding_segment_for_profile_view(profile, group, asset_index)?
+        else {
+            if require_full_catchup
+                && pending_zero_move_funding_requires_crank_view(profile, group, asset_index)?
+            {
+                return Err(V16Error::Stale);
+            }
+            return Ok(());
+        };
+        let now_slot = authenticated_market_slot_or_fallback_view(group);
+        group.accrue_asset_to_not_atomic(
+            asset_index,
+            now_slot,
+            effective_price,
+            funding_rate_e9,
+            true,
+        )?;
+        let asset_slot = group.markets[asset_index].engine.asset.slot_last.get();
+        advance_funding_mark_checkpoint_view(profile, asset_slot);
+        // One instruction never performs an attacker-sized catch-up loop. If more deterministic
+        // zero-move funding remains, roll this inline segment back and require bounded public
+        // cranks before the unchanged position operation retries.
+        if require_full_catchup
+            && (zero_move_funding_segment_for_profile_view(profile, group, asset_index)?.is_some()
+                || pending_zero_move_funding_requires_crank_view(profile, group, asset_index)?)
+        {
+            return Err(V16Error::Stale);
+        }
+        Ok(())
+    }
+
+    fn accrue_zero_move_funding_before_position_change_view(
+        cfg: &WrapperConfigV16,
+        group: &mut state::MarketViewMutV16<'_>,
+        asset_index: usize,
+        require_full_catchup: bool,
+    ) -> Result<(), V16Error> {
+        let mut profile = read_oracle_profile_from_view(group, cfg, asset_index)
+            .map_err(|_| V16Error::InvalidConfig)?;
+        accrue_zero_move_funding_before_position_change_for_profile_view(
+            &mut profile,
+            group,
+            asset_index,
+            require_full_catchup,
+        )?;
+        write_oracle_profile_to_view(group, asset_index, &profile)
+            .map_err(|_| V16Error::InvalidConfig)
+    }
+
+    fn accrue_zero_move_funding_before_matcher_view(
+        market_ai: &AccountInfo<'_>,
+        account_a_ai: &AccountInfo<'_>,
+        account_b_ai: &AccountInfo<'_>,
+        max_market_slots: usize,
+        requests: &[(u16, i128)],
+    ) -> ProgramResult {
+        ensure_portfolio_storage_for_market_slots(account_a_ai, max_market_slots)?;
+        ensure_portfolio_storage_for_market_slots(account_b_ai, max_market_slots)?;
+        let mut market_data = market_ai.try_borrow_mut_data()?;
+        let (cfg, mut group) = state::market_view_mut(&mut market_data)?;
+        let mut account_a_data = account_a_ai.try_borrow_mut_data()?;
+        let account_a =
+            state::portfolio_view_mut_for_market_slots(&mut account_a_data, max_market_slots)?;
+        let mut account_b_data = account_b_ai.try_borrow_mut_data()?;
+        let account_b =
+            state::portfolio_view_mut_for_market_slots(&mut account_b_data, max_market_slots)?;
+        for &(asset_index, size_q) in requests {
+            let asset_index_usize = asset_index as usize;
+            let account_a_position =
+                signed_position_for_asset_view(&group, &account_a, asset_index_usize)?;
+            let account_b_position =
+                signed_position_for_asset_view(&group, &account_b, asset_index_usize)?;
+            let reduces_existing = trade_delta_reduces_existing(account_a_position, size_q)
+                || trade_delta_reduces_existing(account_b_position, -size_q);
+            accrue_zero_move_funding_before_position_change_view(
+                &cfg,
+                &mut group,
+                asset_index_usize,
+                reduces_existing,
+            )
+            .map_err(map_v16_error)?;
+        }
+        group.validate_shape().map_err(map_v16_error)
     }
 
     fn advance_funding_mark_checkpoint_view(
