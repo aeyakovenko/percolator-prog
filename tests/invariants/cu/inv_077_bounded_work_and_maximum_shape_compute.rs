@@ -680,6 +680,7 @@ fn run_dense_zero_delta_resolution_shape(asset_count: u16) {
     env.svm.expire_blockhash();
     env.send(
         ProgInstruction::ConfigurePermissionlessResolve {
+            asset_generation_frontier: 0,
             policy_sequence: u64::MAX,
             stale_slots: 1,
             force_close_delay_slots: 1,
@@ -1559,7 +1560,9 @@ fn v16_bpf_10m_market_resolution_stays_bounded() {
     env.svm.expire_blockhash();
     let resolve_cu = env
         .send(
-            ProgInstruction::ResolveMarket,
+            ProgInstruction::ResolveMarket {
+                asset_generation_frontier: 0,
+            },
             vec![
                 AccountMeta::new(admin.pubkey(), true),
                 AccountMeta::new(env.market, false),

@@ -2535,7 +2535,9 @@ impl V16CuEnv {
                 &mut self.svm,
                 self.program_id,
                 &self.payer,
-                ProgInstruction::ResolveMarket,
+                ProgInstruction::ResolveMarket {
+                    asset_generation_frontier: 0,
+                },
                 vec![
                     AccountMeta::new(self.admin.pubkey(), true),
                     AccountMeta::new(self.market, false),
@@ -2604,6 +2606,7 @@ impl V16CuEnv {
             self.program_id,
             &self.payer,
             ProgInstruction::ConfigurePermissionlessResolve {
+                asset_generation_frontier: 0,
                 stale_slots,
                 force_close_delay_slots,
                 policy_sequence,
@@ -4116,7 +4119,7 @@ fn send_tx(
     accounts: Vec<AccountMeta>,
     extra_signers: &[&Keypair],
 ) -> Result<u64, String> {
-    bind_current_asset_generation(svm, &accounts, &mut ix);
+    bind_current_generation_guards(svm, &accounts, &mut ix);
     let instruction = Instruction {
         program_id,
         accounts,
@@ -4136,11 +4139,38 @@ fn send_tx(
         .map_err(|e| format!("{e:?}"))
 }
 
-fn bind_current_asset_generation(
+fn bind_current_generation_guards(
     svm: &LiteSVM,
     accounts: &[AccountMeta],
     ix: &mut ProgInstruction,
 ) {
+    let asset_generation_frontier = match ix {
+        ProgInstruction::ResolveMarket {
+            asset_generation_frontier,
+        }
+        | ProgInstruction::ConfigurePermissionlessResolve {
+            asset_generation_frontier,
+            ..
+        } => Some(asset_generation_frontier),
+        _ => None,
+    };
+    if let Some(asset_generation_frontier) = asset_generation_frontier {
+        if *asset_generation_frontier != 0 {
+            return;
+        }
+        let market_key = accounts.get(1).expect("market-wide market account").pubkey;
+        let market = svm
+            .get_account(&market_key)
+            .expect("market-wide market state");
+        let (_, group) = state::read_market(&market.data).expect("valid market-wide market state");
+        *asset_generation_frontier = group.next_market_id;
+        assert_ne!(
+            *asset_generation_frontier, 0,
+            "asset generation frontier must be nonzero"
+        );
+        return;
+    }
+
     let (asset_index, market_id) = match ix {
         ProgInstruction::ConfigureHybridOracle {
             asset_index,
@@ -23660,7 +23690,9 @@ fn v16_attack_non_admin_cannot_resolve_or_configure() {
         &mut env.svm,
         env.program_id,
         &env.payer,
-        ProgInstruction::ResolveMarket,
+        ProgInstruction::ResolveMarket {
+            asset_generation_frontier: 0,
+        },
         vec![
             AccountMeta::new(mallory.pubkey(), true),
             AccountMeta::new(env.market, false),
@@ -25132,7 +25164,9 @@ fn v16_attack_terminal_insurance_ledger_rejects_cross_market_reuse() {
         &mut env.svm,
         env.program_id,
         &env.payer,
-        ProgInstruction::ResolveMarket,
+        ProgInstruction::ResolveMarket {
+            asset_generation_frontier: 0,
+        },
         vec![
             AccountMeta::new(admin.pubkey(), true),
             AccountMeta::new(market_b, false),
@@ -25271,7 +25305,9 @@ fn v16_attack_terminal_withdraw_insurance_rejects_portfolio_as_ledger() {
         &mut env.svm,
         env.program_id,
         &env.payer,
-        ProgInstruction::ResolveMarket,
+        ProgInstruction::ResolveMarket {
+            asset_generation_frontier: 0,
+        },
         vec![
             AccountMeta::new(admin.pubkey(), true),
             AccountMeta::new(market_b, false),
@@ -27178,6 +27214,7 @@ fn v16_attack_rotated_marketauth_cannot_replay_policy_updates() {
     );
     old_attempt(
         ProgInstruction::ConfigurePermissionlessResolve {
+            asset_generation_frontier: 0,
             policy_sequence: u64::MAX,
             stale_slots: 100,
             force_close_delay_slots: 5,
@@ -27231,6 +27268,7 @@ fn v16_attack_rotated_marketauth_cannot_replay_policy_updates() {
     );
     new_update(
         ProgInstruction::ConfigurePermissionlessResolve {
+            asset_generation_frontier: 0,
             policy_sequence: u64::MAX,
             stale_slots: 100,
             force_close_delay_slots: 5,
@@ -28942,7 +28980,9 @@ fn v16_attack_close_slab_rejects_stale_marketauth_after_rotation() {
         &mut env.svm,
         env.program_id,
         &env.payer,
-        ProgInstruction::ResolveMarket,
+        ProgInstruction::ResolveMarket {
+            asset_generation_frontier: 0,
+        },
         vec![
             AccountMeta::new(new_admin.pubkey(), true),
             AccountMeta::new(env.market, false),
@@ -29152,7 +29192,9 @@ fn v16_attack_close_slab_rejects_market_as_lamport_destination() {
         &mut svm,
         program_id,
         &payer,
-        ProgInstruction::ResolveMarket,
+        ProgInstruction::ResolveMarket {
+            asset_generation_frontier: 0,
+        },
         vec![
             AccountMeta::new(market.pubkey(), true),
             AccountMeta::new(market.pubkey(), false),
@@ -32083,7 +32125,9 @@ fn v16_attack_close_resolved_rejects_cross_market_portfolio_payout() {
         &mut env.svm,
         env.program_id,
         &env.payer,
-        ProgInstruction::ResolveMarket,
+        ProgInstruction::ResolveMarket {
+            asset_generation_frontier: 0,
+        },
         vec![
             AccountMeta::new(env.admin.pubkey(), true),
             AccountMeta::new(market_b, false),
@@ -38290,6 +38334,7 @@ fn v16_attack_force_close_rejects_cross_market_portfolio_substitution() {
         env.program_id,
         &env.payer,
         ProgInstruction::ConfigurePermissionlessResolve {
+            asset_generation_frontier: 0,
             policy_sequence: u64::MAX,
             stale_slots: 100,
             force_close_delay_slots: DELAY,
@@ -55982,6 +56027,7 @@ fn v16_attack_configure_permissionless_resolve_gated_and_bounded() {
     env.svm.expire_blockhash();
     let r_grief = env.send(
         ProgInstruction::ConfigurePermissionlessResolve {
+            asset_generation_frontier: 0,
             policy_sequence: u64::MAX,
             stale_slots: 1_000,
             force_close_delay_slots: 1_000,
@@ -56003,6 +56049,7 @@ fn v16_attack_configure_permissionless_resolve_gated_and_bounded() {
     env.svm.expire_blockhash();
     let r_zero = env.send(
         ProgInstruction::ConfigurePermissionlessResolve {
+            asset_generation_frontier: 0,
             policy_sequence: u64::MAX,
             stale_slots: 0,
             force_close_delay_slots: 1_000,
@@ -56019,6 +56066,7 @@ fn v16_attack_configure_permissionless_resolve_gated_and_bounded() {
     env.svm.expire_blockhash();
     let r_huge = env.send(
         ProgInstruction::ConfigurePermissionlessResolve {
+            asset_generation_frontier: 0,
             policy_sequence: u64::MAX,
             stale_slots: percolator_prog::constants::MAX_PERMISSIONLESS_RESOLVE_STALE_SLOTS + 1,
             force_close_delay_slots: 1_000,
@@ -56038,6 +56086,7 @@ fn v16_attack_configure_permissionless_resolve_gated_and_bounded() {
     env.svm.expire_blockhash();
     let r_force_zero = env.send(
         ProgInstruction::ConfigurePermissionlessResolve {
+            asset_generation_frontier: 0,
             policy_sequence: u64::MAX,
             stale_slots: 1_000,
             force_close_delay_slots: 0,
@@ -56057,6 +56106,7 @@ fn v16_attack_configure_permissionless_resolve_gated_and_bounded() {
     env.svm.expire_blockhash();
     let r_force_huge = env.send(
         ProgInstruction::ConfigurePermissionlessResolve {
+            asset_generation_frontier: 0,
             policy_sequence: u64::MAX,
             stale_slots: 1_000,
             force_close_delay_slots: percolator_prog::constants::MAX_FORCE_CLOSE_DELAY_SLOTS + 1,
@@ -56078,6 +56128,7 @@ fn v16_attack_configure_permissionless_resolve_gated_and_bounded() {
     env.svm.expire_blockhash();
     let r_ok = env.send(
         ProgInstruction::ConfigurePermissionlessResolve {
+            asset_generation_frontier: 0,
             policy_sequence: u64::MAX,
             stale_slots: 1_000,
             force_close_delay_slots: 1_000,
@@ -56119,6 +56170,7 @@ fn v16_attack_configure_permissionless_resolve_rejects_when_resolve_matured() {
     env.svm.expire_blockhash();
     let fresh = env.send(
         ProgInstruction::ConfigurePermissionlessResolve {
+            asset_generation_frontier: 0,
             policy_sequence: u64::MAX,
             stale_slots: 6,
             force_close_delay_slots: 6,
@@ -56147,6 +56199,7 @@ fn v16_attack_configure_permissionless_resolve_rejects_when_resolve_matured() {
     env.svm.expire_blockhash();
     let stale = env.send(
         ProgInstruction::ConfigurePermissionlessResolve {
+            asset_generation_frontier: 0,
             policy_sequence: u64::MAX,
             stale_slots: 1_000,
             force_close_delay_slots: 1_000,

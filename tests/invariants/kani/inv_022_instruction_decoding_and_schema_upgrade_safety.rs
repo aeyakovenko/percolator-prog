@@ -385,12 +385,16 @@ fn kani_v16_asset_controls_reject_generationless_legacy_payloads() {
     let legacy_backing = [24u8; 27];
     let legacy_withdrawal = [57u8; 19];
     let legacy_backing_policy = [51u8; 15];
+    let legacy_resolve = [19u8; 1];
+    let legacy_resolve_policy = [38u8; 25];
 
     assert!(Instruction::decode(&legacy_insurance).is_err());
     assert!(Instruction::decode(&legacy_domain_insurance).is_err());
     assert!(Instruction::decode(&legacy_backing).is_err());
     assert!(Instruction::decode(&legacy_withdrawal).is_err());
     assert!(Instruction::decode(&legacy_backing_policy).is_err());
+    assert!(Instruction::decode(&legacy_resolve).is_err());
+    assert!(Instruction::decode(&legacy_resolve_policy).is_err());
 }
 
 #[kani::proof]
@@ -972,22 +976,36 @@ fn kani_v16_base_unit_payloads_decode_preserves_wire_fields() {
 
 #[kani::proof]
 fn kani_v16_permissionless_resolve_decode_preserves_wire_fields() {
+    let asset_generation_frontier: u64 = kani::any();
     let stale_slots: u64 = kani::any();
     let force_close_delay_slots: u64 = kani::any();
     let policy_sequence: u64 = kani::any();
     let now_slot: u64 = kani::any();
 
-    let mut configure = [0u8; 25];
+    let mut resolve_market = [0u8; 9];
+    resolve_market[0] = 19;
+    resolve_market[1..9].copy_from_slice(&asset_generation_frontier.to_le_bytes());
+    match Instruction::decode(&resolve_market).unwrap() {
+        Instruction::ResolveMarket {
+            asset_generation_frontier: got_frontier,
+        } => assert_eq!(got_frontier, asset_generation_frontier),
+        _ => unreachable!(),
+    }
+
+    let mut configure = [0u8; 33];
     configure[0] = 38;
-    configure[1..9].copy_from_slice(&stale_slots.to_le_bytes());
-    configure[9..17].copy_from_slice(&force_close_delay_slots.to_le_bytes());
-    configure[17..25].copy_from_slice(&policy_sequence.to_le_bytes());
+    configure[1..9].copy_from_slice(&asset_generation_frontier.to_le_bytes());
+    configure[9..17].copy_from_slice(&stale_slots.to_le_bytes());
+    configure[17..25].copy_from_slice(&force_close_delay_slots.to_le_bytes());
+    configure[25..33].copy_from_slice(&policy_sequence.to_le_bytes());
     match Instruction::decode(&configure).unwrap() {
         Instruction::ConfigurePermissionlessResolve {
+            asset_generation_frontier: got_frontier,
             stale_slots: got_stale,
             force_close_delay_slots: got_delay,
             policy_sequence: got_sequence,
         } => {
+            assert_eq!(got_frontier, asset_generation_frontier);
             assert_eq!(got_stale, stale_slots);
             assert_eq!(got_delay, force_close_delay_slots);
             assert_eq!(got_sequence, policy_sequence);
@@ -1368,7 +1386,12 @@ fn kani_v16_admin_policy_payloads_reject_trailing_byte() {
     let extra: u8 = kani::any();
 
     assert_rejects_trailing_byte(Instruction::CloseSlab, extra);
-    assert_rejects_trailing_byte(Instruction::ResolveMarket, extra);
+    assert_rejects_trailing_byte(
+        Instruction::ResolveMarket {
+            asset_generation_frontier: 1,
+        },
+        extra,
+    );
     assert_rejects_trailing_byte(
         Instruction::UpdateAuthority {
             new_pubkey: [1u8; 32],
@@ -1437,6 +1460,7 @@ fn kani_v16_admin_policy_payloads_reject_trailing_byte() {
     );
     assert_rejects_trailing_byte(
         Instruction::ConfigurePermissionlessResolve {
+            asset_generation_frontier: 1,
             stale_slots: 5,
             force_close_delay_slots: 1,
             policy_sequence: 1,

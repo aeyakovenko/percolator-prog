@@ -22,10 +22,10 @@ verification methods are in [`../../INVARIANTS.md`](../../INVARIANTS.md).
 
 | Suite | Tests | Evidence |
 | --- | ---: | --- |
-| `public_sbf/` | 76 | Deterministic public SBF/LiteSVM counterexamples, regressions, and manifest checks |
+| `public_sbf/` | 77 | Deterministic public SBF/LiteSVM counterexamples, regressions, and manifest checks |
 | `stateful/` | 109 | Proptest-generated public routes, including generalized active-leg/currentness, source-claim attribution, source-credit-rate, and authenticated-expiry route matrices |
 | `cu/` | 107 | Positive public-route, metamorphic, rollback, liveness, and max-shape CU tests |
-| `kani/` | 51 | Symbolic wrapper arithmetic, matcher-binding, ordering, and strict-decoder proof harnesses; the newest top-up wire-format harness has not been run locally |
+| `kani/` | 51 | Symbolic wrapper arithmetic, matcher-binding, ordering, and strict-decoder proof harnesses; the newest generation-control wire-format harness has not been run locally |
 
 Most deterministic and stateful LoF adapters still reproduce quarantined vulnerable behavior;
 fixed-pin regressions explicitly require safe rejection or preservation instead. A vulnerable-pin
@@ -46,8 +46,11 @@ configuration/mark-push/restart routes, both insurance top-up routes, backing-bu
 asset-insurance withdrawal, and backing-fee policy updates now bind the asset's monotonic
 `market_id`. This closes PR231/PR277/PR279/PR318/PR321/PR322/PR328 slot-reuse replay, including an
 asset-0 shutdown/restart with the same insurance authority and oracle requests retained with
-`u64::MAX` sequence. The INV-002 matrix now reports only two remaining global-control families:
-whole-market resolve and permissionless-resolve policy.
+`u64::MAX` sequence. Whole-market resolve and permissionless-resolve policy bind the persisted
+`next_market_id` asset-generation frontier, closing PR311/PR312 without incorrectly depending on
+asset 0 alone. The INV-002 public-route matrix now reports zero generation-replay violations across
+all 15 retained control families. Same-pubkey whole-market recreation remains an INV-001 concern
+because a newly initialized market can begin with the same frontier value.
 
 ## Coverage status
 

@@ -2807,7 +2807,9 @@ pub mod ix {
             amount: u128,
         },
         CloseSlab,
-        ResolveMarket,
+        ResolveMarket {
+            asset_generation_frontier: u64,
+        },
         TopUpBackingBucket {
             domain: u16,
             market_id: u64,
@@ -2873,6 +2875,7 @@ pub mod ix {
         },
         SyncInsuranceLedger,
         ConfigurePermissionlessResolve {
+            asset_generation_frontier: u64,
             stale_slots: u64,
             force_close_delay_slots: u64,
             policy_sequence: u64,
@@ -3110,7 +3113,9 @@ pub mod ix {
                     amount: read_u128(&mut rest)?,
                 },
                 13 => Self::CloseSlab,
-                19 => Self::ResolveMarket,
+                19 => Self::ResolveMarket {
+                    asset_generation_frontier: read_u64(&mut rest)?,
+                },
                 24 => Self::TopUpBackingBucket {
                     domain: read_u16(&mut rest)?,
                     market_id: read_u64(&mut rest)?,
@@ -3204,6 +3209,7 @@ pub mod ix {
                 },
                 54 => Self::SyncInsuranceLedger,
                 38 => Self::ConfigurePermissionlessResolve {
+                    asset_generation_frontier: read_u64(&mut rest)?,
                     stale_slots: read_u64(&mut rest)?,
                     force_close_delay_slots: read_u64(&mut rest)?,
                     policy_sequence: read_u64(&mut rest)?,
@@ -3449,7 +3455,12 @@ pub mod ix {
                     push_u128(&mut out, amount);
                 }
                 Self::CloseSlab => out.push(13),
-                Self::ResolveMarket => out.push(19),
+                Self::ResolveMarket {
+                    asset_generation_frontier,
+                } => {
+                    out.push(19);
+                    push_u64(&mut out, asset_generation_frontier);
+                }
                 Self::TopUpBackingBucket {
                     domain,
                     market_id,
@@ -3566,11 +3577,13 @@ pub mod ix {
                 }
                 Self::SyncInsuranceLedger => out.push(54),
                 Self::ConfigurePermissionlessResolve {
+                    asset_generation_frontier,
                     stale_slots,
                     force_close_delay_slots,
                     policy_sequence,
                 } => {
                     out.push(38);
+                    push_u64(&mut out, asset_generation_frontier);
                     push_u64(&mut out, stale_slots);
                     push_u64(&mut out, force_close_delay_slots);
                     push_u64(&mut out, policy_sequence);
@@ -5759,6 +5772,16 @@ pub mod processor {
         Ok(())
     }
 
+    fn require_asset_generation_frontier_view(
+        group: &state::MarketViewMutV16<'_>,
+        expected_frontier: u64,
+    ) -> ProgramResult {
+        if group.header.next_market_id.get() != expected_frontier {
+            return Err(PercolatorError::AssetGenerationMismatch.into());
+        }
+        Ok(())
+    }
+
     fn reset_empty_asset_oracle_anchor_view(
         group: &mut state::MarketViewMutV16<'_>,
         asset_index: usize,
@@ -5922,7 +5945,9 @@ pub mod processor {
                 amount,
             } => handle_top_up_insurance_domain(program_id, accounts, domain, market_id, amount),
             Instruction::CloseSlab => handle_close_slab(program_id, accounts),
-            Instruction::ResolveMarket => handle_resolve_market(program_id, accounts),
+            Instruction::ResolveMarket {
+                asset_generation_frontier,
+            } => handle_resolve_market(program_id, accounts, asset_generation_frontier),
             Instruction::TopUpBackingBucket {
                 domain,
                 market_id,
@@ -6021,12 +6046,14 @@ pub mod processor {
             }
             Instruction::SyncInsuranceLedger => handle_sync_insurance_ledger(program_id, accounts),
             Instruction::ConfigurePermissionlessResolve {
+                asset_generation_frontier,
                 stale_slots,
                 force_close_delay_slots,
                 policy_sequence,
             } => handle_configure_permissionless_resolve(
                 program_id,
                 accounts,
+                asset_generation_frontier,
                 stale_slots,
                 force_close_delay_slots,
                 policy_sequence,
@@ -9918,6 +9945,7 @@ pub mod processor {
     fn handle_resolve_market<'a>(
         program_id: &Pubkey,
         accounts: &'a [AccountInfo<'a>],
+        expected_asset_generation_frontier: u64,
     ) -> ProgramResult {
         let admin = account(accounts, 0)?;
         let market_ai = account(accounts, 1)?;
@@ -9926,6 +9954,7 @@ pub mod processor {
         expect_owner(market_ai, program_id)?;
         let mut market_data = market_ai.try_borrow_mut_data()?;
         let (cfg, mut group) = state::market_view_mut(&mut market_data)?;
+        require_asset_generation_frontier_view(&group, expected_asset_generation_frontier)?;
         if group.header.mode != 0 {
             return Err(PercolatorError::EngineLockActive.into());
         }
@@ -11054,6 +11083,7 @@ pub mod processor {
     fn handle_configure_permissionless_resolve<'a>(
         program_id: &Pubkey,
         accounts: &'a [AccountInfo<'a>],
+        expected_asset_generation_frontier: u64,
         stale_slots: u64,
         force_close_delay_slots: u64,
         policy_sequence: u64,
@@ -11073,6 +11103,7 @@ pub mod processor {
         let mut data = market_ai.try_borrow_mut_data()?;
         let cfg_after = {
             let (mut cfg, mut group) = state::market_view_mut(&mut data)?;
+            require_asset_generation_frontier_view(&group, expected_asset_generation_frontier)?;
             expect_live_authority(&cfg.marketauth, admin.key)?;
             if group.header.mode != 0 {
                 return Err(PercolatorError::EngineLockActive.into());

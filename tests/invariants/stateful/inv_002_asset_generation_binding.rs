@@ -7,9 +7,9 @@
 //! finding-agnostic retained-operation registry over public retirement/reactivation. Direct impact
 //! regressions remain below. Oracle controls use a retained `u64::MAX` sequence, proving the
 //! generation property independently of the monotonic control-sequence layer.
-//! `v16_program_asset_generation_terminal_policy_discovers_replacement_value_transfer` proves
-//! economic impact by replaying an old asset-generation resolve policy only after replacement
-//! users have opened and accrued opposite PnL. These tests exercise the deployed public
+//! `v16_program_asset_generation_terminal_policy_rejects_before_replacement_value_transfer`
+//! retains an old resolve policy until replacement users have opened and accrued opposite PnL,
+//! then requires generation-mismatch rejection and exact rollback. These tests exercise the deployed public
 //! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
 //! rollback, liveness, or compute outcomes appropriate to the invariant.
 //!
@@ -53,33 +53,8 @@ proptest! {
             .map(|discovery| discovery.kind)
             .collect();
         eprintln!("independent INV-002 discoveries: {violations:?}");
-        prop_assert_eq!(
-            violations,
-            vec![
-                AssetIntentKind::ResolveMarket,
-                AssetIntentKind::ResolvePolicy,
-            ],
-            "asset-generation discovery/protection split changed"
-        );
-        prop_assert_eq!(
-            protected,
-            vec![
-                AssetIntentKind::TradeNoCpi,
-                AssetIntentKind::TradeCpi,
-                AssetIntentKind::BatchTradeNoCpi,
-                AssetIntentKind::BatchTradeCpi,
-                AssetIntentKind::PushAuthMark,
-                AssetIntentKind::PushEwmaMark,
-                AssetIntentKind::ConfigureAuthMark,
-                AssetIntentKind::ConfigureEwmaMark,
-                AssetIntentKind::ConfigureHybridOracle,
-                AssetIntentKind::InsuranceTopUp,
-                AssetIntentKind::BackingTopUp,
-                AssetIntentKind::InsuranceWithdrawal,
-                AssetIntentKind::BackingFeePolicy,
-            ],
-            "asset-local trade, oracle, value, and policy intents must reject after slot reuse"
-        );
+        prop_assert!(violations.is_empty(), "every retained generation-scoped control must reject after slot reuse");
+        prop_assert_eq!(protected, AssetIntentKind::ALL.to_vec());
     }
 }
 
@@ -96,17 +71,17 @@ proptest! {
     })]
 
     #[test]
-    fn v16_program_asset_generation_terminal_policy_discovers_replacement_value_transfer(
+    fn v16_program_asset_generation_terminal_policy_rejects_before_replacement_value_transfer(
         seed in any::<[u8; 32]>()
     ) {
         for kind in TerminalGenerationKind::ASSET {
             let discovery = discover_terminal_generation_replay(seed, kind)
                 .map_err(TestCaseError::fail)?;
-            prop_assert!(
-                discovery.is_violation(),
-                "old asset-generation terminal policy did not transfer replacement value: {:?}",
-                discovery
-            );
+            prop_assert!(!discovery.is_violation());
+            prop_assert!(discovery.stale_intent_rejected);
+            prop_assert!(discovery.exact_rollback);
+            prop_assert!(discovery.rejection_was_generation_mismatch);
+            prop_assert!(discovery.fresh_intent_landed);
         }
     }
 }
@@ -205,16 +180,20 @@ proptest! {
     }
 
     #[test]
-    fn v16_program_pr311_resolve_generation_replay_fuzz(
+    fn v16_program_pr311_pr312_marketwide_generation_binding_fuzz(
         seed in resolve_generation_replay_seed_strategy()
     ) {
-        let result = reproduce_resolve_generation_replay(seed);
-        prop_assert!(
-            result.is_ok(),
-            "PR 311 no longer reproduces for seed {:?}: {}",
-            seed,
-            result.unwrap_err()
-        );
+        for kind in [AssetIntentKind::ResolveMarket, AssetIntentKind::ResolvePolicy] {
+            let protection = discover_asset_generation_replay(seed, kind)
+                .map_err(TestCaseError::fail)?;
+            prop_assert!(protection.new_asset_id > protection.old_asset_id);
+            prop_assert!(!protection.accepted_stale_intent);
+            prop_assert!(!protection.mutated_economic_state);
+            prop_assert_eq!(protection.compute_units, None);
+            prop_assert!(protection.rejection_was_generation_mismatch);
+            prop_assert!(protection.fresh_intent_landed);
+            prop_assert!(protection.fresh_intent_mutated_economic_state);
+        }
     }
 
     #[test]

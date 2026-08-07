@@ -2,7 +2,7 @@
 //!
 //! Normative obligation: Asset-scoped consent cannot cross retirement, slot reuse, or asset-generation changes.
 //!
-//! Evidence in this file (I plus invariant-specific F/M assertions): `v16_program_pr231_asset_generation_replay_rejects_on_every_route`, `v16_program_pr279_stale_insurance_top_up_rejects_across_asset_generation`, `v16_program_pr279_asset_zero_top_up_rejects_after_restart`, `v16_program_pr321_stale_backing_top_up_rejects_across_asset_generation`, `v16_program_pr328_stale_insurance_withdrawal_rejects_across_asset_generation`, `v16_program_pr318_stale_backing_fee_policy_rejects_across_asset_generation`, `v16_program_pr311_stale_resolve_crystallizes_replacement_loss`, `v16_program_pr275_stale_mark_pushes_reject_across_asset_generation`, `v16_program_pr277_pr322_stale_oracle_controls_reject_across_asset_generation`. These tests exercise the deployed public
+//! Evidence in this file (I plus invariant-specific F/M assertions): `v16_program_pr231_asset_generation_replay_rejects_on_every_route`, `v16_program_pr279_stale_insurance_top_up_rejects_across_asset_generation`, `v16_program_pr279_asset_zero_top_up_rejects_after_restart`, `v16_program_pr321_stale_backing_top_up_rejects_across_asset_generation`, `v16_program_pr328_stale_insurance_withdrawal_rejects_across_asset_generation`, `v16_program_pr318_stale_backing_fee_policy_rejects_across_asset_generation`, `v16_program_pr311_pr312_marketwide_controls_reject_after_asset_slot_reuse`, `v16_program_pr311_pr312_marketwide_controls_reject_after_asset_zero_restart`, `v16_program_pr275_stale_mark_pushes_reject_across_asset_generation`, `v16_program_pr277_pr322_stale_oracle_controls_reject_across_asset_generation`. These tests exercise the deployed public
 //! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
 //! rollback, liveness, or compute outcomes appropriate to the invariant. Oracle controls are
 //! retained with `u64::MAX` sequences so sequence reset or forward-gap ordering cannot make the
@@ -162,18 +162,84 @@ fn v16_program_pr318_stale_backing_fee_policy_rejects_across_asset_generation() 
 }
 
 #[test]
-fn v16_program_pr311_stale_resolve_crystallizes_replacement_loss() {
-    let reproduction = reproduce_resolve_generation_replay([0x11; 32])
-        .unwrap_or_else(|error| panic!("PR 311 no longer reproduces: {error}"));
-    assert_eq!(reproduction.blocker, KnownBlocker::ResolveGenerationReplay);
-    assert!(reproduction.new_market_id > reproduction.old_market_id);
-    assert_eq!(reproduction.victim_loss, 100_000);
-    assert_eq!(reproduction.beneficiary_gain, 100_000);
-    assert_eq!(reproduction.control_victim_payout, 1_000_000);
-    assert_eq!(reproduction.replay_victim_payout, 900_000);
-    assert_eq!(reproduction.control_winner_payout, 1_000_000);
-    assert_eq!(reproduction.replay_winner_payout, 1_100_000);
-    assert!(reproduction.replay_cu < 1_400_000);
+fn v16_program_pr311_pr312_marketwide_controls_reject_after_asset_slot_reuse() {
+    for kind in [
+        AssetIntentKind::ResolveMarket,
+        AssetIntentKind::ResolvePolicy,
+    ] {
+        let protection = discover_asset_generation_replay([0x11; 32], kind)
+            .unwrap_or_else(|error| panic!("PR 311/312 {kind:?} protection failed: {error}"));
+        assert_eq!(protection.kind, kind);
+        assert!(protection.new_asset_id > protection.old_asset_id);
+        assert!(!protection.accepted_stale_intent);
+        assert!(!protection.mutated_economic_state);
+        assert_eq!(protection.compute_units, None);
+        assert!(protection.rejection_was_generation_mismatch);
+        assert!(protection.fresh_intent_landed);
+        assert!(protection.fresh_intent_mutated_economic_state);
+    }
+}
+
+#[test]
+fn v16_program_pr311_pr312_marketwide_controls_reject_after_asset_zero_restart() {
+    const PRICE: u64 = 100;
+    let mut env = V16Svm::new([0x12; 32], MarketConfig::default());
+    env.configure_permissionless_resolve(100, 1)
+        .expect("configure finite recovery delay");
+    let old_frontier = env.primary_market_state().1.next_market_id;
+    let retained_policy = env.build_retained_permissionless_resolve_policy(17, 29);
+    let retained_resolve = env.build_retained_resolve_market();
+
+    env.warp_to_slot(1);
+    env.shutdown_asset(0, 1)
+        .expect("put asset-0 generation A into Recovery");
+    env.warp_to_slot(2);
+    env.restart_asset_oracle(0, 2, PRICE)
+        .expect("restart asset 0 into generation B");
+    let new_frontier = env.primary_market_state().1.next_market_id;
+    assert!(new_frontier > old_frontier);
+
+    let expected = format!(
+        "Custom({})",
+        PercolatorError::AssetGenerationMismatch as u32
+    );
+    for (label, retained) in [
+        ("resolve policy", retained_policy),
+        ("market resolve", retained_resolve),
+    ] {
+        let market_before = env.market_data(false);
+        let tokens_before = env.all_token_account_data();
+        let supply_before = env.token_supply_observed();
+        let error = match env.land_retained(retained) {
+            Ok(success) => panic!(
+                "stale {label} landed after asset-0 restart in {} CU",
+                success.compute_units
+            ),
+            Err(error) => error,
+        };
+        assert!(
+            error.contains(&expected),
+            "stale {label} must return {expected}, got {error}"
+        );
+        assert_eq!(env.market_data(false), market_before);
+        assert_eq!(env.all_token_account_data(), tokens_before);
+        assert_eq!(env.token_supply_observed(), supply_before);
+    }
+
+    let fresh_policy = env.build_retained_permissionless_resolve_policy(17, 29);
+    env.land_retained(fresh_policy)
+        .expect("current-frontier resolve policy remains live");
+    let (cfg, _) = env.primary_market_state();
+    assert_eq!(cfg.permissionless_resolve_stale_slots, 17);
+    assert_eq!(cfg.force_close_delay_slots, 29);
+
+    let fresh_resolve = env.build_retained_resolve_market();
+    env.land_retained(fresh_resolve)
+        .expect("current-frontier market resolve remains live");
+    assert_eq!(
+        env.primary_market_state().1.mode,
+        percolator::MarketModeV16::Resolved
+    );
 }
 
 #[test]

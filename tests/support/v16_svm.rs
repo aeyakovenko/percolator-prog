@@ -885,8 +885,11 @@ impl V16Svm {
 
     pub fn resolve_market(&mut self) -> Result<TxSuccess, String> {
         let admin = copy_keypair(&self.admin);
+        let asset_generation_frontier = self.primary_market_state().1.next_market_id;
         self.send_program(
-            ProgInstruction::ResolveMarket,
+            ProgInstruction::ResolveMarket {
+                asset_generation_frontier,
+            },
             vec![
                 AccountMeta::new(admin.pubkey(), true),
                 AccountMeta::new(self.market, false),
@@ -984,9 +987,11 @@ impl V16Svm {
     ) -> Result<TxSuccess, String> {
         let policy_sequence =
             next_control_sequence(self.primary_control_sequences(0).permissionless_resolve);
+        let asset_generation_frontier = self.primary_market_state().1.next_market_id;
         let admin = copy_keypair(&self.admin);
         self.send_program(
             ProgInstruction::ConfigurePermissionlessResolve {
+                asset_generation_frontier,
                 stale_slots,
                 force_close_delay_slots,
                 policy_sequence,
@@ -2843,8 +2848,11 @@ impl V16Svm {
 
     pub fn build_retained_resolve_market(&mut self) -> Transaction {
         let admin = copy_keypair(&self.admin);
+        let asset_generation_frontier = self.primary_market_state().1.next_market_id;
         self.build_program_transaction(
-            ProgInstruction::ResolveMarket,
+            ProgInstruction::ResolveMarket {
+                asset_generation_frontier,
+            },
             vec![
                 AccountMeta::new(admin.pubkey(), true),
                 AccountMeta::new(self.market, false),
@@ -2860,9 +2868,11 @@ impl V16Svm {
     ) -> Transaction {
         let policy_sequence =
             next_control_sequence(self.primary_control_sequences(0).permissionless_resolve);
+        let asset_generation_frontier = self.primary_market_state().1.next_market_id;
         let admin = copy_keypair(&self.admin);
         self.build_program_transaction(
             ProgInstruction::ConfigurePermissionlessResolve {
+                asset_generation_frontier,
                 stale_slots,
                 force_close_delay_slots,
                 policy_sequence,

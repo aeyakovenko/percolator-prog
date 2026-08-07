@@ -663,6 +663,10 @@ pub struct TerminalGenerationDiscovery {
     pub kind: TerminalGenerationKind,
     pub old_generation: u64,
     pub new_generation: u64,
+    pub stale_intent_rejected: bool,
+    pub exact_rollback: bool,
+    pub rejection_was_generation_mismatch: bool,
+    pub fresh_intent_landed: bool,
     pub victim_payout: u128,
     pub winner_payout: u128,
     pub victim_loss: u128,
@@ -2692,8 +2696,58 @@ pub fn discover_terminal_generation_replay(
         return Err("replacement market did not commit adverse mark".into());
     }
 
-    env.land_retained(retained)
-        .map_err(|error| format!("old-generation terminal intent rejected: {error}"))?;
+    let before_replay = fingerprint(&env);
+    let replay_result = env.land_retained(retained);
+    if kind == TerminalGenerationKind::AssetResolvePolicy {
+        let error = match replay_result {
+            Ok(success) => {
+                return Err(format!(
+                    "old asset-generation resolve policy landed in {} CU",
+                    success.compute_units
+                ));
+            }
+            Err(error) => error,
+        };
+        let expected = format!(
+            "Custom({})",
+            PercolatorError::AssetGenerationMismatch as u32
+        );
+        if !error.contains(&expected) {
+            return Err(format!(
+                "old asset-generation resolve policy rejected for the wrong reason: expected {expected}, got {error}"
+            ));
+        }
+        if fingerprint(&env) != before_replay {
+            return Err(
+                "rejected asset-generation resolve policy did not roll back exactly".into(),
+            );
+        }
+        let fresh = env.build_retained_permissionless_resolve_policy(1, 1);
+        let before_fresh = fingerprint(&env);
+        env.land_retained(fresh).map_err(|error| {
+            format!("current asset-generation resolve policy rejected: {error}")
+        })?;
+        if fingerprint(&env) == before_fresh {
+            return Err("current asset-generation resolve policy made no state change".into());
+        }
+        if env.token_supply_observed() != supply_before {
+            return Err("asset-generation resolve-policy protection changed SPL supply".into());
+        }
+        return Ok(TerminalGenerationDiscovery {
+            kind,
+            old_generation,
+            new_generation,
+            stale_intent_rejected: true,
+            exact_rollback: true,
+            rejection_was_generation_mismatch: true,
+            fresh_intent_landed: true,
+            victim_payout: 0,
+            winner_payout: 0,
+            victim_loss: 0,
+            winner_gain: 0,
+        });
+    }
+    replay_result.map_err(|error| format!("old-generation terminal intent rejected: {error}"))?;
     if kind != TerminalGenerationKind::MarketResolve {
         env.warp_to_slot(MARK_SLOT + 2);
         env.resolve_stale_permissionless(MARK_SLOT + 2)
@@ -2731,6 +2785,10 @@ pub fn discover_terminal_generation_replay(
         kind,
         old_generation,
         new_generation,
+        stale_intent_rejected: false,
+        exact_rollback: false,
+        rejection_was_generation_mismatch: false,
+        fresh_intent_landed: false,
         victim_payout,
         winner_payout,
         victim_loss,
