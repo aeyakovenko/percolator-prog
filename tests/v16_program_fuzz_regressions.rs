@@ -56,6 +56,9 @@ mod inv_003_portfolio_incarnation_binding;
 #[path = "invariants/public_sbf/inv_005_authority_incarnation_binding.rs"]
 mod inv_005_authority_incarnation_binding;
 
+#[path = "invariants/public_sbf/inv_006_program_chain_message_type_and_version_binding.rs"]
+mod inv_006_program_chain_message_type_and_version_binding;
+
 #[path = "invariants/public_sbf/inv_008_intent_uniqueness_and_bounded_replay.rs"]
 mod inv_008_intent_uniqueness_and_bounded_replay;
 

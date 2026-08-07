@@ -22,7 +22,7 @@ verification methods are in [`../../INVARIANTS.md`](../../INVARIANTS.md).
 
 | Suite | Tests | Evidence |
 | --- | ---: | --- |
-| `public_sbf/` | 77 | Deterministic public SBF/LiteSVM counterexamples, regressions, and manifest checks |
+| `public_sbf/` | 79 | Deterministic public SBF/LiteSVM counterexamples, regressions, and manifest checks |
 | `stateful/` | 109 | Proptest-generated public routes, including generalized active-leg/currentness, source-claim attribution, source-credit-rate, and authenticated-expiry route matrices |
 | `cu/` | 107 | Positive public-route, metamorphic, rollback, liveness, and max-shape CU tests |
 | `kani/` | 51 | Symbolic wrapper arithmetic, matcher-binding, ordering, and strict-decoder proof harnesses; the newest generation-control wire-format harness has not been run locally |
@@ -80,7 +80,7 @@ charter.
 | INV-003 | Independent + Direct | `public_sbf/inv_003_portfolio_incarnation_binding.rs`, `stateful/inv_003_portfolio_incarnation_binding.rs` |
 | INV-004 | Independent | `stateful/inv_004_position_episode_binding.rs`, `kani/inv_004_position_episode_binding.rs` |
 | INV-005 | Independent + Direct + SVM/CU | `public_sbf/inv_005_authority_incarnation_binding.rs`, `stateful/inv_005_authority_incarnation_binding.rs`, `cu/inv_005_authority_incarnation_binding.rs` |
-| INV-006 | Gap | - |
+| INV-006 | SVM/CU | `public_sbf/inv_006_program_chain_message_type_and_version_binding.rs` (signed program, market, instruction bytes, and recent-blockhash mutation with exact rollback; explicit genesis-domain field remains absent) |
 | INV-007 | Gap | - |
 | INV-008 | Independent + Direct | `public_sbf/inv_008_intent_uniqueness_and_bounded_replay.rs`, `stateful/inv_008_intent_uniqueness_and_bounded_replay.rs` |
 | INV-009 | Gap | - |
