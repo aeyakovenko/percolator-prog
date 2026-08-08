@@ -6,9 +6,10 @@
 //!
 //! This SBF owner complements the Kani decoder proofs with raw public
 //! transactions. A canonical raw deposit first proves the fixture can mutate
-//! state through the deployed entrypoint; malformed, truncated, oversized, and
-//! trailing encodings must then reject as instruction-data errors before any
-//! market, portfolio, or vault bytes change.
+//! state through the deployed entrypoint; malformed, truncated, oversized,
+//! trailing, and systematically bit-mutated encodings must then fail before
+//! any market, portfolio, or vault bytes change. The mutation matrix covers
+//! every bit at each schema's tag and boundary-sensitive payload positions.
 
 use super::*;
 
@@ -44,31 +45,50 @@ fn assert_decode_rejects_without_mutation(
     portfolio: Pubkey,
     data: Vec<u8>,
 ) {
+    assert_raw_instruction_fails_without_mutation(
+        label,
+        env,
+        portfolio,
+        data,
+        Some("InvalidInstructionData"),
+    );
+}
+
+fn assert_raw_instruction_fails_without_mutation(
+    label: &str,
+    env: &mut V16CuEnv,
+    portfolio: Pubkey,
+    data: Vec<u8>,
+    expected_error: Option<&str>,
+) -> String {
     let market_before = env.svm.get_account(&env.market).unwrap();
     let portfolio_before = env.svm.get_account(&portfolio).unwrap();
     let vault_before = env.svm.get_account(&env.vault).unwrap();
     let error = send_raw_program_instruction(env, data, vec![], &[])
-        .unwrap_err_or_else(|| panic!("{label}: malformed instruction unexpectedly succeeded"));
+        .unwrap_err_or_else(|| panic!("{label}: raw instruction unexpectedly succeeded"));
 
-    assert!(
-        error.contains("InvalidInstructionData"),
-        "{label}: expected decoder rejection, got {error}",
-    );
+    if let Some(expected_error) = expected_error {
+        assert!(
+            error.contains(expected_error),
+            "{label}: expected {expected_error}, got {error}",
+        );
+    }
     assert_eq!(
         env.svm.get_account(&env.market).unwrap(),
         market_before,
-        "{label}: decoder rejection rewrote market state",
+        "{label}: failed instruction rewrote market state",
     );
     assert_eq!(
         env.svm.get_account(&portfolio).unwrap(),
         portfolio_before,
-        "{label}: decoder rejection rewrote portfolio state",
+        "{label}: failed instruction rewrote portfolio state",
     );
     assert_eq!(
         env.svm.get_account(&env.vault).unwrap(),
         vault_before,
-        "{label}: decoder rejection rewrote vault state",
+        "{label}: failed instruction rewrote vault state",
     );
+    error
 }
 
 trait ResultExt<T> {
@@ -463,6 +483,103 @@ fn v16_program_encoded_public_instruction_roster_rejects_trailing_bytes() {
             tag,
         );
     }
+}
+
+#[test]
+fn v16_program_deployed_decoder_bit_mutation_matrix_is_total_canonical_and_atomic() {
+    let representatives = inv_022_representative_public_instructions();
+    let canonical_tags: std::collections::BTreeSet<u8> = representatives
+        .iter()
+        .map(|instruction| instruction.encode()[0])
+        .collect();
+    assert_eq!(
+        canonical_tags.len(),
+        50,
+        "mutation roster must own every public instruction tag",
+    );
+
+    // Deduplicate payloads so identical cross-schema mutations cannot replay
+    // the same transaction signature in LiteSVM. Each payload retains every
+    // source tag whose mutation produced it.
+    let mut mutations =
+        std::collections::BTreeMap::<Vec<u8>, std::collections::BTreeSet<u8>>::new();
+    let mut covered_tags = std::collections::BTreeSet::new();
+    for instruction in representatives {
+        let canonical = instruction.encode();
+        let tag = canonical[0];
+        assert_eq!(
+            ProgInstruction::decode(&canonical).expect("canonical mutation seed decodes"),
+            instruction,
+            "tag {tag}: mutation seed must round-trip",
+        );
+
+        let mut positions = std::collections::BTreeSet::from([0usize]);
+        if canonical.len() > 1 {
+            positions.insert(1);
+            positions.insert(canonical.len() / 2);
+            positions.insert(canonical.len() - 1);
+        }
+        for position in positions {
+            for bit in 0..u8::BITS {
+                let mut mutated = canonical.clone();
+                mutated[position] ^= 1u8 << bit;
+                mutations.entry(mutated).or_default().insert(tag);
+                covered_tags.insert(tag);
+            }
+        }
+    }
+
+    assert_eq!(
+        covered_tags, canonical_tags,
+        "every public schema must contribute bit mutations",
+    );
+    assert!(
+        mutations.len() >= 1_200,
+        "expected a substantive cross-schema mutation matrix, got {} cases",
+        mutations.len(),
+    );
+
+    let mut env = V16CuEnv::new();
+    let owner = Keypair::new();
+    let portfolio = env.create_portfolio(&owner);
+    let mut decoder_rejections = 0usize;
+    let mut canonical_alternatives = 0usize;
+
+    for (case, (data, source_tags)) in mutations.into_iter().enumerate() {
+        let label = format!("mutation {case} from tags {source_tags:?}");
+        match ProgInstruction::decode(&data) {
+            Ok(decoded) => {
+                canonical_alternatives += 1;
+                assert_eq!(
+                    decoded.encode(),
+                    data,
+                    "{label}: every accepted mutation must be a canonical encoding",
+                );
+                assert_raw_instruction_fails_without_mutation(
+                    &label, &mut env, portfolio, data, None,
+                );
+            }
+            Err(_) => {
+                decoder_rejections += 1;
+                assert_raw_instruction_fails_without_mutation(
+                    &label,
+                    &mut env,
+                    portfolio,
+                    data,
+                    Some("InvalidInstructionData"),
+                );
+            }
+        }
+    }
+
+    assert!(
+        decoder_rejections > 0,
+        "matrix must exercise malformed deployed decoder inputs",
+    );
+    assert!(
+        canonical_alternatives > 0,
+        "matrix must exercise valid alternate field values through deployed dispatch",
+    );
 }
 
 #[test]
