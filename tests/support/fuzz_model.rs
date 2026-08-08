@@ -15,7 +15,7 @@ use percolator_prog::{
 use proptest::prelude::*;
 use serde::{Deserialize, Serialize};
 use solana_sdk::{pubkey::Pubkey, signature::Signer, transaction::Transaction};
-use std::collections::VecDeque;
+use std::collections::{BTreeSet, VecDeque};
 
 const MIN_LIVENESS_DRAIN_LIMIT: usize = 256;
 const MAX_LIVENESS_DRAIN_LIMIT: usize = 100_000;
@@ -1308,6 +1308,10 @@ pub struct Coverage {
     pub route_success: [u64; 4],
     pub route_reject: [u64; 4],
     pub crank_progress: u64,
+    pub crank_rank_component_seen: [u64; 6],
+    pub crank_rank_component_reduced: [u64; 6],
+    pub crank_rank_nodes: BTreeSet<u8>,
+    pub crank_rank_edges: BTreeSet<(u8, u8)>,
     pub mark_updates: u64,
     pub oracle_reconfigs: u64,
     pub maintenance_syncs: u64,
@@ -1341,6 +1345,10 @@ impl Default for Coverage {
             route_success: [0; 4],
             route_reject: [0; 4],
             crank_progress: 0,
+            crank_rank_component_seen: [0; 6],
+            crank_rank_component_reduced: [0; 6],
+            crank_rank_nodes: BTreeSet::new(),
+            crank_rank_edges: BTreeSet::new(),
             mark_updates: 0,
             oracle_reconfigs: 0,
             maintenance_syncs: 0,
@@ -1432,6 +1440,10 @@ impl Coverage {
             self.substitution_rejections[index] += other.substitution_rejections[index];
         }
         self.crank_progress += other.crank_progress;
+        for index in 0..self.crank_rank_component_seen.len() {
+            self.crank_rank_component_seen[index] += other.crank_rank_component_seen[index];
+            self.crank_rank_component_reduced[index] += other.crank_rank_component_reduced[index];
+        }
         self.mark_updates += other.mark_updates;
         self.oracle_reconfigs += other.oracle_reconfigs;
         self.maintenance_syncs += other.maintenance_syncs;
@@ -1473,6 +1485,8 @@ impl Coverage {
             *target += value;
         }
         self.max_cu = self.max_cu.max(other.max_cu);
+        self.crank_rank_nodes.extend(other.crank_rank_nodes);
+        self.crank_rank_edges.extend(other.crank_rank_edges);
     }
 }
 
@@ -1496,12 +1510,41 @@ impl ProgressRank {
     }
 
     fn reduced_from(self, before: Self) -> bool {
-        self.market_mark_lag < before.market_mark_lag
-            || self.market_loss_lag < before.market_loss_lag
-            || self.market_locks < before.market_locks
-            || self.b_work < before.b_work
-            || self.stale_legs < before.stale_legs
-            || self.health_work < before.health_work
+        (
+            self.market_mark_lag,
+            self.market_loss_lag,
+            self.market_locks,
+            self.b_work,
+            self.stale_legs,
+            self.health_work,
+        ) < (
+            before.market_mark_lag,
+            before.market_loss_lag,
+            before.market_locks,
+            before.b_work,
+            before.stale_legs,
+            before.health_work,
+        )
+    }
+
+    fn components(self) -> [u128; 6] {
+        [
+            self.market_mark_lag,
+            self.market_loss_lag,
+            self.market_locks,
+            self.b_work,
+            self.stale_legs,
+            self.health_work,
+        ]
+    }
+
+    fn class_mask(self) -> u8 {
+        self.components()
+            .into_iter()
+            .enumerate()
+            .fold(0u8, |mask, (index, value)| {
+                mask | (u8::from(value != 0) << index)
+            })
     }
 }
 
@@ -2859,6 +2902,23 @@ impl ScenarioRunner {
                 }
                 if rank_after.reduced_from(rank_before) {
                     self.coverage.crank_progress += 1;
+                    let before_components = rank_before.components();
+                    let after_components = rank_after.components();
+                    for index in 0..before_components.len() {
+                        if before_components[index] != 0 {
+                            self.coverage.crank_rank_component_seen[index] += 1;
+                        }
+                        if after_components[index] < before_components[index] {
+                            self.coverage.crank_rank_component_reduced[index] += 1;
+                        }
+                    }
+                    let before_class = rank_before.class_mask();
+                    let after_class = rank_after.class_mask();
+                    self.coverage.crank_rank_nodes.insert(before_class);
+                    self.coverage.crank_rank_nodes.insert(after_class);
+                    self.coverage
+                        .crank_rank_edges
+                        .insert((before_class, after_class));
                 }
                 Ok(())
             }
@@ -3887,6 +3947,88 @@ pub fn run_scenario(scenario: &Scenario) -> Result<Coverage, String> {
     progress_runner.coverage.merge(liquidation_coverage);
     progress_runner.coverage.assert_pull_request_non_vacuity()?;
     Ok(progress_runner.coverage)
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BoundedLivenessGraphEvidence {
+    pub scenario_count: usize,
+    pub coverage: Coverage,
+}
+
+pub fn run_bounded_public_liveness_graph() -> Result<BoundedLivenessGraphEvidence, String> {
+    let configs = [
+        SmallMarketConfig {
+            max_price_move_bps_per_slot: 500,
+            max_accrual_dt_slots: 1,
+            max_abs_funding_e9_per_slot: 0,
+            maintenance_fee_per_slot: 0,
+        },
+        SmallMarketConfig {
+            max_price_move_bps_per_slot: 50,
+            max_accrual_dt_slots: 2,
+            max_abs_funding_e9_per_slot: 0,
+            maintenance_fee_per_slot: 1,
+        },
+    ];
+    let action_programs = [
+        vec![],
+        vec![Action::PushMark {
+            asset: 0,
+            dt: 1,
+            move_bps: 500,
+        }],
+        vec![Action::PushMark {
+            asset: 1,
+            dt: 2,
+            move_bps: -500,
+        }],
+        vec![
+            Action::PushMark {
+                asset: 0,
+                dt: 1,
+                move_bps: 500,
+            },
+            Action::PushMark {
+                asset: 1,
+                dt: 1,
+                move_bps: -500,
+            },
+        ],
+        vec![
+            Action::SyncMaintenanceFee { actor: 0, dt: 2 },
+            Action::PushMark {
+                asset: 2,
+                dt: 1,
+                move_bps: 500,
+            },
+        ],
+    ];
+
+    let mut coverage = Coverage::default();
+    let mut scenario_count = 0usize;
+    for (config_index, config) in configs.into_iter().enumerate() {
+        for (program_index, actions) in action_programs.iter().enumerate() {
+            let mut seed = [0x82; 32];
+            seed[0] ^= config_index as u8;
+            seed[1] ^= program_index as u8;
+            let scenario = Scenario {
+                seed,
+                config,
+                actions: actions.clone(),
+            };
+            let mut runner = ScenarioRunner::new(&scenario)?;
+            runner.run_safety_prefix(&scenario.actions)?;
+            runner.run_permissionless_progress_campaign()?;
+            coverage.merge(runner.coverage);
+            scenario_count += 1;
+        }
+    }
+
+    coverage.merge(run_liquidation_exit_probe([0x83; 32])?);
+    Ok(BoundedLivenessGraphEvidence {
+        scenario_count,
+        coverage,
+    })
 }
 
 #[allow(dead_code)]

@@ -14,7 +14,14 @@
 //! bounded whole-route witness, not an exhaustive proof over every reachable
 //! state.
 //!
-//! A second public regression fixes the generated model's lifecycle boundary:
+//! A bounded graph owner enumerates ten deterministic public prefixes across
+//! two market configurations, records only successful lexicographically
+//! rank-decreasing crank edges, and requires every observed actionable class
+//! to reach rank zero. This is executable bounded-reachability evidence for
+//! INV-071 and INV-082, but it does not quantify over unobserved lifecycle
+//! classes or the complete public state space.
+//!
+//! A separate public regression fixes the generated model's lifecycle boundary:
 //! an invalid certificate backed only by a Recovery leg is not auto-crank
 //! dispatchable. Both empty and apparently complete hints reject atomically,
 //! while the owner's strict reduction remains live. That is an engine
@@ -22,9 +29,78 @@
 //! owner-exit rank must not be conflated.
 
 use super::*;
+use crate::support::fuzz_model::run_bounded_public_liveness_graph;
 use crate::support::v16_svm::{MarketConfig, V16Svm};
 use percolator::{AssetLifecycleV16, POS_SCALE};
 use percolator_prog::ix::CrankObservationHint;
+use std::collections::{BTreeSet, VecDeque};
+
+#[test]
+fn v16_program_bounded_public_crank_graph_reaches_terminal_rank() {
+    let evidence =
+        run_bounded_public_liveness_graph().expect("INV-071/INV-082 bounded public graph");
+    let coverage = evidence.coverage;
+
+    assert_eq!(
+        evidence.scenario_count, 10,
+        "the bounded graph must retain its full public-prefix/configuration matrix"
+    );
+    assert!(
+        coverage.crank_progress > 0,
+        "the graph must contain successful rank-decreasing public cranks: {coverage:?}"
+    );
+    assert!(
+        coverage.crank_rank_nodes.contains(&0),
+        "every bounded campaign must observe terminal rank zero: {coverage:?}"
+    );
+    assert!(
+        coverage.crank_rank_nodes.len() >= 3,
+        "the graph must exercise multiple actionable rank classes: {coverage:?}"
+    );
+
+    let observed_components = coverage
+        .crank_rank_component_seen
+        .iter()
+        .filter(|count| **count != 0)
+        .count();
+    assert!(
+        observed_components >= 3,
+        "the bounded graph must cover at least three independent rank components: {coverage:?}"
+    );
+    for (index, seen) in coverage.crank_rank_component_seen.iter().enumerate() {
+        if *seen != 0 {
+            assert!(
+                coverage.crank_rank_component_reduced[index] != 0,
+                "observed rank component {index} never had a public reducing edge: {coverage:?}"
+            );
+        }
+    }
+
+    for start in coverage
+        .crank_rank_nodes
+        .iter()
+        .copied()
+        .filter(|node| *node != 0)
+    {
+        let mut visited = BTreeSet::from([start]);
+        let mut frontier = VecDeque::from([start]);
+        while let Some(node) = frontier.pop_front() {
+            for (_, next) in coverage
+                .crank_rank_edges
+                .iter()
+                .filter(|(from, _)| *from == node)
+            {
+                if visited.insert(*next) {
+                    frontier.push_back(*next);
+                }
+            }
+        }
+        assert!(
+            visited.contains(&0),
+            "observed actionable rank class {start:#08b} has no public path to zero: {coverage:?}"
+        );
+    }
+}
 
 #[test]
 fn v16_program_public_sequence_has_rank_decreasing_progress_and_exit_witnesses() {
