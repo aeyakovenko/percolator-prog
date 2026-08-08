@@ -201,7 +201,7 @@ Assets 1..N are **truly permissionless ⇒ untrusted**. The protocol must guaran
   `UpdateAssetLifecycle { action: RETIRE, asset_index: 0 }` rejects, so asset 0 is never returned to
   the permissionless reusable-slot pool. Once any asset 0..N is in RECOVERY and every position/loss plus
   value-bearing source/backing/reservation state for that asset is gone,
-  `RestartAssetOracle { asset_index, ... }` signed by that asset's `asset_admin` atomically retires the old market id,
+  `RestartAssetOracle { asset_index, market_id, ... }` signed by that asset's `asset_admin` atomically retires the old market id,
   activates a fresh market id at the supplied initial price, preserves that asset's authority keys and
   funded insurance-domain budgets, and returns the asset to ACTIVE. New legs bind to the new monotonic
   `market_id`; stale legs cannot leak through restart. **✅**
@@ -268,8 +268,9 @@ Positions and PnL use native `i128`/`u128` (`POS_SCALE = 1_000_000`, `ADL_ONE = 
 ### Two trade paths
 - **TradeNoCpi**: no external matcher; used for baseline integration, local testing, and deterministic program-test scenarios.
 - **TradeCpi**: production matcher path; the LP owner configures a matcher program/context once on
-  the LP portfolio with `SetMatcherConfig` (tag 68). Fills then run without the LP owner
-  signing each transaction. Direct LP-signed bilateral trading is `TradeNoCpi`.
+  the LP portfolio with `SetMatcherConfig` (tag 68). Each mutation binds the current
+  `portfolio_id` and matcher sequence, then advances the sequence. Fills then run without the LP
+  owner signing each transaction. Direct LP-signed bilateral trading is `TradeNoCpi`.
 
 ### MatchingEngine trait
 The `MatchingEngine` trait is defined in the Percolator program (not in the engine crate). The engine is a pure recorder of state transitions and does not define the matching interface. Two implementations exist: `NoOpMatcher` (TradeNoCpi) and `CpiMatcher` (TradeCpi).
@@ -309,7 +310,7 @@ Percolator enforces three layers with distinct responsibilities:
 - **Layout**: header + wrapper config + `MarketGroupV16Account`
 - Holds market-level totals, insurance, oracle/asset state, source-domain credit state, and asset lifecycle state.
 
-The v16 asset index ABI is `u16`. The current persisted layout is still a fixed-capacity Pod market-group layout, but asset indices are treated as reusable logical slots. A retired asset slot can only be reactivated after the configured shutdown/activation timeout, and reactivation assigns a new monotonic `u64` `market_id` from the market group. `market_id` values are never reused. Portfolio legs and close-progress ledgers carry that id, so stale state from an old shutdown market cannot bind to a reused slot.
+The v16 asset index ABI is `u16`. The current persisted layout is still a fixed-capacity Pod market-group layout, but asset indices are treated as reusable logical slots. A retired asset slot can only be reactivated after the configured shutdown/activation timeout, and reactivation assigns a new monotonic `u64` `market_id` from the market group. `market_id` values are never reused. Trade instructions, portfolio legs, and close-progress ledgers carry that id, so neither stale signed intent nor stale state from an old shutdown market can bind to a reused slot.
 
 ### Portfolio account
 - **Owner**: Percolator program id
@@ -354,7 +355,12 @@ Unsigned LP matcher fills require an enabled matcher config stored directly on t
 
 `SetMatcherConfig` (tag 68) is signed by the LP owner and writes:
 
-`matcher_program, matcher_context, matcher_delegate, enabled`
+`matcher_program, matcher_context, matcher_delegate, enabled, trade_fee_cap_bps`
+
+The signed instruction carries `portfolio_id` and `expected_sequence`. It succeeds only for the
+current portfolio incarnation and current sequence, then increments the sequence exactly once.
+This prevents a retained enable from crossing a later revoke. Prior-layout portfolios with a
+portfolio ID but no sequence tail read sequence zero and grow atomically on their first mutation.
 
 During `TradeCpi` / `BatchTradeCpi`, Percolator reads this LP-account config and requires the
 instruction's matcher program, matcher context, and matcher delegate PDA to match it byte-for-byte.
@@ -390,7 +396,7 @@ This section describes intent and operational ordering, not argument-by-argument
     until `force_close_delay_slots` elapses; signer is `marketauth` or that asset's `asset_admin`
   - ordinary `RETIRE` rejects `asset_index = 0`; asset 0 is restarted, not reused
 - **RestartAssetOracle** (tag 69)
-  - `RestartAssetOracle { asset_index, now_slot, initial_price }`, signed by that asset's `asset_admin`
+  - `RestartAssetOracle { asset_index, market_id, now_slot, initial_price, observation_sequence }`, signed by that asset's `asset_admin`
   - after the target asset is already RECOVERY and empty of positions/loss plus value-bearing
     source/backing/reservation state, atomically retires the old market id, activates a fresh market id
     at the supplied initial price, preserves authority keys and funded insurance-domain budgets, then
@@ -430,13 +436,16 @@ This section describes intent and operational ordering, not argument-by-argument
 
 ### Trading
 - **TradeNoCpi**
-  - trade without external matcher (used for testing / deterministic scenarios)
+  - trade without external matcher (used for testing / deterministic scenarios). The signed
+    `market_id` must match the current generation of `asset_index`.
 - **TradeCpi**
   - trade via LP-chosen matcher CPI with strict binding + validation. The LP portfolio must already
-    store an enabled matcher config for the passed matcher program/context/delegate tuple.
+    store an enabled matcher config for the passed matcher program/context/delegate tuple. The
+    signed `market_id` is checked before matcher CPI.
 - **BatchTradeNoCpi** (tag 66)
   - atomic multi-leg batch (up to the portfolio asset cap) against one taker/LP pair; each leg's
-    **signed** `size_q` sets its direction, so a single batch can carry a mixed long/short spread.
+    `market_id` binds the reusable asset generation and **signed** `size_q` sets its direction, so a
+    single batch can carry a mixed long/short spread.
     The engine settles both accounts once, applies every leg, then runs a **single end-state
     initial-margin check** — interim legs need not be individually margin-feasible. Current v1 batch
     execution rejects if any backing-domain trade-fee policy is configured, so those fees are not
@@ -444,11 +453,13 @@ This section describes intent and operational ordering, not argument-by-argument
 - **BatchTradeCpi** (tag 67)
   - same atomic multi-leg batch routed through an external matcher: **one** batched matcher CPI
     (matcher tag 3) fills every leg against a single LP, each return is validated under the same
-    anti-spoof binding as `TradeCpi`, then all fills apply through the batch path. Bounded to 16
-    legs (the matcher's return-data cap).
+    anti-spoof binding as `TradeCpi`, and every signed `market_id` is checked before CPI, then all
+    fills apply through the batch path. Bounded to 16 legs (the matcher's return-data cap).
 - **SetMatcherConfig** (tag 68)
   - LP-owner-signed opt-in/out for unsigned LP matcher fills. This writes the matcher config tail
-    on the LP portfolio: matcher program, matcher context, matcher delegate, and enabled flag.
+    on the LP portfolio: matcher program, matcher context, matcher delegate, enabled flag, and live
+    base-fee cap. The payload is `portfolio_id: u64, expected_sequence: u64, enabled: u8,
+    trade_fee_cap_bps: u16`; stale incarnation or sequence values reject before mutation.
 
 ### Oracle / mark management
 - External-oracle markets authenticate configured oracle account(s) in the oracle configuration/crank
@@ -456,6 +467,9 @@ This section describes intent and operational ordering, not argument-by-argument
   accounting.
 - AuthMark markets use **ConfigureAuthMark** (tag 62) and **PushAuthMark** (tag 63), signed by the configured mark authority, to store a direct authority mark without EWMA smoothing.
 - EwmaMark markets use **ConfigureEwmaMark** (tag 35) and **PushEwmaMark** (tag 36), signed by the configured mark authority, to update a smoothed EWMA mark input.
+- Every oracle configuration, mark push, and restart binds the current asset `market_id` plus its
+  scope-local `observation_sequence`; a retained request for a retired generation rejects before
+  sequence consumption or mutation.
 - The per-slot effective-price movement cap is a risk parameter set at init; there is no standalone `SetOraclePriceCap` instruction in the current ABI.
 
 ### Insurance management
@@ -479,9 +493,13 @@ This section describes intent and operational ordering, not argument-by-argument
 - **CureAndCancelClose** (tag 42)
   - owner-signed close recovery path; optional deposit is transferred first, then the engine cancels the pending close if the cure succeeds
 - **ForfeitRecoveryLeg** (tag 43)
-  - owner-signed recovery-leg forfeit for a selected asset and bounded B-delta budget
+  - owner-signed recovery-leg forfeit bound to the current `portfolio_id` and `position_epoch`, for
+    a selected asset and bounded B-delta budget
 - **RebalanceReduce** (tag 44)
-  - owner-signed risk-reducing rebalance against the wrapper-authenticated effective price vector
+  - owner-signed risk-reducing rebalance bound to the current `portfolio_id` and `position_epoch`,
+    against the wrapper-authenticated effective price vector
+  - `position_epoch` advances after every successful trade, liquidation, recovery force-close,
+    rebalance, or recovery forfeit; refresh-only cranks and rejected instructions do not advance it
 - **ClaimResolvedPayoutTopup** (tag 46)
   - permissionless resolved-payout top-up claim; pays only the stored owner receipt token account
 
@@ -560,7 +578,7 @@ AuthMark and EwmaMark are authority-pushed pricing modes for markets that do not
 
 AuthMark is the direct authority-mark path:
 
-- **Direct mark API**: `ConfigureAuthMark { asset_index, now_slot, initial_mark_e6 }` and `PushAuthMark { asset_index, now_slot, mark_e6 }`.
+- **Direct mark API**: `ConfigureAuthMark { asset_index, market_id, now_slot, initial_mark_e6, observation_sequence }` and `PushAuthMark { asset_index, market_id, now_slot, mark_e6, observation_sequence }`.
 - **No EWMA configuration**: there is no halflife, mark-min-fee, feed id, confidence filter, invert flag, or unit-scale configuration in the AuthMark API.
 - **Authority boundary**: only the configured mark authority can push a new mark; public cranks can only consume the stored mark.
 - **Adapter-friendly**: a separate oracle adapter PDA can verify Pyth, Chainlink, Switchboard, or custom feed policy, then sign `PushAuthMark` with the resulting mark.
@@ -691,6 +709,7 @@ The wrapper proof suite does not re-prove engine conservation. It proves wrapper
 
 Current wrapper Kani anchors live in `tests/v16_kani.rs` and cover:
 
+- packed position-episode monotonicity and matcher-state preservation
 - instruction decode/encode preservation for active wrapper payloads, including authority, oracle, policy, lifecycle, and custody instructions
 - rejection of unknown tags, truncated payloads, and trailing bytes
 - matcher-return validation against malformed/malicious fills (`kani_v16_matcher_return_accepts_only_bound_echoed_fills`)
@@ -782,6 +801,11 @@ Run `PermissionlessCrank` continuously.
 ## Security properties and verification
 
 Percolator's security model is "engine correctness + wrapper enforcement".
+
+The normative whole-route charter is [`INVARIANTS.md`](INVARIANTS.md). Its executable PR135
+coverage and explicit gaps are indexed in
+[`tests/invariants/README.md`](tests/invariants/README.md). Passing a finding-specific regression is
+not treated as independent bug discovery or full invariant certification.
 
 ### Wrapper-level properties (Kani-proven)
 The current Kani suite is in `tests/v16_kani.rs`. It proves wrapper ABI and local validation properties:
@@ -935,6 +959,16 @@ cargo build-sbf --no-default-features
 # All tests (integration, unit, alignment; LiteSVM loads target/deploy/percolator_prog.so)
 cargo test --all-targets
 
-# Kani harnesses (requires kani toolchain)
-cargo kani --tests
+# Blocker corpus and stateful public-interface fuzz gate.
+(cd tests/fixtures/auth_matcher && cargo build-sbf --tools-version v1.52)
+cargo test --test v16_program_fuzz_regressions -- --nocapture
+cargo test --test v16_program_stateful_fuzz -- --nocapture
+
+# Longer stateful campaign.
+PERCOLATOR_FUZZ_CASES=100 PERCOLATOR_FUZZ_ACTIONS=40 \
+  PERCOLATOR_FUZZ_SHRINK_ITERS=256 \
+  cargo test --test v16_program_stateful_fuzz -- --nocapture
+
+# Kani harnesses (requires kani toolchain; proof-specific 32-byte loops override this bound)
+cargo kani --tests --default-unwind 18
 ```

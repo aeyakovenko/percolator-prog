@@ -1,0 +1,418 @@
+//! INV-039 - Pending-loss obligation durability.
+//!
+//! Normative obligation: Pending accrual and loss obligations cannot be erased by route choice or lifecycle changes.
+//!
+//! Evidence in this file (F over public I routes):
+//! `v16_program_accrual_boundary_operation_matrix_preserves_transfers` builds one
+//! zero-price-move funding checkpoint and permutes settlement against CPI close, batch CPI close,
+//! unilateral reduction, and recovery forfeit. The common oracle requires both sides to book the
+//! same nonzero transfer and compares conserved claims across the two orders.
+//! `v16_program_prospective_accrual_route_matrix_preserves_elapsed_funding` independently varies
+//! all single/batch CPI/no-CPI trade routes around the same funding catch-up boundary. Every route
+//! requires identical funding indices and unrelated-victim payout. No-CPI routes additionally
+//! require identical terminal prices and payouts because their signed execution price is fixed;
+//! CPI matcher quotes legitimately vary with the crank-first versus trade-first oracle input.
+//! `v16_program_shutdown_commit_ordering_preserves_committed_funding` applies the same ordering
+//! oracle to asset shutdown while constraining the effective price to remain unchanged. Any payout
+//! difference is therefore a committed funding transfer erased by the lifecycle transition.
+//! `v16_program_stale_cohort_route_matrix_discovers_historical_loss_transfer` realizes
+//! source-backed PnL while the losing cohort is stale, varies all single/batch CPI/no-CPI routes
+//! used to novate the winning exposure, and then settles and exits every participant. Its token oracle
+//! requires the fresh LP's exact principal loss plus the original loser's loss to equal the
+//! stale winner's extracted profit.
+//! Direct impact tests remain below. These tests
+//! exercise the deployed public
+//! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
+//! rollback, liveness, or compute outcomes appropriate to the invariant.
+//!
+//! Guarantee boundary: the prospective-accrual, exposure-removal, asset-shutdown, and
+//! terminal-resolve matrices are fixed-pin certification. Stale-cohort novation remains a
+//! quarantined counterexample until its corresponding fix lands.
+
+use super::*;
+
+#[test]
+fn v16_host_market_roundtrip_preserves_funding_mark_checkpoint() {
+    let mut env = crate::support::v16_svm::V16Svm::new(
+        [0x39; 32],
+        crate::support::v16_svm::MarketConfig::default(),
+    );
+    let slot = env.current_slot();
+    env.configure_ewma_mark(0, slot, 1_000_000, 600, 0).unwrap();
+    let mut data = env.svm.get_account(&env.market).unwrap().data;
+    let (cfg, group) = percolator_prog::state::read_market(&data).unwrap();
+    let mut profile = percolator_prog::state::read_asset_oracle_profile(&data, 0).unwrap();
+    profile.funding_mark_e6 = profile.mark_ewma_e6;
+    profile.funding_mark_pending_e6 = profile.mark_ewma_e6 + 1;
+    profile.funding_mark_pending_slot = group.current_slot + 1;
+    percolator_prog::state::write_asset_oracle_profile(&mut data, 0, &profile).unwrap();
+
+    percolator_prog::state::write_market(&mut data, &cfg, &group).unwrap();
+    let after = percolator_prog::state::read_asset_oracle_profile(&data, 0).unwrap();
+    assert_eq!(after.funding_mark_e6, profile.funding_mark_e6);
+    assert_eq!(
+        after.funding_mark_pending_e6,
+        profile.funding_mark_pending_e6
+    );
+    assert_eq!(
+        after.funding_mark_pending_slot,
+        profile.funding_mark_pending_slot
+    );
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig {
+        cases: env_usize("PERCOLATOR_FUZZ_CASES", 8) as u32,
+        max_shrink_iters: env_usize("PERCOLATOR_FUZZ_SHRINK_ITERS", 64) as u32,
+        failure_persistence: Some(Box::new(
+            proptest::test_runner::FileFailurePersistence::Direct(
+                "proptest-regressions/inv_039_accrual_ordering_discovery.txt",
+            ),
+        )),
+        ..ProptestConfig::default()
+    })]
+
+    #[test]
+    fn v16_program_accrual_boundary_operation_matrix_preserves_transfers(
+        seed in any::<[u8; 32]>()
+    ) {
+        let discoveries = discover_accrual_ordering_violations(seed)
+            .map_err(TestCaseError::fail)?;
+        prop_assert_eq!(discoveries.len(), AccrualOrderingKind::ALL.len());
+        for (expected, discovery) in AccrualOrderingKind::ALL.into_iter().zip(&discoveries) {
+            prop_assert_eq!(discovery.kind, expected);
+        }
+        let violations: Vec<_> = discoveries
+            .iter()
+            .filter(|discovery| discovery.is_violation())
+            .map(|discovery| discovery.kind)
+            .collect();
+        prop_assert!(
+            violations.is_empty(),
+            "accrual-ordering invariant violations remain: {violations:?}"
+        );
+    }
+
+    #[test]
+    fn v16_program_multi_segment_accrual_ordering_preserves_transfers(
+        seed in any::<[u8; 32]>()
+    ) {
+        let discoveries = discover_multi_segment_accrual_ordering_violations(seed)
+            .map_err(TestCaseError::fail)?;
+        prop_assert_eq!(discoveries.len(), AccrualOrderingKind::ALL.len());
+        for (expected, discovery) in AccrualOrderingKind::ALL.into_iter().zip(&discoveries) {
+            prop_assert_eq!(discovery.kind, expected);
+            prop_assert!(discovery.unsafe_action_rejected, "{discovery:?}");
+            prop_assert!(discovery.rejected_exact_rollback, "{discovery:?}");
+            prop_assert!(discovery.retry_landed, "{discovery:?}");
+        }
+        let violations: Vec<_> = discoveries
+            .iter()
+            .filter(|discovery| discovery.is_violation())
+            .map(|discovery| discovery.kind)
+            .collect();
+        prop_assert!(
+            violations.is_empty(),
+            "multi-segment accrual-ordering violations remain: {violations:?}; \
+             discoveries={discoveries:?}"
+        );
+    }
+
+    #[test]
+    fn v16_program_shutdown_commit_ordering_preserves_committed_funding(
+        seed in any::<[u8; 32]>()
+    ) {
+        let discovery = discover_shutdown_commit_ordering(seed)
+            .map_err(TestCaseError::fail)?;
+        prop_assert_ne!(discovery.control_f_long_num, 0);
+        prop_assert_ne!(discovery.control_f_short_num, 0);
+        prop_assert_eq!(
+            discovery.shutdown_f_long_num,
+            discovery.control_f_long_num
+        );
+        prop_assert_eq!(
+            discovery.shutdown_f_short_num,
+            discovery.control_f_short_num
+        );
+        prop_assert_eq!(discovery.victim_payout_loss, 0);
+        prop_assert_eq!(discovery.counterparty_payout_gain, 0);
+        prop_assert!(!discovery.is_violation(), "{discovery:?}");
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig {
+        cases: env_usize("PERCOLATOR_FUZZ_CASES", 8) as u32,
+        max_shrink_iters: env_usize("PERCOLATOR_FUZZ_SHRINK_ITERS", 64) as u32,
+        failure_persistence: Some(Box::new(
+            proptest::test_runner::FileFailurePersistence::Direct(
+                "proptest-regressions/inv_039_shutdown_catchup.txt",
+            ),
+        )),
+        ..ProptestConfig::default()
+    })]
+
+    #[test]
+    fn v16_program_shutdown_rejection_retains_bounded_public_progress(
+        seed in any::<[u8; 32]>()
+    ) {
+        let discovery = discover_shutdown_catchup_liveness(seed)
+            .map_err(TestCaseError::fail)?;
+        prop_assert!(discovery.initial_shutdown_rejected);
+        prop_assert!(discovery.rejected_exact_rollback);
+        prop_assert!(discovery.catchup_steps > 0);
+        prop_assert!(discovery.catchup_steps <= 16);
+        prop_assert!(discovery.max_catchup_cu < 1_400_000);
+        prop_assert!(discovery.retry_landed);
+        prop_assert_ne!(discovery.f_long_num, 0);
+        prop_assert_ne!(discovery.f_short_num, 0);
+        prop_assert!(discovery.users_terminal);
+        prop_assert_eq!(discovery.total_payout, 2_000_000);
+        prop_assert!(discovery.token_supply_conserved);
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig {
+        cases: env_usize("PERCOLATOR_FUZZ_CASES", 8) as u32,
+        max_shrink_iters: env_usize("PERCOLATOR_FUZZ_SHRINK_ITERS", 64) as u32,
+        failure_persistence: Some(Box::new(
+            proptest::test_runner::FileFailurePersistence::Direct(
+                "proptest-regressions/inv_039_pending_zero_move_terminal.txt",
+            ),
+        )),
+        ..ProptestConfig::default()
+    })]
+
+    #[test]
+    fn v16_program_pending_zero_move_terminal_ordering_fuzz(
+        seed in any::<[u8; 32]>()
+    ) {
+        let discovery = discover_pending_zero_move_terminal_ordering(seed)
+            .map_err(TestCaseError::fail)?;
+        prop_assert!(discovery.unsafe_resolve_rejected);
+        prop_assert!(discovery.rejected_exact_rollback);
+        prop_assert!(discovery.catchup_steps >= 2);
+        prop_assert!(discovery.catchup_steps <= 16);
+        prop_assert!(discovery.max_catchup_cu < 1_400_000);
+        prop_assert_ne!(discovery.control_f_long_num, 0);
+        prop_assert_ne!(discovery.control_f_short_num, 0);
+        prop_assert_eq!(
+            discovery.reordered_f_long_num,
+            discovery.control_f_long_num
+        );
+        prop_assert_eq!(
+            discovery.reordered_f_short_num,
+            discovery.control_f_short_num
+        );
+        prop_assert!(!discovery.is_violation(), "{discovery:?}");
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig {
+        cases: env_usize("PERCOLATOR_FUZZ_CASES", 4) as u32,
+        max_shrink_iters: env_usize("PERCOLATOR_FUZZ_SHRINK_ITERS", 8) as u32,
+        failure_persistence: Some(Box::new(
+            proptest::test_runner::FileFailurePersistence::Direct(
+                "proptest-regressions/inv_039_stale_cohort_discovery.txt",
+            ),
+        )),
+        ..ProptestConfig::default()
+    })]
+
+    #[test]
+    fn v16_program_stale_cohort_route_matrix_discovers_historical_loss_transfer(
+        seed in any::<[u8; 32]>()
+    ) {
+        let discoveries = discover_stale_cohort_novations(seed)
+            .map_err(TestCaseError::fail)?;
+        prop_assert_eq!(discoveries.len(), StaleCohortRoute::ALL.len());
+        for (expected, discovery) in StaleCohortRoute::ALL.into_iter().zip(&discoveries) {
+            prop_assert_eq!(discovery.route, expected);
+            prop_assert_eq!(discovery.pre_stale_long_count, 0);
+            prop_assert_eq!(discovery.pre_stale_short_count, 0);
+            prop_assert_eq!(discovery.pre_negative_pnl_count, 0);
+        }
+        let violations: Vec<_> = discoveries
+            .iter()
+            .filter(|discovery| discovery.is_violation())
+            .map(|discovery| discovery.route)
+            .collect();
+        eprintln!("independent stale-cohort novation discoveries: {discoveries:?}");
+        prop_assert_eq!(
+            violations,
+            StaleCohortRoute::ALL.to_vec(),
+            "vulnerable-pin stale-cohort route behavior changed"
+        );
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig {
+        cases: env_usize("PERCOLATOR_FUZZ_CASES", 8) as u32,
+        max_shrink_iters: env_usize("PERCOLATOR_FUZZ_SHRINK_ITERS", 64) as u32,
+        failure_persistence: Some(Box::new(
+            proptest::test_runner::FileFailurePersistence::Direct(
+                "proptest-regressions/inv_039_prospective_accrual_discovery.txt",
+            ),
+        )),
+        ..ProptestConfig::default()
+    })]
+
+    #[test]
+    fn v16_program_prospective_accrual_route_matrix_preserves_elapsed_funding(
+        seed in any::<[u8; 32]>()
+    ) {
+        let discoveries = discover_prospective_accrual_violations(seed)
+            .map_err(TestCaseError::fail)?;
+        prop_assert_eq!(discoveries.len(), ProspectiveAccrualRoute::ALL.len());
+        for (expected, discovery) in ProspectiveAccrualRoute::ALL.into_iter().zip(&discoveries) {
+            prop_assert_eq!(discovery.route, expected);
+        }
+        for discovery in discoveries {
+            prop_assert!(!discovery.is_violation(), "{discovery:?}");
+            prop_assert!(discovery.control_f_short_num > 0);
+            prop_assert_eq!(
+                discovery.reordered_f_short_num,
+                discovery.control_f_short_num
+            );
+            prop_assert_eq!(discovery.victim_payout_loss, 0);
+            if matches!(
+                discovery.route,
+                ProspectiveAccrualRoute::NoCpi | ProspectiveAccrualRoute::BatchNoCpi
+            ) {
+                prop_assert_eq!(discovery.coalition_payout_gain, 0);
+                prop_assert_eq!(
+                    discovery.reordered_total_payout,
+                    discovery.control_total_payout
+                );
+            }
+        }
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig {
+        cases: env_usize("PERCOLATOR_FUZZ_CASES", 8) as u32,
+        max_shrink_iters: env_usize("PERCOLATOR_FUZZ_SHRINK_ITERS", 64) as u32,
+        failure_persistence: Some(Box::new(
+            proptest::test_runner::FileFailurePersistence::Direct(
+                "proptest-regressions/inv_039_terminal_commit_discovery.txt",
+            ),
+        )),
+        ..ProptestConfig::default()
+    })]
+
+    #[test]
+    fn v16_program_terminal_commit_ordering_preserves_pending_value(
+        seed in any::<[u8; 32]>()
+    ) {
+        let discovery = discover_terminal_commit_ordering(seed)
+            .map_err(TestCaseError::fail)?;
+        prop_assert!(
+            !discovery.is_violation(),
+            "terminal-commit ordering still discards value: {discovery:?}"
+        );
+        prop_assert!(discovery.unsafe_resolve_rejected);
+        prop_assert!(discovery.rejected_exact_rollback);
+        prop_assert!(discovery.catchup_steps > 0);
+        prop_assert!(discovery.catchup_steps <= 16);
+        prop_assert!(discovery.max_catchup_cu < 1_400_000);
+        prop_assert_eq!(discovery.committed_mark, discovery.reordered_mark);
+        prop_assert_eq!(discovery.victim_payout_loss, 0);
+        prop_assert_eq!(discovery.counterparty_payout_gain, 0);
+        prop_assert_eq!(
+            discovery.committed_total_payout,
+            discovery.reordered_total_payout
+        );
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig {
+        cases: env_usize("PERCOLATOR_FUZZ_CASES", 8) as u32,
+        max_shrink_iters: env_usize("PERCOLATOR_FUZZ_SHRINK_ITERS", 64) as u32,
+        failure_persistence: Some(Box::new(
+            proptest::test_runner::FileFailurePersistence::Direct(
+                "proptest-regressions/v16_program_stateful_fuzz.txt",
+            ),
+        )),
+        ..ProptestConfig::default()
+    })]
+
+    #[test]
+    fn v16_program_pr380_prospective_funding_preservation_fuzz(
+        (seed, route) in prospective_funding_rewrite_strategy()
+    ) {
+        let reproduction = reproduce_prospective_funding_rewrite(seed, route)
+            .map_err(TestCaseError::fail)?;
+        prop_assert_eq!(reproduction.route, route);
+        prop_assert!(reproduction.control_f_short_num > 0);
+        prop_assert_eq!(
+            reproduction.attack_f_short_num,
+            reproduction.control_f_short_num
+        );
+        prop_assert_eq!(reproduction.victim_payout_loss, 0);
+        if matches!(route, TradeRoute::NoCpi | TradeRoute::BatchNoCpi) {
+            prop_assert_eq!(reproduction.attacker_coalition_gain, 0);
+            prop_assert_eq!(
+                reproduction.attack_total_payout,
+                reproduction.control_total_payout
+            );
+        }
+    }
+
+    #[test]
+    fn v16_program_pr255_resolve_requires_public_catchup_fuzz(
+        seed in resolve_before_committed_accrual_seed_strategy()
+    ) {
+        let result = reproduce_resolve_before_committed_accrual(seed);
+        prop_assert!(
+            result.is_ok(),
+            "PR 255 fixed invariant failed for seed {:?}: {}",
+            seed,
+            result.unwrap_err()
+        );
+    }
+
+    #[test]
+    fn v16_program_pr271_trade_funding_preservation_fuzz(
+        (seed, route) in trade_funding_erasure_strategy()
+    ) {
+        let result = reproduce_trade_funding_erasure(seed, route);
+        prop_assert!(
+            result.is_ok(),
+            "PR 271 {:?} fixed invariant failed for seed {:?}: {}",
+            route,
+            seed,
+            result.unwrap_err()
+        );
+    }
+
+    #[test]
+    fn v16_program_pr272_rebalance_funding_preservation_fuzz(
+        seed in rebalance_funding_erasure_seed_strategy()
+    ) {
+        let result = reproduce_rebalance_funding_erasure(seed);
+        prop_assert!(
+            result.is_ok(),
+            "PR 272 fixed invariant failed for seed {:?}: {}",
+            seed,
+            result.unwrap_err()
+        );
+    }
+
+    #[test]
+    fn v16_program_pr273_forfeit_funding_preservation_fuzz(
+        seed in forfeit_funding_erasure_seed_strategy()
+    ) {
+        let result = reproduce_forfeit_funding_erasure(seed);
+        prop_assert!(
+            result.is_ok(),
+            "PR 273 fixed invariant failed for seed {:?}: {}",
+            seed,
+            result.unwrap_err()
+        );
+    }
+}
