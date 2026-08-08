@@ -41,15 +41,15 @@ INV-041	R	OMITTED	-	No exhaustive allocation and caller-order state model exists
 INV-043	R	OMITTED	-	Hedge and correlation credit are absent from the wrapper API; reopen when exposed.
 INV-046	R	OMITTED	-	No bounded search proves every unsafe-price state retains a reducing route.
 INV-055	R	OMITTED	-	No exhaustive instruction-by-lifecycle admission model exists.
-INV-057	R	OMITTED	-	No reachable-state search proves risk-reduction availability in every mode.
-INV-065	R	OMITTED	-	No exhaustive reset recovery and retirement interleaving model exists.
+INV-057	R	PARTIAL	tests/invariants/stateful/inv_065_reset_recovery_and_retired_state_isolation.rs#v16_program_generated_shutdown_reaches_recovery_then_all_positions_exit	Generated public Recovery states retain owner exits; exhaustive mode reachability remains.
+INV-065	R	PARTIAL	tests/invariants/stateful/inv_065_reset_recovery_and_retired_state_isolation.rs#v16_program_generated_shutdown_reaches_recovery_then_all_positions_exit	Shutdown and generated interleavings are covered; exhaustive reset recovery and retirement reachability remains.
 INV-066	R	OMITTED	-	No exhaustive resolved claimant-order state model exists.
 INV-067	R	OMITTED	-	No exhaustive exact-once terminal claim state model exists.
 INV-069	R	OMITTED	-	No exhaustive terminal normalization and retirement state model exists.
 INV-070	R	OMITTED	-	No complete public market-lifecycle reachability model reaches CloseSlab.
 INV-071	R	OMITTED	-	No exhaustive actionable-state rank graph exists at the wrapper boundary.
 INV-072	R	OMITTED	-	No exhaustive hint-set and actionable-class reachability model exists.
-INV-073	R	OMITTED	-	No bounded graph proves terminal disposition from every reachable funded state.
+INV-073	R	PARTIAL	tests/invariants/stateful/inv_065_reset_recovery_and_retired_state_isolation.rs#v16_program_generated_shutdown_reaches_recovery_then_all_positions_exit	A generated funded Recovery path exits; no bounded graph covers every reachable funded state.
 INV-075	R	OMITTED	-	No exhaustive close-priority preemption and restart model exists.
 INV-078	R	OMITTED	-	No exhaustive failure-class to permissionless-recovery model exists.
 INV-079	R	OMITTED	-	Finding traces are not replayed through a bounded public-state reachability engine.

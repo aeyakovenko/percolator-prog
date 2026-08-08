@@ -5,8 +5,9 @@
 //! Evidence in this file (F over public I routes): `v16_program_stateful_public_interface_fuzz`
 //! generates deposits, withdrawals, all four trade routes, retained transactions, oracle changes,
 //! cranks, fee synchronization, matcher-capability changes, insurance/backing top-ups, released-PnL
-//! conversion, unilateral rebalance reduction, and hostile account substitution. After every public
-//! transition it independently rejects undecodable or hidden legs, duplicate same-asset legs, stale
+//! conversion, unilateral rebalance reduction, asset shutdown, oracle-authority rotation, and
+//! hostile account substitution. After every public transition it independently rejects
+//! undecodable or hidden legs, duplicate same-asset legs, stale
 //! generation bindings, source-lien classification mismatches, stored-position/OI drift, and
 //! net-position drift. Successful non-token routes must preserve every tracked SPL account
 //! byte-for-byte; value routes may mutate only their canonical source/destination and vault, with
@@ -105,6 +106,15 @@ fn v16_program_extended_public_action_alphabet_runs_through_shared_oracles() {
                 actor: 0,
                 amount: 2_000,
             },
+            Action::RotateOracleAuthority {
+                asset: 2,
+                new_actor: 0,
+            },
+            Action::ConfigurePermissionlessResolve {
+                stale_slots: 1_000,
+                force_close_delay_slots: 100,
+            },
+            Action::ShutdownAsset { asset: 0, dt: 0 },
         ],
     };
 
@@ -121,6 +131,9 @@ fn v16_program_extended_public_action_alphabet_runs_through_shared_oracles() {
     assert!(coverage.backing_topups != 0);
     assert!(coverage.pnl_conversions != 0);
     assert!(coverage.rebalance_reductions != 0);
+    assert!(coverage.authority_updates != 0);
+    assert!(coverage.resolve_policy_updates != 0);
+    assert!(coverage.lifecycle_updates != 0);
 }
 
 proptest! {

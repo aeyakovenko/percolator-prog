@@ -1233,6 +1233,18 @@ pub enum Action {
         actor: u8,
         asset: u8,
     },
+    ConfigurePermissionlessResolve {
+        stale_slots: u16,
+        force_close_delay_slots: u16,
+    },
+    ShutdownAsset {
+        asset: u8,
+        dt: u8,
+    },
+    RotateOracleAuthority {
+        asset: u8,
+        new_actor: u8,
+    },
     CrossMarketSubstitution {
         actor: u8,
     },
@@ -1299,12 +1311,15 @@ pub struct Coverage {
     pub mark_updates: u64,
     pub oracle_reconfigs: u64,
     pub maintenance_syncs: u64,
-    pub extended_action_attempts: [u64; 5],
+    pub extended_action_attempts: [u64; 8],
     pub matcher_config_updates: u64,
     pub insurance_topups: u64,
     pub backing_topups: u64,
     pub pnl_conversions: u64,
     pub rebalance_reductions: u64,
+    pub resolve_policy_updates: u64,
+    pub lifecycle_updates: u64,
+    pub authority_updates: u64,
     pub deposits: u64,
     pub withdrawals: u64,
     pub token_frame_checks: u64,
@@ -1329,12 +1344,15 @@ impl Default for Coverage {
             mark_updates: 0,
             oracle_reconfigs: 0,
             maintenance_syncs: 0,
-            extended_action_attempts: [0; 5],
+            extended_action_attempts: [0; 8],
             matcher_config_updates: 0,
             insurance_topups: 0,
             backing_topups: 0,
             pnl_conversions: 0,
             rebalance_reductions: 0,
+            resolve_policy_updates: 0,
+            lifecycle_updates: 0,
+            authority_updates: 0,
             deposits: 0,
             withdrawals: 0,
             token_frame_checks: 0,
@@ -1429,6 +1447,9 @@ impl Coverage {
         self.backing_topups += other.backing_topups;
         self.pnl_conversions += other.pnl_conversions;
         self.rebalance_reductions += other.rebalance_reductions;
+        self.resolve_policy_updates += other.resolve_policy_updates;
+        self.lifecycle_updates += other.lifecycle_updates;
+        self.authority_updates += other.authority_updates;
         self.deposits += other.deposits;
         self.withdrawals += other.withdrawals;
         self.token_frame_checks += other.token_frame_checks;
@@ -2421,6 +2442,74 @@ impl ScenarioRunner {
                 let size_before = self.positions[actor][asset];
                 if size_before != 0 && self.try_rebalance_exit(actor, asset, size_before)? {
                     self.coverage.rebalance_reductions += 1;
+                }
+                Ok(())
+            }
+            Action::ConfigurePermissionlessResolve {
+                stale_slots,
+                force_close_delay_slots,
+            } => {
+                self.coverage.extended_action_attempts[5] += 1;
+                let before = self.snapshot();
+                match self.env.configure_permissionless_resolve(
+                    u64::from(stale_slots.max(1)),
+                    u64::from(force_close_delay_slots.max(1)),
+                ) {
+                    Ok(success) => {
+                        self.coverage.resolve_policy_updates += 1;
+                        self.coverage.observe_success(None, &success);
+                        self.assert_portfolio_frame(&before, &[])?;
+                        self.assert_no_token_side_effects(&before)?;
+                    }
+                    Err(_) => self.assert_snapshot_unchanged(&before)?,
+                }
+                Ok(())
+            }
+            Action::ShutdownAsset { asset, dt } => {
+                self.coverage.extended_action_attempts[6] += 1;
+                let asset = asset as usize % ASSET_COUNT;
+                let next_slot = self
+                    .env
+                    .current_slot()
+                    .checked_add(u64::from(dt.min(4)))
+                    .ok_or("shutdown slot overflow")?;
+                self.env.warp_to_slot(next_slot);
+                let before = self.snapshot();
+                match self.env.shutdown_asset(asset as u16, next_slot) {
+                    Ok(success) => {
+                        self.coverage.lifecycle_updates += 1;
+                        self.coverage.observe_success(None, &success);
+                        self.assert_portfolio_frame(&before, &[])?;
+                        self.assert_no_token_side_effects(&before)?;
+                        let (_, group) = self.env.primary_market_state();
+                        if group.assets[asset].lifecycle != AssetLifecycleV16::Recovery {
+                            return Err(format!(
+                                "successful public shutdown left asset {asset} in {:?}",
+                                group.assets[asset].lifecycle
+                            ));
+                        }
+                    }
+                    Err(_) => self.assert_snapshot_unchanged(&before)?,
+                }
+                Ok(())
+            }
+            Action::RotateOracleAuthority { asset, new_actor } => {
+                self.coverage.extended_action_attempts[7] += 1;
+                let asset = asset as usize % ASSET_COUNT;
+                let new_actor = new_actor as usize % USER_COUNT;
+                let before = self.snapshot();
+                match self.env.update_asset_authority_from_admin(
+                    asset as u16,
+                    percolator_prog::processor::ASSET_AUTH_ORACLE,
+                    new_actor,
+                ) {
+                    Ok(success) => {
+                        self.coverage.authority_updates += 1;
+                        self.coverage.observe_success(None, &success);
+                        self.assert_portfolio_frame(&before, &[])?;
+                        self.assert_no_token_side_effects(&before)?;
+                    }
+                    Err(_) => self.assert_snapshot_unchanged(&before)?,
                 }
                 Ok(())
             }
@@ -4307,6 +4396,11 @@ fn scenario_liveness_limit(scenario: &Scenario) -> Result<usize, String> {
                 authenticated_dt = authenticated_dt
                     .checked_add(u64::from((*dt).clamp(1, 4)))
                     .ok_or("liveness fee-clock bound overflow")?;
+            }
+            Action::ShutdownAsset { dt, .. } => {
+                authenticated_dt = authenticated_dt
+                    .checked_add(u64::from((*dt).min(4)))
+                    .ok_or("liveness shutdown-clock bound overflow")?;
             }
             _ => {}
         }
@@ -17646,6 +17740,17 @@ fn action_strategy() -> impl Strategy<Value = Action> {
             .prop_map(|(actor, amount)| Action::ConvertReleasedPnl { actor, amount }),
         2 => (any::<u8>(), any::<u8>())
             .prop_map(|(actor, asset)| Action::RebalanceReduce { actor, asset }),
+        1 => (128u16..=u16::MAX, 1u16..=u16::MAX).prop_map(
+            |(stale_slots, force_close_delay_slots)| Action::ConfigurePermissionlessResolve {
+                stale_slots,
+                force_close_delay_slots,
+            },
+        ),
+        1 => (any::<u8>(), 0u8..=4)
+            .prop_map(|(asset, dt)| Action::ShutdownAsset { asset, dt }),
+        1 => (any::<u8>(), any::<u8>()).prop_map(|(asset, new_actor)| {
+            Action::RotateOracleAuthority { asset, new_actor }
+        }),
         2 => any::<u8>().prop_map(|actor| Action::CrossMarketSubstitution { actor }),
         2 => (
             any::<u8>(),

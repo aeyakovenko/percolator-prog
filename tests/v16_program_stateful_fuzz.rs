@@ -158,6 +158,9 @@ mod inv_061_deterministic_bounded_liquidation;
 #[path = "invariants/stateful/inv_063_backing_expiry_normalization.rs"]
 mod inv_063_backing_expiry_normalization;
 
+#[path = "invariants/stateful/inv_065_reset_recovery_and_retired_state_isolation.rs"]
+mod inv_065_reset_recovery_and_retired_state_isolation;
+
 #[path = "invariants/stateful/inv_067_terminal_payout_completeness_and_exact_once_settlement.rs"]
 mod inv_067_terminal_payout_completeness_and_exact_once_settlement;
 

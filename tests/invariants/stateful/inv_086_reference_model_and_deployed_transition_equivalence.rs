@@ -9,8 +9,9 @@
 //! snapshots. Each successful transition is reconciled against the shadow model;
 //! each rejected transition must preserve every tracked account byte and token
 //! balance. The coverage assertions keep the generated run non-vacuous across
-//! all trade routes, public crank progress, deposits, token frames, account
-//! substitution rejection, normal exits, liquidation, and CU ceilings.
+//! all trade routes, public crank progress, deposits, token frames, lifecycle
+//! and authority changes, account substitution rejection, normal exits,
+//! liquidation, and CU ceilings.
 
 use super::*;
 
