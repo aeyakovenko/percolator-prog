@@ -179,6 +179,9 @@ mod inv_067_terminal_payout_completeness_and_exact_once_settlement;
 #[path = "invariants/stateful/inv_069_terminal_normalization_and_retirement.rs"]
 mod inv_069_terminal_normalization_and_retirement;
 
+#[path = "invariants/stateful/inv_078_permissionless_recovery_coverage.rs"]
+mod inv_078_permissionless_recovery_coverage;
+
 #[path = "invariants/stateful/inv_081_success_state_validity_over_complete_public_routes.rs"]
 mod inv_081_success_state_validity_over_complete_public_routes;
 

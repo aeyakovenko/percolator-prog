@@ -23,7 +23,7 @@ verification methods are in [`../../INVARIANTS.md`](../../INVARIANTS.md).
 | Suite | Tests | Evidence |
 | --- | ---: | --- |
 | `public_sbf/` | 81 | Deterministic public SBF/LiteSVM counterexamples, regressions, decoder corpora, and manifest checks |
-| `stateful/` | 116 | Proptest-generated public routes plus bounded lifecycle models for scarce-backing pair/chunk allocation orders, a 16-cell positive-claim boundary partition, all 3! matcher-control/trade landing orders, 20 user-operation/admission cells, 12 caller-priced boundary-exit cells, the four-state retirement-obligation lattice, a Recovery crank/owner-exit classifier boundary, and all 5! claimant orders, including generalized active-leg/currentness, source-claim attribution, source-credit-rate, authenticated-expiry, state-indexed liveness witnesses, and reference-model/deployed-transition equivalence |
+| `stateful/` | 117 | Proptest-generated public routes plus bounded lifecycle models for scarce-backing pair/chunk allocation orders, a 16-cell positive-claim boundary partition, all 3! matcher-control/trade landing orders, 20 user-operation/admission cells, 12 caller-priced boundary-exit cells, the four-state retirement-obligation lattice, a four-state Recovery resource-failure lattice, a Recovery crank/owner-exit classifier boundary, and all 5! claimant orders, including generalized active-leg/currentness, source-claim attribution, source-credit-rate, authenticated-expiry, state-indexed liveness witnesses, and reference-model/deployed-transition equivalence |
 | `cu/` | 712 | Full `v16_cu` public-route, metamorphic, rollback, liveness, arithmetic-differential, and max-shape CU inventory, with no standalone top-level tests |
 | `kani/` | 79 | Symbolic wrapper arithmetic, matcher-binding, ordering, strict-decoder, and proof-assumption nonvacuity harnesses; full `cargo kani --tests` remains the required verification command |
 
@@ -158,7 +158,7 @@ charter.
 | INV-075 | SVM/CU + Partial R + Spec/implementation divergence | `cu/inv_075_close_priority_ownership_and_episode_integrity.rs` (owner/episode/replay checks plus both landing orders of two public equal-domain close starts through exact rejection, permissionless expiry/finalization, and rejected-contender exit; the engine implements first-landed exclusive domain ownership rather than the charter's strict preemption total order) |
 | INV-076 | SVM/CU + Model gap | `cu/inv_076_close_drift_residual_durability_and_finalization_atomicity.rs` (public stale-cure and public-created zero-cure atomic rollback with terminal-progress checks; exhaustive close-phase fault injection remains) |
 | INV-077 | Independent + SVM/CU | `cu/inv_077_bounded_work_and_maximum_shape_compute.rs` (supported 14-leg/28-source routes remain bounded; a production-derived registry maps all 50 tags to measured CU evidence; unreserved over-budget source-domain risk rejects atomically before CU exhaustion) |
-| INV-078 | SVM/CU | `cu/inv_078_permissionless_recovery_coverage.rs` |
+| INV-078 | SVM/CU + Partial R | `stateful/inv_078_permissionless_recovery_coverage.rs`, `cu/inv_078_permissionless_recovery_coverage.rs` (all four absent/expired-backing by absent/tiny-insurance cells publicly create the same bankrupt exposure, then prove exact insurance spend, residual B booking, zero expired-backing support, and owner-callable terminal exits; lien impairment, payout conflict, and the complete lifecycle failure set remain) |
 | INV-079 | Direct + Static rosters | `public_sbf/inv_079_public_reachability_evidence.rs` enforces the finding manifest, all 50 production instruction tags, and all charter-required metamorphic/reachability/compute method classifications |
 | INV-080 | P + SVM/CU | `kani/inv_080_error_propagation_and_exact_rollback.rs`, `cu/inv_080_error_propagation_and_exact_rollback.rs` prove every current engine error variant maps to a nonzero instruction `ProgramError` and cover partial oracle, legacy realloc, terminal top-up, token CPI, and over-withdraw engine-error rollback paths |
 | INV-081 | F + Direct + SVM/CU | `public_sbf/inv_081_success_state_validity_over_complete_public_routes.rs`, `stateful/inv_066_resolved_payout_fairness_and_order_independence.rs`, `stateful/inv_081_success_state_validity_over_complete_public_routes.rs`, `cu/inv_081_success_state_validity_over_complete_public_routes.rs` (fifteen generated operation classes share success/rollback/global-state oracles; a separate bounded owner composes trade, resolve, exact-once claim, portfolio close, and market close across all 5! claimant orders) |
@@ -202,8 +202,8 @@ method outstanding. The current ledger is 58 **OPEN-T**, 20 **OPEN-D**, 10 **FRO
    and `C` for 2. Invariant-owned directories currently exist for only 9 `P`, 27 `F`, and 87 `I`
    owners. File presence is only a lower bound; many owners cover one scenario rather than the
    required matrix. `special_method_coverage.tsv` now machine-indexes all `M`, `R`, and `C`
-   obligations: all 32 `M` and both `C` rows have partial named evidence; 14 `R` rows now have
-   bounded generated or exhaustive-topology evidence and the other 8 remain explicitly omitted.
+   obligations: all 32 `M` and both `C` rows have partial named evidence; 15 `R` rows now have
+   bounded generated or exhaustive-topology evidence and the other 7 remain explicitly omitted.
 2. The deployed decoder has 50 public instruction variants. The stateful public-interface model
    generates fifteen direct operation classes (trade, EWMA configuration, mark push, crank, deposit,
    withdraw, maintenance sync, matcher configuration, insurance top-up, backing top-up,
@@ -216,15 +216,17 @@ method outstanding. The current ledger is 58 **OPEN-T**, 20 **OPEN-D**, 10 **FRO
    mutation score, or corpus-stability criterion for declaring a generator exhausted.
 4. No general bounded BFS/model checker enumerates the reachable lifecycle graph required by
    INV-007, INV-043, INV-057, INV-065,
-   INV-071, INV-073, INV-078, INV-079, INV-082, INV-084, or INV-086. INV-066,
+   INV-071, INV-073, INV-079, INV-082, INV-084, or INV-086. INV-066,
    INV-067, and INV-070 now have a narrower public two-asset model that exhausts all 5! basic
    claimant orders through exact-once retries and `CloseSlab`; INV-069 separately exhausts the
    four-state insurance/backing retirement-blocker lattice and both public drain orders; INV-010
    exhausts all 3! orders in its conflicting-control/trade topology; INV-029 exhausts a 16-cell
    public claim-attribution boundary partition; INV-041 covers a public scarce-backing pair/chunk
    ordering cross-product; INV-075 exhausts both landing orders for two equal-domain public close
-   starts and demonstrates first-landed exclusion rather than priority preemption; INV-055 has a separate public
-   20-cell core user-operation admission model; INV-046 has a separate 12-cell caller-priced
+   starts and demonstrates first-landed exclusion rather than priority preemption; INV-078 crosses
+   absent/expired backing with absent/tiny insurance and proves exact terminal residual
+   classification in all four public Recovery cells; INV-055 has a separate public 20-cell core
+   user-operation admission model; INV-046 has a separate 12-cell caller-priced
    boundary-exit model across three publicly reached lifecycle states; INV-072 exhausts all 40
    three-asset hint words through length three in one actionable topology.
 5. Several liveness/admission tests create the interesting state with `set_account`,
@@ -322,7 +324,7 @@ are machine-checked below so a future README edit cannot silently omit an invari
 | AUDIT-075 | FRONTIER | Both landing orders of two public equal-domain close starts now prove first-landed exclusion, exact rejected-contender rollback, immutable accepted identity, permissionless expiry/finalization after configured delays, and terminal exit of the rejected contender without the first owner's signature. This also demonstrates a normative mismatch: the public API and engine expose no strict `ClosePriority` tuple or preemption order. Decide whether exclusion is the specification; otherwise add priority/preemption semantics, then model restart, stale continuation, cure/cancel, owner deposit, and no-double-booking. |
 | AUDIT-076 | OPEN-T | Only stale-cure and zero-cure rollback are owned. Add table-driven public fault injection at every close phase, price/funding drift, preemption/restart, durable residual booking, complete snapshots, and atomic OI/basis-clear checks. |
 | AUDIT-077 | OPEN-T | The production-derived registry now maps all 50 instruction tags to named public-route and measured CU evidence with zero omissions; this tranche added explicit `InitMarket`, enabled/disabled `SetMatcherConfig`, and 5,834-slot `UpdateAssetLifecycle` measurements and indexed nine existing bounds. Complete the remaining maximum-dimension cross-product and activation-time rejection of unsupported shapes. |
-| AUDIT-078 | OPEN-T | Stale-oracle and selected shutdown/expired-close recovery exist. Add public failure classes for B exhaustion, backing failure, lien impairment, domain lock, insurance exhaustion, payout conflict, and every lifecycle failure, then bounded recovery reachability. |
+| AUDIT-078 | OPEN-T | A four-state public model now crosses absent/expired backing with absent/tiny insurance after creating the same bankrupt exposure. Every cell reaches owner-callable terminal exits with zero expired-backing support, exact insurance spend, and exact residual B booking; INV-075 separately covers domain-close exclusion and eventual permissionless release. Add lien impairment, true B-exhaustion/booking failure, payout conflict, oracle-unavailable terminal fallback, and the remaining lifecycle failure classes, then compose them into bounded recovery reachability. |
 | AUDIT-079 | OPEN-D | The manifest enforces names/classifications; source-derived registries now fail unless every production instruction tag and every charter-required M/R/C method has named evidence or an explicit omission. No formal finding trace-evidence schema records signers, account metas, absence of out-of-band mutation, exact token/lamport deltas, and persistent exit result; add and replay that schema for every qualifying PoC. |
 | AUDIT-080 | OPEN-T | Engine-error mapping and many SPL/realloc rollback paths are covered; the shared stateful rejection snapshot now includes every modeled economic account's lamports as well as program bytes and SPL data. Fault-inject every wrapper fallible stage outside that generated model and test a later instruction in the same transaction cannot consume success-only output. |
 | AUDIT-081 | FRONTIER | The shared stateful model covers fifteen direct operation classes, and a separate bounded owner now composes public trade, resolution, all five claims, exact-once retries, portfolio closes, and market close across all 5! claimant orders. Authority epochs/ABA, retirement/reactivation, complex payout states, and those terminal operations inside the generated alphabet remain open; the runner also does not assert the full invariant suite after every success. Expand those classes and the executable invariant registry, then use typed-transition composition for routes whose whole-body proof remains intractable. |
