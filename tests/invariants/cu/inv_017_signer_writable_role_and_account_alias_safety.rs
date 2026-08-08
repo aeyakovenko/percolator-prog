@@ -5,7 +5,8 @@
 //! trade, ledger, helper, and optional-ledger routes. A rejected alias attempt must leave program
 //! accounts and SPL custody bytes unchanged exactly. The trade matrices exhaust all ten direct
 //! and all 21 CPI semantic account pairs, plus every required signer/writable downgrade, for both
-//! single and batch routes from otherwise-valid public fixtures.
+//! single and batch routes from otherwise-valid public fixtures. Deposit and withdraw separately
+//! exhaust their 15- and 21-pair SPL custody account spaces and required privileges.
 //!
 //! Guarantee boundary: this is targeted public-route evidence for the most dangerous alias pairs;
 //! it is not an exhaustive pairwise account-meta proof for every instruction.
@@ -350,6 +351,182 @@ fn v16_program_cpi_trade_account_pairs_and_required_privileges_are_exhaustive() 
             assert_cpi_trade_alias_rejects_atomically(
                 route,
                 &format!("{} writable downgrade", ROLE_NAMES[role]),
+                |accounts| accounts[role].is_writable = false,
+            );
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum CustodyAliasRoute {
+    Deposit,
+    Withdraw,
+}
+
+struct CustodyAliasFixture {
+    env: V16CuEnv,
+    owner: Keypair,
+    portfolio: Pubkey,
+    user_token: Pubkey,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CustodyAliasSnapshot {
+    core: AliasSnapshot,
+    user_token: Account,
+}
+
+fn custody_alias_fixture(route: CustodyAliasRoute) -> CustodyAliasFixture {
+    let mut env = V16CuEnv::new();
+    let owner = Keypair::new();
+    let portfolio = env.create_portfolio(&owner);
+    let user_token = match route {
+        CustodyAliasRoute::Deposit => env.token_account(owner.pubkey(), 100),
+        CustodyAliasRoute::Withdraw => {
+            env.deposit(&owner, portfolio, 100);
+            env.token_account(owner.pubkey(), 0)
+        }
+    };
+    CustodyAliasFixture {
+        env,
+        owner,
+        portfolio,
+        user_token,
+    }
+}
+
+fn custody_alias_snapshot(fixture: &CustodyAliasFixture) -> CustodyAliasSnapshot {
+    CustodyAliasSnapshot {
+        core: snapshot(&fixture.env, fixture.portfolio, None),
+        user_token: fixture.env.svm.get_account(&fixture.user_token).unwrap(),
+    }
+}
+
+fn custody_alias_instruction(
+    fixture: &CustodyAliasFixture,
+    route: CustodyAliasRoute,
+) -> ProgInstruction {
+    match route {
+        CustodyAliasRoute::Deposit => fixture.env.deposit_ix(fixture.portfolio, 10),
+        CustodyAliasRoute::Withdraw => fixture.env.withdraw_ix(fixture.portfolio, 10),
+    }
+}
+
+fn custody_alias_accounts(
+    fixture: &CustodyAliasFixture,
+    route: CustodyAliasRoute,
+) -> Vec<AccountMeta> {
+    let mut accounts = vec![
+        AccountMeta::new(fixture.owner.pubkey(), true),
+        AccountMeta::new(fixture.env.market, false),
+        AccountMeta::new(fixture.portfolio, false),
+        AccountMeta::new(fixture.user_token, false),
+        AccountMeta::new(fixture.env.vault, false),
+    ];
+    if let CustodyAliasRoute::Withdraw = route {
+        accounts.push(AccountMeta::new_readonly(
+            fixture.env.vault_authority,
+            false,
+        ));
+    }
+    accounts.push(AccountMeta::new_readonly(spl_token::ID, false));
+    accounts
+}
+
+fn assert_custody_alias_rejects_atomically(
+    route: CustodyAliasRoute,
+    label: &str,
+    mutate: impl FnOnce(&mut [AccountMeta]),
+) {
+    let mut fixture = custody_alias_fixture(route);
+    let instruction = custody_alias_instruction(&fixture, route);
+    let mut accounts = custody_alias_accounts(&fixture, route);
+    mutate(&mut accounts);
+    let before = custody_alias_snapshot(&fixture);
+    let owner_signature_required = accounts
+        .iter()
+        .any(|account| account.is_signer && account.pubkey == fixture.owner.pubkey());
+    let signers = owner_signature_required
+        .then_some(&fixture.owner)
+        .into_iter()
+        .collect::<Vec<_>>();
+
+    fixture.env.svm.expire_blockhash();
+    let rejected = fixture.env.send(instruction, accounts, &signers);
+    assert!(
+        rejected.is_err(),
+        "{route:?} {label}: aliased or underprivileged custody route unexpectedly succeeded",
+    );
+    assert_eq!(
+        custody_alias_snapshot(&fixture),
+        before,
+        "{route:?} {label}: custody rejection must roll back accounting and SPL bytes exactly",
+    );
+}
+
+#[test]
+fn v16_program_custody_account_pairs_and_required_privileges_are_exhaustive() {
+    for route in [CustodyAliasRoute::Deposit, CustodyAliasRoute::Withdraw] {
+        let role_names: &[&str] = match route {
+            CustodyAliasRoute::Deposit => &[
+                "owner",
+                "market",
+                "portfolio",
+                "source_token",
+                "vault",
+                "token_program",
+            ],
+            CustodyAliasRoute::Withdraw => &[
+                "owner",
+                "market",
+                "portfolio",
+                "destination_token",
+                "vault",
+                "vault_authority",
+                "token_program",
+            ],
+        };
+
+        let mut control = custody_alias_fixture(route);
+        let before = custody_alias_snapshot(&control);
+        let accepted = control.env.send(
+            custody_alias_instruction(&control, route),
+            custody_alias_accounts(&control, route),
+            &[&control.owner],
+        );
+        assert!(
+            accepted.is_ok(),
+            "{route:?}: canonical custody control must execute: {accepted:?}",
+        );
+        assert_ne!(
+            custody_alias_snapshot(&control),
+            before,
+            "{route:?}: canonical custody control must move tokens and accounting",
+        );
+
+        let mut pair_count = 0usize;
+        for first in 0..role_names.len() {
+            for second in (first + 1)..role_names.len() {
+                pair_count += 1;
+                let label = format!("alias {} with {}", role_names[first], role_names[second]);
+                assert_custody_alias_rejects_atomically(route, &label, |accounts| {
+                    accounts[second].pubkey = accounts[first].pubkey;
+                });
+            }
+        }
+        assert_eq!(
+            pair_count,
+            role_names.len() * (role_names.len() - 1) / 2,
+            "pair matrix must be complete",
+        );
+
+        assert_custody_alias_rejects_atomically(route, "owner signer downgrade", |accounts| {
+            accounts[0].is_signer = false;
+        });
+        for role in 1..=4 {
+            assert_custody_alias_rejects_atomically(
+                route,
+                &format!("{} writable downgrade", role_names[role]),
                 |accounts| accounts[role].is_writable = false,
             );
         }
