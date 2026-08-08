@@ -1432,6 +1432,16 @@ impl Coverage {
     }
 
     fn merge(&mut self, other: Self) {
+        if other.loaded_program_hash != [0; 32] {
+            if self.loaded_program_hash == [0; 32] {
+                self.loaded_program_hash = other.loaded_program_hash;
+            } else {
+                assert_eq!(
+                    self.loaded_program_hash, other.loaded_program_hash,
+                    "coverage cannot merge evidence from different SBF artifacts"
+                );
+            }
+        }
         for index in 0..self.route_success.len() {
             self.route_success[index] += other.route_success[index];
             self.route_reject[index] += other.route_reject[index];
@@ -4027,6 +4037,264 @@ pub fn run_bounded_public_liveness_graph() -> Result<BoundedLivenessGraphEvidenc
     coverage.merge(run_liquidation_exit_probe([0x83; 32])?);
     Ok(BoundedLivenessGraphEvidence {
         scenario_count,
+        coverage,
+    })
+}
+
+const BOUNDED_REFERENCE_ACTION_COUNT: usize = 11;
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct BoundedReferenceNode {
+    positions: [[i128; ASSET_COUNT]; PRIMARY_ACTOR_COUNT],
+    protocol_positions: [i128; ASSET_COUNT],
+    capitals: [u128; PRIMARY_ACTOR_COUNT],
+    market_mode: u8,
+    lifecycles: [u8; ASSET_COUNT],
+    side_modes: [[u8; 2]; ASSET_COUNT],
+    effective_prices: [u64; ASSET_COUNT],
+    raw_targets: [u64; ASSET_COUNT],
+    wrapper_marks: [u64; ASSET_COUNT],
+    oracle_authorities: [[u8; 32]; ASSET_COUNT],
+    matcher_sequences: [u64; PRIMARY_ACTOR_COUNT],
+    rank_classes: [u8; PRIMARY_ACTOR_COUNT],
+    c_tot: u128,
+    vault: u128,
+    insurance: u128,
+    source_claim_bound_total_num: u128,
+    source_fresh_backing_total_num: u128,
+    resolve_policy: [u64; 2],
+    current_slot: u64,
+    epochs: [u64; 4],
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BoundedReferenceGraphEvidence {
+    pub word_count: usize,
+    pub transition_count: usize,
+    pub unique_node_count: usize,
+    pub unique_edge_count: usize,
+    pub action_attempts: [u64; BOUNDED_REFERENCE_ACTION_COUNT],
+    pub action_state_changes: [u64; BOUNDED_REFERENCE_ACTION_COUNT],
+    pub coverage: Coverage,
+}
+
+impl ScenarioRunner {
+    fn bounded_reference_node(&self) -> Result<BoundedReferenceNode, String> {
+        self.assert_global_invariants()?;
+        let (config, group) = self.env.primary_market_state();
+        let capitals = std::array::from_fn(|actor| self.env.primary_portfolio(actor).capital.get());
+        let lifecycles = std::array::from_fn(|asset| group.assets[asset].lifecycle as u8);
+        let side_modes = std::array::from_fn(|asset| {
+            [
+                group.assets[asset].mode_long as u8,
+                group.assets[asset].mode_short as u8,
+            ]
+        });
+        let effective_prices = std::array::from_fn(|asset| group.assets[asset].effective_price);
+        let raw_targets = std::array::from_fn(|asset| group.assets[asset].raw_oracle_target_price);
+        let wrapper_marks =
+            std::array::from_fn(|asset| self.env.primary_profile(asset).mark_ewma_e6);
+        let oracle_authorities =
+            std::array::from_fn(|asset| self.env.primary_profile(asset).oracle_authority);
+        let matcher_sequences =
+            std::array::from_fn(|actor| self.env.primary_portfolio_matcher_sequence(actor));
+        let mut rank_classes = [0u8; PRIMARY_ACTOR_COUNT];
+        for (actor, class) in rank_classes.iter_mut().enumerate() {
+            *class = self.progress_rank(actor)?.class_mask();
+        }
+        let source_fresh_backing_total_num =
+            group
+                .source_credit
+                .iter()
+                .try_fold(0u128, |total, source| {
+                    total
+                        .checked_add(source.fresh_reserved_backing_num)
+                        .ok_or("bounded reference backing total overflow")
+                })?;
+
+        Ok(BoundedReferenceNode {
+            positions: self.positions,
+            protocol_positions: self.protocol_positions,
+            capitals,
+            market_mode: group.mode as u8,
+            lifecycles,
+            side_modes,
+            effective_prices,
+            raw_targets,
+            wrapper_marks,
+            oracle_authorities,
+            matcher_sequences,
+            rank_classes,
+            c_tot: group.c_tot,
+            vault: group.vault,
+            insurance: group.insurance,
+            source_claim_bound_total_num: group.source_claim_bound_total_num,
+            source_fresh_backing_total_num,
+            resolve_policy: [
+                config.permissionless_resolve_stale_slots,
+                config.force_close_delay_slots,
+            ],
+            current_slot: group.current_slot,
+            epochs: [
+                group.oracle_epoch,
+                group.funding_epoch,
+                group.risk_epoch,
+                group.asset_set_epoch,
+            ],
+        })
+    }
+}
+
+fn bounded_reference_actions() -> [Action; BOUNDED_REFERENCE_ACTION_COUNT] {
+    [
+        Action::Deposit {
+            actor: 0,
+            amount: 17,
+        },
+        Action::Withdraw {
+            actor: 0,
+            amount: 11,
+        },
+        Action::Trade {
+            route: TradeRoute::NoCpi,
+            taker: 0,
+            maker: 1,
+            asset: 0,
+            units: 1,
+            fee_bps: 0,
+            price_move_bps: 0,
+            prefer_reduce: false,
+        },
+        Action::Trade {
+            route: TradeRoute::BatchCpi,
+            taker: 2,
+            maker: 3,
+            asset: 1,
+            units: 1,
+            fee_bps: 0,
+            price_move_bps: 0,
+            prefer_reduce: false,
+        },
+        Action::PushMark {
+            asset: 0,
+            dt: 1,
+            move_bps: 100,
+        },
+        Action::Crank {
+            actor: 0,
+            hints: HintMode::Complete,
+        },
+        Action::SetMatcherConfig {
+            actor: 1,
+            enabled: false,
+            trade_fee_cap_bps: 0,
+        },
+        Action::TopUpBacking {
+            domain: 0,
+            amount: 7,
+            expiry_delta: 3,
+        },
+        Action::RotateOracleAuthority {
+            asset: 0,
+            new_actor: 1,
+        },
+        Action::ConfigurePermissionlessResolve {
+            stale_slots: 1_000,
+            force_close_delay_slots: 100,
+        },
+        Action::ShutdownAsset { asset: 2, dt: 1 },
+    ]
+}
+
+pub fn run_bounded_reference_equivalence_graph() -> Result<BoundedReferenceGraphEvidence, String> {
+    type Edge = (BoundedReferenceNode, u8, BoundedReferenceNode);
+
+    fn replay_word(
+        word: &[(usize, Action)],
+        nodes: &mut BTreeSet<BoundedReferenceNode>,
+        edges: &mut BTreeSet<Edge>,
+        action_attempts: &mut [u64; BOUNDED_REFERENCE_ACTION_COUNT],
+        action_state_changes: &mut [u64; BOUNDED_REFERENCE_ACTION_COUNT],
+        coverage: &mut Coverage,
+    ) -> Result<(), String> {
+        let scenario = Scenario {
+            seed: [0x86; 32],
+            config: SmallMarketConfig {
+                max_price_move_bps_per_slot: 500,
+                max_accrual_dt_slots: 2,
+                max_abs_funding_e9_per_slot: 0,
+                maintenance_fee_per_slot: 1,
+            },
+            actions: vec![],
+        };
+        let mut runner = ScenarioRunner::new_unprefixed(&scenario)?;
+        let mut before = runner.bounded_reference_node()?;
+        nodes.insert(before.clone());
+        for (action_index, action) in word {
+            runner.run_safety_prefix(std::slice::from_ref(action))?;
+            let after = runner.bounded_reference_node()?;
+            action_attempts[*action_index] += 1;
+            if after != before {
+                action_state_changes[*action_index] += 1;
+            }
+            nodes.insert(after.clone());
+            edges.insert((before, *action_index as u8, after.clone()));
+            before = after;
+        }
+        coverage.merge(runner.coverage);
+        Ok(())
+    }
+
+    let actions = bounded_reference_actions();
+    let mut nodes = BTreeSet::new();
+    let mut edges = BTreeSet::new();
+    let mut action_attempts = [0u64; BOUNDED_REFERENCE_ACTION_COUNT];
+    let mut action_state_changes = [0u64; BOUNDED_REFERENCE_ACTION_COUNT];
+    let mut coverage = Coverage::default();
+    let mut word_count = 0usize;
+    let mut transition_count = 0usize;
+
+    replay_word(
+        &[],
+        &mut nodes,
+        &mut edges,
+        &mut action_attempts,
+        &mut action_state_changes,
+        &mut coverage,
+    )?;
+    word_count += 1;
+    for (first_index, first) in actions.iter().enumerate() {
+        replay_word(
+            &[(first_index, first.clone())],
+            &mut nodes,
+            &mut edges,
+            &mut action_attempts,
+            &mut action_state_changes,
+            &mut coverage,
+        )?;
+        word_count += 1;
+        transition_count += 1;
+        for (second_index, second) in actions.iter().enumerate() {
+            replay_word(
+                &[(first_index, first.clone()), (second_index, second.clone())],
+                &mut nodes,
+                &mut edges,
+                &mut action_attempts,
+                &mut action_state_changes,
+                &mut coverage,
+            )?;
+            word_count += 1;
+            transition_count += 2;
+        }
+    }
+
+    Ok(BoundedReferenceGraphEvidence {
+        word_count,
+        transition_count,
+        unique_node_count: nodes.len(),
+        unique_edge_count: edges.len(),
+        action_attempts,
+        action_state_changes,
         coverage,
     })
 }

@@ -12,8 +12,63 @@
 //! all trade routes, public crank progress, deposits, token frames, lifecycle
 //! and authority changes, account substitution rejection, normal exits,
 //! liquidation, and CU ceilings.
+//!
+//! A separate bounded graph exhausts every action word through depth two over
+//! eleven wrapper actions. It replays each edge from the same public genesis,
+//! applies the independent state oracles after every transition, records exact
+//! rollback as a self-edge, and distinguishes normalized economic states. This
+//! is finite reachability evidence, not equivalence over unbounded sequences or
+//! omitted payout/receipt state.
 
 use super::*;
+use crate::support::fuzz_model::run_bounded_reference_equivalence_graph;
+
+#[test]
+fn v16_program_bounded_reference_graph_exhausts_public_action_words() {
+    let evidence = run_bounded_reference_equivalence_graph()
+        .expect("INV-086 bounded deployed/reference graph");
+
+    assert_eq!(
+        evidence.word_count, 133,
+        "must exhaust 11^0 + 11^1 + 11^2 words"
+    );
+    assert_eq!(
+        evidence.transition_count, 253,
+        "must replay every edge in every bounded word"
+    );
+    assert!(
+        evidence.unique_node_count >= 50 && evidence.unique_edge_count >= 100,
+        "bounded graph collapsed to vacuous state coverage: {evidence:?}"
+    );
+    assert!(
+        evidence
+            .action_attempts
+            .iter()
+            .all(|attempts| *attempts == 23),
+        "every action must occupy every first/second word position: {evidence:?}"
+    );
+    assert!(
+        evidence
+            .action_state_changes
+            .iter()
+            .all(|changes| *changes != 0),
+        "every action class must produce a real normalized state transition: {evidence:?}"
+    );
+    assert_ne!(
+        evidence.coverage.loaded_program_hash, [0; 32],
+        "bounded evidence must bind the production SBF artifact"
+    );
+    assert!(
+        evidence.coverage.route_success.iter().sum::<u64>() != 0
+            && evidence.coverage.token_frame_checks != 0
+            && evidence.coverage.matcher_config_updates != 0
+            && evidence.coverage.backing_topups != 0
+            && evidence.coverage.authority_updates != 0
+            && evidence.coverage.resolve_policy_updates != 0
+            && evidence.coverage.lifecycle_updates != 0,
+        "bounded graph must exercise value, trade, policy, authority, and lifecycle edges: {evidence:?}"
+    );
+}
 
 #[test]
 fn v16_program_rebalance_then_terminal_exit_preserves_position_attribution() {
