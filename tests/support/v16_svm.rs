@@ -2263,6 +2263,31 @@ impl V16Svm {
         )
     }
 
+    pub fn withdraw_insurance_asset_as_admin(
+        &mut self,
+        asset_index: u16,
+        amount: u128,
+    ) -> Result<TxSuccess, String> {
+        let authority = copy_keypair(&self.admin);
+        let market_id = self.primary_market_state().1.assets[asset_index as usize].market_id;
+        self.send_program(
+            ProgInstruction::WithdrawInsuranceAsset {
+                asset_index,
+                market_id,
+                amount,
+            },
+            vec![
+                AccountMeta::new(authority.pubkey(), true),
+                AccountMeta::new(self.market, false),
+                AccountMeta::new(self.provider_destination_token, false),
+                AccountMeta::new(self.vault, false),
+                AccountMeta::new_readonly(self.vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[authority],
+        )
+    }
+
     pub fn withdraw_terminal_insurance_for_actor(
         &mut self,
         actor_index: usize,

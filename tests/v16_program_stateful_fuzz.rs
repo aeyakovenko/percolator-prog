@@ -173,6 +173,9 @@ mod inv_066_resolved_payout_fairness_and_order_independence;
 #[path = "invariants/stateful/inv_067_terminal_payout_completeness_and_exact_once_settlement.rs"]
 mod inv_067_terminal_payout_completeness_and_exact_once_settlement;
 
+#[path = "invariants/stateful/inv_069_terminal_normalization_and_retirement.rs"]
+mod inv_069_terminal_normalization_and_retirement;
+
 #[path = "invariants/stateful/inv_081_success_state_validity_over_complete_public_routes.rs"]
 mod inv_081_success_state_validity_over_complete_public_routes;
 

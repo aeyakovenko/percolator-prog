@@ -23,7 +23,7 @@ verification methods are in [`../../INVARIANTS.md`](../../INVARIANTS.md).
 | Suite | Tests | Evidence |
 | --- | ---: | --- |
 | `public_sbf/` | 81 | Deterministic public SBF/LiteSVM counterexamples, regressions, decoder corpora, and manifest checks |
-| `stateful/` | 112 | Proptest-generated public routes plus bounded lifecycle models for 20 user-operation/admission cells, 12 caller-priced boundary-exit cells, a Recovery crank/owner-exit classifier boundary, and all 5! claimant orders, including generalized active-leg/currentness, source-claim attribution, source-credit-rate, authenticated-expiry, state-indexed liveness witnesses, and reference-model/deployed-transition equivalence |
+| `stateful/` | 113 | Proptest-generated public routes plus bounded lifecycle models for 20 user-operation/admission cells, 12 caller-priced boundary-exit cells, the four-state retirement-obligation lattice, a Recovery crank/owner-exit classifier boundary, and all 5! claimant orders, including generalized active-leg/currentness, source-claim attribution, source-credit-rate, authenticated-expiry, state-indexed liveness witnesses, and reference-model/deployed-transition equivalence |
 | `cu/` | 711 | Full `v16_cu` public-route, metamorphic, rollback, liveness, arithmetic-differential, and max-shape CU inventory, with no standalone top-level tests |
 | `kani/` | 79 | Symbolic wrapper arithmetic, matcher-binding, ordering, strict-decoder, and proof-assumption nonvacuity harnesses; full `cargo kani --tests` remains the required verification command |
 
@@ -149,7 +149,7 @@ charter.
 | INV-066 | SVM/CU + M + Partial R | `stateful/inv_066_resolved_payout_fairness_and_order_independence.rs`, `cu/inv_066_resolved_payout_fairness_and_order_independence.rs` (all 5! basic claimant orders complete the same two-asset lifecycle with identical payouts; top-up, recovery, residue, and authority-refinement state spaces remain) |
 | INV-067 | Independent + Direct + SVM/CU + Partial R | `public_sbf/inv_067_terminal_payout_completeness_and_exact_once_settlement.rs`, `stateful/inv_066_resolved_payout_fairness_and_order_independence.rs`, `stateful/inv_067_terminal_payout_completeness_and_exact_once_settlement.rs`, `cu/inv_067_terminal_payout_completeness_and_exact_once_settlement.rs` (both terminal payout routes are retried at the fixed point after each claimant in all 5! basic orders) |
 | INV-068 | SVM/CU | `cu/inv_068_receipt_uniqueness_and_monotonic_topups.rs` |
-| INV-069 | SVM/CU | `cu/inv_069_terminal_normalization_and_retirement.rs` |
+| INV-069 | SVM/CU + Partial R | `stateful/inv_069_terminal_normalization_and_retirement.rs`, `cu/inv_069_terminal_normalization_and_retirement.rs` (all four funded-insurance/funded-backing blocker states and both public drain orders are covered; other terminal obligation classes remain) |
 | INV-070 | SVM/CU + Partial R | `stateful/inv_066_resolved_payout_fairness_and_order_independence.rs`, `cu/inv_070_zero_unattributed_terminal_residue_and_close_slab.rs` (a public two-asset lifecycle drains every portfolio and reaches `CloseSlab` in all 5! claimant orders) |
 | INV-071 | Independent + SVM/CU + Cross-owner counterexample | `cu/inv_071_crank_progress.rs`, `stateful/inv_082_state_indexed_liveness_theorem.rs` (a Recovery-only stale certificate is classified as stale but neither empty nor apparently complete hints can dispatch a successful crank; the owner reduction remains live) |
 | INV-072 | SVM/CU + M + Partial R | `cu/inv_072_order_robust_crankability.rs` (exhaustive 40-word three-asset hint alphabet through length three, malformed tails, valid-hint normalization, selected-mark observation requirements, and public expired-close recovery after adversarial hints) |
@@ -202,8 +202,8 @@ method outstanding. The current ledger is 58 **OPEN-T**, 20 **OPEN-D**, 10 **FRO
    and `C` for 2. Invariant-owned directories currently exist for only 9 `P`, 27 `F`, and 87 `I`
    owners. File presence is only a lower bound; many owners cover one scenario rather than the
    required matrix. `special_method_coverage.tsv` now machine-indexes all `M`, `R`, and `C`
-   obligations: all 32 `M` and both `C` rows have partial named evidence; 9 `R` rows now have
-   bounded generated or exhaustive-topology evidence and the other 13 remain explicitly omitted.
+   obligations: all 32 `M` and both `C` rows have partial named evidence; 10 `R` rows now have
+   bounded generated or exhaustive-topology evidence and the other 12 remain explicitly omitted.
 2. The deployed decoder has 50 public instruction variants. The stateful public-interface model
    generates fifteen direct operation classes (trade, EWMA configuration, mark push, crank, deposit,
    withdraw, maintenance sync, matcher configuration, insurance top-up, backing top-up,
@@ -215,10 +215,11 @@ method outstanding. The current ledger is 58 **OPEN-T**, 20 **OPEN-D**, 10 **FRO
    not saturation evidence. There is no time-budgeted campaign, transition/branch coverage target,
    mutation score, or corpus-stability criterion for declaring a generator exhausted.
 4. No general bounded BFS/model checker enumerates the reachable lifecycle graph required by
-   INV-007, INV-010, INV-029, INV-041, INV-043, INV-057, INV-065, INV-069,
+   INV-007, INV-010, INV-029, INV-041, INV-043, INV-057, INV-065,
    INV-071, INV-073, INV-075, INV-078, INV-079, INV-082, INV-084, or INV-086. INV-066,
    INV-067, and INV-070 now have a narrower public two-asset model that exhausts all 5! basic
-   claimant orders through exact-once retries and `CloseSlab`; INV-055 has a separate public
+   claimant orders through exact-once retries and `CloseSlab`; INV-069 separately exhausts the
+   four-state insurance/backing retirement-blocker lattice and both public drain orders; INV-055 has a separate public
    20-cell core user-operation admission model; INV-046 has a separate 12-cell caller-priced
    boundary-exit model across three publicly reached lifecycle states; INV-072 exhausts all 40
    three-asset hint words through length three in one actionable topology.
@@ -308,7 +309,7 @@ are machine-checked below so a future README edit cannot silently omit an invari
 | AUDIT-066 | OPEN-T | A public two-asset lifecycle now exhausts all 5! basic claimant orders with exact payout/vault reconciliation and identical outcomes. Extend that bounded model with authority refinement, partial top-ups, exact-bound replacement, recovery transitions, and a rational residue oracle. |
 | AUDIT-067 | OPEN-D | Both payout routes are retried at a byte- and token-stable fixed point after every claimant across all 5! basic orders, but public/stateful terminal-dust tests still assert a reachable payout-erasure violation. Fix it, then model partial top-up, close/recreate, forfeit, and recovery conversion over every claim episode. |
 | AUDIT-068 | OPEN-T | Replay and payout-rail tests exist. Add one-field receipt substitution for market/domain, portfolio incarnation, claim episode, face, snapshot, receipt ID, cross-portfolio, and asset-slot reuse, plus monotonic split top-ups. |
-| AUDIT-069 | OPEN-T | Spent insurance and selected retirement blockers are covered, but important spent/provider setups are injected. Recreate them publicly, then add reset history, price-only indices, expired labels, old epochs, every nonempty obligation control, and bounded terminal normalization reachability. |
+| AUDIT-069 | OPEN-T | A public bounded model now exhausts all four funded-insurance/funded-backing blocker states and both drain orders with exact rollback before terminal retirement. Spent/provider-receivable setups are still injected; recreate them publicly, then add reset history, price-only indices, expired labels, old epochs, pending loss/receipt controls, and their cross-product. |
 | AUDIT-070 | OPEN-T | A complete public two-asset lifecycle now resolves, pays and dematerializes all five funded portfolios, proves zero accounting, and reaches `CloseSlab` across all 5! claimant orders while a foreign market remains byte-identical. Extend it with rounding, recovery, prior insurance, independent stock classification, and surplus sweep. |
 | AUDIT-071 | OPEN-D | Selected crank classes progress, but other owned tests still assert public lock/no-op discoveries. The new public boundary case is precise: shutting down the sole-leg asset invalidates the certificate, the engine classifies the account stale, empty hints reject `NonProgress`, and a hint for the Recovery asset rejects `LockActive`; the owner can still reduce to zero. Stop classifying that state as crank-actionable or add a value-neutral dispatchable continuation, then compose engine rank contracts with a bounded wrapper-state graph. |
 | AUDIT-072 | OPEN-T | A public three-asset matrix now exhausts all 40 hint words through length three, including every bounded subset, ordering, and duplicate placement, plus selected out-of-range, malformed/absent oracle, and unclaimed account tails. Every case rejects atomically or lowers rank before an honest completion to rank zero. Extend that equivalence over every account-actionable crank class and the complete stale external-oracle tail space. |
