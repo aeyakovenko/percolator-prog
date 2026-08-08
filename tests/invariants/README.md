@@ -24,7 +24,7 @@ verification methods are in [`../../INVARIANTS.md`](../../INVARIANTS.md).
 | --- | ---: | --- |
 | `public_sbf/` | 81 | Deterministic public SBF/LiteSVM counterexamples, regressions, decoder corpora, and manifest checks |
 | `stateful/` | 116 | Proptest-generated public routes plus bounded lifecycle models for scarce-backing pair/chunk allocation orders, a 16-cell positive-claim boundary partition, all 3! matcher-control/trade landing orders, 20 user-operation/admission cells, 12 caller-priced boundary-exit cells, the four-state retirement-obligation lattice, a Recovery crank/owner-exit classifier boundary, and all 5! claimant orders, including generalized active-leg/currentness, source-claim attribution, source-credit-rate, authenticated-expiry, state-indexed liveness witnesses, and reference-model/deployed-transition equivalence |
-| `cu/` | 711 | Full `v16_cu` public-route, metamorphic, rollback, liveness, arithmetic-differential, and max-shape CU inventory, with no standalone top-level tests |
+| `cu/` | 712 | Full `v16_cu` public-route, metamorphic, rollback, liveness, arithmetic-differential, and max-shape CU inventory, with no standalone top-level tests |
 | `kani/` | 79 | Symbolic wrapper arithmetic, matcher-binding, ordering, strict-decoder, and proof-assumption nonvacuity harnesses; full `cargo kani --tests` remains the required verification command |
 
 Most deterministic and stateful LoF adapters still reproduce quarantined vulnerable behavior;
@@ -155,7 +155,7 @@ charter.
 | INV-072 | SVM/CU + M + Partial R | `cu/inv_072_order_robust_crankability.rs` (exhaustive 40-word three-asset hint alphabet through length three, malformed tails, valid-hint normalization, selected-mark observation requirements, and public expired-close recovery after adversarial hints) |
 | INV-073 | Independent + F + SVM/CU + Partial R | `stateful/inv_065_reset_recovery_and_retired_state_isolation.rs`, `stateful/inv_066_resolved_payout_fairness_and_order_independence.rs`, `cu/inv_073_no_permanent_user_lock.rs` (generated Recovery exits and an exhaustive basic resolved-claim order model reach terminal disposition) |
 | INV-074 | Independent + SVM/CU | `cu/inv_074_scope_locality.rs` (asset-local stale/bankruptcy isolation plus public asset-close locality for unrelated withdrawals and existing-position exits; new unrelated risk admission may still be conservatively blocked during active close) |
-| INV-075 | SVM/CU + Model gap | `cu/inv_075_close_priority_ownership_and_episode_integrity.rs` (owner/episode/replay checks plus public-created close-ledger competing-action priority and identity preservation; exhaustive strict preemption total-order matrix remains) |
+| INV-075 | SVM/CU + Partial R + Spec/implementation divergence | `cu/inv_075_close_priority_ownership_and_episode_integrity.rs` (owner/episode/replay checks plus both landing orders of two public equal-domain close starts through exact rejection, permissionless expiry/finalization, and rejected-contender exit; the engine implements first-landed exclusive domain ownership rather than the charter's strict preemption total order) |
 | INV-076 | SVM/CU + Model gap | `cu/inv_076_close_drift_residual_durability_and_finalization_atomicity.rs` (public stale-cure and public-created zero-cure atomic rollback with terminal-progress checks; exhaustive close-phase fault injection remains) |
 | INV-077 | Independent + SVM/CU | `cu/inv_077_bounded_work_and_maximum_shape_compute.rs` (supported 14-leg/28-source routes remain bounded; a production-derived registry maps all 50 tags to measured CU evidence; unreserved over-budget source-domain risk rejects atomically before CU exhaustion) |
 | INV-078 | SVM/CU | `cu/inv_078_permissionless_recovery_coverage.rs` |
@@ -202,8 +202,8 @@ method outstanding. The current ledger is 58 **OPEN-T**, 20 **OPEN-D**, 10 **FRO
    and `C` for 2. Invariant-owned directories currently exist for only 9 `P`, 27 `F`, and 87 `I`
    owners. File presence is only a lower bound; many owners cover one scenario rather than the
    required matrix. `special_method_coverage.tsv` now machine-indexes all `M`, `R`, and `C`
-   obligations: all 32 `M` and both `C` rows have partial named evidence; 13 `R` rows now have
-   bounded generated or exhaustive-topology evidence and the other 9 remain explicitly omitted.
+   obligations: all 32 `M` and both `C` rows have partial named evidence; 14 `R` rows now have
+   bounded generated or exhaustive-topology evidence and the other 8 remain explicitly omitted.
 2. The deployed decoder has 50 public instruction variants. The stateful public-interface model
    generates fifteen direct operation classes (trade, EWMA configuration, mark push, crank, deposit,
    withdraw, maintenance sync, matcher configuration, insurance top-up, backing top-up,
@@ -216,13 +216,14 @@ method outstanding. The current ledger is 58 **OPEN-T**, 20 **OPEN-D**, 10 **FRO
    mutation score, or corpus-stability criterion for declaring a generator exhausted.
 4. No general bounded BFS/model checker enumerates the reachable lifecycle graph required by
    INV-007, INV-043, INV-057, INV-065,
-   INV-071, INV-073, INV-075, INV-078, INV-079, INV-082, INV-084, or INV-086. INV-066,
+   INV-071, INV-073, INV-078, INV-079, INV-082, INV-084, or INV-086. INV-066,
    INV-067, and INV-070 now have a narrower public two-asset model that exhausts all 5! basic
    claimant orders through exact-once retries and `CloseSlab`; INV-069 separately exhausts the
    four-state insurance/backing retirement-blocker lattice and both public drain orders; INV-010
    exhausts all 3! orders in its conflicting-control/trade topology; INV-029 exhausts a 16-cell
    public claim-attribution boundary partition; INV-041 covers a public scarce-backing pair/chunk
-   ordering cross-product; INV-055 has a separate public
+   ordering cross-product; INV-075 exhausts both landing orders for two equal-domain public close
+   starts and demonstrates first-landed exclusion rather than priority preemption; INV-055 has a separate public
    20-cell core user-operation admission model; INV-046 has a separate 12-cell caller-priced
    boundary-exit model across three publicly reached lifecycle states; INV-072 exhausts all 40
    three-asset hint words through length three in one actionable topology.
@@ -318,7 +319,7 @@ are machine-checked below so a future README edit cannot silently omit an invari
 | AUDIT-072 | OPEN-T | A public three-asset matrix now exhausts all 40 hint words through length three, including every bounded subset, ordering, and duplicate placement, plus selected out-of-range, malformed/absent oracle, and unclaimed account tails. Every case rejects atomically or lowers rank before an honest completion to rank zero. Extend that equivalence over every account-actionable crank class and the complete stale external-oracle tail space. |
 | AUDIT-073 | OPEN-D | The stateful campaigns exit the designated liquidity provider after unilateral reduction, every modeled portfolio after public asset shutdown, and every basic resolved claimant across all 5! orders, but multiple owned tests still assert publicly reachable funded locks. Fix those locks, then build a small public state graph plus long sequences requiring every funded nonterminal node to reach principal return, a receipt, or authorized junior forfeit. |
 | AUDIT-074 | OPEN-D | Unrelated base trading/withdrawal cases exist, but an owned public test still asserts an unrelated backed claim is blocked by asset-local bankruptcy. Fix or normatively justify that lock, then complete side, portfolio, domain, close, and receipt locality. |
-| AUDIT-075 | FRONTIER | Owner/episode and selected competing-close cases exist. Exhaust strict priority, equal inputs, preemption/restart, stale continuation, cure/cancel, owner deposit, immutable anchors, and no-double-booking with bounded model checking. |
+| AUDIT-075 | FRONTIER | Both landing orders of two public equal-domain close starts now prove first-landed exclusion, exact rejected-contender rollback, immutable accepted identity, permissionless expiry/finalization after configured delays, and terminal exit of the rejected contender without the first owner's signature. This also demonstrates a normative mismatch: the public API and engine expose no strict `ClosePriority` tuple or preemption order. Decide whether exclusion is the specification; otherwise add priority/preemption semantics, then model restart, stale continuation, cure/cancel, owner deposit, and no-double-booking. |
 | AUDIT-076 | OPEN-T | Only stale-cure and zero-cure rollback are owned. Add table-driven public fault injection at every close phase, price/funding drift, preemption/restart, durable residual booking, complete snapshots, and atomic OI/basis-clear checks. |
 | AUDIT-077 | OPEN-T | The production-derived registry now maps all 50 instruction tags to named public-route and measured CU evidence with zero omissions; this tranche added explicit `InitMarket`, enabled/disabled `SetMatcherConfig`, and 5,834-slot `UpdateAssetLifecycle` measurements and indexed nine existing bounds. Complete the remaining maximum-dimension cross-product and activation-time rejection of unsupported shapes. |
 | AUDIT-078 | OPEN-T | Stale-oracle and selected shutdown/expired-close recovery exist. Add public failure classes for B exhaustion, backing failure, lien impairment, domain lock, insurance exhaustion, payout conflict, and every lifecycle failure, then bounded recovery reachability. |

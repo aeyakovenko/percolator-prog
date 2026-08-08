@@ -4,11 +4,14 @@
 //! owner and episode, and inert/canceled ledgers cannot be replayed to double
 //! book deposits or resurrect stale progress.
 //!
-//! Evidence in this file (I/C): public LiteSVM tests cover non-owner
+//! Evidence in this file (I/C/bounded R): public LiteSVM tests cover non-owner
 //! CureAndCancelClose rejection with exact rollback plus successful owner cure,
-//! and double-cure replay rejection against an already canceled close ledger.
-//! Strict close-preemption total-order coverage remains a broader model/proof
-//! follow-up.
+//! double-cure replay rejection, and both landing orders of two publicly
+//! created equal-domain close contenders through permissionless expiry,
+//! terminal finalization, and exit of the rejected contender. The pinned
+//! engine implements first-landed exclusive domain ownership, not the charter's
+//! strict ClosePriority preemption order; resolving that specification/
+//! implementation divergence remains broader model and design work.
 
 use super::*;
 
@@ -23,6 +26,127 @@ fn inv075_close_episode_key(
         ledger.gross_loss_at_close_start,
         ledger.drift_reference_slot,
         ledger.max_close_slot,
+    )
+}
+
+fn inv075_competing_public_closes_fixture() -> (V16CuEnv, Vec<Keypair>, Vec<Pubkey>) {
+    let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+        max_bankrupt_close_lifetime_slots: 2,
+        public_b_chunk_atoms: 1,
+        ..V16CuMarketParams::default()
+    });
+    env.configure_auth_mark_with_cu(0, 100);
+    env.configure_permissionless_resolve_with_cu(100, 5);
+    env.update_market_init_fee_policy_with_cu(1);
+
+    // Keep an unrelated base market live while asset 1 enters Recovery.
+    let base_long_owner = Keypair::new();
+    let base_short_owner = Keypair::new();
+    let base_long = env.create_portfolio(&base_long_owner);
+    let base_short = env.create_portfolio(&base_short_owner);
+    env.deposit(&base_long_owner, base_long, 1_000);
+    env.deposit(&base_short_owner, base_short, 1_000);
+    env.trade_asset_with_cu(
+        0,
+        &base_long_owner,
+        base_long,
+        &base_short_owner,
+        base_short,
+        POS_SCALE as i128,
+        100,
+        0,
+    );
+
+    let creator = Keypair::new();
+    let creator_key = creator.pubkey();
+    env.activate_permissionless_asset_with_fee(
+        &creator,
+        1,
+        1,
+        100,
+        creator_key,
+        creator_key,
+        creator_key,
+        creator_key,
+        1,
+    );
+    env.configure_auth_mark_for_asset_with_authority(1, &creator, 1, 100);
+
+    let mut winners = Vec::new();
+    let mut loss_owners = Vec::new();
+    let mut losses = Vec::new();
+    for _ in 0..2 {
+        let winner_owner = Keypair::new();
+        let loss_owner = Keypair::new();
+        let winner = env.create_portfolio(&winner_owner);
+        let loss = env.create_portfolio(&loss_owner);
+        env.deposit(&winner_owner, winner, 10);
+        env.deposit(&loss_owner, loss, 2);
+        env.trade_asset_with_cu(
+            1,
+            &winner_owner,
+            winner,
+            &loss_owner,
+            loss,
+            (POS_SCALE / 50) as i128,
+            100,
+            0,
+        );
+        winners.push(winner);
+        loss_owners.push(loss_owner);
+        losses.push(loss);
+    }
+
+    for (slot, mark) in [(2u64, 200u64), (3, 300)] {
+        env.svm.warp_to_slot(slot);
+        env.push_auth_mark_for_asset_with_authority(1, &creator, slot, mark);
+        for &winner in &winners {
+            env.crank(
+                winner,
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: slot,
+                    observations: crank_observations(1),
+                },
+            );
+        }
+    }
+    for &loss in &losses {
+        env.crank(
+            loss,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 3,
+                observations: crank_observations(1),
+            },
+        );
+    }
+
+    env.svm.warp_to_slot(4);
+    env.try_shutdown_asset_with_authority(&creator, 1, 4)
+        .expect("asset creator shuts down asset 1");
+    (env, loss_owners, losses)
+}
+
+fn inv075_try_forfeit(
+    env: &mut V16CuEnv,
+    owner: &Keypair,
+    portfolio: Pubkey,
+) -> Result<u64, String> {
+    let portfolio_id = env.portfolio_id(portfolio);
+    let position_epoch = env.portfolio_position_epoch(portfolio);
+    env.svm.expire_blockhash();
+    env.send(
+        ProgInstruction::ForfeitRecoveryLeg {
+            portfolio_id,
+            position_epoch,
+            asset_index: 1,
+            b_delta_budget: 1,
+        },
+        vec![
+            AccountMeta::new(owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio, false),
+        ],
+        &[owner],
     )
 }
 
@@ -271,6 +395,130 @@ fn v16_program_public_close_episode_competing_actions_preserve_priority_and_iden
         ),
         "expired close continuation must enter a terminal progress mode"
     );
+}
+
+// The pinned engine does not expose the charter's ClosePriority tuple. It
+// serializes close starts with a first-landed per-domain barrier instead. This
+// bounded public model exhausts both 2! landing orders for equal close
+// contenders and pins that actual mechanism: the first start owns the barrier,
+// the second rejects with an exact frame, the accepted episode retains its
+// immutable identity, and both contenders can be terminally cleared after the
+// configured delays without a signature from the first owner.
+#[test]
+fn v16_program_competing_close_starts_exhaust_both_landing_orders() {
+    for first in [0usize, 1usize] {
+        let second = 1 - first;
+        let (mut env, owners, portfolios) = inv075_competing_public_closes_fixture();
+
+        inv075_try_forfeit(&mut env, &owners[first], portfolios[first])
+            .expect("first landed close takes the domain barrier");
+        let accepted_before = close_progress(&env.portfolio_state(portfolios[first]));
+        assert!(accepted_before.active && accepted_before.residual_remaining > 0);
+        let accepted_episode = inv075_close_episode_key(accepted_before);
+
+        let market_before = env.svm.get_account(&env.market).unwrap();
+        let first_before = env.svm.get_account(&portfolios[first]).unwrap();
+        let second_before = env.svm.get_account(&portfolios[second]).unwrap();
+        let vault_before = env.svm.get_account(&env.vault).unwrap();
+        let rejected = inv075_try_forfeit(&mut env, &owners[second], portfolios[second])
+            .expect_err("second close in the occupied domain must reject");
+        assert!(
+            rejected.contains("Custom(21)"),
+            "occupied-domain contender must reject LockActive: {rejected}"
+        );
+        assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+        assert_eq!(
+            env.svm.get_account(&portfolios[first]).unwrap(),
+            first_before
+        );
+        assert_eq!(
+            env.svm.get_account(&portfolios[second]).unwrap(),
+            second_before
+        );
+        assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+        assert_eq!(
+            inv075_close_episode_key(close_progress(&env.portfolio_state(portfolios[first]))),
+            accepted_episode
+        );
+        assert!(!close_progress(&env.portfolio_state(portfolios[second])).active);
+        assert!(has_active_leg_for_asset(
+            &env.portfolio_state(portfolios[second]),
+            1
+        ));
+
+        env.svm.warp_to_slot(accepted_before.max_close_slot + 1);
+        env.svm.expire_blockhash();
+        env.send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 0,
+                observations: vec![],
+            },
+            vec![
+                AccountMeta::new_readonly(env.payer.pubkey(), false),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(portfolios[first], false),
+            ],
+            &[],
+        )
+        .expect("accepted close retains a permissionless expiry continuation");
+        assert!(matches!(
+            env.market_state().1.mode,
+            MarketModeV16::Recovery | MarketModeV16::Resolved
+        ));
+        env.svm.warp_to_slot(accepted_before.max_close_slot + 10);
+        for _ in 0..16 {
+            let close = close_progress(&env.portfolio_state(portfolios[first]));
+            if close.finalized && close.residual_remaining == 0 {
+                break;
+            }
+            let (cfg, group) = env.market_state();
+            if group.mode == MarketModeV16::Resolved {
+                env.svm.warp_to_slot(
+                    group
+                        .resolved_slot
+                        .saturating_add(cfg.force_close_delay_slots)
+                        .saturating_add(1),
+                );
+            }
+            env.svm.expire_blockhash();
+            env.send(
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: 0,
+                    observations: vec![],
+                },
+                vec![
+                    AccountMeta::new_readonly(owners[first].pubkey(), false),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(portfolios[first], false),
+                ],
+                &[],
+            )
+            .expect("accepted close retains a permissionless terminal continuation");
+        }
+        let accepted_after = close_progress(&env.portfolio_state(portfolios[first]));
+        assert!(
+            accepted_after.finalized && accepted_after.residual_remaining == 0,
+            "permissionless terminal continuation must finalize the accepted close: {accepted_after:?}"
+        );
+        if env.market_state().1.mode == MarketModeV16::Recovery {
+            env.resolve_stale_permissionless_with_cu(200);
+        }
+        assert_eq!(env.market_state().1.mode, MarketModeV16::Resolved);
+        for _ in 0..16 {
+            if !has_active_leg_for_asset(&env.portfolio_state(portfolios[second]), 1) {
+                break;
+            }
+            env.close_resolved(&owners[second], portfolios[second]);
+        }
+        assert!(!has_active_leg_for_asset(
+            &env.portfolio_state(portfolios[first]),
+            1
+        ));
+        assert!(!has_active_leg_for_asset(
+            &env.portfolio_state(portfolios[second]),
+            1
+        ));
+    }
 }
 
 // security.md sweep — withdraw blocked during active close (#22/#48): an account with an active/in-

@@ -50,7 +50,7 @@ INV-070	R	PARTIAL	tests/invariants/stateful/inv_066_resolved_payout_fairness_and
 INV-071	R	OMITTED	-	No exhaustive actionable-state rank graph exists at the wrapper boundary.
 INV-072	R	PARTIAL	tests/invariants/cu/inv_072_order_robust_crankability.rs#v16_program_crank_hint_matrix_preserves_or_discovers_canonical_progress	Exhausts all 40 three-asset hint words through length three plus malformed tails in one public actionable topology; other crank classes remain.
 INV-073	R	PARTIAL	tests/invariants/stateful/inv_065_reset_recovery_and_retired_state_isolation.rs#v16_program_generated_shutdown_reaches_recovery_then_all_positions_exit	A generated funded Recovery path exits; no bounded graph covers every reachable funded state.
-INV-075	R	OMITTED	-	No exhaustive close-priority preemption and restart model exists.
+INV-075	R	PARTIAL	tests/invariants/cu/inv_075_close_priority_ownership_and_episode_integrity.rs#v16_program_competing_close_starts_exhaust_both_landing_orders	Exhausts both public landing orders for two equal-domain close starts through exact rejection permissionless expiry/finalization and rejected-contender exit under the engine's first-landed exclusive barrier; the charter's strict priority/preemption semantics are absent and restart/cure interleavings remain.
 INV-078	R	OMITTED	-	No exhaustive failure-class to permissionless-recovery model exists.
 INV-079	R	OMITTED	-	Finding traces are not replayed through a bounded public-state reachability engine.
 INV-082	R	OMITTED	-	Fixed route witnesses exist but no exhaustive state-indexed liveness graph exists.
