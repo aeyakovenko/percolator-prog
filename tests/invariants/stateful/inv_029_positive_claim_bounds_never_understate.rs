@@ -30,6 +30,33 @@
 
 use super::*;
 
+#[test]
+fn v16_program_claim_bound_boundary_partition_exhausts_public_lifecycle_grid() {
+    let mut case = 0u8;
+    for position_units in [1u8, 4] {
+        for price_move in [5u8, 6, 19, 20] {
+            for reverse_conversion_order in [false, true] {
+                let mut seed = [0x29; 32];
+                seed[0] = case;
+                verify_positive_claim_bound_attribution_lifecycle(
+                    seed,
+                    position_units,
+                    price_move,
+                    reverse_conversion_order,
+                )
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "claim-bound boundary cell failed: units={position_units}, \
+                         move={price_move}, reverse={reverse_conversion_order}: {error}"
+                    )
+                });
+                case = case.checked_add(1).expect("bounded case count");
+            }
+        }
+    }
+    assert_eq!(case, 16);
+}
+
 proptest! {
     #![proptest_config(ProptestConfig {
         cases: env_usize("PERCOLATOR_FUZZ_CASES", 8) as u32,

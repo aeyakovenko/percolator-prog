@@ -23,7 +23,7 @@ verification methods are in [`../../INVARIANTS.md`](../../INVARIANTS.md).
 | Suite | Tests | Evidence |
 | --- | ---: | --- |
 | `public_sbf/` | 81 | Deterministic public SBF/LiteSVM counterexamples, regressions, decoder corpora, and manifest checks |
-| `stateful/` | 114 | Proptest-generated public routes plus bounded lifecycle models for all 3! matcher-control/trade landing orders, 20 user-operation/admission cells, 12 caller-priced boundary-exit cells, the four-state retirement-obligation lattice, a Recovery crank/owner-exit classifier boundary, and all 5! claimant orders, including generalized active-leg/currentness, source-claim attribution, source-credit-rate, authenticated-expiry, state-indexed liveness witnesses, and reference-model/deployed-transition equivalence |
+| `stateful/` | 115 | Proptest-generated public routes plus bounded lifecycle models for a 16-cell positive-claim boundary partition, all 3! matcher-control/trade landing orders, 20 user-operation/admission cells, 12 caller-priced boundary-exit cells, the four-state retirement-obligation lattice, a Recovery crank/owner-exit classifier boundary, and all 5! claimant orders, including generalized active-leg/currentness, source-claim attribution, source-credit-rate, authenticated-expiry, state-indexed liveness witnesses, and reference-model/deployed-transition equivalence |
 | `cu/` | 711 | Full `v16_cu` public-route, metamorphic, rollback, liveness, arithmetic-differential, and max-shape CU inventory, with no standalone top-level tests |
 | `kani/` | 79 | Symbolic wrapper arithmetic, matcher-binding, ordering, strict-decoder, and proof-assumption nonvacuity harnesses; full `cargo kani --tests` remains the required verification command |
 
@@ -109,7 +109,7 @@ charter.
 | INV-026 | SVM/CU | `cu/inv_026_reservation_and_encumbrance_conservation_is_separate_from_token_value.rs` |
 | INV-027 | SVM/CU | `cu/inv_027_protected_principal_seniority.rs` |
 | INV-028 | Independent + SVM/CU | `stateful/inv_028_source_domain_realizability_cap.rs`, `cu/inv_028_source_domain_realizability_cap.rs` (28-domain admission-order matrix rejects unreserved risk before funded-leg admission while already-reserved domains remain closeable) |
-| INV-029 | F + SVM/CU | `stateful/inv_029_positive_claim_bounds_never_understate.rs`, `cu/inv_029_positive_claim_bounds_never_understate.rs` (deterministic whole-route source-claim lifecycle census) |
+| INV-029 | F + SVM/CU + Partial R | `stateful/inv_029_positive_claim_bounds_never_understate.rs`, `cu/inv_029_positive_claim_bounds_never_understate.rs` (whole-route source-claim lifecycle census plus a 16-cell min/max and odd/even boundary partition) |
 | INV-030 | Independent + SVM/CU | `stateful/inv_030_credit_rate_determinism_and_fail_closed_behavior.rs`, `cu/inv_030_credit_rate_determinism_and_fail_closed_behavior.rs`, `cu/inv_063_backing_expiry_normalization.rs` (deterministic credit-rate lifecycle plus secondary expiry/progress owner) |
 | INV-031 | Independent + Direct + SVM/CU | `public_sbf/inv_031_no_double_use_of_claim_backing_or_insurance_atoms.rs`, `stateful/inv_031_no_double_use_of_claim_backing_or_insurance_atoms.rs`, `cu/inv_031_no_double_use_of_claim_backing_or_insurance_atoms.rs` (shared user credit, live domain insurance, and terminal insurance across primary/secondary collateral rails) |
 | INV-032 | SVM/CU | `cu/inv_032_exact_counterparty_lien_lifecycle.rs` |
@@ -202,8 +202,8 @@ method outstanding. The current ledger is 58 **OPEN-T**, 20 **OPEN-D**, 10 **FRO
    and `C` for 2. Invariant-owned directories currently exist for only 9 `P`, 27 `F`, and 87 `I`
    owners. File presence is only a lower bound; many owners cover one scenario rather than the
    required matrix. `special_method_coverage.tsv` now machine-indexes all `M`, `R`, and `C`
-   obligations: all 32 `M` and both `C` rows have partial named evidence; 11 `R` rows now have
-   bounded generated or exhaustive-topology evidence and the other 11 remain explicitly omitted.
+   obligations: all 32 `M` and both `C` rows have partial named evidence; 12 `R` rows now have
+   bounded generated or exhaustive-topology evidence and the other 10 remain explicitly omitted.
 2. The deployed decoder has 50 public instruction variants. The stateful public-interface model
    generates fifteen direct operation classes (trade, EWMA configuration, mark push, crank, deposit,
    withdraw, maintenance sync, matcher configuration, insurance top-up, backing top-up,
@@ -215,12 +215,13 @@ method outstanding. The current ledger is 58 **OPEN-T**, 20 **OPEN-D**, 10 **FRO
    not saturation evidence. There is no time-budgeted campaign, transition/branch coverage target,
    mutation score, or corpus-stability criterion for declaring a generator exhausted.
 4. No general bounded BFS/model checker enumerates the reachable lifecycle graph required by
-   INV-007, INV-029, INV-041, INV-043, INV-057, INV-065,
+   INV-007, INV-041, INV-043, INV-057, INV-065,
    INV-071, INV-073, INV-075, INV-078, INV-079, INV-082, INV-084, or INV-086. INV-066,
    INV-067, and INV-070 now have a narrower public two-asset model that exhausts all 5! basic
    claimant orders through exact-once retries and `CloseSlab`; INV-069 separately exhausts the
    four-state insurance/backing retirement-blocker lattice and both public drain orders; INV-010
-   exhausts all 3! orders in its conflicting-control/trade topology; INV-055 has a separate public
+   exhausts all 3! orders in its conflicting-control/trade topology; INV-029 exhausts a 16-cell
+   public claim-attribution boundary partition; INV-055 has a separate public
    20-cell core user-operation admission model; INV-046 has a separate 12-cell caller-priced
    boundary-exit model across three publicly reached lifecycle states; INV-072 exhausts all 40
    three-asset hint words through length three in one actionable topology.
@@ -270,7 +271,7 @@ are machine-checked below so a future README edit cannot silently omit an invari
 | AUDIT-026 | OPEN-T | One source-credit reservation path is covered. Creation, consumption, release, impairment, recovery, insurance reservations, pending obligations, close reserves, and retry/double-use need a common encumbrance lifecycle model. |
 | AUDIT-027 | OPEN-T | Selected protected-principal paths are covered, but not every favorable operation/route from underbacked, loss-stale, and stale-certificate states. Add a generated route-by-state seniority matrix and normalized metamorphic outcomes. |
 | AUDIT-028 | OPEN-T | Source reversal, expiry, rounding, sparse-capacity, and formula checks exist. Insurance impairment, cyclic `A-backs-B-backs-A`, omitted backing, and a bounded multi-domain proof against an independent cap model remain. |
-| AUDIT-029 | OPEN-T | A generated claim census exists, but bucket edges, favorable funding bounds, rebucketing, stale uncertainty, exact-receipt replacement, and bounded reachability are not exhausted. |
+| AUDIT-029 | OPEN-T | The exact public claim census now exhausts 16 lifecycle cells over min/max positions, odd/even partial-burn edges, and both claimant orders. Interior price moves, favorable funding bounds, rebucketing, stale uncertainty, exact-receipt replacement, and the complete production state graph remain. |
 | AUDIT-030 | OPEN-T | The independent rate oracle covers claim/add/expiry/reduce/refill. Add impairment, omitted/malformed state, every source-credit mutation route, and a proof that only fresh backing or a valid claim-bound decrease can improve rate. |
 | AUDIT-031 | OPEN-T | Shared credit and insurance rails are tested, while vulnerable-pin double-spend traces remain. Duplicate lien creation, cross-domain reservation, partial retry, and concurrent route use need one atom-ownership lifecycle oracle. |
 | AUDIT-032 | OPEN-T | One force-close route checks lien sums. Differentially recompute bucket and domain aggregates across create, consume, release, impair, recover, and every injected failure point. |
