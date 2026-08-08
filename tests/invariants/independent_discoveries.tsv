@@ -61,7 +61,7 @@ INV-039	terminal-commit/pending-zero-move-funding	v16_program_pending_zero_move_
 INV-039	terminal-commit/asset-shutdown-funding	v16_program_shutdown_commit_ordering_preserves_committed_funding	committed-funding-must-accrue-before-lifecycle-terminalization	254
 INV-039	terminal-commit/asset-shutdown-catchup	v16_program_shutdown_rejection_retains_bounded_public_progress	stale-shutdown-must-retain-a-bounded-public-progress-path	254
 INV-039	prospective-accrual/all-trade-routes	v16_program_prospective_accrual_route_matrix_preserves_elapsed_funding	prospective-accrual-cannot-be-rewritten-by-trade-order	380
-INV-039	stale-cohort/all-trade-routes	v16_program_stale_cohort_route_matrix_discovers_historical_loss_transfer	fresh-counterparty-must-not-inherit-preexisting-settlement-cohort	360
+INV-039	stale-cohort/all-trade-routes	v16_program_stale_cohort_route_matrix_discovers_fresh_principal_subordination	fresh-counterparty-must-not-inherit-preexisting-settlement-cohort	360
 INV-045	mark-publication/authenticated-push	v16_program_mark_publication_matrix_discovers_stale_risk_admission	pending-mark-cannot-authorize-stale-price-risk-increase	264
 INV-045	mark-publication/ewma-push	v16_program_mark_publication_matrix_discovers_stale_risk_admission	pending-mark-cannot-authorize-stale-price-risk-increase	265
 INV-045	mark-publication/reported-price-trade	v16_program_mark_publication_matrix_discovers_stale_risk_admission	pending-mark-cannot-authorize-stale-price-risk-increase	333

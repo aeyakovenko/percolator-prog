@@ -129,6 +129,9 @@ mod inv_025_exact_stock_reconciliation;
 #[path = "invariants/stateful/inv_026_reservation_and_encumbrance_conservation.rs"]
 mod inv_026_reservation_and_encumbrance_conservation;
 
+#[path = "invariants/stateful/inv_027_protected_principal_seniority.rs"]
+mod inv_027_protected_principal_seniority;
+
 #[path = "invariants/stateful/inv_028_source_domain_realizability_cap.rs"]
 mod inv_028_source_domain_realizability_cap;
 

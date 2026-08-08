@@ -295,6 +295,11 @@ fn v16_open_security_finding_benchmark_is_complete_and_non_overclaiming() {
             include_str!("../stateful/inv_020_authenticated_clock_slot_and_oracle_provenance.rs"),
         ),
         (
+            27,
+            &[27, 39],
+            include_str!("../stateful/inv_027_protected_principal_seniority.rs"),
+        ),
+        (
             28,
             &[28],
             include_str!("../stateful/inv_028_source_domain_realizability_cap.rs"),

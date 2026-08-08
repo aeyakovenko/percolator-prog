@@ -3895,11 +3895,13 @@ impl ScenarioRunner {
         } else {
             0
         };
-        // A ResetPending side is actionable before its final leg is cleared, not only once
-        // FinalizeResetSide is already admissible. Count the mode barrier plus every exact
-        // prerequisite consumed by the public clear/finalize sequence so clearing the last leg
-        // changes reset work from 2 to 1, and finalization changes it from 1 to 0.
-        let loss_work = reset_pending_work(&group)?.max(u128::from(group.loss_stale_active));
+        // Auto-crank receives one caller-selected portfolio. Reset work is actionable for that
+        // call only when this portfolio owns an old-epoch leg or the side is already finalizable.
+        // Include the future finalize step when this account owns the last stored leg so clear
+        // changes 2 -> 1 and finalize changes 1 -> 0 without making unrelated empty accounts
+        // appear actionable.
+        let loss_work = reset_pending_work_for_account(&group, &account)?
+            .max(u128::from(group.loss_stale_active));
         let market_locks = u128::from(group.bankruptcy_hlock_active)
             .checked_add(u128::from(group.threshold_stress_active))
             .and_then(|value| value.checked_add(loss_work))
@@ -16755,18 +16757,23 @@ fn reset_pending_side_count(group: &percolator_prog::state::MarketGroupV16) -> u
         .sum()
 }
 
-fn reset_pending_work(group: &percolator_prog::state::MarketGroupV16) -> Result<u128, String> {
+fn reset_pending_work_for_account(
+    group: &percolator_prog::state::MarketGroupV16,
+    account: &PortfolioAccountV16,
+) -> Result<u128, String> {
     let mut work = 0u128;
+    let legs = decoded_legs(account);
     for (asset_index, asset) in group.assets.iter().take(ASSET_COUNT).enumerate() {
         let (long_domain, short_domain) = v16_domain_pair_for_asset_index(asset_index)
             .map_err(|error| format!("reset-work domain mapping: {error:?}"))?;
-        for (mode, stored, stale, pending, domain) in [
+        for (mode, stored, stale, pending, domain, side) in [
             (
                 asset.mode_long,
                 asset.stored_pos_count_long,
                 asset.stale_account_count_long,
                 asset.pending_obligation_count_long,
                 long_domain,
+                SideV16::Long,
             ),
             (
                 asset.mode_short,
@@ -16774,6 +16781,7 @@ fn reset_pending_work(group: &percolator_prog::state::MarketGroupV16) -> Result<
                 asset.stale_account_count_short,
                 asset.pending_obligation_count_short,
                 short_domain,
+                SideV16::Short,
             ),
         ] {
             if mode != SideModeV16::ResetPending {
@@ -16784,11 +16792,16 @@ fn reset_pending_work(group: &percolator_prog::state::MarketGroupV16) -> Result<
                 .get(domain)
                 .copied()
                 .ok_or_else(|| format!("reset-work missing domain {domain}"))?;
-            let side_work = 1u128
-                .checked_add(u128::from(stored))
-                .and_then(|value| value.checked_add(u128::from(stale)))
-                .and_then(|value| value.checked_add(u128::from(pending)))
-                .and_then(|value| value.checked_add(u128::from(barrier)))
+            let account_legs = legs
+                .iter()
+                .filter(|leg| {
+                    leg.active && leg.asset_index as usize == asset_index && leg.side == side
+                })
+                .count() as u64;
+            let already_finalizable = stored == 0 && stale == 0 && pending == 0 && barrier == 0;
+            let owns_last_stored_legs = account_legs != 0 && account_legs == stored;
+            let side_work = u128::from(account_legs)
+                .checked_add(u128::from(already_finalizable || owns_last_stored_legs))
                 .ok_or("reset-side progress rank overflow")?;
             work = work
                 .checked_add(side_work)
@@ -16854,7 +16867,7 @@ fn asset_contributes_to_loss_stale(asset: &percolator::AssetStateV16) -> bool {
         || asset.loss_weight_sum_short != 0)
 }
 
-fn execute_trade_route(
+pub(crate) fn execute_trade_route(
     env: &mut V16Svm,
     route: TradeRoute,
     taker: usize,

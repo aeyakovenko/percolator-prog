@@ -15,19 +15,17 @@
 //! `v16_program_shutdown_commit_ordering_preserves_committed_funding` applies the same ordering
 //! oracle to asset shutdown while constraining the effective price to remain unchanged. Any payout
 //! difference is therefore a committed funding transfer erased by the lifecycle transition.
-//! `v16_program_stale_cohort_route_matrix_discovers_historical_loss_transfer` realizes
-//! source-backed PnL while the losing cohort is stale, varies all single/batch CPI/no-CPI routes
-//! used to novate the winning exposure, and then settles and exits every participant. Its token oracle
-//! requires the fresh LP's exact principal loss plus the original loser's loss to equal the
-//! stale winner's extracted profit.
+//! INV-027 owns the stale-cohort novation counterexample because its terminal economic violation
+//! is subordination of a fresh entrant's protected principal. This file retains the independent
+//! pending-obligation and accrual-ordering matrices that lead to that broader seniority property.
 //! Direct impact tests remain below. These tests
 //! exercise the deployed public
 //! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
 //! rollback, liveness, or compute outcomes appropriate to the invariant.
 //!
 //! Guarantee boundary: the prospective-accrual, exposure-removal, asset-shutdown, and
-//! terminal-resolve matrices are fixed-pin certification. Stale-cohort novation remains a
-//! quarantined counterexample until its corresponding fix lands.
+//! terminal-resolve matrices are fixed-pin certification. INV-027 tracks stale-cohort novation as
+//! a quarantined protected-principal counterexample until its corresponding fix lands.
 
 use super::*;
 
@@ -206,45 +204,6 @@ proptest! {
             discovery.control_f_short_num
         );
         prop_assert!(!discovery.is_violation(), "{discovery:?}");
-    }
-}
-
-proptest! {
-    #![proptest_config(ProptestConfig {
-        cases: env_usize("PERCOLATOR_FUZZ_CASES", 4) as u32,
-        max_shrink_iters: env_usize("PERCOLATOR_FUZZ_SHRINK_ITERS", 8) as u32,
-        failure_persistence: Some(Box::new(
-            proptest::test_runner::FileFailurePersistence::Direct(
-                "proptest-regressions/inv_039_stale_cohort_discovery.txt",
-            ),
-        )),
-        ..ProptestConfig::default()
-    })]
-
-    #[test]
-    fn v16_program_stale_cohort_route_matrix_discovers_historical_loss_transfer(
-        seed in any::<[u8; 32]>()
-    ) {
-        let discoveries = discover_stale_cohort_novations(seed)
-            .map_err(TestCaseError::fail)?;
-        prop_assert_eq!(discoveries.len(), StaleCohortRoute::ALL.len());
-        for (expected, discovery) in StaleCohortRoute::ALL.into_iter().zip(&discoveries) {
-            prop_assert_eq!(discovery.route, expected);
-            prop_assert_eq!(discovery.pre_stale_long_count, 0);
-            prop_assert_eq!(discovery.pre_stale_short_count, 0);
-            prop_assert_eq!(discovery.pre_negative_pnl_count, 0);
-        }
-        let violations: Vec<_> = discoveries
-            .iter()
-            .filter(|discovery| discovery.is_violation())
-            .map(|discovery| discovery.route)
-            .collect();
-        eprintln!("independent stale-cohort novation discoveries: {discoveries:?}");
-        prop_assert_eq!(
-            violations,
-            StaleCohortRoute::ALL.to_vec(),
-            "vulnerable-pin stale-cohort route behavior changed"
-        );
     }
 }
 
