@@ -4,18 +4,18 @@
 //! public route or separately proven satisfiable for the modeled transition.
 //! A harness must not make the exploit class impossible by assumption.
 //!
-//! Evidence in this file (P): these harnesses pin representative proof
-//! preconditions used by the wrapper's local Kani suite. They prove concrete
-//! valid witnesses for sequence, decoder, matcher-return, and mark-policy
-//! assumptions; and they remove one bounded-input assumption entirely by
-//! proving `set_enabled` accepts exactly 0/1 and fail-closes all other `u8`
-//! values without mutating unrelated control bits. They also prove the unknown
-//! instruction-tag partition used by INV-022 has concrete rejected witnesses,
-//! including retained gaps and the internal-only tag 47.
+//! Evidence in this file (P): a compile-time inventory covers every explicit
+//! Kani assumption in all mounted wrapper Kani owners. Source sentinels bind each
+//! inventory entry to its exact predicate and owning proof. A full-width
+//! symbolic partition then proves each current predicate has admitted and
+//! excluded models and pins boundary witnesses that kill common widening or
+//! dropped-clause mutations. Additional harnesses prove constructive valid
+//! witnesses for sequence, decoder, matcher-return, and mark-policy domains.
 //!
-//! Guarantee boundary: this is proof-harness hygiene. It does not replace
-//! whole-route SVM tests that establish the public-account state entering these
-//! pure transitions.
+//! Guarantee boundary: this inventories explicit assumption calls, not all
+//! implicit proof preconditions encoded as branches or concrete fixtures. It
+//! also does not replace whole-route SVM or bounded-state evidence establishing
+//! that public-account states reach each admitted proof domain.
 
 use super::*;
 use percolator::V16Error;
@@ -54,6 +54,36 @@ const INV084_FILE_084: &[u8] =
     b"tests/invariants/kani/inv_084_proof_assumptions_are_reachable_and_nonvacuous.rs";
 const INV084_FILE_085: &[u8] =
     b"tests/invariants/kani/inv_085_proven_arithmetic_equals_deployed_arithmetic.rs";
+
+const INV084_ASSUME_ENABLED: &[u8] = b"kani\x3a\x3aassume(enabled <= 1);";
+const INV084_ASSUME_FEED_INDEX: &[u8] = b"kani\x3a\x3aassume(feed_index < feeds.len());";
+const INV084_ASSUME_BYTE_INDEX: &[u8] = b"kani\x3a\x3aassume(byte_index < feeds[0].len());";
+const INV084_ASSUME_POSITIVE_MARKS: &[u8] = b"kani\x3a\x3aassume(old_mark > 0 && quoted_mark > 0);";
+const INV084_ASSUME_ENGINE_TAG: &[u8] = b"kani\x3a\x3aassume(tag < 12);";
+const INV084_ASSUME_DT_BOUND: &[u8] = b"kani\x3a\x3aassume(dt_raw <= 15);";
+
+const INV084_OWNER_MATCHER_TOGGLE: &[u8] = b"fn kani_v16_matcher_toggle_preserves_position_epoch(";
+const INV084_OWNER_HYBRID_DECODE: &[u8] =
+    b"fn kani_v16_configure_hybrid_oracle_decode_preserves_wire_fields(";
+const INV084_OWNER_FEE_MARK_CLAMP: &[u8] =
+    b"fn kani_v16_fee_supported_mark_clamp_is_directional_and_zero_support_is_noop(";
+const INV084_OWNER_COLLECTED_BASE_FEE: &[u8] =
+    b"fn kani_v16_collected_base_fee_cannot_fund_mark_movement(";
+const INV084_OWNER_ONE_SIDED_FEE: &[u8] =
+    b"fn kani_v16_one_sided_externality_fee_cannot_fund_mark_movement(";
+const INV084_OWNER_ENGINE_ERROR: &[u8] =
+    b"fn kani_v16_inv080_every_engine_error_maps_to_instruction_error(";
+const INV084_OWNER_DT_CLAMP: &[u8] =
+    b"fn kani_v16_inv085_clamp_toward_matches_widened_reference_for_small_symbolic_domain(";
+
+const INV084_ROW_MATCHER_TOGGLE: &[u8] = b"tests/invariants/kani/inv_004_position_episode_binding.rs\t48\tINV-004\tkani_v16_matcher_toggle_preserves_position_epoch\tenabled <= 1\t";
+const INV084_ROW_FEED_INDEX: &[u8] = b"tests/invariants/kani/inv_022_instruction_decoding_and_schema_upgrade_safety.rs\t1096\tINV-022\tkani_v16_configure_hybrid_oracle_decode_preserves_wire_fields\tfeed_index < feeds.len()\t";
+const INV084_ROW_BYTE_INDEX: &[u8] = b"tests/invariants/kani/inv_022_instruction_decoding_and_schema_upgrade_safety.rs\t1097\tINV-022\tkani_v16_configure_hybrid_oracle_decode_preserves_wire_fields\tbyte_index < feeds[0].len()\t";
+const INV084_ROW_FEE_MARK_CLAMP: &[u8] = b"tests/invariants/kani/inv_045_no_free_mark_movement.rs\t46\tINV-045\tkani_v16_fee_supported_mark_clamp_is_directional_and_zero_support_is_noop\told_mark > 0 && quoted_mark > 0\t";
+const INV084_ROW_COLLECTED_BASE_FEE: &[u8] = b"tests/invariants/kani/inv_045_no_free_mark_movement.rs\t78\tINV-045\tkani_v16_collected_base_fee_cannot_fund_mark_movement\told_mark > 0 && quoted_mark > 0\t";
+const INV084_ROW_ONE_SIDED_FEE: &[u8] = b"tests/invariants/kani/inv_045_no_free_mark_movement.rs\t108\tINV-045\tkani_v16_one_sided_externality_fee_cannot_fund_mark_movement\told_mark > 0 && quoted_mark > 0\t";
+const INV084_ROW_ENGINE_ERROR: &[u8] = b"tests/invariants/kani/inv_080_error_propagation_and_exact_rollback.rs\t54\tINV-080\tkani_v16_inv080_every_engine_error_maps_to_instruction_error\ttag < 12\t";
+const INV084_ROW_DT_CLAMP: &[u8] = b"tests/invariants/kani/inv_085_proven_arithmetic_equals_deployed_arithmetic.rs\t68\tINV-085\tkani_v16_inv085_clamp_toward_matches_widened_reference_for_small_symbolic_domain\tdt_raw <= 15\t";
 
 const fn inv084_bytes_eq_at(haystack: &[u8], offset: usize, needle: &[u8]) -> bool {
     if offset + needle.len() > haystack.len() {
@@ -275,43 +305,58 @@ const _: () = assert!(
 const _: () = assert!(inv084_line_contains_token(
     INV084_SRC_004,
     48,
-    INV084_ASSUME_TOKEN
+    INV084_ASSUME_ENABLED
 ));
 const _: () = assert!(inv084_line_contains_token(
     INV084_SRC_022,
     1096,
-    INV084_ASSUME_TOKEN
+    INV084_ASSUME_FEED_INDEX
 ));
 const _: () = assert!(inv084_line_contains_token(
     INV084_SRC_022,
     1097,
-    INV084_ASSUME_TOKEN
+    INV084_ASSUME_BYTE_INDEX
 ));
 const _: () = assert!(inv084_line_contains_token(
     INV084_SRC_045,
     46,
-    INV084_ASSUME_TOKEN
+    INV084_ASSUME_POSITIVE_MARKS
 ));
 const _: () = assert!(inv084_line_contains_token(
     INV084_SRC_045,
     78,
-    INV084_ASSUME_TOKEN
+    INV084_ASSUME_POSITIVE_MARKS
 ));
 const _: () = assert!(inv084_line_contains_token(
     INV084_SRC_045,
     108,
-    INV084_ASSUME_TOKEN
+    INV084_ASSUME_POSITIVE_MARKS
 ));
 const _: () = assert!(inv084_line_contains_token(
     INV084_SRC_080,
     54,
-    INV084_ASSUME_TOKEN
+    INV084_ASSUME_ENGINE_TAG
 ));
 const _: () = assert!(inv084_line_contains_token(
     INV084_SRC_085,
     68,
-    INV084_ASSUME_TOKEN
+    INV084_ASSUME_DT_BOUND
 ));
+const _: () = assert!(inv084_count_token(INV084_SRC_004, INV084_OWNER_MATCHER_TOGGLE) == 1);
+const _: () = assert!(inv084_count_token(INV084_SRC_022, INV084_OWNER_HYBRID_DECODE) == 1);
+const _: () = assert!(inv084_count_token(INV084_SRC_045, INV084_OWNER_FEE_MARK_CLAMP) == 1);
+const _: () = assert!(inv084_count_token(INV084_SRC_045, INV084_OWNER_COLLECTED_BASE_FEE) == 1);
+const _: () = assert!(inv084_count_token(INV084_SRC_045, INV084_OWNER_ONE_SIDED_FEE) == 1);
+const _: () = assert!(inv084_count_token(INV084_SRC_080, INV084_OWNER_ENGINE_ERROR) == 1);
+const _: () = assert!(inv084_count_token(INV084_SRC_085, INV084_OWNER_DT_CLAMP) == 1);
+const _: () = assert!(inv084_count_token(INV084_INVENTORY, INV084_ROW_MATCHER_TOGGLE) == 1);
+const _: () = assert!(inv084_count_token(INV084_INVENTORY, INV084_ROW_FEED_INDEX) == 1);
+const _: () = assert!(inv084_count_token(INV084_INVENTORY, INV084_ROW_BYTE_INDEX) == 1);
+const _: () = assert!(inv084_count_token(INV084_INVENTORY, INV084_ROW_FEE_MARK_CLAMP) == 1);
+const _: () = assert!(inv084_count_token(INV084_INVENTORY, INV084_ROW_COLLECTED_BASE_FEE) == 1);
+const _: () = assert!(inv084_count_token(INV084_INVENTORY, INV084_ROW_ONE_SIDED_FEE) == 1);
+const _: () = assert!(inv084_count_token(INV084_INVENTORY, INV084_ROW_ENGINE_ERROR) == 1);
+const _: () = assert!(inv084_count_token(INV084_INVENTORY, INV084_ROW_DT_CLAMP) == 1);
 
 fn inv084_known_public_instruction_tag(tag: u8) -> bool {
     matches!(
@@ -354,6 +399,129 @@ fn inv084_known_public_instruction_tag(tag: u8) -> bool {
             | 54
             | 55
     )
+}
+
+const fn inv084_matcher_enabled_predicate(enabled: u8) -> bool {
+    enabled <= 1
+}
+
+const fn inv084_feed_index_predicate(feed_index: usize) -> bool {
+    feed_index < 3
+}
+
+const fn inv084_feed_byte_index_predicate(byte_index: usize) -> bool {
+    byte_index < 32
+}
+
+const fn inv084_positive_marks_predicate(old_mark: u64, quoted_mark: u64) -> bool {
+    old_mark > 0 && quoted_mark > 0
+}
+
+const fn inv084_engine_error_tag_predicate(tag: u8) -> bool {
+    tag < 12
+}
+
+const fn inv084_dt_solver_bound_predicate(dt_raw: u8) -> bool {
+    dt_raw <= 15
+}
+
+#[kani::proof]
+fn kani_v16_inv084_explicit_assumptions_have_two_sided_mutation_witnesses() {
+    let enabled: u8 = kani::any();
+    let enabled_admitted = inv084_matcher_enabled_predicate(enabled);
+    assert_eq!(enabled_admitted, enabled == 0 || enabled == 1);
+    kani::cover!(
+        enabled == 0 && enabled_admitted,
+        "toggle lower admitted model"
+    );
+    kani::cover!(
+        enabled == 1 && enabled_admitted,
+        "toggle upper admitted model"
+    );
+    kani::cover!(enabled == 2 && !enabled_admitted, "toggle widening killer");
+    assert!(inv084_matcher_enabled_predicate(0));
+    assert!(inv084_matcher_enabled_predicate(1));
+    assert!(!inv084_matcher_enabled_predicate(2));
+    assert!(!inv084_matcher_enabled_predicate(u8::MAX));
+
+    let feed_index: usize = kani::any();
+    let feed_index_admitted = inv084_feed_index_predicate(feed_index);
+    assert_eq!(feed_index_admitted, feed_index <= 2);
+    kani::cover!(
+        feed_index == 2 && feed_index_admitted,
+        "feed-index upper admitted model"
+    );
+    kani::cover!(
+        feed_index == 3 && !feed_index_admitted,
+        "feed-index off-by-one mutation killer"
+    );
+    assert!(inv084_feed_index_predicate(0));
+    assert!(inv084_feed_index_predicate(2));
+    assert!(!inv084_feed_index_predicate(3));
+    assert!(!inv084_feed_index_predicate(usize::MAX));
+
+    let byte_index: usize = kani::any();
+    let byte_index_admitted = inv084_feed_byte_index_predicate(byte_index);
+    assert_eq!(byte_index_admitted, byte_index <= 31);
+    kani::cover!(
+        byte_index == 31 && byte_index_admitted,
+        "feed-byte upper admitted model"
+    );
+    kani::cover!(
+        byte_index == 32 && !byte_index_admitted,
+        "feed-byte off-by-one mutation killer"
+    );
+    assert!(inv084_feed_byte_index_predicate(0));
+    assert!(inv084_feed_byte_index_predicate(31));
+    assert!(!inv084_feed_byte_index_predicate(32));
+    assert!(!inv084_feed_byte_index_predicate(usize::MAX));
+
+    let old_mark: u64 = kani::any();
+    let quoted_mark: u64 = kani::any();
+    let positive_marks_admitted = inv084_positive_marks_predicate(old_mark, quoted_mark);
+    assert_eq!(positive_marks_admitted, old_mark != 0 && quoted_mark != 0);
+    kani::cover!(
+        old_mark == 1 && quoted_mark == 1 && positive_marks_admitted,
+        "positive-mark admitted model"
+    );
+    kani::cover!(
+        old_mark == 0 && quoted_mark == 1 && !positive_marks_admitted,
+        "dropped old-mark clause mutation killer"
+    );
+    kani::cover!(
+        old_mark == 1 && quoted_mark == 0 && !positive_marks_admitted,
+        "dropped quoted-mark clause mutation killer"
+    );
+    assert!(inv084_positive_marks_predicate(1, 1));
+    assert!(!inv084_positive_marks_predicate(0, 1));
+    assert!(!inv084_positive_marks_predicate(1, 0));
+    assert!(!inv084_positive_marks_predicate(0, 0));
+
+    let error_tag: u8 = kani::any();
+    let error_tag_admitted = inv084_engine_error_tag_predicate(error_tag);
+    assert_eq!(error_tag_admitted, error_tag <= 11);
+    kani::cover!(
+        error_tag == 11 && error_tag_admitted,
+        "engine-error upper admitted model"
+    );
+    kani::cover!(
+        error_tag == 12 && !error_tag_admitted,
+        "engine-error widening killer"
+    );
+    assert!(inv084_engine_error_tag_predicate(0));
+    assert!(inv084_engine_error_tag_predicate(11));
+    assert!(!inv084_engine_error_tag_predicate(12));
+    assert!(!inv084_engine_error_tag_predicate(u8::MAX));
+
+    let dt_raw: u8 = kani::any();
+    let dt_admitted = inv084_dt_solver_bound_predicate(dt_raw);
+    assert_eq!(dt_admitted, dt_raw < 16);
+    kani::cover!(dt_raw == 15 && dt_admitted, "dt upper admitted model");
+    kani::cover!(dt_raw == 16 && !dt_admitted, "dt widening killer");
+    assert!(inv084_dt_solver_bound_predicate(0));
+    assert!(inv084_dt_solver_bound_predicate(15));
+    assert!(!inv084_dt_solver_bound_predicate(16));
+    assert!(!inv084_dt_solver_bound_predicate(u8::MAX));
 }
 
 #[kani::proof]
