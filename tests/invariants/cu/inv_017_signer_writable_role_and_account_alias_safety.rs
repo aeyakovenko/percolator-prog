@@ -3,7 +3,9 @@
 //! Public wrappers must reject duplicate mutable accounts in roles where aliasing would merge
 //! independent economic meanings. These tests exercise real SBF/LiteSVM account metas for custody
 //! trade, ledger, helper, and optional-ledger routes. A rejected alias attempt must leave program
-//! accounts and SPL custody bytes unchanged exactly.
+//! accounts and SPL custody bytes unchanged exactly. The direct-trade matrix exhausts all ten
+//! semantic account pairs and every required signer/writable downgrade for both single and batch
+//! no-CPI routes from otherwise-valid public fixtures.
 //!
 //! Guarantee boundary: this is targeted public-route evidence for the most dangerous alias pairs;
 //! it is not an exhaustive pairwise account-meta proof for every instruction.
@@ -26,6 +28,152 @@ fn snapshot(env: &V16CuEnv, portfolio_a: Pubkey, portfolio_b: Option<Pubkey>) ->
         portfolio_b: portfolio_b.map(|key| env.svm.get_account(&key).unwrap()),
         vault: env.svm.get_account(&env.vault).unwrap(),
         vault_atoms: env.token_amount(env.vault),
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum DirectTradeAliasRoute {
+    Single,
+    Batch,
+}
+
+fn direct_trade_alias_fixture() -> (V16CuEnv, Keypair, Pubkey, Keypair, Pubkey) {
+    let mut env = V16CuEnv::new();
+    let owner_a = Keypair::new();
+    let owner_b = Keypair::new();
+    let portfolio_a = env.create_portfolio(&owner_a);
+    let portfolio_b = env.create_portfolio(&owner_b);
+    env.deposit(&owner_a, portfolio_a, 1_000_000);
+    env.deposit(&owner_b, portfolio_b, 1_000_000);
+    (env, owner_a, portfolio_a, owner_b, portfolio_b)
+}
+
+fn direct_trade_alias_instruction(
+    env: &V16CuEnv,
+    route: DirectTradeAliasRoute,
+    portfolio_a: Pubkey,
+    portfolio_b: Pubkey,
+) -> ProgInstruction {
+    match route {
+        DirectTradeAliasRoute::Single => {
+            env.trade_no_cpi_ix(portfolio_a, portfolio_b, 0, POS_SCALE as i128, 100, 0)
+        }
+        DirectTradeAliasRoute::Batch => env.batch_trade_no_cpi_ix(
+            portfolio_a,
+            portfolio_b,
+            vec![BatchTradeLeg {
+                asset_index: 0,
+                market_id: env.asset_market_id(0),
+                size_q: POS_SCALE as i128,
+                exec_price: 100,
+                fee_bps: 0,
+            }],
+        ),
+    }
+}
+
+fn direct_trade_alias_accounts(
+    env: &V16CuEnv,
+    owner_a: &Keypair,
+    portfolio_a: Pubkey,
+    owner_b: &Keypair,
+    portfolio_b: Pubkey,
+) -> Vec<AccountMeta> {
+    vec![
+        AccountMeta::new(owner_a.pubkey(), true),
+        AccountMeta::new(owner_b.pubkey(), true),
+        AccountMeta::new(env.market, false),
+        AccountMeta::new(portfolio_a, false),
+        AccountMeta::new(portfolio_b, false),
+    ]
+}
+
+fn assert_direct_trade_alias_rejects_atomically(
+    route: DirectTradeAliasRoute,
+    label: &str,
+    mutate: impl FnOnce(&mut [AccountMeta]),
+) {
+    let (mut env, owner_a, portfolio_a, owner_b, portfolio_b) = direct_trade_alias_fixture();
+    let instruction = direct_trade_alias_instruction(&env, route, portfolio_a, portfolio_b);
+    let mut accounts =
+        direct_trade_alias_accounts(&env, &owner_a, portfolio_a, &owner_b, portfolio_b);
+    mutate(&mut accounts);
+    let before = snapshot(&env, portfolio_a, Some(portfolio_b));
+    let owner_a_required = accounts
+        .iter()
+        .any(|account| account.is_signer && account.pubkey == owner_a.pubkey());
+    let owner_b_required = accounts
+        .iter()
+        .any(|account| account.is_signer && account.pubkey == owner_b.pubkey());
+    let mut signers = Vec::with_capacity(2);
+    if owner_a_required {
+        signers.push(&owner_a);
+    }
+    if owner_b_required {
+        signers.push(&owner_b);
+    }
+
+    env.svm.expire_blockhash();
+    let rejected = env.send(instruction, accounts, &signers);
+    assert!(
+        rejected.is_err(),
+        "{route:?} {label}: aliased or underprivileged route unexpectedly succeeded",
+    );
+    assert_eq!(
+        snapshot(&env, portfolio_a, Some(portfolio_b)),
+        before,
+        "{route:?} {label}: rejection must roll back both portfolios, market, and vault exactly",
+    );
+}
+
+#[test]
+fn v16_program_direct_trade_account_pairs_and_required_privileges_are_exhaustive() {
+    const ROLE_NAMES: [&str; 5] = ["owner_a", "owner_b", "market", "portfolio_a", "portfolio_b"];
+
+    for route in [DirectTradeAliasRoute::Single, DirectTradeAliasRoute::Batch] {
+        let (mut env, owner_a, portfolio_a, owner_b, portfolio_b) = direct_trade_alias_fixture();
+        let before = snapshot(&env, portfolio_a, Some(portfolio_b));
+        let control = env.send(
+            direct_trade_alias_instruction(&env, route, portfolio_a, portfolio_b),
+            direct_trade_alias_accounts(&env, &owner_a, portfolio_a, &owner_b, portfolio_b),
+            &[&owner_a, &owner_b],
+        );
+        assert!(
+            control.is_ok(),
+            "{route:?}: canonical control must prove the fixture reaches trade mutation: {control:?}",
+        );
+        assert_ne!(
+            snapshot(&env, portfolio_a, Some(portfolio_b)),
+            before,
+            "{route:?}: canonical control must change economic state",
+        );
+
+        let mut pair_count = 0usize;
+        for first in 0..ROLE_NAMES.len() {
+            for second in (first + 1)..ROLE_NAMES.len() {
+                pair_count += 1;
+                let label = format!("alias {} with {}", ROLE_NAMES[first], ROLE_NAMES[second]);
+                assert_direct_trade_alias_rejects_atomically(route, &label, |accounts| {
+                    accounts[second].pubkey = accounts[first].pubkey;
+                });
+            }
+        }
+        assert_eq!(pair_count, 10, "five semantic roles have exactly ten pairs");
+
+        for (role, role_name) in ROLE_NAMES.iter().enumerate().take(2) {
+            assert_direct_trade_alias_rejects_atomically(
+                route,
+                &format!("{role_name} signer downgrade"),
+                |accounts| accounts[role].is_signer = false,
+            );
+        }
+        for (role, role_name) in ROLE_NAMES.iter().enumerate().skip(2) {
+            assert_direct_trade_alias_rejects_atomically(
+                route,
+                &format!("{role_name} writable downgrade"),
+                |accounts| accounts[role].is_writable = false,
+            );
+        }
     }
 }
 
