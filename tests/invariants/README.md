@@ -23,7 +23,7 @@ verification methods are in [`../../INVARIANTS.md`](../../INVARIANTS.md).
 | Suite | Tests | Evidence |
 | --- | ---: | --- |
 | `public_sbf/` | 81 | Deterministic public SBF/LiteSVM counterexamples, regressions, decoder corpora, and manifest checks |
-| `stateful/` | 113 | Proptest-generated public routes plus bounded lifecycle models for 20 user-operation/admission cells, 12 caller-priced boundary-exit cells, the four-state retirement-obligation lattice, a Recovery crank/owner-exit classifier boundary, and all 5! claimant orders, including generalized active-leg/currentness, source-claim attribution, source-credit-rate, authenticated-expiry, state-indexed liveness witnesses, and reference-model/deployed-transition equivalence |
+| `stateful/` | 114 | Proptest-generated public routes plus bounded lifecycle models for all 3! matcher-control/trade landing orders, 20 user-operation/admission cells, 12 caller-priced boundary-exit cells, the four-state retirement-obligation lattice, a Recovery crank/owner-exit classifier boundary, and all 5! claimant orders, including generalized active-leg/currentness, source-claim attribution, source-credit-rate, authenticated-expiry, state-indexed liveness witnesses, and reference-model/deployed-transition equivalence |
 | `cu/` | 711 | Full `v16_cu` public-route, metamorphic, rollback, liveness, arithmetic-differential, and max-shape CU inventory, with no standalone top-level tests |
 | `kani/` | 79 | Symbolic wrapper arithmetic, matcher-binding, ordering, strict-decoder, and proof-assumption nonvacuity harnesses; full `cargo kani --tests` remains the required verification command |
 
@@ -90,7 +90,7 @@ charter.
 | INV-007 | Direct | `public_sbf/inv_007_no_aba_reuse.rs` (whole-market same-pubkey recreation remains a visible public ABA counterexample: all 11 retained market-scope routes still land until persistent market generation binding is added) |
 | INV-008 | Independent + Direct | `public_sbf/inv_008_intent_uniqueness_and_bounded_replay.rs`, `stateful/inv_008_intent_uniqueness_and_bounded_replay.rs` |
 | INV-009 | SVM/CU | `cu/inv_009_partial_fill_and_retry_accounting.rs` |
-| INV-010 | Independent + P + SVM/CU | `stateful/inv_010_out_of_order_safety.rs`, `kani/inv_010_out_of_order_safety.rs`, `cu/inv_010_out_of_order_safety.rs` (deterministic out-of-order matcher revoke/stale-enable/fresh-enable witness) |
+| INV-010 | Independent + P + SVM/CU + Partial R | `stateful/inv_010_out_of_order_safety.rs`, `kani/inv_010_out_of_order_safety.rs`, `cu/inv_010_out_of_order_safety.rs` (all 3! landing orders of conflicting same-sequence matcher controls and a retained CPI trade, plus fresh-consent exit witnesses; other retained request domains remain) |
 | INV-011 | SVM/CU + Spec gap | `cu/inv_011_signed_aggregate_economic_bounds.rs` (per-leg CPI signed price bounds and atomic batch rejection are covered; a single aggregate budget field remains absent) |
 | INV-012 | SVM/CU | `cu/inv_012_capability_and_delegate_scope.rs` |
 | INV-013 | SVM/CU + Cross-owner references | `cu/inv_013_destructive_consent_scope.rs` (public stale reduction episode rollback); related market/portfolio/position generation matrices live in INV-001, INV-003, and INV-004 |
@@ -202,8 +202,8 @@ method outstanding. The current ledger is 58 **OPEN-T**, 20 **OPEN-D**, 10 **FRO
    and `C` for 2. Invariant-owned directories currently exist for only 9 `P`, 27 `F`, and 87 `I`
    owners. File presence is only a lower bound; many owners cover one scenario rather than the
    required matrix. `special_method_coverage.tsv` now machine-indexes all `M`, `R`, and `C`
-   obligations: all 32 `M` and both `C` rows have partial named evidence; 10 `R` rows now have
-   bounded generated or exhaustive-topology evidence and the other 12 remain explicitly omitted.
+   obligations: all 32 `M` and both `C` rows have partial named evidence; 11 `R` rows now have
+   bounded generated or exhaustive-topology evidence and the other 11 remain explicitly omitted.
 2. The deployed decoder has 50 public instruction variants. The stateful public-interface model
    generates fifteen direct operation classes (trade, EWMA configuration, mark push, crank, deposit,
    withdraw, maintenance sync, matcher configuration, insurance top-up, backing top-up,
@@ -215,11 +215,12 @@ method outstanding. The current ledger is 58 **OPEN-T**, 20 **OPEN-D**, 10 **FRO
    not saturation evidence. There is no time-budgeted campaign, transition/branch coverage target,
    mutation score, or corpus-stability criterion for declaring a generator exhausted.
 4. No general bounded BFS/model checker enumerates the reachable lifecycle graph required by
-   INV-007, INV-010, INV-029, INV-041, INV-043, INV-057, INV-065,
+   INV-007, INV-029, INV-041, INV-043, INV-057, INV-065,
    INV-071, INV-073, INV-075, INV-078, INV-079, INV-082, INV-084, or INV-086. INV-066,
    INV-067, and INV-070 now have a narrower public two-asset model that exhausts all 5! basic
    claimant orders through exact-once retries and `CloseSlab`; INV-069 separately exhausts the
-   four-state insurance/backing retirement-blocker lattice and both public drain orders; INV-055 has a separate public
+   four-state insurance/backing retirement-blocker lattice and both public drain orders; INV-010
+   exhausts all 3! orders in its conflicting-control/trade topology; INV-055 has a separate public
    20-cell core user-operation admission model; INV-046 has a separate 12-cell caller-priced
    boundary-exit model across three publicly reached lifecycle states; INV-072 exhausts all 40
    three-asset hint words through length three in one actionable topology.
@@ -250,7 +251,7 @@ are machine-checked below so a future README edit cannot silently omit an invari
 | AUDIT-007 | OPEN-D | Whole-market ABA remains live, and no unified roster covers receipt, delegate, capability, and auxiliary-account close/recreate. Add persistent generations and a bounded ABA model for every closable account class. |
 | AUDIT-008 | OPEN-D | Existing public tests intentionally reproduce duplicate execution across retry variants. A program-enforced intent ledger/expiry is missing, as are same-transaction, cross-entrypoint, and partial-failure exact-once tests. |
 | AUDIT-009 | OPEN-T | One CPI short-fill rejection/retry is covered. Successful partial fills, random partitions, cumulative quantity/fee/slippage/expiry budgets, route switching, and one-minimum-fee-per-intent accounting are absent. |
-| AUDIT-010 | OPEN-T | Only matcher revoke/stale-enable ordering is modeled. Add bounded permutations of trade, deposit, withdraw, reduction, authority rotation, policy update, resolve, and claim with signed postcondition checks. |
+| AUDIT-010 | OPEN-T | All 3! landing orders of two same-sequence matcher controls and one retained CPI trade are now exhausted with state-derived consent, exact rollback, and a matcher-independent exit. Add bounded permutations of deposit, withdraw, reduction, authority rotation, policy update, resolve, and claim with signed postcondition checks. |
 | AUDIT-011 | OPEN-D | Per-leg prices and atomic batch rejection exist, but the message has no aggregate fee, quantity, slippage, deadline, final-position, or collateral/PnL-credit budget. Add those fields before split-intent proofs can close. |
 | AUDIT-012 | OPEN-T | Matcher tuple and delegate checks are strong, but capability domain, authority epoch, expiry, allowed assets/operations, limits, and complete generation binding are not one-field-substitution tested or formally composed. |
 | AUDIT-013 | OPEN-T | Coverage is limited to stale rebalance reduction and recovery forfeit. Add shutdown, resolve, close, liquidation delegation, recovery, claim, and receipt consent across every later lifecycle episode. |

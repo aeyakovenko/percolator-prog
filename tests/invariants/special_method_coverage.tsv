@@ -35,7 +35,7 @@ INV-086	M	PARTIAL	tests/invariants/stateful/inv_086_reference_model_and_deployed
 INV-088	M	PARTIAL	tests/invariants/cu/inv_088_global_summaries_are_not_account_local_proofs.rs#v16_program_stored_position_summaries_match_portfolio_scan_after_cross_asset_updates	Every global accumulator and adversarial touch order remains.
 INV-089	M	PARTIAL	tests/invariants/cu/inv_089_activation_reactivation_and_initialization_equivalence.rs#v16_program_reuse_matches_fresh_activation_envelope_and_drops_old_authority	Full raw-state activation/reactivation equivalence remains.
 INV-007	R	OMITTED	-	No bounded public-state ABA reachability model exists.
-INV-010	R	OMITTED	-	No exhaustive bounded landing-order reachability model exists.
+INV-010	R	PARTIAL	tests/invariants/stateful/inv_010_out_of_order_safety.rs#v16_program_conflicting_matcher_controls_and_trade_exhaust_all_landing_orders	Exhausts all 3! landing orders for two conflicting same-sequence matcher controls and one retained CPI trade; other retained controls and value routes remain.
 INV-029	R	OMITTED	-	No exhaustive bucket-edge claim-bound state model exists.
 INV-041	R	OMITTED	-	No exhaustive allocation and caller-order state model exists.
 INV-043	R	OMITTED	-	Hedge and correlation credit are absent from the wrapper API; reopen when exposed.
