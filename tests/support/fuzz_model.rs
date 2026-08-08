@@ -16385,6 +16385,316 @@ fn execute_trade_route(
     }
 }
 
+#[allow(dead_code)]
+pub fn verify_attributed_pnl_roundtrip(
+    mut seed: [u8; 32],
+    open_route: TradeRoute,
+    close_route: TradeRoute,
+    account_a_long: bool,
+) -> Result<(), String> {
+    const ACCOUNT_A: usize = 0;
+    const ACCOUNT_B: usize = 1;
+    const MARKET_CRANKER: usize = 4;
+    const ASSET: u16 = 0;
+    const START_PRICE: u64 = 1_000_000;
+    const SETTLED_PRICE: u64 = 1_100_000;
+    const DEPOSIT: u128 = 2_000_000;
+    const EXPECTED_PNL: u128 = 100_000;
+    const UNRELATED_DEPOSIT: u128 = 1;
+
+    fn assert_token_frame(
+        label: &str,
+        before: &[(Pubkey, Vec<u8>)],
+        after: &[(Pubkey, Vec<u8>)],
+        mutable: &[Pubkey],
+    ) -> Result<(), String> {
+        if before.len() != after.len() {
+            return Err(format!("{label}: tracked token-account set changed"));
+        }
+        for ((before_key, before_data), (after_key, after_data)) in before.iter().zip(after) {
+            if before_key != after_key {
+                return Err(format!("{label}: tracked token-account order changed"));
+            }
+            if !mutable.contains(before_key) && before_data != after_data {
+                return Err(format!(
+                    "{label}: unrelated token account {before_key} changed"
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn assert_custody(
+        label: &str,
+        env: &V16Svm,
+        expected_vault: u128,
+        expected_capital: u128,
+    ) -> Result<(), String> {
+        let (_, group) = env.primary_market_state();
+        if group.vault != expected_vault
+            || u128::from(env.token_amount(env.vault)) != expected_vault
+            || group.c_tot != expected_capital
+        {
+            return Err(format!(
+                "{label}: custody/capital mismatch: accounting vault={}, SPL vault={}, c_tot={}, expected={expected_vault}/{expected_capital}",
+                group.vault,
+                env.token_amount(env.vault),
+                group.c_tot,
+            ));
+        }
+        Ok(())
+    }
+
+    seed[0] ^= (open_route.index() as u8) << 4;
+    seed[0] ^= (close_route.index() as u8) << 1;
+    seed[0] ^= u8::from(account_a_long);
+    let mut env = V16Svm::new(
+        seed,
+        MarketConfig {
+            initial_price: START_PRICE,
+            max_price_move_bps_per_slot: 10_000,
+            max_accrual_dt_slots: 1,
+            max_abs_funding_e9_per_slot: 0,
+            min_funding_lifetime_slots: 1,
+            maintenance_fee_per_slot: 0,
+            actor_deposits: [
+                DEPOSIT,
+                DEPOSIT,
+                UNRELATED_DEPOSIT,
+                UNRELATED_DEPOSIT,
+                UNRELATED_DEPOSIT,
+            ],
+            actor_token_balances: [
+                DEPOSIT as u64,
+                DEPOSIT as u64,
+                UNRELATED_DEPOSIT as u64,
+                UNRELATED_DEPOSIT as u64,
+                UNRELATED_DEPOSIT as u64,
+            ],
+            ..MarketConfig::default()
+        },
+    );
+    let baseline_vault = DEPOSIT
+        .checked_mul(2)
+        .and_then(|value| value.checked_add(UNRELATED_DEPOSIT * 3))
+        .ok_or("INV-024 baseline vault overflow")?;
+    let initial_token_frame = env.all_token_account_data();
+    let unrelated_portfolios = [2usize, 3usize]
+        .into_iter()
+        .map(|actor| env.primary_portfolio_data(actor))
+        .collect::<Vec<_>>();
+    let initial_supply = env.token_supply_observed();
+    let (_, initial_group) = env.primary_market_state();
+    let initial_insurance = initial_group.insurance;
+    let initial_insurance_budget = initial_group.insurance_domain_budget.clone();
+    let initial_insurance_spent = initial_group.insurance_domain_spent.clone();
+    let initial_insurance_reservations = initial_group.insurance_credit_reservations.clone();
+    assert_custody("INV-024 initialized", &env, baseline_vault, baseline_vault)?;
+
+    let open_size = if account_a_long {
+        POS_SCALE as i128
+    } else {
+        -(POS_SCALE as i128)
+    };
+    let (winner, loser) = if account_a_long {
+        (ACCOUNT_A, ACCOUNT_B)
+    } else {
+        (ACCOUNT_B, ACCOUNT_A)
+    };
+    execute_trade_route(
+        &mut env,
+        open_route,
+        ACCOUNT_A,
+        ACCOUNT_B,
+        ASSET,
+        open_size,
+        START_PRICE,
+        0,
+    )
+    .map_err(|error| format!("INV-024 {open_route:?} open: {error}"))?;
+    let opened_a = env.primary_portfolio(ACCOUNT_A);
+    let opened_b = env.primary_portfolio(ACCOUNT_B);
+    if opened_a.capital.get() != DEPOSIT
+        || opened_b.capital.get() != DEPOSIT
+        || opened_a.pnl.get() != 0
+        || opened_b.pnl.get() != 0
+        || position_for_asset(&opened_a, ASSET as usize)? != open_size
+        || position_for_asset(&opened_b, ASSET as usize)? != -open_size
+    {
+        return Err(format!(
+            "INV-024 {open_route:?} open misattributed state: A cap/pnl={}/{}, B cap/pnl={}/{}, positions={}/{}",
+            opened_a.capital.get(),
+            opened_a.pnl.get(),
+            opened_b.capital.get(),
+            opened_b.pnl.get(),
+            position_for_asset(&opened_a, ASSET as usize)?,
+            position_for_asset(&opened_b, ASSET as usize)?,
+        ));
+    }
+    assert_custody("INV-024 after open", &env, baseline_vault, baseline_vault)?;
+    assert_token_frame(
+        "INV-024 open",
+        &initial_token_frame,
+        &env.all_token_account_data(),
+        &[],
+    )?;
+
+    env.warp_to_slot(2);
+    env.push_auth_mark(ASSET, 2, SETTLED_PRICE)
+        .map_err(|error| format!("INV-024 publish settled mark: {error}"))?;
+    crank_market_then_accounts_once(&mut env, MARKET_CRANKER, &[loser, winner], 2, ASSET, 8)?;
+    let settled_winner = env.primary_portfolio(winner);
+    let settled_loser = env.primary_portfolio(loser);
+    if settled_winner.capital.get() != DEPOSIT
+        || settled_winner.pnl.get() != EXPECTED_PNL as i128
+        || settled_loser.capital.get() != DEPOSIT - EXPECTED_PNL
+        || settled_loser.pnl.get() != 0
+    {
+        return Err(format!(
+            "INV-024 {open_route:?}/{close_route:?} settled PnL went to the wrong owner: winner {winner} cap/pnl={}/{}, loser {loser} cap/pnl={}/{}",
+            settled_winner.capital.get(),
+            settled_winner.pnl.get(),
+            settled_loser.capital.get(),
+            settled_loser.pnl.get(),
+        ));
+    }
+    assert_custody(
+        "INV-024 after settlement",
+        &env,
+        baseline_vault,
+        baseline_vault - EXPECTED_PNL,
+    )?;
+    assert_token_frame(
+        "INV-024 settlement",
+        &initial_token_frame,
+        &env.all_token_account_data(),
+        &[],
+    )?;
+
+    execute_trade_route(
+        &mut env,
+        close_route,
+        ACCOUNT_A,
+        ACCOUNT_B,
+        ASSET,
+        -open_size,
+        SETTLED_PRICE,
+        0,
+    )
+    .map_err(|error| format!("INV-024 {close_route:?} close: {error}"))?;
+    let flat_winner = env.primary_portfolio(winner);
+    let flat_loser = env.primary_portfolio(loser);
+    if decoded_legs(&flat_winner).iter().any(|leg| leg.active)
+        || decoded_legs(&flat_loser).iter().any(|leg| leg.active)
+        || flat_winner.capital.get() != DEPOSIT
+        || flat_winner.pnl.get() != EXPECTED_PNL as i128
+        || flat_loser.capital.get() != DEPOSIT - EXPECTED_PNL
+        || flat_loser.pnl.get() != 0
+    {
+        return Err(format!(
+            "INV-024 {open_route:?}/{close_route:?} close changed owner attribution"
+        ));
+    }
+    assert_custody(
+        "INV-024 after close",
+        &env,
+        baseline_vault,
+        baseline_vault - EXPECTED_PNL,
+    )?;
+    assert_token_frame(
+        "INV-024 close",
+        &initial_token_frame,
+        &env.all_token_account_data(),
+        &[],
+    )?;
+
+    env.convert_released_pnl(winner, EXPECTED_PNL)
+        .map_err(|error| format!("INV-024 winner conversion: {error}"))?;
+    let converted_winner = env.primary_portfolio(winner);
+    if converted_winner.pnl.get() != 0
+        || converted_winner.capital.get() != DEPOSIT + EXPECTED_PNL
+        || env.primary_portfolio(loser).capital.get() != DEPOSIT - EXPECTED_PNL
+    {
+        return Err(format!(
+            "INV-024 conversion did not preserve winner/loser attribution: winner cap/pnl={}/{}, loser cap={}",
+            converted_winner.capital.get(),
+            converted_winner.pnl.get(),
+            env.primary_portfolio(loser).capital.get(),
+        ));
+    }
+    assert_custody(
+        "INV-024 after conversion",
+        &env,
+        baseline_vault,
+        baseline_vault,
+    )?;
+    assert_token_frame(
+        "INV-024 conversion",
+        &initial_token_frame,
+        &env.all_token_account_data(),
+        &[],
+    )?;
+
+    env.withdraw_primary(winner, DEPOSIT + EXPECTED_PNL)
+        .map_err(|error| format!("INV-024 winner withdrawal: {error}"))?;
+    env.withdraw_primary(loser, DEPOSIT - EXPECTED_PNL)
+        .map_err(|error| format!("INV-024 loser withdrawal: {error}"))?;
+    if env.token_amount(env.actors[winner].destination_token) != (DEPOSIT + EXPECTED_PNL) as u64
+        || env.token_amount(env.actors[loser].destination_token) != (DEPOSIT - EXPECTED_PNL) as u64
+    {
+        return Err(format!(
+            "INV-024 terminal SPL payouts were misattributed: winner={}, loser={}",
+            env.token_amount(env.actors[winner].destination_token),
+            env.token_amount(env.actors[loser].destination_token),
+        ));
+    }
+    assert_custody(
+        "INV-024 terminal",
+        &env,
+        UNRELATED_DEPOSIT * 3,
+        UNRELATED_DEPOSIT * 3,
+    )?;
+    assert_token_frame(
+        "INV-024 terminal",
+        &initial_token_frame,
+        &env.all_token_account_data(),
+        &[
+            env.vault,
+            env.actors[ACCOUNT_A].destination_token,
+            env.actors[ACCOUNT_B].destination_token,
+        ],
+    )?;
+
+    let after_unrelated_portfolios = [2usize, 3usize]
+        .into_iter()
+        .map(|actor| env.primary_portfolio_data(actor))
+        .collect::<Vec<_>>();
+    if after_unrelated_portfolios != unrelated_portfolios {
+        return Err("INV-024 route matrix mutated an unrelated portfolio".into());
+    }
+    let (_, terminal_group) = env.primary_market_state();
+    if terminal_group.insurance != initial_insurance
+        || terminal_group.insurance_domain_budget != initial_insurance_budget
+        || terminal_group.insurance_domain_spent != initial_insurance_spent
+        || terminal_group.insurance_credit_reservations != initial_insurance_reservations
+        || terminal_group.source_claim_bound_total_num != 0
+        || terminal_group.source_credit.iter().any(|source| {
+            source.positive_claim_bound_num != 0
+                || source.fresh_reserved_backing_num != 0
+                || source.insurance_credit_reserved_num != 0
+        })
+        || env.token_supply_observed() != initial_supply
+    {
+        return Err(format!(
+            "INV-024 terminal attribution left reserve, claim, or token-supply drift: claims={}, supply={}/{}",
+            terminal_group.source_claim_bound_total_num,
+            env.token_supply_observed(),
+            initial_supply,
+        ));
+    }
+    Ok(())
+}
+
 fn zero_move_funding_world(seed: [u8; 32]) -> Result<V16Svm, String> {
     const PRICE: u64 = 2;
     const TARGET: u64 = 1;
