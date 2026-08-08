@@ -1954,6 +1954,32 @@ impl V16Svm {
         )
     }
 
+    pub fn drain_only_asset(
+        &mut self,
+        asset_index: u16,
+        now_slot: u64,
+    ) -> Result<TxSuccess, String> {
+        let authority = copy_keypair(&self.admin);
+        self.send_program(
+            ProgInstruction::UpdateAssetLifecycle {
+                action: percolator_prog::processor::ASSET_ACTION_DRAIN_ONLY,
+                asset_index,
+                now_slot,
+                initial_price: 0,
+                max_init_fee: u128::MAX,
+                insurance_authority: authority.pubkey().to_bytes(),
+                insurance_operator: authority.pubkey().to_bytes(),
+                backing_bucket_authority: authority.pubkey().to_bytes(),
+                oracle_authority: authority.pubkey().to_bytes(),
+            },
+            vec![
+                AccountMeta::new(authority.pubkey(), true),
+                AccountMeta::new(self.market, false),
+            ],
+            &[authority],
+        )
+    }
+
     pub fn shutdown_asset(&mut self, asset_index: u16, now_slot: u64) -> Result<TxSuccess, String> {
         let authority = copy_keypair(&self.admin);
         self.send_program(

@@ -152,6 +152,9 @@ mod inv_045_no_free_mark_movement;
 #[path = "invariants/stateful/inv_053_full_health_recertification_equivalence.rs"]
 mod inv_053_full_health_recertification_equivalence;
 
+#[path = "invariants/stateful/inv_055_state_indexed_admission.rs"]
+mod inv_055_state_indexed_admission;
+
 #[path = "invariants/stateful/inv_061_deterministic_bounded_liquidation.rs"]
 mod inv_061_deterministic_bounded_liquidation;
 

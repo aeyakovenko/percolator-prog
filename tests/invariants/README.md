@@ -23,7 +23,7 @@ verification methods are in [`../../INVARIANTS.md`](../../INVARIANTS.md).
 | Suite | Tests | Evidence |
 | --- | ---: | --- |
 | `public_sbf/` | 81 | Deterministic public SBF/LiteSVM counterexamples, regressions, decoder corpora, and manifest checks |
-| `stateful/` | 109 | Proptest-generated public routes plus a bounded 5! claimant-order lifecycle, including generalized active-leg/currentness, source-claim attribution, source-credit-rate, authenticated-expiry and lifecycle route matrices, state-indexed liveness witnesses, and reference-model/deployed-transition equivalence |
+| `stateful/` | 110 | Proptest-generated public routes plus bounded lifecycle models for 20 user-operation/admission cells and all 5! claimant orders, including generalized active-leg/currentness, source-claim attribution, source-credit-rate, authenticated-expiry, state-indexed liveness witnesses, and reference-model/deployed-transition equivalence |
 | `cu/` | 711 | Full `v16_cu` public-route, metamorphic, rollback, liveness, arithmetic-differential, and max-shape CU inventory, with no standalone top-level tests |
 | `kani/` | 79 | Symbolic wrapper arithmetic, matcher-binding, ordering, strict-decoder, and proof-assumption nonvacuity harnesses; full `cargo kani --tests` remains the required verification command |
 
@@ -135,7 +135,7 @@ charter.
 | INV-052 | SVM/CU | `cu/inv_052_split_merge_invariance.rs` (no-fee exact split/aggregate equivalence, fee-bearing split cannot reduce collected fees, and split withdraw custody equivalence) |
 | INV-053 | Independent + Direct + SVM/CU | `public_sbf/inv_053_full_health_recertification_equivalence.rs`, `stateful/inv_053_full_health_recertification_equivalence.rs`, `cu/inv_053_full_health_recertification_equivalence.rs` |
 | INV-054 | SVM/CU | `cu/inv_054_certificate_epoch_completeness.rs` |
-| INV-055 | SVM/CU | `cu/inv_055_state_indexed_admission.rs` |
+| INV-055 | SVM/CU + Partial R | `stateful/inv_055_state_indexed_admission.rs`, `cu/inv_055_state_indexed_admission.rs` (public setup and exact economic/rollback oracles cover open, bilateral reduce, deposit, withdraw, and resolved payout across Active, DrainOnly, Recovery, and Resolved; reset-side and remaining instruction classes remain) |
 | INV-056 | SVM/CU | `cu/inv_056_hints_are_discovery_only_favorable_actions_fully_refresh.rs` (primary withdraw/full-refresh rollback), with related crank-hint evidence in `cu/inv_023_caller_input_confinement_for_derived_safety_state.rs` and `cu/inv_072_order_robust_crankability.rs` |
 | INV-057 | F + SVM/CU + Partial R | `stateful/inv_065_reset_recovery_and_retired_state_isolation.rs`, `cu/inv_057_risk_reduction_availability.rs` (generated public Recovery state retains all-portfolio exits; exhaustive lifecycle reachability remains) |
 | INV-058 | SVM/CU | `cu/inv_058_cumulative_position_oi_notional_and_rate_limit_integrity.rs` |
@@ -202,8 +202,8 @@ method outstanding. The current ledger is 58 **OPEN-T**, 20 **OPEN-D**, 10 **FRO
    and `C` for 2. Invariant-owned directories currently exist for only 9 `P`, 27 `F`, and 87 `I`
    owners. File presence is only a lower bound; many owners cover one scenario rather than the
    required matrix. `special_method_coverage.tsv` now machine-indexes all `M`, `R`, and `C`
-   obligations: all 32 `M` and both `C` rows have partial named evidence; 6 `R` rows now have
-   bounded generated or exhaustive-topology evidence and the other 16 remain explicitly omitted.
+   obligations: all 32 `M` and both `C` rows have partial named evidence; 7 `R` rows now have
+   bounded generated or exhaustive-topology evidence and the other 15 remain explicitly omitted.
 2. The deployed decoder has 50 public instruction variants. The stateful public-interface model
    generates fifteen direct operation classes (trade, EWMA configuration, mark push, crank, deposit,
    withdraw, maintenance sync, matcher configuration, insurance top-up, backing top-up,
@@ -215,10 +215,11 @@ method outstanding. The current ledger is 58 **OPEN-T**, 20 **OPEN-D**, 10 **FRO
    not saturation evidence. There is no time-budgeted campaign, transition/branch coverage target,
    mutation score, or corpus-stability criterion for declaring a generator exhausted.
 4. No general bounded BFS/model checker enumerates the reachable lifecycle graph required by
-   INV-007, INV-010, INV-029, INV-041, INV-043, INV-046, INV-055, INV-057, INV-065, INV-069,
+   INV-007, INV-010, INV-029, INV-041, INV-043, INV-046, INV-057, INV-065, INV-069,
    INV-071 through INV-073, INV-075, INV-078, INV-079, INV-082, INV-084, or INV-086. INV-066,
    INV-067, and INV-070 now have a narrower public two-asset model that exhausts all 5! basic
-   claimant orders through exact-once retries and `CloseSlab`.
+   claimant orders through exact-once retries and `CloseSlab`; INV-055 has a separate public
+   20-cell core user-operation admission model.
 5. Several liveness/admission tests create the interesting state with `set_account`,
    `mutate_market`, or benchmark seeding. That is valid for malformed-input and rollback testing,
    but it is not public-reachability evidence unless a separate public trace establishes the same
@@ -291,7 +292,7 @@ are machine-checked below so a future README edit cannot silently omit an invari
 | AUDIT-052 | OPEN-T | Deterministic trade and withdrawal partitions exist. Add arbitrary partition/permutation fuzz for liquidation, reduction, lien consumption, insurance withdrawal, claims, cooldowns, rates, and policy limits. |
 | AUDIT-053 | FRONTIER | Omitted-leg findings and route/order fuzz are strong, but no full-certificate oracle runs after every transition and pending obligations, impaired liens, ADL, and all penalty lanes are not composed. Prove or differentially establish fast <= full. |
 | AUDIT-054 | OPEN-T | Two stale-certificate inputs are covered. Mutate active bitmap, generations, target/effective price, oracle epochs, A/K/F/B, source-credit epochs, liens, obligations, lifecycle/close modes, and policy epochs one at a time. |
-| AUDIT-055 | OPEN-T | Directed admission tests cover selected modes, but not the 50-instruction cross-product with market/asset/side/portfolio/close/recovery modes. Replace injected Recovery setup with a public trace and generate the declarative matrix. |
+| AUDIT-055 | OPEN-T | A public declarative matrix now covers all 20 combinations of open, bilateral reduce, deposit, withdraw, and resolved payout with Active, DrainOnly, Recovery, and Resolved. Every allowed cell must produce its exact economic delta and every forbidden cell must roll back all tracked bytes, SPL data, and lamports. Reset-side, close-ledger, retirement/reactivation, and the remaining public instruction classes still prevent a complete 50-instruction state cross-product. |
 | AUDIT-056 | OPEN-T | Batch stale-related-leg and crank-hint cases exist. Omit/reorder/duplicate the worst and benign legs across withdraw, liquidation, conversion, claim, and all trade routes, comparing each result with canonical full discovery. |
 | AUDIT-057 | FRONTIER | The generator now reaches a real funded Recovery state by public policy configuration and asset shutdown and requires all modeled positions to exit. It still does not establish an exit from every reachable lifecycle state; add a bounded public-only state search whose oracle finds a reducing action or terminal receipt. |
 | AUDIT-058 | OPEN-T | TVL, large amount, over-reduce, top-up, and batch cap boundaries are covered. Generate every hard OI/notional/rate bound with zero/one/max/near-max, splitting, batching, cross-zero, route, transfer, and recreate variants. |
