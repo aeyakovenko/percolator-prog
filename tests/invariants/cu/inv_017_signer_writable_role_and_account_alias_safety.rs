@@ -3,9 +3,9 @@
 //! Public wrappers must reject duplicate mutable accounts in roles where aliasing would merge
 //! independent economic meanings. These tests exercise real SBF/LiteSVM account metas for custody
 //! trade, ledger, helper, and optional-ledger routes. A rejected alias attempt must leave program
-//! accounts and SPL custody bytes unchanged exactly. The direct-trade matrix exhausts all ten
-//! semantic account pairs and every required signer/writable downgrade for both single and batch
-//! no-CPI routes from otherwise-valid public fixtures.
+//! accounts and SPL custody bytes unchanged exactly. The trade matrices exhaust all ten direct
+//! and all 21 CPI semantic account pairs, plus every required signer/writable downgrade, for both
+//! single and batch routes from otherwise-valid public fixtures.
 //!
 //! Guarantee boundary: this is targeted public-route evidence for the most dangerous alias pairs;
 //! it is not an exhaustive pairwise account-meta proof for every instruction.
@@ -171,6 +171,185 @@ fn v16_program_direct_trade_account_pairs_and_required_privileges_are_exhaustive
             assert_direct_trade_alias_rejects_atomically(
                 route,
                 &format!("{role_name} writable downgrade"),
+                |accounts| accounts[role].is_writable = false,
+            );
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum CpiTradeAliasRoute {
+    Single,
+    Batch,
+}
+
+struct CpiTradeAliasFixture {
+    env: V16CuEnv,
+    taker_owner: Keypair,
+    taker: Pubkey,
+    lp: Pubkey,
+    matcher_program: Pubkey,
+    matcher_context: Pubkey,
+    matcher_delegate: Pubkey,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CpiAliasSnapshot {
+    core: AliasSnapshot,
+    matcher_context: Account,
+}
+
+fn cpi_trade_alias_fixture() -> CpiTradeAliasFixture {
+    let mut env = V16CuEnv::new();
+    let taker_owner = Keypair::new();
+    let lp_owner = Keypair::new();
+    let taker = env.create_portfolio(&taker_owner);
+    let lp = env.create_portfolio(&lp_owner);
+    env.deposit(&taker_owner, taker, 1_000_000);
+    env.deposit(&lp_owner, lp, 1_000_000);
+    let (matcher_program, matcher_context, matcher_delegate) =
+        auth_matcher_for_lp(&mut env, &lp_owner, lp);
+    CpiTradeAliasFixture {
+        env,
+        taker_owner,
+        taker,
+        lp,
+        matcher_program,
+        matcher_context,
+        matcher_delegate,
+    }
+}
+
+fn cpi_alias_snapshot(fixture: &CpiTradeAliasFixture) -> CpiAliasSnapshot {
+    CpiAliasSnapshot {
+        core: snapshot(&fixture.env, fixture.taker, Some(fixture.lp)),
+        matcher_context: fixture
+            .env
+            .svm
+            .get_account(&fixture.matcher_context)
+            .unwrap(),
+    }
+}
+
+fn cpi_trade_alias_instruction(
+    fixture: &CpiTradeAliasFixture,
+    route: CpiTradeAliasRoute,
+) -> ProgInstruction {
+    match route {
+        CpiTradeAliasRoute::Single => {
+            fixture
+                .env
+                .trade_cpi_ix(fixture.taker, fixture.lp, 0, POS_SCALE as i128, 0, 0)
+        }
+        CpiTradeAliasRoute::Batch => fixture.env.batch_trade_cpi_ix(
+            fixture.taker,
+            fixture.lp,
+            vec![BatchTradeCpiLeg {
+                asset_index: 0,
+                market_id: fixture.env.asset_market_id(0),
+                size_q: POS_SCALE as i128,
+                fee_bps: 0,
+                limit_price: 0,
+            }],
+        ),
+    }
+}
+
+fn cpi_trade_alias_accounts(fixture: &CpiTradeAliasFixture) -> Vec<AccountMeta> {
+    vec![
+        AccountMeta::new(fixture.taker_owner.pubkey(), true),
+        AccountMeta::new(fixture.env.market, false),
+        AccountMeta::new(fixture.taker, false),
+        AccountMeta::new(fixture.lp, false),
+        AccountMeta::new_readonly(fixture.matcher_program, false),
+        AccountMeta::new(fixture.matcher_context, false),
+        AccountMeta::new_readonly(fixture.matcher_delegate, false),
+    ]
+}
+
+fn assert_cpi_trade_alias_rejects_atomically(
+    route: CpiTradeAliasRoute,
+    label: &str,
+    mutate: impl FnOnce(&mut [AccountMeta]),
+) {
+    let mut fixture = cpi_trade_alias_fixture();
+    let instruction = cpi_trade_alias_instruction(&fixture, route);
+    let mut accounts = cpi_trade_alias_accounts(&fixture);
+    mutate(&mut accounts);
+    let before = cpi_alias_snapshot(&fixture);
+    let taker_signature_required = accounts
+        .iter()
+        .any(|account| account.is_signer && account.pubkey == fixture.taker_owner.pubkey());
+    let signers = taker_signature_required
+        .then_some(&fixture.taker_owner)
+        .into_iter()
+        .collect::<Vec<_>>();
+
+    fixture.env.svm.expire_blockhash();
+    let rejected = fixture.env.send(instruction, accounts, &signers);
+    assert!(
+        rejected.is_err(),
+        "{route:?} {label}: aliased or underprivileged CPI route unexpectedly succeeded",
+    );
+    assert_eq!(
+        cpi_alias_snapshot(&fixture),
+        before,
+        "{route:?} {label}: CPI rejection must roll back matcher and protocol state exactly",
+    );
+}
+
+#[test]
+fn v16_program_cpi_trade_account_pairs_and_required_privileges_are_exhaustive() {
+    const ROLE_NAMES: [&str; 7] = [
+        "taker_owner",
+        "market",
+        "taker_portfolio",
+        "lp_portfolio",
+        "matcher_program",
+        "matcher_context",
+        "matcher_delegate",
+    ];
+    const REQUIRED_WRITABLE_ROLES: [usize; 4] = [1, 2, 3, 5];
+
+    for route in [CpiTradeAliasRoute::Single, CpiTradeAliasRoute::Batch] {
+        let mut control = cpi_trade_alias_fixture();
+        let before = cpi_alias_snapshot(&control);
+        let accepted = control.env.send(
+            cpi_trade_alias_instruction(&control, route),
+            cpi_trade_alias_accounts(&control),
+            &[&control.taker_owner],
+        );
+        assert!(
+            accepted.is_ok(),
+            "{route:?}: canonical CPI control must reach matcher-backed mutation: {accepted:?}",
+        );
+        assert_ne!(
+            cpi_alias_snapshot(&control),
+            before,
+            "{route:?}: canonical CPI control must change matcher or economic state",
+        );
+
+        let mut pair_count = 0usize;
+        for first in 0..ROLE_NAMES.len() {
+            for second in (first + 1)..ROLE_NAMES.len() {
+                pair_count += 1;
+                let label = format!("alias {} with {}", ROLE_NAMES[first], ROLE_NAMES[second]);
+                assert_cpi_trade_alias_rejects_atomically(route, &label, |accounts| {
+                    accounts[second].pubkey = accounts[first].pubkey;
+                });
+            }
+        }
+        assert_eq!(pair_count, 21, "seven semantic roles have exactly 21 pairs");
+
+        assert_cpi_trade_alias_rejects_atomically(
+            route,
+            "taker owner signer downgrade",
+            |accounts| accounts[0].is_signer = false,
+        );
+        for role in REQUIRED_WRITABLE_ROLES {
+            assert_cpi_trade_alias_rejects_atomically(
+                route,
+                &format!("{} writable downgrade", ROLE_NAMES[role]),
                 |accounts| accounts[role].is_writable = false,
             );
         }
