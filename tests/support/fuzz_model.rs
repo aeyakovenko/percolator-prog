@@ -1607,7 +1607,10 @@ fn reference_mul_div_floor(lhs: u128, rhs: u128, denominator: u128) -> Result<u1
     Ok(quotient)
 }
 
-fn assert_source_credit_rates(label: &str, group: &MarketGroupV16) -> Result<(), String> {
+pub(crate) fn assert_source_credit_rates(
+    label: &str,
+    group: &MarketGroupV16,
+) -> Result<(), String> {
     for (domain, source) in group.source_credit.iter().copied().enumerate() {
         if source.exact_positive_claim_num > source.positive_claim_bound_num {
             return Err(format!(
