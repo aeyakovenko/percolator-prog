@@ -1719,6 +1719,135 @@ fn assert_source_claim_bound_attribution(
     Ok(())
 }
 
+fn assert_reservation_encumbrance_census(
+    label: &str,
+    group: &MarketGroupV16,
+    portfolios: &[PortfolioAccountV16],
+) -> Result<(), String> {
+    let domain_count = group.source_credit.len();
+    if group.source_backing_buckets.len() != domain_count
+        || group.insurance_credit_reservations.len() != domain_count
+    {
+        return Err(format!(
+            "{label}: source, bucket, and insurance-reservation domain counts differ"
+        ));
+    }
+    let expected_portfolios = u64::try_from(portfolios.len())
+        .map_err(|_| format!("{label}: encumbrance portfolio census does not fit u64"))?;
+    if group.materialized_portfolio_count != expected_portfolios {
+        return Err(format!(
+            "{label}: encumbrance census has {} portfolios but market records {}",
+            portfolios.len(),
+            group.materialized_portfolio_count,
+        ));
+    }
+
+    let mut account_counterparty_backing = vec![0u128; domain_count];
+    let mut account_insurance_backing = vec![0u128; domain_count];
+    let mut account_impaired_insurance_backing = vec![0u128; domain_count];
+    for (portfolio_index, portfolio) in portfolios.iter().enumerate() {
+        for (slot, account_source) in portfolio.source_domains.iter().copied().enumerate() {
+            if !account_source.is_occupied() {
+                continue;
+            }
+            let domain = account_source.domain.get() as usize;
+            if domain >= domain_count {
+                return Err(format!(
+                    "{label}: portfolio {portfolio_index} source slot {slot} names missing domain {domain}"
+                ));
+            }
+            let counterparty_face = account_source.source_claim_counterparty_liened_num.get();
+            let insurance_face = account_source.source_claim_insurance_liened_num.get();
+            let classified_face = counterparty_face
+                .checked_add(insurance_face)
+                .ok_or_else(|| format!("{label}: domain {domain} account lien-face overflow"))?;
+            if classified_face != account_source.source_claim_liened_num.get() {
+                return Err(format!(
+                    "{label}: portfolio {portfolio_index} domain {domain} lien face is not singly classified"
+                ));
+            }
+            let counterparty_backing = account_source.source_lien_counterparty_backing_num.get();
+            let insurance_backing = account_source.source_lien_insurance_backing_num.get();
+            let classified_backing = counterparty_backing
+                .checked_add(insurance_backing)
+                .ok_or_else(|| format!("{label}: domain {domain} account lien-backing overflow"))?;
+            let expected_backing = account_source
+                .source_lien_effective_reserved
+                .get()
+                .checked_mul(BOUND_SCALE)
+                .ok_or_else(|| format!("{label}: domain {domain} effective lien overflow"))?;
+            if classified_backing != expected_backing {
+                return Err(format!(
+                    "{label}: portfolio {portfolio_index} domain {domain} backing labels {classified_backing} != effective lien {expected_backing}"
+                ));
+            }
+            checked_stock_add(
+                &mut account_counterparty_backing[domain],
+                counterparty_backing,
+                &format!("{label} domain {domain} account counterparty liens"),
+            )?;
+            checked_stock_add(
+                &mut account_insurance_backing[domain],
+                insurance_backing,
+                &format!("{label} domain {domain} account insurance liens"),
+            )?;
+            let impaired_insurance_backing = account_source
+                .source_lien_impaired_effective_reserved
+                .get()
+                .checked_mul(BOUND_SCALE)
+                .ok_or_else(|| {
+                    format!("{label}: domain {domain} impaired effective lien overflow")
+                })?;
+            checked_stock_add(
+                &mut account_impaired_insurance_backing[domain],
+                impaired_insurance_backing,
+                &format!("{label} domain {domain} account impaired insurance liens"),
+            )?;
+        }
+    }
+
+    for domain in 0..domain_count {
+        let source = group.source_credit[domain];
+        let bucket = group.source_backing_buckets[domain];
+        let reservation = group.insurance_credit_reservations[domain];
+        let bucket_fresh = bucket
+            .fresh_unliened_backing_num
+            .checked_add(bucket.valid_liened_backing_num)
+            .ok_or_else(|| format!("{label}: domain {domain} fresh-backing overflow"))?;
+        if source.fresh_reserved_backing_num != bucket_fresh
+            || source.provider_receivable_num != bucket.consumed_liened_backing_num
+            || source.spent_backing_num < source.provider_receivable_num
+            || source.valid_liened_backing_num != bucket.valid_liened_backing_num
+            || source.impaired_liened_backing_num != bucket.impaired_liened_backing_num
+            || source.insurance_credit_reserved_num != reservation.insurance_credit_reserved_num
+            || source.valid_liened_insurance_num != reservation.valid_liened_insurance_num
+            || source.impaired_liened_insurance_num != reservation.impaired_liened_insurance_num
+        {
+            return Err(format!(
+                "{label}: domain {domain} source/bucket/reservation encumbrance ledger diverged"
+            ));
+        }
+        let market_counterparty_backing = source
+            .valid_liened_backing_num
+            .checked_add(source.impaired_liened_backing_num)
+            .ok_or_else(|| format!("{label}: domain {domain} market counterparty lien overflow"))?;
+        if account_counterparty_backing[domain] != market_counterparty_backing {
+            return Err(format!(
+                "{label}: domain {domain} account counterparty liens {} != market valid+impaired {}",
+                account_counterparty_backing[domain], market_counterparty_backing,
+            ));
+        }
+        if account_insurance_backing[domain] != source.valid_liened_insurance_num
+            || account_impaired_insurance_backing[domain] != source.impaired_liened_insurance_num
+        {
+            return Err(format!(
+                "{label}: domain {domain} account insurance lien lifecycle diverged from market valid/impaired ledgers"
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn assert_primary_source_claim_bound_attribution(label: &str, env: &V16Svm) -> Result<(), String> {
     let (_, group) = env.primary_market_state();
     let portfolios: Vec<_> = (0..PRIMARY_ACTOR_COUNT)
@@ -1726,6 +1855,26 @@ fn assert_primary_source_claim_bound_attribution(label: &str, env: &V16Svm) -> R
         .collect();
     assert_source_credit_rates(label, &group)?;
     assert_source_claim_bound_attribution(label, &group, &portfolios)
+}
+
+pub fn assert_public_encumbrance_census(label: &str, env: &V16Svm) -> Result<(), String> {
+    let (_, primary) = env.primary_market_state();
+    let primary_portfolios = (0..env.actors.len())
+        .map(|actor| env.primary_portfolio(actor))
+        .collect::<Vec<_>>();
+    assert_reservation_encumbrance_census(
+        &format!("{label} primary"),
+        &primary,
+        &primary_portfolios,
+    )?;
+
+    let (_, foreign) = env.foreign_market_state();
+    let foreign_portfolios = [env.foreign_portfolio()];
+    assert_reservation_encumbrance_census(
+        &format!("{label} foreign"),
+        &foreign,
+        &foreign_portfolios,
+    )
 }
 
 fn checked_stock_add(total: &mut u128, value: u128, label: &str) -> Result<(), String> {
@@ -3825,6 +3974,7 @@ impl ScenarioRunner {
         let foreign_portfolios = [self.env.foreign_portfolio()];
         assert_source_claim_bound_attribution("foreign", &foreign, &foreign_portfolios)?;
         assert_public_stock_census("stateful post-transition", &self.env)?;
+        assert_public_encumbrance_census("stateful post-transition", &self.env)?;
         self.assert_positions_match()
     }
 
@@ -17179,6 +17329,242 @@ pub fn verify_exact_stock_reconciliation_lifecycle(seed: [u8; 32]) -> Result<(),
             terminal_fresh_backing_num,
             terminal.insurance,
         ));
+    }
+    Ok(())
+}
+
+fn account_counterparty_lien_for_domain(account: &PortfolioAccountV16, domain: usize) -> u128 {
+    account
+        .source_domains
+        .iter()
+        .find(|source| source.is_occupied() && source.domain.get() as usize == domain)
+        .map(|source| source.source_lien_counterparty_backing_num.get())
+        .unwrap_or(0)
+}
+
+fn drain_resolved_actor_with_encumbrance_census(
+    env: &mut V16Svm,
+    actor: usize,
+    label: &str,
+) -> Result<u16, String> {
+    let mut successful_calls = 0u16;
+    for step in 0..512 {
+        let market_before = env.market_data(false);
+        let portfolio_before = env.primary_portfolio_data(actor);
+        let destination_before = env.token_amount(env.actors[actor].destination_token);
+        if env.close_resolved_primary(actor).is_ok() {
+            successful_calls = successful_calls
+                .checked_add(1)
+                .ok_or_else(|| format!("{label}: resolved-close call count overflow"))?;
+            assert_public_encumbrance_census(
+                &format!("{label} actor {actor} close step {step}"),
+                env,
+            )?;
+        }
+        if env.claim_resolved_payout_topup_primary(actor).is_ok() {
+            assert_public_encumbrance_census(
+                &format!("{label} actor {actor} claim step {step}"),
+                env,
+            )?;
+        }
+        if env.market_data(false) == market_before
+            && env.primary_portfolio_data(actor) == portfolio_before
+            && env.token_amount(env.actors[actor].destination_token) == destination_before
+        {
+            return Ok(successful_calls);
+        }
+    }
+    Err(format!(
+        "{label}: resolved actor {actor} did not reach a fixed point in 512 calls"
+    ))
+}
+
+#[allow(dead_code)]
+pub fn verify_counterparty_encumbrance_route_matrix(mut seed: [u8; 32]) -> Result<(), String> {
+    const WINNER: usize = 0;
+    const COUNTERPARTY: usize = 1;
+    const MARKET_CRANKER: usize = 4;
+    const WINNING_ASSET: u16 = 0;
+    const ADVERSE_ASSET: u16 = 1;
+    const START_PRICE: u64 = 100;
+    const WINNING_SIZE_Q: i128 = 20 * POS_SCALE as i128;
+    const ADVERSE_SIZE_Q: i128 = 10 * POS_SCALE as i128;
+    const SAFE_INCREASE_Q: i128 = 2 * POS_SCALE as i128;
+    const WINNER_DEPOSIT: u128 = 313;
+    const BACKING_ATOMS: u128 = 150;
+
+    for route in [
+        TradeRoute::NoCpi,
+        TradeRoute::Cpi,
+        TradeRoute::BatchNoCpi,
+        TradeRoute::BatchCpi,
+    ] {
+        for winner_long in [false, true] {
+            seed[0] ^= (route.index() as u8) << 3;
+            seed[1] ^= u8::from(winner_long);
+            let direction = if winner_long { 1i128 } else { -1i128 };
+            let winning_mark = if winner_long { 105 } else { 95 };
+            let adverse_mark = if winner_long { 95 } else { 105 };
+            let source_domain = if winner_long { 1usize } else { 0usize };
+            let label = format!("INV-026 {route:?} winner_long={winner_long}");
+            let mut env = V16Svm::new(
+                seed,
+                MarketConfig {
+                    initial_price: START_PRICE,
+                    h_max: 4,
+                    maintenance_margin_bps: 1_000,
+                    initial_margin_bps: 1_000,
+                    max_price_move_bps_per_slot: 500,
+                    max_accrual_dt_slots: 1,
+                    max_abs_funding_e9_per_slot: 0,
+                    min_funding_lifetime_slots: 1,
+                    maintenance_fee_per_slot: 0,
+                    actor_deposits: [WINNER_DEPOSIT, 1_000, 1, 1, 1],
+                    actor_token_balances: [WINNER_DEPOSIT as u64, 1_000, 1, 1, 1],
+                    ..MarketConfig::default()
+                },
+            );
+            let supply_before = env.token_supply_observed();
+            env.top_up_backing_bucket(source_domain as u16, BACKING_ATOMS, 100)
+                .map_err(|error| format!("{label} backing top-up: {error}"))?;
+            assert_public_encumbrance_census(&format!("{label} after backing top-up"), &env)?;
+
+            execute_trade_route(
+                &mut env,
+                route,
+                WINNER,
+                COUNTERPARTY,
+                WINNING_ASSET,
+                direction * WINNING_SIZE_Q,
+                START_PRICE,
+                0,
+            )
+            .map_err(|error| format!("{label} winning-leg open: {error}"))?;
+            execute_trade_route(
+                &mut env,
+                route,
+                WINNER,
+                COUNTERPARTY,
+                ADVERSE_ASSET,
+                direction * ADVERSE_SIZE_Q,
+                START_PRICE,
+                0,
+            )
+            .map_err(|error| format!("{label} adverse-leg open: {error}"))?;
+            assert_public_encumbrance_census(&format!("{label} after opens"), &env)?;
+
+            env.warp_to_slot(2);
+            env.push_auth_mark(WINNING_ASSET, 2, winning_mark)
+                .map_err(|error| format!("{label} winning mark: {error}"))?;
+            env.push_auth_mark(ADVERSE_ASSET, 2, adverse_mark)
+                .map_err(|error| format!("{label} adverse mark: {error}"))?;
+            let observations = [WINNING_ASSET, ADVERSE_ASSET]
+                .into_iter()
+                .map(|asset_index| CrankObservationHint {
+                    asset_index,
+                    oracle_accounts: env.primary_profile(asset_index as usize).oracle_leg_count,
+                })
+                .collect::<Vec<_>>();
+            for actor in [MARKET_CRANKER, COUNTERPARTY, WINNER] {
+                crank_adapter_steps_with_observations(&mut env, actor, 2, observations.clone(), 16)
+                    .map_err(|error| format!("{label} settle actor {actor}: {error}"))?;
+            }
+            if env.primary_portfolio(WINNER).pnl.get() != 50 {
+                return Err(format!(
+                    "{label}: paired marks produced PnL {}, expected 50",
+                    env.primary_portfolio(WINNER).pnl.get(),
+                ));
+            }
+            assert_public_encumbrance_census(&format!("{label} after settlement"), &env)?;
+
+            execute_trade_route(
+                &mut env,
+                route,
+                WINNER,
+                COUNTERPARTY,
+                ADVERSE_ASSET,
+                direction * SAFE_INCREASE_Q,
+                adverse_mark,
+                0,
+            )
+            .map_err(|error| format!("{label} source-backed risk increase: {error}"))?;
+            let account_lien =
+                account_counterparty_lien_for_domain(&env.primary_portfolio(WINNER), source_domain);
+            let (_, liened_group) = env.primary_market_state();
+            if account_lien == 0
+                || account_lien
+                    != liened_group.source_credit[source_domain].valid_liened_backing_num
+            {
+                return Err(format!(
+                    "{label}: route did not create a real singly-attributed counterparty lien: account={account_lien}, market={}",
+                    liened_group.source_credit[source_domain].valid_liened_backing_num,
+                ));
+            }
+            assert_public_encumbrance_census(&format!("{label} after lien creation"), &env)?;
+
+            env.resolve_market()
+                .map_err(|error| format!("{label} resolve: {error}"))?;
+            assert_public_encumbrance_census(&format!("{label} after resolve"), &env)?;
+            let mut winner_calls = 0u16;
+            let mut counterparty_calls = 0u16;
+            let mut globally_fixed = false;
+            for _ in 0..64 {
+                let market_before = env.market_data(false);
+                let winner_before = env.primary_portfolio_data(WINNER);
+                let counterparty_before = env.primary_portfolio_data(COUNTERPARTY);
+                let winner_destination_before =
+                    env.token_amount(env.actors[WINNER].destination_token);
+                let counterparty_destination_before =
+                    env.token_amount(env.actors[COUNTERPARTY].destination_token);
+                winner_calls = winner_calls
+                    .checked_add(drain_resolved_actor_with_encumbrance_census(
+                        &mut env, WINNER, &label,
+                    )?)
+                    .ok_or_else(|| format!("{label}: winner close count overflow"))?;
+                counterparty_calls = counterparty_calls
+                    .checked_add(drain_resolved_actor_with_encumbrance_census(
+                        &mut env,
+                        COUNTERPARTY,
+                        &label,
+                    )?)
+                    .ok_or_else(|| format!("{label}: counterparty close count overflow"))?;
+                if env.market_data(false) == market_before
+                    && env.primary_portfolio_data(WINNER) == winner_before
+                    && env.primary_portfolio_data(COUNTERPARTY) == counterparty_before
+                    && env.token_amount(env.actors[WINNER].destination_token)
+                        == winner_destination_before
+                    && env.token_amount(env.actors[COUNTERPARTY].destination_token)
+                        == counterparty_destination_before
+                {
+                    globally_fixed = true;
+                    break;
+                }
+            }
+            let (_, terminal) = env.primary_market_state();
+            let terminal_source = terminal.source_credit[source_domain];
+            let terminal_bucket = terminal.source_backing_buckets[source_domain];
+            if !globally_fixed
+                || winner_calls == 0
+                || counterparty_calls == 0
+                || account_counterparty_lien_for_domain(
+                    &env.primary_portfolio(WINNER),
+                    source_domain,
+                ) != 0
+                || terminal_source.valid_liened_backing_num != 0
+                || terminal_source.impaired_liened_backing_num != 0
+                || terminal_bucket.valid_liened_backing_num != 0
+                || terminal_bucket.consumed_liened_backing_num == 0
+                || terminal_source.provider_receivable_num
+                    != terminal_bucket.consumed_liened_backing_num
+                || env.token_supply_observed() != supply_before
+            {
+                return Err(format!(
+                    "{label}: terminal lien lifecycle incomplete: calls={winner_calls}/{counterparty_calls}, source={terminal_source:?}, bucket={terminal_bucket:?}, supply={}/{}",
+                    env.token_supply_observed(), supply_before,
+                ));
+            }
+            assert_public_encumbrance_census(&format!("{label} terminal"), &env)?;
+        }
     }
     Ok(())
 }
