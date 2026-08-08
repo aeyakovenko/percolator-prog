@@ -1,0 +1,60 @@
+# Machine-indexed coverage for charter-required metamorphic (M), bounded reachability (R), and compute (C) methods.
+# PARTIAL names executable evidence but does not claim the full charter matrix is complete.
+# OMITTED names a required method with no qualifying executable owner yet.
+invariant	method	status	evidence	remaining_gap
+INV-001	M	PARTIAL	tests/invariants/stateful/inv_001_market_incarnation_binding.rs#v16_program_market_incarnation_operation_matrix_discovers_stale_intents	Complete cross-program and cross-chain control/replay equivalence remains.
+INV-002	M	PARTIAL	tests/invariants/stateful/inv_002_asset_generation_binding.rs#v16_program_asset_generation_operation_matrix_discovers_stale_intents	Complete every retained asset request across retire/reuse permutations.
+INV-004	M	PARTIAL	tests/invariants/stateful/inv_004_position_episode_binding.rs#v16_program_all_trade_routes_advance_position_episode_once_and_errors_do_not	Recovery and resolved-claim episode route pairs remain.
+INV-008	M	PARTIAL	tests/invariants/stateful/inv_008_intent_uniqueness_and_bounded_replay.rs#v16_program_retry_operation_matrix_discovers_duplicate_economic_execution	Complete duplicate execution equivalence across every retryable route.
+INV-009	M	PARTIAL	tests/invariants/cu/inv_009_partial_fill_and_retry_accounting.rs#v16_program_tradecpi_short_fill_rejects_atomically_and_retries_cleanly	Partitioned successful fills and aggregate budget accounting remain absent.
+INV-010	M	PARTIAL	tests/invariants/stateful/inv_010_out_of_order_safety.rs#v16_program_matcher_mutation_order_rejects_revoked_capability	Complete landing-order permutations for all retained controls and value routes.
+INV-011	M	PARTIAL	tests/invariants/cu/inv_011_signed_aggregate_economic_bounds.rs#v16_program_batch_cpi_per_leg_limit_aborts_whole_batch	A signed aggregate multi-leg budget is not exposed by the API.
+INV-014	M	PARTIAL	tests/invariants/stateful/inv_014_delayed_policy_and_policy_epoch_safety.rs#v16_program_superseded_control_matrix_rejects_stale_overwrites	Complete every delayed policy under stricter and looser replacement policies.
+INV-017	M	PARTIAL	tests/invariants/cu/inv_017_signer_writable_role_and_account_alias_safety.rs#v16_program_custody_token_aliases_reject_without_mutation	Systematic all-pairs alias enumeration remains.
+INV-027	M	PARTIAL	tests/invariants/cu/inv_027_protected_principal_seniority.rs#v16_attack_insurance_ops_preserve_junior_backing	Complete favorable-operation equivalence in every underbacked and loss-stale mode.
+INV-035	M	PARTIAL	tests/invariants/public_sbf/inv_035_no_global_b_pool_residuals_remain_local.rs#v16_program_pr281_b_settlement_stays_domain_local_and_owner_can_exit	Multi-asset bankruptcy ordering permutations remain incomplete.
+INV-036	M	PARTIAL	tests/invariants/stateful/inv_036_fee_destination_and_policy_version_integrity.rs#v16_program_source_fee_consent_route_matrix_discovers_unsigned_debits	Complete single/batch and CPI/no-CPI fee destination equivalence across policy epochs.
+INV-038	M	PARTIAL	tests/invariants/stateful/inv_038_rounding_and_ratio_conservation.rs#v16_program_composite_scale_matrix_preserves_exact_composition	Full arithmetic split and ratio-change partition matrix remains.
+INV-041	M	PARTIAL	tests/invariants/cu/inv_041_deterministic_allocation_and_caller_order_independence.rs#v16_attack_multi_observation_crank_order_cannot_change_economics	Complete liquidation support insurance lien and claim order permutations.
+INV-045	M	PARTIAL	tests/invariants/stateful/inv_045_no_free_mark_movement.rs#v16_program_trade_route_matrix_discovers_pending_mark_inheritance	Complete zero one and maximum price comparisons across every mark-updating route.
+INV-047	M	PARTIAL	tests/invariants/cu/inv_047_equivalent_route_semantics.rs#v16_program_one_leg_batch_nocpi_matches_single_nocpi_fee_trade	Complete all route pairs after documented fee normalization.
+INV-048	M	PARTIAL	tests/invariants/cu/inv_048_matched_trade_and_open_interest_coherence.rs#v16_program_all_trade_routes_keep_oi_equal_to_active_leg_scan	Lifecycle reset recovery and resolved aggregate route comparisons remain.
+INV-050	M	PARTIAL	tests/invariants/cu/inv_050_cross_zero_decomposition.rs#v16_attack_position_flip_enforces_initial_margin	Cross-zero decomposition equivalence across all four trade routes remains.
+INV-051	M	PARTIAL	tests/invariants/cu/inv_051_canonical_adl_effective_quantity.rs#v16_program_crossed_adl_effective_exit_matrix_preserves_bounded_cleanup	One canonical effective-quantity oracle is not compared across every mutation route.
+INV-052	M	PARTIAL	tests/invariants/cu/inv_052_split_merge_invariance.rs#v16_program_split_trade_matches_aggregate_trade_economics	Liquidation lien insurance and claim split/merge matrices remain.
+INV-053	M	PARTIAL	tests/invariants/stateful/inv_053_full_health_recertification_equivalence.rs#v16_program_active_leg_currentness_route_order_matrix	Fast certificate versus independent full recomputation remains incomplete.
+INV-056	M	PARTIAL	tests/invariants/cu/inv_056_hints_are_discovery_only_favorable_actions_fully_refresh.rs#v16_program_batch_routes_refresh_stale_related_legs_before_favorable_trade	Complete stale missing duplicated and reordered hints across all favorable routes.
+INV-058	M	PARTIAL	tests/invariants/cu/inv_058_cumulative_position_oi_notional_and_rate_limit_integrity.rs#v16_program_topups_cannot_bypass_cumulative_tvl_cap	Complete partition strategies across position OI notional and rate limits.
+INV-059	M	PARTIAL	tests/invariants/cu/inv_059_fee_fragmentation_bound.rs#v16_attack_min_liquidation_fee_falls_back_to_full_close_progress	Episode-wide arbitrary liquidation partition comparison remains.
+INV-061	M	PARTIAL	tests/invariants/stateful/inv_061_deterministic_bounded_liquidation.rs#v16_program_resolved_adl_close_order_matrix_discovers_funded_exit_lock	Complete equal-priority leg and close-size permutation matrix remains.
+INV-064	M	PARTIAL	tests/invariants/cu/inv_064_insurance_withdrawal_policy_equivalence.rs#v16_program_terminal_insurance_withdraw_cannot_bypass_live_asset_withdrawal_policy	All withdrawal route asset and domain interleavings remain.
+INV-066	M	PARTIAL	tests/invariants/cu/inv_066_resolved_payout_fairness_and_order_independence.rs#v16_attack_resolved_two_public_winners_are_close_order_independent	Exhaustive claimant top-up receipt and authority-refinement order remains.
+INV-072	M	PARTIAL	tests/invariants/cu/inv_072_order_robust_crankability.rs#v16_program_crank_hint_matrix_preserves_or_discovers_canonical_progress	Every actionable crank class and full bounded hint power set remain.
+INV-085	M	PARTIAL	tests/invariants/cu/inv_085_proven_arithmetic_equals_deployed_arithmetic.rs#v16_program_price_clamp_matches_widened_oracle_on_boundaries	Full Kani host BPF and bigint arithmetic equivalence remains.
+INV-086	M	PARTIAL	tests/invariants/stateful/inv_086_reference_model_and_deployed_transition_equivalence.rs#v16_program_reference_model_matches_deployed_public_sequence	Reference model omits identity liens payout authority resolution and lifecycle.
+INV-088	M	PARTIAL	tests/invariants/cu/inv_088_global_summaries_are_not_account_local_proofs.rs#v16_program_stored_position_summaries_match_portfolio_scan_after_cross_asset_updates	Every global accumulator and adversarial touch order remains.
+INV-089	M	PARTIAL	tests/invariants/cu/inv_089_activation_reactivation_and_initialization_equivalence.rs#v16_program_reuse_matches_fresh_activation_envelope_and_drops_old_authority	Full raw-state activation/reactivation equivalence remains.
+INV-007	R	OMITTED	-	No bounded public-state ABA reachability model exists.
+INV-010	R	OMITTED	-	No exhaustive bounded landing-order reachability model exists.
+INV-029	R	OMITTED	-	No exhaustive bucket-edge claim-bound state model exists.
+INV-041	R	OMITTED	-	No exhaustive allocation and caller-order state model exists.
+INV-043	R	OMITTED	-	Hedge and correlation credit are absent from the wrapper API; reopen when exposed.
+INV-046	R	OMITTED	-	No bounded search proves every unsafe-price state retains a reducing route.
+INV-055	R	OMITTED	-	No exhaustive instruction-by-lifecycle admission model exists.
+INV-057	R	OMITTED	-	No reachable-state search proves risk-reduction availability in every mode.
+INV-065	R	OMITTED	-	No exhaustive reset recovery and retirement interleaving model exists.
+INV-066	R	OMITTED	-	No exhaustive resolved claimant-order state model exists.
+INV-067	R	OMITTED	-	No exhaustive exact-once terminal claim state model exists.
+INV-069	R	OMITTED	-	No exhaustive terminal normalization and retirement state model exists.
+INV-070	R	OMITTED	-	No complete public market-lifecycle reachability model reaches CloseSlab.
+INV-071	R	OMITTED	-	No exhaustive actionable-state rank graph exists at the wrapper boundary.
+INV-072	R	OMITTED	-	No exhaustive hint-set and actionable-class reachability model exists.
+INV-073	R	OMITTED	-	No bounded graph proves terminal disposition from every reachable funded state.
+INV-075	R	OMITTED	-	No exhaustive close-priority preemption and restart model exists.
+INV-078	R	OMITTED	-	No exhaustive failure-class to permissionless-recovery model exists.
+INV-079	R	OMITTED	-	Finding traces are not replayed through a bounded public-state reachability engine.
+INV-082	R	OMITTED	-	Fixed route witnesses exist but no exhaustive state-indexed liveness graph exists.
+INV-084	R	OMITTED	-	Proof preconditions lack exhaustive public-route reachability establishment.
+INV-086	R	OMITTED	-	No bounded deployed-versus-reference state graph exists.
+INV-061	C	PARTIAL	tests/invariants/cu/inv_061_deterministic_bounded_liquidation.rs#v16_bpf_permissionless_liquidation_is_bounded	Complete maximum-asset equal-risk liquidation shapes remain.
+INV-077	C	PARTIAL	tests/invariants/cu/inv_077_bounded_work_and_maximum_shape_compute.rs#v16_bpf_public_full_14_leg_composite_oracle_liquidation_progress_is_bounded	All 50 routes are measured but the relevant maximum-dimension cross-product remains.

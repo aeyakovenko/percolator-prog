@@ -861,6 +861,165 @@ fn source_defines_function(source: &str, function: &str) -> bool {
     })
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct SpecialMethodRequirement {
+    invariant: String,
+    method: String,
+}
+
+#[test]
+fn v16_special_verification_method_registry_matches_charter() {
+    let required = charter_special_method_requirements(include_str!("../../../INVARIANTS.md"));
+    let indexed = parse_special_method_registry(include_str!("../special_method_coverage.tsv"));
+    let indexed_requirements = indexed
+        .iter()
+        .map(|row| SpecialMethodRequirement {
+            invariant: row.invariant.to_string(),
+            method: row.method.to_string(),
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+
+    assert_eq!(
+        indexed_requirements, required,
+        "every charter-required M/R/C method must have exactly one explicit registry row"
+    );
+    assert_eq!(
+        indexed.len(),
+        required.len(),
+        "duplicate method registry row"
+    );
+}
+
+fn charter_special_method_requirements(
+    charter: &str,
+) -> std::collections::BTreeSet<SpecialMethodRequirement> {
+    let mut current_invariant = None;
+    let mut required = std::collections::BTreeSet::new();
+
+    for line in charter.lines() {
+        if let Some(rest) = line.strip_prefix("### INV-") {
+            let digits = rest
+                .chars()
+                .take_while(|ch| ch.is_ascii_digit())
+                .collect::<String>();
+            assert_eq!(digits.len(), 3, "malformed invariant heading: {line}");
+            current_invariant = Some(format!("INV-{digits}"));
+            continue;
+        }
+        let Some(methods) = line.strip_prefix("**Verification:** ") else {
+            continue;
+        };
+        let invariant = current_invariant
+            .as_ref()
+            .unwrap_or_else(|| panic!("verification methods precede an invariant heading"));
+        for method in methods.split(',').map(str::trim) {
+            if matches!(method, "M" | "R" | "C") {
+                assert!(
+                    required.insert(SpecialMethodRequirement {
+                        invariant: invariant.clone(),
+                        method: method.to_string(),
+                    }),
+                    "duplicate {method} requirement for {invariant}"
+                );
+            }
+        }
+    }
+
+    assert_eq!(required.iter().filter(|row| row.method == "M").count(), 32);
+    assert_eq!(required.iter().filter(|row| row.method == "R").count(), 22);
+    assert_eq!(required.iter().filter(|row| row.method == "C").count(), 2);
+    required
+}
+
+#[derive(Debug)]
+struct SpecialMethodCoverageRow<'a> {
+    invariant: &'a str,
+    method: &'a str,
+}
+
+fn parse_special_method_registry(tsv: &str) -> Vec<SpecialMethodCoverageRow<'_>> {
+    const HEADER: &str = "invariant\tmethod\tstatus\tevidence\tremaining_gap";
+    let mut rows = Vec::new();
+    let mut saw_header = false;
+
+    for (line_index, line) in tsv.lines().enumerate() {
+        if line.starts_with('#') || line.is_empty() {
+            continue;
+        }
+        if !saw_header {
+            assert_eq!(line, HEADER, "special method registry header changed");
+            saw_header = true;
+            continue;
+        }
+
+        let fields = line.split('\t').collect::<Vec<_>>();
+        assert_eq!(
+            fields.len(),
+            5,
+            "malformed special method registry row {}: {line}",
+            line_index + 1
+        );
+        let (invariant, method, status, evidence, remaining_gap) =
+            (fields[0], fields[1], fields[2], fields[3], fields[4]);
+        assert!(
+            invariant.len() == 7
+                && invariant.starts_with("INV-")
+                && invariant[4..].chars().all(|ch| ch.is_ascii_digit()),
+            "invalid invariant id on row {}: {invariant}",
+            line_index + 1
+        );
+        assert!(
+            matches!(method, "M" | "R" | "C"),
+            "invalid method on row {}: {method}",
+            line_index + 1
+        );
+        assert!(
+            !remaining_gap.trim().is_empty(),
+            "row {} must name the remaining completion gap",
+            line_index + 1
+        );
+
+        match status {
+            "PARTIAL" => {
+                let (path, function) = evidence.split_once('#').unwrap_or_else(|| {
+                    panic!(
+                        "row {} PARTIAL evidence lacks path#function",
+                        line_index + 1
+                    )
+                });
+                assert!(
+                    path.starts_with("tests/invariants/") && path.ends_with(".rs"),
+                    "row {} evidence is not invariant-owned: {path}",
+                    line_index + 1
+                );
+                let full_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(path);
+                let source = std::fs::read_to_string(&full_path)
+                    .unwrap_or_else(|error| panic!("read method evidence {path}: {error}"));
+                assert!(
+                    source_defines_function(&source, function),
+                    "row {} evidence {path} does not define fn {function}",
+                    line_index + 1
+                );
+            }
+            "OMITTED" => assert_eq!(
+                evidence,
+                "-",
+                "row {} OMITTED method cannot claim evidence",
+                line_index + 1
+            ),
+            _ => panic!(
+                "row {} status must be PARTIAL or OMITTED, got {status}",
+                line_index + 1
+            ),
+        }
+
+        rows.push(SpecialMethodCoverageRow { invariant, method });
+    }
+
+    assert!(saw_header, "special method registry header is missing");
+    rows
+}
+
 fn invariant_ids(markdown: &str, prefix: &str) -> Vec<u16> {
     markdown
         .lines()
