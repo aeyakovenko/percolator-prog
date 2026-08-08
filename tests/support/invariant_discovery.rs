@@ -1,5 +1,6 @@
 use super::v16_svm::{
-    MarketConfig, V16Svm, EXIT_MAKER_DEPOSIT, INITIAL_PRICE, PRIMARY_ACTOR_COUNT, USER_DEPOSIT,
+    MarketConfig, PublicTraceEvidence, V16Svm, EXIT_MAKER_DEPOSIT, INITIAL_PRICE,
+    PRIMARY_ACTOR_COUNT, USER_DEPOSIT,
 };
 use percolator::{BackingBucketStatusV16, MarketModeV16, SideModeV16, ADL_ONE, POS_SCALE};
 use percolator_prog::{
@@ -643,6 +644,7 @@ pub struct MarketIncarnationDiscovery {
     pub accepted_stale_intent: bool,
     pub mutated_economic_state: bool,
     pub compute_units: Option<u64>,
+    pub public_trace: PublicTraceEvidence,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2344,6 +2346,7 @@ fn finish_market_incarnation_discovery(
             env.token_supply_observed()
         ));
     }
+    let public_trace = env.finish_public_trace();
 
     match result {
         Ok(success) => {
@@ -2360,6 +2363,7 @@ fn finish_market_incarnation_discovery(
                 accepted_stale_intent: true,
                 mutated_economic_state,
                 compute_units: Some(success.compute_units),
+                public_trace,
             })
         }
         Err(_) => {
@@ -2375,6 +2379,7 @@ fn finish_market_incarnation_discovery(
                 accepted_stale_intent: false,
                 mutated_economic_state: false,
                 compute_units: None,
+                public_trace,
             })
         }
     }
@@ -2414,6 +2419,7 @@ fn discover_rebalance_market_incarnation_replay(
         ..MarketConfig::default()
     };
     let mut env = V16Svm::new(seed, config);
+    env.begin_public_trace();
     let supply_before = env.token_supply_observed();
     let old_market_id = env.primary_market_state().1.assets[0].market_id;
     env.trade_no_cpi(SUBJECT, COUNTERPARTY, 0, OLD_SIZE_Q, PRICE, 0)
@@ -2460,6 +2466,7 @@ fn discover_forfeit_market_incarnation_replay(
         ..MarketConfig::default()
     };
     let mut env = V16Svm::new(seed, config);
+    env.begin_public_trace();
     let supply_before = env.token_supply_observed();
     env.configure_permissionless_resolve(100, 1)
         .map_err(|error| format!("configure old-market recovery lifecycle: {error}"))?;
@@ -2531,6 +2538,7 @@ fn discover_one_market_incarnation_replay(
         ..MarketConfig::default()
     };
     let mut env = V16Svm::new(seed, config);
+    env.begin_public_trace();
     let supply_before = env.token_supply_observed();
     if kind == MarketIntentKind::ShutdownAsset {
         env.configure_permissionless_resolve(1_000_000, 1)

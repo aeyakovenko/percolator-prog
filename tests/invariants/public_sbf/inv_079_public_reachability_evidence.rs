@@ -2,7 +2,7 @@
 //!
 //! Normative obligation: Accepted LoF and DoS findings reproduce through valid public instructions and exact external effects.
 //!
-//! Evidence in this file (I plus invariant-specific F/M assertions): `v16_program_fixed_blockers_remain_progressing`, `v16_program_open_lof_manifest_snapshot_is_structurally_honest`, `v16_open_security_finding_benchmark_is_complete_and_non_overclaiming`, `v16_invariant_charter_and_index_are_complete`. These tests exercise the deployed public
+//! Evidence in this file (I plus invariant-specific F/M assertions): `v16_public_trace_schema_detects_out_of_band_economic_mutation`, `v16_program_fixed_blockers_remain_progressing`, `v16_program_open_lof_manifest_snapshot_is_structurally_honest`, `v16_open_security_finding_benchmark_is_complete_and_non_overclaiming`, `v16_invariant_charter_and_index_are_complete`. These tests exercise the deployed public
 //! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
 //! rollback, liveness, or compute outcomes appropriate to the invariant.
 //!
@@ -11,6 +11,68 @@
 //! plus every additional verification method required by the charter.
 
 use super::*;
+use crate::support::v16_svm::{MarketConfig, V16Svm};
+use solana_sdk::signature::Signer;
+
+#[test]
+fn v16_public_trace_schema_detects_out_of_band_economic_mutation() {
+    let mut env = V16Svm::new([0x79; 32], MarketConfig::default());
+    env.begin_public_trace();
+
+    let mut foreign_market = env
+        .svm
+        .get_account(&env.foreign_market)
+        .expect("foreign market fixture");
+    foreign_market.lamports = foreign_market
+        .lamports
+        .checked_add(1)
+        .expect("mutation sentinel lamports");
+    env.svm
+        .set_account(env.foreign_market, foreign_market)
+        .expect("install deliberate out-of-band mutation sentinel");
+
+    env.deposit_primary(0, 1)
+        .expect("public call after mutation sentinel");
+    env.withdraw_primary(0, u128::MAX)
+        .expect_err("unrepresentable public withdrawal must reject");
+    let trace = env.finish_public_trace();
+    assert_eq!(
+        trace.out_of_band_economic_mutations, 1,
+        "trace schema must reject hidden state-injection evidence"
+    );
+    assert_eq!(trace.steps.len(), 2);
+    let step = &trace.steps[0];
+    assert_eq!(step.program_id, percolator_prog::id());
+    assert!(step.succeeded);
+    assert!(step.compute_units.is_some());
+    assert!(step
+        .transaction_signers
+        .contains(&env.actors[0].signer.pubkey()));
+    assert!(step
+        .accounts
+        .iter()
+        .any(|meta| meta.key == env.actors[0].signer.pubkey() && meta.is_signer));
+    assert!(step
+        .token_deltas
+        .contains(&(env.actors[0].source_token, -1)));
+    assert!(step.token_deltas.contains(&(env.vault, 1)));
+    assert!(!step.lamport_deltas.is_empty());
+
+    let rejected = &trace.steps[1];
+    assert_eq!(rejected.program_id, percolator_prog::id());
+    assert!(!rejected.succeeded);
+    assert_eq!(rejected.compute_units, None);
+    assert_eq!(rejected.rejected_exact_writable_rollback, Some(true));
+    assert_eq!(rejected.rejected_no_program_lamport_delta, Some(true));
+    assert!(rejected.token_deltas.iter().all(|(_, delta)| *delta == 0));
+    assert!(rejected.lamport_deltas.iter().all(|(key, delta)| {
+        if *key == rejected.fee_payer {
+            *delta < 0
+        } else {
+            *delta == 0
+        }
+    }));
+}
 
 #[test]
 fn v16_program_fixed_blockers_remain_progressing() {

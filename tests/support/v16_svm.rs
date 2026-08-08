@@ -120,6 +120,63 @@ pub struct TxSuccess {
     pub compute_units: u64,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PublicTraceAccountMeta {
+    pub key: Pubkey,
+    pub is_signer: bool,
+    pub is_writable: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PublicTraceStep {
+    pub program_id: Pubkey,
+    pub instruction_data: Vec<u8>,
+    pub fee_payer: Pubkey,
+    pub transaction_signers: Vec<Pubkey>,
+    pub accounts: Vec<PublicTraceAccountMeta>,
+    pub succeeded: bool,
+    pub compute_units: Option<u64>,
+    pub rejected_exact_writable_rollback: Option<bool>,
+    pub rejected_no_program_lamport_delta: Option<bool>,
+    pub token_deltas: Vec<(Pubkey, i128)>,
+    pub lamport_deltas: Vec<(Pubkey, i128)>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PublicTraceEvidence {
+    pub steps: Vec<PublicTraceStep>,
+    pub out_of_band_economic_mutations: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct TraceAccountState {
+    lamports: u64,
+    data: Vec<u8>,
+    owner: Pubkey,
+    executable: bool,
+    rent_epoch: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct TraceStateSnapshot(Vec<(Pubkey, Option<TraceAccountState>)>);
+
+struct PublicTraceCapture {
+    expected_state: TraceStateSnapshot,
+    steps: Vec<PublicTraceStep>,
+    out_of_band_economic_mutations: usize,
+}
+
+struct PendingPublicTraceStep {
+    program_id: Pubkey,
+    instruction_data: Vec<u8>,
+    fee_payer: Pubkey,
+    transaction_signers: Vec<Pubkey>,
+    accounts: Vec<PublicTraceAccountMeta>,
+    writable_before: Vec<(Pubkey, Option<TraceAccountState>)>,
+    token_balances_before: Vec<(Pubkey, u64)>,
+    lamports_before: Vec<(Pubkey, u64)>,
+}
+
 pub struct V16Svm {
     pub svm: LiteSVM,
     pub program_id: Pubkey,
@@ -144,6 +201,7 @@ pub struct V16Svm {
     foreign_admin: Keypair,
     token_accounts: Vec<Pubkey>,
     tx_sequence: u64,
+    public_trace: Option<PublicTraceCapture>,
 }
 
 impl V16Svm {
@@ -353,6 +411,7 @@ impl V16Svm {
             foreign_admin,
             token_accounts,
             tx_sequence: 0,
+            public_trace: None,
         };
         out.initialize_world(config);
         out
@@ -3591,9 +3650,36 @@ impl V16Svm {
         )
     }
 
+    pub fn begin_public_trace(&mut self) {
+        assert!(self.public_trace.is_none(), "public trace already active");
+        self.public_trace = Some(PublicTraceCapture {
+            expected_state: self.trace_state_snapshot(),
+            steps: Vec::new(),
+            out_of_band_economic_mutations: 0,
+        });
+    }
+
+    pub fn finish_public_trace(&mut self) -> PublicTraceEvidence {
+        let current_state = self.trace_state_snapshot();
+        let mut capture = self
+            .public_trace
+            .take()
+            .expect("public trace is not active");
+        if current_state != capture.expected_state {
+            capture.out_of_band_economic_mutations += 1;
+        }
+        PublicTraceEvidence {
+            steps: capture.steps,
+            out_of_band_economic_mutations: capture.out_of_band_economic_mutations,
+        }
+    }
+
     pub fn land_retained(&mut self, tx: Transaction) -> Result<TxSuccess, String> {
-        self.svm
-            .send_transaction(tx)
+        let pending_trace = self.prepare_public_trace_step(&tx);
+        let result = self.svm.send_transaction(tx);
+        let compute_units = result.as_ref().ok().map(|meta| meta.compute_units_consumed);
+        self.complete_public_trace_step(pending_trace, compute_units);
+        result
             .map(|meta| {
                 assert!(
                     meta.compute_units_consumed <= TX_CU_LIMIT,
@@ -3605,6 +3691,236 @@ impl V16Svm {
                 }
             })
             .map_err(|err| format!("{err:?}"))
+    }
+
+    fn trace_account_state(&self, key: Pubkey) -> Option<TraceAccountState> {
+        self.svm.get_account(&key).map(|account| TraceAccountState {
+            lamports: account.lamports,
+            data: account.data,
+            owner: account.owner,
+            executable: account.executable,
+            rent_epoch: account.rent_epoch,
+        })
+    }
+
+    fn trace_state_keys(&self) -> Vec<Pubkey> {
+        let mut keys = vec![
+            self.market,
+            self.foreign_market,
+            self.mint,
+            self.vault,
+            self.foreign_vault,
+            self.provider_source_token,
+            self.provider_destination_token,
+            self.backing_domain_ledger,
+            self.market_admin_destination_token,
+            self.payer.pubkey(),
+            self.admin.pubkey(),
+            self.foreign_admin.pubkey(),
+            self.foreign_actor.signer.pubkey(),
+            self.foreign_actor.portfolio,
+            self.foreign_actor.source_token,
+            self.foreign_actor.destination_token,
+        ];
+        keys.extend(self.token_accounts.iter().copied());
+        for actor in &self.actors {
+            keys.extend([
+                actor.signer.pubkey(),
+                actor.portfolio,
+                actor.source_token,
+                actor.destination_token,
+                actor.matcher_context,
+                actor.matcher_delegate,
+            ]);
+        }
+        keys.sort_unstable_by_key(|key| key.to_bytes());
+        keys.dedup();
+        keys
+    }
+
+    fn trace_state_snapshot(&self) -> TraceStateSnapshot {
+        TraceStateSnapshot(
+            self.trace_state_keys()
+                .into_iter()
+                .map(|key| (key, self.trace_account_state(key)))
+                .collect(),
+        )
+    }
+
+    fn trace_token_balances(&self) -> Vec<(Pubkey, u64)> {
+        let mut balances: Vec<_> = self
+            .token_accounts
+            .iter()
+            .copied()
+            .map(|key| {
+                let amount = self
+                    .svm
+                    .get_account(&key)
+                    .and_then(|account| TokenAccount::unpack(&account.data).ok())
+                    .map(|account| account.amount)
+                    .unwrap_or(0);
+                (key, amount)
+            })
+            .collect();
+        balances.sort_unstable_by_key(|(key, _)| key.to_bytes());
+        balances.dedup_by_key(|(key, _)| *key);
+        balances
+    }
+
+    fn prepare_public_trace_step(&mut self, tx: &Transaction) -> Option<PendingPublicTraceStep> {
+        self.public_trace.as_ref()?;
+        let current_state = self.trace_state_snapshot();
+        let message = &tx.message;
+        let instruction = message
+            .instructions
+            .iter()
+            .rev()
+            .find(|instruction| {
+                message.account_keys[instruction.program_id_index as usize]
+                    != solana_sdk::compute_budget::id()
+            })
+            .expect("traced transaction has a non-compute instruction");
+        let required_signers = message.header.num_required_signatures as usize;
+        let writable_signed = required_signers
+            .checked_sub(message.header.num_readonly_signed_accounts as usize)
+            .expect("message signed-account header");
+        let writable_unsigned_end = message
+            .account_keys
+            .len()
+            .checked_sub(message.header.num_readonly_unsigned_accounts as usize)
+            .expect("message unsigned-account header");
+        let transaction_signers = message.account_keys[..required_signers].to_vec();
+        let accounts: Vec<_> = instruction
+            .accounts
+            .iter()
+            .map(|raw_index| {
+                let index = *raw_index as usize;
+                let is_signer = index < required_signers;
+                let is_writable = if is_signer {
+                    index < writable_signed
+                } else {
+                    index < writable_unsigned_end
+                };
+                PublicTraceAccountMeta {
+                    key: message.account_keys[index],
+                    is_signer,
+                    is_writable,
+                }
+            })
+            .collect();
+        let mut writable_keys: Vec<_> = accounts
+            .iter()
+            .filter_map(|meta| meta.is_writable.then_some(meta.key))
+            .collect();
+        writable_keys.sort_unstable_by_key(|key| key.to_bytes());
+        writable_keys.dedup();
+        let writable_before = writable_keys
+            .into_iter()
+            .map(|key| (key, self.trace_account_state(key)))
+            .collect();
+        let mut lamport_keys = transaction_signers.clone();
+        lamport_keys.extend(accounts.iter().map(|meta| meta.key));
+        lamport_keys.sort_unstable_by_key(|key| key.to_bytes());
+        lamport_keys.dedup();
+        let lamports_before = lamport_keys
+            .into_iter()
+            .map(|key| (key, self.account_lamports(key)))
+            .collect();
+
+        let capture = self.public_trace.as_mut().expect("trace checked above");
+        if current_state != capture.expected_state {
+            capture.out_of_band_economic_mutations += 1;
+        }
+        capture.expected_state = current_state;
+
+        Some(PendingPublicTraceStep {
+            program_id: message.account_keys[instruction.program_id_index as usize],
+            instruction_data: instruction.data.clone(),
+            fee_payer: message.account_keys[0],
+            transaction_signers,
+            accounts,
+            writable_before,
+            token_balances_before: self.trace_token_balances(),
+            lamports_before,
+        })
+    }
+
+    fn complete_public_trace_step(
+        &mut self,
+        pending: Option<PendingPublicTraceStep>,
+        compute_units: Option<u64>,
+    ) {
+        let Some(pending) = pending else {
+            return;
+        };
+        let current_state = self.trace_state_snapshot();
+        let rejected_exact_writable_rollback = compute_units.is_none().then(|| {
+            pending.writable_before.iter().all(|(key, before)| {
+                let after = self.trace_account_state(*key);
+                if *key != pending.fee_payer {
+                    return after == *before;
+                }
+                match (before, after) {
+                    (Some(before), Some(after)) => {
+                        before.data == after.data
+                            && before.owner == after.owner
+                            && before.executable == after.executable
+                            && before.rent_epoch == after.rent_epoch
+                    }
+                    (None, None) => true,
+                    _ => false,
+                }
+            })
+        });
+        let token_balances_after = self.trace_token_balances();
+        let token_deltas = pending
+            .token_balances_before
+            .iter()
+            .map(|(key, before)| {
+                let after = token_balances_after
+                    .iter()
+                    .find_map(|(candidate, amount)| (candidate == key).then_some(*amount))
+                    .unwrap_or(0);
+                (*key, i128::from(after) - i128::from(*before))
+            })
+            .collect();
+        let lamport_deltas = pending
+            .lamports_before
+            .iter()
+            .map(|(key, before)| {
+                (
+                    *key,
+                    i128::from(self.account_lamports(*key)) - i128::from(*before),
+                )
+            })
+            .collect::<Vec<_>>();
+        let rejected_no_program_lamport_delta = compute_units.is_none().then(|| {
+            lamport_deltas.iter().all(|(key, delta)| {
+                if *key == pending.fee_payer {
+                    *delta <= 0
+                } else {
+                    *delta == 0
+                }
+            })
+        });
+        let capture = self
+            .public_trace
+            .as_mut()
+            .expect("public trace remained active");
+        capture.expected_state = current_state;
+        capture.steps.push(PublicTraceStep {
+            program_id: pending.program_id,
+            instruction_data: pending.instruction_data,
+            fee_payer: pending.fee_payer,
+            transaction_signers: pending.transaction_signers,
+            accounts: pending.accounts,
+            succeeded: compute_units.is_some(),
+            compute_units,
+            rejected_exact_writable_rollback,
+            rejected_no_program_lamport_delta,
+            token_deltas,
+            lamport_deltas,
+        });
     }
 
     pub fn expire_blockhash(&mut self) {
