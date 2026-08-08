@@ -22,10 +22,10 @@ verification methods are in [`../../INVARIANTS.md`](../../INVARIANTS.md).
 
 | Suite | Tests | Evidence |
 | --- | ---: | --- |
-| `public_sbf/` | 79 | Deterministic public SBF/LiteSVM counterexamples, regressions, and manifest checks |
-| `stateful/` | 109 | Proptest-generated public routes, including generalized active-leg/currentness, source-claim attribution, source-credit-rate, and authenticated-expiry route matrices |
-| `cu/` | 107 | Positive public-route, metamorphic, rollback, liveness, and max-shape CU tests |
-| `kani/` | 51 | Symbolic wrapper arithmetic, matcher-binding, ordering, and strict-decoder proof harnesses; the newest generation-control wire-format harness has not been run locally |
+| `public_sbf/` | 77 | Deterministic public SBF/LiteSVM counterexamples, regressions, and manifest checks |
+| `stateful/` | 104 | Proptest-generated public routes, including generalized active-leg/currentness, source-claim attribution, source-credit-rate, authenticated-expiry route matrices, state-indexed liveness witnesses, and reference-model/deployed-transition equivalence |
+| `cu/` | 707 | Full `v16_cu` public-route, metamorphic, rollback, liveness, arithmetic-differential, and max-shape CU inventory, with no standalone top-level tests |
+| `kani/` | 76 | Symbolic wrapper arithmetic, matcher-binding, ordering, strict-decoder, and proof-assumption nonvacuity harnesses; full `cargo kani --tests` remains the required verification command |
 
 Most deterministic and stateful LoF adapters still reproduce quarantined vulnerable behavior;
 fixed-pin regressions explicitly require safe rejection or preservation instead. A vulnerable-pin
@@ -52,6 +52,12 @@ asset 0 alone. The INV-002 public-route matrix now reports zero generation-repla
 all 15 retained control families. Same-pubkey whole-market recreation remains an INV-001 concern
 because a newly initialized market can begin with the same frontier value.
 
+The wrapper-supported sparse source-domain liveness shape is `2 * WRAPPER_MAX_PORTFOLIO_ASSETS`
+(28 domains). Public historical episodes can fill that shape; already-reserved domains and
+risk-reducing exits remain live there. A risk-increasing trade on an unreserved asset must reject
+before admitting a funded leg when the wrapper-supported source-domain budget is full. INV-028 owns
+the admission-order matrix; INV-077 owns the CU/max-shape liveness regressions.
+
 ## Coverage status
 
 Status meanings:
@@ -77,93 +83,242 @@ charter.
 | --- | --- | --- |
 | INV-001 | Independent + Direct | `public_sbf/inv_001_market_incarnation_binding.rs`, `stateful/inv_001_market_incarnation_binding.rs` |
 | INV-002 | Independent + Direct + SVM/CU | `public_sbf/inv_002_asset_generation_binding.rs`, `stateful/inv_002_asset_generation_binding.rs`, `cu/inv_002_asset_generation_binding.rs` |
-| INV-003 | Independent + Direct | `public_sbf/inv_003_portfolio_incarnation_binding.rs`, `stateful/inv_003_portfolio_incarnation_binding.rs` |
-| INV-004 | Independent | `stateful/inv_004_position_episode_binding.rs`, `kani/inv_004_position_episode_binding.rs` |
+| INV-003 | Independent + Direct + SVM/CU | `public_sbf/inv_003_portfolio_incarnation_binding.rs`, `stateful/inv_003_portfolio_incarnation_binding.rs`, `cu/inv_003_portfolio_incarnation_binding.rs` |
+| INV-004 | Independent + P + SVM/CU | `stateful/inv_004_position_episode_binding.rs`, `kani/inv_004_position_episode_binding.rs`, `cu/inv_004_position_episode_binding.rs` (deterministic retained reduction/recovery-forfeit episode replay witness) |
 | INV-005 | Independent + Direct + SVM/CU | `public_sbf/inv_005_authority_incarnation_binding.rs`, `stateful/inv_005_authority_incarnation_binding.rs`, `cu/inv_005_authority_incarnation_binding.rs` |
 | INV-006 | SVM/CU | `public_sbf/inv_006_program_chain_message_type_and_version_binding.rs` (signed program, market, instruction bytes, and recent-blockhash mutation with exact rollback; explicit genesis-domain field remains absent) |
-| INV-007 | Gap | - |
+| INV-007 | Direct | `public_sbf/inv_007_no_aba_reuse.rs` (whole-market same-pubkey recreation remains a visible public ABA counterexample: all 11 retained market-scope routes still land until persistent market generation binding is added) |
 | INV-008 | Independent + Direct | `public_sbf/inv_008_intent_uniqueness_and_bounded_replay.rs`, `stateful/inv_008_intent_uniqueness_and_bounded_replay.rs` |
-| INV-009 | Gap | - |
-| INV-010 | Independent + P | `stateful/inv_010_out_of_order_safety.rs`, `kani/inv_010_out_of_order_safety.rs` |
-| INV-011 | Gap | - |
-| INV-012 | Gap | - |
-| INV-013 | Gap | - |
-| INV-014 | Independent + Direct + SVM/CU + P harness | `public_sbf/inv_014_delayed_policy_and_policy_epoch_safety.rs`, `stateful/inv_014_delayed_policy_and_policy_epoch_safety.rs`, `cu/inv_014_delayed_policy_and_policy_epoch_safety.rs`, `kani/inv_014_delayed_policy_and_policy_epoch_safety.rs` |
-| INV-015 | Gap | - |
-| INV-016 | Gap | - |
-| INV-017 | Gap | - |
+| INV-009 | SVM/CU | `cu/inv_009_partial_fill_and_retry_accounting.rs` |
+| INV-010 | Independent + P + SVM/CU | `stateful/inv_010_out_of_order_safety.rs`, `kani/inv_010_out_of_order_safety.rs`, `cu/inv_010_out_of_order_safety.rs` (deterministic out-of-order matcher revoke/stale-enable/fresh-enable witness) |
+| INV-011 | SVM/CU + Spec gap | `cu/inv_011_signed_aggregate_economic_bounds.rs` (per-leg CPI signed price bounds and atomic batch rejection are covered; a single aggregate budget field remains absent) |
+| INV-012 | SVM/CU | `cu/inv_012_capability_and_delegate_scope.rs` |
+| INV-013 | SVM/CU + Cross-owner references | `cu/inv_013_destructive_consent_scope.rs` (public stale reduction episode rollback); related market/portfolio/position generation matrices live in INV-001, INV-003, and INV-004 |
+| INV-014 | Independent + Direct + P + SVM/CU | `public_sbf/inv_014_delayed_policy_and_policy_epoch_safety.rs`, `stateful/inv_014_delayed_policy_and_policy_epoch_safety.rs`, `cu/inv_014_delayed_policy_and_policy_epoch_safety.rs`, `kani/inv_014_delayed_policy_and_policy_epoch_safety.rs` |
+| INV-015 | SVM/CU | `public_sbf/inv_015_account_ownership_layout_discriminator_and_length_validity.rs` |
+| INV-016 | SVM/CU | `cu/inv_016_canonical_pda_and_seed_binding.rs` |
+| INV-017 | SVM/CU | `cu/inv_017_signer_writable_role_and_account_alias_safety.rs` |
 | INV-018 | SVM/CU | `cu/inv_018_quote_mint_vault_token_program_and_authority_integrity.rs` |
 | INV-019 | P + SVM/CU | `kani/inv_019_cpi_invocation_and_return_data_binding.rs`, `cu/inv_019_cpi_invocation_and_return_data_binding.rs` |
 | INV-020 | Independent + Direct + SVM/CU | `public_sbf/inv_020_authenticated_clock_slot_and_oracle_provenance.rs`, `stateful/inv_020_authenticated_clock_slot_and_oracle_provenance.rs`, `cu/inv_020_authenticated_clock_slot_and_oracle_provenance.rs` |
-| INV-021 | Gap | - |
-| INV-022 | P + P harness | `kani/inv_022_instruction_decoding_and_schema_upgrade_safety.rs` |
-| INV-023 | Gap | - |
-| INV-024 | F + Partial | `stateful/inv_081_success_state_validity_over_complete_public_routes.rs` (external SPL frames and exact deposit/withdraw flow; full internal attribution remains open) |
-| INV-025 | Gap | - |
-| INV-026 | Gap | - |
+| INV-021 | SVM/CU | `cu/inv_021_account_creation_reallocation_close_rent_and_lamport_safety.rs` |
+| INV-022 | P + SVM/CU + Prover gap | `kani/inv_022_instruction_decoding_and_schema_upgrade_safety.rs`, `cu/inv_022_instruction_decoding_and_schema_upgrade_safety.rs` cover symbolic field preservation, Kani trailing/truncation witnesses, raw public decoder rollback, exhaustive one-byte unknown/truncated tag rejection, split one-byte truncation buckets, split admin/authority/oracle/permissionless trailing-byte proofs, five generationless-oracle legacy rejection proofs, the generationless hybrid legacy SVM rollback case, and an encoded public-instruction roster that exact-round-trips representative payloads and rejects trailing bytes for every public variant; the fully symbolic unknown-tag Kani query, generationless hybrid legacy Kani query, asset-lifecycle/base-unit all-fields Kani queries, tag-60 base-unit trailing-byte Kani query, and monolithic all-payload trailing-byte Kani shape remain solver cliffs and are backstopped by exhaustive host/SVM rosters |
+| INV-023 | SVM/CU | `cu/inv_023_caller_input_confinement_for_derived_safety_state.rs` |
+| INV-024 | F + SVM/CU + Partial | `cu/inv_024_attributed_quote_value_conservation.rs`, `stateful/inv_081_success_state_validity_over_complete_public_routes.rs` (external SPL frames, exact deposit/withdraw flow, and public conservation regressions; full internal attribution proof remains open) |
+| INV-025 | SVM/CU | `cu/inv_025_exact_stock_reconciliation.rs` |
+| INV-026 | SVM/CU | `cu/inv_026_reservation_and_encumbrance_conservation_is_separate_from_token_value.rs` |
 | INV-027 | SVM/CU | `cu/inv_027_protected_principal_seniority.rs` |
-| INV-028 | Independent + SVM/CU | `stateful/inv_028_source_domain_realizability_cap.rs`, `cu/inv_028_source_domain_realizability_cap.rs` |
-| INV-029 | F | `stateful/inv_029_positive_claim_bounds_never_understate.rs` |
-| INV-030 | Independent + SVM/CU | `stateful/inv_030_credit_rate_determinism_and_fail_closed_behavior.rs`, `cu/inv_063_backing_expiry_normalization.rs` (secondary expiry/progress owner) |
-| INV-031 | Independent + Direct | `public_sbf/inv_031_no_double_use_of_claim_backing_or_insurance_atoms.rs`, `stateful/inv_031_no_double_use_of_claim_backing_or_insurance_atoms.rs` |
+| INV-028 | Independent + SVM/CU | `stateful/inv_028_source_domain_realizability_cap.rs`, `cu/inv_028_source_domain_realizability_cap.rs` (28-domain admission-order matrix rejects unreserved risk before funded-leg admission while already-reserved domains remain closeable) |
+| INV-029 | F + SVM/CU | `stateful/inv_029_positive_claim_bounds_never_understate.rs`, `cu/inv_029_positive_claim_bounds_never_understate.rs` (deterministic whole-route source-claim lifecycle census) |
+| INV-030 | Independent + SVM/CU | `stateful/inv_030_credit_rate_determinism_and_fail_closed_behavior.rs`, `cu/inv_030_credit_rate_determinism_and_fail_closed_behavior.rs`, `cu/inv_063_backing_expiry_normalization.rs` (deterministic credit-rate lifecycle plus secondary expiry/progress owner) |
+| INV-031 | Independent + Direct + SVM/CU | `public_sbf/inv_031_no_double_use_of_claim_backing_or_insurance_atoms.rs`, `stateful/inv_031_no_double_use_of_claim_backing_or_insurance_atoms.rs`, `cu/inv_031_no_double_use_of_claim_backing_or_insurance_atoms.rs` (shared user credit, live domain insurance, and terminal insurance across primary/secondary collateral rails) |
 | INV-032 | SVM/CU | `cu/inv_032_exact_counterparty_lien_lifecycle.rs` |
-| INV-033 | Gap | - |
+| INV-033 | SVM/CU + API gap | `cu/inv_033_insurance_backed_lien_single_classification.rs` proves the deployed public route creates counterparty-backed source liens without double-classifying them as insurance-backed, and that unreserved domain insurance cannot be silently consumed as source-credit backing; direct insurance-backed lien creation remains engine fuzz/Kani-only until a wrapper reservation route exists |
 | INV-034 | Independent + Direct + SVM/CU | `public_sbf/inv_034_domain_and_instance_isolation.rs`, `stateful/inv_034_domain_and_instance_isolation.rs`, `cu/inv_034_domain_and_instance_isolation.rs` |
 | INV-035 | Independent + Direct | `public_sbf/inv_035_no_global_b_pool_residuals_remain_local.rs`, `stateful/inv_035_no_global_b_pool_residuals_remain_local.rs` |
 | INV-036 | Independent + Direct + SVM/CU | `public_sbf/inv_036_fee_destination_and_policy_version_integrity.rs`, `stateful/inv_036_fee_destination_and_policy_version_integrity.rs`, `cu/inv_036_fee_destination_and_policy_version_integrity.rs` |
-| INV-037 | Gap | - |
-| INV-038 | Independent + Direct | `public_sbf/inv_038_rounding_and_ratio_conservation.rs`, `stateful/inv_038_rounding_and_ratio_conservation.rs` |
+| INV-037 | SVM/CU | `cu/inv_037_exact_residual_partition.rs` |
+| INV-038 | Independent + Direct + SVM/CU | `public_sbf/inv_038_rounding_and_ratio_conservation.rs`, `stateful/inv_038_rounding_and_ratio_conservation.rs`, `cu/inv_038_rounding_and_ratio_conservation.rs` |
 | INV-039 | Independent + Direct | `public_sbf/inv_039_pending_loss_obligation_durability.rs`, `stateful/inv_039_pending_loss_obligation_durability.rs` |
-| INV-040 | Gap | - |
+| INV-040 | SVM/CU | `cu/inv_040_no_fee_seniority.rs` (no-CPI, batch no-CPI, single-CPI, and batch-CPI underfunded exits drop uncollectible fees instead of senioritizing them; maintenance fee spam remains bounded) |
 | INV-041 | SVM/CU | `cu/inv_041_deterministic_allocation_and_caller_order_independence.rs` |
-| INV-042 | Gap | - |
-| INV-043 | Gap | - |
-| INV-044 | Gap | - |
+| INV-042 | SVM/CU + Spec gap | `cu/inv_042_recovery_fallback_envelope.rs` (public force-close admission, timing, pairing, and size bounds; full recovery price/value-transfer envelope remains engine/spec proof work) |
+| INV-043 | Spec/API gap | No hedge/correlation-credit feature is exposed by the current wrapper route set; treat as N/A until the spec/API enables it |
+| INV-044 | SVM/CU + Cross-owner references | `cu/inv_044_no_phantom_value_from_indices_certificates_or_labels.rs`; supporting stock/label/terminal coverage in INV-025, INV-026, INV-069, and INV-070 |
 | INV-045 | Independent + Direct + P + SVM/CU | `public_sbf/inv_045_no_free_mark_movement.rs`, `stateful/inv_045_no_free_mark_movement.rs`, `kani/inv_045_no_free_mark_movement.rs`, `cu/inv_045_no_free_mark_movement.rs` |
-| INV-046 | SVM/CU | `cu/inv_046_trade_availability_without_unsafe_mark_admission.rs` |
-| INV-047 | SVM/CU | `cu/inv_047_equivalent_route_semantics.rs` |
-| INV-048 | F | `stateful/inv_081_success_state_validity_over_complete_public_routes.rs` |
-| INV-049 | F | `stateful/inv_081_success_state_validity_over_complete_public_routes.rs` |
+| INV-046 | SVM/CU | `cu/inv_046_trade_availability_without_unsafe_mark_admission.rs` (extreme-price high-notional no-CPI exits, off-mark single no-CPI/CPI strict reductions, and off-mark one-leg batch-CPI strict reduction) |
+| INV-047 | SVM/CU | `cu/inv_047_equivalent_route_semantics.rs` (empty-target oracle-crank equivalence, one-leg batch/single no-CPI fee equivalence, batch margin protection, zero-fill, capacity, and duplicate-asset route checks) |
+| INV-048 | F + SVM/CU | `cu/inv_048_matched_trade_and_open_interest_coherence.rs`, `stateful/inv_081_success_state_validity_over_complete_public_routes.rs` |
+| INV-049 | F + SVM/CU | `cu/inv_049_canonical_single_net_leg_per_asset_generation.rs`, `stateful/inv_081_success_state_validity_over_complete_public_routes.rs` |
 | INV-050 | SVM/CU | `cu/inv_050_cross_zero_decomposition.rs` |
 | INV-051 | F + SVM/CU | `cu/inv_051_canonical_adl_effective_quantity.rs`, `stateful/inv_081_success_state_validity_over_complete_public_routes.rs` (shared post-transition pooled-OI/reset oracle) |
-| INV-052 | Gap | - |
+| INV-052 | SVM/CU | `cu/inv_052_split_merge_invariance.rs` (no-fee exact split/aggregate equivalence, fee-bearing split cannot reduce collected fees, and split withdraw custody equivalence) |
 | INV-053 | Independent + Direct + SVM/CU | `public_sbf/inv_053_full_health_recertification_equivalence.rs`, `stateful/inv_053_full_health_recertification_equivalence.rs`, `cu/inv_053_full_health_recertification_equivalence.rs` |
 | INV-054 | SVM/CU | `cu/inv_054_certificate_epoch_completeness.rs` |
 | INV-055 | SVM/CU | `cu/inv_055_state_indexed_admission.rs` |
-| INV-056 | Gap | - |
+| INV-056 | SVM/CU | `cu/inv_056_hints_are_discovery_only_favorable_actions_fully_refresh.rs` (primary withdraw/full-refresh rollback), with related crank-hint evidence in `cu/inv_023_caller_input_confinement_for_derived_safety_state.rs` and `cu/inv_072_order_robust_crankability.rs` |
 | INV-057 | SVM/CU | `cu/inv_057_risk_reduction_availability.rs` |
-| INV-058 | Gap | - |
+| INV-058 | SVM/CU | `cu/inv_058_cumulative_position_oi_notional_and_rate_limit_integrity.rs` |
 | INV-059 | SVM/CU | `cu/inv_059_fee_fragmentation_bound.rs` |
-| INV-060 | Gap | - |
+| INV-060 | SVM/CU + Proof gap | `cu/inv_060_single_sided_margin_and_penalty_accounting.rs` (public margin-gap and lag-withdrawal gates; full certificate-lane decomposition remains proof/model work) |
 | INV-061 | Independent + SVM/CU | `stateful/inv_061_deterministic_bounded_liquidation.rs`, `cu/inv_061_deterministic_bounded_liquidation.rs` |
-| INV-062 | Gap | - |
+| INV-062 | SVM/CU | `cu/inv_062_no_identity_assumptions_self_trade_containment.rs` |
 | INV-063 | Independent + Direct + SVM/CU | `public_sbf/inv_063_backing_expiry_normalization.rs`, `stateful/inv_063_backing_expiry_normalization.rs`, `cu/inv_063_backing_expiry_normalization.rs` |
-| INV-064 | Gap | - |
-| INV-065 | Gap | - |
+| INV-064 | SVM/CU | `cu/inv_064_insurance_withdrawal_policy_equivalence.rs` (live asset-domain route versus terminal market-wide route; configurable cooldown/cap fields remain spec-frontier/dead-control candidates) |
+| INV-065 | SVM/CU | `cu/inv_065_reset_recovery_and_retired_state_isolation.rs` |
 | INV-066 | SVM/CU | `cu/inv_066_resolved_payout_fairness_and_order_independence.rs` |
 | INV-067 | Independent + Direct + SVM/CU | `public_sbf/inv_067_terminal_payout_completeness_and_exact_once_settlement.rs`, `stateful/inv_067_terminal_payout_completeness_and_exact_once_settlement.rs`, `cu/inv_067_terminal_payout_completeness_and_exact_once_settlement.rs` |
-| INV-068 | Gap | - |
-| INV-069 | Gap | - |
-| INV-070 | Gap | - |
+| INV-068 | SVM/CU | `cu/inv_068_receipt_uniqueness_and_monotonic_topups.rs` |
+| INV-069 | SVM/CU | `cu/inv_069_terminal_normalization_and_retirement.rs` |
+| INV-070 | SVM/CU | `cu/inv_070_zero_unattributed_terminal_residue_and_close_slab.rs` |
 | INV-071 | Independent + SVM/CU | `cu/inv_071_crank_progress.rs` |
-| INV-072 | Gap | - |
+| INV-072 | SVM/CU | `cu/inv_072_order_robust_crankability.rs` (valid-hint normalization, duplicate-hint rollback, selected-mark observation requirement, and public expired-close recovery after adversarial hints) |
 | INV-073 | Independent + SVM/CU | `cu/inv_073_no_permanent_user_lock.rs` |
-| INV-074 | Independent + SVM/CU | `cu/inv_074_scope_locality.rs` |
-| INV-075 | Gap | - |
-| INV-076 | Gap | - |
-| INV-077 | Independent + SVM/CU | `cu/inv_077_bounded_work_and_maximum_shape_compute.rs` |
+| INV-074 | Independent + SVM/CU | `cu/inv_074_scope_locality.rs` (asset-local stale/bankruptcy isolation plus public asset-close locality for unrelated withdrawals and existing-position exits; new unrelated risk admission may still be conservatively blocked during active close) |
+| INV-075 | SVM/CU + Model gap | `cu/inv_075_close_priority_ownership_and_episode_integrity.rs` (owner/episode/replay checks plus public-created close-ledger competing-action priority and identity preservation; exhaustive strict preemption total-order matrix remains) |
+| INV-076 | SVM/CU + Model gap | `cu/inv_076_close_drift_residual_durability_and_finalization_atomicity.rs` (public stale-cure and public-created zero-cure atomic rollback with terminal-progress checks; exhaustive close-phase fault injection remains) |
+| INV-077 | Independent + SVM/CU | `cu/inv_077_bounded_work_and_maximum_shape_compute.rs` (supported 14-leg/28-source routes remain bounded; unreserved over-budget source-domain risk rejects atomically before CU exhaustion) |
 | INV-078 | SVM/CU | `cu/inv_078_permissionless_recovery_coverage.rs` |
 | INV-079 | Direct | `public_sbf/inv_079_public_reachability_evidence.rs` |
-| INV-080 | SVM/CU | `cu/inv_080_error_propagation_and_exact_rollback.rs` |
-| INV-081 | F + Direct | `public_sbf/inv_081_success_state_validity_over_complete_public_routes.rs`, `stateful/inv_081_success_state_validity_over_complete_public_routes.rs` |
-| INV-082 | Gap | - |
-| INV-083 | Gap | - |
-| INV-084 | Gap | - |
-| INV-085 | Gap | - |
-| INV-086 | Direct | `public_sbf/inv_086_reference_model_and_deployed_transition_equivalence.rs` |
-| INV-087 | Gap | - |
-| INV-088 | Gap | - |
-| INV-089 | Gap | - |
+| INV-080 | P + SVM/CU | `kani/inv_080_error_propagation_and_exact_rollback.rs`, `cu/inv_080_error_propagation_and_exact_rollback.rs` prove every current engine error variant maps to a nonzero instruction `ProgramError` and cover partial oracle, legacy realloc, terminal top-up, token CPI, and over-withdraw engine-error rollback paths |
+| INV-081 | F + Direct + SVM/CU | `public_sbf/inv_081_success_state_validity_over_complete_public_routes.rs`, `stateful/inv_081_success_state_validity_over_complete_public_routes.rs`, `cu/inv_081_success_state_validity_over_complete_public_routes.rs` (deterministic complete public-route oracle with success-state checks plus an over-policy trade rollback witness) |
+| INV-082 | F route witness + SVM/CU + Model/proof gap | `stateful/inv_082_state_indexed_liveness_theorem.rs`, `cu/inv_082_state_indexed_liveness_theorem.rs` require fixed public sequences to expose rank-decreasing permissionless progress, normal exits, liquidation progress, retained no-CPI execution under the state oracle, exact rollback of account substitutions, bad-hint noise, and no known-blocker quarantine; exhaustive bounded reachable-state liveness theorem remains proof/model work |
+| INV-083 | SVM/CU + Cross-owner references | `cu/inv_083_boundary_completeness.rs`; additional boundary coverage in INV-011, INV-058, INV-077, and Kani INV-022 |
+| INV-084 | P + Proof-harness gap | `kani/inv_084_proof_assumptions_are_reachable_and_nonvacuous.rs` proves representative sequence, matcher-toggle, matcher-return, decoder-tag, unknown-tag, and positive-mark assumptions are satisfiable/nonvacuous; complete route-established-precondition coverage for every proof harness remains open |
+| INV-085 | P + SVM/CU arithmetic differential + Proof gap | `kani/inv_085_proven_arithmetic_equals_deployed_arithmetic.rs`, `cu/inv_085_proven_arithmetic_equals_deployed_arithmetic.rs` cover deployed price-move and dt-clamp helpers against widened independent references with bounded symbolic Kani proofs plus deployed movement, funding, fee-supported mark clamping, and dynamic externality-fee boundary oracles; full deployed wide arithmetic versus bigint/Kani/BPF equivalence remains |
+| INV-086 | Direct + F | `public_sbf/inv_086_reference_model_and_deployed_transition_equivalence.rs`, `stateful/inv_086_reference_model_and_deployed_transition_equivalence.rs` |
+| INV-087 | SVM/CU + Static roster + WrapperConfig inventory | `cu/inv_087_no_phantom_controls_or_dead_security_fields.rs` covers persisted policy writes plus public enforcement witnesses for permissionless resolve timing, activation cooldown, base-unit swaps, authority rotation, trade-fee admission, and exact liquidation cranker-share enforcement; it statically ties the wrapper-owned covered controls to source writer/enforcement edges and named witnesses, inventories every persisted `WrapperConfigV16` field, and classifies disabled insurance-withdraw policy fields as dead-control candidates rather than active protection; broader persisted-control inventory outside `WrapperConfigV16` remains |
+| INV-088 | SVM/CU + Model gap | `cu/inv_088_global_summaries_are_not_account_local_proofs.rs` (public per-asset locality, multi-asset batch-no-CPI summary updates, same-asset multi-portfolio preservation, liquidation locality, and independent stored-count/ADL-effective OI scans); broader global-summary recomputation remains stateful/model work |
+| INV-089 | SVM/CU | `cu/inv_089_activation_reactivation_and_initialization_equivalence.rs` |
+
+## Exhaustiveness audit
+
+Audit date: 2026-08-08. The answer to "is every invariant exhaustively proven or tested as much as
+computationally feasible?" is **no**. The table above records evidence ownership, not completion.
+This audit read the normative `Required tests` clause and the bodies of every owned and
+cross-referenced test/proof for each invariant. Passing tests, file presence, a vulnerable-pin
+counterexample, and a finding-specific regression do not by themselves close an invariant.
+
+Verdicts used below:
+
+- **OPEN-T** - a non-marginal, computationally tractable test, fuzz, metamorphic, Kani, static
+  roster, or bounded-model increment is missing.
+- **OPEN-D** - the invariant cannot close until a named implementation, API, persisted identity,
+  ledger, or specification requirement exists or a currently reproduced violation is fixed.
+- **FRONTIER** - direct whole-route proof or exhaustive reachability is currently solver/state-space
+  limited, but the row names the strongest feasible decomposition or differential backstop still
+  missing.
+- **N/A** - the feature is not exposed by this wrapper. It must remain absent or be re-opened when
+  the API is introduced.
+
+There are no **CLOSED** rows in this audit. That does not mean the existing evidence is weak; it
+means every non-N/A invariant still has at least one material charter clause or stronger feasible
+method outstanding. The current ledger is 58 **OPEN-T**, 20 **OPEN-D**, 10 **FRONTIER**, and one
+**N/A**.
+
+### Cross-cutting coverage bugs
+
+1. The charter requests `P` for 76 invariants, `F` for 85, `I` for 66, `M` for 32, `R` for 22,
+   and `C` for 2. Invariant-owned directories currently exist for only 9 `P`, 26 `F`, and 87 `I`
+   owners. File presence is only a lower bound; many owners cover one scenario rather than the
+   required matrix. `M`, `R`, and `C` completion is not machine-indexed at all.
+2. The deployed decoder has 50 public instruction variants. The stateful public-interface model
+   generates seven direct operation classes (trade, EWMA configuration, mark push, crank, deposit,
+   withdraw, and maintenance sync) plus replay/substitution meta-actions. INV-081 therefore does not
+   yet cover the complete public transition system.
+3. Stateful suites default to 4 or 8 cases, generally 12 to 16 actions. Those are CI smoke budgets,
+   not saturation evidence. There is no time-budgeted campaign, transition/branch coverage target,
+   mutation score, or corpus-stability criterion for declaring a generator exhausted.
+4. No bounded BFS/model checker enumerates the reachable lifecycle graph required by INV-007,
+   INV-010, INV-029, INV-041, INV-043, INV-046, INV-055, INV-057, INV-065 through INV-073,
+   INV-075, INV-078, INV-079, INV-082, INV-084, or INV-086.
+5. Several liveness/admission tests create the interesting state with `set_account`,
+   `mutate_market`, or benchmark seeding. That is valid for malformed-input and rollback testing,
+   but it is not public-reachability evidence unless a separate public trace establishes the same
+   pre-state.
+6. Kani proofs cover local wrapper helpers. There is no complete wrapper-validation-to-engine-
+   contract composition roster, and INV-084 checks only representative assumptions rather than
+   every proof precondition.
+7. The known-finding benchmark is a dated snapshot. Independent rediscovery of its rows is useful
+   regression evidence, but it cannot establish completeness against unknown attack classes or
+   findings opened after the snapshot.
+
+### Per-invariant coverage bugs
+
+The last clause in each row is the strongest currently feasible closure. `AUDIT-NNN` identifiers
+are machine-checked below so a future README edit cannot silently omit an invariant.
+
+| Audit | Verdict | Known coverage bugs and strongest feasible closure |
+| --- | --- | --- |
+| AUDIT-001 | OPEN-D | The 11-route public matrix is a live whole-market same-pubkey ABA counterexample, not a safety proof. Add a persistent program-assigned market generation, reject every stale route before mutation, and add explicit cross-market and cross-program controls. |
+| AUDIT-002 | OPEN-T | Fifteen retained asset-control families and all trade routes are covered, but claim/capability families, a deliberately weakened `(market_id, asset_index)` negative encoding, wrapper Kani composition, and full metamorphic replay coverage remain. |
+| AUDIT-003 | OPEN-T | The 11 retained portfolio routes and ID lifecycle are covered; explicit same-owner-return, distinct claim/receipt consent, failed-init ID preservation, and a proof that every portfolio handler consumes `portfolio_id` remain. |
+| AUDIT-004 | OPEN-T | Trade open/close, reduction, and recovery-forfeit episodes are covered. Cross-zero, side reset, conversion, close, claim, recovery conversion, terminal receipt, and resolved-claim episode transitions are missing from the replay matrix. |
+| AUDIT-005 | OPEN-D | Current tests still discover authority `A -> B -> A` revival. Add a monotonic epoch for each authority scope, prove atomic epoch rotation, and flip both `A -> B -> A` and disable/re-enable matrices to rejection. |
+| AUDIT-006 | OPEN-D | Transaction tampering covers program, market, kind, bytes, and blockhash, but no retained-message genesis/chain domain or explicit message-version field exists. Prefix-compatible, downgrade, and cross-cluster replay need a typed intent header and decoder fuzz. |
+| AUDIT-007 | OPEN-D | Whole-market ABA remains live, and no unified roster covers receipt, delegate, capability, and auxiliary-account close/recreate. Add persistent generations and a bounded ABA model for every closable account class. |
+| AUDIT-008 | OPEN-D | Existing public tests intentionally reproduce duplicate execution across retry variants. A program-enforced intent ledger/expiry is missing, as are same-transaction, cross-entrypoint, and partial-failure exact-once tests. |
+| AUDIT-009 | OPEN-T | One CPI short-fill rejection/retry is covered. Successful partial fills, random partitions, cumulative quantity/fee/slippage/expiry budgets, route switching, and one-minimum-fee-per-intent accounting are absent. |
+| AUDIT-010 | OPEN-T | Only matcher revoke/stale-enable ordering is modeled. Add bounded permutations of trade, deposit, withdraw, reduction, authority rotation, policy update, resolve, and claim with signed postcondition checks. |
+| AUDIT-011 | OPEN-D | Per-leg prices and atomic batch rejection exist, but the message has no aggregate fee, quantity, slippage, deadline, final-position, or collateral/PnL-credit budget. Add those fields before split-intent proofs can close. |
+| AUDIT-012 | OPEN-T | Matcher tuple and delegate checks are strong, but capability domain, authority epoch, expiry, allowed assets/operations, limits, and complete generation binding are not one-field-substitution tested or formally composed. |
+| AUDIT-013 | OPEN-T | Coverage is limited to stale rebalance reduction and recovery forfeit. Add shutdown, resolve, close, liquidation delegation, recovery, claim, and receipt consent across every later lifecycle episode. |
+| AUDIT-014 | OPEN-D | Same-incarnation sequence supersession is covered, but market recreation, authority ABA, and backing-provider fee consent remain live gaps. Bind policy consent to all relevant incarnations/epochs, then compare stricter and looser delayed policies metamorphically. |
+| AUDIT-015 | OPEN-T | Owner, short length, magic, kind, and type-confusion cases exist. Version, padding, invalid enum, alignment, maximum length, every account class, and a proof that validation precedes every zero-copy view remain. |
+| AUDIT-016 | OPEN-T | Tests reject wrong vault and matcher PDAs, but do not systematically test noncanonical bumps, reordered/omitted seeds, omitted generation fields, role-crossing, or valid PDAs from another market. |
+| AUDIT-017 | OPEN-T | Targeted aliases are broad but not pairwise-complete. Generate every semantic account-pair alias and signer/writable mutation for all instructions, with an allowlist for intentionally safe aliases. |
+| AUDIT-018 | OPEN-T | SPL custody substitutions are extensive. Token-2022, fee-on-transfer/transfer-hook behavior, primary quote-decimal validation, and one independent actual-SPL-delta versus internal-accounting oracle across every value route remain. |
+| AUDIT-019 | OPEN-T | Matcher return fields, stale data, req_id, tails, and local validation are covered. Add benign unrelated CPI before/after matcher return data, replace the injected matcher-context ABA setup with public close/recreate, and document that oracle paths are account reads rather than CPI. |
+| AUDIT-020 | OPEN-T | Oracle provenance and authenticated clock tests are broad, but stored-slot rewind and expiry `-1/0/+1` are not crossed with every oracle mode and public consumer. No wrapper proof or complete clock/observation matrix exists. |
+| AUDIT-021 | OPEN-T | Init growth, close rent, funded-close rejection, and reuse are covered. Residual claim/lien/recovery classes need a close/recreate matrix; impossible shrink and caller-selected close-destination cases should be proven N/A from the API. |
+| AUDIT-022 | FRONTIER | Split Kani and exhaustive host/SVM decoder rosters backstop several solver cliffs. Arbitrary-byte stateful fuzz, duplicate-field N/A documentation, a curated prior-schema corpus, and per-tag proof decomposition for the remaining payloads are still feasible. |
+| AUDIT-023 | OPEN-T | The owner tests only late malformed crank hints. Build an instruction-field taint roster and fuzz every caller scalar/account to show it is signed intent, authenticated observation, or discovery-only rather than an economic safety input. |
+| AUDIT-024 | OPEN-T | External SPL conservation is broad, but aggregate vault equality is not per-account/domain attribution. Add a stateful `TokenValueFlow` reference ledger after every successful transition and exact internal/external snapshots after every failure. |
+| AUDIT-025 | OPEN-T | Three stock tests cover selected deposits, withdrawals, insurance/backing, and serialization. Recompute every stock class from raw state after every generated step through recovery, resolution, terminal close, rounding residue, and surplus. |
+| AUDIT-026 | OPEN-T | One source-credit reservation path is covered. Creation, consumption, release, impairment, recovery, insurance reservations, pending obligations, close reserves, and retry/double-use need a common encumbrance lifecycle model. |
+| AUDIT-027 | OPEN-T | Selected protected-principal paths are covered, but not every favorable operation/route from underbacked, loss-stale, and stale-certificate states. Add a generated route-by-state seniority matrix and normalized metamorphic outcomes. |
+| AUDIT-028 | OPEN-T | Source reversal, expiry, rounding, sparse-capacity, and formula checks exist. Insurance impairment, cyclic `A-backs-B-backs-A`, omitted backing, and a bounded multi-domain proof against an independent cap model remain. |
+| AUDIT-029 | OPEN-T | A generated claim census exists, but bucket edges, favorable funding bounds, rebucketing, stale uncertainty, exact-receipt replacement, and bounded reachability are not exhausted. |
+| AUDIT-030 | OPEN-T | The independent rate oracle covers claim/add/expiry/reduce/refill. Add impairment, omitted/malformed state, every source-credit mutation route, and a proof that only fresh backing or a valid claim-bound decrease can improve rate. |
+| AUDIT-031 | OPEN-T | Shared credit and insurance rails are tested, while vulnerable-pin double-spend traces remain. Duplicate lien creation, cross-domain reservation, partial retry, and concurrent route use need one atom-ownership lifecycle oracle. |
+| AUDIT-032 | OPEN-T | One force-close route checks lien sums. Differentially recompute bucket and domain aggregates across create, consume, release, impair, recover, and every injected failure point. |
+| AUDIT-033 | OPEN-D | The wrapper exposes counterparty-backed liens but no direct insurance-backed lien creation/consume route. Add the API or rely on a named engine contract, then prove consume/release/impair/recovery classification is disjoint. |
+| AUDIT-034 | OPEN-T | Cross-market/domain substitutions are broad but manually selected and often malformed through account injection. Generate every public instruction/account-domain substitution and require public controls plus normalized rollback. |
+| AUDIT-035 | OPEN-T | Domain-local B settlement has fixed and generated evidence. Multi-asset bankruptcy order permutations and a pure proof that residuals cannot touch unrelated `(asset, side)` domains remain. |
+| AUDIT-036 | OPEN-T | Major fee routes are covered, but the parasitic zero-activity asset, every policy epoch, and all single/batch/CPI/no-CPI fee-destination pairs are not one complete matrix; no whole-route fee-flow proof exists. |
+| AUDIT-037 | OPEN-D | Current state does not expose every term in the normative residual partition, and tests cover selected liquidation counters. Add explicit drift/obligation/lien categories, then recompute the disjoint equality after continuation, preemption, cancel, recovery, and finalize. |
+| AUDIT-038 | OPEN-D | Dust, funding, backing splits, and composite rounding are tested, but a fractional-cap violation remains quarantined. Add exact rational/residue accounting for resolved claims, B booking, and social-loss clearing and fix the live counterexample. |
+| AUDIT-039 | OPEN-D | Many accrual-before-weight-removal routes are covered, but stale-cohort novation remains an expected violation. Transfer, reset, account close, and partial liquidation also need the common obligation-before-removal state machine. |
+| AUDIT-040 | OPEN-T | Four underfunded trade routes and maintenance spam are covered. Matcher, liquidation, protocol, and maintenance fee variants with remaining senior obligations need the same protected-pool delta oracle. |
+| AUDIT-041 | OPEN-T | Force-close chunking and observation order are covered. Permute equal-priority liquidation, support, insurance, lien, residual, payout, claim, and continuation ordering and compare normalized outcomes. |
+| AUDIT-042 | OPEN-D | Force-close admission/timing/size is tested, but no normative fallback price/value-transfer envelope exists. Define it, then test stale/unavailable reference, max positions/accounts, and just-inside/outside bounds. |
+| AUDIT-043 | N/A | The wrapper exposes no hedge/correlation-credit feature. Keep a static absence check; if introduced, require exhaustive small portfolios, sign flips, missing legs, bucket edges, and scenario extremes before activation. |
+| AUDIT-044 | OPEN-T | Selected B and parked-PnL cases plus cross-owner stock tests exist. Exercise every A/K/F/B index, certificate, claim bound, reservation, lien, tag, and soft-credit durable-use path through public transitions with token/encumbrance balance checks. |
+| AUDIT-045 | OPEN-D | Clamp helpers and many route/boundary regressions are strong, but multiple public/stateful mark-movement exploit adapters still reproduce. Fix those violations, then use one accepted-mark-update generator over all modes/routes and raw `0/1/MAX`. |
+| AUDIT-046 | OPEN-T | Extreme/off-mark exits are covered on selected routes. Cross zero/extreme/stale/out-of-band prices with normal, drain, reset, recovery, and close modes and all four trade routes, proving mark state stays safe and one reducing route remains. |
+| AUDIT-047 | OPEN-T | Only one single-versus-batch no-CPI test compares identical snapshots; other tests are route-local checks. Add full pairwise CPI/no-CPI, single/batch, direct/composite, wrapper/engine metamorphic execution with normalized fees. |
+| AUDIT-048 | OPEN-T | All four fresh trade routes scan OI, but liquidation, rebalance, reset, resolved close, and recovery are not directed owners. The stateful oracle skips equality in stale/obligation/unilateral states; model those classes explicitly. |
+| AUDIT-049 | OPEN-T | All trade routes preserve one net leg, but transfer, reset, recovery, reactivation, and deserialization attachment attempts are absent. Add public transition matrices and malformed-deserialization negatives only where deserialization is an ingress. |
+| AUDIT-050 | OPEN-T | Current tests cover normal no-CPI and batch lifecycle rejection, not partial liquidation, unrelated auxiliary OI, real ADL-effective decomposition, or all four routes. Add that public matrix with and without auxiliary OI. |
+| AUDIT-051 | FRONTIER | Zero-effective-OI and selected ADL paths are covered, but no single pure effective-quantity oracle is compared across transfer, resize, rebalance, liquidation, clear, resolved close, recovery, retirement, and side reset. Extract and compose that oracle. |
+| AUDIT-052 | OPEN-T | Deterministic trade and withdrawal partitions exist. Add arbitrary partition/permutation fuzz for liquidation, reduction, lien consumption, insurance withdrawal, claims, cooldowns, rates, and policy limits. |
+| AUDIT-053 | FRONTIER | Omitted-leg findings and route/order fuzz are strong, but no full-certificate oracle runs after every transition and pending obligations, impaired liens, ADL, and all penalty lanes are not composed. Prove or differentially establish fast <= full. |
+| AUDIT-054 | OPEN-T | Two stale-certificate inputs are covered. Mutate active bitmap, generations, target/effective price, oracle epochs, A/K/F/B, source-credit epochs, liens, obligations, lifecycle/close modes, and policy epochs one at a time. |
+| AUDIT-055 | OPEN-T | Directed admission tests cover selected modes, but not the 50-instruction cross-product with market/asset/side/portfolio/close/recovery modes. Replace injected Recovery setup with a public trace and generate the declarative matrix. |
+| AUDIT-056 | OPEN-T | Batch stale-related-leg and crank-hint cases exist. Omit/reorder/duplicate the worst and benign legs across withdraw, liquidation, conversion, claim, and all trade routes, comparing each result with canonical full discovery. |
+| AUDIT-057 | FRONTIER | Many public exit regressions exist, but hand-built and injected states do not establish an exit from every reachable lifecycle state. Add a bounded public-only state search whose oracle finds a reducing action or terminal receipt. |
+| AUDIT-058 | OPEN-T | TVL, large amount, over-reduce, top-up, and batch cap boundaries are covered. Generate every hard OI/notional/rate bound with zero/one/max/near-max, splitting, batching, cross-zero, route, transfer, and recreate variants. |
+| AUDIT-059 | OPEN-T | One minimum-liquidation-fee case is covered; stale pre-CPI tests do not prove fragmentation. Compare aggregate close with one-atom closes, retries, mixed routes, and public partial failures under an episode-level fee oracle. |
+| AUDIT-060 | FRONTIER | Public IM/MM and lag gates exist, but there is no independent decomposition of pending obligations, impaired liens, reserves, oracle lag, and penalties. Build a lane model and prove each component appears exactly once. |
+| AUDIT-061 | OPEN-D | Liquidation safety, fees, progress, and selected generated schedules are covered, but public/stateful ADL close-order tests still assert violations. Fix those states, then add equal-risk permutations, arbitrary close splitting, normalized loss attribution, and max-shape liquidation coverage. |
+| AUDIT-062 | OPEN-T | Selected self-trades show no identity privilege. Repeat common-control counterparties over every route/oracle mode and prove no unbacked value, mark-cost bypass, fee reclaim, or attribution change with a shared reference ledger. |
+| AUDIT-063 | OPEN-T | Expiry regressions are broad, but add/consume/release/claim/close/payout/retire are not one complete consumer-by-`expiry-1/expiry/expiry+1` matrix, and no proof establishes normalization before every consumer. |
+| AUDIT-064 | OPEN-D | Live and terminal insurance routes are tested, but the normative shared enable flag, cap, cooldown, policy epoch, and last-withdraw ledger are partly absent/dead controls. Specify or remove them, then interleave every route against one allowance ledger. |
+| AUDIT-065 | OPEN-T | Selected reset/recovery gates exist, but several fixtures use `mutate_market`. Add public begin/finalize interleavings, every trade route, side isolation, retirement/reactivation, stale-generation attempts, and a bounded admission model using public setup only. |
+| AUDIT-066 | OPEN-T | Two-winner order and selected terminal payouts are covered. Exhaust claimant permutations with authority refinement, top-ups, exact-bound replacement, recovery transitions, and a rational residue oracle. |
+| AUDIT-067 | OPEN-D | Exact-once payout regressions are broad, but public/stateful terminal-dust tests still assert a reachable payout-erasure violation. Fix it, then model retry, replay, partial top-up, close/recreate, claim order, forfeit, and recovery conversion over every claim episode. |
+| AUDIT-068 | OPEN-T | Replay and payout-rail tests exist. Add one-field receipt substitution for market/domain, portfolio incarnation, claim episode, face, snapshot, receipt ID, cross-portfolio, and asset-slot reuse, plus monotonic split top-ups. |
+| AUDIT-069 | OPEN-T | Spent insurance and selected retirement blockers are covered, but important spent/provider setups are injected. Recreate them publicly, then add reset history, price-only indices, expired labels, old epochs, every nonempty obligation control, and bounded terminal normalization reachability. |
+| AUDIT-070 | OPEN-T | CloseSlab checks selected payout, secondary-vault, dust, and destination cases. Run complete public market lifecycles with adversarial order, rounding, recovery, prior insurance, independent stock classification, surplus sweep, and final close. |
+| AUDIT-071 | OPEN-D | Selected crank classes progress, but other owned tests still assert public lock/no-op discoveries. Fix those states, then record a finite rank before/after every successful crank, reject all successful no-ops, and compose engine rank contracts with a bounded wrapper-state graph. |
+| AUDIT-072 | OPEN-T | Valid, duplicate, malformed, and selected out-of-order hints are covered. Exhaust bounded hint subsets, duplicates, permutations, partial-valid tails, and missing observations while comparing canonical selected work and rank progress. |
+| AUDIT-073 | OPEN-D | Many bounded exits exist, but multiple owned tests still assert publicly reachable funded locks. Fix those locks, then build a small public state graph plus long sequences requiring every funded nonterminal node to reach principal return, a receipt, or authorized junior forfeit. |
+| AUDIT-074 | OPEN-D | Unrelated base trading/withdrawal cases exist, but an owned public test still asserts an unrelated backed claim is blocked by asset-local bankruptcy. Fix or normatively justify that lock, then complete side, portfolio, domain, close, and receipt locality. |
+| AUDIT-075 | FRONTIER | Owner/episode and selected competing-close cases exist. Exhaust strict priority, equal inputs, preemption/restart, stale continuation, cure/cancel, owner deposit, immutable anchors, and no-double-booking with bounded model checking. |
+| AUDIT-076 | OPEN-T | Only stale-cure and zero-cure rollback are owned. Add table-driven public fault injection at every close phase, price/funding drift, preemption/restart, durable residual booking, complete snapshots, and atomic OI/basis-clear checks. |
+| AUDIT-077 | OPEN-T | Max-shape trade/crank/close/source-domain routes are strong, but not every public instruction is measured at every relevant maximum dimension. Add a machine roster mapping all 50 variants to supported maxima and CU thresholds, plus activation-time shape rejection. |
+| AUDIT-078 | OPEN-T | Stale-oracle and selected shutdown/expired-close recovery exist. Add public failure classes for B exhaustion, backing failure, lien impairment, domain lock, insurance exhaustion, payout conflict, and every lifecycle failure, then bounded recovery reachability. |
+| AUDIT-079 | OPEN-D | The manifest enforces names and classifications, but no formal trace-evidence schema records the full public route. Add one and require every qualifying PoC to attest no out-of-band mutation, signers/accounts, exact token/lamport deltas, and persistent exit result. |
+| AUDIT-080 | OPEN-T | Engine-error mapping and many SPL/realloc rollback paths are covered. Fault-inject every wrapper fallible stage, include all program account bytes and lamports, and test a later instruction in the same transaction cannot consume success-only output. |
+| AUDIT-081 | FRONTIER | The stateful model covers only seven of 50 public operation variants and does not assert the full invariant suite after every success. Expand the action model and executable invariant registry, then use typed-transition composition for routes whose whole-body proof remains intractable. |
+| AUDIT-082 | FRONTIER | Two fixed route witnesses are not a theorem over reachable states. Build a bounded public transition graph, define mode-specific ranks, and prove every abstract transition either terminates or has a constructible rank-decreasing call. |
+| AUDIT-083 | OPEN-T | Selected arithmetic and index boundaries exist, but no machine corpus maps every arithmetic/lifecycle field to zero, one, max, max-1, expiry edges, full width, cross-zero, empty/full, and near-overflow cases. |
+| AUDIT-084 | FRONTIER | Six representative nonvacuity proofs do not cover every Kani harness. Statically inventory every `assume`, add satisfiable/mutation witnesses, and prove route establishment or a named unreachability argument for each precondition. |
+| AUDIT-085 | FRONTIER | Selected price/funding/fee helpers match widened references on bounded domains. Full carry/borrow/multiply/divide/scale equivalence among Kani, host, BPF, and bigint remains; split by primitive and use differential full-boundary corpora where CBMC cliffs. |
+| AUDIT-086 | OPEN-T | One bounded reference-model sequence and deterministic replay do not model identity, all balances, OI, source credit, liens, payout, and lifecycle across all generated public actions. Expand the model and add bounded state-graph differential checking. |
+| AUDIT-087 | OPEN-T | The static roster inventories `WrapperConfigV16` and selected policies only. Inventory every persisted security field across all account types and require one writer, enforcement read, public mutation witness, or explicit removal/N/A classification. |
+| AUDIT-088 | OPEN-T | Per-asset OI/count scans cover selected trade/liquidation orderings. Recompute every market/global accumulator from all bounded portfolios/domains after every relevant public transition and compare adversarial asset/account touch orders. |
+| AUDIT-089 | OPEN-T | Fresh/reuse authority and price checks are broad, but full raw-state equivalence, support weight, source ledgers, certificate invalidation, residual state, stale epochs, generation increment, and unsupported-shape cases are not one differential matrix. |
 
 ## Known-finding benchmark
 
@@ -213,9 +368,10 @@ cargo test --test v16_cu
 cargo kani --tests
 ```
 
-On engine pin `9ffc4749a4b7e486f814090c7b43fb01a6df5dcf`, the full `v16_cu` inventory has
-671 passing tests. The former red PR220/PR366, PR367, and live source-backing expiry probes are
-fixed-pin regressions under INV-030, INV-053, and INV-063; the unfiltered command is the required
+On engine pin `9ffc4749a4b7e486f814090c7b43fb01a6df5dcf`, the full `v16_cu` inventory is
+invariant-owned and has 707 passing tests. The former red PR220/PR366, PR367, live
+source-backing expiry, and source-domain capacity admission probes are fixed-pin regressions under
+INV-028, INV-030, INV-053, INV-063, and INV-077; the unfiltered command is the required
 verification command.
 
 Use `PERCOLATOR_FUZZ_CASES`, `PERCOLATOR_FUZZ_ACTIONS`, and

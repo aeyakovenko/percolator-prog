@@ -96,6 +96,7 @@ pub mod constants {
     // audited stale-trade and crank CU envelope. Additional markets remain
     // usable through separate portfolios.
     pub const WRAPPER_MAX_PORTFOLIO_ASSETS: u16 = 14;
+    pub const WRAPPER_MAX_BOUNDED_SOURCE_DOMAINS: usize = WRAPPER_MAX_PORTFOLIO_ASSETS as usize * 2;
 }
 
 pub mod error {
@@ -2757,9 +2758,11 @@ pub mod ix {
         },
         InitPortfolio,
         Deposit {
+            portfolio_id: u64,
             amount: u128,
         },
         Withdraw {
+            portfolio_id: u64,
             amount: u128,
         },
         PermissionlessCrank {
@@ -2767,6 +2770,8 @@ pub mod ix {
             observations: Vec<CrankObservationHint>,
         },
         TradeNoCpi {
+            account_a_portfolio_id: u64,
+            account_b_portfolio_id: u64,
             asset_index: u16,
             market_id: u64,
             size_q: i128,
@@ -2774,6 +2779,8 @@ pub mod ix {
             fee_bps: u64,
         },
         TradeCpi {
+            account_a_portfolio_id: u64,
+            account_b_portfolio_id: u64,
             asset_index: u16,
             market_id: u64,
             size_q: i128,
@@ -2783,11 +2790,15 @@ pub mod ix {
         /// Atomic multi-leg batch: apply every leg against one taker/LP pair with a single
         /// end-state initial-margin check (interim legs need not be individually margin-feasible).
         BatchTradeNoCpi {
+            account_a_portfolio_id: u64,
+            account_b_portfolio_id: u64,
             legs: Vec<BatchTradeLeg>,
         },
         /// Atomic multi-leg batch routed through an external matcher: one batched matcher CPI fills
         /// every leg against a single LP, then all fills apply with one end-state margin check.
         BatchTradeCpi {
+            account_a_portfolio_id: u64,
+            account_b_portfolio_id: u64,
             legs: Vec<BatchTradeCpiLeg>,
         },
         SetMatcherConfig {
@@ -2796,7 +2807,9 @@ pub mod ix {
             enabled: u8,
             trade_fee_cap_bps: u16,
         },
-        ClosePortfolio,
+        ClosePortfolio {
+            portfolio_id: u64,
+        },
         TopUpInsurance {
             market_id: u64,
             amount: u128,
@@ -2821,6 +2834,7 @@ pub mod ix {
             amount: u128,
         },
         ConvertReleasedPnl {
+            portfolio_id: u64,
             amount: u128,
         },
         CloseResolved {
@@ -3025,9 +3039,11 @@ pub mod ix {
                 },
                 1 => Self::InitPortfolio,
                 3 => Self::Deposit {
+                    portfolio_id: read_u64(&mut rest)?,
                     amount: read_u128(&mut rest)?,
                 },
                 4 => Self::Withdraw {
+                    portfolio_id: read_u64(&mut rest)?,
                     amount: read_u128(&mut rest)?,
                 },
                 5 => {
@@ -3049,6 +3065,8 @@ pub mod ix {
                     }
                 }
                 6 => Self::TradeNoCpi {
+                    account_a_portfolio_id: read_u64(&mut rest)?,
+                    account_b_portfolio_id: read_u64(&mut rest)?,
                     asset_index: read_u16(&mut rest)?,
                     market_id: read_u64(&mut rest)?,
                     size_q: read_i128(&mut rest)?,
@@ -3056,6 +3074,8 @@ pub mod ix {
                     fee_bps: read_u64(&mut rest)?,
                 },
                 10 => Self::TradeCpi {
+                    account_a_portfolio_id: read_u64(&mut rest)?,
+                    account_b_portfolio_id: read_u64(&mut rest)?,
                     asset_index: read_u16(&mut rest)?,
                     market_id: read_u64(&mut rest)?,
                     size_q: read_i128(&mut rest)?,
@@ -3077,7 +3097,11 @@ pub mod ix {
                             fee_bps: read_u64(&mut rest)?,
                         });
                     }
-                    Self::BatchTradeNoCpi { legs }
+                    Self::BatchTradeNoCpi {
+                        account_a_portfolio_id: read_u64(&mut rest)?,
+                        account_b_portfolio_id: read_u64(&mut rest)?,
+                        legs,
+                    }
                 }
                 67 => {
                     let n = read_u8(&mut rest)? as usize;
@@ -3094,7 +3118,11 @@ pub mod ix {
                             limit_price: read_u64(&mut rest)?,
                         });
                     }
-                    Self::BatchTradeCpi { legs }
+                    Self::BatchTradeCpi {
+                        account_a_portfolio_id: read_u64(&mut rest)?,
+                        account_b_portfolio_id: read_u64(&mut rest)?,
+                        legs,
+                    }
                 }
                 68 => Self::SetMatcherConfig {
                     portfolio_id: read_u64(&mut rest)?,
@@ -3102,7 +3130,9 @@ pub mod ix {
                     enabled: read_u8(&mut rest)?,
                     trade_fee_cap_bps: read_u16(&mut rest)?,
                 },
-                8 => Self::ClosePortfolio,
+                8 => Self::ClosePortfolio {
+                    portfolio_id: read_u64(&mut rest)?,
+                },
                 9 => Self::TopUpInsurance {
                     market_id: read_u64(&mut rest)?,
                     amount: read_u128(&mut rest)?,
@@ -3127,6 +3157,7 @@ pub mod ix {
                     amount: read_u128(&mut rest)?,
                 },
                 28 => Self::ConvertReleasedPnl {
+                    portfolio_id: read_u64(&mut rest)?,
                     amount: read_u128(&mut rest)?,
                 },
                 30 => Self::CloseResolved {
@@ -3356,12 +3387,20 @@ pub mod ix {
                     push_u128(&mut out, maintenance_fee_per_slot);
                 }
                 Self::InitPortfolio => out.push(1),
-                Self::Deposit { amount } => {
+                Self::Deposit {
+                    portfolio_id,
+                    amount,
+                } => {
                     out.push(3);
+                    push_u64(&mut out, portfolio_id);
                     push_u128(&mut out, amount);
                 }
-                Self::Withdraw { amount } => {
+                Self::Withdraw {
+                    portfolio_id,
+                    amount,
+                } => {
                     out.push(4);
+                    push_u64(&mut out, portfolio_id);
                     push_u128(&mut out, amount);
                 }
                 Self::PermissionlessCrank {
@@ -3377,6 +3416,8 @@ pub mod ix {
                     }
                 }
                 Self::TradeNoCpi {
+                    account_a_portfolio_id,
+                    account_b_portfolio_id,
                     asset_index,
                     market_id,
                     size_q,
@@ -3384,6 +3425,8 @@ pub mod ix {
                     fee_bps,
                 } => {
                     out.push(6);
+                    push_u64(&mut out, account_a_portfolio_id);
+                    push_u64(&mut out, account_b_portfolio_id);
                     push_u16(&mut out, asset_index);
                     push_u64(&mut out, market_id);
                     push_i128(&mut out, size_q);
@@ -3391,6 +3434,8 @@ pub mod ix {
                     push_u64(&mut out, fee_bps);
                 }
                 Self::TradeCpi {
+                    account_a_portfolio_id,
+                    account_b_portfolio_id,
                     asset_index,
                     market_id,
                     size_q,
@@ -3398,13 +3443,19 @@ pub mod ix {
                     limit_price,
                 } => {
                     out.push(10);
+                    push_u64(&mut out, account_a_portfolio_id);
+                    push_u64(&mut out, account_b_portfolio_id);
                     push_u16(&mut out, asset_index);
                     push_u64(&mut out, market_id);
                     push_i128(&mut out, size_q);
                     push_u64(&mut out, fee_bps);
                     push_u64(&mut out, limit_price);
                 }
-                Self::BatchTradeNoCpi { ref legs } => {
+                Self::BatchTradeNoCpi {
+                    account_a_portfolio_id,
+                    account_b_portfolio_id,
+                    ref legs,
+                } => {
                     out.push(66);
                     out.push(legs.len() as u8);
                     for leg in legs.iter() {
@@ -3414,8 +3465,14 @@ pub mod ix {
                         push_u64(&mut out, leg.exec_price);
                         push_u64(&mut out, leg.fee_bps);
                     }
+                    push_u64(&mut out, account_a_portfolio_id);
+                    push_u64(&mut out, account_b_portfolio_id);
                 }
-                Self::BatchTradeCpi { ref legs } => {
+                Self::BatchTradeCpi {
+                    account_a_portfolio_id,
+                    account_b_portfolio_id,
+                    ref legs,
+                } => {
                     out.push(67);
                     out.push(legs.len() as u8);
                     for leg in legs.iter() {
@@ -3425,6 +3482,8 @@ pub mod ix {
                         push_u64(&mut out, leg.fee_bps);
                         push_u64(&mut out, leg.limit_price);
                     }
+                    push_u64(&mut out, account_a_portfolio_id);
+                    push_u64(&mut out, account_b_portfolio_id);
                 }
                 Self::SetMatcherConfig {
                     portfolio_id,
@@ -3438,7 +3497,10 @@ pub mod ix {
                     out.push(enabled);
                     push_u16(&mut out, trade_fee_cap_bps);
                 }
-                Self::ClosePortfolio => out.push(8),
+                Self::ClosePortfolio { portfolio_id } => {
+                    out.push(8);
+                    push_u64(&mut out, portfolio_id);
+                }
                 Self::TopUpInsurance { market_id, amount } => {
                     out.push(9);
                     push_u64(&mut out, market_id);
@@ -3478,8 +3540,12 @@ pub mod ix {
                     push_u16(&mut out, domain);
                     push_u128(&mut out, amount);
                 }
-                Self::ConvertReleasedPnl { amount } => {
+                Self::ConvertReleasedPnl {
+                    portfolio_id,
+                    amount,
+                } => {
                     out.push(28);
+                    push_u64(&mut out, portfolio_id);
                     push_u128(&mut out, amount);
                 }
                 Self::CloseResolved { fee_rate_per_slot } => {
@@ -5880,13 +5946,21 @@ pub mod processor {
                 maintenance_fee_per_slot,
             ),
             Instruction::InitPortfolio => handle_init_portfolio(program_id, accounts),
-            Instruction::Deposit { amount } => handle_deposit(program_id, accounts, amount),
-            Instruction::Withdraw { amount } => handle_withdraw(program_id, accounts, amount),
+            Instruction::Deposit {
+                portfolio_id,
+                amount,
+            } => handle_deposit(program_id, accounts, portfolio_id, amount),
+            Instruction::Withdraw {
+                portfolio_id,
+                amount,
+            } => handle_withdraw(program_id, accounts, portfolio_id, amount),
             Instruction::PermissionlessCrank {
                 now_slot,
                 observations,
             } => handle_permissionless_crank(program_id, accounts, now_slot, observations),
             Instruction::TradeNoCpi {
+                account_a_portfolio_id,
+                account_b_portfolio_id,
                 asset_index,
                 market_id,
                 size_q,
@@ -5895,6 +5969,8 @@ pub mod processor {
             } => handle_trade_nocpi(
                 program_id,
                 accounts,
+                account_a_portfolio_id,
+                account_b_portfolio_id,
                 asset_index,
                 market_id,
                 size_q,
@@ -5902,6 +5978,8 @@ pub mod processor {
                 fee_bps,
             ),
             Instruction::TradeCpi {
+                account_a_portfolio_id,
+                account_b_portfolio_id,
                 asset_index,
                 market_id,
                 size_q,
@@ -5910,18 +5988,36 @@ pub mod processor {
             } => handle_trade_cpi(
                 program_id,
                 accounts,
+                account_a_portfolio_id,
+                account_b_portfolio_id,
                 asset_index,
                 market_id,
                 size_q,
                 fee_bps,
                 limit_price,
             ),
-            Instruction::BatchTradeNoCpi { legs } => {
-                handle_batch_trade_nocpi(program_id, accounts, &legs)
-            }
-            Instruction::BatchTradeCpi { legs } => {
-                handle_batch_trade_cpi(program_id, accounts, &legs)
-            }
+            Instruction::BatchTradeNoCpi {
+                account_a_portfolio_id,
+                account_b_portfolio_id,
+                legs,
+            } => handle_batch_trade_nocpi(
+                program_id,
+                accounts,
+                account_a_portfolio_id,
+                account_b_portfolio_id,
+                &legs,
+            ),
+            Instruction::BatchTradeCpi {
+                account_a_portfolio_id,
+                account_b_portfolio_id,
+                legs,
+            } => handle_batch_trade_cpi(
+                program_id,
+                accounts,
+                account_a_portfolio_id,
+                account_b_portfolio_id,
+                &legs,
+            ),
             Instruction::SetMatcherConfig {
                 portfolio_id,
                 expected_sequence,
@@ -5935,7 +6031,9 @@ pub mod processor {
                 enabled,
                 trade_fee_cap_bps,
             ),
-            Instruction::ClosePortfolio => handle_close_portfolio(program_id, accounts),
+            Instruction::ClosePortfolio { portfolio_id } => {
+                handle_close_portfolio(program_id, accounts, portfolio_id)
+            }
             Instruction::TopUpInsurance { market_id, amount } => {
                 handle_top_up_insurance(program_id, accounts, market_id, amount)
             }
@@ -5964,9 +6062,10 @@ pub mod processor {
             Instruction::WithdrawBackingBucket { domain, amount } => {
                 handle_withdraw_backing_bucket(program_id, accounts, domain, amount)
             }
-            Instruction::ConvertReleasedPnl { amount } => {
-                handle_convert_released_pnl(program_id, accounts, amount)
-            }
+            Instruction::ConvertReleasedPnl {
+                portfolio_id,
+                amount,
+            } => handle_convert_released_pnl(program_id, accounts, portfolio_id, amount),
             Instruction::CloseResolved { fee_rate_per_slot } => {
                 handle_close_resolved(program_id, accounts, fee_rate_per_slot)
             }
@@ -6458,6 +6557,7 @@ pub mod processor {
     fn handle_deposit<'a>(
         program_id: &Pubkey,
         accounts: &'a [AccountInfo<'a>],
+        expected_portfolio_id: u64,
         amount: u128,
     ) -> ProgramResult {
         let owner = account(accounts, 0)?;
@@ -6496,6 +6596,7 @@ pub mod processor {
             }
             reject_permissionless_resolve_matured_live_view(&cfg, &group)?;
             let mut portfolio_data = portfolio_ai.try_borrow_mut_data()?;
+            expect_portfolio_id(&portfolio_data, expected_portfolio_id)?;
             let mut portfolio =
                 state::portfolio_view_mut_for_market_slots(&mut portfolio_data, max_market_slots)?;
             expect_portfolio_view_account_key(&portfolio, portfolio_ai.key)?;
@@ -6512,6 +6613,7 @@ pub mod processor {
     fn handle_withdraw<'a>(
         program_id: &Pubkey,
         accounts: &'a [AccountInfo<'a>],
+        expected_portfolio_id: u64,
         amount: u128,
     ) -> ProgramResult {
         let owner = account(accounts, 0)?;
@@ -6556,6 +6658,7 @@ pub mod processor {
             }
             reject_permissionless_resolve_matured_live_view(&cfg, &group)?;
             let mut portfolio_data = portfolio_ai.try_borrow_mut_data()?;
+            expect_portfolio_id(&portfolio_data, expected_portfolio_id)?;
             let mut portfolio =
                 state::portfolio_view_mut_for_market_slots(&mut portfolio_data, max_market_slots)?;
             expect_portfolio_view_account_key(&portfolio, portfolio_ai.key)?;
@@ -6584,6 +6687,8 @@ pub mod processor {
         market_ai: &AccountInfo<'a>,
         account_a_ai: &AccountInfo<'a>,
         account_b_ai: &AccountInfo<'a>,
+        account_a_portfolio_id: u64,
+        account_b_portfolio_id: u64,
         asset_index: u16,
         expected_market_id: u64,
         size_q: i128,
@@ -6618,6 +6723,8 @@ pub mod processor {
             )?;
             let mut account_a_data = account_a_ai.try_borrow_mut_data()?;
             let mut account_b_data = account_b_ai.try_borrow_mut_data()?;
+            expect_portfolio_id(&account_a_data, account_a_portfolio_id)?;
+            expect_portfolio_id(&account_b_data, account_b_portfolio_id)?;
             let mut account_a =
                 state::portfolio_view_mut_for_market_slots(&mut account_a_data, max_market_slots)?;
             let mut account_b =
@@ -6680,6 +6787,28 @@ pub mod processor {
                 &account_b,
                 core::slice::from_ref(&req),
             )?;
+            let account_a_needs_source_capacity =
+                trade_delta_may_require_source_domain_capacity(account_a_position, size_q)?;
+            let account_b_needs_source_capacity =
+                trade_delta_may_require_source_domain_capacity(account_b_position, -size_q)?;
+            if account_a_needs_source_capacity || account_b_needs_source_capacity {
+                let mut admitted_source_domains_a =
+                    occupied_source_domains_snapshot_for_trade_view(&account_a)?;
+                let mut admitted_source_domains_b =
+                    occupied_source_domains_snapshot_for_trade_view(&account_b)?;
+                ensure_trade_delta_source_domain_capacity_view(
+                    &mut admitted_source_domains_a,
+                    asset_index as usize,
+                    account_a_position,
+                    size_q,
+                )?;
+                ensure_trade_delta_source_domain_capacity_view(
+                    &mut admitted_source_domains_b,
+                    asset_index as usize,
+                    account_b_position,
+                    -size_q,
+                )?;
+            }
             let backing_before_a = source_counterparty_backing_snapshot_view(&account_a)?;
             let backing_before_b = source_counterparty_backing_snapshot_view(&account_b)?;
             let source_lien_before_a =
@@ -6752,6 +6881,14 @@ pub mod processor {
                 source_lien_effective_reserved_snapshot_for_trade_view(&account_a)?;
             let source_lien_after_b =
                 source_lien_effective_reserved_snapshot_for_trade_view(&account_b)?;
+            ensure_source_domain_growth_within_wrapper_bound(
+                source_lien_before_a.len(),
+                source_lien_after_a.len(),
+            )?;
+            ensure_source_domain_growth_within_wrapper_bound(
+                source_lien_before_b.len(),
+                source_lien_after_b.len(),
+            )?;
             ensure_new_source_lien_domains_full_rate_for_trade_view(
                 &group,
                 source_lien_before_a.as_ref(),
@@ -6805,6 +6942,8 @@ pub mod processor {
     fn handle_batch_trade_nocpi<'a>(
         program_id: &Pubkey,
         accounts: &'a [AccountInfo<'a>],
+        account_a_portfolio_id: u64,
+        account_b_portfolio_id: u64,
         legs: &[ix::BatchTradeLeg],
     ) -> ProgramResult {
         let signer_a = account(accounts, 0)?;
@@ -6846,6 +6985,8 @@ pub mod processor {
             market_ai,
             account_a_ai,
             account_b_ai,
+            account_a_portfolio_id,
+            account_b_portfolio_id,
             legs,
             max_market_slots,
         )
@@ -6859,6 +7000,8 @@ pub mod processor {
         market_ai: &AccountInfo<'a>,
         account_a_ai: &AccountInfo<'a>,
         account_b_ai: &AccountInfo<'a>,
+        account_a_portfolio_id: u64,
+        account_b_portfolio_id: u64,
         legs: &[ix::BatchTradeLeg],
         max_market_slots: usize,
     ) -> ProgramResult {
@@ -6878,6 +7021,8 @@ pub mod processor {
             }
             let mut account_a_data = account_a_ai.try_borrow_mut_data()?;
             let mut account_b_data = account_b_ai.try_borrow_mut_data()?;
+            expect_portfolio_id(&account_a_data, account_a_portfolio_id)?;
+            expect_portfolio_id(&account_b_data, account_b_portfolio_id)?;
             let mut account_a =
                 state::portfolio_view_mut_for_market_slots(&mut account_a_data, max_market_slots)?;
             let mut account_b =
@@ -6898,7 +7043,10 @@ pub mod processor {
                 u64,
                 HybridTradeFeeQuote,
                 u128,
+                i128,
+                i128,
             )> = Vec::with_capacity(legs.len());
+            let mut needs_source_domain_capacity = false;
             for leg in legs {
                 let asset_index = leg.asset_index as usize;
                 if requests.iter().any(|r| r.asset_index == asset_index) {
@@ -6925,6 +7073,12 @@ pub mod processor {
                     signed_position_for_asset_view(&group, &account_b, asset_index)?;
                 let reduces_existing = trade_delta_reduces_existing(account_a_position, leg.size_q)
                     || trade_delta_reduces_existing(account_b_position, -leg.size_q);
+                needs_source_domain_capacity |=
+                    trade_delta_may_require_source_domain_capacity(account_a_position, leg.size_q)?
+                        || trade_delta_may_require_source_domain_capacity(
+                            account_b_position,
+                            -leg.size_q,
+                        )?;
                 accrue_zero_move_funding_before_position_change_for_profile_view(
                     &mut oracle_profile,
                     &mut group,
@@ -6959,11 +7113,46 @@ pub mod processor {
                     fee_basis_price,
                     fee_quote,
                     abs_size,
+                    account_a_position,
+                    account_b_position,
                 ));
             }
             ensure_trade_portfolios_current_for_requests_view(
                 &group, &account_a, &account_b, &requests,
             )?;
+            if needs_source_domain_capacity {
+                let mut admitted_source_domains_a =
+                    occupied_source_domains_snapshot_for_trade_view(&account_a)?;
+                let mut admitted_source_domains_b =
+                    occupied_source_domains_snapshot_for_trade_view(&account_b)?;
+                for (
+                    asset_index,
+                    _oracle_profile,
+                    _fee_basis_price,
+                    _fee_quote,
+                    _abs_size,
+                    account_a_position,
+                    account_b_position,
+                ) in leg_ctx.iter()
+                {
+                    let request = requests
+                        .iter()
+                        .find(|request| request.asset_index == *asset_index)
+                        .ok_or(PercolatorError::InvalidInstruction)?;
+                    ensure_trade_delta_source_domain_capacity_view(
+                        &mut admitted_source_domains_a,
+                        *asset_index,
+                        *account_a_position,
+                        request.size_q,
+                    )?;
+                    ensure_trade_delta_source_domain_capacity_view(
+                        &mut admitted_source_domains_b,
+                        *asset_index,
+                        *account_b_position,
+                        -request.size_q,
+                    )?;
+                }
+            }
 
             let backing_before_a = source_counterparty_backing_snapshot_view(&account_a)?;
             let backing_before_b = source_counterparty_backing_snapshot_view(&account_b)?;
@@ -6995,8 +7184,15 @@ pub mod processor {
             let mut remaining_fee_a = outcome.fee_a;
             let mut remaining_fee_b = outcome.fee_b;
             let mut cfg_dirty = false;
-            for (asset_index, oracle_profile, fee_basis_price, fee_quote, abs_size) in
-                leg_ctx.iter_mut()
+            for (
+                asset_index,
+                oracle_profile,
+                fee_basis_price,
+                fee_quote,
+                abs_size,
+                _account_a_position,
+                _account_b_position,
+            ) in leg_ctx.iter_mut()
             {
                 let requested_fee_leg =
                     batch_leg_fee(*abs_size, *fee_basis_price, fee_quote.fee_bps)?;
@@ -7043,6 +7239,14 @@ pub mod processor {
                 source_lien_effective_reserved_snapshot_for_trade_view(&account_a)?;
             let source_lien_after_b =
                 source_lien_effective_reserved_snapshot_for_trade_view(&account_b)?;
+            ensure_source_domain_growth_within_wrapper_bound(
+                source_lien_before_a.len(),
+                source_lien_after_a.len(),
+            )?;
+            ensure_source_domain_growth_within_wrapper_bound(
+                source_lien_before_b.len(),
+                source_lien_after_b.len(),
+            )?;
             ensure_new_source_lien_domains_full_rate_for_trade_view(
                 &group,
                 source_lien_before_a.as_ref(),
@@ -7065,6 +7269,8 @@ pub mod processor {
     fn handle_trade_nocpi<'a>(
         program_id: &Pubkey,
         accounts: &'a [AccountInfo<'a>],
+        account_a_portfolio_id: u64,
+        account_b_portfolio_id: u64,
         asset_index: u16,
         market_id: u64,
         size_q: i128,
@@ -7105,6 +7311,8 @@ pub mod processor {
             market_ai,
             account_a_ai,
             account_b_ai,
+            account_a_portfolio_id,
+            account_b_portfolio_id,
             asset_index,
             market_id,
             size_q,
@@ -7253,6 +7461,108 @@ pub mod processor {
             }
         }
         Ok(out.into_boxed_slice())
+    }
+
+    struct SourceDomainAdmissionSnapshot {
+        domains: [u32; percolator::PORTFOLIO_SOURCE_DOMAIN_CAP],
+        len: usize,
+    }
+
+    impl SourceDomainAdmissionSnapshot {
+        fn contains(&self, domain: u32) -> bool {
+            let mut i = 0usize;
+            while i < self.len {
+                if self.domains[i] == domain {
+                    return true;
+                }
+                i += 1;
+            }
+            false
+        }
+
+        fn push_reserved(&mut self, domain: u32) -> ProgramResult {
+            if self.contains(domain) {
+                return Ok(());
+            }
+            if self.len >= constants::WRAPPER_MAX_BOUNDED_SOURCE_DOMAINS {
+                return Err(PercolatorError::InvalidInstruction.into());
+            }
+            if self.len >= self.domains.len() {
+                return Err(PercolatorError::InvalidInstruction.into());
+            }
+            self.domains[self.len] = domain;
+            self.len += 1;
+            Ok(())
+        }
+    }
+
+    fn occupied_source_domains_snapshot_for_trade_view(
+        account: &percolator::PortfolioV16ViewMut<'_>,
+    ) -> Result<SourceDomainAdmissionSnapshot, ProgramError> {
+        let mut out = SourceDomainAdmissionSnapshot {
+            domains: [0u32; percolator::PORTFOLIO_SOURCE_DOMAIN_CAP],
+            len: 0,
+        };
+        for slot in account.header.source_domains.iter() {
+            if slot.is_occupied() {
+                if out.len >= out.domains.len() {
+                    return Err(PercolatorError::InvalidInstruction.into());
+                }
+                out.domains[out.len] = slot.domain.get();
+                out.len += 1;
+            }
+        }
+        Ok(out)
+    }
+
+    fn ensure_trade_delta_source_domain_capacity_view(
+        occupied_domains: &mut SourceDomainAdmissionSnapshot,
+        asset_index: usize,
+        current_q: i128,
+        delta_q: i128,
+    ) -> ProgramResult {
+        if !trade_delta_may_require_source_domain_capacity(current_q, delta_q)? {
+            return Ok(());
+        }
+        if occupied_domains.len > constants::WRAPPER_MAX_BOUNDED_SOURCE_DOMAINS {
+            return Err(PercolatorError::InvalidInstruction.into());
+        }
+        let (long_domain, short_domain) =
+            percolator::v16_domain_pair_for_asset_index(asset_index).map_err(map_v16_error)?;
+        for domain in [long_domain as u32, short_domain as u32] {
+            if occupied_domains.contains(domain) {
+                continue;
+            }
+            occupied_domains.push_reserved(domain)?;
+        }
+        Ok(())
+    }
+
+    fn trade_delta_may_require_source_domain_capacity(
+        current_q: i128,
+        delta_q: i128,
+    ) -> Result<bool, ProgramError> {
+        let post_q = current_q
+            .checked_add(delta_q)
+            .ok_or(PercolatorError::EngineArithmeticOverflow)?;
+        if current_q == 0 {
+            return Ok(delta_q != 0);
+        }
+        if current_q > 0 {
+            return Ok(delta_q > 0 || post_q < 0);
+        }
+        Ok(delta_q < 0 || post_q > 0)
+    }
+
+    fn ensure_source_domain_growth_within_wrapper_bound(
+        before_count: usize,
+        after_count: usize,
+    ) -> ProgramResult {
+        if after_count > before_count && after_count > constants::WRAPPER_MAX_BOUNDED_SOURCE_DOMAINS
+        {
+            return Err(PercolatorError::InvalidInstruction.into());
+        }
+        Ok(())
     }
 
     #[inline(never)]
@@ -7473,6 +7783,8 @@ pub mod processor {
     fn handle_trade_cpi<'a>(
         program_id: &Pubkey,
         accounts: &'a [AccountInfo<'a>],
+        account_a_portfolio_id: u64,
+        account_b_portfolio_id: u64,
         asset_index: u16,
         expected_market_id: u64,
         size_q: i128,
@@ -7513,10 +7825,16 @@ pub mod processor {
         if market_id != expected_market_id {
             return Err(PercolatorError::AssetGenerationMismatch.into());
         }
-        let (account_a_header, account_a_owner) =
-            state::read_portfolio_owner_preflight(&account_a_ai.try_borrow_data()?)?;
-        let (account_b_header, account_b_owner) =
-            state::read_portfolio_owner_preflight(&account_b_ai.try_borrow_data()?)?;
+        let (account_a_header, account_a_owner) = {
+            let data = account_a_ai.try_borrow_data()?;
+            expect_portfolio_id(&data, account_a_portfolio_id)?;
+            state::read_portfolio_owner_preflight(&data)?
+        };
+        let (account_b_header, account_b_owner) = {
+            let data = account_b_ai.try_borrow_data()?;
+            expect_portfolio_id(&data, account_b_portfolio_id)?;
+            state::read_portfolio_owner_preflight(&data)?
+        };
         if mode_pre != MarketModeV16::Live {
             return Err(PercolatorError::EngineLockActive.into());
         }
@@ -7662,6 +7980,8 @@ pub mod processor {
             market_ai,
             account_a_ai,
             account_b_ai,
+            account_a_portfolio_id,
+            account_b_portfolio_id,
             asset_index,
             expected_market_id,
             ret.exec_size,
@@ -7820,6 +8140,8 @@ pub mod processor {
     fn handle_batch_trade_cpi<'a>(
         program_id: &Pubkey,
         accounts: &'a [AccountInfo<'a>],
+        account_a_portfolio_id: u64,
+        account_b_portfolio_id: u64,
         legs: &[ix::BatchTradeCpiLeg],
     ) -> ProgramResult {
         if legs.is_empty() || legs.len() > MATCHER_BATCH_MAX_LEGS {
@@ -7930,10 +8252,16 @@ pub mod processor {
         if !fee_bounds_ok {
             return Err(PercolatorError::InvalidInstruction.into());
         }
-        let (account_a_header, account_a_owner) =
-            state::read_portfolio_owner_preflight(&account_a_ai.try_borrow_data()?)?;
-        let (account_b_header, account_b_owner) =
-            state::read_portfolio_owner_preflight(&account_b_ai.try_borrow_data()?)?;
+        let (account_a_header, account_a_owner) = {
+            let data = account_a_ai.try_borrow_data()?;
+            expect_portfolio_id(&data, account_a_portfolio_id)?;
+            state::read_portfolio_owner_preflight(&data)?
+        };
+        let (account_b_header, account_b_owner) = {
+            let data = account_b_ai.try_borrow_data()?;
+            expect_portfolio_id(&data, account_b_portfolio_id)?;
+            state::read_portfolio_owner_preflight(&data)?
+        };
         if account_a_header.portfolio_account_id != account_a_ai.key.to_bytes()
             || account_b_header.portfolio_account_id != account_b_ai.key.to_bytes()
         {
@@ -8084,6 +8412,8 @@ pub mod processor {
             market_ai,
             account_a_ai,
             account_b_ai,
+            account_a_portfolio_id,
+            account_b_portfolio_id,
             &exec_legs,
             max_market_slots,
         )
@@ -8093,6 +8423,7 @@ pub mod processor {
     fn handle_close_portfolio<'a>(
         program_id: &Pubkey,
         accounts: &'a [AccountInfo<'a>],
+        expected_portfolio_id: u64,
     ) -> ProgramResult {
         let closer = account(accounts, 0)?;
         let market_ai = account(accounts, 1)?;
@@ -8109,6 +8440,7 @@ pub mod processor {
             let mut market_data = market_ai.try_borrow_mut_data()?;
             let (cfg, mut group) = state::market_view_mut(&mut market_data)?;
             let mut portfolio_data = portfolio_ai.try_borrow_mut_data()?;
+            expect_portfolio_id(&portfolio_data, expected_portfolio_id)?;
             let portfolio =
                 state::portfolio_view_mut_for_market_slots(&mut portfolio_data, max_market_slots)?;
             expect_portfolio_view_account_key(&portfolio, portfolio_ai.key)?;
@@ -9449,32 +9781,40 @@ pub mod processor {
     fn handle_convert_released_pnl<'a>(
         program_id: &Pubkey,
         accounts: &'a [AccountInfo<'a>],
+        expected_portfolio_id: u64,
         amount: u128,
     ) -> ProgramResult {
         if amount == 0 {
             return Err(PercolatorError::InvalidInstruction.into());
         }
-        with_one_portfolio_view(program_id, accounts, true, None, |group, portfolio, cfg| {
-            if group.header.mode != 0 {
-                return Err(V16Error::LockActive);
-            }
-            if permissionless_resolve_matured_now_view(cfg, group) {
-                return Err(V16Error::LockActive);
-            }
-            reject_lapsed_source_backing_for_conversion_view(
-                group,
-                portfolio,
-                authenticated_market_slot_or_fallback_view(group),
-            )?;
-            // The v16 engine converts the currently released residual-bounded
-            // amount atomically. Preserve the wrapper caller cap by staging the
-            // conversion and only committing it when the converted amount fits.
-            let converted = group.convert_released_pnl_to_capital_not_atomic(portfolio)?;
-            if converted == 0 || converted > amount {
-                return Err(V16Error::LockActive);
-            }
-            Ok(())
-        })
+        with_one_portfolio_view(
+            program_id,
+            accounts,
+            true,
+            Some(expected_portfolio_id),
+            None,
+            |group, portfolio, cfg| {
+                if group.header.mode != 0 {
+                    return Err(V16Error::LockActive);
+                }
+                if permissionless_resolve_matured_now_view(cfg, group) {
+                    return Err(V16Error::LockActive);
+                }
+                reject_lapsed_source_backing_for_conversion_view(
+                    group,
+                    portfolio,
+                    authenticated_market_slot_or_fallback_view(group),
+                )?;
+                // The v16 engine converts the currently released residual-bounded
+                // amount atomically. Preserve the wrapper caller cap by staging the
+                // conversion and only committing it when the converted amount fits.
+                let converted = group.convert_released_pnl_to_capital_not_atomic(portfolio)?;
+                if converted == 0 || converted > amount {
+                    return Err(V16Error::LockActive);
+                }
+                Ok(())
+            },
+        )
     }
 
     #[inline(never)]
@@ -9555,6 +9895,7 @@ pub mod processor {
             program_id,
             accounts,
             true,
+            None,
             Some((expected_portfolio_id, expected_position_epoch)),
             |group, portfolio, cfg| {
                 if group.header.mode == 0 && permissionless_resolve_matured_now_view(cfg, group) {
@@ -9593,6 +9934,7 @@ pub mod processor {
             program_id,
             accounts,
             true,
+            None,
             Some((expected_portfolio_id, expected_position_epoch)),
             |group, portfolio, cfg| {
                 if group.header.mode == 0 && permissionless_resolve_matured_now_view(cfg, group) {
@@ -12386,6 +12728,13 @@ pub mod processor {
         Ok(())
     }
 
+    fn expect_portfolio_id(data: &[u8], expected_portfolio_id: u64) -> Result<(), ProgramError> {
+        if state::read_portfolio_id(data)? != expected_portfolio_id {
+            return Err(PercolatorError::EngineProvenanceMismatch.into());
+        }
+        Ok(())
+    }
+
     fn reject_missing_pending_liquidation_observations_view(
         cfg: &WrapperConfigV16,
         group: &state::MarketViewMutV16<'_>,
@@ -12752,6 +13101,7 @@ pub mod processor {
         program_id: &Pubkey,
         accounts: &'a [AccountInfo<'a>],
         owner_must_sign: bool,
+        portfolio_binding: Option<u64>,
         position_binding: Option<(u64, u64)>,
         f: F,
     ) -> ProgramResult
@@ -12778,10 +13128,13 @@ pub mod processor {
         let mut market_data = market_ai.try_borrow_mut_data()?;
         let (cfg, mut group) = state::market_view_mut(&mut market_data)?;
         let mut portfolio_data = portfolio_ai.try_borrow_mut_data()?;
-        if let Some((expected_portfolio_id, expected_position_epoch)) = position_binding {
-            if state::read_portfolio_id(&portfolio_data)? != expected_portfolio_id
-                || state::read_portfolio_position_epoch(&portfolio_data)? != expected_position_epoch
-            {
+        if let Some(expected_portfolio_id) =
+            portfolio_binding.or(position_binding.map(|(portfolio_id, _)| portfolio_id))
+        {
+            expect_portfolio_id(&portfolio_data, expected_portfolio_id)?;
+        }
+        if let Some((_expected_portfolio_id, expected_position_epoch)) = position_binding {
+            if state::read_portfolio_position_epoch(&portfolio_data)? != expected_position_epoch {
                 return Err(PercolatorError::EngineProvenanceMismatch.into());
             }
         }

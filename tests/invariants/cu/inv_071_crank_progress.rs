@@ -2,7 +2,9 @@
 //!
 //! Normative obligation: Every successful crank strictly decreases a finite liveness rank or enters a lower terminal mode.
 //!
-//! Evidence in this file (I/C plus invariant-specific M assertions): `v16_program_prospective_loss_expiry_matrix_discovers_resolved_exit_lock`, `v16_program_prospective_source_expiry_prerequisite_matrix_keeps_exit_live`, `v16_program_b_budget_prerequisite_matrix_hits_resolved_adl_lock`, `v16_program_bankruptcy_escalation_matrix_commits_recovery_and_resolves`, `v16_program_micro_price_schedule_matrix_discovers_clock_consuming_noop_cranks`, `v16_attack_resolved_permissionless_crank_survives_drained_owner_system_account`, `v16_attack_stale_liquidation_budget_observation_crank_progresses_without_reward_or_value`, `v16_attack_auto_crank_prioritizes_b_stale_over_liquidation_reward_tail`, `v16_attack_auto_crank_reaches_later_material_liquidation_past_tiny_first_leg`. These tests exercise the deployed public
+//! Evidence in this file (I/C plus invariant-specific M assertions): expiry matrices, bankruptcy
+//! escalation, no-op crank detection, resolved cranks, stale liquidation-budget progress, priority
+//! selection, and current solvent partial-liquidation progress. These tests exercise the deployed public
 //! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
 //! rollback, liveness, or compute outcomes appropriate to the invariant.
 //!
@@ -1124,4 +1126,193 @@ fn v16_attack_auto_crank_reaches_later_material_liquidation_past_tiny_first_leg(
         !has_active_leg_for_asset(&env.portfolio_state(victim), 0),
         "the minimum-quantum first leg must clear before the later material liquidation progresses"
     );
+}
+
+// the keeper has no liquidation-size input.
+#[test]
+fn v16_program_auto_crank_current_solvent_partial_liquidation_makes_progress() {
+    let mut env = V16CuEnv::new();
+    env.top_up_insurance(1_000_000);
+    env.svm.warp_to_slot(1);
+    env.configure_auth_mark_with_cu(1, 100);
+
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long_account = env.create_portfolio(&long_owner);
+    let short_account = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long_account, 10_000);
+    env.deposit(&short_owner, short_account, 3_000);
+    env.trade_with_cu(
+        &long_owner,
+        long_account,
+        &short_owner,
+        short_account,
+        (10 * POS_SCALE) as i128,
+        100,
+        0,
+    );
+    let position_epoch_after_trade = env.portfolio_position_epoch(short_account);
+
+    env.svm.warp_to_slot(2);
+    env.push_auth_mark_with_cu(2, 300);
+    env.crank(
+        short_account,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 2,
+            observations: crank_observations(0),
+        },
+    );
+    env.svm.warp_to_slot(3);
+    env.crank(
+        short_account,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 3,
+            observations: crank_observations(0),
+        },
+    );
+
+    let before_group = env.market_state().1;
+    let before_short = env.portfolio_state(short_account);
+    let before_cert = health_cert(&before_short);
+    assert_eq!(
+        env.portfolio_position_epoch(short_account),
+        position_epoch_after_trade,
+        "refresh-only cranks must not invalidate signed position consent"
+    );
+    assert!(
+        before_cert.certified_liq_deficit != 0 && before_cert.certified_equity > 0,
+        "setup must be solvent but liquidatable before partial liquidation: {before_cert:?}"
+    );
+    let oi_pre = before_group.assets[0].oi_eff_short_q;
+
+    env.svm.expire_blockhash();
+    let partial = env.send(
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 3,
+            observations: vec![],
+        },
+        vec![
+            AccountMeta::new(env.payer.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(short_account, false),
+        ],
+        &[],
+    );
+    assert!(
+        partial.is_ok(),
+        "current solvent liquidation must not require observations to make progress: {partial:?}"
+    );
+
+    let after_group = env.market_state().1;
+    let after_short = env.portfolio_state(short_account);
+    let closed = oi_pre.saturating_sub(after_group.assets[0].oi_eff_short_q);
+    assert!(closed > 0, "partial liquidation must reduce open interest");
+    assert_eq!(
+        env.portfolio_position_epoch(short_account),
+        position_epoch_after_trade + 1,
+        "a successful liquidation must advance the position episode exactly once"
+    );
+    assert!(
+        closed < oi_pre,
+        "solvent liquidation should preserve the engine-selected remaining position: closed={closed}"
+    );
+    assert!(
+        has_active_leg_for_asset(&after_short, 0),
+        "partial close should leave the remaining position active"
+    );
+    assert_eq!(
+        health_cert(&after_short).certified_liq_deficit,
+        0,
+        "engine-selected partial close restores maintenance health"
+    );
+    assert_eq!(
+        after_group.vault, before_group.vault,
+        "liquidation fee is internal accounting, not a vault mint"
+    );
+    assert_eq!(after_group.vault as u64, env.token_amount(env.vault));
+    assert!(after_group.vault >= after_group.c_tot + after_group.insurance);
+}
+
+// security.md sweep — crank idempotency / double-accrual (#32 race): re-cranking an asset at the SAME
+// slot must be a no-op. If a second same-slot crank re-applies the price move/funding, an attacker
+// could double-realize a counterparty's loss or double-charge funding. We first crank to the
+// settlement fixed point (§6.1/§6.2 needs multiple passes), then assert re-cranking is an exact no-op.
+#[test]
+fn v16_regression_crank_idempotent_at_settlement_fixed_point() {
+    let mut env = V16CuEnv::new();
+    env.configure_auth_mark_with_cu(0, 100);
+    let lo_owner = Keypair::new();
+    let lo = env.create_portfolio(&lo_owner);
+    let sh_owner = Keypair::new();
+    let sh = env.create_portfolio(&sh_owner);
+    env.deposit(&lo_owner, lo, 1_000_000);
+    env.deposit(&sh_owner, sh, 1_000_000);
+    env.trade_asset_with_cu(
+        0,
+        &lo_owner,
+        lo,
+        &sh_owner,
+        sh,
+        (10_000 * POS_SCALE) as i128,
+        100,
+        0,
+    );
+    env.svm.warp_to_slot(10);
+    env.push_auth_mark_with_cu(10, 110);
+    let crank = |env: &mut V16CuEnv, p: Pubkey, slot: u64| {
+        env.svm.expire_blockhash();
+        let _ = env.send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: slot,
+                observations: crank_observations(0),
+            },
+            vec![
+                AccountMeta::new(env.payer.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(p, false),
+            ],
+            &[],
+        );
+    };
+    // crank many passes at slot 11 and watch the short's capital: it must CONVERGE to a fixed point
+    // (settlement completing), not keep dropping (which would be double-accrual).
+    env.svm.warp_to_slot(11);
+    for _ in 0..8 {
+        for p in [sh, lo] {
+            crank(&mut env, p, 11);
+        }
+    } // crank to the settlement fixed point
+    let lo1 = state::read_portfolio(&env.svm.get_account(&lo).unwrap().data).unwrap();
+    let sh1 = state::read_portfolio(&env.svm.get_account(&sh).unwrap().data).unwrap();
+    let (_, g1) = env.market_state();
+    let ep1 = g1.assets[0].effective_price;
+    for _ in 0..3 {
+        for p in [sh, lo] {
+            crank(&mut env, p, 11);
+        }
+    }
+    let lo2 = state::read_portfolio(&env.svm.get_account(&lo).unwrap().data).unwrap();
+    let sh2 = state::read_portfolio(&env.svm.get_account(&sh).unwrap().data).unwrap();
+    let (_, g2) = env.market_state();
+
+    assert_eq!(
+        g2.assets[0].effective_price, ep1,
+        "effective price unchanged by same-slot re-crank"
+    );
+    assert_eq!(
+        (lo2.capital.get(), lo2.pnl.get()),
+        (lo1.capital.get(), lo1.pnl.get()),
+        "long pnl/capital not double-accrued"
+    );
+    assert_eq!(
+        (sh2.capital.get(), sh2.pnl.get()),
+        (sh1.capital.get(), sh1.pnl.get()),
+        "short pnl/capital not double-accrued"
+    );
+    assert_eq!(
+        g2.assets[0].f_long_num, g1.assets[0].f_long_num,
+        "funding ledger not double-applied"
+    );
+    assert_eq!(g2.vault, 2_000_000, "vault conserved");
+    assert!(g2.vault >= g2.c_tot + g2.insurance, "senior conservation");
 }

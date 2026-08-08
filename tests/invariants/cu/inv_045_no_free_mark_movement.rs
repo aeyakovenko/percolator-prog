@@ -2,7 +2,10 @@
 //!
 //! Normative obligation: Every mark movement remains elapsed-time bounded and economically paid across every trade route.
 //!
-//! Evidence in this file (I/C plus invariant-specific M assertions): `v16_probe_ewma_fee_covers_large_passive_oi_moved_by_small_wash_trades`, `v16_attack_accumulated_ewma_lag_remains_fee_covered_after_crank`, `v16_attack_nocpi_positive_mark_min_fee_does_not_dos_or_move_ewma_for_free`, `v16_attack_cpi_matcher_price_caps_ewma_move_without_dos`, `v16_attack_underfunded_exit_cannot_move_ewma_with_uncollectible_fee`, `v16_attack_underfunded_cpi_exit_cannot_move_ewma_with_uncollectible_fee`. These tests exercise the deployed public
+//! Evidence in this file (I/C plus invariant-specific M assertions): wash-trade fee coverage,
+//! no-CPI zero/epsilon/extreme reported-price normalization, CPI matcher quote pinning, same-slot
+//! and per-slot EWMA circuit breakers, and underfunded exits that cannot move EWMA with an
+//! uncollectible fee. These tests exercise the deployed public
 //! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
 //! rollback, liveness, or compute outcomes appropriate to the invariant.
 //!
@@ -307,4 +310,690 @@ fn v16_attack_underfunded_cpi_exit_cannot_move_ewma_with_uncollectible_fee() {
     for path in [CpiEwmaTradePath::Single, CpiEwmaTradePath::Batch] {
         assert_underfunded_cpi_ewma_exit_uses_collected_fee(path);
     }
+}
+
+// Attacker criterion (must FAIL): declaring exec_price << mark charges a smaller fee than the mark.
+#[test]
+fn v16_program_tradenocpi_fee_cannot_be_evaded_via_exec_price() {
+    // fee charged (insurance delta) for the SAME mark-valued position at different declared exec_prices.
+    let fee_for = |exec_price: u64| -> u128 {
+        let mut env = V16CuEnv::new();
+        env.configure_auth_mark_with_cu(0, 100); // mark = 100
+        let oa = Keypair::new();
+        let a = env.create_portfolio(&oa);
+        let ob = Keypair::new();
+        let b = env.create_portfolio(&ob);
+        env.deposit(&oa, a, 100_000_000_000);
+        env.deposit(&ob, b, 100_000_000_000);
+        let ins0 = env.market_state().1.insurance;
+        env.trade_asset_with_cu(
+            0,
+            &oa,
+            a,
+            &ob,
+            b,
+            (1000 * POS_SCALE) as i128,
+            exec_price,
+            100,
+        );
+        env.market_state().1.insurance - ins0
+    };
+    let fee_at_mark = fee_for(100);
+    assert!(
+        fee_at_mark > 0,
+        "non-vacuous: a real fee is charged at the mark"
+    );
+    // The whole point of the fix: a tiny declared exec_price does NOT reduce the fee anymore.
+    assert_eq!(
+        fee_for(1),
+        fee_at_mark,
+        "exec_price=1 is billed the SAME mark-based fee (no evasion)"
+    );
+    assert_eq!(
+        fee_for(50),
+        fee_at_mark,
+        "exec_price below mark is billed the mark-based fee"
+    );
+    // Declaring a HIGH exec_price must not over-bill either — fee is pinned to the mark, not the caller.
+    assert_eq!(
+        fee_for(100_000),
+        fee_at_mark,
+        "exec_price above mark is also billed the mark-based fee"
+    );
+}
+
+// reported price used to bypass the per-slot clamp and move the mark toward zero via a wash trade.
+#[test]
+fn v16_program_nocpi_zero_reported_price_cannot_drive_ewma_or_hybrid_mark() {
+    for path in [
+        NoCpiReportedPricePath::Single,
+        NoCpiReportedPricePath::Batch,
+    ] {
+        assert_zero_reported_price_rejects_atomically(
+            zero_reported_price_ewma_env(),
+            path,
+            "EWMA mark",
+        );
+        assert_zero_reported_price_rejects_atomically(
+            zero_reported_price_hybrid_after_hours_env(),
+            path,
+            "Hybrid after-hours mark",
+        );
+    }
+}
+
+// different mark than the charged price justified.
+#[test]
+fn v16_program_nocpi_epsilon_reported_price_uses_dt_clamped_fee_and_ewma_price() {
+    const MARK: u64 = 1_000_000;
+    const CAP_BPS: u64 = 50;
+    const DT: u64 = 4;
+    let dt_clamped_epsilon = oracle_v16::clamp_toward_engine_dt(MARK, 1, CAP_BPS, DT);
+    assert_eq!(
+        dt_clamped_epsilon, 980_000,
+        "test setup must exercise a multi-slot engine dt clamp"
+    );
+
+    for path in [
+        NoCpiReportedPricePath::Single,
+        NoCpiReportedPricePath::Batch,
+    ] {
+        let epsilon = ewma_no_cpi_fee_and_mark_for_reported_price(path, 1);
+        let clamped = ewma_no_cpi_fee_and_mark_for_reported_price(path, dt_clamped_epsilon);
+        let at_mark = ewma_no_cpi_fee_and_mark_for_reported_price(path, MARK);
+
+        assert_eq!(
+            epsilon, clamped,
+            "{path:?}: epsilon report must be normalized to the accepted dt-clamped price for fee and EWMA"
+        );
+        assert_ne!(
+            epsilon.0, at_mark.0,
+            "{path:?}: non-vacuous fee assertion; the accepted below-mark print must not be billed as old mark"
+        );
+        assert_ne!(
+            epsilon.1, at_mark.1,
+            "{path:?}: non-vacuous EWMA assertion; the accepted below-mark print must move the mark"
+        );
+        assert_eq!(
+            at_mark.1, MARK,
+            "{path:?}: at-mark control should not move EWMA"
+        );
+        assert!(
+            epsilon.1 < at_mark.1,
+            "{path:?}: lower accepted print should move EWMA below at-mark control"
+        );
+    }
+}
+
+// unit against this price. The trade must still execute, but the unpaid print must move no EWMA.
+#[test]
+fn v16_program_nocpi_trade_not_dosed_by_extreme_reported_price() {
+    for path in [
+        NoCpiReportedPricePath::Single,
+        NoCpiReportedPricePath::Batch,
+    ] {
+        for reported_price in [1, percolator::MAX_ORACLE_PRICE] {
+            assert_no_cpi_tiny_exit_accepts_extreme_reported_price(path, reported_price);
+            assert_no_cpi_tiny_open_accepts_extreme_reported_price(path, reported_price);
+        }
+    }
+}
+
+// is reduced to what the capped fee actually pays for.
+#[test]
+fn v16_program_nocpi_extreme_price_caps_ewma_move_without_dos() {
+    for path in [
+        NoCpiReportedPricePath::Single,
+        NoCpiReportedPricePath::Batch,
+    ] {
+        for reported_price in [1, percolator::MAX_ORACLE_PRICE] {
+            assert_no_cpi_extreme_reported_price_caps_paid_ewma_move(path, reported_price);
+        }
+    }
+}
+
+// the fee is computed on the mark, so the matcher's price-quoting knobs (spread) cannot change the fee.
+#[test]
+fn v16_program_tradecpi_fee_is_mark_pinned_not_matcher_quoted() {
+    let fee_for_spread = |base_spread: u32, max_total: u32| -> u128 {
+        let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+            trade_fee_base_bps: 100,
+            ..V16CuMarketParams::default()
+        });
+        let matcher_program = Pubkey::new_unique();
+        let matcher_bytes = std::fs::read(matcher_program_path()).expect("read matcher BPF");
+        env.svm.add_program(matcher_program, &matcher_bytes);
+        let to = Keypair::new();
+        let t = env.create_portfolio(&to);
+        let mo = Keypair::new();
+        let m = env.create_portfolio(&mo);
+        env.deposit(&to, t, 100_000_000);
+        env.deposit(&mo, m, 100_000_000);
+        let (ctx, del, _) = env.init_matcher_context_with_passive_spread_authorized(
+            matcher_program,
+            &mo,
+            m,
+            base_spread,
+            max_total,
+        );
+        let ins0 = env.market_state().1.insurance;
+        let _ = env.trade_cpi_with_cu_on_asset(
+            &to,
+            t,
+            &mo,
+            m,
+            matcher_program,
+            ctx,
+            del,
+            0,
+            (10 * POS_SCALE) as i128,
+            100,
+        );
+        // entry is at the mark (effective_price==100) regardless of the matcher's spread.
+        assert_eq!(
+            env.market_state().1.assets[0].effective_price,
+            100,
+            "position priced at the mark"
+        );
+        assert_eq!(
+            env.portfolio_state(t).pnl.get(),
+            0,
+            "no off-market PnL from the matcher quote"
+        );
+        env.market_state().1.insurance - ins0
+    };
+    // fee at the mark (no spread): 10*POS_SCALE @ 100 = notional 1000 -> 100bps -> 10/side -> 20 total.
+    let fee_no_spread = fee_for_spread(0, 100);
+    assert_eq!(fee_no_spread, 20, "baseline CPI fee is the mark-based fee");
+    // a WIDE matcher spread (20%) charges the IDENTICAL fee -> the fee is on the mark, NOT the matcher's
+    // (potentially manipulated) exec_price. A malicious matcher cannot under-bill the CPI fee.
+    assert_eq!(
+        fee_for_spread(2_000, 4_000),
+        fee_no_spread,
+        "matcher spread does not change the CPI fee (mark-pinned)"
+    );
+    assert_eq!(
+        fee_for_spread(500, 1_000),
+        fee_no_spread,
+        "fee invariant to a moderate spread too"
+    );
+}
+
+// per-slot cap. Complements #10533 with the EWMA mode.
+#[test]
+fn v16_program_ewma_mark_respects_per_slot_circuit_breaker() {
+    const INITIAL_PRICE: u64 = 1_000_000;
+    const MOVE_BPS: u64 = 1_000; // 10% / slot circuit breaker
+    let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+        initial_price: INITIAL_PRICE,
+        max_price_move_bps_per_slot: MOVE_BPS,
+        max_accrual_dt_slots: 1,
+        max_abs_funding_e9_per_slot: 1_000,
+        min_funding_lifetime_slots: 1,
+        ..V16CuMarketParams::default()
+    });
+    env.svm.warp_to_slot(0);
+    // EWMA mark mode with an aggressive halflife (1 slot) so the smoothed target races toward any push.
+    env.configure_ewma_mark_with_cu(0, INITIAL_PRICE, 1, 0);
+    let lo_owner = Keypair::new();
+    let lo = env.create_portfolio(&lo_owner);
+    let sh_owner = Keypair::new();
+    let sh = env.create_portfolio(&sh_owner);
+    env.deposit(&lo_owner, lo, 50_000_000);
+    env.deposit(&sh_owner, sh, 50_000_000);
+    // open matched OI so equity is active (the move gate at v16.rs:8060 only fires when equity_active).
+    env.trade_asset_with_cu(
+        0,
+        &lo_owner,
+        lo,
+        &sh_owner,
+        sh,
+        POS_SCALE as i128,
+        INITIAL_PRICE,
+        0,
+    );
+
+    let mut prev_price = INITIAL_PRICE;
+    // push the EWMA mark to 100x EVERY slot and crank; the effective price must never jump past the cap.
+    for slot in 1..=4u64 {
+        env.svm.warp_to_slot(slot);
+        env.push_ewma_mark_with_cu(slot, INITIAL_PRICE * 100); // 100,000,000 — 100x
+        env.svm.expire_blockhash();
+        // crank may succeed (clamped move) or be refused (RecoveryRequired) — either way price is bounded.
+        let _ = env.send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: slot,
+                observations: crank_observations(0),
+            },
+            vec![
+                AccountMeta::new(env.payer.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(lo, false),
+            ],
+            &[],
+        );
+        let g = env.market_state().1;
+        let ep = g.assets[0].effective_price;
+        // PER-SLOT CAP: the move from the previous settled price is at most MOVE_BPS (10%); a small
+        // tolerance covers rounding in the EWMA target. The mark authority CANNOT jump the price 100x.
+        let cap = prev_price + prev_price * (MOVE_BPS + 1) / 10_000;
+        assert!(
+            ep <= cap,
+            "slot {}: effective price {} clamped to <= per-slot cap {} (prev {})",
+            slot,
+            ep,
+            cap,
+            prev_price
+        );
+        prev_price = ep;
+        assert!(
+            g.vault >= g.c_tot + g.insurance,
+            "senior conservation under clamped EWMA move"
+        );
+        assert_eq!(
+            g.vault as u64,
+            env.token_amount(env.vault),
+            "accounting vault == real on-chain vault"
+        );
+    }
+    // NON-VACUITY + the headline: after FOUR slots of pushing to 100,000,000, the effective settlement
+    // price is still nowhere near it — the EWMA mode did NOT bypass the circuit breaker.
+    let final_price = env.market_state().1.assets[0].effective_price;
+    assert!(final_price < INITIAL_PRICE * 2, "after 4 clamped slots the price ({}) is far below the 100x push (circuit breaker held across EWMA mode)", final_price);
+    // NON-VACUITY: the price DID move toward the push (the clamp throttled a real move, it wasn't a no-op).
+    assert!(
+        final_price > INITIAL_PRICE,
+        "the EWMA mark actually moved the price (clamped, not frozen): {} > {}",
+        final_price,
+        INITIAL_PRICE
+    );
+}
+
+// hyperp-index Bug #9 fix, which has its own test.)
+#[test]
+fn v16_program_push_ewma_mark_same_slot_does_not_compound() {
+    let mut env = V16CuEnv::new();
+    env.configure_ewma_mark_with_cu(1, 100, 10, 0); // asset 0 EWMA, mark 100, halflife 10
+    env.svm.warp_to_slot(5);
+    env.svm.expire_blockhash();
+    env.push_ewma_mark_with_cu(5, 1000); // push toward 1000 -> partial (alpha) move, not a jump
+    let m1 = env.market_state().0.mark_ewma_e6;
+    assert!(
+        m1 > 100 && m1 < 1000,
+        "first push moves EWMA partially toward target (no instant jump): {m1}"
+    );
+    // SECOND push, SAME slot, same target: dt==0 -> must NOT move (no compounding).
+    env.svm.expire_blockhash();
+    env.push_ewma_mark_with_cu(5, 1000);
+    let m2 = env.market_state().0.mark_ewma_e6;
+    assert_eq!(
+        m2, m1,
+        "same-slot repeated PushEwmaMark must not compound (dt==0 -> no movement)"
+    );
+    // a genuine slot advance resumes movement (time-gated, not frozen).
+    env.svm.warp_to_slot(6);
+    env.svm.expire_blockhash();
+    env.push_ewma_mark_with_cu(6, 1000);
+    let m3 = env.market_state().0.mark_ewma_e6;
+    assert!(
+        m3 > m2,
+        "advancing a slot resumes EWMA movement: {m3} vs {m2}"
+    );
+}
+
+// security.md sweep — oracle/mark bounds (#37/#39): the auth-mark push feeds settlement. An extreme
+// mark (0 or u64::MAX) must be rejected/clamped, never corrupt pnl or panic the program.
+#[test]
+fn v16_attack_extreme_auth_mark_push_rejected_or_safe() {
+    let mut env = V16CuEnv::new();
+    env.configure_auth_mark_with_cu(0, 100);
+    let lo_owner = Keypair::new();
+    let lo = env.create_portfolio(&lo_owner);
+    let sh_owner = Keypair::new();
+    let sh = env.create_portfolio(&sh_owner);
+    env.deposit(&lo_owner, lo, 1_000_000);
+    env.deposit(&sh_owner, sh, 1_000_000);
+    env.trade_asset_with_cu(0, &lo_owner, lo, &sh_owner, sh, POS_SCALE as i128, 100, 0);
+    env.svm.warp_to_slot(5);
+    // push extreme marks; each must reject or be clamped — never panic, never corrupt state.
+    for mark in [0u64, 1, u64::MAX, u64::MAX / 2] {
+        env.svm.expire_blockhash();
+        let _ = send_tx(
+            &mut env.svm,
+            env.program_id,
+            &env.payer,
+            ProgInstruction::PushAuthMark {
+                market_id: 0,
+                observation_sequence: u64::MAX,
+                asset_index: 0,
+                now_slot: 5,
+                mark_e6: mark,
+            },
+            vec![
+                AccountMeta::new(env.admin.pubkey(), true),
+                AccountMeta::new(env.market, false),
+            ],
+            &[&env.admin],
+        ); // ignore Err; we only require no panic + conservation
+           // crank against whatever mark landed; must not corrupt conservation.
+        env.svm.expire_blockhash();
+        let _ = env.send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 5,
+                observations: crank_observations(0),
+            },
+            vec![
+                AccountMeta::new(env.payer.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(lo, false),
+            ],
+            &[],
+        );
+        let (_, g) = env.market_state();
+        assert_eq!(
+            g.vault, 2_000_000,
+            "vault intact under extreme mark {}",
+            mark
+        );
+        assert!(
+            g.vault >= g.c_tot + g.insurance,
+            "senior conservation under extreme mark {}",
+            mark
+        );
+        assert!(
+            g.assets[0].effective_price > 0
+                && g.assets[0].effective_price <= percolator::MAX_ORACLE_PRICE,
+            "effective price stays in valid bounds under extreme mark {} (got {})",
+            mark,
+            g.assets[0].effective_price
+        );
+    }
+    // state still decodes and positions intact (no corruption). Vault holds exactly the deposits
+    // (checked per-iteration); accounted equity + insurance never EXCEEDS the vault (the small
+    // difference is the in-vault §6.2 residual buffer, not lost value).
+    let a = state::read_portfolio(&env.svm.get_account(&lo).unwrap().data).unwrap();
+    let b = state::read_portfolio(&env.svm.get_account(&sh).unwrap().data).unwrap();
+    let accounted = (a.capital.get() as i128 + a.pnl.get())
+        + (b.capital.get() as i128 + b.pnl.get())
+        + env.market_state().1.insurance as i128;
+    assert!(
+        accounted <= 2_000_000,
+        "no value created by extreme mark pushes (accounted {})",
+        accounted
+    );
+    assert!(
+        accounted >= 2_000_000 - 1_000,
+        "value not materially destroyed; remainder is in-vault residual (accounted {})",
+        accounted
+    );
+}
+
+// security.md sweep — circuit breaker on mark push (#9 oracle manipulation): a push to a far-away
+// mark must move the effective price by at most max_price_move_bps_per_slot per slot. An attacker
+// (mark authority) cannot jump the settlement price arbitrarily in one slot.
+#[test]
+fn v16_attack_mark_push_clamped_per_slot() {
+    let mut env = V16CuEnv::new(); // max_price_move_bps_per_slot = 10_000 (100%/slot)
+    env.configure_auth_mark_with_cu(0, 100);
+    let lo_owner = Keypair::new();
+    let lo = env.create_portfolio(&lo_owner);
+    let sh_owner = Keypair::new();
+    let sh = env.create_portfolio(&sh_owner);
+    env.deposit(&lo_owner, lo, 1_000_000);
+    env.deposit(&sh_owner, sh, 1_000_000);
+    env.trade_asset_with_cu(0, &lo_owner, lo, &sh_owner, sh, POS_SCALE as i128, 100, 0);
+    let mut prev_price = 100u64;
+    for slot in [10u64, 11, 12] {
+        env.svm.warp_to_slot(slot);
+        env.push_auth_mark_with_cu(slot, 1_000_000); // push to a huge mark (10000x) every slot
+        env.svm.expire_blockhash();
+        let _ = env.send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: slot,
+                observations: crank_observations(0),
+            },
+            vec![
+                AccountMeta::new(env.payer.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(lo, false),
+            ],
+            &[],
+        );
+        let (_, g) = env.market_state();
+        let ep = g.assets[0].effective_price;
+        // the per-slot move is clamped to <= 100% (price at most doubles per slot).
+        assert!(
+            ep <= prev_price * 2,
+            "slot {}: effective price {} clamped to <= 2x prev {} (circuit breaker)",
+            slot,
+            ep,
+            prev_price
+        );
+        assert!(
+            ep > prev_price,
+            "slot {}: price moved toward the pushed mark (non-vacuous)",
+            slot
+        );
+        prev_price = ep;
+        assert!(
+            g.vault >= g.c_tot + g.insurance,
+            "senior conservation under clamped move"
+        );
+    }
+    // even after 3 slots of pushing to 1,000,000, the effective price is nowhere near it (clamped).
+    let (_, g) = env.market_state();
+    assert!(
+        g.assets[0].effective_price <= 800,
+        "after 3 clamped slots, price is far below the 1,000,000 push (got {})",
+        g.assets[0].effective_price
+    );
+}
+
+// security.md sweep — EWMA mark halflife edge (#37): configuring the EWMA mark with halflife 0
+// (instant) must be handled cleanly — no div-by-zero/panic, no settlement corruption. The mark/price
+// stays in valid bounds and conservation holds.
+#[test]
+fn v16_attack_ewma_mark_halflife_zero_safe() {
+    let mut env = V16CuEnv::new();
+    // configure with halflife = 0 (instant). If accepted, settlement must stay safe.
+    let r = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::ConfigureEwmaMark {
+            market_id: 0,
+            observation_sequence: u64::MAX,
+            asset_index: 0,
+            now_slot: 0,
+            initial_mark_e6: 100,
+            mark_ewma_halflife_slots: 0,
+            mark_min_fee: 0,
+        },
+        vec![
+            AccountMeta::new(env.admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&env.admin],
+    );
+    let lo = Keypair::new();
+    let plo = env.create_portfolio(&lo);
+    let sh = Keypair::new();
+    let psh = env.create_portfolio(&sh);
+    env.deposit(&lo, plo, 1_000_000);
+    env.deposit(&sh, psh, 1_000_000);
+    env.trade_with_cu(&lo, plo, &sh, psh, POS_SCALE as i128, 100, 0);
+    // if the halflife=0 config was accepted, push a mark and crank — must not panic/corrupt.
+    if r.is_ok() {
+        env.svm.warp_to_slot(1);
+        env.push_ewma_mark_with_cu(1, 150);
+        for slot in [1u64, 2] {
+            env.svm.warp_to_slot(slot);
+            for p in [psh, plo] {
+                env.svm.expire_blockhash();
+                let _ = env.send(
+                    ProgInstruction::PermissionlessCrank {
+                        now_slot: slot,
+                        observations: crank_observations(0),
+                    },
+                    vec![
+                        AccountMeta::new(env.payer.pubkey(), true),
+                        AccountMeta::new(env.market, false),
+                        AccountMeta::new(p, false),
+                    ],
+                    &[],
+                );
+            }
+        }
+    }
+    // regardless of accept/reject: no corruption, state decodes, conservation holds, price in bounds.
+    let (_, g) = env.market_state();
+    assert_eq!(g.vault, 2_000_000, "vault intact");
+    assert_eq!(
+        g.vault as u64,
+        env.token_amount(env.vault),
+        "accounting == real vault"
+    );
+    assert!(g.vault >= g.c_tot + g.insurance, "senior conservation");
+    assert!(
+        g.assets[0].effective_price > 0
+            && g.assets[0].effective_price <= percolator::MAX_ORACLE_PRICE,
+        "price in valid bounds (no corruption)"
+    );
+    let _ = r;
+}
+
+// security.md sweep — EWMA-mark mode respects the per-slot circuit breaker (#6/#9/#37): the auth-mark
+// test (#10533) proves AUTH_MARK clamps to <= max_price_move_bps_per_slot; EWMA_MARK is a SEPARATE
+// pricing mode (halflife smoothing toward a pushed mark) and could, if the clamp lived only in the
+// auth-mark path, let the mark authority move the effective settlement price arbitrarily fast in one
+// slot. Attacker goal: as mark authority, push the EWMA mark to 100x and have the NEXT crank settle the
+// effective price (used for liquidation/funding/PnL) at the full 100x in a single slot. Protection: the
+// per-slot move gate is mode-INDEPENDENT — it lives in accrue_asset_to_not_atomic (percolator/src/v16.rs:
+// 8052: price_diff*MAX_MARGIN_BPS <= max_price_move_bps_per_slot*segment_dt*old_price, else RecoveryRequired),
+// so an EWMA push beyond the budget either clamps or is refused; the effective price cannot jump past the
+// security.md sweep — crank dt-clamp prevents retroactive one-shot settlement after a long gap (#9/#22):
+// the per-crank segment is clamped to max_accrual_dt_slots (percolator/src/v16.rs:8037), and a crank
+// advances slot_last by only that clamped segment (v16.rs:8089), NOT all the way to now_slot. This dt is
+// the multiplier on EVERY time-scaled accrual (funding: v16.rs:8072 funding_rate*segment_dt*price; and the
+// price-move budget: v16.rs:8057 cap*segment_dt). Attacker goal: leave the market un-cranked for a long
+// time so a large accrual window builds up, then fire ONE crank to retroactively settle the FULL elapsed
+// window in a single shot — a one-block funding windfall to the favoured side, or a surprise margin blow-up
+// of the other side that skips the per-slot price-move circuit breaker. Protection: each crank settles at
+// most max_accrual_dt_slots; slot_last creeps forward by the clamp per crank, so catch-up is bounded and
+// many cranks (each itself re-clamped) are required to close the gap — no one-shot retroactive settlement.
+// (Not covered by the conservation tests, which all crank every slot so dt is always 1.)
+#[test]
+fn v16_attack_crank_dt_clamp_blocks_retroactive_settle() {
+    const INITIAL_PRICE: u64 = 1_000_000;
+    const DT_CLAMP: u64 = 3; // max_accrual_dt_slots
+    let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+        initial_price: INITIAL_PRICE,
+        max_price_move_bps_per_slot: 1_000,
+        max_accrual_dt_slots: DT_CLAMP,
+        max_abs_funding_e9_per_slot: 1_000,
+        min_funding_lifetime_slots: DT_CLAMP, // lifetime >= accrual window (config validity)
+        ..V16CuMarketParams::default()
+    });
+    env.svm.warp_to_slot(0);
+    env.configure_ewma_mark_with_cu(0, INITIAL_PRICE, 1, 0);
+    let lo_owner = Keypair::new();
+    let lo = env.create_portfolio(&lo_owner);
+    let sh_owner = Keypair::new();
+    let sh = env.create_portfolio(&sh_owner);
+    env.deposit(&lo_owner, lo, 50_000_000);
+    env.deposit(&sh_owner, sh, 50_000_000);
+    env.trade_asset_with_cu(
+        0,
+        &lo_owner,
+        lo,
+        &sh_owner,
+        sh,
+        POS_SCALE as i128,
+        INITIAL_PRICE,
+        0,
+    );
+    let slot_last_0 = env.market_state().1.assets[0].slot_last;
+    assert_eq!(
+        slot_last_0, 0,
+        "asset starts settled at slot 0 (open position is live)"
+    );
+
+    // ATTACK: leave the market UNCRANKED for a huge window, then fire ONE crank that tries to settle it all.
+    const GAP_SLOT: u64 = 500;
+    env.svm.warp_to_slot(GAP_SLOT);
+    env.svm.expire_blockhash();
+    let r = env.send(
+        ProgInstruction::PermissionlessCrank {
+            now_slot: GAP_SLOT,
+            observations: crank_observations(0),
+        },
+        vec![
+            AccountMeta::new(env.payer.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(lo, false),
+        ],
+        &[],
+    );
+    assert!(r.is_ok(), "the catch-up crank itself succeeds: {:?}", r);
+
+    let g1 = env.market_state().1;
+    // ANTI-RETROACTIVITY (the headline): the settled segment is the dt CLAMP (3), NOT the 500-slot gap.
+    // A naive retroactive settle would jump slot_last to 500 and apply ~166x the funding/move budget in one
+    // block; the clamp holds the advance to exactly max_accrual_dt_slots.
+    assert_eq!(
+        g1.assets[0].slot_last,
+        slot_last_0 + DT_CLAMP,
+        "one crank settles only max_accrual_dt_slots ({}), NOT the full {}-slot gap (slot_last={})",
+        DT_CLAMP,
+        GAP_SLOT,
+        g1.assets[0].slot_last
+    );
+    assert!(GAP_SLOT > 50 * DT_CLAMP, "non-vacuous: the elapsed gap ({}) dwarfs the clamp ({}) — the clamp is the binding constraint", GAP_SLOT, DT_CLAMP);
+    assert_eq!(
+        g1.current_slot, GAP_SLOT,
+        "header current_slot advances to now (the asset is intentionally left 'behind' by design)"
+    );
+    // conservation: whatever was settled is internal redistribution; nothing minted.
+    assert_eq!(
+        g1.vault, 100_000_000,
+        "vault unchanged (settlement mints nothing)"
+    );
+    assert_eq!(
+        g1.vault as u64,
+        env.token_amount(env.vault),
+        "accounting vault == real on-chain vault"
+    );
+    assert!(
+        g1.vault >= g1.c_tot + g1.insurance,
+        "senior conservation under the clamped catch-up"
+    );
+
+    // A SECOND crank at the same now_slot advances slot_last by ANOTHER clamp window — catch-up is bounded
+    // PER crank, so closing a 500-slot gap needs ~167 separately-clamped cranks, each re-subject to the
+    // per-slot price-move circuit breaker. There is no single transaction that settles the whole window.
+    env.svm.expire_blockhash();
+    let r2 = env.send(
+        ProgInstruction::PermissionlessCrank {
+            now_slot: GAP_SLOT,
+            observations: crank_observations(0),
+        },
+        vec![
+            AccountMeta::new(env.payer.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(lo, false),
+        ],
+        &[],
+    );
+    assert!(r2.is_ok(), "second catch-up crank succeeds: {:?}", r2);
+    let g2 = env.market_state().1;
+    assert_eq!(
+        g2.assets[0].slot_last,
+        slot_last_0 + 2 * DT_CLAMP,
+        "second crank advances another clamp window (bounded per-crank catch-up)"
+    );
+    assert!(g2.assets[0].slot_last < GAP_SLOT, "even after two cranks the asset is still far short of the gap (catch-up is throttled, not instant)");
+    assert!(
+        g2.vault >= g2.c_tot + g2.insurance,
+        "senior conservation after second crank"
+    );
 }

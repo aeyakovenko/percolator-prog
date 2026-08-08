@@ -741,8 +741,12 @@ impl V16Svm {
         let owner = copy_keypair(&actor.signer);
         let portfolio = actor.portfolio;
         let source = actor.source_token;
+        let portfolio_id = self.primary_portfolio_id(actor_index);
         self.send_program(
-            ProgInstruction::Deposit { amount },
+            ProgInstruction::Deposit {
+                portfolio_id,
+                amount,
+            },
             vec![
                 AccountMeta::new(owner.pubkey(), true),
                 AccountMeta::new(self.market, false),
@@ -757,8 +761,12 @@ impl V16Svm {
 
     fn deposit_foreign(&mut self, amount: u128) -> Result<TxSuccess, String> {
         let owner = copy_keypair(&self.foreign_actor.signer);
+        let portfolio_id = self.foreign_portfolio_id();
         self.send_program(
-            ProgInstruction::Deposit { amount },
+            ProgInstruction::Deposit {
+                portfolio_id,
+                amount,
+            },
             vec![
                 AccountMeta::new(owner.pubkey(), true),
                 AccountMeta::new(self.foreign_market, false),
@@ -773,8 +781,12 @@ impl V16Svm {
 
     pub fn withdraw_foreign(&mut self, amount: u128) -> Result<TxSuccess, String> {
         let owner = copy_keypair(&self.foreign_actor.signer);
+        let portfolio_id = self.foreign_portfolio_id();
         self.send_program(
-            ProgInstruction::Withdraw { amount },
+            ProgInstruction::Withdraw {
+                portfolio_id,
+                amount,
+            },
             vec![
                 AccountMeta::new(owner.pubkey(), true),
                 AccountMeta::new(self.foreign_market, false),
@@ -795,8 +807,12 @@ impl V16Svm {
     ) -> Result<TxSuccess, String> {
         let actor = &self.actors[actor_index];
         let owner = copy_keypair(&actor.signer);
+        let portfolio_id = self.primary_portfolio_id(actor_index);
         self.send_program(
-            ProgInstruction::Withdraw { amount },
+            ProgInstruction::Withdraw {
+                portfolio_id,
+                amount,
+            },
             vec![
                 AccountMeta::new(owner.pubkey(), true),
                 AccountMeta::new(self.market, false),
@@ -813,8 +829,9 @@ impl V16Svm {
     pub fn close_primary_portfolio(&mut self, actor_index: usize) -> Result<TxSuccess, String> {
         let actor = &self.actors[actor_index];
         let owner = copy_keypair(&actor.signer);
+        let portfolio_id = self.primary_portfolio_id(actor_index);
         self.send_program(
-            ProgInstruction::ClosePortfolio,
+            ProgInstruction::ClosePortfolio { portfolio_id },
             vec![
                 AccountMeta::new(owner.pubkey(), true),
                 AccountMeta::new(self.market, false),
@@ -827,8 +844,9 @@ impl V16Svm {
     pub fn build_retained_close_primary_portfolio(&mut self, actor_index: usize) -> Transaction {
         let actor = &self.actors[actor_index];
         let owner = copy_keypair(&actor.signer);
+        let portfolio_id = self.primary_portfolio_id(actor_index);
         self.build_program_transaction(
-            ProgInstruction::ClosePortfolio,
+            ProgInstruction::ClosePortfolio { portfolio_id },
             vec![
                 AccountMeta::new(owner.pubkey(), true),
                 AccountMeta::new(self.market, false),
@@ -871,6 +889,14 @@ impl V16Svm {
     pub fn primary_portfolio_id(&self, actor_index: usize) -> u64 {
         let data = self.primary_portfolio_data(actor_index);
         state::read_portfolio_id(&data).expect("decode primary portfolio id")
+    }
+
+    pub fn foreign_portfolio_id(&self) -> u64 {
+        let account = self
+            .svm
+            .get_account(&self.foreign_actor.portfolio)
+            .expect("foreign portfolio account");
+        state::read_portfolio_id(&account.data).expect("decode foreign portfolio id")
     }
 
     pub fn primary_portfolio_position_epoch(&self, actor_index: usize) -> u64 {
@@ -1082,8 +1108,12 @@ impl V16Svm {
     ) -> Result<TxSuccess, String> {
         let actor = &self.actors[actor_index];
         let owner = copy_keypair(&actor.signer);
+        let portfolio_id = self.primary_portfolio_id(actor_index);
         self.send_program(
-            ProgInstruction::ConvertReleasedPnl { amount },
+            ProgInstruction::ConvertReleasedPnl {
+                portfolio_id,
+                amount,
+            },
             vec![
                 AccountMeta::new(owner.pubkey(), true),
                 AccountMeta::new(self.market, false),
@@ -1163,10 +1193,14 @@ impl V16Svm {
         fee_bps: u64,
     ) -> Result<TxSuccess, String> {
         let market_id = self.primary_market_state().1.assets[asset_index as usize].market_id;
+        let account_a_portfolio_id = self.primary_portfolio_id(taker);
+        let account_b_portfolio_id = self.primary_portfolio_id(maker);
         let taker_owner = copy_keypair(&self.actors[taker].signer);
         let maker_owner = copy_keypair(&self.actors[maker].signer);
         self.send_program(
             ProgInstruction::TradeNoCpi {
+                account_a_portfolio_id,
+                account_b_portfolio_id,
                 asset_index,
                 market_id,
                 size_q,
@@ -1190,10 +1224,16 @@ impl V16Svm {
         maker: usize,
         legs: Vec<BatchTradeLeg>,
     ) -> Result<TxSuccess, String> {
+        let account_a_portfolio_id = self.primary_portfolio_id(taker);
+        let account_b_portfolio_id = self.primary_portfolio_id(maker);
         let taker_owner = copy_keypair(&self.actors[taker].signer);
         let maker_owner = copy_keypair(&self.actors[maker].signer);
         self.send_program(
-            ProgInstruction::BatchTradeNoCpi { legs },
+            ProgInstruction::BatchTradeNoCpi {
+                account_a_portfolio_id,
+                account_b_portfolio_id,
+                legs,
+            },
             vec![
                 AccountMeta::new(taker_owner.pubkey(), true),
                 AccountMeta::new(maker_owner.pubkey(), true),
@@ -1215,10 +1255,14 @@ impl V16Svm {
         limit_price: u64,
     ) -> Result<TxSuccess, String> {
         let market_id = self.primary_market_state().1.assets[asset_index as usize].market_id;
+        let account_a_portfolio_id = self.primary_portfolio_id(taker);
+        let account_b_portfolio_id = self.primary_portfolio_id(maker);
         let taker_owner = copy_keypair(&self.actors[taker].signer);
         let binding = &self.actors[maker];
         self.send_program(
             ProgInstruction::TradeCpi {
+                account_a_portfolio_id,
+                account_b_portfolio_id,
                 asset_index,
                 market_id,
                 size_q,
@@ -1244,10 +1288,16 @@ impl V16Svm {
         maker: usize,
         legs: Vec<BatchTradeCpiLeg>,
     ) -> Result<TxSuccess, String> {
+        let account_a_portfolio_id = self.primary_portfolio_id(taker);
+        let account_b_portfolio_id = self.primary_portfolio_id(maker);
         let taker_owner = copy_keypair(&self.actors[taker].signer);
         let binding = &self.actors[maker];
         self.send_program(
-            ProgInstruction::BatchTradeCpi { legs },
+            ProgInstruction::BatchTradeCpi {
+                account_a_portfolio_id,
+                account_b_portfolio_id,
+                legs,
+            },
             vec![
                 AccountMeta::new(taker_owner.pubkey(), true),
                 AccountMeta::new(self.market, false),
@@ -2603,10 +2653,14 @@ impl V16Svm {
         size_q: i128,
     ) -> Result<TxSuccess, String> {
         let market_id = self.primary_market_state().1.assets[0].market_id;
+        let account_a_portfolio_id = self.primary_portfolio_id(actor_index);
+        let account_b_portfolio_id = self.foreign_portfolio_id();
         let primary_owner = copy_keypair(&self.actors[actor_index].signer);
         let foreign_owner = copy_keypair(&self.foreign_actor.signer);
         self.send_program(
             ProgInstruction::TradeNoCpi {
+                account_a_portfolio_id,
+                account_b_portfolio_id,
                 asset_index: 0,
                 market_id,
                 size_q,
@@ -2631,8 +2685,12 @@ impl V16Svm {
     ) -> Result<TxSuccess, String> {
         let actor = &self.actors[actor_index];
         let owner = copy_keypair(&actor.signer);
+        let portfolio_id = self.primary_portfolio_id(actor_index);
         self.send_program(
-            ProgInstruction::Deposit { amount },
+            ProgInstruction::Deposit {
+                portfolio_id,
+                amount,
+            },
             vec![
                 AccountMeta::new(owner.pubkey(), true),
                 AccountMeta::new(self.market, false),
@@ -2652,8 +2710,12 @@ impl V16Svm {
     ) -> Result<TxSuccess, String> {
         let actor = &self.actors[actor_index];
         let owner = copy_keypair(&actor.signer);
+        let portfolio_id = self.primary_portfolio_id(actor_index);
         self.send_program(
-            ProgInstruction::Withdraw { amount },
+            ProgInstruction::Withdraw {
+                portfolio_id,
+                amount,
+            },
             vec![
                 AccountMeta::new(owner.pubkey(), true),
                 AccountMeta::new(self.market, false),
@@ -2692,11 +2754,15 @@ impl V16Svm {
         substituted_binding: usize,
     ) -> Result<TxSuccess, String> {
         let market_id = self.primary_market_state().1.assets[0].market_id;
+        let account_a_portfolio_id = self.primary_portfolio_id(taker);
+        let account_b_portfolio_id = self.primary_portfolio_id(maker);
         let taker_owner = copy_keypair(&self.actors[taker].signer);
         let maker_portfolio = self.actors[maker].portfolio;
         let binding = &self.actors[substituted_binding];
         self.send_program(
             ProgInstruction::TradeCpi {
+                account_a_portfolio_id,
+                account_b_portfolio_id,
                 asset_index: 0,
                 market_id,
                 size_q: POS_SCALE as i128 / 4,
@@ -2734,8 +2800,12 @@ impl V16Svm {
     ) -> Transaction {
         let actor = &self.actors[actor_index];
         let owner = copy_keypair(&actor.signer);
+        let portfolio_id = self.primary_portfolio_id(actor_index);
         self.build_program_transaction(
-            ProgInstruction::ConvertReleasedPnl { amount },
+            ProgInstruction::ConvertReleasedPnl {
+                portfolio_id,
+                amount,
+            },
             vec![
                 AccountMeta::new(owner.pubkey(), true),
                 AccountMeta::new(self.market, false),
@@ -2807,10 +2877,14 @@ impl V16Svm {
         fee_bps: u64,
     ) -> Transaction {
         let market_id = self.primary_market_state().1.assets[asset_index as usize].market_id;
+        let account_a_portfolio_id = self.primary_portfolio_id(taker);
+        let account_b_portfolio_id = self.primary_portfolio_id(maker);
         let taker_owner = copy_keypair(&self.actors[taker].signer);
         let maker_owner = copy_keypair(&self.actors[maker].signer);
         self.build_program_transaction(
             ProgInstruction::TradeNoCpi {
+                account_a_portfolio_id,
+                account_b_portfolio_id,
                 asset_index,
                 market_id,
                 size_q,
@@ -2831,8 +2905,12 @@ impl V16Svm {
     pub fn build_retained_withdrawal(&mut self, actor_index: usize, amount: u128) -> Transaction {
         let actor = &self.actors[actor_index];
         let owner = copy_keypair(&actor.signer);
+        let portfolio_id = self.primary_portfolio_id(actor_index);
         self.build_program_transaction(
-            ProgInstruction::Withdraw { amount },
+            ProgInstruction::Withdraw {
+                portfolio_id,
+                amount,
+            },
             vec![
                 AccountMeta::new(owner.pubkey(), true),
                 AccountMeta::new(self.market, false),
@@ -2914,8 +2992,12 @@ impl V16Svm {
     pub fn build_retained_deposit(&mut self, actor_index: usize, amount: u128) -> Transaction {
         let actor = &self.actors[actor_index];
         let owner = copy_keypair(&actor.signer);
+        let portfolio_id = self.primary_portfolio_id(actor_index);
         self.build_program_transaction(
-            ProgInstruction::Deposit { amount },
+            ProgInstruction::Deposit {
+                portfolio_id,
+                amount,
+            },
             vec![
                 AccountMeta::new(owner.pubkey(), true),
                 AccountMeta::new(self.market, false),
@@ -2937,10 +3019,14 @@ impl V16Svm {
         limit_price: u64,
     ) -> Transaction {
         let market_id = self.primary_market_state().1.assets[asset_index as usize].market_id;
+        let account_a_portfolio_id = self.primary_portfolio_id(taker);
+        let account_b_portfolio_id = self.primary_portfolio_id(maker);
         let taker_owner = copy_keypair(&self.actors[taker].signer);
         let binding = &self.actors[maker];
         self.build_program_transaction(
             ProgInstruction::TradeCpi {
+                account_a_portfolio_id,
+                account_b_portfolio_id,
                 asset_index,
                 market_id,
                 size_q,
@@ -2988,10 +3074,14 @@ impl V16Svm {
         fee_bps: u64,
     ) -> Transaction {
         let market_id = self.primary_market_state().1.assets[asset_index as usize].market_id;
+        let account_a_portfolio_id = self.primary_portfolio_id(taker);
+        let account_b_portfolio_id = self.primary_portfolio_id(maker);
         let taker_owner = copy_keypair(&self.actors[taker].signer);
         let maker_owner = copy_keypair(&self.actors[maker].signer);
         self.build_program_transaction(
             ProgInstruction::BatchTradeNoCpi {
+                account_a_portfolio_id,
+                account_b_portfolio_id,
                 legs: vec![BatchTradeLeg {
                     asset_index,
                     market_id,
@@ -3020,10 +3110,14 @@ impl V16Svm {
         limit_price: u64,
     ) -> Transaction {
         let market_id = self.primary_market_state().1.assets[asset_index as usize].market_id;
+        let account_a_portfolio_id = self.primary_portfolio_id(taker);
+        let account_b_portfolio_id = self.primary_portfolio_id(maker);
         let taker_owner = copy_keypair(&self.actors[taker].signer);
         let binding = &self.actors[maker];
         self.build_program_transaction(
             ProgInstruction::BatchTradeCpi {
+                account_a_portfolio_id,
+                account_b_portfolio_id,
                 legs: vec![BatchTradeCpiLeg {
                     asset_index,
                     market_id,

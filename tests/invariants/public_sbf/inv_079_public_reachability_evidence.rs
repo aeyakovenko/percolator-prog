@@ -584,6 +584,11 @@ fn v16_invariant_charter_and_index_are_complete() {
         expected,
         "the executable coverage index must account for every normative invariant"
     );
+    assert_eq!(
+        invariant_ids(include_str!("../README.md"), "| AUDIT-"),
+        expected,
+        "the exhaustiveness audit must classify every normative invariant exactly once"
+    );
 }
 
 #[test]

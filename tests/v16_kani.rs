@@ -32,3 +32,12 @@ mod inv_022_instruction_decoding_and_schema_upgrade_safety;
 
 #[path = "invariants/kani/inv_045_no_free_mark_movement.rs"]
 mod inv_045_no_free_mark_movement;
+
+#[path = "invariants/kani/inv_080_error_propagation_and_exact_rollback.rs"]
+mod inv_080_error_propagation_and_exact_rollback;
+
+#[path = "invariants/kani/inv_084_proof_assumptions_are_reachable_and_nonvacuous.rs"]
+mod inv_084_proof_assumptions_are_reachable_and_nonvacuous;
+
+#[path = "invariants/kani/inv_085_proven_arithmetic_equals_deployed_arithmetic.rs"]
+mod inv_085_proven_arithmetic_equals_deployed_arithmetic;

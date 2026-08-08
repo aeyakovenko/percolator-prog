@@ -6,32 +6,28 @@ use support::{
         reproduce_activation_retry_replay, reproduce_authority_handoff_aba_replay,
         reproduce_backing_top_up_retry_replay, reproduce_bilateral_fee_support,
         reproduce_composite_oracle_rounding, reproduce_composite_oracle_time_skew,
-        reproduce_convert_portfolio_incarnation_replay, reproduce_cross_domain_b_settlement,
-        reproduce_cross_domain_backing_double_spend, reproduce_cross_margin_insurance_drain,
-        reproduce_delayed_asset_authority_revival, reproduce_deposit_retry_replay,
-        reproduce_fee_redirect_generation_replay, reproduce_forfeit_funding_erasure,
-        reproduce_forfeit_market_generation_replay, reproduce_forfeit_portfolio_incarnation_replay,
+        reproduce_cross_domain_b_settlement, reproduce_cross_domain_backing_double_spend,
+        reproduce_cross_margin_insurance_drain, reproduce_delayed_asset_authority_revival,
+        reproduce_deposit_retry_replay, reproduce_fee_redirect_generation_replay,
+        reproduce_forfeit_funding_erasure, reproduce_forfeit_market_generation_replay,
         reproduce_fractional_cap_settlement, reproduce_insurance_top_up_retry_replay,
         reproduce_liquidation_policy_generation_replay,
         reproduce_maintenance_policy_generation_replay, reproduce_market_incarnation_deposit,
         reproduce_matcher_grant_market_generation_replay, reproduce_omitted_rescue_liquidation,
         reproduce_pending_ewma_inheritance, reproduce_pending_ewma_target_override,
-        reproduce_pending_mark_fee_reward, reproduce_portfolio_close_incarnation_replay,
-        reproduce_portfolio_incarnation_deposit, reproduce_portfolio_incarnation_withdrawal,
-        reproduce_post_expiry_backing_fee, reproduce_prospective_funding_rewrite,
-        reproduce_rebalance_funding_erasure, reproduce_reclaimable_ewma_fee,
-        reproduce_resolve_authority_incarnation_replay, reproduce_resolve_before_committed_accrual,
-        reproduce_rounded_funding_omission, reproduce_shutdown_generation_replay,
-        reproduce_terminal_dust_payout_erasure, reproduce_trade_driven_liquidation_reward,
-        reproduce_trade_funding_erasure, reproduce_trade_portfolio_incarnation_replay,
+        reproduce_pending_mark_fee_reward, reproduce_post_expiry_backing_fee,
+        reproduce_prospective_funding_rewrite, reproduce_rebalance_funding_erasure,
+        reproduce_reclaimable_ewma_fee, reproduce_resolve_authority_incarnation_replay,
+        reproduce_resolve_before_committed_accrual, reproduce_rounded_funding_omission,
+        reproduce_shutdown_generation_replay, reproduce_terminal_dust_payout_erasure,
+        reproduce_trade_driven_liquidation_reward, reproduce_trade_funding_erasure,
         reproduce_trade_retry_replay, reproduce_unstaged_mark_target,
         reproduce_withdrawal_retry_liquidation, run_scenario, verify_activation_fee_consent,
         verify_bilateral_base_fee_consent, verify_cpi_backing_fee_consent,
         verify_cpi_base_fee_consent, verify_cpi_caller_fee_protection,
-        verify_matcher_grant_portfolio_incarnation_protection,
         verify_trade_fee_market_generation_nonextraction, AuthorityHandoffAbaPath,
-        BilateralFeeMode, CompositeRoundingCase, KnownBlocker, PortfolioIncarnationTradeSide,
-        PostExpiryBackingCase, Scenario, TargetStagingCase, TradeDrivenLiquidationMode, TradeRoute,
+        BilateralFeeMode, CompositeRoundingCase, KnownBlocker, PostExpiryBackingCase, Scenario,
+        TargetStagingCase, TradeDrivenLiquidationMode, TradeRoute,
     },
     invariant_discovery::{
         discover_asset_generation_replay, discover_expired_backing_consumers,
@@ -59,11 +55,17 @@ mod inv_005_authority_incarnation_binding;
 #[path = "invariants/public_sbf/inv_006_program_chain_message_type_and_version_binding.rs"]
 mod inv_006_program_chain_message_type_and_version_binding;
 
+#[path = "invariants/public_sbf/inv_007_no_aba_reuse.rs"]
+mod inv_007_no_aba_reuse;
+
 #[path = "invariants/public_sbf/inv_008_intent_uniqueness_and_bounded_replay.rs"]
 mod inv_008_intent_uniqueness_and_bounded_replay;
 
 #[path = "invariants/public_sbf/inv_014_delayed_policy_and_policy_epoch_safety.rs"]
 mod inv_014_delayed_policy_and_policy_epoch_safety;
+
+#[path = "invariants/public_sbf/inv_015_account_ownership_layout_discriminator_and_length_validity.rs"]
+mod inv_015_account_ownership_layout_discriminator_and_length_validity;
 
 #[path = "invariants/public_sbf/inv_020_authenticated_clock_slot_and_oracle_provenance.rs"]
 mod inv_020_authenticated_clock_slot_and_oracle_provenance;

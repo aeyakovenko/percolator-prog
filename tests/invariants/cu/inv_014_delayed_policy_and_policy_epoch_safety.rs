@@ -7,7 +7,8 @@
 //!
 //! Evidence in this file uses the public SBF instruction boundary. The first
 //! test covers strict monotonicity, gap acceptance, exact rollback, and lane
-//! independence. The second covers cross-mode oracle supersession: EWMA,
+//! independence. Fee-consent coverage proves a post-sign base-fee policy cannot
+//! silently charge either trader beyond the signed fee. The second covers cross-mode oracle supersession: EWMA,
 //! authenticated mark, and hybrid configuration all consume one observation
 //! lane, so switching instruction variants cannot revive stale consent.
 //!
@@ -239,4 +240,48 @@ fn v16_oracle_modes_share_one_supersession_sequence() {
         percolator_prog::constants::ORACLE_MODE_HYBRID_AFTER_HOURS
     );
     assert_eq!(env.control_sequences(0).oracle_observation, 4);
+}
+
+// owner's charge. The default market is manual-priced, so only the configured base fee applies.
+#[test]
+fn v16_program_trade_requires_signed_base_fee_consent() {
+    let mut env = V16CuEnv::new();
+    env.update_trade_fee_policy_with_cu(500); // config base fee = 5%
+    let la = Keypair::new();
+    let pa = env.create_portfolio(&la);
+    let lb = Keypair::new();
+    let pb = env.create_portfolio(&lb);
+    env.deposit(&la, pa, 1_000_000);
+    env.deposit(&lb, pb, 1_000_000);
+    let ins0 = env.market_state().1.insurance;
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let a_before = env.svm.get_account(&pa).unwrap();
+    let b_before = env.svm.get_account(&pb).unwrap();
+
+    env.svm.expire_blockhash();
+    let r = env.try_trade_asset_with_cu(0, &la, pa, &lb, pb, POS_SCALE as i128, 100, 0);
+    assert!(
+        r.is_err(),
+        "fee_bps below the live base must reject rather than evade or silently increase: {r:?}"
+    );
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+    assert_eq!(env.svm.get_account(&pa).unwrap(), a_before);
+    assert_eq!(env.svm.get_account(&pb).unwrap(), b_before);
+
+    env.svm.expire_blockhash();
+    env.trade_asset_with_cu(0, &la, pa, &lb, pb, POS_SCALE as i128, 100, 500);
+
+    let (_, g1) = env.market_state();
+    assert!(
+        g1.insurance > ins0,
+        "a trade that signs the configured base must pay it; \
+         insurance {ins0} -> {}",
+        g1.insurance
+    );
+    assert_eq!(
+        g1.vault,
+        g1.c_tot + g1.insurance,
+        "exact conservation after the consented base-fee trade"
+    );
 }

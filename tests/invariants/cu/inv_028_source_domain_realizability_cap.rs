@@ -5,11 +5,11 @@
 //! settle or close merely because historical source claims occupy the bounded source table.
 //!
 //! Evidence in this file (I/C/M):
-//! `v16_program_source_capacity_admission_order_matrix_discovers_funded_lock` fills every source
-//! slot through ordinary trades in forward and reverse asset order, admits a new live leg, moves
-//! its authenticated mark, and probes keeper crank, claim conversion, unilateral reduction,
-//! signed single/batch trade, and authenticated CPI exits. A finding requires every route to
-//! reject with exact rollback while real capital, two active positions, and vault liquidity remain.
+//! `v16_program_source_capacity_admission_order_matrix_rejects_unreserved_risk` fills every
+//! wrapper-supported source slot through ordinary trades in forward and reverse asset order, proves
+//! already-reserved domains remain tradable, and then attempts to admit a new asset whose long/short
+//! source domains are not reserved. The public route must reject before admitting a funded leg and
+//! roll back market, portfolios, and SPL custody exactly.
 //! `v16_program_expired_source_lien_route_matrix_discovers_funded_residue_lock` creates a source lien by
 //! ordinary risk increase, crosses its authenticated expiry at two boundaries, and judges crank
 //! progress from the source-lien rank rather than the return code. It records repeated successful
@@ -20,8 +20,9 @@
 //! proves whether the lien-free close can create the impaired aggregate state required by either
 //! downstream finding.
 //!
-//! Guarantee boundary: this is a public maximum-shape counterexample on the vulnerable engine
-//! pin. It does not certify the fixed admission reservation rule.
+//! Guarantee boundary: the wrapper-supported sparse source-domain shape is 2 *
+//! WRAPPER_MAX_PORTFOLIO_ASSETS. Risk-reducing exits remain available at that shape; additional
+//! risk on an unreserved asset is not an advertised public liveness shape.
 
 use super::*;
 
@@ -149,7 +150,8 @@ impl SourceCapacityFillOrder {
     const ALL: [Self; 2] = [Self::Forward, Self::Reverse];
 
     fn assets(self) -> Vec<u16> {
-        let mut assets: Vec<_> = (0..16).collect();
+        let mut assets: Vec<_> =
+            (0..percolator_prog::constants::WRAPPER_MAX_PORTFOLIO_ASSETS).collect();
         if matches!(self, Self::Reverse) {
             assets.reverse();
         }
@@ -193,7 +195,7 @@ fn assert_capacity_attempt_rolls_back<T, E>(
 
 fn run_source_capacity_admission_order(order: SourceCapacityFillOrder) {
     const ACTIVE_CAP: u16 = percolator_prog::constants::WRAPPER_MAX_PORTFOLIO_ASSETS;
-    const HISTORICAL_ASSETS: u16 = 16;
+    const HISTORICAL_ASSETS: u16 = percolator_prog::constants::WRAPPER_MAX_PORTFOLIO_ASSETS;
     const NEW_ASSET: u16 = HISTORICAL_ASSETS;
     const LOW: u64 = 100;
     const HIGH: u64 = 101;
@@ -223,12 +225,6 @@ fn run_source_capacity_admission_order(order: SourceCapacityFillOrder) {
     let counterparty = env.create_portfolio(&counterparty_owner);
     env.deposit(&owner, portfolio, 1_000_000);
     env.deposit(&counterparty_owner, counterparty, 1_000_000);
-
-    let matcher_program = Pubkey::new_unique();
-    let matcher_bytes = std::fs::read(auth_matcher_program_path()).expect("read auth matcher SBF");
-    env.svm.add_program(matcher_program, &matcher_bytes);
-    let (matcher_context, matcher_delegate, _) =
-        env.init_auth_matcher_context(matcher_program, &counterparty_owner, counterparty);
 
     let settle_both = |env: &mut V16CuEnv, asset_index: u16, now_slot: u64| {
         for account in [counterparty, portfolio] {
@@ -305,8 +301,8 @@ fn run_source_capacity_admission_order(order: SourceCapacityFillOrder) {
             .iter()
             .filter(|source| source.is_occupied())
             .count(),
-        percolator::PORTFOLIO_SOURCE_DOMAIN_CAP,
-        "public historical episodes must fill the sparse source table"
+        percolator_prog::constants::WRAPPER_MAX_BOUNDED_SOURCE_DOMAINS,
+        "public historical episodes must fill the wrapper-supported sparse source table"
     );
     assert!(percolator::active_bitmap_is_empty(active_bitmap(&full)));
     let old_asset = historical_assets[0];
@@ -323,6 +319,26 @@ fn run_source_capacity_admission_order(order: SourceCapacityFillOrder) {
     );
     env.svm.expire_blockhash();
     env.trade_asset_with_cu(
+        old_asset,
+        &owner,
+        portfolio,
+        &counterparty_owner,
+        counterparty,
+        -(POS_SCALE as i128),
+        LOW,
+        0,
+    );
+    assert!(
+        percolator::active_bitmap_is_empty(active_bitmap(&env.portfolio_state(portfolio))),
+        "risk on already-reserved source domains remains closeable"
+    );
+
+    let vault_before = env.token_amount(env.vault);
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let owner_before = env.svm.get_account(&portfolio).unwrap();
+    let counterparty_before = env.svm.get_account(&counterparty).unwrap();
+    env.svm.expire_blockhash();
+    let rejected = env.try_trade_asset_with_cu(
         NEW_ASSET,
         &owner,
         portfolio,
@@ -332,161 +348,34 @@ fn run_source_capacity_admission_order(order: SourceCapacityFillOrder) {
         LOW,
         0,
     );
-
-    slot += 1;
-    env.svm.warp_to_slot(slot);
-    env.push_auth_mark_for_asset_as_admin(NEW_ASSET, slot, HIGH);
-    env.crank_steps_after_market_catchup(
+    let rejected_text = rejected
+        .as_ref()
+        .expect_err("unreserved new-asset risk must reject before funded admission");
+    assert!(
+        rejected_text.contains("Custom(9)")
+            && !rejected_text.contains("ProgramFailedToComplete")
+            && !rejected_text.contains("exceeded CUs"),
+        "unreserved source-domain admission must fail cleanly, got {rejected_text}"
+    );
+    assert_capacity_attempt_rolls_back(
+        "unreserved new-asset risk admission",
+        &rejected,
+        &env,
+        portfolio,
         counterparty,
-        ProgInstruction::PermissionlessCrank {
-            now_slot: slot,
-            observations: crank_observations(NEW_ASSET),
-        },
-        1,
+        &market_before,
+        &owner_before,
+        &counterparty_before,
+        vault_before,
     );
-
-    let trapped = env.portfolio_state(portfolio);
-    assert_eq!(
-        percolator::active_bitmap_count_ones(active_bitmap(&trapped)),
-        2,
-        "the vulnerable admission must leave both funded legs active"
-    );
-    assert_ne!(trapped.capital.get(), 0);
-    let vault_before = env.token_amount(env.vault);
-    assert!(u128::from(vault_before) >= trapped.capital.get());
-
-    macro_rules! assert_blocked {
-        ($label:literal, $attempt:expr) => {{
-            env.svm.expire_blockhash();
-            let market_before = env.svm.get_account(&env.market).unwrap();
-            let owner_before = env.svm.get_account(&portfolio).unwrap();
-            let counterparty_before = env.svm.get_account(&counterparty).unwrap();
-            let result = $attempt;
-            assert_capacity_attempt_rolls_back(
-                $label,
-                &result,
-                &env,
-                portfolio,
-                counterparty,
-                &market_before,
-                &owner_before,
-                &counterparty_before,
-                vault_before,
-            );
-        }};
-    }
-
-    assert_blocked!(
-        "permissionless crank",
-        env.send(
-            ProgInstruction::PermissionlessCrank {
-                now_slot: slot,
-                observations: crank_observations(NEW_ASSET),
-            },
-            vec![
-                AccountMeta::new(env.payer.pubkey(), true),
-                AccountMeta::new(env.market, false),
-                AccountMeta::new(portfolio, false),
-            ],
-            &[],
-        )
-    );
-    assert_blocked!(
-        "released-PnL conversion",
-        env.send(
-            ProgInstruction::ConvertReleasedPnl { amount: 1 },
-            vec![
-                AccountMeta::new(owner.pubkey(), true),
-                AccountMeta::new(env.market, false),
-                AccountMeta::new(portfolio, false),
-            ],
-            &[&owner],
-        )
-    );
-    assert_blocked!(
-        "single signed new-leg close",
-        env.try_trade_asset_with_cu(
-            NEW_ASSET,
-            &owner,
-            portfolio,
-            &counterparty_owner,
-            counterparty,
-            -(POS_SCALE as i128),
-            HIGH,
-            0,
-        )
-    );
-    assert_blocked!(
-        "batch signed new-leg close",
-        env.send(
-            ProgInstruction::BatchTradeNoCpi {
-                legs: vec![BatchTradeLeg {
-                    asset_index: NEW_ASSET,
-                    market_id: env.asset_market_id(NEW_ASSET),
-                    size_q: -(POS_SCALE as i128),
-                    exec_price: HIGH,
-                    fee_bps: 0,
-                }],
-            },
-            vec![
-                AccountMeta::new(owner.pubkey(), true),
-                AccountMeta::new(counterparty_owner.pubkey(), true),
-                AccountMeta::new(env.market, false),
-                AccountMeta::new(portfolio, false),
-                AccountMeta::new(counterparty, false),
-            ],
-            &[&owner, &counterparty_owner],
-        )
-    );
-    assert_blocked!(
-        "authenticated CPI new-leg close",
-        env.try_trade_cpi_with_cu_on_asset(
-            &owner,
-            portfolio,
-            &counterparty_owner,
-            counterparty,
-            matcher_program,
-            matcher_context,
-            matcher_delegate,
-            NEW_ASSET,
-            -(POS_SCALE as i128),
-            0,
-        )
-    );
-    assert_blocked!(
-        "single signed old-leg close",
-        env.try_trade_asset_with_cu(
-            old_asset,
-            &owner,
-            portfolio,
-            &counterparty_owner,
-            counterparty,
-            -(POS_SCALE as i128),
-            LOW,
-            0,
-        )
-    );
-    assert_blocked!(
-        "unilateral reduction",
-        env.send(
-            ProgInstruction::RebalanceReduce {
-                portfolio_id: env.portfolio_id(portfolio),
-                position_epoch: env.portfolio_position_epoch(portfolio),
-                asset_index: NEW_ASSET,
-                reduce_q: POS_SCALE,
-            },
-            vec![
-                AccountMeta::new(owner.pubkey(), true),
-                AccountMeta::new(env.market, false),
-                AccountMeta::new(portfolio, false),
-            ],
-            &[&owner],
-        )
+    assert!(
+        percolator::active_bitmap_is_empty(active_bitmap(&env.portfolio_state(portfolio))),
+        "rejected unreserved risk must not leave a funded active leg"
     );
 }
 
 #[test]
-fn v16_program_source_capacity_admission_order_matrix_discovers_funded_lock() {
+fn v16_program_source_capacity_admission_order_matrix_rejects_unreserved_risk() {
     for order in SourceCapacityFillOrder::ALL {
         run_source_capacity_admission_order(order);
     }
@@ -707,15 +596,17 @@ fn run_expired_source_lien_route_matrix(now_slot: u64, hinted_first: bool) {
     assert_exit_locked!(
         "signed batch reduction",
         env.send(
-            ProgInstruction::BatchTradeNoCpi {
-                legs: vec![BatchTradeLeg {
+            env.batch_trade_no_cpi_ix(
+                portfolio,
+                counterparty,
+                vec![BatchTradeLeg {
                     asset_index: 0,
                     market_id: env.asset_market_id(0),
                     size_q: -(POS_SCALE as i128),
                     exec_price: WINNING_MARK,
                     fee_bps: 0,
                 }],
-            },
+            ),
             vec![
                 AccountMeta::new(owner.pubkey(), true),
                 AccountMeta::new(counterparty_owner.pubkey(), true),
@@ -744,7 +635,7 @@ fn run_expired_source_lien_route_matrix(now_slot: u64, hinted_first: bool) {
     assert_exit_locked!(
         "released PnL conversion",
         env.send(
-            ProgInstruction::ConvertReleasedPnl { amount: 1 },
+            env.convert_released_pnl_ix(portfolio, 1),
             vec![
                 AccountMeta::new(owner.pubkey(), true),
                 AccountMeta::new(env.market, false),
@@ -758,4 +649,602 @@ fn run_expired_source_lien_route_matrix(now_slot: u64, hinted_first: bool) {
 #[test]
 fn v16_program_expired_source_lien_route_matrix_discovers_funded_residue_lock() {
     run_expired_source_lien_route_matrix(2, true);
+}
+
+// security.md sweep - last-principal backing withdrawal must not strand provider earnings (#22/#48):
+// utilization-fee earnings are owed to the backing authority but stored beside the principal bucket.
+// A provider who withdraws principal before earnings must not turn the bucket into an invalid empty
+// shell with trapped earnings; the rejected attempt must roll back market, ledger, vault, and dest.
+#[test]
+fn v16_attack_backing_principal_withdraw_preserves_provider_earnings() {
+    const PRINCIPAL: u128 = 100;
+    const EARNINGS: u128 = 42;
+    let mut env = V16CuEnv::new();
+    env.activate_asset(1, 1, 100);
+    let ledger = env.backing_domain_ledger_account();
+    env.top_up_backing_bucket_with_ledger_with_cu(ledger, 2, PRINCIPAL, 10_000);
+    env.mutate_market(|_, group| {
+        group.source_backing_buckets[2].utilization_fee_earnings = EARNINGS;
+        group.vault += EARNINGS;
+    });
+    let funded_vault = env.market_state().1.vault as u64;
+    env.set_token_account_amount(env.vault, env.mint, env.vault_authority, funded_vault);
+    let (_, funded_group) = env.market_state();
+    assert_eq!(
+        funded_group.source_backing_buckets[2].fresh_unliened_backing_num,
+        PRINCIPAL * BOUND_SCALE,
+        "asset-1 backing principal is present (non-vacuous)"
+    );
+    assert_eq!(
+        funded_group.source_backing_buckets[2].utilization_fee_earnings, EARNINGS,
+        "asset-1 backing provider earnings are owed (non-vacuous)"
+    );
+
+    let admin = env.admin.insecure_clone();
+    let dest = env.token_account(admin.pubkey(), 0);
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let ledger_before = env.svm.get_account(&ledger).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    let dest_before = env.svm.get_account(&dest).unwrap();
+    env.svm.expire_blockhash();
+    let premature_principal = env.send(
+        ProgInstruction::WithdrawBackingBucket {
+            domain: 2,
+            amount: PRINCIPAL,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(ledger, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        premature_principal.is_err(),
+        "last-principal withdrawal must reject while provider earnings remain unpaid"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "rejected principal withdrawal leaves market accounting unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&ledger).unwrap(),
+        ledger_before,
+        "rejected principal withdrawal leaves the provider ledger unchanged"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        vault_before,
+        "rejected principal withdrawal leaves the canonical vault untouched"
+    );
+    assert_eq!(
+        env.svm.get_account(&dest).unwrap(),
+        dest_before,
+        "rejected principal withdrawal pays no destination tokens"
+    );
+    let (_, still_funded_group) = env.market_state();
+    assert_eq!(
+        still_funded_group.source_backing_buckets[2].fresh_unliened_backing_num,
+        PRINCIPAL * BOUND_SCALE,
+        "principal remains recoverable after rejected premature withdrawal"
+    );
+    assert_eq!(
+        still_funded_group.source_backing_buckets[2].utilization_fee_earnings, EARNINGS,
+        "earnings remain recoverable after rejected premature withdrawal"
+    );
+
+    env.withdraw_backing_bucket_earnings_to_admin_token_with_cu(ledger, dest, 2, EARNINGS);
+    assert_eq!(
+        env.token_amount(dest),
+        EARNINGS as u64,
+        "backing provider recovers the accrued earnings first"
+    );
+    assert_eq!(
+        env.market_state().1.source_backing_buckets[2].utilization_fee_earnings,
+        0,
+        "earnings blocker is fully drained"
+    );
+
+    env.svm.expire_blockhash();
+    let principal_after_earnings = env.send(
+        ProgInstruction::WithdrawBackingBucket {
+            domain: 2,
+            amount: PRINCIPAL,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(ledger, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        principal_after_earnings.is_ok(),
+        "principal withdrawal succeeds after earnings are paid: {principal_after_earnings:?}"
+    );
+    assert_eq!(
+        env.token_amount(dest),
+        (PRINCIPAL + EARNINGS) as u64,
+        "provider recovers both earnings and principal exactly once"
+    );
+    assert_eq!(
+        env.market_state().1.source_backing_buckets[2].fresh_unliened_backing_num,
+        0,
+        "principal blocker is fully drained after the safe order"
+    );
+
+    env.svm.warp_to_slot(4);
+    env.svm.expire_blockhash();
+    let accepted = env.send(
+        ProgInstruction::UpdateAssetLifecycle {
+            action: percolator_prog::processor::ASSET_ACTION_RETIRE,
+            asset_index: 1,
+            now_slot: 4,
+            initial_price: 0,
+            max_init_fee: u128::MAX,
+            insurance_authority: admin.pubkey().to_bytes(),
+            insurance_operator: admin.pubkey().to_bytes(),
+            backing_bucket_authority: admin.pubkey().to_bytes(),
+            oracle_authority: admin.pubkey().to_bytes(),
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        accepted.is_ok(),
+        "RETIRE succeeds once provider earnings and principal are paid: {accepted:?}"
+    );
+    let (_, retired_group) = env.market_state();
+    assert_eq!(
+        retired_group.assets[1].lifecycle,
+        AssetLifecycleV16::Retired,
+        "asset-1 retired after backing-provider funds are paid"
+    );
+    assert_eq!(
+        retired_group.source_backing_buckets[2].utilization_fee_earnings, 0,
+        "retired slot carries no stale provider earnings"
+    );
+}
+
+// security.md sweep — convert bounded by available backing (#33/#35): if a winner's positive pnl
+// exceeds its source backing, ConvertReleasedPnl must release at most the AVAILABLE backing, never the
+// full (partly-unbacked) pnl. Otherwise unbacked pnl would convert into withdrawable capital.
+#[test]
+fn v16_attack_convert_bounded_by_available_backing() {
+    const BACKING: u128 = 40;
+    let mut env = V16CuEnv::new();
+    let ledger = env.backing_domain_ledger_account();
+    env.top_up_backing_bucket_with_ledger_with_cu(ledger, 1, BACKING, 10);
+    let owner = Keypair::new();
+    let p = env.create_portfolio(&owner);
+    // add MORE positive pnl (80) than the backing (40).
+    env.add_source_positive_pnl(p, 1, 80);
+    env.crank(
+        p,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 0,
+            observations: crank_observations(0),
+        },
+    );
+    let cap_before = env.portfolio_state(p).capital.get();
+    let (_, g0) = env.market_state();
+    // convert with a huge cap -> released amount must be bounded by the available backing.
+    env.svm.expire_blockhash();
+    let _ = env.send(
+        env.convert_released_pnl_ix(p, 1_000_000_000),
+        vec![
+            AccountMeta::new(owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(p, false),
+        ],
+        &[&owner],
+    );
+    let converted = env.portfolio_state(p).capital.get() - cap_before;
+    assert!(
+        converted <= BACKING,
+        "convert released at most the available backing ({} <= {})",
+        converted,
+        BACKING
+    );
+    let (_, g1) = env.market_state();
+    assert!(
+        g1.vault >= g1.c_tot + g1.insurance,
+        "senior conservation after convert"
+    );
+    assert_eq!(
+        g1.vault as u64,
+        env.token_amount(env.vault),
+        "accounting vault == real vault"
+    );
+    let _ = g0;
+}
+
+// security.md sweep — backing bucket top-up/withdraw input gates (#33/#44): a backing top-up with an
+// already-expired (or zero) expiry must reject (no dead backing injected to skew freshness accounting),
+// and a withdraw can never exceed the bucket's fresh-unliened principal. Complements the watermark/lien
+// permutation tests (which cover liened backing) with the plain balance + expiry gates.
+#[test]
+fn v16_attack_backing_bucket_topup_withdraw_input_gates() {
+    let mut env = V16CuEnv::new();
+    let admin = env.admin.insecure_clone();
+    let cur = env.svm.get_sysvar::<Clock>().slot;
+
+    // helper: inline TopUpBackingBucket returning Result (the env helper panics on reject).
+    let top_up = |env: &mut V16CuEnv, amount: u128, expiry: u64| -> Result<u64, String> {
+        let source = Pubkey::new_unique();
+        env.svm
+            .set_account(
+                source,
+                Account {
+                    lamports: 1_000_000_000,
+                    data: make_token_data(env.mint, admin.pubkey(), amount.max(1) as u64),
+                    owner: spl_token::ID,
+                    executable: false,
+                    rent_epoch: 0,
+                },
+            )
+            .unwrap();
+        env.svm.expire_blockhash();
+        send_tx(
+            &mut env.svm,
+            env.program_id,
+            &env.payer,
+            ProgInstruction::TopUpBackingBucket {
+                market_id: 0,
+                domain: 0,
+                amount,
+                expiry_slot: expiry,
+            },
+            vec![
+                AccountMeta::new(admin.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(source, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[&admin],
+        )
+    };
+
+    // (1) expiry_slot <= current_slot must reject (no already-expired backing) — for a real (amount>0) top-up.
+    assert!(
+        top_up(&mut env, 1_000_000, cur).is_err(),
+        "expiry == now must reject"
+    );
+    assert!(
+        top_up(&mut env, 1_000_000, 0).is_err(),
+        "expiry 0 must reject"
+    );
+    // (2) zero amount is a benign no-op: the engine add (which holds the expiry gate) is skipped, so it
+    // succeeds without injecting any backing — even with an expired expiry. Nothing enters the vault.
+    assert!(
+        top_up(&mut env, 0, cur + 1_000_000).is_ok(),
+        "zero-amount top-up is a no-op success"
+    );
+    assert!(
+        top_up(&mut env, 0, 0).is_ok(),
+        "zero-amount top-up no-op even with expired expiry"
+    );
+    // nothing entered the vault on any rejected top-up or zero no-op.
+    assert_eq!(
+        env.market_state().1.vault,
+        0,
+        "no backing injected by rejected/no-op top-ups"
+    );
+    assert_eq!(
+        env.market_state().1.source_backing_buckets[0].fresh_unliened_backing_num,
+        0,
+        "no backing num"
+    );
+
+    // (3) a valid top-up succeeds; backing is Fresh & unliened.
+    assert!(
+        top_up(&mut env, 1_000_000, cur + 1_000_000).is_ok(),
+        "valid top-up ok"
+    );
+    let g = env.market_state().1;
+    assert_eq!(g.vault, 1_000_000, "vault holds the backing principal");
+    // fresh_unliened_backing_num is in BOUND_SCALE units (amount * 1e12); just assert it's funded.
+    assert!(
+        g.source_backing_buckets[0].fresh_unliened_backing_num > 0,
+        "backing is fresh-unliened"
+    );
+
+    // (4) withdraw beyond the fresh-unliened principal must reject.
+    let dest = env.token_account_for_mint(env.mint, admin.pubkey(), 0);
+    env.svm.expire_blockhash();
+    let r_over = send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::WithdrawBackingBucket {
+            domain: 0,
+            amount: 1_000_001,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(dest, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(env.vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&admin],
+    );
+    assert!(
+        r_over.is_err(),
+        "withdraw > fresh-unliened principal must reject"
+    );
+    assert_eq!(
+        env.token_amount(dest),
+        0,
+        "no backing paid out on rejected over-withdraw"
+    );
+
+    // (5) withdraw exactly the principal succeeds and conserves.
+    env.svm.expire_blockhash();
+    env.withdraw_backing_bucket_to_admin_token_with_cu(dest, 0, 1_000_000);
+    assert_eq!(
+        env.token_amount(dest),
+        1_000_000,
+        "exactly the principal withdrawn"
+    );
+    let g = env.market_state().1;
+    assert_eq!(
+        g.source_backing_buckets[0].fresh_unliened_backing_num, 0,
+        "backing drained"
+    );
+    assert_eq!(
+        g.vault as u64,
+        env.token_amount(env.vault),
+        "accounting == real vault"
+    );
+    assert!(g.vault >= g.c_tot + g.insurance, "senior conservation");
+}
+
+// security.md sweep — ConvertReleasedPnl cannot mint from unbacked pnl (#33/#35/#22): the existing
+// caller-cap test (#?) uses FULLY-backed pnl. Here the positive pnl (100) EXCEEDS its source backing
+// (residual 40). Attacker goal: convert the full 100 into withdrawable senior capital, printing 60 of
+// unbacked value. Protection: only the residual-backed portion converts to capital; the phantom excess
+// is cleared (it was never realizable), the account's realizable value is conserved, and the vault is
+// never minted.
+#[test]
+fn v16_attack_convert_released_pnl_cannot_mint_from_unbacked_pnl() {
+    let mut env = V16CuEnv::new();
+    env.top_up_backing_bucket(1, 40, 10_000); // residual backing = 40 in domain 1
+    let o = Keypair::new();
+    let p = env.create_portfolio(&o);
+    env.deposit(&o, p, 1_000);
+    env.add_source_positive_pnl(p, 1, 100); // claim 100 -> only 40 is backed
+    env.crank(
+        p,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 0,
+            observations: crank_observations(0),
+        },
+    );
+    let pre = env.portfolio_state(p);
+    let g_pre = env.market_state().1;
+    let residual_pre = g_pre
+        .vault
+        .saturating_sub(g_pre.c_tot)
+        .saturating_sub(g_pre.insurance);
+    assert!(
+        pre.pnl.get() > residual_pre as i128,
+        "non-vacuous: pnl ({}) exceeds the backing residual ({})",
+        pre.pnl.get(),
+        residual_pre
+    );
+
+    // ATTACK: convert with a huge cap, trying to realize the full (partly-unbacked) pnl into capital.
+    env.svm.expire_blockhash();
+    let r = env.send(
+        env.convert_released_pnl_ix(p, 1_000_000_000),
+        vec![
+            AccountMeta::new(o.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(p, false),
+        ],
+        &[&o],
+    );
+    assert!(
+        r.is_ok(),
+        "convert should succeed (converting the backed portion): {:?}",
+        r
+    );
+
+    let post = env.portfolio_state(p);
+    let g = env.market_state().1;
+    let minted = post.capital.get() as i128 - pre.capital.get() as i128;
+    // ANTI-MINT: capital grew by AT MOST the residual that actually backed the pnl — never the full 100.
+    assert!(
+        minted <= residual_pre as i128,
+        "capital minted ({}) must not exceed backing residual ({})",
+        minted,
+        residual_pre
+    );
+    assert_eq!(
+        minted, residual_pre as i128,
+        "exactly the backed portion (40) converts to capital"
+    );
+    assert!(
+        minted < pre.pnl.get(),
+        "the unbacked excess (60) is NOT converted to capital"
+    );
+    // realizable value conserved: capital_before + backed (== capital_after); no phantom value created.
+    assert_eq!(
+        post.capital.get() as i128,
+        pre.capital.get() as i128 + residual_pre as i128,
+        "realizable value conserved"
+    );
+    // no vault minting + senior conservation.
+    assert_eq!(
+        g.vault, g_pre.vault,
+        "ConvertReleasedPnl moves no vault tokens"
+    );
+    assert_eq!(
+        g.vault as u64,
+        env.token_amount(env.vault),
+        "accounting == real vault"
+    );
+    assert!(g.vault >= g.c_tot + g.insurance, "senior conservation");
+}
+
+// security.md sweep — full winner extraction: convert backed pnl then withdraw (#33/#35/#44 interaction):
+// a backed winner converts released junior pnl to senior capital, then withdraws. Attacker goal: extract
+// MORE than (deposit + backed pnl) — print value on the way out. Protection: the conversion is bounded by
+// the backing (#147) and withdraw moves only real capital, so total out == deposit + backing, no more,
+// and the vault drains to exactly what the backing provider funded.
+#[test]
+fn v16_attack_convert_then_withdraw_extracts_exactly_backed() {
+    const DEP: u128 = 1_000;
+    const BACK: u128 = 40;
+    let mut env = V16CuEnv::new();
+    env.top_up_backing_bucket(1, BACK, 10_000); // an LP backs the winner with 40
+    let o = Keypair::new();
+    let p = env.create_portfolio(&o);
+    env.deposit(&o, p, DEP);
+    env.add_source_positive_pnl(p, 1, BACK); // fully-backed 40 junior pnl
+    env.crank(
+        p,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 0,
+            observations: crank_observations(0),
+        },
+    );
+    let vault0 = env.market_state().1.vault;
+    assert_eq!(
+        vault0,
+        DEP + BACK,
+        "vault holds the deposit + the LP backing"
+    );
+
+    // (1) convert the backed junior pnl into senior capital.
+    env.svm.expire_blockhash();
+    let rc = env.send(
+        env.convert_released_pnl_ix(p, 1_000_000_000),
+        vec![
+            AccountMeta::new(o.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(p, false),
+        ],
+        &[&o],
+    );
+    assert!(rc.is_ok(), "convert backed pnl should succeed: {:?}", rc);
+    let cap_after_convert = env.portfolio_state(p).capital.get();
+    assert_eq!(
+        cap_after_convert,
+        DEP + BACK,
+        "capital == deposit + the backed portion (exactly)"
+    );
+
+    // (2) withdraw the full converted capital (account is flat — no open position).
+    env.svm.expire_blockhash();
+    let dest = env.withdraw(&o, p, DEP + BACK);
+    let out = env.token_amount(dest) as u128;
+
+    // EXTRACTION BOUND: the winner pulled EXACTLY deposit + backing, never more.
+    assert_eq!(
+        out,
+        DEP + BACK,
+        "winner extracts exactly deposit + backed pnl, not a unit more"
+    );
+    let pf = env.portfolio_state(p);
+    let g = env.market_state().1;
+    assert_eq!(pf.capital.get(), 0, "winner fully withdrawn");
+    assert_eq!(
+        g.vault, 0,
+        "vault drained to exactly the funded amount (deposit + LP backing), no residual mint"
+    );
+    assert_eq!(
+        g.vault as u64,
+        env.token_amount(env.vault),
+        "accounting == real vault"
+    );
+    assert!(g.vault >= g.c_tot + g.insurance, "senior conservation");
+}
+
+// security.md sweep — backing-bucket creation must reject an already-lapsed expiry. TopUpBackingBucket
+// forwards expiry_slot to the engine's deposit_fresh, which requires a FUTURE expiry
+// (expiry_slot > current_slot). A topup at expiry_slot 0 would mint immediately-lapsed backing
+// principal (poisoning the live source-domain ledger) — it must reject, pulling no tokens; a future
+// expiry is the accepted control.
+#[test]
+fn v16_attack_backing_topup_rejects_lapsed_expiry() {
+    let mut env = V16CuEnv::new();
+    let vault0 = env.token_amount(env.vault);
+    let admin = env.admin.insecure_clone();
+    let source = env.token_account(admin.pubkey(), 50);
+    let topup = |env: &mut V16CuEnv, expiry: u64| -> Result<u64, String> {
+        env.svm.expire_blockhash();
+        env.send(
+            ProgInstruction::TopUpBackingBucket {
+                market_id: 0,
+                domain: 1,
+                amount: 50,
+                expiry_slot: expiry,
+            },
+            vec![
+                AccountMeta::new(admin.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(source, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[&admin],
+        )
+    };
+    let r = topup(&mut env, 0);
+    assert!(
+        r.is_err(),
+        "topup with lapsed expiry_slot=0 must reject: {r:?}"
+    );
+    assert_eq!(
+        env.token_amount(env.vault),
+        vault0,
+        "rejected lapsed-expiry topup pulled no tokens into the vault"
+    );
+    assert_eq!(
+        env.token_amount(source),
+        50,
+        "source balance intact after reject"
+    );
+    // control: a future expiry is accepted and credits exactly the backing.
+    let r_ok = topup(&mut env, 10_000);
+    assert!(
+        r_ok.is_ok(),
+        "future-expiry backing topup must succeed: {r_ok:?}"
+    );
+    assert_eq!(
+        env.token_amount(env.vault),
+        vault0 + 50,
+        "valid topup credits exactly the backing"
+    );
+}
+
+#[test]
+fn v16_bpf_trade_paths_respect_source_credit_watermark_permutations() {
+    for path in [
+        SourceCreditWatermarkTradePath::NoCpi,
+        SourceCreditWatermarkTradePath::Cpi,
+    ] {
+        for direction in [
+            SourceCreditWatermarkDirection::PositiveSize,
+            SourceCreditWatermarkDirection::NegativeSize,
+        ] {
+            run_source_credit_watermark_trade_case(path, direction);
+        }
+    }
 }

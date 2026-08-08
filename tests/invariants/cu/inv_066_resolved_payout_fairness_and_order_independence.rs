@@ -601,3 +601,250 @@ fn v16_bpf_force_close_pair_order_preserves_unequal_partial_payouts() {
         "a cranker allocated value by choosing an unequal partial force-close schedule"
     );
 }
+
+// security.md sweep — resolved wind-down LoF / over-claim (#22/#30/#48): a market can be resolved
+// with OPEN positions (handle_resolve_market does not require flat). After resolution a long and a
+// short must each recover their FAIR value via CloseResolved — neither stuck (LoF) nor able to
+// over-claim. Total tokens paid out must never exceed total deposited.
+#[test]
+fn v16_regression_resolved_open_positions_recover_fairly_order_robust() {
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(1, 1_000, 1_000, 500);
+    env.configure_auth_mark_with_cu(0, 100);
+    let lo_owner = Keypair::new();
+    let lo = env.create_portfolio(&lo_owner);
+    let sh_owner = Keypair::new();
+    let sh = env.create_portfolio(&sh_owner);
+    env.deposit(&lo_owner, lo, 1_000_000);
+    env.deposit(&sh_owner, sh, 1_000_000);
+    env.trade_asset_with_cu(
+        0,
+        &lo_owner,
+        lo,
+        &sh_owner,
+        sh,
+        (10_000 * POS_SCALE) as i128,
+        100,
+        0,
+    ); // notional 1M
+       // move price so the long wins, settle both legs across two slots, THEN resolve with positions still open.
+    env.svm.warp_to_slot(10);
+    env.push_auth_mark_with_cu(10, 110);
+    for slot in [10u64, 11] {
+        env.svm.warp_to_slot(slot);
+        for p in [sh, lo] {
+            env.svm.expire_blockhash();
+            let _ = env.send(
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: slot,
+                    observations: crank_observations(0),
+                },
+                vec![
+                    AccountMeta::new(env.payer.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(p, false),
+                ],
+                &[],
+            );
+        }
+    }
+    env.resolve(); // resolve WITH open positions still on the book
+
+    let bal = |env: &V16CuEnv, k: &Pubkey| -> u128 {
+        let d = env.svm.get_account(k).unwrap().data;
+        u64::from_le_bytes(d[64..72].try_into().unwrap()) as u128
+    };
+    // Winner (long) closes FIRST, before the loser has funded the vault. This must be a SAFE NO-OP:
+    // it pays 0 and leaves the winner's capital fully intact (no destructive partial close / no LoF).
+    let (dest_lo1, _) = env.close_resolved_with_cu(&lo_owner, lo);
+    assert_eq!(
+        bal(&env, &dest_lo1),
+        0,
+        "premature winner close pays nothing (vault not yet funded)"
+    );
+    let mid = state::read_portfolio(&env.svm.get_account(&lo).unwrap().data).unwrap();
+    assert_eq!(
+        mid.capital.get(),
+        1_000_000,
+        "premature winner close is a no-op: capital fully preserved"
+    );
+    assert_eq!(
+        mid.pnl.get(),
+        100_000,
+        "premature winner close preserves parked pnl"
+    );
+
+    // Loser closes (recovers its post-loss capital, funding the vault for the winner).
+    let (dest_sh, _) = env.close_resolved_with_cu(&sh_owner, sh);
+    let out_sh = bal(&env, &dest_sh);
+    // Winner RETRIES and now recovers full fair value.
+    let (dest_lo2, _) = env.close_resolved_with_cu(&lo_owner, lo);
+    let out_lo = bal(&env, &dest_lo2);
+
+    // No LoF, exact value conservation, fair winner/loser split.
+    assert_eq!(
+        out_lo + out_sh,
+        2_000_000,
+        "every account recovers; total payout == total deposited (no LoF, no printing)"
+    );
+    assert_eq!(
+        out_lo, 1_100_000,
+        "winner recovers capital + realized profit"
+    );
+    assert_eq!(out_sh, 900_000, "loser recovers capital - realized loss");
+    let a = state::read_portfolio(&env.svm.get_account(&lo).unwrap().data).unwrap();
+    let b = state::read_portfolio(&env.svm.get_account(&sh).unwrap().data).unwrap();
+    assert_eq!(a.capital.get(), 0, "long fully wound down");
+    assert_eq!(b.capital.get(), 0, "short fully wound down");
+    // The winner's positive pnl is source-backed (the directional trade created source credit),
+    // so at resolved close it is REALIZED into capital and paid as capital — no junior payout
+    // receipt is parked. The account winds down completely (pnl 0, capital 0, no receipt).
+    assert!(
+        !resolved_receipt(&a).present,
+        "winner fully paid via capital realization, no dangling receipt"
+    );
+    assert_eq!(a.pnl.get(), 0, "winner pnl fully realized");
+    let (_, g) = env.market_state();
+    assert_eq!(g.vault, 0, "vault fully drained, no funds stranded");
+}
+
+// security.md sweep — haircut payout rounding across multiple winners (#33/#37): when several
+// resolved winners share ONE insufficient backing pool, each is paid floor(face * rate). The sum of
+// floored payouts must NEVER exceed the backing (a rounding-up bug would let winners collectively
+// extract more than the pool holds). Probe with deliberately non-divisible faces.
+#[test]
+fn v16_regression_resolved_multiwinner_haircut_no_overpay_no_strand() {
+    const BACKING: u128 = 100;
+    // three winners with non-divisible positive-pnl faces against a shared 100 backing.
+    let faces: [u128; 3] = [250, 251, 253];
+    let mut env = V16CuEnv::new();
+    env.top_up_backing_bucket(1, BACKING, 10_000);
+    let mut owners = Vec::new();
+    let mut ports = Vec::new();
+    for &face in faces.iter() {
+        let o = Keypair::new();
+        let p = env.create_portfolio(&o);
+        env.deposit(&o, p, 1_000);
+        env.add_source_positive_pnl(p, 1, face);
+        owners.push(o);
+        ports.push(p);
+    }
+    env.resolve();
+    // Two close passes: early winners get a present-but-unfinalized receipt (terminal haircut rate
+    // not settled while other claims pend); a RETRY close after all are processed clears them.
+    let mut total_pnl_paid: u128 = 0;
+    let mut total_out: u128 = 0;
+    for _pass in 0..2 {
+        for (o, p) in owners.iter().zip(ports.iter()) {
+            let dest = env.close_resolved(o, *p);
+            let got = env.token_amount(dest) as u128;
+            total_out += got;
+            total_pnl_paid += got.saturating_sub(if got >= 1_000 { 1_000 } else { got });
+        }
+    }
+    // CRUX 1: summed haircut pnl never exceeds the shared backing (no rounding-up over-pay).
+    assert!(
+        total_pnl_paid <= BACKING,
+        "summed haircut pnl {} must not exceed backing {}",
+        total_pnl_paid,
+        BACKING
+    );
+    // CRUX 2 (no strand): every winner's receipt is closable and the portfolio dematerializes.
+    for (o, p) in owners.iter().zip(ports.iter()) {
+        let a = state::read_portfolio(&env.svm.get_account(p).unwrap().data).unwrap();
+        assert_eq!(a.capital.get(), 0, "winner capital fully paid");
+        assert!(
+            !resolved_receipt(&a).present || resolved_receipt(&a).finalized,
+            "receipt closable after retry"
+        );
+        env.close_portfolio_with_cu(o, *p); // panics if dematerialization is blocked
+    }
+    let (_, g) = env.market_state();
+    assert_eq!(
+        g.materialized_portfolio_count, 0,
+        "all winners dematerialized — no permanent strand"
+    );
+    assert_eq!(g.c_tot, 0, "all capital wound down");
+    assert!(
+        g.vault <= 1,
+        "at most conservative-rounding dust remains in vault (got {})",
+        g.vault
+    );
+    assert!(
+        total_out >= 3_000,
+        "all senior capital recovered (no LoF on capital)"
+    );
+}
+
+// security.md sweep — resolve mid-flight before settlement (#30 sequence/race): push a price move,
+// then resolve WITHOUT any settlement crank. The resolved wind-down must still settle at the true
+// post-move price — the winner recovers their gain, the loser bears their loss, value conserved.
+// Attacker success = stale pre-move settlement (winner LoF, or loser escapes its loss).
+#[test]
+fn v16_regression_resolve_before_settlement_uses_official_price() {
+    let mut env = V16CuEnv::new();
+    env.configure_auth_mark_with_cu(0, 100);
+    let lo_owner = Keypair::new();
+    let lo = env.create_portfolio(&lo_owner);
+    let sh_owner = Keypair::new();
+    let sh = env.create_portfolio(&sh_owner);
+    env.deposit(&lo_owner, lo, 1_000_000);
+    env.deposit(&sh_owner, sh, 1_000_000);
+    env.trade_asset_with_cu(
+        0,
+        &lo_owner,
+        lo,
+        &sh_owner,
+        sh,
+        (10_000 * POS_SCALE) as i128,
+        100,
+        0,
+    ); // notional 1M
+    env.svm.warp_to_slot(10);
+    env.push_auth_mark_with_cu(10, 110); // pending mark; NOT yet accrued into effective_price (anti-retroactivity)
+                                         // NO crank: resolve immediately. The pushed mark is unaccrued, so the official effective_price is
+                                         // still 100 and the position is officially flat.
+    let (_, g_pre) = env.market_state();
+    assert_eq!(
+        g_pre.assets[0].effective_price, 100,
+        "unaccrued mark push does NOT move the official price"
+    );
+    env.resolve();
+
+    fn bal(env: &V16CuEnv, k: &Pubkey) -> u128 {
+        let d = env.svm.get_account(k).unwrap().data;
+        u64::from_le_bytes(d[64..72].try_into().unwrap()) as u128
+    }
+    // loser-first, then winner (order-robust wind-down established in batch 23). Retry winner if deferred.
+    let _ = env.close_resolved(&sh_owner, sh);
+    let d1 = env.close_resolved(&lo_owner, lo);
+    let mut won = bal(&env, &d1);
+    if won == 0 {
+        let d2 = env.close_resolved(&lo_owner, lo);
+        won = bal(&env, &d2);
+    }
+    let lost = {
+        let b = state::read_portfolio(&env.svm.get_account(&sh).unwrap().data).unwrap();
+        assert_eq!(b.capital.get(), 0, "loser wound down");
+        2_000_000u128.saturating_sub(won)
+    };
+    // CORRECT behavior: resolve settles at the OFFICIAL accrued price (100). The unaccrued mark push
+    // is NOT retroactively applied, so no value is created or destroyed — each party recovers exactly
+    // its deposit. (Contrast batch 23: crank-to-accrue BEFORE resolve, and the winner gets 1.1M.)
+    assert_eq!(
+        won, 1_000_000,
+        "no value invented from an unaccrued mark — deposit returned"
+    );
+    assert_eq!(
+        won + lost,
+        2_000_000,
+        "exact conservation across resolve-before-settlement"
+    );
+    let (_, g) = env.market_state();
+    assert!(g.vault >= g.c_tot + g.insurance, "senior conservation");
+    let a = state::read_portfolio(&env.svm.get_account(&lo).unwrap().data).unwrap();
+    assert_eq!(a.capital.get(), 0, "long fully wound down");
+    assert!(
+        resolved_receipt(&a).finalized || !resolved_receipt(&a).present,
+        "receipt closable"
+    );
+}

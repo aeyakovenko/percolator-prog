@@ -556,14 +556,9 @@ fn v16_probe_post_expiry_trade_cannot_charge_backing_fee() {
                     AccountMeta::new(trader, false),
                     AccountMeta::new(counterparty, false),
                 ],
-                data: ProgInstruction::TradeNoCpi {
-                    asset_index: 0,
-                    market_id: before.assets[0].market_id,
-                    size_q: INCREASE_Q,
-                    exec_price: WINNING_MARK,
-                    fee_bps: 0,
-                }
-                .encode(),
+                data: env
+                    .trade_no_cpi_ix(trader, counterparty, 0, INCREASE_Q, WINNING_MARK, 0)
+                    .encode(),
             },
         ],
         Some(&env.payer.pubkey()),
@@ -767,4 +762,57 @@ fn v16_attack_lapsed_live_source_backing_expires_bounded_and_owner_can_reduce() 
     let done = env.market_state().1;
     assert_eq!(done.vault, vault_before);
     assert_eq!(done.vault as u64, env.token_amount(env.vault));
+}
+
+// security.md sweep — backing-bucket expiry (#33): a winner's positive pnl backed by a backing bucket
+// with an expiry. After the expiry passes, the payout must still be CONSERVING — the winner is paid at
+// most the (still-available) backing, never more, and the system never over-pays expired backing.
+// (Engine e833b7f / commit 6433346 "Expire lapsed backing at resolved close" makes the realize step
+// expire past-expiry backing instead of stranding the winner with Stale — see the prior finding.)
+#[test]
+fn v16_attack_backing_expiry_no_overpay() {
+    let mut env = V16CuEnv::new();
+    let ledger = env.backing_domain_ledger_account();
+    env.top_up_backing_bucket_with_ledger_with_cu(ledger, 1, 40, 5); // backing expires at slot 5
+    let owner = Keypair::new();
+    let p = env.create_portfolio(&owner);
+    env.deposit(&owner, p, 1_000);
+    env.add_source_positive_pnl(p, 1, 40);
+    // advance PAST the backing expiry.
+    env.svm.warp_to_slot(20);
+    let _ = env.send(
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 20,
+            observations: crank_observations(0),
+        },
+        vec![
+            AccountMeta::new(env.payer.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(p, false),
+        ],
+        &[],
+    );
+    let vault_before = env.market_state().1.vault;
+    env.resolve();
+    // two close passes to converge.
+    let mut out = 0u128;
+    for _ in 0..2 {
+        let d = env.close_resolved(&owner, p);
+        out += env.token_amount(d) as u128;
+    }
+    let (_, g) = env.market_state();
+    // winner gets at least its senior capital (1000) and at most capital + backing (1040) -- no over-pay.
+    assert!(out >= 1_000, "winner recovers at least its senior capital");
+    assert!(
+        out <= 1_040,
+        "winner paid at most capital + backing (no over-pay against expired backing): out={}",
+        out
+    );
+    assert!(g.vault <= vault_before, "vault not over-credited");
+    assert!(g.vault >= g.c_tot + g.insurance, "senior conservation");
+    assert_eq!(
+        g.vault as u64,
+        env.token_amount(env.vault),
+        "accounting == real vault"
+    );
 }
