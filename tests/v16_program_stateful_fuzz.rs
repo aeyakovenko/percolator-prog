@@ -161,6 +161,9 @@ mod inv_063_backing_expiry_normalization;
 #[path = "invariants/stateful/inv_065_reset_recovery_and_retired_state_isolation.rs"]
 mod inv_065_reset_recovery_and_retired_state_isolation;
 
+#[path = "invariants/stateful/inv_066_resolved_payout_fairness_and_order_independence.rs"]
+mod inv_066_resolved_payout_fairness_and_order_independence;
+
 #[path = "invariants/stateful/inv_067_terminal_payout_completeness_and_exact_once_settlement.rs"]
 mod inv_067_terminal_payout_completeness_and_exact_once_settlement;
 

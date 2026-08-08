@@ -28,7 +28,7 @@ INV-058	M	PARTIAL	tests/invariants/cu/inv_058_cumulative_position_oi_notional_an
 INV-059	M	PARTIAL	tests/invariants/cu/inv_059_fee_fragmentation_bound.rs#v16_attack_min_liquidation_fee_falls_back_to_full_close_progress	Episode-wide arbitrary liquidation partition comparison remains.
 INV-061	M	PARTIAL	tests/invariants/stateful/inv_061_deterministic_bounded_liquidation.rs#v16_program_resolved_adl_close_order_matrix_discovers_funded_exit_lock	Complete equal-priority leg and close-size permutation matrix remains.
 INV-064	M	PARTIAL	tests/invariants/cu/inv_064_insurance_withdrawal_policy_equivalence.rs#v16_program_terminal_insurance_withdraw_cannot_bypass_live_asset_withdrawal_policy	All withdrawal route asset and domain interleavings remain.
-INV-066	M	PARTIAL	tests/invariants/cu/inv_066_resolved_payout_fairness_and_order_independence.rs#v16_attack_resolved_two_public_winners_are_close_order_independent	Exhaustive claimant top-up receipt and authority-refinement order remains.
+INV-066	M	PARTIAL	tests/invariants/stateful/inv_066_resolved_payout_fairness_and_order_independence.rs#v16_program_full_terminal_lifecycle_is_claimant_order_independent	All 5! basic claimant orders are equivalent; top-up receipt authority-refinement and recovery orders remain.
 INV-072	M	PARTIAL	tests/invariants/cu/inv_072_order_robust_crankability.rs#v16_program_crank_hint_matrix_preserves_or_discovers_canonical_progress	Every actionable crank class and full bounded hint power set remain.
 INV-085	M	PARTIAL	tests/invariants/cu/inv_085_proven_arithmetic_equals_deployed_arithmetic.rs#v16_program_price_clamp_matches_widened_oracle_on_boundaries	Full Kani host BPF and bigint arithmetic equivalence remains.
 INV-086	M	PARTIAL	tests/invariants/stateful/inv_086_reference_model_and_deployed_transition_equivalence.rs#v16_program_reference_model_matches_deployed_public_sequence	Reference model omits identity liens payout authority resolution and lifecycle.
@@ -43,10 +43,10 @@ INV-046	R	OMITTED	-	No bounded search proves every unsafe-price state retains a 
 INV-055	R	OMITTED	-	No exhaustive instruction-by-lifecycle admission model exists.
 INV-057	R	PARTIAL	tests/invariants/stateful/inv_065_reset_recovery_and_retired_state_isolation.rs#v16_program_generated_shutdown_reaches_recovery_then_all_positions_exit	Generated public Recovery states retain owner exits; exhaustive mode reachability remains.
 INV-065	R	PARTIAL	tests/invariants/stateful/inv_065_reset_recovery_and_retired_state_isolation.rs#v16_program_generated_shutdown_reaches_recovery_then_all_positions_exit	Shutdown and generated interleavings are covered; exhaustive reset recovery and retirement reachability remains.
-INV-066	R	OMITTED	-	No exhaustive resolved claimant-order state model exists.
-INV-067	R	OMITTED	-	No exhaustive exact-once terminal claim state model exists.
+INV-066	R	PARTIAL	tests/invariants/stateful/inv_066_resolved_payout_fairness_and_order_independence.rs#v16_program_full_terminal_lifecycle_is_claimant_order_independent	Exhausts all 5! claimant orders in one two-asset zero-fee topology; top-up receipt residue and recovery states remain.
+INV-067	R	PARTIAL	tests/invariants/stateful/inv_066_resolved_payout_fairness_and_order_independence.rs#v16_program_full_terminal_lifecycle_is_claimant_order_independent	Every terminal claimant route is retried at its fixed point across all 5! orders; partial top-up replay and claim episodes remain.
 INV-069	R	OMITTED	-	No exhaustive terminal normalization and retirement state model exists.
-INV-070	R	OMITTED	-	No complete public market-lifecycle reachability model reaches CloseSlab.
+INV-070	R	PARTIAL	tests/invariants/stateful/inv_066_resolved_payout_fairness_and_order_independence.rs#v16_program_full_terminal_lifecycle_is_claimant_order_independent	A complete two-asset public lifecycle reaches CloseSlab across all 5! claimant orders; rounding recovery prior-insurance and surplus paths remain.
 INV-071	R	OMITTED	-	No exhaustive actionable-state rank graph exists at the wrapper boundary.
 INV-072	R	OMITTED	-	No exhaustive hint-set and actionable-class reachability model exists.
 INV-073	R	PARTIAL	tests/invariants/stateful/inv_065_reset_recovery_and_retired_state_isolation.rs#v16_program_generated_shutdown_reaches_recovery_then_all_positions_exit	A generated funded Recovery path exits; no bounded graph covers every reachable funded state.
