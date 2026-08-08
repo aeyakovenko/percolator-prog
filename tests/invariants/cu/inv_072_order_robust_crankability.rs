@@ -123,6 +123,267 @@ fn v16_program_permissionless_crank_bad_hints_do_not_block_later_canonical_progr
     assert_eq!(group.assets[1].slot_last, 4);
 }
 
+const INV072_MATRIX_ASSETS: usize = 3;
+const INV072_MATRIX_OPEN_SLOT: u64 = 1;
+const INV072_MATRIX_CONFIG_SLOT: u64 = 2;
+const INV072_MATRIX_CRANK_SLOT: u64 = 3;
+const INV072_MATRIX_MARK: u64 = 100;
+
+#[derive(Clone, Copy)]
+enum Inv072ExtraTail {
+    None,
+    MintReadonly,
+    MarketReadonly,
+}
+
+struct Inv072HintMatrixCase {
+    label: &'static str,
+    observations: Vec<CrankObservationHint>,
+    extra_tail: Inv072ExtraTail,
+}
+
+fn inv072_hint(asset_index: u16) -> CrankObservationHint {
+    CrankObservationHint {
+        asset_index,
+        oracle_accounts: 0,
+    }
+}
+
+fn inv072_hint_with_accounts(asset_index: u16, oracle_accounts: u8) -> CrankObservationHint {
+    CrankObservationHint {
+        asset_index,
+        oracle_accounts,
+    }
+}
+
+fn inv072_pending_rank(group: &MarketGroupV16) -> u64 {
+    (0..INV072_MATRIX_ASSETS)
+        .map(|asset_index| {
+            INV072_MATRIX_CRANK_SLOT.saturating_sub(group.assets[asset_index].slot_last)
+        })
+        .sum()
+}
+
+fn inv072_honest_observations_for_remaining(env: &V16CuEnv) -> Vec<CrankObservationHint> {
+    let (_, group) = env.market_state();
+    (0..INV072_MATRIX_ASSETS)
+        .filter(|&asset_index| group.assets[asset_index].slot_last < INV072_MATRIX_CRANK_SLOT)
+        .map(|asset_index| inv072_hint(asset_index as u16))
+        .collect()
+}
+
+fn inv072_three_asset_pending_auth_mark_world() -> (V16CuEnv, Pubkey) {
+    let mut env = V16CuEnv::new();
+    for asset_index in 1..INV072_MATRIX_ASSETS {
+        let open_slot = INV072_MATRIX_OPEN_SLOT + asset_index as u64 - 1;
+        env.activate_asset(asset_index as u16, open_slot, INV072_MATRIX_MARK);
+    }
+    for asset_index in 0..INV072_MATRIX_ASSETS {
+        env.configure_auth_mark_for_asset_as_admin(
+            asset_index as u16,
+            INV072_MATRIX_CONFIG_SLOT,
+            INV072_MATRIX_MARK + asset_index as u64,
+        );
+    }
+
+    let owner = Keypair::new();
+    let portfolio = env.create_portfolio(&owner);
+    env.svm.warp_to_slot(INV072_MATRIX_CRANK_SLOT);
+    for asset_index in 0..INV072_MATRIX_ASSETS {
+        env.push_auth_mark_for_asset_as_admin(
+            asset_index as u16,
+            INV072_MATRIX_CRANK_SLOT,
+            INV072_MATRIX_MARK + 100 + asset_index as u64,
+        );
+    }
+
+    let (_, group) = env.market_state();
+    for asset_index in 0..INV072_MATRIX_ASSETS {
+        assert!(
+            group.assets[asset_index].slot_last < INV072_MATRIX_CRANK_SLOT,
+            "setup must stage asset {asset_index} as publicly crankable"
+        );
+    }
+    assert!(
+        inv072_pending_rank(&group) > 0,
+        "setup must expose non-vacuous crank rank"
+    );
+
+    (env, portfolio)
+}
+
+fn inv072_crank_accounts(
+    env: &V16CuEnv,
+    portfolio: Pubkey,
+    extra_tail: Inv072ExtraTail,
+) -> Vec<AccountMeta> {
+    let mut accounts = vec![
+        AccountMeta::new(env.payer.pubkey(), true),
+        AccountMeta::new(env.market, false),
+        AccountMeta::new(portfolio, false),
+    ];
+    match extra_tail {
+        Inv072ExtraTail::None => {}
+        Inv072ExtraTail::MintReadonly => {
+            accounts.push(AccountMeta::new_readonly(env.mint, false));
+        }
+        Inv072ExtraTail::MarketReadonly => {
+            accounts.push(AccountMeta::new_readonly(env.market, false));
+        }
+    }
+    accounts
+}
+
+#[test]
+fn v16_program_crank_hint_matrix_preserves_or_discovers_canonical_progress() {
+    let cases = vec![
+        Inv072HintMatrixCase {
+            label: "single leading subset",
+            observations: vec![inv072_hint(0)],
+            extra_tail: Inv072ExtraTail::None,
+        },
+        Inv072HintMatrixCase {
+            label: "single middle subset",
+            observations: vec![inv072_hint(1)],
+            extra_tail: Inv072ExtraTail::None,
+        },
+        Inv072HintMatrixCase {
+            label: "sparse reversed subset",
+            observations: vec![inv072_hint(2), inv072_hint(0)],
+            extra_tail: Inv072ExtraTail::None,
+        },
+        Inv072HintMatrixCase {
+            label: "full reverse permutation",
+            observations: vec![inv072_hint(2), inv072_hint(1), inv072_hint(0)],
+            extra_tail: Inv072ExtraTail::None,
+        },
+        Inv072HintMatrixCase {
+            label: "adjacent duplicate",
+            observations: vec![inv072_hint(0), inv072_hint(0), inv072_hint(1)],
+            extra_tail: Inv072ExtraTail::None,
+        },
+        Inv072HintMatrixCase {
+            label: "separated duplicate",
+            observations: vec![inv072_hint(1), inv072_hint(2), inv072_hint(1)],
+            extra_tail: Inv072ExtraTail::None,
+        },
+        Inv072HintMatrixCase {
+            label: "valid then out-of-range",
+            observations: vec![inv072_hint(0), inv072_hint(3)],
+            extra_tail: Inv072ExtraTail::None,
+        },
+        Inv072HintMatrixCase {
+            label: "out-of-range then valid",
+            observations: vec![inv072_hint(3), inv072_hint(1)],
+            extra_tail: Inv072ExtraTail::None,
+        },
+        Inv072HintMatrixCase {
+            label: "declared oracle tail missing after valid asset",
+            observations: vec![inv072_hint_with_accounts(0, 1), inv072_hint(1)],
+            extra_tail: Inv072ExtraTail::None,
+        },
+        Inv072HintMatrixCase {
+            label: "declared oracle tail is non-oracle account",
+            observations: vec![inv072_hint_with_accounts(0, 1), inv072_hint(1)],
+            extra_tail: Inv072ExtraTail::MintReadonly,
+        },
+        Inv072HintMatrixCase {
+            label: "unclaimed duplicate-market account tail",
+            observations: vec![inv072_hint(2), inv072_hint(1)],
+            extra_tail: Inv072ExtraTail::MarketReadonly,
+        },
+    ];
+
+    for case in cases {
+        let (mut env, portfolio) = inv072_three_asset_pending_auth_mark_world();
+        let market_before = env.svm.get_account(&env.market).unwrap();
+        let portfolio_before = env.svm.get_account(&portfolio).unwrap();
+        let vault_before = env.svm.get_account(&env.vault).unwrap();
+        let vault_tokens_before = env.token_amount(env.vault);
+        let (_, before_group) = env.market_state();
+        let rank_before = inv072_pending_rank(&before_group);
+        assert!(rank_before > 0, "{label}: setup rank", label = case.label);
+
+        env.svm.expire_blockhash();
+        let attempted = env.send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: INV072_MATRIX_CRANK_SLOT,
+                observations: case.observations,
+            },
+            inv072_crank_accounts(&env, portfolio, case.extra_tail),
+            &[],
+        );
+
+        let rank_after_attempt = if attempted.is_err() {
+            assert_eq!(
+                env.svm.get_account(&env.market).unwrap(),
+                market_before,
+                "{label}: rejected hostile hints must roll back market exactly",
+                label = case.label,
+            );
+            assert_eq!(
+                env.svm.get_account(&portfolio).unwrap(),
+                portfolio_before,
+                "{label}: rejected hostile hints must roll back portfolio exactly",
+                label = case.label,
+            );
+            assert_eq!(
+                env.svm.get_account(&env.vault).unwrap(),
+                vault_before,
+                "{label}: rejected hostile hints must not touch custody",
+                label = case.label,
+            );
+            rank_before
+        } else {
+            let (_, after_group) = env.market_state();
+            let rank_after = inv072_pending_rank(&after_group);
+            assert!(
+                rank_after < rank_before,
+                "{label}: accepted hint schedule must make rank-decreasing market progress ({rank_before} -> {rank_after})",
+                label = case.label,
+            );
+            assert_eq!(
+                env.token_amount(env.vault),
+                vault_tokens_before,
+                "{label}: progress-only crank must not move custody",
+                label = case.label,
+            );
+            rank_after
+        };
+
+        if rank_after_attempt > 0 {
+            let honest_observations = inv072_honest_observations_for_remaining(&env);
+            assert!(
+                !honest_observations.is_empty(),
+                "{label}: positive rank must expose at least one honest hint",
+                label = case.label,
+            );
+            env.crank_steps_after_market_catchup(
+                portfolio,
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: INV072_MATRIX_CRANK_SLOT,
+                    observations: honest_observations,
+                },
+                1,
+            );
+        }
+
+        let (_, final_group) = env.market_state();
+        assert_eq!(
+            inv072_pending_rank(&final_group),
+            0,
+            "{label}: honest follow-up must discover canonical completion",
+            label = case.label,
+        );
+        assert_eq!(
+            env.token_amount(env.vault),
+            vault_tokens_before,
+            "{label}: hostile attempt plus honest follow-up must not move custody",
+            label = case.label,
+        );
+    }
+}
+
 #[test]
 fn v16_program_bad_hints_cannot_block_public_expired_close_recovery() {
     let PublicActiveCloseFixture { mut env, loss, .. } = public_asset1_bankrupt_close_fixture();

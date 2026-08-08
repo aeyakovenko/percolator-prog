@@ -1211,6 +1211,28 @@ pub enum Action {
         actor: u8,
         dt: u8,
     },
+    SetMatcherConfig {
+        actor: u8,
+        enabled: bool,
+        trade_fee_cap_bps: u16,
+    },
+    TopUpInsurance {
+        domain: u8,
+        amount: u16,
+    },
+    TopUpBacking {
+        domain: u8,
+        amount: u16,
+        expiry_delta: u8,
+    },
+    ConvertReleasedPnl {
+        actor: u8,
+        amount: u16,
+    },
+    RebalanceReduce {
+        actor: u8,
+        asset: u8,
+    },
     CrossMarketSubstitution {
         actor: u8,
     },
@@ -1277,6 +1299,12 @@ pub struct Coverage {
     pub mark_updates: u64,
     pub oracle_reconfigs: u64,
     pub maintenance_syncs: u64,
+    pub extended_action_attempts: [u64; 5],
+    pub matcher_config_updates: u64,
+    pub insurance_topups: u64,
+    pub backing_topups: u64,
+    pub pnl_conversions: u64,
+    pub rebalance_reductions: u64,
     pub deposits: u64,
     pub withdrawals: u64,
     pub token_frame_checks: u64,
@@ -1301,6 +1329,12 @@ impl Default for Coverage {
             mark_updates: 0,
             oracle_reconfigs: 0,
             maintenance_syncs: 0,
+            extended_action_attempts: [0; 5],
+            matcher_config_updates: 0,
+            insurance_topups: 0,
+            backing_topups: 0,
+            pnl_conversions: 0,
+            rebalance_reductions: 0,
             deposits: 0,
             withdrawals: 0,
             token_frame_checks: 0,
@@ -1383,6 +1417,18 @@ impl Coverage {
         self.mark_updates += other.mark_updates;
         self.oracle_reconfigs += other.oracle_reconfigs;
         self.maintenance_syncs += other.maintenance_syncs;
+        for (target, value) in self
+            .extended_action_attempts
+            .iter_mut()
+            .zip(other.extended_action_attempts)
+        {
+            *target += value;
+        }
+        self.matcher_config_updates += other.matcher_config_updates;
+        self.insurance_topups += other.insurance_topups;
+        self.backing_topups += other.backing_topups;
+        self.pnl_conversions += other.pnl_conversions;
+        self.rebalance_reductions += other.rebalance_reductions;
         self.deposits += other.deposits;
         self.withdrawals += other.withdrawals;
         self.token_frame_checks += other.token_frame_checks;
@@ -1614,6 +1660,7 @@ struct Snapshot {
     backing_domain_ledger: Vec<u8>,
     token_accounts: Vec<(Pubkey, Vec<u8>)>,
     matcher_contexts: Vec<Vec<u8>>,
+    economic_account_lamports: Vec<(Pubkey, u64)>,
 }
 
 struct RetainedTrade {
@@ -1727,7 +1774,7 @@ impl ScenarioRunner {
     }
 
     pub fn run_direct_user_exit_campaign(&mut self) -> Result<(), String> {
-        for user in 0..USER_COUNT {
+        for user in 0..PRIMARY_ACTOR_COUNT {
             for asset in 0..ASSET_COUNT {
                 if self.positions[user][asset] == 0 {
                     continue;
@@ -1884,7 +1931,11 @@ impl ScenarioRunner {
         if let Some(error) = self.last_trade_rejection.clone() {
             rejections.push(error);
         }
-        if self.try_dead_leg_forfeit_exit(user, asset, size)? {
+        let size_after_rebalance = self.positions[user][asset];
+        if size_after_rebalance == 0 {
+            return Ok(true);
+        }
+        if self.try_dead_leg_forfeit_exit(user, asset, size_after_rebalance)? {
             return Ok(true);
         }
         if let Some(error) = self.last_trade_rejection.clone() {
@@ -2015,7 +2066,7 @@ impl ScenarioRunner {
                     && candidate_size.unsigned_abs() >= size.unsigned_abs()
             })
             .collect();
-        if !counterparties.contains(&EXIT_MAKER_INDEX) {
+        if user != EXIT_MAKER_INDEX && !counterparties.contains(&EXIT_MAKER_INDEX) {
             counterparties.push(EXIT_MAKER_INDEX);
         }
         counterparties
@@ -2241,6 +2292,135 @@ impl ScenarioRunner {
                         self.assert_no_token_side_effects(&before)?;
                     }
                     Err(_) => self.assert_snapshot_unchanged(&before)?,
+                }
+                Ok(())
+            }
+            Action::SetMatcherConfig {
+                actor,
+                enabled,
+                trade_fee_cap_bps,
+            } => {
+                self.coverage.extended_action_attempts[0] += 1;
+                let actor = actor as usize % PRIMARY_ACTOR_COUNT;
+                let before = self.snapshot();
+                match self.env.set_matcher_config_with_trade_fee_cap(
+                    actor,
+                    u8::from(enabled),
+                    if enabled {
+                        trade_fee_cap_bps.min(10_000)
+                    } else {
+                        0
+                    },
+                ) {
+                    Ok(success) => {
+                        self.coverage.matcher_config_updates += 1;
+                        self.coverage.observe_success(None, &success);
+                        self.assert_portfolio_frame(&before, &[actor])?;
+                        self.assert_no_token_side_effects(&before)?;
+                    }
+                    Err(_) => self.assert_snapshot_unchanged(&before)?,
+                }
+                Ok(())
+            }
+            Action::TopUpInsurance { domain, amount } => {
+                self.coverage.extended_action_attempts[1] += 1;
+                let domain = u16::from(domain) % (ASSET_COUNT as u16 * 2);
+                let amount = u128::from(amount.max(1));
+                let before = self.snapshot();
+                let source_before =
+                    u128::from(self.env.token_amount(self.env.provider_source_token));
+                let vault_before = u128::from(self.env.token_amount(self.env.vault));
+                match self.env.top_up_insurance_domain(domain, amount) {
+                    Ok(success) => {
+                        self.coverage.insurance_topups += 1;
+                        self.coverage.observe_success(None, &success);
+                        self.assert_portfolio_frame(&before, &[])?;
+                        let source_after =
+                            u128::from(self.env.token_amount(self.env.provider_source_token));
+                        let vault_after = u128::from(self.env.token_amount(self.env.vault));
+                        if source_after.checked_add(amount) != Some(source_before)
+                            || vault_before.checked_add(amount) != Some(vault_after)
+                        {
+                            return Err(
+                                "insurance top-up did not preserve exact source/vault deltas"
+                                    .into(),
+                            );
+                        }
+                        self.assert_token_frame(
+                            &before,
+                            &[self.env.provider_source_token, self.env.vault],
+                        )?;
+                    }
+                    Err(_) => self.assert_snapshot_unchanged(&before)?,
+                }
+                Ok(())
+            }
+            Action::TopUpBacking {
+                domain,
+                amount,
+                expiry_delta,
+            } => {
+                self.coverage.extended_action_attempts[2] += 1;
+                let domain = u16::from(domain) % (ASSET_COUNT as u16 * 2);
+                let amount = u128::from(amount.max(1));
+                let expiry_slot = self
+                    .env
+                    .current_slot()
+                    .checked_add(u64::from(expiry_delta))
+                    .ok_or("backing expiry overflow")?;
+                let before = self.snapshot();
+                let source_before =
+                    u128::from(self.env.token_amount(self.env.provider_source_token));
+                let vault_before = u128::from(self.env.token_amount(self.env.vault));
+                match self.env.top_up_backing_bucket(domain, amount, expiry_slot) {
+                    Ok(success) => {
+                        self.coverage.backing_topups += 1;
+                        self.coverage.observe_success(None, &success);
+                        self.assert_portfolio_frame(&before, &[])?;
+                        let source_after =
+                            u128::from(self.env.token_amount(self.env.provider_source_token));
+                        let vault_after = u128::from(self.env.token_amount(self.env.vault));
+                        if source_after.checked_add(amount) != Some(source_before)
+                            || vault_before.checked_add(amount) != Some(vault_after)
+                        {
+                            return Err(
+                                "backing top-up did not preserve exact source/vault deltas".into(),
+                            );
+                        }
+                        self.assert_token_frame(
+                            &before,
+                            &[self.env.provider_source_token, self.env.vault],
+                        )?;
+                    }
+                    Err(_) => self.assert_snapshot_unchanged(&before)?,
+                }
+                Ok(())
+            }
+            Action::ConvertReleasedPnl { actor, amount } => {
+                self.coverage.extended_action_attempts[3] += 1;
+                let actor = actor as usize % PRIMARY_ACTOR_COUNT;
+                let before = self.snapshot();
+                match self
+                    .env
+                    .convert_released_pnl(actor, u128::from(amount.max(1)))
+                {
+                    Ok(success) => {
+                        self.coverage.pnl_conversions += 1;
+                        self.coverage.observe_success(None, &success);
+                        self.assert_portfolio_frame(&before, &[actor])?;
+                        self.assert_no_token_side_effects(&before)?;
+                    }
+                    Err(_) => self.assert_snapshot_unchanged(&before)?,
+                }
+                Ok(())
+            }
+            Action::RebalanceReduce { actor, asset } => {
+                self.coverage.extended_action_attempts[4] += 1;
+                let actor = actor as usize % PRIMARY_ACTOR_COUNT;
+                let asset = asset as usize % ASSET_COUNT;
+                let size_before = self.positions[actor][asset];
+                if size_before != 0 && self.try_rebalance_exit(actor, asset, size_before)? {
+                    self.coverage.rebalance_reductions += 1;
                 }
                 Ok(())
             }
@@ -3335,15 +3515,25 @@ impl ScenarioRunner {
                 && !asset_has_stale_leg[asset]
                 && engine_asset.pending_obligation_count_long == 0
                 && engine_asset.pending_obligation_count_short == 0
+                && engine_asset.mode_long == SideModeV16::Normal
+                && engine_asset.mode_short == SideModeV16::Normal
                 && (observed_long_oi[asset] != engine_asset.oi_eff_long_q
                     || observed_short_oi[asset] != engine_asset.oi_eff_short_q)
             {
                 return Err(format!(
-                    "asset {asset} effective OI {}/{} != current-leg sum {}/{}",
+                    "asset {asset} effective OI {}/{} != current-leg sum {}/{}; market={:?}, \
+                     lifecycle={:?}, side_modes={:?}/{:?}, pending={}/{}, protocol_position={}",
                     engine_asset.oi_eff_long_q,
                     engine_asset.oi_eff_short_q,
                     observed_long_oi[asset],
-                    observed_short_oi[asset]
+                    observed_short_oi[asset],
+                    group.mode,
+                    engine_asset.lifecycle,
+                    engine_asset.mode_long,
+                    engine_asset.mode_short,
+                    engine_asset.pending_obligation_count_long,
+                    engine_asset.pending_obligation_count_short,
+                    self.protocol_positions[asset],
                 ));
             }
             let user_net: i128 = observed.iter().map(|positions| positions[asset]).sum();
@@ -3353,8 +3543,8 @@ impl ScenarioRunner {
             if net != 0 {
                 return Err(format!(
                     "asset {asset} position attribution diverged: users={user_net}, \
-                     protocol={}, net={net}",
-                    self.protocol_positions[asset]
+                     protocol={}, net={net}; observed={observed:?}, ghost={:?}",
+                    self.protocol_positions[asset], self.positions
                 ));
             }
         }
@@ -3485,6 +3675,7 @@ impl ScenarioRunner {
             backing_domain_ledger: self.env.backing_domain_ledger_data(),
             token_accounts: self.env.all_token_account_data(),
             matcher_contexts: self.env.all_matcher_context_data(),
+            economic_account_lamports: self.env.all_economic_account_lamports(),
         }
     }
 
@@ -3552,8 +3743,11 @@ impl ScenarioRunner {
             || before.backing_domain_ledger != self.env.backing_domain_ledger_data()
             || before.token_accounts != self.env.all_token_account_data()
             || before.matcher_contexts != self.env.all_matcher_context_data()
+            || before.economic_account_lamports != self.env.all_economic_account_lamports()
         {
-            return Err("rejected substituted transaction changed economic state".into());
+            return Err(
+                "rejected public transaction changed account bytes, tokens, or lamports".into(),
+            );
         }
         Ok(())
     }
@@ -17432,6 +17626,26 @@ fn action_strategy() -> impl Strategy<Value = Action> {
             .prop_map(|(actor, amount)| Action::Withdraw { actor, amount }),
         2 => (any::<u8>(), 1u8..=4)
             .prop_map(|(actor, dt)| Action::SyncMaintenanceFee { actor, dt }),
+        2 => (any::<u8>(), any::<bool>(), 0u16..=10_000).prop_map(
+            |(actor, enabled, trade_fee_cap_bps)| Action::SetMatcherConfig {
+                actor,
+                enabled,
+                trade_fee_cap_bps,
+            },
+        ),
+        2 => (any::<u8>(), 1u16..=500)
+            .prop_map(|(domain, amount)| Action::TopUpInsurance { domain, amount }),
+        2 => (any::<u8>(), 1u16..=500, 128u8..=u8::MAX).prop_map(
+            |(domain, amount, expiry_delta)| Action::TopUpBacking {
+                domain,
+                amount,
+                expiry_delta,
+            },
+        ),
+        2 => (any::<u8>(), 1u16..=500)
+            .prop_map(|(actor, amount)| Action::ConvertReleasedPnl { actor, amount }),
+        2 => (any::<u8>(), any::<u8>())
+            .prop_map(|(actor, asset)| Action::RebalanceReduce { actor, asset }),
         2 => any::<u8>().prop_map(|actor| Action::CrossMarketSubstitution { actor }),
         2 => (
             any::<u8>(),

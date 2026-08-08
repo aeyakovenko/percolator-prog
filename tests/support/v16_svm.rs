@@ -3696,6 +3696,29 @@ impl V16Svm {
             .unwrap_or(0)
     }
 
+    pub fn all_economic_account_lamports(&self) -> Vec<(Pubkey, u64)> {
+        let mut keys = vec![
+            self.market,
+            self.foreign_market,
+            self.mint,
+            self.backing_domain_ledger,
+        ];
+        keys.extend(self.token_accounts.iter().copied());
+        for actor in &self.actors {
+            keys.extend([
+                actor.portfolio,
+                actor.matcher_context,
+                actor.matcher_delegate,
+            ]);
+        }
+        keys.push(self.foreign_actor.portfolio);
+        keys.sort_unstable_by_key(|key| key.to_bytes());
+        keys.dedup();
+        keys.into_iter()
+            .map(|key| (key, self.account_lamports(key)))
+            .collect()
+    }
+
     pub fn token_supply_observed(&self) -> u128 {
         self.token_accounts
             .iter()

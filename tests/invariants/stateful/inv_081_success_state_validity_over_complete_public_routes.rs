@@ -4,12 +4,14 @@
 //!
 //! Evidence in this file (F over public I routes): `v16_program_stateful_public_interface_fuzz`
 //! generates deposits, withdrawals, all four trade routes, retained transactions, oracle changes,
-//! cranks, fee synchronization, and hostile account substitution. After every public transition it
-//! independently rejects undecodable or hidden legs, duplicate same-asset legs, stale generation
-//! bindings, source-lien classification mismatches, stored-position/OI drift, and net-position
-//! drift. Successful non-token routes must preserve every tracked SPL account byte-for-byte;
-//! deposits and withdrawals may mutate only their canonical source/destination and vault, with
-//! exact authorized deltas. Every rejected route must roll back all tracked economic state.
+//! cranks, fee synchronization, matcher-capability changes, insurance/backing top-ups, released-PnL
+//! conversion, unilateral rebalance reduction, and hostile account substitution. After every public
+//! transition it independently rejects undecodable or hidden legs, duplicate same-asset legs, stale
+//! generation bindings, source-lien classification mismatches, stored-position/OI drift, and
+//! net-position drift. Successful non-token routes must preserve every tracked SPL account
+//! byte-for-byte; value routes may mutate only their canonical source/destination and vault, with
+//! exact authorized deltas. Every rejected route must roll back all tracked program bytes, SPL
+//! data, and economic-account lamports.
 //!
 //! Secondary coverage: INV-024, INV-031, INV-034, INV-048, INV-049, INV-051, and INV-080. The OI
 //! oracle always checks live long/short equality, effective OI cannot exceed the complete raw-leg
@@ -23,6 +25,103 @@
 //! plus every additional verification method required by the charter.
 
 use super::*;
+
+#[test]
+fn v16_program_designated_liquidity_provider_has_public_exit_after_unilateral_reduction() {
+    let scenario = Scenario {
+        seed: [0x18; 32],
+        config: SmallMarketConfig {
+            max_price_move_bps_per_slot: 1_000,
+            max_accrual_dt_slots: 4,
+            max_abs_funding_e9_per_slot: 0,
+            maintenance_fee_per_slot: 0,
+        },
+        actions: vec![Action::RebalanceReduce { actor: 3, asset: 0 }],
+    };
+
+    let coverage = run_scenario(&scenario)
+        .expect("every modeled portfolio, including the exit-liquidity provider, must exit");
+    assert_ne!(
+        coverage.rebalance_reductions, 0,
+        "setup must execute a real unilateral reduction"
+    );
+    assert_ne!(
+        coverage.user_positions_closed, 0,
+        "the resulting asymmetric portfolio set must reach public terminal exits"
+    );
+}
+
+#[test]
+fn v16_program_extended_public_action_alphabet_runs_through_shared_oracles() {
+    let scenario = Scenario {
+        seed: [0x81; 32],
+        config: SmallMarketConfig::default(),
+        actions: vec![
+            Action::SetMatcherConfig {
+                actor: 0,
+                enabled: false,
+                trade_fee_cap_bps: 0,
+            },
+            Action::TopUpInsurance {
+                domain: 0,
+                amount: 7,
+            },
+            Action::TopUpBacking {
+                domain: 1,
+                amount: 500,
+                expiry_delta: 200,
+            },
+            Action::RebalanceReduce { actor: 0, asset: 2 },
+            Action::PushMark {
+                asset: 0,
+                dt: 4,
+                move_bps: 500,
+            },
+            Action::Trade {
+                route: TradeRoute::NoCpi,
+                taker: 0,
+                maker: 1,
+                asset: 0,
+                units: 1,
+                fee_bps: 0,
+                price_move_bps: 0,
+                prefer_reduce: true,
+            },
+            Action::Trade {
+                route: TradeRoute::NoCpi,
+                taker: 0,
+                maker: 1,
+                asset: 1,
+                units: 1,
+                fee_bps: 0,
+                price_move_bps: 0,
+                prefer_reduce: true,
+            },
+            Action::Crank {
+                actor: 0,
+                hints: HintMode::Complete,
+            },
+            Action::ConvertReleasedPnl {
+                actor: 0,
+                amount: 2_000,
+            },
+        ],
+    };
+
+    let coverage = run_scenario(&scenario).expect("extended public action scenario");
+    assert!(
+        coverage
+            .extended_action_attempts
+            .iter()
+            .all(|attempts| *attempts != 0),
+        "every added public action class must execute through the shared success/rollback oracle: {coverage:?}"
+    );
+    assert!(coverage.matcher_config_updates != 0);
+    assert!(coverage.insurance_topups != 0);
+    assert!(coverage.backing_topups != 0);
+    assert!(coverage.pnl_conversions != 0);
+    assert!(coverage.rebalance_reductions != 0);
+}
 
 proptest! {
     #![proptest_config(ProptestConfig {

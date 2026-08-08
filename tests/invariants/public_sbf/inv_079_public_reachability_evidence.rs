@@ -560,6 +560,307 @@ fn source_defines_test(source: &str, function: &str) -> bool {
     false
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PublicInstructionRoute {
+    tag: u8,
+    variant: String,
+}
+
+#[derive(Debug)]
+struct PublicInstructionCoverageRow<'a> {
+    tag: u8,
+    variant: &'a str,
+    public_route_coverage: &'a str,
+    cu_coverage: &'a str,
+    omission_reason: &'a str,
+}
+
+#[test]
+fn v16_public_instruction_coverage_registry_matches_production_roster() {
+    let production_roster =
+        production_public_instruction_roster(include_str!("../../../src/v16_program.rs"));
+    let registry = parse_public_instruction_coverage_registry(include_str!(
+        "../public_instruction_coverage.tsv"
+    ));
+
+    let registry_roster: Vec<PublicInstructionRoute> = registry
+        .iter()
+        .map(|row| PublicInstructionRoute {
+            tag: row.tag,
+            variant: row.variant.to_string(),
+        })
+        .collect();
+
+    assert_eq!(
+        registry_roster, production_roster,
+        "public instruction coverage registry must have exactly one row per production \
+         ProgInstruction tag/variant"
+    );
+}
+
+fn production_public_instruction_roster(source: &str) -> Vec<PublicInstructionRoute> {
+    let variants = instruction_enum_variants(source);
+    let tags = instruction_decode_tags(source);
+    assert_eq!(
+        variants.len(),
+        tags.len(),
+        "every Instruction enum variant must have a decode tag"
+    );
+
+    let mut roster = Vec::with_capacity(variants.len());
+    for variant in variants {
+        let tag = tags
+            .get(&variant)
+            .unwrap_or_else(|| panic!("Instruction::{variant} lacks a decode tag"));
+        roster.push(PublicInstructionRoute { tag: *tag, variant });
+    }
+    roster.sort_by_key(|route| route.tag);
+    roster
+}
+
+fn instruction_enum_variants(source: &str) -> Vec<String> {
+    let block = braced_block_after(source, "pub enum Instruction");
+    let mut variants = Vec::new();
+    let mut depth = 0i32;
+
+    for raw_line in block.lines() {
+        let line = raw_line.split("//").next().unwrap_or("").trim();
+        if depth == 0 {
+            let name: String = line
+                .chars()
+                .take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '_')
+                .collect();
+            if name
+                .chars()
+                .next()
+                .is_some_and(|ch| ch.is_ascii_alphabetic())
+            {
+                variants.push(name);
+            }
+        }
+        depth += brace_delta(line);
+        assert!(depth >= 0, "Instruction enum parser underflowed at {line}");
+    }
+    assert_eq!(depth, 0, "Instruction enum parser ended inside a variant");
+    variants
+}
+
+fn instruction_decode_tags(source: &str) -> std::collections::BTreeMap<String, u8> {
+    let block = braced_block_after(source, "pub fn decode(input: &[u8])");
+    let mut tags = std::collections::BTreeMap::new();
+    let mut pending_tag = None;
+
+    for raw_line in block.lines() {
+        let line = raw_line.split("//").next().unwrap_or("").trim();
+        if let Some((tag, tail)) = parse_decode_tag_arm(line) {
+            if let Some(variant) = self_variant_name(tail) {
+                assert!(
+                    tags.insert(variant.clone(), tag).is_none(),
+                    "duplicate decode tag for Instruction::{variant}"
+                );
+                pending_tag = None;
+            } else {
+                pending_tag = Some(tag);
+            }
+            continue;
+        }
+
+        if let Some(tag) = pending_tag {
+            if let Some(variant) = self_variant_name(line) {
+                assert!(
+                    tags.insert(variant.clone(), tag).is_none(),
+                    "duplicate decode tag for Instruction::{variant}"
+                );
+                pending_tag = None;
+            }
+        }
+    }
+
+    tags
+}
+
+fn braced_block_after<'a>(source: &'a str, marker: &str) -> &'a str {
+    let start = source
+        .find(marker)
+        .unwrap_or_else(|| panic!("missing source marker {marker}"));
+    let open = start
+        + source[start..]
+            .find('{')
+            .unwrap_or_else(|| panic!("missing opening brace after {marker}"));
+    let mut depth = 0i32;
+    for (offset, ch) in source[open..].char_indices() {
+        match ch {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return &source[(open + 1)..(open + offset)];
+                }
+            }
+            _ => {}
+        }
+    }
+    panic!("unterminated source block after {marker}");
+}
+
+fn brace_delta(line: &str) -> i32 {
+    line.chars().filter(|ch| *ch == '{').count() as i32
+        - line.chars().filter(|ch| *ch == '}').count() as i32
+}
+
+fn parse_decode_tag_arm(line: &str) -> Option<(u8, &str)> {
+    let (raw_tag, tail) = line.split_once("=>")?;
+    let raw_tag = raw_tag.trim();
+    if raw_tag.chars().all(|ch| ch.is_ascii_digit()) {
+        Some((raw_tag.parse().expect("decode tag fits in u8"), tail.trim()))
+    } else {
+        None
+    }
+}
+
+fn self_variant_name(line: &str) -> Option<String> {
+    let tail = line.split_once("Self::")?.1;
+    let name: String = tail
+        .chars()
+        .take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '_')
+        .collect();
+    (!name.is_empty()).then_some(name)
+}
+
+fn parse_public_instruction_coverage_registry(tsv: &str) -> Vec<PublicInstructionCoverageRow<'_>> {
+    const HEADER: &str = "tag\tvariant\tpublic_route_coverage\tcu_coverage\tomission_reason";
+    let mut rows = Vec::new();
+    let mut seen_tags = std::collections::BTreeSet::new();
+    let mut seen_variants = std::collections::BTreeSet::new();
+    let mut prior_tag = None;
+    let mut saw_header = false;
+
+    for (line_index, line) in tsv.lines().enumerate() {
+        if line.starts_with('#') || line.is_empty() {
+            continue;
+        }
+        if !saw_header {
+            assert_eq!(line, HEADER, "public instruction registry header changed");
+            saw_header = true;
+            continue;
+        }
+
+        let fields: Vec<_> = line.split('\t').collect();
+        assert_eq!(
+            fields.len(),
+            5,
+            "malformed public instruction registry row {}: {line}",
+            line_index + 1
+        );
+        let tag: u8 = fields[0]
+            .parse()
+            .unwrap_or_else(|_| panic!("non-numeric instruction tag on row {}", line_index + 1));
+        let row = PublicInstructionCoverageRow {
+            tag,
+            variant: fields[1],
+            public_route_coverage: fields[2],
+            cu_coverage: fields[3],
+            omission_reason: fields[4],
+        };
+
+        if let Some(prior) = prior_tag {
+            assert!(
+                row.tag > prior,
+                "public instruction registry rows must be sorted by tag"
+            );
+        }
+        prior_tag = Some(row.tag);
+        assert!(
+            seen_tags.insert(row.tag),
+            "duplicate public instruction tag {}",
+            row.tag
+        );
+        assert!(
+            seen_variants.insert(row.variant),
+            "duplicate public instruction variant {}",
+            row.variant
+        );
+        assert!(
+            row.variant
+                .chars()
+                .next()
+                .is_some_and(|ch| ch.is_ascii_uppercase()),
+            "variant names must be Rust enum variants: {}",
+            row.variant
+        );
+
+        let public_omitted = validate_public_instruction_coverage_cell(
+            row.public_route_coverage,
+            "public_route_coverage",
+            row.variant,
+        );
+        let cu_omitted =
+            validate_public_instruction_coverage_cell(row.cu_coverage, "cu_coverage", row.variant);
+        if public_omitted || cu_omitted {
+            assert!(
+                !matches!(row.omission_reason, "" | "-"),
+                "{} omits coverage but lacks an explicit omission reason",
+                row.variant
+            );
+        } else {
+            assert_eq!(
+                row.omission_reason, "-",
+                "{} has no omitted coverage; keep omission_reason as '-'",
+                row.variant
+            );
+        }
+        rows.push(row);
+    }
+
+    assert!(!rows.is_empty(), "public instruction registry is empty");
+    rows
+}
+
+fn validate_public_instruction_coverage_cell(cell: &str, column: &str, variant: &str) -> bool {
+    if cell == "OMITTED" {
+        return true;
+    }
+
+    for evidence in cell.split(';') {
+        let (kind, rest) = evidence
+            .split_once(':')
+            .unwrap_or_else(|| panic!("{variant} {column} evidence lacks prefix: {evidence}"));
+        assert!(
+            matches!(kind, "OWNED" | "SHARED" | "CROSS"),
+            "{variant} {column} has unknown evidence prefix {kind}"
+        );
+        let (path, function) = rest
+            .split_once('#')
+            .unwrap_or_else(|| panic!("{variant} {column} evidence lacks function: {evidence}"));
+        assert!(
+            path.starts_with("tests/invariants/") && path.ends_with(".rs"),
+            "{variant} {column} evidence must stay under tests/invariants: {path}"
+        );
+        assert!(
+            function.starts_with("v16_"),
+            "{variant} {column} evidence must name a v16 test function: {function}"
+        );
+        let full_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(path);
+        let source = std::fs::read_to_string(&full_path)
+            .unwrap_or_else(|error| panic!("read evidence source {path}: {error}"));
+        assert!(
+            source_defines_function(&source, function),
+            "{variant} {column} evidence {path} does not define fn {function}"
+        );
+    }
+
+    false
+}
+
+fn source_defines_function(source: &str, function: &str) -> bool {
+    let expected = format!("fn {function}");
+    source.lines().any(|line| {
+        line.trim_start()
+            .strip_prefix(&expected)
+            .is_some_and(|tail| tail.trim_start().starts_with('('))
+    })
+}
+
 fn invariant_ids(markdown: &str, prefix: &str) -> Vec<u16> {
     markdown
         .lines()

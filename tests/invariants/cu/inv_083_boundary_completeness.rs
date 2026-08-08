@@ -6,10 +6,152 @@
 //!
 //! Evidence in this file (I/C): oversized batch leg vectors at the public decode
 //! boundary reject as instruction data errors rather than allocating a large
-//! vector or panicking the SBF program. Other boundary cases are distributed in
+//! vector or panicking the SBF program. The machine-readable roster in
+//! `tests/invariants/inv_083_boundary_roster.tsv` names the current
+//! invariant-owned boundary corpus. Other boundary cases are distributed in
 //! INV-011, INV-058, INV-077, and the instruction-decoder Kani owner.
 
 use super::*;
+
+const INV_083_BOUNDARY_ROSTER: &str = include_str!("../inv_083_boundary_roster.tsv");
+const INV_083_BOUNDARY_ROSTER_HEADER: &str =
+    "class\tinvariant\towner_file\ttest_function\tboundary_value\tcoverage_note";
+const INV_083_REQUIRED_BOUNDARY_CLASSES: &[&str] = &[
+    "zero",
+    "one",
+    "max-1",
+    "max",
+    "expiry-1",
+    "expiry-equal",
+    "expiry+1",
+    "cross-zero",
+    "empty",
+    "full",
+    "near-overflow",
+];
+
+fn inv_083_source_contains_test(source: &str, test_function: &str) -> bool {
+    let top_level = format!("#[test]\nfn {test_function}(");
+    let indented = format!("#[test]\n    fn {test_function}(");
+    source.contains(&top_level) || source.contains(&indented)
+}
+
+#[test]
+fn v16_program_boundary_roster_maps_required_classes_to_owned_tests() {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    let mut covered = BTreeMap::new();
+    for &class in INV_083_REQUIRED_BOUNDARY_CLASSES {
+        covered.insert(class, 0usize);
+    }
+
+    let mut lines = INV_083_BOUNDARY_ROSTER.lines().enumerate();
+    let (_, header) = lines
+        .next()
+        .expect("INV-083 boundary roster must not be empty");
+    assert_eq!(
+        header, INV_083_BOUNDARY_ROSTER_HEADER,
+        "INV-083 boundary roster header changed; update the parser deliberately"
+    );
+
+    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut seen_rows = BTreeSet::new();
+    let mut row_count = 0usize;
+
+    for (line_index, line) in lines {
+        let line_no = line_index + 1;
+        if line.trim().is_empty() || line.starts_with('#') {
+            continue;
+        }
+
+        let columns = line.split('\t').collect::<Vec<_>>();
+        assert_eq!(
+            columns.len(),
+            6,
+            "line {line_no}: expected 6 tab-separated columns"
+        );
+        let class = columns[0];
+        let invariant = columns[1];
+        let owner_file = columns[2];
+        let test_function = columns[3];
+        let boundary_value = columns[4];
+        let coverage_note = columns[5];
+
+        assert!(
+            columns.iter().all(|column| !column.trim().is_empty()),
+            "line {line_no}: roster columns must be non-empty"
+        );
+        assert!(
+            covered.contains_key(class),
+            "line {line_no}: unexpected INV-083 boundary class {class:?}"
+        );
+        assert!(
+            invariant.len() == "INV-000".len()
+                && invariant.starts_with("INV-")
+                && invariant[4..].chars().all(|digit| digit.is_ascii_digit()),
+            "line {line_no}: invalid invariant id {invariant:?}"
+        );
+        assert!(
+            test_function.starts_with("v16_")
+                && test_function
+                    .chars()
+                    .all(|ch| ch == '_' || ch.is_ascii_alphanumeric()),
+            "line {line_no}: invalid test function name {test_function:?}"
+        );
+        assert_ne!(
+            test_function, "v16_program_boundary_roster_maps_required_classes_to_owned_tests",
+            "line {line_no}: the roster cannot satisfy itself"
+        );
+        assert!(
+            !boundary_value.contains('\n') && !coverage_note.contains('\n'),
+            "line {line_no}: roster fields must stay single-line"
+        );
+
+        let owner_path = std::path::Path::new(owner_file);
+        assert!(
+            owner_path.is_relative()
+                && owner_file.starts_with("tests/invariants/")
+                && owner_file.ends_with(".rs")
+                && owner_file
+                    .split('/')
+                    .all(|part| !part.is_empty() && part != ".."),
+            "line {line_no}: owner file must be a relative tests/invariants/*.rs path: {owner_file:?}"
+        );
+        let owner_token = format!("inv_{}", invariant[4..].to_ascii_lowercase());
+        assert!(
+            owner_file.contains(&owner_token),
+            "line {line_no}: {owner_file:?} does not match {invariant}"
+        );
+
+        let owner_source_path = manifest_dir.join(owner_path);
+        let owner_source = std::fs::read_to_string(&owner_source_path).unwrap_or_else(|error| {
+            panic!("line {line_no}: failed to read {owner_file:?}: {error}")
+        });
+        assert!(
+            owner_source.contains(&format!("//! {invariant} -")),
+            "line {line_no}: {owner_file:?} is not owned by {invariant}"
+        );
+        assert!(
+            inv_083_source_contains_test(&owner_source, test_function),
+            "line {line_no}: {owner_file:?} does not contain #[test] fn {test_function}"
+        );
+
+        assert!(
+            seen_rows.insert(line.to_string()),
+            "line {line_no}: duplicate roster row"
+        );
+        *covered.get_mut(class).expect("class checked above") += 1;
+        row_count += 1;
+    }
+
+    assert!(
+        row_count >= INV_083_REQUIRED_BOUNDARY_CLASSES.len(),
+        "INV-083 boundary roster has fewer rows than required classes"
+    );
+    for (class, count) in covered {
+        assert!(count > 0, "INV-083 boundary roster is missing {class}");
+    }
+}
 
 #[test]
 fn v16_program_batch_decode_oversized_vectors_reject_before_allocation() {

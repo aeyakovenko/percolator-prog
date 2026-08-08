@@ -594,27 +594,33 @@ fn run_dense_zero_delta_resolution_shape(asset_count: u16) {
         let activation_slot = asset_index as u64;
         env.svm.warp_to_slot(activation_slot);
         env.svm.expire_blockhash();
-        env.send(
-            ProgInstruction::UpdateAssetLifecycle {
-                action: processor::ASSET_ACTION_ACTIVATE,
-                asset_index,
-                now_slot: activation_slot,
-                initial_price: PRICE,
-                max_init_fee: u128::MAX,
-                insurance_authority: admin.pubkey().to_bytes(),
-                insurance_operator: admin.pubkey().to_bytes(),
-                backing_bucket_authority: admin.pubkey().to_bytes(),
-                oracle_authority: admin.pubkey().to_bytes(),
-            },
-            vec![
-                AccountMeta::new(admin.pubkey(), true),
-                AccountMeta::new(env.market, false),
-            ],
-            &[&admin],
-        )
-        .unwrap_or_else(|error| {
-            panic!("public activation failed for asset {asset_index}: {error}")
-        });
+        let activation_cu = env
+            .send(
+                ProgInstruction::UpdateAssetLifecycle {
+                    action: processor::ASSET_ACTION_ACTIVATE,
+                    asset_index,
+                    now_slot: activation_slot,
+                    initial_price: PRICE,
+                    max_init_fee: u128::MAX,
+                    insurance_authority: admin.pubkey().to_bytes(),
+                    insurance_operator: admin.pubkey().to_bytes(),
+                    backing_bucket_authority: admin.pubkey().to_bytes(),
+                    oracle_authority: admin.pubkey().to_bytes(),
+                },
+                vec![
+                    AccountMeta::new(admin.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                ],
+                &[&admin],
+            )
+            .unwrap_or_else(|error| {
+                panic!("public activation failed for asset {asset_index}: {error}")
+            });
+        assert_cu_within(
+            "UpdateAssetLifecycle maximum-shape activation",
+            activation_cu,
+            CUSTODY_CU_LIMIT,
+        );
         env.configure_auth_mark_for_asset_as_admin(asset_index, activation_slot, PRICE);
     }
     assert_eq!(
@@ -2979,6 +2985,7 @@ fn v16_bpf_stale_full_14_leg_tradenocpi_rejects_before_cu_cliff() {
 #[test]
 fn v16_cu_custody_and_resolution_paths_are_bounded() {
     let mut env = V16CuEnv::new();
+    let init_market_cu = env.init_market_cu;
     let owner = Keypair::new();
     let (portfolio, init_portfolio_cu) = env.create_portfolio_with_cu(&owner);
     let (_source, deposit_cu) = env.deposit_with_cu(&owner, portfolio, 1_000);
@@ -2990,9 +2997,10 @@ fn v16_cu_custody_and_resolution_paths_are_bounded() {
     let (_resolved_dest, close_resolved_cu) = env.close_resolved_with_cu(&owner, portfolio);
 
     println!(
-        "v16 custody CU init_portfolio={init_portfolio_cu}, deposit={deposit_cu}, withdraw={withdraw_cu}, top_up={top_up_cu}, withdraw_insurance={withdraw_insurance_cu}, resolve={resolve_cu}, close_resolved={close_resolved_cu}"
+        "v16 custody CU init_market={init_market_cu}, init_portfolio={init_portfolio_cu}, deposit={deposit_cu}, withdraw={withdraw_cu}, top_up={top_up_cu}, withdraw_insurance={withdraw_insurance_cu}, resolve={resolve_cu}, close_resolved={close_resolved_cu}"
     );
     for (name, cu) in [
+        ("init_market", init_market_cu),
         ("init_portfolio", init_portfolio_cu),
         ("deposit", deposit_cu),
         ("withdraw", withdraw_cu),
@@ -3009,6 +3017,61 @@ fn v16_cu_custody_and_resolution_paths_are_bounded() {
             CUSTODY_CU_LIMIT
         );
     }
+}
+
+#[test]
+fn v16_cu_set_matcher_config_enabled_and_disabled_are_bounded() {
+    let mut env = V16CuEnv::new();
+    let matcher_program = Pubkey::new_unique();
+    let matcher_bytes = std::fs::read(matcher_program_path()).expect("read matcher BPF");
+    env.svm.add_program(matcher_program, &matcher_bytes);
+
+    let maker_owner = Keypair::new();
+    let maker = env.create_portfolio(&maker_owner);
+    let (matcher_context, matcher_delegate, _) =
+        env.init_matcher_context_authorized(matcher_program, &maker_owner, maker);
+
+    env.svm.expire_blockhash();
+    let disable_cu = env
+        .send(
+            ProgInstruction::SetMatcherConfig {
+                portfolio_id: env.portfolio_id(maker),
+                expected_sequence: env.portfolio_matcher_sequence(maker),
+                enabled: 0,
+                trade_fee_cap_bps: 0,
+            },
+            vec![
+                AccountMeta::new(maker_owner.pubkey(), true),
+                AccountMeta::new_readonly(env.market, false),
+                AccountMeta::new(maker, false),
+            ],
+            &[&maker_owner],
+        )
+        .expect("disable matcher config");
+
+    env.svm.expire_blockhash();
+    let enable_cu = env
+        .send(
+            ProgInstruction::SetMatcherConfig {
+                portfolio_id: env.portfolio_id(maker),
+                expected_sequence: env.portfolio_matcher_sequence(maker),
+                enabled: 1,
+                trade_fee_cap_bps: 10_000,
+            },
+            vec![
+                AccountMeta::new(maker_owner.pubkey(), true),
+                AccountMeta::new_readonly(env.market, false),
+                AccountMeta::new(maker, false),
+                AccountMeta::new_readonly(matcher_program, false),
+                AccountMeta::new_readonly(matcher_context, false),
+                AccountMeta::new_readonly(matcher_delegate, false),
+            ],
+            &[&maker_owner],
+        )
+        .expect("enable matcher config");
+
+    assert_cu_within("SetMatcherConfig disabled", disable_cu, CUSTODY_CU_LIMIT);
+    assert_cu_within("SetMatcherConfig enabled", enable_cu, CUSTODY_CU_LIMIT);
 }
 
 #[test]

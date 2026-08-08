@@ -70,6 +70,9 @@ mod inv_015_account_ownership_layout_discriminator_and_length_validity;
 #[path = "invariants/public_sbf/inv_020_authenticated_clock_slot_and_oracle_provenance.rs"]
 mod inv_020_authenticated_clock_slot_and_oracle_provenance;
 
+#[path = "invariants/public_sbf/inv_022_instruction_decoding_and_schema_upgrade_safety.rs"]
+mod inv_022_instruction_decoding_and_schema_upgrade_safety;
+
 #[path = "invariants/public_sbf/inv_031_no_double_use_of_claim_backing_or_insurance_atoms.rs"]
 mod inv_031_no_double_use_of_claim_backing_or_insurance_atoms;
 

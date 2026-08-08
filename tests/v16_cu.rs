@@ -631,6 +631,7 @@ struct V16CuEnv {
     program_id: Pubkey,
     payer: Keypair,
     admin: Keypair,
+    init_market_cu: u64,
     market: Pubkey,
     mint: Pubkey,
     vault: Pubkey,
@@ -866,7 +867,7 @@ impl V16CuEnv {
         )
         .unwrap();
 
-        send_tx(
+        let init_market_cu = send_tx(
             &mut svm,
             program_id,
             &payer,
@@ -907,6 +908,7 @@ impl V16CuEnv {
             program_id,
             payer,
             admin,
+            init_market_cu,
             market,
             mint,
             vault,

@@ -14,6 +14,29 @@
 
 use super::*;
 
+#[test]
+fn v16_program_rebalance_then_terminal_exit_preserves_position_attribution() {
+    let scenario = Scenario {
+        seed: [0x86; 32],
+        config: SmallMarketConfig {
+            maintenance_fee_per_slot: 1,
+            ..SmallMarketConfig::default()
+        },
+        actions: vec![Action::RebalanceReduce { actor: 3, asset: 1 }],
+    };
+
+    let coverage = run_scenario(&scenario)
+        .expect("unilateral reduction followed by public terminal exits must reconcile");
+    assert_ne!(
+        coverage.rebalance_reductions, 0,
+        "setup must execute a real public unilateral reduction"
+    );
+    assert_ne!(
+        coverage.user_positions_closed, 0,
+        "the resulting asymmetric position set must still reach public terminal exits"
+    );
+}
+
 proptest! {
     #![proptest_config(ProptestConfig {
         cases: env_usize("PERCOLATOR_INV086_FUZZ_CASES", 8) as u32,

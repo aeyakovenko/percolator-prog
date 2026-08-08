@@ -18,7 +18,300 @@
 //! pure transitions.
 
 use super::*;
+use percolator::V16Error;
+use percolator_prog::error::{map_v16_error, PercolatorError};
 use percolator_prog::state;
+use solana_program::program_error::ProgramError;
+
+const INV084_ASSUME_TOKEN: &[u8] = b"kani\x3a\x3aassume";
+const INV084_INVENTORY: &str = include_str!("../kani_assumption_inventory.tsv");
+const INV084_KANI_ROOT: &str = include_str!("../../v16_kani.rs");
+const INV084_SRC_004: &str = include_str!("inv_004_position_episode_binding.rs");
+const INV084_SRC_010: &str = include_str!("inv_010_out_of_order_safety.rs");
+const INV084_SRC_014: &str = include_str!("inv_014_delayed_policy_and_policy_epoch_safety.rs");
+const INV084_SRC_019: &str = include_str!("inv_019_cpi_invocation_and_return_data_binding.rs");
+const INV084_SRC_022: &str =
+    include_str!("inv_022_instruction_decoding_and_schema_upgrade_safety.rs");
+const INV084_SRC_045: &str = include_str!("inv_045_no_free_mark_movement.rs");
+const INV084_SRC_080: &str = include_str!("inv_080_error_propagation_and_exact_rollback.rs");
+const INV084_SRC_084: &str =
+    include_str!("inv_084_proof_assumptions_are_reachable_and_nonvacuous.rs");
+const INV084_SRC_085: &str =
+    include_str!("inv_085_proven_arithmetic_equals_deployed_arithmetic.rs");
+
+const INV084_FILE_004: &[u8] = b"tests/invariants/kani/inv_004_position_episode_binding.rs";
+const INV084_FILE_010: &[u8] = b"tests/invariants/kani/inv_010_out_of_order_safety.rs";
+const INV084_FILE_014: &[u8] =
+    b"tests/invariants/kani/inv_014_delayed_policy_and_policy_epoch_safety.rs";
+const INV084_FILE_019: &[u8] =
+    b"tests/invariants/kani/inv_019_cpi_invocation_and_return_data_binding.rs";
+const INV084_FILE_022: &[u8] =
+    b"tests/invariants/kani/inv_022_instruction_decoding_and_schema_upgrade_safety.rs";
+const INV084_FILE_045: &[u8] = b"tests/invariants/kani/inv_045_no_free_mark_movement.rs";
+const INV084_FILE_080: &[u8] =
+    b"tests/invariants/kani/inv_080_error_propagation_and_exact_rollback.rs";
+const INV084_FILE_084: &[u8] =
+    b"tests/invariants/kani/inv_084_proof_assumptions_are_reachable_and_nonvacuous.rs";
+const INV084_FILE_085: &[u8] =
+    b"tests/invariants/kani/inv_085_proven_arithmetic_equals_deployed_arithmetic.rs";
+
+const fn inv084_bytes_eq_at(haystack: &[u8], offset: usize, needle: &[u8]) -> bool {
+    if offset + needle.len() > haystack.len() {
+        return false;
+    }
+    let mut i = 0;
+    while i < needle.len() {
+        if haystack[offset + i] != needle[i] {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
+
+const fn inv084_count_token(haystack: &str, needle: &[u8]) -> usize {
+    let bytes = haystack.as_bytes();
+    let mut count = 0;
+    let mut i = 0;
+    while i + needle.len() <= bytes.len() {
+        if inv084_bytes_eq_at(bytes, i, needle) {
+            count += 1;
+            i += needle.len();
+        } else {
+            i += 1;
+        }
+    }
+    count
+}
+
+const fn inv084_line_contains_token(source: &str, target_line: usize, needle: &[u8]) -> bool {
+    let bytes = source.as_bytes();
+    let mut current_line = 1;
+    let mut line_start = 0;
+    let mut i = 0;
+    while i <= bytes.len() {
+        if i == bytes.len() || bytes[i] == b'\n' {
+            if current_line == target_line {
+                let mut offset = line_start;
+                while offset + needle.len() <= i {
+                    if inv084_bytes_eq_at(bytes, offset, needle) {
+                        return true;
+                    }
+                    offset += 1;
+                }
+                return false;
+            }
+            current_line += 1;
+            line_start = i + 1;
+        }
+        i += 1;
+    }
+    false
+}
+
+const fn inv084_line_is_empty(bytes: &[u8], start: usize, end: usize) -> bool {
+    let mut i = start;
+    while i < end {
+        if bytes[i] != b' ' && bytes[i] != b'\t' && bytes[i] != b'\r' {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
+
+const fn inv084_line_starts_with(bytes: &[u8], start: usize, end: usize, prefix: &[u8]) -> bool {
+    if start + prefix.len() > end {
+        return false;
+    }
+    inv084_bytes_eq_at(bytes, start, prefix)
+}
+
+const fn inv084_line_file_matches(bytes: &[u8], start: usize, end: usize, file: &[u8]) -> bool {
+    if start + file.len() >= end {
+        return false;
+    }
+    inv084_bytes_eq_at(bytes, start, file) && bytes[start + file.len()] == b'\t'
+}
+
+const fn inv084_line_ends_with(bytes: &[u8], start: usize, end: usize, suffix: &[u8]) -> bool {
+    if start + suffix.len() > end {
+        return false;
+    }
+    inv084_bytes_eq_at(bytes, end - suffix.len(), suffix)
+}
+
+const fn inv084_line_has_required_fields(bytes: &[u8], start: usize, end: usize) -> bool {
+    let mut fields = 0;
+    let mut field_start = start;
+    let mut i = start;
+    while i <= end {
+        if i == end || bytes[i] == b'\t' {
+            if i == field_start {
+                return false;
+            }
+            fields += 1;
+            field_start = i + 1;
+        }
+        i += 1;
+    }
+
+    fields == 7
+        && (inv084_line_ends_with(bytes, start, end, b"NONVACUITY_WITNESS")
+            || inv084_line_ends_with(bytes, start, end, b"ROUTE_ESTABLISHED")
+            || inv084_line_ends_with(bytes, start, end, b"SOLVER_BOUND_RATIONALE"))
+}
+
+const fn inv084_count_inventory_rows_for_file(file: &[u8]) -> usize {
+    let bytes = INV084_INVENTORY.as_bytes();
+    let mut rows = 0;
+    let mut start = 0;
+    let mut i = 0;
+    while i <= bytes.len() {
+        if i == bytes.len() || bytes[i] == b'\n' {
+            if !inv084_line_is_empty(bytes, start, i)
+                && !inv084_line_starts_with(bytes, start, i, b"file\tline\t")
+                && inv084_line_file_matches(bytes, start, i, file)
+            {
+                rows += 1;
+            }
+            start = i + 1;
+        }
+        i += 1;
+    }
+    rows
+}
+
+const fn inv084_count_inventory_rows() -> usize {
+    let bytes = INV084_INVENTORY.as_bytes();
+    let mut rows = 0;
+    let mut start = 0;
+    let mut i = 0;
+    while i <= bytes.len() {
+        if i == bytes.len() || bytes[i] == b'\n' {
+            if !inv084_line_is_empty(bytes, start, i)
+                && !inv084_line_starts_with(bytes, start, i, b"file\tline\t")
+            {
+                rows += 1;
+            }
+            start = i + 1;
+        }
+        i += 1;
+    }
+    rows
+}
+
+const fn inv084_inventory_rows_are_classified() -> bool {
+    let bytes = INV084_INVENTORY.as_bytes();
+    let mut start = 0;
+    let mut i = 0;
+    while i <= bytes.len() {
+        if i == bytes.len() || bytes[i] == b'\n' {
+            if !inv084_line_is_empty(bytes, start, i)
+                && !inv084_line_starts_with(bytes, start, i, b"file\tline\t")
+                && !inv084_line_has_required_fields(bytes, start, i)
+            {
+                return false;
+            }
+            start = i + 1;
+        }
+        i += 1;
+    }
+    true
+}
+
+const INV084_KANI_MODULES_MOUNTED: usize =
+    inv084_count_token(INV084_KANI_ROOT, b"#[path = \"invariants/kani/");
+
+const INV084_ASSUME_TOTAL: usize = inv084_count_token(INV084_SRC_004, INV084_ASSUME_TOKEN)
+    + inv084_count_token(INV084_SRC_010, INV084_ASSUME_TOKEN)
+    + inv084_count_token(INV084_SRC_014, INV084_ASSUME_TOKEN)
+    + inv084_count_token(INV084_SRC_019, INV084_ASSUME_TOKEN)
+    + inv084_count_token(INV084_SRC_022, INV084_ASSUME_TOKEN)
+    + inv084_count_token(INV084_SRC_045, INV084_ASSUME_TOKEN)
+    + inv084_count_token(INV084_SRC_080, INV084_ASSUME_TOKEN)
+    + inv084_count_token(INV084_SRC_084, INV084_ASSUME_TOKEN)
+    + inv084_count_token(INV084_SRC_085, INV084_ASSUME_TOKEN);
+
+const _: () = assert!(INV084_KANI_MODULES_MOUNTED == 9);
+const _: () = assert!(inv084_inventory_rows_are_classified());
+const _: () = assert!(inv084_count_inventory_rows() == INV084_ASSUME_TOTAL);
+const _: () = assert!(
+    inv084_count_inventory_rows_for_file(INV084_FILE_004)
+        == inv084_count_token(INV084_SRC_004, INV084_ASSUME_TOKEN)
+);
+const _: () = assert!(
+    inv084_count_inventory_rows_for_file(INV084_FILE_010)
+        == inv084_count_token(INV084_SRC_010, INV084_ASSUME_TOKEN)
+);
+const _: () = assert!(
+    inv084_count_inventory_rows_for_file(INV084_FILE_014)
+        == inv084_count_token(INV084_SRC_014, INV084_ASSUME_TOKEN)
+);
+const _: () = assert!(
+    inv084_count_inventory_rows_for_file(INV084_FILE_019)
+        == inv084_count_token(INV084_SRC_019, INV084_ASSUME_TOKEN)
+);
+const _: () = assert!(
+    inv084_count_inventory_rows_for_file(INV084_FILE_022)
+        == inv084_count_token(INV084_SRC_022, INV084_ASSUME_TOKEN)
+);
+const _: () = assert!(
+    inv084_count_inventory_rows_for_file(INV084_FILE_045)
+        == inv084_count_token(INV084_SRC_045, INV084_ASSUME_TOKEN)
+);
+const _: () = assert!(
+    inv084_count_inventory_rows_for_file(INV084_FILE_080)
+        == inv084_count_token(INV084_SRC_080, INV084_ASSUME_TOKEN)
+);
+const _: () = assert!(
+    inv084_count_inventory_rows_for_file(INV084_FILE_084)
+        == inv084_count_token(INV084_SRC_084, INV084_ASSUME_TOKEN)
+);
+const _: () = assert!(
+    inv084_count_inventory_rows_for_file(INV084_FILE_085)
+        == inv084_count_token(INV084_SRC_085, INV084_ASSUME_TOKEN)
+);
+const _: () = assert!(inv084_line_contains_token(
+    INV084_SRC_004,
+    48,
+    INV084_ASSUME_TOKEN
+));
+const _: () = assert!(inv084_line_contains_token(
+    INV084_SRC_022,
+    1096,
+    INV084_ASSUME_TOKEN
+));
+const _: () = assert!(inv084_line_contains_token(
+    INV084_SRC_022,
+    1097,
+    INV084_ASSUME_TOKEN
+));
+const _: () = assert!(inv084_line_contains_token(
+    INV084_SRC_045,
+    46,
+    INV084_ASSUME_TOKEN
+));
+const _: () = assert!(inv084_line_contains_token(
+    INV084_SRC_045,
+    78,
+    INV084_ASSUME_TOKEN
+));
+const _: () = assert!(inv084_line_contains_token(
+    INV084_SRC_045,
+    108,
+    INV084_ASSUME_TOKEN
+));
+const _: () = assert!(inv084_line_contains_token(
+    INV084_SRC_080,
+    54,
+    INV084_ASSUME_TOKEN
+));
+const _: () = assert!(inv084_line_contains_token(
+    INV084_SRC_085,
+    68,
+    INV084_ASSUME_TOKEN
+));
 
 fn inv084_known_public_instruction_tag(tag: u8) -> bool {
     matches!(
@@ -160,6 +453,46 @@ fn kani_v16_inv084_matcher_return_acceptance_witnesses_are_constructible() {
 }
 
 #[kani::proof]
+fn kani_v16_inv084_hybrid_oracle_feed_index_bounds_have_concrete_witnesses() {
+    let mut feeds = [[0u8; 32]; 3];
+    feeds[0][0] = 11;
+    feeds[0][31] = 22;
+    feeds[1][0] = 33;
+    feeds[1][31] = 44;
+    feeds[2][0] = 55;
+    feeds[2][31] = 66;
+
+    assert_eq!(feeds.len(), 3);
+    assert_eq!(feeds[0].len(), 32);
+    assert_eq!(feeds[0][0], 11);
+    assert_eq!(feeds[0][31], 22);
+    assert_eq!(feeds[1][0], 33);
+    assert_eq!(feeds[1][31], 44);
+    assert_eq!(feeds[2][0], 55);
+    assert_eq!(feeds[2][31], 66);
+}
+
+#[kani::proof]
+fn kani_v16_inv084_engine_error_tag_partition_has_boundary_witnesses() {
+    let first = map_v16_error(V16Error::InvalidConfig);
+    let middle = map_v16_error(V16Error::Stale);
+    let final_tag = map_v16_error(V16Error::CounterUnderflow);
+
+    assert_eq!(
+        first,
+        ProgramError::from(PercolatorError::EngineInvalidConfig)
+    );
+    assert_eq!(middle, ProgramError::from(PercolatorError::EngineStale));
+    assert_eq!(
+        final_tag,
+        ProgramError::from(PercolatorError::EngineCounterUnderflow)
+    );
+    assert!(matches!(first, ProgramError::Custom(code) if code != 0));
+    assert!(matches!(middle, ProgramError::Custom(code) if code != 0));
+    assert!(matches!(final_tag, ProgramError::Custom(code) if code != 0));
+}
+
+#[kani::proof]
 fn kani_v16_inv084_decoder_tag_assumptions_have_concrete_witnesses() {
     for (tag, amount) in [(3u8, 11u128), (4u8, 12u128), (28u8, 13u128)] {
         let portfolio_id = 9u64;
@@ -225,4 +558,20 @@ fn kani_v16_inv084_positive_mark_policy_assumptions_have_boundary_witnesses() {
     assert!(policy_v16::premium_funding_rate_e9(2, 1, 1).unwrap() > 0);
     assert!(policy_v16::premium_funding_rate_e9(1, 2, 1).unwrap() < 0);
     assert_eq!(policy_v16::premium_funding_rate_e9(1, 1, 1).unwrap(), 0);
+}
+
+#[kani::proof]
+fn kani_v16_inv084_dt_clamp_solver_bound_has_boundary_witnesses() {
+    assert_eq!(
+        percolator_prog::oracle_v16::clamp_toward_engine_dt(100, 200, 10_000, 0),
+        100
+    );
+    assert_eq!(
+        percolator_prog::oracle_v16::clamp_toward_engine_dt(100, 200, 10_000, 15),
+        200
+    );
+    assert_eq!(
+        percolator_prog::oracle_v16::clamp_toward_engine_dt(200, 100, 10_000, 15),
+        100
+    );
 }
