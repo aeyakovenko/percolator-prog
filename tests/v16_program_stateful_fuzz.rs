@@ -192,6 +192,9 @@ mod inv_067_terminal_payout_completeness_and_exact_once_settlement;
 #[path = "invariants/stateful/inv_069_terminal_normalization_and_retirement.rs"]
 mod inv_069_terminal_normalization_and_retirement;
 
+#[path = "invariants/stateful/inv_071_crank_progress.rs"]
+mod inv_071_crank_progress;
+
 #[path = "invariants/stateful/inv_078_permissionless_recovery_coverage.rs"]
 mod inv_078_permissionless_recovery_coverage;
 
