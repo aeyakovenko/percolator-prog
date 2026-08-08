@@ -23,7 +23,7 @@ verification methods are in [`../../INVARIANTS.md`](../../INVARIANTS.md).
 | Suite | Tests | Evidence |
 | --- | ---: | --- |
 | `public_sbf/` | 81 | Deterministic public SBF/LiteSVM counterexamples, regressions, decoder corpora, and manifest checks |
-| `stateful/` | 115 | Proptest-generated public routes plus bounded lifecycle models for a 16-cell positive-claim boundary partition, all 3! matcher-control/trade landing orders, 20 user-operation/admission cells, 12 caller-priced boundary-exit cells, the four-state retirement-obligation lattice, a Recovery crank/owner-exit classifier boundary, and all 5! claimant orders, including generalized active-leg/currentness, source-claim attribution, source-credit-rate, authenticated-expiry, state-indexed liveness witnesses, and reference-model/deployed-transition equivalence |
+| `stateful/` | 116 | Proptest-generated public routes plus bounded lifecycle models for scarce-backing pair/chunk allocation orders, a 16-cell positive-claim boundary partition, all 3! matcher-control/trade landing orders, 20 user-operation/admission cells, 12 caller-priced boundary-exit cells, the four-state retirement-obligation lattice, a Recovery crank/owner-exit classifier boundary, and all 5! claimant orders, including generalized active-leg/currentness, source-claim attribution, source-credit-rate, authenticated-expiry, state-indexed liveness witnesses, and reference-model/deployed-transition equivalence |
 | `cu/` | 711 | Full `v16_cu` public-route, metamorphic, rollback, liveness, arithmetic-differential, and max-shape CU inventory, with no standalone top-level tests |
 | `kani/` | 79 | Symbolic wrapper arithmetic, matcher-binding, ordering, strict-decoder, and proof-assumption nonvacuity harnesses; full `cargo kani --tests` remains the required verification command |
 
@@ -121,7 +121,7 @@ charter.
 | INV-038 | Independent + Direct + SVM/CU | `public_sbf/inv_038_rounding_and_ratio_conservation.rs`, `stateful/inv_038_rounding_and_ratio_conservation.rs`, `cu/inv_038_rounding_and_ratio_conservation.rs` |
 | INV-039 | Independent + Direct | `public_sbf/inv_039_pending_loss_obligation_durability.rs`, `stateful/inv_039_pending_loss_obligation_durability.rs` |
 | INV-040 | SVM/CU | `cu/inv_040_no_fee_seniority.rs` (no-CPI, batch no-CPI, single-CPI, and batch-CPI underfunded exits drop uncollectible fees instead of senioritizing them; maintenance fee spam remains bounded) |
-| INV-041 | SVM/CU | `cu/inv_041_deterministic_allocation_and_caller_order_independence.rs` |
+| INV-041 | SVM/CU + Partial R | `stateful/inv_041_deterministic_allocation_and_caller_order_independence.rs`, `cu/inv_041_deterministic_allocation_and_caller_order_independence.rs` (both equal-priority pair orders crossed with one-shot/dust force-close schedules under scarce backing; broader allocation orders remain) |
 | INV-042 | SVM/CU + Spec gap | `cu/inv_042_recovery_fallback_envelope.rs` (public force-close admission, timing, pairing, and size bounds; full recovery price/value-transfer envelope remains engine/spec proof work) |
 | INV-043 | Spec/API gap | No hedge/correlation-credit feature is exposed by the current wrapper route set; treat as N/A until the spec/API enables it |
 | INV-044 | SVM/CU + Cross-owner references | `cu/inv_044_no_phantom_value_from_indices_certificates_or_labels.rs`; supporting stock/label/terminal coverage in INV-025, INV-026, INV-069, and INV-070 |
@@ -202,8 +202,8 @@ method outstanding. The current ledger is 58 **OPEN-T**, 20 **OPEN-D**, 10 **FRO
    and `C` for 2. Invariant-owned directories currently exist for only 9 `P`, 27 `F`, and 87 `I`
    owners. File presence is only a lower bound; many owners cover one scenario rather than the
    required matrix. `special_method_coverage.tsv` now machine-indexes all `M`, `R`, and `C`
-   obligations: all 32 `M` and both `C` rows have partial named evidence; 12 `R` rows now have
-   bounded generated or exhaustive-topology evidence and the other 10 remain explicitly omitted.
+   obligations: all 32 `M` and both `C` rows have partial named evidence; 13 `R` rows now have
+   bounded generated or exhaustive-topology evidence and the other 9 remain explicitly omitted.
 2. The deployed decoder has 50 public instruction variants. The stateful public-interface model
    generates fifteen direct operation classes (trade, EWMA configuration, mark push, crank, deposit,
    withdraw, maintenance sync, matcher configuration, insurance top-up, backing top-up,
@@ -215,13 +215,14 @@ method outstanding. The current ledger is 58 **OPEN-T**, 20 **OPEN-D**, 10 **FRO
    not saturation evidence. There is no time-budgeted campaign, transition/branch coverage target,
    mutation score, or corpus-stability criterion for declaring a generator exhausted.
 4. No general bounded BFS/model checker enumerates the reachable lifecycle graph required by
-   INV-007, INV-041, INV-043, INV-057, INV-065,
+   INV-007, INV-043, INV-057, INV-065,
    INV-071, INV-073, INV-075, INV-078, INV-079, INV-082, INV-084, or INV-086. INV-066,
    INV-067, and INV-070 now have a narrower public two-asset model that exhausts all 5! basic
    claimant orders through exact-once retries and `CloseSlab`; INV-069 separately exhausts the
    four-state insurance/backing retirement-blocker lattice and both public drain orders; INV-010
    exhausts all 3! orders in its conflicting-control/trade topology; INV-029 exhausts a 16-cell
-   public claim-attribution boundary partition; INV-055 has a separate public
+   public claim-attribution boundary partition; INV-041 covers a public scarce-backing pair/chunk
+   ordering cross-product; INV-055 has a separate public
    20-cell core user-operation admission model; INV-046 has a separate 12-cell caller-priced
    boundary-exit model across three publicly reached lifecycle states; INV-072 exhausts all 40
    three-asset hint words through length three in one actionable topology.
@@ -283,7 +284,7 @@ are machine-checked below so a future README edit cannot silently omit an invari
 | AUDIT-038 | OPEN-D | Dust, funding, backing splits, and composite rounding are tested, but a fractional-cap violation remains quarantined. Add exact rational/residue accounting for resolved claims, B booking, and social-loss clearing and fix the live counterexample. |
 | AUDIT-039 | OPEN-D | Many accrual-before-weight-removal routes are covered, but stale-cohort novation remains an expected violation. Transfer, reset, account close, and partial liquidation also need the common obligation-before-removal state machine. |
 | AUDIT-040 | OPEN-T | Four underfunded trade routes and maintenance spam are covered. Matcher, liquidation, protocol, and maintenance fee variants with remaining senior obligations need the same protected-pool delta oracle. |
-| AUDIT-041 | OPEN-T | Force-close chunking and observation order are covered. Permute equal-priority liquidation, support, insurance, lien, residual, payout, claim, and continuation ordering and compare normalized outcomes. |
+| AUDIT-041 | OPEN-T | A public scarce-backing topology now exhausts both equal-priority pair orders crossed with one-shot/dust force-close schedules and compares per-user claims plus domain classifications; observation order is also covered. Extend the model to liquidation, insurance, lien, residual, payout, claim, and close-preemption ordering. |
 | AUDIT-042 | OPEN-D | Force-close admission/timing/size is tested, but no normative fallback price/value-transfer envelope exists. Define it, then test stale/unavailable reference, max positions/accounts, and just-inside/outside bounds. |
 | AUDIT-043 | N/A | The wrapper exposes no hedge/correlation-credit feature. Keep a static absence check; if introduced, require exhaustive small portfolios, sign flips, missing legs, bucket edges, and scenario extremes before activation. |
 | AUDIT-044 | OPEN-T | Selected B and parked-PnL cases plus cross-owner stock tests exist. Exercise every A/K/F/B index, certificate, claim bound, reservation, lien, tag, and soft-credit durable-use path through public transitions with token/encumbrance balance checks. |

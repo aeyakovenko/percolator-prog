@@ -146,6 +146,9 @@ mod inv_038_rounding_and_ratio_conservation;
 #[path = "invariants/stateful/inv_039_pending_loss_obligation_durability.rs"]
 mod inv_039_pending_loss_obligation_durability;
 
+#[path = "invariants/stateful/inv_041_deterministic_allocation_and_caller_order_independence.rs"]
+mod inv_041_deterministic_allocation_and_caller_order_independence;
+
 #[path = "invariants/stateful/inv_045_no_free_mark_movement.rs"]
 mod inv_045_no_free_mark_movement;
 
