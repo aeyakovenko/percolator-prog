@@ -1631,7 +1631,7 @@ fn v16_attack_source_backed_force_close_preserves_bounded_resolved_exits() {
             portfolio,
             ProgInstruction::PermissionlessCrank {
                 now_slot: 2,
-                observations: crank_observations(asset_index),
+                observations: crank_observations_for_assets(&[asset_index, 1 - asset_index]),
             },
         );
     }
@@ -4284,7 +4284,7 @@ fn v16_attack_resolved_cross_margin_deep_insolvency_winds_down_publicly() {
                 let _ = env.send(
                     ProgInstruction::PermissionlessCrank {
                         now_slot: slot,
-                        observations: crank_observations(ai),
+                        observations: crank_observations_for_assets(&[ai, 1 - ai]),
                     },
                     vec![
                         AccountMeta::new(env.payer.pubkey(), true),
@@ -4304,7 +4304,7 @@ fn v16_attack_resolved_cross_margin_deep_insolvency_winds_down_publicly() {
                 let _ = env.send(
                     ProgInstruction::PermissionlessCrank {
                         now_slot: 2,
-                        observations: crank_observations(ai),
+                        observations: crank_observations_for_assets(&[ai, 1 - ai]),
                     },
                     vec![
                         AccountMeta::new(env.payer.pubkey(), true),

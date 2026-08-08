@@ -24,8 +24,7 @@ fn v16_program_source_credit_reservation_labels_do_not_free_backing_value() {
     const SAFE_INCREASE_Q: i128 = POS_SCALE as i128;
     const TOO_LARGE_INCREASE_Q: i128 = 30 * POS_SCALE as i128;
     const DEPOSIT: u128 = 313;
-    const EXPECTED_POSITIVE_PNL: i128 = 100;
-    const EXPECTED_NET_PNL_AFTER_REFRESH: i128 = 50;
+    const EXPECTED_POSITIVE_PNL: i128 = 50;
 
     let mut env = V16CuEnv::new_with_market_params_and_price_move(4, 1_000, 1_000, 500);
     env.svm.warp_to_slot(1);
@@ -73,7 +72,7 @@ fn v16_program_source_credit_reservation_labels_do_not_free_backing_value() {
             portfolio,
             ProgInstruction::PermissionlessCrank {
                 now_slot: 2,
-                observations: crank_observations(asset_index),
+                observations: crank_observations_for_assets(&[asset_index, 1 - asset_index]),
             },
         );
     }
@@ -91,6 +90,11 @@ fn v16_program_source_credit_reservation_labels_do_not_free_backing_value() {
         before_watermark_group.source_credit[1].fresh_reserved_backing_num;
     let positive_claim_before_withdraw =
         before_watermark_group.source_credit[1].positive_claim_bound_num;
+    assert_eq!(
+        positive_claim_before_withdraw,
+        EXPECTED_POSITIVE_PNL as u128 * BOUND_SCALE,
+        "the source-domain claim must match complete-account positive PnL",
+    );
 
     let watermark_withdraw_dest = env.token_account(env.admin.pubkey(), 0);
     let withdraw_cu =
@@ -169,7 +173,7 @@ fn v16_program_source_credit_reservation_labels_do_not_free_backing_value() {
         ASSET1_SIZE_Q + SAFE_INCREASE_Q,
     );
     assert_eq!(cross_after.capital.get(), DEPOSIT);
-    assert_eq!(cross_after.pnl.get(), EXPECTED_NET_PNL_AFTER_REFRESH);
+    assert_eq!(cross_after.pnl.get(), EXPECTED_POSITIVE_PNL);
     assert!(
         cross_after.capital.get() < health_cert(&cross_after).certified_initial_req,
         "without positive PnL credit this risk increase would fail initial margin",

@@ -129,7 +129,7 @@ fn v16_attack_cross_margin_divergent_moves_conserve() {
                 let _ = env.send(
                     ProgInstruction::PermissionlessCrank {
                         now_slot: slot,
-                        observations: crank_observations(ai),
+                        observations: crank_observations_for_assets(&[ai, 1 - ai]),
                     },
                     vec![
                         AccountMeta::new(env.payer.pubkey(), true),
@@ -1121,7 +1121,7 @@ fn v16_attack_cross_margin_divergent_close_conserves() {
                 let _ = env.send(
                     ProgInstruction::PermissionlessCrank {
                         now_slot: slot,
-                        observations: crank_observations(ai),
+                        observations: crank_observations_for_assets(&[ai, 1 - ai]),
                     },
                     vec![
                         AccountMeta::new(env.payer.pubkey(), true),
@@ -1911,7 +1911,7 @@ fn v16_attack_cross_margin_netting_conserves() {
         let _ = env.send(
             ProgInstruction::PermissionlessCrank {
                 now_slot: 2,
-                observations: crank_observations(ai),
+                observations: crank_observations_for_assets(&[ai, 1 - ai]),
             },
             vec![
                 AccountMeta::new(env.payer.pubkey(), true),
@@ -2686,7 +2686,7 @@ fn v16_regression_cross_margin_insolvency_no_value_extraction() {
                 let _ = env.send(
                     ProgInstruction::PermissionlessCrank {
                         now_slot: slot,
-                        observations: crank_observations(ai),
+                        observations: crank_observations_for_assets(&[ai, 1 - ai]),
                     },
                     vec![
                         AccountMeta::new(env.payer.pubkey(), true),

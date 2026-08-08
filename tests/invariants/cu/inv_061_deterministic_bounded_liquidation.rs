@@ -779,7 +779,7 @@ fn v16_program_cross_margin_solvent_account_not_unfairly_liquidated() {
                 let _ = env.send(
                     ProgInstruction::PermissionlessCrank {
                         now_slot: slot,
-                        observations: crank_observations(ai),
+                        observations: crank_observations_for_assets(&[ai, 1 - ai]),
                     },
                     vec![
                         AccountMeta::new(env.payer.pubkey(), true),

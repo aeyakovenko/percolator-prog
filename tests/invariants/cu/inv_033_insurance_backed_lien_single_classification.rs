@@ -90,7 +90,7 @@ fn run_public_source_lien_classification(
             portfolio,
             ProgInstruction::PermissionlessCrank {
                 now_slot: 2,
-                observations: crank_observations(asset_index),
+                observations: crank_observations_for_assets(&[asset_index, 1 - asset_index]),
             },
         );
     }

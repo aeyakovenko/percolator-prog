@@ -2033,7 +2033,6 @@ fn v16_bpf_cross_margin_positive_pnl_allows_trading_negative_leg_before_convert(
     const ASSET0_SIZE_Q: i128 = 20 * POS_SCALE as i128;
     const ASSET1_SIZE_Q: i128 = 10 * POS_SCALE as i128;
     const DEPOSIT: u128 = 320;
-    const EXPECTED_POSITIVE_PNL: i128 = 100;
     const EXPECTED_NET_PNL_AFTER_NEGATIVE_CLOSE: i128 = 50;
 
     let mut env = V16CuEnv::new_with_market_params_and_price_move(4, 1_000, 1_000, 500);
@@ -2090,7 +2089,7 @@ fn v16_bpf_cross_margin_positive_pnl_allows_trading_negative_leg_before_convert(
             portfolio,
             ProgInstruction::PermissionlessCrank {
                 now_slot: 2,
-                observations: crank_observations(asset_index),
+                observations: crank_observations_for_assets(&[asset_index, 1 - asset_index]),
             },
         );
         assert_cu_within(label, cu, CRANK_CU_LIMIT);
@@ -2100,7 +2099,11 @@ fn v16_bpf_cross_margin_positive_pnl_allows_trading_negative_leg_before_convert(
     assert_eq!(moved_group.assets[1].effective_price, ASSET1_MARK);
 
     let cross_before_close = env.portfolio_state(cross_account);
-    assert_eq!(cross_before_close.pnl.get(), EXPECTED_POSITIVE_PNL);
+    assert_eq!(
+        cross_before_close.pnl.get(),
+        EXPECTED_NET_PNL_AFTER_NEGATIVE_CLOSE,
+        "complete refresh must retain positive net PnL before the reducing close",
+    );
     assert_eq!(cross_before_close.capital.get(), DEPOSIT);
     assert_eq!(
         active_leg_for_asset(&cross_before_close, 1).basis_pos_q,

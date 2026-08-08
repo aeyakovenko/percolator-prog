@@ -47,10 +47,18 @@ const fn first_generation_market_id(asset_index: u16) -> u64 {
 }
 
 fn crank_observations(asset_index: u16) -> Vec<CrankObservationHint> {
-    vec![CrankObservationHint {
-        asset_index,
-        oracle_accounts: 0,
-    }]
+    crank_observations_for_assets(&[asset_index])
+}
+
+fn crank_observations_for_assets(asset_indices: &[u16]) -> Vec<CrankObservationHint> {
+    asset_indices
+        .iter()
+        .copied()
+        .map(|asset_index| CrankObservationHint {
+            asset_index,
+            oracle_accounts: 0,
+        })
+        .collect()
 }
 
 // Two independent winners register claims against one undercollateralized source domain. Vary both
@@ -5043,7 +5051,7 @@ fn run_source_credit_watermark_trade_case(
     const ASSET1_SIZE_Q: i128 = 10 * POS_SCALE as i128;
     const SAFE_INCREASE_Q: i128 = POS_SCALE as i128;
     const DEPOSIT: u128 = 313;
-    const EXPECTED_POSITIVE_PNL: i128 = 100;
+    const EXPECTED_POSITIVE_PNL: i128 = 50;
 
     let mut env = V16CuEnv::new_with_market_params_and_price_move(4, 1_000, 1_000, 500);
     let matcher_program = match path {
@@ -5110,7 +5118,7 @@ fn run_source_credit_watermark_trade_case(
             portfolio,
             ProgInstruction::PermissionlessCrank {
                 now_slot: 2,
-                observations: crank_observations(asset_index),
+                observations: crank_observations_for_assets(&[asset_index, 1 - asset_index]),
             },
         );
     }
@@ -5124,7 +5132,7 @@ fn run_source_credit_watermark_trade_case(
     assert_eq!(
         cross_before.pnl.get(),
         EXPECTED_POSITIVE_PNL,
-        "{path:?} {direction:?} setup must create source-backed positive PnL"
+        "{path:?} {direction:?} setup must retain positive net PnL after complete refresh"
     );
     let (_, before_withdraw_group) = env.market_state();
     assert_eq!(

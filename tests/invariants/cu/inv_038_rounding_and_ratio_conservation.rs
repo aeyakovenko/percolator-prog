@@ -353,6 +353,8 @@ fn v16_attack_backing_fee_split_conserves() {
     const WINNING_DOMAIN: usize = 1;
     const FEE_BPS: u16 = 5_000; // 10% of consumed backing
     const INSURANCE_SHARE_BPS: u16 = 2_500; // 25% of the fee to insurance, 75% to provider
+    const EXPECTED_SOURCE_CLAIM: u128 = 500;
+    const EXPECTED_NET_PNL: i128 = 500;
 
     let mut env = V16CuEnv::new_with_market_params_and_price_move(4, 1_000, 1_000, 500);
     env.svm.warp_to_slot(1);
@@ -406,7 +408,7 @@ fn v16_attack_backing_fee_split_conserves() {
             portfolio,
             ProgInstruction::PermissionlessCrank {
                 now_slot: 2,
-                observations: crank_observations(asset_index),
+                observations: crank_observations_for_assets(&[asset_index, 1 - asset_index]),
             },
         );
     }
@@ -414,13 +416,18 @@ fn v16_attack_backing_fee_split_conserves() {
     env.force_portfolio_capital_for_benchmark(cross_account, 2_600);
     assert_eq!(
         env.portfolio_state(cross_account).pnl.get(),
-        1_000,
-        "setup must create source-backed positive PnL"
+        EXPECTED_NET_PNL,
+        "setup must retain positive net PnL after complete refresh"
     );
 
     // Trim the bucket to the exact watermark, then refill generously so the risk increase liens against
     // fresh counterparty backing.
     let (_, g0) = env.market_state();
+    assert_eq!(
+        g0.source_credit[WINNING_DOMAIN].positive_claim_bound_num,
+        EXPECTED_SOURCE_CLAIM * BOUND_SCALE,
+        "the source-domain claim must match complete-account positive PnL",
+    );
     let surplus = (g0.source_credit[WINNING_DOMAIN].fresh_reserved_backing_num
         - g0.source_credit[WINNING_DOMAIN].positive_claim_bound_num)
         / BOUND_SCALE;
