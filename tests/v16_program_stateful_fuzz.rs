@@ -149,6 +149,9 @@ mod inv_039_pending_loss_obligation_durability;
 #[path = "invariants/stateful/inv_045_no_free_mark_movement.rs"]
 mod inv_045_no_free_mark_movement;
 
+#[path = "invariants/stateful/inv_046_trade_availability_without_unsafe_mark_admission.rs"]
+mod inv_046_trade_availability_without_unsafe_mark_admission;
+
 #[path = "invariants/stateful/inv_053_full_health_recertification_equivalence.rs"]
 mod inv_053_full_health_recertification_equivalence;
 

@@ -3298,21 +3298,37 @@ impl ScenarioRunner {
             || cert.cert_risk_epoch.get() != group.risk_epoch
             || cert.cert_asset_set_epoch.get() != group.asset_set_epoch
             || cert.active_bitmap_at_cert != account.active_bitmap;
-        let active_abs_q = decoded_legs(&account)
+        // Recovery legs remain owner-exitable, but the engine deliberately excludes them from
+        // auto-crank refresh/liquidation selection. Keep the permissionless-crank rank scoped to
+        // the same dispatch domain; the separate direct-user campaign owns Recovery exit
+        // liveness and INV-082 has a public regression for the classifier boundary.
+        let crank_dispatchable_abs_q = decoded_legs(&account)
             .into_iter()
-            .filter(|leg| leg.active)
+            .filter(|leg| {
+                leg.active
+                    && group
+                        .assets
+                        .get(leg.asset_index as usize)
+                        .map(|asset| {
+                            matches!(
+                                asset.lifecycle,
+                                AssetLifecycleV16::Active | AssetLifecycleV16::DrainOnly
+                            )
+                        })
+                        .unwrap_or(false)
+            })
             .try_fold(0u128, |sum, leg| {
                 sum.checked_add(leg.basis_pos_q.unsigned_abs())
                     .ok_or("active-position rank overflow")
             })?;
-        let health_work = if active == 0 {
+        let health_work = if active == 0 || crank_dispatchable_abs_q == 0 {
             0
         } else if cert.valid == 0 || cert_epoch_mismatch {
-            active_abs_q
+            crank_dispatchable_abs_q
                 .checked_add(1u128 << 120)
                 .ok_or("invalid-health rank overflow")?
         } else if cert.certified_liq_deficit.get() != 0 {
-            active_abs_q
+            crank_dispatchable_abs_q
         } else {
             0
         };
@@ -3529,6 +3545,10 @@ impl ScenarioRunner {
         for asset in 0..ASSET_COUNT {
             let engine_asset = &group.assets[asset];
             if group.mode == MarketModeV16::Live
+                && matches!(
+                    engine_asset.lifecycle,
+                    AssetLifecycleV16::Active | AssetLifecycleV16::DrainOnly
+                )
                 && engine_asset.oi_eff_long_q != engine_asset.oi_eff_short_q
             {
                 return Err(format!(

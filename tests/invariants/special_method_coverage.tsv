@@ -39,7 +39,7 @@ INV-010	R	OMITTED	-	No exhaustive bounded landing-order reachability model exist
 INV-029	R	OMITTED	-	No exhaustive bucket-edge claim-bound state model exists.
 INV-041	R	OMITTED	-	No exhaustive allocation and caller-order state model exists.
 INV-043	R	OMITTED	-	Hedge and correlation credit are absent from the wrapper API; reopen when exposed.
-INV-046	R	OMITTED	-	No bounded search proves every unsafe-price state retains a reducing route.
+INV-046	R	PARTIAL	tests/invariants/stateful/inv_046_trade_availability_without_unsafe_mark_admission.rs#v16_program_caller_priced_boundary_exit_lifecycle_matrix	All 12 caller-priced single/batch boundary cases cover zero rejection then price-one progress and maximum-price progress in publicly reached Active DrainOnly and Recovery states; CPI matcher prices cross-zero stale reset and resolved-close state spaces remain.
 INV-055	R	PARTIAL	tests/invariants/stateful/inv_055_state_indexed_admission.rs#v16_program_user_operation_lifecycle_admission_matrix	All 20 core user-operation cells cover Active DrainOnly Recovery and Resolved; reset-side close-ledger retirement and the remaining instruction classes remain.
 INV-057	R	PARTIAL	tests/invariants/stateful/inv_065_reset_recovery_and_retired_state_isolation.rs#v16_program_generated_shutdown_reaches_recovery_then_all_positions_exit	Generated public Recovery states retain owner exits; exhaustive mode reachability remains.
 INV-065	R	PARTIAL	tests/invariants/stateful/inv_065_reset_recovery_and_retired_state_isolation.rs#v16_program_generated_shutdown_reaches_recovery_then_all_positions_exit	Shutdown and generated interleavings are covered; exhaustive reset recovery and retirement reachability remains.
