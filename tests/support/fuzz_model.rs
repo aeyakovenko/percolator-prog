@@ -4,11 +4,14 @@ use super::v16_svm::{
 };
 use percolator::{
     v16_domain_pair_for_asset_index, AssetLifecycleV16, BackingBucketStatusV16, MarketModeV16,
-    PortfolioLegV16, SideModeV16, SideV16, CREDIT_RATE_SCALE, PORTFOLIO_SOURCE_DOMAIN_CAP,
-    POS_SCALE,
+    PortfolioLegV16, SideModeV16, SideV16, BOUND_SCALE, CREDIT_RATE_SCALE,
+    PORTFOLIO_SOURCE_DOMAIN_CAP, POS_SCALE,
 };
 use percolator_prog::{
-    constants::{ORACLE_LEG_FLAG_DIVIDE_LEG2, ORACLE_LEG_FLAG_DIVIDE_LEG3, ORACLE_MODE_EWMA_MARK},
+    constants::{
+        MARKET_GROUP_OFF, ORACLE_LEG_FLAG_DIVIDE_LEG2, ORACLE_LEG_FLAG_DIVIDE_LEG3,
+        ORACLE_MODE_EWMA_MARK,
+    },
     ix::{BatchTradeCpiLeg, BatchTradeLeg, CrankObservationHint},
     state::{MarketGroupV16, PortfolioAccountV16},
 };
@@ -1725,6 +1728,309 @@ fn assert_primary_source_claim_bound_attribution(label: &str, env: &V16Svm) -> R
     assert_source_claim_bound_attribution(label, &group, &portfolios)
 }
 
+fn checked_stock_add(total: &mut u128, value: u128, label: &str) -> Result<(), String> {
+    *total = total
+        .checked_add(value)
+        .ok_or_else(|| format!("{label}: independent stock census overflow"))?;
+    Ok(())
+}
+
+fn checked_count_add(total: &mut u64, value: u64, label: &str) -> Result<(), String> {
+    *total = total
+        .checked_add(value)
+        .ok_or_else(|| format!("{label}: independent count census overflow"))?;
+    Ok(())
+}
+
+fn decoded_flag(value: u8, label: &str, field: &str) -> Result<bool, String> {
+    match value {
+        0 => Ok(false),
+        1 => Ok(true),
+        _ => Err(format!(
+            "{label}: portfolio has invalid {field} byte {value}"
+        )),
+    }
+}
+
+fn bound_num_to_atoms_ceil(value: u128, label: &str) -> Result<u128, String> {
+    let whole = value / BOUND_SCALE;
+    if value % BOUND_SCALE == 0 {
+        Ok(whole)
+    } else {
+        whole
+            .checked_add(1)
+            .ok_or_else(|| format!("{label}: bound-to-atom ceiling overflow"))
+    }
+}
+
+fn assert_market_stock_census(
+    label: &str,
+    group: &MarketGroupV16,
+    market_data: &[u8],
+    portfolios: &[PortfolioAccountV16],
+    spl_vault_atoms: u128,
+) -> Result<(), String> {
+    let header_len = core::mem::size_of::<percolator::MarketGroupV16HeaderAccount>();
+    let header_end = MARKET_GROUP_OFF
+        .checked_add(header_len)
+        .ok_or_else(|| format!("{label}: raw market-header range overflow"))?;
+    let header_bytes = market_data
+        .get(MARKET_GROUP_OFF..header_end)
+        .ok_or_else(|| format!("{label}: raw market data is shorter than the engine header"))?;
+    let header =
+        bytemuck::pod_read_unaligned::<percolator::MarketGroupV16HeaderAccount>(header_bytes);
+
+    let mut capital_total = 0u128;
+    let mut positive_pnl_total = 0u128;
+    let mut cancel_escrow_total = 0u128;
+    let mut stale_count = 0u64;
+    let mut b_stale_count = 0u64;
+    let mut negative_pnl_count = 0u64;
+    for (portfolio_index, portfolio) in portfolios.iter().enumerate() {
+        checked_stock_add(
+            &mut capital_total,
+            portfolio.capital.get(),
+            &format!("{label} portfolio {portfolio_index} capital"),
+        )?;
+        let pnl = portfolio.pnl.get();
+        if pnl > 0 {
+            checked_stock_add(
+                &mut positive_pnl_total,
+                pnl as u128,
+                &format!("{label} portfolio {portfolio_index} positive PnL"),
+            )?;
+        } else if pnl < 0 {
+            checked_count_add(
+                &mut negative_pnl_count,
+                1,
+                &format!("{label} portfolio {portfolio_index} negative PnL"),
+            )?;
+        }
+        checked_stock_add(
+            &mut cancel_escrow_total,
+            portfolio.cancel_deposit_escrow.get(),
+            &format!("{label} portfolio {portfolio_index} cancel escrow"),
+        )?;
+        if decoded_flag(portfolio.stale_state, label, "stale_state")? {
+            checked_count_add(&mut stale_count, 1, label)?;
+        }
+        if decoded_flag(portfolio.b_stale_state, label, "b_stale_state")? {
+            checked_count_add(&mut b_stale_count, 1, label)?;
+        }
+    }
+
+    let mut backing_provider_earnings = 0u128;
+    for (domain, bucket) in group.source_backing_buckets.iter().enumerate() {
+        checked_stock_add(
+            &mut backing_provider_earnings,
+            bucket.utilization_fee_earnings,
+            &format!("{label} domain {domain} backing earnings"),
+        )?;
+    }
+
+    let mut source_claim_bound_num = 0u128;
+    let mut source_fresh_backing_num = 0u128;
+    let mut source_insurance_reserved_atoms = 0u128;
+    for (domain, source) in group.source_credit.iter().enumerate() {
+        checked_stock_add(
+            &mut source_claim_bound_num,
+            source.positive_claim_bound_num,
+            &format!("{label} domain {domain} source claim"),
+        )?;
+        checked_stock_add(
+            &mut source_fresh_backing_num,
+            source.fresh_reserved_backing_num,
+            &format!("{label} domain {domain} fresh backing"),
+        )?;
+        checked_stock_add(
+            &mut source_insurance_reserved_atoms,
+            bound_num_to_atoms_ceil(
+                source.insurance_credit_reserved_num,
+                &format!("{label} domain {domain} insurance reservation"),
+            )?,
+            &format!("{label} domain {domain} insurance reservation"),
+        )?;
+    }
+
+    let mut insurance_budget_remaining = 0u128;
+    for (domain, (&budget, &spent)) in group
+        .insurance_domain_budget
+        .iter()
+        .zip(&group.insurance_domain_spent)
+        .enumerate()
+    {
+        let remaining = budget.checked_sub(spent).ok_or_else(|| {
+            format!("{label}: domain {domain} insurance spend exceeds its budget")
+        })?;
+        checked_stock_add(
+            &mut insurance_budget_remaining,
+            remaining,
+            &format!("{label} domain {domain} insurance budget"),
+        )?;
+    }
+
+    let mut resolved_payout_blockers = 0u64;
+    for (asset_index, asset) in group.assets.iter().enumerate() {
+        for value in [
+            asset.stored_pos_count_long,
+            asset.stored_pos_count_short,
+            asset.stale_account_count_long,
+            asset.stale_account_count_short,
+        ] {
+            checked_count_add(&mut resolved_payout_blockers, value, label)?;
+        }
+        let (long_domain, short_domain) = v16_domain_pair_for_asset_index(asset_index)
+            .map_err(|error| format!("{label}: asset {asset_index} domain mapping: {error:?}"))?;
+        for domain in [long_domain, short_domain] {
+            let barrier = *group
+                .pending_domain_loss_barriers
+                .get(domain)
+                .ok_or_else(|| {
+                    format!("{label}: asset {asset_index} is missing domain {domain} barrier")
+                })?;
+            checked_count_add(&mut resolved_payout_blockers, barrier, label)?;
+        }
+    }
+
+    let materialized_count = u64::try_from(portfolios.len())
+        .map_err(|_| format!("{label}: materialized portfolio count does not fit u64"))?;
+    let aggregate_checks = [
+        ("capital", capital_total, group.c_tot, header.c_tot.get()),
+        (
+            "positive PnL",
+            positive_pnl_total,
+            group.pnl_pos_tot,
+            header.pnl_pos_tot.get(),
+        ),
+        (
+            "backing earnings",
+            backing_provider_earnings,
+            group.backing_provider_earnings_total,
+            header.backing_provider_earnings_total.get(),
+        ),
+        (
+            "source claims",
+            source_claim_bound_num,
+            group.source_claim_bound_total_num,
+            header.source_claim_bound_total_num.get(),
+        ),
+        (
+            "source insurance reservations",
+            source_insurance_reserved_atoms,
+            group.source_insurance_credit_reserved_total_atoms,
+            header.source_insurance_credit_reserved_total_atoms.get(),
+        ),
+        (
+            "insurance budget remaining",
+            insurance_budget_remaining,
+            group.insurance_domain_budget_remaining_total,
+            header.insurance_domain_budget_remaining_total.get(),
+        ),
+    ];
+    for (name, independent, decoded, raw) in aggregate_checks {
+        if independent != decoded || independent != raw {
+            return Err(format!(
+                "{label}: {name} aggregate mismatch: independent={independent}, decoded={decoded}, raw={raw}"
+            ));
+        }
+    }
+    if source_fresh_backing_num != header.source_fresh_backing_total_num.get() {
+        return Err(format!(
+            "{label}: fresh-backing aggregate mismatch: independent={source_fresh_backing_num}, raw={}",
+            header.source_fresh_backing_total_num.get(),
+        ));
+    }
+
+    let count_checks = [
+        (
+            "materialized portfolios",
+            materialized_count,
+            group.materialized_portfolio_count,
+            header.materialized_portfolio_count.get(),
+        ),
+        (
+            "stale certificates",
+            stale_count,
+            group.stale_certificate_count,
+            header.stale_certificate_count.get(),
+        ),
+        (
+            "B-stale accounts",
+            b_stale_count,
+            group.b_stale_account_count,
+            header.b_stale_account_count.get(),
+        ),
+        (
+            "negative-PnL accounts",
+            negative_pnl_count,
+            group.negative_pnl_account_count,
+            header.negative_pnl_account_count.get(),
+        ),
+        (
+            "resolved-payout blockers",
+            resolved_payout_blockers,
+            group.resolved_payout_blocker_count,
+            header.resolved_payout_blocker_count.get(),
+        ),
+    ];
+    for (name, independent, decoded, raw) in count_checks {
+        if independent != decoded || independent != raw {
+            return Err(format!(
+                "{label}: {name} mismatch: independent={independent}, decoded={decoded}, raw={raw}"
+            ));
+        }
+    }
+
+    if group.vault != spl_vault_atoms || header.vault.get() != spl_vault_atoms {
+        return Err(format!(
+            "{label}: vault mismatch: SPL={spl_vault_atoms}, decoded={}, raw={}",
+            group.vault,
+            header.vault.get(),
+        ));
+    }
+    let fresh_backing_atoms = source_fresh_backing_num / BOUND_SCALE;
+    let explicit_stock = capital_total
+        .checked_add(group.insurance)
+        .and_then(|value| value.checked_add(backing_provider_earnings))
+        .and_then(|value| value.checked_add(fresh_backing_atoms))
+        .and_then(|value| value.checked_add(cancel_escrow_total))
+        .ok_or_else(|| format!("{label}: explicit stock sum overflow"))?;
+    let junior_residual = spl_vault_atoms.checked_sub(explicit_stock).ok_or_else(|| {
+        format!(
+            "{label}: explicit stocks exceed custody: capital={capital_total}, insurance={}, earnings={backing_provider_earnings}, backing={fresh_backing_atoms}, escrow={cancel_escrow_total}, vault={spl_vault_atoms}",
+            group.insurance,
+        )
+    })?;
+    if explicit_stock.checked_add(junior_residual) != Some(spl_vault_atoms) {
+        return Err(format!("{label}: exact stock partition failed"));
+    }
+    Ok(())
+}
+
+pub fn assert_public_stock_census(label: &str, env: &V16Svm) -> Result<(), String> {
+    let (_, primary) = env.primary_market_state();
+    let primary_portfolios = (0..env.actors.len())
+        .map(|actor| env.primary_portfolio(actor))
+        .collect::<Vec<_>>();
+    assert_market_stock_census(
+        &format!("{label} primary"),
+        &primary,
+        &env.market_data(false),
+        &primary_portfolios,
+        u128::from(env.token_amount(env.vault)),
+    )?;
+
+    let (_, foreign) = env.foreign_market_state();
+    let foreign_portfolios = [env.foreign_portfolio()];
+    assert_market_stock_census(
+        &format!("{label} foreign"),
+        &foreign,
+        &env.market_data(true),
+        &foreign_portfolios,
+        u128::from(env.token_amount(env.foreign_vault)),
+    )
+}
+
 #[derive(Clone)]
 struct Snapshot {
     primary_market: Vec<u8>,
@@ -2911,24 +3217,7 @@ impl ScenarioRunner {
                     )));
                 }
                 if rank_after.reduced_from(rank_before) {
-                    self.coverage.crank_progress += 1;
-                    let before_components = rank_before.components();
-                    let after_components = rank_after.components();
-                    for index in 0..before_components.len() {
-                        if before_components[index] != 0 {
-                            self.coverage.crank_rank_component_seen[index] += 1;
-                        }
-                        if after_components[index] < before_components[index] {
-                            self.coverage.crank_rank_component_reduced[index] += 1;
-                        }
-                    }
-                    let before_class = rank_before.class_mask();
-                    let after_class = rank_after.class_mask();
-                    self.coverage.crank_rank_nodes.insert(before_class);
-                    self.coverage.crank_rank_nodes.insert(after_class);
-                    self.coverage
-                        .crank_rank_edges
-                        .insert((before_class, after_class));
+                    self.record_permissionless_rank_reduction(rank_before, rank_after);
                 }
                 Ok(())
             }
@@ -2946,6 +3235,31 @@ impl ScenarioRunner {
                 }
             }
         }
+    }
+
+    fn record_permissionless_rank_reduction(
+        &mut self,
+        rank_before: ProgressRank,
+        rank_after: ProgressRank,
+    ) {
+        self.coverage.crank_progress += 1;
+        let before_components = rank_before.components();
+        let after_components = rank_after.components();
+        for index in 0..before_components.len() {
+            if before_components[index] != 0 {
+                self.coverage.crank_rank_component_seen[index] += 1;
+            }
+            if after_components[index] < before_components[index] {
+                self.coverage.crank_rank_component_reduced[index] += 1;
+            }
+        }
+        let before_class = rank_before.class_mask();
+        let after_class = rank_after.class_mask();
+        self.coverage.crank_rank_nodes.insert(before_class);
+        self.coverage.crank_rank_nodes.insert(after_class);
+        self.coverage
+            .crank_rank_edges
+            .insert((before_class, after_class));
     }
 
     fn selected_observation(&self, actor: usize) -> Result<Vec<CrankObservationHint>, String> {
@@ -3184,6 +3498,7 @@ impl ScenarioRunner {
         let mut failures = Vec::new();
         let mut stale_prerequisites = 0usize;
         for (asset, side, _) in pending {
+            let rank_before = self.progress_rank(0)?;
             let before = self.snapshot();
             match self.env.finalize_reset_side(asset as u16, side) {
                 Ok(success) => {
@@ -3197,6 +3512,13 @@ impl ScenarioRunner {
                             "FinalizeResetSide succeeded without lowering pending-side rank: {pending_before} -> {pending_after}"
                         ));
                     }
+                    let rank_after = self.progress_rank(0)?;
+                    if !rank_after.reduced_from(rank_before) {
+                        return Err(format!(
+                            "FinalizeResetSide succeeded without lowering the public liveness rank: {rank_before:?} -> {rank_after:?}"
+                        ));
+                    }
+                    self.record_permissionless_rank_reduction(rank_before, rank_after);
                     return Ok(true);
                 }
                 Err(error) => {
@@ -3424,15 +3746,20 @@ impl ScenarioRunner {
         } else {
             0
         };
-        let loss_work =
-            finalizable_reset_side_count(&group).max(usize::from(group.loss_stale_active));
+        // A ResetPending side is actionable before its final leg is cleared, not only once
+        // FinalizeResetSide is already admissible. Count the mode barrier plus every exact
+        // prerequisite consumed by the public clear/finalize sequence so clearing the last leg
+        // changes reset work from 2 to 1, and finalization changes it from 1 to 0.
+        let loss_work = reset_pending_work(&group)?.max(u128::from(group.loss_stale_active));
+        let market_locks = u128::from(group.bankruptcy_hlock_active)
+            .checked_add(u128::from(group.threshold_stress_active))
+            .and_then(|value| value.checked_add(loss_work))
+            .and_then(|value| value.checked_add(lapsed_live_backing))
+            .ok_or("market-lock progress rank overflow")?;
         Ok(ProgressRank {
             market_mark_lag,
             market_loss_lag,
-            market_locks: u128::from(group.bankruptcy_hlock_active)
-                + u128::from(group.threshold_stress_active)
-                + loss_work as u128
-                + lapsed_live_backing,
+            market_locks,
             b_work,
             stale_legs,
             health_work,
@@ -3497,6 +3824,7 @@ impl ScenarioRunner {
         assert_source_claim_bound_attribution("primary", &primary, &primary_portfolios)?;
         let foreign_portfolios = [self.env.foreign_portfolio()];
         assert_source_claim_bound_attribution("foreign", &foreign, &foreign_portfolios)?;
+        assert_public_stock_census("stateful post-transition", &self.env)?;
         self.assert_positions_match()
     }
 
@@ -16277,17 +16605,47 @@ fn reset_pending_side_count(group: &percolator_prog::state::MarketGroupV16) -> u
         .sum()
 }
 
-fn finalizable_reset_side_count(group: &percolator_prog::state::MarketGroupV16) -> usize {
-    group
-        .assets
-        .iter()
-        .take(ASSET_COUNT)
-        .enumerate()
-        .map(|(asset, _state)| {
-            usize::from(reset_side_finalizable(group, asset, 0))
-                + usize::from(reset_side_finalizable(group, asset, 1))
-        })
-        .sum()
+fn reset_pending_work(group: &percolator_prog::state::MarketGroupV16) -> Result<u128, String> {
+    let mut work = 0u128;
+    for (asset_index, asset) in group.assets.iter().take(ASSET_COUNT).enumerate() {
+        let (long_domain, short_domain) = v16_domain_pair_for_asset_index(asset_index)
+            .map_err(|error| format!("reset-work domain mapping: {error:?}"))?;
+        for (mode, stored, stale, pending, domain) in [
+            (
+                asset.mode_long,
+                asset.stored_pos_count_long,
+                asset.stale_account_count_long,
+                asset.pending_obligation_count_long,
+                long_domain,
+            ),
+            (
+                asset.mode_short,
+                asset.stored_pos_count_short,
+                asset.stale_account_count_short,
+                asset.pending_obligation_count_short,
+                short_domain,
+            ),
+        ] {
+            if mode != SideModeV16::ResetPending {
+                continue;
+            }
+            let barrier = group
+                .pending_domain_loss_barriers
+                .get(domain)
+                .copied()
+                .ok_or_else(|| format!("reset-work missing domain {domain}"))?;
+            let side_work = 1u128
+                .checked_add(u128::from(stored))
+                .and_then(|value| value.checked_add(u128::from(stale)))
+                .and_then(|value| value.checked_add(u128::from(pending)))
+                .and_then(|value| value.checked_add(u128::from(barrier)))
+                .ok_or("reset-side progress rank overflow")?;
+            work = work
+                .checked_add(side_work)
+                .ok_or("aggregate reset progress rank overflow")?;
+        }
+    }
+    Ok(work)
 }
 
 fn reset_side_finalizable(
@@ -16690,6 +17048,136 @@ pub fn verify_attributed_pnl_roundtrip(
             terminal_group.source_claim_bound_total_num,
             env.token_supply_observed(),
             initial_supply,
+        ));
+    }
+    Ok(())
+}
+
+#[allow(dead_code)]
+pub fn verify_exact_stock_reconciliation_lifecycle(seed: [u8; 32]) -> Result<(), String> {
+    const LONG: usize = 0;
+    const SHORT: usize = 1;
+    const MARKET_CRANKER: usize = 4;
+    const ASSET: u16 = 0;
+    const SHORT_SOURCE_DOMAIN: u16 = 1;
+    const START_PRICE: u64 = 1_000_000;
+    const SETTLED_PRICE: u64 = 1_100_000;
+    const DEPOSIT: u128 = 2_000_000;
+    const BACKING: u128 = 125_003;
+    const INSURANCE: u128 = 37_001;
+    const EXPECTED_PNL: u128 = 100_000;
+
+    let mut env = V16Svm::new(
+        seed,
+        MarketConfig {
+            initial_price: START_PRICE,
+            max_price_move_bps_per_slot: 10_000,
+            max_accrual_dt_slots: 1,
+            max_abs_funding_e9_per_slot: 0,
+            min_funding_lifetime_slots: 1,
+            maintenance_fee_per_slot: 0,
+            actor_deposits: [DEPOSIT, DEPOSIT, 1, 1, 1],
+            actor_token_balances: [DEPOSIT as u64, DEPOSIT as u64, 1, 1, 1],
+            ..MarketConfig::default()
+        },
+    );
+    assert_public_stock_census("INV-025 initialized", &env)?;
+
+    env.top_up_insurance_domain(0, INSURANCE)
+        .map_err(|error| format!("INV-025 insurance top-up: {error}"))?;
+    assert_public_stock_census("INV-025 after insurance top-up", &env)?;
+
+    env.top_up_backing_bucket(SHORT_SOURCE_DOMAIN, BACKING, 100)
+        .map_err(|error| format!("INV-025 backing top-up: {error}"))?;
+    assert_public_stock_census("INV-025 after backing top-up", &env)?;
+
+    execute_trade_route(
+        &mut env,
+        TradeRoute::NoCpi,
+        LONG,
+        SHORT,
+        ASSET,
+        POS_SCALE as i128,
+        START_PRICE,
+        0,
+    )
+    .map_err(|error| format!("INV-025 open: {error}"))?;
+    assert_public_stock_census("INV-025 after open", &env)?;
+
+    env.warp_to_slot(2);
+    env.push_auth_mark(ASSET, 2, SETTLED_PRICE)
+        .map_err(|error| format!("INV-025 mark publication: {error}"))?;
+    crank_market_then_accounts_once(&mut env, MARKET_CRANKER, &[SHORT, LONG], 2, ASSET, 8)?;
+    let winner = env.primary_portfolio(LONG);
+    let loser = env.primary_portfolio(SHORT);
+    if winner.pnl.get() != EXPECTED_PNL as i128
+        || loser.pnl.get() != 0
+        || loser.capital.get() != DEPOSIT - EXPECTED_PNL
+    {
+        return Err(format!(
+            "INV-025 settlement fixture drifted: winner pnl={}, loser capital/pnl={}/{}",
+            winner.pnl.get(),
+            loser.capital.get(),
+            loser.pnl.get(),
+        ));
+    }
+    assert_public_stock_census("INV-025 after PnL settlement", &env)?;
+
+    execute_trade_route(
+        &mut env,
+        TradeRoute::BatchCpi,
+        LONG,
+        SHORT,
+        ASSET,
+        -(POS_SCALE as i128),
+        SETTLED_PRICE,
+        0,
+    )
+    .map_err(|error| format!("INV-025 route-switched close: {error}"))?;
+    assert_public_stock_census("INV-025 after route-switched close", &env)?;
+
+    env.convert_released_pnl(LONG, EXPECTED_PNL)
+        .map_err(|error| format!("INV-025 released-PnL conversion: {error}"))?;
+    assert_public_stock_census("INV-025 after released-PnL conversion", &env)?;
+
+    let (_, post_conversion) = env.primary_market_state();
+    let remaining_backing_atoms = post_conversion.source_credit[SHORT_SOURCE_DOMAIN as usize]
+        .fresh_reserved_backing_num
+        / BOUND_SCALE;
+    if remaining_backing_atoms != 0 {
+        env.withdraw_backing_bucket(SHORT_SOURCE_DOMAIN, remaining_backing_atoms)
+            .map_err(|error| format!("INV-025 backing withdrawal: {error}"))?;
+        assert_public_stock_census("INV-025 after backing withdrawal", &env)?;
+    }
+
+    let long_capital = env.primary_portfolio(LONG).capital.get();
+    let short_capital = env.primary_portfolio(SHORT).capital.get();
+    env.withdraw_primary(LONG, long_capital)
+        .map_err(|error| format!("INV-025 winner withdrawal: {error}"))?;
+    assert_public_stock_census("INV-025 after winner withdrawal", &env)?;
+    env.withdraw_primary(SHORT, short_capital)
+        .map_err(|error| format!("INV-025 loser withdrawal: {error}"))?;
+    assert_public_stock_census("INV-025 after loser withdrawal", &env)?;
+
+    let (_, terminal) = env.primary_market_state();
+    let terminal_fresh_backing_num = terminal
+        .source_credit
+        .iter()
+        .try_fold(0u128, |sum, source| {
+            sum.checked_add(source.fresh_reserved_backing_num)
+        })
+        .ok_or("INV-025 terminal backing sum overflow")?;
+    if terminal.c_tot != 3
+        || terminal.source_claim_bound_total_num != 0
+        || terminal_fresh_backing_num != 0
+        || terminal.insurance != INSURANCE
+    {
+        return Err(format!(
+            "INV-025 terminal explicit stocks drifted: capital={}, claims={}, backing={}, insurance={}",
+            terminal.c_tot,
+            terminal.source_claim_bound_total_num,
+            terminal_fresh_backing_num,
+            terminal.insurance,
         ));
     }
     Ok(())

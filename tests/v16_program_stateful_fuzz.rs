@@ -45,10 +45,11 @@ use support::fuzz_model::{
     trade_fee_market_generation_replay_seed_strategy, trade_funding_erasure_strategy,
     trade_retry_replay_strategy, verify_activation_fee_consent, verify_attributed_pnl_roundtrip,
     verify_bilateral_base_fee_consent, verify_cpi_backing_fee_consent, verify_cpi_base_fee_consent,
-    verify_cpi_caller_fee_protection, verify_positive_claim_bound_attribution_lifecycle,
-    verify_source_credit_rate_lifecycle, verify_trade_fee_market_generation_nonextraction,
-    withdrawal_retry_liquidation_seed_strategy, Action, AssetGenerationConfigPath, HintMode,
-    Scenario, SmallMarketConfig, SubstitutionKind, TradeRoute,
+    verify_cpi_caller_fee_protection, verify_exact_stock_reconciliation_lifecycle,
+    verify_positive_claim_bound_attribution_lifecycle, verify_source_credit_rate_lifecycle,
+    verify_trade_fee_market_generation_nonextraction, withdrawal_retry_liquidation_seed_strategy,
+    Action, AssetGenerationConfigPath, HintMode, Scenario, SmallMarketConfig, SubstitutionKind,
+    TradeRoute,
 };
 use support::invariant_discovery::{
     discover_accrual_ordering_violations, discover_active_leg_currentness_violation,
@@ -121,6 +122,9 @@ mod inv_020_authenticated_clock_slot_and_oracle_provenance;
 
 #[path = "invariants/stateful/inv_024_attributed_quote_value_conservation.rs"]
 mod inv_024_attributed_quote_value_conservation;
+
+#[path = "invariants/stateful/inv_025_exact_stock_reconciliation.rs"]
+mod inv_025_exact_stock_reconciliation;
 
 #[path = "invariants/stateful/inv_028_source_domain_realizability_cap.rs"]
 mod inv_028_source_domain_realizability_cap;
