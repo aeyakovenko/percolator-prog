@@ -137,7 +137,7 @@ enum Inv072ExtraTail {
 }
 
 struct Inv072HintMatrixCase {
-    label: &'static str,
+    label: String,
     observations: Vec<CrankObservationHint>,
     extra_tail: Inv072ExtraTail,
 }
@@ -234,65 +234,72 @@ fn inv072_crank_accounts(
     accounts
 }
 
+fn inv072_bounded_hint_words() -> Vec<Vec<CrankObservationHint>> {
+    fn extend(
+        prefix: &mut Vec<CrankObservationHint>,
+        remaining: usize,
+        out: &mut Vec<Vec<CrankObservationHint>>,
+    ) {
+        if remaining == 0 {
+            return;
+        }
+        for asset_index in 0..INV072_MATRIX_ASSETS {
+            prefix.push(inv072_hint(asset_index as u16));
+            out.push(prefix.clone());
+            extend(prefix, remaining - 1, out);
+            prefix.pop();
+        }
+    }
+
+    let mut out = vec![vec![]];
+    extend(&mut Vec::new(), INV072_MATRIX_ASSETS, &mut out);
+    out
+}
+
 #[test]
 fn v16_program_crank_hint_matrix_preserves_or_discovers_canonical_progress() {
-    let cases = vec![
-        Inv072HintMatrixCase {
-            label: "single leading subset",
-            observations: vec![inv072_hint(0)],
+    let bounded_words = inv072_bounded_hint_words();
+    assert_eq!(
+        bounded_words.len(),
+        1 + 3 + 9 + 27,
+        "all three-asset hint words through length three must be enumerated"
+    );
+    let mut cases: Vec<_> = bounded_words
+        .into_iter()
+        .enumerate()
+        .map(|(index, observations)| Inv072HintMatrixCase {
+            label: format!("bounded valid hint word {index}: {observations:?}"),
+            observations,
             extra_tail: Inv072ExtraTail::None,
-        },
+        })
+        .collect();
+    cases.extend([
         Inv072HintMatrixCase {
-            label: "single middle subset",
-            observations: vec![inv072_hint(1)],
-            extra_tail: Inv072ExtraTail::None,
-        },
-        Inv072HintMatrixCase {
-            label: "sparse reversed subset",
-            observations: vec![inv072_hint(2), inv072_hint(0)],
-            extra_tail: Inv072ExtraTail::None,
-        },
-        Inv072HintMatrixCase {
-            label: "full reverse permutation",
-            observations: vec![inv072_hint(2), inv072_hint(1), inv072_hint(0)],
-            extra_tail: Inv072ExtraTail::None,
-        },
-        Inv072HintMatrixCase {
-            label: "adjacent duplicate",
-            observations: vec![inv072_hint(0), inv072_hint(0), inv072_hint(1)],
-            extra_tail: Inv072ExtraTail::None,
-        },
-        Inv072HintMatrixCase {
-            label: "separated duplicate",
-            observations: vec![inv072_hint(1), inv072_hint(2), inv072_hint(1)],
-            extra_tail: Inv072ExtraTail::None,
-        },
-        Inv072HintMatrixCase {
-            label: "valid then out-of-range",
+            label: "valid then out-of-range".to_string(),
             observations: vec![inv072_hint(0), inv072_hint(3)],
             extra_tail: Inv072ExtraTail::None,
         },
         Inv072HintMatrixCase {
-            label: "out-of-range then valid",
+            label: "out-of-range then valid".to_string(),
             observations: vec![inv072_hint(3), inv072_hint(1)],
             extra_tail: Inv072ExtraTail::None,
         },
         Inv072HintMatrixCase {
-            label: "declared oracle tail missing after valid asset",
+            label: "declared oracle tail missing after valid asset".to_string(),
             observations: vec![inv072_hint_with_accounts(0, 1), inv072_hint(1)],
             extra_tail: Inv072ExtraTail::None,
         },
         Inv072HintMatrixCase {
-            label: "declared oracle tail is non-oracle account",
+            label: "declared oracle tail is non-oracle account".to_string(),
             observations: vec![inv072_hint_with_accounts(0, 1), inv072_hint(1)],
             extra_tail: Inv072ExtraTail::MintReadonly,
         },
         Inv072HintMatrixCase {
-            label: "unclaimed duplicate-market account tail",
+            label: "unclaimed duplicate-market account tail".to_string(),
             observations: vec![inv072_hint(2), inv072_hint(1)],
             extra_tail: Inv072ExtraTail::MarketReadonly,
         },
-    ];
+    ]);
 
     for case in cases {
         let (mut env, portfolio) = inv072_three_asset_pending_auth_mark_world();

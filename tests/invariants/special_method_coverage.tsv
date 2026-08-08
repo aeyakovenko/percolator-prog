@@ -29,7 +29,7 @@ INV-059	M	PARTIAL	tests/invariants/cu/inv_059_fee_fragmentation_bound.rs#v16_att
 INV-061	M	PARTIAL	tests/invariants/stateful/inv_061_deterministic_bounded_liquidation.rs#v16_program_resolved_adl_close_order_matrix_discovers_funded_exit_lock	Complete equal-priority leg and close-size permutation matrix remains.
 INV-064	M	PARTIAL	tests/invariants/cu/inv_064_insurance_withdrawal_policy_equivalence.rs#v16_program_terminal_insurance_withdraw_cannot_bypass_live_asset_withdrawal_policy	All withdrawal route asset and domain interleavings remain.
 INV-066	M	PARTIAL	tests/invariants/stateful/inv_066_resolved_payout_fairness_and_order_independence.rs#v16_program_full_terminal_lifecycle_is_claimant_order_independent	All 5! basic claimant orders are equivalent; top-up receipt authority-refinement and recovery orders remain.
-INV-072	M	PARTIAL	tests/invariants/cu/inv_072_order_robust_crankability.rs#v16_program_crank_hint_matrix_preserves_or_discovers_canonical_progress	Every actionable crank class and full bounded hint power set remain.
+INV-072	M	PARTIAL	tests/invariants/cu/inv_072_order_robust_crankability.rs#v16_program_crank_hint_matrix_preserves_or_discovers_canonical_progress	All 40 three-asset hint words through length three are covered; every actionable crank class and external-oracle tail permutation remain.
 INV-085	M	PARTIAL	tests/invariants/cu/inv_085_proven_arithmetic_equals_deployed_arithmetic.rs#v16_program_price_clamp_matches_widened_oracle_on_boundaries	Full Kani host BPF and bigint arithmetic equivalence remains.
 INV-086	M	PARTIAL	tests/invariants/stateful/inv_086_reference_model_and_deployed_transition_equivalence.rs#v16_program_reference_model_matches_deployed_public_sequence	Reference model omits identity liens payout authority resolution and lifecycle.
 INV-088	M	PARTIAL	tests/invariants/cu/inv_088_global_summaries_are_not_account_local_proofs.rs#v16_program_stored_position_summaries_match_portfolio_scan_after_cross_asset_updates	Every global accumulator and adversarial touch order remains.
@@ -48,7 +48,7 @@ INV-067	R	PARTIAL	tests/invariants/stateful/inv_066_resolved_payout_fairness_and
 INV-069	R	OMITTED	-	No exhaustive terminal normalization and retirement state model exists.
 INV-070	R	PARTIAL	tests/invariants/stateful/inv_066_resolved_payout_fairness_and_order_independence.rs#v16_program_full_terminal_lifecycle_is_claimant_order_independent	A complete two-asset public lifecycle reaches CloseSlab across all 5! claimant orders; rounding recovery prior-insurance and surplus paths remain.
 INV-071	R	OMITTED	-	No exhaustive actionable-state rank graph exists at the wrapper boundary.
-INV-072	R	OMITTED	-	No exhaustive hint-set and actionable-class reachability model exists.
+INV-072	R	PARTIAL	tests/invariants/cu/inv_072_order_robust_crankability.rs#v16_program_crank_hint_matrix_preserves_or_discovers_canonical_progress	Exhausts all 40 three-asset hint words through length three plus malformed tails in one public actionable topology; other crank classes remain.
 INV-073	R	PARTIAL	tests/invariants/stateful/inv_065_reset_recovery_and_retired_state_isolation.rs#v16_program_generated_shutdown_reaches_recovery_then_all_positions_exit	A generated funded Recovery path exits; no bounded graph covers every reachable funded state.
 INV-075	R	OMITTED	-	No exhaustive close-priority preemption and restart model exists.
 INV-078	R	OMITTED	-	No exhaustive failure-class to permissionless-recovery model exists.
