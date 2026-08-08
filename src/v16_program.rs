@@ -12518,21 +12518,15 @@ pub mod processor {
             let summary = group
                 .build_actionable_summary(&portfolio.as_view())
                 .map_err(map_v16_error)?;
-            if summary.liquidatable && !summary.b_stale {
+            // Refresh and liquidation both recertify the complete bounded portfolio. A pending
+            // wrapper-side mark/funding segment on any active leg must therefore be observed
+            // before either route can certify the account, even when the engine selects another
+            // leg for the first bounded step.
+            if (summary.stale || summary.liquidatable) && !summary.b_stale {
                 reject_missing_pending_liquidation_observations_view(
                     &cfg,
                     &group,
                     &portfolio,
-                    authenticated_now_slot,
-                    observations.as_slice(),
-                )?;
-            } else if let Some(asset_index) =
-                auto_crank_selected_asset_that_accrues_view(&portfolio, &summary)?
-            {
-                reject_missing_observation_that_changes_accrual_view(
-                    &cfg,
-                    &group,
-                    asset_index,
                     authenticated_now_slot,
                     observations.as_slice(),
                 )?;
@@ -12778,43 +12772,6 @@ pub mod processor {
             slot += 1;
         }
         Ok(())
-    }
-
-    fn first_active_asset_from_portfolio_view(
-        portfolio: &percolator::PortfolioV16ViewMut<'_>,
-    ) -> Result<Option<usize>, ProgramError> {
-        let active_bitmap = portfolio
-            .header
-            .active_bitmap
-            .map(percolator::V16PodU64::get);
-        let mut slot = 0usize;
-        while slot < percolator::V16_MAX_PORTFOLIO_ASSETS_N {
-            let leg = portfolio.header.legs[slot]
-                .try_to_runtime()
-                .map_err(map_v16_error)?;
-            let bit = percolator::active_bitmap_get(active_bitmap, slot);
-            if bit != leg.active {
-                return Err(PercolatorError::EngineHiddenLeg.into());
-            }
-            if bit {
-                return Ok(Some(leg.asset_index as usize));
-            }
-            slot += 1;
-        }
-        Ok(None)
-    }
-
-    fn auto_crank_selected_asset_that_accrues_view(
-        portfolio: &percolator::PortfolioV16ViewMut<'_>,
-        summary: &percolator::ActionableSummaryV16,
-    ) -> Result<Option<usize>, ProgramError> {
-        if summary.b_stale {
-            return Ok(None);
-        }
-        if summary.stale || summary.liquidatable {
-            return first_active_asset_from_portfolio_view(portfolio);
-        }
-        Ok(None)
     }
 
     fn reject_missing_observation_that_changes_accrual_view(

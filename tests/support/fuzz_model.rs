@@ -5460,9 +5460,9 @@ pub fn verify_cpi_backing_fee_consent(
 ) -> Result<CpiBackingFeeProtection, String> {
     seed[0] ^= 0x23;
     const PRICE: u64 = 100;
-    const LP_DEPOSIT: u128 = 3_190;
+    const LP_DEPOSIT: u128 = 4_100;
     const ATTACKER_DEPOSIT: u128 = 10_000;
-    const WINNING_SIZE_Q: i128 = 200 * POS_SCALE as i128;
+    const WINNING_SIZE_Q: i128 = 300 * POS_SCALE as i128;
     const LOSING_SIZE_Q: i128 = 100 * POS_SCALE as i128;
     const INCREASE_Q: i128 = 20 * POS_SCALE as i128;
     const WINNING_DOMAIN: u16 = 3;
@@ -5470,6 +5470,7 @@ pub fn verify_cpi_backing_fee_consent(
     let mut env = V16Svm::new(
         seed,
         MarketConfig {
+            initial_price: PRICE,
             maintenance_margin_bps: 1_000,
             initial_margin_bps: 1_000,
             max_price_move_bps_per_slot: 500,
@@ -5510,15 +5511,34 @@ pub fn verify_cpi_backing_fee_consent(
         .map_err(|error| format!("prime attacker asset: {error}"))?;
     env.push_auth_mark(0, 4, PRICE)
         .map_err(|error| format!("prime base asset: {error}"))?;
-    for (actor, asset) in [(1, 1), (2, 1), (1, 0), (2, 0)] {
-        crank_adapter_steps(&mut env, actor, 4, asset, 4)?;
+    let complete_prime_observations = vec![
+        CrankObservationHint {
+            asset_index: 1,
+            oracle_accounts: env.primary_profile(1).oracle_leg_count,
+        },
+        CrankObservationHint {
+            asset_index: 0,
+            oracle_accounts: env.primary_profile(0).oracle_leg_count,
+        },
+    ];
+    for actor in [1, 2] {
+        crank_adapter_steps_with_observations(
+            &mut env,
+            actor,
+            4,
+            complete_prime_observations.clone(),
+            8,
+        )?;
     }
     env.sync_maintenance_fee(2, 4)
         .map_err(|error| format!("sync LP maintenance fee: {error}"))?;
-    if env.primary_portfolio(2).capital.get() != 3_100 {
+    let expected_lp_capital = LP_DEPOSIT
+        .checked_sub(90)
+        .ok_or("LP maintenance setup underflow")?;
+    if env.primary_portfolio(2).capital.get() != expected_lp_capital {
         return Err(format!(
-            "LP maintenance setup reached capital {}, expected 3100",
-            env.primary_portfolio(2).capital.get()
+            "LP maintenance setup reached capital {}, expected {expected_lp_capital}",
+            env.primary_portfolio(2).capital.get(),
         ));
     }
 
@@ -5527,8 +5547,19 @@ pub fn verify_cpi_backing_fee_consent(
         .map_err(|error| format!("push LP winning mark: {error}"))?;
     env.push_auth_mark(0, 5, 95)
         .map_err(|error| format!("push LP losing mark: {error}"))?;
-    for (actor, asset) in [(1, 1), (2, 1), (1, 0)] {
-        crank_adapter_steps(&mut env, actor, 5, asset, 4)?;
+    let complete_lp_observations = vec![
+        CrankObservationHint {
+            asset_index: 1,
+            oracle_accounts: env.primary_profile(1).oracle_leg_count,
+        },
+        CrankObservationHint {
+            asset_index: 0,
+            oracle_accounts: env.primary_profile(0).oracle_leg_count,
+        },
+    ];
+    for actor in [1, 2] {
+        env.crank(actor, 5, complete_lp_observations.clone())
+            .map_err(|error| format!("fully refresh LP source-PnL actor {actor}: {error}"))?;
     }
     if env.primary_portfolio(2).pnl.get() != 1_000 {
         return Err(format!(
@@ -14985,6 +15016,7 @@ pub fn reproduce_cross_domain_b_settlement(
     let mut env = V16Svm::new(
         seed,
         MarketConfig {
+            initial_price: INITIAL_PRICE,
             max_price_move_bps_per_slot: 10_000,
             max_accrual_dt_slots: 1,
             min_funding_lifetime_slots: 1,
@@ -16282,11 +16314,24 @@ fn crank_adapter_steps(
     asset_index: u16,
     attempts: usize,
 ) -> Result<u64, String> {
-    let oracle_accounts = env.primary_profile(asset_index as usize).oracle_leg_count;
     let observations = vec![CrankObservationHint {
         asset_index,
-        oracle_accounts,
+        oracle_accounts: env.primary_profile(asset_index as usize).oracle_leg_count,
     }];
+    crank_adapter_steps_with_observations(env, actor, now_slot, observations, attempts)
+}
+
+fn crank_adapter_steps_with_observations(
+    env: &mut V16Svm,
+    actor: usize,
+    now_slot: u64,
+    observations: Vec<CrankObservationHint>,
+    attempts: usize,
+) -> Result<u64, String> {
+    let observed_assets = observations
+        .iter()
+        .map(|observation| observation.asset_index)
+        .collect::<Vec<_>>();
     let mut progressed = false;
     let mut max_cu = 0;
     for _ in 0..attempts {
@@ -16298,14 +16343,14 @@ fn crank_adapter_steps(
             Err(error) if progressed && error.contains("Custom(22)") => break,
             Err(error) => {
                 return Err(format!(
-                    "actor {actor} asset {asset_index} crank failed before progress: {error}"
+                    "actor {actor} assets {observed_assets:?} crank failed before progress: {error}"
                 ));
             }
         }
     }
     if !progressed {
         return Err(format!(
-            "actor {actor} asset {asset_index} crank made no progress"
+            "actor {actor} assets {observed_assets:?} crank made no progress"
         ));
     }
     Ok(max_cu)

@@ -4389,25 +4389,27 @@ pub fn discover_fee_consent_violations(seed: [u8; 32]) -> Result<Vec<FeeConsentD
         .collect()
 }
 
-fn crank_discovery_steps(
+fn crank_discovery_steps_for_assets(
     env: &mut V16Svm,
     actor: usize,
     slot: u64,
-    asset_index: u16,
+    asset_indices: &[u16],
 ) -> Result<(), String> {
-    let oracle_accounts = env.primary_profile(asset_index as usize).oracle_leg_count;
+    let observations = asset_indices
+        .iter()
+        .copied()
+        .map(|asset_index| CrankObservationHint {
+            asset_index,
+            oracle_accounts: env.primary_profile(asset_index as usize).oracle_leg_count,
+        })
+        .collect::<Vec<_>>();
     for step in 0..4 {
-        env.crank(
-            actor,
-            slot,
-            vec![CrankObservationHint {
-                asset_index,
-                oracle_accounts,
-            }],
-        )
-        .map_err(|error| {
-            format!("source-fee crank actor {actor} asset {asset_index} step {step}: {error}")
-        })?;
+        env.crank(actor, slot, observations.clone())
+            .map_err(|error| {
+                format!(
+                    "source-fee crank actor {actor} assets {asset_indices:?} step {step}: {error}"
+                )
+            })?;
     }
     Ok(())
 }
@@ -4460,13 +4462,8 @@ fn prepare_source_backed_fee_world(seed: [u8; 32]) -> Result<V16Svm, String> {
         .map_err(|error| format!("prime source-backed mark: {error}"))?;
     env.push_auth_mark(0, 4, PRICE)
         .map_err(|error| format!("prime base mark: {error}"))?;
-    for (actor, asset_index) in [
-        (MARKET_TRADER, ASSET),
-        (LP, ASSET),
-        (MARKET_TRADER, 0),
-        (LP, 0),
-    ] {
-        crank_discovery_steps(&mut env, actor, 4, asset_index)?;
+    for actor in [MARKET_TRADER, LP] {
+        crank_discovery_steps_for_assets(&mut env, actor, 4, &[ASSET, 0])?;
     }
     env.sync_maintenance_fee(LP, 4)
         .map_err(|error| format!("sync source-backed LP maintenance fee: {error}"))?;
@@ -4476,8 +4473,8 @@ fn prepare_source_backed_fee_world(seed: [u8; 32]) -> Result<V16Svm, String> {
         .map_err(|error| format!("publish source-backed winning mark: {error}"))?;
     env.push_auth_mark(0, 5, PRICE - 5)
         .map_err(|error| format!("publish offsetting losing mark: {error}"))?;
-    for (actor, asset_index) in [(MARKET_TRADER, ASSET), (LP, ASSET), (MARKET_TRADER, 0)] {
-        crank_discovery_steps(&mut env, actor, 5, asset_index)?;
+    for actor in [MARKET_TRADER, LP] {
+        crank_discovery_steps_for_assets(&mut env, actor, 5, &[ASSET, 0])?;
     }
     if env.primary_portfolio(LP).pnl.get() <= 0 {
         return Err(format!(
@@ -4751,13 +4748,8 @@ fn discover_one_backing_provider_consent_violation(
         .map_err(|error| format!("prime provider-backed mark: {error}"))?;
     env.push_auth_mark(0, 2, PRICE)
         .map_err(|error| format!("prime provider base mark: {error}"))?;
-    for (actor, asset_index) in [
-        (MARKET_TRADER, ASSET),
-        (LP, ASSET),
-        (MARKET_TRADER, 0),
-        (LP, 0),
-    ] {
-        crank_discovery_steps(&mut env, actor, 2, asset_index)?;
+    for actor in [MARKET_TRADER, LP] {
+        crank_discovery_steps_for_assets(&mut env, actor, 2, &[ASSET, 0])?;
     }
     env.sync_maintenance_fee(LP, 2)
         .map_err(|error| format!("sync provider-backed LP fee: {error}"))?;
@@ -4766,8 +4758,8 @@ fn discover_one_backing_provider_consent_violation(
         .map_err(|error| format!("publish provider-backed winning mark: {error}"))?;
     env.push_auth_mark(0, 3, PRICE - 5)
         .map_err(|error| format!("publish provider-backed losing mark: {error}"))?;
-    for (actor, asset_index) in [(MARKET_TRADER, ASSET), (LP, ASSET), (MARKET_TRADER, 0)] {
-        crank_discovery_steps(&mut env, actor, 3, asset_index)?;
+    for actor in [MARKET_TRADER, LP] {
+        crank_discovery_steps_for_assets(&mut env, actor, 3, &[ASSET, 0])?;
     }
     if env.primary_portfolio(LP).pnl.get() <= 0 {
         return Err(format!(
@@ -10345,7 +10337,6 @@ fn discover_one_cross_domain_rounding_exit_lock(
             oracle_accounts: oracle_accounts[asset_index as usize],
         }]
     };
-
     let mut slot = env.current_slot();
     for (offset, asset_index) in assets.into_iter().enumerate() {
         env.trade_no_cpi(
@@ -10581,6 +10572,15 @@ fn discover_one_flat_source_lien_claim_lock(
             oracle_accounts: oracle_accounts[asset_index as usize],
         }]
     };
+    let complete_observations = || {
+        [0u16, 1]
+            .into_iter()
+            .map(|asset_index| CrankObservationHint {
+                asset_index,
+                oracle_accounts: oracle_accounts[asset_index as usize],
+            })
+            .collect::<Vec<_>>()
+    };
     env.top_up_backing_bucket(1, 150, 10)
         .map_err(|error| format!("fund flat source-lien backing: {error}"))?;
     env.trade_no_cpi(WINNER, COUNTERPARTY, 0, ASSET0_SIZE_Q, PRICE, 0)
@@ -10593,8 +10593,8 @@ fn discover_one_flat_source_lien_claim_lock(
         .map_err(|error| format!("publish flat-lien winning mark: {error}"))?;
     env.push_auth_mark(1, 2, 95)
         .map_err(|error| format!("publish flat-lien adverse mark: {error}"))?;
-    for (actor, asset_index) in [(COUNTERPARTY, 0), (WINNER, 0), (COUNTERPARTY, 1)] {
-        env.crank(actor, 2, observation(asset_index))
+    for actor in [COUNTERPARTY, WINNER] {
+        env.crank(actor, 2, complete_observations())
             .map_err(|error| format!("settle flat-lien actor {actor}: {error}"))?;
     }
     env.withdraw_backing_bucket(1, provider_withdrawal)
