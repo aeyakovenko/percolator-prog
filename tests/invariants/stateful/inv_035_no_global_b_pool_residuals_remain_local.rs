@@ -8,11 +8,11 @@
 //! deltas. It requires the unrelated claim to remain unchanged, the affected claim to absorb the
 //! exact B loss, bounded public reductions to flatten the affected leg, and principal withdrawal
 //! with conserved SPL supply.
-//! `v16_program_ambiguous_multi_asset_deficit_recovers_without_last_asset_charge` exercises the
+//! `v16_program_ambiguous_multi_asset_deficit_resolves_without_last_asset_charge` exercises the
 //! complementary public route boundary. A loss from asset 0 predates the final reduction of an
 //! unrelated asset 1 leg, so the engine cannot safely infer one residual domain. Every trade route
-//! must leave both B domains untouched, select terminal Recovery, and settle all funded portfolios
-//! without losing SPL value.
+//! must leave both B domains untouched, remain Live until the configured market-level stale policy
+//! resolves it, and settle all funded portfolios without losing SPL value.
 //!
 //! Guarantee boundary: this randomized public-route oracle certifies the exercised two-domain
 //! topology. The deterministic TDD route lives in the public-SBF INV-035 file, while engine Kani
@@ -32,7 +32,7 @@ fn inv_035_terminal(account: &percolator_prog::state::PortfolioAccountV16) -> bo
         && active_bitmap_is_empty(account.active_bitmap.map(|word| word.get()))
 }
 
-fn verify_ambiguous_multi_asset_recovery(route: TradeRoute) -> Result<(), String> {
+fn verify_ambiguous_multi_asset_resolution(route: TradeRoute) -> Result<(), String> {
     const WINNER: usize = 0;
     const LOSER: usize = 1;
     const KEEPER: usize = 4;
@@ -66,6 +66,8 @@ fn verify_ambiguous_multi_asset_recovery(route: TradeRoute) -> Result<(), String
             ..MarketConfig::default()
         },
     );
+    env.configure_permissionless_resolve(100, 1)
+        .map_err(|error| format!("{route:?}: configure public resolution: {error}"))?;
     let supply_before = env.token_supply_observed();
     let destination_before: u128 = env
         .actors
@@ -164,17 +166,18 @@ fn verify_ambiguous_multi_asset_recovery(route: TradeRoute) -> Result<(), String
         ));
     }
 
-    env.crank(LOSER, final_slot, vec![])
-        .map_err(|error| format!("{route:?}: declare ambiguous recovery: {error}"))?;
-    if env.primary_market_state().1.mode != MarketModeV16::Recovery {
+    if env.primary_market_state().1.mode != MarketModeV16::Live {
         return Err(format!(
-            "{route:?}: ambiguous residual did not enter Recovery"
+            "{route:?}: ambiguous account forced market-wide Recovery"
         ));
     }
-    env.crank(LOSER, final_slot, vec![])
-        .map_err(|error| format!("{route:?}: finalize ambiguous recovery: {error}"))?;
+    let resolution_slot = final_slot
+        .checked_add(100)
+        .ok_or_else(|| format!("{route:?}: resolution slot overflow"))?;
+    env.resolve_stale_permissionless(resolution_slot)
+        .map_err(|error| format!("{route:?}: permissionless market resolution: {error}"))?;
     if env.primary_market_state().1.mode != MarketModeV16::Resolved {
-        return Err(format!("{route:?}: Recovery did not finalize"));
+        return Err(format!("{route:?}: stale market did not resolve"));
     }
 
     for actor in [LOSER, WINNER, 2, 3, KEEPER] {
@@ -225,14 +228,14 @@ fn verify_ambiguous_multi_asset_recovery(route: TradeRoute) -> Result<(), String
 }
 
 #[test]
-fn v16_program_ambiguous_multi_asset_deficit_recovers_without_last_asset_charge() {
+fn v16_program_ambiguous_multi_asset_deficit_resolves_without_last_asset_charge() {
     for route in [
         TradeRoute::NoCpi,
         TradeRoute::Cpi,
         TradeRoute::BatchNoCpi,
         TradeRoute::BatchCpi,
     ] {
-        verify_ambiguous_multi_asset_recovery(route)
+        verify_ambiguous_multi_asset_resolution(route)
             .unwrap_or_else(|error| panic!("INV-035: {error}"));
     }
 }

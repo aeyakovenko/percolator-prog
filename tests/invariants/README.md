@@ -115,7 +115,7 @@ charter.
 | INV-032 | SVM/CU | `cu/inv_032_exact_counterparty_lien_lifecycle.rs` |
 | INV-033 | SVM/CU + API gap | `cu/inv_033_insurance_backed_lien_single_classification.rs` proves the deployed public route creates counterparty-backed source liens without double-classifying them as insurance-backed, and that unreserved domain insurance cannot be silently consumed as source-credit backing; direct insurance-backed lien creation remains engine fuzz/Kani-only until a wrapper reservation route exists |
 | INV-034 | Independent + Direct + SVM/CU | `public_sbf/inv_034_domain_and_instance_isolation.rs`, `stateful/inv_034_domain_and_instance_isolation.rs`, `cu/inv_034_domain_and_instance_isolation.rs` |
-| INV-035 | Independent + Direct | `public_sbf/inv_035_no_global_b_pool_residuals_remain_local.rs`, `stateful/inv_035_no_global_b_pool_residuals_remain_local.rs` |
+| INV-035 | Independent + Direct + SVM/CU | `public_sbf/inv_035_no_global_b_pool_residuals_remain_local.rs`, `stateful/inv_035_no_global_b_pool_residuals_remain_local.rs`, and `cu/inv_074_scope_locality.rs` cover exact two-asset B attribution plus the ambiguous-domain case across all four trade routes. A final reduction with a uniquely attributable residual preserves an asset-local close ledger until a permissionless crank books the loss; an ambiguous account deficit cannot charge the last touched asset or force unrelated live markets into Recovery, and instead reaches terminal settlement through the configured permissionless stale-market policy. |
 | INV-036 | Independent + Direct + SVM/CU | `public_sbf/inv_036_fee_destination_and_policy_version_integrity.rs`, `stateful/inv_036_fee_destination_and_policy_version_integrity.rs`, `cu/inv_036_fee_destination_and_policy_version_integrity.rs` |
 | INV-037 | SVM/CU | `cu/inv_037_exact_residual_partition.rs` |
 | INV-038 | Independent + Direct + SVM/CU | `public_sbf/inv_038_rounding_and_ratio_conservation.rs`, `stateful/inv_038_rounding_and_ratio_conservation.rs`, `cu/inv_038_rounding_and_ratio_conservation.rs` |
@@ -151,7 +151,7 @@ charter.
 | INV-068 | SVM/CU | `cu/inv_068_receipt_uniqueness_and_monotonic_topups.rs` |
 | INV-069 | SVM/CU + Partial R | `stateful/inv_069_terminal_normalization_and_retirement.rs`, `cu/inv_069_terminal_normalization_and_retirement.rs` (all four funded-insurance/funded-backing blocker states and both public drain orders are covered; other terminal obligation classes remain) |
 | INV-070 | SVM/CU + Partial R | `stateful/inv_066_resolved_payout_fairness_and_order_independence.rs`, `cu/inv_070_zero_unattributed_terminal_residue_and_close_slab.rs` (a public two-asset lifecycle drains every portfolio and reaches `CloseSlab` in all 5! claimant orders) |
-| INV-071 | Independent + SVM/CU + Partial R + Cross-owner counterexample | `cu/inv_071_crank_progress.rs`, `stateful/inv_082_state_indexed_liveness_theorem.rs` (ten public prefixes across two configurations record only strict lexicographic rank-decreasing crank edges and require every observed actionable rank class to reach zero; the rank now counts the complete ResetPending episode as mode barrier plus stored/stale/pending/domain-barrier work, so clearing the final prior-epoch leg and then finalizing are both strict decreases; a Recovery-only stale certificate is classified as stale but neither empty nor apparently complete hints can dispatch a successful crank, while owner reduction remains live) |
+| INV-071 | Independent + SVM/CU + Partial R + Cross-owner counterexample | `stateful/inv_071_crank_progress.rs`, `cu/inv_071_crank_progress.rs`, and `stateful/inv_082_state_indexed_liveness_theorem.rs`. Ten public prefixes across two configurations record only strict lexicographic rank-decreasing crank edges and require every observed actionable rank class to reach zero. The four-route flat-negative regression proves the final owner reduction preserves the close ledger, one permissionless `AdvanceClose` books the residual, the account cannot force market-wide Recovery, and the configured permissionless stale-market route reaches signed terminal payout with exact SPL conservation. The rank now counts the complete ResetPending episode as mode barrier plus stored/stale/pending/domain-barrier work, so clearing the final prior-epoch leg and then finalizing are both strict decreases. A separate Recovery-only stale certificate remains a cross-owner counterexample: neither empty nor apparently complete hints can dispatch a successful crank, while owner reduction remains live. |
 | INV-072 | SVM/CU + M + Partial R | `cu/inv_072_order_robust_crankability.rs` (exhaustive 40-word three-asset hint alphabet through length three, malformed tails, valid-hint normalization, selected-mark observation requirements, and public expired-close recovery after adversarial hints) |
 | INV-073 | Independent + F + SVM/CU + Partial R | `stateful/inv_065_reset_recovery_and_retired_state_isolation.rs`, `stateful/inv_066_resolved_payout_fairness_and_order_independence.rs`, `cu/inv_073_no_permanent_user_lock.rs` (generated Recovery exits and an exhaustive basic resolved-claim order model reach terminal disposition) |
 | INV-074 | Independent + SVM/CU | `cu/inv_074_scope_locality.rs` (asset-local stale/bankruptcy isolation plus public asset-close locality for unrelated withdrawals and existing-position exits; new unrelated risk admission may still be conservatively blocked during active close) |
@@ -388,11 +388,11 @@ cargo test --test v16_cu
 cargo kani --tests
 ```
 
-On engine pin `9ffc4749a4b7e486f814090c7b43fb01a6df5dcf`, the full `v16_cu` inventory is
-invariant-owned and has 707 passing tests. The former red PR220/PR366, PR367, live
-source-backing expiry, and source-domain capacity admission probes are fixed-pin regressions under
-INV-028, INV-030, INV-053, INV-063, and INV-077; the unfiltered command is the required
-verification command.
+On engine pin `4bf0a98f8b1a1f8db18947630460a91a89de0f16`, the full `v16_cu` inventory is
+invariant-owned and passes as an unfiltered suite. The former red PR220/PR366, PR367, live
+source-backing expiry, source-domain capacity admission, and flat-negative final-leg progress
+probes are fixed-pin regressions under INV-028, INV-030, INV-035, INV-053, INV-063, INV-071,
+INV-074, and INV-077; the unfiltered command is the required verification command.
 
 Use `PERCOLATOR_FUZZ_CASES`, `PERCOLATOR_FUZZ_ACTIONS`, and
 `PERCOLATOR_FUZZ_SHRINK_ITERS` to raise the generated stateful budget. Kani harness names now include

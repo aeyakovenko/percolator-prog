@@ -9,10 +9,11 @@
 //! same underfunded position through single/batch CPI/no-CPI routes. The adverse mark is published
 //! through authenticated wrapper instructions. The final risk-reducing trade remains available,
 //! preserves an asset-local close ledger before clearing the final leg, and leaves a public
-//! `AdvanceClose` continuation. Permissionless cranks then book the residual and enter/finalize
-//! Recovery. Signed owner closes terminate every funded portfolio, empty the real SPL vault, and
-//! preserve exact token supply. The trace rejects any out-of-band economic-state mutation and
-//! requires exact rollback for every rejected instruction.
+//! `AdvanceClose` continuation. A permissionless crank books the residual without granting the
+//! account authority to terminate unrelated markets. The configured permissionless stale-market
+//! policy then begins terminal settlement, signed owner closes terminate every funded portfolio,
+//! empty the real SPL vault, and preserve exact token supply. The trace rejects any out-of-band
+//! economic-state mutation and requires exact rollback for every rejected instruction.
 //!
 //! Guarantee boundary: this is deployed LiteSVM evidence for the four wrapper trade routes and the
 //! uniquely attributable one-asset residual class. The engine's production selector and rank
@@ -82,6 +83,8 @@ fn verify_flat_negative_final_leg_progress(
             ..MarketConfig::default()
         },
     );
+    env.configure_permissionless_resolve(100, 1)
+        .map_err(|error| format!("{route:?}: configure public resolution: {error}"))?;
     let token_supply_before = env.token_supply_observed();
     let destination_balances_before: u128 = env
         .actors
@@ -155,8 +158,8 @@ fn verify_flat_negative_final_leg_progress(
     }
     let residual_before = pending.residual_remaining;
 
-    // AdvanceClose, DeclareRecovery, and FinalizeRecovery are state-derived plans. They do not
-    // require an oracle hint and each public call performs one bounded unit of work.
+    // AdvanceClose is state-derived and needs no oracle hint. It books the residual without
+    // granting this account authority to terminate unrelated live market activity.
     max_compute_units = max_compute_units.max(
         env.crank(LOSER, final_slot, vec![])
             .map_err(|error| format!("{route:?}: advance residual: {error}"))?
@@ -182,23 +185,21 @@ fn verify_flat_negative_final_leg_progress(
     }
     let residual_after = booked.residual_remaining;
 
-    max_compute_units = max_compute_units.max(
-        env.crank(LOSER, final_slot, vec![])
-            .map_err(|error| format!("{route:?}: declare recovery: {error}"))?
-            .compute_units,
-    );
-    if env.primary_market_state().1.mode != MarketModeV16::Recovery {
+    if env.primary_market_state().1.mode != MarketModeV16::Live {
         return Err(format!(
-            "{route:?}: sticky bankruptcy did not enter Recovery"
+            "{route:?}: account residual forced market recovery"
         ));
     }
+    let resolution_slot = final_slot
+        .checked_add(100)
+        .ok_or_else(|| format!("{route:?}: resolution slot overflow"))?;
     max_compute_units = max_compute_units.max(
-        env.crank(LOSER, final_slot, vec![])
-            .map_err(|error| format!("{route:?}: finalize recovery: {error}"))?
+        env.resolve_stale_permissionless(resolution_slot)
+            .map_err(|error| format!("{route:?}: permissionless market resolution: {error}"))?
             .compute_units,
     );
     if env.primary_market_state().1.mode != MarketModeV16::Resolved {
-        return Err(format!("{route:?}: Recovery did not finalize to Resolved"));
+        return Err(format!("{route:?}: stale market did not resolve"));
     }
 
     let mut terminal_close_calls = 0usize;
