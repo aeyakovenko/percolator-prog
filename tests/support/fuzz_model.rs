@@ -2219,6 +2219,7 @@ pub struct ScenarioRunner {
     env: V16Svm,
     positions: [[i128; ASSET_COUNT]; PRIMARY_ACTOR_COUNT],
     protocol_positions: [i128; ASSET_COUNT],
+    expected_effective_oi: [[u128; 2]; ASSET_COUNT],
     liveness_limit: usize,
     retained: VecDeque<RetainedTrade>,
     last_trade_rejection: Option<String>,
@@ -2239,6 +2240,7 @@ impl ScenarioRunner {
             env,
             positions: [[0; ASSET_COUNT]; PRIMARY_ACTOR_COUNT],
             protocol_positions: [0; ASSET_COUNT],
+            expected_effective_oi: [[0; 2]; ASSET_COUNT],
             liveness_limit: scenario_liveness_limit(scenario)?,
             retained: VecDeque::new(),
             last_trade_rejection: None,
@@ -2485,6 +2487,8 @@ impl ScenarioRunner {
         asset: usize,
         size_before: i128,
     ) -> Result<bool, String> {
+        let account_before = self.env.primary_portfolio(user);
+        let (_, group_before) = self.env.primary_market_state();
         let before = self.snapshot();
         match self
             .env
@@ -2505,6 +2509,31 @@ impl ScenarioRunner {
                 let user_delta = size_after
                     .checked_sub(size_before)
                     .ok_or("rebalance exit delta overflow")?;
+                let reduced = size_before
+                    .unsigned_abs()
+                    .checked_sub(size_after.unsigned_abs())
+                    .ok_or("rebalance exit increased position")?;
+                if reduced == 0 {
+                    return Err("successful rebalance exit made no position progress".into());
+                }
+                let account_after = self.env.primary_portfolio(user);
+                self.apply_account_oi_transition(
+                    &account_before,
+                    &account_after,
+                    &group_before,
+                    false,
+                    "owner rebalance exit",
+                )?;
+                self.apply_unilateral_matching_oi_reduction(
+                    asset,
+                    if size_before > 0 {
+                        SideV16::Long
+                    } else {
+                        SideV16::Short
+                    },
+                    reduced,
+                    "owner rebalance exit",
+                )?;
                 self.positions[user][asset] = size_after;
                 self.protocol_positions[asset] = self.protocol_positions[asset]
                     .checked_sub(user_delta)
@@ -2551,6 +2580,8 @@ impl ScenarioRunner {
             return Ok(false);
         }
 
+        let account_before = account;
+        let group_before = group;
         let before = self.snapshot();
         match self
             .env
@@ -2571,6 +2602,14 @@ impl ScenarioRunner {
                 let user_delta = size_after
                     .checked_sub(size_before)
                     .ok_or("dead-leg forfeit delta overflow")?;
+                let account_after = self.env.primary_portfolio(user);
+                self.apply_account_oi_transition(
+                    &account_before,
+                    &account_after,
+                    &group_before,
+                    true,
+                    "dead-leg forfeit exit",
+                )?;
                 self.positions[user][asset] = size_after;
                 self.protocol_positions[asset] = self.protocol_positions[asset]
                     .checked_sub(user_delta)
@@ -3485,6 +3524,196 @@ impl ScenarioRunner {
             .unwrap_or(false)
     }
 
+    fn account_leg_for_asset(
+        account: &PortfolioAccountV16,
+        asset: usize,
+    ) -> Result<Option<PortfolioLegV16>, String> {
+        let mut found = None;
+        for leg in decoded_legs(account)
+            .into_iter()
+            .filter(|leg| leg.active && leg.asset_index as usize == asset)
+        {
+            if found.replace(leg).is_some() {
+                return Err(format!(
+                    "independent OI model found duplicate legs for asset {asset}"
+                ));
+            }
+        }
+        Ok(found)
+    }
+
+    fn side_index(side: SideV16) -> usize {
+        match side {
+            SideV16::Long => 0,
+            SideV16::Short => 1,
+        }
+    }
+
+    fn opposite_side(side: SideV16) -> SideV16 {
+        match side {
+            SideV16::Long => SideV16::Short,
+            SideV16::Short => SideV16::Long,
+        }
+    }
+
+    fn leg_oi_was_removed_by_reset(
+        group_before: &MarketGroupV16,
+        asset: usize,
+        leg: PortfolioLegV16,
+        allow_internal_exhausted_reset: bool,
+    ) -> bool {
+        let engine_asset = &group_before.assets[asset];
+        let (mode, epoch, effective_oi, pending_count) = match leg.side {
+            SideV16::Long => (
+                engine_asset.mode_long,
+                engine_asset.epoch_long,
+                engine_asset.oi_eff_long_q,
+                engine_asset.pending_obligation_count_long,
+            ),
+            SideV16::Short => (
+                engine_asset.mode_short,
+                engine_asset.epoch_short,
+                engine_asset.oi_eff_short_q,
+                engine_asset.pending_obligation_count_short,
+            ),
+        };
+        (mode == SideModeV16::ResetPending && leg.epoch_snap.checked_add(1) == Some(epoch))
+            || (allow_internal_exhausted_reset
+                && effective_oi == 0
+                && pending_count == 0
+                && mode != SideModeV16::ResetPending)
+    }
+
+    fn replace_expected_oi(
+        &mut self,
+        asset: usize,
+        side: SideV16,
+        old_q: u128,
+        new_q: u128,
+        context: &str,
+    ) -> Result<(), String> {
+        let side_index = Self::side_index(side);
+        let before = self.expected_effective_oi[asset][side_index];
+        self.expected_effective_oi[asset][side_index] = if new_q >= old_q {
+            before.checked_add(new_q - old_q)
+        } else {
+            before.checked_sub(old_q - new_q)
+        }
+        .ok_or_else(|| {
+            format!(
+                "{context} independent {:?} OI adjustment under/overflow for asset {asset}: \
+                 current {before}, old {old_q}, new {new_q}",
+                side
+            )
+        })?;
+        Ok(())
+    }
+
+    fn apply_account_oi_transition(
+        &mut self,
+        account_before: &PortfolioAccountV16,
+        account_after: &PortfolioAccountV16,
+        group_before: &MarketGroupV16,
+        allow_internal_exhausted_reset: bool,
+        context: &str,
+    ) -> Result<(), String> {
+        for asset in 0..ASSET_COUNT {
+            let old_leg = Self::account_leg_for_asset(account_before, asset)?;
+            let new_leg = Self::account_leg_for_asset(account_after, asset)?;
+            match (old_leg, new_leg) {
+                (None, None) => {}
+                (None, Some(new_leg)) => {
+                    self.replace_expected_oi(
+                        asset,
+                        new_leg.side,
+                        0,
+                        new_leg.basis_pos_q.unsigned_abs(),
+                        context,
+                    )?;
+                }
+                (Some(old_leg), None) => {
+                    if !Self::leg_oi_was_removed_by_reset(
+                        group_before,
+                        asset,
+                        old_leg,
+                        allow_internal_exhausted_reset,
+                    ) {
+                        self.replace_expected_oi(
+                            asset,
+                            old_leg.side,
+                            old_leg.basis_pos_q.unsigned_abs(),
+                            0,
+                            context,
+                        )?;
+                    }
+                }
+                (Some(old_leg), Some(new_leg)) if old_leg.side == new_leg.side => {
+                    let already_removed = Self::leg_oi_was_removed_by_reset(
+                        group_before,
+                        asset,
+                        old_leg,
+                        allow_internal_exhausted_reset,
+                    );
+                    if already_removed && old_leg.basis_pos_q != new_leg.basis_pos_q {
+                        return Err(format!(
+                            "{context} resized prior-reset asset {asset} from {} to {}",
+                            old_leg.basis_pos_q, new_leg.basis_pos_q
+                        ));
+                    }
+                    if !already_removed && old_leg.basis_pos_q != new_leg.basis_pos_q {
+                        self.replace_expected_oi(
+                            asset,
+                            old_leg.side,
+                            old_leg.basis_pos_q.unsigned_abs(),
+                            new_leg.basis_pos_q.unsigned_abs(),
+                            context,
+                        )?;
+                    }
+                }
+                (Some(old_leg), Some(new_leg)) => {
+                    if !Self::leg_oi_was_removed_by_reset(
+                        group_before,
+                        asset,
+                        old_leg,
+                        allow_internal_exhausted_reset,
+                    ) {
+                        self.replace_expected_oi(
+                            asset,
+                            old_leg.side,
+                            old_leg.basis_pos_q.unsigned_abs(),
+                            0,
+                            context,
+                        )?;
+                    }
+                    self.replace_expected_oi(
+                        asset,
+                        new_leg.side,
+                        0,
+                        new_leg.basis_pos_q.unsigned_abs(),
+                        context,
+                    )?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn apply_unilateral_matching_oi_reduction(
+        &mut self,
+        asset: usize,
+        closed_side: SideV16,
+        reduce_q: u128,
+        context: &str,
+    ) -> Result<(), String> {
+        self.replace_expected_oi(
+            asset,
+            Self::opposite_side(closed_side),
+            reduce_q,
+            0,
+            context,
+        )
+    }
+
     fn reconcile_account_position_changes(
         &mut self,
         actor: usize,
@@ -3501,7 +3730,9 @@ impl ScenarioRunner {
                 self.positions[actor]
             ));
         }
-        let observed = observed_positions(&self.env.primary_portfolio(actor))?;
+        let account_after = self.env.primary_portfolio(actor);
+        let observed = observed_positions(&account_after)?;
+        let mut unilateral_reductions = Vec::new();
         for (asset, new) in observed.into_iter().enumerate() {
             let old = before_positions[asset];
             let delta = new
@@ -3539,6 +3770,15 @@ impl ScenarioRunner {
             self.positions[actor][asset] = new;
             if !prior_reset_cleanup {
                 let reduced = old.unsigned_abs() - new.unsigned_abs();
+                unilateral_reductions.push((
+                    asset,
+                    if old > 0 {
+                        SideV16::Long
+                    } else {
+                        SideV16::Short
+                    },
+                    reduced,
+                ));
                 self.coverage.liquidation_steps += 1;
                 self.coverage.liquidated_abs_q = self
                     .coverage
@@ -3548,6 +3788,16 @@ impl ScenarioRunner {
             } else {
                 self.coverage.user_positions_closed += u64::from(new == 0);
             }
+        }
+        self.apply_account_oi_transition(
+            account_before,
+            &account_after,
+            group_before,
+            false,
+            context,
+        )?;
+        for (asset, closed_side, reduce_q) in unilateral_reductions {
+            self.apply_unilateral_matching_oi_reduction(asset, closed_side, reduce_q, context)?;
         }
         Ok(())
     }
@@ -3990,7 +4240,6 @@ impl ScenarioRunner {
         let mut observed_short_oi = [0u128; ASSET_COUNT];
         let mut observed_long_count = [0u64; ASSET_COUNT];
         let mut observed_short_count = [0u64; ASSET_COUNT];
-        let mut asset_has_stale_leg = [false; ASSET_COUNT];
         for (actor, row) in observed.iter_mut().enumerate() {
             let account = self.env.primary_portfolio(actor);
             let mut seen_assets = [false; ASSET_COUNT];
@@ -4067,7 +4316,6 @@ impl ScenarioRunner {
                 row[asset] = row[asset]
                     .checked_add(leg.basis_pos_q)
                     .ok_or("observed position overflow")?;
-                asset_has_stale_leg[asset] |= leg.stale || leg.b_stale;
                 match leg.side {
                     SideV16::Long => {
                         observed_long_oi[asset] = observed_long_oi[asset]
@@ -4131,6 +4379,25 @@ impl ScenarioRunner {
                     observed_short_oi[asset]
                 ));
             }
+            let [expected_long_oi, expected_short_oi] = self.expected_effective_oi[asset];
+            if engine_asset.oi_eff_long_q != expected_long_oi
+                || engine_asset.oi_eff_short_q != expected_short_oi
+            {
+                return Err(format!(
+                    "asset {asset} deployed effective OI {}/{} != independent transition ledger \
+                     {}/{}; raw basis={}/{}, market={:?}, lifecycle={:?}, side_modes={:?}/{:?}",
+                    engine_asset.oi_eff_long_q,
+                    engine_asset.oi_eff_short_q,
+                    expected_long_oi,
+                    expected_short_oi,
+                    observed_long_oi[asset],
+                    observed_short_oi[asset],
+                    group.mode,
+                    engine_asset.lifecycle,
+                    engine_asset.mode_long,
+                    engine_asset.mode_short,
+                ));
+            }
             for (side, effective_oi, raw_basis, stored_count, pending_count, mode, loss_weight) in [
                 (
                     "long",
@@ -4172,31 +4439,6 @@ impl ScenarioRunner {
                         "asset {asset} {side} has zero effective OI with raw basis {raw_basis} in {mode:?}; no bounded reset continuation"
                     ));
                 }
-            }
-            if self.protocol_positions[asset] == 0
-                && !asset_has_stale_leg[asset]
-                && engine_asset.pending_obligation_count_long == 0
-                && engine_asset.pending_obligation_count_short == 0
-                && engine_asset.mode_long == SideModeV16::Normal
-                && engine_asset.mode_short == SideModeV16::Normal
-                && (observed_long_oi[asset] != engine_asset.oi_eff_long_q
-                    || observed_short_oi[asset] != engine_asset.oi_eff_short_q)
-            {
-                return Err(format!(
-                    "asset {asset} effective OI {}/{} != current-leg sum {}/{}; market={:?}, \
-                     lifecycle={:?}, side_modes={:?}/{:?}, pending={}/{}, protocol_position={}",
-                    engine_asset.oi_eff_long_q,
-                    engine_asset.oi_eff_short_q,
-                    observed_long_oi[asset],
-                    observed_short_oi[asset],
-                    group.mode,
-                    engine_asset.lifecycle,
-                    engine_asset.mode_long,
-                    engine_asset.mode_short,
-                    engine_asset.pending_obligation_count_long,
-                    engine_asset.pending_obligation_count_short,
-                    self.protocol_positions[asset],
-                ));
             }
             let user_net: i128 = observed.iter().map(|positions| positions[asset]).sum();
             let net = user_net
@@ -4530,6 +4772,7 @@ const BOUNDED_REFERENCE_ACTION_COUNT: usize = 11;
 struct BoundedReferenceNode {
     positions: [[i128; ASSET_COUNT]; PRIMARY_ACTOR_COUNT],
     protocol_positions: [i128; ASSET_COUNT],
+    expected_effective_oi: [[u128; 2]; ASSET_COUNT],
     capitals: [u128; PRIMARY_ACTOR_COUNT],
     market_mode: u8,
     lifecycles: [u8; ASSET_COUNT],
@@ -4598,6 +4841,7 @@ impl ScenarioRunner {
         Ok(BoundedReferenceNode {
             positions: self.positions,
             protocol_positions: self.protocol_positions,
+            expected_effective_oi: self.expected_effective_oi,
             capitals,
             market_mode: group.mode as u8,
             lifecycles,

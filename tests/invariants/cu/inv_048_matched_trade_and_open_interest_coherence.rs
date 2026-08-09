@@ -4,10 +4,13 @@
 //! and keeps stored market open interest coherent with the complete set of
 //! active portfolio legs.
 //!
-//! This file is the primary CU/SBF owner for that guarantee. It executes the
-//! four public trade routes from fresh state, then independently scans the two
-//! affected portfolios and compares the observed long/short basis with the
-//! maintained O(1) market counters.
+//! This file is the primary directed CU/SBF owner for that guarantee. It executes
+//! the four public trade routes from fresh state, then independently scans the two
+//! affected portfolios and compares observed long/short basis with the maintained
+//! O(1) market counters. The stateful INV-086 owner extends the oracle beyond fresh
+//! state: its independent transition ledger tracks exact effective OI across
+//! matched trades, retained trades, liquidation, rebalance, reset cleanup, and
+//! forfeit without treating ADL-retained raw basis as effective OI.
 
 use super::*;
 

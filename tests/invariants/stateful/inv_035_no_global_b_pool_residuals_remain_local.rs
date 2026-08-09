@@ -8,15 +8,16 @@
 //! deltas. It requires the unrelated claim to remain unchanged, the affected claim to absorb the
 //! exact B loss, bounded public reductions to flatten the affected leg, and principal withdrawal
 //! with conserved SPL supply.
-//! `v16_program_ambiguous_multi_asset_deficit_resolves_without_last_asset_charge` exercises the
-//! complementary public route boundary. A loss from asset 0 predates the final reduction of an
-//! unrelated asset 1 leg, so the engine cannot safely infer one residual domain. Every trade route
-//! must leave both B domains untouched, remain Live until the configured market-level stale policy
-//! resolves it, and settle all funded portfolios without losing SPL value.
+//! `v16_program_ambiguous_multi_asset_deficit_order_matrix_avoids_domain_guess` exercises the
+//! complementary public route boundary across four trade routes, both possible loss assets, both
+//! close orders, and both position directions. Because the adverse value is realized while two
+//! assets are live, the engine cannot safely infer one residual domain. All 32 cells must leave
+//! both B domains untouched, remain Live until the configured market-level stale policy resolves
+//! them, and settle every funded portfolio without losing SPL value.
 //!
-//! Guarantee boundary: this randomized public-route oracle certifies the exercised two-domain
-//! topology. The deterministic TDD route lives in the public-SBF INV-035 file, while engine Kani
-//! proves the domain-first partition kernel.
+//! Guarantee boundary: this bounded matrix and the randomized public-route oracle below certify
+//! the exercised two-domain topologies. The deterministic TDD route lives in the public-SBF
+//! INV-035 file, while engine Kani proves the domain-first partition kernel.
 
 use super::*;
 use crate::support::{
@@ -32,16 +33,23 @@ fn inv_035_terminal(account: &percolator_prog::state::PortfolioAccountV16) -> bo
         && active_bitmap_is_empty(account.active_bitmap.map(|word| word.get()))
 }
 
-fn verify_ambiguous_multi_asset_resolution(route: TradeRoute) -> Result<(), String> {
-    const WINNER: usize = 0;
-    const LOSER: usize = 1;
+fn verify_ambiguous_multi_asset_resolution(
+    route: TradeRoute,
+    loss_asset: u16,
+    close_loss_first: bool,
+    account_a_long: bool,
+) -> Result<(), String> {
     const KEEPER: usize = 4;
-    const LOSS_ASSET: u16 = 0;
-    const LAST_CLOSED_ASSET: u16 = 1;
     const OPEN_PRICE: u64 = 100;
     const LOSS_PRICE: u64 = 150;
     const SIZE_Q: i128 = 10 * POS_SCALE as i128;
     const LOSER_PRINCIPAL: u128 = 250;
+
+    let other_asset = 1u16
+        .checked_sub(loss_asset)
+        .ok_or_else(|| format!("{route:?}: unsupported loss asset {loss_asset}"))?;
+    let (winner, loser) = if account_a_long { (0, 1) } else { (1, 0) };
+    let open_size_q = if account_a_long { SIZE_Q } else { -SIZE_Q };
 
     let route_tag = match route {
         TradeRoute::NoCpi => 0,
@@ -49,10 +57,15 @@ fn verify_ambiguous_multi_asset_resolution(route: TradeRoute) -> Result<(), Stri
         TradeRoute::BatchNoCpi => 2,
         TradeRoute::BatchCpi => 3,
     };
-    let actor_deposits = [2_000, LOSER_PRINCIPAL, 1_000, 1, 1];
+    let mut actor_deposits = [1_000, 1_000, 1_000, 1, 1];
+    actor_deposits[winner] = 2_000;
+    actor_deposits[loser] = LOSER_PRINCIPAL;
     let expected_payouts: u128 = actor_deposits.iter().sum();
     let mut seed = [0x35; 32];
     seed[0] ^= route_tag;
+    seed[0] ^= (loss_asset as u8) << 2;
+    seed[0] ^= u8::from(close_loss_first) << 3;
+    seed[0] ^= u8::from(account_a_long) << 4;
     let mut env = V16Svm::new(
         seed,
         MarketConfig {
@@ -76,34 +89,56 @@ fn verify_ambiguous_multi_asset_resolution(route: TradeRoute) -> Result<(), Stri
         .sum();
     env.begin_public_trace();
 
-    for asset in [LOSS_ASSET, LAST_CLOSED_ASSET] {
-        execute_trade_route(&mut env, route, WINNER, LOSER, asset, SIZE_Q, OPEN_PRICE, 0)
+    for asset in [loss_asset, other_asset] {
+        execute_trade_route(&mut env, route, 0, 1, asset, open_size_q, OPEN_PRICE, 0)
             .map_err(|error| format!("{route:?}: open asset {asset}: {error}"))?;
     }
 
     let mut final_slot = 1;
-    let oracle_accounts = env.primary_profile(LOSS_ASSET as usize).oracle_leg_count;
+    let oracle_accounts = env.primary_profile(loss_asset as usize).oracle_leg_count;
     for (offset, mark) in (105u64..=LOSS_PRICE).step_by(5).enumerate() {
         final_slot = 2 + u64::try_from(offset).expect("bounded mark step");
         env.warp_to_slot(final_slot);
-        env.push_auth_mark(LOSS_ASSET, final_slot, mark)
+        env.push_auth_mark(loss_asset, final_slot, mark)
             .map_err(|error| format!("{route:?}: publish loss mark {mark}: {error}"))?;
         env.crank(
             KEEPER,
             final_slot,
             vec![CrankObservationHint {
-                asset_index: LOSS_ASSET,
+                asset_index: loss_asset,
                 oracle_accounts,
             }],
         )
         .map_err(|error| format!("{route:?}: accrue loss asset: {error}"))?;
     }
 
+    let first_closed_asset = if close_loss_first {
+        loss_asset
+    } else {
+        other_asset
+    };
+    let final_closed_asset = if close_loss_first {
+        other_asset
+    } else {
+        loss_asset
+    };
+
     execute_trade_route(
-        &mut env, route, WINNER, LOSER, LOSS_ASSET, -SIZE_Q, LOSS_PRICE, 0,
+        &mut env,
+        route,
+        0,
+        1,
+        first_closed_asset,
+        -open_size_q,
+        if first_closed_asset == loss_asset {
+            LOSS_PRICE
+        } else {
+            OPEN_PRICE
+        },
+        0,
     )
-    .map_err(|error| format!("{route:?}: close loss asset: {error}"))?;
-    let after_loss_close = env.primary_portfolio(LOSER);
+    .map_err(|error| format!("{route:?}: close first asset {first_closed_asset}: {error}"))?;
+    let after_loss_close = env.primary_portfolio(loser);
     let active_assets = after_loss_close
         .legs
         .iter()
@@ -112,10 +147,10 @@ fn verify_ambiguous_multi_asset_resolution(route: TradeRoute) -> Result<(), Stri
         .map(|leg| leg.asset_index)
         .collect::<Vec<_>>();
     if after_loss_close.pnl.get() != -(LOSER_PRINCIPAL as i128)
-        || active_assets != vec![LAST_CLOSED_ASSET as u32]
+        || active_assets != vec![final_closed_asset as u32]
     {
         return Err(format!(
-            "{route:?}: loss was not retained while unrelated leg remained: pnl={}, active={active_assets:?}",
+            "{route:?}: loss was not retained after the first close: pnl={}, active={active_assets:?}",
             after_loss_close.pnl.get()
         ));
     }
@@ -132,15 +167,19 @@ fn verify_ambiguous_multi_asset_resolution(route: TradeRoute) -> Result<(), Stri
     execute_trade_route(
         &mut env,
         route,
-        WINNER,
-        LOSER,
-        LAST_CLOSED_ASSET,
-        -SIZE_Q,
-        OPEN_PRICE,
+        0,
+        1,
+        final_closed_asset,
+        -open_size_q,
+        if final_closed_asset == loss_asset {
+            LOSS_PRICE
+        } else {
+            OPEN_PRICE
+        },
         0,
     )
-    .map_err(|error| format!("{route:?}: close unrelated final asset: {error}"))?;
-    let flat_loser = env.primary_portfolio(LOSER);
+    .map_err(|error| format!("{route:?}: close final asset {final_closed_asset}: {error}"))?;
+    let flat_loser = env.primary_portfolio(loser);
     let terminal_ledger = flat_loser
         .close_progress
         .try_to_runtime()
@@ -150,19 +189,19 @@ fn verify_ambiguous_multi_asset_resolution(route: TradeRoute) -> Result<(), Stri
         || flat_loser.pnl.get() != -(LOSER_PRINCIPAL as i128)
         || terminal_ledger.active
         || terminal_ledger.residual_remaining != 0
-        || before_recovery.assets[LOSS_ASSET as usize].b_long_num != 0
-        || before_recovery.assets[LOSS_ASSET as usize].b_short_num != 0
-        || before_recovery.assets[LAST_CLOSED_ASSET as usize].b_long_num != 0
-        || before_recovery.assets[LAST_CLOSED_ASSET as usize].b_short_num != 0
+        || before_recovery.assets[loss_asset as usize].b_long_num != 0
+        || before_recovery.assets[loss_asset as usize].b_short_num != 0
+        || before_recovery.assets[other_asset as usize].b_long_num != 0
+        || before_recovery.assets[other_asset as usize].b_short_num != 0
     {
         return Err(format!(
             "{route:?}: ambiguous residual was charged to an inferred asset: pnl={}, \
              ledger={terminal_ledger:?}, loss_b=({}, {}), last_b=({}, {})",
             flat_loser.pnl.get(),
-            before_recovery.assets[LOSS_ASSET as usize].b_long_num,
-            before_recovery.assets[LOSS_ASSET as usize].b_short_num,
-            before_recovery.assets[LAST_CLOSED_ASSET as usize].b_long_num,
-            before_recovery.assets[LAST_CLOSED_ASSET as usize].b_short_num,
+            before_recovery.assets[loss_asset as usize].b_long_num,
+            before_recovery.assets[loss_asset as usize].b_short_num,
+            before_recovery.assets[other_asset as usize].b_long_num,
+            before_recovery.assets[other_asset as usize].b_short_num,
         ));
     }
 
@@ -180,7 +219,7 @@ fn verify_ambiguous_multi_asset_resolution(route: TradeRoute) -> Result<(), Stri
         return Err(format!("{route:?}: stale market did not resolve"));
     }
 
-    for actor in [LOSER, WINNER, 2, 3, KEEPER] {
+    for actor in [loser, winner, 2, 3, KEEPER] {
         for _ in 0..16 {
             if inv_035_terminal(&env.primary_portfolio(actor)) {
                 break;
@@ -228,15 +267,32 @@ fn verify_ambiguous_multi_asset_resolution(route: TradeRoute) -> Result<(), Stri
 }
 
 #[test]
-fn v16_program_ambiguous_multi_asset_deficit_resolves_without_last_asset_charge() {
+fn v16_program_ambiguous_multi_asset_deficit_order_matrix_avoids_domain_guess() {
     for route in [
         TradeRoute::NoCpi,
         TradeRoute::Cpi,
         TradeRoute::BatchNoCpi,
         TradeRoute::BatchCpi,
     ] {
-        verify_ambiguous_multi_asset_resolution(route)
-            .unwrap_or_else(|error| panic!("INV-035: {error}"));
+        for loss_asset in [0, 1] {
+            for close_loss_first in [false, true] {
+                for account_a_long in [false, true] {
+                    verify_ambiguous_multi_asset_resolution(
+                        route,
+                        loss_asset,
+                        close_loss_first,
+                        account_a_long,
+                    )
+                    .unwrap_or_else(|error| {
+                        panic!(
+                            "INV-035 route={route:?}, loss_asset={loss_asset}, \
+                             close_loss_first={close_loss_first}, \
+                             account_a_long={account_a_long}: {error}"
+                        )
+                    });
+                }
+            }
+        }
     }
 }
 

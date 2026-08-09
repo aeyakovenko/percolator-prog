@@ -5,10 +5,16 @@
 //! must agree with the deployed public transition after every generated step.
 //!
 //! Evidence in this file (F over public I routes): `run_scenario` drives the
-//! actual SBF wrapper while maintaining independent shadow positions and
-//! snapshots. Each successful transition is reconciled against the shadow model;
-//! each rejected transition must preserve every tracked account byte and token
-//! balance. The coverage assertions keep the generated run non-vacuous across
+//! actual SBF wrapper while maintaining independent shadow positions, pooled
+//! effective OI, and snapshots. The OI ledger derives account-side deltas from
+//! pre/post public leg transitions and applies the separate matched-side decrement
+//! for liquidation and owner rebalance. It therefore does not confuse an
+//! ADL-reduced leg's intentionally retained raw basis with its smaller effective
+//! OI. Each successful transition is reconciled against the shadow model; each
+//! rejected transition must preserve every tracked account byte and token balance.
+//! The retained corpus includes a public ADL/rebalance sequence that first exposed
+//! the old raw-basis oracle's false equality assumption. The coverage assertions
+//! keep the generated run non-vacuous across
 //! all trade routes, public crank progress, deposits, token frames, lifecycle
 //! and authority changes, account substitution rejection, normal exits,
 //! liquidation, and CU ceilings.
