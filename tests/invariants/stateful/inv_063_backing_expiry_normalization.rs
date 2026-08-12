@@ -11,10 +11,12 @@
 //! four public trade routes at `expiry-1`, `expiry`, and `expiry+1`. Every pre-expiry control must
 //! grow a real counterparty-backed lien; single routes must also charge and extract a real provider
 //! fee. Both expired boundaries reject atomically and preserve a risk-reducing trade.
-//! `v16_program_retained_maturity_matrix_rejects_expired_topup_and_preserves_terminal_progress`
-//! generates signed expiry boundaries independently of any finding manifest and compares omitted
-//! and delayed operations. An expired delayed top-up must reject with exact rollback, leave provider
-//! principal untouched, and preserve the control world's terminal payouts.
+//! `v16_program_retained_backing_topup_boundary_matrix` generates signed retained top-ups at all
+//! three expiry boundaries and compares omitted and submitted operations. A fresh request debits
+//! provider SPL and credits canonical custody/accounting exactly, then independently reproduces
+//! PR291's resolved-settlement lock on the pre-fix engine pin. Expired requests roll back every
+//! delta and preserve terminal user progress. PR291 changes the fresh cell to require bounded
+//! terminal progress.
 //! `v16_program_backing_expiry_conversion_boundary_matrix` generates released source-backed claims
 //! at all three expiry boundaries. The pre-expiry control must consume backing, credit capital, and
 //! withdraw real SPL value; both expired boundaries reject with exact rollback and zero
@@ -65,6 +67,22 @@ fn assert_backing_expiry_consumer_boundary(discovery: &ExpiredBackingConsumerDis
     }
 }
 
+fn assert_retained_maturity_boundary(discovery: &RetainedMaturityDiscovery) {
+    match discovery.landing {
+        BackingExpiryLanding::Before => assert!(
+            discovery.reproduces_fresh_lapsed_settlement_lock(),
+            "{:?} did not independently reproduce the fresh lapsed-settlement lock: {discovery:?}",
+            discovery.kind
+        ),
+        BackingExpiryLanding::At | BackingExpiryLanding::After => assert!(
+            discovery.rejects_expired_intent_and_preserves_terminal_progress(),
+            "{:?} did not reject a {:?} retained request while preserving terminal progress: {discovery:?}",
+            discovery.kind,
+            discovery.landing
+        ),
+    }
+}
+
 #[test]
 fn v16_program_backing_expiry_trade_route_boundary_matrix() {
     let discoveries = discover_backing_expiry_trade_route_boundaries([0x63; 32], 2)
@@ -88,6 +106,19 @@ fn v16_program_backing_expiry_conversion_boundary_matrix() {
     );
     for discovery in &discoveries {
         assert_backing_expiry_consumer_boundary(discovery);
+    }
+}
+
+#[test]
+fn v16_program_retained_backing_topup_boundary_matrix() {
+    let discoveries = discover_retained_maturity_boundaries([0x65; 32], 3)
+        .expect("build every retained maturity and expiry-boundary world");
+    assert_eq!(
+        discoveries.len(),
+        RetainedMaturityKind::ALL.len() * BackingExpiryLanding::ALL.len()
+    );
+    for discovery in &discoveries {
+        assert_retained_maturity_boundary(discovery);
     }
 }
 
@@ -162,11 +193,12 @@ proptest! {
     }
 
     #[test]
-    fn v16_program_retained_maturity_matrix_rejects_expired_topup_and_preserves_terminal_progress(
+    fn v16_program_retained_maturity_matrix_respects_expiry_boundary(
         seed in any::<[u8; 32]>(),
+        landing in prop::sample::select(BackingExpiryLanding::ALL.to_vec()),
         expiry_offset in prop::sample::select(vec![2u8, 3, 4, 6]),
     ) {
-        let discoveries = discover_retained_maturity_terminal_locks(seed, expiry_offset);
+        let discoveries = discover_retained_maturity_boundary(seed, expiry_offset, landing);
         prop_assert!(
             discoveries.is_ok(),
             "retained-maturity verification failed at offset {expiry_offset}: {}",
@@ -179,11 +211,16 @@ proptest! {
             "every retained maturity operation needs a generated world"
         );
         for discovery in discoveries {
-            prop_assert!(
-                discovery.rejects_expired_intent_and_preserves_terminal_progress(),
-                "expired retained operation did not reject while preserving terminal progress: {:?}",
-                discovery
-            );
+            match landing {
+                BackingExpiryLanding::Before => prop_assert!(
+                    discovery.reproduces_fresh_lapsed_settlement_lock(),
+                    "fresh retained operation did not reproduce the PR291 lock nonvacuously: {discovery:?}"
+                ),
+                BackingExpiryLanding::At | BackingExpiryLanding::After => prop_assert!(
+                    discovery.rejects_expired_intent_and_preserves_terminal_progress(),
+                    "expired retained operation did not reject while preserving terminal progress: {discovery:?}"
+                ),
+            }
         }
     }
 

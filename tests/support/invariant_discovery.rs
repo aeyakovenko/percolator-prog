@@ -1193,6 +1193,7 @@ impl RetainedMaturityKind {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RetainedMaturityDiscovery {
     pub kind: RetainedMaturityKind,
+    pub landing: BackingExpiryLanding,
     pub expiry_slot: u64,
     pub landing_slot: u64,
     pub retained_landed: bool,
@@ -1205,6 +1206,10 @@ pub struct RetainedMaturityDiscovery {
     pub delayed_close_failures: u16,
     pub delayed_progress_failures: u16,
     pub exact_rollback: bool,
+    pub landing_provider_source_debit: u128,
+    pub landing_vault_token_credit: u128,
+    pub landing_internal_vault_credit: u128,
+    pub landing_bucket_principal_credit_num: u128,
     pub provider_principal_consumed: u128,
     pub provider_recovery: u128,
     pub control_external_payout: u128,
@@ -1213,8 +1218,34 @@ pub struct RetainedMaturityDiscovery {
 }
 
 impl RetainedMaturityDiscovery {
+    pub fn reproduces_fresh_lapsed_settlement_lock(&self) -> bool {
+        self.landing == BackingExpiryLanding::Before
+            && self.landing_slot < self.expiry_slot
+            && self.retained_landed
+            && !self.retained_rejected_expired
+            && !self.retained_exact_rollback
+            && self.landing_provider_source_debit != 0
+            && self.landing_vault_token_credit == self.landing_provider_source_debit
+            && self.landing_internal_vault_credit == self.landing_provider_source_debit
+            && self.landing_bucket_principal_credit_num
+                == self.landing_provider_source_debit * BOUND_SCALE
+            && self.control_users_terminal
+            && !self.delayed_users_terminal
+            && self.delayed_funded_value != 0
+            && self.delayed_vault_liquidity >= self.delayed_funded_value
+            && self.delayed_close_failures != 0
+            && self.delayed_progress_failures != 0
+            && self.exact_rollback
+            && self.provider_principal_consumed == self.landing_provider_source_debit
+            && self.provider_recovery == 0
+            && self.control_external_payout != 0
+            && self.delayed_external_payout == 0
+            && self.token_supply_conserved
+    }
+
     pub fn rejects_expired_intent_and_preserves_terminal_progress(&self) -> bool {
-        self.landing_slot > self.expiry_slot
+        self.landing != BackingExpiryLanding::Before
+            && self.landing_slot >= self.expiry_slot
             && !self.retained_landed
             && self.retained_rejected_expired
             && self.retained_exact_rollback
@@ -1222,10 +1253,37 @@ impl RetainedMaturityDiscovery {
             && self.delayed_users_terminal
             && self.delayed_funded_value == 0
             && self.exact_rollback
+            && self.landing_provider_source_debit == 0
+            && self.landing_vault_token_credit == 0
+            && self.landing_internal_vault_credit == 0
+            && self.landing_bucket_principal_credit_num == 0
             && self.provider_principal_consumed == 0
             && self.provider_recovery == 0
             && self.control_external_payout != 0
             && self.delayed_external_payout == self.control_external_payout
+            && self.token_supply_conserved
+    }
+
+    pub fn accepts_fresh_intent_and_preserves_terminal_progress(&self) -> bool {
+        self.landing == BackingExpiryLanding::Before
+            && self.landing_slot < self.expiry_slot
+            && self.retained_landed
+            && !self.retained_rejected_expired
+            && !self.retained_exact_rollback
+            && self.landing_provider_source_debit != 0
+            && self.landing_vault_token_credit == self.landing_provider_source_debit
+            && self.landing_internal_vault_credit == self.landing_provider_source_debit
+            && self.landing_bucket_principal_credit_num
+                == self.landing_provider_source_debit * BOUND_SCALE
+            && self.control_users_terminal
+            && self.delayed_users_terminal
+            && self.delayed_funded_value == 0
+            && self.exact_rollback
+            && self.provider_principal_consumed == self.landing_provider_source_debit
+            && self.control_external_payout != 0
+            && self.delayed_external_payout >= self.control_external_payout
+            && self.delayed_external_payout
+                <= self.control_external_payout + self.landing_provider_source_debit
             && self.token_supply_conserved
     }
 }
@@ -9776,6 +9834,10 @@ struct RetainedMaturityWorld {
     close_failures: u16,
     progress_failures: u16,
     exact_rollback: bool,
+    landing_provider_source_debit: u128,
+    landing_vault_token_credit: u128,
+    landing_internal_vault_credit: u128,
+    landing_bucket_principal_credit_num: u128,
     provider_principal_consumed: u128,
     provider_recovery: u128,
     external_payout: u128,
@@ -9810,6 +9872,7 @@ fn run_retained_maturity_world(
     kind: RetainedMaturityKind,
     expiry_offset: u8,
     submit_retained: bool,
+    landing: BackingExpiryLanding,
 ) -> Result<(u64, u64, RetainedMaturityWorld), String> {
     const WINNER: usize = 0;
     const LOSER: usize = 1;
@@ -9822,7 +9885,6 @@ fn run_retained_maturity_world(
     const BACKING: u128 = 500;
     const SIZE_Q: i128 = 10 * POS_SCALE as i128;
     const CONTROL_ATTEMPTS: usize = 16;
-    const DELAYED_ATTEMPTS: usize = 4;
 
     seed[0] ^= 0x63;
     seed[1] ^= kind.discriminator();
@@ -9830,9 +9892,7 @@ fn run_retained_maturity_world(
     let expiry_slot = SETTLED_SLOT
         .checked_add(u64::from(expiry_offset.clamp(2, 6)))
         .ok_or_else(|| "retained maturity expiry overflow".to_string())?;
-    let landing_slot = expiry_slot
-        .checked_add(1)
-        .ok_or_else(|| "retained maturity landing overflow".to_string())?;
+    let landing_slot = landing.authenticated_slot(expiry_slot)?;
     let resolve_slot = landing_slot
         .checked_add(6)
         .ok_or_else(|| "retained maturity resolve overflow".to_string())?;
@@ -9885,6 +9945,11 @@ fn run_retained_maturity_world(
     }
 
     let provider_source_before = env.token_amount(env.actors[PROVIDER].source_token);
+    let vault_token_before = env.token_amount(env.vault);
+    let internal_vault_before = env.primary_market_state().1.vault;
+    let bucket_principal_before = env.primary_market_state().1.source_backing_buckets
+        [WINNING_DOMAIN as usize]
+        .fresh_unliened_backing_num;
     let retained = match kind {
         RetainedMaturityKind::BackingTopUp => env.build_retained_backing_bucket_top_up_for_actor(
             PROVIDER,
@@ -9908,9 +9973,26 @@ fn run_retained_maturity_world(
     } else {
         (false, false, true)
     };
-    if env.current_slot() != landing_slot || landing_slot <= expiry_slot {
-        return Err("retained maturity did not cross the authenticated expiry boundary".into());
+    if env.current_slot() != landing_slot {
+        return Err("retained maturity did not reach the authenticated landing slot".into());
     }
+    let landing_provider_source_debit = provider_source_before
+        .checked_sub(env.token_amount(env.actors[PROVIDER].source_token))
+        .ok_or_else(|| "retained maturity provider source increased at landing".to_string())?;
+    let landing_vault_token_credit = env
+        .token_amount(env.vault)
+        .checked_sub(vault_token_before)
+        .ok_or_else(|| "retained maturity vault token balance decreased at landing".to_string())?;
+    let landing_group = env.primary_market_state().1;
+    let landing_internal_vault_credit = landing_group
+        .vault
+        .checked_sub(internal_vault_before)
+        .ok_or_else(|| "retained maturity internal vault decreased at landing".to_string())?;
+    let landing_bucket_principal_credit_num = landing_group.source_backing_buckets
+        [WINNING_DOMAIN as usize]
+        .fresh_unliened_backing_num
+        .checked_sub(bucket_principal_before)
+        .ok_or_else(|| "retained maturity bucket principal decreased at landing".to_string())?;
 
     env.resolve_stale_permissionless(resolve_slot)
         .map_err(|error| format!("resolve retained-maturity world: {error}"))?;
@@ -9918,12 +10000,7 @@ fn run_retained_maturity_world(
     let mut close_failures = 0u16;
     let mut progress_failures = 0u16;
     let mut exact_rollback = true;
-    let attempts = if retained_landed {
-        DELAYED_ATTEMPTS
-    } else {
-        CONTROL_ATTEMPTS
-    };
-    for _ in 0..attempts {
+    for _ in 0..CONTROL_ATTEMPTS {
         for actor in [LOSER, WINNER] {
             if discovery_portfolio_is_terminal(&env.primary_portfolio(actor))? {
                 continue;
@@ -9984,6 +10061,10 @@ fn run_retained_maturity_world(
             close_failures,
             progress_failures,
             exact_rollback,
+            landing_provider_source_debit: u128::from(landing_provider_source_debit),
+            landing_vault_token_credit: u128::from(landing_vault_token_credit),
+            landing_internal_vault_credit,
+            landing_bucket_principal_credit_num,
             provider_principal_consumed: u128::from(provider_principal_consumed),
             provider_recovery,
             external_payout,
@@ -9996,14 +10077,24 @@ pub fn discover_retained_maturity_terminal_locks(
     seed: [u8; 32],
     expiry_offset: u8,
 ) -> Result<Vec<RetainedMaturityDiscovery>, String> {
+    discover_retained_maturity_boundary(seed, expiry_offset, BackingExpiryLanding::After)
+}
+
+pub fn discover_retained_maturity_boundary(
+    seed: [u8; 32],
+    expiry_offset: u8,
+    landing: BackingExpiryLanding,
+) -> Result<Vec<RetainedMaturityDiscovery>, String> {
     RetainedMaturityKind::ALL
         .into_iter()
         .map(|kind| {
-            let (_, _, control) = run_retained_maturity_world(seed, kind, expiry_offset, false)?;
+            let (_, _, control) =
+                run_retained_maturity_world(seed, kind, expiry_offset, false, landing)?;
             let (expiry_slot, landing_slot, delayed) =
-                run_retained_maturity_world(seed, kind, expiry_offset, true)?;
+                run_retained_maturity_world(seed, kind, expiry_offset, true, landing)?;
             Ok(RetainedMaturityDiscovery {
                 kind,
+                landing,
                 expiry_slot,
                 landing_slot,
                 retained_landed: delayed.retained_landed,
@@ -10016,6 +10107,10 @@ pub fn discover_retained_maturity_terminal_locks(
                 delayed_close_failures: delayed.close_failures,
                 delayed_progress_failures: delayed.progress_failures,
                 exact_rollback: delayed.exact_rollback,
+                landing_provider_source_debit: delayed.landing_provider_source_debit,
+                landing_vault_token_credit: delayed.landing_vault_token_credit,
+                landing_internal_vault_credit: delayed.landing_internal_vault_credit,
+                landing_bucket_principal_credit_num: delayed.landing_bucket_principal_credit_num,
                 provider_principal_consumed: delayed.provider_principal_consumed,
                 provider_recovery: delayed.provider_recovery,
                 control_external_payout: control.external_payout,
@@ -10025,6 +10120,17 @@ pub fn discover_retained_maturity_terminal_locks(
             })
         })
         .collect()
+}
+
+pub fn discover_retained_maturity_boundaries(
+    seed: [u8; 32],
+    expiry_offset: u8,
+) -> Result<Vec<RetainedMaturityDiscovery>, String> {
+    BackingExpiryLanding::ALL
+        .into_iter()
+        .map(|landing| discover_retained_maturity_boundary(seed, expiry_offset, landing))
+        .collect::<Result<Vec<_>, _>>()
+        .map(|discoveries| discoveries.into_iter().flatten().collect())
 }
 
 fn discover_one_backing_expiry_consumer_boundary(
