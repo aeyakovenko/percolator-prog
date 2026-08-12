@@ -83,6 +83,7 @@ INV-028	source-lien/authenticated-expiry-routes	v16_program_expired_source_lien_
 INV-028	cross-domain-rounding/public-exit-matrix	v16_program_cross_domain_rounding_exit_matrix_discovers_funded_lock	fractional-source-domains-must-have-a-bounded-public-unwind	306
 INV-028	flat-source-lien/terminal-claim-routes	v16_program_flat_source_lien_route_matrix_discovers_backed_claim_lock	flat-backed-claim-must-have-bounded-terminal-conversion	364
 INV-028	source-capacity/admission-order-matrix	v16_program_source_capacity_admission_order_matrix_rejects_unreserved_risk	admitted-live-leg-must-reserve-a-settlement-source-slot	270,379
+INV-028	shared-expiry/provider-lien-provenance	v16_program_shared_expiry_progress_matrix_preserves_terminal_progress	expired-provider-lien-retirement-must-preserve-provenance-and-terminal-progress	300
 INV-077	max-source/conversion-amount-matrix	v16_program_max_source_conversion_amount_matrix_discovers_claim_lock	max-source-backed-claim-conversion-must-fit-one-bounded-step	357
 INV-077	max-source/resolved-close-order-matrix	v16_program_max_shape_resolved_close_order_matrix_discovers_terminal_cu_lock	max-source-terminal-claim-must-have-a-bounded-close-step	359
 INV-077	max-source/liquidation-asset-matrix	v16_program_max_source_liquidation_asset_matrix_discovers_funded_cu_lock	max-source-liquidatable-account-must-have-a-bounded-public-reduction	212
@@ -114,7 +115,7 @@ INV-063	backing-expiry/authenticated-clock	v16_program_backing_expiry_boundary_r
 INV-063	backing-expiry/favorable-consumers	v16_program_backing_expiry_conversion_boundary_matrix	expired-backing-cannot-capitalize-and-extract-independent-principal	363
 INV-063	retained-maturity/terminal-progress	v16_program_retained_backing_topup_boundary_matrix	expired-retained-operation-cannot-consume-principal-and-lock-terminal-users	361
 INV-063	resolved-settlement/lapsed-backing	v16_program_retained_backing_topup_boundary_matrix	lapsed-backing-must-not-lock-resolved-user-exit	291
-INV-030	resolved-settlement/impaired-prospective-loss	v16_program_shared_expiry_progress_matrix_discovers_impaired_loss_lock	impaired-domain-prospective-loss-must-have-bounded-terminal-reconciliation	302
+INV-030	resolved-settlement/impaired-prospective-loss	v16_program_shared_expiry_progress_matrix_preserves_terminal_progress	impaired-domain-prospective-loss-must-have-bounded-terminal-reconciliation	302
 INV-001	terminal-generation/authority-resolve	v16_program_market_generation_terminal_matrix_discovers_replacement_value_transfer	old-generation-terminal-capability-cannot-crystallize-replacement-value	323
 INV-001	terminal-generation/resolve-policy	v16_program_market_generation_terminal_matrix_discovers_replacement_value_transfer	old-generation-terminal-capability-cannot-crystallize-replacement-value	324
 INV-002	terminal-generation/asset-resolve-policy	v16_program_asset_generation_terminal_policy_rejects_before_replacement_value_transfer	old-generation-terminal-capability-cannot-crystallize-replacement-value	312

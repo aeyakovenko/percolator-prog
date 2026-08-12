@@ -70,7 +70,7 @@
 297	DoS	BLOCKER	INV-071	nonqualifying	[BLOCKER DoS] Prove prospective K/F source expiry progress
 298	DoS	BLOCKER	INV-071	independent-discovery	[BLOCKER DoS] Expire prospective loss backing before resolved settlement
 299	LoF	HARDENING	INV-003	independent-discovery	[HARDENING LoF] Bind withdrawals to portfolio incarnations
-300	DoS	BLOCKER	INV-028	nonqualifying	[BLOCKER DoS] Prevent foreign expiry from stranding resolved source liens
+300	DoS	BLOCKER	INV-028	independent-discovery	[BLOCKER DoS] Prevent foreign expiry from stranding resolved source liens
 301	LoF	HARDENING	INV-003	independent-discovery	[HARDENING LoF] Bind PnL conversion to portfolio incarnations
 302	DoS	BLOCKER	INV-030	independent-discovery	[BLOCKER DoS] Route prospective loss after source impairment
 303	LoF	HARDENING	INV-003	independent-discovery	[HARDENING LoF] Bind trades to portfolio incarnations

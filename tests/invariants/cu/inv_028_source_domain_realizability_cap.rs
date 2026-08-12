@@ -15,15 +15,17 @@
 //! progress from the source-lien rank rather than the return code. It records repeated successful
 //! no-op cranks, permits any genuine partial reductions, and requires every remaining owner route
 //! to roll back exactly once the reduction sequence reaches a funded nonzero fixed point.
-//! `v16_program_shared_expiry_progress_matrix_discovers_impaired_loss_lock` constructs one public
+//! `v16_program_shared_expiry_progress_matrix_preserves_terminal_progress` constructs one public
 //! four-portfolio world containing a live source lien and a prospective adverse K/F delta. A
 //! lien-free winner expires their shared bucket, after which the prospective loser is tested
 //! through `CloseResolved` and the sole public crank while every other portfolio is allowed to
-//! progress. The current counterexample requires repeated errors with byte-exact rollback,
-//! retained funded state, and zero payout.
+//! progress. Every accepted call must mutate a terminal rank, every rejected call must roll back
+//! exactly, and all four funded portfolios must reach terminal disposition.
 //!
 //! Secondary coverage: INV-030 credit-rate fail-closed behavior must still provide a terminal
-//! continuation after shared backing becomes impaired; failing closed forever is a user DoS.
+//! continuation after shared backing becomes impaired; INV-032 requires the exact account-local
+//! provider label to retire without consuming a sibling label or an insurance-backed reserve; and
+//! INV-073 requires every funded portfolio in the public lifecycle to reach terminal disposition.
 //!
 //! Guarantee boundary: the wrapper-supported sparse source-domain shape is 2 *
 //! WRAPPER_MAX_PORTFOLIO_ASSETS. Risk-reducing exits remain available at that shape; additional
@@ -32,7 +34,7 @@
 use super::*;
 
 #[test]
-fn v16_program_shared_expiry_progress_matrix_discovers_impaired_loss_lock() {
+fn v16_program_shared_expiry_progress_matrix_preserves_terminal_progress() {
     const Q: i128 = 1_000 * POS_SCALE as i128;
     const PRICE: u64 = 100;
     const UP_PRICE: u64 = 105;
@@ -167,10 +169,10 @@ fn v16_program_shared_expiry_progress_matrix_discovers_impaired_loss_lock() {
         "the aggregate impaired reserve must include the target's live local lien"
     );
 
-    let loser_before = env.svm.get_account(&trigger_peer).unwrap();
     let mut target_progressed = false;
     let mut target_errors = Vec::new();
-    let mut loser_rejections = 0usize;
+    let mut loser_progressed = false;
+    let mut loser_errors = Vec::new();
     for round in 0..8 {
         for (owner, portfolio, destination) in [
             (target_owner.pubkey(), target, target_destination),
@@ -217,51 +219,85 @@ fn v16_program_shared_expiry_progress_matrix_discovers_impaired_loss_lock() {
             let portfolio_before = env.svm.get_account(&trigger_peer).unwrap();
             let vault_before = env.svm.get_account(&env.vault).unwrap();
             let destination_before = env.svm.get_account(&loser_destination).unwrap();
-            let error = send_resolved(
+            match send_resolved(
                 &mut env,
                 trigger_peer_owner.pubkey(),
                 trigger_peer,
                 loser_destination,
                 use_crank,
-            )
-            .expect_err("the impaired-domain prospective loss must reject");
-            assert!(
-                error.contains("Custom(21)"),
-                "prospective-loss close returned the wrong blocker: {error}"
-            );
-            assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
-            assert_eq!(
-                env.svm.get_account(&trigger_peer).unwrap(),
-                portfolio_before
-            );
-            assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
-            assert_eq!(
-                env.svm.get_account(&loser_destination).unwrap(),
-                destination_before
-            );
-            loser_rejections += 1;
+            ) {
+                Ok(cu) => {
+                    assert_cu_within("impaired prospective-loss progress", cu, 1_000_000);
+                    loser_progressed |= env.svm.get_account(&env.market).unwrap() != market_before
+                        || env.svm.get_account(&trigger_peer).unwrap() != portfolio_before
+                        || env.svm.get_account(&env.vault).unwrap() != vault_before
+                        || env.svm.get_account(&loser_destination).unwrap() != destination_before;
+                }
+                Err(error) => {
+                    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+                    assert_eq!(
+                        env.svm.get_account(&trigger_peer).unwrap(),
+                        portfolio_before
+                    );
+                    assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+                    assert_eq!(
+                        env.svm.get_account(&loser_destination).unwrap(),
+                        destination_before
+                    );
+                    loser_errors.push(error);
+                }
+            }
         }
     }
-    assert_eq!(loser_rejections, 16);
-    assert_eq!(env.svm.get_account(&trigger_peer).unwrap(), loser_before);
-    assert_eq!(env.token_amount(loser_destination), 0);
+    assert!(
+        loser_progressed,
+        "the impaired-domain prospective loss made no terminal progress: {loser_errors:?}"
+    );
     assert!(
         target_progressed,
         "the foreign-impaired lien path did not reach its staged progress state"
     );
     assert!(
-        target_errors
-            .iter()
-            .all(|error| !error.contains("Custom(25)")),
-        "PR300's claimed counter-underflow should remain masked by PR302 on this pin: {target_errors:?}"
+        target_errors.is_empty(),
+        "the account-local foreign-impaired lien path must remain live: {target_errors:?}"
+    );
+    assert!(
+        loser_errors.is_empty(),
+        "the prospective-loss path must remain live after source impairment: {loser_errors:?}"
     );
 
-    let loser_after = env.portfolio_state(trigger_peer);
-    assert!(has_active_leg_for_asset(&loser_after, 0));
-    assert!(loser_after.capital.get() != 0);
-    assert!(
-        env.market_state().1.assets[0].k_short < active_leg_for_asset(&loser_after, 0).k_snap,
-        "the prospective loser must retain its unsettled adverse K/F delta"
+    for (label, portfolio) in [
+        ("foreign-impaired winner", target),
+        ("foreign-impaired counterparty", target_peer),
+        ("expiry-trigger winner", trigger),
+        ("prospective loser", trigger_peer),
+    ] {
+        let state = env.portfolio_state(portfolio);
+        let receipt = resolved_receipt(&state);
+        assert!(
+            percolator::active_bitmap_is_empty(active_bitmap(&state))
+                && state.capital.get() == 0
+                && state.pnl.get() == 0
+                && (!receipt.present || receipt.finalized),
+            "{label} must reach terminal disposition: capital={}, pnl={}, bitmap={:?}, receipt={receipt:?}",
+            state.capital.get(),
+            state.pnl.get(),
+            active_bitmap(&state),
+        );
+    }
+    let terminal_market = env.market_state().1;
+    assert_eq!(
+        terminal_market.source_backing_buckets[1].status,
+        BackingBucketStatusV16::Expired,
+        "the final account-local provider label must normalize the shared bucket"
+    );
+    assert_eq!(
+        terminal_market.source_backing_buckets[1].impaired_liened_backing_num,
+        0
+    );
+    assert_eq!(
+        terminal_market.source_credit[1].impaired_liened_backing_num,
+        0
     );
 }
 

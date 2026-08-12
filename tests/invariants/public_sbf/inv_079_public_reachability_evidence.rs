@@ -243,10 +243,10 @@ fn v16_open_security_finding_benchmark_is_complete_and_non_overclaiming() {
     assert_eq!(direct, 0, "direct adapter inventory changed");
     assert_eq!(missing, 0, "all benchmark rows need executable disposition");
     assert_eq!(
-        independent, 125,
+        independent, 126,
         "promote only genuinely finding-agnostic invariant discoveries"
     );
-    assert_eq!(nonqualifying, 18, "nonqualifying evidence roster changed");
+    assert_eq!(nonqualifying, 17, "nonqualifying evidence roster changed");
 
     let independent_sources: &[(u16, &[u16], &str)] = &[
         (
@@ -483,6 +483,7 @@ fn v16_open_security_finding_benchmark_is_complete_and_non_overclaiming() {
                     | "fractional-source-domains-must-have-a-bounded-public-unwind"
                     | "flat-backed-claim-must-have-bounded-terminal-conversion"
                     | "admitted-live-leg-must-reserve-a-settlement-source-slot"
+                    | "expired-provider-lien-retirement-must-preserve-provenance-and-terminal-progress"
                     | "max-source-backed-claim-conversion-must-fit-one-bounded-step"
                     | "max-source-terminal-claim-must-have-a-bounded-close-step"
                     | "max-source-liquidatable-account-must-have-a-bounded-public-reduction"
