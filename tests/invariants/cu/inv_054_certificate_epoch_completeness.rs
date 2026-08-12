@@ -2,9 +2,10 @@
 //!
 //! Normative obligation: Every health-relevant state change invalidates or conservatively downgrades certificates.
 //!
-//! Evidence in this file (I/C plus invariant-specific M assertions): `v16_attack_convert_released_pnl_requires_current_cert_and_public_refresh`. These tests exercise the deployed public
-//! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
-//! rollback, liveness, or compute outcomes appropriate to the invariant.
+//! Evidence in this file (I/C plus invariant-specific M assertions): public trade/mark/crank/close
+//! sequences create a real source-backed released-PnL claim. Public oracle, source-credit, and
+//! asset-set mutations then make its certificate stale. Favorable conversion must reject with exact
+//! rollback until a permissionless public crank refreshes every certificate key.
 //!
 //! Guarantee boundary: a quarantined counterexample demonstrates public reachability; it does
 //! not certify the invariant on an unfixed pin. Certification requires the fixed-pin assertion
@@ -12,57 +13,357 @@
 
 use super::*;
 
+const PUBLIC_RELEASED_PNL: u128 = 50_000;
+
+fn cert_is_current(env: &V16CuEnv, portfolio: Pubkey) -> bool {
+    let group = env.market_state().1;
+    let account = env.portfolio_state(portfolio);
+    let cert = health_cert(&account);
+    cert.valid
+        && cert.cert_oracle_epoch == group.oracle_epoch
+        && cert.cert_funding_epoch == group.funding_epoch
+        && cert.cert_risk_epoch == group.risk_epoch
+        && cert.cert_asset_set_epoch == group.asset_set_epoch
+        && cert.active_bitmap_at_cert == active_bitmap(&account)
+}
+
+fn setup_public_released_pnl_certificate() -> (V16CuEnv, Keypair, Pubkey) {
+    const INITIAL_PRICE: u64 = 1_000_000;
+    const WINNING_PRICE: u64 = 1_050_000;
+    const SIZE_Q: i128 = POS_SCALE as i128;
+
+    let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+        maintenance_margin_bps: 1_000,
+        initial_margin_bps: 1_000,
+        max_price_move_bps_per_slot: 500,
+        max_abs_funding_e9_per_slot: 1_000,
+        ..V16CuMarketParams::default()
+    });
+    env.svm.warp_to_slot(1);
+    env.configure_auth_mark_for_asset_as_admin(0, 1, INITIAL_PRICE);
+    env.top_up_backing_bucket(1, 75_000, 10_000);
+
+    let winner_owner = Keypair::new();
+    let loser_owner = Keypair::new();
+    let winner = env.create_portfolio(&winner_owner);
+    let loser = env.create_portfolio(&loser_owner);
+    env.deposit(&winner_owner, winner, 1_000_000);
+    env.deposit(&loser_owner, loser, 1_000_000);
+    env.trade_asset_with_cu(
+        0,
+        &winner_owner,
+        winner,
+        &loser_owner,
+        loser,
+        SIZE_Q,
+        INITIAL_PRICE,
+        0,
+    );
+
+    env.svm.warp_to_slot(2);
+    env.push_auth_mark_for_asset_as_admin(0, 2, WINNING_PRICE);
+    for portfolio in [loser, winner] {
+        env.crank(
+            portfolio,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 2,
+                observations: crank_observations(0),
+            },
+        );
+    }
+    env.trade_asset_with_cu(
+        0,
+        &winner_owner,
+        winner,
+        &loser_owner,
+        loser,
+        -SIZE_Q,
+        WINNING_PRICE,
+        0,
+    );
+
+    let winner_state = env.portfolio_state(winner);
+    assert!(
+        !has_active_leg_for_asset(&winner_state, 0),
+        "public close must leave the winner flat"
+    );
+    assert_eq!(
+        winner_state.pnl.get(),
+        PUBLIC_RELEASED_PNL as i128,
+        "public price move and close must create the expected source-backed claim"
+    );
+    assert!(
+        cert_is_current(&env, winner),
+        "the public close must issue a fully current certificate"
+    );
+    (env, winner_owner, winner)
+}
+
+fn assert_stale_conversion_rolls_back(env: &mut V16CuEnv, owner: &Keypair, portfolio: Pubkey) {
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let portfolio_before = env.svm.get_account(&portfolio).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    env.svm.expire_blockhash();
+    let rejected = env.send(
+        env.convert_released_pnl_ix(portfolio, PUBLIC_RELEASED_PNL),
+        vec![
+            AccountMeta::new(owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio, false),
+        ],
+        &[owner],
+    );
+    assert!(
+        rejected.is_err(),
+        "a favorable conversion with a stale certificate must propagate an instruction error"
+    );
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+    assert_eq!(env.svm.get_account(&portfolio).unwrap(), portfolio_before);
+    assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+}
+
+fn refresh_and_convert_public_claim(env: &mut V16CuEnv, owner: &Keypair, portfolio: Pubkey) {
+    let now_slot = env.svm.get_sysvar::<Clock>().slot;
+    env.crank(
+        portfolio,
+        ProgInstruction::PermissionlessCrank {
+            now_slot,
+            // A flat stale certificate has no active leg from which the engine can
+            // self-select an accrual asset. Any authenticated current observation
+            // supplies that bounded refresh context; it does not choose economics.
+            observations: crank_observations(0),
+        },
+    );
+    assert!(
+        cert_is_current(env, portfolio),
+        "permissionless public refresh must restore all certificate keys"
+    );
+    let capital_before = env.portfolio_state(portfolio).capital.get();
+    let convert_cu = env.convert_released_pnl_with_cu(owner, portfolio, PUBLIC_RELEASED_PNL);
+    assert_cu_within(
+        "public released-PnL conversion after certificate refresh",
+        convert_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    assert_eq!(
+        env.portfolio_state(portfolio).capital.get(),
+        capital_before + PUBLIC_RELEASED_PNL,
+        "refresh admits exactly the publicly realized claim"
+    );
+    assert_eq!(
+        env.market_state().1.vault as u64,
+        env.token_amount(env.vault),
+        "certificate refresh and conversion preserve SPL custody parity"
+    );
+}
+
+#[test]
+fn v16_attack_source_credit_risk_epoch_invalidates_public_released_pnl_cert() {
+    let (mut env, owner, portfolio) = setup_public_released_pnl_certificate();
+    let before = env.market_state().1;
+    let cert_before = health_cert(&env.portfolio_state(portfolio));
+
+    env.top_up_backing_bucket(0, 1, 10_000);
+
+    let after = env.market_state().1;
+    let stale = health_cert(&env.portfolio_state(portfolio));
+    assert_eq!(after.risk_epoch, before.risk_epoch + 1);
+    assert_eq!(after.oracle_epoch, before.oracle_epoch);
+    assert_eq!(after.funding_epoch, before.funding_epoch);
+    assert_eq!(after.asset_set_epoch, before.asset_set_epoch);
+    assert_eq!(
+        stale, cert_before,
+        "unrelated backing does not rewrite the account"
+    );
+    assert!(
+        stale.cert_risk_epoch < after.risk_epoch,
+        "the isolated source-credit mutation must invalidate the old risk certificate"
+    );
+
+    assert_stale_conversion_rolls_back(&mut env, &owner, portfolio);
+    refresh_and_convert_public_claim(&mut env, &owner, portfolio);
+}
+
+#[test]
+fn v16_attack_asset_append_invalidates_public_released_pnl_cert() {
+    const INIT_FEE: u128 = 1;
+    let (mut env, owner, portfolio) = setup_public_released_pnl_certificate();
+    env.update_market_init_fee_policy_with_cu(INIT_FEE);
+    let before = env.market_state().1;
+    let cert_before = health_cert(&env.portfolio_state(portfolio));
+    let creator = Keypair::new();
+    let creator_key = creator.pubkey();
+
+    env.svm.warp_to_slot(3);
+    env.activate_permissionless_asset_with_fee(
+        &creator,
+        1,
+        3,
+        100,
+        creator_key,
+        creator_key,
+        creator_key,
+        creator_key,
+        INIT_FEE,
+    );
+
+    let after = env.market_state().1;
+    let stale = health_cert(&env.portfolio_state(portfolio));
+    assert!(
+        after.asset_set_epoch > before.asset_set_epoch,
+        "physical growth plus activation must advance the asset-set epoch"
+    );
+    assert!(
+        after.risk_epoch > before.risk_epoch,
+        "physical growth plus activation must advance the risk epoch"
+    );
+    assert_eq!(after.oracle_epoch, before.oracle_epoch);
+    assert_eq!(after.funding_epoch, before.funding_epoch);
+    assert_eq!(
+        stale, cert_before,
+        "append does not rewrite unrelated portfolios"
+    );
+    assert!(
+        stale.cert_asset_set_epoch < after.asset_set_epoch,
+        "the appended asset must invalidate the old asset-set certificate"
+    );
+
+    assert_stale_conversion_rolls_back(&mut env, &owner, portfolio);
+    refresh_and_convert_public_claim(&mut env, &owner, portfolio);
+}
+
+#[test]
+fn v16_attack_funding_only_epoch_invalidates_public_released_pnl_cert() {
+    const PREMIUM_MARK: u64 = 2_000_000;
+    const FUNDING_SIZE_Q: i128 = 10 * POS_SCALE as i128;
+    let (mut env, claim_owner, claimant) = setup_public_released_pnl_certificate();
+
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long = env.create_portfolio(&long_owner);
+    let short = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long, 10_000_000);
+    env.deposit(&short_owner, short, 10_000_000);
+    let open_price = env.market_state().1.assets[0].effective_price;
+    env.trade_asset_with_cu(
+        0,
+        &long_owner,
+        long,
+        &short_owner,
+        short,
+        FUNDING_SIZE_Q,
+        open_price,
+        0,
+    );
+
+    // Stage and activate a premium funding mark. This first interval moves the
+    // effective price and therefore advances oracle_epoch; refresh the claimant
+    // afterward so the next interval starts with every certificate key current.
+    env.svm.warp_to_slot(3);
+    env.push_auth_mark_for_asset_as_admin(0, 3, PREMIUM_MARK);
+    env.crank(
+        long,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 3,
+            observations: crank_observations(0),
+        },
+    );
+    env.crank(
+        claimant,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 3,
+            observations: crank_observations(0),
+        },
+    );
+    assert!(cert_is_current(&env, claimant));
+
+    let current_effective_price = env.market_state().1.assets[0].effective_price;
+    env.svm.warp_to_slot(4);
+    env.push_auth_mark_for_asset_as_admin(0, 4, current_effective_price);
+    let before = env.market_state().1;
+    let cert_before = health_cert(&env.portfolio_state(claimant));
+    assert_eq!(cert_before.cert_funding_epoch, before.funding_epoch);
+    assert_eq!(cert_before.cert_oracle_epoch, before.oracle_epoch);
+
+    // A risk-reducing public trade first books deterministic zero-move funding.
+    // Unlike an observation-bearing crank, this route does not synchronize the
+    // engine raw target, so a passing assertion below isolates funding_epoch.
+    env.trade_asset_with_cu(
+        0,
+        &long_owner,
+        long,
+        &short_owner,
+        short,
+        -(POS_SCALE as i128),
+        current_effective_price,
+        0,
+    );
+
+    let after = env.market_state().1;
+    let stale = health_cert(&env.portfolio_state(claimant));
+    assert_eq!(
+        after.assets[0].effective_price, current_effective_price,
+        "the funding interval must have zero effective-price movement"
+    );
+    assert_eq!(
+        after.oracle_epoch, before.oracle_epoch,
+        "oracle_epoch must remain fixed so it cannot mask the funding key"
+    );
+    assert_eq!(
+        after.funding_epoch,
+        before.funding_epoch + 1,
+        "the committed premium interval must advance funding_epoch exactly once"
+    );
+    assert_ne!(
+        after.assets[0].f_long_num, before.assets[0].f_long_num,
+        "the isolated epoch bump must correspond to a real funding-ledger change"
+    );
+    assert_eq!(
+        stale, cert_before,
+        "another account's funding accrual does not rewrite the claimant"
+    );
+    assert!(
+        stale.cert_funding_epoch < after.funding_epoch,
+        "the old claim certificate must be stale solely on the funding key"
+    );
+
+    assert_stale_conversion_rolls_back(&mut env, &claim_owner, claimant);
+    refresh_and_convert_public_claim(&mut env, &claim_owner, claimant);
+}
+
 #[test]
 fn v16_attack_convert_released_pnl_requires_current_cert_and_public_refresh() {
-    const RELEASED: u128 = 40;
-    let mut env = V16CuEnv::new();
-    env.configure_auth_mark_with_cu(0, 100);
-    env.top_up_backing_bucket(1, RELEASED, 10_000);
+    let (mut env, owner, portfolio) = setup_public_released_pnl_certificate();
 
     let crank_long_owner = Keypair::new();
     let crank_short_owner = Keypair::new();
     let crank_long = env.create_portfolio(&crank_long_owner);
     let crank_short = env.create_portfolio(&crank_short_owner);
-    env.deposit(&crank_long_owner, crank_long, 1_000_000);
-    env.deposit(&crank_short_owner, crank_short, 1_000_000);
+    env.deposit(&crank_long_owner, crank_long, 10_000_000);
+    env.deposit(&crank_short_owner, crank_short, 10_000_000);
+    let price = env.market_state().1.assets[0].effective_price;
     env.trade_with_cu(
         &crank_long_owner,
         crank_long,
         &crank_short_owner,
         crank_short,
         POS_SCALE as i128,
-        100,
+        price,
         0,
-    );
-
-    let owner = Keypair::new();
-    let portfolio = env.create_portfolio(&owner);
-    env.add_source_positive_pnl(portfolio, 1, RELEASED);
-    env.crank(
-        portfolio,
-        ProgInstruction::PermissionlessCrank {
-            now_slot: 0,
-            observations: crank_observations(0),
-        },
     );
     assert_eq!(
         env.portfolio_state(portfolio).pnl.get(),
-        RELEASED as i128,
-        "setup must stage real released PnL"
+        PUBLIC_RELEASED_PNL as i128,
+        "setup must realize PnL through public trades"
     );
-    let (_, fresh_group) = env.market_state();
-    assert_eq!(
-        health_cert(&env.portfolio_state(portfolio)).cert_oracle_epoch,
-        fresh_group.oracle_epoch,
-        "setup must start with a current cert"
-    );
+    assert!(cert_is_current(&env, portfolio));
 
-    env.svm.warp_to_slot(1);
-    env.push_auth_mark_with_cu(1, 101);
+    env.svm.warp_to_slot(3);
+    env.push_auth_mark_with_cu(3, price + 1);
     env.crank(
         crank_long,
         ProgInstruction::PermissionlessCrank {
-            now_slot: 1,
+            now_slot: 3,
             observations: crank_observations(0),
         },
     );
@@ -72,75 +373,8 @@ fn v16_attack_convert_released_pnl_requires_current_cert_and_public_refresh() {
         "auth mark update must make the existing cert stale"
     );
 
-    let market_before = env.svm.get_account(&env.market).unwrap();
-    let portfolio_before = env.svm.get_account(&portfolio).unwrap();
-    let vault_before = env.svm.get_account(&env.vault).unwrap();
-    env.svm.expire_blockhash();
-    let rejected = env.send(
-        env.convert_released_pnl_ix(portfolio, RELEASED),
-        vec![
-            AccountMeta::new(owner.pubkey(), true),
-            AccountMeta::new(env.market, false),
-            AccountMeta::new(portfolio, false),
-        ],
-        &[&owner],
-    );
-    assert!(
-        rejected.is_err(),
-        "stale-cert ConvertReleasedPnl must propagate the engine error"
-    );
-    assert_eq!(
-        env.svm.get_account(&env.market).unwrap(),
-        market_before,
-        "stale-cert rejection leaves market accounting unchanged"
-    );
-    assert_eq!(
-        env.svm.get_account(&portfolio).unwrap(),
-        portfolio_before,
-        "stale-cert rejection leaves released PnL and cert bytes unchanged"
-    );
-    assert_eq!(
-        env.svm.get_account(&env.vault).unwrap(),
-        vault_before,
-        "stale-cert rejection moves no custody"
-    );
-
-    env.crank(
-        portfolio,
-        ProgInstruction::PermissionlessCrank {
-            now_slot: 1,
-            observations: crank_observations(0),
-        },
-    );
-    let (_, refreshed_group) = env.market_state();
-    assert_eq!(
-        health_cert(&env.portfolio_state(portfolio)).cert_oracle_epoch,
-        refreshed_group.oracle_epoch,
-        "public crank refreshes the stale cert"
-    );
-
-    let convert_cu = env.convert_released_pnl_with_cu(&owner, portfolio, RELEASED);
-    assert_cu_within(
-        "ConvertReleasedPnl after public cert refresh",
-        convert_cu,
-        CUSTODY_CU_LIMIT,
-    );
-    let after = env.portfolio_state(portfolio);
-    let converted = after.capital.get();
-    assert!(
-        converted > 0 && converted <= RELEASED,
-        "refreshed conversion makes bounded progress without over-converting: {converted}"
-    );
-    assert!(
-        after.pnl.get() >= 0 && after.pnl.get() < RELEASED as i128,
-        "conversion consumes released PnL without increasing the claim: pnl={}",
-        after.pnl.get()
-    );
-    assert_eq!(
-        env.market_state().1.vault as u64,
-        env.token_amount(env.vault),
-        "conversion preserves SPL custody parity"
-    );
+    assert_stale_conversion_rolls_back(&mut env, &owner, portfolio);
+    refresh_and_convert_public_claim(&mut env, &owner, portfolio);
 }
 
 #[test]

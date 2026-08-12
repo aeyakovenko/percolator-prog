@@ -748,10 +748,14 @@ fill, especially when a nontraded asset is lagging.
 
 ### INV-054 - Certificate epoch completeness
 
-**Statement.** A health certificate binds every state version capable of affecting health: active
-bitmap, market and asset generations, raw target and effective prices, oracle epochs, A/K/F/B,
-source-credit epochs, liens, pending obligations, lifecycle modes, close state, and relevant policy
-epochs. Any change invalidates or conservatively downgrades the certificate.
+**Statement.** A health certificate binds every state version capable of affecting health. In the
+deployed representation this means the account active bitmap plus the market `oracle_epoch`,
+`funding_epoch`, `risk_epoch`, and `asset_set_epoch`. Every health-relevant writer, including raw
+target/effective-price, A/K/F/B, source-credit, lien, pending-obligation, generation, lifecycle, and
+close-state changes, must either advance the appropriate bound epoch, atomically issue a certificate
+for the post-state, or conservatively invalidate the certificate. A policy field that cannot affect
+health need not create a phantom certificate epoch; any policy that can affect health must map to one
+of these deployed keys or extend the certificate schema.
 
 **Required tests.** Change one bound input at a time and prove stale certificates cannot authorize a
 favorable action.
