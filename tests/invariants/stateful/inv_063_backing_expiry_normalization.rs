@@ -7,9 +7,10 @@
 //! trade while backing is fresh and lands it after authenticated Clock expiry. The unsafe increase
 //! must return `EngineStale` with exact rollback, zero provider fee, and no victim loss; a reducing
 //! trade must remain executable.
-//! `v16_program_expired_backing_trade_route_matrix` repeats the freshness check through all four
-//! public trade routes. It rejects newly-created counterparty-backed liens independently of fee
-//! routing and separately proves that a risk-reducing trade remains available after expiry.
+//! `v16_program_backing_expiry_trade_route_boundary_matrix` repeats the freshness check through all
+//! four public trade routes at `expiry-1`, `expiry`, and `expiry+1`. Every pre-expiry control must
+//! grow a real counterparty-backed lien; single routes must also charge and extract a real provider
+//! fee. Both expired boundaries reject atomically and preserve a risk-reducing trade.
 //! `v16_program_retained_maturity_matrix_rejects_expired_topup_and_preserves_terminal_progress`
 //! generates signed expiry boundaries independently of any finding manifest and compares omitted
 //! and delayed operations. An expired delayed top-up must reject with exact rollback, leave provider
@@ -24,26 +25,40 @@
 
 use super::*;
 
-fn assert_expired_backing_trade_route(discovery: &ExpiredBackingTradeRouteDiscovery) {
-    assert!(
-        discovery.rejects_expired_risk_increase_safely(),
-        "{:?} did not reject an authenticated-expiry lien with exact rollback: {discovery:?}",
-        discovery.route
-    );
-    assert!(
-        discovery.preserves_risk_reduction(),
-        "{:?} did not preserve a post-expiry reducing trade: {discovery:?}",
-        discovery.route
-    );
+fn assert_backing_expiry_trade_route_boundary(discovery: &ExpiredBackingTradeRouteDiscovery) {
+    match discovery.landing {
+        BackingExpiryLanding::Before => assert!(
+            discovery.uses_fresh_backing_nonvacuously(),
+            "{:?} did not consume fresh backing before expiry: {discovery:?}",
+            discovery.route
+        ),
+        BackingExpiryLanding::At | BackingExpiryLanding::After => {
+            assert!(
+                discovery.rejects_expired_risk_increase_safely(),
+                "{:?} did not reject a {:?} authenticated-expiry lien with exact rollback: {discovery:?}",
+                discovery.route,
+                discovery.landing
+            );
+            assert!(
+                discovery.preserves_risk_reduction(),
+                "{:?} did not preserve a {:?} risk-reducing trade: {discovery:?}",
+                discovery.route,
+                discovery.landing
+            );
+        }
+    }
 }
 
 #[test]
-fn v16_program_expired_backing_trade_route_matrix() {
-    let discoveries = discover_expired_backing_trade_routes([0x63; 32], 2)
-        .expect("build every public trade-route expiry world");
-    assert_eq!(discoveries.len(), DiscoveryTradeRoute::ALL.len());
+fn v16_program_backing_expiry_trade_route_boundary_matrix() {
+    let discoveries = discover_backing_expiry_trade_route_boundaries([0x63; 32], 2)
+        .expect("build every public trade-route and expiry-boundary world");
+    assert_eq!(
+        discoveries.len(),
+        DiscoveryTradeRoute::ALL.len() * BackingExpiryLanding::ALL.len()
+    );
     for discovery in &discoveries {
-        assert_expired_backing_trade_route(discovery);
+        assert_backing_expiry_trade_route_boundary(discovery);
     }
 }
 
@@ -86,21 +101,35 @@ proptest! {
     }
 
     #[test]
-    fn v16_program_expired_backing_trade_routes_reject_stale_lien_creation(
+    fn v16_program_backing_expiry_trade_routes_respect_boundary(
         seed in any::<[u8; 32]>(),
         route in prop::sample::select(DiscoveryTradeRoute::ALL.to_vec()),
+        landing in prop::sample::select(BackingExpiryLanding::ALL.to_vec()),
         expiry_offset in prop::sample::select(vec![1u8, 2, 4, 6]),
     ) {
-        let discovery = discover_expired_backing_trade_route(seed, route, expiry_offset)
+        let discovery = discover_backing_expiry_trade_route_boundary(
+            seed,
+            route,
+            expiry_offset,
+            landing,
+        )
             .map_err(TestCaseError::fail)?;
-        prop_assert!(
-            discovery.rejects_expired_risk_increase_safely(),
-            "{route:?} did not reject an authenticated-expiry lien safely: {discovery:?}"
-        );
-        prop_assert!(
-            discovery.preserves_risk_reduction(),
-            "{route:?} did not preserve post-expiry risk reduction: {discovery:?}"
-        );
+        match landing {
+            BackingExpiryLanding::Before => prop_assert!(
+                discovery.uses_fresh_backing_nonvacuously(),
+                "{route:?} did not use pre-expiry backing nonvacuously: {discovery:?}"
+            ),
+            BackingExpiryLanding::At | BackingExpiryLanding::After => {
+                prop_assert!(
+                    discovery.rejects_expired_risk_increase_safely(),
+                    "{route:?} did not reject a {landing:?} authenticated-expiry lien safely: {discovery:?}"
+                );
+                prop_assert!(
+                    discovery.preserves_risk_reduction(),
+                    "{route:?} did not preserve {landing:?} risk reduction: {discovery:?}"
+                );
+            }
+        }
     }
 
     #[test]

@@ -322,6 +322,29 @@ impl DiscoveryTradeRoute {
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum BackingExpiryLanding {
+    Before,
+    At,
+    After,
+}
+
+impl BackingExpiryLanding {
+    pub const ALL: [Self; 3] = [Self::Before, Self::At, Self::After];
+
+    fn authenticated_slot(self, expiry_slot: u64) -> Result<u64, String> {
+        match self {
+            Self::Before => expiry_slot
+                .checked_sub(1)
+                .ok_or_else(|| "pre-expiry landing slot underflow".to_string()),
+            Self::At => Ok(expiry_slot),
+            Self::After => expiry_slot
+                .checked_add(1)
+                .ok_or_else(|| "post-expiry landing slot overflow".to_string()),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ActiveLegOrder {
     RescueFirst,
     RescueLast,
@@ -1134,6 +1157,7 @@ pub struct BackingExpiryDiscovery {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ExpiredBackingTradeRouteDiscovery {
     pub route: DiscoveryTradeRoute,
+    pub landing: BackingExpiryLanding,
     pub expiry_slot: u64,
     pub authenticated_slot: u64,
     pub engine_slot: u64,
@@ -1456,7 +1480,8 @@ impl ExpiredBackingTradeRouteDiscovery {
     }
 
     pub fn rejects_expired_risk_increase_safely(&self) -> bool {
-        self.authenticated_slot > self.expiry_slot
+        self.landing != BackingExpiryLanding::Before
+            && self.authenticated_slot >= self.expiry_slot
             && self.engine_slot < self.authenticated_slot
             && !self.risk_increase_landed
             && self.rejected_exact_rollback
@@ -1464,6 +1489,29 @@ impl ExpiredBackingTradeRouteDiscovery {
             && self.victim_capital_loss == 0
             && self.provider_earnings == 0
             && self.extracted_tokens == 0
+            && self.token_supply_conserved
+    }
+
+    pub fn uses_fresh_backing_nonvacuously(&self) -> bool {
+        let fee_path_is_nonvacuous = match self.route {
+            DiscoveryTradeRoute::NoCpi | DiscoveryTradeRoute::Cpi => {
+                self.victim_capital_loss > 0
+                    && self.provider_earnings > 0
+                    && u128::from(self.extracted_tokens) == self.provider_earnings
+            }
+            DiscoveryTradeRoute::BatchNoCpi | DiscoveryTradeRoute::BatchCpi => {
+                self.victim_capital_loss == 0
+                    && self.provider_earnings == 0
+                    && self.extracted_tokens == 0
+            }
+        };
+        self.landing == BackingExpiryLanding::Before
+            && self.authenticated_slot < self.expiry_slot
+            && self.risk_increase_landed
+            && !self.rejected_exact_rollback
+            && self.counterparty_lien_increase_num > 0
+            && fee_path_is_nonvacuous
+            && self.preserves_risk_reduction()
             && self.token_supply_conserved
     }
 }
@@ -9517,10 +9565,11 @@ pub fn discover_backing_expiry_violation(
     })
 }
 
-pub fn discover_expired_backing_trade_route(
+pub fn discover_backing_expiry_trade_route_boundary(
     mut seed: [u8; 32],
     route: DiscoveryTradeRoute,
     expiry_offset: u8,
+    landing: BackingExpiryLanding,
 ) -> Result<ExpiredBackingTradeRouteDiscovery, String> {
     const WINNER: usize = 0;
     const LOSER: usize = 1;
@@ -9558,9 +9607,7 @@ pub fn discover_expired_backing_trade_route(
     let expiry_slot = start_slot
         .checked_add(u64::from(expiry_offset.clamp(2, 6)))
         .ok_or_else(|| "trade-route expiry overflow".to_string())?;
-    let authenticated_slot = expiry_slot
-        .checked_add(1)
-        .ok_or_else(|| "trade-route landing slot overflow".to_string())?;
+    let authenticated_slot = landing.authenticated_slot(expiry_slot)?;
     let supply_before = env.token_supply_observed();
     env.configure_auth_mark(false, ASSET, start_slot, PRICE)
         .map_err(|error| format!("configure trade-route mark: {error}"))?;
@@ -9569,6 +9616,10 @@ pub fn discover_expired_backing_trade_route(
     if matches!(route, DiscoveryTradeRoute::NoCpi | DiscoveryTradeRoute::Cpi) {
         env.update_backing_fee_policy(DOMAIN, 5_000, 0)
             .map_err(|error| format!("configure trade-route backing fee: {error}"))?;
+    }
+    if route == DiscoveryTradeRoute::Cpi {
+        env.set_matcher_backing_fee_cap(LOSER, 5_000)
+            .map_err(|error| format!("authorize CPI trade-route backing fee: {error}"))?;
     }
     env.top_up_backing_bucket(DOMAIN, BUCKET_AMOUNT, expiry_slot)
         .map_err(|error| format!("fund trade-route backing: {error}"))?;
@@ -9588,7 +9639,7 @@ pub fn discover_expired_backing_trade_route(
     let before_bucket = before_group.source_backing_buckets[DOMAIN as usize];
     if before_bucket.status != BackingBucketStatusV16::Fresh
         || before_bucket.expiry_slot != expiry_slot
-        || before_group.current_slot >= authenticated_slot
+        || before_group.current_slot > authenticated_slot
     {
         return Err("trade-route backing was not cached-fresh before retention".into());
     }
@@ -9660,6 +9711,7 @@ pub fn discover_expired_backing_trade_route(
 
     Ok(ExpiredBackingTradeRouteDiscovery {
         route,
+        landing,
         expiry_slot,
         authenticated_slot,
         engine_slot,
@@ -9676,13 +9728,20 @@ pub fn discover_expired_backing_trade_route(
     })
 }
 
-pub fn discover_expired_backing_trade_routes(
+pub fn discover_backing_expiry_trade_route_boundaries(
     seed: [u8; 32],
     expiry_offset: u8,
 ) -> Result<Vec<ExpiredBackingTradeRouteDiscovery>, String> {
-    DiscoveryTradeRoute::ALL
+    BackingExpiryLanding::ALL
         .into_iter()
-        .map(|route| discover_expired_backing_trade_route(seed, route, expiry_offset))
+        .flat_map(|landing| {
+            DiscoveryTradeRoute::ALL
+                .into_iter()
+                .map(move |route| (landing, route))
+        })
+        .map(|(landing, route)| {
+            discover_backing_expiry_trade_route_boundary(seed, route, expiry_offset, landing)
+        })
         .collect()
 }
 
