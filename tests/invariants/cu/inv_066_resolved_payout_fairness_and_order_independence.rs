@@ -12,6 +12,32 @@
 
 use super::*;
 
+fn close_resolved_until_terminal(
+    env: &mut V16CuEnv,
+    owner: &Keypair,
+    portfolio: Pubkey,
+    label: &str,
+) -> u64 {
+    let mut paid = 0u64;
+    for _ in 0..32 {
+        let (destination, cu) = env.close_resolved_with_cu(owner, portfolio);
+        assert_cu_within(label, cu, CUSTODY_CU_LIMIT);
+        paid = paid
+            .checked_add(env.token_amount(destination))
+            .expect("resolved payout total overflow");
+        let state = env.portfolio_state(portfolio);
+        let receipt = resolved_receipt(&state);
+        if state.capital.get() == 0
+            && state.pnl.get() == 0
+            && percolator::active_bitmap_is_empty(active_bitmap(&state))
+            && (!receipt.present || receipt.finalized)
+        {
+            return paid;
+        }
+    }
+    panic!("{label} did not reach a terminal portfolio in 32 bounded calls");
+}
+
 #[test]
 fn v16_attack_resolved_close_order_preserves_scarce_source_backing() {
     fn run(reverse: bool) -> ([u128; 4], u128, u128, u128, u128, u128) {
@@ -293,8 +319,12 @@ fn v16_bpf_force_close_pair_order_preserves_terminal_user_payouts() {
         env.svm.warp_to_slot(104);
         let mut payouts = [0u64; 4];
         for i in 0..4 {
-            let destination = env.close_resolved(&owners[i], portfolios[i]);
-            payouts[i] = env.token_amount(destination);
+            payouts[i] = close_resolved_until_terminal(
+                &mut env,
+                &owners[i],
+                portfolios[i],
+                "force-close pair-order terminal settlement",
+            );
         }
         assert_eq!(payouts, [100_100, 99_900, 100_000, 100_000]);
         let (_, group) = env.market_state();
@@ -578,8 +608,12 @@ fn v16_bpf_force_close_pair_order_preserves_unequal_partial_payouts() {
         env.svm.warp_to_slot(105);
         let mut payouts = [0u64; 4];
         for i in 0..4 {
-            let destination = env.close_resolved(&owners[i], portfolios[i]);
-            payouts[i] = env.token_amount(destination);
+            payouts[i] = close_resolved_until_terminal(
+                &mut env,
+                &owners[i],
+                portfolios[i],
+                "unequal force-close terminal settlement",
+            );
         }
         assert_eq!(payouts, [1_200, 800, 2_400, 1_600]);
         let (_, group) = env.market_state();

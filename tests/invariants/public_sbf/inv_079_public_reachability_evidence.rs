@@ -243,10 +243,10 @@ fn v16_open_security_finding_benchmark_is_complete_and_non_overclaiming() {
     assert_eq!(direct, 0, "direct adapter inventory changed");
     assert_eq!(missing, 0, "all benchmark rows need executable disposition");
     assert_eq!(
-        independent, 124,
+        independent, 125,
         "promote only genuinely finding-agnostic invariant discoveries"
     );
-    assert_eq!(nonqualifying, 19, "nonqualifying evidence roster changed");
+    assert_eq!(nonqualifying, 18, "nonqualifying evidence roster changed");
 
     let independent_sources: &[(u16, &[u16], &str)] = &[
         (
@@ -306,7 +306,7 @@ fn v16_open_security_finding_benchmark_is_complete_and_non_overclaiming() {
         ),
         (
             28,
-            &[28],
+            &[28, 30],
             include_str!("../cu/inv_028_source_domain_realizability_cap.rs"),
         ),
         (
@@ -477,6 +477,7 @@ fn v16_open_security_finding_benchmark_is_complete_and_non_overclaiming() {
                     | "expired-backing-cannot-capitalize-and-extract-independent-principal"
                     | "expired-retained-operation-cannot-consume-principal-and-lock-terminal-users"
                     | "lapsed-backing-must-not-lock-resolved-user-exit"
+                    | "impaired-domain-prospective-loss-must-have-bounded-terminal-reconciliation"
                     | "vanished-source-claim-must-have-a-bounded-public-unwind"
                     | "expired-source-lien-must-have-bounded-public-reconciliation"
                     | "fractional-source-domains-must-have-a-bounded-public-unwind"

@@ -13,10 +13,10 @@
 //! fee. Both expired boundaries reject atomically and preserve a risk-reducing trade.
 //! `v16_program_retained_backing_topup_boundary_matrix` generates signed retained top-ups at all
 //! three expiry boundaries and compares omitted and submitted operations. A fresh request debits
-//! provider SPL and credits canonical custody/accounting exactly, then independently reproduces
-//! PR291's resolved-settlement lock on the pre-fix engine pin. Expired requests roll back every
-//! delta and preserve terminal user progress. PR291 changes the fresh cell to require bounded
-//! terminal progress.
+//! provider SPL and credits canonical custody/accounting exactly, then remains boundedly
+//! settleable after the backing lapses. Expired requests roll back every delta and preserve
+//! terminal user progress. The immediately preceding TDD commit reproduces PR291's terminal lock
+//! with this same matrix on the pre-fix engine pin.
 //! `v16_program_backing_expiry_conversion_boundary_matrix` generates released source-backed claims
 //! at all three expiry boundaries. The pre-expiry control must consume backing, credit capital, and
 //! withdraw real SPL value; both expired boundaries reject with exact rollback and zero
@@ -70,8 +70,8 @@ fn assert_backing_expiry_consumer_boundary(discovery: &ExpiredBackingConsumerDis
 fn assert_retained_maturity_boundary(discovery: &RetainedMaturityDiscovery) {
     match discovery.landing {
         BackingExpiryLanding::Before => assert!(
-            discovery.reproduces_fresh_lapsed_settlement_lock(),
-            "{:?} did not independently reproduce the fresh lapsed-settlement lock: {discovery:?}",
+            discovery.accepts_fresh_intent_and_preserves_terminal_progress(),
+            "{:?} did not execute fresh retained backing and settle boundedly: {discovery:?}",
             discovery.kind
         ),
         BackingExpiryLanding::At | BackingExpiryLanding::After => assert!(
@@ -213,8 +213,8 @@ proptest! {
         for discovery in discoveries {
             match landing {
                 BackingExpiryLanding::Before => prop_assert!(
-                    discovery.reproduces_fresh_lapsed_settlement_lock(),
-                    "fresh retained operation did not reproduce the PR291 lock nonvacuously: {discovery:?}"
+                    discovery.accepts_fresh_intent_and_preserves_terminal_progress(),
+                    "fresh retained operation was not nonvacuous or terminal-safe: {discovery:?}"
                 ),
                 BackingExpiryLanding::At | BackingExpiryLanding::After => prop_assert!(
                     discovery.rejects_expired_intent_and_preserves_terminal_progress(),

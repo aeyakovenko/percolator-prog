@@ -15,10 +15,15 @@
 //! progress from the source-lien rank rather than the return code. It records repeated successful
 //! no-op cranks, permits any genuine partial reductions, and requires every remaining owner route
 //! to roll back exactly once the reduction sequence reaches a funded nonzero fixed point.
-//! `v16_program_shared_expiry_prerequisite_matrix_keeps_bucket_fresh` constructs the exact
-//! two-winner precursor with both a live source lien and a prospective adverse K/F delta, then
-//! proves whether the lien-free close can create the impaired aggregate state required by either
-//! downstream finding.
+//! `v16_program_shared_expiry_progress_matrix_discovers_impaired_loss_lock` constructs one public
+//! four-portfolio world containing a live source lien and a prospective adverse K/F delta. A
+//! lien-free winner expires their shared bucket, after which the prospective loser is tested
+//! through `CloseResolved` and the sole public crank while every other portfolio is allowed to
+//! progress. The current counterexample requires repeated errors with byte-exact rollback,
+//! retained funded state, and zero payout.
+//!
+//! Secondary coverage: INV-030 credit-rate fail-closed behavior must still provide a terminal
+//! continuation after shared backing becomes impaired; failing closed forever is a user DoS.
 //!
 //! Guarantee boundary: the wrapper-supported sparse source-domain shape is 2 *
 //! WRAPPER_MAX_PORTFOLIO_ASSETS. Risk-reducing exits remain available at that shape; additional
@@ -27,7 +32,7 @@
 use super::*;
 
 #[test]
-fn v16_program_shared_expiry_prerequisite_matrix_keeps_bucket_fresh() {
+fn v16_program_shared_expiry_progress_matrix_discovers_impaired_loss_lock() {
     const Q: i128 = 1_000 * POS_SCALE as i128;
     const PRICE: u64 = 100;
     const UP_PRICE: u64 = 105;
@@ -108,36 +113,156 @@ fn v16_program_shared_expiry_prerequisite_matrix_keeps_bucket_fresh() {
 
     env.svm.warp_to_slot(3);
     env.resolve();
+    let target_destination = env.token_account(target_owner.pubkey(), 0);
+    let target_peer_destination = env.token_account(target_peer_owner.pubkey(), 0);
     let trigger_destination = env.token_account(trigger_owner.pubkey(), 0);
-    env.svm.expire_blockhash();
-    env.send(
-        ProgInstruction::CloseResolved {
-            fee_rate_per_slot: 0,
-        },
-        vec![
-            AccountMeta::new_readonly(trigger_owner.pubkey(), false),
-            AccountMeta::new(env.market, false),
-            AccountMeta::new(trigger, false),
-            AccountMeta::new(trigger_destination, false),
-            AccountMeta::new(env.vault, false),
-            AccountMeta::new_readonly(env.vault_authority, false),
-            AccountMeta::new_readonly(spl_token::ID, false),
-        ],
-        &[],
+    let loser_destination = env.token_account(trigger_peer_owner.pubkey(), 0);
+    let send_resolved = |env: &mut V16CuEnv,
+                         owner: Pubkey,
+                         portfolio: Pubkey,
+                         destination: Pubkey,
+                         use_crank: bool| {
+        env.svm.expire_blockhash();
+        let instruction = if use_crank {
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 3,
+                observations: crank_observations(0),
+            }
+        } else {
+            ProgInstruction::CloseResolved {
+                fee_rate_per_slot: 0,
+            }
+        };
+        env.send(
+            instruction,
+            vec![
+                AccountMeta::new_readonly(owner, false),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(portfolio, false),
+                AccountMeta::new(destination, false),
+                AccountMeta::new(env.vault, false),
+                AccountMeta::new_readonly(env.vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[],
+        )
+    };
+    send_resolved(
+        &mut env,
+        trigger_owner.pubkey(),
+        trigger,
+        trigger_destination,
+        false,
     )
-    .expect("the lien-free winner must commit the foreign expiry");
+    .expect("the lien-free winner must commit one bounded foreign-expiry step");
     let impaired_market = env.market_state().1;
     assert_eq!(
         impaired_market.source_backing_buckets[1].status,
-        BackingBucketStatusV16::Fresh,
-        "the pinned predecessor unexpectedly created PR300's impaired prerequisite"
+        BackingBucketStatusV16::Impaired,
+        "the lien-free winner must expose the shared impaired-backing state"
     );
-    assert_eq!(
-        impaired_market.source_backing_buckets[1].impaired_liened_backing_num,
-        0
+    assert!(
+        impaired_market.source_backing_buckets[1].impaired_liened_backing_num
+            >= lien.source_lien_counterparty_backing_num.get(),
+        "the aggregate impaired reserve must include the target's live local lien"
     );
-    assert!(has_active_leg_for_asset(&env.portfolio_state(target), 0));
-    assert!(env.portfolio_state(target).capital.get() != 0);
+
+    let loser_before = env.svm.get_account(&trigger_peer).unwrap();
+    let mut target_progressed = false;
+    let mut target_errors = Vec::new();
+    let mut loser_rejections = 0usize;
+    for round in 0..8 {
+        for (owner, portfolio, destination) in [
+            (target_owner.pubkey(), target, target_destination),
+            (
+                target_peer_owner.pubkey(),
+                target_peer,
+                target_peer_destination,
+            ),
+            (trigger_owner.pubkey(), trigger, trigger_destination),
+        ] {
+            let market_before = env.svm.get_account(&env.market).unwrap();
+            let portfolio_before = env.svm.get_account(&portfolio).unwrap();
+            let vault_before = env.svm.get_account(&env.vault).unwrap();
+            let destination_before = env.svm.get_account(&destination).unwrap();
+            match send_resolved(&mut env, owner, portfolio, destination, round % 2 != 0) {
+                Ok(cu) => {
+                    assert_cu_within("nonblocked resolved peer", cu, 1_000_000);
+                    if portfolio == target
+                        && (env.svm.get_account(&env.market).unwrap() != market_before
+                            || env.svm.get_account(&portfolio).unwrap() != portfolio_before
+                            || env.svm.get_account(&env.vault).unwrap() != vault_before
+                            || env.svm.get_account(&destination).unwrap() != destination_before)
+                    {
+                        target_progressed = true;
+                    }
+                }
+                Err(error) => {
+                    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+                    assert_eq!(env.svm.get_account(&portfolio).unwrap(), portfolio_before);
+                    assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+                    assert_eq!(
+                        env.svm.get_account(&destination).unwrap(),
+                        destination_before
+                    );
+                    if portfolio == target {
+                        target_errors.push(error);
+                    }
+                }
+            }
+        }
+
+        for use_crank in [false, true] {
+            let market_before = env.svm.get_account(&env.market).unwrap();
+            let portfolio_before = env.svm.get_account(&trigger_peer).unwrap();
+            let vault_before = env.svm.get_account(&env.vault).unwrap();
+            let destination_before = env.svm.get_account(&loser_destination).unwrap();
+            let error = send_resolved(
+                &mut env,
+                trigger_peer_owner.pubkey(),
+                trigger_peer,
+                loser_destination,
+                use_crank,
+            )
+            .expect_err("the impaired-domain prospective loss must reject");
+            assert!(
+                error.contains("Custom(21)"),
+                "prospective-loss close returned the wrong blocker: {error}"
+            );
+            assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+            assert_eq!(
+                env.svm.get_account(&trigger_peer).unwrap(),
+                portfolio_before
+            );
+            assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+            assert_eq!(
+                env.svm.get_account(&loser_destination).unwrap(),
+                destination_before
+            );
+            loser_rejections += 1;
+        }
+    }
+    assert_eq!(loser_rejections, 16);
+    assert_eq!(env.svm.get_account(&trigger_peer).unwrap(), loser_before);
+    assert_eq!(env.token_amount(loser_destination), 0);
+    assert!(
+        target_progressed,
+        "the foreign-impaired lien path did not reach its staged progress state"
+    );
+    assert!(
+        target_errors
+            .iter()
+            .all(|error| !error.contains("Custom(25)")),
+        "PR300's claimed counter-underflow should remain masked by PR302 on this pin: {target_errors:?}"
+    );
+
+    let loser_after = env.portfolio_state(trigger_peer);
+    assert!(has_active_leg_for_asset(&loser_after, 0));
+    assert!(loser_after.capital.get() != 0);
+    assert!(
+        env.market_state().1.assets[0].k_short < active_leg_for_asset(&loser_after, 0).k_snap,
+        "the prospective loser must retain its unsettled adverse K/F delta"
+    );
 }
 
 #[derive(Clone, Copy, Debug)]

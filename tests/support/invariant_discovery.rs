@@ -1218,31 +1218,6 @@ pub struct RetainedMaturityDiscovery {
 }
 
 impl RetainedMaturityDiscovery {
-    pub fn reproduces_fresh_lapsed_settlement_lock(&self) -> bool {
-        self.landing == BackingExpiryLanding::Before
-            && self.landing_slot < self.expiry_slot
-            && self.retained_landed
-            && !self.retained_rejected_expired
-            && !self.retained_exact_rollback
-            && self.landing_provider_source_debit != 0
-            && self.landing_vault_token_credit == self.landing_provider_source_debit
-            && self.landing_internal_vault_credit == self.landing_provider_source_debit
-            && self.landing_bucket_principal_credit_num
-                == self.landing_provider_source_debit * BOUND_SCALE
-            && self.control_users_terminal
-            && !self.delayed_users_terminal
-            && self.delayed_funded_value != 0
-            && self.delayed_vault_liquidity >= self.delayed_funded_value
-            && self.delayed_close_failures != 0
-            && self.delayed_progress_failures != 0
-            && self.exact_rollback
-            && self.provider_principal_consumed == self.landing_provider_source_debit
-            && self.provider_recovery == 0
-            && self.control_external_payout != 0
-            && self.delayed_external_payout == 0
-            && self.token_supply_conserved
-    }
-
     pub fn rejects_expired_intent_and_preserves_terminal_progress(&self) -> bool {
         self.landing != BackingExpiryLanding::Before
             && self.landing_slot >= self.expiry_slot
@@ -1280,6 +1255,7 @@ impl RetainedMaturityDiscovery {
             && self.delayed_funded_value == 0
             && self.exact_rollback
             && self.provider_principal_consumed == self.landing_provider_source_debit
+            && self.provider_recovery == 0
             && self.control_external_payout != 0
             && self.delayed_external_payout >= self.control_external_payout
             && self.delayed_external_payout
