@@ -8,10 +8,11 @@
 //!
 //! Guarantee boundary: the post-expiry trade test certifies the minimized PR367 trace on the fixed
 //! program and checks exact rollback plus a surviving risk-reducing trade. The stateful INV-063
-//! module supplies the nonvacuous four-route `expiry-1`/`expiry`/`expiry+1` matrix; this CU module
-//! retains the finding-specific and bounded-crank evidence. The lapsed-Live test is also whole-route
-//! SVM/CU evidence for INV-030, INV-071, and INV-073: it proves one bounded expiry step, one bounded
-//! certification step, custody preservation, and a subsequent owner reduction.
+//! module supplies nonvacuous `expiry-1`/`expiry`/`expiry+1` matrices for all four trade routes and
+//! released-PnL conversion; this CU module retains the finding-specific and bounded-crank evidence.
+//! The lapsed-Live test is also whole-route SVM/CU evidence for INV-030, INV-071, and INV-073: it
+//! proves one bounded expiry step, one bounded certification step, custody preservation, and a
+//! subsequent owner reduction.
 
 use super::*;
 

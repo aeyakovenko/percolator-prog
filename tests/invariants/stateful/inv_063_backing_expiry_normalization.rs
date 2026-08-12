@@ -15,10 +15,10 @@
 //! generates signed expiry boundaries independently of any finding manifest and compares omitted
 //! and delayed operations. An expired delayed top-up must reject with exact rollback, leave provider
 //! principal untouched, and preserve the control world's terminal payouts.
-//! `v16_program_expired_backing_consumer_matrix_rejects_lapsed_conversion` generates released
-//! source-backed claims and varies the expiry boundary. Conversion must reject at authenticated
-//! expiry with exact rollback and zero provider-principal movement, while the flat claimant can
-//! still withdraw all senior capital.
+//! `v16_program_backing_expiry_conversion_boundary_matrix` generates released source-backed claims
+//! at all three expiry boundaries. The pre-expiry control must consume backing, credit capital, and
+//! withdraw real SPL value; both expired boundaries reject with exact rollback and zero
+//! provider-principal movement while preserving withdrawal of all senior capital.
 //!
 //! Guarantee boundary: the trade, conversion, and retained-top-up consumers have fixed-pin bounded
 //! evidence over the generated route and expiry boundaries represented here.
@@ -49,6 +49,22 @@ fn assert_backing_expiry_trade_route_boundary(discovery: &ExpiredBackingTradeRou
     }
 }
 
+fn assert_backing_expiry_consumer_boundary(discovery: &ExpiredBackingConsumerDiscovery) {
+    match discovery.landing {
+        BackingExpiryLanding::Before => assert!(
+            discovery.consumes_fresh_backing_nonvacuously(),
+            "{:?} did not consume fresh backing before expiry: {discovery:?}",
+            discovery.kind
+        ),
+        BackingExpiryLanding::At | BackingExpiryLanding::After => assert!(
+            discovery.rejects_lapsed_conversion_and_preserves_senior_exit(),
+            "{:?} did not reject a {:?} backing conversion safely: {discovery:?}",
+            discovery.kind,
+            discovery.landing
+        ),
+    }
+}
+
 #[test]
 fn v16_program_backing_expiry_trade_route_boundary_matrix() {
     let discoveries = discover_backing_expiry_trade_route_boundaries([0x63; 32], 2)
@@ -59,6 +75,19 @@ fn v16_program_backing_expiry_trade_route_boundary_matrix() {
     );
     for discovery in &discoveries {
         assert_backing_expiry_trade_route_boundary(discovery);
+    }
+}
+
+#[test]
+fn v16_program_backing_expiry_conversion_boundary_matrix() {
+    let discoveries = discover_backing_expiry_consumer_boundaries([0x64; 32], 2)
+        .expect("build every favorable backing-consumer and expiry-boundary world");
+    assert_eq!(
+        discoveries.len(),
+        ExpiredBackingConsumerKind::ALL.len() * BackingExpiryLanding::ALL.len()
+    );
+    for discovery in &discoveries {
+        assert_backing_expiry_consumer_boundary(discovery);
     }
 }
 
@@ -159,11 +188,16 @@ proptest! {
     }
 
     #[test]
-    fn v16_program_expired_backing_consumer_matrix_rejects_lapsed_conversion(
+    fn v16_program_backing_expiry_consumer_matrix_respects_boundary(
         seed in any::<[u8; 32]>(),
+        landing in prop::sample::select(BackingExpiryLanding::ALL.to_vec()),
         expiry_offset in prop::sample::select(vec![1u8, 2, 4, 6]),
     ) {
-        let discoveries = discover_expired_backing_consumers(seed, expiry_offset);
+        let discoveries = discover_backing_expiry_consumer_boundary(
+            seed,
+            expiry_offset,
+            landing,
+        );
         prop_assert!(
             discoveries.is_ok(),
             "expired-backing consumer verification failed at offset {expiry_offset}: {}",
@@ -176,11 +210,16 @@ proptest! {
             "every favorable backing consumer needs a generated expiry world"
         );
         for discovery in discoveries {
-            prop_assert!(
-                discovery.rejects_lapsed_conversion_and_preserves_senior_exit(),
-                "expired backing consumer was not rejected safely with a senior exit: {:?}",
-                discovery
-            );
+            match landing {
+                BackingExpiryLanding::Before => prop_assert!(
+                    discovery.consumes_fresh_backing_nonvacuously(),
+                    "fresh backing consumer was not exercised nonvacuously: {discovery:?}"
+                ),
+                BackingExpiryLanding::At | BackingExpiryLanding::After => prop_assert!(
+                    discovery.rejects_lapsed_conversion_and_preserves_senior_exit(),
+                    "expired backing consumer was not rejected safely with a senior exit: {discovery:?}"
+                ),
+            }
         }
     }
 }

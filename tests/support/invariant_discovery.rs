@@ -2,7 +2,9 @@ use super::v16_svm::{
     MarketConfig, PublicTraceEvidence, V16Svm, EXIT_MAKER_DEPOSIT, INITIAL_PRICE,
     PRIMARY_ACTOR_COUNT, USER_DEPOSIT,
 };
-use percolator::{BackingBucketStatusV16, MarketModeV16, SideModeV16, ADL_ONE, POS_SCALE};
+use percolator::{
+    BackingBucketStatusV16, MarketModeV16, SideModeV16, ADL_ONE, BOUND_SCALE, POS_SCALE,
+};
 use percolator_prog::{
     constants::{ORACLE_LEG_FLAG_DIVIDE_LEG2, ORACLE_LEG_FLAG_DIVIDE_LEG3},
     error::PercolatorError,
@@ -1246,6 +1248,7 @@ impl ExpiredBackingConsumerKind {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ExpiredBackingConsumerDiscovery {
     pub kind: ExpiredBackingConsumerKind,
+    pub landing: BackingExpiryLanding,
     pub expiry_slot: u64,
     pub authenticated_slot: u64,
     pub engine_slot: u64,
@@ -1264,7 +1267,8 @@ pub struct ExpiredBackingConsumerDiscovery {
 
 impl ExpiredBackingConsumerDiscovery {
     pub fn rejects_lapsed_conversion_and_preserves_senior_exit(&self) -> bool {
-        self.authenticated_slot > self.expiry_slot
+        self.landing != BackingExpiryLanding::Before
+            && self.authenticated_slot >= self.expiry_slot
             && self.engine_slot < self.authenticated_slot
             && self.released_pnl != 0
             && !self.conversion_landed
@@ -1273,6 +1277,22 @@ impl ExpiredBackingConsumerDiscovery {
             && self.capital_credit == 0
             && self.consumed_backing_num == 0
             && self.extracted_tokens == 0
+            && self.senior_capital_before != 0
+            && self.senior_withdraw_landed
+            && u128::from(self.senior_withdrawn_tokens) == self.senior_capital_before
+            && self.token_supply_conserved
+    }
+
+    pub fn consumes_fresh_backing_nonvacuously(&self) -> bool {
+        self.landing == BackingExpiryLanding::Before
+            && self.authenticated_slot < self.expiry_slot
+            && self.released_pnl != 0
+            && self.conversion_landed
+            && !self.conversion_rejected_stale
+            && !self.rejected_exact_rollback
+            && self.capital_credit == self.released_pnl
+            && self.consumed_backing_num == self.released_pnl * BOUND_SCALE
+            && u128::from(self.extracted_tokens) == self.released_pnl
             && self.senior_capital_before != 0
             && self.senior_withdraw_landed
             && u128::from(self.senior_withdrawn_tokens) == self.senior_capital_before
@@ -10007,10 +10027,11 @@ pub fn discover_retained_maturity_terminal_locks(
         .collect()
 }
 
-fn discover_one_expired_backing_consumer(
+fn discover_one_backing_expiry_consumer_boundary(
     mut seed: [u8; 32],
     kind: ExpiredBackingConsumerKind,
     expiry_offset: u8,
+    landing: BackingExpiryLanding,
 ) -> Result<ExpiredBackingConsumerDiscovery, String> {
     const WINNER: usize = 0;
     const LOSER: usize = 1;
@@ -10028,9 +10049,7 @@ fn discover_one_expired_backing_consumer(
     let expiry_slot = 2u64
         .checked_add(u64::from(expiry_offset.clamp(1, 6)))
         .ok_or_else(|| "expired-consumer expiry overflow".to_string())?;
-    let authenticated_slot = expiry_slot
-        .checked_add(1)
-        .ok_or_else(|| "expired-consumer landing overflow".to_string())?;
+    let authenticated_slot = landing.authenticated_slot(expiry_slot)?;
     let mut env = V16Svm::new(
         seed,
         MarketConfig {
@@ -10135,6 +10154,7 @@ fn discover_one_expired_backing_consumer(
 
     Ok(ExpiredBackingConsumerDiscovery {
         kind,
+        landing,
         expiry_slot,
         authenticated_slot,
         engine_slot: after_group.current_slot,
@@ -10152,14 +10172,41 @@ fn discover_one_expired_backing_consumer(
     })
 }
 
+pub fn discover_backing_expiry_consumer_boundary(
+    seed: [u8; 32],
+    expiry_offset: u8,
+    landing: BackingExpiryLanding,
+) -> Result<Vec<ExpiredBackingConsumerDiscovery>, String> {
+    ExpiredBackingConsumerKind::ALL
+        .into_iter()
+        .map(|kind| {
+            discover_one_backing_expiry_consumer_boundary(seed, kind, expiry_offset, landing)
+        })
+        .collect()
+}
+
+pub fn discover_backing_expiry_consumer_boundaries(
+    seed: [u8; 32],
+    expiry_offset: u8,
+) -> Result<Vec<ExpiredBackingConsumerDiscovery>, String> {
+    BackingExpiryLanding::ALL
+        .into_iter()
+        .flat_map(|landing| {
+            ExpiredBackingConsumerKind::ALL
+                .into_iter()
+                .map(move |kind| (landing, kind))
+        })
+        .map(|(landing, kind)| {
+            discover_one_backing_expiry_consumer_boundary(seed, kind, expiry_offset, landing)
+        })
+        .collect()
+}
+
 pub fn discover_expired_backing_consumers(
     seed: [u8; 32],
     expiry_offset: u8,
 ) -> Result<Vec<ExpiredBackingConsumerDiscovery>, String> {
-    ExpiredBackingConsumerKind::ALL
-        .into_iter()
-        .map(|kind| discover_one_expired_backing_consumer(seed, kind, expiry_offset))
-        .collect()
+    discover_backing_expiry_consumer_boundary(seed, expiry_offset, BackingExpiryLanding::After)
 }
 
 fn discover_one_source_lien_reversal_exit(
