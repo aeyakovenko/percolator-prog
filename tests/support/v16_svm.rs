@@ -2663,6 +2663,32 @@ impl V16Svm {
         )
     }
 
+    pub fn crank_resolved_primary_signed(
+        &mut self,
+        actor_index: usize,
+        now_slot: u64,
+        observations: Vec<CrankObservationHint>,
+    ) -> Result<TxSuccess, String> {
+        let actor = &self.actors[actor_index];
+        let owner = copy_keypair(&actor.signer);
+        self.send_program(
+            ProgInstruction::PermissionlessCrank {
+                now_slot,
+                observations,
+            },
+            vec![
+                AccountMeta::new_readonly(owner.pubkey(), true),
+                AccountMeta::new(self.market, false),
+                AccountMeta::new(actor.portfolio, false),
+                AccountMeta::new(actor.destination_token, false),
+                AccountMeta::new(self.vault, false),
+                AccountMeta::new_readonly(self.vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[owner],
+        )
+    }
+
     pub fn crank_with_oracles(
         &mut self,
         actor_index: usize,

@@ -5,9 +5,11 @@
 //! Evidence in this file (F over public I routes): `v16_program_stateful_public_interface_fuzz`
 //! generates deposits, withdrawals, all four trade routes, retained transactions, oracle changes,
 //! cranks, fee synchronization, matcher-capability changes, insurance/backing top-ups, released-PnL
-//! conversion, unilateral rebalance reduction, asset shutdown, oracle-authority rotation, and
-//! hostile account substitution. After every public transition it independently rejects
-//! undecodable or hidden legs, duplicate same-asset legs, stale
+//! conversion, unilateral rebalance reduction, asset shutdown, oracle-authority rotation, market
+//! resolution, resolved crank/close/claim transitions, and hostile account substitution. Terminal
+//! routes independently reconcile position and effective-OI removal, receipt monotonicity, and
+//! exact destination/SPL-vault/engine-vault deltas. After every public transition the shared oracle
+//! rejects undecodable or hidden legs, duplicate same-asset legs, stale
 //! generation bindings, source-lien classification mismatches, stored-position/OI drift, and
 //! net-position drift. Successful non-token routes must preserve every tracked SPL account
 //! byte-for-byte; value routes may mutate only their canonical source/destination and vault, with
@@ -106,6 +108,20 @@ fn v16_program_extended_public_action_alphabet_runs_through_shared_oracles() {
                 actor: 0,
                 amount: 2_000,
             },
+            Action::Crank {
+                actor: 2,
+                hints: HintMode::Complete,
+            },
+            Action::Trade {
+                route: TradeRoute::NoCpi,
+                taker: 2,
+                maker: 3,
+                asset: 0,
+                units: 1,
+                fee_bps: 0,
+                price_move_bps: 0,
+                prefer_reduce: true,
+            },
             Action::RotateOracleAuthority {
                 asset: 2,
                 new_actor: 0,
@@ -115,6 +131,13 @@ fn v16_program_extended_public_action_alphabet_runs_through_shared_oracles() {
                 force_close_delay_slots: 100,
             },
             Action::ShutdownAsset { asset: 0, dt: 0 },
+            Action::ResolveMarket,
+            Action::Crank {
+                actor: 1,
+                hints: HintMode::Complete,
+            },
+            Action::CloseResolved { actor: 0 },
+            Action::ClaimResolvedPayoutTopup { actor: 0 },
         ],
     };
 
@@ -134,6 +157,18 @@ fn v16_program_extended_public_action_alphabet_runs_through_shared_oracles() {
     assert!(coverage.authority_updates != 0);
     assert!(coverage.resolve_policy_updates != 0);
     assert!(coverage.lifecycle_updates != 0);
+    assert!(coverage.terminal_resolve_attempts != 0, "{coverage:?}");
+    assert!(coverage.terminal_resolves != 0, "{coverage:?}");
+    assert!(coverage.resolved_crank_attempts != 0, "{coverage:?}");
+    assert!(coverage.resolved_crank_successes != 0, "{coverage:?}");
+    assert!(coverage.resolved_close_attempts != 0, "{coverage:?}");
+    assert!(coverage.resolved_close_successes != 0, "{coverage:?}");
+    assert!(coverage.resolved_claim_attempts != 0, "{coverage:?}");
+    assert!(
+        coverage.resolved_crank_mutations + coverage.resolved_close_mutations != 0,
+        "{coverage:?}"
+    );
+    assert!(coverage.resolved_payout_atoms != 0, "{coverage:?}");
 }
 
 proptest! {

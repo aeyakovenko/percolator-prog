@@ -3,9 +3,9 @@ use super::v16_svm::{
     TX_CU_LIMIT, USER_COUNT,
 };
 use percolator::{
-    v16_domain_pair_for_asset_index, AssetLifecycleV16, BackingBucketStatusV16, MarketModeV16,
-    PortfolioLegV16, SideModeV16, SideV16, BOUND_SCALE, CREDIT_RATE_SCALE,
-    PORTFOLIO_SOURCE_DOMAIN_CAP, POS_SCALE,
+    active_bitmap_is_empty, v16_domain_pair_for_asset_index, AssetLifecycleV16,
+    BackingBucketStatusV16, MarketModeV16, PortfolioLegV16, SideModeV16, SideV16, BOUND_SCALE,
+    CREDIT_RATE_SCALE, PORTFOLIO_SOURCE_DOMAIN_CAP, POS_SCALE,
 };
 use percolator_prog::{
     constants::{
@@ -1248,6 +1248,13 @@ pub enum Action {
         asset: u8,
         new_actor: u8,
     },
+    ResolveMarket,
+    CloseResolved {
+        actor: u8,
+    },
+    ClaimResolvedPayoutTopup {
+        actor: u8,
+    },
     CrossMarketSubstitution {
         actor: u8,
     },
@@ -1327,6 +1334,18 @@ pub struct Coverage {
     pub resolve_policy_updates: u64,
     pub lifecycle_updates: u64,
     pub authority_updates: u64,
+    pub terminal_resolve_attempts: u64,
+    pub terminal_resolves: u64,
+    pub resolved_crank_attempts: u64,
+    pub resolved_crank_successes: u64,
+    pub resolved_crank_mutations: u64,
+    pub resolved_close_attempts: u64,
+    pub resolved_close_successes: u64,
+    pub resolved_close_mutations: u64,
+    pub resolved_claim_attempts: u64,
+    pub resolved_claim_successes: u64,
+    pub resolved_claim_mutations: u64,
+    pub resolved_payout_atoms: u128,
     pub deposits: u64,
     pub withdrawals: u64,
     pub token_frame_checks: u64,
@@ -1364,6 +1383,18 @@ impl Default for Coverage {
             resolve_policy_updates: 0,
             lifecycle_updates: 0,
             authority_updates: 0,
+            terminal_resolve_attempts: 0,
+            terminal_resolves: 0,
+            resolved_crank_attempts: 0,
+            resolved_crank_successes: 0,
+            resolved_crank_mutations: 0,
+            resolved_close_attempts: 0,
+            resolved_close_successes: 0,
+            resolved_close_mutations: 0,
+            resolved_claim_attempts: 0,
+            resolved_claim_successes: 0,
+            resolved_claim_mutations: 0,
+            resolved_payout_atoms: 0,
             deposits: 0,
             withdrawals: 0,
             token_frame_checks: 0,
@@ -1475,6 +1506,18 @@ impl Coverage {
         self.resolve_policy_updates += other.resolve_policy_updates;
         self.lifecycle_updates += other.lifecycle_updates;
         self.authority_updates += other.authority_updates;
+        self.terminal_resolve_attempts += other.terminal_resolve_attempts;
+        self.terminal_resolves += other.terminal_resolves;
+        self.resolved_crank_attempts += other.resolved_crank_attempts;
+        self.resolved_crank_successes += other.resolved_crank_successes;
+        self.resolved_crank_mutations += other.resolved_crank_mutations;
+        self.resolved_close_attempts += other.resolved_close_attempts;
+        self.resolved_close_successes += other.resolved_close_successes;
+        self.resolved_close_mutations += other.resolved_close_mutations;
+        self.resolved_claim_attempts += other.resolved_claim_attempts;
+        self.resolved_claim_successes += other.resolved_claim_successes;
+        self.resolved_claim_mutations += other.resolved_claim_mutations;
+        self.resolved_payout_atoms += other.resolved_payout_atoms;
         self.deposits += other.deposits;
         self.withdrawals += other.withdrawals;
         self.token_frame_checks += other.token_frame_checks;
@@ -2183,7 +2226,7 @@ pub fn assert_public_stock_census(label: &str, env: &V16Svm) -> Result<(), Strin
     )
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 struct Snapshot {
     primary_market: Vec<u8>,
     foreign_market: Vec<u8>,
@@ -2205,6 +2248,20 @@ struct RetainedTrade {
 enum CrankFailure {
     Rejected(String),
     Invariant(String),
+}
+
+#[derive(Clone, Copy, Debug)]
+enum TerminalRoute {
+    Crank,
+    Close,
+    Claim,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct TerminalRouteResult {
+    landed: bool,
+    mutated: bool,
+    payout: u128,
 }
 
 impl CrankFailure {
@@ -2264,7 +2321,11 @@ impl ScenarioRunner {
     }
 
     pub fn run_permissionless_progress_campaign(&mut self) -> Result<(), String> {
-        self.drain_cranks(self.liveness_limit)?;
+        if self.env.primary_market_state().1.mode == MarketModeV16::Resolved {
+            self.run_terminal_payout_campaign()?;
+        } else {
+            self.drain_cranks(self.liveness_limit)?;
+        }
         self.assert_global_invariants()
     }
 
@@ -2308,39 +2369,43 @@ impl ScenarioRunner {
     }
 
     pub fn run_direct_user_exit_campaign(&mut self) -> Result<(), String> {
-        for user in 0..PRIMARY_ACTOR_COUNT {
-            for asset in 0..ASSET_COUNT {
-                if self.positions[user][asset] == 0 {
-                    continue;
+        if self.env.primary_market_state().1.mode == MarketModeV16::Resolved {
+            self.run_terminal_payout_campaign()?;
+        } else {
+            for user in 0..PRIMARY_ACTOR_COUNT {
+                for asset in 0..ASSET_COUNT {
+                    if self.positions[user][asset] == 0 {
+                        continue;
+                    }
+                    if !self.try_normal_exit(user, asset)? {
+                        self.run_permissionless_progress_campaign()
+                            .map_err(|error| {
+                                format!(
+                                "normal exit needed public progress, but crank could not converge: \
+                                 {error}"
+                            )
+                            })?;
+                    }
+                    if !self.try_normal_exit(user, asset)? {
+                        let size = self.positions[user][asset];
+                        let legs = vec![(asset, -size)];
+                        let diagnostics = self
+                            .normal_exit_counterparties(user, asset, size)
+                            .into_iter()
+                            .map(|counterparty| {
+                                self.trade_diagnostics(user, counterparty, &legs)
+                                    .map(|diagnostic| format!("maker {counterparty}: {diagnostic}"))
+                            })
+                            .collect::<Result<Vec<_>, _>>()?
+                            .join("; ");
+                        return Err(format!(
+                            "all public trade routes rejected normal exit for user {user} asset \
+                             {asset}; last rejection={:?}; {diagnostics}",
+                            self.last_trade_rejection
+                        ));
+                    }
+                    self.coverage.user_positions_closed += 1;
                 }
-                if !self.try_normal_exit(user, asset)? {
-                    self.run_permissionless_progress_campaign()
-                        .map_err(|error| {
-                            format!(
-                            "normal exit needed public progress, but crank could not converge: \
-                             {error}"
-                        )
-                        })?;
-                }
-                if !self.try_normal_exit(user, asset)? {
-                    let size = self.positions[user][asset];
-                    let legs = vec![(asset, -size)];
-                    let diagnostics = self
-                        .normal_exit_counterparties(user, asset, size)
-                        .into_iter()
-                        .map(|counterparty| {
-                            self.trade_diagnostics(user, counterparty, &legs)
-                                .map(|diagnostic| format!("maker {counterparty}: {diagnostic}"))
-                        })
-                        .collect::<Result<Vec<_>, _>>()?
-                        .join("; ");
-                    return Err(format!(
-                        "all public trade routes rejected normal exit for user {user} asset \
-                         {asset}; last rejection={:?}; {diagnostics}",
-                        self.last_trade_rejection
-                    ));
-                }
-                self.coverage.user_positions_closed += 1;
             }
         }
         self.assert_global_invariants()?;
@@ -2804,8 +2869,13 @@ impl ScenarioRunner {
             }
             Action::Crank { actor, hints } => {
                 let actor = actor as usize % PRIMARY_ACTOR_COUNT;
-                self.execute_crank(actor, hints, matches!(hints, HintMode::Complete))
-                    .map_err(CrankFailure::into_message)
+                if self.env.primary_market_state().1.mode == MarketModeV16::Resolved {
+                    self.execute_terminal_route(actor, TerminalRoute::Crank)
+                        .map(|_| ())
+                } else {
+                    self.execute_crank(actor, hints, matches!(hints, HintMode::Complete))
+                        .map_err(CrankFailure::into_message)
+                }
             }
             Action::Deposit { actor, amount } => self
                 .execute_deposit(
@@ -3063,6 +3133,13 @@ impl ScenarioRunner {
                 }
                 Ok(())
             }
+            Action::ResolveMarket => self.execute_resolve_market(),
+            Action::CloseResolved { actor } => self
+                .execute_terminal_route(actor as usize % PRIMARY_ACTOR_COUNT, TerminalRoute::Close)
+                .map(|_| ()),
+            Action::ClaimResolvedPayoutTopup { actor } => self
+                .execute_terminal_route(actor as usize % PRIMARY_ACTOR_COUNT, TerminalRoute::Claim)
+                .map(|_| ()),
             Action::CrossMarketSubstitution { actor } => self.execute_account_substitution(
                 actor as usize % USER_COUNT,
                 SubstitutionKind::ForeignTradePortfolio,
@@ -3134,6 +3211,364 @@ impl ScenarioRunner {
                 Ok(())
             }
         }
+    }
+
+    fn execute_resolve_market(&mut self) -> Result<(), String> {
+        self.coverage.terminal_resolve_attempts += 1;
+        let before = self.snapshot();
+        match self.env.resolve_market() {
+            Ok(success) => {
+                self.coverage.terminal_resolves += 1;
+                self.coverage.observe_success(None, &success);
+                self.assert_portfolio_frame(&before, &[])?;
+                self.assert_no_token_side_effects(&before)?;
+                if before.backing_domain_ledger != self.env.backing_domain_ledger_data()
+                    || before.matcher_contexts != self.env.all_matcher_context_data()
+                    || before.economic_account_lamports != self.env.all_economic_account_lamports()
+                {
+                    return Err(
+                        "ResolveMarket mutated a backing ledger, matcher context, or lamports"
+                            .into(),
+                    );
+                }
+                if self.env.primary_market_state().1.mode != MarketModeV16::Resolved {
+                    return Err("successful ResolveMarket did not enter Resolved mode".into());
+                }
+            }
+            Err(_) => self.assert_snapshot_unchanged(&before)?,
+        }
+        Ok(())
+    }
+
+    fn execute_terminal_route(
+        &mut self,
+        actor: usize,
+        route: TerminalRoute,
+    ) -> Result<TerminalRouteResult, String> {
+        match route {
+            TerminalRoute::Crank => self.coverage.resolved_crank_attempts += 1,
+            TerminalRoute::Close => self.coverage.resolved_close_attempts += 1,
+            TerminalRoute::Claim => self.coverage.resolved_claim_attempts += 1,
+        }
+        let account_before = self.env.primary_portfolio(actor);
+        let receipt_before = account_before
+            .resolved_payout_receipt
+            .try_to_runtime()
+            .map_err(|error| format!("actor {actor} {route:?} pre-receipt decode: {error:?}"))?;
+        let (_, group_before) = self.env.primary_market_state();
+        let before = self.snapshot();
+        let destination = self.env.actors[actor].destination_token;
+        let destination_before = u128::from(self.env.token_amount(destination));
+        let spl_vault_before = u128::from(self.env.token_amount(self.env.vault));
+        let result = match route {
+            TerminalRoute::Crank => {
+                self.env
+                    .crank_resolved_primary_signed(actor, self.env.current_slot(), Vec::new())
+            }
+            TerminalRoute::Close => self.env.close_resolved_primary_signed(actor),
+            TerminalRoute::Claim => self.env.claim_resolved_payout_topup_primary(actor),
+        };
+        let Ok(success) = result else {
+            self.assert_snapshot_unchanged(&before)?;
+            return Ok(TerminalRouteResult {
+                landed: false,
+                mutated: false,
+                payout: 0,
+            });
+        };
+
+        match route {
+            TerminalRoute::Crank => self.coverage.resolved_crank_successes += 1,
+            TerminalRoute::Close => self.coverage.resolved_close_successes += 1,
+            TerminalRoute::Claim => self.coverage.resolved_claim_successes += 1,
+        }
+        self.coverage.observe_success(None, &success);
+        self.assert_portfolio_frame(&before, &[actor])?;
+        self.assert_token_frame(&before, &[destination, self.env.vault])?;
+        if before.backing_domain_ledger != self.env.backing_domain_ledger_data()
+            || before.matcher_contexts != self.env.all_matcher_context_data()
+            || before.economic_account_lamports != self.env.all_economic_account_lamports()
+        {
+            return Err(format!(
+                "actor {actor} {route:?} mutated a backing ledger, matcher context, or lamports"
+            ));
+        }
+
+        let (_, group_after) = self.env.primary_market_state();
+        let account_after = self.env.primary_portfolio(actor);
+        let receipt_after = account_after
+            .resolved_payout_receipt
+            .try_to_runtime()
+            .map_err(|error| format!("actor {actor} {route:?} post-receipt decode: {error:?}"))?;
+        let destination_after = u128::from(self.env.token_amount(destination));
+        let spl_vault_after = u128::from(self.env.token_amount(self.env.vault));
+        let payout = destination_after
+            .checked_sub(destination_before)
+            .ok_or_else(|| format!("actor {actor} {route:?} decreased its destination"))?;
+        let spl_vault_debit = spl_vault_before
+            .checked_sub(spl_vault_after)
+            .ok_or_else(|| format!("actor {actor} {route:?} increased the SPL vault"))?;
+        let engine_vault_debit = group_before
+            .vault
+            .checked_sub(group_after.vault)
+            .ok_or_else(|| format!("actor {actor} {route:?} increased the engine vault"))?;
+        if payout != spl_vault_debit || payout != engine_vault_debit {
+            return Err(format!(
+                "actor {actor} {route:?} payout mismatch: destination={payout}, SPL debit={spl_vault_debit}, engine debit={engine_vault_debit}"
+            ));
+        }
+        self.coverage.resolved_payout_atoms = self
+            .coverage
+            .resolved_payout_atoms
+            .checked_add(payout)
+            .ok_or("terminal payout coverage overflow")?;
+        self.assert_receipt_transition(actor, route, receipt_before, receipt_after, &group_after)?;
+        self.reconcile_terminal_account_transition(
+            actor,
+            &account_before,
+            &account_after,
+            &group_before,
+            &group_after,
+            route,
+        )?;
+
+        let after = self.snapshot();
+        let mutated = after != before;
+        if mutated {
+            match route {
+                TerminalRoute::Crank => self.coverage.resolved_crank_mutations += 1,
+                TerminalRoute::Close => self.coverage.resolved_close_mutations += 1,
+                TerminalRoute::Claim => self.coverage.resolved_claim_mutations += 1,
+            }
+        }
+        Ok(TerminalRouteResult {
+            landed: true,
+            mutated,
+            payout,
+        })
+    }
+
+    fn assert_receipt_transition(
+        &self,
+        actor: usize,
+        route: TerminalRoute,
+        before: percolator::ResolvedPayoutReceiptV16,
+        after: percolator::ResolvedPayoutReceiptV16,
+        group_after: &MarketGroupV16,
+    ) -> Result<(), String> {
+        if after.present {
+            let exact_num = after
+                .terminal_positive_claim_face
+                .checked_mul(BOUND_SCALE)
+                .ok_or("terminal receipt face overflow")?;
+            if exact_num > after.prior_bound_contribution_num
+                || after.paid_effective > after.terminal_positive_claim_face
+                || after.finalized != (after.paid_effective == after.terminal_positive_claim_face)
+            {
+                return Err(format!(
+                    "actor {actor} {route:?} produced an invalid receipt: {after:?}"
+                ));
+            }
+            if before.present
+                && (after.prior_bound_contribution_num != before.prior_bound_contribution_num
+                    || after.live_released_face_at_receipt != before.live_released_face_at_receipt
+                    || after.terminal_positive_claim_face != before.terminal_positive_claim_face
+                    || after.paid_effective < before.paid_effective)
+            {
+                return Err(format!(
+                    "actor {actor} {route:?} rewrote or rolled back its receipt: {before:?} -> {after:?}"
+                ));
+            }
+        } else if before.present {
+            let ledger = group_after.resolved_payout_ledger;
+            let claimable = reference_mul_div_floor(
+                before.terminal_positive_claim_face,
+                ledger.current_payout_rate_num,
+                ledger.current_payout_rate_den,
+            )?
+            .checked_sub(before.paid_effective)
+            .ok_or("terminal receipt paid amount exceeds current entitlement")?;
+            if !before.finalized
+                && (ledger.terminal_claim_bound_unreceipted_num != 0 || claimable != 0)
+            {
+                return Err(format!(
+                    "actor {actor} {route:?} cleared a still-claimable receipt: {before:?}; ledger={ledger:?}"
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn reconcile_terminal_account_transition(
+        &mut self,
+        actor: usize,
+        account_before: &PortfolioAccountV16,
+        account_after: &PortfolioAccountV16,
+        group_before: &MarketGroupV16,
+        group_after: &MarketGroupV16,
+        route: TerminalRoute,
+    ) -> Result<(), String> {
+        let observed_before = observed_positions(account_before)?;
+        if observed_before != self.positions[actor] {
+            return Err(format!(
+                "actor {actor} {route:?} pre-state diverged from position ghost: observed={observed_before:?}, ghost={:?}",
+                self.positions[actor]
+            ));
+        }
+        let observed_after = observed_positions(account_after)?;
+        for asset in 0..ASSET_COUNT {
+            let delta = observed_after[asset]
+                .checked_sub(observed_before[asset])
+                .ok_or("terminal position delta overflow")?;
+            if delta != 0 {
+                self.protocol_positions[asset] = self.protocol_positions[asset]
+                    .checked_sub(delta)
+                    .ok_or("terminal protocol-position attribution overflow")?;
+                self.coverage.user_positions_closed +=
+                    u64::from(observed_after[asset] == 0 && observed_before[asset] != 0);
+            }
+            self.positions[actor][asset] = observed_after[asset];
+        }
+
+        for asset in 0..ASSET_COUNT {
+            let before_leg = Self::account_leg_for_asset(account_before, asset)?;
+            let after_leg = Self::account_leg_for_asset(account_after, asset)?;
+            for (side, side_index) in [(SideV16::Long, 0usize), (SideV16::Short, 1usize)] {
+                let before_oi = match side {
+                    SideV16::Long => group_before.assets[asset].oi_eff_long_q,
+                    SideV16::Short => group_before.assets[asset].oi_eff_short_q,
+                };
+                let after_oi = match side {
+                    SideV16::Long => group_after.assets[asset].oi_eff_long_q,
+                    SideV16::Short => group_after.assets[asset].oi_eff_short_q,
+                };
+                let removed_leg = before_leg.filter(|leg| leg.side == side && after_leg.is_none());
+                if after_oi > before_oi {
+                    return Err(format!(
+                        "actor {actor} {route:?} increased {:?} OI for asset {asset}: {before_oi}->{after_oi}",
+                        side
+                    ));
+                }
+                let deployed_debit = before_oi - after_oi;
+                if let Some(leg) = removed_leg {
+                    let prior_reset =
+                        Self::leg_oi_was_removed_by_reset(group_before, asset, leg, true);
+                    let expected_debit = if prior_reset {
+                        0
+                    } else {
+                        leg.basis_pos_q.unsigned_abs()
+                    };
+                    if deployed_debit != expected_debit {
+                        return Err(format!(
+                            "actor {actor} {route:?} {side:?} asset {asset} OI debit {deployed_debit} != removed current leg {expected_debit}"
+                        ));
+                    }
+                } else if deployed_debit != 0 {
+                    return Err(format!(
+                        "actor {actor} {route:?} changed {:?} asset {asset} OI without clearing that side's leg: {before_oi}->{after_oi}",
+                        side
+                    ));
+                }
+                self.expected_effective_oi[asset][side_index] = after_oi;
+            }
+        }
+        self.assert_positions_match()
+    }
+
+    fn portfolio_is_economically_terminal(&self, actor: usize) -> Result<bool, String> {
+        let group = self.env.primary_market_state().1;
+        let account = self.env.primary_portfolio(actor);
+        let receipt = account
+            .resolved_payout_receipt
+            .try_to_runtime()
+            .map_err(|error| format!("actor {actor} terminal receipt decode: {error:?}"))?;
+        let close = account
+            .close_progress
+            .try_to_runtime()
+            .map_err(|error| format!("actor {actor} terminal close decode: {error:?}"))?;
+        Ok(group.mode == MarketModeV16::Resolved
+            && account.capital.get() == 0
+            && account.pnl.get() == 0
+            && account.reserved_pnl.get() == 0
+            && account.fee_credits.get() == 0
+            && account.cancel_deposit_escrow.get() == 0
+            && active_bitmap_is_empty(account.active_bitmap.map(|word| word.get()))
+            && account.stale_state == 0
+            && account.b_stale_state == 0
+            && account.rebalance_lock == 0
+            && account.liquidation_lock == 0
+            && account.last_fee_slot.get() == group.resolved_slot
+            && account.health_cert.valid == 0
+            && account
+                .source_domains
+                .iter()
+                .all(|source| !source.is_occupied())
+            && (!receipt.present || receipt.finalized)
+            && (!close.active || (close.finalized && close.residual_remaining == 0)))
+    }
+
+    fn run_terminal_payout_campaign(&mut self) -> Result<(), String> {
+        if self.env.primary_market_state().1.mode != MarketModeV16::Resolved {
+            return Err("terminal payout campaign requires Resolved mode".into());
+        }
+        let routes = [
+            TerminalRoute::Crank,
+            TerminalRoute::Close,
+            TerminalRoute::Claim,
+        ];
+        for round in 0..self.liveness_limit {
+            let before_round = self.snapshot();
+            let mut all_terminal = true;
+            let mut terminal_routes_callable = true;
+            let mut terminal_routes_quiescent = true;
+            for actor in 0..PRIMARY_ACTOR_COUNT {
+                for route in routes {
+                    let result = self.execute_terminal_route(actor, route)?;
+                    if self.portfolio_is_economically_terminal(actor)? {
+                        let payout_snapshot_captured =
+                            self.env.primary_market_state().1.payout_snapshot_captured;
+                        terminal_routes_callable &= result.landed
+                            || (matches!(route, TerminalRoute::Claim) && !payout_snapshot_captured);
+                        terminal_routes_quiescent &= !result.mutated && result.payout == 0;
+                    }
+                    self.assert_global_invariants()?;
+                }
+                all_terminal &= self.portfolio_is_economically_terminal(actor)?;
+            }
+            let after_round = self.snapshot();
+            if after_round == before_round {
+                if !all_terminal {
+                    let blocked = (0..PRIMARY_ACTOR_COUNT)
+                        .filter(|actor| {
+                            self.portfolio_is_economically_terminal(*actor)
+                                .map(|terminal| !terminal)
+                                .unwrap_or(true)
+                        })
+                        .collect::<Vec<_>>();
+                    return Err(format!(
+                        "terminal public routes reached a fixed point with funded/nonterminal actors {blocked:?} on sweep {round}"
+                    ));
+                }
+                if !terminal_routes_callable {
+                    return Err(format!(
+                        "terminal fixed point on sweep {round} depended on a rejected required crank/close/claim route"
+                    ));
+                }
+                if !terminal_routes_quiescent {
+                    return Err(format!(
+                        "terminal fixed point on sweep {round} contained a mutating or paying route"
+                    ));
+                }
+                return Ok(());
+            }
+            if all_terminal {
+                continue;
+            }
+        }
+        Err(format!(
+            "terminal payout routes did not converge in {} bounded sweeps",
+            self.liveness_limit
+        ))
     }
 
     fn execute_deposit(
@@ -3529,10 +3964,13 @@ impl ScenarioRunner {
         asset: usize,
     ) -> Result<Option<PortfolioLegV16>, String> {
         let mut found = None;
-        for leg in decoded_legs(account)
-            .into_iter()
-            .filter(|leg| leg.active && leg.asset_index as usize == asset)
-        {
+        for (slot, encoded_leg) in account.legs.iter().enumerate() {
+            let leg = encoded_leg.try_to_runtime().map_err(|error| {
+                format!("independent OI model could not decode leg slot {slot}: {error:?}")
+            })?;
+            if !leg.active || leg.asset_index as usize != asset {
+                continue;
+            }
             if found.replace(leg).is_some() {
                 return Err(format!(
                     "independent OI model found duplicate legs for asset {asset}"
@@ -19670,6 +20108,9 @@ fn action_strategy() -> impl Strategy<Value = Action> {
         1 => (any::<u8>(), any::<u8>()).prop_map(|(asset, new_actor)| {
             Action::RotateOracleAuthority { asset, new_actor }
         }),
+        1 => Just(Action::ResolveMarket),
+        2 => any::<u8>().prop_map(|actor| Action::CloseResolved { actor }),
+        2 => any::<u8>().prop_map(|actor| Action::ClaimResolvedPayoutTopup { actor }),
         2 => any::<u8>().prop_map(|actor| Action::CrossMarketSubstitution { actor }),
         2 => (
             any::<u8>(),
@@ -19732,7 +20173,10 @@ fn observed_positions(
     account: &percolator_prog::state::PortfolioAccountV16,
 ) -> Result<[i128; ASSET_COUNT], String> {
     let mut out = [0i128; ASSET_COUNT];
-    for leg in decoded_legs(account) {
+    for (slot, encoded_leg) in account.legs.iter().enumerate() {
+        let leg = encoded_leg.try_to_runtime().map_err(|error| {
+            format!("position oracle could not decode leg slot {slot}: {error:?}")
+        })?;
         if !leg.active {
             continue;
         }
