@@ -3,6 +3,51 @@
 This directory owns the security tests introduced by PR135. The normative statements and required
 verification methods are in [`../../INVARIANTS.md`](../../INVARIANTS.md).
 
+## Current checkpoint
+
+Updated 2026-08-13. PR135 is at wrapper commit `5e88fdf7` and pins engine commit
+`0a23b5f5fc85ddb0223089c66c29cbf1600be62b`. The latest completed tranche adds a 24-world public
+bankruptcy-to-terminal matrix across all four trade routes, three claimant orders, and both
+`CloseResolved`/`ClaimResolvedPayoutTopup` priorities. It independently checks position/OI
+lifecycle, exact SPL and engine-vault payouts, receipt monotonicity, stock/encumbrance censuses,
+rollback on every rejected call, and a genuinely callable terminal fixed point.
+
+Verification at this checkpoint:
+
+| Command/scope | Result | Freshness |
+| --- | ---: | --- |
+| Focused bankruptcy terminal matrix | 24/24 worlds | rerun at `5e88fdf7` |
+| `cargo test --test v16_program_stateful_fuzz` | 132/132 | rerun at `5e88fdf7` |
+| Special-method registry and invariant diff checks | pass | rerun at `5e88fdf7` |
+| `cargo test --test v16_program_fuzz_regressions` | 83/83 | last full run on the same program and engine pin, before the test-only terminal-matrix commit |
+| `cargo test --test v16_cu` | 720/720 | last full run on the same program and engine pin, before the test-only terminal-matrix commit |
+| `cargo kani --tests` | 80/80 | last full run on the same program and engine pin, before the test-only terminal-matrix commit |
+
+This is strong public-route evidence, not an exhaustive proof that the program is LoF/DoS-free.
+The dated known-finding benchmark is fully classified, while the `AUDIT-*` rows below remain the
+source of truth for incomplete state dimensions, route cross-products, public counterexamples,
+and formal-composition gaps.
+
+### Immediate next work
+
+1. Add `ResolveMarket`, `CloseResolved`, and `ClaimResolvedPayoutTopup` to the shared generated
+   `Action` alphabet. Make progress and owner-exit campaigns mode-aware so a resolved world is
+   drained through terminal routes instead of producing vacuous live-route rejections.
+2. For every terminal action, derive position and effective-OI deltas from public pre/post account
+   state, check receipt monotonicity and exact destination/SPL-vault/engine-vault deltas, enforce
+   account frames, and require byte/token/lamport equality on rejection.
+3. Extend the bounded reference graph with terminal-resolution, payout-ledger, receipt, and close
+   state. Then add recovery, backing-expiry, and claimant-order dimensions without treating the
+   finite graph as universal equivalence.
+4. Re-run all commands in **Commands** after the shared-model change and update this checkpoint
+   before the next push or merge decision.
+
+Wrapper proofs should remain wrapper-specific: decoding, account-role/authentication boundaries,
+signed scope and ordering, engine-result propagation, custody deltas, and wrapper arithmetic. They
+must not duplicate engine kernel proofs. A qualifying LoF/DoS finding still requires a public SBF
+trace with valid account construction and no out-of-band mutation; a rejected transaction is
+state-preserving because the wrapper returns the error and SVM rollback applies.
+
 ## Ownership rules
 
 1. Every new security test has one primary `INV-NNN` owner and lives in that invariant's file.
