@@ -13,7 +13,12 @@ episode cannot erase that episode's funding telemetry after the account returns 
 the existing persisted sequence lane and does not expand the account layout. `InitPortfolio` now
 also requires rent exemption at the final canonical account size before writing either account,
 closing issue 404's zero-lamport AccountsDb-purge and underfunded-reallocation phantom-registration
-routes. The shared generated public-transition model also
+routes. Switchboard freshness now follows the timestamp selected by
+`CurrentResult.submission_idx`, not the independently advancing account-write timestamp, closing
+issue 405's stale-selected-price revival path. Public configuration rejects stale selected results
+with exact rollback; permissionless crank falls back without refreshing oracle liveness; selected
+indices 0, 7, 31, and 32 plus the inclusive staleness boundary are covered. The shared generated
+public-transition model also
 includes `ResolveMarket`, resolved-mode `PermissionlessCrank`, `CloseResolved`, and
 `ClaimResolvedPayoutTopup`. Progress and owner-exit campaigns switch to terminal settlement after
 resolution instead of treating live-route rejection as progress. Every successful terminal call
@@ -26,18 +31,19 @@ Verification at this checkpoint:
 
 | Command/scope | Result | Freshness |
 | --- | ---: | --- |
-| Focused INV-013 delayed-close and INV-021 transient-rent red/green scenarios | pass | rerun on the 2026-08-18 PR135 production head |
+| Focused INV-020 selected-Switchboard-result red/green, boundary, and crank-liveness scenarios | pass | rerun on the 2026-08-18 PR135 production head |
 | `cargo check --tests` | pass | rerun on the 2026-08-18 PR135 test head |
 | `cargo test --test v16_program_stateful_fuzz` | 134/134 | rerun on the 2026-08-18 PR135 production head |
 | Registry/manifest checks in the INV-079 module | 8/8 | rerun on the 2026-08-18 PR135 production head |
 | `cargo test --test v16_program_fuzz_regressions` | 87/87 | rerun on the 2026-08-18 PR135 production head |
-| `cargo test --test v16_cu` | 723/723 | rerun on the 2026-08-18 PR135 production head |
+| `cargo test --test v16_cu` | 726/726 | rerun on the 2026-08-18 PR135 production head |
 | `cargo kani --tests -j 8 --output-format terse` | 82/82 | rerun on the 2026-08-18 PR135 production head |
 
 This tranche changes the `ClosePortfolio` wire contract, deposit/close wrapper state transitions,
-and the pre-mutation `InitPortfolio` rent gate, with matching test support. The locally rebuilt
+the pre-mutation `InitPortfolio` rent gate, and Switchboard selected-result provenance, with
+matching test support. The locally rebuilt
 production SBF used by the 2026-08-18 LiteSVM run has SHA-256
-`8cecff5c577070a1ff63ea73b5129cab7872ea974fcfa27a8e6c89c6cf3345d9`.
+`a05deb436b9f4e613d41463e15d38a4270276f2ad5408ae84470c74f2752f94f`.
 
 This is strong public-route evidence, not an exhaustive proof that the program is LoF/DoS-free.
 The dated known-finding benchmark is fully classified, while the `AUDIT-*` rows below remain the
@@ -52,9 +58,9 @@ and formal-composition gaps.
    rollback on the current pin (issue 389). INV-013 now closes delayed `ClosePortfolio` consent
    (issue 402) with public red/green, generated ABA, rollback, fresh-close liveness, and Kani binding
    evidence.
-2. Add public-SBF owners for the currently unmodeled selected-oracle-result timestamp,
-   matcher-inventory reconciliation, maintenance-debt seniority, and crank-cadence findings
-   (issues 405 through 409). Each owner must distinguish a live counterexample from a
+2. Add public-SBF owners for the currently unmodeled matcher-inventory reconciliation,
+   maintenance-debt seniority, and crank-cadence findings (issues 406 through 409). Each owner must
+   distinguish a live counterexample from a
    current-pin-safe control and record exact value, rollback, liveness, and CU outcomes.
 3. Extend INV-086's bounded reference node and action alphabet with terminal resolution,
    payout-ledger, receipt, and close-progress state. Prove each normalized edge against the same
@@ -89,7 +95,7 @@ state-preserving because the wrapper returns the error and SVM rollback applies.
 | --- | ---: | --- |
 | `public_sbf/` | 87 | Deterministic public SBF/LiteSVM counterexamples, regressions, decoder corpora, trace-schema checks, and manifest checks, including paired-world conversion-retry extraction, fixed-pin rebalance-retry rejection, and issue-402 delayed-close red/green plus failed-deposit rollback |
 | `stateful/` | 134 | Proptest-generated public routes, now including generated resolution and all three resolved payout rails plus an eleven-family retained-operation retry matrix, including same-incarnation PnL conversion and position-epoch-bound rebalance reduction; a generated close-consent ABA crosses arbitrary nonzero deposits and proves stale rejection plus fresh-close liveness; bounded lifecycle models cover scarce-backing pair/chunk allocation orders, a 16-cell positive-claim boundary partition, all 3! matcher-control/trade landing orders, all 32 open-route/close-route/winner-side realized-PnL attribution worlds, an independent raw-header/portfolio/domain stock census and account/bucket/reservation encumbrance census after every generated action, all eight trade-family/source-side counterparty-lien lifecycles, eight reciprocal cross-asset credit-cycle worlds, 20 user-operation/admission cells, 12 caller-priced boundary-exit cells, the four-state retirement-obligation lattice, a four-state Recovery resource-failure lattice, stale-refresh later-leg observation boundaries in Live and mixed Recovery/Live portfolios, a ten-prefix/two-configuration public crank-rank graph, all 133 public action words through depth two over an eleven-action deployed/reference alphabet, a Recovery crank/owner-exit classifier boundary, and all 5! claimant orders, including generalized active-leg/currentness, source-claim attribution, source-credit-rate, authenticated-expiry, state-indexed liveness witnesses, and reference-model/deployed-transition equivalence |
-| `cu/` | 723 | Full `v16_cu` public-route, metamorphic, rollback, liveness, arithmetic-differential, and max-shape CU inventory, including issue-404 fresh-zero-lamport, post-reallocation rent, exact-rent liveness, and atomic close/reinit boundaries, with no standalone top-level tests |
+| `cu/` | 726 | Full `v16_cu` public-route, metamorphic, rollback, liveness, arithmetic-differential, and max-shape CU inventory, including issue-404 transient-rent boundaries and issue-405 selected-Switchboard-result provenance, staleness boundaries, exact rollback, and crank-liveness preservation, with no standalone top-level tests |
 | `kani/` | 82 | Symbolic wrapper arithmetic, retained-close tuple binding, deposit-sequence invalidation, matcher binding, ordering, strict-decoder, and proof-assumption nonvacuity harnesses; full `cargo kani --tests` remains the required verification command |
 
 Most deterministic and stateful LoF adapters still reproduce quarantined vulnerable behavior;
@@ -165,7 +171,7 @@ charter.
 | INV-017 | SVM/CU + Partial M | `cu/inv_017_signer_writable_role_and_account_alias_safety.rs` exhausts all ten direct and all 21 CPI semantic account-pair aliases for single/batch trade, plus all 15 deposit and 21 withdraw account pairs and every required signer/writable downgrade, from nonvacuous public fixtures with exact matcher/market/portfolio/SPL rollback; ledger, helper, reward, close, optional-tail, and remaining aliases remain route-specific rather than pairwise-complete |
 | INV-018 | SVM/CU | `cu/inv_018_quote_mint_vault_token_program_and_authority_integrity.rs` |
 | INV-019 | P + SVM/CU | `kani/inv_019_cpi_invocation_and_return_data_binding.rs`, `cu/inv_019_cpi_invocation_and_return_data_binding.rs` |
-| INV-020 | Independent + Direct + SVM/CU | `public_sbf/inv_020_authenticated_clock_slot_and_oracle_provenance.rs`, `stateful/inv_020_authenticated_clock_slot_and_oracle_provenance.rs`, `cu/inv_020_authenticated_clock_slot_and_oracle_provenance.rs` |
+| INV-020 | Independent + Direct + SVM/CU | `public_sbf/inv_020_authenticated_clock_slot_and_oracle_provenance.rs`, `stateful/inv_020_authenticated_clock_slot_and_oracle_provenance.rs`, and `cu/inv_020_authenticated_clock_slot_and_oracle_provenance.rs`; issue 405 is closed by reading the timestamp at `CurrentResult.submission_idx`, with public stale-selected-result rejection/rollback, valid index boundaries, exact age boundaries, a fresh control, and a crank proof that account-write churn cannot refresh `last_good_oracle_slot` |
 | INV-021 | SVM/CU | `cu/inv_021_account_creation_reallocation_close_rent_and_lamport_safety.rs` publicly reproduces and closes issue 404 without program-state injection: zero-lamport System creation and atomic close/reinit reject with the wrapper rent error and exact rollback, an initially rent-exempt undersized account rejects after underfunded canonical realloc, and exact-final-rent init/close remains live |
 | INV-022 | P + SVM/CU + Prover gap | `kani/inv_022_instruction_decoding_and_schema_upgrade_safety.rs`, `public_sbf/inv_022_instruction_decoding_and_schema_upgrade_safety.rs`, and `cu/inv_022_instruction_decoding_and_schema_upgrade_safety.rs` cover symbolic field preservation, Kani trailing/truncation witnesses, raw public decoder rollback, a deterministic arbitrary-byte corpus, canonical round trips for all 50 tags, curated prior schemas, vector-length edges, exhaustive one-byte unknown/truncated tag rejection, and at least 1,200 deployed-SBF single-bit mutations spanning every tag plus each encoding's first, midpoint, and final payload positions with exact state rollback; the fully symbolic unknown-tag Kani query, generationless hybrid legacy Kani query, asset-lifecycle/base-unit all-fields Kani queries, tag-60 base-unit trailing-byte Kani query, and monolithic all-payload trailing-byte Kani shape remain solver cliffs and are backstopped by exhaustive host/SVM rosters |
 | INV-023 | SVM/CU + Source-bound roster | `cu/inv_023_caller_input_confinement_for_derived_safety_state.rs` and `inv_023_caller_input_roster.tsv` classify every field in all 50 production instruction variants and the three nested public input structs as signed configuration/economics, identity/scope, authenticated time, replay/bounded-work control, discovery-only input, no caller data, or an explicitly ignored legacy field, and bind every row to an executable witness; late malformed crank hints also prove exact rollback and nonvacuous progress. Per-field dynamic boundary mutation, a complete account-input roster, and alternate-entrypoint substitution remain. |
@@ -336,7 +342,7 @@ are machine-checked below so a future README edit cannot silently omit an invari
 | AUDIT-017 | OPEN-T | All four trade routes exhaust ten direct or 21 CPI/matcher core-account pairs, while deposit and withdraw exhaust all 15 and 21 custody pairs; every required signer/writable downgrade starts from a successful public control and hostile cases reject with exact economic, SPL, and matcher rollback. Ledger, helper, reward, close, optional-tail, and remaining instruction schemas still need the same generated all-pairs matrix, with explicit successful controls for intentionally safe aliases. |
 | AUDIT-018 | OPEN-T | SPL custody substitutions are extensive. Token-2022, fee-on-transfer/transfer-hook behavior, primary quote-decimal validation, and one independent actual-SPL-delta versus internal-accounting oracle across every value route remain. |
 | AUDIT-019 | OPEN-T | Matcher return fields, stale data, req_id, tails, and local validation are covered. Add benign unrelated CPI before/after matcher return data, replace the injected matcher-context ABA setup with public close/recreate, and document that oracle paths are account reads rather than CPI. |
-| AUDIT-020 | OPEN-T | Oracle provenance and authenticated clock tests are broad, but stored-slot rewind and expiry `-1/0/+1` are not crossed with every oracle mode and public consumer. No wrapper proof or complete clock/observation matrix exists. |
+| AUDIT-020 | OPEN-T | Issue 405's account-write/selected-result timestamp split is closed on both configuration and permissionless-crank routes: freshness and monotonic profile provenance use the selected submission timestamp, malformed selection rejects, exact age boundaries are covered, stale reads cannot refresh liveness, and a current selected result remains live. Stored-slot rewind and expiry `-1/0/+1` are not yet crossed with every oracle mode and public consumer; no whole-parser wrapper proof or complete clock/observation matrix exists. |
 | AUDIT-021 | OPEN-T | Issue 404's two public transient-account roots are closed: zero-lamport System create/init and atomic close/reinit reject before registration, underfunded final-size realloc rejects, exact rent remains live, and every failure rolls back market/account/custody state. Residual claim/lien/recovery classes still need a close/recreate matrix; impossible shrink and caller-selected close-destination cases should be proven N/A from the API. |
 | AUDIT-022 | FRONTIER | Split Kani and exhaustive host/SVM decoder rosters backstop several solver cliffs. A deterministic 4,096-payload host corpus checks totality/canonicality, a canonical corpus locks all 50 tags, curated prior schemas plus vector-length boundaries reject, and a deployed-SBF matrix flips every bit at the tag and three boundary-sensitive payload positions for all schemas while requiring canonical decode-or-reject behavior and exact rollback. Duplicate-field N/A documentation, deeper interior-byte mutation, and per-tag proof decomposition for the remaining solver-cliff payloads remain. |
 | AUDIT-023 | PARTIAL | A production-source-bound roster now owns every scalar/container field in all 50 instruction variants and three nested public input structs, enforces semantic classes, and requires a live evidence function for every row; late malformed crank hints prove exact rollback. Dynamic one-field boundary mutation, a complete account-role roster, and systematic alternate-entrypoint substitution remain. |

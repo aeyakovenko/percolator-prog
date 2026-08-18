@@ -781,6 +781,240 @@ fn v16_program_switchboard_stale_feed_rejected() {
     );
 }
 
+// Issue #405: PullFeed.last_update_timestamp dates the account write, not CurrentResult.value.
+// A successful Switchboard response can advance that account-wide field while retaining an older
+// selected submission. This public ConfigureHybridOracle route must age the timestamp selected by
+// CurrentResult.submission_idx and reject before mutating the market.
+#[test]
+fn v16_program_switchboard_fresh_account_timestamp_cannot_revive_stale_selected_result() {
+    let mut env = V16CuEnv::new();
+    set_test_clock(&mut env, 222, 189);
+    let value: i128 = 100 * 1_000_000_000_000;
+    let feed = Pubkey::new_unique();
+    let mut data = make_switchboard_data(&[0xAB; 32], value, 1, 100, 3, 1, 1);
+    data[2216..2224].copy_from_slice(&189i64.to_le_bytes());
+    data[2361] = 7;
+    data[2952..2960].copy_from_slice(&189i64.to_le_bytes());
+    data[3008..3016].copy_from_slice(&100i64.to_le_bytes());
+    assert_eq!(
+        i64::from_le_bytes(data[3008..3016].try_into().unwrap()),
+        100,
+        "the selected submission remains 89 seconds old"
+    );
+    env.svm
+        .set_account(
+            feed,
+            Account {
+                lamports: 1_000_000_000,
+                data,
+                owner: oracle_v16::SWITCHBOARD_ON_DEMAND_MAINNET_PROGRAM_ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    let before = env.svm.get_account(&env.market).unwrap().data;
+
+    let rejected = env.try_configure_hybrid_asset_with_conf_filter_cu(
+        0,
+        1,
+        0,
+        [feed.to_bytes(), [0; 32], [0; 32]],
+        &[feed],
+        222,
+        189,
+        0,
+        0,
+        3,
+        100,
+    );
+    let err = rejected.expect_err(
+        "a fresh account write timestamp must not revive a stale selected Switchboard result",
+    );
+    assert!(
+        err.contains("Custom(27)"),
+        "stale selected result must reject as OracleStale, got: {err}"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap().data,
+        before,
+        "selected-result freshness rejection must roll back the complete market"
+    );
+
+    let malformed_feed = Pubkey::new_unique();
+    let mut malformed = make_switchboard_data(&[0xAB; 32], value, 1, 189, 3, 1, 222);
+    malformed[2361] = 32;
+    env.svm
+        .set_account(
+            malformed_feed,
+            Account {
+                lamports: 1_000_000_000,
+                data: malformed,
+                owner: oracle_v16::SWITCHBOARD_ON_DEMAND_MAINNET_PROGRAM_ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    env.svm.expire_blockhash();
+    let malformed_rejection = env
+        .try_configure_hybrid_asset_with_conf_filter_cu(
+            0,
+            1,
+            0,
+            [malformed_feed.to_bytes(), [0; 32], [0; 32]],
+            &[malformed_feed],
+            222,
+            189,
+            0,
+            0,
+            3,
+            100,
+        )
+        .expect_err("an out-of-range selected submission index must reject");
+    assert!(
+        malformed_rejection.contains("Custom(26)"),
+        "invalid selected index must reject as OracleInvalid, got: {malformed_rejection}"
+    );
+    assert_eq!(env.svm.get_account(&env.market).unwrap().data, before);
+
+    let fresh_feed = Pubkey::new_unique();
+    let mut fresh_data = make_switchboard_data(&[0xAB; 32], value, 1, 189, 3, 1, 222);
+    fresh_data[2361] = 31;
+    fresh_data[3200..3208].copy_from_slice(&189i64.to_le_bytes());
+    env.svm
+        .set_account(
+            fresh_feed,
+            Account {
+                lamports: 1_000_000_000,
+                data: fresh_data,
+                owner: oracle_v16::SWITCHBOARD_ON_DEMAND_MAINNET_PROGRAM_ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    env.svm.expire_blockhash();
+    env.try_configure_hybrid_asset_with_conf_filter_cu(
+        0,
+        1,
+        0,
+        [fresh_feed.to_bytes(), [0; 32], [0; 32]],
+        &[fresh_feed],
+        222,
+        189,
+        0,
+        0,
+        3,
+        100,
+    )
+    .expect("a genuinely current selected Switchboard result remains usable");
+}
+
+#[test]
+fn v16_program_switchboard_selected_timestamp_staleness_boundary_is_inclusive() {
+    let configure = |selected_publish_time: i64| {
+        let mut env = V16CuEnv::new();
+        set_test_clock(&mut env, 222, 189);
+        let feed = Pubkey::new_unique();
+        let mut data = make_switchboard_data(
+            &[0xAB; 32],
+            100 * 1_000_000_000_000,
+            1,
+            selected_publish_time,
+            3,
+            1,
+            222,
+        );
+        data[2216..2224].copy_from_slice(&189i64.to_le_bytes());
+        env.svm
+            .set_account(
+                feed,
+                Account {
+                    lamports: 1_000_000_000,
+                    data,
+                    owner: oracle_v16::SWITCHBOARD_ON_DEMAND_MAINNET_PROGRAM_ID,
+                    executable: false,
+                    rent_epoch: 0,
+                },
+            )
+            .unwrap();
+        env.try_configure_hybrid_asset_with_conf_filter_cu(
+            0,
+            1,
+            0,
+            [feed.to_bytes(), [0; 32], [0; 32]],
+            &[feed],
+            222,
+            189,
+            0,
+            0,
+            3,
+            100,
+        )
+    };
+
+    configure(129).expect("age exactly equal to max_staleness_secs must remain valid");
+    let stale = configure(128).expect_err("max_staleness_secs + 1 must reject");
+    assert!(
+        stale.contains("Custom(27)"),
+        "one second outside the selected-result freshness bound must be OracleStale: {stale}"
+    );
+}
+
+#[test]
+fn v16_program_switchboard_stale_selected_result_cannot_refresh_crank_liveness() {
+    let mut env = V16CuEnv::new();
+    set_test_clock(&mut env, 1, 100);
+    let feed = env.set_switchboard_price(100 * 1_000_000_000_000, 1, 100);
+    env.try_configure_hybrid_asset_with_conf_filter_cu(
+        0,
+        1,
+        0,
+        [feed.to_bytes(), [0; 32], [0; 32]],
+        &[feed],
+        1,
+        100,
+        0,
+        0,
+        3,
+        100,
+    )
+    .expect("configure a genuinely current selected result");
+    assert_eq!(env.market_state().0.last_good_oracle_slot, 1);
+
+    // Model the production-observed Switchboard transition: only the account write timestamp
+    // advances. The selected value, result slot, submission index, and selected timestamp remain
+    // unchanged. A permissionless crank may use Hybrid fallback, but must not certify this as a new
+    // good oracle observation or postpone stale-oracle recovery.
+    let mut account = env.svm.get_account(&feed).unwrap();
+    account.data[2216..2224].copy_from_slice(&189i64.to_le_bytes());
+    env.svm.set_account(feed, account).unwrap();
+    let keeper = Keypair::new();
+    let portfolio = env.create_portfolio(&keeper);
+    set_test_clock(&mut env, 222, 189);
+    let cu = env.crank_with_oracle_tail(
+        portfolio,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 222,
+            observations: crank_observations(0),
+        },
+        &[feed],
+    );
+    assert_cu_within(
+        "Switchboard stale selected-result crank",
+        cu,
+        CRANK_CU_LIMIT,
+    );
+    let (cfg, _) = env.market_state();
+    assert_eq!(
+        cfg.last_good_oracle_slot, 1,
+        "account timestamp churn must not refresh selected-result liveness"
+    );
+    assert_eq!(cfg.oracle_target_publish_time, 100);
+    assert_eq!(cfg.oracle_leg_publish_times[0], 100);
+}
+
 // A wide-variance feed must not install an uncertain mark, and the rejection must roll back the market.
 #[test]
 fn v16_program_switchboard_wide_std_dev_rejected_without_mutation() {

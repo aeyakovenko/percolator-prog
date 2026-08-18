@@ -4121,7 +4121,10 @@ pub mod oracle_v16 {
     const SB_OFF_RESULT_VALUE: usize = 8 + 2_256;
     const SB_OFF_RESULT_STD_DEV: usize = 8 + 2_272;
     const SB_OFF_RESULT_NUM_SAMPLES: usize = 8 + 2_352;
+    const SB_OFF_RESULT_SUBMISSION_IDX: usize = 8 + 2_353;
     const SB_OFF_RESULT_SLOT: usize = 8 + 2_360;
+    const SB_OFF_SUBMISSION_TIMESTAMPS: usize = 8 + 2_944;
+    const SB_SUBMISSION_CAP: usize = 32;
     const CHAINLINK_TRANSMISSIONS_DISCRIMINATOR: [u8; 8] = [96, 179, 69, 66, 128, 129, 73, 117];
     const CHAINLINK_HEADER_SIZE: usize = 192;
     const CHAINLINK_FEED_MIN_LEN: usize = 8 + CHAINLINK_HEADER_SIZE + 48;
@@ -4347,23 +4350,33 @@ pub mod oracle_v16 {
             .try_into()
             .unwrap();
         let min_sample_size = data[SB_OFF_MIN_SAMPLE_SIZE];
-        let publish_time = read_i64_le(&data, SB_OFF_LAST_UPDATE_TIMESTAMP)?;
+        let account_update_time = read_i64_le(&data, SB_OFF_LAST_UPDATE_TIMESTAMP)?;
         let value = read_i128_le(&data, SB_OFF_RESULT_VALUE)?;
         let std_dev = read_i128_le(&data, SB_OFF_RESULT_STD_DEV)?;
         let num_samples = data[SB_OFF_RESULT_NUM_SAMPLES];
+        let submission_idx = data[SB_OFF_RESULT_SUBMISSION_IDX] as usize;
         let result_slot = read_u64_le(&data, SB_OFF_RESULT_SLOT)?;
         if feed_hash == [0u8; 32]
             || min_sample_size == 0
             || num_samples < min_sample_size
+            || submission_idx >= SB_SUBMISSION_CAP
             || result_slot == 0
-            || publish_time <= 0
+            || account_update_time <= 0
             || value <= 0
             || std_dev < 0
         {
             return Err(PercolatorError::OracleInvalid.into());
         }
+        // PullFeed.last_update_timestamp dates the account write. It can advance while the
+        // aggregate CurrentResult remains unchanged, so it cannot establish price freshness.
+        // submission_idx identifies the submission carrying CurrentResult.value; age that exact
+        // observation instead and retain it as the monotonic provenance tracked by the profile.
+        let publish_time = read_i64_le(
+            &data,
+            SB_OFF_SUBMISSION_TIMESTAMPS + submission_idx * core::mem::size_of::<i64>(),
+        )?;
         let age = now_unix_ts.saturating_sub(publish_time);
-        if age < 0 || age as u64 > max_staleness_secs {
+        if publish_time <= 0 || age < 0 || age as u64 > max_staleness_secs {
             return Err(PercolatorError::OracleStale.into());
         }
         let value_u = value as u128;

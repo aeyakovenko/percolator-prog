@@ -599,7 +599,9 @@ fn make_switchboard_data(
     data[2264..2280].copy_from_slice(&value.to_le_bytes()); // SB_OFF_RESULT_VALUE = 8 + 2256
     data[2280..2296].copy_from_slice(&std_dev.to_le_bytes()); // SB_OFF_RESULT_STD_DEV = 8 + 2272
     data[2360] = num_samples; // SB_OFF_RESULT_NUM_SAMPLES = 8 + 2352
+    data[2361] = 0; // SB_OFF_RESULT_SUBMISSION_IDX = 8 + 2353
     data[2368..2376].copy_from_slice(&result_slot.to_le_bytes()); // SB_OFF_RESULT_SLOT = 8 + 2360
+    data[2952..2960].copy_from_slice(&publish_time.to_le_bytes()); // selected submission timestamp
     data
 }
 
