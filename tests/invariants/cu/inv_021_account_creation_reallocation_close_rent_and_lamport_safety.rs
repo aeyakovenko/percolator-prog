@@ -3,10 +3,203 @@
 //! These tests exercise the public InitPortfolio and ClosePortfolio routes with real
 //! LiteSVM accounts. The invariant is that successful realloc/close/reuse transitions preserve
 //! market accounting and route rent only through the market slab, while rejected owner,
-//! reinit, foreign-account, and alias paths roll back every program byte, lamport, and
-//! SPL-token effect exactly.
+//! reinit, foreign-account, alias, and non-rent-exempt paths roll back every program byte,
+//! lamport, and SPL-token effect exactly. The issue-404 regression creates the hostile account
+//! through the System Program in the same transaction; no program-owned state is injected.
 
 use super::*;
+
+fn inv021_init_portfolio_ix(env: &V16CuEnv, owner: Pubkey, portfolio: Pubkey) -> Instruction {
+    Instruction {
+        program_id: env.program_id,
+        accounts: vec![
+            AccountMeta::new(owner, true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio, false),
+        ],
+        data: ProgInstruction::InitPortfolio.encode(),
+    }
+}
+
+#[test]
+fn v16_program_issue404_zero_lamport_system_create_cannot_leave_phantom_portfolio() {
+    let mut env = V16CuEnv::new();
+    let ghost = Keypair::new();
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    let count_before = env.market_state().1.materialized_portfolio_count;
+    let create = system_instruction::create_account(
+        &env.payer.pubkey(),
+        &ghost.pubkey(),
+        0,
+        env.portfolio_account_len as u64,
+        &env.program_id,
+    );
+    let init = inv021_init_portfolio_ix(&env, env.payer.pubkey(), ghost.pubkey());
+
+    env.svm.expire_blockhash();
+    let rejected = send_raw_ixs(
+        &mut env.svm,
+        &env.payer,
+        vec![heap_ix(), cu_ix(), create, init],
+        &[&ghost],
+    );
+    assert!(
+        rejected
+            .as_ref()
+            .is_err_and(|error| error.contains("Custom(31)")),
+        "zero-lamport System CreateAccount + InitPortfolio must reject before registration"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before,
+        "rejected transient init must roll back the market registration exactly"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        vault_before,
+        "rejected transient init cannot affect custody"
+    );
+    assert_eq!(
+        env.market_state().1.materialized_portfolio_count,
+        count_before
+    );
+    assert!(
+        env.svm.get_account(&ghost.pubkey()).is_none(),
+        "the failed transaction must roll back the System Program creation"
+    );
+}
+
+#[test]
+fn v16_program_issue404_final_size_rent_boundary_rejects_then_remains_live() {
+    let mut env = V16CuEnv::new();
+    let rent = env.svm.get_sysvar::<solana_sdk::rent::Rent>();
+    let small_len = env.portfolio_account_len / 3;
+    let required_len = env.portfolio_account_len;
+    let small_rent = rent.minimum_balance(small_len);
+    let required_rent = rent.minimum_balance(required_len);
+    assert!(
+        small_rent < required_rent,
+        "fixture must become underfunded only after canonical reallocation"
+    );
+
+    let underfunded = Keypair::new();
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let create_underfunded = system_instruction::create_account(
+        &env.payer.pubkey(),
+        &underfunded.pubkey(),
+        small_rent,
+        small_len as u64,
+        &env.program_id,
+    );
+    let init_underfunded = inv021_init_portfolio_ix(&env, env.payer.pubkey(), underfunded.pubkey());
+    env.svm.expire_blockhash();
+    let rejected = send_raw_ixs(
+        &mut env.svm,
+        &env.payer,
+        vec![heap_ix(), cu_ix(), create_underfunded, init_underfunded],
+        &[&underfunded],
+    );
+    assert!(
+        rejected
+            .as_ref()
+            .is_err_and(|error| error.contains("Custom(31)")),
+        "rent-exempt-at-old-size account must reject after underfunded canonical realloc: {rejected:?}"
+    );
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+    assert!(env.svm.get_account(&underfunded.pubkey()).is_none());
+
+    let funded = Keypair::new();
+    let create_funded = system_instruction::create_account(
+        &env.payer.pubkey(),
+        &funded.pubkey(),
+        required_rent,
+        required_len as u64,
+        &env.program_id,
+    );
+    let init_funded = inv021_init_portfolio_ix(&env, env.payer.pubkey(), funded.pubkey());
+    env.svm.expire_blockhash();
+    let init_cu = send_raw_ixs(
+        &mut env.svm,
+        &env.payer,
+        vec![heap_ix(), cu_ix(), create_funded, init_funded],
+        &[&funded],
+    )
+    .expect("exact-final-rent account remains initializable");
+    assert_cu_within(
+        "INV-021 exact-rent InitPortfolio",
+        init_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    let funded_account = env.svm.get_account(&funded.pubkey()).unwrap();
+    assert_eq!(funded_account.lamports, required_rent);
+    assert!(rent.is_exempt(funded_account.lamports, funded_account.data.len()));
+    assert_eq!(env.market_state().1.materialized_portfolio_count, 1);
+
+    env.svm.expire_blockhash();
+    let close_cu = env
+        .send(
+            env.close_portfolio_ix(funded.pubkey()),
+            vec![
+                AccountMeta::new(env.payer.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(funded.pubkey(), false),
+            ],
+            &[],
+        )
+        .expect("exact-rent empty portfolio remains closeable");
+    assert_cu_within(
+        "INV-021 exact-rent ClosePortfolio",
+        close_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    assert_eq!(env.market_state().1.materialized_portfolio_count, 0);
+}
+
+#[test]
+fn v16_program_issue404_atomic_close_reinit_rolls_back_without_phantom_count() {
+    let mut env = V16CuEnv::new();
+    let owner = Keypair::new();
+    let portfolio = env.create_portfolio(&owner);
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let portfolio_before = env.svm.get_account(&portfolio).unwrap();
+    assert_eq!(env.market_state().1.materialized_portfolio_count, 1);
+
+    let close = Instruction {
+        program_id: env.program_id,
+        accounts: vec![
+            AccountMeta::new(owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio, false),
+        ],
+        data: env.close_portfolio_ix(portfolio).encode(),
+    };
+    let reinit = inv021_init_portfolio_ix(&env, owner.pubkey(), portfolio);
+    env.svm.expire_blockhash();
+    let rejected = send_raw_ixs(
+        &mut env.svm,
+        &env.payer,
+        vec![heap_ix(), cu_ix(), close, reinit],
+        &[&owner],
+    );
+    assert!(
+        rejected
+            .as_ref()
+            .is_err_and(|error| error.contains("Custom(31)")),
+        "atomic close/reinit must reject at the zero-lamport reinit: {rejected:?}"
+    );
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+    assert_eq!(env.svm.get_account(&portfolio).unwrap(), portfolio_before);
+    assert_eq!(env.market_state().1.materialized_portfolio_count, 1);
+
+    let close_cu = env.close_portfolio_with_cu(&owner, portfolio);
+    assert_cu_within(
+        "INV-021 post-rollback ClosePortfolio",
+        close_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    assert_eq!(env.market_state().1.materialized_portfolio_count, 0);
+}
 
 #[test]
 fn v16_program_undersized_init_grows_account_then_close_sweeps_rent_exactly() {

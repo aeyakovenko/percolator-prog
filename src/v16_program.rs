@@ -27,7 +27,7 @@ use solana_program::{
     program_error::ProgramError,
     program_pack::Pack,
     pubkey::Pubkey,
-    sysvar::Sysvar,
+    sysvar::{rent::Rent, Sysvar},
 };
 
 declare_id!("Perco1ator111111111111111111111111111111111");
@@ -140,6 +140,7 @@ pub mod error {
         OracleConfTooWide,
         InvalidOracleKey,
         AssetGenerationMismatch,
+        RentExemptRequired,
     }
 
     impl From<PercolatorError> for ProgramError {
@@ -6551,6 +6552,9 @@ pub mod processor {
             state::portfolio_account_len_for_market_slots(max_market_slots)?;
         if portfolio_ai.data_len() < required_portfolio_len {
             portfolio_ai.realloc(required_portfolio_len, true)?;
+        }
+        if !Rent::get()?.is_exempt(portfolio_ai.lamports(), required_portfolio_len) {
+            return Err(PercolatorError::RentExemptRequired.into());
         }
         let cfg_after = {
             let mut market_data = market_ai.try_borrow_mut_data()?;
