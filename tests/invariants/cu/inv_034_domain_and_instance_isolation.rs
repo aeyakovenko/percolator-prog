@@ -2899,12 +2899,16 @@ fn v16_attack_cross_market_portfolio_cannot_drain_foreign_vault() {
     let market_b_before_close = env.svm.get_account(&market_b).unwrap();
     env.svm.expire_blockhash();
     let pa_close_portfolio_id = env.portfolio_id(pa);
+    let pa_close_sequence = env.portfolio_matcher_sequence(pa);
+    let pa_close_position_epoch = env.portfolio_position_epoch(pa);
     let close_foreign = send_tx(
         &mut env.svm,
         env.program_id,
         &env.payer,
         ProgInstruction::ClosePortfolio {
             portfolio_id: pa_close_portfolio_id,
+            expected_sequence: pa_close_sequence,
+            position_epoch: pa_close_position_epoch,
         },
         vec![
             AccountMeta::new(attacker.pubkey(), true),

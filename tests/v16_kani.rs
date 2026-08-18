@@ -15,6 +15,9 @@ mod inv_004_position_episode_binding;
 #[path = "invariants/kani/inv_010_out_of_order_safety.rs"]
 mod inv_010_out_of_order_safety;
 
+#[path = "invariants/kani/inv_013_destructive_consent_scope.rs"]
+mod inv_013_destructive_consent_scope;
+
 #[path = "invariants/kani/inv_014_delayed_policy_and_policy_epoch_safety.rs"]
 mod inv_014_delayed_policy_and_policy_epoch_safety;
 

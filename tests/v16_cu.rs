@@ -1616,6 +1616,8 @@ impl V16CuEnv {
     fn close_portfolio_ix(&self, portfolio: Pubkey) -> ProgInstruction {
         ProgInstruction::ClosePortfolio {
             portfolio_id: self.portfolio_id(portfolio),
+            expected_sequence: self.portfolio_matcher_sequence(portfolio),
+            position_epoch: self.portfolio_position_epoch(portfolio),
         }
     }
 

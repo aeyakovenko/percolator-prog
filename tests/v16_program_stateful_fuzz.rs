@@ -118,6 +118,9 @@ mod inv_008_intent_uniqueness_and_bounded_replay;
 #[path = "invariants/stateful/inv_010_out_of_order_safety.rs"]
 mod inv_010_out_of_order_safety;
 
+#[path = "invariants/stateful/inv_013_destructive_consent_scope.rs"]
+mod inv_013_destructive_consent_scope;
+
 #[path = "invariants/stateful/inv_014_delayed_policy_and_policy_epoch_safety.rs"]
 mod inv_014_delayed_policy_and_policy_epoch_safety;
 

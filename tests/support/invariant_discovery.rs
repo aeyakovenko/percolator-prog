@@ -2653,6 +2653,8 @@ fn discover_one_market_incarnation_replay(
             .map_err(|error| format!("configure old-market shutdown policy: {error}"))?;
     }
     let old_market_id = env.primary_market_state().1.assets[0].market_id;
+    let old_matcher_sequence = (kind == MarketIntentKind::MatcherEnable)
+        .then(|| env.primary_portfolio_matcher_sequence(SUBJECT));
     let retained = retained_market_intent(&mut env, kind);
 
     publicly_recreate_market(&mut env, config, REINIT_SLOT)?;
@@ -2667,11 +2669,21 @@ fn discover_one_market_incarnation_replay(
             .map_err(|error| format!("initialize replacement portfolio: {error}"))?;
     }
     if kind == MarketIntentKind::MatcherEnable {
-        // Market recreation resets both portfolio IDs and matcher sequences. Advance the
-        // replacement through a legitimate owner mutation so an old generation's expected
-        // sequence collides again; sequence binding alone is not market-incarnation binding.
-        env.set_matcher_config(SUBJECT, 0)
-            .map_err(|error| format!("align replacement matcher sequence: {error}"))?;
+        // Market recreation resets both portfolio IDs and retained-action sequences. Advance
+        // the replacement through legitimate owner mutations until the old generation's
+        // expected sequence collides again; sequence binding alone is not market-incarnation
+        // binding. The dynamic target keeps this probe valid as more owner operations consume
+        // the shared sequence.
+        let target = old_matcher_sequence.expect("matcher target captured above");
+        while env.primary_portfolio_matcher_sequence(SUBJECT) < target {
+            env.set_matcher_config(SUBJECT, 0)
+                .map_err(|error| format!("align replacement matcher sequence: {error}"))?;
+        }
+        if env.primary_portfolio_matcher_sequence(SUBJECT) != target {
+            return Err(format!(
+                "replacement matcher sequence overshot retained target {target}"
+            ));
+        }
     }
     if kind == MarketIntentKind::ShutdownAsset {
         env.configure_permissionless_resolve(1_000_000, 1)

@@ -1,11 +1,12 @@
 //! INV-010 - Out-of-order safety.
 //!
-//! Normative obligation: a retained matcher mutation executes only against the exact
-//! portfolio-scoped sequence it observed, and every successful mutation advances that sequence.
+//! Normative obligation: a retained owner-state mutation executes only against the exact
+//! portfolio-scoped sequence it observed, and every successful consuming mutation advances that
+//! sequence. The same persisted lane now also invalidates pre-deposit ClosePortfolio consent.
 //!
 //! Evidence in this file (P): Kani checks the pure sequence transition used by the deployed
-//! `SetMatcherConfig` handler over every pair of `u64` values. Mismatched and exhausted inputs
-//! reject; the sole successful case advances exactly once.
+//! `SetMatcherConfig` and Deposit handlers over every pair of `u64` values. Mismatched and
+//! exhausted inputs reject; the sole successful case advances exactly once.
 //!
 //! Guarantee boundary: this is the wrapper's local sequence contract. INV-010 stateful LiteSVM
 //! coverage proves composition with portfolio identity, owner authorization, exact rollback, and

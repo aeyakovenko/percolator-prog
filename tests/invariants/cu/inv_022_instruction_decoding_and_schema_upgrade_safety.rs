@@ -214,7 +214,11 @@ fn inv_022_representative_public_instructions() -> Vec<ProgInstruction> {
             exec_price: 100,
             fee_bps: 0,
         },
-        ProgInstruction::ClosePortfolio { portfolio_id: 1 },
+        ProgInstruction::ClosePortfolio {
+            portfolio_id: 1,
+            expected_sequence: 2,
+            position_epoch: 3,
+        },
         ProgInstruction::TopUpInsurance {
             market_id: 1,
             amount: 1,

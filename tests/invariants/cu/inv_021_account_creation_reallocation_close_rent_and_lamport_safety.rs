@@ -162,7 +162,11 @@ fn v16_program_uninitialized_close_rejects_exact_rollback() {
 
     env.svm.expire_blockhash();
     let rejected = env.send(
-        ProgInstruction::ClosePortfolio { portfolio_id: 0 },
+        ProgInstruction::ClosePortfolio {
+            portfolio_id: 0,
+            expected_sequence: 0,
+            position_epoch: 0,
+        },
         vec![
             AccountMeta::new(owner.pubkey(), true),
             AccountMeta::new(env.market, false),

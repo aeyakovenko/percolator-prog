@@ -70,6 +70,10 @@ pub mod constants {
     pub const PORTFOLIO_MATCHER_CONTROL_OFF: usize = PORTFOLIO_MATCHER_CONFIG_OFF + 96;
     pub const PORTFOLIO_ID_OFF: usize = PORTFOLIO_MATCHER_CONFIG_OFF + PORTFOLIO_MATCHER_CONFIG_LEN;
     pub const PORTFOLIO_ID_LEN: usize = 8;
+    // Shared retained owner-state sequence. The historical MATCHER name is retained in the
+    // persisted-layout constants because changing the byte lane would break existing accounts.
+    // Matcher controls consume it; deposits advance it so an earlier empty-state close cannot
+    // become valid again after a later funded episode.
     pub const PORTFOLIO_MATCHER_SEQUENCE_OFF: usize = PORTFOLIO_ID_OFF + PORTFOLIO_ID_LEN;
     pub const PORTFOLIO_MATCHER_SEQUENCE_LEN: usize = 8;
     pub const PORTFOLIO_LEGACY_ACCOUNT_LEN: usize = PORTFOLIO_MATCHER_SEQUENCE_OFF;
@@ -961,6 +965,20 @@ pub mod state {
         current
             .checked_add(1)
             .ok_or(PercolatorError::EngineCounterOverflow.into())
+    }
+
+    #[inline]
+    pub fn portfolio_close_binding_matches(
+        current_portfolio_id: u64,
+        current_sequence: u64,
+        current_position_epoch: u64,
+        expected_portfolio_id: u64,
+        expected_sequence: u64,
+        expected_position_epoch: u64,
+    ) -> bool {
+        current_portfolio_id == expected_portfolio_id
+            && current_sequence == expected_sequence
+            && current_position_epoch == expected_position_epoch
     }
 
     #[inline]
@@ -2809,6 +2827,8 @@ pub mod ix {
         },
         ClosePortfolio {
             portfolio_id: u64,
+            expected_sequence: u64,
+            position_epoch: u64,
         },
         TopUpInsurance {
             market_id: u64,
@@ -3132,6 +3152,8 @@ pub mod ix {
                 },
                 8 => Self::ClosePortfolio {
                     portfolio_id: read_u64(&mut rest)?,
+                    expected_sequence: read_u64(&mut rest)?,
+                    position_epoch: read_u64(&mut rest)?,
                 },
                 9 => Self::TopUpInsurance {
                     market_id: read_u64(&mut rest)?,
@@ -3497,9 +3519,15 @@ pub mod ix {
                     out.push(enabled);
                     push_u16(&mut out, trade_fee_cap_bps);
                 }
-                Self::ClosePortfolio { portfolio_id } => {
+                Self::ClosePortfolio {
+                    portfolio_id,
+                    expected_sequence,
+                    position_epoch,
+                } => {
                     out.push(8);
                     push_u64(&mut out, portfolio_id);
+                    push_u64(&mut out, expected_sequence);
+                    push_u64(&mut out, position_epoch);
                 }
                 Self::TopUpInsurance { market_id, amount } => {
                     out.push(9);
@@ -6031,9 +6059,17 @@ pub mod processor {
                 enabled,
                 trade_fee_cap_bps,
             ),
-            Instruction::ClosePortfolio { portfolio_id } => {
-                handle_close_portfolio(program_id, accounts, portfolio_id)
-            }
+            Instruction::ClosePortfolio {
+                portfolio_id,
+                expected_sequence,
+                position_epoch,
+            } => handle_close_portfolio(
+                program_id,
+                accounts,
+                portfolio_id,
+                expected_sequence,
+                position_epoch,
+            ),
             Instruction::TopUpInsurance { market_id, amount } => {
                 handle_top_up_insurance(program_id, accounts, market_id, amount)
             }
@@ -6597,13 +6633,20 @@ pub mod processor {
             reject_permissionless_resolve_matured_live_view(&cfg, &group)?;
             let mut portfolio_data = portfolio_ai.try_borrow_mut_data()?;
             expect_portfolio_id(&portfolio_data, expected_portfolio_id)?;
-            let mut portfolio =
-                state::portfolio_view_mut_for_market_slots(&mut portfolio_data, max_market_slots)?;
-            expect_portfolio_view_account_key(&portfolio, portfolio_ai.key)?;
-            expect_portfolio_view_owner(&portfolio, owner.key)?;
-            group
-                .deposit_not_atomic(&mut portfolio, amount)
-                .map_err(map_v16_error)?;
+            let sequence = state::read_portfolio_matcher_sequence(&portfolio_data)?;
+            state::next_portfolio_matcher_sequence(sequence, sequence)?;
+            {
+                let mut portfolio = state::portfolio_view_mut_for_market_slots(
+                    &mut portfolio_data,
+                    max_market_slots,
+                )?;
+                expect_portfolio_view_account_key(&portfolio, portfolio_ai.key)?;
+                expect_portfolio_view_owner(&portfolio, owner.key)?;
+                group
+                    .deposit_not_atomic(&mut portfolio, amount)
+                    .map_err(map_v16_error)?;
+            }
+            state::advance_portfolio_matcher_sequence(&mut portfolio_data, sequence)?;
         }
         transfer_tokens(token_program, source_token, vault_token, owner, amount_u64)?;
         Ok(())
@@ -8424,6 +8467,8 @@ pub mod processor {
         program_id: &Pubkey,
         accounts: &'a [AccountInfo<'a>],
         expected_portfolio_id: u64,
+        expected_sequence: u64,
+        expected_position_epoch: u64,
     ) -> ProgramResult {
         let closer = account(accounts, 0)?;
         let market_ai = account(accounts, 1)?;
@@ -8440,7 +8485,19 @@ pub mod processor {
             let mut market_data = market_ai.try_borrow_mut_data()?;
             let (cfg, mut group) = state::market_view_mut(&mut market_data)?;
             let mut portfolio_data = portfolio_ai.try_borrow_mut_data()?;
-            expect_portfolio_id(&portfolio_data, expected_portfolio_id)?;
+            let current_portfolio_id = state::read_portfolio_id(&portfolio_data)?;
+            let current_sequence = state::read_portfolio_matcher_sequence(&portfolio_data)?;
+            let current_position_epoch = state::read_portfolio_position_epoch(&portfolio_data)?;
+            if !state::portfolio_close_binding_matches(
+                current_portfolio_id,
+                current_sequence,
+                current_position_epoch,
+                expected_portfolio_id,
+                expected_sequence,
+                expected_position_epoch,
+            ) {
+                return Err(PercolatorError::EngineStale.into());
+            }
             let portfolio =
                 state::portfolio_view_mut_for_market_slots(&mut portfolio_data, max_market_slots)?;
             expect_portfolio_view_account_key(&portfolio, portfolio_ai.key)?;

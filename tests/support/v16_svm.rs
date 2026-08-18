@@ -889,8 +889,14 @@ impl V16Svm {
         let actor = &self.actors[actor_index];
         let owner = copy_keypair(&actor.signer);
         let portfolio_id = self.primary_portfolio_id(actor_index);
+        let expected_sequence = self.primary_portfolio_matcher_sequence(actor_index);
+        let position_epoch = self.primary_portfolio_position_epoch(actor_index);
         self.send_program(
-            ProgInstruction::ClosePortfolio { portfolio_id },
+            ProgInstruction::ClosePortfolio {
+                portfolio_id,
+                expected_sequence,
+                position_epoch,
+            },
             vec![
                 AccountMeta::new(owner.pubkey(), true),
                 AccountMeta::new(self.market, false),
@@ -904,8 +910,14 @@ impl V16Svm {
         let actor = &self.actors[actor_index];
         let owner = copy_keypair(&actor.signer);
         let portfolio_id = self.primary_portfolio_id(actor_index);
+        let expected_sequence = self.primary_portfolio_matcher_sequence(actor_index);
+        let position_epoch = self.primary_portfolio_position_epoch(actor_index);
         self.build_program_transaction(
-            ProgInstruction::ClosePortfolio { portfolio_id },
+            ProgInstruction::ClosePortfolio {
+                portfolio_id,
+                expected_sequence,
+                position_epoch,
+            },
             vec![
                 AccountMeta::new(owner.pubkey(), true),
                 AccountMeta::new(self.market, false),

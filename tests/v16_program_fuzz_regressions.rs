@@ -62,6 +62,9 @@ mod inv_007_no_aba_reuse;
 #[path = "invariants/public_sbf/inv_008_intent_uniqueness_and_bounded_replay.rs"]
 mod inv_008_intent_uniqueness_and_bounded_replay;
 
+#[path = "invariants/public_sbf/inv_013_destructive_consent_scope.rs"]
+mod inv_013_destructive_consent_scope;
+
 #[path = "invariants/public_sbf/inv_014_delayed_policy_and_policy_epoch_safety.rs"]
 mod inv_014_delayed_policy_and_policy_epoch_safety;
 

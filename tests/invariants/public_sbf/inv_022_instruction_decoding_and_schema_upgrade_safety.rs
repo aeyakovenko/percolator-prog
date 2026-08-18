@@ -117,7 +117,11 @@ fn public_instruction_corpus() -> Vec<ProgInstruction> {
             enabled: 1,
             trade_fee_cap_bps: 25,
         },
-        ProgInstruction::ClosePortfolio { portfolio_id: 1 },
+        ProgInstruction::ClosePortfolio {
+            portfolio_id: 1,
+            expected_sequence: 2,
+            position_epoch: 3,
+        },
         ProgInstruction::TopUpInsurance {
             market_id: 1,
             amount: 1,

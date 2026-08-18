@@ -1662,7 +1662,14 @@ fn kani_v16_resolved_recovery_payloads_reject_trailing_byte() {
         extra,
     );
     assert_rejects_trailing_byte(Instruction::ClaimResolvedPayoutTopup, extra);
-    assert_rejects_trailing_byte(Instruction::ClosePortfolio { portfolio_id: 1 }, extra);
+    assert_rejects_trailing_byte(
+        Instruction::ClosePortfolio {
+            portfolio_id: 1,
+            expected_sequence: 2,
+            position_epoch: 3,
+        },
+        extra,
+    );
 }
 
 #[kani::proof]
