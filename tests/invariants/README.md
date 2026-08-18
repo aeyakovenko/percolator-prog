@@ -18,7 +18,14 @@ routes. Switchboard freshness now follows the timestamp selected by
 issue 405's stale-selected-price revival path. Public configuration rejects stale selected results
 with exact rollback; permissionless crank falls back without refreshing oracle liveness; selected
 indices 0, 7, 31, and 32 plus the inclusive staleness boundary are covered. The shared generated
-public-transition model also
+public-transition model also closes issue 406's matcher-inventory desynchronization: every
+successful position mutation outside the configured matcher now advances the position epoch and
+disables that capability while preserving its signed fee cap; a fill through the configured
+matcher advances the epoch but keeps the participating LP enabled. Public partial liquidation,
+force-close/reuse, direct and batch no-CPI, and direct and batch CPI controls prove the distinction,
+including stale-fill rollback and a freshly reauthorized liveness control. Positive route
+generators now reauthorize explicitly after an external position mutation instead of relying on a
+stale fixture capability. The shared generated public-transition model also
 includes `ResolveMarket`, resolved-mode `PermissionlessCrank`, `CloseResolved`, and
 `ClaimResolvedPayoutTopup`. Progress and owner-exit campaigns switch to terminal settlement after
 resolution instead of treating live-route rejection as progress. Every successful terminal call
@@ -32,18 +39,20 @@ Verification at this checkpoint:
 | Command/scope | Result | Freshness |
 | --- | ---: | --- |
 | Focused INV-020 selected-Switchboard-result red/green, boundary, and crank-liveness scenarios | pass | rerun on the 2026-08-18 PR135 production head |
+| Focused INV-012 issue-406 matcher synchronization route matrix | 4/4 | rerun on the 2026-08-18 PR135 production head |
 | `cargo check --tests` | pass | rerun on the 2026-08-18 PR135 test head |
 | `cargo test --test v16_program_stateful_fuzz` | 134/134 | rerun on the 2026-08-18 PR135 production head |
 | Registry/manifest checks in the INV-079 module | 8/8 | rerun on the 2026-08-18 PR135 production head |
 | `cargo test --test v16_program_fuzz_regressions` | 87/87 | rerun on the 2026-08-18 PR135 production head |
-| `cargo test --test v16_cu` | 726/726 | rerun on the 2026-08-18 PR135 production head |
-| `cargo kani --tests -j 8 --output-format terse` | 82/82 | rerun on the 2026-08-18 PR135 production head |
+| `cargo test --test v16_cu` | 730/730 | rerun on the 2026-08-18 PR135 production head |
+| `cargo kani --tests -j 8 --output-format terse` | 83/83 | rerun on the 2026-08-18 PR135 production head |
 
 This tranche changes the `ClosePortfolio` wire contract, deposit/close wrapper state transitions,
-the pre-mutation `InitPortfolio` rent gate, and Switchboard selected-result provenance, with
-matching test support. The locally rebuilt
+the pre-mutation `InitPortfolio` rent gate, Switchboard selected-result provenance, and matcher
+capability synchronization with wrapper-owned position episodes, with matching test support. The
+locally rebuilt
 production SBF used by the 2026-08-18 LiteSVM run has SHA-256
-`a05deb436b9f4e613d41463e15d38a4270276f2ad5408ae84470c74f2752f94f`.
+`a2c2af7118e370a5d42f4c4c26a0069c0dee588427de81136503b5fc303085ee`.
 
 This is strong public-route evidence, not an exhaustive proof that the program is LoF/DoS-free.
 The dated known-finding benchmark is fully classified, while the `AUDIT-*` rows below remain the
@@ -58,8 +67,9 @@ and formal-composition gaps.
    rollback on the current pin (issue 389). INV-013 now closes delayed `ClosePortfolio` consent
    (issue 402) with public red/green, generated ABA, rollback, fresh-close liveness, and Kani binding
    evidence.
-2. Add public-SBF owners for the currently unmodeled matcher-inventory reconciliation,
-   maintenance-debt seniority, and crank-cadence findings (issues 406 through 409). Each owner must
+2. Add public-SBF owners for the currently unmodeled maintenance-debt seniority and crank-cadence
+   findings (issues 407 through 409). Issue 406's matcher-inventory reconciliation is closed by
+   INV-004/INV-012 public route and packed-control proof evidence. Each remaining owner must
    distinguish a live counterexample from a
    current-pin-safe control and record exact value, rollback, liveness, and CU outcomes.
 3. Extend INV-086's bounded reference node and action alphabet with terminal resolution,
@@ -95,8 +105,8 @@ state-preserving because the wrapper returns the error and SVM rollback applies.
 | --- | ---: | --- |
 | `public_sbf/` | 87 | Deterministic public SBF/LiteSVM counterexamples, regressions, decoder corpora, trace-schema checks, and manifest checks, including paired-world conversion-retry extraction, fixed-pin rebalance-retry rejection, and issue-402 delayed-close red/green plus failed-deposit rollback |
 | `stateful/` | 134 | Proptest-generated public routes, now including generated resolution and all three resolved payout rails plus an eleven-family retained-operation retry matrix, including same-incarnation PnL conversion and position-epoch-bound rebalance reduction; a generated close-consent ABA crosses arbitrary nonzero deposits and proves stale rejection plus fresh-close liveness; bounded lifecycle models cover scarce-backing pair/chunk allocation orders, a 16-cell positive-claim boundary partition, all 3! matcher-control/trade landing orders, all 32 open-route/close-route/winner-side realized-PnL attribution worlds, an independent raw-header/portfolio/domain stock census and account/bucket/reservation encumbrance census after every generated action, all eight trade-family/source-side counterparty-lien lifecycles, eight reciprocal cross-asset credit-cycle worlds, 20 user-operation/admission cells, 12 caller-priced boundary-exit cells, the four-state retirement-obligation lattice, a four-state Recovery resource-failure lattice, stale-refresh later-leg observation boundaries in Live and mixed Recovery/Live portfolios, a ten-prefix/two-configuration public crank-rank graph, all 133 public action words through depth two over an eleven-action deployed/reference alphabet, a Recovery crank/owner-exit classifier boundary, and all 5! claimant orders, including generalized active-leg/currentness, source-claim attribution, source-credit-rate, authenticated-expiry, state-indexed liveness witnesses, and reference-model/deployed-transition equivalence |
-| `cu/` | 726 | Full `v16_cu` public-route, metamorphic, rollback, liveness, arithmetic-differential, and max-shape CU inventory, including issue-404 transient-rent boundaries and issue-405 selected-Switchboard-result provenance, staleness boundaries, exact rollback, and crank-liveness preservation, with no standalone top-level tests |
-| `kani/` | 82 | Symbolic wrapper arithmetic, retained-close tuple binding, deposit-sequence invalidation, matcher binding, ordering, strict-decoder, and proof-assumption nonvacuity harnesses; full `cargo kani --tests` remains the required verification command |
+| `cu/` | 730 | Full `v16_cu` public-route, metamorphic, rollback, liveness, arithmetic-differential, and max-shape CU inventory, including issue-404 transient-rent boundaries, issue-405 selected-Switchboard-result provenance, and issue-406 matcher-inventory synchronization across liquidation, force-close/reuse, and all trade families, with exact rollback and live fresh-consent controls, with no standalone top-level tests |
+| `kani/` | 83 | Symbolic wrapper arithmetic, retained-close tuple binding, deposit-sequence invalidation, matcher binding and synchronization policy, ordering, strict-decoder, and proof-assumption nonvacuity harnesses; full `cargo kani --tests` remains the required verification command |
 
 Most deterministic and stateful LoF adapters still reproduce quarantined vulnerable behavior;
 fixed-pin regressions explicitly require safe rejection or preservation instead. A vulnerable-pin
@@ -155,7 +165,7 @@ charter.
 | INV-001 | Independent + Direct | `public_sbf/inv_001_market_incarnation_binding.rs`, `stateful/inv_001_market_incarnation_binding.rs` |
 | INV-002 | Independent + Direct + SVM/CU | `public_sbf/inv_002_asset_generation_binding.rs`, `stateful/inv_002_asset_generation_binding.rs`, `cu/inv_002_asset_generation_binding.rs` |
 | INV-003 | Independent + Direct + SVM/CU | `public_sbf/inv_003_portfolio_incarnation_binding.rs`, `stateful/inv_003_portfolio_incarnation_binding.rs`, `cu/inv_003_portfolio_incarnation_binding.rs` |
-| INV-004 | Independent + P + SVM/CU | `stateful/inv_004_position_episode_binding.rs`, `kani/inv_004_position_episode_binding.rs`, `cu/inv_004_position_episode_binding.rs` (deterministic retained reduction/recovery-forfeit episode replay witness) |
+| INV-004 | Independent + P + SVM/CU | `stateful/inv_004_position_episode_binding.rs`, `kani/inv_004_position_episode_binding.rs`, `cu/inv_004_position_episode_binding.rs`, and the issue-406 route matrix in `cu/inv_012_capability_and_delegate_scope.rs` cover deterministic retained reduction/recovery-forfeit replay plus exact epoch advance and capability invalidation for out-of-matcher position mutations |
 | INV-005 | Independent + Direct + SVM/CU | `public_sbf/inv_005_authority_incarnation_binding.rs`, `stateful/inv_005_authority_incarnation_binding.rs`, `cu/inv_005_authority_incarnation_binding.rs` |
 | INV-006 | SVM/CU | `public_sbf/inv_006_program_chain_message_type_and_version_binding.rs` (signed program, market, instruction bytes, and recent-blockhash mutation with exact rollback; explicit genesis-domain field remains absent) |
 | INV-007 | Direct + Partial R | `public_sbf/inv_007_no_aba_reuse.rs` (a bounded public close/recreate/replay model exhausts all 11 retained market-scope route classes with compiled signer/meta traces and exact external deltas; every stale route still lands until persistent market generation binding is added, and other closable account classes remain) |
@@ -163,7 +173,7 @@ charter.
 | INV-009 | SVM/CU | `cu/inv_009_partial_fill_and_retry_accounting.rs` |
 | INV-010 | Independent + P + SVM/CU + Partial R | `stateful/inv_010_out_of_order_safety.rs`, `kani/inv_010_out_of_order_safety.rs`, `cu/inv_010_out_of_order_safety.rs` (all 3! landing orders of conflicting same-sequence matcher controls and a retained CPI trade, plus fresh-consent exit witnesses; other retained request domains remain) |
 | INV-011 | SVM/CU + Spec gap | `cu/inv_011_signed_aggregate_economic_bounds.rs` (per-leg CPI signed price bounds and atomic batch rejection are covered; a single aggregate budget field remains absent) |
-| INV-012 | SVM/CU | `cu/inv_012_capability_and_delegate_scope.rs` |
+| INV-012 | P + SVM/CU | `cu/inv_012_capability_and_delegate_scope.rs` and `kani/inv_004_position_episode_binding.rs` cover matcher tuple/delegate authorization and issue 406's external-inventory synchronization boundary: public partial liquidation, force-close/reuse, and no-CPI mutations invalidate, configured CPI fills preserve only the participating LP, the fee cap survives, stale fills roll back exactly, and owner reauthorization restores liveness |
 | INV-013 | P + F + SVM/CU + Cross-owner references | `public_sbf/inv_013_destructive_consent_scope.rs`, `stateful/inv_013_destructive_consent_scope.rs`, `kani/inv_013_destructive_consent_scope.rs`, and `cu/inv_013_destructive_consent_scope.rs` cover delayed close across a later funded/funding episode, arbitrary deposit/withdraw empty-state ABA, failed-deposit rollback, fresh-close liveness, exact close-binding and sequence contracts, and stale reduction rollback; related market/portfolio/position generation matrices live in INV-001, INV-003, and INV-004 |
 | INV-014 | Independent + Direct + P + SVM/CU | `public_sbf/inv_014_delayed_policy_and_policy_epoch_safety.rs`, `stateful/inv_014_delayed_policy_and_policy_epoch_safety.rs`, `cu/inv_014_delayed_policy_and_policy_epoch_safety.rs`, `kani/inv_014_delayed_policy_and_policy_epoch_safety.rs` |
 | INV-015 | SVM/CU | `public_sbf/inv_015_account_ownership_layout_discriminator_and_length_validity.rs` |
@@ -326,7 +336,7 @@ are machine-checked below so a future README edit cannot silently omit an invari
 | AUDIT-001 | OPEN-D | The 11-route public matrix is a live whole-market same-pubkey ABA counterexample, not a safety proof. Add a persistent program-assigned market generation, reject every stale route before mutation, and add explicit cross-market and cross-program controls. |
 | AUDIT-002 | OPEN-T | Fifteen retained asset-control families and all trade routes are covered, but claim/capability families, a deliberately weakened `(market_id, asset_index)` negative encoding, wrapper Kani composition, and full metamorphic replay coverage remain. |
 | AUDIT-003 | OPEN-T | The 11 retained portfolio routes and ID lifecycle are covered; explicit same-owner-return, distinct claim/receipt consent, failed-init ID preservation, and a proof that every portfolio handler consumes `portfolio_id` remain. |
-| AUDIT-004 | OPEN-T | Trade open/close, reduction, and recovery-forfeit episodes are covered. Cross-zero, side reset, conversion, close, claim, recovery conversion, terminal receipt, and resolved-claim episode transitions are missing from the replay matrix. |
+| AUDIT-004 | OPEN-T | Trade open/close, reduction, recovery-forfeit, force-close/reuse, and permissionless-liquidation matcher synchronization are covered. Cross-zero, side reset, conversion, claim, recovery conversion, terminal receipt, and resolved-claim episode transitions are missing from the retained replay matrix. |
 | AUDIT-005 | OPEN-D | Current tests still discover authority `A -> B -> A` revival. Add a monotonic epoch for each authority scope, prove atomic epoch rotation, and flip both `A -> B -> A` and disable/re-enable matrices to rejection. |
 | AUDIT-006 | OPEN-D | Transaction tampering covers program, market, kind, bytes, and blockhash, but no retained-message genesis/chain domain or explicit message-version field exists. Prefix-compatible, downgrade, and cross-cluster replay need a typed intent header and decoder fuzz. |
 | AUDIT-007 | OPEN-D | A bounded public model now exhausts all 11 retained market-request kinds across one same-pubkey close/recreate boundary with zero state injection and exact trace frames, but every stale request still lands. Add a persistent market generation and flip this matrix to exact rejection, then extend it across multiple recreation depths and receipt, delegate, capability, and auxiliary-account classes. |
@@ -334,7 +344,7 @@ are machine-checked below so a future README edit cannot silently omit an invari
 | AUDIT-009 | OPEN-T | One CPI short-fill rejection/retry is covered. Successful partial fills, random partitions, cumulative quantity/fee/slippage/expiry budgets, route switching, and one-minimum-fee-per-intent accounting are absent. |
 | AUDIT-010 | OPEN-T | All 3! landing orders of two same-sequence matcher controls and one retained CPI trade are now exhausted with state-derived consent, exact rollback, and a matcher-independent exit. Add bounded permutations of deposit, withdraw, reduction, authority rotation, policy update, resolve, and claim with signed postcondition checks. |
 | AUDIT-011 | OPEN-D | Per-leg prices and atomic batch rejection exist, but the message has no aggregate fee, quantity, slippage, deadline, final-position, or collateral/PnL-credit budget. Add those fields before split-intent proofs can close. |
-| AUDIT-012 | OPEN-T | Matcher tuple and delegate checks are strong, but capability domain, authority epoch, expiry, allowed assets/operations, limits, and complete generation binding are not one-field-substitution tested or formally composed. |
+| AUDIT-012 | OPEN-T | Matcher tuple/delegate checks and the issue-406 inventory-synchronization boundary are strong: out-of-matcher position changes disable the capability, configured matcher fills preserve only the participating LP, and the packed policy is proven over every control word. Capability domain, authority epoch, expiry, allowed assets/operations, complete generation binding, and whole-route formal composition remain. |
 | AUDIT-013 | OPEN-T | Close consent now binds the exact portfolio ID, shared owner-state sequence, and position epoch; deterministic public funding telemetry, generated deposit/withdraw ABA, failed-deposit rollback, fresh-close liveness, and exact Kani tuple/sequence contracts cover issue 402. Shutdown, resolve, liquidation delegation, recovery conversion, claim, receipt, and every later lifecycle episode still need the same retained-consent matrix. |
 | AUDIT-014 | OPEN-D | Same-incarnation sequence supersession is covered, but market recreation, authority ABA, and backing-provider fee consent remain live gaps. Bind policy consent to all relevant incarnations/epochs, then compare stricter and looser delayed policies metamorphically. |
 | AUDIT-015 | OPEN-T | Owner, short length, magic, kind, and type-confusion cases exist. Version, padding, invalid enum, alignment, maximum length, every account class, and a proof that validation precedes every zero-copy view remain. |

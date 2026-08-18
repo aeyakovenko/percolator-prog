@@ -1025,14 +1025,42 @@ pub mod state {
     }
 
     #[inline]
-    pub fn bump_portfolio_position_epoch(data: &mut [u8]) -> Result<u64, ProgramError> {
+    pub fn next_portfolio_position_control_for_matcher_sync(
+        control: u64,
+        matcher_synchronized: bool,
+    ) -> Result<(u64, u64), ProgramError> {
+        let (next, mut next_control) = next_portfolio_position_control(control)?;
+        if !matcher_synchronized {
+            next_control &= !PortfolioMatcherConfigV16::ENABLED_MASK;
+        }
+        Ok((next, next_control))
+    }
+
+    #[inline]
+    fn bump_portfolio_position_epoch_with_matcher_state(
+        data: &mut [u8],
+        matcher_synchronized: bool,
+    ) -> Result<u64, ProgramError> {
         check_header(data, KIND_PORTFOLIO)?;
         let control = read_u64(data, PORTFOLIO_MATCHER_CONTROL_OFF)?;
-        let (next, next_control) = next_portfolio_position_control(control)?;
+        let (next, next_control) =
+            next_portfolio_position_control_for_matcher_sync(control, matcher_synchronized)?;
         data.get_mut(PORTFOLIO_MATCHER_CONTROL_OFF..PORTFOLIO_MATCHER_CONTROL_OFF + 8)
             .ok_or(PercolatorError::InvalidAccountLen)?
             .copy_from_slice(&next_control.to_le_bytes());
         Ok(next)
+    }
+
+    #[inline]
+    pub fn bump_portfolio_position_epoch(data: &mut [u8]) -> Result<u64, ProgramError> {
+        bump_portfolio_position_epoch_with_matcher_state(data, false)
+    }
+
+    #[inline]
+    pub fn bump_portfolio_position_epoch_after_matcher_fill(
+        data: &mut [u8],
+    ) -> Result<u64, ProgramError> {
+        bump_portfolio_position_epoch_with_matcher_state(data, true)
     }
 
     #[inline]
@@ -6755,6 +6783,7 @@ pub mod processor {
         exec_price: u64,
         fee_bps: u64,
         account_b_backing_fee_cap_bps: Option<u16>,
+        account_b_matcher_synchronized: bool,
         max_market_slots: usize,
     ) -> ProgramResult {
         ensure_portfolio_storage_for_market_slots(account_a_ai, max_market_slots)?;
@@ -6959,7 +6988,11 @@ pub mod processor {
             drop(account_a);
             drop(account_b);
             state::bump_portfolio_position_epoch(&mut account_a_data)?;
-            state::bump_portfolio_position_epoch(&mut account_b_data)?;
+            if account_b_matcher_synchronized {
+                state::bump_portfolio_position_epoch_after_matcher_fill(&mut account_b_data)?;
+            } else {
+                state::bump_portfolio_position_epoch(&mut account_b_data)?;
+            }
         }
         if let Some(cfg) = cfg_after {
             state::write_wrapper_config(&mut market_ai.try_borrow_mut_data()?, &cfg)?;
@@ -7048,6 +7081,7 @@ pub mod processor {
             account_a_portfolio_id,
             account_b_portfolio_id,
             legs,
+            false,
             max_market_slots,
         )
     }
@@ -7063,6 +7097,7 @@ pub mod processor {
         account_a_portfolio_id: u64,
         account_b_portfolio_id: u64,
         legs: &[ix::BatchTradeLeg],
+        account_b_matcher_synchronized: bool,
         max_market_slots: usize,
     ) -> ProgramResult {
         if legs.is_empty() {
@@ -7317,7 +7352,11 @@ pub mod processor {
             drop(account_a);
             drop(account_b);
             state::bump_portfolio_position_epoch(&mut account_a_data)?;
-            state::bump_portfolio_position_epoch(&mut account_b_data)?;
+            if account_b_matcher_synchronized {
+                state::bump_portfolio_position_epoch_after_matcher_fill(&mut account_b_data)?;
+            } else {
+                state::bump_portfolio_position_epoch(&mut account_b_data)?;
+            }
         }
         if let Some(cfg) = cfg_after {
             state::write_wrapper_config(&mut market_ai.try_borrow_mut_data()?, &cfg)?;
@@ -7379,6 +7418,7 @@ pub mod processor {
             exec_price,
             fee_bps,
             None,
+            false,
             max_market_slots,
         )
     }
@@ -7401,6 +7441,23 @@ pub mod processor {
             slot += 1;
         }
         found.ok_or(PercolatorError::EngineInvalidLeg.into())
+    }
+
+    fn portfolio_position_vector_view(
+        portfolio: &percolator::PortfolioV16ViewMut<'_>,
+    ) -> Result<[(u32, i128); percolator::V16_MAX_PORTFOLIO_ASSETS_N], ProgramError> {
+        let mut positions = [(u32::MAX, 0i128); percolator::V16_MAX_PORTFOLIO_ASSETS_N];
+        let mut slot = 0usize;
+        while slot < portfolio.header.legs.len() {
+            let leg = portfolio.header.legs[slot]
+                .try_to_runtime()
+                .map_err(map_v16_error)?;
+            if leg.active {
+                positions[slot] = (leg.asset_index, leg.basis_pos_q);
+            }
+            slot += 1;
+        }
+        Ok(positions)
     }
 
     fn source_credit_has_live_amounts(source: SourceCreditStateV16) -> bool {
@@ -8051,6 +8108,7 @@ pub mod processor {
             // unsigned LP; mark-movement fees are still derived inside the shared trade path.
             cfg_pre.trade_fee_base_bps,
             Some(ret.backing_fee_cap_bps()),
+            true,
             max_market_slots,
         )
     }
@@ -8475,6 +8533,7 @@ pub mod processor {
             account_a_portfolio_id,
             account_b_portfolio_id,
             &exec_legs,
+            true,
             max_market_slots,
         )
     }
@@ -12586,12 +12645,19 @@ pub mod processor {
             }
 
             let mut portfolio_data = portfolio_ai.try_borrow_mut_data()?;
+            let matcher_enabled =
+                state::read_portfolio_matcher_config(&portfolio_data)?.enabled() != 0;
             let mut portfolio =
                 state::portfolio_view_mut_for_market_slots(&mut portfolio_data, max_market_slots)?;
             expect_portfolio_view_account_key(&portfolio, portfolio_ai.key)?;
             let summary = group
                 .build_actionable_summary(&portfolio.as_view())
                 .map_err(map_v16_error)?;
+            let positions_before = if matcher_enabled {
+                Some(portfolio_position_vector_view(&portfolio)?)
+            } else {
+                None
+            };
             // Refresh and liquidation both recertify the complete bounded portfolio. A pending
             // wrapper-side mark/funding segment on any active leg must therefore be observed
             // before either route can certify the account, even when the engine selects another
@@ -12642,6 +12708,13 @@ pub mod processor {
                     )
                 ))
             );
+            let position_changed = if completed_liquidation {
+                true
+            } else if let Some(positions_before) = positions_before {
+                positions_before != portfolio_position_vector_view(&portfolio)?
+            } else {
+                false
+            };
             if matches!(
                 result.as_ref().map(|r| &r.outcome),
                 Some(AutoCrankOutcomeV16::ResolvedClose(_))
@@ -12690,7 +12763,7 @@ pub mod processor {
                 selected_fee_asset,
                 retained_for_domains,
             )?;
-            if completed_liquidation {
+            if position_changed {
                 group.validate_shape().map_err(map_v16_error)?;
                 drop(portfolio);
                 state::bump_portfolio_position_epoch(&mut portfolio_data)?;
@@ -14546,15 +14619,30 @@ pub mod processor {
             let mut matcher = state::read_portfolio_matcher_config(&data).unwrap();
             assert_eq!(
                 matcher.enabled(),
-                1,
-                "an episode bump preserves matcher state"
+                0,
+                "an out-of-matcher position mutation invalidates matcher state"
             );
             assert_eq!(matcher.position_epoch(), 1);
+            assert_eq!(matcher.trade_fee_cap_bps(), 500);
+
+            matcher.set_enabled(1).unwrap();
+            state::write_portfolio_matcher_config(&mut data, &matcher).unwrap();
+            assert_eq!(
+                state::bump_portfolio_position_epoch_after_matcher_fill(&mut data).unwrap(),
+                2
+            );
+            let mut matcher = state::read_portfolio_matcher_config(&data).unwrap();
+            assert_eq!(
+                matcher.enabled(),
+                1,
+                "a fill through the configured matcher keeps its inventory synchronized"
+            );
+            assert_eq!(matcher.position_epoch(), 2);
             assert_eq!(matcher.trade_fee_cap_bps(), 500);
             matcher.set_enabled(0).unwrap();
             matcher.set_trade_fee_cap_bps(0).unwrap();
             state::write_portfolio_matcher_config(&mut data, &matcher).unwrap();
-            assert_eq!(state::read_portfolio_position_epoch(&data).unwrap(), 1);
+            assert_eq!(state::read_portfolio_position_epoch(&data).unwrap(), 2);
             assert_eq!(
                 state::read_portfolio_matcher_config(&data)
                     .unwrap()

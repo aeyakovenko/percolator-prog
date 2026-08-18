@@ -8766,6 +8766,8 @@ pub fn reproduce_bilateral_fee_support(
         .checked_sub(insurance_before)
         .ok_or("PR 369 insurance decreased")?;
 
+    env.ensure_primary_matcher_enabled(close_lp)
+        .map_err(|error| format!("PR 369 refresh close-LP matcher authorization: {error}"))?;
     let close = env
         .trade_cpi(2, close_lp, 0, -BENEFICIARY_Q, 0, 0)
         .map_err(|error| format!("PR 369 close beneficiary through independent LP: {error}"))?;
@@ -17788,6 +17790,10 @@ pub(crate) fn execute_trade_route(
     fee_bps: u64,
 ) -> Result<TxSuccess, String> {
     let market_id = env.primary_market_state().1.assets[asset_index as usize].market_id;
+    if matches!(route, TradeRoute::Cpi | TradeRoute::BatchCpi) {
+        env.ensure_primary_matcher_enabled(maker)
+            .map_err(|error| format!("refresh CPI matcher authorization: {error}"))?;
+    }
     match route {
         TradeRoute::NoCpi => env.trade_no_cpi(taker, maker, asset_index, size_q, price, fee_bps),
         TradeRoute::Cpi => env.trade_cpi(taker, maker, asset_index, size_q, fee_bps, 0),

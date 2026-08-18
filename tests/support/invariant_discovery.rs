@@ -6099,6 +6099,13 @@ fn execute_discovery_trade_route(
     price: u64,
 ) -> Result<(), String> {
     let market_id = env.primary_market_state().1.assets[asset_index as usize].market_id;
+    if matches!(
+        route,
+        DiscoveryTradeRoute::Cpi | DiscoveryTradeRoute::BatchCpi
+    ) {
+        env.ensure_primary_matcher_enabled(maker)
+            .map_err(|error| format!("refresh discovery CPI matcher authorization: {error}"))?;
+    }
     match route {
         DiscoveryTradeRoute::NoCpi => env
             .trade_no_cpi(taker, maker, asset_index, size_q, price, 0)
@@ -6143,19 +6150,26 @@ fn build_retained_discovery_trade(
     asset_index: u16,
     size_q: i128,
     price: u64,
-) -> Transaction {
+) -> Result<Transaction, String> {
+    if matches!(
+        route,
+        DiscoveryTradeRoute::Cpi | DiscoveryTradeRoute::BatchCpi
+    ) {
+        env.ensure_primary_matcher_enabled(maker)
+            .map_err(|error| format!("refresh retained CPI matcher authorization: {error}"))?;
+    }
     match route {
         DiscoveryTradeRoute::NoCpi => {
-            env.build_retained_no_cpi_trade(taker, maker, asset_index, size_q, price)
+            Ok(env.build_retained_no_cpi_trade(taker, maker, asset_index, size_q, price))
         }
         DiscoveryTradeRoute::BatchNoCpi => {
-            env.build_retained_batch_no_cpi_trade(taker, maker, asset_index, size_q, price)
+            Ok(env.build_retained_batch_no_cpi_trade(taker, maker, asset_index, size_q, price))
         }
         DiscoveryTradeRoute::Cpi => {
-            env.build_retained_cpi_trade(taker, maker, asset_index, size_q, 0)
+            Ok(env.build_retained_cpi_trade(taker, maker, asset_index, size_q, 0))
         }
         DiscoveryTradeRoute::BatchCpi => {
-            env.build_retained_batch_cpi_trade(taker, maker, asset_index, size_q, 0)
+            Ok(env.build_retained_batch_cpi_trade(taker, maker, asset_index, size_q, 0))
         }
     }
 }
@@ -6554,7 +6568,7 @@ fn discover_one_pending_mark_inheritance(
     env.top_up_backing_bucket(1, 10_000_000, 100)
         .map_err(|error| format!("{route:?} fund source backing: {error}"))?;
     env.warp_to_slot(2);
-    let retained = build_retained_discovery_trade(&mut env, route, 2, 3, 0, LARGE_Q, MARK);
+    let retained = build_retained_discovery_trade(&mut env, route, 2, 3, 0, LARGE_Q, MARK)?;
 
     let seed_capital_before = env
         .primary_portfolio(0)
@@ -7581,6 +7595,8 @@ fn discover_one_bilateral_mark_fee_violation(
         .checked_sub(insurance_before)
         .ok_or_else(|| "bilateral mark reduced insurance".to_string())?;
 
+    env.ensure_primary_matcher_enabled(close_lp)
+        .map_err(|error| format!("refresh independent LP matcher authorization: {error}"))?;
     env.trade_cpi(2, close_lp, 0, -BENEFICIARY_Q, 0, 0)
         .map_err(|error| format!("close beneficiary through independent LP: {error}"))?;
     let released = env.primary_portfolio(2).pnl.get().max(0) as u128;
@@ -9751,7 +9767,7 @@ pub fn discover_backing_expiry_trade_route_boundary(
         ASSET,
         INCREASE_Q,
         WINNING_MARK,
-    );
+    )?;
     let before_retained = fingerprint(&env);
 
     env.warp_to_slot(authenticated_slot);
@@ -10423,6 +10439,13 @@ fn discover_one_source_lien_reversal_exit(
     let mut rejection_errors = Vec::new();
     let mut exact_rollback = true;
     let trade_market_id = env.primary_market_state().1.assets[ASSET as usize].market_id;
+    if matches!(
+        route,
+        SourceLienReversalExitRoute::TradeCpi | SourceLienReversalExitRoute::BatchCpi
+    ) {
+        env.ensure_primary_matcher_enabled(COUNTERPARTY)
+            .map_err(|error| format!("refresh source-lien exit matcher authorization: {error}"))?;
+    }
     for _ in 0..ATTEMPTS {
         let before = fingerprint(&env);
         let result = match route {

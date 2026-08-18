@@ -1,11 +1,12 @@
 //! INV-004 - Position episode binding.
 //!
-//! Normative obligation: wrapper-owned position episodes advance monotonically without changing
-//! the matcher-enabled bit, LP fee cap, or deployed portfolio account layout.
+//! Normative obligation: wrapper-owned position episodes advance monotonically; configured-matcher
+//! fills preserve approval, out-of-matcher mutations clear it, and both preserve cap/layout.
 //!
 //! Evidence in this file (P): Kani checks the exact packed-control transition used by production
-//! over every `u64` control word. It proves exact increment and matcher/cap preservation whenever
-//! another episode is representable, and fail-closed behavior for invalid caps or exhaustion.
+//! over every `u64` control word. It proves exact increment, policy-prescribed matcher state, cap
+//! preservation whenever another episode is representable, and fail-closed behavior for invalid
+//! caps or exhaustion.
 //!
 //! Guarantee boundary: this is a local wrapper-layout proof. Public-route episode coverage and
 //! exact rollback are exercised independently by the INV-004 stateful LiteSVM matrices.
@@ -80,5 +81,38 @@ fn kani_v16_matcher_fee_cap_update_is_bounded_and_preserves_other_control_fields
         assert_eq!(config.trade_fee_cap_bps(), trade_fee_cap_bps);
         assert_eq!(config.position_epoch(), epoch);
         assert_eq!(config.enabled(), matcher_enabled);
+    }
+}
+
+#[kani::proof]
+fn kani_v16_position_epoch_sync_policy_is_total_and_exact() {
+    let control: u64 = kani::any();
+    let matcher_synchronized: bool = kani::any();
+    let config = state::PortfolioMatcherConfigV16 {
+        control,
+        ..state::PortfolioMatcherConfigV16::default()
+    };
+    let epoch = config.position_epoch();
+    let result =
+        state::next_portfolio_position_control_for_matcher_sync(control, matcher_synchronized);
+
+    if config.trade_fee_cap_bps() > 10_000
+        || epoch == state::PortfolioMatcherConfigV16::position_epoch_max()
+    {
+        assert!(result.is_err());
+    } else {
+        let (next_epoch, next_control) = result.unwrap();
+        let next_config = state::PortfolioMatcherConfigV16 {
+            control: next_control,
+            ..state::PortfolioMatcherConfigV16::default()
+        };
+        assert_eq!(next_epoch, epoch + 1);
+        assert_eq!(next_config.position_epoch(), next_epoch);
+        assert_eq!(next_config.trade_fee_cap_bps(), config.trade_fee_cap_bps());
+        if matcher_synchronized {
+            assert_eq!(next_config.enabled(), config.enabled());
+        } else {
+            assert_eq!(next_config.enabled(), 0);
+        }
     }
 }

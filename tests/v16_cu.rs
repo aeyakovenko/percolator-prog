@@ -5077,12 +5077,6 @@ fn run_source_credit_watermark_trade_case(
     let counterparty_account = env.create_portfolio(&counterparty_owner);
     env.deposit(&cross_owner, cross_account, DEPOSIT);
     env.deposit(&counterparty_owner, counterparty_account, 1_000);
-    let matcher_accounts = matcher_program.map(|program| {
-        let (ctx, delegate, _) =
-            env.init_matcher_context_authorized(program, &counterparty_owner, counterparty_account);
-        (program, ctx, delegate)
-    });
-
     let (winning_domain, asset0_mark, asset1_mark, side_sign) = match direction {
         SourceCreditWatermarkDirection::PositiveSize => (1usize, 105, 95, 1i128),
         SourceCreditWatermarkDirection::NegativeSize => (0usize, 95, 105, -1i128),
@@ -5165,6 +5159,13 @@ fn run_source_credit_watermark_trade_case(
         exact_watermark_group.source_credit[winning_domain].positive_claim_bound_num,
         "{path:?} {direction:?} setup must leave no surplus source-credit backing"
     );
+    // The setup positions were created outside the matcher. Authorize the matcher only after those
+    // mutations so this route permutation starts from current, explicit LP consent.
+    let matcher_accounts = matcher_program.map(|program| {
+        let (ctx, delegate, _) =
+            env.init_matcher_context_authorized(program, &counterparty_owner, counterparty_account);
+        (program, ctx, delegate)
+    });
 
     let before_market = env.svm.get_account(&env.market).unwrap();
     let before_cross = env.svm.get_account(&cross_account).unwrap();

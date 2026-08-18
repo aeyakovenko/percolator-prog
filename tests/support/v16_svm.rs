@@ -980,6 +980,20 @@ impl V16Svm {
         state::read_portfolio_matcher_sequence(&data).expect("decode primary matcher sequence")
     }
 
+    pub fn ensure_primary_matcher_enabled(
+        &mut self,
+        actor_index: usize,
+    ) -> Result<Option<TxSuccess>, String> {
+        let data = self.primary_portfolio_data(actor_index);
+        let config = state::read_portfolio_matcher_config(&data)
+            .map_err(|error| format!("decode primary matcher config: {error:?}"))?;
+        if config.enabled() == 1 {
+            return Ok(None);
+        }
+        self.set_matcher_config_with_trade_fee_cap(actor_index, 1, config.trade_fee_cap_bps())
+            .map(Some)
+    }
+
     pub fn resolve_market(&mut self) -> Result<TxSuccess, String> {
         let admin = copy_keypair(&self.admin);
         let asset_generation_frontier = self.primary_market_state().1.next_market_id;
