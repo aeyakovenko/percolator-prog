@@ -157,6 +157,8 @@ pub enum RetryIntentKind {
     TradeCpi,
     BatchTradeNoCpi,
     BatchTradeCpi,
+    ConvertReleasedPnl,
+    RebalanceReduce,
     InsuranceTopUp,
     BackingTopUp,
     AssetActivation,
@@ -501,13 +503,15 @@ impl SupersededIntentKind {
 }
 
 impl RetryIntentKind {
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 11] = [
         Self::Deposit,
         Self::Withdraw,
         Self::TradeNoCpi,
         Self::TradeCpi,
         Self::BatchTradeNoCpi,
         Self::BatchTradeCpi,
+        Self::ConvertReleasedPnl,
+        Self::RebalanceReduce,
         Self::InsuranceTopUp,
         Self::BackingTopUp,
         Self::AssetActivation,
@@ -521,9 +525,11 @@ impl RetryIntentKind {
             Self::TradeCpi => 3,
             Self::BatchTradeNoCpi => 4,
             Self::BatchTradeCpi => 5,
-            Self::InsuranceTopUp => 6,
-            Self::BackingTopUp => 7,
-            Self::AssetActivation => 8,
+            Self::ConvertReleasedPnl => 6,
+            Self::RebalanceReduce => 7,
+            Self::InsuranceTopUp => 8,
+            Self::BackingTopUp => 9,
+            Self::AssetActivation => 10,
         }
     }
 }
@@ -3781,6 +3787,12 @@ fn retained_retry_pair(env: &mut V16Svm, kind: RetryIntentKind) -> (Transaction,
         RetryIntentKind::BatchTradeCpi => {
             env.build_retained_batch_cpi_trade(SUBJECT, COUNTERPARTY, ASSET, size_q, 0)
         }
+        RetryIntentKind::ConvertReleasedPnl => {
+            env.build_retained_convert_released_pnl(SUBJECT, u128::MAX)
+        }
+        RetryIntentKind::RebalanceReduce => {
+            env.build_retained_rebalance_reduce(SUBJECT, ASSET, POS_SCALE as u128)
+        }
         RetryIntentKind::InsuranceTopUp => {
             env.build_retained_insurance_domain_top_up_for_actor(AUTHORITY, 0, AMOUNT)
         }
@@ -3813,6 +3825,13 @@ fn discover_one_intent_retry(
     let supply_before = env.token_supply_observed();
 
     match kind {
+        RetryIntentKind::ConvertReleasedPnl => {
+            create_released_pnl(&mut env, 0, 1, 1_000_000, 1_000_000, 2, INITIAL_PRICE)?;
+        }
+        RetryIntentKind::RebalanceReduce => {
+            env.trade_no_cpi(0, 1, 0, 2 * POS_SCALE as i128, INITIAL_PRICE, 0)
+                .map_err(|error| format!("prepare retained rebalance reduction: {error}"))?;
+        }
         RetryIntentKind::InsuranceTopUp => {
             env.update_asset_authority_from_admin(
                 0,
@@ -3845,11 +3864,17 @@ fn discover_one_intent_retry(
         .land_retained(intended)
         .map_err(|error| format!("{kind:?} intended execution rejected: {error}"))?;
 
-    if kind == RetryIntentKind::AssetActivation {
-        env.warp_to_slot(4);
-        env.retire_asset(1, 4)
-            .map_err(|error| format!("retire first activated generation: {error}"))?;
-        env.warp_to_slot(5);
+    match kind {
+        RetryIntentKind::ConvertReleasedPnl => {
+            create_released_pnl(&mut env, 0, 1, 1_000_000, 1_000_000, 3, INITIAL_PRICE + 5)?;
+        }
+        RetryIntentKind::AssetActivation => {
+            env.warp_to_slot(4);
+            env.retire_asset(1, 4)
+                .map_err(|error| format!("retire first activated generation: {error}"))?;
+            env.warp_to_slot(5);
+        }
+        _ => {}
     }
 
     let before_retry = fingerprint(&env);

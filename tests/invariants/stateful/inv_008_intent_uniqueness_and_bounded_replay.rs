@@ -43,11 +43,22 @@ proptest! {
             .map(|discovery| discovery.kind)
             .collect();
         eprintln!("independent INV-008 discoveries: {violations:?}");
+        let expected_violations: Vec<_> = RetryIntentKind::ALL
+            .into_iter()
+            .filter(|kind| *kind != RetryIntentKind::RebalanceReduce)
+            .collect();
         prop_assert_eq!(
             violations,
-            RetryIntentKind::ALL.to_vec(),
-            "vulnerable-pin exact-once discovery corpus changed"
+            expected_violations,
+            "exact-once discovery/protection corpus changed"
         );
+        let rebalance = discoveries
+            .iter()
+            .find(|discovery| discovery.kind == RetryIntentKind::RebalanceReduce)
+            .expect("rebalance retry discovery");
+        prop_assert!(!rebalance.accepted_retry);
+        prop_assert!(!rebalance.duplicated_economic_effect);
+        prop_assert_eq!(rebalance.retry_compute_units, None);
     }
 }
 
@@ -137,6 +148,17 @@ proptest! {
         prop_assert!(
             result.is_ok(),
             "PR 355 no longer reproduces for seed {:?}: {}",
+            seed,
+            result.unwrap_err()
+        );
+    }
+
+    #[test]
+    fn v16_program_conversion_retry_replay_fuzz(seed in any::<[u8; 32]>()) {
+        let result = reproduce_convert_retry_replay(seed);
+        prop_assert!(
+            result.is_ok(),
+            "conversion retry no longer reproduces for seed {:?}: {}",
             seed,
             result.unwrap_err()
         );

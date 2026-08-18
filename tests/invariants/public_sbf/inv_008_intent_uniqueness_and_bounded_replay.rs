@@ -2,7 +2,7 @@
 //!
 //! Normative obligation: One retained economic intent can execute at most once across routes and retries.
 //!
-//! Evidence in this file (I plus invariant-specific F/M assertions): `v16_program_pr343_trade_retry_variants_extract_value_on_every_route`, `v16_program_pr344_insurance_top_up_retry_extracts_duplicate`, `v16_program_pr362_activation_retry_extracts_duplicate_fee`, `v16_program_pr351_backing_top_up_retry_funds_independent_winner`, `v16_program_pr350_deposit_retry_funds_independent_winner`, `v16_program_pr355_withdrawal_retry_liquidates_fresh_risk`. These tests exercise the deployed public
+//! Evidence in this file (I plus invariant-specific F/M assertions): `v16_program_pr343_trade_retry_variants_extract_value_on_every_route`, `v16_program_pr344_insurance_top_up_retry_extracts_duplicate`, `v16_program_pr362_activation_retry_extracts_duplicate_fee`, `v16_program_pr351_backing_top_up_retry_funds_independent_winner`, `v16_program_pr350_deposit_retry_funds_independent_winner`, `v16_program_pr355_withdrawal_retry_liquidates_fresh_risk`, `v16_program_issue387_conversion_retry_redirects_later_earnings`, `v16_program_issue389_rebalance_retry_rejects_exactly_on_current_pin`. These tests exercise the deployed public
 //! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
 //! rollback, liveness, or compute outcomes appropriate to the invariant.
 //!
@@ -105,4 +105,32 @@ fn v16_program_pr355_withdrawal_retry_liquidates_fresh_risk() {
     assert_eq!(reproduction.cranker_reward, 7_917);
     assert_eq!(reproduction.extracted_reward, 7_917);
     assert!(reproduction.replay_cu < 1_400_000);
+}
+
+#[test]
+fn v16_program_issue387_conversion_retry_redirects_later_earnings() {
+    let reproduction = reproduce_convert_retry_replay([0x87; 32])
+        .unwrap_or_else(|error| panic!("conversion retry no longer reproduces: {error}"));
+    assert_eq!(reproduction.blocker, KnownBlocker::ConvertRetryReplay);
+    assert!(reproduction.released_pnl > 0);
+    assert!(reproduction.victim_loss > 0);
+    assert_eq!(reproduction.victim_loss, reproduction.cranker_extraction);
+    assert!(reproduction.retry_cu < 1_400_000);
+    assert!(reproduction.sync_cu < 1_400_000);
+    assert!(reproduction.max_cu < 1_400_000);
+}
+
+#[test]
+fn v16_program_issue389_rebalance_retry_rejects_exactly_on_current_pin() {
+    let discoveries = discover_intent_retries([0x89; 32])
+        .unwrap_or_else(|error| panic!("rebalance retry probe failed: {error}"));
+    let rebalance = discoveries
+        .iter()
+        .find(|discovery| discovery.kind == RetryIntentKind::RebalanceReduce)
+        .expect("rebalance retry route is in the complete retained-intent matrix");
+
+    assert!(rebalance.first_compute_units > 0);
+    assert!(!rebalance.accepted_retry);
+    assert!(!rebalance.duplicated_economic_effect);
+    assert_eq!(rebalance.retry_compute_units, None);
 }

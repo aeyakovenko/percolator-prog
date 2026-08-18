@@ -130,6 +130,7 @@ pub enum KnownBlocker {
     MatcherGrantPortfolioIncarnationReplay,
     TradePortfolioIncarnationReplay,
     ConvertPortfolioIncarnationReplay,
+    ConvertRetryReplay,
     ForfeitPortfolioIncarnationReplay,
     MatcherGrantMarketGenerationReplay,
     TradeFeeMarketGenerationReplay,
@@ -137,7 +138,7 @@ pub enum KnownBlocker {
 }
 
 impl KnownBlocker {
-    pub const COUNT: usize = 67;
+    pub const COUNT: usize = 68;
 
     pub const fn index(self) -> usize {
         match self {
@@ -204,10 +205,11 @@ impl KnownBlocker {
             Self::MatcherGrantPortfolioIncarnationReplay => 60,
             Self::TradePortfolioIncarnationReplay => 61,
             Self::ConvertPortfolioIncarnationReplay => 62,
-            Self::ForfeitPortfolioIncarnationReplay => 63,
-            Self::MatcherGrantMarketGenerationReplay => 64,
-            Self::TradeFeeMarketGenerationReplay => 65,
-            Self::ForfeitMarketGenerationReplay => 66,
+            Self::ConvertRetryReplay => 63,
+            Self::ForfeitPortfolioIncarnationReplay => 64,
+            Self::MatcherGrantMarketGenerationReplay => 65,
+            Self::TradeFeeMarketGenerationReplay => 66,
+            Self::ForfeitMarketGenerationReplay => 67,
         }
     }
 }
@@ -1010,6 +1012,17 @@ pub struct ConvertPortfolioIncarnationReplayReproduction {
     pub victim_loss: u64,
     pub cranker_extraction: u64,
     pub replay_cu: u64,
+    pub sync_cu: u64,
+    pub max_cu: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ConvertRetryReplayReproduction {
+    pub blocker: KnownBlocker,
+    pub released_pnl: u128,
+    pub victim_loss: u64,
+    pub cranker_extraction: u64,
+    pub retry_cu: u64,
     pub sync_cu: u64,
     pub max_cu: u64,
 }
@@ -13433,6 +13446,218 @@ pub fn reproduce_convert_portfolio_incarnation_replay(
         victim_loss,
         cranker_extraction: replay.cranker_extraction,
         replay_cu: replay.replay_cu,
+        sync_cu: replay.sync_cu,
+        max_cu: replay.max_cu.max(control.max_cu),
+    })
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ConvertRetryWorld {
+    released_pnl: u128,
+    victim_payout: u64,
+    cranker_extraction: u64,
+    retry_cu: u64,
+    sync_cu: u64,
+    max_cu: u64,
+}
+
+fn run_convert_retry_world(seed: [u8; 32], land_retry: bool) -> Result<ConvertRetryWorld, String> {
+    const LOSER_A: usize = 0;
+    const VICTIM: usize = 1;
+    const CRANKER: usize = 2;
+    const LOSER_B: usize = 3;
+    const PRICE_A: u64 = 100;
+    const PRICE_B: u64 = 105;
+    const TARGET_CAPITAL: u128 = 1_000_000;
+
+    let mut env = V16Svm::new(
+        seed,
+        MarketConfig {
+            initial_price: PRICE_A,
+            h_max: 10,
+            min_nonzero_mm_req: 1,
+            min_nonzero_im_req: 2,
+            maintenance_margin_bps: 1_000,
+            initial_margin_bps: 1_000,
+            max_price_move_bps_per_slot: 500,
+            max_accrual_dt_slots: 1,
+            min_funding_lifetime_slots: 1,
+            maintenance_fee_per_slot: 1,
+            actor_deposits: [1, 1, 1, 1, 1],
+            actor_token_balances: [2_000_000, 3_000_000, 10_000, 2_000_000, 10],
+            ..MarketConfig::default()
+        },
+    );
+    let supply_before = env.token_supply_observed();
+    env.update_maintenance_fee_policy(10_000)
+        .map_err(|error| format!("configure conversion-retry cranker reward: {error}"))?;
+    env.top_up_backing_bucket(1, 300, 1_000)
+        .map_err(|error| format!("fund conversion-retry short backing: {error}"))?;
+
+    let released_a = create_released_pnl_for_incarnation(
+        &mut env,
+        VICTIM,
+        LOSER_A,
+        TARGET_CAPITAL - 1,
+        TARGET_CAPITAL - 1,
+        2,
+        PRICE_A,
+        "conversion-retry epoch A",
+    )?;
+    let intended = env.build_retained_convert_released_pnl(VICTIM, u128::MAX);
+    let retry = env.build_retained_convert_released_pnl(VICTIM, u128::MAX);
+    env.land_retained(intended)
+        .map_err(|error| format!("intended conversion rejected: {error}"))?;
+    if env.primary_portfolio(VICTIM).pnl.get() != 0 {
+        return Err("intended conversion left epoch-A released PnL".into());
+    }
+    let epoch_a_capital = env.primary_portfolio(VICTIM).capital.get();
+    env.withdraw_primary(VICTIM, epoch_a_capital)
+        .map_err(|error| format!("withdraw converted epoch-A capital: {error}"))?;
+
+    let victim_destination = env.actors[VICTIM].destination_token;
+    let victim_destination_before = env.token_amount(victim_destination);
+    let released_pnl = create_released_pnl_for_incarnation(
+        &mut env,
+        VICTIM,
+        LOSER_B,
+        TARGET_CAPITAL,
+        TARGET_CAPITAL - 1,
+        3,
+        PRICE_B,
+        "conversion-retry epoch B",
+    )?;
+    if released_pnl != released_a {
+        return Err(format!(
+            "conversion retry epochs differ: first={released_a}, second={released_pnl}"
+        ));
+    }
+    let ordinary_capital = env.primary_portfolio(VICTIM).capital.get();
+    env.withdraw_primary(VICTIM, ordinary_capital)
+        .map_err(|error| format!("withdraw epoch-B ordinary capital: {error}"))?;
+    env.crank(
+        VICTIM,
+        3,
+        vec![CrankObservationHint {
+            asset_index: 0,
+            oracle_accounts: 0,
+        }],
+    )
+    .map_err(|error| format!("settle flat epoch-B portfolio: {error}"))?;
+    if env.primary_portfolio(VICTIM).capital.get() != 0
+        || env.primary_portfolio(VICTIM).pnl.get() != released_pnl as i128
+    {
+        return Err(format!(
+            "epoch-B precondition mismatch: capital={}, pnl={}, expected={released_pnl}",
+            env.primary_portfolio(VICTIM).capital.get(),
+            env.primary_portfolio(VICTIM).pnl.get()
+        ));
+    }
+
+    let mut retry_cu = 0;
+    let mut max_cu = 0;
+    if land_retry {
+        let replay = env
+            .land_retained(retry)
+            .map_err(|error| format!("retained conversion no longer lands: {error}"))?;
+        retry_cu = replay.compute_units;
+        max_cu = max_cu.max(replay.compute_units);
+    }
+
+    env.warp_to_slot(10);
+    let cranker_before = env.primary_portfolio(CRANKER).capital.get();
+    let sync = env
+        .sync_maintenance_fee_with_reward(VICTIM, CRANKER, 10)
+        .map_err(|error| format!("sync conversion-retry maintenance fee: {error}"))?;
+    let sync_cu = sync.compute_units;
+    max_cu = max_cu.max(sync_cu);
+    let cranker_reward = env
+        .primary_portfolio(CRANKER)
+        .capital
+        .get()
+        .checked_sub(cranker_before)
+        .ok_or("conversion-retry cranker capital decreased")?;
+    if !land_retry {
+        if cranker_reward != 0 {
+            return Err(format!(
+                "released-PnL control paid a {cranker_reward}-atom maintenance reward"
+            ));
+        }
+        env.convert_released_pnl(VICTIM, u128::MAX)
+            .map_err(|error| format!("fresh epoch-B conversion: {error}"))?;
+    }
+
+    let victim_capital = env.primary_portfolio(VICTIM).capital.get();
+    let victim_withdrawal = env
+        .withdraw_primary(VICTIM, victim_capital)
+        .map_err(|error| format!("withdraw epoch-B terminal capital: {error}"))?;
+    max_cu = max_cu.max(victim_withdrawal.compute_units);
+    let victim_payout = env
+        .token_amount(victim_destination)
+        .checked_sub(victim_destination_before)
+        .ok_or("conversion-retry victim destination decreased")?;
+
+    let mut cranker_extraction = 0;
+    if cranker_reward > 0 {
+        let cranker_destination = env.actors[CRANKER].destination_token;
+        let cranker_destination_before = env.token_amount(cranker_destination);
+        let withdrawal = env
+            .withdraw_primary(CRANKER, cranker_reward)
+            .map_err(|error| format!("withdraw conversion-retry cranker reward: {error}"))?;
+        max_cu = max_cu.max(withdrawal.compute_units);
+        cranker_extraction = env
+            .token_amount(cranker_destination)
+            .checked_sub(cranker_destination_before)
+            .ok_or("conversion-retry cranker destination decreased")?;
+    }
+    if u128::from(cranker_extraction) != cranker_reward
+        || env.token_supply_observed() != supply_before
+        || max_cu >= TX_CU_LIMIT
+    {
+        return Err(format!(
+            "conversion-retry terminal mismatch: replay={land_retry}, victim={victim_payout}, \
+             reward={cranker_reward}/{cranker_extraction}, max_cu={max_cu}, supply={}/{}",
+            env.token_supply_observed(),
+            supply_before
+        ));
+    }
+    Ok(ConvertRetryWorld {
+        released_pnl,
+        victim_payout,
+        cranker_extraction,
+        retry_cu,
+        sync_cu,
+        max_cu,
+    })
+}
+
+pub fn reproduce_convert_retry_replay(
+    mut seed: [u8; 32],
+) -> Result<ConvertRetryReplayReproduction, String> {
+    seed[0] ^= 0x87;
+    let control = run_convert_retry_world(seed, false)?;
+    let replay = run_convert_retry_world(seed, true)?;
+    let victim_loss = control
+        .victim_payout
+        .checked_sub(replay.victim_payout)
+        .ok_or("conversion retry increased victim payout")?;
+    if control.released_pnl != replay.released_pnl
+        || control.cranker_extraction != 0
+        || replay.cranker_extraction == 0
+        || victim_loss != replay.cranker_extraction
+        || replay.retry_cu == 0
+    {
+        return Err(format!(
+            "conversion-retry paired-world mismatch: control={control:?}, replay={replay:?}, \
+             victim_loss={victim_loss}"
+        ));
+    }
+    Ok(ConvertRetryReplayReproduction {
+        blocker: KnownBlocker::ConvertRetryReplay,
+        released_pnl: replay.released_pnl,
+        victim_loss,
+        cranker_extraction: replay.cranker_extraction,
+        retry_cu: replay.retry_cu,
         sync_cu: replay.sync_cu,
         max_cu: replay.max_cu.max(control.max_cu),
     })
