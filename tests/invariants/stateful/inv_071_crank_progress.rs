@@ -16,6 +16,9 @@
 //! original trade route. Every complete sweep must make progress, every rejected call must roll
 //! back exactly, receipts must be monotonic, and all funded portfolios must dematerialize before
 //! `CloseSlab` empties the real SPL vault. Per-owner payouts are invariant across every order.
+//! A second focused route drives the shared stateful rank oracle through the same public
+//! `AdvanceClose` class and requires the residual itself to be a lexicographically decreasing rank
+//! component; aggregate market lock bits alone are not a sufficient progress measure.
 //!
 //! Guarantee boundary: this is deployed LiteSVM evidence for the four wrapper trade routes and the
 //! uniquely attributable one-asset residual class. The engine's production selector and rank
@@ -26,6 +29,7 @@ use super::*;
 use crate::support::{
     fuzz_model::{
         assert_public_encumbrance_census, assert_public_stock_census, execute_trade_route,
+        run_pending_close_rank_oracle,
     },
     v16_svm::{MarketConfig, V16Svm, PRIMARY_ACTOR_COUNT, TX_CU_LIMIT},
 };
@@ -45,6 +49,14 @@ struct FlatNegativeCrankOutcome {
     expected_payouts: u128,
     max_compute_units: u64,
     trace_steps: usize,
+}
+
+#[test]
+fn v16_program_pending_close_residual_is_part_of_the_public_crank_rank() {
+    let evidence = run_pending_close_rank_oracle()
+        .expect("public AdvanceClose must strictly reduce the stateful liveness rank");
+    assert!(evidence.residual_before > evidence.residual_after);
+    assert!(evidence.coverage.crank_progress > 0, "{evidence:?}");
 }
 
 fn portfolio_is_economically_terminal(env: &V16Svm, actor: usize) -> bool {

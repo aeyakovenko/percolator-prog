@@ -1367,8 +1367,8 @@ pub struct Coverage {
     pub route_success: [u64; 4],
     pub route_reject: [u64; 4],
     pub crank_progress: u64,
-    pub crank_rank_component_seen: [u64; 6],
-    pub crank_rank_component_reduced: [u64; 6],
+    pub crank_rank_component_seen: [u64; 7],
+    pub crank_rank_component_reduced: [u64; 7],
     pub crank_rank_nodes: BTreeSet<u8>,
     pub crank_rank_edges: BTreeSet<(u8, u8)>,
     pub mark_updates: u64,
@@ -1429,8 +1429,8 @@ impl Default for Coverage {
             route_success: [0; 4],
             route_reject: [0; 4],
             crank_progress: 0,
-            crank_rank_component_seen: [0; 6],
-            crank_rank_component_reduced: [0; 6],
+            crank_rank_component_seen: [0; 7],
+            crank_rank_component_reduced: [0; 7],
             crank_rank_nodes: BTreeSet::new(),
             crank_rank_edges: BTreeSet::new(),
             mark_updates: 0,
@@ -1639,6 +1639,7 @@ struct ProgressRank {
     market_mark_lag: u128,
     market_loss_lag: u128,
     market_locks: u128,
+    close_work: u128,
     b_work: u128,
     stale_legs: u128,
     health_work: u128,
@@ -1650,7 +1651,7 @@ impl ProgressRank {
     }
 
     fn account_actionable(self) -> bool {
-        self.b_work != 0 || self.stale_legs != 0 || self.health_work != 0
+        self.close_work != 0 || self.b_work != 0 || self.stale_legs != 0 || self.health_work != 0
     }
 
     fn reduced_from(self, before: Self) -> bool {
@@ -1658,6 +1659,7 @@ impl ProgressRank {
             self.market_mark_lag,
             self.market_loss_lag,
             self.market_locks,
+            self.close_work,
             self.b_work,
             self.stale_legs,
             self.health_work,
@@ -1665,17 +1667,19 @@ impl ProgressRank {
             before.market_mark_lag,
             before.market_loss_lag,
             before.market_locks,
+            before.close_work,
             before.b_work,
             before.stale_legs,
             before.health_work,
         )
     }
 
-    fn components(self) -> [u128; 6] {
+    fn components(self) -> [u128; 7] {
         [
             self.market_mark_lag,
             self.market_loss_lag,
             self.market_locks,
+            self.close_work,
             self.b_work,
             self.stale_legs,
             self.health_work,
@@ -2379,14 +2383,32 @@ impl ScenarioRunner {
     }
 
     fn new_unprefixed(scenario: &Scenario) -> Result<Self, String> {
-        let env = V16Svm::new(scenario.seed, scenario.config.into());
+        Self::new_unprefixed_with_market_config(scenario.seed, scenario.config.into())
+    }
+
+    fn new_unprefixed_with_market_config(
+        seed: [u8; 32],
+        config: MarketConfig,
+    ) -> Result<Self, String> {
+        let liveness_scenario = Scenario {
+            seed,
+            config: SmallMarketConfig {
+                max_price_move_bps_per_slot: config.max_price_move_bps_per_slot,
+                max_accrual_dt_slots: config.max_accrual_dt_slots,
+                max_abs_funding_e9_per_slot: config.max_abs_funding_e9_per_slot,
+                maintenance_fee_per_slot: config.maintenance_fee_per_slot,
+            },
+            actions: Vec::new(),
+        };
+        let liveness_limit = scenario_liveness_limit(&liveness_scenario)?;
+        let env = V16Svm::new(seed, config);
         let loaded_program_hash = env.loaded_program_hash.to_bytes();
         let out = Self {
             env,
             positions: [[0; ASSET_COUNT]; PRIMARY_ACTOR_COUNT],
             protocol_positions: [0; ASSET_COUNT],
             expected_effective_oi: [[0; 2]; ASSET_COUNT],
-            liveness_limit: scenario_liveness_limit(scenario)?,
+            liveness_limit,
             retained: VecDeque::new(),
             last_trade_rejection: None,
             coverage: Coverage {
@@ -5568,6 +5590,15 @@ impl ScenarioRunner {
         // appear actionable.
         let loss_work = reset_pending_work_for_account(&group, &account)?
             .max(u128::from(group.loss_stale_active));
+        let close = account
+            .close_progress
+            .try_to_runtime()
+            .map_err(|error| format!("progress-rank close decode: {error:?}"))?;
+        let close_work = if close.active && !close.finalized {
+            close.residual_remaining
+        } else {
+            0
+        };
         let market_locks = u128::from(group.bankruptcy_hlock_active)
             .checked_add(u128::from(group.threshold_stress_active))
             .and_then(|value| value.checked_add(loss_work))
@@ -5577,6 +5608,10 @@ impl ScenarioRunner {
             market_mark_lag,
             market_loss_lag,
             market_locks,
+            // AdvanceClose is selected ahead of B settlement and account refresh. Its finite rank
+            // is the remaining attributed residual, not any market-level lock bit: booking a
+            // chunk can reduce it while the aggregate lock/count fields remain unchanged.
+            close_work,
             b_work,
             stale_legs,
             health_work,
@@ -6427,6 +6462,106 @@ pub fn run_drain_reduce_retire_route_oracle() -> Result<Coverage, String> {
 pub struct BoundedLivenessGraphEvidence {
     pub scenario_count: usize,
     pub coverage: Coverage,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PendingCloseRankEvidence {
+    pub residual_before: u128,
+    pub residual_after: u128,
+    pub coverage: Coverage,
+}
+
+pub fn run_pending_close_rank_oracle() -> Result<PendingCloseRankEvidence, String> {
+    const WINNER: u8 = 0;
+    const LOSER: usize = 1;
+    const KEEPER: u8 = EXIT_MAKER_INDEX as u8;
+
+    let seed = [0x71; 32];
+    let config = MarketConfig {
+        max_price_move_bps_per_slot: 500,
+        max_accrual_dt_slots: 1,
+        max_abs_funding_e9_per_slot: 0,
+        min_funding_lifetime_slots: 1,
+        maintenance_fee_per_slot: 0,
+        maintenance_margin_bps: 1_000,
+        initial_margin_bps: 1_000,
+        actor_deposits: [1_000_000, 161_600, 1_000_000, 1_000_000, 1],
+        actor_token_balances: [1_000_000, 161_600, 1_000_000, 1_000_000, 1],
+        ..MarketConfig::default()
+    };
+    let mut runner = ScenarioRunner::new_unprefixed_with_market_config(seed, config)?;
+    runner.run_safety_prefix(&[Action::Trade {
+        route: TradeRoute::NoCpi,
+        taker: WINNER,
+        maker: LOSER as u8,
+        asset: 0,
+        units: 3,
+        fee_bps: 0,
+        price_move_bps: 0,
+        prefer_reduce: false,
+    }])?;
+    for _ in 0..20 {
+        runner.run_safety_prefix(&[
+            Action::PushMark {
+                asset: 0,
+                dt: 1,
+                move_bps: 500,
+            },
+            Action::Crank {
+                actor: KEEPER,
+                hints: HintMode::Complete,
+            },
+        ])?;
+    }
+    runner.run_safety_prefix(&[Action::Trade {
+        route: TradeRoute::NoCpi,
+        taker: WINNER,
+        maker: LOSER as u8,
+        asset: 0,
+        units: 1,
+        fee_bps: 0,
+        price_move_bps: 0,
+        prefer_reduce: true,
+    }])?;
+
+    let close_before = runner
+        .env
+        .primary_portfolio(LOSER)
+        .close_progress
+        .try_to_runtime()
+        .map_err(|error| format!("pending-close rank pre-state decode: {error:?}"))?;
+    if !close_before.active || close_before.finalized || close_before.residual_remaining == 0 {
+        return Err(format!(
+            "public route did not create actionable close residual: {close_before:?}"
+        ));
+    }
+    let rank_before = runner.progress_rank(LOSER)?;
+    runner
+        .execute_crank(LOSER, HintMode::Empty, true)
+        .map_err(CrankFailure::into_message)?;
+    let close_after = runner
+        .env
+        .primary_portfolio(LOSER)
+        .close_progress
+        .try_to_runtime()
+        .map_err(|error| format!("pending-close rank post-state decode: {error:?}"))?;
+    let rank_after = runner.progress_rank(LOSER)?;
+    if close_after.residual_remaining >= close_before.residual_remaining
+        || !rank_after.reduced_from(rank_before)
+        || runner.coverage.crank_rank_component_seen[3] == 0
+        || runner.coverage.crank_rank_component_reduced[3] == 0
+    {
+        return Err(format!(
+            "AdvanceClose did not reduce the public close rank: close={close_before:?}->{close_after:?}, rank={rank_before:?}->{rank_after:?}, coverage={:?}",
+            runner.coverage
+        ));
+    }
+    runner.assert_global_invariants()?;
+    Ok(PendingCloseRankEvidence {
+        residual_before: close_before.residual_remaining,
+        residual_after: close_after.residual_remaining,
+        coverage: runner.coverage,
+    })
 }
 
 pub fn run_bounded_public_liveness_graph() -> Result<BoundedLivenessGraphEvidence, String> {
