@@ -3,7 +3,7 @@ use super::v16_svm::{
     TX_CU_LIMIT, USER_COUNT,
 };
 use percolator::{
-    active_bitmap_is_empty, v16_domain_pair_for_asset_index, AssetLifecycleV16,
+    active_bitmap_is_empty, v16_domain_pair_for_asset_index, AssetLifecycleV16, AssetStateV16,
     BackingBucketStatusV16, MarketModeV16, PortfolioLegV16, SideModeV16, SideV16, BOUND_SCALE,
     CREDIT_RATE_SCALE, PORTFOLIO_SOURCE_DOMAIN_CAP, POS_SCALE,
 };
@@ -13,7 +13,7 @@ use percolator_prog::{
         ORACLE_MODE_EWMA_MARK, ORACLE_MODE_MANUAL,
     },
     ix::{BatchTradeCpiLeg, BatchTradeLeg, CrankObservationHint},
-    state::{MarketGroupV16, PortfolioAccountV16},
+    state::{self, MarketGroupV16, PortfolioAccountV16},
 };
 use proptest::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -1278,6 +1278,13 @@ pub enum Action {
         asset: u8,
         dt: u8,
     },
+    DrainOnlyAsset {
+        asset: u8,
+    },
+    RetireAsset {
+        asset: u8,
+        dt: u8,
+    },
     RestartAssetOracle {
         asset: u8,
         dt: u8,
@@ -1367,7 +1374,7 @@ pub struct Coverage {
     pub mark_updates: u64,
     pub oracle_reconfigs: u64,
     pub maintenance_syncs: u64,
-    pub extended_action_attempts: [u64; 14],
+    pub extended_action_attempts: [u64; 16],
     pub matcher_config_updates: u64,
     pub insurance_topups: u64,
     pub backing_topups: u64,
@@ -1383,6 +1390,8 @@ pub struct Coverage {
     pub rebalance_reductions: u64,
     pub resolve_policy_updates: u64,
     pub lifecycle_updates: u64,
+    pub drain_only_updates: u64,
+    pub asset_retirements: u64,
     pub asset_restarts: u64,
     pub authority_updates: u64,
     pub permissionless_resolve_attempts: u64,
@@ -1427,7 +1436,7 @@ impl Default for Coverage {
             mark_updates: 0,
             oracle_reconfigs: 0,
             maintenance_syncs: 0,
-            extended_action_attempts: [0; 14],
+            extended_action_attempts: [0; 16],
             matcher_config_updates: 0,
             insurance_topups: 0,
             backing_topups: 0,
@@ -1443,6 +1452,8 @@ impl Default for Coverage {
             rebalance_reductions: 0,
             resolve_policy_updates: 0,
             lifecycle_updates: 0,
+            drain_only_updates: 0,
+            asset_retirements: 0,
             asset_restarts: 0,
             authority_updates: 0,
             permissionless_resolve_attempts: 0,
@@ -1577,6 +1588,8 @@ impl Coverage {
         self.rebalance_reductions += other.rebalance_reductions;
         self.resolve_policy_updates += other.resolve_policy_updates;
         self.lifecycle_updates += other.lifecycle_updates;
+        self.drain_only_updates += other.drain_only_updates;
+        self.asset_retirements += other.asset_retirements;
         self.asset_restarts += other.asset_restarts;
         self.authority_updates += other.authority_updates;
         self.permissionless_resolve_attempts += other.permissionless_resolve_attempts;
@@ -3254,6 +3267,22 @@ impl ScenarioRunner {
                 }
                 Ok(())
             }
+            Action::DrainOnlyAsset { asset } => {
+                self.coverage.extended_action_attempts[14] += 1;
+                self.execute_drain_only_asset(asset as usize % ASSET_COUNT)
+                    .map(|_| ())
+            }
+            Action::RetireAsset { asset, dt } => {
+                self.coverage.extended_action_attempts[15] += 1;
+                let asset = asset as usize % ASSET_COUNT;
+                let next_slot = self
+                    .env
+                    .current_slot()
+                    .checked_add(u64::from(dt.clamp(1, 4)))
+                    .ok_or("retirement slot overflow")?;
+                self.env.warp_to_slot(next_slot);
+                self.execute_retire_asset(asset, next_slot).map(|_| ())
+            }
             Action::RestartAssetOracle {
                 asset,
                 dt,
@@ -4200,6 +4229,214 @@ impl ScenarioRunner {
                 self.last_trade_rejection = Some(format!(
                     "ForfeitRecoveryLeg owner {actor} asset {asset}: {error}"
                 ));
+                self.assert_snapshot_unchanged(&before)?;
+                Ok(false)
+            }
+        }
+    }
+
+    fn execute_drain_only_asset(&mut self, asset: usize) -> Result<bool, String> {
+        let (config_before, group_before) = self.env.primary_market_state();
+        let asset_before = group_before.assets[asset];
+        let profiles_before: Vec<_> = (0..ASSET_COUNT)
+            .map(|index| self.env.primary_profile(index))
+            .collect();
+        let controls_before: Vec<_> = (0..ASSET_COUNT)
+            .map(|index| self.env.primary_control_sequences(index))
+            .collect();
+        let before = self.snapshot();
+        match self.env.drain_only_asset(asset as u16, 0) {
+            Ok(success) => {
+                self.coverage.observe_success(None, &success);
+                self.assert_portfolio_frame(&before, &[])?;
+                self.assert_no_token_side_effects(&before)?;
+                if before.backing_domain_ledger != self.env.backing_domain_ledger_data()
+                    || before.matcher_contexts != self.env.all_matcher_context_data()
+                    || before.economic_account_lamports != self.env.all_economic_account_lamports()
+                {
+                    return Err(
+                        "DrainOnly transition mutated a wrapper ledger, matcher context, or lamports"
+                            .into(),
+                    );
+                }
+                let (config_after, group_after) = self.env.primary_market_state();
+                let mut expected_group = group_before.clone();
+                match asset_before.lifecycle {
+                    AssetLifecycleV16::Active => {
+                        expected_group.assets[asset].lifecycle = AssetLifecycleV16::DrainOnly;
+                        expected_group.asset_set_epoch = expected_group
+                            .asset_set_epoch
+                            .checked_add(1)
+                            .ok_or("DrainOnly asset-set epoch overflow")?;
+                        expected_group.risk_epoch = expected_group
+                            .risk_epoch
+                            .checked_add(1)
+                            .ok_or("DrainOnly risk epoch overflow")?;
+                        self.coverage.drain_only_updates += 1;
+                    }
+                    AssetLifecycleV16::DrainOnly => {}
+                    lifecycle => {
+                        return Err(format!(
+                            "DrainOnly unexpectedly succeeded from lifecycle {lifecycle:?}"
+                        ));
+                    }
+                }
+                let profiles_after: Vec<_> = (0..ASSET_COUNT)
+                    .map(|index| self.env.primary_profile(index))
+                    .collect();
+                let controls_after: Vec<_> = (0..ASSET_COUNT)
+                    .map(|index| self.env.primary_control_sequences(index))
+                    .collect();
+                if config_after != config_before
+                    || group_after != expected_group
+                    || profiles_after != profiles_before
+                    || controls_after != controls_before
+                {
+                    return Err(format!(
+                        "successful DrainOnly transition exceeded its exact lifecycle/epoch frame: before={asset_before:?}, after={:?}",
+                        group_after.assets[asset]
+                    ));
+                }
+                self.assert_positions_match()?;
+                Ok(true)
+            }
+            Err(_) => {
+                self.assert_snapshot_unchanged(&before)?;
+                Ok(false)
+            }
+        }
+    }
+
+    fn execute_retire_asset(&mut self, asset: usize, now_slot: u64) -> Result<bool, String> {
+        let (config_before, group_before) = self.env.primary_market_state();
+        let asset_before = group_before.assets[asset];
+        let profiles_before: Vec<_> = (0..ASSET_COUNT)
+            .map(|index| self.env.primary_profile(index))
+            .collect();
+        let controls_before: Vec<_> = (0..ASSET_COUNT)
+            .map(|index| self.env.primary_control_sequences(index))
+            .collect();
+        let before = self.snapshot();
+        match self.env.retire_asset(asset as u16, now_slot) {
+            Ok(success) => {
+                self.coverage.observe_success(None, &success);
+                self.assert_portfolio_frame(&before, &[])?;
+                self.assert_no_token_side_effects(&before)?;
+                if before.backing_domain_ledger != self.env.backing_domain_ledger_data()
+                    || before.matcher_contexts != self.env.all_matcher_context_data()
+                    || before.economic_account_lamports != self.env.all_economic_account_lamports()
+                {
+                    return Err(
+                        "asset retirement mutated a wrapper ledger, matcher context, or lamports"
+                            .into(),
+                    );
+                }
+                let (config_after, group_after) = self.env.primary_market_state();
+                let asset_after = group_after.assets[asset];
+                let transitioned = asset_before.lifecycle != AssetLifecycleV16::Retired;
+                let expected_free_slots = if asset_before.lifecycle == AssetLifecycleV16::Retired {
+                    config_before.free_market_slot_count
+                } else {
+                    config_before
+                        .free_market_slot_count
+                        .checked_add(1)
+                        .ok_or("asset retirement free-slot count overflow")?
+                };
+                let expected_retired_slot = if asset_before.lifecycle == AssetLifecycleV16::Retired
+                {
+                    asset_before.retired_slot
+                } else {
+                    now_slot
+                };
+                let mut expected_config = config_before;
+                expected_config.free_market_slot_count = expected_free_slots;
+                if transitioned {
+                    let policy_count = (profiles_before[asset].backing_trade_fee_bps_long != 0)
+                        as u16
+                        + (profiles_before[asset].backing_trade_fee_bps_short != 0) as u16;
+                    expected_config.backing_trade_fee_policy_count = expected_config
+                        .backing_trade_fee_policy_count
+                        .checked_sub(policy_count)
+                        .ok_or("asset retirement backing-fee policy count underflow")?;
+                }
+                let mut expected_asset = AssetStateV16::default();
+                expected_asset.market_id = asset_before.market_id;
+                expected_asset.retired_slot = expected_retired_slot;
+                expected_asset.lifecycle = AssetLifecycleV16::Retired;
+                expected_asset.raw_oracle_target_price = asset_before.raw_oracle_target_price;
+                expected_asset.effective_price = asset_before.effective_price;
+                expected_asset.fund_px_last = asset_before.fund_px_last;
+                expected_asset.slot_last = asset_before.slot_last;
+                let mut expected_group = group_before.clone();
+                expected_group.assets[asset] = expected_asset;
+                if transitioned {
+                    expected_group.current_slot = now_slot;
+                    expected_group.asset_set_epoch = expected_group
+                        .asset_set_epoch
+                        .checked_add(1)
+                        .ok_or("asset retirement asset-set epoch overflow")?;
+                    expected_group.risk_epoch = expected_group
+                        .risk_epoch
+                        .checked_add(1)
+                        .ok_or("asset retirement risk epoch overflow")?;
+                }
+                let mut expected_profile =
+                    state::manual_asset_oracle_profile(asset_after.effective_price, now_slot);
+                expected_profile.backing_trade_fee_bps_long =
+                    profiles_before[asset].backing_trade_fee_bps_long;
+                expected_profile.backing_trade_fee_bps_short =
+                    profiles_before[asset].backing_trade_fee_bps_short;
+                expected_profile.backing_trade_fee_insurance_share_bps_long =
+                    profiles_before[asset].backing_trade_fee_insurance_share_bps_long;
+                expected_profile.backing_trade_fee_insurance_share_bps_short =
+                    profiles_before[asset].backing_trade_fee_insurance_share_bps_short;
+                expected_profile.insurance_authority = profiles_before[asset].insurance_authority;
+                expected_profile.insurance_operator = profiles_before[asset].insurance_operator;
+                expected_profile.backing_bucket_authority =
+                    profiles_before[asset].backing_bucket_authority;
+                expected_profile.oracle_authority = profiles_before[asset].oracle_authority;
+                if asset == 0 || group_after != expected_group || config_after != expected_config {
+                    return Err(format!(
+                        "successful retirement did not produce a canonical empty slot: before={asset_before:?}, after={asset_after:?}, free={}/{expected_free_slots}",
+                        config_after.free_market_slot_count
+                    ));
+                }
+                let profiles_after: Vec<_> = (0..ASSET_COUNT)
+                    .map(|index| self.env.primary_profile(index))
+                    .collect();
+                let controls_after: Vec<_> = (0..ASSET_COUNT)
+                    .map(|index| self.env.primary_control_sequences(index))
+                    .collect();
+                for other in 0..ASSET_COUNT {
+                    if other != asset && group_after.assets[other] != group_before.assets[other] {
+                        return Err(format!(
+                            "asset {asset} retirement mutated unrelated asset {other}"
+                        ));
+                    }
+                    if other != asset && profiles_after[other] != profiles_before[other] {
+                        return Err(format!(
+                            "asset {asset} retirement mutated unrelated oracle profile {other}"
+                        ));
+                    }
+                }
+                if profiles_after[asset] != expected_profile || controls_after != controls_before {
+                    return Err(
+                        "asset retirement exceeded its exact oracle-profile/control frame".into(),
+                    );
+                }
+                if self.positions.iter().any(|positions| positions[asset] != 0) {
+                    return Err(
+                        "asset retirement succeeded while the independent model retained exposure"
+                            .into(),
+                    );
+                }
+                self.assert_positions_match()?;
+                if transitioned {
+                    self.coverage.asset_retirements += 1;
+                }
+                Ok(true)
+            }
+            Err(_) => {
                 self.assert_snapshot_unchanged(&before)?;
                 Ok(false)
             }
@@ -6122,6 +6359,67 @@ pub fn run_permissionless_stale_resolution_terminal_oracle() -> Result<Coverage,
         }
     }
     runner.assert_global_invariants()?;
+    Ok(runner.coverage)
+}
+
+pub fn run_drain_reduce_retire_route_oracle() -> Result<Coverage, String> {
+    let scenario = Scenario {
+        seed: [0x46; 32],
+        config: SmallMarketConfig::default(),
+        actions: Vec::new(),
+    };
+    let mut runner = ScenarioRunner::new_unprefixed(&scenario)?;
+    runner.run_safety_prefix(&[
+        Action::Trade {
+            route: TradeRoute::NoCpi,
+            taker: 0,
+            maker: 1,
+            asset: 2,
+            units: 2,
+            fee_bps: 0,
+            price_move_bps: 0,
+            prefer_reduce: false,
+        },
+        Action::DrainOnlyAsset { asset: 2 },
+        Action::DrainOnlyAsset { asset: 2 },
+        Action::Trade {
+            route: TradeRoute::NoCpi,
+            taker: 2,
+            maker: 3,
+            asset: 2,
+            units: 1,
+            fee_bps: 0,
+            price_move_bps: 0,
+            prefer_reduce: false,
+        },
+        Action::Trade {
+            route: TradeRoute::NoCpi,
+            taker: 0,
+            maker: 1,
+            asset: 2,
+            units: 1,
+            fee_bps: 0,
+            price_move_bps: 0,
+            prefer_reduce: true,
+        },
+        Action::RetireAsset { asset: 2, dt: 1 },
+        Action::RetireAsset { asset: 2, dt: 1 },
+    ])?;
+    let (_, group) = runner.env.primary_market_state();
+    if runner.coverage.drain_only_updates != 1
+        || runner.coverage.asset_retirements != 1
+        || runner.coverage.route_success[TradeRoute::NoCpi.index()] != 2
+        || runner.coverage.route_reject[TradeRoute::NoCpi.index()] != 1
+        || group.assets[2].lifecycle != AssetLifecycleV16::Retired
+        || group.assets[2].oi_eff_long_q != 0
+        || group.assets[2].oi_eff_short_q != 0
+        || runner.positions.iter().any(|positions| positions[2] != 0)
+    {
+        return Err(format!(
+            "DrainOnly reduction/retirement composition was vacuous: coverage={:?}, asset={:?}, positions={:?}",
+            runner.coverage, group.assets[2], runner.positions
+        ));
+    }
     Ok(runner.coverage)
 }
 
@@ -21364,6 +21662,9 @@ fn action_strategy() -> impl Strategy<Value = Action> {
             },
         ),
         2 => any::<u8>().prop_map(|dt| Action::ResolveStalePermissionless { dt }),
+        2 => any::<u8>().prop_map(|asset| Action::DrainOnlyAsset { asset }),
+        2 => (any::<u8>(), any::<u8>())
+            .prop_map(|(asset, dt)| Action::RetireAsset { asset, dt }),
         2 => (any::<u8>(), 1u16..=500)
             .prop_map(|(actor, amount)| Action::ConvertReleasedPnl { actor, amount }),
         2 => (any::<u8>(), any::<u8>())

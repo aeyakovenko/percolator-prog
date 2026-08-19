@@ -7,7 +7,8 @@
 //! cranks, fee synchronization, matcher-capability changes, insurance/backing top-ups and
 //! withdrawals, released-PnL conversion, unilateral rebalance reduction, asset shutdown, owner
 //! recovery-leg forfeit, permissionless abandoned-asset force close, oracle-authority rotation,
-//! market resolution, resolved crank/close/claim transitions, and hostile account substitution.
+//! DrainOnly admission/reduction, empty-asset retirement, market resolution, resolved
+//! crank/close/claim transitions, and hostile account substitution.
 //! Terminal routes independently reconcile position and effective-OI removal, receipt monotonicity,
 //! and exact destination/SPL-vault/engine-vault deltas. After every public transition the shared oracle
 //! rejects undecodable or hidden legs, duplicate same-asset legs, stale
@@ -81,6 +82,16 @@ fn v16_program_permissionless_stale_resolution_reaches_terminal_user_disposition
     assert_eq!(coverage.permissionless_resolve_attempts, 1);
     assert_eq!(coverage.permissionless_resolves, 1);
     assert!(coverage.resolved_close_successes != 0);
+}
+
+#[test]
+fn v16_program_drain_only_allows_reduction_then_empty_asset_retires() {
+    let coverage = run_drain_reduce_retire_route_oracle().expect(
+        "DrainOnly must reject new exposure, admit bilateral reduction, and permit empty retirement",
+    );
+    assert_eq!(coverage.drain_only_updates, 1);
+    assert_eq!(coverage.asset_retirements, 1);
+    assert_eq!(coverage.route_reject[0], 1);
 }
 
 #[test]
@@ -192,6 +203,8 @@ fn v16_program_extended_public_action_alphabet_runs_through_shared_oracles() {
                 stale_slots: 1_000,
                 force_close_delay_slots: 100,
             },
+            Action::DrainOnlyAsset { asset: 2 },
+            Action::RetireAsset { asset: 2, dt: 1 },
             Action::ShutdownAsset { asset: 0, dt: 0 },
             Action::ForfeitRecoveryLeg {
                 actor: 0,
