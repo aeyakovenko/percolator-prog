@@ -3,7 +3,7 @@
 //! Normative obligation: Partitioning an authorized operation must not improve or otherwise alter
 //! its normalized economic result, except for explicitly bounded conservative rounding.
 //!
-//! Evidence in this file (generated F over public I routes): three generated properties build
+//! Evidence in this file (generated F over public I routes): four generated properties build
 //! authenticated target-replacement histories. Every episode publishes the same target at the same
 //! slot and holds it until a common endpoint, but executes its permissionless crank work eagerly,
 //! at a generated irregular subset of slots, or only at the endpoint. They compare the complete
@@ -23,7 +23,14 @@
 //! additionally requires released-PnL conversion to succeed. The oracle target changes, effective
 //! price moves, and funding accrues, so equality is nonvacuous. This proves that caller-selected
 //! crank cadence cannot change value attribution for these bounded public histories while
-//! preserving authenticated event order.
+//! preserving authenticated event order. A separate public unilateral-reduction regression
+//! creates quantity ADL, advances an authenticated mark, settles both sides, and requires exact
+//! zero-sum account-value deltas and matching source claim/backing. It fails on the former
+//! `ADL_ONE` K/F accrual path. Generated owner-reduction partitions also compare aggregate,
+//! split, and reversed-split execution. Every field except the affected side's `A` factor is
+//! exact; repeated floor can lower split `A` by at most one unit per extra partition, which is
+//! checked against an independent recurrence together with the resulting one-atom effective-OI
+//! scan envelope.
 //!
 //! Guarantee boundary: target publication order and target lifetime are identical across the
 //! compared executions. Reordering authenticated observations is a different economic history,
@@ -35,7 +42,7 @@
 
 use super::*;
 use crate::support::v16_svm::{MarketConfig, V16Svm, TX_CU_LIMIT};
-use percolator::POS_SCALE;
+use percolator::{ADL_ONE, CREDIT_RATE_SCALE, POS_SCALE};
 use percolator_prog::ix::CrankObservationHint;
 use percolator_prog::state;
 
@@ -83,6 +90,15 @@ struct TargetHistoryOutcome {
     destination_payouts: [u64; 2],
     saw_price_movement: bool,
     saw_funding: bool,
+    max_compute_units: u64,
+    public_steps: usize,
+}
+
+#[derive(Debug)]
+struct RebalancePartitionOutcome {
+    snapshot: CanonicalPrefixSnapshot,
+    final_basis_q: i128,
+    final_oi_q: [u128; 2],
     max_compute_units: u64,
     public_steps: usize,
 }
@@ -195,6 +211,76 @@ fn canonical_prefix_snapshot(env: &V16Svm) -> Result<CanonicalPrefixSnapshot, St
         short_portfolio,
         tokens: env.all_token_account_data(),
     })
+}
+
+fn run_rebalance_partition(
+    seed: [u8; 32],
+    open_q: u128,
+    reductions: &[u128],
+) -> Result<RebalancePartitionOutcome, String> {
+    let mut env = V16Svm::new(seed, MarketConfig::default());
+    env.trade_no_cpi(0, 1, 0, open_q as i128, INITIAL_PRICE, 0)
+        .map_err(|error| format!("open bilateral rebalance position: {error}"))?;
+    let tokens_before = env.all_token_account_data();
+    let mut max_compute_units = 0;
+    env.begin_public_trace();
+    for (index, reduction) in reductions.iter().copied().enumerate() {
+        let step = env
+            .rebalance_reduce(0, 0, reduction)
+            .map_err(|error| format!("rebalance partition {index} reduce {reduction}: {error}"))?;
+        max_compute_units = max_compute_units.max(step.compute_units);
+    }
+    if env.all_token_account_data() != tokens_before {
+        return Err("RebalanceReduce moved SPL custody".to_string());
+    }
+    let trace = env.finish_public_trace();
+    if trace.out_of_band_economic_mutations != 0 || trace.steps.iter().any(|step| !step.succeeded) {
+        return Err("rebalance partition used a rejected or out-of-band step".to_string());
+    }
+    let account = env.primary_portfolio(0);
+    let group = env.primary_market_state().1;
+    Ok(RebalancePartitionOutcome {
+        snapshot: canonical_prefix_snapshot(&env)?,
+        final_basis_q: account.legs[0].basis_pos_q.get(),
+        final_oi_q: [
+            group.assets[0].oi_eff_long_q,
+            group.assets[0].oi_eff_short_q,
+        ],
+        max_compute_units,
+        public_steps: trace.steps.len(),
+    })
+}
+
+fn rebalance_snapshot_without_adl_rounding(
+    mut snapshot: CanonicalPrefixSnapshot,
+) -> CanonicalPrefixSnapshot {
+    snapshot.group.assets[0].a_short = 0;
+    snapshot
+}
+
+fn expected_rebalance_a(mut oi_q: u128, reductions: &[u128]) -> u128 {
+    let mut a = ADL_ONE;
+    for reduction in reductions.iter().copied() {
+        let next_oi = oi_q.checked_sub(reduction).unwrap();
+        a = a.checked_mul(next_oi).unwrap() / oi_q;
+        oi_q = next_oi;
+    }
+    a
+}
+
+fn counterparty_effective_scan(outcome: &RebalancePartitionOutcome) -> u128 {
+    let leg = outcome
+        .snapshot
+        .short_portfolio
+        .legs
+        .iter()
+        .find_map(|leg| leg.try_to_runtime().ok().filter(|leg| leg.active))
+        .expect("rebalance world retains the counterparty leg");
+    leg.basis_pos_q
+        .unsigned_abs()
+        .checked_mul(outcome.snapshot.group.assets[0].a_short)
+        .unwrap()
+        / leg.a_basis
 }
 
 fn prefix_difference(
@@ -794,6 +880,90 @@ fn v16_program_net_funding_is_partition_invariant_but_paid_only_rewards_are_not(
     backing_expiry_partition_envelope(&episodes, &eager, &eager, &delayed).unwrap();
 }
 
+#[test]
+fn v16_program_owner_rebalance_reduction_is_split_merge_invariant() {
+    let seed = [0x53; 32];
+    let open_q = 10 * POS_SCALE;
+    let aggregate = run_rebalance_partition(seed, open_q, &[6 * POS_SCALE]).unwrap();
+    let split = run_rebalance_partition(seed, open_q, &[2 * POS_SCALE, 4 * POS_SCALE]).unwrap();
+
+    assert_eq!(aggregate.snapshot, split.snapshot);
+    assert_eq!(aggregate.final_basis_q, 4 * POS_SCALE as i128);
+    assert_eq!(aggregate.final_basis_q, split.final_basis_q);
+    assert_eq!(aggregate.final_oi_q, [4 * POS_SCALE, 4 * POS_SCALE]);
+    assert_eq!(aggregate.final_oi_q, split.final_oi_q);
+    assert_eq!(aggregate.public_steps, 1);
+    assert_eq!(split.public_steps, 2);
+    assert!(aggregate.max_compute_units < TX_CU_LIMIT);
+    assert!(split.max_compute_units < TX_CU_LIMIT);
+}
+
+#[test]
+fn v16_program_unilateral_rebalance_adl_keeps_followup_price_settlement_zero_sum() {
+    let mut env = V16Svm::new([0x55; 32], MarketConfig::default());
+    env.begin_public_trace();
+    env.warp_to_slot(1);
+    env.configure_auth_mark(false, 0, 1, INITIAL_PRICE).unwrap();
+    env.trade_no_cpi(0, 1, 0, 10 * POS_SCALE as i128, INITIAL_PRICE, 0)
+        .unwrap();
+    env.rebalance_reduce(0, 0, 6 * POS_SCALE).unwrap();
+    let before = env.primary_market_state().1;
+    assert_eq!(before.assets[0].a_short, 4 * ADL_ONE / 10);
+    assert_eq!(
+        [
+            before.assets[0].oi_eff_long_q,
+            before.assets[0].oi_eff_short_q,
+        ],
+        [4 * POS_SCALE, 4 * POS_SCALE]
+    );
+    let tokens_before = env.all_token_account_data();
+    let values_before = [0usize, 1usize].map(|actor| {
+        let account = env.primary_portfolio(actor);
+        i128::try_from(account.capital.get()).unwrap() + account.pnl.get()
+    });
+
+    env.warp_to_slot(2);
+    env.push_auth_mark(0, 2, 900_000).unwrap();
+    let observation = || {
+        vec![CrankObservationHint {
+            asset_index: 0,
+            oracle_accounts: 0,
+        }]
+    };
+    let short_crank = env.crank(1, 2, observation()).unwrap();
+    let long_crank = env.crank(0, 2, observation()).unwrap();
+
+    let values_after = [0usize, 1usize].map(|actor| {
+        let account = env.primary_portfolio(actor);
+        i128::try_from(account.capital.get()).unwrap() + account.pnl.get()
+    });
+    let expected_move = 4 * 100_000i128;
+    assert_eq!(values_after[0] - values_before[0], -expected_move);
+    assert_eq!(values_after[1] - values_before[1], expected_move);
+    assert_eq!(
+        (values_after[0] - values_before[0]) + (values_after[1] - values_before[1]),
+        0,
+        "post-ADL mark settlement must remain exactly zero-sum"
+    );
+    assert_eq!(env.all_token_account_data(), tokens_before);
+
+    let after = env.primary_market_state().1;
+    let source = after.source_credit[0];
+    assert_eq!(
+        source.positive_claim_bound_num, source.fresh_reserved_backing_num,
+        "the winner claim must equal independently crystallized counterparty loss"
+    );
+    assert_eq!(source.credit_rate_num, CREDIT_RATE_SCALE);
+    assert_eq!(after.assets[0].a_short, before.assets[0].a_short);
+    assert!(short_crank.compute_units < TX_CU_LIMIT);
+    assert!(long_crank.compute_units < TX_CU_LIMIT);
+
+    let trace = env.finish_public_trace();
+    assert_eq!(trace.out_of_band_economic_mutations, 0);
+    assert!(trace.steps.iter().all(|step| step.succeeded));
+    assert_eq!(trace.steps.len(), 6);
+}
+
 proptest! {
     #![proptest_config(ProptestConfig {
         cases: env_usize("PERCOLATOR_FUZZ_CASES", 8) as u32,
@@ -937,5 +1107,98 @@ proptest! {
         prop_assert!(eager.max_compute_units < TX_CU_LIMIT);
         prop_assert!(irregular.max_compute_units < TX_CU_LIMIT);
         prop_assert!(delayed.max_compute_units < TX_CU_LIMIT);
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig {
+        cases: env_usize("PERCOLATOR_FUZZ_CASES", 8) as u32,
+        max_shrink_iters: env_usize("PERCOLATOR_FUZZ_SHRINK_ITERS", 64) as u32,
+        failure_persistence: Some(Box::new(
+            proptest::test_runner::FileFailurePersistence::Direct(
+                "proptest-regressions/inv_052_rebalance_partition.txt",
+            ),
+        )),
+        ..ProptestConfig::default()
+    })]
+
+    #[test]
+    fn v16_program_generated_owner_rebalance_partitions_are_invariant(
+        open_units in 3u64..=32,
+        open_dust in 0u64..u64::try_from(POS_SCALE).unwrap(),
+        raw_reduction in any::<u64>(),
+        raw_first_part in any::<u64>(),
+    ) {
+        let open_q = u128::from(open_units) * POS_SCALE + u128::from(open_dust);
+        let reduction_q = 2 + u128::from(raw_reduction) % (open_q - 2);
+        let first_q = 1 + u128::from(raw_first_part) % (reduction_q - 1);
+        let second_q = reduction_q - first_q;
+        let seed = [0x54; 32];
+
+        let aggregate = run_rebalance_partition(seed, open_q, &[reduction_q])
+            .map_err(TestCaseError::fail)?;
+        let split = run_rebalance_partition(seed, open_q, &[first_q, second_q])
+            .map_err(TestCaseError::fail)?;
+        let reversed = run_rebalance_partition(seed, open_q, &[second_q, first_q])
+            .map_err(TestCaseError::fail)?;
+
+        let aggregate_a = aggregate.snapshot.group.assets[0].a_short;
+        let split_a = split.snapshot.group.assets[0].a_short;
+        let reversed_a = reversed.snapshot.group.assets[0].a_short;
+        prop_assert_eq!(aggregate_a, expected_rebalance_a(open_q, &[reduction_q]));
+        prop_assert_eq!(split_a, expected_rebalance_a(open_q, &[first_q, second_q]));
+        prop_assert_eq!(reversed_a, expected_rebalance_a(open_q, &[second_q, first_q]));
+        prop_assert!(split_a <= aggregate_a);
+        prop_assert!(reversed_a <= aggregate_a);
+        prop_assert!(aggregate_a - split_a <= 1);
+        prop_assert!(aggregate_a - reversed_a <= 1);
+
+        let aggregate_without_a =
+            rebalance_snapshot_without_adl_rounding(aggregate.snapshot.clone());
+        let split_without_a = rebalance_snapshot_without_adl_rounding(split.snapshot.clone());
+        let reversed_without_a =
+            rebalance_snapshot_without_adl_rounding(reversed.snapshot.clone());
+        prop_assert!(
+            aggregate_without_a == split_without_a,
+            "aggregate/split rebalance divergence outside bounded A rounding: {}",
+            prefix_difference(
+                std::slice::from_ref(&aggregate_without_a),
+                std::slice::from_ref(&split_without_a),
+            ),
+        );
+        prop_assert!(
+            aggregate_without_a == reversed_without_a,
+            "aggregate/reversed rebalance divergence outside bounded A rounding: {}",
+            prefix_difference(
+                std::slice::from_ref(&aggregate_without_a),
+                std::slice::from_ref(&reversed_without_a),
+            ),
+        );
+
+        let aggregate_effective = counterparty_effective_scan(&aggregate);
+        let split_effective = counterparty_effective_scan(&split);
+        let reversed_effective = counterparty_effective_scan(&reversed);
+        prop_assert!(split_effective <= aggregate_effective);
+        prop_assert!(reversed_effective <= aggregate_effective);
+        prop_assert!(aggregate_effective - split_effective <= 1);
+        prop_assert!(aggregate_effective - reversed_effective <= 1);
+        let expected_basis = i128::try_from(open_q - reduction_q).unwrap();
+        prop_assert_eq!(aggregate.final_basis_q, expected_basis);
+        prop_assert_eq!(aggregate.final_basis_q, split.final_basis_q);
+        prop_assert_eq!(aggregate.final_basis_q, reversed.final_basis_q);
+        prop_assert_eq!(aggregate.final_oi_q[0], open_q - reduction_q);
+        prop_assert_eq!(aggregate.final_oi_q[0], aggregate.final_oi_q[1]);
+        prop_assert_eq!(aggregate.final_oi_q, split.final_oi_q);
+        prop_assert_eq!(aggregate.final_oi_q, reversed.final_oi_q);
+        for effective in [aggregate_effective, split_effective, reversed_effective] {
+            prop_assert!(effective <= aggregate.final_oi_q[1]);
+            prop_assert!(aggregate.final_oi_q[1] - effective <= 1);
+        }
+        prop_assert_eq!(aggregate.public_steps, 1);
+        prop_assert_eq!(split.public_steps, 2);
+        prop_assert_eq!(reversed.public_steps, 2);
+        prop_assert!(aggregate.max_compute_units < TX_CU_LIMIT);
+        prop_assert!(split.max_compute_units < TX_CU_LIMIT);
+        prop_assert!(reversed.max_compute_units < TX_CU_LIMIT);
     }
 }

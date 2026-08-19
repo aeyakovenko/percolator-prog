@@ -334,7 +334,7 @@ fn v16_program_prospective_source_expiry_prerequisite_matrix_keeps_exit_live() {
 }
 
 #[test]
-fn v16_program_b_budget_prerequisite_matrix_hits_resolved_adl_lock() {
+fn v16_program_b_budget_lock_prerequisite_rejects_post_adl_basis_reissue() {
     const SCALE: u64 = 100_000_000;
     const INITIAL_PRICE: u64 = 10_000 * SCALE;
 
@@ -393,7 +393,18 @@ fn v16_program_b_budget_prerequisite_matrix_hits_resolved_adl_lock() {
         3,
     );
     env.rebalance_reduce_with_cu(&owners[0], accounts[0], 0, 25 * POS_SCALE);
-    env.trade_asset_with_cu(
+    let adl = env.market_state().1;
+    assert!(adl.assets[0].a_long < percolator::ADL_ONE);
+    assert_eq!(adl.assets[0].oi_eff_long_q, 4 * POS_SCALE);
+    assert_eq!(adl.assets[0].oi_eff_short_q, 4 * POS_SCALE);
+
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let account0_before = env.svm.get_account(&accounts[0]).unwrap();
+    let account1_before = env.svm.get_account(&accounts[1]).unwrap();
+    let account2_before = env.svm.get_account(&accounts[2]).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    env.svm.expire_blockhash();
+    let prerequisite = env.try_trade_asset_with_cu(
         0,
         &owners[2],
         accounts[2],
@@ -403,102 +414,32 @@ fn v16_program_b_budget_prerequisite_matrix_hits_resolved_adl_lock() {
         9_976 * SCALE,
         0,
     );
-    env.trade_asset_with_cu(
-        0,
-        &owners[0],
-        accounts[0],
-        &owners[1],
-        accounts[1],
-        POS_SCALE as i128,
-        9_976 * SCALE,
-        0,
-    );
-    env.trade_asset_with_cu(
-        0,
-        &owners[0],
-        accounts[0],
-        &owners[1],
-        accounts[1],
-        13 * POS_SCALE as i128,
-        9_976 * SCALE,
-        7,
-    );
-    crank_at(&mut env, accounts[0], 1);
-
-    env.svm.warp_to_slot(2);
-    env.push_auth_mark_with_cu(2, 9_931 * SCALE);
-    crank_at(&mut env, accounts[2], 2);
-    env.trade_asset_with_cu(
-        0,
-        &owners[0],
-        accounts[0],
-        &owners[1],
-        accounts[1],
-        POS_SCALE as i128,
-        9_931 * SCALE,
-        0,
-    );
-
-    env.svm.warp_to_slot(3);
-    env.push_auth_mark_with_cu(3, 9_860 * SCALE);
-    crank_at(&mut env, accounts[0], 3);
-    env.trade_asset_with_cu(
-        0,
-        &owners[0],
-        accounts[0],
-        &owners[1],
-        accounts[1],
-        POS_SCALE as i128,
-        9_860 * SCALE,
-        0,
-    );
-
-    env.svm.warp_to_slot(4);
-    env.push_auth_mark_with_cu(4, 9_801 * SCALE);
-    crank_at(&mut env, accounts[2], 4);
-    env.trade_asset_with_cu(
-        0,
-        &owners[0],
-        accounts[0],
-        &owners[1],
-        accounts[1],
-        POS_SCALE as i128,
-        9_801 * SCALE,
-        0,
-    );
-
-    env.resolve();
-    let dest = env.token_account(owners[2].pubkey(), 0);
-    let market_before = env.svm.get_account(&env.market).unwrap();
-    let portfolio_before = env.svm.get_account(&accounts[2]).unwrap();
-    let dest_before = env.svm.get_account(&dest).unwrap();
-    let vault_before = env.svm.get_account(&env.vault).unwrap();
-    env.svm.expire_blockhash();
-    let prerequisite = env.send(
-        ProgInstruction::CloseResolved {
-            fee_rate_per_slot: 0,
-        },
-        vec![
-            AccountMeta::new_readonly(owners[2].pubkey(), false),
-            AccountMeta::new(env.market, false),
-            AccountMeta::new(accounts[2], false),
-            AccountMeta::new(dest, false),
-            AccountMeta::new(env.vault, false),
-            AccountMeta::new_readonly(env.vault_authority, false),
-            AccountMeta::new_readonly(spl_token::ID, false),
-        ],
-        &[],
-    );
+    let error = prerequisite
+        .expect_err("the former resolved B-budget lock prefix must stop at post-ADL basis reissue");
     assert!(
-        prerequisite.is_err(),
-        "the PR216 prerequisite unexpectedly landed on the pinned engine"
+        error.contains("Custom(21)") || error.contains("custom program error: 0x15"),
+        "B-budget prerequisite reached the wrong gate: {error}"
     );
     assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
-    assert_eq!(env.svm.get_account(&accounts[2]).unwrap(), portfolio_before);
-    assert_eq!(env.svm.get_account(&dest).unwrap(), dest_before);
+    assert_eq!(env.svm.get_account(&accounts[0]).unwrap(), account0_before);
+    assert_eq!(env.svm.get_account(&accounts[1]).unwrap(), account1_before);
+    assert_eq!(env.svm.get_account(&accounts[2]).unwrap(), account2_before);
     assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
-    let blocked = env.portfolio_state(accounts[2]);
-    assert!(blocked.capital.get() != 0 || blocked.pnl.get() != 0);
+
+    let raw_before = active_leg_for_asset(&env.portfolio_state(accounts[0]), 0)
+        .basis_pos_q
+        .unsigned_abs();
+    let exit_cu = env.rebalance_reduce_with_cu(&owners[0], accounts[0], 0, POS_SCALE);
+    assert_cu_within("B-budget prefix owner exit", exit_cu, CUSTODY_CU_LIMIT);
+    let after_exit = env.market_state().1;
+    assert_eq!(
+        active_leg_for_asset(&env.portfolio_state(accounts[0]), 0)
+            .basis_pos_q
+            .unsigned_abs(),
+        raw_before - POS_SCALE
+    );
+    assert_eq!(after_exit.assets[0].oi_eff_long_q, 3 * POS_SCALE);
+    assert_eq!(after_exit.assets[0].oi_eff_short_q, 3 * POS_SCALE);
 }
 
 #[test]

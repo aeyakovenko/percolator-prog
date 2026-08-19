@@ -301,31 +301,17 @@ fn v16_program_issue406_liquidation_invalidates_stale_lp_matcher_capability() {
     assert_eq!(env.svm.get_account(&lp).unwrap(), lp_before);
     assert_eq!(env.svm.get_account(&ctx).unwrap(), ctx_before);
 
-    // Nonvacuity control: a fresh LP signature can deliberately authorize this exact context.
-    // The same fill then passes every market/health/matcher gate and demonstrates the stale
-    // context would otherwise place the engine position above its configured inventory cap.
+    // The successful pre-liquidation fill above is the positive capability control. A fresh LP
+    // signature can deliberately restore this exact capability, but quantity ADL now blocks all
+    // ordinary position mutations until the side is normalized. Do not use a post-ADL trade as
+    // the capability-liveness oracle: that would require reopening the basis-reissue bug owned by
+    // INV-050/INV-061.
     env.set_matcher_config(matcher_program, &lp_owner, lp, ctx, delegate, 1);
-    env.trade_cpi_with_cu_on_asset(
-        &taker_owner,
-        attack_taker,
-        &lp_owner,
-        lp,
-        matcher_program,
-        ctx,
-        delegate,
-        0,
-        -(CROSS_REQUEST_Q as i128),
-        0,
-    );
-    let lp_after = env.portfolio_state(lp);
+    assert_eq!(env.portfolio_matcher_config(lp).enabled(), 1);
     assert_eq!(
         issue406_matcher_inventory(&env.svm.get_account(&ctx).unwrap().data),
-        MAX_INV_Q as i128,
-        "the matcher itself remains within its configured cap"
-    );
-    assert!(
-        active_leg_for_asset(&lp_after, 0).basis_pos_q > MAX_INV_Q as i128,
-        "control proves stale inventory would exceed the real LP cap without invalidation"
+        -(MAX_INV_Q as i128),
+        "reauthorization changes wrapper capability state, not external matcher inventory"
     );
 }
 

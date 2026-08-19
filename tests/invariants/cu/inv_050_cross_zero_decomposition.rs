@@ -5,16 +5,16 @@
 //! Evidence in this file (I/C plus invariant-specific M assertions): lifecycle exact-close
 //! controls, initial-margin flip admission, and an all-four-route post-liquidation matrix. The
 //! matrix publicly creates partial ADL, then compares the identical cross-zero request with and
-//! without unrelated auxiliary OI. The control rejects with exact rollback; auxiliary OI alone
-//! admits the Flip branch and leaves fresh current-`A` legs larger than pooled effective OI by the
-//! exact prior ADL haircut. This is a route/branch expansion of the known PR250/engine-134 basis-
-//! reissue root cause, not a distinct finding. These tests exercise the deployed public wrapper
-//! with real SBF/LiteSVM account construction and assert economic state, token, rollback,
-//! liveness, or compute outcomes appropriate to the invariant.
+//! without unrelated auxiliary OI. Both reject with exact rollback. The auxiliary-OI cases prove
+//! the common post-ADL route gate closes the former Flip-branch basis reissue even when aggregate
+//! OI would otherwise admit the raw reduction. Every rejected route is followed by a bounded
+//! owner `RebalanceReduce`, proving the fix preserves exit liveness. This is the public wrapper
+//! certification for PR250/engine-134. These tests exercise real SBF/LiteSVM account construction
+//! and assert economic state, token, rollback, liveness, and compute outcomes.
 //!
-//! Guarantee boundary: the matrix demonstrates public reachability on the unfixed pin; it does
-//! not certify the invariant. Certification requires inverting the counterexample on the fixed
-//! engine pin and retaining the no-auxiliary exit control.
+//! Guarantee boundary: the matrix covers all four trade routes and both OI preflight branches for
+//! one nonzero partial-ADL shape. Cross-zero quantity boundaries, pending-obligation epochs, and
+//! all lifecycle modes remain separate coverage obligations.
 
 use super::*;
 
@@ -120,10 +120,7 @@ fn try_adl_cross_zero_route(
     }
 }
 
-fn run_partial_liquidation_cross_zero_world(
-    route: AdlCrossZeroRoute,
-    add_unrelated_oi: bool,
-) -> Option<u128> {
+fn run_partial_liquidation_cross_zero_world(route: AdlCrossZeroRoute, add_unrelated_oi: bool) {
     const OPEN_PRICE: u64 = 100;
     const ADVERSE_PRICE: u64 = 500;
     const OPEN_Q: i128 = 2 * POS_SCALE as i128;
@@ -161,6 +158,18 @@ fn run_partial_liquidation_cross_zero_world(
         OPEN_PRICE,
         0,
     );
+    if add_unrelated_oi {
+        env.trade_asset_with_cu(
+            0,
+            &auxiliary_long_owner,
+            auxiliary_long,
+            &auxiliary_short_owner,
+            auxiliary_short,
+            OPEN_Q,
+            OPEN_PRICE,
+            0,
+        );
+    }
 
     env.svm.warp_to_slot(6);
     env.push_auth_mark_with_cu(6, ADVERSE_PRICE);
@@ -191,27 +200,22 @@ fn run_partial_liquidation_cross_zero_world(
     let adl = env.market_state().1;
     let winner_leg = active_leg_for_asset(&env.portfolio_state(winner), 0);
     let raw_q = winner_leg.basis_pos_q.unsigned_abs();
-    let effective_q = adl.assets[0].oi_eff_long_q;
+    let global_effective_q = adl.assets[0].oi_eff_long_q;
+    let winner_effective_q = raw_q * adl.assets[0].a_long / winner_leg.a_basis;
     assert_eq!(raw_q, OPEN_Q.unsigned_abs());
-    assert!(effective_q > 0 && effective_q < raw_q);
+    assert!(winner_effective_q > 0 && winner_effective_q < raw_q);
     assert!(adl.assets[0].a_long < ADL_ONE);
-    assert_eq!(adl.assets[0].oi_eff_short_q, effective_q);
-    let unrelated_q = raw_q - effective_q;
-
+    assert_eq!(adl.assets[0].oi_eff_short_q, global_effective_q);
     if add_unrelated_oi {
-        env.trade_asset_with_cu(
-            0,
-            &auxiliary_long_owner,
-            auxiliary_long,
-            &auxiliary_short_owner,
-            auxiliary_short,
-            unrelated_q as i128,
-            ADVERSE_PRICE,
-            0,
+        assert!(
+            global_effective_q >= raw_q,
+            "preexisting auxiliary OI must admit the raw reduction preflight"
         );
-        let with_auxiliary = env.market_state().1;
-        assert_eq!(with_auxiliary.assets[0].oi_eff_long_q, raw_q);
-        assert_eq!(with_auxiliary.assets[0].oi_eff_short_q, raw_q);
+    } else {
+        assert!(
+            global_effective_q < raw_q,
+            "control must reject before the raw reduction exceeds pooled OI"
+        );
     }
 
     let matcher = route.uses_cpi().then(|| {
@@ -241,61 +245,55 @@ fn run_partial_liquidation_cross_zero_world(
         matcher,
     );
 
-    if !add_unrelated_oi {
+    let error = result.expect_err("post-ADL cross-zero must not reissue fresh basis");
+    if add_unrelated_oi {
         assert!(
-            result.is_err(),
-            "{route:?} must reject when the account's raw reduction exceeds all pooled OI"
+            error.contains("Custom(21)") || error.contains("custom program error: 0x15"),
+            "{route:?} auxiliary-OI path must reach the common ADL LockActive gate: {error}"
         );
-        assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
-        assert_eq!(env.svm.get_account(&winner).unwrap(), winner_before);
-        assert_eq!(env.svm.get_account(&successor).unwrap(), successor_before);
-        if let (Some((_, context, _)), Some(before)) = (matcher, matcher_before) {
-            assert_eq!(env.svm.get_account(&context).unwrap(), before);
-        }
-        assert_eq!(env.token_amount(env.vault), vault_before);
-        return None;
     }
-
-    let cu = result.expect("unrelated aggregate OI admits the vulnerable cross-zero flip");
-    assert_cu_within(
-        &format!("{route:?} post-ADL cross-zero"),
-        cu,
-        TRADE_CU_LIMIT,
-    );
-    let after = env.market_state().1;
-    assert_eq!(
-        after.assets[0].oi_eff_long_q,
-        after.assets[0].oi_eff_short_q
-    );
-    assert_eq!(
-        active_leg_for_asset(&env.portfolio_state(winner), 0).basis_pos_q,
-        -NEW_SIDE_Q
-    );
-    let successor_leg = active_leg_for_asset(&env.portfolio_state(successor), 0);
-    let auxiliary_leg = active_leg_for_asset(&env.portfolio_state(auxiliary_long), 0);
-    assert_eq!(successor_leg.a_basis, after.assets[0].a_long);
-    assert_eq!(auxiliary_leg.a_basis, after.assets[0].a_long);
-    let fresh_long_basis = successor_leg
-        .basis_pos_q
-        .unsigned_abs()
-        .checked_add(auxiliary_leg.basis_pos_q.unsigned_abs())
-        .unwrap();
-    let missing_effective_oi = fresh_long_basis
-        .checked_sub(after.assets[0].oi_eff_long_q)
-        .expect("fresh current-A legs exceed the corrupted pooled OI");
-    assert_eq!(missing_effective_oi, unrelated_q);
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+    assert_eq!(env.svm.get_account(&winner).unwrap(), winner_before);
+    assert_eq!(env.svm.get_account(&successor).unwrap(), successor_before);
+    if let (Some((_, context, _)), Some(before)) = (matcher, matcher_before) {
+        assert_eq!(env.svm.get_account(&context).unwrap(), before);
+    }
     assert_eq!(env.token_amount(env.vault), vault_before);
-    assert_eq!(after.vault as u64, vault_before);
-    Some(missing_effective_oi)
+
+    let exit_q = global_effective_q.min(POS_SCALE / 4).max(1);
+    let raw_before_exit = active_leg_for_asset(&env.portfolio_state(winner), 0)
+        .basis_pos_q
+        .unsigned_abs();
+    let market_before_exit = env.market_state().1;
+    let exit_cu = env.rebalance_reduce_with_cu(&winner_owner, winner, 0, exit_q);
+    assert_cu_within(
+        &format!("{route:?} post-ADL owner exit"),
+        exit_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    let market_after_exit = env.market_state().1;
+    assert_eq!(
+        active_leg_for_asset(&env.portfolio_state(winner), 0)
+            .basis_pos_q
+            .unsigned_abs(),
+        raw_before_exit - exit_q
+    );
+    assert_eq!(
+        market_after_exit.assets[0].oi_eff_long_q,
+        market_before_exit.assets[0].oi_eff_long_q - exit_q
+    );
+    assert_eq!(
+        market_after_exit.assets[0].oi_eff_short_q,
+        market_before_exit.assets[0].oi_eff_short_q - exit_q
+    );
+    assert_eq!(env.token_amount(env.vault), vault_before);
 }
 
 #[test]
-fn v16_program_post_liquidation_cross_zero_uses_unrelated_oi_on_all_routes() {
+fn v16_program_post_liquidation_cross_zero_rejects_basis_reissue_on_all_routes() {
     for route in AdlCrossZeroRoute::ALL {
-        assert_eq!(run_partial_liquidation_cross_zero_world(route, false), None);
-        let missing = run_partial_liquidation_cross_zero_world(route, true)
-            .expect("auxiliary OI must reach the vulnerable Flip branch");
-        assert!(missing > 0, "{route:?} counterexample must be non-vacuous");
+        run_partial_liquidation_cross_zero_world(route, false);
+        run_partial_liquidation_cross_zero_world(route, true);
     }
 }
 

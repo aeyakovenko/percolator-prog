@@ -7,8 +7,10 @@
 //! rollback, liveness, or compute outcomes appropriate to the invariant.
 //!
 //! Guarantee boundary: the first test certifies the minimized PR220/PR366 trace on the fixed
-//! program and checks exact rollback plus the fully observed healthy control. The stateful matrix
-//! supplies bounded coverage over all four trade routes and both active-leg orders.
+//! program and checks exact rollback plus the fully observed healthy control. A maximum-shape
+//! matrix proves every one of the fourteen active slots is mandatory when it has pending accrual,
+//! then executes the complete refresh below the CU ceiling. The stateful matrix supplies bounded
+//! coverage over all four trade routes and both active-leg orders.
 
 use super::*;
 
@@ -891,4 +893,133 @@ fn v16_bpf_auth_mark_target_effective_lag_counts_toward_liquidation_health() {
         0,
         "engine-selected lag liquidation restores health"
     );
+}
+
+#[test]
+fn v16_program_max_shape_refresh_rejects_each_single_omitted_pending_leg() {
+    const ASSET_COUNT: u16 = 14;
+    const INITIAL_MARK: u64 = 100;
+    const MOVED_MARK: u64 = 95;
+    const REFRESH_SLOT: u64 = 2;
+
+    let mut env = V16CuEnv::new_with_market_params_and_price_move(ASSET_COUNT, 1_000, 1_000, 500);
+    env.svm.warp_to_slot(1);
+    for asset_index in 0..ASSET_COUNT {
+        env.configure_auth_mark_for_asset_as_admin(asset_index, 1, INITIAL_MARK);
+    }
+
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long = env.create_portfolio(&long_owner);
+    let short = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long, 10_000_000);
+    env.deposit(&short_owner, short, 10_000_000);
+    let legs = (0..ASSET_COUNT)
+        .map(|asset_index| BatchTradeLeg {
+            asset_index,
+            market_id: first_generation_market_id(asset_index),
+            size_q: POS_SCALE as i128,
+            exec_price: INITIAL_MARK,
+            fee_bps: 0,
+        })
+        .collect();
+    env.send(
+        env.batch_trade_no_cpi_ix(long, short, legs),
+        vec![
+            AccountMeta::new(long_owner.pubkey(), true),
+            AccountMeta::new(short_owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(long, false),
+            AccountMeta::new(short, false),
+        ],
+        &[&long_owner, &short_owner],
+    )
+    .expect("open maximum-shape public portfolio");
+
+    env.svm.warp_to_slot(REFRESH_SLOT);
+    for asset_index in 0..ASSET_COUNT {
+        env.push_auth_mark_for_asset_as_admin(asset_index, REFRESH_SLOT, MOVED_MARK);
+    }
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let long_before = env.svm.get_account(&long).unwrap();
+    let short_before = env.svm.get_account(&short).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+
+    for omitted in 0..ASSET_COUNT {
+        let observations = (0..ASSET_COUNT)
+            .filter(|asset_index| *asset_index != omitted)
+            .map(|asset_index| CrankObservationHint {
+                asset_index,
+                oracle_accounts: 0,
+            })
+            .collect();
+        env.svm.expire_blockhash();
+        let error = env
+            .send(
+                ProgInstruction::PermissionlessCrank {
+                    now_slot: REFRESH_SLOT,
+                    observations,
+                },
+                vec![
+                    AccountMeta::new(env.payer.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(long, false),
+                ],
+                &[],
+            )
+            .expect_err("omitting any pending active leg must reject full-account refresh");
+        assert!(
+            error.contains("Custom(22)") || error.contains("custom program error: 0x16"),
+            "omitting asset {omitted} reached the wrong guard: {error}"
+        );
+        assert_eq!(
+            env.svm.get_account(&env.market).unwrap(),
+            market_before,
+            "omitting asset {omitted} mutated market state"
+        );
+        assert_eq!(
+            env.svm.get_account(&long).unwrap(),
+            long_before,
+            "omitting asset {omitted} mutated the refreshed portfolio"
+        );
+        assert_eq!(env.svm.get_account(&short).unwrap(), short_before);
+        assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+    }
+
+    let asset_indices = (0..ASSET_COUNT).collect::<Vec<_>>();
+    env.svm.expire_blockhash();
+    let refresh_cu = env
+        .send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: REFRESH_SLOT,
+                observations: crank_observations_for_assets(&asset_indices),
+            },
+            vec![
+                AccountMeta::new(env.payer.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(long, false),
+            ],
+            &[],
+        )
+        .expect("complete maximum-shape observation set must retain refresh liveness");
+    println!("INV-053 complete 14-leg AuthMark refresh CU: {refresh_cu}");
+    assert_cu_within("maximum-shape complete refresh", refresh_cu, 900_000);
+
+    let after = env.market_state().1;
+    let long_after = env.portfolio_state(long);
+    for asset_index in 0..ASSET_COUNT as usize {
+        assert_eq!(after.assets[asset_index].effective_price, MOVED_MARK);
+        assert_eq!(
+            active_leg_for_asset(&long_after, asset_index)
+                .basis_pos_q
+                .unsigned_abs(),
+            POS_SCALE
+        );
+    }
+    assert_eq!(
+        health_cert(&long_after).cert_oracle_epoch,
+        after.oracle_epoch
+    );
+    assert_eq!(env.svm.get_account(&short).unwrap(), short_before);
+    assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
 }

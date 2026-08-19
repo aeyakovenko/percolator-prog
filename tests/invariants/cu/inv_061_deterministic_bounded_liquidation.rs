@@ -2,27 +2,29 @@
 //!
 //! Normative obligation: Liquidation is deterministic, risk reducing, OI coherent, and bounded at maximum shape.
 //!
-//! Evidence in this file (I/C plus invariant-specific M assertions): ADL-transfer and reset-carry
-//! liquidation matrices plus public liquidation health checks, bounded partial closes, fee caps,
-//! no-repeat charging after restored health, reward split bounds, and no vault minting. These tests exercise the deployed public
-//! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
-//! rollback, liveness, or compute outcomes appropriate to the invariant.
+//! Evidence in this file (I/C plus invariant-specific M assertions): fixed-pin ADL-transfer
+//! rejection and owner-exit matrices, reset-carry liquidation matrices, public liquidation health
+//! checks, bounded partial closes, fee caps, no-repeat charging after restored health, reward split
+//! bounds, and no vault minting. These tests exercise the deployed public wrapper with real
+//! SBF/LiteSVM account construction and assert economic state, token, rollback, liveness, or
+//! compute outcomes appropriate to the invariant.
 //!
-//! Guarantee boundary: a quarantined counterexample demonstrates public reachability; it does
-//! not certify the invariant on an unfixed pin. Certification requires the fixed-pin assertion
-//! plus every additional verification method required by the charter.
+//! Guarantee boundary: the fixed-pin regressions close the known post-ADL fresh-basis transfer
+//! prefixes. Equal-risk liquidation permutations, arbitrary close partitions, complete loss
+//! attribution, and every lifecycle boundary remain.
 
 use super::*;
 
 #[derive(Debug)]
 struct PostAdlTransferOutcome {
     opposing_loss: u128,
-    converted: u128,
-    withdrawn: u64,
-    backing_consumed_num: u128,
+    claimant_gain: u128,
+    final_raw_q: u128,
+    final_oi_q: [u128; 2],
+    backing_unliened_num: u128,
 }
 
-fn run_post_adl_transfer_world(split_before_mark: bool) -> PostAdlTransferOutcome {
+fn run_post_adl_transfer_world(probe_before_mark: bool) -> PostAdlTransferOutcome {
     const OPEN_PRICE: u64 = 1_000_000;
     const CLOSE_PRICE: u64 = 500_000;
     const OPEN_Q: u128 = POS_SCALE / 10;
@@ -69,10 +71,14 @@ fn run_post_adl_transfer_world(split_before_mark: bool) -> PostAdlTransferOutcom
         OPEN_Q
     );
 
-    let (claim_owner, claimant) = if split_before_mark {
-        for _ in 0..2 {
-            env.svm.expire_blockhash();
-            env.try_trade_asset_with_cu(
+    if probe_before_mark {
+        let market_before = env.svm.get_account(&env.market).unwrap();
+        let short_before = env.svm.get_account(&short).unwrap();
+        let successor_before = env.svm.get_account(&successor).unwrap();
+        let vault_before = env.svm.get_account(&env.vault).unwrap();
+        env.svm.expire_blockhash();
+        let error = env
+            .try_trade_asset_with_cu(
                 0,
                 &short_owner,
                 short,
@@ -82,25 +88,22 @@ fn run_post_adl_transfer_world(split_before_mark: bool) -> PostAdlTransferOutcom
                 OPEN_PRICE,
                 0,
             )
-            .expect("split transfer reissues the full raw short basis");
-        }
-        assert!(!has_active_leg_for_asset(&env.portfolio_state(short), 0));
-        assert_eq!(
-            active_leg_for_asset(&env.portfolio_state(successor), 0)
-                .basis_pos_q
-                .unsigned_abs(),
-            OPEN_Q
+            .expect_err("post-ADL transfer must not reissue raw short basis before settlement");
+        assert!(
+            error.contains("Custom(21)") || error.contains("custom program error: 0x15"),
+            "post-ADL transfer reached the wrong gate: {error}"
         );
-        (&successor_owner, successor)
-    } else {
-        (&short_owner, short)
-    };
+        assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+        assert_eq!(env.svm.get_account(&short).unwrap(), short_before);
+        assert_eq!(env.svm.get_account(&successor).unwrap(), successor_before);
+        assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+    }
 
     let account_value = |account: &percolator::PortfolioAccountV16Account| {
         account.capital.get() as i128 + account.pnl.get()
     };
     let long_value_before = account_value(&env.portfolio_state(long));
-    let backing_before = env.market_state().1.source_backing_buckets[0];
+    let short_value_before = account_value(&env.portfolio_state(short));
     env.svm.warp_to_slot(2);
     env.push_auth_mark_with_cu(2, CLOSE_PRICE);
     env.crank_steps_after_market_catchup(
@@ -112,71 +115,100 @@ fn run_post_adl_transfer_world(split_before_mark: bool) -> PostAdlTransferOutcom
         1,
     );
     env.crank(
-        claimant,
+        short,
         ProgInstruction::PermissionlessCrank {
             now_slot: 2,
             observations: crank_observations(0),
         },
     );
     let long_value_after = account_value(&env.portfolio_state(long));
+    let short_value_after = account_value(&env.portfolio_state(short));
     let opposing_loss = (long_value_before - long_value_after) as u128;
+    let claimant_gain = (short_value_after - short_value_before) as u128;
     assert!(opposing_loss > 0);
-    assert!(env.portfolio_state(claimant).pnl.get() > 0);
+    assert_eq!(claimant_gain, opposing_loss);
 
-    for _ in 0..2 {
-        env.svm.expire_blockhash();
-        env.try_trade_asset_with_cu(
+    let market_before_transfer = env.svm.get_account(&env.market).unwrap();
+    let short_before_transfer = env.svm.get_account(&short).unwrap();
+    let relay_before_transfer = env.svm.get_account(&relay).unwrap();
+    let vault_before_transfer = env.svm.get_account(&env.vault).unwrap();
+    env.svm.expire_blockhash();
+    let error = env
+        .try_trade_asset_with_cu(
             0,
-            claim_owner,
-            claimant,
+            &short_owner,
+            short,
             &relay_owner,
             relay,
             (OPEN_Q / 2) as i128,
             CLOSE_PRICE,
             0,
         )
-        .expect("post-mark split transfer leaves the profitable claimant flat");
-    }
-    assert!(!has_active_leg_for_asset(&env.portfolio_state(claimant), 0));
-    let capital_before = env.portfolio_state(claimant).capital.get();
-    env.convert_released_pnl_with_cu(claim_owner, claimant, u128::MAX);
-    let capital_after = env.portfolio_state(claimant).capital.get();
-    let converted = capital_after - capital_before;
-    assert!(converted > 0);
-    let backing_after = env.market_state().1.source_backing_buckets[0];
-    let backing_consumed_num = backing_before
-        .fresh_unliened_backing_num
-        .checked_sub(backing_after.fresh_unliened_backing_num)
-        .expect("conversion cannot mint provider backing");
+        .expect_err("post-mark transfer must not detach a post-ADL profitable claim");
+    assert!(
+        error.contains("Custom(21)") || error.contains("custom program error: 0x15"),
+        "post-mark transfer reached the wrong gate: {error}"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before_transfer
+    );
+    assert_eq!(env.svm.get_account(&short).unwrap(), short_before_transfer);
+    assert_eq!(env.svm.get_account(&relay).unwrap(), relay_before_transfer);
+    assert_eq!(
+        env.svm.get_account(&env.vault).unwrap(),
+        vault_before_transfer
+    );
 
-    let destination = env.withdraw(claim_owner, claimant, converted);
-    let withdrawn = env.token_amount(destination);
-    assert_eq!(withdrawn, converted as u64);
+    let before_exit = env.market_state().1;
+    let raw_before_exit = active_leg_for_asset(&env.portfolio_state(short), 0)
+        .basis_pos_q
+        .unsigned_abs();
+    let exit_q = OPEN_Q / 4;
+    let exit_cu = env.rebalance_reduce_with_cu(&short_owner, short, 0, exit_q);
+    assert_cu_within("post-ADL short owner reduction", exit_cu, CUSTODY_CU_LIMIT);
+    let after_exit = env.market_state().1;
+    let final_raw_q = active_leg_for_asset(&env.portfolio_state(short), 0)
+        .basis_pos_q
+        .unsigned_abs();
+    assert_eq!(final_raw_q, raw_before_exit - exit_q);
+    assert_eq!(
+        after_exit.assets[0].oi_eff_long_q,
+        before_exit.assets[0].oi_eff_long_q - exit_q
+    );
+    assert_eq!(
+        after_exit.assets[0].oi_eff_short_q,
+        before_exit.assets[0].oi_eff_short_q - exit_q
+    );
+    let backing_after = after_exit.source_backing_buckets[0];
     PostAdlTransferOutcome {
         opposing_loss,
-        converted,
-        withdrawn,
-        backing_consumed_num,
+        claimant_gain,
+        final_raw_q,
+        final_oi_q: [
+            after_exit.assets[0].oi_eff_long_q,
+            after_exit.assets[0].oi_eff_short_q,
+        ],
+        backing_unliened_num: backing_after.fresh_unliened_backing_num,
     }
 }
 
 #[test]
-fn v16_program_post_adl_transfer_extraction_matrix_discovers_backing_drain() {
+fn v16_program_post_adl_transfer_extraction_is_rejected_before_backing_drain() {
     let control = run_post_adl_transfer_world(false);
-    let split = run_post_adl_transfer_world(true);
-    assert_eq!(split.opposing_loss, control.opposing_loss);
-    assert!(split.converted > control.converted);
-    assert_eq!(split.withdrawn as u128, split.converted);
-    assert_eq!(control.withdrawn as u128, control.converted);
-    assert!(split.backing_consumed_num > control.backing_consumed_num);
+    let probed = run_post_adl_transfer_world(true);
+    assert_eq!(probed.opposing_loss, control.opposing_loss);
+    assert_eq!(probed.claimant_gain, control.claimant_gain);
+    assert_eq!(probed.final_raw_q, control.final_raw_q);
+    assert_eq!(probed.final_oi_q, control.final_oi_q);
     assert_eq!(
-        split.converted - control.converted,
-        (split.backing_consumed_num - control.backing_consumed_num) / BOUND_SCALE
+        probed.backing_unliened_num, control.backing_unliened_num,
+        "a rejected transfer probe cannot consume additional provider backing"
     );
 }
 
 #[test]
-fn v16_program_post_adl_transfer_matrix_discovers_phantom_value() {
+fn v16_program_post_adl_transfer_rejects_phantom_value_and_preserves_owner_progress() {
     const PRICE: u64 = 100;
     const OPEN_Q: i128 = 13_000 * POS_SCALE as i128;
 
@@ -251,7 +283,11 @@ fn v16_program_post_adl_transfer_matrix_discovers_phantom_value() {
     let successor = env.create_portfolio(&successor_owner);
     env.deposit(&successor_owner, successor, 100_000);
     env.svm.expire_blockhash();
-    let split_cu = env
+    let market_before = env.svm.get_account(&env.market).unwrap();
+    let survivor_before = env.svm.get_account(&survivor).unwrap();
+    let successor_before = env.svm.get_account(&successor).unwrap();
+    let vault_before = env.svm.get_account(&env.vault).unwrap();
+    let error = env
         .try_trade_asset_with_cu(
             0,
             &survivor_owner,
@@ -262,80 +298,39 @@ fn v16_program_post_adl_transfer_matrix_discovers_phantom_value() {
             PRICE,
             0,
         )
-        .expect("vulnerable pin reissues post-ADL raw basis to a fresh portfolio");
-    assert_cu_within("post-ADL split transfer", split_cu, TRADE_CU_LIMIT);
-    assert!(has_active_leg_for_asset(&env.portfolio_state(successor), 0));
-
-    let account_value = |account: &percolator::PortfolioAccountV16Account| {
-        account.capital.get() as i128 + account.pnl.get()
-    };
-    let before_values = [survivor, liquidated, successor]
-        .map(|portfolio| account_value(&env.portfolio_state(portfolio)));
-    let vault_before = env.token_amount(env.vault);
-    let insurance_before = env.market_state().1.insurance;
-
-    env.svm.warp_to_slot(40);
-    env.push_auth_mark_with_cu(40, PRICE + 1);
-    for portfolio in [survivor, liquidated, successor] {
-        env.crank(
-            portfolio,
-            ProgInstruction::PermissionlessCrank {
-                now_slot: 40,
-                observations: crank_observations(0),
-            },
-        );
-    }
-    let after_states = [survivor, liquidated, successor].map(|p| env.portfolio_state(p));
-    let after_values = after_states.map(|account| account_value(&account));
-    let value_deltas = [0usize, 1, 2].map(|i| after_values[i] - before_values[i]);
-    let aggregate_creation: i128 = value_deltas.iter().sum();
-    let positive_mark_value: u128 = value_deltas
-        .iter()
-        .copied()
-        .filter(|delta| *delta > 0)
-        .map(|delta| delta as u128)
-        .sum();
-    let negative_mark_value: u128 = value_deltas
-        .iter()
-        .copied()
-        .filter(|delta| *delta < 0)
-        .map(i128::unsigned_abs)
-        .sum();
-    let insurance_delta = env.market_state().1.insurance - insurance_before;
-    let total_creation = aggregate_creation + insurance_delta as i128;
-    assert!(total_creation > 0);
-    assert_eq!(
-        positive_mark_value + insurance_delta,
-        negative_mark_value + total_creation as u128,
-        "maintenance attribution must remain in the value domain when measuring phantom creation"
+        .expect_err("fixed engine must reject post-ADL raw-basis transfer");
+    assert!(
+        error.contains("Custom(21)") || error.contains("custom program error: 0x15"),
+        "post-ADL transfer reached the wrong gate: {error}"
     );
-    assert_eq!(env.token_amount(env.vault), vault_before);
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+    assert_eq!(env.svm.get_account(&survivor).unwrap(), survivor_before);
+    assert_eq!(env.svm.get_account(&successor).unwrap(), successor_before);
+    assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
 
-    for (owner, portfolio) in [(&survivor_owner, survivor), (&successor_owner, successor)] {
-        let pnl = env.portfolio_state(portfolio).pnl.get();
-        if pnl > 0 {
-            let market_before = env.svm.get_account(&env.market).unwrap();
-            let portfolio_before = env.svm.get_account(&portfolio).unwrap();
-            let vault_before = env.svm.get_account(&env.vault).unwrap();
-            env.svm.expire_blockhash();
-            let conversion = env.send(
-                env.convert_released_pnl_ix(portfolio, u128::MAX),
-                vec![
-                    AccountMeta::new(owner.pubkey(), true),
-                    AccountMeta::new(env.market, false),
-                    AccountMeta::new(portfolio, false),
-                ],
-                &[owner],
-            );
-            assert!(
-                conversion.is_err(),
-                "active malformed exposure unexpectedly converted phantom value"
-            );
-            assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
-            assert_eq!(env.svm.get_account(&portfolio).unwrap(), portfolio_before);
-            assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
-        }
-    }
+    let before_exit = env.market_state().1;
+    let exit_q = effective_q.min(raw_q / 2).max(1);
+    let exit_cu = env.rebalance_reduce_with_cu(&survivor_owner, survivor, 0, exit_q);
+    assert_cu_within(
+        "post-ADL survivor owner reduction",
+        exit_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    let after_exit = env.market_state().1;
+    assert_eq!(
+        active_leg_for_asset(&env.portfolio_state(survivor), 0)
+            .basis_pos_q
+            .unsigned_abs(),
+        raw_q - exit_q
+    );
+    assert_eq!(
+        after_exit.assets[0].oi_eff_long_q,
+        before_exit.assets[0].oi_eff_long_q - exit_q
+    );
+    assert_eq!(
+        after_exit.assets[0].oi_eff_short_q,
+        before_exit.assets[0].oi_eff_short_q - exit_q
+    );
 }
 
 #[test]

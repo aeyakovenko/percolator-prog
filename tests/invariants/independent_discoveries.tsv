@@ -96,7 +96,7 @@ INV-053	full-refresh/omitted-later-leg	v16_program_full_refresh_equivalence_reje
 INV-053	full-refresh/stale-later-mark	v16_program_stale_refresh_scans_all_live_legs_for_pending_mark	liquidation-certificate-cannot-be-healthier-than-full-refresh	220,366
 INV-061	resolved-adl/close-order	v16_program_resolved_adl_close_order_matrix_discovers_funded_exit_lock	funded-resolved-adl-winner-has-bounded-public-exit	216
 INV-061	bankruptcy/reset-carry-liquidation	v16_program_reset_carry_liquidation_matrix_discovers_crank_lock	fractional-reset-carry-cannot-block-permissionless-liquidation	218
-INV-061	post-adl/split-transfer-extraction	v16_program_post_adl_transfer_extraction_matrix_discovers_backing_drain	post-adl-split-cannot-increase-withdrawable-backing-funded-value	250
+INV-061	post-adl/split-transfer-extraction	v16_program_post_adl_transfer_extraction_is_rejected_before_backing_drain	post-adl-split-cannot-increase-withdrawable-backing-funded-value	250
 INV-073	partial-adl/exact-effective-reduction	v16_program_unilateral_adl_effective_exit_matrix_preserves_bounded_cleanup	zero-effective-oi-funded-residue-must-enter-bounded-cleanup	268
 INV-073	crossed-adl/exact-effective-trade	v16_program_crossed_adl_effective_exit_matrix_preserves_bounded_cleanup	zero-effective-oi-funded-residue-must-enter-bounded-cleanup	266
 INV-073	partial-adl/recovery-force-close	v16_program_recovery_residue_matrix_clears_abandoned_owner_residue	partial-adl-recovery-residue-has-permissionless-bounded-cleanup	203
