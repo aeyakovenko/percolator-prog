@@ -8,7 +8,9 @@
 //! Evidence in this file (I): public LiteSVM lifecycle coverage for portfolio
 //! close/reinit. The test creates, closes, and recreates through public routes and
 //! asserts the wrapper assigns a new monotonic `portfolio_id` while failed reinit
-//! attempts do not consume an incarnation.
+//! attempts do not consume an incarnation. A source-bound completeness roster
+//! additionally proves that every instruction field carrying a portfolio ID is
+//! forwarded by dispatch and consumed by a production incarnation guard.
 
 use super::*;
 
@@ -137,4 +139,178 @@ fn v16_portfolio_incarnation_id_separates_close_and_reuse() {
     assert_eq!(replacement.residual_crystallized_loss_atoms_total.get(), 0);
     assert_eq!(replacement.residual_spent_principal_atoms_total.get(), 0);
     assert_eq!(replacement.residual_received_atoms_total.get(), 0);
+}
+
+fn source_between<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
+    let start = source
+        .find(start)
+        .unwrap_or_else(|| panic!("missing source boundary {start:?}"));
+    let tail = &source[start..];
+    let end = tail
+        .find(end)
+        .unwrap_or_else(|| panic!("missing source boundary {end:?}"));
+    &tail[..end]
+}
+
+fn handler_source<'a>(source: &'a str, name: &str) -> &'a str {
+    let marker = format!("\n    fn handle_{name}");
+    let start = source
+        .find(&marker)
+        .unwrap_or_else(|| panic!("missing production handler {name}"));
+    let tail = &source[start + 1..];
+    let end = tail.find("\n    fn handle_").unwrap_or(tail.len());
+    &tail[..end]
+}
+
+fn assert_dispatch_forwards(
+    dispatch: &str,
+    variant: &str,
+    handler: &str,
+    portfolio_fields: &[&str],
+) {
+    let marker = format!("Instruction::{variant}");
+    let start = dispatch
+        .find(&marker)
+        .unwrap_or_else(|| panic!("{variant}: missing production dispatch arm"));
+    let tail = &dispatch[start..];
+    let end = tail
+        .find("\n            Instruction::")
+        .unwrap_or(tail.len());
+    let arm = &tail[..end];
+    assert!(
+        arm.contains(&format!("handle_{handler}(")),
+        "{variant}: dispatch does not call handle_{handler}"
+    );
+    for field in portfolio_fields {
+        assert!(
+            arm.matches(field).count() >= 2,
+            "{variant}: {field} must occur in both the decoded pattern and handler arguments"
+        );
+    }
+}
+
+#[test]
+fn v16_program_retained_portfolio_binding_roster_is_source_complete() {
+    let source = include_str!("../../../src/v16_program.rs");
+    let instruction_enum =
+        source_between(source, "pub enum Instruction {", "\n    impl Instruction {");
+    let dispatch = source_between(
+        source,
+        "pub fn process_instruction<'a>(",
+        "\n    #[inline(never)]\n    fn handle_init_market",
+    );
+
+    // Seven single-account requests and four two-account trade requests are the complete set of
+    // encoded portfolio-incarnation fields. A new field-bearing instruction changes this count and
+    // must be assigned to INV-003 before CI can pass.
+    assert_eq!(
+        instruction_enum.matches("portfolio_id: u64").count(),
+        15,
+        "portfolio-ID-bearing instruction roster changed without INV-003 review"
+    );
+
+    let routes: [(&str, &str, &[&str]); 11] = [
+        ("Deposit", "deposit", &["portfolio_id"]),
+        ("Withdraw", "withdraw", &["portfolio_id"]),
+        (
+            "TradeNoCpi",
+            "trade_nocpi",
+            &["account_a_portfolio_id", "account_b_portfolio_id"],
+        ),
+        (
+            "TradeCpi",
+            "trade_cpi",
+            &["account_a_portfolio_id", "account_b_portfolio_id"],
+        ),
+        (
+            "BatchTradeNoCpi",
+            "batch_trade_nocpi",
+            &["account_a_portfolio_id", "account_b_portfolio_id"],
+        ),
+        (
+            "BatchTradeCpi",
+            "batch_trade_cpi",
+            &["account_a_portfolio_id", "account_b_portfolio_id"],
+        ),
+        ("SetMatcherConfig", "set_matcher_config", &["portfolio_id"]),
+        ("ClosePortfolio", "close_portfolio", &["portfolio_id"]),
+        (
+            "ConvertReleasedPnl",
+            "convert_released_pnl",
+            &["portfolio_id"],
+        ),
+        (
+            "ForfeitRecoveryLeg",
+            "forfeit_recovery_leg",
+            &["portfolio_id"],
+        ),
+        ("RebalanceReduce", "rebalance_reduce", &["portfolio_id"]),
+    ];
+    for (variant, handler, fields) in routes {
+        let variant_marker = format!("{variant} {{");
+        assert!(
+            instruction_enum.contains(&variant_marker),
+            "{variant}: missing from the portfolio-ID instruction roster"
+        );
+        assert_dispatch_forwards(dispatch, variant, handler, fields);
+    }
+
+    let deposit = handler_source(source, "deposit");
+    let withdraw = handler_source(source, "withdraw");
+    for (name, handler) in [("Deposit", deposit), ("Withdraw", withdraw)] {
+        assert!(
+            handler.contains("expect_portfolio_id(&portfolio_data, expected_portfolio_id)?;"),
+            "{name}: decoded portfolio ID is not consumed before mutation"
+        );
+    }
+
+    let trade_core = handler_source(source, "trade_nocpi_zero_copy");
+    let batch_core = handler_source(source, "batch_execute_zero_copy");
+    for (name, handler) in [("single trade", trade_core), ("batch trade", batch_core)] {
+        assert!(
+            handler.contains("expect_portfolio_id(&account_a_data, account_a_portfolio_id)?;")
+                && handler
+                    .contains("expect_portfolio_id(&account_b_data, account_b_portfolio_id)?;"),
+            "{name}: both portfolio incarnations must be consumed by the shared mutation core"
+        );
+    }
+    for name in ["trade_cpi", "batch_trade_cpi"] {
+        let handler = handler_source(source, name);
+        assert!(
+            handler.contains("expect_portfolio_id(&data, account_a_portfolio_id)?;")
+                && handler.contains("expect_portfolio_id(&data, account_b_portfolio_id)?;"),
+            "{name}: both IDs must be checked before invoking the external matcher"
+        );
+    }
+
+    let matcher = handler_source(source, "set_matcher_config");
+    assert!(
+        matcher.contains("portfolio_id != current_portfolio_id"),
+        "SetMatcherConfig: current incarnation is not compared with signed consent"
+    );
+    let close = handler_source(source, "close_portfolio");
+    assert!(
+        close.contains("state::portfolio_close_binding_matches(")
+            && close.contains("expected_portfolio_id,"),
+        "ClosePortfolio: the composite close binding omits portfolio incarnation"
+    );
+    let convert = handler_source(source, "convert_released_pnl");
+    assert!(
+        convert.contains("Some(expected_portfolio_id),"),
+        "ConvertReleasedPnl: portfolio binding is not passed to the shared view"
+    );
+    for name in ["forfeit_recovery_leg", "rebalance_reduce"] {
+        let handler = handler_source(source, name);
+        assert!(
+            handler.contains("Some((expected_portfolio_id, expected_position_epoch))"),
+            "{name}: portfolio and position incarnations are not composed"
+        );
+    }
+
+    // This is deliberately an asserted frontier, not a silent omission. CureAndCancelClose is the
+    // only owner-signed portfolio mutation with signed economic input that is not currently in the
+    // ID-bearing roster. Permissionless crank/maintenance/terminal routes consume no owner consent.
+    let cure = handler_source(source, "cure_and_cancel_close");
+    assert!(cure.contains("expect_signer(owner)?;"));
+    assert!(!cure.contains("expect_portfolio_id("));
 }
