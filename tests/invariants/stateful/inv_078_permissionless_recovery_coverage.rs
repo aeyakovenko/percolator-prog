@@ -94,19 +94,19 @@ fn v16_program_recovery_resource_failure_lattice_preserves_public_exit() {
             asset_index: ASSET,
             oracle_accounts: env.primary_profile(ASSET as usize).oracle_leg_count,
         }];
-        for slot in 2u64..=25 {
+        for slot in 2u64..=41 {
             env.warp_to_slot(slot);
             env.push_auth_mark(ASSET, slot, 300)
                 .expect("publish authenticated adverse mark");
             crank_to_fixed_point(&mut env, 0, slot, &observations);
         }
-        env.crank(1, 25, observations)
+        env.crank(1, 41, observations)
             .expect("settle bankrupt counterparty once before Recovery");
         let terminal_observations = vec![CrankObservationHint {
             asset_index: ASSET,
             oracle_accounts: env.primary_profile(ASSET as usize).oracle_leg_count,
         }];
-        crank_to_fixed_point(&mut env, 0, 25, &terminal_observations);
+        crank_to_fixed_point(&mut env, 0, 41, &terminal_observations);
         let loser_before_recovery = env.primary_portfolio(1);
         let effective_price = env.primary_market_state().1.assets[ASSET as usize].effective_price;
         assert_eq!(effective_price, 300);
@@ -122,10 +122,10 @@ fn v16_program_recovery_resource_failure_lattice_preserves_public_exit() {
             "resource cell {resource_mask} must create a publicly bankrupt counterparty"
         );
 
-        env.warp_to_slot(26);
-        env.shutdown_asset(ASSET, 26)
+        env.warp_to_slot(42);
+        env.shutdown_asset(ASSET, 42)
             .expect("enter public Recovery lifecycle");
-        env.warp_to_slot(28);
+        env.warp_to_slot(44);
         env.forfeit_recovery_leg(1, ASSET, u128::MAX)
             .expect("bankrupt owner forfeits its Recovery leg");
         env.forfeit_recovery_leg(0, ASSET, u128::MAX)

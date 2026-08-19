@@ -27,6 +27,20 @@ enum AuxiliaryMalformedCase {
     InvalidSemanticField,
 }
 
+#[derive(Clone, Copy, Debug)]
+enum OracleProfileMalformedCase {
+    RemainderOutOfRange,
+    ReservedByteNonzero,
+}
+
+fn inv015_asset_zero_profile_offset() -> usize {
+    constants::MARKET_GROUP_OFF
+        + percolator::MarketGroupV16HeaderAccount::dynamic_asset_slot_offset::<
+            state::AssetOracleStorageV16,
+        >(0)
+        .expect("asset-zero profile offset")
+}
+
 fn inv015_sync_auxiliary_ledger_ix(
     env: &V16CuEnv,
     ledger: Pubkey,
@@ -221,6 +235,67 @@ fn v16_program_initialized_auxiliary_ledger_malformed_matrix_rejects_exactly() {
                 "malformed {label} ledger rejection must not mutate the market"
             );
         }
+    }
+}
+
+#[test]
+fn v16_program_oracle_remainder_wire_bounds_reject_malformed_profiles_exactly() {
+    for case in [
+        OracleProfileMalformedCase::RemainderOutOfRange,
+        OracleProfileMalformedCase::ReservedByteNonzero,
+    ] {
+        let mut env = V16CuEnv::new();
+        let owner = Keypair::new();
+        let portfolio = env.create_portfolio(&owner);
+        let mut malformed_market = env.svm.get_account(&env.market).unwrap();
+        let profile_offset = inv015_asset_zero_profile_offset();
+        match case {
+            OracleProfileMalformedCase::RemainderOutOfRange => {
+                let offset = profile_offset
+                    + core::mem::offset_of!(
+                        state::AssetOracleProfileV16,
+                        price_move_remainder_bps_num
+                    );
+                malformed_market.data[offset..offset + 2].copy_from_slice(&10_000u16.to_le_bytes());
+            }
+            OracleProfileMalformedCase::ReservedByteNonzero => {
+                let offset =
+                    profile_offset + core::mem::offset_of!(state::AssetOracleProfileV16, _padding0);
+                malformed_market.data[offset] = 1;
+            }
+        }
+        env.svm
+            .set_account(env.market, malformed_market.clone())
+            .unwrap();
+        let portfolio_before = env.svm.get_account(&portfolio).unwrap();
+
+        env.svm.expire_blockhash();
+        let rejected = env.send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 0,
+                observations: crank_observations(0),
+            },
+            vec![
+                AccountMeta::new(env.payer.pubkey(), true),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(portfolio, false),
+            ],
+            &[],
+        );
+        assert!(
+            rejected.is_err(),
+            "malformed oracle profile case {case:?} must return an instruction error"
+        );
+        assert_eq!(
+            env.svm.get_account(&env.market).unwrap(),
+            malformed_market,
+            "malformed oracle profile case {case:?} must roll back the market exactly"
+        );
+        assert_eq!(
+            env.svm.get_account(&portfolio).unwrap(),
+            portfolio_before,
+            "malformed oracle profile case {case:?} must not mutate the portfolio"
+        );
     }
 }
 

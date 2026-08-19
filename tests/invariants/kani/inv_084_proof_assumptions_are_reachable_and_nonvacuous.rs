@@ -33,6 +33,7 @@ const INV084_SRC_019: &str = include_str!("inv_019_cpi_invocation_and_return_dat
 const INV084_SRC_022: &str =
     include_str!("inv_022_instruction_decoding_and_schema_upgrade_safety.rs");
 const INV084_SRC_045: &str = include_str!("inv_045_no_free_mark_movement.rs");
+const INV084_SRC_052: &str = include_str!("inv_052_split_merge_invariance.rs");
 const INV084_SRC_080: &str = include_str!("inv_080_error_propagation_and_exact_rollback.rs");
 const INV084_SRC_084: &str =
     include_str!("inv_084_proof_assumptions_are_reachable_and_nonvacuous.rs");
@@ -48,6 +49,7 @@ const INV084_FILE_019: &[u8] =
 const INV084_FILE_022: &[u8] =
     b"tests/invariants/kani/inv_022_instruction_decoding_and_schema_upgrade_safety.rs";
 const INV084_FILE_045: &[u8] = b"tests/invariants/kani/inv_045_no_free_mark_movement.rs";
+const INV084_FILE_052: &[u8] = b"tests/invariants/kani/inv_052_split_merge_invariance.rs";
 const INV084_FILE_080: &[u8] =
     b"tests/invariants/kani/inv_080_error_propagation_and_exact_rollback.rs";
 const INV084_FILE_084: &[u8] =
@@ -259,11 +261,12 @@ const INV084_ASSUME_TOTAL: usize = inv084_count_token(INV084_SRC_004, INV084_ASS
     + inv084_count_token(INV084_SRC_019, INV084_ASSUME_TOKEN)
     + inv084_count_token(INV084_SRC_022, INV084_ASSUME_TOKEN)
     + inv084_count_token(INV084_SRC_045, INV084_ASSUME_TOKEN)
+    + inv084_count_token(INV084_SRC_052, INV084_ASSUME_TOKEN)
     + inv084_count_token(INV084_SRC_080, INV084_ASSUME_TOKEN)
     + inv084_count_token(INV084_SRC_084, INV084_ASSUME_TOKEN)
     + inv084_count_token(INV084_SRC_085, INV084_ASSUME_TOKEN);
 
-const _: () = assert!(INV084_KANI_MODULES_MOUNTED == 9);
+const _: () = assert!(INV084_KANI_MODULES_MOUNTED == 10);
 const _: () = assert!(inv084_inventory_rows_are_classified());
 const _: () = assert!(inv084_count_inventory_rows() == INV084_ASSUME_TOTAL);
 const _: () = assert!(
@@ -289,6 +292,10 @@ const _: () = assert!(
 const _: () = assert!(
     inv084_count_inventory_rows_for_file(INV084_FILE_045)
         == inv084_count_token(INV084_SRC_045, INV084_ASSUME_TOKEN)
+);
+const _: () = assert!(
+    inv084_count_inventory_rows_for_file(INV084_FILE_052)
+        == inv084_count_token(INV084_SRC_052, INV084_ASSUME_TOKEN)
 );
 const _: () = assert!(
     inv084_count_inventory_rows_for_file(INV084_FILE_080)

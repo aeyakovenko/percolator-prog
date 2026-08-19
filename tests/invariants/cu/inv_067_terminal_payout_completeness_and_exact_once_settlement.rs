@@ -29,6 +29,7 @@ fn v16_program_retained_recovery_haircut_prerequisite_matrix_keeps_prior_claim_f
 
     let mut params = production_risk_params();
     params.max_portfolio_assets = 2;
+    params.max_abs_funding_e9_per_slot = 0;
     params.public_b_chunk_atoms = percolator::MAX_VAULT_TVL;
     let mut env = V16CuEnv::new_with_init_params(params);
     env.configure_permissionless_resolve_with_cu(100, 5);

@@ -610,7 +610,8 @@ pub struct PendingMarkFeeRewardReproduction {
 pub struct FractionalCapSettlementReproduction {
     pub blocker: KnownBlocker,
     pub target_price: u64,
-    pub stalled_price: u64,
+    pub settlement_price: u64,
+    pub reached_target: bool,
     pub successful_cranks: u16,
     pub rollback_stalls: u8,
     pub long_payout: u64,
@@ -10343,7 +10344,7 @@ pub fn reproduce_fractional_cap_settlement(
         }
         let price_after = env.primary_market_state().1.assets[0].effective_price;
         if price_after == TARGET_PRICE {
-            return Err("PR 365 fractional cap now reaches its target; remove quarantine".into());
+            break;
         }
         if (nonmoving_attempts >= 3 || rollback_stalls >= 3) && price_after > TARGET_PRICE {
             break;
@@ -10352,17 +10353,18 @@ pub fn reproduce_fractional_cap_settlement(
             .checked_add(MAX_DT)
             .ok_or("PR 365 crank slot overflow")?;
     }
-    let stalled = env.primary_market_state().1.assets[0];
+    let settlement = env.primary_market_state().1.assets[0];
+    let reached_target = settlement.effective_price == TARGET_PRICE;
     if successful_cranks == 0
-        || (nonmoving_attempts < 3 && rollback_stalls < 3)
-        || stalled.effective_price <= TARGET_PRICE
-        || stalled.raw_oracle_target_price != TARGET_PRICE
+        || (!reached_target && nonmoving_attempts < 3 && rollback_stalls < 3)
+        || settlement.effective_price < TARGET_PRICE
+        || settlement.raw_oracle_target_price != TARGET_PRICE
     {
         return Err(format!(
-            "PR 365 did not reach a persistent max-dt floor: price={}, raw={}, successes={}, \
+            "PR 365 reached neither its target nor a persistent max-dt floor: price={}, raw={}, successes={}, \
              nonmoving={}, rejected={rollback_stalls}",
-            stalled.effective_price,
-            stalled.raw_oracle_target_price,
+            settlement.effective_price,
+            settlement.raw_oracle_target_price,
             successful_cranks,
             nonmoving_attempts
         ));
@@ -10394,23 +10396,24 @@ pub fn reproduce_fractional_cap_settlement(
         .ok_or("PR 365 target short payout arithmetic failed")?;
     let long_overpayment = long_payout.checked_sub(target_long_payout).ok_or_else(|| {
         format!(
-            "PR 365 stalled settlement underpaid the long: actual={long_payout}, target={target_long_payout}, short={short_payout}/{target_short_payout}, stalled={}",
-            stalled.effective_price
+            "PR 365 settlement underpaid the long: actual={long_payout}, target={target_long_payout}, short={short_payout}/{target_short_payout}, settlement={}",
+            settlement.effective_price
         )
     })?;
     let short_underpayment = target_short_payout.checked_sub(short_payout).ok_or_else(|| {
         format!(
-            "PR 365 stalled settlement overpaid the short: actual={short_payout}, target={target_short_payout}, long={long_payout}/{target_long_payout}, stalled={}",
-            stalled.effective_price
+            "PR 365 settlement overpaid the short: actual={short_payout}, target={target_short_payout}, long={long_payout}/{target_long_payout}, settlement={}",
+            settlement.effective_price
         )
     })?;
-    if long_overpayment == 0
-        || long_overpayment != short_underpayment
+    if long_overpayment != short_underpayment
+        || (reached_target && long_overpayment != 0)
+        || (!reached_target && long_overpayment == 0)
         || u128::from(long_payout) + u128::from(short_payout) != DEPOSIT * 2
         || env.token_supply_observed() != supply_before
     {
         return Err(format!(
-            "PR 365 stalled mark did not transfer conserved terminal value: payouts={long_payout}/{short_payout}, target={target_long_payout}/{target_short_payout}, supply={}/{}",
+            "PR 365 settlement did not preserve target attribution and SPL supply: payouts={long_payout}/{short_payout}, target={target_long_payout}/{target_short_payout}, supply={}/{}",
             env.token_supply_observed(),
             supply_before
         ));
@@ -10418,7 +10421,8 @@ pub fn reproduce_fractional_cap_settlement(
     Ok(FractionalCapSettlementReproduction {
         blocker: KnownBlocker::FractionalCapSettlement,
         target_price: TARGET_PRICE,
-        stalled_price: stalled.effective_price,
+        settlement_price: settlement.effective_price,
+        reached_target,
         successful_cranks,
         rollback_stalls,
         long_payout,
@@ -18102,7 +18106,10 @@ fn run_prospective_funding_world(
         .map_err(|error| format!("PR 380 open stamper pair: {error}"))?;
 
     env.warp_to_slot(PREP_SLOT);
-    for _ in 0..4 {
+    for _ in 0..40 {
+        if env.primary_market_state().1.assets[0].slot_last == PREP_SLOT {
+            break;
+        }
         env.crank(
             1,
             PREP_SLOT,
@@ -18112,9 +18119,6 @@ fn run_prospective_funding_world(
             }],
         )
         .map_err(|error| format!("PR 380 prime funding clock: {error}"))?;
-        if env.primary_market_state().1.assets[0].slot_last == PREP_SLOT {
-            break;
-        }
     }
     if env.primary_market_state().1.assets[0].slot_last != PREP_SLOT {
         return Err(format!(
@@ -18152,15 +18156,25 @@ fn run_prospective_funding_world(
             0,
         )
     };
-    let catchup = |env: &mut V16Svm| {
-        env.crank(
-            1,
-            CATCHUP_SLOT,
-            vec![CrankObservationHint {
-                asset_index: 0,
-                oracle_accounts: 0,
-            }],
-        )
+    let catchup = |env: &mut V16Svm| -> Result<(), String> {
+        for _ in 0..8 {
+            if env.primary_market_state().1.assets[0].slot_last == CATCHUP_SLOT {
+                return Ok(());
+            }
+            env.crank(
+                1,
+                CATCHUP_SLOT,
+                vec![CrankObservationHint {
+                    asset_index: 0,
+                    oracle_accounts: 0,
+                }],
+            )
+            .map_err(|error| format!("PR 380 bounded catch-up: {error}"))?;
+        }
+        Err(format!(
+            "PR 380 bounded catch-up stopped at slot {}",
+            env.primary_market_state().1.assets[0].slot_last
+        ))
     };
     if stamp_before_catchup {
         stamp(&mut env).map_err(|error| format!("PR 380 trade-first stamp: {error}"))?;
@@ -19433,9 +19447,9 @@ fn run_pending_ewma_target_world(
         slot = slot
             .checked_add(1)
             .ok_or("PR 282 convergence slot overflow")?;
-        if slot >= 24 {
+        if slot >= 72 {
             return Err(format!(
-                "{route:?} pending target did not converge by slot 23"
+                "{route:?} pending target did not converge within 65 bounded one-slot cranks"
             ));
         }
         env.warp_to_slot(slot);
@@ -19619,9 +19633,9 @@ fn run_terminal_dust_payout_world(
         slot = slot
             .checked_add(1)
             .ok_or("PR 283 convergence slot overflow")?;
-        if slot >= 24 {
+        if slot >= 72 {
             return Err(format!(
-                "{route:?} terminal-dust rebound did not converge by slot 23"
+                "{route:?} terminal-dust rebound did not converge within 65 bounded one-slot cranks"
             ));
         }
         env.warp_to_slot(slot);

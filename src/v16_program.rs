@@ -12,10 +12,11 @@ extern crate std;
 
 use alloc::vec::Vec;
 use percolator::{
-    v16_domain_count_for_market_slots, AutoCrankObservationV16, AutoCrankOutcomeV16,
-    AutoCrankPlanV16, AutoCrankWorkV16, MarketModeV16, PermissionlessProgressOutcomeV16,
-    RebalanceRequestV16, SideV16, SourceCreditStateV16, TradeRequestV16, V16Config, V16Error,
-    BOUND_SCALE,
+    canonical_accrual_price_step_v16, v16_domain_count_for_market_slots, AccrualStepV16,
+    AutoCrankObservationV16, AutoCrankOutcomeV16, AutoCrankPlanV16, AutoCrankWorkV16,
+    MarketModeV16, PermissionlessProgressOutcomeV16, RebalanceRequestV16, SideV16,
+    SourceCreditStateV16, TradeRequestV16, V16Config, V16Error, BOUND_SCALE,
+    V16_MAX_ACCRUAL_PATH_STEPS,
 };
 use solana_program::{
     account_info::AccountInfo,
@@ -586,7 +587,10 @@ pub mod state {
         pub backing_trade_fee_bps_short: u16,
         pub backing_trade_fee_insurance_share_bps_long: u16,
         pub backing_trade_fee_insurance_share_bps_short: u16,
-        pub _padding0: [u8; 6],
+        /// Canonical price-move numerator remainder. This occupies two bytes of the former
+        /// six-byte padding lane, preserving the deployed account size and all later offsets.
+        pub price_move_remainder_bps_num: u16,
+        pub _padding0: [u8; 4],
         pub insurance_authority: [u8; 32],
         pub insurance_operator: [u8; 32],
         pub backing_bucket_authority: [u8; 32],
@@ -1405,7 +1409,8 @@ pub mod state {
                 profile.backing_trade_fee_insurance_share_bps_short,
             )
             || profile.invert > 1
-            || profile._padding0 != [0u8; 6]
+            || profile.price_move_remainder_bps_num >= 10_000
+            || profile._padding0 != [0u8; 4]
             || profile.oracle_leg_count as usize > ORACLE_LEG_CAP
             || (profile.oracle_leg_flags & !ORACLE_LEG_FLAGS_MASK) != 0
             || (profile.funding_mark_e6 != 0 && !valid_engine_oracle_price(profile.funding_mark_e6))
@@ -1501,7 +1506,8 @@ pub mod state {
             backing_trade_fee_bps_short: 0,
             backing_trade_fee_insurance_share_bps_long: 0,
             backing_trade_fee_insurance_share_bps_short: 0,
-            _padding0: [0u8; 6],
+            price_move_remainder_bps_num: 0,
+            _padding0: [0u8; 4],
             insurance_authority: [0u8; 32],
             insurance_operator: [0u8; 32],
             backing_bucket_authority: [0u8; 32],
@@ -1539,7 +1545,8 @@ pub mod state {
                 .backing_trade_fee_insurance_share_bps_long,
             backing_trade_fee_insurance_share_bps_short: config
                 .backing_trade_fee_insurance_share_bps_short,
-            _padding0: [0u8; 6],
+            price_move_remainder_bps_num: 0,
+            _padding0: [0u8; 4],
             // At InitMarket the market key bootstraps asset 0 exactly like an activator bootstraps a
             // permissionless asset 1..N: it is asset 0's cold-storage admin and all its sub-authorities.
             insurance_authority: config.marketauth,
@@ -12308,7 +12315,8 @@ pub mod processor {
                     .backing_trade_fee_insurance_share_bps_long,
                 backing_trade_fee_insurance_share_bps_short: existing_profile
                     .backing_trade_fee_insurance_share_bps_short,
-                _padding0: [0u8; 6],
+                price_move_remainder_bps_num: 0,
+                _padding0: [0u8; 4],
                 insurance_authority: existing_profile.insurance_authority,
                 insurance_operator: existing_profile.insurance_operator,
                 asset_admin: existing_profile.asset_admin,
@@ -12447,7 +12455,8 @@ pub mod processor {
                     .backing_trade_fee_insurance_share_bps_long,
                 backing_trade_fee_insurance_share_bps_short: existing_profile
                     .backing_trade_fee_insurance_share_bps_short,
-                _padding0: [0u8; 6],
+                price_move_remainder_bps_num: 0,
+                _padding0: [0u8; 4],
                 insurance_authority: existing_profile.insurance_authority,
                 insurance_operator: existing_profile.insurance_operator,
                 asset_admin: existing_profile.asset_admin,
@@ -12567,7 +12576,8 @@ pub mod processor {
                     .backing_trade_fee_insurance_share_bps_long,
                 backing_trade_fee_insurance_share_bps_short: existing_profile
                     .backing_trade_fee_insurance_share_bps_short,
-                _padding0: [0u8; 6],
+                price_move_remainder_bps_num: 0,
+                _padding0: [0u8; 4],
                 insurance_authority: existing_profile.insurance_authority,
                 insurance_operator: existing_profile.insurance_operator,
                 asset_admin: existing_profile.asset_admin,
@@ -13123,50 +13133,97 @@ pub mod processor {
                         .oracle_target_publish_time
                         .saturating_add(i64::try_from(elapsed_slots).unwrap_or(i64::MAX))
                 });
-                let (accrual_slot, crank_price, computed_funding_rate_e9) = if resolve_matured {
-                    required_market_resolve_accrual_for_profile_view(
-                        &oracle_profile,
-                        &group,
-                        asset_index,
-                        authenticated_now_slot,
-                        true,
-                    )?
-                    .ok_or(PercolatorError::EngineNonProgress)?
+                let (accrual_slot, crank_price, computed_funding_rate_e9, canonical_path) =
+                    if resolve_matured {
+                        let (slot, price, funding_rate) =
+                            required_market_resolve_accrual_for_profile_view(
+                                &oracle_profile,
+                                &group,
+                                asset_index,
+                                authenticated_now_slot,
+                                true,
+                            )?
+                            .ok_or(PercolatorError::EngineNonProgress)?;
+                        (slot, price, funding_rate, None)
+                    } else {
+                        reject_non_base_oracle_update_after_global_resolve_matured(
+                            &cfg,
+                            asset_index,
+                            authenticated_now_slot,
+                        )?;
+                        reject_permissionless_resolve_matured_live_for_profile_view(
+                            &cfg,
+                            &oracle_profile,
+                            &group,
+                        )?;
+                        let (target, target_slot) = hybrid_target_for_crank_view(
+                            &cfg,
+                            &mut oracle_profile,
+                            &group,
+                            asset_index,
+                            authenticated_now_slot,
+                            now_unix_ts,
+                            observation_tail,
+                        )?;
+                        let path = canonical_accrual_path_for_target_view(
+                            &mut oracle_profile,
+                            &group,
+                            asset_index,
+                            authenticated_now_slot,
+                            target,
+                            target_slot,
+                        )?;
+                        let price = path.last().map_or_else(
+                            || {
+                                group.markets[asset_index]
+                                    .engine
+                                    .asset
+                                    .effective_price
+                                    .get()
+                            },
+                            |step| step.effective_price,
+                        );
+                        (authenticated_now_slot, price, 0, Some(path))
+                    };
+                if canonical_path.is_none() {
+                    group
+                        .set_asset_raw_oracle_target_not_atomic(
+                            asset_index,
+                            oracle_profile.oracle_target_price_e6,
+                        )
+                        .map_err(map_v16_error)?;
+                }
+                if let Some(path) = canonical_path.as_ref() {
+                    group
+                        .accrue_asset_path_to_not_atomic(
+                            asset_index,
+                            accrual_slot,
+                            oracle_profile.oracle_target_price_e6,
+                            path,
+                            true,
+                        )
+                        .map_err(map_v16_error)?;
                 } else {
-                    reject_non_base_oracle_update_after_global_resolve_matured(
-                        &cfg,
-                        asset_index,
-                        authenticated_now_slot,
-                    )?;
-                    reject_permissionless_resolve_matured_live_for_profile_view(
-                        &cfg,
-                        &oracle_profile,
-                        &group,
-                    )?;
-                    let crank_price = hybrid_effective_price_for_crank_view(
-                        &cfg,
-                        &mut oracle_profile,
-                        &group,
-                        asset_index,
-                        authenticated_now_slot,
-                        now_unix_ts,
-                        observation_tail,
-                    )?;
-                    let funding_rate_e9 = permissionless_funding_rate_e9_view(
-                        &oracle_profile,
-                        &group,
-                        asset_index,
-                        authenticated_now_slot,
-                        crank_price,
-                    )?;
-                    (authenticated_now_slot, crank_price, funding_rate_e9)
-                };
-                group
-                    .set_asset_raw_oracle_target_not_atomic(
-                        asset_index,
-                        oracle_profile.oracle_target_price_e6,
-                    )
-                    .map_err(map_v16_error)?;
+                    group
+                        .accrue_asset_to_not_atomic(
+                            asset_index,
+                            accrual_slot,
+                            crank_price,
+                            computed_funding_rate_e9,
+                            true,
+                        )
+                        .map_err(map_v16_error)?;
+                }
+                let asset_slot_after = group.markets[asset_index].engine.asset.slot_last.get();
+                bounded_market_catchup_only |= asset_slot_after < authenticated_now_slot;
+                advance_funding_mark_checkpoint_view(&mut oracle_profile, asset_slot_after);
+                let next_funding_rate_e9 = permissionless_funding_rate_e9_view(
+                    &oracle_profile,
+                    &group,
+                    asset_index,
+                    accrual_slot,
+                    crank_price,
+                )?;
                 if asset_index == 0 {
                     cfg.last_good_oracle_slot = core::cmp::max(
                         cfg.last_good_oracle_slot,
@@ -13192,25 +13249,6 @@ pub mod processor {
                     cfg.oracle_leg_prices_e6 = oracle_profile.oracle_leg_prices_e6;
                     cfg.oracle_leg_publish_times = oracle_profile.oracle_leg_publish_times;
                 }
-                group
-                    .accrue_asset_to_not_atomic(
-                        asset_index,
-                        accrual_slot,
-                        crank_price,
-                        computed_funding_rate_e9,
-                        true,
-                    )
-                    .map_err(map_v16_error)?;
-                let asset_slot_after = group.markets[asset_index].engine.asset.slot_last.get();
-                bounded_market_catchup_only |= asset_slot_after < authenticated_now_slot;
-                advance_funding_mark_checkpoint_view(&mut oracle_profile, asset_slot_after);
-                let next_funding_rate_e9 = permissionless_funding_rate_e9_view(
-                    &oracle_profile,
-                    &group,
-                    asset_index,
-                    accrual_slot,
-                    crank_price,
-                )?;
                 write_oracle_profile_to_view(&mut group, asset_index, &oracle_profile)?;
                 observations.push(AutoCrankObservationV16 {
                     asset_index,
@@ -14410,7 +14448,7 @@ pub mod processor {
         .ok_or(PercolatorError::EngineArithmeticOverflow.into())
     }
 
-    fn hybrid_effective_price_for_crank_view(
+    fn hybrid_target_for_crank_view(
         cfg: &WrapperConfigV16,
         profile: &mut state::AssetOracleProfileV16,
         group: &state::MarketViewMutV16<'_>,
@@ -14418,28 +14456,18 @@ pub mod processor {
         now_slot: u64,
         now_unix_ts: i64,
         oracle_accounts: &[AccountInfo],
-    ) -> Result<u64, ProgramError> {
+    ) -> Result<(u64, u64), ProgramError> {
         if asset_index >= group.header.config.max_market_slots.get() as usize {
             return Err(PercolatorError::InvalidInstruction.into());
         }
         let asset_slot = group.markets[asset_index].engine.asset.slot_last.get();
-        advance_funding_mark_checkpoint_view(profile, asset_slot);
         if oracle_v16::profile_is_ewma_mark(profile) || oracle_v16::profile_is_auth_mark(profile) {
             let target = profile.mark_ewma_e6;
             if target == 0 {
                 return Err(PercolatorError::OracleInvalid.into());
             }
-            let asset = group.markets[asset_index].engine.asset;
-            let exposed = asset.oi_eff_long_q.get() != 0 || asset.oi_eff_short_q.get() != 0;
-            let price = oracle_v16::effective_price_from_target(
-                asset.effective_price.get(),
-                target,
-                group.header.config.max_price_move_bps_per_slot.get(),
-                asset_segment_dt_view(group, asset_index, now_slot)?,
-                exposed,
-            );
             profile.oracle_target_price_e6 = target;
-            return Ok(price);
+            return Ok((target, asset_slot.saturating_add(1)));
         }
         if !oracle_v16::profile_is_hybrid(profile) {
             let price = group.markets[asset_index]
@@ -14451,7 +14479,7 @@ pub mod processor {
                 return Err(PercolatorError::OracleInvalid.into());
             }
             profile.oracle_target_price_e6 = price;
-            return Ok(price);
+            return Ok((price, asset_slot));
         }
         if cfg.permissionless_resolve_stale_slots != 0
             && now_slot.saturating_sub(profile.last_good_oracle_slot)
@@ -14488,24 +14516,188 @@ pub mod processor {
         if target == 0 {
             return Err(PercolatorError::OracleInvalid.into());
         }
-        let asset = group.markets[asset_index].engine.asset;
-        let exposed = asset.oi_eff_long_q.get() != 0 || asset.oi_eff_short_q.get() != 0;
-        let price = oracle_v16::effective_price_from_target(
-            asset.effective_price.get(),
-            target,
-            group.header.config.max_price_move_bps_per_slot.get(),
-            asset_segment_dt_view(group, asset_index, now_slot)?,
-            exposed,
-        );
         profile.oracle_target_price_e6 = target;
-        if !oracle_v16::profile_hybrid_soft_stale_matured(profile, now_slot)
-            && price != profile.mark_ewma_e6
-        {
-            record_funding_mark_transition_view(profile, asset_slot, price, now_slot)?;
-            profile.mark_ewma_e6 = price;
-            profile.mark_ewma_last_slot = now_slot;
+        Ok((target, asset_slot.saturating_add(1)))
+    }
+
+    fn funding_rate_from_checkpoint_view(
+        profile: &state::AssetOracleProfileV16,
+        max_abs_rate: u64,
+        max_price_move_bps_per_slot: u64,
+        exposed: bool,
+        asset_slot: u64,
+        effective_price_before: u64,
+        effective_price_after: u64,
+        segment_dt: u64,
+    ) -> Result<i128, ProgramError> {
+        if !oracle_v16::profile_is_price_managed(profile) || max_abs_rate == 0 {
+            return Ok(0);
         }
-        Ok(price)
+        let active_mark = if profile.funding_mark_e6 != 0 {
+            profile.funding_mark_e6
+        } else if profile.mark_ewma_last_slot <= asset_slot {
+            profile.mark_ewma_e6
+        } else {
+            // A legacy profile cannot recover the mark that preceded an already-pending update.
+            // Preserve the old non-retroactive behavior until the engine catches up.
+            return Ok(0);
+        };
+        let has_pending =
+            profile.funding_mark_pending_e6 != 0 && profile.funding_mark_pending_slot > asset_slot;
+        let funding_index = if has_pending {
+            oracle_v16::effective_price_from_target(
+                effective_price_before,
+                active_mark,
+                max_price_move_bps_per_slot,
+                segment_dt,
+                exposed,
+            )
+        } else {
+            effective_price_after
+        };
+        policy_v16::premium_funding_rate_e9(active_mark, funding_index, max_abs_rate)
+            .ok_or(PercolatorError::EngineArithmeticOverflow.into())
+    }
+
+    fn price_move_remainder_bps_num_view(profile: &state::AssetOracleProfileV16) -> u16 {
+        profile.price_move_remainder_bps_num
+    }
+
+    fn set_price_move_remainder_bps_num_view(
+        profile: &mut state::AssetOracleProfileV16,
+        remainder: u16,
+    ) -> ProgramResult {
+        if remainder >= 10_000 {
+            return Err(PercolatorError::EngineInvalidConfig.into());
+        }
+        profile.price_move_remainder_bps_num = remainder;
+        Ok(())
+    }
+
+    fn canonical_accrual_path_for_target_view(
+        profile: &mut state::AssetOracleProfileV16,
+        group: &state::MarketViewMutV16<'_>,
+        asset_index: usize,
+        now_slot: u64,
+        target: u64,
+        target_slot: u64,
+    ) -> Result<Vec<AccrualStepV16>, ProgramError> {
+        if asset_index >= group.header.config.max_market_slots.get() as usize
+            || asset_index >= group.markets.len()
+            || target == 0
+        {
+            return Err(PercolatorError::InvalidInstruction.into());
+        }
+        let asset = group.markets[asset_index].engine.asset;
+        let mut simulated_slot = asset.slot_last.get();
+        if now_slot < simulated_slot {
+            return Err(PercolatorError::EngineStale.into());
+        }
+        let step_count = core::cmp::min(
+            asset_segment_dt_view(group, asset_index, now_slot)?,
+            V16_MAX_ACCRUAL_PATH_STEPS as u64,
+        );
+        let old_target = {
+            let stored = asset.raw_oracle_target_price.get();
+            if stored == 0 {
+                asset.effective_price.get()
+            } else {
+                stored
+            }
+        };
+        let exposed = asset.oi_eff_long_q.get() != 0 || asset.oi_eff_short_q.get() != 0;
+        let max_price_move_bps_per_slot = group.header.config.max_price_move_bps_per_slot.get();
+        let max_abs_rate = group.header.config.max_abs_funding_e9_per_slot.get();
+        let mut effective_price = asset.effective_price.get();
+        let price_cap_anchor = if old_target == target {
+            let anchor = asset.fund_px_last.get();
+            if anchor == 0 || anchor > percolator::MAX_ORACLE_PRICE {
+                return Err(PercolatorError::EngineInvalidConfig.into());
+            }
+            anchor
+        } else {
+            effective_price
+        };
+        let mut simulated_profile = *profile;
+        let mut price_move_remainder = if old_target == target {
+            price_move_remainder_bps_num_view(&simulated_profile)
+        } else {
+            0
+        };
+        let update_fresh_hybrid_mark = oracle_v16::profile_is_hybrid(&simulated_profile)
+            && !oracle_v16::profile_hybrid_soft_stale_matured(&simulated_profile, now_slot);
+        let hybrid_mark_start_slot = simulated_profile.last_good_oracle_slot;
+        let mut steps = Vec::with_capacity(step_count as usize);
+        for _ in 0..step_count {
+            advance_funding_mark_checkpoint_view(&mut simulated_profile, simulated_slot);
+            let next_slot = simulated_slot
+                .checked_add(1)
+                .ok_or(PercolatorError::EngineArithmeticOverflow)?;
+            let step_target = if old_target == target || next_slot >= target_slot {
+                target
+            } else {
+                old_target
+            };
+            let remainder_before = price_move_remainder;
+            let (next_price, remainder_after) = canonical_accrual_price_step_v16(
+                effective_price,
+                step_target,
+                price_cap_anchor,
+                max_price_move_bps_per_slot,
+                exposed,
+                remainder_before,
+            )
+            .map_err(map_v16_error)?;
+            price_move_remainder = remainder_after;
+            if next_price == 0 || next_price > percolator::MAX_ORACLE_PRICE {
+                return Err(PercolatorError::OracleInvalid.into());
+            }
+            if update_fresh_hybrid_mark
+                && next_slot >= hybrid_mark_start_slot
+                && next_price != simulated_profile.mark_ewma_e6
+            {
+                record_funding_mark_transition_view(
+                    &mut simulated_profile,
+                    simulated_slot,
+                    next_price,
+                    next_slot,
+                )?;
+                simulated_profile.mark_ewma_e6 = next_price;
+                simulated_profile.mark_ewma_last_slot = next_slot;
+            }
+            let funding_rate_e9 = funding_rate_from_checkpoint_view(
+                &simulated_profile,
+                max_abs_rate,
+                max_price_move_bps_per_slot,
+                exposed,
+                simulated_slot,
+                effective_price,
+                next_price,
+                1,
+            )?;
+            steps.push(AccrualStepV16 {
+                effective_price: next_price,
+                funding_rate_e9,
+                price_move_remainder_before_bps_num: remainder_before,
+                price_move_remainder_after_bps_num: remainder_after,
+            });
+            effective_price = next_price;
+            simulated_slot = next_slot;
+            advance_funding_mark_checkpoint_view(&mut simulated_profile, simulated_slot);
+        }
+        if update_fresh_hybrid_mark && effective_price != simulated_profile.mark_ewma_e6 {
+            record_funding_mark_transition_view(
+                &mut simulated_profile,
+                simulated_slot,
+                effective_price,
+                now_slot,
+            )?;
+            simulated_profile.mark_ewma_e6 = effective_price;
+            simulated_profile.mark_ewma_last_slot = now_slot;
+        }
+        set_price_move_remainder_bps_num_view(&mut simulated_profile, price_move_remainder)?;
+        *profile = simulated_profile;
+        Ok(steps)
     }
 
     fn permissionless_funding_rate_e9_view(
@@ -14529,34 +14721,17 @@ pub mod processor {
         }
         let asset = group.markets[asset_index].engine.asset;
         let asset_slot = asset.slot_last.get();
-        let active_mark = if profile.funding_mark_e6 != 0 {
-            profile.funding_mark_e6
-        } else if profile.mark_ewma_last_slot <= asset_slot {
-            profile.mark_ewma_e6
-        } else {
-            // A legacy profile cannot recover the mark that preceded an already-pending update.
-            // Preserve the old non-retroactive behavior until the engine catches up.
-            return Ok(0);
-        };
         let segment_dt = asset_segment_dt_view(group, asset_index, now_slot)?;
-        let has_pending =
-            profile.funding_mark_pending_e6 != 0 && profile.funding_mark_pending_slot > asset_slot;
-        // A prospective mark must not rewrite either side of the premium for elapsed time. When a
-        // pending mark exists, derive the counterfactual index from the committed mark as well.
-        let funding_index = if has_pending {
-            let exposed = asset.oi_eff_long_q.get() != 0 || asset.oi_eff_short_q.get() != 0;
-            oracle_v16::effective_price_from_target(
-                asset.effective_price.get(),
-                active_mark,
-                group.header.config.max_price_move_bps_per_slot.get(),
-                segment_dt,
-                exposed,
-            )
-        } else {
-            effective_price
-        };
-        policy_v16::premium_funding_rate_e9(active_mark, funding_index, max_abs_rate)
-            .ok_or(PercolatorError::EngineArithmeticOverflow.into())
+        funding_rate_from_checkpoint_view(
+            profile,
+            max_abs_rate,
+            group.header.config.max_price_move_bps_per_slot.get(),
+            asset.oi_eff_long_q.get() != 0 || asset.oi_eff_short_q.get() != 0,
+            asset_slot,
+            asset.effective_price.get(),
+            effective_price,
+            segment_dt,
+        )
     }
 
     fn stored_mark_target_for_zero_move_accrual_view(

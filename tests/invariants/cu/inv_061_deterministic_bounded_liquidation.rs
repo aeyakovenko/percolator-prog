@@ -903,14 +903,21 @@ fn v16_program_liquidation_cranker_reward_bounded_by_fee() {
         cranker_reward
     );
     assert!(total_fee > 0, "a liquidation fee was charged");
-    // BOUND: the reward never exceeds the fee, and at 50% share it is exactly half (rest to insurance).
+    // BOUND: the reward never exceeds the fee. The configured share rounds down and the
+    // indivisible remainder stays in insurance, so odd fees still partition exactly.
     assert!(
         cranker_reward <= total_fee,
         "cranker reward must not exceed the fee (no profit beyond the fee)"
     );
     assert_eq!(
-        cranker_reward, ins_delta,
-        "50%% share: cranker reward == insurance share (exact split)"
+        cranker_reward,
+        total_fee * 5_000 / 10_000,
+        "50% cranker share uses the production floor rule"
+    );
+    assert_eq!(
+        ins_delta,
+        total_fee - cranker_reward,
+        "insurance receives the exact indivisible remainder"
     );
     assert!(
         cranker_reward < total_fee,

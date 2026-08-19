@@ -713,7 +713,7 @@ fn run_micro_price_schedule(eager: bool) -> MicroPriceScheduleOutcome {
 }
 
 #[test]
-fn v16_program_micro_price_schedule_matrix_discovers_clock_consuming_noop_cranks() {
+fn v16_program_micro_price_schedule_is_partition_invariant_and_eventually_progresses() {
     let delayed = run_micro_price_schedule(false);
     let eager = run_micro_price_schedule(true);
     assert_eq!(delayed.raw_target, 200);
@@ -723,12 +723,18 @@ fn v16_program_micro_price_schedule_matrix_discovers_clock_consuming_noop_cranks
         "five elapsed slots must make one price atom representable: {delayed:?}"
     );
     assert_eq!(
-        eager.effective_price, 100,
-        "per-slot cranks must reproduce target pinning: {eager:?}"
+        eager.effective_price, delayed.effective_price,
+        "carried sub-atom movement must make eager and delayed cranks equivalent: eager={eager:?}, delayed={delayed:?}"
     );
     assert_eq!(eager.asset_slot_last, 5);
+    assert_eq!(delayed.asset_slot_last, eager.asset_slot_last);
     assert_eq!(eager.successful_calls, 5);
-    assert_eq!(eager.zero_delta_clock_advances, 5);
+    assert_eq!(delayed.successful_calls, 1);
+    assert_eq!(
+        eager.zero_delta_clock_advances, 4,
+        "four sub-atom steps should carry into the fifth visible price move: {eager:?}"
+    );
+    assert_eq!(delayed.zero_delta_clock_advances, 0);
     assert_eq!(eager.vault_tokens, delayed.vault_tokens);
 }
 

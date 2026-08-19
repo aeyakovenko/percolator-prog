@@ -45,6 +45,9 @@ mod inv_022_instruction_decoding_and_schema_upgrade_safety;
 #[path = "invariants/kani/inv_045_no_free_mark_movement.rs"]
 mod inv_045_no_free_mark_movement;
 
+#[path = "invariants/kani/inv_052_split_merge_invariance.rs"]
+mod inv_052_split_merge_invariance;
+
 #[path = "invariants/kani/inv_080_error_propagation_and_exact_rollback.rs"]
 mod inv_080_error_propagation_and_exact_rollback;
 

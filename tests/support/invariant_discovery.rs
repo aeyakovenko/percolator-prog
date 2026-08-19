@@ -1074,7 +1074,8 @@ pub struct ObservationOmissionDiscovery {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FractionalMovementDiscovery {
     pub target_price: u64,
-    pub stalled_price: u64,
+    pub settlement_price: u64,
+    pub reached_target: bool,
     pub successful_cranks: u16,
     pub rejected_stalls: u8,
     pub nonmoving_stalls: u8,
@@ -1679,10 +1680,19 @@ impl HybridTerminalSnapshotDiscovery {
 impl FractionalMovementDiscovery {
     pub fn is_violation(&self) -> bool {
         self.successful_cranks != 0
-            && self.stalled_price > self.target_price
+            && !self.reached_target
+            && self.settlement_price > self.target_price
             && (self.rejected_stalls >= 3 || self.nonmoving_stalls >= 3)
             && self.long_overpayment != 0
             && self.long_overpayment == self.short_underpayment
+    }
+
+    pub fn preserves_fractional_settlement(&self) -> bool {
+        self.successful_cranks != 0
+            && self.reached_target
+            && self.settlement_price == self.target_price
+            && self.long_overpayment == 0
+            && self.short_underpayment == 0
     }
 }
 
@@ -6383,7 +6393,10 @@ fn run_prospective_accrual_world(
     execute_reported_price_route(&mut env, route, 0, 1, POS_SCALE as i128, PRICE)?;
     execute_reported_price_route(&mut env, route, 2, 3, POS_SCALE as i128, PRICE)?;
     env.warp_to_slot(PREP_SLOT);
-    for _ in 0..4 {
+    for _ in 0..40 {
+        if env.primary_market_state().1.assets[0].slot_last == PREP_SLOT {
+            break;
+        }
         env.crank(
             1,
             PREP_SLOT,
@@ -6393,9 +6406,6 @@ fn run_prospective_accrual_world(
             }],
         )
         .map_err(|error| format!("prime prospective funding clock: {error}"))?;
-        if env.primary_market_state().1.assets[0].slot_last == PREP_SLOT {
-            break;
-        }
     }
     if env.primary_market_state().1.assets[0].slot_last != PREP_SLOT {
         return Err("prospective funding clock did not reach prep slot".into());
@@ -6420,16 +6430,25 @@ fn run_prospective_accrual_world(
     let stamp = |env: &mut V16Svm| {
         execute_reported_price_route(env, route, 2, 3, -(POS_SCALE as i128), STAMP_EXEC_PRICE)
     };
-    let catchup = |env: &mut V16Svm| {
-        env.crank(
-            1,
-            CATCHUP_SLOT,
-            vec![CrankObservationHint {
-                asset_index: 0,
-                oracle_accounts: 0,
-            }],
-        )
-        .map(|_| ())
+    let catchup = |env: &mut V16Svm| -> Result<(), String> {
+        for _ in 0..8 {
+            if env.primary_market_state().1.assets[0].slot_last == CATCHUP_SLOT {
+                return Ok(());
+            }
+            env.crank(
+                1,
+                CATCHUP_SLOT,
+                vec![CrankObservationHint {
+                    asset_index: 0,
+                    oracle_accounts: 0,
+                }],
+            )
+            .map_err(|error| format!("bounded prospective catch-up: {error}"))?;
+        }
+        Err(format!(
+            "bounded prospective catch-up stopped at slot {}",
+            env.primary_market_state().1.assets[0].slot_last
+        ))
     };
     if stamp_before_catchup {
         stamp(&mut env).map_err(|error| format!("trade-first prospective stamp: {error}"))?;
@@ -6950,8 +6969,10 @@ fn run_pending_target_world(
         slot = slot
             .checked_add(1)
             .ok_or_else(|| "target convergence slot overflow".to_string())?;
-        if slot >= 24 {
-            return Err(format!("{route:?} pending target did not converge"));
+        if slot >= 72 {
+            return Err(format!(
+                "{route:?} pending target did not converge within 65 bounded one-slot cranks"
+            ));
         }
         env.warp_to_slot(slot);
     }
@@ -8177,7 +8198,7 @@ pub fn discover_observation_omission_violation(
     })
 }
 
-pub fn discover_fractional_movement_stall(
+pub fn verify_fractional_movement_convergence(
     mut seed: [u8; 32],
 ) -> Result<FractionalMovementDiscovery, String> {
     const OPEN_PRICE: u64 = 100;
@@ -8253,7 +8274,7 @@ pub fn discover_fractional_movement_stall(
         }
         let price_after = env.primary_market_state().1.assets[0].effective_price;
         if price_after == TARGET_PRICE {
-            return Err("fractional movement reached target; no stall discovered".into());
+            break;
         }
         if (nonmoving_stalls >= 3 || rejected_stalls >= 3) && price_after > TARGET_PRICE {
             break;
@@ -8262,13 +8283,14 @@ pub fn discover_fractional_movement_stall(
             .checked_add(MAX_DT)
             .ok_or_else(|| "fractional crank slot overflow".to_string())?;
     }
-    let stalled_price = env.primary_market_state().1.assets[0].effective_price;
+    let settlement_price = env.primary_market_state().1.assets[0].effective_price;
+    let reached_target = settlement_price == TARGET_PRICE;
     if successful_cranks == 0
-        || (nonmoving_stalls < 3 && rejected_stalls < 3)
-        || stalled_price <= TARGET_PRICE
+        || (!reached_target && nonmoving_stalls < 3 && rejected_stalls < 3)
+        || settlement_price < TARGET_PRICE
     {
         return Err(format!(
-            "fractional target did not reach stable stall: price={stalled_price}, success={successful_cranks}, no-op={nonmoving_stalls}, reject={rejected_stalls}"
+            "fractional target reached neither its target nor a stable floor: price={settlement_price}, success={successful_cranks}, no-op={nonmoving_stalls}, reject={rejected_stalls}"
         ));
     }
 
@@ -8292,21 +8314,27 @@ pub fn discover_fractional_movement_stall(
         .ok_or_else(|| "target short payout overflow".to_string())?;
     let long_overpayment = long_payout
         .checked_sub(target_long_payout)
-        .ok_or_else(|| "fractional stall underpaid long".to_string())?;
+        .ok_or_else(|| "fractional settlement underpaid long".to_string())?;
     let short_underpayment = target_short_payout
         .checked_sub(short_payout)
-        .ok_or_else(|| "fractional stall overpaid short".to_string())?;
+        .ok_or_else(|| "fractional settlement overpaid short".to_string())?;
     if long_payout
         .checked_add(short_payout)
         .ok_or_else(|| "fractional payout total overflow".to_string())?
         != DEPOSIT * 2
         || env.token_supply_observed() != supply_before
+        || long_overpayment != short_underpayment
+        || (reached_target && long_overpayment != 0)
+        || (!reached_target && long_overpayment == 0)
     {
-        return Err("fractional stall did not conserve terminal payout/SPL supply".into());
+        return Err(
+            "fractional settlement did not preserve target attribution and SPL supply".into(),
+        );
     }
     Ok(FractionalMovementDiscovery {
         target_price: TARGET_PRICE,
-        stalled_price,
+        settlement_price,
+        reached_target,
         successful_cranks,
         rejected_stalls,
         nonmoving_stalls,
@@ -8693,8 +8721,10 @@ fn run_terminal_dust_world(
         slot = slot
             .checked_add(1)
             .ok_or_else(|| "terminal convergence slot overflow".to_string())?;
-        if slot >= 24 {
-            return Err(format!("{route:?} terminal rebound did not converge"));
+        if slot >= 72 {
+            return Err(format!(
+                "{route:?} terminal rebound did not converge within 65 bounded one-slot cranks"
+            ));
         }
         env.warp_to_slot(slot);
     }
@@ -9212,7 +9242,7 @@ fn discover_one_stale_cohort_novation(
         asset_index: 0,
         oracle_accounts: 0,
     }];
-    for slot in 2..=4 {
+    for slot in 2..=5 {
         env.warp_to_slot(slot);
         env.push_auth_mark(0, slot, LOSS_PRICE)
             .map_err(|error| format!("publish stale-cohort loss mark at {slot}: {error}"))?;
@@ -9293,7 +9323,7 @@ fn discover_one_stale_cohort_novation(
     for _ in 0..64 {
         let mut round_progressed = false;
         for actor in [LOSER, ENTRANT, WINNER] {
-            if env.crank(actor, 4, observation.clone()).is_ok() {
+            if env.crank(actor, 5, observation.clone()).is_ok() {
                 settlement_cranks = settlement_cranks.saturating_add(1);
                 round_progressed = true;
             }
@@ -9319,7 +9349,7 @@ fn discover_one_stale_cohort_novation(
     let _ = env.finalize_reset_side(0, 0);
     for actor in [ENTRANT, WINNER] {
         for _ in 0..4 {
-            let _ = env.crank(actor, 4, observation.clone());
+            let _ = env.crank(actor, 5, observation.clone());
         }
     }
 

@@ -184,7 +184,7 @@ struct FundingCadenceOutcome {
     terminal_c_tot: u128,
 }
 
-fn run_funding_cadence(fragmented: bool, target_price: u64) -> FundingCadenceOutcome {
+fn run_funding_cadence(crank_slots: &[u64], target_price: u64) -> FundingCadenceOutcome {
     const INITIAL_PRICE: u64 = 1_000_000;
     const DEPOSIT: u128 = 2_000_000_000;
     const SIZE_Q: i128 = (1_000u128 * POS_SCALE) as i128;
@@ -238,33 +238,23 @@ fn run_funding_cadence(fragmented: bool, target_price: u64) -> FundingCadenceOut
         }
     );
 
-    if fragmented {
-        for slot in 2..=10u64 {
-            env.svm.warp_to_slot(slot);
-            for portfolio in [long, short] {
-                env.svm.expire_blockhash();
-                env.crank(
-                    portfolio,
-                    ProgInstruction::PermissionlessCrank {
-                        now_slot: slot,
-                        observations: crank_observations(0),
-                    },
-                );
-            }
-        }
-    } else {
-        env.svm.warp_to_slot(10);
+    let mut previous_slot = 1;
+    for &slot in crank_slots {
+        assert!(slot > previous_slot && slot <= 10);
+        env.svm.warp_to_slot(slot);
         for portfolio in [long, short] {
             env.svm.expire_blockhash();
             env.crank(
                 portfolio,
                 ProgInstruction::PermissionlessCrank {
-                    now_slot: 10,
+                    now_slot: slot,
                     observations: crank_observations(0),
                 },
             );
         }
+        previous_slot = slot;
     }
+    assert_eq!(previous_slot, 10, "schedule must reach the common endpoint");
 
     let long_state_before_close = env.portfolio_state(long);
     let short_state_before_close = env.portfolio_state(short);
@@ -346,13 +336,14 @@ fn run_funding_cadence(fragmented: bool, target_price: u64) -> FundingCadenceOut
     }
 }
 
-// Direct counterexample: endpoint funding currently erases the premium integral when one delayed
-// public crank reaches the same terminal mark as a sequence of one-slot cranks.
 #[test]
-fn v16_counterexample_delayed_converging_crank_erases_elapsed_funding() {
-    let fragmented = run_funding_cadence(true, 1_100_000);
-    let delayed = run_funding_cadence(false, 1_100_000);
+fn v16_program_upward_funding_is_crank_partition_invariant() {
+    let fragmented = run_funding_cadence(&[2, 3, 4, 5, 6, 7, 8, 9, 10], 1_100_000);
+    let irregular = run_funding_cadence(&[3, 6, 7, 10], 1_100_000);
+    let delayed = run_funding_cadence(&[10], 1_100_000);
 
+    assert_eq!(fragmented, irregular);
+    assert_eq!(fragmented, delayed);
     assert_eq!(fragmented.final_mark, delayed.final_mark);
     assert_eq!(fragmented.final_mark, 1_100_000);
     assert_eq!(fragmented.effective_price, delayed.effective_price);
@@ -362,41 +353,22 @@ fn v16_counterexample_delayed_converging_crank_erases_elapsed_funding() {
     assert_eq!(fragmented.terminal_c_tot, delayed.terminal_c_tot);
     assert_eq!(fragmented.terminal_c_tot, 0);
     assert_ne!(fragmented.f_long_num, 0, "control must accrue funding");
-    assert_eq!(
-        delayed.f_long_num, 0,
-        "delayed endpoint rate erases the interval"
-    );
-    assert!(delayed.long_pnl_before_close > fragmented.long_pnl_before_close);
-    assert!(delayed.short_capital_before_close < fragmented.short_capital_before_close);
-    assert_eq!(
-        (delayed.long_pnl_before_close - fragmented.long_pnl_before_close) as u128,
-        fragmented.short_capital_before_close - delayed.short_capital_before_close,
-    );
-    assert_eq!(
-        delayed.long_withdrawn - fragmented.long_withdrawn,
-        fragmented.short_withdrawn - delayed.short_withdrawn,
-    );
-    assert_eq!(delayed.long_withdrawn - fragmented.long_withdrawn, 80_000);
+    assert_eq!(fragmented.f_short_num, -fragmented.f_long_num);
 }
 
 #[test]
-fn v16_counterexample_downward_convergence_erases_negative_funding() {
-    let fragmented = run_funding_cadence(true, 910_000);
-    let delayed = run_funding_cadence(false, 910_000);
+fn v16_program_downward_funding_is_crank_partition_invariant() {
+    let fragmented = run_funding_cadence(&[2, 3, 4, 5, 6, 7, 8, 9, 10], 910_000);
+    let irregular = run_funding_cadence(&[4, 5, 8, 10], 910_000);
+    let delayed = run_funding_cadence(&[10], 910_000);
 
+    assert_eq!(fragmented, irregular);
+    assert_eq!(fragmented, delayed);
     assert_eq!(fragmented.final_mark, 910_000);
     assert_eq!(fragmented.effective_price, delayed.effective_price);
     assert_eq!(fragmented.effective_price, 910_000);
     assert!(fragmented.f_long_num > 0);
     assert_eq!(fragmented.f_short_num, -fragmented.f_long_num);
-    assert_eq!(delayed.f_long_num, 0);
-    assert_eq!(delayed.f_short_num, 0);
-    assert!(fragmented.long_withdrawn > delayed.long_withdrawn);
-    assert!(delayed.short_withdrawn > fragmented.short_withdrawn);
-    assert_eq!(
-        fragmented.long_withdrawn - delayed.long_withdrawn,
-        delayed.short_withdrawn - fragmented.short_withdrawn,
-    );
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -408,7 +380,7 @@ struct PriceCapCadenceOutcome {
     short_withdrawn: u128,
 }
 
-fn run_price_cap_cadence(fragmented: bool, target_price: u64) -> PriceCapCadenceOutcome {
+fn run_price_cap_cadence(crank_slots: &[u64], target_price: u64) -> PriceCapCadenceOutcome {
     const INITIAL_PRICE: u64 = 1_000_000;
     const DEPOSIT: u128 = 2_000_000_000;
     let size_q = if target_price > INITIAL_PRICE {
@@ -470,29 +442,21 @@ fn run_price_cap_cadence(fragmented: bool, target_price: u64) -> PriceCapCadence
         }
     );
 
-    if fragmented {
-        for slot in 2..=10u64 {
-            env.svm.warp_to_slot(slot);
-            env.svm.expire_blockhash();
-            env.crank(
-                long,
-                ProgInstruction::PermissionlessCrank {
-                    now_slot: slot,
-                    observations: crank_observations(0),
-                },
-            );
-        }
-    } else {
-        env.svm.warp_to_slot(10);
+    let mut previous_slot = 1;
+    for &slot in crank_slots {
+        assert!(slot > previous_slot && slot <= 10);
+        env.svm.warp_to_slot(slot);
         env.svm.expire_blockhash();
         env.crank(
             long,
             ProgInstruction::PermissionlessCrank {
-                now_slot: 10,
+                now_slot: slot,
                 observations: crank_observations(0),
             },
         );
+        previous_slot = slot;
     }
+    assert_eq!(previous_slot, 10, "schedule must reach the common endpoint");
 
     let long_before_close = env.portfolio_state(long);
     let short_before_close = env.portfolio_state(short);
@@ -543,53 +507,39 @@ fn run_price_cap_cadence(fragmented: bool, target_price: u64) -> PriceCapCadence
     }
 }
 
-// Direct counterexample: the public caller can partition identical elapsed time into one-slot
-// cranks, compounding a current-price cap and changing independent users' eventual SPL payouts.
 #[test]
-fn v16_counterexample_price_cap_partition_changes_effective_price_and_spl_payouts() {
-    let fragmented = run_price_cap_cadence(true, 2_000_000);
-    let delayed = run_price_cap_cadence(false, 2_000_000);
+fn v16_program_upward_price_cap_and_spl_payouts_are_crank_partition_invariant() {
+    let fragmented = run_price_cap_cadence(&[2, 3, 4, 5, 6, 7, 8, 9, 10], 2_000_000);
+    let irregular = run_price_cap_cadence(&[2, 5, 9, 10], 2_000_000);
+    let delayed = run_price_cap_cadence(&[10], 2_000_000);
 
-    assert_eq!(fragmented.effective_price_before_close, 1_104_620);
-    assert_eq!(delayed.effective_price_before_close, 1_100_900);
-    assert!(fragmented.long_pnl_before_close > delayed.long_pnl_before_close);
+    assert_eq!(fragmented, irregular);
+    assert_eq!(fragmented, delayed);
+    assert_eq!(fragmented.effective_price_before_close, 1_100_000);
+    assert!(fragmented.long_pnl_before_close > 0);
     assert_eq!(
-        fragmented.short_capital_before_close,
-        delayed.short_capital_before_close,
-    );
-    assert_eq!(
-        fragmented.long_withdrawn - delayed.long_withdrawn,
-        3_720_000,
-    );
-    assert_eq!(
-        delayed.short_withdrawn - fragmented.short_withdrawn,
-        3_720_000,
+        fragmented.long_withdrawn + fragmented.short_withdrawn,
+        4_000_000_000
     );
 }
 
 #[test]
-fn v16_counterexample_downward_price_cap_partition_reverses_the_winner() {
-    let fragmented = run_price_cap_cadence(true, 500_000);
-    let delayed = run_price_cap_cadence(false, 500_000);
+fn v16_program_downward_price_cap_and_spl_payouts_are_crank_partition_invariant() {
+    let fragmented = run_price_cap_cadence(&[2, 3, 4, 5, 6, 7, 8, 9, 10], 500_000);
+    let irregular = run_price_cap_cadence(&[4, 6, 10], 500_000);
+    let delayed = run_price_cap_cadence(&[10], 500_000);
 
-    assert_eq!(fragmented.effective_price_before_close, 904_387);
-    assert_eq!(delayed.effective_price_before_close, 900_900);
-    assert!(delayed.long_pnl_before_close > fragmented.long_pnl_before_close);
+    assert_eq!(fragmented, irregular);
+    assert_eq!(fragmented, delayed);
+    assert_eq!(fragmented.effective_price_before_close, 900_000);
+    assert!(fragmented.long_pnl_before_close > 0);
     assert_eq!(
-        fragmented.short_capital_before_close,
-        delayed.short_capital_before_close,
-    );
-    assert_eq!(
-        delayed.long_withdrawn - fragmented.long_withdrawn,
-        3_487_000
-    );
-    assert_eq!(
-        fragmented.short_withdrawn - delayed.short_withdrawn,
-        3_487_000
+        fragmented.long_withdrawn + fragmented.short_withdrawn,
+        4_000_000_000
     );
 }
 
-fn run_hybrid_price_cap_endpoint(fragmented: bool) -> u64 {
+fn run_hybrid_price_cap_endpoint(crank_slots: &[u64]) -> u64 {
     const INITIAL_PRICE: u64 = 1_000_000;
     const TARGET_PRICE: u64 = 2_000_000;
     let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
@@ -647,36 +597,257 @@ fn run_hybrid_price_cap_endpoint(fragmented: bool) -> u64 {
     );
     assert_eq!(env.market_state().1.assets[0].effective_price, 1_010_000);
 
-    if fragmented {
-        for slot in 2..=10u64 {
-            set_test_clock(&mut env, slot, 100 + slot as i64);
-            env.svm.expire_blockhash();
-            env.crank_with_oracle_tail(
-                long,
-                ProgInstruction::PermissionlessCrank {
-                    now_slot: slot,
-                    observations: crank_observations(0),
-                },
-                &[target],
-            );
-        }
-    } else {
-        set_test_clock(&mut env, 10, 110);
+    let mut previous_slot = 1;
+    for &slot in crank_slots {
+        assert!(slot > previous_slot && slot <= 10);
+        set_test_clock(&mut env, slot, 100 + slot as i64);
         env.svm.expire_blockhash();
         env.crank_with_oracle_tail(
             long,
             ProgInstruction::PermissionlessCrank {
-                now_slot: 10,
+                now_slot: slot,
                 observations: crank_observations(0),
             },
             &[target],
         );
+        previous_slot = slot;
     }
+    assert_eq!(previous_slot, 10, "schedule must reach the common endpoint");
     env.market_state().1.assets[0].effective_price
 }
 
 #[test]
-fn v16_counterexample_hybrid_pyth_price_cap_partition_changes_endpoint() {
-    assert_eq!(run_hybrid_price_cap_endpoint(true), 1_104_620);
-    assert_eq!(run_hybrid_price_cap_endpoint(false), 1_100_900);
+fn v16_program_hybrid_pyth_price_cap_is_crank_partition_invariant() {
+    let fragmented = run_hybrid_price_cap_endpoint(&[2, 3, 4, 5, 6, 7, 8, 9, 10]);
+    let irregular = run_hybrid_price_cap_endpoint(&[4, 8, 10]);
+    let delayed = run_hybrid_price_cap_endpoint(&[10]);
+    assert_eq!(fragmented, 1_100_000);
+    assert_eq!(irregular, fragmented);
+    assert_eq!(delayed, fragmented);
+}
+
+#[test]
+fn v16_program_maximum_canonical_accrual_prefix_is_bounded_and_progresses() {
+    const INITIAL_PRICE: u64 = 1_000_000;
+    let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+        initial_price: INITIAL_PRICE,
+        max_price_move_bps_per_slot: 100,
+        max_accrual_dt_slots: 64,
+        max_abs_funding_e9_per_slot: 10_000,
+        min_funding_lifetime_slots: 64,
+        ..V16CuMarketParams::default()
+    });
+    env.svm.warp_to_slot(0);
+    env.configure_auth_mark_with_cu(0, INITIAL_PRICE);
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long = env.create_portfolio(&long_owner);
+    let short = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long, 2_000_000_000);
+    env.deposit(&short_owner, short, 2_000_000_000);
+    env.trade_with_cu(
+        &long_owner,
+        long,
+        &short_owner,
+        short,
+        (1_000u128 * POS_SCALE) as i128,
+        INITIAL_PRICE,
+        0,
+    );
+    env.svm.warp_to_slot(1);
+    env.push_auth_mark_with_cu(1, 2_000_000);
+    env.svm.warp_to_slot(64);
+
+    let first_cu = env.crank(
+        long,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 64,
+            observations: crank_observations(0),
+        },
+    );
+    let after_first = env.market_state().1.assets[0];
+    assert_eq!(
+        after_first.slot_last,
+        percolator::V16_MAX_ACCRUAL_PATH_STEPS as u64
+    );
+    assert!(after_first.effective_price > INITIAL_PRICE);
+
+    let second_cu = env.crank(
+        long,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 64,
+            observations: crank_observations(0),
+        },
+    );
+    let after_second = env.market_state().1.assets[0];
+    assert_eq!(after_second.slot_last, 64);
+    assert!(after_second.effective_price > after_first.effective_price);
+    println!("v16 canonical 32-step accrual prefix CU: first={first_cu}, second={second_cu}");
+    assert!(
+        first_cu < 1_400_000,
+        "first max-prefix crank used {first_cu} CU"
+    );
+    assert!(
+        second_cu < 1_400_000,
+        "second max-prefix crank used {second_cu} CU"
+    );
+}
+
+#[test]
+fn v16_program_target_change_resets_prior_price_movement_remainder() {
+    const PRICE: u64 = 100;
+    let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+        initial_price: PRICE,
+        max_price_move_bps_per_slot: 24,
+        max_accrual_dt_slots: 20,
+        min_funding_lifetime_slots: 20,
+        ..V16CuMarketParams::default()
+    });
+    env.configure_auth_mark_with_cu(0, PRICE);
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long = env.create_portfolio(&long_owner);
+    let short = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long, 10_000);
+    env.deposit(&short_owner, short, 10_000);
+    env.trade_with_cu(
+        &long_owner,
+        long,
+        &short_owner,
+        short,
+        POS_SCALE as i128,
+        PRICE,
+        0,
+    );
+
+    env.svm.warp_to_slot(1);
+    env.push_auth_mark_with_cu(1, 200);
+    env.crank(
+        long,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 1,
+            observations: crank_observations(0),
+        },
+    );
+    let first_profile =
+        state::read_asset_oracle_profile(&env.svm.get_account(&env.market).unwrap().data, 0)
+            .unwrap();
+    assert_eq!(first_profile.price_move_remainder_bps_num, 2_400);
+    assert_eq!(env.market_state().1.assets[0].effective_price, PRICE);
+
+    env.svm.warp_to_slot(2);
+    env.push_auth_mark_with_cu(2, 50);
+    env.crank(
+        long,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 2,
+            observations: crank_observations(0),
+        },
+    );
+    let second_profile =
+        state::read_asset_oracle_profile(&env.svm.get_account(&env.market).unwrap().data, 0)
+            .unwrap();
+    assert_eq!(
+        second_profile.price_move_remainder_bps_num,
+        2_400,
+        "the new downward trajectory starts with zero carry instead of inheriting the old target's 2,400 numerator units"
+    );
+    assert_eq!(second_profile._padding0, [0u8; 4]);
+    assert_eq!(env.market_state().1.assets[0].raw_oracle_target_price, 50);
+    assert_eq!(env.market_state().1.assets[0].effective_price, PRICE);
+}
+
+#[test]
+fn v16_program_full_14_leg_maximum_accrual_prefix_stays_bounded() {
+    const ASSET_COUNT: u16 = percolator_prog::constants::WRAPPER_MAX_PORTFOLIO_ASSETS;
+    const INITIAL_PRICE: u64 = 1_000_000;
+    let mut env = V16CuEnv::new_with_init_params(V16CuMarketParams {
+        max_portfolio_assets: ASSET_COUNT,
+        initial_price: INITIAL_PRICE,
+        max_price_move_bps_per_slot: 100,
+        max_accrual_dt_slots: 64,
+        max_abs_funding_e9_per_slot: 10_000,
+        min_funding_lifetime_slots: 64,
+        ..V16CuMarketParams::default()
+    });
+    for asset_index in 0..ASSET_COUNT {
+        env.configure_auth_mark_for_asset_as_admin(asset_index, 0, INITIAL_PRICE);
+    }
+
+    let long_owner = Keypair::new();
+    let short_owner = Keypair::new();
+    let long = env.create_portfolio(&long_owner);
+    let short = env.create_portfolio(&short_owner);
+    env.deposit(&long_owner, long, 100_000_000);
+    env.deposit(&short_owner, short, 100_000_000);
+    let legs = (0..ASSET_COUNT)
+        .map(|asset_index| BatchTradeLeg {
+            asset_index,
+            market_id: first_generation_market_id(asset_index),
+            size_q: POS_SCALE as i128,
+            exec_price: INITIAL_PRICE,
+            fee_bps: 0,
+        })
+        .collect();
+    env.svm.expire_blockhash();
+    env.send(
+        env.batch_trade_no_cpi_ix(long, short, legs),
+        vec![
+            AccountMeta::new(long_owner.pubkey(), true),
+            AccountMeta::new(short_owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(long, false),
+            AccountMeta::new(short, false),
+        ],
+        &[&long_owner, &short_owner],
+    )
+    .expect("public 14-leg batch open");
+    assert_eq!(
+        percolator::active_bitmap_count_ones(active_bitmap(&env.portfolio_state(long))),
+        ASSET_COUNT as u32
+    );
+    let vault_before = env.token_amount(env.vault);
+
+    env.svm.warp_to_slot(1);
+    env.push_auth_mark_for_asset_as_admin(0, 1, 2_000_000);
+    env.svm.warp_to_slot(64);
+    let first_cu = env.crank(
+        long,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 64,
+            observations: crank_observations(0),
+        },
+    );
+    let first = env.market_state().1.assets[0];
+    assert_eq!(
+        first.slot_last,
+        percolator::V16_MAX_ACCRUAL_PATH_STEPS as u64
+    );
+
+    let second_cu = env.crank(
+        long,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 64,
+            observations: crank_observations(0),
+        },
+    );
+    let second = env.market_state().1.assets[0];
+    assert_eq!(second.slot_last, 64);
+    assert!(second.effective_price > first.effective_price);
+    assert_eq!(env.token_amount(env.vault), vault_before);
+    assert_eq!(
+        percolator::active_bitmap_count_ones(active_bitmap(&env.portfolio_state(long))),
+        ASSET_COUNT as u32
+    );
+    println!(
+        "v16 public 14-leg canonical 32-step accrual CU: first={first_cu}, second={second_cu}"
+    );
+    assert!(
+        first_cu < 1_400_000,
+        "first full-shape prefix used {first_cu} CU"
+    );
+    assert!(
+        second_cu < 1_400_000,
+        "second full-shape prefix used {second_cu} CU"
+    );
 }

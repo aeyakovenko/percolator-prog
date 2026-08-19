@@ -139,6 +139,7 @@ fn v16_program_issue408_liquidation_reward_cannot_preempt_aged_maintenance_colla
 
     let mut params = production_risk_params();
     params.maintenance_fee_per_slot = FEE_PER_SLOT;
+    params.max_abs_funding_e9_per_slot = 0;
     let mut env = V16CuEnv::new_with_init_params(params);
     env.update_liquidation_fee_policy_with_cu(10_000);
     env.configure_auth_mark_with_cu(0, 1_000_000);

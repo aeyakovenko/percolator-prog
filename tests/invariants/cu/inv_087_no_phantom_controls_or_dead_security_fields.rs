@@ -472,6 +472,7 @@ fn v16_program_all_wrapper_owned_persisted_structs_have_complete_field_rosters()
                 "backing_trade_fee_bps_short",
                 "backing_trade_fee_insurance_share_bps_long",
                 "backing_trade_fee_insurance_share_bps_short",
+                "price_move_remainder_bps_num",
                 "_padding0",
                 "insurance_authority",
                 "insurance_operator",
@@ -575,6 +576,7 @@ fn v16_program_all_wrapper_owned_persisted_structs_have_complete_field_rosters()
             "expect_live_authority(&authorities.backing_bucket_authority",
             "record_funding_mark_transition_view",
             "advance_funding_mark_checkpoint_view",
+            "price_move_remainder_bps_num_view",
             "write_oracle_profile_to_view",
         ],
     );

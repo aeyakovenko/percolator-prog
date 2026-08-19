@@ -1784,6 +1784,18 @@ fn v16_bpf_no_cranker_liquidation_rejects_invalid_final_market_shape() {
 
     env.svm.warp_to_slot(1);
     env.push_ewma_mark_with_cu(1, 300);
+    env.crank(
+        short_account,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 1,
+            observations: crank_observations(0),
+        },
+    );
+    assert_ne!(
+        health_cert(&env.portfolio_state(short_account)).certified_liq_deficit,
+        0,
+        "the public refresh step must make the next selected action a liquidation"
+    );
     env.mutate_market(|_, group| {
         group.insurance_domain_budget[0] = group.insurance.saturating_add(1);
     });
@@ -1845,6 +1857,18 @@ fn v16_bpf_cranker_reward_liquidation_rejects_invalid_shape_without_paying_rewar
 
     env.svm.warp_to_slot(1);
     env.push_ewma_mark_with_cu(1, 300);
+    env.crank(
+        short_account,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 1,
+            observations: crank_observations(0),
+        },
+    );
+    assert_ne!(
+        health_cert(&env.portfolio_state(short_account)).certified_liq_deficit,
+        0,
+        "the public refresh step must make the next selected action a liquidation"
+    );
     env.mutate_market(|_, group| {
         group.config.liquidation_fee_bps = 10_000;
         group.config.liquidation_fee_cap = 1;

@@ -2,12 +2,11 @@
 //!
 //! Normative obligation: Every rounded allocation plus explicit residue equals its exact source amount.
 //!
-//! Evidence in this file (I plus invariant-specific F/M assertions): `v16_program_pr329_pr381_composite_rounding_preserves_exact_price_and_health`, `v16_program_pr253_omitted_rounded_funding_rejects_and_recovers`, `v16_program_pr365_fractional_cap_floor_changes_terminal_payouts`. These tests exercise the deployed public
+//! Evidence in this file (I plus invariant-specific F/M assertions): `v16_program_pr329_pr381_composite_rounding_preserves_exact_price_and_health`, `v16_program_pr253_omitted_rounded_funding_rejects_and_recovers`, `v16_program_pr365_fractional_cap_reaches_target_and_preserves_terminal_payouts`. These tests exercise the deployed public
 //! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
 //! rollback, liveness, or compute outcomes appropriate to the invariant.
 //!
-//! Guarantee boundary: PR329/381 and PR253 are fixed-pin public-route certifications. The
-//! fractional-cap test remains a quarantined counterexample and does not certify that sub-route.
+//! Guarantee boundary: PR329/381, PR253, and PR365 are fixed-pin public-route certifications.
 
 use super::*;
 
@@ -52,18 +51,16 @@ fn v16_program_pr253_omitted_rounded_funding_rejects_and_recovers() {
 }
 
 #[test]
-fn v16_program_pr365_fractional_cap_floor_changes_terminal_payouts() {
+fn v16_program_pr365_fractional_cap_reaches_target_and_preserves_terminal_payouts() {
     let reproduction = reproduce_fractional_cap_settlement([0x65; 32])
-        .unwrap_or_else(|error| panic!("PR 365 no longer reproduces: {error}"));
+        .unwrap_or_else(|error| panic!("PR 365 fixed route failed: {error}"));
     assert_eq!(reproduction.blocker, KnownBlocker::FractionalCapSettlement);
     assert_eq!(reproduction.target_price, 1);
-    assert!(reproduction.stalled_price > reproduction.target_price);
+    assert!(reproduction.reached_target);
+    assert_eq!(reproduction.settlement_price, reproduction.target_price);
     assert!(reproduction.successful_cranks > 0);
-    assert_eq!(
-        reproduction.long_overpayment,
-        reproduction.short_underpayment
-    );
-    assert!(reproduction.short_underpayment > 0);
+    assert_eq!(reproduction.long_overpayment, 0);
+    assert_eq!(reproduction.short_underpayment, 0);
     assert_eq!(
         u128::from(reproduction.long_payout) + u128::from(reproduction.short_payout),
         2_000_000

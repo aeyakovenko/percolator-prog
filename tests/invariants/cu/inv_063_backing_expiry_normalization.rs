@@ -30,6 +30,7 @@ fn v16_program_retained_recovery_expiry_prerequisite_matrix_avoids_provider_capi
 
     let mut params = production_risk_params();
     params.max_portfolio_assets = 2;
+    params.max_abs_funding_e9_per_slot = 0;
     let mut env = V16CuEnv::new_with_init_params(params);
     env.configure_permissionless_resolve_with_cu(100, 5);
     env.configure_auth_mark_for_asset_as_admin(0, 0, PRICE);
@@ -548,7 +549,7 @@ fn v16_attack_lapsed_live_source_backing_expires_bounded_and_owner_can_reduce() 
 
     for slot in 31..=160 {
         env.svm.warp_to_slot(slot);
-        env.push_auth_mark_with_cu(slot, 1);
+        env.push_auth_mark_with_cu(slot, 300);
         env.crank(
             keeper,
             ProgInstruction::PermissionlessCrank {

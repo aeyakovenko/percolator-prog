@@ -11,15 +11,14 @@
 //! public worlds with and without the selected asset observation after an unrelated epoch advance;
 //! omission must reject with exact rollback, after which the observed continuation must preserve
 //! funding indexes and terminal payouts exactly.
-//! `v16_program_fractional_max_dt_cranks_discover_terminal_value_stall` repeatedly executes the
+//! `v16_program_fractional_max_dt_cranks_reach_target_and_preserve_terminal_value` repeatedly executes the
 //! bounded public crank at maximum elapsed time and requires fractional cap residue to accumulate
 //! until the target is reached; it also reconciles any stalled price against terminal payouts.
 //! Direct impact tests remain below. These tests exercise the deployed public
 //! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
 //! rollback, liveness, or compute outcomes appropriate to the invariant.
 //!
-//! Guarantee boundary: the composite-rounding and selected-observation matrices are fixed-pin
-//! certification. The fractional movement matrix remains a quarantined counterexample.
+//! Guarantee boundary: all three matrices are fixed-pin public-route certifications.
 
 use super::*;
 
@@ -36,15 +35,15 @@ proptest! {
     })]
 
     #[test]
-    fn v16_program_fractional_max_dt_cranks_discover_terminal_value_stall(
+    fn v16_program_fractional_max_dt_cranks_reach_target_and_preserve_terminal_value(
         seed in any::<[u8; 32]>()
     ) {
-        let discovery = discover_fractional_movement_stall(seed)
+        let discovery = verify_fractional_movement_convergence(seed)
             .map_err(TestCaseError::fail)?;
         eprintln!("independent fractional-movement discovery: {discovery:?}");
         prop_assert!(
-            discovery.is_violation(),
-            "vulnerable-pin fractional movement changed: {:?}",
+            discovery.preserves_fractional_settlement(),
+            "fractional movement failed to converge and conserve value: {:?}",
             discovery
         );
     }
@@ -158,12 +157,15 @@ proptest! {
     fn v16_program_pr365_fractional_cap_settlement_fuzz(
         seed in fractional_cap_settlement_seed_strategy()
     ) {
-        let result = reproduce_fractional_cap_settlement(seed);
-        prop_assert!(
-            result.is_ok(),
-            "PR 365 no longer reproduces for seed {:?}: {}",
-            seed,
-            result.unwrap_err()
+        let reproduction = reproduce_fractional_cap_settlement(seed)
+            .map_err(TestCaseError::fail)?;
+        prop_assert!(reproduction.reached_target);
+        prop_assert_eq!(reproduction.settlement_price, reproduction.target_price);
+        prop_assert_eq!(reproduction.long_overpayment, 0);
+        prop_assert_eq!(reproduction.short_underpayment, 0);
+        prop_assert_eq!(
+            u128::from(reproduction.long_payout) + u128::from(reproduction.short_payout),
+            2_000_000
         );
     }
 }

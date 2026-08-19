@@ -583,7 +583,10 @@ fn v16_bpf_permissionless_crank_computes_funding_from_internal_mark_premium() {
     );
     let (_, funded_group) = env.market_state();
     assert_eq!(funded_group.funding_epoch, 1);
-    assert_eq!(funded_group.assets[0].effective_price, 1_210_000);
+    assert_eq!(
+        funded_group.assets[0].effective_price, 1_200_000,
+        "the two-slot movement envelope is linear from the stable trajectory anchor"
+    );
     assert_eq!(funded_group.assets[0].f_long_num, -(ADL_ONE as i128));
     assert_eq!(funded_group.assets[0].f_short_num, ADL_ONE as i128);
 }

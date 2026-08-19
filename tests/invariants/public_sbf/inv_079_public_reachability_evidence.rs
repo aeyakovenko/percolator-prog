@@ -466,6 +466,7 @@ fn v16_open_security_finding_benchmark_is_complete_and_non_overclaiming() {
                     | "composite-price-is-rounded-once-after-exact-composition"
                     | "omitted-observation-cannot-erase-balanced-rounded-transfer"
                     | "fractional-cap-residue-must-accumulate-to-target"
+                    | "canonical-price-remainder-makes-eager-and-delayed-cranks-equivalent"
                     | "composite-oracle-legs-must-share-one-coherent-observation-epoch"
                     | "terminal-payout-is-invariant-to-flattened-dust-position"
                     | "terminal-residual-cannot-double-charge-provider-principal"
