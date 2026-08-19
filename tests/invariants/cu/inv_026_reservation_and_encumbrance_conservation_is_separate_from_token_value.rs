@@ -234,12 +234,14 @@ fn v16_program_source_credit_reservation_labels_do_not_free_backing_value() {
     let market_before_withdraw = env.svm.get_account(&env.market).unwrap();
     let vault_before_withdraw = env.svm.get_account(&env.vault).unwrap();
     let dest_before_withdraw = env.svm.get_account(&backing_withdraw_dest).unwrap();
+    let market_id = env.asset_market_id(0);
     let backing_withdraw = send_tx(
         &mut env.svm,
         env.program_id,
         &env.payer,
         ProgInstruction::WithdrawBackingBucket {
             domain: 1,
+            market_id,
             amount: over_watermark_amount,
         },
         vec![

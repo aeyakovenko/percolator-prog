@@ -617,8 +617,10 @@ fn exercise_public_pda_substitution(route: PdaRoute, slot: PdaSlot, fault: PdaFa
             let vault = substitute_vault(slot, env.vault, substitutions);
             let vault_authority =
                 substitute_vault_authority(slot, env.vault_authority, substitutions);
+            let market_id = env.asset_market_id(0);
             let ix = ProgInstruction::WithdrawBackingBucket {
                 domain: 0,
+                market_id,
                 amount: 100,
             };
             let accounts = vec![

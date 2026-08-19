@@ -198,11 +198,13 @@ fn v16_program_asset0_recovery_matrix_discovers_provider_and_restart_lock() {
     let market_before = env.svm.get_account(&env.market).unwrap();
     let vault_before = env.svm.get_account(&env.vault).unwrap();
     let destination_before = env.svm.get_account(&provider_destination).unwrap();
+    let market_id = recovered.assets[0].market_id;
     for _ in 0..16 {
         env.svm.expire_blockhash();
         let withdrawal = env.send(
             ProgInstruction::WithdrawBackingBucket {
                 domain: 0,
+                market_id,
                 amount: principal,
             },
             vec![
@@ -4155,10 +4157,12 @@ fn v16_program_live_domain_withdrawals_reject_when_resolve_matured() {
         "WithdrawInsuranceAsset must reject once the market is resolve-matured"
     );
 
+    let market_id = env.asset_market_id(0);
     env.svm.expire_blockhash();
     let stale_backing = env.send(
         ProgInstruction::WithdrawBackingBucket {
             domain: 1,
+            market_id,
             amount: 20,
         },
         vec![
@@ -4180,6 +4184,7 @@ fn v16_program_live_domain_withdrawals_reject_when_resolve_matured() {
     let stale_earnings = env.send(
         ProgInstruction::WithdrawBackingBucketEarnings {
             domain: 1,
+            market_id,
             amount: 10,
         },
         vec![

@@ -840,6 +840,7 @@ fn v16_attack_backing_principal_withdraw_preserves_provider_earnings() {
         funded_group.source_backing_buckets[2].utilization_fee_earnings, EARNINGS,
         "asset-1 backing provider earnings are owed (non-vacuous)"
     );
+    let asset1_market_id = funded_group.assets[1].market_id;
 
     let admin = env.admin.insecure_clone();
     let dest = env.token_account(admin.pubkey(), 0);
@@ -851,6 +852,7 @@ fn v16_attack_backing_principal_withdraw_preserves_provider_earnings() {
     let premature_principal = env.send(
         ProgInstruction::WithdrawBackingBucket {
             domain: 2,
+            market_id: asset1_market_id,
             amount: PRINCIPAL,
         },
         vec![
@@ -915,6 +917,7 @@ fn v16_attack_backing_principal_withdraw_preserves_provider_earnings() {
     let principal_after_earnings = env.send(
         ProgInstruction::WithdrawBackingBucket {
             domain: 2,
+            market_id: asset1_market_id,
             amount: PRINCIPAL,
         },
         vec![
@@ -1132,6 +1135,7 @@ fn v16_attack_backing_bucket_topup_withdraw_input_gates() {
         &env.payer,
         ProgInstruction::WithdrawBackingBucket {
             domain: 0,
+            market_id: g.assets[0].market_id,
             amount: 1_000_001,
         },
         vec![

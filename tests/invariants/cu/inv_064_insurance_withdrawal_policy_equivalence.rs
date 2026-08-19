@@ -197,6 +197,7 @@ fn v16_attack_resolved_backing_withdraw_requires_full_user_wind_down() {
         &env.payer,
         ProgInstruction::WithdrawBackingBucket {
             domain: 1,
+            market_id: g.assets[0].market_id,
             amount: 100,
         },
         vec![

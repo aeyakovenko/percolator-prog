@@ -68,6 +68,21 @@ fn v16_program_pr321_stale_backing_top_up_rejects_across_asset_generation() {
 }
 
 #[test]
+fn v16_program_stale_backing_withdrawal_rejects_across_asset_generation() {
+    let protection =
+        discover_asset_generation_replay([0x22; 32], AssetIntentKind::BackingWithdrawal)
+            .unwrap_or_else(|error| panic!("backing withdrawal protection failed: {error}"));
+    assert_eq!(protection.kind, AssetIntentKind::BackingWithdrawal);
+    assert!(protection.new_asset_id > protection.old_asset_id);
+    assert!(!protection.accepted_stale_intent);
+    assert!(!protection.mutated_economic_state);
+    assert_eq!(protection.compute_units, None);
+    assert!(protection.rejection_was_generation_mismatch);
+    assert!(protection.fresh_intent_landed);
+    assert!(protection.fresh_intent_mutated_economic_state);
+}
+
+#[test]
 fn v16_program_pr279_asset_zero_top_up_rejects_after_restart() {
     const ASSET: u16 = 0;
     const REUSED_INSURANCE_AUTHORITY: usize = 2;

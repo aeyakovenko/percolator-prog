@@ -1105,10 +1105,12 @@ fn v16_program_value_paths_cannot_use_portfolio_as_optional_ledger() {
     );
 
     let backing_dest = env.token_account(admin.pubkey(), 0);
+    let market_id = env.asset_market_id(0);
     env.svm.expire_blockhash();
     let withdraw_backing = env.send(
         ProgInstruction::WithdrawBackingBucket {
             domain: 1,
+            market_id,
             amount: 10,
         },
         vec![
@@ -1138,6 +1140,7 @@ fn v16_program_value_paths_cannot_use_portfolio_as_optional_ledger() {
     let withdraw_earnings = env.send(
         ProgInstruction::WithdrawBackingBucketEarnings {
             domain: 1,
+            market_id,
             amount: 10,
         },
         vec![
@@ -1309,10 +1312,12 @@ fn v16_program_value_paths_cannot_use_market_as_optional_ledger() {
     assert_eq!(env.token_amount(insurance_dest), 0);
 
     let backing_dest = env.token_account(admin.pubkey(), 0);
+    let market_id = env.asset_market_id(0);
     env.svm.expire_blockhash();
     let withdraw_backing = env.send(
         ProgInstruction::WithdrawBackingBucket {
             domain: 1,
+            market_id,
             amount: 10,
         },
         vec![
@@ -1338,6 +1343,7 @@ fn v16_program_value_paths_cannot_use_market_as_optional_ledger() {
     let withdraw_earnings = env.send(
         ProgInstruction::WithdrawBackingBucketEarnings {
             domain: 1,
+            market_id,
             amount: 10,
         },
         vec![

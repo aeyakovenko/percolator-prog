@@ -2697,8 +2697,39 @@ impl V16Svm {
         amount: u128,
     ) -> Result<TxSuccess, String> {
         let authority = copy_keypair(&self.actors[actor_index].signer);
+        let market_id = self.primary_market_state().1.assets[domain as usize / 2].market_id;
         self.send_program(
-            ProgInstruction::WithdrawBackingBucket { domain, amount },
+            ProgInstruction::WithdrawBackingBucket {
+                domain,
+                market_id,
+                amount,
+            },
+            vec![
+                AccountMeta::new(authority.pubkey(), true),
+                AccountMeta::new(self.market, false),
+                AccountMeta::new(self.actors[actor_index].destination_token, false),
+                AccountMeta::new(self.vault, false),
+                AccountMeta::new_readonly(self.vault_authority, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[authority],
+        )
+    }
+
+    pub fn build_retained_backing_bucket_withdrawal_for_actor(
+        &mut self,
+        actor_index: usize,
+        domain: u16,
+        amount: u128,
+    ) -> Transaction {
+        let authority = copy_keypair(&self.actors[actor_index].signer);
+        let market_id = self.primary_market_state().1.assets[domain as usize / 2].market_id;
+        self.build_program_transaction(
+            ProgInstruction::WithdrawBackingBucket {
+                domain,
+                market_id,
+                amount,
+            },
             vec![
                 AccountMeta::new(authority.pubkey(), true),
                 AccountMeta::new(self.market, false),
@@ -2717,8 +2748,13 @@ impl V16Svm {
         amount: u128,
     ) -> Result<TxSuccess, String> {
         let authority = copy_keypair(&self.admin);
+        let market_id = self.primary_market_state().1.assets[domain as usize / 2].market_id;
         self.send_program(
-            ProgInstruction::WithdrawBackingBucket { domain, amount },
+            ProgInstruction::WithdrawBackingBucket {
+                domain,
+                market_id,
+                amount,
+            },
             vec![
                 AccountMeta::new(authority.pubkey(), true),
                 AccountMeta::new(self.market, false),
@@ -2737,8 +2773,13 @@ impl V16Svm {
         amount: u128,
     ) -> Result<TxSuccess, String> {
         let authority = copy_keypair(&self.admin);
+        let market_id = self.primary_market_state().1.assets[domain as usize / 2].market_id;
         self.send_program(
-            ProgInstruction::WithdrawBackingBucketEarnings { domain, amount },
+            ProgInstruction::WithdrawBackingBucketEarnings {
+                domain,
+                market_id,
+                amount,
+            },
             vec![
                 AccountMeta::new(authority.pubkey(), true),
                 AccountMeta::new(self.market, false),
@@ -2759,8 +2800,13 @@ impl V16Svm {
         amount: u128,
     ) -> Result<TxSuccess, String> {
         let authority = copy_keypair(&self.actors[actor_index].signer);
+        let market_id = self.primary_market_state().1.assets[domain as usize / 2].market_id;
         self.send_program(
-            ProgInstruction::WithdrawBackingBucketEarnings { domain, amount },
+            ProgInstruction::WithdrawBackingBucketEarnings {
+                domain,
+                market_id,
+                amount,
+            },
             vec![
                 AccountMeta::new(authority.pubkey(), true),
                 AccountMeta::new(self.market, false),

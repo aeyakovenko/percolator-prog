@@ -919,6 +919,7 @@ fn v16_attack_backing_earnings_reject_noncanonical_vault() {
     let canonical_vault_before = env.svm.get_account(&env.vault).unwrap();
     let fake_vault_before = env.svm.get_account(&fake_vault).unwrap();
     let dest_before = env.svm.get_account(&dest).unwrap();
+    let market_id = env.asset_market_id(0);
 
     env.svm.expire_blockhash();
     let rejected = send_tx(
@@ -927,6 +928,7 @@ fn v16_attack_backing_earnings_reject_noncanonical_vault() {
         &env.payer,
         ProgInstruction::WithdrawBackingBucketEarnings {
             domain: 1,
+            market_id,
             amount: 10,
         },
         vec![
@@ -1983,6 +1985,7 @@ fn v16_attack_backing_withdraw_pinned_to_canonical_vault() {
         )
         .unwrap();
     let dest = env.token_account_for_mint(env.mint, env.admin.pubkey(), 0);
+    let market_id = env.asset_market_id(0);
     // backing withdraw routed to the fake vault -> reject (canonical pin).
     env.svm.expire_blockhash();
     let r = send_tx(
@@ -1991,6 +1994,7 @@ fn v16_attack_backing_withdraw_pinned_to_canonical_vault() {
         &env.payer,
         ProgInstruction::WithdrawBackingBucket {
             domain: 1,
+            market_id,
             amount: 500,
         },
         vec![

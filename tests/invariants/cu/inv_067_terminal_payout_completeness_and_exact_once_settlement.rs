@@ -585,9 +585,11 @@ fn v16_program_terminal_bankruptcy_residual_matrix_preserves_provider_value() {
             .fresh_unliened_backing_num
             / BOUND_SCALE;
         if backing != 0 {
+            let market_id = env.asset_market_id(domain / 2);
             env.send(
                 ProgInstruction::WithdrawBackingBucket {
                     domain,
+                    market_id,
                     amount: backing,
                 },
                 vec![

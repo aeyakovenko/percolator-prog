@@ -72,6 +72,7 @@ pub enum AssetIntentKind {
     ConfigureHybridOracle,
     InsuranceTopUp,
     BackingTopUp,
+    BackingWithdrawal,
     InsuranceWithdrawal,
     BackingFeePolicy,
     ResolveMarket,
@@ -576,7 +577,7 @@ impl AuthorityIntentKind {
 }
 
 impl AssetIntentKind {
-    pub const ALL: [Self; 15] = [
+    pub const ALL: [Self; 16] = [
         Self::TradeNoCpi,
         Self::TradeCpi,
         Self::BatchTradeNoCpi,
@@ -588,6 +589,7 @@ impl AssetIntentKind {
         Self::ConfigureHybridOracle,
         Self::InsuranceTopUp,
         Self::BackingTopUp,
+        Self::BackingWithdrawal,
         Self::InsuranceWithdrawal,
         Self::BackingFeePolicy,
         Self::ResolveMarket,
@@ -607,10 +609,11 @@ impl AssetIntentKind {
             Self::ConfigureHybridOracle => 8,
             Self::InsuranceTopUp => 9,
             Self::BackingTopUp => 10,
-            Self::InsuranceWithdrawal => 11,
-            Self::BackingFeePolicy => 12,
-            Self::ResolveMarket => 13,
-            Self::ResolvePolicy => 14,
+            Self::BackingWithdrawal => 11,
+            Self::InsuranceWithdrawal => 12,
+            Self::BackingFeePolicy => 13,
+            Self::ResolveMarket => 14,
+            Self::ResolvePolicy => 15,
         }
     }
 
@@ -619,6 +622,7 @@ impl AssetIntentKind {
             self,
             Self::InsuranceTopUp
                 | Self::BackingTopUp
+                | Self::BackingWithdrawal
                 | Self::InsuranceWithdrawal
                 | Self::BackingFeePolicy
         )
@@ -3217,7 +3221,9 @@ fn configure_old_asset_intent(
             }
             Ok(None)
         }
-        AssetIntentKind::BackingTopUp | AssetIntentKind::BackingFeePolicy => env
+        AssetIntentKind::BackingTopUp
+        | AssetIntentKind::BackingWithdrawal
+        | AssetIntentKind::BackingFeePolicy => env
             .update_asset_authority_from_admin(
                 asset_index,
                 percolator_prog::processor::ASSET_AUTH_BACKING_BUCKET,
@@ -3306,6 +3312,9 @@ fn retained_asset_intent(
         AssetIntentKind::BackingTopUp => {
             env.build_retained_backing_bucket_top_up_for_actor(authority_actor, domain, AMOUNT, 100)
         }
+        AssetIntentKind::BackingWithdrawal => {
+            env.build_retained_backing_bucket_withdrawal_for_actor(authority_actor, domain, AMOUNT)
+        }
         AssetIntentKind::InsuranceWithdrawal => {
             env.build_retained_insurance_withdrawal_for_actor(authority_actor, asset_index, AMOUNT)
         }
@@ -3346,6 +3355,10 @@ fn configure_replacement_asset(
             .top_up_insurance_domain_for_actor(authority_actor, asset_index * 2, 1_000)
             .map(|_| ())
             .map_err(|error| format!("fund replacement insurance reserve: {error}")),
+        AssetIntentKind::BackingWithdrawal => env
+            .top_up_backing_bucket_for_actor(authority_actor, asset_index * 2, 1_000, 100)
+            .map(|_| ())
+            .map_err(|error| format!("fund replacement backing bucket: {error}")),
         _ => Ok(()),
     }
 }
@@ -3362,15 +3375,29 @@ fn discover_one_asset_generation_replay(
     let mut env = V16Svm::new(seed, MarketConfig::default());
     let supply_before = env.token_supply_observed();
     let oracle_account = configure_old_asset_intent(&mut env, kind, ASSET, AUTHORITY_ACTOR)?;
-    if kind == AssetIntentKind::InsuranceWithdrawal {
-        env.top_up_insurance_domain_for_actor(AUTHORITY_ACTOR, ASSET * 2, 1_000)
-            .map_err(|error| format!("fund old insurance reserve: {error}"))?;
+    match kind {
+        AssetIntentKind::InsuranceWithdrawal => env
+            .top_up_insurance_domain_for_actor(AUTHORITY_ACTOR, ASSET * 2, 1_000)
+            .map(|_| ())
+            .map_err(|error| format!("fund old insurance reserve: {error}"))?,
+        AssetIntentKind::BackingWithdrawal => env
+            .top_up_backing_bucket_for_actor(AUTHORITY_ACTOR, ASSET * 2, 1_000, 100)
+            .map(|_| ())
+            .map_err(|error| format!("fund old backing bucket: {error}"))?,
+        _ => {}
     }
     let old_asset_id = env.primary_market_state().1.assets[ASSET as usize].market_id;
     let retained = retained_asset_intent(&mut env, kind, ASSET, AUTHORITY_ACTOR, oracle_account);
-    if kind == AssetIntentKind::InsuranceWithdrawal {
-        env.withdraw_insurance_asset(AUTHORITY_ACTOR, ASSET, 1_000)
-            .map_err(|error| format!("clear old insurance reserve: {error}"))?;
+    match kind {
+        AssetIntentKind::InsuranceWithdrawal => env
+            .withdraw_insurance_asset(AUTHORITY_ACTOR, ASSET, 1_000)
+            .map(|_| ())
+            .map_err(|error| format!("clear old insurance reserve: {error}"))?,
+        AssetIntentKind::BackingWithdrawal => env
+            .withdraw_backing_bucket_for_actor(AUTHORITY_ACTOR, ASSET * 2, 1_000)
+            .map(|_| ())
+            .map_err(|error| format!("clear old backing bucket: {error}"))?,
+        _ => {}
     }
 
     env.update_market_init_fee_policy(1)

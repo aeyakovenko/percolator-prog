@@ -185,7 +185,6 @@ fn v16_program_claim_resolved_topup_rejects_cross_market_portfolio_payout() {
         &[&env.admin],
     )
     .expect("init market B");
-
     let owner_b = Keypair::new();
     env.ensure_signer_account(owner_b.pubkey());
     let pb = Pubkey::new_unique();
@@ -955,6 +954,7 @@ fn v16_attack_backing_ledger_domain_binding_enforced() {
         &env.payer,
         ProgInstruction::WithdrawBackingBucketEarnings {
             domain: 2,
+            market_id: g_before_spend.assets[1].market_id,
             amount: 10,
         },
         vec![
@@ -1099,6 +1099,11 @@ fn v16_attack_backing_ledger_market_binding_enforced() {
         &[&admin],
     )
     .expect("init market B");
+    let market_b_market_id = state::read_market(&env.svm.get_account(&market_b).unwrap().data)
+        .unwrap()
+        .1
+        .assets[0]
+        .market_id;
 
     let source_b = env.token_account(admin.pubkey(), 100);
     env.svm.expire_blockhash();
@@ -1107,7 +1112,7 @@ fn v16_attack_backing_ledger_market_binding_enforced() {
         env.program_id,
         &env.payer,
         ProgInstruction::TopUpBackingBucket {
-            market_id: 0,
+            market_id: market_b_market_id,
             domain: 1,
             amount: 100,
             expiry_slot: 10,
@@ -1171,6 +1176,7 @@ fn v16_attack_backing_ledger_market_binding_enforced() {
         &env.payer,
         ProgInstruction::WithdrawBackingBucketEarnings {
             domain: 1,
+            market_id: market_b_market_id,
             amount: 10,
         },
         vec![
@@ -1229,6 +1235,7 @@ fn v16_attack_backing_ledger_market_binding_enforced() {
         &env.payer,
         ProgInstruction::WithdrawBackingBucketEarnings {
             domain: 1,
+            market_id: market_b_market_id,
             amount: 10,
         },
         vec![

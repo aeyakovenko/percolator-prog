@@ -126,6 +126,18 @@ transaction ceiling. Kani proves exact tuple acceptance and that successful epis
 invalidates the old binding. Permissionless claim and terminal-receipt routes carry no retained
 owner consent; adding such a route reopens INV-004.
 
+INV-002 now also binds both backing-withdrawal wire contracts to the current asset generation.
+The public stale-principal route uses the same valid backing service across a retire/reactivate
+cycle, funds the replacement generation from an independent provider, and proves that the retained
+old-generation transaction rejects with exact market, vault, destination, and bucket rollback while
+a fresh withdrawal remains live. Both principal and earnings handlers check the generation during
+read-only preflight and again at the mutation boundary. Kani proves the production predicate is
+exact equality, both wire formats preserve the full-width generation, and both legacy unbound
+payloads fail closed. A source-completeness roster owns all fifteen direct generation fields, both
+batch-leg fields, and these two handler guard sites. This does not close INV-002:
+`UpdateAssetAuthority` and `UpdateAssetLifecycle` are still signed asset-slot messages without an
+encoded generation and are the next tractable replay surfaces.
+
 Verification at this checkpoint:
 
 | Command/scope | Result | Freshness |
@@ -140,22 +152,24 @@ Verification at this checkpoint:
 | Focused INV-016 canonical PDA matrices and source roster | 5/5; 57 custody substitutions plus 9 matcher seed substitutions | rerun on the 2026-08-18 PR135 test head |
 | Focused INV-003 portfolio lifecycle, cure ABA, and source-completeness roster | 4/4 runtime plus 4/4 Kani; all 12 retained variants and 16 portfolio-ID fields | rerun on the 2026-08-18 PR135 production head |
 | Focused INV-004 position-episode lifecycle, retained-route roster, and contracts | 3/3 stateful, 2/2 CU, 6/6 local Kani; all 5 retained position-bound variants | rerun on the 2026-08-18 PR135 production head |
+| Focused INV-002 backing-withdrawal generation replay, roster, and contracts | 12/12 public generation regressions, 9/9 stateful generation tests, 3/3 CU roster tests, 3/3 local Kani | rerun on the 2026-08-18 PR135 production head |
 | `cargo check --tests` | pass | rerun on the 2026-08-18 PR135 test head |
 | `cargo test --lib` | 7/7 | rerun on the 2026-08-18 PR135 test head |
 | `cargo test --test v16_program_stateful_fuzz` | 144/144 | rerun on the 2026-08-18 PR135 production head |
 | Registry/manifest checks in the INV-079 module | 8/8 | rerun on the 2026-08-18 PR135 test head |
-| `cargo test --test v16_program_fuzz_regressions` | 87/87 | rerun on the 2026-08-18 PR135 test head |
-| `cargo test --test v16_cu` | 744/744 | rerun on the 2026-08-18 PR135 production head |
-| `cargo kani --tests -j 8 --output-format terse` | 88/88 | full rerun on the 2026-08-18 PR135 production head |
+| `cargo test --test v16_program_fuzz_regressions` | 88/88 | rerun on the 2026-08-18 PR135 production head |
+| `cargo test --test v16_cu` | 745/745 | rerun on the 2026-08-18 PR135 production head |
+| `cargo kani --tests -j 8 --output-format terse` | 90/90 | full rerun on the 2026-08-18 PR135 production head |
 | Engine PR177 `cargo test` plus released-obligation Kani contracts | 150/150; 2/2 proofs | rerun on engine commit `72195914` |
 
-This tranche changes the `ClosePortfolio`, `ConvertReleasedPnl`, and `CureAndCancelClose` wire
-contracts, deposit/close/conversion wrapper state transitions,
+This tranche changes the `ClosePortfolio`, `ConvertReleasedPnl`, `CureAndCancelClose`,
+`WithdrawBackingBucket`, and `WithdrawBackingBucketEarnings` wire contracts,
+deposit/close/conversion wrapper state transitions, and backing-withdrawal generation guards,
 the pre-mutation `InitPortfolio` rent gate, Switchboard selected-result provenance, matcher
 capability synchronization with wrapper-owned position episodes, and maintenance collection order
 on value-debit routes, with matching test support. The locally rebuilt
 production SBF used by the 2026-08-18 LiteSVM run has SHA-256
-`c4ad02e647369351e2e74a68887682dc5b591a3fb81f3b2422b8a4652a4dfce1`.
+`4041ca8d4a6a1af13471a4caafeb2bf48489cbd86a5ccd36385bd37eab27286d`.
 
 This is strong public-route evidence, not an exhaustive proof that the program is LoF/DoS-free.
 The dated known-finding benchmark is fully classified, while the `AUDIT-*` rows below remain the
@@ -164,26 +178,33 @@ and formal-composition gaps.
 
 ### Immediate next work
 
-1. Close the nine remaining live exact-once violations in the eleven-family retained-operation
+1. Bind `UpdateAssetLifecycle` to the exact current generation for shutdown, drain, and retire,
+   and to the exact next-generation frontier for activation. Bind `UpdateAssetAuthority` to the
+   current generation. For each family, retain the original signed transaction across public
+   retire/reactivate cycles, require stale rejection and exact rollback, prove a fresh control,
+   add strict legacy-wire rejection, and update the production-source roster. This closes the
+   remaining tractable INV-002 message omissions but does not by itself close authority A -> B -> A
+   replay under INV-005.
+2. Close the nine remaining live exact-once violations in the eleven-family retained-operation
    matrix. `ConvertReleasedPnl` (issue 387) and `RebalanceReduce` (issue 389) now reject stale
    same-episode retries exactly; deposit, withdraw, all four trade routes, insurance/backing top-up,
    and asset activation still need a general program-enforced intent ledger or equivalent bounded
    replay key. Keep same-transaction, cross-entrypoint, partial-failure, and fresh-intent liveness
    controls in the shared INV-008 matrix.
-2. Close the now-publicly-reproduced crank-cadence violations (issues 407 and 409). Define one
+3. Close the now-publicly-reproduced crank-cadence violations (issues 407 and 409). Define one
    canonical elapsed-time price path and funding integral that do not depend on transaction
    partitioning, preserve both price directions and all oracle modes, and require bounded work
    independent of elapsed slots. Turn the five INV-052 counterexamples into equality assertions,
    add stale/fresh target transitions and maximum-shape CU controls, and keep the existing engine
    K/F settlement-partition proof as a separate downstream guarantee.
-3. Extend INV-086's now-terminal-aware bounded graph with a publicly reachable underfunded receipt
+4. Extend INV-086's now-terminal-aware bounded graph with a publicly reachable underfunded receipt
    seed and a successful `ClaimResolvedPayoutTopup` edge. The node already includes payout-ledger,
    receipt, close-progress, and terminal-resolution state. Do not assume that two ordinary
    bankrupt closes produce this state: `AdvanceClose` socializes uncovered PnL before payout, so a
    candidate seed must assert a genuinely pending receipt before claiming top-up coverage. Keep
    the finite graph explicitly non-universal, or prove that the value-changing route is unreachable
    from the supported public lifecycle and classify the existing legacy-state tests accordingly.
-4. Cross that reference graph with recovery, backing expiry, claimant order, prior
+5. Cross that reference graph with recovery, backing expiry, claimant order, prior
    insurance, authority epochs, retirement/reactivation, and the new retained-operation classes.
 
 Wrapper proofs should remain wrapper-specific: decoding, account-role/authentication boundaries,
@@ -232,13 +253,14 @@ closing same-market delayed overwrites including PR335/336/337/338/340/347/349. 
 replay (including PR296/325/326), authority A -> B -> A revival, and PR339 backing-provider fee
 consent remain explicit INV-001/INV-005/INV-014 gaps. All four signed trade routes, all six oracle
 configuration/mark-push/restart routes, both insurance top-up routes, backing-bucket top-up,
-asset-insurance withdrawal, and backing-fee policy updates now bind the asset's monotonic
+both backing principal and earnings withdrawals, asset-insurance withdrawal, and backing-fee
+policy updates now bind the asset's monotonic
 `market_id`. This closes PR231/PR277/PR279/PR318/PR321/PR322/PR328 slot-reuse replay, including an
 asset-0 shutdown/restart with the same insurance authority and oracle requests retained with
 `u64::MAX` sequence. Whole-market resolve and permissionless-resolve policy bind the persisted
 `next_market_id` asset-generation frontier, closing PR311/PR312 without incorrectly depending on
 asset 0 alone. The INV-002 public-route matrix now reports zero generation-replay violations across
-all 15 retained control families. Same-pubkey whole-market recreation remains an INV-001 concern
+all 16 retained control families. Same-pubkey whole-market recreation remains an INV-001 concern
 because a newly initialized market can begin with the same frontier value.
 
 The wrapper-supported sparse source-domain liveness shape is `2 * WRAPPER_MAX_PORTFOLIO_ASSETS`
@@ -271,7 +293,7 @@ charter.
 | Invariant | Status | Primary PR135 owner |
 | --- | --- | --- |
 | INV-001 | Independent + Direct | `public_sbf/inv_001_market_incarnation_binding.rs`, `stateful/inv_001_market_incarnation_binding.rs` |
-| INV-002 | Independent + Direct + F + SVM/CU | `public_sbf/inv_002_asset_generation_binding.rs`, `stateful/inv_002_asset_generation_binding.rs`, `stateful/inv_081_success_state_validity_over_complete_public_routes.rs`, and `cu/inv_002_asset_generation_binding.rs`. The shared route now composes public shutdown, exact old-generation exposure removal, monotonic restart, and a new trade whose legs and OI bind only the fresh generation. |
+| INV-002 | Independent + P + Static roster + Direct + F + SVM/CU | `public_sbf/inv_002_asset_generation_binding.rs`, `stateful/inv_002_asset_generation_binding.rs`, `stateful/inv_081_success_state_validity_over_complete_public_routes.rs`, `cu/inv_002_asset_generation_binding.rs`, and `kani/inv_002_asset_generation_binding.rs`. The 16-family public matrix includes backing principal withdrawal; its stale transaction rejects against independently funded replacement backing with exact rollback and a fresh-route control. Both backing-withdrawal handlers are generation-guarded at preflight and mutation, and Kani owns their wire bindings. The shared lifecycle route composes public shutdown, exact old-generation exposure removal, monotonic restart, and a new trade whose legs and OI bind only the fresh generation. `UpdateAssetAuthority` and `UpdateAssetLifecycle` remain unbound signed message families. |
 | INV-003 | Independent + P + Static roster + Direct + SVM/CU | `public_sbf/inv_003_portfolio_incarnation_binding.rs`, `stateful/inv_003_portfolio_incarnation_binding.rs`, `cu/inv_003_portfolio_incarnation_binding.rs`, `kani/inv_003_portfolio_incarnation_binding.rs`, and `kani/inv_022_instruction_decoding_and_schema_upgrade_safety.rs`; all 12 ID-bearing retained routes and 16 production fields are owned, including public A -> B -> A same-pubkey cycles, position/Recovery/close episode replacements, exact rollback, fresh-cure liveness, and deployed allocator monotonicity/non-reuse proofs |
 | INV-004 | Independent + P + Static roster + F + SVM/CU | `stateful/inv_004_position_episode_binding.rs`, `kani/inv_004_position_episode_binding.rs`, `cu/inv_004_position_episode_binding.rs`, the fixed issue-387 owner in INV-008, and the issue-406 route matrix in INV-012 cover all five retained position-bound families, exact tuple consumption, reduction/forfeit/conversion/cure replay, four-route open/cross-zero/close transitions, force-close/liquidation/auto-crank episode writers, exact rollback, and fresh-operation liveness. Permissionless claim/receipt routes carry no retained consent. |
 | INV-005 | Independent + Direct + SVM/CU | `public_sbf/inv_005_authority_incarnation_binding.rs`, `stateful/inv_005_authority_incarnation_binding.rs`, `cu/inv_005_authority_incarnation_binding.rs` |
@@ -446,7 +468,7 @@ are machine-checked below so a future README edit cannot silently omit an invari
 | Audit | Verdict | Known coverage bugs and strongest feasible closure |
 | --- | --- | --- |
 | AUDIT-001 | OPEN-D | The 11-route public matrix is a live whole-market same-pubkey ABA counterexample, not a safety proof. Add a persistent program-assigned market generation, reject every stale route before mutation, and add explicit cross-market and cross-program controls. |
-| AUDIT-002 | OPEN-T | Fifteen retained asset-control families and all trade routes are covered. A shared whole-route composition now removes every old-generation exposure, requires a monotonic public restart, and attaches the next trade only to the fresh generation. Claim/capability families, a deliberately weakened `(market_id, asset_index)` negative encoding, wrapper Kani composition, and full metamorphic replay coverage remain. |
+| AUDIT-002 | OPEN-T | Sixteen retained asset-control families and all trade routes are covered. Backing principal and earnings withdrawals now encode the asset generation, enforce it at preflight and mutation, reject legacy unbound payloads, and have Kani wire/predicate proofs; the principal route has a public independent-victim replay regression with exact rollback and fresh liveness. A shared whole-route composition removes every old-generation exposure, requires a monotonic public restart, and attaches the next trade only to the fresh generation. `UpdateAssetAuthority` and `UpdateAssetLifecycle` remain signed generationless families; claim/capability families, a deliberately weakened `(market_id, asset_index)` negative encoding, whole-handler Kani composition, and full metamorphic replay coverage also remain. |
 | AUDIT-003 | CLOSED | The production-source roster owns all 12 owner-signed portfolio request families and all 16 encoded IDs, including pre-CPI and pre-mutation guards. Every family now crosses a public same-pubkey A -> B -> A two-recreation sequence and rejects A's original request only after A owns the replacement again, with exact writable/SPL rollback and zero out-of-band economic mutation. Rebalance, forfeit, and cure cells establish fresh position, Recovery, and close episodes; the cure red/green also proves fresh-incarnation liveness. Kani proves decoder field preservation, rejection of incarnationless tag-42 payloads, and strict nonzero monotonic allocation/non-reuse through the deployed allocator. The source roster reopens this row if a new retained portfolio field or route appears. |
 | AUDIT-004 | CLOSED | The production roster owns all five retained position-bound families (`ClosePortfolio`, `ConvertReleasedPnl`, `CureAndCancelClose`, `ForfeitRecoveryLeg`, and `RebalanceReduce`) and every wrapper epoch writer. All consume the exact portfolio/episode tuple before mutation. Public SBF/stateful matrices cover reduction, Recovery forfeit, conversion, two same-portfolio close/cure episodes, open/cross-zero/close over all four trade routes, force-close, liquidation, and matcher-disabled auto-crank detachment; stale requests reject with exact rollback and fresh requests remain live. Kani proves exact tuple acceptance, monotonic episode consumption, decoder preservation, and rejection of legacy unbound tag-28/tag-42 payloads. Claim, recovery-finalization, and terminal-receipt operations are permissionless current-state transitions with no retained owner consent. A future retained consent route or new position writer reopens this row. |
 | AUDIT-005 | OPEN-D | Current tests still discover authority `A -> B -> A` revival. Add a monotonic epoch for each authority scope, prove atomic epoch rotation, and flip both `A -> B -> A` and disable/re-enable matrices to rejection. |

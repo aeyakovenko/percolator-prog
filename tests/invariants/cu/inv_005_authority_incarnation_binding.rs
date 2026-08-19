@@ -1089,6 +1089,8 @@ fn v16_attack_cross_asset_backing_authority_cannot_withdraw_other_asset_bucket()
     );
     env.top_up_backing_bucket(0, 500, 10_000);
     env.top_up_backing_bucket_with_authority(&asset1_backing, 2, 300, 10_000);
+    let asset0_market_id = env.asset_market_id(0);
+    let asset1_market_id = env.asset_market_id(1);
     let (_, funded) = env.market_state();
     assert_eq!(
         funded.source_backing_buckets[0].fresh_unliened_backing_num,
@@ -1111,6 +1113,7 @@ fn v16_attack_cross_asset_backing_authority_cannot_withdraw_other_asset_bucket()
         &env.payer,
         ProgInstruction::WithdrawBackingBucket {
             domain: 0,
+            market_id: asset0_market_id,
             amount: 100,
         },
         vec![
@@ -1150,6 +1153,7 @@ fn v16_attack_cross_asset_backing_authority_cannot_withdraw_other_asset_bucket()
         &env.payer,
         ProgInstruction::WithdrawBackingBucket {
             domain: 2,
+            market_id: asset1_market_id,
             amount: 100,
         },
         vec![
@@ -1237,6 +1241,8 @@ fn v16_attack_cross_asset_backing_authority_cannot_withdraw_other_asset_earnings
         env.vault_authority,
         funded.vault as u64,
     );
+    let asset0_market_id = env.asset_market_id(0);
+    let asset1_market_id = env.asset_market_id(1);
     assert_eq!(
         funded.source_backing_buckets[0].utilization_fee_earnings,
         40
@@ -1260,6 +1266,7 @@ fn v16_attack_cross_asset_backing_authority_cannot_withdraw_other_asset_earnings
         &env.payer,
         ProgInstruction::WithdrawBackingBucketEarnings {
             domain: 0,
+            market_id: asset0_market_id,
             amount: 10,
         },
         vec![
@@ -1310,6 +1317,7 @@ fn v16_attack_cross_asset_backing_authority_cannot_withdraw_other_asset_earnings
         &env.payer,
         ProgInstruction::WithdrawBackingBucketEarnings {
             domain: 2,
+            market_id: asset1_market_id,
             amount: 10,
         },
         vec![
@@ -3505,6 +3513,7 @@ fn v16_attack_asset0_backing_rotation_rekeys_live_bucket_withdraw() {
     )
     .expect("asset-0 admin rotates the backing-bucket authority");
     env.top_up_backing_bucket_with_authority(&new_backing, 0, 500, 100_000);
+    let asset0_market_id = env.asset_market_id(0);
 
     let (_, group_before) = env.market_state();
     assert_eq!(
@@ -3524,6 +3533,7 @@ fn v16_attack_asset0_backing_rotation_rekeys_live_bucket_withdraw() {
         &env.payer,
         ProgInstruction::WithdrawBackingBucket {
             domain: 0,
+            market_id: asset0_market_id,
             amount: 100,
         },
         vec![
@@ -3564,6 +3574,7 @@ fn v16_attack_asset0_backing_rotation_rekeys_live_bucket_withdraw() {
         &env.payer,
         ProgInstruction::WithdrawBackingBucket {
             domain: 0,
+            market_id: asset0_market_id,
             amount: 100,
         },
         vec![

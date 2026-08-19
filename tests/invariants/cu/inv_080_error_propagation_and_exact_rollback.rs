@@ -1991,12 +1991,14 @@ fn v16_bpf_failed_backing_withdraw_transfer_rolls_back_bucket_and_ledger() {
     let ledger_before = env.svm.get_account(&ledger).unwrap();
     let dest_before = env.svm.get_account(&dest).unwrap();
     let vault_before = env.svm.get_account(&env.vault).unwrap();
+    let market_id = env.asset_market_id(0);
     let result = send_tx(
         &mut env.svm,
         env.program_id,
         &env.payer,
         ProgInstruction::WithdrawBackingBucket {
             domain: 1,
+            market_id,
             amount: 40,
         },
         vec![
@@ -2053,12 +2055,14 @@ fn v16_bpf_failed_backing_earnings_withdraw_rolls_back_bucket_and_ledger() {
     let ledger_before = env.svm.get_account(&ledger).unwrap();
     let dest_before = env.svm.get_account(&dest).unwrap();
     let vault_before = env.svm.get_account(&env.vault).unwrap();
+    let market_id = env.asset_market_id(0);
     let result = send_tx(
         &mut env.svm,
         env.program_id,
         &env.payer,
         ProgInstruction::WithdrawBackingBucketEarnings {
             domain: 1,
+            market_id,
             amount: 10,
         },
         vec![

@@ -706,6 +706,7 @@ fn v16_attack_backing_withdraw_cannot_strand_liened_winner() {
         "winner has backed positive pnl (non-vacuous)"
     );
     let dest = env.token_account_for_mint(env.mint, env.admin.pubkey(), 0);
+    let market_id = env.asset_market_id(0);
 
     // try to withdraw the LIENED backing (full 40, and a partial 1) -> must reject.
     for amt in [40u128, 1] {
@@ -716,6 +717,7 @@ fn v16_attack_backing_withdraw_cannot_strand_liened_winner() {
             &env.payer,
             ProgInstruction::WithdrawBackingBucket {
                 domain: 1,
+                market_id,
                 amount: amt,
             },
             vec![

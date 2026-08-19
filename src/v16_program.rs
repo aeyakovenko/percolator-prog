@@ -994,6 +994,14 @@ pub mod state {
     }
 
     #[inline]
+    pub fn asset_generation_binding_matches(
+        current_market_id: u64,
+        expected_market_id: u64,
+    ) -> bool {
+        current_market_id == expected_market_id
+    }
+
+    #[inline]
     pub(crate) fn allocate_portfolio_id(next: u64) -> Result<(u64, u64), ProgramError> {
         // Wrapper configs written before the counter existed contain zero in this former padding
         // word. Such a market starts the sequence at one on its next successful initialization.
@@ -2896,6 +2904,7 @@ pub mod ix {
         },
         WithdrawBackingBucket {
             domain: u16,
+            market_id: u64,
             amount: u128,
         },
         ConvertReleasedPnl {
@@ -2948,6 +2957,7 @@ pub mod ix {
         },
         WithdrawBackingBucketEarnings {
             domain: u16,
+            market_id: u64,
             amount: u128,
         },
         SyncBackingDomainLedger {
@@ -3224,6 +3234,7 @@ pub mod ix {
                 },
                 50 => Self::WithdrawBackingBucket {
                     domain: read_u16(&mut rest)?,
+                    market_id: read_u64(&mut rest)?,
                     amount: read_u128(&mut rest)?,
                 },
                 28 => Self::ConvertReleasedPnl {
@@ -3304,6 +3315,7 @@ pub mod ix {
                 },
                 52 => Self::WithdrawBackingBucketEarnings {
                     domain: read_u16(&mut rest)?,
+                    market_id: read_u64(&mut rest)?,
                     amount: read_u128(&mut rest)?,
                 },
                 53 => Self::SyncBackingDomainLedger {
@@ -3614,9 +3626,14 @@ pub mod ix {
                     push_u128(&mut out, amount);
                     push_u64(&mut out, expiry_slot);
                 }
-                Self::WithdrawBackingBucket { domain, amount } => {
+                Self::WithdrawBackingBucket {
+                    domain,
+                    market_id,
+                    amount,
+                } => {
                     out.push(50);
                     push_u16(&mut out, domain);
+                    push_u64(&mut out, market_id);
                     push_u128(&mut out, amount);
                 }
                 Self::ConvertReleasedPnl {
@@ -3713,9 +3730,14 @@ pub mod ix {
                     out.push(61);
                     push_u128(&mut out, amount);
                 }
-                Self::WithdrawBackingBucketEarnings { domain, amount } => {
+                Self::WithdrawBackingBucketEarnings {
+                    domain,
+                    market_id,
+                    amount,
+                } => {
                     out.push(52);
                     push_u16(&mut out, domain);
+                    push_u64(&mut out, market_id);
                     push_u128(&mut out, amount);
                 }
                 Self::SyncBackingDomainLedger { domain } => {
@@ -5980,7 +6002,10 @@ pub mod processor {
         {
             return Err(PercolatorError::InvalidInstruction.into());
         }
-        if group.markets[asset_index].engine.asset.market_id.get() != expected_market_id {
+        if !state::asset_generation_binding_matches(
+            group.markets[asset_index].engine.asset.market_id.get(),
+            expected_market_id,
+        ) {
             return Err(PercolatorError::AssetGenerationMismatch.into());
         }
         Ok(())
@@ -6215,9 +6240,11 @@ pub mod processor {
                 amount,
                 expiry_slot,
             ),
-            Instruction::WithdrawBackingBucket { domain, amount } => {
-                handle_withdraw_backing_bucket(program_id, accounts, domain, amount)
-            }
+            Instruction::WithdrawBackingBucket {
+                domain,
+                market_id,
+                amount,
+            } => handle_withdraw_backing_bucket(program_id, accounts, domain, market_id, amount),
             Instruction::ConvertReleasedPnl {
                 portfolio_id,
                 position_epoch,
@@ -6300,9 +6327,13 @@ pub mod processor {
                 min_init_fee,
                 policy_sequence,
             ),
-            Instruction::WithdrawBackingBucketEarnings { domain, amount } => {
-                handle_withdraw_backing_bucket_earnings(program_id, accounts, domain, amount)
-            }
+            Instruction::WithdrawBackingBucketEarnings {
+                domain,
+                market_id,
+                amount,
+            } => handle_withdraw_backing_bucket_earnings(
+                program_id, accounts, domain, market_id, amount,
+            ),
             Instruction::SyncBackingDomainLedger { domain } => {
                 handle_sync_backing_domain_ledger(program_id, accounts, domain)
             }
@@ -9122,6 +9153,7 @@ pub mod processor {
         vault_authority_ai: &AccountInfo<'a>,
         domain: usize,
         amount: u128,
+        expected_market_id: u64,
         require_live_mode: bool,
         authority_kind: u8,
     ) -> Result<(u8, u64), ProgramError> {
@@ -9134,6 +9166,11 @@ pub mod processor {
             || asset_index >= configured_slots
         {
             return Err(PercolatorError::InvalidInstruction.into());
+        }
+        let (_, _, _, current_market_id, _, _) =
+            state::read_market_trade_preflight(&market_data, asset_index)?;
+        if !state::asset_generation_binding_matches(current_market_id, expected_market_id) {
+            return Err(PercolatorError::AssetGenerationMismatch.into());
         }
         let profile = read_oracle_profile_for_asset(&market_data, &cfg, asset_index)?;
         let authorities = domain_authorities_from_profile(&cfg, &profile, asset_index);
@@ -9278,6 +9315,7 @@ pub mod processor {
         program_id: &Pubkey,
         accounts: &'a [AccountInfo<'a>],
         domain: u16,
+        expected_market_id: u64,
         amount: u128,
     ) -> ProgramResult {
         let authority = account(accounts, 0)?;
@@ -9311,6 +9349,7 @@ pub mod processor {
             vault_authority_ai,
             domain_usize,
             amount,
+            expected_market_id,
             false,
             DOMAIN_WITHDRAW_AUTH_BACKING,
         )?;
@@ -9318,6 +9357,7 @@ pub mod processor {
         {
             let mut market_data = market_ai.try_borrow_mut_data()?;
             let (cfg, mut group) = state::market_view_mut(&mut market_data)?;
+            require_asset_generation_view(&group, domain_usize / 2, expected_market_id)?;
             let authorities = domain_authorities_from_view(&group, &cfg, domain_usize)?;
             let shutdown_drain = match group.header.mode {
                 0 => live_domain_withdraw_health_or_shutdown_view(&cfg, &group, domain_usize)?,
@@ -9405,6 +9445,7 @@ pub mod processor {
         program_id: &Pubkey,
         accounts: &'a [AccountInfo<'a>],
         domain: u16,
+        expected_market_id: u64,
         amount: u128,
     ) -> ProgramResult {
         let authority = account(accounts, 0)?;
@@ -9436,6 +9477,7 @@ pub mod processor {
             vault_authority_ai,
             domain_usize,
             amount,
+            expected_market_id,
             false,
             DOMAIN_WITHDRAW_AUTH_BACKING,
         )?;
@@ -9443,6 +9485,7 @@ pub mod processor {
         {
             let mut market_data = market_ai.try_borrow_mut_data()?;
             let (cfg, mut group) = state::market_view_mut(&mut market_data)?;
+            require_asset_generation_view(&group, domain_usize / 2, expected_market_id)?;
             let authorities = domain_authorities_from_view(&group, &cfg, domain_usize)?;
             let shutdown_drain = match group.header.mode {
                 0 => live_domain_withdraw_health_or_shutdown_view(&cfg, &group, domain_usize)?,

@@ -338,6 +338,7 @@ fn inv_022_representative_public_instructions() -> Vec<ProgInstruction> {
         },
         ProgInstruction::WithdrawBackingBucket {
             domain: 0,
+            market_id: 1,
             amount: 1,
         },
         ProgInstruction::UpdateBackingFeePolicy {
@@ -349,6 +350,7 @@ fn inv_022_representative_public_instructions() -> Vec<ProgInstruction> {
         },
         ProgInstruction::WithdrawBackingBucketEarnings {
             domain: 0,
+            market_id: 1,
             amount: 1,
         },
         ProgInstruction::SyncBackingDomainLedger { domain: 0 },

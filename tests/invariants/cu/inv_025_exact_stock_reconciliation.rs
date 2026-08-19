@@ -89,10 +89,12 @@ fn v16_program_value_routes_reconcile_vault_capital_insurance_and_backing_stocks
     let vault_before = env.svm.get_account(&env.vault).unwrap();
     let dest_before = env.svm.get_account(&backing_dest).unwrap();
     let admin = env.admin.insecure_clone();
+    let market_id = env.asset_market_id(0);
     env.svm.expire_blockhash();
     let rejected = env.send(
         ProgInstruction::WithdrawBackingBucket {
             domain: 0,
+            market_id,
             amount: 7_001,
         },
         vec![

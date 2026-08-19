@@ -219,6 +219,7 @@ fn v16_program_live_backing_withdraw_rejects_exposed_target_effective_lag() {
         &env.payer,
         ProgInstruction::WithdrawBackingBucket {
             domain: 0,
+            market_id: group_before.assets[0].market_id,
             amount: 100,
         },
         vec![

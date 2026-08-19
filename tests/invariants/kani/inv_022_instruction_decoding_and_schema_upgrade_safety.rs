@@ -572,25 +572,6 @@ fn kani_v16_batch_trade_cpi_decode_preserves_asset_generation() {
 }
 
 #[kani::proof]
-fn kani_v16_withdraw_backing_bucket_decode_preserves_wire_fields() {
-    let domain: u16 = kani::any();
-    let amount: u128 = kani::any();
-
-    let data = Instruction::WithdrawBackingBucket { domain, amount }.encode();
-
-    match Instruction::decode(&data).unwrap() {
-        Instruction::WithdrawBackingBucket {
-            domain: got_domain,
-            amount: got_amount,
-        } => {
-            assert_eq!(got_domain, domain);
-            assert_eq!(got_amount, amount);
-        }
-        _ => unreachable!(),
-    }
-}
-
-#[kani::proof]
 fn kani_v16_tradenocpi_decode_preserves_wire_fields() {
     let account_a_portfolio_id: u64 = kani::any();
     let account_b_portfolio_id: u64 = kani::any();
@@ -1419,6 +1400,15 @@ fn kani_v16_custody_payloads_reject_trailing_byte() {
     assert_rejects_trailing_byte(
         Instruction::WithdrawBackingBucket {
             domain: 1,
+            market_id: 1,
+            amount: 1,
+        },
+        extra,
+    );
+    assert_rejects_trailing_byte(
+        Instruction::WithdrawBackingBucketEarnings {
+            domain: 1,
+            market_id: 1,
             amount: 1,
         },
         extra,

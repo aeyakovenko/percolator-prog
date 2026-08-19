@@ -9,6 +9,9 @@ use percolator_prog::matcher_abi::{
 };
 use percolator_prog::policy_v16;
 
+#[path = "invariants/kani/inv_002_asset_generation_binding.rs"]
+mod inv_002_asset_generation_binding;
+
 #[path = "invariants/kani/inv_003_portfolio_incarnation_binding.rs"]
 mod inv_003_portfolio_incarnation_binding;
 

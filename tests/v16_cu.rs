@@ -3782,11 +3782,16 @@ impl V16CuEnv {
         domain: u16,
         amount: u128,
     ) -> u64 {
+        let market_id = self.asset_market_id(domain / 2);
         send_tx(
             &mut self.svm,
             self.program_id,
             &self.payer,
-            ProgInstruction::WithdrawBackingBucket { domain, amount },
+            ProgInstruction::WithdrawBackingBucket {
+                domain,
+                market_id,
+                amount,
+            },
             vec![
                 AccountMeta::new(self.admin.pubkey(), true),
                 AccountMeta::new(self.market, false),
@@ -3823,11 +3828,16 @@ impl V16CuEnv {
         domain: u16,
         amount: u128,
     ) -> u64 {
+        let market_id = self.asset_market_id(domain / 2);
         send_tx(
             &mut self.svm,
             self.program_id,
             &self.payer,
-            ProgInstruction::WithdrawBackingBucketEarnings { domain, amount },
+            ProgInstruction::WithdrawBackingBucketEarnings {
+                domain,
+                market_id,
+                amount,
+            },
             vec![
                 AccountMeta::new(self.admin.pubkey(), true),
                 AccountMeta::new(self.market, false),

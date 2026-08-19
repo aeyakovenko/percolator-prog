@@ -452,6 +452,7 @@ fn v16_attack_domain_indexed_calls_reject_out_of_range_atomically() {
         &env.payer,
         ProgInstruction::WithdrawBackingBucket {
             domain: BAD_DOMAIN,
+            market_id: 0,
             amount: 1,
         },
         vec![
@@ -485,6 +486,7 @@ fn v16_attack_domain_indexed_calls_reject_out_of_range_atomically() {
         &env.payer,
         ProgInstruction::WithdrawBackingBucketEarnings {
             domain: BAD_DOMAIN,
+            market_id: 0,
             amount: 1,
         },
         vec![
