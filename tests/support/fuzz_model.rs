@@ -6505,7 +6505,31 @@ pub fn run_bounded_public_liveness_graph() -> Result<BoundedLivenessGraphEvidenc
     })
 }
 
-const BOUNDED_REFERENCE_ACTION_COUNT: usize = 11;
+const BOUNDED_REFERENCE_ACTION_COUNT: usize = 13;
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct BoundedCloseProgressNode {
+    flags: [bool; 3],
+    close_id: u64,
+    asset_index: u32,
+    market_id: u64,
+    domain_side: u8,
+    slots: [u64; 2],
+    amounts: [u128; 9],
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct BoundedReceiptNode {
+    flags: [bool; 2],
+    amounts: [u128; 4],
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct BoundedPayoutLedgerNode {
+    amounts: [u128; 5],
+    snapshot_slot: u64,
+    flags: [bool; 2],
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct BoundedReferenceNode {
@@ -6513,6 +6537,14 @@ struct BoundedReferenceNode {
     protocol_positions: [i128; ASSET_COUNT],
     expected_effective_oi: [[u128; 2]; ASSET_COUNT],
     capitals: [u128; PRIMARY_ACTOR_COUNT],
+    pnl: [i128; PRIMARY_ACTOR_COUNT],
+    reserved_pnl: [u128; PRIMARY_ACTOR_COUNT],
+    fee_credits: [i128; PRIMARY_ACTOR_COUNT],
+    cancel_deposit_escrow: [u128; PRIMARY_ACTOR_COUNT],
+    last_fee_slots: [u64; PRIMARY_ACTOR_COUNT],
+    account_flags: [[u8; 5]; PRIMARY_ACTOR_COUNT],
+    close_progress: [BoundedCloseProgressNode; PRIMARY_ACTOR_COUNT],
+    payout_receipts: [BoundedReceiptNode; PRIMARY_ACTOR_COUNT],
     market_mode: u8,
     lifecycles: [u8; ASSET_COUNT],
     side_modes: [[u8; 2]; ASSET_COUNT],
@@ -6527,6 +6559,11 @@ struct BoundedReferenceNode {
     insurance: u128,
     source_claim_bound_total_num: u128,
     source_fresh_backing_total_num: u128,
+    resolved_slot: u64,
+    payout_snapshot: u128,
+    payout_snapshot_pnl_pos_tot: u128,
+    payout_snapshot_captured: bool,
+    payout_ledger: BoundedPayoutLedgerNode,
     resolve_policy: [u64; 2],
     current_slot: u64,
     epochs: [u64; 4],
@@ -6548,6 +6585,77 @@ impl ScenarioRunner {
         self.assert_global_invariants()?;
         let (config, group) = self.env.primary_market_state();
         let capitals = std::array::from_fn(|actor| self.env.primary_portfolio(actor).capital.get());
+        let pnl = std::array::from_fn(|actor| self.env.primary_portfolio(actor).pnl.get());
+        let reserved_pnl =
+            std::array::from_fn(|actor| self.env.primary_portfolio(actor).reserved_pnl.get());
+        let fee_credits =
+            std::array::from_fn(|actor| self.env.primary_portfolio(actor).fee_credits.get());
+        let cancel_deposit_escrow = std::array::from_fn(|actor| {
+            self.env
+                .primary_portfolio(actor)
+                .cancel_deposit_escrow
+                .get()
+        });
+        let last_fee_slots =
+            std::array::from_fn(|actor| self.env.primary_portfolio(actor).last_fee_slot.get());
+        let account_flags = std::array::from_fn(|actor| {
+            let account = self.env.primary_portfolio(actor);
+            [
+                account.stale_state,
+                account.b_stale_state,
+                account.rebalance_lock,
+                account.liquidation_lock,
+                account.health_cert.valid,
+            ]
+        });
+        let mut close_progress = Vec::with_capacity(PRIMARY_ACTOR_COUNT);
+        let mut payout_receipts = Vec::with_capacity(PRIMARY_ACTOR_COUNT);
+        for actor in 0..PRIMARY_ACTOR_COUNT {
+            let account = self.env.primary_portfolio(actor);
+            let close = account.close_progress.try_to_runtime().map_err(|error| {
+                format!("bounded reference actor {actor} close-progress decode: {error:?}")
+            })?;
+            close_progress.push(BoundedCloseProgressNode {
+                flags: [close.active, close.finalized, close.canceled],
+                close_id: close.close_id,
+                asset_index: close.asset_index,
+                market_id: close.market_id,
+                domain_side: close.domain_side as u8,
+                slots: [close.drift_reference_slot, close.max_close_slot],
+                amounts: [
+                    close.gross_loss_at_close_start,
+                    close.support_consumed,
+                    close.junior_face_burned,
+                    close.insurance_spent,
+                    close.b_loss_booked,
+                    close.explicit_loss_assigned,
+                    close.quantity_adl_applied_q,
+                    close.drift_consumed,
+                    close.residual_remaining,
+                ],
+            });
+            let receipt = account
+                .resolved_payout_receipt
+                .try_to_runtime()
+                .map_err(|error| {
+                    format!("bounded reference actor {actor} payout-receipt decode: {error:?}")
+                })?;
+            payout_receipts.push(BoundedReceiptNode {
+                flags: [receipt.present, receipt.finalized],
+                amounts: [
+                    receipt.prior_bound_contribution_num,
+                    receipt.live_released_face_at_receipt,
+                    receipt.terminal_positive_claim_face,
+                    receipt.paid_effective,
+                ],
+            });
+        }
+        let close_progress: [BoundedCloseProgressNode; PRIMARY_ACTOR_COUNT] = close_progress
+            .try_into()
+            .map_err(|_| "bounded reference close-progress cardinality mismatch")?;
+        let payout_receipts: [BoundedReceiptNode; PRIMARY_ACTOR_COUNT] = payout_receipts
+            .try_into()
+            .map_err(|_| "bounded reference payout-receipt cardinality mismatch")?;
         let lifecycles = std::array::from_fn(|asset| group.assets[asset].lifecycle as u8);
         let side_modes = std::array::from_fn(|asset| {
             [
@@ -6582,6 +6690,14 @@ impl ScenarioRunner {
             protocol_positions: self.protocol_positions,
             expected_effective_oi: self.expected_effective_oi,
             capitals,
+            pnl,
+            reserved_pnl,
+            fee_credits,
+            cancel_deposit_escrow,
+            last_fee_slots,
+            account_flags,
+            close_progress,
+            payout_receipts,
             market_mode: group.mode as u8,
             lifecycles,
             side_modes,
@@ -6596,6 +6712,28 @@ impl ScenarioRunner {
             insurance: group.insurance,
             source_claim_bound_total_num: group.source_claim_bound_total_num,
             source_fresh_backing_total_num,
+            resolved_slot: group.resolved_slot,
+            payout_snapshot: group.payout_snapshot,
+            payout_snapshot_pnl_pos_tot: group.payout_snapshot_pnl_pos_tot,
+            payout_snapshot_captured: group.payout_snapshot_captured,
+            payout_ledger: BoundedPayoutLedgerNode {
+                amounts: [
+                    group.resolved_payout_ledger.snapshot_residual,
+                    group
+                        .resolved_payout_ledger
+                        .terminal_claim_exact_receipts_num,
+                    group
+                        .resolved_payout_ledger
+                        .terminal_claim_bound_unreceipted_num,
+                    group.resolved_payout_ledger.current_payout_rate_num,
+                    group.resolved_payout_ledger.current_payout_rate_den,
+                ],
+                snapshot_slot: group.resolved_payout_ledger.snapshot_slot,
+                flags: [
+                    group.resolved_payout_ledger.payout_halted,
+                    group.resolved_payout_ledger.finalized,
+                ],
+            },
             resolve_policy: [
                 config.permissionless_resolve_stale_slots,
                 config.force_close_delay_slots,
@@ -6669,6 +6807,8 @@ fn bounded_reference_actions() -> [Action; BOUNDED_REFERENCE_ACTION_COUNT] {
             force_close_delay_slots: 100,
         },
         Action::ShutdownAsset { asset: 2, dt: 1 },
+        Action::ResolveMarket,
+        Action::CloseResolved { actor: 0 },
     ]
 }
 

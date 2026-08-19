@@ -20,11 +20,13 @@
 //! liquidation, and CU ceilings.
 //!
 //! A separate bounded graph exhausts every action word through depth two over
-//! eleven wrapper actions. It replays each edge from the same public genesis,
+//! thirteen wrapper actions, including authority resolution and resolved close. Its
+//! normalized node includes every portfolio's PnL, escrow, close ledger, payout receipt,
+//! and account status plus the market payout snapshot and ledger. It replays each edge
+//! from the same public genesis,
 //! applies the independent state oracles after every transition, records exact
 //! rollback as a self-edge, and distinguishes normalized economic states. This
-//! is finite reachability evidence, not equivalence over unbounded sequences or
-//! omitted payout/receipt state.
+//! is finite reachability evidence, not equivalence over unbounded sequences.
 
 use super::*;
 use crate::support::fuzz_model::run_bounded_reference_equivalence_graph;
@@ -35,22 +37,22 @@ fn v16_program_bounded_reference_graph_exhausts_public_action_words() {
         .expect("INV-086 bounded deployed/reference graph");
 
     assert_eq!(
-        evidence.word_count, 133,
-        "must exhaust 11^0 + 11^1 + 11^2 words"
+        evidence.word_count, 183,
+        "must exhaust 13^0 + 13^1 + 13^2 words"
     );
     assert_eq!(
-        evidence.transition_count, 253,
+        evidence.transition_count, 351,
         "must replay every edge in every bounded word"
     );
     assert!(
-        evidence.unique_node_count >= 50 && evidence.unique_edge_count >= 100,
+        evidence.unique_node_count >= 60 && evidence.unique_edge_count >= 140,
         "bounded graph collapsed to vacuous state coverage: {evidence:?}"
     );
     assert!(
         evidence
             .action_attempts
             .iter()
-            .all(|attempts| *attempts == 23),
+            .all(|attempts| *attempts == 27),
         "every action must occupy every first/second word position: {evidence:?}"
     );
     assert!(
@@ -71,8 +73,10 @@ fn v16_program_bounded_reference_graph_exhausts_public_action_words() {
             && evidence.coverage.backing_topups != 0
             && evidence.coverage.authority_updates != 0
             && evidence.coverage.resolve_policy_updates != 0
-            && evidence.coverage.lifecycle_updates != 0,
-        "bounded graph must exercise value, trade, policy, authority, and lifecycle edges: {evidence:?}"
+            && evidence.coverage.lifecycle_updates != 0
+            && evidence.coverage.terminal_resolves != 0
+            && evidence.coverage.resolved_close_mutations != 0,
+        "bounded graph must exercise value, trade, policy, authority, lifecycle, and terminal edges: {evidence:?}"
     );
 }
 
