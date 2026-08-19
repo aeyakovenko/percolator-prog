@@ -3,9 +3,9 @@
 //! Normative obligation: Every health-relevant state change invalidates or conservatively downgrades certificates.
 //!
 //! Evidence in this file (I/C plus invariant-specific M assertions): public trade/mark/crank/close
-//! sequences create a real source-backed released-PnL claim. Public oracle, source-credit, and
-//! asset-set mutations then make its certificate stale. Favorable conversion must reject with exact
-//! rollback until a permissionless public crank refreshes every certificate key.
+//! sequences create a real source-backed released-PnL claim. Public oracle, source-credit,
+//! lifecycle, and asset-set mutations then make its certificate stale. Favorable conversion must
+//! reject with exact rollback until a permissionless public crank refreshes every certificate key.
 //!
 //! Guarantee boundary: a quarantined counterexample demonstrates public reachability; it does
 //! not certify the invariant on an unfixed pin. Certification requires the fixed-pin assertion
@@ -178,6 +178,43 @@ fn v16_attack_source_credit_risk_epoch_invalidates_public_released_pnl_cert() {
     assert!(
         stale.cert_risk_epoch < after.risk_epoch,
         "the isolated source-credit mutation must invalidate the old risk certificate"
+    );
+
+    assert_stale_conversion_rolls_back(&mut env, &owner, portfolio);
+    refresh_and_convert_public_claim(&mut env, &owner, portfolio);
+}
+
+#[test]
+fn v16_attack_lifecycle_risk_epoch_invalidates_public_released_pnl_cert() {
+    let (mut env, owner, portfolio) = setup_public_released_pnl_certificate();
+    let before = env.market_state().1;
+    let cert_before = health_cert(&env.portfolio_state(portfolio));
+    let lifecycle_cu =
+        env.update_asset_lifecycle_as_admin_with_cu(processor::ASSET_ACTION_DRAIN_ONLY, 0, 0, 0);
+    assert_cu_within(
+        "public Active-to-DrainOnly certificate invalidation",
+        lifecycle_cu,
+        CUSTODY_CU_LIMIT,
+    );
+
+    let after = env.market_state().1;
+    let stale = health_cert(&env.portfolio_state(portfolio));
+    assert_eq!(after.assets[0].lifecycle, AssetLifecycleV16::DrainOnly);
+    assert_eq!(after.risk_epoch, before.risk_epoch + 1);
+    assert_eq!(after.oracle_epoch, before.oracle_epoch);
+    assert_eq!(after.funding_epoch, before.funding_epoch);
+    assert_eq!(after.asset_set_epoch, before.asset_set_epoch + 1);
+    assert_eq!(
+        stale, cert_before,
+        "a market lifecycle transition must not rewrite an unrelated portfolio"
+    );
+    assert!(
+        stale.cert_risk_epoch < after.risk_epoch,
+        "the lifecycle transition must invalidate the old risk certificate"
+    );
+    assert!(
+        stale.cert_asset_set_epoch < after.asset_set_epoch,
+        "the lifecycle transition must invalidate the old asset-set certificate"
     );
 
     assert_stale_conversion_rolls_back(&mut env, &owner, portfolio);
