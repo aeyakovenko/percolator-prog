@@ -697,7 +697,7 @@ fn kani_v16_inv084_decoder_tag_assumptions_have_concrete_witnesses() {
         }
     }
 
-    for (tag, amount) in [(30u8, 21u128), (41u8, 22u128), (42u8, 23u128)] {
+    for (tag, amount) in [(30u8, 21u128), (41u8, 22u128)] {
         let mut data = [0u8; 17];
         data[0] = tag;
         data[1..17].copy_from_slice(&amount.to_le_bytes());
@@ -706,14 +706,25 @@ fn kani_v16_inv084_decoder_tag_assumptions_have_concrete_witnesses() {
                 assert_eq!(fee_rate_per_slot, amount)
             }
             (41, Instruction::WithdrawInsurance { amount: got }) => assert_eq!(got, amount),
-            (
-                42,
-                Instruction::CureAndCancelClose {
-                    optional_deposit: got,
-                },
-            ) => assert_eq!(got, amount),
             _ => unreachable!(),
         }
+    }
+
+    let portfolio_id = 24u64;
+    let amount = 23u128;
+    let mut cure = [0u8; 25];
+    cure[0] = 42;
+    cure[1..9].copy_from_slice(&portfolio_id.to_le_bytes());
+    cure[9..25].copy_from_slice(&amount.to_le_bytes());
+    match Instruction::decode(&cure).unwrap() {
+        Instruction::CureAndCancelClose {
+            portfolio_id: got_portfolio_id,
+            optional_deposit: got,
+        } => {
+            assert_eq!(got_portfolio_id, portfolio_id);
+            assert_eq!(got, amount);
+        }
+        _ => unreachable!(),
     }
 }
 

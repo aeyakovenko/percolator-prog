@@ -1086,6 +1086,7 @@ fn v16_attack_cure_deposit_rejects_noncanonical_vault() {
     env.svm.expire_blockhash();
     let rejected = env.send(
         ProgInstruction::CureAndCancelClose {
+            portfolio_id: env.portfolio_id(portfolio),
             optional_deposit: 50,
         },
         vec![

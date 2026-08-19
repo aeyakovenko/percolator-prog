@@ -4013,8 +4013,10 @@ impl V16CuEnv {
         source: Pubkey,
         amount: u128,
     ) -> u64 {
+        let portfolio_id = self.portfolio_id(portfolio);
         self.send(
             ProgInstruction::CureAndCancelClose {
+                portfolio_id,
                 optional_deposit: amount,
             },
             vec![

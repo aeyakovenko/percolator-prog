@@ -200,16 +200,16 @@ fn v16_program_retained_portfolio_binding_roster_is_source_complete() {
         "\n    #[inline(never)]\n    fn handle_init_market",
     );
 
-    // Seven single-account requests and four two-account trade requests are the complete set of
+    // Eight single-account requests and four two-account trade requests are the complete set of
     // encoded portfolio-incarnation fields. A new field-bearing instruction changes this count and
     // must be assigned to INV-003 before CI can pass.
     assert_eq!(
         instruction_enum.matches("portfolio_id: u64").count(),
-        15,
+        16,
         "portfolio-ID-bearing instruction roster changed without INV-003 review"
     );
 
-    let routes: [(&str, &str, &[&str]); 11] = [
+    let routes: [(&str, &str, &[&str]); 12] = [
         ("Deposit", "deposit", &["portfolio_id"]),
         ("Withdraw", "withdraw", &["portfolio_id"]),
         (
@@ -237,6 +237,11 @@ fn v16_program_retained_portfolio_binding_roster_is_source_complete() {
         (
             "ConvertReleasedPnl",
             "convert_released_pnl",
+            &["portfolio_id"],
+        ),
+        (
+            "CureAndCancelClose",
+            "cure_and_cancel_close",
             &["portfolio_id"],
         ),
         (
@@ -307,10 +312,10 @@ fn v16_program_retained_portfolio_binding_roster_is_source_complete() {
         );
     }
 
-    // This is deliberately an asserted frontier, not a silent omission. CureAndCancelClose is the
-    // only owner-signed portfolio mutation with signed economic input that is not currently in the
-    // ID-bearing roster. Permissionless crank/maintenance/terminal routes consume no owner consent.
     let cure = handler_source(source, "cure_and_cancel_close");
     assert!(cure.contains("expect_signer(owner)?;"));
-    assert!(!cure.contains("expect_portfolio_id("));
+    assert!(
+        cure.contains("expect_portfolio_id(") && cure.contains("expected_portfolio_id"),
+        "CureAndCancelClose: current incarnation is not checked before economic mutation"
+    );
 }

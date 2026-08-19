@@ -6485,11 +6485,25 @@ pub struct CurePendingObligationDosEvidence {
     pub owner_withdraw_rejected: bool,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CurePortfolioIncarnationReplayEvidence {
+    pub old_portfolio_id: u64,
+    pub new_portfolio_id: u64,
+    pub stale_replay_rejected: bool,
+    pub rejected_exact_rollback: bool,
+    pub stale_source_debit: u64,
+    pub stale_capital_credit: u128,
+    pub stale_close_canceled: bool,
+    pub fresh_cure_landed: bool,
+    pub fresh_close_canceled: bool,
+}
+
 fn create_public_cancellable_close(
     runner: &mut ScenarioRunner,
     winner: u8,
     loser: u8,
     asset: u8,
+    cranker: u8,
 ) -> Result<(), String> {
     runner.run_safety_prefix(&[Action::Trade {
         route: TradeRoute::NoCpi,
@@ -6502,17 +6516,30 @@ fn create_public_cancellable_close(
         prefer_reduce: false,
     }])?;
     for _ in 0..20 {
-        runner.run_safety_prefix(&[
-            Action::PushMark {
-                asset,
-                dt: 1,
-                move_bps: 500,
-            },
-            Action::Crank {
-                actor: EXIT_MAKER_INDEX as u8,
+        runner.run_safety_prefix(&[Action::PushMark {
+            asset,
+            dt: 1,
+            move_bps: 500,
+        }])?;
+        if runner.env.primary_market_state().1.bankruptcy_hlock_active {
+            runner
+                .env
+                .crank(
+                    cranker as usize,
+                    runner.env.current_slot(),
+                    vec![CrankObservationHint {
+                        asset_index: asset as u16,
+                        oracle_accounts: 0,
+                    }],
+                )
+                .map_err(|error| format!("explicit post-bankruptcy mark crank: {error}"))?;
+            runner.assert_global_invariants()?;
+        } else {
+            runner.run_safety_prefix(&[Action::Crank {
+                actor: cranker,
                 hints: HintMode::Complete,
-            },
-        ])?;
+            }])?;
+        }
     }
     runner.run_safety_prefix(&[Action::Trade {
         route: TradeRoute::NoCpi,
@@ -6570,7 +6597,13 @@ pub fn run_cure_pending_obligation_dos_probe() -> Result<CurePendingObligationDo
         ..MarketConfig::default()
     };
     let mut runner = ScenarioRunner::new_unprefixed_with_market_config([0xc3; 32], config)?;
-    create_public_cancellable_close(&mut runner, FIRST_WINNER as u8, LOSER as u8, 0)?;
+    create_public_cancellable_close(
+        &mut runner,
+        FIRST_WINNER as u8,
+        LOSER as u8,
+        0,
+        EXIT_MAKER_INDEX as u8,
+    )?;
 
     let mut cure_deposit = 1_000_000u128;
     loop {
@@ -6695,6 +6728,163 @@ pub fn run_cure_pending_obligation_dos_probe() -> Result<CurePendingObligationDo
         successful_noop_cranks,
         unrelated_trade_rejected,
         owner_withdraw_rejected,
+    })
+}
+
+pub fn run_cure_portfolio_incarnation_replay_probe(
+    seed: [u8; 32],
+) -> Result<CurePortfolioIncarnationReplayEvidence, String> {
+    const FIRST_WINNER: usize = 0;
+    const LOSER: usize = 1;
+    const SECOND_WINNER: usize = 2;
+    const CURE_DEPOSIT: u128 = 2_000_000;
+    const REPLACEMENT_CAPITAL: u128 = 161_600;
+
+    let config = MarketConfig {
+        max_price_move_bps_per_slot: 500,
+        max_accrual_dt_slots: 1,
+        max_abs_funding_e9_per_slot: 0,
+        min_funding_lifetime_slots: 1,
+        maintenance_fee_per_slot: 0,
+        maintenance_margin_bps: 1_000,
+        initial_margin_bps: 1_000,
+        actor_deposits: [1_000_000, REPLACEMENT_CAPITAL, 1_000_000, 1_000_000, 1],
+        actor_token_balances: [1_000_000, 1_000_000_000_000, 1_000_000, 1_000_000, 1],
+        ..MarketConfig::default()
+    };
+    let mut runner = ScenarioRunner::new_unprefixed_with_market_config(seed, config)?;
+    create_public_cancellable_close(
+        &mut runner,
+        FIRST_WINNER as u8,
+        LOSER as u8,
+        0,
+        EXIT_MAKER_INDEX as u8,
+    )?;
+    let old_portfolio_id = runner.env.primary_portfolio_id(LOSER);
+    let stale_cure = runner
+        .env
+        .build_retained_cure_and_cancel_primary_close(LOSER, CURE_DEPOSIT);
+    runner
+        .env
+        .cure_and_cancel_primary_close(LOSER, CURE_DEPOSIT)
+        .map_err(|error| format!("cure old close episode: {error}"))?;
+
+    let first_asset = runner.env.primary_market_state().1.assets[0];
+    let next_slot = first_asset
+        .slot_last
+        .checked_add(1)
+        .ok_or("old close cleanup slot overflow")?;
+    if runner.env.current_slot() < next_slot {
+        runner.env.warp_to_slot(next_slot);
+    }
+    for iteration in 0..4 {
+        runner
+            .env
+            .crank(
+                FIRST_WINNER,
+                runner.env.current_slot(),
+                vec![CrankObservationHint {
+                    asset_index: 0,
+                    oracle_accounts: 0,
+                }],
+            )
+            .map_err(|error| format!("old close cleanup crank {iteration}: {error}"))?;
+        let (_, group) = runner.env.primary_market_state();
+        let leg = runner.env.primary_portfolio(FIRST_WINNER).legs[0]
+            .try_to_runtime()
+            .map_err(|error| format!("old winner cleanup leg decode: {error:?}"))?;
+        if group.assets[0].pending_obligation_count_long == 0
+            && group.assets[0].pending_obligation_count_short == 0
+            && (!leg.active || leg.loss_weight == 0)
+        {
+            break;
+        }
+    }
+    runner
+        .env
+        .withdraw_primary(LOSER, 1)
+        .map_err(|error| format!("settle cured old portfolio loss: {error}"))?;
+    let old_capital = runner.env.primary_portfolio(LOSER).capital.get();
+    runner
+        .env
+        .withdraw_primary(LOSER, old_capital)
+        .map_err(|error| format!("withdraw cured old portfolio: {error}"))?;
+    runner
+        .env
+        .close_primary_portfolio(LOSER)
+        .map_err(|error| format!("close cured old portfolio: {error}"))?;
+    runner
+        .env
+        .fund_closed_primary_portfolio(LOSER, 1_000_000_000)
+        .map_err(|error| format!("fund replacement portfolio account: {error}"))?;
+    runner
+        .env
+        .reinitialize_primary_portfolio(LOSER)
+        .map_err(|error| format!("reinitialize replacement portfolio: {error}"))?;
+    let new_portfolio_id = runner.env.primary_portfolio_id(LOSER);
+    if new_portfolio_id <= old_portfolio_id {
+        return Err(format!(
+            "portfolio incarnation did not advance: {old_portfolio_id} -> {new_portfolio_id}"
+        ));
+    }
+    runner
+        .env
+        .deposit_primary(LOSER, REPLACEMENT_CAPITAL)
+        .map_err(|error| format!("fund replacement economic episode: {error}"))?;
+    create_public_cancellable_close(
+        &mut runner,
+        SECOND_WINNER as u8,
+        LOSER as u8,
+        1,
+        LOSER as u8,
+    )?;
+
+    let before = runner.snapshot();
+    let source = runner.env.actors[LOSER].source_token;
+    let source_before = runner.env.token_amount(source);
+    let capital_before = runner.env.primary_portfolio(LOSER).capital.get();
+    let stale_result = runner.env.land_retained(stale_cure);
+    let after_stale = runner.snapshot();
+    let source_after = runner.env.token_amount(source);
+    let capital_after = runner.env.primary_portfolio(LOSER).capital.get();
+    let stale_close = runner
+        .env
+        .primary_portfolio(LOSER)
+        .close_progress
+        .try_to_runtime()
+        .map_err(|error| format!("replacement close decode after stale cure: {error:?}"))?;
+
+    let stale_replay_rejected = stale_result.is_err();
+    let rejected_exact_rollback = stale_replay_rejected && before == after_stale;
+    let stale_source_debit = source_before.saturating_sub(source_after);
+    let stale_capital_credit = capital_after.saturating_sub(capital_before);
+
+    let (fresh_cure_landed, fresh_close_canceled) = if stale_replay_rejected {
+        let fresh = runner
+            .env
+            .build_retained_cure_and_cancel_primary_close(LOSER, CURE_DEPOSIT);
+        let landed = runner.env.land_retained(fresh).is_ok();
+        let close = runner
+            .env
+            .primary_portfolio(LOSER)
+            .close_progress
+            .try_to_runtime()
+            .map_err(|error| format!("replacement close decode after fresh cure: {error:?}"))?;
+        (landed, close.canceled)
+    } else {
+        (false, false)
+    };
+
+    Ok(CurePortfolioIncarnationReplayEvidence {
+        old_portfolio_id,
+        new_portfolio_id,
+        stale_replay_rejected,
+        rejected_exact_rollback,
+        stale_source_debit,
+        stale_capital_credit,
+        stale_close_canceled: stale_close.canceled,
+        fresh_cure_landed,
+        fresh_close_canceled,
     })
 }
 

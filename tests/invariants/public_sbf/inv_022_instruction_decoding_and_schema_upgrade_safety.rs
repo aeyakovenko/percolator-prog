@@ -277,6 +277,7 @@ fn public_instruction_corpus() -> Vec<ProgInstruction> {
             amount: 1,
         },
         ProgInstruction::CureAndCancelClose {
+            portfolio_id: 1,
             optional_deposit: 1,
         },
         ProgInstruction::ForfeitRecoveryLeg {
@@ -496,6 +497,9 @@ fn host_instruction_decoder_rejects_curated_prior_schema_payloads() {
     let mut legacy_base_unit_mints = vec![0u8; 33];
     legacy_base_unit_mints[0] = 60;
 
+    let mut incarnationless_cure = vec![0u8; 17];
+    incarnationless_cure[0] = 42;
+
     for (label, data) in [
         (
             "legacy TradeNoCpi without portfolio and asset generations",
@@ -516,6 +520,10 @@ fn host_instruction_decoder_rejects_curated_prior_schema_payloads() {
         (
             "legacy PermissionlessCrank close-size payload",
             legacy_crank_with_close_size,
+        ),
+        (
+            "legacy CureAndCancelClose without portfolio incarnation",
+            incarnationless_cure,
         ),
         (
             "generationless ConfigureHybridOracle",

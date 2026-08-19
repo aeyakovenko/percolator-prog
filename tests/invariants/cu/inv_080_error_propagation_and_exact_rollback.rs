@@ -308,6 +308,7 @@ fn v16_program_stale_cure_rolls_back_legacy_realloc_and_transfer() {
     env.deposit(&owner, portfolio, 100);
     env.seed_cancellable_close_progress(portfolio);
     let source = env.token_account_for_mint(env.mint, owner.pubkey(), 20);
+    let portfolio_id = env.portfolio_id(portfolio);
 
     let mut legacy = env.svm.get_account(&portfolio).unwrap();
     legacy.data.truncate(PORTFOLIO_ENGINE_ACCOUNT_LEN);
@@ -329,6 +330,7 @@ fn v16_program_stale_cure_rolls_back_legacy_realloc_and_transfer() {
     env.svm.expire_blockhash();
     let rejected = env.send(
         ProgInstruction::CureAndCancelClose {
+            portfolio_id,
             optional_deposit: 20,
         },
         vec![

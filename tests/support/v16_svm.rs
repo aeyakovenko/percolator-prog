@@ -932,10 +932,39 @@ impl V16Svm {
         actor_index: usize,
         optional_deposit: u128,
     ) -> Result<TxSuccess, String> {
+        let portfolio_id = self.primary_portfolio_id(actor_index);
         let actor = &self.actors[actor_index];
         let owner = copy_keypair(&actor.signer);
         self.send_program(
-            ProgInstruction::CureAndCancelClose { optional_deposit },
+            ProgInstruction::CureAndCancelClose {
+                portfolio_id,
+                optional_deposit,
+            },
+            vec![
+                AccountMeta::new(owner.pubkey(), true),
+                AccountMeta::new(self.market, false),
+                AccountMeta::new(actor.portfolio, false),
+                AccountMeta::new(actor.source_token, false),
+                AccountMeta::new(self.vault, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[owner],
+        )
+    }
+
+    pub fn build_retained_cure_and_cancel_primary_close(
+        &mut self,
+        actor_index: usize,
+        optional_deposit: u128,
+    ) -> Transaction {
+        let portfolio_id = self.primary_portfolio_id(actor_index);
+        let actor = &self.actors[actor_index];
+        let owner = copy_keypair(&actor.signer);
+        self.build_program_transaction(
+            ProgInstruction::CureAndCancelClose {
+                portfolio_id,
+                optional_deposit,
+            },
             vec![
                 AccountMeta::new(owner.pubkey(), true),
                 AccountMeta::new(self.market, false),

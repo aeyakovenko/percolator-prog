@@ -752,6 +752,7 @@ fn v16_attack_cure_rejects_cross_market_portfolio_before_transfer() {
     let source_before = env.svm.get_account(&source).unwrap();
     let vault_a_before = env.svm.get_account(&env.vault).unwrap();
     let vault_b_before = env.svm.get_account(&vault_b).unwrap();
+    let portfolio_a_id = env.portfolio_id(portfolio_a);
 
     env.svm.expire_blockhash();
     let rejected = send_tx(
@@ -759,6 +760,7 @@ fn v16_attack_cure_rejects_cross_market_portfolio_before_transfer() {
         env.program_id,
         &env.payer,
         ProgInstruction::CureAndCancelClose {
+            portfolio_id: portfolio_a_id,
             optional_deposit: 50,
         },
         vec![
@@ -866,12 +868,14 @@ fn v16_attack_cure_rejects_cross_market_portfolio_before_transfer() {
             .unwrap();
     }
     let source_b = env.token_account_for_mint(env.mint, owner.pubkey(), 50);
+    let portfolio_b_id = env.portfolio_id(portfolio_b);
     env.svm.expire_blockhash();
     let ok = send_tx(
         &mut env.svm,
         env.program_id,
         &env.payer,
         ProgInstruction::CureAndCancelClose {
+            portfolio_id: portfolio_b_id,
             optional_deposit: 50,
         },
         vec![

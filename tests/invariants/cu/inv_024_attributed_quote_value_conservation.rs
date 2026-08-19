@@ -2065,6 +2065,7 @@ fn v16_attack_cure_deposit_exact_and_atomic() {
     env.svm.expire_blockhash();
     let r = env.send(
         ProgInstruction::CureAndCancelClose {
+            portfolio_id: env.portfolio_id(b),
             optional_deposit: 1_000,
         },
         vec![

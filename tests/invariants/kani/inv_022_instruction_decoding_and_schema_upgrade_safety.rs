@@ -230,18 +230,33 @@ fn kani_v16_withdraw_insurance_decode_preserves_wire_fields() {
 
 #[kani::proof]
 fn kani_v16_cure_and_cancel_close_decode_preserves_wire_fields() {
+    let portfolio_id: u64 = kani::any();
     let amount: u128 = kani::any();
 
-    let mut data = [0u8; 17];
+    let mut data = [0u8; 25];
     data[0] = 42;
-    data[1..17].copy_from_slice(&amount.to_le_bytes());
+    data[1..9].copy_from_slice(&portfolio_id.to_le_bytes());
+    data[9..25].copy_from_slice(&amount.to_le_bytes());
 
     match Instruction::decode(&data).unwrap() {
         Instruction::CureAndCancelClose {
+            portfolio_id: got_portfolio_id,
             optional_deposit: got,
-        } => assert_eq!(got, amount),
+        } => {
+            assert_eq!(got_portfolio_id, portfolio_id);
+            assert_eq!(got, amount);
+        }
         _ => unreachable!(),
     }
+}
+
+#[kani::proof]
+fn kani_v16_cure_and_cancel_close_rejects_incarnationless_legacy_payload() {
+    let amount: u128 = kani::any();
+    let mut data = [0u8; 17];
+    data[0] = 42;
+    data[1..17].copy_from_slice(&amount.to_le_bytes());
+    assert!(Instruction::decode(&data).is_err());
 }
 
 #[kani::proof]
@@ -1624,6 +1639,7 @@ fn kani_v16_resolved_recovery_payloads_reject_trailing_byte() {
     );
     assert_rejects_trailing_byte(
         Instruction::CureAndCancelClose {
+            portfolio_id: 1,
             optional_deposit: 1,
         },
         extra,
@@ -1802,7 +1818,7 @@ fn kani_v16_resolved_progress_payloads_reject_one_byte_truncation() {
     let withdraw_insurance_full = [41u8; 16];
     assert!(Instruction::decode(&withdraw_insurance_full).is_err());
 
-    let cure = [42u8; 16];
+    let cure = [42u8; 24];
     assert!(Instruction::decode(&cure).is_err());
 
     let forfeit = [43u8; 16];

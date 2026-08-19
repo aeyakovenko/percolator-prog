@@ -48,6 +48,7 @@ fn v16_program_cure_and_cancel_close_rejects_when_resolve_matured_atomically() {
     env.svm.expire_blockhash();
     let rejected = env.send(
         ProgInstruction::CureAndCancelClose {
+            portfolio_id: env.portfolio_id(stale),
             optional_deposit: 20,
         },
         vec![
@@ -98,6 +99,7 @@ fn v16_program_public_close_zero_cure_rejects_atomically_and_terminal_progress_r
     env.svm.expire_blockhash();
     let rejected = env.send(
         ProgInstruction::CureAndCancelClose {
+            portfolio_id: env.portfolio_id(loss),
             optional_deposit: 0,
         },
         vec![

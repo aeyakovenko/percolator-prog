@@ -3025,6 +3025,7 @@ pub mod ix {
             amount: u128,
         },
         CureAndCancelClose {
+            portfolio_id: u64,
             optional_deposit: u128,
         },
         ForfeitRecoveryLeg {
@@ -3356,6 +3357,7 @@ pub mod ix {
                     amount: read_u128(&mut rest)?,
                 },
                 42 => Self::CureAndCancelClose {
+                    portfolio_id: read_u64(&mut rest)?,
                     optional_deposit: read_u128(&mut rest)?,
                 },
                 43 => Self::ForfeitRecoveryLeg {
@@ -3871,8 +3873,12 @@ pub mod ix {
                     push_u64(&mut out, market_id);
                     push_u128(&mut out, amount);
                 }
-                Self::CureAndCancelClose { optional_deposit } => {
+                Self::CureAndCancelClose {
+                    portfolio_id,
+                    optional_deposit,
+                } => {
                     out.push(42);
+                    push_u64(&mut out, portfolio_id);
                     push_u128(&mut out, optional_deposit);
                 }
                 Self::ForfeitRecoveryLeg {
@@ -6448,9 +6454,10 @@ pub mod processor {
                 market_id,
                 amount,
             ),
-            Instruction::CureAndCancelClose { optional_deposit } => {
-                handle_cure_and_cancel_close(program_id, accounts, optional_deposit)
-            }
+            Instruction::CureAndCancelClose {
+                portfolio_id,
+                optional_deposit,
+            } => handle_cure_and_cancel_close(program_id, accounts, portfolio_id, optional_deposit),
             Instruction::ForfeitRecoveryLeg {
                 portfolio_id,
                 position_epoch,
@@ -10029,6 +10036,7 @@ pub mod processor {
     fn handle_cure_and_cancel_close<'a>(
         program_id: &Pubkey,
         accounts: &'a [AccountInfo<'a>],
+        expected_portfolio_id: u64,
         optional_deposit: u128,
     ) -> ProgramResult {
         let owner = account(accounts, 0)?;
@@ -10043,6 +10051,7 @@ pub mod processor {
         let (_, _, max_market_slots, _) =
             state::read_market_config_mode_and_capacity(&market_ai.try_borrow_data()?)?;
         ensure_portfolio_storage_for_market_slots(portfolio_ai, max_market_slots)?;
+        expect_portfolio_id(&portfolio_ai.try_borrow_data()?, expected_portfolio_id)?;
 
         let amount_u64 = if optional_deposit != 0 {
             let source_token = account(accounts, 3)?;

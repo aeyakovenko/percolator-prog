@@ -8,6 +8,24 @@
 
 use super::*;
 
+#[test]
+fn v16_program_cure_consent_binds_same_pubkey_portfolio_incarnation() {
+    let evidence =
+        crate::support::fuzz_model::run_cure_portfolio_incarnation_replay_probe([0x3c; 32])
+            .expect("public cure-incarnation replay route");
+    assert!(
+        evidence.new_portfolio_id > evidence.old_portfolio_id,
+        "{evidence:?}"
+    );
+    assert!(evidence.stale_replay_rejected, "{evidence:?}");
+    assert!(evidence.rejected_exact_rollback, "{evidence:?}");
+    assert_eq!(evidence.stale_source_debit, 0, "{evidence:?}");
+    assert_eq!(evidence.stale_capital_credit, 0, "{evidence:?}");
+    assert!(!evidence.stale_close_canceled, "{evidence:?}");
+    assert!(evidence.fresh_cure_landed, "{evidence:?}");
+    assert!(evidence.fresh_close_canceled, "{evidence:?}");
+}
+
 proptest! {
     #![proptest_config(ProptestConfig {
         cases: env_usize("PERCOLATOR_FUZZ_CASES", 8) as u32,
