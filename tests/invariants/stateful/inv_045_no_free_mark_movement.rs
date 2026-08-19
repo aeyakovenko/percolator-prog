@@ -216,6 +216,8 @@ proptest! {
         let discovery = discover_pending_mark_fee_ordering(seed)
             .map_err(TestCaseError::fail)?;
         eprintln!("pending-mark fee-order verification: {discovery:?}");
+        prop_assert_eq!(discovery.control_reward, 0);
+        prop_assert_eq!(discovery.reordered_reward, 0);
         prop_assert!(
             discovery.rejects_pending_sync_and_preserves_terminal_value(),
             "pending-mark fee ordering did not reject and preserve value: {:?}",

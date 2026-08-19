@@ -36,9 +36,11 @@ fn run_directional_fee_terminal_world(
     let low_owner = Keypair::new();
     let victim_owner = Keypair::new();
     let reward_owner = Keypair::new();
+    let refresh_owner = Keypair::new();
     let low = env.create_portfolio(&low_owner);
     let victim = env.create_portfolio(&victim_owner);
     let reward = env.create_portfolio(&reward_owner);
+    let refresh = env.create_portfolio(&refresh_owner);
     env.deposit(&low_owner, low, FEE);
     env.deposit(&victim_owner, victim, 2 * FEE);
     env.trade_asset_with_cu(
@@ -54,23 +56,18 @@ fn run_directional_fee_terminal_world(
 
     env.svm.warp_to_slot(1);
     env.push_auth_mark_with_cu(1, MARK);
-    for portfolio in [low, victim] {
-        for _ in 0..2 {
-            env.svm.expire_blockhash();
-            let _ = env.send(
-                ProgInstruction::PermissionlessCrank {
-                    now_slot: 1,
-                    observations: crank_observations(0),
-                },
-                vec![
-                    AccountMeta::new(env.payer.pubkey(), true),
-                    AccountMeta::new(env.market, false),
-                    AccountMeta::new(portfolio, false),
-                ],
-                &[],
-            );
-        }
-    }
+    env.crank(
+        refresh,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: 1,
+            observations: crank_observations(0),
+        },
+    );
+    // Keep this directional trade-fee regression independent of maintenance-fee ordering. A
+    // self-rewarded public sync advances the victim's cursor without changing its capital or any
+    // domain budget, so the terminal delta below still isolates single-vs-batch side attribution.
+    env.sync_maintenance_fee_with_cu(victim, Some(victim), 1);
+    assert_eq!(env.portfolio_state(victim).capital.get(), 2 * FEE);
     env.sync_maintenance_fee_with_cu(low, Some(reward), 1);
     assert_eq!(env.portfolio_state(low).capital.get(), 1);
 
@@ -93,6 +90,10 @@ fn run_directional_fee_terminal_world(
     assert_eq!(env.portfolio_state(low).capital.get(), 0);
     assert_eq!(env.portfolio_state(victim).capital.get(), FEE);
 
+    // The reward account was created one slot earlier. Advance its own fee cursor through a
+    // self-rewarded sync so its withdrawal cannot reintroduce maintenance ordering into this test.
+    env.sync_maintenance_fee_with_cu(reward, Some(reward), 1);
+    assert_eq!(env.portfolio_state(reward).capital.get(), FEE - 1);
     let reward_dest = env.withdraw(&reward_owner, reward, FEE - 1);
     assert_eq!(env.token_amount(reward_dest) as u128, FEE - 1);
     env.close_portfolio_with_cu(&reward_owner, reward);

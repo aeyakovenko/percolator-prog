@@ -2440,6 +2440,7 @@ impl ScenarioRunner {
             }
             let before = self.snapshot();
             let vault_before = u128::from(self.env.token_amount(self.env.vault));
+            let insurance_before = self.env.primary_market_state().1.insurance;
             let destination_before = self
                 .env
                 .token_amount(self.env.actors[actor].destination_token);
@@ -2454,12 +2455,21 @@ impl ScenarioRunner {
                 .env
                 .token_amount(self.env.actors[actor].destination_token);
             let vault_after = u128::from(self.env.token_amount(self.env.vault));
-            if u128::from(destination_after).checked_sub(u128::from(destination_before))
-                != Some(capital)
-                || vault_after.checked_add(capital) != Some(vault_before)
+            let withdrawn = u128::from(destination_after)
+                .checked_sub(u128::from(destination_before))
+                .ok_or_else(|| format!("actor {actor} destination balance regressed"))?;
+            let vault_debit = vault_before
+                .checked_sub(vault_after)
+                .ok_or_else(|| format!("actor {actor} withdrawal increased vault tokens"))?;
+            let collected_fee = capital
+                .checked_sub(withdrawn)
+                .ok_or_else(|| format!("actor {actor} withdrew more than authorized"))?;
+            let insurance_after = self.env.primary_market_state().1.insurance;
+            if vault_debit != withdrawn
+                || insurance_after.checked_sub(insurance_before) != Some(collected_fee)
             {
                 return Err(format!(
-                    "actor {actor} withdrawal vault/destination delta did not equal authorized debit"
+                    "actor {actor} withdrawal did not partition authorized capital into exact SPL payout and maintenance fee"
                 ));
             }
             self.assert_token_frame(
@@ -2477,6 +2487,7 @@ impl ScenarioRunner {
         if foreign_capital != 0 {
             let before = self.snapshot();
             let vault_before = u128::from(self.env.token_amount(self.env.foreign_vault));
+            let insurance_before = self.env.foreign_market_state().1.insurance;
             let destination_before = u128::from(
                 self.env
                     .token_amount(self.env.foreign_actor.destination_token),
@@ -2492,10 +2503,23 @@ impl ScenarioRunner {
                 self.env
                     .token_amount(self.env.foreign_actor.destination_token),
             );
-            if vault_after.checked_add(foreign_capital) != Some(vault_before)
-                || destination_before.checked_add(foreign_capital) != Some(destination_after)
+            let withdrawn = destination_after
+                .checked_sub(destination_before)
+                .ok_or("foreign destination balance regressed")?;
+            let vault_debit = vault_before
+                .checked_sub(vault_after)
+                .ok_or("foreign withdrawal increased vault tokens")?;
+            let collected_fee = foreign_capital
+                .checked_sub(withdrawn)
+                .ok_or("foreign withdrawal exceeded authorized capital")?;
+            let insurance_after = self.env.foreign_market_state().1.insurance;
+            if vault_debit != withdrawn
+                || insurance_after.checked_sub(insurance_before) != Some(collected_fee)
             {
-                return Err("foreign withdrawal did not preserve exact token deltas".into());
+                return Err(
+                    "foreign withdrawal did not partition capital into exact SPL payout and maintenance fee"
+                        .into(),
+                );
             }
             self.assert_token_frame(
                 &before,
@@ -2902,6 +2926,7 @@ impl ScenarioRunner {
                 let amount = amount as u128;
                 let before = self.snapshot();
                 let capital_before = self.env.primary_portfolio(actor).capital.get();
+                let insurance_before = self.env.primary_market_state().1.insurance;
                 let before_vault = u128::from(self.env.token_amount(self.env.vault));
                 let destination_before = self
                     .env
@@ -2912,12 +2937,26 @@ impl ScenarioRunner {
                         self.coverage.observe_success(None, &success);
                         self.assert_portfolio_frame(&before, &[actor])?;
                         let capital_after = self.env.primary_portfolio(actor).capital.get();
+                        let insurance_after = self.env.primary_market_state().1.insurance;
                         let destination_after = self
                             .env
                             .token_amount(self.env.actors[actor].destination_token);
-                        if capital_before.checked_sub(amount) != Some(capital_after)
-                            || destination_after as u128 != destination_before as u128 + amount
-                            || u128::from(self.env.token_amount(self.env.vault)).checked_add(amount)
+                        let payout = u128::from(destination_after)
+                            .checked_sub(u128::from(destination_before))
+                            .ok_or("withdrawal decreased owner destination")?;
+                        let maintenance = insurance_after
+                            .checked_sub(insurance_before)
+                            .ok_or("withdrawal decreased canonical insurance")?;
+                        let capital_debit = capital_before
+                            .checked_sub(capital_after)
+                            .ok_or("withdrawal increased owner capital")?;
+                        if payout == 0
+                            || payout > amount
+                            || capital_debit
+                                != payout
+                                    .checked_add(maintenance)
+                                    .ok_or("withdrawal payout plus maintenance overflowed")?
+                            || u128::from(self.env.token_amount(self.env.vault)).checked_add(payout)
                                 != Some(before_vault)
                         {
                             return Err(
@@ -7054,6 +7093,7 @@ pub fn verify_cpi_backing_fee_consent(
     const LOSING_SIZE_Q: i128 = 100 * POS_SCALE as i128;
     const INCREASE_Q: i128 = 20 * POS_SCALE as i128;
     const WINNING_DOMAIN: u16 = 3;
+    const EXPECTED_ATTACKER_MAINTENANCE_FEE: i128 = 120;
 
     let mut env = V16Svm::new(
         seed,
@@ -7231,7 +7271,7 @@ pub fn verify_cpi_backing_fee_consent(
         .and_then(|after| i128::try_from(attacker_before).map(|before| after - before))
         .map_err(|_| "attacker capital does not fit i128")?;
     if !zero_cap_risk_reduction_landed
-        || attacker_capital_delta != 0
+        || attacker_capital_delta != -EXPECTED_ATTACKER_MAINTENANCE_FEE
         || observed_positions(&env.primary_portfolio(0))?[0] != 0
     {
         return Err(format!(
@@ -8070,20 +8110,22 @@ fn run_pending_mark_fee_reward_world(
     let reward = cranker_capital
         .checked_sub(1)
         .ok_or("PR 356 cranker capital fell below its fixture deposit")?;
-    if reward == 0 {
-        return Err("PR 356 maintenance sync paid no public reward".into());
-    }
-    env.withdraw_primary(2, cranker_capital)
-        .map_err(|error| format!("PR 356 withdraw cranker reward: {error}"))?;
-    let cranker_withdrawn = env.token_amount(env.actors[2].destination_token);
-    let extracted_reward = cranker_withdrawn
-        .checked_sub(1)
-        .ok_or("PR 356 cranker withdrawal lost fixture deposit")?;
-    if u128::from(extracted_reward) != reward {
-        return Err(format!(
-            "PR 356 cranker reward/SPL mismatch: {reward}/{extracted_reward}"
-        ));
-    }
+    let extracted_reward = if reward == 0 {
+        0
+    } else {
+        env.withdraw_primary(2, cranker_capital)
+            .map_err(|error| format!("PR 356 withdraw cranker reward: {error}"))?;
+        let cranker_withdrawn = env.token_amount(env.actors[2].destination_token);
+        let extracted = cranker_withdrawn
+            .checked_sub(1)
+            .ok_or("PR 356 cranker withdrawal lost fixture deposit")?;
+        if u128::from(extracted) != reward {
+            return Err(format!(
+                "PR 356 cranker reward/SPL mismatch: {reward}/{extracted}"
+            ));
+        }
+        extracted
+    };
 
     for _ in 0..24 {
         for actor in [0, 1] {
@@ -9982,6 +10024,9 @@ pub fn reproduce_maintenance_policy_generation_replay(
     }
 
     env.warp_to_slot(SYNC_SLOT);
+    let attacker_fee_refresh = env
+        .sync_maintenance_fee_with_reward(ATTACKER, ATTACKER, SYNC_SLOT)
+        .map_err(|error| format!("PR 325 make attacker reward account fee-current: {error}"))?;
     let payer_before = env.primary_portfolio(FEE_PAYER).capital.get();
     let attacker_before = env.primary_portfolio(ATTACKER).capital.get();
     let sync = env
@@ -10018,6 +10063,7 @@ pub fn reproduce_maintenance_policy_generation_replay(
         .ok_or("PR 325 attacker destination decreased")?;
     let max_cu = replay
         .compute_units
+        .max(attacker_fee_refresh.compute_units)
         .max(sync.compute_units)
         .max(withdrawal.compute_units);
     if attacker_extraction != EXPECTED_FEE
@@ -13567,6 +13613,10 @@ fn run_convert_retry_world(seed: [u8; 32], land_retry: bool) -> Result<ConvertRe
     }
 
     env.warp_to_slot(10);
+    let cranker_fee_refresh = env
+        .sync_maintenance_fee_with_reward(CRANKER, CRANKER, 10)
+        .map_err(|error| format!("make conversion-retry cranker fee-current: {error}"))?;
+    max_cu = max_cu.max(cranker_fee_refresh.compute_units);
     let cranker_before = env.primary_portfolio(CRANKER).capital.get();
     let sync = env
         .sync_maintenance_fee_with_reward(VICTIM, CRANKER, 10)

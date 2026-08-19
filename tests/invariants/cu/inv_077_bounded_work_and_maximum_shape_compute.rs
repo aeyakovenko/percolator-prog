@@ -90,6 +90,15 @@ fn v16_program_max_source_conversion_amount_matrix_discovers_claim_lock() {
     }
 
     env.svm.warp_to_slot(slot + 1);
+    let retained_asset = MAX_SOURCE_LIVE_ASSETS - 1;
+    env.push_auth_mark_for_asset_as_admin(retained_asset, slot + 1, 100);
+    env.crank(
+        lp,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: slot + 1,
+            observations: crank_observations(retained_asset),
+        },
+    );
     env.svm.expire_blockhash();
     let market_before_crank = env.svm.get_account(&env.market).unwrap();
     let lp_before_crank = env.svm.get_account(&lp).unwrap();

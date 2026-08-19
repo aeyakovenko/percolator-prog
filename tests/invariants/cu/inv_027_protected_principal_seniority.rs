@@ -2,15 +2,243 @@
 //!
 //! Normative obligation: Junior value and fees cannot outrank protected principal or pending senior obligations.
 //!
-//! Evidence in this file (I/C plus invariant-specific M assertions): `v16_bpf_public_crystallized_loss_budget_credits_only_fresh_lp_principal`. These tests exercise the deployed public
-//! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
-//! rollback, liveness, or compute outcomes appropriate to the invariant.
+//! Evidence in this file (I/C plus invariant-specific M assertions):
+//! `v16_bpf_public_crystallized_loss_budget_credits_only_fresh_lp_principal` and the issue-408
+//! standing-matcher/liquidation matrices. The latter age a real maintenance obligation through
+//! authenticated public cranks, then prove an unsigned matcher fill or permissionless liquidation
+//! cannot transfer the same collateral before collection. These tests exercise the deployed public
+//! wrapper with real SBF/LiteSVM account construction and assert economic state, token, rollback,
+//! liveness, or compute outcomes appropriate to the invariant.
 //!
 //! Guarantee boundary: a quarantined counterexample demonstrates public reachability; it does
 //! not certify the invariant on an unfixed pin. Certification requires the fixed-pin assertion
 //! plus every additional verification method required by the charter.
 
 use super::*;
+
+const ISSUE408_FEE_PER_SLOT: u128 = 1_000;
+const ISSUE408_AGED_SLOT: u64 = 500;
+const ISSUE408_MOVE_SLOT: u64 = 542;
+const ISSUE408_LOTS: i128 = 10;
+
+fn issue408_advance_market_without_target_refresh(
+    env: &mut V16CuEnv,
+    empty: Pubkey,
+    slot: u64,
+    mark: u64,
+) {
+    env.svm.warp_to_slot(slot);
+    env.push_auth_mark_for_asset_as_admin(0, slot, mark);
+    env.crank(
+        empty,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: slot,
+            observations: crank_observations(0),
+        },
+    );
+}
+
+fn issue408_aged_portfolios() -> (V16CuEnv, Keypair, Keypair, Pubkey, Pubkey, Pubkey, Pubkey) {
+    let mut params = production_risk_params();
+    params.maintenance_fee_per_slot = ISSUE408_FEE_PER_SLOT;
+    let mut env = V16CuEnv::new_with_init_params(params);
+    env.configure_auth_mark_with_cu(0, 1_000_000);
+
+    let aged_owner = Keypair::new();
+    let aged = env.create_portfolio(&aged_owner);
+    let dust_owner = Keypair::new();
+    let dust = env.create_portfolio(&dust_owner);
+    let empty_owner = Keypair::new();
+    let empty = env.create_portfolio(&empty_owner);
+    env.deposit(&aged_owner, aged, 1_100_000);
+    env.deposit(&dust_owner, dust, 600);
+    env.trade_with_cu(&aged_owner, aged, &dust_owner, dust, 1, 1_000_000, 0);
+    for slot in (20..=ISSUE408_AGED_SLOT).step_by(20) {
+        issue408_advance_market_without_target_refresh(&mut env, empty, slot, 1_000_000);
+    }
+
+    let fresh_owner = Keypair::new();
+    let fresh = env.create_portfolio(&fresh_owner);
+    env.deposit(&fresh_owner, fresh, 600_000);
+    (env, aged_owner, fresh_owner, aged, dust, empty, fresh)
+}
+
+#[test]
+fn v16_program_issue408_unsigned_matcher_cannot_spend_aged_maintenance_collateral() {
+    let (mut env, lp_owner, taker_owner, lp, dust, empty, taker) = issue408_aged_portfolios();
+    assert_eq!(env.portfolio_state(lp).last_fee_slot.get(), 0);
+
+    let matcher_program = Pubkey::new_unique();
+    let matcher_bytes = std::fs::read(matcher_program_path()).expect("read matcher BPF");
+    env.svm.add_program(matcher_program, &matcher_bytes);
+    let (matcher_ctx, matcher_delegate, _) =
+        env.init_matcher_context_authorized(matcher_program, &lp_owner, lp);
+
+    // The LP owner does not sign. A public refresh followed by the taker's matcher fill must
+    // crystallize the old obligation before the fill can move any of that collateral.
+    env.crank(
+        lp,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: ISSUE408_AGED_SLOT,
+            observations: crank_observations(0),
+        },
+    );
+    env.trade_cpi_with_cu_on_asset(
+        &taker_owner,
+        taker,
+        &lp_owner,
+        lp,
+        matcher_program,
+        matcher_ctx,
+        matcher_delegate,
+        0,
+        ISSUE408_LOTS * POS_SCALE as i128,
+        0,
+    );
+
+    let lp_after_fill = env.portfolio_state(lp);
+    assert_eq!(
+        lp_after_fill.last_fee_slot.get(),
+        ISSUE408_AGED_SLOT,
+        "the unsigned LP fill must first advance the aged fee cursor"
+    );
+    assert_eq!(
+        lp_after_fill.capital.get(),
+        600_000,
+        "exactly the 500-slot maintenance obligation must leave LP capital before transfer"
+    );
+    assert_eq!(
+        env.market_state().1.insurance,
+        ISSUE408_FEE_PER_SLOT * ISSUE408_AGED_SLOT as u128,
+        "the crystallized obligation must be durably attributed to insurance"
+    );
+
+    issue408_advance_market_without_target_refresh(&mut env, empty, 520, 1_048_000);
+    issue408_advance_market_without_target_refresh(&mut env, empty, 540, 1_098_304);
+    issue408_advance_market_without_target_refresh(&mut env, empty, ISSUE408_MOVE_SLOT, 1_100_000);
+    for portfolio in [lp, taker, dust] {
+        env.crank(
+            portfolio,
+            ProgInstruction::PermissionlessCrank {
+                now_slot: ISSUE408_MOVE_SLOT,
+                observations: crank_observations(0),
+            },
+        );
+    }
+    assert!(
+        env.market_state().1.insurance >= ISSUE408_FEE_PER_SLOT * ISSUE408_AGED_SLOT as u128,
+        "later settlement cannot claw the already crystallized senior fee back out"
+    );
+}
+
+#[test]
+fn v16_program_issue408_liquidation_reward_cannot_preempt_aged_maintenance_collateral() {
+    const FEE_PER_SLOT: u128 = 35;
+    const AGED_SLOT: u64 = 4_000;
+    const MOVE_SLOT: u64 = 4_020;
+
+    let mut params = production_risk_params();
+    params.maintenance_fee_per_slot = FEE_PER_SLOT;
+    let mut env = V16CuEnv::new_with_init_params(params);
+    env.update_liquidation_fee_policy_with_cu(10_000);
+    env.configure_auth_mark_with_cu(0, 1_000_000);
+
+    let long_owner = Keypair::new();
+    let long = env.create_portfolio(&long_owner);
+    let victim_owner = Keypair::new();
+    let victim = env.create_portfolio(&victim_owner);
+    let empty_owner = Keypair::new();
+    let empty = env.create_portfolio(&empty_owner);
+    env.deposit(&long_owner, long, 100_000_000);
+    env.deposit(&victim_owner, victim, 600_000);
+    env.trade_with_cu(
+        &long_owner,
+        long,
+        &victim_owner,
+        victim,
+        ISSUE408_LOTS * POS_SCALE as i128,
+        1_000_000,
+        0,
+    );
+    for slot in (20..=AGED_SLOT).step_by(20) {
+        issue408_advance_market_without_target_refresh(&mut env, empty, slot, 1_000_000);
+    }
+    assert_eq!(env.portfolio_state(victim).last_fee_slot.get(), 0);
+
+    issue408_advance_market_without_target_refresh(&mut env, empty, MOVE_SLOT, 1_048_000);
+    let cranker_owner = Keypair::new();
+    let cranker = env.create_portfolio(&cranker_owner);
+    env.deposit(&cranker_owner, cranker, 1);
+    let cranker_before = env.portfolio_state(cranker).capital.get();
+    let insurance_before_collection = env.market_state().1.insurance;
+    env.svm.expire_blockhash();
+    send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: MOVE_SLOT,
+            observations: vec![],
+        },
+        vec![
+            AccountMeta::new(cranker_owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(victim, false),
+            AccountMeta::new(cranker, false),
+        ],
+        &[&cranker_owner],
+    )
+    .expect("the value-moving crank must first crystallize maintenance");
+
+    let after_collection = env.portfolio_state(victim);
+    assert_eq!(after_collection.last_fee_slot.get(), MOVE_SLOT);
+    assert_eq!(after_collection.capital.get(), 0);
+    assert_eq!(
+        env.market_state().1.insurance - insurance_before_collection,
+        120_000,
+        "all available victim capital must be attributed to the older fee before any reward"
+    );
+    assert_eq!(
+        env.portfolio_state(cranker).capital.get(),
+        cranker_before,
+        "the cranker cannot receive collateral already consumed by the senior fee"
+    );
+    let position_before_liquidation = active_leg_for_asset(&after_collection, 0)
+        .basis_pos_q
+        .unsigned_abs();
+
+    // Collection invalidates the old health certificate. A subsequent public call must still
+    // advance liquidation or terminal recovery; the ordering fix cannot strand the position.
+    env.svm.expire_blockhash();
+    send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: MOVE_SLOT,
+            observations: vec![],
+        },
+        vec![
+            AccountMeta::new(cranker_owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(victim, false),
+            AccountMeta::new(cranker, false),
+        ],
+        &[&cranker_owner],
+    )
+    .expect("fee collection must preserve a public liquidation or recovery continuation");
+    assert_eq!(env.portfolio_state(cranker).capital.get(), cranker_before);
+    let victim_after_liquidation = env.portfolio_state(victim);
+    let position_reduced = !has_active_leg_for_asset(&victim_after_liquidation, 0)
+        || active_leg_for_asset(&victim_after_liquidation, 0)
+            .basis_pos_q
+            .unsigned_abs()
+            < position_before_liquidation;
+    assert!(
+        position_reduced || env.market_state().1.mode != MarketModeV16::Live,
+        "the bounded follow-up crank must reduce exposure or enter terminal recovery"
+    );
+}
 
 #[test]
 fn v16_bpf_public_crystallized_loss_budget_credits_only_fresh_lp_principal() {

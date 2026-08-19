@@ -1098,12 +1098,21 @@ pub(super) fn assert_inv_051_crossed_adl_effective_exit_matrix_preserves_bounded
         });
         let survivor_owner = Keypair::new();
         let counterparty_owner = Keypair::new();
+        let keeper_owner = Keypair::new();
+        env.svm.warp_to_slot(8);
         let survivor = env.create_portfolio(&survivor_owner);
         let counterparty = env.create_portfolio(&counterparty_owner);
+        let keeper = env.create_portfolio(&keeper_owner);
         env.deposit(&survivor_owner, survivor, 1_000);
-        env.deposit(&counterparty_owner, counterparty, 1_189);
+        // The fixed crank collects through slot 35 before sizing liquidation; the historical
+        // fixture collected only through the slot-20 bounded accrual frontier. Add the exact
+        // seven-slot net delta so post-fee capital, and therefore this ADL boundary, is unchanged.
+        env.deposit(
+            &counterparty_owner,
+            counterparty,
+            1_189 + maintenance_fee_per_slot * 7,
+        );
 
-        env.svm.warp_to_slot(8);
         env.trade_asset_with_cu(
             0,
             &survivor_owner,
@@ -1116,7 +1125,7 @@ pub(super) fn assert_inv_051_crossed_adl_effective_exit_matrix_preserves_bounded
         );
         env.svm.warp_to_slot(27);
         env.crank(
-            survivor,
+            keeper,
             ProgInstruction::PermissionlessCrank {
                 now_slot: 27,
                 observations: crank_observations(0),
@@ -1229,9 +1238,11 @@ pub(super) fn assert_inv_051_crossed_adl_effective_exit_matrix_preserves_bounded
         assert!(!has_active_leg_for_asset(&cleaned, 0));
         assert_eq!(env.market_state().1.assets[0].oi_eff_long_q, 0);
         let withdrawable = cleaned.capital.get();
-        assert!(withdrawable > 0);
-        let destination = env.withdraw(&survivor_owner, survivor, withdrawable);
-        assert_eq!(env.token_amount(destination), withdrawable as u64);
+        if withdrawable > 0 {
+            let destination = env.withdraw(&survivor_owner, survivor, withdrawable);
+            assert_eq!(env.token_amount(destination), withdrawable as u64);
+        }
+        env.close_portfolio_with_cu(&survivor_owner, survivor);
         assert_eq!(
             env.market_state().1.vault as u64,
             env.token_amount(env.vault)
@@ -1415,12 +1426,18 @@ pub(super) fn assert_inv_051_liquidation_adl_effective_exit_matrix_preserves_bou
         });
         let survivor_owner = Keypair::new();
         let liquidated_owner = Keypair::new();
+        let keeper_owner = Keypair::new();
+        env.svm.warp_to_slot(8);
         let survivor = env.create_portfolio(&survivor_owner);
         let liquidated = env.create_portfolio(&liquidated_owner);
+        let keeper = env.create_portfolio(&keeper_owner);
         env.deposit(&survivor_owner, survivor, 1_000);
-        env.deposit(&liquidated_owner, liquidated, 1_189);
+        env.deposit(
+            &liquidated_owner,
+            liquidated,
+            1_189 + maintenance_fee_per_slot * 7,
+        );
 
-        env.svm.warp_to_slot(8);
         env.trade_asset_with_cu(
             0,
             &survivor_owner,
@@ -1433,7 +1450,7 @@ pub(super) fn assert_inv_051_liquidation_adl_effective_exit_matrix_preserves_bou
         );
         env.svm.warp_to_slot(27);
         env.crank(
-            survivor,
+            keeper,
             ProgInstruction::PermissionlessCrank {
                 now_slot: 27,
                 observations: crank_observations(0),
@@ -1568,9 +1585,11 @@ pub(super) fn assert_inv_051_liquidation_adl_effective_exit_matrix_preserves_bou
         assert!(!has_active_leg_for_asset(&cleaned, 0));
         assert_eq!(env.market_state().1.assets[0].oi_eff_long_q, 0);
         let withdrawable = cleaned.capital.get();
-        assert!(withdrawable > 0);
-        let destination = env.withdraw(&survivor_owner, survivor, withdrawable);
-        assert_eq!(env.token_amount(destination), withdrawable as u64);
+        if withdrawable > 0 {
+            let destination = env.withdraw(&survivor_owner, survivor, withdrawable);
+            assert_eq!(env.token_amount(destination), withdrawable as u64);
+        }
+        env.close_portfolio_with_cu(&survivor_owner, survivor);
         assert_eq!(
             env.market_state().1.vault as u64,
             env.token_amount(env.vault)
@@ -3036,12 +3055,14 @@ fn v16_attack_crossed_trade_cannot_turn_partial_liquidation_survivors_same_side(
     });
     let owner_a = Keypair::new();
     let owner_b = Keypair::new();
+    let keeper_owner = Keypair::new();
+    env.svm.warp_to_slot(8);
     let account_a = env.create_portfolio(&owner_a);
     let account_b = env.create_portfolio(&owner_b);
+    let keeper = env.create_portfolio(&keeper_owner);
     env.deposit(&owner_a, account_a, 1_000);
-    env.deposit(&owner_b, account_b, 1_189);
+    env.deposit(&owner_b, account_b, 1_189 + 7 * 27);
 
-    env.svm.warp_to_slot(8);
     let open_cu = env
         .try_trade_asset_with_cu(
             0, &owner_a, account_a, &owner_b, account_b, OPEN_Q, PRICE, 0,
@@ -3051,7 +3072,7 @@ fn v16_attack_crossed_trade_cannot_turn_partial_liquidation_survivors_same_side(
 
     env.svm.warp_to_slot(27);
     env.crank(
-        account_a,
+        keeper,
         ProgInstruction::PermissionlessCrank {
             now_slot: 27,
             observations: crank_observations(0),
@@ -3169,13 +3190,24 @@ fn v16_attack_crossed_trade_cannot_turn_partial_liquidation_survivors_same_side(
     assert!(exited_group.vault >= exited_group.c_tot + exited_group.insurance);
 
     env.svm.expire_blockhash();
+    let insurance_before_a_withdrawal = env.market_state().1.insurance;
     let (dest_a, withdraw_a_cu) = env.withdraw_with_cu(&owner_a, account_a, exited_a.capital.get());
     assert_cu_within(
         "issue 103 ADL survivor withdrawal",
         withdraw_a_cu,
         CUSTODY_CU_LIMIT,
     );
-    assert_eq!(env.token_amount(dest_a), exited_a.capital.get() as u64);
+    let elapsed_maintenance = 27u128 * 27;
+    assert_eq!(
+        env.token_amount(dest_a),
+        (exited_a.capital.get() - elapsed_maintenance) as u64,
+        "withdraw-all must pay the principal remaining after crystallizing maintenance"
+    );
+    assert_eq!(
+        env.market_state().1.insurance - insurance_before_a_withdrawal,
+        elapsed_maintenance,
+        "withdraw-all must attribute the crystallized maintenance exactly once"
+    );
     env.svm.expire_blockhash();
     let (dest_b, withdraw_b_cu) = env.withdraw_with_cu(&owner_b, account_b, exited_b.capital.get());
     assert_cu_within(
@@ -3199,6 +3231,7 @@ fn v16_attack_crossed_trade_cannot_turn_partial_liquidation_survivors_same_side(
         close_b_cu,
         CUSTODY_CU_LIMIT,
     );
+    env.close_portfolio_with_cu(&keeper_owner, keeper);
     let (_, final_group) = env.market_state();
     assert_eq!(final_group.materialized_portfolio_count, 0);
     assert_eq!(final_group.vault as u64, env.token_amount(env.vault));

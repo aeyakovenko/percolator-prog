@@ -88,6 +88,8 @@ fn v16_program_pr356_pending_mark_fee_sync_rejects_then_preserves_terminal_value
     assert_eq!(reproduction.blocker, KnownBlocker::PendingMarkFeeReward);
     assert!(reproduction.pending_sync_rejected_lock);
     assert!(reproduction.pending_sync_exact_rollback);
+    assert_eq!(reproduction.control_reward, 0);
+    assert_eq!(reproduction.reordered_reward, 0);
     assert_eq!(reproduction.reordered_reward, reproduction.control_reward);
     assert_eq!(
         reproduction.reordered_winner_payout,

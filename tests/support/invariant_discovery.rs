@@ -6968,15 +6968,20 @@ fn run_pending_mark_fee_world(
     let reward = cranker_capital
         .checked_sub(1)
         .ok_or_else(|| "cranker capital fell below deposit".to_string())?;
-    env.withdraw_primary(2, cranker_capital)
-        .map_err(|error| format!("withdraw maintenance reward: {error}"))?;
-    let extracted_reward = env
-        .token_amount(env.actors[2].destination_token)
-        .checked_sub(1)
-        .ok_or_else(|| "cranker withdrawal lost deposit".to_string())?;
-    if u128::from(extracted_reward) != reward {
-        return Err("maintenance reward did not reach SPL destination".into());
-    }
+    let extracted_reward = if reward == 0 {
+        0
+    } else {
+        env.withdraw_primary(2, cranker_capital)
+            .map_err(|error| format!("withdraw maintenance reward: {error}"))?;
+        let extracted = env
+            .token_amount(env.actors[2].destination_token)
+            .checked_sub(1)
+            .ok_or_else(|| "cranker withdrawal lost deposit".to_string())?;
+        if u128::from(extracted) != reward {
+            return Err("maintenance reward did not reach SPL destination".into());
+        }
+        extracted
+    };
 
     for _ in 0..24 {
         for actor in [0, 1] {

@@ -5866,6 +5866,54 @@ pub mod processor {
         credit_market_insurance_budget_view(group, 0, amount)
     }
 
+    /// Crystallize every maintenance fee that is currently collectible from this portfolio before
+    /// a public route can debit or transfer its capital. The engine remains the source of truth for
+    /// fee anchoring, side-effect settlement, and the junior-value cap; the wrapper only enforces
+    /// ordering and attributes the collected amount to the canonical maintenance-fee destination.
+    fn collect_maintenance_fee_to_slot_before_value_debit_view(
+        cfg: &WrapperConfigV16,
+        group: &mut state::MarketViewMutV16<'_>,
+        portfolio: &mut percolator::PortfolioV16ViewMut<'_>,
+        now_slot: u64,
+    ) -> Result<u128, ProgramError> {
+        if group.header.mode != 0 || cfg.maintenance_fee_per_slot == 0 {
+            return Ok(0);
+        }
+        let charged = group
+            .sync_account_fee_to_slot_not_atomic(portfolio, now_slot, cfg.maintenance_fee_per_slot)
+            .map_err(map_v16_error)?;
+        credit_maintenance_fee_to_active_market_budgets_view(cfg, group, charged)?;
+        Ok(charged)
+    }
+
+    fn collect_maintenance_fee_before_value_debit_view(
+        cfg: &WrapperConfigV16,
+        group: &mut state::MarketViewMutV16<'_>,
+        portfolio: &mut percolator::PortfolioV16ViewMut<'_>,
+    ) -> Result<u128, ProgramError> {
+        let now_slot = authenticated_market_slot_or_fallback_view(group);
+        collect_maintenance_fee_to_slot_before_value_debit_view(cfg, group, portfolio, now_slot)
+    }
+
+    fn collect_maintenance_fee_before_trade_view(
+        cfg: &WrapperConfigV16,
+        group: &mut state::MarketViewMutV16<'_>,
+        portfolio: &mut percolator::PortfolioV16ViewMut<'_>,
+    ) -> Result<u128, ProgramError> {
+        let active_bitmap = portfolio
+            .header
+            .active_bitmap
+            .map(percolator::V16PodU64::get);
+        if percolator::active_bitmap_is_empty(active_bitmap) {
+            // Opening a first leg does not debit an existing exposure. Leave flat-account fee
+            // realization to SyncMaintenanceFee/Withdraw instead of advancing its cursor ahead of
+            // the loss-current anchor immediately before it becomes nonflat.
+            return Ok(0);
+        }
+        let now_slot = authenticated_market_slot_or_fallback_view(group);
+        collect_maintenance_fee_to_slot_before_value_debit_view(cfg, group, portfolio, now_slot)
+    }
+
     fn require_asset_active_for_oracle_reconfiguration_view(
         group: &state::MarketViewMutV16<'_>,
         asset_index: usize,
@@ -6734,11 +6782,13 @@ pub mod processor {
             &vault_authority,
             &cfg,
         )?;
-        let amount_u64 = amount_to_u64(amount)?;
-        require_token_balance(vault_token, amount_u64)?;
+        if amount == 0 {
+            return Ok(());
+        }
+        amount_to_u64(amount)?;
 
         ensure_portfolio_storage_for_market_slots(portfolio_ai, max_market_slots)?;
-        {
+        let withdrawn_amount = {
             let mut market_data = market_ai.try_borrow_mut_data()?;
             let (cfg, mut group) = state::market_view_mut(&mut market_data)?;
             if group.header.mode != 0 {
@@ -6751,10 +6801,22 @@ pub mod processor {
                 state::portfolio_view_mut_for_market_slots(&mut portfolio_data, max_market_slots)?;
             expect_portfolio_view_account_key(&portfolio, portfolio_ai.key)?;
             expect_portfolio_view_owner(&portfolio, owner.key)?;
+            let capital_before_fee = portfolio.header.capital.get();
+            collect_maintenance_fee_before_value_debit_view(&cfg, &mut group, &mut portfolio)?;
+            // Preserve an atomic withdraw-all path when the submitted balance became stale only
+            // because this instruction crystallized its fee. Partial withdrawals remain exact.
+            let withdrawn_amount = if amount == capital_before_fee {
+                portfolio.header.capital.get()
+            } else {
+                amount
+            };
             group
-                .withdraw_not_atomic(&mut portfolio, amount)
+                .withdraw_not_atomic(&mut portfolio, withdrawn_amount)
                 .map_err(map_v16_error)?;
-        }
+            withdrawn_amount
+        };
+        let amount_u64 = amount_to_u64(withdrawn_amount)?;
+        require_token_balance(vault_token, amount_u64)?;
         let bump_arr = [bump];
         let signer_seeds: &[&[&[u8]]] = &[&[b"vault", market_ai.key.as_ref(), &bump_arr]];
         transfer_tokens_signed(
@@ -6876,6 +6938,8 @@ pub mod processor {
                 &account_b,
                 core::slice::from_ref(&req),
             )?;
+            collect_maintenance_fee_before_trade_view(&cfg, &mut group, &mut account_a)?;
+            collect_maintenance_fee_before_trade_view(&cfg, &mut group, &mut account_b)?;
             let account_a_needs_source_capacity =
                 trade_delta_may_require_source_domain_capacity(account_a_position, size_q)?;
             let account_b_needs_source_capacity =
@@ -7215,6 +7279,8 @@ pub mod processor {
             ensure_trade_portfolios_current_for_requests_view(
                 &group, &account_a, &account_b, &requests,
             )?;
+            collect_maintenance_fee_before_trade_view(&cfg, &mut group, &mut account_a)?;
+            collect_maintenance_fee_before_trade_view(&cfg, &mut group, &mut account_b)?;
             if needs_source_domain_capacity {
                 let mut admitted_source_domains_a =
                     occupied_source_domains_snapshot_for_trade_view(&account_a)?;
@@ -7755,6 +7821,8 @@ pub mod processor {
         account_b
             .validate_with_market(&group.as_view())
             .map_err(map_v16_error)?;
+        collect_maintenance_fee_before_value_debit_view(&cfg, &mut group, &mut account_a)?;
+        collect_maintenance_fee_before_value_debit_view(&cfg, &mut group, &mut account_b)?;
         let position_a = signed_position_for_asset_view(&group, &account_a, asset_index_usize)?;
         let position_b = signed_position_for_asset_view(&group, &account_b, asset_index_usize)?;
         if position_a == 0 || position_b == 0 {
@@ -12489,7 +12557,6 @@ pub mod processor {
                     }
                 }
             }
-            let insurance_before = group.header.insurance.get();
             let mut observations: Vec<AutoCrankObservationV16> =
                 Vec::with_capacity(percolator::V16_MAX_PORTFOLIO_ASSETS_N);
             let mut settlement_only_after_maturity = None;
@@ -12650,14 +12717,25 @@ pub mod processor {
             let mut portfolio =
                 state::portfolio_view_mut_for_market_slots(&mut portfolio_data, max_market_slots)?;
             expect_portfolio_view_account_key(&portfolio, portfolio_ai.key)?;
-            let summary = group
+            let mut summary = group
                 .build_actionable_summary(&portfolio.as_view())
                 .map_err(map_v16_error)?;
-            let positions_before = if matcher_enabled {
-                Some(portfolio_position_vector_view(&portfolio)?)
-            } else {
-                None
-            };
+            let active_bitmap = portfolio
+                .header
+                .active_bitmap
+                .map(percolator::V16PodU64::get);
+            if cfg.maintenance_fee_per_slot != 0
+                && !percolator::active_bitmap_is_empty(active_bitmap)
+                && portfolio.header.last_fee_slot.get() < authenticated_now_slot
+                && !summary.b_stale
+                && !summary.pending_close
+                && !summary.expired_close
+            {
+                collect_maintenance_fee_before_value_debit_view(&cfg, &mut group, &mut portfolio)?;
+                summary = group
+                    .build_actionable_summary(&portfolio.as_view())
+                    .map_err(map_v16_error)?;
+            }
             // Refresh and liquidation both recertify the complete bounded portfolio. A pending
             // wrapper-side mark/funding segment on any active leg must therefore be observed
             // before either route can certify the account, even when the engine selects another
@@ -12671,6 +12749,15 @@ pub mod processor {
                     observations.as_slice(),
                 )?;
             }
+            // Maintenance collection is senior to a liquidation reward. Snapshot insurance only
+            // after that collection so the reward calculation below sees liquidation proceeds,
+            // never the old maintenance obligation.
+            let insurance_before = group.header.insurance.get();
+            let positions_before = if matcher_enabled {
+                Some(portfolio_position_vector_view(&portfolio)?)
+            } else {
+                None
+            };
             let result = match group.permissionless_auto_crank_not_atomic(
                 &mut portfolio,
                 AutoCrankWorkV16 {

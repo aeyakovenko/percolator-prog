@@ -199,16 +199,16 @@ fn v16_program_post_adl_transfer_matrix_discovers_phantom_value() {
     let survivor_owner = Keypair::new();
     let liquidated_owner = Keypair::new();
     let successor_owner = Keypair::new();
-    let survivor = env.create_portfolio(&survivor_owner);
-    let liquidated = env.create_portfolio(&liquidated_owner);
-    let successor = env.create_portfolio(&successor_owner);
-    env.deposit(&survivor_owner, survivor, 100_000);
-    env.deposit(&liquidated_owner, liquidated, 118_900);
-    env.deposit(&successor_owner, successor, 100_000);
+    let keeper_owner = Keypair::new();
     env.svm.warp_to_slot(1);
     env.configure_auth_mark_with_cu(1, PRICE);
-
     env.svm.warp_to_slot(8);
+    let survivor = env.create_portfolio(&survivor_owner);
+    let liquidated = env.create_portfolio(&liquidated_owner);
+    let keeper = env.create_portfolio(&keeper_owner);
+    env.deposit(&survivor_owner, survivor, 100_000);
+    env.deposit(&liquidated_owner, liquidated, 118_900 + 7 * 2_700);
+
     env.trade_with_cu(
         &survivor_owner,
         survivor,
@@ -220,7 +220,7 @@ fn v16_program_post_adl_transfer_matrix_discovers_phantom_value() {
     );
     env.svm.warp_to_slot(27);
     env.crank(
-        survivor,
+        keeper,
         ProgInstruction::PermissionlessCrank {
             now_slot: 27,
             observations: crank_observations(0),
@@ -246,6 +246,10 @@ fn v16_program_post_adl_transfer_matrix_discovers_phantom_value() {
     assert!(effective_q < raw_q);
     assert!(adl.assets[0].a_long < percolator::ADL_ONE);
 
+    // Create the fresh recipient at the transfer slot so maintenance-debt ordering cannot obscure
+    // this matrix's independent post-ADL basis-transfer predicate.
+    let successor = env.create_portfolio(&successor_owner);
+    env.deposit(&successor_owner, successor, 100_000);
     env.svm.expire_blockhash();
     let split_cu = env
         .try_trade_asset_with_cu(
@@ -268,6 +272,7 @@ fn v16_program_post_adl_transfer_matrix_discovers_phantom_value() {
     let before_values = [survivor, liquidated, successor]
         .map(|portfolio| account_value(&env.portfolio_state(portfolio)));
     let vault_before = env.token_amount(env.vault);
+    let insurance_before = env.market_state().1.insurance;
 
     env.svm.warp_to_slot(40);
     env.push_auth_mark_with_cu(40, PRICE + 1);
@@ -296,10 +301,13 @@ fn v16_program_post_adl_transfer_matrix_discovers_phantom_value() {
         .filter(|delta| *delta < 0)
         .map(i128::unsigned_abs)
         .sum();
-    assert!(aggregate_creation > 0);
+    let insurance_delta = env.market_state().1.insurance - insurance_before;
+    let total_creation = aggregate_creation + insurance_delta as i128;
+    assert!(total_creation > 0);
     assert_eq!(
-        positive_mark_value - negative_mark_value,
-        aggregate_creation as u128
+        positive_mark_value + insurance_delta,
+        negative_mark_value + total_creation as u128,
+        "maintenance attribution must remain in the value domain when measuring phantom creation"
     );
     assert_eq!(env.token_amount(env.vault), vault_before);
 
