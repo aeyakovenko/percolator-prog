@@ -7,9 +7,10 @@
 //!
 //! Evidence in this file (I/C): public LiteSVM tests cover two high-impact
 //! controls with writer/read/enforcement behavior: permissionless resolve timing
-//! policy and asset activation cooldown. The static roster below also inventories
-//! every persisted `WrapperConfigV16` field so a newly added control cannot be
-//! mistaken for covered security surface without an explicit classification.
+//! policy and asset activation cooldown. The static rosters below also inventory
+//! every field in all six wrapper-owned persisted structs and require category-specific
+//! writer/read/validation edges. Engine-owned fields remain the engine proof boundary.
+//! Not every wrapper field yet has an independent public mutation witness.
 
 use super::*;
 
@@ -30,6 +31,42 @@ fn wrapper_config_fields_from_source(source: &str) -> Vec<&str> {
             Some(name.trim())
         })
         .collect()
+}
+
+fn persisted_struct_fields_from_source<'a>(source: &'a str, name: &str) -> Vec<&'a str> {
+    let marker = format!("pub struct {name} {{");
+    let start = source
+        .find(&marker)
+        .unwrap_or_else(|| panic!("{name} definition must stay present"));
+    source[start + marker.len()..]
+        .lines()
+        .take_while(|line| line.trim() != "}")
+        .filter_map(|line| {
+            let field = line.trim().strip_prefix("pub ")?;
+            let (name, _) = field.split_once(':')?;
+            Some(name.trim())
+        })
+        .collect()
+}
+
+fn assert_exact_persisted_fields(source: &str, name: &str, expected: &[&str]) {
+    let mut parsed = persisted_struct_fields_from_source(source, name);
+    let mut expected = expected.to_vec();
+    parsed.sort_unstable();
+    expected.sort_unstable();
+    assert_eq!(
+        parsed, expected,
+        "{name} persisted-field inventory changed without an INV-087 classification",
+    );
+}
+
+fn assert_source_edges(source: &str, class: &str, edges: &[&str]) {
+    for edge in edges {
+        assert!(
+            source.contains(edge),
+            "{class} missing writer/read/validation edge: {edge}",
+        );
+    }
 }
 
 #[test]
@@ -416,6 +453,178 @@ fn v16_program_wrapper_config_static_inventory_covers_every_persisted_field() {
             "WrapperConfigV16 inventory depends on executable witness {witness}"
         );
     }
+}
+
+#[test]
+fn v16_program_all_wrapper_owned_persisted_structs_have_complete_field_rosters() {
+    let source = include_str!("../../../src/v16_program.rs");
+    let inventories: &[(&str, &[&str])] = &[
+        (
+            "AssetOracleProfileV16",
+            &[
+                "oracle_mode",
+                "oracle_leg_count",
+                "oracle_leg_flags",
+                "invert",
+                "unit_scale",
+                "conf_filter_bps",
+                "backing_trade_fee_bps_long",
+                "backing_trade_fee_bps_short",
+                "backing_trade_fee_insurance_share_bps_long",
+                "backing_trade_fee_insurance_share_bps_short",
+                "_padding0",
+                "insurance_authority",
+                "insurance_operator",
+                "backing_bucket_authority",
+                "oracle_authority",
+                "max_staleness_secs",
+                "hybrid_soft_stale_slots",
+                "mark_ewma_e6",
+                "mark_ewma_last_slot",
+                "mark_ewma_halflife_slots",
+                "mark_min_fee",
+                "oracle_target_price_e6",
+                "oracle_target_publish_time",
+                "last_good_oracle_slot",
+                "oracle_leg_feeds",
+                "oracle_leg_prices_e6",
+                "oracle_leg_publish_times",
+                "asset_admin",
+                "funding_mark_e6",
+                "funding_mark_pending_e6",
+                "funding_mark_pending_slot",
+            ],
+        ),
+        (
+            "AssetControlSequencesV16",
+            &[
+                "oracle_observation",
+                "backing_fee_long",
+                "backing_fee_short",
+                "trade_fee",
+                "liquidation_fee",
+                "maintenance_fee",
+                "fee_redirect",
+                "market_init_fee",
+                "permissionless_resolve",
+                "_reserved",
+            ],
+        ),
+        (
+            "BackingDomainLedgerAccountV16",
+            &[
+                "market_group",
+                "authority",
+                "total_principal_atoms",
+                "total_deposited_atoms",
+                "total_principal_withdrawn_atoms",
+                "total_earnings_atoms",
+                "total_earnings_withdrawn_atoms",
+                "last_observed_bucket_earnings_atoms",
+                "cumulative_loss_atoms",
+                "cumulative_recovery_atoms",
+                "last_observed_unavailable_principal_atoms",
+                "domain",
+                "_padding",
+            ],
+        ),
+        (
+            "InsuranceLedgerAccountV16",
+            &[
+                "market_group",
+                "authority",
+                "total_principal_atoms",
+                "total_deposited_atoms",
+                "total_withdrawn_atoms",
+                "cumulative_profit_atoms",
+                "cumulative_loss_atoms",
+                "last_observed_insurance_atoms",
+            ],
+        ),
+        (
+            "PortfolioMatcherConfigV16",
+            &[
+                "matcher_program",
+                "matcher_context",
+                "matcher_delegate",
+                "control",
+            ],
+        ),
+    ];
+
+    for (name, fields) in inventories {
+        assert_exact_persisted_fields(source, name, fields);
+        for field in *fields {
+            assert!(
+                source.matches(field).count() >= 2,
+                "{name}.{field} has no source use beyond its persisted declaration",
+            );
+        }
+    }
+
+    // Category-specific edges prevent a field-name occurrence from being mistaken for an
+    // enforcement path. These cover all five wrapper-owned structs outside WrapperConfigV16.
+    assert_source_edges(
+        source,
+        "asset oracle profile provenance and authority",
+        &[
+            "fn validate_asset_oracle_profile(",
+            "expect_live_authority(&existing_profile.oracle_authority",
+            "expect_live_authority(&authorities.insurance_authority",
+            "expect_live_authority(&authorities.backing_bucket_authority",
+            "record_funding_mark_transition_view",
+            "advance_funding_mark_checkpoint_view",
+            "write_oracle_profile_to_view",
+        ],
+    );
+    assert_source_edges(
+        source,
+        "asset retained-control watermarks",
+        &[
+            "fn validate_asset_control_sequences(",
+            "state::require_newer_control_sequence",
+            "fn set_control_sequence(",
+            "write_control_sequences_to_view",
+        ],
+    );
+    assert_source_edges(
+        source,
+        "backing-domain ledger identity and counters",
+        &[
+            "fn validate_backing_domain_ledger(",
+            "state::read_backing_domain_ledger",
+            "write_or_init_backing_domain_ledger",
+            "ledger.total_principal_withdrawn_atoms =",
+            "ledger.last_observed_bucket_earnings_atoms =",
+            "ledger.cumulative_loss_atoms =",
+            "ledger.cumulative_recovery_atoms =",
+        ],
+    );
+    assert_source_edges(
+        source,
+        "insurance ledger identity and counters",
+        &[
+            "fn validate_insurance_ledger(",
+            "state::read_insurance_ledger",
+            "write_or_init_insurance_ledger",
+            "ledger.last_observed_insurance_atoms =",
+            "ledger.cumulative_profit_atoms =",
+            "ledger.cumulative_loss_atoms =",
+        ],
+    );
+    assert_source_edges(
+        source,
+        "portfolio matcher capability binding",
+        &[
+            "pub fn read_portfolio_matcher_config(",
+            "pub fn write_portfolio_matcher_config(",
+            "cfg.validate()?;",
+            "matcher_program: matcher_prog.key.to_bytes()",
+            "matcher_context: matcher_ctx.key.to_bytes()",
+            "matcher_delegate: matcher_delegate.key.to_bytes()",
+            "next_portfolio_position_control_for_matcher_sync",
+        ],
+    );
 }
 
 #[test]
