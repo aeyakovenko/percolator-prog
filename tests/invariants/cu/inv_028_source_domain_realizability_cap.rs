@@ -1068,6 +1068,7 @@ fn v16_attack_backing_bucket_topup_withdraw_input_gates() {
             env.program_id,
             &env.payer,
             ProgInstruction::TopUpBackingBucket {
+                intent_id: 0,
                 market_id: 0,
                 domain: 0,
                 amount,
@@ -1358,6 +1359,7 @@ fn v16_attack_backing_topup_rejects_lapsed_expiry() {
         env.svm.expire_blockhash();
         env.send(
             ProgInstruction::TopUpBackingBucket {
+                intent_id: 0,
                 market_id: 0,
                 domain: 1,
                 amount: 50,

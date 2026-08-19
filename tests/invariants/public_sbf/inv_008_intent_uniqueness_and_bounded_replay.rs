@@ -4,7 +4,8 @@
 //!
 //! Evidence in this file (I plus invariant-specific F/M assertions): the PR343/350/355
 //! fixed-pin tests reject stale trade/deposit/withdraw retries exactly and land a newly bound
-//! operation; the PR344/351 tests retain the two authority-top-up counterexamples; PR362 and the
+//! operation; the PR344/351 tests require both authority-top-up routes to reject stale retries;
+//! PR362 and the
 //! issue387/389 tests cover generation/position-bound activation, conversion, and reduction.
 //! These tests exercise the deployed public
 //! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
@@ -34,19 +35,29 @@ fn v16_program_pr343_trade_retry_variants_reject_stale_and_land_fresh() {
 }
 
 #[test]
-fn v16_program_pr344_insurance_top_up_retry_extracts_duplicate() {
-    let reproduction = reproduce_insurance_top_up_retry_replay([0x44; 32])
-        .unwrap_or_else(|error| panic!("PR 344 no longer reproduces: {error}"));
-    assert_eq!(
-        reproduction.blocker,
-        KnownBlocker::InsuranceTopUpRetryReplay
-    );
-    assert_eq!(reproduction.intended_contribution, 50_000);
-    assert_eq!(reproduction.duplicate_loss, 50_000);
-    assert_eq!(reproduction.operator_extraction, 50_000);
-    assert_eq!(reproduction.insured_remainder, 50_000);
-    assert!(reproduction.first_cu < 1_400_000);
-    assert!(reproduction.replay_cu < 1_400_000);
+fn v16_program_pr344_insurance_top_up_retry_rejects_stale_and_lands_fresh() {
+    let protection = discover_intent_retry([0x44; 32], RetryIntentKind::InsuranceTopUp)
+        .unwrap_or_else(|error| panic!("PR 344 protection failed: {error}"));
+    assert!(protection.first_compute_units > 0);
+    assert!(!protection.accepted_retry);
+    assert!(!protection.duplicated_economic_effect);
+    assert_eq!(protection.retry_compute_units, None);
+    assert!(protection.fresh_compute_units.is_some());
+}
+
+#[test]
+fn v16_program_insurance_top_up_routes_share_one_replay_watermark() {
+    for direct_first in [false, true] {
+        let protection = discover_cross_route_insurance_top_up_retry(
+            [0x48 ^ u8::from(direct_first); 32],
+            direct_first,
+        )
+        .unwrap_or_else(|error| panic!("cross-route top-up protection failed: {error}"));
+        assert!(!protection.accepted_retry);
+        assert!(!protection.duplicated_economic_effect);
+        assert_eq!(protection.retry_compute_units, None);
+        assert!(protection.fresh_compute_units.is_some());
+    }
 }
 
 #[test]
@@ -66,16 +77,14 @@ fn v16_program_pr362_activation_retry_rejects_after_generation_consumed() {
 }
 
 #[test]
-fn v16_program_pr351_backing_top_up_retry_funds_independent_winner() {
-    let reproduction = reproduce_backing_top_up_retry_replay([0x35; 32])
-        .unwrap_or_else(|error| panic!("PR 351 no longer reproduces: {error}"));
-    assert_eq!(reproduction.blocker, KnownBlocker::BackingTopUpRetryReplay);
-    assert_eq!(reproduction.intended_contribution, 500);
-    assert_eq!(reproduction.duplicate_loss, 500);
-    assert_eq!(reproduction.beneficiary_extra_payout, 500);
-    assert_eq!(reproduction.control_winner_payout, 2_500);
-    assert_eq!(reproduction.replay_winner_payout, 3_000);
-    assert!(reproduction.replay_cu < 1_400_000);
+fn v16_program_pr351_backing_top_up_retry_rejects_stale_and_lands_fresh() {
+    let protection = discover_intent_retry([0x35; 32], RetryIntentKind::BackingTopUp)
+        .unwrap_or_else(|error| panic!("PR 351 protection failed: {error}"));
+    assert!(protection.first_compute_units > 0);
+    assert!(!protection.accepted_retry);
+    assert!(!protection.duplicated_economic_effect);
+    assert_eq!(protection.retry_compute_units, None);
+    assert!(protection.fresh_compute_units.is_some());
 }
 
 #[test]

@@ -991,6 +991,7 @@ fn v16_program_value_paths_cannot_use_portfolio_as_optional_ledger() {
     env.svm.expire_blockhash();
     let top_up_insurance = env.send(
         ProgInstruction::TopUpInsurance {
+            intent_id: 0,
             market_id: 0,
             amount: 25,
         },
@@ -1019,6 +1020,7 @@ fn v16_program_value_paths_cannot_use_portfolio_as_optional_ledger() {
     env.svm.expire_blockhash();
     let top_up_domain = env.send(
         ProgInstruction::TopUpInsuranceDomain {
+            intent_id: 0,
             market_id: 0,
             domain: 0,
             amount: 20,
@@ -1048,6 +1050,7 @@ fn v16_program_value_paths_cannot_use_portfolio_as_optional_ledger() {
     env.svm.expire_blockhash();
     let top_up_backing = env.send(
         ProgInstruction::TopUpBackingBucket {
+            intent_id: 0,
             market_id: 0,
             domain: 1,
             amount: 30,
@@ -1214,6 +1217,7 @@ fn v16_program_value_paths_cannot_use_market_as_optional_ledger() {
     env.svm.expire_blockhash();
     let top_up_insurance = env.send(
         ProgInstruction::TopUpInsurance {
+            intent_id: 0,
             market_id: 0,
             amount: 25,
         },
@@ -1238,6 +1242,7 @@ fn v16_program_value_paths_cannot_use_market_as_optional_ledger() {
     env.svm.expire_blockhash();
     let top_up_domain = env.send(
         ProgInstruction::TopUpInsuranceDomain {
+            intent_id: 0,
             market_id: 0,
             domain: 0,
             amount: 20,
@@ -1263,6 +1268,7 @@ fn v16_program_value_paths_cannot_use_market_as_optional_ledger() {
     env.svm.expire_blockhash();
     let top_up_backing = env.send(
         ProgInstruction::TopUpBackingBucket {
+            intent_id: 0,
             market_id: 0,
             domain: 1,
             amount: 30,

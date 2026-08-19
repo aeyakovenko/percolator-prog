@@ -504,6 +504,7 @@ fn exercise_public_pda_substitution(route: PdaRoute, slot: PdaSlot, fault: PdaFa
             let vault = substitute_vault(slot, env.vault, substitutions);
             let ix = ProgInstruction::TopUpInsurance {
                 market_id: 0,
+                intent_id: 0,
                 amount: 100,
             };
             let accounts = vec![
@@ -523,6 +524,7 @@ fn exercise_public_pda_substitution(route: PdaRoute, slot: PdaSlot, fault: PdaFa
             let vault = substitute_vault(slot, env.vault, substitutions);
             let ix = ProgInstruction::TopUpInsuranceDomain {
                 market_id: 0,
+                intent_id: 0,
                 domain: 0,
                 amount: 100,
             };
@@ -549,6 +551,7 @@ fn exercise_public_pda_substitution(route: PdaRoute, slot: PdaSlot, fault: PdaFa
             let vault = substitute_vault(slot, env.vault, substitutions);
             let ix = ProgInstruction::TopUpBackingBucket {
                 market_id: 0,
+                intent_id: 0,
                 domain: 0,
                 amount: 100,
                 expiry_slot: 10,

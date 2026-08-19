@@ -187,6 +187,7 @@ fn v16_program_topups_cannot_bypass_cumulative_tvl_cap() {
         env.svm.expire_blockhash();
         let result = env.send(
             ProgInstruction::TopUpInsurance {
+                intent_id: 0,
                 market_id: 0,
                 amount: 2,
             },
@@ -233,6 +234,7 @@ fn v16_program_topups_cannot_bypass_cumulative_tvl_cap() {
         env.svm.expire_blockhash();
         let result = env.send(
             ProgInstruction::TopUpInsuranceDomain {
+                intent_id: 0,
                 market_id: 0,
                 domain: 0,
                 amount: 2,
@@ -257,6 +259,7 @@ fn v16_program_topups_cannot_bypass_cumulative_tvl_cap() {
         env.svm.expire_blockhash();
         env.send(
             ProgInstruction::TopUpInsuranceDomain {
+                intent_id: 0,
                 market_id: 0,
                 domain: 0,
                 amount: 1,
@@ -297,6 +300,7 @@ fn v16_program_topups_cannot_bypass_cumulative_tvl_cap() {
         env.svm.expire_blockhash();
         let result = env.send(
             ProgInstruction::TopUpBackingBucket {
+                intent_id: 0,
                 market_id: 0,
                 domain: 1,
                 amount: 2,

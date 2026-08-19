@@ -320,33 +320,44 @@ fn kani_v16_domain_topup_and_asset_insurance_decode_preserves_wire_fields() {
     let domain: u16 = kani::any();
     let asset_index: u16 = kani::any();
     let market_id: u64 = kani::any();
+    let intent_id: u64 = kani::any();
     let amount: u128 = kani::any();
 
-    let insurance = Instruction::TopUpInsurance { market_id, amount }.encode();
+    let insurance = Instruction::TopUpInsurance {
+        market_id,
+        intent_id,
+        amount,
+    }
+    .encode();
     match Instruction::decode(&insurance).unwrap() {
         Instruction::TopUpInsurance {
             market_id: got_market_id,
+            intent_id: got_intent_id,
             amount: got_amount,
         } => {
             assert_eq!(got_market_id, market_id);
+            assert_eq!(got_intent_id, intent_id);
             assert_eq!(got_amount, amount);
         }
         _ => unreachable!(),
     }
 
-    let mut top_up = [0u8; 27];
+    let mut top_up = [0u8; 35];
     top_up[0] = 56;
     top_up[1..3].copy_from_slice(&domain.to_le_bytes());
     top_up[3..11].copy_from_slice(&market_id.to_le_bytes());
-    top_up[11..27].copy_from_slice(&amount.to_le_bytes());
+    top_up[11..19].copy_from_slice(&intent_id.to_le_bytes());
+    top_up[19..35].copy_from_slice(&amount.to_le_bytes());
     match Instruction::decode(&top_up).unwrap() {
         Instruction::TopUpInsuranceDomain {
             domain: got_domain,
             market_id: got_market_id,
+            intent_id: got_intent_id,
             amount: got_amount,
         } => {
             assert_eq!(got_domain, domain);
             assert_eq!(got_market_id, market_id);
+            assert_eq!(got_intent_id, intent_id);
             assert_eq!(got_amount, amount);
         }
         _ => unreachable!(),
@@ -484,30 +495,45 @@ fn kani_v16_position_consent_rejects_unbound_legacy_payloads() {
 fn kani_v16_top_up_backing_bucket_decode_preserves_wire_fields() {
     let domain: u16 = kani::any();
     let market_id: u64 = kani::any();
+    let intent_id: u64 = kani::any();
     let amount: u128 = kani::any();
     let expiry_slot: u64 = kani::any();
 
-    let mut data = [0u8; 35];
+    let mut data = [0u8; 43];
     data[0] = 24;
     data[1..3].copy_from_slice(&domain.to_le_bytes());
     data[3..11].copy_from_slice(&market_id.to_le_bytes());
-    data[11..27].copy_from_slice(&amount.to_le_bytes());
-    data[27..35].copy_from_slice(&expiry_slot.to_le_bytes());
+    data[11..19].copy_from_slice(&intent_id.to_le_bytes());
+    data[19..35].copy_from_slice(&amount.to_le_bytes());
+    data[35..43].copy_from_slice(&expiry_slot.to_le_bytes());
 
     match Instruction::decode(&data).unwrap() {
         Instruction::TopUpBackingBucket {
             domain: got_domain,
             market_id: got_market_id,
+            intent_id: got_intent_id,
             amount: got_amount,
             expiry_slot: got_expiry,
         } => {
             assert_eq!(got_domain, domain);
             assert_eq!(got_market_id, market_id);
+            assert_eq!(got_intent_id, intent_id);
             assert_eq!(got_amount, amount);
             assert_eq!(got_expiry, expiry_slot);
         }
         _ => unreachable!(),
     }
+}
+
+#[kani::proof]
+fn kani_v16_topups_reject_intentless_legacy_payloads() {
+    let insurance = [9u8; 25];
+    let domain_insurance = [56u8; 27];
+    let backing = [24u8; 35];
+
+    assert!(Instruction::decode(&insurance).is_err());
+    assert!(Instruction::decode(&domain_insurance).is_err());
+    assert!(Instruction::decode(&backing).is_err());
 }
 
 #[kani::proof]
@@ -1585,6 +1611,7 @@ fn kani_v16_custody_payloads_reject_trailing_byte() {
     );
     assert_rejects_trailing_byte(
         Instruction::TopUpInsurance {
+            intent_id: 1,
             market_id: 1,
             amount: 1,
         },
@@ -1592,6 +1619,7 @@ fn kani_v16_custody_payloads_reject_trailing_byte() {
     );
     assert_rejects_trailing_byte(
         Instruction::TopUpBackingBucket {
+            intent_id: 1,
             domain: 1,
             market_id: 1,
             amount: 1,
@@ -1601,6 +1629,7 @@ fn kani_v16_custody_payloads_reject_trailing_byte() {
     );
     assert_rejects_trailing_byte(
         Instruction::TopUpInsuranceDomain {
+            intent_id: 1,
             domain: 1,
             market_id: 1,
             amount: 1,
@@ -1959,13 +1988,13 @@ fn kani_v16_core_payloads_reject_one_byte_truncation() {
 
 #[kani::proof]
 fn kani_v16_funding_backing_payloads_reject_one_byte_truncation() {
-    let top_up = [9u8; 16];
+    let top_up = [9u8; 32];
     assert!(Instruction::decode(&top_up).is_err());
 
-    let top_up_domain = [56u8; 17];
+    let top_up_domain = [56u8; 34];
     assert!(Instruction::decode(&top_up_domain).is_err());
 
-    let top_up_backing = [24u8; 25];
+    let top_up_backing = [24u8; 42];
     assert!(Instruction::decode(&top_up_backing).is_err());
 
     let withdraw_insurance = [23u8; 16];

@@ -1283,9 +1283,12 @@ fn v16_bpf_failed_deposit_spl_transfer_rolls_back_engine_credit() {
 }
 
 #[test]
-fn v16_bpf_failed_insurance_topup_transfer_rolls_back_budget_and_ledger() {
+fn v16_bpf_failed_insurance_topup_transfer_preserves_same_intent_retry() {
     let mut env = V16CuEnv::new();
     let ledger = env.insurance_ledger_account();
+    let market_id = env.asset_market_id(0);
+    let sequences_before = env.control_sequences(0);
+    let intent_id = next_control_sequence(sequences_before.insurance_top_up);
     let source = Pubkey::new_unique();
     env.svm
         .set_account(
@@ -1309,7 +1312,8 @@ fn v16_bpf_failed_insurance_topup_transfer_rolls_back_budget_and_ledger() {
         env.program_id,
         &env.payer,
         ProgInstruction::TopUpInsurance {
-            market_id: 0,
+            intent_id,
+            market_id,
             amount: 100,
         },
         vec![
@@ -1331,15 +1335,50 @@ fn v16_bpf_failed_insurance_topup_transfer_rolls_back_budget_and_ledger() {
     assert_eq!(env.svm.get_account(&ledger).unwrap(), ledger_before);
     assert_eq!(env.svm.get_account(&source).unwrap(), source_before);
     assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+    assert_eq!(env.control_sequences(0), sequences_before);
     let (_, group) = env.market_state();
     assert_eq!(group.insurance, 0);
     assert_eq!(group.vault, 0);
+
+    let mut repaired_source = env.svm.get_account(&source).unwrap();
+    repaired_source.owner = spl_token::ID;
+    env.svm.set_account(source, repaired_source).unwrap();
+    env.svm.expire_blockhash();
+    send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::TopUpInsurance {
+            intent_id,
+            market_id,
+            amount: 100,
+        },
+        vec![
+            AccountMeta::new(env.admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(ledger, false),
+        ],
+        &[&env.admin],
+    )
+    .expect("the same insurance intent remains live after rolled-back CPI failure");
+    assert_eq!(env.control_sequences(0).insurance_top_up, intent_id);
+    let (_, group) = env.market_state();
+    assert_eq!(group.insurance, 100);
+    assert_eq!(group.vault, 100);
+    assert_eq!(env.token_amount(source), 0);
+    assert_eq!(env.token_amount(env.vault), 100);
 }
 
 #[test]
-fn v16_bpf_failed_domain_insurance_topup_transfer_rolls_back_budget_and_ledger() {
+fn v16_bpf_failed_domain_insurance_topup_transfer_preserves_same_intent_retry() {
     let mut env = V16CuEnv::new();
     let ledger = env.insurance_ledger_account();
+    let market_id = env.asset_market_id(0);
+    let sequences_before = env.control_sequences(0);
+    let intent_id = next_control_sequence(sequences_before.insurance_top_up);
     let source = Pubkey::new_unique();
     env.svm
         .set_account(
@@ -1363,7 +1402,8 @@ fn v16_bpf_failed_domain_insurance_topup_transfer_rolls_back_budget_and_ledger()
         env.program_id,
         &env.payer,
         ProgInstruction::TopUpInsuranceDomain {
-            market_id: 0,
+            intent_id,
+            market_id,
             domain: 1,
             amount: 100,
         },
@@ -1386,17 +1426,55 @@ fn v16_bpf_failed_domain_insurance_topup_transfer_rolls_back_budget_and_ledger()
     assert_eq!(env.svm.get_account(&ledger).unwrap(), ledger_before);
     assert_eq!(env.svm.get_account(&source).unwrap(), source_before);
     assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+    assert_eq!(env.control_sequences(0), sequences_before);
     let (_, group) = env.market_state();
     assert_eq!(group.insurance_domain_budget[1], 0);
     assert_eq!(group.insurance_domain_budget_remaining_total, 0);
     assert_eq!(group.insurance, 0);
     assert_eq!(group.vault, 0);
+
+    let mut repaired_source = env.svm.get_account(&source).unwrap();
+    repaired_source.owner = spl_token::ID;
+    env.svm.set_account(source, repaired_source).unwrap();
+    env.svm.expire_blockhash();
+    send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::TopUpInsuranceDomain {
+            intent_id,
+            market_id,
+            domain: 1,
+            amount: 100,
+        },
+        vec![
+            AccountMeta::new(env.admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(ledger, false),
+        ],
+        &[&env.admin],
+    )
+    .expect("the same domain-insurance intent remains live after rolled-back CPI failure");
+    assert_eq!(env.control_sequences(0).insurance_top_up, intent_id);
+    let (_, group) = env.market_state();
+    assert_eq!(group.insurance_domain_budget[1], 100);
+    assert_eq!(group.insurance_domain_budget_remaining_total, 100);
+    assert_eq!(group.insurance, 100);
+    assert_eq!(group.vault, 100);
+    assert_eq!(env.token_amount(source), 0);
+    assert_eq!(env.token_amount(env.vault), 100);
 }
 
 #[test]
-fn v16_bpf_failed_backing_topup_transfer_rolls_back_bucket_and_ledger() {
+fn v16_bpf_failed_backing_topup_transfer_preserves_same_intent_retry() {
     let mut env = V16CuEnv::new();
     let ledger = env.backing_domain_ledger_account();
+    let market_id = env.asset_market_id(0);
+    let sequences_before = env.control_sequences(0);
+    let intent_id = next_control_sequence(sequences_before.backing_top_up);
     let source = Pubkey::new_unique();
     env.svm
         .set_account(
@@ -1420,7 +1498,8 @@ fn v16_bpf_failed_backing_topup_transfer_rolls_back_bucket_and_ledger() {
         env.program_id,
         &env.payer,
         ProgInstruction::TopUpBackingBucket {
-            market_id: 0,
+            intent_id,
+            market_id,
             domain: 1,
             amount: 100,
             expiry_slot: 10,
@@ -1444,6 +1523,7 @@ fn v16_bpf_failed_backing_topup_transfer_rolls_back_bucket_and_ledger() {
     assert_eq!(env.svm.get_account(&ledger).unwrap(), ledger_before);
     assert_eq!(env.svm.get_account(&source).unwrap(), source_before);
     assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+    assert_eq!(env.control_sequences(0), sequences_before);
     let (_, group) = env.market_state();
     assert_eq!(group.vault, 0);
     assert_eq!(
@@ -1451,6 +1531,46 @@ fn v16_bpf_failed_backing_topup_transfer_rolls_back_bucket_and_ledger() {
         0
     );
     assert_eq!(group.source_credit[1].fresh_reserved_backing_num, 0);
+
+    let mut repaired_source = env.svm.get_account(&source).unwrap();
+    repaired_source.owner = spl_token::ID;
+    env.svm.set_account(source, repaired_source).unwrap();
+    env.svm.expire_blockhash();
+    send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer,
+        ProgInstruction::TopUpBackingBucket {
+            intent_id,
+            market_id,
+            domain: 1,
+            amount: 100,
+            expiry_slot: 10,
+        },
+        vec![
+            AccountMeta::new(env.admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(ledger, false),
+        ],
+        &[&env.admin],
+    )
+    .expect("the same backing intent remains live after rolled-back CPI failure");
+    assert_eq!(env.control_sequences(0).backing_top_up, intent_id);
+    let (_, group) = env.market_state();
+    assert_eq!(group.vault, 100);
+    assert_eq!(
+        group.source_backing_buckets[1].fresh_unliened_backing_num,
+        100 * BOUND_SCALE
+    );
+    assert_eq!(
+        group.source_credit[1].fresh_reserved_backing_num,
+        100 * BOUND_SCALE
+    );
+    assert_eq!(env.token_amount(source), 0);
+    assert_eq!(env.token_amount(env.vault), 100);
 }
 
 #[test]

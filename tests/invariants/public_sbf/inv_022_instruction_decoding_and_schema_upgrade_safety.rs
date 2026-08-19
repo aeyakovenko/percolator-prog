@@ -133,10 +133,12 @@ fn public_instruction_corpus() -> Vec<ProgInstruction> {
             position_epoch: 3,
         },
         ProgInstruction::TopUpInsurance {
+            intent_id: 2,
             market_id: 1,
             amount: 1,
         },
         ProgInstruction::TopUpInsuranceDomain {
+            intent_id: 3,
             domain: 0,
             market_id: 1,
             amount: 1,
@@ -146,6 +148,7 @@ fn public_instruction_corpus() -> Vec<ProgInstruction> {
             asset_generation_frontier: 1,
         },
         ProgInstruction::TopUpBackingBucket {
+            intent_id: 4,
             domain: 0,
             market_id: 1,
             amount: 1,
@@ -516,6 +519,15 @@ fn host_instruction_decoder_rejects_curated_prior_schema_payloads() {
     let mut incarnationless_cure = vec![0u8; 17];
     incarnationless_cure[0] = 42;
 
+    let mut intentless_insurance_top_up = vec![0u8; 25];
+    intentless_insurance_top_up[0] = 9;
+
+    let mut intentless_domain_insurance_top_up = vec![0u8; 27];
+    intentless_domain_insurance_top_up[0] = 56;
+
+    let mut intentless_backing_top_up = vec![0u8; 35];
+    intentless_backing_top_up[0] = 24;
+
     for (label, data) in [
         (
             "legacy TradeNoCpi without portfolio and asset generations",
@@ -540,6 +552,18 @@ fn host_instruction_decoder_rejects_curated_prior_schema_payloads() {
         (
             "legacy CureAndCancelClose without portfolio incarnation",
             incarnationless_cure,
+        ),
+        (
+            "legacy TopUpInsurance without intent ID",
+            intentless_insurance_top_up,
+        ),
+        (
+            "legacy TopUpInsuranceDomain without intent ID",
+            intentless_domain_insurance_top_up,
+        ),
+        (
+            "legacy TopUpBackingBucket without intent ID",
+            intentless_backing_top_up,
         ),
         (
             "generationless ConfigureHybridOracle",

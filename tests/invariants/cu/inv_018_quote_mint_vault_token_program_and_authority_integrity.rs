@@ -1286,6 +1286,7 @@ fn v16_attack_topups_cannot_use_vault_as_source() {
     reject_alias(
         &mut env,
         ProgInstruction::TopUpInsurance {
+            intent_id: 0,
             market_id: 0,
             amount: 500,
         },
@@ -1294,6 +1295,7 @@ fn v16_attack_topups_cannot_use_vault_as_source() {
     reject_alias(
         &mut env,
         ProgInstruction::TopUpInsuranceDomain {
+            intent_id: 0,
             market_id: 0,
             domain: 0,
             amount: 500,
@@ -1304,6 +1306,7 @@ fn v16_attack_topups_cannot_use_vault_as_source() {
     reject_alias(
         &mut env,
         ProgInstruction::TopUpBackingBucket {
+            intent_id: 0,
             market_id: 0,
             domain: 1,
             amount: 500,
@@ -1357,6 +1360,7 @@ fn v16_attack_insurance_topup_pinned_to_canonical_vault() {
         env.program_id,
         &env.payer,
         ProgInstruction::TopUpInsurance {
+            intent_id: 0,
             market_id: 0,
             amount: 500,
         },
@@ -1424,6 +1428,7 @@ fn v16_attack_domain_topups_pinned_to_canonical_vault() {
         env.program_id,
         &env.payer,
         ProgInstruction::TopUpInsuranceDomain {
+            intent_id: 0,
             market_id: 0,
             domain: 0,
             amount: 500,
@@ -1467,6 +1472,7 @@ fn v16_attack_domain_topups_pinned_to_canonical_vault() {
         env.program_id,
         &env.payer,
         ProgInstruction::TopUpBackingBucket {
+            intent_id: 0,
             market_id: 0,
             domain: 1,
             amount: 700,
@@ -2759,6 +2765,7 @@ fn v16_attack_value_topups_reject_delegated_canonical_vault() {
         env.program_id,
         &env.payer,
         ProgInstruction::TopUpInsurance {
+            intent_id: 0,
             market_id: 0,
             amount: 11,
         },
@@ -2790,6 +2797,7 @@ fn v16_attack_value_topups_reject_delegated_canonical_vault() {
         env.program_id,
         &env.payer,
         ProgInstruction::TopUpInsuranceDomain {
+            intent_id: 0,
             market_id: 0,
             domain: 0,
             amount: 12,
@@ -2822,6 +2830,7 @@ fn v16_attack_value_topups_reject_delegated_canonical_vault() {
         env.program_id,
         &env.payer,
         ProgInstruction::TopUpBackingBucket {
+            intent_id: 0,
             market_id: 0,
             domain: 1,
             amount: 13,
@@ -4343,6 +4352,7 @@ fn v16_bpf_mainnet_realistic_system_spl_ata_bootstrap_deposits_and_ledgers() {
         program_id,
         &payer,
         ProgInstruction::TopUpBackingBucket {
+            intent_id: 0,
             market_id: 0,
             domain: 1,
             amount: 77,
@@ -4401,6 +4411,7 @@ fn v16_bpf_mainnet_realistic_system_spl_ata_bootstrap_deposits_and_ledgers() {
         program_id,
         &payer,
         ProgInstruction::TopUpInsurance {
+            intent_id: 0,
             market_id: 0,
             amount: 33,
         },

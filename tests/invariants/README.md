@@ -127,15 +127,20 @@ transaction ceiling. Kani proves exact tuple acceptance and that successful epis
 invalidates the old binding. Permissionless claim and terminal-receipt routes carry no retained
 owner consent; adding such a route reopens INV-004.
 
-INV-008 now rejects same-intent replay for deposit, withdraw, and all four single/batch CPI/no-CPI
-trade routes. Deposit and withdraw consume the portfolio's shared owner-state sequence; each trade
-binds both portfolio incarnations and both current position episodes, whose successful transition
-advances the episode. Stale retries reject before token, matcher-CPI, or engine mutation with exact
-rollback, while freshly rebuilt intents remain live. The public wire tests reject every preceding
-sequence-less or episode-less schema. Kani proves exact sequence/episode acceptance and every
-full-width field of the four shipping trade-body decoders; those field proofs are partitioned so
-CBMC proves the deployed parser without reintroducing the monolithic decoder solver cliff. The two
-remaining exact-once counterexamples are insurance and backing top-ups.
+INV-008 now rejects same-intent replay across all eleven retained-operation families in the shared
+matrix. Deposit and withdraw consume the portfolio's shared owner-state sequence; each trade binds
+both portfolio incarnations and both current position episodes, whose successful transition
+advances the episode. The direct and domain insurance top-ups share one per-asset monotonic intent
+watermark, while backing top-up uses an independent per-asset watermark. Those two `u64` fields
+reuse the existing 16-byte zero-copy control-sequence tail, so persisted market size and offsets do
+not change. Stale retries reject before token, matcher-CPI, or engine mutation with exact rollback,
+while freshly rebuilt intents remain live. Randomized landing orders prove one insurance route
+invalidates a retained request through the other route. Real failed SPL CPIs prove watermark,
+ledger, market, and custody rollback and then admit the identical intent after only the external
+token account is repaired. Public wire tests reject every preceding sequence-less, episode-less,
+or intentless schema. Kani proves strict full-width watermark ordering, exact sequence/episode
+acceptance, and every full-width field of the shipping decoders; those field proofs are partitioned
+so CBMC proves the deployed parser without reintroducing the monolithic decoder solver cliff.
 
 INV-002 now binds both backing-withdrawal wire contracts, `UpdateAssetAuthority`, and every
 `UpdateAssetLifecycle` action to an exact asset generation.
@@ -172,26 +177,27 @@ Verification at this checkpoint:
 | Focused INV-016 canonical PDA matrices and source roster | 5/5; 57 custody substitutions plus 9 matcher seed substitutions | rerun on the 2026-08-18 PR135 test head |
 | Focused INV-003 portfolio lifecycle, cure ABA, and source-completeness roster | 4/4 runtime plus 4/4 Kani; all 12 retained variants and 16 portfolio-ID fields | rerun on the 2026-08-18 PR135 production head |
 | Focused INV-004 position-episode lifecycle, retained-route roster, and contracts | 3/3 stateful, 2/2 CU, 6/6 local Kani; all 13 fields across 9 retained position-bound variants | rerun on the 2026-08-18 PR135 production head |
-| Focused INV-008 retained-operation retry matrix and contracts | 8/8 public, stateful 11-family matrix, 3/3 local Kani; deposit, withdraw, and all four trade variants reject stale retries with exact rollback and admit a fresh current intent | rerun on the 2026-08-18 PR135 production head; insurance/backing top-ups remain live counterexamples |
+| Focused INV-008 retained-operation retry matrix and contracts | 9/9 public, 9/9 stateful, 4/4 local Kani, 3/3 source/layout CU, plus 3/3 real failed-CPI retry probes; all 11 retained families reject stale retries with exact rollback and admit a fresh current intent | rerun on the 2026-08-18 PR135 production head; no live violation in the current retained-operation roster |
 | Focused INV-002 generation replay, frontier, roster, and contracts | 20-family stateful replay matrix plus authority/lifecycle and activation-frontier public controls; focused host/Kani checks pass | rerun on the 2026-08-18 PR135 production head |
 | `cargo check --tests` | pass | rerun on the 2026-08-18 PR135 test head |
 | `cargo test --lib` | 7/7 | rerun on the 2026-08-18 PR135 test head |
-| `cargo test --test v16_program_stateful_fuzz` | 144/144 | rerun on the 2026-08-18 PR135 production head |
+| `cargo test --test v16_program_stateful_fuzz` | 145/145 | rerun on the 2026-08-18 PR135 production head |
 | Registry/manifest checks in the INV-079 module | 8/8 | rerun on the 2026-08-18 PR135 test head |
-| `cargo test --test v16_program_fuzz_regressions` | 90/90 | rerun on the 2026-08-18 PR135 production head |
-| `cargo test --test v16_cu` | 746/746 | rerun on the 2026-08-18 PR135 production head |
-| `cargo kani --tests -j 8 --output-format terse` | 128/128 | rerun on the 2026-08-18 PR135 production head |
+| `cargo test --test v16_program_fuzz_regressions` | 91/91 | rerun on the 2026-08-18 PR135 production head |
+| `cargo test --test v16_cu` | 749/749 | rerun on the 2026-08-18 PR135 production head |
+| `cargo kani --tests --default-unwind 18` | 130/130 | rerun on the 2026-08-18 PR135 production head; the 32-byte authority comparison has an explicit complete unwind override |
 | Engine PR177 `cargo test` plus released-obligation Kani contracts | 150/150; 2/2 proofs | rerun on engine commit `72195914` |
 
 This tranche changes the `ClosePortfolio`, `ConvertReleasedPnl`, `CureAndCancelClose`,
 `WithdrawBackingBucket`, `WithdrawBackingBucketEarnings`, `UpdateAssetAuthority`, and
-`UpdateAssetLifecycle` wire contracts, deposit/close/conversion wrapper state transitions, and
-asset-control generation guards,
+`UpdateAssetLifecycle` wire contracts, all three insurance/backing top-up wire contracts,
+deposit/close/conversion wrapper state transitions, asset-control generation guards, and the
+per-asset top-up intent watermarks,
 the pre-mutation `InitPortfolio` rent gate, Switchboard selected-result provenance, matcher
 capability synchronization with wrapper-owned position episodes, and maintenance collection order
 on value-debit routes, with matching test support. The locally rebuilt
 production SBF used by the 2026-08-18 LiteSVM run has SHA-256
-`0b502cfa08104a1e9df7e329435593513c348bc0faa416cecd614df8beacf26d`.
+`d8ab62f242243a0b44b7e7dbbf71366f107f35090e3d8df91a56947f2240d186`.
 
 This is strong public-route evidence, not an exhaustive proof that the program is LoF/DoS-free.
 The dated known-finding benchmark is fully classified, while the `AUDIT-*` rows below remain the
@@ -200,26 +206,20 @@ and formal-composition gaps.
 
 ### Immediate next work
 
-1. Close the two remaining live exact-once violations in the eleven-family retained-operation
-   matrix: insurance and backing top-ups. `ConvertReleasedPnl`, `RebalanceReduce`, deposit,
-   withdraw, all four trade routes, and retired-slot activation now reject stale same-intent retries
-   exactly. Reuse the persisted per-asset control-sequence tail for top-up intent IDs without
-   growing the market account, and keep same-transaction, cross-entrypoint, partial-failure, legacy
-   schema rejection, and fresh-intent liveness controls in the shared INV-008 matrix.
-2. Close the now-publicly-reproduced crank-cadence violations (issues 407 and 409). Define one
+1. Close the now-publicly-reproduced crank-cadence violations (issues 407 and 409). Define one
    canonical elapsed-time price path and funding integral that do not depend on transaction
    partitioning, preserve both price directions and all oracle modes, and require bounded work
    independent of elapsed slots. Turn the five INV-052 counterexamples into equality assertions,
    add stale/fresh target transitions and maximum-shape CU controls, and keep the existing engine
    K/F settlement-partition proof as a separate downstream guarantee.
-3. Extend INV-086's now-terminal-aware bounded graph with a publicly reachable underfunded receipt
+2. Extend INV-086's now-terminal-aware bounded graph with a publicly reachable underfunded receipt
    seed and a successful `ClaimResolvedPayoutTopup` edge. The node already includes payout-ledger,
    receipt, close-progress, and terminal-resolution state. Do not assume that two ordinary
    bankrupt closes produce this state: `AdvanceClose` socializes uncovered PnL before payout, so a
    candidate seed must assert a genuinely pending receipt before claiming top-up coverage. Keep
    the finite graph explicitly non-universal, or prove that the value-changing route is unreachable
    from the supported public lifecycle and classify the existing legacy-state tests accordingly.
-4. Cross that reference graph with recovery, backing expiry, claimant order, prior
+3. Cross that reference graph with recovery, backing expiry, claimant order, prior
    insurance, authority epochs, retirement/reactivation, and the new retained-operation classes.
 
 Wrapper proofs should remain wrapper-specific: decoding, account-role/authentication boundaries,
@@ -247,10 +247,10 @@ state-preserving because the wrapper returns the error and SVM rollback applies.
 
 | Suite | Tests | Evidence |
 | --- | ---: | --- |
-| `public_sbf/` | 89 | Deterministic public SBF/LiteSVM counterexamples, regressions, decoder corpora, trace-schema checks, and manifest checks, including paired-world conversion-retry rejection with unchanged victim payout, fixed-pin rebalance-retry rejection, issue-402 delayed-close red/green plus failed-deposit rollback, and asset-authority/lifecycle generation replay plus exact activation-frontier controls |
-| `stateful/` | 144 | Proptest-generated public routes, now including generated authority and permissionless-stale resolution and all three resolved payout rails plus an eleven-family retained-operation retry matrix, including protected same-incarnation PnL conversion and position-epoch-bound rebalance reduction; generated portfolio-consent ABA coverage cycles every retained family through same-pubkey A -> B -> A ownership, including real position and Recovery episodes, while public two-close `CureAndCancelClose` routes prove both same-pubkey ABA and same-portfolio episode rejection with exact rollback, fresh-cure liveness, and matcher-disabled cleanup epoch advance; all four trade routes cover open, cross-zero replacement, and final close episode transitions. Bounded lifecycle models cover scarce-backing pair/chunk allocation orders, a 16-cell positive-claim boundary partition, all 3! matcher-control/trade landing orders, all 32 open-route/close-route/winner-side realized-PnL attribution worlds, an independent raw-header/portfolio/domain stock census and account/bucket/reservation encumbrance census after every generated action, exact live insurance/backing withdrawal custody and ledger deltas, nonvacuous owner recovery forfeits, permissionless abandoned-asset force close, Recovery-to-restart-to-fresh-trade composition, stale-market permissionless resolution through terminal disposition, and Active-to-DrainOnly risk rejection/reduction-to-empty-retirement composition with exact generation/position/OI/episode/custody progress, all eight trade-family/source-side counterparty-lien lifecycles, eight reciprocal cross-asset credit-cycle worlds, 20 user-operation/admission cells, 12 caller-priced boundary-exit cells, the four-state retirement-obligation lattice, a four-state Recovery resource-failure lattice, stale-refresh later-leg observation boundaries in Live and mixed Recovery/Live portfolios, focused public pending-close residual and cured-obligation release rank edges, a ten-prefix/two-configuration public crank-rank graph, all 183 public action words through depth two over a thirteen-action deployed/reference alphabet with normalized resolution/payout/receipt/close state, a Recovery crank/owner-exit classifier boundary, and all 5! claimant orders, including generalized active-leg/currentness, source-claim attribution, source-credit-rate, authenticated-expiry, state-indexed liveness witnesses, and reference-model/deployed-transition equivalence |
-| `cu/` | 746 | Full `v16_cu` public-route, metamorphic, rollback, liveness, arithmetic-differential, and max-shape CU inventory, including issue-404 transient-rent boundaries, issue-405 selected-Switchboard-result provenance, issue-406 matcher-inventory synchronization, issue-408 maintenance seniority, canonical portfolio and auxiliary-ledger account sizing, complete portfolio-ID/PDA/token-move callsite ownership, INV-002/INV-004 retained-route and writer completeness rosters, lifecycle wire migration coverage, five nonvacuous issues-407/409 crank-cadence counterexamples, and a complete six-struct wrapper-owned persisted-field roster; the cadence violations remain open, with no standalone top-level tests |
-| `kani/` | 128 | Symbolic wrapper arithmetic, exact portfolio/position tuple acceptance and episode invalidation, retained-close and owner-value sequence binding, all four trade tuple bindings, matcher binding and synchronization policy, ordering, strict-decoder, and proof-assumption nonvacuity harnesses. The roster includes rejection of legacy deposit/withdraw/trade schemas; all full-width fields in the four exact shipping trade-body decoders as tractable per-field proofs; exact current-versus-frontier asset-generation selection; authority-wire binding; and exact deployed portfolio-ID allocator monotonicity/non-reuse. Full `cargo kani --tests -j 8 --output-format terse` remains the required verification command. |
+| `public_sbf/` | 91 | Deterministic public SBF/LiteSVM counterexamples, regressions, decoder corpora, trace-schema checks, and manifest checks, including paired-world conversion-retry rejection with unchanged victim payout, fixed-pin rebalance-retry rejection, issue-402 delayed-close red/green plus failed-deposit rollback, asset-authority/lifecycle generation replay plus exact activation-frontier controls, and all eleven retained-operation families with stale-retry rejection and fresh-intent liveness |
+| `stateful/` | 145 | Proptest-generated public routes, now including generated authority and permissionless-stale resolution and all three resolved payout rails plus an eleven-family retained-operation retry matrix with no current-roster duplicate-execution violation; direct and domain insurance top-ups share one generated ordering watermark while backing top-up is independent. Generated portfolio-consent ABA coverage cycles every retained family through same-pubkey A -> B -> A ownership, including real position and Recovery episodes, while public two-close `CureAndCancelClose` routes prove both same-pubkey ABA and same-portfolio episode rejection with exact rollback, fresh-cure liveness, and matcher-disabled cleanup epoch advance; all four trade routes cover open, cross-zero replacement, and final close episode transitions. Bounded lifecycle models cover scarce-backing pair/chunk allocation orders, a 16-cell positive-claim boundary partition, all 3! matcher-control/trade landing orders, all 32 open-route/close-route/winner-side realized-PnL attribution worlds, an independent raw-header/portfolio/domain stock census and account/bucket/reservation encumbrance census after every generated action, exact live insurance/backing withdrawal custody and ledger deltas, nonvacuous owner recovery forfeits, permissionless abandoned-asset force close, Recovery-to-restart-to-fresh-trade composition, stale-market permissionless resolution through terminal disposition, and Active-to-DrainOnly risk rejection/reduction-to-empty-retirement composition with exact generation/position/OI/episode/custody progress, all eight trade-family/source-side counterparty-lien lifecycles, eight reciprocal cross-asset credit-cycle worlds, 20 user-operation/admission cells, 12 caller-priced boundary-exit cells, the four-state retirement-obligation lattice, a four-state Recovery resource-failure lattice, stale-refresh later-leg observation boundaries in Live and mixed Recovery/Live portfolios, focused public pending-close residual and cured-obligation release rank edges, a ten-prefix/two-configuration public crank-rank graph, all 183 public action words through depth two over a thirteen-action deployed/reference alphabet with normalized resolution/payout/receipt/close state, a Recovery crank/owner-exit classifier boundary, and all 5! claimant orders, including generalized active-leg/currentness, source-claim attribution, source-credit-rate, authenticated-expiry, state-indexed liveness witnesses, and reference-model/deployed-transition equivalence |
+| `cu/` | 749 | Full `v16_cu` public-route, metamorphic, rollback, liveness, arithmetic-differential, and max-shape CU inventory, including issue-404 transient-rent boundaries, issue-405 selected-Switchboard-result provenance, issue-406 matcher-inventory synchronization, issue-408 maintenance seniority, canonical portfolio and auxiliary-ledger account sizing, complete portfolio-ID/PDA/token-move callsite ownership, INV-002/INV-004/INV-008 retained-route and writer completeness rosters, lifecycle wire migration coverage, failed-SPL-CPI same-intent retry for all three top-up routes, five nonvacuous issues-407/409 crank-cadence counterexamples, and a complete six-struct wrapper-owned persisted-field roster; the cadence violations remain open, with no standalone top-level tests |
+| `kani/` | 130 | Symbolic wrapper arithmetic, exact portfolio/position tuple acceptance and episode invalidation, retained-close and owner-value sequence binding, all four trade tuple bindings, strict full-width top-up watermark ordering, matcher binding and synchronization policy, ordering, strict-decoder, and proof-assumption nonvacuity harnesses. The roster includes rejection of legacy deposit/withdraw/trade/top-up schemas; all full-width fields in the four exact shipping trade-body decoders as tractable per-field proofs; exact current-versus-frontier asset-generation selection; authority-wire binding; and exact deployed portfolio-ID allocator monotonicity/non-reuse. Full `cargo kani --tests --default-unwind 18` remains the required verification command. |
 
 Most deterministic and stateful LoF adapters still reproduce quarantined vulnerable behavior;
 fixed-pin regressions explicitly require safe rejection or preservation instead. A vulnerable-pin
@@ -317,7 +317,7 @@ charter.
 | INV-005 | Independent + Direct + SVM/CU | `public_sbf/inv_005_authority_incarnation_binding.rs`, `stateful/inv_005_authority_incarnation_binding.rs`, `cu/inv_005_authority_incarnation_binding.rs` |
 | INV-006 | SVM/CU | `public_sbf/inv_006_program_chain_message_type_and_version_binding.rs` (signed program, market, instruction bytes, and recent-blockhash mutation with exact rollback; explicit genesis-domain field remains absent) |
 | INV-007 | Direct + Partial R | `public_sbf/inv_007_no_aba_reuse.rs` (a bounded public close/recreate/replay model exhausts all 11 retained market-scope route classes with compiled signer/meta traces and exact external deltas; every stale route still lands until persistent market generation binding is added, and other closable account classes remain) |
-| INV-008 | Independent + P + Direct + F + SVM/CU | `public_sbf/inv_008_intent_uniqueness_and_bounded_replay.rs`, `stateful/inv_008_intent_uniqueness_and_bounded_replay.rs`, and `kani/inv_008_intent_uniqueness_and_bounded_replay.rs` prove stale-retry rejection, exact rollback, fresh-intent liveness, sequence/episode invalidation, and legacy-schema rejection for deposit, withdraw, conversion, rebalance, all four trade routes, and retired-slot activation. Insurance and backing top-up retries remain the two live public counterexamples. |
+| INV-008 | Independent + P + Direct + F + SVM/CU | `public_sbf/inv_008_intent_uniqueness_and_bounded_replay.rs`, `stateful/inv_008_intent_uniqueness_and_bounded_replay.rs`, `cu/inv_008_intent_uniqueness_and_bounded_replay.rs`, `cu/inv_080_error_propagation_and_exact_rollback.rs`, and `kani/inv_008_intent_uniqueness_and_bounded_replay.rs` cover all eleven retained-operation families. They prove stale-retry rejection, exact rollback, fresh-intent liveness, sequence/episode/watermark invalidation, intentless legacy-schema rejection, cross-route insurance ordering, and same-intent liveness after a real failed SPL CPI. Direct and domain insurance top-ups share one per-asset watermark; backing top-up has a separate lane. Broader all-family same-transaction, cross-entrypoint, partial-failure, and route-addition completeness remain open test dimensions. |
 | INV-009 | SVM/CU | `cu/inv_009_partial_fill_and_retry_accounting.rs` |
 | INV-010 | Independent + P + SVM/CU + Partial R | `stateful/inv_010_out_of_order_safety.rs`, `kani/inv_010_out_of_order_safety.rs`, `cu/inv_010_out_of_order_safety.rs` (all 3! landing orders of conflicting same-sequence matcher controls and a retained CPI trade, plus fresh-consent exit witnesses; other retained request domains remain) |
 | INV-011 | SVM/CU + Spec gap | `cu/inv_011_signed_aggregate_economic_bounds.rs` (per-leg CPI signed price bounds and atomic batch rejection are covered; a single aggregate budget field remains absent) |
@@ -492,7 +492,7 @@ are machine-checked below so a future README edit cannot silently omit an invari
 | AUDIT-005 | OPEN-D | Current tests still discover authority `A -> B -> A` revival. Add a monotonic epoch for each authority scope, prove atomic epoch rotation, and flip both `A -> B -> A` and disable/re-enable matrices to rejection. |
 | AUDIT-006 | OPEN-D | Transaction tampering covers program, market, kind, bytes, and blockhash, but no retained-message genesis/chain domain or explicit message-version field exists. Prefix-compatible, downgrade, and cross-cluster replay need a typed intent header and decoder fuzz. |
 | AUDIT-007 | OPEN-D | A bounded public model now exhausts all 11 retained market-request kinds across one same-pubkey close/recreate boundary with zero state injection and exact trace frames, but every stale request still lands. Add a persistent market generation and flip this matrix to exact rejection, then extend it across multiple recreation depths and receipt, delegate, capability, and auxiliary-account classes. |
-| AUDIT-008 | OPEN-D | The public retained-operation matrix covers eleven families. Eight still reproduce duplicate economic execution; `ConvertReleasedPnl` and `RebalanceReduce` consume a position epoch, while retired-slot activation consumes an exact asset-generation frontier, so all three reject retained variants exactly. The issue-387 paired world proves stale conversion rejection, exact rollback, zero cranker extraction, unchanged victim payout, and fresh-intent liveness; INV-002 owns activation's exact rollback and fresh-frontier control. INV-013 separately closes delayed empty-state portfolio consent. A general program-enforced owner-intent ledger/expiry is still absent, and same-transaction, cross-entrypoint, and partial-failure exact-once tests remain. |
+| AUDIT-008 | OPEN-T | The current public retained-operation roster covers eleven families and reports no duplicate-execution violation. Deposit/withdraw, conversion/rebalance, all four trade routes, retired-slot activation, both insurance top-up routes, and backing top-up each reject a stale retained request with exact rollback and admit a fresh request. The insurance routes deliberately share one per-asset watermark, backing uses an independent lane, randomized route ordering cannot revive an insurance request, and real failed SPL CPIs preserve an identical retry for all three top-up routes. Remaining closure is broader all-family same-transaction/cross-entrypoint/partial-failure permutation coverage, expiry and aggregate-budget semantics where applicable, and a source-bound completeness rule that forces future retained routes into this matrix. |
 | AUDIT-009 | OPEN-T | One CPI short-fill rejection/retry is covered. Successful partial fills, random partitions, cumulative quantity/fee/slippage/expiry budgets, route switching, and one-minimum-fee-per-intent accounting are absent. |
 | AUDIT-010 | OPEN-T | All 3! landing orders of two same-sequence matcher controls and one retained CPI trade are now exhausted with state-derived consent, exact rollback, and a matcher-independent exit. Add bounded permutations of deposit, withdraw, reduction, authority rotation, policy update, resolve, and claim with signed postcondition checks. |
 | AUDIT-011 | OPEN-D | Per-leg prices and atomic batch rejection exist, but the message has no aggregate fee, quantity, slippage, deadline, final-position, or collateral/PnL-credit budget. Add those fields before split-intent proofs can close. |

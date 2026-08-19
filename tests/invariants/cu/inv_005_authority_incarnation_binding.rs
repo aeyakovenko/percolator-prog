@@ -279,6 +279,7 @@ fn v16_attack_retired_asset_domain_authority_cannot_refund_slot_and_block_reuse(
     env.svm.expire_blockhash();
     let insurance_topup = env.send(
         ProgInstruction::TopUpInsuranceDomain {
+            intent_id: 0,
             market_id: 0,
             domain: 2,
             amount: 77,
@@ -308,6 +309,7 @@ fn v16_attack_retired_asset_domain_authority_cannot_refund_slot_and_block_reuse(
     env.svm.expire_blockhash();
     let backing_topup = env.send(
         ProgInstruction::TopUpBackingBucket {
+            intent_id: 0,
             market_id: 0,
             domain: 2,
             amount: 88,
@@ -934,6 +936,7 @@ fn v16_attack_topup_insurance_domain_authority_gated() {
         env.program_id,
         &env.payer,
         ProgInstruction::TopUpInsuranceDomain {
+            intent_id: 0,
             market_id: 0,
             domain: 0,
             amount: 500,
@@ -1047,6 +1050,7 @@ fn v16_attack_topup_backing_bucket_authority_gated() {
         env.program_id,
         &env.payer,
         ProgInstruction::TopUpBackingBucket {
+            intent_id: 0,
             market_id: 0,
             domain: 0,
             amount: 500,
@@ -1217,6 +1221,7 @@ fn v16_attack_cross_asset_backing_authority_cannot_withdraw_other_asset_earnings
         env.program_id,
         &env.payer,
         ProgInstruction::TopUpBackingBucket {
+            intent_id: 0,
             market_id: 0,
             domain: 2,
             amount: 300,

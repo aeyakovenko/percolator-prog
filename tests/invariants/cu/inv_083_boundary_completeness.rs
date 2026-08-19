@@ -358,6 +358,7 @@ fn v16_attack_domain_indexed_calls_reject_out_of_range_atomically() {
         env.program_id,
         &env.payer,
         ProgInstruction::TopUpInsuranceDomain {
+            intent_id: 0,
             market_id: 0,
             domain: BAD_DOMAIN,
             amount: 123,
@@ -389,6 +390,7 @@ fn v16_attack_domain_indexed_calls_reject_out_of_range_atomically() {
         env.program_id,
         &env.payer,
         ProgInstruction::TopUpBackingBucket {
+            intent_id: 0,
             market_id: 0,
             domain: BAD_DOMAIN,
             amount: 456,

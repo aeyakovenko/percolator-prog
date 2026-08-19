@@ -3,9 +3,9 @@
 //! Normative obligation: One retained economic intent can execute at most once across routes and retries.
 //!
 //! Evidence in this file (F over public I routes):
-//! `v16_program_retry_operation_matrix_discovers_duplicate_economic_execution` generates
-//! signature-distinct retries from one economic-operation registry without finding metadata.
-//! Direct impact regressions remain below. These tests exercise the deployed public
+//! `v16_program_retry_operation_matrix_rejects_every_stale_retry` generates signature-distinct
+//! retries from one economic-operation registry without finding metadata. These tests exercise
+//! the deployed public
 //! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
 //! rollback, liveness, or compute outcomes appropriate to the invariant.
 //!
@@ -28,7 +28,7 @@ proptest! {
     })]
 
     #[test]
-    fn v16_program_retry_operation_matrix_discovers_duplicate_economic_execution(
+    fn v16_program_retry_operation_matrix_rejects_every_stale_retry(
         seed in any::<[u8; 32]>()
     ) {
         let discoveries = discover_intent_retries(seed)
@@ -43,27 +43,17 @@ proptest! {
             .map(|discovery| discovery.kind)
             .collect();
         eprintln!("independent INV-008 discoveries: {violations:?}");
-        let expected_violations = vec![
-            RetryIntentKind::InsuranceTopUp,
-            RetryIntentKind::BackingTopUp,
-        ];
+        let expected_violations = Vec::<RetryIntentKind>::new();
         prop_assert_eq!(
             &violations,
             &expected_violations,
             "exact-once discovery/protection corpus changed"
         );
         for discovery in &discoveries {
-            if expected_violations.contains(&discovery.kind) {
-                prop_assert!(discovery.accepted_retry);
-                prop_assert!(discovery.duplicated_economic_effect);
-                prop_assert!(discovery.retry_compute_units.is_some());
-                prop_assert_eq!(discovery.fresh_compute_units, None);
-            } else {
-                prop_assert!(!discovery.accepted_retry);
-                prop_assert!(!discovery.duplicated_economic_effect);
-                prop_assert_eq!(discovery.retry_compute_units, None);
-                prop_assert!(discovery.fresh_compute_units.is_some());
-            }
+            prop_assert!(!discovery.accepted_retry);
+            prop_assert!(!discovery.duplicated_economic_effect);
+            prop_assert_eq!(discovery.retry_compute_units, None);
+            prop_assert!(discovery.fresh_compute_units.is_some());
         }
         let rebalance = discoveries
             .iter()
@@ -124,16 +114,28 @@ proptest! {
     }
 
     #[test]
-    fn v16_program_pr344_insurance_top_up_retry_replay_fuzz(
+    fn v16_program_pr344_insurance_top_up_retry_rejection_fuzz(
         seed in insurance_top_up_retry_replay_seed_strategy()
     ) {
-        let result = reproduce_insurance_top_up_retry_replay(seed);
-        prop_assert!(
-            result.is_ok(),
-            "PR 344 no longer reproduces for seed {:?}: {}",
-            seed,
-            result.unwrap_err()
-        );
+        let discovery = discover_intent_retry(seed, RetryIntentKind::InsuranceTopUp)
+            .map_err(TestCaseError::fail)?;
+        prop_assert!(!discovery.accepted_retry);
+        prop_assert!(!discovery.duplicated_economic_effect);
+        prop_assert_eq!(discovery.retry_compute_units, None);
+        prop_assert!(discovery.fresh_compute_units.is_some());
+    }
+
+    #[test]
+    fn v16_program_insurance_top_up_cross_route_retry_rejection_fuzz(
+        seed in any::<[u8; 32]>(),
+        direct_first in any::<bool>(),
+    ) {
+        let discovery = discover_cross_route_insurance_top_up_retry(seed, direct_first)
+            .map_err(TestCaseError::fail)?;
+        prop_assert!(!discovery.accepted_retry);
+        prop_assert!(!discovery.duplicated_economic_effect);
+        prop_assert_eq!(discovery.retry_compute_units, None);
+        prop_assert!(discovery.fresh_compute_units.is_some());
     }
 
     #[test]
@@ -152,16 +154,15 @@ proptest! {
     }
 
     #[test]
-    fn v16_program_pr351_backing_top_up_retry_replay_fuzz(
+    fn v16_program_pr351_backing_top_up_retry_rejection_fuzz(
         seed in backing_top_up_retry_replay_seed_strategy()
     ) {
-        let result = reproduce_backing_top_up_retry_replay(seed);
-        prop_assert!(
-            result.is_ok(),
-            "PR 351 no longer reproduces for seed {:?}: {}",
-            seed,
-            result.unwrap_err()
-        );
+        let discovery = discover_intent_retry(seed, RetryIntentKind::BackingTopUp)
+            .map_err(TestCaseError::fail)?;
+        prop_assert!(!discovery.accepted_retry);
+        prop_assert!(!discovery.duplicated_economic_effect);
+        prop_assert_eq!(discovery.retry_compute_units, None);
+        prop_assert!(discovery.fresh_compute_units.is_some());
     }
 
     #[test]

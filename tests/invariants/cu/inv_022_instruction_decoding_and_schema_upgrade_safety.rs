@@ -224,6 +224,7 @@ fn inv_022_representative_public_instructions() -> Vec<ProgInstruction> {
             position_epoch: 3,
         },
         ProgInstruction::TopUpInsurance {
+            intent_id: 2,
             market_id: 1,
             amount: 1,
         },
@@ -243,6 +244,7 @@ fn inv_022_representative_public_instructions() -> Vec<ProgInstruction> {
             asset_generation_frontier: 1,
         },
         ProgInstruction::TopUpBackingBucket {
+            intent_id: 4,
             domain: 0,
             market_id: 1,
             amount: 1,
@@ -367,6 +369,7 @@ fn inv_022_representative_public_instructions() -> Vec<ProgInstruction> {
             policy_sequence: 1,
         },
         ProgInstruction::TopUpInsuranceDomain {
+            intent_id: 3,
             domain: 0,
             market_id: 1,
             amount: 1,

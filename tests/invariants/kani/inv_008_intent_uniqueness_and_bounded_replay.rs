@@ -1,14 +1,30 @@
 //! INV-008 - Intent uniqueness and bounded replay.
 //!
 //! Normative obligation: a successful retained portfolio operation consumes the exact persisted
-//! owner sequence or position episode carried on its wire. The old binding must then be false.
+//! owner sequence, position episode, or per-asset top-up intent carried on its wire. The old
+//! binding must then be false.
 //!
 //! Evidence in this file (P): these proofs exhaust all wrapper `u64` sequence values and all
 //! packed position-control words used by the deployed handlers. They establish fail-closed
 //! overflow, exact one-step consumption, and invalidation of both single-account and paired-trade
-//! bindings. Public SBF tests prove handler composition, exact rollback, and fresh-call liveness.
+//! bindings. The top-up contract proves all full-width watermark/proposal pairs and is shared by
+//! both insurance entrypoints. Public SBF tests prove handler composition, exact rollback, and
+//! fresh-call liveness.
 
 use percolator_prog::state;
+
+#[kani::proof]
+fn kani_v16_top_up_intent_accepts_only_a_strictly_newer_watermark() {
+    let current: u64 = kani::any();
+    let proposed: u64 = kani::any();
+
+    let accepted = state::require_newer_control_sequence(current, proposed).is_ok();
+    assert_eq!(accepted, proposed > current);
+    if accepted {
+        assert!(state::require_newer_control_sequence(proposed, proposed).is_err());
+        assert!(state::require_newer_control_sequence(proposed, current).is_err());
+    }
+}
 
 #[kani::proof]
 fn kani_v16_owner_sequence_success_consumes_exactly_once() {

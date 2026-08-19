@@ -1113,6 +1113,7 @@ fn v16_attack_backing_ledger_market_binding_enforced() {
         env.program_id,
         &env.payer,
         ProgInstruction::TopUpBackingBucket {
+            intent_id: 0,
             market_id: market_b_market_id,
             domain: 1,
             amount: 100,
@@ -1479,6 +1480,7 @@ fn v16_attack_insurance_ledger_market_binding_enforced() {
         env.program_id,
         &env.payer,
         ProgInstruction::TopUpInsuranceDomain {
+            intent_id: 0,
             market_id: 0,
             domain: 0,
             amount: 100,
@@ -1748,6 +1750,7 @@ fn v16_attack_topup_optional_ledgers_reject_cross_market_reuse() {
         env.program_id,
         &env.payer,
         ProgInstruction::TopUpInsurance {
+            intent_id: 0,
             market_id: 0,
             amount: 25,
         },
@@ -1780,6 +1783,7 @@ fn v16_attack_topup_optional_ledgers_reject_cross_market_reuse() {
         env.program_id,
         &env.payer,
         ProgInstruction::TopUpInsuranceDomain {
+            intent_id: 0,
             market_id: 0,
             domain: 0,
             amount: 30,
@@ -1813,6 +1817,7 @@ fn v16_attack_topup_optional_ledgers_reject_cross_market_reuse() {
         env.program_id,
         &env.payer,
         ProgInstruction::TopUpBackingBucket {
+            intent_id: 0,
             market_id: 0,
             domain: 1,
             amount: 40,
@@ -1847,6 +1852,7 @@ fn v16_attack_topup_optional_ledgers_reject_cross_market_reuse() {
         env.program_id,
         &env.payer,
         ProgInstruction::TopUpInsurance {
+            intent_id: 0,
             market_id: 0,
             amount: 25,
         },
@@ -1881,6 +1887,7 @@ fn v16_attack_topup_optional_ledgers_reject_cross_market_reuse() {
         env.program_id,
         &env.payer,
         ProgInstruction::TopUpInsuranceDomain {
+            intent_id: 0,
             market_id: 0,
             domain: 0,
             amount: 30,
@@ -1914,6 +1921,7 @@ fn v16_attack_topup_optional_ledgers_reject_cross_market_reuse() {
         env.program_id,
         &env.payer,
         ProgInstruction::TopUpBackingBucket {
+            intent_id: 0,
             market_id: 0,
             domain: 1,
             amount: 40,
@@ -2045,6 +2053,7 @@ fn v16_attack_terminal_insurance_ledger_rejects_cross_market_reuse() {
         env.program_id,
         &env.payer,
         ProgInstruction::TopUpInsurance {
+            intent_id: 0,
             market_id: 0,
             amount: 100,
         },
@@ -2186,6 +2195,7 @@ fn v16_attack_terminal_withdraw_insurance_rejects_portfolio_as_ledger() {
         env.program_id,
         &env.payer,
         ProgInstruction::TopUpInsurance {
+            intent_id: 0,
             market_id: 0,
             amount: 100,
         },

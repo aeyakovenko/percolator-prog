@@ -41,6 +41,7 @@ fn kani_v16_asset_lifecycle_binding_selects_current_or_frontier_exactly() {
 }
 
 #[kani::proof]
+#[kani::unwind(34)]
 fn kani_v16_asset_authority_preserves_generation_and_rejects_legacy() {
     let asset_index: u16 = kani::any();
     let market_id: u64 = kani::any();

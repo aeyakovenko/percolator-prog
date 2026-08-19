@@ -507,7 +507,8 @@ fn v16_program_all_wrapper_owned_persisted_structs_have_complete_field_rosters()
                 "fee_redirect",
                 "market_init_fee",
                 "permissionless_resolve",
-                "_reserved",
+                "insurance_top_up",
+                "backing_top_up",
             ],
         ),
         (

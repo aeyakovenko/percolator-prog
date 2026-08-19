@@ -618,7 +618,9 @@ pub mod state {
     const _: [(); ASSET_ORACLE_PROFILE_LEN] = [(); core::mem::size_of::<AssetOracleProfileV16>()];
 
     /// Wrapper-only ordering watermarks stored in the unused tail of each asset slot.
-    /// Asset zero owns the market-wide policy lanes; oracle and backing lanes are per asset.
+    /// Asset zero owns the market-wide policy lanes; oracle, backing, and top-up lanes are per
+    /// asset. Both insurance top-up entrypoints share `insurance_top_up` so an intent cannot be
+    /// replayed through the alternate route.
     #[repr(C)]
     #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, bytemuck::Pod, bytemuck::Zeroable)]
     pub struct AssetControlSequencesV16 {
@@ -631,7 +633,8 @@ pub mod state {
         pub fee_redirect: u64,
         pub market_init_fee: u64,
         pub permissionless_resolve: u64,
-        pub _reserved: [u8; 16],
+        pub insurance_top_up: u64,
+        pub backing_top_up: u64,
     }
 
     const _: [(); ASSET_CONTROL_SEQUENCES_LEN] =
@@ -1664,11 +1667,8 @@ pub mod state {
 
     #[inline]
     pub fn validate_asset_control_sequences(
-        sequences: &AssetControlSequencesV16,
+        _sequences: &AssetControlSequencesV16,
     ) -> Result<(), ProgramError> {
-        if sequences._reserved != [0u8; 16] {
-            return Err(ProgramError::InvalidAccountData);
-        }
         Ok(())
     }
 
@@ -2930,11 +2930,13 @@ pub mod ix {
         },
         TopUpInsurance {
             market_id: u64,
+            intent_id: u64,
             amount: u128,
         },
         TopUpInsuranceDomain {
             domain: u16,
             market_id: u64,
+            intent_id: u64,
             amount: u128,
         },
         CloseSlab,
@@ -2944,6 +2946,7 @@ pub mod ix {
         TopUpBackingBucket {
             domain: u16,
             market_id: u64,
+            intent_id: u64,
             amount: u128,
             expiry_slot: u64,
         },
@@ -3321,11 +3324,13 @@ pub mod ix {
                 },
                 9 => Self::TopUpInsurance {
                     market_id: read_u64(&mut rest)?,
+                    intent_id: read_u64(&mut rest)?,
                     amount: read_u128(&mut rest)?,
                 },
                 56 => Self::TopUpInsuranceDomain {
                     domain: read_u16(&mut rest)?,
                     market_id: read_u64(&mut rest)?,
+                    intent_id: read_u64(&mut rest)?,
                     amount: read_u128(&mut rest)?,
                 },
                 13 => Self::CloseSlab,
@@ -3335,6 +3340,7 @@ pub mod ix {
                 24 => Self::TopUpBackingBucket {
                     domain: read_u16(&mut rest)?,
                     market_id: read_u64(&mut rest)?,
+                    intent_id: read_u64(&mut rest)?,
                     amount: read_u128(&mut rest)?,
                     expiry_slot: read_u64(&mut rest)?,
                 },
@@ -3720,19 +3726,26 @@ pub mod ix {
                     push_u64(&mut out, expected_sequence);
                     push_u64(&mut out, position_epoch);
                 }
-                Self::TopUpInsurance { market_id, amount } => {
+                Self::TopUpInsurance {
+                    market_id,
+                    intent_id,
+                    amount,
+                } => {
                     out.push(9);
                     push_u64(&mut out, market_id);
+                    push_u64(&mut out, intent_id);
                     push_u128(&mut out, amount);
                 }
                 Self::TopUpInsuranceDomain {
                     domain,
                     market_id,
+                    intent_id,
                     amount,
                 } => {
                     out.push(56);
                     push_u16(&mut out, domain);
                     push_u64(&mut out, market_id);
+                    push_u64(&mut out, intent_id);
                     push_u128(&mut out, amount);
                 }
                 Self::CloseSlab => out.push(13),
@@ -3745,12 +3758,14 @@ pub mod ix {
                 Self::TopUpBackingBucket {
                     domain,
                     market_id,
+                    intent_id,
                     amount,
                     expiry_slot,
                 } => {
                     out.push(24);
                     push_u16(&mut out, domain);
                     push_u64(&mut out, market_id);
+                    push_u64(&mut out, intent_id);
                     push_u128(&mut out, amount);
                     push_u64(&mut out, expiry_slot);
                 }
@@ -5480,6 +5495,8 @@ pub mod processor {
         FeeRedirect,
         MarketInitFee,
         PermissionlessResolve,
+        InsuranceTopUp,
+        BackingTopUp,
     }
 
     fn read_control_sequences_from_view(
@@ -5533,6 +5550,8 @@ pub mod processor {
             ControlSequenceLane::FeeRedirect => sequences.fee_redirect,
             ControlSequenceLane::MarketInitFee => sequences.market_init_fee,
             ControlSequenceLane::PermissionlessResolve => sequences.permissionless_resolve,
+            ControlSequenceLane::InsuranceTopUp => sequences.insurance_top_up,
+            ControlSequenceLane::BackingTopUp => sequences.backing_top_up,
         }
     }
 
@@ -5551,6 +5570,8 @@ pub mod processor {
             ControlSequenceLane::FeeRedirect => sequences.fee_redirect = value,
             ControlSequenceLane::MarketInitFee => sequences.market_init_fee = value,
             ControlSequenceLane::PermissionlessResolve => sequences.permissionless_resolve = value,
+            ControlSequenceLane::InsuranceTopUp => sequences.insurance_top_up = value,
+            ControlSequenceLane::BackingTopUp => sequences.backing_top_up = value,
         }
     }
 
@@ -6406,14 +6427,19 @@ pub mod processor {
                 expected_sequence,
                 position_epoch,
             ),
-            Instruction::TopUpInsurance { market_id, amount } => {
-                handle_top_up_insurance(program_id, accounts, market_id, amount)
-            }
+            Instruction::TopUpInsurance {
+                market_id,
+                intent_id,
+                amount,
+            } => handle_top_up_insurance(program_id, accounts, market_id, intent_id, amount),
             Instruction::TopUpInsuranceDomain {
                 domain,
                 market_id,
+                intent_id,
                 amount,
-            } => handle_top_up_insurance_domain(program_id, accounts, domain, market_id, amount),
+            } => handle_top_up_insurance_domain(
+                program_id, accounts, domain, market_id, intent_id, amount,
+            ),
             Instruction::CloseSlab => handle_close_slab(program_id, accounts),
             Instruction::ResolveMarket {
                 asset_generation_frontier,
@@ -6421,6 +6447,7 @@ pub mod processor {
             Instruction::TopUpBackingBucket {
                 domain,
                 market_id,
+                intent_id,
                 amount,
                 expiry_slot,
             } => handle_top_up_backing_bucket(
@@ -6428,6 +6455,7 @@ pub mod processor {
                 accounts,
                 domain,
                 market_id,
+                intent_id,
                 amount,
                 expiry_slot,
             ),
@@ -9041,6 +9069,7 @@ pub mod processor {
         program_id: &Pubkey,
         accounts: &'a [AccountInfo<'a>],
         expected_market_id: u64,
+        intent_id: u64,
         amount: u128,
     ) -> ProgramResult {
         let signer = account(accounts, 0)?;
@@ -9066,6 +9095,8 @@ pub mod processor {
             if market_id != expected_market_id {
                 return Err(PercolatorError::AssetGenerationMismatch.into());
             }
+            let sequences = state::read_asset_control_sequences(&market_data, 0)?;
+            state::require_newer_control_sequence(sequences.insurance_top_up, intent_id)?;
             let profile0 = read_oracle_profile_for_asset(&market_data, &cfg_pre, 0)?;
             (cfg_pre, mode, profile0.insurance_authority)
         };
@@ -9136,6 +9167,12 @@ pub mod processor {
             {
                 write_or_init_insurance_ledger(data, ledger, *initialized)?;
             }
+            advance_control_sequence_view(
+                &mut group,
+                0,
+                ControlSequenceLane::InsuranceTopUp,
+                intent_id,
+            )?;
         }
         transfer_tokens(token_program, source_token, vault_token, signer, amount_u64)?;
         if let Some(cfg) = cfg_after {
@@ -9150,6 +9187,7 @@ pub mod processor {
         accounts: &'a [AccountInfo<'a>],
         domain: u16,
         expected_market_id: u64,
+        intent_id: u64,
         amount: u128,
     ) -> ProgramResult {
         let signer = account(accounts, 0)?;
@@ -9181,6 +9219,8 @@ pub mod processor {
                 return Err(PercolatorError::InvalidInstruction.into());
             }
             require_asset_generation_view(&group, asset_index, expected_market_id)?;
+            let sequences = read_control_sequences_from_view(&group, asset_index)?;
+            state::require_newer_control_sequence(sequences.insurance_top_up, intent_id)?;
             require_domain_accepts_live_topup_view(&group, domain)?;
             let profile = read_oracle_profile_from_view(&group, &cfg, asset_index)?;
             let authorities = domain_authorities_from_profile(&cfg, &profile, asset_index);
@@ -9245,6 +9285,12 @@ pub mod processor {
             {
                 write_or_init_insurance_ledger(data, ledger, *initialized)?;
             }
+            advance_control_sequence_view(
+                &mut group,
+                domain / 2,
+                ControlSequenceLane::InsuranceTopUp,
+                intent_id,
+            )?;
         }
         transfer_tokens(token_program, source_token, vault_token, signer, amount_u64)?;
         Ok(())
@@ -9503,6 +9549,7 @@ pub mod processor {
         accounts: &'a [AccountInfo<'a>],
         domain: u16,
         expected_market_id: u64,
+        intent_id: u64,
         amount: u128,
         expiry_slot: u64,
     ) -> ProgramResult {
@@ -9535,6 +9582,8 @@ pub mod processor {
                 return Err(PercolatorError::EngineLockActive.into());
             }
             require_asset_generation_view(&group, asset_index, expected_market_id)?;
+            let sequences = read_control_sequences_from_view(&group, asset_index)?;
+            state::require_newer_control_sequence(sequences.backing_top_up, intent_id)?;
             if amount != 0 && expiry_slot <= authenticated_market_slot_or_fallback_view(&group) {
                 return Err(PercolatorError::InvalidInstruction.into());
             }
@@ -9602,6 +9651,22 @@ pub mod processor {
             {
                 write_or_init_backing_domain_ledger(data, ledger, *initialized)?;
             }
+            advance_control_sequence_view(
+                &mut group,
+                domain_usize / 2,
+                ControlSequenceLane::BackingTopUp,
+                intent_id,
+            )?;
+        } else {
+            let mut market_data = market_ai.try_borrow_mut_data()?;
+            let (_, mut group) = state::market_view_mut(&mut market_data)?;
+            require_asset_generation_view(&group, domain_usize / 2, expected_market_id)?;
+            advance_control_sequence_view(
+                &mut group,
+                domain_usize / 2,
+                ControlSequenceLane::BackingTopUp,
+                intent_id,
+            )?;
         }
         transfer_tokens(token_program, source_token, vault_token, signer, amount_u64)?;
         Ok(())

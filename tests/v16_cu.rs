@@ -3416,6 +3416,7 @@ impl V16CuEnv {
             self.program_id,
             &self.payer,
             ProgInstruction::TopUpInsurance {
+                intent_id: 0,
                 market_id: 0,
                 amount,
             },
@@ -3443,6 +3444,7 @@ impl V16CuEnv {
             self.program_id,
             &self.payer,
             ProgInstruction::TopUpBackingBucket {
+                intent_id: 0,
                 market_id: 0,
                 domain,
                 amount,
@@ -3479,6 +3481,7 @@ impl V16CuEnv {
             self.program_id,
             &self.payer,
             ProgInstruction::TopUpInsurance {
+                intent_id: 0,
                 market_id: 0,
                 amount,
             },
@@ -3518,6 +3521,7 @@ impl V16CuEnv {
             self.program_id,
             &self.payer,
             ProgInstruction::TopUpInsurance {
+                intent_id: 0,
                 market_id: 0,
                 amount,
             },
@@ -3560,6 +3564,7 @@ impl V16CuEnv {
             self.program_id,
             &self.payer,
             ProgInstruction::TopUpInsuranceDomain {
+                intent_id: 0,
                 market_id: 0,
                 domain,
                 amount,
@@ -3603,6 +3608,7 @@ impl V16CuEnv {
             self.program_id,
             &self.payer,
             ProgInstruction::TopUpInsuranceDomain {
+                intent_id: 0,
                 market_id: 0,
                 domain,
                 amount,
@@ -3645,6 +3651,7 @@ impl V16CuEnv {
             self.program_id,
             &self.payer,
             ProgInstruction::TopUpBackingBucket {
+                intent_id: 0,
                 market_id: 0,
                 domain,
                 amount,
@@ -3688,6 +3695,7 @@ impl V16CuEnv {
             self.program_id,
             &self.payer,
             ProgInstruction::TopUpBackingBucket {
+                intent_id: 0,
                 market_id: 0,
                 domain,
                 amount,
@@ -3721,6 +3729,7 @@ impl V16CuEnv {
             self.program_id,
             &self.payer,
             ProgInstruction::TopUpBackingBucket {
+                intent_id: 0,
                 market_id: 0,
                 domain,
                 amount,
@@ -4379,6 +4388,30 @@ fn bind_current_generation_guards(
     accounts: &[AccountMeta],
     ix: &mut ProgInstruction,
 ) {
+    let top_up_intent = match ix {
+        ProgInstruction::TopUpInsurance { intent_id, .. } => Some((0usize, true, intent_id)),
+        ProgInstruction::TopUpInsuranceDomain {
+            domain, intent_id, ..
+        } => Some((*domain as usize / 2, true, intent_id)),
+        ProgInstruction::TopUpBackingBucket {
+            domain, intent_id, ..
+        } => Some((*domain as usize / 2, false, intent_id)),
+        _ => None,
+    };
+    if let Some((asset_index, insurance, intent_id)) = top_up_intent {
+        if *intent_id == 0 {
+            let market_key = accounts.get(1).expect("top-up market account").pubkey;
+            let market = svm.get_account(&market_key).expect("top-up market state");
+            if let Ok(sequences) = state::read_asset_control_sequences(&market.data, asset_index) {
+                *intent_id = next_control_sequence(if insurance {
+                    sequences.insurance_top_up
+                } else {
+                    sequences.backing_top_up
+                });
+            }
+        }
+    }
+
     let asset_generation_frontier = match ix {
         ProgInstruction::ResolveMarket {
             asset_generation_frontier,
@@ -4736,6 +4769,7 @@ fn top_up_backing_bucket_to_market(
         env.program_id,
         &env.payer,
         ProgInstruction::TopUpBackingBucket {
+            intent_id: 0,
             market_id: 0,
             domain,
             amount,
@@ -7666,6 +7700,9 @@ mod inv_004_position_episode_binding;
 
 #[path = "invariants/cu/inv_005_authority_incarnation_binding.rs"]
 mod inv_005_authority_incarnation_binding;
+
+#[path = "invariants/cu/inv_008_intent_uniqueness_and_bounded_replay.rs"]
+mod inv_008_intent_uniqueness_and_bounded_replay;
 
 #[path = "invariants/cu/inv_009_partial_fill_and_retry_accounting.rs"]
 mod inv_009_partial_fill_and_retry_accounting;

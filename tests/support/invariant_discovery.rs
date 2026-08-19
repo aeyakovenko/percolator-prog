@@ -4035,6 +4035,69 @@ pub fn discover_intent_retry(
     }
 }
 
+pub fn discover_cross_route_insurance_top_up_retry(
+    mut seed: [u8; 32],
+    direct_first: bool,
+) -> Result<IntentReplayDiscovery, String> {
+    const AUTHORITY: usize = 2;
+    const AMOUNT: u128 = 1_000;
+    seed[0] ^= 0xc8;
+    seed[1] ^= u8::from(direct_first);
+    let mut env = V16Svm::new(seed, MarketConfig::default());
+    env.update_asset_authority_from_admin(
+        0,
+        percolator_prog::processor::ASSET_AUTH_INSURANCE,
+        AUTHORITY,
+    )
+    .map_err(|error| format!("install insurance authority: {error}"))?;
+
+    // Both requests are retained against the same per-asset watermark. Landing either route must
+    // invalidate the other, even though its instruction kind and destination ledger differ.
+    let direct = env.build_retained_insurance_top_up_for_actor(AUTHORITY, AMOUNT);
+    let domain = env.build_retained_insurance_domain_top_up_for_actor(AUTHORITY, 0, AMOUNT);
+    let (intended, retry) = if direct_first {
+        (direct, domain)
+    } else {
+        (domain, direct)
+    };
+    let supply_before = env.token_supply_observed();
+    let first = env
+        .land_retained(intended)
+        .map_err(|error| format!("first cross-route insurance top-up rejected: {error}"))?;
+
+    let before_retry = fingerprint(&env);
+    let retry_error = env
+        .land_retained(retry)
+        .expect_err("same-watermark cross-route insurance top-up must reject");
+    if !is_engine_stale_error(&retry_error) || fingerprint(&env) != before_retry {
+        return Err(format!(
+            "cross-route insurance retry was not an exact EngineStale rollback: {retry_error}"
+        ));
+    }
+
+    let fresh = if direct_first {
+        env.build_retained_insurance_domain_top_up_for_actor(AUTHORITY, 0, AMOUNT)
+    } else {
+        env.build_retained_insurance_top_up_for_actor(AUTHORITY, AMOUNT)
+    };
+    let before_fresh = fingerprint(&env);
+    let fresh = env
+        .land_retained(fresh)
+        .map_err(|error| format!("fresh cross-route insurance top-up rejected: {error}"))?;
+    if fingerprint(&env) == before_fresh || env.token_supply_observed() != supply_before {
+        return Err("fresh cross-route insurance top-up did not conserve supply and mutate".into());
+    }
+
+    Ok(IntentReplayDiscovery {
+        kind: RetryIntentKind::InsuranceTopUp,
+        first_compute_units: first.compute_units,
+        accepted_retry: false,
+        duplicated_economic_effect: false,
+        retry_compute_units: None,
+        fresh_compute_units: Some(fresh.compute_units),
+    })
+}
+
 pub fn discover_intent_retries(seed: [u8; 32]) -> Result<Vec<IntentReplayDiscovery>, String> {
     RetryIntentKind::ALL
         .into_iter()

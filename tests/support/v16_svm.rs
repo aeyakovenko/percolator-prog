@@ -2622,9 +2622,13 @@ impl V16Svm {
         expiry_slot: u64,
     ) -> Result<TxSuccess, String> {
         let authority = copy_keypair(&self.admin);
-        let market_id = self.primary_market_state().1.assets[domain as usize / 2].market_id;
+        let asset_index = domain as usize / 2;
+        let market_id = self.primary_market_state().1.assets[asset_index].market_id;
+        let intent_id =
+            next_control_sequence(self.primary_control_sequences(asset_index).backing_top_up);
         self.send_program(
             ProgInstruction::TopUpBackingBucket {
+                intent_id,
                 domain,
                 market_id,
                 amount,
@@ -2649,9 +2653,13 @@ impl V16Svm {
         expiry_slot: u64,
     ) -> Result<TxSuccess, String> {
         let authority = copy_keypair(&self.admin);
-        let market_id = self.primary_market_state().1.assets[domain as usize / 2].market_id;
+        let asset_index = domain as usize / 2;
+        let market_id = self.primary_market_state().1.assets[asset_index].market_id;
+        let intent_id =
+            next_control_sequence(self.primary_control_sequences(asset_index).backing_top_up);
         self.send_program(
             ProgInstruction::TopUpBackingBucket {
+                intent_id,
                 domain,
                 market_id,
                 amount,
@@ -2675,9 +2683,13 @@ impl V16Svm {
         amount: u128,
     ) -> Result<TxSuccess, String> {
         let authority = copy_keypair(&self.actors[actor_index].signer);
-        let market_id = self.primary_market_state().1.assets[domain as usize / 2].market_id;
+        let asset_index = domain as usize / 2;
+        let market_id = self.primary_market_state().1.assets[asset_index].market_id;
+        let intent_id =
+            next_control_sequence(self.primary_control_sequences(asset_index).insurance_top_up);
         self.send_program(
             ProgInstruction::TopUpInsuranceDomain {
+                intent_id,
                 domain,
                 market_id,
                 amount,
@@ -2699,9 +2711,13 @@ impl V16Svm {
         amount: u128,
     ) -> Result<TxSuccess, String> {
         let authority = copy_keypair(&self.admin);
-        let market_id = self.primary_market_state().1.assets[domain as usize / 2].market_id;
+        let asset_index = domain as usize / 2;
+        let market_id = self.primary_market_state().1.assets[asset_index].market_id;
+        let intent_id =
+            next_control_sequence(self.primary_control_sequences(asset_index).insurance_top_up);
         self.send_program(
             ProgInstruction::TopUpInsuranceDomain {
+                intent_id,
                 domain,
                 market_id,
                 amount,
@@ -2725,9 +2741,13 @@ impl V16Svm {
         expiry_slot: u64,
     ) -> Result<TxSuccess, String> {
         let authority = copy_keypair(&self.actors[actor_index].signer);
-        let market_id = self.primary_market_state().1.assets[domain as usize / 2].market_id;
+        let asset_index = domain as usize / 2;
+        let market_id = self.primary_market_state().1.assets[asset_index].market_id;
+        let intent_id =
+            next_control_sequence(self.primary_control_sequences(asset_index).backing_top_up);
         self.send_program(
             ProgInstruction::TopUpBackingBucket {
+                intent_id,
                 domain,
                 market_id,
                 amount,
@@ -3704,9 +3724,13 @@ impl V16Svm {
         amount: u128,
     ) -> Transaction {
         let authority = copy_keypair(&self.actors[actor_index].signer);
-        let market_id = self.primary_market_state().1.assets[domain as usize / 2].market_id;
+        let asset_index = domain as usize / 2;
+        let market_id = self.primary_market_state().1.assets[asset_index].market_id;
+        let intent_id =
+            next_control_sequence(self.primary_control_sequences(asset_index).insurance_top_up);
         self.build_program_transaction(
             ProgInstruction::TopUpInsuranceDomain {
+                intent_id,
                 domain,
                 market_id,
                 amount,
@@ -3729,8 +3753,13 @@ impl V16Svm {
     ) -> Transaction {
         let authority = copy_keypair(&self.actors[actor_index].signer);
         let market_id = self.primary_market_state().1.assets[0].market_id;
+        let intent_id = next_control_sequence(self.primary_control_sequences(0).insurance_top_up);
         self.build_program_transaction(
-            ProgInstruction::TopUpInsurance { market_id, amount },
+            ProgInstruction::TopUpInsurance {
+                market_id,
+                intent_id,
+                amount,
+            },
             vec![
                 AccountMeta::new(authority.pubkey(), true),
                 AccountMeta::new(self.market, false),
@@ -3750,9 +3779,13 @@ impl V16Svm {
         expiry_slot: u64,
     ) -> Transaction {
         let authority = copy_keypair(&self.actors[actor_index].signer);
-        let market_id = self.primary_market_state().1.assets[domain as usize / 2].market_id;
+        let asset_index = domain as usize / 2;
+        let market_id = self.primary_market_state().1.assets[asset_index].market_id;
+        let intent_id =
+            next_control_sequence(self.primary_control_sequences(asset_index).backing_top_up);
         self.build_program_transaction(
             ProgInstruction::TopUpBackingBucket {
+                intent_id,
                 domain,
                 market_id,
                 amount,
