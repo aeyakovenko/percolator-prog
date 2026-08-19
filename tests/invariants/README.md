@@ -76,6 +76,15 @@ risk-reducing trade instructions, then requires `PermissionlessCrank` to reduce 
 `AdvanceClose` changed real economic state while unchanged aggregate market lock bits made it look
 like a successful no-op. Production code and the engine pin are unchanged.
 
+INV-016 now exercises the complete public matcher-delegate seed tuple rather than one arbitrary
+bad key. Nine real PDA substitutions cover a noncanonical bump, cross-role key, cross-market,
+cross-portfolio, cross-owner, cross-matcher-program, cross-context, reordered program/context
+seeds, and an omitted context seed. Every case leaves the matcher context, market, and LP portfolio
+byte-identical, while the canonical tuple initializes successfully. The canonical vault test now
+also uses a valid noncanonical ATA bump for the exact authority/token-program/mint tuple. Together
+with the existing 57-case custody matrix, these cover the deployed vault-authority, vault-ATA, and
+matcher-delegate PDA boundaries without program-state injection.
+
 Verification at this checkpoint:
 
 | Command/scope | Result | Freshness |
@@ -87,6 +96,7 @@ Verification at this checkpoint:
 | Focused INV-071 pending-close rank plus terminal schedule matrix | 2/2 | rerun on the 2026-08-18 PR135 test head |
 | Focused INV-087 complete wrapper-owned persisted-field roster | 8/8 | rerun on the 2026-08-18 PR135 test head |
 | Focused INV-015 canonical-length and malformed-account matrix | 7/7 CU; 12 market/portfolio plus 14 auxiliary malformed cases | rerun on the 2026-08-18 PR135 test head |
+| Focused INV-016 canonical PDA matrices | 4/4; 57 custody substitutions plus 9 matcher seed substitutions | rerun on the 2026-08-18 PR135 test head |
 | `cargo check --tests` | pass | rerun on the 2026-08-18 PR135 test head |
 | `cargo test --lib` | 7/7 | rerun on the 2026-08-18 PR135 test head |
 | `cargo test --test v16_program_stateful_fuzz` | 141/141 | rerun on the 2026-08-18 PR135 test head |
@@ -230,7 +240,7 @@ charter.
 | INV-013 | P + F + SVM/CU + Cross-owner references | `public_sbf/inv_013_destructive_consent_scope.rs`, `stateful/inv_013_destructive_consent_scope.rs`, `kani/inv_013_destructive_consent_scope.rs`, and `cu/inv_013_destructive_consent_scope.rs` cover delayed close across a later funded/funding episode, arbitrary deposit/withdraw empty-state ABA, failed-deposit rollback, fresh-close liveness, exact close-binding and sequence contracts, and stale reduction rollback; related market/portfolio/position generation matrices live in INV-001, INV-003, and INV-004 |
 | INV-014 | Independent + Direct + P + SVM/CU | `public_sbf/inv_014_delayed_policy_and_policy_epoch_safety.rs`, `stateful/inv_014_delayed_policy_and_policy_epoch_safety.rs`, `cu/inv_014_delayed_policy_and_policy_epoch_safety.rs`, `kani/inv_014_delayed_policy_and_policy_epoch_safety.rs` |
 | INV-015 | SVM/CU | `public_sbf/inv_015_account_ownership_layout_discriminator_and_length_validity.rs` and `cu/inv_015_account_ownership_layout_discriminator_and_length_validity.rs` cover owner, minimum and maximum length, magic, version, kind, wrapper-padding, semantic-field, and account-type failures. Public System Program creation proves `InitPortfolio` normalizes oversized uninitialized storage to the exact canonical wrapper length and remains usable. Equivalent public controls prove exact backing and insurance ledgers initialize while overlong ledgers reject atomically; nonzero malformed ledger storage cannot be reinterpreted as fresh. |
-| INV-016 | SVM/CU | `cu/inv_016_canonical_pda_and_seed_binding.rs` (wrong-bump, cross-role, and cross-market substitutions over all 11 public custody routes) |
+| INV-016 | SVM/CU | `cu/inv_016_canonical_pda_and_seed_binding.rs` covers 57 wrong-bump/cross-role/cross-market substitutions over every PDA slot on all 11 public custody routes, a valid noncanonical ATA bump under the exact canonical-vault seed tuple, and nine matcher-delegate seed/bump substitutions with exact context/market/LP rollback plus a canonical success control. |
 | INV-017 | SVM/CU + Partial M | `cu/inv_017_signer_writable_role_and_account_alias_safety.rs` exhausts all ten direct and all 21 CPI semantic account-pair aliases for single/batch trade, plus all 15 deposit and 21 withdraw account pairs and every required signer/writable downgrade, from nonvacuous public fixtures with exact matcher/market/portfolio/SPL rollback; ledger, helper, reward, close, optional-tail, and remaining aliases remain route-specific rather than pairwise-complete |
 | INV-018 | SVM/CU | `cu/inv_018_quote_mint_vault_token_program_and_authority_integrity.rs` |
 | INV-019 | P + SVM/CU | `kani/inv_019_cpi_invocation_and_return_data_binding.rs`, `cu/inv_019_cpi_invocation_and_return_data_binding.rs` |
@@ -404,7 +414,7 @@ are machine-checked below so a future README edit cannot silently omit an invari
 | AUDIT-013 | OPEN-T | Close consent now binds the exact portfolio ID, shared owner-state sequence, and position epoch; deterministic public funding telemetry, generated deposit/withdraw ABA, failed-deposit rollback, fresh-close liveness, and exact Kani tuple/sequence contracts cover issue 402. Shutdown, resolve, liquidation delegation, recovery conversion, claim, receipt, and every later lifecycle episode still need the same retained-consent matrix. |
 | AUDIT-014 | OPEN-D | Same-incarnation sequence supersession is covered, but market recreation, authority ABA, and backing-provider fee consent remain live gaps. Bind policy consent to all relevant incarnations/epochs, then compare stricter and looser delayed policies metamorphically. |
 | AUDIT-015 | OPEN-T | Market, portfolio, backing-ledger, and insurance-ledger owner, short length, magic, version, kind, padding/semantic field, trailing maximum length, and type-confusion cases now exist. Public creation controls cover portfolio normalization plus exact auxiliary-ledger admission and malformed nonzero first-use rejection. Invalid nested market/engine enums, explicit alignment boundaries, matcher-context layouts, every layout-version migration edge, and a proof that validation precedes every zero-copy view remain. |
-| AUDIT-016 | OPEN-T | Tests reject wrong vault and matcher PDAs, but do not systematically test noncanonical bumps, reordered/omitted seeds, omitted generation fields, role-crossing, or valid PDAs from another market. |
+| AUDIT-016 | OPEN-T | The deployed public PDA surfaces now have systematic dynamic evidence: all 11 custody routes reject wrong-bump, cross-role, and cross-market vault substitutions; the exact vault ATA tuple rejects a valid noncanonical bump; matcher initialization rejects noncanonical bump, role, market, portfolio, owner, matcher-program, context, reordered-seed, and omitted-seed keys and accepts only the canonical tuple. Remaining closure is a production-source-bound derivation roster plus a composition argument that incarnation checks on the current market/portfolio state are equivalent to adding generation bytes to these stateless PDA addresses. |
 | AUDIT-017 | OPEN-T | All four trade routes exhaust ten direct or 21 CPI/matcher core-account pairs, while deposit and withdraw exhaust all 15 and 21 custody pairs; every required signer/writable downgrade starts from a successful public control and hostile cases reject with exact economic, SPL, and matcher rollback. Ledger, helper, reward, close, optional-tail, and remaining instruction schemas still need the same generated all-pairs matrix, with explicit successful controls for intentionally safe aliases. |
 | AUDIT-018 | OPEN-T | SPL custody substitutions are extensive. Token-2022, fee-on-transfer/transfer-hook behavior, primary quote-decimal validation, and one independent actual-SPL-delta versus internal-accounting oracle across every value route remain. |
 | AUDIT-019 | OPEN-T | Matcher return fields, stale data, req_id, tails, and local validation are covered. Add benign unrelated CPI before/after matcher return data, replace the injected matcher-context ABA setup with public close/recreate, and document that oracle paths are account reads rather than CPI. |

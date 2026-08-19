@@ -176,6 +176,195 @@ fn noncanonical_vault_authority(program_id: Pubkey, market: Pubkey) -> Pubkey {
     panic!("could not find a noncanonical bump for the vault-authority seed tuple");
 }
 
+fn noncanonical_vault_token_address(vault_authority: Pubkey, mint: Pubkey) -> Pubkey {
+    let associated_token_program =
+        solana_sdk::pubkey!("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL");
+    let (_, canonical_bump) = Pubkey::find_program_address(
+        &[
+            vault_authority.as_ref(),
+            spl_token::ID.as_ref(),
+            mint.as_ref(),
+        ],
+        &associated_token_program,
+    );
+    for bump in 0..=u8::MAX {
+        if bump == canonical_bump {
+            continue;
+        }
+        let bump_seed = [bump];
+        if let Ok(key) = Pubkey::create_program_address(
+            &[
+                vault_authority.as_ref(),
+                spl_token::ID.as_ref(),
+                mint.as_ref(),
+                &bump_seed,
+            ],
+            &associated_token_program,
+        ) {
+            return key;
+        }
+    }
+    panic!("could not find a noncanonical bump for the canonical vault ATA seed tuple");
+}
+
+#[derive(Clone, Copy, Debug)]
+enum MatcherDelegateFault {
+    WrongBump,
+    CrossRole,
+    CrossMarket,
+    CrossPortfolio,
+    CrossOwner,
+    CrossMatcherProgram,
+    CrossMatcherContext,
+    ReorderedProgramAndContext,
+    OmittedContext,
+}
+
+const MATCHER_DELEGATE_FAULTS: [MatcherDelegateFault; 9] = [
+    MatcherDelegateFault::WrongBump,
+    MatcherDelegateFault::CrossRole,
+    MatcherDelegateFault::CrossMarket,
+    MatcherDelegateFault::CrossPortfolio,
+    MatcherDelegateFault::CrossOwner,
+    MatcherDelegateFault::CrossMatcherProgram,
+    MatcherDelegateFault::CrossMatcherContext,
+    MatcherDelegateFault::ReorderedProgramAndContext,
+    MatcherDelegateFault::OmittedContext,
+];
+
+fn noncanonical_matcher_delegate(
+    program_id: Pubkey,
+    market: Pubkey,
+    maker: Pubkey,
+    maker_owner: Pubkey,
+    matcher_program: Pubkey,
+    matcher_context: Pubkey,
+) -> Pubkey {
+    let (_, canonical_bump) = Pubkey::find_program_address(
+        &[
+            b"matcher",
+            market.as_ref(),
+            maker.as_ref(),
+            maker_owner.as_ref(),
+            matcher_program.as_ref(),
+            matcher_context.as_ref(),
+        ],
+        &program_id,
+    );
+    for bump in 0..=u8::MAX {
+        if bump == canonical_bump {
+            continue;
+        }
+        let bump_seed = [bump];
+        if let Ok(key) = Pubkey::create_program_address(
+            &[
+                b"matcher",
+                market.as_ref(),
+                maker.as_ref(),
+                maker_owner.as_ref(),
+                matcher_program.as_ref(),
+                matcher_context.as_ref(),
+                &bump_seed,
+            ],
+            &program_id,
+        ) {
+            return key;
+        }
+    }
+    panic!("could not find a noncanonical bump for the matcher-delegate seed tuple");
+}
+
+fn matcher_delegate_fault_key(
+    fault: MatcherDelegateFault,
+    program_id: Pubkey,
+    market: Pubkey,
+    maker: Pubkey,
+    maker_owner: Pubkey,
+    matcher_program: Pubkey,
+    matcher_context: Pubkey,
+) -> Pubkey {
+    match fault {
+        MatcherDelegateFault::WrongBump => noncanonical_matcher_delegate(
+            program_id,
+            market,
+            maker,
+            maker_owner,
+            matcher_program,
+            matcher_context,
+        ),
+        MatcherDelegateFault::CrossRole => {
+            Pubkey::find_program_address(&[b"vault", market.as_ref()], &program_id).0
+        }
+        MatcherDelegateFault::CrossMarket => matcher_delegate_key(
+            &program_id,
+            &Pubkey::new_unique(),
+            &maker,
+            &maker_owner,
+            &matcher_program,
+            &matcher_context,
+        ),
+        MatcherDelegateFault::CrossPortfolio => matcher_delegate_key(
+            &program_id,
+            &market,
+            &Pubkey::new_unique(),
+            &maker_owner,
+            &matcher_program,
+            &matcher_context,
+        ),
+        MatcherDelegateFault::CrossOwner => matcher_delegate_key(
+            &program_id,
+            &market,
+            &maker,
+            &Pubkey::new_unique(),
+            &matcher_program,
+            &matcher_context,
+        ),
+        MatcherDelegateFault::CrossMatcherProgram => matcher_delegate_key(
+            &program_id,
+            &market,
+            &maker,
+            &maker_owner,
+            &Pubkey::new_unique(),
+            &matcher_context,
+        ),
+        MatcherDelegateFault::CrossMatcherContext => matcher_delegate_key(
+            &program_id,
+            &market,
+            &maker,
+            &maker_owner,
+            &matcher_program,
+            &Pubkey::new_unique(),
+        ),
+        MatcherDelegateFault::ReorderedProgramAndContext => {
+            Pubkey::find_program_address(
+                &[
+                    b"matcher",
+                    market.as_ref(),
+                    maker.as_ref(),
+                    maker_owner.as_ref(),
+                    matcher_context.as_ref(),
+                    matcher_program.as_ref(),
+                ],
+                &program_id,
+            )
+            .0
+        }
+        MatcherDelegateFault::OmittedContext => {
+            Pubkey::find_program_address(
+                &[
+                    b"matcher",
+                    market.as_ref(),
+                    maker.as_ref(),
+                    maker_owner.as_ref(),
+                    matcher_program.as_ref(),
+                ],
+                &program_id,
+            )
+            .0
+        }
+    }
+}
+
 fn seed_system_account(env: &mut V16CuEnv, key: Pubkey) {
     if env.svm.get_account(&key).is_none() {
         env.svm
@@ -562,7 +751,7 @@ fn v16_program_deposit_rejects_noncanonical_vault_address_without_mutation() {
     let owner = Keypair::new();
     let portfolio = env.create_portfolio(&owner);
     let source = env.token_account(owner.pubkey(), 1_000);
-    let noncanonical_vault = Pubkey::new_unique();
+    let noncanonical_vault = noncanonical_vault_token_address(env.vault_authority, env.mint);
     env.svm
         .set_account(
             noncanonical_vault,
@@ -655,7 +844,7 @@ fn v16_program_withdraw_rejects_wrong_vault_authority_pda_without_mutation() {
 }
 
 #[test]
-fn v16_bpf_auth_matcher_init_rejects_wrong_pda_accepts_right_pda() {
+fn v16_bpf_auth_matcher_init_binds_every_delegate_seed_and_canonical_bump() {
     let mut env = V16CuEnv::new();
     let matcher_program = Pubkey::new_unique();
     let matcher_bytes = std::fs::read(auth_matcher_program_path()).expect("read auth matcher BPF");
@@ -663,41 +852,64 @@ fn v16_bpf_auth_matcher_init_rejects_wrong_pda_accepts_right_pda() {
     let lp_owner = Keypair::new();
     let lp = env.create_portfolio(&lp_owner);
 
-    let bad_ctx = Keypair::new();
-    let bad_delegate = Pubkey::new_unique();
-    system_create_account_for_test(
-        &mut env.svm,
-        &env.payer,
-        &bad_ctx,
-        MATCHER_CONTEXT_LEN,
-        matcher_program,
-    );
-    let bad = send_raw_tx(
-        &mut env.svm,
-        &env.payer,
-        Instruction {
-            program_id: matcher_program,
-            accounts: vec![
-                AccountMeta::new_readonly(lp_owner.pubkey(), true),
-                AccountMeta::new_readonly(bad_delegate, false),
-                AccountMeta::new(bad_ctx.pubkey(), false),
-                AccountMeta::new_readonly(env.program_id, false),
-                AccountMeta::new_readonly(env.market, false),
-                AccountMeta::new_readonly(lp, false),
-            ],
-            data: vec![2],
-        },
-        &[&lp_owner],
-    );
-    assert!(
-        bad.is_err(),
-        "auth matcher init must reject a delegate PDA with the wrong seeds"
-    );
-    assert_eq!(
-        env.svm.get_account(&bad_ctx.pubkey()).unwrap().data[64],
-        0,
-        "failed init must not mark the matcher context initialized"
-    );
+    for fault in MATCHER_DELEGATE_FAULTS {
+        let bad_ctx = Keypair::new();
+        system_create_account_for_test(
+            &mut env.svm,
+            &env.payer,
+            &bad_ctx,
+            MATCHER_CONTEXT_LEN,
+            matcher_program,
+        );
+        let bad_delegate = matcher_delegate_fault_key(
+            fault,
+            env.program_id,
+            env.market,
+            lp,
+            lp_owner.pubkey(),
+            matcher_program,
+            bad_ctx.pubkey(),
+        );
+        let before_ctx = env.svm.get_account(&bad_ctx.pubkey()).unwrap();
+        let before_market = env.svm.get_account(&env.market).unwrap();
+        let before_lp = env.svm.get_account(&lp).unwrap();
+        let bad = send_raw_tx(
+            &mut env.svm,
+            &env.payer,
+            Instruction {
+                program_id: matcher_program,
+                accounts: vec![
+                    AccountMeta::new_readonly(lp_owner.pubkey(), true),
+                    AccountMeta::new_readonly(bad_delegate, false),
+                    AccountMeta::new(bad_ctx.pubkey(), false),
+                    AccountMeta::new_readonly(env.program_id, false),
+                    AccountMeta::new_readonly(env.market, false),
+                    AccountMeta::new_readonly(lp, false),
+                ],
+                data: vec![2],
+            },
+            &[&lp_owner],
+        );
+        assert!(
+            bad.is_err(),
+            "auth matcher init accepted {fault:?} delegate {bad_delegate}"
+        );
+        assert_eq!(
+            env.svm.get_account(&bad_ctx.pubkey()).unwrap(),
+            before_ctx,
+            "{fault:?} must not initialize or otherwise mutate the matcher context"
+        );
+        assert_eq!(
+            env.svm.get_account(&env.market).unwrap(),
+            before_market,
+            "{fault:?} must frame the market"
+        );
+        assert_eq!(
+            env.svm.get_account(&lp).unwrap(),
+            before_lp,
+            "{fault:?} must frame the LP portfolio"
+        );
+    }
 
     let (ctx, delegate, _) =
         env.init_auth_matcher_context_via_system_create(matcher_program, &lp_owner, lp);
