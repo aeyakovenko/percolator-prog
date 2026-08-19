@@ -52,13 +52,23 @@ INV-052 now owns the issues 407/409 fix and its public-route certification. The 
 bounded canonical accrual step with a stable linear movement anchor, exact sub-basis-point carry,
 and per-logical-slot funding integration. The wrapper persists the carry in an explicit validated
 field, applies at most 32 logical steps per instruction, and resets the carry when a new target is
-authenticated. Eleven public LiteSVM tests and route comparisons cover upward and downward AuthMark movement,
-upward and downward funding with exact SPL settlement, Hybrid/Pyth movement, irregular partitions,
-target replacement, a one-leg 32-step prefix, and the full 14-leg maximum-shape prefix. Eager and
-delayed schedules now agree at every compared canonical prefix, fractional movement eventually
-reaches its target, and terminal payout remains exact. The engine proves the canonical arithmetic
-partition theorem; a wrapper Kani proof exhausts the persisted `u16` carry and `u32` reserved-byte
-domains and proves the validator accepts exactly `carry < 10_000 && reserved == 0`.
+authenticated. Eleven fixed public LiteSVM tests are joined by four stateful tests that generate
+three authenticated target-replacement episodes and compare eager, irregular, and endpoint-only
+crank schedules. The generated histories compose through live close/withdraw, bounded resolved
+payout in both claimant orders, and shutdown plus owner Recovery forfeits. Exact normalized market,
+portfolio, source-domain, lifecycle, SPL-custody, and payout state agrees at every common prefix;
+fresh-backing expiry is separately constrained to its crystallization-time envelope. Fractional
+movement reaches its target, every required step remains below the CU limit, and rejected or
+out-of-band economic steps are forbidden. The engine proves the canonical arithmetic partition
+theorem; a wrapper Kani proof exhausts the persisted `u16` carry and `u32` reserved-byte domains and
+proves the validator accepts exactly `carry < 10_000 && reserved == 0`.
+
+The four gross funding paid/received counters are telemetry, not a cadence-invariant reward basis.
+A fixed direction-reversal witness produces different gross paid/received observations under eager
+and endpoint-only settlement while net funding, all normalized economic state, and final SPL payout
+remain identical. The deployed wrapper does not consume those counters. Any future distributor
+that rewards only `funding_long_paid_atoms_total + funding_short_paid_atoms_total` must either use a
+cadence-invariant engine index or add and prove a canonical gross-flow accumulator before shipping.
 
 The shared generated public-transition model also
 includes `ResolveMarket`, resolved-mode `PermissionlessCrank`, `CloseResolved`, and
@@ -175,7 +185,7 @@ Verification at this checkpoint:
 | Focused INV-020 selected-Switchboard-result red/green, boundary, and crank-liveness scenarios | pass | rerun on the 2026-08-18 PR135 production head |
 | Focused INV-012 issue-406 matcher synchronization route matrix | 4/4 | rerun on the 2026-08-18 PR135 production head |
 | Focused INV-027 issue-408 maintenance seniority and liveness matrix | 2/2 | rerun on the 2026-08-18 PR135 production head |
-| Focused INV-052 canonical crank-partition route matrix | 11/11 CU plus 1/1 engine Kani and 1/1 wrapper Kani | rerun on the 2026-08-18 PR135 production head; issues 407/409 fixed |
+| Focused INV-052 canonical crank-partition route matrix | 11/11 CU plus 4/4 stateful, 1/1 engine Kani, and 1/1 wrapper Kani | generated live, resolved, and shutdown/Recovery suffixes rerun on the 2026-08-18 PR135 production head; issues 407/409 fixed |
 | Focused INV-071 pending-close rank, cured-obligation release, and terminal schedule matrix | 3/3 | old-pin red and fixed-pin green rerun on 2026-08-18 |
 | Focused INV-087 complete wrapper-owned persisted-field roster | 8/8 | rerun on the 2026-08-18 PR135 test head |
 | Focused INV-015 canonical-length and malformed-account matrix | 8/8 CU; 12 market/portfolio, 14 auxiliary-ledger, and 2 oracle-profile corruption classes | rerun on the 2026-08-18 PR135 test head |
@@ -186,7 +196,7 @@ Verification at this checkpoint:
 | Focused INV-002 generation replay, frontier, roster, and contracts | 20-family stateful replay matrix plus authority/lifecycle and activation-frontier public controls; focused host/Kani checks pass | rerun on the 2026-08-18 PR135 production head |
 | `cargo check --tests` | pass | rerun on the 2026-08-18 PR135 test head |
 | `cargo test --lib` | 7/7 | rerun on the 2026-08-18 PR135 test head |
-| `cargo test --test v16_program_stateful_fuzz` | 145/145 | rerun on the 2026-08-18 PR135 production head |
+| `cargo test --test v16_program_stateful_fuzz` | 149/149 | rerun on the 2026-08-18 PR135 production head |
 | Registry/manifest checks in the INV-079 module | 8/8 | rerun on the 2026-08-18 PR135 test head |
 | `cargo test --test v16_program_fuzz_regressions` | 91/91 | rerun on the 2026-08-18 PR135 production head |
 | `cargo test --test v16_cu` | 753/753 | rerun on the 2026-08-18 PR135 production head |
@@ -213,10 +223,11 @@ and formal-composition gaps.
 
 ### Immediate next work
 
-1. Extend INV-052 from fixed target histories to generated histories that replace authenticated
-   targets mid-interval, cross stale/fresh mode boundaries, and enter shutdown or terminal resolve.
-   Compare eager, irregular, and maximum-32-step schedules only at common canonical prefixes and
-   retain exact funding, mark, custody, and CU assertions.
+1. Extend INV-052's generated target-replacement, resolved-payout, and shutdown/Recovery histories
+   across exact stale/fresh boundaries and mixed AuthMark/Hybrid/Pyth episodes. Keep authenticated
+   observation order identical, compare only common canonical prefixes, and retain exact mark,
+   custody, terminal-value, and CU assertions. Gross funding telemetry must be checked separately
+   from economic state and must not become a paid-only reward source.
 2. Apply the same split/merge oracle to liquidation, owner reduction, lien consumption, insurance
    withdrawal, resolved claims, cooldowns, rates, and policy limits. Keep operation-specific
    rounding explicit instead of assuming every partition must be byte-identical.
@@ -369,7 +380,7 @@ charter.
 | INV-049 | F + SVM/CU | `cu/inv_049_canonical_single_net_leg_per_asset_generation.rs`, `stateful/inv_081_success_state_validity_over_complete_public_routes.rs` include both an Active-to-DrainOnly bilateral reduction that removes every leg before retirement and an old-generation full exit followed by restart and exact fresh-generation leg/OI attachment. |
 | INV-050 | SVM/CU + M + Counterexample | `cu/inv_050_cross_zero_decomposition.rs` covers lifecycle exact-close admission, initial-margin flips, and all four public trade routes after a real partial liquidation. The latter matrix holds the signed Flip request fixed and varies only unrelated auxiliary OI: the control rejects atomically, while auxiliary OI admits the unfixed PR250/engine-134 basis-reissue path and makes fresh current-`A` legs exceed pooled effective OI by exactly the prior ADL haircut. |
 | INV-051 | Independent + F + SVM/CU | `cu/inv_051_canonical_adl_effective_quantity.rs`, `stateful/inv_086_reference_model_and_deployed_transition_equivalence.rs`, `stateful/inv_081_success_state_validity_over_complete_public_routes.rs`, and `stateful/inv_071_crank_progress.rs`. Directed ADL exit matrices are joined by an exact transition-derived pooled-OI ledger that deliberately separates retained raw basis from effective OI; the bankruptcy matrix separately pins the zero-effective-OI pending-obligation boundary through terminal payout. |
-| INV-052 | P(wrapper) + P(engine) + SVM/CU + M | `cu/inv_052_split_merge_invariance.rs` proves no-fee trade, fee-bearing trade, and withdrawal partition controls, then certifies the issues 407/409 canonical-accrual fix across upward/downward AuthMark price movement, upward/downward funding with exact SPL settlement, Hybrid/Pyth movement, irregular partitions, target replacement, a one-leg 32-step prefix, and the full 14-leg maximum-shape prefix. `kani/inv_052_split_merge_invariance.rs` proves the exact wrapper carry-validation domain, while the pinned engine proves the canonical arithmetic partition theorem. Arbitrary target histories and the liquidation, reduction, lien, insurance, claim, cooldown, rate, and policy-limit split/merge families remain. |
+| INV-052 | P(wrapper) + P(engine) + F + SVM/CU + M | `cu/inv_052_split_merge_invariance.rs` proves no-fee trade, fee-bearing trade, and withdrawal partition controls, then certifies the issues 407/409 canonical-accrual fix across upward/downward AuthMark price movement, upward/downward funding with exact SPL settlement, Hybrid/Pyth movement, irregular partitions, target replacement, a one-leg 32-step prefix, and the full 14-leg maximum-shape prefix. `stateful/inv_052_split_merge_invariance.rs` generates three target-replacement episodes and compares eager, irregular, and endpoint-only schedules through live close/withdraw, bounded resolved payout in either claimant order, and shutdown/Recovery owner exits. It preserves exact normalized economic and SPL state, separately bounds crystallization-time backing expiry, and proves gross paid/received funding telemetry is not a cadence-safe reward basis even though net economics are invariant. `kani/inv_052_split_merge_invariance.rs` proves the exact wrapper carry-validation domain, while the pinned engine proves the canonical arithmetic partition theorem. Exact stale/fresh and mixed-oracle histories plus liquidation, reduction, lien, insurance, claim, cooldown, rate, and policy-limit split/merge families remain. |
 | INV-053 | Independent + Direct + SVM/CU | `public_sbf/inv_053_full_health_recertification_equivalence.rs`, `stateful/inv_053_full_health_recertification_equivalence.rs`, `cu/inv_053_full_health_recertification_equivalence.rs` (all trade-route/leg-order liquidation cells plus stale-refresh regressions requiring pending later-leg marks across ordinary Live and first-Recovery-leg portfolios; maximum 14-leg refresh remains 159,748 CU) |
 | INV-054 | SVM/CU | `cu/inv_054_certificate_epoch_completeness.rs` creates a source-backed released-PnL claim entirely through public trade/mark/crank/close routes, then separately demonstrates stale favorable-action rollback and public refresh after oracle-target, isolated funding, isolated source-credit/risk, and asset-set mutations. Every deployed certificate key (`oracle`, `funding`, `risk`, `asset_set`, and account bitmap) is asserted by one shared currentness oracle. |
 | INV-055 | F + SVM/CU + Partial R | `stateful/inv_055_state_indexed_admission.rs`, `stateful/inv_081_success_state_validity_over_complete_public_routes.rs`, and `cu/inv_055_state_indexed_admission.rs` cover open, bilateral reduce, deposit, withdraw, and resolved payout across Active, DrainOnly, Recovery, and Resolved. A dedicated public composition requires DrainOnly to reject fresh exposure while admitting the exact bilateral reduction needed for retirement. Reset-side and remaining instruction classes remain. |
@@ -546,7 +557,7 @@ are machine-checked below so a future README edit cannot silently omit an invari
 | AUDIT-049 | OPEN-T | All trade routes preserve one net leg. Public compositions now prove both that DrainOnly bilateral reduction removes every leg before retirement and that Recovery removes old-generation legs before restart attaches one exact fresh-generation leg per account with matching OI. Transfer, reset, nonzero-ADL recovery, and deserialization attachment attempts remain. Add public transition matrices and malformed-deserialization negatives only where deserialization is an ingress. |
 | AUDIT-050 | OPEN-D | A public all-four-route matrix now creates partial liquidation/ADL, crosses zero, and proves unrelated auxiliary OI alone changes admission and erases the exact haircut from fresh-leg effective-OI attribution. This independently reaches the known PR250/engine-134 basis-reissue root through the Flip branch. Land the engine fix, invert the vulnerable cells to exact rollback, then add cross-zero boundaries around zero/effective/raw/max quantity, pending-obligation epochs, and lifecycle modes. |
 | AUDIT-051 | FRONTIER | Zero-effective-OI directed matrices and the stateful transition ledger cover resize, matched trade, rebalance, liquidation, reset clear, and recovery forfeit without collapsing raw basis into effective OI. The bankruptcy matrix now carries zero effective OI through a nonzero pending-obligation epoch and terminal close. Transfer, nonzero-ADL resolved close, retirement, and a pure whole-transition equivalence proof remain. |
-| AUDIT-052 | OPEN-T | The current-anchor compounding and endpoint-funding sampling violations are fixed by one bounded canonical accrual path. Eleven public tests and route comparisons, exact SPL outcomes, full 14-leg/32-step CU coverage, an engine arithmetic proof, and a wrapper carry-domain proof certify the fixed histories. Add generated target replacement/staleness/terminal histories and arbitrary partition/permutation fuzz for liquidation, reduction, lien consumption, insurance withdrawal, claims, cooldowns, rates, and policy limits. |
+| AUDIT-052 | OPEN-T | The current-anchor compounding and endpoint-funding sampling violations are fixed by one bounded canonical accrual path. Eleven fixed and four stateful public tests now include generated target replacement plus live, resolved, and shutdown/Recovery suffixes, exact normalized/SPL outcomes, both resolved claimant orders, full 14-leg/32-step CU coverage, an engine arithmetic proof, and a wrapper carry-domain proof. A direction-reversal witness also proves gross paid/received funding telemetry is cadence-dependent and therefore unsafe as a paid-only reward basis; the deployed wrapper has no such consumer. Add exact stale/fresh and mixed-oracle histories plus arbitrary partition/permutation fuzz for liquidation, reduction, lien consumption, insurance withdrawal, claims, cooldowns, rates, and policy limits. |
 | AUDIT-053 | FRONTIER | Omitted-leg liquidation findings and route/order fuzz are now joined by public stale-refresh regressions for a pending later Live mark behind either a current Live leg or a Recovery leg. These found and fixed a wrapper branch that checked only the first selected leg before whole-account certification; stale refresh and liquidation now scan every active leg, with a measured 159,748-CU 14-leg refresh. No full-certificate oracle runs after every transition, and pending obligations, impaired liens, ADL, and all penalty lanes are not composed. Prove or differentially establish fast <= full. |
 | AUDIT-054 | OPEN-T | Public favorable-action tests now isolate all four deployed global certificate keys: target/effective oracle movement, nonzero `F` movement with fixed `oracle_epoch`, source-credit backing with only `risk_epoch`, and asset append with `asset_set_epoch` plus risk. Every stale conversion rejects with exact account/market/vault rollback, and public crank restores all keys before exact conversion. Account bitmap is checked after every fixture transition, but a deliberately stale bitmap cannot be produced by a successful public route because leg mutations recertify atomically. Remaining work is to classify every health-relevant writer into these four epochs and add directed lien, pending-obligation, lifecycle/reset, and close-state cases; policy changes that do not affect health should not be invented as certificate keys. |
 | AUDIT-055 | OPEN-T | A public declarative matrix covers all 20 combinations of open, bilateral reduce, deposit, withdraw, and resolved payout with Active, DrainOnly, Recovery, and Resolved. A separate composition proves fresh risk rejects but bilateral reduction succeeds in DrainOnly and enables retirement. Every allowed cell must produce its exact economic delta and every forbidden cell must roll back all tracked bytes, SPL data, and lamports. Reset-side, close-ledger, reactivation, and the remaining public instruction classes still prevent a complete 50-instruction state cross-product. |
