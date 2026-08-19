@@ -1287,6 +1287,9 @@ pub enum Action {
         asset: u8,
         new_actor: u8,
     },
+    ResolveStalePermissionless {
+        dt: u8,
+    },
     ResolveMarket,
     CloseResolved {
         actor: u8,
@@ -1364,7 +1367,7 @@ pub struct Coverage {
     pub mark_updates: u64,
     pub oracle_reconfigs: u64,
     pub maintenance_syncs: u64,
-    pub extended_action_attempts: [u64; 13],
+    pub extended_action_attempts: [u64; 14],
     pub matcher_config_updates: u64,
     pub insurance_topups: u64,
     pub backing_topups: u64,
@@ -1382,6 +1385,8 @@ pub struct Coverage {
     pub lifecycle_updates: u64,
     pub asset_restarts: u64,
     pub authority_updates: u64,
+    pub permissionless_resolve_attempts: u64,
+    pub permissionless_resolves: u64,
     pub terminal_resolve_attempts: u64,
     pub terminal_resolves: u64,
     pub resolved_crank_attempts: u64,
@@ -1422,7 +1427,7 @@ impl Default for Coverage {
             mark_updates: 0,
             oracle_reconfigs: 0,
             maintenance_syncs: 0,
-            extended_action_attempts: [0; 13],
+            extended_action_attempts: [0; 14],
             matcher_config_updates: 0,
             insurance_topups: 0,
             backing_topups: 0,
@@ -1440,6 +1445,8 @@ impl Default for Coverage {
             lifecycle_updates: 0,
             asset_restarts: 0,
             authority_updates: 0,
+            permissionless_resolve_attempts: 0,
+            permissionless_resolves: 0,
             terminal_resolve_attempts: 0,
             terminal_resolves: 0,
             resolved_crank_attempts: 0,
@@ -1572,6 +1579,8 @@ impl Coverage {
         self.lifecycle_updates += other.lifecycle_updates;
         self.asset_restarts += other.asset_restarts;
         self.authority_updates += other.authority_updates;
+        self.permissionless_resolve_attempts += other.permissionless_resolve_attempts;
+        self.permissionless_resolves += other.permissionless_resolves;
         self.terminal_resolve_attempts += other.terminal_resolve_attempts;
         self.terminal_resolves += other.terminal_resolves;
         self.resolved_crank_attempts += other.resolved_crank_attempts;
@@ -3282,6 +3291,15 @@ impl ScenarioRunner {
                 }
                 Ok(())
             }
+            Action::ResolveStalePermissionless { dt } => {
+                self.coverage.extended_action_attempts[13] += 1;
+                let next_slot = self
+                    .env
+                    .current_slot()
+                    .checked_add(u64::from(dt.clamp(1, 8)))
+                    .ok_or("permissionless resolution slot overflow")?;
+                self.execute_permissionless_stale_resolution(next_slot)
+            }
             Action::ResolveMarket => self.execute_resolve_market(),
             Action::CloseResolved { actor } => self
                 .execute_terminal_route(actor as usize % PRIMARY_ACTOR_COUNT, TerminalRoute::Close)
@@ -3382,6 +3400,37 @@ impl ScenarioRunner {
                 }
                 if self.env.primary_market_state().1.mode != MarketModeV16::Resolved {
                     return Err("successful ResolveMarket did not enter Resolved mode".into());
+                }
+            }
+            Err(_) => self.assert_snapshot_unchanged(&before)?,
+        }
+        Ok(())
+    }
+
+    fn execute_permissionless_stale_resolution(&mut self, now_slot: u64) -> Result<(), String> {
+        self.coverage.permissionless_resolve_attempts += 1;
+        let before = self.snapshot();
+        match self.env.resolve_stale_permissionless(now_slot) {
+            Ok(success) => {
+                self.coverage.permissionless_resolves += 1;
+                self.coverage.observe_success(None, &success);
+                self.assert_portfolio_frame(&before, &[])?;
+                self.assert_no_token_side_effects(&before)?;
+                if before.backing_domain_ledger != self.env.backing_domain_ledger_data()
+                    || before.matcher_contexts != self.env.all_matcher_context_data()
+                    || before.economic_account_lamports != self.env.all_economic_account_lamports()
+                {
+                    return Err(
+                        "ResolveStalePermissionless mutated a wrapper ledger, matcher context, or lamports"
+                            .into(),
+                    );
+                }
+                let (_, group) = self.env.primary_market_state();
+                if group.mode != MarketModeV16::Resolved || group.resolved_slot != now_slot {
+                    return Err(format!(
+                        "successful permissionless stale resolution did not bind its authenticated terminal slot: mode={:?}, resolved_slot={}, requested={now_slot}",
+                        group.mode, group.resolved_slot
+                    ));
                 }
             }
             Err(_) => self.assert_snapshot_unchanged(&before)?,
@@ -6028,6 +6077,51 @@ pub fn run_recovery_restart_trade_route_oracle() -> Result<Coverage, String> {
             runner.coverage, group.assets[0], runner.positions
         ));
     }
+    Ok(runner.coverage)
+}
+
+pub fn run_permissionless_stale_resolution_terminal_oracle() -> Result<Coverage, String> {
+    let scenario = Scenario {
+        seed: [0x45; 32],
+        config: SmallMarketConfig::default(),
+        actions: Vec::new(),
+    };
+    let mut runner = ScenarioRunner::new_unprefixed(&scenario)?;
+    runner.run_safety_prefix(&[
+        Action::ConfigurePermissionlessResolve {
+            stale_slots: 2,
+            force_close_delay_slots: 100,
+        },
+        Action::Trade {
+            route: TradeRoute::NoCpi,
+            taker: 0,
+            maker: 1,
+            asset: 0,
+            units: 2,
+            fee_bps: 0,
+            price_move_bps: 0,
+            prefer_reduce: false,
+        },
+        Action::ResolveStalePermissionless { dt: 3 },
+    ])?;
+    if runner.coverage.permissionless_resolve_attempts != 1
+        || runner.coverage.permissionless_resolves != 1
+        || runner.env.primary_market_state().1.mode != MarketModeV16::Resolved
+    {
+        return Err(format!(
+            "permissionless stale resolution control was vacuous: {:?}",
+            runner.coverage
+        ));
+    }
+    runner.run_terminal_payout_campaign()?;
+    for actor in 0..PRIMARY_ACTOR_COUNT {
+        if !runner.portfolio_is_economically_terminal(actor)? {
+            return Err(format!(
+                "permissionless stale resolution left actor {actor} nonterminal"
+            ));
+        }
+    }
+    runner.assert_global_invariants()?;
     Ok(runner.coverage)
 }
 
@@ -21269,6 +21363,7 @@ fn action_strategy() -> impl Strategy<Value = Action> {
                 initial_price,
             },
         ),
+        2 => any::<u8>().prop_map(|dt| Action::ResolveStalePermissionless { dt }),
         2 => (any::<u8>(), 1u16..=500)
             .prop_map(|(actor, amount)| Action::ConvertReleasedPnl { actor, amount }),
         2 => (any::<u8>(), any::<u8>())

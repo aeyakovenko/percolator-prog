@@ -74,6 +74,16 @@ fn v16_program_recovery_exit_restart_and_fresh_generation_trade_compose() {
 }
 
 #[test]
+fn v16_program_permissionless_stale_resolution_reaches_terminal_user_disposition() {
+    let coverage = run_permissionless_stale_resolution_terminal_oracle().expect(
+        "permissionless stale resolution must compose with the exact terminal payout campaign",
+    );
+    assert_eq!(coverage.permissionless_resolve_attempts, 1);
+    assert_eq!(coverage.permissionless_resolves, 1);
+    assert!(coverage.resolved_close_successes != 0);
+}
+
+#[test]
 fn v16_program_designated_liquidity_provider_has_public_exit_after_unilateral_reduction() {
     let scenario = Scenario {
         seed: [0x18; 32],
@@ -201,6 +211,7 @@ fn v16_program_extended_public_action_alphabet_runs_through_shared_oracles() {
                 dt: 1,
                 initial_price: 137,
             },
+            Action::ResolveStalePermissionless { dt: 1 },
             Action::ResolveMarket,
             Action::Crank {
                 actor: 1,
