@@ -1257,6 +1257,11 @@ pub enum Action {
         dt: u8,
         units: u8,
     },
+    ForfeitRecoveryLeg {
+        actor: u8,
+        asset: u8,
+        budget_units: u8,
+    },
     ConvertReleasedPnl {
         actor: u8,
         amount: u16,
@@ -1354,7 +1359,7 @@ pub struct Coverage {
     pub mark_updates: u64,
     pub oracle_reconfigs: u64,
     pub maintenance_syncs: u64,
-    pub extended_action_attempts: [u64; 11],
+    pub extended_action_attempts: [u64; 12],
     pub matcher_config_updates: u64,
     pub insurance_topups: u64,
     pub backing_topups: u64,
@@ -1363,6 +1368,9 @@ pub struct Coverage {
     pub force_close_attempts: u64,
     pub force_close_successes: u64,
     pub force_closed_abs_q: u128,
+    pub recovery_forfeit_attempts: u64,
+    pub recovery_forfeit_successes: u64,
+    pub recovery_forfeited_abs_q: u128,
     pub pnl_conversions: u64,
     pub rebalance_reductions: u64,
     pub resolve_policy_updates: u64,
@@ -1408,7 +1416,7 @@ impl Default for Coverage {
             mark_updates: 0,
             oracle_reconfigs: 0,
             maintenance_syncs: 0,
-            extended_action_attempts: [0; 11],
+            extended_action_attempts: [0; 12],
             matcher_config_updates: 0,
             insurance_topups: 0,
             backing_topups: 0,
@@ -1417,6 +1425,9 @@ impl Default for Coverage {
             force_close_attempts: 0,
             force_close_successes: 0,
             force_closed_abs_q: 0,
+            recovery_forfeit_attempts: 0,
+            recovery_forfeit_successes: 0,
+            recovery_forfeited_abs_q: 0,
             pnl_conversions: 0,
             rebalance_reductions: 0,
             resolve_policy_updates: 0,
@@ -1545,6 +1556,9 @@ impl Coverage {
         self.force_close_attempts += other.force_close_attempts;
         self.force_close_successes += other.force_close_successes;
         self.force_closed_abs_q += other.force_closed_abs_q;
+        self.recovery_forfeit_attempts += other.recovery_forfeit_attempts;
+        self.recovery_forfeit_successes += other.recovery_forfeit_successes;
+        self.recovery_forfeited_abs_q += other.recovery_forfeited_abs_q;
         self.pnl_conversions += other.pnl_conversions;
         self.rebalance_reductions += other.rebalance_reductions;
         self.resolve_policy_updates += other.resolve_policy_updates;
@@ -2713,51 +2727,13 @@ impl ScenarioRunner {
             return Ok(false);
         }
 
-        let account_before = account;
-        let group_before = group;
-        let before = self.snapshot();
-        match self
-            .env
-            .forfeit_recovery_leg(user, asset as u16, u128::from(u64::MAX))
-        {
-            Ok(success) => {
-                self.coverage.observe_success(None, &success);
-                self.assert_portfolio_frame(&before, &[user])?;
-                self.assert_no_token_side_effects(&before)?;
-                let size_after = decoded_legs(&self.env.primary_portfolio(user))
-                    .into_iter()
-                    .filter(|leg| leg.active && leg.asset_index as usize == asset)
-                    .try_fold(0i128, |total, leg| {
-                        total
-                            .checked_add(leg.basis_pos_q)
-                            .ok_or("dead-leg forfeit position overflow")
-                    })?;
-                let user_delta = size_after
-                    .checked_sub(size_before)
-                    .ok_or("dead-leg forfeit delta overflow")?;
-                let account_after = self.env.primary_portfolio(user);
-                self.apply_account_oi_transition(
-                    &account_before,
-                    &account_after,
-                    &group_before,
-                    true,
-                    "dead-leg forfeit exit",
-                )?;
-                self.positions[user][asset] = size_after;
-                self.protocol_positions[asset] = self.protocol_positions[asset]
-                    .checked_sub(user_delta)
-                    .ok_or("dead-leg forfeit protocol attribution overflow")?;
-                self.assert_positions_match()?;
-                Ok(size_after == 0)
-            }
-            Err(error) => {
-                self.last_trade_rejection = Some(format!(
-                    "ForfeitRecoveryLeg owner {user} asset {asset}: {error}"
-                ));
-                self.assert_snapshot_unchanged(&before)?;
-                Ok(false)
-            }
+        if self.positions[user][asset] != size_before {
+            return Err(format!(
+                "dead-leg forfeit ghost changed before dispatch: {size_before} != {}",
+                self.positions[user][asset]
+            ));
         }
+        self.execute_recovery_forfeit(user, asset, u128::from(u64::MAX))
     }
 
     fn normal_exit_counterparties(&self, user: usize, asset: usize, size: i128) -> Vec<usize> {
@@ -3166,6 +3142,24 @@ impl ScenarioRunner {
                     cranker, account_a, account_b, asset, next_slot, close_q,
                 )
                 .map(|_| ())
+            }
+            Action::ForfeitRecoveryLeg {
+                actor,
+                asset,
+                budget_units,
+            } => {
+                self.coverage.extended_action_attempts[11] += 1;
+                let actor = actor as usize % PRIMARY_ACTOR_COUNT;
+                let asset = asset as usize % ASSET_COUNT;
+                let b_delta_budget = if budget_units == u8::MAX {
+                    u128::MAX
+                } else {
+                    u128::from(budget_units.max(1))
+                        .checked_mul(BOUND_SCALE)
+                        .ok_or("recovery-forfeit budget overflow")?
+                };
+                self.execute_recovery_forfeit(actor, asset, b_delta_budget)
+                    .map(|_| ())
             }
             Action::ConvertReleasedPnl { actor, amount } => {
                 self.coverage.extended_action_attempts[3] += 1;
@@ -4047,6 +4041,91 @@ impl ScenarioRunner {
                 Ok(true)
             }
             Err(_) => {
+                self.assert_snapshot_unchanged(&before)?;
+                Ok(false)
+            }
+        }
+    }
+
+    fn execute_recovery_forfeit(
+        &mut self,
+        actor: usize,
+        asset: usize,
+        b_delta_budget: u128,
+    ) -> Result<bool, String> {
+        self.coverage.recovery_forfeit_attempts += 1;
+        let account_before = self.env.primary_portfolio(actor);
+        let position_epoch_before = self.env.primary_portfolio_position_epoch(actor);
+        let (_, group_before) = self.env.primary_market_state();
+        let size_before = self.positions[actor][asset];
+        let before = self.snapshot();
+
+        match self
+            .env
+            .forfeit_recovery_leg(actor, asset as u16, b_delta_budget)
+        {
+            Ok(success) => {
+                self.coverage.observe_success(None, &success);
+                self.assert_portfolio_frame(&before, &[actor])?;
+                self.assert_no_token_side_effects(&before)?;
+                if before.backing_domain_ledger != self.env.backing_domain_ledger_data()
+                    || before.matcher_contexts != self.env.all_matcher_context_data()
+                    || before.economic_account_lamports != self.env.all_economic_account_lamports()
+                {
+                    return Err(
+                        "recovery forfeit mutated a wrapper ledger, matcher context, or lamport balance"
+                            .into(),
+                    );
+                }
+                let account_after = self.env.primary_portfolio(actor);
+                let size_after = observed_positions(&account_after)?[asset];
+                let reduced_abs_q = size_before
+                    .unsigned_abs()
+                    .checked_sub(size_after.unsigned_abs())
+                    .ok_or("recovery forfeit increased position exposure")?;
+                if size_before == 0 || reduced_abs_q == 0 {
+                    return Err(
+                        "successful ForfeitRecoveryLeg did not strictly reduce a real position"
+                            .into(),
+                    );
+                }
+                self.apply_account_oi_transition(
+                    &account_before,
+                    &account_after,
+                    &group_before,
+                    true,
+                    "owner recovery-leg forfeit",
+                )?;
+                let actor_delta = size_after
+                    .checked_sub(size_before)
+                    .ok_or("recovery-forfeit position delta overflow")?;
+                self.positions[actor][asset] = size_after;
+                self.protocol_positions[asset] = self.protocol_positions[asset]
+                    .checked_sub(actor_delta)
+                    .ok_or("recovery-forfeit protocol attribution overflow")?;
+                if self.env.primary_portfolio_position_epoch(actor)
+                    != position_epoch_before
+                        .checked_add(1)
+                        .ok_or("recovery-forfeit position epoch overflow")?
+                {
+                    return Err(
+                        "recovery forfeit did not advance the removed position episode exactly once"
+                            .into(),
+                    );
+                }
+                self.assert_positions_match()?;
+                self.coverage.recovery_forfeit_successes += 1;
+                self.coverage.recovery_forfeited_abs_q = self
+                    .coverage
+                    .recovery_forfeited_abs_q
+                    .checked_add(reduced_abs_q)
+                    .ok_or("recovery-forfeit coverage overflow")?;
+                Ok(size_after == 0)
+            }
+            Err(error) => {
+                self.last_trade_rejection = Some(format!(
+                    "ForfeitRecoveryLeg owner {actor} asset {asset}: {error}"
+                ));
                 self.assert_snapshot_unchanged(&before)?;
                 Ok(false)
             }
@@ -5690,6 +5769,61 @@ pub fn run_abandoned_asset_force_close_oracle() -> Result<Coverage, String> {
     if group.assets[0].oi_eff_long_q != 0 || group.assets[0].oi_eff_short_q != 0 {
         return Err(format!(
             "public abandoned-asset force close left effective OI: long={}, short={}",
+            group.assets[0].oi_eff_long_q, group.assets[0].oi_eff_short_q
+        ));
+    }
+    Ok(runner.coverage)
+}
+
+pub fn run_recovery_forfeit_route_oracle() -> Result<Coverage, String> {
+    let scenario = Scenario {
+        seed: [0x43; 32],
+        config: SmallMarketConfig::default(),
+        actions: Vec::new(),
+    };
+    let mut runner = ScenarioRunner::new_unprefixed(&scenario)?;
+    runner.run_safety_prefix(&[
+        Action::ConfigurePermissionlessResolve {
+            stale_slots: 1_000,
+            force_close_delay_slots: 100,
+        },
+        Action::Trade {
+            route: TradeRoute::NoCpi,
+            taker: 0,
+            maker: 1,
+            asset: 0,
+            units: 2,
+            fee_bps: 0,
+            price_move_bps: 0,
+            prefer_reduce: false,
+        },
+        Action::ShutdownAsset { asset: 0, dt: 1 },
+        Action::ForfeitRecoveryLeg {
+            actor: 0,
+            asset: 0,
+            budget_units: u8::MAX,
+        },
+        Action::ForfeitRecoveryLeg {
+            actor: 1,
+            asset: 0,
+            budget_units: u8::MAX,
+        },
+    ])?;
+    if runner.coverage.recovery_forfeit_attempts != 2
+        || runner.coverage.recovery_forfeit_successes != 2
+        || runner.coverage.recovery_forfeited_abs_q != POS_SCALE
+        || runner.positions[0][0] != 0
+        || runner.positions[1][0] != 0
+    {
+        return Err(format!(
+            "public recovery-forfeit controls were vacuous: {:?}, positions={:?}",
+            runner.coverage, runner.positions
+        ));
+    }
+    let (_, group) = runner.env.primary_market_state();
+    if group.assets[0].oi_eff_long_q != 0 || group.assets[0].oi_eff_short_q != 0 {
+        return Err(format!(
+            "public recovery forfeits left effective OI: long={}, short={}",
             group.assets[0].oi_eff_long_q, group.assets[0].oi_eff_short_q
         ));
     }
@@ -20920,6 +21054,13 @@ fn action_strategy() -> impl Strategy<Value = Action> {
                     }
                 },
             ),
+        2 => (any::<u8>(), any::<u8>(), any::<u8>()).prop_map(
+            |(actor, asset, budget_units)| Action::ForfeitRecoveryLeg {
+                actor,
+                asset,
+                budget_units,
+            },
+        ),
         2 => (any::<u8>(), 1u16..=500)
             .prop_map(|(actor, amount)| Action::ConvertReleasedPnl { actor, amount }),
         2 => (any::<u8>(), any::<u8>())

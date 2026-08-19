@@ -5,11 +5,11 @@
 //! Evidence in this file (F over public I routes): `v16_program_stateful_public_interface_fuzz`
 //! generates deposits, withdrawals, all four trade routes, retained transactions, oracle changes,
 //! cranks, fee synchronization, matcher-capability changes, insurance/backing top-ups and
-//! withdrawals, released-PnL conversion, unilateral rebalance reduction, asset shutdown,
-//! permissionless abandoned-asset force close, oracle-authority rotation, market resolution,
-//! resolved crank/close/claim transitions, and hostile account substitution. Terminal
-//! routes independently reconcile position and effective-OI removal, receipt monotonicity, and
-//! exact destination/SPL-vault/engine-vault deltas. After every public transition the shared oracle
+//! withdrawals, released-PnL conversion, unilateral rebalance reduction, asset shutdown, owner
+//! recovery-leg forfeit, permissionless abandoned-asset force close, oracle-authority rotation,
+//! market resolution, resolved crank/close/claim transitions, and hostile account substitution.
+//! Terminal routes independently reconcile position and effective-OI removal, receipt monotonicity,
+//! and exact destination/SPL-vault/engine-vault deltas. After every public transition the shared oracle
 //! rejects undecodable or hidden legs, duplicate same-asset legs, stale
 //! generation bindings, source-lien classification mismatches, stored-position/OI drift, and
 //! net-position drift. Successful non-token routes must preserve every tracked SPL account
@@ -52,6 +52,15 @@ fn v16_program_abandoned_asset_force_close_strictly_reduces_public_exposure() {
     assert_eq!(coverage.force_close_attempts, 1);
     assert_eq!(coverage.force_close_successes, 1);
     assert_eq!(coverage.force_closed_abs_q, POS_SCALE);
+}
+
+#[test]
+fn v16_program_owner_recovery_forfeit_strictly_reduces_each_position_episode() {
+    let coverage = run_recovery_forfeit_route_oracle()
+        .expect("owner recovery forfeits must satisfy the shared position/OI/frame oracle");
+    assert_eq!(coverage.recovery_forfeit_attempts, 2);
+    assert_eq!(coverage.recovery_forfeit_successes, 2);
+    assert_eq!(coverage.recovery_forfeited_abs_q, POS_SCALE);
 }
 
 #[test]
@@ -164,6 +173,11 @@ fn v16_program_extended_public_action_alphabet_runs_through_shared_oracles() {
                 force_close_delay_slots: 100,
             },
             Action::ShutdownAsset { asset: 0, dt: 0 },
+            Action::ForfeitRecoveryLeg {
+                actor: 0,
+                asset: 0,
+                budget_units: u8::MAX,
+            },
             Action::ForceCloseAbandoned {
                 cranker: 2,
                 account_a: 0,
