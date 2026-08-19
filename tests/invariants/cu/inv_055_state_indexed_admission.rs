@@ -4,10 +4,11 @@
 //!
 //! Evidence in this file (I/C plus invariant-specific M assertions):
 //! `v16_attack_batch_nocpi_mixed_exit_and_fresh_open_rejects_atomically`,
-//! `v16_attack_spare_capacity_asset_rejects_public_routes_before_matcher`, and the public
-//! ResetPending four-route matrix below. These tests exercise the deployed public wrapper with
-//! real SBF/LiteSVM account construction and assert economic state, token, rollback, liveness, or
-//! compute outcomes appropriate to the invariant.
+//! `v16_attack_spare_capacity_asset_rejects_public_routes_before_matcher`, the public
+//! ResetPending four-route matrix, and the irreversible-close admission/terminal-progress
+//! composition below. These tests exercise the deployed public wrapper with real SBF/LiteSVM
+//! account construction and assert economic state, token, rollback, liveness, or compute outcomes
+//! appropriate to the invariant.
 //!
 //! Guarantee boundary: a quarantined counterexample demonstrates public reachability; it does
 //! not certify the invariant on an unfixed pin. Certification requires the fixed-pin assertion
@@ -209,6 +210,147 @@ fn v16_program_reset_pending_admission_matrix_rejects_risk_then_restores_trade()
     let reopened = env.market_state().1;
     assert_eq!(reopened.assets[0].oi_eff_long_q, POS_SCALE);
     assert_eq!(reopened.assets[0].oi_eff_short_q, POS_SCALE);
+}
+
+#[test]
+fn v16_program_irreversible_close_ledger_admits_only_terminal_progress() {
+    let PublicActiveCloseFixture {
+        mut env,
+        loss_owner,
+        loss,
+        live_counterparty,
+        live_peer,
+        ..
+    } = public_asset1_bankrupt_close_fixture();
+    let active_close = close_progress(&env.portfolio_state(loss));
+    assert!(active_close.active && !active_close.canceled && !active_close.finalized);
+    assert!(active_close.residual_remaining > 0);
+
+    let lp_owner = Keypair::new();
+    let lp = env.create_portfolio(&lp_owner);
+    env.deposit(&lp_owner, lp, 1_000_000);
+    let market_before_trade = env.svm.get_account(&env.market).unwrap();
+    let loss_before_trade = env.svm.get_account(&loss).unwrap();
+    let lp_before_trade = env.svm.get_account(&lp).unwrap();
+    let vault_before_trade = env.svm.get_account(&env.vault).unwrap();
+    env.svm.expire_blockhash();
+    let rejected_trade = env.try_trade_asset_with_cu(
+        0,
+        &loss_owner,
+        loss,
+        &lp_owner,
+        lp,
+        POS_SCALE as i128,
+        100,
+        0,
+    );
+    assert!(
+        rejected_trade.is_err(),
+        "an account with active close progress must not open unrelated live risk"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before_trade
+    );
+    assert_eq!(env.svm.get_account(&loss).unwrap(), loss_before_trade);
+    assert_eq!(env.svm.get_account(&lp).unwrap(), lp_before_trade);
+    assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before_trade);
+
+    env.svm.expire_blockhash();
+    let rejected_close = env.send(
+        env.close_portfolio_ix(loss),
+        vec![
+            AccountMeta::new(loss_owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(loss, false),
+        ],
+        &[&loss_owner],
+    );
+    assert!(
+        rejected_close.is_err(),
+        "ClosePortfolio must not erase an active close ledger"
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before_trade
+    );
+    assert_eq!(env.svm.get_account(&loss).unwrap(), loss_before_trade);
+    assert_eq!(env.svm.get_account(&lp).unwrap(), lp_before_trade);
+    assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before_trade);
+
+    let cure_amount = active_close.residual_remaining + 1_000;
+    let cure_source = env.token_account(loss_owner.pubkey(), cure_amount as u64);
+    let source_before_cure = env.svm.get_account(&cure_source).unwrap();
+    env.svm.expire_blockhash();
+    let rejected_cure = env.send(
+        ProgInstruction::CureAndCancelClose {
+            portfolio_id: env.portfolio_id(loss),
+            position_epoch: env.portfolio_position_epoch(loss),
+            optional_deposit: cure_amount,
+        },
+        vec![
+            AccountMeta::new(loss_owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(loss, false),
+            AccountMeta::new(cure_source, false),
+            AccountMeta::new(env.vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&loss_owner],
+    );
+    let cure_error = rejected_cure.expect_err("irreversible close progress cannot be canceled");
+    assert!(
+        cure_error.contains("Custom(21)") || cure_error.contains("custom program error: 0x15"),
+        "irreversible cure reached the wrong guard: {cure_error}"
+    );
+    assert_eq!(
+        env.svm.get_account(&cure_source).unwrap(),
+        source_before_cure
+    );
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before_trade
+    );
+    assert_eq!(env.svm.get_account(&loss).unwrap(), loss_before_trade);
+    assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before_trade);
+
+    let live_counterparty_before = env.svm.get_account(&live_counterparty).unwrap();
+    let live_peer_before = env.svm.get_account(&live_peer).unwrap();
+    env.svm.warp_to_slot(active_close.max_close_slot + 1);
+    env.svm.expire_blockhash();
+    let progress_cu = env
+        .send(
+            ProgInstruction::PermissionlessCrank {
+                now_slot: 0,
+                observations: Vec::new(),
+            },
+            vec![
+                AccountMeta::new_readonly(env.payer.pubkey(), false),
+                AccountMeta::new(env.market, false),
+                AccountMeta::new(loss, false),
+            ],
+            &[],
+        )
+        .expect("expired irreversible close must retain permissionless terminal progress");
+    assert_cu_within(
+        "irreversible close terminal continuation",
+        progress_cu,
+        CRANK_CU_LIMIT,
+    );
+    assert!(matches!(
+        env.market_state().1.mode,
+        MarketModeV16::Recovery | MarketModeV16::Resolved
+    ));
+    assert_eq!(
+        env.svm.get_account(&live_counterparty).unwrap(),
+        live_counterparty_before,
+        "terminal admission changes must not rewrite an unrelated portfolio"
+    );
+    assert_eq!(
+        env.svm.get_account(&live_peer).unwrap(),
+        live_peer_before,
+        "terminal admission changes must not rewrite an unrelated peer"
+    );
 }
 
 #[test]
