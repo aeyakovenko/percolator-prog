@@ -6,8 +6,8 @@
 //! generates deposits, withdrawals, all four trade routes, retained transactions, oracle changes,
 //! cranks, fee synchronization, matcher-capability changes, insurance/backing top-ups and
 //! withdrawals, released-PnL conversion, unilateral rebalance reduction, asset shutdown,
-//! oracle-authority rotation, market resolution, resolved crank/close/claim transitions, and
-//! hostile account substitution. Terminal
+//! permissionless abandoned-asset force close, oracle-authority rotation, market resolution,
+//! resolved crank/close/claim transitions, and hostile account substitution. Terminal
 //! routes independently reconcile position and effective-OI removal, receipt monotonicity, and
 //! exact destination/SPL-vault/engine-vault deltas. After every public transition the shared oracle
 //! rejects undecodable or hidden legs, duplicate same-asset legs, stale
@@ -29,6 +29,7 @@
 //! plus every additional verification method required by the charter.
 
 use super::*;
+use percolator::POS_SCALE;
 
 #[test]
 fn v16_program_value_withdrawal_routes_preserve_exact_whole_route_deltas() {
@@ -42,6 +43,15 @@ fn v16_program_value_withdrawal_routes_preserve_exact_whole_route_deltas() {
         coverage.token_frame_checks, 4,
         "each value route must execute an exact SPL account-frame check"
     );
+}
+
+#[test]
+fn v16_program_abandoned_asset_force_close_strictly_reduces_public_exposure() {
+    let coverage = run_abandoned_asset_force_close_oracle()
+        .expect("permissionless force close must satisfy the shared position/OI/frame oracle");
+    assert_eq!(coverage.force_close_attempts, 1);
+    assert_eq!(coverage.force_close_successes, 1);
+    assert_eq!(coverage.force_closed_abs_q, POS_SCALE);
 }
 
 #[test]
@@ -154,6 +164,14 @@ fn v16_program_extended_public_action_alphabet_runs_through_shared_oracles() {
                 force_close_delay_slots: 100,
             },
             Action::ShutdownAsset { asset: 0, dt: 0 },
+            Action::ForceCloseAbandoned {
+                cranker: 2,
+                account_a: 0,
+                account_b: 1,
+                asset: 0,
+                dt: 1,
+                units: 1,
+            },
             Action::ResolveMarket,
             Action::Crank {
                 actor: 1,

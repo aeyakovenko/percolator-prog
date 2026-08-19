@@ -1249,6 +1249,14 @@ pub enum Action {
         domain: u8,
         amount: u16,
     },
+    ForceCloseAbandoned {
+        cranker: u8,
+        account_a: u8,
+        account_b: u8,
+        asset: u8,
+        dt: u8,
+        units: u8,
+    },
     ConvertReleasedPnl {
         actor: u8,
         amount: u16,
@@ -1346,12 +1354,15 @@ pub struct Coverage {
     pub mark_updates: u64,
     pub oracle_reconfigs: u64,
     pub maintenance_syncs: u64,
-    pub extended_action_attempts: [u64; 10],
+    pub extended_action_attempts: [u64; 11],
     pub matcher_config_updates: u64,
     pub insurance_topups: u64,
     pub backing_topups: u64,
     pub insurance_withdrawals: u64,
     pub backing_withdrawals: u64,
+    pub force_close_attempts: u64,
+    pub force_close_successes: u64,
+    pub force_closed_abs_q: u128,
     pub pnl_conversions: u64,
     pub rebalance_reductions: u64,
     pub resolve_policy_updates: u64,
@@ -1397,12 +1408,15 @@ impl Default for Coverage {
             mark_updates: 0,
             oracle_reconfigs: 0,
             maintenance_syncs: 0,
-            extended_action_attempts: [0; 10],
+            extended_action_attempts: [0; 11],
             matcher_config_updates: 0,
             insurance_topups: 0,
             backing_topups: 0,
             insurance_withdrawals: 0,
             backing_withdrawals: 0,
+            force_close_attempts: 0,
+            force_close_successes: 0,
+            force_closed_abs_q: 0,
             pnl_conversions: 0,
             rebalance_reductions: 0,
             resolve_policy_updates: 0,
@@ -1528,6 +1542,9 @@ impl Coverage {
         self.backing_topups += other.backing_topups;
         self.insurance_withdrawals += other.insurance_withdrawals;
         self.backing_withdrawals += other.backing_withdrawals;
+        self.force_close_attempts += other.force_close_attempts;
+        self.force_close_successes += other.force_close_successes;
+        self.force_closed_abs_q += other.force_closed_abs_q;
         self.pnl_conversions += other.pnl_conversions;
         self.rebalance_reductions += other.rebalance_reductions;
         self.resolve_policy_updates += other.resolve_policy_updates;
@@ -3119,6 +3136,37 @@ impl ScenarioRunner {
                 )
                 .map(|_| ())
             }
+            Action::ForceCloseAbandoned {
+                cranker,
+                account_a,
+                account_b,
+                asset,
+                dt,
+                units,
+            } => {
+                self.coverage.extended_action_attempts[10] += 1;
+                let cranker = cranker as usize % USER_COUNT;
+                let account_a = account_a as usize % PRIMARY_ACTOR_COUNT;
+                let mut account_b = account_b as usize % PRIMARY_ACTOR_COUNT;
+                if account_b == account_a {
+                    account_b = (account_b + 1) % PRIMARY_ACTOR_COUNT;
+                }
+                let asset = asset as usize % ASSET_COUNT;
+                let next_slot = self
+                    .env
+                    .current_slot()
+                    .checked_add(u64::from(dt.clamp(1, 4)))
+                    .ok_or("force-close slot overflow")?;
+                self.env.warp_to_slot(next_slot);
+                let close_q = u128::from(units.clamp(1, 4))
+                    .checked_mul(POS_SCALE)
+                    .and_then(|value| value.checked_div(4))
+                    .ok_or("force-close quantity overflow")?;
+                self.execute_force_close_abandoned(
+                    cranker, account_a, account_b, asset, next_slot, close_q,
+                )
+                .map(|_| ())
+            }
             Action::ConvertReleasedPnl { actor, amount } => {
                 self.coverage.extended_action_attempts[3] += 1;
                 let actor = actor as usize % PRIMARY_ACTOR_COUNT;
@@ -3787,6 +3835,215 @@ impl ScenarioRunner {
                     );
                 }
                 self.assert_token_frame(&before, &[destination, self.env.vault])?;
+                Ok(true)
+            }
+            Err(_) => {
+                self.assert_snapshot_unchanged(&before)?;
+                Ok(false)
+            }
+        }
+    }
+
+    fn execute_force_close_abandoned(
+        &mut self,
+        cranker: usize,
+        account_a: usize,
+        account_b: usize,
+        asset: usize,
+        now_slot: u64,
+        close_q: u128,
+    ) -> Result<bool, String> {
+        self.coverage.force_close_attempts += 1;
+        let account_a_before = self.env.primary_portfolio(account_a);
+        let account_b_before = self.env.primary_portfolio(account_b);
+        let account_a_epoch_before = self.env.primary_portfolio_position_epoch(account_a);
+        let account_b_epoch_before = self.env.primary_portfolio_position_epoch(account_b);
+        let (_, group_before) = self.env.primary_market_state();
+        let position_a_before = self.positions[account_a][asset];
+        let position_b_before = self.positions[account_b][asset];
+        let abs_before = position_a_before
+            .unsigned_abs()
+            .checked_add(position_b_before.unsigned_abs())
+            .ok_or("force-close pre-position sum overflow")?;
+        let bilateral = position_a_before != 0
+            && position_b_before != 0
+            && position_a_before.signum() != position_b_before.signum();
+        let residue = (position_a_before != 0) ^ (position_b_before != 0);
+        let before = self.snapshot();
+
+        match self.env.force_close_abandoned_asset(
+            cranker,
+            account_a,
+            account_b,
+            asset as u16,
+            now_slot,
+            close_q,
+        ) {
+            Ok(success) => {
+                self.coverage.observe_success(None, &success);
+                self.assert_portfolio_frame(&before, &[account_a, account_b])?;
+                self.assert_no_token_side_effects(&before)?;
+                if before.backing_domain_ledger != self.env.backing_domain_ledger_data()
+                    || before.matcher_contexts != self.env.all_matcher_context_data()
+                    || before.economic_account_lamports != self.env.all_economic_account_lamports()
+                {
+                    return Err(
+                        "force close mutated a wrapper ledger, matcher context, or lamport balance"
+                            .into(),
+                    );
+                }
+                if group_before.assets[asset].lifecycle != AssetLifecycleV16::Recovery
+                    || self.env.primary_market_state().1.assets[asset].lifecycle
+                        != AssetLifecycleV16::Recovery
+                {
+                    return Err(
+                        "ForceCloseAbandonedAsset succeeded outside a stable Recovery lifecycle"
+                            .into(),
+                    );
+                }
+
+                if bilateral {
+                    let reduced_q = close_q
+                        .min(position_a_before.unsigned_abs())
+                        .min(position_b_before.unsigned_abs());
+                    if reduced_q == 0 {
+                        return Err("successful bilateral force close had zero reduction".into());
+                    }
+                    let reduced_q_i128 = i128::try_from(reduced_q)
+                        .map_err(|_| "force-close quantity exceeds signed position range")?;
+                    let mut account_a_deltas = [0i128; ASSET_COUNT];
+                    let mut account_b_deltas = [0i128; ASSET_COUNT];
+                    account_a_deltas[asset] = if position_a_before > 0 {
+                        -reduced_q_i128
+                    } else {
+                        reduced_q_i128
+                    };
+                    account_b_deltas[asset] = if position_b_before > 0 {
+                        -reduced_q_i128
+                    } else {
+                        reduced_q_i128
+                    };
+                    self.reconcile_account_position_changes(
+                        account_a,
+                        &account_a_before,
+                        &group_before,
+                        account_a_deltas,
+                        false,
+                        "permissionless abandoned-asset force close account A",
+                    )?;
+                    self.reconcile_account_position_changes(
+                        account_b,
+                        &account_b_before,
+                        &group_before,
+                        account_b_deltas,
+                        false,
+                        "permissionless abandoned-asset force close account B",
+                    )?;
+                    if self.env.primary_portfolio_position_epoch(account_a)
+                        != account_a_epoch_before
+                            .checked_add(1)
+                            .ok_or("force-close account-A epoch overflow")?
+                        || self.env.primary_portfolio_position_epoch(account_b)
+                            != account_b_epoch_before
+                                .checked_add(1)
+                                .ok_or("force-close account-B epoch overflow")?
+                    {
+                        return Err(
+                            "bilateral force close did not advance both position episodes exactly once"
+                                .into(),
+                        );
+                    }
+                } else if residue {
+                    let residue_actor = if position_a_before != 0 {
+                        account_a
+                    } else {
+                        account_b
+                    };
+                    let untouched_actor = if residue_actor == account_a {
+                        account_b
+                    } else {
+                        account_a
+                    };
+                    let residue_before = if residue_actor == account_a {
+                        &account_a_before
+                    } else {
+                        &account_b_before
+                    };
+                    let residue_position_before = self.positions[residue_actor][asset];
+                    let residue_after = self.env.primary_portfolio(residue_actor);
+                    let residue_position_after = observed_positions(&residue_after)?[asset];
+                    if residue_position_after.unsigned_abs()
+                        >= residue_position_before.unsigned_abs()
+                    {
+                        return Err(
+                            "successful residue force close did not strictly reduce the remaining leg"
+                                .into(),
+                        );
+                    }
+                    self.apply_account_oi_transition(
+                        residue_before,
+                        &residue_after,
+                        &group_before,
+                        true,
+                        "permissionless abandoned-asset residue removal",
+                    )?;
+                    let residue_delta = residue_position_after
+                        .checked_sub(residue_position_before)
+                        .ok_or("force-close residue delta overflow")?;
+                    self.positions[residue_actor][asset] = residue_position_after;
+                    self.protocol_positions[asset] = self.protocol_positions[asset]
+                        .checked_sub(residue_delta)
+                        .ok_or("force-close residue attribution overflow")?;
+                    if self.env.primary_portfolio_data(untouched_actor)
+                        != before.primary_portfolios[untouched_actor]
+                    {
+                        return Err("residue force close mutated the empty peer portfolio".into());
+                    }
+                    let residue_epoch_before = if residue_actor == account_a {
+                        account_a_epoch_before
+                    } else {
+                        account_b_epoch_before
+                    };
+                    let untouched_epoch_before = if untouched_actor == account_a {
+                        account_a_epoch_before
+                    } else {
+                        account_b_epoch_before
+                    };
+                    if self.env.primary_portfolio_position_epoch(residue_actor)
+                        != residue_epoch_before
+                            .checked_add(1)
+                            .ok_or("force-close residue epoch overflow")?
+                        || self.env.primary_portfolio_position_epoch(untouched_actor)
+                            != untouched_epoch_before
+                    {
+                        return Err(
+                            "residue force close did not advance exactly the removed position episode"
+                                .into(),
+                        );
+                    }
+                } else {
+                    return Err(format!(
+                        "ForceCloseAbandonedAsset succeeded without opposite legs or one zero-OI residue: {position_a_before}, {position_b_before}"
+                    ));
+                }
+
+                self.assert_positions_match()?;
+                let abs_after = self.positions[account_a][asset]
+                    .unsigned_abs()
+                    .checked_add(self.positions[account_b][asset].unsigned_abs())
+                    .ok_or("force-close post-position sum overflow")?;
+                let reduced_abs_q = abs_before
+                    .checked_sub(abs_after)
+                    .ok_or("force close increased aggregate exposure")?;
+                if reduced_abs_q == 0 {
+                    return Err("successful force close made no exposure progress".into());
+                }
+                self.coverage.force_close_successes += 1;
+                self.coverage.force_closed_abs_q = self
+                    .coverage
+                    .force_closed_abs_q
+                    .checked_add(reduced_abs_q)
+                    .ok_or("force-close coverage overflow")?;
                 Ok(true)
             }
             Err(_) => {
@@ -5381,6 +5638,59 @@ pub fn run_value_withdrawal_route_oracle() -> Result<Coverage, String> {
         return Err(format!(
             "public value-withdrawal controls were vacuous: {:?}",
             runner.coverage
+        ));
+    }
+    Ok(runner.coverage)
+}
+
+pub fn run_abandoned_asset_force_close_oracle() -> Result<Coverage, String> {
+    let scenario = Scenario {
+        seed: [0x64; 32],
+        config: SmallMarketConfig::default(),
+        actions: Vec::new(),
+    };
+    let mut runner = ScenarioRunner::new_unprefixed(&scenario)?;
+    runner.run_safety_prefix(&[
+        Action::ConfigurePermissionlessResolve {
+            stale_slots: 1_000,
+            force_close_delay_slots: 1,
+        },
+        Action::Trade {
+            route: TradeRoute::NoCpi,
+            taker: 0,
+            maker: 1,
+            asset: 0,
+            units: 2,
+            fee_bps: 0,
+            price_move_bps: 0,
+            prefer_reduce: false,
+        },
+        Action::ShutdownAsset { asset: 0, dt: 1 },
+        Action::ForceCloseAbandoned {
+            cranker: 2,
+            account_a: 0,
+            account_b: 1,
+            asset: 0,
+            dt: 1,
+            units: 2,
+        },
+    ])?;
+    if runner.coverage.force_close_attempts != 1
+        || runner.coverage.force_close_successes != 1
+        || runner.coverage.force_closed_abs_q != POS_SCALE
+        || runner.positions[0][0] != 0
+        || runner.positions[1][0] != 0
+    {
+        return Err(format!(
+            "public abandoned-asset force-close control was vacuous: {:?}, positions={:?}",
+            runner.coverage, runner.positions
+        ));
+    }
+    let (_, group) = runner.env.primary_market_state();
+    if group.assets[0].oi_eff_long_q != 0 || group.assets[0].oi_eff_short_q != 0 {
+        return Err(format!(
+            "public abandoned-asset force close left effective OI: long={}, short={}",
+            group.assets[0].oi_eff_long_q, group.assets[0].oi_eff_short_q
         ));
     }
     Ok(runner.coverage)
@@ -20590,6 +20900,26 @@ fn action_strategy() -> impl Strategy<Value = Action> {
             .prop_map(|(asset, amount)| Action::WithdrawInsurance { asset, amount }),
         2 => (any::<u8>(), 1u16..=500)
             .prop_map(|(domain, amount)| Action::WithdrawBacking { domain, amount }),
+        2 => (
+            any::<u8>(),
+            any::<u8>(),
+            any::<u8>(),
+            any::<u8>(),
+            any::<u8>(),
+            any::<u8>(),
+        )
+            .prop_map(
+                |(cranker, account_a, account_b, asset, dt, units)| {
+                    Action::ForceCloseAbandoned {
+                        cranker,
+                        account_a,
+                        account_b,
+                        asset,
+                        dt,
+                        units,
+                    }
+                },
+            ),
         2 => (any::<u8>(), 1u16..=500)
             .prop_map(|(actor, amount)| Action::ConvertReleasedPnl { actor, amount }),
         2 => (any::<u8>(), any::<u8>())
