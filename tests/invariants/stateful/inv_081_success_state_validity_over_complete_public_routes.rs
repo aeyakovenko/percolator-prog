@@ -64,6 +64,16 @@ fn v16_program_owner_recovery_forfeit_strictly_reduces_each_position_episode() {
 }
 
 #[test]
+fn v16_program_recovery_exit_restart_and_fresh_generation_trade_compose() {
+    let coverage = run_recovery_restart_trade_route_oracle().expect(
+        "recovery exits, asset restart, and fresh-generation trade must share one exact oracle",
+    );
+    assert_eq!(coverage.asset_restarts, 1);
+    assert_eq!(coverage.recovery_forfeit_successes, 2);
+    assert!(coverage.route_success[0] >= 2);
+}
+
+#[test]
 fn v16_program_designated_liquidity_provider_has_public_exit_after_unilateral_reduction() {
     let scenario = Scenario {
         seed: [0x18; 32],
@@ -185,6 +195,11 @@ fn v16_program_extended_public_action_alphabet_runs_through_shared_oracles() {
                 asset: 0,
                 dt: 1,
                 units: 1,
+            },
+            Action::RestartAssetOracle {
+                asset: 0,
+                dt: 1,
+                initial_price: 137,
             },
             Action::ResolveMarket,
             Action::Crank {

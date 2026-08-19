@@ -10,7 +10,7 @@ use percolator::{
 use percolator_prog::{
     constants::{
         MARKET_GROUP_OFF, ORACLE_LEG_FLAG_DIVIDE_LEG2, ORACLE_LEG_FLAG_DIVIDE_LEG3,
-        ORACLE_MODE_EWMA_MARK,
+        ORACLE_MODE_EWMA_MARK, ORACLE_MODE_MANUAL,
     },
     ix::{BatchTradeCpiLeg, BatchTradeLeg, CrankObservationHint},
     state::{MarketGroupV16, PortfolioAccountV16},
@@ -1278,6 +1278,11 @@ pub enum Action {
         asset: u8,
         dt: u8,
     },
+    RestartAssetOracle {
+        asset: u8,
+        dt: u8,
+        initial_price: u8,
+    },
     RotateOracleAuthority {
         asset: u8,
         new_actor: u8,
@@ -1359,7 +1364,7 @@ pub struct Coverage {
     pub mark_updates: u64,
     pub oracle_reconfigs: u64,
     pub maintenance_syncs: u64,
-    pub extended_action_attempts: [u64; 12],
+    pub extended_action_attempts: [u64; 13],
     pub matcher_config_updates: u64,
     pub insurance_topups: u64,
     pub backing_topups: u64,
@@ -1375,6 +1380,7 @@ pub struct Coverage {
     pub rebalance_reductions: u64,
     pub resolve_policy_updates: u64,
     pub lifecycle_updates: u64,
+    pub asset_restarts: u64,
     pub authority_updates: u64,
     pub terminal_resolve_attempts: u64,
     pub terminal_resolves: u64,
@@ -1416,7 +1422,7 @@ impl Default for Coverage {
             mark_updates: 0,
             oracle_reconfigs: 0,
             maintenance_syncs: 0,
-            extended_action_attempts: [0; 12],
+            extended_action_attempts: [0; 13],
             matcher_config_updates: 0,
             insurance_topups: 0,
             backing_topups: 0,
@@ -1432,6 +1438,7 @@ impl Default for Coverage {
             rebalance_reductions: 0,
             resolve_policy_updates: 0,
             lifecycle_updates: 0,
+            asset_restarts: 0,
             authority_updates: 0,
             terminal_resolve_attempts: 0,
             terminal_resolves: 0,
@@ -1563,6 +1570,7 @@ impl Coverage {
         self.rebalance_reductions += other.rebalance_reductions;
         self.resolve_policy_updates += other.resolve_policy_updates;
         self.lifecycle_updates += other.lifecycle_updates;
+        self.asset_restarts += other.asset_restarts;
         self.authority_updates += other.authority_updates;
         self.terminal_resolve_attempts += other.terminal_resolve_attempts;
         self.terminal_resolves += other.terminal_resolves;
@@ -3237,6 +3245,23 @@ impl ScenarioRunner {
                 }
                 Ok(())
             }
+            Action::RestartAssetOracle {
+                asset,
+                dt,
+                initial_price,
+            } => {
+                self.coverage.extended_action_attempts[12] += 1;
+                let asset = asset as usize % ASSET_COUNT;
+                let next_slot = self
+                    .env
+                    .current_slot()
+                    .checked_add(u64::from(dt.clamp(1, 4)))
+                    .ok_or("restart slot overflow")?;
+                let initial_price = u64::from(initial_price.max(1));
+                self.env.warp_to_slot(next_slot);
+                self.execute_restart_asset_oracle(asset, next_slot, initial_price)
+                    .map(|_| ())
+            }
             Action::RotateOracleAuthority { asset, new_actor } => {
                 self.coverage.extended_action_attempts[7] += 1;
                 let asset = asset as usize % ASSET_COUNT;
@@ -4126,6 +4151,109 @@ impl ScenarioRunner {
                 self.last_trade_rejection = Some(format!(
                     "ForfeitRecoveryLeg owner {actor} asset {asset}: {error}"
                 ));
+                self.assert_snapshot_unchanged(&before)?;
+                Ok(false)
+            }
+        }
+    }
+
+    fn execute_restart_asset_oracle(
+        &mut self,
+        asset: usize,
+        now_slot: u64,
+        initial_price: u64,
+    ) -> Result<bool, String> {
+        let (_, group_before) = self.env.primary_market_state();
+        let profile_before = self.env.primary_profile(asset);
+        let sequence_before = self.env.primary_control_sequences(asset).oracle_observation;
+        let old_market_id = group_before.assets[asset].market_id;
+        let before = self.snapshot();
+
+        match self
+            .env
+            .restart_asset_oracle(asset as u16, now_slot, initial_price)
+        {
+            Ok(success) => {
+                self.coverage.observe_success(None, &success);
+                self.assert_portfolio_frame(&before, &[])?;
+                self.assert_no_token_side_effects(&before)?;
+                if before.backing_domain_ledger != self.env.backing_domain_ledger_data()
+                    || before.matcher_contexts != self.env.all_matcher_context_data()
+                    || before.economic_account_lamports != self.env.all_economic_account_lamports()
+                {
+                    return Err(
+                        "asset restart mutated a wrapper ledger, matcher context, or lamport balance"
+                            .into(),
+                    );
+                }
+
+                let (_, group_after) = self.env.primary_market_state();
+                let restarted = group_after.assets[asset];
+                let profile_after = self.env.primary_profile(asset);
+                let sequence_after = self.env.primary_control_sequences(asset).oracle_observation;
+                let expected_sequence_after = sequence_before
+                    .checked_add(1)
+                    .ok_or("successful restart overflowed its observation sequence")?;
+                if group_before.assets[asset].lifecycle != AssetLifecycleV16::Recovery
+                    || restarted.lifecycle != AssetLifecycleV16::Active
+                    || restarted.market_id <= old_market_id
+                    || restarted.raw_oracle_target_price != initial_price
+                    || restarted.effective_price != initial_price
+                    || restarted.fund_px_last != initial_price
+                    || restarted.slot_last != now_slot
+                    || restarted.oi_eff_long_q != 0
+                    || restarted.oi_eff_short_q != 0
+                    || restarted.stored_pos_count_long != 0
+                    || restarted.stored_pos_count_short != 0
+                {
+                    return Err(format!(
+                        "successful restart did not create a fresh empty active generation: before={:?}, after={restarted:?}",
+                        group_before.assets[asset]
+                    ));
+                }
+                for other in 0..ASSET_COUNT {
+                    if other != asset && group_after.assets[other] != group_before.assets[other] {
+                        return Err(format!(
+                            "asset {asset} restart mutated unrelated engine asset {other}"
+                        ));
+                    }
+                }
+                if group_after.insurance != group_before.insurance
+                    || group_after.insurance_domain_budget != group_before.insurance_domain_budget
+                    || profile_after.oracle_mode != ORACLE_MODE_MANUAL
+                    || profile_after.oracle_target_price_e6 != initial_price
+                    || profile_after.mark_ewma_e6 != initial_price
+                    || profile_after.mark_ewma_last_slot != now_slot
+                    || profile_after.last_good_oracle_slot != now_slot
+                    || profile_after.asset_admin != profile_before.asset_admin
+                    || profile_after.insurance_authority != profile_before.insurance_authority
+                    || profile_after.insurance_operator != profile_before.insurance_operator
+                    || profile_after.backing_bucket_authority
+                        != profile_before.backing_bucket_authority
+                    || profile_after.oracle_authority != profile_before.oracle_authority
+                    || profile_after.backing_trade_fee_bps_long
+                        != profile_before.backing_trade_fee_bps_long
+                    || profile_after.backing_trade_fee_bps_short
+                        != profile_before.backing_trade_fee_bps_short
+                    || profile_after.backing_trade_fee_insurance_share_bps_long
+                        != profile_before.backing_trade_fee_insurance_share_bps_long
+                    || profile_after.backing_trade_fee_insurance_share_bps_short
+                        != profile_before.backing_trade_fee_insurance_share_bps_short
+                    || sequence_after != expected_sequence_after
+                {
+                    return Err("asset restart did not preserve authority, fee, insurance, or sequence invariants".into());
+                }
+                if self.positions.iter().any(|positions| positions[asset] != 0) {
+                    return Err(
+                        "asset restart succeeded while the independent model retained exposure"
+                            .into(),
+                    );
+                }
+                self.assert_positions_match()?;
+                self.coverage.asset_restarts += 1;
+                Ok(true)
+            }
+            Err(_) => {
                 self.assert_snapshot_unchanged(&before)?;
                 Ok(false)
             }
@@ -5825,6 +5953,79 @@ pub fn run_recovery_forfeit_route_oracle() -> Result<Coverage, String> {
         return Err(format!(
             "public recovery forfeits left effective OI: long={}, short={}",
             group.assets[0].oi_eff_long_q, group.assets[0].oi_eff_short_q
+        ));
+    }
+    Ok(runner.coverage)
+}
+
+pub fn run_recovery_restart_trade_route_oracle() -> Result<Coverage, String> {
+    let scenario = Scenario {
+        seed: [0x44; 32],
+        config: SmallMarketConfig::default(),
+        actions: Vec::new(),
+    };
+    let mut runner = ScenarioRunner::new_unprefixed(&scenario)?;
+    let old_market_id = runner.env.primary_market_state().1.assets[0].market_id;
+    runner.run_safety_prefix(&[
+        Action::ConfigurePermissionlessResolve {
+            stale_slots: 1_000,
+            force_close_delay_slots: 100,
+        },
+        Action::Trade {
+            route: TradeRoute::NoCpi,
+            taker: 0,
+            maker: 1,
+            asset: 0,
+            units: 2,
+            fee_bps: 0,
+            price_move_bps: 0,
+            prefer_reduce: false,
+        },
+        Action::ShutdownAsset { asset: 0, dt: 1 },
+        Action::ForfeitRecoveryLeg {
+            actor: 0,
+            asset: 0,
+            budget_units: u8::MAX,
+        },
+        Action::ForfeitRecoveryLeg {
+            actor: 1,
+            asset: 0,
+            budget_units: u8::MAX,
+        },
+        Action::RestartAssetOracle {
+            asset: 0,
+            dt: 1,
+            initial_price: 137,
+        },
+        Action::Trade {
+            route: TradeRoute::NoCpi,
+            taker: 2,
+            maker: 3,
+            asset: 0,
+            units: 2,
+            fee_bps: 0,
+            price_move_bps: 0,
+            prefer_reduce: false,
+        },
+    ])?;
+    let (_, group) = runner.env.primary_market_state();
+    let fresh_position_q =
+        i128::try_from(POS_SCALE / 2).map_err(|_| "fresh-generation position does not fit i128")?;
+    if runner.coverage.asset_restarts != 1
+        || runner.coverage.recovery_forfeit_successes != 2
+        || group.assets[0].market_id <= old_market_id
+        || group.assets[0].lifecycle != AssetLifecycleV16::Active
+        || group.assets[0].effective_price != 137
+        || group.assets[0].oi_eff_long_q != POS_SCALE / 2
+        || group.assets[0].oi_eff_short_q != POS_SCALE / 2
+        || runner.positions[0][0] != 0
+        || runner.positions[1][0] != 0
+        || runner.positions[2][0] != fresh_position_q
+        || runner.positions[3][0] != -fresh_position_q
+    {
+        return Err(format!(
+            "recovery/restart/new-generation trade composition was vacuous: coverage={:?}, asset={:?}, positions={:?}",
+            runner.coverage, group.assets[0], runner.positions
         ));
     }
     Ok(runner.coverage)
@@ -21059,6 +21260,13 @@ fn action_strategy() -> impl Strategy<Value = Action> {
                 actor,
                 asset,
                 budget_units,
+            },
+        ),
+        2 => (any::<u8>(), any::<u8>(), any::<u8>()).prop_map(
+            |(asset, dt, initial_price)| Action::RestartAssetOracle {
+                asset,
+                dt,
+                initial_price,
             },
         ),
         2 => (any::<u8>(), 1u16..=500)
