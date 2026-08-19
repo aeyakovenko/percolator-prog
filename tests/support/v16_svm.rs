@@ -927,6 +927,27 @@ impl V16Svm {
         )
     }
 
+    pub fn cure_and_cancel_primary_close(
+        &mut self,
+        actor_index: usize,
+        optional_deposit: u128,
+    ) -> Result<TxSuccess, String> {
+        let actor = &self.actors[actor_index];
+        let owner = copy_keypair(&actor.signer);
+        self.send_program(
+            ProgInstruction::CureAndCancelClose { optional_deposit },
+            vec![
+                AccountMeta::new(owner.pubkey(), true),
+                AccountMeta::new(self.market, false),
+                AccountMeta::new(actor.portfolio, false),
+                AccountMeta::new(actor.source_token, false),
+                AccountMeta::new(self.vault, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+            &[owner],
+        )
+    }
+
     pub fn fund_closed_primary_portfolio(
         &mut self,
         actor_index: usize,

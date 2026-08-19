@@ -6471,6 +6471,233 @@ pub struct PendingCloseRankEvidence {
     pub coverage: Coverage,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CurePendingObligationDosEvidence {
+    pub cure_deposit: u128,
+    pub close_canceled: bool,
+    pub pending_obligation_count: u64,
+    pub bankruptcy_hlock_active: bool,
+    pub retained_basis_pos_q: i128,
+    pub retained_loss_weight: u128,
+    pub progressing_cranks: usize,
+    pub successful_noop_cranks: usize,
+    pub unrelated_trade_rejected: bool,
+    pub owner_withdraw_rejected: bool,
+}
+
+fn create_public_cancellable_close(
+    runner: &mut ScenarioRunner,
+    winner: u8,
+    loser: u8,
+    asset: u8,
+) -> Result<(), String> {
+    runner.run_safety_prefix(&[Action::Trade {
+        route: TradeRoute::NoCpi,
+        taker: winner,
+        maker: loser,
+        asset,
+        units: 3,
+        fee_bps: 0,
+        price_move_bps: 0,
+        prefer_reduce: false,
+    }])?;
+    for _ in 0..20 {
+        runner.run_safety_prefix(&[
+            Action::PushMark {
+                asset,
+                dt: 1,
+                move_bps: 500,
+            },
+            Action::Crank {
+                actor: EXIT_MAKER_INDEX as u8,
+                hints: HintMode::Complete,
+            },
+        ])?;
+    }
+    runner.run_safety_prefix(&[Action::Trade {
+        route: TradeRoute::NoCpi,
+        taker: winner,
+        maker: loser,
+        asset,
+        units: 1,
+        fee_bps: 0,
+        price_move_bps: 0,
+        prefer_reduce: true,
+    }])?;
+    let close = runner
+        .env
+        .primary_portfolio(loser as usize)
+        .close_progress
+        .try_to_runtime()
+        .map_err(|error| format!("pending close decode: {error:?}"))?;
+    if !close.active
+        || close.finalized
+        || close.canceled
+        || close.support_consumed != 0
+        || close.junior_face_burned != 0
+        || close.insurance_spent != 0
+        || close.b_loss_booked != 0
+        || close.explicit_loss_assigned != 0
+        || close.quantity_adl_applied_q != 0
+        || close.drift_consumed != 0
+        || close.residual_remaining == 0
+        || close.residual_remaining != close.gross_loss_at_close_start
+    {
+        return Err(format!(
+            "public final reduction did not create a cancellable close for actor {loser}: {close:?}"
+        ));
+    }
+    Ok(())
+}
+
+pub fn run_cure_pending_obligation_dos_probe() -> Result<CurePendingObligationDosEvidence, String> {
+    const FIRST_WINNER: usize = 0;
+    const LOSER: usize = 1;
+    const UNRELATED_TAKER: usize = 2;
+    const UNRELATED_MAKER: usize = 3;
+    const CRANK_BOUND: usize = 4;
+
+    let config = MarketConfig {
+        max_price_move_bps_per_slot: 500,
+        max_accrual_dt_slots: 1,
+        max_abs_funding_e9_per_slot: 0,
+        min_funding_lifetime_slots: 1,
+        maintenance_fee_per_slot: 0,
+        maintenance_margin_bps: 1_000,
+        initial_margin_bps: 1_000,
+        actor_deposits: [1_000_000, 161_600, 1_000_000, 1_000_000, 1],
+        actor_token_balances: [1_000_000, 1_000_000_000_000, 1_000_000, 1_000_000, 1],
+        ..MarketConfig::default()
+    };
+    let mut runner = ScenarioRunner::new_unprefixed_with_market_config([0xc3; 32], config)?;
+    create_public_cancellable_close(&mut runner, FIRST_WINNER as u8, LOSER as u8, 0)?;
+
+    let mut cure_deposit = 1_000_000u128;
+    loop {
+        match runner
+            .env
+            .cure_and_cancel_primary_close(LOSER, cure_deposit)
+        {
+            Ok(_) => break,
+            Err(error) if error.contains("Custom(14)") => {
+                cure_deposit = cure_deposit
+                    .checked_mul(2)
+                    .filter(|amount| *amount <= 100_000_000_000)
+                    .ok_or_else(|| {
+                        format!("no bounded valid public cure amount found; last error: {error}")
+                    })?;
+            }
+            Err(error) => return Err(format!("old-episode cure control: {error}")),
+        }
+    }
+
+    let canceled_close = runner
+        .env
+        .primary_portfolio(LOSER)
+        .close_progress
+        .try_to_runtime()
+        .map_err(|error| format!("canceled close decode: {error:?}"))?;
+    let (_, group) = runner.env.primary_market_state();
+    let asset = group.assets[0];
+    let pending_obligation_count = asset
+        .pending_obligation_count_long
+        .checked_add(asset.pending_obligation_count_short)
+        .ok_or("pending-obligation count overflow")?;
+    let retained_leg = runner.env.primary_portfolio(FIRST_WINNER).legs[0]
+        .try_to_runtime()
+        .map_err(|error| format!("retained winner leg decode: {error:?}"))?;
+    if !canceled_close.canceled
+        || pending_obligation_count == 0
+        || !group.bankruptcy_hlock_active
+        || !retained_leg.active
+        || retained_leg.basis_pos_q != 0
+        || retained_leg.loss_weight == 0
+    {
+        return Err(format!(
+            "public cure did not expose the released-obligation state: close={canceled_close:?}, pending={pending_obligation_count}, hlock={}, leg={retained_leg:?}",
+            group.bankruptcy_hlock_active
+        ));
+    }
+
+    let next_slot = asset
+        .slot_last
+        .checked_add(1)
+        .ok_or("post-cure crank slot overflow")?;
+    if runner.env.current_slot() < next_slot {
+        runner.env.warp_to_slot(next_slot);
+    }
+    let mut progressing_cranks = 0usize;
+    let mut successful_noop_cranks = 0usize;
+    for iteration in 0..CRANK_BOUND {
+        let before = runner.snapshot();
+        let observations = vec![CrankObservationHint {
+            asset_index: 0,
+            oracle_accounts: 0,
+        }];
+        runner
+            .env
+            .crank(FIRST_WINNER, runner.env.current_slot(), observations)
+            .map_err(|error| format!("post-cure crank {iteration} rejected: {error}"))?;
+        if runner.snapshot() == before {
+            successful_noop_cranks += 1;
+        } else {
+            progressing_cranks += 1;
+        }
+        let (_, after_group) = runner.env.primary_market_state();
+        let after_asset = after_group.assets[0];
+        let after_leg = runner.env.primary_portfolio(FIRST_WINNER).legs[0]
+            .try_to_runtime()
+            .map_err(|error| format!("post-crank winner leg decode: {error:?}"))?;
+        if after_asset.pending_obligation_count_long == 0
+            && after_asset.pending_obligation_count_short == 0
+            && (!after_leg.active || after_leg.loss_weight == 0)
+        {
+            break;
+        }
+    }
+
+    let (_, final_group) = runner.env.primary_market_state();
+    let final_asset = final_group.assets[0];
+    let final_pending_obligation_count = final_asset
+        .pending_obligation_count_long
+        .checked_add(final_asset.pending_obligation_count_short)
+        .ok_or("final pending-obligation count overflow")?;
+    let final_leg = runner.env.primary_portfolio(FIRST_WINNER).legs[0]
+        .try_to_runtime()
+        .map_err(|error| format!("final winner leg decode: {error:?}"))?;
+
+    let unrelated_trade_rejected = !runner.execute_trade(
+        TradeRoute::NoCpi,
+        UNRELATED_TAKER,
+        UNRELATED_MAKER,
+        vec![(1, POS_SCALE as i128 / 100)],
+        0,
+        0,
+        false,
+    )?;
+
+    let before_withdraw = runner.snapshot();
+    let owner_withdraw_rejected = runner.env.withdraw_primary(FIRST_WINNER, 1).is_err();
+    if owner_withdraw_rejected && runner.snapshot() != before_withdraw {
+        return Err("rejected owner withdrawal did not roll back exactly".into());
+    }
+
+    runner.assert_global_invariants()?;
+
+    Ok(CurePendingObligationDosEvidence {
+        cure_deposit,
+        close_canceled: canceled_close.canceled,
+        pending_obligation_count: final_pending_obligation_count,
+        bankruptcy_hlock_active: final_group.bankruptcy_hlock_active,
+        retained_basis_pos_q: final_leg.basis_pos_q,
+        retained_loss_weight: final_leg.loss_weight,
+        progressing_cranks,
+        successful_noop_cranks,
+        unrelated_trade_rejected,
+        owner_withdraw_rejected,
+    })
+}
+
 pub fn run_pending_close_rank_oracle() -> Result<PendingCloseRankEvidence, String> {
     const WINNER: u8 = 0;
     const LOSER: usize = 1;

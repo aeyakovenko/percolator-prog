@@ -19,6 +19,11 @@
 //! A second focused route drives the shared stateful rank oracle through the same public
 //! `AdvanceClose` class and requires the residual itself to be a lexicographically decreasing rank
 //! component; aggregate market lock bits alone are not a sufficient progress measure.
+//! `v16_program_cured_close_releases_counterparty_obligation` reaches a cancellable bankruptcy
+//! close entirely through public trade, oracle, crank, and cure instructions. It requires the
+//! winner's released zero-basis loss obligation to be detached by a bounded permissionless crank;
+//! a successful byte-identical crank while the obligation and market lock remain is a concrete
+//! liveness violation, not progress.
 //!
 //! Guarantee boundary: this is deployed LiteSVM evidence for the four wrapper trade routes and the
 //! uniquely attributable one-asset residual class. The engine's production selector and rank
@@ -29,7 +34,7 @@ use super::*;
 use crate::support::{
     fuzz_model::{
         assert_public_encumbrance_census, assert_public_stock_census, execute_trade_route,
-        run_pending_close_rank_oracle,
+        run_cure_pending_obligation_dos_probe, run_pending_close_rank_oracle,
     },
     v16_svm::{MarketConfig, V16Svm, PRIMARY_ACTOR_COUNT, TX_CU_LIMIT},
 };
@@ -57,6 +62,26 @@ fn v16_program_pending_close_residual_is_part_of_the_public_crank_rank() {
         .expect("public AdvanceClose must strictly reduce the stateful liveness rank");
     assert!(evidence.residual_before > evidence.residual_after);
     assert!(evidence.coverage.crank_progress > 0, "{evidence:?}");
+}
+
+#[test]
+fn v16_program_cured_close_releases_counterparty_obligation() {
+    let evidence = run_cure_pending_obligation_dos_probe()
+        .expect("a public cure must leave a bounded crank path for the counterparty obligation");
+    assert!(evidence.close_canceled, "{evidence:?}");
+    assert_eq!(evidence.pending_obligation_count, 0, "{evidence:?}");
+    assert_eq!(evidence.retained_basis_pos_q, 0, "{evidence:?}");
+    assert_eq!(evidence.retained_loss_weight, 0, "{evidence:?}");
+    assert!(evidence.progressing_cranks > 0, "{evidence:?}");
+    assert_eq!(evidence.successful_noop_cranks, 0, "{evidence:?}");
+    assert!(!evidence.unrelated_trade_rejected, "{evidence:?}");
+    assert!(!evidence.owner_withdraw_rejected, "{evidence:?}");
+    if evidence.bankruptcy_hlock_active {
+        assert!(
+            !evidence.unrelated_trade_rejected && !evidence.owner_withdraw_rejected,
+            "a surviving aggregate lock must remain scope-local: {evidence:?}"
+        );
+    }
 }
 
 fn portfolio_is_economically_terminal(env: &V16Svm, actor: usize) -> bool {
