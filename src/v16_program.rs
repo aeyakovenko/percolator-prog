@@ -993,6 +993,11 @@ pub mod state {
         Ok((id, next))
     }
 
+    #[cfg(kani)]
+    pub fn kani_allocate_portfolio_id(next: u64) -> Result<(u64, u64), ProgramError> {
+        allocate_portfolio_id(next)
+    }
+
     #[inline]
     pub fn read_portfolio_position_epoch(data: &[u8]) -> Result<u64, ProgramError> {
         check_header(data, KIND_PORTFOLIO)?;

@@ -661,10 +661,12 @@ impl MarketIntentKind {
 pub struct IncarnationDiscovery {
     pub kind: PortfolioIntentKind,
     pub old_portfolio_id: u64,
+    pub intermediate_portfolio_id: u64,
     pub new_portfolio_id: u64,
     pub accepted_stale_intent: bool,
     pub mutated_economic_state: bool,
     pub compute_units: Option<u64>,
+    pub public_trace: PublicTraceEvidence,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2049,13 +2051,16 @@ fn finish_portfolio_incarnation_discovery(
     env: &mut V16Svm,
     kind: PortfolioIntentKind,
     old_portfolio_id: u64,
+    intermediate_portfolio_id: u64,
     new_portfolio_id: u64,
     retained: Transaction,
     supply_before: u128,
 ) -> Result<IncarnationDiscovery, String> {
-    if new_portfolio_id <= old_portfolio_id {
+    if intermediate_portfolio_id <= old_portfolio_id
+        || new_portfolio_id <= intermediate_portfolio_id
+    {
         return Err(format!(
-            "portfolio incarnation did not advance: {old_portfolio_id} -> {new_portfolio_id}"
+            "portfolio incarnation did not advance across A-B-A: {old_portfolio_id} -> {intermediate_portfolio_id} -> {new_portfolio_id}"
         ));
     }
     let before = fingerprint(env);
@@ -2065,6 +2070,12 @@ fn finish_portfolio_incarnation_discovery(
         return Err(format!(
             "{kind:?} incarnation probe changed SPL supply: {supply_before} -> {}",
             env.token_supply_observed()
+        ));
+    }
+    let public_trace = env.finish_public_trace();
+    if public_trace.out_of_band_economic_mutations != 0 {
+        return Err(format!(
+            "{kind:?} incarnation probe used out-of-band economic mutation"
         ));
     }
 
@@ -2079,10 +2090,12 @@ fn finish_portfolio_incarnation_discovery(
             Ok(IncarnationDiscovery {
                 kind,
                 old_portfolio_id,
+                intermediate_portfolio_id,
                 new_portfolio_id,
                 accepted_stale_intent: true,
                 mutated_economic_state,
                 compute_units: Some(success.compute_units),
+                public_trace,
             })
         }
         Err(_) => {
@@ -2094,10 +2107,12 @@ fn finish_portfolio_incarnation_discovery(
             Ok(IncarnationDiscovery {
                 kind,
                 old_portfolio_id,
+                intermediate_portfolio_id,
                 new_portfolio_id,
                 accepted_stale_intent: false,
                 mutated_economic_state: false,
                 compute_units: None,
+                public_trace,
             })
         }
     }
@@ -2169,6 +2184,7 @@ fn discover_convert_portfolio_incarnation_replay(
         },
     );
     let supply_before = env.token_supply_observed();
+    env.begin_public_trace();
     env.top_up_backing_bucket(1, 300, 1_000)
         .map_err(|error| format!("fund short-side backing: {error}"))?;
     let released = create_released_pnl(
@@ -2189,11 +2205,9 @@ fn discover_convert_portfolio_incarnation_replay(
         .map_err(|error| format!("empty old PnL portfolio: {error}"))?;
     env.close_primary_portfolio(SUBJECT)
         .map_err(|error| format!("close old PnL portfolio: {error}"))?;
-    env.fund_closed_primary_portfolio(SUBJECT, 1_000_000_000)
-        .map_err(|error| format!("fund replacement PnL portfolio: {error}"))?;
-    env.reinitialize_primary_portfolio(SUBJECT)
-        .map_err(|error| format!("initialize replacement PnL portfolio: {error}"))?;
-    let new_portfolio_id = env.primary_portfolio_id(SUBJECT);
+    let (intermediate_portfolio_id, new_portfolio_id) = env
+        .cycle_closed_primary_portfolio_through_owner(SUBJECT, 2)
+        .map_err(|error| format!("cycle replacement PnL portfolio owner A-B-A: {error}"))?;
     create_released_pnl(
         &mut env,
         SUBJECT,
@@ -2207,6 +2221,7 @@ fn discover_convert_portfolio_incarnation_replay(
         &mut env,
         kind,
         old_portfolio_id,
+        intermediate_portfolio_id,
         new_portfolio_id,
         retained,
         supply_before,
@@ -2233,6 +2248,7 @@ fn discover_rebalance_portfolio_incarnation_replay(
         },
     );
     let supply_before = env.token_supply_observed();
+    env.begin_public_trace();
     env.trade_no_cpi(SUBJECT, COUNTERPARTY, 0, OLD_SIZE_Q, PRICE, 0)
         .map_err(|error| format!("open old rebalance position: {error}"))?;
     let old_portfolio_id = env.primary_portfolio_id(SUBJECT);
@@ -2243,11 +2259,9 @@ fn discover_rebalance_portfolio_incarnation_replay(
         .map_err(|error| format!("empty old rebalance portfolio: {error}"))?;
     env.close_primary_portfolio(SUBJECT)
         .map_err(|error| format!("close old rebalance portfolio: {error}"))?;
-    env.fund_closed_primary_portfolio(SUBJECT, 1_000_000_000)
-        .map_err(|error| format!("fund replacement rebalance portfolio: {error}"))?;
-    env.reinitialize_primary_portfolio(SUBJECT)
-        .map_err(|error| format!("initialize replacement rebalance portfolio: {error}"))?;
-    let new_portfolio_id = env.primary_portfolio_id(SUBJECT);
+    let (intermediate_portfolio_id, new_portfolio_id) = env
+        .cycle_closed_primary_portfolio_through_owner(SUBJECT, 2)
+        .map_err(|error| format!("cycle replacement rebalance owner A-B-A: {error}"))?;
     env.deposit_primary(SUBJECT, DEPOSIT)
         .map_err(|error| format!("fund replacement rebalance portfolio: {error}"))?;
     env.trade_no_cpi(SUBJECT, COUNTERPARTY, 0, NEW_SIZE_Q, PRICE, 0)
@@ -2256,6 +2270,7 @@ fn discover_rebalance_portfolio_incarnation_replay(
         &mut env,
         kind,
         old_portfolio_id,
+        intermediate_portfolio_id,
         new_portfolio_id,
         retained,
         supply_before,
@@ -2286,6 +2301,7 @@ fn discover_forfeit_portfolio_incarnation_replay(
         },
     );
     let supply_before = env.token_supply_observed();
+    env.begin_public_trace();
     env.configure_permissionless_resolve(100, 1)
         .map_err(|error| format!("configure recovery lifecycle: {error}"))?;
     env.trade_no_cpi(SUBJECT, COUNTERPARTY, 0, SIZE_Q, PRICE, 0)
@@ -2308,11 +2324,9 @@ fn discover_forfeit_portfolio_incarnation_replay(
         .map_err(|error| format!("restart asset for replacement recovery leg: {error}"))?;
     env.configure_auth_mark(false, 0, 3, PRICE)
         .map_err(|error| format!("configure replacement recovery mark: {error}"))?;
-    env.fund_closed_primary_portfolio(SUBJECT, 1_000_000_000)
-        .map_err(|error| format!("fund replacement recovery portfolio: {error}"))?;
-    env.reinitialize_primary_portfolio(SUBJECT)
-        .map_err(|error| format!("initialize replacement recovery portfolio: {error}"))?;
-    let new_portfolio_id = env.primary_portfolio_id(SUBJECT);
+    let (intermediate_portfolio_id, new_portfolio_id) = env
+        .cycle_closed_primary_portfolio_through_owner(SUBJECT, 2)
+        .map_err(|error| format!("cycle replacement recovery owner A-B-A: {error}"))?;
     env.deposit_primary(SUBJECT, DEPOSIT)
         .map_err(|error| format!("fund replacement recovery portfolio: {error}"))?;
     env.trade_no_cpi(SUBJECT, COUNTERPARTY, 0, SIZE_Q, PRICE, 0)
@@ -2324,6 +2338,7 @@ fn discover_forfeit_portfolio_incarnation_replay(
         &mut env,
         kind,
         old_portfolio_id,
+        intermediate_portfolio_id,
         new_portfolio_id,
         retained,
         supply_before,
@@ -2351,6 +2366,7 @@ fn discover_one_portfolio_incarnation_replay(
     }
     let mut env = V16Svm::new(seed, MarketConfig::default());
     let supply_before = env.token_supply_observed();
+    env.begin_public_trace();
     let old_portfolio_id = env.primary_portfolio_id(SUBJECT);
     let retained = retained_portfolio_intent(&mut env, kind);
 
@@ -2359,11 +2375,9 @@ fn discover_one_portfolio_incarnation_replay(
         .map_err(|error| format!("empty old portfolio: {error}"))?;
     env.close_primary_portfolio(SUBJECT)
         .map_err(|error| format!("close old portfolio: {error}"))?;
-    env.fund_closed_primary_portfolio(SUBJECT, 1_000_000_000)
-        .map_err(|error| format!("fund replacement portfolio: {error}"))?;
-    env.reinitialize_primary_portfolio(SUBJECT)
-        .map_err(|error| format!("initialize replacement portfolio: {error}"))?;
-    let new_portfolio_id = env.primary_portfolio_id(SUBJECT);
+    let (intermediate_portfolio_id, new_portfolio_id) = env
+        .cycle_closed_primary_portfolio_through_owner(SUBJECT, 2)
+        .map_err(|error| format!("cycle replacement portfolio owner A-B-A: {error}"))?;
     let replacement_capital = replacement_capital(kind);
     if replacement_capital != 0 {
         env.deposit_primary(SUBJECT, replacement_capital)
@@ -2378,6 +2392,7 @@ fn discover_one_portfolio_incarnation_replay(
         &mut env,
         kind,
         old_portfolio_id,
+        intermediate_portfolio_id,
         new_portfolio_id,
         retained,
         supply_before,

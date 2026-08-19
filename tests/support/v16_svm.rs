@@ -1007,6 +1007,55 @@ impl V16Svm {
         )
     }
 
+    pub fn cycle_closed_primary_portfolio_through_owner(
+        &mut self,
+        actor_index: usize,
+        intermediate_owner_index: usize,
+    ) -> Result<(u64, u64), String> {
+        assert_ne!(
+            actor_index, intermediate_owner_index,
+            "portfolio owner cycle requires a distinct intermediate owner"
+        );
+        let portfolio = self.actors[actor_index].portfolio;
+        let intermediate_owner_init = copy_keypair(&self.actors[intermediate_owner_index].signer);
+        let intermediate_owner_close = copy_keypair(&self.actors[intermediate_owner_index].signer);
+        let intermediate_owner_pubkey = intermediate_owner_init.pubkey();
+
+        self.fund_closed_primary_portfolio(actor_index, 1_000_000_000)?;
+        self.send_program(
+            ProgInstruction::InitPortfolio,
+            vec![
+                AccountMeta::new(intermediate_owner_pubkey, true),
+                AccountMeta::new(self.market, false),
+                AccountMeta::new(portfolio, false),
+            ],
+            &[intermediate_owner_init],
+        )?;
+        let intermediate_portfolio_id = self.primary_portfolio_id(actor_index);
+        let expected_sequence = self.primary_portfolio_matcher_sequence(actor_index);
+        let position_epoch = self.primary_portfolio_position_epoch(actor_index);
+        self.send_program(
+            ProgInstruction::ClosePortfolio {
+                portfolio_id: intermediate_portfolio_id,
+                expected_sequence,
+                position_epoch,
+            },
+            vec![
+                AccountMeta::new(intermediate_owner_pubkey, true),
+                AccountMeta::new(self.market, false),
+                AccountMeta::new(portfolio, false),
+            ],
+            &[intermediate_owner_close],
+        )?;
+
+        self.fund_closed_primary_portfolio(actor_index, 1_000_000_000)?;
+        self.reinitialize_primary_portfolio(actor_index)?;
+        Ok((
+            intermediate_portfolio_id,
+            self.primary_portfolio_id(actor_index),
+        ))
+    }
+
     pub fn primary_portfolio_id(&self, actor_index: usize) -> u64 {
         let data = self.primary_portfolio_data(actor_index);
         state::read_portfolio_id(&data).expect("decode primary portfolio id")

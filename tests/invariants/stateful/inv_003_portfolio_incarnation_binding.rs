@@ -2,9 +2,9 @@
 //!
 //! Normative obligation: portfolio-scoped consent cannot cross close and
 //! same-pubkey recreation. The fuzzer generates retained requests for the full
-//! portfolio-intent registry, performs a public close/recreate at the same
-//! pubkey, and then replays the stale request. Every route must reject before
-//! mutation and preserve exact rollback.
+//! portfolio-intent registry, performs a public A -> B -> A owner cycle at the
+//! same pubkey, and then replays A's original request after A owns the account
+//! again. Every route must reject before mutation and preserve exact rollback.
 
 use super::*;
 
@@ -14,7 +14,8 @@ fn v16_program_cure_consent_binds_same_pubkey_portfolio_incarnation() {
         crate::support::fuzz_model::run_cure_portfolio_incarnation_replay_probe([0x3c; 32])
             .expect("public cure-incarnation replay route");
     assert!(
-        evidence.new_portfolio_id > evidence.old_portfolio_id,
+        evidence.intermediate_portfolio_id > evidence.old_portfolio_id
+            && evidence.new_portfolio_id > evidence.intermediate_portfolio_id,
         "{evidence:?}"
     );
     assert!(evidence.stale_replay_rejected, "{evidence:?}");
@@ -48,9 +49,13 @@ proptest! {
         for (expected, discovery) in PortfolioIntentKind::ALL.into_iter().zip(&discoveries) {
             prop_assert_eq!(discovery.kind, expected);
             prop_assert!(
-                discovery.new_portfolio_id > discovery.old_portfolio_id,
-                "{:?}: portfolio id did not advance across close/recreate",
-                expected
+                discovery.intermediate_portfolio_id > discovery.old_portfolio_id
+                    && discovery.new_portfolio_id > discovery.intermediate_portfolio_id,
+                "{:?}: portfolio id did not advance across A-B-A recreation: {} -> {} -> {}",
+                expected,
+                discovery.old_portfolio_id,
+                discovery.intermediate_portfolio_id,
+                discovery.new_portfolio_id,
             );
             prop_assert!(
                 !discovery.accepted_stale_intent,
@@ -67,6 +72,26 @@ proptest! {
                 None,
                 "{:?}: stale replay should have no successful CU result",
                 expected
+            );
+            prop_assert_eq!(
+                discovery.public_trace.out_of_band_economic_mutations,
+                0,
+                "{:?}: replay evidence must use public transitions only",
+                expected,
+            );
+            let replay = discovery.public_trace.steps.last()
+                .ok_or_else(|| TestCaseError::fail(format!("{expected:?}: missing replay trace")))?;
+            prop_assert!(!replay.succeeded, "{:?}: stale replay trace", expected);
+            prop_assert_eq!(
+                replay.rejected_exact_writable_rollback,
+                Some(true),
+                "{:?}: stale replay must roll back every writable account",
+                expected,
+            );
+            prop_assert!(
+                replay.token_deltas.iter().all(|(_, delta)| *delta == 0),
+                "{:?}: stale replay must move no SPL value",
+                expected,
             );
         }
     }

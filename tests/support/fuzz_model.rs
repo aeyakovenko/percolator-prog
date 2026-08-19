@@ -6488,6 +6488,7 @@ pub struct CurePendingObligationDosEvidence {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CurePortfolioIncarnationReplayEvidence {
     pub old_portfolio_id: u64,
+    pub intermediate_portfolio_id: u64,
     pub new_portfolio_id: u64,
     pub stale_replay_rejected: bool,
     pub rejected_exact_rollback: bool,
@@ -6813,18 +6814,15 @@ pub fn run_cure_portfolio_incarnation_replay_probe(
         .env
         .close_primary_portfolio(LOSER)
         .map_err(|error| format!("close cured old portfolio: {error}"))?;
-    runner
+    let (intermediate_portfolio_id, new_portfolio_id) = runner
         .env
-        .fund_closed_primary_portfolio(LOSER, 1_000_000_000)
-        .map_err(|error| format!("fund replacement portfolio account: {error}"))?;
-    runner
-        .env
-        .reinitialize_primary_portfolio(LOSER)
-        .map_err(|error| format!("reinitialize replacement portfolio: {error}"))?;
-    let new_portfolio_id = runner.env.primary_portfolio_id(LOSER);
-    if new_portfolio_id <= old_portfolio_id {
+        .cycle_closed_primary_portfolio_through_owner(LOSER, SECOND_WINNER)
+        .map_err(|error| format!("cycle replacement portfolio owner A-B-A: {error}"))?;
+    if intermediate_portfolio_id <= old_portfolio_id
+        || new_portfolio_id <= intermediate_portfolio_id
+    {
         return Err(format!(
-            "portfolio incarnation did not advance: {old_portfolio_id} -> {new_portfolio_id}"
+            "portfolio incarnation did not advance across A-B-A: {old_portfolio_id} -> {intermediate_portfolio_id} -> {new_portfolio_id}"
         ));
     }
     runner
@@ -6877,6 +6875,7 @@ pub fn run_cure_portfolio_incarnation_replay_probe(
 
     Ok(CurePortfolioIncarnationReplayEvidence {
         old_portfolio_id,
+        intermediate_portfolio_id,
         new_portfolio_id,
         stale_replay_rejected,
         rejected_exact_rollback,

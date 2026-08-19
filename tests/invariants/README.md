@@ -102,11 +102,15 @@ already proves a failed initialization neither consumes `next_portfolio_id` nor 
 incarnation. `ClaimResolvedPayoutTopup` and the delayed `CloseResolved` rail are permissionless
 canonical payout operations rather than retained owner consent. `CureAndCancelClose` tag 42 now
 encodes the current `portfolio_id` and checks it before token or engine mutation. Its all-public
-red/green route creates and cures one real close, closes and recreates the portfolio at the same
-pubkey under the same owner, creates a second real close, and replays the old cure. On the preceding
+red/green route creates and cures one real close, cycles the same portfolio pubkey through owners
+A -> B -> A, creates a second real close, and replays A's old cure only after A owns it again. The
+other eleven retained families now use the same two-recreation owner-revival route, including real
+replacement position and Recovery episodes, and emit a public trace with zero out-of-band economic
+mutation. On the preceding
 wire the replay debited 2,000,000 quote atoms and canceled the replacement close; the current wire
 rejects with exact rollback, while a fresh-incarnation cure remains live. Kani proves both encoded
-fields survive decoding and every incarnationless legacy payload rejects.
+fields survive decoding, every incarnationless legacy payload rejects, every successful allocator
+step is strictly monotonic, and three successive incarnations can never reuse the original ID.
 
 Verification at this checkpoint:
 
@@ -120,14 +124,14 @@ Verification at this checkpoint:
 | Focused INV-087 complete wrapper-owned persisted-field roster | 8/8 | rerun on the 2026-08-18 PR135 test head |
 | Focused INV-015 canonical-length and malformed-account matrix | 7/7 CU; 12 market/portfolio plus 14 auxiliary malformed cases | rerun on the 2026-08-18 PR135 test head |
 | Focused INV-016 canonical PDA matrices and source roster | 5/5; 57 custody substitutions plus 9 matcher seed substitutions | rerun on the 2026-08-18 PR135 test head |
-| Focused INV-003 portfolio lifecycle, cure ABA, and source-completeness roster | 4/4 runtime plus 2/2 Kani; all 12 retained variants and 16 portfolio-ID fields | rerun on the 2026-08-18 PR135 production head |
+| Focused INV-003 portfolio lifecycle, cure ABA, and source-completeness roster | 4/4 runtime plus 4/4 Kani; all 12 retained variants and 16 portfolio-ID fields | rerun on the 2026-08-18 PR135 production head |
 | `cargo check --tests` | pass | rerun on the 2026-08-18 PR135 test head |
 | `cargo test --lib` | 7/7 | rerun on the 2026-08-18 PR135 test head |
 | `cargo test --test v16_program_stateful_fuzz` | 143/143 | rerun on the 2026-08-18 PR135 production head |
 | Registry/manifest checks in the INV-079 module | 8/8 | rerun on the 2026-08-18 PR135 test head |
 | `cargo test --test v16_program_fuzz_regressions` | 87/87 | rerun on the 2026-08-18 PR135 test head |
 | `cargo test --test v16_cu` | 743/743 | rerun on the 2026-08-18 PR135 test head |
-| `cargo kani --tests -j 8 --output-format terse` | 84/84 | full rerun on the 2026-08-18 PR135 production head |
+| `cargo kani --tests -j 8 --output-format terse` | 86/86 | full rerun on the 2026-08-18 PR135 production head |
 | Engine PR177 `cargo test` plus released-obligation Kani contracts | 150/150; 2/2 proofs | rerun on engine commit `72195914` |
 
 This tranche changes the `ClosePortfolio` and `CureAndCancelClose` wire contracts, deposit/close
@@ -145,29 +149,26 @@ and formal-composition gaps.
 
 ### Immediate next work
 
-1. Extend INV-003 beyond the closed production-route roster: cover multiple consecutive
-   close/recreate depths, owner changes, and the cross-product with position/recovery episodes.
-   No known owner-signed portfolio mutation remains without a `portfolio_id` field.
-2. Complete the live open-issue coverage roster. The retained-operation matrix covers eleven
+1. Complete the live open-issue coverage roster. The retained-operation matrix covers eleven
    operation families: it independently reproduces same-incarnation `ConvertReleasedPnl` retry
    value redirection (issue 387), while `RebalanceReduce` rejects the same-epoch retry with exact
    rollback on the current pin (issue 389). INV-013 now closes delayed `ClosePortfolio` consent
    (issue 402) with public red/green, generated ABA, rollback, fresh-close liveness, and Kani binding
    evidence.
-3. Close the now-publicly-reproduced crank-cadence violations (issues 407 and 409). Define one
+2. Close the now-publicly-reproduced crank-cadence violations (issues 407 and 409). Define one
    canonical elapsed-time price path and funding integral that do not depend on transaction
    partitioning, preserve both price directions and all oracle modes, and require bounded work
    independent of elapsed slots. Turn the five INV-052 counterexamples into equality assertions,
    add stale/fresh target transitions and maximum-shape CU controls, and keep the existing engine
    K/F settlement-partition proof as a separate downstream guarantee.
-4. Extend INV-086's now-terminal-aware bounded graph with a publicly reachable underfunded receipt
+3. Extend INV-086's now-terminal-aware bounded graph with a publicly reachable underfunded receipt
    seed and a successful `ClaimResolvedPayoutTopup` edge. The node already includes payout-ledger,
    receipt, close-progress, and terminal-resolution state. Do not assume that two ordinary
    bankrupt closes produce this state: `AdvanceClose` socializes uncovered PnL before payout, so a
    candidate seed must assert a genuinely pending receipt before claiming top-up coverage. Keep
    the finite graph explicitly non-universal, or prove that the value-changing route is unreachable
    from the supported public lifecycle and classify the existing legacy-state tests accordingly.
-5. Cross that reference graph with recovery, backing expiry, claimant order, prior
+4. Cross that reference graph with recovery, backing expiry, claimant order, prior
    insurance, authority epochs, retirement/reactivation, and the new retained-operation classes.
 
 Wrapper proofs should remain wrapper-specific: decoding, account-role/authentication boundaries,
@@ -196,9 +197,9 @@ state-preserving because the wrapper returns the error and SVM rollback applies.
 | Suite | Tests | Evidence |
 | --- | ---: | --- |
 | `public_sbf/` | 87 | Deterministic public SBF/LiteSVM counterexamples, regressions, decoder corpora, trace-schema checks, and manifest checks, including paired-world conversion-retry extraction, fixed-pin rebalance-retry rejection, and issue-402 delayed-close red/green plus failed-deposit rollback |
-| `stateful/` | 143 | Proptest-generated public routes, now including generated authority and permissionless-stale resolution and all three resolved payout rails plus an eleven-family retained-operation retry matrix, including same-incarnation PnL conversion and position-epoch-bound rebalance reduction; generated close-consent ABA coverage now includes the all-public two-close `CureAndCancelClose` same-pubkey replay with exact stale rollback and fresh-cure liveness; bounded lifecycle models cover scarce-backing pair/chunk allocation orders, a 16-cell positive-claim boundary partition, all 3! matcher-control/trade landing orders, all 32 open-route/close-route/winner-side realized-PnL attribution worlds, an independent raw-header/portfolio/domain stock census and account/bucket/reservation encumbrance census after every generated action, exact live insurance/backing withdrawal custody and ledger deltas, nonvacuous owner recovery forfeits, permissionless abandoned-asset force close, Recovery-to-restart-to-fresh-trade composition, stale-market permissionless resolution through terminal disposition, and Active-to-DrainOnly risk rejection/reduction-to-empty-retirement composition with exact generation/position/OI/episode/custody progress, all eight trade-family/source-side counterparty-lien lifecycles, eight reciprocal cross-asset credit-cycle worlds, 20 user-operation/admission cells, 12 caller-priced boundary-exit cells, the four-state retirement-obligation lattice, a four-state Recovery resource-failure lattice, stale-refresh later-leg observation boundaries in Live and mixed Recovery/Live portfolios, focused public pending-close residual and cured-obligation release rank edges, a ten-prefix/two-configuration public crank-rank graph, all 183 public action words through depth two over a thirteen-action deployed/reference alphabet with normalized resolution/payout/receipt/close state, a Recovery crank/owner-exit classifier boundary, and all 5! claimant orders, including generalized active-leg/currentness, source-claim attribution, source-credit-rate, authenticated-expiry, state-indexed liveness witnesses, and reference-model/deployed-transition equivalence |
+| `stateful/` | 143 | Proptest-generated public routes, now including generated authority and permissionless-stale resolution and all three resolved payout rails plus an eleven-family retained-operation retry matrix, including same-incarnation PnL conversion and position-epoch-bound rebalance reduction; generated portfolio-consent ABA coverage cycles every retained family through same-pubkey A -> B -> A ownership, including real position and Recovery episodes, while the all-public two-close `CureAndCancelClose` replay proves exact stale rollback and fresh-cure liveness; bounded lifecycle models cover scarce-backing pair/chunk allocation orders, a 16-cell positive-claim boundary partition, all 3! matcher-control/trade landing orders, all 32 open-route/close-route/winner-side realized-PnL attribution worlds, an independent raw-header/portfolio/domain stock census and account/bucket/reservation encumbrance census after every generated action, exact live insurance/backing withdrawal custody and ledger deltas, nonvacuous owner recovery forfeits, permissionless abandoned-asset force close, Recovery-to-restart-to-fresh-trade composition, stale-market permissionless resolution through terminal disposition, and Active-to-DrainOnly risk rejection/reduction-to-empty-retirement composition with exact generation/position/OI/episode/custody progress, all eight trade-family/source-side counterparty-lien lifecycles, eight reciprocal cross-asset credit-cycle worlds, 20 user-operation/admission cells, 12 caller-priced boundary-exit cells, the four-state retirement-obligation lattice, a four-state Recovery resource-failure lattice, stale-refresh later-leg observation boundaries in Live and mixed Recovery/Live portfolios, focused public pending-close residual and cured-obligation release rank edges, a ten-prefix/two-configuration public crank-rank graph, all 183 public action words through depth two over a thirteen-action deployed/reference alphabet with normalized resolution/payout/receipt/close state, a Recovery crank/owner-exit classifier boundary, and all 5! claimant orders, including generalized active-leg/currentness, source-claim attribution, source-credit-rate, authenticated-expiry, state-indexed liveness witnesses, and reference-model/deployed-transition equivalence |
 | `cu/` | 743 | Full `v16_cu` public-route, metamorphic, rollback, liveness, arithmetic-differential, and max-shape CU inventory, including issue-404 transient-rent boundaries, issue-405 selected-Switchboard-result provenance, issue-406 matcher-inventory synchronization, issue-408 maintenance seniority, canonical portfolio and auxiliary-ledger account sizing, complete portfolio-ID/PDA/token-move callsite ownership, five nonvacuous issues-407/409 crank-cadence counterexamples, and a complete six-struct wrapper-owned persisted-field roster; the cadence violations remain open, with no standalone top-level tests |
-| `kani/` | 84 | Symbolic wrapper arithmetic, retained-close tuple binding, deposit-sequence invalidation, matcher binding and synchronization policy, ordering, strict-decoder, and proof-assumption nonvacuity harnesses, including tag-42 field preservation and rejection of every incarnationless legacy cure payload; full `cargo kani --tests` remains the required verification command |
+| `kani/` | 86 | Symbolic wrapper arithmetic, retained-close tuple binding, deposit-sequence invalidation, matcher binding and synchronization policy, ordering, strict-decoder, and proof-assumption nonvacuity harnesses, including tag-42 field preservation, rejection of every incarnationless legacy cure payload, and exact deployed portfolio-ID allocator monotonicity/non-reuse; full `cargo kani --tests` remains the required verification command |
 
 Most deterministic and stateful LoF adapters still reproduce quarantined vulnerable behavior;
 fixed-pin regressions explicitly require safe rejection or preservation instead. A vulnerable-pin
@@ -256,7 +257,7 @@ charter.
 | --- | --- | --- |
 | INV-001 | Independent + Direct | `public_sbf/inv_001_market_incarnation_binding.rs`, `stateful/inv_001_market_incarnation_binding.rs` |
 | INV-002 | Independent + Direct + F + SVM/CU | `public_sbf/inv_002_asset_generation_binding.rs`, `stateful/inv_002_asset_generation_binding.rs`, `stateful/inv_081_success_state_validity_over_complete_public_routes.rs`, and `cu/inv_002_asset_generation_binding.rs`. The shared route now composes public shutdown, exact old-generation exposure removal, monotonic restart, and a new trade whose legs and OI bind only the fresh generation. |
-| INV-003 | Independent + P + Static roster + Direct + SVM/CU | `public_sbf/inv_003_portfolio_incarnation_binding.rs`, `stateful/inv_003_portfolio_incarnation_binding.rs`, `cu/inv_003_portfolio_incarnation_binding.rs`, and `kani/inv_022_instruction_decoding_and_schema_upgrade_safety.rs`; all 12 ID-bearing retained routes and 16 production fields are owned, including an all-public two-close cure ABA red/green with exact rollback and a fresh-cure liveness control |
+| INV-003 | Independent + P + Static roster + Direct + SVM/CU | `public_sbf/inv_003_portfolio_incarnation_binding.rs`, `stateful/inv_003_portfolio_incarnation_binding.rs`, `cu/inv_003_portfolio_incarnation_binding.rs`, `kani/inv_003_portfolio_incarnation_binding.rs`, and `kani/inv_022_instruction_decoding_and_schema_upgrade_safety.rs`; all 12 ID-bearing retained routes and 16 production fields are owned, including public A -> B -> A same-pubkey cycles, position/Recovery/close episode replacements, exact rollback, fresh-cure liveness, and deployed allocator monotonicity/non-reuse proofs |
 | INV-004 | Independent + P + SVM/CU | `stateful/inv_004_position_episode_binding.rs`, `kani/inv_004_position_episode_binding.rs`, `cu/inv_004_position_episode_binding.rs`, and the issue-406 route matrix in `cu/inv_012_capability_and_delegate_scope.rs` cover deterministic retained reduction/recovery-forfeit replay plus exact epoch advance and capability invalidation for out-of-matcher position mutations |
 | INV-005 | Independent + Direct + SVM/CU | `public_sbf/inv_005_authority_incarnation_binding.rs`, `stateful/inv_005_authority_incarnation_binding.rs`, `cu/inv_005_authority_incarnation_binding.rs` |
 | INV-006 | SVM/CU | `public_sbf/inv_006_program_chain_message_type_and_version_binding.rs` (signed program, market, instruction bytes, and recent-blockhash mutation with exact rollback; explicit genesis-domain field remains absent) |
@@ -346,7 +347,7 @@ charter.
 
 ## Exhaustiveness audit
 
-Audit date: 2026-08-08. The answer to "is every invariant exhaustively proven or tested as much as
+Audit last reconciled: 2026-08-18. The answer to "is every invariant exhaustively proven or tested as much as
 computationally feasible?" is **no**. The table above records evidence ownership, not completion.
 This audit read the normative `Required tests` clause and the bodies of every owned and
 cross-referenced test/proof for each invariant. Passing tests, file presence, a vulnerable-pin
@@ -361,18 +362,19 @@ Verdicts used below:
 - **FRONTIER** - direct whole-route proof or exhaustive reachability is currently solver/state-space
   limited, but the row names the strongest feasible decomposition or differential backstop still
   missing.
+- **CLOSED** - the currently exposed production surface satisfies the charter's required tests and
+  strongest computationally feasible proof/test composition; later API expansion reopens the row.
 - **N/A** - the feature is not exposed by this wrapper. It must remain absent or be re-opened when
   the API is introduced.
 
-There are no **CLOSED** rows in this audit. That does not mean the existing evidence is weak; it
-means every non-N/A invariant still has at least one material charter clause or stronger feasible
-method outstanding. The current ledger is 58 **OPEN-T**, 20 **OPEN-D**, 10 **FRONTIER**, and one
-**N/A**.
+The current ledger is one **CLOSED**, 57 **OPEN-T**, 20 **OPEN-D**, 10 **FRONTIER**, and one
+**N/A**. A closed row is scoped to the current public API and named assumptions, not a claim that
+the whole program is LoF/DoS-free.
 
 ### Cross-cutting coverage bugs
 
 1. The charter requests `P` for 76 invariants, `F` for 85, `I` for 66, `M` for 32, `R` for 22,
-   and `C` for 2. Invariant-owned directories currently exist for only 9 `P`, 27 `F`, and 87 `I`
+   and `C` for 2. Invariant-owned directories currently exist for only 10 `P`, 27 `F`, and 87 `I`
    owners. File presence is only a lower bound; many owners cover one scenario rather than the
    required matrix. `special_method_coverage.tsv` now machine-indexes all `M`, `R`, and `C`
    obligations: all 32 `M` and both `C` rows have partial named evidence; 17 `R` rows now have
@@ -430,7 +432,7 @@ are machine-checked below so a future README edit cannot silently omit an invari
 | --- | --- | --- |
 | AUDIT-001 | OPEN-D | The 11-route public matrix is a live whole-market same-pubkey ABA counterexample, not a safety proof. Add a persistent program-assigned market generation, reject every stale route before mutation, and add explicit cross-market and cross-program controls. |
 | AUDIT-002 | OPEN-T | Fifteen retained asset-control families and all trade routes are covered. A shared whole-route composition now removes every old-generation exposure, requires a monotonic public restart, and attaches the next trade only to the fresh generation. Claim/capability families, a deliberately weakened `(market_id, asset_index)` negative encoding, wrapper Kani composition, and full metamorphic replay coverage remain. |
-| AUDIT-003 | OPEN-T | The production roster covers all 12 owner-signed portfolio request families and all 16 encoded IDs, including pre-CPI and pre-mutation guards. The dedicated all-public cure route establishes both old and replacement close episodes, rejects the stale same-owner/same-pubkey cure with exact rollback, and proves a fresh cure remains live; decoder Kani rejects every legacy incarnationless payload. Extend the matrix across multiple recreation depths, owner changes, and position/recovery episode cross-products before treating finite evidence as exhaustive. |
+| AUDIT-003 | CLOSED | The production-source roster owns all 12 owner-signed portfolio request families and all 16 encoded IDs, including pre-CPI and pre-mutation guards. Every family now crosses a public same-pubkey A -> B -> A two-recreation sequence and rejects A's original request only after A owns the replacement again, with exact writable/SPL rollback and zero out-of-band economic mutation. Rebalance, forfeit, and cure cells establish fresh position, Recovery, and close episodes; the cure red/green also proves fresh-incarnation liveness. Kani proves decoder field preservation, rejection of incarnationless tag-42 payloads, and strict nonzero monotonic allocation/non-reuse through the deployed allocator. The source roster reopens this row if a new retained portfolio field or route appears. |
 | AUDIT-004 | OPEN-T | Trade open/close, reduction, recovery-forfeit, force-close/reuse, and permissionless-liquidation matcher synchronization are covered. Cross-zero, side reset, conversion, claim, recovery conversion, terminal receipt, and resolved-claim episode transitions are missing from the retained replay matrix. |
 | AUDIT-005 | OPEN-D | Current tests still discover authority `A -> B -> A` revival. Add a monotonic epoch for each authority scope, prove atomic epoch rotation, and flip both `A -> B -> A` and disable/re-enable matrices to rejection. |
 | AUDIT-006 | OPEN-D | Transaction tampering covers program, market, kind, bytes, and blockhash, but no retained-message genesis/chain domain or explicit message-version field exists. Prefix-compatible, downgrade, and cross-cluster replay need a typed intent header and decoder fuzz. |

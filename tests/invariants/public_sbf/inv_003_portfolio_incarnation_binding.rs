@@ -6,11 +6,12 @@
 //! or lamport mutation.
 //!
 //! Evidence in this file (I): one public SBF/LiteSVM matrix builds retained
-//! requests for every portfolio-scoped public route, closes and recreates the
-//! same portfolio pubkey, then replays the old transaction. The assertion is
+//! requests for every portfolio-scoped public route, cycles the same portfolio
+//! pubkey through owners A -> B -> A, then replays A's original transaction. The assertion is
 //! route-local: the stale request must reject, exact tracked state must roll
 //! back, SPL supply must stay fixed, and the replacement account's new
-//! `portfolio_id` must be larger than the old one.
+//! `portfolio_id` must be larger than both prior incarnations. The trace schema
+//! additionally proves every lifecycle edge is a real public transaction.
 
 use crate::support::invariant_discovery::{
     discover_portfolio_incarnation_replays, PortfolioIntentKind,
@@ -25,8 +26,12 @@ fn v16_program_all_retained_portfolio_intents_reject_after_same_pubkey_recreate(
     for (expected, discovery) in PortfolioIntentKind::ALL.into_iter().zip(&discoveries) {
         assert_eq!(discovery.kind, expected);
         assert!(
-            discovery.new_portfolio_id > discovery.old_portfolio_id,
-            "{expected:?}: portfolio id did not advance across close/recreate"
+            discovery.intermediate_portfolio_id > discovery.old_portfolio_id
+                && discovery.new_portfolio_id > discovery.intermediate_portfolio_id,
+            "{expected:?}: portfolio id did not advance across A-B-A recreation: {} -> {} -> {}",
+            discovery.old_portfolio_id,
+            discovery.intermediate_portfolio_id,
+            discovery.new_portfolio_id,
         );
         assert!(
             !discovery.accepted_stale_intent,
@@ -39,6 +44,25 @@ fn v16_program_all_retained_portfolio_intents_reject_after_same_pubkey_recreate(
         assert_eq!(
             discovery.compute_units, None,
             "{expected:?}: stale replay should have no successful CU result"
+        );
+        assert_eq!(
+            discovery.public_trace.out_of_band_economic_mutations, 0,
+            "{expected:?}: replay evidence must use public transitions only",
+        );
+        let replay = discovery
+            .public_trace
+            .steps
+            .last()
+            .expect("A-B-A trace includes the stale replay");
+        assert!(!replay.succeeded, "{expected:?}: stale replay trace");
+        assert_eq!(
+            replay.rejected_exact_writable_rollback,
+            Some(true),
+            "{expected:?}: stale replay must roll back every writable account",
+        );
+        assert!(
+            replay.token_deltas.iter().all(|(_, delta)| *delta == 0),
+            "{expected:?}: stale replay must move no SPL value",
         );
     }
 }
