@@ -8,6 +8,221 @@
 //! instruction errors and must leave persistent state unchanged.
 
 use super::*;
+use percolator_prog::constants;
+
+#[derive(Clone, Copy)]
+enum AuxiliaryLedgerKind {
+    Backing,
+    Insurance,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum AuxiliaryMalformedCase {
+    WrongOwner,
+    TooShort,
+    BadMagic,
+    BadVersion,
+    BadKind,
+    TrailingByte,
+    InvalidSemanticField,
+}
+
+fn inv015_sync_auxiliary_ledger_ix(
+    env: &V16CuEnv,
+    ledger: Pubkey,
+    kind: AuxiliaryLedgerKind,
+) -> Instruction {
+    let data = match kind {
+        AuxiliaryLedgerKind::Backing => {
+            ProgInstruction::SyncBackingDomainLedger { domain: 0 }.encode()
+        }
+        AuxiliaryLedgerKind::Insurance => ProgInstruction::SyncInsuranceLedger.encode(),
+    };
+    Instruction {
+        program_id: env.program_id,
+        accounts: vec![
+            AccountMeta::new(env.admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(ledger, false),
+        ],
+        data,
+    }
+}
+
+fn inv015_create_and_sync_auxiliary_ledger(
+    env: &mut V16CuEnv,
+    kind: AuxiliaryLedgerKind,
+    data_len: usize,
+) -> (Pubkey, Result<u64, String>) {
+    let ledger = Keypair::new();
+    let rent = env.svm.get_sysvar::<solana_sdk::rent::Rent>();
+    let create = system_instruction::create_account(
+        &env.payer.pubkey(),
+        &ledger.pubkey(),
+        rent.minimum_balance(data_len),
+        data_len as u64,
+        &env.program_id,
+    );
+    let sync = inv015_sync_auxiliary_ledger_ix(env, ledger.pubkey(), kind);
+    env.svm.expire_blockhash();
+    let result = send_raw_ixs(
+        &mut env.svm,
+        &env.payer,
+        vec![heap_ix(), cu_ix(), create, sync],
+        &[&env.admin, &ledger],
+    );
+    (ledger.pubkey(), result)
+}
+
+#[test]
+fn v16_program_auxiliary_ledgers_require_exact_public_account_length() {
+    for (kind, required_len, label) in [
+        (
+            AuxiliaryLedgerKind::Backing,
+            state::backing_domain_ledger_account_len(),
+            "backing",
+        ),
+        (
+            AuxiliaryLedgerKind::Insurance,
+            state::insurance_ledger_account_len(),
+            "insurance",
+        ),
+    ] {
+        let mut oversized_env = V16CuEnv::new();
+        let market_before = oversized_env
+            .svm
+            .get_account(&oversized_env.market)
+            .unwrap();
+        let (oversized, rejected) =
+            inv015_create_and_sync_auxiliary_ledger(&mut oversized_env, kind, required_len + 1);
+        assert!(
+            rejected.is_err(),
+            "{label} ledger with trailing storage must reject"
+        );
+        assert!(
+            oversized_env.svm.get_account(&oversized).is_none(),
+            "atomic rejection must roll back the oversized {label} ledger creation"
+        );
+        assert_eq!(
+            oversized_env
+                .svm
+                .get_account(&oversized_env.market)
+                .unwrap(),
+            market_before,
+            "oversized {label} ledger rejection must not mutate the market"
+        );
+
+        let mut exact_env = V16CuEnv::new();
+        let (exact, accepted) =
+            inv015_create_and_sync_auxiliary_ledger(&mut exact_env, kind, required_len);
+        let cu = accepted.expect("canonical auxiliary ledger must remain initializable");
+        assert_cu_within(
+            "INV-015 canonical auxiliary ledger initialization",
+            cu,
+            CUSTODY_CU_LIMIT,
+        );
+        let account = exact_env.svm.get_account(&exact).unwrap();
+        assert_eq!(account.data.len(), required_len);
+        match kind {
+            AuxiliaryLedgerKind::Backing => {
+                state::read_backing_domain_ledger(&account.data).unwrap();
+            }
+            AuxiliaryLedgerKind::Insurance => {
+                state::read_insurance_ledger(&account.data).unwrap();
+            }
+        }
+    }
+}
+
+#[test]
+fn v16_program_initialized_auxiliary_ledger_malformed_matrix_rejects_exactly() {
+    for (kind, required_len, label) in [
+        (
+            AuxiliaryLedgerKind::Backing,
+            state::backing_domain_ledger_account_len(),
+            "backing",
+        ),
+        (
+            AuxiliaryLedgerKind::Insurance,
+            state::insurance_ledger_account_len(),
+            "insurance",
+        ),
+    ] {
+        for case in [
+            AuxiliaryMalformedCase::WrongOwner,
+            AuxiliaryMalformedCase::TooShort,
+            AuxiliaryMalformedCase::BadMagic,
+            AuxiliaryMalformedCase::BadVersion,
+            AuxiliaryMalformedCase::BadKind,
+            AuxiliaryMalformedCase::TrailingByte,
+            AuxiliaryMalformedCase::InvalidSemanticField,
+        ] {
+            let mut env = V16CuEnv::new();
+            let (ledger, initialized) =
+                inv015_create_and_sync_auxiliary_ledger(&mut env, kind, required_len);
+            initialized.expect("canonical control must initialize before malformed mutation");
+
+            let mut malformed = env.svm.get_account(&ledger).unwrap();
+            match case {
+                AuxiliaryMalformedCase::WrongOwner => {
+                    malformed.owner = solana_sdk::system_program::ID;
+                }
+                AuxiliaryMalformedCase::TooShort => {
+                    malformed.data.truncate(required_len - 1);
+                }
+                AuxiliaryMalformedCase::BadMagic => malformed.data[0] ^= 0x80,
+                AuxiliaryMalformedCase::BadVersion => malformed.data[8] ^= 0x80,
+                AuxiliaryMalformedCase::BadKind => malformed.data[10] ^= 0x7f,
+                AuxiliaryMalformedCase::TrailingByte => malformed.data.push(0),
+                AuxiliaryMalformedCase::InvalidSemanticField => match kind {
+                    AuxiliaryLedgerKind::Backing => {
+                        let offset = constants::HEADER_LEN
+                            + core::mem::offset_of!(state::BackingDomainLedgerAccountV16, _padding);
+                        malformed.data[offset] = 1;
+                    }
+                    AuxiliaryLedgerKind::Insurance => {
+                        malformed.data[constants::HEADER_LEN] = 0;
+                        malformed.data[constants::HEADER_LEN + 1..constants::HEADER_LEN + 32]
+                            .fill(0);
+                    }
+                },
+            }
+            env.svm.set_account(ledger, malformed.clone()).unwrap();
+            let market_before = env.svm.get_account(&env.market).unwrap();
+
+            let admin = Keypair::from_bytes(&env.admin.to_bytes()).unwrap();
+            env.svm.expire_blockhash();
+            let rejected = env.send(
+                match kind {
+                    AuxiliaryLedgerKind::Backing => {
+                        ProgInstruction::SyncBackingDomainLedger { domain: 0 }
+                    }
+                    AuxiliaryLedgerKind::Insurance => ProgInstruction::SyncInsuranceLedger,
+                },
+                vec![
+                    AccountMeta::new(admin.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(ledger, false),
+                ],
+                &[&admin],
+            );
+            assert!(
+                rejected.is_err(),
+                "malformed {label} ledger case {case:?} must reject"
+            );
+            assert_eq!(
+                env.svm.get_account(&ledger).unwrap(),
+                malformed,
+                "malformed {label} ledger rejection must roll back exactly"
+            );
+            assert_eq!(
+                env.svm.get_account(&env.market).unwrap(),
+                market_before,
+                "malformed {label} ledger rejection must not mutate the market"
+            );
+        }
+    }
+}
 
 #[test]
 fn v16_program_init_portfolio_canonicalizes_oversized_uninitialized_account() {

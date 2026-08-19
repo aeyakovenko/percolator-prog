@@ -1080,7 +1080,7 @@ pub mod state {
     pub fn read_backing_domain_ledger(
         data: &[u8],
     ) -> Result<BackingDomainLedgerAccountV16, ProgramError> {
-        if data.len() < backing_domain_ledger_account_len() {
+        if data.len() != backing_domain_ledger_account_len() {
             return Err(PercolatorError::InvalidAccountLen.into());
         }
         check_header(data, KIND_BACKING_DOMAIN_LEDGER)?;
@@ -1097,7 +1097,7 @@ pub mod state {
         data: &mut [u8],
         ledger: &BackingDomainLedgerAccountV16,
     ) -> Result<(), ProgramError> {
-        if data.len() < backing_domain_ledger_account_len() {
+        if data.len() != backing_domain_ledger_account_len() {
             return Err(PercolatorError::InvalidAccountLen.into());
         }
         check_header(data, KIND_BACKING_DOMAIN_LEDGER)?;
@@ -1113,7 +1113,7 @@ pub mod state {
         data: &mut [u8],
         ledger: &BackingDomainLedgerAccountV16,
     ) -> Result<(), ProgramError> {
-        if data.len() < backing_domain_ledger_account_len() {
+        if data.len() != backing_domain_ledger_account_len() {
             return Err(PercolatorError::InvalidAccountLen.into());
         }
         if is_initialized(data) {
@@ -1136,7 +1136,7 @@ pub mod state {
 
     #[inline]
     pub fn read_insurance_ledger(data: &[u8]) -> Result<InsuranceLedgerAccountV16, ProgramError> {
-        if data.len() < insurance_ledger_account_len() {
+        if data.len() != insurance_ledger_account_len() {
             return Err(PercolatorError::InvalidAccountLen.into());
         }
         check_header(data, KIND_INSURANCE_LEDGER)?;
@@ -1153,7 +1153,7 @@ pub mod state {
         data: &mut [u8],
         ledger: &InsuranceLedgerAccountV16,
     ) -> Result<(), ProgramError> {
-        if data.len() < insurance_ledger_account_len() {
+        if data.len() != insurance_ledger_account_len() {
             return Err(PercolatorError::InvalidAccountLen.into());
         }
         check_header(data, KIND_INSURANCE_LEDGER)?;
@@ -1169,7 +1169,7 @@ pub mod state {
         data: &mut [u8],
         ledger: &InsuranceLedgerAccountV16,
     ) -> Result<(), ProgramError> {
-        if data.len() < insurance_ledger_account_len() {
+        if data.len() != insurance_ledger_account_len() {
             return Err(PercolatorError::InvalidAccountLen.into());
         }
         if is_initialized(data) {
@@ -8964,6 +8964,9 @@ pub mod processor {
         domain: u16,
         bucket: &percolator::BackingBucketV16,
     ) -> Result<(state::BackingDomainLedgerAccountV16, bool), ProgramError> {
+        if data.len() != state::backing_domain_ledger_account_len() {
+            return Err(PercolatorError::InvalidAccountLen.into());
+        }
         if state::is_initialized(data) {
             let ledger = state::read_backing_domain_ledger(data)?;
             if ledger.market_group != market_group
@@ -8973,6 +8976,8 @@ pub mod processor {
                 return Err(PercolatorError::Unauthorized.into());
             }
             Ok((ledger, true))
+        } else if data.iter().any(|byte| *byte != 0) {
+            Err(ProgramError::InvalidAccountData)
         } else {
             Ok((
                 state::BackingDomainLedgerAccountV16 {
@@ -9015,12 +9020,17 @@ pub mod processor {
         authority: [u8; 32],
         insurance_atoms: u128,
     ) -> Result<(state::InsuranceLedgerAccountV16, bool), ProgramError> {
+        if data.len() != state::insurance_ledger_account_len() {
+            return Err(PercolatorError::InvalidAccountLen.into());
+        }
         if state::is_initialized(data) {
             let ledger = state::read_insurance_ledger(data)?;
             if ledger.market_group != market_group || ledger.authority != authority {
                 return Err(PercolatorError::Unauthorized.into());
             }
             Ok((ledger, true))
+        } else if data.iter().any(|byte| *byte != 0) {
+            Err(ProgramError::InvalidAccountData)
         } else {
             Ok((
                 state::InsuranceLedgerAccountV16 {
