@@ -122,10 +122,12 @@ fn v16_attack_privileged_reactivate_rekeys_retired_slot_authorities() {
 
     env.svm.warp_to_slot(4);
     env.svm.expire_blockhash();
+    let activation_market_id = env.market_state().1.next_market_id;
     env.send(
         ProgInstruction::UpdateAssetLifecycle {
             action: percolator_prog::processor::ASSET_ACTION_ACTIVATE,
             asset_index: 1,
+            market_id: activation_market_id,
             now_slot: 4,
             initial_price: 250,
             max_init_fee: u128::MAX,
@@ -530,6 +532,7 @@ fn v16_attack_update_authority_requires_new_authority_signature() {
             .unwrap()
     };
     let ins_before = prof0(&env).insurance_authority;
+    let asset_market_id = env.asset_market_id(0);
     // The current asset-0 admin tries to set asset-0 insurance to a non-signing key -> reject.
     env.svm.expire_blockhash();
     let r2 = send_tx(
@@ -538,6 +541,7 @@ fn v16_attack_update_authority_requires_new_authority_signature() {
         &env.payer,
         ProgInstruction::UpdateAssetAuthority {
             asset_index: 0,
+            market_id: asset_market_id,
             kind: processor::ASSET_AUTH_INSURANCE,
             new_pubkey: victim.pubkey().to_bytes(),
         },
@@ -567,6 +571,7 @@ fn v16_attack_update_authority_requires_new_authority_signature() {
         &env.payer,
         ProgInstruction::UpdateAssetAuthority {
             asset_index: 0,
+            market_id: asset_market_id,
             kind: processor::ASSET_AUTH_INSURANCE,
             new_pubkey: new_ins.pubkey().to_bytes(),
         },
@@ -1392,6 +1397,7 @@ fn v16_attack_retire_asset_authority_gated() {
     let mallory = Keypair::new();
     env.ensure_signer_account(mallory.pubkey());
     env.svm.warp_to_slot(5);
+    let market_id = env.asset_market_id(1);
     let r = send_tx(
         &mut env.svm,
         env.program_id,
@@ -1399,6 +1405,7 @@ fn v16_attack_retire_asset_authority_gated() {
         ProgInstruction::UpdateAssetLifecycle {
             action: percolator_prog::processor::ASSET_ACTION_RETIRE,
             asset_index: 1,
+            market_id,
             now_slot: 5,
             initial_price: 0,
             max_init_fee: u128::MAX,
@@ -1896,6 +1903,7 @@ fn v16_attack_update_authority_non_holder_cannot_rotate() {
             .unwrap()
     };
     let a0_ins_before = prof0(&env).insurance_authority;
+    let asset_market_id = env.asset_market_id(0);
     env.svm.expire_blockhash();
     let r_a0_ins = send_tx(
         &mut env.svm,
@@ -1903,6 +1911,7 @@ fn v16_attack_update_authority_non_holder_cannot_rotate() {
         &env.payer,
         ProgInstruction::UpdateAssetAuthority {
             asset_index: 0,
+            market_id: asset_market_id,
             kind: processor::ASSET_AUTH_INSURANCE,
             new_pubkey: mallory.pubkey().to_bytes(),
         },
@@ -2279,6 +2288,7 @@ fn v16_attack_per_asset_admin_rotates_keys_isolated_and_burnable() {
         if let Some(k) = co {
             signers.push(k);
         }
+        let market_id = env.asset_market_id(ai);
         env.svm.expire_blockhash();
         send_tx(
             &mut env.svm,
@@ -2286,6 +2296,7 @@ fn v16_attack_per_asset_admin_rotates_keys_isolated_and_burnable() {
             &env.payer,
             ProgInstruction::UpdateAssetAuthority {
                 asset_index: ai,
+                market_id,
                 kind,
                 new_pubkey: new,
             },
@@ -2489,6 +2500,7 @@ fn v16_attack_update_asset_authority_rejects_zero_domain_authority() {
         (processor::ASSET_AUTH_BACKING_BUCKET, "backing authority"),
         (processor::ASSET_AUTH_ORACLE, "oracle authority"),
     ] {
+        let market_id = env.asset_market_id(0);
         env.svm.expire_blockhash();
         let burn = send_tx(
             &mut env.svm,
@@ -2496,6 +2508,7 @@ fn v16_attack_update_asset_authority_rejects_zero_domain_authority() {
             &env.payer,
             ProgInstruction::UpdateAssetAuthority {
                 asset_index: 0,
+                market_id,
                 kind,
                 new_pubkey: [0u8; 32],
             },
@@ -2689,12 +2702,14 @@ fn v16_attack_non_admin_activate_cannot_install_authorities() {
     let mallory = Keypair::new();
     env.ensure_signer_account(mallory.pubkey());
     let atk = mallory.pubkey().to_bytes();
+    let activation_market_id = env.market_state().1.next_market_id;
 
     env.svm.expire_blockhash();
     let r_activate = env.send(
         ProgInstruction::UpdateAssetLifecycle {
             action: percolator_prog::processor::ASSET_ACTION_ACTIVATE,
             asset_index: 1,
+            market_id: activation_market_id,
             now_slot: 1,
             initial_price: 100,
             max_init_fee: u128::MAX,
@@ -2749,6 +2764,7 @@ fn v16_attack_non_admin_activate_cannot_install_authorities() {
         ProgInstruction::UpdateAssetLifecycle {
             action: percolator_prog::processor::ASSET_ACTION_ACTIVATE,
             asset_index: 1,
+            market_id: activation_market_id,
             now_slot: 1,
             initial_price: 100,
             max_init_fee: u128::MAX,
@@ -3316,10 +3332,12 @@ fn v16_attack_oracle_authority_rotation_revokes_old_grants_new() {
     // control of the incoming key).
     let newauth = Keypair::new();
     env.ensure_signer_account(newauth.pubkey());
+    let asset_market_id = env.asset_market_id(0);
     env.svm.expire_blockhash();
     let rot = env.send(
         ProgInstruction::UpdateAssetAuthority {
             asset_index: 0,
+            market_id: asset_market_id,
             kind: percolator_prog::processor::ASSET_AUTH_ORACLE,
             new_pubkey: newauth.pubkey().to_bytes(),
         },
@@ -3765,6 +3783,7 @@ fn v16_attack_update_authority_handoff_rekeys_asset0_lifecycle_admin() {
         "default asset-0 admin follows the market authority handoff"
     );
 
+    let asset_market_id = env.asset_market_id(0);
     let market_before = env.svm.get_account(&env.market).unwrap();
     env.svm.warp_to_slot(2);
     env.svm.expire_blockhash();
@@ -3775,6 +3794,7 @@ fn v16_attack_update_authority_handoff_rekeys_asset0_lifecycle_admin() {
         ProgInstruction::UpdateAssetLifecycle {
             action: percolator_prog::processor::ASSET_ACTION_SHUTDOWN,
             asset_index: 0,
+            market_id: asset_market_id,
             now_slot: 2,
             initial_price: 0,
             max_init_fee: u128::MAX,
@@ -3812,6 +3832,7 @@ fn v16_attack_update_authority_handoff_rekeys_asset0_lifecycle_admin() {
         ProgInstruction::UpdateAssetLifecycle {
             action: percolator_prog::processor::ASSET_ACTION_SHUTDOWN,
             asset_index: 0,
+            market_id: asset_market_id,
             now_slot: 2,
             initial_price: 0,
             max_init_fee: u128::MAX,

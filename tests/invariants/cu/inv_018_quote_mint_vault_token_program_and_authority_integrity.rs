@@ -3940,11 +3940,13 @@ fn v16_attack_permissionless_create_rejects_noncanonical_fee_vault() {
     let canonical_vault_before = env.svm.get_account(&env.vault).unwrap();
     let fake_vault_before = env.svm.get_account(&fake_vault).unwrap();
     let source_before = env.svm.get_account(&source).unwrap();
+    let activation_market_id = env.market_state().1.next_market_id;
     env.svm.expire_blockhash();
     let rejected = env.send(
         ProgInstruction::UpdateAssetLifecycle {
             action: percolator_prog::processor::ASSET_ACTION_ACTIVATE,
             asset_index: 1,
+            market_id: activation_market_id,
             now_slot: 1,
             initial_price: 100,
             max_init_fee: u128::MAX,
@@ -3998,6 +4000,7 @@ fn v16_attack_permissionless_create_rejects_noncanonical_fee_vault() {
         ProgInstruction::UpdateAssetLifecycle {
             action: percolator_prog::processor::ASSET_ACTION_ACTIVATE,
             asset_index: 1,
+            market_id: activation_market_id,
             now_slot: 1,
             initial_price: 100,
             max_init_fee: u128::MAX,
@@ -4053,11 +4056,13 @@ fn v16_attack_permissionless_create_rejects_vault_as_fee_source() {
     let vault_before = env.svm.get_account(&env.vault).unwrap();
     let portfolio_before = env.svm.get_account(&honest_portfolio).unwrap();
     let (_, group_before) = env.market_state();
+    let activation_market_id = group_before.next_market_id;
     env.svm.expire_blockhash();
     let rejected = env.send(
         ProgInstruction::UpdateAssetLifecycle {
             action: percolator_prog::processor::ASSET_ACTION_ACTIVATE,
             asset_index: 1,
+            market_id: activation_market_id,
             now_slot: 1,
             initial_price: 100,
             max_init_fee: u128::MAX,
@@ -4114,6 +4119,7 @@ fn v16_attack_permissionless_create_rejects_vault_as_fee_source() {
         ProgInstruction::UpdateAssetLifecycle {
             action: percolator_prog::processor::ASSET_ACTION_ACTIVATE,
             asset_index: 1,
+            market_id: activation_market_id,
             now_slot: 1,
             initial_price: 100,
             max_init_fee: u128::MAX,

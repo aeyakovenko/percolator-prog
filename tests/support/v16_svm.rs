@@ -2123,11 +2123,13 @@ impl V16Svm {
     }
 
     pub fn retire_asset(&mut self, asset_index: u16, now_slot: u64) -> Result<TxSuccess, String> {
+        let market_id = self.primary_market_state().1.assets[asset_index as usize].market_id;
         let authority = copy_keypair(&self.admin);
         self.send_program(
             ProgInstruction::UpdateAssetLifecycle {
                 action: percolator_prog::processor::ASSET_ACTION_RETIRE,
                 asset_index,
+                market_id,
                 now_slot,
                 initial_price: 0,
                 max_init_fee: u128::MAX,
@@ -2149,11 +2151,13 @@ impl V16Svm {
         asset_index: u16,
         now_slot: u64,
     ) -> Result<TxSuccess, String> {
+        let market_id = self.primary_market_state().1.assets[asset_index as usize].market_id;
         let authority = copy_keypair(&self.admin);
         self.send_program(
             ProgInstruction::UpdateAssetLifecycle {
                 action: percolator_prog::processor::ASSET_ACTION_DRAIN_ONLY,
                 asset_index,
+                market_id,
                 now_slot,
                 initial_price: 0,
                 max_init_fee: u128::MAX,
@@ -2171,11 +2175,13 @@ impl V16Svm {
     }
 
     pub fn shutdown_asset(&mut self, asset_index: u16, now_slot: u64) -> Result<TxSuccess, String> {
+        let market_id = self.primary_market_state().1.assets[asset_index as usize].market_id;
         let authority = copy_keypair(&self.admin);
         self.send_program(
             ProgInstruction::UpdateAssetLifecycle {
                 action: percolator_prog::processor::ASSET_ACTION_SHUTDOWN,
                 asset_index,
+                market_id,
                 now_slot,
                 initial_price: 0,
                 max_init_fee: u128::MAX,
@@ -2355,11 +2361,13 @@ impl V16Svm {
         if fee == 0 {
             return Err("permissionless activation adapter requires a nonzero fee".into());
         }
+        let market_id = self.primary_market_state().1.next_market_id;
         let creator = copy_keypair(&self.actors[creator_index].signer);
         self.send_program(
             ProgInstruction::UpdateAssetLifecycle {
                 action: percolator_prog::processor::ASSET_ACTION_ACTIVATE,
                 asset_index,
+                market_id,
                 now_slot,
                 initial_price,
                 max_init_fee: fee,
@@ -2403,11 +2411,13 @@ impl V16Svm {
         if fee == 0 {
             return Err("permissionless activation adapter requires a nonzero fee".into());
         }
+        let market_id = self.primary_market_state().1.next_market_id;
         let creator = copy_keypair(&self.actors[creator_index].signer);
         self.send_program(
             ProgInstruction::UpdateAssetLifecycle {
                 action: percolator_prog::processor::ASSET_ACTION_ACTIVATE,
                 asset_index,
+                market_id,
                 now_slot,
                 initial_price,
                 max_init_fee: fee,
@@ -2522,10 +2532,12 @@ impl V16Svm {
     }
 
     pub fn burn_asset_admin(&mut self, asset_index: u16) -> Result<TxSuccess, String> {
+        let market_id = self.primary_market_state().1.assets[asset_index as usize].market_id;
         let current = copy_keypair(&self.admin);
         self.send_program(
             ProgInstruction::UpdateAssetAuthority {
                 asset_index,
+                market_id,
                 kind: percolator_prog::processor::ASSET_AUTH_ADMIN,
                 new_pubkey: [0; 32],
             },
@@ -2545,9 +2557,11 @@ impl V16Svm {
         current: Keypair,
         incoming: Keypair,
     ) -> Result<TxSuccess, String> {
+        let market_id = self.primary_market_state().1.assets[asset_index as usize].market_id;
         self.send_program(
             ProgInstruction::UpdateAssetAuthority {
                 asset_index,
+                market_id,
                 kind,
                 new_pubkey: incoming.pubkey().to_bytes(),
             },
@@ -3283,11 +3297,61 @@ impl V16Svm {
         asset_index: u16,
         now_slot: u64,
     ) -> Transaction {
+        let market_id = self.primary_market_state().1.assets[asset_index as usize].market_id;
         let admin = copy_keypair(&self.admin);
         self.build_program_transaction(
             ProgInstruction::UpdateAssetLifecycle {
                 action: percolator_prog::processor::ASSET_ACTION_SHUTDOWN,
                 asset_index,
+                market_id,
+                now_slot,
+                initial_price: 0,
+                max_init_fee: u128::MAX,
+                insurance_authority: admin.pubkey().to_bytes(),
+                insurance_operator: admin.pubkey().to_bytes(),
+                backing_bucket_authority: admin.pubkey().to_bytes(),
+                oracle_authority: admin.pubkey().to_bytes(),
+            },
+            vec![
+                AccountMeta::new(admin.pubkey(), true),
+                AccountMeta::new(self.market, false),
+            ],
+            &[admin],
+        )
+    }
+
+    pub fn build_retained_drain_only_asset(&mut self, asset_index: u16) -> Transaction {
+        let market_id = self.primary_market_state().1.assets[asset_index as usize].market_id;
+        let admin = copy_keypair(&self.admin);
+        self.build_program_transaction(
+            ProgInstruction::UpdateAssetLifecycle {
+                action: percolator_prog::processor::ASSET_ACTION_DRAIN_ONLY,
+                asset_index,
+                market_id,
+                now_slot: 0,
+                initial_price: 0,
+                max_init_fee: u128::MAX,
+                insurance_authority: admin.pubkey().to_bytes(),
+                insurance_operator: admin.pubkey().to_bytes(),
+                backing_bucket_authority: admin.pubkey().to_bytes(),
+                oracle_authority: admin.pubkey().to_bytes(),
+            },
+            vec![
+                AccountMeta::new(admin.pubkey(), true),
+                AccountMeta::new(self.market, false),
+            ],
+            &[admin],
+        )
+    }
+
+    pub fn build_retained_retire_asset(&mut self, asset_index: u16, now_slot: u64) -> Transaction {
+        let market_id = self.primary_market_state().1.assets[asset_index as usize].market_id;
+        let admin = copy_keypair(&self.admin);
+        self.build_program_transaction(
+            ProgInstruction::UpdateAssetLifecycle {
+                action: percolator_prog::processor::ASSET_ACTION_RETIRE,
+                asset_index,
+                market_id,
                 now_slot,
                 initial_price: 0,
                 max_init_fee: u128::MAX,
@@ -3460,11 +3524,13 @@ impl V16Svm {
         kind: u8,
         new_actor_index: usize,
     ) -> Transaction {
+        let market_id = self.primary_market_state().1.assets[asset_index as usize].market_id;
         let current = copy_keypair(&self.admin);
         let incoming = copy_keypair(&self.actors[new_actor_index].signer);
         self.build_program_transaction(
             ProgInstruction::UpdateAssetAuthority {
                 asset_index,
+                market_id,
                 kind,
                 new_pubkey: incoming.pubkey().to_bytes(),
             },
@@ -3484,11 +3550,13 @@ impl V16Svm {
         current_actor_index: usize,
         incoming_actor_index: usize,
     ) -> Transaction {
+        let market_id = self.primary_market_state().1.assets[asset_index as usize].market_id;
         let current = copy_keypair(&self.actors[current_actor_index].signer);
         let incoming = copy_keypair(&self.actors[incoming_actor_index].signer);
         self.build_program_transaction(
             ProgInstruction::UpdateAssetAuthority {
                 asset_index,
+                market_id,
                 kind,
                 new_pubkey: incoming.pubkey().to_bytes(),
             },
@@ -3641,11 +3709,13 @@ impl V16Svm {
         backing_bucket_authority_index: usize,
         oracle_authority_index: usize,
     ) -> Transaction {
+        let market_id = self.primary_market_state().1.next_market_id;
         let creator = copy_keypair(&self.actors[creator_index].signer);
         self.build_program_transaction(
             ProgInstruction::UpdateAssetLifecycle {
                 action: percolator_prog::processor::ASSET_ACTION_ACTIVATE,
                 asset_index,
+                market_id,
                 now_slot,
                 initial_price,
                 max_init_fee,

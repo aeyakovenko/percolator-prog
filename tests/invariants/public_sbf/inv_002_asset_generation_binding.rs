@@ -2,7 +2,7 @@
 //!
 //! Normative obligation: Asset-scoped consent cannot cross retirement, slot reuse, or asset-generation changes.
 //!
-//! Evidence in this file (I plus invariant-specific F/M assertions): `v16_program_pr231_asset_generation_replay_rejects_on_every_route`, `v16_program_pr279_stale_insurance_top_up_rejects_across_asset_generation`, `v16_program_pr279_asset_zero_top_up_rejects_after_restart`, `v16_program_pr321_stale_backing_top_up_rejects_across_asset_generation`, `v16_program_pr328_stale_insurance_withdrawal_rejects_across_asset_generation`, `v16_program_pr318_stale_backing_fee_policy_rejects_across_asset_generation`, `v16_program_pr311_pr312_marketwide_controls_reject_after_asset_slot_reuse`, `v16_program_pr311_pr312_marketwide_controls_reject_after_asset_zero_restart`, `v16_program_pr275_stale_mark_pushes_reject_across_asset_generation`, `v16_program_pr277_pr322_stale_oracle_controls_reject_across_asset_generation`. These tests exercise the deployed public
+//! Evidence in this file (I plus invariant-specific F/M assertions): `v16_program_pr231_asset_generation_replay_rejects_on_every_route`, `v16_program_asset_authority_and_lifecycle_replays_reject_after_slot_reuse`, `v16_program_retained_activation_binds_exact_next_generation_frontier`, `v16_program_pr279_stale_insurance_top_up_rejects_across_asset_generation`, `v16_program_pr279_asset_zero_top_up_rejects_after_restart`, `v16_program_pr321_stale_backing_top_up_rejects_across_asset_generation`, `v16_program_pr328_stale_insurance_withdrawal_rejects_across_asset_generation`, `v16_program_pr318_stale_backing_fee_policy_rejects_across_asset_generation`, `v16_program_pr311_pr312_marketwide_controls_reject_after_asset_slot_reuse`, `v16_program_pr311_pr312_marketwide_controls_reject_after_asset_zero_restart`, `v16_program_pr275_stale_mark_pushes_reject_across_asset_generation`, `v16_program_pr277_pr322_stale_oracle_controls_reject_across_asset_generation`. These tests exercise the deployed public
 //! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
 //! rollback, liveness, or compute outcomes appropriate to the invariant. Oracle controls are
 //! retained with `u64::MAX` sequences so sequence reset or forward-gap ordering cannot make the
@@ -37,6 +37,108 @@ fn v16_program_pr231_asset_generation_replay_rejects_on_every_route() {
         assert!(protection.fresh_intent_landed);
         assert!(protection.fresh_intent_mutated_economic_state);
     }
+}
+
+#[test]
+fn v16_program_asset_authority_and_lifecycle_replays_reject_after_slot_reuse() {
+    for kind in [
+        AssetIntentKind::AssetAuthority,
+        AssetIntentKind::LifecycleShutdown,
+        AssetIntentKind::LifecycleDrainOnly,
+        AssetIntentKind::LifecycleRetire,
+    ] {
+        let protection = discover_asset_generation_replay([0xa2; 32], kind)
+            .unwrap_or_else(|error| panic!("{kind:?} generation protection failed: {error}"));
+        assert_eq!(protection.kind, kind);
+        assert!(protection.new_asset_id > protection.old_asset_id);
+        assert!(!protection.accepted_stale_intent);
+        assert!(!protection.mutated_economic_state);
+        assert_eq!(protection.compute_units, None);
+        assert!(protection.rejection_was_generation_mismatch);
+        assert!(protection.fresh_intent_landed);
+        assert!(protection.fresh_intent_mutated_economic_state);
+    }
+}
+
+#[test]
+fn v16_program_retained_activation_binds_exact_next_generation_frontier() {
+    const ASSET: u16 = 1;
+    const STALE_CREATOR: usize = 2;
+    const INTERVENING_CREATOR: usize = 3;
+    const PRICE: u64 = 100;
+
+    let mut env = V16Svm::new([0xa3; 32], MarketConfig::default());
+    env.update_market_init_fee_policy(1)
+        .expect("enable permissionless activation");
+    env.warp_to_slot(3);
+    env.retire_asset(ASSET, 3)
+        .expect("retire the initial asset generation");
+
+    let stale_target = env.primary_market_state().1.next_market_id;
+    let stale = env.build_retained_permissionless_asset_activation(
+        STALE_CREATOR,
+        ASSET,
+        4,
+        PRICE,
+        1,
+        STALE_CREATOR,
+        STALE_CREATOR,
+        STALE_CREATOR,
+        STALE_CREATOR,
+    );
+
+    env.warp_to_slot(4);
+    env.activate_permissionless_asset(INTERVENING_CREATOR, ASSET, 4, PRICE, 1)
+        .expect("an intervening activation consumes the retained target generation");
+    assert_eq!(
+        env.primary_market_state().1.assets[ASSET as usize].market_id,
+        stale_target
+    );
+    env.warp_to_slot(6);
+    env.retire_asset(ASSET, 6)
+        .expect("retire the intervening generation");
+    let fresh_target = env.primary_market_state().1.next_market_id;
+    assert!(fresh_target > stale_target);
+
+    let market_before = env.market_data(false);
+    let tokens_before = env.all_token_account_data();
+    let supply_before = env.token_supply_observed();
+    let error = env
+        .land_retained(stale)
+        .expect_err("a retained activation cannot skip to a later generation");
+    let expected = format!(
+        "Custom({})",
+        PercolatorError::AssetGenerationMismatch as u32
+    );
+    assert!(
+        error.contains(&expected),
+        "stale activation must return {expected}, got {error}"
+    );
+    assert_eq!(env.market_data(false), market_before);
+    assert_eq!(env.all_token_account_data(), tokens_before);
+    assert_eq!(env.token_supply_observed(), supply_before);
+
+    let fresh = env.build_retained_permissionless_asset_activation(
+        STALE_CREATOR,
+        ASSET,
+        7,
+        PRICE,
+        1,
+        STALE_CREATOR,
+        STALE_CREATOR,
+        STALE_CREATOR,
+        STALE_CREATOR,
+    );
+    env.warp_to_slot(7);
+    env.land_retained(fresh)
+        .expect("a request bound to the current generation frontier remains live");
+    let (_, group) = env.primary_market_state();
+    assert_eq!(group.assets[ASSET as usize].market_id, fresh_target);
+    assert_eq!(
+        group.assets[ASSET as usize].lifecycle,
+        AssetLifecycleV16::Active
+    );
+    assert_eq!(env.token_supply_observed(), supply_before);
 }
 
 #[test]

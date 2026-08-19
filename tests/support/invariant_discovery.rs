@@ -77,6 +77,10 @@ pub enum AssetIntentKind {
     BackingFeePolicy,
     ResolveMarket,
     ResolvePolicy,
+    AssetAuthority,
+    LifecycleShutdown,
+    LifecycleDrainOnly,
+    LifecycleRetire,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -577,7 +581,7 @@ impl AuthorityIntentKind {
 }
 
 impl AssetIntentKind {
-    pub const ALL: [Self; 16] = [
+    pub const ALL: [Self; 20] = [
         Self::TradeNoCpi,
         Self::TradeCpi,
         Self::BatchTradeNoCpi,
@@ -594,6 +598,10 @@ impl AssetIntentKind {
         Self::BackingFeePolicy,
         Self::ResolveMarket,
         Self::ResolvePolicy,
+        Self::AssetAuthority,
+        Self::LifecycleShutdown,
+        Self::LifecycleDrainOnly,
+        Self::LifecycleRetire,
     ];
 
     fn discriminator(self) -> u8 {
@@ -614,6 +622,10 @@ impl AssetIntentKind {
             Self::BackingFeePolicy => 13,
             Self::ResolveMarket => 14,
             Self::ResolvePolicy => 15,
+            Self::AssetAuthority => 16,
+            Self::LifecycleShutdown => 17,
+            Self::LifecycleDrainOnly => 18,
+            Self::LifecycleRetire => 19,
         }
     }
 
@@ -625,6 +637,7 @@ impl AssetIntentKind {
                 | Self::BackingWithdrawal
                 | Self::InsuranceWithdrawal
                 | Self::BackingFeePolicy
+                | Self::AssetAuthority
         )
     }
 }
@@ -3242,6 +3255,14 @@ fn configure_old_asset_intent(
                 101,
             )))
         }
+        AssetIntentKind::AssetAuthority => env
+            .update_asset_authority_from_admin(
+                asset_index,
+                percolator_prog::processor::ASSET_AUTH_ADMIN,
+                authority_actor,
+            )
+            .map(|_| None)
+            .map_err(|error| format!("install old asset admin: {error}")),
         _ => Ok(None),
     }
 }
@@ -3323,6 +3344,22 @@ fn retained_asset_intent(
         }
         AssetIntentKind::ResolveMarket => env.build_retained_resolve_market(),
         AssetIntentKind::ResolvePolicy => env.build_retained_permissionless_resolve_policy(17, 29),
+        AssetIntentKind::AssetAuthority => env
+            .build_retained_asset_authority_handoff_between_actors(
+                asset_index,
+                percolator_prog::processor::ASSET_AUTH_ADMIN,
+                authority_actor,
+                authority_actor + 1,
+            ),
+        AssetIntentKind::LifecycleShutdown => {
+            let now_slot = env.current_slot().max(1);
+            env.build_retained_shutdown_asset(asset_index, now_slot)
+        }
+        AssetIntentKind::LifecycleDrainOnly => env.build_retained_drain_only_asset(asset_index),
+        AssetIntentKind::LifecycleRetire => {
+            let now_slot = env.current_slot().max(1);
+            env.build_retained_retire_asset(asset_index, now_slot)
+        }
     }
 }
 
@@ -3359,6 +3396,10 @@ fn configure_replacement_asset(
             .top_up_backing_bucket_for_actor(authority_actor, asset_index * 2, 1_000, 100)
             .map(|_| ())
             .map_err(|error| format!("fund replacement backing bucket: {error}")),
+        AssetIntentKind::AssetAuthority
+        | AssetIntentKind::LifecycleShutdown
+        | AssetIntentKind::LifecycleDrainOnly
+        | AssetIntentKind::LifecycleRetire => Ok(()),
         _ => Ok(()),
     }
 }
@@ -3373,6 +3414,10 @@ fn discover_one_asset_generation_replay(
     seed[0] ^= 0xc9;
     seed[1] ^= kind.discriminator();
     let mut env = V16Svm::new(seed, MarketConfig::default());
+    if kind == AssetIntentKind::LifecycleShutdown {
+        env.configure_permissionless_resolve(100, 1)
+            .map_err(|error| format!("configure shutdown recovery delay: {error}"))?;
+    }
     let supply_before = env.token_supply_observed();
     let oracle_account = configure_old_asset_intent(&mut env, kind, ASSET, AUTHORITY_ACTOR)?;
     match kind {
@@ -3406,9 +3451,14 @@ fn discover_one_asset_generation_replay(
     env.retire_asset(ASSET, 3)
         .map_err(|error| format!("retire old asset: {error}"))?;
     env.warp_to_slot(4);
+    let activation_payer = if kind == AssetIntentKind::AssetAuthority {
+        AUTHORITY_ACTOR
+    } else {
+        ACTIVATION_PAYER
+    };
     if kind.uses_actor_authorities() {
         env.activate_permissionless_asset_with_actor_authorities(
-            ACTIVATION_PAYER,
+            activation_payer,
             ASSET,
             4,
             INITIAL_PRICE,
@@ -3420,7 +3470,7 @@ fn discover_one_asset_generation_replay(
         )
         .map_err(|error| format!("activate actor-authority replacement asset: {error}"))?;
     } else {
-        env.activate_permissionless_asset(ACTIVATION_PAYER, ASSET, 4, INITIAL_PRICE, 1)
+        env.activate_permissionless_asset(activation_payer, ASSET, 4, INITIAL_PRICE, 1)
             .map_err(|error| format!("activate replacement asset: {error}"))?;
     }
     let new_asset_id = env.primary_market_state().1.assets[ASSET as usize].market_id;

@@ -154,9 +154,10 @@ Assets 1..N are **truly permissionless ⇒ untrusted**. The protocol must guaran
 - **Per-asset admin keys, isolated — uniform across all assets including asset 0** — one asset's admin
   can never be used against another asset. **✅** Every asset (0..N) carries its own `asset_admin`
   (`AssetOracleProfileV16`): assets 1..N bootstrap it to the activator, **asset 0 bootstraps it to the
-  market admin at `InitMarket`**. `UpdateAssetAuthority { asset_index, kind, new_pubkey }` is scoped to
-  that asset's profile only and now operates on **asset 0 too** (the old `asset_index == 0` rejection is
-  gone). Asset 0 is **not** special for authorities — its only special properties are **fee capture**
+  market admin at `InitMarket`**.
+  `UpdateAssetAuthority { asset_index, market_id, kind, new_pubkey }` is scoped to that exact asset
+  generation's profile only and now operates on **asset 0 too** (the old `asset_index == 0` rejection
+  is gone). Asset 0 is **not** special for authorities — its only special properties are **fee capture**
   (it's the insurance-redirect target) and that it **cannot be permissionlessly created** (it's created
   at `InitMarket`, not via `UpdateAssetLifecycle`).
 - **Each asset (0..N) has a cold-storage admin** that can **rotate that asset's other keys**
@@ -392,6 +393,8 @@ This section describes intent and operational ordering, not argument-by-argument
 - **UpdateAssetLifecycle** (tag 40)
   - appends/reactivates/retires assets 1..N, including permissionless create/reuse when the configured
     create fee is nonzero
+  - binds shutdown, drain, and retire requests to the current asset `market_id`; activation requests
+    bind the exact `next_market_id` frontier they are authorized to create
   - `ASSET_ACTION_SHUTDOWN` moves any asset 0..N to RECOVERY at a frozen mark, with force-close blocked
     until `force_close_delay_slots` elapses; signer is `marketauth` or that asset's `asset_admin`
   - ordinary `RETIRE` rejects `asset_index = 0`; asset 0 is restarted, not reused

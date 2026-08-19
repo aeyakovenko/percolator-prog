@@ -912,6 +912,7 @@ fn v16_attack_permissionless_sparse_append_indices_rejected_without_realloc_or_f
         cfg_before.free_market_slot_count, 0,
         "no retired slots are reusable"
     );
+    let activation_market_id = group_before.next_market_id;
 
     for bad_index in [2u16, 7, u16::MAX] {
         let source = env.token_account(creator.pubkey(), FEE as u64);
@@ -921,6 +922,7 @@ fn v16_attack_permissionless_sparse_append_indices_rejected_without_realloc_or_f
             ProgInstruction::UpdateAssetLifecycle {
                 action: percolator_prog::processor::ASSET_ACTION_ACTIVATE,
                 asset_index: bad_index,
+                market_id: activation_market_id,
                 now_slot: 1,
                 initial_price: 100,
                 max_init_fee: u128::MAX,
@@ -974,6 +976,7 @@ fn v16_attack_permissionless_sparse_append_indices_rejected_without_realloc_or_f
         ProgInstruction::UpdateAssetLifecycle {
             action: percolator_prog::processor::ASSET_ACTION_ACTIVATE,
             asset_index: 1,
+            market_id: activation_market_id,
             now_slot: 1,
             initial_price: 100,
             max_init_fee: u128::MAX,

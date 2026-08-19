@@ -3,7 +3,7 @@
 # OMITTED names a required method with no qualifying executable owner yet.
 invariant	method	status	evidence	remaining_gap
 INV-001	M	PARTIAL	tests/invariants/stateful/inv_001_market_incarnation_binding.rs#v16_program_market_incarnation_operation_matrix_discovers_stale_intents	Complete cross-program and cross-chain control/replay equivalence remains.
-INV-002	M	PARTIAL	tests/invariants/stateful/inv_002_asset_generation_binding.rs#v16_program_asset_generation_operation_matrix_discovers_stale_intents	Complete every retained asset request across retire/reuse permutations.
+INV-002	M	PARTIAL	tests/invariants/stateful/inv_002_asset_generation_binding.rs#v16_program_asset_generation_operation_matrix_discovers_stale_intents	All 20 retained families plus the activation frontier are covered; broader landing-order, cross-program, and multi-cycle permutations remain.
 INV-004	M	PARTIAL	tests/invariants/stateful/inv_004_position_episode_binding.rs#v16_program_all_trade_routes_advance_position_episode_once_and_errors_do_not	Recovery and resolved-claim episode route pairs remain.
 INV-008	M	PARTIAL	tests/invariants/stateful/inv_008_intent_uniqueness_and_bounded_replay.rs#v16_program_retry_operation_matrix_discovers_duplicate_economic_execution	Complete duplicate execution equivalence across every retryable route.
 INV-009	M	PARTIAL	tests/invariants/cu/inv_009_partial_fill_and_retry_accounting.rs#v16_program_tradecpi_short_fill_rejects_atomically_and_retries_cleanly	Partitioned successful fills and aggregate budget accounting remain absent.

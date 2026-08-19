@@ -603,11 +603,13 @@ fn run_dense_zero_delta_resolution_shape(asset_count: u16) {
         let activation_slot = asset_index as u64;
         env.svm.warp_to_slot(activation_slot);
         env.svm.expire_blockhash();
+        let market_id = env.market_state().1.next_market_id;
         let activation_cu = env
             .send(
                 ProgInstruction::UpdateAssetLifecycle {
                     action: processor::ASSET_ACTION_ACTIVATE,
                     asset_index,
+                    market_id,
                     now_slot: activation_slot,
                     initial_price: PRICE,
                     max_init_fee: u128::MAX,

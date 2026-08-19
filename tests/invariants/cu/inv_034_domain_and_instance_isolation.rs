@@ -4395,6 +4395,7 @@ fn v16_attack_force_close_rejects_cross_market_portfolio_substitution() {
         ProgInstruction::UpdateAssetLifecycle {
             action: percolator_prog::processor::ASSET_ACTION_SHUTDOWN,
             asset_index: 1,
+            market_id: market_b_open.assets[1].market_id,
             now_slot: SHUT,
             initial_price: 0,
             max_init_fee: u128::MAX,

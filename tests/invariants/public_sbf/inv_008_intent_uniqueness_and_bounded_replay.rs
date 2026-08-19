@@ -2,7 +2,7 @@
 //!
 //! Normative obligation: One retained economic intent can execute at most once across routes and retries.
 //!
-//! Evidence in this file (I plus invariant-specific F/M assertions): `v16_program_pr343_trade_retry_variants_extract_value_on_every_route`, `v16_program_pr344_insurance_top_up_retry_extracts_duplicate`, `v16_program_pr362_activation_retry_extracts_duplicate_fee`, `v16_program_pr351_backing_top_up_retry_funds_independent_winner`, `v16_program_pr350_deposit_retry_funds_independent_winner`, `v16_program_pr355_withdrawal_retry_liquidates_fresh_risk`, `v16_program_issue387_stale_conversion_rejects_without_redirecting_later_earnings`, `v16_program_issue389_rebalance_retry_rejects_exactly_on_current_pin`. These tests exercise the deployed public
+//! Evidence in this file (I plus invariant-specific F/M assertions): `v16_program_pr343_trade_retry_variants_extract_value_on_every_route`, `v16_program_pr344_insurance_top_up_retry_extracts_duplicate`, `v16_program_pr362_activation_retry_rejects_after_generation_consumed`, `v16_program_pr351_backing_top_up_retry_funds_independent_winner`, `v16_program_pr350_deposit_retry_funds_independent_winner`, `v16_program_pr355_withdrawal_retry_liquidates_fresh_risk`, `v16_program_issue387_stale_conversion_rejects_without_redirecting_later_earnings`, `v16_program_issue389_rebalance_retry_rejects_exactly_on_current_pin`. These tests exercise the deployed public
 //! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
 //! rollback, liveness, or compute outcomes appropriate to the invariant.
 //!
@@ -53,16 +53,18 @@ fn v16_program_pr344_insurance_top_up_retry_extracts_duplicate() {
 }
 
 #[test]
-fn v16_program_pr362_activation_retry_extracts_duplicate_fee() {
-    let reproduction = reproduce_activation_retry_replay([0x62; 32])
-        .unwrap_or_else(|error| panic!("PR 362 no longer reproduces: {error}"));
-    assert_eq!(reproduction.blocker, KnownBlocker::ActivationRetryReplay);
-    assert_ne!(reproduction.first_market_id, reproduction.replay_market_id);
-    assert_eq!(reproduction.intended_fee, 500);
-    assert_eq!(reproduction.duplicate_loss, 500);
-    assert_eq!(reproduction.beneficiary_extraction, 500);
-    assert_eq!(reproduction.insured_remainder, 500);
-    assert!(reproduction.replay_cu < 1_400_000);
+fn v16_program_pr362_activation_retry_rejects_after_generation_consumed() {
+    let discoveries = discover_intent_retries([0x62; 32])
+        .unwrap_or_else(|error| panic!("PR 362 protection probe failed: {error}"));
+    let activation = discoveries
+        .iter()
+        .find(|discovery| discovery.kind == RetryIntentKind::AssetActivation)
+        .expect("asset activation is in the retained-intent matrix");
+
+    assert!(activation.first_compute_units > 0);
+    assert!(!activation.accepted_retry);
+    assert!(!activation.duplicated_economic_effect);
+    assert_eq!(activation.retry_compute_units, None);
 }
 
 #[test]

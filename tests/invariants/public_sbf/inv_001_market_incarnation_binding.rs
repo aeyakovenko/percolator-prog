@@ -2,7 +2,7 @@
 //!
 //! Normative obligation: Retained requests cannot cross a market close, recreation, or generation change.
 //!
-//! Evidence in this file (I plus invariant-specific F/M assertions): `v16_program_pr294_stale_matcher_grant_liquidates_reinitialized_market`, `v16_program_pr296_stale_trade_fee_policy_cannot_silently_debit_reinitialized_market`, `v16_program_pr295_stale_forfeit_discards_reinitialized_market_winner_payout`, `v16_program_pr317_stale_fee_redirect_extracts_victim_fee`, `v16_program_pr307_stale_deposit_funds_reinitialized_market_winner`, `v16_program_pr315_stale_shutdown_force_closes_replacement_loss`. These tests exercise the deployed public
+//! Evidence in this file (I plus invariant-specific F/M assertions): `v16_program_pr294_stale_matcher_grant_liquidates_reinitialized_market`, `v16_program_pr296_stale_trade_fee_policy_cannot_silently_debit_reinitialized_market`, `v16_program_pr295_stale_forfeit_discards_reinitialized_market_winner_payout`, `v16_program_pr317_stale_fee_redirect_extracts_victim_fee`, `v16_program_pr307_stale_deposit_funds_reinitialized_market_winner`, `v16_program_pr315_same_market_restart_rejects_stale_shutdown`. These tests exercise the deployed public
 //! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
 //! rollback, liveness, or compute outcomes appropriate to the invariant.
 //!
@@ -10,7 +10,9 @@
 //! not certify the invariant on an unfixed pin. Certification requires the fixed-pin assertion
 //! plus every additional verification method required by the charter.
 //! PR 296's economic extraction is blocked by signed base-fee consent, but the test deliberately
-//! records that the stale policy itself still lands; generation binding remains open.
+//! records that the stale policy itself still lands; whole-market generation binding remains open.
+//! PR 315's same-market restart path is protected by INV-002's asset generation, but recreation of
+//! the entire market at the same pubkey can reset that counter and remains an INV-001 gap.
 
 use super::*;
 
@@ -109,17 +111,15 @@ fn v16_program_pr307_stale_deposit_funds_reinitialized_market_winner() {
 }
 
 #[test]
-fn v16_program_pr315_stale_shutdown_force_closes_replacement_loss() {
-    let reproduction = reproduce_shutdown_generation_replay([0x15; 32])
-        .unwrap_or_else(|error| panic!("PR 315 no longer reproduces: {error}"));
-    assert_eq!(reproduction.blocker, KnownBlocker::ShutdownGenerationReplay);
-    assert!(reproduction.new_market_id > reproduction.old_market_id);
-    assert_eq!(reproduction.victim_loss, 100_000);
-    assert_eq!(reproduction.beneficiary_gain, 100_000);
-    assert_eq!(reproduction.control_victim_payout, 1_000_000);
-    assert_eq!(reproduction.replay_victim_payout, 900_000);
-    assert_eq!(reproduction.control_winner_payout, 1_000_000);
-    assert_eq!(reproduction.replay_winner_payout, 1_100_000);
-    assert!(reproduction.replay_cu < 1_400_000);
-    assert!(reproduction.force_close_cu < 1_400_000);
+fn v16_program_pr315_same_market_restart_rejects_stale_shutdown() {
+    let protection =
+        discover_asset_generation_replay([0x15; 32], AssetIntentKind::LifecycleShutdown)
+            .unwrap_or_else(|error| panic!("PR 315 protection probe failed: {error}"));
+    assert!(protection.new_asset_id > protection.old_asset_id);
+    assert!(!protection.accepted_stale_intent);
+    assert!(!protection.mutated_economic_state);
+    assert_eq!(protection.compute_units, None);
+    assert!(protection.rejection_was_generation_mismatch);
+    assert!(protection.fresh_intent_landed);
+    assert!(protection.fresh_intent_mutated_economic_state);
 }

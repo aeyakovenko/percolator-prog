@@ -769,6 +769,7 @@ fn kani_v16_update_authority_decode_preserves_wire_fields() {
 #[kani::unwind(34)]
 fn kani_v16_update_asset_authority_decode_preserves_wire_fields() {
     let asset_index: u16 = kani::any();
+    let market_id: u64 = kani::any();
     let kind: u8 = kani::any();
     let mut new_pubkey = [0u8; 32];
     let mut i = 0;
@@ -777,19 +778,22 @@ fn kani_v16_update_asset_authority_decode_preserves_wire_fields() {
         i += 1;
     }
 
-    let mut data = [0u8; 36];
+    let mut data = [0u8; 44];
     data[0] = 65;
     data[1..3].copy_from_slice(&asset_index.to_le_bytes());
-    data[3] = kind;
-    data[4..36].copy_from_slice(&new_pubkey);
+    data[3..11].copy_from_slice(&market_id.to_le_bytes());
+    data[11] = kind;
+    data[12..44].copy_from_slice(&new_pubkey);
 
     match Instruction::decode(&data).unwrap() {
         Instruction::UpdateAssetAuthority {
             asset_index: got_asset_index,
+            market_id: got_market_id,
             kind: got_kind,
             new_pubkey: got_pubkey,
         } => {
             assert_eq!(got_asset_index, asset_index);
+            assert_eq!(got_market_id, market_id);
             assert_eq!(got_kind, kind);
             assert_eq!(got_pubkey, new_pubkey);
         }
@@ -1498,15 +1502,14 @@ fn kani_v16_update_authority_payload_rejects_trailing_byte() {
 #[kani::unwind(18)]
 fn kani_v16_update_asset_authority_payload_rejects_trailing_byte() {
     let extra: u8 = kani::any();
-
-    assert_rejects_trailing_byte(
-        Instruction::UpdateAssetAuthority {
-            asset_index: 1,
-            kind: 0,
-            new_pubkey: [1u8; 32],
-        },
-        extra,
-    );
+    let mut data = [0u8; 45];
+    data[0] = 65;
+    data[1..3].copy_from_slice(&1u16.to_le_bytes());
+    data[3..11].copy_from_slice(&2u64.to_le_bytes());
+    data[11] = 0;
+    data[12..44].copy_from_slice(&[1u8; 32]);
+    data[44] = extra;
+    assert!(Instruction::decode(&data).is_err());
 }
 
 #[kani::proof]
@@ -1732,6 +1735,8 @@ fn kani_v16_core_payloads_reject_one_byte_truncation() {
     let crank = [5u8; 59];
     assert!(Instruction::decode(&crank).is_err());
 
+    // Keep this truncation before the four wide authority arrays; the host canonical corpus
+    // exhausts every one-byte prefix through the exact 172-byte lifecycle payload.
     let asset_lifecycle = [40u8; 147];
     assert!(Instruction::decode(&asset_lifecycle).is_err());
 
@@ -1771,7 +1776,7 @@ fn kani_v16_authority_oracle_payloads_reject_one_byte_truncation() {
     let update_authority = [32u8; 32];
     assert!(Instruction::decode(&update_authority).is_err());
 
-    let update_asset_authority = [65u8; 35];
+    let update_asset_authority = [65u8; 43];
     assert!(Instruction::decode(&update_asset_authority).is_err());
 
     let update_insurance = [33u8; 11];

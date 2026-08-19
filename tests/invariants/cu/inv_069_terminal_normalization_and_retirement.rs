@@ -375,9 +375,11 @@ fn v16_attack_retire_rejects_funded_insurance_domain_budget() {
     let admin = env.admin.insecure_clone();
     let market = env.market;
     let admin_key = admin.pubkey();
+    let market_id = env.asset_market_id(1);
     let retire_ix = |now_slot: u64| ProgInstruction::UpdateAssetLifecycle {
         action: percolator_prog::processor::ASSET_ACTION_RETIRE,
         asset_index: 1,
+        market_id,
         now_slot,
         initial_price: 0,
         max_init_fee: u128::MAX,
@@ -449,12 +451,14 @@ fn v16_attack_retire_rejects_funded_backing_bucket() {
 
     let admin = env.admin.insecure_clone();
     let market_before = env.svm.get_account(&env.market).unwrap();
+    let market_id = env.asset_market_id(1);
     env.svm.warp_to_slot(3);
     env.svm.expire_blockhash();
     let rejected = env.send(
         ProgInstruction::UpdateAssetLifecycle {
             action: percolator_prog::processor::ASSET_ACTION_RETIRE,
             asset_index: 1,
+            market_id,
             now_slot: 3,
             initial_price: 0,
             max_init_fee: u128::MAX,
@@ -498,6 +502,7 @@ fn v16_attack_retire_rejects_funded_backing_bucket() {
         ProgInstruction::UpdateAssetLifecycle {
             action: percolator_prog::processor::ASSET_ACTION_RETIRE,
             asset_index: 1,
+            market_id,
             now_slot: 4,
             initial_price: 0,
             max_init_fee: u128::MAX,

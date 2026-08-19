@@ -354,6 +354,7 @@ fn v16_program_terminal_bankruptcy_residual_matrix_preserves_provider_value() {
     env.ensure_signer_account(provider.pubkey());
     env.ensure_signer_account(oracle.pubkey());
     let admin = env.admin.insecure_clone();
+    let market_id = env.asset_market_id(0);
     for (kind, incoming) in [
         (processor::ASSET_AUTH_INSURANCE, &provider),
         (processor::ASSET_AUTH_INSURANCE_OPERATOR, &provider),
@@ -364,6 +365,7 @@ fn v16_program_terminal_bankruptcy_residual_matrix_preserves_provider_value() {
         env.send(
             ProgInstruction::UpdateAssetAuthority {
                 asset_index: 0,
+                market_id,
                 kind,
                 new_pubkey: incoming.pubkey().to_bytes(),
             },

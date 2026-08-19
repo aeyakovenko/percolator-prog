@@ -809,9 +809,11 @@ fn v16_program_asset_activation_cooldown_is_enforced_and_then_reopens() {
         AccountMeta::new(admin.pubkey(), true),
         AccountMeta::new(env.market, false),
     ];
+    let market_id = env.market_state().1.next_market_id;
     let ix = |idx: u16, slot: u64| ProgInstruction::UpdateAssetLifecycle {
         action: percolator_prog::processor::ASSET_ACTION_ACTIVATE,
         asset_index: idx,
+        market_id,
         now_slot: slot,
         initial_price: price,
         max_init_fee: u128::MAX,

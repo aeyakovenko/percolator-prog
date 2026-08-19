@@ -300,6 +300,7 @@ fn inv_022_representative_public_instructions() -> Vec<ProgInstruction> {
         ProgInstruction::UpdateAssetLifecycle {
             action: 0,
             asset_index: 1,
+            market_id: 2,
             now_slot: 2,
             initial_price: 100,
             max_init_fee: 1,
@@ -403,6 +404,7 @@ fn inv_022_representative_public_instructions() -> Vec<ProgInstruction> {
         },
         ProgInstruction::UpdateAssetAuthority {
             asset_index: 1,
+            market_id: 2,
             kind: 0,
             new_pubkey: [1u8; 32],
         },

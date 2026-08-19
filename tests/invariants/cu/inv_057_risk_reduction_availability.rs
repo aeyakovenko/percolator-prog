@@ -958,6 +958,7 @@ fn v16_program_force_shutdown_timeout_lets_traders_exit_before_close() {
     env.svm.expire_blockhash();
     let mallory = Keypair::new();
     env.ensure_signer_account(mallory.pubkey());
+    let market_id = env.asset_market_id(1);
     let stranger = send_tx(
         &mut env.svm,
         env.program_id,
@@ -965,6 +966,7 @@ fn v16_program_force_shutdown_timeout_lets_traders_exit_before_close() {
         ProgInstruction::UpdateAssetLifecycle {
             action: percolator_prog::processor::ASSET_ACTION_SHUTDOWN,
             asset_index: 1,
+            market_id,
             now_slot: SHUT,
             initial_price: 0,
             max_init_fee: u128::MAX,
@@ -1078,11 +1080,13 @@ fn v16_program_drain_only_blocks_new_risk_but_allows_reduce() {
 
     let stranger = Keypair::new();
     env.ensure_signer_account(stranger.pubkey());
+    let market_id = env.asset_market_id(0);
     env.svm.expire_blockhash();
     let unauthorized = env.send(
         ProgInstruction::UpdateAssetLifecycle {
             action: percolator_prog::processor::ASSET_ACTION_DRAIN_ONLY,
             asset_index: 0,
+            market_id,
             now_slot: 0,
             initial_price: 0,
             max_init_fee: u128::MAX,
@@ -1112,6 +1116,7 @@ fn v16_program_drain_only_blocks_new_risk_but_allows_reduce() {
         ProgInstruction::UpdateAssetLifecycle {
             action: percolator_prog::processor::ASSET_ACTION_DRAIN_ONLY,
             asset_index: 0,
+            market_id,
             now_slot: 1,
             initial_price: 0,
             max_init_fee: u128::MAX,

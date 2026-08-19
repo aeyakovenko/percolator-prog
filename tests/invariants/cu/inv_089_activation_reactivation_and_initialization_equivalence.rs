@@ -61,6 +61,7 @@ fn v16_program_reuse_rejects_every_zero_authority_before_mutation() {
         let vault_before = env.svm.get_account(&env.vault).unwrap();
         let source = env.token_account(creator.pubkey(), 1);
         let source_before = env.svm.get_account(&source).unwrap();
+        let activation_market_id = env.market_state().1.next_market_id;
 
         env.svm.warp_to_slot(4);
         env.svm.expire_blockhash();
@@ -68,6 +69,7 @@ fn v16_program_reuse_rejects_every_zero_authority_before_mutation() {
             ProgInstruction::UpdateAssetLifecycle {
                 action: processor::ASSET_ACTION_ACTIVATE,
                 asset_index: 1,
+                market_id: activation_market_id,
                 now_slot: 4,
                 initial_price: 250,
                 max_init_fee: u128::MAX,
@@ -311,6 +313,7 @@ fn v16_attack_marketauth_cannot_reactivate_or_rekey_active_slot_with_open_intere
     assert_eq!(before_group.assets[1].lifecycle, AssetLifecycleV16::Active);
     assert_eq!(before_group.assets[1].oi_eff_long_q, POS_SCALE);
     assert_eq!(before_group.assets[1].oi_eff_short_q, POS_SCALE);
+    let activation_market_id = before_group.next_market_id;
 
     let new_insurance = Keypair::new();
     let new_operator = Keypair::new();
@@ -322,6 +325,7 @@ fn v16_attack_marketauth_cannot_reactivate_or_rekey_active_slot_with_open_intere
         ProgInstruction::UpdateAssetLifecycle {
             action: percolator_prog::processor::ASSET_ACTION_ACTIVATE,
             asset_index: 1,
+            market_id: activation_market_id,
             now_slot: 2,
             initial_price: 999,
             max_init_fee: u128::MAX,
@@ -397,6 +401,7 @@ fn v16_attack_privileged_reactivate_invalid_price_keeps_retired_slot_reusable() 
     let (cfg_before, group_before) = state::read_market(&market_before.data).unwrap();
     assert_eq!(cfg_before.free_market_slot_count, 1);
     assert_eq!(group_before.assets[1].lifecycle, AssetLifecycleV16::Retired);
+    let activation_market_id = group_before.next_market_id;
 
     for (label, bad_price) in [
         ("zero privileged reactivation price", 0),
@@ -411,6 +416,7 @@ fn v16_attack_privileged_reactivate_invalid_price_keeps_retired_slot_reusable() 
             ProgInstruction::UpdateAssetLifecycle {
                 action: percolator_prog::processor::ASSET_ACTION_ACTIVATE,
                 asset_index: 1,
+                market_id: activation_market_id,
                 now_slot: 4,
                 initial_price: bad_price,
                 max_init_fee: u128::MAX,
@@ -449,6 +455,7 @@ fn v16_attack_privileged_reactivate_invalid_price_keeps_retired_slot_reusable() 
         ProgInstruction::UpdateAssetLifecycle {
             action: percolator_prog::processor::ASSET_ACTION_ACTIVATE,
             asset_index: 1,
+            market_id: activation_market_id,
             now_slot: 4,
             initial_price: 250,
             max_init_fee: u128::MAX,
@@ -532,6 +539,7 @@ fn v16_attack_permissionless_reuse_invalid_price_keeps_slot_reusable() {
     );
     let market_before = env.svm.get_account(&env.market).unwrap();
     let vault_before = env.svm.get_account(&env.vault).unwrap();
+    let activation_market_id = group_retired.next_market_id;
 
     for (label, bad_price) in [
         ("zero reuse price", 0),
@@ -548,6 +556,7 @@ fn v16_attack_permissionless_reuse_invalid_price_keeps_slot_reusable() {
             ProgInstruction::UpdateAssetLifecycle {
                 action: percolator_prog::processor::ASSET_ACTION_ACTIVATE,
                 asset_index: 1,
+                market_id: activation_market_id,
                 now_slot: 4,
                 initial_price: bad_price,
                 max_init_fee: u128::MAX,
@@ -593,6 +602,7 @@ fn v16_attack_permissionless_reuse_invalid_price_keeps_slot_reusable() {
         ProgInstruction::UpdateAssetLifecycle {
             action: percolator_prog::processor::ASSET_ACTION_ACTIVATE,
             asset_index: 1,
+            market_id: activation_market_id,
             now_slot: 4,
             initial_price: 250,
             max_init_fee: u128::MAX,
@@ -663,12 +673,14 @@ fn v16_attack_permissionless_reuse_respects_activation_cooldown_and_fee_atomicit
     let market_before = env.svm.get_account(&env.market).unwrap();
     let vault_before = env.svm.get_account(&env.vault).unwrap();
     let source_before = env.svm.get_account(&source).unwrap();
+    let activation_market_id = retired_group.next_market_id;
 
     env.svm.expire_blockhash();
     let same_slot_reuse = env.send(
         ProgInstruction::UpdateAssetLifecycle {
             action: percolator_prog::processor::ASSET_ACTION_ACTIVATE,
             asset_index: 1,
+            market_id: activation_market_id,
             now_slot: 5,
             initial_price: 250,
             max_init_fee: u128::MAX,
@@ -713,6 +725,7 @@ fn v16_attack_permissionless_reuse_respects_activation_cooldown_and_fee_atomicit
         ProgInstruction::UpdateAssetLifecycle {
             action: percolator_prog::processor::ASSET_ACTION_ACTIVATE,
             asset_index: 1,
+            market_id: activation_market_id,
             now_slot: 6,
             initial_price: 250,
             max_init_fee: u128::MAX,
@@ -760,11 +773,13 @@ fn v16_attack_permissionless_create_requires_nonzero_fee() {
     let market = env.market;
     env.svm.warp_to_slot(1);
     let append = |env: &mut V16CuEnv, signer: &Keypair| -> Result<u64, String> {
+        let market_id = env.market_state().1.next_market_id;
         env.svm.expire_blockhash();
         env.send(
             ProgInstruction::UpdateAssetLifecycle {
                 action: percolator_prog::processor::ASSET_ACTION_ACTIVATE,
                 asset_index: 1,
+                market_id,
                 now_slot: 1,
                 initial_price: 100,
                 max_init_fee: u128::MAX,
@@ -821,6 +836,7 @@ fn v16_attack_permissionless_create_underfunded_fee_does_not_activate_or_credit(
         group_before.config.max_market_slots, 1,
         "starts as a one-asset market"
     );
+    let activation_market_id = group_before.next_market_id;
 
     let underfunded_source = env.token_account(creator.pubkey(), FEE as u64 - 1);
     env.svm.expire_blockhash();
@@ -828,6 +844,7 @@ fn v16_attack_permissionless_create_underfunded_fee_does_not_activate_or_credit(
         ProgInstruction::UpdateAssetLifecycle {
             action: percolator_prog::processor::ASSET_ACTION_ACTIVATE,
             asset_index: 1,
+            market_id: activation_market_id,
             now_slot: 1,
             initial_price: 100,
             max_init_fee: u128::MAX,
@@ -889,6 +906,7 @@ fn v16_attack_permissionless_create_underfunded_fee_does_not_activate_or_credit(
         ProgInstruction::UpdateAssetLifecycle {
             action: percolator_prog::processor::ASSET_ACTION_ACTIVATE,
             asset_index: 1,
+            market_id: activation_market_id,
             now_slot: 1,
             initial_price: 100,
             max_init_fee: u128::MAX,
@@ -947,12 +965,14 @@ fn v16_attack_permissionless_append_zero_authority_rolls_back_realloc_and_fee() 
     let vault_before = env.svm.get_account(&env.vault).unwrap();
     let source = env.token_account(creator.pubkey(), FEE as u64);
     let (_, group_before) = env.market_state();
+    let activation_market_id = group_before.next_market_id;
 
     env.svm.expire_blockhash();
     let rejected = env.send(
         ProgInstruction::UpdateAssetLifecycle {
             action: percolator_prog::processor::ASSET_ACTION_ACTIVATE,
             asset_index: 1,
+            market_id: activation_market_id,
             now_slot: 1,
             initial_price: 100,
             max_init_fee: u128::MAX,
@@ -1007,6 +1027,7 @@ fn v16_attack_permissionless_append_zero_authority_rolls_back_realloc_and_fee() 
         ProgInstruction::UpdateAssetLifecycle {
             action: percolator_prog::processor::ASSET_ACTION_ACTIVATE,
             asset_index: 1,
+            market_id: activation_market_id,
             now_slot: 1,
             initial_price: 100,
             max_init_fee: u128::MAX,
@@ -1050,6 +1071,7 @@ fn v16_attack_permissionless_append_invalid_price_rolls_back_realloc_and_fee() {
     let market_before = env.svm.get_account(&env.market).unwrap();
     let vault_before = env.svm.get_account(&env.vault).unwrap();
     let (_, group_before) = env.market_state();
+    let activation_market_id = group_before.next_market_id;
 
     for (label, bad_price) in [
         ("zero initial price", 0),
@@ -1065,6 +1087,7 @@ fn v16_attack_permissionless_append_invalid_price_rolls_back_realloc_and_fee() {
             ProgInstruction::UpdateAssetLifecycle {
                 action: percolator_prog::processor::ASSET_ACTION_ACTIVATE,
                 asset_index: 1,
+                market_id: activation_market_id,
                 now_slot: 1,
                 initial_price: bad_price,
                 max_init_fee: u128::MAX,
@@ -1119,6 +1142,7 @@ fn v16_attack_permissionless_append_invalid_price_rolls_back_realloc_and_fee() {
         ProgInstruction::UpdateAssetLifecycle {
             action: percolator_prog::processor::ASSET_ACTION_ACTIVATE,
             asset_index: 1,
+            market_id: activation_market_id,
             now_slot: 1,
             initial_price: 100,
             max_init_fee: u128::MAX,
@@ -1284,6 +1308,7 @@ fn v16_audit_permissionless_reuse_rejects_zero_insurance_authority() {
         retired_group.assets[1].lifecycle,
         AssetLifecycleV16::Retired
     );
+    let activation_market_id = retired_group.next_market_id;
 
     // Reuse the retired slot with insurance_authority = ZERO.
     env.svm.warp_to_slot(4);
@@ -1295,6 +1320,7 @@ fn v16_audit_permissionless_reuse_rejects_zero_insurance_authority() {
         ProgInstruction::UpdateAssetLifecycle {
             action: percolator_prog::processor::ASSET_ACTION_ACTIVATE,
             asset_index: 1,
+            market_id: activation_market_id,
             now_slot: 4,
             initial_price: 250,
             max_init_fee: u128::MAX,

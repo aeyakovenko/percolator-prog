@@ -948,10 +948,12 @@ fn v16_attack_backing_principal_withdraw_preserves_provider_earnings() {
 
     env.svm.warp_to_slot(4);
     env.svm.expire_blockhash();
+    let market_id = env.asset_market_id(1);
     let accepted = env.send(
         ProgInstruction::UpdateAssetLifecycle {
             action: percolator_prog::processor::ASSET_ACTION_RETIRE,
             asset_index: 1,
+            market_id,
             now_slot: 4,
             initial_price: 0,
             max_init_fee: u128::MAX,

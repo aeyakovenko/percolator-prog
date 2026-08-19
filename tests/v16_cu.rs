@@ -995,6 +995,7 @@ impl V16CuEnv {
         if clock.slot < now_slot {
             self.svm.warp_to_slot(now_slot);
         }
+        let market_id = self.market_state().1.next_market_id;
         send_tx(
             &mut self.svm,
             self.program_id,
@@ -1002,6 +1003,7 @@ impl V16CuEnv {
             ProgInstruction::UpdateAssetLifecycle {
                 action: percolator_prog::processor::ASSET_ACTION_ACTIVATE,
                 asset_index,
+                market_id,
                 now_slot,
                 initial_price,
                 max_init_fee: u128::MAX,
@@ -1050,6 +1052,11 @@ impl V16CuEnv {
         let mut max_cu = 0;
         for _ in 0..max_attempts {
             self.svm.expire_blockhash();
+            let market_id = if action == percolator_prog::processor::ASSET_ACTION_ACTIVATE {
+                self.market_state().1.next_market_id
+            } else {
+                self.asset_market_id(asset_index)
+            };
             let result = send_tx(
                 &mut self.svm,
                 self.program_id,
@@ -1057,6 +1064,7 @@ impl V16CuEnv {
                 ProgInstruction::UpdateAssetLifecycle {
                     action,
                     asset_index,
+                    market_id,
                     now_slot,
                     initial_price,
                     max_init_fee: u128::MAX,
@@ -1222,6 +1230,7 @@ impl V16CuEnv {
         asset_index: u16,
         now_slot: u64,
     ) -> Result<u64, String> {
+        let market_id = self.asset_market_id(asset_index);
         send_tx(
             &mut self.svm,
             self.program_id,
@@ -1229,6 +1238,7 @@ impl V16CuEnv {
             ProgInstruction::UpdateAssetLifecycle {
                 action: percolator_prog::processor::ASSET_ACTION_SHUTDOWN,
                 asset_index,
+                market_id,
                 now_slot,
                 initial_price: 0,
                 max_init_fee: u128::MAX,
@@ -1392,6 +1402,7 @@ impl V16CuEnv {
         new_pubkey: [u8; 32],
     ) -> Result<u64, String> {
         self.ensure_signer_account(signer.pubkey());
+        let market_id = self.asset_market_id(asset_index);
         let mut signers = vec![signer];
         let new_authority_key = if let Some(new_authority) = new_authority {
             self.ensure_signer_account(new_authority.pubkey());
@@ -1403,6 +1414,7 @@ impl V16CuEnv {
         self.send(
             ProgInstruction::UpdateAssetAuthority {
                 asset_index,
+                market_id,
                 kind,
                 new_pubkey,
             },
@@ -1808,6 +1820,7 @@ impl V16CuEnv {
     ) -> (Pubkey, u64) {
         self.ensure_signer_account(creator.pubkey());
         let source = self.token_account(creator.pubkey(), fee as u64);
+        let market_id = self.market_state().1.next_market_id;
         let cu = send_tx(
             &mut self.svm,
             self.program_id,
@@ -1815,6 +1828,7 @@ impl V16CuEnv {
             ProgInstruction::UpdateAssetLifecycle {
                 action: percolator_prog::processor::ASSET_ACTION_ACTIVATE,
                 asset_index,
+                market_id,
                 now_slot,
                 initial_price,
                 max_init_fee: fee,

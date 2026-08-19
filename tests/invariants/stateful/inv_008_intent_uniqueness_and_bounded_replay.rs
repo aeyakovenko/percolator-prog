@@ -48,7 +48,9 @@ proptest! {
             .filter(|kind| {
                 !matches!(
                     kind,
-                    RetryIntentKind::ConvertReleasedPnl | RetryIntentKind::RebalanceReduce
+                    RetryIntentKind::ConvertReleasedPnl
+                        | RetryIntentKind::RebalanceReduce
+                        | RetryIntentKind::AssetActivation
                 )
             })
             .collect();
@@ -71,6 +73,13 @@ proptest! {
         prop_assert!(!conversion.accepted_retry);
         prop_assert!(!conversion.duplicated_economic_effect);
         prop_assert_eq!(conversion.retry_compute_units, None);
+        let activation = discoveries
+            .iter()
+            .find(|discovery| discovery.kind == RetryIntentKind::AssetActivation)
+            .expect("activation retry discovery");
+        prop_assert!(!activation.accepted_retry);
+        prop_assert!(!activation.duplicated_economic_effect);
+        prop_assert_eq!(activation.retry_compute_units, None);
     }
 }
 
@@ -114,16 +123,18 @@ proptest! {
     }
 
     #[test]
-    fn v16_program_pr362_activation_retry_replay_fuzz(
+    fn v16_program_pr362_activation_retry_rejection_fuzz(
         seed in activation_retry_replay_seed_strategy()
     ) {
-        let result = reproduce_activation_retry_replay(seed);
-        prop_assert!(
-            result.is_ok(),
-            "PR 362 no longer reproduces for seed {:?}: {}",
-            seed,
-            result.unwrap_err()
-        );
+        let discoveries = discover_intent_retries(seed).map_err(TestCaseError::fail)?;
+        let activation = discoveries
+            .iter()
+            .find(|discovery| discovery.kind == RetryIntentKind::AssetActivation)
+            .expect("activation retry discovery");
+        prop_assert!(activation.first_compute_units > 0);
+        prop_assert!(!activation.accepted_retry);
+        prop_assert!(!activation.duplicated_economic_effect);
+        prop_assert_eq!(activation.retry_compute_units, None);
     }
 
     #[test]

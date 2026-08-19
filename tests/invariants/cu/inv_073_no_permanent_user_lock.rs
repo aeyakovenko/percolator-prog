@@ -3693,12 +3693,14 @@ fn v16_program_permissionless_asset_activation_rejects_when_resolve_matured() {
     let market_before = env.svm.get_account(&env.market).unwrap();
     let vault_before = env.svm.get_account(&env.vault).unwrap();
     let source_before = env.svm.get_account(&stale_fee_source).unwrap();
+    let activation_market_id = env.market_state().1.next_market_id;
 
     env.svm.expire_blockhash();
     let rejected = env.send(
         ProgInstruction::UpdateAssetLifecycle {
             action: percolator_prog::processor::ASSET_ACTION_ACTIVATE,
             asset_index: 2,
+            market_id: activation_market_id,
             now_slot: 0,
             initial_price: 100,
             max_init_fee: u128::MAX,
@@ -3900,6 +3902,7 @@ fn v16_program_marketauth_lifecycle_actions_reject_when_resolve_matured() {
         "test setup must be beyond the permissionless resolve stale boundary"
     );
     assert_eq!(stale_group.assets[2].lifecycle, AssetLifecycleV16::Active);
+    let market_id = stale_group.assets[2].market_id;
 
     let before_drain = env.svm.get_account(&env.market).unwrap();
     env.svm.expire_blockhash();
@@ -3907,6 +3910,7 @@ fn v16_program_marketauth_lifecycle_actions_reject_when_resolve_matured() {
         ProgInstruction::UpdateAssetLifecycle {
             action: percolator_prog::processor::ASSET_ACTION_DRAIN_ONLY,
             asset_index: 2,
+            market_id,
             now_slot: 0,
             initial_price: 0,
             max_init_fee: u128::MAX,
@@ -3937,6 +3941,7 @@ fn v16_program_marketauth_lifecycle_actions_reject_when_resolve_matured() {
         ProgInstruction::UpdateAssetLifecycle {
             action: percolator_prog::processor::ASSET_ACTION_RETIRE,
             asset_index: 2,
+            market_id,
             now_slot: 40,
             initial_price: 0,
             max_init_fee: u128::MAX,

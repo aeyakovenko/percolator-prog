@@ -1002,6 +1002,21 @@ pub mod state {
     }
 
     #[inline]
+    pub fn asset_lifecycle_generation_binding_matches(
+        current_market_id: u64,
+        next_market_id: u64,
+        is_activation: bool,
+        expected_market_id: u64,
+    ) -> bool {
+        let bound_market_id = if is_activation {
+            next_market_id
+        } else {
+            current_market_id
+        };
+        bound_market_id == expected_market_id
+    }
+
+    #[inline]
     pub(crate) fn allocate_portfolio_id(next: u64) -> Result<(u64, u64), ProgramError> {
         // Wrapper configs written before the counter existed contain zero in this former padding
         // word. Such a market starts the sequence at one on its next successful initialization.
@@ -1720,6 +1735,26 @@ pub mod state {
             engine_config.max_market_slots as usize,
             header.asset_slot_capacity.get() as usize,
         ))
+    }
+
+    pub fn read_asset_lifecycle_generation_preflight(
+        data: &[u8],
+        asset_index: usize,
+        is_activation: bool,
+    ) -> Result<(u64, u64), ProgramError> {
+        check_header(data, KIND_MARKET)?;
+        validate_market_dynamic_len(data)?;
+        let header = market_header(data)?;
+        let configured = header.config.max_market_slots.get() as usize;
+        if asset_index > configured || (!is_activation && asset_index == configured) {
+            return Err(PercolatorError::InvalidInstruction.into());
+        }
+        let current_market_id = if asset_index < configured {
+            asset_slot_wire(data, asset_index)?.asset.market_id.get()
+        } else {
+            0
+        };
+        Ok((current_market_id, header.next_market_id.get()))
     }
 
     pub fn write_asset_oracle_profile(
@@ -2925,6 +2960,7 @@ pub mod ix {
         /// authority (self-rotation). Isolated to the given asset_index.
         UpdateAssetAuthority {
             asset_index: u16,
+            market_id: u64,
             kind: u8,
             new_pubkey: [u8; 32],
         },
@@ -3035,6 +3071,7 @@ pub mod ix {
         UpdateAssetLifecycle {
             action: u8,
             asset_index: u16,
+            market_id: u64,
             now_slot: u64,
             initial_price: u64,
             max_init_fee: u128,
@@ -3250,6 +3287,7 @@ pub mod ix {
                 },
                 65 => Self::UpdateAssetAuthority {
                     asset_index: read_u16(&mut rest)?,
+                    market_id: read_u64(&mut rest)?,
                     kind: read_u8(&mut rest)?,
                     new_pubkey: read_bytes32(&mut rest)?,
                 },
@@ -3371,6 +3409,7 @@ pub mod ix {
                 40 => Self::UpdateAssetLifecycle {
                     action: read_u8(&mut rest)?,
                     asset_index: read_u16(&mut rest)?,
+                    market_id: read_u64(&mut rest)?,
                     now_slot: read_u64(&mut rest)?,
                     initial_price: read_u64(&mut rest)?,
                     max_init_fee: read_u128(&mut rest)?,
@@ -3656,11 +3695,13 @@ pub mod ix {
                 }
                 Self::UpdateAssetAuthority {
                     asset_index,
+                    market_id,
                     kind,
                     new_pubkey,
                 } => {
                     out.push(65);
                     push_u16(&mut out, asset_index);
+                    push_u64(&mut out, market_id);
                     out.push(kind);
                     out.extend_from_slice(&new_pubkey);
                 }
@@ -3884,6 +3925,7 @@ pub mod ix {
                 Self::UpdateAssetLifecycle {
                     action,
                     asset_index,
+                    market_id,
                     now_slot,
                     initial_price,
                     max_init_fee,
@@ -3895,6 +3937,7 @@ pub mod ix {
                     out.push(40);
                     out.push(action);
                     push_u16(&mut out, asset_index);
+                    push_u64(&mut out, market_id);
                     push_u64(&mut out, now_slot);
                     push_u64(&mut out, initial_price);
                     push_u128(&mut out, max_init_fee);
@@ -6011,6 +6054,35 @@ pub mod processor {
         Ok(())
     }
 
+    fn require_asset_lifecycle_generation_view(
+        group: &state::MarketViewMutV16<'_>,
+        asset_index: usize,
+        is_activation: bool,
+        expected_market_id: u64,
+    ) -> ProgramResult {
+        let configured = group.header.config.max_market_slots.get() as usize;
+        if asset_index > configured
+            || (!is_activation && asset_index == configured)
+            || asset_index >= group.markets.len()
+        {
+            return Err(PercolatorError::InvalidInstruction.into());
+        }
+        let current_market_id = if asset_index < configured {
+            group.markets[asset_index].engine.asset.market_id.get()
+        } else {
+            0
+        };
+        if !state::asset_lifecycle_generation_binding_matches(
+            current_market_id,
+            group.header.next_market_id.get(),
+            is_activation,
+            expected_market_id,
+        ) {
+            return Err(PercolatorError::AssetGenerationMismatch.into());
+        }
+        Ok(())
+    }
+
     fn require_asset_generation_frontier_view(
         group: &state::MarketViewMutV16<'_>,
         expected_frontier: u64,
@@ -6264,9 +6336,17 @@ pub mod processor {
             }
             Instruction::UpdateAssetAuthority {
                 asset_index,
+                market_id,
                 kind,
                 new_pubkey,
-            } => handle_update_asset_authority(program_id, accounts, asset_index, kind, new_pubkey),
+            } => handle_update_asset_authority(
+                program_id,
+                accounts,
+                asset_index,
+                market_id,
+                kind,
+                new_pubkey,
+            ),
             Instruction::UpdateLiquidationFeePolicy {
                 cranker_share_bps,
                 policy_sequence,
@@ -6482,6 +6562,7 @@ pub mod processor {
             Instruction::UpdateAssetLifecycle {
                 action,
                 asset_index,
+                market_id,
                 now_slot,
                 initial_price,
                 max_init_fee,
@@ -6494,6 +6575,7 @@ pub mod processor {
                 accounts,
                 action,
                 asset_index,
+                market_id,
                 now_slot,
                 initial_price,
                 max_init_fee,
@@ -10687,6 +10769,7 @@ pub mod processor {
         program_id: &Pubkey,
         accounts: &'a [AccountInfo<'a>],
         asset_index: u16,
+        expected_market_id: u64,
         kind: u8,
         new_pubkey: [u8; 32],
     ) -> ProgramResult {
@@ -10714,6 +10797,7 @@ pub mod processor {
         if asset_index >= group.header.config.max_market_slots.get() as usize {
             return Err(PercolatorError::InvalidInstruction.into());
         }
+        require_asset_generation_view(&group, asset_index, expected_market_id)?;
         let mut profile = read_oracle_profile_from_view(&group, &cfg, asset_index)?;
 
         // The asset's own cold-storage admin may rotate ANY of its authorities, and only the admin
@@ -11019,6 +11103,7 @@ pub mod processor {
         accounts: &'a [AccountInfo<'a>],
         action: u8,
         asset_index: u16,
+        expected_market_id: u64,
         now_slot: u64,
         initial_price: u64,
         max_init_fee: u128,
@@ -11034,6 +11119,24 @@ pub mod processor {
         expect_owner(market_ai, program_id)?;
 
         let asset_index = asset_index as usize;
+        let is_activation = action == ASSET_ACTION_ACTIVATE;
+        {
+            let data = market_ai.try_borrow_data()?;
+            let (current_market_id, next_market_id) =
+                state::read_asset_lifecycle_generation_preflight(
+                    &data,
+                    asset_index,
+                    is_activation,
+                )?;
+            if !state::asset_lifecycle_generation_binding_matches(
+                current_market_id,
+                next_market_id,
+                is_activation,
+                expected_market_id,
+            ) {
+                return Err(PercolatorError::AssetGenerationMismatch.into());
+            }
+        }
         let (cfg_pre, mode_pre, configured_slots_pre, capacity_pre) =
             state::read_market_config_mode_and_capacity(&market_ai.try_borrow_data()?)?;
         if mode_pre != MarketModeV16::Live {
@@ -11095,6 +11198,12 @@ pub mod processor {
                 let mut reuse_activated = false;
                 {
                     let (mut cfg, mut group) = state::market_view_mut(&mut data)?;
+                    require_asset_lifecycle_generation_view(
+                        &group,
+                        asset_index,
+                        true,
+                        expected_market_id,
+                    )?;
                     let still_asset_authority =
                         cfg.marketauth != [0u8; 32] && cfg.marketauth == authority.key.to_bytes();
                     if !still_asset_authority {
@@ -11228,6 +11337,12 @@ pub mod processor {
             let cfg_after = {
                 let mut data = market_ai.try_borrow_mut_data()?;
                 let (mut cfg, mut group) = state::market_view_mut(&mut data)?;
+                require_asset_lifecycle_generation_view(
+                    &group,
+                    asset_index,
+                    false,
+                    expected_market_id,
+                )?;
                 if group.header.mode != 0 {
                     return Err(PercolatorError::EngineLockActive.into());
                 }
@@ -11304,6 +11419,12 @@ pub mod processor {
             let mut data = market_ai.try_borrow_mut_data()?;
             let existing_profile = state::read_asset_oracle_profile(&data, asset_index)?;
             let (mut cfg, mut group) = state::market_view_mut(&mut data)?;
+            require_asset_lifecycle_generation_view(
+                &group,
+                asset_index,
+                is_activation,
+                expected_market_id,
+            )?;
             if !live_authority_matches(&cfg.marketauth, authority.key) {
                 return Err(PercolatorError::Unauthorized.into());
             }

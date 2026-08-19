@@ -631,6 +631,7 @@ fn v16_bpf_asset0_shutdown_force_closes_preserves_insurance_and_restarts() {
     let insurance_before_shutdown = env.market_state().1.insurance;
     let vault_before_shutdown = env.token_amount(env.vault);
     assert_eq!(insurance_before_shutdown, 500);
+    let asset_market_id = env.asset_market_id(0);
 
     env.svm.expire_blockhash();
     let ordinary_retire_asset0 = send_tx(
@@ -640,6 +641,7 @@ fn v16_bpf_asset0_shutdown_force_closes_preserves_insurance_and_restarts() {
         ProgInstruction::UpdateAssetLifecycle {
             action: processor::ASSET_ACTION_RETIRE,
             asset_index: 0,
+            market_id: asset_market_id,
             now_slot: 1,
             initial_price: 0,
             max_init_fee: u128::MAX,
@@ -712,6 +714,7 @@ fn v16_bpf_asset0_shutdown_force_closes_preserves_insurance_and_restarts() {
         ProgInstruction::UpdateAssetLifecycle {
             action: processor::ASSET_ACTION_SHUTDOWN,
             asset_index: 0,
+            market_id: old_market_id,
             now_slot: 2,
             initial_price: 0,
             max_init_fee: u128::MAX,

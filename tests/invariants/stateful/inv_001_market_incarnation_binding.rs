@@ -165,15 +165,19 @@ proptest! {
     }
 
     #[test]
-    fn v16_program_pr315_shutdown_generation_replay_fuzz(
+    fn v16_program_pr315_shutdown_generation_rejection_fuzz(
         seed in shutdown_generation_replay_seed_strategy()
     ) {
-        let result = reproduce_shutdown_generation_replay(seed);
-        prop_assert!(
-            result.is_ok(),
-            "PR 315 no longer reproduces for seed {:?}: {}",
+        let protection = discover_asset_generation_replay(
             seed,
-            result.unwrap_err()
-        );
+            AssetIntentKind::LifecycleShutdown,
+        ).map_err(TestCaseError::fail)?;
+        prop_assert!(protection.new_asset_id > protection.old_asset_id);
+        prop_assert!(!protection.accepted_stale_intent);
+        prop_assert!(!protection.mutated_economic_state);
+        prop_assert_eq!(protection.compute_units, None);
+        prop_assert!(protection.rejection_was_generation_mismatch);
+        prop_assert!(protection.fresh_intent_landed);
+        prop_assert!(protection.fresh_intent_mutated_economic_state);
     }
 }
