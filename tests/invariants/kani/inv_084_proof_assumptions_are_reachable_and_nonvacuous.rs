@@ -664,15 +664,18 @@ fn kani_v16_inv084_engine_error_tag_partition_has_boundary_witnesses() {
 fn kani_v16_inv084_decoder_tag_assumptions_have_concrete_witnesses() {
     for (tag, amount) in [(3u8, 11u128), (4u8, 12u128)] {
         let portfolio_id = 9u64;
-        let mut data = [0u8; 25];
+        let expected_sequence = 10u64;
+        let mut data = [0u8; 33];
         data[0] = tag;
         data[1..9].copy_from_slice(&portfolio_id.to_le_bytes());
-        data[9..25].copy_from_slice(&amount.to_le_bytes());
+        data[9..17].copy_from_slice(&expected_sequence.to_le_bytes());
+        data[17..33].copy_from_slice(&amount.to_le_bytes());
         match (tag, Instruction::decode(&data).unwrap()) {
             (
                 3,
                 Instruction::Deposit {
                     portfolio_id: got_id,
+                    expected_sequence: got_sequence,
                     amount: got,
                 },
             )
@@ -680,10 +683,12 @@ fn kani_v16_inv084_decoder_tag_assumptions_have_concrete_witnesses() {
                 4,
                 Instruction::Withdraw {
                     portfolio_id: got_id,
+                    expected_sequence: got_sequence,
                     amount: got,
                 },
             ) => {
                 assert_eq!(got_id, portfolio_id);
+                assert_eq!(got_sequence, expected_sequence);
                 assert_eq!(got, amount);
             }
             _ => unreachable!(),

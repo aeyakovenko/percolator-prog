@@ -264,8 +264,10 @@ fn v16_program_retained_portfolio_binding_roster_is_source_complete() {
     let withdraw = handler_source(source, "withdraw");
     for (name, handler) in [("Deposit", deposit), ("Withdraw", withdraw)] {
         assert!(
-            handler.contains("expect_portfolio_id(&portfolio_data, expected_portfolio_id)?;"),
-            "{name}: decoded portfolio ID is not consumed before mutation"
+            handler.contains("expect_portfolio_sequence_binding(")
+                && handler.contains("expected_portfolio_id,")
+                && handler.contains("expected_sequence,"),
+            "{name}: portfolio incarnation and replay sequence are not consumed together"
         );
     }
 
@@ -273,18 +275,25 @@ fn v16_program_retained_portfolio_binding_roster_is_source_complete() {
     let batch_core = handler_source(source, "batch_execute_zero_copy");
     for (name, handler) in [("single trade", trade_core), ("batch trade", batch_core)] {
         assert!(
-            handler.contains("expect_portfolio_id(&account_a_data, account_a_portfolio_id)?;")
-                && handler
-                    .contains("expect_portfolio_id(&account_b_data, account_b_portfolio_id)?;"),
-            "{name}: both portfolio incarnations must be consumed by the shared mutation core"
+            handler
+                .matches("expect_portfolio_position_binding(")
+                .count()
+                >= 2
+                && handler.contains("account_a_portfolio_id,")
+                && handler.contains("account_b_portfolio_id,"),
+            "{name}: both portfolio incarnations must be consumed with their position episodes"
         );
     }
     for name in ["trade_cpi", "batch_trade_cpi"] {
         let handler = handler_source(source, name);
         assert!(
-            handler.contains("expect_portfolio_id(&data, account_a_portfolio_id)?;")
-                && handler.contains("expect_portfolio_id(&data, account_b_portfolio_id)?;"),
-            "{name}: both IDs must be checked before invoking the external matcher"
+            handler
+                .matches("expect_portfolio_position_binding(")
+                .count()
+                >= 2
+                && handler.contains("account_a_portfolio_id,")
+                && handler.contains("account_b_portfolio_id,"),
+            "{name}: both IDs and episodes must be checked before invoking the external matcher"
         );
     }
 

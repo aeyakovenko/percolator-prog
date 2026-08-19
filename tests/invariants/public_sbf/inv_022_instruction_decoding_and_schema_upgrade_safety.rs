@@ -70,10 +70,12 @@ fn public_instruction_corpus() -> Vec<ProgInstruction> {
         ProgInstruction::InitPortfolio,
         ProgInstruction::Deposit {
             portfolio_id: 1,
+            expected_sequence: 0,
             amount: 1,
         },
         ProgInstruction::Withdraw {
             portfolio_id: 1,
+            expected_sequence: 0,
             amount: 1,
         },
         ProgInstruction::PermissionlessCrank {
@@ -85,7 +87,9 @@ fn public_instruction_corpus() -> Vec<ProgInstruction> {
         },
         ProgInstruction::TradeNoCpi {
             account_a_portfolio_id: 1,
+            account_a_position_epoch: 0,
             account_b_portfolio_id: 2,
+            account_b_position_epoch: 0,
             asset_index: 0,
             market_id: 1,
             size_q: 1,
@@ -94,7 +98,9 @@ fn public_instruction_corpus() -> Vec<ProgInstruction> {
         },
         ProgInstruction::TradeCpi {
             account_a_portfolio_id: 1,
+            account_a_position_epoch: 0,
             account_b_portfolio_id: 2,
+            account_b_position_epoch: 0,
             asset_index: 0,
             market_id: 1,
             size_q: 1,
@@ -103,12 +109,16 @@ fn public_instruction_corpus() -> Vec<ProgInstruction> {
         },
         ProgInstruction::BatchTradeNoCpi {
             account_a_portfolio_id: 1,
+            account_a_position_epoch: 0,
             account_b_portfolio_id: 2,
+            account_b_position_epoch: 0,
             legs: vec![batch_nocpi_leg(0)],
         },
         ProgInstruction::BatchTradeCpi {
             account_a_portfolio_id: 1,
+            account_a_position_epoch: 0,
             account_b_portfolio_id: 2,
+            account_b_position_epoch: 0,
             legs: vec![batch_cpi_leg(0)],
         },
         ProgInstruction::SetMatcherConfig {
@@ -561,7 +571,9 @@ fn host_instruction_decoder_handles_batch_and_observation_length_edges() {
         "zero-leg BatchTradeNoCpi",
         ProgInstruction::BatchTradeNoCpi {
             account_a_portfolio_id: 1,
+            account_a_position_epoch: 0,
             account_b_portfolio_id: 2,
+            account_b_position_epoch: 0,
             legs: vec![],
         },
     );
@@ -569,7 +581,9 @@ fn host_instruction_decoder_handles_batch_and_observation_length_edges() {
         "zero-leg BatchTradeCpi",
         ProgInstruction::BatchTradeCpi {
             account_a_portfolio_id: 1,
+            account_a_position_epoch: 0,
             account_b_portfolio_id: 2,
+            account_b_position_epoch: 0,
             legs: vec![],
         },
     );
@@ -577,7 +591,9 @@ fn host_instruction_decoder_handles_batch_and_observation_length_edges() {
         "max-leg BatchTradeNoCpi",
         ProgInstruction::BatchTradeNoCpi {
             account_a_portfolio_id: 1,
+            account_a_position_epoch: 0,
             account_b_portfolio_id: 2,
+            account_b_position_epoch: 0,
             legs: (0..MAX_BATCH_LEGS).map(batch_nocpi_leg).collect(),
         },
     );
@@ -585,7 +601,9 @@ fn host_instruction_decoder_handles_batch_and_observation_length_edges() {
         "max-leg BatchTradeCpi",
         ProgInstruction::BatchTradeCpi {
             account_a_portfolio_id: 1,
+            account_a_position_epoch: 0,
             account_b_portfolio_id: 2,
+            account_b_position_epoch: 0,
             legs: (0..MAX_BATCH_LEGS).map(batch_cpi_leg).collect(),
         },
     );
@@ -611,7 +629,9 @@ fn host_instruction_decoder_handles_batch_and_observation_length_edges() {
 
     let mut nocpi_max = ProgInstruction::BatchTradeNoCpi {
         account_a_portfolio_id: 1,
+        account_a_position_epoch: 0,
         account_b_portfolio_id: 2,
+        account_b_position_epoch: 0,
         legs: (0..MAX_BATCH_LEGS).map(batch_nocpi_leg).collect(),
     }
     .encode();
@@ -626,7 +646,9 @@ fn host_instruction_decoder_handles_batch_and_observation_length_edges() {
 
     let mut cpi_max = ProgInstruction::BatchTradeCpi {
         account_a_portfolio_id: 1,
+        account_a_position_epoch: 0,
         account_b_portfolio_id: 2,
+        account_b_position_epoch: 0,
         legs: (0..MAX_BATCH_LEGS).map(batch_cpi_leg).collect(),
     }
     .encode();

@@ -51,8 +51,19 @@ proptest! {
         eprintln!("independent INV-001 discoveries: {violations:?}");
         prop_assert_eq!(
             violations,
-            MarketIntentKind::ALL.to_vec(),
-            "vulnerable-pin market-incarnation discovery corpus changed"
+            vec![
+                MarketIntentKind::MatcherEnable,
+                MarketIntentKind::TradeFeePolicy,
+                MarketIntentKind::FeeRedirectPolicy,
+                MarketIntentKind::MaintenanceFeePolicy,
+                MarketIntentKind::LiquidationFeePolicy,
+                MarketIntentKind::ShutdownAsset,
+                MarketIntentKind::ResolveMarket,
+                MarketIntentKind::ResolvePolicy,
+                MarketIntentKind::RebalanceReduce,
+                MarketIntentKind::ForfeitRecoveryLeg,
+            ],
+            "market-incarnation discovery corpus changed"
         );
     }
 }

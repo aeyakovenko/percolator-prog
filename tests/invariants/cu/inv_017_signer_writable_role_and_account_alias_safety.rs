@@ -1409,6 +1409,7 @@ fn v16_attack_non_owner_cannot_withdraw_or_trade() {
     let r_wd = env.send(
         ProgInstruction::Withdraw {
             portfolio_id: pa_id,
+            expected_sequence: 0,
             amount: 500_000,
         },
         vec![
@@ -1442,7 +1443,9 @@ fn v16_attack_non_owner_cannot_withdraw_or_trade() {
     let r_tr = env.send(
         ProgInstruction::TradeNoCpi {
             account_a_portfolio_id: pa_id,
+            account_a_position_epoch: 0,
             account_b_portfolio_id: pb_id,
+            account_b_position_epoch: 0,
             asset_index: 0,
             market_id: first_generation_market_id((0) as u16),
             size_q: POS_SCALE as i128,

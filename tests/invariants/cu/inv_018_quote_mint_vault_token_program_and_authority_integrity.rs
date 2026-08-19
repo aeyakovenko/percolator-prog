@@ -4315,6 +4315,7 @@ fn v16_bpf_mainnet_realistic_system_spl_ata_bootstrap_deposits_and_ledgers() {
         &payer,
         ProgInstruction::Deposit {
             portfolio_id,
+            expected_sequence: 0,
             amount: 123,
         },
         vec![
@@ -4428,12 +4429,17 @@ fn v16_bpf_mainnet_realistic_system_spl_ata_bootstrap_deposits_and_ledgers() {
     )
     .expect("sync system-created insurance ledger");
 
+    let withdraw_sequence =
+        state::read_portfolio_matcher_sequence(&svm.get_account(&portfolio.pubkey()).unwrap().data)
+            .expect("read portfolio owner-operation sequence after deposit");
+    assert_eq!(withdraw_sequence, 1, "deposit consumes its replay sequence");
     send_tx(
         &mut svm,
         program_id,
         &payer,
         ProgInstruction::Withdraw {
             portfolio_id,
+            expected_sequence: withdraw_sequence,
             amount: 23,
         },
         vec![

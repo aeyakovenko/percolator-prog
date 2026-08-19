@@ -1616,6 +1616,7 @@ impl V16CuEnv {
     fn deposit_ix(&self, portfolio: Pubkey, amount: u128) -> ProgInstruction {
         ProgInstruction::Deposit {
             portfolio_id: self.portfolio_id(portfolio),
+            expected_sequence: self.portfolio_matcher_sequence(portfolio),
             amount,
         }
     }
@@ -1623,6 +1624,7 @@ impl V16CuEnv {
     fn withdraw_ix(&self, portfolio: Pubkey, amount: u128) -> ProgInstruction {
         ProgInstruction::Withdraw {
             portfolio_id: self.portfolio_id(portfolio),
+            expected_sequence: self.portfolio_matcher_sequence(portfolio),
             amount,
         }
     }
@@ -1654,7 +1656,9 @@ impl V16CuEnv {
     ) -> ProgInstruction {
         ProgInstruction::TradeNoCpi {
             account_a_portfolio_id: self.portfolio_id(account_a),
+            account_a_position_epoch: self.portfolio_position_epoch(account_a),
             account_b_portfolio_id: self.portfolio_id(account_b),
+            account_b_position_epoch: self.portfolio_position_epoch(account_b),
             asset_index,
             market_id: self.asset_market_id(asset_index),
             size_q,
@@ -1674,7 +1678,9 @@ impl V16CuEnv {
     ) -> ProgInstruction {
         ProgInstruction::TradeCpi {
             account_a_portfolio_id: self.portfolio_id(account_a),
+            account_a_position_epoch: self.portfolio_position_epoch(account_a),
             account_b_portfolio_id: self.portfolio_id(account_b),
+            account_b_position_epoch: self.portfolio_position_epoch(account_b),
             asset_index,
             market_id: self.asset_market_id(asset_index),
             size_q,
@@ -1691,7 +1697,9 @@ impl V16CuEnv {
     ) -> ProgInstruction {
         ProgInstruction::BatchTradeNoCpi {
             account_a_portfolio_id: self.portfolio_id(account_a),
+            account_a_position_epoch: self.portfolio_position_epoch(account_a),
             account_b_portfolio_id: self.portfolio_id(account_b),
+            account_b_position_epoch: self.portfolio_position_epoch(account_b),
             legs,
         }
     }
@@ -1704,7 +1712,9 @@ impl V16CuEnv {
     ) -> ProgInstruction {
         ProgInstruction::BatchTradeCpi {
             account_a_portfolio_id: self.portfolio_id(account_a),
+            account_a_position_epoch: self.portfolio_position_epoch(account_a),
             account_b_portfolio_id: self.portfolio_id(account_b),
+            account_b_position_epoch: self.portfolio_position_epoch(account_b),
             legs,
         }
     }
@@ -1947,7 +1957,9 @@ impl V16CuEnv {
         self.send(
             ProgInstruction::TradeNoCpi {
                 account_a_portfolio_id: self.portfolio_id(account_a),
+                account_a_position_epoch: self.portfolio_position_epoch(account_a),
                 account_b_portfolio_id: self.portfolio_id(account_b),
+                account_b_position_epoch: self.portfolio_position_epoch(account_b),
                 asset_index,
                 market_id,
                 size_q,
@@ -2653,7 +2665,9 @@ impl V16CuEnv {
         self.send(
             ProgInstruction::TradeCpi {
                 account_a_portfolio_id: self.portfolio_id(account_a),
+                account_a_position_epoch: self.portfolio_position_epoch(account_a),
                 account_b_portfolio_id: self.portfolio_id(account_b),
+                account_b_position_epoch: self.portfolio_position_epoch(account_b),
                 asset_index,
                 market_id,
                 size_q,
@@ -4690,6 +4704,7 @@ fn deposit_to_market(
         &env.payer,
         ProgInstruction::Deposit {
             portfolio_id,
+            expected_sequence: 0,
             amount,
         },
         vec![
@@ -4827,7 +4842,9 @@ fn assert_signed_trade_cannot_replay_across_asset_slot_reuse() {
         let stale_instruction = match path {
             AssetGenerationTradePath::TradeNoCpi => ProgInstruction::TradeNoCpi {
                 account_a_portfolio_id,
+                account_a_position_epoch: 0,
                 account_b_portfolio_id,
+                account_b_position_epoch: 0,
                 asset_index: ASSET,
                 market_id: old_market_id,
                 size_q: POS_SCALE as i128,
@@ -4836,7 +4853,9 @@ fn assert_signed_trade_cannot_replay_across_asset_slot_reuse() {
             },
             AssetGenerationTradePath::BatchTradeNoCpi => ProgInstruction::BatchTradeNoCpi {
                 account_a_portfolio_id,
+                account_a_position_epoch: 0,
                 account_b_portfolio_id,
+                account_b_position_epoch: 0,
                 legs: vec![BatchTradeLeg {
                     asset_index: ASSET,
                     market_id: old_market_id,
@@ -4847,7 +4866,9 @@ fn assert_signed_trade_cannot_replay_across_asset_slot_reuse() {
             },
             AssetGenerationTradePath::TradeCpi => ProgInstruction::TradeCpi {
                 account_a_portfolio_id,
+                account_a_position_epoch: 0,
                 account_b_portfolio_id,
+                account_b_position_epoch: 0,
                 asset_index: ASSET,
                 market_id: old_market_id,
                 size_q: POS_SCALE as i128,
@@ -4856,7 +4877,9 @@ fn assert_signed_trade_cannot_replay_across_asset_slot_reuse() {
             },
             AssetGenerationTradePath::BatchTradeCpi => ProgInstruction::BatchTradeCpi {
                 account_a_portfolio_id,
+                account_a_position_epoch: 0,
                 account_b_portfolio_id,
+                account_b_position_epoch: 0,
                 legs: vec![BatchTradeCpiLeg {
                     asset_index: ASSET,
                     market_id: old_market_id,
@@ -4961,7 +4984,9 @@ fn assert_signed_trade_cannot_replay_across_asset_slot_reuse() {
         let current_instruction = match path {
             AssetGenerationTradePath::TradeNoCpi => ProgInstruction::TradeNoCpi {
                 account_a_portfolio_id,
+                account_a_position_epoch: 0,
                 account_b_portfolio_id,
+                account_b_position_epoch: 0,
                 asset_index: ASSET,
                 market_id: new_market_id,
                 size_q: POS_SCALE as i128,
@@ -4970,7 +4995,9 @@ fn assert_signed_trade_cannot_replay_across_asset_slot_reuse() {
             },
             AssetGenerationTradePath::BatchTradeNoCpi => ProgInstruction::BatchTradeNoCpi {
                 account_a_portfolio_id,
+                account_a_position_epoch: 0,
                 account_b_portfolio_id,
+                account_b_position_epoch: 0,
                 legs: vec![BatchTradeLeg {
                     asset_index: ASSET,
                     market_id: new_market_id,
@@ -4981,7 +5008,9 @@ fn assert_signed_trade_cannot_replay_across_asset_slot_reuse() {
             },
             AssetGenerationTradePath::TradeCpi => ProgInstruction::TradeCpi {
                 account_a_portfolio_id,
+                account_a_position_epoch: 0,
                 account_b_portfolio_id,
+                account_b_position_epoch: 0,
                 asset_index: ASSET,
                 market_id: new_market_id,
                 size_q: POS_SCALE as i128,
@@ -4990,7 +5019,9 @@ fn assert_signed_trade_cannot_replay_across_asset_slot_reuse() {
             },
             AssetGenerationTradePath::BatchTradeCpi => ProgInstruction::BatchTradeCpi {
                 account_a_portfolio_id,
+                account_a_position_epoch: 0,
                 account_b_portfolio_id,
+                account_b_position_epoch: 0,
                 legs: vec![BatchTradeCpiLeg {
                     asset_index: ASSET,
                     market_id: new_market_id,

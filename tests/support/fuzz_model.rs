@@ -11947,10 +11947,10 @@ pub fn verify_bilateral_base_fee_consent(
     }
 
     let freshly_consented_open = build_trade(&mut env, SIZE_Q, INSTALLED_FEE_BPS);
-    let freshly_consented_close = build_trade(&mut env, -SIZE_Q, INSTALLED_FEE_BPS);
     let open = env
         .land_retained(freshly_consented_open)
         .map_err(|error| format!("PR 310 freshly consented open failed: {error}"))?;
+    let freshly_consented_close = build_trade(&mut env, -SIZE_Q, INSTALLED_FEE_BPS);
     let close = env
         .land_retained(freshly_consented_close)
         .map_err(|error| format!("PR 310 freshly consented close failed: {error}"))?;
@@ -17198,6 +17198,13 @@ fn run_market_incarnation_deposit_world(
     let old_asset_market_id = env.primary_market_state().1.assets[0].market_id;
     let source = env.actors[VICTIM].source_token;
     let source_before = env.token_amount(source);
+    // Portfolio-local replay sequences reset with the portfolio account, so they are not a
+    // market-incarnation identity. Align generation A with generation B through the same public,
+    // signed zero-value operation to keep this whole-market ABA witness source-valid.
+    env.deposit_primary(VICTIM, 0)
+        .map_err(|error| format!("PR 307 align generation-A replay sequence: {error}"))?;
+    let retained_portfolio_id = env.primary_portfolio_id(VICTIM);
+    let retained_sequence = env.primary_portfolio_matcher_sequence(VICTIM);
     let retained = env.build_retained_deposit(VICTIM, STALE_DEPOSIT);
 
     for actor in 0..PRIMARY_ACTOR_COUNT {
@@ -17243,10 +17250,36 @@ fn run_market_incarnation_deposit_world(
         .map_err(|error| format!("PR 307 fund generation-B victim: {error}"))?;
     env.deposit_primary(WINNER, WINNER_CAPITAL)
         .map_err(|error| format!("PR 307 fund generation-B winner: {error}"))?;
+    for step in 0..8 {
+        let replacement_sequence = env.primary_portfolio_matcher_sequence(VICTIM);
+        if replacement_sequence == retained_sequence {
+            break;
+        }
+        if replacement_sequence > retained_sequence {
+            return Err(format!(
+                "PR 307 replacement sequence passed retained sequence at step {step}: \
+                 {replacement_sequence} > {retained_sequence}"
+            ));
+        }
+        env.deposit_primary(VICTIM, 0).map_err(|error| {
+            format!("PR 307 align generation-B replay sequence at step {step}: {error}")
+        })?;
+    }
     env.trade_no_cpi(WINNER, VICTIM, 0, 1_000 * POS_SCALE as i128, PRICE, 0)
         .map_err(|error| format!("PR 307 open generation-B risk: {error}"))?;
 
     let replay_cu = if land_replay {
+        let replacement_portfolio_id = env.primary_portfolio_id(VICTIM);
+        let replacement_sequence = env.primary_portfolio_matcher_sequence(VICTIM);
+        if (retained_portfolio_id, retained_sequence)
+            != (replacement_portfolio_id, replacement_sequence)
+        {
+            return Err(format!(
+                "PR 307 counterexample bindings are not aligned: retained=({retained_portfolio_id}, \
+                 {retained_sequence}), replacement=({replacement_portfolio_id}, \
+                 {replacement_sequence})"
+            ));
+        }
         env.land_retained(retained)
             .map_err(|error| format!("PR 307 generation-A deposit no longer lands: {error}"))?
             .compute_units

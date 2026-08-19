@@ -2,7 +2,11 @@
 //!
 //! Normative obligation: One retained economic intent can execute at most once across routes and retries.
 //!
-//! Evidence in this file (I plus invariant-specific F/M assertions): `v16_program_pr343_trade_retry_variants_extract_value_on_every_route`, `v16_program_pr344_insurance_top_up_retry_extracts_duplicate`, `v16_program_pr362_activation_retry_rejects_after_generation_consumed`, `v16_program_pr351_backing_top_up_retry_funds_independent_winner`, `v16_program_pr350_deposit_retry_funds_independent_winner`, `v16_program_pr355_withdrawal_retry_liquidates_fresh_risk`, `v16_program_issue387_stale_conversion_rejects_without_redirecting_later_earnings`, `v16_program_issue389_rebalance_retry_rejects_exactly_on_current_pin`. These tests exercise the deployed public
+//! Evidence in this file (I plus invariant-specific F/M assertions): the PR343/350/355
+//! fixed-pin tests reject stale trade/deposit/withdraw retries exactly and land a newly bound
+//! operation; the PR344/351 tests retain the two authority-top-up counterexamples; PR362 and the
+//! issue387/389 tests cover generation/position-bound activation, conversion, and reduction.
+//! These tests exercise the deployed public
 //! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
 //! rollback, liveness, or compute outcomes appropriate to the invariant.
 //!
@@ -13,26 +17,19 @@
 use super::*;
 
 #[test]
-fn v16_program_pr343_trade_retry_variants_extract_value_on_every_route() {
-    for route in [
-        TradeRoute::NoCpi,
-        TradeRoute::Cpi,
-        TradeRoute::BatchNoCpi,
-        TradeRoute::BatchCpi,
+fn v16_program_pr343_trade_retry_variants_reject_stale_and_land_fresh() {
+    for kind in [
+        RetryIntentKind::TradeNoCpi,
+        RetryIntentKind::TradeCpi,
+        RetryIntentKind::BatchTradeNoCpi,
+        RetryIntentKind::BatchTradeCpi,
     ] {
-        let reproduction = reproduce_trade_retry_replay([0x43; 32], route)
-            .unwrap_or_else(|error| panic!("PR 343 {route:?} no longer reproduces: {error}"));
-        assert_eq!(reproduction.blocker, KnownBlocker::TradeRetryReplay);
-        assert_eq!(reproduction.route, route);
-        assert_eq!(
-            reproduction.victim_extra_loss,
-            reproduction.attacker_extra_payout
-        );
-        assert!(reproduction.victim_extra_loss > 0);
-        assert_eq!(
-            reproduction.control_total_payout,
-            reproduction.replay_total_payout
-        );
+        let protection = discover_intent_retry([0x43; 32], kind)
+            .unwrap_or_else(|error| panic!("PR 343 {kind:?} protection failed: {error}"));
+        assert!(!protection.accepted_retry);
+        assert!(!protection.duplicated_economic_effect);
+        assert_eq!(protection.retry_compute_units, None);
+        assert!(protection.fresh_compute_units.is_some());
     }
 }
 
@@ -65,6 +62,7 @@ fn v16_program_pr362_activation_retry_rejects_after_generation_consumed() {
     assert!(!activation.accepted_retry);
     assert!(!activation.duplicated_economic_effect);
     assert_eq!(activation.retry_compute_units, None);
+    assert!(activation.fresh_compute_units.is_some());
 }
 
 #[test]
@@ -81,32 +79,23 @@ fn v16_program_pr351_backing_top_up_retry_funds_independent_winner() {
 }
 
 #[test]
-fn v16_program_pr350_deposit_retry_funds_independent_winner() {
-    let reproduction = reproduce_deposit_retry_replay([0x50; 32])
-        .unwrap_or_else(|error| panic!("PR 350 no longer reproduces: {error}"));
-    assert_eq!(reproduction.blocker, KnownBlocker::DepositRetryReplay);
-    assert_eq!(reproduction.intended_contribution, 500);
-    assert_eq!(reproduction.duplicate_loss, 500);
-    assert_eq!(reproduction.beneficiary_extra_payout, 500);
-    assert_eq!(reproduction.control_winner_payout, 2_500);
-    assert_eq!(reproduction.replay_winner_payout, 3_000);
-    assert!(reproduction.replay_cu < 1_400_000);
+fn v16_program_pr350_deposit_retry_rejects_stale_and_lands_fresh() {
+    let protection = discover_intent_retry([0x50; 32], RetryIntentKind::Deposit)
+        .unwrap_or_else(|error| panic!("PR 350 protection failed: {error}"));
+    assert!(!protection.accepted_retry);
+    assert!(!protection.duplicated_economic_effect);
+    assert_eq!(protection.retry_compute_units, None);
+    assert!(protection.fresh_compute_units.is_some());
 }
 
 #[test]
-fn v16_program_pr355_withdrawal_retry_liquidates_fresh_risk() {
-    let reproduction = reproduce_withdrawal_retry_liquidation([0x55; 32])
-        .unwrap_or_else(|error| panic!("PR 355 no longer reproduces: {error}"));
-    assert_eq!(
-        reproduction.blocker,
-        KnownBlocker::WithdrawalRetryLiquidation
-    );
-    assert_eq!(reproduction.intended_withdrawal, 50_000_000);
-    assert_eq!(reproduction.duplicate_withdrawal, 50_000_000);
-    assert!(reproduction.restored_equity_surplus > 0);
-    assert_eq!(reproduction.cranker_reward, 7_917);
-    assert_eq!(reproduction.extracted_reward, 7_917);
-    assert!(reproduction.replay_cu < 1_400_000);
+fn v16_program_pr355_withdrawal_retry_rejects_stale_and_lands_fresh() {
+    let protection = discover_intent_retry([0x55; 32], RetryIntentKind::Withdraw)
+        .unwrap_or_else(|error| panic!("PR 355 protection failed: {error}"));
+    assert!(!protection.accepted_retry);
+    assert!(!protection.duplicated_economic_effect);
+    assert_eq!(protection.retry_compute_units, None);
+    assert!(protection.fresh_compute_units.is_some());
 }
 
 #[test]
@@ -139,4 +128,5 @@ fn v16_program_issue389_rebalance_retry_rejects_exactly_on_current_pin() {
     assert!(!rebalance.accepted_retry);
     assert!(!rebalance.duplicated_economic_effect);
     assert_eq!(rebalance.retry_compute_units, None);
+    assert!(rebalance.fresh_compute_units.is_some());
 }

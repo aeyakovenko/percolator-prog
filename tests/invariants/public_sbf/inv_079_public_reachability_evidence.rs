@@ -722,7 +722,9 @@ fn instruction_decode_tags(source: &str) -> std::collections::BTreeMap<String, u
     for raw_line in block.lines() {
         let line = raw_line.split("//").next().unwrap_or("").trim();
         if let Some((tag, tail)) = parse_decode_tag_arm(line) {
-            if let Some(variant) = self_variant_name(tail) {
+            if let Some(variant) =
+                decode_helper_variant(source, tail).or_else(|| self_variant_name(tail))
+            {
                 assert!(
                     tags.insert(variant.clone(), tag).is_none(),
                     "duplicate decode tag for Instruction::{variant}"
@@ -746,6 +748,16 @@ fn instruction_decode_tags(source: &str) -> std::collections::BTreeMap<String, u
     }
 
     tags
+}
+
+fn decode_helper_variant(source: &str, line: &str) -> Option<String> {
+    let helper = line.split_once("Self::decode_")?.1;
+    let helper: String = helper
+        .chars()
+        .take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '_')
+        .collect();
+    let block = braced_block_after(source, &format!("fn decode_{helper}"));
+    block.lines().find_map(self_variant_name)
 }
 
 fn braced_block_after<'a>(source: &'a str, marker: &str) -> &'a str {

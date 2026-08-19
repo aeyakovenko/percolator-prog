@@ -18,6 +18,9 @@ mod inv_003_portfolio_incarnation_binding;
 #[path = "invariants/kani/inv_004_position_episode_binding.rs"]
 mod inv_004_position_episode_binding;
 
+#[path = "invariants/kani/inv_008_intent_uniqueness_and_bounded_replay.rs"]
+mod inv_008_intent_uniqueness_and_bounded_replay;
+
 #[path = "invariants/kani/inv_010_out_of_order_safety.rs"]
 mod inv_010_out_of_order_safety;
 

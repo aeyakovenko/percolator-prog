@@ -43,22 +43,28 @@ proptest! {
             .map(|discovery| discovery.kind)
             .collect();
         eprintln!("independent INV-008 discoveries: {violations:?}");
-        let expected_violations: Vec<_> = RetryIntentKind::ALL
-            .into_iter()
-            .filter(|kind| {
-                !matches!(
-                    kind,
-                    RetryIntentKind::ConvertReleasedPnl
-                        | RetryIntentKind::RebalanceReduce
-                        | RetryIntentKind::AssetActivation
-                )
-            })
-            .collect();
+        let expected_violations = vec![
+            RetryIntentKind::InsuranceTopUp,
+            RetryIntentKind::BackingTopUp,
+        ];
         prop_assert_eq!(
-            violations,
-            expected_violations,
+            &violations,
+            &expected_violations,
             "exact-once discovery/protection corpus changed"
         );
+        for discovery in &discoveries {
+            if expected_violations.contains(&discovery.kind) {
+                prop_assert!(discovery.accepted_retry);
+                prop_assert!(discovery.duplicated_economic_effect);
+                prop_assert!(discovery.retry_compute_units.is_some());
+                prop_assert_eq!(discovery.fresh_compute_units, None);
+            } else {
+                prop_assert!(!discovery.accepted_retry);
+                prop_assert!(!discovery.duplicated_economic_effect);
+                prop_assert_eq!(discovery.retry_compute_units, None);
+                prop_assert!(discovery.fresh_compute_units.is_some());
+            }
+        }
         let rebalance = discoveries
             .iter()
             .find(|discovery| discovery.kind == RetryIntentKind::RebalanceReduce)
@@ -66,6 +72,7 @@ proptest! {
         prop_assert!(!rebalance.accepted_retry);
         prop_assert!(!rebalance.duplicated_economic_effect);
         prop_assert_eq!(rebalance.retry_compute_units, None);
+        prop_assert!(rebalance.fresh_compute_units.is_some());
         let conversion = discoveries
             .iter()
             .find(|discovery| discovery.kind == RetryIntentKind::ConvertReleasedPnl)
@@ -73,6 +80,7 @@ proptest! {
         prop_assert!(!conversion.accepted_retry);
         prop_assert!(!conversion.duplicated_economic_effect);
         prop_assert_eq!(conversion.retry_compute_units, None);
+        prop_assert!(conversion.fresh_compute_units.is_some());
         let activation = discoveries
             .iter()
             .find(|discovery| discovery.kind == RetryIntentKind::AssetActivation)
@@ -80,6 +88,7 @@ proptest! {
         prop_assert!(!activation.accepted_retry);
         prop_assert!(!activation.duplicated_economic_effect);
         prop_assert_eq!(activation.retry_compute_units, None);
+        prop_assert!(activation.fresh_compute_units.is_some());
     }
 }
 
@@ -99,14 +108,19 @@ proptest! {
     fn v16_program_pr343_trade_retry_replay_fuzz(
         (seed, route) in trade_retry_replay_strategy()
     ) {
-        let result = reproduce_trade_retry_replay(seed, route);
-        prop_assert!(
-            result.is_ok(),
-            "PR 343 {:?} no longer reproduces for seed {:?}: {}",
-            route,
-            seed,
-            result.unwrap_err()
-        );
+        let kind = match route {
+            TradeRoute::NoCpi => RetryIntentKind::TradeNoCpi,
+            TradeRoute::Cpi => RetryIntentKind::TradeCpi,
+            TradeRoute::BatchNoCpi => RetryIntentKind::BatchTradeNoCpi,
+            TradeRoute::BatchCpi => RetryIntentKind::BatchTradeCpi,
+        };
+        let discovery = discover_intent_retry(seed, kind).map_err(TestCaseError::fail)?;
+        prop_assert_eq!(discovery.kind, kind);
+        prop_assert!(discovery.first_compute_units > 0);
+        prop_assert!(!discovery.accepted_retry);
+        prop_assert!(!discovery.duplicated_economic_effect);
+        prop_assert_eq!(discovery.retry_compute_units, None);
+        prop_assert!(discovery.fresh_compute_units.is_some());
     }
 
     #[test]
@@ -152,28 +166,30 @@ proptest! {
 
     #[test]
     fn v16_program_pr350_deposit_retry_replay_fuzz(
-        seed in deposit_retry_replay_seed_strategy()
+        seed in any::<[u8; 32]>()
     ) {
-        let result = reproduce_deposit_retry_replay(seed);
-        prop_assert!(
-            result.is_ok(),
-            "PR 350 no longer reproduces for seed {:?}: {}",
-            seed,
-            result.unwrap_err()
-        );
+        let discovery = discover_intent_retry(seed, RetryIntentKind::Deposit)
+            .map_err(TestCaseError::fail)?;
+        prop_assert_eq!(discovery.kind, RetryIntentKind::Deposit);
+        prop_assert!(discovery.first_compute_units > 0);
+        prop_assert!(!discovery.accepted_retry);
+        prop_assert!(!discovery.duplicated_economic_effect);
+        prop_assert_eq!(discovery.retry_compute_units, None);
+        prop_assert!(discovery.fresh_compute_units.is_some());
     }
 
     #[test]
     fn v16_program_pr355_withdrawal_retry_liquidation_fuzz(
-        seed in withdrawal_retry_liquidation_seed_strategy()
+        seed in any::<[u8; 32]>()
     ) {
-        let result = reproduce_withdrawal_retry_liquidation(seed);
-        prop_assert!(
-            result.is_ok(),
-            "PR 355 no longer reproduces for seed {:?}: {}",
-            seed,
-            result.unwrap_err()
-        );
+        let discovery = discover_intent_retry(seed, RetryIntentKind::Withdraw)
+            .map_err(TestCaseError::fail)?;
+        prop_assert_eq!(discovery.kind, RetryIntentKind::Withdraw);
+        prop_assert!(discovery.first_compute_units > 0);
+        prop_assert!(!discovery.accepted_retry);
+        prop_assert!(!discovery.duplicated_economic_effect);
+        prop_assert_eq!(discovery.retry_compute_units, None);
+        prop_assert!(discovery.fresh_compute_units.is_some());
     }
 
     #[test]

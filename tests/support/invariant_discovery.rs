@@ -848,6 +848,7 @@ pub struct IntentReplayDiscovery {
     pub accepted_retry: bool,
     pub duplicated_economic_effect: bool,
     pub retry_compute_units: Option<u64>,
+    pub fresh_compute_units: Option<u64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -3918,7 +3919,7 @@ fn retained_retry_pair(env: &mut V16Svm, kind: RetryIntentKind) -> (Transaction,
     (build(env), build(env))
 }
 
-fn discover_one_intent_retry(
+pub fn discover_intent_retry(
     mut seed: [u8; 32],
     kind: RetryIntentKind,
 ) -> Result<IntentReplayDiscovery, String> {
@@ -4005,11 +4006,22 @@ fn discover_one_intent_retry(
                 accepted_retry: true,
                 duplicated_economic_effect,
                 retry_compute_units: Some(success.compute_units),
+                fresh_compute_units: None,
             })
         }
         Err(_) => {
             if before_retry != after_retry {
                 return Err(format!("{kind:?} rejected retry did not roll back exactly"));
+            }
+            let (fresh, _) = retained_retry_pair(&mut env, kind);
+            let before_fresh = fingerprint(&env);
+            let fresh_success = env
+                .land_retained(fresh)
+                .map_err(|error| format!("{kind:?} fresh intent rejected: {error}"))?;
+            if fingerprint(&env) == before_fresh {
+                return Err(format!(
+                    "{kind:?} fresh intent landed without an observable economic delta"
+                ));
             }
             Ok(IntentReplayDiscovery {
                 kind,
@@ -4017,6 +4029,7 @@ fn discover_one_intent_retry(
                 accepted_retry: false,
                 duplicated_economic_effect: false,
                 retry_compute_units: None,
+                fresh_compute_units: Some(fresh_success.compute_units),
             })
         }
     }
@@ -4025,7 +4038,7 @@ fn discover_one_intent_retry(
 pub fn discover_intent_retries(seed: [u8; 32]) -> Result<Vec<IntentReplayDiscovery>, String> {
     RetryIntentKind::ALL
         .into_iter()
-        .map(|kind| discover_one_intent_retry(seed, kind))
+        .map(|kind| discover_intent_retry(seed, kind))
         .collect()
 }
 

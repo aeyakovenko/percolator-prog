@@ -72,8 +72,8 @@ pub mod constants {
     pub const PORTFOLIO_ID_LEN: usize = 8;
     // Shared retained owner-state sequence. The historical MATCHER name is retained in the
     // persisted-layout constants because changing the byte lane would break existing accounts.
-    // Matcher controls consume it; deposits advance it so an earlier empty-state close cannot
-    // become valid again after a later funded episode.
+    // Matcher controls and retained owner value operations consume it. Deposits and nonzero
+    // withdrawals advance it so a landed debit or credit cannot be replayed economically.
     pub const PORTFOLIO_MATCHER_SEQUENCE_OFF: usize = PORTFOLIO_ID_OFF + PORTFOLIO_ID_LEN;
     pub const PORTFOLIO_MATCHER_SEQUENCE_LEN: usize = 8;
     pub const PORTFOLIO_LEGACY_ACCOUNT_LEN: usize = PORTFOLIO_MATCHER_SEQUENCE_OFF;
@@ -2865,10 +2865,12 @@ pub mod ix {
         InitPortfolio,
         Deposit {
             portfolio_id: u64,
+            expected_sequence: u64,
             amount: u128,
         },
         Withdraw {
             portfolio_id: u64,
+            expected_sequence: u64,
             amount: u128,
         },
         PermissionlessCrank {
@@ -2877,7 +2879,9 @@ pub mod ix {
         },
         TradeNoCpi {
             account_a_portfolio_id: u64,
+            account_a_position_epoch: u64,
             account_b_portfolio_id: u64,
+            account_b_position_epoch: u64,
             asset_index: u16,
             market_id: u64,
             size_q: i128,
@@ -2886,7 +2890,9 @@ pub mod ix {
         },
         TradeCpi {
             account_a_portfolio_id: u64,
+            account_a_position_epoch: u64,
             account_b_portfolio_id: u64,
+            account_b_position_epoch: u64,
             asset_index: u16,
             market_id: u64,
             size_q: i128,
@@ -2897,14 +2903,18 @@ pub mod ix {
         /// end-state initial-margin check (interim legs need not be individually margin-feasible).
         BatchTradeNoCpi {
             account_a_portfolio_id: u64,
+            account_a_position_epoch: u64,
             account_b_portfolio_id: u64,
+            account_b_position_epoch: u64,
             legs: Vec<BatchTradeLeg>,
         },
         /// Atomic multi-leg batch routed through an external matcher: one batched matcher CPI fills
         /// every leg against a single LP, then all fills apply with one end-state margin check.
         BatchTradeCpi {
             account_a_portfolio_id: u64,
+            account_a_position_epoch: u64,
             account_b_portfolio_id: u64,
+            account_b_position_epoch: u64,
             legs: Vec<BatchTradeCpiLeg>,
         },
         SetMatcherConfig {
@@ -3123,6 +3133,119 @@ pub mod ix {
     }
 
     impl Instruction {
+        fn decode_trade_nocpi_body(rest: &mut &[u8]) -> Result<Self, ProgramError> {
+            Ok(Self::TradeNoCpi {
+                account_a_portfolio_id: read_u64(rest)?,
+                account_a_position_epoch: read_u64(rest)?,
+                account_b_portfolio_id: read_u64(rest)?,
+                account_b_position_epoch: read_u64(rest)?,
+                asset_index: read_u16(rest)?,
+                market_id: read_u64(rest)?,
+                size_q: read_i128(rest)?,
+                exec_price: read_u64(rest)?,
+                fee_bps: read_u64(rest)?,
+            })
+        }
+
+        fn decode_trade_cpi_body(rest: &mut &[u8]) -> Result<Self, ProgramError> {
+            Ok(Self::TradeCpi {
+                account_a_portfolio_id: read_u64(rest)?,
+                account_a_position_epoch: read_u64(rest)?,
+                account_b_portfolio_id: read_u64(rest)?,
+                account_b_position_epoch: read_u64(rest)?,
+                asset_index: read_u16(rest)?,
+                market_id: read_u64(rest)?,
+                size_q: read_i128(rest)?,
+                fee_bps: read_u64(rest)?,
+                limit_price: read_u64(rest)?,
+            })
+        }
+
+        fn decode_batch_trade_nocpi_body(rest: &mut &[u8]) -> Result<Self, ProgramError> {
+            let n = read_u8(rest)? as usize;
+            if n > BATCH_TRADE_DECODE_MAX_LEGS {
+                return Err(ProgramError::InvalidInstructionData);
+            }
+            let mut legs = Vec::with_capacity(n);
+            for _ in 0..n {
+                legs.push(BatchTradeLeg {
+                    asset_index: read_u16(rest)?,
+                    market_id: read_u64(rest)?,
+                    size_q: read_i128(rest)?,
+                    exec_price: read_u64(rest)?,
+                    fee_bps: read_u64(rest)?,
+                });
+            }
+            Ok(Self::BatchTradeNoCpi {
+                account_a_portfolio_id: read_u64(rest)?,
+                account_a_position_epoch: read_u64(rest)?,
+                account_b_portfolio_id: read_u64(rest)?,
+                account_b_position_epoch: read_u64(rest)?,
+                legs,
+            })
+        }
+
+        fn decode_batch_trade_cpi_body(rest: &mut &[u8]) -> Result<Self, ProgramError> {
+            let n = read_u8(rest)? as usize;
+            if n > BATCH_TRADE_DECODE_MAX_LEGS {
+                return Err(ProgramError::InvalidInstructionData);
+            }
+            let mut legs = Vec::with_capacity(n);
+            for _ in 0..n {
+                legs.push(BatchTradeCpiLeg {
+                    asset_index: read_u16(rest)?,
+                    market_id: read_u64(rest)?,
+                    size_q: read_i128(rest)?,
+                    fee_bps: read_u64(rest)?,
+                    limit_price: read_u64(rest)?,
+                });
+            }
+            Ok(Self::BatchTradeCpi {
+                account_a_portfolio_id: read_u64(rest)?,
+                account_a_position_epoch: read_u64(rest)?,
+                account_b_portfolio_id: read_u64(rest)?,
+                account_b_position_epoch: read_u64(rest)?,
+                legs,
+            })
+        }
+
+        #[cfg(kani)]
+        fn finish_proof_body(
+            input: &[u8],
+            decode: fn(&mut &[u8]) -> Result<Self, ProgramError>,
+        ) -> Result<Self, ProgramError> {
+            let mut rest = input;
+            let ix = decode(&mut rest)?;
+            if !rest.is_empty() {
+                return Err(ProgramError::InvalidInstructionData);
+            }
+            Ok(ix)
+        }
+
+        #[doc(hidden)]
+        #[cfg(kani)]
+        pub fn decode_trade_nocpi_body_for_proof(input: &[u8]) -> Result<Self, ProgramError> {
+            Self::finish_proof_body(input, Self::decode_trade_nocpi_body)
+        }
+
+        #[doc(hidden)]
+        #[cfg(kani)]
+        pub fn decode_trade_cpi_body_for_proof(input: &[u8]) -> Result<Self, ProgramError> {
+            Self::finish_proof_body(input, Self::decode_trade_cpi_body)
+        }
+
+        #[doc(hidden)]
+        #[cfg(kani)]
+        pub fn decode_batch_trade_nocpi_body_for_proof(input: &[u8]) -> Result<Self, ProgramError> {
+            Self::finish_proof_body(input, Self::decode_batch_trade_nocpi_body)
+        }
+
+        #[doc(hidden)]
+        #[cfg(kani)]
+        pub fn decode_batch_trade_cpi_body_for_proof(input: &[u8]) -> Result<Self, ProgramError> {
+            Self::finish_proof_body(input, Self::decode_batch_trade_cpi_body)
+        }
+
         pub fn decode(input: &[u8]) -> Result<Self, ProgramError> {
             let (&tag, mut rest) = input
                 .split_first()
@@ -3155,10 +3278,12 @@ pub mod ix {
                 1 => Self::InitPortfolio,
                 3 => Self::Deposit {
                     portfolio_id: read_u64(&mut rest)?,
+                    expected_sequence: read_u64(&mut rest)?,
                     amount: read_u128(&mut rest)?,
                 },
                 4 => Self::Withdraw {
                     portfolio_id: read_u64(&mut rest)?,
+                    expected_sequence: read_u64(&mut rest)?,
                     amount: read_u128(&mut rest)?,
                 },
                 5 => {
@@ -3179,66 +3304,10 @@ pub mod ix {
                         observations,
                     }
                 }
-                6 => Self::TradeNoCpi {
-                    account_a_portfolio_id: read_u64(&mut rest)?,
-                    account_b_portfolio_id: read_u64(&mut rest)?,
-                    asset_index: read_u16(&mut rest)?,
-                    market_id: read_u64(&mut rest)?,
-                    size_q: read_i128(&mut rest)?,
-                    exec_price: read_u64(&mut rest)?,
-                    fee_bps: read_u64(&mut rest)?,
-                },
-                10 => Self::TradeCpi {
-                    account_a_portfolio_id: read_u64(&mut rest)?,
-                    account_b_portfolio_id: read_u64(&mut rest)?,
-                    asset_index: read_u16(&mut rest)?,
-                    market_id: read_u64(&mut rest)?,
-                    size_q: read_i128(&mut rest)?,
-                    fee_bps: read_u64(&mut rest)?,
-                    limit_price: read_u64(&mut rest)?,
-                },
-                66 => {
-                    let n = read_u8(&mut rest)? as usize;
-                    if n > BATCH_TRADE_DECODE_MAX_LEGS {
-                        return Err(ProgramError::InvalidInstructionData);
-                    }
-                    let mut legs = Vec::with_capacity(n);
-                    for _ in 0..n {
-                        legs.push(BatchTradeLeg {
-                            asset_index: read_u16(&mut rest)?,
-                            market_id: read_u64(&mut rest)?,
-                            size_q: read_i128(&mut rest)?,
-                            exec_price: read_u64(&mut rest)?,
-                            fee_bps: read_u64(&mut rest)?,
-                        });
-                    }
-                    Self::BatchTradeNoCpi {
-                        account_a_portfolio_id: read_u64(&mut rest)?,
-                        account_b_portfolio_id: read_u64(&mut rest)?,
-                        legs,
-                    }
-                }
-                67 => {
-                    let n = read_u8(&mut rest)? as usize;
-                    if n > BATCH_TRADE_DECODE_MAX_LEGS {
-                        return Err(ProgramError::InvalidInstructionData);
-                    }
-                    let mut legs = Vec::with_capacity(n);
-                    for _ in 0..n {
-                        legs.push(BatchTradeCpiLeg {
-                            asset_index: read_u16(&mut rest)?,
-                            market_id: read_u64(&mut rest)?,
-                            size_q: read_i128(&mut rest)?,
-                            fee_bps: read_u64(&mut rest)?,
-                            limit_price: read_u64(&mut rest)?,
-                        });
-                    }
-                    Self::BatchTradeCpi {
-                        account_a_portfolio_id: read_u64(&mut rest)?,
-                        account_b_portfolio_id: read_u64(&mut rest)?,
-                        legs,
-                    }
-                }
+                6 => Self::decode_trade_nocpi_body(&mut rest)?,
+                10 => Self::decode_trade_cpi_body(&mut rest)?,
+                66 => Self::decode_batch_trade_nocpi_body(&mut rest)?,
+                67 => Self::decode_batch_trade_cpi_body(&mut rest)?,
                 68 => Self::SetMatcherConfig {
                     portfolio_id: read_u64(&mut rest)?,
                     expected_sequence: read_u64(&mut rest)?,
@@ -3513,18 +3582,22 @@ pub mod ix {
                 Self::InitPortfolio => out.push(1),
                 Self::Deposit {
                     portfolio_id,
+                    expected_sequence,
                     amount,
                 } => {
                     out.push(3);
                     push_u64(&mut out, portfolio_id);
+                    push_u64(&mut out, expected_sequence);
                     push_u128(&mut out, amount);
                 }
                 Self::Withdraw {
                     portfolio_id,
+                    expected_sequence,
                     amount,
                 } => {
                     out.push(4);
                     push_u64(&mut out, portfolio_id);
+                    push_u64(&mut out, expected_sequence);
                     push_u128(&mut out, amount);
                 }
                 Self::PermissionlessCrank {
@@ -3541,7 +3614,9 @@ pub mod ix {
                 }
                 Self::TradeNoCpi {
                     account_a_portfolio_id,
+                    account_a_position_epoch,
                     account_b_portfolio_id,
+                    account_b_position_epoch,
                     asset_index,
                     market_id,
                     size_q,
@@ -3550,7 +3625,9 @@ pub mod ix {
                 } => {
                     out.push(6);
                     push_u64(&mut out, account_a_portfolio_id);
+                    push_u64(&mut out, account_a_position_epoch);
                     push_u64(&mut out, account_b_portfolio_id);
+                    push_u64(&mut out, account_b_position_epoch);
                     push_u16(&mut out, asset_index);
                     push_u64(&mut out, market_id);
                     push_i128(&mut out, size_q);
@@ -3559,7 +3636,9 @@ pub mod ix {
                 }
                 Self::TradeCpi {
                     account_a_portfolio_id,
+                    account_a_position_epoch,
                     account_b_portfolio_id,
+                    account_b_position_epoch,
                     asset_index,
                     market_id,
                     size_q,
@@ -3568,7 +3647,9 @@ pub mod ix {
                 } => {
                     out.push(10);
                     push_u64(&mut out, account_a_portfolio_id);
+                    push_u64(&mut out, account_a_position_epoch);
                     push_u64(&mut out, account_b_portfolio_id);
+                    push_u64(&mut out, account_b_position_epoch);
                     push_u16(&mut out, asset_index);
                     push_u64(&mut out, market_id);
                     push_i128(&mut out, size_q);
@@ -3577,7 +3658,9 @@ pub mod ix {
                 }
                 Self::BatchTradeNoCpi {
                     account_a_portfolio_id,
+                    account_a_position_epoch,
                     account_b_portfolio_id,
+                    account_b_position_epoch,
                     ref legs,
                 } => {
                     out.push(66);
@@ -3590,11 +3673,15 @@ pub mod ix {
                         push_u64(&mut out, leg.fee_bps);
                     }
                     push_u64(&mut out, account_a_portfolio_id);
+                    push_u64(&mut out, account_a_position_epoch);
                     push_u64(&mut out, account_b_portfolio_id);
+                    push_u64(&mut out, account_b_position_epoch);
                 }
                 Self::BatchTradeCpi {
                     account_a_portfolio_id,
+                    account_a_position_epoch,
                     account_b_portfolio_id,
+                    account_b_position_epoch,
                     ref legs,
                 } => {
                     out.push(67);
@@ -3607,7 +3694,9 @@ pub mod ix {
                         push_u64(&mut out, leg.limit_price);
                     }
                     push_u64(&mut out, account_a_portfolio_id);
+                    push_u64(&mut out, account_a_position_epoch);
                     push_u64(&mut out, account_b_portfolio_id);
+                    push_u64(&mut out, account_b_position_epoch);
                 }
                 Self::SetMatcherConfig {
                     portfolio_id,
@@ -6193,19 +6282,35 @@ pub mod processor {
             Instruction::InitPortfolio => handle_init_portfolio(program_id, accounts),
             Instruction::Deposit {
                 portfolio_id,
+                expected_sequence,
                 amount,
-            } => handle_deposit(program_id, accounts, portfolio_id, amount),
+            } => handle_deposit(
+                program_id,
+                accounts,
+                portfolio_id,
+                expected_sequence,
+                amount,
+            ),
             Instruction::Withdraw {
                 portfolio_id,
+                expected_sequence,
                 amount,
-            } => handle_withdraw(program_id, accounts, portfolio_id, amount),
+            } => handle_withdraw(
+                program_id,
+                accounts,
+                portfolio_id,
+                expected_sequence,
+                amount,
+            ),
             Instruction::PermissionlessCrank {
                 now_slot,
                 observations,
             } => handle_permissionless_crank(program_id, accounts, now_slot, observations),
             Instruction::TradeNoCpi {
                 account_a_portfolio_id,
+                account_a_position_epoch,
                 account_b_portfolio_id,
+                account_b_position_epoch,
                 asset_index,
                 market_id,
                 size_q,
@@ -6215,7 +6320,9 @@ pub mod processor {
                 program_id,
                 accounts,
                 account_a_portfolio_id,
+                account_a_position_epoch,
                 account_b_portfolio_id,
+                account_b_position_epoch,
                 asset_index,
                 market_id,
                 size_q,
@@ -6224,7 +6331,9 @@ pub mod processor {
             ),
             Instruction::TradeCpi {
                 account_a_portfolio_id,
+                account_a_position_epoch,
                 account_b_portfolio_id,
+                account_b_position_epoch,
                 asset_index,
                 market_id,
                 size_q,
@@ -6234,7 +6343,9 @@ pub mod processor {
                 program_id,
                 accounts,
                 account_a_portfolio_id,
+                account_a_position_epoch,
                 account_b_portfolio_id,
+                account_b_position_epoch,
                 asset_index,
                 market_id,
                 size_q,
@@ -6243,24 +6354,32 @@ pub mod processor {
             ),
             Instruction::BatchTradeNoCpi {
                 account_a_portfolio_id,
+                account_a_position_epoch,
                 account_b_portfolio_id,
+                account_b_position_epoch,
                 legs,
             } => handle_batch_trade_nocpi(
                 program_id,
                 accounts,
                 account_a_portfolio_id,
+                account_a_position_epoch,
                 account_b_portfolio_id,
+                account_b_position_epoch,
                 &legs,
             ),
             Instruction::BatchTradeCpi {
                 account_a_portfolio_id,
+                account_a_position_epoch,
                 account_b_portfolio_id,
+                account_b_position_epoch,
                 legs,
             } => handle_batch_trade_cpi(
                 program_id,
                 accounts,
                 account_a_portfolio_id,
+                account_a_position_epoch,
                 account_b_portfolio_id,
+                account_b_position_epoch,
                 &legs,
             ),
             Instruction::SetMatcherConfig {
@@ -6845,6 +6964,7 @@ pub mod processor {
         program_id: &Pubkey,
         accounts: &'a [AccountInfo<'a>],
         expected_portfolio_id: u64,
+        expected_sequence: u64,
         amount: u128,
     ) -> ProgramResult {
         let owner = account(accounts, 0)?;
@@ -6861,6 +6981,11 @@ pub mod processor {
         expect_owner(market_ai, program_id)?;
         expect_owner(portfolio_ai, program_id)?;
         verify_token_program(token_program)?;
+        expect_portfolio_sequence_binding(
+            &portfolio_ai.try_borrow_data()?,
+            expected_portfolio_id,
+            expected_sequence,
+        )?;
 
         let (cfg, mode, max_market_slots, _) =
             state::read_market_config_mode_and_capacity(&market_ai.try_borrow_data()?)?;
@@ -6883,9 +7008,11 @@ pub mod processor {
             }
             reject_permissionless_resolve_matured_live_view(&cfg, &group)?;
             let mut portfolio_data = portfolio_ai.try_borrow_mut_data()?;
-            expect_portfolio_id(&portfolio_data, expected_portfolio_id)?;
-            let sequence = state::read_portfolio_matcher_sequence(&portfolio_data)?;
-            state::next_portfolio_matcher_sequence(sequence, sequence)?;
+            expect_portfolio_sequence_binding(
+                &portfolio_data,
+                expected_portfolio_id,
+                expected_sequence,
+            )?;
             {
                 let mut portfolio = state::portfolio_view_mut_for_market_slots(
                     &mut portfolio_data,
@@ -6897,7 +7024,7 @@ pub mod processor {
                     .deposit_not_atomic(&mut portfolio, amount)
                     .map_err(map_v16_error)?;
             }
-            state::advance_portfolio_matcher_sequence(&mut portfolio_data, sequence)?;
+            state::advance_portfolio_matcher_sequence(&mut portfolio_data, expected_sequence)?;
         }
         transfer_tokens(token_program, source_token, vault_token, owner, amount_u64)?;
         Ok(())
@@ -6908,6 +7035,7 @@ pub mod processor {
         program_id: &Pubkey,
         accounts: &'a [AccountInfo<'a>],
         expected_portfolio_id: u64,
+        expected_sequence: u64,
         amount: u128,
     ) -> ProgramResult {
         let owner = account(accounts, 0)?;
@@ -6925,6 +7053,11 @@ pub mod processor {
         expect_owner(market_ai, program_id)?;
         expect_owner(portfolio_ai, program_id)?;
         verify_token_program(token_program)?;
+        expect_portfolio_sequence_binding(
+            &portfolio_ai.try_borrow_data()?,
+            expected_portfolio_id,
+            expected_sequence,
+        )?;
 
         let (cfg, mode, max_market_slots, _) =
             state::read_market_config_mode_and_capacity(&market_ai.try_borrow_data()?)?;
@@ -6954,7 +7087,11 @@ pub mod processor {
             }
             reject_permissionless_resolve_matured_live_view(&cfg, &group)?;
             let mut portfolio_data = portfolio_ai.try_borrow_mut_data()?;
-            expect_portfolio_id(&portfolio_data, expected_portfolio_id)?;
+            expect_portfolio_sequence_binding(
+                &portfolio_data,
+                expected_portfolio_id,
+                expected_sequence,
+            )?;
             let mut portfolio =
                 state::portfolio_view_mut_for_market_slots(&mut portfolio_data, max_market_slots)?;
             expect_portfolio_view_account_key(&portfolio, portfolio_ai.key)?;
@@ -6971,6 +7108,8 @@ pub mod processor {
             group
                 .withdraw_not_atomic(&mut portfolio, withdrawn_amount)
                 .map_err(map_v16_error)?;
+            drop(portfolio);
+            state::advance_portfolio_matcher_sequence(&mut portfolio_data, expected_sequence)?;
             withdrawn_amount
         };
         let amount_u64 = amount_to_u64(withdrawn_amount)?;
@@ -6996,7 +7135,9 @@ pub mod processor {
         account_a_ai: &AccountInfo<'a>,
         account_b_ai: &AccountInfo<'a>,
         account_a_portfolio_id: u64,
+        account_a_position_epoch: u64,
         account_b_portfolio_id: u64,
+        account_b_position_epoch: u64,
         asset_index: u16,
         expected_market_id: u64,
         size_q: i128,
@@ -7032,8 +7173,16 @@ pub mod processor {
             )?;
             let mut account_a_data = account_a_ai.try_borrow_mut_data()?;
             let mut account_b_data = account_b_ai.try_borrow_mut_data()?;
-            expect_portfolio_id(&account_a_data, account_a_portfolio_id)?;
-            expect_portfolio_id(&account_b_data, account_b_portfolio_id)?;
+            expect_portfolio_position_binding(
+                &account_a_data,
+                account_a_portfolio_id,
+                account_a_position_epoch,
+            )?;
+            expect_portfolio_position_binding(
+                &account_b_data,
+                account_b_portfolio_id,
+                account_b_position_epoch,
+            )?;
             let mut account_a =
                 state::portfolio_view_mut_for_market_slots(&mut account_a_data, max_market_slots)?;
             let mut account_b =
@@ -7258,7 +7407,9 @@ pub mod processor {
         program_id: &Pubkey,
         accounts: &'a [AccountInfo<'a>],
         account_a_portfolio_id: u64,
+        account_a_position_epoch: u64,
         account_b_portfolio_id: u64,
+        account_b_position_epoch: u64,
         legs: &[ix::BatchTradeLeg],
     ) -> ProgramResult {
         let signer_a = account(accounts, 0)?;
@@ -7277,6 +7428,16 @@ pub mod processor {
         if account_a_ai.key == account_b_ai.key {
             return Err(PercolatorError::InvalidInstruction.into());
         }
+        expect_portfolio_position_binding(
+            &account_a_ai.try_borrow_data()?,
+            account_a_portfolio_id,
+            account_a_position_epoch,
+        )?;
+        expect_portfolio_position_binding(
+            &account_b_ai.try_borrow_data()?,
+            account_b_portfolio_id,
+            account_b_position_epoch,
+        )?;
         for leg in legs {
             ensure_valid_reported_trade_price(leg.exec_price)?;
         }
@@ -7301,7 +7462,9 @@ pub mod processor {
             account_a_ai,
             account_b_ai,
             account_a_portfolio_id,
+            account_a_position_epoch,
             account_b_portfolio_id,
+            account_b_position_epoch,
             legs,
             false,
             max_market_slots,
@@ -7317,7 +7480,9 @@ pub mod processor {
         account_a_ai: &AccountInfo<'a>,
         account_b_ai: &AccountInfo<'a>,
         account_a_portfolio_id: u64,
+        account_a_position_epoch: u64,
         account_b_portfolio_id: u64,
+        account_b_position_epoch: u64,
         legs: &[ix::BatchTradeLeg],
         account_b_matcher_synchronized: bool,
         max_market_slots: usize,
@@ -7338,8 +7503,16 @@ pub mod processor {
             }
             let mut account_a_data = account_a_ai.try_borrow_mut_data()?;
             let mut account_b_data = account_b_ai.try_borrow_mut_data()?;
-            expect_portfolio_id(&account_a_data, account_a_portfolio_id)?;
-            expect_portfolio_id(&account_b_data, account_b_portfolio_id)?;
+            expect_portfolio_position_binding(
+                &account_a_data,
+                account_a_portfolio_id,
+                account_a_position_epoch,
+            )?;
+            expect_portfolio_position_binding(
+                &account_b_data,
+                account_b_portfolio_id,
+                account_b_position_epoch,
+            )?;
             let mut account_a =
                 state::portfolio_view_mut_for_market_slots(&mut account_a_data, max_market_slots)?;
             let mut account_b =
@@ -7593,7 +7766,9 @@ pub mod processor {
         program_id: &Pubkey,
         accounts: &'a [AccountInfo<'a>],
         account_a_portfolio_id: u64,
+        account_a_position_epoch: u64,
         account_b_portfolio_id: u64,
+        account_b_position_epoch: u64,
         asset_index: u16,
         market_id: u64,
         size_q: i128,
@@ -7616,6 +7791,16 @@ pub mod processor {
         if account_a_ai.key == account_b_ai.key {
             return Err(PercolatorError::InvalidInstruction.into());
         }
+        expect_portfolio_position_binding(
+            &account_a_ai.try_borrow_data()?,
+            account_a_portfolio_id,
+            account_a_position_epoch,
+        )?;
+        expect_portfolio_position_binding(
+            &account_b_ai.try_borrow_data()?,
+            account_b_portfolio_id,
+            account_b_position_epoch,
+        )?;
         ensure_valid_reported_trade_price(exec_price)?;
         let (cfg_pre, mode_pre, max_market_slots, _) =
             state::read_market_config_mode_and_capacity(&market_ai.try_borrow_data()?)?;
@@ -7635,7 +7820,9 @@ pub mod processor {
             account_a_ai,
             account_b_ai,
             account_a_portfolio_id,
+            account_a_position_epoch,
             account_b_portfolio_id,
+            account_b_position_epoch,
             asset_index,
             market_id,
             size_q,
@@ -8131,7 +8318,9 @@ pub mod processor {
         program_id: &Pubkey,
         accounts: &'a [AccountInfo<'a>],
         account_a_portfolio_id: u64,
+        account_a_position_epoch: u64,
         account_b_portfolio_id: u64,
+        account_b_position_epoch: u64,
         asset_index: u16,
         expected_market_id: u64,
         size_q: i128,
@@ -8163,6 +8352,16 @@ pub mod processor {
         {
             return Err(PercolatorError::InvalidInstruction.into());
         }
+        expect_portfolio_position_binding(
+            &account_a_ai.try_borrow_data()?,
+            account_a_portfolio_id,
+            account_a_position_epoch,
+        )?;
+        expect_portfolio_position_binding(
+            &account_b_ai.try_borrow_data()?,
+            account_b_portfolio_id,
+            account_b_position_epoch,
+        )?;
 
         let (cfg_pre, mode_pre, current_slot_pre, market_id, oracle_price, max_trading_fee_bps) =
             state::read_market_trade_preflight(
@@ -8328,7 +8527,9 @@ pub mod processor {
             account_a_ai,
             account_b_ai,
             account_a_portfolio_id,
+            account_a_position_epoch,
             account_b_portfolio_id,
+            account_b_position_epoch,
             asset_index,
             expected_market_id,
             ret.exec_size,
@@ -8486,7 +8687,9 @@ pub mod processor {
         program_id: &Pubkey,
         accounts: &'a [AccountInfo<'a>],
         account_a_portfolio_id: u64,
+        account_a_position_epoch: u64,
         account_b_portfolio_id: u64,
+        account_b_position_epoch: u64,
         legs: &[ix::BatchTradeCpiLeg],
     ) -> ProgramResult {
         if legs.is_empty() || legs.len() > MATCHER_BATCH_MAX_LEGS {
@@ -8517,6 +8720,16 @@ pub mod processor {
         {
             return Err(PercolatorError::InvalidInstruction.into());
         }
+        expect_portfolio_position_binding(
+            &account_a_ai.try_borrow_data()?,
+            account_a_portfolio_id,
+            account_a_position_epoch,
+        )?;
+        expect_portfolio_position_binding(
+            &account_b_ai.try_borrow_data()?,
+            account_b_portfolio_id,
+            account_b_position_epoch,
+        )?;
 
         // Preflight: market must be Live, the taker owner must sign, and each leg's oracle price
         // is read for matcher request/return binding.
@@ -8758,7 +8971,9 @@ pub mod processor {
             account_a_ai,
             account_b_ai,
             account_a_portfolio_id,
+            account_a_position_epoch,
             account_b_portfolio_id,
+            account_b_position_epoch,
             &exec_legs,
             true,
             max_market_slots,
@@ -13189,6 +13404,31 @@ pub mod processor {
     fn expect_portfolio_id(data: &[u8], expected_portfolio_id: u64) -> Result<(), ProgramError> {
         if state::read_portfolio_id(data)? != expected_portfolio_id {
             return Err(PercolatorError::EngineProvenanceMismatch.into());
+        }
+        Ok(())
+    }
+
+    fn expect_portfolio_sequence_binding(
+        data: &[u8],
+        expected_portfolio_id: u64,
+        expected_sequence: u64,
+    ) -> Result<(), ProgramError> {
+        expect_portfolio_id(data, expected_portfolio_id)?;
+        state::next_portfolio_matcher_sequence(
+            state::read_portfolio_matcher_sequence(data)?,
+            expected_sequence,
+        )?;
+        Ok(())
+    }
+
+    fn expect_portfolio_position_binding(
+        data: &[u8],
+        expected_portfolio_id: u64,
+        expected_position_epoch: u64,
+    ) -> Result<(), ProgramError> {
+        expect_portfolio_id(data, expected_portfolio_id)?;
+        if state::read_portfolio_position_epoch(data)? != expected_position_epoch {
+            return Err(PercolatorError::EngineStale.into());
         }
         Ok(())
     }

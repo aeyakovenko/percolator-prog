@@ -192,10 +192,12 @@ fn inv_022_representative_public_instructions() -> Vec<ProgInstruction> {
         ProgInstruction::InitPortfolio,
         ProgInstruction::Deposit {
             portfolio_id: 1,
+            expected_sequence: 0,
             amount: 1,
         },
         ProgInstruction::Withdraw {
             portfolio_id: 1,
+            expected_sequence: 0,
             amount: 1,
         },
         ProgInstruction::PermissionlessCrank {
@@ -207,7 +209,9 @@ fn inv_022_representative_public_instructions() -> Vec<ProgInstruction> {
         },
         ProgInstruction::TradeNoCpi {
             account_a_portfolio_id: 1,
+            account_a_position_epoch: 0,
             account_b_portfolio_id: 2,
+            account_b_position_epoch: 0,
             asset_index: 0,
             market_id: 1,
             size_q: 1,
@@ -225,7 +229,9 @@ fn inv_022_representative_public_instructions() -> Vec<ProgInstruction> {
         },
         ProgInstruction::TradeCpi {
             account_a_portfolio_id: 1,
+            account_a_position_epoch: 0,
             account_b_portfolio_id: 2,
+            account_b_position_epoch: 0,
             asset_index: 0,
             market_id: 1,
             size_q: 1,
@@ -410,7 +416,9 @@ fn inv_022_representative_public_instructions() -> Vec<ProgInstruction> {
         },
         ProgInstruction::BatchTradeNoCpi {
             account_a_portfolio_id: 1,
+            account_a_position_epoch: 0,
             account_b_portfolio_id: 2,
+            account_b_position_epoch: 0,
             legs: vec![BatchTradeLeg {
                 asset_index: 0,
                 market_id: 1,
@@ -421,7 +429,9 @@ fn inv_022_representative_public_instructions() -> Vec<ProgInstruction> {
         },
         ProgInstruction::BatchTradeCpi {
             account_a_portfolio_id: 1,
+            account_a_position_epoch: 0,
             account_b_portfolio_id: 2,
+            account_b_position_epoch: 0,
             legs: vec![BatchTradeCpiLeg {
                 asset_index: 0,
                 market_id: 1,
@@ -603,6 +613,7 @@ fn v16_program_raw_instruction_decoder_rejects_ambiguity_without_mutation() {
     let vault = env.vault;
     let canonical_deposit = ProgInstruction::Deposit {
         portfolio_id: env.portfolio_id(portfolio),
+        expected_sequence: 0,
         amount: 7,
     }
     .encode();

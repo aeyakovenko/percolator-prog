@@ -209,7 +209,9 @@ fn v16_program_batch_decode_oversized_vectors_reject_before_allocation() {
     let cpi = env.send(
         ProgInstruction::BatchTradeCpi {
             account_a_portfolio_id: env.portfolio_id(taker_account),
+            account_a_position_epoch: 0,
             account_b_portfolio_id: env.portfolio_id(maker_account),
+            account_b_position_epoch: 0,
             legs: cpi_legs,
         },
         vec![],

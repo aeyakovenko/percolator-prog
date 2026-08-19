@@ -603,7 +603,9 @@ fn v16_program_hostile_matcher_no_write_cannot_replay_stale_batch_return_data() 
         ],
         data: ProgInstruction::BatchTradeCpi {
             account_a_portfolio_id: taker_portfolio_id,
+            account_a_position_epoch: 0,
             account_b_portfolio_id: lp_portfolio_id,
+            account_b_position_epoch: 0,
             legs: vec![
                 BatchTradeCpiLeg {
                     asset_index: 0,
@@ -684,7 +686,9 @@ fn v16_program_hostile_matcher_no_write_cannot_replay_stale_single_context() {
         ],
         data: ProgInstruction::TradeCpi {
             account_a_portfolio_id: taker_portfolio_id,
+            account_a_position_epoch: 0,
             account_b_portfolio_id: lp_portfolio_id,
+            account_b_position_epoch: 0,
             asset_index: 0,
             market_id: first_generation_market_id(0),
             size_q,
@@ -1204,7 +1208,9 @@ fn v16_attack_tradecpi_matcher_tail_cannot_carry_protocol_state() {
     let m_portfolio_id = env.portfolio_id(m);
     let ix = |asset_index, size_q| ProgInstruction::TradeCpi {
         account_a_portfolio_id: t_portfolio_id,
+        account_a_position_epoch: 0,
         account_b_portfolio_id: m_portfolio_id,
+        account_b_position_epoch: 0,
         asset_index,
         market_id: first_generation_market_id((asset_index) as u16),
         size_q,

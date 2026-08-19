@@ -306,6 +306,7 @@ fn v16_program_account_type_confusion_rejected() {
     let r1 = env.send(
         ProgInstruction::Withdraw {
             portfolio_id: 0,
+            expected_sequence: 0,
             amount: 1,
         },
         vec![
@@ -326,7 +327,9 @@ fn v16_program_account_type_confusion_rejected() {
     let r2 = env.send(
         ProgInstruction::TradeNoCpi {
             account_a_portfolio_id: 0,
+            account_a_position_epoch: 0,
             account_b_portfolio_id: env.portfolio_id(pb),
+            account_b_position_epoch: 0,
             asset_index: 0,
             market_id: first_generation_market_id((0) as u16),
             size_q: POS_SCALE as i128,
@@ -525,6 +528,7 @@ fn v16_attack_deposit_into_uninitialized_portfolio_rejects() {
     let r = env.send(
         ProgInstruction::Deposit {
             portfolio_id: 0,
+            expected_sequence: 0,
             amount: 1_000,
         },
         vec![

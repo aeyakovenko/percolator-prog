@@ -89,6 +89,7 @@ fn retained_transaction_binds_program_market_kind_schema_and_blockhash() {
         let ix_index = program_instruction_index(env, tx);
         tx.message.instructions[ix_index].data = ProgInstruction::Withdraw {
             portfolio_id: env.primary_portfolio_id(0),
+            expected_sequence: 0,
             amount: 1_337,
         }
         .encode();

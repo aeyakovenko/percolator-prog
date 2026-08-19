@@ -831,6 +831,7 @@ fn v16_attack_cure_rejects_cross_market_portfolio_before_transfer() {
         &env.payer,
         ProgInstruction::Deposit {
             portfolio_id: portfolio_b_id,
+            expected_sequence: 0,
             amount: 100,
         },
         vec![
@@ -2415,7 +2416,9 @@ fn v16_attack_rebalance_reduce_rejects_cross_market_portfolio_substitution() {
         &env.payer,
         ProgInstruction::TradeNoCpi {
             account_a_portfolio_id: local_trade_portfolio_id,
+            account_a_position_epoch: 0,
             account_b_portfolio_id: local_short_trade_portfolio_id,
+            account_b_position_epoch: 0,
             asset_index: 0,
             market_id: first_generation_market_id((0) as u16),
             size_q: POS_SCALE as i128,
@@ -2585,7 +2588,9 @@ fn v16_attack_forfeit_recovery_leg_rejects_cross_market_portfolio_substitution()
         &env.payer,
         ProgInstruction::TradeNoCpi {
             account_a_portfolio_id: local_trade_portfolio_id,
+            account_a_position_epoch: 0,
             account_b_portfolio_id: local_short_trade_portfolio_id,
+            account_b_position_epoch: 0,
             asset_index: 0,
             market_id: first_generation_market_id((0) as u16),
             size_q: POS_SCALE as i128,
@@ -2835,6 +2840,7 @@ fn v16_attack_cross_market_portfolio_cannot_drain_foreign_vault() {
         &env.payer,
         ProgInstruction::Deposit {
             portfolio_id: pb_deposit_portfolio_id,
+            expected_sequence: 0,
             amount: 1_000_000,
         },
         vec![
@@ -2876,6 +2882,7 @@ fn v16_attack_cross_market_portfolio_cannot_drain_foreign_vault() {
         &env.payer,
         ProgInstruction::Withdraw {
             portfolio_id: pa_withdraw_portfolio_id,
+            expected_sequence: 0,
             amount: 1_000_000,
         },
         vec![
@@ -3100,7 +3107,9 @@ fn v16_attack_trade_paths_reject_cross_market_portfolio_substitution() {
             "TradeNoCpi",
             ProgInstruction::TradeNoCpi {
                 account_a_portfolio_id: pa_portfolio_id,
+                account_a_position_epoch: 0,
                 account_b_portfolio_id: pb_portfolio_id,
+                account_b_position_epoch: 0,
                 asset_index: 0,
                 market_id: first_generation_market_id((0) as u16),
                 size_q: POS_SCALE as i128,
@@ -3120,7 +3129,9 @@ fn v16_attack_trade_paths_reject_cross_market_portfolio_substitution() {
             "BatchTradeNoCpi",
             ProgInstruction::BatchTradeNoCpi {
                 account_a_portfolio_id: pa_portfolio_id,
+                account_a_position_epoch: 0,
                 account_b_portfolio_id: pb_portfolio_id,
+                account_b_position_epoch: 0,
                 legs: vec![BatchTradeLeg {
                     asset_index: 0,
                     market_id: first_generation_market_id((0) as u16),
@@ -3142,7 +3153,9 @@ fn v16_attack_trade_paths_reject_cross_market_portfolio_substitution() {
             "TradeCpi",
             ProgInstruction::TradeCpi {
                 account_a_portfolio_id: pa_portfolio_id,
+                account_a_position_epoch: 0,
                 account_b_portfolio_id: pb_portfolio_id,
+                account_b_position_epoch: 0,
                 asset_index: 0,
                 market_id: first_generation_market_id((0) as u16),
                 size_q: POS_SCALE as i128,
@@ -3164,7 +3177,9 @@ fn v16_attack_trade_paths_reject_cross_market_portfolio_substitution() {
             "BatchTradeCpi",
             ProgInstruction::BatchTradeCpi {
                 account_a_portfolio_id: pa_portfolio_id,
+                account_a_position_epoch: 0,
                 account_b_portfolio_id: pb_portfolio_id,
+                account_b_position_epoch: 0,
                 legs: vec![BatchTradeCpiLeg {
                     asset_index: 0,
                     market_id: first_generation_market_id((0) as u16),
@@ -3211,7 +3226,9 @@ fn v16_attack_trade_paths_reject_cross_market_portfolio_substitution() {
         &env.payer,
         ProgInstruction::TradeNoCpi {
             account_a_portfolio_id: p_good_a_id,
+            account_a_position_epoch: 0,
             account_b_portfolio_id: p_good_b_id,
+            account_b_position_epoch: 0,
             asset_index: 0,
             market_id: first_generation_market_id((0) as u16),
             size_q: POS_SCALE as i128,
@@ -3322,7 +3339,9 @@ fn v16_attack_trade_paths_reject_cross_market_portfolio_substitution() {
         &env.payer,
         ProgInstruction::BatchTradeCpi {
             account_a_portfolio_id: cpi_taker_portfolio_id,
+            account_a_position_epoch: 0,
             account_b_portfolio_id: cpi_lp_account_portfolio_id,
+            account_b_position_epoch: 0,
             legs: vec![BatchTradeCpiLeg {
                 asset_index: 0,
                 market_id: first_generation_market_id((0) as u16),
@@ -3477,6 +3496,7 @@ fn v16_attack_close_resolved_rejects_cross_market_portfolio_payout() {
         &env.payer,
         ProgInstruction::Deposit {
             portfolio_id: pb_portfolio_id,
+            expected_sequence: 0,
             amount: 1_000_000,
         },
         vec![
@@ -3745,6 +3765,7 @@ fn v16_attack_permissionless_crank_rejects_cross_market_target_portfolio() {
             &env.payer,
             ProgInstruction::Deposit {
                 portfolio_id,
+                expected_sequence: 0,
                 amount: 1_000_000,
             },
             vec![
@@ -3768,7 +3789,9 @@ fn v16_attack_permissionless_crank_rejects_cross_market_target_portfolio() {
         &env.payer,
         ProgInstruction::TradeNoCpi {
             account_a_portfolio_id: long_b_id,
+            account_a_position_epoch: 0,
             account_b_portfolio_id: short_b_id,
+            account_b_position_epoch: 0,
             asset_index: 0,
             market_id: first_generation_market_id((0) as u16),
             size_q: POS_SCALE as i128,
@@ -4364,7 +4387,9 @@ fn v16_attack_force_close_rejects_cross_market_portfolio_substitution() {
         &env.payer,
         ProgInstruction::TradeNoCpi {
             account_a_portfolio_id: b_long_id,
+            account_a_position_epoch: 0,
             account_b_portfolio_id: b_short_id,
+            account_b_position_epoch: 0,
             asset_index: 1,
             market_id: first_generation_market_id((1) as u16),
             size_q: POS_SCALE as i128,

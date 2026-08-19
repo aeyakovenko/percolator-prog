@@ -13,11 +13,12 @@
 //! signed current consent to land and change exposure so the guard is not a
 //! blanket risk-reduction DoS.
 //!
-//! The source roster requires all five current retained episode-bound instruction families to
-//! encode and dispatch `position_epoch`, consume the shared exact binding predicate before
-//! mutation, and advance the epoch after success. It also owns every wrapper callsite that can
-//! change a portfolio's position vector: single/batch trades, force-close, auto-crank, and the two
-//! shared owner routes. A new field or bump callsite reopens this invariant until classified.
+//! The source roster requires all five single-account and four paired-trade episode-bound
+//! instruction families to encode and dispatch their position epochs, consume the shared exact
+//! binding predicate before mutation, and advance the epoch after success. It also owns every
+//! wrapper callsite that can change a portfolio's position vector: single/batch trades,
+//! force-close, auto-crank, and the two shared owner routes. A new field or bump callsite reopens
+//! this invariant until classified.
 
 use std::fs;
 
@@ -65,7 +66,7 @@ fn v16_program_retained_position_binding_and_writer_rosters_are_source_complete(
     let instruction_enum = &source[enum_start..enum_end];
     assert_eq!(
         instruction_enum.matches("position_epoch: u64").count(),
-        5,
+        13,
         "retained position-episode field roster changed without INV-004 review"
     );
     for variant in [
@@ -84,6 +85,40 @@ fn v16_program_retained_position_binding_and_writer_rosters_are_source_complete(
         assert!(
             body[..end].contains("position_epoch: u64"),
             "{variant} lost its signed episode binding"
+        );
+    }
+    for variant in ["TradeNoCpi", "TradeCpi", "BatchTradeNoCpi", "BatchTradeCpi"] {
+        let marker = format!("{variant} {{");
+        let start = instruction_enum
+            .find(&marker)
+            .unwrap_or_else(|| panic!("missing paired episode route {variant}"));
+        let body = &instruction_enum[start..];
+        let end = body.find("},").expect("variant terminator") + 2;
+        assert!(
+            body[..end].contains("account_a_position_epoch: u64")
+                && body[..end].contains("account_b_position_epoch: u64"),
+            "{variant} must bind both counterparties' episodes"
+        );
+    }
+
+    for name in [
+        "handle_trade_nocpi_zero_copy",
+        "handle_batch_execute_zero_copy",
+        "handle_trade_cpi",
+        "handle_batch_trade_cpi",
+    ] {
+        let start = source
+            .find(&format!("fn {name}"))
+            .unwrap_or_else(|| panic!("missing paired trade handler {name}"));
+        let tail = &source[start..];
+        let end = tail.find("\n    fn ").unwrap_or(tail.len());
+        let handler = &tail[..end];
+        assert!(
+            handler
+                .matches("expect_portfolio_position_binding(")
+                .count()
+                >= 2,
+            "{name} must consume both exact episode bindings before mutation or CPI"
         );
     }
 
