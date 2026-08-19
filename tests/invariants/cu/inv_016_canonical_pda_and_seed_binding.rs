@@ -924,3 +924,113 @@ fn v16_bpf_auth_matcher_init_binds_every_delegate_seed_and_canonical_bump() {
         "valid init stores the LP-account-bound delegate PDA"
     );
 }
+
+#[test]
+fn v16_program_pda_and_token_move_callsite_roster_is_source_complete() {
+    let source = include_str!("../../../src/v16_program.rs");
+    assert_eq!(
+        source.matches("fn derive_vault_authority").count(),
+        1,
+        "vault-authority derivation must have one canonical implementation"
+    );
+    assert_eq!(
+        source.matches("fn derive_matcher_delegate").count(),
+        1,
+        "matcher-delegate derivation must have one canonical implementation"
+    );
+    assert_eq!(
+        source.matches("fn canonical_vault_address").count(),
+        1,
+        "vault ATA derivation must have one canonical implementation"
+    );
+
+    let mut token_move_handlers = Vec::new();
+    let mut direct_vault_derivation_handlers = Vec::new();
+    let mut matcher_derivation_handlers = Vec::new();
+    for segment in source.split("\n    fn handle_").skip(1) {
+        let name_end = segment
+            .find(|character: char| character == '<' || character == '(')
+            .expect("handler name terminator");
+        let name = &segment[..name_end];
+        let moves_tokens =
+            segment.contains("transfer_tokens(") || segment.contains("transfer_tokens_signed(");
+        if moves_tokens {
+            assert!(
+                segment.contains("verify_vault_token_account(")
+                    || segment.contains("verify_withdrawable_token_accounts(")
+                    || segment.contains("verify_domain_withdrawal_preflight("),
+                "token-moving handler {name} has no canonical vault-address guard"
+            );
+            token_move_handlers.push(name);
+        }
+        if segment.matches("derive_vault_authority(").count()
+            > segment.matches("fn derive_vault_authority").count()
+        {
+            direct_vault_derivation_handlers.push(name);
+        }
+        if segment.matches("derive_matcher_delegate(").count()
+            > segment.matches("fn derive_matcher_delegate").count()
+        {
+            matcher_derivation_handlers.push(name);
+        }
+    }
+    token_move_handlers.sort_unstable();
+    token_move_handlers.dedup();
+    direct_vault_derivation_handlers.sort_unstable();
+    direct_vault_derivation_handlers.dedup();
+    matcher_derivation_handlers.sort_unstable();
+    matcher_derivation_handlers.dedup();
+
+    let mut expected_token_move_handlers = vec![
+        "claim_resolved_payout_topup",
+        "close_resolved",
+        "close_slab",
+        "cure_and_cancel_close",
+        "deposit",
+        "swap_secondary_for_primary",
+        "top_up_backing_bucket",
+        "top_up_insurance",
+        "top_up_insurance_domain",
+        "update_asset_lifecycle",
+        "withdraw",
+        "withdraw_backing_bucket",
+        "withdraw_backing_bucket_earnings",
+        "withdraw_insurance",
+        "withdraw_insurance_asset",
+    ];
+    expected_token_move_handlers.sort_unstable();
+    assert_eq!(
+        token_move_handlers, expected_token_move_handlers,
+        "every production token-moving handler needs an explicit INV-016 owner"
+    );
+
+    let mut expected_direct_vault_derivations = vec![
+        "claim_resolved_payout_topup",
+        "close_resolved",
+        "close_slab",
+        "cure_and_cancel_close",
+        "deposit",
+        "swap_secondary_for_primary",
+        "top_up_backing_bucket",
+        "top_up_insurance",
+        "top_up_insurance_domain",
+        "update_asset_lifecycle",
+        "update_base_unit_mints",
+        "withdraw",
+        "withdraw_insurance",
+        "withdraw_insurance_asset",
+    ];
+    expected_direct_vault_derivations.sort_unstable();
+    assert_eq!(
+        direct_vault_derivation_handlers, expected_direct_vault_derivations,
+        "vault-derivation callsite roster changed without INV-016 review"
+    );
+
+    let mut expected_matcher_derivations =
+        vec!["batch_trade_cpi", "set_matcher_config", "trade_cpi"];
+    expected_matcher_derivations.sort_unstable();
+    assert_eq!(
+        matcher_derivation_handlers, expected_matcher_derivations,
+        "matcher-derivation callsite roster changed without INV-016 review"
+    );
+}
