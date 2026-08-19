@@ -4,9 +4,10 @@
 //!
 //! Evidence in this file (F over public I routes): `v16_program_stateful_public_interface_fuzz`
 //! generates deposits, withdrawals, all four trade routes, retained transactions, oracle changes,
-//! cranks, fee synchronization, matcher-capability changes, insurance/backing top-ups, released-PnL
-//! conversion, unilateral rebalance reduction, asset shutdown, oracle-authority rotation, market
-//! resolution, resolved crank/close/claim transitions, and hostile account substitution. Terminal
+//! cranks, fee synchronization, matcher-capability changes, insurance/backing top-ups and
+//! withdrawals, released-PnL conversion, unilateral rebalance reduction, asset shutdown,
+//! oracle-authority rotation, market resolution, resolved crank/close/claim transitions, and
+//! hostile account substitution. Terminal
 //! routes independently reconcile position and effective-OI removal, receipt monotonicity, and
 //! exact destination/SPL-vault/engine-vault deltas. After every public transition the shared oracle
 //! rejects undecodable or hidden legs, duplicate same-asset legs, stale
@@ -28,6 +29,20 @@
 //! plus every additional verification method required by the charter.
 
 use super::*;
+
+#[test]
+fn v16_program_value_withdrawal_routes_preserve_exact_whole_route_deltas() {
+    let coverage = run_value_withdrawal_route_oracle()
+        .expect("insurance and backing withdrawal routes must satisfy the shared public oracle");
+    assert_eq!(coverage.insurance_topups, 1);
+    assert_eq!(coverage.insurance_withdrawals, 1);
+    assert_eq!(coverage.backing_topups, 1);
+    assert_eq!(coverage.backing_withdrawals, 1);
+    assert_eq!(
+        coverage.token_frame_checks, 4,
+        "each value route must execute an exact SPL account-frame check"
+    );
+}
 
 #[test]
 fn v16_program_designated_liquidity_provider_has_public_exit_after_unilateral_reduction() {
@@ -73,6 +88,14 @@ fn v16_program_extended_public_action_alphabet_runs_through_shared_oracles() {
                 domain: 1,
                 amount: 500,
                 expiry_delta: 200,
+            },
+            Action::WithdrawInsurance {
+                asset: 0,
+                amount: 3,
+            },
+            Action::WithdrawBacking {
+                domain: 1,
+                amount: 3,
             },
             Action::RebalanceReduce { actor: 0, asset: 2 },
             Action::PushMark {

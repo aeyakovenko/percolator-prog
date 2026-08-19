@@ -1241,6 +1241,14 @@ pub enum Action {
         amount: u16,
         expiry_delta: u8,
     },
+    WithdrawInsurance {
+        asset: u8,
+        amount: u16,
+    },
+    WithdrawBacking {
+        domain: u8,
+        amount: u16,
+    },
     ConvertReleasedPnl {
         actor: u8,
         amount: u16,
@@ -1338,10 +1346,12 @@ pub struct Coverage {
     pub mark_updates: u64,
     pub oracle_reconfigs: u64,
     pub maintenance_syncs: u64,
-    pub extended_action_attempts: [u64; 8],
+    pub extended_action_attempts: [u64; 10],
     pub matcher_config_updates: u64,
     pub insurance_topups: u64,
     pub backing_topups: u64,
+    pub insurance_withdrawals: u64,
+    pub backing_withdrawals: u64,
     pub pnl_conversions: u64,
     pub rebalance_reductions: u64,
     pub resolve_policy_updates: u64,
@@ -1387,10 +1397,12 @@ impl Default for Coverage {
             mark_updates: 0,
             oracle_reconfigs: 0,
             maintenance_syncs: 0,
-            extended_action_attempts: [0; 8],
+            extended_action_attempts: [0; 10],
             matcher_config_updates: 0,
             insurance_topups: 0,
             backing_topups: 0,
+            insurance_withdrawals: 0,
+            backing_withdrawals: 0,
             pnl_conversions: 0,
             rebalance_reductions: 0,
             resolve_policy_updates: 0,
@@ -1514,6 +1526,8 @@ impl Coverage {
         self.matcher_config_updates += other.matcher_config_updates;
         self.insurance_topups += other.insurance_topups;
         self.backing_topups += other.backing_topups;
+        self.insurance_withdrawals += other.insurance_withdrawals;
+        self.backing_withdrawals += other.backing_withdrawals;
         self.pnl_conversions += other.pnl_conversions;
         self.rebalance_reductions += other.rebalance_reductions;
         self.resolve_policy_updates += other.resolve_policy_updates;
@@ -3089,6 +3103,22 @@ impl ScenarioRunner {
                 }
                 Ok(())
             }
+            Action::WithdrawInsurance { asset, amount } => {
+                self.coverage.extended_action_attempts[8] += 1;
+                self.execute_insurance_withdrawal(
+                    asset as usize % ASSET_COUNT,
+                    u128::from(amount.max(1)),
+                )
+                .map(|_| ())
+            }
+            Action::WithdrawBacking { domain, amount } => {
+                self.coverage.extended_action_attempts[9] += 1;
+                self.execute_backing_withdrawal(
+                    u16::from(domain) % (ASSET_COUNT as u16 * 2),
+                    u128::from(amount.max(1)),
+                )
+                .map(|_| ())
+            }
             Action::ConvertReleasedPnl { actor, amount } => {
                 self.coverage.extended_action_attempts[3] += 1;
                 let actor = actor as usize % PRIMARY_ACTOR_COUNT;
@@ -3621,6 +3651,149 @@ impl ScenarioRunner {
             "terminal payout routes did not converge in {} bounded sweeps",
             self.liveness_limit
         ))
+    }
+
+    fn execute_insurance_withdrawal(&mut self, asset: usize, amount: u128) -> Result<bool, String> {
+        let before = self.snapshot();
+        let destination = self.env.provider_destination_token;
+        let destination_before = u128::from(self.env.token_amount(destination));
+        let spl_vault_before = u128::from(self.env.token_amount(self.env.vault));
+        let (_, group_before) = self.env.primary_market_state();
+        let long_domain = asset
+            .checked_mul(2)
+            .ok_or("insurance domain multiplication overflow")?;
+        let domain_remaining = |domain: usize| {
+            group_before.insurance_domain_budget[domain]
+                .checked_sub(group_before.insurance_domain_spent[domain])
+                .ok_or_else(|| format!("insurance domain {domain} spent exceeds budget"))
+        };
+        let asset_budget_before = domain_remaining(long_domain)?
+            .checked_add(domain_remaining(long_domain + 1)?)
+            .ok_or("insurance asset budget overflow")?;
+
+        match self
+            .env
+            .withdraw_insurance_asset_as_admin(asset as u16, amount)
+        {
+            Ok(success) => {
+                self.coverage.insurance_withdrawals += 1;
+                self.coverage.observe_success(None, &success);
+                self.assert_portfolio_frame(&before, &[])?;
+                let destination_after = u128::from(self.env.token_amount(destination));
+                let spl_vault_after = u128::from(self.env.token_amount(self.env.vault));
+                let (_, group_after) = self.env.primary_market_state();
+                let asset_budget_after = group_after.insurance_domain_budget[long_domain]
+                    .checked_sub(group_after.insurance_domain_spent[long_domain])
+                    .and_then(|long| {
+                        group_after.insurance_domain_budget[long_domain + 1]
+                            .checked_sub(group_after.insurance_domain_spent[long_domain + 1])
+                            .and_then(|short| long.checked_add(short))
+                    })
+                    .ok_or("post-withdraw insurance asset budget is invalid")?;
+                if destination_before.checked_add(amount) != Some(destination_after)
+                    || spl_vault_after.checked_add(amount) != Some(spl_vault_before)
+                    || group_after.insurance.checked_add(amount) != Some(group_before.insurance)
+                    || group_after.vault.checked_add(amount) != Some(group_before.vault)
+                    || asset_budget_after.checked_add(amount) != Some(asset_budget_before)
+                {
+                    return Err(format!(
+                        "insurance withdrawal {amount} on asset {asset} did not preserve exact destination/vault/insurance/domain-budget deltas"
+                    ));
+                }
+                if before.backing_domain_ledger != self.env.backing_domain_ledger_data()
+                    || before.matcher_contexts != self.env.all_matcher_context_data()
+                    || before.economic_account_lamports != self.env.all_economic_account_lamports()
+                {
+                    return Err(
+                        "insurance withdrawal mutated an unrelated ledger, matcher context, or lamport balance"
+                            .into(),
+                    );
+                }
+                self.assert_token_frame(&before, &[destination, self.env.vault])?;
+                Ok(true)
+            }
+            Err(_) => {
+                self.assert_snapshot_unchanged(&before)?;
+                Ok(false)
+            }
+        }
+    }
+
+    fn execute_backing_withdrawal(&mut self, domain: u16, amount: u128) -> Result<bool, String> {
+        let before = self.snapshot();
+        let destination = self.env.provider_destination_token;
+        let destination_before = u128::from(self.env.token_amount(destination));
+        let spl_vault_before = u128::from(self.env.token_amount(self.env.vault));
+        let (_, group_before) = self.env.primary_market_state();
+        let domain_index = domain as usize;
+        let backing_num = amount
+            .checked_mul(BOUND_SCALE)
+            .ok_or("backing withdrawal scale overflow")?;
+        let bucket_before = group_before.source_backing_buckets[domain_index];
+        let source_before = group_before.source_credit[domain_index];
+        let source_total_before =
+            group_before
+                .source_credit
+                .iter()
+                .try_fold(0u128, |total, source| {
+                    total
+                        .checked_add(source.fresh_reserved_backing_num)
+                        .ok_or("pre-withdraw backing total overflow")
+                })?;
+
+        match self.env.withdraw_backing_bucket(domain, amount) {
+            Ok(success) => {
+                self.coverage.backing_withdrawals += 1;
+                self.coverage.observe_success(None, &success);
+                self.assert_portfolio_frame(&before, &[])?;
+                let destination_after = u128::from(self.env.token_amount(destination));
+                let spl_vault_after = u128::from(self.env.token_amount(self.env.vault));
+                let (_, group_after) = self.env.primary_market_state();
+                let bucket_after = group_after.source_backing_buckets[domain_index];
+                let source_after = group_after.source_credit[domain_index];
+                let source_total_after =
+                    group_after
+                        .source_credit
+                        .iter()
+                        .try_fold(0u128, |total, source| {
+                            total
+                                .checked_add(source.fresh_reserved_backing_num)
+                                .ok_or("post-withdraw backing total overflow")
+                        })?;
+                if destination_before.checked_add(amount) != Some(destination_after)
+                    || spl_vault_after.checked_add(amount) != Some(spl_vault_before)
+                    || group_after.vault.checked_add(amount) != Some(group_before.vault)
+                    || bucket_after
+                        .fresh_unliened_backing_num
+                        .checked_add(backing_num)
+                        != Some(bucket_before.fresh_unliened_backing_num)
+                    || source_after
+                        .fresh_reserved_backing_num
+                        .checked_add(backing_num)
+                        != Some(source_before.fresh_reserved_backing_num)
+                    || source_total_after.checked_add(backing_num) != Some(source_total_before)
+                {
+                    return Err(format!(
+                        "backing withdrawal {amount} on domain {domain} did not preserve exact destination/vault/bucket/source deltas"
+                    ));
+                }
+                if before.backing_domain_ledger != self.env.backing_domain_ledger_data()
+                    || before.matcher_contexts != self.env.all_matcher_context_data()
+                    || before.economic_account_lamports != self.env.all_economic_account_lamports()
+                {
+                    return Err(
+                        "backing withdrawal without a ledger mutated an unrelated ledger, matcher context, or lamport balance"
+                            .into(),
+                    );
+                }
+                self.assert_token_frame(&before, &[destination, self.env.vault])?;
+                Ok(true)
+            }
+            Err(_) => {
+                self.assert_snapshot_unchanged(&before)?;
+                Ok(false)
+            }
+        }
     }
 
     fn execute_deposit(
@@ -5172,6 +5345,45 @@ pub fn run_scenario(scenario: &Scenario) -> Result<Coverage, String> {
     progress_runner.coverage.merge(liquidation_coverage);
     progress_runner.coverage.assert_pull_request_non_vacuity()?;
     Ok(progress_runner.coverage)
+}
+
+pub fn run_value_withdrawal_route_oracle() -> Result<Coverage, String> {
+    let scenario = Scenario {
+        seed: [0x24; 32],
+        config: SmallMarketConfig::default(),
+        actions: Vec::new(),
+    };
+    let mut runner = ScenarioRunner::new_unprefixed(&scenario)?;
+    runner.run_safety_prefix(&[
+        Action::TopUpInsurance {
+            domain: 0,
+            amount: 1_000,
+        },
+        Action::WithdrawInsurance {
+            asset: 0,
+            amount: 400,
+        },
+        Action::TopUpBacking {
+            domain: 1,
+            amount: 1_000,
+            expiry_delta: 200,
+        },
+        Action::WithdrawBacking {
+            domain: 1,
+            amount: 400,
+        },
+    ])?;
+    if runner.coverage.insurance_topups != 1
+        || runner.coverage.insurance_withdrawals != 1
+        || runner.coverage.backing_topups != 1
+        || runner.coverage.backing_withdrawals != 1
+    {
+        return Err(format!(
+            "public value-withdrawal controls were vacuous: {:?}",
+            runner.coverage
+        ));
+    }
+    Ok(runner.coverage)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -20374,6 +20586,10 @@ fn action_strategy() -> impl Strategy<Value = Action> {
                 expiry_delta,
             },
         ),
+        2 => (any::<u8>(), 1u16..=500)
+            .prop_map(|(asset, amount)| Action::WithdrawInsurance { asset, amount }),
+        2 => (any::<u8>(), 1u16..=500)
+            .prop_map(|(domain, amount)| Action::WithdrawBacking { domain, amount }),
         2 => (any::<u8>(), 1u16..=500)
             .prop_map(|(actor, amount)| Action::ConvertReleasedPnl { actor, amount }),
         2 => (any::<u8>(), any::<u8>())
