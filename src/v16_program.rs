@@ -2378,7 +2378,7 @@ pub mod state {
         let required = HEADER_LEN
             .checked_add(PORTFOLIO_STATE_LEN)
             .ok_or(PercolatorError::InvalidAccountLen)?;
-        if data.len() < required {
+        if data.len() < required || data.len() > PORTFOLIO_ACCOUNT_LEN {
             return Err(PercolatorError::InvalidAccountLen.into());
         }
         let portfolio_bytes = data
@@ -2640,7 +2640,7 @@ pub mod state {
         data: &mut [u8],
         account: &PortfolioAccountV16,
     ) -> Result<(), ProgramError> {
-        if data.len() < PORTFOLIO_ACCOUNT_LEN {
+        if data.len() != PORTFOLIO_ACCOUNT_LEN {
             return Err(PercolatorError::InvalidAccountLen.into());
         }
         if is_initialized(data) {
@@ -2664,7 +2664,7 @@ pub mod state {
         portfolio_id: u64,
     ) -> Result<(), ProgramError> {
         let required = portfolio_account_len_for_market_slots(max_market_slots)?;
-        if data.len() < required {
+        if data.len() != required {
             return Err(PercolatorError::InvalidAccountLen.into());
         }
         if is_initialized(data) {
@@ -6639,7 +6639,7 @@ pub mod processor {
             v16_domain_count_for_market_slots(max_market_slots as u32).map_err(map_v16_error)?;
         let required_portfolio_len =
             state::portfolio_account_len_for_market_slots(max_market_slots)?;
-        if portfolio_ai.data_len() < required_portfolio_len {
+        if portfolio_ai.data_len() != required_portfolio_len {
             portfolio_ai.realloc(required_portfolio_len, true)?;
         }
         if !Rent::get()?.is_exempt(portfolio_ai.lamports(), required_portfolio_len) {
@@ -8219,10 +8219,7 @@ pub mod processor {
             return Err(PercolatorError::EngineStale.into());
         }
         state::next_portfolio_matcher_sequence(current_sequence, expected_sequence)?;
-        let required_len = state::portfolio_account_len_for_market_slots(0)?;
-        if lp_portfolio_ai.data_len() < required_len {
-            lp_portfolio_ai.realloc(required_len, true)?;
-        }
+        ensure_portfolio_storage_for_market_slots(lp_portfolio_ai, 0)?;
         let prior_control =
             state::read_portfolio_matcher_config(&lp_portfolio_ai.try_borrow_data()?)?.control;
         let mut cfg = if enabled == 0 {
@@ -13282,6 +13279,9 @@ pub mod processor {
         max_market_slots: usize,
     ) -> ProgramResult {
         let required = state::portfolio_account_len_for_market_slots(max_market_slots)?;
+        if portfolio_ai.data_len() > required {
+            return Err(PercolatorError::InvalidAccountLen.into());
+        }
         if portfolio_ai.data_len() < required {
             portfolio_ai.realloc(required, true)?;
         }

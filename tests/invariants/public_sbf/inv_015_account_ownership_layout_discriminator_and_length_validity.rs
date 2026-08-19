@@ -10,6 +10,7 @@
 //! fails closed and relies on SVM rollback only after a real transaction error is returned.
 
 use super::support::v16_svm::{MarketConfig, V16Svm};
+use percolator_prog::{constants, state};
 use solana_sdk::{account::Account, pubkey::Pubkey, system_program};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -75,11 +76,16 @@ enum MalformedCase {
     MarketWrongOwner,
     MarketTooShort,
     MarketBadMagic,
+    MarketBadVersion,
     MarketBadKind,
+    MarketNonzeroWrapperPadding,
+    MarketTrailingByte,
     PortfolioWrongOwner,
     PortfolioTooShort,
     PortfolioBadMagic,
+    PortfolioBadVersion,
     PortfolioBadKind,
+    PortfolioTrailingByte,
 }
 
 fn apply_malformed_case(env: &mut V16Svm, case: MalformedCase) {
@@ -95,8 +101,21 @@ fn apply_malformed_case(env: &mut V16Svm, case: MalformedCase) {
         MalformedCase::MarketBadMagic => {
             replace_account(env, env.market, |account| account.data[0] ^= 0x80);
         }
+        MalformedCase::MarketBadVersion => {
+            replace_account(env, env.market, |account| account.data[8] ^= 0x80);
+        }
         MalformedCase::MarketBadKind => {
             replace_account(env, env.market, |account| account.data[10] ^= 0x7f);
+        }
+        MalformedCase::MarketNonzeroWrapperPadding => {
+            let padding_offset =
+                constants::HEADER_LEN + core::mem::offset_of!(state::WrapperConfigV16, _padding0);
+            replace_account(env, env.market, |account| {
+                account.data[padding_offset] = 1;
+            });
+        }
+        MalformedCase::MarketTrailingByte => {
+            replace_account(env, env.market, |account| account.data.push(0));
         }
         MalformedCase::PortfolioWrongOwner => {
             replace_account(env, env.actors[0].portfolio, |account| {
@@ -113,10 +132,18 @@ fn apply_malformed_case(env: &mut V16Svm, case: MalformedCase) {
                 account.data[0] ^= 0x80
             });
         }
+        MalformedCase::PortfolioBadVersion => {
+            replace_account(env, env.actors[0].portfolio, |account| {
+                account.data[8] ^= 0x80
+            });
+        }
         MalformedCase::PortfolioBadKind => {
             replace_account(env, env.actors[0].portfolio, |account| {
                 account.data[10] ^= 0x7f
             });
+        }
+        MalformedCase::PortfolioTrailingByte => {
+            replace_account(env, env.actors[0].portfolio, |account| account.data.push(0));
         }
     }
 }
@@ -127,11 +154,16 @@ fn malformed_program_accounts_reject_before_mutation_and_roll_back_exactly() {
         MalformedCase::MarketWrongOwner,
         MalformedCase::MarketTooShort,
         MalformedCase::MarketBadMagic,
+        MalformedCase::MarketBadVersion,
         MalformedCase::MarketBadKind,
+        MalformedCase::MarketNonzeroWrapperPadding,
+        MalformedCase::MarketTrailingByte,
         MalformedCase::PortfolioWrongOwner,
         MalformedCase::PortfolioTooShort,
         MalformedCase::PortfolioBadMagic,
+        MalformedCase::PortfolioBadVersion,
         MalformedCase::PortfolioBadKind,
+        MalformedCase::PortfolioTrailingByte,
     ] {
         let mut env = V16Svm::new([case as u8; 32], MarketConfig::default());
         let retained = env.build_retained_deposit(0, 1_337);

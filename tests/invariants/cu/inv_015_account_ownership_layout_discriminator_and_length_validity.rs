@@ -9,6 +9,59 @@
 
 use super::*;
 
+#[test]
+fn v16_program_init_portfolio_canonicalizes_oversized_uninitialized_account() {
+    let mut env = V16CuEnv::new();
+    let owner = Keypair::new();
+    let portfolio = Keypair::new();
+    env.ensure_signer_account(owner.pubkey());
+
+    let oversized_len = env.portfolio_account_len + 1;
+    let rent = env.svm.get_sysvar::<solana_sdk::rent::Rent>();
+    let create = system_instruction::create_account(
+        &env.payer.pubkey(),
+        &portfolio.pubkey(),
+        rent.minimum_balance(oversized_len),
+        oversized_len as u64,
+        &env.program_id,
+    );
+    let init = Instruction {
+        program_id: env.program_id,
+        accounts: vec![
+            AccountMeta::new(owner.pubkey(), true),
+            AccountMeta::new(env.market, false),
+            AccountMeta::new(portfolio.pubkey(), false),
+        ],
+        data: ProgInstruction::InitPortfolio.encode(),
+    };
+
+    env.svm.expire_blockhash();
+    let init_cu = send_raw_ixs(
+        &mut env.svm,
+        &env.payer,
+        vec![heap_ix(), cu_ix(), create, init],
+        &[&owner, &portfolio],
+    )
+    .expect("public InitPortfolio must canonicalize an oversized uninitialized account");
+    assert_cu_within(
+        "INV-015 oversized InitPortfolio canonicalization",
+        init_cu,
+        CUSTODY_CU_LIMIT,
+    );
+
+    let initialized = env.svm.get_account(&portfolio.pubkey()).unwrap();
+    assert_eq!(
+        initialized.data.len(),
+        env.portfolio_account_len,
+        "public initialization must not preserve ambiguous trailing bytes",
+    );
+    assert!(state::is_initialized(&initialized.data));
+    assert_eq!(env.market_state().1.materialized_portfolio_count, 1);
+
+    env.deposit(&owner, portfolio.pubkey(), 1_000);
+    assert_eq!(env.portfolio_state(portfolio.pubkey()).capital.get(), 1_000);
+}
+
 // Account-type confusion must reject before state mutation or value movement.
 #[test]
 fn v16_program_account_type_confusion_rejected() {
