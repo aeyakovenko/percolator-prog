@@ -1017,12 +1017,14 @@ pub struct ConvertPortfolioIncarnationReplayReproduction {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ConvertRetryReplayReproduction {
-    pub blocker: KnownBlocker,
+pub struct ConvertRetryReplayProtection {
     pub released_pnl: u128,
-    pub victim_loss: u64,
+    pub stale_retry_rejected: bool,
+    pub rejected_exact_rollback: bool,
+    pub fresh_intent_landed: bool,
+    pub control_victim_payout: u64,
+    pub replay_victim_payout: u64,
     pub cranker_extraction: u64,
-    pub retry_cu: u64,
     pub sync_cu: u64,
     pub max_cu: u64,
 }
@@ -6499,6 +6501,21 @@ pub struct CurePortfolioIncarnationReplayEvidence {
     pub fresh_close_canceled: bool,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CurePositionEpisodeReplayEvidence {
+    pub portfolio_id_unchanged: bool,
+    pub old_position_epoch: u64,
+    pub replacement_position_epoch: u64,
+    pub matcher_disabled_cleanup_advanced_epoch: bool,
+    pub stale_replay_rejected: bool,
+    pub rejected_exact_rollback: bool,
+    pub stale_source_debit: u64,
+    pub stale_capital_credit: u128,
+    pub stale_close_canceled: bool,
+    pub fresh_cure_landed: bool,
+    pub fresh_close_canceled: bool,
+}
+
 fn create_public_cancellable_close(
     runner: &mut ScenarioRunner,
     winner: u8,
@@ -6877,6 +6894,158 @@ pub fn run_cure_portfolio_incarnation_replay_probe(
         old_portfolio_id,
         intermediate_portfolio_id,
         new_portfolio_id,
+        stale_replay_rejected,
+        rejected_exact_rollback,
+        stale_source_debit,
+        stale_capital_credit,
+        stale_close_canceled: stale_close.canceled,
+        fresh_cure_landed,
+        fresh_close_canceled,
+    })
+}
+
+pub fn run_cure_position_episode_replay_probe(
+    seed: [u8; 32],
+) -> Result<CurePositionEpisodeReplayEvidence, String> {
+    const FIRST_WINNER: usize = 0;
+    const LOSER: usize = 1;
+    const SECOND_WINNER: usize = 2;
+    const CURE_DEPOSIT: u128 = 2_000_000;
+    const REPLACEMENT_CAPITAL: u128 = 161_600;
+
+    let config = MarketConfig {
+        max_price_move_bps_per_slot: 500,
+        max_accrual_dt_slots: 1,
+        max_abs_funding_e9_per_slot: 0,
+        min_funding_lifetime_slots: 1,
+        maintenance_fee_per_slot: 0,
+        maintenance_margin_bps: 1_000,
+        initial_margin_bps: 1_000,
+        actor_deposits: [1_000_000, REPLACEMENT_CAPITAL, 1_000_000, 1_000_000, 1],
+        actor_token_balances: [1_000_000, 1_000_000_000_000, 1_000_000, 1_000_000, 1],
+        ..MarketConfig::default()
+    };
+    let mut runner = ScenarioRunner::new_unprefixed_with_market_config(seed, config)?;
+    create_public_cancellable_close(
+        &mut runner,
+        FIRST_WINNER as u8,
+        LOSER as u8,
+        0,
+        EXIT_MAKER_INDEX as u8,
+    )?;
+    let portfolio_id = runner.env.primary_portfolio_id(LOSER);
+    let old_position_epoch = runner.env.primary_portfolio_position_epoch(LOSER);
+    let stale_cure = runner
+        .env
+        .build_retained_cure_and_cancel_primary_close(LOSER, CURE_DEPOSIT);
+    runner
+        .env
+        .cure_and_cancel_primary_close(LOSER, CURE_DEPOSIT)
+        .map_err(|error| format!("cure old close episode: {error}"))?;
+    runner
+        .env
+        .set_matcher_config(FIRST_WINNER, 0)
+        .map_err(|error| format!("disable old winner matcher before cleanup: {error}"))?;
+    let cleanup_epoch_before = runner.env.primary_portfolio_position_epoch(FIRST_WINNER);
+
+    let first_asset = runner.env.primary_market_state().1.assets[0];
+    let next_slot = first_asset
+        .slot_last
+        .checked_add(1)
+        .ok_or("old close cleanup slot overflow")?;
+    if runner.env.current_slot() < next_slot {
+        runner.env.warp_to_slot(next_slot);
+    }
+    for iteration in 0..4 {
+        runner
+            .env
+            .crank(
+                FIRST_WINNER,
+                runner.env.current_slot(),
+                vec![CrankObservationHint {
+                    asset_index: 0,
+                    oracle_accounts: 0,
+                }],
+            )
+            .map_err(|error| format!("old close cleanup crank {iteration}: {error}"))?;
+        let (_, group) = runner.env.primary_market_state();
+        let leg = runner.env.primary_portfolio(FIRST_WINNER).legs[0]
+            .try_to_runtime()
+            .map_err(|error| format!("old winner cleanup leg decode: {error:?}"))?;
+        if group.assets[0].pending_obligation_count_long == 0
+            && group.assets[0].pending_obligation_count_short == 0
+            && (!leg.active || leg.loss_weight == 0)
+        {
+            break;
+        }
+    }
+    let matcher_disabled_cleanup_advanced_epoch =
+        runner.env.primary_portfolio_position_epoch(FIRST_WINNER) > cleanup_epoch_before;
+    runner
+        .env
+        .withdraw_primary(LOSER, 1)
+        .map_err(|error| format!("settle cured old-episode loss: {error}"))?;
+    let old_capital = runner.env.primary_portfolio(LOSER).capital.get();
+    if old_capital != 0 {
+        runner
+            .env
+            .withdraw_primary(LOSER, old_capital)
+            .map_err(|error| format!("withdraw old-episode capital: {error}"))?;
+    }
+    runner
+        .env
+        .deposit_primary(LOSER, REPLACEMENT_CAPITAL)
+        .map_err(|error| format!("fund replacement close episode: {error}"))?;
+    create_public_cancellable_close(
+        &mut runner,
+        SECOND_WINNER as u8,
+        LOSER as u8,
+        1,
+        EXIT_MAKER_INDEX as u8,
+    )?;
+
+    let replacement_position_epoch = runner.env.primary_portfolio_position_epoch(LOSER);
+    let portfolio_id_unchanged = runner.env.primary_portfolio_id(LOSER) == portfolio_id;
+    let before = runner.snapshot();
+    let source = runner.env.actors[LOSER].source_token;
+    let source_before = runner.env.token_amount(source);
+    let capital_before = runner.env.primary_portfolio(LOSER).capital.get();
+    let stale_result = runner.env.land_retained(stale_cure);
+    let after_stale = runner.snapshot();
+    let source_after = runner.env.token_amount(source);
+    let capital_after = runner.env.primary_portfolio(LOSER).capital.get();
+    let stale_close = runner
+        .env
+        .primary_portfolio(LOSER)
+        .close_progress
+        .try_to_runtime()
+        .map_err(|error| format!("replacement close after stale cure: {error:?}"))?;
+
+    let stale_replay_rejected = stale_result.is_err();
+    let rejected_exact_rollback = stale_replay_rejected && before == after_stale;
+    let stale_source_debit = source_before.saturating_sub(source_after);
+    let stale_capital_credit = capital_after.saturating_sub(capital_before);
+    let (fresh_cure_landed, fresh_close_canceled) = if stale_replay_rejected {
+        let fresh = runner
+            .env
+            .build_retained_cure_and_cancel_primary_close(LOSER, CURE_DEPOSIT);
+        let landed = runner.env.land_retained(fresh).is_ok();
+        let close = runner
+            .env
+            .primary_portfolio(LOSER)
+            .close_progress
+            .try_to_runtime()
+            .map_err(|error| format!("replacement close after fresh cure: {error:?}"))?;
+        (landed, close.canceled)
+    } else {
+        (false, false)
+    };
+
+    Ok(CurePositionEpisodeReplayEvidence {
+        portfolio_id_unchanged,
+        old_position_epoch,
+        replacement_position_epoch,
+        matcher_disabled_cleanup_advanced_epoch,
         stale_replay_rejected,
         rejected_exact_rollback,
         stale_source_debit,
@@ -15444,7 +15613,9 @@ struct ConvertRetryWorld {
     released_pnl: u128,
     victim_payout: u64,
     cranker_extraction: u64,
-    retry_cu: u64,
+    stale_retry_rejected: bool,
+    rejected_exact_rollback: bool,
+    fresh_intent_landed: bool,
     sync_cu: u64,
     max_cu: u64,
 }
@@ -15542,14 +15713,24 @@ fn run_convert_retry_world(seed: [u8; 32], land_retry: bool) -> Result<ConvertRe
         ));
     }
 
-    let mut retry_cu = 0;
     let mut max_cu = 0;
+    let mut stale_retry_rejected = false;
+    let mut rejected_exact_rollback = false;
     if land_retry {
-        let replay = env
-            .land_retained(retry)
-            .map_err(|error| format!("retained conversion no longer lands: {error}"))?;
-        retry_cu = replay.compute_units;
-        max_cu = max_cu.max(replay.compute_units);
+        let market_before = env.market_data(false);
+        let portfolio_before = env.primary_portfolio_data(VICTIM);
+        let vault_before = env.svm.get_account(&env.vault);
+        let supply_before_retry = env.token_supply_observed();
+        match env.land_retained(retry) {
+            Ok(replay) => max_cu = max_cu.max(replay.compute_units),
+            Err(_) => {
+                stale_retry_rejected = true;
+                rejected_exact_rollback = env.market_data(false) == market_before
+                    && env.primary_portfolio_data(VICTIM) == portfolio_before
+                    && env.svm.get_account(&env.vault) == vault_before
+                    && env.token_supply_observed() == supply_before_retry;
+            }
+        }
     }
 
     env.warp_to_slot(10);
@@ -15569,7 +15750,7 @@ fn run_convert_retry_world(seed: [u8; 32], land_retry: bool) -> Result<ConvertRe
         .get()
         .checked_sub(cranker_before)
         .ok_or("conversion-retry cranker capital decreased")?;
-    if !land_retry {
+    let fresh_intent_landed = if !land_retry || stale_retry_rejected {
         if cranker_reward != 0 {
             return Err(format!(
                 "released-PnL control paid a {cranker_reward}-atom maintenance reward"
@@ -15577,7 +15758,10 @@ fn run_convert_retry_world(seed: [u8; 32], land_retry: bool) -> Result<ConvertRe
         }
         env.convert_released_pnl(VICTIM, u128::MAX)
             .map_err(|error| format!("fresh epoch-B conversion: {error}"))?;
-    }
+        true
+    } else {
+        false
+    };
 
     let victim_capital = env.primary_portfolio(VICTIM).capital.get();
     let victim_withdrawal = env
@@ -15617,39 +15801,40 @@ fn run_convert_retry_world(seed: [u8; 32], land_retry: bool) -> Result<ConvertRe
         released_pnl,
         victim_payout,
         cranker_extraction,
-        retry_cu,
+        stale_retry_rejected,
+        rejected_exact_rollback,
+        fresh_intent_landed,
         sync_cu,
         max_cu,
     })
 }
 
-pub fn reproduce_convert_retry_replay(
+pub fn verify_convert_retry_replay_protection(
     mut seed: [u8; 32],
-) -> Result<ConvertRetryReplayReproduction, String> {
+) -> Result<ConvertRetryReplayProtection, String> {
     seed[0] ^= 0x87;
     let control = run_convert_retry_world(seed, false)?;
     let replay = run_convert_retry_world(seed, true)?;
-    let victim_loss = control
-        .victim_payout
-        .checked_sub(replay.victim_payout)
-        .ok_or("conversion retry increased victim payout")?;
     if control.released_pnl != replay.released_pnl
         || control.cranker_extraction != 0
-        || replay.cranker_extraction == 0
-        || victim_loss != replay.cranker_extraction
-        || replay.retry_cu == 0
+        || !replay.stale_retry_rejected
+        || !replay.rejected_exact_rollback
+        || !replay.fresh_intent_landed
+        || replay.cranker_extraction != 0
+        || control.victim_payout != replay.victim_payout
     {
         return Err(format!(
-            "conversion-retry paired-world mismatch: control={control:?}, replay={replay:?}, \
-             victim_loss={victim_loss}"
+            "conversion-retry protection mismatch: control={control:?}, replay={replay:?}"
         ));
     }
-    Ok(ConvertRetryReplayReproduction {
-        blocker: KnownBlocker::ConvertRetryReplay,
+    Ok(ConvertRetryReplayProtection {
         released_pnl: replay.released_pnl,
-        victim_loss,
+        stale_retry_rejected: replay.stale_retry_rejected,
+        rejected_exact_rollback: replay.rejected_exact_rollback,
+        fresh_intent_landed: replay.fresh_intent_landed,
+        control_victim_payout: control.victim_payout,
+        replay_victim_payout: replay.victim_payout,
         cranker_extraction: replay.cranker_extraction,
-        retry_cu: replay.retry_cu,
         sync_cu: replay.sync_cu,
         max_cu: replay.max_cu.max(control.max_cu),
     })

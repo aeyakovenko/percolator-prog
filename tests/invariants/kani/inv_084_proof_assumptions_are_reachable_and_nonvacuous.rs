@@ -662,7 +662,7 @@ fn kani_v16_inv084_engine_error_tag_partition_has_boundary_witnesses() {
 
 #[kani::proof]
 fn kani_v16_inv084_decoder_tag_assumptions_have_concrete_witnesses() {
-    for (tag, amount) in [(3u8, 11u128), (4u8, 12u128), (28u8, 13u128)] {
+    for (tag, amount) in [(3u8, 11u128), (4u8, 12u128)] {
         let portfolio_id = 9u64;
         let mut data = [0u8; 25];
         data[0] = tag;
@@ -682,19 +682,32 @@ fn kani_v16_inv084_decoder_tag_assumptions_have_concrete_witnesses() {
                     portfolio_id: got_id,
                     amount: got,
                 },
-            )
-            | (
-                28,
-                Instruction::ConvertReleasedPnl {
-                    portfolio_id: got_id,
-                    amount: got,
-                },
             ) => {
                 assert_eq!(got_id, portfolio_id);
                 assert_eq!(got, amount);
             }
             _ => unreachable!(),
         }
+    }
+
+    let convert_position_epoch = 10u64;
+    let convert_amount = 13u128;
+    let mut convert = [0u8; 33];
+    convert[0] = 28;
+    convert[1..9].copy_from_slice(&9u64.to_le_bytes());
+    convert[9..17].copy_from_slice(&convert_position_epoch.to_le_bytes());
+    convert[17..33].copy_from_slice(&convert_amount.to_le_bytes());
+    match Instruction::decode(&convert).unwrap() {
+        Instruction::ConvertReleasedPnl {
+            portfolio_id,
+            position_epoch,
+            amount,
+        } => {
+            assert_eq!(portfolio_id, 9);
+            assert_eq!(position_epoch, convert_position_epoch);
+            assert_eq!(amount, convert_amount);
+        }
+        _ => unreachable!(),
     }
 
     for (tag, amount) in [(30u8, 21u128), (41u8, 22u128)] {
@@ -711,17 +724,21 @@ fn kani_v16_inv084_decoder_tag_assumptions_have_concrete_witnesses() {
     }
 
     let portfolio_id = 24u64;
+    let position_epoch = 25u64;
     let amount = 23u128;
-    let mut cure = [0u8; 25];
+    let mut cure = [0u8; 33];
     cure[0] = 42;
     cure[1..9].copy_from_slice(&portfolio_id.to_le_bytes());
-    cure[9..25].copy_from_slice(&amount.to_le_bytes());
+    cure[9..17].copy_from_slice(&position_epoch.to_le_bytes());
+    cure[17..33].copy_from_slice(&amount.to_le_bytes());
     match Instruction::decode(&cure).unwrap() {
         Instruction::CureAndCancelClose {
             portfolio_id: got_portfolio_id,
+            position_epoch: got_position_epoch,
             optional_deposit: got,
         } => {
             assert_eq!(got_portfolio_id, portfolio_id);
+            assert_eq!(got_position_epoch, position_epoch);
             assert_eq!(got, amount);
         }
         _ => unreachable!(),

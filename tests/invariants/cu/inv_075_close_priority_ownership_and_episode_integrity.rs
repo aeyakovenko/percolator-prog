@@ -168,6 +168,7 @@ fn v16_program_cure_and_cancel_close_owner_gated() {
     let rejected = env.send(
         ProgInstruction::CureAndCancelClose {
             portfolio_id: env.portfolio_id(victim),
+            position_epoch: env.portfolio_position_epoch(victim),
             optional_deposit: 50,
         },
         vec![
@@ -216,6 +217,7 @@ fn v16_program_cure_cannot_be_replayed_on_canceled_close_ledger() {
     let replay = env.send(
         ProgInstruction::CureAndCancelClose {
             portfolio_id: env.portfolio_id(portfolio),
+            position_epoch: env.portfolio_position_epoch(portfolio),
             optional_deposit: 50,
         },
         vec![
@@ -265,6 +267,7 @@ fn v16_program_public_close_episode_competing_actions_preserve_priority_and_iden
     let rejected_cure = env.send(
         ProgInstruction::CureAndCancelClose {
             portfolio_id: env.portfolio_id(loss),
+            position_epoch: env.portfolio_position_epoch(loss),
             optional_deposit: 50,
         },
         vec![

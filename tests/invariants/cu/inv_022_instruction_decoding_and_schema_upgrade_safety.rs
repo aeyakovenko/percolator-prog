@@ -244,6 +244,7 @@ fn inv_022_representative_public_instructions() -> Vec<ProgInstruction> {
         },
         ProgInstruction::ConvertReleasedPnl {
             portfolio_id: 1,
+            position_epoch: 1,
             amount: 1,
         },
         ProgInstruction::CloseResolved {
@@ -310,6 +311,7 @@ fn inv_022_representative_public_instructions() -> Vec<ProgInstruction> {
         ProgInstruction::WithdrawInsurance { amount: 1 },
         ProgInstruction::CureAndCancelClose {
             portfolio_id: 1,
+            position_epoch: 1,
             optional_deposit: 1,
         },
         ProgInstruction::ForfeitRecoveryLeg {

@@ -933,11 +933,13 @@ impl V16Svm {
         optional_deposit: u128,
     ) -> Result<TxSuccess, String> {
         let portfolio_id = self.primary_portfolio_id(actor_index);
+        let position_epoch = self.primary_portfolio_position_epoch(actor_index);
         let actor = &self.actors[actor_index];
         let owner = copy_keypair(&actor.signer);
         self.send_program(
             ProgInstruction::CureAndCancelClose {
                 portfolio_id,
+                position_epoch,
                 optional_deposit,
             },
             vec![
@@ -958,11 +960,13 @@ impl V16Svm {
         optional_deposit: u128,
     ) -> Transaction {
         let portfolio_id = self.primary_portfolio_id(actor_index);
+        let position_epoch = self.primary_portfolio_position_epoch(actor_index);
         let actor = &self.actors[actor_index];
         let owner = copy_keypair(&actor.signer);
         self.build_program_transaction(
             ProgInstruction::CureAndCancelClose {
                 portfolio_id,
+                position_epoch,
                 optional_deposit,
             },
             vec![
@@ -1293,9 +1297,11 @@ impl V16Svm {
         let actor = &self.actors[actor_index];
         let owner = copy_keypair(&actor.signer);
         let portfolio_id = self.primary_portfolio_id(actor_index);
+        let position_epoch = self.primary_portfolio_position_epoch(actor_index);
         self.send_program(
             ProgInstruction::ConvertReleasedPnl {
                 portfolio_id,
+                position_epoch,
                 amount,
             },
             vec![
@@ -3062,9 +3068,11 @@ impl V16Svm {
         let actor = &self.actors[actor_index];
         let owner = copy_keypair(&actor.signer);
         let portfolio_id = self.primary_portfolio_id(actor_index);
+        let position_epoch = self.primary_portfolio_position_epoch(actor_index);
         self.build_program_transaction(
             ProgInstruction::ConvertReleasedPnl {
                 portfolio_id,
+                position_epoch,
                 amount,
             },
             vec![

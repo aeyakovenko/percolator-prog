@@ -678,6 +678,7 @@ fn v16_program_public_helpers_cannot_use_market_as_portfolio_alias() {
     let convert = env.send(
         ProgInstruction::ConvertReleasedPnl {
             portfolio_id: 0,
+            position_epoch: 0,
             amount: 1,
         },
         vec![
@@ -2550,6 +2551,7 @@ fn v16_attack_convert_released_pnl_owner_gated() {
     let pnl0 = env.portfolio_state(p).pnl.get();
     assert!(pnl0 > 0, "victim has backed junior pnl");
     let portfolio_id = env.portfolio_id(p);
+    let position_epoch = env.portfolio_position_epoch(p);
     let portfolio_before = env.svm.get_account(&p).unwrap();
 
     // ATTACK 1: a NON-OWNER (mallory) signs a convert on the victim's portfolio -> reject (owner mismatch).
@@ -2559,6 +2561,7 @@ fn v16_attack_convert_released_pnl_owner_gated() {
     let r1 = env.send(
         ProgInstruction::ConvertReleasedPnl {
             portfolio_id,
+            position_epoch,
             amount: 1_000_000_000,
         },
         vec![
@@ -2580,6 +2583,7 @@ fn v16_attack_convert_released_pnl_owner_gated() {
     let r2 = env.send(
         ProgInstruction::ConvertReleasedPnl {
             portfolio_id,
+            position_epoch,
             amount: 1_000_000_000,
         },
         vec![
@@ -2616,6 +2620,7 @@ fn v16_attack_convert_released_pnl_owner_gated() {
     let ok = env.send(
         ProgInstruction::ConvertReleasedPnl {
             portfolio_id,
+            position_epoch,
             amount: 1_000_000_000,
         },
         vec![

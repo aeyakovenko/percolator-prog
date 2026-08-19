@@ -2,7 +2,7 @@
 //!
 //! Normative obligation: One retained economic intent can execute at most once across routes and retries.
 //!
-//! Evidence in this file (I plus invariant-specific F/M assertions): `v16_program_pr343_trade_retry_variants_extract_value_on_every_route`, `v16_program_pr344_insurance_top_up_retry_extracts_duplicate`, `v16_program_pr362_activation_retry_extracts_duplicate_fee`, `v16_program_pr351_backing_top_up_retry_funds_independent_winner`, `v16_program_pr350_deposit_retry_funds_independent_winner`, `v16_program_pr355_withdrawal_retry_liquidates_fresh_risk`, `v16_program_issue387_conversion_retry_redirects_later_earnings`, `v16_program_issue389_rebalance_retry_rejects_exactly_on_current_pin`. These tests exercise the deployed public
+//! Evidence in this file (I plus invariant-specific F/M assertions): `v16_program_pr343_trade_retry_variants_extract_value_on_every_route`, `v16_program_pr344_insurance_top_up_retry_extracts_duplicate`, `v16_program_pr362_activation_retry_extracts_duplicate_fee`, `v16_program_pr351_backing_top_up_retry_funds_independent_winner`, `v16_program_pr350_deposit_retry_funds_independent_winner`, `v16_program_pr355_withdrawal_retry_liquidates_fresh_risk`, `v16_program_issue387_stale_conversion_rejects_without_redirecting_later_earnings`, `v16_program_issue389_rebalance_retry_rejects_exactly_on_current_pin`. These tests exercise the deployed public
 //! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
 //! rollback, liveness, or compute outcomes appropriate to the invariant.
 //!
@@ -108,16 +108,20 @@ fn v16_program_pr355_withdrawal_retry_liquidates_fresh_risk() {
 }
 
 #[test]
-fn v16_program_issue387_conversion_retry_redirects_later_earnings() {
-    let reproduction = reproduce_convert_retry_replay([0x87; 32])
-        .unwrap_or_else(|error| panic!("conversion retry no longer reproduces: {error}"));
-    assert_eq!(reproduction.blocker, KnownBlocker::ConvertRetryReplay);
-    assert!(reproduction.released_pnl > 0);
-    assert!(reproduction.victim_loss > 0);
-    assert_eq!(reproduction.victim_loss, reproduction.cranker_extraction);
-    assert!(reproduction.retry_cu < 1_400_000);
-    assert!(reproduction.sync_cu < 1_400_000);
-    assert!(reproduction.max_cu < 1_400_000);
+fn v16_program_issue387_stale_conversion_rejects_without_redirecting_later_earnings() {
+    let protection = verify_convert_retry_replay_protection([0x87; 32])
+        .unwrap_or_else(|error| panic!("conversion retry protection failed: {error}"));
+    assert!(protection.released_pnl > 0);
+    assert!(protection.stale_retry_rejected);
+    assert!(protection.rejected_exact_rollback);
+    assert!(protection.fresh_intent_landed);
+    assert_eq!(
+        protection.control_victim_payout,
+        protection.replay_victim_payout
+    );
+    assert_eq!(protection.cranker_extraction, 0);
+    assert!(protection.sync_cu < 1_400_000);
+    assert!(protection.max_cu < 1_400_000);
 }
 
 #[test]

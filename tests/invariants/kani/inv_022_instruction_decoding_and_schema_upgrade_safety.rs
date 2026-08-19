@@ -174,27 +174,32 @@ fn kani_v16_withdraw_decode_preserves_wire_fields() {
 #[kani::proof]
 fn kani_v16_convert_released_pnl_decode_preserves_wire_fields() {
     let portfolio_id: u64 = kani::any();
+    let position_epoch: u64 = kani::any();
     let amount: u128 = kani::any();
 
-    let mut data = [0u8; 25];
+    let mut data = [0u8; 33];
     data[0] = 28;
     data[1..9].copy_from_slice(&portfolio_id.to_le_bytes());
-    data[9..25].copy_from_slice(&amount.to_le_bytes());
+    data[9..17].copy_from_slice(&position_epoch.to_le_bytes());
+    data[17..33].copy_from_slice(&amount.to_le_bytes());
 
     match Instruction::decode(&data).unwrap() {
         Instruction::ConvertReleasedPnl {
             portfolio_id: got_id,
+            position_epoch: got_position_epoch,
             amount: got,
         } => {
             assert_eq!(got_id, portfolio_id);
+            assert_eq!(got_position_epoch, position_epoch);
             assert_eq!(got, amount);
         }
         _ => unreachable!(),
     }
 
-    let mut legacy = [0u8; 17];
+    let mut legacy = [0u8; 25];
     legacy[0] = 28;
-    legacy[1..17].copy_from_slice(&amount.to_le_bytes());
+    legacy[1..9].copy_from_slice(&portfolio_id.to_le_bytes());
+    legacy[9..25].copy_from_slice(&amount.to_le_bytes());
     assert!(Instruction::decode(&legacy).is_err());
 }
 
@@ -231,19 +236,23 @@ fn kani_v16_withdraw_insurance_decode_preserves_wire_fields() {
 #[kani::proof]
 fn kani_v16_cure_and_cancel_close_decode_preserves_wire_fields() {
     let portfolio_id: u64 = kani::any();
+    let position_epoch: u64 = kani::any();
     let amount: u128 = kani::any();
 
-    let mut data = [0u8; 25];
+    let mut data = [0u8; 33];
     data[0] = 42;
     data[1..9].copy_from_slice(&portfolio_id.to_le_bytes());
-    data[9..25].copy_from_slice(&amount.to_le_bytes());
+    data[9..17].copy_from_slice(&position_epoch.to_le_bytes());
+    data[17..33].copy_from_slice(&amount.to_le_bytes());
 
     match Instruction::decode(&data).unwrap() {
         Instruction::CureAndCancelClose {
             portfolio_id: got_portfolio_id,
+            position_epoch: got_position_epoch,
             optional_deposit: got,
         } => {
             assert_eq!(got_portfolio_id, portfolio_id);
+            assert_eq!(got_position_epoch, position_epoch);
             assert_eq!(got, amount);
         }
         _ => unreachable!(),
@@ -1627,6 +1636,7 @@ fn kani_v16_resolved_recovery_payloads_reject_trailing_byte() {
     assert_rejects_trailing_byte(
         Instruction::ConvertReleasedPnl {
             portfolio_id: 1,
+            position_epoch: 2,
             amount: 1,
         },
         extra,
@@ -1640,6 +1650,7 @@ fn kani_v16_resolved_recovery_payloads_reject_trailing_byte() {
     assert_rejects_trailing_byte(
         Instruction::CureAndCancelClose {
             portfolio_id: 1,
+            position_epoch: 2,
             optional_deposit: 1,
         },
         extra,

@@ -584,12 +584,14 @@ fn v16_attack_convert_released_pnl_rejects_cross_market_portfolio_substitution()
     let vault_b_before = env.svm.get_account(&vault_b).unwrap();
     env.svm.expire_blockhash();
     let foreign_portfolio_id = env.portfolio_id(foreign);
+    let foreign_position_epoch = env.portfolio_position_epoch(foreign);
     let rejected = send_tx(
         &mut env.svm,
         env.program_id,
         &env.payer,
         ProgInstruction::ConvertReleasedPnl {
             portfolio_id: foreign_portfolio_id,
+            position_epoch: foreign_position_epoch,
             amount: RELEASED,
         },
         vec![
@@ -620,12 +622,14 @@ fn v16_attack_convert_released_pnl_rejects_cross_market_portfolio_substitution()
 
     env.svm.expire_blockhash();
     let local_portfolio_id = env.portfolio_id(local);
+    let local_position_epoch = env.portfolio_position_epoch(local);
     let ok = send_tx(
         &mut env.svm,
         env.program_id,
         &env.payer,
         ProgInstruction::ConvertReleasedPnl {
             portfolio_id: local_portfolio_id,
+            position_epoch: local_position_epoch,
             amount: RELEASED,
         },
         vec![
@@ -753,6 +757,7 @@ fn v16_attack_cure_rejects_cross_market_portfolio_before_transfer() {
     let vault_a_before = env.svm.get_account(&env.vault).unwrap();
     let vault_b_before = env.svm.get_account(&vault_b).unwrap();
     let portfolio_a_id = env.portfolio_id(portfolio_a);
+    let portfolio_a_position_epoch = env.portfolio_position_epoch(portfolio_a);
 
     env.svm.expire_blockhash();
     let rejected = send_tx(
@@ -761,6 +766,7 @@ fn v16_attack_cure_rejects_cross_market_portfolio_before_transfer() {
         &env.payer,
         ProgInstruction::CureAndCancelClose {
             portfolio_id: portfolio_a_id,
+            position_epoch: portfolio_a_position_epoch,
             optional_deposit: 50,
         },
         vec![
@@ -869,6 +875,7 @@ fn v16_attack_cure_rejects_cross_market_portfolio_before_transfer() {
     }
     let source_b = env.token_account_for_mint(env.mint, owner.pubkey(), 50);
     let portfolio_b_id = env.portfolio_id(portfolio_b);
+    let portfolio_b_position_epoch = env.portfolio_position_epoch(portfolio_b);
     env.svm.expire_blockhash();
     let ok = send_tx(
         &mut env.svm,
@@ -876,6 +883,7 @@ fn v16_attack_cure_rejects_cross_market_portfolio_before_transfer() {
         &env.payer,
         ProgInstruction::CureAndCancelClose {
             portfolio_id: portfolio_b_id,
+            position_epoch: portfolio_b_position_epoch,
             optional_deposit: 50,
         },
         vec![

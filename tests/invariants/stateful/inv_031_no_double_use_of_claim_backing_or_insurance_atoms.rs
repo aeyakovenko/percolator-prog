@@ -163,9 +163,9 @@ fn verify_haircut_conversion_retry(route: TradeRoute, seed_tag: u8) -> Result<()
         }
         Err(error) => error,
     };
-    if !retry_error.contains("Custom(19)") {
+    if !retry_error.contains("Custom(16)") {
         return Err(format!(
-            "{label} retained conversion did not reach the program's LockActive rejection: {retry_error}"
+            "{label} retained conversion did not reject at the consumed position-episode boundary: {retry_error}"
         ));
     }
     if economic_snapshot(&env) != before_retry {

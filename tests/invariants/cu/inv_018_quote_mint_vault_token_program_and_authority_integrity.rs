@@ -1087,6 +1087,7 @@ fn v16_attack_cure_deposit_rejects_noncanonical_vault() {
     let rejected = env.send(
         ProgInstruction::CureAndCancelClose {
             portfolio_id: env.portfolio_id(portfolio),
+            position_epoch: env.portfolio_position_epoch(portfolio),
             optional_deposit: 50,
         },
         vec![

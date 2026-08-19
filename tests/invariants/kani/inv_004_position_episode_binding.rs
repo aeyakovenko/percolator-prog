@@ -15,6 +15,58 @@ use super::*;
 use percolator_prog::state;
 
 #[kani::proof]
+fn kani_v16_position_binding_accepts_exactly_the_current_incarnation_and_episode() {
+    let current_portfolio_id: u64 = kani::any();
+    let current_position_epoch: u64 = kani::any();
+    let expected_portfolio_id: u64 = kani::any();
+    let expected_position_epoch: u64 = kani::any();
+
+    assert_eq!(
+        state::portfolio_position_binding_matches(
+            current_portfolio_id,
+            current_position_epoch,
+            expected_portfolio_id,
+            expected_position_epoch,
+        ),
+        current_portfolio_id == expected_portfolio_id
+            && current_position_epoch == expected_position_epoch
+    );
+}
+
+#[kani::proof]
+fn kani_v16_successful_episode_consumption_invalidates_the_old_binding() {
+    let portfolio_id: u64 = kani::any();
+    let control: u64 = kani::any();
+    let config = state::PortfolioMatcherConfigV16 {
+        control,
+        ..state::PortfolioMatcherConfigV16::default()
+    };
+    kani::assume(config.trade_fee_cap_bps() <= 10_000);
+    kani::assume(config.position_epoch() < state::PortfolioMatcherConfigV16::position_epoch_max());
+
+    let old_epoch = config.position_epoch();
+    let (new_epoch, _) = state::next_portfolio_position_control(control).unwrap();
+    assert!(state::portfolio_position_binding_matches(
+        portfolio_id,
+        old_epoch,
+        portfolio_id,
+        old_epoch,
+    ));
+    assert!(!state::portfolio_position_binding_matches(
+        portfolio_id,
+        new_epoch,
+        portfolio_id,
+        old_epoch,
+    ));
+    assert!(state::portfolio_position_binding_matches(
+        portfolio_id,
+        new_epoch,
+        portfolio_id,
+        new_epoch,
+    ));
+}
+
+#[kani::proof]
 fn kani_v16_position_epoch_control_is_monotonic_and_preserves_matcher_state() {
     let control: u64 = kani::any();
     let config = state::PortfolioMatcherConfigV16 {

@@ -1626,6 +1626,7 @@ impl V16CuEnv {
     fn convert_released_pnl_ix(&self, portfolio: Pubkey, amount: u128) -> ProgInstruction {
         ProgInstruction::ConvertReleasedPnl {
             portfolio_id: self.portfolio_id(portfolio),
+            position_epoch: self.portfolio_position_epoch(portfolio),
             amount,
         }
     }
@@ -4014,9 +4015,11 @@ impl V16CuEnv {
         amount: u128,
     ) -> u64 {
         let portfolio_id = self.portfolio_id(portfolio);
+        let position_epoch = self.portfolio_position_epoch(portfolio);
         self.send(
             ProgInstruction::CureAndCancelClose {
                 portfolio_id,
+                position_epoch,
                 optional_deposit: amount,
             },
             vec![

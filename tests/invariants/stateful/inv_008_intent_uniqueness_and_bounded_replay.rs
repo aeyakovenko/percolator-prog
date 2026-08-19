@@ -45,7 +45,12 @@ proptest! {
         eprintln!("independent INV-008 discoveries: {violations:?}");
         let expected_violations: Vec<_> = RetryIntentKind::ALL
             .into_iter()
-            .filter(|kind| *kind != RetryIntentKind::RebalanceReduce)
+            .filter(|kind| {
+                !matches!(
+                    kind,
+                    RetryIntentKind::ConvertReleasedPnl | RetryIntentKind::RebalanceReduce
+                )
+            })
             .collect();
         prop_assert_eq!(
             violations,
@@ -59,6 +64,13 @@ proptest! {
         prop_assert!(!rebalance.accepted_retry);
         prop_assert!(!rebalance.duplicated_economic_effect);
         prop_assert_eq!(rebalance.retry_compute_units, None);
+        let conversion = discoveries
+            .iter()
+            .find(|discovery| discovery.kind == RetryIntentKind::ConvertReleasedPnl)
+            .expect("conversion retry discovery");
+        prop_assert!(!conversion.accepted_retry);
+        prop_assert!(!conversion.duplicated_economic_effect);
+        prop_assert_eq!(conversion.retry_compute_units, None);
     }
 }
 
@@ -154,11 +166,11 @@ proptest! {
     }
 
     #[test]
-    fn v16_program_conversion_retry_replay_fuzz(seed in any::<[u8; 32]>()) {
-        let result = reproduce_convert_retry_replay(seed);
+    fn v16_program_conversion_retry_protection_fuzz(seed in any::<[u8; 32]>()) {
+        let result = verify_convert_retry_replay_protection(seed);
         prop_assert!(
             result.is_ok(),
-            "conversion retry no longer reproduces for seed {:?}: {}",
+            "conversion retry protection failed for seed {:?}: {}",
             seed,
             result.unwrap_err()
         );

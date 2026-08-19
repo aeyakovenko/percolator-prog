@@ -983,6 +983,17 @@ pub mod state {
     }
 
     #[inline]
+    pub fn portfolio_position_binding_matches(
+        current_portfolio_id: u64,
+        current_position_epoch: u64,
+        expected_portfolio_id: u64,
+        expected_position_epoch: u64,
+    ) -> bool {
+        current_portfolio_id == expected_portfolio_id
+            && current_position_epoch == expected_position_epoch
+    }
+
+    #[inline]
     pub(crate) fn allocate_portfolio_id(next: u64) -> Result<(u64, u64), ProgramError> {
         // Wrapper configs written before the counter existed contain zero in this former padding
         // word. Such a market starts the sequence at one on its next successful initialization.
@@ -2889,6 +2900,7 @@ pub mod ix {
         },
         ConvertReleasedPnl {
             portfolio_id: u64,
+            position_epoch: u64,
             amount: u128,
         },
         CloseResolved {
@@ -3031,6 +3043,7 @@ pub mod ix {
         },
         CureAndCancelClose {
             portfolio_id: u64,
+            position_epoch: u64,
             optional_deposit: u128,
         },
         ForfeitRecoveryLeg {
@@ -3215,6 +3228,7 @@ pub mod ix {
                 },
                 28 => Self::ConvertReleasedPnl {
                     portfolio_id: read_u64(&mut rest)?,
+                    position_epoch: read_u64(&mut rest)?,
                     amount: read_u128(&mut rest)?,
                 },
                 30 => Self::CloseResolved {
@@ -3363,6 +3377,7 @@ pub mod ix {
                 },
                 42 => Self::CureAndCancelClose {
                     portfolio_id: read_u64(&mut rest)?,
+                    position_epoch: read_u64(&mut rest)?,
                     optional_deposit: read_u128(&mut rest)?,
                 },
                 43 => Self::ForfeitRecoveryLeg {
@@ -3606,10 +3621,12 @@ pub mod ix {
                 }
                 Self::ConvertReleasedPnl {
                     portfolio_id,
+                    position_epoch,
                     amount,
                 } => {
                     out.push(28);
                     push_u64(&mut out, portfolio_id);
+                    push_u64(&mut out, position_epoch);
                     push_u128(&mut out, amount);
                 }
                 Self::CloseResolved { fee_rate_per_slot } => {
@@ -3880,10 +3897,12 @@ pub mod ix {
                 }
                 Self::CureAndCancelClose {
                     portfolio_id,
+                    position_epoch,
                     optional_deposit,
                 } => {
                     out.push(42);
                     push_u64(&mut out, portfolio_id);
+                    push_u64(&mut out, position_epoch);
                     push_u128(&mut out, optional_deposit);
                 }
                 Self::ForfeitRecoveryLeg {
@@ -6201,8 +6220,15 @@ pub mod processor {
             }
             Instruction::ConvertReleasedPnl {
                 portfolio_id,
+                position_epoch,
                 amount,
-            } => handle_convert_released_pnl(program_id, accounts, portfolio_id, amount),
+            } => handle_convert_released_pnl(
+                program_id,
+                accounts,
+                portfolio_id,
+                position_epoch,
+                amount,
+            ),
             Instruction::CloseResolved { fee_rate_per_slot } => {
                 handle_close_resolved(program_id, accounts, fee_rate_per_slot)
             }
@@ -6461,8 +6487,15 @@ pub mod processor {
             ),
             Instruction::CureAndCancelClose {
                 portfolio_id,
+                position_epoch,
                 optional_deposit,
-            } => handle_cure_and_cancel_close(program_id, accounts, portfolio_id, optional_deposit),
+            } => handle_cure_and_cancel_close(
+                program_id,
+                accounts,
+                portfolio_id,
+                position_epoch,
+                optional_deposit,
+            ),
             Instruction::ForfeitRecoveryLeg {
                 portfolio_id,
                 position_epoch,
@@ -7523,19 +7556,23 @@ pub mod processor {
 
     fn portfolio_position_vector_view(
         portfolio: &percolator::PortfolioV16ViewMut<'_>,
-    ) -> Result<[(u32, i128); percolator::V16_MAX_PORTFOLIO_ASSETS_N], ProgramError> {
-        let mut positions = [(u32::MAX, 0i128); percolator::V16_MAX_PORTFOLIO_ASSETS_N];
+    ) -> [(u8, u32, u64, u8, i128); percolator::V16_MAX_PORTFOLIO_ASSETS_N] {
+        // The surrounding validated view makes raw POD reads sufficient here. Avoiding full leg
+        // conversion keeps this exact before/after episode check viable on max-shape crank paths.
+        let mut positions = [(0, 0, 0, 0, 0); percolator::V16_MAX_PORTFOLIO_ASSETS_N];
         let mut slot = 0usize;
         while slot < portfolio.header.legs.len() {
-            let leg = portfolio.header.legs[slot]
-                .try_to_runtime()
-                .map_err(map_v16_error)?;
-            if leg.active {
-                positions[slot] = (leg.asset_index, leg.basis_pos_q);
-            }
+            let leg = &portfolio.header.legs[slot];
+            positions[slot] = (
+                leg.active,
+                leg.asset_index.get(),
+                leg.market_id.get(),
+                leg.side,
+                leg.basis_pos_q.get(),
+            );
             slot += 1;
         }
-        Ok(positions)
+        positions
     }
 
     fn source_credit_has_live_amounts(source: SourceCreditStateV16) -> bool {
@@ -10002,6 +10039,7 @@ pub mod processor {
         program_id: &Pubkey,
         accounts: &'a [AccountInfo<'a>],
         expected_portfolio_id: u64,
+        expected_position_epoch: u64,
         amount: u128,
     ) -> ProgramResult {
         if amount == 0 {
@@ -10011,8 +10049,8 @@ pub mod processor {
             program_id,
             accounts,
             true,
-            Some(expected_portfolio_id),
             None,
+            Some((expected_portfolio_id, expected_position_epoch)),
             |group, portfolio, cfg| {
                 if group.header.mode != 0 {
                     return Err(V16Error::LockActive);
@@ -10042,6 +10080,7 @@ pub mod processor {
         program_id: &Pubkey,
         accounts: &'a [AccountInfo<'a>],
         expected_portfolio_id: u64,
+        expected_position_epoch: u64,
         optional_deposit: u128,
     ) -> ProgramResult {
         let owner = account(accounts, 0)?;
@@ -10056,7 +10095,19 @@ pub mod processor {
         let (_, _, max_market_slots, _) =
             state::read_market_config_mode_and_capacity(&market_ai.try_borrow_data()?)?;
         ensure_portfolio_storage_for_market_slots(portfolio_ai, max_market_slots)?;
-        expect_portfolio_id(&portfolio_ai.try_borrow_data()?, expected_portfolio_id)?;
+        {
+            let portfolio_data = portfolio_ai.try_borrow_data()?;
+            let current_portfolio_id = state::read_portfolio_id(&portfolio_data)?;
+            let current_position_epoch = state::read_portfolio_position_epoch(&portfolio_data)?;
+            if !state::portfolio_position_binding_matches(
+                current_portfolio_id,
+                current_position_epoch,
+                expected_portfolio_id,
+                expected_position_epoch,
+            ) {
+                return Err(PercolatorError::EngineProvenanceMismatch.into());
+            }
+        }
 
         let amount_u64 = if optional_deposit != 0 {
             let source_token = account(accounts, 3)?;
@@ -10093,6 +10144,8 @@ pub mod processor {
             group
                 .cure_and_cancel_close_not_atomic(&mut portfolio, optional_deposit)
                 .map_err(map_v16_error)?;
+            drop(portfolio);
+            state::bump_portfolio_position_epoch(&mut portfolio_data)?;
         }
 
         if let Some((amount_u64, source_token, vault_token, token_program)) = amount_u64 {
@@ -12733,8 +12786,6 @@ pub mod processor {
             }
 
             let mut portfolio_data = portfolio_ai.try_borrow_mut_data()?;
-            let matcher_enabled =
-                state::read_portfolio_matcher_config(&portfolio_data)?.enabled() != 0;
             let mut portfolio =
                 state::portfolio_view_mut_for_market_slots(&mut portfolio_data, max_market_slots)?;
             expect_portfolio_view_account_key(&portfolio, portfolio_ai.key)?;
@@ -12774,11 +12825,7 @@ pub mod processor {
             // after that collection so the reward calculation below sees liquidation proceeds,
             // never the old maintenance obligation.
             let insurance_before = group.header.insurance.get();
-            let positions_before = if matcher_enabled {
-                Some(portfolio_position_vector_view(&portfolio)?)
-            } else {
-                None
-            };
+            let positions_before = portfolio_position_vector_view(&portfolio);
             let result = match group.permissionless_auto_crank_not_atomic(
                 &mut portfolio,
                 AutoCrankWorkV16 {
@@ -12818,10 +12865,8 @@ pub mod processor {
             );
             let position_changed = if completed_liquidation {
                 true
-            } else if let Some(positions_before) = positions_before {
-                positions_before != portfolio_position_vector_view(&portfolio)?
             } else {
-                false
+                positions_before != portfolio_position_vector_view(&portfolio)
             };
             if matches!(
                 result.as_ref().map(|r| &r.outcome),
@@ -13343,15 +13388,19 @@ pub mod processor {
         let mut market_data = market_ai.try_borrow_mut_data()?;
         let (cfg, mut group) = state::market_view_mut(&mut market_data)?;
         let mut portfolio_data = portfolio_ai.try_borrow_mut_data()?;
-        if let Some(expected_portfolio_id) =
-            portfolio_binding.or(position_binding.map(|(portfolio_id, _)| portfolio_id))
-        {
-            expect_portfolio_id(&portfolio_data, expected_portfolio_id)?;
-        }
-        if let Some((_expected_portfolio_id, expected_position_epoch)) = position_binding {
-            if state::read_portfolio_position_epoch(&portfolio_data)? != expected_position_epoch {
+        if let Some((expected_portfolio_id, expected_position_epoch)) = position_binding {
+            let current_portfolio_id = state::read_portfolio_id(&portfolio_data)?;
+            let current_position_epoch = state::read_portfolio_position_epoch(&portfolio_data)?;
+            if !state::portfolio_position_binding_matches(
+                current_portfolio_id,
+                current_position_epoch,
+                expected_portfolio_id,
+                expected_position_epoch,
+            ) {
                 return Err(PercolatorError::EngineProvenanceMismatch.into());
             }
+        } else if let Some(expected_portfolio_id) = portfolio_binding {
+            expect_portfolio_id(&portfolio_data, expected_portfolio_id)?;
         }
         let mut portfolio =
             state::portfolio_view_mut_for_market_slots(&mut portfolio_data, max_market_slots)?;

@@ -14,10 +14,32 @@
 //! also proves that the episode is packed into the matcher-control word: matcher revoke/re-enable
 //! preserves it, the separate matcher-sequence tail, and the deployed portfolio account length.
 //!
-//! Guarantee boundary: this certifies the two retained position-consent routes represented here;
-//! other retained instruction families require their own identity and episode bindings.
+//! `v16_program_cure_consent_cannot_cross_close_episodes_in_one_portfolio` additionally creates
+//! two independent close episodes without replacing the portfolio account. A cure retained from
+//! the first episode must not deposit into or cancel the second one; a fresh cure remains live.
+//!
+//! Guarantee boundary: this certifies every currently deployed retained instruction that can
+//! reduce, forfeit, convert, close, or cure portfolio economic state. Permissionless claim and
+//! terminal-receipt routes derive their action from current state and carry no retained owner
+//! consent, so replay binding is not applicable to those routes.
 
 use super::*;
+
+#[test]
+fn v16_program_cure_consent_cannot_cross_close_episodes_in_one_portfolio() {
+    let evidence = run_cure_position_episode_replay_probe([0x4c; 32])
+        .expect("public same-portfolio close-episode replay route");
+    assert!(evidence.portfolio_id_unchanged);
+    assert!(evidence.replacement_position_epoch > evidence.old_position_epoch);
+    assert!(evidence.matcher_disabled_cleanup_advanced_epoch);
+    assert!(evidence.stale_replay_rejected);
+    assert!(evidence.rejected_exact_rollback);
+    assert_eq!(evidence.stale_source_debit, 0);
+    assert_eq!(evidence.stale_capital_credit, 0);
+    assert!(!evidence.stale_close_canceled);
+    assert!(evidence.fresh_cure_landed);
+    assert!(evidence.fresh_close_canceled);
+}
 
 #[test]
 fn v16_program_all_trade_routes_advance_position_episode_once_and_errors_do_not() {
@@ -137,16 +159,33 @@ fn v16_program_all_trade_routes_advance_position_episode_once_and_errors_do_not(
             "route {route} advanced an episode on a rejected instruction"
         );
 
-        execute(&mut env, -size_q).unwrap_or_else(|error| {
-            panic!("route {route} must close through its public interface: {error}")
+        execute(&mut env, -2 * size_q).unwrap_or_else(|error| {
+            panic!("route {route} must cross zero through its public interface: {error}")
+        });
+        let after_cross = [
+            env.primary_portfolio_position_epoch(0),
+            env.primary_portfolio_position_epoch(1),
+        ];
+        assert_eq!(after_cross, [after_open[0] + 1, after_open[1] + 1]);
+        assert!(
+            env.primary_portfolio(0).legs[0].basis_pos_q.get() < 0,
+            "route {route} did not create the replacement short episode"
+        );
+        assert!(
+            env.primary_portfolio(1).legs[0].basis_pos_q.get() > 0,
+            "route {route} did not create the replacement long episode"
+        );
+
+        execute(&mut env, size_q).unwrap_or_else(|error| {
+            panic!("route {route} must close the crossed episode: {error}")
         });
         assert_eq!(
             [
                 env.primary_portfolio_position_epoch(0),
                 env.primary_portfolio_position_epoch(1),
             ],
-            [after_open[0] + 1, after_open[1] + 1],
-            "route {route} did not advance each changed portfolio exactly once"
+            [after_cross[0] + 1, after_cross[1] + 1],
+            "route {route} did not advance each changed portfolio on final close"
         );
         assert_eq!(
             [env.primary_portfolio_id(0), env.primary_portfolio_id(1)],

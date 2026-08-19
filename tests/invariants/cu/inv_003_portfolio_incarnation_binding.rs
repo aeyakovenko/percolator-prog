@@ -301,8 +301,8 @@ fn v16_program_retained_portfolio_binding_roster_is_source_complete() {
     );
     let convert = handler_source(source, "convert_released_pnl");
     assert!(
-        convert.contains("Some(expected_portfolio_id),"),
-        "ConvertReleasedPnl: portfolio binding is not passed to the shared view"
+        convert.contains("Some((expected_portfolio_id, expected_position_epoch))"),
+        "ConvertReleasedPnl: portfolio and position bindings are not composed"
     );
     for name in ["forfeit_recovery_leg", "rebalance_reduce"] {
         let handler = handler_source(source, name);
@@ -315,7 +315,9 @@ fn v16_program_retained_portfolio_binding_roster_is_source_complete() {
     let cure = handler_source(source, "cure_and_cancel_close");
     assert!(cure.contains("expect_signer(owner)?;"));
     assert!(
-        cure.contains("expect_portfolio_id(") && cure.contains("expected_portfolio_id"),
-        "CureAndCancelClose: current incarnation is not checked before economic mutation"
+        cure.contains("state::portfolio_position_binding_matches(")
+            && cure.contains("expected_portfolio_id")
+            && cure.contains("expected_position_epoch"),
+        "CureAndCancelClose: current incarnation and episode are not checked before mutation"
     );
 }

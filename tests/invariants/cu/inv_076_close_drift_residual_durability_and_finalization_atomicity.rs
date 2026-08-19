@@ -49,6 +49,7 @@ fn v16_program_cure_and_cancel_close_rejects_when_resolve_matured_atomically() {
     let rejected = env.send(
         ProgInstruction::CureAndCancelClose {
             portfolio_id: env.portfolio_id(stale),
+            position_epoch: env.portfolio_position_epoch(stale),
             optional_deposit: 20,
         },
         vec![
@@ -100,6 +101,7 @@ fn v16_program_public_close_zero_cure_rejects_atomically_and_terminal_progress_r
     let rejected = env.send(
         ProgInstruction::CureAndCancelClose {
             portfolio_id: env.portfolio_id(loss),
+            position_epoch: env.portfolio_position_epoch(loss),
             optional_deposit: 0,
         },
         vec![
