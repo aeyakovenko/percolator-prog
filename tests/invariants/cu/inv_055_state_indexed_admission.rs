@@ -2,15 +2,214 @@
 //!
 //! Normative obligation: Each lifecycle mode admits only its explicitly allowed operation set.
 //!
-//! Evidence in this file (I/C plus invariant-specific M assertions): `v16_attack_batch_nocpi_mixed_exit_and_fresh_open_rejects_atomically`, `v16_attack_spare_capacity_asset_rejects_public_routes_before_matcher`. These tests exercise the deployed public
-//! wrapper with real SBF/LiteSVM account construction and assert economic state, token,
-//! rollback, liveness, or compute outcomes appropriate to the invariant.
+//! Evidence in this file (I/C plus invariant-specific M assertions):
+//! `v16_attack_batch_nocpi_mixed_exit_and_fresh_open_rejects_atomically`,
+//! `v16_attack_spare_capacity_asset_rejects_public_routes_before_matcher`, and the public
+//! ResetPending four-route matrix below. These tests exercise the deployed public wrapper with
+//! real SBF/LiteSVM account construction and assert economic state, token, rollback, liveness, or
+//! compute outcomes appropriate to the invariant.
 //!
 //! Guarantee boundary: a quarantined counterexample demonstrates public reachability; it does
 //! not certify the invariant on an unfixed pin. Certification requires the fixed-pin assertion
 //! plus every additional verification method required by the charter.
 
 use super::*;
+
+#[test]
+fn v16_program_reset_pending_admission_matrix_rejects_risk_then_restores_trade() {
+    const OPEN_Q: u128 = 10 * POS_SCALE;
+    const PRICE: u64 = 100;
+
+    let mut env = V16CuEnv::new();
+    let reducing_owner = Keypair::new();
+    let stale_owner = Keypair::new();
+    let reducing = env.create_portfolio(&reducing_owner);
+    let stale = env.create_portfolio(&stale_owner);
+    env.deposit(&reducing_owner, reducing, 1_000_000);
+    env.deposit(&stale_owner, stale, 1_000_000);
+    env.trade_asset_with_cu(
+        0,
+        &reducing_owner,
+        reducing,
+        &stale_owner,
+        stale,
+        OPEN_Q as i128,
+        PRICE,
+        0,
+    );
+    env.rebalance_reduce_with_cu(&reducing_owner, reducing, 0, OPEN_Q);
+
+    let reset = env.market_state().1;
+    assert_eq!(reset.assets[0].mode_short, SideModeV16::ResetPending);
+    assert_eq!(reset.assets[0].oi_eff_long_q, 0);
+    assert_eq!(reset.assets[0].oi_eff_short_q, 0);
+    assert_eq!(reset.assets[0].stored_pos_count_short, 1);
+
+    let taker_owner = Keypair::new();
+    let lp_owner = Keypair::new();
+    let taker = env.create_portfolio(&taker_owner);
+    let lp = env.create_portfolio(&lp_owner);
+    env.deposit(&taker_owner, taker, 1_000_000);
+    env.deposit(&lp_owner, lp, 1_000_000);
+    let matcher_program = Pubkey::new_unique();
+    env.svm.add_program(
+        matcher_program,
+        &std::fs::read(auth_matcher_program_path()).unwrap(),
+    );
+    let (matcher_context, matcher_delegate, _) =
+        env.init_auth_matcher_context(matcher_program, &lp_owner, lp);
+
+    for route in ["TradeNoCpi", "BatchTradeNoCpi", "TradeCpi", "BatchTradeCpi"] {
+        let market_before = env.svm.get_account(&env.market).unwrap();
+        let taker_before = env.svm.get_account(&taker).unwrap();
+        let lp_before = env.svm.get_account(&lp).unwrap();
+        let stale_before = env.svm.get_account(&stale).unwrap();
+        let matcher_before = env.svm.get_account(&matcher_context).unwrap();
+        let vault_before = env.svm.get_account(&env.vault).unwrap();
+        env.svm.expire_blockhash();
+        let result = match route {
+            "TradeNoCpi" => env.try_trade_asset_with_cu(
+                0,
+                &taker_owner,
+                taker,
+                &lp_owner,
+                lp,
+                POS_SCALE as i128,
+                PRICE,
+                0,
+            ),
+            "BatchTradeNoCpi" => env.send(
+                env.batch_trade_no_cpi_ix(
+                    taker,
+                    lp,
+                    vec![BatchTradeLeg {
+                        asset_index: 0,
+                        market_id: env.asset_market_id(0),
+                        size_q: POS_SCALE as i128,
+                        exec_price: PRICE,
+                        fee_bps: 0,
+                    }],
+                ),
+                vec![
+                    AccountMeta::new(taker_owner.pubkey(), true),
+                    AccountMeta::new(lp_owner.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(taker, false),
+                    AccountMeta::new(lp, false),
+                ],
+                &[&taker_owner, &lp_owner],
+            ),
+            "TradeCpi" => env.try_trade_cpi_with_cu_on_asset(
+                &taker_owner,
+                taker,
+                &lp_owner,
+                lp,
+                matcher_program,
+                matcher_context,
+                matcher_delegate,
+                0,
+                POS_SCALE as i128,
+                0,
+            ),
+            "BatchTradeCpi" => env.send(
+                env.batch_trade_cpi_ix(
+                    taker,
+                    lp,
+                    vec![BatchTradeCpiLeg {
+                        asset_index: 0,
+                        market_id: env.asset_market_id(0),
+                        size_q: POS_SCALE as i128,
+                        fee_bps: 0,
+                        limit_price: 0,
+                    }],
+                ),
+                vec![
+                    AccountMeta::new(taker_owner.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(taker, false),
+                    AccountMeta::new(lp, false),
+                    AccountMeta::new_readonly(matcher_program, false),
+                    AccountMeta::new(matcher_context, false),
+                    AccountMeta::new_readonly(matcher_delegate, false),
+                ],
+                &[&taker_owner],
+            ),
+            _ => unreachable!(),
+        };
+        let error = result.expect_err("ResetPending must reject fresh risk on every trade route");
+        assert!(
+            error.contains("Custom(21)") || error.contains("custom program error: 0x15"),
+            "{route} reached the wrong ResetPending guard: {error}"
+        );
+        assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+        assert_eq!(env.svm.get_account(&taker).unwrap(), taker_before);
+        assert_eq!(env.svm.get_account(&lp).unwrap(), lp_before);
+        assert_eq!(env.svm.get_account(&stale).unwrap(), stale_before);
+        assert_eq!(
+            env.svm.get_account(&matcher_context).unwrap(),
+            matcher_before
+        );
+        assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+    }
+
+    let market_before_finalize = env.svm.get_account(&env.market).unwrap();
+    env.svm.expire_blockhash();
+    let premature_finalize = env.send(
+        ProgInstruction::FinalizeResetSide {
+            asset_index: 0,
+            side: 1,
+        },
+        vec![AccountMeta::new(env.market, false)],
+        &[],
+    );
+    assert!(premature_finalize.is_err());
+    assert_eq!(
+        env.svm.get_account(&env.market).unwrap(),
+        market_before_finalize
+    );
+
+    env.crank(
+        stale,
+        ProgInstruction::PermissionlessCrank {
+            now_slot: env.svm.get_sysvar::<Clock>().slot,
+            observations: Vec::new(),
+        },
+    );
+    assert!(!has_active_leg_for_asset(&env.portfolio_state(stale), 0));
+    assert_eq!(
+        env.market_state().1.assets[0].mode_short,
+        SideModeV16::ResetPending
+    );
+    let finalize_cu = env.finalize_reset_side_with_cu(0, 1);
+    assert_cu_within(
+        "public ResetPending admission finalization",
+        finalize_cu,
+        CUSTODY_CU_LIMIT,
+    );
+    assert_eq!(
+        env.market_state().1.assets[0].mode_short,
+        SideModeV16::Normal
+    );
+
+    let reopened_cu = env.trade_asset_with_cu(
+        0,
+        &taker_owner,
+        taker,
+        &lp_owner,
+        lp,
+        POS_SCALE as i128,
+        PRICE,
+        0,
+    );
+    assert_cu_within(
+        "fresh trade after ResetPending finalization",
+        reopened_cu,
+        TRADE_CU_LIMIT,
+    );
+    let reopened = env.market_state().1;
+    assert_eq!(reopened.assets[0].oi_eff_long_q, POS_SCALE);
+    assert_eq!(reopened.assets[0].oi_eff_short_q, POS_SCALE);
+}
 
 #[test]
 fn v16_attack_batch_nocpi_mixed_exit_and_fresh_open_rejects_atomically() {
