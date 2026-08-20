@@ -19,6 +19,13 @@
 //! fresh matched open/close through the same route and full owner withdrawals prove the reset does
 //! not orphan funds or permanently disable the asset. Each dynamic-asset world additionally enters
 //! DrainOnly and Retired, proving reset history cannot become a terminal retirement lock.
+//! `v16_program_shutdown_during_reset_pending_retains_permissionless_progress` covers another
+//! sixteen public worlds: all four trade routes, both reset sides, and a stale pre-shutdown oracle
+//! hint either absent or landing after shutdown. Recovery must preserve the prior-generation reset
+//! obligation as an immediately crankable action, ignore the now-inapplicable external observation,
+//! detach the stale leg, finalize and restart with a new generation, admit a fresh same-route
+//! roundtrip, and return every owner's capital. This is the wrapper composition regression for the
+//! engine selector/dispatch mismatch fixed by engine commit `7387e7a9`.
 //!
 //! This is bounded generated coverage, not exhaustive reset/recovery/retirement
 //! reachability.
@@ -319,6 +326,198 @@ fn assert_public_reset_lifecycle(
         max_compute_units < TX_CU_LIMIT,
         "{case}: {max_compute_units}"
     );
+}
+
+fn assert_shutdown_during_reset_pending(
+    route: TradeRoute,
+    reducer_long: bool,
+    include_stale_hint: bool,
+    seed: [u8; 32],
+) {
+    const REDUCER: usize = 0;
+    const STALE_COUNTERPARTY: usize = 1;
+    const FRESH_LONG: usize = 2;
+    const FRESH_SHORT: usize = 3;
+    const ASSET: u16 = 0;
+    const SIZE_Q: u128 = POS_SCALE;
+
+    let signed_size_q = if reducer_long {
+        SIZE_Q as i128
+    } else {
+        -(SIZE_Q as i128)
+    };
+    let reset_side = u8::from(reducer_long);
+    let case = format!("{route:?}/reducer_long={reducer_long}/hint={include_stale_hint}");
+    let mut env = V16Svm::new(seed, MarketConfig::default());
+    let supply_before = env.token_supply_observed();
+    env.configure_permissionless_resolve(1_000, 100)
+        .expect("configure the authenticated Recovery route");
+    let mut max_compute_units = execute_trade_route(
+        &mut env,
+        route,
+        REDUCER,
+        STALE_COUNTERPARTY,
+        ASSET,
+        signed_size_q,
+        INITIAL_PRICE,
+        0,
+    )
+    .unwrap_or_else(|error| panic!("{case}: establish a public matched position: {error}"))
+    .compute_units;
+    let reduce = env
+        .rebalance_reduce(REDUCER, ASSET, SIZE_Q)
+        .unwrap_or_else(|error| panic!("{case}: enter ResetPending: {error}"));
+    max_compute_units = max_compute_units.max(reduce.compute_units);
+    let pending = env.primary_market_state().1.assets[ASSET as usize];
+    let (pending_mode, pending_count) = if reducer_long {
+        (pending.mode_short, pending.stored_pos_count_short)
+    } else {
+        (pending.mode_long, pending.stored_pos_count_long)
+    };
+    assert_eq!(pending_mode, SideModeV16::ResetPending, "{case}");
+    assert_eq!(pending_count, 1, "{case}");
+
+    env.warp_to_slot(1);
+    let shutdown = env
+        .shutdown_asset(ASSET, 1)
+        .unwrap_or_else(|error| panic!("{case}: shutdown over reset episode: {error}"));
+    max_compute_units = max_compute_units.max(shutdown.compute_units);
+    let recovery = env.primary_market_state().1.assets[ASSET as usize];
+    let old_market_id = recovery.market_id;
+    let (recovery_mode, recovery_count) = if reducer_long {
+        (recovery.mode_short, recovery.stored_pos_count_short)
+    } else {
+        (recovery.mode_long, recovery.stored_pos_count_long)
+    };
+    assert_eq!(recovery.lifecycle, AssetLifecycleV16::Recovery, "{case}");
+    assert_eq!(recovery_mode, SideModeV16::ResetPending, "{case}");
+    assert_eq!(recovery_count, 1, "{case}");
+    assert_public_stock_census("INV-065 Recovery overlaps ResetPending", &env)
+        .expect("overlap stock census");
+    assert_public_encumbrance_census("INV-065 Recovery overlaps ResetPending", &env)
+        .expect("overlap encumbrance census");
+
+    let observation = if include_stale_hint {
+        vec![CrankObservationHint {
+            asset_index: ASSET,
+            oracle_accounts: env.primary_profile(ASSET as usize).oracle_leg_count,
+        }]
+    } else {
+        Vec::new()
+    };
+    let crank = env
+        .crank(STALE_COUNTERPARTY, env.current_slot(), observation)
+        .unwrap_or_else(|error| panic!("{case}: reset obligation must remain crankable: {error}"));
+    max_compute_units = max_compute_units.max(crank.compute_units);
+    let ready = env.primary_market_state().1.assets[ASSET as usize];
+    let (stored_count, stale_count, pending_count) = if reducer_long {
+        (
+            ready.stored_pos_count_short,
+            ready.stale_account_count_short,
+            ready.pending_obligation_count_short,
+        )
+    } else {
+        (
+            ready.stored_pos_count_long,
+            ready.stale_account_count_long,
+            ready.pending_obligation_count_long,
+        )
+    };
+    assert_eq!(stored_count, 0, "{case}");
+    assert_eq!(stale_count, 0, "{case}");
+    assert_eq!(pending_count, 0, "{case}");
+    assert!(
+        env.primary_portfolio(STALE_COUNTERPARTY)
+            .active_bitmap
+            .iter()
+            .all(|word| word.get() == 0),
+        "{case}: crank must detach the prior-generation leg"
+    );
+    let finalize = env
+        .finalize_reset_side(ASSET, reset_side)
+        .unwrap_or_else(|error| panic!("{case}: finalize reset side: {error}"));
+    max_compute_units = max_compute_units.max(finalize.compute_units);
+
+    env.warp_to_slot(2);
+    let restart = env
+        .restart_asset_oracle(ASSET, 2, INITIAL_PRICE)
+        .unwrap_or_else(|error| panic!("{case}: restart empty Recovery asset: {error}"));
+    max_compute_units = max_compute_units.max(restart.compute_units);
+    let restarted = env.primary_market_state().1.assets[ASSET as usize];
+    assert_eq!(restarted.lifecycle, AssetLifecycleV16::Active, "{case}");
+    assert!(restarted.market_id > old_market_id, "{case}");
+    assert_eq!(restarted.mode_long, SideModeV16::Normal, "{case}");
+    assert_eq!(restarted.mode_short, SideModeV16::Normal, "{case}");
+    assert_eq!(restarted.oi_eff_long_q, 0, "{case}");
+    assert_eq!(restarted.oi_eff_short_q, 0, "{case}");
+
+    let reopen = execute_trade_route(
+        &mut env,
+        route,
+        FRESH_LONG,
+        FRESH_SHORT,
+        ASSET,
+        signed_size_q,
+        INITIAL_PRICE,
+        0,
+    )
+    .unwrap_or_else(|error| panic!("{case}: fresh-generation open: {error}"));
+    max_compute_units = max_compute_units.max(reopen.compute_units);
+    let reclose = execute_trade_route(
+        &mut env,
+        route,
+        FRESH_LONG,
+        FRESH_SHORT,
+        ASSET,
+        -signed_size_q,
+        INITIAL_PRICE,
+        0,
+    )
+    .unwrap_or_else(|error| panic!("{case}: fresh-generation close: {error}"));
+    max_compute_units = max_compute_units.max(reclose.compute_units);
+
+    for actor in [REDUCER, STALE_COUNTERPARTY, FRESH_LONG, FRESH_SHORT] {
+        let capital = env.primary_portfolio(actor).capital.get();
+        if capital != 0 {
+            let withdraw = env
+                .withdraw_primary(actor, capital)
+                .unwrap_or_else(|error| panic!("{case}: actor {actor} withdrawal: {error}"));
+            max_compute_units = max_compute_units.max(withdraw.compute_units);
+        }
+        assert_eq!(env.primary_portfolio(actor).capital.get(), 0, "{case}");
+    }
+    assert_eq!(env.token_supply_observed(), supply_before, "{case}");
+    assert_public_stock_census("INV-065 after reset/Recovery restart", &env)
+        .expect("restart stock census");
+    assert_public_encumbrance_census("INV-065 after reset/Recovery restart", &env)
+        .expect("restart encumbrance census");
+    assert!(
+        max_compute_units < TX_CU_LIMIT,
+        "{case}: {max_compute_units}"
+    );
+}
+
+#[test]
+fn v16_program_shutdown_during_reset_pending_retains_permissionless_progress() {
+    for (route_index, route) in [
+        TradeRoute::NoCpi,
+        TradeRoute::Cpi,
+        TradeRoute::BatchNoCpi,
+        TradeRoute::BatchCpi,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        for reducer_long in [false, true] {
+            for include_stale_hint in [false, true] {
+                let mut seed = [0x46; 32];
+                seed[0] ^= route_index as u8;
+                seed[1] ^= u8::from(reducer_long);
+                seed[2] ^= u8::from(include_stale_hint);
+                assert_shutdown_during_reset_pending(route, reducer_long, include_stale_hint, seed);
+            }
+        }
+    }
 }
 
 #[test]

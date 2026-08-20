@@ -13370,6 +13370,27 @@ pub mod processor {
                     return Err(PercolatorError::InvalidInstruction.into());
                 }
                 let oracle_account_count = hint.oracle_accounts as usize;
+                let asset = group.markets[asset_index]
+                    .engine
+                    .asset
+                    .try_to_runtime()
+                    .map_err(map_v16_error)?;
+                if !matches!(
+                    asset.lifecycle,
+                    percolator::AssetLifecycleV16::Active
+                        | percolator::AssetLifecycleV16::DrainOnly
+                ) {
+                    if oracle_tail.len() < oracle_account_count {
+                        return Err(ProgramError::NotEnoughAccountKeys);
+                    }
+                    oracle_tail = &oracle_tail[oracle_account_count..];
+                    observations.push(AutoCrankObservationV16 {
+                        asset_index,
+                        effective_price: asset.effective_price,
+                        funding_rate_e9: 0,
+                    });
+                    continue;
+                }
                 let mut oracle_profile = read_oracle_profile_from_view(&group, &cfg, asset_index)?;
                 let asset_slot_before = group.markets[asset_index].engine.asset.slot_last.get();
                 advance_funding_mark_checkpoint_view(&mut oracle_profile, asset_slot_before);
