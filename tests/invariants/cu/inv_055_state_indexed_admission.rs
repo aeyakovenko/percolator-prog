@@ -5,10 +5,10 @@
 //! Evidence in this file (I/C plus invariant-specific M assertions):
 //! `v16_attack_batch_nocpi_mixed_exit_and_fresh_open_rejects_atomically`,
 //! `v16_attack_spare_capacity_asset_rejects_public_routes_before_matcher`, the public
-//! ResetPending four-route matrix, and the irreversible-close admission/terminal-progress
-//! composition below. These tests exercise the deployed public wrapper with real SBF/LiteSVM
-//! account construction and assert economic state, token, rollback, liveness, or compute outcomes
-//! appropriate to the invariant.
+//! ResetPending and retired/reactivated four-route matrices, and the irreversible-close
+//! admission/terminal-progress composition below. These tests exercise the deployed public
+//! wrapper with real SBF/LiteSVM account construction and assert economic state, token, rollback,
+//! liveness, or compute outcomes appropriate to the invariant.
 //!
 //! Guarantee boundary: a quarantined counterexample demonstrates public reachability; it does
 //! not certify the invariant on an unfixed pin. Certification requires the fixed-pin assertion
@@ -351,6 +351,205 @@ fn v16_program_irreversible_close_ledger_admits_only_terminal_progress() {
         live_peer_before,
         "terminal admission changes must not rewrite an unrelated peer"
     );
+}
+
+#[test]
+fn v16_program_retired_slot_reactivation_restores_fresh_generation_trade_admission() {
+    const ASSET_INDEX: u16 = 1;
+    const PRICE: u64 = 100;
+
+    for route in ["TradeNoCpi", "BatchTradeNoCpi", "TradeCpi", "BatchTradeCpi"] {
+        let mut env = V16CuEnv::new();
+        let old_creator = Keypair::new();
+        env.update_market_init_fee_policy_with_cu(1);
+        env.svm.warp_to_slot(1);
+        env.activate_permissionless_asset_with_fee(
+            &old_creator,
+            ASSET_INDEX,
+            1,
+            PRICE,
+            old_creator.pubkey(),
+            old_creator.pubkey(),
+            old_creator.pubkey(),
+            old_creator.pubkey(),
+            1,
+        );
+
+        let taker_owner = Keypair::new();
+        let lp_owner = Keypair::new();
+        let taker = env.create_portfolio(&taker_owner);
+        let lp = env.create_portfolio(&lp_owner);
+        env.deposit(&taker_owner, taker, 1_000_000);
+        env.deposit(&lp_owner, lp, 1_000_000);
+        let matcher_program = Pubkey::new_unique();
+        env.svm.add_program(
+            matcher_program,
+            &std::fs::read(auth_matcher_program_path()).unwrap(),
+        );
+        let (matcher_context, matcher_delegate, _) =
+            env.init_auth_matcher_context(matcher_program, &lp_owner, lp);
+
+        env.svm.warp_to_slot(3);
+        env.update_asset_lifecycle_as_admin_with_cu(
+            processor::ASSET_ACTION_RETIRE,
+            ASSET_INDEX,
+            3,
+            0,
+        );
+        let retired_generation = env.asset_market_id(ASSET_INDEX);
+        assert_eq!(
+            env.market_state().1.assets[ASSET_INDEX as usize].lifecycle,
+            AssetLifecycleV16::Retired
+        );
+
+        let execute = |env: &mut V16CuEnv| match route {
+            "TradeNoCpi" => env.try_trade_asset_with_cu(
+                ASSET_INDEX,
+                &taker_owner,
+                taker,
+                &lp_owner,
+                lp,
+                POS_SCALE as i128,
+                PRICE,
+                0,
+            ),
+            "BatchTradeNoCpi" => env.send(
+                env.batch_trade_no_cpi_ix(
+                    taker,
+                    lp,
+                    vec![BatchTradeLeg {
+                        asset_index: ASSET_INDEX,
+                        market_id: env.asset_market_id(ASSET_INDEX),
+                        size_q: POS_SCALE as i128,
+                        exec_price: PRICE,
+                        fee_bps: 0,
+                    }],
+                ),
+                vec![
+                    AccountMeta::new(taker_owner.pubkey(), true),
+                    AccountMeta::new(lp_owner.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(taker, false),
+                    AccountMeta::new(lp, false),
+                ],
+                &[&taker_owner, &lp_owner],
+            ),
+            "TradeCpi" => env.try_trade_cpi_with_cu_on_asset(
+                &taker_owner,
+                taker,
+                &lp_owner,
+                lp,
+                matcher_program,
+                matcher_context,
+                matcher_delegate,
+                ASSET_INDEX,
+                POS_SCALE as i128,
+                0,
+            ),
+            "BatchTradeCpi" => env.send(
+                env.batch_trade_cpi_ix(
+                    taker,
+                    lp,
+                    vec![BatchTradeCpiLeg {
+                        asset_index: ASSET_INDEX,
+                        market_id: env.asset_market_id(ASSET_INDEX),
+                        size_q: POS_SCALE as i128,
+                        fee_bps: 0,
+                        limit_price: 0,
+                    }],
+                ),
+                vec![
+                    AccountMeta::new(taker_owner.pubkey(), true),
+                    AccountMeta::new(env.market, false),
+                    AccountMeta::new(taker, false),
+                    AccountMeta::new(lp, false),
+                    AccountMeta::new_readonly(matcher_program, false),
+                    AccountMeta::new(matcher_context, false),
+                    AccountMeta::new_readonly(matcher_delegate, false),
+                ],
+                &[&taker_owner],
+            ),
+            _ => unreachable!(),
+        };
+
+        let market_before = env.svm.get_account(&env.market).unwrap();
+        let taker_before = env.svm.get_account(&taker).unwrap();
+        let lp_before = env.svm.get_account(&lp).unwrap();
+        let matcher_before = env.svm.get_account(&matcher_context).unwrap();
+        let vault_before = env.svm.get_account(&env.vault).unwrap();
+        env.svm.expire_blockhash();
+        let error = execute(&mut env).expect_err("Retired asset must reject fresh risk");
+        assert!(
+            error.contains("Custom(21)") || error.contains("custom program error: 0x15"),
+            "{route} reached the wrong Retired admission guard: {error}"
+        );
+        assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+        assert_eq!(env.svm.get_account(&taker).unwrap(), taker_before);
+        assert_eq!(env.svm.get_account(&lp).unwrap(), lp_before);
+        assert_eq!(
+            env.svm.get_account(&matcher_context).unwrap(),
+            matcher_before
+        );
+        assert_eq!(env.svm.get_account(&env.vault).unwrap(), vault_before);
+
+        let new_creator = Keypair::new();
+        env.svm.warp_to_slot(5);
+        env.activate_permissionless_asset_with_fee(
+            &new_creator,
+            ASSET_INDEX,
+            5,
+            PRICE,
+            new_creator.pubkey(),
+            new_creator.pubkey(),
+            new_creator.pubkey(),
+            new_creator.pubkey(),
+            1,
+        );
+        let fresh_generation = env.asset_market_id(ASSET_INDEX);
+        assert_ne!(fresh_generation, retired_generation);
+        assert_eq!(
+            env.market_state().1.assets[ASSET_INDEX as usize].lifecycle,
+            AssetLifecycleV16::Active
+        );
+
+        env.svm.expire_blockhash();
+        let open_cu = execute(&mut env).expect("fresh generation must restore trade admission");
+        assert_cu_within(
+            &format!("{route} after retired-slot reactivation"),
+            open_cu,
+            TRADE_CU_LIMIT,
+        );
+        let opened = env.market_state().1.assets[ASSET_INDEX as usize];
+        assert_eq!(opened.oi_eff_long_q, POS_SCALE);
+        assert_eq!(opened.oi_eff_short_q, POS_SCALE);
+
+        let close_cu = env.trade_asset_with_cu(
+            ASSET_INDEX,
+            &taker_owner,
+            taker,
+            &lp_owner,
+            lp,
+            -(POS_SCALE as i128),
+            PRICE,
+            0,
+        );
+        assert_cu_within(
+            &format!("{route} reactivated-generation exit"),
+            close_cu,
+            TRADE_CU_LIMIT,
+        );
+        let closed = env.market_state().1.assets[ASSET_INDEX as usize];
+        assert_eq!(closed.oi_eff_long_q, 0);
+        assert_eq!(closed.oi_eff_short_q, 0);
+        assert!(!has_active_leg_for_asset(
+            &env.portfolio_state(taker),
+            ASSET_INDEX as usize
+        ));
+        assert!(!has_active_leg_for_asset(
+            &env.portfolio_state(lp),
+            ASSET_INDEX as usize
+        ));
+    }
 }
 
 #[test]
